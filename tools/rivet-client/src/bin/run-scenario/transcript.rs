@@ -188,6 +188,7 @@ fn check_outcome_terminal(records: &[Value], outcome: &str) -> Result<(), String
         "connection_failed" => "connection_failed",
         "disconnected" => "disconnect",
         "loaded" => "loaded",
+        "generated" => "generated",
         "walked" => "walked",
         other => {
             return Err(format!(
@@ -223,6 +224,12 @@ fn outcome(records: &[Value]) -> &'static str {
         .any(|r| r.get("event") == Some(&json!("loaded")))
     {
         return "loaded";
+    }
+    if records
+        .iter()
+        .any(|r| r.get("event") == Some(&json!("generated")))
+    {
+        return "generated";
     }
     if records
         .iter()
@@ -1148,6 +1155,222 @@ pub fn rivet_loaded_verdict(t: &Value) -> Result<&'static str, String> {
         ));
     }
     Ok("loaded world content observed and sampled (per-coordinate block content reported)")
+}
+
+/// Project a client run onto the canonical `generated` transcript — the
+/// generated-world acceptance observable. The record carries the join
+/// lifecycle, the per-coordinate content samples from the client's own loaded
+/// `ChunkStorage` (exactly the `loaded` sampling contract), the bounded forward
+/// walk evidence, and the keepalive-survival dwell evidence, so the runner can
+/// prove the client genuinely joined, dwelled, walked, and sampled a served
+/// generated world.
+pub fn normalize_generated(raw: &str) -> Result<Value, String> {
+    let records = parse_records(raw)?;
+
+    let lifecycle: Vec<String> = records
+        .iter()
+        .filter_map(|r| r.get("event").and_then(Value::as_str))
+        .filter(|e| LIFECYCLE_EVENTS.contains(e))
+        .map(str::to_owned)
+        .collect();
+
+    let outcome = outcome(&records);
+    check_outcome_terminal(&records, outcome)?;
+
+    let azalea_revision = records
+        .iter()
+        .find(|r| r.get("event") == Some(&json!("starting")))
+        .and_then(|r| r.get("azalea_revision").and_then(Value::as_str))
+        .map(str::to_owned);
+
+    let generated = records
+        .iter()
+        .find(|r| r.get("event") == Some(&json!("generated")))
+        .cloned();
+
+    let mut transcript = json!({
+        "protocol": PROTOCOL,
+        "scenario": "generated",
+        "outcome": outcome,
+        "lifecycle": lifecycle,
+        "azalea_revision": azalea_revision,
+        "excluded": serde_json::Map::new(),
+    });
+
+    if let Some(generated) = generated {
+        transcript["generated"] = json!({
+            "position": generated.get("position").cloned().unwrap_or(Value::Null),
+            "spawn_chunk": generated.get("spawn_chunk").cloned().unwrap_or(Value::Null),
+            "chunk_count": generated.get("chunk_count").cloned().unwrap_or(Value::Null),
+            "samples": generated.get("samples").cloned().unwrap_or_else(|| json!([])),
+            "walk": generated.get("walk").cloned().unwrap_or(Value::Null),
+            "dwell": generated.get("dwell").cloned().unwrap_or(Value::Null),
+            "is_flat": generated.get("is_flat").cloned().unwrap_or(Value::Null),
+        });
+    }
+
+    Ok(transcript)
+}
+
+/// The minimum received-chunk count a generated-world run must prove: the
+/// server must have served the client at least one chunk — a non-empty
+/// send-set. This is a sanity floor, not proof of a genuine generated world:
+/// the load-bearing check is the runner's per-coordinate content comparison
+/// against the seed-42 ground truth (`compare_generated_content`). The floor
+/// is deliberately not an exact count because the generated-world server's
+/// send-set is not yet pinned to the 117-chunk Rivet join contract (a fresh
+/// world of a real seed has no superflat send-set guarantee).
+pub const GENERATED_MIN_CHUNKS: usize = 1;
+
+/// The minimum wall-clock dwell window (s) the generated-world client must
+/// prove: long enough for at least one keepalive challenge to land and be
+/// echoed while the client is connected, so the dwell evidence is genuine and
+/// not a vacuous zero. This is a brief "reached PLAY and dwelled" check, NOT
+/// the 30 s keepalive-survival proof the `dwell` scenario owns — the
+/// generated-world acceptance's purpose is content comparison, and its dwell
+/// only proves the client actually reached PLAY rather than being rejected
+/// before it could sample. The generated record is emitted only after this
+/// window elapses from spawn.
+pub const GENERATED_MIN_DWELL_SECONDS: f64 = 1.0;
+
+/// Verify a normalized `generated` transcript proves the real Azalea client
+/// joined a server serving a genuine generated world (fresh seed world), then
+/// dwelled, walked, and sampled it from its own loaded `ChunkStorage`.
+///
+/// Returns a human-readable description of the generated-content boundary
+/// reached. Errors when the transcript does not prove that:
+///
+/// - the outcome is anything but `generated` — the client never completed
+///   login/configuration into play against the generated-world port.
+/// - the lifecycle does not contain both `login` and `spawn`.
+/// - `azalea_revision != PINNED_AZALEA_REVISION`.
+/// - the `generated` record is absent or its `samples` is empty — the client
+///   did not sample any generated content.
+/// - `chunk_count < GENERATED_MIN_CHUNKS` — the server served an empty
+///   send-set (a sanity floor; the per-coordinate content comparison is the
+///   load-bearing check).
+/// - the walk evidence is missing or the walk did not move (before == after) —
+///   a frozen world cannot pass.
+/// - the dwell evidence is missing, below [`GENERATED_MIN_DWELL_SECONDS`], or
+///   shows no keepalive challenge — the client did not stay connected long
+///   enough to observe a challenge (a brief reached-PLAY check, not the 30 s
+///   survival dwell gate).
+///
+/// This verdict deliberately does NOT compare the sampled block content
+/// against the seed-42 ground truth: that comparison lives in the runner
+/// (`compare_generated_content` feeds the oracle `generated-expected`
+/// manifest, external to the client transcript). The verdict here only proves
+/// the client observed and reported per-coordinate content while connected
+/// long enough to dwell and move.
+pub fn rivet_generated_verdict(t: &Value) -> Result<&'static str, String> {
+    let outcome = t
+        .get("outcome")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if outcome != "generated" {
+        return Err(format!(
+            "generated transcript outcome is {outcome} (expected generated): the client never \
+             completed login/configuration into play and sampled the generated world. \
+             connection_failed/timeout mean the connect or first write failed, and disconnected \
+             means the server closed the client before play"
+        ));
+    }
+    let lifecycle: Vec<&str> = t
+        .get("lifecycle")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if !lifecycle.contains(&"login") || !lifecycle.contains(&"spawn") {
+        return Err(format!(
+            "generated transcript lifecycle is {lifecycle:?} (expected to contain login and \
+             spawn) — malformed transcript or the client never reached play"
+        ));
+    }
+    if t.get("azalea_revision").and_then(Value::as_str) != Some(PINNED_AZALEA_REVISION) {
+        return Err(format!(
+            "generated transcript azalea_revision is {:?} (expected {PINNED_AZALEA_REVISION}) — \
+             the client was not built from the pinned unmodified Azalea revision",
+            t.get("azalea_revision").and_then(Value::as_str)
+        ));
+    }
+    let generated = t
+        .get("generated")
+        .ok_or_else(|| "generated transcript has no `generated` record".to_owned())?;
+    let samples = generated
+        .get("samples")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "generated record has no samples array".to_owned())?;
+    if samples.is_empty() {
+        return Err(
+            "generated record has no samples: the client did not sample any generated content"
+                .to_owned(),
+        );
+    }
+    let chunk_count = generated
+        .get("chunk_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    if chunk_count < GENERATED_MIN_CHUNKS {
+        return Err(format!(
+            "generated transcript chunk_count is {chunk_count} (expected at least \
+             {GENERATED_MIN_CHUNKS}): the server served no genuine generated view"
+        ));
+    }
+    // The walk evidence is the bounded-forward-walk proof: the client must have
+    // moved in the served world. A frozen world (before == after) cannot pass.
+    let walk = generated
+        .get("walk")
+        .ok_or_else(|| "generated record has no walk evidence".to_owned())?;
+    let coord = |p: &Value| -> Option<(f64, f64)> {
+        Some((
+            p.get("x").and_then(Value::as_f64)?,
+            p.get("z").and_then(Value::as_f64)?,
+        ))
+    };
+    let before = walk
+        .get("before")
+        .and_then(coord)
+        .ok_or_else(|| "generated walk evidence has no before position".to_owned())?;
+    let after = walk
+        .get("after")
+        .and_then(coord)
+        .ok_or_else(|| "generated walk evidence has no after position".to_owned())?;
+    let moved = (after.0 - before.0).abs() > 0.001 || (after.1 - before.1).abs() > 0.001;
+    if !moved {
+        return Err(
+            "generated walk evidence shows no movement (before == after): a frozen world cannot \
+             pass"
+                .to_owned(),
+        );
+    }
+    // The dwell evidence is the reached-PLAY proof: the client must have
+    // stayed connected long enough to observe and echo at least one keepalive
+    // challenge. A zero-dwell client that never reached a live PLAY cannot
+    // pass. (This is a brief check, not the 30 s survival dwell gate.)
+    let dwell = generated
+        .get("dwell")
+        .ok_or_else(|| "generated record has no dwell evidence".to_owned())?;
+    let connected_wall_seconds = dwell
+        .get("connected_wall_seconds")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let challenge_count = dwell
+        .get("challenge_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if connected_wall_seconds < GENERATED_MIN_DWELL_SECONDS || challenge_count == 0 {
+        return Err(format!(
+            "generated dwell evidence is connected_wall_seconds={connected_wall_seconds} \
+             challenge_count={challenge_count} (expected >= {GENERATED_MIN_DWELL_SECONDS}s and \
+             at least one keepalive challenge): the client did not stay connected long enough \
+             to observe a keepalive challenge (a brief reached-PLAY check, not the 30 s \
+             survival dwell gate)"
+        ));
+    }
+    Ok(
+        "generated world content observed, dwelled, walked, and sampled (per-coordinate block \
+        content reported)",
+    )
 }
 
 /// The final +x boundary the `loaded-recenter` route crosses (issues #185/#561):
@@ -2414,6 +2637,115 @@ mod tests {
             }
         }
         cells.join(",")
+    }
+
+    fn generated_records() -> String {
+        [
+            r#"{"event":"starting","address":"127.0.0.1:25599","username":"RivetProbe","timeout_seconds":40,"mode":"generated","azalea_revision":"6249c295d353b9b3ef68f665b311cba39211fd19","protocol":1}"#,
+            r#"{"event":"init","protocol":1}"#,
+            r#"{"event":"login","protocol":1}"#,
+            r#"{"event":"spawn","position":{"x":9.5,"y":-60.0,"z":-3.5},"protocol":1}"#,
+            r#"{"event":"generated","position":{"x":9.5,"y":-60.0,"z":-3.5},"spawn_chunk":[0,-1],"chunk_count":81,"walk":{"before":{"x":9.5,"y":-60.0,"z":-3.5},"after":{"x":10.9,"y":-60.0,"z":-3.5}},"dwell":{"connected_wall_seconds":2.014,"challenge_count":2,"echo_count":2},"is_flat":false,"samples":[{"chunk_x":0,"chunk_z":0,"sample_x":8,"sample_z":8,"surface":"minecraft:grass_block","bedrock":"minecraft:bedrock","below_feet":"minecraft:stone"},{"chunk_x":1,"chunk_z":0,"sample_x":24,"sample_z":8,"surface":"minecraft:grass_block","bedrock":"minecraft:bedrock","below_feet":"minecraft:stone"}],"observation_ms":4100,"protocol":1}"#,
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn generated_verdict_accepts_a_genuine_generated_content_run() {
+        let t = normalize_generated(&generated_records()).expect("normalize");
+        assert_eq!(t["outcome"], "generated");
+        assert_eq!(t["scenario"], "generated");
+        assert_eq!(t["generated"]["chunk_count"], json!(81));
+        assert_eq!(
+            t["generated"]["samples"][0]["surface"],
+            "minecraft:grass_block"
+        );
+        // A genuine generated world is not superflat: the login `is_flat` flag
+        // the server advertised is carried through the normalized record.
+        assert_eq!(t["generated"]["is_flat"], json!(false));
+        assert!(rivet_generated_verdict(&t).is_ok());
+    }
+
+    #[test]
+    fn generated_verdict_carries_a_superflat_login_flag() {
+        // The superflat M1 boot advertises is_flat=true at login; the normalized
+        // record must carry that flag so the runner can key the pinned UNVERIFIED
+        // reason on it (the server served the M1 fixture, not a generated world).
+        let raw = generated_records().replace("\"is_flat\":false", "\"is_flat\":true");
+        let t = normalize_generated(&raw).expect("normalize");
+        assert_eq!(t["generated"]["is_flat"], json!(true));
+    }
+
+    #[test]
+    fn generated_verdict_rejects_an_empty_sample_set() {
+        let mut t = normalize_generated(&generated_records()).expect("normalize");
+        t["generated"]["samples"] = json!([]);
+        assert!(
+            rivet_generated_verdict(&t).is_err(),
+            "an empty sample set must not pass"
+        );
+    }
+
+    #[test]
+    fn generated_verdict_rejects_a_failed_join() {
+        let raw = [
+            r#"{"event":"starting","address":"127.0.0.1:25599","username":"RivetProbe","timeout_seconds":5,"mode":"generated","azalea_revision":"x","protocol":1}"#,
+            r#"{"event":"init","protocol":1}"#,
+            r#"{"event":"connection_failed","reason":"failed to create connection","protocol":1}"#,
+        ]
+        .join("\n");
+        let t = normalize_generated(&raw).expect("normalize");
+        assert_eq!(t["outcome"], "connection_failed");
+        assert!(
+            rivet_generated_verdict(&t).is_err(),
+            "a failed join must not pass"
+        );
+    }
+
+    #[test]
+    fn generated_verdict_rejects_a_wrong_azalea_revision() {
+        let mut t = normalize_generated(&generated_records()).expect("normalize");
+        t["azalea_revision"] = json!("deadbeef");
+        assert!(
+            rivet_generated_verdict(&t).is_err(),
+            "a client not built from the pinned Azalea revision must not pass"
+        );
+    }
+
+    #[test]
+    fn generated_verdict_rejects_a_frozen_world() {
+        // The client never moved (before == after): a frozen world cannot pass.
+        let mut t = normalize_generated(&generated_records()).expect("normalize");
+        t["generated"]["walk"]["after"] = t["generated"]["walk"]["before"].clone();
+        assert!(
+            rivet_generated_verdict(&t).is_err(),
+            "a walk with no movement must not pass"
+        );
+    }
+
+    #[test]
+    fn generated_verdict_rejects_zero_dwell() {
+        // No keepalive challenge was observed: the client did not survive in
+        // PLAY long enough to dwell genuinely.
+        let mut t = normalize_generated(&generated_records()).expect("normalize");
+        t["generated"]["dwell"]["connected_wall_seconds"] = json!(0.0);
+        t["generated"]["dwell"]["challenge_count"] = json!(0);
+        assert!(
+            rivet_generated_verdict(&t).is_err(),
+            "a zero-dwell client must not pass"
+        );
+    }
+
+    #[test]
+    fn generated_verdict_rejects_a_low_chunk_count() {
+        // chunk_count below the floor means the server served no genuine
+        // generated view (an empty/zero send set).
+        let mut t = normalize_generated(&generated_records()).expect("normalize");
+        t["generated"]["chunk_count"] = json!(0);
+        assert!(
+            rivet_generated_verdict(&t).is_err(),
+            "a chunk_count below the floor must not pass"
+        );
     }
 
     /// A genuine `loaded-recenter` sustained-walking run (issues #185/#561): the

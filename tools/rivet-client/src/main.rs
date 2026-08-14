@@ -133,6 +133,20 @@ enum Mode {
     /// (UNVERIFIED for non-FULL chunks and uncarried #369 capability flags)
     /// rather than reporting a fabricated PASS.
     Loaded,
+    /// Join a server that boots a fresh generated seed-42 world (`--seed 42`,
+    /// the generated-world acceptance contract), wait for chunk quiescence,
+    /// dwell briefly (keepalive survival evidence), walk a bounded distance
+    /// (movement evidence), then sample the genuine per-coordinate block
+    /// content the server served (surface/bedrock/under-feet names from the
+    /// client's own loaded `ChunkStorage`) and emit the `generated` record.
+    /// The runner compares this against the seed-42 ground-truth handoff
+    /// (`rivet-oracle generated-expected`); a server that merely echoes
+    /// superflat bytes or a copied loaded world cannot match it. The
+    /// rivet-server `--seed` capability now exists but the no-level boot still
+    /// serves the superflat M1 fixture, so the client reports the login
+    /// `is_flat` flag and the runner reports the exact pinned UNVERIFIED reason
+    /// until the server genuinely serves generated chunks.
+    Generated,
     /// The loaded-world sustained-walking route (issues #185/#561): join a
     /// server booted against a real loaded world (`--level <copy>`, issue #374),
     /// advertise client view distance 2 (so the join burst's send-3 spawn view
@@ -160,6 +174,7 @@ impl Mode {
             Mode::Dwell => "dwell",
             Mode::Kick => "kick",
             Mode::Loaded => "loaded",
+            Mode::Generated => "generated",
             Mode::LoadedRecenter => "loaded-recenter",
         }
     }
@@ -171,6 +186,7 @@ impl Mode {
             "dwell" => Some(Mode::Dwell),
             "kick" => Some(Mode::Kick),
             "loaded" => Some(Mode::Loaded),
+            "generated" => Some(Mode::Generated),
             "loaded-recenter" => Some(Mode::LoadedRecenter),
             _ => None,
         }
@@ -213,7 +229,7 @@ impl Args {
                     let value = next_value(&mut args, "--mode")?;
                     mode = Mode::parse(&value).ok_or_else(|| {
                         format!(
-                            "invalid --mode value: {value} (expected join|move|dwell|kick|loaded|loaded-recenter)"
+                            "invalid --mode value: {value} (expected join|move|dwell|kick|loaded|generated|loaded-recenter)"
                         )
                     })?;
                 }
@@ -234,8 +250,8 @@ impl Args {
         // rather than ignored.
         if dwell_explicit && mode != Mode::Dwell {
             return Err(
-                "--dwell-seconds only applies to --mode dwell; join/move/kick/loaded never dwell, \
-                 so an explicit value would be a silent no-op — drop it"
+                "--dwell-seconds only applies to --mode dwell; join/move/kick/loaded/loaded-recenter/generated \
+                 never dwell, so an explicit value would be a silent no-op — drop it"
                     .to_owned(),
             );
         }
@@ -291,7 +307,7 @@ fn next_value(args: &mut impl Iterator<Item = String>, option: &str) -> Result<S
 
 fn usage() -> String {
     format!(
-        "Usage: rivet-client [--mode join|move|dwell|kick|loaded|loaded-recenter] [--address HOST:PORT] [--username NAME] \
+        "Usage: rivet-client [--mode join|move|dwell|kick|loaded|generated|loaded-recenter] [--address HOST:PORT] [--username NAME] \
          [--timeout-seconds N] [--dwell-seconds N]\n\
          Defaults: --mode {DEFAULT_MODE} --address {DEFAULT_ADDRESS} --username {DEFAULT_USERNAME} \
          --timeout-seconds {DEFAULT_TIMEOUT_SECONDS} --dwell-seconds {DEFAULT_DWELL_SECONDS}"
@@ -482,6 +498,13 @@ struct State {
     /// precision, so the transcript is invariant to the per-boot spawn X/Z
     /// offset instead of excluding the whole coordinate.
     spawn_origin: Arc<Mutex<Option<azalea::Vec3>>>,
+    /// The login packet's `is_flat` flag (whether the server's booted level is
+    /// superflat), observed at login and read when the `generated` record is
+    /// emitted. The generated-world acceptance uses it as the client-observable
+    /// discriminator between the superflat M1 fixture and a genuine generated
+    /// overworld. Login always precedes `Event::Spawn`, so it is `Some` by the
+    /// time the generated task runs.
+    is_flat: Arc<Mutex<Option<bool>>>,
     runtime: tokio::runtime::Handle,
 }
 
@@ -501,6 +524,7 @@ impl Default for State {
             keepalive_log: Arc::new(Mutex::new(KeepaliveLog::default())),
             corrections: Arc::new(Mutex::new(Vec::new())),
             spawn_origin: Arc::new(Mutex::new(None)),
+            is_flat: Arc::new(Mutex::new(None)),
             runtime: tokio::runtime::Handle::current(),
         }
     }
@@ -919,6 +943,17 @@ async fn loaded_and_emit(bot: Client, state: State) {
 /// client timeout.
 const LOADED_WALK: Duration = Duration::from_millis(1500);
 
+/// How long the generated-mode dwell runs (wall-clock): long enough for at
+/// least one keepalive challenge to land and be echoed while the client is
+/// connected (the generated-world dwell evidence), short enough to stay well
+/// inside the client timeout. The generated-mode walk runs afterward.
+const GENERATED_DWELL: Duration = Duration::from_secs(2);
+
+/// How long the generated-mode walk runs (wall-clock): same bound as the
+/// loaded-mode walk — long enough to move at least one block, short enough to
+/// stay inside the timeout.
+const GENERATED_WALK: Duration = Duration::from_millis(1500);
+
 /// Drive a short bounded forward walk (yaw -90 faces +x) and report the
 /// position before and after as the walk evidence. A server that accepted the
 /// client but served a frozen world yields `before == after`; the runner
@@ -931,6 +966,135 @@ async fn loaded_walk(bot: &Client) -> Value {
     bot.walk(WalkDirection::None);
     let after = bot.position().ok().map(round_position);
     json!({ "before": before, "after": after })
+}
+
+/// Emit the `generated` record — the generated-world acceptance observable —
+/// after joining a server booting a fresh generated seed-42 world, dwelling
+/// briefly (keepalive survival evidence), walking a bounded distance
+/// (movement evidence), and sampling the genuine per-coordinate block content
+/// the server served. Then end the client.
+///
+/// The sampling contract is exactly the `loaded` mode's: sample the 5×5 grid
+/// of chunks centered on the spawn chunk, one cell per chunk at the chunk
+/// center offset, from the client's own loaded `ChunkStorage`. The runner
+/// compares these against the seed-42 ground-truth handoff
+/// (`rivet-oracle generated-expected`); a server that merely echoes superflat
+/// bytes or a copied loaded world cannot match it.
+async fn generated_and_emit(bot: Client, state: State) {
+    let chunks = Arc::clone(&state.chunks);
+    let started = Instant::now();
+    wait_chunk_quiescence(&chunks).await;
+
+    let position = bot.position().ok().map(round_position);
+    let spawn_pos = state
+        .spawn_origin
+        .lock()
+        .expect("spawn origin lock poisoned")
+        .map(|p| azalea::core::position::BlockPos {
+            x: p.x.floor() as i32,
+            y: p.y.floor() as i32,
+            z: p.z.floor() as i32,
+        });
+    let spawn_chunk = spawn_pos.map(|p| (p.x.div_euclid(16), p.z.div_euclid(16)));
+
+    // Sample the block content the server served (the `loaded` sampling
+    // contract). The `WorldHolder` read guard is scoped and dropped before the
+    // dwell/walk below, so the future stays `Send`.
+    let samples: Vec<Value> = {
+        let holder = bot
+            .component::<WorldHolder>()
+            .map_err(|_| "client has no loaded WorldHolder".to_owned())
+            .expect("generated mode requires a joined client");
+        match (spawn_chunk, position.as_ref()) {
+            (Some((cx, cz)), Some(_)) => {
+                let shared = holder.shared.read();
+                let mut out = Vec::new();
+                for dx in -2..=2i32 {
+                    for dz in -2..=2i32 {
+                        let chunk_x = cx + dx;
+                        let chunk_z = cz + dz;
+                        let origin_x = chunk_x * 16 + 8;
+                        let origin_z = chunk_z * 16 + 8;
+                        let (surface, bedrock, below_feet) =
+                            sample_cell(&shared, origin_x, origin_z);
+                        out.push(json!({
+                            "chunk_x": chunk_x,
+                            "chunk_z": chunk_z,
+                            "sample_x": origin_x,
+                            "sample_z": origin_z,
+                            "surface": surface,
+                            "bedrock": bedrock,
+                            "below_feet": below_feet,
+                        }));
+                    }
+                }
+                out
+            }
+            _ => Vec::new(),
+        }
+    };
+
+    // Dwell briefly: stay connected so at least one keepalive challenge lands
+    // and is echoed (the dwell survival evidence), then settle and snapshot the
+    // keepalive log coherently. The generated mode carries its own fixed dwell
+    // window (the runner passes dwell_seconds 0 and `--dwell-seconds` is
+    // rejected on non-dwell modes), so the evidence is deterministic.
+    let dwell = GENERATED_DWELL;
+    let start = state
+        .spawn_instant
+        .lock()
+        .expect("spawn instant lock poisoned")
+        .unwrap_or_else(Instant::now);
+    tokio::time::sleep(dwell).await;
+    let log = settle_and_snapshot(
+        &state.keepalive_log,
+        KEEPALIVE_SETTLE_TIMEOUT,
+        KEEPALIVE_SETTLE_INTERVAL,
+    )
+    .await;
+    let connected_wall_seconds = elapsed_secs_f64(start, Instant::now());
+    let challenge_count = log.challenges.len();
+    let echo_count = log.echoes.len();
+
+    // Bounded forward walk: the client must have moved in the served world. The
+    // position delta is recorded and asserted by the verdict (a frozen world
+    // cannot pass).
+    let walk = {
+        let before = bot.position().ok().map(round_position);
+        let _ = bot.set_direction(-90.0, 0.0);
+        bot.walk(WalkDirection::Forward);
+        tokio::time::sleep(GENERATED_WALK).await;
+        bot.walk(WalkDirection::None);
+        let after = bot.position().ok().map(round_position);
+        json!({ "before": before, "after": after })
+    };
+
+    // The login `is_flat` flag the server advertised (observed at login, before
+    // spawn). The runner keys the pinned UNVERIFIED reason on it: true means the
+    // no-level boot served the superflat M1 fixture, not a genuine generated
+    // world. The flag is carried through as-is (JSON null when no login packet
+    // was observed), so a client that never captured the login cannot read as a
+    // genuine non-flat world and slip past the runner's flag gate.
+    let is_flat = *state.is_flat.lock().expect("is_flat lock poisoned");
+
+    emit(json!({
+        "event": "generated",
+        "position": position,
+        "spawn_chunk": spawn_chunk.map(|(x, z)| [x, z]),
+        "chunk_count": chunks.lock().expect("chunks lock poisoned").len(),
+        "samples": samples,
+        "walk": walk,
+        "dwell": {
+            "connected_wall_seconds": round_to(connected_wall_seconds, 3),
+            "challenge_count": challenge_count,
+            "echo_count": echo_count,
+        },
+        "is_flat": is_flat,
+        "observation_ms": started.elapsed().as_millis() as u64,
+    }));
+
+    let _ = bot;
+    hard_exit(0);
 }
 
 /// The `loaded-recenter` sustained-walking route (issues #185/#561): the block-X
@@ -1050,12 +1214,16 @@ async fn loaded_recenter_and_emit(bot: Client, state: State) {
     hard_exit(0);
 }
 
-/// The overworld world-ceiling Y (the copied world is full-height 384).
+/// The overworld world-ceiling Y (a full-height 384 overworld spans
+/// y=-64..320). Shared by the loaded and generated sampling slices.
 const WORLD_CEILING_Y: i32 = 320;
-/// The bedrock-slab sample Y (mirrors the extractor's `BEDROCK_Y`).
+/// The bedrock-slab sample Y (mirrors the extractor's `BEDROCK_Y`). Shared by
+/// the loaded and generated slices — a cross-tool contract: the oracle
+/// `extract-world` / `generated-expected` extractor must record ground truth
+/// at this exact Y or every bedrock column comparison mis-passes.
 const LOADED_BEDROCK_Y: i32 = -60;
 /// One block below the bedrock slab (mirrors the extractor's
-/// `BELOW_BEDROCK_Y`).
+/// `BELOW_BEDROCK_Y`), same shared cross-tool contract as [`LOADED_BEDROCK_Y`].
 const LOADED_BELOW_BEDROCK_Y: i32 = -61;
 
 /// Canonicalize an azalea block id for the transcript: azalea's
@@ -1073,9 +1241,12 @@ fn namespaced_block_name(id: &str) -> String {
 
 /// Sample one world column at `(x, z)`: the surface block (highest non-air),
 /// the block at the bedrock slab, and the block below it. `world` is the
-/// client's loaded `World` (its `ChunkStorage`). Returns `minecraft:air` for
-/// any coordinate the client has not loaded — the runner treats a missing
-/// chunk as a FAIL (the server did not serve the loaded world), never as a
+/// client's loaded `World` (its `ChunkStorage`). Serves both the loaded and
+/// generated slices, reusing the same sample Ys ([`WORLD_CEILING_Y`],
+/// [`LOADED_BEDROCK_Y`], [`LOADED_BELOW_BEDROCK_Y`]) so the two acceptances
+/// share one vertical sampling contract. Returns `minecraft:air` for any
+/// coordinate the client has not loaded — the runner treats a missing chunk as
+/// a FAIL (the server did not serve the loaded/generated world), never as a
 /// vacuous pass. Every emitted name is namespaced (see
 /// [`namespaced_block_name`]).
 fn sample_cell(world: &azalea::world::World, x: i32, z: i32) -> (String, String, String) {
@@ -1514,6 +1685,7 @@ async fn handle(bot: Client, event: Event, state: State) {
                 Mode::Dwell => runtime.spawn(dwell_and_emit(bot, state)),
                 Mode::Kick => runtime.spawn(kick_and_wait(bot, state)),
                 Mode::Loaded => runtime.spawn(loaded_and_emit(bot, state)),
+                Mode::Generated => runtime.spawn(generated_and_emit(bot, state)),
                 Mode::LoadedRecenter => runtime.spawn(loaded_recenter_and_emit(bot, state)),
             };
         }
@@ -1522,6 +1694,12 @@ async fn handle(bot: Client, event: Event, state: State) {
         // relationships (rivet-capture's relationships.rs patterns) on the raw
         // ids, then normalize discards the per-boot id values.
         Event::Packet(packet) => {
+            // The login packet is the first game packet and always precedes
+            // `Event::Spawn`, so its `is_flat` flag is captured for every mode
+            // before the Move-only observables below.
+            if let ClientboundGamePacket::Login(p) = &*packet {
+                *state.is_flat.lock().expect("is_flat lock poisoned") = Some(p.common.is_flat);
+            }
             if state.mode != Mode::Move {
                 return;
             }
