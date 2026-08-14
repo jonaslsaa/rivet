@@ -141,13 +141,22 @@ fn build_biome_registry() -> Registry<rivet_registry::biome_id::BiomeId> {
     use rivet_registry::biome_id::BiomeId;
     let biome_key = &*rivet_registry::registries::BIOME;
     let mut builder: RegistryBuilder<BiomeId> = RegistryBuilder::new(biome_key);
-    for (i, name) in SURFACE_RULE_BIOMES.iter().enumerate() {
+    for name in SURFACE_RULE_BIOMES {
+        // The value is the biome's real generated id (`BiomeId::from_name`), not
+        // a fabricated positional index: a `SurfaceRuleData` `is_biome` holder
+        // resolved through this registry reads this value back via
+        // `Holder::value`, so it must equal the id the generated biome table
+        // assigns the same key. (`dense_biome_id` on a `Reference` reads the
+        // positional `id` field, not this value — the `#179` apply-path gap the
+        // surface_rules module doc documents.)
+        let value = BiomeId::from_name(&format!("minecraft:{name}"))
+            .expect("SURFACE_RULE_BIOMES entries are generated biome keys");
         builder.register(
             &ResourceKey::create(
                 biome_key,
                 rivet_registry::Identifier::with_default_namespace(name),
             ),
-            Arc::new(BiomeId::from_id(i as u16)),
+            Arc::new(value),
             RegistrationInfo::BUILT_IN,
         );
     }
@@ -343,5 +352,74 @@ mod tests {
             text.contains("minecraft:badlands") && text.contains("minecraft:stony_peaks"),
             "the surface rule must encode its referenced biome identifiers, got {text}"
         );
+    }
+
+    /// The `#179` biome-registry identity: the bootstrapped biome registry
+    /// registers each `SURFACE_RULE_BIOMES` key under its real generated id, so
+    /// a `SurfaceRuleData` condition holder resolved through it (`is_biome` →
+    /// `getOrThrow`) reads back that real id via `Holder::value`. The reference
+    /// is `key`-round-trippable, and the fabricated-index regression (the old
+    /// `from_id(i)` values — basalt_deltas registered as id 1 instead of the
+    /// real 2) is pinned by the value/id split.
+    #[test]
+    fn surface_rule_biome_registry_resolves_real_generated_ids() {
+        use crate::biome::biomes::SURFACE_RULE_BIOMES;
+        use crate::biome::dense_biome_id;
+        use rivet_registry::biome_id::BiomeId;
+
+        let access = build_worldgen_registries();
+        let biomes = access
+            .lookup(&*rivet_registry::registries::BIOME)
+            .expect("BIOME registry");
+        let biome_key = &*rivet_registry::registries::BIOME;
+
+        for name in SURFACE_RULE_BIOMES {
+            let key = ResourceKey::create(
+                biome_key,
+                rivet_registry::Identifier::with_default_namespace(name),
+            );
+            let holder = biomes.get_or_throw(&key);
+            // A positional `Reference` into the frozen subset registry
+            // (identity-based `get_id`), which resolves back to its key.
+            assert!(
+                matches!(&holder, rivet_registry::Holder::Reference { .. }),
+                "{name} holder must be a reference"
+            );
+            assert_eq!(
+                holder.key(biomes),
+                key,
+                "{name} reference round-trips its key"
+            );
+            // The registered VALUE is the biome's real generated id (never the
+            // fabricated subset index the builder used before #179).
+            let real = BiomeId::from_name(&format!("minecraft:{name}")).expect("generated key");
+            assert_eq!(
+                holder.value(biomes).id(),
+                real.id(),
+                "{name} value must be its real generated id"
+            );
+        }
+
+        // The residual `#179` apply-path gap, documented honestly: `dense_biome_id`
+        // on the positional `Reference` reads the subset index, not the real id.
+        // The biome-core wiring that makes the runtime biome source produce
+        // `Reference`s from this registry must also resolve them to their values.
+        let basalt_deltas = ResourceKey::create(
+            biome_key,
+            rivet_registry::Identifier::with_default_namespace("basalt_deltas"),
+        );
+        let holder = biomes.get_or_throw(&basalt_deltas);
+        let basalt_real = BiomeId::from_name("minecraft:basalt_deltas").unwrap();
+        assert_eq!(
+            holder.value(biomes).id(),
+            basalt_real.id(),
+            "value is real id 2"
+        );
+        assert_eq!(
+            dense_biome_id(&holder),
+            1,
+            "reference reads the subset index"
+        );
+        assert_ne!(dense_biome_id(&holder), basalt_real.id());
     }
 }
