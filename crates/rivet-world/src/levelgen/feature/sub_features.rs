@@ -1,6 +1,5 @@
-//! STUB(mc.world.level.levelgen.feature.selector) — the
-//! `getSubFeatures` flattening helper the selector/composite configurations
-//! share.
+//! STUB(mc.world.level.levelgen.feature.core) — the `getSubFeatures`
+//! flattening helper the selector/composite configurations share.
 //!
 //! Java's `PlacedFeature.getFeatures()` is `Stream.concat(Stream.of(this.feature),
 //! this.feature.value().getSubFeatures())` — a lazy stream of the configured
@@ -40,14 +39,14 @@ pub fn placed_sub_features(
                 std::iter::once(placed.feature.clone()).chain(configured.get_sub_features()),
             ),
             Holder::Reference { .. } => panic!(
-                "STUB(mc.world.level.levelgen.feature.selector): getSubFeatures on a \
+                "STUB(mc.world.level.levelgen.feature.core): getSubFeatures on a \
                  Reference configured-feature holder inside a placed feature needs the \
                  configured-feature HolderLookup, which the FeatureConfiguration trait cannot \
                  thread"
             ),
         },
         Holder::Reference { .. } => panic!(
-            "STUB(mc.world.level.levelgen.feature.selector): getSubFeatures on a \
+            "STUB(mc.world.level.levelgen.feature.core): getSubFeatures on a \
              Reference placed-feature holder needs the placed-feature HolderLookup, which the \
              FeatureConfiguration trait cannot thread"
         ),

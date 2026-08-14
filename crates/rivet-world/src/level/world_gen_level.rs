@@ -115,12 +115,12 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     }
 
     // -----------------------------------------------------------------------
-    // STUB(mc.world.level.levelgen.feature.vegetation-family): the remaining
-    // world seams the vegetation/aquatic/selector feature family consumes.
-    // Each defaults to an explicit failure (the same capability-unavailable
-    // seam as `get_biome`/`get_height_at`) until the owning `world.level`
-    // unit lands; the concrete features and their test doubles override them
-    // with real behavior.
+    // The world seams the vegetation/aquatic/selector feature family consumes
+    // (`is_empty_block`, `get_sea_level`, `set_block`). Each defaults to an
+    // explicit failure (the same capability-unavailable seam as
+    // `get_biome`/`get_height_at`, marked `RivetTodo #228`) until the owning
+    // `mc.world.level` unit lands; the concrete features and their test
+    // doubles override them with real behavior.
     // -----------------------------------------------------------------------
 
     /// `LevelReader.isEmptyBlock(BlockPos)` — the empty-cell read the
@@ -169,8 +169,8 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     /// from the `&mut` level. This is a port-threading artifact, not a Java
     /// surface: Java features never touch the access here.
     ///
-    /// STUB(mc.world.level.levelgen.feature.selector): no production
-    /// `WorldGenLevel` provides it yet; the default fails explicitly. Test
+    /// STUB(mc.world.level): no production `WorldGenLevel` provides it yet;
+    /// the default fails explicitly (the `RivetTodo(#399)` panic below). Test
     /// doubles build a `RegistryAccess` over the placed/configured-feature
     /// registries and override.
     fn registry_access(&self) -> RegistryAccess {

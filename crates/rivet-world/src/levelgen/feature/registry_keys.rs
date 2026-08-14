@@ -9,8 +9,9 @@
 //! needs the owning registry. `PlacedFeature::place` takes the configured-feature
 //! `HolderLookup` as its first parameter, and the selector/composite features
 //! reach both lookups through `WorldGenLevel::registry_access` — the deferred
-//! seam in `crate::level::world_gen_level`, marked there as
-//! `STUB(mc.world.level.levelgen.feature.selector)`.
+//! seam in `crate::level::world_gen_level` (a `STUB(mc.world.level)` default
+//! that panics with `RivetTodo #399` until a production `WorldGenLevel`
+//! provides it).
 //!
 //! Both registry keys are defined in `biome_generation_settings.rs`
 //! (`mc.world.level.biome.core`, merged): `Registries.CONFIGURED_FEATURE` as a
@@ -27,6 +28,7 @@ pub use crate::biome::biome_generation_settings::{CONFIGURED_FEATURE, PLACED_FEA
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rivet_registry::Identifier;
 
     #[test]
     fn keys_match_java_registry_identifiers() {
