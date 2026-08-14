@@ -14,7 +14,7 @@
 //! breaks. Returns `true` iff at least one write landed.
 //!
 //! `state.canSurvive` is the `WorldGenLevel::can_survive` seam (RivetTodo
-//! #399); the test double overrides it with a controlled verdict.
+//! #232); the test double overrides it with a controlled verdict.
 
 use crate::block::blocks::Blocks;
 use crate::level::WorldGenLevel;

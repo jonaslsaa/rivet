@@ -18,7 +18,7 @@
 //!
 //! The block-write seam is `WorldGenLevel::set_block`; `isEmptyBlock` and
 //! `isOutsideBuildHeight` are the `WorldGenLevel`/`LevelHeightAccessor` seams
-//! (RivetTodo #228).
+//! (RivetTodo #232).
 
 use crate::block::blocks::Blocks;
 use crate::level::WorldGenLevel;

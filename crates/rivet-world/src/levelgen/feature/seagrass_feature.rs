@@ -17,7 +17,7 @@
 //! with `Block.UPDATE_CLIENTS` (2). The `is(Blocks.WATER)` identity checks read
 //! `get_block_state(...).block()` against the `minecraft:water` id (the
 //! registry id from the generated block table), and `state.canSurvive` is the
-//! `WorldGenLevel::can_survive` seam (RivetTodo #399) — the test double
+//! `WorldGenLevel::can_survive` seam (RivetTodo #232) — the test double
 //! overrides it with a controlled verdict.
 
 use crate::block::blocks::Blocks;

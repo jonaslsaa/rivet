@@ -16,7 +16,7 @@
 //!
 //! The `is(Blocks.X)` identity checks read `get_block_state(...).block()`
 //! against the generated ids; the sea-level gate reads the
-//! `WorldGenLevel::get_sea_level` seam (RivetTodo #228).
+//! `WorldGenLevel::get_sea_level` seam (RivetTodo #232).
 
 use crate::block::blocks::Blocks;
 use crate::level::WorldGenLevel;

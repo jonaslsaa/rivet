@@ -10,7 +10,7 @@
 //! `HolderLookup` as its first parameter, and the selector/composite features
 //! reach both lookups through `WorldGenLevel::registry_access` — the deferred
 //! seam in `crate::level::world_gen_level` (a `STUB(mc.world.level)` default
-//! that panics with `RivetTodo #399` until a production `WorldGenLevel`
+//! that panics with `RivetTodo #232` until a production `WorldGenLevel`
 //! provides it).
 //!
 //! Both registry keys are defined in `biome_generation_settings.rs`

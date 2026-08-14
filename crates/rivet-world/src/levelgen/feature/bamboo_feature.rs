@@ -18,8 +18,8 @@
 //!
 //! The `is(TagKey)` podzol-disk check reads the block-tag table through
 //! `BlockState::is_in_tag`; the `WORLD_SURFACE` height read uses the
-//! `WorldGenLevel::get_height_at` seam (RivetTodo #228) and `canSurvive` uses
-//! the `WorldGenLevel::can_survive` seam (RivetTodo #399).
+//! `WorldGenLevel::get_height_at` seam (RivetTodo #232) and `canSurvive` uses
+//! the `WorldGenLevel::can_survive` seam (RivetTodo #232).
 
 use crate::block::blocks::Blocks;
 use crate::level::WorldGenLevel;

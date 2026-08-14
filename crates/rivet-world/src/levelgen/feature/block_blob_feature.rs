@@ -14,7 +14,7 @@
 //! once the descent gate passes.
 //!
 //! The `canPlaceOn` predicate dispatches through the erased
-//! `BlockPredicate::test` (the `#399` dispatch surface); `distSqr` reads the
+//! `BlockPredicate::test` (the `#232` world-access surface); `distSqr` reads the
 //! `Vec3i::dist_sqr` helper via the coordinate projection.
 
 use crate::level::WorldGenLevel;
