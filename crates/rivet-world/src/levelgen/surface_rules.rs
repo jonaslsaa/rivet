@@ -4345,12 +4345,12 @@ mod tests {
 
     #[test]
     fn set_block_state_air_fast_path_is_identity_not_behavioral() {
-        // Java's `wasEmpty && state.is(Blocks.AIR)` is a block-identity check
-        // (`getBlock() == Blocks.AIR`). CAVE_AIR shares the behavioral `is_air`
-        // predicate with AIR, so this guard proves it takes the real
-        // section-write path into an all-air section instead of
-        // short-circuiting: a behavioral predicate would have returned CAVE_AIR
-        // without writing, leaving the cell AIR.
+        // Java's `wasEmpty && state.is(Blocks.AIR)` fast path is a
+        // block-IDENTITY check (`getBlock() == Blocks.AIR`), not the
+        // behavioral `is_air` predicate. AIR, CAVE_AIR, and VOID_AIR are all
+        // `AirBlock` with `.air()` properties (behaviorally air), so only the
+        // identity comparison lets exact AIR take the fast path while
+        // CAVE_AIR/VOID_AIR fall through to the real section write.
         use crate::chunk::proto_chunk::ProtoChunk;
         use crate::chunk::storage::chunk_reconstruction::resolve_state_flags;
         use crate::chunk::storage::section_reconstruction::current_version_container_factory;
@@ -4372,24 +4372,40 @@ mod tests {
         );
         let section_index = proto.get_section_index(0) as usize;
 
-        // Exact AIR takes the fast path: the all-air section is left untouched.
+        // Writing exact AIR leaves the section all-air. This is observationally
+        // the same whether the fast path returned early or the write stored
+        // AIR (both leave every cell AIR and `non_empty_block_count == 0`), so
+        // this half alone cannot prove the fast path was taken — it only pins
+        // the section's all-air invariant.
         assert!(proto.get_section(section_index).has_only_air());
         proto.set_block_state(0, 0, 0, Blocks::AIR.default_block_state());
         assert!(proto.get_section(section_index).has_only_air());
 
-        // CAVE_AIR must NOT take the fast path. The write returns the previous
-        // (AIR) state, and the section-level read (the paletted container, which
-        // the chunk-level read masks behind `hasOnlyAir`) proves the cave-air
-        // cell was stored.
+        // The discriminating half: CAVE_AIR is behaviorally air but its block
+        // id (795) differs from AIR's (0), so the identity guard must NOT fire
+        // and the write must reach the paletted container. A behavioral fast
+        // path would have returned CAVE_AIR without writing, leaving the cell
+        // AIR and failing the assertions below.
         let previous = proto.set_block_state(1, 0, 1, Blocks::CAVE_AIR.default_block_state());
         assert_eq!(previous, Blocks::AIR.default_block_state());
+        // `LevelChunkSection::get_block_state` reads the paletted container
+        // directly (`states.get`, no `has_only_air` mask), so observing CAVE_AIR
+        // here is direct proof the cell was written through the real section
+        // path — the palette holds the stored cave-air cell.
         assert_eq!(
             proto.get_section(section_index).get_block_state(1, 0, 1),
             Blocks::CAVE_AIR.default_block_state()
         );
-        // Java-faithful masking: `getBlockState` returns AIR for an all-air
-        // section even when a stored cell is CAVE_AIR (`hasOnlyAir` is a
-        // behavioral count, so CAVE_AIR does not break it).
+        // The write was cell-targeted: an untouched neighbor in the same
+        // all-air section is still AIR at the palette level.
+        assert_eq!(
+            proto.get_section(section_index).get_block_state(2, 0, 2),
+            Blocks::AIR.default_block_state()
+        );
+        // Java-faithful masking: `ProtoChunk.getBlockState` still returns AIR
+        // because `hasOnlyAir` is a behavioral count (CAVE_AIR never
+        // increments it), exactly like Java's `section.hasOnlyAir() ? AIR :
+        // section.getBlockState(...)`.
         assert!(proto.get_section(section_index).has_only_air());
         assert_eq!(
             proto.get_block_state(1, 0, 1),
