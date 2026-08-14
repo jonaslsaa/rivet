@@ -54,8 +54,8 @@ use rivet_registry::core::{BlockPos, ChunkPos};
 /// `net.minecraft.world.level.chunk.ImposterProtoChunk`.
 pub struct ImposterProtoChunk<T, B, S>
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     /// `wrapped` — the `LevelChunk` all reads delegate to.
@@ -72,8 +72,8 @@ where
 
 impl<T, B, S> ImposterProtoChunk<T, B, S>
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     /// `ImposterProtoChunk(LevelChunk, boolean allowWrites)`.
@@ -330,7 +330,7 @@ mod tests {
         fn by_id(&self, id: i32) -> Option<u8> {
             Some(id as u8)
         }
-        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8>> {
+        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8> + Send + Sync> {
             Box::new(*self)
         }
     }

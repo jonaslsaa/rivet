@@ -42,6 +42,7 @@ pub const HUGE_RED_MUSHROOM: HugeRedMushroomFeature = HugeRedMushroomFeature;
 
 /// `getTreeRadiusForHeight(int, int, int, int)` — `leafRadius` when `yo` is in
 /// `[treeHeight - 3, treeHeight]`, `0` otherwise.
+#[allow(clippy::if_same_then_else)] // Java's two branches are literally identical.
 fn get_tree_radius_for_height(
     _trunk_height: i32,
     tree_height: i32,
@@ -141,7 +142,7 @@ impl FeatureBehavior<HugeMushroomFeatureConfiguration> for HugeRedMushroomFeatur
             level,
             random,
             &origin,
-            &config,
+            config,
             get_tree_radius_for_height,
             make_cap::<R>,
         )

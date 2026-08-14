@@ -179,11 +179,14 @@ pub fn block_state_provider_get_state<R: RandomSource>(
 ///
 /// The twin of [`block_state_provider_get_state`] for the optional surface
 /// `SimpleBlockFeature.place` consumes (`config.toPlace().getOptionalState(
-/// level, random, origin)`): the same closed match, but calling the concrete
-/// `get_optional_state` (Java's virtual `getOptionalState`). Only
-/// `RuleBasedStateProvider` overrides it (returning `None` when no rule matches
-/// and there is no fallback); every other provider inherits the default, which
-/// delegates to `get_state`.
+/// level, random, origin)`) and `TrunkPlacer.placeBelowTrunkBlock` consumes
+/// (`config.belowTrunkProvider.getOptionalState(...)`): the same closed match,
+/// but calling the concrete `get_optional_state` (Java's virtual
+/// `getOptionalState`). Only `RuleBasedStateProvider` overrides it (returning
+/// `None` when no rule matches and there is no fallback); every other provider
+/// inherits the default, which delegates to `get_state`. The unknown-id arm is
+/// unreachable for the eight registered types, same as the `get_state`
+/// dispatch.
 pub fn block_state_provider_get_optional_state<R: RandomSource>(
     provider: &dyn ErasedBlockStateProvider,
     level: &dyn WorldGenLevel,

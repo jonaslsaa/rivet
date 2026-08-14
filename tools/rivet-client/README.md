@@ -44,8 +44,39 @@ tools/rivet-client/run-scenario.sh join --server rivet            # Rivet headle
 tools/rivet-client/run-scenario.sh join --server both --pairs paper:rivet  # Paper-vs-Rivet play scenario
 tools/rivet-client/run-scenario.sh dwell --server rivet           # wall-clock keepalive survival past the 30 s kick limit (issues #157/#160)
 tools/rivet-client/run-scenario.sh load-world                     # copy the local 26.2 save, prove immutability, probe the future #339 launch seam
+tools/rivet-client/run-scenario.sh generated-world                # seed-42 generated acceptance: boot Rivet with --seed 42, drive the client in generated mode, compare against the seed-42 ground-truth handoff; UNVERIFIED until the server genuinely serves generated chunks
 tools/rivet-client/run-scenario.sh capture        # one boot; print the normalized transcript
 ```
+
+`generated-world` is the seed-42 generated-world acceptance contract, defined
+ahead of the generator. The launch seam is the rivet-server `--seed <n>` option
+(`GENERATED_SEED_ARG`), which the server now accepts but still serves the
+superflat M1 fixture from. The runner boots Rivet with `--seed 42`, drives the
+real Azalea client in `generated` mode (join + dwell + bounded walk +
+per-coordinate content sampling of the served world), verifies the rivet
+connection, requires the `generated` verdict (samples present, chunk count above
+the floor, the walk moved, the dwell evidence proves keepalive survival), and
+compares the observed content against the seed-42 ground-truth handoff
+(`rivet-oracle generated-expected`, whose committed seed-42 golden is captured).
+The acceptance discriminates what the server actually served via the login
+packet's client-observable `is_flat` flag: true means the no-level boot served
+the superflat M1 fixture, so the run exits UNVERIFIED (3) with the exact pinned
+`GENERATED_WORLD_UNVERIFIED_REASON`; a transcript that did not carry the login
+flag cannot prove a genuine world and stays UNVERIFIED too. Only a non-flat
+transcript proceeds to the per-coordinate comparison against the golden. A build
+that rejects `--seed` entirely is classified `Absent` at boot and exits
+UNVERIFIED (3) with the same pinned reason. The runner never falls back to the
+superflat no-level boot or a copied loaded world, which would fabricate a PASS
+on the wrong world. A superflat echo, a chunk outside the handoff, or non-FULL
+sampled chunks all refuse PASS.
+
+The full-gate row is milestone-gated like the `RIVET_HASH_DIR` hash-diff: while
+the server does not yet genuinely serve generated chunks the acceptance cannot
+pass, so it is an explicit NOTICE and stays mergeable, keeping the release lane
+unblocked ahead of the generator. Set `RIVET_GENERATED_WORLD=1` in
+`scripts/gate.sh`'s
+environment to opt into the strict check (exit 3 then sets ORACLE_UNVERIFIED,
+and `--require-oracle` hard-fails it).
 
 `load-world` is the independent #316 harness slice. `RIVET_WORLD_SRC` may
 override the default launcher save at
@@ -165,8 +196,9 @@ The runner:
 
 Exit codes are machine-stable and consumed by gate.sh: `0` PASS, `1` FAIL
 (scenario comparison failed, negative case failed, harness error), `3`
-UNVERIFIED (missing prereq — paperclip jar / rivet-server binary — or a server
-did not reach READY within its boot timeout), `64` invalid CLI arguments.
+UNVERIFIED (missing prereq — paperclip jar / rivet-server binary / the
+generated-world `--seed` capability or its seed-42 ground-truth handoff — or a
+server did not reach READY within its boot timeout), `64` invalid CLI arguments.
 
 The normalized `join`, `move`, and `dwell` transcript shapes are documented in
 `src/bin/run-scenario/transcript.rs`. The comparator

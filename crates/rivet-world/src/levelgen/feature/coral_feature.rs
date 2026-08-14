@@ -54,7 +54,7 @@ pub(crate) fn tag_random_block_state<R: RandomSource>(
     random: &mut R,
 ) -> Option<BlockState> {
     let names = BLOCK_TAG_BY_NAME.get(tag)?;
-    let name = get_random_safe(*names, random)?;
+    let name = get_random_safe(names, random)?;
     Some(BlockState::of(BlockId::from_name(name).unwrap()))
 }
 
@@ -89,20 +89,23 @@ pub(crate) fn place_coral_block<R: RandomSource>(
         }
 
         for direction in Plane::Horizontal.faces() {
-            if random.next_float() < 0.2 {
-                let relative = pos.relative(direction);
-                if level.get_block_state(&relative).block() == Blocks::WATER.id() {
-                    if let Some(coral) = tag_random_block_state("minecraft:wall_corals", random) {
-                        let state = if coral.has_property(BlockStateProperties::FACING) {
-                            coral
-                                .set_value(BlockStateProperties::FACING, *direction)
-                                .expect("wall coral carries the facing property")
-                        } else {
-                            coral
-                        };
-                        level.set_block(&relative, state, UPDATE_CLIENTS);
-                    }
-                }
+            // Java's nested `if (nextFloat() < 0.2F)` / water check / wall-coral
+            // draw collapse to a let-chain — the short-circuit keeps the
+            // `nextFloat` roll, then the water read, then the tag draw, exactly
+            // Java's evaluation order.
+            let relative = pos.relative(direction);
+            if random.next_float() < 0.2
+                && level.get_block_state(&relative).block() == Blocks::WATER.id()
+                && let Some(coral) = tag_random_block_state("minecraft:wall_corals", random)
+            {
+                let state = if coral.has_property(BlockStateProperties::FACING) {
+                    coral
+                        .set_value(BlockStateProperties::FACING, *direction)
+                        .expect("wall coral carries the facing property")
+                } else {
+                    coral
+                };
+                level.set_block(&relative, state, UPDATE_CLIENTS);
             }
         }
 

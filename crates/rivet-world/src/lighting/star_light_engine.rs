@@ -6,9 +6,9 @@
 //! mask with the pure static `StarLightEngine.getEmptySectionsForChunk` and
 //! pass it to the [`StarLightProvider`] ops; that static is ported here. The
 //! propagation engines themselves (the sky/block `StarLightEngine`s and their
-//! graph/nibble work) defer with the `ca.spottedleaf.moonrise.patches
-//! .starlight.light` unit in `rivet-server` (RivetTodo #184) — today
-//! `rivet-server` ships `StubStarLightProvider`, a no-op.
+//! graph/nibble work) live in `rivet-server` (RivetTodo #184): the sky engine
+//! is ported (`star_light_engine::SkyStarLightEngine`) and driven by the
+//! `SkyLightProvider`; the block engine and the light queue defer.
 //!
 //! [`StarLightProvider`]: crate::lighting::star_light_provider::StarLightProvider
 
@@ -24,8 +24,8 @@ use crate::chunk::proto_chunk::ProtoChunk;
 /// trait doc): `Some(true)` empty, `Some(false)` has blocks.
 pub fn get_empty_sections_for_chunk<T, B, S>(chunk: &ProtoChunk<T, B, S>) -> Vec<Option<bool>>
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     chunk
@@ -62,7 +62,7 @@ mod tests {
         fn by_id(&self, id: i32) -> Option<u8> {
             Some(id as u8)
         }
-        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8>> {
+        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8> + Send + Sync> {
             Box::new(*self)
         }
     }

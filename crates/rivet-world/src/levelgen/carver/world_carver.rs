@@ -40,8 +40,10 @@
 //!   markPosForPostProcessing` are the `ChunkAccess` block surface owned by
 //!   #399; the port exposes the smallest typed seam — the [`CarveChunk`]
 //!   trait — and the concrete carvers operate on `&mut dyn CarveChunk`.
-//!   RivetTodo(#399): implement `CarveChunk` for `ChunkAccess`/`ProtoChunk`
-//!   when the block surface lands.
+//!   [`CarveChunk`] is implemented for the worldgen `ProtoChunk` (the
+//!   production CARVERS-status driver `NoiseBasedChunkGenerator::apply_carvers`
+//!   binds it, RivetTodo(#399)); the remaining generic `ChunkAccess` block
+//!   surface the #399 unit owns still defers.
 //! - `carveBlock`'s `mask` parameter is dead in Java (passed but never read);
 //!   it is dropped from the Rust signature.
 //! - `Mth.floor` on a double is `mth::floor_d`, on a float `mth::floor`.
@@ -365,7 +367,8 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// The `ChunkAccess` block-surface seam (RivetTodo #399)
+// The `ChunkAccess` block-surface seam (RivetTodo(#399) — bound for the
+// worldgen ProtoChunk by the CARVERS-status driver)
 // ---------------------------------------------------------------------------
 
 /// The smallest typed seam for the `ChunkAccess`/`ProtoChunk` block surface the
@@ -373,10 +376,10 @@ where
 /// `markPosForPostProcessing`/`getPos` (Java's `ChunkAccess` used directly in
 /// `WorldCarver`).
 ///
-/// RivetTodo(#399): the `ChunkAccess` block-state surface is owned by the #399
-/// unit; implement this trait for `ChunkAccess`/`ProtoChunk` there. Until then
-/// the seam is unbound (no production chunk implements it — the algorithm
-/// compiles against the seam, no state is fabricated).
+/// RivetTodo(#399): implemented for the worldgen `ProtoChunk`
+/// (`crate::chunk::proto_chunk`) and bound by the production CARVERS-status
+/// driver `NoiseBasedChunkGenerator::apply_carvers`; the remaining generic
+/// `ChunkAccess` block-state surface the #399 unit owns still defers.
 pub trait CarveChunk: Send + Sync {
     /// `ChunkAccess.getPos()`.
     fn get_pos(&self) -> ChunkPos;

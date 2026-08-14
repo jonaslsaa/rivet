@@ -10,7 +10,7 @@
 //! world/seed — see [`RandomState`]'s borrow), and [`OverworldNoiseBiomeSource`]
 //! adapts the overworld `MultiNoiseBiomeSource` over the realized climate
 //! sampler. [`GenerationChunkHolder`] owns a real `ProtoChunk` and drives it
-//! BIOMES→NOISE→SURFACE through the `GENERATION_PYRAMID` executor.
+//! BIOMES→NOISE→SURFACE→CARVERS through the `GENERATION_PYRAMID` executor.
 //!
 //! **This is the standalone foundation, not yet the live ticket path.** No
 //! production caller (ticket, `ChunkMap`, or boot) creates a holder yet — the
@@ -22,24 +22,24 @@
 //!
 //! ## The typed downstream boundary
 //!
-//! `WorldGenContext::generate_through` supports generation through `SURFACE` —
-//! the BIOMES→NOISE→SURFACE task bodies are wired to the real Paper drivers
-//! (`fillFromNoise` / `buildSurface`), so an EMPTY chunk can reach SURFACE. The
-//! INITIALIZE_LIGHT/LIGHT steps are also executor-wired but engine-gated (the
-//! holder wires no light engine, so it cannot reach LIGHT). Everything the value
-//! layer does not wire is refused *before* running work: a target in
-//! CARVERS..LIGHT hits the unwired CARVERS rung first (`GenError::
-//! UnsupportedTask` — the CARVERS..FEATURES and SPAWN/FULL ladder is the unwired
-//! #185 step), and a target past LIGHT (SPAWN/FULL) is out of range (`GenError::
-//! UnsupportedStatus`). The holder's [`GenerationChunkHolder::generate_through`]
-//! surfaces these as typed [`GeneratedChunkError::Generation`] /
-//! [`GeneratedChunkError::UnsupportedStatus`] rather than stamping a status that
-//! was never generated. And a generated chunk can never
-//! enter the server authority: [`ChunkMap::install`] accepts only a `LevelChunk`
-//! (the FULL chunk type), and no conversion from a sub-FULL `ProtoChunk`
-//! exists — the [`GenerationChunkHolder::to_level_chunk`] gate fails loudly
-//! with [`GeneratedChunkError::InstallRequiresFull`] instead of fabricating a
-//! FULL chunk or falling back to superflat.
+//! `WorldGenContext::generate_through` supports generation through `CARVERS` —
+//! the BIOMES→NOISE→SURFACE→CARVERS task bodies are wired to the real Paper
+//! drivers (`fillFromNoise` / `buildSurface` / `applyCarvers`), so an EMPTY
+//! chunk can reach CARVERS. The INITIALIZE_LIGHT/LIGHT steps are also
+//! executor-wired but engine-gated (the holder wires no light engine, so it
+//! cannot reach LIGHT). Everything the value layer does not wire is refused
+//! *before* running work: a target in FEATURES..LIGHT hits the unwired FEATURES
+//! rung first (`GenError::UnsupportedTask` — the FEATURES and SPAWN/FULL ladder
+//! is the unwired #185 step), and a target past LIGHT (SPAWN/FULL) is out of
+//! range (`GenError::UnsupportedStatus`). The holder's
+//! [`GenerationChunkHolder::generate_through`] surfaces these as typed
+//! [`GeneratedChunkError::Generation`] / [`GeneratedChunkError::UnsupportedStatus`]
+//! rather than stamping a status that was never generated. And a generated
+//! chunk can never enter the server authority: [`ChunkMap::install`] accepts
+//! only a `LevelChunk` (the FULL chunk type), and no conversion from a sub-FULL
+//! `ProtoChunk` exists — the [`GenerationChunkHolder::to_level_chunk`] gate
+//! fails loudly with [`GeneratedChunkError::InstallRequiresFull`] instead of
+//! fabricating a FULL chunk or falling back to superflat.
 //!
 //! ## The deferred `GenerationChunkHolderView` seam
 //!
@@ -108,7 +108,7 @@ pub enum GeneratedChunkError {
     Generation(GenError),
     /// A target past `LIGHT` — the executor rejected it before running any
     /// work. Naming the requested status makes the downstream boundary explicit.
-    /// (A target in CARVERS..LIGHT is instead refused by the unwired CARVERS
+    /// (A target in FEATURES..LIGHT is instead refused by the unwired FEATURES
     /// rung, which surfaces as [`GeneratedChunkError::Generation`].)
     UnsupportedStatus(ChunkStatus),
     /// The genuine-FULL-only install gate: a generated chunk is a `ProtoChunk`
@@ -126,7 +126,7 @@ impl fmt::Display for GeneratedChunkError {
             }
             GeneratedChunkError::UnsupportedStatus(status) => write!(
                 f,
-                "generating to {status:?} is unsupported: the CARVERS..FULL stages are unwired (RivetTodo #185)"
+                "generating to {status:?} is unsupported: the FEATURES..FULL stages are unwired (RivetTodo #185)"
             ),
             GeneratedChunkError::InstallRequiresFull(status) => write!(
                 f,
@@ -333,7 +333,10 @@ impl GenerationChunkHolder {
     /// `createBiomes` default) over the overworld biome source and this world's
     /// sampler, mapping each `Holder<BiomeId>` to the dense worldgen biome id;
     /// the NOISE body runs the shell's real `fillFromNoise` block write over an
-    /// empty blender.
+    /// empty blender; the SURFACE body runs the real `buildSurface`; the
+    /// CARVERS body runs the real `applyCarvers` (the overworld-carvers
+    /// center-chunk loop — see the noisegen driver's doc for the deferred
+    /// `WorldGenRegion`/`StructureManager` seams).
     pub fn new(pos: ChunkPos, generator: Arc<OverworldGenerator>) -> Self {
         let height_accessor = create_height_accessor(
             generator.generator().get_min_y(),
@@ -401,23 +404,48 @@ impl GenerationChunkHolder {
                     );
                 }
             },
+            {
+                // `ChunkStatusTasks.generateCarvers` → the real
+                // `NoiseBasedChunkGenerator.applyCarvers` (the ported CARVERS
+                // driver). Same `BiomeManager` argument the SURFACE closure
+                // builds (Java's `applyCarvers` receives the same manager the
+                // `buildSurface` call used and derives the
+                // `withDifferentSource` corrected one inside), plus the
+                // overworld biome source — the `biomeSource` field the Java
+                // driver wraps.
+                let generator = Arc::clone(&generator);
+                move |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
+                    let biome_manager = Arc::new(BiomeManager::new(
+                        Arc::new(generator.biome_source.clone()),
+                        BiomeManager::obfuscate_seed(generator.seed()),
+                    ));
+                    generator.generator().apply_carvers(
+                        &*generator,
+                        generator.seed(),
+                        generator.random_state(),
+                        &biome_manager,
+                        Arc::new(generator.biome_source.clone()),
+                        chunk,
+                    );
+                }
+            },
         );
         GenerationChunkHolder { chunk, context }
     }
 
-    /// The chunk's persisted status — `EMPTY` before any step, `SURFACE` after a
-    /// successful BIOMES→NOISE→SURFACE run, and never `FULL` (the executor
-    /// refuses to stamp it).
+    /// The chunk's persisted status — `EMPTY` before any step, `CARVERS` after a
+    /// successful BIOMES→NOISE→SURFACE→CARVERS run, and never `FULL` (the
+    /// executor refuses to stamp it).
     pub fn status(&self) -> ChunkStatus {
         self.chunk.get_persisted_status()
     }
 
     /// Drive the chunk from its current persisted status through `target`
-    /// (inclusive). The BIOMES→NOISE→SURFACE task bodies are wired (an EMPTY
-    /// chunk can reach SURFACE); a target the value layer does not wire is
-    /// rejected by the executor before any work with a typed error — a fresh
-    /// EMPTY chunk targeting CARVERS..LIGHT is refused by the unwired CARVERS
-    /// rung ([`GeneratedChunkError::Generation`] carrying
+    /// (inclusive). The BIOMES→NOISE→SURFACE→CARVERS task bodies are wired (an
+    /// EMPTY chunk can reach CARVERS); a target the value layer does not wire is
+    /// rejected by the executor before any work with a typed error — a chunk
+    /// targeting FEATURES..LIGHT is refused by the unwired FEATURES rung
+    /// ([`GeneratedChunkError::Generation`] carrying
     /// `GenError::UnsupportedTask`), and a target past LIGHT (SPAWN/FULL) is out
     /// of range ([`GeneratedChunkError::UnsupportedStatus`]). The chunk is
     /// left untouched.
@@ -434,8 +462,8 @@ impl GenerationChunkHolder {
 
     /// The genuine-FULL-only install gate: `ChunkMap::install` accepts only a
     /// `LevelChunk` (FULL), and a generated chunk is a `ProtoChunk` through
-    /// `SURFACE`. No conversion from a sub-FULL `ProtoChunk` exists or may be
-    /// added without the unwired CARVERS..FULL stages (RivetTodo #185), so this
+    /// `CARVERS`. No conversion from a sub-FULL `ProtoChunk` exists or may be
+    /// added without the unwired FEATURES..FULL stages (RivetTodo #185), so this
     /// always fails loudly with the chunk's real status — never stamping FULL
     /// and never falling back to superflat.
     pub fn to_level_chunk(&self) -> Result<LevelChunk, GeneratedChunkError> {
@@ -687,6 +715,141 @@ mod tests {
         assert_eq!(holder.status(), ChunkStatus::Surface);
     }
 
+    /// The CARVERS rung runs the real `NoiseBasedChunkGenerator.applyCarvers`
+    /// over the SURFACE output: the executor drives EMPTY→BIOMES→NOISE→SURFACE→
+    /// CARVERS, stamps the chunk CARVERS, and the carvers body actually carved —
+    /// the carving mask is written back (only `applyCarvers` writes it) and is
+    /// non-empty, and at least one carved cell differs from the SURFACE snapshot
+    /// the carvers consumed (air/water carved through the SURFACE output, which
+    /// is what the top-material binder feeds them).
+    #[test]
+    fn generate_through_carvers_runs_the_real_apply_carvers() {
+        let generator = test_generator();
+        let pos = ChunkPos::new(2, 3);
+        let mut holder = generator.create_holder(pos);
+        assert_eq!(holder.status(), ChunkStatus::Empty);
+
+        holder
+            .generate_through(ChunkStatus::Surface)
+            .expect("SURFACE");
+        assert_eq!(holder.status(), ChunkStatus::Surface);
+        let min_y = holder.chunk.get_min_y();
+        let height = holder.chunk.get_height();
+
+        // Snapshot the full SURFACE output — the carvers consume this (the
+        // top-material binder) and carve through it.
+        let mut before = Vec::with_capacity((16 * 16 * height) as usize);
+        for y in min_y..min_y + height {
+            for z in 0..16i32 {
+                for x in 0..16i32 {
+                    before.push(holder.chunk.get_block_state(x, y, z));
+                }
+            }
+        }
+        let index =
+            |x: i32, y: i32, z: i32| -> usize { ((y - min_y) * 16 * 16 + z * 16 + x) as usize };
+
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        assert_eq!(holder.status(), ChunkStatus::Carvers);
+
+        // The real driver ran: only `applyCarvers` writes the carving mask, and
+        // it came back present with carved cells — a fresh EMPTY chunk has no
+        // mask, and no other step touches it.
+        let mask = holder
+            .chunk
+            .get_carving_mask()
+            .expect("applyCarvers must write the carving mask");
+        let carved: Vec<BlockPos> = mask.stream(&pos).collect();
+        assert!(
+            !carved.is_empty(),
+            "the overworld carvers must carve at least one cell at {pos:?}"
+        );
+
+        // And the carve wrote blocks: each mask bit is a cell the driver
+        // carved, so at least one such cell must differ from the SURFACE output
+        // it consumed (air/water through the surface material).
+        let mut any_carved_cell_changed = false;
+        for block in &carved {
+            let x = block.get_x();
+            let z = block.get_z();
+            let y = block.get_y();
+            if y >= min_y
+                && y < min_y + height
+                && before[index(x, y, z)] != holder.chunk.get_block_state(x, y, z)
+            {
+                any_carved_cell_changed = true;
+            }
+        }
+        assert!(
+            any_carved_cell_changed,
+            "carving must write air/water through the SURFACE output at a carved cell"
+        );
+
+        // Re-running to the same status is an idempotent no-op — the already
+        // stamped chunk is not carved twice.
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("idempotent");
+        assert_eq!(holder.status(), ChunkStatus::Carvers);
+    }
+
+    /// The CARVERS step is deterministic: two independent chunks at the same
+    /// position, driven through the same seed-42 generator, carve identically.
+    /// This pins the RNG draw order — the shared `WorldgenRandom` is re-seeded
+    /// per source chunk/carver with `setLargeFeatureSeed(seed + index, x, z)`
+    /// (wrapping long arithmetic), so the same seed and position must reproduce
+    /// the exact same carving mask and the exact same carved blocks.
+    #[test]
+    fn generate_through_carvers_is_deterministic() {
+        let generator = test_generator();
+        let pos = ChunkPos::new(-3, 5);
+        let mut a = generator.create_holder(pos);
+        let mut b = generator.create_holder(pos);
+
+        a.generate_through(ChunkStatus::Carvers).expect("a CARVERS");
+        b.generate_through(ChunkStatus::Carvers).expect("b CARVERS");
+
+        // Same seed + position → identical carving mask (the bit pattern, not
+        // just the stream). A fresh EMPTY chunk starts mask-less, so the mask
+        // presence is part of the determinism contract.
+        let mask_a = a
+            .chunk
+            .get_carving_mask()
+            .expect("applyCarvers must write the carving mask");
+        let mask_b = b
+            .chunk
+            .get_carving_mask()
+            .expect("applyCarvers must write the carving mask");
+        assert_eq!(
+            mask_a.to_array(),
+            mask_b.to_array(),
+            "same seed + position must reproduce the identical carving mask"
+        );
+        assert!(
+            !mask_a.to_array().is_empty(),
+            "determinism test must be non-vacuous: the carvers carved at {pos:?}"
+        );
+
+        // And the carve wrote identical blocks: every carved cell's state
+        // matches between the two runs.
+        let min_y = a.chunk.get_min_y();
+        let height = a.chunk.get_height();
+        for block in mask_a.stream(&pos) {
+            let x = block.get_x();
+            let z = block.get_z();
+            let y = block.get_y();
+            if y >= min_y && y < min_y + height {
+                assert_eq!(
+                    a.chunk.get_block_state(x, y, z),
+                    b.chunk.get_block_state(x, y, z),
+                    "carved cell ({x}, {y}, {z}) must be deterministic"
+                );
+            }
+        }
+    }
+
     /// Hostile: the out-of-build-height read default is real `void_air` — raw
     /// id 794, default state 15292 — not AIR and not another block's default.
     /// The NOISE test reads at the surface height (inside build height), so it
@@ -718,31 +881,32 @@ mod tests {
         }
     }
 
-    /// Hostile: the stages below the wired BIOMES→NOISE→SURFACE run (SURFACE and
-    /// beyond) are rejected before any work runs, with a typed error, and the
-    /// chunk is never stamped past the supported rung — fresh, and again after a
-    /// successful NOISE.
+    /// Hostile: the stages below the wired BIOMES→NOISE→SURFACE→CARVERS run
+    /// (CARVERS and beyond) are rejected before any work runs, with a typed
+    /// error, and the chunk is never stamped past the supported rung — fresh,
+    /// and again after a successful NOISE.
     ///
     /// The value-layer boundary is `LIGHT`: the INITIALIZE_LIGHT/LIGHT steps are
     /// wired (`WorldGenContext::generate_through`, engine-gated) but the
-    /// CARVERS..FEATURES ladder below them is unwired (RivetTodo #185). A fresh
-    /// EMPTY chunk targeting any of CARVERS..LIGHT is therefore refused by the
-    /// unwired CARVERS rung that the pre-check hits first (`UnsupportedTask`),
+    /// FEATURES ladder below them is unwired (RivetTodo #185). A fresh EMPTY
+    /// chunk targeting any of FEATURES..LIGHT is therefore refused by the
+    /// unwired FEATURES rung that the pre-check hits first (`UnsupportedTask`),
     /// and a target past LIGHT (SPAWN/FULL) is out of range
     /// (`UnsupportedStatus`). Every refusal happens before any work, so the
-    /// chunk stays EMPTY. SURFACE itself is wired (the real
-    /// `NoiseBasedChunkGenerator.buildSurface`), so a fresh EMPTY chunk
-    /// targeting it runs BIOMES→NOISE→SURFACE and is stamped SURFACE.
+    /// chunk stays EMPTY. CARVERS itself is wired (the real
+    /// `NoiseBasedChunkGenerator.applyCarvers`, see
+    /// `generate_through_carvers_runs_the_real_apply_carvers`), so a fresh
+    /// EMPTY chunk targeting it runs BIOMES→NOISE→SURFACE→CARVERS and is
+    /// stamped CARVERS.
     #[test]
     fn downstream_stages_fail_loudly_and_never_stamp() {
         let generator = test_generator();
         let mut fresh = generator.create_holder(ChunkPos::ZERO);
-        // CARVERS..LIGHT: the unwired CARVERS rung blocks the whole path in the
-        // value layer, before any work runs — even the engine-gated light steps
-        // are unreachable from EMPTY, because the CARVERS step would have to be
-        // the first unwired mutation. The chunk is untouched.
+        // FEATURES..LIGHT: the unwired FEATURES rung blocks the whole path in
+        // the value layer, before any work runs — even the engine-gated light
+        // steps are unreachable from EMPTY, because the FEATURES step would
+        // have to be the first unwired mutation. The chunk is untouched.
         for status in [
-            ChunkStatus::Carvers,
             ChunkStatus::Features,
             ChunkStatus::InitializeLight,
             ChunkStatus::Light,
@@ -751,11 +915,11 @@ mod tests {
                 matches!(
                     fresh.generate_through(status),
                     Err(GeneratedChunkError::Generation(GenError::UnsupportedTask {
-                        task: ChunkStatusTask::GenerateCarvers,
+                        task: ChunkStatusTask::GenerateFeatures,
                         ..
                     }))
                 ),
-                "target {status:?} must be rejected by the unwired CARVERS rung"
+                "target {status:?} must be rejected by the unwired FEATURES rung"
             );
             assert_eq!(fresh.status(), ChunkStatus::Empty);
         }
@@ -771,25 +935,25 @@ mod tests {
             assert_eq!(fresh.status(), ChunkStatus::Empty);
         }
 
-        // SURFACE is wired: a fresh EMPTY chunk targeting it runs the real
-        // surface body and is stamped SURFACE (see
-        // `generate_through_biomes_then_noise_then_surface`).
-        let mut surfaced = generator.create_holder(ChunkPos::new(0, 1));
-        surfaced
-            .generate_through(ChunkStatus::Surface)
-            .expect("SURFACE");
-        assert_eq!(surfaced.status(), ChunkStatus::Surface);
-        // From SURFACE the next unwired stage (CARVERS) still fails loudly and
-        // the persisted status stays SURFACE — never a silent stamp to FULL.
-        let err = surfaced.generate_through(ChunkStatus::Carvers).unwrap_err();
+        // CARVERS is wired: a fresh EMPTY chunk targeting it runs the real
+        // carvers body and is stamped CARVERS (see
+        // `generate_through_carvers_runs_the_real_apply_carvers`).
+        let mut carvers = generator.create_holder(ChunkPos::new(0, 1));
+        carvers
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        assert_eq!(carvers.status(), ChunkStatus::Carvers);
+        // From CARVERS the next unwired stage (FEATURES) still fails loudly and
+        // the persisted status stays CARVERS — never a silent stamp to FULL.
+        let err = carvers.generate_through(ChunkStatus::Features).unwrap_err();
         assert!(matches!(
             err,
             GeneratedChunkError::Generation(GenError::UnsupportedTask {
-                task: ChunkStatusTask::GenerateCarvers,
+                task: ChunkStatusTask::GenerateFeatures,
                 ..
             })
         ));
-        assert_eq!(surfaced.status(), ChunkStatus::Surface);
+        assert_eq!(carvers.status(), ChunkStatus::Carvers);
 
         // After a real NOISE, requesting a downstream stage still fails loudly
         // and the persisted status stays NOISE — never a silent stamp to FULL.
@@ -840,8 +1004,8 @@ mod tests {
 
     /// Ownership: the holder owns its ProtoChunk by value (no `Arc<RwLock>`
     /// game state) while the immutable worldgen config is shared across holders
-    /// by `Arc` — the three executor closures (BIOMES, NOISE, SURFACE) each
-    /// capture a clone. This test builds its own exclusive generator (the
+    /// by `Arc` — the four executor closures (BIOMES, NOISE, SURFACE, CARVERS)
+    /// each capture a clone. This test builds its own exclusive generator (the
     /// shared `LazyLock` would be touched by the other parallel tests, making
     /// the strong count global/racy).
     #[test]
@@ -849,8 +1013,8 @@ mod tests {
         let generator = Arc::new(OverworldGenerator::new(42));
         let base = Arc::strong_count(&generator);
         let holder = generator.create_holder(ChunkPos::new(2, 3));
-        // The three executor closures each hold a clone of the shared generator.
-        assert_eq!(Arc::strong_count(&generator), base + 3);
+        // The four executor closures each hold a clone of the shared generator.
+        assert_eq!(Arc::strong_count(&generator), base + 4);
         drop(holder);
         assert_eq!(Arc::strong_count(&generator), base);
     }

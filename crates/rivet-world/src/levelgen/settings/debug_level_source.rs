@@ -135,7 +135,7 @@ impl DebugLevelSource {
         level: &mut dyn WorldGenLevel,
         chunk: &ChunkAccess<BlockState, B, S>,
     ) where
-        B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         S: Eq + std::hash::Hash,
     {
         let center_pos = chunk.get_pos();

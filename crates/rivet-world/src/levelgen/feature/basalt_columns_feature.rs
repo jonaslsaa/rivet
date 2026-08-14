@@ -458,10 +458,6 @@ mod tests {
             .iter()
             .position(|c| *c == RngCall::IntBound(5))
             .expect("a reach sample per passing cell");
-        assert!(
-            random.calls[first_reach + 1..]
-                .iter()
-                .any(|c| *c == RngCall::IntBound(3))
-        );
+        assert!(random.calls[first_reach + 1..].contains(&RngCall::IntBound(3)));
     }
 }

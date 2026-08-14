@@ -121,7 +121,7 @@ impl FeatureBehavior<HugeMushroomFeatureConfiguration> for HugeBrownMushroomFeat
             level,
             random,
             &origin,
-            &config,
+            config,
             get_tree_radius_for_height,
             make_cap::<R>,
         )

@@ -12,8 +12,11 @@
 //! `axisStepOrder` (JOML `Vec3`), and `moonrise$uniqueId`. RivetTodo(#126): the
 //! remaining codec surface (`CODEC`'s sibling constants `VERTICAL_CODEC`,
 //! `byName`, `STREAM_CODEC`, `LEGACY_ID_CODEC_*`) defers with the protocol
-//! codec surface; `CODEC` itself is ported here as [`direction_codec`] (the
-//! `StringRepresentable.fromEnum` ops form) because
+//! codec surface, and the `Axis` enum's `Axis.CODEC`/`Axis.byName` pair is not
+//! ported in this module (it is satisfied unit-locally by `rivet-world`'s
+//! `templatesystem::axis_codec` where `AxisAlignedLinearPosTest.CODEC` consumes
+//! `Axis.CODEC.optionalFieldOf("axis", Axis.Y)`); `CODEC` itself is ported here
+//! as [`direction_codec`] (the `StringRepresentable.fromEnum` ops form) because
 //! `HasSturdyFacePredicate.CODEC` (issue #180) reads `Direction.CODEC.fieldOf
 //! ("direction")`.
 
@@ -21,6 +24,7 @@ use super::vec3i::Vec3i;
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::extra_codecs;
+use rivet_util::RandomSource;
 use rivet_util::mth;
 use std::sync::Arc;
 
@@ -672,6 +676,17 @@ impl Plane {
     /// `Plane.length()`.
     pub fn length(&self) -> usize {
         self.faces().len()
+    }
+
+    /// `Plane.getRandomDirection(RandomSource)` —
+    /// `Util.getRandom(this.faces, random)` = `this.faces[random.nextInt(
+    /// this.faces.length)]`. The tree-family trunk placers
+    /// (`ForkingTrunkPlacer`, `DarkOakTrunkPlacer`, `BendingTrunkPlacer`,
+    /// `UpwardsBranchingTrunkPlacer`, `CherryTrunkPlacer`) draw their lean /
+    /// branch direction through this. Not `from_2d_data_value` — the RNG maps
+    /// to the faces array index directly.
+    pub fn get_random_direction<R: RandomSource>(&self, random: &mut R) -> Direction {
+        self.faces()[random.next_int_bound(self.faces().len() as i32) as usize]
     }
 
     /// `Plane.stream()`.

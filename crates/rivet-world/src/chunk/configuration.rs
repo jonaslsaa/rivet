@@ -23,11 +23,11 @@ pub enum PaletteFactoryKind {
 
 impl PaletteFactoryKind {
     /// `Factory.create(int bits, List<T> entries)`.
-    pub fn create<T: Clone + PartialEq + Send + 'static>(
+    pub fn create<T: Clone + PartialEq + Send + Sync + 'static>(
         self,
         bits: i32,
         palette_entries: Vec<T>,
-    ) -> Box<dyn Palette<T>> {
+    ) -> Box<dyn Palette<T> + Send + Sync> {
         match self {
             PaletteFactoryKind::SingleValue => {
                 crate::chunk::palette::SingleValuePalette::create(bits, palette_entries)
@@ -82,11 +82,11 @@ impl Configuration {
     }
 
     /// `createPalette(Strategy, List<T>)`.
-    pub fn create_palette<T: Clone + PartialEq + Send + 'static>(
+    pub fn create_palette<T: Clone + PartialEq + Send + Sync + 'static>(
         &self,
         strategy: &Strategy<T>,
         palette_entries: Vec<T>,
-    ) -> Box<dyn Palette<T>> {
+    ) -> Box<dyn Palette<T> + Send + Sync> {
         match self {
             Configuration::Global { .. } => strategy.global_palette(),
             Configuration::Simple { factory, bits } => factory.create(*bits, palette_entries),

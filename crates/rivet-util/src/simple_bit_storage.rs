@@ -228,7 +228,7 @@ impl BitStorage for SimpleBitStorage {
         }
     }
 
-    fn copy_box(&self) -> Box<dyn BitStorage> {
+    fn copy_box(&self) -> Box<dyn BitStorage + Send + Sync> {
         Box::new(SimpleBitStorage {
             data: self.data.clone(),
             bits: self.bits,

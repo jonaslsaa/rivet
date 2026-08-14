@@ -42,7 +42,7 @@ impl GlobalIdMap<u8> for TestGlobalMap {
     fn by_id(&self, id: i32) -> Option<u8> {
         Some(id as u8)
     }
-    fn clone_box(&self) -> Box<dyn GlobalIdMap<u8>> {
+    fn clone_box(&self) -> Box<dyn GlobalIdMap<u8> + Send + Sync> {
         Box::new(*self)
     }
 }

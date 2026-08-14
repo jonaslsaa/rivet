@@ -139,6 +139,7 @@ fn below_is_air(level: &dyn WorldGenLevel, pos: &BlockPos) -> bool {
 
 /// `setIcebergBlock(BlockPos, LevelAccessor, RandomSource, int, int, boolean,
 /// boolean, BlockState)`.
+#[allow(clippy::too_many_arguments)] // Java's `setIcebergBlock` has 8 params.
 fn set_iceberg_block<R: RandomSource>(
     pos: &BlockPos,
     level: &mut dyn WorldGenLevel,
@@ -172,6 +173,7 @@ fn set_iceberg_block<R: RandomSource>(
 
 /// `generateIcebergBlock(LevelAccessor, RandomSource, BlockPos, int, int, int,
 /// int, int, int, boolean, int, double, boolean, BlockState)`.
+#[allow(clippy::too_many_arguments)] // Java's `generateIcebergBlock` has 14 params.
 fn generate_iceberg_block<R: RandomSource>(
     level: &mut dyn WorldGenLevel,
     random: &mut R,
@@ -226,6 +228,7 @@ fn generate_iceberg_block<R: RandomSource>(
 
 /// `carve(int, int, BlockPos, LevelAccessor, boolean, double, BlockPos, int,
 /// int)`.
+#[allow(clippy::too_many_arguments)] // Java's `carve` has 9 params.
 fn carve(
     level: &mut dyn WorldGenLevel,
     radius: i32,
@@ -321,6 +324,7 @@ impl IcebergFeature {
 
     /// `generateCutOut(RandomSource, LevelAccessor, int, int, BlockPos,
     /// boolean, int, double, int)`.
+    #[allow(clippy::too_many_arguments)] // Java's `generateCutOut` has 9 params.
     fn generate_cut_out<R: RandomSource>(
         &self,
         random: &mut R,

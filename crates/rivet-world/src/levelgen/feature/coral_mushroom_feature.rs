@@ -40,6 +40,7 @@ pub const CORAL_MUSHROOM: CoralMushroomFeature = CoralMushroomFeature;
 
 /// `CoralMushroomFeature.placeFeature(LevelAccessor, RandomSource, BlockPos,
 /// BlockState)` — the mushroom box walk.
+#[allow(clippy::neg_cmp_op_on_partial_ord)] // `!(nextFloat() < 0.1F)` is Java-exact.
 fn place_feature<R: RandomSource>(
     level: &mut dyn WorldGenLevel,
     random: &mut R,

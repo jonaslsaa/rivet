@@ -128,8 +128,8 @@ impl FeatureBehavior<BlockColumnConfiguration> for BlockColumnFeature {
         let mut layer_heights = vec![0i32; layer_count];
         let mut total_height = 0i32;
 
-        for i in 0..layer_count {
-            layer_heights[i] = config.layers()[i].height().sample(random);
+        for (i, layer) in config.layers().iter().enumerate() {
+            layer_heights[i] = layer.height().sample(random);
             total_height = total_height.wrapping_add(layer_heights[i]);
         }
 
@@ -156,11 +156,9 @@ impl FeatureBehavior<BlockColumnConfiguration> for BlockColumnFeature {
             next_pos.move_dir(&config.direction());
         }
 
-        for i in 0..layer_count {
+        for (i, layer) in config.layers().iter().enumerate() {
             let count = layer_heights[i];
             if count != 0 {
-                let layer = &config.layers()[i];
-
                 for _y in 0..count {
                     let state = block_state_provider_get_state(
                         &**layer.state(),

@@ -35,8 +35,8 @@ use crate::chunk::strategy::Strategy;
 /// (`StateId` in the generated-table callers), `B` the biome type.
 pub struct PalettedContainerFactory<T, B>
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
 {
     /// `Strategy<BlockState>` — `Strategy.createForBlockStates`.
     block_states_strategy: Strategy<T>,
@@ -49,8 +49,8 @@ where
 }
 
 impl<
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
 > PalettedContainerFactory<T, B>
 {
     /// `create(RegistryAccess)` — Java reads the four fields out of the
