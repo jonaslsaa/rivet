@@ -49,12 +49,11 @@
 //! engine, the face-occlusion shape test, `relightChunks`, `checkChunkEdges`
 //! and the client-side notify path (`isClientSide`) are not ported. The
 //! remaining `StarLightProvider` mutators (`block_change`, `section_change`,
-//! `relight_chunks`, `check_chunk_edges`) are the phase-A no-ops, and this
-//! engine is exercised only through the light-chunk path.
-//!
-//! The engine is not yet wired into the provider (see the RivetTodo above), so
-//! its public surface is unreachable from the lib target and reads as dead code;
-//! the internal call graph between these items is live and compiles.
+//! `relight_chunks`, `check_chunk_edges`) are the no-ops the provider keeps for
+//! the deferred paths, and this engine is exercised through the provider's
+//! light-chunk path. The light-only branches of the shared methods are reachable
+//! from `SkyLightProvider`; the block-engine branches and the deferred edges
+//! still read as dead code to the compiler, so the allow stays.
 #![allow(dead_code)]
 
 use crate::server::level::level_chunk::{BiomeId as ServerBiomeId, StateId, StructureKey};
@@ -664,16 +663,16 @@ impl SkyStarLightEngine {
     // --- the abstract hooks the sky engine implements (inline dispatch keeps
     // the shared core faithful to Java's protected methods) ---
 
-    /// `getEmptinessMap(chunk)` — the chunk's stored sky emptiness map. The
-    /// phase-A `ChunkAccess` has no sky-emptiness field, so this returns `None`
-    /// and the engine recomputes the map from the empty-section mask in
-    /// `handle_empty_section_changes`, surfacing it via
+    /// `getEmptinessMap(chunk)` — the chunk's stored sky emptiness map
+    /// (`StarlightChunk.starlight$getSkyEmptinessMap`). `None` before the sky
+    /// engine has computed it; `handle_empty_section_changes` then derives the
+    /// map from the empty-section mask, surfacing it via
     /// `set_emptiness_map_on_surface` for the provider to publish.
     fn get_emptiness_map_from_chunk(
         &self,
-        _chunk: &ChunkAccess<StateId, ServerBiomeId, StructureKey>,
+        chunk: &ChunkAccess<StateId, ServerBiomeId, StructureKey>,
     ) -> Option<Vec<bool>> {
-        None
+        chunk.sky_emptiness_map().map(ToOwned::to_owned)
     }
 
     /// `setEmptinessMap(chunk, to)` — publish the recomputed sky emptiness map
@@ -697,6 +696,19 @@ impl SkyStarLightEngine {
     /// owns the `&mut` chunk); Java writes through `ChunkLightTask`.
     fn set_nibbles_on_surface(&mut self, to: Vec<SwmrNibbleArray>) {
         self.pending_nibbles = Some(to);
+    }
+
+    /// The provider's read of `pending_nibbles` — take (rather than borrow) so
+    /// the next run starts clean, mirroring Java where each `lightChunk` hands
+    /// a fresh `setNibbles` array to the chunk.
+    pub(crate) fn take_pending_nibbles(&mut self) -> Option<Vec<SwmrNibbleArray>> {
+        self.pending_nibbles.take()
+    }
+
+    /// The provider's read of `pending_emptiness_map` — take (rather than
+    /// borrow) so the next run starts clean.
+    pub(crate) fn take_pending_emptiness_map(&mut self) -> Option<Vec<bool>> {
+        self.pending_emptiness_map.take()
     }
 
     /// `initNibble(chunkX, chunkY, chunkZ, extrude, initRemovedNibbles)` —
