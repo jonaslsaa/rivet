@@ -139,6 +139,24 @@ pub mod trunkplacers;
 // see `tree_feature.rs`.
 mod tree_feature;
 
+// The end-leaves wave — the five End-feature structs (each owned by its own
+// `.feature.end*`/`.feature.chorusplant`/`.feature.voidstartplatform` MANIFEST
+// row) wired into the `#181` dispatch hub at their registration ids.
+// `EndPodiumFeature` is unregistered (constructed with a `boolean active`), so
+// it has no dispatch arm.
+pub mod chorus_plant_feature;
+pub mod end_island_feature;
+pub mod end_platform_feature;
+pub mod end_podium_feature;
+pub mod void_start_platform_feature;
+
+// STUB(mc.world.level.block): `ChorusFlowerBlock.generatePlant` +
+// `ChorusPlantBlock.getStateWithConnections` + `allNeighborsEmpty` — the
+// cross-unit chorus-growth logic `ChorusPlantFeature` consumes before every
+// placement. Owned by the pending `mc.world.level.block` manifest unit (row
+// 454); see `chorus_growth.rs`.
+mod chorus_growth;
+
 use crate::chunk::chunk_generator::ChunkGenerator;
 use crate::level::WorldGenLevel;
 use crate::levelgen::feature::configurations::BlockBlobConfiguration;
@@ -191,6 +209,20 @@ pub use sub_features::placed_sub_features;
 pub use weighted_placed_feature::WeightedPlacedFeature;
 pub use weighted_random_selector_feature::{
     WEIGHTED_RANDOM_SELECTOR, WeightedRandomSelectorFeature,
+};
+
+// The end-leaves wave — the registered End features (ids 5/7/29/31) plus the
+// unregistered podium constructors.
+pub use chorus_plant_feature::{CHORUS_PLANT, ChorusPlantFeature};
+pub use end_island_feature::{END_ISLAND, EndIslandFeature};
+pub use end_platform_feature::{END_PLATFORM, EndPlatformFeature};
+pub use end_podium_feature::{
+    CORNER_ROUNDING, EndPodiumFeature, PODIUM_PILLAR_HEIGHT, PODIUM_RADIUS, RIM_RADIUS,
+    get_location,
+};
+pub use void_start_platform_feature::{
+    PLATFORM_OFFSET, PLATFORM_ORIGIN_CHUNK, PLATFORM_RADIUS, PLATFORM_RADIUS_CHUNKS,
+    VOID_START_PLATFORM, VoidStartPlatformFeature,
 };
 
 /// `net.minecraft.world.level.levelgen.feature.ConfiguredFeature<FC, F>`
@@ -573,6 +605,36 @@ pub fn feature_place<R: RandomSource>(
                 .expect("basalt_pillar feature must carry a NoneFeatureConfiguration");
             BASALT_PILLAR.place_with_config(config, level, chunk_generator, random, origin)
         }
+        // The end-leaves wave — the four registered End features (each owned by
+        // its own `.feature.*` MANIFEST row), all over `NoneFeatureConfiguration`.
+        // `Feature.CHORUS_PLANT`.
+        5 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<NoneFeatureConfiguration>()
+                .expect("chorus_plant feature must carry a NoneFeatureConfiguration");
+            CHORUS_PLANT.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.VOID_START_PLATFORM`.
+        7 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<NoneFeatureConfiguration>()
+                .expect("void_start_platform feature must carry a NoneFeatureConfiguration");
+            VOID_START_PLATFORM.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.END_PLATFORM`.
+        29 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<NoneFeatureConfiguration>()
+                .expect("end_platform feature must carry a NoneFeatureConfiguration");
+            END_PLATFORM.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.END_ISLAND`.
+        31 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<NoneFeatureConfiguration>()
+                .expect("end_island feature must carry a NoneFeatureConfiguration");
+            END_ISLAND.place_with_config(config, level, chunk_generator, random, origin)
+        }
         // The remaining registered features are generated content emitted
         // by `rivet-codegen`; until then they are unavailable leaves. Failing
         // explicitly (rather than returning a fabricated boolean) is the honest
@@ -622,6 +684,13 @@ pub fn check_neighbors(
 /// `checkNeighbors(blockGetter, pos, BlockStateBase::isAir)`.
 pub fn is_adjacent_to_air(block_getter: impl Fn(&BlockPos) -> BlockState, pos: &BlockPos) -> bool {
     check_neighbors(block_getter, pos, |state| state.is_air())
+}
+
+/// `BlockStateBase.is(Block)` — the block identity check the End feature
+/// leaves gate their writes on (`EndPlatformFeature`, `EndPodiumFeature`, and
+/// the chorus-growth connection tests).
+pub(crate) fn is_block(state: BlockState, block: crate::block::Block) -> bool {
+    state.block() == block.id()
 }
 
 #[cfg(test)]

@@ -131,6 +131,16 @@ impl Blocks {
     pub const DEEPSLATE_IRON_ORE: Block = Block::new(BlockId(45));
     /// `Blocks.END_STONE` (noisegen: `NoiseGeneratorSettings.end`).
     pub const END_STONE: Block = Block::new(BlockId(393));
+    /// `Blocks.OBSIDIAN` (end-leaves: `EndPlatformFeature`'s floor).
+    pub const OBSIDIAN: Block = Block::new(BlockId(193));
+    /// `Blocks.WALL_TORCH` (end-leaves: `EndPodiumFeature`'s pillar torches).
+    pub const WALL_TORCH: Block = Block::new(BlockId(195));
+    /// `Blocks.END_PORTAL` (end-leaves: `EndPodiumFeature`'s active portal).
+    pub const END_PORTAL: Block = Block::new(BlockId(391));
+    /// `Blocks.CHORUS_PLANT` (end-leaves: `ChorusPlantFeature`'s stem).
+    pub const CHORUS_PLANT: Block = Block::new(BlockId(656));
+    /// `Blocks.CHORUS_FLOWER` (end-leaves: the chorus-growth terminal flower).
+    pub const CHORUS_FLOWER: Block = Block::new(BlockId(657));
     /// `Blocks.OAK_BUTTON` (noisegen: `OreVeinifier` debug ore-veins).
     pub const OAK_BUTTON: Block = Block::new(BlockId(443));
     /// `Blocks.SLIME_BLOCK` (noisegen: `debugPreliminarySurfaceLevel`).
@@ -244,6 +254,11 @@ mod tests {
             Blocks::DEEPSLATE,
             Blocks::DEEPSLATE_IRON_ORE,
             Blocks::END_STONE,
+            Blocks::OBSIDIAN,
+            Blocks::WALL_TORCH,
+            Blocks::END_PORTAL,
+            Blocks::CHORUS_PLANT,
+            Blocks::CHORUS_FLOWER,
             Blocks::OAK_BUTTON,
             Blocks::SLIME_BLOCK,
             Blocks::BARRIER,
