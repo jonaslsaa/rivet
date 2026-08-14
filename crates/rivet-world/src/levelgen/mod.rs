@@ -72,6 +72,12 @@ pub mod vertical_anchor;
 // ported here (the minY/height window placement derives from the generator);
 // only the Paper `level()` accessor defers (RivetTodo #232, see the module).
 pub mod world_generation_context;
+// The `mc.world.level.levelgen.settings` unit (issue #179): the world-level-gen
+// *settings* sources — `WorldOptions`, `WorldDimensions` (with the out-of-unit
+// `LevelStem` value shell), `WorldGenSettings`, the three geode settings
+// records, `BelowZeroRetrogen`, and the `FlatLevelSource`/`DebugLevelSource`
+// `ChunkGenerator` realizations (see `settings::mod`).
+pub mod settings;
 // The `mc.world.level.levelgen.synth` unit's seven primitive-noise classes
 // (issue #177). `DensityFunction`/registry dispatch seams defer as
 // `RivetTodo(#177)`; see `synth::mod`.
