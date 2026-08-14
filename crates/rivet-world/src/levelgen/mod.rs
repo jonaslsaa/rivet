@@ -14,10 +14,14 @@
 //! block-surface trait and the `#126` dispatch codecs stay unbound), the
 //! `blockpredicates` slice (issue #399 — the block-predicate value/codec
 //! framework), the `synth` primitive-noise classes (the
-//! `mc.world.level.levelgen.synth` unit — issue #177), the
-//! `WorldGenerationContext` window, and the `PositionalRandomFactory`
-//! BlockPos/Identifier default overloads (`random`, issue #208) are ported so
-//! far; the generators/feature worldgen live under the owning manifest unit.
+//! `mc.world.level.levelgen.synth` unit — issue #177), the `flat` world type
+//! (the `mc.world.level.levelgen.flat` unit — issue #178:
+//! `FlatLevelGeneratorSettings`/`FlatLayerInfo`/`FlatLevelGeneratorPreset`/
+//! `FlatLevelGeneratorPresets`, the biome reference riding the `biome.core`
+//! id-model), the `WorldGenerationContext` window, and the
+//! `PositionalRandomFactory` BlockPos/Identifier default overloads (`random`,
+//! issue #208) are ported so far; the generators/feature worldgen live under
+//! the owning manifest unit.
 
 pub mod blockpredicates;
 // The `mc.world.level.levelgen.blending` unit's shared Blender value
@@ -29,6 +33,11 @@ pub mod blockpredicates;
 pub mod blending;
 pub mod carver;
 pub mod feature;
+// The `mc.world.level.levelgen.flat` unit (issue #178): the flat world type —
+// `FlatLayerInfo`, `FlatLevelGeneratorSettings`, `FlatLevelGeneratorPreset`,
+// and the `FlatLevelGeneratorPresets` registrations (the biome reference rides
+// the `biome.core` id-model; see the module's cross-unit STUB seams).
+pub mod flat;
 pub mod generation_step;
 pub mod heightmap;
 // The `mc.world.level.levelgen.heightproviders` unit (issue #181 leaf): the
