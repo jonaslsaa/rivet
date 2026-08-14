@@ -28,6 +28,14 @@ use std::fmt::Debug;
 /// semantics for overriders: sub-features are produced on demand and can be
 /// short-circuited, never materialized eagerly.
 ///
+/// One implementer is an exception: `WeightedRandomFeatureConfiguration`
+/// materializes its flattened sequence eagerly. Its `WeightedList` hides its
+/// entries behind `unwrap()` (issue #353), so a lazy iterator borrowing the
+/// clone cannot outlive the `unwrap()` temporary — a self-referential borrow
+/// the trait surface cannot express. The materialization is a pure read
+/// (observably identical to Java's lazy stream), documented on that
+/// implementer.
+///
 /// The `Any` supertrait gives the `#181` feature dispatch (`feature_place`,
 /// `feature.core`) its downcast seam: a `dyn FeatureConfiguration` is upcast to
 /// `&dyn Any` and downcast to the concrete config type before a concrete
