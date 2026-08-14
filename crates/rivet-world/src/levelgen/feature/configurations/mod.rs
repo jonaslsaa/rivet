@@ -28,6 +28,7 @@ pub mod block_column_configuration;
 pub mod block_pile_configuration;
 pub mod block_state_configuration;
 pub mod column_feature_configuration;
+pub mod composite_feature_configuration;
 pub mod count_configuration;
 pub mod delta_feature_configuration;
 pub mod disk_configuration;
@@ -43,6 +44,8 @@ pub mod nether_forest_vegetation_config;
 pub mod none_feature_configuration;
 pub mod ore_configuration;
 pub mod probability_feature_configuration;
+pub mod random_boolean_feature_configuration;
+pub mod random_feature_configuration;
 pub mod replace_block_configuration;
 pub mod replace_sphere_configuration;
 pub mod sculk_patch_configuration;
@@ -56,12 +59,16 @@ pub mod tree_configuration;
 pub mod twisting_vines_config;
 pub mod underwater_magma_configuration;
 pub mod vegetation_patch_configuration;
+pub mod weighted_random_feature_configuration;
 
 pub use block_blob_configuration::BlockBlobConfiguration;
 pub use block_column_configuration::BlockColumnConfiguration;
 pub use block_pile_configuration::{BlockPileConfiguration, block_pile_configuration_codec};
 pub use block_state_configuration::BlockStateConfiguration;
 pub use column_feature_configuration::ColumnFeatureConfiguration;
+pub use composite_feature_configuration::{
+    CompositeFeatureConfiguration, composite_feature_configuration_codec,
+};
 pub use count_configuration::CountConfiguration;
 pub use delta_feature_configuration::DeltaFeatureConfiguration;
 pub use disk_configuration::DiskConfiguration;
@@ -77,6 +84,12 @@ pub use nether_forest_vegetation_config::NetherForestVegetationConfig;
 pub use none_feature_configuration::NoneFeatureConfiguration;
 pub use ore_configuration::{OreConfiguration, TargetBlockState};
 pub use probability_feature_configuration::ProbabilityFeatureConfiguration;
+pub use random_boolean_feature_configuration::{
+    RandomBooleanFeatureConfiguration, random_boolean_feature_configuration_codec,
+};
+pub use random_feature_configuration::{
+    RandomFeatureConfiguration, random_feature_configuration_codec,
+};
 pub use replace_block_configuration::ReplaceBlockConfiguration;
 pub use replace_sphere_configuration::ReplaceSphereConfiguration;
 pub use sculk_patch_configuration::SculkPatchConfiguration;
@@ -90,3 +103,6 @@ pub use tree_configuration::TreeConfiguration;
 pub use twisting_vines_config::TwistingVinesConfig;
 pub use underwater_magma_configuration::UnderwaterMagmaConfiguration;
 pub use vegetation_patch_configuration::VegetationPatchConfiguration;
+pub use weighted_random_feature_configuration::{
+    WeightedRandomFeatureConfiguration, weighted_random_feature_configuration_codec,
+};
