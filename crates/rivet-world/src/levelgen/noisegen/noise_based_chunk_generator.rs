@@ -10,15 +10,17 @@
 //! - Java extends the abstract `ChunkGenerator` (biome source + codec dispatch),
 //!   owned by `mc.world.level.chunk.generator`. The noisegen unit does not port
 //!   that base; the methods that are pure overrides of it and have unported
-//!   parameter types (`createBiomes`, `applyCarvers`, `buildSurface`,
-//!   `spawnOriginalMobs`) are `STUB`-marked `*_stub` methods on the value shell
-//!   — they keep Java's exact intent and defer the world-touching body to its
-//!   owning unit. `fillFromNoise`/`doFill` (the worldgen block-write slice) is
-//!   the one `ChunkGenerator` override ported here: its `ProtoChunk`/
-//!   `LevelChunkSection`/`Heightmap`/post-processing seams are all present in
-//!   the `chunk` module, and its `NoiseChunk`/`Aquifer`/`Blender` dependencies
-//!   live in this noisegen unit. `addDebugScreenInfo` (router reads + string
-//!   formatting) has fully ported parameter types, so it is ported in full.
+//!   parameter types (`createBiomes`, `applyCarvers`, `spawnOriginalMobs`) are
+//!   `STUB`-marked `*_stub` methods on the value shell — they keep Java's exact
+//!   intent and defer the world-touching body to its owning unit.
+//!   `fillFromNoise`/`doFill` (the worldgen block-write slice) and `buildSurface`
+//!   (the SURFACE status-step body) are the two `ChunkGenerator` overrides
+//!   ported here: their `ProtoChunk`/`LevelChunkSection`/`Heightmap`/
+//!   post-processing seams are all present in the `chunk` module, the surface
+//!   unit lives in `levelgen::surface_rules`, and the `NoiseChunk`/`Aquifer`/
+//!   `Blender` dependencies live in this noisegen unit. `addDebugScreenInfo`
+//!   (router reads + string formatting) has fully ported parameter types, so it
+//!   is ported in full.
 //!   `CODEC` (the `BiomeSource` + `NoiseGeneratorSettings` record codec)
 //!   defers with the `ChunkGenerator` unit (no `BiomeSource` ported here).
 //! - Java memoizes the global fluid picker in `Suppliers.memoize`; the picker
@@ -43,6 +45,7 @@
 //! `LevelChunkSection`, `ProtoChunk`, `Heightmap`) are consumed directly; see
 //! the noisegen module doc.
 
+use crate::biome::BiomeManager;
 use crate::block::BlockState;
 use crate::block::blocks::Blocks;
 use crate::chunk::proto_chunk::ProtoChunk;
@@ -60,6 +63,8 @@ use crate::levelgen::noisegen::noise_chunk::NoiseChunk;
 use crate::levelgen::noisegen::noise_generator_settings::NoiseGeneratorSettings;
 use crate::levelgen::noisegen::noise_router_data::peaks_and_valleys_f32;
 use crate::levelgen::noisegen::random_state::RandomState;
+use crate::levelgen::world_generation_context::WorldGenerationContext;
+use rivet_registry::biome_id::BiomeId;
 use rivet_registry::core::BlockPos;
 use rivet_registry::holder::Holder;
 use rivet_util::mth;
@@ -654,16 +659,42 @@ impl NoiseBasedChunkGenerator {
         noise_chunk.stop_interpolation();
     }
 
-    /// `buildSurface` — STUB (the production wire is unwired; the surface unit
-    /// is ported).
+    /// `buildSurface(ChunkAccess, WorldGenerationContext, RandomState,
+    /// StructureManager, BiomeManager, Blender, Set<Holder<Biome>>)` — the
+    /// SURFACE status-step body, a faithful port of the Java.
     ///
-    /// Java: `randomState.surfaceSystem().buildSurface(...)`. The `SurfaceSystem`
-    /// and the surface-build value surface are ported in
-    /// `levelgen::surface_rules`; only the production wire (the
-    /// `ChunkAccess`/heightmap writes `doFill` feeds it) is deferred — the
-    /// `#216`/`#185` seams and `NoiseBasedChunkGenerator` wiring (RivetTodo
-    /// #177).
-    pub fn build_surface_stub(&self) {}
+    /// Java's `getOrCreateNoiseChunk` is the same single-shot cache the
+    /// [`Self::fill_from_noise`] path uses; this slice constructs the
+    /// `NoiseChunk` over an empty blender exactly once (RivetTodo #185: the
+    /// stage composing biomes/surface over the same chunk adds the cache).
+    /// The `possible_biomes` set (Java's `collectPossibleBiomes(region, 1)`)
+    /// is not threaded — the single-holder path has no `WorldGenRegion` to
+    /// collect from, so `None` is the honest seam (the surface rules that take
+    /// the possible-biomes short-circuit keep their whole-set behavior).
+    pub fn build_surface<B, S>(
+        &self,
+        random_state: &RandomState,
+        biome_manager: Arc<BiomeManager>,
+        generation_context: Arc<WorldGenerationContext>,
+        chunk: &mut ProtoChunk<BlockState, B, S>,
+        possible_biomes: Option<&[Holder<BiomeId>]>,
+    ) where
+        B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        S: Eq + std::hash::Hash,
+    {
+        let noise_chunk = Arc::new(self.create_noise_chunk(chunk, random_state, Blender::empty()));
+        let settings = settings_value(&self.settings);
+        random_state.surface_system().build_surface(
+            random_state,
+            biome_manager,
+            settings.use_legacy_random_source,
+            generation_context,
+            chunk,
+            noise_chunk,
+            &settings.surface_rule,
+            possible_biomes,
+        );
+    }
 
     /// `spawnOriginalMobs` — STUB(mc.world.level.chunk.generator).
     ///
