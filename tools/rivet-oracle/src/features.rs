@@ -293,6 +293,12 @@ pub fn load(dir: &Path) -> Result<FeaturesGolden, Error> {
 /// per-chunk status/flag contract, and FEATURES-decoration non-vacuity.
 pub fn verify_features(dir: &Path) -> Result<(), Error> {
     let manifest = crate::verify_fixtures(dir)?;
+    // 0. The SHA-256 binding is load-bearing, not optional: verify_fixtures only
+    //    checks the files the manifest DOES list, so a manifest with no captured
+    //    entry (or one that omits features.json) would let a modified-but-still-
+    //    valid golden pass with zero byte binding. Require exactly one non-empty
+    //    captured entry naming the golden.
+    crate::require_single_captured(&manifest, FIXTURE_BASENAME)?;
     // 1. Provenance: the checkpoint is pinned to seed 42 and Paper 0a99345; a
     //    fixture regenerated under a different seed or commit is drift.
     if manifest.kind.as_deref() != Some(KIND) {
@@ -651,12 +657,10 @@ pub fn run_cli(args: &[&str]) -> Result<(), Error> {
             parsed.seed
         )));
     }
-    verify_features(&dir)?;
-    println!(
-        "PASS: features seed-42 FEATURES checkpoint verified (pinned Paper 0a99345 provenance, \
-         manifest hash, forced-grid per-chunk status/decoration-sample contract, non-vacuity)"
-    );
-    Ok(())
+    // Route through the same tri-state classification as the gate (PR #175):
+    // wholly absent -> UNVERIFIED (exit 3), partial/corrupt -> hard failure, so
+    // the CLI and the gate cannot disagree about an absent/partial tree.
+    crate::verify_features_step(&dir)
 }
 
 /// Parsed `features` CLI arguments.
@@ -880,6 +884,94 @@ mod tests {
             matches!(result, Err(crate::Error::Unverified(_))),
             "expected Error::Unverified (exit 3), got {result:?}"
         );
+    }
+
+    /// A PARTIAL features tree — only manifest.json, no features.json — is a
+    /// corrupt checkpoint, NOT an absent prerequisite: it must hard-fail
+    /// (Error::Manifest, exit 1), never classify as UNVERIFIED (exit 3). The
+    /// half-present tree's verifier cannot be trusted, so it reads as damage,
+    /// not as "prerequisites unavailable" (D8 tri-state contract).
+    #[test]
+    fn partial_fixture_tree_is_a_hard_failure() {
+        for missing in ["manifest.json", FIXTURE_BASENAME] {
+            let scratch = std::env::temp_dir().join(format!(
+                "rivet-oracle-features-partial-{missing}-{}",
+                std::process::id()
+            ));
+            if scratch.exists() {
+                fs::remove_dir_all(&scratch).unwrap();
+            }
+            fs::create_dir_all(&scratch).unwrap();
+            let present = if missing == "manifest.json" {
+                FIXTURE_BASENAME
+            } else {
+                "manifest.json"
+            };
+            fs::write(scratch.join(present), b"{}").unwrap();
+            let result = crate::verify_features_step(&scratch);
+            let _ = fs::remove_dir_all(&scratch);
+            assert!(
+                matches!(result, Err(crate::Error::Manifest(_))),
+                "a partial features tree missing {missing} must hard-fail (Error::Manifest), \
+                 got {result:?}"
+            );
+        }
+    }
+
+    /// The SHA-256 binding is load-bearing, not optional: `verify_fixtures`
+    /// only checks the files the manifest DOES list, so a manifest whose
+    /// `captured` list is empty (or binds a different file instead of
+    /// features.json) must be rejected even though the golden bytes themselves
+    /// are untouched — otherwise a modified golden could pass with no byte
+    /// binding at all.
+    #[test]
+    fn manifest_without_captured_binding_is_rejected() {
+        let dir = fixtures_dir().join("features");
+        require_fixture(&dir);
+        let golden = fs::read(dir.join(FIXTURE_BASENAME)).unwrap();
+        // Case 1: an empty `captured` list — verify_fixtures accepts it
+        // (nothing to check), so the require_single_captured gate must refuse.
+        // Case 2: a manifest that binds ONLY a relabeled copy (other.json, a
+        // byte-identical features.json under a different name) — verify_fixtures
+        // passes its hash, yet features.json itself has no binding.
+        let relabeled = vec![serde_json::json!({
+            "path": "other.json",
+            "sha256": crate::sha256_hex(&golden),
+            "bytes": golden.len(),
+        })];
+        for captured in [vec![], relabeled] {
+            let scratch = std::env::temp_dir().join(format!(
+                "rivet-oracle-features-nocap-{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&scratch);
+            fs::create_dir_all(&scratch).unwrap();
+            fs::write(scratch.join(FIXTURE_BASENAME), &golden).unwrap();
+            fs::write(scratch.join("other.json"), &golden).unwrap();
+            let manifest = serde_json::json!({
+                "format": 1,
+                "paper": PINNED_PAPER,
+                "seed": "42",
+                "level-type": "minecraft:normal",
+                "kind": KIND,
+                "note": "test",
+                "captured": captured,
+            });
+            fs::write(
+                scratch.join("manifest.json"),
+                serde_json::to_string_pretty(&manifest).unwrap(),
+            )
+            .unwrap();
+            let result = verify_features(&scratch);
+            let _ = fs::remove_dir_all(&scratch);
+            let err = result
+                .expect_err("a manifest without a features.json captured entry must be refused");
+            assert!(
+                err.to_string()
+                    .contains("must bind exactly one captured entry"),
+                "unexpected error: {err}"
+            );
+        }
     }
 
     #[test]

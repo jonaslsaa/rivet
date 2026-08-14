@@ -521,6 +521,33 @@ fn verify_fixtures(dir: &Path) -> Result<Manifest, Error> {
     Ok(manifest)
 }
 
+/// Assert the manifest binds exactly one non-empty captured entry for
+/// `filename`. `verify_fixtures` only checks the files that ARE listed, so an
+/// empty `captured` list (or one that omits the fixture) would let a
+/// modified-but-semantically-valid golden pass with no byte binding at all. The
+/// SHA-256 binding is what makes a fixture checkpoint byte-exact, so it is not
+/// optional — a load-bearing verifier must require it.
+pub(crate) fn require_single_captured(manifest: &Manifest, filename: &str) -> Result<(), Error> {
+    let matching: Vec<&Captured> = manifest
+        .captured
+        .iter()
+        .filter(|c| c.path == filename)
+        .collect();
+    if matching.len() != 1 {
+        return Err(Error::Manifest(format!(
+            "manifest must bind exactly one captured entry for {filename}, got {}",
+            matching.len()
+        )));
+    }
+    if matching[0].bytes == 0 {
+        return Err(Error::Manifest(format!(
+            "manifest captured entry for {filename} records 0 bytes — a non-empty fixture \
+             must bind its true size (verify_fixtures skips size checks for 0)"
+        )));
+    }
+    Ok(())
+}
+
 /// True for the concurrency-sensitive M2 region chunk capture — the only
 /// capture whose byte identity depends on the pinned chunk-concurrency
 /// provenance (issue #266).
@@ -990,25 +1017,64 @@ fn verify_all_fixture_kinds_from(root: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// Verify the committed seed-42 FEATURES checkpoint, failing with
-/// `Error::Unverified` (exit 3) when the fixture tree is absent rather than
-/// silently skipping it (D8).
-fn verify_features_step(dir: &Path) -> Result<(), Error> {
-    if !dir.join("manifest.json").is_file() || !dir.join("features.json").is_file() {
-        return Err(Error::Unverified(format!(
-            "features fixtures {} are ABSENT (need both manifest.json and features.json) — \
-             the seed-42 FEATURES checkpoint and its per-chunk decoration gate cannot verify \
-             (git checkout or regenerate via --features); refusing to pass green without them",
-            dir.display()
-        )));
+/// The seed-42 FEATURES fixture tree's presence state. The tri-state contract is
+/// central so the gate and the CLI cannot disagree about how a partial or absent
+/// tree classifies.
+#[derive(Debug, PartialEq, Eq)]
+enum FeaturesFixtureState {
+    /// Neither manifest.json nor features.json exists: the checkpoint is wholly
+    /// absent and maps to `Error::Unverified` (exit 3), never a silent green.
+    Absent,
+    /// Exactly one of the two exists (or one is unreadable/empty): a partial or
+    /// corrupt tree is a hard failure (exit 1), NOT the exit-3 missing-prereq
+    /// classification — the checkpoint is half-present and its verifier cannot
+    /// be trusted, so it must never read as "prerequisites unavailable".
+    Partial,
+    /// Both exist: run the full verifier.
+    Present,
+}
+
+/// Classify the committed seed-42 FEATURES fixture tree by presence.
+fn classify_features_fixtures(dir: &Path) -> FeaturesFixtureState {
+    let manifest = dir.join("manifest.json").is_file();
+    let golden = dir.join(features::FIXTURE_BASENAME).is_file();
+    match (manifest, golden) {
+        (true, true) => FeaturesFixtureState::Present,
+        (false, false) => FeaturesFixtureState::Absent,
+        _ => FeaturesFixtureState::Partial,
     }
-    features::verify_features(dir)?;
-    println!(
-        "PASS: features seed-42 FEATURES checkpoint verified (pinned Paper 0a99345 provenance, \
-         status {}, per-chunk decoration-sample contract, non-vacuity)",
-        features::EXPECTED_STATUS
-    );
-    Ok(())
+}
+
+/// Verify the committed seed-42 FEATURES checkpoint under the tri-state
+/// contract: wholly absent -> `Error::Unverified` (exit 3), partial/corrupt ->
+/// hard failure (exit 1), both present -> full verify. Shared by the gate and
+/// the CLI so the two paths classify identically.
+pub(crate) fn verify_features_step(dir: &Path) -> Result<(), Error> {
+    match classify_features_fixtures(dir) {
+        FeaturesFixtureState::Absent => Err(Error::Unverified(format!(
+            "features fixtures {} are ABSENT (need both manifest.json and {} — the seed-42 \
+             FEATURES checkpoint and its per-chunk decoration gate cannot verify (git checkout \
+             or regenerate via --features); refusing to pass green without them",
+            dir.display(),
+            features::FIXTURE_BASENAME
+        ))),
+        FeaturesFixtureState::Partial => Err(Error::Manifest(format!(
+            "features fixtures {} are PARTIAL (only one of manifest.json / {} exists) — a \
+             half-present tree is corrupt, not an absent prerequisite; restore or regenerate \
+             both files before verifying",
+            dir.display(),
+            features::FIXTURE_BASENAME
+        ))),
+        FeaturesFixtureState::Present => {
+            features::verify_features(dir)?;
+            println!(
+                "PASS: features seed-42 FEATURES checkpoint verified (pinned Paper 0a99345 \
+                 provenance, status {}, per-chunk decoration-sample contract, non-vacuity)",
+                features::EXPECTED_STATUS
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Verify the committed post-surface column golden, failing with
