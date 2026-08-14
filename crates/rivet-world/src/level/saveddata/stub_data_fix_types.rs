@@ -3,12 +3,13 @@
 //! (`SAVED_DATA_WEATHER`, `SAVED_DATA_WANDERING_TRADER`, ...).
 //!
 //! The real port is owned by the pending `mc.util.datafix` unit
-//! (rivet-util). This unit only needs the two variants `WanderingTraderData`/
-//! `WeatherData` reference (`SAVED_DATA_WANDERING_TRADER` /
-//! `SAVED_DATA_WEATHER`) plus the `NONE` Paper no-op used by the minimal
-//! `SavedDataType` value record, so the stub declares the enum's variant
-//! surface as a value-identity enum without the DFU machinery. The owning
-//! unit's port replaces this stub wholesale.
+//! (rivet-util). This unit's payloads reference the two variants
+//! `WanderingTraderData`/`WeatherData` use (`SAVED_DATA_WANDERING_TRADER` /
+//! `SAVED_DATA_WEATHER`); the `NONE` Paper no-op variant is additionally
+//! declared for parity with the future `mc.util.datafix` port but is not used
+//! by any value in this unit. The stub declares the enum's variant surface as
+//! a value-identity enum without the DFU machinery; the owning unit's port
+//! replaces it wholesale.
 
 /// `net.minecraft.util.datafix.DataFixTypes` — value-identity only.
 ///

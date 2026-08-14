@@ -16,23 +16,27 @@ pub use crate::level::saveddata::stub_data_fix_types::DataFixTypes;
 /// `net.minecraft.world.level.saveddata.SavedDataType<T>`.
 ///
 /// Java is a record `SavedDataType<T extends SavedData>(Identifier id,
-/// Supplier<T> constructor, Codec<T> codec, DataFixTypes dataFixType)`. The
-/// `Supplier<T>`/`Codec<T>` are carried as owned closures so the type can be
-/// built once (`WanderingTraderData::TYPE`, `WeatherData::TYPE`) and shared;
-/// codecs are ops-generic in Rivet, so the `codec` slot is the NbtOps-pinned
-/// codec the disk runtime will use.
+/// Supplier<T> constructor, Codec<T> codec, DataFixTypes dataFixType)` with
+/// final (immutable) components. The components are private with read
+/// accessors, so the `id` that `PartialEq`/`Eq`/`Hash` are derived over cannot
+/// be mutated after the value is placed in a map/set. Java's `T extends
+/// SavedData` bound is not enforceable while `SavedData` is a plain struct, so
+/// any `T` is accepted. The `Supplier<T>`/`Codec<T>` are carried as `Arc`s so
+/// the value can be shared cheaply. `type_()` builds a fresh equivalent value
+/// per call rather than reproducing Java's `static final` `TYPE` singletons —
+/// equality is by `id` only, so the fresh values are identical.
 pub struct SavedDataType<T> {
     /// Java `Identifier id` — the filename/type identity (e.g.
     /// `minecraft:wandering_trader`).
-    pub id: Identifier,
+    id: Identifier,
     /// Java `Supplier<T> constructor` — builds a fresh instance with default
     /// state (used when no saved payload exists).
-    pub constructor: Arc<dyn Fn() -> T + Send + Sync>,
+    constructor: Arc<dyn Fn() -> T + Send + Sync>,
     /// Java `Codec<T> codec` — the payload codec.
-    pub codec: Arc<dyn rivet_serialization::Codec<T, rivet_nbt::nbt_ops::NbtOps>>,
+    codec: Arc<dyn rivet_serialization::Codec<T, rivet_nbt::nbt_ops::NbtOps>>,
     /// Java `DataFixTypes dataFixType` — the datafixer type reference for this
     /// saved-data population.
-    pub data_fix_type: DataFixTypes,
+    data_fix_type: DataFixTypes,
 }
 
 impl<T> SavedDataType<T> {
@@ -49,6 +53,26 @@ impl<T> SavedDataType<T> {
             codec,
             data_fix_type,
         }
+    }
+
+    /// `id()` — Java record accessor.
+    pub fn id(&self) -> &Identifier {
+        &self.id
+    }
+
+    /// `constructor()` — Java record accessor.
+    pub fn constructor(&self) -> &Arc<dyn Fn() -> T + Send + Sync> {
+        &self.constructor
+    }
+
+    /// `codec()` — Java record accessor.
+    pub fn codec(&self) -> &Arc<dyn rivet_serialization::Codec<T, rivet_nbt::nbt_ops::NbtOps>> {
+        &self.codec
+    }
+
+    /// `dataFixType()` — Java record accessor.
+    pub fn data_fix_type(&self) -> DataFixTypes {
+        self.data_fix_type
     }
 }
 

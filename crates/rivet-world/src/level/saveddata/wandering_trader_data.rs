@@ -83,7 +83,9 @@ impl WanderingTraderData {
     /// Identifier.withDefaultNamespace("wandering_trader"),
     /// WanderingTraderData::new, CODEC,
     /// DataFixTypes.SAVED_DATA_WANDERING_TRADER)`. The codec slot is the
-    /// NbtOps-pinned codec the disk runtime uses.
+    /// NbtOps-pinned codec the disk runtime uses. Unlike Java's `static final
+    /// TYPE` singleton, this builds a fresh equivalent value per call (equality
+    /// is by `id` only, so the values are identical).
     pub fn type_() -> SavedDataType<WanderingTraderData> {
         SavedDataType::new(
             Identifier::with_default_namespace("wandering_trader"),
@@ -245,10 +247,10 @@ mod tests {
     #[test]
     fn type_has_expected_identity() {
         let t = WanderingTraderData::type_();
-        assert_eq!(t.id.to_string(), "minecraft:wandering_trader");
-        assert_eq!(t.data_fix_type, DataFixTypes::SavedDataWanderingTrader);
+        assert_eq!(t.id().to_string(), "minecraft:wandering_trader");
+        assert_eq!(t.data_fix_type(), DataFixTypes::SavedDataWanderingTrader);
         assert_eq!(t.to_string(), "SavedDataType[minecraft:wandering_trader]");
-        let constructed = (t.constructor)();
+        let constructed = (t.constructor())();
         assert_eq!(constructed.spawn_delay(), DEFAULT_SPAWN_DELAY);
     }
 }

@@ -13,8 +13,8 @@
 //! codecs, and `SavedDataType` handles the runtime will call.
 //!
 //! `DataFixTypes` is the `mc.util.datafix` unit's enum; this unit declares the
-//! two variants the payloads reference as a value-identity stub (see
-//! [`stub_data_fix_types`]).
+//! two variants the payloads reference plus the reserved `NONE` Paper no-op as
+//! a value-identity stub (see [`stub_data_fix_types`]).
 
 pub mod saved_data;
 pub mod saved_data_type;

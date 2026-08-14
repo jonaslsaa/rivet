@@ -17,14 +17,22 @@
 //!   event system is not ported (see `OWNERSHIP.md`), so the port keeps the
 //!   guard-and-assign core (`same value -> return` + `assign; setDirty()`) and
 //!   drops the event dispatch.
-//! - **Paper `ServerLevel` field.** The `private @Nullable ServerLevel level`
-//!   field and `setLevel(ServerLevel)` exist only to feed the CraftBukkit
-//!   events (`this.level == null ? null : this.level.getWorld()`). The concrete
-//!   level lives in `rivet-server` (the `mc.server.level` unit, not yet
-//!   ported), so the field is declared against the `net.minecraft.server.level.
-//!   ServerLevel` STUB handle used by other rivet-world modules and is carried
-//!   so a future `mc.server.level` port can wire events without changing this
-//!   unit.
+//! - **Paper `ServerLevel` field / `setLevel`.** Java also carries a
+//!   `private @Nullable ServerLevel level` field set via the server-internal
+//!   `setLevel(ServerLevel)`, solely to feed the CraftBukkit events
+//!   (`this.level == null ? null : this.level.getWorld()`). The concrete level
+//!   lives in `rivet-server` (the `mc.server.level` unit, not yet ported), and
+//!   rivet-world cannot depend on it. The field and `setLevel` are dropped here
+//!   — nothing reads them without the event dispatch. When `mc.server.level`
+//!   lands and wires the real event dispatch, the `setRaining`/`setThundering`
+//!   re-typing happens in that owning unit.
+//!
+//! RivetTodo(#26): `setRaining`/`setThundering` drop the CraftBukkit
+//! `WeatherChangeEvent`/`ThunderChangeEvent` dispatch + cancellation bail-out
+//! (and the `@Nullable ServerLevel level` field + `setLevel()` that feed them —
+//! see the seams above). A cancelled event in Java leaves the field unchanged
+//! and un-dirtied; the dispatch is re-added here when the CraftBukkit event
+//! system lands (epic #26, OWNERSHIP.md "Events (Bukkit/Paper layer)").
 
 use super::saved_data::SavedData;
 use super::saved_data_type::SavedDataType;
@@ -34,16 +42,6 @@ use rivet_serialization::codec;
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
 use std::sync::Arc;
-
-/// The `net.minecraft.server.level.ServerLevel` id-handle STUB — the level
-/// behind the CraftBukkit event dispatch.
-///
-/// STUB(mc.server.level) — `net.minecraft.server.level.ServerLevel` lives in
-/// rivet-server and is not yet ported; rivet-world carries only the empty
-/// id-handle so value units can reference it. Replaced when the server level
-/// unit lands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ServerLevel;
 
 /// `net.minecraft.world.level.saveddata.WeatherData`.
 #[derive(Debug, Clone)]
@@ -60,8 +58,6 @@ pub struct WeatherData {
     raining: bool,
     /// `this.thundering`.
     thundering: bool,
-    /// Paper `private @Nullable ServerLevel level` — the event-dispatch level.
-    level: Option<ServerLevel>,
 }
 
 impl WeatherData {
@@ -74,7 +70,6 @@ impl WeatherData {
             thunder_time: 0,
             raining: false,
             thundering: false,
-            level: None,
         }
     }
 
@@ -94,7 +89,6 @@ impl WeatherData {
             thunder_time,
             raining,
             thundering,
-            level: None,
         }
     }
 
@@ -135,7 +129,9 @@ impl WeatherData {
     /// `WeatherData.TYPE` — `new SavedDataType<>(
     /// Identifier.withDefaultNamespace("weather"), WeatherData::new, CODEC,
     /// DataFixTypes.SAVED_DATA_WEATHER)`. The codec slot is the NbtOps-pinned
-    /// codec the disk runtime uses.
+    /// codec the disk runtime uses. Unlike Java's `static final TYPE`
+    /// singleton, this builds a fresh equivalent value per call (equality is
+    /// by `id` only, so the values are identical).
     pub fn type_() -> SavedDataType<WeatherData> {
         SavedDataType::new(
             Identifier::with_default_namespace("weather"),
@@ -166,6 +162,9 @@ impl WeatherData {
     /// Without the CraftBukkit event dispatch, this is the guard-and-assign
     /// core: a same-value call returns without marking dirty; otherwise the
     /// field is set and the blob marked dirty.
+    ///
+    /// RivetTodo(#26): the `ThunderChangeEvent` dispatch + cancellation
+    /// bail-out and the `level`/`setLevel` feed are dropped (module-doc seam).
     pub fn set_thundering(&mut self, thundering: bool) {
         if self.thundering == thundering {
             return;
@@ -194,6 +193,9 @@ impl WeatherData {
     ///
     /// Same guard-and-assign core as `set_thundering` (see the module doc's
     /// seam note for the dropped CraftBukkit event dispatch).
+    ///
+    /// RivetTodo(#26): the `WeatherChangeEvent` dispatch + cancellation
+    /// bail-out and the `level`/`setLevel` feed are dropped (module-doc seam).
     pub fn set_raining(&mut self, raining: bool) {
         if self.raining == raining {
             return;
@@ -211,13 +213,6 @@ impl WeatherData {
     pub fn set_rain_time(&mut self, rain_time: i32) {
         self.rain_time = rain_time;
         self.base.set_dirty();
-    }
-
-    // --- Paper additions ---
-
-    /// `setLevel(ServerLevel)` (Paper) — the level behind the event dispatch.
-    pub fn set_level(&mut self, level: ServerLevel) {
-        self.level = Some(level);
     }
 
     // --- inherited `SavedData` surface ---
@@ -378,10 +373,10 @@ mod tests {
     #[test]
     fn type_has_expected_identity() {
         let t = WeatherData::type_();
-        assert_eq!(t.id.to_string(), "minecraft:weather");
-        assert_eq!(t.data_fix_type, DataFixTypes::SavedDataWeather);
+        assert_eq!(t.id().to_string(), "minecraft:weather");
+        assert_eq!(t.data_fix_type(), DataFixTypes::SavedDataWeather);
         assert_eq!(t.to_string(), "SavedDataType[minecraft:weather]");
-        let constructed = (t.constructor)();
+        let constructed = (t.constructor())();
         assert_eq!(constructed.clear_weather_time(), 0);
     }
 }
