@@ -52,7 +52,7 @@ impl<T: std::fmt::Debug> IdForResult<T> {
 /// The global id map surface palettes and the container need (Java
 /// `IdMap<T>`). `by_id` returns an owned value because the Rust port models
 /// block states as copy ids, not references.
-pub trait GlobalIdMap<T: Clone + Send + 'static>: Send {
+pub trait GlobalIdMap<T: Clone + Send + Sync + 'static>: Send {
     /// `IdMap.getId(T)` — `-1` when absent.
     fn get_id(&self, value: &T) -> i32;
 
@@ -66,11 +66,11 @@ pub trait GlobalIdMap<T: Clone + Send + 'static>: Send {
     /// `IdMap.byId(int)` — `Option::None` when absent.
     fn by_id(&self, id: i32) -> Option<T>;
 
-    fn clone_box(&self) -> Box<dyn GlobalIdMap<T>>;
+    fn clone_box(&self) -> Box<dyn GlobalIdMap<T> + Send + Sync>;
 }
 
 /// `net.minecraft.world.level.chunk.Palette<T>`.
-pub trait Palette<T: Clone + PartialEq + Send + 'static>: Send {
+pub trait Palette<T: Clone + PartialEq + Send + Sync + 'static>: Send {
     /// `idFor(T, PaletteResize)` — returns the palette-local index, or a
     /// resize request for the container to handle.
     fn id_for(&mut self, value: &T) -> IdForResult<T>;
@@ -95,7 +95,7 @@ pub trait Palette<T: Clone + PartialEq + Send + 'static>: Send {
     fn get_size(&self) -> i32;
 
     /// `copy()` — a fresh palette with identical contents.
-    fn copy_palette(&self) -> Box<dyn Palette<T>>;
+    fn copy_palette(&self) -> Box<dyn Palette<T> + Send + Sync>;
 
     /// `moonrise$getRawPalette(FastPaletteData)` — the Moonrise
     /// `FastPaletteData` read-path snapshot: a `Vec<T>` whose index `i` holds
@@ -147,15 +147,15 @@ impl<T> SingleValuePalette<T> {
     }
 }
 
-impl<T: Clone + PartialEq + Send + 'static> SingleValuePalette<T> {
+impl<T: Clone + PartialEq + Send + Sync + 'static> SingleValuePalette<T> {
     /// `SingleValuePalette.create`.
-    pub fn create(bits: i32, entries: Vec<T>) -> Box<dyn Palette<T>> {
+    pub fn create(bits: i32, entries: Vec<T>) -> Box<dyn Palette<T> + Send + Sync> {
         let _ = bits;
         Box::new(SingleValuePalette::new(entries))
     }
 }
 
-impl<T: Clone + PartialEq + Send + 'static> Palette<T> for SingleValuePalette<T> {
+impl<T: Clone + PartialEq + Send + Sync + 'static> Palette<T> for SingleValuePalette<T> {
     fn id_for(&mut self, value: &T) -> IdForResult<T> {
         if self.value.is_some() && self.value.as_ref() != Some(value) {
             return IdForResult::Resize {
@@ -208,7 +208,7 @@ impl<T: Clone + PartialEq + Send + 'static> Palette<T> for SingleValuePalette<T>
         1
     }
 
-    fn copy_palette(&self) -> Box<dyn Palette<T>> {
+    fn copy_palette(&self) -> Box<dyn Palette<T> + Send + Sync> {
         if self.value.is_none() {
             panic!("Use of an uninitialized palette");
         }
@@ -263,14 +263,14 @@ impl<T> LinearPalette<T> {
     }
 }
 
-impl<T: Clone + PartialEq + Send + 'static> LinearPalette<T> {
+impl<T: Clone + PartialEq + Send + Sync + 'static> LinearPalette<T> {
     /// `LinearPalette.create`.
-    pub fn create(bits: i32, entries: Vec<T>) -> Box<dyn Palette<T>> {
+    pub fn create(bits: i32, entries: Vec<T>) -> Box<dyn Palette<T> + Send + Sync> {
         Box::new(LinearPalette::new(bits, entries))
     }
 }
 
-impl<T: Clone + PartialEq + Send + 'static> Palette<T> for LinearPalette<T> {
+impl<T: Clone + PartialEq + Send + Sync + 'static> Palette<T> for LinearPalette<T> {
     fn id_for(&mut self, value: &T) -> IdForResult<T> {
         for i in 0..self.size as usize {
             if self.values[i].as_ref() == Some(value) {
@@ -342,7 +342,7 @@ impl<T: Clone + PartialEq + Send + 'static> Palette<T> for LinearPalette<T> {
         self.size
     }
 
-    fn copy_palette(&self) -> Box<dyn Palette<T>> {
+    fn copy_palette(&self) -> Box<dyn Palette<T> + Send + Sync> {
         Box::new(LinearPalette {
             values: self.values.clone(),
             bits: self.bits,
@@ -387,9 +387,9 @@ impl<T> HashMapPalette<T> {
     }
 }
 
-impl<T: Clone + PartialEq + Send + 'static> HashMapPalette<T> {
+impl<T: Clone + PartialEq + Send + Sync + 'static> HashMapPalette<T> {
     /// `HashMapPalette.create`.
-    pub fn create(bits: i32, entries: Vec<T>) -> Box<dyn Palette<T>> {
+    pub fn create(bits: i32, entries: Vec<T>) -> Box<dyn Palette<T> + Send + Sync> {
         Box::new(HashMapPalette::new(bits, entries))
     }
 
@@ -401,7 +401,7 @@ impl<T: Clone + PartialEq + Send + 'static> HashMapPalette<T> {
     }
 }
 
-impl<T: Clone + PartialEq + Send + 'static> Palette<T> for HashMapPalette<T> {
+impl<T: Clone + PartialEq + Send + Sync + 'static> Palette<T> for HashMapPalette<T> {
     fn id_for(&mut self, value: &T) -> IdForResult<T> {
         let id = self
             .values
@@ -471,7 +471,7 @@ impl<T: Clone + PartialEq + Send + 'static> Palette<T> for HashMapPalette<T> {
         self.values.len() as i32
     }
 
-    fn copy_palette(&self) -> Box<dyn Palette<T>> {
+    fn copy_palette(&self) -> Box<dyn Palette<T> + Send + Sync> {
         Box::new(HashMapPalette {
             values: self.values.clone(),
             bits: self.bits,
@@ -495,17 +495,17 @@ impl<T: Clone + PartialEq + Send + 'static> Palette<T> for HashMapPalette<T> {
 /// global-id palette. The wire palette section is empty (the entries are the
 /// global ids themselves).
 pub struct GlobalPalette<T> {
-    registry: Box<dyn GlobalIdMap<T>>,
+    registry: Box<dyn GlobalIdMap<T> + Send + Sync>,
 }
 
 impl<T> GlobalPalette<T> {
     /// `GlobalPalette(IdMap<T> registry)`.
-    pub fn new(registry: Box<dyn GlobalIdMap<T>>) -> Self {
+    pub fn new(registry: Box<dyn GlobalIdMap<T> + Send + Sync>) -> Self {
         GlobalPalette { registry }
     }
 }
 
-impl<T: Clone + PartialEq + Send + 'static> Palette<T> for GlobalPalette<T> {
+impl<T: Clone + PartialEq + Send + Sync + 'static> Palette<T> for GlobalPalette<T> {
     fn id_for(&mut self, value: &T) -> IdForResult<T> {
         let id = self.registry.get_id(value);
         if id == DEFAULT_ID {
@@ -538,7 +538,7 @@ impl<T: Clone + PartialEq + Send + 'static> Palette<T> for GlobalPalette<T> {
         self.registry.size()
     }
 
-    fn copy_palette(&self) -> Box<dyn Palette<T>> {
+    fn copy_palette(&self) -> Box<dyn Palette<T> + Send + Sync> {
         Box::new(GlobalPalette {
             registry: self.registry.clone_box(),
         })

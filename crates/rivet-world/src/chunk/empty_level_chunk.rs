@@ -30,8 +30,8 @@ use rivet_registry::core::{BlockPos, ChunkPos};
 /// `net.minecraft.world.level.chunk.EmptyLevelChunk`.
 pub struct EmptyLevelChunk<T, B, S>
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     /// The `ChunkAccess` base (the `LevelChunk`-side fields; the empty chunk
@@ -48,8 +48,8 @@ where
 
 impl<T, B, S> EmptyLevelChunk<T, B, S>
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     /// `EmptyLevelChunk(Level, ChunkPos, Holder<Biome>)` — the short
@@ -182,7 +182,7 @@ mod tests {
         fn by_id(&self, id: i32) -> Option<u8> {
             Some(id as u8)
         }
-        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8>> {
+        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8> + Send + Sync> {
             Box::new(*self)
         }
     }

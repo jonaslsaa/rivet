@@ -77,7 +77,7 @@ impl GlobalIdMap<StateId> for BlockStateGlobalMap {
             None
         }
     }
-    fn clone_box(&self) -> Box<dyn GlobalIdMap<StateId>> {
+    fn clone_box(&self) -> Box<dyn GlobalIdMap<StateId> + Send + Sync> {
         Box::new(*self)
     }
 }
@@ -100,7 +100,7 @@ impl GlobalIdMap<BiomeId> for BiomeGlobalMap {
     fn by_id(&self, id: i32) -> Option<BiomeId> {
         (id >= 0).then_some(BiomeId(id as u16))
     }
-    fn clone_box(&self) -> Box<dyn GlobalIdMap<BiomeId>> {
+    fn clone_box(&self) -> Box<dyn GlobalIdMap<BiomeId> + Send + Sync> {
         Box::new(*self)
     }
 }

@@ -493,7 +493,7 @@ mod maps {
                 .contains(&id)
                 .then_some(StateId(id as u16))
         }
-        fn clone_box(&self) -> Box<dyn GlobalIdMap<StateId>> {
+        fn clone_box(&self) -> Box<dyn GlobalIdMap<StateId> + Send + Sync> {
             Box::new(*self)
         }
     }
@@ -519,7 +519,7 @@ mod maps {
                 .contains(&id)
                 .then_some(BiomeId(id as u16))
         }
-        fn clone_box(&self) -> Box<dyn GlobalIdMap<BiomeId>> {
+        fn clone_box(&self) -> Box<dyn GlobalIdMap<BiomeId> + Send + Sync> {
             Box::new(*self)
         }
     }
@@ -1015,7 +1015,7 @@ mod tests {
         fn by_id(&self, id: i32) -> Option<u8> {
             Some(id as u8)
         }
-        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8>> {
+        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8> + Send + Sync> {
             Box::new(*self)
         }
     }

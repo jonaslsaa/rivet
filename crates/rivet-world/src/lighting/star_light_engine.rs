@@ -24,8 +24,8 @@ use crate::chunk::proto_chunk::ProtoChunk;
 /// trait doc): `Some(true)` empty, `Some(false)` has blocks.
 pub fn get_empty_sections_for_chunk<T, B, S>(chunk: &ProtoChunk<T, B, S>) -> Vec<Option<bool>>
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     chunk
@@ -62,7 +62,7 @@ mod tests {
         fn by_id(&self, id: i32) -> Option<u8> {
             Some(id as u8)
         }
-        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8>> {
+        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8> + Send + Sync> {
             Box::new(*self)
         }
     }

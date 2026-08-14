@@ -57,7 +57,7 @@ impl GlobalIdMap<BlockState> for BlockStateGlobalMap {
             .then_some(BlockState::new(StateId(id as u16)))
     }
 
-    fn clone_box(&self) -> Box<dyn GlobalIdMap<BlockState>> {
+    fn clone_box(&self) -> Box<dyn GlobalIdMap<BlockState> + Send + Sync> {
         Box::new(*self)
     }
 }
@@ -85,7 +85,7 @@ impl GlobalIdMap<BiomeId> for BiomeGlobalMap {
             .then_some(BiomeId(id as u16))
     }
 
-    fn clone_box(&self) -> Box<dyn GlobalIdMap<BiomeId>> {
+    fn clone_box(&self) -> Box<dyn GlobalIdMap<BiomeId> + Send + Sync> {
         Box::new(*self)
     }
 }

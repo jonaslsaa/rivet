@@ -84,8 +84,8 @@ fn filled_empty_light(count: usize) -> Vec<SwmrNibbleArray> {
 /// `net.minecraft.world.level.chunk.ChunkAccess` — the generic base value.
 pub struct ChunkAccess<T, B, S>
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     /// `chunkPos` (plus Paper's cached `coordinateKey`/`locX`/`locZ`).
@@ -141,8 +141,8 @@ where
 
 impl<T, B, S> ChunkAccess<T, B, S>
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     /// `ChunkAccess(ChunkPos, UpgradeData, LevelHeightAccessor,
@@ -859,8 +859,8 @@ where
         resolve: &'static (dyn Fn(&T2) -> StateFlags + Sync),
     ) -> Result<ChunkAccess<T2, B2, S>, String>
     where
-        T2: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-        B2: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        T2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+        B2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     {
         let ChunkAccess {
             pos,
@@ -917,8 +917,8 @@ where
 
 impl<T, B, S> LightChunk<T> for ChunkAccess<T, B, S>
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     /// `findBlockLightSources` — delegates to the inherent `find_blocks` walk.
@@ -944,8 +944,8 @@ fn flags_at<T, B>(
     z: i32,
 ) -> StateFlags
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
 {
     if height_accessor.is_outside_build_height(y) {
         // `Blocks.VOID_AIR` — `isAir`, not opaque.
@@ -1018,7 +1018,7 @@ mod tests {
         fn by_id(&self, id: i32) -> Option<u8> {
             Some(id as u8)
         }
-        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8>> {
+        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8> + Send + Sync> {
             Box::new(*self)
         }
     }

@@ -58,8 +58,8 @@ use rivet_registry::holder::Holder;
 /// `net.minecraft.world.level.chunk.ProtoChunk` — the worldgen chunk value.
 pub struct ProtoChunk<T, B, S>
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     /// The `ChunkAccess` base.
@@ -79,8 +79,8 @@ where
 
 impl<T, B, S> ProtoChunk<T, B, S>
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     /// `ProtoChunk(ChunkPos, UpgradeData, LevelHeightAccessor,
@@ -439,7 +439,7 @@ where
 
 impl<B, S> ProtoChunk<BlockState, B, S>
 where
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     /// `ProtoChunk.setBlockState(BlockPos, BlockState, flags)` — the worldgen
@@ -497,7 +497,7 @@ where
 
 impl<B, S> ChunkSurface for ProtoChunk<BlockState, B, S>
 where
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     fn get_height(&self, x: i32, z: i32) -> i32 {
@@ -570,7 +570,7 @@ mod tests {
         fn by_id(&self, id: i32) -> Option<u8> {
             Some(id as u8)
         }
-        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8>> {
+        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8> + Send + Sync> {
             Box::new(*self)
         }
     }

@@ -461,7 +461,7 @@ impl NoiseBasedChunkGenerator {
         random_state: &RandomState,
         center_chunk: &mut ProtoChunk<BlockState, B, S>,
     ) where
-        B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         S: Eq + std::hash::Hash,
     {
         let noise_settings = settings_value(&self.settings)
@@ -515,7 +515,7 @@ impl NoiseBasedChunkGenerator {
         blender: Blender,
     ) -> NoiseChunk
     where
-        B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         S: Eq + std::hash::Hash,
     {
         let pos = center_chunk.get_pos();
@@ -558,7 +558,7 @@ impl NoiseBasedChunkGenerator {
         cell_min_y: i32,
         cell_count_y: i32,
     ) where
-        B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         S: Eq + std::hash::Hash,
     {
         let noise_chunk = self.create_noise_chunk(center_chunk, random_state, blender);
@@ -679,7 +679,7 @@ impl NoiseBasedChunkGenerator {
         chunk: &mut ProtoChunk<BlockState, B, S>,
         possible_biomes: Option<&[Holder<BiomeId>]>,
     ) where
-        B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         S: Eq + std::hash::Hash,
     {
         let noise_chunk = Arc::new(self.create_noise_chunk(chunk, random_state, Blender::empty()));

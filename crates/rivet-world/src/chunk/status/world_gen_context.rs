@@ -224,8 +224,8 @@ fn ensure_canonical_rung(task: ChunkStatusTask, target: ChunkStatus) -> Result<(
 
 impl<T, B, S> WorldGenContext<T, B, S>
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     /// Wraps the three worldgen seam closures (owned, mirroring the record).

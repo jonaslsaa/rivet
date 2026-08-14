@@ -37,7 +37,7 @@ pub struct CarvingMask {
     /// 64-bit words.
     mask: Vec<u64>,
     /// `additionalMask` — `None` is Java's default `(x, y, z) -> false`.
-    additional_mask: Option<Box<dyn Mask>>,
+    additional_mask: Option<Box<dyn Mask + Send + Sync>>,
 }
 
 impl CarvingMask {
@@ -72,7 +72,7 @@ impl CarvingMask {
     }
 
     /// `setAdditionalMask(Mask)`.
-    pub fn set_additional_mask(&mut self, additional_mask: Box<dyn Mask>) {
+    pub fn set_additional_mask(&mut self, additional_mask: Box<dyn Mask + Send + Sync>) {
         self.additional_mask = Some(additional_mask);
     }
 
