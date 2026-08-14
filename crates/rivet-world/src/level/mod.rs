@@ -24,6 +24,10 @@ pub mod height_accessor;
 // `world.level.LevelSettings` — the level.dat settings record (+ nested
 // `DifficultySettings`) and the `Dynamic` parse (#486).
 pub mod level_settings;
+// `world.level.saveddata` — the per-world persisted-data value layer: the
+// `SavedData` base, `SavedDataType`, and the `WanderingTraderData`/
+// `WeatherData` payloads (`mc.world.level.saveddata` unit).
+pub mod saveddata;
 // The Java package `world.level` + class `Level` mirrors to `level::level`;
 // clippy's module_inception lint fires on the faithful PORTING.md name (same
 // as `rivet-brigadier::suggestion::suggestion`).
@@ -48,6 +52,7 @@ pub use level_accessor::LevelAccessor;
 pub use level_reader::LevelReader;
 pub use level_settings::{DifficultySettings, LevelSettings};
 pub use rivet_registry::core::ChunkPos;
+pub use saveddata::{SavedData, SavedDataType, WanderingTraderData, WeatherData};
 pub use storage::{
     DerivedLevelData, LevelData, RespawnData, ServerLevelData, WorldData, WritableLevelData,
     default_respawn_data, format_location, respawn_data_codec, respawn_data_map_codec,
