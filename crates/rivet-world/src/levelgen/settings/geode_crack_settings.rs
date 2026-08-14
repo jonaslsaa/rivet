@@ -19,6 +19,10 @@ use rivet_serialization::record_builder::{self, RecordCodecBuilder};
 use std::sync::Arc;
 
 /// `net.minecraft.world.level.levelgen.GeodeCrackSettings`.
+///
+/// Java is a plain class with identity equals; the port derives value
+/// `PartialEq` (all fields are primitives; no consumer observes equality —
+/// the geode-config unit that owns the record semantics is pending).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GeodeCrackSettings {
     /// `generateCrackChance`.

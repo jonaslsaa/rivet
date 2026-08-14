@@ -21,11 +21,14 @@
 //! ### The `ChunkStatus` by-name codec
 //!
 //! Java's `BuiltInRegistries.CHUNK_STATUS.byNameCodec()` resolves the registry
-//! name (the full `"minecraft:empty"`..`"minecraft:full"` ladder). The ported
-//! `ChunkStatus` enum has `serialization_name()` and is a `Copy` value, so the
-//! codec is built with `string_representable::from_values` over the ladder
-//! (`StringRepresentable`/`Display` impls live here, local to the settings
-//! unit, to avoid pre-empting the `mc.world.level.chunk.status` unit).
+//! name through `Identifier.CODEC.comapFlatMap(name -> registry.get(name))`:
+//! the `Identifier` parse defaults a bare path to the `minecraft` namespace, so
+//! both the short (`"empty"`..`"full"`) and full (`"minecraft:empty"`..
+//! `"minecraft:full"`) forms decode. The ported `ChunkStatus` enum has
+//! `serialization_name()` and is a `Copy` value, so the codec composes
+//! `identifier_codec` with a full-name lookup over the ladder — no local
+//! `StringRepresentable`/`Display` impls (the `mc.world.level.chunk.status`
+//! unit stays un-pre-empted).
 //!
 //! ### The chunk-write seam
 //!
@@ -52,12 +55,11 @@ use rivet_registry::biome_id::BiomeId;
 use rivet_registry::block_state::BlockState;
 use rivet_registry::core::BlockPos;
 use rivet_registry::holder::Holder;
+use rivet_registry::identifier::{Identifier, identifier_codec};
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::data_result::DataResult;
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
-use rivet_util::string_representable::{self, StringRepresentable};
-use std::fmt;
 use std::sync::{Arc, LazyLock};
 
 use crate::block::blocks::Blocks;
@@ -141,25 +143,33 @@ fn bitset_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<BitSet, Ops>> {
     )
 }
 
-impl StringRepresentable for ChunkStatus {
-    /// `ChunkStatus.getSerializedName()` — the full registry name
-    /// (`"minecraft:empty"` .. `"minecraft:full"`).
-    fn get_serialized_name(&self) -> &str {
-        self.serialization_name()
-    }
-}
-
-impl fmt::Display for ChunkStatus {
-    /// `String.valueOf` for the codec's unknown-id message.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.serialization_name())
-    }
-}
-
 /// `BelowZeroRetrogen.NON_EMPTY_CHUNK_STATUS` — the by-name `ChunkStatus` codec
 /// that rejects `EMPTY` (`"target_status cannot be empty"`).
+///
+/// Composed like Java's `BuiltInRegistries.CHUNK_STATUS.byNameCodec()` (an
+/// `Identifier.CODEC.comapFlatMap(name -> registry.get(name), ...)`), so the
+/// `Identifier` parse defaults a bare path to the `minecraft` namespace: the
+/// short `"empty"`/`"features"` forms decode exactly like the full
+/// `"minecraft:empty"`/`"minecraft:features"` forms.
 fn non_empty_chunk_status_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<ChunkStatus, Ops>> {
-    let by_name = string_representable::from_values::<ChunkStatus, Ops>(&ChunkStatus::ALL);
+    let by_name = codec::comap_flat_map(
+        identifier_codec::<Ops>(),
+        Arc::new(|identifier: &Identifier| {
+            let name = identifier.to_string();
+            match ChunkStatus::ALL
+                .iter()
+                .find(|status| status.serialization_name() == name)
+            {
+                Some(status) => DataResult::success(*status),
+                None => DataResult::error(format!(
+                    "Unknown registry key in minecraft:chunk_status: {name}"
+                )),
+            }
+        }),
+        Arc::new(|status: &ChunkStatus| Identifier::parse(status.serialization_name())),
+    );
+    // Java: `.comapFlatMap(status -> status == EMPTY ? error : success,
+    // Function.identity())`.
     codec::comap_flat_map(
         by_name,
         Arc::new(|status: &ChunkStatus| {
@@ -214,7 +224,8 @@ impl BelowZeroRetrogen {
     /// The height window is `chunk.getHeightAccessorForGeneration()`; the
     /// `UPGRADE_HEIGHT_ACCESSOR` branch of that accessor defers with
     /// `ChunkAccess.isUpgrading()` (RivetTodo #183), so the chunk's own
-    /// accessor is used here.
+    /// accessor is used here. The two worldgen heightmaps are created once up
+    /// front (the `fill_from_noise` pattern) before the write loop.
     pub fn apply_bedrock_mask<B, S>(&self, chunk: &mut ProtoChunk<BlockState, B, S>)
     where
         B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
@@ -223,6 +234,9 @@ impl BelowZeroRetrogen {
         let height_accessor = chunk.height_accessor();
         let min_y = height_accessor.get_min_y();
         let max_y = height_accessor.get_max_y();
+
+        chunk.get_or_create_heightmap_unprimed(Types::OceanFloorWg);
+        chunk.get_or_create_heightmap_unprimed(Types::WorldSurfaceWg);
 
         for x in 0..16 {
             for z in 0..16 {
@@ -272,6 +286,10 @@ where
     B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
+    // The two worldgen heightmaps are created once up front (the
+    // `fill_from_noise` pattern) before the write loop.
+    chunk.get_or_create_heightmap_unprimed(Types::OceanFloorWg);
+    chunk.get_or_create_heightmap_unprimed(Types::WorldSurfaceWg);
     for pos in BlockPos::between_closed(0, 0, 0, 15, 4, 15) {
         let state = chunk.get_block_state(pos.get_x(), pos.get_y(), pos.get_z());
         if state.block() == Blocks::BEDROCK.id() {
@@ -284,13 +302,15 @@ where
 /// primes the persisted-status heightmaps before the section write; the
 /// worldgen write (`write_worldgen_block`) does the same for the two
 /// `Usage.WORLDGEN` heightmaps (the `EMPTY`-status set). See the module doc.
+///
+/// The heightmaps must exist before the first write: every caller (the two
+/// `replaceOldBedrock`/`applyBedrockMask` paths) creates them once up front,
+/// mirroring `flat_level_source.fill_from_noise`.
 fn write_block<B, S>(chunk: &mut ProtoChunk<BlockState, B, S>, pos: &BlockPos, state: BlockState)
 where
     B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
-    chunk.get_or_create_heightmap_unprimed(Types::OceanFloorWg);
-    chunk.get_or_create_heightmap_unprimed(Types::WorldSurfaceWg);
     let section_index = chunk.get_section_index(pos.get_y());
     let predicates = block_state_predicates();
     chunk.write_worldgen_block(
@@ -425,6 +445,36 @@ mod tests {
     }
 
     #[test]
+    fn codec_accepts_short_default_namespace_status() {
+        let ops = JsonOps::INSTANCE;
+        let codec = below_zero_retrogen_codec::<JsonOps>();
+        // Java's `Identifier` parse defaults a bare path to the `minecraft`
+        // namespace (`byNameCodec`), so the short form decodes exactly like the
+        // full form.
+        let decoded = codec
+            .parse(&ops, &json!({"target_status": "features"}))
+            .result()
+            .expect("short 'features' must decode like 'minecraft:features'")
+            .clone();
+        assert_eq!(decoded.target_status(), ChunkStatus::Features);
+        // The default-namespace `"empty"` still resolves to `EMPTY` and is
+        // rejected by `NON_EMPTY_CHUNK_STATUS`.
+        assert!(
+            codec
+                .parse(&ops, &json!({"target_status": "empty"}))
+                .result()
+                .is_none()
+        );
+        // A foreign namespace is not a registry status (unknown-key error).
+        assert!(
+            codec
+                .parse(&ops, &json!({"target_status": "foreign:features"}))
+                .result()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn has_bedrock_hole_indexes_like_java() {
         let mask = BitSet::value_of(&[1i64 << ((3 * 16 + 5) as u64)]);
         let retrogen = BelowZeroRetrogen::new(ChunkStatus::Full, Some(mask));
@@ -496,6 +546,10 @@ mod tests {
         // block write (section write + worldgen heightmap updates).
         let bedrock = Blocks::BEDROCK.default_block_state();
         let mut proto = worldgen_proto();
+        // `write_block` requires the worldgen heightmaps (the caller primes
+        // them once, as `applyBedrockMask`/`replaceOldBedrock` do).
+        proto.get_or_create_heightmap_unprimed(Types::OceanFloorWg);
+        proto.get_or_create_heightmap_unprimed(Types::WorldSurfaceWg);
         for y in 0..=4 {
             for x in 0..16 {
                 for z in 0..16 {
@@ -531,6 +585,10 @@ mod tests {
         // clears the full column to air, leaving neighboring columns intact.
         let bedrock = Blocks::BEDROCK.default_block_state();
         let mut proto = worldgen_proto();
+        // `write_block` requires the worldgen heightmaps (the caller primes
+        // them once, as `applyBedrockMask`/`replaceOldBedrock` do).
+        proto.get_or_create_heightmap_unprimed(Types::OceanFloorWg);
+        proto.get_or_create_heightmap_unprimed(Types::WorldSurfaceWg);
         for y in 0..=4 {
             for x in 0..16 {
                 for z in 0..16 {
