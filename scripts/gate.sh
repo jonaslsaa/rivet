@@ -361,7 +361,7 @@ oracle_prereq_check() {
 # gate like any other oracle stage; the tamper never touches the committed
 # fixtures.
 run_oracle_verify() {
-  echo "==> oracle verify (all committed fixture kinds: M0 slice + worldgen samples + M2 regions + text corpus + spline)"
+  echo "==> oracle verify (all committed fixture kinds: M0 slice + worldgen samples + M2 regions + text corpus + spline + composed-noise + surface-column)"
   cargo run -q -p rivet-oracle
   if [ "$VERIFY_RUNNABLE" = 1 ]; then
     echo "==> oracle verify (M0 sanity gate: green against vanilla itself)"
