@@ -15,7 +15,8 @@
 //! trait — the mutator/reader surface the facade calls on
 //! `starlight$getLightEngine()` — and `rivet-server` owns the concrete impl
 //! (the `ca.spottedleaf.moonrise.patches.starlight.light` manifest unit;
-//! currently a `StubStarLightProvider`). [`LevelLightEngine`](crate::lighting::level_light_engine)
+//! `star_light_provider_impl::SkyLightProvider`, a real synchronous layer over
+//! the `SkyStarLightEngine` compute core). [`LevelLightEngine`](crate::lighting::level_light_engine)
 //! holds an `Option<Box<dyn StarLightProvider + Send>>`; without the trait, a
 //! concrete `StarLightInterface` (compute, rivet-server) inside
 //! `LevelLightEngine` (facade, rivet-world) would create a
@@ -30,12 +31,12 @@
 //! exclusive: the facade owns the provider and hands out `&mut`/`&` — never
 //! shared, never `Sync` (the OWNERSHIP.md single-owner tick-thread model).
 //!
-//! RivetTodo(#184): this is the smallest compile-green seam slice. The
-//! concrete `StarLightInterface` and its propagation engines are not ported
-//! (the `starlight.light` unit; `rivet-server` ships a no-op stub). The three
-//! ops Java routes through a `ChunkAccess`/callbacks take the chunk *position*
-//! here — the impl resolves the chunk through its own light access (as
-//! `StarLightInterface` holds a `LightChunkGetter`), and the
+//! RivetTodo(#184): the light queue and the block engine, live
+//! `blockChange`/`sectionChange`/`relightChunks`/`checkChunkEdges`, the client
+//! notify path, and the final generated-serving pipeline wiring are not ported.
+//! The ops Java routes through a `ChunkAccess`/callbacks take the chunk
+//! *position* here — the impl resolves the chunk through its own narrow light
+//! access (as `StarLightInterface` holds a `LightChunkGetter`), and the
 //! `relightChunks` completion callbacks return with the light-queue port.
 
 use std::collections::HashSet;

@@ -3,13 +3,16 @@
 //!
 //! Ported so far: the [`StarLightProvider`] seam (the concrete impl that plugs
 //! into the `rivet-world` facade) and the Starlight flood-fill compute core as
-//! `star_light_engine::SkyStarLightEngine` (exercised through the light-chunk
-//! path; the provider is not yet wired to call it). What defers with #184 is
-//! the real `StarLightInterface`, the block engine, the generated-serving
-//! wiring into the provider, and the `blockChange`/`sectionChange`/
-//! `relightChunks`/`checkChunkEdges`/client-notify paths.
+//! `star_light_engine::SkyStarLightEngine`. The provider is now
+//! `star_light_provider_impl::SkyLightProvider` — a real synchronous layer that
+//! drives the engine on an explicitly supplied in-progress chunk and publishes
+//! the computed sky nibbles + sky-emptiness map back onto it. What defers with
+//! #184 is the real `StarLightInterface` queue wiring, the block engine, live
+//! `blockChange`/`sectionChange`/`relightChunks`/`checkChunkEdges`, the client
+//! notify path, and the final generated-serving pipeline wiring into a concrete
+//! chunk storage.
 
 pub mod star_light_engine;
 pub mod star_light_provider_impl;
 
-pub use star_light_provider_impl::StubStarLightProvider;
+pub use star_light_provider_impl::SkyLightProvider;
