@@ -5,14 +5,36 @@
 //! bonus-chest) and the `WorldDimensions` level-stem map, plus the `CODEC`
 //! (the two settings codecs grouped) and the `SavedDataType` `TYPE`.
 //!
-//! ### The `SavedDataType` seam
+//! ### The `SavedDataType` handle
 //!
 //! `WorldGenSettings extends SavedData` and exposes `TYPE` — a
-//! `SavedDataType<WorldGenSettings>` over `SavedData`/`DataFixTypes`. The
-//! `mc.world.level.saveddata` unit is pending (RivetTodo #421), so `TYPE` is a
-//! typed seam: [`world_gen_settings_type`] fails explicitly rather than
-//! fabricate the saved-data binding. The `SavedDataTypeShell` marker types the
-//! seam until the real type lands.
+//! `SavedDataType<WorldGenSettings>` over the `SavedData`/`SavedDataType`
+//! base and the `DataFixTypes` value-identity enum from the
+//! `mc.world.level.saveddata` unit (deferral #421, closed by that unit). The
+//! `TYPE` handle is a `LazyLock` static mirroring Java's `static final TYPE`.
+//! Its constructor supplier builds the default
+//! `WorldOptions` plus an empty `WorldDimensions` — exactly what Java's `TYPE`
+//! passes — so invoking the constructor panics with "Overworld settings
+//! missing", matching Java's `WorldDimensions` compact constructor
+//! `IllegalStateException` for the same supplier.
+//!
+//! ### The inherited `SavedData` base
+//!
+//! Java's `WorldGenSettings` inherits `SavedData`'s `boolean dirty` +
+//! `setDirty()`/`setDirty(boolean)`/`isDirty()`. The port does **not** embed
+//! the base field: it is structurally and observably dead on this value.
+//! `WorldGenSettings` is immutable (`private final` `options`/`dimensions`, no
+//! setters), its `hashCode` is overridden as `Objects.hash(options, dimensions)`
+//! (dirty excluded), it does not override `equals` (reference identity), and
+//! its storage goes straight through `WorldGenSettings.CODEC` —
+//! `LevelStorageSource.readExistingSavedData` (`savedDataType.codec().parse(...)`)
+//! and `writeSavedData` (`codec.encodeStart(...)`) never read the flag, and no
+//! consumer anywhere in Paper calls `isDirty`/`setDirty` on a `WorldGenSettings`.
+//! Embedding the base would add an always-false, never-read `bool`. (Compare the
+//! mutable saved-data payloads `WeatherData`/`WanderingTraderData`, which embed
+//! the base because their dirty-marking setters and the ServerLevel storage
+//! runtime make it observable.) Java's `hashCode`/`toString` are likewise not
+//! ported for the same reason — no consumer observes them.
 //!
 //! ### The codec seam
 //!
@@ -21,26 +43,17 @@
 //! `world_dimensions`/`level_stem`), so the settings round-trip is unavailable
 //! until the `mc.world.level.dimension`/`mc.world.level.chunk.generator` units
 //! land; the record structure is faithful and tested.
-//!
-//! Java's `hashCode`/`toString` are not ported: `Objects.hash(options,
-//! dimensions)` combines Java identity/record hashes that the port's value
-//! model does not reproduce, and no consumer observes them.
 
+use crate::level::saveddata::saved_data_type::SavedDataType;
+use crate::level::saveddata::stub_data_fix_types::DataFixTypes;
 use crate::levelgen::settings::world_dimensions::{WorldDimensions, world_dimensions_map_codec};
 use crate::levelgen::settings::world_options::{WorldOptions, world_options_map_codec};
+use rivet_registry::Identifier;
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
-use std::sync::Arc;
-
-/// `WorldGenSettings.TYPE`'s deferred type — the `SavedDataType<WorldGenSettings>`
-/// stand-in.
-///
-/// The `mc.world.level.saveddata` unit owns the real `SavedDataType`/`SavedData`
-/// base and `DataFixTypes` (RivetTodo #421); this marker only types the `TYPE`
-/// seam until that unit lands.
-#[derive(Debug, Clone, Copy)]
-pub struct SavedDataTypeShell;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock};
 
 /// `net.minecraft.world.level.levelgen.WorldGenSettings`.
 #[derive(Debug, Clone)]
@@ -110,20 +123,29 @@ pub fn world_gen_settings_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Wo
     }))
 }
 
-/// `WorldGenSettings.TYPE` — the `SavedDataType<WorldGenSettings>`.
-///
-/// Java: `new SavedDataType<>(Identifier.withDefaultNamespace(
-/// "world_gen_settings"), () -> new WorldGenSettings(
-/// WorldOptions.defaultWithRandomSeed(), new WorldDimensions(new HashMap<>())),
-/// CODEC, DataFixTypes.SAVED_DATA_WORLD_GEN_SETTINGS)`. The `SavedData`/
-/// `SavedDataType` base and `DataFixTypes` defer with the
-/// `mc.world.level.saveddata` unit (RivetTodo #421); the seam fails explicitly
-/// rather than fabricate the saved-data binding.
-pub fn world_gen_settings_type() -> SavedDataTypeShell {
-    panic!(
-        "WorldGenSettings.TYPE is not implemented (RivetTodo #421): needs SavedDataType/SavedData/DataFixTypes from mc.world.level.saveddata"
+/// `WorldGenSettings.TYPE` — `new SavedDataType<>(
+/// Identifier.withDefaultNamespace("world_gen_settings"), () -> new
+/// WorldGenSettings(WorldOptions.defaultWithRandomSeed(), new
+/// WorldDimensions(new HashMap<>())), CODEC,
+/// DataFixTypes.SAVED_DATA_WORLD_GEN_SETTINGS)`. Java's `static final`
+/// singleton is a `LazyLock` static in the port; the codec slot is the
+/// NbtOps-pinned codec the disk runtime uses. Invoking the constructor panics
+/// on the empty dimensions map — Java's `WorldDimensions` compact constructor
+/// throws `IllegalStateException` for the same supplier, so the panic is
+/// faithful.
+pub static TYPE: LazyLock<SavedDataType<WorldGenSettings>> = LazyLock::new(|| {
+    SavedDataType::new(
+        Identifier::with_default_namespace("world_gen_settings"),
+        Arc::new(|| {
+            WorldGenSettings::new(
+                WorldOptions::default_with_random_seed(),
+                WorldDimensions::new(HashMap::new()),
+            )
+        }),
+        world_gen_settings_codec::<rivet_nbt::nbt_ops::NbtOps>(),
+        DataFixTypes::SavedDataWorldGenSettings,
     )
-}
+});
 
 #[cfg(test)]
 mod tests {
@@ -179,5 +201,21 @@ mod tests {
             message.contains("LevelStem.CODEC") && message.contains("RivetTodo #388"),
             "the seam must name the LevelStem deferral, got: {message}"
         );
+    }
+
+    #[test]
+    fn type_has_expected_identity() {
+        let t: &SavedDataType<WorldGenSettings> = &TYPE;
+        assert_eq!(t.id().to_string(), "minecraft:world_gen_settings");
+        assert_eq!(t.data_fix_type(), DataFixTypes::SavedDataWorldGenSettings);
+        assert_eq!(t.to_string(), "SavedDataType[minecraft:world_gen_settings]");
+    }
+
+    #[test]
+    #[should_panic(expected = "Overworld settings missing")]
+    fn type_constructor_panics_on_empty_dimensions() {
+        // Java's TYPE supplier passes `new WorldDimensions(new HashMap<>())`;
+        // the compact constructor throws `IllegalStateException` — faithful.
+        (TYPE.constructor())();
     }
 }
