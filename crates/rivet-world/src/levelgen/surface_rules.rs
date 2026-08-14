@@ -3034,10 +3034,10 @@ impl SurfaceSystem {
 /// `SurfaceSystem` Arc comes from the `RandomState`.
 ///
 /// This is the surface-unit half of the carver composition: the production
-/// carver loop (`NoiseBasedChunkGenerator::apply_carvers_stub`, RivetTodo
-/// #185) is not wired, so the binding is exercised by the tests and is ready
-/// for that loop to call once the `#399`/`#185` seams land.
-#[allow(dead_code)] // #185 — the carver-loop binding, exercised by the seam tests.
+/// carver loop (`NoiseBasedChunkGenerator::apply_carvers`) calls it to bind
+/// the `CarvingContext`'s `topMaterial` seam over the shared `SurfaceSystem`
+/// (RivetTodo #185 defers only the `WorldGenRegion`/`StructureManager`
+/// neighbor surface and the per-biome settings split, not this binding).
 pub(crate) fn bind_carver_top_material<'a>(
     carving_context: &mut CarvingContext<'a>,
     rule_source: &ArcRuleSource,
