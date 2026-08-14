@@ -266,8 +266,64 @@ pub fn load(dir: &Path) -> Result<SurfaceColumn, Error> {
 /// drift, not a golden). This is the SURFACE checkpoint gate.
 pub fn verify_surface_column(dir: &Path) -> Result<(), Error> {
     let fixture = load(dir)?;
-    // 1. Provenance + manifest hashes. Pinned to seed 42, Paper 0a99345, the
-    //    normal overworld generator.
+    // 1. The manifest hash gate: the golden bytes must match the committed
+    //    SHA-256 — a flipped byte is drift, not the probe's output. The manifest
+    //    must also carry the surface-column kind + pinned Paper 0a99345,
+    //    agreeing with the golden's own paper string and seed.
+    let manifest = crate::verify_fixtures(dir)?;
+    if manifest.kind.as_deref() != Some(KIND) {
+        return Err(Error::Manifest(format!(
+            "expected kind {KIND}, got {:?}",
+            manifest.kind
+        )));
+    }
+    // The manifest's SHA-256 gate is only load-bearing if it actually records
+    // the golden — an empty `captured` list would verify nothing.
+    if !manifest.captured.iter().any(|c| c.path == FIXTURE_BASENAME) {
+        return Err(Error::Manifest(format!(
+            "surface-column manifest records no captured {FIXTURE_BASENAME} — the \
+             SHA-256 gate cannot protect the golden"
+        )));
+    }
+    if crate::parse_paper_pin(manifest.paper.as_deref()).as_deref() != Some(PINNED_COMMIT) {
+        return Err(Error::Manifest(format!(
+            "surface-column fixture not pinned to Paper 0a99345: {:?}",
+            manifest.paper
+        )));
+    }
+    if fixture.paper != manifest.paper.as_deref().unwrap_or("") {
+        return Err(Error::Manifest(format!(
+            "fixture paper {} != manifest paper {:?}",
+            fixture.paper, manifest.paper
+        )));
+    }
+    // The manifest's informational seed string must match the pinned seed too.
+    // The golden's own `seed` field is the structural gate (checked in
+    // `verify_semantics` below); the manifest string is the writer's
+    // self-description, so a manifest that claims a different seed is drift even
+    // if the golden's hash still matches.
+    if manifest.seed.as_deref() != Some("42") {
+        return Err(Error::Manifest(format!(
+            "surface-column manifest seed {:?} != pinned seed 42",
+            manifest.seed
+        )));
+    }
+    // 2. Then the fixture's own semantics (provenance, shape, non-vacuity).
+    verify_semantics(&fixture)
+}
+
+/// Semantically validate a surface-column fixture: the pinned provenance
+/// (seed, dimension, generator, level-type, noise-settings, height shape, sea
+/// level, Paper pin), the #175 matrix shape, and the non-vacuity guarantees —
+/// every column must have had real surface changes (a pre-surface/no-op
+/// capture is drift, not a golden), and the corpus must carry at least one
+/// surface-rule block (a fill-only capture is rejected). Shared by
+/// `verify_surface_column` (after the manifest hash gate) and `run_probe`'s
+/// capture step (before the manifest rewrite), so a semantically invalid fresh
+/// capture can never become the committed golden.
+fn verify_semantics(fixture: &SurfaceColumn) -> Result<(), Error> {
+    // 1. Provenance. Pinned to seed 42, Paper 0a99345, the normal overworld
+    //    generator.
     if fixture.seed != 42 {
         return Err(Error::Manifest(format!(
             "surface-column seed {} != pinned seed 42",
@@ -333,41 +389,12 @@ pub fn verify_surface_column(dir: &Path) -> Result<(), Error> {
             fixture.flat_bedrock_substitution
         )));
     }
-    let manifest = crate::verify_fixtures(dir)?;
-    if manifest.kind.as_deref() != Some(KIND) {
-        return Err(Error::Manifest(format!(
-            "expected kind {KIND}, got {:?}",
-            manifest.kind
-        )));
-    }
-    // The manifest's SHA-256 gate is only load-bearing if it actually records
-    // the golden — an empty `captured` list would verify nothing.
-    if !manifest.captured.iter().any(|c| c.path == FIXTURE_BASENAME) {
-        return Err(Error::Manifest(format!(
-            "surface-column manifest records no captured {FIXTURE_BASENAME} — the \
-             SHA-256 gate cannot protect the golden"
-        )));
-    }
-    if crate::parse_paper_pin(manifest.paper.as_deref()).as_deref() != Some(PINNED_COMMIT) {
+    // The capture's own Paper pin — a probe run against a different commit is
+    // drift even when the shape and non-vacuity still hold.
+    if crate::parse_paper_pin(Some(&fixture.paper)).as_deref() != Some(PINNED_COMMIT) {
         return Err(Error::Manifest(format!(
             "surface-column fixture not pinned to Paper 0a99345: {:?}",
-            manifest.paper
-        )));
-    }
-    if fixture.paper != manifest.paper.as_deref().unwrap_or("") {
-        return Err(Error::Manifest(format!(
-            "fixture paper {} != manifest paper {:?}",
-            fixture.paper, manifest.paper
-        )));
-    }
-    // The manifest's informational seed string must match the pinned seed too.
-    // The golden's own `seed` field is the structural gate (checked above); the
-    // manifest string is the writer's self-description, so a manifest that
-    // claims a different seed is drift even if the golden's hash still matches.
-    if manifest.seed.as_deref() != Some("42") {
-        return Err(Error::Manifest(format!(
-            "surface-column manifest seed {:?} != pinned seed 42",
-            manifest.seed
+            fixture.paper
         )));
     }
     // 2. Structural + non-vacuity assertions. The committed fixture is
@@ -671,6 +698,18 @@ pub fn run_probe(dir: &Path) -> Result<(), Error> {
             )),
         });
     }
+    capture(dir)
+}
+
+/// Commit a freshly generated surface-column golden: validate its semantics
+/// BEFORE the manifest rewrite hashes/commits it. `regenerate_manifest` derives
+/// the manifest hash from the golden bytes, so without this gate it would commit
+/// garbage — a probe run against the wrong seed/generator/Paper, a dropped
+/// `buildSurface` call (fill-only columns), or an all-air/no-op capture must
+/// never become the new committed golden.
+fn capture(dir: &Path) -> Result<(), Error> {
+    let fixture = load(dir)?;
+    verify_semantics(&fixture)?;
     regenerate_manifest(dir)?;
     Ok(())
 }
@@ -1210,6 +1249,67 @@ mod tests {
         assert!(
             msg.contains("any-surface-changed=false"),
             "unexpected error: {msg}"
+        );
+    }
+
+    /// The capture step (what `run_probe` ends with) must reject a semantically
+    /// bad fresh probe output BEFORE the manifest rewrite commits it. Without
+    /// the gate, `regenerate_manifest` would derive a manifest hash from the
+    /// garbage bytes and the bad capture would become the new committed golden.
+    #[test]
+    fn capture_rejects_semantically_bad_fresh_output() {
+        let dir = fixtures_dir().join("surface-column");
+        require_fixture(&dir);
+        let mut fixture = load(&dir).unwrap();
+        // A probe regression: wrong generator identity — a capture that is no
+        // longer the pinned normal-overworld generator is drift, not the golden.
+        fixture.generator = "flat".to_string();
+        let scratch = std::env::temp_dir().join(format!(
+            "rivet-oracle-sc-capture-gate-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&scratch);
+        fs::create_dir_all(&scratch).unwrap();
+        fs::write(
+            scratch.join(FIXTURE_BASENAME),
+            serde_json::to_string_pretty(&fixture).unwrap(),
+        )
+        .unwrap();
+        let result = capture(&scratch);
+        let _ = fs::remove_dir_all(&scratch);
+        let err = result.expect_err("capture must reject a semantically bad fresh output");
+        assert!(
+            err.to_string().contains("generator"),
+            "unexpected error: {err}"
+        );
+        // And a genuinely bad fixture (dropped buildSurface => fill-only columns)
+        // must also be rejected before the manifest is written.
+        let mut fixture = load(&dir).unwrap();
+        for col in fixture.columns.iter_mut() {
+            for s in col.samples.iter_mut() {
+                if SURFACE_RULE_BLOCKS.contains(&s.post.block.as_str()) {
+                    s.post.block = "minecraft:stone".to_string();
+                }
+                s.changed = s.pre != s.post;
+            }
+        }
+        let scratch = std::env::temp_dir().join(format!(
+            "rivet-oracle-sc-capture-fill-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&scratch);
+        fs::create_dir_all(&scratch).unwrap();
+        fs::write(
+            scratch.join(FIXTURE_BASENAME),
+            serde_json::to_string_pretty(&fixture).unwrap(),
+        )
+        .unwrap();
+        let result = capture(&scratch);
+        let _ = fs::remove_dir_all(&scratch);
+        let err = result.expect_err("capture must reject a fill-only fresh output");
+        assert!(
+            err.to_string().contains("no surface-rule block"),
+            "unexpected error: {err}"
         );
     }
 
