@@ -47,6 +47,9 @@ impl Blocks {
     pub const WATER: Block = Block::new(BlockId(35));
     /// `Blocks.LAVA`.
     pub const LAVA: Block = Block::new(BlockId(36));
+    /// `Blocks.BUBBLE_COLUMN` (feature: `LakeFeature`'s `BlockState.liquid()`
+    /// gate — the water/lava/bubble-column liquid property).
+    pub const BUBBLE_COLUMN: Block = Block::new(BlockId(796));
     /// `Blocks.SAND`.
     pub const SAND: Block = Block::new(BlockId(37));
     /// `Blocks.RED_SAND`.
@@ -180,6 +183,30 @@ impl Blocks {
     pub const BLUE_ICE: Block = Block::new(BlockId(789));
     /// `Blocks.BAMBOO` (feature: `BambooFeature`).
     pub const BAMBOO: Block = Block::new(BlockId(792));
+    /// `Blocks.SPAWNER` (feature: `DeltaFeature.CANNOT_REPLACE`).
+    pub const SPAWNER: Block = Block::new(BlockId(198));
+    /// `Blocks.CHEST` (feature: `DeltaFeature.CANNOT_REPLACE`).
+    pub const CHEST: Block = Block::new(BlockId(201));
+    /// `Blocks.NETHER_BRICKS` (feature: `DeltaFeature.CANNOT_REPLACE`).
+    pub const NETHER_BRICKS: Block = Block::new(BlockId(381));
+    /// `Blocks.NETHER_BRICK_FENCE` (feature: `DeltaFeature.CANNOT_REPLACE`).
+    pub const NETHER_BRICK_FENCE: Block = Block::new(BlockId(382));
+    /// `Blocks.NETHER_BRICK_STAIRS` (feature: `DeltaFeature.CANNOT_REPLACE`).
+    pub const NETHER_BRICK_STAIRS: Block = Block::new(BlockId(383));
+    /// `Blocks.NETHER_WART` (feature: `DeltaFeature.CANNOT_REPLACE`).
+    pub const NETHER_WART: Block = Block::new(BlockId(384));
+    /// `Blocks.SCULK` (feature: `SculkPatchFeature` — `start.getBlock()
+    /// instanceof SculkBehaviour`; only `SculkBlock` and `SculkVeinBlock`
+    /// implement the interface).
+    pub const SCULK: Block = Block::new(BlockId(1030));
+    /// `Blocks.SCULK_VEIN` (feature: `SculkPatchFeature` — the second
+    /// `SculkBehaviour` implementor).
+    pub const SCULK_VEIN: Block = Block::new(BlockId(1031));
+    /// `Blocks.SCULK_CATALYST` (feature: `SculkPatchFeature` catalyst write).
+    pub const SCULK_CATALYST: Block = Block::new(BlockId(1032));
+    /// `Blocks.SCULK_SHRIEKER` (feature: `SculkPatchFeature` extra-growth
+    /// shrieker write).
+    pub const SCULK_SHRIEKER: Block = Block::new(BlockId(1033));
 }
 
 #[cfg(test)]
@@ -206,6 +233,7 @@ mod tests {
             Blocks::BEDROCK,
             Blocks::WATER,
             Blocks::LAVA,
+            Blocks::BUBBLE_COLUMN,
             Blocks::SAND,
             Blocks::RED_SAND,
             Blocks::GRAVEL,
@@ -266,6 +294,16 @@ mod tests {
             Blocks::SEA_PICKLE,
             Blocks::BLUE_ICE,
             Blocks::BAMBOO,
+            Blocks::SPAWNER,
+            Blocks::CHEST,
+            Blocks::NETHER_BRICKS,
+            Blocks::NETHER_BRICK_FENCE,
+            Blocks::NETHER_BRICK_STAIRS,
+            Blocks::NETHER_WART,
+            Blocks::SCULK,
+            Blocks::SCULK_VEIN,
+            Blocks::SCULK_CATALYST,
+            Blocks::SCULK_SHRIEKER,
         ];
         for block in all {
             let by_name = BlockId::from_name(block.name())

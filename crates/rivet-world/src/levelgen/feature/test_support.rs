@@ -32,6 +32,7 @@ use rivet_registry::access::RegistryAccess;
 use rivet_registry::block_state::BlockState;
 use rivet_registry::builder::RegistryBuilder;
 use rivet_registry::core::{BlockPos, Direction};
+use rivet_registry::fluid_id::FluidId;
 use rivet_registry::generated::blocks::BlockId;
 use rivet_registry::root::AnyBox;
 use rivet_registry::{Identifier, ResourceKey};
@@ -142,6 +143,16 @@ pub struct TestLevel {
     /// `is_face_sturdy` — the fixed face-sturdiness verdict
     /// (`BlockPileFeature.mayPlaceOn`).
     pub face_sturdy: bool,
+    /// `mark_pos_for_post_processing` — the positions the geology/cave leaves
+    /// mark for post-processing (in call order).
+    pub post_processing: Vec<BlockPos>,
+    /// `schedule_tick` — the `(pos, fluid, delay)` tick requests the
+    /// geology/cave leaves schedule (in call order).
+    pub ticks: Vec<(BlockPos, FluidId, i32)>,
+    /// `schedule_block_tick` — the `(pos, block, delay)` block tick requests
+    /// `LakeFeature.place` schedules for the placed cave-air cells (in call
+    /// order).
+    pub block_ticks: Vec<(BlockPos, crate::block::Block, i32)>,
 }
 
 impl TestLevel {
@@ -158,6 +169,9 @@ impl TestLevel {
             sea_level: 63,
             survive: true,
             face_sturdy: true,
+            post_processing: Vec::new(),
+            ticks: Vec::new(),
+            block_ticks: Vec::new(),
         }
     }
 }
@@ -216,6 +230,18 @@ impl WorldGenLevel for TestLevel {
 
     fn is_face_sturdy(&self, _pos: &BlockPos, _state: &BlockState, _direction: &Direction) -> bool {
         self.face_sturdy
+    }
+
+    fn schedule_tick(&mut self, pos: &BlockPos, fluid: FluidId, delay: i32) {
+        self.ticks.push((*pos, fluid, delay));
+    }
+
+    fn schedule_block_tick(&mut self, pos: &BlockPos, block: crate::block::Block, delay: i32) {
+        self.block_ticks.push((*pos, block, delay));
+    }
+
+    fn mark_pos_for_post_processing(&mut self, pos: &BlockPos) {
+        self.post_processing.push(*pos);
     }
 }
 
