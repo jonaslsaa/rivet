@@ -82,8 +82,9 @@
 //! captured at `build_surface` start (the applied rules are `'static`/`Send +
 //! Sync` and cannot carry the `&mut` chunk; the snapshot is bit-identical to
 //! Java's live reads for the end-stone and overworld surface writes, with the
-//! one accepted divergence being a rule that writes `AIR` over the topmost
-//! `defaultBlock`). The `Biome`-value reads (`coldEnoughToSnow`,
+//! accepted divergences — an `AIR` write over the topmost `defaultBlock`, and
+//! the per-column eroded-badlands raise — documented on `seam_get_height`).
+//! The `Biome`-value reads (`coldEnoughToSnow`,
 //! `shouldMeltFrozenOceanIcebergSlightly`) are the biome-value seams
 //! (RivetTodo #185). `SurfaceRuleData.end` is ported (the end-stone `block`
 //! rule), and `SurfaceRuleData.nether`/`overworld`/`overworldLike` are ported
@@ -1104,21 +1105,22 @@ impl Condition for TemperatureHelperCondition {
 /// (x & 15, z & 15) - 1` over the primed heightmap (issue #185). The read
 /// happens against the snapshot `build_surface` captured at its start.
 ///
-/// Java ordering: `buildSurface` reads `startingHeight` and re-reads `height`
-/// from the live heightmap, and `erodedBadlandsExtension` writes
-/// `defaultBlock` into `AIR` at/below `startY` BEFORE the column loop — so a
-/// rule that writes over the topmost `defaultBlock` lowers the worldgen height
-/// (Java's `setBlock`) and a later `getHeight` sees it. The Rust port reads
-/// the start-of-`build_surface` snapshot (the applied rules are
+/// Java ordering: `buildSurface` walks the columns `x`-outer/`z`-inner; per
+/// column it reads `startingHeight`, runs `erodedBadlandsExtension` on an
+/// `ERODED_BADLANDS` column (writing `defaultBlock` into `AIR` at/below
+/// `startY`, which `setBlockState` folds into the live `WORLD_SURFACE_WG`
+/// heightmap), then re-reads `height` and drives the steep probes from it — so
+/// Java's `getHeight` sees the extension's raise on the *current* column. The
+/// Rust port reads the start-of-`build_surface` snapshot (the applied rules are
 /// `'static`/`Send + Sync` and cannot carry the `&mut` chunk), which is
 /// bit-identical for every surface write that keeps the topmost non-air block
 /// in place — the end-stone rule and the default-block-to-surface-state writes
 /// of the overworld rules. The accepted divergences, pinned by the snapshot:
 /// (1) a rule writing `AIR` over the topmost `defaultBlock` lowers Java's live
 /// height but not the snapshot; (2) an `eroded_badlands` column's extension
-/// runs before the steep probes in Java, so its raised `defaultBlock` would be
-/// visible to Java's live `SteepMaterialCondition` but not to the snapshot.
-/// Both are documented residuals of the `#185` heightmap seam (RivetTodo #185).
+/// raises its live height in Java (visible to that column's own west/east
+/// probes) but the snapshot predates it. Both are documented residuals of the
+/// `#185` heightmap seam (RivetTodo #185).
 fn seam_get_height(heights: &[i32; 256], x: i32, z: i32) -> i32 {
     heights[(x & 15) as usize + (z & 15) as usize * 16]
 }
@@ -1130,12 +1132,13 @@ fn seam_cold_enough_to_snow() -> bool {
     // (a positional handle into the worldgen biome registry, not a `Biome`
     // value), and no runtime `Registry<Biome>` value layer exists yet — the
     // `Biome` value codec/serialization (`SYNCHRONIZED_NBT`) is unported
-    // (biome-core). The value methods `Biome::cold_enough_to_snow` exist, but
-    // there is no registry to resolve a `BiomeId` holder through, so this stays
-    // permanently false (no snow coverage from the temperature rule). Do NOT
-    // panic: this is reachable in the production frozen-ocean/frozen-peaks
-    // paths today. It becomes the real call once the biome value registry
-    // lands (RivetTodo(#185)).
+    // (biome-core). The value methods `Biome::cold_enough_to_snow` exist (and
+    // are proven in biome.rs), but there is no registry to resolve a `BiomeId`
+    // holder through, so this stays permanently false (no snow coverage from
+    // the temperature rule). Do NOT panic: the frozen-ocean branch of the
+    // overworld rule tree reaches this in production (the `#177` build_surface
+    // wire defers, so it is not reachable today). It becomes the real call once
+    // the biome value registry lands (RivetTodo(#185)).
     false
 }
 
@@ -2599,8 +2602,9 @@ impl SurfaceSystem {
         // `SteepMaterialCondition` probes through this snapshot, never the
         // `&mut` chunk. Bit-identical to Java's live reads for the end-stone and
         // overworld surface writes (which keep the topmost non-air block in
-        // place); a rule writing `AIR` over the topmost `defaultBlock` is the
-        // one accepted divergence (see [`seam_get_height`]).
+        // place); the accepted divergences — an `AIR` write over the topmost
+        // `defaultBlock`, and the per-column eroded-badlands raise — are
+        // documented on [`seam_get_height`].
         let mut world_surface_heights = [0i32; 256];
         for x in 0..16i32 {
             for z in 0..16i32 {
@@ -4276,24 +4280,29 @@ mod tests {
         assert!(!condition_for(None).test());
     }
 
-    /// The `#185` eroded-badlands heightmap divergence, pinned honestly: in
-    /// Java, `buildSurface` runs `erodedBadlandsExtension` (which writes
-    /// `defaultBlock` into `AIR` at/below `startY`, raising the worldgen
-    /// height) BEFORE the column loop's steep probes, so a later live
-    /// `getHeight(WORLD_SURFACE_WG)` sees the raised height. The Rust port
-    /// reads the start-of-`build_surface` snapshot, which predates the
-    /// extension, so the steep condition on a neighboring column probes the
-    /// pre-extension height. This test documents that the snapshot is taken
-    /// BEFORE the eroded-badlands writes (the seam's accepted divergence).
+    /// The `#185` eroded-badlands heightmap divergence, pinned honestly: Java's
+    /// `buildSurface` walks the columns x-outer/z-inner and runs
+    /// `erodedBadlandsExtension` per column (writing `defaultBlock` into `AIR`
+    /// at/below `startY`, raising the live `WORLD_SURFACE_WG` height) before
+    /// that column's steep probes. The Rust port reads the start-of-
+    /// `build_surface` snapshot, which predates every column's extension. On an
+    /// `ERODED_BADLANDS` column at `x == 0`, Java's own-column raise becomes
+    /// visible to the steep check: the west probe clamps `x - 1` to 0 (Java's
+    /// `Math.max(x - 1, 0)`), reading the *current* column's post-extension
+    /// height, while the east probe reads the not-yet-processed `x + 1` column.
+    /// Java then fires `west >= east + 4`; the snapshot reads the pre-extension
+    /// height and does not. This test pins the snapshot-before-extension
+    /// ordering through that reachable path, plus the positive control that the
+    /// raised column does fire.
     #[test]
     fn steep_snapshot_predates_the_eroded_badlands_extension() {
-        // The snapshot captured at `build_surface` start has the column at
-        // (0, 2) at height 10; the eroded-badlands extension runs after the
-        // snapshot and would raise it to 14. Java's live read would see 14 and
-        // fire steep; the snapshot reads 10 and does not.
-        let mut heights = [10i32; 256];
-        // (0, 2) — the south probe of column (0, 1): flat 10 == 10.
-        heights[32] = 10;
+        // The snapshot captured at `build_surface` start: every column is at
+        // its pre-extension height 10 — including the current column (0, 1),
+        // an ERODED_BADLANDS column whose extension Java would run just before
+        // its probes. At x = 0 the west probe clamps to (0, 1) itself (index
+        // 0 + 1*16), the east probe reads (1, 1) (index 1 + 1*16, processed
+        // later at x = 1), so 10 >= 10 + 4 is false and steep does not fire.
+        let heights = [10i32; 256];
         let sc = Arc::new(SurfaceContext {
             system: Arc::new(stub_surface_system()),
             cells: SharedCells::new(),
@@ -4307,6 +4316,28 @@ mod tests {
             surface_context: sc,
         };
         assert!(!steep.test(), "snapshot predates the eroded-badlands raise");
+
+        // Positive control: the SAME column with the extension's raise applied
+        // (Java's per-column `erodedBadlandsExtension` lifts (0, 1) to 14; the
+        // x = 0 west clamp reads it, the unprocessed east neighbor stays 10,
+        // and 14 >= 10 + 4 fires). The snapshot timing is the only thing that
+        // suppressed the fire above — if the steep condition ever read a
+        // raised column, the first assertion would flip.
+        let mut raised = [10i32; 256];
+        raised[0 + 1 * 16] = 14;
+        let sc = Arc::new(SurfaceContext {
+            system: Arc::new(stub_surface_system()),
+            cells: SharedCells::new(),
+            biome_getter: Arc::new(|_: &BlockPos| Holder::direct(BiomeId::from_id(0))),
+            worldgen_context: Arc::new(worldgen_context(-64, 384, 384)),
+            world_surface_heights: Some(Arc::new(raised)),
+        });
+        sc.update_xz(0, 1);
+        let steep = SteepMaterialCondition {
+            cache: LazyCache::new(sc.cells.last_update_xz()),
+            surface_context: sc,
+        };
+        assert!(steep.test(), "the raised current column fires steep");
     }
 
     /// The `#185` biome-value seam is fail-loud, never a panic: the
