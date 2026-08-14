@@ -227,7 +227,12 @@ fn configured_feature_direct_codec<Ops: DynamicOps + 'static>()
 /// `PlacedFeature.DIRECT_CODEC` — a record over the required `"feature"` field
 /// (`ConfiguredFeature.CODEC`) and the required `"placement"` field
 /// (`PlacementModifier.CODEC.listOf()`).
-fn placed_feature_direct_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>()
+///
+/// `pub(crate)`: the `mc.world.level.biome.core` unit's
+/// `PlacedFeature.LIST_OF_LISTS_CODEC` (the biome generation settings'
+/// `"features"` field) is `homogeneousList(PLACED_FEATURE, DIRECT_CODEC,
+/// true).listOf()` and reuses this direct codec as its inline element codec.
+pub(crate) fn placed_feature_direct_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>()
 -> Arc<dyn Codec<PlacedFeature, Ops>> {
     record_builder::create(|instance| {
         instance

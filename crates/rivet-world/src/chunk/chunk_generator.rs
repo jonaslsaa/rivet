@@ -284,10 +284,13 @@ pub trait ChunkGenerator: Send + Sync + 'static {
     /// performs (`context.generator().getBiomeGenerationSettings(biome)
     /// .hasFeature(feature)`).
     ///
-    /// STUB(mc.world.level.biome.core) — `BiomeGenerationSettings` and its
-    /// `featureSet`/`hasFeature` memo are owned by the `#178` biome-core unit,
-    /// so the read fails explicitly rather than fabricating a membership
-    /// result (the same capability-unavailable seam as `WorldGenLevel::get_biome`).
+    /// STUB(mc.data.worldgen.biome) — the read is `generator.
+    /// getBiomeGenerationSettings(biome).hasFeature(feature)`: `hasFeature`
+    /// itself is implemented (`biome.core`, #178), but resolving the
+    /// `Holder<BiomeId>` to the `Biome` value's generation settings needs the
+    /// biome-value registry, so it fails explicitly rather than fabricating a
+    /// membership result (the same capability-unavailable seam as
+    /// `WorldGenLevel::get_biome`).
     fn get_biome_generation_settings_has_feature(
         &self,
         _biome: &Holder<BiomeId>,

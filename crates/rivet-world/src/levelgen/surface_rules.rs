@@ -1103,7 +1103,7 @@ fn seam_get_height(heights: &[i32; 256], x: i32, z: i32) -> i32 {
 /// The `RivetTodo(#185)` biome-value seam —
 /// `getBiome().value().coldEnoughToSnow(pos, seaLevel)`.
 fn seam_cold_enough_to_snow() -> bool {
-    // STUB(mc.world.level.biome.core): `BiomeManager` yields
+    // STUB(mc.data.worldgen.biome): `BiomeManager` yields
     // `Holder<BiomeId>`; the `Biome`-value registry is unported, so the
     // temperature condition is permanently false (no snow coverage from this
     // rule) until `RivetTodo(#185)` ports the value registry and this becomes
