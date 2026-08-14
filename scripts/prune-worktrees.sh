@@ -179,7 +179,7 @@ main() {
   MAIN=$(cd "$MAIN" && pwd)
   NOW=$(date +%s)
   mins=$((IDLE_HOURS * 60))
-  freed_kb=0; removed=0; pruned=0
+  freed_kb=0; removed=0; pruned=0; stranded=0
 
   # Merged-ness is judged against origin/main. A dry run must not touch the
   # network or move refs (its summary claims "nothing touched"), so fetch only
