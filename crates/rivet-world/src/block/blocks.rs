@@ -164,6 +164,22 @@ impl Blocks {
     pub const RAW_COPPER_BLOCK: Block = Block::new(BlockId(1174));
     /// `Blocks.HONEY_BLOCK` (noisegen: `debugPreliminarySurfaceLevel`).
     pub const HONEY_BLOCK: Block = Block::new(BlockId(913));
+    /// `Blocks.SEAGRASS` (feature: `SeagrassFeature`).
+    pub const SEAGRASS: Block = Block::new(BlockId(136));
+    /// `Blocks.TALL_SEAGRASS` (feature: `SeagrassFeature`).
+    pub const TALL_SEAGRASS: Block = Block::new(BlockId(137));
+    /// `Blocks.DIRT_PATH` (feature: `BlockPileFeature` `mayPlaceOn`).
+    pub const DIRT_PATH: Block = Block::new(BlockId(666));
+    /// `Blocks.KELP` (feature: `KelpFeature`).
+    pub const KELP: Block = Block::new(BlockId(742));
+    /// `Blocks.KELP_PLANT` (feature: `KelpFeature`).
+    pub const KELP_PLANT: Block = Block::new(BlockId(743));
+    /// `Blocks.SEA_PICKLE` (feature: `SeaPickleFeature`).
+    pub const SEA_PICKLE: Block = Block::new(BlockId(788));
+    /// `Blocks.BLUE_ICE` (feature: `BlueIceFeature`).
+    pub const BLUE_ICE: Block = Block::new(BlockId(789));
+    /// `Blocks.BAMBOO` (feature: `BambooFeature`).
+    pub const BAMBOO: Block = Block::new(BlockId(792));
 }
 
 #[cfg(test)]
@@ -242,6 +258,14 @@ mod tests {
             Blocks::RAW_IRON_BLOCK,
             Blocks::RAW_COPPER_BLOCK,
             Blocks::HONEY_BLOCK,
+            Blocks::SEAGRASS,
+            Blocks::TALL_SEAGRASS,
+            Blocks::DIRT_PATH,
+            Blocks::KELP,
+            Blocks::KELP_PLANT,
+            Blocks::SEA_PICKLE,
+            Blocks::BLUE_ICE,
+            Blocks::BAMBOO,
         ];
         for block in all {
             let by_name = BlockId::from_name(block.name())
