@@ -32,9 +32,11 @@
 //! — and the owning realization must change the signatures anyway (adding the
 //! world-touching parameters) when the status executor lands (RivetTodo #185).
 //! `createBiomes` in particular has a Java *default* body (not abstract), so a
-//! panic seam is the honest unavailable-capability boundary until
-//! `fillBiomesFromNoise` is ported. Each seam documents its exact Java
-//! signature; the owning realization provides the faithful parameter surface.
+//! panic seam is the honest unavailable-capability boundary until the
+//! world-touching parameters (the generic `ChunkAccess`, `StructureManager`)
+//! can be named in an object-safe trait method and the async wrapper lands.
+//! Each seam documents its exact Java signature; the owning realization
+//! provides the faithful parameter surface.
 //!
 //! ## The default surface
 //!
@@ -97,13 +99,16 @@ pub trait ChunkGenerator: Send + Sync + 'static {
     /// ChunkAccess)` — the biomes step of the chunk status ladder.
     ///
     /// Java declares a default body (`protoChunk.fillBiomesFromNoise(
-    /// this.biomeSource, randomState.sampler())`); `fillBiomesFromNoise` on the
-    /// chunk surface is not ported, so the trait cannot carry that body and the
-    /// step is a capability-unavailable seam. The world-touching parameters
-    /// (`StructureManager`, the `ChunkAccess`) and the `CompletableFuture` async
-    /// wrapper defer with the owning `.chunk.generator` pipeline (RivetTodo
-    /// #185); the owning `NoiseBasedChunkGenerator` realization provides the
-    /// faithful signature when the status executor lands.
+    /// this.biomeSource, randomState.sampler())`); the port's
+    /// `fillBiomesFromNoise` lives on the generic `ChunkAccess`/`ProtoChunk`
+    /// surface, which an object-safe trait method cannot name (the chunk types
+    /// are generic over their storage strategies), so the trait cannot carry
+    /// that body and the step is a capability-unavailable seam. The
+    /// world-touching parameters (`StructureManager`, the `ChunkAccess`) and
+    /// the `CompletableFuture` async wrapper defer with the owning
+    /// `.chunk.generator` pipeline (RivetTodo #185); the owning
+    /// `NoiseBasedChunkGenerator` realization provides the faithful signature
+    /// when the status executor lands.
     fn create_biomes(&self) {
         panic!("ChunkGenerator.createBiomes is not implemented (RivetTodo #185)")
     }

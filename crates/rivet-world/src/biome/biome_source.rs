@@ -75,6 +75,7 @@
 //! OWNERSHIP's pure-id model but is a real cardinality difference for
 //! duplicated entries.
 
+use crate::biome::biome_resolver::BiomeResolver;
 use crate::biome::biome_source_type::{BiomeSourceTypeId, BiomeSourceTypes};
 use crate::biome::climate::Sampler;
 use crate::biome::fixed_biome_source::FixedBiomeSource;
@@ -207,7 +208,12 @@ fn downcast_erased<C: BiomeSource + Clone + 'static>(source: &Arc<dyn BiomeSourc
 /// `Any` (supertrait) enables the dispatch codec's downcast of an erased value
 /// back to its concrete type on encode, via the explicit [`BiomeSource::as_any`]
 /// seam (the same pattern `BlockPredicate` uses).
-pub trait BiomeSource: Any + Debug + Send + Sync + 'static {
+///
+/// Java's `BiomeSource` implements the `BiomeResolver` interface, so every
+/// concrete source is uniformly its own quart resolver; the port mirrors that
+/// with the `BiomeResolver` supertrait (the resolver's `get_noise_biome` is
+/// inherited — Java's abstract, over `BiomeResolver`).
+pub trait BiomeSource: BiomeResolver + Any + Debug + Send + Sync + 'static {
     /// `BiomeSource.codec()` — the registered `MapCodec` identity this source
     /// dispatches on (the key `BiomeSource.CODEC` uses).
     fn type_id(&self) -> BiomeSourceTypeId;
@@ -270,16 +276,6 @@ pub trait BiomeSource: Any + Debug + Send + Sync + 'static {
 
         biome_set
     }
-
-    /// `BiomeSource.getNoiseBiome(int quartX, int quartY, int quartZ, Sampler)`
-    /// — the quart-position resolver (Java's abstract, over `BiomeResolver`).
-    fn get_noise_biome(
-        &self,
-        quart_x: i32,
-        quart_y: i32,
-        quart_z: i32,
-        sampler: &Sampler,
-    ) -> Holder<BiomeId>;
 
     /// `BiomeSource.addDebugInfo(List<String>, BlockPos, Sampler)` — the empty
     /// default; `MultiNoiseBiomeSource` overrides it.
