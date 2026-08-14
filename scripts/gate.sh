@@ -747,13 +747,13 @@ run_scenario_recenter() {
 # the rivet-server binary on demand.
 #
 # The row is milestone-gated exactly like the Paper-vs-Rivet hash-diff
-# (RIVET_HASH_DIR): the rivet-server `--seed` launch option now exists but
-# still serves the superflat M1 fixture, and the Paper seed-42 ground-truth
-# reference is not captured yet, so the runner exits UNVERIFIED (3) with the
-# exact pinned reason — it never falls back to a superflat boot or a copied
-# loaded world, so this row can never fabricate a PASS. While real
-# generated-world serving and the Paper seed-42 `generated-expected` ground
-# truth are absent the row is recorded as an explicit NOTICE (never a silent
+# (RIVET_HASH_DIR): the committed seed-42 `generated-expected` golden is
+# captured on main, but the rivet-server `--seed` launch option still serves
+# the superflat M1 fixture (login is_flat=true), not genuine FULL generated
+# chunks, so the runner exits UNVERIFIED (3) with the exact pinned reason — it
+# never falls back to a superflat boot or a copied loaded world, so this row
+# can never fabricate a PASS. While the server does not genuinely serve
+# generated chunks the row is recorded as an explicit NOTICE (never a silent
 # skip, never a green-looking pass) and stays mergeable, so it does not block
 # the serialized release lane ahead of the generator. Setting
 # RIVET_GENERATED_WORLD=1 opts into the strict check: the comparison then runs
@@ -766,11 +766,11 @@ run_scenario_generated_world() {
   # value other than "0" enables the strict check, so an operator can disable
   # the row explicitly with RIVET_GENERATED_WORLD=0 (never silently enabling it).
   if [ -z "${RIVET_GENERATED_WORLD:-}" ] || [ "$RIVET_GENERATED_WORLD" = "0" ]; then
-    echo "    NOTICE — generated-world acceptance is UNVERIFIED and milestone-gated: real"
-    echo "      generated-world serving and/or the Paper seed-42 generated-expected ground truth"
-    echo "      are not present yet (the runner exits 3 with the exact pinned"
-    echo "      GENERATED_WORLD_UNVERIFIED_REASON; it never falls back to superflat or a copied"
-    echo "      loaded world). Set RIVET_GENERATED_WORLD=1 to require this row."
+    echo "    NOTICE — generated-world acceptance is UNVERIFIED and milestone-gated: the"
+    echo "      server does not yet genuinely serve generated chunks (the --seed build still"
+    echo "      boots the superflat M1 fixture, login is_flat=true; the runner exits 3 with the"
+    echo "      exact pinned GENERATED_WORLD_UNVERIFIED_REASON; it never falls back to superflat"
+    echo "      or a copied loaded world). Set RIVET_GENERATED_WORLD=1 to require this row."
     return 0
   fi
   local rc=0
@@ -782,9 +782,8 @@ run_scenario_generated_world() {
     exit 1
   elif [ "$rc" -eq 3 ]; then
     # UNVERIFIED: the rivet-server --seed option still serves the superflat M1
-    # fixture (real generated-world serving) and/or the seed-42 ground-truth
-    # reference is not captured. The comparison never ran to completion and
-    # MUST NOT look green.
+    # fixture (login is_flat=true) rather than genuine generated chunks, so the
+    # comparison never ran to completion and MUST NOT look green.
     echo "    UNVERIFIED — generated-world acceptance did not complete (exit $rc; see the output above)"
     ORACLE_UNVERIFIED=1
     if [ "$REQUIRE_ORACLE" = 1 ]; then

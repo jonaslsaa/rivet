@@ -1205,6 +1205,7 @@ pub fn normalize_generated(raw: &str) -> Result<Value, String> {
             "samples": generated.get("samples").cloned().unwrap_or_else(|| json!([])),
             "walk": generated.get("walk").cloned().unwrap_or(Value::Null),
             "dwell": generated.get("dwell").cloned().unwrap_or(Value::Null),
+            "is_flat": generated.get("is_flat").cloned().unwrap_or(Value::Null),
         });
     }
 
@@ -2644,7 +2645,7 @@ mod tests {
             r#"{"event":"init","protocol":1}"#,
             r#"{"event":"login","protocol":1}"#,
             r#"{"event":"spawn","position":{"x":9.5,"y":-60.0,"z":-3.5},"protocol":1}"#,
-            r#"{"event":"generated","position":{"x":9.5,"y":-60.0,"z":-3.5},"spawn_chunk":[0,-1],"chunk_count":81,"walk":{"before":{"x":9.5,"y":-60.0,"z":-3.5},"after":{"x":10.9,"y":-60.0,"z":-3.5}},"dwell":{"connected_wall_seconds":2.014,"challenge_count":2,"echo_count":2},"samples":[{"chunk_x":0,"chunk_z":0,"sample_x":8,"sample_z":8,"surface":"minecraft:grass_block","bedrock":"minecraft:bedrock","below_feet":"minecraft:stone"},{"chunk_x":1,"chunk_z":0,"sample_x":24,"sample_z":8,"surface":"minecraft:grass_block","bedrock":"minecraft:bedrock","below_feet":"minecraft:stone"}],"observation_ms":4100,"protocol":1}"#,
+            r#"{"event":"generated","position":{"x":9.5,"y":-60.0,"z":-3.5},"spawn_chunk":[0,-1],"chunk_count":81,"walk":{"before":{"x":9.5,"y":-60.0,"z":-3.5},"after":{"x":10.9,"y":-60.0,"z":-3.5}},"dwell":{"connected_wall_seconds":2.014,"challenge_count":2,"echo_count":2},"is_flat":false,"samples":[{"chunk_x":0,"chunk_z":0,"sample_x":8,"sample_z":8,"surface":"minecraft:grass_block","bedrock":"minecraft:bedrock","below_feet":"minecraft:stone"},{"chunk_x":1,"chunk_z":0,"sample_x":24,"sample_z":8,"surface":"minecraft:grass_block","bedrock":"minecraft:bedrock","below_feet":"minecraft:stone"}],"observation_ms":4100,"protocol":1}"#,
         ]
         .join("\n")
     }
@@ -2659,7 +2660,20 @@ mod tests {
             t["generated"]["samples"][0]["surface"],
             "minecraft:grass_block"
         );
+        // A genuine generated world is not superflat: the login `is_flat` flag
+        // the server advertised is carried through the normalized record.
+        assert_eq!(t["generated"]["is_flat"], json!(false));
         assert!(rivet_generated_verdict(&t).is_ok());
+    }
+
+    #[test]
+    fn generated_verdict_carries_a_superflat_login_flag() {
+        // The superflat M1 boot advertises is_flat=true at login; the normalized
+        // record must carry that flag so the runner can key the pinned UNVERIFIED
+        // reason on it (the server served the M1 fixture, not a generated world).
+        let raw = generated_records().replace("\"is_flat\":false", "\"is_flat\":true");
+        let t = normalize_generated(&raw).expect("normalize");
+        assert_eq!(t["generated"]["is_flat"], json!(true));
     }
 
     #[test]

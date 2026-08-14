@@ -44,7 +44,7 @@ tools/rivet-client/run-scenario.sh join --server rivet            # Rivet headle
 tools/rivet-client/run-scenario.sh join --server both --pairs paper:rivet  # Paper-vs-Rivet play scenario
 tools/rivet-client/run-scenario.sh dwell --server rivet           # wall-clock keepalive survival past the 30 s kick limit (issues #157/#160)
 tools/rivet-client/run-scenario.sh load-world                     # copy the local 26.2 save, prove immutability, probe the future #339 launch seam
-tools/rivet-client/run-scenario.sh generated-world                # seed-42 generated acceptance: boot Rivet with --seed 42, drive the client in generated mode, compare against the seed-42 ground-truth handoff; UNVERIFIED until real generated-world serving and the Paper seed-42 generated-expected ground truth land
+tools/rivet-client/run-scenario.sh generated-world                # seed-42 generated acceptance: boot Rivet with --seed 42, drive the client in generated mode, compare against the seed-42 ground-truth handoff; UNVERIFIED until the server genuinely serves generated chunks
 tools/rivet-client/run-scenario.sh capture        # one boot; print the normalized transcript
 ```
 
@@ -57,19 +57,24 @@ per-coordinate content sampling of the served world), verifies the rivet
 connection, requires the `generated` verdict (samples present, chunk count above
 the floor, the walk moved, the dwell evidence proves keepalive survival), and
 compares the observed content against the seed-42 ground-truth handoff
-(`rivet-oracle generated-expected`). Because the server still serves superflat
-and the Paper seed-42 reference is not captured yet, the run exits UNVERIFIED
-(3) — the exact pinned `GENERATED_WORLD_UNVERIFIED_REASON` on a build that
-rejects `--seed`, or the oracle handoff's own UNVERIFIED reason when the
-server boots but the ground truth is missing. It never falls back to the
+(`rivet-oracle generated-expected`, whose committed seed-42 golden is captured).
+The acceptance discriminates what the server actually served via the login
+packet's client-observable `is_flat` flag: true means the no-level boot served
+the superflat M1 fixture, so the run exits UNVERIFIED (3) with the exact pinned
+`GENERATED_WORLD_UNVERIFIED_REASON`; a transcript that did not carry the login
+flag cannot prove a genuine world and stays UNVERIFIED too. Only a non-flat
+transcript proceeds to the per-coordinate comparison against the golden. A build
+that rejects `--seed` entirely is classified `Absent` at boot and exits
+UNVERIFIED (3) with the same pinned reason. The runner never falls back to the
 superflat no-level boot or a copied loaded world, which would fabricate a PASS
 on the wrong world. A superflat echo, a chunk outside the handoff, or non-FULL
 sampled chunks all refuse PASS.
 
 The full-gate row is milestone-gated like the `RIVET_HASH_DIR` hash-diff: while
-real generated-world serving and/or the Paper seed-42 reference are absent it is
-an explicit NOTICE and stays mergeable, so it does not block the release lane
-ahead of the generator. Set `RIVET_GENERATED_WORLD=1` in `scripts/gate.sh`'s
+the server does not yet genuinely serve generated chunks the acceptance cannot
+pass, so it is an explicit NOTICE and stays mergeable, keeping the release lane
+unblocked ahead of the generator. Set `RIVET_GENERATED_WORLD=1` in
+`scripts/gate.sh`'s
 environment to opt into the strict check (exit 3 then sets ORACLE_UNVERIFIED,
 and `--require-oracle` hard-fails it).
 

@@ -62,11 +62,13 @@ pub const WORLD_PATH_ARG: &str = "--level";
 
 /// The generated-world launch option the generated-world acceptance probe
 /// passes to rivet-server (`--seed <n>`). This is the explicit generated-world
-/// server capability: a rivet-server build that accepts `--seed` can boot a
-/// fresh generated world of the requested seed; a build that rejects it (only
-/// `--host`/`--port`/`--level`, the state at this harness's landing) has no
-/// such capability. Kept in the seam module so the argv construction and the
-/// probe classification share one token.
+/// server seam: a rivet-server build that rejects it (only
+/// `--host`/`--port`/`--level`) is classified `Absent` (no way to boot a fresh
+/// seed world at all). A build that accepts `--seed` still boots the superflat
+/// M1 fixture (login `is_flat` true), not genuine FULL generated chunks; the
+/// runner keys the pinned UNVERIFIED reason on the client-observable `is_flat`
+/// flag until the server genuinely serves generated chunks. Kept in the seam
+/// module so the argv construction and the probe classification share one token.
 pub const GENERATED_SEED_ARG: &str = "--seed";
 
 /// The seed the generated-world acceptance contract boots and compares: a

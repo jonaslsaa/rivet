@@ -142,10 +142,10 @@ enum Mode {
     /// The runner compares this against the seed-42 ground-truth handoff
     /// (`rivet-oracle generated-expected`); a server that merely echoes
     /// superflat bytes or a copied loaded world cannot match it. The
-    /// rivet-server `--seed` capability now exists but still serves the
-    /// superflat M1 fixture, so the runner boots it and reports the exact
-    /// pinned UNVERIFIED reason until real generated-world serving and the
-    /// Paper seed-42 ground truth land.
+    /// rivet-server `--seed` capability now exists but the no-level boot still
+    /// serves the superflat M1 fixture, so the client reports the login
+    /// `is_flat` flag and the runner reports the exact pinned UNVERIFIED reason
+    /// until the server genuinely serves generated chunks.
     Generated,
     /// The loaded-world sustained-walking route (issues #185/#561): join a
     /// server booted against a real loaded world (`--level <copy>`, issue #374),
@@ -498,6 +498,13 @@ struct State {
     /// precision, so the transcript is invariant to the per-boot spawn X/Z
     /// offset instead of excluding the whole coordinate.
     spawn_origin: Arc<Mutex<Option<azalea::Vec3>>>,
+    /// The login packet's `is_flat` flag (whether the server's booted level is
+    /// superflat), observed at login and read when the `generated` record is
+    /// emitted. The generated-world acceptance uses it as the client-observable
+    /// discriminator between the superflat M1 fixture and a genuine generated
+    /// overworld. Login always precedes `Event::Spawn`, so it is `Some` by the
+    /// time the generated task runs.
+    is_flat: Arc<Mutex<Option<bool>>>,
     runtime: tokio::runtime::Handle,
 }
 
@@ -517,6 +524,7 @@ impl Default for State {
             keepalive_log: Arc::new(Mutex::new(KeepaliveLog::default())),
             corrections: Arc::new(Mutex::new(Vec::new())),
             spawn_origin: Arc::new(Mutex::new(None)),
+            is_flat: Arc::new(Mutex::new(None)),
             runtime: tokio::runtime::Handle::current(),
         }
     }
@@ -1061,6 +1069,14 @@ async fn generated_and_emit(bot: Client, state: State) {
         json!({ "before": before, "after": after })
     };
 
+    // The login `is_flat` flag the server advertised (observed at login, before
+    // spawn). The runner keys the pinned UNVERIFIED reason on it: true means the
+    // no-level boot served the superflat M1 fixture, not a genuine generated
+    // world. The flag is carried through as-is (JSON null when no login packet
+    // was observed), so a client that never captured the login cannot read as a
+    // genuine non-flat world and slip past the runner's flag gate.
+    let is_flat = *state.is_flat.lock().expect("is_flat lock poisoned");
+
     emit(json!({
         "event": "generated",
         "position": position,
@@ -1073,6 +1089,7 @@ async fn generated_and_emit(bot: Client, state: State) {
             "challenge_count": challenge_count,
             "echo_count": echo_count,
         },
+        "is_flat": is_flat,
         "observation_ms": started.elapsed().as_millis() as u64,
     }));
 
@@ -1677,6 +1694,12 @@ async fn handle(bot: Client, event: Event, state: State) {
         // relationships (rivet-capture's relationships.rs patterns) on the raw
         // ids, then normalize discards the per-boot id values.
         Event::Packet(packet) => {
+            // The login packet is the first game packet and always precedes
+            // `Event::Spawn`, so its `is_flat` flag is captured for every mode
+            // before the Move-only observables below.
+            if let ClientboundGamePacket::Login(p) = &*packet {
+                *state.is_flat.lock().expect("is_flat lock poisoned") = Some(p.common.is_flat);
+            }
             if state.mode != Mode::Move {
                 return;
             }

@@ -3107,18 +3107,24 @@ fn run_loaded_world(args: &Args) -> Result<(), RunnerError> {
 }
 
 /// The exact, test-pinned UNVERIFIED reason the generated-world acceptance
-/// reports on a rivet-server build that rejects the `--seed` launch option
-/// (only `--host`/`--port`/`--level`). Such a build has no way to boot a fresh
-/// generated seed world, so the scenario must exit UNVERIFIED (3) with exactly
-/// this reason — it must never fall back to the superflat no-level boot or a
-/// copied loaded world, which would fabricate a PASS on the wrong world. (The
-/// current rivet-server accepts `--seed` but still serves the superflat M1
-/// fixture; the row then reaches the oracle `generated-expected` UNVERIFIED
-/// handoff instead of this boot-rejection reason.)
-pub const GENERATED_WORLD_UNVERIFIED_REASON: &str = "generated-world acceptance is UNVERIFIED: rivet-server has no generated-world capability \
-     yet (no --seed launch option; only --host/--port/--level). The scenario will not boot a \
-     superflat or copied-loaded-world stand-in. It reports UNVERIFIED until the rivet-server \
-     worldgen capability lands.";
+/// reports while the rivet-server does not yet serve a genuine generated
+/// world. Two failure shapes both report it:
+///
+/// - a boot that rejects the `--seed` launch option (only
+///   `--host`/`--port`/`--level`) — no way to boot a fresh seed world at all;
+/// - a boot that accepts `--seed` but still serves the superflat M1 fixture —
+///   the client-observable login `is_flat` flag is true, so the server served
+///   the no-level superflat default, not genuine FULL generated chunks.
+///
+/// In both shapes the scenario must exit UNVERIFIED (3) with exactly this
+/// reason — it must never fall back to the superflat no-level boot or a copied
+/// loaded world, which would fabricate a PASS on the wrong world. When the
+/// server genuinely serves a generated world, the login `is_flat` flag is
+/// false and the runner proceeds to compare against the seed-42 ground truth.
+pub const GENERATED_WORLD_UNVERIFIED_REASON: &str = "generated-world acceptance is UNVERIFIED: rivet-server does not yet serve a genuine \
+     generated seed-42 world (no --seed launch option, or a --seed build that still boots the \
+     superflat M1 fixture). The scenario will not boot a superflat or copied-loaded-world \
+     stand-in. It reports UNVERIFIED until the rivet-server worldgen capability lands.";
 
 /// The official-client generated-world acceptance probe (seed-42 contract).
 ///
@@ -3129,15 +3135,17 @@ pub const GENERATED_WORLD_UNVERIFIED_REASON: &str = "generated-world acceptance 
 /// content against the seed-42 ground-truth handoff (`rivet-oracle
 /// generated-expected`), and requires a clean SIGTERM shutdown.
 ///
-/// The rivet-server `--seed` option now exists but still serves the superflat
-/// M1 fixture, and the Paper seed-42 ground-truth reference is not captured
-/// yet, so the runner boots the server and the acceptance stays honestly
-/// UNVERIFIED — via the oracle `generated-expected` handoff's own UNVERIFIED
-/// reason — rather than comparing against nothing or fabricating a PASS. A
-/// build that rejects `--seed` entirely is classified `Absent` and exits
-/// UNVERIFIED (3) with the exact
-/// [`GENERATED_WORLD_UNVERIFIED_REASON`] — never a superflat or loaded-world
-/// fallback.
+/// The rivet-server `--seed` option exists but the no-level boot still serves
+/// the superflat M1 fixture, not genuine FULL generated chunks. The runner
+/// detects this client-observably: the login packet's `is_flat` flag is true
+/// for the superflat M1 boot, so the acceptance stays honestly UNVERIFIED with
+/// the exact [`GENERATED_WORLD_UNVERIFIED_REASON`] — never a superflat or
+/// loaded-world stand-in — rather than comparing the superflat bytes against
+/// the seed-42 ground truth and fabricating a PASS or a FAIL. Only when the
+/// server serves a genuine generated world (login `is_flat` false) does the
+/// runner proceed to the per-coordinate comparison. A build that rejects
+/// `--seed` entirely is classified `Absent` at boot and exits UNVERIFIED (3)
+/// with the same pinned reason.
 fn run_generated_world(args: &Args) -> Result<(), RunnerError> {
     let crate_root = crate_root();
     let work = crate_root.join("work/scenario-generated-world");
@@ -3186,10 +3194,11 @@ fn run_generated_world(args: &Args) -> Result<(), RunnerError> {
         // The post-boot acceptance body. It never shuts `srv` down; the wrapper
         // below always does.
         let body = (|| -> Result<(), RunnerError> {
-            // Fetch the seed-42 ground-truth handoff. Until the Paper seed-42
-            // reference is captured, the oracle handoff is UNVERIFIED and the
-            // acceptance stays honestly UNVERIFIED — it never compares against
-            // nothing.
+            // Fetch the seed-42 ground-truth handoff. The merged
+            // `generated-expected` oracle now captures the real Paper seed-42
+            // reference, so the handoff succeeds; the acceptance still must not
+            // compare against it until the server serves a genuine generated
+            // world (the `is_flat` gate below).
             let expected = run_generated_expected(&work)?;
 
             // Drive the real Azalea client in generated mode against the booted
@@ -3216,6 +3225,10 @@ fn run_generated_world(args: &Args) -> Result<(), RunnerError> {
                 .map_err(RunnerError::Transcript)?;
             let boundary = transcript::rivet_generated_verdict(&transcript)
                 .map_err(RunnerError::Transcript)?;
+
+            // Re-ground the pinned UNVERIFIED contract on what the server
+            // actually served (see [`classify_generated_is_flat`]).
+            classify_generated_is_flat(&transcript)?;
 
             // Compare the client's observed block content against the seed-42
             // ground truth. This is the load-bearing comparison: a server that
@@ -3274,10 +3287,10 @@ fn classify_generated_world_boot_failure(error: server::Error, log_path: &Path) 
 const GENERATED_EXPECTED_JSON: &str = "generated-expected.json";
 
 /// Invoke `rivet-oracle generated-expected <seed>` and parse the seed-42
-/// ground-truth manifest into a `serde_json::Value`. The handoff is the future
-/// Paper-captured reference for the generated-world acceptance; until that
-/// reference is captured, the oracle reports UNVERIFIED and this stays honestly
-/// UNVERIFIED — the acceptance never compares against nothing.
+/// ground-truth manifest into a `serde_json::Value`. The handoff is the
+/// committed Paper-captured seed-42 golden for the generated-world acceptance;
+/// the runner still must not compare against it until the server genuinely
+/// serves a generated world (the `is_flat` gate in `run_generated_world`).
 fn run_generated_expected(work: &Path) -> Result<Value, RunnerError> {
     let oracle_bin = oracle_binary();
     let out = work.join(GENERATED_EXPECTED_JSON);
@@ -3301,6 +3314,30 @@ fn run_generated_expected(work: &Path) -> Result<Value, RunnerError> {
     let text = fs::read_to_string(&out)?;
     let manifest: Value = serde_json::from_str(&text).map_err(RunnerError::Json)?;
     Ok(manifest)
+}
+
+/// Re-ground the pinned UNVERIFIED contract on what the server actually
+/// served. The client transcript carries the login `is_flat` flag, which
+/// discriminates the no-level superflat M1 fixture (true) from a genuine
+/// generated world (false). While `--seed` is accepted but still boots the
+/// superflat fixture, the acceptance must exit UNVERIFIED (3) with the exact
+/// [`GENERATED_WORLD_UNVERIFIED_REASON`] — comparing the superflat bytes
+/// against the seed-42 ground truth would fabricate a FAIL on the wrong world.
+/// A transcript that did not carry the login flag cannot prove the server
+/// served a genuine non-flat world, so it also stays UNVERIFIED. Only a
+/// non-flat transcript proceeds to the per-coordinate comparison.
+fn classify_generated_is_flat(transcript: &Value) -> Result<(), RunnerError> {
+    match transcript["generated"]["is_flat"].as_bool() {
+        Some(true) => Err(RunnerError::Unverified(format!(
+            "{GENERATED_WORLD_UNVERIFIED_REASON} The booted server served the superflat M1 fixture \
+             (login is_flat=true), not genuine FULL generated chunks."
+        ))),
+        None => Err(RunnerError::Unverified(format!(
+            "{GENERATED_WORLD_UNVERIFIED_REASON} The client transcript did not report the login \
+             is_flat flag, so the served world cannot be proven genuine."
+        ))),
+        Some(false) => Ok(()),
+    }
 }
 
 /// Compare the client's observed per-coordinate block content against the
@@ -4740,6 +4777,53 @@ mod tests {
     /// the compare helpers mirror the loaded shape with that key.
     fn generated_transcript_with(sample: Value) -> Value {
         json!({ "generated": { "samples": [sample] } })
+    }
+
+    /// The exact UNVERIFIED classification the runner reports when the booted
+    /// server served the superflat M1 fixture (login `is_flat` true) instead of
+    /// genuine FULL generated chunks.
+    #[test]
+    fn generated_world_is_flat_reports_the_pinned_unverified_reason() {
+        let mut transcript = generated_transcript_with(matching_sample(0, 0));
+        // The superflat M1 no-level boot advertises is_flat=true at login.
+        transcript["generated"]["is_flat"] = json!(true);
+        match classify_generated_is_flat(&transcript) {
+            Err(RunnerError::Unverified(message)) => {
+                assert!(
+                    message.starts_with(GENERATED_WORLD_UNVERIFIED_REASON),
+                    "the superflat-served reason must be pinned exactly, got {message}"
+                );
+                assert_eq!(
+                    RunnerError::Unverified(message).exit_code(),
+                    EXIT_UNVERIFIED
+                );
+            }
+            other => panic!("expected an Unverified classification, got {other:?}"),
+        }
+
+        // A genuine non-flat world (is_flat=false) must NOT be classified
+        // UNVERIFIED on the flag: it proceeds to the content comparison.
+        transcript["generated"]["is_flat"] = json!(false);
+        assert!(
+            classify_generated_is_flat(&transcript).is_ok(),
+            "a non-flat transcript must proceed to the content comparison"
+        );
+
+        // A transcript that did not carry the login flag cannot prove the
+        // served world was genuine — it stays honestly UNVERIFIED rather than
+        // fabricating a PASS or FAIL on an unproven world.
+        let mut no_flag = generated_transcript_with(matching_sample(0, 0));
+        no_flag["generated"]
+            .as_object_mut()
+            .unwrap()
+            .remove("is_flat");
+        match classify_generated_is_flat(&no_flag) {
+            Err(RunnerError::Unverified(message)) => assert!(
+                message.starts_with(GENERATED_WORLD_UNVERIFIED_REASON),
+                "the missing-flag reason must be pinned exactly, got {message}"
+            ),
+            other => panic!("expected an Unverified classification, got {other:?}"),
+        }
     }
 
     #[test]
