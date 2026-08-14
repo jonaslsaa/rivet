@@ -114,8 +114,10 @@
 //! holders across forms.
 //! The `@Deprecated` single-column [`SurfaceSystem::top_material`] probe (the
 //! carver's grass-replacement call) is ported and composed into the carver
-//! `CarvingContext` seam through [`bind_carver_top_material`]; the production
-//! carver loop that binds it defers (RivetTodo #185).
+//! `CarvingContext` seam through [`bind_carver_top_material`], which the
+//! production carver loop (`NoiseBasedChunkGenerator::apply_carvers`) calls
+//! (RivetTodo #185 defers only the `WorldGenRegion`/`StructureManager`
+//! neighbor surface and the per-biome settings split, not this binding).
 
 use crate::biome::BiomeManager;
 use crate::biome::biomes;

@@ -16,8 +16,10 @@
 //! bound) and `set` grows the array on demand.
 //!
 //! RivetTodo(#399): the carver unit's `CarveChunk` block-surface trait is
-//! unbound; the ported `CarvingContext` and concrete carvers consume this mask
-//! directly. Java's default `additionalMask` is the lambda
+//! implemented for the worldgen `ProtoChunk` (the production CARVERS-status
+//! driver `NoiseBasedChunkGenerator::apply_carvers` binds it); the ported
+//! `CarvingContext` and concrete carvers consume this mask directly. Java's
+//! default `additionalMask` is the lambda
 //! `(x, y, z) -> false` (`CarvingMask.java` field initializer) — never `null`;
 //! the port models it as `Option`, treating `None` as always-false, which
 //! preserves the default semantics.

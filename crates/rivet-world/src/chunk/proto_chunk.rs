@@ -534,10 +534,12 @@ where
     /// Java's `state.is(Blocks.AIR)` is a block-identity check
     /// (`getBlock() == Blocks.AIR`), so `CAVE_AIR`/`VOID_AIR` do not take the
     /// fast path — hence the `state.block() == Blocks::AIR.id()` comparison
-    /// rather than the behavioral `is_air` predicate. The `CAVE_AIR`-writing
-    /// carver path is not yet wired for `ProtoChunk` (RivetTodo(#399)), so this
-    /// fast path is currently only reachable via the surface driver's exact
-    /// `AIR` writes.
+    /// rather than the behavioral `is_air` predicate. The worldgen carver loop
+    /// (`NoiseBasedChunkGenerator::apply_carvers`) drives this same
+    /// `set_block_state` through the `CarveChunk` impl (RivetTodo(#399)) and
+    /// writes `CAVE_AIR` via the aquifer, so its writes deliberately bypass this
+    /// `AIR` fast path — matching Java — while the surface driver's exact `AIR`
+    /// writes take it.
     ///
     /// Returns the previous state, matching Java.
     pub fn set_block_state(&mut self, x: i32, y: i32, z: i32, state: BlockState) -> BlockState {
