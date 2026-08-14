@@ -218,8 +218,8 @@ impl BelowZeroRetrogen {
             .get(((z & 15).wrapping_mul(16).wrapping_add(x & 15)) as usize)
     }
 
-    /// `applyBedrockMask(ProtoChunk)` — clears the bedrock-hole columns
-    /// (full-column air) where the mask has a hole.
+    /// `applyBedrockMask(ProtoChunk)` — clears the bedrock-hole columns (air
+    /// where the mask has a hole).
     ///
     /// The height window is `chunk.getHeightAccessorForGeneration()`. At the
     /// only call site (the noise step of an upgrading chunk in
