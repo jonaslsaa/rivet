@@ -98,15 +98,17 @@ pub trait ChunkGenerator: Send + Sync + 'static {
     /// `ChunkGenerator.createBiomes(RandomState, Blender, StructureManager,
     /// ChunkAccess)` — the biomes step of the chunk status ladder.
     ///
-    /// Java declares a default body (`protoChunk.fillBiomesFromNoise(
-    /// this.biomeSource, randomState.sampler())`); the port's
+    /// Java's default returns `CompletableFuture.supplyAsync(() ->
+    /// protoChunk.fillBiomesFromNoise(this.biomeSource, randomState.sampler()),
+    /// Runnable::run)` — the `Runnable::run` executor runs the task inline on
+    /// the calling thread, so the async wrapper is a scheduling no-op (the
+    /// future is already complete when `createBiomes` returns). The port's
     /// `fillBiomesFromNoise` lives on the generic `ChunkAccess`/`ProtoChunk`
     /// surface, which an object-safe trait method cannot name (the chunk types
     /// are generic over their storage strategies), so the trait cannot carry
     /// that body and the step is a capability-unavailable seam. The
-    /// world-touching parameters (`StructureManager`, the `ChunkAccess`) and
-    /// the `CompletableFuture` async wrapper defer with the owning
-    /// `.chunk.generator` pipeline (RivetTodo #185); the owning
+    /// world-touching parameters (`StructureManager`, the `ChunkAccess`) defer
+    /// with the owning `.chunk.generator` pipeline (RivetTodo #185); the owning
     /// `NoiseBasedChunkGenerator` realization provides the faithful signature
     /// when the status executor lands.
     fn create_biomes(&self) {
@@ -220,11 +222,15 @@ pub trait ChunkGenerator: Send + Sync + 'static {
     }
 
     /// `ChunkGenerator.getBaseColumn(int, int, LevelHeightAccessor,
-    /// RandomState)` — abstract in Java (no default). The `NoiseColumn` return
-    /// value defers with the `mc.world.level` NoiseColumn unit (RivetTodo
-    /// #232); the seam carries the same `(clamped_min_y, Vec<BlockState>)`
-    /// shape the noisegen value shell's `get_base_column` produces and fails
-    /// explicitly until the owning realization overrides it (RivetTodo #185).
+    /// RandomState)` — abstract in Java (no default). Java returns a
+    /// `NoiseColumn` value; that unit defers with `mc.world.level` (RivetTodo
+    /// #232). Until it lands, the `Option<(i32, Vec<BlockState>)>` return is a
+    /// placeholder invented for this port — the `(clamped_min_y,
+    /// Vec<BlockState>)` decomposition matching the noisegen value shell's
+    /// `get_base_column`, NOT a faithful mirror of Java's `NoiseColumn`
+    /// signature. RivetTodo #232 must reconcile the seam's return shape to the
+    /// `NoiseColumn` value once that unit exists. The seam fails explicitly
+    /// until the owning realization overrides it (RivetTodo #185).
     fn get_base_column(
         &self,
         _x: i32,
@@ -284,10 +290,15 @@ pub trait ChunkGenerator: Send + Sync + 'static {
     /// performs (`context.generator().getBiomeGenerationSettings(biome)
     /// .hasFeature(feature)`).
     ///
-    /// STUB(mc.world.level.biome.core) — `BiomeGenerationSettings` and its
-    /// `featureSet`/`hasFeature` memo are owned by the `#178` biome-core unit,
-    /// so the read fails explicitly rather than fabricating a membership
-    /// result (the same capability-unavailable seam as `WorldGenLevel::get_biome`).
+    /// STUB(mc.data.worldgen.biome) — the read is `generator.
+    /// getBiomeGenerationSettings(biome).hasFeature(feature)`. Two blockers:
+    /// resolving the `Holder<BiomeId>` to the `Biome` value's generation
+    /// settings needs the biome-value registry, AND `hasFeature` itself still
+    /// defers on RivetTodo #181 (`PlacedFeature` value equality — see
+    /// [`crate::biome::biome_generation_settings::BiomeGenerationSettings::has_feature`]).
+    /// Both must land before the read can return a membership result, so it
+    /// fails explicitly rather than fabricating one (the same
+    /// capability-unavailable seam as `WorldGenLevel::get_biome`).
     fn get_biome_generation_settings_has_feature(
         &self,
         _biome: &Holder<BiomeId>,

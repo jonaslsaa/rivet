@@ -179,11 +179,11 @@ impl FlatLevelGeneratorSettings {
     /// back-reference rule (holder.rs) makes that key resolution require the
     /// owning lookup here.
     ///
-    /// STUB(mc.world.level.biome.core): the id-model carries biomes
+    /// STUB(mc.data.worldgen.biome): the id-model carries biomes
     /// as `Holder<BiomeId>` — there is no biome-value registry to resolve
     /// `sourceBiome.value().getGenerationSettings()`. The method body below is
     /// the faithful 26.2 port; it panics at the first biome-value resolution
-    /// until the biome value registry lands (nothing in this unit calls it).
+    /// until the biome-value registry lands (nothing in this unit calls it).
     ///
     /// Takes `&mut self`: Java's non-opaque-layer loop nulls the LIVE
     /// `getLayers()` list (`layers.set(i, null)`), so the mutation is on
@@ -292,7 +292,7 @@ impl FlatLevelGeneratorSettings {
 
     /// The biome's `BiomeGenerationSettings` — the pending biome-value seam.
     ///
-    /// STUB(mc.world.level.biome.core): resolving `Holder<BiomeId>`
+    /// STUB(mc.data.worldgen.biome): resolving `Holder<BiomeId>`
     /// to the `Biome` value (and its generation settings) needs the biome-value
     /// registry; until then the settings cannot be derived.
     ///
@@ -305,7 +305,7 @@ impl FlatLevelGeneratorSettings {
     /// holder) treats them as equal and takes the derived-`PlainBuilder` path.
     fn biome_generation_settings_of(&self, _biome: &Holder<BiomeId>) -> &BiomeGenerationSettings {
         panic!(
-            "STUB(mc.world.level.biome.core): no biome value registry; \
+            "STUB(mc.data.worldgen.biome): no biome value registry; \
              adjustGenerationSettings cannot resolve a Holder<BiomeId> to generation settings"
         )
     }
