@@ -68,7 +68,10 @@ pub static CONFIGURED_CARVER: LazyLock<ResourceKey<Registry<ConfiguredWorldCarve
     });
 
 /// `Registries.PLACED_FEATURE` — `createRegistryKey("worldgen/placed_feature")`,
-/// the typed registry key over the `PlacedFeature` value.
+/// the typed registry key over the `PlacedFeature` value. The shared definition
+/// for the crate's worldgen codecs (`BiomeGenerationSettings`' `"features"`
+/// field and `VegetationPatchConfiguration`'s `PlacedFeature.CODEC`, which is a
+/// `RegistryFileCodec` over it).
 pub static PLACED_FEATURE: LazyLock<ResourceKey<Registry<PlacedFeature>>> = LazyLock::new(|| {
     ResourceKey::create_registry_key(Identifier::with_default_namespace(
         "worldgen/placed_feature",
@@ -225,7 +228,13 @@ impl BiomeGenerationSettings {
 
 /// `ConfiguredWorldCarver.LIST_CODEC` — `RegistryCodecs.homogeneousList(
 /// Registries.CONFIGURED_CARVER, DIRECT_CODEC)`, as the ops-generic factory.
-/// Named carver references resolve through the registry; the inline `DIRECT_CODEC`
+///
+/// The two-arg `homogeneousList` wraps the element in a `RegistryFileCodec`
+/// with `allowInline = true` (NOT the `RegistryFixedCodec` the single-arg
+/// `homogeneousList(registryKey)` overload uses — the same convention as
+/// `placed_feature_list_of_lists_codec` below). So the element is
+/// `RegistryFileCodec.create(CONFIGURED_CARVER, direct_stub)`: a named carver
+/// reference resolves through the registry, and the inline `DIRECT_CODEC`
 /// element is a STUB (`#126`).
 fn configured_world_carver_list_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>()
 -> Arc<dyn Codec<HolderSet<ConfiguredWorldCarverErased>, Ops>> {
@@ -305,6 +314,14 @@ impl PlainBuilder {
 
 /// `BiomeGenerationSettings.Builder` — `PlainBuilder` over a
 /// `HolderGetter<PlacedFeature>`/`HolderGetter<ConfiguredWorldCarver<?>>`.
+///
+/// Java's `Builder extends PlainBuilder`, so its public surface includes the
+/// inherited Holder-based overloads (`addFeature(Decoration, Holder<PlacedFeature>)`,
+/// `addFeature(int, Holder<PlacedFeature>)` and `addCarver(Holder<...>)`). This
+/// port deliberately narrows the `Builder` surface to the `ResourceKey`
+/// overloads — the forms production data builders use; the Holder-based forms
+/// remain available on [`PlainBuilder`] (`add_feature`, `add_feature_index`,
+/// `add_carver`).
 pub struct Builder {
     /// The underlying `PlainBuilder` (Java's `Builder extends PlainBuilder`).
     inner: PlainBuilder,
