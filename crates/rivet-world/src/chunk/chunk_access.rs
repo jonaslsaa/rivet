@@ -340,6 +340,13 @@ where
         }
     }
 
+    /// `setBlockState`'s `placed` half — resolve the heightmap behavior flags
+    /// for a newly placed state through the stored resolver (the same flags
+    /// `write_worldgen_block` and the heightmap `update` walks use).
+    pub(crate) fn resolve_flags(&self, state: &T) -> StateFlags {
+        (self.resolve)(state)
+    }
+
     /// `ChunkAccess.getSectionIndex(int blockY)` — delegates to the accessor.
     pub fn get_section_index(&self, block_y: i32) -> i32 {
         self.height_accessor.get_section_index(block_y)
