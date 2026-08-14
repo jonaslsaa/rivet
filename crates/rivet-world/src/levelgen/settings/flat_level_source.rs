@@ -71,9 +71,12 @@ impl FlatLevelSource {
     }
 
     /// `FlatLevelSource(FlatLevelGeneratorSettings, BiomeSource)` — the
-    /// CraftBukkit second constructor. The base's `Util.memoize(
-    /// generatorSettings::adjustGenerationSettings)` memo defers with the flat
-    /// unit's biome-value seam (RivetTodo #178); the shell does not run it.
+    /// CraftBukkit second constructor. Java's base `Util.memoize(
+    /// generatorSettings::adjustGenerationSettings)` supplier is not carried:
+    /// the `ChunkGenerator` trait's biome-read seam covers it, and the flat
+    /// unit's `adjust_generation_settings` is the merged port (only its
+    /// internal biome-value registry resolution remains STUB'd at
+    /// `mc.world.level.biome.core`, RivetTodo #178).
     pub fn new_with_biome_source(
         generator_settings: FlatLevelGeneratorSettings,
         biome_source: FixedBiomeSource,
@@ -101,8 +104,10 @@ impl FlatLevelSource {
     /// [`ProtoChunk::write_worldgen_block`] (the real worldgen block write the
     /// noisegen unit uses), which updates both heightmaps per block — see
     /// [`write_layer_block`]. Java's `if (blockState != null)` guard skips the
-    /// `None` slots introduced by `adjustGenerationSettings` (RivetTodo #178's
-    /// biome-value seam); no write or heightmap update happens for them.
+    /// `None` slots the flat unit's `adjustGenerationSettings` introduces (the
+    /// nullable-layer loop is the merged flat unit's port; only its internal
+    /// biome-value registry resolves later, RivetTodo #178); no write or
+    /// heightmap update happens for them.
     pub fn fill_from_noise<B, S>(
         &self,
         _blender: Blender,
@@ -220,8 +225,8 @@ impl ChunkGenerator for FlatLevelSource {
     /// `minY`.
     ///
     /// Java's `state != null && type.isOpaque().test(state)` skips the `None`
-    /// slots introduced by `adjustGenerationSettings` (RivetTodo #178's
-    /// biome-value seam).
+    /// slots the flat unit's `adjustGenerationSettings` introduces (see the
+    /// module doc — the nullable-layer loop is the merged flat unit's port).
     fn get_base_height(
         &self,
         _x: i32,
