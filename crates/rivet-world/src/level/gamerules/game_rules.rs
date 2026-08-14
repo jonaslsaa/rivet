@@ -450,7 +450,7 @@ pub fn bootstrap() -> Arc<GameRuleErased> {
 /// set) is deferred with the ServerLevel seam (`RivetTodo` below); the value
 /// codec surface is the GameRuleMap CODEC — the accessor below.
 ///
-/// RivetTodo(#388): `ServerLevel`/`MinecraftServer` unported — the `GameRules`
+/// RivetTodo(#418): `ServerLevel`/`MinecraftServer` unported — the `GameRules`
 /// aggregate (its `rules` field, the enabled-feature-reconciling constructor,
 /// `get`/`set`/`copy`/`setAll`/`setFromOther` with the `@Nullable ServerLevel`
 /// `onGameRuleChanged` callback seam, `availableRules`, `getAsString`,
