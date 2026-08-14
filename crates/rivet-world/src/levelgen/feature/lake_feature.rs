@@ -435,7 +435,13 @@ impl FeatureBehavior<Configuration> for LakeFeature {
             // has not ported (see `biome.rs`'s `shouldFreeze`/`shouldSnow`
             // defer). The loop is skipped until that surface lands — an honest
             // omission, not a fabricated verdict; the RNG stream is unaffected
-            // (the barrier loop's draws already happened).
+            // (the barrier loop's draws already happened). This is a tracked
+            // behavior gap, not a wrong port: in Java a water lake in a
+            // freezing biome writes `Blocks.ICE` at the `yy == 4` surface
+            // cells; here those writes are skipped. Re-enable the loop verbatim
+            // when the `#232` surface lands — its two prerequisites are
+            // `WorldGenLevel::get_biome` (default panics today) and
+            // `Biome::should_freeze`.
             // for xx in 0..16 {
             //     for zz in 0..16 {
             //         let offset = origin.offset(xx as i32, 4, zz as i32);
@@ -845,6 +851,165 @@ mod tests {
             } else {
                 assert_eq!(*state, cave_air(), "write #{i} at/above the fluid level");
             }
+        }
+    }
+
+    /// The barrier loop is parity-critical (the module doc claims the `1/2`
+    /// roll matches Java) yet the shared `config()` helper's air barrier skips
+    /// it in every other test. With a stone barrier, the loop runs: the
+    /// `yy < 4` boundary cells are replaced unconditionally (Java's
+    /// short-circuit draws no RNG) and the `yy >= 4` boundary cells each draw
+    /// `nextInt(2)`. This test pins the draw count/order and the write set for
+    /// seed 1 on the stone-filled local cube (every cell solid, so the
+    /// `isSolid` gate holds for every boundary cell and the writes are exactly
+    /// the cells the draw gate admits).
+    #[test]
+    fn barrier_loop_draw_stream_and_writes_are_exact() {
+        let mut level = TestLevel::over(access());
+        let origin = BlockPos::new(0, 64, 0);
+        fill_local_cube_with_stone(&mut level);
+        let generator = TestGenerator;
+        let mut random = RecordingRandom::new(1);
+        let config = Configuration::new(
+            Arc::new(simple(water())),
+            Arc::new(simple(stone())),
+            always_true(),
+            always_true(),
+            always_true(),
+        );
+        assert!(LAKE.place(&mut FeaturePlaceContext::new(
+            None,
+            &mut level,
+            &generator,
+            &mut random,
+            &origin,
+            &config,
+        )));
+        // Draw stream: `nextInt(4)`, then `6 * spots` `nextDouble`s, then
+        // exactly `K = 148` `nextInt(2)` draws — one per boundary cell at
+        // `yy >= 4`. The 106 boundary cells below the fluid level draw nothing
+        // (the `yy < 4 ||` short-circuit): K equals the count of `yy >= 4`
+        // boundary cells, which is what pins the short-circuit.
+        let mut idx = 1;
+        let mut spot_draws = 0;
+        while idx < random.calls.len() && random.calls[idx] == RngCall::Double {
+            spot_draws += 1;
+            idx += 1;
+        }
+        assert_eq!(random.calls.first(), Some(&RngCall::IntBound(4)));
+        assert_eq!(spot_draws % 6, 0, "nextDouble draws come in 6 per lobe");
+        let spots = spot_draws / 6;
+        assert!((4..=7).contains(&spots), "spots in 4..=7, got {spots}");
+        let barrier_draws = &random.calls[idx..];
+        assert_eq!(
+            barrier_draws.len(),
+            148,
+            "K = the 148 yy>=4 boundary cells each draw nextInt(2)"
+        );
+        assert!(
+            barrier_draws.iter().all(|c| *c == RngCall::IntBound(2)),
+            "barrier draws must all be nextInt(2), got {:?}",
+            barrier_draws
+        );
+        // The write set: 260 placement writes (every marked cell) then 176
+        // barrier writes — 106 at `y < 64` (unconditional below the fluid
+        // level) and 70 at `y >= 64` (the `nextInt(2) != 0` half). Every
+        // barrier write is stone.
+        assert_eq!(level.writes.len(), 260 + 176, "placement + barrier writes");
+        let barrier = &level.writes[260..];
+        assert!(barrier.iter().all(|(_, s)| *s == stone()));
+        let below = barrier.iter().filter(|(p, _)| p.get_y() < 64).count();
+        let at_or_above = barrier.iter().filter(|(p, _)| p.get_y() >= 64).count();
+        assert_eq!(below, 106);
+        assert_eq!(at_or_above, 70);
+        // The 70 `y >= 64` writes are the roll-dependent half: their exact
+        // positions pin the `nextInt(2)` *values* (a different roll subset
+        // would write a different set), exactly as `spot_draw_stream_is_exact`
+        // pins the `nextDouble` values through its golden write set.
+        let mut at_writes: Vec<BlockPos> = barrier
+            .iter()
+            .filter(|(p, _)| p.get_y() >= 64)
+            .map(|(p, _)| *p)
+            .collect();
+        at_writes.sort_by_key(|p| (p.get_x(), p.get_y(), p.get_z()));
+        let golden_at: Vec<BlockPos> = vec![
+            BlockPos::new(-7, 64, -3),
+            BlockPos::new(-6, 64, -2),
+            BlockPos::new(-6, 66, -5),
+            BlockPos::new(-6, 66, -3),
+            BlockPos::new(-5, 64, -1),
+            BlockPos::new(-5, 65, -1),
+            BlockPos::new(-5, 66, -6),
+            BlockPos::new(-5, 66, -4),
+            BlockPos::new(-4, 64, -7),
+            BlockPos::new(-4, 65, -7),
+            BlockPos::new(-4, 65, -1),
+            BlockPos::new(-4, 66, -6),
+            BlockPos::new(-3, 64, -1),
+            BlockPos::new(-3, 65, -1),
+            BlockPos::new(-3, 66, -2),
+            BlockPos::new(-3, 67, -4),
+            BlockPos::new(-2, 65, -6),
+            BlockPos::new(-2, 65, 1),
+            BlockPos::new(-2, 65, 2),
+            BlockPos::new(-2, 65, 4),
+            BlockPos::new(-2, 66, -4),
+            BlockPos::new(-2, 66, 1),
+            BlockPos::new(-1, 64, -6),
+            BlockPos::new(-1, 65, -5),
+            BlockPos::new(-1, 65, 5),
+            BlockPos::new(-1, 66, -3),
+            BlockPos::new(-1, 66, -2),
+            BlockPos::new(-1, 66, -1),
+            BlockPos::new(-1, 66, 0),
+            BlockPos::new(-1, 67, 1),
+            BlockPos::new(0, 64, -7),
+            BlockPos::new(0, 64, 5),
+            BlockPos::new(0, 66, -4),
+            BlockPos::new(0, 66, -3),
+            BlockPos::new(0, 66, -1),
+            BlockPos::new(0, 67, -2),
+            BlockPos::new(0, 67, 0),
+            BlockPos::new(0, 67, 1),
+            BlockPos::new(1, 64, -6),
+            BlockPos::new(1, 64, 6),
+            BlockPos::new(1, 65, -6),
+            BlockPos::new(1, 66, -3),
+            BlockPos::new(1, 66, -2),
+            BlockPos::new(1, 67, 0),
+            BlockPos::new(1, 67, 1),
+            BlockPos::new(1, 67, 2),
+            BlockPos::new(1, 67, 4),
+            BlockPos::new(2, 65, -6),
+            BlockPos::new(2, 66, -5),
+            BlockPos::new(2, 66, -4),
+            BlockPos::new(2, 66, -3),
+            BlockPos::new(2, 66, -2),
+            BlockPos::new(2, 66, 5),
+            BlockPos::new(2, 67, 0),
+            BlockPos::new(2, 67, 1),
+            BlockPos::new(2, 67, 2),
+            BlockPos::new(3, 64, -5),
+            BlockPos::new(3, 64, 4),
+            BlockPos::new(3, 66, -3),
+            BlockPos::new(3, 66, -2),
+            BlockPos::new(3, 66, 0),
+            BlockPos::new(3, 66, 1),
+            BlockPos::new(3, 66, 4),
+            BlockPos::new(4, 64, -3),
+            BlockPos::new(4, 64, 2),
+            BlockPos::new(4, 65, -3),
+            BlockPos::new(4, 65, 1),
+            BlockPos::new(4, 65, 2),
+            BlockPos::new(4, 65, 3),
+            BlockPos::new(4, 66, 2),
+        ];
+        assert_eq!(at_writes.len(), golden_at.len(), "at/above barrier count");
+        for (i, pos) in at_writes.iter().enumerate() {
+            // `BlockPos` derives no `PartialEq`, so compare field-wise.
+            assert_eq!(pos.get_x(), golden_at[i].get_x(), "at/above write #{i} x");
+            assert_eq!(pos.get_y(), golden_at[i].get_y(), "at/above write #{i} y");
+            assert_eq!(pos.get_z(), golden_at[i].get_z(), "at/above write #{i} z");
         }
     }
 
