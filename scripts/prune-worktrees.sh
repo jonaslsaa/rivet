@@ -176,7 +176,7 @@ main() {
     git -C "$MAIN" fetch origin main -q 2>/dev/null || true
   fi
 
-  while read -r wt; do
+  while IFS=$'\t' read -r wt lock; do
     [ "$wt" = "$MAIN" ] && continue
     [ -d "$wt" ] || continue
 
@@ -192,8 +192,13 @@ main() {
     git -C "$wt" merge-base --is-ancestor "$head" origin/main 2>/dev/null && merged=merged
     state="${dirty:+dirty, }${merged:-unmerged}"
     [ -n "$status_fail" ] && state="status probe failed"
+    # A locked worktree is not removable: `git worktree remove --force` refuses a
+    # lock (only remove -f -f overrides), so the sweep must report it as kept
+    # rather than count a removal a real run cannot do. The lock reason comes
+    # from the porcelain "locked" field (prefix * matches `git worktree list`).
+    [ -n "$lock" ] && state="${state:+$state, }locked"
 
-    if [ -z "$status_fail" ] && [ -z "$dirty" ] && [ -n "$merged" ]; then
+    if [ -z "$status_fail" ] && [ -z "$dirty" ] && [ -n "$merged" ] && [ -z "$lock" ]; then
       kb=$(dir_kb "$wt")
       say "$(act REMOVE) $wt  [$branch: clean, merged, $((kb / 1024))MB]"
       if run git -C "$MAIN" worktree remove --force "$wt"; then
@@ -229,7 +234,11 @@ main() {
     else
       say "KEEP   $wt  [$branch: $state, no build caches]"
     fi
-  done < <(git -C "$MAIN" worktree list --porcelain | awk '/^worktree /{print substr($0,10)}')
+  done < <(git -C "$MAIN" worktree list --porcelain | awk '
+    /^worktree /{if (p != "") print p; p = substr($0, 10); r = ""; next}
+    /^locked/{if (p != "") {r = substr($0, 7); print p "\t*" r; p = ""; next}}
+    {next}
+    END{if (p != "") print p}')
 
   run git -C "$MAIN" worktree prune
 

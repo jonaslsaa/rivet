@@ -540,6 +540,38 @@ echo "$out" | grep -q "note: 1 branch ref(s) left in place" || fail "stranded: m
 git -C "$E2E4/main" branch --list feature/stranded | grep -q . || fail "stranded: branch was force-deleted"
 pass "e2e refused branch -d is reported and the ref survives (never force-deleted)"
 
+# --- e2e: a locked worktree is never counted as removed ------------------------
+# `git worktree remove --force` refuses a locked worktree (only remove -f -f
+# overrides), so the sweep must report it as kept — not WOULD REMOVE/REMOVE and
+# not a removal count a real run cannot perform. Both the dry run and the real
+# run must leave the locked worktree, its branch, and its lock intact.
+E2E5="$SANDBOX/e2e5"
+mkdir -p "$E2E5/main"
+git init -q "$E2E5/main"
+git -C "$E2E5/main" config user.email test@example.com
+git -C "$E2E5/main" config user.name "test"
+git -C "$E2E5/main" config commit.gpgsign false
+printf 'x\n' > "$E2E5/main/a.txt"
+git -C "$E2E5/main" add a.txt
+git -C "$E2E5/main" commit -qm c1
+git -C "$E2E5/main" update-ref refs/remotes/origin/main HEAD
+git -C "$E2E5/main" worktree add -q -b feature/locked "$E2E5/wt" HEAD
+git -C "$E2E5/wt" worktree lock "$E2E5/wt" --reason "active manual work"
+cd "$E2E5/main"
+out=$(bash "$SCRIPT_DIR/prune-worktrees.sh" --dry-run --no-tmp 2>&1)
+echo "$out" | grep -q "KEEP .*feature/locked.*locked" || fail "locked e2e dry-run missing locked KEEP line: $out"
+echo "$out" | grep -q "WOULD REMOVE .*feature/locked" && fail "locked e2e dry-run claimed a WOULD REMOVE: $out"
+echo "$out" | grep -q "would remove 0 worktree(s)" || fail "locked e2e dry-run counted a removal it cannot do: $out"
+[ -d "$E2E5/wt" ] || fail "locked e2e dry-run removed the locked worktree"
+git -C "$E2E5/wt" worktree list --porcelain | grep -q "^locked" || fail "locked e2e dry-run dropped the lock"
+pass "e2e locked worktree: dry-run reports kept, counts no removal"
+out=$(bash "$SCRIPT_DIR/prune-worktrees.sh" --no-tmp 2>&1)
+echo "$out" | grep -q "KEEP .*feature/locked.*locked" || fail "locked e2e real run missing locked KEEP line: $out"
+[ -d "$E2E5/wt" ] || fail "locked e2e real run removed the locked worktree"
+git -C "$E2E5/main" branch --list feature/locked | grep -q . || fail "locked e2e real run deleted the locked branch"
+git -C "$E2E5/wt" worktree list --porcelain | grep -q "^locked" || fail "locked e2e real run dropped the lock"
+pass "e2e locked worktree: real run keeps worktree, branch, and lock"
+
 # --- zsh: sourcing + classification works (no failglob abort) ----------------
 if command -v zsh >/dev/null 2>&1; then
   zrc=0
