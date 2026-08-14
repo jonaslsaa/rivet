@@ -10,13 +10,31 @@
 //! `WorldGenSettings extends SavedData` and exposes `TYPE` — a
 //! `SavedDataType<WorldGenSettings>` over the `SavedData`/`SavedDataType`
 //! base and the `DataFixTypes` value-identity enum from the
-//! `mc.world.level.saveddata` unit (RivetTodo #421, now ported). The `TYPE`
-//! handle is a `LazyLock` static mirroring Java's `static final TYPE`. Its
-//! constructor supplier builds the default `WorldOptions` plus an empty
-//! `WorldDimensions` — exactly what Java's `TYPE` passes — so invoking the
-//! constructor panics with "Overworld settings missing", matching Java's
-//! `WorldDimensions` compact constructor `IllegalStateException` for the same
-//! supplier.
+//! `mc.world.level.saveddata` unit (deferral #421, closed by that unit). The
+//! `TYPE` handle is a `LazyLock` static mirroring Java's `static final TYPE`.
+//! Its constructor supplier builds the default
+//! `WorldOptions` plus an empty `WorldDimensions` — exactly what Java's `TYPE`
+//! passes — so invoking the constructor panics with "Overworld settings
+//! missing", matching Java's `WorldDimensions` compact constructor
+//! `IllegalStateException` for the same supplier.
+//!
+//! ### The inherited `SavedData` base
+//!
+//! Java's `WorldGenSettings` inherits `SavedData`'s `boolean dirty` +
+//! `setDirty()`/`setDirty(boolean)`/`isDirty()`. The port does **not** embed
+//! the base field: it is structurally and observably dead on this value.
+//! `WorldGenSettings` is immutable (`private final` `options`/`dimensions`, no
+//! setters), its `hashCode` is overridden as `Objects.hash(options, dimensions)`
+//! (dirty excluded), it does not override `equals` (reference identity), and
+//! its storage goes straight through `WorldGenSettings.CODEC` —
+//! `LevelStorageSource.readExistingSavedData` (`savedDataType.codec().parse(...)`)
+//! and `writeSavedData` (`codec.encodeStart(...)`) never read the flag, and no
+//! consumer anywhere in Paper calls `isDirty`/`setDirty` on a `WorldGenSettings`.
+//! Embedding the base would add an always-false, never-read `bool`. (Compare the
+//! mutable saved-data payloads `WeatherData`/`WanderingTraderData`, which embed
+//! the base because their dirty-marking setters and the ServerLevel storage
+//! runtime make it observable.) Java's `hashCode`/`toString` are likewise not
+//! ported for the same reason — no consumer observes them.
 //!
 //! ### The codec seam
 //!
@@ -25,10 +43,6 @@
 //! `world_dimensions`/`level_stem`), so the settings round-trip is unavailable
 //! until the `mc.world.level.dimension`/`mc.world.level.chunk.generator` units
 //! land; the record structure is faithful and tested.
-//!
-//! Java's `hashCode`/`toString` are not ported: `Objects.hash(options,
-//! dimensions)` combines Java identity/record hashes that the port's value
-//! model does not reproduce, and no consumer observes them.
 
 use crate::level::saveddata::saved_data_type::SavedDataType;
 use crate::level::saveddata::stub_data_fix_types::DataFixTypes;

@@ -77,10 +77,11 @@ impl<T> SavedDataType<T> {
     }
 }
 
-impl<T> PartialEq for SavedDataType<T> {
+impl<T, U> PartialEq<SavedDataType<U>> for SavedDataType<T> {
     /// `SavedDataType.equals(Object)` — equal when the other is a
-    /// `SavedDataType<?>` with the same `id`.
-    fn eq(&self, other: &Self) -> bool {
+    /// `SavedDataType<?>` with the same `id`; the `T`/`U` payload types do not
+    /// participate.
+    fn eq(&self, other: &SavedDataType<U>) -> bool {
         self.id == other.id
     }
 }
@@ -123,12 +124,24 @@ mod tests {
     #[test]
     fn equality_is_id_bound_not_component_identity() {
         // Java `SavedDataType.equals` compares only the id; the `TYPE` static
-        // and a fresh equivalent value share the id but hold distinct
+        // and a fresh same-id value share the id but hold distinct
         // constructor/codec Arcs.
         let a: &SavedDataType<WeatherData> = &weather_data::TYPE;
-        let b: &SavedDataType<WeatherData> = &weather_data::TYPE;
-        assert_eq!(a, b, "same id must compare equal despite distinct codecs");
-        assert_eq!(hash_of(a), hash_of(b), "hashCode delegates to id");
+        let fresh_same_id = SavedDataType::new(
+            Identifier::with_default_namespace("weather"),
+            Arc::new(WeatherData::new),
+            WeatherData::codec::<rivet_nbt::nbt_ops::NbtOps>(),
+            DataFixTypes::SavedDataWeather,
+        );
+        assert_eq!(
+            a, &fresh_same_id,
+            "same id must compare equal despite distinct codecs"
+        );
+        assert_eq!(
+            hash_of(a),
+            hash_of(&fresh_same_id),
+            "hashCode delegates to id"
+        );
 
         // A same-shape type with a different id is not equal.
         let different_id = SavedDataType::new(
@@ -138,6 +151,27 @@ mod tests {
             DataFixTypes::SavedDataWeather,
         );
         assert_ne!(a, &different_id, "different ids must not compare equal");
+    }
+
+    #[test]
+    fn equality_is_cross_generic_by_id() {
+        // Java `equals` is `obj instanceof SavedDataType<?> type && id.equals`
+        // — a WeatherData handle and a WanderingTraderData handle sharing the
+        // same id compare equal despite different payload types.
+        use crate::level::saveddata::wandering_trader_data::WanderingTraderData;
+
+        let weather: &SavedDataType<WeatherData> = &weather_data::TYPE;
+        let cross_payload = SavedDataType::new(
+            Identifier::with_default_namespace("weather"),
+            Arc::new(WanderingTraderData::new),
+            WanderingTraderData::codec::<rivet_nbt::nbt_ops::NbtOps>(),
+            DataFixTypes::SavedDataWanderingTrader,
+        );
+        assert_eq!(
+            weather, &cross_payload,
+            "same id across payload types must compare equal"
+        );
+        assert_eq!(hash_of(weather), hash_of(&cross_payload));
     }
 
     #[test]

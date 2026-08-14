@@ -13,11 +13,12 @@
 //! codecs, and `SavedDataType` handles the runtime will call.
 //!
 //! `DataFixTypes` is the `mc.util.datafix` unit's enum; this unit declares the
-//! variants the payloads reference (`SAVED_DATA_WEATHER`,
-//! `SAVED_DATA_WANDERING_TRADER`, and — for the `mc.world.level.levelgen.
-//! settings` unit's `WorldGenSettings.TYPE` — `SAVED_DATA_WORLD_GEN_SETTINGS`)
-//! plus the reserved `NONE` Paper no-op as a value-identity stub (see
-//! [`stub_data_fix_types`]).
+//! variants its consumers reference (`SAVED_DATA_WEATHER`,
+//! `SAVED_DATA_WANDERING_TRADER`, `SAVED_DATA_WORLD_GEN_SETTINGS` for the
+//! `mc.world.level.levelgen.settings` unit's `WorldGenSettings.TYPE`, and
+//! `SAVED_DATA_WORLD_BORDER` for the #612 `WorldBorder` saved-data) plus the
+//! reserved `NONE` Paper no-op as a value-identity stub (see
+//! [`stub_data_fix_types`]). This is not the full Java enum.
 
 pub mod saved_data;
 pub mod saved_data_type;

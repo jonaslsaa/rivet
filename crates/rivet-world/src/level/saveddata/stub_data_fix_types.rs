@@ -3,14 +3,15 @@
 //! (`SAVED_DATA_WEATHER`, `SAVED_DATA_WANDERING_TRADER`, ...).
 //!
 //! The real port is owned by the pending `mc.util.datafix` unit
-//! (rivet-util). This unit's payloads reference the variants
-//! `WanderingTraderData`/`WeatherData` use (`SAVED_DATA_WANDERING_TRADER` /
-//! `SAVED_DATA_WEATHER`) plus `SAVED_DATA_WORLD_GEN_SETTINGS`, which the
-//! `mc.world.level.levelgen.settings` unit's `WorldGenSettings.TYPE` consumes;
-//! the `NONE` Paper no-op variant is additionally declared for parity with the
-//! future `mc.util.datafix` port but is not used by any value in this unit.
-//! The stub declares the enum's variant surface as a value-identity enum
-//! without the DFU machinery; the owning unit's port replaces it wholesale.
+//! (rivet-util). This unit declares the variant surface its consumers need —
+//! the payloads `WanderingTraderData`/`WeatherData` use
+//! (`SAVED_DATA_WANDERING_TRADER` / `SAVED_DATA_WEATHER`),
+//! `SAVED_DATA_WORLD_GEN_SETTINGS` (the `WorldGenSettings.TYPE` handle,
+//! `mc.world.level.levelgen.settings`), and `SAVED_DATA_WORLD_BORDER` (the
+//! `mc.world.level.border` `WorldBorder` saved-data, #612) — plus the `NONE`
+//! Paper no-op. This is not the full Java enum (many other variants remain
+//! absent, e.g. `LEVEL`, `PLAYER`, `CHUNK`); the stub is replaced wholesale
+//! when `mc.util.datafix` lands.
 
 /// `net.minecraft.util.datafix.DataFixTypes` — value-identity only.
 ///
@@ -28,4 +29,26 @@ pub enum DataFixTypes {
     /// `References.SAVED_DATA_WORLD_GEN_SETTINGS` — consumed by the
     /// `WorldGenSettings.TYPE` handle (`mc.world.level.levelgen.settings`).
     SavedDataWorldGenSettings,
+    /// `References.SAVED_DATA_WORLD_BORDER` — the `WorldBorder` saved-data
+    /// (`mc.world.level.border`, #612).
+    SavedDataWorldBorder,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn world_border_variant_is_scoped_and_distinct() {
+        // `SAVED_DATA_WORLD_BORDER` is a distinct value-identity variant the
+        // #612 `WorldBorder` saved-data will consume.
+        assert_ne!(
+            DataFixTypes::SavedDataWorldBorder,
+            DataFixTypes::SavedDataWorldGenSettings
+        );
+        assert_ne!(
+            DataFixTypes::SavedDataWorldBorder,
+            DataFixTypes::SavedDataWeather
+        );
+    }
 }
