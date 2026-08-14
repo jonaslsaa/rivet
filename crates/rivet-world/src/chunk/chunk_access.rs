@@ -128,6 +128,12 @@ where
     block_nibbles: Vec<SwmrNibbleArray>,
     /// Starlight's sky-light nibbles with the same light-section indexing.
     sky_nibbles: Vec<SwmrNibbleArray>,
+    /// `StarlightChunk.starlight$getSkyEmptinessMap()` — the per-section sky
+    /// emptiness map (world-section indexed, lowest first). `None` before the
+    /// sky engine has computed it (Java's null); `light_chunk` derives it from
+    /// the empty-section mask and publishes it here. `getDataLayerData` returns
+    /// null until it is set.
+    sky_emptiness_map: Option<Vec<bool>>,
     /// The per-state behavior flags the heightmap predicates need. Java's
     /// `Heightmap` holds a `ChunkAccess` and calls `state.isAir()`/
     /// `state.blocksMotion()`/`getFluidState()`/`instanceof LeavesBlock`; the
@@ -205,6 +211,7 @@ where
             heightmaps: [None, None, None, None, None, None],
             block_nibbles: filled_empty_light(light_section_count),
             sky_nibbles: filled_empty_light(light_section_count),
+            sky_emptiness_map: None,
             resolve,
         }
     }
@@ -562,6 +569,16 @@ where
         self.sky_nibbles = nibbles;
     }
 
+    /// `StarlightChunk.starlight$getSkyEmptinessMap()`.
+    pub fn sky_emptiness_map(&self) -> Option<&[bool]> {
+        self.sky_emptiness_map.as_deref()
+    }
+
+    /// `StarlightChunk.starlight$setSkyEmptinessMap(Boolean[])`.
+    pub fn set_sky_emptiness_map(&mut self, map: Option<Vec<bool>>) {
+        self.sky_emptiness_map = map;
+    }
+
     /// `ChunkAccess.getNoiseBiome(int, int, int)` — Paper's get-block-chunk
     /// optimisation: `sectionY = (quartY >> 2) - minSection`, with the quart
     /// relative Y clamped to the section stack and the section's `getNoiseBiome`
@@ -876,6 +893,7 @@ where
             heightmaps,
             block_nibbles,
             sky_nibbles,
+            sky_emptiness_map,
             resolve: _,
         } = self;
         let factory = PalettedContainerFactory::new(
@@ -905,6 +923,7 @@ where
         base.pending_block_entities = pending_block_entities;
         base.block_nibbles = block_nibbles;
         base.sky_nibbles = sky_nibbles;
+        base.sky_emptiness_map = sky_emptiness_map;
         for (index, heightmap) in heightmaps.into_iter().enumerate() {
             if let Some(heightmap) = heightmap {
                 base.heightmaps[index] = Some(heightmap);

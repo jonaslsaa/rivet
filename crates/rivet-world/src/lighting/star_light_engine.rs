@@ -6,9 +6,9 @@
 //! mask with the pure static `StarLightEngine.getEmptySectionsForChunk` and
 //! pass it to the [`StarLightProvider`] ops; that static is ported here. The
 //! propagation engines themselves (the sky/block `StarLightEngine`s and their
-//! graph/nibble work) defer with the `ca.spottedleaf.moonrise.patches
-//! .starlight.light` unit in `rivet-server` (RivetTodo #184) — today
-//! `rivet-server` ships `StubStarLightProvider`, a no-op.
+//! graph/nibble work) live in `rivet-server` (RivetTodo #184): the sky engine
+//! is ported (`star_light_engine::SkyStarLightEngine`) and driven by the
+//! `SkyLightProvider`; the block engine and the light queue defer.
 //!
 //! [`StarLightProvider`]: crate::lighting::star_light_provider::StarLightProvider
 

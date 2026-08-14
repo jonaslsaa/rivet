@@ -50,7 +50,7 @@ use crate::levelgen::carver::CarveChunk;
 use crate::levelgen::heightmap::{Heightmap, StateFlags, Types};
 use crate::levelgen::surface_rules::ChunkSurface;
 use crate::lighting::swmr_nibble_array::SwmrNibbleArray;
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::core::{BlockPos, ChunkPos, SectionPos};
@@ -437,6 +437,70 @@ where
     /// `ChunkAccess.getUpgradeData()`.
     pub fn get_upgrade_data(&self) -> &UpgradeData {
         self.base.get_upgrade_data()
+    }
+
+    /// `ChunkAccess.getStartForStructure(Structure)` — delegate to the base's
+    /// `StructureAccess` (the `i64` stand-in for the unported `StructureStart`,
+    /// #369).
+    pub fn get_start_for_structure(&self, structure: &S) -> Option<i64> {
+        self.base.get_start_for_structure(structure)
+    }
+
+    /// `ChunkAccess.setStartForStructure(Structure, StructureStart)` — delegate
+    /// (the base marks the chunk unsaved).
+    pub fn set_start_for_structure(&mut self, structure: S, start: i64) {
+        self.base.set_start_for_structure(structure, start);
+    }
+
+    /// `ChunkAccess.getAllStarts()` — the base's typed structure-starts
+    /// authority. Java's promotion copies it wholesale
+    /// (`setAllStarts(protoChunk.getAllStarts())`).
+    pub fn get_all_starts(&self) -> &std::collections::HashMap<S, i64> {
+        self.base.get_all_starts()
+    }
+
+    /// `ChunkAccess.setAllStarts(Map)` — clear + putAll, then marks unsaved.
+    pub fn set_all_starts(&mut self, starts: std::collections::HashMap<S, i64>) {
+        self.base.set_all_starts(starts);
+    }
+
+    /// `ChunkAccess.getReferencesForStructure(Structure)` — delegate.
+    pub fn get_references_for_structure<'a>(
+        &'a self,
+        structure: &'a S,
+    ) -> impl Iterator<Item = &'a u64> + 'a {
+        self.base.get_references_for_structure(structure)
+    }
+
+    /// `ChunkAccess.addReferenceForStructure(Structure, long)` — delegate.
+    pub fn add_reference_for_structure(&mut self, structure: S, reference: u64) {
+        self.base.add_reference_for_structure(structure, reference);
+    }
+
+    /// `ChunkAccess.getAllReferences()` — the insertion-ordered runtime
+    /// authority (#537).
+    pub fn get_all_references(&self) -> &IndexMap<S, IndexSet<u64>> {
+        self.base.get_all_references()
+    }
+
+    /// `ChunkAccess.setAllReferences(Map)` — delegate. Java's promotion copies
+    /// the reference map wholesale (`setAllReferences(protoChunk.getAllReferences())`).
+    pub fn set_all_references<I: IntoIterator<Item = (S, Vec<u64>)>>(&mut self, data: I) {
+        self.base.set_all_references(data);
+    }
+
+    /// Consume the proto and return its `ChunkAccess` base.
+    ///
+    /// Java's promotion path (`new LevelChunk(ServerLevel, ProtoChunk,
+    /// PostLoadProcessor)`) hands the proto's owned base state — sections,
+    /// heightmaps, light nibbles, flags, inhabited time, pending block
+    /// entities, post-processing, structure access — to the `LevelChunk`
+    /// constructor; the port keeps that a value move. The proto-only fields
+    /// (`entities`, `status`, `carvingMask`) are not part of the base and are
+    /// dropped by the caller's typed refusal when the persisted status is not
+    /// genuine `FULL` (see the server `LevelChunk::try_from_full_proto`).
+    pub fn into_base(self) -> ChunkAccess<T, B, S> {
+        self.base
     }
 }
 

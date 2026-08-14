@@ -110,6 +110,25 @@ where
         LevelChunk { base, air }
     }
 
+    /// Wrap an already-built `ChunkAccess` base as a loaded chunk, priming the
+    /// absent `FINAL_HEIGHTMAPS` entries (the `ChunkStatus.FULL.heightmapsAfter()`
+    /// set) as unprimed — the same priming `new` performs, and the half of
+    /// Java's promotion `new LevelChunk(ServerLevel, ProtoChunk,
+    /// PostLoadProcessor)` constructor the port's server conversion relies on
+    /// after the proto's base has been value-mapped into the server value pair.
+    ///
+    /// An entry that is already primed (the value-map preserved it) is left
+    /// untouched — this mirrors `getOrCreateHeightmapUnprimed`'s
+    /// `computeIfAbsent`, so a caller who wants the FINAL set materialized on a
+    /// base that already carries them gets the existing data, never a reset.
+    pub fn from_base(base: ChunkAccess<T, B, S>, air: T) -> Self {
+        let mut base = base;
+        for ty in FINAL_HEIGHTMAPS {
+            base.get_or_create_heightmap_unprimed(ty);
+        }
+        LevelChunk { base, air }
+    }
+
     /// Value-transform every block state and biome, preserving all other chunk
     /// state (sections, heightmaps, light nibbles, pending block entities,
     /// post-processing, flags). The #516 server bridge uses this to convert the
@@ -693,5 +712,75 @@ mod tests {
         // The stone section is a 4-bit linear palette [air, stone]: its
         // serialized size is nonzero, so the buffer is not empty.
         assert!(!buffer.is_empty());
+    }
+
+    /// `from_base` wraps a `ChunkAccess` without resetting anything: a heightmap
+    /// the base already carries is preserved (never reset to the all-zero `new`
+    /// priming), the absent `FINAL_HEIGHTMAPS` entries are primed as unprimed,
+    /// and the base's inhabited time/light-correct flag survive. This is the
+    /// consumer the server `LevelChunk::try_from_full_proto` relies on after the
+    /// proto's base has been value-mapped into the server value pair.
+    #[test]
+    fn from_base_preserves_base_state_and_primes_only_missing_final_heightmaps() {
+        // Build a raw `ChunkAccess` — unlike `LevelChunk::new`, it does NOT
+        // prime the FINAL_HEIGHTMAPS entries.
+        let mut sections = Vec::with_capacity(24);
+        sections.push(LevelChunkSection::new(
+            PalettedContainer::new(0u8, block_strategy()),
+            PalettedContainer::new(0u8, biome_strategy()),
+            is_air,
+            is_randomly_ticking,
+            fluid_is_empty,
+            fluid_is_randomly_ticking,
+            is_special_colliding,
+        ));
+        for _ in 1..24 {
+            sections.push(LevelChunkSection::new(
+                PalettedContainer::new(0u8, block_strategy()),
+                PalettedContainer::new(0u8, biome_strategy()),
+                is_air,
+                is_randomly_ticking,
+                fluid_is_empty,
+                fluid_is_randomly_ticking,
+                is_special_colliding,
+            ));
+        }
+        let mut base: ChunkAccess<u8, u8, &'static str> = ChunkAccess::new(
+            ChunkPos::ZERO,
+            UpgradeData::empty(24),
+            accessor(),
+            &factory(),
+            0,
+            Some(sections),
+            &|s: &u8| StateFlags {
+                is_air: *s == 0,
+                blocks_motion: *s != 0,
+                has_fluid: false,
+                is_leaves: false,
+            },
+        );
+        let raw: Vec<i64> = {
+            let mut v = vec![0x0040_2010_0804_0201i64; 36];
+            v.push(0x0000_0000_0804_0201i64);
+            v
+        };
+        // Prime one FINAL heightmap with real data before wrapping; the rest
+        // are absent (ChunkAccess::new does not prime).
+        base.set_heightmap(Types::WorldSurface, &raw);
+        assert!(!base.heightmaps()[Types::MotionBlocking as usize].is_some());
+        base.set_inhabited_time(42);
+        base.set_light_correct(true);
+
+        let mut chunk = LevelChunk::from_base(base, 0u8);
+
+        // The pre-existing WorldSurface data is preserved, not reset.
+        assert_eq!(chunk.get_height_at(Types::WorldSurface, 3, 7), -64);
+        // The previously-absent MotionBlocking entry was primed (unprimed).
+        assert!(chunk.heightmaps()[Types::MotionBlocking as usize].is_some());
+        // A read through the unprimed entry yields the unprimed (all-zero) value.
+        assert_eq!(chunk.get_height_at(Types::MotionBlocking, 0, 0), -65);
+
+        assert_eq!(chunk.get_inhabited_time(), 42);
+        assert!(chunk.is_light_correct());
     }
 }
