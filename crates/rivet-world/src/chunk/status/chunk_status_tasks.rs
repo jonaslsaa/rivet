@@ -7,8 +7,11 @@
 //! `mc.world.level.chunk.generator` wave, so the STRUCTURE_STARTS and
 //! STRUCTURE_REFERENCES bodies are pass-throughs here, and the BIOMES/NOISE
 //! bodies are the seam hooks invoked by the `WorldGenContext` executor. The
-//! `ChunkStatusTask` enum preserves the Java method-name identities for
-//! greppability.
+//! INITIALIZE_LIGHT/LIGHT bodies dispatch through the `StarLightProvider` seam
+//! in the executor (`world_gen_context.rs::run_light_task`); the pure
+//! `StarLightEngine.getEmptySectionsForChunk` static they both consume lives in
+//! `crate::lighting::star_light_engine`. The `ChunkStatusTask` enum preserves
+//! the Java method-name identities for greppability.
 
 use crate::chunk::proto_chunk::ProtoChunk;
 
