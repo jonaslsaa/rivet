@@ -26,6 +26,7 @@ use rivet_registry::biome_id::BiomeId;
 use rivet_registry::block_state::BlockState;
 use rivet_registry::core::BlockPos;
 use rivet_registry::core::Direction;
+use rivet_registry::fluid_id::FluidId;
 use rivet_registry::holder::Holder;
 
 /// `net.minecraft.world.level.WorldGenLevel` — the world generation level.
@@ -175,5 +176,30 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     /// registries and override.
     fn registry_access(&self) -> RegistryAccess {
         panic!("WorldGenLevel.registryAccess is not implemented (RivetTodo #232)")
+    }
+
+    /// `LevelReader.isStateAtPosition(BlockPos, Predicate<BlockState>)` — the
+    /// state-testing seam the foliage-placer slice consumes
+    /// (`FoliagePlacer.tryPlaceLeaf`, `tree_feature::valid_tree_pos`).
+    ///
+    /// The default resolves the offset state through the `get_block_state`
+    /// seam and applies the predicate, so the read is exactly
+    /// `get_block_state`'s (`WorldGenRegion` provides it on the gated chunk
+    /// read).
+    fn is_state_at_position(&self, pos: &BlockPos, test: &dyn Fn(&BlockState) -> bool) -> bool {
+        test(&self.get_block_state(pos))
+    }
+
+    /// `LevelReader.isFluidAtPosition(BlockPos, Predicate<FluidState>)` — the
+    /// fluid-state-testing seam the foliage-placer slice consumes
+    /// (`FoliagePlacer.tryPlaceLeaf` waterlogging decision).
+    ///
+    /// The default resolves the position's fluid through the `get_block_state`
+    /// seam (`BlockState.fluid_id()`, the state's fluid registry id) and
+    /// applies the predicate — the same `get_block_state` read `WorldGenRegion`
+    /// provides (the gated chunk read).
+    fn is_fluid_at_position(&self, pos: &BlockPos, test: &dyn Fn(&FluidId) -> bool) -> bool {
+        let state = self.get_block_state(pos);
+        test(&FluidId::from_id(state.fluid_id()))
     }
 }
