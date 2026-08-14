@@ -3,13 +3,14 @@
 //! (`SAVED_DATA_WEATHER`, `SAVED_DATA_WANDERING_TRADER`, ...).
 //!
 //! The real port is owned by the pending `mc.util.datafix` unit
-//! (rivet-util). This unit's payloads reference the two variants
+//! (rivet-util). This unit's payloads reference the variants
 //! `WanderingTraderData`/`WeatherData` use (`SAVED_DATA_WANDERING_TRADER` /
-//! `SAVED_DATA_WEATHER`); the `NONE` Paper no-op variant is additionally
-//! declared for parity with the future `mc.util.datafix` port but is not used
-//! by any value in this unit. The stub declares the enum's variant surface as
-//! a value-identity enum without the DFU machinery; the owning unit's port
-//! replaces it wholesale.
+//! `SAVED_DATA_WEATHER`) plus `SAVED_DATA_WORLD_GEN_SETTINGS`, which the
+//! `mc.world.level.levelgen.settings` unit's `WorldGenSettings.TYPE` consumes;
+//! the `NONE` Paper no-op variant is additionally declared for parity with the
+//! future `mc.util.datafix` port but is not used by any value in this unit.
+//! The stub declares the enum's variant surface as a value-identity enum
+//! without the DFU machinery; the owning unit's port replaces it wholesale.
 
 /// `net.minecraft.util.datafix.DataFixTypes` — value-identity only.
 ///
@@ -24,4 +25,7 @@ pub enum DataFixTypes {
     SavedDataWanderingTrader,
     /// `References.SAVED_DATA_WEATHER`.
     SavedDataWeather,
+    /// `References.SAVED_DATA_WORLD_GEN_SETTINGS` — consumed by the
+    /// `WorldGenSettings.TYPE` handle (`mc.world.level.levelgen.settings`).
+    SavedDataWorldGenSettings,
 }

@@ -18,13 +18,14 @@ pub use crate::level::saveddata::stub_data_fix_types::DataFixTypes;
 /// Java is a record `SavedDataType<T extends SavedData>(Identifier id,
 /// Supplier<T> constructor, Codec<T> codec, DataFixTypes dataFixType)` with
 /// final (immutable) components. The components are private with read
-/// accessors, so the `id` that `PartialEq`/`Eq`/`Hash` are derived over cannot
-/// be mutated after the value is placed in a map/set. Java's `T extends
-/// SavedData` bound is not enforceable while `SavedData` is a plain struct, so
-/// any `T` is accepted. The `Supplier<T>`/`Codec<T>` are carried as `Arc`s so
-/// the value can be shared cheaply. `type_()` builds a fresh equivalent value
-/// per call rather than reproducing Java's `static final` `TYPE` singletons —
-/// equality is by `id` only, so the fresh values are identical.
+/// accessors, mirroring the record's immutability: the `id` that
+/// `PartialEq`/`Eq`/`Hash` are implemented over cannot be mutated after the
+/// value is placed in a map/set. Java's `T extends SavedData` bound is not
+/// enforceable while `SavedData` is a plain struct, so any `T` is accepted.
+/// The `Supplier<T>`/`Codec<T>` are carried as `Arc`s so the value can be
+/// shared cheaply. Value units expose their `TYPE` as a `LazyLock` static
+/// mirroring Java's `static final` singleton; equality is by `id` only, so a
+/// fresh equivalent value would be identical.
 pub struct SavedDataType<T> {
     /// Java `Identifier id` — the filename/type identity (e.g.
     /// `minecraft:wandering_trader`).
@@ -109,7 +110,7 @@ impl<T> std::fmt::Debug for SavedDataType<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::level::saveddata::weather_data::WeatherData;
+    use crate::level::saveddata::weather_data::{self, WeatherData};
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -121,12 +122,13 @@ mod tests {
 
     #[test]
     fn equality_is_id_bound_not_component_identity() {
-        // Java `SavedDataType.equals` compares only the id; two fresh `TYPE`
-        // values share the id but hold distinct constructor/codec Arcs.
-        let a = WeatherData::type_();
-        let b = WeatherData::type_();
+        // Java `SavedDataType.equals` compares only the id; the `TYPE` static
+        // and a fresh equivalent value share the id but hold distinct
+        // constructor/codec Arcs.
+        let a: &SavedDataType<WeatherData> = &weather_data::TYPE;
+        let b: &SavedDataType<WeatherData> = &weather_data::TYPE;
         assert_eq!(a, b, "same id must compare equal despite distinct codecs");
-        assert_eq!(hash_of(&a), hash_of(&b), "hashCode delegates to id");
+        assert_eq!(hash_of(a), hash_of(b), "hashCode delegates to id");
 
         // A same-shape type with a different id is not equal.
         let different_id = SavedDataType::new(
@@ -135,12 +137,12 @@ mod tests {
             WeatherData::codec::<rivet_nbt::nbt_ops::NbtOps>(),
             DataFixTypes::SavedDataWeather,
         );
-        assert_ne!(a, different_id, "different ids must not compare equal");
+        assert_ne!(a, &different_id, "different ids must not compare equal");
     }
 
     #[test]
     fn display_prints_only_the_id() {
-        let t = WeatherData::type_();
+        let t: &SavedDataType<WeatherData> = &weather_data::TYPE;
         assert_eq!(t.to_string(), "SavedDataType[minecraft:weather]");
         assert_eq!(format!("{t:?}"), "SavedDataType[minecraft:weather]");
     }

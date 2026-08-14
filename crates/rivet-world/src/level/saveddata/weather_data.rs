@@ -41,7 +41,7 @@ use rivet_registry::Identifier;
 use rivet_serialization::codec;
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 /// `net.minecraft.world.level.saveddata.WeatherData`.
 #[derive(Debug, Clone)]
@@ -124,21 +124,6 @@ impl WeatherData {
                 ))
                 .apply(instance, Arc::new(WeatherData::new_with))
         })
-    }
-
-    /// `WeatherData.TYPE` — `new SavedDataType<>(
-    /// Identifier.withDefaultNamespace("weather"), WeatherData::new, CODEC,
-    /// DataFixTypes.SAVED_DATA_WEATHER)`. The codec slot is the NbtOps-pinned
-    /// codec the disk runtime uses. Unlike Java's `static final TYPE`
-    /// singleton, this builds a fresh equivalent value per call (equality is
-    /// by `id` only, so the values are identical).
-    pub fn type_() -> SavedDataType<WeatherData> {
-        SavedDataType::new(
-            Identifier::with_default_namespace("weather"),
-            Arc::new(WeatherData::new),
-            WeatherData::codec::<rivet_nbt::nbt_ops::NbtOps>(),
-            DataFixTypes::SavedDataWeather,
-        )
     }
 
     /// `getClearWeatherTime()`.
@@ -232,6 +217,20 @@ impl WeatherData {
         self.base.set_dirty_flag(dirty);
     }
 }
+
+/// `WeatherData.TYPE` — `new SavedDataType<>(
+/// Identifier.withDefaultNamespace("weather"), WeatherData::new, CODEC,
+/// DataFixTypes.SAVED_DATA_WEATHER)`. The codec slot is the NbtOps-pinned
+/// codec the disk runtime uses. Java's `static final TYPE` singleton is a
+/// `LazyLock` static in the port.
+pub static TYPE: LazyLock<SavedDataType<WeatherData>> = LazyLock::new(|| {
+    SavedDataType::new(
+        Identifier::with_default_namespace("weather"),
+        Arc::new(WeatherData::new),
+        WeatherData::codec::<rivet_nbt::nbt_ops::NbtOps>(),
+        DataFixTypes::SavedDataWeather,
+    )
+});
 
 impl Default for WeatherData {
     fn default() -> Self {
@@ -372,7 +371,7 @@ mod tests {
 
     #[test]
     fn type_has_expected_identity() {
-        let t = WeatherData::type_();
+        let t: &SavedDataType<WeatherData> = &TYPE;
         assert_eq!(t.id().to_string(), "minecraft:weather");
         assert_eq!(t.data_fix_type(), DataFixTypes::SavedDataWeather);
         assert_eq!(t.to_string(), "SavedDataType[minecraft:weather]");

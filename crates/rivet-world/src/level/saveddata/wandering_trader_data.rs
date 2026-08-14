@@ -13,7 +13,7 @@ use rivet_registry::Identifier;
 use rivet_serialization::codec;
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 /// `WanderingTraderData.spawn_delay` default — `24000`.
 pub const DEFAULT_SPAWN_DELAY: i32 = 24000;
@@ -79,22 +79,6 @@ impl WanderingTraderData {
         })
     }
 
-    /// `WanderingTraderData.TYPE` — `new SavedDataType<>(
-    /// Identifier.withDefaultNamespace("wandering_trader"),
-    /// WanderingTraderData::new, CODEC,
-    /// DataFixTypes.SAVED_DATA_WANDERING_TRADER)`. The codec slot is the
-    /// NbtOps-pinned codec the disk runtime uses. Unlike Java's `static final
-    /// TYPE` singleton, this builds a fresh equivalent value per call (equality
-    /// is by `id` only, so the values are identical).
-    pub fn type_() -> SavedDataType<WanderingTraderData> {
-        SavedDataType::new(
-            Identifier::with_default_namespace("wandering_trader"),
-            Arc::new(WanderingTraderData::new),
-            WanderingTraderData::codec::<rivet_nbt::nbt_ops::NbtOps>(),
-            DataFixTypes::SavedDataWanderingTrader,
-        )
-    }
-
     /// `spawnDelay()`.
     pub fn spawn_delay(&self) -> i32 {
         self.spawn_delay
@@ -138,6 +122,21 @@ impl WanderingTraderData {
         self.base.set_dirty_flag(dirty);
     }
 }
+
+/// `WanderingTraderData.TYPE` — `new SavedDataType<>(
+/// Identifier.withDefaultNamespace("wandering_trader"),
+/// WanderingTraderData::new, CODEC,
+/// DataFixTypes.SAVED_DATA_WANDERING_TRADER)`. The codec slot is the
+/// NbtOps-pinned codec the disk runtime uses. Java's `static final TYPE`
+/// singleton is a `LazyLock` static in the port.
+pub static TYPE: LazyLock<SavedDataType<WanderingTraderData>> = LazyLock::new(|| {
+    SavedDataType::new(
+        Identifier::with_default_namespace("wandering_trader"),
+        Arc::new(WanderingTraderData::new),
+        WanderingTraderData::codec::<rivet_nbt::nbt_ops::NbtOps>(),
+        DataFixTypes::SavedDataWanderingTrader,
+    )
+});
 
 impl Default for WanderingTraderData {
     fn default() -> Self {
@@ -262,7 +261,7 @@ mod tests {
 
     #[test]
     fn type_has_expected_identity() {
-        let t = WanderingTraderData::type_();
+        let t: &SavedDataType<WanderingTraderData> = &TYPE;
         assert_eq!(t.id().to_string(), "minecraft:wandering_trader");
         assert_eq!(t.data_fix_type(), DataFixTypes::SavedDataWanderingTrader);
         assert_eq!(t.to_string(), "SavedDataType[minecraft:wandering_trader]");

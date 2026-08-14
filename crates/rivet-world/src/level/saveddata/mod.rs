@@ -13,8 +13,11 @@
 //! codecs, and `SavedDataType` handles the runtime will call.
 //!
 //! `DataFixTypes` is the `mc.util.datafix` unit's enum; this unit declares the
-//! two variants the payloads reference plus the reserved `NONE` Paper no-op as
-//! a value-identity stub (see [`stub_data_fix_types`]).
+//! variants the payloads reference (`SAVED_DATA_WEATHER`,
+//! `SAVED_DATA_WANDERING_TRADER`, and — for the `mc.world.level.levelgen.
+//! settings` unit's `WorldGenSettings.TYPE` — `SAVED_DATA_WORLD_GEN_SETTINGS`)
+//! plus the reserved `NONE` Paper no-op as a value-identity stub (see
+//! [`stub_data_fix_types`]).
 
 pub mod saved_data;
 pub mod saved_data_type;
