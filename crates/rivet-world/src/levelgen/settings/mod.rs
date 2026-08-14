@@ -19,6 +19,8 @@
 //! - [`flat_level_source`] / [`debug_level_source`] — the two concrete
 //!   `ChunkGenerator` realizations owned by this unit, implementing the
 //!   `ChunkGenerator` trait seam (rivet-world::chunk::chunk_generator).
+//!   `FlatLevelSource` consumes the `FlatLevelGeneratorSettings` record from
+//!   the merged `mc.world.level.levelgen.flat` unit (`levelgen::flat`, #178).
 //!
 //! `GenerationStep` is *not* re-ported here: it was proactively ported as
 //! `levelgen::generation_step` by the #306 feature-shell wave (see the
@@ -27,16 +29,17 @@
 //! ### Ownership seams
 //!
 //! The unit's `java_paths` include `FlatLevelGeneratorSettings` (via
-//! `FlatLevelSource.settings`), `LevelStem` (via `WorldDimensions`), and the
-//! `SavedData` base — all pending units at the time of this wave. Where the
-//! dependency type is genuinely unavailable the port keeps the class shape and
-//! the faithful *portable* surface, and exposes the smallest typed seam for the
-//! rest (the `RivetTodo` on each module names the owning unit/issue). The two
-//! `ChunkGenerator` realizations follow the noisegen value-shell pattern: they
-//! implement the `ChunkGenerator` trait for the nameable surface and carry the
-//! world-touching lifecycle bodies as inherent methods whose full signatures
-//! the owning `mc.world.level.chunk.generator` realization reconciles
-//! (RivetTodo #185).
+//! `FlatLevelSource.settings` — now owned by the merged `flat` unit, #178,
+//! consumed directly), `LevelStem` (via `WorldDimensions`), and the
+//! `SavedData` base — the two remaining pending units at the time of this wave.
+//! Where the dependency type is genuinely unavailable the port keeps the class
+//! shape and the faithful *portable* surface, and exposes the smallest typed
+//! seam for the rest (the `RivetTodo` on each module names the owning
+//! unit/issue). The two `ChunkGenerator` realizations follow the noisegen
+//! value-shell pattern: they implement the `ChunkGenerator` trait for the
+//! nameable surface and carry the world-touching lifecycle bodies as inherent
+//! methods whose full signatures the owning `mc.world.level.chunk.generator`
+//! realization reconciles (RivetTodo #185).
 
 pub mod below_zero_retrogen;
 pub mod debug_level_source;
