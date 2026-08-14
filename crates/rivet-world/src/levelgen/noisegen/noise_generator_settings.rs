@@ -803,16 +803,21 @@ mod tests {
 
     /// A frozen biome registry carrying the 33 `SurfaceRuleData`-referenced
     /// keys (the single source of truth in
-    /// `biome::biomes::SURFACE_RULE_BIOMES`) as `BiomeId` handles (the surface
-    /// trees only need the holder identity, so every key maps to its hub index
-    /// — a `Direct`/registry `Reference` the `HolderSet` composes identically).
+    /// `biome::biomes::SURFACE_RULE_BIOMES`) as `BiomeId` handles. Each key is
+    /// registered under its real generated id (`BiomeId::from_name`), matching
+    /// the production `worldgen_bootstraps::build_biome_registry` exactly — a
+    /// `SurfaceRuleData` `is_biome` holder resolved through this registry reads
+    /// back the same value the generated biome table assigns (the `#179`
+    /// runtime biome-registry identity, one copy, no fabricated indices).
     fn build_biome_registry() -> Registry<BiomeId> {
         let biome_key = &*rivet_registry::registries::BIOME;
         let mut builder: RegistryBuilder<BiomeId> = RegistryBuilder::new(biome_key);
-        for (i, name) in SURFACE_RULE_BIOMES.iter().enumerate() {
+        for name in SURFACE_RULE_BIOMES {
+            let value = BiomeId::from_name(&format!("minecraft:{name}"))
+                .expect("SURFACE_RULE_BIOMES entries are generated biome keys");
             builder.register(
                 &ResourceKey::create(biome_key, Identifier::with_default_namespace(name)),
-                Arc::new(BiomeId::from_id(i as u16)),
+                Arc::new(value),
                 RegistrationInfo::BUILT_IN,
             );
         }
