@@ -7,7 +7,7 @@
 //! the whole value layer (universe identity, set subset/join/subtract
 //! semantics, declaration-ordering registry, the `FeatureFlags` statics, and
 //! the registry codec with its exact unknown-flag partial-error behavior).
-//! `FeatureElement` is deferred with a `RivetTodo(#387)` marker: its
+//! `FeatureElement` is deferred with a `RivetTodo(#418)` marker: its
 //! `FILTERED_REGISTRIES` set references `Registries.ITEM`/`BLOCK`/
 //! `ENTITY_TYPE`/`GAME_RULE`/`MENU`/`POTION`/`MOB_EFFECT`, none of which have
 //! generated registry keys in `rivet-registry` yet.

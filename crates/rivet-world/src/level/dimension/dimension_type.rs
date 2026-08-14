@@ -12,9 +12,9 @@
 //!
 //! `VerticalAnchor`'s per-variant codecs bound their int fields with
 //! `Codec.intRange(MIN_Y, MAX_Y)`, so this slice is exactly the constants it
-//! references. RivetTodo(#388): the full `DimensionType` record/codec (the
-//! 16-field record, the constructor validation, `MonsterSettings`/`Skybox`,
-//! `DIRECT_CODEC`/`NETWORK_CODEC`, and the remaining constants
+//! references. The full `DimensionType` record/codec (the 16-field record, the
+//! constructor validation, `MonsterSettings`/`Skybox`, `DIRECT_CODEC`/
+//! `NETWORK_CODEC`, and the remaining constants
 //! `MIN_HEIGHT`/`WAY_ABOVE_MAX_Y`/`WAY_BELOW_MIN_Y` that no current consumer
 //! needs) defers with the owning `mc.world.level.dimension` manifest unit; when
 //! it lands, the record folds these constants in and this shell is replaced.
