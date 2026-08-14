@@ -1,11 +1,11 @@
 #!/bin/bash
 # Focused test for run-scenario.sh's on-demand rivet-server build (issues #157,
-# #86, #316, #374). The wrapper must build `rivet-server` for every mode that
-# boots exactly one Rivet server (dwell/kick/load-world/loaded-world) and for
-# `--server rivet|both`, and must NOT build it for the Paper-only default (join
-# with no --server). Cargo is shimmed to record `-p rivet-server` builds; the
-# run-scenario binary is a stub that records its argv so the test can also
-# assert the requested mode is passed through verbatim.
+# #86, #316, #374, #185/#561). The wrapper must build `rivet-server` for every
+# mode that boots exactly one Rivet server (dwell/kick/load-world/loaded-world/
+# recenter) and for `--server rivet|both`, and must NOT build it for the
+# Paper-only default (join with no --server). Cargo is shimmed to record
+# `-p rivet-server` builds; the run-scenario binary is a stub that records its
+# argv so the test can also assert the requested mode is passed through verbatim.
 #
 #   ./scripts/test_run_scenario_builds_rivet.sh
 set -euo pipefail
@@ -64,7 +64,7 @@ built_rivet() {
 # Rivet-only modes must always trigger the server build (server selection is
 # pinned to Rivet even without --server; generated-world is the seed-42
 # acceptance contract that always boots one rivet-server with --seed 42).
-for mode in dwell kick load-world loaded-world generated-world; do
+for mode in dwell kick load-world loaded-world recenter generated-world; do
   run_wrapper "$mode"
   built_rivet || fail "$mode must build rivet-server (cargo log: $(cat "$CARGO_LOG"))"
   [ "$(wc -l < "$SCENARIO_ARGV_LOG" | tr -d ' ')" = 1 ] || fail "$mode: expected exactly 1 run-scenario invocation"

@@ -115,6 +115,11 @@ pub struct SaveState {
 }
 
 /// `ca.spottedleaf.moonrise.patches.starlight.light.SWMRNibbleArray`.
+///
+/// `Clone` deep-copies the CoW buffers so a caller can hand the engine a
+/// snapshot of a section's current light state without aliasing the live
+/// array (Java clones the byte array when a chunk's nibble is captured).
+#[derive(Clone)]
 pub struct SwmrNibbleArray {
     /// `stateUpdating` — the writer-visible state (plain, writer-confined).
     state_updating: InitState,

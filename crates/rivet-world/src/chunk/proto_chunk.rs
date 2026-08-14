@@ -12,10 +12,12 @@
 //! Deferred with their owning units:
 //! - `getFluidState` (the `FluidState` type lives with the material/block-state
 //!   units);
-//! - `setBlockState`'s block-state mutation and the `INITIALIZE_LIGHT`-status
-//!   light writes (the #216 section write); its heightmap half is ported here
-//!   as [`ProtoChunk::update_heightmaps_after`] (#287), which #216 calls after
-//!   the section's `setBlockState`;
+//! - `setBlockState`'s `INITIALIZE_LIGHT`-status light writes (the #216
+//!   section write's light half; a worldgen `ProtoChunk` is always below that
+//!   status). The section write itself and its heightmap half
+//!   ([`ProtoChunk::update_heightmaps_after`], #287) are implemented here —
+//!   the #216 section write calls `update_heightmaps_after` after the section's
+//!   `setBlockState`;
 //! - `setBlockEntity`/`getBlockEntity`/`getBlockEntities` (the block-entity
 //!   unit); the port keeps `pendingBlockEntities` on the base and
 //!   `removeBlockEntity`'s pending half;
@@ -33,17 +35,25 @@
 //! `markPosForPostProcessing`'s parent `postProcessGeneration` consumer and
 //! `addPackedPostProcess`'s `ShortList` read path remain with that owning unit.
 
+use crate::biome::biome_resolver::BiomeResolver;
+use crate::biome::climate::Sampler;
+use crate::block::BlockState;
+use crate::block::blocks::Blocks;
 use crate::chunk::carving_mask::CarvingMask;
 use crate::chunk::chunk_access::{ChunkAccess, ChunkStatus};
 use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::paletted_container_factory::PalettedContainerFactory;
+use crate::chunk::storage::chunk_reconstruction::block_state_predicates;
 use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::SimpleLevelHeightAccessor;
 use crate::levelgen::heightmap::{Heightmap, StateFlags, Types};
+use crate::levelgen::surface_rules::ChunkSurface;
 use crate::lighting::swmr_nibble_array::SwmrNibbleArray;
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use rivet_nbt::compound_tag::CompoundTag;
+use rivet_registry::biome_id::BiomeId;
 use rivet_registry::core::{BlockPos, ChunkPos, SectionPos};
+use rivet_registry::holder::Holder;
 
 /// `net.minecraft.world.level.chunk.ProtoChunk` — the worldgen chunk value.
 pub struct ProtoChunk<T, B, S>
@@ -207,6 +217,21 @@ where
         self.base.get_section_mut(section_index)
     }
 
+    /// `ChunkAccess.fillBiomesFromNoise(BiomeResolver, Climate.Sampler)` — the
+    /// biomes step of the status ladder, forwarded to the base (`ProtoChunk`
+    /// inherits the method from `ChunkAccess` in Java). `map_biome` converts
+    /// each resolved `Holder<BiomeId>` into the section's stored element `B`
+    /// (see [`ChunkAccess::fill_biomes_from_noise`]).
+    pub fn fill_biomes_from_noise(
+        &mut self,
+        biome_resolver: &dyn BiomeResolver,
+        sampler: &Sampler,
+        map_biome: &impl Fn(&Holder<BiomeId>) -> B,
+    ) {
+        self.base
+            .fill_biomes_from_noise(biome_resolver, sampler, map_biome);
+    }
+
     /// `ChunkAccess.getSectionIndex(int blockY)`.
     pub fn get_section_index(&self, block_y: i32) -> i32 {
         self.base.get_section_index(block_y)
@@ -273,6 +298,18 @@ where
     pub fn set_persisted_status(&mut self, status: ChunkStatus) {
         self.status = status;
         self.base.mark_unsaved();
+    }
+
+    /// `ChunkAccess.isLightCorrect()` — the light-correct flag the LIGHT task
+    /// toggles around `lightChunk` (`ChunkLightTask.LightTask`).
+    pub fn is_light_correct(&self) -> bool {
+        self.base.is_light_correct()
+    }
+
+    /// `ChunkAccess.setLightCorrect(boolean)` — forwarded to the base (which
+    /// marks the chunk unsaved, matching `ChunkAccess.setLightCorrect`).
+    pub fn set_light_correct(&mut self, light_correct: bool) {
+        self.base.set_light_correct(light_correct);
     }
 
     /// `ProtoChunk.addEntity(CompoundTag)`.
@@ -390,17 +427,197 @@ where
     pub fn get_upgrade_data(&self) -> &UpgradeData {
         self.base.get_upgrade_data()
     }
+
+    /// `ChunkAccess.getStartForStructure(Structure)` — delegate to the base's
+    /// `StructureAccess` (the `i64` stand-in for the unported `StructureStart`,
+    /// #369).
+    pub fn get_start_for_structure(&self, structure: &S) -> Option<i64> {
+        self.base.get_start_for_structure(structure)
+    }
+
+    /// `ChunkAccess.setStartForStructure(Structure, StructureStart)` — delegate
+    /// (the base marks the chunk unsaved).
+    pub fn set_start_for_structure(&mut self, structure: S, start: i64) {
+        self.base.set_start_for_structure(structure, start);
+    }
+
+    /// `ChunkAccess.getAllStarts()` — the base's typed structure-starts
+    /// authority. Java's promotion copies it wholesale
+    /// (`setAllStarts(protoChunk.getAllStarts())`).
+    pub fn get_all_starts(&self) -> &std::collections::HashMap<S, i64> {
+        self.base.get_all_starts()
+    }
+
+    /// `ChunkAccess.setAllStarts(Map)` — clear + putAll, then marks unsaved.
+    pub fn set_all_starts(&mut self, starts: std::collections::HashMap<S, i64>) {
+        self.base.set_all_starts(starts);
+    }
+
+    /// `ChunkAccess.getReferencesForStructure(Structure)` — delegate.
+    pub fn get_references_for_structure<'a>(
+        &'a self,
+        structure: &'a S,
+    ) -> impl Iterator<Item = &'a u64> + 'a {
+        self.base.get_references_for_structure(structure)
+    }
+
+    /// `ChunkAccess.addReferenceForStructure(Structure, long)` — delegate.
+    pub fn add_reference_for_structure(&mut self, structure: S, reference: u64) {
+        self.base.add_reference_for_structure(structure, reference);
+    }
+
+    /// `ChunkAccess.getAllReferences()` — the insertion-ordered runtime
+    /// authority (#537).
+    pub fn get_all_references(&self) -> &IndexMap<S, IndexSet<u64>> {
+        self.base.get_all_references()
+    }
+
+    /// `ChunkAccess.setAllReferences(Map)` — delegate. Java's promotion copies
+    /// the reference map wholesale (`setAllReferences(protoChunk.getAllReferences())`).
+    pub fn set_all_references<I: IntoIterator<Item = (S, Vec<u64>)>>(&mut self, data: I) {
+        self.base.set_all_references(data);
+    }
+
+    /// Consume the proto and return its `ChunkAccess` base.
+    ///
+    /// Java's promotion path (`new LevelChunk(ServerLevel, ProtoChunk,
+    /// PostLoadProcessor)`) hands the proto's owned base state — sections,
+    /// heightmaps, light nibbles, flags, inhabited time, pending block
+    /// entities, post-processing, structure access — to the `LevelChunk`
+    /// constructor; the port keeps that a value move. The proto-only fields
+    /// (`entities`, `status`, `carvingMask`) are not part of the base and are
+    /// dropped by the caller's typed refusal when the persisted status is not
+    /// genuine `FULL` (see the server `LevelChunk::try_from_full_proto`).
+    pub fn into_base(self) -> ChunkAccess<T, B, S> {
+        self.base
+    }
+}
+
+// The worldgen surface-driver specialization: `ProtoChunk.setBlockState` and
+// the `ChunkSurface` seam (`build_surface`'s block-column over the real chunk,
+// issue #179/#185). `BlockState` satisfies the `T` bounds of the generic
+// `ProtoChunk`; the biome type `B` is opaque to the surface write (only the
+// heightmap `placed` flags and section predicates are resolved, through the
+// generated `BlockState` behavior table — `block_state_predicates` — exactly
+// like `NoiseBasedChunkGenerator.doFill`'s `write_worldgen_block`).
+
+impl<B, S> ProtoChunk<BlockState, B, S>
+where
+    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash,
+{
+    /// `ProtoChunk.setBlockState(BlockPos, BlockState, flags)` — the worldgen
+    /// write path Java's `buildSurface` `BlockColumn.setBlock` calls.
+    ///
+    /// Java's full `setBlockState`: the build-height guard (returns `VOID_AIR`,
+    /// no write), the `wasEmpty && state.is(Blocks.AIR)` fast path, the section
+    /// write, then the `getPersistedStatus().heightmapsAfter()` heightmap
+    /// updates (priming missing entries first). The light half (the
+    /// `status.isOrAfter(ChunkStatus.INITIALIZE_LIGHT)` branch) defers with the
+    /// lighting unit (#184/#216); a worldgen `ProtoChunk` is always below that
+    /// status, so the omission is unreachable on this path. The section write
+    /// uses the generated `BlockState` behavior predicates
+    /// ([`block_state_predicates`]), the same set `doFill` passes to
+    /// `write_worldgen_block`.
+    ///
+    /// Java's `state.is(Blocks.AIR)` is a block-identity check
+    /// (`getBlock() == Blocks.AIR`), so `CAVE_AIR`/`VOID_AIR` do not take the
+    /// fast path — hence the `state.block() == Blocks::AIR.id()` comparison
+    /// rather than the behavioral `is_air` predicate. The `CAVE_AIR`-writing
+    /// carver path is not yet wired for `ProtoChunk` (RivetTodo(#399)), so this
+    /// fast path is currently only reachable via the surface driver's exact
+    /// `AIR` writes.
+    ///
+    /// Returns the previous state, matching Java.
+    pub fn set_block_state(&mut self, x: i32, y: i32, z: i32, state: BlockState) -> BlockState {
+        if self.base.is_outside_build_height(y) {
+            return self.void_air;
+        }
+        let section_index = self.base.get_section_index(y) as usize;
+        let was_empty = self.base.get_section(section_index).has_only_air();
+        let predicates = block_state_predicates();
+        if was_empty && state.block() == Blocks::AIR.id() {
+            return state;
+        }
+        let local_x = x & 15;
+        let local_y = y & 15;
+        let local_z = z & 15;
+        let placed = self.base.resolve_flags(&state);
+        let old_state = self.base.get_section_mut(section_index).set_block_state(
+            local_x,
+            local_y,
+            local_z,
+            state,
+            &predicates.is_air,
+            &predicates.is_randomly_ticking,
+            &predicates.fluid_is_empty,
+            &predicates.fluid_is_randomly_ticking,
+            &predicates.is_special_colliding,
+        );
+        self.update_heightmaps_after(local_x, y, local_z, placed);
+        old_state
+    }
+}
+
+impl<B, S> ChunkSurface for ProtoChunk<BlockState, B, S>
+where
+    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash,
+{
+    fn get_height(&self, x: i32, z: i32) -> i32 {
+        // `ChunkAccess.getHeight(WORLD_SURFACE_WG, x, z)` — Java primes a
+        // missing heightmap on demand (a `&mut` read). The surface driver
+        // consumes a chunk whose worldgen heightmaps are already primed
+        // (`doFill` creates them), so this reads the primed entry; an absent
+        // entry decodes as `minY - 1`, the exact value Java's `getHeight`
+        // yields for an all-air (never-opaque) chunk (issue #185 seam).
+        let min_y = self.base.get_min_y();
+        match &self.base.heightmaps()[Types::WorldSurfaceWg as usize] {
+            Some(hm) => hm.get_height_at(x & 15, z & 15, min_y),
+            None => min_y - 1,
+        }
+    }
+
+    fn get_min_y(&self) -> i32 {
+        self.base.get_min_y()
+    }
+
+    fn min_block_x(&self) -> i32 {
+        self.base.get_pos().get_min_block_x()
+    }
+
+    fn min_block_z(&self) -> i32 {
+        self.base.get_pos().get_min_block_z()
+    }
+
+    fn is_inside_build_height(&self, y: i32) -> bool {
+        self.base.is_inside_build_height(y)
+    }
+
+    fn get_block_state(&self, x: i32, y: i32, z: i32) -> BlockState {
+        ProtoChunk::get_block_state(self, x, y, z)
+    }
+
+    fn set_block_state(&mut self, x: i32, y: i32, z: i32, state: BlockState) {
+        ProtoChunk::set_block_state(self, x, y, z, state);
+    }
+
+    fn mark_pos_for_post_processing(&mut self, x: i32, y: i32, z: i32) {
+        ProtoChunk::mark_pos_for_post_processing(self, &BlockPos::new(x, y, z));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::biome::Climate;
     use crate::chunk::palette::GlobalIdMap;
     use crate::chunk::paletted_container::PalettedContainer;
     use crate::chunk::strategy::Strategy;
     use crate::level::height_accessor::create as create_accessor;
     use crate::levelgen::heightmap::{FINAL_HEIGHTMAPS, WORLDGEN_HEIGHTMAPS};
     use rivet_registry::core::Vec3iLike;
+    use std::cell::RefCell;
 
     #[derive(Clone, Copy)]
     struct TestGlobalMap;
@@ -643,5 +860,46 @@ mod tests {
         for ty in WORLDGEN_HEIGHTMAPS {
             assert!(!full.base.has_primed_heightmap(ty), "FULL skips {ty:?}");
         }
+    }
+
+    /// A `BiomeResolver` that records every quart request in order.
+    struct RecordingResolver(RefCell<Vec<(i32, i32, i32)>>);
+
+    impl BiomeResolver for RecordingResolver {
+        fn get_noise_biome(
+            &self,
+            quart_x: i32,
+            quart_y: i32,
+            quart_z: i32,
+            _sampler: &Sampler,
+        ) -> Holder<BiomeId> {
+            self.0.borrow_mut().push((quart_x, quart_y, quart_z));
+            Holder::direct(BiomeId::from_id(0))
+        }
+    }
+
+    fn map_biome(holder: &Holder<BiomeId>) -> u8 {
+        match holder {
+            Holder::Direct(biome) => biome.id() as u8,
+            Holder::Reference { id, .. } => *id as u8,
+        }
+    }
+
+    /// `ProtoChunk.fillBiomesFromNoise` forwards to the base (`ProtoChunk`
+    /// inherits `ChunkAccess.fillBiomesFromNoise` in Java): the same quart
+    /// routing drives the base's section fill.
+    #[test]
+    fn fill_biomes_from_noise_forwards_to_the_base() {
+        let resolver = RecordingResolver(RefCell::new(Vec::new()));
+        let mut proto = stone_proto();
+        let sampler = Climate::empty();
+        proto.fill_biomes_from_noise(&resolver, &sampler, &map_biome);
+
+        let calls = resolver.0.into_inner();
+        assert_eq!(calls.len(), 24 * 64);
+        // ChunkPos::ZERO: quartMinX = 0, quartMinZ = 0; bottom section (Y -4)
+        // has quartMinY = -16.
+        assert_eq!(calls.first().copied(), Some((0, -16, 0)));
+        assert_eq!(calls.last().copied(), Some((3, 79, 3)));
     }
 }

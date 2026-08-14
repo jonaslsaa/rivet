@@ -83,9 +83,10 @@ pub static BIOME: LazyLock<ResourceKey<Registry<Biome>>> = LazyLock::new(|| {
 });
 
 // Java's `TEMPERATURE_CACHE_SIZE` (`1024`) and the frozen
-// `ThreadLocal<Long2FloatLinkedOpenHashMap>` temperature cache are not ported:
-// the pure `getValue` math is deterministic and the cache is a memoization
-// only, so it would be dead state in the value model.
+// `ThreadLocal<Long2FloatLinkedOpenHashMap>` temperature cache field are not
+// ported: the field is declared but never read in the pinned Paper 26.2
+// `Biome` (Java re-evaluates the noise per call), and the pure `getValue` math
+// is deterministic, so the cache would be dead state in the value model.
 
 /// `Biome.TEMPERATURE_NOISE` — `PerlinSimplexNoise(WorldgenRandom(
 /// LegacyRandomSource(1234L)), ImmutableList.of(0))`.
@@ -1081,31 +1082,6 @@ mod tests {
             .generation_settings(BiomeGenerationSettings::EMPTY)
             .build();
         assert_eq!(arid.get_precipitation_at(&pos, 63), Precipitation::None);
-    }
-
-    #[test]
-    fn temperature_adjustment_frozen_uses_noise() {
-        // FROZEN at a position whose noise pushes below 0.3 ice-patches and
-        // 0.8 small-variation returns 0.2F; the (0,0) sample on the pinned
-        // seeded noise is deterministic.
-        let effects = BiomeSpecialEffectsBuilder::default()
-            .water_color(0x3F76E4)
-            .build();
-        let frozen = BiomeBuilder::new()
-            .has_precipitation(true)
-            .temperature(0.7)
-            .temperature_adjustment(TemperatureModifier::Frozen)
-            .downfall(0.5)
-            .special_effects(effects)
-            .mob_spawn_settings(MobSpawnSettings::empty())
-            .generation_settings(BiomeGenerationSettings::EMPTY)
-            .build();
-        let pos = BlockPos::new(0, 64, 0);
-        let base = frozen.get_base_temperature();
-        let adjusted = frozen.get_temperature(&pos, 63);
-        // The adjusted temperature is either 0.2 (FROZEN kicked in) or the
-        // noise-adjusted base — both deterministic on the pinned seeds.
-        assert!(adjusted == 0.2 || adjusted != base);
     }
 
     #[test]

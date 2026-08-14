@@ -15,26 +15,28 @@
 //! trait — the mutator/reader surface the facade calls on
 //! `starlight$getLightEngine()` — and `rivet-server` owns the concrete impl
 //! (the `ca.spottedleaf.moonrise.patches.starlight.light` manifest unit;
-//! currently a `StubStarLightProvider`). [`LevelLightEngine`](crate::lighting::level_light_engine)
+//! `star_light_provider_impl::SkyLightProvider`, a real synchronous layer over
+//! the `SkyStarLightEngine` compute core). [`LevelLightEngine`](crate::lighting::level_light_engine)
 //! holds an `Option<Box<dyn StarLightProvider + Send>>`; without the trait, a
 //! concrete `StarLightInterface` (compute, rivet-server) inside
 //! `LevelLightEngine` (facade, rivet-world) would create a
 //! `rivet-world -> rivet-server` dependency edge.
 //!
 //! The op surface mirrors `StarLightInterface`: `blockChange`, `sectionChange`,
-//! `lightChunk`, `relightChunks`, `checkChunkEdges`, plus the sky/block readers
-//! (`getSkyLightValue`, `getBlockLightValue`, `getDataLayerData`). The trait is
+//! `lightChunk`, `forceLoadInChunk`, `relightChunks`, `checkChunkEdges`, plus
+//! the sky/block readers (`getSkyLightValue`, `getBlockLightValue`,
+//! `getDataLayerData`). The trait is
 //! object-safe (mutators take `&mut self`, readers `&self`, no generic
 //! parameters) so the facade can hold it as `Box<dyn>`, and ownership is
 //! exclusive: the facade owns the provider and hands out `&mut`/`&` — never
 //! shared, never `Sync` (the OWNERSHIP.md single-owner tick-thread model).
 //!
-//! RivetTodo(#184): this is the smallest compile-green seam slice. The
-//! concrete `StarLightInterface` and its propagation engines are not ported
-//! (the `starlight.light` unit; `rivet-server` ships a no-op stub). The three
-//! ops Java routes through a `ChunkAccess`/callbacks take the chunk *position*
-//! here — the impl resolves the chunk through its own light access (as
-//! `StarLightInterface` holds a `LightChunkGetter`), and the
+//! RivetTodo(#184): the light queue and the block engine, live
+//! `blockChange`/`sectionChange`/`relightChunks`/`checkChunkEdges`, the client
+//! notify path, and the final generated-serving pipeline wiring are not ported.
+//! The ops Java routes through a `ChunkAccess`/callbacks take the chunk
+//! *position* here — the impl resolves the chunk through its own narrow light
+//! access (as `StarLightInterface` holds a `LightChunkGetter`), and the
 //! `relightChunks` completion callbacks return with the light-queue port.
 
 use std::collections::HashSet;
@@ -67,6 +69,14 @@ pub trait StarLightProvider {
     /// the impl resolves the chunk through its own light access (as
     /// `StarLightInterface` holds a `LightChunkGetter`).
     fn light_chunk(&mut self, pos: ChunkPos, empty_sections: &[Option<bool>]);
+
+    /// `StarLightInterface.forceLoadInChunk(int, int, Boolean[])` — register a
+    /// chunk as loaded for the light engine (its per-section emptiness
+    /// `empty_sections`) without recomputing its light. The LIGHT task's
+    /// already-lighted branch calls this instead of `lightChunk` (see
+    /// `ChunkLightTask.LightTask`), so a chunk that is light-correct and at/after
+    /// `LIGHT` is confirmed in place rather than relit.
+    fn force_load_in_chunk(&mut self, pos: ChunkPos, empty_sections: &[Option<bool>]);
 
     /// `StarLightInterface.relightChunks(Set<ChunkPos>, Consumer<ChunkPos>,
     /// IntConsumer)` — recompute light for the given chunks. The completion
@@ -105,6 +115,7 @@ mod tests {
         block_changes: Vec<BlockPos>,
         section_changes: Vec<(SectionPos, bool)>,
         lit_chunks: Vec<(ChunkPos, Vec<Option<bool>>)>,
+        force_loaded_chunks: Vec<(ChunkPos, Vec<Option<bool>>)>,
         relit_chunks: Vec<ChunkPos>,
         edge_checks: Vec<ChunkPos>,
     }
@@ -139,6 +150,13 @@ mod tests {
                 .lock()
                 .unwrap()
                 .lit_chunks
+                .push((pos, empty_sections.to_vec()));
+        }
+        fn force_load_in_chunk(&mut self, pos: ChunkPos, empty_sections: &[Option<bool>]) {
+            self.log
+                .lock()
+                .unwrap()
+                .force_loaded_chunks
                 .push((pos, empty_sections.to_vec()));
         }
         fn relight_chunks(&mut self, chunks: &HashSet<ChunkPos>) {
@@ -177,6 +195,7 @@ mod tests {
         let pos = SectionPos::of(4, 5, 6);
         provider.section_change(pos, true);
         provider.light_chunk(ChunkPos::new(7, 8), &[Some(false), None, Some(true)]);
+        provider.force_load_in_chunk(ChunkPos::new(8, 9), &[Some(true), None, Some(false)]);
         let mut chunks = HashSet::new();
         chunks.insert(ChunkPos::new(9, 10));
         provider.relight_chunks(&chunks);
@@ -188,6 +207,10 @@ mod tests {
         assert_eq!(
             seen.lit_chunks,
             vec![(ChunkPos::new(7, 8), vec![Some(false), None, Some(true)])]
+        );
+        assert_eq!(
+            seen.force_loaded_chunks,
+            vec![(ChunkPos::new(8, 9), vec![Some(true), None, Some(false)])]
         );
         assert_eq!(seen.relit_chunks, vec![ChunkPos::new(9, 10)]);
         assert_eq!(seen.edge_checks, vec![ChunkPos::new(11, 12)]);

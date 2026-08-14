@@ -44,6 +44,7 @@
 //! and `NoiseRouterData.peaksAndValleys(weirdness)`.
 
 use crate::biome::biome_id_codec::biome_id_field_codec;
+use crate::biome::biome_resolver::BiomeResolver;
 use crate::biome::biome_source::BiomeSource;
 use crate::biome::biome_source::keys;
 use crate::biome::biome_source_type::{BiomeSourceTypeId, BiomeSourceTypes};
@@ -555,19 +556,6 @@ impl BiomeSource for MultiNoiseBiomeSource {
             .clone()
     }
 
-    fn get_noise_biome(
-        &self,
-        quart_x: i32,
-        quart_y: i32,
-        quart_z: i32,
-        sampler: &Sampler,
-    ) -> Holder<BiomeId> {
-        // Java: `getNoiseBiome(sampler.sample(quartX, quartY, quartZ))` →
-        // `parameters().findValue(target)`.
-        let target = sampler.sample(quart_x, quart_y, quart_z);
-        self.parameters().find_value(&target)
-    }
-
     fn add_debug_info(&self, result: &mut Vec<String>, feet_pos: &BlockPos, sampler: &Sampler) {
         let quart_x = QuartPos::from_block(feet_pos.get_x());
         let quart_y = QuartPos::from_block(feet_pos.get_y());
@@ -597,6 +585,25 @@ impl BiomeSource for MultiNoiseBiomeSource {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+/// The source is its own resolver (Java `BiomeSource implements
+/// BiomeResolver`): the `BiomeResolver` supertrait method, with the body the
+/// `BiomeSource` impl used to carry — `getNoiseBiome(sampler.sample(x, y, z))`
+/// → `parameters().findValue(target)`.
+impl BiomeResolver for MultiNoiseBiomeSource {
+    fn get_noise_biome(
+        &self,
+        quart_x: i32,
+        quart_y: i32,
+        quart_z: i32,
+        sampler: &Sampler,
+    ) -> Holder<BiomeId> {
+        // Java: `getNoiseBiome(sampler.sample(quartX, quartY, quartZ))` →
+        // `parameters().findValue(target)`.
+        let target = sampler.sample(quart_x, quart_y, quart_z);
+        self.parameters().find_value(&target)
     }
 }
 
@@ -637,7 +644,8 @@ mod tests {
         let src = MultiNoiseBiomeSource::create_from_list(nether_list());
         // `Climate.empty()` samples all zeros → the nether_wastes entry
         // (0, 0, 0, 0, 0, 0, offset 0) wins (every other entry carries a
-        // nonzero offset or parameter).
+        // nonzero offset or parameter). The source is its own resolver, so the
+        // resolution goes through the inherited `BiomeResolver` method.
         assert_eq!(
             src.get_noise_biome(0, 0, 0, &crate::biome::climate::Climate::empty()),
             holder(34)
@@ -701,8 +709,7 @@ mod tests {
                 .expect("nether preset present")
                 .clone(),
             &NameGetter,
-        )
-        .expect("the nether preset is never deferred");
+        );
         let preset_src = MultiNoiseBiomeSource::create_from_preset(direct_preset);
         assert!(!preset_src.stable(&preset_key));
     }
@@ -755,6 +762,8 @@ mod tests {
         assert!(!decoded.stable(&overworld_key));
         // `get_noise_biome` resolves through the stored search list (the nether
         // preset's first entry — nether_wastes, the all-zero sample winner).
+        // The source is its own resolver, so the resolution goes through the
+        // inherited `BiomeResolver` method.
         assert_eq!(
             decoded.get_noise_biome(0, 0, 0, &crate::biome::climate::Climate::empty()),
             holder(34)
@@ -840,8 +849,7 @@ mod tests {
                 .expect("nether preset present")
                 .clone(),
             &NameGetter,
-        )
-        .expect("the nether preset is never deferred");
+        );
         let mut builder =
             rivet_registry::RegistryBuilder::<MultiNoiseBiomeSourceParameterList>::new(
                 &preset_registry_key,

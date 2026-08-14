@@ -10,15 +10,17 @@
 //! - Java extends the abstract `ChunkGenerator` (biome source + codec dispatch),
 //!   owned by `mc.world.level.chunk.generator`. The noisegen unit does not port
 //!   that base; the methods that are pure overrides of it and have unported
-//!   parameter types (`createBiomes`, `applyCarvers`, `buildSurface`,
-//!   `spawnOriginalMobs`) are `STUB`-marked `*_stub` methods on the value shell
-//!   — they keep Java's exact intent and defer the world-touching body to its
-//!   owning unit. `fillFromNoise`/`doFill` (the worldgen block-write slice) is
-//!   the one `ChunkGenerator` override ported here: its `ProtoChunk`/
-//!   `LevelChunkSection`/`Heightmap`/post-processing seams are all present in
-//!   the `chunk` module, and its `NoiseChunk`/`Aquifer`/`Blender` dependencies
-//!   live in this noisegen unit. `addDebugScreenInfo` (router reads + string
-//!   formatting) has fully ported parameter types, so it is ported in full.
+//!   parameter types (`createBiomes`, `applyCarvers`, `spawnOriginalMobs`) are
+//!   `STUB`-marked `*_stub` methods on the value shell — they keep Java's exact
+//!   intent and defer the world-touching body to its owning unit.
+//!   `fillFromNoise`/`doFill` (the worldgen block-write slice) and `buildSurface`
+//!   (the SURFACE status-step body) are the two `ChunkGenerator` overrides
+//!   ported here: their `ProtoChunk`/`LevelChunkSection`/`Heightmap`/
+//!   post-processing seams are all present in the `chunk` module, the surface
+//!   unit lives in `levelgen::surface_rules`, and the `NoiseChunk`/`Aquifer`/
+//!   `Blender` dependencies live in this noisegen unit. `addDebugScreenInfo`
+//!   (router reads + string formatting) has fully ported parameter types, so it
+//!   is ported in full.
 //!   `CODEC` (the `BiomeSource` + `NoiseGeneratorSettings` record codec)
 //!   defers with the `ChunkGenerator` unit (no `BiomeSource` ported here).
 //! - Java memoizes the global fluid picker in `Suppliers.memoize`; the picker
@@ -35,12 +37,15 @@
 //!   `Holder::value`.
 //!
 //! The still-unported world/level surfaces this slice touches (`WorldGenRegion`,
-//! `StructureManager`, `BiomeSource`, `NaturalSpawner`, `NoiseColumn`) defer
-//! with their owning units; the surfaces that have landed (`BiomeManager`,
-//! `CarvingContext`/`CarvingMask`, `BiomeGenerationSettings`,
-//! `ConfiguredWorldCarver`, `LevelChunkSection`, `ProtoChunk`, `Heightmap`)
-//! are consumed directly; see the noisegen module doc.
+//! `StructureManager`, `NaturalSpawner`, `NoiseColumn`) defer with their owning
+//! units; the `BiomeSource` family is ported while the `ChunkGenerator` base
+//! that owns a `BiomeSource` field defers with the `mc.world.level.chunk.generator`
+//! unit; the surfaces that have landed (`BiomeManager`, `CarvingContext`/
+//! `CarvingMask`, `BiomeGenerationSettings`, `ConfiguredWorldCarver`,
+//! `LevelChunkSection`, `ProtoChunk`, `Heightmap`) are consumed directly; see
+//! the noisegen module doc.
 
+use crate::biome::BiomeManager;
 use crate::block::BlockState;
 use crate::block::blocks::Blocks;
 use crate::chunk::proto_chunk::ProtoChunk;
@@ -58,6 +63,8 @@ use crate::levelgen::noisegen::noise_chunk::NoiseChunk;
 use crate::levelgen::noisegen::noise_generator_settings::NoiseGeneratorSettings;
 use crate::levelgen::noisegen::noise_router_data::peaks_and_valleys_f32;
 use crate::levelgen::noisegen::random_state::RandomState;
+use crate::levelgen::world_generation_context::WorldGenerationContext;
+use rivet_registry::biome_id::BiomeId;
 use rivet_registry::core::BlockPos;
 use rivet_registry::holder::Holder;
 use rivet_util::mth;
@@ -192,8 +199,10 @@ impl NoiseBasedChunkGenerator {
     /// A faithful port of the single-column walk with the
     /// `Heightmap.Types.isOpaque` tester (`NOT_AIR` for `WORLD_SURFACE_WG`,
     /// `blocksMotion` for `OCEAN_FLOOR_WG`) resolved over the block-state flags.
-    /// Not wired to the `ChunkGenerator` trait (a `mc.world.level.chunk.generator`
-    /// STUB) — the value shell exposes it directly.
+    /// Not wired to the `ChunkGenerator` trait — the trait surface is ported
+    /// (rivet-world::chunk::chunk_generator), but this value shell is not the
+    /// `NoiseBasedChunkGenerator` realization (RivetTodo #185) — so the shell
+    /// exposes it directly.
     pub fn get_base_height(
         &self,
         x: i32,
@@ -427,9 +436,9 @@ impl NoiseBasedChunkGenerator {
     /// `CarvingContext`, `CarvingMask`, `BiomeGenerationSettings.getCarvers`,
     /// `ConfiguredWorldCarver.carve`, and `BiomeManager.withDifferentSource` live in
     /// their owning units, and `NoiseChunk.aquifer()` is here (see `noise_chunk.rs`).
-    /// Only `WorldGenRegion`, `BiomeSource.getNoiseBiome`, and
-    /// `WorldgenRandom.setLargeFeatureSeed` defer with the `chunk.generator` wave
-    /// (RivetTodo #185).
+    /// Only `WorldGenRegion`, the carver loop calling `BiomeSource.getNoiseBiome`
+    /// with a `Climate.Sampler`, and `WorldgenRandom.setLargeFeatureSeed` defer
+    /// with the `chunk.generator` wave (RivetTodo #185).
     pub fn apply_carvers_stub(&self) {}
 
     /// `fillFromNoise(Blender, RandomState, StructureManager, ChunkAccess)` —
@@ -650,12 +659,42 @@ impl NoiseBasedChunkGenerator {
         noise_chunk.stop_interpolation();
     }
 
-    /// `buildSurface` — STUB(mc.world.level.levelgen.surface).
+    /// `buildSurface(ChunkAccess, WorldGenerationContext, RandomState,
+    /// StructureManager, BiomeManager, Blender, Set<Holder<Biome>>)` — the
+    /// SURFACE status-step body, a faithful port of the Java.
     ///
-    /// Java: `randomState.surfaceSystem().buildSurface(...)`. The `SurfaceSystem`
-    /// is the `levelgen::surface_rules` STUB; the owning surface unit ports the
-    /// build (the `levelgen.surface` wave, RivetTodo #177).
-    pub fn build_surface_stub(&self) {}
+    /// Java's `getOrCreateNoiseChunk` is the same single-shot cache the
+    /// [`Self::fill_from_noise`] path uses; this slice constructs the
+    /// `NoiseChunk` over an empty blender exactly once (RivetTodo #185: the
+    /// stage composing biomes/surface over the same chunk adds the cache).
+    /// The `possible_biomes` set (Java's `collectPossibleBiomes(region, 1)`)
+    /// is not threaded — the single-holder path has no `WorldGenRegion` to
+    /// collect from, so `None` is the honest seam (the surface rules that take
+    /// the possible-biomes short-circuit keep their whole-set behavior).
+    pub fn build_surface<B, S>(
+        &self,
+        random_state: &RandomState,
+        biome_manager: Arc<BiomeManager>,
+        generation_context: Arc<WorldGenerationContext>,
+        chunk: &mut ProtoChunk<BlockState, B, S>,
+        possible_biomes: Option<&[Holder<BiomeId>]>,
+    ) where
+        B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        S: Eq + std::hash::Hash,
+    {
+        let noise_chunk = Arc::new(self.create_noise_chunk(chunk, random_state, Blender::empty()));
+        let settings = settings_value(&self.settings);
+        random_state.surface_system().build_surface(
+            random_state,
+            biome_manager,
+            settings.use_legacy_random_source,
+            generation_context,
+            chunk,
+            noise_chunk,
+            &settings.surface_rule,
+            possible_biomes,
+        );
+    }
 
     /// `spawnOriginalMobs` — STUB(mc.world.level.chunk.generator).
     ///
@@ -1206,12 +1245,35 @@ mod tests {
         )
     }
 
-    /// Empty registries — the test router has no registry-resolved nodes, so
-    /// `RandomState::create` never touches them (the `noise_chunk` tests'
-    /// helper).
-    fn empty_registries() -> (Registry<NoiseParameters>, Registry<DensityFunctionValue>) {
+    /// A noise registry populated via `NoiseData.bootstrap` —
+    /// `RandomState::create` eagerly constructs the `SurfaceSystem`, which
+    /// resolves its nine `Noises.*` keys (including `clay_bands_offset`)
+    /// through the registry. The density-function registry stays empty: the
+    /// test routers carry no `HolderHolder`/`NoiseHolder` nodes (mirrors the
+    /// `noise_chunk` tests' helper).
+    fn populated_registries() -> (Registry<NoiseParameters>, Registry<DensityFunctionValue>) {
+        use crate::data::worldgen::bootstrap_context::RecordingContext;
+        use crate::data::worldgen::noise_data;
+        use rivet_registry::RegistrationInfo;
+        use rivet_registry::RegistryAccess;
+        use rivet_registry::holder::RegistryId;
+
         let noise_key = &crate::levelgen::noise::registry_keys::NOISE;
-        let noise_registry: Registry<NoiseParameters> = RegistryBuilder::new(noise_key).freeze();
+        let mut noise_builder: RegistryBuilder<NoiseParameters> = RegistryBuilder::new(noise_key);
+        let mut noise_ctx = RecordingContext::<NoiseParameters>::new(
+            RegistryId(0),
+            (*noise_key).clone(),
+            RegistryAccess::empty(),
+        );
+        noise_data::bootstrap(&mut noise_ctx);
+        for reg in noise_ctx.registrations() {
+            noise_builder.register(
+                &reg.key,
+                Arc::new(reg.value.clone()),
+                RegistrationInfo::BUILT_IN,
+            );
+        }
+        let noise_registry = noise_builder.freeze();
         let df_key = &crate::levelgen::noise::registry_keys::DENSITY_FUNCTION;
         let df_registry: Registry<DensityFunctionValue> = RegistryBuilder::new(df_key).freeze();
         (noise_registry, df_registry)
@@ -1249,7 +1311,7 @@ mod tests {
     #[test]
     fn fill_from_noise_writes_default_block_everywhere_and_creates_heightmaps() {
         let settings = test_settings();
-        let (noise_registry, df_registry) = empty_registries();
+        let (noise_registry, df_registry) = populated_registries();
         let state = RandomState::create(&settings, &noise_registry, &df_registry, 1234);
         let generator = NoiseBasedChunkGenerator::new(Holder::Direct(settings));
         let mut proto = worldgen_proto(ChunkPos::ZERO);
@@ -1301,7 +1363,7 @@ mod tests {
         // (no negative-section indexing) and that the block writes stay inside
         // the chunk.
         let settings = test_settings();
-        let (noise_registry, df_registry) = empty_registries();
+        let (noise_registry, df_registry) = populated_registries();
         let state = RandomState::create(&settings, &noise_registry, &df_registry, 1234);
         let generator = NoiseBasedChunkGenerator::new(Holder::Direct(settings));
         let mut proto = worldgen_proto(ChunkPos::new(-1, -1));
@@ -1334,7 +1396,7 @@ mod tests {
         // section. The chunk has a single section; `fill_from_noise` must not
         // index into it.
         let settings = test_settings();
-        let (noise_registry, df_registry) = empty_registries();
+        let (noise_registry, df_registry) = populated_registries();
         let state = RandomState::create(&settings, &noise_registry, &df_registry, 1234);
         let generator = NoiseBasedChunkGenerator::new(Holder::Direct(settings));
 
@@ -1388,7 +1450,7 @@ mod tests {
         let gradient =
             fns::interpolated(fns::cache_once(fns::y_clamped_gradient(-64, 63, 1.0, -1.0)));
         let settings = test_settings_with_final_density(gradient);
-        let (noise_registry, df_registry) = empty_registries();
+        let (noise_registry, df_registry) = populated_registries();
         let state = RandomState::create(&settings, &noise_registry, &df_registry, 1234);
         let generator = NoiseBasedChunkGenerator::new(Holder::Direct(settings));
         let mut proto = worldgen_proto(ChunkPos::ZERO);

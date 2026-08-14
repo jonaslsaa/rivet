@@ -18,10 +18,15 @@
 //! - `spawnTarget` inlines `new OverworldBiomeBuilder().spawnTarget()` (the
 //!   two `ParameterPoint`s the biome unit's builder returns — the only leaf
 //!   this SCC reads; see the module doc).
-//! - `SurfaceRuleData.end/nether/overworld/overworldLike/air` are STUBs in
-//!   `levelgen::surface_rules` (the owning `mc.world.level.levelgen.surface`
-//!   unit ports the real builders); every preset carries the `Air` stand-in so
-//!   the record composes.
+//! - `SurfaceRuleData.end` is ported (the end-stone `block` rule), and
+//!   `SurfaceRuleData.nether/overworld/overworldLike` are ported faithfully in
+//!   `levelgen::surface_rules` (the `mc.data.worldgen` unit, RivetTodo #179).
+//!   The Java `bootstrap` threads `context.lookup(Registries.BIOME)` into the
+//!   surface-rule builders; the port mirrors that with
+//!   `context.lookup(&*registries::BIOME)` resolved inside `bootstrap`, so the
+//!   biome registry must be present in the bootstrap access (the recording
+//!   context answers `None` for an absent registry, and `getOrThrow` on a
+//!   missing biome key panics with Java's `Missing element <key>` message).
 //! - `Blocks.END_STONE/NETHERRACK/LAVA/STONE/WATER/AIR` all have
 //!   `default_block_state()` handles.
 //! - `WorldgenRandom.Algorithm` — `rivet_util::worldgen_random::Algorithm`.
@@ -37,11 +42,12 @@ use crate::levelgen::surface_rules::{
     surface_rule_overworld, surface_rule_overworld_like,
 };
 use crate::levelgen::synth::normal_noise::NoiseParameters;
+use rivet_registry::biome_id::BiomeId;
 use rivet_registry::holder::Holder;
 use rivet_registry::holder_lookup::HolderGetter;
 use rivet_registry::registry_file_codec::RegistryFileCodec;
 use rivet_registry::registry_ops::RegistryOpsLookup;
-use rivet_registry::{Identifier, ResourceKey};
+use rivet_registry::{Identifier, ResourceKey, registries};
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::data_result::DataResult;
 use rivet_serialization::dynamic_ops::{DynamicOps, Keyable, MapLike, RecordBuilder};
@@ -64,7 +70,9 @@ pub struct NoiseGeneratorSettings {
     pub default_fluid: BlockState,
     /// `noiseRouter`.
     pub noise_router: NoiseRouter,
-    /// `surfaceRule` — the erased `ArcRuleSource` (STUB carrier).
+    /// `surfaceRule` — the erased `ArcRuleSource`: the real
+    /// `SurfaceRuleData` tree for the preset (`end`/`nether`/`overworld`/
+    /// `overworldLike`/`air`).
     pub surface_rule: ArcRuleSource,
     /// `spawnTarget`.
     pub spawn_target: Vec<ParameterPoint>,
@@ -182,6 +190,20 @@ impl NoiseGeneratorSettings {
     }
 }
 
+/// `context.lookup(Registries.BIOME)` — the biome `HolderGetter` the
+/// `SurfaceRuleData.nether/overworld/overworldLike` builders need. Java's
+/// `BootstrapContext.lookup` always returns a getter; the port's `Option` is a
+/// documented seam deviation, so the settings bootstrap `.expect`s the biome
+/// registry exactly like the functions/noises lookups (the biome registry is
+/// always present when worldgen settings are bootstrapped).
+fn biomes_lookup(
+    context: &impl crate::data::worldgen::bootstrap_context::BootstrapContext<NoiseGeneratorSettings>,
+) -> &dyn HolderGetter<BiomeId> {
+    context
+        .lookup(&*registries::BIOME)
+        .expect("biome registry present in settings bootstrap")
+}
+
 /// `NoiseGeneratorSettings.bootstrap(BootstrapContext<NoiseGeneratorSettings>)`.
 ///
 /// `context.register` mutates the build state, so the Rust port takes a `&mut`
@@ -202,7 +224,8 @@ pub fn bootstrap(
         let noises = context
             .lookup(&crate::levelgen::noise::registry_keys::NOISE)
             .expect("noise registry present in settings bootstrap");
-        overworld(functions, noises, false, false)
+        let biomes = biomes_lookup(context);
+        overworld(functions, noises, biomes, false, false)
     });
     context.register_default(&LARGE_BIOMES, {
         let functions = context
@@ -211,7 +234,8 @@ pub fn bootstrap(
         let noises = context
             .lookup(&crate::levelgen::noise::registry_keys::NOISE)
             .expect("noise registry present in settings bootstrap");
-        overworld(functions, noises, false, true)
+        let biomes = biomes_lookup(context);
+        overworld(functions, noises, biomes, false, true)
     });
     context.register_default(&AMPLIFIED, {
         let functions = context
@@ -220,7 +244,8 @@ pub fn bootstrap(
         let noises = context
             .lookup(&crate::levelgen::noise::registry_keys::NOISE)
             .expect("noise registry present in settings bootstrap");
-        overworld(functions, noises, true, false)
+        let biomes = biomes_lookup(context);
+        overworld(functions, noises, biomes, true, false)
     });
     context.register_default(&NETHER, {
         let functions = context
@@ -229,7 +254,8 @@ pub fn bootstrap(
         let noises = context
             .lookup(&crate::levelgen::noise::registry_keys::NOISE)
             .expect("noise registry present in settings bootstrap");
-        nether(functions, noises)
+        let biomes = biomes_lookup(context);
+        nether(functions, noises, biomes)
     });
     context.register_default(&END, {
         let functions = context
@@ -241,7 +267,8 @@ pub fn bootstrap(
         let functions = context
             .lookup(&crate::levelgen::noise::registry_keys::DENSITY_FUNCTION)
             .expect("density function registry present in settings bootstrap");
-        caves(functions)
+        let biomes = biomes_lookup(context);
+        caves(functions, biomes)
     });
     context.register_default(&FLOATING_ISLANDS, {
         let functions = context
@@ -250,7 +277,8 @@ pub fn bootstrap(
         let noises = context
             .lookup(&crate::levelgen::noise::registry_keys::NOISE)
             .expect("noise registry present in settings bootstrap");
-        floating_islands(functions, noises)
+        let biomes = biomes_lookup(context);
+        floating_islands(functions, noises, biomes)
     });
 }
 
@@ -281,13 +309,14 @@ fn end(functions: &dyn HolderGetter<DensityFunctionValue>) -> NoiseGeneratorSett
 fn nether(
     functions: &dyn HolderGetter<DensityFunctionValue>,
     noises: &dyn HolderGetter<NoiseParameters>,
+    biomes: &dyn HolderGetter<BiomeId>,
 ) -> NoiseGeneratorSettings {
     NoiseGeneratorSettings::new(
         crate::levelgen::noise::noise_settings::NETHER_NOISE_SETTINGS,
         Blocks::NETHERRACK.default_block_state(),
         Blocks::LAVA.default_block_state(),
         crate::levelgen::noisegen::noise_router_data::nether(functions, noises),
-        surface_rule_nether(),
+        surface_rule_nether(biomes),
         Vec::new(),
         32,
         false,
@@ -305,6 +334,7 @@ fn nether(
 fn overworld(
     functions: &dyn HolderGetter<DensityFunctionValue>,
     noises: &dyn HolderGetter<NoiseParameters>,
+    biomes: &dyn HolderGetter<BiomeId>,
     is_amplified: bool,
     large_biomes: bool,
 ) -> NoiseGeneratorSettings {
@@ -318,7 +348,7 @@ fn overworld(
             large_biomes,
             is_amplified,
         ),
-        surface_rule_overworld(),
+        surface_rule_overworld(biomes),
         spawn_target(),
         63,
         false,
@@ -332,13 +362,16 @@ fn overworld(
 /// water fluid, `NoiseRouterData.caves`, `SurfaceRuleData.overworldLike(false,
 /// true, true)`, no spawn target, sea level 32, no mob generation, no
 /// aquifers, no ore veins, legacy random.
-fn caves(functions: &dyn HolderGetter<DensityFunctionValue>) -> NoiseGeneratorSettings {
+fn caves(
+    functions: &dyn HolderGetter<DensityFunctionValue>,
+    biomes: &dyn HolderGetter<BiomeId>,
+) -> NoiseGeneratorSettings {
     NoiseGeneratorSettings::new(
         crate::levelgen::noise::noise_settings::CAVES_NOISE_SETTINGS,
         Blocks::STONE.default_block_state(),
         Blocks::WATER.default_block_state(),
         crate::levelgen::noisegen::noise_router_data::caves(functions),
-        surface_rule_overworld_like(false, true, true),
+        surface_rule_overworld_like(biomes, false, true, true),
         Vec::new(),
         32,
         false,
@@ -356,13 +389,14 @@ fn caves(functions: &dyn HolderGetter<DensityFunctionValue>) -> NoiseGeneratorSe
 fn floating_islands(
     functions: &dyn HolderGetter<DensityFunctionValue>,
     noises: &dyn HolderGetter<NoiseParameters>,
+    biomes: &dyn HolderGetter<BiomeId>,
 ) -> NoiseGeneratorSettings {
     NoiseGeneratorSettings::new(
         crate::levelgen::noise::noise_settings::FLOATING_ISLANDS_NOISE_SETTINGS,
         Blocks::STONE.default_block_state(),
         Blocks::WATER.default_block_state(),
         crate::levelgen::noisegen::noise_router_data::floating_islands(functions, noises),
-        surface_rule_overworld_like(false, false, false),
+        surface_rule_overworld_like(biomes, false, false, false),
         Vec::new(),
         -64,
         false,
@@ -541,10 +575,12 @@ impl<Ops: DynamicOps + 'static> MapEncoder<NoiseGeneratorSettings, Ops>
         self.sea_level.encode(&input.sea_level, ops, prefix);
         self.disable_mob_generation
             .encode(&input.disable_mob_generation, ops, prefix);
+        // Java's `DIRECT_CODEC` `forGetter` is the DEBUG-gated accessor
+        // (`isAquifersEnabled` / `oreVeinsEnabled`), so encode through it.
         self.aquifers_enabled
-            .encode(&input.aquifers_enabled, ops, prefix);
+            .encode(&input.is_aquifers_enabled(), ops, prefix);
         self.ore_veins_enabled
-            .encode(&input.ore_veins_enabled, ops, prefix);
+            .encode(&input.ore_veins_enabled(), ops, prefix);
         self.legacy_random_source
             .encode(&input.use_legacy_random_source, ops, prefix);
     }
@@ -730,6 +766,7 @@ impl<Ops: DynamicOps + 'static> MapDecoder<NoiseGeneratorSettings, Ops>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::biome::biomes::SURFACE_RULE_BIOMES;
     use crate::data::worldgen::bootstrap_context::RecordingContext;
     use crate::data::worldgen::noise_data;
     use crate::levelgen::noisegen::noise_router_data::bootstrap as density_function_bootstrap;
@@ -764,8 +801,33 @@ mod tests {
         noise_builder.freeze()
     }
 
-    /// A `RegistryAccess` with the noise + density-function registries
-    /// populated (the `NoiseGeneratorSettings.bootstrap` lookups need them).
+    /// A frozen biome registry carrying the 33 `SurfaceRuleData`-referenced
+    /// keys (the single source of truth in
+    /// `biome::biomes::SURFACE_RULE_BIOMES`) as `BiomeId` handles. Each key is
+    /// registered under its real generated id (`BiomeId::from_name`), matching
+    /// the production `worldgen_bootstraps::build_biome_registry` exactly — a
+    /// `SurfaceRuleData` `is_biome` holder resolved through this registry reads
+    /// back the same value the generated biome table assigns (the `#179`
+    /// runtime biome-registry identity, one copy, no fabricated indices).
+    fn build_biome_registry() -> Registry<BiomeId> {
+        let biome_key = &*rivet_registry::registries::BIOME;
+        let mut builder: RegistryBuilder<BiomeId> = RegistryBuilder::new(biome_key);
+        for name in SURFACE_RULE_BIOMES {
+            let value = BiomeId::from_name(&format!("minecraft:{name}"))
+                .expect("SURFACE_RULE_BIOMES entries are generated biome keys");
+            builder.register(
+                &ResourceKey::create(biome_key, Identifier::with_default_namespace(name)),
+                Arc::new(value),
+                RegistrationInfo::BUILT_IN,
+            );
+        }
+        builder.freeze()
+    }
+
+    /// A `RegistryAccess` with the noise, density-function, and biome
+    /// registries populated (the `NoiseGeneratorSettings.bootstrap` lookups —
+    /// including the `SurfaceRuleData` builders' `Registries.BIOME` — need
+    /// them).
     fn make_access() -> RegistryAccess {
         let noise_key = &crate::levelgen::noise::registry_keys::NOISE;
         let df_key = &crate::levelgen::noise::registry_keys::DENSITY_FUNCTION;
@@ -797,6 +859,12 @@ mod tests {
             (
                 ResourceKey::create_registry_key(df_key.identifier().clone()),
                 Box::new(df_registry) as AnyBox,
+            ),
+            (
+                ResourceKey::create_registry_key(
+                    rivet_registry::registries::BIOME.identifier().clone(),
+                ),
+                Box::new(build_biome_registry()) as AnyBox,
             ),
         ])
     }
@@ -860,7 +928,10 @@ mod tests {
         let noises = access
             .lookup(&crate::levelgen::noise::registry_keys::NOISE)
             .expect("noise registry");
-        let settings = overworld(functions, noises, false, false);
+        let biomes = access
+            .lookup(&*rivet_registry::registries::BIOME)
+            .expect("biome registry");
+        let settings = overworld(functions, noises, biomes, false, false);
         assert_eq!(settings.sea_level, 63);
         assert!(settings.aquifers_enabled);
         assert!(settings.ore_veins_enabled);
@@ -892,5 +963,43 @@ mod tests {
         assert_eq!(ids[5], "minecraft:caves");
         assert_eq!(ids[6], "minecraft:floating_islands");
         assert_eq!(ids[3], NETHER.identifier().to_string());
+    }
+
+    /// The `DIRECT_CODEC` must round-trip the full settings record — in
+    /// particular the `surface_rule` field, which carries
+    /// `surface_rule_air()` = `SurfaceRules.state(Blocks.AIR)` (the real
+    /// `block` rule, Java's `makeStateRule`). Before the audit this field was a
+    /// fabricated `Air` with an unregistered `"air"` type id, which made the
+    /// settings record unencodable. This pins encodability end-to-end.
+    #[test]
+    fn direct_codec_round_trips_settings_including_surface_rule() {
+        use crate::levelgen::surface_rules::BlockRuleSource;
+        use rivet_registry::registry_ops::RegistryOps;
+        use rivet_serialization::json_ops::JsonOps;
+
+        type TestOps = RegistryOps<serde_json::Value, JsonOps>;
+        let access = make_access();
+        let ops = TestOps::create_from_access(&JsonOps::INSTANCE, access);
+        let settings = dummy();
+        let codec = NoiseGeneratorSettings::direct_codec::<TestOps>();
+
+        let encoded = codec
+            .encode_start(&ops, &settings)
+            .get_or_throw("encode settings")
+            .clone();
+        // The `surface_rule` field round-trips as the Java `block` rule.
+        assert_eq!(
+            encoded.get("surface_rule"),
+            Some(&serde_json::json!({
+                "type": "minecraft:block",
+                "result_state": {"Name": "minecraft:air"}
+            }))
+        );
+        let (decoded, _rest) = codec
+            .decode(&ops, &encoded)
+            .result()
+            .expect("decode settings")
+            .clone();
+        assert!(decoded.surface_rule.as_any().is::<BlockRuleSource>());
     }
 }

@@ -14,27 +14,39 @@
 //! block-surface trait and the `#126` dispatch codecs stay unbound), the
 //! `blockpredicates` slice (issue #399 — the block-predicate value/codec
 //! framework), the `synth` primitive-noise classes (the
-//! `mc.world.level.levelgen.synth` unit — issue #177), the
-//! `WorldGenerationContext` window, and the `PositionalRandomFactory`
-//! BlockPos/Identifier default overloads (`random`, issue #208) are ported so
-//! far; the generators/feature worldgen live under the owning manifest unit.
+//! `mc.world.level.levelgen.synth` unit — issue #177), the `flat` world type
+//! (the `mc.world.level.levelgen.flat` unit — issue #178:
+//! `FlatLevelGeneratorSettings`/`FlatLayerInfo`/`FlatLevelGeneratorPreset`/
+//! `FlatLevelGeneratorPresets`, the biome reference riding the `biome.core`
+//! id-model), the `WorldGenerationContext` window, and the
+//! `PositionalRandomFactory` BlockPos/Identifier default overloads (`random`,
+//! issue #208) are ported so far; the generators/feature worldgen live under
+//! the owning manifest unit.
 
 pub mod blockpredicates;
-// The `mc.world.level.levelgen.blending` unit's shared Blender value
-// prerequisite (issue #177): the empty singleton (`empty()`/`isEmpty()`, the
-// identity `blendDensity`, the `(1.0, 0.0)` empty
-// `blendOffsetAndFactor`/`BlendingOutput`, and the generic identity
-// `getBiomeResolver` override) — the non-empty `of`/`BlendingData` surface
-// defers (RivetTodo #177, see `blending::blender`).
+// The `mc.world.level.levelgen.blending` unit (issue #177): the full value
+// surface — `Blender` (empty singleton + the non-empty weighted height/density
+// blends, `BlendingOutput`, `blendBiome` + the `SHIFT_NOISE` gate) and
+// `BlendingData` (the per-old-chunk grid + `Packed` codec). The chunk-reading
+// half (`of(WorldGenRegion)`, `calculateData`, the carving-mask/border-tick
+// surfaces) defers (RivetTodo #177, see `blending::mod`).
 pub mod blending;
 pub mod carver;
 pub mod feature;
+// The `mc.world.level.levelgen.flat` unit (issue #178): the flat world type —
+// `FlatLayerInfo`, `FlatLevelGeneratorSettings`, `FlatLevelGeneratorPreset`,
+// and the `FlatLevelGeneratorPresets` registrations (the biome reference rides
+// the `biome.core` id-model; see the module's cross-unit STUB seams).
+pub mod flat;
 pub mod generation_step;
 pub mod heightmap;
 // The `mc.world.level.levelgen.heightproviders` unit (issue #181 leaf): the
 // `HeightProvider` value/codec layer, unblocked by the merged VerticalAnchor
 // #388 and weighted-random #353.
 pub mod heightproviders;
+// The `mc.world.level.levelgen.material` unit (issue #179 leaf): the
+// `MaterialRuleList` record — the `NoiseChunk.BlockStateFiller` list.
+pub mod material;
 // The `mc.world.level.levelgen.noise` unit's density-function/noise-router
 // value slice (issue #177).
 pub mod noise;
@@ -44,11 +56,13 @@ pub mod noise;
 // `NoiseBasedChunkGenerator`, `OreVeinifier`).
 pub mod noisegen;
 pub mod placement;
-// The `mc.world.level.levelgen.surface` unit's `SurfaceRules` value shell:
-// the `RuleSource`/`SurfaceRule`/`Context` type identities + the erased
-// `ArcRuleSource` carrier `NoiseGeneratorSettings` stores, the
-// `SurfaceRuleData` builder stand-ins, and the `SurfaceSystem` type identity
-// (RivetTodo to the surface unit — see the module).
+// The `mc.world.level.levelgen.presets` unit: the `WorldPreset` value + its
+// `worldgen/world_preset` registry file codec, and `WorldPresets` (the seven
+// builtin preset keys + the `HolderLookup.Provider` helpers; the `bootstrap`/
+// `fromSettings` seams defer with RivetTodo(#185), see the module).
+pub mod presets;
+// The `mc.world.level.levelgen.surface` unit: the `SurfaceRules` value codecs
+// + the `Context` runtime + the `SurfaceSystem` noise set (see the module).
 pub mod surface_rules;
 // The `mc.world.level.levelgen.structure.templatesystem.rules` unit (issue
 // #182) — the `RuleTest`/`PosRuleTest` template-system rule tests.
@@ -66,6 +80,12 @@ pub mod vertical_anchor;
 // ported here (the minY/height window placement derives from the generator);
 // only the Paper `level()` accessor defers (RivetTodo #232, see the module).
 pub mod world_generation_context;
+// The `mc.world.level.levelgen.settings` unit (issue #179): the world-level-gen
+// *settings* sources — `WorldOptions`, `WorldDimensions` (with the out-of-unit
+// `LevelStem` value shell), `WorldGenSettings`, the three geode settings
+// records, `BelowZeroRetrogen`, and the `FlatLevelSource`/`DebugLevelSource`
+// `ChunkGenerator` realizations (see `settings::mod`).
+pub mod settings;
 // The `mc.world.level.levelgen.synth` unit's seven primitive-noise classes
 // (issue #177). `DensityFunction`/registry dispatch seams defer as
 // `RivetTodo(#177)`; see `synth::mod`.

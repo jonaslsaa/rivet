@@ -52,6 +52,7 @@
 
 use crate::levelgen::feature::ConfiguredFeatureErased;
 use crate::levelgen::feature::configurations::FeatureConfiguration;
+use crate::levelgen::feature::registry_keys::{CONFIGURED_FEATURE, PLACED_FEATURE};
 use crate::levelgen::feature::stateproviders::block_state_provider::{
     ErasedBlockStateProvider, block_state_provider_codec,
 };
@@ -64,8 +65,6 @@ use rivet_registry::holder_set::HolderSet;
 use rivet_registry::registries::BlockType;
 use rivet_registry::registry_file_codec::RegistryFileCodec;
 use rivet_registry::registry_ops::RegistryOpsLookup;
-use rivet_registry::resource_key::ResourceKey;
-use rivet_registry::{Identifier, Registry};
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::data_result::{self, DataResult};
 use rivet_serialization::decoder;
@@ -147,24 +146,6 @@ impl VegetationPatchConfiguration {
     }
 }
 
-/// `Registries.CONFIGURED_FEATURE` — `"worldgen/configured_feature"`, the
-/// registry key `ConfiguredFeature.CODEC` is a `RegistryFileCodec` over. Not yet
-/// a `rivet-registry` constant, so it is declared here for the codec STUB.
-fn configured_feature_registry_key() -> ResourceKey<Registry<ConfiguredFeatureErased>> {
-    ResourceKey::create_registry_key(Identifier::with_default_namespace(
-        "worldgen/configured_feature",
-    ))
-}
-
-/// `Registries.PLACED_FEATURE` — `"worldgen/placed_feature"`, the registry key
-/// `PlacedFeature.CODEC` is a `RegistryFileCodec` over. Not yet a
-/// `rivet-registry` constant, so it is declared here for the codec STUB.
-fn placed_feature_registry_key() -> ResourceKey<Registry<PlacedFeature>> {
-    ResourceKey::create_registry_key(Identifier::with_default_namespace(
-        "worldgen/placed_feature",
-    ))
-}
-
 /// `PlacementModifier.CODEC` — the `"type"`-dispatch codec for the placement
 /// modifier list elements.
 ///
@@ -198,7 +179,7 @@ fn configured_feature_holder_codec<Ops: DynamicOps + 'static + RegistryOpsLookup
 -> Arc<dyn Codec<Holder<ConfiguredFeatureErased>, Ops>> {
     #[allow(clippy::arc_with_non_send_sync)]
     Arc::new(RegistryFileCodec::create(
-        &configured_feature_registry_key(),
+        &*CONFIGURED_FEATURE,
         configured_feature_direct_codec::<Ops>(),
     ))
 }
@@ -227,7 +208,12 @@ fn configured_feature_direct_codec<Ops: DynamicOps + 'static>()
 /// `PlacedFeature.DIRECT_CODEC` — a record over the required `"feature"` field
 /// (`ConfiguredFeature.CODEC`) and the required `"placement"` field
 /// (`PlacementModifier.CODEC.listOf()`).
-fn placed_feature_direct_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>()
+///
+/// `pub(crate)`: the `mc.world.level.biome.core` unit's
+/// `PlacedFeature.LIST_OF_LISTS_CODEC` (the biome generation settings'
+/// `"features"` field) is `homogeneousList(PLACED_FEATURE, DIRECT_CODEC,
+/// true).listOf()` and reuses this direct codec as its inline element codec.
+pub(crate) fn placed_feature_direct_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>()
 -> Arc<dyn Codec<PlacedFeature, Ops>> {
     record_builder::create(|instance| {
         instance
@@ -263,7 +249,7 @@ pub fn placed_feature_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>()
 -> Arc<dyn Codec<Holder<PlacedFeature>, Ops>> {
     #[allow(clippy::arc_with_non_send_sync)]
     Arc::new(RegistryFileCodec::create(
-        &placed_feature_registry_key(),
+        &*PLACED_FEATURE,
         placed_feature_direct_codec::<Ops>(),
     ))
 }
@@ -484,12 +470,14 @@ impl FeatureConfiguration for VegetationPatchConfiguration {}
 mod tests {
     use super::*;
     use crate::levelgen::feature::stateproviders::block_state_provider::simple;
+    use rivet_registry::Identifier;
     use rivet_registry::access::RegistryAccess;
     use rivet_registry::block_state::BlockState;
     use rivet_registry::builder::RegistryBuilder;
     use rivet_registry::generated::blocks::BlockId;
     use rivet_registry::registration_info::RegistrationInfo;
     use rivet_registry::registry_ops::RegistryOps;
+    use rivet_registry::resource_key::ResourceKey;
     use rivet_registry::root::AnyBox;
     use rivet_serialization::float_format::java_float_equals;
     use rivet_serialization::json_ops::JsonOps;
@@ -530,10 +518,10 @@ mod tests {
         )]);
         let blocks = blocks.freeze();
 
-        let mut features = RegistryBuilder::new(&configured_feature_registry_key());
+        let mut features = RegistryBuilder::new(&*CONFIGURED_FEATURE);
         features.register(
             &ResourceKey::create(
-                &configured_feature_registry_key(),
+                &*CONFIGURED_FEATURE,
                 Identifier::parse("minecraft:moss_vegetation"),
             ),
             Arc::new(ConfiguredFeatureErased {
@@ -551,7 +539,7 @@ mod tests {
         // inline direct form); an empty registry suffices here because the
         // fixture's `vegetation_feature` is an inline `{"feature", "placement"}`
         // map, never a placed-feature identifier.
-        let placed = RegistryBuilder::new(&placed_feature_registry_key());
+        let placed = RegistryBuilder::new(&*PLACED_FEATURE);
         let placed = placed.freeze();
 
         RegistryAccess::from_pairs(vec![
@@ -594,7 +582,7 @@ mod tests {
     /// The `minecraft:moss_vegetation` configured feature as a reference holder
     /// through the SAME access the ops use.
     fn moss_vegetation(access: &RegistryAccess) -> Holder<ConfiguredFeatureErased> {
-        let registry = RegistryAccess::lookup(access, &configured_feature_registry_key())
+        let registry = RegistryAccess::lookup(access, &*CONFIGURED_FEATURE)
             .expect("configured feature registry");
         Holder::reference(registry.registry_id(), 0)
     }

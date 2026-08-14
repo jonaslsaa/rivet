@@ -12,13 +12,13 @@
 //! The `shouldPlace` guard (`topFeature().orElseThrow(...)`, message exact)
 //! and the biome read (`WorldGenLevel::get_biome`, the `#399` seam) are ported
 //! faithfully; the final membership read — `getBiomeGenerationSettings(biome)
-//! .hasFeature(feature)` — is owned by the `mc.world.level.biome.core` unit
-//! (#178), so it routes through the `ChunkGenerator` trait-default seam
-//! (`get_biome_generation_settings_has_feature`), which fails explicitly until
-//! that unit lands — never fabricating a biome-membership result. Because the
-//! seam is a trait default, a generator that does provide the surface keeps
-//! `shouldPlace` executable: the filter behaves as a filter (a real boolean
-//! predicate) rather than aborting the process.
+//! .hasFeature(feature)` — routes through the `ChunkGenerator` trait-default
+//! seam (`get_biome_generation_settings_has_feature`), which fails explicitly
+//! until the biome-value registry (`mc.data.worldgen.biome`) lands — never
+//! fabricating a biome-membership result. Because the seam is a trait default,
+//! a generator that does provide the surface keeps `shouldPlace` executable:
+//! the filter behaves as a filter (a real boolean predicate) rather than
+//! aborting the process.
 //!
 //! `BiomeFilter` is a Java singleton; `Clone` yields the same always-instance
 //! filter.
@@ -65,10 +65,10 @@ impl PlacementFilter for BiomeFilter {
         // `context.getLevel().getBiome(origin)` — the `#399` biome-read seam.
         let biome = context.get_level().get_biome(origin);
         // `context.generator().getBiomeGenerationSettings(biome).hasFeature(feature)`
-        // — the `#178` biome-core owner's surface, routed through the
-        // `ChunkGenerator` trait-default seam: it fails explicitly rather than
-        // fabricating a biome-membership result, but a generator that provides
-        // the surface keeps `shouldPlace` a real predicate.
+        // — routed through the `ChunkGenerator` trait-default seam: it fails
+        // explicitly until the biome-value registry (`mc.data.worldgen.biome`)
+        // lands, never fabricating a biome-membership result, but a generator
+        // that provides the surface keeps `shouldPlace` a real predicate.
         context
             .generator()
             .get_biome_generation_settings_has_feature(&biome, feature)

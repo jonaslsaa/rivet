@@ -68,12 +68,12 @@
 #                          Rivet headlessly and proves the client survives past the 30 s
 #                          keepalive kick limit (wall-clock, echoing every live keepalive).
 #                          The Paper rows are guarded by the paperclip jar, like oracle
-#                          verify; dwell/kick/loaded-world/generated-world need only the
-#                          rivet-server binary (run-scenario.sh builds it on demand; the
-#                          loaded-world and generated-world rows additionally need the
-#                          rivet-oracle and rivet-client binaries the harness resolves).
-#                          Each row exits 0 PASS / 1 FAIL / 3 UNVERIFIED (never silently
-#                          green).
+#                          verify; dwell/kick/loaded-world/recenter/generated-world need
+#                          only the rivet-server binary (run-scenario.sh builds it on
+#                          demand; the loaded-world and generated-world rows additionally
+#                          need the rivet-oracle and rivet-client binaries the harness
+#                          resolves). Each row exits 0 PASS / 1 FAIL / 3 UNVERIFIED
+#                          (never silently green).
 #   - join capture         rivet-capture: boots Paper, joins via the Azalea client
 #                          through a byte-transparent proxy, and diffs the normalized
 #                          join packets byte-for-byte against the committed fixture,
@@ -363,7 +363,7 @@ oracle_prereq_check() {
 # gate like any other oracle stage; the tamper never touches the committed
 # fixtures.
 run_oracle_verify() {
-  echo "==> oracle verify (all committed fixture kinds: M0 slice + worldgen samples + M2 regions + text corpus + spline)"
+  echo "==> oracle verify (all committed fixture kinds: M0 slice + worldgen samples + M2 regions + text corpus + spline + composed-noise + surface-column)"
   cargo run -q -p rivet-oracle
   if [ "$VERIFY_RUNNABLE" = 1 ]; then
     echo "==> oracle verify (M0 sanity gate: green against vanilla itself)"
@@ -695,6 +695,45 @@ run_scenario_loaded_world() {
   else
     # Tool crash / panic / unexpected error: FAILED, never green.
     echo "    FAILED — loaded-world acceptance crashed or errored (exit $rc; see the output above)"
+    exit 1
+  fi
+}
+
+# The recenter acceptance row (issues #185/#561): boot Rivet against a
+# disposable copy of the safe world under `working/client-worlds/New World`
+# (never the launcher save), drive the real Azalea client's deterministic +x
+# route across repeated chunk boundaries, and REQUIRE the positive
+# sustained-walking result — the client stays connected and receives every
+# beyond-boot chunk the region-backed recenter loads on demand — plus a
+# tampered-copy negative control that proves the acceptance is non-vacuous.
+# It is a Rivet-only terminal acceptance (like loaded-world) — no paperclip jar
+# is a prereq, and run-scenario.sh builds the rivet-server binary on demand.
+# Its exit code is the machine-stable 0 PASS / 1 FAIL / 3 UNVERIFIED contract.
+# The row must never silently skip or look green on a missing prereq: an
+# UNVERIFIED (exit 3) sets ORACLE_UNVERIFIED so the gate exits 3, and under
+# --require-oracle it is a hard failure (exit 1) — exactly the
+# rivet-parity/self-test boundary.
+run_scenario_recenter() {
+  echo "==> scenario runner (recenter: sustained-walking acceptance vs the disposable copied world, issues #185/#561)"
+  local rc=0
+  "$REPO_DIR/tools/rivet-client/run-scenario.sh" recenter || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "    PASS — the client walked the deterministic +x route across repeated chunk boundaries; the region-backed recenter stayed connected and received every beyond-boot chunk"
+  elif [ "$rc" -eq 1 ]; then
+    echo "    FAILED — recenter acceptance found a divergence (exit $rc; see the output above)"
+    exit 1
+  elif [ "$rc" -eq 3 ]; then
+    # UNVERIFIED: a prerequisite was missing (copied world, binaries) or the
+    # server did not reach READY — the sustained walk never ran to completion.
+    echo "    UNVERIFIED — recenter acceptance did not complete (exit $rc; see the output above)"
+    ORACLE_UNVERIFIED=1
+    if [ "$REQUIRE_ORACLE" = 1 ]; then
+      echo "    --require-oracle is set: a recenter run that cannot complete is a hard failure"
+      exit 1
+    fi
+  else
+    # Tool crash / panic / unexpected error: FAILED, never green.
+    echo "    FAILED — recenter acceptance crashed or errored (exit $rc; see the output above)"
     exit 1
   fi
 }
@@ -1050,6 +1089,20 @@ main() {
   #                         0 PASS / 1 FAIL / 3 UNVERIFIED; exit 3 sets
   #                         ORACLE_UNVERIFIED so the gate exits 3 (and
   #                         --require-oracle hard-fails it at exit 1).
+  #   recenter              Rivet-only sustained-walking acceptance (issues #185/#561):
+  #                         boot Rivet against a disposable copy of the safe world
+  #                         under working/client-worlds/New World (never the
+  #                         launcher save), drive the real Azalea client's
+  #                         deterministic +x route across repeated chunk boundaries,
+  #                         and REQUIRE the client stays connected and receives every
+  #                         beyond-boot chunk the region-backed recenter loads on
+  #                         demand — plus a tampered-copy negative control proving the
+  #                         acceptance is non-vacuous. Needs no jar — only the
+  #                         rivet-server binary (built on demand by run-scenario.sh)
+  #                         plus the rivet-client binary the harness resolves.
+  #                         Exits 0 PASS / 1 FAIL / 3 UNVERIFIED; exit 3 sets
+  #                         ORACLE_UNVERIFIED so the gate exits 3 (and
+  #                         --require-oracle hard-fails it at exit 1).
   #   generated-world       Rivet-only official-client acceptance (seed-42
   #                         generated-world contract, ahead of the generator):
   #                         boot Rivet with `--seed 42` (the generated-world
@@ -1057,32 +1110,34 @@ main() {
   #                         the real Azalea client in generated mode, and compare
   #                         the served per-coordinate content against the seed-42
   #                         ground-truth handoff (rivet-oracle
-  #                         generated-expected). Milestone-gated behind
-  #                         RIVET_GENERATED_WORLD=1 (like RIVET_HASH_DIR): the
-  #                         `--seed` option still serves the superflat M1
-  #                         fixture, and the Paper seed-42 reference is not
-  #                         captured yet, so while real generated-world serving
-  #                         and/or the ground truth are absent the row is an
-  #                         explicit NOTICE and stays mergeable — never a silent
-  #                         skip or a fabricated PASS. With the flag set the exit
-  #                         contract matches loaded-world (0 PASS / 1 FAIL / 3
-  #                         UNVERIFIED; exit 3 sets ORACLE_UNVERIFIED, and
-  #                         --require-oracle hard-fails it at exit 1).
+  #                         generated-expected). The Paper seed-42 golden is
+  #                         captured (PR #595), but the rivet-server `--seed`
+  #                         option still serves the superflat M1 fixture — real
+  #                         generated-world serving is not wired into the live
+  #                         path yet — so the runner stays UNVERIFIED (exit 3)
+  #                         with the exact pinned reason. Milestone-gated behind
+  #                         RIVET_GENERATED_WORLD=1 (like RIVET_HASH_DIR): while
+  #                         genuine generated-world serving is absent the row is
+  #                         an explicit NOTICE and stays mergeable — never a
+  #                         silent skip or a fabricated PASS. With the flag set
+  #                         the exit contract matches loaded-world (0 PASS / 1
+  #                         FAIL / 3 UNVERIFIED; exit 3 sets ORACLE_UNVERIFIED,
+  #                         and --require-oracle hard-fails it at exit 1).
   #
   # The Paper rows run when the paperclip jar and the rivet-client binary are
   # present (SCENARIO_RUNNABLE, set by the prereq pre-check); when either is
   # missing they report UNVERIFIED and set ORACLE_UNVERIFIED so the gate exits 3
   # (--require-oracle hard-fails at the pre-check) — never the bare "SKIPPED"
   # that could conceal the missing comparison behind a green-looking run (issue
-  # #160). The dwell/kick/loaded-world/generated-world rows are Rivet-only —
-  # they need no jar, only the rivet-server binary (which run-scenario.sh builds
-  # on demand; the loaded-world and generated-world rows additionally need the
-  # rivet-oracle and rivet-client binaries the harness resolves — generated-world
-  # also invokes `rivet-oracle generated-expected` for the seed-42 ground-truth
-  # handoff). Every row exits 0 PASS / 1 FAIL
-  # / 3 UNVERIFIED, so a missing prereq or a failed scenario can never look
-  # green. Skipped when gating a crate subset (the scenario drives a whole
-  # server).
+  # #160). The dwell/kick/loaded-world/recenter/generated-world rows are
+  # Rivet-only — they need no jar, only the rivet-server binary (which
+  # run-scenario.sh builds on demand; the loaded-world row additionally needs
+  # the rivet-oracle and rivet-client binaries the harness resolves, the recenter
+  # row only the rivet-client binary, and the generated-world row also invokes
+  # `rivet-oracle generated-expected` for the seed-42 ground-truth handoff).
+  # Every row exits 0 PASS / 1 FAIL / 3 UNVERIFIED, so a missing prereq or a
+  # failed scenario can never look green. Skipped when gating a crate subset
+  # (the scenario drives a whole server).
   if [ "$FULL_GATE" = true ]; then
     run_scenario_paper_rows
     echo "==> scenario runner (dwell: wall-clock keepalive survival past the 30s kick limit)"
@@ -1090,6 +1145,7 @@ main() {
     echo "==> scenario runner (kick: decoded disconnect reason from the anti-cheat gate)"
     "$REPO_DIR/tools/rivet-client/run-scenario.sh" kick --server rivet
     run_scenario_loaded_world
+    run_scenario_recenter
     run_scenario_generated_world
   fi
 

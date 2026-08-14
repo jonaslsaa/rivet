@@ -2,18 +2,29 @@
 //! value slice (issue #177).
 //!
 //! The `mc.world.level.levelgen.blending` unit owns the three Java files
-//! (`Blender`, `BlendingData`, `package-info`). This slice ports only the
-//! independently compilable empty-`Blender` value prerequisite that noisegen
-//! shares (see `blender`):
+//! (`Blender`, `BlendingData`, `package-info`). This module ports the full
+//! value surface:
 //!
-//! - [`blender::BlendingOutput`] — the `blendOffsetAndFactor` result record.
-//! - [`blender::Blender`] — the empty singleton (`empty()`/`isEmpty()`), the
-//!   identity `blendDensity`, the empty `blendOffsetAndFactor` constant
-//!   `(1.0, 0.0)`, and the generic identity `getBiomeResolver` override.
+//! - [`blending_data`] — `BlendingData`, the per-old-chunk height/biome/density
+//!   grid, plus the `Packed` record and its `CODEC` (round-trips the
+//!   `blending_data` compound `serializable_chunk_data` carries; both agree on
+//!   `CELL_COLUMN_COUNT == 16`). The chunk-reading half (`calculateData`,
+//!   `getOrUpdateBlendingData`, …) defers (RivetTodo #177, see `blending_data`).
+//! - [`blender`] — `Blender`, the non-empty weighted height/density blends
+//!   backed by `BlendingData` (`blendOffsetAndFactor`/`blendDensity`), the
+//!   empty singleton, and `BlendingOutput`. `of(WorldGenRegion)` and the
+//!   chunk-border surfaces (`generateBorderTicks`,
+//!   `addAroundOldChunksCarvingMaskFilter`, …) defer (RivetTodo #177, see
+//!   `blender`).
 //!
-//! `BlendingData` (the per-chunk height/biome/density grid) is NOT ported in
-//! this slice: `Blender.of(WorldGenRegion)` and the non-empty weighted
-//! height/density blends that read it defer as `RivetTodo(#177)` owned by the
-//! blending unit.
+//! RivetTodo(#177): the chunk/region-reading half of `BlendingData`
+//! (`getOrUpdateBlendingData`/`sideByGenerationAge`/`calculateData` and the
+//! per-column readers) needs the `ChunkAccess`/`WorldGenRegion` surfaces; see
+//! `blending_data`'s module doc.
+//! RivetTodo(#177): `Blender.of(WorldGenRegion)` and the chunk-border surfaces
+//! (`generateBorderTicks`/`addAroundOldChunksCarvingMaskFilter`/the distance
+//! getters) need `WorldGenRegion`/`ProtoChunk`/`WorldGenLevel`; see `blender`'s
+//! module doc.
 
 pub mod blender;
+pub mod blending_data;
