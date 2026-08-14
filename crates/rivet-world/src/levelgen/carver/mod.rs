@@ -51,6 +51,7 @@ pub mod carving_context;
 pub mod cave_carver_configuration;
 pub mod cave_world_carver;
 pub mod configured_world_carver;
+pub mod overworld_carvers;
 pub mod world_carver;
 
 pub use canyon_carver_configuration::{

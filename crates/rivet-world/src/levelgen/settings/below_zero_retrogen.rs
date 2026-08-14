@@ -236,7 +236,7 @@ impl BelowZeroRetrogen {
     /// once up front (the `fill_from_noise` pattern) before the write loop.
     pub fn apply_bedrock_mask<B, S>(&self, chunk: &mut ProtoChunk<BlockState, B, S>)
     where
-        B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         S: Eq + std::hash::Hash,
     {
         let height_accessor = &*UPGRADE_HEIGHT_ACCESSOR;
@@ -291,7 +291,7 @@ pub fn below_zero_retrogen_codec<Ops: DynamicOps + 'static>()
 /// the worldgen block write (see the module doc).
 pub fn replace_old_bedrock<B, S>(chunk: &mut ProtoChunk<BlockState, B, S>)
 where
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     // The two worldgen heightmaps are created once up front (the
@@ -316,7 +316,7 @@ where
 /// front, mirroring `flat_level_source.fill_from_noise`.
 fn write_block<B, S>(chunk: &mut ProtoChunk<BlockState, B, S>, pos: &BlockPos, state: BlockState)
 where
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     let section_index = chunk.get_section_index(pos.get_y());

@@ -58,8 +58,8 @@ static FULL_LIST: LazyLock<Vec<i16>> = LazyLock::new(|| (0..SECTION_SIZE as i16)
 /// `LevelChunkSection` — the block/biome container pair plus the wire-visible
 /// count fields and the Moonrise block-counting lists.
 pub struct LevelChunkSection<
-    T: Clone + PartialEq + Send + 'static,
-    B: Clone + PartialEq + Send + 'static,
+    T: Clone + PartialEq + Send + Sync + 'static,
+    B: Clone + PartialEq + Send + Sync + 'static,
 > {
     /// `nonEmptyBlockCount` — blocks that are not air.
     non_empty_block_count: i16,
@@ -82,8 +82,8 @@ pub struct LevelChunkSection<
 }
 
 impl<
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
 > LevelChunkSection<T, B>
 {
     /// `LevelChunkSection(PalettedContainer<BlockState> states,
@@ -163,8 +163,8 @@ impl<
         map_biome: &impl Fn(&B) -> B2,
     ) -> Result<LevelChunkSection<T2, B2>, String>
     where
-        T2: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-        B2: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        T2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+        B2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     {
         let LevelChunkSection {
             non_empty_block_count,
@@ -612,7 +612,7 @@ mod tests {
         fn by_id(&self, id: i32) -> Option<u8> {
             Some(id as u8)
         }
-        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8>> {
+        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8> + Send + Sync> {
             Box::new(*self)
         }
     }

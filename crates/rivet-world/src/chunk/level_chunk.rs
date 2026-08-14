@@ -58,8 +58,8 @@ use std::collections::HashMap;
 /// `net.minecraft.world.level.chunk.LevelChunk` — the loaded chunk value.
 pub struct LevelChunk<T, B, S>
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     /// The `ChunkAccess` base — sections, heightmaps, flags, pending BEs.
@@ -72,8 +72,8 @@ where
 
 impl<T, B, S> LevelChunk<T, B, S>
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     /// `LevelChunk(Level, ChunkPos, UpgradeData, LevelChunkTicks, LevelChunkTicks,
@@ -156,8 +156,8 @@ where
         resolve: &'static (dyn Fn(&T2) -> StateFlags + Sync),
     ) -> Result<LevelChunk<T2, B2, S>, String>
     where
-        T2: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-        B2: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        T2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+        B2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     {
         let LevelChunk { base, air: _ } = self;
         let base = base.map_values(
@@ -511,7 +511,7 @@ mod tests {
         fn by_id(&self, id: i32) -> Option<u8> {
             Some(id as u8)
         }
-        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8>> {
+        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8> + Send + Sync> {
             Box::new(*self)
         }
     }

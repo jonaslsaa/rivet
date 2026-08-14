@@ -59,7 +59,7 @@ impl BitStorage for ZeroBitStorage {
         }
     }
 
-    fn copy_box(&self) -> Box<dyn BitStorage> {
+    fn copy_box(&self) -> Box<dyn BitStorage + Send + Sync> {
         Box::new(*self)
     }
 
