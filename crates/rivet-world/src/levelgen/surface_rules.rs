@@ -4306,4 +4306,58 @@ mod tests {
             63
         );
     }
+
+    #[test]
+    fn set_block_state_air_fast_path_is_identity_not_behavioral() {
+        // Java's `wasEmpty && state.is(Blocks.AIR)` is a block-identity check
+        // (`getBlock() == Blocks.AIR`). CAVE_AIR shares the behavioral `is_air`
+        // predicate with AIR, so this guard proves it takes the real
+        // section-write path into an all-air section instead of
+        // short-circuiting: a behavioral predicate would have returned CAVE_AIR
+        // without writing, leaving the cell AIR.
+        use crate::chunk::proto_chunk::ProtoChunk;
+        use crate::chunk::storage::chunk_reconstruction::resolve_state_flags;
+        use crate::chunk::storage::section_reconstruction::current_version_container_factory;
+        use crate::chunk::upgrade_data::UpgradeData;
+
+        let mut proto: ProtoChunk<
+            BlockState,
+            crate::chunk::storage::section_reconstruction::BiomeId,
+            &'static str,
+        > = ProtoChunk::new(
+            ChunkPos::ZERO,
+            UpgradeData::empty(24),
+            create(-64, 384),
+            &current_version_container_factory(),
+            None,
+            Blocks::AIR.default_block_state(),
+            Blocks::AIR.default_block_state(),
+            &resolve_state_flags,
+        );
+        let section_index = proto.get_section_index(0) as usize;
+
+        // Exact AIR takes the fast path: the all-air section is left untouched.
+        assert!(proto.get_section(section_index).has_only_air());
+        proto.set_block_state(0, 0, 0, Blocks::AIR.default_block_state());
+        assert!(proto.get_section(section_index).has_only_air());
+
+        // CAVE_AIR must NOT take the fast path. The write returns the previous
+        // (AIR) state, and the section-level read (the paletted container, which
+        // the chunk-level read masks behind `hasOnlyAir`) proves the cave-air
+        // cell was stored.
+        let previous = proto.set_block_state(1, 0, 1, Blocks::CAVE_AIR.default_block_state());
+        assert_eq!(previous, Blocks::AIR.default_block_state());
+        assert_eq!(
+            proto.get_section(section_index).get_block_state(1, 0, 1),
+            Blocks::CAVE_AIR.default_block_state()
+        );
+        // Java-faithful masking: `getBlockState` returns AIR for an all-air
+        // section even when a stored cell is CAVE_AIR (`hasOnlyAir` is a
+        // behavioral count, so CAVE_AIR does not break it).
+        assert!(proto.get_section(section_index).has_only_air());
+        assert_eq!(
+            proto.get_block_state(1, 0, 1),
+            Blocks::AIR.default_block_state()
+        );
+    }
 }

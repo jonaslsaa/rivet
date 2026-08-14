@@ -38,6 +38,7 @@
 use crate::biome::biome_resolver::BiomeResolver;
 use crate::biome::climate::Sampler;
 use crate::block::BlockState;
+use crate::block::blocks::Blocks;
 use crate::chunk::carving_mask::CarvingMask;
 use crate::chunk::chunk_access::{ChunkAccess, ChunkStatus};
 use crate::chunk::level_chunk_section::LevelChunkSection;
@@ -433,15 +434,23 @@ where
     /// write path Java's `buildSurface` `BlockColumn.setBlock` calls.
     ///
     /// Java's full `setBlockState`: the build-height guard (returns `VOID_AIR`,
-    /// no write), the `wasEmpty && state.is(AIR)` fast path, the section write,
-    /// then the `getPersistedStatus().heightmapsAfter()` heightmap updates
-    /// (priming missing entries first). The light half (the
+    /// no write), the `wasEmpty && state.is(Blocks.AIR)` fast path, the section
+    /// write, then the `getPersistedStatus().heightmapsAfter()` heightmap
+    /// updates (priming missing entries first). The light half (the
     /// `status.isOrAfter(ChunkStatus.INITIALIZE_LIGHT)` branch) defers with the
     /// lighting unit (#184/#216); a worldgen `ProtoChunk` is always below that
     /// status, so the omission is unreachable on this path. The section write
     /// uses the generated `BlockState` behavior predicates
     /// ([`block_state_predicates`]), the same set `doFill` passes to
     /// `write_worldgen_block`.
+    ///
+    /// Java's `state.is(Blocks.AIR)` is a block-identity check
+    /// (`getBlock() == Blocks.AIR`), so `CAVE_AIR`/`VOID_AIR` do not take the
+    /// fast path — hence the `state.block() == Blocks::AIR.id()` comparison
+    /// rather than the behavioral `is_air` predicate. The `CAVE_AIR`-writing
+    /// carver path is not yet wired for `ProtoChunk` (RivetTodo(#399)), so this
+    /// fast path is currently only reachable via the surface driver's exact
+    /// `AIR` writes.
     ///
     /// Returns the previous state, matching Java.
     pub fn set_block_state(&mut self, x: i32, y: i32, z: i32, state: BlockState) -> BlockState {
@@ -451,7 +460,7 @@ where
         let section_index = self.base.get_section_index(y) as usize;
         let was_empty = self.base.get_section(section_index).has_only_air();
         let predicates = block_state_predicates();
-        if was_empty && (predicates.is_air)(&state) {
+        if was_empty && state.block() == Blocks::AIR.id() {
             return state;
         }
         let local_x = x & 15;
