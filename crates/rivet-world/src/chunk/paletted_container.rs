@@ -70,7 +70,7 @@ impl<T> PackedData<T> {
 }
 
 /// `PalettedContainer<T>`.
-pub struct PalettedContainer<T: Clone + PartialEq + Send + 'static> {
+pub struct PalettedContainer<T: Clone + PartialEq + Send + Sync + 'static> {
     strategy: Strategy<T>,
     data: Data<T>,
     /// Paper Anti-Xray `presetValues` — a fixed set of values kept in the
@@ -79,7 +79,7 @@ pub struct PalettedContainer<T: Clone + PartialEq + Send + 'static> {
     preset_values: Option<Vec<T>>,
 }
 
-impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<T> {
+impl<T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static> PalettedContainer<T> {
     /// `PalettedContainer(T initialValue, Strategy<T>)`.
     ///
     /// Starts at the zero-bit configuration (single-value palette,
@@ -118,8 +118,8 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
     pub(crate) fn from_data(
         strategy: Strategy<T>,
         configuration: Configuration,
-        storage: Box<dyn BitStorage>,
-        palette: Box<dyn Palette<T>>,
+        storage: Box<dyn BitStorage + Send + Sync>,
+        palette: Box<dyn Palette<T> + Send + Sync>,
         values: Vec<T>,
         default_value: Option<T>,
         preset_values: Option<Vec<T>>,
@@ -544,12 +544,13 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
             ));
         }
 
-        let (storage, palette): (Box<dyn BitStorage>, Box<dyn Palette<T>>) = if stored_configuration
-            .bits_in_memory()
-            == 0
-        {
+        let (storage, palette): (
+            Box<dyn BitStorage + Send + Sync>,
+            Box<dyn Palette<T> + Send + Sync>,
+        ) = if stored_configuration.bits_in_memory() == 0 {
             let palette = stored_configuration.create_palette(strategy, palette_entries.clone());
-            let storage: Box<dyn BitStorage> = Box::new(ZeroBitStorage::new(entry_count as usize));
+            let storage: Box<dyn BitStorage + Send + Sync> =
+                Box::new(ZeroBitStorage::new(entry_count as usize));
             (storage, palette)
         } else {
             let data = disc_data
@@ -564,7 +565,10 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
                     .map_err(|e: InitializationException| {
                         format!("Failed to read PalettedContainer: {}", e)
                     })?;
-                (Box::new(storage) as Box<dyn BitStorage>, palette)
+                (
+                    Box::new(storage) as Box<dyn BitStorage + Send + Sync>,
+                    palette,
+                )
             } else {
                 let old_palette = HashMapPalette::new(bits_on_disc, palette_entries.clone());
                 let old_storage =
@@ -584,7 +588,10 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
                     entry_count as usize,
                     &new_contents,
                 );
-                (Box::new(storage) as Box<dyn BitStorage>, new_palette)
+                (
+                    Box::new(storage) as Box<dyn BitStorage + Send + Sync>,
+                    new_palette,
+                )
             }
         };
 
@@ -618,7 +625,7 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
         f: &impl Fn(&T) -> T2,
     ) -> Result<PalettedContainer<T2>, String>
     where
-        T2: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        T2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     {
         let packed = self.pack();
         let palette_entries = packed.palette_entries.iter().map(f).collect::<Vec<_>>();
@@ -650,7 +657,7 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainer<
 /// trait exists so a value that only needs reads can be typed by capability
 /// (e.g. the factory's `biomeContainerCodec` in Java is `Codec<
 /// PalettedContainerRO<Holder<Biome>>>`).
-pub trait PalettedContainerRO<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> {
+pub trait PalettedContainerRO<T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static> {
     /// `get(int, int, int)`.
     fn get(&self, x: i32, y: i32, z: i32) -> T;
     /// `getAll(Consumer<T>)`.
@@ -680,7 +687,7 @@ pub trait PalettedContainerRO<T: Clone + PartialEq + Send + std::fmt::Debug + 's
     fn pack(&self, strategy: &Strategy<T>) -> PackedData<T>;
 }
 
-impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainerRO<T>
+impl<T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static> PalettedContainerRO<T>
     for PalettedContainer<T>
 {
     fn get(&self, x: i32, y: i32, z: i32) -> T {
@@ -730,22 +737,22 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> PalettedContainerR
 
 /// `PalettedContainer.Data<T>` — the configuration/storage/palette triple
 /// plus the Moonrise `FastPaletteData` read-path snapshot (issue #216).
-pub struct Data<T: Clone + PartialEq + Send + 'static> {
+pub struct Data<T: Clone + PartialEq + Send + Sync + 'static> {
     configuration: Configuration,
-    storage: Box<dyn BitStorage>,
-    palette: Box<dyn Palette<T>>,
+    storage: Box<dyn BitStorage + Send + Sync>,
+    palette: Box<dyn Palette<T> + Send + Sync>,
     /// `moonrise$palette` — the materialized palette snapshot used by the
     /// `read_palette` fast path (`None` when no palette materializes one).
     snapshot: Option<Vec<T>>,
 }
 
-impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> Data<T> {
+impl<T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static> Data<T> {
     /// `createOrReuseData`'s fresh-data branch: storage sized by
     /// `configuration.bits_in_memory()` (zero-width -> `ZeroBitStorage`),
     /// palette from the configuration with no entries.
     fn new(configuration: Configuration, strategy: &Strategy<T>) -> Self {
         let entry_count = strategy.entry_count();
-        let storage: Box<dyn BitStorage> = if configuration.bits_in_memory() == 0 {
+        let storage: Box<dyn BitStorage + Send + Sync> = if configuration.bits_in_memory() == 0 {
             Box::new(ZeroBitStorage::new(entry_count as usize))
         } else {
             Box::new(SimpleBitStorage::new(
@@ -798,7 +805,7 @@ impl<T: Clone + PartialEq + Send + std::fmt::Debug + 'static> Data<T> {
 /// entry through `old_palette.valueFor` then `new_palette.idFor`, skipping
 /// re-mapping runs of identical ids (Java's `lastReadId`/`lastWrittenId`
 /// cache).
-pub fn reencode_contents<T: Clone + PartialEq + Send + std::fmt::Debug + 'static>(
+pub fn reencode_contents<T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static>(
     storage: &dyn BitStorage,
     old_palette: &dyn Palette<T>,
     new_palette: &mut dyn Palette<T>,

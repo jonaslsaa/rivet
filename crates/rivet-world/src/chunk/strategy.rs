@@ -19,15 +19,15 @@ pub enum StrategyKind {
 }
 
 /// `net.minecraft.world.level.chunk.Strategy<T>`.
-pub struct Strategy<T: Clone + Send + 'static> {
-    global_map: Box<dyn GlobalIdMap<T>>,
+pub struct Strategy<T: Clone + Send + Sync + 'static> {
+    global_map: Box<dyn GlobalIdMap<T> + Send + Sync>,
     kind: StrategyKind,
     global_palette_bits_in_memory: i32,
     bits_per_axis: i32,
     entry_count: i32,
 }
 
-impl<T: Clone + Send + 'static> Clone for Strategy<T> {
+impl<T: Clone + Send + Sync + 'static> Clone for Strategy<T> {
     fn clone(&self) -> Self {
         Strategy {
             global_map: self.global_map.clone_box(),
@@ -39,9 +39,13 @@ impl<T: Clone + Send + 'static> Clone for Strategy<T> {
     }
 }
 
-impl<T: Clone + Send + 'static> Strategy<T> {
+impl<T: Clone + Send + Sync + 'static> Strategy<T> {
     /// Java's private `Strategy(IdMap, bitsPerAxis)`.
-    fn new(global_map: Box<dyn GlobalIdMap<T>>, kind: StrategyKind, bits_per_axis: i32) -> Self {
+    fn new(
+        global_map: Box<dyn GlobalIdMap<T> + Send + Sync>,
+        kind: StrategyKind,
+        bits_per_axis: i32,
+    ) -> Self {
         let size = global_map.size();
         let global_palette_bits_in_memory = ceillog2(size);
         let entry_count = 1i32 << (bits_per_axis * 3);
@@ -57,14 +61,14 @@ impl<T: Clone + Send + 'static> Strategy<T> {
     /// `Strategy.createForBlockStates(IdMap<T>)` — the strategy used for a
     /// `PalettedContainer<BlockState>`: bits-per-axis 4, so a 16×16×16 section
     /// has 4096 entries.
-    pub fn create_for_block_states(registry: Box<dyn GlobalIdMap<T>>) -> Self {
+    pub fn create_for_block_states(registry: Box<dyn GlobalIdMap<T> + Send + Sync>) -> Self {
         Self::new(registry, StrategyKind::BlockStates, 4)
     }
 
     /// `Strategy.createForBiomes(IdMap<T>)` — bits-per-axis 2 (4×4×4 = 64
     /// entries). Included for the shared `PalettedContainer`/`Palette` wire
     /// format even though biome containers are not part of the M1 #108 scope.
-    pub fn create_for_biomes(registry: Box<dyn GlobalIdMap<T>>) -> Self {
+    pub fn create_for_biomes(registry: Box<dyn GlobalIdMap<T> + Send + Sync>) -> Self {
         Self::new(registry, StrategyKind::Biomes, 2)
     }
 
@@ -148,11 +152,11 @@ impl<T: Clone + Send + 'static> Strategy<T> {
     }
 }
 
-impl<T: Clone + PartialEq + Send + 'static> Strategy<T> {
+impl<T: Clone + PartialEq + Send + Sync + 'static> Strategy<T> {
     /// `globalPalette()` — a `GlobalPalette` over this strategy's global map
     /// (Java shares one instance; the container re-creates it on demand, so
     /// freshness is unobservable).
-    pub fn global_palette(&self) -> Box<dyn Palette<T>> {
+    pub fn global_palette(&self) -> Box<dyn Palette<T> + Send + Sync> {
         Box::new(GlobalPalette::new(self.global_map.clone_box()))
     }
 }

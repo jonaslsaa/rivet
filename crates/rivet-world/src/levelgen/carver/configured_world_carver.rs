@@ -130,10 +130,8 @@ impl<C: CarverConfiguration> fmt::Display for ConfiguredWorldCarver<C> {
 /// `dyn CarverConfiguration`. The concrete configuration type is recovered by
 /// the `#180` dispatch, which downcasts before calling the concrete carver's
 /// behavior. Like `ConfiguredFeatureErased`, the erased form keeps the
-/// behavior surface the wildcard inherits (`isStartChunk`, mirroring Java's
-/// `ConfiguredWorldCarver<?>.isStartChunk`; `carve` is only on the generic
-/// form — no consumer calls the wildcard's `carve` through the erased
-/// surface).
+/// behavior surface the wildcard inherits (`isStartChunk` and `carve`,
+/// mirroring Java's `ConfiguredWorldCarver<?>` — the wildcard has both).
 ///
 /// The wildcard's record `equals`/`hashCode` are not ported here: a
 /// `dyn CarverConfiguration` is not object-safely comparable, so the erased
@@ -167,6 +165,42 @@ impl ConfiguredWorldCarverErased {
     /// `ConfiguredFeatureErased::place`).
     pub fn is_start_chunk<R: RandomSource>(&self, random: &mut R) -> bool {
         carver_is_start_chunk(self.world_carver.clone(), self.config.as_ref(), random)
+    }
+
+    /// `ConfiguredWorldCarver<?>.carve(...)` — the wildcard inherits the
+    /// record's carve from the erased halves (`!debugVoidTerrain(chunk.getPos())
+    /// && this.worldCarver.carve(...)`), dispatched through `carver_carve` (the
+    /// same body as the generic [`ConfiguredWorldCarver::carve`]).
+    ///
+    /// The `biomeGetter` is folded into the `CarvingContext.topMaterial` seam
+    /// (see `world_carver`), so the signature matches the generic form's.
+    #[allow(clippy::too_many_arguments)]
+    pub fn carve<R: RandomSource>(
+        &self,
+        context: &CarvingContext,
+        chunk: &mut dyn CarveChunk,
+        random: &mut R,
+        aquifer: &dyn Aquifer,
+        source_chunk_pos: &ChunkPos,
+        mask: &mut CarvingMask,
+    ) -> bool {
+        let pos = chunk.get_pos();
+        if rivet_core::shared_constants::debug_void_terrain(
+            pos.get_min_block_x(),
+            pos.get_min_block_z(),
+        ) {
+            return false;
+        }
+        carver_carve(
+            self.world_carver.clone(),
+            self.config.as_ref(),
+            context,
+            chunk,
+            random,
+            aquifer,
+            source_chunk_pos,
+            mask,
+        )
     }
 }
 

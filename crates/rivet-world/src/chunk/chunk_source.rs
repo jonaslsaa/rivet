@@ -44,8 +44,8 @@ use crate::chunk::light_chunk_getter::LightChunkGetter;
 pub struct ChunkSource<'a, C, T, B, S>
 where
     C: Fn(i32, i32, bool) -> Option<&'a LevelChunk<T, B, S>>,
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     /// The resolver backing the abstract `getChunk(x, z, status, load)`:
@@ -58,8 +58,8 @@ where
 impl<'a, C, T, B, S> ChunkSource<'a, C, T, B, S>
 where
     C: Fn(i32, i32, bool) -> Option<&'a LevelChunk<T, B, S>>,
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     /// Wraps the caller's chunk-resolution closure.
@@ -160,7 +160,7 @@ mod tests {
         fn by_id(&self, id: i32) -> Option<u8> {
             Some(id as u8)
         }
-        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8>> {
+        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8> + Send + Sync> {
             Box::new(*self)
         }
     }

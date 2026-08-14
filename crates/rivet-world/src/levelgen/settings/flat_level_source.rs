@@ -114,7 +114,7 @@ impl FlatLevelSource {
         _random_state: &RandomState,
         center_chunk: &mut ProtoChunk<BlockState, B, S>,
     ) where
-        B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         S: Eq + std::hash::Hash,
     {
         let layers = self.settings.get_layers();
@@ -156,7 +156,7 @@ fn write_layer_block<B, S>(
     z: i32,
     state: BlockState,
 ) where
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     let section_index = chunk.get_section_index(y);

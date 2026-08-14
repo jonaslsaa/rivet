@@ -1154,8 +1154,8 @@ pub fn reconstruct_heightmaps<T, B, S>(
     heightmaps_after: &[Types],
 ) -> Vec<Types>
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     let to_prime = heightmaps_to_prime(chunk.get_height(), stored, heightmaps_after);
@@ -1269,8 +1269,8 @@ impl ReconstructedLightData {
     /// #184 `ChunkAccess` surface.
     pub fn install<T, B, S>(self, chunk: &mut ChunkAccess<T, B, S>)
     where
-        T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-        B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+        B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         S: Eq + std::hash::Hash,
     {
         chunk.set_block_nibbles(self.block_nibbles);

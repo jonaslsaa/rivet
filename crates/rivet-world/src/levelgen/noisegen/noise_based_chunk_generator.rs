@@ -10,17 +10,23 @@
 //! - Java extends the abstract `ChunkGenerator` (biome source + codec dispatch),
 //!   owned by `mc.world.level.chunk.generator`. The noisegen unit does not port
 //!   that base; the methods that are pure overrides of it and have unported
-//!   parameter types (`createBiomes`, `applyCarvers`, `spawnOriginalMobs`) are
-//!   `STUB`-marked `*_stub` methods on the value shell — they keep Java's exact
-//!   intent and defer the world-touching body to its owning unit.
-//!   `fillFromNoise`/`doFill` (the worldgen block-write slice) and `buildSurface`
-//!   (the SURFACE status-step body) are the two `ChunkGenerator` overrides
-//!   ported here: their `ProtoChunk`/`LevelChunkSection`/`Heightmap`/
-//!   post-processing seams are all present in the `chunk` module, the surface
-//!   unit lives in `levelgen::surface_rules`, and the `NoiseChunk`/`Aquifer`/
-//!   `Blender` dependencies live in this noisegen unit. `addDebugScreenInfo`
-//!   (router reads + string formatting) has fully ported parameter types, so it
-//!   is ported in full.
+//!   parameter types (`createBiomes`, `spawnOriginalMobs`) are `STUB`-marked
+//!   `*_stub` methods on the value shell — they keep Java's exact intent and
+//!   defer the world-touching body to its owning unit.
+//!   `fillFromNoise`/`doFill` (the worldgen block-write slice), `buildSurface`
+//!   (the SURFACE status-step body), and `applyCarvers` (the CARVERS
+//!   status-step body) are the `ChunkGenerator` overrides ported here: their
+//!   `ProtoChunk`/`LevelChunkSection`/`Heightmap`/`CarvingMask` seams are all
+//!   present in the `chunk` module, the surface unit lives in
+//!   `levelgen::surface_rules`, the carver loop's settings live in
+//!   `levelgen::carver`, and the `NoiseChunk`/`Aquifer`/`Blender` dependencies
+//!   live in this noisegen unit. `addDebugScreenInfo` (router reads + string
+//!   formatting) has fully ported parameter types, so it is ported in full.
+//!   `applyCarvers` still defers the `WorldGenRegion`/`StructureManager`
+//!   neighbor lookup and the per-biome settings resolution (RivetTodo #178/
+//!   #185 — the loop is center-chunk-only over the shared overworld carvers,
+//!   faithful because all overworld biomes share the carver set; see the
+//!   method doc).
 //!   `CODEC` (the `BiomeSource` + `NoiseGeneratorSettings` record codec)
 //!   defers with the `ChunkGenerator` unit (no `BiomeSource` ported here).
 //! - Java memoizes the global fluid picker in `Suppliers.memoize`; the picker
@@ -46,13 +52,18 @@
 //! the noisegen module doc.
 
 use crate::biome::BiomeManager;
+use crate::biome::biome_manager::NoiseBiomeSource;
 use crate::block::BlockState;
 use crate::block::blocks::Blocks;
+use crate::chunk::carving_mask::CarvingMask;
+use crate::chunk::chunk_generator::ChunkGenerator;
 use crate::chunk::proto_chunk::ProtoChunk;
 use crate::chunk::storage::chunk_reconstruction::block_state_predicates;
 use crate::level::dimension::dimension_type::MIN_Y as DIMENSION_TYPE_MIN_Y;
 use crate::level::height_accessor::LevelHeightAccessor;
 use crate::levelgen::blending::blender::Blender;
+use crate::levelgen::carver::carving_context::CarvingContext;
+use crate::levelgen::carver::overworld_carvers::overworld_carver_settings;
 use crate::levelgen::heightmap::{Heightmap, StateFlags, Types};
 use crate::levelgen::noise::beardifier_marker::BeardifierMarker;
 use crate::levelgen::noise::density_function::{
@@ -63,11 +74,14 @@ use crate::levelgen::noisegen::noise_chunk::NoiseChunk;
 use crate::levelgen::noisegen::noise_generator_settings::NoiseGeneratorSettings;
 use crate::levelgen::noisegen::noise_router_data::peaks_and_valleys_f32;
 use crate::levelgen::noisegen::random_state::RandomState;
+use crate::levelgen::surface_rules::{BiomeGetter, bind_carver_top_material};
 use crate::levelgen::world_generation_context::WorldGenerationContext;
 use rivet_registry::biome_id::BiomeId;
-use rivet_registry::core::BlockPos;
+use rivet_registry::core::{BlockPos, ChunkPos};
 use rivet_registry::holder::Holder;
 use rivet_util::mth;
+use rivet_util::random::LegacyRandomSource;
+use rivet_util::worldgen_random::WorldgenRandom;
 use std::sync::Arc;
 
 /// `net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator`.
@@ -427,19 +441,143 @@ impl NoiseBasedChunkGenerator {
     /// (No body — the world-touching surface is deferred.)
     pub fn create_biomes_stub(&self) {}
 
-    /// `applyCarvers` — STUB(mc.world.level.chunk.generator).
+    /// `applyCarvers(WorldGenRegion, long, RandomState, BiomeManager,
+    /// StructureManager, ChunkAccess)` — the CARVERS status-step body, a
+    /// faithful port of the Java.
     ///
-    /// Java's carver loop needs `WorldGenRegion`, `BiomeManager.withDifferentSource`,
-    /// `BiomeSource.getNoiseBiome`, `CarvingContext`, `CarvingMask`,
-    /// `BiomeGenerationSettings.getCarvers`, `ConfiguredWorldCarver.carve`, and
-    /// `WorldgenRandom.setLargeFeatureSeed`. The carver loop surface is ported —
-    /// `CarvingContext`, `CarvingMask`, `BiomeGenerationSettings.getCarvers`,
-    /// `ConfiguredWorldCarver.carve`, and `BiomeManager.withDifferentSource` live in
-    /// their owning units, and `NoiseChunk.aquifer()` is here (see `noise_chunk.rs`).
-    /// Only `WorldGenRegion`, the carver loop calling `BiomeSource.getNoiseBiome`
-    /// with a `Climate.Sampler`, and `WorldgenRandom.setLargeFeatureSeed` defer
-    /// with the `chunk.generator` wave (RivetTodo #185).
-    pub fn apply_carvers_stub(&self) {}
+    /// Java's carver loop walks the 17×17 source-chunk neighborhood of the
+    /// center chunk; for each source chunk it resolves that chunk's biome's
+    /// `BiomeGenerationSettings` and runs its carvers in `getCarvers` order,
+    /// re-seeding the shared `WorldgenRandom` with `seed + index` per source
+    /// chunk/carver (`setLargeFeatureSeed`). The surface-deferred seams:
+    /// - `WorldGenRegion` (the `region.getChunk` neighbor reads) and
+    ///   `StructureManager` defer with the `chunk.generator` wave (RivetTodo
+    ///   #185). The port resolves every source chunk to the single shared
+    ///   overworld settings ([`crate::levelgen::carver::overworld_carvers::
+    ///   overworld_carver_settings`]) — all overworld biomes share the same
+    ///   carver set (`BiomeDefaultFeatures.addDefaultCarversAndLakes`), so the
+    ///   center-chunk-only loop is faithful without neighbor lookups (RivetTodo
+    ///   #178 defers the per-biome `getBiomeGenerationSettings` split).
+    /// - `RandomSupport.generateUniqueSeed()` for the `WorldgenRandom`
+    ///   construction is unobservable — `setLargeFeatureSeed` fully re-seeds
+    ///   before the first draw — so a fixed constant preserves the draw
+    ///   sequence ([`CARVER_RANDOM_SEED`]).
+    /// - `chunk.getOrCreateNoiseChunk` is the same single-shot cache the other
+    ///   world-touching bodies use; this slice constructs the `NoiseChunk` over
+    ///   an empty blender exactly once (RivetTodo #185).
+    /// - The `registryAccess`/`level` `CarvingContext` fields defer with their
+    ///   owning units; the `surfaceRule`/`noiseChunk`/`randomState` feed the
+    ///   `topMaterial` seam, bound here via `bind_carver_top_material`.
+    ///
+    /// The mask is the `ProtoChunk`'s carving mask — Java's
+    /// `getOrCreateCarvingMask` (lazily created, written back through the
+    /// driver's take/set split).
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_carvers<B, S>(
+        &self,
+        generator: &dyn ChunkGenerator,
+        seed: i64,
+        random_state: &RandomState,
+        biome_manager: &BiomeManager,
+        biome_source: Arc<dyn NoiseBiomeSource>,
+        chunk: &mut ProtoChunk<BlockState, B, S>,
+    ) where
+        B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+        S: Eq + std::hash::Hash + Send + Sync,
+    {
+        if rivet_core::shared_constants::DEBUG_DISABLE_CARVERS {
+            return;
+        }
+
+        // `BiomeManager.withDifferentSource` — Java's lambda
+        // `(qx, qy, qz) -> this.biomeSource.getNoiseBiome(qx, qy, qz,
+        // randomState.sampler())`. The passed `NoiseBiomeSource` is the world's
+        // overworld source with this world's sampler baked in, matching the
+        // Java argument exactly (the generator's `biomeSource` field).
+        let correct_biome_manager = Arc::new(biome_manager.with_different_source(biome_source));
+
+        // `new WorldgenRandom(new LegacyRandomSource(RandomSupport.
+        // generateUniqueSeed()))` — the unique seed is unobservable (see the
+        // method doc), so [`CARVER_RANDOM_SEED`] is the fixed construction
+        // seed.
+        let mut random = WorldgenRandom::new(LegacyRandomSource::new(CARVER_RANDOM_SEED));
+        let range = 8;
+
+        // `chunk.getOrCreateNoiseChunk(...)` — the single-shot cache is not
+        // ported; the `NoiseChunk` is constructed exactly once over an empty
+        // blender (RivetTodo #185).
+        let noise_chunk = Arc::new(self.create_noise_chunk(chunk, random_state, Blender::empty()));
+        let aquifer = noise_chunk.aquifer();
+
+        // `new CarvingContext(this, registryAccess, chunk.
+        // getHeightAccessorForGeneration(), noiseChunk, randomState,
+        // this.settings.value().surfaceRule(), region.getMinecraftWorld())` —
+        // the registry/level fields defer with their owning units; the
+        // `surfaceRule`/`noiseChunk`/`randomState` feed the `topMaterial` seam
+        // bound below.
+        let mut carving_context =
+            CarvingContext::new(generator, &chunk.height_accessor(), random_state);
+        let biome_getter: BiomeGetter = {
+            let biome_manager = Arc::clone(&correct_biome_manager);
+            Arc::new(move |pos: &BlockPos| biome_manager.get_biome(pos))
+        };
+        bind_carver_top_material(
+            &mut carving_context,
+            &settings_value(&self.settings).surface_rule,
+            noise_chunk,
+            biome_getter,
+        );
+
+        // `((ProtoChunk)chunk).getOrCreateCarvingMask()` — the lazy
+        // `CarvingMask(height, minY)` create, then taken out so the carve calls
+        // can hold both `&mut dyn CarveChunk` (the chunk) and `&mut CarvingMask`
+        // (a field of the chunk) at once; written back after the loop.
+        let mut mask = chunk
+            .take_carving_mask()
+            .unwrap_or_else(|| CarvingMask::new(chunk.get_height(), chunk.get_min_y()));
+
+        let chunk_pos = chunk.get_pos();
+        let carvers = overworld_carver_settings().get_carvers();
+        for dx in -range..=range {
+            for dz in -range..=range {
+                // `new ChunkPos(pos.x() + dx, pos.z() + dz)`.
+                let source_pos = ChunkPos::new(chunk_pos.x() + dx, chunk_pos.z() + dz);
+                // `carverCenterChunk.carverBiome(() -> getBiomeGenerationSettings(
+                // biomeSource.getNoiseBiome(QuartPos.fromBlock(sourcePos.
+                // getMinBlockX()), 0, QuartPos.fromBlock(sourcePos.
+                // getMinBlockZ()), randomState.sampler())))` — the shared
+                // overworld settings for any biome holder (see the method doc).
+                // `for (int index = 0; index < ...; index++)` — the carver
+                // index feeds `setLargeFeatureSeed(seed + (long)index, ...)`.
+                for (index, carver_holder) in carvers.iter().enumerate() {
+                    let carver = match carver_holder {
+                        Holder::Direct(carver) => carver,
+                        Holder::Reference { .. } => {
+                            panic!("overworld carvers must be Direct holders")
+                        }
+                    };
+                    // `random.setLargeFeatureSeed(seed + (long)index,
+                    // sourcePos.x(), sourcePos.z())` — long arithmetic.
+                    random.set_large_feature_seed(
+                        seed.wrapping_add(index as i64),
+                        source_pos.x(),
+                        source_pos.z(),
+                    );
+                    if carver.is_start_chunk(&mut random) {
+                        carver.carve(
+                            &carving_context,
+                            chunk,
+                            &mut random,
+                            aquifer.as_ref(),
+                            &source_pos,
+                            &mut mask,
+                        );
+                    }
+                }
+            }
+        }
+        chunk.set_carving_mask(mask);
+    }
 
     /// `fillFromNoise(Blender, RandomState, StructureManager, ChunkAccess)` —
     /// the worldgen block-write slice.
@@ -461,7 +599,7 @@ impl NoiseBasedChunkGenerator {
         random_state: &RandomState,
         center_chunk: &mut ProtoChunk<BlockState, B, S>,
     ) where
-        B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         S: Eq + std::hash::Hash,
     {
         let noise_settings = settings_value(&self.settings)
@@ -515,7 +653,7 @@ impl NoiseBasedChunkGenerator {
         blender: Blender,
     ) -> NoiseChunk
     where
-        B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         S: Eq + std::hash::Hash,
     {
         let pos = center_chunk.get_pos();
@@ -558,7 +696,7 @@ impl NoiseBasedChunkGenerator {
         cell_min_y: i32,
         cell_count_y: i32,
     ) where
-        B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         S: Eq + std::hash::Hash,
     {
         let noise_chunk = self.create_noise_chunk(center_chunk, random_state, blender);
@@ -679,7 +817,7 @@ impl NoiseBasedChunkGenerator {
         chunk: &mut ProtoChunk<BlockState, B, S>,
         possible_biomes: Option<&[Holder<BiomeId>]>,
     ) where
-        B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+        B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         S: Eq + std::hash::Hash,
     {
         let noise_chunk = Arc::new(self.create_noise_chunk(chunk, random_state, Blender::empty()));
@@ -1068,6 +1206,16 @@ fn flags_of(state: BlockState) -> StateFlags {
         is_leaves: state.is_in_tag("minecraft:leaves"),
     }
 }
+
+/// The fixed seed for the CARVERS step's `WorldgenRandom` construction.
+///
+/// Java's `new WorldgenRandom(new LegacyRandomSource(RandomSupport.
+/// generateUniqueSeed()))` uses an unobservable unique seed: every draw in the
+/// loop follows a `setLargeFeatureSeed` call, which fully re-seeds the random
+/// before its first draw, so the construction seed never influences the
+/// sequence. A fixed constant reproduces the Java draw sequence exactly
+/// (locked decision — see `apply_carvers`).
+const CARVER_RANDOM_SEED: i64 = 0;
 
 /// `settings.value()` — resolves the holder to its value.
 ///
