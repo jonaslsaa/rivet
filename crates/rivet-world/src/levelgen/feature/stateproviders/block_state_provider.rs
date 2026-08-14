@@ -174,6 +174,43 @@ pub fn block_state_provider_get_state<R: RandomSource>(
     }
 }
 
+/// `getOptionalState(WorldGenLevel, RandomSource, BlockPos)` over the erased
+/// carrier — dispatch an erased provider to its optional state (the
+/// `BlockStateProvider.getOptionalState` surface the tree family's
+/// `TrunkPlacer.placeBelowTrunkBlock` consumes; `RuleBasedStateProvider`
+/// overrides the default to return `None` when no rule matches and no fallback
+/// is present). The dispatch mirrors `block_state_provider_get_state`.
+pub fn block_state_provider_get_optional_state<R: RandomSource>(
+    provider: &dyn ErasedBlockStateProvider,
+    level: &dyn WorldGenLevel,
+    random: &mut R,
+    pos: &BlockPos,
+) -> Option<BlockState> {
+    let any = provider.as_any();
+    if let Some(s) = any.downcast_ref::<SimpleStateProvider>() {
+        s.get_optional_state(level, random, pos)
+    } else if let Some(w) = any.downcast_ref::<WeightedStateProvider>() {
+        w.get_optional_state(level, random, pos)
+    } else if let Some(n) = any.downcast_ref::<NoiseThresholdProvider>() {
+        n.get_optional_state(level, random, pos)
+    } else if let Some(n) = any.downcast_ref::<NoiseProvider>() {
+        n.get_optional_state(level, random, pos)
+    } else if let Some(d) = any.downcast_ref::<DualNoiseProvider>() {
+        d.get_optional_state(level, random, pos)
+    } else if let Some(r) = any.downcast_ref::<RotatedBlockProvider>() {
+        r.get_optional_state(level, random, pos)
+    } else if let Some(r) = any.downcast_ref::<RandomizedIntStateProvider>() {
+        r.get_optional_state(level, random, pos)
+    } else if let Some(r) = any.downcast_ref::<RuleBasedStateProvider>() {
+        r.get_optional_state(level, random, pos)
+    } else {
+        panic!(
+            "Trying to apply block state provider type '{}' with no registered behavior (#181 codegen)",
+            provider.type_id().location
+        );
+    }
+}
+
 /// `BlockStateProvider.simple(BlockState)` — a `SimpleStateProvider` over a
 /// fixed state.
 pub fn simple(state: BlockState) -> SimpleStateProvider {
