@@ -13,6 +13,9 @@
 //! path `world.level.ChunkPos` resolves — never re-ported.
 
 pub mod block_getter;
+// `world.level.border` — the `mc.world.level.border` unit (`WorldBorder`,
+// `BorderStatus`, `BorderChangeListener` + `package-info` @NullMarked; wave 3).
+pub mod border;
 // `world.level.DataPackConfig` — the `WorldDataConfiguration` prerequisite
 // (#387).
 pub mod data_pack_config;
@@ -45,6 +48,9 @@ pub mod world_gen_level;
 pub mod world_data_configuration;
 
 pub use block_getter::BlockGetter;
+pub use border::{
+    BorderChangeListener, BorderStatus, Settings as WorldBorderSettings, WorldBorder,
+};
 pub use data_pack_config::DataPackConfig;
 pub use height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccessor, create};
 pub use level::{Level, end, nether, overworld, resource_key_codec};
