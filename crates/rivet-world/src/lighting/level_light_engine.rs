@@ -276,6 +276,7 @@ mod tests {
                     .push((format!("section:{new_empty_value}"), pos.coords()));
             }
             fn light_chunk(&mut self, _pos: ChunkPos, _empty_sections: &[Option<bool>]) {}
+            fn force_load_in_chunk(&mut self, _pos: ChunkPos, _empty_sections: &[Option<bool>]) {}
             fn relight_chunks(&mut self, _chunks: &HashSet<ChunkPos>) {}
             fn check_chunk_edges(&mut self, _pos: ChunkPos) {}
             fn get_sky_light_value(&self, _pos: BlockPos) -> i32 {

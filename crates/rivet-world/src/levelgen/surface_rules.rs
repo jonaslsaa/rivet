@@ -78,12 +78,15 @@
 //! driver the column write (`ProtoChunk.setBlockState` +
 //! `markPosForPostProcessing`) is the real worldgen write path; the worldgen
 //! heightmap reads (`getHeight(WORLD_SURFACE_WG)`) are the `#185` seam — the
-//! applied `SteepMaterialCondition` reads a snapshot of the primed heights
-//! captured at `build_surface` start (the applied rules are `'static`/`Send +
-//! Sync` and cannot carry the `&mut` chunk; the snapshot is bit-identical to
-//! Java's live reads for the end-stone and overworld surface writes, with the
-//! one accepted divergence being a rule that writes `AIR` over the topmost
-//! `defaultBlock`). The `Biome`-value reads (`coldEnoughToSnow`,
+//! applied `SteepMaterialCondition` reads the shared live mirror
+//! [`SurfaceContext::world_surface_heights`] (the applied rules are
+//! `'static`/`Send + Sync` and cannot carry the `&mut` chunk). The mirror is
+//! primed from the chunk's primed heightmap at `build_surface` start and kept
+//! current by every column write through [`ChunkColumnAdapter::set_block`], so
+//! the probes read Java's live ordering exactly — including an `AIR` write over
+//! the topmost `defaultBlock` and the per-column eroded-badlands raise
+//! (documented on `seam_get_height`).
+//! The `Biome`-value reads (`coldEnoughToSnow`,
 //! `shouldMeltFrozenOceanIcebergSlightly`) are the biome-value seams
 //! (RivetTodo #185). `SurfaceRuleData.end` is ported (the end-stone `block`
 //! rule), and `SurfaceRuleData.nether`/`overworld`/`overworldLike` are ported
@@ -92,13 +95,22 @@
 //! `noise_generator_settings` callers).
 //!
 //! RivetTodo(#179): the `is_biome` `HolderSet`s the builders resolve are
-//! bound to whatever `HolderGetter<BiomeId>` is handed in. The bootstrap-time
-//! registries (the `worldgen_bootstraps` access and the unit-test accesses)
-//! freeze their own biome registries with fabricated `BiomeId` handles, so the
-//! surface-rule holder identity will NOT match the runtime biome-source
-//! registry until the `#185`/`#177` wiring resolves the same registry both the
-//! `BiomeCondition` and the biome source read. Encode is byte-exact today; the
-//! apply path must not compare holders across registries until then.
+//! bound to whatever `HolderGetter<BiomeId>` is handed in. In the
+//! `worldgen_bootstraps` access the biome registry registers each
+//! `SURFACE_RULE_BIOMES` key under its real generated id (`BiomeId::from_name`),
+//! so a condition holder resolved through it is a `Reference` whose value (via
+//! `Holder::value`) is that real id. But `Registry::get_id` is identity-based
+//! and returns the POSITIONAL registration index, so the `Reference`'s `id`
+//! field — and `dense_biome_id` on it — is the index into the 33-key subset,
+//! while the runtime biome source (`BiomeManager`) yields `Holder::Direct`
+//! holders carrying the real ids. `HolderSet::contains` compares holder values,
+//! and a `Reference` never equals a `Direct`, so the apply path cannot match
+//! today. The encode path requires `Reference` (a `Direct` holder errors in
+//! `RegistryFixedCodec::encode`), so the fix is not a Direct conversion: the
+//! runtime biome source must be rewired (biome-core) to produce `Reference`s
+//! from the same frozen biome registry, and the biome-id read path must resolve
+//! References to their value ids. Until then the apply path must not compare
+//! holders across forms.
 //! The `@Deprecated` single-column [`SurfaceSystem::top_material`] probe (the
 //! carver's grass-replacement call) is ported and composed into the carver
 //! `CarvingContext` seam through [`bind_carver_top_material`]; the production
@@ -590,12 +602,15 @@ pub(crate) struct SurfaceContext {
     biome_getter: BiomeGetter,
     /// `Context.context` — the `WorldGenerationContext` (vertical anchors).
     worldgen_context: Arc<WorldGenerationContext>,
-    /// `Context.chunk`'s primed `WORLD_SURFACE_WG` heights, captured at
-    /// `buildSurface` start — the `#185` heightmap seam. The applied rules are
-    /// `'static`/`Send + Sync`, so they cannot carry the `&mut` chunk; the
-    /// heights are snapshotted into the shared context instead. `None` for the
-    /// single-column [`SurfaceSystem::top_material`] probe, which has no chunk.
-    world_surface_heights: Option<Arc<[i32; 256]>>,
+    /// `Context.chunk`'s live `WORLD_SURFACE_WG` heights — the `#185` heightmap
+    /// seam. The applied rules are `'static`/`Send + Sync`, so they cannot
+    /// carry the `&mut` chunk; instead the heights live in this shared mirror,
+    /// primed at `buildSurface` start and kept current by every column write
+    /// (see [`ChunkColumnAdapter::set_block`]) — so a `SteepMaterialCondition`
+    /// probe reads exactly what Java's live `getHeight(WORLD_SURFACE_WG)` would
+    /// at that point. `None` for the single-column
+    /// [`SurfaceSystem::top_material`] probe, which has no chunk.
+    world_surface_heights: Option<Arc<Mutex<[i32; 256]>>>,
 }
 
 // RivetTodo(#177): the surface-build runtime is test-exercised through the
@@ -826,12 +841,13 @@ impl<'a> Context<'a> {
     /// `new Context(SurfaceSystem, RandomState, ChunkAccess, NoiseChunk,
     /// Function<BlockPos, Holder<Biome>>, WorldGenerationContext,
     /// @Nullable Set<Holder<Biome>>)` — Java's `ChunkAccess chunk` is the
-    /// `#185` heightmap seam: the port snapshots the primed `WORLD_SURFACE_WG`
-    /// heights (`world_surface_heights`) so the applied rules read them without
-    /// carrying the `&mut` chunk; `None` when there is no chunk (the carver
-    /// probe). The `SurfaceSystem` is the `Arc` shared from `RandomState`
-    /// (Java's `Context.system` is the same object the `RandomState` holds);
-    /// the `RandomState` is borrowed for the context's lifetime.
+    /// `#185` heightmap seam: the applied rules cannot carry the `&mut` chunk,
+    /// so the live `WORLD_SURFACE_WG` heights are mirrored into the shared
+    /// `world_surface_heights` (primed at `buildSurface` start, kept current
+    /// by the column writes); `None` when there is no chunk (the carver probe).
+    /// The `SurfaceSystem` is the `Arc` shared from `RandomState` (Java's
+    /// `Context.system` is the same object the `RandomState` holds); the
+    /// `RandomState` is borrowed for the context's lifetime.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         system: Arc<SurfaceSystem>,
@@ -840,7 +856,7 @@ impl<'a> Context<'a> {
         biome_getter: BiomeGetter,
         worldgen_context: Arc<WorldGenerationContext>,
         possible_biomes: Option<Vec<Holder<BiomeId>>>,
-        world_surface_heights: Option<Arc<[i32; 256]>>,
+        world_surface_heights: Option<Arc<Mutex<[i32; 256]>>>,
     ) -> Self {
         let surface_context = Arc::new(SurfaceContext {
             system,
@@ -1014,8 +1030,9 @@ impl Condition for HoleCondition {
 /// `Context.SteepMaterialCondition` — a `LazyXZCondition` reading the chunk's
 /// `WORLD_SURFACE_WG` heights. The chunk reads are the `#185` heightmap seam:
 /// the applied condition cannot prime/read the `&mut` heightmap through `&self`,
-/// so it reads the snapshot `build_surface` captured at its start (see
-/// [`SurfaceContext::world_surface_heights`]); the arithmetic is faithful.
+/// so it reads the live mirror [`SurfaceContext::world_surface_heights`] (primed
+/// at `build_surface` start and kept current by every column write — Java's
+/// live `getHeight` ordering, exactly); the arithmetic is faithful.
 struct SteepMaterialCondition {
     cache: LazyCache,
     surface_context: Arc<SurfaceContext>,
@@ -1041,9 +1058,10 @@ impl Condition for SteepMaterialCondition {
                 // The `ChunkAccess.getHeight(WORLD_SURFACE_WG, ...)` reads are
                 // the `#185` heightmap seam — the applied rule cannot prime/
                 // read the `&mut` heightmap through `&self`, so it reads the
-                // snapshot `build_surface` captured at its start. The single-
-                // column carver probe has no chunk (`None`), so the steep
-                // condition cannot fire there — Java's probe does have a
+                // live mirror [`SurfaceContext::world_surface_heights`] (primed
+                // at `build_surface` start, kept current by every column write).
+                // The single-column carver probe has no chunk (`None`), so the
+                // steep condition cannot fire there — Java's probe does have a
                 // chunk, but the seam cannot construct one (see the module
                 // doc).
                 let Some(heights) = &self.surface_context.world_surface_heights else {
@@ -1053,13 +1071,14 @@ impl Condition for SteepMaterialCondition {
                 let chunk_block_z = self.surface_context.cells.block_z() & 15;
                 let (z_north, z_south, x_west, x_east) =
                     steep_neighbor_probes(chunk_block_x, chunk_block_z);
-                let height_north = seam_get_height(heights, chunk_block_x, z_north);
-                let height_south = seam_get_height(heights, chunk_block_x, z_south);
+                let heights = heights.lock().unwrap();
+                let height_north = seam_get_height(&heights, chunk_block_x, z_north);
+                let height_south = seam_get_height(&heights, chunk_block_x, z_south);
                 if height_south >= height_north + 4 {
                     return true;
                 }
-                let height_west = seam_get_height(heights, x_west, chunk_block_z);
-                let height_east = seam_get_height(heights, x_east, chunk_block_z);
+                let height_west = seam_get_height(&heights, x_west, chunk_block_z);
+                let height_east = seam_get_height(&heights, x_east, chunk_block_z);
                 height_west >= height_east + 4
             })
     }
@@ -1067,8 +1086,11 @@ impl Condition for SteepMaterialCondition {
 
 /// `Context.TemperatureHelperCondition` — a `LazyYCondition` reading
 /// `getBiome().value().coldEnoughToSnow(...)`. The `Biome`-value read is the
-/// `#185` biome-value seam (`BiomeManager` yields `Holder<BiomeId>`, the value
-/// registry is unported).
+/// `#185` biome-value seam: `BiomeManager` yields `Holder<BiomeId>` and no
+/// runtime `Registry<Biome>` value layer is populated (the `Biome` value data
+/// is `mc.data.worldgen.biome`, pending), so the read resolves through
+/// [`seam_cold_enough_to_snow`] (permanently false, never a panic — see the
+/// seam).
 struct TemperatureHelperCondition {
     cache: LazyCache,
     surface_context: Arc<SurfaceContext>,
@@ -1088,14 +1110,20 @@ impl Condition for TemperatureHelperCondition {
 }
 
 /// The `ChunkAccess.getHeight(WORLD_SURFACE_WG, x, z)` read — `getFirstAvailable
-/// (x & 15, z & 15) - 1` over the primed heightmap (issue #185). The read
-/// happens against the snapshot `build_surface` captured at its start. The
-/// snapshot is bit-identical to Java's live reads for every surface write that
-/// keeps the topmost non-air block in place — the end-stone rule and the
-/// default-block-to-surface-state writes of the overworld rules; the one
-/// divergence is a rule that writes `AIR` over the topmost `defaultBlock`
-/// (Java's `setBlock` lowers the worldgen height there and the live probe
-/// would see it), which the seam accepts (RivetTodo #185).
+/// (x & 15, z & 15) - 1` over the primed heightmap (issue #185). The applied
+/// `SteepMaterialCondition` cannot prime/read the `&mut` heightmap through
+/// `&self`, so the read goes through the live mirror
+/// [`SurfaceContext::world_surface_heights`]: primed at `build_surface` start
+/// and kept current by every column write through
+/// [`ChunkColumnAdapter::set_block`]. That reproduces Java's live `getHeight`
+/// ordering exactly — `buildSurface` walks the columns `x`-outer/`z`-inner; per
+/// column it reads `startingHeight`, runs `erodedBadlandsExtension` on an
+/// `ERODED_BADLANDS` column (writing `defaultBlock` into `AIR`, raising the
+/// live `WORLD_SURFACE_WG`), re-reads `height`, then drives the steep probes —
+/// and each write (the extension's, a rule's `AIR` over the topmost
+/// `defaultBlock`, the end-stone/overworld surface states) folds into the live
+/// heightmap before the next probe. The mirror is the `#185` seam only in
+/// mechanism; the values are Java's.
 fn seam_get_height(heights: &[i32; 256], x: i32, z: i32) -> i32 {
     heights[(x & 15) as usize + (z & 15) as usize * 16]
 }
@@ -1103,11 +1131,18 @@ fn seam_get_height(heights: &[i32; 256], x: i32, z: i32) -> i32 {
 /// The `RivetTodo(#185)` biome-value seam —
 /// `getBiome().value().coldEnoughToSnow(pos, seaLevel)`.
 fn seam_cold_enough_to_snow() -> bool {
-    // STUB(mc.world.level.biome.core): `BiomeManager` yields
-    // `Holder<BiomeId>`; the `Biome`-value registry is unported, so the
-    // temperature condition is permanently false (no snow coverage from this
-    // rule) until `RivetTodo(#185)` ports the value registry and this becomes
-    // the real `coldEnoughToSnow` call.
+    // STUB(mc.data.worldgen.biome): `BiomeManager` yields `Holder<BiomeId>` (a
+    // positional handle into the worldgen biome registry, not a `Biome` value),
+    // and no runtime `Registry<Biome>` value layer is populated. The `Biome`
+    // value type/codec surface (`mc.world.level.biome.core`, complete) proves
+    // `Biome::cold_enough_to_snow`, but the generated `Biome` VALUE data
+    // (temperature/downfall) that would populate the registry lives in
+    // `mc.data.worldgen.biome` (pending), so there is no registry to resolve a
+    // `BiomeId` holder through — this stays permanently false (no snow coverage
+    // from the temperature rule). Do NOT panic: the frozen-ocean branch of the
+    // overworld rule tree reaches this in production (the `#177` build_surface
+    // wire defers, so it is not reachable today). It becomes the real call once
+    // `mc.data.worldgen.biome` lands the value registry (RivetTodo(#185)).
     false
 }
 
@@ -2536,14 +2571,15 @@ impl SurfaceSystem {
     ///
     /// The block-column read is ported faithfully (the `column.getBlock` /
     /// `isStone` / `updateY` / `old == defaultBlock` / `rule.tryApply`
-    /// cascade). The `getHeight(WORLD_SURFACE_WG)` reads are the `#185` seam
-    /// (snapshotted at [`Self::build_surface`] start into the shared
-    /// `SurfaceContext`, then read by `SteepMaterialCondition`); the
-    /// `Biome`-value reads (`surfaceBiome.is(Biomes.X)`,
-    /// `shouldMeltFrozenOceanIcebergSlightly`) are the biome-value seams
-    /// (`dense_biome_id` + `false`); the column write
-    /// (`ProtoChunk.setBlockState` + `markPosForPostProcessing`) is the real
-    /// worldgen write path (`ChunkColumnAdapter` guards + writes + marks).
+    /// cascade). The `getHeight(WORLD_SURFACE_WG)` reads are the `#185` seam —
+    /// primed at [`Self::build_surface`] start into the shared live mirror on
+    /// the `SurfaceContext`, kept current by every column write through
+    /// [`ChunkColumnAdapter::set_block`], then read by
+    /// `SteepMaterialCondition`); the `Biome`-value reads
+    /// (`surfaceBiome.is(Biomes.X)`, `shouldMeltFrozenOceanIcebergSlightly`)
+    /// are the biome-value seams (`dense_biome_id` + `false`); the column
+    /// write (`ProtoChunk.setBlockState` + `markPosForPostProcessing`) is the
+    /// real worldgen write path (`ChunkColumnAdapter` guards + writes + marks).
     #[allow(clippy::too_many_arguments)]
     #[allow(dead_code)] // #177 — seam driver until `NoiseBasedChunkGenerator` wires it.
     pub(crate) fn build_surface<'a>(
@@ -2557,26 +2593,28 @@ impl SurfaceSystem {
         rule_source: &ArcRuleSource,
         possible_biomes: Option<&[Holder<BiomeId>]>,
     ) {
+        // The live `WORLD_SURFACE_WG` height mirror (the `#185` heightmap
+        // seam): the applied rules read the `SteepMaterialCondition` probes
+        // through this shared mirror, never the `&mut` chunk. It is primed
+        // from the chunk's primed heightmap before the context is built and
+        // kept current by every column write through
+        // [`ChunkColumnAdapter::set_block`], so the probes see exactly what
+        // Java's live `getHeight` reads would at each point in the column
+        // walk.
+        let world_surface_heights = Arc::new(Mutex::new([0i32; 256]));
         let mut column = ChunkColumnAdapter {
             chunk: RefCell::new(proto_chunk),
             x: Cell::new(0),
             z: Cell::new(0),
+            world_surface_heights: Some(Arc::clone(&world_surface_heights)),
         };
         let biome_getter = {
             let bm = Arc::clone(&biome_manager);
             Arc::new(move |pos: &BlockPos| bm.get_biome(pos)) as BiomeGetter
         };
-        // Capture the primed `WORLD_SURFACE_WG` heights before the context is
-        // built (the `#185` heightmap seam): the applied rules read the
-        // `SteepMaterialCondition` probes through this snapshot, never the
-        // `&mut` chunk. Bit-identical to Java's live reads for the end-stone and
-        // overworld surface writes (which keep the topmost non-air block in
-        // place); a rule writing `AIR` over the topmost `defaultBlock` is the
-        // one accepted divergence (see [`seam_get_height`]).
-        let mut world_surface_heights = [0i32; 256];
         for x in 0..16i32 {
             for z in 0..16i32 {
-                world_surface_heights[(x + z * 16) as usize] =
+                world_surface_heights.lock().unwrap()[(x + z * 16) as usize] =
                     column.chunk.borrow().get_height(x, z);
             }
         }
@@ -2587,7 +2625,7 @@ impl SurfaceSystem {
             biome_getter,
             generation_context,
             possible_biomes.map(|set| set.to_vec()),
-            Some(Arc::new(world_surface_heights)),
+            Some(Arc::clone(&world_surface_heights)),
         );
         let rule = rule_source.apply(&context);
         let min_block_x = column.chunk.borrow().min_block_x();
@@ -2747,8 +2785,8 @@ impl SurfaceSystem {
             biome_getter,
             worldgen_context,
             None,
-            // No chunk: the single-column probe has no heightmap to snapshot,
-            // so `SteepMaterialCondition` cannot fire here (RivetTodo #185).
+            // No chunk: the single-column probe has no heightmap to mirror, so
+            // `SteepMaterialCondition` cannot fire here (RivetTodo #185).
             None,
         );
         let rule = rule_source.apply(&context);
@@ -3060,6 +3098,13 @@ struct ChunkColumnAdapter<'a> {
     chunk: RefCell<&'a mut dyn ChunkSurface>,
     x: Cell<i32>,
     z: Cell<i32>,
+    /// The live `WORLD_SURFACE_WG` mirror shared with the applied rules (see
+    /// [`SurfaceContext::world_surface_heights`]). `set_block` folds every
+    /// write back into it (re-reading the chunk's post-write height, which
+    /// `setBlockState` updated), so the `SteepMaterialCondition` probes read
+    /// Java's live `getHeight` ordering. `None` in the adapter-only tests,
+    /// which have no `Context` to share with.
+    world_surface_heights: Option<Arc<Mutex<[i32; 256]>>>,
 }
 
 impl BlockColumn<BlockState> for ChunkColumnAdapter<'_> {
@@ -3078,6 +3123,16 @@ impl BlockColumn<BlockState> for ChunkColumnAdapter<'_> {
             chunk.set_block_state(self.x.get(), block_y, self.z.get(), state);
             if !state.fluid_empty() {
                 chunk.mark_pos_for_post_processing(self.x.get(), block_y, self.z.get());
+            }
+            // `setBlockState` folds the write into the live `WORLD_SURFACE_WG`
+            // heightmap (issue #287); re-read it into the shared mirror so the
+            // applied rules' `SteepMaterialCondition` probes see exactly what
+            // Java's live `getHeight` would at this point (issue #185).
+            if let Some(heights) = &self.world_surface_heights {
+                let x = self.x.get();
+                let z = self.z.get();
+                heights.lock().unwrap()[(x & 15) as usize + (z & 15) as usize * 16] =
+                    chunk.get_height(x, z);
             }
         }
     }
@@ -4113,19 +4168,23 @@ mod tests {
 
     /// A biome registry with the 33 `SurfaceRuleData`-referenced keys (the
     /// single source of truth in `biome::biomes::SURFACE_RULE_BIOMES`) under
-    /// `Registries.BIOME` (id = the enumerate index over that list, matching the
-    /// settings bootstrap's and the production builder's `BiomeId` handles). The
-    /// codec tests encode the real trees, so every referenced key must resolve
-    /// through the access.
+    /// `Registries.BIOME`. The codec tests encode the real trees by KEY, so the
+    /// registered `BiomeId` VALUES are irrelevant here (encode never reads
+    /// them); each key is registered under its real generated id
+    /// (`BiomeId::from_name`), matching the production
+    /// `worldgen_bootstraps::build_biome_registry` exactly — one `#179`
+    /// runtime biome-registry identity, no fabricated indices.
     fn biome_access() -> RegistryAccess {
         let mut builder = RegistryBuilder::new(&*rivet_registry::registries::BIOME);
-        for (i, name) in biomes::SURFACE_RULE_BIOMES.iter().enumerate() {
+        for name in biomes::SURFACE_RULE_BIOMES {
+            let value = BiomeId::from_name(&format!("minecraft:{name}"))
+                .expect("SURFACE_RULE_BIOMES entries are generated biome keys");
             builder.register(
                 &ResourceKey::create(
                     &*rivet_registry::registries::BIOME,
                     Identifier::parse(&format!("minecraft:{name}")),
                 ),
-                Arc::new(BiomeId::from_id(i as u16)),
+                Arc::new(value),
                 RegistrationInfo::BUILT_IN,
             );
         }
@@ -4214,13 +4273,14 @@ mod tests {
     }
 
     /// The `#185` heightmap seam firing path: `SteepMaterialCondition` reads
-    /// the `WORLD_SURFACE_WG` snapshot `build_surface` captured at its start
-    /// (never the `&mut` chunk), so a column whose south neighbor is >= 4 blocks
-    /// higher must report steep exactly as Java's live `getHeight` reads would.
+    /// the live `WORLD_SURFACE_WG` mirror (primed at `build_surface` start,
+    /// kept current by every column write — never the `&mut` chunk), so a
+    /// column whose south neighbor is >= 4 blocks higher must report steep
+    /// exactly as Java's live `getHeight` reads would.
     #[test]
-    fn steep_condition_fires_on_the_primed_heightmap_snapshot() {
-        // A helper building a steep condition over a given height snapshot.
-        fn condition_for(heights: Option<Arc<[i32; 256]>>) -> SteepMaterialCondition {
+    fn steep_condition_fires_on_the_live_height_mirror() {
+        // A helper building a steep condition over a given height mirror.
+        fn condition_for(heights: Option<Arc<Mutex<[i32; 256]>>>) -> SteepMaterialCondition {
             let sc = Arc::new(SurfaceContext {
                 system: Arc::new(stub_surface_system()),
                 cells: SharedCells::new(),
@@ -4234,17 +4294,151 @@ mod tests {
                 surface_context: sc,
             }
         }
-        // A snapshot where the chunk-local column (0, 1) probes north height 10
+        // A mirror where the chunk-local column (0, 1) probes north height 10
         // (z=0) and south height 14 (z=2): 14 >= 10 + 4 -> steep.
         let mut heights = [0i32; 256];
         heights[0] = 10; // (0, 0) — the north probe at chunk-block z 0.
         heights[32] = 14; // (0, 2) — the south probe at chunk-block z 2.
-        assert!(condition_for(Some(Arc::new(heights))).test());
-        // Flat snapshot: north == south == 10 -> not steep.
+        assert!(condition_for(Some(Arc::new(Mutex::new(heights)))).test());
+        // Flat mirror: north == south == 10 -> not steep.
         let flat = [10i32; 256];
-        assert!(!condition_for(Some(Arc::new(flat))).test());
-        // No snapshot (the single-column carver probe): cannot fire.
+        assert!(!condition_for(Some(Arc::new(Mutex::new(flat)))).test());
+        // No mirror (the single-column carver probe): cannot fire.
         assert!(!condition_for(None).test());
+    }
+
+    /// The live-mirror `#185` ordering Java's `buildSurface` guarantees: an
+    /// `eroded_badlands` column's extension (writing `defaultBlock` into `AIR`
+    /// above the current top) raises the live `WORLD_SURFACE_WG` height, and
+    /// that raise is folded into the heightmap *before* the column's steep
+    /// probes — so the west probe's clamp onto the current column sees it. The
+    /// port reproduces that ordering through [`ChunkColumnAdapter::set_block`]:
+    /// each write re-reads the chunk's post-write height into the shared
+    /// mirror, so a later probe reads the raised column exactly as Java's live
+    /// `getHeight` would. This pins write → mirror → probe (a regression for
+    /// the old start-of-`build_surface` snapshot, which predated every column's
+    /// extension).
+    #[test]
+    fn adapter_writes_raise_the_live_mirror_before_the_steep_probe() {
+        // A chunk whose columns all top out at y = 9 (stone below, air above),
+        // with a real write seam: writing non-air above a column's top raises
+        // that column's height, exactly like `ProtoChunk::setBlockState`'s
+        // heightmap update.
+        let mut chunk = MockChunkSurface {
+            min_y: 0,
+            height: 16,
+            top: [9; 256],
+            writes: Vec::new(),
+        };
+        // The shared live mirror, primed from the chunk's primed heightmap as
+        // `build_surface` does.
+        let mirror = Arc::new(Mutex::new([0i32; 256]));
+        for x in 0..16 {
+            for z in 0..16 {
+                mirror.lock().unwrap()[(x + z * 16) as usize] = chunk.get_height(x, z);
+            }
+        }
+        let mut adapter = ChunkColumnAdapter {
+            chunk: RefCell::new(&mut chunk),
+            x: Cell::new(0),
+            z: Cell::new(1),
+            world_surface_heights: Some(Arc::clone(&mirror)),
+        };
+        // The eroded-badlands extension on the current column (0, 1): writing
+        // `defaultBlock` into the air above the top raises its live height from
+        // 9 to 13 (a +4 climb). Each write is a `set_block`, which re-reads the
+        // post-write height into the mirror.
+        adapter.set_block(10, Blocks::STONE.default_block_state());
+        adapter.set_block(11, Blocks::STONE.default_block_state());
+        adapter.set_block(12, Blocks::STONE.default_block_state());
+        adapter.set_block(13, Blocks::STONE.default_block_state());
+        // The mirror now reads the raised column (index 0 + 1*16); the not-yet-
+        // processed east neighbor (1, 1) — index 1 + 1*16 — is untouched.
+        let heights = mirror.lock().unwrap();
+        assert_eq!(heights[16], 13, "the current column's raise folded in");
+        assert_eq!(heights[17], 9, "the unprocessed east neighbor stays low");
+        drop(heights);
+
+        // A steep condition over the same mirror, at the same column: the west
+        // probe clamps x - 1 to the current column (13), the east probe reads
+        // the low neighbor (9), and 13 >= 9 + 4 fires — Java's post-extension
+        // ordering.
+        let sc = Arc::new(SurfaceContext {
+            system: Arc::new(stub_surface_system()),
+            cells: SharedCells::new(),
+            biome_getter: Arc::new(|_: &BlockPos| Holder::direct(BiomeId::from_id(0))),
+            worldgen_context: Arc::new(worldgen_context(0, 16, 16)),
+            world_surface_heights: Some(Arc::clone(&mirror)),
+        });
+        sc.update_xz(0, 1);
+        let steep = SteepMaterialCondition {
+            cache: LazyCache::new(sc.cells.last_update_xz()),
+            surface_context: sc,
+        };
+        assert!(
+            steep.test(),
+            "the raised column fires steep through the mirror"
+        );
+    }
+
+    /// The live-mirror `#185` ordering holds for the *lowering* leg of the
+    /// heightmap too: an air write at a column's top removes the topmost
+    /// non-air block, so the live `WORLD_SURFACE_WG` height falls — and
+    /// [`ChunkColumnAdapter::set_block`] folds that fall back into the mirror
+    /// exactly like the raise. This pins the "kept current by every write"
+    /// claim in both directions (regression for a mirror that only tracked
+    /// raises, which the pre-#185 snapshot did).
+    #[test]
+    fn adapter_writes_lower_the_live_mirror_on_an_air_write() {
+        let mut chunk = MockChunkSurface {
+            min_y: 0,
+            height: 16,
+            top: [9; 256],
+            writes: Vec::new(),
+        };
+        let mirror = Arc::new(Mutex::new([0i32; 256]));
+        for x in 0..16 {
+            for z in 0..16 {
+                mirror.lock().unwrap()[(x + z * 16) as usize] = chunk.get_height(x, z);
+            }
+        }
+        let mut adapter = ChunkColumnAdapter {
+            chunk: RefCell::new(&mut chunk),
+            x: Cell::new(0),
+            z: Cell::new(1),
+            world_surface_heights: Some(Arc::clone(&mirror)),
+        };
+        // Air at the column's top: `Heightmap.update` removes the topmost
+        // non-air block, so the height falls 9 -> 8 and the mirror follows.
+        adapter.set_block(9, Blocks::AIR.default_block_state());
+        let heights = mirror.lock().unwrap();
+        assert_eq!(heights[16], 8, "the air write's lowering folded in");
+    }
+
+    /// The `#185` biome-value seam is fail-loud, never a panic: the
+    /// `temperature` condition resolves through `seam_cold_enough_to_snow`
+    /// (permanently false — the `Biome` value registry is unported, biome-core),
+    /// and the `build_surface` driver must reach it without panicking on the
+    /// frozen-ocean paths. This pins the reachable-false contract so a future
+    /// "improvement" to panic (or to fabricate a value) fails the test.
+    #[test]
+    fn temperature_seam_never_panics_and_is_false() {
+        // The seam function itself: typed, deterministic, false.
+        assert!(!seam_cold_enough_to_snow());
+        // A `Context` with a `Temperature` source applies and tests without
+        // panicking, reading the biome cache (Java's `getBiome()` is called
+        // first — `surface_context.get_biome()` — then the seam).
+        let sc = stub_surface_context();
+        sc.update_xz(0, 0);
+        sc.update_y(1, 1, i32::MIN, 63);
+        let temperature = Arc::new(TemperatureHelperCondition {
+            cache: LazyCache::new(sc.cells.last_update_y()),
+            surface_context: sc,
+        });
+        assert!(
+            !temperature.test(),
+            "the temperature seam is permanently false"
+        );
     }
 
     /// `SurfaceRuleData.air()` must round-trip through `rule_source_codec` as a
@@ -4942,19 +5136,30 @@ mod tests {
 
     /// A `ChunkSurface` double: a fixed-height worldgen window over an
     /// all-stone body, tracking the write requests the surface system issues.
-    /// `get_height` returns `surface_height - 1` per column (so
-    /// `startingHeight = getHeight + 1 = surface_height`); `is_inside_build_height`
-    /// follows the height window (`min_y .. min_y + height`).
+    /// `top` holds the topmost non-air y per column — `get_height` returns it,
+    /// so `startingHeight = getHeight + 1 = top + 1` — and
+    /// `is_inside_build_height` follows the height window (`min_y .. min_y +
+    /// height`). A non-air write above a column's top raises that column's top,
+    /// and an air write at the top lowers it by one (the heightmap
+    /// raise/lower the real `setBlockState`/`Heightmap.update` folds into the
+    /// live `WORLD_SURFACE_WG`; the mock's columns are solid up to `top`, so
+    /// the next non-air below a removed top is always `top - 1`).
     struct MockChunkSurface {
         min_y: i32,
         height: i32,
-        surface_height: i32,
+        top: [i32; 256],
         writes: Vec<(i32, i32, i32, BlockState)>,
     }
 
+    impl MockChunkSurface {
+        fn index(x: i32, z: i32) -> usize {
+            (x & 15) as usize + (z & 15) as usize * 16
+        }
+    }
+
     impl ChunkSurface for MockChunkSurface {
-        fn get_height(&self, _x: i32, _z: i32) -> i32 {
-            self.surface_height - 1
+        fn get_height(&self, x: i32, z: i32) -> i32 {
+            self.top[Self::index(x, z)]
         }
         fn get_min_y(&self) -> i32 {
             self.min_y
@@ -4968,14 +5173,26 @@ mod tests {
         fn is_inside_build_height(&self, y: i32) -> bool {
             y >= self.min_y && y < self.min_y + self.height
         }
-        fn get_block_state(&self, _x: i32, y: i32, _z: i32) -> BlockState {
-            if y < self.surface_height {
+        fn get_block_state(&self, x: i32, y: i32, z: i32) -> BlockState {
+            if y <= self.top[Self::index(x, z)] {
                 Blocks::STONE.default_block_state()
             } else {
                 Blocks::AIR.default_block_state()
             }
         }
         fn set_block_state(&mut self, x: i32, y: i32, z: i32, state: BlockState) {
+            let idx = Self::index(x, z);
+            if state.is_air() {
+                // `Heightmap.update` lowers on an air write at the current max:
+                // the block at the top is removed, so the next non-air (the
+                // solid `top - 1` below) becomes the new top. Writes strictly
+                // below the top leave it unchanged (the top block remains).
+                if y == self.top[idx] {
+                    self.top[idx] = y - 1;
+                }
+            } else if y > self.top[idx] {
+                self.top[idx] = y;
+            }
             self.writes.push((x, y, z, state));
         }
         fn mark_pos_for_post_processing(&mut self, _x: i32, _y: i32, _z: i32) {}
@@ -4991,15 +5208,16 @@ mod tests {
         let mut chunk = MockChunkSurface {
             min_y: -64,
             height: 384,
-            surface_height: 64,
+            top: [63; 256],
             writes: Vec::new(),
         };
         let mut adapter = ChunkColumnAdapter {
             chunk: RefCell::new(&mut chunk),
             x: Cell::new(5),
             z: Cell::new(9),
+            world_surface_heights: None,
         };
-        // `get_block(y)` reads at (x=5, y=10, z=9): 10 < surface_height -> stone.
+        // `get_block(y)` reads at (x=5, y=10, z=9): 10 < top (63) -> stone.
         assert_eq!(adapter.get_block(10), Blocks::STONE.default_block_state());
         // `set_block(y, state)` writes at (x=5, y=10, z=9), guarded by the
         // build-height check.
@@ -5078,7 +5296,7 @@ mod tests {
         let mut chunk = MockChunkSurface {
             min_y: -64,
             height: 384,
-            surface_height: 64,
+            top: [63; 256],
             writes: Vec::new(),
         };
         // `Blocks.AIR` is not `default_block` (stone), so the rule only fires
@@ -5104,7 +5322,7 @@ mod tests {
         );
 
         // Every column wrote into each of its 128 stone cells
-        // (`[min_y, surface_height) = [-64, 64)`): every one is `default_block`
+        // (`[min_y, top) = [-64, 64)`): every one is `default_block`
         // and air is a valid `tryApply` result, so the rule fires all the way
         // down the column (Java's `buildSurface` replaces every
         // `old == defaultBlock` cell with the rule result).
@@ -5130,7 +5348,7 @@ mod tests {
         let mut chunk = MockChunkSurface {
             min_y: -64,
             height: 384,
-            surface_height: 64,
+            top: [63; 256],
             writes: Vec::new(),
         };
         let rule_source: ArcRuleSource = if_true(

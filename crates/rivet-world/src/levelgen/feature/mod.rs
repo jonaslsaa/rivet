@@ -67,6 +67,7 @@ pub mod configurations;
 mod feature_count_tracker;
 mod feature_place_context;
 mod no_op_feature;
+pub mod ore_feature;
 
 // The vegetation-family wave (issue #600) — the `.feature.vegetation-family`
 // unit's leaves that live in this module: the aquatic/vegetation feature
