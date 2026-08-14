@@ -487,9 +487,9 @@ mod tests {
     #[test]
     fn codec_round_trips_the_plains_element_through_the_registry() {
         use rivet_registry::HolderGetter;
+        use rivet_registry::RegistrationInfo;
         use rivet_registry::RegistryBuilder;
         use rivet_registry::ResourceKey;
-        use rivet_registry::RegistrationInfo;
         use rivet_registry::access::RegistryAccess;
         use rivet_registry::identifier::Identifier;
         use rivet_registry::registry_ops::RegistryOps;
@@ -517,17 +517,19 @@ mod tests {
             .get_or_throw(&biomes::PLAINS);
 
         let ops = RegistryOps::create_from_access(&JsonOps::INSTANCE, access);
-        let codec = map_codec::codec_of(debug_level_source_map_codec::<RegistryOps<
-            serde_json::Value,
-            JsonOps,
-        >>());
+        let codec = map_codec::codec_of(debug_level_source_map_codec::<
+            RegistryOps<serde_json::Value, JsonOps>,
+        >());
 
         let encoded_in = json!({});
         let parsed = codec.parse(&ops, &encoded_in);
         let source = parsed.result().expect("decode should succeed");
 
         // The fixed plains biome source resolves through the registry context.
-        assert_eq!(source.get_biome_source().collect_possible_biomes(), vec![plains]);
+        assert_eq!(
+            source.get_biome_source().collect_possible_biomes(),
+            vec![plains]
+        );
 
         // Encode round-trips to the empty wire form.
         let encoded = codec
