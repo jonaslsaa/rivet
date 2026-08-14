@@ -105,3 +105,43 @@ impl<T> std::fmt::Debug for SavedDataType<T> {
         std::fmt::Display::fmt(self, f)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::level::saveddata::weather_data::WeatherData;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    fn hash_of<T>(value: &SavedDataType<T>) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn equality_is_id_bound_not_component_identity() {
+        // Java `SavedDataType.equals` compares only the id; two fresh `TYPE`
+        // values share the id but hold distinct constructor/codec Arcs.
+        let a = WeatherData::type_();
+        let b = WeatherData::type_();
+        assert_eq!(a, b, "same id must compare equal despite distinct codecs");
+        assert_eq!(hash_of(&a), hash_of(&b), "hashCode delegates to id");
+
+        // A same-shape type with a different id is not equal.
+        let different_id = SavedDataType::new(
+            Identifier::with_default_namespace("other_weather"),
+            Arc::new(WeatherData::new),
+            WeatherData::codec::<rivet_nbt::nbt_ops::NbtOps>(),
+            DataFixTypes::SavedDataWeather,
+        );
+        assert_ne!(a, different_id, "different ids must not compare equal");
+    }
+
+    #[test]
+    fn display_prints_only_the_id() {
+        let t = WeatherData::type_();
+        assert_eq!(t.to_string(), "SavedDataType[minecraft:weather]");
+        assert_eq!(format!("{t:?}"), "SavedDataType[minecraft:weather]");
+    }
+}

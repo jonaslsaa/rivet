@@ -236,12 +236,28 @@ mod tests {
     fn codec_fails_on_malformed_present_field() {
         let ops = JsonOps::INSTANCE;
         let codec = WanderingTraderData::codec::<JsonOps>();
-        // A present-but-non-numeric spawn_delay is a decode error (non-lenient).
-        let input = ops.create_map(vec![Pair::of(
+        // A present-but-non-numeric field is a decode error (non-lenient);
+        // both optional fields are exercised.
+        let malformed_spawn_delay = ops.create_map(vec![Pair::of(
             ops.create_string("spawn_delay".to_string()),
             ops.create_string("bogus".to_string()),
         )]);
-        assert!(codec.decode(&ops, &input).result().is_none());
+        assert!(
+            codec
+                .decode(&ops, &malformed_spawn_delay)
+                .result()
+                .is_none()
+        );
+        let malformed_spawn_chance = ops.create_map(vec![Pair::of(
+            ops.create_string("spawn_chance".to_string()),
+            ops.create_string("bogus".to_string()),
+        )]);
+        assert!(
+            codec
+                .decode(&ops, &malformed_spawn_chance)
+                .result()
+                .is_none()
+        );
     }
 
     #[test]

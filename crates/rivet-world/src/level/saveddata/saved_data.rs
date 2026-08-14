@@ -34,3 +34,21 @@ impl SavedData {
         self.dirty
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dirty_flag_can_be_cleared_and_redirtied() {
+        let mut data = SavedData::default();
+        assert!(!data.is_dirty());
+        data.set_dirty();
+        assert!(data.is_dirty());
+        // Java `setDirty(boolean false)` clears the flag.
+        data.set_dirty_flag(false);
+        assert!(!data.is_dirty());
+        data.set_dirty_flag(true);
+        assert!(data.is_dirty());
+    }
+}
