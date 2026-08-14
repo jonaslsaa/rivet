@@ -4341,6 +4341,134 @@ mod tests {
                 .get_height_at(15, 15, -64),
             63
         );
+        // Negative control for the fluid-marking seam: end stone is a fluid-empty
+        // block, so `BlockColumn.setBlock` must NOT have marked any cell for
+        // post-processing (Java's `if (!state.getFluidState().isEmpty())`).
+        assert_eq!(
+            proto
+                .get_post_processing()
+                .iter()
+                .map(Vec::len)
+                .sum::<usize>(),
+            0
+        );
+    }
+
+    /// The fluid-marking half of the surface column seam (issue #179): Java's
+    /// `BlockColumn.setBlock` marks every non-empty fluid write for
+    /// post-processing (`SurfaceSystem.java`). Here a real `ProtoChunk`
+    /// (the same hand-built 24-section shape as
+    /// `build_surface_replaces_stone_in_a_real_proto_chunk`) is surfaced with a
+    /// WATER rule — the default state is a non-empty fluid (fluid id 2) — so
+    /// every stone `default_block` cell the rule replaces becomes a water write
+    /// that must land its packed offset in the chunk's post-processing list.
+    #[test]
+    fn build_surface_marks_water_writes_for_post_processing() {
+        use crate::chunk::proto_chunk::ProtoChunk;
+        use crate::chunk::storage::chunk_reconstruction::{
+            block_state_predicates, resolve_state_flags,
+        };
+        use crate::chunk::storage::section_reconstruction::current_version_container_factory;
+        use crate::chunk::upgrade_data::UpgradeData;
+
+        // The real worldgen chunk shape (same as the END_STONE test).
+        type SurfaceChunk = ProtoChunk<
+            BlockState,
+            crate::chunk::storage::section_reconstruction::BiomeId,
+            &'static str,
+        >;
+
+        let (_settings, random_state, noise_chunk) = build_surface_state();
+        let system = random_state.surface_system();
+
+        let mut proto: SurfaceChunk = ProtoChunk::new(
+            ChunkPos::ZERO,
+            UpgradeData::empty(24),
+            create(-64, 384),
+            &current_version_container_factory(),
+            None,
+            Blocks::AIR.default_block_state(),
+            Blocks::AIR.default_block_state(),
+            &resolve_state_flags,
+        );
+        let stone = Blocks::STONE.default_block_state();
+        let flags = resolve_state_flags(&stone);
+        let predicates = block_state_predicates();
+        for y in -64..64 {
+            let section_index = proto.get_section_index(y) as usize;
+            let y_in_section = y & 15;
+            let section = proto.get_section_mut(section_index);
+            for x in 0..16 {
+                for z in 0..16 {
+                    section.set_block_state(
+                        x,
+                        y_in_section,
+                        z,
+                        stone,
+                        &predicates.is_air,
+                        &predicates.is_randomly_ticking,
+                        &predicates.fluid_is_empty,
+                        &predicates.fluid_is_randomly_ticking,
+                        &predicates.is_special_colliding,
+                    );
+                }
+            }
+        }
+        for x in 0..16 {
+            for z in 0..16 {
+                proto.update_heightmaps_after(x, 63, z, flags);
+            }
+        }
+
+        let biome_manager = Arc::new(BiomeManager::new(
+            Arc::new(crate::biome::FixedBiomeSource::new(Holder::direct(
+                BiomeId::from_id(0),
+            ))),
+            0,
+        ));
+        let gen_context = Arc::new(worldgen_context(-64, 384, 384));
+        // `state(Blocks.WATER)` — a `block` rule returning the water default
+        // state (`SurfaceRuleData` builders are `state(...)` shims).
+        let rule_source: ArcRuleSource = state(Blocks::WATER.default_block_state());
+
+        // The default water state is a non-empty fluid in the generated
+        // behavior table (fluid id 2), so the write path must mark it.
+        assert!(!Blocks::WATER.default_block_state().fluid_empty());
+
+        system.build_surface(
+            &random_state,
+            biome_manager,
+            false,
+            gen_context,
+            &mut proto,
+            noise_chunk,
+            &rule_source,
+            None,
+        );
+
+        // The water writes landed through `ProtoChunk::set_block_state`.
+        assert_eq!(
+            proto.get_block_state(0, 63, 0),
+            Blocks::WATER.default_block_state()
+        );
+        assert_eq!(
+            proto.get_block_state(7, 0, 7),
+            Blocks::WATER.default_block_state()
+        );
+        // Every one of the 16x16 columns x 128 stone layers was replaced, and
+        // every replacement is a non-empty fluid write — so exactly one
+        // post-processing mark per cell, packed into the per-section lists
+        // (`getSectionIndex(y)` buckets).
+        let marks: usize = proto.get_post_processing().iter().map(Vec::len).sum();
+        assert_eq!(marks, 16 * 16 * 128);
+        // Spot-check the packed offset for the topmost water cell (x=0, y=63,
+        // z=0): section index 7 (y in [48, 64)), `packOffsetCoordinates` =
+        // dx | dy<<4 | dz<<8 = 0 | 15<<4 | 0<<8 = 0xF0.
+        let section_index = proto.get_section_index(63) as usize;
+        assert_eq!(section_index, 7);
+        assert!(proto.get_post_processing()[section_index].contains(
+            &SurfaceChunk::pack_offset_coordinates(&BlockPos::new(0, 63, 0))
+        ));
     }
 
     #[test]
