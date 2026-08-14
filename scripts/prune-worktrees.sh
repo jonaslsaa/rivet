@@ -129,6 +129,16 @@ canonical_dir() { # $1 = path; canonical absolute path if it is a real dir, else
   cd "$r" 2>/dev/null && pwd -P
 }
 
+branch_deletable() { # $1 = repo, $2 = branch; would a no-force `git branch -d` delete it?
+  # branch -d refuses a tip not merged into HEAD or its upstream; a dry run
+  # cannot execute it (that would delete the ref), so main() predicts the
+  # refusal with this read-only check.
+  git -C "$1" merge-base --is-ancestor "$2" HEAD 2>/dev/null && return 0
+  local up
+  up=$(git -C "$1" rev-parse --abbrev-ref "$2@{upstream}" 2>/dev/null) || return 1
+  git -C "$1" merge-base --is-ancestor "$2" "$up" 2>/dev/null
+}
+
 sweep_tmp() {
   local root d caches cache kb mins=$((IDLE_HOURS * 60))
   for root in "$@"; do
@@ -208,9 +218,18 @@ main() {
       # A plain remove succeeds for every clean+merged+unlocked worktree here.
       if run git -C "$MAIN" worktree remove "$wt"; then
         freed_kb=$((freed_kb + kb)); removed=$((removed + 1))
-        if [ "$branch" != "(detached)" ] && ! run git -C "$MAIN" branch -d "$branch"; then
-          say "  WARN: branch '$branch' survived worktree removal (branch -d refused; ref left in place, never force-deleted)"
-          stranded=$((stranded + 1))
+        if [ "$branch" != "(detached)" ]; then
+          # A no-force branch -d strands a tip not merged into HEAD/upstream. A
+          # real run lets git's refusal at deletion time be authoritative; a dry
+          # run cannot execute branch -d (that would delete the ref), so it
+          # predicts the refusal so the preview does not under-state a strand.
+          if [ "$DRY" = 1 ] && ! branch_deletable "$MAIN" "$branch"; then
+            say "  WARN: branch '$branch' would survive worktree removal (branch -d would refuse; ref left in place, never force-deleted)"
+            stranded=$((stranded + 1))
+          elif ! run git -C "$MAIN" branch -d "$branch"; then
+            say "  WARN: branch '$branch' survived worktree removal (branch -d refused; ref left in place, never force-deleted)"
+            stranded=$((stranded + 1))
+          fi
         fi
       fi
       continue
@@ -267,7 +286,11 @@ main() {
     say "removed $removed worktree(s), pruned $pruned build cache(s), reclaimed ~$((freed_kb / 1024 / 1024))GB"
   fi
   if [ "$stranded" -gt 0 ]; then
-    say "note: $stranded branch ref(s) left in place after worktree removal (branch -d refused; refs are never force-deleted)"
+    if [ "$DRY" = 1 ]; then
+      say "note: $stranded branch ref(s) would be left in place after worktree removal (branch -d would refuse; refs are never force-deleted)"
+    else
+      say "note: $stranded branch ref(s) left in place after worktree removal (branch -d refused; refs are never force-deleted)"
+    fi
   fi
 }
 

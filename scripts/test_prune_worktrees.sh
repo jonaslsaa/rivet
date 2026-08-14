@@ -443,6 +443,7 @@ cd "$E2E/main"
 out=$(bash "$SCRIPT_DIR/prune-worktrees.sh" --dry-run --no-tmp 2>&1)
 echo "$out" | grep -q "WOULD REMOVE .*feature/merged" || fail "e2e dry-run missing WOULD REMOVE line: $out"
 echo "$out" | grep -q "would reclaim .*dry-run; nothing touched" || fail "e2e dry-run summary not prospective: $out"
+echo "$out" | grep -q "WARN.*would survive" && fail "e2e dry-run false-stranded a deletable branch: $out"
 [ -d "$E2E/wt" ] || fail "e2e dry-run removed the merged worktree"
 pass "e2e dry-run reports WOULD REMOVE and touches nothing"
 
@@ -512,7 +513,10 @@ pass "e2e corrupted linked-worktree index: uncommitted file survives, removal re
 # --- e2e: a refused branch -d is visible, accounted, and never force-deleted ---
 # The worktree is clean and merged into origin/main, so it is removed. But the
 # branch tip is NOT merged into MAIN's HEAD and has no upstream, so `git branch
-# -d` refuses: the ref must survive and the summary must say so honestly.
+# -d` refuses: the ref must survive and the summary must say so honestly. The
+# dry-run preview must predict that refusal (a dry run cannot execute branch -d,
+# which would delete the ref), so a user previewing sees the same strand a real
+# run produces instead of a clean removal that under-states it.
 E2E4="$SANDBOX/e2e4"
 mkdir -p "$E2E4/main"
 git init -q "$E2E4/main"
@@ -532,6 +536,15 @@ git -C "$E2E4/wt" commit -qm c1
 origin_head=$(git -C "$E2E4/wt" rev-parse HEAD)
 git -C "$E2E4/main" update-ref refs/remotes/origin/main "$origin_head"
 cd "$E2E4/main"
+# dry-run preview predicts the strand: WARN, prospective note, and no removal
+out=$(bash "$SCRIPT_DIR/prune-worktrees.sh" --dry-run --no-tmp 2>&1)
+echo "$out" | grep -q "WOULD REMOVE .*feature/stranded" || fail "stranded dry-run: missing WOULD REMOVE line: $out"
+echo "$out" | grep -q "WARN: branch 'feature/stranded' would survive" || fail "stranded dry-run: missing prospective WARN line: $out"
+echo "$out" | grep -q "note: 1 branch ref(s) would be left in place" || fail "stranded dry-run: missing prospective stranded note: $out"
+[ -d "$E2E4/wt" ] || fail "stranded dry-run: removed the worktree"
+git -C "$E2E4/main" branch --list feature/stranded | grep -q . || fail "stranded dry-run: deleted the branch"
+pass "e2e dry-run preview predicts a refused branch -d (strand visible before it happens)"
+# the real run then does exactly what the preview predicted
 out=$(bash "$SCRIPT_DIR/prune-worktrees.sh" --no-tmp 2>&1)
 echo "$out" | grep -q "REMOVE .*feature/stranded" || fail "stranded: missing REMOVE line: $out"
 echo "$out" | grep -q "WARN: branch 'feature/stranded' survived" || fail "stranded: missing WARN line: $out"
