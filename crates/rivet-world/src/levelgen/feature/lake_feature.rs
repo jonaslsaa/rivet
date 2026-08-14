@@ -27,7 +27,13 @@
 //!    predicate holds.
 //! 4. **Freeze** — when the fluid's `FluidState.is(FluidTags.WATER)`, every
 //!    surface cell at `yy == 4` whose biome `shouldFreeze`s and whose
-//!    `canReplaceWithAirOrFluid` predicate holds becomes `Blocks.ICE`.
+//!    `canReplaceWithAirOrFluid` predicate holds becomes `Blocks.ICE`. The
+//!    loop is structurally deferred: `try_freeze_surface` is an explicit no-op
+//!    (the sole RivetTodo(#232) omission in this unit) because `shouldFreeze` reads
+//!    the `LevelReader` block surface that the #232 `world.level` slice has
+//!    not ported. A water lake placed in a freezing biome therefore writes no
+//!    ice surface — a tracked behavioral divergence, not a wrong port (the
+//!    Java loop draws no RNG, so the draw stream is exact).
 //!
 //! Returns `true` unconditionally once the validation loop passes. The draw
 //! stream is exact: the six `nextDouble`s per spot, then the barrier loop's
@@ -54,8 +60,6 @@ use crate::levelgen::feature::stateproviders::block_state_provider::{
     ErasedBlockStateProvider, block_state_provider_get_state,
 };
 use rivet_registry::block_state::BlockState;
-use rivet_registry::generated::registries::FLUID_BY_NAME;
-use rivet_registry::generated::tags::FLUID_TAG_BY_NAME;
 use rivet_registry::registry_ops::RegistryOpsLookup;
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::dynamic_ops::DynamicOps;
@@ -258,34 +262,15 @@ fn is_liquid_block(block_state: BlockState) -> bool {
     id == Blocks::WATER.id() || id == Blocks::LAVA.id() || id == Blocks::BUBBLE_COLUMN.id()
 }
 
-/// `BlockState.getFluidState().is(FluidTags.WATER)` — the `minecraft:water`
-/// fluid-tag membership test on the state's fluid type (`fluid_id`, the
-/// `BuiltInRegistries.FLUID.getId(getFluidState().getType())` encoding).
-///
-/// The tag (`FluidTags.WATER`, `FLUID_TAG_BY_NAME["minecraft:water"]`) contains
-/// BOTH `minecraft:water` (id 2, the still source) AND
-/// `minecraft:flowing_water` (id 1), so the membership must be tested against
-/// the tag's element set rather than a single-id equality — a state whose fluid
-/// type is the flowing-water variant would freeze in Paper but miss a
-/// single-id check. The generated tag table resolves element names through
-/// `FLUID_BY_NAME`; both the tag key and its elements are generated from the
-/// same MC 26.2 registry load, so the lookups unwrap.
-fn fluid_state_is_water(block_state: BlockState) -> bool {
-    let fluid_id = block_state.fluid_id();
-    FLUID_TAG_BY_NAME["minecraft:water"]
-        .iter()
-        .any(|name| FLUID_BY_NAME[name] == fluid_id)
-}
-
 impl FeatureBehavior<Configuration> for LakeFeature {
     /// `LakeFeature.place(FeaturePlaceContext<Configuration>)`.
     ///
-    /// The freeze loop's `shouldFreeze` reads the `LevelReader` block surface,
-    /// which the #232 world slice has not ported; the loop is skipped honestly
-    /// (the biome read goes through the `get_biome` seam's `RivetTodo(#232)`
-    /// panic). The RNG stream is exact: `random.nextInt(4)`, then the six
-    /// `nextDouble`s per spot, then the barrier loop's `nextInt(2)` per
-    /// candidate cell.
+    /// The freeze loop is structurally deferred to `try_freeze_surface`, which
+    /// is an explicit no-op: its `shouldFreeze` reads the `LevelReader` block
+    /// surface, which the #232 world slice has not ported (the biome read goes
+    /// through the `get_biome` seam's `RivetTodo(#232)` panic). The RNG stream
+    /// is exact: `random.nextInt(4)`, then the six `nextDouble`s per spot,
+    /// then the barrier loop's `nextInt(2)` per candidate cell.
     fn place<R: RandomSource>(
         &self,
         context: &mut FeaturePlaceContext<'_, Configuration, R>,
@@ -421,44 +406,62 @@ impl FeatureBehavior<Configuration> for LakeFeature {
             }
         }
 
-        // The freeze loop: `fluid.getFluidState().is(FluidTags.WATER)` is the
-        // `minecraft:water` fluid-tag membership test — the tag contains BOTH
-        // `minecraft:water` (id 2, the still source) and
-        // `minecraft:flowing_water` (id 1), so the guard is the tag set, not a
-        // single-id equality. The biome `shouldFreeze` read is the deferred
-        // `#232` surface, so the loop is skipped honestly.
-        if fluid_state_is_water(fluid) {
-            // RivetTodo(#232): `Biome.shouldFreeze(level, offset, false)`
-            // reads the `LevelReader` block surface (`getBlockState`/
-            // `getFluidState`/`getBrightness`/`isWaterAt`/
-            // `isInsideBuildHeight`), which the #232 `world.level` value slice
-            // has not ported (see `biome.rs`'s `shouldFreeze`/`shouldSnow`
-            // defer). The loop is skipped until that surface lands — an honest
-            // omission, not a fabricated verdict; the RNG stream is unaffected
-            // (the barrier loop's draws already happened). This is a tracked
-            // behavior gap, not a wrong port: in Java a water lake in a
-            // freezing biome writes `Blocks.ICE` at the `yy == 4` surface
-            // cells; here those writes are skipped. Re-enable the loop verbatim
-            // when the `#232` surface lands — its two prerequisites are
-            // `WorldGenLevel::get_biome` (default panics today) and
-            // `Biome::should_freeze`.
-            // for xx in 0..16 {
-            //     for zz in 0..16 {
-            //         let offset = origin.offset(xx as i32, 4, zz as i32);
-            //         if level.get_biome(&offset).value().should_freeze(level,
-            //             &offset, false)
-            //             && config.can_replace_with_air_or_fluid().test(level,
-            //             &offset)
-            //         {
-            //             level.set_block(&offset, Blocks::ICE.default_block_state(),
-            //                 UPDATE_CLIENTS);
-            //         }
-            //     }
-            // }
-        }
+        // The freeze loop (`fluid.getFluidState().is(FluidTags.WATER)` then the
+        // `yy == 4` surface scan) is deferred: `try_freeze_surface` below is
+        // the structural marker that the Java loop is skipped — see its
+        // RivetTodo(#232) note. It is a call, not a dead `if` guard, so a
+        // reader cannot mistake it for working freeze logic.
+        try_freeze_surface(level, config, fluid);
 
         true
     }
+}
+
+/// `LakeFeature.place`'s freeze loop, deferred.
+///
+/// Java writes `Blocks.ICE` at the `yy == 4` surface cells:
+///
+/// ```java
+/// if (fluid.getFluidState().is(FluidTags.WATER)) {
+///     for (int xx = 0; xx < 16; xx++) {
+///         for (int zz = 0; zz < 16; zz++) {
+///             BlockPos offset = origin.offset(xx, 4, zz);
+///             if (level.getBiome(offset).value().shouldFreeze(level, offset, false)
+///                 && config.canReplaceWithAirOrFluid.test(level, offset)) {
+///                 level.setBlock(offset, Blocks.ICE.defaultBlockState(), Block.UPDATE_CLIENTS);
+///             }
+///         }
+///     }
+/// }
+/// ```
+///
+/// RivetTodo(#232): `Biome.shouldFreeze(level, offset, false)` reads the
+/// `LevelReader` block surface (`getBlockState`/`getFluidState`/
+/// `getBrightness`/`isWaterAt`/`isInsideBuildHeight`), which the #232
+/// `world.level` value slice has not ported (see `biome.rs`'s
+/// `shouldFreeze`/`shouldSnow` defer). The loop is skipped until that surface
+/// lands — an honest omission, not a fabricated verdict; the RNG stream is
+/// unaffected (the barrier loop's draws already happened). This is a tracked
+/// behavior gap, not a wrong port: in Java a water lake in a freezing biome
+/// writes `Blocks.ICE` at the `yy == 4` surface cells; here those writes are
+/// skipped. Re-enable the loop verbatim when the #232 surface lands — its two
+/// prerequisites are `WorldGenLevel::get_biome` (default panics today) and
+/// `Biome::should_freeze` (not yet ported).
+///
+/// The guard, `fluid.getFluidState().is(FluidTags.WATER)`, is
+/// `BlockState.getFluidState().is(FluidTags.WATER)` — a `minecraft:water`
+/// fluid-tag membership test on the state's fluid type (`fluid_id`, the
+/// `BuiltInRegistries.FLUID.getId(getFluidState().getType())` encoding). The
+/// tag contains BOTH `minecraft:water` (id 2, the still source) AND
+/// `minecraft:flowing_water` (id 1), so the re-enabled guard must test the
+/// generated tag set (`FLUID_TAG_BY_NAME["minecraft:water"]` resolved through
+/// `FLUID_BY_NAME`), not a single-id equality — a state whose fluid type is the
+/// flowing-water variant freezes in Paper but would miss a single-id check.
+fn try_freeze_surface(_level: &mut dyn WorldGenLevel, _config: &Configuration, _fluid: BlockState) {
+    // Deferred: the freeze-loop body is the Java loop in the doc note above
+    // (with the tag-set guard semantics). The empty body is the structural
+    // marker that the loop is not ported yet — an explicit no-op, not a dead
+    // `if` guard a reader could mistake for working freeze logic.
 }
 
 #[cfg(test)]
@@ -470,9 +473,13 @@ mod tests {
     use crate::levelgen::feature::test_support::{
         RecordingRandom, RngCall, TestGenerator, TestLevel, access,
     };
+    use rivet_registry::access::RegistryAccess;
     use rivet_registry::block_state::BlockState;
     use rivet_registry::core::BlockPos;
+    use rivet_registry::registry_ops::RegistryOps;
+    use rivet_serialization::json_ops::JsonOps;
     use rivet_util::random::LegacyRandomSource;
+    use serde_json::json;
 
     fn water() -> BlockState {
         BlockState::of(Blocks::WATER.id())
@@ -528,6 +535,128 @@ mod tests {
         ))
     }
 
+    /// `block_state_provider_codec`/`block_predicate_codec` dispatch over the
+    /// registry-backed providers/predicates, so the codec requires `RegistryOps`
+    /// (the `RegistryOpsLookup` ops). An empty access is enough — the providers
+    /// here are `simple` and the predicates `always_true`.
+    type TestOps = RegistryOps<serde_json::Value, JsonOps>;
+
+    fn ops() -> TestOps {
+        RegistryOps::create_from_access(&JsonOps::INSTANCE, RegistryAccess::empty())
+    }
+
+    /// A water/stone config with all three predicates `always_true` — the codec
+    /// fixture: the fluid and barrier exercise the `BlockStateProvider.CODEC`
+    /// dispatch (water is non-singleton, so its state carries a `Properties`
+    /// compound), the three predicates the `BlockPredicate.CODEC` dispatch.
+    fn codec_config() -> Configuration {
+        Configuration::new(
+            Arc::new(simple(water())),
+            Arc::new(simple(stone())),
+            always_true(),
+            always_true(),
+            always_true(),
+        )
+    }
+
+    #[test]
+    fn lake_configuration_codec_round_trips() {
+        let codec = lake_configuration_codec::<TestOps>();
+        let ops = ops();
+        let config = codec_config();
+        let encoded = codec
+            .encode_start(&ops, &config)
+            .result()
+            .expect("encode should succeed")
+            .clone();
+        // `RecordCodecBuilder` emits the five fields in Java's group order, and
+        // each provider/predicate dispatch writes its value fields before the
+        // `"type"` key (Java's KeyDispatchCodec order). The water state is
+        // non-singleton (a `level` property), so it carries the `Properties`
+        // compound; stone is singleton and encodes name-only.
+        assert_eq!(
+            encoded,
+            json!({
+                "fluid": {"state": {"Properties": {"level": "0"}, "Name": "minecraft:water"}, "type": "minecraft:simple_state_provider"},
+                "barrier": {"state": {"Name": "minecraft:stone"}, "type": "minecraft:simple_state_provider"},
+                "can_place_feature": {"type": "minecraft:true"},
+                "can_replace_with_air_or_fluid": {"type": "minecraft:true"},
+                "can_replace_with_barrier": {"type": "minecraft:true"},
+            })
+        );
+        // Pin the byte order too — indexmap map equality is order-insensitive,
+        // so the `json!` assertion alone cannot catch a regression that emits a
+        // field (or a `"type"` key) out of Java's order.
+        assert_eq!(
+            serde_json::to_string(&encoded).expect("encode is json"),
+            r#"{"fluid":{"state":{"Properties":{"level":"0"},"Name":"minecraft:water"},"type":"minecraft:simple_state_provider"},"barrier":{"state":{"Name":"minecraft:stone"},"type":"minecraft:simple_state_provider"},"can_place_feature":{"type":"minecraft:true"},"can_replace_with_air_or_fluid":{"type":"minecraft:true"},"can_replace_with_barrier":{"type":"minecraft:true"}}"#
+        );
+        let decoded = codec
+            .parse(&ops, &encoded)
+            .result()
+            .expect("decode should succeed")
+            .clone();
+        // The provider/predicate halves are behavior carriers; equality is by
+        // dispatch identity (the `"type"` key), which is what the codec
+        // round-trips — pinning the constructor order (fluid, barrier, then the
+        // three predicates in field order).
+        assert_eq!(
+            ErasedBlockStateProvider::type_id(&**decoded.fluid()),
+            ErasedBlockStateProvider::type_id(&**config.fluid())
+        );
+        assert_eq!(
+            ErasedBlockStateProvider::type_id(&**decoded.barrier()),
+            ErasedBlockStateProvider::type_id(&**config.barrier())
+        );
+        assert_eq!(
+            BlockPredicate::type_id(&**decoded.can_place_feature()),
+            BlockPredicate::type_id(&**config.can_place_feature())
+        );
+        assert_eq!(
+            BlockPredicate::type_id(&**decoded.can_replace_with_air_or_fluid()),
+            BlockPredicate::type_id(&**config.can_replace_with_air_or_fluid())
+        );
+        assert_eq!(
+            BlockPredicate::type_id(&**decoded.can_replace_with_barrier()),
+            BlockPredicate::type_id(&**config.can_replace_with_barrier())
+        );
+    }
+
+    #[test]
+    fn lake_configuration_codec_requires_all_fields() {
+        let codec = lake_configuration_codec::<TestOps>();
+        let ops = ops();
+        assert!(codec.parse(&ops, &json!({})).is_error());
+        // Missing the last predicate field.
+        assert!(
+            codec
+                .parse(
+                    &ops,
+                    &json!({
+                        "fluid": {"type": "minecraft:simple_state_provider", "state": {"Name": "minecraft:water"}},
+                        "barrier": {"type": "minecraft:simple_state_provider", "state": {"Name": "minecraft:stone"}},
+                        "can_place_feature": {"type": "minecraft:true"},
+                        "can_replace_with_air_or_fluid": {"type": "minecraft:true"},
+                    })
+                )
+                .is_error()
+        );
+        // Missing the fluid provider field.
+        assert!(
+            codec
+                .parse(
+                    &ops,
+                    &json!({
+                        "barrier": {"type": "minecraft:simple_state_provider", "state": {"Name": "minecraft:stone"}},
+                        "can_place_feature": {"type": "minecraft:true"},
+                        "can_replace_with_air_or_fluid": {"type": "minecraft:true"},
+                        "can_replace_with_barrier": {"type": "minecraft:true"},
+                    })
+                )
+                .is_error()
+        );
+    }
+
     /// The `origin.getY() <= level.getMinY() + 4` gate: `getMinY() = -64`, so
     /// an origin at `y <= -60` returns `false` before any draw or write.
     #[test]
@@ -548,6 +677,18 @@ mod tests {
     /// multiplier) changes the radii, hence the marked-cell grid, hence the
     /// golden write set — so the golden positions and count pin the draw
     /// stream's *values*, not just its shape.
+    ///
+    /// Provenance: the golden write set was captured from the Rust
+    /// implementation run for seed 1 (a `LegacyRandomSource(1)` over the
+    /// stone-filled local cube), not from an independent Paper oracle probe —
+    /// there is no lake feature probe in `rivet-oracle`. It therefore pins the
+    /// Rust port's draw stream (its self-consistency: the lobe-count draw, the
+    /// `6 * spots` doubles, and the exact cells those radii mark), not an
+    /// independent Paper value. The write rule (fluid below, cave air at/above
+    /// `yy == 4`) and the loop structure were verified against `LakeFeature.java`
+    /// during translation, but a symmetric error in both the formula and the
+    /// goldens could pass. Treat a change to this golden as a review trigger,
+    /// not a routine update.
     #[test]
     fn spot_draw_stream_is_exact() {
         let mut level = TestLevel::over(access());
@@ -863,6 +1004,16 @@ mod tests {
     /// seed 1 on the stone-filled local cube (every cell solid, so the
     /// `isSolid` gate holds for every boundary cell and the writes are exactly
     /// the cells the draw gate admits).
+    ///
+    /// Provenance: as in `spot_draw_stream_is_exact`, the counts and golden
+    /// write sets were captured from the Rust implementation run for seed 1,
+    /// not from an independent Paper oracle probe (none exists for `LakeFeature`
+    /// in `rivet-oracle`). The `nextInt(2)` count (one per `yy >= 4` boundary
+    /// cell), the unconditional `yy < 4` writes, and the roll-dependent subset
+    /// therefore pin the Rust port's behavior — a symmetric error in the port
+    /// and the goldens could pass. The 1/2-roll semantics (`nextInt(2) != 0`)
+    /// were verified against `LakeFeature.java` during translation. Treat a
+    /// change to this golden as a review trigger, not a routine update.
     #[test]
     fn barrier_loop_draw_stream_and_writes_are_exact() {
         let mut level = TestLevel::over(access());
