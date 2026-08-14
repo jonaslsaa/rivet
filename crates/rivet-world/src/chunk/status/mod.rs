@@ -2,7 +2,7 @@
 //! 12-rung `ChunkStatus` ladder (`chunk_status`), the `ChunkDependencies` /
 //! `ChunkStep` / `ChunkPyramid` dependency-DAG values (with the access-radius
 //! tables), the `ChunkStatusTask` identities, the pass-through task bodies, and
-//! the `WorldGenContext` executor seam that runs the DAG through NOISE.
+//! the `WorldGenContext` executor seam that runs the DAG through LIGHT.
 //!
 //! The generation/loading DAGs are built as deterministic pure functions of the
 //! builder calls (`ChunkPyramid::GENERATION_PYRAMID` / `LOADING_PYRAMID`), and
