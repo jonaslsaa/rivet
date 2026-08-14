@@ -191,7 +191,7 @@ mod tests {
         assert_eq!(decoded.radius(), &provider(3, 3));
         assert_eq!(decoded.offset(), &provider(0, 0));
         let encoded = codec
-            .encode_start(&JsonOps::INSTANCE, &decoded)
+            .encode_start(&JsonOps::INSTANCE, decoded)
             .result()
             .expect("encode should succeed")
             .clone();

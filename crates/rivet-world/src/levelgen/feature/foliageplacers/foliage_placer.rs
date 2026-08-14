@@ -126,6 +126,11 @@ pub trait FoliagePlacer: Any + Debug + Send + Sync + 'static {
     /// `FoliagePlacer.createFoliage(..., int foliageHeight, int leafRadius)` —
     /// the public entry: resolves `this.offset(random)` and delegates to the
     /// abstract [`FoliagePlacer::create_foliage_with_offset`].
+    //
+    // `createFoliage` has eight Java parameters (+ `&self`); bundling them into
+    // a struct would diverge from the Paper signature the concrete placers
+    // dispatch through, so the arity is preserved.
+    #[allow(clippy::too_many_arguments)]
     fn create_foliage<R: RandomSource>(
         &self,
         level: &dyn WorldGenLevel,
@@ -153,6 +158,10 @@ pub trait FoliagePlacer: Any + Debug + Send + Sync + 'static {
 
     /// `FoliagePlacer.createFoliage(..., int foliageHeight, int leafRadius,
     /// int offset)` — the abstract per-placer foliage placement.
+    //
+    // Nine Java parameters (+ `&self`) — the arity is Paper's; see
+    // `create_foliage`.
+    #[allow(clippy::too_many_arguments)]
     fn create_foliage_with_offset<R: RandomSource>(
         &self,
         level: &dyn WorldGenLevel,
@@ -220,6 +229,10 @@ pub trait FoliagePlacer: Any + Debug + Send + Sync + 'static {
     /// height `y` of the given radius around `origin`, skipping the
     /// `shouldSkipLocationSigned` corners. `BlockPos.setWithOffset(origin, dx,
     /// y, dz)` is the mutable cursor (`set_with_offset_xyz`).
+    //
+    // Eight Java parameters (+ `&self`) — the arity is Paper's; see
+    // `create_foliage`.
+    #[allow(clippy::too_many_arguments)]
     fn place_leaves_row<R: RandomSource>(
         &self,
         level: &dyn WorldGenLevel,
@@ -254,6 +267,10 @@ pub trait FoliagePlacer: Any + Debug + Send + Sync + 'static {
     /// `FoliagePlacer.placeLeavesRowWithHangingLeavesBelow(...)` (final) —
     /// `placeLeavesRow` first, then hanging extensions below each horizontal
     /// edge, walked by `pos.move(...)`.
+    //
+    // Ten Java parameters (+ `&self`) — the arity is Paper's; see
+    // `create_foliage`.
+    #[allow(clippy::too_many_arguments)]
     fn place_leaves_row_with_hanging_leaves_below<R: RandomSource>(
         &self,
         level: &dyn WorldGenLevel,
@@ -442,6 +459,11 @@ pub(crate) fn try_place_leaf<R: RandomSource>(
 /// `FoliagePlacer.tryPlaceExtension(...)` (private static) — extend a hanging
 /// vine when within 7 blocks (Manhattan) of the log position and the chance
 /// passes.
+//
+// `!(random.nextFloat() > chance)` is Java-verbatim: the negated `>` form is
+// kept because the `<=` clippy rewrite flips NaN behavior (`!(NaN > c)` is
+// true, `NaN <= c` is false), and Paper's Java `nextFloat()` can return NaN.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 fn try_place_extension<R: RandomSource>(
     level: &dyn WorldGenLevel,
     foliage_setter: &mut dyn FoliageSetter,

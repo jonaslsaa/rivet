@@ -195,7 +195,7 @@ mod tests {
         assert_eq!(decoded.radius(), &provider(2, 2));
         assert_eq!(decoded.offset(), &provider(0, 0));
         let encoded = codec
-            .encode_start(&JsonOps::INSTANCE, &decoded)
+            .encode_start(&JsonOps::INSTANCE, decoded)
             .result()
             .expect("encode should succeed")
             .clone();
@@ -209,7 +209,7 @@ mod tests {
         let p = PineFoliagePlacer::new(provider(1, 1), provider(0, 0), provider(5, 5));
         let mut random = rivet_util::random::LegacyRandomSource::new(0);
         let r = p.foliage_radius(&mut random, 0);
-        assert!(r >= 1 && r <= 2);
+        assert!((1..=2).contains(&r));
     }
 
     #[test]
