@@ -18,8 +18,8 @@ use crate::chunk::proto_chunk::ProtoChunk;
 /// `ChunkStatusTasks.passThrough` — the chunk is returned unchanged.
 pub fn pass_through<T, B, S>(_chunk: &mut ProtoChunk<T, B, S>)
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
 }

@@ -7,9 +7,11 @@
 //! the steps by status index. The value-layer pyramid is the full 12-rung
 //! ladder — the accumulated tables of the later steps are pure functions of the
 //! builder calls and the access-radius table (§3.5 of `chunk-pipeline-spec.md`)
-//! needs all 12 entries. Only the steps through LIGHT are *wired*: the executor
-//! seam (`world_gen_context.rs`) refuses the CARVERS..FEATURES and SPAWN/FULL
-//! task bodies (RivetTodo #185).
+//! needs all 12 entries. The worldgen steps through CARVERS and the
+//! INITIALIZE_LIGHT/LIGHT steps are *wired*: the executor seam
+//! (`world_gen_context.rs`) runs the CARVERS task body
+//! (`NoiseBasedChunkGenerator::apply_carvers`) at the Carvers rung and refuses
+//! the FEATURES and SPAWN/FULL task bodies (RivetTodo #185).
 //!
 //! The access radii are the `ChunkTaskScheduler.getAccessRadius0` recursion
 //! (the `ca.spottedleaf.moonrise...scheduling` cluster) ported as a pure
@@ -103,8 +105,9 @@ impl ChunkPyramidBuilder {
 }
 
 /// `ChunkPyramid.GENERATION_PYRAMID` — the builder calls ported verbatim from
-/// the Java static initializer. The tasks through SURFACE are the wired seam;
-/// the CARVERS..FEATURES and SPAWN/FULL tasks are identified but not dispatched
+/// the Java static initializer. The tasks through CARVERS are the wired seam
+/// (the executor dispatches `GenerateCarvers` at the Carvers rung); the
+/// FEATURES and SPAWN/FULL tasks are identified but not dispatched
 /// (RivetTodo #185).
 fn build_generation_pyramid() -> ChunkPyramid {
     ChunkPyramid::builder()

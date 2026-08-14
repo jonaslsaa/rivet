@@ -38,7 +38,7 @@ impl GlobalIdMap<StateId> for TestGlobalMap {
             None
         }
     }
-    fn clone_box(&self) -> Box<dyn GlobalIdMap<StateId>> {
+    fn clone_box(&self) -> Box<dyn GlobalIdMap<StateId> + Send + Sync> {
         Box::new(*self)
     }
 }
