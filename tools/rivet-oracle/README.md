@@ -458,8 +458,12 @@ This was verified against the pinned Paper 0a99345 runtime (real
 starts within 6 chunks of any corpus chunk, and no corpus chunk is a placement
 chunk. The Rust regression test
 `committed_surface_column_is_structure_free` replays the placement predicate
-over the committed coordinates and encodes the verified in-reach placement
-chunks, so a future regeneration that stops being structure-free fails loudly.
+(including Paper's power-of-two `nextInt(bound)` shortcut, which ancient
+cities' limit of 16 needs) over the committed coordinates and encodes the four
+verified in-reach placement chunks — (9,11) village + ancient city near (15,15),
+(36,25) village near (31,31), (-25,-27) trail ruins near (-31,-31) — each
+biome-rejected at its true start position, so a future regeneration that stops
+being structure-free fails loudly.
 
 Verify / regenerate:
 

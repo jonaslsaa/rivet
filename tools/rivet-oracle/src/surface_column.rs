@@ -13,7 +13,17 @@
 //!
 //!   * the pre-surface and post-surface block state at every `SAMPLE_STEP`-th Y
 //!     (block registry key + raw `Block.BLOCK_STATE_REGISTRY` id), so a Rust
-//!     port asserts the exact post-surface block id per sampled Y,
+//!     port asserts the exact post-surface block id per sampled Y. The block
+//!     samples are pinned at the chunk's own block-origin corner column only
+//!     (the block at `min-block-x`, y, `min-block-z`); the other 255 columns of
+//!     each chunk are covered by heights alone, not block ids. So a green proves
+//!     the exact block id down the corner column of every chunk plus the
+//!     surface/floor height across all 256 columns — it does NOT pin the
+//!     sub-surface block id at the other 255 columns (a surface port whose
+//!     cave/biome-driven subsurface differs off the corner column while matching
+//!     top heights and the corner column would still pass). That bound is
+//!     intentional for the #179 SURFACE checkpoint; exact per-column block-id
+//!     coverage is a follow-up.
 //!   * pre/post WORLD_SURFACE_WG and OCEAN_FLOOR_WG heights (the pre-surface
 //!     snapshot is an all-air chunk whose heightmaps are unprimed, so a capture
 //!     that recorded the chunk before any generation is visible as a null
@@ -47,16 +57,19 @@
 //!
 //! Verified against the pinned Paper 0a99345 runtime (via the real
 //! `ChunkGeneratorStructureState` + `StructurePlacement.isStructureChunk` +
-//! the `Structure.isValidBiome` biome gate at the real `onTopOfChunkCenter`
-//! start position): **zero** beard-affecting structure starts land within 6
+//! the `Structure.isValidBiome` biome gate at each structure's real start
+//! position): **zero** beard-affecting structure starts land within 6
 //! chunks of any of the 8 corpus chunks, and no corpus chunk is a placement
 //! chunk for any structure set. 6 chunks of margin covers the 12-block beard
 //! kernel plus any piece reach. The seed-42 matrix is genuinely structure-free;
 //! `Beardifier.EMPTY` is the exact Paper density input, not a weakening.
 //! `committed_surface_column_is_structure_free` locks this in: it replays the
-//! placement-chunk predicate over the committed corpus coords and would fail
-//! loudly if a future regeneration's coordinates ever stopped being
-//! structure-free.
+//! placement-chunk predicate (reproducing Paper's `LegacyRandomSource`,
+//! including the power-of-two `nextInt(bound)` shortcut that ancient cities'
+//! limit of 16 needs) over the committed corpus coords and encodes the four
+//! verified in-reach placement chunks — each biome-rejected at its true start
+//! position — so a future regeneration that stops being structure-free fails
+//! loudly instead of silently capturing a non-structure-free world.
 
 use crate::{CapturedFile, Error, sha256_hex};
 use std::collections::BTreeMap;
@@ -757,14 +770,21 @@ mod tests {
         // within `SEARCH` chunks of a corpus chunk AND is biome-eligible. Real
         // Paper's isStructureChunk (placement-only, no biome gate) reports
         // several over-reports near the corpus; every one is biome-rejected for
-        // its structure (the biomes at those positions are dark_forest/ocean/
-        // deep_ocean/flower_forest, none of which any village/outpost/
-        // ancient-city/trail-ruins/trial-chambers biome tag accepts), so no
-        // beard start actually generates. The only over-reports within beard
-        // reach (<= SEARCH chunks, chebyshev) are:
-        //   (15,15): (9,11)   [village salt 10387312]
-        //   (31,31): (36,25)  [village salt 10387312]
-        //   (-31,-31): (-25,-27)  [trail ruins salt 83469867]
+        // its structure at its TRUE start position (verified against the pinned
+        // Paper 0a99345 runtime biome source), so no beard start actually
+        // generates. The only over-reports within beard reach (<= SEARCH chunks,
+        // chebyshev) are:
+        //   (15,15): (9,11)   [village salt 10387312]        — start projects to
+        //     WORLD_SURFACE_WG, biome = ocean; village biome tag is
+        //     plains/desert/savanna/snowy/taiga -> REJECTED
+        //   (15,15): (9,11)   [ancient city salt 20083232]   — ConstantHeight
+        //     y=-27, biome = lush_caves; ancient-city tag is deep_dark ->
+        //     REJECTED
+        //   (31,31): (36,25)  [village salt 10387312]        — surface biome =
+        //     ocean -> REJECTED
+        //   (-31,-31): (-25,-27)  [trail ruins salt 83469867] — surface biome =
+        //     plains; trail-ruins tag is taiga/snowy_taiga/old_growth_*/jungle
+        //     -> REJECTED
         // The rest ((17,7), (23,19), (35,38), (38,31), (-29,-21), (-22,-36),
         // (-13,-24)) are farther than beard reach and cannot affect the corpus.
         // This truth table is verified against the pinned Paper 0a99345 runtime.
@@ -775,6 +795,7 @@ mod tests {
         type InReach = ((i64, i64), i64, (i64, i64));
         const VERIFIED_IN_REACH: &[InReach] = &[
             ((15, 15), 10387312, (9, 11)),
+            ((15, 15), 20083232, (9, 11)),
             ((31, 31), 10387312, (36, 25)),
             ((-31, -31), 83469867, (-25, -27)),
         ];
@@ -813,6 +834,44 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The power-of-two `nextInt` shortcut must match Paper exactly: for a bound
+    /// that is a power of two, `BitRandomSource.nextInt` takes the TOP bits via
+    /// `(bound * next(31)) >> 31`, NOT `next(31) % bound` (the bottom bits).
+    /// Ancient cities (spacing 24, separation 8 -> limit 16) depend on this. The
+    /// expected draws are grounded in real Paper 0a99345 output: for the ancient
+    /// city feature seed of grid cell (0,0) (`42 + 20083232`), the real
+    /// `LegacyRandomSource.nextInt(16)` sequence is 9, 11 (raw `next(31)` =
+    /// 1242028138, 1500875121), and the first modulo draw would be 10 — so this
+    /// test also fails if the implementation ever regresses to the bottom-bit
+    /// form.
+    #[test]
+    fn next_int_power_of_two_matches_paper() {
+        // Grid (0,0) feature seed for ancient cities at seed 42:
+        // setLargeFeatureWithSalt(42, 0, 0, 20083232) = 0 + 0 + 42 + 20083232.
+        let mut rng = LegacyRandomSource::new(42 + 20083232);
+        assert_eq!(
+            rng.next_int(16),
+            9,
+            "ancient-city grid(0,0) first spread draw"
+        );
+        assert_eq!(
+            rng.next_int(16),
+            11,
+            "ancient-city grid(0,0) second spread draw"
+        );
+
+        // The top-bit and bottom-bit forms disagree on the first draw, so a
+        // regression to `next(31) % bound` is caught, not silently accepted.
+        let mut bottom_bits = LegacyRandomSource::new(42 + 20083232);
+        assert_eq!((16 * bottom_bits.next(31)) >> 31, 9, "top-bit shortcut");
+        let mut modulo = LegacyRandomSource::new(42 + 20083232);
+        assert_eq!(
+            modulo.next(31) % 16,
+            10,
+            "bottom-bit modulo differs, proving the shortcut matters"
+        );
     }
 
     /// Paper's `WorldgenRandom.setLargeFeatureWithSalt` + `LegacyRandomSource`,
@@ -875,13 +934,19 @@ mod tests {
         }
 
         fn next_int(&mut self, bound: i32) -> i64 {
-            // BitRandomSource.nextInt(bound): for a non-power-of-2 bound this is
-            // rejection sampling: sample = next(31); modulo = sample % bound;
-            // retry while (sample - modulo + (bound - 1)) overflows into the sign
-            // bit (i.e. < 0). All our limits (spacing - separation) are
-            // non-powers-of-2, so the power-of-2 shortcut never applies.
+            // BitRandomSource.nextInt(bound), exactly:
+            //   * power-of-two bound: take the TOP bits, (bound * next(31)) >> 31.
+            //     This is NOT next(31) % bound (the bottom bits) — they disagree,
+            //     and ancient cities (spacing 24, separation 8 -> limit 16) depend
+            //     on the top-bit form.
+            //   * otherwise: rejection sampling, sample = next(31); modulo =
+            //     sample % bound; redraw while (sample - modulo + (bound - 1))
+            //     overflows into the sign bit (i.e. < 0).
             if bound <= 0 {
                 return 0;
+            }
+            if (bound & (bound - 1)) == 0 {
+                return ((bound as i64) * self.next(31)) >> 31;
             }
             let sample = self.next(31) as i32;
             let modulo = sample % bound;
