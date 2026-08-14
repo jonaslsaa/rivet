@@ -69,72 +69,59 @@ static BUILT_IN_RULES: LazyLock<Vec<(&'static str, Arc<GameRuleErased>)>> = Lazy
     vec![
         (
             "advance_time",
-            register_boolean("advance_time", GameRuleCategory::updates(), true),
+            register_boolean(GameRuleCategory::updates(), true),
         ),
         (
             "advance_weather",
-            register_boolean("advance_weather", GameRuleCategory::updates(), true),
+            register_boolean(GameRuleCategory::updates(), true),
         ),
         (
             "allow_entering_nether_using_portals",
-            register_boolean(
-                "allow_entering_nether_using_portals",
-                GameRuleCategory::misc(),
-                true,
-            ),
+            register_boolean(GameRuleCategory::misc(), true),
         ),
         (
             "block_drops",
-            register_boolean("block_drops", GameRuleCategory::drops(), true),
+            register_boolean(GameRuleCategory::drops(), true),
         ),
         (
             "block_explosion_drop_decay",
-            register_boolean(
-                "block_explosion_drop_decay",
-                GameRuleCategory::drops(),
-                true,
-            ),
+            register_boolean(GameRuleCategory::drops(), true),
         ),
         (
             "command_blocks_work",
-            register_boolean("command_blocks_work", GameRuleCategory::misc(), true),
+            register_boolean(GameRuleCategory::misc(), true),
         ),
         (
             "command_block_output",
-            register_boolean("command_block_output", GameRuleCategory::chat(), true),
+            register_boolean(GameRuleCategory::chat(), true),
         ),
         (
             "drowning_damage",
-            register_boolean("drowning_damage", GameRuleCategory::player(), true),
+            register_boolean(GameRuleCategory::player(), true),
         ),
         (
             "elytra_movement_check",
-            register_boolean("elytra_movement_check", GameRuleCategory::player(), true),
+            register_boolean(GameRuleCategory::player(), true),
         ),
         (
             "ender_pearls_vanish_on_death",
-            register_boolean(
-                "ender_pearls_vanish_on_death",
-                GameRuleCategory::player(),
-                true,
-            ),
+            register_boolean(GameRuleCategory::player(), true),
         ),
         (
             "entity_drops",
-            register_boolean("entity_drops", GameRuleCategory::drops(), true),
+            register_boolean(GameRuleCategory::drops(), true),
         ),
         (
             "fall_damage",
-            register_boolean("fall_damage", GameRuleCategory::player(), true),
+            register_boolean(GameRuleCategory::player(), true),
         ),
         (
             "fire_damage",
-            register_boolean("fire_damage", GameRuleCategory::player(), true),
+            register_boolean(GameRuleCategory::player(), true),
         ),
         (
             "fire_spread_radius_around_player",
             register_integer(
-                "fire_spread_radius_around_player",
                 GameRuleCategory::updates(),
                 128,
                 -1,
@@ -144,44 +131,43 @@ static BUILT_IN_RULES: LazyLock<Vec<(&'static str, Arc<GameRuleErased>)>> = Lazy
         ),
         (
             "forgive_dead_players",
-            register_boolean("forgive_dead_players", GameRuleCategory::mobs(), true),
+            register_boolean(GameRuleCategory::mobs(), true),
         ),
         (
             "freeze_damage",
-            register_boolean("freeze_damage", GameRuleCategory::player(), true),
+            register_boolean(GameRuleCategory::player(), true),
         ),
         (
             "global_sound_events",
-            register_boolean("global_sound_events", GameRuleCategory::misc(), true),
+            register_boolean(GameRuleCategory::misc(), true),
         ),
         (
             "immediate_respawn",
-            register_boolean("immediate_respawn", GameRuleCategory::player(), false),
+            register_boolean(GameRuleCategory::player(), false),
         ),
         (
             "keep_inventory",
-            register_boolean("keep_inventory", GameRuleCategory::player(), false),
+            register_boolean(GameRuleCategory::player(), false),
         ),
         (
             "lava_source_conversion",
-            register_boolean("lava_source_conversion", GameRuleCategory::updates(), false),
+            register_boolean(GameRuleCategory::updates(), false),
         ),
         (
             "limited_crafting",
-            register_boolean("limited_crafting", GameRuleCategory::player(), false),
+            register_boolean(GameRuleCategory::player(), false),
         ),
         (
             "locator_bar",
-            register_boolean("locator_bar", GameRuleCategory::player(), true),
+            register_boolean(GameRuleCategory::player(), true),
         ),
         (
             "log_admin_commands",
-            register_boolean("log_admin_commands", GameRuleCategory::chat(), true),
+            register_boolean(GameRuleCategory::chat(), true),
         ),
         (
             "max_block_modifications",
             register_integer(
-                "max_block_modifications",
                 GameRuleCategory::misc(),
                 32768,
                 1,
@@ -192,7 +178,6 @@ static BUILT_IN_RULES: LazyLock<Vec<(&'static str, Arc<GameRuleErased>)>> = Lazy
         (
             "max_command_forks",
             register_integer(
-                "max_command_forks",
                 GameRuleCategory::misc(),
                 65536,
                 0,
@@ -203,7 +188,6 @@ static BUILT_IN_RULES: LazyLock<Vec<(&'static str, Arc<GameRuleErased>)>> = Lazy
         (
             "max_command_sequence_length",
             register_integer(
-                "max_command_sequence_length",
                 GameRuleCategory::misc(),
                 65536,
                 0,
@@ -214,7 +198,6 @@ static BUILT_IN_RULES: LazyLock<Vec<(&'static str, Arc<GameRuleErased>)>> = Lazy
         (
             "max_entity_cramming",
             register_integer(
-                "max_entity_cramming",
                 GameRuleCategory::mobs(),
                 24,
                 0,
@@ -225,7 +208,6 @@ static BUILT_IN_RULES: LazyLock<Vec<(&'static str, Arc<GameRuleErased>)>> = Lazy
         (
             "max_minecart_speed",
             register_integer(
-                "max_minecart_speed",
                 GameRuleCategory::misc(),
                 8,
                 1,
@@ -235,43 +217,31 @@ static BUILT_IN_RULES: LazyLock<Vec<(&'static str, Arc<GameRuleErased>)>> = Lazy
         ),
         (
             "max_snow_accumulation_height",
-            register_integer(
-                "max_snow_accumulation_height",
-                GameRuleCategory::updates(),
-                1,
-                0,
-                8,
-                FeatureFlagSet::of(),
-            ),
+            register_integer(GameRuleCategory::updates(), 1, 0, 8, FeatureFlagSet::of()),
         ),
         (
             "mob_drops",
-            register_boolean("mob_drops", GameRuleCategory::drops(), true),
+            register_boolean(GameRuleCategory::drops(), true),
         ),
         (
             "mob_explosion_drop_decay",
-            register_boolean("mob_explosion_drop_decay", GameRuleCategory::drops(), true),
+            register_boolean(GameRuleCategory::drops(), true),
         ),
         (
             "mob_griefing",
-            register_boolean("mob_griefing", GameRuleCategory::mobs(), true),
+            register_boolean(GameRuleCategory::mobs(), true),
         ),
         (
             "natural_health_regeneration",
-            register_boolean(
-                "natural_health_regeneration",
-                GameRuleCategory::player(),
-                true,
-            ),
+            register_boolean(GameRuleCategory::player(), true),
         ),
         (
             "player_movement_check",
-            register_boolean("player_movement_check", GameRuleCategory::player(), true),
+            register_boolean(GameRuleCategory::player(), true),
         ),
         (
             "players_nether_portal_creative_delay",
             register_integer(
-                "players_nether_portal_creative_delay",
                 GameRuleCategory::player(),
                 0,
                 0,
@@ -282,7 +252,6 @@ static BUILT_IN_RULES: LazyLock<Vec<(&'static str, Arc<GameRuleErased>)>> = Lazy
         (
             "players_nether_portal_default_delay",
             register_integer(
-                "players_nether_portal_default_delay",
                 GameRuleCategory::player(),
                 80,
                 0,
@@ -293,7 +262,6 @@ static BUILT_IN_RULES: LazyLock<Vec<(&'static str, Arc<GameRuleErased>)>> = Lazy
         (
             "players_sleeping_percentage",
             register_integer(
-                "players_sleeping_percentage",
                 GameRuleCategory::player(),
                 100,
                 0,
@@ -303,24 +271,13 @@ static BUILT_IN_RULES: LazyLock<Vec<(&'static str, Arc<GameRuleErased>)>> = Lazy
         ),
         (
             "projectiles_can_break_blocks",
-            register_boolean(
-                "projectiles_can_break_blocks",
-                GameRuleCategory::drops(),
-                true,
-            ),
+            register_boolean(GameRuleCategory::drops(), true),
         ),
-        (
-            "pvp",
-            register_boolean("pvp", GameRuleCategory::player(), true),
-        ),
-        (
-            "raids",
-            register_boolean("raids", GameRuleCategory::mobs(), true),
-        ),
+        ("pvp", register_boolean(GameRuleCategory::player(), true)),
+        ("raids", register_boolean(GameRuleCategory::mobs(), true)),
         (
             "random_tick_speed",
             register_integer(
-                "random_tick_speed",
                 GameRuleCategory::updates(),
                 3,
                 0,
@@ -330,12 +287,11 @@ static BUILT_IN_RULES: LazyLock<Vec<(&'static str, Arc<GameRuleErased>)>> = Lazy
         ),
         (
             "reduced_debug_info",
-            register_boolean("reduced_debug_info", GameRuleCategory::misc(), false),
+            register_boolean(GameRuleCategory::misc(), false),
         ),
         (
             "respawn_radius",
             register_integer(
-                "respawn_radius",
                 GameRuleCategory::player(),
                 10,
                 0,
@@ -345,75 +301,67 @@ static BUILT_IN_RULES: LazyLock<Vec<(&'static str, Arc<GameRuleErased>)>> = Lazy
         ),
         (
             "send_command_feedback",
-            register_boolean("send_command_feedback", GameRuleCategory::chat(), true),
+            register_boolean(GameRuleCategory::chat(), true),
         ),
         (
             "show_advancement_messages",
-            register_boolean("show_advancement_messages", GameRuleCategory::chat(), true),
+            register_boolean(GameRuleCategory::chat(), true),
         ),
         (
             "show_death_messages",
-            register_boolean("show_death_messages", GameRuleCategory::chat(), true),
+            register_boolean(GameRuleCategory::chat(), true),
         ),
         (
             "spawner_blocks_work",
-            register_boolean("spawner_blocks_work", GameRuleCategory::misc(), true),
+            register_boolean(GameRuleCategory::misc(), true),
         ),
         (
             "spawn_mobs",
-            register_boolean("spawn_mobs", GameRuleCategory::spawning(), true),
+            register_boolean(GameRuleCategory::spawning(), true),
         ),
         (
             "spawn_monsters",
-            register_boolean("spawn_monsters", GameRuleCategory::spawning(), true),
+            register_boolean(GameRuleCategory::spawning(), true),
         ),
         (
             "spawn_patrols",
-            register_boolean("spawn_patrols", GameRuleCategory::spawning(), true),
+            register_boolean(GameRuleCategory::spawning(), true),
         ),
         (
             "spawn_phantoms",
-            register_boolean("spawn_phantoms", GameRuleCategory::spawning(), true),
+            register_boolean(GameRuleCategory::spawning(), true),
         ),
         (
             "spawn_wandering_traders",
-            register_boolean(
-                "spawn_wandering_traders",
-                GameRuleCategory::spawning(),
-                true,
-            ),
+            register_boolean(GameRuleCategory::spawning(), true),
         ),
         (
             "spawn_wardens",
-            register_boolean("spawn_wardens", GameRuleCategory::spawning(), true),
+            register_boolean(GameRuleCategory::spawning(), true),
         ),
         (
             "spectators_generate_chunks",
-            register_boolean(
-                "spectators_generate_chunks",
-                GameRuleCategory::player(),
-                true,
-            ),
+            register_boolean(GameRuleCategory::player(), true),
         ),
         (
             "spread_vines",
-            register_boolean("spread_vines", GameRuleCategory::updates(), true),
+            register_boolean(GameRuleCategory::updates(), true),
         ),
         (
             "tnt_explodes",
-            register_boolean("tnt_explodes", GameRuleCategory::misc(), true),
+            register_boolean(GameRuleCategory::misc(), true),
         ),
         (
             "tnt_explosion_drop_decay",
-            register_boolean("tnt_explosion_drop_decay", GameRuleCategory::drops(), false),
+            register_boolean(GameRuleCategory::drops(), false),
         ),
         (
             "universal_anger",
-            register_boolean("universal_anger", GameRuleCategory::mobs(), false),
+            register_boolean(GameRuleCategory::mobs(), false),
         ),
         (
             "water_source_conversion",
-            register_boolean("water_source_conversion", GameRuleCategory::updates(), true),
+            register_boolean(GameRuleCategory::updates(), true),
         ),
     ]
 });
@@ -421,11 +369,7 @@ static BUILT_IN_RULES: LazyLock<Vec<(&'static str, Arc<GameRuleErased>)>> = Lazy
 /// `GameRules.registerBoolean(String, GameRuleCategory, boolean)` —
 /// `GameRuleType.BOOL`, `BoolArgumentType.bool()`, `Codec.BOOL`,
 /// `GameRuleTypeVisitor::visitBoolean`, `b -> b ? 1 : 0`.
-fn register_boolean(
-    _id: &str,
-    category: &GameRuleCategory,
-    default_value: bool,
-) -> Arc<GameRuleErased> {
+fn register_boolean(category: &GameRuleCategory, default_value: bool) -> Arc<GameRuleErased> {
     Arc::new(GameRuleErased::new(
         category.clone(),
         GameRuleType::Bool,
@@ -452,7 +396,6 @@ fn register_boolean(
 /// `IntegerArgumentType.integer(min, max)`, `Codec.intRange(min, max)`,
 /// `GameRuleTypeVisitor::visitInteger`, `i -> i`.
 fn register_integer(
-    _id: &str,
     category: &GameRuleCategory,
     default_value: i32,
     min: i32,

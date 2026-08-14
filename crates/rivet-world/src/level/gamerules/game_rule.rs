@@ -445,7 +445,7 @@ mod tests {
         );
         // Trailing characters error (the parsed value is the partial). Brigadier
         // reads one unquoted string, so the trailing character needs a space
-        // separator ("truex" parses as the single boolean `false`).
+        // separator ("truex" is a single token and fails as an invalid bool).
         let trailing = rule.deserialize("true x");
         assert!(trailing.result().is_none());
         // `resultOrPartial` still yields the parsed `true`.
