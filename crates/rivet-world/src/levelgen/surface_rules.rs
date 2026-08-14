@@ -4381,6 +4381,40 @@ mod tests {
         );
     }
 
+    /// The live-mirror `#185` ordering holds for the *lowering* leg of the
+    /// heightmap too: an air write at a column's top removes the topmost
+    /// non-air block, so the live `WORLD_SURFACE_WG` height falls — and
+    /// [`ChunkColumnAdapter::set_block`] folds that fall back into the mirror
+    /// exactly like the raise. This pins the "kept current by every write"
+    /// claim in both directions (regression for a mirror that only tracked
+    /// raises, which the pre-#185 snapshot did).
+    #[test]
+    fn adapter_writes_lower_the_live_mirror_on_an_air_write() {
+        let mut chunk = MockChunkSurface {
+            min_y: 0,
+            height: 16,
+            top: [9; 256],
+            writes: Vec::new(),
+        };
+        let mirror = Arc::new(Mutex::new([0i32; 256]));
+        for x in 0..16 {
+            for z in 0..16 {
+                mirror.lock().unwrap()[(x + z * 16) as usize] = chunk.get_height(x, z);
+            }
+        }
+        let mut adapter = ChunkColumnAdapter {
+            chunk: RefCell::new(&mut chunk),
+            x: Cell::new(0),
+            z: Cell::new(1),
+            world_surface_heights: Some(Arc::clone(&mirror)),
+        };
+        // Air at the column's top: `Heightmap.update` removes the topmost
+        // non-air block, so the height falls 9 -> 8 and the mirror follows.
+        adapter.set_block(9, Blocks::AIR.default_block_state());
+        let heights = mirror.lock().unwrap();
+        assert_eq!(heights[16], 8, "the air write's lowering folded in");
+    }
+
     /// The `#185` biome-value seam is fail-loud, never a panic: the
     /// `temperature` condition resolves through `seam_cold_enough_to_snow`
     /// (permanently false — the `Biome` value registry is unported, biome-core),
@@ -5105,10 +5139,11 @@ mod tests {
     /// `top` holds the topmost non-air y per column — `get_height` returns it,
     /// so `startingHeight = getHeight + 1 = top + 1` — and
     /// `is_inside_build_height` follows the height window (`min_y .. min_y +
-    /// height`). A non-air write above a column's top raises that column's top
-    /// (the heightmap raise the real `setBlockState`/`Heightmap.update` folds
-    /// into the live `WORLD_SURFACE_WG`); air writes keep it, which is enough
-    /// for the surface tests (they never lower a column's top mid-walk).
+    /// height`). A non-air write above a column's top raises that column's top,
+    /// and an air write at the top lowers it by one (the heightmap
+    /// raise/lower the real `setBlockState`/`Heightmap.update` folds into the
+    /// live `WORLD_SURFACE_WG`; the mock's columns are solid up to `top`, so
+    /// the next non-air below a removed top is always `top - 1`).
     struct MockChunkSurface {
         min_y: i32,
         height: i32,
@@ -5147,7 +5182,15 @@ mod tests {
         }
         fn set_block_state(&mut self, x: i32, y: i32, z: i32, state: BlockState) {
             let idx = Self::index(x, z);
-            if !state.is_air() && y >= self.top[idx] {
+            if state.is_air() {
+                // `Heightmap.update` lowers on an air write at the current max:
+                // the block at the top is removed, so the next non-air (the
+                // solid `top - 1` below) becomes the new top. Writes strictly
+                // below the top leave it unchanged (the top block remains).
+                if y == self.top[idx] {
+                    self.top[idx] = y - 1;
+                }
+            } else if y > self.top[idx] {
                 self.top[idx] = y;
             }
             self.writes.push((x, y, z, state));
