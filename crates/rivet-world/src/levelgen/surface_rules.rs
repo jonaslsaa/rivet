@@ -92,13 +92,22 @@
 //! `noise_generator_settings` callers).
 //!
 //! RivetTodo(#179): the `is_biome` `HolderSet`s the builders resolve are
-//! bound to whatever `HolderGetter<BiomeId>` is handed in. The bootstrap-time
-//! registries (the `worldgen_bootstraps` access and the unit-test accesses)
-//! freeze their own biome registries with fabricated `BiomeId` handles, so the
-//! surface-rule holder identity will NOT match the runtime biome-source
-//! registry until the `#185`/`#177` wiring resolves the same registry both the
-//! `BiomeCondition` and the biome source read. Encode is byte-exact today; the
-//! apply path must not compare holders across registries until then.
+//! bound to whatever `HolderGetter<BiomeId>` is handed in. In the
+//! `worldgen_bootstraps` access the biome registry registers each
+//! `SURFACE_RULE_BIOMES` key under its real generated id (`BiomeId::from_name`),
+//! so a condition holder resolved through it is a `Reference` whose value (via
+//! `Holder::value`) is that real id. But `Registry::get_id` is identity-based
+//! and returns the POSITIONAL registration index, so the `Reference`'s `id`
+//! field — and `dense_biome_id` on it — is the index into the 33-key subset,
+//! while the runtime biome source (`BiomeManager`) yields `Holder::Direct`
+//! holders carrying the real ids. `HolderSet::contains` compares holder values,
+//! and a `Reference` never equals a `Direct`, so the apply path cannot match
+//! today. The encode path requires `Reference` (a `Direct` holder errors in
+//! `RegistryFixedCodec::encode`), so the fix is not a Direct conversion: the
+//! runtime biome source must be rewired (biome-core) to produce `Reference`s
+//! from the same frozen biome registry, and the biome-id read path must resolve
+//! References to their value ids. Until then the apply path must not compare
+//! holders across forms.
 //! The `@Deprecated` single-column [`SurfaceSystem::top_material`] probe (the
 //! carver's grass-replacement call) is ported and composed into the carver
 //! `CarvingContext` seam through [`bind_carver_top_material`]; the production
@@ -1015,7 +1024,9 @@ impl Condition for HoleCondition {
 /// `WORLD_SURFACE_WG` heights. The chunk reads are the `#185` heightmap seam:
 /// the applied condition cannot prime/read the `&mut` heightmap through `&self`,
 /// so it reads the snapshot `build_surface` captured at its start (see
-/// [`SurfaceContext::world_surface_heights`]); the arithmetic is faithful.
+/// [`SurfaceContext::world_surface_heights`]); the arithmetic is faithful, and
+/// the snapshot divergences (an `AIR`-over-default write, the eroded-badlands
+/// pre-extension) are documented on [`seam_get_height`] (RivetTodo #185).
 struct SteepMaterialCondition {
     cache: LazyCache,
     surface_context: Arc<SurfaceContext>,
@@ -1067,8 +1078,10 @@ impl Condition for SteepMaterialCondition {
 
 /// `Context.TemperatureHelperCondition` — a `LazyYCondition` reading
 /// `getBiome().value().coldEnoughToSnow(...)`. The `Biome`-value read is the
-/// `#185` biome-value seam (`BiomeManager` yields `Holder<BiomeId>`, the value
-/// registry is unported).
+/// `#185` biome-value seam: `BiomeManager` yields `Holder<BiomeId>` and no
+/// runtime `Registry<Biome>` value layer exists (biome-core), so the read
+/// resolves through [`seam_cold_enough_to_snow`] (permanently false, never a
+/// panic — see the seam).
 struct TemperatureHelperCondition {
     cache: LazyCache,
     surface_context: Arc<SurfaceContext>,
@@ -1089,13 +1102,23 @@ impl Condition for TemperatureHelperCondition {
 
 /// The `ChunkAccess.getHeight(WORLD_SURFACE_WG, x, z)` read — `getFirstAvailable
 /// (x & 15, z & 15) - 1` over the primed heightmap (issue #185). The read
-/// happens against the snapshot `build_surface` captured at its start. The
-/// snapshot is bit-identical to Java's live reads for every surface write that
-/// keeps the topmost non-air block in place — the end-stone rule and the
-/// default-block-to-surface-state writes of the overworld rules; the one
-/// divergence is a rule that writes `AIR` over the topmost `defaultBlock`
-/// (Java's `setBlock` lowers the worldgen height there and the live probe
-/// would see it), which the seam accepts (RivetTodo #185).
+/// happens against the snapshot `build_surface` captured at its start.
+///
+/// Java ordering: `buildSurface` reads `startingHeight` and re-reads `height`
+/// from the live heightmap, and `erodedBadlandsExtension` writes
+/// `defaultBlock` into `AIR` at/below `startY` BEFORE the column loop — so a
+/// rule that writes over the topmost `defaultBlock` lowers the worldgen height
+/// (Java's `setBlock`) and a later `getHeight` sees it. The Rust port reads
+/// the start-of-`build_surface` snapshot (the applied rules are
+/// `'static`/`Send + Sync` and cannot carry the `&mut` chunk), which is
+/// bit-identical for every surface write that keeps the topmost non-air block
+/// in place — the end-stone rule and the default-block-to-surface-state writes
+/// of the overworld rules. The accepted divergences, pinned by the snapshot:
+/// (1) a rule writing `AIR` over the topmost `defaultBlock` lowers Java's live
+/// height but not the snapshot; (2) an `eroded_badlands` column's extension
+/// runs before the steep probes in Java, so its raised `defaultBlock` would be
+/// visible to Java's live `SteepMaterialCondition` but not to the snapshot.
+/// Both are documented residuals of the `#185` heightmap seam (RivetTodo #185).
 fn seam_get_height(heights: &[i32; 256], x: i32, z: i32) -> i32 {
     heights[(x & 15) as usize + (z & 15) as usize * 16]
 }
@@ -1103,11 +1126,16 @@ fn seam_get_height(heights: &[i32; 256], x: i32, z: i32) -> i32 {
 /// The `RivetTodo(#185)` biome-value seam —
 /// `getBiome().value().coldEnoughToSnow(pos, seaLevel)`.
 fn seam_cold_enough_to_snow() -> bool {
-    // STUB(mc.world.level.biome.core): `BiomeManager` yields
-    // `Holder<BiomeId>`; the `Biome`-value registry is unported, so the
-    // temperature condition is permanently false (no snow coverage from this
-    // rule) until `RivetTodo(#185)` ports the value registry and this becomes
-    // the real `coldEnoughToSnow` call.
+    // STUB(mc.world.level.biome.core): `BiomeManager` yields `Holder<BiomeId>`
+    // (a positional handle into the worldgen biome registry, not a `Biome`
+    // value), and no runtime `Registry<Biome>` value layer exists yet — the
+    // `Biome` value codec/serialization (`SYNCHRONIZED_NBT`) is unported
+    // (biome-core). The value methods `Biome::cold_enough_to_snow` exist, but
+    // there is no registry to resolve a `BiomeId` holder through, so this stays
+    // permanently false (no snow coverage from the temperature rule). Do NOT
+    // panic: this is reachable in the production frozen-ocean/frozen-peaks
+    // paths today. It becomes the real call once the biome value registry
+    // lands (RivetTodo(#185)).
     false
 }
 
@@ -4113,10 +4141,11 @@ mod tests {
 
     /// A biome registry with the 33 `SurfaceRuleData`-referenced keys (the
     /// single source of truth in `biome::biomes::SURFACE_RULE_BIOMES`) under
-    /// `Registries.BIOME` (id = the enumerate index over that list, matching the
-    /// settings bootstrap's and the production builder's `BiomeId` handles). The
-    /// codec tests encode the real trees, so every referenced key must resolve
-    /// through the access.
+    /// `Registries.BIOME`. The codec tests encode the real trees by KEY, so the
+    /// registered `BiomeId` VALUES are irrelevant here (encode never reads
+    /// them) and the enumerate-index fill is a codec-test-only convenience —
+    /// the production `build_biome_registry` registers the real generated ids
+    /// (see `worldgen_bootstraps`).
     fn biome_access() -> RegistryAccess {
         let mut builder = RegistryBuilder::new(&*rivet_registry::registries::BIOME);
         for (i, name) in biomes::SURFACE_RULE_BIOMES.iter().enumerate() {
@@ -4245,6 +4274,65 @@ mod tests {
         assert!(!condition_for(Some(Arc::new(flat))).test());
         // No snapshot (the single-column carver probe): cannot fire.
         assert!(!condition_for(None).test());
+    }
+
+    /// The `#185` eroded-badlands heightmap divergence, pinned honestly: in
+    /// Java, `buildSurface` runs `erodedBadlandsExtension` (which writes
+    /// `defaultBlock` into `AIR` at/below `startY`, raising the worldgen
+    /// height) BEFORE the column loop's steep probes, so a later live
+    /// `getHeight(WORLD_SURFACE_WG)` sees the raised height. The Rust port
+    /// reads the start-of-`build_surface` snapshot, which predates the
+    /// extension, so the steep condition on a neighboring column probes the
+    /// pre-extension height. This test documents that the snapshot is taken
+    /// BEFORE the eroded-badlands writes (the seam's accepted divergence).
+    #[test]
+    fn steep_snapshot_predates_the_eroded_badlands_extension() {
+        // The snapshot captured at `build_surface` start has the column at
+        // (0, 2) at height 10; the eroded-badlands extension runs after the
+        // snapshot and would raise it to 14. Java's live read would see 14 and
+        // fire steep; the snapshot reads 10 and does not.
+        let mut heights = [10i32; 256];
+        // (0, 2) — the south probe of column (0, 1): flat 10 == 10.
+        heights[32] = 10;
+        let sc = Arc::new(SurfaceContext {
+            system: Arc::new(stub_surface_system()),
+            cells: SharedCells::new(),
+            biome_getter: Arc::new(|_: &BlockPos| Holder::direct(BiomeId::from_id(0))),
+            worldgen_context: Arc::new(worldgen_context(-64, 384, 384)),
+            world_surface_heights: Some(Arc::new(heights)),
+        });
+        sc.update_xz(0, 1);
+        let steep = SteepMaterialCondition {
+            cache: LazyCache::new(sc.cells.last_update_xz()),
+            surface_context: sc,
+        };
+        assert!(!steep.test(), "snapshot predates the eroded-badlands raise");
+    }
+
+    /// The `#185` biome-value seam is fail-loud, never a panic: the
+    /// `temperature` condition resolves through `seam_cold_enough_to_snow`
+    /// (permanently false — the `Biome` value registry is unported, biome-core),
+    /// and the `build_surface` driver must reach it without panicking on the
+    /// frozen-ocean paths. This pins the reachable-false contract so a future
+    /// "improvement" to panic (or to fabricate a value) fails the test.
+    #[test]
+    fn temperature_seam_never_panics_and_is_false() {
+        // The seam function itself: typed, deterministic, false.
+        assert!(!seam_cold_enough_to_snow());
+        // A `Context` with a `Temperature` source applies and tests without
+        // panicking, reading the biome cache (Java's `getBiome()` is called
+        // first — `surface_context.get_biome()` — then the seam).
+        let sc = stub_surface_context();
+        sc.update_xz(0, 0);
+        sc.update_y(1, 1, i32::MIN, 63);
+        let temperature = Arc::new(TemperatureHelperCondition {
+            cache: LazyCache::new(sc.cells.last_update_y()),
+            surface_context: sc,
+        });
+        assert!(
+            !temperature.test(),
+            "the temperature seam is permanently false"
+        );
     }
 
     /// `SurfaceRuleData.air()` must round-trip through `rule_source_codec` as a
