@@ -306,6 +306,43 @@ mod tests {
             WorldOptions::parse_seed("\u{21}42"),
             Some(string_hash("\u{21}42") as i64)
         );
+        // `Long.parseLong` accepts a leading `+` (verified: `"+42"` -> 42).
+        // Rust's `i64::from_str` parses `+` the same way, so the parse succeeds
+        // without touching the hash fallback.
+        assert_eq!(WorldOptions::parse_seed("+42"), Some(42));
+        assert_eq!(WorldOptions::parse_seed("+0"), Some(0));
+        assert_eq!(
+            WorldOptions::parse_seed("+9223372036854775807"),
+            Some(i64::MAX)
+        );
+        assert_eq!(
+            WorldOptions::parse_seed("-9223372036854775808"),
+            Some(i64::MIN)
+        );
+        // Overflow beyond the `long` range throws `NumberFormatException` in
+        // Java (`Long.parseLong`) -> the `String.hashCode()` fallback. Rust's
+        // `i64::from_str` errors the same way, so the hash fallback runs.
+        assert_eq!(
+            WorldOptions::parse_seed("+9223372036854775808"),
+            Some(string_hash("+9223372036854775808") as i64)
+        );
+        assert_eq!(
+            WorldOptions::parse_seed("9223372036854775808"),
+            Some(string_hash("9223372036854775808") as i64)
+        );
+        assert_eq!(
+            WorldOptions::parse_seed("-9223372036854775809"),
+            Some(string_hash("-9223372036854775809") as i64)
+        );
+        // A lone sign is not a valid `long` (Java `NumberFormatException` ->
+        // `hashCode()`; Java `"+".hashCode()` = 43, `"-".hashCode()` = 45).
+        assert_eq!(WorldOptions::parse_seed("+"), Some(string_hash("+") as i64));
+        assert_eq!(WorldOptions::parse_seed("-"), Some(string_hash("-") as i64));
+        // A sign separated from the digits is invalid too.
+        assert_eq!(
+            WorldOptions::parse_seed("+ 42"),
+            Some(string_hash("+ 42") as i64)
+        );
     }
 
     #[test]
