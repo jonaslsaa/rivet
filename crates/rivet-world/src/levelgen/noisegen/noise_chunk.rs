@@ -15,7 +15,9 @@
 //!   `router.mapAll`) registers them exactly like the Java inner-class
 //!   constructors do. The per-instance mutable values (the interpolator's
 //!   `noise000..value`, `Cache2D`/`CacheOnce` caches) live in their own
-//!   `Mutex`es.
+//!   `Mutex`es. The shared `arrayIndex` mirrors Java's `private int arrayIndex`
+//!   (typed `i32`, not `usize`) so a hostile `forIndex` input stores Java's
+//!   negative value rather than a re-sign-extended `usize`.
 //! - Java's `context != NoiseChunk.this` reference-identity checks become the
 //!   [`is_owning_chunk`] test: a downcast of the `FunctionContext` to
 //!   `NoiseChunk` plus a shared-`InterpolationState` `Arc` identity compare.
@@ -33,13 +35,14 @@
 //!   `preliminary_surface_level` closure (see `aquifer.rs`). The closure and
 //!   the public `preliminary_surface_level` share one
 //!   `preliminarySurfaceLevelCache` `Arc` (Java's single `Long2IntMap`).
-//! - `MaterialRuleList` (`mc.world.level.levelgen.material`) is a STUB value
-//!   struct here (the 2-line iteration; the owning material unit replaces it).
+//! - `MaterialRuleList` (`mc.world.level.levelgen.material`) is ported by its
+//!   owning unit in `levelgen::material`; the noisegen unit consumes it.
 
 use crate::biome::{ParameterPoint, Sampler};
 use crate::block::BlockState;
 use crate::level::height_accessor::LevelHeightAccessor;
 use crate::levelgen::blending::blender::{Blender, BlendingOutput};
+use crate::levelgen::material::MaterialRuleList;
 use crate::levelgen::noise::beardifier_marker::BeardifierMarker;
 use crate::levelgen::noise::density_function::{
     ContextProvider, DensityFunction, FunctionContext, IdentityKey, SinglePointContext, Visitor,
@@ -68,33 +71,6 @@ pub trait BlockStateFiller: Send + Sync {
     fn calculate(&self, context: &dyn FunctionContext) -> Option<BlockState>;
 }
 
-/// STUB(mc.world.level.levelgen.material) — `MaterialRuleList`, the
-/// `NoiseChunk.BlockStateFiller` list. The owning material unit ports the real
-/// class; the noisegen unit carries the 2-line iteration (the first non-`None`
-/// filler wins).
-pub struct MaterialRuleList {
-    /// `rules` — the `NoiseChunk.BlockStateFiller[]`.
-    pub rules: Vec<Arc<dyn BlockStateFiller>>,
-}
-
-impl MaterialRuleList {
-    /// `MaterialRuleList(NoiseChunk.BlockStateFiller...)`.
-    pub fn new(rules: Vec<Arc<dyn BlockStateFiller>>) -> Self {
-        MaterialRuleList { rules }
-    }
-}
-
-impl BlockStateFiller for MaterialRuleList {
-    fn calculate(&self, context: &dyn FunctionContext) -> Option<BlockState> {
-        for rule in &self.rules {
-            if let Some(state) = rule.calculate(context) {
-                return Some(state);
-            }
-        }
-        None
-    }
-}
-
 /// The mutable interpolation state shared between the `NoiseChunk`, its `wrap`
 /// visitor, and the inner density-function structs (Java's `NoiseChunk.this`
 /// mutable fields + the `interpolators`/`cellCaches` lists).
@@ -120,8 +96,15 @@ pub struct InterpolationState {
     interpolation_counter: i64,
     /// `arrayInterpolationCounter`.
     array_interpolation_counter: i64,
-    /// `arrayIndex`.
-    array_index: usize,
+    /// `arrayIndex` — Java's `private int arrayIndex`. Typed `i32` to match
+    /// the Java field exactly: a hostile `forIndex` input (`usize::MAX` →
+    /// truncated `-1`) stores `-1` like Java, so a subsequent `CacheOnce`
+    /// `last_array[arrayIndex]` read fails equivalently (Rust OOB panic vs
+    /// Java's `ArrayIndexOutOfBoundsException`). Only meaningful for the cell
+    /// index the current fill walked (`0 <= index < cellWidth*cellWidth*
+    /// cellHeight` for the in-cell fill path; the slice path's
+    /// `0..cellCountY+1`).
+    array_index: i32,
     /// `lastBlendingDataPos`.
     last_blending_data_pos: i64,
     /// `lastBlendingOutput`.
@@ -219,7 +202,8 @@ pub struct NoiseChunk {
     preliminary_surface_level: Arc<dyn DensityFunction>,
     /// `fullNoiseDensity`.
     full_noise_density: Arc<dyn DensityFunction>,
-    /// `blockStateRule` — the `MaterialRuleList` STUB.
+    /// `blockStateRule` — the `MaterialRuleList` (levelgen::material)
+    /// block-state-rule list.
     block_state_rule: Arc<dyn BlockStateFiller>,
     /// `blender`.
     blender: Blender,
@@ -305,7 +289,6 @@ impl NoiseChunk {
             cell_height,
             cell_count_y,
             cell_count_xz,
-            first_cell_z,
             first_noise_x,
             first_noise_z,
             noise_size_xz,
@@ -470,7 +453,6 @@ impl NoiseChunk {
             cell_height: self.cell_height,
             cell_count_y: self.cell_count_y,
             cell_count_xz: self.cell_count_xz,
-            first_cell_z: self.first_cell_z,
             first_noise_x: self.first_noise_x,
             first_noise_z: self.first_noise_z,
             noise_size_xz: self.noise_size_xz,
@@ -527,9 +509,11 @@ impl NoiseChunk {
                 if surface_level > max_y {
                     max_y = surface_level;
                 }
-                block_x += 4;
+                // Java's `blockX += 4` / `blockZ += 4` are plain int additions
+                // that wrap on overflow.
+                block_x = block_x.wrapping_add(4);
             }
-            block_z += 4;
+            block_z = block_z.wrapping_add(4);
         }
         max_y
     }
@@ -567,7 +551,7 @@ impl NoiseChunk {
             cell_count_y: self.cell_count_y,
         };
         let interpolators = self.state.lock().unwrap().interpolators.clone();
-        for cell_z_index in 0..(self.cell_count_xz + 1) {
+        for cell_z_index in 0..(self.cell_count_xz.wrapping_add(1)) {
             let cell_z = self.first_cell_z.wrapping_add(cell_z_index);
             {
                 let mut state = self.state.lock().unwrap();
@@ -737,104 +721,14 @@ impl NoiseChunk {
     }
 
     /// `wrapNew(DensityFunction)` — the marker/holder/blend dispatch.
+    ///
+    /// Java's single `wrapNew` switch lives in `NoiseChunkWrap` (the
+    /// construction-time visitor); the chunk's `wrap` path reuses it through
+    /// the shared config. `functions` is `None` here — the climate fields are
+    /// the already-wired router functions, so a `Holder::Reference` takes the
+    /// unbound panic (see `NoiseChunkWrap::wrap_new`).
     fn wrap_new(&self, function: &dyn DensityFunction) -> Arc<dyn DensityFunction> {
-        if let Some(marker) = function.as_any().downcast_ref::<Marker>() {
-            let wrapped = marker.wrapped();
-            let mut state = self.state.lock().unwrap();
-            return match marker.marker_type() {
-                MarkerType::Interpolated => {
-                    let interp = Arc::new(NoiseInterpolator::new(
-                        wrapped.clone(),
-                        self.state.clone(),
-                        self.cell_count_y,
-                        self.cell_count_xz,
-                        self.cell_width,
-                        self.cell_height,
-                        self.first_cell_z,
-                    ));
-                    state.interpolators.push(interp.clone());
-                    // Return the *registered* instance: Java's `wrap` hands back
-                    // the same inner-class object the constructor registered
-                    // into `interpolators`/`cellCaches`, and the interpolation
-                    // loop writes its `values` through those lists. A
-                    // `clone_arc` copy would read the never-updated cloned
-                    // `values`.
-                    interp.clone()
-                }
-                MarkerType::FlatCache => Arc::new(FlatCache::new(
-                    wrapped.clone(),
-                    true,
-                    self.noise_size_xz,
-                    self.first_noise_x,
-                    self.first_noise_z,
-                )),
-                MarkerType::Cache2D => Arc::new(Cache2D::new(wrapped.clone())),
-                MarkerType::CacheOnce => {
-                    Arc::new(CacheOnce::new(wrapped.clone(), self.state.clone()))
-                }
-                MarkerType::CacheAllInCell => {
-                    let cache = Arc::new(CacheAllInCell::new(
-                        wrapped.clone(),
-                        self.state.clone(),
-                        self.cell_width,
-                        self.cell_height,
-                    ));
-                    state.cell_caches.push(cache.clone());
-                    // Same identity requirement as `Interpolated`: the cell
-                    // cache is filled through `selectCellYZ`'s `cellCaches`
-                    // list, so the tree must read the registered instance.
-                    cache.clone()
-                }
-                MarkerType::BlendDensity => {
-                    if !self.blender.is_empty() {
-                        Arc::new(BlendDensity::new(wrapped.clone(), self.blender.clone()))
-                    } else {
-                        wrapped.clone()
-                    }
-                }
-            };
-        }
-        if let Some(holder) = function.as_any().downcast_ref::<HolderHolder>() {
-            match holder.function() {
-                Holder::Direct(value) => value.clone(),
-                Holder::Reference { .. } => {
-                    // The reference holders are resolved by the router wiring
-                    // (`RandomState`'s flattener) before this point; a
-                    // Reference here is Java's unbound-value panic.
-                    panic!("Trying to access unbound value '{}'", render_unbound())
-                }
-            }
-        } else if function
-            .as_any()
-            .downcast_ref::<fns::BlendAlpha>()
-            .is_some()
-        {
-            match &self.blend_alpha {
-                // Java: `function == BlendAlpha.INSTANCE && this.blendAlpha !=
-                // null ? this.blendAlpha : function` — the *same* flat-cache
-                // instance (a `clone_arc` copy would carry an empty `values`).
-                Some(cache) => cache.clone(),
-                None => function.clone_arc(),
-            }
-        } else if function
-            .as_any()
-            .downcast_ref::<fns::BlendOffset>()
-            .is_some()
-        {
-            match &self.blend_offset {
-                // Same identity requirement as `blend_alpha`.
-                Some(cache) => cache.clone(),
-                None => function.clone_arc(),
-            }
-        } else if function
-            .as_any()
-            .downcast_ref::<BeardifierMarker>()
-            .is_some()
-        {
-            self.beardifier.clone()
-        } else {
-            function.clone_arc()
-        }
+        self.wrap_visitor().wrap_new(function)
     }
 
     /// `forIndex(int cellIndex)` — the `ContextProvider` entry that sets the
@@ -852,7 +746,10 @@ impl NoiseChunk {
         state.in_cell_x = x_in_cell;
         state.in_cell_y = y_in_cell;
         state.in_cell_z = z_in_cell;
-        state.array_index = cell_index as usize;
+        // `cell_index` is the truncated i32 (Java's `int cellIndex`), stored
+        // directly like Java's `this.arrayIndex = cellIndex` — no
+        // re-sign-extension back to `usize`.
+        state.array_index = cell_index;
         self
     }
 }
@@ -871,7 +768,6 @@ struct NoiseChunkWrap<'a> {
     cell_height: i32,
     cell_count_y: i32,
     cell_count_xz: i32,
-    first_cell_z: i32,
     first_noise_x: i32,
     first_noise_z: i32,
     noise_size_xz: i32,
@@ -917,7 +813,6 @@ impl<'a> NoiseChunkWrap<'a> {
                         self.cell_count_xz,
                         self.cell_width,
                         self.cell_height,
-                        self.first_cell_z,
                     ));
                     state.interpolators.push(interp.clone());
                     // Return the *registered* instance: Java's `wrap` hands back
@@ -971,16 +866,15 @@ impl<'a> NoiseChunkWrap<'a> {
                     // registry the wrap visitor carries.
                     match &self.functions {
                         Some(functions) => holder.function().value(*functions).clone(),
-                        None => panic!("Trying to access unbound value '{}'", render_unbound()),
+                        None => {
+                            panic!(
+                                "Trying to access unbound value '{}'",
+                                render_unbound(holder.function())
+                            )
+                        }
                     }
                 }
             }
-        } else if function
-            .as_any()
-            .downcast_ref::<BeardifierMarker>()
-            .is_some()
-        {
-            self.beardifier.clone()
         } else if function
             .as_any()
             .downcast_ref::<fns::BlendAlpha>()
@@ -1003,6 +897,12 @@ impl<'a> NoiseChunkWrap<'a> {
                 Some(cache) => cache.clone(),
                 None => function.clone_arc(),
             }
+        } else if function
+            .as_any()
+            .downcast_ref::<BeardifierMarker>()
+            .is_some()
+        {
+            self.beardifier.clone()
         } else {
             function.clone_arc()
         }
@@ -1038,11 +938,16 @@ impl Visitor for NoiseChunkWrap<'_> {
     }
 }
 
-/// `render_unbound()` — the `Holder.Reference.value()` panic render (the
+/// `render_unbound(holder)` — the `Holder.Reference.value()` panic render (the
 /// holder model's unbound state; the full `render_holder` is in
-/// `rivet-registry`).
-fn render_unbound() -> String {
-    "unbound holder reference".to_string()
+/// `rivet-registry`). Java string-concatenates the registry `key`; the pure-ID
+/// holder carries only the `(RegistryId, id)` pair (key resolution deferred —
+/// see RivetTodo #177), so the render uses those.
+fn render_unbound(holder: &Holder<Arc<dyn DensityFunction>>) -> String {
+    match holder {
+        Holder::Direct(_) => "Direct".to_string(),
+        Holder::Reference { registry, id } => format!("{}:{}", registry.0, id),
+    }
 }
 
 impl FunctionContext for NoiseChunk {
@@ -1092,9 +997,13 @@ impl ContextProvider for NoiseChunk {
                 self.state.lock().unwrap().in_cell_x = x_in_cell;
                 for z_in_cell in 0..self.cell_width {
                     self.state.lock().unwrap().in_cell_z = z_in_cell;
+                    // Java's `output[this.arrayIndex++] = function.compute(this)`
+                    // evaluates the LHS postfix-inc BEFORE the RHS, so the shared
+                    // counter is old+1 while the wrapped function computes; the
+                    // output index is the pre-increment value.
                     let index = self.state.lock().unwrap().array_index;
-                    output[index] = function.compute(self);
                     self.state.lock().unwrap().array_index = index + 1;
+                    output[index as usize] = function.compute(self);
                 }
             }
         }
@@ -1124,7 +1033,7 @@ impl ContextProvider for SliceFillingContextProvider<'_> {
             .wrapping_mul(self.cell_height);
         state.interpolation_counter += 1;
         state.in_cell_y = 0;
-        state.array_index = index;
+        state.array_index = index as i32;
         // Java's `forIndex` returns `NoiseChunk.this` — the owning chunk, so
         // every inner function reached through the per-index fill takes the
         // interpolation/cache branch. The lock guard is dropped at the end of
@@ -1134,7 +1043,7 @@ impl ContextProvider for SliceFillingContextProvider<'_> {
     }
 
     fn fill_all_directly(&self, output: &mut [f64], function: &dyn DensityFunction) {
-        for cell_y_index in 0..(self.cell_count_y + 1) {
+        for cell_y_index in 0..(self.cell_count_y.wrapping_add(1)) {
             // The cell-start-y/counter/array-index are set under a short lock
             // and the guard is dropped before `compute` (same deadlock
             // consideration as `NoiseChunk::fill_all_directly`).
@@ -1145,7 +1054,7 @@ impl ContextProvider for SliceFillingContextProvider<'_> {
                     .wrapping_mul(self.cell_height);
                 state.interpolation_counter += 1;
                 state.in_cell_y = 0;
-                state.array_index = cell_y_index as usize;
+                state.array_index = cell_y_index;
             }
             output[cell_y_index as usize] = function.compute(self.chunk);
         }
@@ -1318,13 +1227,18 @@ impl DensityFunction for Cache2D {
         let block_x = context.block_x();
         let block_z = context.block_z();
         let pos_2d = ChunkPos::pack_coords(block_x, block_z);
-        let mut cache = self.cache.lock().unwrap();
-        if cache.0 == pos_2d {
-            return cache.1;
+        {
+            let mut cache = self.cache.lock().unwrap();
+            if cache.0 == pos_2d {
+                return cache.1;
+            }
+            // Java writes `lastPos2D` before evaluating the wrapped function
+            // and `lastValue` after; the guard is dropped across `compute` so a
+            // re-entrant wrapped function cannot deadlock on `self.cache`.
+            cache.0 = pos_2d;
         }
-        cache.0 = pos_2d;
         let value = self.function.compute(context);
-        cache.1 = value;
+        self.cache.lock().unwrap().1 = value;
         value
     }
     fn fill_array(&self, output: &mut [f64], context_provider: &dyn ContextProvider) {
@@ -1488,8 +1402,10 @@ impl CacheOnce {
             function,
             state,
             cache: Mutex::new(OnceCacheValues {
-                last_counter: -1,
-                last_array_counter: -1,
+                // Java's `long lastCounter; long lastArrayCounter;` fields
+                // default to `0L`.
+                last_counter: 0,
+                last_array_counter: 0,
                 last_value: 0.0,
                 last_array: None,
             }),
@@ -1507,28 +1423,42 @@ impl DensityFunction for CacheOnce {
         if let Some(last_array) = &cache.last_array
             && cache.last_array_counter == state.array_interpolation_counter
         {
-            return last_array[state.array_index];
+            // `array_index` is Java's `int` (i32); indexing the cache re-broadens
+            // to `usize`. A hostile out-of-range index (e.g. `-1` from a
+            // truncated `usize::MAX` `forIndex`) fails equivalently to Java's
+            // `ArrayIndexOutOfBoundsException` (Rust slice OOB panic).
+            return last_array[state.array_index as usize];
         }
         if cache.last_counter == state.interpolation_counter {
             return cache.last_value;
         }
         cache.last_counter = state.interpolation_counter;
+        // Drop the shared-state AND per-instance cache guards before the
+        // wrapped compute, matching `Cache2D::compute`'s deadlock rule: the
+        // non-reentrant mutex would self-deadlock if the wrapped function
+        // re-entered this same `CacheOnce` (e.g. if identity/aliasing
+        // semantics ever allowed the same instance twice in the DAG).
         drop(state);
+        drop(cache);
         let value = self.function.compute(context);
-        cache.last_value = value;
+        self.cache.lock().unwrap().last_value = value;
         value
     }
     fn fill_array(&self, output: &mut [f64], context_provider: &dyn ContextProvider) {
         let state = self.state.lock().unwrap();
-        let mut cache = self.cache.lock().unwrap();
+        let cache = self.cache.lock().unwrap();
         if let Some(last_array) = &cache.last_array
             && cache.last_array_counter == state.array_interpolation_counter
         {
             output.copy_from_slice(&last_array[..output.len()]);
         } else {
+            // Drop both guards before the wrapped fill (same non-reentrant
+            // deadlock rule as `compute` above and `Cache2D::compute`).
             drop(state);
+            drop(cache);
             self.function.fill_array(output, context_provider);
             let state = self.state.lock().unwrap();
+            let mut cache = self.cache.lock().unwrap();
             if let Some(last_array) = &mut cache.last_array
                 && last_array.len() == output.len()
             {
@@ -1691,7 +1621,6 @@ pub struct NoiseInterpolator {
     state: Arc<Mutex<InterpolationState>>,
     cell_width: i32,
     cell_height: i32,
-    first_cell_z: i32,
     /// The corner/lerp values the interpolation loop writes and the tree
     /// reads. Shared (`Arc`) so a `clone_arc` (the `SimpleFunction::mapChildren`
     /// identity and the wrap-visitor default) aliases the SAME instance — Java
@@ -1712,7 +1641,6 @@ impl NoiseInterpolator {
         cell_count_xz: i32,
         cell_width: i32,
         cell_height: i32,
-        first_cell_z: i32,
     ) -> Self {
         NoiseInterpolator {
             slice0: Arc::new(Mutex::new(allocate_slice(cell_count_y, cell_count_xz))),
@@ -1721,7 +1649,6 @@ impl NoiseInterpolator {
             state,
             cell_width,
             cell_height,
-            first_cell_z,
             values: Arc::new(Mutex::new(InterpolatorValues::new())),
         }
     }
@@ -1799,8 +1726,8 @@ impl NoiseInterpolator {
 
 /// `allocateSlice(int cellCountY, int cellCountZ)` — `new double[sizeZ][sizeY]`.
 fn allocate_slice(cell_count_y: i32, cell_count_z: i32) -> Vec<Vec<f64>> {
-    let size_z = cell_count_z + 1;
-    let size_y = cell_count_y + 1;
+    let size_z = cell_count_z.wrapping_add(1);
+    let size_y = cell_count_y.wrapping_add(1);
     vec![vec![0.0; size_y as usize]; size_z as usize]
 }
 
@@ -1864,7 +1791,6 @@ impl DensityFunction for NoiseInterpolator {
             state: self.state.clone(),
             cell_width: self.cell_width,
             cell_height: self.cell_height,
-            first_cell_z: self.first_cell_z,
             // Share `values`: the wrap visitor's default (`SimpleFunction`'s
             // `mapChildren` identity) and the second `map_all` both `clone_arc`
             // the already-wrapped interpolator, and Java returns the same
@@ -2075,7 +2001,50 @@ mod tests {
             (point.block_x(), point.block_y(), point.block_z()),
             (3, 264, 3)
         );
+        // `arrayIndex` mirrors Java's `private int arrayIndex`: the hostile
+        // `usize` truncates to `-1`, not a re-sign-extended `usize::MAX`.
+        assert_eq!(
+            chunk.state.lock().unwrap().array_index,
+            -1,
+            "for_index(usize::MAX) must store Java's int -1 in arrayIndex"
+        );
         chunk.stop_interpolation();
+    }
+
+    /// The `CacheOnce` array-read combined with the hostile `forIndex` index:
+    /// a truncated `-1` stored in `arrayIndex` indexes `last_array` out of
+    /// bounds exactly like Java's `lastArray[NoiseChunk.this.arrayIndex]`
+    /// throws `ArrayIndexOutOfBoundsException`. This pins the equivalent-failure
+    /// claim (Rust slice OOB panic vs Java AIOOBE) — not that either recovers.
+    #[test]
+    fn cache_once_hostile_index_fails_equivalently() {
+        let chunk = interpolating_chunk();
+        let cache_once = CacheOnce::new(fns::constant(1.0), chunk.state.clone());
+        // Prime the `lastArray` cache for the current array-interpolation
+        // counter, so `compute` takes the `lastArray[arrayIndex]` read path
+        // (Java's `CacheOnce.compute`).
+        {
+            let mut state = chunk.state.lock().unwrap();
+            state.array_interpolation_counter = 1;
+        }
+        {
+            let mut cache = cache_once.cache.lock().unwrap();
+            cache.last_array = Some(vec![7.0; 4]);
+            cache.last_array_counter = 1;
+        }
+        // A hostile `forIndex(usize::MAX)` stores `-1` in `arrayIndex`.
+        ContextProvider::for_index(&chunk, usize::MAX);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = cache_once.compute(&chunk);
+        }));
+        assert!(
+            panicked.is_err(),
+            "CacheOnce last_array[-1] read must panic (Rust OOB), matching Java's AIOOBE"
+        );
+        // No `stop_interpolation` here: the OOB panic unwound while the
+        // `CacheOnce` held the shared-state guard (exactly the production
+        // failure), leaving `chunk.state` poisoned, so a final lock would panic
+        // on the PoisonError. The chunk is local and dropped at test end.
     }
 
     /// The cell-geometry arithmetic wraps exactly like Java's plain int
@@ -2402,7 +2371,6 @@ mod tests {
             cell_height: 8,
             cell_count_y: 24,
             cell_count_xz: 4,
-            first_cell_z: 0,
             first_noise_x: 0,
             first_noise_z: 0,
             noise_size_xz: 16,
