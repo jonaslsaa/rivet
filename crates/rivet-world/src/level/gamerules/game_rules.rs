@@ -672,12 +672,21 @@ mod tests {
         // is `byNameCodec`, whose RegistryOps encoding carries the full
         // namespaced `ResourceLocation` (Java's `byNameCodec` uses
         // `ResourceLocation.CODEC`, so keys round-trip as `minecraft:xxx`).
+        //
+        // Java's `DispatchedMapCodec.encode` emits entries in the input map's
+        // (unspecified) iteration order, so the port does not canonicalize the
+        // key order — assert the encoded object order-insensitively.
+        let encoded_obj = encoded
+            .as_object()
+            .expect("encoded gamerules map is an object");
+        assert_eq!(encoded_obj.len(), 2);
         assert_eq!(
-            encoded,
-            json!({
-                "minecraft:advance_time": false,
-                "minecraft:random_tick_speed": 7,
-            })
+            encoded_obj.get("minecraft:advance_time"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            encoded_obj.get("minecraft:random_tick_speed"),
+            Some(&json!(7))
         );
 
         let parsed = codec.parse(&ops, &encoded);

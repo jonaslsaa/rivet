@@ -31,14 +31,24 @@ use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::lifecycle::Lifecycle;
 use rivet_serialization::pair::Pair;
 use rivet_serialization::unit::Unit;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::{self, Debug};
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// `GameRuleMap` — the `Reference2ObjectMap<GameRule<?>, Object>` value map
 /// plus Paper's array-backed `idAccess`. The map is keyed by game-rule
 /// identity (the registry-held `Arc`), so a `HashMap<Arc<GameRuleErased>, _>`
 /// preserves Java's reference-key semantics.
+///
+/// The `map` is held as `Rc<RefCell<HashMap>>`: Java's `Builder.build()` and
+/// the built `GameRuleMap` **share** the same `Reference2ObjectMap` object
+/// (the private constructor assigns `this.map = map` directly), and
+/// `copyOf`/`ofTrusted`/`of` wrap fresh maps. The port reproduces that shared
+/// identity with an `Rc` clone of one `RefCell<HashMap>` — game state is
+/// tick-thread-confined (OWNERSHIP.md D5), so the interior mutability is
+/// single-thread `RefCell`, not `Arc<RwLock>`.
 ///
 /// `GameRuleMap.TYPE` (deferred) — the `SavedDataType<GameRuleMap>` with key
 /// `"game_rules"`. `SavedDataType` is owned by the `mc.world.level.saveddata`
@@ -55,8 +65,10 @@ use std::sync::Arc;
 /// `dirty` flag, diverging from the Java surface.
 #[derive(Debug)]
 pub struct GameRuleMap {
-    /// `map` — `Reference2ObjectMap<GameRule<?>, Object>` (identity-keyed).
-    map: HashMap<Arc<GameRuleErased>, GameRuleValue>,
+    /// `map` — `Reference2ObjectMap<GameRule<?>, Object>` (identity-keyed),
+    /// shared by reference with the `Builder` that produced it (`Rc` clone of
+    /// one `RefCell<HashMap>`).
+    map: Rc<RefCell<HashMap<Arc<GameRuleErased>, GameRuleValue>>>,
     /// Paper array-backed access — one slot per constructed game rule, `None`
     /// when the rule has no value (the map never stores `null`).
     id_access: Vec<Option<GameRuleValue>>,
@@ -67,7 +79,8 @@ pub struct GameRuleMap {
 }
 
 impl GameRuleMap {
-    /// The private constructor — builds `idAccess` from `map`'s entries (Paper).
+    /// The private constructor — wraps a fresh `map` in the shared `Rc` and
+    /// builds `idAccess` from its entries (Paper).
     fn from_map(map: HashMap<Arc<GameRuleErased>, GameRuleValue>) -> GameRuleMap {
         // Java's 59 built-in rules are static initializers of `GameRules`, so
         // `GameRule.LAST_GAMERULE_INDEX` is already 59 before any `GameRuleMap`
@@ -77,16 +90,43 @@ impl GameRuleMap {
         // invariant (a map built first would size `id_access` to 0 and every
         // subsequent `set`/`get`/`has`/`remove` would index out of bounds).
         game_rules::built_in_registry();
-        let mut id_access: Vec<Option<GameRuleValue>> =
-            vec![None; game_rule::last_game_rule_index() as usize];
-        for (rule, value) in &map {
-            id_access[rule.game_rule_index as usize] = Some(*value);
+        let id_access = Self::id_access_from(&map);
+        GameRuleMap {
+            map: Rc::new(RefCell::new(map)),
+            id_access,
+            dirty: false,
         }
+    }
+
+    /// `new GameRuleMap(map)` with a **shared** map — `Builder.build()`'s path
+    /// (Java's private constructor assigns `this.map = map` directly, so the
+    /// builder and the built map share one map object). The `Rc` clone is the
+    /// shared reference; `idAccess` is snapshotted at construction exactly as
+    /// Java's array is, so a post-`build()` builder write is visible through
+    /// the built map's map view (`keySet`/`size`) but not its array view.
+    fn from_shared_map(
+        map: Rc<RefCell<HashMap<Arc<GameRuleErased>, GameRuleValue>>>,
+    ) -> GameRuleMap {
+        game_rules::built_in_registry();
+        let id_access = Self::id_access_from(&map.borrow());
         GameRuleMap {
             map,
             id_access,
             dirty: false,
         }
+    }
+
+    /// Paper's `idAccess` fill — one slot per constructed rule, `None` where the
+    /// map has no value.
+    fn id_access_from(
+        map: &HashMap<Arc<GameRuleErased>, GameRuleValue>,
+    ) -> Vec<Option<GameRuleValue>> {
+        let mut id_access: Vec<Option<GameRuleValue>> =
+            vec![None; game_rule::last_game_rule_index() as usize];
+        for (rule, value) in map {
+            id_access[rule.game_rule_index as usize] = Some(*value);
+        }
+        id_access
     }
 
     /// `GameRuleMap.ofTrusted(Map)` — wraps a decoded/encoded map.
@@ -112,12 +152,15 @@ impl GameRuleMap {
     ///
     /// Java's `copyOf` goes through the private constructor (`new GameRuleMap(
     /// new Reference2ObjectOpenHashMap<>(gameRuleMap.map))`), which never calls
-    /// `setDirty` — a copy of a dirty source map is clean. `from_map` rebuilds
-    /// `id_access` and starts `dirty: false`. This is the ONLY copy path (the
-    /// type has no `Clone`, mirroring Java's lack of a public copy), so the
-    /// saved-data save cadence never sees a copied dirty flag.
+    /// `setDirty` — a copy of a dirty source map is clean. The fresh
+    /// `Reference2ObjectOpenHashMap` makes the copy **independent** of the
+    /// source's shared map (no `Rc` sharing), so a later builder or built-map
+    /// write does not leak into the copy. `from_map` rebuilds `id_access` and
+    /// starts `dirty: false`. This is the ONLY copy path (the type has no
+    /// `Clone`, mirroring Java's lack of a public copy), so the saved-data save
+    /// cadence never sees a copied dirty flag.
     pub fn copy_of(game_rule_map: &GameRuleMap) -> GameRuleMap {
-        Self::from_map(game_rule_map.map.clone())
+        Self::from_map(game_rule_map.map.borrow().clone())
     }
 
     /// `has(GameRule<?>)` — `idAccess[gameRuleIndex] != null`.
@@ -134,7 +177,7 @@ impl GameRuleMap {
     /// value`.
     pub fn set(&mut self, game_rule: &Arc<GameRuleErased>, value: GameRuleValue) {
         self.dirty = true;
-        self.map.insert(game_rule.clone(), value);
+        self.map.borrow_mut().insert(game_rule.clone(), value);
         self.id_access[game_rule.game_rule_index as usize] = Some(value);
     }
 
@@ -149,17 +192,17 @@ impl GameRuleMap {
     pub fn remove(&mut self, game_rule: &GameRuleErased) -> Option<GameRuleValue> {
         self.dirty = true;
         self.id_access[game_rule.game_rule_index as usize] = None;
-        self.map.remove(game_rule)
+        self.map.borrow_mut().remove(game_rule)
     }
 
     /// `keySet()` — the identity-keyed map's key set.
     pub fn key_set(&self) -> Vec<Arc<GameRuleErased>> {
-        self.map.keys().cloned().collect()
+        self.map.borrow().keys().cloned().collect()
     }
 
     /// `size()`.
     pub fn size(&self) -> usize {
-        self.map.len()
+        self.map.borrow().len()
     }
 
     /// `withOther(GameRuleMap other)` — `copyOf(this)` then set every rule from
@@ -210,9 +253,10 @@ impl GameRuleMap {
 /// `getIdentifier` NPE on the same path.
 impl fmt::Display for GameRuleMap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let map = self.map.borrow();
         f.write_str("{")?;
         let mut first = true;
-        for (k, v) in &self.map {
+        for (k, v) in map.iter() {
             if !first {
                 f.write_str(", ")?;
             }
@@ -227,10 +271,12 @@ impl fmt::Display for GameRuleMap {
 /// underlying identity-keyed `Reference2ObjectMap`: the same game-rule keys
 /// (reference identity) mapped to equal values. The SavedData `dirty` flag and
 /// the Paper `idAccess` array do not participate, so maps equal regardless of
-/// their save state.
+/// their save state. `Rc` pointers are not compared — the borrowed `HashMap`
+/// contents are (two maps built from independent `Rc`s with the same entries
+/// are equal, exactly as two Java maps with equal maps are).
 impl PartialEq for GameRuleMap {
     fn eq(&self, other: &Self) -> bool {
-        self.map == other.map
+        *self.map.borrow() == *other.map.borrow()
     }
 }
 
@@ -242,7 +288,8 @@ impl Eq for GameRuleMap {}
 /// insensitive `PartialEq`.
 impl std::hash::Hash for GameRuleMap {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        let mut entries: Vec<_> = self.map.iter().collect();
+        let map = self.map.borrow();
+        let mut entries: Vec<_> = map.iter().collect();
         entries.sort_by_key(|(k, _)| k.game_rule_index);
         for (k, v) in entries {
             k.hash(state);
@@ -269,7 +316,7 @@ fn set_game_rule(other: &GameRuleMap, game_rule: &Arc<GameRuleErased>, result: &
 
 /// `GameRuleMap.Builder` — `set(GameRule<T>, T value)` + `build()`.
 pub struct Builder {
-    map: HashMap<Arc<GameRuleErased>, GameRuleValue>,
+    map: Rc<RefCell<HashMap<Arc<GameRuleErased>, GameRuleValue>>>,
 }
 
 impl Default for Builder {
@@ -282,37 +329,34 @@ impl Builder {
     /// `new Builder()` — the empty map.
     pub fn new() -> Builder {
         Builder {
-            map: HashMap::new(),
+            map: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
-    /// `Builder.set(GameRule<T>, T value)` — consumes the builder and returns
-    /// it, so `set` can be chained into `build` (`builder().set(a, v).build()`).
-    /// Java's `set` returns `this` (a shared reference); the consuming form is
-    /// the Rust analog that lets `build` take ownership of the map.
-    pub fn set(mut self, game_rule: &Arc<GameRuleErased>, value: GameRuleValue) -> Self {
-        self.map.insert(game_rule.clone(), value);
+    /// `Builder.set(GameRule<T>, T value)` — returns `this` for chaining
+    /// (`builder().set(a, v).set(b, w).build()`), exactly Java's shared
+    /// reference return. Takes `&self` (not `&mut self`) so the builder stays
+    /// usable after a `build()`, mirroring Java.
+    pub fn set(&self, game_rule: &Arc<GameRuleErased>, value: GameRuleValue) -> &Self {
+        self.map.borrow_mut().insert(game_rule.clone(), value);
         self
     }
 
-    /// `Builder.build()` — `new GameRuleMap(map)`.
+    /// `Builder.build()` — `new GameRuleMap(this.map)`.
     ///
-    /// Java's `build()` aliases the builder's live map (the private
-    /// `GameRuleMap` constructor assigns `this.map = map` directly), so a
-    /// `builder.set(...)` after `build()` is visible through the built map's
-    /// `keySet()`/`size()` — but NOT its array-backed `idAccess` (Java's own
-    /// internal inconsistency). Reproducing that shared-map aliasing needs
-    /// interior mutability on game state, which OWNERSHIP.md (D5) forbids, so
-    /// this port reproduces the identity faithfully for every observable
-    /// pre-`build()` write and blocks the aliasing with ownership instead:
-    /// `build(self)` **moves** the builder's map into the `GameRuleMap` (no
-    /// copy — Java's `this.map = map`), and consuming the builder makes a
-    /// post-`build()` `set` a compile error (the "fail-loud typed seam")
-    /// rather than a silent divergence. The built map's `keySet()`/`size()`
-    /// and `has()`/`get()` (via `idAccess`) always agree on every write made
-    /// through the builder, exactly as Java's do.
-    pub fn build(self) -> GameRuleMap {
-        GameRuleMap::from_map(self.map)
+    /// Java's private `GameRuleMap` constructor assigns `this.map = map`
+    /// directly, so the built map and the builder **share** the same map
+    /// object. The port reproduces that shared identity with
+    /// `Rc<RefCell<HashMap>>`: `build(&self)` returns a `GameRuleMap` holding
+    /// an `Rc` clone of the builder's map (no copy). A post-`build()`
+    /// `builder.set(...)` is therefore visible through the built map's
+    /// `keySet()`/`size()` — but NOT its array-backed `idAccess` (snapshotted
+    /// at construction; Java's own internal inconsistency) — and a
+    /// `map.set(...)` on the built map is visible through the builder. Game
+    /// state is tick-thread-confined (OWNERSHIP.md D5), so the interior
+    /// mutability is single-thread `RefCell`, not `Arc<RwLock>`.
+    pub fn build(&self) -> GameRuleMap {
+        GameRuleMap::from_shared_map(self.map.clone())
     }
 }
 
@@ -412,24 +456,20 @@ impl<Ops: DynamicOps + 'static> DispatchedMapCodec<Ops> {
         prefix: &mut dyn rivet_serialization::dynamic_ops::RecordBuilder<Output = Ops::Output>,
     ) {
         let key_codec = self.key_codec.clone();
-        // Java's `Reference2ObjectOpenHashMap.entrySet()` iterates in identity-
-        // hash slot order, which depends on `System.identityHashCode` (JVM-
-        // address-derived, not reproducible across runs) — Paper's emitted
-        // compound order is itself not byte-stable. The port canonicalizes for
-        // deterministic output; the gamerules compound is unordered
-        // semantically (readers fetch by key), so this is format-compatible.
-        //
-        // The sort key is `game_rule_index`, not `id()`: `id()` resolves the
-        // key through the built-in GAME_RULE registry and panics for a rule not
-        // registered there, whereas Java's `DispatchedMapCodec.encode` reports
-        // an unregistered key as a recoverable `DataResult.error` from the key
-        // codec (and the `codec()` parameter is an arbitrary registry, not
-        // necessarily the built-in one). Sorting by the construction index keeps
-        // the output deterministic without a registry lookup, so an unregistered
-        // key reaches the key codec's real encode-error path below.
-        let mut entries: Vec<_> = input.iter().collect();
-        entries.sort_by_key(|(k, _)| k.game_rule_index);
-        for (k, v) in entries {
+        // Java's `DispatchedMapCodec.encode` iterates `input.entrySet()` in the
+        // input map's own iteration order. For a `Reference2ObjectOpenHashMap`
+        // (the built map) that order is identity-hash slot order, which depends
+        // on `System.identityHashCode` (JVM-address-derived, not reproducible
+        // across runs); the Rust `HashMap` iteration order is likewise
+        // unspecified (per-process `RandomState`). Neither is byte-stable, so
+        // this unit does NOT canonicalize — determinism here would be a
+        // PORTING.md "improvement" over Java. The order is unobservable in the
+        // encoded carriers anyway: the gamerules compound is stored in an NBT
+        // `CompoundTag` (itself a `HashMap` that does not preserve entry order)
+        // and readers fetch by key. The `game_rule_index` of an unregistered
+        // key is never needed — the key reaches the key codec's real encode
+        // error path below.
+        for (k, v) in input.iter() {
             prefix.add_result_result(
                 key_codec.encode_start(ops, k),
                 self.value_codec(k).encode_start(ops, v),
@@ -579,37 +619,57 @@ mod tests {
         assert!(!map.has(&advance_time));
     }
 
-    /// `Builder` — every pre-`build()` `set` is visible in the built map's
-    /// `keySet()`/`size()` AND its array-backed `has()`/`get()` (Java: the
-    /// built map holds the same map object, `idAccess` computed from it at
-    /// construction). Java's post-`build()` builder mutation would diverge
-    /// those two views; this port instead consumes the builder in `build()`,
-    /// moving its map (no copy — Java's `this.map = map`) so the aliasing is a
-    /// compile error rather than a silent divergence. A fresh builder is
-    /// independent of previously built maps.
+    /// `Builder` — Java's `build()` shares the builder's live map object with
+    /// the built `GameRuleMap` (the private constructor assigns `this.map =
+    /// map` directly). The port reproduces that shared identity with
+    /// `Rc<RefCell<HashMap>>` (tick-thread-confined value state, OWNERSHIP.md
+    /// D5). A post-`build()` builder write is visible through the built map's
+    /// `keySet()`/`size()` — but NOT its array-backed `idAccess` (snapshotted
+    /// at construction; Java's own internal inconsistency) — and a built-map
+    /// write is visible through the builder. `copyOf` still copies (fresh
+    /// `Reference2ObjectOpenHashMap`), so a copy is independent of the shared
+    /// map.
     #[test]
-    fn builder_build_moves_map_and_keeps_views_consistent() {
+    fn builder_build_shares_map_identity_with_post_build_mutation() {
         let registry = built_in_registry();
         let advance_time = registry.by_id_arc(0).cloned().unwrap();
         let advance_weather = registry.by_id_arc(1).cloned().unwrap();
 
-        let map = GameRuleMap::builder()
+        let builder = GameRuleMap::builder();
+        let mut map = builder
             .set(&advance_time, GameRuleValue::Bool(true))
-            .set(&advance_weather, GameRuleValue::Bool(false))
             .build();
-
-        // The map view (keySet/size) and the idAccess view (has/get) agree on
-        // every pre-build write, exactly as Java's do.
-        assert_eq!(map.size(), 2);
-        assert_eq!(map.key_set().len(), 2);
+        // Every pre-build write is visible in both the map view and idAccess view.
         assert!(map.has(&advance_time));
         assert_eq!(map.get(&advance_time), Some(GameRuleValue::Bool(true)));
-        assert!(map.has(&advance_weather));
-        assert_eq!(map.get(&advance_weather), Some(GameRuleValue::Bool(false)));
+        assert_eq!(map.size(), 1);
 
-        // A fresh builder is independent of previously built maps.
-        let empty = GameRuleMap::builder().build();
-        assert_eq!(empty.size(), 0);
-        assert!(!empty.has(&advance_time));
+        // Post-build builder.set is visible through the built map's map view
+        // (shared identity) — but NOT its array-backed idAccess.
+        builder.set(&advance_weather, GameRuleValue::Bool(false));
+        assert_eq!(map.size(), 2);
+        assert!(map.key_set().contains(&advance_weather));
+        assert!(!map.has(&advance_weather));
+        assert_eq!(map.get(&advance_weather), None);
+
+        // A built-map set is visible through the builder (shared identity in
+        // the other direction): a second build() recomputes idAccess from the
+        // now-shared map, so the new map sees the rule in both views.
+        map.set(&advance_weather, GameRuleValue::Bool(true));
+        let rebuilt = builder.build();
+        assert!(rebuilt.has(&advance_weather));
+        assert_eq!(
+            rebuilt.get(&advance_weather),
+            Some(GameRuleValue::Bool(true))
+        );
+        assert_eq!(rebuilt.size(), 2);
+
+        // copyOf copies the shared map into an independent map: a later builder
+        // write is invisible to the copy.
+        let copy = GameRuleMap::copy_of(&map);
+        assert_eq!(copy, map);
+        builder.set(&advance_time, GameRuleValue::Bool(false));
+        assert_eq!(copy.get(&advance_time), Some(GameRuleValue::Bool(true)));
+        assert_eq!(copy.size(), 2);
     }
 }
