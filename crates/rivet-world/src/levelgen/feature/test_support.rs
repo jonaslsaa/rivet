@@ -129,6 +129,10 @@ pub struct TestLevel {
     pub can_write: bool,
     /// The `set_block` calls in order (the `Block.UPDATE_*` flag value).
     pub writes: Vec<(BlockPos, BlockState)>,
+    /// The `destroy_block` calls in order — the drop-and-set features
+    /// (`EndPodiumFeature` active, `EndPlatformFeature` dropResources) destroy
+    /// before overwriting, and the double records each destroyed position.
+    pub destroyed: Vec<BlockPos>,
     /// The mutable block-state map: `get_block_state` reads it (air for an
     /// unset position), `set_block` writes it.
     pub states: HashMap<BlockPos, BlockState>,
@@ -153,6 +157,7 @@ impl TestLevel {
             access,
             can_write: true,
             writes: Vec::new(),
+            destroyed: Vec::new(),
             states: HashMap::new(),
             height: 0,
             sea_level: 63,
@@ -191,6 +196,12 @@ impl WorldGenLevel for TestLevel {
     fn set_block(&mut self, pos: &BlockPos, state: BlockState, _flags: u32) -> bool {
         self.writes.push((*pos, state));
         self.states.insert(*pos, state);
+        true
+    }
+
+    fn destroy_block(&mut self, pos: &BlockPos, _drop: bool) -> bool {
+        self.destroyed.push(*pos);
+        self.states.insert(*pos, BlockState::of(BlockId(0)));
         true
     }
 
