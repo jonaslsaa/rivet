@@ -8,7 +8,8 @@
 //! `performLightDecrease`, `propagateNeighbourLevels` and the flag constants —
 //! plus the skylight engine's overrides (`initNibble`, `setNibbleNull`,
 //! `rewriteNibbleCacheForSkylight`, `checkNullSection`, `getLightLevelExtruded`,
-//! `tryPropagateSkylight`).
+//! `tryPropagateSkylight`, and the delayed-light-set write-backs
+//! `processDelayedIncreases`/`processDelayedDecreases`).
 //!
 //! #184 (M2) slices the Starlight compute engine in on the light-chunk path:
 //! the concrete engine is [`SkyStarLightEngine`] and the block-engine branches
