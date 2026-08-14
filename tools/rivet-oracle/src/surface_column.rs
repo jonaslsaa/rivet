@@ -775,8 +775,9 @@ mod tests {
         // generates. The only over-reports within beard reach (<= SEARCH chunks,
         // chebyshev) are:
         //   (15,15): (9,11)   [village salt 10387312]        — start projects to
-        //     WORLD_SURFACE_WG, biome = ocean; village biome tag is
-        //     plains/desert/savanna/snowy/taiga -> REJECTED
+        //     WORLD_SURFACE_WG, biome = ocean; the village biome tags
+        //     (plains/meadow, desert, savanna, snowy_*, taiga) accept no ocean ->
+        //     REJECTED
         //   (15,15): (9,11)   [ancient city salt 20083232]   — ConstantHeight
         //     y=-27, biome = lush_caves; ancient-city tag is deep_dark ->
         //     REJECTED
