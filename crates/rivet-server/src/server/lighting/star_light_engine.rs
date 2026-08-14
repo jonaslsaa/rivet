@@ -28,11 +28,16 @@
 //!   masks), and the queue entries pack into `u64` exactly as Java's `long`.
 //! - The face-occlusion branches (`isConditionallyFullOpaque` +
 //!   `getFaceOcclusionShape` + `Shapes.faceShapeOccludes`) are NOT ported
-//!   (`VoxelShape` is not). A conditionally-full-opaque block is carried as the
-//!   `FLAG_HAS_SIDED_TRANSPARENT_BLOCKS` flag and, where Java would test the
-//!   shape, the seam assumes it occludes (`continue`/`break`). For the superflat
-//!   air + stone content neither block sets the flag, so the byte-exact contract
-//!   is unaffected (the tests use only air/stone).
+//!   (`VoxelShape` is not). A conditionally-full-opaque *propagated-into* block
+//!   is carried as the `FLAG_HAS_SIDED_TRANSPARENT_BLOCKS` flag and the light
+//!   propagates through it unconditionally (set in both
+//!   `perform_light_increase` branches), where Java tests the culling shape and
+//!   skips a neighbour whose face occludes — the seam over-propagates there.
+//!   The *source* (from-shape) and column-walk branches instead assume occlusion
+//!   (`continue`/`break`), matching Java's skip when the face shape occludes.
+//!   Neither deviation affects the superflat air + stone content (neither block
+//!   sets the flag), so the byte-exact contract is unaffected (the tests use
+//!   only air/stone).
 //! - `checkChunkEdges` (the `needsEdgeChecks=true` branch's per-edge decrease)
 //!   is not ported — `relightChunks`, `checkChunkEdges` and the client-side
 //!   notify path (`isClientSide`) defer with the edge-check unit (RivetTodo
@@ -301,6 +306,14 @@ pub(crate) struct SkyStarLightEngine {
     /// `nullPropagationCheckCache` — per-light-section flag: whether this
     /// section's null-propagation check already ran this run.
     null_propagation_check_cache: Vec<bool>,
+    /// `rewriteNibbleCacheForSkylight`'s effect on the center chunk: which
+    /// light sections the rewrite nulled out of the cache. Java writes the
+    /// *original* array back to the chunk, so a section the rewrite nulled (and
+    /// `checkNullSection` may have re-created as a fresh scratch nibble) keeps
+    /// the untouched original `Null` nibble; only sections the cache still
+    /// aliases carry the in-place mutations. Indexed by `chunkY -
+    /// minLightSection`, reset per `light` run.
+    nulled_sections: Vec<bool>,
 
     // --- encode offsets, recomputed per `setupEncodeOffset` ---
     encode_offset_x: i32,
@@ -355,6 +368,7 @@ impl SkyStarLightEngine {
             chunk_cache: vec![false; 25],
             emptiness_map_cache: (0..25).map(|_| None).collect(),
             null_propagation_check_cache: vec![false; light_section_count],
+            nulled_sections: vec![false; light_section_count],
             encode_offset_x: 0,
             encode_offset_y: 0,
             encode_offset_z: 0,
@@ -534,16 +548,6 @@ impl SkyStarLightEngine {
     ) {
         let idx = (chunk_x + 5 * chunk_z + 25 * chunk_y + self.chunk_section_index_offset) as usize;
         self.nibble_cache[idx] = nibble;
-    }
-
-    fn get_nibbles_for_chunk_from_cache(&self, chunk_x: i32, chunk_z: i32) -> Vec<SwmrNibbleArray> {
-        (self.min_light_section..=self.max_light_section)
-            .map(|cy| {
-                self.get_nibble_from_cache(chunk_x, cy, chunk_z)
-                    .cloned()
-                    .unwrap_or_else(|| SwmrNibbleArray::new_with_bytes_and_null(None, true))
-            })
-            .collect()
     }
 
     fn set_nibbles_for_chunk_in_cache(
@@ -814,15 +818,30 @@ impl SkyStarLightEngine {
     /// `rewriteNibbleCacheForSkylight(chunk)` — stop propagation through null
     /// sections by dropping them from the cache. The dropped nibbles are null
     /// (updating state), so `updateVisible` would publish a null visible state;
-    /// dropping the cache entry has the same effect for this run.
-    fn rewrite_nibble_cache_for_skylight(&mut self) {
+    /// dropping the cache entry has the same effect for this run. The center
+    /// chunk's dropped light sections are recorded in `nulled_sections` — the
+    /// write-back in `light` substitutes the original null nibble for them
+    /// (Java's `setNibbles` writes the original array, so a section the rewrite
+    /// nulled and `checkNullSection` re-created never reaches the chunk).
+    fn rewrite_nibble_cache_for_skylight(&mut self, chunk_x: i32, chunk_z: i32) {
+        let y_divisor = self.light_section_count + 2;
         for index in 0..self.nibble_cache.len() {
             let is_null = match self.nibble_cache[index].as_ref() {
                 Some(nibble) => nibble.is_null_nibble_updating(),
                 None => false,
             };
-            if is_null {
-                self.nibble_cache[index] = None;
+            if !is_null {
+                continue;
+            }
+            let cx = (index % 5) as i32 - self.chunk_offset_x;
+            let cz = ((index / 5) % 5) as i32 - self.chunk_offset_z;
+            let cy = ((index / 25) % y_divisor) as i32 - self.chunk_offset_y;
+            self.nibble_cache[index] = None;
+            if cx == chunk_x && cz == chunk_z {
+                let rel = (cy - self.min_light_section) as usize;
+                if rel < self.nulled_sections.len() {
+                    self.nulled_sections[rel] = true;
+                }
             }
         }
     }
@@ -1571,10 +1590,19 @@ impl SkyStarLightEngine {
     /// `light(lightAccess, chunk, emptySections)` — the entry point the
     /// provider's `light_chunk` drives. Setup caches, force the chunk into the
     /// cache with fresh filled-empty nibbles, run the emptiness changes, light
-    /// the chunk, publish the computed nibbles, and update the visible state.
-    /// The computed nibbles and emptiness map are surfaced through
+    /// the chunk, write back the computed nibbles, and update the visible
+    /// state. The computed nibbles and emptiness map are surfaced through
     /// `pending_nibbles` / `pending_emptiness_map` for the provider to write
     /// onto the chunk.
+    ///
+    /// The write-back is `setNibbles(chunk, nibbles)` then `updateVisible`:
+    /// Java hands the chunk the *original* array — the same objects the cache
+    /// aliased and mutated in place — and publishes the visible state of the
+    /// very objects it handed out. The port reproduces both: it publishes the
+    /// cache clones, then writes back the mutated clone for each section the
+    /// cache still holds, substituting the untouched original `Null` nibble
+    /// for the sections `rewrite_nibble_cache_for_skylight` nulled out (Java's
+    /// re-created scratch nibbles never reach the chunk).
     pub(crate) fn light(
         &mut self,
         provider: &mut dyn ChunkAccessor,
@@ -1583,6 +1611,7 @@ impl SkyStarLightEngine {
     ) {
         let chunk_x = chunk.get_pos().x();
         let chunk_z = chunk.get_pos().z();
+        self.nulled_sections.iter_mut().for_each(|b| *b = false);
         self.setup_caches(
             provider,
             chunk_x * 16 + 7,
@@ -1592,25 +1621,53 @@ impl SkyStarLightEngine {
             true,
         );
 
-        let nibbles =
-            get_filled_empty_light((self.max_light_section - self.min_light_section + 1) as usize);
-        // force current chunk into cache
-        self.set_chunk_in_cache(chunk_x, chunk_z);
-        self.set_blocks_for_chunk_in_cache(chunk_x, chunk_z, chunk);
-        self.set_nibbles_for_chunk_in_cache(chunk_x, chunk_z, &nibbles);
-        self.set_emptiness_map_cache(chunk_x, chunk_z, self.get_emptiness_map_from_chunk(chunk));
+        // Java's `try { ... } finally { destroyCaches(); }`: the body publishes
+        // and writes back the computed nibbles, and the caches are always
+        // cleared afterwards — even when the body panics (a `catch_unwind` +
+        // `resume_unwind` is the finally-equivalent). `setup_caches` above is
+        // outside the finally exactly as in Java.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let nibbles = get_filled_empty_light(
+                (self.max_light_section - self.min_light_section + 1) as usize,
+            );
+            // force current chunk into cache
+            self.set_chunk_in_cache(chunk_x, chunk_z);
+            self.set_blocks_for_chunk_in_cache(chunk_x, chunk_z, chunk);
+            self.set_nibbles_for_chunk_in_cache(chunk_x, chunk_z, &nibbles);
+            self.set_emptiness_map_cache(
+                chunk_x,
+                chunk_z,
+                self.get_emptiness_map_from_chunk(chunk),
+            );
 
-        let ret = self.handle_empty_section_changes(chunk, empty_sections, true);
-        if let Some(map) = ret {
-            self.set_emptiness_map_on_surface(map);
-        }
-        self.light_chunk_impl(chunk, true);
-        // `setNibbles(chunk, nibbles)` — the cache now holds the computed
-        // center-chunk nibbles; hand them to the provider.
-        let computed = self.get_nibbles_for_chunk_from_cache(chunk_x, chunk_z);
-        self.set_nibbles_on_surface(computed);
-        self.update_visible();
+            let ret = self.handle_empty_section_changes(chunk, empty_sections, true);
+            if let Some(map) = ret {
+                self.set_emptiness_map_on_surface(map);
+            }
+            self.light_chunk_impl(chunk, true);
+            // `setNibbles(chunk, nibbles)` then `updateVisible(lightAccess)`:
+            // see the doc above — publish the cache clones, then hand the
+            // mutated ones out, substituting the original null for the
+            // nulled-out sections.
+            self.update_visible();
+            let mut computed = Vec::with_capacity(nibbles.len());
+            for (index, cy) in (self.min_light_section..=self.max_light_section).enumerate() {
+                if self.nulled_sections[index] {
+                    computed.push(nibbles[index].clone());
+                } else {
+                    computed.push(
+                        self.get_nibble_from_cache(chunk_x, cy, chunk_z)
+                            .cloned()
+                            .unwrap_or_else(|| nibbles[index].clone()),
+                    );
+                }
+            }
+            self.set_nibbles_on_surface(computed);
+        }));
         self.destroy_caches();
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
     }
 
     /// `SkyStarLightEngine.lightChunk(lightAccess, chunk, needsEdgeChecks)`.
@@ -1619,13 +1676,13 @@ impl SkyStarLightEngine {
         chunk: &ChunkAccess<StateId, ServerBiomeId, StructureKey>,
         needs_edge_checks: bool,
     ) {
-        self.rewrite_nibble_cache_for_skylight();
+        let chunk_x = chunk.get_pos().x();
+        let chunk_z = chunk.get_pos().z();
+        self.rewrite_nibble_cache_for_skylight(chunk_x, chunk_z);
         self.null_propagation_check_cache
             .iter_mut()
             .for_each(|b| *b = false);
 
-        let chunk_x = chunk.get_pos().x();
-        let chunk_z = chunk.get_pos().z();
         let sections = chunk.get_sections();
 
         let mut highest_non_empty_section = self.max_section;
@@ -1833,6 +1890,25 @@ mod tests {
         }
     }
 
+    /// A provider that resolves exactly one loaded, light-correct neighbour
+    /// chunk (at `(1, 0)`) and nothing else — the multi-chunk neighbour path
+    /// the [`EmptyProvider`] tests never exercise.
+    struct SingleNeighbourProvider(ChunkAccess<StateId, ServerBiomeId, StructureKey>);
+
+    impl ChunkAccessor for SingleNeighbourProvider {
+        fn get_chunk_for_lighting(
+            &mut self,
+            chunk_x: i32,
+            chunk_z: i32,
+        ) -> Option<&ChunkAccess<StateId, ServerBiomeId, StructureKey>> {
+            if chunk_x == 1 && chunk_z == 0 {
+                Some(&self.0)
+            } else {
+                None
+            }
+        }
+    }
+
     /// Encode a queue entry exactly as Java's `appendToIncreaseQueue`/
     /// `appendToDecreaseQueue` do — the 28-bit packed coordinate, the 4-bit
     /// level, and the 6-bit direction bitset.
@@ -1906,7 +1982,7 @@ mod tests {
     }
 
     /// The end-to-end light-chunk run on the flat air + stone superflat chunk.
-    /// The expected sky light is the Paper-captured superflat fixture: the
+    /// The expected sky light is the established M1 superflat sky contract: the
     /// floor light section (block y -64..-49) is byte-exact `128 zeros then 1920
     /// `0xFF`` (stone at y=-64 blocks sky, the 15 air levels above are full),
     /// and the section above (block y -48..-33) is uniformly full. The section
@@ -1983,9 +2059,13 @@ mod tests {
         }
     }
 
-    /// The same run, asserted at the byte level against the Paper-captured
-    /// superflat sky fixture (`superflat::superflat_sky_layers`): the floor
+    /// The same run, asserted at the byte level against the established M1
+    /// superflat sky contract (`superflat::superflat_sky_layers`): the floor
     /// layer is exactly `128 zeros + 1920 0xFF`, the above layer is all `0xFF`.
+    ///
+    /// The write-back publishes the visible state (Java's `updateVisible` after
+    /// `setNibbles`), so the handed-out clones convert directly — no manual
+    /// `update_visible` on a captured copy.
     #[test]
     fn flat_superflat_sky_bytes_match_the_paper_fixture() {
         let mut engine = SkyStarLightEngine::new(&*overworld_accessor());
@@ -1998,11 +2078,7 @@ mod tests {
             .as_ref()
             .expect("sky nibbles written back");
 
-        // Publish the captured clone's updating snapshot so the packet layer
-        // (`to_vanilla_nibble`) can read it.
-        let mut floor = nibbles[1].clone();
-        floor.update_visible();
-        let floor_data = floor
+        let floor_data = nibbles[1]
             .to_vanilla_nibble()
             .expect("floor initialised")
             .get_data();
@@ -2010,9 +2086,7 @@ mod tests {
         assert_eq!(&floor_data[..128], &[0u8; 128][..]);
         assert_eq!(&floor_data[128..], &[0xFFu8; 1920][..]);
 
-        let mut above = nibbles[2].clone();
-        above.update_visible();
-        let above_data = above
+        let above_data = nibbles[2]
             .to_vanilla_nibble()
             .expect("above initialised")
             .get_data();
@@ -2087,6 +2161,47 @@ mod tests {
             .as_ref()
             .expect("sky emptiness map written back");
         assert!(map.iter().all(|&empty| empty));
+    }
+
+    /// With a loaded, light-correct neighbour the engine runs the multi-chunk
+    /// path the [`EmptyProvider`] tests never exercise. The centre chunk is
+    /// entirely air, and the neighbour (at chunk `(1, 0)`) is also all-air — so
+    /// `handleEmptySectionChanges` inits nothing in the centre — but carries a
+    /// pre-existing non-null sky nibble at light section -5, the same height as
+    /// a centre section. `checkNullSection(0, -5, 0)` therefore sees a lit
+    /// neighbour and re-creates the centre's nulled section as a scratch
+    /// (Java's `initNibble` with `initRemovedNibbles`), which must not leak
+    /// into the write-back: `setNibbles(chunk, nibbles)` hands the chunk the
+    /// original array, and a nulled section keeps its untouched original `Null`.
+    #[test]
+    fn loaded_neighbour_recreated_centre_section_stays_null_in_writeback() {
+        let mut engine = SkyStarLightEngine::new(&*overworld_accessor());
+        let chunk = all_air_chunk(ChunkPos::new(0, 0));
+        // All-air, light-correct neighbour at (1, 0) with its light-section -5
+        // (index 0) already initialised to a distinctive non-null level — the
+        // only lit nibble in the centre's neighbourhood at that height.
+        let mut neighbour = all_air_chunk(ChunkPos::new(1, 0));
+        let mut neighbour_nibbles: Vec<SwmrNibbleArray> = neighbour.sky_nibbles().to_vec();
+        neighbour_nibbles[0] = SwmrNibbleArray::new_with_bytes(vec![0x0Fu8; 2048]);
+        neighbour.set_sky_nibbles(neighbour_nibbles);
+        neighbour.set_light_correct(true);
+        let mut provider = SingleNeighbourProvider(neighbour);
+        engine.light(&mut provider, &chunk, &all_air_empty_sections());
+
+        let nibbles = engine
+            .pending_nibbles
+            .as_ref()
+            .expect("sky nibbles written back");
+        // The all-air centre materializes no stored light: every section the
+        // rewrite nulled (all of them) is written back as its original `Null`,
+        // including the index-0 section `checkNullSection` re-created as a
+        // scratch (Paper's re-created nibbles never reach the chunk).
+        for (index, nibble) in nibbles.iter().enumerate() {
+            assert!(
+                nibble.is_null_nibble_updating(),
+                "a nulled centre section keeps its original null, not a re-created scratch (index {index})"
+            );
+        }
     }
 
     /// `performLightIncrease` spills a level-15 source into every direction the
