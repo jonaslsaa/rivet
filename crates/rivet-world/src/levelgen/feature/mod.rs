@@ -62,6 +62,7 @@ pub mod configurations;
 mod feature_count_tracker;
 mod feature_place_context;
 mod no_op_feature;
+pub mod ore_feature;
 
 // The `net.minecraft.world.level.levelgen.feature.stateproviders` value layer
 // (this unit) — the `BlockStateProvider` hierarchy and its declaration-order

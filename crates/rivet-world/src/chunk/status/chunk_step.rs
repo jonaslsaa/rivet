@@ -11,7 +11,7 @@
 //! step's full transitive table. The constructor then derives `byRadius`: the
 //! minimum status that must be generated at each neighbour distance.
 //!
-//! The value-layer pyramid through NOISE is built by `ChunkPyramid`; the task
+//! The value-layer pyramid through LIGHT is built by `ChunkPyramid`; the task
 //! bodies and the ordering enforcement live in the executor seam
 //! (`world_gen_context.rs`). `ChunkStep.apply`'s async `CompletableFuture`
 //! dispatch is deferred with the scheduler (#185).

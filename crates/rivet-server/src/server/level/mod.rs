@@ -19,6 +19,7 @@ pub mod chunk_result;
 pub mod chunk_tracking_view;
 pub mod entity_id_allocator;
 pub mod full_chunk_status;
+pub mod generated_world;
 pub mod level_chunk;
 pub mod player_chunk_loader;
 pub mod region_backed;

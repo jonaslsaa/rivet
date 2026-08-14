@@ -7,9 +7,9 @@
 //! the steps by status index. The value-layer pyramid is the full 12-rung
 //! ladder — the accumulated tables of the later steps are pure functions of the
 //! builder calls and the access-radius table (§3.5 of `chunk-pipeline-spec.md`)
-//! needs all 12 entries. Only the steps through NOISE are *wired*: the executor
-//! seam (`world_gen_context.rs`) refuses the SURFACE..FULL task bodies
-//! (RivetTodo #185).
+//! needs all 12 entries. Only the steps through LIGHT are *wired*: the executor
+//! seam (`world_gen_context.rs`) refuses the SURFACE..FEATURES and SPAWN/FULL
+//! task bodies (RivetTodo #185).
 //!
 //! The access radii are the `ChunkTaskScheduler.getAccessRadius0` recursion
 //! (the `ca.spottedleaf.moonrise...scheduling` cluster) ported as a pure
@@ -103,8 +103,9 @@ impl ChunkPyramidBuilder {
 }
 
 /// `ChunkPyramid.GENERATION_PYRAMID` — the builder calls ported verbatim from
-/// the Java static initializer. The tasks through NOISE are the wired seam; the
-/// SURFACE..FULL tasks are identified but not dispatched (RivetTodo #185).
+/// the Java static initializer. The tasks through LIGHT are the wired seam; the
+/// SURFACE..FEATURES and SPAWN/FULL tasks are identified but not dispatched
+/// (RivetTodo #185).
 fn build_generation_pyramid() -> ChunkPyramid {
     ChunkPyramid::builder()
         .step(ChunkStatus::Empty, |s| s)
