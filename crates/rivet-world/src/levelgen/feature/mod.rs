@@ -128,6 +128,11 @@ mod test_support;
 // the eleven concrete placers (see the submodule doc).
 pub mod foliageplacers;
 
+// The `net.minecraft.world.level.levelgen.feature.trunkplacers` framework
+// (this unit) — the `TrunkPlacer` hierarchy, its `TrunkPlacerType` ids, and
+// the nine concrete placers (see the submodule doc).
+pub mod trunkplacers;
+
 // STUB(mc.world.level.levelgen.feature.tree): `TreeFeature.validTreePos` —
 // the cross-unit helper the foliage/trunk/root placer leaves consume before
 // every placement. Owned by the pending `feature.tree` manifest unit (row 569);
