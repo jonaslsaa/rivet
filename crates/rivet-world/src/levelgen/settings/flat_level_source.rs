@@ -145,8 +145,10 @@ impl FlatLevelSource {
 /// `FlatLevelSource.fillFromNoise`'s per-block write — Java's
 /// `centerChunk.setBlockState(blockPos.set(x, y, z), blockState)` followed by
 /// the two worldgen heightmap `update`s. Routes through the worldgen block
-/// write (see `below_zero_retrogen`'s `write_block` for the same seam). The
-/// heightmaps are created once by `fillFromNoise` before the loop.
+/// write (see `below_zero_retrogen`'s `write_block` for the same seam — the
+/// fully-implemented `set_block_state` and this route produce the same
+/// block/heightmap result for these call sites). The heightmaps are created
+/// once by `fillFromNoise` before the loop.
 fn write_layer_block<B, S>(
     chunk: &mut ProtoChunk<BlockState, B, S>,
     x: i32,

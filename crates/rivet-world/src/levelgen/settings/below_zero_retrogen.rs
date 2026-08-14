@@ -33,14 +33,18 @@
 //! ### The chunk-write seam
 //!
 //! `replaceOldBedrock`/`applyBedrockMask` mutate a `ProtoChunk` through Java's
-//! `chunk.setBlockState`. The ported `ProtoChunk` defers `setBlockState`'s
-//! block-mutation half to the #216 section write, so the writes here route
-//! through [`ProtoChunk::write_worldgen_block`] (the real worldgen block write
-//! the noisegen unit uses) with the two `Usage.WORLDGEN` heightmaps created up
-//! front — the `EMPTY`-status `heightmapsAfter` set, which is the set Java's
-//! `setBlockState` primes for a generation-phase proto chunk. The non-worldgen
-//! heightmaps, post-processing, and light defer with the owning chunk units
-//! (RivetTodo #216/#183).
+//! `chunk.setBlockState`. The ported `ProtoChunk` implements `set_block_state`
+//! (the `isOutsideBuildHeight` void-air guard, the all-air/AIR fast path, the
+//! section write, and the `heightmapsAfter` heightmap updates — see
+//! [`ProtoChunk::set_block_state`]); the writes here instead route through
+//! [`ProtoChunk::write_worldgen_block`], the same worldgen block write the
+//! noisegen `doFill` uses, which updates exactly the two `Usage.WORLDGEN`
+//! heightmaps (the `EMPTY`-status `heightmapsAfter` set) on every write.
+//! Either surface produces the same block/heightmap result for these call
+//! sites; the `write_worldgen_block` route is the one the worldgen fill paths
+//! use, so the caller primes those two heightmaps once up front. The
+//! non-worldgen heightmaps, post-processing, and light defer with the owning
+//! chunk units (RivetTodo #216/#183).
 
 use crate::biome::biome_resolver::BiomeResolver;
 use crate::biome::biomes;
@@ -302,14 +306,14 @@ where
     }
 }
 
-/// The `ProtoChunk.setBlockState` write seam — Java's `setBlockState` prologue
-/// primes the persisted-status heightmaps before the section write; the
-/// worldgen write (`write_worldgen_block`) does the same for the two
-/// `Usage.WORLDGEN` heightmaps (the `EMPTY`-status set). See the module doc.
+/// The per-block write — Java's `ProtoChunk.setBlockState` routed through the
+/// worldgen block write ([`ProtoChunk::write_worldgen_block`]) for the
+/// `Usage.WORLDGEN` heightmaps, exactly as `NoiseBasedChunkGenerator.doFill`
+/// writes (see the module doc).
 ///
-/// The heightmaps must exist before the first write: every caller (the two
-/// `replaceOldBedrock`/`applyBedrockMask` paths) creates them once up front,
-/// mirroring `flat_level_source.fill_from_noise`.
+/// The two worldgen heightmaps must exist before the first write: every caller
+/// (the two `replaceOldBedrock`/`applyBedrockMask` paths) creates them once up
+/// front, mirroring `flat_level_source.fill_from_noise`.
 fn write_block<B, S>(chunk: &mut ProtoChunk<BlockState, B, S>, pos: &BlockPos, state: BlockState)
 where
     B: Clone + PartialEq + Send + std::fmt::Debug + 'static,

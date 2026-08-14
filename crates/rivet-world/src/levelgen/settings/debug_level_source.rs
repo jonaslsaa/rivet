@@ -478,4 +478,63 @@ mod tests {
             1234,
         )
     }
+
+    /// `DebugLevelSource.CODEC` — the single `RegistryOps.retrieveElement(
+    /// Biomes.PLAINS)` context field, `.stable()`. The wire form is an empty
+    /// map (the element is fetched from the registry context, not written); a
+    /// decode resolves the plains biome through the ops access and reconstructs
+    /// the fixed source, and the encode round-trips to the same empty map.
+    #[test]
+    fn codec_round_trips_the_plains_element_through_the_registry() {
+        use rivet_registry::HolderGetter;
+        use rivet_registry::RegistryBuilder;
+        use rivet_registry::ResourceKey;
+        use rivet_registry::RegistrationInfo;
+        use rivet_registry::access::RegistryAccess;
+        use rivet_registry::identifier::Identifier;
+        use rivet_registry::registry_ops::RegistryOps;
+        use rivet_serialization::json_ops::JsonOps;
+        use serde_json::json;
+
+        let mut biomes_reg = RegistryBuilder::new(&*rivet_registry::registries::BIOME);
+        biomes_reg.register(
+            &ResourceKey::create(
+                &*rivet_registry::registries::BIOME,
+                Identifier::parse("minecraft:plains"),
+            ),
+            Arc::new(BiomeId::from_id(40)),
+            RegistrationInfo::BUILT_IN,
+        );
+        let access = RegistryAccess::from_pairs(vec![(
+            ResourceKey::create_registry_key(Identifier::with_default_namespace("worldgen/biome")),
+            Box::new(biomes_reg.freeze()) as rivet_registry::root::AnyBox,
+        )]);
+        // The plains holder the decode must reconstruct (resolved from the
+        // access before the ops consumes it).
+        let plains = access
+            .lookup::<BiomeId>(&*rivet_registry::registries::BIOME)
+            .expect("biome registry")
+            .get_or_throw(&biomes::PLAINS);
+
+        let ops = RegistryOps::create_from_access(&JsonOps::INSTANCE, access);
+        let codec = map_codec::codec_of(debug_level_source_map_codec::<RegistryOps<
+            serde_json::Value,
+            JsonOps,
+        >>());
+
+        let encoded_in = json!({});
+        let parsed = codec.parse(&ops, &encoded_in);
+        let source = parsed.result().expect("decode should succeed");
+
+        // The fixed plains biome source resolves through the registry context.
+        assert_eq!(source.get_biome_source().collect_possible_biomes(), vec![plains]);
+
+        // Encode round-trips to the empty wire form.
+        let encoded = codec
+            .encode_start(&ops, source)
+            .result()
+            .expect("encode should succeed")
+            .clone();
+        assert_eq!(encoded, encoded_in);
+    }
 }
