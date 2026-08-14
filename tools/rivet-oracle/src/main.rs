@@ -133,6 +133,7 @@ mod hash_manifest;
 mod loaded_world;
 mod mutate;
 mod semantic_hash;
+mod surface_column;
 
 use std::collections::BTreeMap;
 use std::env;
@@ -955,6 +956,12 @@ fn verify_all_fixture_kinds_from(root: &Path) -> Result<(), Error> {
         );
     }
     verify_composed_noise_step(&composed_noise_dir)?;
+    // The post-surface column oracle (issue #179): beyond the manifest hashes,
+    // assert the SURFACE-checkpoint goldens (pinned provenance, the #175 matrix,
+    // and non-vacuity — every column must show real post-surface block changes,
+    // so a pre-surface/no-op capture is detected). Like the NOISE checkpoint,
+    // a missing fixture tree is UNVERIFIED (exit 3), never a silent green.
+    verify_surface_column_step(&crate_dir().join("fixtures/surface-column"))?;
     // The generated-expected ground-truth handoff (PR #563): beyond the manifest
     // hashes, assert the seed-42 handoff's provenance, forced-grid shape, and
     // anti-superflat per-chunk sample contract. Absent -> UNVERIFIED (exit 3),
@@ -962,6 +969,25 @@ fn verify_all_fixture_kinds_from(root: &Path) -> Result<(), Error> {
     generated_expected::verify_generated_expected_step(&generated_expected_dir)?;
     println!(
         "PASS: generated-expected seed-42 handoff verified (pinned Paper 0a99345 provenance, manifest hash, forced-grid per-chunk sample contract)"
+    );
+    Ok(())
+}
+
+/// Verify the committed post-surface column golden, failing with
+/// `Error::Unverified` (exit 3) when the fixture tree is absent rather than
+/// silently skipping it.
+fn verify_surface_column_step(dir: &Path) -> Result<(), Error> {
+    if !dir.join("manifest.json").is_file() {
+        return Err(Error::Unverified(format!(
+            "surface-column fixtures {} are ABSENT — the seed-42 post-surface \
+             golden and its SURFACE-checkpoint gate cannot verify (git checkout \
+             or regenerate via --surface-column); refusing to pass green without them",
+            dir.display()
+        )));
+    }
+    surface_column::verify_surface_column(dir)?;
+    println!(
+        "PASS: surface-column seed-42 post-surface golden verified (pinned Paper 0a99345 provenance, #175 matrix, non-vacuous post-surface deltas)"
     );
     Ok(())
 }
@@ -2381,15 +2407,17 @@ fn regenerate_full(dest: &Path) -> Result<(), Error> {
 }
 
 /// `regenerate`: full regeneration of every fixture kind (or a sub-selection
-/// via `--m0` / `--m2` / `--full` / `--samples` / `--text`). A bare invocation
-/// regenerates all five kinds — M0, M2, the superflat status-FULL capture
-/// (issue #51), the derived worldgen samples, and the derived text corpus
-/// (issue #98).
+/// via `--m0` / `--m2` / `--full` / `--samples` / `--text` /
+/// `--composed-noise` / `--surface-column`). A bare invocation regenerates all
+/// of them — M0, M2, the superflat status-FULL capture (issue #51), the
+/// derived worldgen samples, the derived text corpus (issue #98), and the
+/// derived composed-noise / surface-column Paper-grounded goldens.
 ///
 /// Each kind defaults to its committed location (M0 -> `fixtures/`, M2 ->
 /// `fixtures/regions/overworld-normal/`, FULL -> `fixtures/regions/superflat-full/`;
 /// the derived kinds always regenerate their committed `fixtures/worldgen` /
-/// `fixtures/text` trees), so the official path refreshes the golden fixtures in
+/// `fixtures/text` / `fixtures/composed-noise` / `fixtures/surface-column`
+/// trees), so the official path refreshes the golden fixtures in
 /// place. An explicit `--to <dir>` overrides the destination for a single
 /// *booting* kind (`--m0`/`--m2`/`--full` only; refused for bare/combined
 /// selections and for the derived kinds), regenerating into a scratch dir for
@@ -2405,6 +2433,7 @@ fn run_regenerate(only: &[&str], to: Option<&Path>) -> Result<(), Error> {
                 | "--samples"
                 | "--text"
                 | "--composed-noise"
+                | "--surface-column"
                 | "--generated-expected"
         ) {
             return Err(Error::Gate(format!("unknown regenerate flag: {flag}")));
@@ -2424,8 +2453,8 @@ fn run_regenerate(only: &[&str], to: Option<&Path>) -> Result<(), Error> {
         return Err(Error::Gate(format!(
             "regenerate --to <dir> requires exactly one of --m0/--m2/--full — bare \
              and combined selections, and the derived kinds --samples/--text/\
-             --composed-noise/--generated-expected (which regenerate their committed \
-             fixture trees and ignore --to), are refused; got {what}"
+             --composed-noise/--surface-column/--generated-expected (which \
+             regenerate their committed fixture trees and ignore --to), are refused; got {what}"
         )));
     }
     let m0 = regenerates_kind("--m0", only);
@@ -2434,6 +2463,7 @@ fn run_regenerate(only: &[&str], to: Option<&Path>) -> Result<(), Error> {
     let samples = regenerates_kind("--samples", only);
     let text = regenerates_kind("--text", only);
     let composed_noise = regenerates_kind("--composed-noise", only);
+    let surface_column = regenerates_kind("--surface-column", only);
     let generated_expected = regenerates_kind("--generated-expected", only);
     let m0_default = crate_dir().join("fixtures");
     let m2_default = crate_dir().join("fixtures/regions/overworld-normal");
@@ -2464,6 +2494,10 @@ fn run_regenerate(only: &[&str], to: Option<&Path>) -> Result<(), Error> {
     if composed_noise {
         println!("==> regenerating composed-noise seed-42 goldens from pinned Paper");
         composed_noise::run_probe(&crate_dir().join("fixtures/composed-noise"))?;
+    }
+    if surface_column {
+        println!("==> regenerating surface-column seed-42 goldens from pinned Paper");
+        surface_column::run_probe(&crate_dir().join("fixtures/surface-column"))?;
     }
     if generated_expected {
         println!(
@@ -3278,6 +3312,16 @@ fn print_usage() {
         "                                             negative control; --sample regenerates from"
     );
     println!("                                             the pinned Paper runtime");
+    println!("  cargo run -p rivet-oracle -- surface-column [--tamper | --sample]");
+    println!(
+        "                                             surface-column golden comparison: verify the"
+    );
+    println!("                                             seed-42 SURFACE-checkpoint goldens +");
+    println!(
+        "                                             non-vacuity checks; --tamper is the negative"
+    );
+    println!("                                             control; --sample regenerates from the");
+    println!("                                             pinned Paper runtime");
     println!("  cargo run -p rivet-oracle -- generated-expected <seed> [--to <out> | --tamper]");
     println!(
         "                                             seed-42 generated-world ground-truth handoff:"
@@ -3301,9 +3345,8 @@ fn print_usage() {
     println!(
         "                                             (sub-select: --m0 / --m2 / --full / --samples / --text /"
     );
-    println!(
-        "                                              --composed-noise / --generated-expected;"
-    );
+    println!("                                              --composed-noise / --surface-column /");
+    println!("                                              --generated-expected;");
     println!(
         "                                              --to <dir> — exactly one of --m0/--m2/--full"
     );
@@ -3398,6 +3441,27 @@ fn run() -> Result<(), Error> {
                 composed_noise::ComposedNoiseMode::Verify => {
                     crate::verify_composed_noise_step(&dir)
                 }
+            }
+        }
+        Some("surface-column") => {
+            // The post-surface column oracle (SURFACE checkpoint, issue #179).
+            //   cargo run -p rivet-oracle -- surface-column            verify + non-vacuity checks
+            //   cargo run -p rivet-oracle -- surface-column --tamper   negative control
+            //   cargo run -p rivet-oracle -- surface-column --sample   regenerate from pinned Paper
+            let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+            // --help is accepted only as the sole argument; combined with a mode
+            // or another flag it is a hard usage error via parse_mode below.
+            if matches!(rest.as_slice(), ["--help"] | ["-h"]) {
+                print_usage();
+                return Ok(());
+            }
+            let dir = crate_dir().join("fixtures/surface-column");
+            match surface_column::parse_mode(&rest)? {
+                surface_column::SurfaceColumnMode::Tamper => {
+                    surface_column::tamper_negative_control(&dir)
+                }
+                surface_column::SurfaceColumnMode::Sample => surface_column::run_probe(&dir),
+                surface_column::SurfaceColumnMode::Verify => verify_surface_column_step(&dir),
             }
         }
         Some("sample") => regenerate_samples(),
