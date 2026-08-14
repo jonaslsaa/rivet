@@ -35,13 +35,14 @@
 //!   `preliminary_surface_level` closure (see `aquifer.rs`). The closure and
 //!   the public `preliminary_surface_level` share one
 //!   `preliminarySurfaceLevelCache` `Arc` (Java's single `Long2IntMap`).
-//! - `MaterialRuleList` (`mc.world.level.levelgen.material`) is a STUB value
-//!   struct here (the 2-line iteration; the owning material unit replaces it).
+//! - `MaterialRuleList` (`mc.world.level.levelgen.material`) is ported by its
+//!   owning unit in `levelgen::material`; the noisegen unit consumes it.
 
 use crate::biome::{ParameterPoint, Sampler};
 use crate::block::BlockState;
 use crate::level::height_accessor::LevelHeightAccessor;
 use crate::levelgen::blending::blender::{Blender, BlendingOutput};
+use crate::levelgen::material::MaterialRuleList;
 use crate::levelgen::noise::beardifier_marker::BeardifierMarker;
 use crate::levelgen::noise::density_function::{
     ContextProvider, DensityFunction, FunctionContext, IdentityKey, SinglePointContext, Visitor,
@@ -68,33 +69,6 @@ use std::sync::{Arc, Mutex};
 pub trait BlockStateFiller: Send + Sync {
     /// `calculate(FunctionContext)` — `None` for Java's `null`.
     fn calculate(&self, context: &dyn FunctionContext) -> Option<BlockState>;
-}
-
-/// STUB(mc.world.level.levelgen.material) — `MaterialRuleList`, the
-/// `NoiseChunk.BlockStateFiller` list. The owning material unit ports the real
-/// class; the noisegen unit carries the 2-line iteration (the first non-`None`
-/// filler wins).
-pub struct MaterialRuleList {
-    /// `rules` — the `NoiseChunk.BlockStateFiller[]`.
-    pub rules: Vec<Arc<dyn BlockStateFiller>>,
-}
-
-impl MaterialRuleList {
-    /// `MaterialRuleList(NoiseChunk.BlockStateFiller...)`.
-    pub fn new(rules: Vec<Arc<dyn BlockStateFiller>>) -> Self {
-        MaterialRuleList { rules }
-    }
-}
-
-impl BlockStateFiller for MaterialRuleList {
-    fn calculate(&self, context: &dyn FunctionContext) -> Option<BlockState> {
-        for rule in &self.rules {
-            if let Some(state) = rule.calculate(context) {
-                return Some(state);
-            }
-        }
-        None
-    }
 }
 
 /// The mutable interpolation state shared between the `NoiseChunk`, its `wrap`
@@ -228,7 +202,8 @@ pub struct NoiseChunk {
     preliminary_surface_level: Arc<dyn DensityFunction>,
     /// `fullNoiseDensity`.
     full_noise_density: Arc<dyn DensityFunction>,
-    /// `blockStateRule` — the `MaterialRuleList` STUB.
+    /// `blockStateRule` — the `MaterialRuleList` (levelgen::material)
+    /// block-state-rule list.
     block_state_rule: Arc<dyn BlockStateFiller>,
     /// `blender`.
     blender: Blender,
