@@ -720,11 +720,11 @@ pub enum LevelChunkBridgeError {
     #[error(transparent)]
     UnsupportedLightState(#[from] UnsupportedLightState),
     /// A section's paletted containers failed to re-encode into the server
-    /// `StateId`/`BiomeId` value pair (`map_values`). The reconstructed and
-    /// server strategies share the same dense global-id ladder, so this is
-    /// hostile-input defense: the `.expect` that used to abort the process is
-    /// now a typed error.
-    #[error("UNVERIFIED reconstructed chunk failed to re-encode into the server value pair: {0}")]
+    /// `StateId`/`BiomeId` value pair (`map_values`). The source strategies
+    /// (worldgen or reconstructed) and the server strategies share the same
+    /// dense global-id ladder, so this is hostile-input defense: the `.expect`
+    /// that used to abort the process is now a typed error.
+    #[error("UNVERIFIED chunk failed to re-encode into the server value pair: {0}")]
     PaletteMap(String),
 }
 
