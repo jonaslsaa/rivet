@@ -4324,7 +4324,7 @@ mod tests {
         // suppressed the fire above — if the steep condition ever read a
         // raised column, the first assertion would flip.
         let mut raised = [10i32; 256];
-        raised[0 + 1 * 16] = 14;
+        raised[16] = 14;
         let sc = Arc::new(SurfaceContext {
             system: Arc::new(stub_surface_system()),
             cells: SharedCells::new(),
