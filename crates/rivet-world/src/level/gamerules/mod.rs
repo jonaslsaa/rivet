@@ -31,7 +31,7 @@
 //!   (see [`game_rules`]).
 //! - `FeatureElement.isEnabled` is inlined on the rule (`requiredFeatures().
 //!   isSubsetOf(enabledFeatures)`) — the `FeatureElement` trait defers with
-//!   `RivetTodo(#387)`.
+//!   `RivetTodo(#418)`.
 
 pub mod game_rule;
 pub mod game_rule_category;

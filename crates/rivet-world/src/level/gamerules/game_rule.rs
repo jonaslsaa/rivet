@@ -312,7 +312,7 @@ impl GameRuleErased {
 
     /// `FeatureElement.isEnabled(enabledFeatures)` —
     /// `requiredFeatures().isSubsetOf(enabledFeatures)` (the `FeatureElement`
-    /// trait is deferred with `RivetTodo(#387)`; the subset test is inlined).
+    /// trait is deferred with `RivetTodo(#418)`; the subset test is inlined).
     pub fn is_enabled(&self, enabled_features: &FeatureFlagSet) -> bool {
         self.required_features.is_subset_of(enabled_features)
     }
