@@ -52,14 +52,16 @@
 //! `Feature.java`'s protected/static helper surface is ported where the seams
 //! exist: `isReplaceable`, `checkNeighbors`, `isAdjacentToAir` (pure functions
 //! over `BlockState`/`BlockPos`), and `place_with_config` (the `FeatureBehavior`
-//! default; see below). `setBlock`/`safeSetBlock`/`markAboveForPostProcessing`
-//! are NOT ported — their write seams (`LevelWriter.setBlock` with the
-//! `Block.UPDATE_ALL`/`UPDATE_CLIENTS` flag constants, and
-//! `ChunkAccess.markPosForPostProcessing`) are not reachable on the
-//! `WorldGenLevel` seam yet, so declaring them would fabricate a write
-//! (RivetTodo #228). `configuredCodec()` stays deferred with the `#126`
-//! by-name codec surface. Concrete feature units will reach for the ported
-//! helpers at `check_neighbors(context.level(), ...)` /
+//! default; see below). The write seam `WorldGenLevel::set_block` (the target
+//! of `LevelWriter.setBlock` with the `Block.UPDATE_ALL`/`UPDATE_CLIENTS` flag
+//! constants) is declared on `WorldGenLevel` and reduces `Feature.setBlock`/
+//! `safeSetBlock` to it — its default fails explicitly until the owning
+//! `world.level` unit lands (RivetTodo #232). The `Feature.setBlock`/
+//! `safeSetBlock` helper methods themselves and
+//! `ChunkAccess.markPosForPostProcessing` are NOT ported yet, so declaring
+//! them would fabricate a write. `configuredCodec()` stays deferred with the
+//! `#126` by-name codec surface. Concrete feature units will reach for the
+//! ported helpers at `check_neighbors(context.level(), ...)` /
 //! `is_replaceable(...)`.
 
 pub mod configurations;
@@ -570,12 +572,14 @@ pub fn feature_place<R: RandomSource>(
 // `Feature.java`'s protected/static helper surface
 // ---------------------------------------------------------------------------
 //
-// `Feature.setBlock` / `safeSetBlock` / `markAboveForPostProcessing` are NOT
-// ported: their write seams (`LevelWriter.setBlock` with the
-// `Block.UPDATE_ALL`/`UPDATE_CLIENTS` flags, and
-// `ChunkAccess.markPosForPostProcessing`) are not reachable on the
-// `WorldGenLevel` seam yet (RivetTodo #228), so declaring them would be
-// fabrication. The three pure helpers below are reachable with existing seams.
+// The write seam `WorldGenLevel::set_block` (the target of
+// `LevelWriter.setBlock` with the `Block.UPDATE_ALL`/`UPDATE_CLIENTS` flags)
+// is declared on `WorldGenLevel` and reduces `Feature.setBlock`/`safeSetBlock`
+// to it — its default fails explicitly until the owning `world.level` unit
+// lands (RivetTodo #232). The `Feature.setBlock` / `safeSetBlock` helper
+// methods themselves and `ChunkAccess.markPosForPostProcessing` are NOT ported
+// yet, so declaring them would be fabrication. The three pure helpers below
+// are reachable with existing seams.
 
 /// `Feature.isReplaceable(TagKey<Block>)` — `s -> !s.is(cannotReplaceTag)`
 /// over the block-state form; the port's `BlockState::is_in_tag(&str)` reads
