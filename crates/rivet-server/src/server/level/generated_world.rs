@@ -22,24 +22,29 @@
 //!
 //! ## The typed downstream boundary
 //!
-//! `WorldGenContext::generate_through` refuses any target past `NOISE` with a
-//! `GenError::UnsupportedStatus` *before* running work (the SURFACE..FULL
-//! stages are the unwired #185 ladder), so the holder's
-//! [`GenerationChunkHolder::generate_through`] surfaces a typed
-//! [`GeneratedChunkError::UnsupportedStatus`] rather than stamping a status
-//! that was never generated. The SURFACE refusal is also a cross-crate
-//! visibility boundary, not just an executor-wiring choice: the ported surface
-//! driver (`SurfaceSystem::build_surface` in `rivet-world::levelgen::
-//! surface_rules`) is `pub(crate)`-sealed awaiting the #177 surface-wave wiring
-//! that calls it from `NoiseBasedChunkGenerator` (which itself exposes only the
-//! empty `build_surface_stub`). Rivet-server cannot drive SURFACE without
-//! editing rivet-world surface internals (out of this task's scope), so the
-//! spine honors the seal and fails loud instead. And a generated chunk can
-//! never enter the server authority: [`ChunkMap::install`] accepts only a
-//! `LevelChunk` (the FULL chunk type), and no conversion from a sub-FULL
-//! `ProtoChunk` exists — the [`GenerationChunkHolder::to_level_chunk`] gate
-//! fails loudly with [`GeneratedChunkError::InstallRequiresFull`] instead of
-//! fabricating a FULL chunk or falling back to superflat.
+//! `WorldGenContext::generate_through` supports generation through `LIGHT` (the
+//! INITIALIZE_LIGHT/LIGHT steps are wired and engine-gated), and refuses
+//! anything beyond it *before* running work. A fresh EMPTY chunk targeting any
+//! of SURFACE..LIGHT is refused by the unwired SURFACE rung (`GenError::
+//! UnsupportedTask` — the SURFACE..FEATURES ladder is the unwired #185 step,
+//! and it is the first step a promotion to any of those targets must pass), and
+//! a target past LIGHT (SPAWN/FULL) is out of range (`GenError::
+//! UnsupportedStatus`). The holder's [`GenerationChunkHolder::generate_through`]
+//! surfaces these as typed [`GeneratedChunkError::Generation`] /
+//! [`GeneratedChunkError::UnsupportedStatus`] rather than stamping a status that
+//! was never generated. The SURFACE refusal is also a cross-crate visibility
+//! boundary, not just an executor-wiring choice: the ported surface driver
+//! (`SurfaceSystem::build_surface` in `rivet-world::levelgen::surface_rules`)
+//! is `pub(crate)`-sealed awaiting the #177 surface-wave wiring that calls it
+//! from `NoiseBasedChunkGenerator` (which itself exposes only the empty
+//! `build_surface_stub`). Rivet-server cannot drive SURFACE without editing
+//! rivet-world surface internals (out of this task's scope), so the spine
+//! honors the seal and fails loud instead. And a generated chunk can never
+//! enter the server authority: [`ChunkMap::install`] accepts only a `LevelChunk`
+//! (the FULL chunk type), and no conversion from a sub-FULL `ProtoChunk`
+//! exists — the [`GenerationChunkHolder::to_level_chunk`] gate fails loudly
+//! with [`GeneratedChunkError::InstallRequiresFull`] instead of fabricating a
+//! FULL chunk or falling back to superflat.
 //!
 //! ## The deferred `GenerationChunkHolderView` seam
 //!
@@ -104,9 +109,11 @@ pub enum GeneratedChunkError {
     /// (`GenError::BiomesNotGenerated`/`DataNotCarried`), a demotion, or a
     /// wired-task mismatch. The chunk is left untouched.
     Generation(GenError),
-    /// A target past `NOISE` — the executor rejected it before running any
-    /// work. The SURFACE..FULL stages are unwired (#185); naming the requested
-    /// status makes the downstream boundary explicit.
+    /// A target past `LIGHT` — the executor rejected it before running any
+    /// work. Generation is wired only through `LIGHT` (#184); naming the
+    /// requested status makes the downstream boundary explicit. (A target in
+    /// SURFACE..LIGHT is instead refused by the unwired SURFACE rung, which
+    /// surfaces as [`GeneratedChunkError::Generation`].)
     UnsupportedStatus(ChunkStatus),
     /// The genuine-FULL-only install gate: a generated chunk is a `ProtoChunk`
     /// through `NOISE` and cannot be converted into the `LevelChunk` (FULL)
@@ -385,10 +392,13 @@ impl GenerationChunkHolder {
     }
 
     /// Drive the chunk from its current persisted status through `target`
-    /// (inclusive). `target ≤ NOISE` runs real work; `target ≥ SURFACE` is
-    /// rejected by the executor before any work with a typed
-    /// [`GeneratedChunkError::UnsupportedStatus`] — the chunk is left
-    /// untouched.
+    /// (inclusive). Generation is supported through `LIGHT`; a target the value
+    /// layer does not wire is rejected by the executor before any work with a
+    /// typed error — a fresh EMPTY chunk targeting SURFACE..LIGHT is refused by
+    /// the unwired SURFACE rung ([`GeneratedChunkError::Generation`] carrying
+    /// `GenError::UnsupportedTask`), and a target past LIGHT (SPAWN/FULL) is out
+    /// of range ([`GeneratedChunkError::UnsupportedStatus`]). The chunk is
+    /// left untouched.
     pub fn generate_through(&mut self, target: ChunkStatus) -> Result<(), GeneratedChunkError> {
         self.context
             .generate_through(&GENERATION_PYRAMID, &mut self.chunk, target)
@@ -427,6 +437,7 @@ mod tests {
     use super::*;
     use crate::server::level::chunk_map::ChunkMap;
     use rivet_registry::generated::block_states::StateId;
+    use rivet_world::chunk::status::ChunkStatusTask;
     use rivet_world::levelgen::heightmap::Types;
 
     /// The shared test realization (built once — the worldgen registry
@@ -600,23 +611,46 @@ mod tests {
     }
 
     /// Hostile: a downstream target (SURFACE and beyond) is rejected before any
-    /// work runs, with the typed unsupported status, and the chunk is never
-    /// stamped past NOISE — fresh, and again after a successful NOISE.
+    /// work runs, with a typed error, and the chunk is never stamped past NOISE —
+    /// fresh, and again after a successful NOISE.
+    ///
+    /// The value-layer boundary is `LIGHT`: the INITIALIZE_LIGHT/LIGHT steps are
+    /// wired (`WorldGenContext::generate_through`, engine-gated) but the
+    /// SURFACE..FEATURES ladder below them is unwired (RivetTodo #185). A fresh
+    /// EMPTY chunk targeting any of SURFACE..LIGHT is therefore refused by the
+    /// unwired SURFACE rung that the pre-check hits first (`UnsupportedTask`),
+    /// and a target past LIGHT (SPAWN/FULL) is out of range
+    /// (`UnsupportedStatus`). Every refusal happens before any work, so the
+    /// chunk stays EMPTY.
     #[test]
     fn downstream_stages_fail_loudly_and_never_stamp() {
         let generator = test_generator();
-        // A fresh chunk: the executor rejects SURFACE..FULL with the typed
-        // boundary before any work, so the chunk stays EMPTY.
         let mut fresh = generator.create_holder(ChunkPos::ZERO);
+        // SURFACE..LIGHT: the unwired SURFACE rung blocks the whole path in the
+        // value layer, before any work runs — even the engine-gated light steps
+        // are unreachable from EMPTY, because the SURFACE step would have to be
+        // the first mutation. The chunk is untouched.
         for status in [
             ChunkStatus::Surface,
             ChunkStatus::Carvers,
             ChunkStatus::Features,
             ChunkStatus::InitializeLight,
             ChunkStatus::Light,
-            ChunkStatus::Spawn,
-            ChunkStatus::Full,
         ] {
+            assert!(
+                matches!(
+                    fresh.generate_through(status),
+                    Err(GeneratedChunkError::Generation(GenError::UnsupportedTask {
+                        task: ChunkStatusTask::GenerateSurface,
+                        ..
+                    }))
+                ),
+                "target {status:?} must be rejected by the unwired SURFACE rung"
+            );
+            assert_eq!(fresh.status(), ChunkStatus::Empty);
+        }
+        // SPAWN/FULL are past the LIGHT range: rejected as UnsupportedStatus.
+        for status in [ChunkStatus::Spawn, ChunkStatus::Full] {
             assert!(
                 matches!(
                     fresh.generate_through(status),
