@@ -21,6 +21,7 @@
 
 use crate::level::height_accessor::LevelHeightAccessor;
 use crate::levelgen::heightmap::Types;
+use rivet_registry::access::RegistryAccess;
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::block_state::BlockState;
 use rivet_registry::core::BlockPos;
@@ -111,5 +112,68 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     /// default fails explicitly rather than fabricating a result.
     fn can_survive(&self, _state: &BlockState, _pos: &BlockPos) -> bool {
         panic!("BlockStateBase.canSurvive is not implemented (RivetTodo #399)")
+    }
+
+    // -----------------------------------------------------------------------
+    // STUB(mc.world.level.levelgen.feature.vegetation-family): the remaining
+    // world seams the vegetation/aquatic/selector feature family consumes.
+    // Each defaults to an explicit failure (the same capability-unavailable
+    // seam as `get_biome`/`get_height_at`) until the owning `world.level`
+    // unit lands; the concrete features and their test doubles override them
+    // with real behavior.
+    // -----------------------------------------------------------------------
+
+    /// `LevelReader.isEmptyBlock(BlockPos)` — the empty-cell read the
+    /// vegetation features gate on (`VinesFeature`, `BambooFeature`,
+    /// `NetherForestVegetationFeature`, `ChorusPlantFeature`, …).
+    ///
+    /// RivetTodo(#228): the world-access implementation is not ported; the
+    /// default fails explicitly rather than fabricating a state.
+    fn is_empty_block(&self, _pos: &BlockPos) -> bool {
+        panic!("LevelReader.isEmptyBlock is not implemented (RivetTodo #228)")
+    }
+
+    /// `LevelReader.getSeaLevel()` — the sea-level read `BlueIceFeature`
+    /// gates on (`origin.getY() > level.getSeaLevel() - 1`). Java lives on
+    /// `LevelReader`, so it sits here (the `ChunkGenerator`-side
+    /// `get_sea_level` seam exists separately for `BasaltColumnsFeature`).
+    ///
+    /// RivetTodo(#228): the world-access implementation is not ported; the
+    /// default fails explicitly rather than fabricating a level.
+    fn get_sea_level(&self) -> i32 {
+        panic!("LevelReader.getSeaLevel is not implemented (RivetTodo #228)")
+    }
+
+    /// `LevelWriter.setBlock(BlockPos, BlockState, int)` — the block write
+    /// seam `Feature.setBlock`/`safeSetBlock` reduce to
+    /// (`level.setBlock(pos, state, flags)` with the `Block.UPDATE_*`
+    /// constants). `&mut self` mirrors the `LevelWriter` write contract (the
+    /// worldgen level is exclusively `&mut`-borrowed, OWNERSHIP.md).
+    ///
+    /// RivetTodo(#228): the chunk-write implementation is not ported; the
+    /// default fails explicitly rather than fabricating a write.
+    fn set_block(&mut self, _pos: &BlockPos, _state: BlockState, _flags: u32) -> bool {
+        panic!("LevelWriter.setBlock is not implemented (RivetTodo #228)")
+    }
+
+    /// The registry-access back-reference seam. Java `Holder.value()` needs no
+    /// lookup (the holder stores its value); the Rust port's `Reference` is a
+    /// pure `(RegistryId, id)` pair, so resolving one — and threading the
+    /// `&dyn HolderLookup` that `PlacedFeature::place` takes — requires the
+    /// owning `RegistryAccess`. Selector and composite features
+    /// (`RandomSelectorFeature`, `VegetationPatchFeature`, …) resolve their
+    /// `Holder<PlacedFeature>` and pass the configured-feature lookup down.
+    ///
+    /// The access is returned owned (a cheap `Arc` clone of the shared entry
+    /// list) so the resolved registries borrow from the local clone, never
+    /// from the `&mut` level. This is a port-threading artifact, not a Java
+    /// surface: Java features never touch the access here.
+    ///
+    /// STUB(mc.world.level.levelgen.feature.selector): no production
+    /// `WorldGenLevel` provides it yet; the default fails explicitly. Test
+    /// doubles build a `RegistryAccess` over the placed/configured-feature
+    /// registries and override.
+    fn registry_access(&self) -> RegistryAccess {
+        panic!("WorldGenLevel.registryAccess is not implemented (RivetTodo #399)")
     }
 }
