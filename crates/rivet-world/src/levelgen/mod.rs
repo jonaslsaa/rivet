@@ -44,6 +44,9 @@ pub mod heightmap;
 // `HeightProvider` value/codec layer, unblocked by the merged VerticalAnchor
 // #388 and weighted-random #353.
 pub mod heightproviders;
+// The `mc.world.level.levelgen.material` unit (issue #179 leaf): the
+// `MaterialRuleList` record — the `NoiseChunk.BlockStateFiller` list.
+pub mod material;
 // The `mc.world.level.levelgen.noise` unit's density-function/noise-router
 // value slice (issue #177).
 pub mod noise;
@@ -53,6 +56,11 @@ pub mod noise;
 // `NoiseBasedChunkGenerator`, `OreVeinifier`).
 pub mod noisegen;
 pub mod placement;
+// The `mc.world.level.levelgen.presets` unit: the `WorldPreset` value + its
+// `worldgen/world_preset` registry file codec, and `WorldPresets` (the seven
+// builtin preset keys + the `HolderLookup.Provider` helpers; the `bootstrap`/
+// `fromSettings` seams defer with RivetTodo(#185), see the module).
+pub mod presets;
 // The `mc.world.level.levelgen.surface` unit: the `SurfaceRules` value codecs
 // + the `Context` runtime + the `SurfaceSystem` noise set (see the module).
 pub mod surface_rules;
