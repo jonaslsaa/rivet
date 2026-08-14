@@ -336,6 +336,21 @@ impl FlatLevelGeneratorSettings {
         &self.layers
     }
 
+    /// `decoration`.
+    pub fn decoration(&self) -> bool {
+        self.decoration
+    }
+
+    /// `addLakes`.
+    pub fn add_lakes(&self) -> bool {
+        self.add_lakes
+    }
+
+    /// `voidGen`.
+    pub fn void_gen(&self) -> bool {
+        self.void_gen
+    }
+
     /// `updateLayers()` — clears the expanded column and rebuilds it from
     /// `layersInfo`, then recomputes `voidGen` (`allMatch(s ->
     /// s.is(Blocks.AIR))` — Java's `is(Block)` is block identity, not state
