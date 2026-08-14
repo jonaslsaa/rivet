@@ -2,7 +2,7 @@
 //! out-of-unit value shell `WorldDimensions` (this unit) stores.
 //!
 //! `LevelStem` is owned by the pending `mc.world.level.dimension` manifest unit
-//! (RivetTodo #388); the settings wave needs the record value (the
+//! (no owning issue yet); the settings wave needs the record value (the
 //! `WorldDimensions` map's element), so the shape is shelled here and the real
 //! record replaces it when that unit lands. The `type` field holds the
 //! `DIMENSION_TYPE` registry element placeholder (the full `DimensionType`
@@ -12,10 +12,11 @@
 //!
 //! ### The `CODEC` seam
 //!
-//! `LevelStem.CODEC` reads `DimensionType.CODEC` (pending, #388) and
-//! `ChunkGenerator.CODEC` (the generator dispatch codec, pending, #185). The
-//! codec factory returns a poison codec that fails with a `DataResult::error`
-//! naming both deferrals rather than fabricating a value — the same
+//! `LevelStem.CODEC` reads `DimensionType.CODEC` (pending,
+//! `mc.world.level.dimension`) and `ChunkGenerator.CODEC` (the generator
+//! dispatch codec, pending, `mc.world.level.chunk.generator`). The codec
+//! factory returns a poison codec that fails with a `DataResult::error` naming
+//! both deferrals rather than fabricating a value — the same
 //! capability-unavailable boundary the `WorldDimensions`/`WorldGenSettings`
 //! codecs inherit until the owning units land.
 
@@ -60,7 +61,7 @@ pub static END: LazyLock<ResourceKey<registries::LevelStem>> = LazyLock::new(|| 
 pub struct LevelStem {
     /// `type` — the `DIMENSION_TYPE` registry holder. `DimensionType` is the
     /// registry element placeholder until the `mc.world.level.dimension` unit
-    /// lands (RivetTodo #388).
+    /// lands (no owning issue yet).
     pub ty: Holder<registries::DimensionType>,
     /// `generator` — the chunk generator.
     pub generator: Arc<dyn ChunkGenerator>,
@@ -97,14 +98,15 @@ impl fmt::Debug for LevelStem {
 
 /// `LevelStem.CODEC` — the ops-generic `level_stem_codec::<Ops>()` factory.
 ///
-/// The record codec reads `DimensionType.CODEC` (pending, #388) and
-/// `ChunkGenerator.CODEC` (the generator dispatch codec, pending, #185); both
-/// are unavailable, so the factory returns a poison codec that fails with a
+/// The record codec reads `DimensionType.CODEC` (pending,
+/// `mc.world.level.dimension`) and `ChunkGenerator.CODEC` (the generator
+/// dispatch codec, pending, `mc.world.level.chunk.generator`); both are
+/// unavailable, so the factory returns a poison codec that fails with a
 /// `DataResult::error` naming the deferrals whenever an encode/decode reaches a
 /// stem. The `WorldDimensions`/`WorldGenSettings` codecs are structured over
 /// this leaf, so they inherit the boundary until the owning units land.
 pub fn level_stem_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<LevelStem, Ops>> {
-    let message = "LevelStem.CODEC is not implemented (RivetTodo #388/#185): needs DimensionType.CODEC (mc.world.level.dimension) and ChunkGenerator.CODEC (mc.world.level.chunk.generator)".to_string();
+    let message = "LevelStem.CODEC is not implemented (RivetTodo #185): needs DimensionType.CODEC (mc.world.level.dimension) and ChunkGenerator.CODEC (mc.world.level.chunk.generator)".to_string();
     codec::of(
         encoder::error::<LevelStem, Ops>(message.clone()),
         decoder::error::<LevelStem, Ops>(message.clone()),
@@ -141,8 +143,8 @@ mod tests {
             .expect("the LevelStem codec is a seam and must error");
         let message = error.message();
         assert!(
-            message.contains("RivetTodo #388"),
-            "the seam must name the #388 deferral, got: {message}"
+            message.contains("mc.world.level.dimension"),
+            "the seam must name the dimension-unit deferral, got: {message}"
         );
     }
 }
