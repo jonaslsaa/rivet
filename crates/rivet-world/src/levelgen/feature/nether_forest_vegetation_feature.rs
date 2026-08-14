@@ -195,6 +195,35 @@ mod tests {
         );
     }
 
+    /// A `canSurvive` false verdict skips every write, `placed` stays 0, and
+    /// the feature returns `false` — the survival gate is the write conjunct,
+    /// so the full `spreadWidth*spreadWidth` draw sequence still runs but no
+    /// block lands.
+    #[test]
+    fn cannot_survive_returns_false_without_writing() {
+        let mut level = TestLevel::over(access());
+        level.survive = false;
+        level.states.insert(
+            BlockPos::new(0, 59, 0),
+            BlockState::of(BlockId::from_name("minecraft:crimson_nylium").unwrap()),
+        );
+        let mut random = RecordingRandom::new(4);
+        assert!(!place(&mut level, &mut random));
+        assert_eq!(
+            random.calls,
+            [
+                RngCall::IntBound(3),
+                RngCall::IntBound(3),
+                RngCall::IntBound(2),
+                RngCall::IntBound(2),
+                RngCall::IntBound(3),
+                RngCall::IntBound(3),
+            ]
+            .repeat(9)
+        );
+        assert!(level.writes.is_empty());
+    }
+
     /// An origin outside the feature's build-height window returns `false` even
     /// with nylium below (the `y` window check short-circuits before any draw).
     ///
