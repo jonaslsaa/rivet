@@ -632,9 +632,21 @@ impl WorldBorder {
     }
     // Paper end - add back applySettings
 
-    /// `SavedData.isDirty()` — the supertype flag.
+    // --- inherited `SavedData` surface ---
+
+    /// `isDirty()`.
     pub fn is_dirty(&self) -> bool {
         self.saved_data.is_dirty()
+    }
+
+    /// `setDirty()`.
+    pub fn set_dirty(&mut self) {
+        self.saved_data.set_dirty();
+    }
+
+    /// `setDirty(boolean)`.
+    pub fn set_dirty_flag(&mut self, dirty: bool) {
+        self.saved_data.set_dirty_flag(dirty);
     }
 
     /// `WorldBorder.CODEC` — `Settings.CODEC.xmap(WorldBorder::new,
@@ -1756,6 +1768,20 @@ mod tests {
         assert_eq!(border.get_damage_per_block(), 0.5);
         assert_eq!(border.get_warning_time(), 42);
         assert_eq!(border.get_warning_blocks(), 9);
+        assert!(border.is_dirty());
+    }
+
+    #[test]
+    fn dirty_flag_can_be_cleared_and_redirtied() {
+        // The inherited `SavedData` surface: `setDirty()` marks, `setDirty(false)`
+        // clears, `setDirty(true)` redirties.
+        let mut border = WorldBorder::default();
+        assert!(!border.is_dirty());
+        border.set_dirty();
+        assert!(border.is_dirty());
+        border.set_dirty_flag(false);
+        assert!(!border.is_dirty());
+        border.set_dirty_flag(true);
         assert!(border.is_dirty());
     }
 
