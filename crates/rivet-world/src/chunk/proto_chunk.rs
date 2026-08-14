@@ -46,6 +46,7 @@ use crate::chunk::paletted_container_factory::PalettedContainerFactory;
 use crate::chunk::storage::chunk_reconstruction::block_state_predicates;
 use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::SimpleLevelHeightAccessor;
+use crate::levelgen::carver::CarveChunk;
 use crate::levelgen::heightmap::{Heightmap, StateFlags, Types};
 use crate::levelgen::surface_rules::ChunkSurface;
 use crate::lighting::swmr_nibble_array::SwmrNibbleArray;
@@ -413,6 +414,16 @@ where
         self.carving_mask = Some(data);
     }
 
+    /// Take the carving mask out, leaving `None` (Rust-only helper; no Java
+    /// analogue). The CARVERS driver (`NoiseBasedChunkGenerator::apply_carvers`)
+    /// needs both `&mut dyn CarveChunk` (the whole chunk) and `&mut CarvingMask`
+    /// (a field of the chunk) for each carve, which a single `&mut ProtoChunk`
+    /// cannot provide — it takes the mask out, drives it, and writes it back
+    /// with [`Self::set_carving_mask`].
+    pub fn take_carving_mask(&mut self) -> Option<CarvingMask> {
+        self.carving_mask.take()
+    }
+
     /// `ProtoChunk.setLightEngine(LevelLightEngine)` — the engine is not
     /// ported, so there is no field to store.
     ///
@@ -540,6 +551,37 @@ where
 
     fn mark_pos_for_post_processing(&mut self, x: i32, y: i32, z: i32) {
         ProtoChunk::mark_pos_for_post_processing(self, &BlockPos::new(x, y, z));
+    }
+}
+
+// The `CarveChunk` block surface (`applyCarvers`' `ChunkAccess` writes,
+// RivetTodo #399). A worldgen `ProtoChunk` is a freshly generated chunk, so
+// `isUpgrading` is fixed `false` — Java's `ChunkAccess.isUpgrading()` reflects
+// `belowZeroRetrogen != null`, which the generation path never sets.
+
+impl<B, S> CarveChunk for ProtoChunk<BlockState, B, S>
+where
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send + Sync,
+{
+    fn get_pos(&self) -> ChunkPos {
+        ProtoChunk::get_pos(self)
+    }
+
+    fn is_upgrading(&self) -> bool {
+        false
+    }
+
+    fn get_block_state(&self, pos: &BlockPos) -> BlockState {
+        ProtoChunk::get_block_state(self, pos.get_x(), pos.get_y(), pos.get_z())
+    }
+
+    fn set_block_state(&mut self, pos: &BlockPos, state: BlockState) {
+        ProtoChunk::set_block_state(self, pos.get_x(), pos.get_y(), pos.get_z(), state);
+    }
+
+    fn mark_pos_for_post_processing(&mut self, pos: &BlockPos) {
+        ProtoChunk::mark_pos_for_post_processing(self, pos);
     }
 }
 
