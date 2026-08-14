@@ -11,7 +11,8 @@
 //! greppability.
 //!
 //! `place` walks `BlockPos.betweenClosed(origin - (4,1,4), origin + (4,32,4))`
-//! in X/Y/Z-major order. A cell is filled when `insideRim = closerThan(origin,
+//! in x-fastest order (x varies fastest, then y, then z outermost). A cell is
+//! filled when `insideRim = closerThan(origin,
 //! 2.5)` or `closerThan(origin, 3.5)`; `Vec3i.closerThan` is
 //! `distToLowCornerSqr(pos) < Mth.square(distance)` (double `dx*dx+dy*dy+dz*dz`,
 //! the int coordinates widened to double before the per-axis subtraction), so
@@ -31,6 +32,7 @@ use crate::level::WorldGenLevel;
 use crate::levelgen::feature::FeatureBehavior;
 use crate::levelgen::feature::FeaturePlaceContext;
 use crate::levelgen::feature::configurations::NoneFeatureConfiguration;
+use crate::levelgen::feature::is_block;
 use rivet_registry::block_state::BlockState;
 use rivet_registry::block_state_properties::BlockStateProperties;
 use rivet_registry::core::BlockPos;
@@ -40,13 +42,6 @@ use rivet_util::RandomSource;
 /// `Block.UPDATE_ALL` — the write-flag constant `Feature.setBlock` reduces to
 /// (`UPDATE_NEIGHBORS | UPDATE_CLIENTS`).
 const UPDATE_ALL: u32 = 3;
-
-/// `BlockStateBase.is(Block)` — the block identity check
-/// `dropPreviousAndSetBlock` gates its destroy on.
-#[inline]
-fn is_block(state: BlockState, block: crate::block::Block) -> bool {
-    state.block() == block.id()
-}
 
 /// `Vec3i.closerThan(Vec3i, double)` — `distToLowCornerSqr(pos) <
 /// Mth.square(distance)`. `distToLowCornerSqr` widens the int coordinates to
@@ -177,6 +172,8 @@ impl EndPodiumFeature {
         }
         let center_of_pillar = origin.above_steps(2);
         for face in Plane::Horizontal.faces() {
+            // `WALL_TORCH` always carries `HORIZONTAL_FACING`, so the set is
+            // infallible — the `expect` only satisfies the `Result`.
             set_block(
                 level,
                 &center_of_pillar.relative(face),

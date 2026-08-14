@@ -28,6 +28,7 @@
 
 use crate::block::blocks::Blocks;
 use crate::level::WorldGenLevel;
+use crate::levelgen::feature::is_block;
 use rivet_registry::block_state::BlockState;
 use rivet_registry::block_state_properties::BlockStateProperties;
 use rivet_registry::core::BlockPos;
@@ -38,13 +39,6 @@ use rivet_util::mth;
 
 /// `Block.UPDATE_CLIENTS` — the write-flag constant every chorus write uses.
 const UPDATE_CLIENTS: u32 = 2;
-
-/// `BlockStateBase.is(Block)` — the block identity check
-/// `getStateWithConnections`'s connection tests use.
-#[inline]
-fn is_block(state: BlockState, block: crate::block::Block) -> bool {
-    state.block() == block.id()
-}
 
 /// `ChorusPlantBlock.getStateWithConnections(BlockGetter, BlockPos,
 /// BlockState)` — the connection state for a cell given its six neighbors.
@@ -67,22 +61,25 @@ fn get_state_with_connections(
     let block = crate::block::Block::new(default_state.block());
     let connect =
         |state: BlockState| is_block(state, block) || is_block(state, Blocks::CHORUS_FLOWER);
+    // `trySetValue` leaves the state unchanged for an absent property, so
+    // every link is infallible for the `CHORUS_PLANT` block (it carries all
+    // six bool properties) — the `expect` only satisfies the `Result`.
     default_state
         .try_set_value(
             BlockStateProperties::DOWN,
             connect(down) || down.is_in_tag("minecraft:supports_chorus_plant"),
         )
-        .expect("chorus_plant carries the DOWN property")
+        .expect("chorus_plant carries the connection properties")
         .try_set_value(BlockStateProperties::UP, connect(up))
-        .expect("chorus_plant carries the UP property")
+        .expect("chorus_plant carries the connection properties")
         .try_set_value(BlockStateProperties::NORTH, connect(north))
-        .expect("chorus_plant carries the NORTH property")
+        .expect("chorus_plant carries the connection properties")
         .try_set_value(BlockStateProperties::EAST, connect(east))
-        .expect("chorus_plant carries the EAST property")
+        .expect("chorus_plant carries the connection properties")
         .try_set_value(BlockStateProperties::SOUTH, connect(south))
-        .expect("chorus_plant carries the SOUTH property")
+        .expect("chorus_plant carries the connection properties")
         .try_set_value(BlockStateProperties::WEST, connect(west))
-        .expect("chorus_plant carries the WEST property")
+        .expect("chorus_plant carries the connection properties")
 }
 
 /// `ChorusFlowerBlock.allNeighborsEmpty(LevelReader, BlockPos, @Nullable
@@ -217,13 +214,22 @@ fn grow_tree_recursive<R: RandomSource>(
 mod tests {
     use super::*;
     use crate::block::blocks::Blocks;
-    use crate::levelgen::feature::test_support::{RecordingRandom, TestLevel, access};
+    use crate::levelgen::feature::test_support::{RecordingRandom, RngCall, TestLevel, access};
     use rivet_registry::block_state_property::PropertyValue;
     use rivet_registry::core::BlockPos;
     use rivet_registry::generated::blocks::BlockId;
 
     fn grow(level: &mut TestLevel, random: &mut RecordingRandom, origin: BlockPos) {
         generate_plant(level, &origin, random, 8);
+    }
+
+    fn grow_with_spread(
+        level: &mut TestLevel,
+        random: &mut RecordingRandom,
+        origin: BlockPos,
+        max_spread: i32,
+    ) {
+        generate_plant(level, &origin, random, max_spread);
     }
 
     /// `getStateWithConnections` sets the six connection bools from the
@@ -268,6 +274,46 @@ mod tests {
         let flower = BlockId::from_name("minecraft:chorus_flower").unwrap();
         for (_, state) in &level.writes {
             assert!(state.block() == chorus || state.block() == flower);
+        }
+        // The draws match `growTreeRecursive`'s shape: a `nextInt(4)` height
+        // (plus one at depth 0), then a `nextInt(4)` stem count (plus one at
+        // depth 0), then one `nextInt(4)` per horizontal-direction pick.
+        assert!(
+            random.calls.iter().all(|c| *c == RngCall::IntBound(4)),
+            "chorus growth draws only nextInt(4): {:?}",
+            random.calls
+        );
+    }
+
+    /// A `maxHorizontalSpread` of 0 forbids every horizontal branch: each
+    /// node's `abs(target.x - start.x) < maxHorizontalSpread` gate fails, so
+    /// every node writes the dead `AGE_5` flower atop its stem — and no write
+    /// ever leaves the start column. This pins the spread gate and the
+    /// `ChorusFlowerBlock.DEAD_AGE` terminal.
+    #[test]
+    fn zero_spread_blocks_branches_and_terminates_each_stem_in_age5_flower() {
+        let mut level = TestLevel::over(access());
+        level.states.insert(
+            BlockPos::new(0, -1, 0),
+            Blocks::END_STONE.default_block_state(),
+        );
+        let mut random = RecordingRandom::new(7);
+        grow_with_spread(&mut level, &mut random, BlockPos::new(0, 0, 0), 0);
+        assert!(!level.writes.is_empty());
+        let flower = BlockId::from_name("minecraft:chorus_flower").unwrap();
+        let chorus = BlockId::from_name("minecraft:chorus_plant").unwrap();
+        for (pos, state) in &level.writes {
+            // No branch can escape the start column when the spread is 0.
+            assert_eq!(pos.get_x(), 0);
+            assert_eq!(pos.get_z(), 0);
+            if state.block() == flower {
+                assert_eq!(
+                    state.get_value(BlockStateProperties::AGE_5),
+                    Some(PropertyValue::Int(5))
+                );
+            } else {
+                assert_eq!(state.block(), chorus);
+            }
         }
     }
 }

@@ -144,30 +144,49 @@ mod tests {
     }
 
     /// An origin in the platform chunk (block `(8, 3, 8)` = chunk `(0, 0)`)
-    /// writes the cobblestone center plus the stone radius-16 square, and
-    /// returns `true`. The exact center is cobblestone.
+    /// writes the whole chunk's 16x16 column at `origin.y + PLATFORM_OFFSET.y`.
+    /// Every cell of chunk `(0, 0)` is within Chebyshev radius 16 of the
+    /// center `(8, y, 8)` (the farthest corner is 8 away), so all 256 cells
+    /// are written exactly once — the center cell `COBBLESTONE`, the other 255
+    /// `STONE`, all with `UPDATE_CLIENTS` — and the feature returns `true`.
     #[test]
     fn origin_in_platform_chunk_writes_center_and_radius() {
         let mut level = TestLevel::over(access());
         let origin = BlockPos::new(8, 3, 8);
         let placed = place(&mut level, origin);
         assert!(placed);
-        assert!(!level.writes.is_empty());
-        // The platform center is at the origin's y + PLATFORM_OFFSET.y = 6.
+        let platform_y = origin.get_y() + PLATFORM_OFFSET.get_y();
+        assert_eq!(level.writes.len(), 16 * 16);
+        let cobblestone = level
+            .writes
+            .iter()
+            .filter(|(_, s)| s.block() == BlockId::from_name("minecraft:cobblestone").unwrap())
+            .count();
+        let stone = level
+            .writes
+            .iter()
+            .filter(|(_, s)| s.block() == BlockId::from_name("minecraft:stone").unwrap())
+            .count();
+        assert_eq!(cobblestone, 1);
+        assert_eq!(stone, 16 * 16 - 1);
+        for (pos, state) in &level.writes {
+            assert_eq!(pos.get_y(), platform_y);
+            assert!(pos.get_x() >= 0 && pos.get_x() < 16);
+            assert!(pos.get_z() >= 0 && pos.get_z() < 16);
+            assert!(
+                state.block() == BlockId::from_name("minecraft:cobblestone").unwrap()
+                    || state.block() == BlockId::from_name("minecraft:stone").unwrap()
+            );
+        }
+        // The single cobblestone cell is the platform center.
         assert_eq!(
-            level.states[&BlockPos::new(8, 6, 8)].block(),
+            level.states[&BlockPos::new(8, platform_y, 8)].block(),
             BlockId::from_name("minecraft:cobblestone").unwrap()
         );
         assert_eq!(
-            level.states[&BlockPos::new(8, 6, 7)].block(),
+            level.states[&BlockPos::new(8, platform_y, 7)].block(),
             BlockId::from_name("minecraft:stone").unwrap()
         );
-        // Cells outside the Chebyshev radius 16 are not written (the chunk
-        // edge at x=0 is 8 cells from the center; a far corner is > 16).
-        assert!(!level.writes.iter().any(|(p, _)| {
-            p.get_x().wrapping_sub(8).wrapping_abs() > 16
-                || p.get_z().wrapping_sub(8).wrapping_abs() > 16
-        }));
     }
 
     /// An origin outside the platform chunk (a chunk > 1 Chebyshev cells away)

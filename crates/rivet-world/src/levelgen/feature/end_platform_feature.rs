@@ -24,19 +24,13 @@ use crate::level::WorldGenLevel;
 use crate::levelgen::feature::FeatureBehavior;
 use crate::levelgen::feature::FeaturePlaceContext;
 use crate::levelgen::feature::configurations::NoneFeatureConfiguration;
+use crate::levelgen::feature::is_block;
 use rivet_registry::core::BlockPos;
 use rivet_util::RandomSource;
 
 /// `Block.UPDATE_ALL` — the write-flag constant the platform writes reduce to
 /// (`UPDATE_NEIGHBORS | UPDATE_CLIENTS`).
 const UPDATE_ALL: u32 = 3;
-
-/// `BlockStateBase.is(Block)` — the block identity check the platform gates
-/// its writes on.
-#[inline]
-fn is_block(state: rivet_registry::block_state::BlockState, block: crate::block::Block) -> bool {
-    state.block() == block.id()
-}
 
 /// `net.minecraft.world.level.levelgen.feature.EndPlatformFeature`.
 #[derive(Debug)]

@@ -133,12 +133,30 @@ mod tests {
             // bound; spot-check the extreme corner cells were not written.
             assert!(pos.get_x().abs() <= 6 && pos.get_z().abs() <= 6);
         }
-        // The draw order is pinned: one `nextInt(3)` then alternating layers
-        // of `nextInt(2)` until `size <= 0.5F`.
+        // The full draw order is pinned: one `nextInt(3)` for the initial
+        // size, then one `nextInt(2)` per descending layer until `size <=
+        // 0.5F` — no other draws.
         assert_eq!(
             random.calls[0],
             crate::levelgen::feature::test_support::RngCall::IntBound(3)
         );
+        assert!(
+            random
+                .calls
+                .iter()
+                .skip(1)
+                .all(|c| *c == crate::levelgen::feature::test_support::RngCall::IntBound(2)),
+            "after the initial nextInt(3) every draw is the per-layer nextInt(2): {:?}",
+            random.calls
+        );
+        // One `nextInt(2)` per written layer — each layer writes a distinct y.
+        let layers = level
+            .writes
+            .iter()
+            .map(|(pos, _)| pos.get_y())
+            .collect::<std::collections::HashSet<i32>>()
+            .len();
+        assert_eq!(random.calls.len(), layers + 1);
     }
 
     /// A hostile origin with negative coordinates still writes the island

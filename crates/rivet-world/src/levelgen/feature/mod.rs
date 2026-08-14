@@ -681,6 +681,13 @@ pub fn is_adjacent_to_air(block_getter: impl Fn(&BlockPos) -> BlockState, pos: &
     check_neighbors(block_getter, pos, |state| state.is_air())
 }
 
+/// `BlockStateBase.is(Block)` — the block identity check the End feature
+/// leaves gate their writes on (`EndPlatformFeature`, `EndPodiumFeature`, and
+/// the chorus-growth connection tests).
+pub(crate) fn is_block(state: BlockState, block: crate::block::Block) -> bool {
+    state.block() == block.id()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
