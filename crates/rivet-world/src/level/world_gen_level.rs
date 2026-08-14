@@ -157,6 +157,20 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
         panic!("LevelWriter.setBlock is not implemented (RivetTodo #232)")
     }
 
+    /// `LevelAccessor.destroyBlock(BlockPos, boolean, @Nullable Entity)` — the
+    /// block-destruction seam `EndPodiumFeature.dropPreviousAndSetBlock` and
+    /// `EndPlatformFeature`'s `dropResources` path reduce to
+    /// (`level.destroyBlock(pos, true, null)`). The `@Nullable Entity`
+    /// argument is dropped: every reachable caller passes `null` (the worldgen
+    /// platform/podium call sites), so the signature carries only the `drop`
+    /// flag.
+    ///
+    /// RivetTodo(#232): the block-destruction implementation is not ported; the
+    /// default fails explicitly rather than fabricating a destruction.
+    fn destroy_block(&mut self, _pos: &BlockPos, _drop: bool) -> bool {
+        panic!("LevelAccessor.destroyBlock is not implemented (RivetTodo #232)")
+    }
+
     /// The registry-access back-reference seam. Java `Holder.value()` needs no
     /// lookup (the holder stores its value); the Rust port's `Reference` is a
     /// pure `(RegistryId, id)` pair, so resolving one — and threading the
