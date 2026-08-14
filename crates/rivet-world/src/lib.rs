@@ -29,7 +29,9 @@
 //!   (`CaveWorldCarver`/`NetherWorldCarver`/`CanyonWorldCarver` + their
 //!   configurations), `ConfiguredWorldCarver` with `carve`/`isStartChunk`, and
 //!   `WorldCarverId`/`WorldCarverBehavior`; the `#399` `CarveChunk`
-//!   block-surface trait and the `#126` dispatch codecs stay unbound
+//!   block-surface trait is implemented for the worldgen `ProtoChunk` (the
+//!   CARVERS-status driver binds it), while the `#126` dispatch codecs stay
+//!   unbound
 //! - `levelgen::generation_step` — the `GenerationStep.Decoration` enum,
 //!   proactively ported from the pending `mc.world.level.levelgen.settings`
 //!   unit (the settings wave must not re-port it)
