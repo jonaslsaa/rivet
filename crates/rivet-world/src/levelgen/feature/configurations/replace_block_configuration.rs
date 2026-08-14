@@ -1,5 +1,5 @@
 //! Port of `net.minecraft.world.level.levelgen.feature.configurations.ReplaceBlockConfiguration`
-//! (class, 26.2) — the `mc.world.level.levelgen.feature.configurations.replace_block`
+//! (class, 26.2) — the `mc.world.level.levelgen.feature.configurations.replaceblock`
 //! manifest unit.
 //!
 //! Java: a value class holding `List<OreConfiguration.TargetBlockState> targetStates`
