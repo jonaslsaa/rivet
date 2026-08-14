@@ -1,5 +1,5 @@
 //! Port of `net.minecraft.world.level.levelgen.feature.BambooFeature`
-//! (class, 26.2) — owned by the `mc.world.level.levelgen.feature.vegetation-family`
+//! (class, 26.2) — owned by the `mc.world.level.levelgen.feature.bamboo`
 //! manifest unit (issue #600).
 //!
 //! Java: `Feature<ProbabilityFeatureConfiguration>` whose `place` gates on the

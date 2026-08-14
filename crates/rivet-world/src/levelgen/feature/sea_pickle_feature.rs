@@ -1,5 +1,5 @@
 //! Port of `net.minecraft.world.level.levelgen.feature.SeaPickleFeature`
-//! (class, 26.2) — owned by the `mc.world.level.levelgen.feature.vegetation-family`
+//! (class, 26.2) — owned by the `mc.world.level.levelgen.feature.seapickle`
 //! manifest unit (issue #600).
 //!
 //! Java: `Feature<CountConfiguration>` whose `place` samples

@@ -7,7 +7,7 @@
 //! so `FeaturePlaceContext`/`ConfiguredFeature.place`/`PlacedFeature.place`
 //! type-check. The block-touching surface (`getBlockState`/`setBlock`/
 //! `getChunk`/`markPosForPostProcessing`) defers with the `BlockState` type
-//! (RivetTodo #228) and the `ChunkAccess` spine.
+//! (RivetTodo #232) and the `ChunkAccess` spine.
 //!
 //! RivetTodo(#232): `setCurrentlyGenerating(Supplier<String>)` is omitted — the
 //! Java default is a no-op body and only `WorldGenRegion` (server.level)
@@ -47,7 +47,7 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     /// `BlockGetter.getBlockState(BlockPos)` — the minimal block-state read
     /// seam the `blockpredicates` `StateTestingPredicate` base consumes.
     ///
-    /// RivetTodo(#399): the real world-access implementation is not ported yet,
+    /// RivetTodo(#232): the real world-access implementation is not ported yet,
     /// so no production `WorldGenLevel` provides it and every caller must fail
     /// explicitly rather than fabricate a state. Concrete worlds and test
     /// doubles implement the real behavior when they land; until then the
@@ -59,11 +59,11 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     /// `MatchingBiomesPredicate` consumes (`this.biomes.contains(level.getBiome(
     /// pos))`).
     ///
-    /// RivetTodo(#399): like `get_block_state`, the real world-access
+    /// RivetTodo(#232): like `get_block_state`, the real world-access
     /// implementation is not ported, so the default fails explicitly (panics)
     /// rather than fabricating a biome — the same capability-unavailable seam.
     fn get_biome(&self, _pos: &BlockPos) -> Holder<BiomeId> {
-        panic!("WorldGenLevel.getBiome is not implemented (RivetTodo #399)")
+        panic!("WorldGenLevel.getBiome is not implemented (RivetTodo #232)")
     }
 
     /// `LevelReader.getHeight(Heightmap.Types, int, int)` — the column-height
@@ -76,49 +76,49 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     /// name — the same `_at` suffix `ChunkAccess::get_height_at` uses for
     /// exactly this collision.
     ///
-    /// RivetTodo(#228): the worldgen `LevelReader` heightmap read is not ported
+    /// RivetTodo(#232): the worldgen `LevelReader` heightmap read is not ported
     /// yet, so the default fails explicitly (panics) rather than fabricating a
     /// surface — the same capability-unavailable seam as `get_biome`. Concrete
     /// worlds and test doubles override it with real behavior when they land.
     fn get_height_at(&self, _ty: Types, _x: i32, _z: i32) -> i32 {
-        panic!("WorldGenLevel.getHeight is not implemented (RivetTodo #228)")
+        panic!("WorldGenLevel.getHeight is not implemented (RivetTodo #232)")
     }
 
     /// `LevelAccessor.isUnobstructed(@Nullable Entity, VoxelShape)` — the
     /// "is the shape unobstructed" seam the `UnobstructedPredicate` consumes
     /// (`worldGenLevel.isUnobstructed(null, Shapes.block().move(pos))`).
     ///
-    /// RivetTodo(#399): the collision world-access implementation is not
+    /// RivetTodo(#232): the collision world-access implementation is not
     /// ported; the default fails explicitly rather than fabricating a result.
     fn is_unobstructed(&self, _pos: &BlockPos) -> bool {
-        panic!("WorldGenLevel.isUnobstructed is not implemented (RivetTodo #399)")
+        panic!("WorldGenLevel.isUnobstructed is not implemented (RivetTodo #232)")
     }
 
     /// `BlockStateBase.isFaceSturdy(BlockGetter, BlockPos, Direction)` — the
     /// face-sturdiness seam the `HasSturdyFacePredicate` consumes
     /// (`getBlockState(pos).isFaceSturdy(level, pos, direction)`).
     ///
-    /// RivetTodo(#399): the shape world-access implementation is not ported;
+    /// RivetTodo(#232): the shape world-access implementation is not ported;
     /// the default fails explicitly rather than fabricating a result.
     fn is_face_sturdy(&self, _pos: &BlockPos, _state: &BlockState, _direction: &Direction) -> bool {
-        panic!("BlockStateBase.isFaceSturdy is not implemented (RivetTodo #399)")
+        panic!("BlockStateBase.isFaceSturdy is not implemented (RivetTodo #232)")
     }
 
     /// `BlockBehaviour.BlockStateBase.canSurvive(BlockGetter, BlockPos)` — the
     /// survival seam the `WouldSurvivePredicate` consumes
     /// (`state.canSurvive(level, origin.offset(offset))`).
     ///
-    /// RivetTodo(#399): the world-context survival check is not ported; the
+    /// RivetTodo(#232): the world-context survival check is not ported; the
     /// default fails explicitly rather than fabricating a result.
     fn can_survive(&self, _state: &BlockState, _pos: &BlockPos) -> bool {
-        panic!("BlockStateBase.canSurvive is not implemented (RivetTodo #399)")
+        panic!("BlockStateBase.canSurvive is not implemented (RivetTodo #232)")
     }
 
     // -----------------------------------------------------------------------
     // The world seams the vegetation/aquatic/selector feature family consumes
     // (`is_empty_block`, `get_sea_level`, `set_block`). Each defaults to an
     // explicit failure (the same capability-unavailable seam as
-    // `get_biome`/`get_height_at`, marked `RivetTodo #228`) until the owning
+    // `get_biome`/`get_height_at`, marked `RivetTodo #232`) until the owning
     // `mc.world.level` unit lands; the concrete features and their test
     // doubles override them with real behavior.
     // -----------------------------------------------------------------------
@@ -127,10 +127,10 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     /// vegetation features gate on (`VinesFeature`, `BambooFeature`,
     /// `NetherForestVegetationFeature`, `ChorusPlantFeature`, …).
     ///
-    /// RivetTodo(#228): the world-access implementation is not ported; the
+    /// RivetTodo(#232): the world-access implementation is not ported; the
     /// default fails explicitly rather than fabricating a state.
     fn is_empty_block(&self, _pos: &BlockPos) -> bool {
-        panic!("LevelReader.isEmptyBlock is not implemented (RivetTodo #228)")
+        panic!("LevelReader.isEmptyBlock is not implemented (RivetTodo #232)")
     }
 
     /// `LevelReader.getSeaLevel()` — the sea-level read `BlueIceFeature`
@@ -138,10 +138,10 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     /// `LevelReader`, so it sits here (the `ChunkGenerator`-side
     /// `get_sea_level` seam exists separately for `BasaltColumnsFeature`).
     ///
-    /// RivetTodo(#228): the world-access implementation is not ported; the
+    /// RivetTodo(#232): the world-access implementation is not ported; the
     /// default fails explicitly rather than fabricating a level.
     fn get_sea_level(&self) -> i32 {
-        panic!("LevelReader.getSeaLevel is not implemented (RivetTodo #228)")
+        panic!("LevelReader.getSeaLevel is not implemented (RivetTodo #232)")
     }
 
     /// `LevelWriter.setBlock(BlockPos, BlockState, int)` — the block write
@@ -150,10 +150,10 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     /// constants). `&mut self` mirrors the `LevelWriter` write contract (the
     /// worldgen level is exclusively `&mut`-borrowed, OWNERSHIP.md).
     ///
-    /// RivetTodo(#228): the chunk-write implementation is not ported; the
+    /// RivetTodo(#232): the chunk-write implementation is not ported; the
     /// default fails explicitly rather than fabricating a write.
     fn set_block(&mut self, _pos: &BlockPos, _state: BlockState, _flags: u32) -> bool {
-        panic!("LevelWriter.setBlock is not implemented (RivetTodo #228)")
+        panic!("LevelWriter.setBlock is not implemented (RivetTodo #232)")
     }
 
     /// The registry-access back-reference seam. Java `Holder.value()` needs no
@@ -170,10 +170,10 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     /// surface: Java features never touch the access here.
     ///
     /// STUB(mc.world.level): no production `WorldGenLevel` provides it yet;
-    /// the default fails explicitly (the `RivetTodo(#399)` panic below). Test
+    /// the default fails explicitly (the `RivetTodo(#232)` panic below). Test
     /// doubles build a `RegistryAccess` over the placed/configured-feature
     /// registries and override.
     fn registry_access(&self) -> RegistryAccess {
-        panic!("WorldGenLevel.registryAccess is not implemented (RivetTodo #399)")
+        panic!("WorldGenLevel.registryAccess is not implemented (RivetTodo #232)")
     }
 }

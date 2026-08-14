@@ -1,5 +1,5 @@
 //! Port of `net.minecraft.world.level.levelgen.feature.NetherForestVegetationFeature`
-//! (class, 26.2) — owned by the `mc.world.level.levelgen.feature.vegetation-family`
+//! (class, 26.2) — owned by the `mc.world.level.levelgen.feature.vegetation`
 //! manifest unit (issue #600).
 //!
 //! Java: `Feature<NetherForestVegetationConfig>` whose `place` gates on the

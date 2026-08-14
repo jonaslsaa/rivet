@@ -1,5 +1,5 @@
 //! Port of `net.minecraft.world.level.levelgen.feature.BlueIceFeature`
-//! (class, 26.2) — owned by the `mc.world.level.levelgen.feature.vegetation-family`
+//! (class, 26.2) — owned by the `mc.world.level.levelgen.feature.blueice`
 //! manifest unit (issue #600).
 //!
 //! Java: `Feature<NoneFeatureConfiguration>` whose `place` gates on the origin

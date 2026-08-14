@@ -1,5 +1,5 @@
 //! Port of `net.minecraft.world.level.levelgen.feature.BlockPileFeature`
-//! (class, 26.2) — owned by the `mc.world.level.levelgen.feature.vegetation-family`
+//! (class, 26.2) — owned by the `mc.world.level.levelgen.feature.blockpile`
 //! manifest unit (issue #600).
 //!
 //! Java: `Feature<BlockPileConfiguration>` whose `place` gates on the origin
@@ -10,7 +10,7 @@
 //! `tryPlaceBlock`s when `xd² + zd²` fits; otherwise it draws one more
 //! `nextFloat` and `tryPlaceBlock`s when that is `< 0.031`. `tryPlaceBlock`
 //! writes `config.stateProvider.getState(level, random, pos)` with
-//! `Block.UPDATE_NONE` (0) when the cell is empty and `mayPlaceOn` passes —
+//! `Block.UPDATE_NONE` (260) when the cell is empty and `mayPlaceOn` passes —
 //! `below.is(Blocks.DIRT_PATH) ? nextBoolean() : below.isFaceSturdy(level,
 //! below, Direction.UP)` (the `WorldGenLevel::is_face_sturdy` seam, RivetTodo
 //! #399). Always returns `true` once the `y` gate passes.
@@ -31,8 +31,11 @@ use rivet_registry::generated::blocks::BlockId;
 use rivet_util::RandomSource;
 
 /// `Block.UPDATE_NONE` — the write-flag constant `BlockPileFeature` uses
-/// (`setBlock` with no client update).
-const UPDATE_NONE: u32 = 0;
+/// (`setBlock` with no client update). Paper defines it as
+/// `UPDATE_INVISIBLE | UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS` (`4 | 256`), NOT
+/// zero: the "no client update" combination still suppresses block-entity
+/// lifecycle side effects and hidden-block client updates.
+const UPDATE_NONE: u32 = 260;
 
 /// `BlockStateBase.is(Blocks.DIRT_PATH)` — the block identity check
 /// `mayPlaceOn` branches on.

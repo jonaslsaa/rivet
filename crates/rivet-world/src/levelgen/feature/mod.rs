@@ -69,11 +69,12 @@ mod feature_place_context;
 mod no_op_feature;
 pub mod ore_feature;
 
-// The vegetation-family wave (issue #600) — the `.feature.vegetation-family`
-// unit's leaves that live in this module: the aquatic/vegetation feature
-// structs whose configs the `.configurations.vegetation-family` unit owns. Each
-// concrete feature is a `FeatureBehavior<FC>` singleton wired into the `#181`
-// dispatch hub at its registration id.
+// The vegetation-family wave (issue #600) — the nine aquatic/vegetation
+// feature structs that live in this module. Each is owned by its own leaf row
+// (`.feature.bamboo`/`basaltpillar`/`blockblob`/`blockpile`/`blueice`/`kelp`/
+// `nether_forest_vegetation`/`sea_pickle`/`seagrass`, the last through the
+// `.feature.vegetation` cluster) and wired into the `#181` dispatch hub at its
+// registration id; each config is owned by its own `configurations.*` row.
 pub mod bamboo_feature;
 pub mod basalt_pillar_feature;
 pub mod block_blob_feature;
@@ -95,9 +96,10 @@ pub mod stateproviders;
 pub mod featuresize;
 
 // The vegetation-family wave (issue #600) — the `.feature.selector` manifest
-// unit's slice that lives in this module: the `WeightedPlacedFeature` record,
-// the registry-key seam the selector features resolve their holders through,
-// the `getSubFeatures` flattening helper the selector/composite configurations
+// unit's slice that lives in this module: the `WeightedPlacedFeature` record
+// (owned by `.feature.selector`), the registry-key seam the selector features
+// resolve their holders through, the `getSubFeatures` flattening helper the
+// selector/composite configurations
 // share, and the five concrete selector features (`RandomSelectorFeature`,
 // `RandomBooleanSelectorFeature`, `SimpleRandomSelectorFeature`,
 // `WeightedRandomSelectorFeature`, `SequenceFeature`). The selector
@@ -478,12 +480,11 @@ pub fn feature_place<R: RandomSource>(
                 .expect("sequence feature must carry a CompositeFeatureConfiguration");
             SEQUENCE.place_with_config(config, level, chunk_generator, random, origin)
         }
-        // The nine `.feature.vegetation-family` leaves (this wave, issue #600) —
-        // the aquatic/vegetation feature structs whose configs the
-        // `.configurations.vegetation-family` unit owns. Each downcasts to its
-        // own config and delegates to `place_with_config` (the `ensureCanWrite`
-        // gate applied here, as Java's `Feature.place(FC, …)` does).
-        // `Feature.BLOCK_PILE`.
+        // The nine vegetation-family leaves (this wave, issue #600) — the
+        // aquatic/vegetation feature structs (each owned by its own
+        // `.feature.*` MANIFEST row). Each downcasts to its own config and
+        // delegates to `place_with_config` (the `ensureCanWrite` gate applied
+        // here, as Java's `Feature.place(FC, …)` does). `Feature.BLOCK_PILE`.
         3 => {
             let config = (config as &dyn Any)
                 .downcast_ref::<BlockPileConfiguration>()

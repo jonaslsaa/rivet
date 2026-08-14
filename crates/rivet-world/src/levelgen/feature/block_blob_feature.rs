@@ -1,5 +1,5 @@
 //! Port of `net.minecraft.world.level.levelgen.feature.BlockBlobFeature`
-//! (class, 26.2) — owned by the `mc.world.level.levelgen.feature.vegetation-family`
+//! (class, 26.2) — owned by the `mc.world.level.levelgen.feature.blockblob`
 //! manifest unit (issue #600).
 //!
 //! Java: `Feature<BlockBlobConfiguration>` whose `place` first walks the origin

@@ -1,5 +1,5 @@
 //! Port of `net.minecraft.world.level.levelgen.feature.KelpFeature`
-//! (class, 26.2) — owned by the `mc.world.level.levelgen.feature.vegetation-family`
+//! (class, 26.2) — owned by the `mc.world.level.levelgen.feature.kelp`
 //! manifest unit (issue #600).
 //!
 //! Java: `Feature<NoneFeatureConfiguration>` whose `place` reads the
