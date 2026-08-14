@@ -1,10 +1,11 @@
 //! STUB(mc.world.level.levelgen.feature.tree): `TreeFeature` /
 //! `FallenTreeFeature` are owned by the pending `feature.tree` manifest unit
-//! (MANIFEST.tsv row 569, task #1327). The tree family's earlier slices
-//! (`FoliagePlacer.tryPlaceLeaf`, `TrunkPlacer.isFree`, `RootPlacer`) call the
-//! static helper `TreeFeature.validTreePos` before every leaf/log placement, so
-//! this stub carries exactly that one free function; the owning unit replaces
-//! this file when it lands.
+//! (MANIFEST.tsv row 569, task #1327). The foliage-placer slice calls the
+//! static helper `TreeFeature.validTreePos` before every leaf placement
+//! (`FoliagePlacer.tryPlaceLeaf`), so this stub carries exactly that one free
+//! function; the owning unit replaces this file when it lands. The
+//! trunk/root/decorator consumers of this helper live on the preserved
+//! `feature/worldgen-tree-scaffolding` branch.
 
 use crate::level::WorldGenLevel;
 use rivet_registry::block_state::BlockState;

@@ -21,7 +21,6 @@
 
 use crate::level::height_accessor::LevelHeightAccessor;
 use crate::levelgen::heightmap::Types;
-use rivet_registry::access::RegistryAccess;
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::block_state::BlockState;
 use rivet_registry::core::BlockPos;
@@ -116,8 +115,8 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     }
 
     /// `LevelReader.isStateAtPosition(BlockPos, Predicate<BlockState>)` — the
-    /// state-testing seam the tree family consumes (`TreeFeature.isVine`,
-    /// `FoliagePlacer.tryPlaceLeaf`, `TrunkPlacer.isFree`, `BeehiveDecorator`).
+    /// state-testing seam the foliage-placer slice consumes
+    /// (`FoliagePlacer.tryPlaceLeaf`, `tree_feature::valid_tree_pos`).
     ///
     /// The default resolves the offset state through the `get_block_state`
     /// seam and applies the predicate, so the capability-unavailable behavior
@@ -129,9 +128,8 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     }
 
     /// `LevelReader.isFluidAtPosition(BlockPos, Predicate<FluidState>)` — the
-    /// fluid-state-testing seam the tree family consumes
-    /// (`FoliagePlacer.tryPlaceLeaf` waterlogging, `RootPlacer.
-    /// getPotentiallyWaterloggedState`).
+    /// fluid-state-testing seam the foliage-placer slice consumes
+    /// (`FoliagePlacer.tryPlaceLeaf` waterlogging decision).
     ///
     /// The default resolves the position's fluid through the `get_block_state`
     /// seam (`BlockState.fluid_id()`, the state's fluid registry id) and
@@ -141,61 +139,5 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     fn is_fluid_at_position(&self, pos: &BlockPos, test: &dyn Fn(&FluidId) -> bool) -> bool {
         let state = self.get_block_state(pos);
         test(&FluidId::from_id(state.fluid_id()))
-    }
-
-    /// `LevelWriter.setBlock(BlockPos, BlockState, int)` — the block-write
-    /// seam the tree family consumes (`TreeFeature.setBlockKnownShape`,
-    /// `FallenTreeFeature.placeLogBlock`, every decorator's `setBlock`).
-    ///
-    /// RivetTodo(#399): the real world-write implementation is not ported, so
-    /// the default fails explicitly rather than fabricating a write. Concrete
-    /// worlds and test doubles implement the real behavior when they land.
-    fn set_block(&mut self, _pos: &BlockPos, _state: &BlockState, _flags: i32) -> bool {
-        panic!("WorldGenLevel.setBlock is not implemented (RivetTodo #399)")
-    }
-
-    /// `ServerLevelAccessor.markAboveForPostProcessing(BlockPos)` — the
-    /// post-processing seam `FallenTreeFeature.placeLogBlock` calls after each
-    /// placed log.
-    ///
-    /// RivetTodo(#399): the real post-processing marking is not ported, so the
-    /// default fails explicitly rather than silently skipping. Concrete worlds
-    /// override when they land.
-    fn mark_above_for_post_processing(&mut self, _pos: &BlockPos) {
-        panic!("WorldGenLevel.markAboveForPostProcessing is not implemented (RivetTodo #399)")
-    }
-
-    /// `LevelReader.getHeightmapPos(Heightmap.Types, BlockPos)` — the heightmap
-    /// position read `PlaceOnGroundDecorator.attemptToPlaceBlockAbove` consumes
-    /// (`level.getHeightmapPos(MOTION_BLOCKING_NO_LEAVES, pos).getY() <=
-    /// abovePos.getY()`).
-    ///
-    /// RivetTodo(#228): the worldgen `LevelReader` heightmap read is not ported,
-    /// so the default fails explicitly rather than fabricating a surface — the
-    /// same capability-unavailable seam as `get_height_at`. Concrete worlds and
-    /// test doubles override it with real behavior when they land.
-    fn get_heightmap_pos(&self, _ty: Types, _pos: &BlockPos) -> BlockPos {
-        panic!("WorldGenLevel.getHeightmapPos is not implemented (RivetTodo #228)")
-    }
-
-    /// `ServerLevelAccessor.registryAccess()` — the registry-access read
-    /// `PaleMossDecorator.place` consumes to look up the
-    /// `configured_feature` registry.
-    ///
-    /// RivetTodo(#399): the world's registry access is not wired yet, so the
-    /// default fails explicitly rather than fabricating an access. Concrete
-    /// worlds override when they land.
-    fn registry_access(&self) -> RegistryAccess {
-        panic!("WorldGenLevel.registryAccess is not implemented (RivetTodo #399)")
-    }
-
-    /// `Level.getBlockEntity(BlockPos, BlockEntityType)` — the block-entity
-    /// read `BeehiveDecorator.place` consumes to store the generated bees.
-    ///
-    /// RivetTodo(#399): the block-entity world access is not ported, so the
-    /// default fails explicitly rather than fabricating an entity. Concrete
-    /// worlds override when they land.
-    fn get_block_entity(&self, _pos: &BlockPos) -> Option<()> {
-        panic!("WorldGenLevel.getBlockEntity is not implemented (RivetTodo #399)")
     }
 }
