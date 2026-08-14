@@ -1420,42 +1420,60 @@ impl SkyStarLightEngine {
         let chunk_z = chunk.get_pos().z();
         let total_sections = (self.max_section - self.min_section + 1) as usize;
 
+        // Java's `getEmptinessMap(chunkX, chunkZ)` returns the live array from
+        // the cache; the port's cache owns a value copy, so the entry is cloned
+        // here and written back once the update loop below runs (see below).
         let mut chunk_emptiness_map = self.get_emptiness_map(chunk_x, chunk_z).cloned();
-        let mut ret = None;
         let needs_init = unlit || chunk_emptiness_map.is_none();
         if needs_init {
-            let fresh = vec![false; total_sections];
-            self.set_emptiness_map_cache(chunk_x, chunk_z, Some(fresh.clone()));
-            chunk_emptiness_map = Some(fresh.clone());
-            ret = Some(fresh);
+            chunk_emptiness_map = Some(vec![false; total_sections]);
         }
-        let emptiness_map = chunk_emptiness_map.as_mut().expect("map set above");
 
-        // update emptiness map
-        for section_index in (0..emptiness_changes.len()).rev() {
-            let mut value_boxed = emptiness_changes[section_index];
-            if value_boxed.is_none() {
-                if !needs_init {
-                    continue;
+        // Java's `Boolean[] emptinessChanges` is mutated in place by the
+        // derivation below (the `null -> derived` write-back); the port keeps a
+        // local copy so the second loop observes the derived values exactly
+        // like Java.
+        let mut changes: Vec<Option<bool>> = emptiness_changes.to_vec();
+        {
+            let emptiness_map = chunk_emptiness_map.as_mut().expect("map set above");
+
+            // update emptiness map
+            for section_index in (0..changes.len()).rev() {
+                let mut value_boxed = changes[section_index];
+                if value_boxed.is_none() {
+                    if !needs_init {
+                        continue;
+                    }
+                    let section = self.get_chunk_section(
+                        chunk_x,
+                        section_index as i32 + self.min_section,
+                        chunk_z,
+                    );
+                    value_boxed = Some(match section {
+                        None => true,
+                        Some(section) => section.has_only_air,
+                    });
+                    changes[section_index] = value_boxed;
                 }
-                let section = self.get_chunk_section(
-                    chunk_x,
-                    section_index as i32 + self.min_section,
-                    chunk_z,
-                );
-                value_boxed = Some(match section {
-                    None => true,
-                    Some(section) => section.has_only_air,
-                });
-            }
-            if let Some(v) = value_boxed {
-                emptiness_map[section_index] = v;
+                if let Some(v) = value_boxed {
+                    emptiness_map[section_index] = v;
+                }
             }
         }
+        // `initNibble` reads the map through the cache, and `ret` aliases the
+        // same array as the cache in Java — publish the updated map to both
+        // before the init loops below run.
+        let updated = chunk_emptiness_map.expect("map set above");
+        let ret = if needs_init {
+            Some(updated.clone())
+        } else {
+            None
+        };
+        self.set_emptiness_map_cache(chunk_x, chunk_z, Some(updated));
 
         // now init neighbour nibbles
-        for section_index in (0..emptiness_changes.len()).rev() {
-            let value_boxed = emptiness_changes[section_index];
+        for section_index in (0..changes.len()).rev() {
+            let value_boxed = changes[section_index];
             let section_y = section_index as i32 + self.min_section;
             let Some(empty) = value_boxed else { continue };
             if empty {
@@ -1733,4 +1751,495 @@ fn get_filled_empty_light(total_light_sections: usize) -> Vec<SwmrNibbleArray> {
     (0..total_light_sections)
         .map(|_| SwmrNibbleArray::new_with_bytes_and_null(None, true))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::level::level_chunk::{
+        BiomeId as ServerBiomeId, StateId, StructureKey, container_factory, state_flags,
+        superflat_content,
+    };
+    use rivet_registry::core::ChunkPos;
+    use rivet_world::chunk::upgrade_data::UpgradeData;
+    use rivet_world::level::height_accessor::create as create_accessor;
+    use rivet_world::superflat::{SECTION_COUNT, SUPERFLAT_HEIGHT, SUPERFLAT_MIN_Y};
+
+    /// The overworld superflat vertical extent (minY -64, height 384): sections
+    /// -4..19, light sections -5..20.
+    fn overworld_accessor() -> Box<dyn rivet_world::level::LevelHeightAccessor + Send> {
+        Box::new(create_accessor(SUPERFLAT_MIN_Y, SUPERFLAT_HEIGHT))
+    }
+
+    /// The server's superflat chunk at `pos` — a single stone layer at block
+    /// y=-64, air everywhere above. The runtime `StateId` resolver classifies
+    /// the states (air = 0, everything else opaque).
+    fn superflat_chunk(pos: ChunkPos) -> ChunkAccess<StateId, ServerBiomeId, StructureKey> {
+        let content = superflat_content();
+        let height_accessor = create_accessor(SUPERFLAT_MIN_Y, SUPERFLAT_HEIGHT);
+        ChunkAccess::new(
+            pos,
+            UpgradeData::empty(height_accessor.get_sections_count() as usize),
+            height_accessor,
+            &container_factory(),
+            0,
+            Some(content.sections),
+            &|state: &StateId| state_flags(*state),
+        )
+    }
+
+    /// An all-air chunk at `pos` — every section air (the superflat preset's
+    /// `minecraft:air` fill).
+    fn all_air_chunk(pos: ChunkPos) -> ChunkAccess<StateId, ServerBiomeId, StructureKey> {
+        let height_accessor = create_accessor(SUPERFLAT_MIN_Y, SUPERFLAT_HEIGHT);
+        ChunkAccess::new(
+            pos,
+            UpgradeData::empty(height_accessor.get_sections_count() as usize),
+            height_accessor,
+            &container_factory(),
+            0,
+            None, // the `ChunkAccess::new` default: every section all-air
+            &|state: &StateId| state_flags(*state),
+        )
+    }
+
+    /// The `emptySections` argument for a superflat chunk: the stone section
+    /// (index 0, world section -4) is non-empty, every other section derives
+    /// from the chunk content (the `None` entries exercise the `needsInit`
+    /// derivation branch of `handleEmptySectionChanges`).
+    fn superflat_empty_sections() -> Vec<Option<bool>> {
+        let mut empty = vec![None; SECTION_COUNT];
+        empty[0] = Some(false);
+        empty
+    }
+
+    /// The `emptySections` argument for an all-air chunk: every section empty.
+    fn all_air_empty_sections() -> Vec<Option<bool>> {
+        vec![Some(true); SECTION_COUNT]
+    }
+
+    /// A provider with no loaded neighbours. `light()` sets up its caches with
+    /// `relaxed = true` (and radius 2), so a missing neighbour is tolerated;
+    /// only the center chunk (forced in by `light`) participates.
+    struct EmptyProvider;
+
+    impl ChunkAccessor for EmptyProvider {
+        fn get_chunk_for_lighting(
+            &mut self,
+            _chunk_x: i32,
+            _chunk_z: i32,
+        ) -> Option<&ChunkAccess<StateId, ServerBiomeId, StructureKey>> {
+            None
+        }
+    }
+
+    /// Encode a queue entry exactly as Java's `appendToIncreaseQueue`/
+    /// `appendToDecreaseQueue` do — the 28-bit packed coordinate, the 4-bit
+    /// level, and the 6-bit direction bitset.
+    fn encode_entry(
+        engine: &SkyStarLightEngine,
+        x: i32,
+        y: i32,
+        z: i32,
+        level: i32,
+        dirs: usize,
+    ) -> u64 {
+        let eo = engine.coordinate_offset;
+        (((x + (z << 6) + (y << 12) + eo) as u64) & ((1u64 << (6 + 6 + 16)) - 1))
+            | (((level as u64) & 0xF) << (6 + 6 + 16))
+            | (((dirs as u64) & 63) << (6 + 6 + 16 + 4))
+    }
+
+    /// The `OLD_CHECK_DIRECTIONS` table must decode every one of the 64
+    /// propagation bitsets to exactly the set directions, in ascending ordinal
+    /// order (Java's `IntegerUtil.trailingZeros` iteration). A wrong bit
+    /// mapping, a dropped direction, or a non-ascending order fails here.
+    #[test]
+    fn old_check_directions_covers_all_64_bitsets() {
+        for bitset in 0u32..64 {
+            let dirs = old_check_directions(bitset as usize);
+            assert_eq!(
+                dirs.len(),
+                bitset.count_ones() as usize,
+                "popcount of bitset {bitset}"
+            );
+            let mut mask = 0u64;
+            let mut prev = -1i32;
+            for &d in dirs {
+                let ordinal = d as usize;
+                assert!(
+                    ordinal as i32 > prev,
+                    "directions must be ascending ordinal for bitset {bitset}"
+                );
+                prev = ordinal as i32;
+                mask |= 1u64 << ordinal;
+            }
+            assert_eq!(mask, bitset as u64, "exact bit coverage of bitset {bitset}");
+        }
+    }
+
+    /// A few hand-written rows pin the ordinal mapping and the boundary cases:
+    /// the empty bitset, single bits, adjacent pairs, and the full six bits.
+    #[test]
+    fn old_check_directions_pins_exact_rows() {
+        assert_eq!(old_check_directions(0), &[]);
+        assert_eq!(old_check_directions(1), &[AxisDirection::PositiveX]);
+        assert_eq!(
+            old_check_directions(0b000011),
+            &[AxisDirection::PositiveX, AxisDirection::NegativeX]
+        );
+        assert_eq!(
+            old_check_directions(0b010001),
+            &[AxisDirection::PositiveX, AxisDirection::PositiveY]
+        );
+        assert_eq!(
+            old_check_directions(0b111111),
+            &[
+                AxisDirection::PositiveX,
+                AxisDirection::NegativeX,
+                AxisDirection::PositiveZ,
+                AxisDirection::NegativeZ,
+                AxisDirection::PositiveY,
+                AxisDirection::NegativeY,
+            ]
+        );
+    }
+
+    /// The end-to-end light-chunk run on the flat air + stone superflat chunk.
+    /// The expected sky light is the Paper-captured superflat fixture: the
+    /// floor light section (block y -64..-49) is byte-exact `128 zeros then 1920
+    /// `0xFF`` (stone at y=-64 blocks sky, the 15 air levels above are full),
+    /// and the section above (block y -48..-33) is uniformly full. The section
+    /// below the world is untouched (0).
+    ///
+    /// This is the "mutated nibbles actually written back" assertion: the
+    /// computed sky light must survive the run into `pending_nibbles`, not be
+    /// discarded in favor of the initial all-null `getFilledEmptyLight` array.
+    #[test]
+    fn flat_superflat_chunk_lights_sky_full_above_and_zero_at_the_floor() {
+        let mut engine = SkyStarLightEngine::new(&*overworld_accessor());
+        let chunk = superflat_chunk(ChunkPos::new(0, 0));
+        let mut provider = EmptyProvider;
+        engine.light(&mut provider, &chunk, &superflat_empty_sections());
+
+        let nibbles = engine
+            .pending_nibbles
+            .as_ref()
+            .expect("sky nibbles written back");
+        // 26 light sections (-5..=20), indexed from the min light section.
+        assert_eq!(nibbles.len(), 26);
+
+        // Light section index 1 = block y -64..-49: the stone floor plane (y=0)
+        // is 0, the air above it (y=1..15) is fully lit.
+        let floor = &nibbles[1];
+        for x in 0..16 {
+            for z in 0..16 {
+                assert_eq!(
+                    floor.get_updating(x, 0, z),
+                    0,
+                    "stone at y=-64 blocks sky at ({x}, {z})"
+                );
+            }
+        }
+        for y in 1..16 {
+            for x in 0..16 {
+                for z in 0..16 {
+                    assert_eq!(
+                        floor.get_updating(x, y, z),
+                        15,
+                        "air above the floor at ({x}, {y}, {z})"
+                    );
+                }
+            }
+        }
+
+        // Light section index 2 = block y -48..-33: fully lit throughout.
+        let above = &nibbles[2];
+        for y in 0..16 {
+            for x in 0..16 {
+                for z in 0..16 {
+                    assert_eq!(
+                        above.get_updating(x, y, z),
+                        15,
+                        "open sky at ({x}, {y}, {z})"
+                    );
+                }
+            }
+        }
+
+        // Light section index 0 = block y -80..-65 (below the world floor):
+        // untouched, all 0.
+        let below = &nibbles[0];
+        for y in 0..16 {
+            for x in 0..16 {
+                for z in 0..16 {
+                    assert_eq!(
+                        below.get_updating(x, y, z),
+                        0,
+                        "below the floor at ({x}, {y}, {z})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The same run, asserted at the byte level against the Paper-captured
+    /// superflat sky fixture (`superflat::superflat_sky_layers`): the floor
+    /// layer is exactly `128 zeros + 1920 0xFF`, the above layer is all `0xFF`.
+    #[test]
+    fn flat_superflat_sky_bytes_match_the_paper_fixture() {
+        let mut engine = SkyStarLightEngine::new(&*overworld_accessor());
+        let chunk = superflat_chunk(ChunkPos::new(0, 0));
+        let mut provider = EmptyProvider;
+        engine.light(&mut provider, &chunk, &superflat_empty_sections());
+
+        let nibbles = engine
+            .pending_nibbles
+            .as_ref()
+            .expect("sky nibbles written back");
+
+        // Publish the captured clone's updating snapshot so the packet layer
+        // (`to_vanilla_nibble`) can read it.
+        let mut floor = nibbles[1].clone();
+        floor.update_visible();
+        let floor_data = floor
+            .to_vanilla_nibble()
+            .expect("floor initialised")
+            .get_data();
+        assert_eq!(floor_data.len(), 2048);
+        assert_eq!(&floor_data[..128], &[0u8; 128][..]);
+        assert_eq!(&floor_data[128..], &[0xFFu8; 1920][..]);
+
+        let mut above = nibbles[2].clone();
+        above.update_visible();
+        let above_data = above
+            .to_vanilla_nibble()
+            .expect("above initialised")
+            .get_data();
+        assert_eq!(above_data, vec![0xFFu8; 2048]);
+    }
+
+    /// The write-back hooks must surface the recomputed state, not the initial
+    /// empties: `pending_nibbles` carries the engine's mutations (the floor
+    /// section is `Initialised`, not the original `Null`), and
+    /// `pending_emptiness_map` carries the freshly derived sky-emptiness map
+    /// (stone section non-empty, every air section empty).
+    #[test]
+    fn light_surfaces_computed_nibbles_and_emptiness_map() {
+        let mut engine = SkyStarLightEngine::new(&*overworld_accessor());
+        let chunk = superflat_chunk(ChunkPos::new(0, 0));
+        let mut provider = EmptyProvider;
+        engine.light(&mut provider, &chunk, &superflat_empty_sections());
+
+        let nibbles = engine
+            .pending_nibbles
+            .as_ref()
+            .expect("sky nibbles written back");
+        // The floor and above sections must have been initialised during the
+        // run — a write-back that discarded the cache mutations would leave
+        // them `Null` (the `getFilledEmptyLight` originals).
+        assert!(
+            nibbles[1].is_initialised_updating(),
+            "floor section mutation must be written back"
+        );
+        assert!(
+            nibbles[2].is_initialised_updating(),
+            "above section mutation must be written back"
+        );
+        // The light-less sections stay null (the faithful empty-chunk state).
+        assert!(nibbles[3].is_null_nibble_updating());
+
+        let map = engine
+            .pending_emptiness_map
+            .as_ref()
+            .expect("sky emptiness map written back");
+        assert_eq!(map.len(), SECTION_COUNT);
+        assert!(!map[0], "stone section is non-empty");
+        assert!(
+            map[1..].iter().all(|&empty| empty),
+            "every air section is empty"
+        );
+    }
+
+    /// A fully-empty chunk produces no light: all sky nibbles stay `Null` and
+    /// the emptiness map is uniformly empty. (The fully-exposed sky is
+    /// represented by null sections — `getLightLevelExtruded` reads 15 above
+    /// them — so the engine correctly materializes nothing.)
+    #[test]
+    fn all_air_chunk_produces_no_light_and_all_empty_map() {
+        let mut engine = SkyStarLightEngine::new(&*overworld_accessor());
+        let chunk = all_air_chunk(ChunkPos::new(0, 0));
+        let mut provider = EmptyProvider;
+        engine.light(&mut provider, &chunk, &all_air_empty_sections());
+
+        let nibbles = engine
+            .pending_nibbles
+            .as_ref()
+            .expect("sky nibbles written back");
+        for nibble in nibbles {
+            assert!(
+                nibble.is_null_nibble_updating(),
+                "an all-air chunk must not materialize sky light"
+            );
+        }
+        let map = engine
+            .pending_emptiness_map
+            .as_ref()
+            .expect("sky emptiness map written back");
+        assert!(map.iter().all(|&empty| empty));
+    }
+
+    /// `performLightIncrease` spills a level-15 source into every direction the
+    /// queue entry's bitset selects. With the four horizontal bits set the light
+    /// reaches all four horizontal neighbours at level 14 (15 − 1 through air)
+    /// while the source keeps 15 — the multi-direction horizontal spill.
+    #[test]
+    fn increase_spills_into_all_four_horizontal_neighbours() {
+        let mut engine = SkyStarLightEngine::new(&*overworld_accessor());
+        engine.setup_encode_offset(7, 128, 7);
+        engine.set_chunk_in_cache(0, 0);
+
+        // Light section -4 (block y -64..-49): a 15 source at (7, -50, 7).
+        let mut nibble = SwmrNibbleArray::new_with_bytes(vec![0u8; 2048]);
+        nibble.set(7, 14, 7, 15);
+        engine.set_nibble_in_cache(0, -4, 0, Some(nibble));
+
+        // The four horizontal directions: +X, -X, +Z, -Z.
+        let horizontal = 0b001111;
+        engine.append_to_increase_queue(encode_entry(&engine, 7, -50, 7, 15, horizontal));
+        engine.perform_light_increase();
+
+        let result = engine
+            .get_nibble_from_cache(0, -4, 0)
+            .expect("section nibble");
+        assert_eq!(
+            result.get_updating(7, 14, 7),
+            15,
+            "source retains its level"
+        );
+        assert_eq!(result.get_updating(8, 14, 7), 14, "+X neighbour");
+        assert_eq!(result.get_updating(6, 14, 7), 14, "-X neighbour");
+        assert_eq!(result.get_updating(7, 14, 8), 14, "+Z neighbour");
+        assert_eq!(result.get_updating(7, 14, 6), 14, "-Z neighbour");
+    }
+
+    /// `performLightDecrease` zeroes every neighbour the decrease entry's
+    /// bitset selects — the source is zeroed first (`SkyStarLightEngine.
+    /// checkBlock` sets the position to 0 before queueing), then the decrease
+    /// propagates through the four horizontal directions, cascading each 14 to 0
+    /// and re-queueing the next level down.
+    #[test]
+    fn decrease_zeroes_all_four_horizontal_neighbours() {
+        let mut engine = SkyStarLightEngine::new(&*overworld_accessor());
+        engine.setup_encode_offset(7, 128, 7);
+        engine.set_chunk_in_cache(0, 0);
+
+        // A 15 source lit to 14 in its four horizontal neighbours.
+        let mut nibble = SwmrNibbleArray::new_with_bytes(vec![0u8; 2048]);
+        nibble.set(7, 14, 7, 15);
+        nibble.set(8, 14, 7, 14);
+        nibble.set(6, 14, 7, 14);
+        nibble.set(7, 14, 8, 14);
+        nibble.set(7, 14, 6, 14);
+        engine.set_nibble_in_cache(0, -4, 0, Some(nibble));
+
+        // `checkBlock` zeroes the source before queueing the decrease.
+        engine.set_light_level(7, -50, 7, 0);
+        let horizontal = 0b001111;
+        engine.append_to_decrease_queue(encode_entry(&engine, 7, -50, 7, 15, horizontal));
+        engine.perform_light_decrease();
+
+        let result = engine
+            .get_nibble_from_cache(0, -4, 0)
+            .expect("section nibble");
+        assert_eq!(result.get_updating(7, 14, 7), 0, "source stays removed");
+        assert_eq!(result.get_updating(8, 14, 7), 0, "+X neighbour");
+        assert_eq!(result.get_updating(6, 14, 7), 0, "-X neighbour");
+        assert_eq!(result.get_updating(7, 14, 8), 0, "+Z neighbour");
+        assert_eq!(result.get_updating(7, 14, 6), 0, "-Z neighbour");
+    }
+
+    /// `initNibble` with `extrude=true` copies the y=0 plane of the first
+    /// non-null section above down into every y-layer of the section below the
+    /// lowest non-empty section. A wrong extrusion (copying the wrong layer,
+    /// only one layer, or leaving the section null) fails the byte assertion.
+    #[test]
+    fn init_nibble_extrudes_the_floor_layer_from_the_section_above() {
+        let mut engine = SkyStarLightEngine::new(&*overworld_accessor());
+        engine.setup_encode_offset(7, 128, 7);
+        engine.set_chunk_in_cache(0, 0);
+
+        // Emptiness: the lowest non-empty world section is 0 (block y -64..-49).
+        let mut map = vec![true; SECTION_COUNT];
+        map[0] = false;
+        engine.set_emptiness_map_cache(0, 0, Some(map));
+
+        // The section above (light section -4) is non-null with a distinctive
+        // y=0 plane.
+        let mut above = SwmrNibbleArray::new_with_bytes(vec![0u8; 2048]);
+        for x in 0..16 {
+            for z in 0..16 {
+                above.set(x, 0, z, (x + z) % 16);
+            }
+        }
+        engine.set_nibble_in_cache(0, -4, 0, Some(above));
+
+        // The section below (light section -5, below the world floor) starts
+        // null.
+        engine.set_nibble_in_cache(
+            0,
+            -5,
+            0,
+            Some(SwmrNibbleArray::new_with_bytes_and_null(None, true)),
+        );
+
+        engine.init_nibble(0, -5, 0, true, false);
+
+        let below = engine
+            .get_nibble_from_cache(0, -5, 0)
+            .expect("extruded nibble");
+        assert!(
+            !below.is_null_nibble_updating(),
+            "extrusion must init the section"
+        );
+        for y in 0..16 {
+            for x in 0..16 {
+                for z in 0..16 {
+                    assert_eq!(
+                        below.get_updating(x, y, z),
+                        (x + z) % 16,
+                        "y-layer {y} at ({x}, {z}) must carry the above section's y=0 plane"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `initNibble` without `extrude` below the lowest non-empty section only
+    /// de-nulls the nibble (Java's `setNonNull`); it must stay uninitialised
+    /// with no data (reads 0), never extruded.
+    #[test]
+    fn init_nibble_without_extrude_stays_uninitialised() {
+        let mut engine = SkyStarLightEngine::new(&*overworld_accessor());
+        engine.setup_encode_offset(7, 128, 7);
+        engine.set_chunk_in_cache(0, 0);
+
+        let mut map = vec![true; SECTION_COUNT];
+        map[0] = false;
+        engine.set_emptiness_map_cache(0, 0, Some(map));
+
+        engine.set_nibble_in_cache(
+            0,
+            -5,
+            0,
+            Some(SwmrNibbleArray::new_with_bytes_and_null(None, true)),
+        );
+
+        engine.init_nibble(0, -5, 0, false, false);
+
+        let below = engine.get_nibble_from_cache(0, -5, 0).expect("nibble");
+        assert!(!below.is_null_nibble_updating(), "must be de-nulled");
+        assert!(below.is_uninitialised_updating(), "must not be extruded");
+        assert_eq!(below.get_updating(0, 0, 0), 0, "no data, reads 0");
+    }
 }
