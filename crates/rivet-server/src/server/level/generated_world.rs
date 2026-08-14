@@ -565,9 +565,8 @@ mod tests {
         // An empty map does not serve the generated position: it holds no
         // superflat placeholder and `install` accepts only the genuine FULL
         // `LevelChunk` type, which no sub-FULL ProtoChunk can produce.
-        let mut map = ChunkMap::empty(4);
+        let map = ChunkMap::empty(4);
         assert!(map.get_chunk(ChunkPos::ZERO).is_none());
-        let _: &mut ChunkMap = &mut map; // (install's LevelChunk-only signature is the compile-time gate)
     }
 
     /// Ownership: the holder owns its ProtoChunk by value (no `Arc<RwLock>`
