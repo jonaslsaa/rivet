@@ -572,6 +572,42 @@ git -C "$E2E5/main" branch --list feature/locked | grep -q . || fail "locked e2e
 git -C "$E2E5/wt" worktree list --porcelain | grep -q "^locked" || fail "locked e2e real run dropped the lock"
 pass "e2e locked worktree: real run keeps worktree, branch, and lock"
 
+# --- e2e: removal is a plain `worktree remove` (no --force); git's dirty-
+# --- refusal at removal time backstops the TOCTOU window ----------------------
+# The clean probe and the remove are adjacent lines, so the only backstop for a
+# file that lands dirty between them is git's own refusal inside `worktree
+# remove`. `--force` would strip that backstop, so the emitted command is pinned
+# two ways: the dry-run line names the exact command (catches a re-added
+# --force), and the same plain command refuses a dirtied worktree with the file
+# preserved.
+E2E6="$SANDBOX/e2e6"
+mkdir -p "$E2E6/main"
+git init -q "$E2E6/main"
+git -C "$E2E6/main" config user.email test@example.com
+git -C "$E2E6/main" config user.name "test"
+git -C "$E2E6/main" config commit.gpgsign false
+printf 'x\n' > "$E2E6/main/a.txt"
+git -C "$E2E6/main" add a.txt
+git -C "$E2E6/main" commit -qm c1
+git -C "$E2E6/main" update-ref refs/remotes/origin/main HEAD
+git -C "$E2E6/main" worktree add -q -b feature/backstop "$E2E6/wt" HEAD
+cd "$E2E6/main"
+out=$(bash "$SCRIPT_DIR/prune-worktrees.sh" --dry-run --no-tmp 2>&1)
+echo "$out" | grep -q "worktree remove --force" && fail "e2e backstop: emitted worktree remove --force (reopens TOCTOU window)"
+wt_c=$(cd "$E2E6/wt" && pwd -P)  # git records the physical path (/tmp -> /private/tmp)
+echo "$out" | grep -q "worktree remove $wt_c" || fail "e2e backstop: dry-run missing plain worktree remove line for $wt_c"
+pass "e2e removal emits a plain worktree remove (no --force)"
+
+# the backstop itself: the same plain command refuses a worktree dirtied after a
+# clean probe and preserves the file
+printf 'y\n' >> "$E2E6/wt/a.txt"
+if git -C "$E2E6/main" worktree remove "$E2E6/wt" 2>/dev/null; then
+  fail "e2e backstop: plain worktree remove deleted a dirty worktree"
+fi
+[ -d "$E2E6/wt" ] || fail "e2e backstop: dirty worktree was removed"
+[ -f "$E2E6/wt/a.txt" ] || fail "e2e backstop: dirty file was lost"
+pass "e2e plain worktree remove refuses a dirtied worktree; file survives"
+
 # --- zsh: sourcing + classification works (no failglob abort) ----------------
 if command -v zsh >/dev/null 2>&1; then
   zrc=0

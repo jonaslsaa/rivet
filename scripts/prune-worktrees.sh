@@ -5,7 +5,9 @@
 # ~18s as of 2026-08), so cargo target/ dirs are disposable cache. Policy:
 #   - worktree clean AND fully merged into origin/main  -> remove worktree (+ branch);
 #     "clean" requires the status probe to succeed — a corrupt/unreadable index is
-#     never clean, and a refused `git branch -d` is reported with the ref left in place
+#     never clean, and removal is a plain `git worktree remove` (no --force) so
+#     git's dirty-refusal at removal time backstops the probe; a refused
+#     `git branch -d` is reported with the ref left in place
 #   - anything else idle for more than IDLE_HOURS        -> delete its build caches
 #   - dirty or unmerged checkouts are never removed
 #
@@ -192,8 +194,8 @@ main() {
     git -C "$wt" merge-base --is-ancestor "$head" origin/main 2>/dev/null && merged=merged
     state="${dirty:+dirty, }${merged:-unmerged}"
     [ -n "$status_fail" ] && state="status probe failed"
-    # A locked worktree is not removable: `git worktree remove --force` refuses a
-    # lock (only remove -f -f overrides), so the sweep must report it as kept
+    # A locked worktree is not removable: `git worktree remove` refuses a lock
+    # (only remove -f -f overrides), so the sweep must report it as kept
     # rather than count a removal a real run cannot do. The lock reason comes
     # from the porcelain "locked" field (prefix * matches `git worktree list`).
     [ -n "$lock" ] && state="${state:+$state, }locked"
@@ -201,7 +203,10 @@ main() {
     if [ -z "$status_fail" ] && [ -z "$dirty" ] && [ -n "$merged" ] && [ -z "$lock" ]; then
       kb=$(dir_kb "$wt")
       say "$(act REMOVE) $wt  [$branch: clean, merged, $((kb / 1024))MB]"
-      if run git -C "$MAIN" worktree remove --force "$wt"; then
+      # No --force: git's dirty-worktree refusal at removal time is the backstop
+      # for a file that lands between the status probe above and this remove.
+      # A plain remove succeeds for every clean+merged+unlocked worktree here.
+      if run git -C "$MAIN" worktree remove "$wt"; then
         freed_kb=$((freed_kb + kb)); removed=$((removed + 1))
         if [ "$branch" != "(detached)" ] && ! run git -C "$MAIN" branch -d "$branch"; then
           say "  WARN: branch '$branch' survived worktree removal (branch -d refused; ref left in place, never force-deleted)"
