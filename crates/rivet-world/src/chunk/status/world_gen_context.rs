@@ -46,8 +46,9 @@
 //!    `ChunkLightTask.LightTask` do (spec §3.4): the INITIALIZE_LIGHT body
 //!    records the engine (Java's `setLightEngine`; Paper's `initializeLight`
 //!    completes immediately — the real compute is the Moonrise `ChunkLightTask`
-//!    at the LIGHT rung), dereferencing it so a missing engine errors like
-//!    Java's NPE but computing nothing; the LIGHT body preserves Java's
+//!    at the LIGHT rung), dereferencing it so a missing engine — or a
+//!    provider-less one, treated the same — errors like Java's NPE but
+//!    computing nothing; the LIGHT body preserves Java's
 //!    load-vs-compute branch — a chunk that is already lighted (`isLighted` =
 //!    persisted status at/after `LIGHT` && light-correct, the value-layer flag
 //!    `ChunkAccess.isLightCorrect`) is *loaded* through the seam
@@ -237,6 +238,19 @@ where
         chunk.get_persisted_status().is_or_after(ChunkStatus::Light) && chunk.is_light_correct()
     }
 
+    /// Whether the context carries a light engine the light steps can use —
+    /// present AND carrying a provider. `LevelLightEngine::new` builds an
+    /// engine with the provider `None` (the seam attaches one through
+    /// `with_provider`); a provider-less engine can neither light nor load, so
+    /// the light steps treat it as absent. The atomic-refusal precheck and the
+    /// single-step guards both require it, so a provider-less engine never lets
+    /// earlier steps mutate a chunk before the light failure.
+    fn has_usable_light_engine(&self) -> bool {
+        self.light_engine
+            .as_ref()
+            .is_some_and(|e| e.provider().is_some())
+    }
+
     /// `ChunkStatusTasks.light` + `ChunkLightTask.LightTask.getAsBoolean` (the
     /// Moonrise per-status light dispatch; spec §3.4) — the LIGHT task body,
     /// dispatched through the provider seam. Java's branch: an already-lighted
@@ -260,17 +274,17 @@ where
             .ok_or(GenError::LightEngineMissing { status })?;
         let empty_sections =
             crate::lighting::star_light_engine::get_empty_sections_for_chunk(chunk);
+        // The provider is required before any mutation — a provider-less engine
+        // (built with `LevelLightEngine::new`) cannot light or load, so the
+        // recompute branch must not toggle light-correct before refusing.
+        let provider = engine
+            .provider_mut()
+            .ok_or(GenError::LightEngineMissing { status })?;
         if Self::is_lighted(chunk) {
-            let provider = engine
-                .provider_mut()
-                .ok_or(GenError::LightEngineMissing { status })?;
             provider.force_load_in_chunk(chunk.get_pos(), &empty_sections);
             provider.check_chunk_edges(chunk.get_pos());
         } else {
             chunk.set_light_correct(false);
-            let provider = engine
-                .provider_mut()
-                .ok_or(GenError::LightEngineMissing { status })?;
             provider.light_chunk(chunk.get_pos(), &empty_sections);
             chunk.set_light_correct(true);
         }
@@ -351,10 +365,11 @@ where
                 // LIGHT rung — see [`Self::run_light_task`]). The value layer
                 // records the engine (Java's `setLightEngine`; the field itself
                 // defers with the lighting unit, #184) and dereferences it — a
-                // missing engine errors like Java's NPE — but computes nothing:
-                // no light-correct toggle, no provider call. A chunk stays at
-                // `INITIALIZE_LIGHT` until the LIGHT task lights or loads it.
-                if self.light_engine.is_none() {
+                // missing engine (or provider-less one) errors like Java's NPE
+                // — but computes nothing: no light-correct toggle, no provider
+                // call. A chunk stays at `INITIALIZE_LIGHT` until the LIGHT
+                // task lights or loads it.
+                if !self.has_usable_light_engine() {
                     return Err(GenError::LightEngineMissing {
                         status: ChunkStatus::InitializeLight,
                     });
@@ -399,10 +414,11 @@ where
     /// `NOISE` by a task that produces no noise data). A target beyond `LIGHT`
     /// is rejected before any work runs; a target before the current status is
     /// a demotion error. The INITIALIZE_LIGHT/LIGHT steps are wired (see
-    /// [`Self::run_light_task`]) but require the light engine — an engine-less
-    /// context targeting them fails [`GenError::LightEngineMissing`] before any
-    /// work runs, and a run whose path passes through a light step is where the
-    /// step leaves its light-correct/status record.
+    /// [`Self::run_light_task`]) but require a usable light engine — an
+    /// engine-less *or provider-less* context targeting them fails
+    /// [`GenError::LightEngineMissing`] before any work runs, and a run whose
+    /// path passes through a light step is where the step leaves its
+    /// light-correct/status record.
     pub fn generate_through(
         &mut self,
         pyramid: &ChunkPyramid,
@@ -427,8 +443,10 @@ where
         // run loop, so a step the loop would refuse fails here instead and a
         // refused promotion leaves the chunk untouched). Every step the loop
         // would run must be either a wired generation task or a pass-through
-        // that does not fabricate BIOMES/NOISE data. The LIGHT step also
-        // requires the engine: without it the path cannot reach LIGHT.
+        // that does not fabricate BIOMES/NOISE data. The light steps also
+        // require a usable engine (present AND provider-carrying): without one
+        // the path cannot reach LIGHT, and a provider-less engine must not let
+        // the earlier steps mutate the chunk before the LIGHT failure.
         let mut projected = current;
         let mut needs_light_engine = false;
         for index in current.index() + 1..=target.index() {
@@ -482,7 +500,7 @@ where
                 }
             }
         }
-        if needs_light_engine && self.light_engine.is_none() {
+        if needs_light_engine && !self.has_usable_light_engine() {
             return Err(GenError::LightEngineMissing { status: target });
         }
         for index in current.index() + 1..=target.index() {
@@ -1290,6 +1308,69 @@ mod tests {
         assert_eq!(chunk.get_persisted_status(), ChunkStatus::Features);
     }
 
+    /// A provider-less engine is not a usable engine: `LevelLightEngine::new`
+    /// (the public constructor) leaves the provider `None` — the seam attaches
+    /// one via `with_provider`. `generate_through` must refuse it at the
+    /// precheck, so the whole path is a no-op — no step runs, the chunk stays
+    /// at `FEATURES` unlit, and neither worldgen seam ran. The atomic-refusal
+    /// invariant holds for a present-but-provider-less engine, not just an
+    /// absent one. (A fresh `EMPTY` chunk cannot reach LIGHT in the value
+    /// layer — SURFACE..FEATURES are unwired — so the light path starts from
+    /// the pre-light `FEATURES` state, where INITIALIZE_LIGHT is the only step
+    /// before LIGHT; the biomes/noise assertions prove no earlier step ran.)
+    #[test]
+    fn a_provider_less_engine_is_refused_atomically() {
+        let (ctx, biomes_calls, noise_calls) = recording_context();
+        let mut chunk = features_chunk();
+        let engine = LevelLightEngine::new(Box::new(create_accessor(-64, 384)), true, true);
+        let mut ctx = ctx.with_light_engine(engine);
+
+        let err = ctx
+            .generate_through(&GENERATION_PYRAMID, &mut chunk, ChunkStatus::Light)
+            .expect_err("provider-less engine cannot light");
+        assert_eq!(
+            err,
+            GenError::LightEngineMissing {
+                status: ChunkStatus::Light
+            }
+        );
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Features);
+        assert!(!chunk.is_light_correct());
+        assert!(biomes_calls.borrow().is_empty());
+        assert!(noise_calls.borrow().is_empty());
+
+        // The single-step INITIALIZE_LIGHT body also refuses a provider-less
+        // engine — the step must not record it (the LIGHT step could never
+        // light through it), so the chunk is left untouched.
+        let err = ctx
+            .run_step(initialize_light_step(), &mut chunk)
+            .expect_err("initialize light needs a provider");
+        assert_eq!(
+            err,
+            GenError::LightEngineMissing {
+                status: ChunkStatus::InitializeLight
+            }
+        );
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Features);
+        assert!(!chunk.is_light_correct());
+        assert!(biomes_calls.borrow().is_empty());
+        assert!(noise_calls.borrow().is_empty());
+
+        // The single-step LIGHT body refuses before mutating light-correct:
+        // the provider deref precedes `setLightCorrect(false)`.
+        let err = ctx
+            .run_step(light_step(), &mut chunk)
+            .expect_err("light needs a provider");
+        assert_eq!(
+            err,
+            GenError::LightEngineMissing {
+                status: ChunkStatus::Light
+            }
+        );
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Features);
+        assert!(!chunk.is_light_correct());
+    }
+
     /// `generate_through` may stop at `INITIALIZE_LIGHT` with an engine
     /// attached: the step records the engine, computes nothing, and leaves the
     /// chunk unlit at `INITIALIZE_LIGHT` (the LIGHT task lights it later).
@@ -1316,9 +1397,12 @@ mod tests {
     }
 
     /// A chunk loaded from disk at `LIGHT` and light-correct is confirmed as a
-    /// no-op through the LOADING pyramid: the LIGHT loading step is a
-    /// pass-through here (the loading DAG carries the chunk's existing status,
-    /// never relighting it — the value-layer loading step has no light task).
+    /// no-op through the LOADING pyramid: `generate_through` short-circuits at
+    /// `target == current` before examining any step. The LOADING pyramid's
+    /// LIGHT step does carry the `Light` task (mirroring
+    /// `ChunkLightTask.LightTask.getAsBoolean`, like the GENERATION pyramid's
+    /// LIGHT rung), but it is never reached for an already-lighted chunk — the
+    /// idempotent confirm is what keeps loading from relighting it.
     #[test]
     fn loading_confirms_an_existing_lighted_chunk_idempotently() {
         let (mut ctx, biomes_calls, noise_calls) = recording_context();
