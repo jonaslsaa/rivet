@@ -71,25 +71,44 @@
 //! The value codecs, the applied `Condition`/`SurfaceRule` runtime, the
 //! `Context` lazy caches, and the `SurfaceSystem` noise set/clay-bands are
 //! faithful ports of the Java arithmetic. `buildSurface` is ported as the
-//! internal [`SurfaceSystem::build_surface`] seam driver (crate-visible,
-//! exercised only against a caller-supplied [`ChunkSurface`]) — the
-//! production wire from `NoiseBasedChunkGenerator.doFill` defers (RivetTodo
-//! #177). Within that driver the block-write half (`ProtoChunk.setBlockState`)
-//! defers with the `#216` section write (RivetTodo #216); the worldgen
-//! heightmap reads (`getHeight(WORLD_SURFACE_WG)`) and the `Biome`-value reads
-//! (`coldEnoughToSnow`, `shouldMeltFrozenOceanIcebergSlightly`) are the
-//! `#185`/biome-value seams. `SurfaceRuleData.end` is ported (the end-stone
-//! `block` rule); the `nether`/`overworld`/`overworldLike` builders remain AIR
-//! shims (the `mc.data.worldgen` unit, RivetTodo #179) because a faithful port
-//! needs the biome `HolderGetter` threaded through the settings bootstrap.
+//! internal [`SurfaceSystem::build_surface`] driver (crate-visible), driven
+//! against the real [`ProtoChunk`](crate::chunk::proto_chunk::ProtoChunk)
+//! `ChunkSurface` impl — the production wire from
+//! `NoiseBasedChunkGenerator.doFill` defers (RivetTodo #177). Within the
+//! driver the column write (`ProtoChunk.setBlockState` +
+//! `markPosForPostProcessing`) is the real worldgen write path; the worldgen
+//! heightmap reads (`getHeight(WORLD_SURFACE_WG)`) are the `#185` seam — the
+//! applied `SteepMaterialCondition` reads a snapshot of the primed heights
+//! captured at `build_surface` start (the applied rules are `'static`/`Send +
+//! Sync` and cannot carry the `&mut` chunk; the snapshot is bit-identical to
+//! Java's live reads for the end-stone and overworld surface writes, with the
+//! one accepted divergence being a rule that writes `AIR` over the topmost
+//! `defaultBlock`). The `Biome`-value reads (`coldEnoughToSnow`,
+//! `shouldMeltFrozenOceanIcebergSlightly`) are the biome-value seams
+//! (RivetTodo #185). `SurfaceRuleData.end` is ported (the end-stone `block`
+//! rule), and `SurfaceRuleData.nether`/`overworld`/`overworldLike` are ported
+//! faithfully (the `mc.data.worldgen` unit, RivetTodo #179) with the biome
+//! `HolderGetter` threaded through the settings bootstrap (the
+//! `noise_generator_settings` callers).
+//!
+//! RivetTodo(#179): the `is_biome` `HolderSet`s the builders resolve are
+//! bound to whatever `HolderGetter<BiomeId>` is handed in. The bootstrap-time
+//! registries (the `worldgen_bootstraps` access and the unit-test accesses)
+//! freeze their own biome registries with fabricated `BiomeId` handles, so the
+//! surface-rule holder identity will NOT match the runtime biome-source
+//! registry until the `#185`/`#177` wiring resolves the same registry both the
+//! `BiomeCondition` and the biome source read. Encode is byte-exact today; the
+//! apply path must not compare holders across registries until then.
 //! The `@Deprecated` single-column [`SurfaceSystem::top_material`] probe (the
 //! carver's grass-replacement call) is ported and composed into the carver
 //! `CarvingContext` seam through [`bind_carver_top_material`]; the production
 //! carver loop that binds it defers (RivetTodo #185).
 
-use crate::biome::{BiomeManager, dense_biome_id};
-use crate::block::BlockState;
+use crate::biome::BiomeManager;
+use crate::biome::biomes;
+use crate::biome::dense_biome_id;
 use crate::block::blocks::Blocks;
+use crate::block::{Block, BlockState};
 use crate::chunk::block_column::BlockColumn;
 use crate::level::dimension::dimension_type::WAY_BELOW_MIN_Y;
 use crate::levelgen::carver::carving_context::CarvingContext;
@@ -106,6 +125,7 @@ use rivet_registry::ResourceKey;
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::core::{BlockPos, ChunkPos, MutableBlockPos};
 use rivet_registry::holder::Holder;
+use rivet_registry::holder_lookup::HolderGetter;
 use rivet_registry::holder_set::HolderSet;
 use rivet_registry::registry_file_codec::{HolderSetCodec, RegistryFixedCodec};
 use rivet_registry::registry_ops::RegistryOpsLookup;
@@ -570,6 +590,12 @@ pub(crate) struct SurfaceContext {
     biome_getter: BiomeGetter,
     /// `Context.context` — the `WorldGenerationContext` (vertical anchors).
     worldgen_context: Arc<WorldGenerationContext>,
+    /// `Context.chunk`'s primed `WORLD_SURFACE_WG` heights, captured at
+    /// `buildSurface` start — the `#185` heightmap seam. The applied rules are
+    /// `'static`/`Send + Sync`, so they cannot carry the `&mut` chunk; the
+    /// heights are snapshotted into the shared context instead. `None` for the
+    /// single-column [`SurfaceSystem::top_material`] probe, which has no chunk.
+    world_surface_heights: Option<Arc<[i32; 256]>>,
 }
 
 // RivetTodo(#177): the surface-build runtime is test-exercised through the
@@ -800,11 +826,12 @@ impl<'a> Context<'a> {
     /// `new Context(SurfaceSystem, RandomState, ChunkAccess, NoiseChunk,
     /// Function<BlockPos, Holder<Biome>>, WorldGenerationContext,
     /// @Nullable Set<Holder<Biome>>)` — Java's `ChunkAccess chunk` is the
-    /// `#185` heightmap seam (the port reads heights through `seam_get_height`,
-    /// so the `Context` does not carry the chunk). The `SurfaceSystem` is the
-    /// `Arc` shared from `RandomState` (Java's `Context.system` is the same
-    /// object the `RandomState` holds); the `RandomState` is borrowed for the
-    /// context's lifetime.
+    /// `#185` heightmap seam: the port snapshots the primed `WORLD_SURFACE_WG`
+    /// heights (`world_surface_heights`) so the applied rules read them without
+    /// carrying the `&mut` chunk; `None` when there is no chunk (the carver
+    /// probe). The `SurfaceSystem` is the `Arc` shared from `RandomState`
+    /// (Java's `Context.system` is the same object the `RandomState` holds);
+    /// the `RandomState` is borrowed for the context's lifetime.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         system: Arc<SurfaceSystem>,
@@ -813,12 +840,14 @@ impl<'a> Context<'a> {
         biome_getter: BiomeGetter,
         worldgen_context: Arc<WorldGenerationContext>,
         possible_biomes: Option<Vec<Holder<BiomeId>>>,
+        world_surface_heights: Option<Arc<[i32; 256]>>,
     ) -> Self {
         let surface_context = Arc::new(SurfaceContext {
             system,
             cells: SharedCells::new(),
             biome_getter,
             worldgen_context,
+            world_surface_heights,
         });
         let temperature = Arc::new(TemperatureHelperCondition {
             cache: LazyCache::new(surface_context.cells.last_update_y()),
@@ -983,8 +1012,10 @@ impl Condition for HoleCondition {
 }
 
 /// `Context.SteepMaterialCondition` — a `LazyXZCondition` reading the chunk's
-/// `WORLD_SURFACE_WG` heights. The chunk reads are the `#185` seam (the
-/// `&mut` heightmap prime); the port keeps the arithmetic and marks the read.
+/// `WORLD_SURFACE_WG` heights. The chunk reads are the `#185` heightmap seam:
+/// the applied condition cannot prime/read the `&mut` heightmap through `&self`,
+/// so it reads the snapshot `build_surface` captured at its start (see
+/// [`SurfaceContext::world_surface_heights`]); the arithmetic is faithful.
 struct SteepMaterialCondition {
     cache: LazyCache,
     surface_context: Arc<SurfaceContext>,
@@ -1007,21 +1038,28 @@ impl Condition for SteepMaterialCondition {
     fn test(&self) -> bool {
         self.cache
             .test(self.surface_context.cells.last_update_xz(), || {
+                // The `ChunkAccess.getHeight(WORLD_SURFACE_WG, ...)` reads are
+                // the `#185` heightmap seam — the applied rule cannot prime/
+                // read the `&mut` heightmap through `&self`, so it reads the
+                // snapshot `build_surface` captured at its start. The single-
+                // column carver probe has no chunk (`None`), so the steep
+                // condition cannot fire there — Java's probe does have a
+                // chunk, but the seam cannot construct one (see the module
+                // doc).
+                let Some(heights) = &self.surface_context.world_surface_heights else {
+                    return false;
+                };
                 let chunk_block_x = self.surface_context.cells.block_x() & 15;
                 let chunk_block_z = self.surface_context.cells.block_z() & 15;
                 let (z_north, z_south, x_west, x_east) =
                     steep_neighbor_probes(chunk_block_x, chunk_block_z);
-                // The `ChunkAccess.getHeight(WORLD_SURFACE_WG, ...)` reads are the
-                // `#185`/`#216` seam — the port cannot prime/read the worldgen
-                // heightmap through the `&mut` accessor inside `&self`. See the
-                // module doc.
-                let height_north = seam_get_height(chunk_block_x, z_north);
-                let height_south = seam_get_height(chunk_block_x, z_south);
+                let height_north = seam_get_height(heights, chunk_block_x, z_north);
+                let height_south = seam_get_height(heights, chunk_block_x, z_south);
                 if height_south >= height_north + 4 {
                     return true;
                 }
-                let height_west = seam_get_height(x_west, chunk_block_z);
-                let height_east = seam_get_height(x_east, chunk_block_z);
+                let height_west = seam_get_height(heights, x_west, chunk_block_z);
+                let height_east = seam_get_height(heights, x_east, chunk_block_z);
                 height_west >= height_east + 4
             })
     }
@@ -1049,15 +1087,17 @@ impl Condition for TemperatureHelperCondition {
     }
 }
 
-/// The `RivetTodo(#185)` heightmap seam — see the module doc.
-fn seam_get_height(_x: i32, _z: i32) -> i32 {
-    // STUB(mc.world.level.chunk.access): the `ChunkAccess.getHeight(
-    // WORLD_SURFACE_WG, x, z)` read needs the `&mut` heightmap prime (the
-    // `RivetTodo(#216)` write slice / `RivetTodo(#185)` worldgen chunk seam).
-    // Returning 0 unconditionally means `SteepMaterialCondition` never fires:
-    // every worldgen-heightmap-driven surface is deferred until the heightmap
-    // write slice lands; the real caller replaces this with the actual reads.
-    0
+/// The `ChunkAccess.getHeight(WORLD_SURFACE_WG, x, z)` read — `getFirstAvailable
+/// (x & 15, z & 15) - 1` over the primed heightmap (issue #185). The read
+/// happens against the snapshot `build_surface` captured at its start. The
+/// snapshot is bit-identical to Java's live reads for every surface write that
+/// keeps the topmost non-air block in place — the end-stone rule and the
+/// default-block-to-surface-state writes of the overworld rules; the one
+/// divergence is a rule that writes `AIR` over the topmost `defaultBlock`
+/// (Java's `setBlock` lowers the worldgen height there and the live probe
+/// would see it), which the seam accepts (RivetTodo #185).
+fn seam_get_height(heights: &[i32; 256], x: i32, z: i32) -> i32 {
+    heights[(x & 15) as usize + (z & 15) as usize * 16]
 }
 
 /// The `RivetTodo(#185)` biome-value seam —
@@ -2489,19 +2529,21 @@ impl SurfaceSystem {
     /// production wire.** Java calls `SurfaceSystem.buildSurface` from
     /// `NoiseBasedChunkGenerator.doFill`; the port's production call site is
     /// `NoiseBasedChunkGenerator::build_surface_stub` (RivetTodo #177, the
-    /// `levelgen.surface` wave). This method exists so the column-loop
-    /// arithmetic and the `ChunkColumnAdapter` x/z threading are exercised
-    /// against a caller-supplied [`ChunkSurface`]; the production `ProtoChunk`
-    /// implements the trait once the `#216` section-write slice lands.
+    /// `levelgen.surface` wave). This method drives the column-loop arithmetic
+    /// and the `ChunkColumnAdapter` x/z threading against a caller-supplied
+    /// [`ChunkSurface`]; the production `ProtoChunk` implements the trait (see
+    /// `chunk::proto_chunk`), exercised by the real-chunk integration tests.
     ///
     /// The block-column read is ported faithfully (the `column.getBlock` /
     /// `isStone` / `updateY` / `old == defaultBlock` / `rule.tryApply`
     /// cascade). The `getHeight(WORLD_SURFACE_WG)` reads are the `#185` seam
-    /// (`ChunkSurface::get_height`); the `Biome`-value reads
-    /// (`surfaceBiome.is(Biomes.X)`, `shouldMeltFrozenOceanIcebergSlightly`)
-    /// are the biome-value seams (`dense_biome_id` + `false`); the column
-    /// write (`ProtoChunk.setBlockState` + `markPosForPostProcessing`) is the
-    /// `#216` seam (`ChunkColumnAdapter` guards + writes, the mark defers).
+    /// (snapshotted at [`Self::build_surface`] start into the shared
+    /// `SurfaceContext`, then read by `SteepMaterialCondition`); the
+    /// `Biome`-value reads (`surfaceBiome.is(Biomes.X)`,
+    /// `shouldMeltFrozenOceanIcebergSlightly`) are the biome-value seams
+    /// (`dense_biome_id` + `false`); the column write
+    /// (`ProtoChunk.setBlockState` + `markPosForPostProcessing`) is the real
+    /// worldgen write path (`ChunkColumnAdapter` guards + writes + marks).
     #[allow(clippy::too_many_arguments)]
     #[allow(dead_code)] // #177 — seam driver until `NoiseBasedChunkGenerator` wires it.
     pub(crate) fn build_surface<'a>(
@@ -2524,6 +2566,20 @@ impl SurfaceSystem {
             let bm = Arc::clone(&biome_manager);
             Arc::new(move |pos: &BlockPos| bm.get_biome(pos)) as BiomeGetter
         };
+        // Capture the primed `WORLD_SURFACE_WG` heights before the context is
+        // built (the `#185` heightmap seam): the applied rules read the
+        // `SteepMaterialCondition` probes through this snapshot, never the
+        // `&mut` chunk. Bit-identical to Java's live reads for the end-stone and
+        // overworld surface writes (which keep the topmost non-air block in
+        // place); a rule writing `AIR` over the topmost `defaultBlock` is the
+        // one accepted divergence (see [`seam_get_height`]).
+        let mut world_surface_heights = [0i32; 256];
+        for x in 0..16i32 {
+            for z in 0..16i32 {
+                world_surface_heights[(x + z * 16) as usize] =
+                    column.chunk.borrow().get_height(x, z);
+            }
+        }
         let context = Context::new(
             random_state.surface_system(),
             random_state,
@@ -2531,6 +2587,7 @@ impl SurfaceSystem {
             biome_getter,
             generation_context,
             possible_biomes.map(|set| set.to_vec()),
+            Some(Arc::new(world_surface_heights)),
         );
         let rule = rule_source.apply(&context);
         let min_block_x = column.chunk.borrow().min_block_x();
@@ -2689,6 +2746,9 @@ impl SurfaceSystem {
             noise_chunk,
             biome_getter,
             worldgen_context,
+            None,
+            // No chunk: the single-column probe has no heightmap to snapshot,
+            // so `SteepMaterialCondition` cannot fire here (RivetTodo #185).
             None,
         );
         let rule = rule_source.apply(&context);
@@ -2964,7 +3024,7 @@ pub(crate) fn bind_carver_top_material<'a>(
 
 /// The `buildSurface` chunk seam — the `BlockColumn` over the chunk + the
 /// worldgen heightmap reads (`#216`/`#185`). The production `ProtoChunk`
-/// implements this once the section-write slice lands.
+/// implements this (issue #179); a test double can too.
 pub trait ChunkSurface {
     /// `ProtoChunk.getHeight(WORLD_SURFACE_WG, x, z)` — the `#185` seam.
     fn get_height(&self, x: i32, z: i32) -> i32;
@@ -2975,12 +3035,17 @@ pub trait ChunkSurface {
     /// `ChunkPos.getMinBlockZ()` — the chunk's north edge in block coords.
     fn min_block_z(&self) -> i32;
     /// `LevelHeightAccessor.isInsideBuildHeight(int)` — the build-height guard
-    /// the `#216` write path applies before `setBlockState`.
+    /// the write path applies before `setBlockState`.
     fn is_inside_build_height(&self, y: i32) -> bool;
     /// `ProtoChunk.getBlockState(x, y, z)`.
     fn get_block_state(&self, x: i32, y: i32, z: i32) -> BlockState;
-    /// `ProtoChunk.setBlockState(x, y, z, state)` — the `#216` seam.
+    /// `ProtoChunk.setBlockState(x, y, z, state)` — the worldgen write
+    /// (section write + heightmap updates + post-processing mark).
     fn set_block_state(&mut self, x: i32, y: i32, z: i32, state: BlockState);
+    /// `ProtoChunk.markPosForPostProcessing(BlockPos)` — the surface
+    /// `BlockColumn.setBlock` calls this for every non-empty fluid write
+    /// (Java, after `protoChunk.setBlockState`).
+    fn mark_pos_for_post_processing(&mut self, x: i32, y: i32, z: i32);
 }
 
 /// The `buildSurface` `BlockColumn` over the chunk seam — Java's anonymous
@@ -3006,66 +3071,702 @@ impl BlockColumn<BlockState> for ChunkColumnAdapter<'_> {
 
     fn set_block(&mut self, block_y: i32, state: BlockState) {
         // Java: `heightAccessor.isInsideBuildHeight(blockY)` guards the write,
-        // and a non-empty fluid state triggers `markPosForPostProcessing` (the
-        // `#216` section-write seam — deferred, the conditional is preserved
-        // as `state.fluid_empty()`'s contract on the caller).
+        // and a non-empty fluid state triggers `markPosForPostProcessing` —
+        // both on the `ChunkSurface` seam (issue #179).
         let mut chunk = self.chunk.borrow_mut();
         if chunk.is_inside_build_height(block_y) {
             chunk.set_block_state(self.x.get(), block_y, self.z.get(), state);
+            if !state.fluid_empty() {
+                chunk.mark_pos_for_post_processing(self.x.get(), block_y, self.z.get());
+            }
         }
     }
 }
 
 // ---------------------------------------------------------------------------
 // SurfaceRuleData builders (the `mc.data.worldgen` unit's static surface, kept
-// here so `noise_generator_settings.rs` compiles unchanged)
+// here so `noise_generator_settings.rs` can compose the real preset trees)
 // ---------------------------------------------------------------------------
+
+/// `SurfaceRuleData.makeStateRule(Block)` — `SurfaceRules.state(block.defaultBlockState())`.
+fn make_state_rule(block: Block) -> ArcRuleSource {
+    state(block.default_block_state())
+}
 
 /// `SurfaceRuleData.air()` — Java's `makeStateRule(Blocks.AIR)` = a `block`
 /// rule carrying the air default state (`SurfaceRules.state`), so it encodes
 /// through the `block` `MATERIAL_RULE` arm exactly like Java.
 pub fn surface_rule_air() -> ArcRuleSource {
-    state(Blocks::AIR.default_block_state())
+    make_state_rule(Blocks::AIR)
 }
 
 /// `SurfaceRuleData.end()` — Java's `return ENDSTONE` =
 /// `makeStateRule(Blocks.END_STONE)` (a `block` rule carrying the end-stone
 /// default state). The end preset's real surface rule.
 pub fn surface_rule_end() -> ArcRuleSource {
-    state(Blocks::END_STONE.default_block_state())
+    make_state_rule(Blocks::END_STONE)
+}
+
+/// `SurfaceRuleData.surfaceNoiseAbove(double)` — the private
+/// `noiseCondition2d(Noises.SURFACE, threshold / 8.25, Double.MAX_VALUE)`
+/// helper.
+fn surface_noise_above(threshold: f64) -> Arc<dyn ConditionSource> {
+    noise_condition_2d_range((*noises::SURFACE).clone(), threshold / 8.25, f64::MAX)
 }
 
 /// `SurfaceRuleData.nether(HolderGetter<Biome>)` — the lava/nylium/soul-sand/
-/// gravel nether surface tree. The port keeps an AIR shim (a `block` rule so
-/// the value still round-trips through `rule_source_codec`): a faithful port
-/// needs the biome `HolderGetter` threaded through the settings bootstrap (the
-/// `mc.data.worldgen` unit, RivetTodo #179) and the biome-value registry
-/// (`RivetTodo #185`/`#178`). Until the `build_surface` production wire
-/// (RivetTodo #177) lands, the shim is inert; once it lands, the nether preset
-/// would silently get an all-air surface — this is the tracked deferral.
-pub(crate) fn surface_rule_nether() -> ArcRuleSource {
-    state(Blocks::AIR.default_block_state())
+/// gravel nether surface tree, ported faithfully from `SurfaceRuleData.java`.
+///
+/// The `HolderGetter<Biome>` resolves each `Biomes.*` key through
+/// `HolderSet.direct(getOrThrow)` exactly like Java's `isBiome`. A missing
+/// biome key panics with Java's `Missing element <key>` message (`getOrThrow`).
+pub(crate) fn surface_rule_nether(biomes_getter: &dyn HolderGetter<BiomeId>) -> ArcRuleSource {
+    let above_nether_lava_level = y_block_check(VerticalAnchor::absolute(31), 0);
+    let above_nether_lava_surface = y_block_check(VerticalAnchor::absolute(32), 0);
+    let nether_band_around_lava_level_bottom = y_start_check(VerticalAnchor::absolute(30), 0);
+    let nether_band_around_lava_level_top =
+        not_condition(y_start_check(VerticalAnchor::absolute(35), 0));
+    let close_to_ceiling = y_block_check(VerticalAnchor::below_top(5), 0);
+    let hole = hole_condition();
+    let soul_sand_layer = noise_condition_2d((*noises::SOUL_SAND_LAYER).clone(), -0.012);
+    let gravel_layer = noise_condition_2d((*noises::GRAVEL_LAYER).clone(), -0.012);
+    let patch = noise_condition_2d((*noises::PATCH).clone(), -0.012);
+    let netherrack = noise_condition_2d((*noises::NETHERRACK).clone(), 0.54);
+    let nether_wart = noise_condition_2d((*noises::NETHER_WART).clone(), 1.17);
+    let nether_state_selector = noise_condition_2d((*noises::NETHER_STATE_SELECTOR).clone(), 0.0);
+    let gravel_patch = if_true(
+        patch.clone(),
+        if_true(
+            nether_band_around_lava_level_bottom.clone(),
+            if_true(
+                nether_band_around_lava_level_top.clone(),
+                make_state_rule(Blocks::GRAVEL),
+            ),
+        ),
+    );
+    sequence(&[
+        if_true(
+            vertical_gradient(
+                "bedrock_floor",
+                VerticalAnchor::bottom(),
+                VerticalAnchor::above_bottom(5),
+            ),
+            make_state_rule(Blocks::BEDROCK),
+        ),
+        if_true(
+            not_condition(vertical_gradient(
+                "bedrock_roof",
+                VerticalAnchor::below_top(5),
+                VerticalAnchor::top(),
+            )),
+            make_state_rule(Blocks::BEDROCK),
+        ),
+        if_true(close_to_ceiling, make_state_rule(Blocks::NETHERRACK)),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::BASALT_DELTAS]),
+            sequence(&[
+                if_true(under_ceiling(), make_state_rule(Blocks::BASALT)),
+                if_true(
+                    under_floor(),
+                    sequence(&[
+                        gravel_patch.clone(),
+                        if_true(
+                            nether_state_selector.clone(),
+                            make_state_rule(Blocks::BASALT),
+                        ),
+                        make_state_rule(Blocks::BLACKSTONE),
+                    ]),
+                ),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::SOUL_SAND_VALLEY]),
+            sequence(&[
+                if_true(
+                    under_ceiling(),
+                    sequence(&[
+                        if_true(
+                            nether_state_selector.clone(),
+                            make_state_rule(Blocks::SOUL_SAND),
+                        ),
+                        make_state_rule(Blocks::SOUL_SOIL),
+                    ]),
+                ),
+                if_true(
+                    under_floor(),
+                    sequence(&[
+                        gravel_patch,
+                        if_true(
+                            nether_state_selector.clone(),
+                            make_state_rule(Blocks::SOUL_SAND),
+                        ),
+                        make_state_rule(Blocks::SOUL_SOIL),
+                    ]),
+                ),
+            ]),
+        ),
+        if_true(
+            on_floor(),
+            sequence(&[
+                if_true(
+                    not_condition(above_nether_lava_surface.clone()),
+                    if_true(hole.clone(), make_state_rule(Blocks::LAVA)),
+                ),
+                if_true(
+                    is_biome(biomes_getter, &[&*biomes::WARPED_FOREST]),
+                    if_true(
+                        not_condition(netherrack.clone()),
+                        if_true(
+                            above_nether_lava_level.clone(),
+                            sequence(&[
+                                if_true(
+                                    nether_wart.clone(),
+                                    make_state_rule(Blocks::WARPED_WART_BLOCK),
+                                ),
+                                make_state_rule(Blocks::WARPED_NYLIUM),
+                            ]),
+                        ),
+                    ),
+                ),
+                if_true(
+                    is_biome(biomes_getter, &[&*biomes::CRIMSON_FOREST]),
+                    if_true(
+                        not_condition(netherrack),
+                        if_true(
+                            above_nether_lava_level.clone(),
+                            sequence(&[
+                                if_true(nether_wart, make_state_rule(Blocks::NETHER_WART_BLOCK)),
+                                make_state_rule(Blocks::CRIMSON_NYLIUM),
+                            ]),
+                        ),
+                    ),
+                ),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::NETHER_WASTES]),
+            sequence(&[
+                if_true(
+                    under_floor(),
+                    if_true(
+                        soul_sand_layer,
+                        sequence(&[
+                            if_true(
+                                not_condition(hole.clone()),
+                                if_true(
+                                    nether_band_around_lava_level_bottom,
+                                    if_true(
+                                        nether_band_around_lava_level_top.clone(),
+                                        make_state_rule(Blocks::SOUL_SAND),
+                                    ),
+                                ),
+                            ),
+                            make_state_rule(Blocks::NETHERRACK),
+                        ]),
+                    ),
+                ),
+                if_true(
+                    on_floor(),
+                    if_true(
+                        above_nether_lava_level,
+                        if_true(
+                            nether_band_around_lava_level_top,
+                            if_true(
+                                gravel_layer,
+                                sequence(&[
+                                    if_true(
+                                        above_nether_lava_surface,
+                                        make_state_rule(Blocks::GRAVEL),
+                                    ),
+                                    if_true(not_condition(hole), make_state_rule(Blocks::GRAVEL)),
+                                ]),
+                            ),
+                        ),
+                    ),
+                ),
+            ]),
+        ),
+        make_state_rule(Blocks::NETHERRACK),
+    ])
 }
 
-/// `SurfaceRuleData.overworld(HolderGetter<Biome>)` — the full overworld
-/// surface tree. The port keeps an AIR shim for the same reason as
-/// `surface_rule_nether` (see there): the biome `HolderGetter` threading is
-/// the `mc.data.worldgen` unit (RivetTodo #179).
-pub(crate) fn surface_rule_overworld() -> ArcRuleSource {
-    state(Blocks::AIR.default_block_state())
+/// `SurfaceRuleData.overworld(HolderGetter<Biome>)` — Java's
+/// `return overworldLike(biomes, true, false, true)`.
+pub(crate) fn surface_rule_overworld(biomes_getter: &dyn HolderGetter<BiomeId>) -> ArcRuleSource {
+    surface_rule_overworld_like(biomes_getter, true, false, true)
 }
 
 /// `SurfaceRuleData.overworldLike(HolderGetter<Biome>, boolean
 /// doPreliminarySurfaceCheck, boolean bedrockRoof, boolean bedrockFloor)` — the
-/// overworld tree parametrized for the `caves`/`floating_islands` presets. The
-/// port keeps an AIR shim for the same reason as `surface_rule_nether` (see
-/// there).
+/// overworld tree parametrized for the `caves`/`floating_islands` presets,
+/// ported faithfully from `SurfaceRuleData.java` (the local ordering and the
+/// final `ImmutableList` builder order preserved exactly).
 pub(crate) fn surface_rule_overworld_like(
-    _do_preliminary_surface_check: bool,
-    _bedrock_roof: bool,
-    _bedrock_floor: bool,
+    biomes_getter: &dyn HolderGetter<BiomeId>,
+    do_preliminary_surface_check: bool,
+    bedrock_roof: bool,
+    bedrock_floor: bool,
 ) -> ArcRuleSource {
-    state(Blocks::AIR.default_block_state())
+    let wooded_badlands_top = y_block_check(VerticalAnchor::absolute(97), 2);
+    let badlands_top = y_block_check(VerticalAnchor::absolute(256), 0);
+    let badlands_height_condition = y_start_check(VerticalAnchor::absolute(63), -1);
+    let badlands_mid = y_start_check(VerticalAnchor::absolute(74), 1);
+    let mangrove_swamp_puddle_level = y_block_check(VerticalAnchor::absolute(60), 0);
+    let swamp_puddle_level = y_block_check(VerticalAnchor::absolute(62), 0);
+    let above_overworld_sea_level = y_block_check(VerticalAnchor::absolute(63), 0);
+    let not_underwater = water_block_check(-1, 0);
+    let above_water = water_block_check(0, 0);
+    let not_under_deep_water = water_start_check(-6, -1);
+    let hole = hole_condition();
+    let frozen_ocean = is_biome(
+        biomes_getter,
+        &[&*biomes::FROZEN_OCEAN, &*biomes::DEEP_FROZEN_OCEAN],
+    );
+    let steep = steep_condition();
+    let grass_or_dirt_if_underwater = sequence(&[
+        if_true(above_water.clone(), make_state_rule(Blocks::GRASS_BLOCK)),
+        make_state_rule(Blocks::DIRT),
+    ]);
+    let sand_or_sandstone_if_ceiling = sequence(&[
+        if_true(on_ceiling(), make_state_rule(Blocks::SANDSTONE)),
+        make_state_rule(Blocks::SAND),
+    ]);
+    let gravel_or_stone_if_ceiling = sequence(&[
+        if_true(on_ceiling(), make_state_rule(Blocks::STONE)),
+        make_state_rule(Blocks::GRAVEL),
+    ]);
+    let biomes_with_sand_and_sandstone = is_biome(
+        biomes_getter,
+        &[&*biomes::WARM_OCEAN, &*biomes::BEACH, &*biomes::SNOWY_BEACH],
+    );
+    let biomes_with_sand_and_very_deep_sandstone = is_biome(biomes_getter, &[&*biomes::DESERT]);
+    let sulfur_cave_bands = sequence(&[
+        if_true(
+            noise_condition_3d_range(
+                (*noises::SULFUR_CAVE_GRADIENT).clone(),
+                -0.4_f32 as f64,
+                -0.1_f32 as f64,
+            ),
+            make_state_rule(Blocks::CINNABAR),
+        ),
+        if_true(
+            noise_condition_3d_range((*noises::SULFUR_CAVE_GRADIENT).clone(), 0.0, 0.4_f32 as f64),
+            make_state_rule(Blocks::SULFUR),
+        ),
+        if_true(
+            noise_condition_3d((*noises::SULFUR_CAVE_GRADIENT).clone(), 0.4_f32 as f64),
+            make_state_rule(Blocks::CINNABAR),
+        ),
+    ]);
+    let common_surface_and_under_rules = sequence(&[
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::STONY_PEAKS]),
+            sequence(&[
+                if_true(
+                    noise_condition_2d_range((*noises::CALCITE).clone(), -0.0125, 0.0125),
+                    make_state_rule(Blocks::CALCITE),
+                ),
+                make_state_rule(Blocks::STONE),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::STONY_SHORE]),
+            sequence(&[
+                if_true(
+                    noise_condition_2d_range((*noises::GRAVEL).clone(), -0.05, 0.05),
+                    gravel_or_stone_if_ceiling.clone(),
+                ),
+                make_state_rule(Blocks::STONE),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::WINDSWEPT_HILLS]),
+            if_true(surface_noise_above(1.0), make_state_rule(Blocks::STONE)),
+        ),
+        if_true(
+            biomes_with_sand_and_sandstone.clone(),
+            sand_or_sandstone_if_ceiling.clone(),
+        ),
+        if_true(
+            biomes_with_sand_and_very_deep_sandstone.clone(),
+            sand_or_sandstone_if_ceiling.clone(),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::DRIPSTONE_CAVES]),
+            make_state_rule(Blocks::STONE),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::SULFUR_CAVES]),
+            sequence(&[sulfur_cave_bands.clone(), make_state_rule(Blocks::STONE)]),
+        ),
+    ]);
+    let powder_snow_under_rule = if_true(
+        noise_condition_2d_range((*noises::POWDER_SNOW).clone(), 0.45, 0.58),
+        if_true(above_water.clone(), make_state_rule(Blocks::POWDER_SNOW)),
+    );
+    let powder_snow_surface_rule = if_true(
+        noise_condition_2d_range((*noises::POWDER_SNOW).clone(), 0.35, 0.6),
+        if_true(above_water.clone(), make_state_rule(Blocks::POWDER_SNOW)),
+    );
+    let biome_under_surface_rule = sequence(&[
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::FROZEN_PEAKS]),
+            sequence(&[
+                if_true(steep.clone(), make_state_rule(Blocks::PACKED_ICE)),
+                if_true(
+                    noise_condition_2d_range((*noises::PACKED_ICE).clone(), -0.5, 0.2),
+                    make_state_rule(Blocks::PACKED_ICE),
+                ),
+                if_true(
+                    noise_condition_2d_range((*noises::ICE).clone(), -0.0625, 0.025),
+                    make_state_rule(Blocks::ICE),
+                ),
+                if_true(above_water.clone(), make_state_rule(Blocks::SNOW_BLOCK)),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::SNOWY_SLOPES]),
+            sequence(&[
+                if_true(steep.clone(), make_state_rule(Blocks::STONE)),
+                powder_snow_under_rule.clone(),
+                if_true(above_water.clone(), make_state_rule(Blocks::SNOW_BLOCK)),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::JAGGED_PEAKS]),
+            make_state_rule(Blocks::STONE),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::GROVE]),
+            sequence(&[powder_snow_under_rule, make_state_rule(Blocks::DIRT)]),
+        ),
+        common_surface_and_under_rules.clone(),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::WINDSWEPT_SAVANNA]),
+            if_true(surface_noise_above(1.75), make_state_rule(Blocks::STONE)),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::WINDSWEPT_GRAVELLY_HILLS]),
+            sequence(&[
+                if_true(surface_noise_above(2.0), gravel_or_stone_if_ceiling.clone()),
+                if_true(surface_noise_above(1.0), make_state_rule(Blocks::STONE)),
+                if_true(surface_noise_above(-1.0), make_state_rule(Blocks::DIRT)),
+                gravel_or_stone_if_ceiling.clone(),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::MANGROVE_SWAMP]),
+            make_state_rule(Blocks::MUD),
+        ),
+        make_state_rule(Blocks::DIRT),
+    ]);
+    let biome_surface_rule = sequence(&[
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::FROZEN_PEAKS]),
+            sequence(&[
+                if_true(steep.clone(), make_state_rule(Blocks::PACKED_ICE)),
+                if_true(
+                    noise_condition_2d_range((*noises::PACKED_ICE).clone(), 0.0, 0.2),
+                    make_state_rule(Blocks::PACKED_ICE),
+                ),
+                if_true(
+                    noise_condition_2d_range((*noises::ICE).clone(), 0.0, 0.025),
+                    make_state_rule(Blocks::ICE),
+                ),
+                if_true(above_water.clone(), make_state_rule(Blocks::SNOW_BLOCK)),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::SNOWY_SLOPES]),
+            sequence(&[
+                if_true(steep.clone(), make_state_rule(Blocks::STONE)),
+                powder_snow_surface_rule.clone(),
+                if_true(above_water.clone(), make_state_rule(Blocks::SNOW_BLOCK)),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::JAGGED_PEAKS]),
+            sequence(&[
+                if_true(steep.clone(), make_state_rule(Blocks::STONE)),
+                if_true(above_water.clone(), make_state_rule(Blocks::SNOW_BLOCK)),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::GROVE]),
+            sequence(&[
+                powder_snow_surface_rule,
+                if_true(above_water.clone(), make_state_rule(Blocks::SNOW_BLOCK)),
+            ]),
+        ),
+        common_surface_and_under_rules.clone(),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::WINDSWEPT_SAVANNA]),
+            sequence(&[
+                if_true(surface_noise_above(1.75), make_state_rule(Blocks::STONE)),
+                if_true(
+                    surface_noise_above(-0.5),
+                    make_state_rule(Blocks::COARSE_DIRT),
+                ),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::WINDSWEPT_GRAVELLY_HILLS]),
+            sequence(&[
+                if_true(surface_noise_above(2.0), gravel_or_stone_if_ceiling.clone()),
+                if_true(surface_noise_above(1.0), make_state_rule(Blocks::STONE)),
+                if_true(
+                    surface_noise_above(-1.0),
+                    grass_or_dirt_if_underwater.clone(),
+                ),
+                gravel_or_stone_if_ceiling.clone(),
+            ]),
+        ),
+        if_true(
+            is_biome(
+                biomes_getter,
+                &[
+                    &*biomes::OLD_GROWTH_PINE_TAIGA,
+                    &*biomes::OLD_GROWTH_SPRUCE_TAIGA,
+                ],
+            ),
+            sequence(&[
+                if_true(
+                    surface_noise_above(1.75),
+                    make_state_rule(Blocks::COARSE_DIRT),
+                ),
+                if_true(surface_noise_above(-0.95), make_state_rule(Blocks::PODZOL)),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::ICE_SPIKES]),
+            if_true(above_water.clone(), make_state_rule(Blocks::SNOW_BLOCK)),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::MANGROVE_SWAMP]),
+            make_state_rule(Blocks::MUD),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::MUSHROOM_FIELDS]),
+            make_state_rule(Blocks::MYCELIUM),
+        ),
+        grass_or_dirt_if_underwater.clone(),
+    ]);
+    let clay_band_1 = noise_condition_2d_range((*noises::SURFACE).clone(), -0.909, -0.5454);
+    let clay_band_2 = noise_condition_2d_range((*noises::SURFACE).clone(), -0.1818, 0.1818);
+    let clay_band_3 = noise_condition_2d_range((*noises::SURFACE).clone(), 0.5454, 0.909);
+    let main_rule_close_to_surface = sequence(&[
+        if_true(
+            on_floor(),
+            sequence(&[
+                if_true(
+                    is_biome(biomes_getter, &[&*biomes::WOODED_BADLANDS]),
+                    if_true(
+                        wooded_badlands_top,
+                        sequence(&[
+                            if_true(clay_band_1.clone(), make_state_rule(Blocks::COARSE_DIRT)),
+                            if_true(clay_band_2.clone(), make_state_rule(Blocks::COARSE_DIRT)),
+                            if_true(clay_band_3.clone(), make_state_rule(Blocks::COARSE_DIRT)),
+                            grass_or_dirt_if_underwater.clone(),
+                        ]),
+                    ),
+                ),
+                if_true(
+                    is_biome(biomes_getter, &[&*biomes::SWAMP]),
+                    if_true(
+                        swamp_puddle_level,
+                        if_true(
+                            not_condition(above_overworld_sea_level.clone()),
+                            if_true(
+                                noise_condition_2d((*noises::SWAMP).clone(), 0.0),
+                                make_state_rule(Blocks::WATER),
+                            ),
+                        ),
+                    ),
+                ),
+                if_true(
+                    is_biome(biomes_getter, &[&*biomes::MANGROVE_SWAMP]),
+                    if_true(
+                        mangrove_swamp_puddle_level,
+                        if_true(
+                            not_condition(above_overworld_sea_level.clone()),
+                            if_true(
+                                noise_condition_2d((*noises::SWAMP).clone(), 0.0),
+                                make_state_rule(Blocks::WATER),
+                            ),
+                        ),
+                    ),
+                ),
+            ]),
+        ),
+        if_true(
+            is_biome(
+                biomes_getter,
+                &[
+                    &*biomes::BADLANDS,
+                    &*biomes::ERODED_BADLANDS,
+                    &*biomes::WOODED_BADLANDS,
+                ],
+            ),
+            sequence(&[
+                if_true(
+                    on_floor(),
+                    sequence(&[
+                        if_true(badlands_top, make_state_rule(Blocks::ORANGE_TERRACOTTA)),
+                        if_true(
+                            badlands_mid.clone(),
+                            sequence(&[
+                                if_true(clay_band_1, make_state_rule(Blocks::TERRACOTTA)),
+                                if_true(clay_band_2, make_state_rule(Blocks::TERRACOTTA)),
+                                if_true(clay_band_3, make_state_rule(Blocks::TERRACOTTA)),
+                                bandlands(),
+                            ]),
+                        ),
+                        if_true(
+                            not_underwater.clone(),
+                            sequence(&[
+                                if_true(on_ceiling(), make_state_rule(Blocks::RED_SANDSTONE)),
+                                make_state_rule(Blocks::RED_SAND),
+                            ]),
+                        ),
+                        if_true(
+                            not_condition(hole.clone()),
+                            make_state_rule(Blocks::ORANGE_TERRACOTTA),
+                        ),
+                        if_true(
+                            not_under_deep_water.clone(),
+                            make_state_rule(Blocks::WHITE_TERRACOTTA),
+                        ),
+                        gravel_or_stone_if_ceiling.clone(),
+                    ]),
+                ),
+                if_true(
+                    badlands_height_condition,
+                    sequence(&[
+                        if_true(
+                            above_overworld_sea_level.clone(),
+                            if_true(
+                                not_condition(badlands_mid),
+                                make_state_rule(Blocks::ORANGE_TERRACOTTA),
+                            ),
+                        ),
+                        bandlands(),
+                    ]),
+                ),
+                if_true(
+                    under_floor(),
+                    if_true(
+                        not_under_deep_water.clone(),
+                        make_state_rule(Blocks::WHITE_TERRACOTTA),
+                    ),
+                ),
+            ]),
+        ),
+        if_true(
+            on_floor(),
+            if_true(
+                not_underwater.clone(),
+                sequence(&[
+                    if_true(
+                        frozen_ocean.clone(),
+                        if_true(
+                            hole.clone(),
+                            sequence(&[
+                                if_true(above_water.clone(), make_state_rule(Blocks::AIR)),
+                                if_true(temperature_condition(), make_state_rule(Blocks::ICE)),
+                                make_state_rule(Blocks::WATER),
+                            ]),
+                        ),
+                    ),
+                    biome_surface_rule,
+                ]),
+            ),
+        ),
+        if_true(
+            not_under_deep_water.clone(),
+            sequence(&[
+                if_true(
+                    on_floor(),
+                    if_true(frozen_ocean, if_true(hole, make_state_rule(Blocks::WATER))),
+                ),
+                if_true(under_floor(), biome_under_surface_rule),
+                if_true(
+                    biomes_with_sand_and_sandstone,
+                    if_true(deep_under_floor(), make_state_rule(Blocks::SANDSTONE)),
+                ),
+                if_true(
+                    biomes_with_sand_and_very_deep_sandstone,
+                    if_true(very_deep_under_floor(), make_state_rule(Blocks::SANDSTONE)),
+                ),
+            ]),
+        ),
+        if_true(
+            on_floor(),
+            sequence(&[
+                if_true(
+                    is_biome(
+                        biomes_getter,
+                        &[&*biomes::FROZEN_PEAKS, &*biomes::JAGGED_PEAKS],
+                    ),
+                    make_state_rule(Blocks::STONE),
+                ),
+                if_true(
+                    is_biome(
+                        biomes_getter,
+                        &[
+                            &*biomes::WARM_OCEAN,
+                            &*biomes::LUKEWARM_OCEAN,
+                            &*biomes::DEEP_LUKEWARM_OCEAN,
+                        ],
+                    ),
+                    sand_or_sandstone_if_ceiling,
+                ),
+                gravel_or_stone_if_ceiling,
+            ]),
+        ),
+    ]);
+    let rule_above_preliminary_surface = if_true(
+        above_preliminary_surface_condition(),
+        main_rule_close_to_surface.clone(),
+    );
+    let mut builder: Vec<ArcRuleSource> = Vec::new();
+    if bedrock_roof {
+        builder.push(if_true(
+            not_condition(vertical_gradient(
+                "bedrock_roof",
+                VerticalAnchor::below_top(5),
+                VerticalAnchor::top(),
+            )),
+            make_state_rule(Blocks::BEDROCK),
+        ));
+    }
+    if bedrock_floor {
+        builder.push(if_true(
+            vertical_gradient(
+                "bedrock_floor",
+                VerticalAnchor::bottom(),
+                VerticalAnchor::above_bottom(5),
+            ),
+            make_state_rule(Blocks::BEDROCK),
+        ));
+    }
+    if do_preliminary_surface_check {
+        builder.push(rule_above_preliminary_surface);
+    } else {
+        builder.push(main_rule_close_to_surface);
+    }
+    builder.push(if_true(
+        is_biome(biomes_getter, &[&*biomes::SULFUR_CAVES]),
+        sulfur_cave_bands,
+    ));
+    builder.push(if_true(
+        vertical_gradient(
+            "deepslate",
+            VerticalAnchor::absolute(0),
+            VerticalAnchor::absolute(8),
+        ),
+        make_state_rule(Blocks::DEEPSLATE),
+    ));
+    sequence(&builder)
 }
 
 // ---------------------------------------------------------------------------
@@ -3178,11 +3879,21 @@ pub fn water_start_check(offset: i32, surface_depth_multiplier: i32) -> Arc<dyn 
     ))
 }
 
-/// `SurfaceRules.isBiome(HolderGetter<Biome>, ResourceKey<Biome>...)` — the
-/// port resolves the biome keys by name against the holder set the caller
-/// provides (the `HolderSet.direct` over `biomes::getOrThrow`).
-pub fn is_biome(biomes: HolderSet<BiomeId>) -> Arc<dyn ConditionSource> {
-    Arc::new(BiomeConditionSource::new(biomes))
+/// `SurfaceRules.isBiome(HolderGetter<Biome>, ResourceKey<Biome>...)` —
+/// Java's `@SafeVarargs` varargs is a fixed-size slice here: the port builds
+/// `HolderSet.direct(getter.getOrThrow(key))` over the keys in argument order
+/// exactly like Java (`HolderSet.direct(biomes::getOrThrow, target)`), so a
+/// missing biome key panics with Java's `Missing element <key>` message and a
+/// single key encodes as the compact bare-identifier holder set.
+pub fn is_biome(
+    biomes_getter: &dyn HolderGetter<BiomeId>,
+    keys: &[&ResourceKey<BiomeId>],
+) -> Arc<dyn ConditionSource> {
+    let holders: Vec<Holder<BiomeId>> = keys
+        .iter()
+        .map(|key| biomes_getter.get_or_throw(key))
+        .collect();
+    Arc::new(BiomeConditionSource::new(HolderSet::direct(holders)))
 }
 
 /// `SurfaceRules.noiseCondition2d(ResourceKey, double)`.
@@ -3286,6 +3997,7 @@ mod tests {
     use crate::chunk::chunk_generator::ChunkGenerator;
     use crate::level::WorldGenLevel;
     use crate::level::height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccessor, create};
+    use crate::levelgen::heightmap::Types;
     use crate::levelgen::noisegen::NoiseGeneratorSettings;
     use rivet_registry::access::RegistryAccess;
     use rivet_registry::builder::RegistryBuilder;
@@ -3395,20 +4107,28 @@ mod tests {
             cells: SharedCells::new(),
             biome_getter: Arc::new(|_: &BlockPos| Holder::direct(BiomeId::from_id(0))),
             worldgen_context: Arc::new(worldgen_context(-64, 384, 384)),
+            world_surface_heights: None,
         })
     }
 
-    /// A biome registry with `plains` (id 0) under `Registries.BIOME`.
+    /// A biome registry with the 33 `SurfaceRuleData`-referenced keys (the
+    /// single source of truth in `biome::biomes::SURFACE_RULE_BIOMES`) under
+    /// `Registries.BIOME` (id = the enumerate index over that list, matching the
+    /// settings bootstrap's and the production builder's `BiomeId` handles). The
+    /// codec tests encode the real trees, so every referenced key must resolve
+    /// through the access.
     fn biome_access() -> RegistryAccess {
         let mut builder = RegistryBuilder::new(&*rivet_registry::registries::BIOME);
-        builder.register(
-            &ResourceKey::create(
-                &*rivet_registry::registries::BIOME,
-                Identifier::parse("minecraft:plains"),
-            ),
-            Arc::new(BiomeId::from_id(0)),
-            RegistrationInfo::BUILT_IN,
-        );
+        for (i, name) in biomes::SURFACE_RULE_BIOMES.iter().enumerate() {
+            builder.register(
+                &ResourceKey::create(
+                    &*rivet_registry::registries::BIOME,
+                    Identifier::parse(&format!("minecraft:{name}")),
+                ),
+                Arc::new(BiomeId::from_id(i as u16)),
+                RegistrationInfo::BUILT_IN,
+            );
+        }
         let registry = builder.freeze();
         RegistryAccess::from_pairs(vec![(
             ResourceKey::create_registry_key(Identifier::with_default_namespace("worldgen/biome")),
@@ -3493,6 +4213,40 @@ mod tests {
         assert_eq!(steep_neighbor_probes(7, 3), (2, 4, 6, 8));
     }
 
+    /// The `#185` heightmap seam firing path: `SteepMaterialCondition` reads
+    /// the `WORLD_SURFACE_WG` snapshot `build_surface` captured at its start
+    /// (never the `&mut` chunk), so a column whose south neighbor is >= 4 blocks
+    /// higher must report steep exactly as Java's live `getHeight` reads would.
+    #[test]
+    fn steep_condition_fires_on_the_primed_heightmap_snapshot() {
+        // A helper building a steep condition over a given height snapshot.
+        fn condition_for(heights: Option<Arc<[i32; 256]>>) -> SteepMaterialCondition {
+            let sc = Arc::new(SurfaceContext {
+                system: Arc::new(stub_surface_system()),
+                cells: SharedCells::new(),
+                biome_getter: Arc::new(|_: &BlockPos| Holder::direct(BiomeId::from_id(0))),
+                worldgen_context: Arc::new(worldgen_context(-64, 384, 384)),
+                world_surface_heights: heights,
+            });
+            sc.update_xz(0, 1);
+            SteepMaterialCondition {
+                cache: LazyCache::new(sc.cells.last_update_xz()),
+                surface_context: sc,
+            }
+        }
+        // A snapshot where the chunk-local column (0, 1) probes north height 10
+        // (z=0) and south height 14 (z=2): 14 >= 10 + 4 -> steep.
+        let mut heights = [0i32; 256];
+        heights[0] = 10; // (0, 0) — the north probe at chunk-block z 0.
+        heights[32] = 14; // (0, 2) — the south probe at chunk-block z 2.
+        assert!(condition_for(Some(Arc::new(heights))).test());
+        // Flat snapshot: north == south == 10 -> not steep.
+        let flat = [10i32; 256];
+        assert!(!condition_for(Some(Arc::new(flat))).test());
+        // No snapshot (the single-column carver probe): cannot fire.
+        assert!(!condition_for(None).test());
+    }
+
     /// `SurfaceRuleData.air()` must round-trip through `rule_source_codec` as a
     /// `block` rule (Java's `makeStateRule(Blocks.AIR)`), never fail with
     /// "Material rule type 'air' is not ported".
@@ -3531,38 +4285,386 @@ mod tests {
         assert!(decoded.as_any().is::<BlockRuleSource>());
     }
 
-    /// The four real `SurfaceRuleData` production builders (`nether`,
-    /// `overworld`, and the two `overworldLike` flag combos the fixture pins)
-    /// are still AIR shims (RivetTodo #179). This is a **non-ignored
-    /// tripwire**: once a faithful port replaces a shim, this test must fail
-    /// so the golden harness is extended to the now real tree. Until then it
-    /// pins the deferral — the shims must encode as `minecraft:air`, never
-    /// silently as some other placeholder.
+    /// `(condition type, result type)` for each top-level rule of an encoded
+    /// `sequence` preset — the `SurfaceRuleData.java` declaration-order
+    /// skeleton. A `condition` rule reports its `if_true` condition type and the
+    /// `then_run` result type; a bare rule (the final `NETHERRACK`/`DEEPSLATE`
+    /// fallbacks, or the unwrapped `mainRuleCloseToSurface`) reports an empty
+    /// condition and its own rule type.
+    fn top_level_condition_then(encoded: &serde_json::Value) -> Vec<(&str, &str)> {
+        encoded["sequence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r["if_true"]["type"].as_str().unwrap_or(""),
+                    r["then_run"]["type"]
+                        .as_str()
+                        .or_else(|| r["type"].as_str())
+                        .unwrap_or(""),
+                )
+            })
+            .collect()
+    }
+
+    /// `SurfaceRuleData.nether` builds the Java top-level 8-rule sequence in
+    /// declaration order: bedrock floor, bedrock roof (`not`), the
+    /// `closeToCeiling` netherrack cap, the three biome blocks (basalt deltas,
+    /// soul sand valley, the `ON_FLOOR` lava/nylium block), nether wastes, and
+    /// the final netherrack fallback. A reordered, dropped, or re-typed rule
+    /// fails here. (Byte-exact coverage against the committed PR #597 fixture
+    /// lives in `builders_encode_byte_exactly_to_the_paper_capture`; this
+    /// structural skeleton pins the ordering with a fast lib test.)
     #[test]
-    fn surface_rule_production_builders_are_still_air_shims() {
+    fn nether_tree_matches_java_top_level_ordering() {
         let ops = ops();
         let codec = rule_source_codec::<TestOps>();
-        let builders: [(&str, ArcRuleSource); 4] = [
-            ("nether", surface_rule_nether()),
-            ("overworld", surface_rule_overworld()),
-            (
-                "overworld_like_true_false_true",
-                surface_rule_overworld_like(true, false, true),
-            ),
-            (
-                "overworld_like_false_false_true",
-                surface_rule_overworld_like(false, false, true),
-            ),
-        ];
-        for (name, rule) in builders {
+        let getter = ops.getter(&*rivet_registry::registries::BIOME).unwrap();
+        let encoded = codec
+            .encode_start(&ops, &surface_rule_nether(&getter))
+            .get_or_throw("encode")
+            .clone();
+        assert_eq!(
+            top_level_condition_then(&encoded),
+            vec![
+                ("minecraft:vertical_gradient", "minecraft:block"),
+                ("minecraft:not", "minecraft:block"),
+                ("minecraft:y_above", "minecraft:block"),
+                ("minecraft:biome", "minecraft:sequence"),
+                ("minecraft:biome", "minecraft:sequence"),
+                ("minecraft:stone_depth", "minecraft:sequence"),
+                ("minecraft:biome", "minecraft:sequence"),
+                ("", "minecraft:block"),
+            ]
+        );
+        // The final bare rule is the netherrack fallback (Java's last
+        // `NETHERRACK` element — a plain `block` rule, no `condition` wrapper).
+        assert_eq!(
+            encoded["sequence"][7]["result_state"]["Name"],
+            json!("minecraft:netherrack")
+        );
+        // The three biome rules resolve to basalt deltas, soul sand valley, and
+        // nether wastes in declaration order.
+        let biome_is: Vec<&str> = (0..7)
+            .filter(|&i| encoded["sequence"][i]["if_true"]["type"] == json!("minecraft:biome"))
+            .map(|i| {
+                encoded["sequence"][i]["if_true"]["biome_is"]
+                    .as_str()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            biome_is,
+            vec![
+                "minecraft:basalt_deltas",
+                "minecraft:soul_sand_valley",
+                "minecraft:nether_wastes"
+            ]
+        );
+    }
+
+    /// `SurfaceRuleData.overworld` = `overworldLike(true, false, true)`: the
+    /// Java 4-rule top-level sequence (bedrock floor, the
+    /// `abovePreliminarySurface`-wrapped main rule, the sulfur-caves bands, the
+    /// deepslate gradient).
+    #[test]
+    fn overworld_tree_matches_java_top_level_ordering() {
+        let ops = ops();
+        let codec = rule_source_codec::<TestOps>();
+        let getter = ops.getter(&*rivet_registry::registries::BIOME).unwrap();
+        let encoded = codec
+            .encode_start(&ops, &surface_rule_overworld(&getter))
+            .get_or_throw("encode")
+            .clone();
+        assert_eq!(
+            top_level_condition_then(&encoded),
+            vec![
+                ("minecraft:vertical_gradient", "minecraft:block"),
+                ("minecraft:above_preliminary_surface", "minecraft:sequence"),
+                ("minecraft:biome", "minecraft:sequence"),
+                ("minecraft:vertical_gradient", "minecraft:block"),
+            ]
+        );
+        // The deepslate rule is the last element (Java's final `builder.add`).
+        assert_eq!(
+            encoded["sequence"][3]["if_true"]["random_name"],
+            json!("minecraft:deepslate")
+        );
+    }
+
+    /// The `overworldLike` flags select the Java `ImmutableList` builder
+    /// additions: `bedrockRoof`/`bedrockFloor` prepend their `not`-wrapped /
+    /// plain vertical gradients, `doPreliminarySurfaceCheck` wraps the main
+    /// rule in `abovePreliminarySurface`. The `caves` preset
+    /// `overworldLike(false, true, true)` must carry both bedrocks and the bare
+    /// main rule; `floating_islands` `overworldLike(false, false, false)` must
+    /// carry neither bedrock.
+    ///
+    /// The committed PR #597 fixture byte-exactly covers `overworld` `(true,
+    /// false, true)` and `(false, false, true)` (see
+    /// `builders_encode_byte_exactly_to_the_paper_capture`); the `caves`
+    /// `(false, true, true)` and `floating_islands` `(false, false, false)`
+    /// combos are not in that capture, so the flag selection is pinned here
+    /// structurally against the Java-documented builder additions.
+    #[test]
+    fn overworld_like_flags_control_bedrock_and_preliminary_surface() {
+        let ops = ops();
+        let codec = rule_source_codec::<TestOps>();
+        let getter = ops.getter(&*rivet_registry::registries::BIOME).unwrap();
+
+        let caves = codec
+            .encode_start(
+                &ops,
+                &surface_rule_overworld_like(&getter, false, true, true),
+            )
+            .get_or_throw("encode")
+            .clone();
+        assert_eq!(
+            top_level_condition_then(&caves),
+            vec![
+                ("minecraft:not", "minecraft:block"),
+                ("minecraft:vertical_gradient", "minecraft:block"),
+                ("", "minecraft:sequence"),
+                ("minecraft:biome", "minecraft:sequence"),
+                ("minecraft:vertical_gradient", "minecraft:block"),
+            ]
+        );
+        // The first `not` is the bedrock roof, the vertical gradient the floor.
+        assert_eq!(
+            caves["sequence"][0]["if_true"]["invert"]["random_name"],
+            json!("minecraft:bedrock_roof")
+        );
+        assert_eq!(
+            caves["sequence"][1]["if_true"]["random_name"],
+            json!("minecraft:bedrock_floor")
+        );
+        // No `abovePreliminarySurface` (doPreliminarySurfaceCheck = false).
+        assert!(!caves.to_string().contains("above_preliminary_surface"));
+
+        let floating = codec
+            .encode_start(
+                &ops,
+                &surface_rule_overworld_like(&getter, false, false, false),
+            )
+            .get_or_throw("encode")
+            .clone();
+        assert_eq!(
+            top_level_condition_then(&floating),
+            vec![
+                ("", "minecraft:sequence"),
+                ("minecraft:biome", "minecraft:sequence"),
+                ("minecraft:vertical_gradient", "minecraft:block"),
+            ]
+        );
+        // No bedrock anywhere in the tree.
+        assert!(!floating.to_string().contains("minecraft:bedrock"));
+    }
+
+    /// `SurfaceRules.isBiome` builds `HolderSet.direct(getOrThrow(key))` in
+    /// argument order — a multi-key set encodes as the list in varargs order
+    /// (Java's `isBiome(biomes, WARM_OCEAN, BEACH, SNOWY_BEACH)`).
+    #[test]
+    fn is_biome_preserves_argument_order_in_holder_set() {
+        let ops = ops();
+        let getter = ops.getter(&*rivet_registry::registries::BIOME).unwrap();
+        let cond = is_biome(
+            &getter,
+            &[&*biomes::WARM_OCEAN, &*biomes::BEACH, &*biomes::SNOWY_BEACH],
+        );
+        let codec = condition_source_codec::<TestOps>();
+        let encoded = codec
+            .encode_start(&ops, &cond)
+            .get_or_throw("encode")
+            .clone();
+        assert_eq!(
+            encoded,
+            json!({"type": "minecraft:biome", "biome_is": ["minecraft:warm_ocean", "minecraft:beach", "minecraft:snowy_beach"]})
+        );
+    }
+
+    /// A single-key `isBiome` encodes as the compact bare identifier (Java's
+    /// `HolderSet` list arm degrades a single element), never a one-element
+    /// list.
+    #[test]
+    fn is_biome_single_key_encodes_as_bare_identifier() {
+        let ops = ops();
+        let getter = ops.getter(&*rivet_registry::registries::BIOME).unwrap();
+        let cond = is_biome(&getter, &[&*biomes::BASALT_DELTAS]);
+        let codec = condition_source_codec::<TestOps>();
+        let encoded = codec
+            .encode_start(&ops, &cond)
+            .get_or_throw("encode")
+            .clone();
+        assert_eq!(
+            encoded,
+            json!({"type": "minecraft:biome", "biome_is": "minecraft:basalt_deltas"})
+        );
+    }
+
+    /// `isBiome` resolves keys through `getOrThrow`: a missing biome key panics
+    /// with Java's `Missing element <key>` message (the surface trees would
+    /// otherwise silently build a holder set with a hole).
+    #[test]
+    fn is_biome_missing_key_panics_with_java_message() {
+        let ops = ops();
+        let getter = ops.getter(&*rivet_registry::registries::BIOME).unwrap();
+        let missing = ResourceKey::create(
+            &*rivet_registry::registries::BIOME,
+            Identifier::parse("minecraft:not_a_real_biome"),
+        );
+        let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            is_biome(&getter, &[&missing]);
+        }));
+        let msg = err
+            .unwrap_err()
+            .downcast_ref::<String>()
+            .cloned()
+            .expect("panic message is a String");
+        // Java's `ResourceKey.toString()` is `ResourceKey[registry / id]`.
+        assert_eq!(
+            msg,
+            "Missing element ResourceKey[minecraft:worldgen/biome / minecraft:not_a_real_biome]"
+        );
+    }
+
+    /// The `sulfurCaveBands` float-literal thresholds are widened from float to
+    /// double exactly like Java (`-0.4F`/`0.4F` → `-0.4000000059604645`/
+    /// `0.4000000059604645`, not `-0.4`/`0.4`). The `surfaceNoiseAbove` helper
+    /// thresholds are `threshold / 8.25` in double.
+    #[test]
+    fn sulfur_cave_bands_encode_widened_float_thresholds() {
+        let ops = ops();
+        let codec = rule_source_codec::<TestOps>();
+        let getter = ops.getter(&*rivet_registry::registries::BIOME).unwrap();
+        let encoded = codec
+            .encode_start(&ops, &surface_rule_overworld(&getter))
+            .get_or_throw("encode")
+            .clone();
+        let sulfur = &encoded["sequence"][2]["then_run"]["sequence"];
+        assert_eq!(
+            sulfur[0]["if_true"]["min_threshold"].as_f64(),
+            Some(-0.4_f32 as f64)
+        );
+        assert_eq!(
+            sulfur[0]["if_true"]["max_threshold"].as_f64(),
+            Some(-0.1_f32 as f64)
+        );
+        assert_eq!(sulfur[1]["if_true"]["min_threshold"].as_f64(), Some(0.0));
+        assert_eq!(
+            sulfur[1]["if_true"]["max_threshold"].as_f64(),
+            Some(0.4_f32 as f64)
+        );
+        assert_eq!(
+            sulfur[2]["if_true"]["min_threshold"].as_f64(),
+            Some(0.4_f32 as f64)
+        );
+        assert_eq!(
+            sulfur[2]["if_true"]["max_threshold"].as_f64(),
+            Some(f64::MAX)
+        );
+        assert_eq!(
+            sulfur[0]["if_true"]["noise"],
+            json!("minecraft:sulfur_cave_gradient")
+        );
+        // `surfaceNoiseAbove(threshold)` = `noiseCondition2d(SURFACE,
+        // threshold / 8.25, MAX)` — Java's private helper. The overworld tree's
+        // `windswept_hills` rule (`surfaceNoiseAbove(1.0)`) must carry the
+        // `1.0 / 8.25` double threshold, never `1.0` or a float-widened value.
+        let windswept_hills = &encoded["sequence"][1]["then_run"]["sequence"][2]["then_run"]["then_run"]
+            ["sequence"][1]["sequence"][4]["sequence"][2]["then_run"];
+        assert_eq!(
+            windswept_hills["if_true"]["noise"],
+            json!("minecraft:surface")
+        );
+        assert_eq!(
+            windswept_hills["if_true"]["min_threshold"].as_f64(),
+            Some(1.0 / 8.25)
+        );
+        assert_eq!(
+            windswept_hills["if_true"]["max_threshold"].as_f64(),
+            Some(f64::MAX)
+        );
+    }
+
+    /// The real nether/overworld trees must round-trip through
+    /// `rule_source_codec` (the `MATERIAL_RULE` dispatch) — the production
+    /// `NoiseGeneratorSettings.surface_rule` field stores the erased
+    /// `ArcRuleSource`, so the value codec is the persistence path.
+    #[test]
+    fn nether_and_overworld_round_trip_through_rule_source_codec() {
+        let ops = ops();
+        let codec = rule_source_codec::<TestOps>();
+        let getter = ops.getter(&*rivet_registry::registries::BIOME).unwrap();
+        for rule in [
+            surface_rule_nether(&getter),
+            surface_rule_overworld(&getter),
+            surface_rule_overworld_like(&getter, false, true, true),
+        ] {
             let encoded = codec
                 .encode_start(&ops, &rule)
                 .get_or_throw("encode")
                 .clone();
+            let decoded = codec.parse(&ops, &encoded).get_or_throw("decode").clone();
+            assert!(decoded.as_any().is::<SequenceRuleSource>());
+        }
+    }
+
+    /// Every builder-constructed tree byte-matches the committed PR #597
+    /// fixture (the Paper 26.2 `0a99345` capture of the canonical
+    /// `SurfaceRuleData` trees through `RuleSource.CODEC` under `RegistryOps`).
+    /// The golden harness round-trips the captured JSON through the codec; this
+    /// pins the builder-construction path against the same capture, so a
+    /// threshold, ordering, block, or anchor deviation in the ported builders
+    /// fails here. The fixture covers `nether`, `overworld`
+    /// (`overworldLike(true, false, true)`), `overworld_like_true_false_true`
+    /// (identical), `overworld_like_false_false_true`, `end`, and `air`. The
+    /// `caves` `(false, true, true)` and `floating_islands` `(false, false,
+    /// false)` flag combos are a deliberate, documented deferral: they are not
+    /// in the committed capture (the probe ran against `working/Paper`, outside
+    /// this worktree) and remain structurally pinned by
+    /// `overworld_like_flags_control_bedrock_and_preliminary_surface`. Extending
+    /// the fixture with those two trees is a follow-up probe capture, not a
+    /// weakening of this test.
+    #[test]
+    fn builders_encode_byte_exactly_to_the_paper_capture() {
+        let ops = ops();
+        let codec = rule_source_codec::<TestOps>();
+        let getter = ops.getter(&*rivet_registry::registries::BIOME).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tools/rivet-oracle/fixtures/surface-rule-data/surface-rule-data.json"
+        ))
+        .expect("fixture parses");
+        let cases: Vec<(&str, ArcRuleSource)> = vec![
+            ("nether", surface_rule_nether(&getter)),
+            ("overworld", surface_rule_overworld(&getter)),
+            (
+                "overworld_like_true_false_true",
+                surface_rule_overworld_like(&getter, true, false, true),
+            ),
+            (
+                "overworld_like_false_false_true",
+                surface_rule_overworld_like(&getter, false, false, true),
+            ),
+            ("end", surface_rule_end()),
+            ("air", surface_rule_air()),
+        ];
+        for (name, tree) in cases {
+            let canonical = fixture["presets"]
+                .as_array()
+                .expect("presets array")
+                .iter()
+                .find(|p| p["name"] == name)
+                .expect("preset present")["json"]
+                .clone();
+            let encoded = codec
+                .encode_start(&ops, &tree)
+                .get_or_throw("encode")
+                .clone();
             assert_eq!(
-                encoded,
-                json!({"type": "minecraft:block", "result_state": {"Name": "minecraft:air"}}),
-                "SurfaceRuleData.{name}() is still an AIR shim (RivetTodo #179)"
+                serde_json::to_vec(&encoded).expect("encoded JSON serializes"),
+                serde_json::to_vec(&canonical).expect("canonical JSON serializes"),
+                "{name} builder must encode byte-identically to the Paper capture"
             );
         }
     }
@@ -3876,6 +4978,7 @@ mod tests {
         fn set_block_state(&mut self, x: i32, y: i32, z: i32, state: BlockState) {
             self.writes.push((x, y, z, state));
         }
+        fn mark_pos_for_post_processing(&mut self, _x: i32, _y: i32, _z: i32) {}
     }
 
     /// Java's anonymous `buildSurface` `BlockColumn` closes over the shared
@@ -4121,5 +5224,332 @@ mod tests {
 
         // An unbound seam yields Java's `Optional.empty()` (no replacement).
         assert_eq!(unbound.top_material(&pos, false), None);
+    }
+
+    /// A real-chunk integration test for the surface driver (issue #179): a
+    /// hand-built 24-section `ProtoChunk<BlockState, BiomeId, &str>` (the real
+    /// worldgen chunk shape) filled with stone `default_block` below y=64, with
+    /// the worldgen heightmaps primed exactly as `fill_from_noise` leaves them.
+    /// `build_surface` with the END rule (end stone — `SurfaceRuleData.end`)
+    /// must replace every stone cell in the real chunk's sections and keep the
+    /// worldgen heightmaps stable (the surface write never moves the topmost
+    /// non-air block).
+    #[test]
+    fn build_surface_replaces_stone_in_a_real_proto_chunk() {
+        use crate::chunk::proto_chunk::ProtoChunk;
+        use crate::chunk::storage::chunk_reconstruction::{
+            block_state_predicates, resolve_state_flags,
+        };
+        use crate::chunk::storage::section_reconstruction::current_version_container_factory;
+        use crate::chunk::upgrade_data::UpgradeData;
+
+        let (_settings, random_state, noise_chunk) = build_surface_state();
+        let system = random_state.surface_system();
+
+        let mut proto: ProtoChunk<
+            BlockState,
+            crate::chunk::storage::section_reconstruction::BiomeId,
+            &'static str,
+        > = ProtoChunk::new(
+            ChunkPos::ZERO,
+            UpgradeData::empty(24),
+            create(-64, 384),
+            &current_version_container_factory(),
+            None,
+            Blocks::AIR.default_block_state(),
+            Blocks::AIR.default_block_state(),
+            &resolve_state_flags,
+        );
+        // Fill the lower 8 sections (`[-64, 64)`) with stone via the real
+        // section write, then prime the worldgen heightmaps column-by-column
+        // (topmost stone at y=63 -> `getHeight = 63`, like the doFill output).
+        let stone = Blocks::STONE.default_block_state();
+        let flags = resolve_state_flags(&stone);
+        let predicates = block_state_predicates();
+        for y in -64..64 {
+            let section_index = proto.get_section_index(y) as usize;
+            let y_in_section = y & 15;
+            let section = proto.get_section_mut(section_index);
+            for x in 0..16 {
+                for z in 0..16 {
+                    section.set_block_state(
+                        x,
+                        y_in_section,
+                        z,
+                        stone,
+                        &predicates.is_air,
+                        &predicates.is_randomly_ticking,
+                        &predicates.fluid_is_empty,
+                        &predicates.fluid_is_randomly_ticking,
+                        &predicates.is_special_colliding,
+                    );
+                }
+            }
+        }
+        for x in 0..16 {
+            for z in 0..16 {
+                proto.update_heightmaps_after(x, 63, z, flags);
+            }
+        }
+        // The primed heightmap reads back the topmost non-air y (63), exactly
+        // what Java's `getHeight(WORLD_SURFACE_WG)` returns for this column.
+        let height_before = proto
+            .get_or_create_heightmap_unprimed(Types::WorldSurfaceWg)
+            .get_height_at(0, 0, -64);
+        assert_eq!(height_before, 63);
+
+        let biome_manager = Arc::new(BiomeManager::new(
+            Arc::new(crate::biome::FixedBiomeSource::new(Holder::direct(
+                BiomeId::from_id(0),
+            ))),
+            0,
+        ));
+        let gen_context = Arc::new(worldgen_context(-64, 384, 384));
+        let rule_source: ArcRuleSource = surface_rule_end();
+
+        system.build_surface(
+            &random_state,
+            biome_manager,
+            false,
+            gen_context,
+            &mut proto,
+            noise_chunk,
+            &rule_source,
+            None,
+        );
+
+        // Every stone `default_block` cell became the END rule result (end
+        // stone) — 16x16x128 real section writes through
+        // `ProtoChunk::setBlockState` + the heightmap updates.
+        assert_eq!(
+            proto.get_block_state(0, 63, 0),
+            Blocks::END_STONE.default_block_state()
+        );
+        assert_eq!(
+            proto.get_block_state(15, -64, 15),
+            Blocks::END_STONE.default_block_state()
+        );
+        assert_eq!(
+            proto.get_block_state(7, 0, 7),
+            Blocks::END_STONE.default_block_state()
+        );
+        // The air above the surface is untouched.
+        assert_eq!(
+            proto.get_block_state(0, 64, 0),
+            Blocks::AIR.default_block_state()
+        );
+        // The worldgen heightmaps stayed stable: the surface write replaced
+        // stone (non-air) with end stone (non-air), so the topmost non-air y
+        // never moves and `getHeight` is unchanged.
+        assert_eq!(
+            proto
+                .get_or_create_heightmap_unprimed(Types::WorldSurfaceWg)
+                .get_height_at(0, 0, -64),
+            63
+        );
+        assert_eq!(
+            proto
+                .get_or_create_heightmap_unprimed(Types::OceanFloorWg)
+                .get_height_at(15, 15, -64),
+            63
+        );
+        // Negative control for the fluid-marking seam: end stone is a fluid-empty
+        // block, so `BlockColumn.setBlock` must NOT have marked any cell for
+        // post-processing (Java's `if (!state.getFluidState().isEmpty())`).
+        assert_eq!(
+            proto
+                .get_post_processing()
+                .iter()
+                .map(Vec::len)
+                .sum::<usize>(),
+            0
+        );
+    }
+
+    /// The fluid-marking half of the surface column seam (issue #179): Java's
+    /// `BlockColumn.setBlock` marks every non-empty fluid write for
+    /// post-processing (`SurfaceSystem.java`). Here a real `ProtoChunk`
+    /// (the same hand-built 24-section shape as
+    /// `build_surface_replaces_stone_in_a_real_proto_chunk`) is surfaced with a
+    /// WATER rule — the default state is a non-empty fluid (fluid id 2) — so
+    /// every stone `default_block` cell the rule replaces becomes a water write
+    /// that must land its packed offset in the chunk's post-processing list.
+    #[test]
+    fn build_surface_marks_water_writes_for_post_processing() {
+        use crate::chunk::proto_chunk::ProtoChunk;
+        use crate::chunk::storage::chunk_reconstruction::{
+            block_state_predicates, resolve_state_flags,
+        };
+        use crate::chunk::storage::section_reconstruction::current_version_container_factory;
+        use crate::chunk::upgrade_data::UpgradeData;
+
+        // The real worldgen chunk shape (same as the END_STONE test).
+        type SurfaceChunk = ProtoChunk<
+            BlockState,
+            crate::chunk::storage::section_reconstruction::BiomeId,
+            &'static str,
+        >;
+
+        let (_settings, random_state, noise_chunk) = build_surface_state();
+        let system = random_state.surface_system();
+
+        let mut proto: SurfaceChunk = ProtoChunk::new(
+            ChunkPos::ZERO,
+            UpgradeData::empty(24),
+            create(-64, 384),
+            &current_version_container_factory(),
+            None,
+            Blocks::AIR.default_block_state(),
+            Blocks::AIR.default_block_state(),
+            &resolve_state_flags,
+        );
+        let stone = Blocks::STONE.default_block_state();
+        let flags = resolve_state_flags(&stone);
+        let predicates = block_state_predicates();
+        for y in -64..64 {
+            let section_index = proto.get_section_index(y) as usize;
+            let y_in_section = y & 15;
+            let section = proto.get_section_mut(section_index);
+            for x in 0..16 {
+                for z in 0..16 {
+                    section.set_block_state(
+                        x,
+                        y_in_section,
+                        z,
+                        stone,
+                        &predicates.is_air,
+                        &predicates.is_randomly_ticking,
+                        &predicates.fluid_is_empty,
+                        &predicates.fluid_is_randomly_ticking,
+                        &predicates.is_special_colliding,
+                    );
+                }
+            }
+        }
+        for x in 0..16 {
+            for z in 0..16 {
+                proto.update_heightmaps_after(x, 63, z, flags);
+            }
+        }
+
+        let biome_manager = Arc::new(BiomeManager::new(
+            Arc::new(crate::biome::FixedBiomeSource::new(Holder::direct(
+                BiomeId::from_id(0),
+            ))),
+            0,
+        ));
+        let gen_context = Arc::new(worldgen_context(-64, 384, 384));
+        // `state(Blocks.WATER)` — a `block` rule returning the water default
+        // state (`SurfaceRuleData` builders are `state(...)` shims).
+        let rule_source: ArcRuleSource = state(Blocks::WATER.default_block_state());
+
+        // The default water state is a non-empty fluid in the generated
+        // behavior table (fluid id 2), so the write path must mark it.
+        assert!(!Blocks::WATER.default_block_state().fluid_empty());
+
+        system.build_surface(
+            &random_state,
+            biome_manager,
+            false,
+            gen_context,
+            &mut proto,
+            noise_chunk,
+            &rule_source,
+            None,
+        );
+
+        // The water writes landed through `ProtoChunk::set_block_state`.
+        assert_eq!(
+            proto.get_block_state(0, 63, 0),
+            Blocks::WATER.default_block_state()
+        );
+        assert_eq!(
+            proto.get_block_state(7, 0, 7),
+            Blocks::WATER.default_block_state()
+        );
+        // Every one of the 16x16 columns x 128 stone layers was replaced, and
+        // every replacement is a non-empty fluid write — so exactly one
+        // post-processing mark per cell, packed into the per-section lists
+        // (`getSectionIndex(y)` buckets).
+        let marks: usize = proto.get_post_processing().iter().map(Vec::len).sum();
+        assert_eq!(marks, 16 * 16 * 128);
+        // Spot-check the packed offset for the topmost water cell (x=0, y=63,
+        // z=0): section index 7 (y in [48, 64)), `packOffsetCoordinates` =
+        // dx | dy<<4 | dz<<8 = 0 | 15<<4 | 0<<8 = 0xF0.
+        let section_index = proto.get_section_index(63) as usize;
+        assert_eq!(section_index, 7);
+        assert!(proto.get_post_processing()[section_index].contains(
+            &SurfaceChunk::pack_offset_coordinates(&BlockPos::new(0, 63, 0))
+        ));
+    }
+
+    #[test]
+    fn set_block_state_air_fast_path_is_identity_not_behavioral() {
+        // Java's `wasEmpty && state.is(Blocks.AIR)` fast path is a
+        // block-IDENTITY check (`getBlock() == Blocks.AIR`), not the
+        // behavioral `is_air` predicate. AIR, CAVE_AIR, and VOID_AIR are all
+        // `AirBlock` with `.air()` properties (behaviorally air), so only the
+        // identity comparison lets exact AIR take the fast path while
+        // CAVE_AIR/VOID_AIR fall through to the real section write.
+        use crate::chunk::proto_chunk::ProtoChunk;
+        use crate::chunk::storage::chunk_reconstruction::resolve_state_flags;
+        use crate::chunk::storage::section_reconstruction::current_version_container_factory;
+        use crate::chunk::upgrade_data::UpgradeData;
+
+        let mut proto: ProtoChunk<
+            BlockState,
+            crate::chunk::storage::section_reconstruction::BiomeId,
+            &'static str,
+        > = ProtoChunk::new(
+            ChunkPos::ZERO,
+            UpgradeData::empty(24),
+            create(-64, 384),
+            &current_version_container_factory(),
+            None,
+            Blocks::AIR.default_block_state(),
+            Blocks::AIR.default_block_state(),
+            &resolve_state_flags,
+        );
+        let section_index = proto.get_section_index(0) as usize;
+
+        // Writing exact AIR leaves the section all-air. This is observationally
+        // the same whether the fast path returned early or the write stored
+        // AIR (both leave every cell AIR and `non_empty_block_count == 0`), so
+        // this half alone cannot prove the fast path was taken — it only pins
+        // the section's all-air invariant.
+        assert!(proto.get_section(section_index).has_only_air());
+        proto.set_block_state(0, 0, 0, Blocks::AIR.default_block_state());
+        assert!(proto.get_section(section_index).has_only_air());
+
+        // The discriminating half: CAVE_AIR is behaviorally air but its block
+        // id (795) differs from AIR's (0), so the identity guard must NOT fire
+        // and the write must reach the paletted container. A behavioral fast
+        // path would have returned CAVE_AIR without writing, leaving the cell
+        // AIR and failing the assertions below.
+        let previous = proto.set_block_state(1, 0, 1, Blocks::CAVE_AIR.default_block_state());
+        assert_eq!(previous, Blocks::AIR.default_block_state());
+        // `LevelChunkSection::get_block_state` reads the paletted container
+        // directly (`states.get`, no `has_only_air` mask), so observing CAVE_AIR
+        // here is direct proof the cell was written through the real section
+        // path — the palette holds the stored cave-air cell.
+        assert_eq!(
+            proto.get_section(section_index).get_block_state(1, 0, 1),
+            Blocks::CAVE_AIR.default_block_state()
+        );
+        // The write was cell-targeted: an untouched neighbor in the same
+        // all-air section is still AIR at the palette level.
+        assert_eq!(
+            proto.get_section(section_index).get_block_state(2, 0, 2),
+            Blocks::AIR.default_block_state()
+        );
+        // Java-faithful masking: `ProtoChunk.getBlockState` still returns AIR
+        // because `hasOnlyAir` is a behavioral count (CAVE_AIR never
+        // increments it), exactly like Java's `section.hasOnlyAir() ? AIR :
+        // section.getBlockState(...)`.
+        assert!(proto.get_section(section_index).has_only_air());
+        assert_eq!(
+            proto.get_block_state(1, 0, 1),
+            Blocks::AIR.default_block_state()
+        );
     }
 }
