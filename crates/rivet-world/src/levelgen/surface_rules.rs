@@ -1134,16 +1134,15 @@ fn seam_cold_enough_to_snow() -> bool {
     // STUB(mc.data.worldgen.biome): `BiomeManager` yields `Holder<BiomeId>` (a
     // positional handle into the worldgen biome registry, not a `Biome` value),
     // and no runtime `Registry<Biome>` value layer is populated. The `Biome`
-    // value type/codec surface (`mc.world.level.biome.core`, partially ported —
-    // the manifest row stays pending) proves `Biome::cold_enough_to_snow`, but
-    // the generated `Biome` VALUE data (temperature/downfall) that would
-    // populate the registry lives in `mc.data.worldgen.biome` (pending), so
-    // there is no registry to resolve a `BiomeId` holder through — this stays
-    // permanently false (no snow coverage from the temperature rule). Do NOT
-    // panic: the frozen-ocean branch of the overworld rule tree reaches this in
-    // production (the `#177` build_surface wire defers, so it is not reachable
-    // today). It becomes the real call once `mc.data.worldgen.biome` lands the
-    // value registry (RivetTodo(#185)).
+    // value type/codec surface (`mc.world.level.biome.core`, complete) proves
+    // `Biome::cold_enough_to_snow`, but the generated `Biome` VALUE data
+    // (temperature/downfall) that would populate the registry lives in
+    // `mc.data.worldgen.biome` (pending), so there is no registry to resolve a
+    // `BiomeId` holder through — this stays permanently false (no snow coverage
+    // from the temperature rule). Do NOT panic: the frozen-ocean branch of the
+    // overworld rule tree reaches this in production (the `#177` build_surface
+    // wire defers, so it is not reachable today). It becomes the real call once
+    // `mc.data.worldgen.biome` lands the value registry (RivetTodo(#185)).
     false
 }
 
