@@ -39,8 +39,9 @@
 //!
 //! The `WorldGenLevel` state/fluid-test seams (`is_state_at_position`,
 //! `is_fluid_at_position`, both real defaults resolving through
-//! `get_block_state`, RivetTodo #399) drive the leaf placement and the
-//! waterlogging decision, and the tree family's `valid_tree_pos` gate
+//! `get_block_state` — `WorldGenRegion` provides it on the gated chunk read)
+//! drive the leaf placement and the waterlogging decision, and the tree
+//! family's `valid_tree_pos` gate
 //! (`isAir() || is(REPLACEABLE_BY_TREES)`) is shared with `TreeFeature` via
 //! `crate::levelgen::feature::tree_feature::valid_tree_pos`.
 
