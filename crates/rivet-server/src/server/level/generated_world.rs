@@ -27,12 +27,19 @@
 //! stages are the unwired #185 ladder), so the holder's
 //! [`GenerationChunkHolder::generate_through`] surfaces a typed
 //! [`GeneratedChunkError::UnsupportedStatus`] rather than stamping a status
-//! that was never generated. And a generated chunk can never enter the server
-//! authority: [`ChunkMap::install`] accepts only a `LevelChunk` (the FULL chunk
-//! type), and no conversion from a sub-FULL `ProtoChunk` exists — the
-//! [`GenerationChunkHolder::to_level_chunk`] gate fails loudly with
-//! [`GeneratedChunkError::InstallRequiresFull`] instead of fabricating a FULL
-//! chunk or falling back to superflat.
+//! that was never generated. The SURFACE refusal is also a cross-crate
+//! visibility boundary, not just an executor-wiring choice: the ported surface
+//! driver (`SurfaceSystem::build_surface` in `rivet-world::levelgen::
+//! surface_rules`) is `pub(crate)`-sealed awaiting the #177 surface-wave wiring
+//! that calls it from `NoiseBasedChunkGenerator` (which itself exposes only the
+//! empty `build_surface_stub`). Rivet-server cannot drive SURFACE without
+//! editing rivet-world surface internals (out of this task's scope), so the
+//! spine honors the seal and fails loud instead. And a generated chunk can
+//! never enter the server authority: [`ChunkMap::install`] accepts only a
+//! `LevelChunk` (the FULL chunk type), and no conversion from a sub-FULL
+//! `ProtoChunk` exists — the [`GenerationChunkHolder::to_level_chunk`] gate
+//! fails loudly with [`GeneratedChunkError::InstallRequiresFull`] instead of
+//! fabricating a FULL chunk or falling back to superflat.
 //!
 //! ## The deferred `GenerationChunkHolderView` seam
 //!
