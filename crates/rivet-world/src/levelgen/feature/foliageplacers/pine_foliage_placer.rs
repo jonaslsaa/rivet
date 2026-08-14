@@ -100,10 +100,9 @@ impl FoliagePlacer for PineFoliagePlacer {
         // `super.foliageRadius(random, trunkHeight) + nextInt(...)`. Rust cannot
         // call a defaulted trait body once an impl overrides it (even via UFCS),
         // so the base body — `this.radius.sample(random)` — is inlined here.
-        self.radius().sample(random).wrapping_add(random.next_int_bound(std::cmp::max(
-            trunk_height.wrapping_add(1),
-            1,
-        )))
+        self.radius()
+            .sample(random)
+            .wrapping_add(random.next_int_bound(std::cmp::max(trunk_height.wrapping_add(1), 1)))
     }
 
     fn foliage_height<R: RandomSource>(

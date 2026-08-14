@@ -145,11 +145,10 @@ impl FoliagePlacer for MegaJungleFoliagePlacer {
 pub fn mega_jungle_foliage_placer_map_codec<Ops: DynamicOps + 'static>()
 -> Arc<dyn MapCodec<MegaJungleFoliagePlacer, Ops>> {
     record_builder::map_codec::<MegaJungleFoliagePlacer, Ops>(move |instance| {
-        let (radius_builder, offset_builder) =
-            foliage_placer_parts::<MegaJungleFoliagePlacer, Ops>(
-                Arc::new(|p: &MegaJungleFoliagePlacer| p.radius.clone()),
-                Arc::new(|p: &MegaJungleFoliagePlacer| p.offset.clone()),
-            );
+        let (radius_builder, offset_builder) = foliage_placer_parts::<MegaJungleFoliagePlacer, Ops>(
+            Arc::new(|p: &MegaJungleFoliagePlacer| p.radius.clone()),
+            Arc::new(|p: &MegaJungleFoliagePlacer| p.offset.clone()),
+        );
         instance
             .group(radius_builder)
             .and(offset_builder)

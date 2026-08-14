@@ -103,11 +103,15 @@ impl FoliagePlacer for RandomSpreadFoliagePlacer {
             // axis — Java int draw order x, x, y, y, z, z.
             pos.set_with_offset_xyz(
                 &origin_vec,
-                random.next_int_bound(leaf_radius).wrapping_sub(random.next_int_bound(leaf_radius)),
+                random
+                    .next_int_bound(leaf_radius)
+                    .wrapping_sub(random.next_int_bound(leaf_radius)),
                 random
                     .next_int_bound(foliage_height)
                     .wrapping_sub(random.next_int_bound(foliage_height)),
-                random.next_int_bound(leaf_radius).wrapping_sub(random.next_int_bound(leaf_radius)),
+                random
+                    .next_int_bound(leaf_radius)
+                    .wrapping_sub(random.next_int_bound(leaf_radius)),
             );
             try_place_leaf(level, foliage_setter, random, config, &pos.immutable());
         }
@@ -154,11 +158,10 @@ impl FoliagePlacer for RandomSpreadFoliagePlacer {
 pub fn random_spread_foliage_placer_map_codec<Ops: DynamicOps + 'static>()
 -> Arc<dyn MapCodec<RandomSpreadFoliagePlacer, Ops>> {
     record_builder::map_codec::<RandomSpreadFoliagePlacer, Ops>(move |instance| {
-        let (radius_builder, offset_builder) =
-            foliage_placer_parts::<RandomSpreadFoliagePlacer, Ops>(
-                Arc::new(|p: &RandomSpreadFoliagePlacer| p.radius.clone()),
-                Arc::new(|p: &RandomSpreadFoliagePlacer| p.offset.clone()),
-            );
+        let (radius_builder, offset_builder) = foliage_placer_parts::<RandomSpreadFoliagePlacer, Ops>(
+            Arc::new(|p: &RandomSpreadFoliagePlacer| p.radius.clone()),
+            Arc::new(|p: &RandomSpreadFoliagePlacer| p.offset.clone()),
+        );
         // `i.group(IntProviders.codec(1, 512).fieldOf("foliage_height"),
         // Codec.intRange(0, 256).fieldOf("leaf_placement_attempts"))` — the
         // nested two-field group, materialized as the `(IntProvider, i32)`

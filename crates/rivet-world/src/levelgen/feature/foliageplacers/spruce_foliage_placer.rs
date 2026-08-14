@@ -118,7 +118,10 @@ impl FoliagePlacer for SpruceFoliagePlacer {
         tree_height: i32,
         _config: &TreeConfiguration,
     ) -> i32 {
-        std::cmp::max(4, tree_height.wrapping_sub(self.trunk_height.sample(random)))
+        std::cmp::max(
+            4,
+            tree_height.wrapping_sub(self.trunk_height.sample(random)),
+        )
     }
 
     fn should_skip_location<R: RandomSource>(
