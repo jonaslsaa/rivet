@@ -24,16 +24,26 @@
 //! statuses do), expects exactly the empty flag set.
 //!
 //! Coordinate set: the committed 2×2 grid {(3,3),(4,3),(3,4),(4,4)} around the
-//! tree-bearing chunk (4,4). The FULL golden (generated-expected) shows (4,4)
-//! decorated with dark-oak/oak logs and leaves, (3,4) as a water column, and
-//! (4,3) as a grass/sand edge — a set that is non-vacuous for biome decoration.
-//! The forced grid is the 4×4 neighborhood {2..=5}×{2..=5}, so every committed
-//! chunk's 3×3 WorldGenRegion window (the radius-1 carvers dependency of the
-//! FEATURES step) is forced too — the buffer that keeps border-tree placement
-//! deterministic. The forced chunks are all held at level 33 (FULL), which is
-//! past FEATURES, so a center chunk's decoration inputs (neighbor
-//! heightmaps/surface, already settled by carvers) are complete before its
-//! FEATURES task runs.
+//! tree-bearing chunk (4,4) — a compact, decoration-dense interior slice of the
+//! established generated-expected handoff (whose committed grid is {-4..=4}).
+//! The FORCED grid is generated-expected's {-6..=6}² regime, not a smaller local
+//! neighborhood. That matters because the FEATURES step is declared with
+//! `blockStateWriteRadius(1)` (ChunkPyramid): a chunk's decoration writes one
+//! chunk into each neighbor, and a border tree observed inside a committed chunk
+//! on its east/south edge is actually placed by the neighbor chunk's own FEATURES
+//! pass. Whether that neighbor's pass runs (and with what surrounding context) is
+//! a function of the forced-grid boundary, so a small pad captures a different
+//! edge regime than the canonical golden: the committed chunks then diverge from
+//! generated-expected at the very x=14/15, z=14/15 spill columns. Forcing the
+//! identical {-6..=6}² grid as the established golden makes every committed
+//! chunk's transitive decoration context (the writers into it, their radius-1
+//! windows, and the spill across the grid edges) byte-identical to that golden,
+//! so the committed chunks ARE the canonical seed-42 FEATURES output — and the
+//! verifier enforces that by cross-checking each committed chunk against
+//! generated-expected at the same coordinates. The forced chunks are all held at
+//! level 33 (FULL), past FEATURES, so a center chunk's decoration inputs
+//! (neighbor heightmaps/surface, already settled by carvers) are complete before
+//! its FEATURES task runs.
 //!
 //! The per-chunk contract reuses the loaded-world fingerprint: 16×16 row-major
 //! `z*16+x` `surface`/`bedrock`/`below_feet` arrays, the sorted distinct block
@@ -63,6 +73,12 @@
 //!     content is written.
 //!   * the regenerate path validates a capture against the decoration contract
 //!     BEFORE committing it, in addition to the twin-boot byte-identity proof.
+//!   * verify (and the regenerate path) cross-check every committed chunk
+//!     against the generated-expected golden at the same coordinates: the
+//!     committed FEATURES output must be byte-identical to the canonical
+//!     handoff, or the checkpoint has silently regressed to a capture-regime
+//!     artifact. The generated-expected fixture is a committed repo file; its
+//!     absence (or a divergent chunk) is damage, never a silent skip.
 //!   * the tamper negative control proves a flipped byte in the golden fails
 //!     verification (the manifest SHA-256 gate is not vacuous).
 
@@ -95,13 +111,16 @@ pub const EXPECTED_STATUS: &str = "minecraft:full";
 /// center offset (8,8)).
 const CENTER_INDEX: usize = 8 * 16 + 8;
 /// The committed grid: the 2×2 southwest quadrant around the tree-bearing chunk
-/// (4,4), a strict interior subset of the forced grid.
+/// (4,4), a strict interior subset of the generated-expected committed grid.
 const GRID_MIN: i32 = 3;
 const GRID_MAX: i32 = 4;
-/// The forced grid: the full 4×4 neighborhood of the committed 2×2, so every
-/// committed chunk's 3×3 WorldGenRegion window is forced at level 33.
-const FORCE_MIN: i32 = 2;
-const FORCE_MAX: i32 = 5;
+/// The forced grid: generated-expected's {-6..=6}² regime (aliased so the two
+/// captures cannot drift apart). See the module doc: the FEATURES step's
+/// `blockStateWriteRadius(1)` makes a chunk's border trees spill from its
+/// neighbors, and only forcing the same grid as the established golden makes the
+/// committed chunks byte-identical to it.
+const FORCE_MIN: i32 = crate::generated_expected::FORCE_GRID_MIN;
+const FORCE_MAX: i32 = crate::generated_expected::FORCE_GRID_MAX;
 /// The FEATURES-decoration evidence: tree blocks a pre-features (carvers)
 /// chunk can never contain. A committed surface carrying any of these proves
 /// the FEATURES step ran and placed vegetation.
@@ -141,8 +160,10 @@ fn committed_coordinates() -> Vec<(i32, i32)> {
         .collect()
 }
 
-/// The forced grid coordinates (a superset of the committed grid), ordered the
-/// same way.
+/// The forced grid coordinates: generated-expected's {-6..=6}² regime, ordered
+/// identically (a superset of the committed grid). Generating the committed
+/// chunks under the exact same forced-grid context as the established golden is
+/// what makes them the canonical seed-42 FEATURES output.
 fn forced_coordinates() -> Vec<(i32, i32)> {
     (FORCE_MIN..=FORCE_MAX)
         .flat_map(|x| (FORCE_MIN..=FORCE_MAX).map(move |z| (x, z)))
@@ -331,6 +352,7 @@ pub fn verify_features(dir: &Path) -> Result<(), Error> {
     }
 
     validate_world(&golden.world)?;
+    cross_check_generated_expected(&golden.world)?;
     Ok(())
 }
 
@@ -492,6 +514,45 @@ fn validate_world(world: &WorldManifest) -> Result<(), Error> {
     Ok(())
 }
 
+/// Cross-check every committed chunk against the generated-expected golden at
+/// the same coordinates. This is the byte-identity that makes the FEATURES
+/// checkpoint the canonical seed-42 decoration rather than a capture-regime
+/// artifact: the FEATURES step's `blockStateWriteRadius(1)` lets border
+/// decoration spill across chunk edges, so the committed chunks must match the
+/// established FULL handoff at every sampled field (surface, bedrock,
+/// below_feet, distinct set, status flags). The generated-expected fixture is a
+/// committed repo file; an absent one (or a divergent chunk) is damage, never a
+/// silent skip.
+fn cross_check_generated_expected(world: &WorldManifest) -> Result<(), Error> {
+    let dir = crate::crate_dir().join("fixtures/generated-expected");
+    if !dir.join("manifest.json").is_file() {
+        return Err(Error::Manifest(
+            "features cross-check needs the generated-expected golden (fixtures/\
+             generated-expected), which is ABSENT — the FEATURES checkpoint cannot be \
+             distinguished from a capture-regime artifact without it"
+                .into(),
+        ));
+    }
+    let golden = crate::generated_expected::load(&dir)?;
+    for (key, fp) in &world.chunks {
+        let expected = golden.world.chunks.get(key).ok_or_else(|| {
+            Error::Manifest(format!(
+                "features chunk {key} is ABSENT from the generated-expected golden — the \
+                 committed grids must stay aligned"
+            ))
+        })?;
+        if fp != expected {
+            return Err(Error::Manifest(format!(
+                "features chunk {key} diverges from the generated-expected golden at the same \
+                 coordinates — the FEATURES capture is not the canonical seed-42 decoration \
+                 (a capture-regime artifact); the forced-grid context changed, or the golden \
+                 drifted"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn format_set(set: &BTreeSet<String>) -> String {
     if set.len() <= 4 {
         set.iter().cloned().collect::<Vec<_>>().join(",")
@@ -537,15 +598,19 @@ pub fn regenerate_manifest(dir: &Path) -> Result<(), Error> {
         note: "Seed-42 FEATURES oracle checkpoint (PR #175/#232): the per-chunk \
                surface/bedrock/below_feet fingerprint for the committed 2x2 grid \
                {(3,3),(4,3),(3,4),(4,4)} captured from the pinned Paper runtime by booting a \
-               fresh normal-overworld world and force-generating the 4x4 neighborhood \
-               {2..5}x{2..5} to level 33 (ChunkLevel.byStatus(FULL)), serialized as \
+               fresh normal-overworld world and force-generating generated-expected's {-6..6}x\
+               {-6..6} forced grid to level 33 (ChunkLevel.byStatus(FULL)), serialized as \
                minecraft:full. FULL is the forced path's ceiling (a level-34 ticket is \
                INACCESSIBLE and never generates), and FEATURES is the last block-mutating \
                status, so a FULL serialization's block data IS the FEATURES-decoration output \
-               this captures. Arrays are 16x16 row-major z*16+x; surface is the highest \
-               non-air block, bedrock at y=-60, below_feet at y=-61. Non-vacuity: chunk (4,4) \
-               must carry tree blocks in its surface (the decoration evidence). Regenerate with \
-               `rivet-oracle regenerate --features` (twin-boot byte-identity proof).",
+               this captures. The forced grid is generated-expected's regime because the \
+               FEATURES step writes one chunk into each neighbor (blockStateWriteRadius(1)): \
+               only the same forced-grid context makes the committed chunks byte-identical to \
+               the canonical golden, which the verifier cross-checks chunk-for-chunk. Arrays \
+               are 16x16 row-major z*16+x; surface is the highest non-air block, bedrock at \
+               y=-60, below_feet at y=-61. Non-vacuity: chunk (4,4) must carry tree blocks in \
+               its surface (the decoration evidence). Regenerate with `rivet-oracle \
+               regenerate --features` (twin-boot byte-identity proof).",
         captured: vec![CapturedFile {
             path: FIXTURE_BASENAME.to_string(),
             sha256: crate::sha256_hex(&data),
@@ -578,8 +643,10 @@ pub fn run_probe(dir: &Path) -> Result<(), Error> {
         ));
     }
     // Validate the (byte-identical) capture against the decoration contract
-    // BEFORE committing — two equally-wrong captures must be refused.
+    // AND the canonical-golden cross-check BEFORE committing — two
+    // equally-wrong captures must be refused.
     validate_world(&a)?;
+    cross_check_generated_expected(&a)?;
 
     println!("[3/3] byte-identical + contract-valid; writing the committed checkpoint...");
     fs::create_dir_all(dir)?;
@@ -773,17 +840,23 @@ mod tests {
     }
 
     #[test]
-    fn forced_grid_is_the_full_neighborhood_of_the_committed_grid() {
-        let committed = committed_coordinates();
+    fn forced_grid_is_the_generated_expected_regime() {
+        // The FEATURES step writes one chunk into each neighbor
+        // (`blockStateWriteRadius(1)`), so a committed chunk's border trees spill
+        // from its neighbors and the forced-grid context decides the captured
+        // content. The forced grid must therefore be generated-expected's
+        // {-6..=6} regime, not a smaller local pad — otherwise the committed
+        // chunks diverge from the canonical golden at the spill columns.
         let forced = forced_coordinates();
-        // Every committed chunk's 3x3 WorldGenRegion window is forced: all 8
-        // neighbors of every committed chunk are in the forced grid.
+        let ge_forced = crate::generated_expected::forced_coordinates();
+        assert_eq!(
+            forced, ge_forced,
+            "the features forced grid must equal generated-expected's"
+        );
+        let committed = committed_coordinates();
         for (cx, cz) in &committed {
             for dx in -1..=1 {
                 for dz in -1..=1 {
-                    if dx == 0 && dz == 0 {
-                        continue;
-                    }
                     assert!(
                         forced.contains(&(cx + dx, cz + dz)),
                         "neighbor ({},{}) of committed chunk ({cx},{cz}) is not forced",
@@ -816,6 +889,19 @@ mod tests {
             fp.surface.iter().any(|b| TREE_BLOCKS.contains(&b.as_str())),
             "the FULL golden's chunk 4,4 is not tree-bearing — the FEATURES checkpoint target \
              would be vacuous"
+        );
+    }
+
+    #[test]
+    fn committed_features_match_generated_expected_at_every_chunk() {
+        // The committed FEATURES chunks must be byte-identical to the canonical
+        // generated-expected golden at the same coordinates — a divergent capture
+        // is a capture-regime artifact, not Paper ground truth.
+        let dir = fixtures_dir().join("features");
+        require_fixture(&dir);
+        let golden = load(&dir).unwrap();
+        cross_check_generated_expected(&golden.world).expect(
+            "committed features chunks must match generated-expected at every sampled field",
         );
     }
 
