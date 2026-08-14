@@ -427,6 +427,20 @@ where
     pub fn get_upgrade_data(&self) -> &UpgradeData {
         self.base.get_upgrade_data()
     }
+
+    /// Consume the proto and return its `ChunkAccess` base.
+    ///
+    /// Java's promotion path (`new LevelChunk(ServerLevel, ProtoChunk,
+    /// PostLoadProcessor)`) hands the proto's owned base state — sections,
+    /// heightmaps, light nibbles, flags, inhabited time, pending block
+    /// entities, post-processing, structure access — to the `LevelChunk`
+    /// constructor; the port keeps that a value move. The proto-only fields
+    /// (`entities`, `status`, `carvingMask`) are not part of the base and are
+    /// dropped by the caller's typed refusal when the persisted status is not
+    /// genuine `FULL` (see the server `LevelChunk::try_from_full_proto`).
+    pub fn into_base(self) -> ChunkAccess<T, B, S> {
+        self.base
+    }
 }
 
 // The worldgen surface-driver specialization: `ProtoChunk.setBlockState` and
