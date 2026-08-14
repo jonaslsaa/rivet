@@ -48,6 +48,12 @@ impl StarLightProvider for StubStarLightProvider {
         // sections; the stub lights nothing.
     }
 
+    fn force_load_in_chunk(&mut self, _pos: ChunkPos, _empty_sections: &[Option<bool>]) {
+        // `StarLightInterface.forceLoadInChunk` registers a chunk as loaded
+        // (the LIGHT task's already-lighted branch) without recomputing; the
+        // stub loads nothing.
+    }
+
     fn relight_chunks(&mut self, _chunks: &std::collections::HashSet<ChunkPos>) {
         // `StarLightInterface.relightChunks` recomputes light for the chunks
         // and invokes the completion callbacks; the stub recomputes nothing.
