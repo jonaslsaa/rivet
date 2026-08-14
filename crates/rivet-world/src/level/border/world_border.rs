@@ -55,9 +55,10 @@
 //!
 //! ## Cross-unit seams
 //!
-//! - `SavedData`/`SavedDataType`/`DataFixTypes` — pending
-//!   `mc.world.level.saveddata`/`mc.util.datafix` units; STUB seams live in
-//!   [`saved_data`] (`// STUB(mc.world.level.saveddata)`).
+//! - `SavedData`/`SavedDataType`/`DataFixTypes` — the merged
+//!   `mc.world.level.saveddata`/`mc.util.datafix` units
+//!   (`crate::level::saveddata`); `WorldBorder extends SavedData` and exposes
+//!   the [`TYPE`] `SavedDataType` static (pinned to `NbtOps`).
 //! - `VoxelShape`/`Shapes`/`BooleanOp` — pending `mc.world.phys.shapes` unit;
 //!   the [`shapes`] seam carries the `STUB(mc.world.phys.shapes)` marker.
 //! - `Entity` — pending `mc.world.entity` unit; minimal `getX`/`getZ` handle
@@ -66,9 +67,11 @@
 //!   `getXsize`/`getZsize` reads are inlined (`max_x - min_x`).
 
 pub use crate::level::border::entity_stub::Entity;
-pub use crate::level::border::saved_data::{DataFixTypes, SavedData, SavedDataType};
 pub use crate::level::border::shapes::Shapes;
 pub use crate::level::border::shapes::VoxelShape;
+use crate::level::saveddata::saved_data::SavedData;
+use crate::level::saveddata::saved_data_type::SavedDataType;
+use crate::level::saveddata::stub_data_fix_types::DataFixTypes;
 use rivet_registry::Identifier;
 use rivet_registry::core::{BlockPos, ChunkPos};
 use rivet_serialization::codec::{self, Codec};
@@ -76,7 +79,7 @@ use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
 use rivet_util::mth::{clamp_f64, lerp, max_f64, min_f64};
 use rivet_util::mth_stubs::{Aabb, Vec3};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 /// `WorldBorder.MAX_SIZE` — `5.999997E7F` (a **float** literal, widened).
 /// The float nearest `59999970.0` is `59999968.0`, so the border's default
@@ -164,7 +167,7 @@ impl WorldBorder {
             center_z: 0.0,
             absolute_max_size: 29999984,
             extent: BorderExtent::Static(StaticBorderExtent::new(MAX_SIZE, 0.0, 0.0, 29999984)),
-            saved_data: SavedData::new(),
+            saved_data: SavedData::default(),
         }
     }
 
@@ -646,23 +649,21 @@ impl WorldBorder {
             Arc::new(Settings::from_world_border),
         )
     }
-
-    /// `WorldBorder.TYPE` — `new SavedDataType<>(Identifier.
-    /// withDefaultNamespace("world_border"), WorldBorder::new, CODEC,
-    /// DataFixTypes.SAVED_DATA_WORLD_BORDER)`. Ops-generic (the port's codecs
-    /// are ops-parameterized).
-    pub fn type_handle<Ops: DynamicOps + 'static>() -> SavedDataType<WorldBorder, Ops>
-    where
-        WorldBorder: 'static,
-    {
-        SavedDataType {
-            id: Identifier::with_default_namespace("world_border"),
-            constructor: Arc::new(WorldBorder::default),
-            codec: WorldBorder::codec::<Ops>(),
-            data_fix_type: DataFixTypes::SavedDataWorldBorder,
-        }
-    }
 }
+
+/// `WorldBorder.TYPE` — `new SavedDataType<>(Identifier.
+/// withDefaultNamespace("world_border"), WorldBorder::new, WorldBorder.CODEC,
+/// DataFixTypes.SAVED_DATA_WORLD_BORDER)`. Java's `static final` singleton is a
+/// `LazyLock` static pinned to `NbtOps` (the disk runtime's ops) — the same
+/// shape as the `mc.world.level.saveddata` payloads' `TYPE` statics.
+pub static TYPE: LazyLock<SavedDataType<WorldBorder>> = LazyLock::new(|| {
+    SavedDataType::new(
+        Identifier::with_default_namespace("world_border"),
+        Arc::new(WorldBorder::default),
+        WorldBorder::codec::<rivet_nbt::nbt_ops::NbtOps>(),
+        DataFixTypes::SavedDataWorldBorder,
+    )
+});
 
 /// `WorldBorder.BorderExtent` — the private extent interface, as a sum type.
 /// `update()` returns the next extent plus whether `setDirty()` fired inside
@@ -1968,23 +1969,22 @@ mod tests {
     }
 
     #[test]
-    fn type_handle_is_world_border_in_default_namespace() {
+    fn type_is_world_border_in_default_namespace() {
         // `WorldBorder.TYPE = new SavedDataType<>(Identifier.
         // withDefaultNamespace("world_border"), WorldBorder::new, CODEC,
         // DataFixTypes.SAVED_DATA_WORLD_BORDER)`.
-        let handle = WorldBorder::type_handle::<JsonOps>();
+        let handle: &SavedDataType<WorldBorder> = &TYPE;
         assert_eq!(
-            handle.id,
-            Identifier::with_default_namespace("world_border")
+            handle.id(),
+            &Identifier::with_default_namespace("world_border")
         );
-        assert_eq!(handle.data_fix_type, DataFixTypes::SavedDataWorldBorder);
+        assert_eq!(handle.data_fix_type(), DataFixTypes::SavedDataWorldBorder);
         assert_eq!(
             format!("{handle:?}"),
             "SavedDataType[minecraft:world_border]"
         );
         // Equality is by id (the `SavedDataType.equals` contract).
-        let again = WorldBorder::type_handle::<JsonOps>();
-        assert_eq!(handle, again);
+        assert_eq!(&*TYPE, handle);
     }
 
     #[test]
