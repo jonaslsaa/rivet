@@ -248,8 +248,8 @@ pub trait FoliagePlacer: Any + Debug + Send + Sync + 'static {
         let offset = if double_trunk { 1 } else { 0 };
         let origin_vec = Vec3i::new(origin.get_x(), origin.get_y(), origin.get_z());
         let mut pos = origin.mutable();
-        for dx in -current_radius..=current_radius.wrapping_add(offset) {
-            for dz in -current_radius..=current_radius.wrapping_add(offset) {
+        for dx in current_radius.wrapping_neg()..=current_radius.wrapping_add(offset) {
+            for dz in current_radius.wrapping_neg()..=current_radius.wrapping_add(offset) {
                 if !self.should_skip_location_signed(
                     random,
                     dx,
