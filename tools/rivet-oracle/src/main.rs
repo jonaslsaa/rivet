@@ -2645,6 +2645,16 @@ fn run_extract_world(world_dir: &Path, to: Option<&Path>) -> Result<(), Error> {
     Ok(())
 }
 
+/// The `generated-expected` subcommand takes the seed explicitly — it has no
+/// default of its own. The seed the acceptance contract pins (seed 42) lives
+/// solely in the runner (`tools/rivet-client/src/bin/run-scenario/server.rs`
+/// `GENERATED_SEED`), which always passes it explicitly to both the server boot
+/// and `generated-expected <seed>`. Keeping the seed out of this crate means
+/// there is no second copy of the constant for the runner and oracle to drift
+/// apart on: the oracle captures whatever seed it is asked for, and a bare CLI
+/// call without a seed is a usage error (`Error::Gate`), never a silent
+/// comparison of the wrong world.
+///
 /// `hash-paper`: rebuild the committed Paper manifest from the decompressed
 /// `.nbt` fixtures. The seed, level-type, region-file-compression, and corpus
 /// version recorded are all read back out of the source region capture's

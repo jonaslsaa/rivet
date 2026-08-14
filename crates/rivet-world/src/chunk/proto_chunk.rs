@@ -46,10 +46,11 @@ use crate::chunk::paletted_container_factory::PalettedContainerFactory;
 use crate::chunk::storage::chunk_reconstruction::block_state_predicates;
 use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::SimpleLevelHeightAccessor;
+use crate::levelgen::carver::CarveChunk;
 use crate::levelgen::heightmap::{Heightmap, StateFlags, Types};
 use crate::levelgen::surface_rules::ChunkSurface;
 use crate::lighting::swmr_nibble_array::SwmrNibbleArray;
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::core::{BlockPos, ChunkPos, SectionPos};
@@ -58,8 +59,8 @@ use rivet_registry::holder::Holder;
 /// `net.minecraft.world.level.chunk.ProtoChunk` — the worldgen chunk value.
 pub struct ProtoChunk<T, B, S>
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     /// The `ChunkAccess` base.
@@ -79,8 +80,8 @@ where
 
 impl<T, B, S> ProtoChunk<T, B, S>
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     /// `ProtoChunk(ChunkPos, UpgradeData, LevelHeightAccessor,
@@ -413,6 +414,16 @@ where
         self.carving_mask = Some(data);
     }
 
+    /// Take the carving mask out, leaving `None` (Rust-only helper; no Java
+    /// analogue). The CARVERS driver (`NoiseBasedChunkGenerator::apply_carvers`)
+    /// needs both `&mut dyn CarveChunk` (the whole chunk) and `&mut CarvingMask`
+    /// (a field of the chunk) for each carve, which a single `&mut ProtoChunk`
+    /// cannot provide — it takes the mask out, drives it, and writes it back
+    /// with [`Self::set_carving_mask`].
+    pub fn take_carving_mask(&mut self) -> Option<CarvingMask> {
+        self.carving_mask.take()
+    }
+
     /// `ProtoChunk.setLightEngine(LevelLightEngine)` — the engine is not
     /// ported, so there is no field to store.
     ///
@@ -427,6 +438,70 @@ where
     pub fn get_upgrade_data(&self) -> &UpgradeData {
         self.base.get_upgrade_data()
     }
+
+    /// `ChunkAccess.getStartForStructure(Structure)` — delegate to the base's
+    /// `StructureAccess` (the `i64` stand-in for the unported `StructureStart`,
+    /// #369).
+    pub fn get_start_for_structure(&self, structure: &S) -> Option<i64> {
+        self.base.get_start_for_structure(structure)
+    }
+
+    /// `ChunkAccess.setStartForStructure(Structure, StructureStart)` — delegate
+    /// (the base marks the chunk unsaved).
+    pub fn set_start_for_structure(&mut self, structure: S, start: i64) {
+        self.base.set_start_for_structure(structure, start);
+    }
+
+    /// `ChunkAccess.getAllStarts()` — the base's typed structure-starts
+    /// authority. Java's promotion copies it wholesale
+    /// (`setAllStarts(protoChunk.getAllStarts())`).
+    pub fn get_all_starts(&self) -> &std::collections::HashMap<S, i64> {
+        self.base.get_all_starts()
+    }
+
+    /// `ChunkAccess.setAllStarts(Map)` — clear + putAll, then marks unsaved.
+    pub fn set_all_starts(&mut self, starts: std::collections::HashMap<S, i64>) {
+        self.base.set_all_starts(starts);
+    }
+
+    /// `ChunkAccess.getReferencesForStructure(Structure)` — delegate.
+    pub fn get_references_for_structure<'a>(
+        &'a self,
+        structure: &'a S,
+    ) -> impl Iterator<Item = &'a u64> + 'a {
+        self.base.get_references_for_structure(structure)
+    }
+
+    /// `ChunkAccess.addReferenceForStructure(Structure, long)` — delegate.
+    pub fn add_reference_for_structure(&mut self, structure: S, reference: u64) {
+        self.base.add_reference_for_structure(structure, reference);
+    }
+
+    /// `ChunkAccess.getAllReferences()` — the insertion-ordered runtime
+    /// authority (#537).
+    pub fn get_all_references(&self) -> &IndexMap<S, IndexSet<u64>> {
+        self.base.get_all_references()
+    }
+
+    /// `ChunkAccess.setAllReferences(Map)` — delegate. Java's promotion copies
+    /// the reference map wholesale (`setAllReferences(protoChunk.getAllReferences())`).
+    pub fn set_all_references<I: IntoIterator<Item = (S, Vec<u64>)>>(&mut self, data: I) {
+        self.base.set_all_references(data);
+    }
+
+    /// Consume the proto and return its `ChunkAccess` base.
+    ///
+    /// Java's promotion path (`new LevelChunk(ServerLevel, ProtoChunk,
+    /// PostLoadProcessor)`) hands the proto's owned base state — sections,
+    /// heightmaps, light nibbles, flags, inhabited time, pending block
+    /// entities, post-processing, structure access — to the `LevelChunk`
+    /// constructor; the port keeps that a value move. The proto-only fields
+    /// (`entities`, `status`, `carvingMask`) are not part of the base and are
+    /// dropped by the caller's typed refusal when the persisted status is not
+    /// genuine `FULL` (see the server `LevelChunk::try_from_full_proto`).
+    pub fn into_base(self) -> ChunkAccess<T, B, S> {
+        self.base
+    }
 }
 
 // The worldgen surface-driver specialization: `ProtoChunk.setBlockState` and
@@ -439,7 +514,7 @@ where
 
 impl<B, S> ProtoChunk<BlockState, B, S>
 where
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     /// `ProtoChunk.setBlockState(BlockPos, BlockState, flags)` — the worldgen
@@ -459,10 +534,12 @@ where
     /// Java's `state.is(Blocks.AIR)` is a block-identity check
     /// (`getBlock() == Blocks.AIR`), so `CAVE_AIR`/`VOID_AIR` do not take the
     /// fast path — hence the `state.block() == Blocks::AIR.id()` comparison
-    /// rather than the behavioral `is_air` predicate. The `CAVE_AIR`-writing
-    /// carver path is not yet wired for `ProtoChunk` (RivetTodo(#399)), so this
-    /// fast path is currently only reachable via the surface driver's exact
-    /// `AIR` writes.
+    /// rather than the behavioral `is_air` predicate. The worldgen carver loop
+    /// (`NoiseBasedChunkGenerator::apply_carvers`) drives this same
+    /// `set_block_state` through the `CarveChunk` impl (RivetTodo(#399)) and
+    /// writes `CAVE_AIR` via the aquifer, so its writes deliberately bypass this
+    /// `AIR` fast path — matching Java — while the surface driver's exact `AIR`
+    /// writes take it.
     ///
     /// Returns the previous state, matching Java.
     pub fn set_block_state(&mut self, x: i32, y: i32, z: i32, state: BlockState) -> BlockState {
@@ -497,7 +574,7 @@ where
 
 impl<B, S> ChunkSurface for ProtoChunk<BlockState, B, S>
 where
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
     fn get_height(&self, x: i32, z: i32) -> i32 {
@@ -543,6 +620,38 @@ where
     }
 }
 
+// The `CarveChunk` block surface is the `ChunkAccess` write surface
+// `applyCarvers` needs (tracked by RivetTodo(#399)). A worldgen `ProtoChunk`
+// is a freshly generated chunk, so
+// `isUpgrading` is fixed `false` — Java's `ChunkAccess.isUpgrading()` reflects
+// `belowZeroRetrogen != null`, which the generation path never sets.
+
+impl<B, S> CarveChunk for ProtoChunk<BlockState, B, S>
+where
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send + Sync,
+{
+    fn get_pos(&self) -> ChunkPos {
+        ProtoChunk::get_pos(self)
+    }
+
+    fn is_upgrading(&self) -> bool {
+        false
+    }
+
+    fn get_block_state(&self, pos: &BlockPos) -> BlockState {
+        ProtoChunk::get_block_state(self, pos.get_x(), pos.get_y(), pos.get_z())
+    }
+
+    fn set_block_state(&mut self, pos: &BlockPos, state: BlockState) {
+        ProtoChunk::set_block_state(self, pos.get_x(), pos.get_y(), pos.get_z(), state);
+    }
+
+    fn mark_pos_for_post_processing(&mut self, pos: &BlockPos) {
+        ProtoChunk::mark_pos_for_post_processing(self, pos);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,7 +679,7 @@ mod tests {
         fn by_id(&self, id: i32) -> Option<u8> {
             Some(id as u8)
         }
-        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8>> {
+        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8> + Send + Sync> {
             Box::new(*self)
         }
     }

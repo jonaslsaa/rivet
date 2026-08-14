@@ -59,7 +59,7 @@ pub trait BitStorage: Send {
     /// for [`ZeroBitStorage`] and a clone for [`SimpleBitStorage`]; the Rust
     /// port always returns an owned fresh value (Java's shared `this` is an
     /// aliasing optimization that is unobservable on the wire).
-    fn copy_box(&self) -> Box<dyn BitStorage>;
+    fn copy_box(&self) -> Box<dyn BitStorage + Send + Sync>;
 
     /// `moonrise$countEntries()` — the Paper/Moonrise block-counting
     /// extension. Maps every distinct palette-local id to the ascending list
@@ -137,7 +137,7 @@ mod tests {
         fn unpack(&self, output: &mut [i32]) {
             output.copy_from_slice(&self.entries);
         }
-        fn copy_box(&self) -> Box<dyn BitStorage> {
+        fn copy_box(&self) -> Box<dyn BitStorage + Send + Sync> {
             Box::new(FakeStorage {
                 entries: self.entries.clone(),
             })

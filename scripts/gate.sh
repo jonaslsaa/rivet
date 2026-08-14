@@ -68,10 +68,12 @@
 #                          Rivet headlessly and proves the client survives past the 30 s
 #                          keepalive kick limit (wall-clock, echoing every live keepalive).
 #                          The Paper rows are guarded by the paperclip jar, like oracle
-#                          verify; dwell/kick/loaded-world/recenter need only the
-#                          rivet-server binary (run-scenario.sh builds it on demand).
-#                          Each row exits 0 PASS / 1 FAIL / 3 UNVERIFIED (never
-#                          silently green).
+#                          verify; dwell/kick/loaded-world/recenter/generated-world need
+#                          only the rivet-server binary (run-scenario.sh builds it on
+#                          demand; the loaded-world and generated-world rows additionally
+#                          need the rivet-oracle and rivet-client binaries the harness
+#                          resolves). Each row exits 0 PASS / 1 FAIL / 3 UNVERIFIED
+#                          (never silently green).
 #   - join capture         rivet-capture: boots Paper, joins via the Azalea client
 #                          through a byte-transparent proxy, and diffs the normalized
 #                          join packets byte-for-byte against the committed fixture,
@@ -736,6 +738,65 @@ run_scenario_recenter() {
   fi
 }
 
+# The generated-world acceptance row (seed-42 contract, ahead of the generator):
+# boot Rivet with the explicit generated-world launch option (`--seed 42`) on a
+# fresh disposable seed world, drive the real Azalea client in `generated` mode,
+# and compare the observed per-coordinate content against the seed-42
+# ground-truth handoff (`rivet-oracle generated-expected`). It is a Rivet-only
+# terminal acceptance — no paperclip jar is a prereq, and run-scenario.sh builds
+# the rivet-server binary on demand.
+#
+# The row is milestone-gated exactly like the Paper-vs-Rivet hash-diff
+# (RIVET_HASH_DIR): the committed seed-42 `generated-expected` golden is
+# captured on main, but the rivet-server `--seed` launch option still serves
+# the superflat M1 fixture (login is_flat=true), not genuine FULL generated
+# chunks, so the runner exits UNVERIFIED (3) with the exact pinned reason — it
+# never falls back to a superflat boot or a copied loaded world, so this row
+# can never fabricate a PASS. While the server does not genuinely serve
+# generated chunks the row is recorded as an explicit NOTICE (never a silent
+# skip, never a green-looking pass) and stays mergeable, so it does not block
+# the serialized release lane ahead of the generator. Setting
+# RIVET_GENERATED_WORLD=1 opts into the strict check: the comparison then runs
+# and any UNVERIFIED (exit 3) sets ORACLE_UNVERIFIED so the gate exits 3, and
+# under --require-oracle it is a hard failure (exit 1) — exactly the
+# rivet-parity/self-test boundary.
+run_scenario_generated_world() {
+  echo "==> scenario runner (generated-world: official-client acceptance vs a fresh seed-42 generated world)"
+  # The opt-in uses the same convention as RIVET_REQUIRE_ORACLE: any non-empty
+  # value other than "0" enables the strict check, so an operator can disable
+  # the row explicitly with RIVET_GENERATED_WORLD=0 (never silently enabling it).
+  if [ -z "${RIVET_GENERATED_WORLD:-}" ] || [ "$RIVET_GENERATED_WORLD" = "0" ]; then
+    echo "    NOTICE — generated-world acceptance is UNVERIFIED and milestone-gated: the"
+    echo "      server does not yet genuinely serve generated chunks (the --seed build still"
+    echo "      boots the superflat M1 fixture, login is_flat=true; the runner exits 3 with the"
+    echo "      exact pinned GENERATED_WORLD_UNVERIFIED_REASON; it never falls back to superflat"
+    echo "      or a copied loaded world). Set RIVET_GENERATED_WORLD=1 to require this row."
+    return 0
+  fi
+  local rc=0
+  "$REPO_DIR/tools/rivet-client/run-scenario.sh" generated-world || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "    PASS — the real client joined, spawned, and the served seed-42 content matched the ground-truth manifest"
+  elif [ "$rc" -eq 1 ]; then
+    echo "    FAILED — generated-world acceptance found a divergence (exit $rc; see the output above)"
+    exit 1
+  elif [ "$rc" -eq 3 ]; then
+    # UNVERIFIED: the rivet-server --seed option still serves the superflat M1
+    # fixture (login is_flat=true) rather than genuine generated chunks, so the
+    # comparison never ran to completion and MUST NOT look green.
+    echo "    UNVERIFIED — generated-world acceptance did not complete (exit $rc; see the output above)"
+    ORACLE_UNVERIFIED=1
+    if [ "$REQUIRE_ORACLE" = 1 ]; then
+      echo "    --require-oracle is set: a generated-world run that cannot complete is a hard failure"
+      exit 1
+    fi
+  else
+    # Tool crash / panic / unexpected error: FAILED, never green.
+    echo "    FAILED — generated-world acceptance crashed or errored (exit $rc; see the output above)"
+    exit 1
+  fi
+}
+
 # ---- main --------------------------------------------------------------------
 
 main() {
@@ -1041,19 +1102,41 @@ main() {
   #                         Exits 0 PASS / 1 FAIL / 3 UNVERIFIED; exit 3 sets
   #                         ORACLE_UNVERIFIED so the gate exits 3 (and
   #                         --require-oracle hard-fails it at exit 1).
+  #   generated-world       Rivet-only official-client acceptance (seed-42
+  #                         generated-world contract, ahead of the generator):
+  #                         boot Rivet with `--seed 42` (the generated-world
+  #                         launch seam) on a fresh disposable seed world, drive
+  #                         the real Azalea client in generated mode, and compare
+  #                         the served per-coordinate content against the seed-42
+  #                         ground-truth handoff (rivet-oracle
+  #                         generated-expected). The Paper seed-42 golden is
+  #                         captured (PR #595), but the rivet-server `--seed`
+  #                         option still serves the superflat M1 fixture — real
+  #                         generated-world serving is not wired into the live
+  #                         path yet — so the runner stays UNVERIFIED (exit 3)
+  #                         with the exact pinned reason. Milestone-gated behind
+  #                         RIVET_GENERATED_WORLD=1 (like RIVET_HASH_DIR): while
+  #                         genuine generated-world serving is absent the row is
+  #                         an explicit NOTICE and stays mergeable — never a
+  #                         silent skip or a fabricated PASS. With the flag set
+  #                         the exit contract matches loaded-world (0 PASS / 1
+  #                         FAIL / 3 UNVERIFIED; exit 3 sets ORACLE_UNVERIFIED,
+  #                         and --require-oracle hard-fails it at exit 1).
   #
   # The Paper rows run when the paperclip jar and the rivet-client binary are
   # present (SCENARIO_RUNNABLE, set by the prereq pre-check); when either is
   # missing they report UNVERIFIED and set ORACLE_UNVERIFIED so the gate exits 3
   # (--require-oracle hard-fails at the pre-check) — never the bare "SKIPPED"
   # that could conceal the missing comparison behind a green-looking run (issue
-  # #160). The dwell/kick/loaded-world/recenter rows are Rivet-only — they need
-  # no jar, only the rivet-server binary (which run-scenario.sh builds on
-  # demand; the loaded-world row additionally needs the rivet-oracle and
-  # rivet-client binaries the harness resolves, the recenter row only the
-  # rivet-client binary). Every row exits 0 PASS / 1 FAIL / 3 UNVERIFIED, so a
-  # missing prereq or a failed scenario can never look green. Skipped when
-  # gating a crate subset (the scenario drives a whole server).
+  # #160). The dwell/kick/loaded-world/recenter/generated-world rows are
+  # Rivet-only — they need no jar, only the rivet-server binary (which
+  # run-scenario.sh builds on demand; the loaded-world row additionally needs
+  # the rivet-oracle and rivet-client binaries the harness resolves, the recenter
+  # row only the rivet-client binary, and the generated-world row also invokes
+  # `rivet-oracle generated-expected` for the seed-42 ground-truth handoff).
+  # Every row exits 0 PASS / 1 FAIL / 3 UNVERIFIED, so a missing prereq or a
+  # failed scenario can never look green. Skipped when gating a crate subset
+  # (the scenario drives a whole server).
   if [ "$FULL_GATE" = true ]; then
     run_scenario_paper_rows
     echo "==> scenario runner (dwell: wall-clock keepalive survival past the 30s kick limit)"
@@ -1062,6 +1145,7 @@ main() {
     "$REPO_DIR/tools/rivet-client/run-scenario.sh" kick --server rivet
     run_scenario_loaded_world
     run_scenario_recenter
+    run_scenario_generated_world
   fi
 
   # --- unused dependencies (cargo-machete) -------------------------------------

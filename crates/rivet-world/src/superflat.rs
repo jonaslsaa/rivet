@@ -55,8 +55,8 @@ pub const LIGHT_SECTION_COUNT: usize = SECTION_COUNT + 2;
 /// The superflat chunk content: sections + heightmaps + light, ready to hand
 /// to the #94 packet bodies.
 pub struct SuperflatChunkContent<
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
 > {
     /// The 24 `LevelChunkSection`s, lowest Y first.
     pub sections: Vec<LevelChunkSection<T, B>>,
@@ -68,8 +68,8 @@ pub struct SuperflatChunkContent<
 }
 
 impl<
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
 > SuperflatChunkContent<T, B>
 {
     /// `calculateChunkSize` + `extractChunkData` — the opaque sections buffer
@@ -145,8 +145,8 @@ pub fn build_superflat<T, B>(
     flags: BlockFlags<T>,
 ) -> SuperflatChunkContent<T, B>
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
 {
     let mut sections = Vec::with_capacity(SECTION_COUNT);
     // Section index 0 (Y=-4): the single stone layer at absolute y=-64.
@@ -213,8 +213,8 @@ fn heightmaps_for_sections<T, B>(
     flags: &BlockFlags<T>,
 ) -> Vec<(HeightmapType, Vec<i64>)>
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
 {
     // `getHighestFilledSectionIndex` -> `getHighestSectionPosition()`: the top
     // block coordinate of the highest non-air section (Java: `-1` -> minY,
@@ -255,8 +255,8 @@ fn block_state_at<T, B>(
     z: i32,
 ) -> T
 where
-    T: Clone + PartialEq + Send + std::fmt::Debug + 'static,
-    B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
 {
     let rel = y - min_y;
     let index = (rel / 16) as usize;

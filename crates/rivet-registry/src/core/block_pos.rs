@@ -464,7 +464,8 @@ impl BlockPos {
     }
 
     /// `BlockPos.betweenClosed(int, int, int, int, int, int)` — the cells of
-    /// the inclusive axis-aligned box in X/Y/Z-major order.
+    /// the inclusive axis-aligned box in x-fastest order (x varies fastest,
+    /// then y, then z outermost).
     pub fn between_closed(
         min_x: i32,
         min_y: i32,

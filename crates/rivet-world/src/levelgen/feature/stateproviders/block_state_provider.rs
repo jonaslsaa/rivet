@@ -177,12 +177,13 @@ pub fn block_state_provider_get_state<R: RandomSource>(
 /// `getOptionalState(WorldGenLevel, RandomSource, BlockPos)` over the erased
 /// carrier — dispatch an erased provider to its optional state.
 ///
-/// The optional-state twin of [`block_state_provider_get_state`], consumed by
-/// `DiskFeature.placeColumn` (`config.stateProvider().getOptionalState(...)`,
-/// `null` when `RuleBasedStateProvider` matches no rule and has no fallback).
-/// The same closed downcast match over the eight concrete providers; every
-/// provider's default `get_optional_state` is `Some(get_state)`, so only
-/// `RuleBasedStateProvider` can return `None`.
+/// The optional-state twin of [`block_state_provider_get_state`], a closed
+/// downcast match over the eight concrete providers forwarding to each one's
+/// `get_optional_state` (the default `Some(get_state)`, overridden by
+/// `RuleBasedStateProvider` — so only it can return `None`). Consumed by
+/// `DiskFeature.placeColumn` (`config.stateProvider().getOptionalState(...)`)
+/// and `TrunkPlacer.placeBelowTrunkBlock`
+/// (`config.belowTrunkProvider.getOptionalState(...)`).
 pub fn block_state_provider_get_optional_state<R: RandomSource>(
     provider: &dyn ErasedBlockStateProvider,
     level: &dyn WorldGenLevel,

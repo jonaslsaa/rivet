@@ -31,6 +31,8 @@
 //! (computed once at construction from `rivet_world::superflat`) instead of
 //! the `LevelLightEngine`; the lighting engine unit replaces it when it lands.
 
+use std::collections::HashMap;
+
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_protocol::protocol::game::heightmap_types::HeightmapType;
 use rivet_protocol::protocol::game::level_chunk_packet_data::{
@@ -51,10 +53,13 @@ use rivet_world::chunk::data_layer::DataLayer;
 use rivet_world::chunk::level_chunk::LevelChunk as WorldLevelChunk;
 use rivet_world::chunk::level_chunk_section::LevelChunkSection;
 use rivet_world::chunk::paletted_container_factory::PalettedContainerFactory;
+use rivet_world::chunk::proto_chunk::ProtoChunk;
+use rivet_world::chunk::status::ChunkStatus;
 use rivet_world::chunk::storage::ChunkReconstruction;
 use rivet_world::chunk::storage::block_entity_materialization::{
     BlockEntityMaterialization, materialize_block_entities,
 };
+use rivet_world::chunk::storage::section_reconstruction::BiomeId as WorldgenBiomeId;
 use rivet_world::chunk::storage::serializable_chunk_data::{
     BlockEntityChunkKind, SerializedBlockEntityOutcome, StructureReference,
     reconstruct_block_entities,
@@ -268,6 +273,89 @@ impl LevelChunk {
         })
     }
 
+    /// Generated `ProtoChunk` → server `LevelChunk`, mirroring Java's
+    /// `new LevelChunk(ServerLevel, ProtoChunk, PostLoadProcessor)` promotion.
+    ///
+    /// The generated chunk is consumed by value: the proto's `ChunkAccess` base
+    /// (sections, heightmaps, light nibbles, flags, inhabited time, pending
+    /// block entities, post-processing, structure access) is moved into the
+    /// server value and its section values re-encoded against the server
+    /// strategies with `map_values` — `BlockState::id()` → the dense global
+    /// `StateId` and the worldgen `BiomeId` → the runtime `BiomeId` by registry
+    /// identity (same dense ladder, so the re-encode is byte-identical on wire).
+    /// `from_base` then primes the `FINAL_HEIGHTMAPS` entries the proto left
+    /// unprimed (the worldgen path only touches `WORLDGEN_HEIGHTMAPS`), and the
+    /// packet light payload is derived once through the #184 send seam. The
+    /// caller installs nothing: this is a pure value conversion.
+    ///
+    /// Structure data the proto carries survives the promotion: `map_values`
+    /// reinstalls the base's `StructureAccess` authority wholesale, so any
+    /// starts/references on the proto are preserved (Java's `setAllStarts(
+    /// protoChunk.getAllStarts())` + `setAllReferences(...)` in the same
+    /// constructor). The typed `HashMap<StructureKey, i64>` starts remain the
+    /// `i64` stand-in for the unported `StructureStart` (#369), readable through
+    /// [`Self::get_all_starts`]. The raw `structures.starts` compound field
+    /// ([`Self::structure_starts`]) stays `None` — that verbatim carry belongs
+    /// to the region-reconstruction path only, and no fabricated starts are
+    /// ever produced.
+    ///
+    /// The proto carries no unpacked ticks (they live on the deferred
+    /// `ProtoChunkTicks` containers), so the server chunk starts with empty
+    /// tick vectors — nothing is fabricated. Its `status`, `entities`, and
+    /// `carving_mask` are proto-only and are not part of the promoted base.
+    ///
+    /// The FULL-only authority rule is loud and atomic: every status short of
+    /// genuine persisted `FULL` is rejected with a typed [`LevelChunkBridgeError::NotFull`]
+    /// before the proto is consumed, so a pre-FULL proto is never promoted and
+    /// a hostile status never reaches the `map_values` re-encode.
+    pub fn try_from_full_proto(
+        proto: ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+    ) -> Result<Self, LevelChunkBridgeError> {
+        let status = proto.get_persisted_status();
+        if status != ChunkStatus::Full {
+            return Err(LevelChunkBridgeError::NotFull(status));
+        }
+        // The #184 send seam panics on an unsupported persisted Starlight state
+        // (`to_vanilla_nibble` has no typed error surface), so reject it before
+        // the base is consumed — same gate as [`LevelChunk::from_bridge`].
+        if proto
+            .block_nibbles()
+            .iter()
+            .chain(proto.sky_nibbles())
+            .any(|nibble| nibble.has_unknown_state_visible())
+        {
+            return Err(LevelChunkBridgeError::UnsupportedLightState(
+                UnsupportedLightState,
+            ));
+        }
+        let (block_strategy, biome_strategy) = strategies();
+        let base = proto
+            .into_base()
+            .map_values(
+                block_strategy,
+                biome_strategy,
+                StateId(0),
+                BiomeId(40),
+                &|state: &BlockState| state.id(),
+                &|biome: &WorldgenBiomeId| BiomeId(biome.0),
+                &|state: &StateId| state_flags(*state),
+            )
+            .map_err(LevelChunkBridgeError::PaletteMap)?;
+        let chunk = WorldLevelChunk::from_base(base, StateId(0));
+        let light_data = light_data_from_nibbles(
+            chunk.block_nibbles(),
+            chunk.sky_nibbles(),
+            chunk.get_height(),
+        );
+        Ok(LevelChunk {
+            chunk,
+            light_data,
+            stored_block_ticks: Vec::new(),
+            stored_fluid_ticks: Vec::new(),
+            structure_starts: None,
+        })
+    }
+
     /// The prebuilt light payload — a clone of the value computed once at
     /// construction (the packet body takes it by value).
     pub fn light_data(&self) -> LightUpdatePacketData {
@@ -436,6 +524,23 @@ impl LevelChunk {
         materialize_block_entities(&outcomes)
     }
 
+    /// `ChunkAccess.getAllStarts()` — the typed structure-starts authority on
+    /// the base (`StructureAccess`, #537). `StructureStart` is unported
+    /// (#369), so each value is the `i64` stand-in; a generated proto's starts
+    /// carry through the FULL promotion untouched, and the region
+    /// reconstruction installs none (the raw `structures.starts` compound is
+    /// carried separately as [`Self::structure_starts`]).
+    pub fn get_all_starts(&self) -> &HashMap<StructureKey, i64> {
+        self.chunk.get_all_starts()
+    }
+
+    /// `ChunkAccess.setAllStarts(Map)` — the typed structure-starts runtime
+    /// mutator (#537): clear + putAll into the chunk's `StructureAccess`
+    /// authority.
+    pub fn set_all_starts(&mut self, starts: HashMap<StructureKey, i64>) {
+        self.chunk.set_all_starts(starts);
+    }
+
     /// The decoded `structures.References` after the >8-chunk distance filter
     /// (#369) — derived from the chunk's `StructureAccess` authority (#537), in
     /// deterministic key-insertion order.
@@ -493,7 +598,7 @@ mod maps {
                 .contains(&id)
                 .then_some(StateId(id as u16))
         }
-        fn clone_box(&self) -> Box<dyn GlobalIdMap<StateId>> {
+        fn clone_box(&self) -> Box<dyn GlobalIdMap<StateId> + Send + Sync> {
             Box::new(*self)
         }
     }
@@ -519,7 +624,7 @@ mod maps {
                 .contains(&id)
                 .then_some(BiomeId(id as u16))
         }
-        fn clone_box(&self) -> Box<dyn GlobalIdMap<BiomeId>> {
+        fn clone_box(&self) -> Box<dyn GlobalIdMap<BiomeId> + Send + Sync> {
             Box::new(*self)
         }
     }
@@ -600,19 +705,26 @@ impl std::fmt::Display for UnsupportedLightState {
 
 impl std::error::Error for UnsupportedLightState {}
 
-/// Why a reconstructed chunk cannot be bridged into the server value pair.
+/// Why a reconstructed or generated chunk cannot be bridged into the server
+/// value pair.
 #[derive(Debug, thiserror::Error)]
 pub enum LevelChunkBridgeError {
+    /// The chunk's persisted status is short of genuine `FULL`, so it must not
+    /// be promoted to a loaded chunk. [`LevelChunk::try_from_full_proto`]
+    /// rejects every pre-FULL status before consuming the proto, so the proto
+    /// is untouched (atomic refusal).
+    #[error("generated chunk at status {0:?} is not FULL; refusing to promote a non-full chunk")]
+    NotFull(ChunkStatus),
     /// The chunk carries a persisted Starlight state the #184 send seam cannot
     /// represent.
     #[error(transparent)]
     UnsupportedLightState(#[from] UnsupportedLightState),
     /// A section's paletted containers failed to re-encode into the server
-    /// `StateId`/`BiomeId` value pair (`map_values`). The reconstructed and
-    /// server strategies share the same dense global-id ladder, so this is
-    /// hostile-input defense: the `.expect` that used to abort the process is
-    /// now a typed error.
-    #[error("UNVERIFIED reconstructed chunk failed to re-encode into the server value pair: {0}")]
+    /// `StateId`/`BiomeId` value pair (`map_values`). The source strategies
+    /// (worldgen or reconstructed) and the server strategies share the same
+    /// dense global-id ladder, so this is hostile-input defense: the `.expect`
+    /// that used to abort the process is now a typed error.
+    #[error("UNVERIFIED chunk failed to re-encode into the server value pair: {0}")]
     PaletteMap(String),
 }
 
@@ -688,20 +800,38 @@ pub(crate) fn superflat_content() -> rivet_world::superflat::SuperflatChunkConte
 
 #[cfg(test)]
 mod tests {
-    use super::{BiomeId, LevelChunk, StateId, strategies};
+    use super::{
+        BiomeId, LevelChunk, LevelChunkBridgeError, StateId, StructureKey, WorldgenBiomeId,
+        strategies,
+    };
     use bytes::BytesMut;
     use rivet_nbt::compound_tag::CompoundTag;
     use rivet_protocol::friendly_byte_buf::FriendlyByteBuf;
+    use rivet_protocol::protocol::game::heightmap_types::HeightmapType;
     use rivet_protocol::protocol::game::level_chunk_packet_data::BlockEntityInfo;
     use rivet_registry::Identifier;
     use rivet_registry::block_state::BlockState;
     use rivet_registry::core::{BlockPos, ChunkPos};
+    use rivet_registry::generated::blocks::BlockId;
+    use rivet_world::block::blocks::Blocks;
     use rivet_world::chunk::level_chunk_section::LevelChunkSection;
     use rivet_world::chunk::palette::GlobalIdMap;
     use rivet_world::chunk::paletted_container::PalettedContainer;
+    use rivet_world::chunk::proto_chunk::ProtoChunk;
+    use rivet_world::chunk::status::ChunkStatus;
     use rivet_world::chunk::storage::block_entity_materialization::BlockEntityMaterializeError;
+    use rivet_world::chunk::storage::chunk_reconstruction::{
+        block_state_predicates, resolve_state_flags,
+    };
+    use rivet_world::chunk::storage::section_reconstruction::current_version_container_factory;
     use rivet_world::chunk::storage::serializable_chunk_data::PendingBlockEntityReason;
     use rivet_world::chunk::strategy::Strategy;
+    use rivet_world::chunk::upgrade_data::UpgradeData;
+    use rivet_world::level::LevelHeightAccessor;
+    use rivet_world::level::height_accessor::create as create_accessor;
+    use rivet_world::levelgen::heightmap::Types;
+    use rivet_world::lighting::swmr_nibble_array::{ARRAY_SIZE, InitState, SwmrNibbleArray};
+    use rivet_world::superflat::{SUPERFLAT_HEIGHT, SUPERFLAT_MIN_Y};
 
     use crate::server::level::region_backed::boot_level;
     use crate::server::level::test_support::loaded_world_root;
@@ -1015,7 +1145,7 @@ mod tests {
         fn by_id(&self, id: i32) -> Option<u8> {
             Some(id as u8)
         }
-        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8>> {
+        fn clone_box(&self) -> Box<dyn GlobalIdMap<u8> + Send + Sync> {
             Box::new(*self)
         }
     }
@@ -1199,5 +1329,268 @@ mod tests {
         assert_eq!((caught[0].x, caught[0].y, caught[0].z), (-82, 70, -65));
         assert_eq!(caught[0].packet, tampered_state);
         assert_eq!(caught[0].authority, authority);
+    }
+
+    /// A generated `ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>`
+    /// built exactly like the production `GenerationChunkHolder` does — the
+    /// worldgen `current_version_container_factory()` source pair, `air` =
+    /// `minecraft:air` and `void_air` = raw block id 794, and the worldgen
+    /// `resolve_state_flags` — with a real stone block in section 0, a
+    /// non-plains biome cell (`WorldgenBiomeId(1)`), and genuine persisted
+    /// `FULL`. The `FULL` status is set explicitly so hostile tests can
+    /// re-stamp it to a pre-FULL status.
+    fn build_full_proto(pos: ChunkPos) -> ProtoChunk<BlockState, WorldgenBiomeId, StructureKey> {
+        let height_accessor = create_accessor(SUPERFLAT_MIN_Y, SUPERFLAT_HEIGHT);
+        let factory = current_version_container_factory();
+        let preds = block_state_predicates();
+        let count = height_accessor.get_sections_count() as usize;
+        let mut sections = Vec::with_capacity(count);
+        for i in 0..count {
+            let mut section = LevelChunkSection::new(
+                PalettedContainer::new(
+                    Blocks::AIR.default_block_state(),
+                    factory.block_states_strategy().clone(),
+                ),
+                PalettedContainer::new(WorldgenBiomeId(40), factory.biome_strategy().clone()),
+                preds.is_air,
+                preds.is_randomly_ticking,
+                preds.fluid_is_empty,
+                preds.fluid_is_randomly_ticking,
+                preds.is_special_colliding,
+            );
+            if i == 0 {
+                section.set_block_state(
+                    1,
+                    1,
+                    1,
+                    Blocks::STONE.default_block_state(),
+                    &preds.is_air,
+                    &preds.is_randomly_ticking,
+                    &preds.fluid_is_empty,
+                    &preds.fluid_is_randomly_ticking,
+                    &preds.is_special_colliding,
+                );
+                // A non-plains cell so the identity mapping is observable:
+                // `WorldgenBiomeId(1)` must re-encode to `BiomeId(1)`.
+                section.set_noise_biome(0, 0, 0, WorldgenBiomeId(1));
+            }
+            sections.push(section);
+        }
+        let mut proto = ProtoChunk::new(
+            pos,
+            UpgradeData::empty(count),
+            height_accessor,
+            &factory,
+            Some(sections),
+            Blocks::AIR.default_block_state(),
+            BlockState::of(BlockId(794)),
+            &resolve_state_flags,
+        );
+        proto.set_persisted_status(ChunkStatus::Full);
+        proto
+    }
+
+    /// 26 `Initialised` 2048-byte light arrays (the overworld 24 sections + 2
+    /// padding) filled with a non-zero byte — the `block`/`sky` nibble state a
+    /// `FULL` generated chunk carries.
+    fn initialised_nibbles() -> Vec<SwmrNibbleArray> {
+        (0..26)
+            .map(|_| SwmrNibbleArray::new_with_bytes(vec![0xAB; ARRAY_SIZE]))
+            .collect()
+    }
+
+    /// A `FULL` proto converted through `try_from_full_proto` promotes with
+    /// the chunk position, the stone block mapped to the dense `StateId(1)`,
+    /// the worldgen biome mapped by identity (`WorldgenBiomeId(1)` →
+    /// `BiomeId(1)`; the default stays plains `BiomeId(40)`), the light
+    /// payload derived through the #184 seam, and no fabricated ticks or raw
+    /// `structures.starts` compound — the `new LevelChunk(ServerLevel,
+    /// ProtoChunk, PostLoadProcessor)` promotion surface. This proto was never
+    /// given structure starts, so the typed `StructureAccess` authority is
+    /// empty too; the carry-through of starts a proto *does* carry is covered
+    /// by its own test.
+    #[test]
+    fn full_proto_promotes_blocks_biomes_position_and_aux() {
+        let chunk = LevelChunk::try_from_full_proto(build_full_proto(ChunkPos::new(3, -2)))
+            .expect("a FULL proto promotes");
+        assert_eq!(chunk.pos(), ChunkPos::new(3, -2));
+        assert_eq!(chunk.get_min_y(), SUPERFLAT_MIN_Y);
+        assert_eq!(chunk.get_height(), SUPERFLAT_HEIGHT);
+
+        // Stone at section-local (1,1,1) of section 0 → absolute y -63.
+        assert_eq!(chunk.get_block_state(1, SUPERFLAT_MIN_Y + 1, 1), StateId(1));
+        // Air elsewhere in the section.
+        assert_eq!(chunk.get_block_state(0, SUPERFLAT_MIN_Y, 0), StateId(0));
+
+        // The worldgen biome maps by registry identity through the dense
+        // ladder: the non-plains cell re-encodes to `BiomeId(1)`, the default
+        // stays plains (40).
+        let section0 = &chunk.get_sections()[0];
+        assert_eq!(section0.biomes().get(0, 0, 0), BiomeId(1));
+        assert_eq!(section0.biomes().get(1, 1, 1), BiomeId(40));
+
+        // No fabricated ticks (they live on the deferred proto containers) and
+        // no raw `structures.starts` compound (that verbatim carry belongs to
+        // the region-reconstruction path only); this proto was never given any
+        // typed starts either, so the authority is empty too.
+        assert!(chunk.stored_block_ticks().is_empty());
+        assert!(chunk.stored_fluid_ticks().is_empty());
+        assert!(chunk.structure_starts().is_none());
+        assert!(chunk.get_all_starts().is_empty());
+
+        // The light payload is derived once through the #184 send seam (the
+        // default `Null` nibbles → no sky/block update layers).
+        let light = chunk.light_data();
+        assert!(light.sky_y_mask().is_empty());
+        assert!(light.block_y_mask().is_empty());
+        assert!(light.sky_updates().is_empty());
+        assert!(light.block_updates().is_empty());
+    }
+
+    /// A `FULL` proto's typed structure starts and references carry through
+    /// the promotion untouched: `map_values` reinstalls the base's
+    /// `StructureAccess` authority wholesale, mirroring Java's
+    /// `setAllStarts(protoChunk.getAllStarts())` +
+    /// `setAllReferences(protoChunk.getAllReferences())` in the same
+    /// constructor. A proto given a real `StructureKey` start exposes it on
+    /// the promoted chunk — no silent drop.
+    #[test]
+    fn structure_starts_and_references_carry_through_the_conversion() {
+        let mut proto = build_full_proto(ChunkPos::new(2, -1));
+        proto.set_start_for_structure(Identifier::parse("minecraft:village"), 42);
+        proto.add_reference_for_structure(Identifier::parse("minecraft:village"), 7);
+
+        let chunk = LevelChunk::try_from_full_proto(proto).expect("a FULL proto promotes");
+
+        // The typed starts authority carries the exact payload.
+        let starts = chunk.get_all_starts();
+        assert_eq!(starts.len(), 1);
+        assert_eq!(
+            starts.get(&Identifier::parse("minecraft:village")),
+            Some(&42)
+        );
+
+        // The references authority carries too, observable through the derived
+        // `structures_references` (deterministic key-insertion order).
+        let references = chunk.structures_references();
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].identifier.to_string(), "minecraft:village");
+        assert_eq!(references[0].references, vec![7]);
+
+        // The raw `structures.starts` compound stays `None` — that verbatim
+        // carry belongs to the region-reconstruction path only, and is never
+        // fabricated for the generated path.
+        assert!(chunk.structure_starts().is_none());
+    }
+
+    /// Every persisted status short of genuine `FULL` is refused atomically
+    /// with the typed `NotFull(status)` error, before the proto is consumed.
+    #[test]
+    fn every_pre_full_status_is_refused_atomically() {
+        for status in ChunkStatus::ALL {
+            if status == ChunkStatus::Full {
+                continue;
+            }
+            let mut proto = build_full_proto(ChunkPos::ZERO);
+            proto.set_persisted_status(status);
+            let error = LevelChunk::try_from_full_proto(proto)
+                .err()
+                .expect("a pre-FULL proto must not promote");
+            assert!(
+                matches!(error, LevelChunkBridgeError::NotFull(s) if s == status),
+                "expected NotFull({status:?}), got {error:?}"
+            );
+        }
+    }
+
+    /// The refusal gates run before the proto is consumed: a pre-FULL proto
+    /// carrying an unsupported persisted Starlight state fails with `NotFull`
+    /// (the status gate fires first, so the light gate never sees it), and a
+    /// `FULL` proto with that same state fails with `UnsupportedLightState`
+    /// (the light gate fires before the `map_values` value transform, so a
+    /// hostile palette never reaches the re-encode).
+    #[test]
+    fn refusal_gates_run_before_the_proto_is_consumed() {
+        let mut proto = build_full_proto(ChunkPos::ZERO);
+        proto.set_persisted_status(ChunkStatus::StructureStarts);
+        // `Other` is the persisted Starlight state the #184 send seam cannot
+        // represent; it must NOT surface here — the status gate wins.
+        let mut nibbles = initialised_nibbles();
+        nibbles[3] = SwmrNibbleArray::new_with_state(None, InitState::Other(5));
+        proto.set_block_nibbles(nibbles);
+        assert!(matches!(
+            LevelChunk::try_from_full_proto(proto),
+            Err(LevelChunkBridgeError::NotFull(ChunkStatus::StructureStarts))
+        ));
+
+        let mut proto = build_full_proto(ChunkPos::ZERO);
+        let mut nibbles = initialised_nibbles();
+        nibbles[3] = SwmrNibbleArray::new_with_state(None, InitState::Other(5));
+        proto.set_block_nibbles(nibbles);
+        assert!(matches!(
+            LevelChunk::try_from_full_proto(proto),
+            Err(LevelChunkBridgeError::UnsupportedLightState(_))
+        ));
+    }
+
+    /// The `block`/`sky` light nibbles and the heightmaps carry through the
+    /// conversion: `map_values` re-encodes only the section values and
+    /// reinstalls the base's light arrays and heightmaps, so the derived packet
+    /// light payload and `client_heightmaps` reflect the proto's data.
+    #[test]
+    fn light_nibbles_and_heightmaps_carry_through_the_conversion() {
+        let mut proto = build_full_proto(ChunkPos::ZERO);
+        proto.set_block_nibbles(initialised_nibbles());
+        proto.set_sky_nibbles(initialised_nibbles());
+        // The 384-height `WORLD_SURFACE` heightmap packs 256 columns at 9 bits
+        // = `ceil(256 / (64/9))` = 37 longs — `set_raw_data` matches on
+        // length, so the raw array must be exactly that many longs.
+        let raw = vec![0x0123_4567_89AB_CDEFu64 as i64; 37];
+        proto.set_heightmap(Types::WorldSurface, &raw);
+
+        let chunk = LevelChunk::try_from_full_proto(proto).expect("a FULL proto promotes");
+
+        // The 26 initialised non-zero nibbles become 26 sky + 26 block update
+        // layers (the `take(light_section_count)` seam consumes exactly the 26
+        // arrays the 24-section overworld carries).
+        let light = chunk.light_data();
+        assert_eq!(light.sky_y_mask(), &[(1u64 << 26) - 1]);
+        assert_eq!(light.block_y_mask(), &[(1u64 << 26) - 1]);
+        assert_eq!(light.sky_updates().len(), 26);
+        assert_eq!(light.block_updates().len(), 26);
+        assert!(light.empty_sky_y_mask().is_empty());
+        assert!(light.empty_block_y_mask().is_empty());
+
+        // The heightmap the proto carried is reinstalled on the converted
+        // chunk, so the client heightmap payload reflects it.
+        let client = chunk.client_heightmaps();
+        let (_, world_surface) = client
+            .iter()
+            .find(|(ty, _)| *ty == HeightmapType::WorldSurface)
+            .expect("WORLD_SURFACE is a client heightmap");
+        assert_eq!(world_surface, &raw);
+    }
+
+    /// The conversion consumes the proto by value into a single owned chunk:
+    /// two chunks promoted from identical protos are independent values, so a
+    /// mutation of one's block-entity authority never aliases the other (no
+    /// shared handles / `Arc<RwLock>` game state).
+    #[test]
+    fn converted_chunks_own_their_data_independently() {
+        let a = LevelChunk::try_from_full_proto(build_full_proto(ChunkPos::new(1, 0)))
+            .expect("a FULL proto promotes");
+        let b = LevelChunk::try_from_full_proto(build_full_proto(ChunkPos::new(1, 0)))
+            .expect("a FULL proto promotes");
+        assert_eq!(a.pos(), b.pos());
+        assert_eq!(a.get_block_state(1, SUPERFLAT_MIN_Y + 1, 1), StateId(1));
+        assert_eq!(b.get_block_state(1, SUPERFLAT_MIN_Y + 1, 1), StateId(1));
+
+        let mut a = a;
+        a.set_block_entity_nbt(block_entity("minecraft:chest", 1, 65, 1));
+        assert_eq!(a.pending_block_entities().len(), 1);
+        assert!(
+            b.pending_block_entities().is_empty(),
+            "the promoted chunks must not share the block-entity authority"
+        );
     }
 }
