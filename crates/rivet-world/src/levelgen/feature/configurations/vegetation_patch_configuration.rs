@@ -50,9 +50,9 @@
 //!   `"placement": []` list decodes and a non-empty list fails loudly instead of
 //!   silently mis-decoding.
 
-use crate::biome::biome_generation_settings::{CONFIGURED_FEATURE, PLACED_FEATURE};
 use crate::levelgen::feature::ConfiguredFeatureErased;
 use crate::levelgen::feature::configurations::FeatureConfiguration;
+use crate::levelgen::feature::registry_keys::{CONFIGURED_FEATURE, PLACED_FEATURE};
 use crate::levelgen::feature::stateproviders::block_state_provider::{
     ErasedBlockStateProvider, block_state_provider_codec,
 };

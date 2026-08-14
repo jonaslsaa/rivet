@@ -2,9 +2,11 @@
 //!
 //! Owned by the `mc.world.level.levelgen.feature.core` manifest unit (26.2):
 //! `Feature.java`, `ConfiguredFeature.java`, `FeaturePlaceContext.java`,
-//! `FeatureCountTracker.java`, `package-info.java`. (`WeightedPlacedFeature.java`
-//! is owned by the `.feature.selector` manifest unit — see MANIFEST.tsv — and
-//! will be ported there when that unit lands.)
+//! `FeatureCountTracker.java`, `package-info.java`. `WeightedPlacedFeature.java`
+//! is owned by the `.feature.selector` manifest unit (see MANIFEST.tsv) and is
+//! ported in the vegetation-family wave (issue #600) as
+//! [`weighted_placed_feature`] (the `.selector` unit's selector-feature/config
+//! port lands on top of it).
 //! The `configurations` package slice (the `FeatureConfiguration` trait and its
 //! first three value types) is owned by the `.configurations.core` unit and
 //! lives in the `configurations` submodule.
@@ -31,9 +33,12 @@
 //! mapping of `Feature.place(FC, WorldGenLevel, ChunkGenerator, RandomSource,
 //! BlockPos)`), preserving the `ensureCanWrite` gate that Java's
 //! `ConfiguredFeature.place` path applies. This core unit ports that dispatch as
-//! `feature_place` and covers the one leaf it can faithfully reach —
-//! `minecraft:no_op` (see `no_op_feature`, id 0, config `NoneFeatureConfiguration`).
-//! The remaining ~62 registrations are generated content: `Feature.register`'s
+//! `feature_place` and covers the leaf it can faithfully reach — `minecraft:no_op`
+//! (see `no_op_feature`, id 0, config `NoneFeatureConfiguration`), plus this wave
+//! (issue #600) the five `.feature.selector` leaves: `random_selector` (id 52),
+//! `weighted_random_selector` (id 53), `simple_random_selector` (id 54),
+//! `random_boolean_selector` (id 55), and `sequence` (id 56).
+//! The remaining registrations are generated content: `Feature.register`'s
 //! entries bind each leaf to `BuiltInRegistries.FEATURE`, and the generated
 //! dispatch folds them in. Until they are emitted, dispatching to an unavailable
 //! leaf fails explicitly (an honest panic naming the id), never fabricating
@@ -47,14 +52,16 @@
 //! `Feature.java`'s protected/static helper surface is ported where the seams
 //! exist: `isReplaceable`, `checkNeighbors`, `isAdjacentToAir` (pure functions
 //! over `BlockState`/`BlockPos`), and `place_with_config` (the `FeatureBehavior`
-//! default; see below). `setBlock`/`safeSetBlock`/`markAboveForPostProcessing`
-//! are NOT ported — their write seams (`LevelWriter.setBlock` with the
-//! `Block.UPDATE_ALL`/`UPDATE_CLIENTS` flag constants, and
-//! `ChunkAccess.markPosForPostProcessing`) are not reachable on the
-//! `WorldGenLevel` seam yet, so declaring them would fabricate a write
-//! (RivetTodo #228). `configuredCodec()` stays deferred with the `#126`
-//! by-name codec surface. Concrete feature units will reach for the ported
-//! helpers at `check_neighbors(context.level(), ...)` /
+//! default; see below). The write seam `WorldGenLevel::set_block` (the target
+//! of `LevelWriter.setBlock` with the `Block.UPDATE_ALL`/`UPDATE_CLIENTS` flag
+//! constants) is declared on `WorldGenLevel` and reduces `Feature.setBlock`/
+//! `safeSetBlock` to it — its default fails explicitly until the owning
+//! `world.level` unit lands (RivetTodo #232). The `Feature.setBlock`/
+//! `safeSetBlock` helper methods themselves and
+//! `ChunkAccess.markPosForPostProcessing` are NOT ported yet, so declaring
+//! them would fabricate a write. `configuredCodec()` stays deferred with the
+//! `#126` by-name codec surface. Concrete feature units will reach for the
+//! ported helpers at `check_neighbors(context.level(), ...)` /
 //! `is_replaceable(...)`.
 
 pub mod configurations;
@@ -63,6 +70,22 @@ mod feature_count_tracker;
 mod feature_place_context;
 mod no_op_feature;
 pub mod ore_feature;
+
+// The vegetation-family wave (issue #600) — the nine aquatic/vegetation
+// feature structs that live in this module. Each is owned by its own leaf row
+// (`.feature.bamboo`/`basaltpillar`/`blockblob`/`blockpile`/`blueice`/`kelp`/
+// `nether_forest_vegetation`/`sea_pickle`/`seagrass`, the last through the
+// `.feature.vegetation` cluster) and wired into the `#181` dispatch hub at its
+// registration id; each config is owned by its own `configurations.*` row.
+pub mod bamboo_feature;
+pub mod basalt_pillar_feature;
+pub mod block_blob_feature;
+pub mod block_pile_feature;
+pub mod blue_ice_feature;
+pub mod kelp_feature;
+pub mod nether_forest_vegetation_feature;
+pub mod sea_pickle_feature;
+pub mod seagrass_feature;
 
 // The `net.minecraft.world.level.levelgen.feature.stateproviders` value layer
 // (this unit) — the `BlockStateProvider` hierarchy and its declaration-order
@@ -73,6 +96,32 @@ pub mod stateproviders;
 // (issue #391) — the `FeatureSize` hierarchy and its declaration-order codec
 // dispatch. Owned by the `mc.world.level.levelgen.feature.featuresize` unit.
 pub mod featuresize;
+
+// The vegetation-family wave (issue #600) — the `.feature.selector` manifest
+// unit's slice that lives in this module: the `WeightedPlacedFeature` record
+// (owned by `.feature.selector`), the registry-key seam the selector features
+// resolve their holders through, the `getSubFeatures` flattening helper the
+// selector/composite configurations
+// share, and the five concrete selector features (`RandomSelectorFeature`,
+// `RandomBooleanSelectorFeature`, `SimpleRandomSelectorFeature`,
+// `WeightedRandomSelectorFeature`, `SequenceFeature`). The selector
+// configurations are owned by `.configurations.selector` and live in the
+// `configurations` submodule.
+pub mod random_boolean_selector_feature;
+pub mod random_selector_feature;
+pub mod registry_keys;
+pub mod sequence_feature;
+pub mod simple_random_selector_feature;
+pub mod sub_features;
+pub mod weighted_placed_feature;
+pub mod weighted_random_selector_feature;
+
+// The shared test double for the `.feature.selector` placement tests — the
+// two-registry access the selector features resolve their holders through, a
+// `WorldGenLevel`/`ChunkGenerator` double over it, and the RNG-call-recording
+// `RandomSource` that pins the exact Java draw order.
+#[cfg(test)]
+mod test_support;
 
 // The `net.minecraft.world.level.levelgen.feature.foliageplacers` framework
 // (this unit) — the `FoliagePlacer` hierarchy, its `FoliagePlacerType` ids, and
@@ -92,8 +141,17 @@ mod tree_feature;
 
 use crate::chunk::chunk_generator::ChunkGenerator;
 use crate::level::WorldGenLevel;
+use crate::levelgen::feature::configurations::BlockBlobConfiguration;
+use crate::levelgen::feature::configurations::BlockPileConfiguration;
+use crate::levelgen::feature::configurations::CompositeFeatureConfiguration;
+use crate::levelgen::feature::configurations::CountConfiguration;
 use crate::levelgen::feature::configurations::FeatureConfiguration;
+use crate::levelgen::feature::configurations::NetherForestVegetationConfig;
 use crate::levelgen::feature::configurations::NoneFeatureConfiguration;
+use crate::levelgen::feature::configurations::ProbabilityFeatureConfiguration;
+use crate::levelgen::feature::configurations::RandomBooleanFeatureConfiguration;
+use crate::levelgen::feature::configurations::RandomFeatureConfiguration;
+use crate::levelgen::feature::configurations::WeightedRandomFeatureConfiguration;
 use crate::levelgen::feature::no_op_feature::NO_OP;
 use rivet_registry::Holder;
 use rivet_registry::block_state::BlockState;
@@ -105,9 +163,35 @@ use std::fmt;
 use std::fmt::Debug;
 use std::sync::Arc;
 
+pub use bamboo_feature::{BAMBOO, BambooFeature};
+pub use basalt_pillar_feature::{BASALT_PILLAR, BasaltPillarFeature};
+pub use block_blob_feature::{BLOCK_BLOB, BlockBlobFeature};
+pub use block_pile_feature::{BLOCK_PILE, BlockPileFeature};
+pub use blue_ice_feature::{BLUE_ICE, BlueIceFeature};
 pub use feature_count_tracker::FeatureCountTracker;
 pub use feature_place_context::FeaturePlaceContext;
+pub use kelp_feature::{KELP, KelpFeature};
+pub use nether_forest_vegetation_feature::{
+    NETHER_FOREST_VEGETATION, NetherForestVegetationFeature,
+};
 pub use no_op_feature::NoOpFeature;
+pub use sea_pickle_feature::{SEA_PICKLE, SeaPickleFeature};
+pub use seagrass_feature::{SEAGRASS, SeagrassFeature};
+
+// The vegetation-family wave (issue #600) — the `.feature.selector` unit's
+// slice that lives in this module: `WeightedPlacedFeature` (owned by
+// `.feature.selector`), the registry-key seam, the `getSubFeatures` flattening
+// helper, and the five concrete selector features.
+pub use random_boolean_selector_feature::{RANDOM_BOOLEAN_SELECTOR, RandomBooleanSelectorFeature};
+pub use random_selector_feature::{RANDOM_SELECTOR, RandomSelectorFeature};
+pub use registry_keys::{CONFIGURED_FEATURE, PLACED_FEATURE};
+pub use sequence_feature::{SEQUENCE, SequenceFeature};
+pub use simple_random_selector_feature::{SIMPLE_RANDOM_SELECTOR, SimpleRandomSelectorFeature};
+pub use sub_features::placed_sub_features;
+pub use weighted_placed_feature::WeightedPlacedFeature;
+pub use weighted_random_selector_feature::{
+    WEIGHTED_RANDOM_SELECTOR, WeightedRandomSelectorFeature,
+};
 
 /// `net.minecraft.world.level.levelgen.feature.ConfiguredFeature<FC, F>`
 /// (record, 26.2) — a feature paired with its configuration.
@@ -317,8 +401,19 @@ impl FeatureId {
 /// (the faithful mapping of `Feature.place(FC, WorldGenLevel, ChunkGenerator,
 /// RandomSource, BlockPos)`, which applies the `ensureCanWrite` gate).
 ///
-/// This unit ports the dispatch and covers the one leaf it can faithfully
-/// reach: `minecraft:no_op` (id 0, `NoOpFeature` over `NoneFeatureConfiguration`).
+/// This unit ports the dispatch and covers the leaves it can faithfully
+/// reach: `minecraft:no_op` (id 0, `NoOpFeature` over `NoneFeatureConfiguration`)
+/// and, this wave (issue #600), the five `.feature.selector` leaves —
+/// `random_selector` (id 52, `RandomSelectorFeature` over
+/// `RandomFeatureConfiguration`), `weighted_random_selector` (id 53,
+/// `WeightedRandomSelectorFeature` over `WeightedRandomFeatureConfiguration`),
+/// `simple_random_selector` (id 54, `SimpleRandomSelectorFeature` over
+/// `CompositeFeatureConfiguration`), `random_boolean_selector` (id 55,
+/// `RandomBooleanSelectorFeature` over `RandomBooleanFeatureConfiguration`),
+/// and `sequence` (id 56, `SequenceFeature` over
+/// `CompositeFeatureConfiguration`) — whose ids are the feature registry's
+/// insertion indices (protocol ids in `registries.json`; the registration
+/// table's 63 `register(...)` calls are counted directly from `Feature.java`).
 /// Every other registered feature is an unavailable leaf (owned by its own
 /// manifest unit) — dispatching to one fails explicitly with an honest panic
 /// naming the feature id, never fabricating success. `Registry.getValueOrThrow`
@@ -345,7 +440,140 @@ pub fn feature_place<R: RandomSource>(
                 .expect("no_op feature must carry a NoneFeatureConfiguration");
             NO_OP.place_with_config(config, level, chunk_generator, random, origin)
         }
-        // The remaining ~62 registered features are generated content emitted
+        // The five `.feature.selector` leaves (this wave, issue #600) — each
+        // downcasts to its own config and delegates to `place_with_config` (the
+        // `ensureCanWrite` gate applied here, as Java's `Feature.place(FC, …)`
+        // does). The selector features resolve their placed/configured-feature
+        // holders through `WorldGenLevel::registry_access`.
+        // `Feature.RANDOM_SELECTOR`.
+        52 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<RandomFeatureConfiguration>()
+                .expect("random_selector feature must carry a RandomFeatureConfiguration");
+            RANDOM_SELECTOR.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.WEIGHTED_RANDOM_SELECTOR`.
+        53 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<WeightedRandomFeatureConfiguration>()
+                .expect(
+                    "weighted_random_selector feature must carry a WeightedRandomFeatureConfiguration",
+                );
+            WEIGHTED_RANDOM_SELECTOR.place_with_config(
+                config,
+                level,
+                chunk_generator,
+                random,
+                origin,
+            )
+        }
+        // `Feature.SIMPLE_RANDOM_SELECTOR`.
+        54 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<CompositeFeatureConfiguration>()
+                .expect(
+                    "simple_random_selector feature must carry a CompositeFeatureConfiguration",
+                );
+            SIMPLE_RANDOM_SELECTOR.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.RANDOM_BOOLEAN_SELECTOR`.
+        55 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<RandomBooleanFeatureConfiguration>()
+                .expect(
+                    "random_boolean_selector feature must carry a RandomBooleanFeatureConfiguration",
+                );
+            RANDOM_BOOLEAN_SELECTOR.place_with_config(
+                config,
+                level,
+                chunk_generator,
+                random,
+                origin,
+            )
+        }
+        // `Feature.SEQUENCE`.
+        56 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<CompositeFeatureConfiguration>()
+                .expect("sequence feature must carry a CompositeFeatureConfiguration");
+            SEQUENCE.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // The nine vegetation-family leaves (this wave, issue #600) — the
+        // aquatic/vegetation feature structs (each owned by its own
+        // `.feature.*` MANIFEST row). Each downcasts to its own config and
+        // delegates to `place_with_config` (the `ensureCanWrite` gate applied
+        // here, as Java's `Feature.place(FC, …)` does). `Feature.BLOCK_PILE`.
+        3 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<BlockPileConfiguration>()
+                .expect("block_pile feature must carry a BlockPileConfiguration");
+            BLOCK_PILE.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.BLUE_ICE`.
+        23 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<NoneFeatureConfiguration>()
+                .expect("blue_ice feature must carry a NoneFeatureConfiguration");
+            BLUE_ICE.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.BLOCK_BLOB`.
+        25 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<BlockBlobConfiguration>()
+                .expect("block_blob feature must carry a BlockBlobConfiguration");
+            BLOCK_BLOB.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.SEAGRASS`.
+        33 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<ProbabilityFeatureConfiguration>()
+                .expect("seagrass feature must carry a ProbabilityFeatureConfiguration");
+            SEAGRASS.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.KELP`.
+        34 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<NoneFeatureConfiguration>()
+                .expect("kelp feature must carry a NoneFeatureConfiguration");
+            KELP.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.SEA_PICKLE`.
+        38 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<CountConfiguration>()
+                .expect("sea_pickle feature must carry a CountConfiguration");
+            SEA_PICKLE.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.BAMBOO`.
+        40 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<ProbabilityFeatureConfiguration>()
+                .expect("bamboo feature must carry a ProbabilityFeatureConfiguration");
+            BAMBOO.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.NETHER_FOREST_VEGETATION`.
+        42 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<NetherForestVegetationConfig>()
+                .expect(
+                    "nether_forest_vegetation feature must carry a NetherForestVegetationConfig",
+                );
+            NETHER_FOREST_VEGETATION.place_with_config(
+                config,
+                level,
+                chunk_generator,
+                random,
+                origin,
+            )
+        }
+        // `Feature.BASALT_PILLAR`.
+        50 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<NoneFeatureConfiguration>()
+                .expect("basalt_pillar feature must carry a NoneFeatureConfiguration");
+            BASALT_PILLAR.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // The remaining registered features are generated content emitted
         // by `rivet-codegen`; until then they are unavailable leaves. Failing
         // explicitly (rather than returning a fabricated boolean) is the honest
         // representation the `#181` dispatch contract requires.
@@ -360,12 +588,14 @@ pub fn feature_place<R: RandomSource>(
 // `Feature.java`'s protected/static helper surface
 // ---------------------------------------------------------------------------
 //
-// `Feature.setBlock` / `safeSetBlock` / `markAboveForPostProcessing` are NOT
-// ported: their write seams (`LevelWriter.setBlock` with the
-// `Block.UPDATE_ALL`/`UPDATE_CLIENTS` flags, and
-// `ChunkAccess.markPosForPostProcessing`) are not reachable on the
-// `WorldGenLevel` seam yet (RivetTodo #228), so declaring them would be
-// fabrication. The three pure helpers below are reachable with existing seams.
+// The write seam `WorldGenLevel::set_block` (the target of
+// `LevelWriter.setBlock` with the `Block.UPDATE_ALL`/`UPDATE_CLIENTS` flags)
+// is declared on `WorldGenLevel` and reduces `Feature.setBlock`/`safeSetBlock`
+// to it — its default fails explicitly until the owning `world.level` unit
+// lands (RivetTodo #232). The `Feature.setBlock` / `safeSetBlock` helper
+// methods themselves and `ChunkAccess.markPosForPostProcessing` are NOT ported
+// yet, so declaring them would be fabrication. The three pure helpers below
+// are reachable with existing seams.
 
 /// `Feature.isReplaceable(TagKey<Block>)` — `s -> !s.is(cannotReplaceTag)`
 /// over the block-state form; the port's `BlockState::is_in_tag(&str)` reads
@@ -505,6 +735,69 @@ mod tests {
             &mut random,
             &origin,
         );
+    }
+
+    /// The five `.feature.selector` dispatch arms (ids 52-56) each downcast the
+    /// erased config before delegating, so handing each arm the *wrong* config
+    /// panics with that arm's "must carry a ..." message. This pins the
+    /// registration id → feature mapping (the feature registry's insertion
+    /// order in `Feature.java`) independently of `place_with_config`, which the
+    /// bare `TestLevel` cannot reach (it has no `registry_access`).
+    #[test]
+    fn selector_dispatch_arms_pin_registration_ids() {
+        let generator = TestGenerator;
+        let origin = BlockPos::new(0, 0, 0);
+        // (feature id, expected downcast panic message).
+        let arms = [
+            (
+                52,
+                "random_selector feature must carry a RandomFeatureConfiguration",
+            ),
+            (
+                53,
+                "weighted_random_selector feature must carry a WeightedRandomFeatureConfiguration",
+            ),
+            (
+                54,
+                "simple_random_selector feature must carry a CompositeFeatureConfiguration",
+            ),
+            (
+                55,
+                "random_boolean_selector feature must carry a RandomBooleanFeatureConfiguration",
+            ),
+            (
+                56,
+                "sequence feature must carry a CompositeFeatureConfiguration",
+            ),
+        ];
+        for (id, message) in arms {
+            let mut level = TestLevel;
+            let mut random = LegacyRandomSource::new(1);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                feature_place(
+                    FeatureId::new(id),
+                    &NoneFeatureConfiguration::INSTANCE,
+                    &mut level,
+                    &generator,
+                    &mut random,
+                    &origin,
+                )
+            }));
+            match result {
+                Err(payload) => {
+                    let text = payload
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("<non-string panic>");
+                    assert!(
+                        text.contains(message),
+                        "id {id}: expected panic containing {message:?}, got {text:?}"
+                    );
+                }
+                Ok(placed) => panic!("id {id}: expected a wrong-config panic, but placed {placed}"),
+            }
+        }
     }
 
     /// `Feature.isReplaceable(cannotReplaceTag)` — `!state.is(tag)`. Grounded in
