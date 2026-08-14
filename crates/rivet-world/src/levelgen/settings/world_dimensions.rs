@@ -11,10 +11,10 @@
 //!
 //! `WorldDimensions.CODEC` is structured faithfully over `LevelStem.CODEC`; the
 //! leaf codec is a poison seam (it errors with a `DataResult::error` naming the
-//! #388/#185 deferrals — see `level_stem::level_stem_codec`), so the dimensions
-//! round-trip is unavailable until the `mc.world.level.dimension` and
-//! `mc.world.level.chunk.generator` units land. The structure (the
-//! `"dimensions"` field, the `ResourceKey` key codec) is ported and tested.
+//! `mc.world.level.dimension`/`mc.world.level.chunk.generator` deferrals — see
+//! `level_stem::level_stem_codec`), so the dimensions round-trip is unavailable
+//! until those units land. The structure (the `"dimensions"` field, the
+//! `ResourceKey` key codec) is ported and tested.
 //!
 //! ### The deferred seams
 //!
@@ -24,7 +24,7 @@
 //!   check fails explicitly (the `BiomeSource::as_any` precedent).
 //! - `replaceOverworldGenerator`/`withOverworld(HolderLookup)` need
 //!   `HolderLookup<DimensionType>` + `BuiltinDimensionTypes.OVERWORLD` (the
-//!   pending `mc.world.level.dimension` unit, #388).
+//!   pending `mc.world.level.dimension` unit).
 //! - `bake` needs the level-stem `Registry` construction (the `#213` registry
 //!   element placeholder), the `MappedRegistry` lifecycle, and the
 //!   `PrimaryLevelData.SpecialWorldProperty` computation — the world-creation
@@ -93,12 +93,12 @@ impl WorldDimensions {
     /// The level-stem `Registry` element is the `#213` placeholder (`LevelStem`
     /// cannot be registered yet), so the constructor is a typed seam: the
     /// world-creation flow that bakes a level-stem registry and passes it here
-    /// lands with the dimension/storage units (RivetTodo #388).
+    /// lands with the `#213` registry element.
     pub fn from_registry(
         _registry: &rivet_registry::registry::Registry<registries::LevelStem>,
     ) -> Self {
         panic!(
-            "WorldDimensions(Registry<LevelStem>) is not implemented (RivetTodo #388): the level-stem registry element is the #213 placeholder"
+            "WorldDimensions(Registry<LevelStem>) is not implemented (RivetTodo #213): the level-stem registry element is the #213 placeholder"
         )
     }
 
@@ -160,13 +160,13 @@ impl WorldDimensions {
 
     /// `replaceOverworldGenerator(HolderLookup.Provider, ChunkGenerator)` — the
     /// `registries.lookupOrThrow(DIMENSION_TYPE)` holder lookup defers with the
-    /// `mc.world.level.dimension` unit (#388).
+    /// pending `mc.world.level.dimension` unit.
     pub fn replace_overworld_generator(
         &self,
         _generator: Arc<dyn ChunkGenerator>,
     ) -> WorldDimensions {
         panic!(
-            "WorldDimensions.replaceOverworldGenerator is not implemented (RivetTodo #388): needs HolderLookup.Provider/DimensionType"
+            "WorldDimensions.replaceOverworldGenerator is not implemented: needs HolderLookup.Provider/DimensionType (pending mc.world.level.dimension unit)"
         )
     }
 
@@ -179,7 +179,7 @@ impl WorldDimensions {
         _generator: Arc<dyn ChunkGenerator>,
     ) -> HashMap<ResourceKey<registries::LevelStem>, LevelStem> {
         panic!(
-            "WorldDimensions.withOverworld(HolderLookup) is not implemented (RivetTodo #388): needs HolderLookup<DimensionType>/BuiltinDimensionTypes"
+            "WorldDimensions.withOverworld(HolderLookup) is not implemented: needs HolderLookup<DimensionType>/BuiltinDimensionTypes (pending mc.world.level.dimension unit)"
         )
     }
 
@@ -206,13 +206,13 @@ impl WorldDimensions {
     /// placeholder), the per-stem stability checks, and the
     /// `PrimaryLevelData.SpecialWorldProperty` derivation all defer with the
     /// world-creation flow (the `Complete` record it returns is part of that
-    /// seam; RivetTodo #388/#213).
+    /// seam; RivetTodo #213).
     pub fn bake(
         &self,
         _base_dimensions: &rivet_registry::registry::Registry<registries::LevelStem>,
     ) -> Complete {
         panic!(
-            "WorldDimensions.bake is not implemented (RivetTodo #388): needs the level-stem Registry construction (the #213 element placeholder) and the SpecialWorldProperty computation"
+            "WorldDimensions.bake is not implemented (RivetTodo #213): needs the level-stem Registry construction (the #213 element placeholder) and the SpecialWorldProperty computation"
         )
     }
 }
@@ -401,7 +401,7 @@ mod tests {
             .expect("the dimensions codec must error through the LevelStem seam");
         let message = error.message();
         assert!(
-            message.contains("LevelStem.CODEC") && message.contains("RivetTodo #388"),
+            message.contains("LevelStem.CODEC") && message.contains("mc.world.level.dimension"),
             "the seam must name the LevelStem deferral, got: {message}"
         );
     }

@@ -42,7 +42,8 @@
 //! - `BelowZeroRetrogen` (`settings`): `doCreateBiomes`'s biome-resolver seam
 //!   is a `STUB`.
 //! - `MaterialRuleList` (`mc.world.level.levelgen.material`): `NoiseChunk`'s
-//!   block-state-rule list is a `STUB` value struct (the 2-line iteration) here.
+//!   block-state-rule list is ported by the owning material unit
+//!   (`levelgen::material`) and consumed here.
 //! - `Beardifier` (structure unit): the real `forStructuresInChunk` defers;
 //!   `NoiseChunk`/`NoiseBasedChunkGenerator` use the `BeardifierMarker` value
 //!   shell (RivetTodo #177).
