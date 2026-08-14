@@ -225,8 +225,10 @@ impl BelowZeroRetrogen {
     /// only call site (the noise step of an upgrading chunk in
     /// `ChunkStatusTasks`) the chunk is upgrading (`getBelowZeroRetrogen() !=
     /// null`), so that accessor always resolves to `UPGRADE_HEIGHT_ACCESSOR` —
-    /// the `[-64, 64)` below-zero window — and the mask clears only that
-    /// window, never the terrain above. The two worldgen heightmaps are created
+    /// the `[-64, -1]` below-zero window (`getMaxY() == getMinY() + getHeight()
+    /// - 1 == -1`, so `BlockPos.betweenClosed` covers `[-64, -1]` inclusive) —
+    /// and the mask clears only that window, never the terrain above. The two
+    /// worldgen heightmaps are created
     /// once up front (the `fill_from_noise` pattern) before the write loop.
     pub fn apply_bedrock_mask<B, S>(&self, chunk: &mut ProtoChunk<BlockState, B, S>)
     where
