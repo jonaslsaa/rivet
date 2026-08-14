@@ -145,10 +145,11 @@ impl FlatLevelSource {
     /// full 16×16 slab, then `CompletableFuture.completedFuture(centerChunk)`.
     ///
     /// The `Blender`/`StructureManager` params are unused in the body (dropped,
-    /// as in the ported `ChunkGenerator` seams). The writes route through
+    /// as in the ported `ChunkGenerator` seams). The two worldgen heightmaps are
+    /// created once up front (Java's `getOrCreateHeightmapUnprimed` pair, hoisted
+    /// out of the loop), then each write routes through
     /// [`ProtoChunk::write_worldgen_block`] (the real worldgen block write the
-    /// noisegen unit uses), which primes-and-updates the two worldgen heightmaps
-    /// Java's `getOrCreateHeightmapUnprimed`/`update` pair manages — see
+    /// noisegen unit uses), which updates both heightmaps per block — see
     /// [`write_layer_block`].
     pub fn fill_from_noise<B, S>(
         &self,
@@ -159,6 +160,12 @@ impl FlatLevelSource {
         B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
         S: Eq + std::hash::Hash,
     {
+        // Java creates the two worldgen heightmaps before the layer loop (the
+        // `oceanFloor`/`worldSurface` locals); the per-write update below needs
+        // them to exist.
+        center_chunk.get_or_create_heightmap_unprimed(Types::OceanFloorWg);
+        center_chunk.get_or_create_heightmap_unprimed(Types::WorldSurfaceWg);
+
         let min_y = center_chunk.get_min_y();
         let layer_count = i32::min(center_chunk.get_height(), self.settings.layers.len() as i32);
         for layer_index in 0..layer_count {
@@ -176,7 +183,8 @@ impl FlatLevelSource {
 /// `FlatLevelSource.fillFromNoise`'s per-block write — Java's
 /// `centerChunk.setBlockState(blockPos.set(x, y, z), blockState)` followed by
 /// the two worldgen heightmap `update`s. Routes through the worldgen block
-/// write (see `below_zero_retrogen`'s `write_block` for the same seam).
+/// write (see `below_zero_retrogen`'s `write_block` for the same seam). The
+/// heightmaps are created once by `fillFromNoise` before the loop.
 fn write_layer_block<B, S>(
     chunk: &mut ProtoChunk<BlockState, B, S>,
     x: i32,
@@ -187,8 +195,6 @@ fn write_layer_block<B, S>(
     B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
-    chunk.get_or_create_heightmap_unprimed(Types::OceanFloorWg);
-    chunk.get_or_create_heightmap_unprimed(Types::WorldSurfaceWg);
     let section_index = chunk.get_section_index(y);
     let predicates = block_state_predicates();
     chunk.write_worldgen_block(

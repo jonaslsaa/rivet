@@ -346,6 +346,20 @@ mod tests {
         assert!(decoded.invalid_blocks.iter().next().is_none());
         // Providers are behavior (no `PartialEq`) — the codec round-trips them
         // structurally; the other fields pin the decode.
+
+        // The flattened-ap8 decode lifecycle is Experimental — matching Java's
+        // `RecordCodecBuilder.create` over eight unstamped fields (verified
+        // against the pinned DFU 10.0.21 jar: a plain `create(...).apply(i,
+        // Foo::new)` decodes Experimental, unlike the `world_options` fields,
+        // which are individually `.stable()`-stamped and decode Stable). The
+        // seed here is deliberately not `stable()`: `.add()` combining the
+        // unstamped field decodes dominates anyway, so a stable seed would be a
+        // no-op (and a fidelity regression against the Java result).
+        let result = codec.parse(&empty_ops(), &encoded);
+        assert_eq!(
+            result.lifecycle(),
+            rivet_serialization::lifecycle::Lifecycle::experimental()
+        );
     }
 
     #[test]

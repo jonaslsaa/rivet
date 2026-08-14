@@ -16,9 +16,12 @@
 //!
 //! `ExtraCodecs.optionalAlwaysPresentFieldOf` is not ported as a helper; the
 //! port composes it inline from `Codec.optionalField(name, codec, false)`
-//! xmapped with `orElse(default)` / `Optional::of` (the exact Java body), so
-//! the field is required on decode and *always* written on encode (unlike
-//! `optionalFieldOf(name, default)`, which omits the default).
+//! xmapped with `orElse(default)` / `Optional::of` (the exact Java body). DFU's
+//! `OptionalFieldCodec` decodes an absent field to `Optional.empty()` regardless
+//! of `lenient`, so the field *defaults* on decode when absent; only a
+//! present-but-malformed value is a decode error (the non-lenient branch). It is
+//! *always* written on encode (unlike `optionalFieldOf(name, default)`, which
+//! omits the default).
 
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::dynamic_ops::DynamicOps;
@@ -184,7 +187,8 @@ fn java_trim(s: &str) -> &str {
 /// Each field is stamped `.stable()`; the composed codec is `.stable()` too
 /// (Java's `.apply(i, i.stable(WorldOptions::new))`). `"seed"` is a required
 /// `LONG` field; `"generate_structures"`/`"bonus_chest"` are
-/// `optionalAlwaysPresentFieldOf` (required on decode, always written on
+/// `optionalAlwaysPresentFieldOf` (defaulted on decode when absent, a
+/// present-but-malformed value errors since non-lenient, always written on
 /// encode); `"legacy_custom_options"` is a lenient optional string.
 pub fn world_options_map_codec<Ops: DynamicOps + 'static>() -> Arc<dyn MapCodec<WorldOptions, Ops>>
 {
