@@ -7,12 +7,12 @@
 //! and `crack_point_offset` (`Codec.intRange(0, 10)`, default `2`), all
 //! non-lenient optional-with-default fields.
 //!
-//! `GeodeConfiguration.CHANCE_RANGE` is owned by the pending
-//! `mc.world.level.levelgen.feature.configurations.geode` manifest unit (the
-//! `GeodeConfiguration` record). This unit only needs the `[0.0, 1.0]` double
-//! range, so it is composed inline here; when the geode-config unit lands it
-//! should reuse that unit's constant.
+//! `GeodeConfiguration.CHANCE_RANGE` — `Codec.doubleRange(0.0, 1.0)` — is owned
+//! by the `mc.world.level.levelgen.feature.configurations.geode` manifest unit
+//! (the `GeodeConfiguration` record, now landed). This unit reuses that unit's
+//! constant via `GeodeConfiguration::chance_range_codec`.
 
+use crate::levelgen::feature::configurations::geode_configuration::GeodeConfiguration;
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
@@ -21,8 +21,7 @@ use std::sync::Arc;
 /// `net.minecraft.world.level.levelgen.GeodeCrackSettings`.
 ///
 /// Java is a plain class with identity equals; the port derives value
-/// `PartialEq` (all fields are primitives; no consumer observes equality —
-/// the geode-config unit that owns the record semantics is pending).
+/// `PartialEq` (all fields are primitives; no consumer observes equality).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GeodeCrackSettings {
     /// `generateCrackChance`.
@@ -48,17 +47,11 @@ impl GeodeCrackSettings {
     }
 }
 
-/// `GeodeConfiguration.CHANCE_RANGE` — `Codec.doubleRange(0.0, 1.0)` (owned by
-/// the pending geode-config unit; composed here until that unit lands).
-pub fn chance_range_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<f64, Ops>> {
-    codec::double_range::<Ops>(0.0, 1.0)
-}
-
 /// `GeodeCrackSettings.CODEC` — the ops-generic
 /// `geode_crack_settings_codec::<Ops>()` factory.
 pub fn geode_crack_settings_codec<Ops: DynamicOps + 'static>()
 -> Arc<dyn Codec<GeodeCrackSettings, Ops>> {
-    let chance_range = chance_range_codec::<Ops>();
+    let chance_range = GeodeConfiguration::chance_range_codec::<Ops>();
     let base_crack_size = codec::double_range::<Ops>(0.0, 5.0);
     let crack_point_offset = codec::int_range::<Ops>(0, 10);
     record_builder::create(|instance| {
