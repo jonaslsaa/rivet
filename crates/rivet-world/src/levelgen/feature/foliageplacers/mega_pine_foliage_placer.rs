@@ -217,9 +217,9 @@ mod tests {
     }
 
     #[test]
-    fn smooth_radius_uses_floor_of_y_ratio() {
-        // `Mth.floor((float)yo / foliageHeight * 3.5F)`: yo=2, height=4 -> floor(
-        // 2/4*3.5)=floor(1.75)=1; yo=4 -> floor(3.5)=3.
+    fn foliage_height_samples_crown_height() {
+        // `MegaPineFoliagePlacer.foliageHeight` = `this.crownHeight.sample(random)`
+        // — a deterministic `UniformInt(4, 4)` samples 4.
         let p = MegaPineFoliagePlacer::new(provider(1, 1), provider(0, 0), provider(4, 4));
         let mut random = rivet_util::random::LegacyRandomSource::new(0);
         assert_eq!(
