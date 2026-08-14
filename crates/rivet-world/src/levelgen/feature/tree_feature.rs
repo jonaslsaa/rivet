@@ -22,3 +22,13 @@ pub fn valid_tree_pos(level: &dyn WorldGenLevel, pos: &BlockPos) -> bool {
         state.is_air() || state.is_in_tag("minecraft:replaceable_by_trees")
     })
 }
+
+/// STUB(mc.world.level.levelgen.feature.tree): `TreeFeature.isAirOrLeaves(
+/// LevelSimulatedReader, BlockPos)` — `level.isStateAtPosition(pos, state ->
+/// state.isAir() || state.is(BlockTags.LEAVES))`, consumed by
+/// `DarkOakTrunkPlacer.placeTrunk`. The owning unit replaces this file.
+pub fn is_air_or_leaves(level: &dyn WorldGenLevel, pos: &BlockPos) -> bool {
+    level.is_state_at_position(pos, &|state: &BlockState| {
+        state.is_air() || state.is_in_tag("minecraft:leaves")
+    })
+}
