@@ -11,10 +11,10 @@
 //!
 //! `WorldDimensions.CODEC` is structured faithfully over `LevelStem.CODEC`; the
 //! leaf codec is a poison seam (it errors with a `DataResult::error` naming the
-//! #388/#185 deferrals — see `level_stem::level_stem_codec`), so the dimensions
-//! round-trip is unavailable until the `mc.world.level.dimension` and
-//! `mc.world.level.chunk.generator` units land. The structure (the
-//! `"dimensions"` field, the `ResourceKey` key codec) is ported and tested.
+//! `mc.world.level.dimension`/`mc.world.level.chunk.generator` deferrals — see
+//! `level_stem::level_stem_codec`), so the dimensions round-trip is unavailable
+//! until those units land. The structure (the `"dimensions"` field, the
+//! `ResourceKey` key codec) is ported and tested.
 //!
 //! ### The deferred seams
 //!
@@ -401,7 +401,7 @@ mod tests {
             .expect("the dimensions codec must error through the LevelStem seam");
         let message = error.message();
         assert!(
-            message.contains("LevelStem.CODEC") && message.contains("RivetTodo #388"),
+            message.contains("LevelStem.CODEC") && message.contains("mc.world.level.dimension"),
             "the seam must name the LevelStem deferral, got: {message}"
         );
     }

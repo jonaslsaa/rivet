@@ -198,7 +198,7 @@ mod tests {
             .expect("the settings codec must error through the LevelStem seam");
         let message = error.message();
         assert!(
-            message.contains("LevelStem.CODEC") && message.contains("RivetTodo #388"),
+            message.contains("LevelStem.CODEC") && message.contains("mc.world.level.dimension"),
             "the seam must name the LevelStem deferral, got: {message}"
         );
     }
