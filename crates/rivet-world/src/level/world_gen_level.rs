@@ -27,6 +27,7 @@ use rivet_registry::block_state::BlockState;
 use rivet_registry::core::BlockPos;
 use rivet_registry::core::Direction;
 use rivet_registry::fluid_id::FluidId;
+use rivet_registry::generated::blocks::BlockId;
 use rivet_registry::holder::Holder;
 
 /// `net.minecraft.world.level.WorldGenLevel` — the world generation level.
@@ -155,6 +156,57 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     /// default fails explicitly rather than fabricating a write.
     fn set_block(&mut self, _pos: &BlockPos, _state: BlockState, _flags: u32) -> bool {
         panic!("LevelWriter.setBlock is not implemented (RivetTodo #232)")
+    }
+
+    /// `ServerLevelAccessor.scheduleTick(BlockPos, Block, int)` — the
+    /// scheduled-tick seam `SimpleBlockFeature.place` consumes when
+    /// `config.scheduleTick()` is set (`level.scheduleTick(origin,
+    /// level.getBlockState(origin).getBlock(), 1)`).
+    ///
+    /// STUB(mc.world.level): the tick-container world write is owned by the
+    /// `world.level` unit and not ported; the default fails explicitly rather
+    /// than fabricating a schedule (the same capability-unavailable seam as
+    /// `set_block`, RivetTodo #232).
+    fn schedule_tick(&mut self, _pos: &BlockPos, _block: BlockId, _delay: i32) {
+        panic!("LevelWriter.scheduleTick is not implemented (RivetTodo #232)")
+    }
+
+    /// `Biome.shouldFreeze(LevelReader, BlockPos, boolean)` — the biome
+    /// freeze verdict `SnowAndFreezeFeature` consumes (`level.getBiome(topPos)
+    /// .value().shouldFreeze(level, belowPos, false)`).
+    ///
+    /// `freeze_pos` is the FREEZE position — the cell the verdict is evaluated
+    /// on, the one `SnowAndFreezeFeature` turns to ice (`belowPos`, one block
+    /// below the `MOTION_BLOCKING` column height). Java samples the biome at
+    /// `topPos` (`freeze_pos.above()`), so a faithful implementation MUST
+    /// resolve the biome at `freeze_pos.above()`, never at `freeze_pos` — the
+    /// `SnowAndFreezeFeature` topPos/belowPos split. This seam is only faithful
+    /// for that single caller, and the offset is part of the contract.
+    ///
+    /// STUB(mc.world.level): the biome
+    /// value is not reachable through `WorldGenLevel::get_biome` (it resolves a
+    /// `Holder<BiomeId>`, id only) and `shouldFreeze` reads the `LevelReader`
+    /// brightness/fluid surface (#232), so the verdict is a dedicated seam; the
+    /// default fails explicitly rather than fabricating a freeze. Test doubles
+    /// override it with a fixed verdict.
+    fn should_freeze(&self, _freeze_pos: &BlockPos, _check_neighbors: bool) -> bool {
+        panic!("Biome.shouldFreeze is not implemented (RivetTodo #232)")
+    }
+
+    /// `Biome.shouldSnow(LevelReader, BlockPos)` — the biome snow verdict
+    /// `SnowAndFreezeFeature` consumes (`level.getBiome(topPos).value()
+    /// .shouldSnow(level, topPos)`).
+    ///
+    /// Here `pos` IS the biome-sample position (`topPos`) — unlike
+    /// `should_freeze`, the sample and the evaluated cell are the same, so no
+    /// offset.
+    ///
+    /// STUB(mc.world.level): like
+    /// `should_freeze`, the verdict reads the unported `LevelReader` surface
+    /// (brightness, snow survival); the default fails explicitly rather than
+    /// fabricating a snowfall. Test doubles override it with a fixed verdict.
+    fn should_snow(&self, _pos: &BlockPos) -> bool {
+        panic!("Biome.shouldSnow is not implemented (RivetTodo #232)")
     }
 
     /// The registry-access back-reference seam. Java `Holder.value()` needs no

@@ -142,6 +142,19 @@ pub struct TestLevel {
     /// `is_face_sturdy` — the fixed face-sturdiness verdict
     /// (`BlockPileFeature.mayPlaceOn`).
     pub face_sturdy: bool,
+    /// `is_face_sturdy` per-position overrides — a `(pos, face)` entry, when
+    /// present, answers that exact query instead of the global `face_sturdy`
+    /// (`VinesFeature` walks six faces and needs a per-neighbour verdict).
+    pub face_sturdy_at: HashMap<(BlockPos, Direction), bool>,
+    /// `should_freeze` — the fixed `Biome.shouldFreeze` verdict
+    /// (`SnowAndFreezeFeature`).
+    pub freeze: bool,
+    /// `should_snow` — the fixed `Biome.shouldSnow` verdict
+    /// (`SnowAndFreezeFeature`).
+    pub snow: bool,
+    /// `schedule_tick` — the scheduled writes in order (`SimpleBlockFeature`
+    /// with `config.scheduleTick()`).
+    pub scheduled_ticks: Vec<(BlockPos, BlockId, i32)>,
 }
 
 impl TestLevel {
@@ -158,6 +171,10 @@ impl TestLevel {
             sea_level: 63,
             survive: true,
             face_sturdy: true,
+            face_sturdy_at: HashMap::new(),
+            freeze: false,
+            snow: false,
+            scheduled_ticks: Vec::new(),
         }
     }
 }
@@ -214,8 +231,23 @@ impl WorldGenLevel for TestLevel {
         self.survive
     }
 
-    fn is_face_sturdy(&self, _pos: &BlockPos, _state: &BlockState, _direction: &Direction) -> bool {
-        self.face_sturdy
+    fn is_face_sturdy(&self, pos: &BlockPos, _state: &BlockState, direction: &Direction) -> bool {
+        self.face_sturdy_at
+            .get(&(*pos, *direction))
+            .copied()
+            .unwrap_or(self.face_sturdy)
+    }
+
+    fn should_freeze(&self, _pos: &BlockPos, _check_neighbors: bool) -> bool {
+        self.freeze
+    }
+
+    fn should_snow(&self, _pos: &BlockPos) -> bool {
+        self.snow
+    }
+
+    fn schedule_tick(&mut self, pos: &BlockPos, block: BlockId, delay: i32) {
+        self.scheduled_ticks.push((*pos, block, delay));
     }
 }
 
@@ -229,6 +261,29 @@ impl ChunkGenerator for TestGenerator {
 
     fn get_gen_depth(&self) -> i32 {
         384
+    }
+}
+
+/// A `ChunkGenerator` double that answers a fixed sea level
+/// (`BasaltColumnsFeature` reads `context.chunkGenerator().getSeaLevel()`, the
+/// `ChunkGenerator::get_sea_level` seam that the plain [`TestGenerator`] does
+/// not override).
+pub struct SeaLevelGenerator {
+    /// `get_sea_level` — the fixed value returned for every call.
+    pub sea_level: i32,
+}
+
+impl ChunkGenerator for SeaLevelGenerator {
+    fn get_min_y(&self) -> i32 {
+        -64
+    }
+
+    fn get_gen_depth(&self) -> i32 {
+        384
+    }
+
+    fn get_sea_level(&self) -> i32 {
+        self.sea_level
     }
 }
 

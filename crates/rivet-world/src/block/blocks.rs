@@ -123,6 +123,9 @@ impl Blocks {
     /// `Blocks.BLACKSTONE` (SurfaceRuleData: nether `basaltDeltas`
     /// `UNDER_FLOOR` `netherStateSelector`).
     pub const BLACKSTONE: Block = Block::new(BlockId(924));
+    /// `Blocks.PALE_MOSS_CARPET` (feature: `MossyCarpetBlock.placeAt`, the
+    /// block `SimpleBlockFeature` places through the carpet seam).
+    pub const PALE_MOSS_CARPET: Block = Block::new(BlockId(1189));
     /// `Blocks.MUD` (SurfaceRuleData: overworld `mangroveSwamp`).
     pub const MUD: Block = Block::new(BlockId(1150));
     /// `Blocks.DEEPSLATE`.
@@ -131,6 +134,16 @@ impl Blocks {
     pub const DEEPSLATE_IRON_ORE: Block = Block::new(BlockId(45));
     /// `Blocks.END_STONE` (noisegen: `NoiseGeneratorSettings.end`).
     pub const END_STONE: Block = Block::new(BlockId(393));
+    /// `Blocks.OBSIDIAN` (end-leaves: `EndPlatformFeature`'s floor).
+    pub const OBSIDIAN: Block = Block::new(BlockId(193));
+    /// `Blocks.WALL_TORCH` (end-leaves: `EndPodiumFeature`'s pillar torches).
+    pub const WALL_TORCH: Block = Block::new(BlockId(195));
+    /// `Blocks.END_PORTAL` (end-leaves: `EndPodiumFeature`'s active portal).
+    pub const END_PORTAL: Block = Block::new(BlockId(391));
+    /// `Blocks.CHORUS_PLANT` (end-leaves: `ChorusPlantFeature`'s stem).
+    pub const CHORUS_PLANT: Block = Block::new(BlockId(656));
+    /// `Blocks.CHORUS_FLOWER` (end-leaves: the chorus-growth terminal flower).
+    pub const CHORUS_FLOWER: Block = Block::new(BlockId(657));
     /// `Blocks.OAK_BUTTON` (noisegen: `OreVeinifier` debug ore-veins).
     pub const OAK_BUTTON: Block = Block::new(BlockId(443));
     /// `Blocks.SLIME_BLOCK` (noisegen: `debugPreliminarySurfaceLevel`).
@@ -180,6 +193,29 @@ impl Blocks {
     pub const BLUE_ICE: Block = Block::new(BlockId(789));
     /// `Blocks.BAMBOO` (feature: `BambooFeature`).
     pub const BAMBOO: Block = Block::new(BlockId(792));
+    /// `Blocks.SPAWNER` (feature: `BasaltColumnsFeature` `CANNOT_PLACE_ON`).
+    pub const SPAWNER: Block = Block::new(BlockId(198));
+    /// `Blocks.CHEST` (feature: `BasaltColumnsFeature` `CANNOT_PLACE_ON`).
+    pub const CHEST: Block = Block::new(BlockId(201));
+    /// `Blocks.SNOW` (features: `SnowAndFreezeFeature`, `IcebergFeature`).
+    pub const SNOW: Block = Block::new(BlockId(276));
+    /// `Blocks.GLOWSTONE` (feature: `GlowstoneFeature`).
+    pub const GLOWSTONE: Block = Block::new(BlockId(294));
+    /// `Blocks.VINE` (feature: `VinesFeature`).
+    pub const VINE: Block = Block::new(BlockId(366));
+    /// `Blocks.NETHER_BRICKS` (feature: `BasaltColumnsFeature`
+    /// `CANNOT_PLACE_ON`).
+    pub const NETHER_BRICKS: Block = Block::new(BlockId(381));
+    /// `Blocks.NETHER_BRICK_FENCE` (feature: `BasaltColumnsFeature`
+    /// `CANNOT_PLACE_ON`).
+    pub const NETHER_BRICK_FENCE: Block = Block::new(BlockId(382));
+    /// `Blocks.NETHER_BRICK_STAIRS` (feature: `BasaltColumnsFeature`
+    /// `CANNOT_PLACE_ON`).
+    pub const NETHER_BRICK_STAIRS: Block = Block::new(BlockId(383));
+    /// `Blocks.NETHER_WART` (feature: `BasaltColumnsFeature` `CANNOT_PLACE_ON`).
+    pub const NETHER_WART: Block = Block::new(BlockId(384));
+    /// `Blocks.MAGMA_BLOCK` (feature: `BasaltColumnsFeature` `CANNOT_PLACE_ON`).
+    pub const MAGMA_BLOCK: Block = Block::new(BlockId(671));
 }
 
 #[cfg(test)]
@@ -240,10 +276,16 @@ mod tests {
             Blocks::WARPED_WART_BLOCK,
             Blocks::CRIMSON_NYLIUM,
             Blocks::BLACKSTONE,
+            Blocks::PALE_MOSS_CARPET,
             Blocks::MUD,
             Blocks::DEEPSLATE,
             Blocks::DEEPSLATE_IRON_ORE,
             Blocks::END_STONE,
+            Blocks::OBSIDIAN,
+            Blocks::WALL_TORCH,
+            Blocks::END_PORTAL,
+            Blocks::CHORUS_PLANT,
+            Blocks::CHORUS_FLOWER,
             Blocks::OAK_BUTTON,
             Blocks::SLIME_BLOCK,
             Blocks::BARRIER,
@@ -266,6 +308,16 @@ mod tests {
             Blocks::SEA_PICKLE,
             Blocks::BLUE_ICE,
             Blocks::BAMBOO,
+            Blocks::SPAWNER,
+            Blocks::CHEST,
+            Blocks::SNOW,
+            Blocks::GLOWSTONE,
+            Blocks::VINE,
+            Blocks::NETHER_BRICKS,
+            Blocks::NETHER_BRICK_FENCE,
+            Blocks::NETHER_BRICK_STAIRS,
+            Blocks::NETHER_WART,
+            Blocks::MAGMA_BLOCK,
         ];
         for block in all {
             let by_name = BlockId::from_name(block.name())
