@@ -73,9 +73,10 @@
 //! faithful ports of the Java arithmetic. `buildSurface` is ported as the
 //! internal [`SurfaceSystem::build_surface`] driver (crate-visible), driven
 //! against the real [`ProtoChunk`](crate::chunk::proto_chunk::ProtoChunk)
-//! `ChunkSurface` impl — the production wire from
-//! `NoiseBasedChunkGenerator.doFill` defers (RivetTodo #177). Within the
-//! driver the column write (`ProtoChunk.setBlockState` +
+//! `ChunkSurface` impl — the production wire lands in
+//! [`NoiseBasedChunkGenerator::build_surface`] (the SURFACE status-step body,
+//! driven through the generated-world spine). Within the driver the column
+//! write (`ProtoChunk.setBlockState` +
 //! `markPosForPostProcessing`) is the real worldgen write path; the worldgen
 //! heightmap reads (`getHeight(WORLD_SURFACE_WG)`) are the `#185` seam — the
 //! applied `SteepMaterialCondition` reads the shared live mirror
@@ -613,9 +614,9 @@ pub(crate) struct SurfaceContext {
     world_surface_heights: Option<Arc<Mutex<[i32; 256]>>>,
 }
 
-// RivetTodo(#177): the surface-build runtime is test-exercised through the
-// `build_surface` seam driver until `NoiseBasedChunkGenerator` wires it; the
-// non-test build sees the reachable-by-tests-only methods as dead.
+// RivetTodo(#177): some `SurfaceContext` helpers are reached only through the
+// applied-rules closure path (test-exercised); the non-test build sees them as
+// dead until every rule fires in the real driver.
 #[allow(dead_code)]
 impl SurfaceContext {
     /// `Context.updateXZ(int blockX, int blockZ)` — increments both counters
@@ -2560,14 +2561,15 @@ impl SurfaceSystem {
 
     /// `buildSurface(RandomState, BiomeManager, boolean useLegacyRandom,
     /// WorldGenerationContext, ChunkAccess, NoiseChunk, RuleSource,
-    /// @Nullable Set<Holder<Biome>>)` — **internal seam driver, not the
-    /// production wire.** Java calls `SurfaceSystem.buildSurface` from
-    /// `NoiseBasedChunkGenerator.doFill`; the port's production call site is
-    /// `NoiseBasedChunkGenerator::build_surface_stub` (RivetTodo #177, the
-    /// `levelgen.surface` wave). This method drives the column-loop arithmetic
-    /// and the `ChunkColumnAdapter` x/z threading against a caller-supplied
-    /// [`ChunkSurface`]; the production `ProtoChunk` implements the trait (see
-    /// `chunk::proto_chunk`), exercised by the real-chunk integration tests.
+    /// @Nullable Set<Holder<Biome>>)` — the production SURFACE driver. Java
+    /// calls `SurfaceSystem.buildSurface` from
+    /// `NoiseBasedChunkGenerator.buildSurface`; the port's production call site
+    /// is [`NoiseBasedChunkGenerator::build_surface`] (the SURFACE status-step
+    /// body), wired through the generated-world spine. This method drives the
+    /// column-loop arithmetic and the `ChunkColumnAdapter` x/z threading
+    /// against a caller-supplied [`ChunkSurface`]; the production `ProtoChunk`
+    /// implements the trait (see `chunk::proto_chunk`), exercised by the
+    /// real-chunk integration tests.
     ///
     /// The block-column read is ported faithfully (the `column.getBlock` /
     /// `isStone` / `updateY` / `old == defaultBlock` / `rule.tryApply`
@@ -2581,7 +2583,6 @@ impl SurfaceSystem {
     /// write (`ProtoChunk.setBlockState` + `markPosForPostProcessing`) is the
     /// real worldgen write path (`ChunkColumnAdapter` guards + writes + marks).
     #[allow(clippy::too_many_arguments)]
-    #[allow(dead_code)] // #177 — seam driver until `NoiseBasedChunkGenerator` wires it.
     pub(crate) fn build_surface<'a>(
         &self,
         random_state: &'a RandomState<'a>,
