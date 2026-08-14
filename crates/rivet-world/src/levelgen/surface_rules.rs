@@ -4056,18 +4056,14 @@ mod tests {
     }
 
     /// A biome registry with the 33 `SurfaceRuleData`-referenced keys (the
-    /// single source of truth in `biome::biomes::SURFACE_RULE_BIOMES`) plus
-    /// `plains` (the older tests' holder) under `Registries.BIOME` (id = the
-    /// hub index). The codec tests encode the real trees, so every referenced
-    /// key must resolve through the access.
+    /// single source of truth in `biome::biomes::SURFACE_RULE_BIOMES`) under
+    /// `Registries.BIOME` (id = the enumerate index over that list, matching the
+    /// settings bootstrap's and the production builder's `BiomeId` handles). The
+    /// codec tests encode the real trees, so every referenced key must resolve
+    /// through the access.
     fn biome_access() -> RegistryAccess {
         let mut builder = RegistryBuilder::new(&*rivet_registry::registries::BIOME);
-        let names: Vec<&str> = ["plains"]
-            .iter()
-            .chain(biomes::SURFACE_RULE_BIOMES.iter())
-            .copied()
-            .collect();
-        for (i, name) in names.iter().enumerate() {
+        for (i, name) in biomes::SURFACE_RULE_BIOMES.iter().enumerate() {
             builder.register(
                 &ResourceKey::create(
                     &*rivet_registry::registries::BIOME,
@@ -4532,10 +4528,14 @@ mod tests {
     /// threshold, ordering, block, or anchor deviation in the ported builders
     /// fails here. The fixture covers `nether`, `overworld`
     /// (`overworldLike(true, false, true)`), `overworld_like_true_false_true`
-    /// (identical), `overworld_like_false_false_true`, `end`, and `air`; the
+    /// (identical), `overworld_like_false_false_true`, `end`, and `air`. The
     /// `caves` `(false, true, true)` and `floating_islands` `(false, false,
-    /// false)` flag combos are not captured and remain structurally pinned by
-    /// `overworld_like_flags_control_bedrock_and_preliminary_surface`.
+    /// false)` flag combos are a deliberate, documented deferral: they are not
+    /// in the committed capture (the probe ran against `working/Paper`, outside
+    /// this worktree) and remain structurally pinned by
+    /// `overworld_like_flags_control_bedrock_and_preliminary_surface`. Extending
+    /// the fixture with those two trees is a follow-up probe capture, not a
+    /// weakening of this test.
     #[test]
     fn builders_encode_byte_exactly_to_the_paper_capture() {
         let ops = ops();

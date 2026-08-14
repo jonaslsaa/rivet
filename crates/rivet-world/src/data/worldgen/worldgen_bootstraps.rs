@@ -4,38 +4,48 @@
 //! (NOISE), [`noise_router_data`] (DENSITY_FUNCTION), and
 //! [`noise_generator_settings`] (NOISE_SETTINGS) — through the test seam
 //! `RecordingContext` into frozen `rivet-registry` registries, and returns the
-//! `RegistryAccess` with all three populated. This is the single reusable entry
-//! point for code that needs the *real* overworld noise composition (probes,
-//! offline samplers, future worldgen wiring) instead of re-deriving the
-//! `RecordingContext` → `RegistryBuilder` → `freeze` sequence per call site.
+//! `RegistryAccess` with all four populated (NOISE, DENSITY_FUNCTION, BIOME,
+//! NOISE_SETTINGS). The BIOME registry rides along because the NOISE_SETTINGS
+//! bootstrap's `SurfaceRuleData` builders resolve their biome holders through
+//! it. This is the single reusable entry point for code that needs the *real*
+//! overworld noise composition (probes, offline samplers, future worldgen
+//! wiring) instead of re-deriving the `RecordingContext` → `RegistryBuilder` →
+//! `freeze` sequence per call site.
 //!
 //! Build order is Java's dependency order: NOISE first (the density-function
 //! bootstrap resolves `Holder<NoiseParameters>` through it), then
-//! DENSITY_FUNCTION, then NOISE_SETTINGS (which resolves the `overworld` router
-//! functions through the density-function registry).
+//! DENSITY_FUNCTION, then BIOME, then NOISE_SETTINGS (which resolves the
+//! `overworld` router functions through the density-function registry and the
+//! `SurfaceRuleData` biome holders through the biome registry).
 //!
 //! `RegistryAccess::from_pairs` consumes each frozen `Registry<T>` and
-//! `Registry<T>` is not `Clone`, so each build function freezes its own
-//! prerequisites: NOISE is frozen four times (once in
-//! [`build_density_function_registry`], then again in
-//! [`build_noise_settings_registry`] — once directly and once through its
-//! `build_density_function_registry` call — and once more in
-//! [`build_worldgen_registries`]) and DENSITY_FUNCTION twice. All
-//! instances of a given registry have identical declaration-ordered contents,
-//! so the `Holder::Reference`s the density-function bootstrap produces resolve
-//! through whichever NOISE / DENSITY_FUNCTION instance `RandomState` is handed
-//! — the same pattern the noisegen unit tests use. `Registry::value_of` resolves
-//! a `Reference` by element id (the registration insertion index), which
-//! matches the declaration order on every instance; the holder's `registry`
-//! owner field is only consulted by `can_serialize_in` (a codec-path owner
-//! check, not exercised by this helper).
+//! `Registry<T>` is not `Clone`, so registries are shared by cloning the
+//! access's erased (key, value) entries — never the `Registry<T>` value.
+//! `build_worldgen_registries` freezes NOISE, DENSITY_FUNCTION, and BIOME once
+//! each into a base access, runs the settings bootstrap against a clone of that
+//! access, and composes the returned access from the same base plus the frozen
+//! NOISE_SETTINGS registry via the layered composite. The two accesses therefore
+//! carry the *same* biome registry instance, and the `Holder::Reference`s the
+//! `SurfaceRuleData` builders produce — whose `registry` field is that biome
+//! registry's `RegistryId` — pass the codec-path `can_serialize_in` owner check
+//! against the returned access.
+//!
+//! `build_density_function_registry` still freezes its own NOISE for the
+//! density-function bootstrap, so NOISE has two instances and DENSITY_FUNCTION
+//! one. All instances of a given registry have identical declaration-ordered
+//! contents, so the `Holder::Reference`s the density-function bootstrap produces
+//! resolve through whichever NOISE / DENSITY_FUNCTION instance `RandomState` is
+//! handed — the same pattern the noisegen unit tests use. `Registry::value_of`
+//! resolves a `Reference` by element id (the registration insertion index),
+//! which matches the declaration order on every instance.
 //!
 //! The `RecordingContext` owner `RegistryId`s are hardcoded (0/1/2) — a
 //! test-seam simplification inherited from the noisegen unit tests. Each frozen
-//! registry actually carries a distinct per-instance `RegistryId` from the
-//! builder; the ids do not affect holder resolution here (see above), but a
-//! future `can_serialize_in`/codec consumer of the returned holders must
-//! re-key them through the real registry identity (`#126`).
+//! registry carries a distinct per-instance `RegistryId` from the builder; the
+//! ids do not affect holder resolution here, and the shared biome registry keeps
+//! the surface-rule holders' owner field aligned with the returned access, but
+//! a future `can_serialize_in`/codec consumer of the other holders' owner fields
+//! must re-key them through the real registry identity (`#126`).
 //!
 //! The `RegistrySetBuilder` production bootstrap (Java's `BuildState`) is a
 //! separate, later unit (`#126`); until it lands, `RecordingContext` is the
@@ -48,6 +58,7 @@ use crate::levelgen::noisegen::noise_generator_settings;
 use crate::levelgen::noisegen::noise_generator_settings::NoiseGeneratorSettings;
 use crate::levelgen::noisegen::noise_router_data::{self, DensityFunctionValue};
 use crate::levelgen::synth::normal_noise::NoiseParameters;
+use rivet_registry::access::{LayeredRegistryAccess, RegistryLayer};
 use rivet_registry::holder::RegistryId;
 use rivet_registry::registry::{Registry, RegistryKey};
 use rivet_registry::root::AnyBox;
@@ -145,18 +156,13 @@ fn build_biome_registry() -> Registry<rivet_registry::biome_id::BiomeId> {
 
 /// A frozen NOISE_SETTINGS registry (via [`noise_generator_settings::bootstrap`]).
 ///
-/// Freezes fresh NOISE + DENSITY_FUNCTION + BIOME registries into the bootstrap
-/// access (the module doc explains the rebuilds; the biome registry is required
-/// by the `SurfaceRuleData` builders the settings bootstrap resolves).
-fn build_noise_settings_registry() -> Registry<NoiseGeneratorSettings> {
-    let noise = build_noise_registry();
-    let functions = build_density_function_registry();
-    let biomes = build_biome_registry();
-    let with_worldgen = RegistryAccess::from_pairs(vec![
-        (noise_key(), Box::new(noise) as AnyBox),
-        (density_function_key(), Box::new(functions) as AnyBox),
-        (biome_key(), Box::new(biomes) as AnyBox),
-    ]);
+/// Runs the settings bootstrap against `with_worldgen` — the caller's base
+/// access (NOISE + DENSITY_FUNCTION + BIOME, see [`build_worldgen_registries`]).
+/// The `SurfaceRuleData` builders the settings bootstrap resolves read their
+/// biome holders through that access's BIOME registry.
+fn build_noise_settings_registry(
+    with_worldgen: RegistryAccess,
+) -> Registry<NoiseGeneratorSettings> {
     let mut builder: RegistryBuilder<NoiseGeneratorSettings> =
         RegistryBuilder::new(&registry_keys::NOISE_SETTINGS);
     let mut context = RecordingContext::<NoiseGeneratorSettings>::new(
@@ -177,20 +183,33 @@ fn build_noise_settings_registry() -> Registry<NoiseGeneratorSettings> {
 
 /// The worldgen registries — NOISE, DENSITY_FUNCTION, BIOME, NOISE_SETTINGS —
 /// frozen and bundled in a `RegistryAccess`. Build once per world/seed; the
-/// access is cheap to clone (shares the frozen registries). The BIOME registry
-/// rides along because the NOISE_SETTINGS bootstrap's `SurfaceRuleData` builders
-/// resolve their biome holders through it.
+/// access is cheap to clone (shares the frozen registries).
+///
+/// The NOISE, DENSITY_FUNCTION, and BIOME registries are frozen once each into
+/// a base access, the settings bootstrap runs against a clone of that access
+/// (sharing the same entries), and the returned access composes the base with
+/// the frozen NOISE_SETTINGS registry via the layered composite. Both accesses
+/// therefore carry the *same* biome registry instance, so the `SurfaceRuleData`
+/// biome holders the settings bootstrap produces pass the codec-path
+/// `can_serialize_in` owner check against the returned access.
 pub fn build_worldgen_registries() -> RegistryAccess {
-    let noise = build_noise_registry();
-    let functions = build_density_function_registry();
-    let biomes = build_biome_registry();
-    let settings = build_noise_settings_registry();
-    RegistryAccess::from_pairs(vec![
-        (noise_key(), Box::new(noise) as AnyBox),
-        (density_function_key(), Box::new(functions) as AnyBox),
-        (biome_key(), Box::new(biomes) as AnyBox),
-        (noise_settings_key(), Box::new(settings) as AnyBox),
-    ])
+    let base = RegistryAccess::from_pairs(vec![
+        (noise_key(), Box::new(build_noise_registry()) as AnyBox),
+        (
+            density_function_key(),
+            Box::new(build_density_function_registry()) as AnyBox,
+        ),
+        (biome_key(), Box::new(build_biome_registry()) as AnyBox),
+    ]);
+    let settings = build_noise_settings_registry(base.clone());
+    let settings_access =
+        RegistryAccess::from_pairs(vec![(noise_settings_key(), Box::new(settings) as AnyBox)]);
+    // The layers are a vehicle for entry-sharing (the composite merges the
+    // erased entries, cloning the pairs), not a semantic layer map.
+    LayeredRegistryAccess::new(vec![RegistryLayer::Static, RegistryLayer::Worldgen])
+        .replace_from(RegistryLayer::Static, &[base])
+        .replace_from(RegistryLayer::Worldgen, &[settings_access])
+        .composite_access()
 }
 
 #[cfg(test)]
@@ -198,7 +217,12 @@ mod tests {
     use super::*;
     use crate::levelgen::noise::noise_settings::OVERWORLD_NOISE_SETTINGS;
     use crate::levelgen::noisegen::noise_generator_settings::{OVERWORLD, dummy};
+    use crate::levelgen::surface_rules::rule_source_codec;
     use rivet_registry::HolderGetter;
+    use rivet_registry::registry_ops::RegistryOps;
+    use rivet_serialization::json_ops::JsonOps;
+
+    type TestOps = RegistryOps<serde_json::Value, JsonOps>;
 
     #[test]
     fn builds_all_four_registries() {
@@ -285,5 +309,39 @@ mod tests {
         assert!(instantiated.max_value().is_finite());
         // The wired router's final density resolves (the `HolderHolder` seam).
         let _ = state.router().final_density();
+    }
+
+    /// The `SurfaceRuleData` biome holders the settings bootstrap produced must
+    /// pass the codec-path `can_serialize_in` owner check against the returned
+    /// access. Encoding the OVERWORLD `surface_rule` through a `RegistryOps`
+    /// over that access resolves every `Holder<BiomeId>`; a holder whose
+    /// `registry` field pointed at a *different* biome-registry instance would
+    /// error `"Element ... is not valid in current registry set"`. This pins the
+    /// one-shared-biome-instance composition (a regression for the duplicate
+    /// `build_biome_registry()` composition, where the settings bootstrap and the
+    /// returned access carried distinct instances).
+    #[test]
+    fn overworld_surface_rule_biome_holders_serialize_against_the_returned_access() {
+        let access = build_worldgen_registries();
+        let settings = access
+            .lookup(&registry_keys::NOISE_SETTINGS)
+            .expect("NOISE_SETTINGS registry");
+        let holder = settings.get_or_throw(&OVERWORLD);
+        let value = holder.value(settings);
+        let codec = rule_source_codec::<TestOps>();
+        // The ops owns an access; a clone shares the same registry entries
+        // (a cheap Arc bump), so the settings borrow above stays valid.
+        let ops = RegistryOps::create_from_access(&JsonOps::INSTANCE, access.clone());
+        let encoded = codec
+            .encode_start(&ops, &value.surface_rule)
+            .get_or_throw("encode OVERWORLD surface rule")
+            .clone();
+        // The biome rules encode by identifier (e.g. `minecraft:badlands`), the
+        // `can_serialize_in` gate's observable output.
+        let text = serde_json::to_string(&encoded).expect("encoded surface rule serializes");
+        assert!(
+            text.contains("minecraft:badlands") && text.contains("minecraft:stony_peaks"),
+            "the surface rule must encode its referenced biome identifiers, got {text}"
+        );
     }
 }
