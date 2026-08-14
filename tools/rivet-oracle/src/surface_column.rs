@@ -722,7 +722,7 @@ mod tests {
         // corpus coordinates and asserts the structure-freeness invariant that
         // makes `Beardifier.EMPTY` exact. It matches the real Paper 0a99345
         // scan (ChunkGeneratorStructureState + StructurePlacement.isStructureChunk
-        // + the Structure.isValidBiome gate at the onTopOfChunkCenter start
+        // + the Structure.isValidBiome gate at each structure's real start
         // position), which found ZERO beard-affecting structure starts within
         // 6 chunks of any corpus chunk. The exact placement chunks reported by
         // `isStructureChunk` near each corpus chunk (biome-unfiltered
