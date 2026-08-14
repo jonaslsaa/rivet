@@ -307,7 +307,7 @@ where
     }
 
     /// `ChunkAccess.setLightCorrect(boolean)` — forwarded to the base (which
-    /// marks the chunk unsaved; Java's does not — a noted base deviation).
+    /// marks the chunk unsaved, matching `ChunkAccess.setLightCorrect`).
     pub fn set_light_correct(&mut self, light_correct: bool) {
         self.base.set_light_correct(light_correct);
     }
