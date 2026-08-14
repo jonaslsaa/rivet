@@ -218,20 +218,22 @@ impl BelowZeroRetrogen {
             .get(((z & 15).wrapping_mul(16).wrapping_add(x & 15)) as usize)
     }
 
-    /// `applyBedrockMask(ProtoChunk)` — clears the bedrock holes (full-height
-    /// air columns) where the mask has a hole.
+    /// `applyBedrockMask(ProtoChunk)` — clears the bedrock-hole columns
+    /// (full-column air) where the mask has a hole.
     ///
-    /// The height window is `chunk.getHeightAccessorForGeneration()`; the
-    /// `UPGRADE_HEIGHT_ACCESSOR` branch of that accessor defers with
-    /// `ChunkAccess.isUpgrading()` (RivetTodo #183), so the chunk's own
-    /// accessor is used here. The two worldgen heightmaps are created once up
-    /// front (the `fill_from_noise` pattern) before the write loop.
+    /// The height window is `chunk.getHeightAccessorForGeneration()`. At the
+    /// only call site (the noise step of an upgrading chunk in
+    /// `ChunkStatusTasks`) the chunk is upgrading (`getBelowZeroRetrogen() !=
+    /// null`), so that accessor always resolves to `UPGRADE_HEIGHT_ACCESSOR` —
+    /// the `[-64, 64)` below-zero window — and the mask clears only that
+    /// window, never the terrain above. The two worldgen heightmaps are created
+    /// once up front (the `fill_from_noise` pattern) before the write loop.
     pub fn apply_bedrock_mask<B, S>(&self, chunk: &mut ProtoChunk<BlockState, B, S>)
     where
         B: Clone + PartialEq + Send + std::fmt::Debug + 'static,
         S: Eq + std::hash::Hash,
     {
-        let height_accessor = chunk.height_accessor();
+        let height_accessor = &*UPGRADE_HEIGHT_ACCESSOR;
         let min_y = height_accessor.get_min_y();
         let max_y = height_accessor.get_max_y();
 
@@ -580,16 +582,18 @@ mod tests {
     }
 
     #[test]
-    fn apply_bedrock_mask_clears_the_hole_column_to_air() {
-        // A bedrock roof plus a mask hole at (x=0, z=0): `applyBedrockMask`
-        // clears the full column to air, leaving neighboring columns intact.
+    fn apply_bedrock_mask_clears_the_hole_column_within_the_upgrade_window() {
+        // A below-zero bedrock layer plus a mask hole at (x=0, z=0):
+        // `applyBedrockMask` clears the hole column within the
+        // `UPGRADE_HEIGHT_ACCESSOR` window `[-64, -1]`, leaving the old roof
+        // above and the neighboring columns intact.
         let bedrock = Blocks::BEDROCK.default_block_state();
         let mut proto = worldgen_proto();
         // `write_block` requires the worldgen heightmaps (the caller primes
         // them once, as `applyBedrockMask`/`replaceOldBedrock` do).
         proto.get_or_create_heightmap_unprimed(Types::OceanFloorWg);
         proto.get_or_create_heightmap_unprimed(Types::WorldSurfaceWg);
-        for y in 0..=4 {
+        for y in -64..=4 {
             for x in 0..16 {
                 for z in 0..16 {
                     write_block(&mut proto, &BlockPos::new(x, y, z), bedrock);
@@ -600,20 +604,21 @@ mod tests {
         let mask = BitSet::value_of(&[1i64]);
         let retrogen = BelowZeroRetrogen::new(ChunkStatus::Full, Some(mask));
         retrogen.apply_bedrock_mask(&mut proto);
-        // The hole column is air from the floor to the top of the chunk.
+        // The hole column is air within the upgrade window `[-64, -1]`...
         assert_eq!(
             proto.get_block_state(0, -64, 0),
             Blocks::AIR.default_block_state()
         );
         assert_eq!(
-            proto.get_block_state(0, 2, 0),
+            proto.get_block_state(0, -1, 0),
             Blocks::AIR.default_block_state()
         );
-        assert_eq!(
-            proto.get_block_state(0, 319, 0),
-            Blocks::AIR.default_block_state()
-        );
-        // The neighboring column is untouched.
+        // ...and untouched above it (the old roof survives).
+        assert_eq!(proto.get_block_state(0, 0, 0), bedrock);
+        assert_eq!(proto.get_block_state(0, 2, 0), bedrock);
+        assert_eq!(proto.get_block_state(0, 4, 0), bedrock);
+        // The neighboring column is untouched throughout.
+        assert_eq!(proto.get_block_state(1, -64, 0), bedrock);
         assert_eq!(proto.get_block_state(1, 2, 0), bedrock);
         assert_eq!(proto.get_block_state(1, 4, 0), bedrock);
     }
