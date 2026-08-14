@@ -620,8 +620,9 @@ where
     }
 }
 
-// The `CarveChunk` block surface (`applyCarvers`' `ChunkAccess` writes,
-// RivetTodo #399). A worldgen `ProtoChunk` is a freshly generated chunk, so
+// The `CarveChunk` block surface is the `ChunkAccess` write surface
+// `applyCarvers` needs (tracked by RivetTodo(#399)). A worldgen `ProtoChunk`
+// is a freshly generated chunk, so
 // `isUpgrading` is fixed `false` — Java's `ChunkAccess.isUpgrading()` reflects
 // `belowZeroRetrogen != null`, which the generation path never sets.
 
