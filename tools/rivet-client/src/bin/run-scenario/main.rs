@@ -3195,11 +3195,11 @@ fn run_generated_world(args: &Args) -> Result<(), RunnerError> {
         // below always does.
         let body = (|| -> Result<(), RunnerError> {
             // Fetch the seed-42 ground-truth handoff. The merged
-            // `generated-expected` oracle now captures the real Paper seed-42
-            // reference, so the handoff succeeds; the acceptance still must not
-            // compare against it until the server serves a genuine generated
-            // world (the `is_flat` gate below).
-            let expected = run_generated_expected(&work)?;
+            // `generated-expected` oracle verifies the committed Paper-captured
+            // seed-42 golden, so the handoff succeeds; the acceptance still must
+            // not compare against it until the server serves a genuine
+            // generated world (the `is_flat` gate below).
+            let expected = run_generated_expected()?;
 
             // Drive the real Azalea client in generated mode against the booted
             // server.
@@ -3282,23 +3282,21 @@ fn classify_generated_world_boot_failure(error: server::Error, log_path: &Path) 
     }
 }
 
-/// The seed-42 ground-truth handoff filename the oracle `generated-expected`
-/// writes.
-const GENERATED_EXPECTED_JSON: &str = "generated-expected.json";
-
-/// Invoke `rivet-oracle generated-expected <seed>` and parse the seed-42
-/// ground-truth manifest into a `serde_json::Value`. The handoff is the
-/// committed Paper-captured seed-42 golden for the generated-world acceptance;
-/// the runner still must not compare against it until the server genuinely
-/// serves a generated world (the `is_flat` gate in `run_generated_world`).
-fn run_generated_expected(work: &Path) -> Result<Value, RunnerError> {
+/// Invoke `rivet-oracle generated-expected <seed>` in verify mode and parse
+/// the committed seed-42 ground-truth golden into a `serde_json::Value`. The
+/// handoff is the committed Paper-captured seed-42 golden at
+/// `tools/rivet-oracle/fixtures/generated-expected/` (the fixture the merged
+/// PR #595 ships); the runner still must not compare against it until the
+/// server genuinely serves a generated world (the `is_flat` gate in
+/// `run_generated_world`). Verify mode is used rather than `--to` capture:
+/// capture re-boots Paper to regenerate the golden, which the committed
+/// fixture already carries — so no Paper runtime is a prerequisite for the
+/// acceptance.
+fn run_generated_expected() -> Result<Value, RunnerError> {
     let oracle_bin = oracle_binary();
-    let out = work.join(GENERATED_EXPECTED_JSON);
     let status = Command::new(&oracle_bin)
         .args(["generated-expected"])
         .arg(server::GENERATED_SEED.to_string())
-        .args(["--to"])
-        .arg(&out)
         .status()
         .map_err(|e| {
             RunnerError::Unverified(format!(
@@ -3307,11 +3305,22 @@ fn run_generated_expected(work: &Path) -> Result<Value, RunnerError> {
                 oracle_bin.display()
             ))
         })?;
-    // The oracle refuses to write an empty/fabricated manifest (it returns
-    // Unverified before touching `--to`), so `report_out` is false here — the
+    // Verify mode writes no `--to` file, so `report_out` is false — the
     // UNVERIFIED reason is the oracle's own message, not a file to inspect.
-    classify_oracle_status("generated-expected", false, status, &out)?;
-    let text = fs::read_to_string(&out)?;
+    classify_oracle_status("generated-expected", false, status, Path::new(""))?;
+    // The oracle only validated the committed fixture; read the golden itself
+    // for the per-coordinate comparison below. A missing golden that the oracle
+    // had just verified is UNVERIFIED (the fixture tree is a prereq), never a
+    // fabricated PASS.
+    let golden = crate_root()
+        .join("../../tools/rivet-oracle/fixtures/generated-expected/generated-expected.json");
+    let text = fs::read_to_string(&golden).map_err(|e| {
+        RunnerError::Unverified(format!(
+            "generated-expected committed golden is unreadable at {} ({e}) — the oracle verified \
+             the fixture tree but the runner could not read the golden",
+            golden.display()
+        ))
+    })?;
     let manifest: Value = serde_json::from_str(&text).map_err(RunnerError::Json)?;
     Ok(manifest)
 }
