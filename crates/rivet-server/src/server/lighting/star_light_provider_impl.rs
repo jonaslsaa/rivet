@@ -11,8 +11,8 @@
 //! crate cycle: `rivet-server` already depends on `rivet-world`, and the trait
 //! lives in `rivet-world`.
 //!
-//! [`SkyLightProvider`] replaces the phase-A [`StubStarLightProvider`] no-op
-//! with a real synchronous compute layer: it owns a
+//! [`SkyLightProvider`] replaces the phase-A stub no-op with a real synchronous
+//! compute layer: it owns a
 //! [`SkyStarLightEngine`] (the Starlight flood-fill core) and drives it on an
 //! explicitly supplied in-progress chunk through [`SkyLightProvider::light_chunk_with`],
 //! publishing the engine's computed sky nibbles and sky-emptiness map back onto
@@ -24,7 +24,10 @@
 //! authoritative state (OWNERSHIP.md). The caller hands an owned chunk out on
 //! take (`None` payload) and receives it back on put (`Some` payload); the
 //! provider buffers the neighbours it resolves during a run and returns them
-//! afterwards. No neighbour is fabricated and none is dropped.
+//! afterwards — on the panic path too, where the engine's `light` re-unwinds
+//! after its finally-equivalent cache clear and the provider puts every taken
+//! chunk back before resuming the original panic. No neighbour is fabricated
+//! and none is dropped.
 //!
 //! The pos-only trait seam ([`StarLightProvider::light_chunk`]) is the take/put
 //! round-trip: take the chunk at the position, light it, put it back. The
@@ -150,12 +153,31 @@ impl SkyLightProvider {
             chunks: &mut self.chunks,
             taken: HashMap::new(),
         };
-        self.engine.light(&mut accessor, chunk, empty_sections);
-        if let Some(nibbles) = self.engine.take_pending_nibbles() {
-            chunk.set_sky_nibbles(nibbles);
-        }
-        if let Some(map) = self.engine.take_pending_emptiness_map() {
-            chunk.set_sky_emptiness_map(Some(map));
+        // The engine's `light` re-unwinds a panicking run only after its
+        // finally-equivalent (`destroyCaches`). The caller's storage contract
+        // ("no neighbour fabricated, none dropped") still holds on that path: a
+        // run that panics must return the neighbours it took. Catching here lets
+        // the put-back run while the original payload is still recoverable, then
+        // re-throws it — no neighbour dropped, no second panic mid-unwind.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.engine.light(&mut accessor, chunk, empty_sections);
+            if let Some(nibbles) = self.engine.take_pending_nibbles() {
+                chunk.set_sky_nibbles(nibbles);
+            }
+            if let Some(map) = self.engine.take_pending_emptiness_map() {
+                chunk.set_sky_emptiness_map(Some(map));
+            }
+        }));
+        if let Err(payload) = result {
+            // Deterministic restore before the original panic resumes — the
+            // put-back ends the accessor's borrow of the callback first, so
+            // `self.chunks` is available again.
+            let taken = std::mem::take(&mut accessor.taken);
+            drop(accessor);
+            for ((x, z), neighbour) in taken {
+                (self.chunks)(x, z, Some(neighbour));
+            }
+            std::panic::resume_unwind(payload);
         }
         // Return the neighbours the run resolved — drop the accessor to end its
         // borrow of the callback, then put each buffered chunk back.
@@ -281,7 +303,8 @@ impl SkyLightProvider {
 /// The engine's [`ChunkAccessor`] over the provider's narrow take/put callback.
 /// Each neighbour the engine resolves during a run is taken as owned, buffered,
 /// and handed out as a reference; [`SkyLightProvider::light_chunk_with`] puts
-/// the buffered chunks back once the run completes.
+/// the buffered chunks back once the run completes — on the panic path too, so
+/// the caller's storage always gets every chunk it handed out back.
 struct CallbackAccessor<'a> {
     chunks: &'a mut ChunkAccessFn,
     taken: HashMap<(i32, i32), ChunkAccess<StateId, ServerBiomeId, StructureKey>>,
@@ -321,8 +344,17 @@ impl StarLightProvider for SkyLightProvider {
         let Some(mut chunk) = self.take_chunk(pos) else {
             return;
         };
-        self.light_chunk_with(&mut chunk, empty_sections);
+        // The centre chunk was taken from the caller's storage, so a panicking
+        // run must still put it back (`light_chunk_with` restores the
+        // neighbours it took). Catch, put the centre back, then resume the
+        // original panic — the centre is never dropped and never lost.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.light_chunk_with(&mut chunk, empty_sections);
+        }));
         self.put_chunk(pos, chunk);
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
     }
 
     fn force_load_in_chunk(&mut self, pos: ChunkPos, _empty_sections: &[Option<bool>]) {
@@ -374,6 +406,7 @@ mod tests {
     use super::*;
     use rivet_world::level::height_accessor::create as create_accessor;
     use rivet_world::lighting::level_light_engine::LevelLightEngine;
+    use rivet_world::lighting::swmr_nibble_array::SwmrNibbleArray;
     use rivet_world::superflat::{SECTION_COUNT, SUPERFLAT_HEIGHT, SUPERFLAT_MIN_Y};
     use std::sync::{Arc, Mutex};
 
@@ -595,6 +628,77 @@ mod tests {
             .expect("floor initialised")
             .get_data();
         assert_eq!(&floor_data[128..], &[0xFFu8; 1920][..]);
+    }
+
+    /// A panicking engine run must not leak caller-storage chunks: the engine's
+    /// finally-equivalent clears its caches, `light_chunk_with` returns every
+    /// taken neighbour, `light_chunk` returns the taken centre, and the
+    /// original panic reaches the caller.
+    ///
+    /// The panic is triggered from inside the engine's `light` try-body, not by
+    /// the test's storage closure: a light-correct radius-1 neighbour whose
+    /// sky-nibble array is truncated leaves the missing light sections' cache
+    /// slots empty, so the emptiness-change init (`initNibble` with
+    /// `initRemovedNibbles=false`) hits Starlight's own "nibble removed while
+    /// not requested" panic.
+    #[test]
+    fn panicking_run_returns_every_taken_chunk_and_preserves_the_panic() {
+        let mut storage = HashMap::new();
+        let center = ChunkPos::new(0, 0);
+        storage.insert((center.x(), center.z()), superflat_chunk(center));
+        let mut neighbour = superflat_chunk(ChunkPos::new(1, 0));
+        neighbour.set_light_correct(true);
+        neighbour.set_sky_nibbles(vec![SwmrNibbleArray::new()]);
+        storage.insert((1, 0), neighbour);
+        let (chunks, shared) = storage_closure(&mut storage);
+        let mut provider = SkyLightProvider::new(overworld(), true, true, chunks);
+
+        let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            provider.light_chunk(center, &superflat_empty_sections());
+        }))
+        .expect_err("the engine's internal panic must propagate out of the provider");
+
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .expect("Starlight's static-str panic message");
+        assert!(
+            message.contains("nibble removed while not requested"),
+            "the original engine panic reaches the caller, got: {message:?}"
+        );
+
+        // The engine's finally-equivalent cleared the per-run caches even
+        // though the run unwound mid-body.
+        assert!(
+            provider.engine.per_run_caches_are_clear(),
+            "destroyCaches runs before light re-unwinds"
+        );
+
+        // Every chunk taken from the caller's storage is back, unchanged: the
+        // centre was never lit and the neighbour kept its light-correct flag
+        // and its truncated nibble array.
+        let map = shared.lock().unwrap();
+        let keys: std::collections::BTreeSet<(i32, i32)> = map.keys().copied().collect();
+        assert_eq!(
+            keys,
+            [(center.x(), center.z()), (1, 0)].into_iter().collect()
+        );
+        let centre_back = &map[&(center.x(), center.z())];
+        assert_eq!(centre_back.get_sections().len(), SECTION_COUNT);
+        assert!(
+            centre_back
+                .sky_nibbles()
+                .iter()
+                .all(SwmrNibbleArray::is_null_nibble_visible),
+            "the centre was never lit — its nibbles stay untouched"
+        );
+        let neighbour_back = &map[&(1, 0)];
+        assert!(neighbour_back.is_light_correct());
+        assert_eq!(
+            neighbour_back.sky_nibbles().len(),
+            1,
+            "the neighbour returns unchanged"
+        );
     }
 
     /// The readers' pos-only variants faithfully report Java's null-chunk

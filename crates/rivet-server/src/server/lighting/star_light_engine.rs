@@ -1813,6 +1813,18 @@ impl SkyStarLightEngine {
         self.chunk_cache.iter_mut().for_each(|c| *c = false);
         self.emptiness_map_cache.iter_mut().for_each(|s| *s = None);
     }
+
+    /// `#[cfg(test)]` probe for the provider's panic-path tests: whether the
+    /// per-run caches are in the post-`destroyCaches` state. Java's finally-clear
+    /// runs even when the `light` body unwinds, so the caches must be gone
+    /// whether the run completed or panicked.
+    #[cfg(test)]
+    pub(crate) fn per_run_caches_are_clear(&self) -> bool {
+        self.section_cache.iter().all(Option::is_none)
+            && self.nibble_cache.iter().all(Option::is_none)
+            && self.chunk_cache.iter().all(|&present| !present)
+            && self.emptiness_map_cache.iter().all(Option::is_none)
+    }
 }
 
 /// `StarLightEngine.getFilledEmptyLight(totalLightSections)` — an array of
