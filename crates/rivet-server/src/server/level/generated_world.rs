@@ -336,11 +336,14 @@ impl GenerationChunkHolder {
             &current_version_container_factory(),
             None,
             Blocks::AIR.default_block_state(),
-            // Paper: `ProtoChunk.getBlockState` returns `Blocks.VOID_AIR` (raw
-            // id 830, `minecraft:void_air`) outside build height. The named
-            // `Blocks` subset has no `VOID_AIR` constant, so resolve it by raw
-            // id here (the block is registered in the generated registry).
-            BlockState::of(BlockId(830)),
+            // Paper: `ProtoChunk.getBlockState` returns `Blocks.VOID_AIR`
+            // (`minecraft:void_air`, raw id 794) outside build height. The
+            // named `Blocks` subset has no `VOID_AIR` constant, so resolve it
+            // by raw id here — `BlockState::of` reads `BLOCK_STATE_BASES[794]`
+            // (default state 15292). A wrong id silently resolves to another
+            // block's default (830 is `minecraft:mud_brick_wall` → 18441), so
+            // this must stay pinned to the generated registry.
+            BlockState::of(BlockId(794)),
             &resolve_state_flags,
         );
         let context = WorldGenContext::new(
@@ -416,6 +419,7 @@ impl fmt::Debug for GenerationChunkHolder {
 mod tests {
     use super::*;
     use crate::server::level::chunk_map::ChunkMap;
+    use rivet_registry::generated::block_states::StateId;
     use rivet_world::levelgen::heightmap::Types;
 
     /// The shared test realization (built once — the worldgen registry
@@ -555,6 +559,37 @@ mod tests {
             .generate_through(ChunkStatus::Noise)
             .expect("idempotent");
         assert_eq!(holder.status(), ChunkStatus::Noise);
+    }
+
+    /// Hostile: the out-of-build-height read default is real `void_air` — raw
+    /// id 794, default state 15292 — not AIR and not another block's default.
+    /// The NOISE test reads at the surface height (inside build height), so it
+    /// can never observe this default; this test pins the state-id contract
+    /// directly, catching a wrong raw id (830 resolves to
+    /// `minecraft:mud_brick_wall`'s default 18441) that the heightmap/terrain
+    /// walks in `fill_from_noise` would silently feed back.
+    #[test]
+    fn get_block_state_outside_build_height_returns_void_air() {
+        let generator = test_generator();
+        let holder = generator.create_holder(ChunkPos::new(3, -1));
+        // Build height is [min_y, min_y + height - 1]; one below and one above
+        // are both outside it.
+        let max_y = holder.chunk.get_min_y() + holder.chunk.get_height() - 1;
+        for y in [holder.chunk.get_min_y() - 1, max_y + 1] {
+            let state = holder.chunk.get_block_state(0, y, 0);
+            assert_eq!(
+                state,
+                BlockState::of(BlockId(794)),
+                "out-of-build-height read at y={y} must be the void_air default state"
+            );
+            assert_eq!(state.id(), StateId(15292));
+            assert_ne!(state, Blocks::AIR.default_block_state());
+            assert_ne!(
+                state.id(),
+                StateId(18441),
+                "must not resolve to minecraft:mud_brick_wall's default"
+            );
+        }
     }
 
     /// Hostile: a downstream target (SURFACE and beyond) is rejected before any
