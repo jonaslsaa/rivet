@@ -951,7 +951,11 @@ mod tests {
             }
             let sample = self.next(31) as i32;
             let modulo = sample % bound;
-            if (sample - modulo + (bound - 1)) < 0 {
+            // Java's int arithmetic wraps silently on overflow; Rust's plain
+            // `+`/`-` panics in debug builds on the same overflow. This overflow
+            // IS the rejection trigger (sample - modulo + (bound - 1) wraps into
+            // the sign bit), so wrapping_* is required to mirror Paper bit-for-bit.
+            if sample.wrapping_sub(modulo).wrapping_add(bound - 1) < 0 {
                 return self.next_int(bound); // reject and redraw, exactly like Paper
             }
             modulo as i64
