@@ -25,8 +25,9 @@
 //! it for the placer's `foliage_provider` (`BlockStateProvider.CODEC`), the two
 //! codecs cross-referencing each other through the config record, so no
 //! `codec::recursive` cycle is needed. The current stub config
-//! (`configurations/tree_configuration.rs`) carries only the three
-//! `BlockStateProvider` fields, so this recursion is not yet wired.
+//! (`configurations/tree_configuration.rs`) carries only `foliage_provider`
+//! (as `Arc<dyn ErasedBlockStateProvider>`), so this recursion is not yet
+//! wired.
 //!
 //! The shared leaf-placing surface is ported on this base exactly as Java
 //! defines it. Java `protected` instance helpers that virtual-dispatch on
