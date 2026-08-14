@@ -119,10 +119,9 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     /// (`FoliagePlacer.tryPlaceLeaf`, `tree_feature::valid_tree_pos`).
     ///
     /// The default resolves the offset state through the `get_block_state`
-    /// seam and applies the predicate, so the capability-unavailable behavior
-    /// is exactly `get_block_state`'s (RivetTodo #399): no production world
-    /// provides it yet, so the call fails loudly rather than fabricating a
-    /// state. Concrete worlds override when they land.
+    /// seam and applies the predicate, so the read is exactly
+    /// `get_block_state`'s (`WorldGenRegion` provides it on the gated chunk
+    /// read).
     fn is_state_at_position(&self, pos: &BlockPos, test: &dyn Fn(&BlockState) -> bool) -> bool {
         test(&self.get_block_state(pos))
     }
@@ -133,9 +132,8 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     ///
     /// The default resolves the position's fluid through the `get_block_state`
     /// seam (`BlockState.fluid_id()`, the state's fluid registry id) and
-    /// applies the predicate, so the capability-unavailable behavior is
-    /// exactly `get_block_state`'s (RivetTodo #399). Concrete worlds override
-    /// when they land.
+    /// applies the predicate — the same `get_block_state` read `WorldGenRegion`
+    /// provides (the gated chunk read).
     fn is_fluid_at_position(&self, pos: &BlockPos, test: &dyn Fn(&FluidId) -> bool) -> bool {
         let state = self.get_block_state(pos);
         test(&FluidId::from_id(state.fluid_id()))
