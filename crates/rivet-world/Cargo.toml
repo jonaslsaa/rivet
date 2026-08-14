@@ -65,6 +65,12 @@ bytes = { workspace = true }
 # The `feature.configurations` codec tests decode/encode through
 # `JsonOps::INSTANCE` (serde_json::Value backed).
 serde_json = { workspace = true }
+# The biome-temperature golden test hashes the committed fixture and asserts it
+# against the sibling manifest's SHA-256 (the `rivet-oracle` fixture-hash
+# invariant), so a focused cargo test catches a drifted fixture.
+# The surface-rule-data golden test recomputes the fixture sha256 to detect a
+# tampered golden.
+sha2 = { workspace = true }
 # The PalettedContainer<StateId> golden tests drive the real global
 # block-state table (rivet-registry `blocks` feature). Dev-only: normal
 # builds of rivet-world stay feature-free.

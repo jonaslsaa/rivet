@@ -99,6 +99,7 @@
 
 use crate::biome::BiomeManager;
 use crate::biome::biomes;
+use crate::biome::dense_biome_id;
 use crate::block::blocks::Blocks;
 use crate::block::{Block, BlockState};
 use crate::chunk::block_column::BlockColumn;
@@ -2511,7 +2512,7 @@ impl SurfaceSystem {
     /// cascade). The `getHeight(WORLD_SURFACE_WG)` reads are the `#185` seam
     /// (`ChunkSurface::get_height`); the `Biome`-value reads
     /// (`surfaceBiome.is(Biomes.X)`, `shouldMeltFrozenOceanIcebergSlightly`)
-    /// are the biome-value seams (`holder_biome_id` + `false`); the column
+    /// are the biome-value seams (`dense_biome_id` + `false`); the column
     /// write (`ProtoChunk.setBlockState` + `markPosForPostProcessing`) is the
     /// `#216` seam (`ChunkColumnAdapter` guards + writes, the mark defers).
     #[allow(clippy::too_many_arguments)]
@@ -2571,7 +2572,7 @@ impl SurfaceSystem {
                     },
                     block_z,
                 ));
-                if holder_biome_id(&surface_biome) == eroded_badlands {
+                if dense_biome_id(&surface_biome) == eroded_badlands {
                     let proto_chunk_min_y = column.chunk.borrow().get_min_y();
                     self.eroded_badlands_extension(
                         &mut column,
@@ -2626,7 +2627,7 @@ impl SurfaceSystem {
                     y -= 1;
                 }
 
-                let biome = holder_biome_id(&surface_biome);
+                let biome = dense_biome_id(&surface_biome);
                 if biome == frozen_ocean || biome == deep_frozen_ocean {
                     // `surfaceBiome.value().shouldMeltFrozenOceanIcebergSlightly(
                     // blockPos.set(blockX, seaLevel, blockZ), seaLevel)` — the
@@ -3025,18 +3026,6 @@ impl BlockColumn<BlockState> for ChunkColumnAdapter<'_> {
         if chunk.is_inside_build_height(block_y) {
             chunk.set_block_state(self.x.get(), block_y, self.z.get(), state);
         }
-    }
-}
-
-/// The biome-id of a `Holder<BiomeId>` — Java's `surfaceBiome.is(Biomes.X)`
-/// compares holder identity; the id-handle port compares the registry id
-/// (`Direct` carries the id, `Reference` stores it as the element id). The
-/// `#177` surface-build runtime.
-#[allow(dead_code)]
-fn holder_biome_id(holder: &Holder<BiomeId>) -> u16 {
-    match holder {
-        Holder::Direct(biome) => biome.id(),
-        Holder::Reference { id, .. } => *id as u16,
     }
 }
 

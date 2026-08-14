@@ -23,7 +23,10 @@
 //! round-trips to its raw IEEE-754 bits exactly; then it prints the
 //! BIOMES→NOISE→SURFACE→CARVERS→FEATURES→LIGHT→FULL status/provenance
 //! scoreboard. The tamper negative control proves the comparison detects a
-//! flipped byte (the manifest SHA-256 gate).
+//! flipped byte (the manifest SHA-256 gate). `--sample` regeneration
+//! (`run_probe`) validates the freshly captured output with the same semantic
+//! gate before rewriting the manifest, so a garbage probe output is never
+//! committed as the new golden.
 
 use crate::chunk_level::{ChunkLevelConsts, ChunkPyramid, by_status, status_around_full_chunk};
 use crate::{CapturedFile, Error, sha256_hex};
@@ -329,15 +332,50 @@ pub fn verify_full_chunk_step(fixture: &ComposedNoise) -> Result<(), Error> {
     Ok(())
 }
 
-/// Verify the committed composed-noise golden: the manifest hashes, the pinned
-/// provenance, the FULL_CHUNK_STEP reachability, and the bit-exact entries
-/// (each captured `bits` must be present; the `value` round-trips). This is the
-/// NOISE checkpoint gate.
+/// Verify the committed composed-noise golden: the manifest hash gate first
+/// (SHA-256s + kind + pinned Paper provenance), then the fixture's own
+/// semantics (`verify_semantics`). This is the NOISE checkpoint gate.
 pub fn verify_composed_noise(dir: &Path) -> Result<(), Error> {
     let fixture = load(dir)?;
-    // 1. Provenance + manifest hashes. The golden is pinned to seed 42 and to
-    //    Paper 0a99345; a fixture regenerated under a different seed or commit
-    //    is drift, not the pinned golden.
+    // 1. The manifest hash gate: the golden bytes must match the committed
+    //    SHA-256 — a flipped byte is drift, not the probe's output. The manifest
+    //    must also carry the composed-noise kind + pinned Paper 0a99345,
+    //    agreeing with the golden's own paper string.
+    let manifest = crate::verify_fixtures(dir)?;
+    if manifest.kind.as_deref() != Some(KIND) {
+        return Err(Error::Manifest(format!(
+            "expected kind {KIND}, got {:?}",
+            manifest.kind
+        )));
+    }
+    if crate::parse_paper_pin(manifest.paper.as_deref()).as_deref() != Some("0a99345") {
+        return Err(Error::Manifest(format!(
+            "composed-noise fixture not pinned to Paper 0a99345: {:?}",
+            manifest.paper
+        )));
+    }
+    if fixture.paper != manifest.paper.as_deref().unwrap_or("") {
+        return Err(Error::Manifest(format!(
+            "fixture paper {} != manifest paper {:?}",
+            fixture.paper, manifest.paper
+        )));
+    }
+    // 2. Then the fixture's own semantics.
+    verify_semantics(&fixture)?;
+    Ok(())
+}
+
+/// Semantically validate a composed-noise fixture: the pinned provenance
+/// (seed/dimension/generator/level-type/noise-settings/Paper pin), the computed
+/// (not assumed) FULL_CHUNK_STEP reachability, the #175 matrix shape, and that
+/// every value round-trips to its raw IEEE-754 bits exactly (and is finite).
+/// Shared by `verify_composed_noise` (after the hash gate) and `capture` (before
+/// the manifest rewrite), so a semantically invalid fresh capture can never
+/// become the committed golden.
+fn verify_semantics(fixture: &ComposedNoise) -> Result<(), Error> {
+    // 1. Provenance. The golden is pinned to seed 42 and to Paper 0a99345; a
+    //    fixture regenerated under a different seed or commit is drift, not the
+    //    pinned golden.
     if fixture.seed != 42 {
         return Err(Error::Manifest(format!(
             "composed-noise seed {} != pinned seed 42",
@@ -371,28 +409,17 @@ pub fn verify_composed_noise(dir: &Path) -> Result<(), Error> {
             fixture.noise_settings
         )));
     }
-    let manifest = crate::verify_fixtures(dir)?;
-    if manifest.kind.as_deref() != Some(KIND) {
-        return Err(Error::Manifest(format!(
-            "expected kind {KIND}, got {:?}",
-            manifest.kind
-        )));
-    }
-    if crate::parse_paper_pin(manifest.paper.as_deref()).as_deref() != Some("0a99345") {
+    // The capture's own Paper pin — a probe run against a different commit is
+    // drift even when its reachability and values still match.
+    if crate::parse_paper_pin(Some(&fixture.paper)).as_deref() != Some("0a99345") {
         return Err(Error::Manifest(format!(
             "composed-noise fixture not pinned to Paper 0a99345: {:?}",
-            manifest.paper
-        )));
-    }
-    if fixture.paper != manifest.paper.as_deref().unwrap_or("") {
-        return Err(Error::Manifest(format!(
-            "fixture paper {} != manifest paper {:?}",
-            fixture.paper, manifest.paper
+            fixture.paper
         )));
     }
     // 2. The computed (not assumed) reachability.
-    verify_full_chunk_step(&fixture)?;
-    // 3. Structural + exact value assertions. The committed fixture is
+    verify_full_chunk_step(fixture)?;
+    // 3. Structural + exact value assertions. In the verify path the golden is
     //    hash-gated (verify_fixtures above), so the bytes are the probe's exact
     //    output; here we pin the shape (the #175 matrix, the density Y slice)
     //    and that every value round-trips to its raw IEEE-754 bits exactly —
@@ -456,7 +483,7 @@ pub fn verify_composed_noise(dir: &Path) -> Result<(), Error> {
     //    f64::from_bits; climate: the float-cast f32::from_bits widened), and
     //    density must never be NaN — a NaN density would be un-placeable
     //    garbage, not a golden.
-    verify_value_bits(&fixture)?;
+    verify_value_bits(fixture)?;
     Ok(())
 }
 
@@ -763,8 +790,9 @@ pub fn regenerate_manifest(dir: &Path) -> Result<(), Error> {
 }
 
 /// Run the Paper-side probe into `dir` (regenerating composed-noise.json), then
-/// rewrite the manifest. Requires the materialized pinned Paper runtime (or the
-/// env overrides).
+/// capture it: validate the fresh output's semantics and only then rewrite the
+/// manifest. Requires the materialized pinned Paper runtime (or the env
+/// overrides).
 pub fn run_probe(dir: &Path) -> Result<(), Error> {
     let crate_root = crate::crate_dir();
     let script = crate_root.join("scripts/run_composed_noise_probe.sh");
@@ -779,6 +807,18 @@ pub fn run_probe(dir: &Path) -> Result<(), Error> {
             "run_composed_noise_probe.sh exited {status} — see its stderr"
         )));
     }
+    capture(dir)
+}
+
+/// Commit a freshly generated composed-noise golden: validate its semantics
+/// BEFORE the manifest rewrite hashes/commits it. `regenerate_manifest` derives
+/// the manifest hash from the golden bytes, so without this gate it would commit
+/// garbage — a probe run against the wrong seed/generator/Paper, a NaN density,
+/// a broken #175 shape, or drifted reachability must never become the new
+/// committed golden.
+fn capture(dir: &Path) -> Result<(), Error> {
+    let fixture = load(dir)?;
+    verify_semantics(&fixture)?;
     regenerate_manifest(dir)?;
     Ok(())
 }
@@ -990,9 +1030,18 @@ mod tests {
     }
 
     #[test]
-    fn gate_path_composed_noise_only_root_is_verified() {
+    fn gate_path_load_bearing_goldens_only_root_is_verified() {
         let src = fixtures_dir().join("composed-noise");
         require_fixture(&src);
+        let ge_src = fixtures_dir().join("generated-expected");
+        assert!(
+            ge_src.join("manifest.json").is_file()
+                && ge_src
+                    .join(crate::generated_expected::FIXTURE_BASENAME)
+                    .is_file(),
+            "committed generated-expected fixtures at {} are unusable",
+            ge_src.display()
+        );
         let root = scratch("gate-cn-only");
         fs::create_dir_all(root.path().join("composed-noise")).unwrap();
         fs::copy(
@@ -1005,10 +1054,25 @@ mod tests {
             root.path().join("composed-noise/composed-noise.json"),
         )
         .unwrap();
+        // generated-expected is equally load-bearing (PR #563/#595): carry both
+        // goldens so the gate's positive path exercises the full composed
+        // contract — neither golden alone may claim an overall green.
+        fs::create_dir_all(root.path().join("generated-expected")).unwrap();
+        fs::copy(
+            ge_src.join("manifest.json"),
+            root.path().join("generated-expected/manifest.json"),
+        )
+        .unwrap();
+        fs::copy(
+            ge_src.join(crate::generated_expected::FIXTURE_BASENAME),
+            root.path()
+                .join("generated-expected/generated-expected.json"),
+        )
+        .unwrap();
         let result = crate::verify_all_fixture_kinds_from(root.path());
         assert!(
             result.is_ok(),
-            "composed-noise-only root must verify green: {result:?}"
+            "goldens-only root must verify green: {result:?}"
         );
     }
 
@@ -1267,6 +1331,154 @@ mod tests {
         let dir = fixtures_dir().join("composed-noise");
         require_fixture(&dir);
         tamper_negative_control(&dir).expect("tamper must be detected");
+    }
+
+    /// Write a composed-noise golden derived from the committed fixture with one
+    /// hostile mutation into a fresh scratch dir (no manifest). A `capture`
+    /// failure on it is then provably the semantic gate — the manifest is only
+    /// written when the output validates, so its absence is proof of rejection.
+    fn write_hostile_golden<F: FnOnce(&mut ComposedNoise)>(
+        tag: &str,
+        mutate: F,
+    ) -> tempfile::TempDir {
+        let src = fixtures_dir().join("composed-noise");
+        require_fixture(&src);
+        let dir = scratch(tag);
+        let mut fixture = load(&src).unwrap();
+        mutate(&mut fixture);
+        fs::write(
+            dir.path().join(FIXTURE_BASENAME),
+            serde_json::to_vec_pretty(&fixture).unwrap(),
+        )
+        .unwrap();
+        dir
+    }
+
+    /// A fresh capture that fails the semantic gate must never write a manifest:
+    /// `regenerate_manifest` (which derives the hash from the golden) is only
+    /// reached for valid output. A hostile NaN density is the value_bits gate.
+    #[test]
+    fn capture_rejects_nan_density_without_rewriting_manifest() {
+        let dir = write_hostile_golden("capture-nan", |f| {
+            f.density[0].density.value = serde_json::json!("NaN");
+        });
+        let result = capture(dir.path());
+        assert!(
+            matches!(result, Err(Error::Manifest(_))),
+            "NaN density must be rejected, got {result:?}"
+        );
+        assert!(
+            !dir.path().join("manifest.json").exists(),
+            "capture must not write a manifest for a NaN-density golden"
+        );
+    }
+
+    /// A wrong seed is drift, not the pinned golden: the semantic gate rejects
+    /// it, and an already-committed manifest is left byte-identical — never
+    /// clobbered with a hash of the invalid output.
+    #[test]
+    fn capture_rejects_wrong_seed_without_clobbering_committed_manifest() {
+        let src = fixtures_dir().join("composed-noise");
+        require_fixture(&src);
+        let dir = scratch("capture-seed");
+        fs::copy(src.join("manifest.json"), dir.path().join("manifest.json")).unwrap();
+        let mut fixture = load(&src).unwrap();
+        fixture.seed = 43;
+        fs::write(
+            dir.path().join(FIXTURE_BASENAME),
+            serde_json::to_vec_pretty(&fixture).unwrap(),
+        )
+        .unwrap();
+        let committed = fs::read(src.join("manifest.json")).unwrap();
+        let result = capture(dir.path());
+        assert!(
+            matches!(result, Err(Error::Manifest(_))),
+            "wrong-seed output must be rejected, got {result:?}"
+        );
+        assert_eq!(
+            fs::read(dir.path().join("manifest.json")).unwrap(),
+            committed,
+            "capture must not clobber the committed manifest with a wrong-seed golden"
+        );
+    }
+
+    /// A broken #175 matrix shape (a missing density row) must fail capture.
+    #[test]
+    fn capture_rejects_broken_175_matrix_without_rewriting_manifest() {
+        let dir = write_hostile_golden("capture-shape", |f| {
+            f.density.truncate(79);
+        });
+        let result = capture(dir.path());
+        assert!(
+            matches!(result, Err(Error::Manifest(_))),
+            "truncated density matrix must be rejected, got {result:?}"
+        );
+        assert!(!dir.path().join("manifest.json").exists());
+    }
+
+    /// Drifted FULL_CHUNK_STEP reachability (a probe against a different Paper)
+    /// must fail capture.
+    #[test]
+    fn capture_rejects_wrong_full_chunk_step_without_rewriting_manifest() {
+        let dir = write_hostile_golden("capture-step", |f| {
+            f.full_chunk_step.level = 32;
+        });
+        let result = capture(dir.path());
+        assert!(
+            matches!(result, Err(Error::Manifest(_))),
+            "drifted reachability must be rejected, got {result:?}"
+        );
+        assert!(!dir.path().join("manifest.json").exists());
+    }
+
+    /// A capture against a non-pinned generator is drift, not the overworld
+    /// NOISE golden: the provenance gate rejects it before the manifest rewrite.
+    #[test]
+    fn capture_rejects_wrong_generator_without_rewriting_manifest() {
+        let dir = write_hostile_golden("capture-generator", |f| {
+            f.generator = "amplified".into();
+        });
+        let result = capture(dir.path());
+        assert!(
+            matches!(result, Err(Error::Manifest(_))),
+            "non-normal generator must be rejected, got {result:?}"
+        );
+        assert!(!dir.path().join("manifest.json").exists());
+    }
+
+    /// A capture recorded against a different Paper commit is drift, not the
+    /// pinned golden: the provenance gate rejects it before the manifest rewrite.
+    #[test]
+    fn capture_rejects_wrong_paper_pin_without_rewriting_manifest() {
+        let dir = write_hostile_golden("capture-paper", |f| {
+            f.paper = "26.2-DEV-main@badbeef".into();
+        });
+        let result = capture(dir.path());
+        assert!(
+            matches!(result, Err(Error::Manifest(_))),
+            "non-pinned Paper commit must be rejected, got {result:?}"
+        );
+        assert!(!dir.path().join("manifest.json").exists());
+    }
+
+    /// The happy path without a live Java probe: capturing the committed golden
+    /// (a valid fresh output) rewrites the manifest byte-identical to the
+    /// committed one (git-clean), and the captured tree verifies green.
+    #[test]
+    fn capture_commits_valid_golden_with_byte_identical_manifest() {
+        let src = fixtures_dir().join("composed-noise");
+        require_fixture(&src);
+        let dir = scratch("capture-valid");
+        fs::copy(
+            src.join(FIXTURE_BASENAME),
+            dir.path().join(FIXTURE_BASENAME),
+        )
+        .unwrap();
+        capture(dir.path()).expect("a valid fresh golden must be capturable");
+        let committed = fs::read(src.join("manifest.json")).unwrap();
+        let written = fs::read(dir.path().join("manifest.json")).unwrap();
+        assert_eq!(written, committed);
+        verify_composed_noise(dir.path()).expect("the captured tree must verify green");
     }
 
     #[test]

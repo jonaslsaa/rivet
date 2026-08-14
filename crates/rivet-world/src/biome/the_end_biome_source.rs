@@ -18,6 +18,7 @@
 //! as a bare function, so the stable point is recovered with
 //! [`map_codec::stable`] over the built codec (see [`TheEndBiomeSource::map_codec`]).
 
+use crate::biome::biome_resolver::BiomeResolver;
 use crate::biome::biome_source::BiomeSource;
 use crate::biome::biome_source_type::{BiomeSourceTypeId, BiomeSourceTypes};
 use crate::biome::biomes;
@@ -171,6 +172,14 @@ impl BiomeSource for TheEndBiomeSource {
             .clone()
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// The source is its own resolver (Java `BiomeSource implements
+/// BiomeResolver`): the End's radius/weirdness quart resolution.
+impl BiomeResolver for TheEndBiomeSource {
     fn get_noise_biome(
         &self,
         quart_x: i32,
@@ -208,10 +217,6 @@ impl BiomeSource for TheEndBiomeSource {
         } else {
             self.barrens.clone()
         }
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
     }
 }
 
