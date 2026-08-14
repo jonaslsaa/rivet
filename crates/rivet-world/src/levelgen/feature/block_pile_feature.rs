@@ -13,7 +13,7 @@
 //! `Block.UPDATE_NONE` (260) when the cell is empty and `mayPlaceOn` passes —
 //! `below.is(Blocks.DIRT_PATH) ? nextBoolean() : below.isFaceSturdy(level,
 //! below, Direction.UP)` (the `WorldGenLevel::is_face_sturdy` seam, RivetTodo
-//! #399). Always returns `true` once the `y` gate passes.
+//! #232). Always returns `true` once the `y` gate passes.
 //!
 //! The `stateProvider.getState` call dispatches through the
 //! `block_state_provider_get_state` hub (the `#181` dispatch surface); the
