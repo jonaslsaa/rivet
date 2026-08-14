@@ -78,14 +78,14 @@ impl WorldGenSettings {
     ///
     /// The level-stem registry element is the #213 placeholder
     /// (`WorldDimensions::from_registry`), so the factory is a typed seam: the
-    /// world-creation flow that holds the registry access lands with the
-    /// dimension/storage units (RivetTodo #388).
+    /// world-creation flow that holds the registry access lands with the #213
+    /// registry element.
     pub fn of(
         _options: WorldOptions,
         _registry_access: &rivet_registry::access::RegistryAccess,
     ) -> Self {
         panic!(
-            "WorldGenSettings.of is not implemented (RivetTodo #388): needs RegistryAccess.lookupOrThrow(LEVEL_STEM) over the #213 level-stem element placeholder"
+            "WorldGenSettings.of is not implemented (RivetTodo #213): needs RegistryAccess.lookupOrThrow(LEVEL_STEM) over the #213 level-stem element placeholder"
         )
     }
 
