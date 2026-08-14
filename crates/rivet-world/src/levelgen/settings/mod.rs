@@ -10,8 +10,8 @@
 //!   value shell the record stores (the real `LevelStem` lives with the
 //!   pending `mc.world.level.dimension` unit).
 //! - [`world_gen_settings`] — `WorldGenSettings` (options + dimensions + the
-//!   `SavedDataType` shell; the `SavedData` base defers with
-//!   `mc.world.level.saveddata`, #421).
+//!   `SavedDataType` `TYPE` handle over the `SavedData`/`SavedDataType` base and
+//!   `DataFixTypes` from the `mc.world.level.saveddata` unit, #421).
 //! - [`geode_block_settings`] / [`geode_crack_settings`] / [`geode_layer_settings`]
 //!   — the geode feature's three settings records.
 //! - [`below_zero_retrogen`] — `BelowZeroRetrogen` (the below-zero retrogen
