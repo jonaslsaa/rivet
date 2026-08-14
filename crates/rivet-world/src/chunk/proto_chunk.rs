@@ -12,10 +12,12 @@
 //! Deferred with their owning units:
 //! - `getFluidState` (the `FluidState` type lives with the material/block-state
 //!   units);
-//! - `setBlockState`'s block-state mutation and the `INITIALIZE_LIGHT`-status
-//!   light writes (the #216 section write); its heightmap half is ported here
-//!   as [`ProtoChunk::update_heightmaps_after`] (#287), which #216 calls after
-//!   the section's `setBlockState`;
+//! - `setBlockState`'s `INITIALIZE_LIGHT`-status light writes (the #216
+//!   section write's light half; a worldgen `ProtoChunk` is always below that
+//!   status). The section write itself and its heightmap half
+//!   ([`ProtoChunk::update_heightmaps_after`], #287) are implemented here —
+//!   the #216 section write calls `update_heightmaps_after` after the section's
+//!   `setBlockState`;
 //! - `setBlockEntity`/`getBlockEntity`/`getBlockEntities` (the block-entity
 //!   unit); the port keeps `pendingBlockEntities` on the base and
 //!   `removeBlockEntity`'s pending half;
