@@ -12,8 +12,9 @@
 //! else a `nextFloat < 0.05` draw may top it with a sea pickle (its `pickles`
 //! count from a `nextInt(4)` draw), and each of the four horizontal faces gets
 //! a `nextFloat < 0.2` draw that may attach a random `#minecraft:wall_corals`
-//! fan (its `facing` set from the face when it carries the property). All the
-//! topping writes use `Block.UPDATE_CLIENTS` (2).
+//! fan (its `HORIZONTAL_FACING` set from the face when it carries the
+//! property — the `facing` property the wall-fan shapes carry). All the topping
+//! writes use `Block.UPDATE_CLIENTS` (2).
 //!
 //! The RNG order is load-bearing: the `#coral_blocks` draw, then the subclass's
 //! shape draws, then per-cell the `placeCoralBlock` draws exactly as Java's
@@ -98,10 +99,10 @@ pub(crate) fn place_coral_block<R: RandomSource>(
                 && level.get_block_state(&relative).block() == Blocks::WATER.id()
                 && let Some(coral) = tag_random_block_state("minecraft:wall_corals", random)
             {
-                let state = if coral.has_property(BlockStateProperties::FACING) {
+                let state = if coral.has_property(BlockStateProperties::HORIZONTAL_FACING) {
                     coral
-                        .set_value(BlockStateProperties::FACING, *direction)
-                        .expect("wall coral carries the facing property")
+                        .set_value(BlockStateProperties::HORIZONTAL_FACING, *direction)
+                        .expect("wall coral carries the horizontal facing property")
                 } else {
                     coral
                 };
@@ -136,7 +137,9 @@ pub(crate) fn place_coral<
 mod tests {
     use super::*;
     use crate::levelgen::feature::test_support::{RecordingRandom, RngCall, TestLevel, access};
+    use rivet_registry::core::Direction;
     use rivet_registry::generated::blocks::BlockId;
+    use rivet_util::random::LegacyPositionalRandomFactory;
 
     fn water() -> BlockState {
         BlockState::of(BlockId::from_name("minecraft:water").unwrap())
@@ -248,5 +251,99 @@ mod tests {
             random.calls,
             vec![RngCall::IntBound(10), RngCall::IntBound(5)]
         );
+    }
+
+    /// A scripted `RandomSource` that returns queued values in draw order
+    /// (popping from the front), so the topping draws can be driven onto the
+    /// exact branch — e.g. force the `0.2` wall-coral roll and the
+    /// `wall_corals` tag index. Only the draws `place_coral_block` performs are
+    /// implemented; the others panic rather than silently wrong-path.
+    struct ScriptedRandom {
+        values: std::collections::VecDeque<f32>,
+    }
+
+    impl RandomSource for ScriptedRandom {
+        type Positional = LegacyPositionalRandomFactory;
+
+        fn fork(&mut self) -> Self {
+            Self {
+                values: self.values.clone(),
+            }
+        }
+        fn fork_positional(&mut self) -> Self::Positional {
+            LegacyPositionalRandomFactory::new(0)
+        }
+        fn set_seed(&mut self, _seed: i64) {}
+        fn next_int(&mut self) -> i32 {
+            panic!("ScriptedRandom has no next_int draw scripted")
+        }
+        fn next_int_bound(&mut self, _bound: i32) -> i32 {
+            self.values.pop_front().expect("ScriptedRandom exhausted") as i32
+        }
+        fn next_long(&mut self) -> i64 {
+            panic!("ScriptedRandom has no next_long draw scripted")
+        }
+        fn next_boolean(&mut self) -> bool {
+            panic!("ScriptedRandom has no next_boolean draw scripted")
+        }
+        fn next_float(&mut self) -> f32 {
+            self.values.pop_front().expect("ScriptedRandom exhausted")
+        }
+        fn next_double(&mut self) -> f64 {
+            panic!("ScriptedRandom has no next_double draw scripted")
+        }
+        fn next_gaussian(&mut self) -> f64 {
+            panic!("ScriptedRandom has no next_gaussian draw scripted")
+        }
+    }
+
+    /// The wall-fan topping writes the fan with its `HORIZONTAL_FACING` set
+    /// from the attaching face — Java's `BaseCoralWallFanBlock.FACING`, the
+    /// 4-way `facing` the wall-fan shapes carry (not the 6-way `FACING`). The
+    /// scripted draws roll the `0.25`/`0.05` topping gates over their
+    /// thresholds, force the `0.2` rolls on the north and south faces, and
+    /// resolve the `wall_corals` tag to `tube_coral_wall_fan` /
+    /// `brain_coral_wall_fan`, so exactly the two fans write and each carries
+    /// its face's facing.
+    #[test]
+    fn wall_fan_writes_carry_the_horizontal_facing() {
+        let mut level = TestLevel::over(access());
+        level.states.insert(BlockPos::new(0, 0, 0), water());
+        level.states.insert(BlockPos::new(0, 1, 0), water());
+        for pos in [
+            BlockPos::new(0, 0, -1), // north
+            BlockPos::new(1, 0, 0),  // east
+            BlockPos::new(0, 0, 1),  // south
+            BlockPos::new(-1, 0, 0), // west
+        ] {
+            level.states.insert(pos, water());
+        }
+        let mut random = ScriptedRandom {
+            values: [0.5, 0.5, 0.1, 0.0, 0.5, 0.1, 1.0, 0.5]
+                .into_iter()
+                .collect(),
+        };
+        let pos = BlockPos::new(0, 0, 0);
+        assert!(place_coral_block(&mut level, &mut random, &pos, coral()));
+
+        let expected_north =
+            BlockState::of(BlockId::from_name("minecraft:tube_coral_wall_fan").unwrap())
+                .set_value(BlockStateProperties::HORIZONTAL_FACING, Direction::North)
+                .unwrap();
+        let expected_south =
+            BlockState::of(BlockId::from_name("minecraft:brain_coral_wall_fan").unwrap())
+                .set_value(BlockStateProperties::HORIZONTAL_FACING, Direction::South)
+                .unwrap();
+
+        assert_eq!(
+            level.states.get(&BlockPos::new(0, 0, -1)).copied().unwrap(),
+            expected_north
+        );
+        assert_eq!(
+            level.states.get(&BlockPos::new(0, 0, 1)).copied().unwrap(),
+            expected_south
+        );
+        // The coral block cell plus the two wall fans — nothing else writes.
+        assert_eq!(level.writes.len(), 3);
     }
 }
