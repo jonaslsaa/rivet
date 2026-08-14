@@ -65,9 +65,8 @@ fn get_state_with_connections(
     // the passed-in default state's block (Java's `getStateWithConnections`),
     // not a hardcoded constant.
     let block = crate::block::Block::new(default_state.block());
-    let connect = |state: BlockState| {
-        is_block(state, block) || is_block(state, Blocks::CHORUS_FLOWER)
-    };
+    let connect =
+        |state: BlockState| is_block(state, block) || is_block(state, Blocks::CHORUS_FLOWER);
     default_state
         .try_set_value(
             BlockStateProperties::DOWN,
@@ -165,7 +164,8 @@ fn grow_tree_recursive<R: RandomSource>(
                 [random.next_int_bound(Plane::Horizontal.faces().len() as i32) as usize];
             let target = current.above_steps(height).relative(&direction);
             if mth::abs_i32(target.get_x().wrapping_sub(start_pos.get_x())) < max_horizontal_spread
-                && mth::abs_i32(target.get_z().wrapping_sub(start_pos.get_z())) < max_horizontal_spread
+                && mth::abs_i32(target.get_z().wrapping_sub(start_pos.get_z()))
+                    < max_horizontal_spread
                 && level.is_empty_block(&target)
                 && level.is_empty_block(&target.below())
                 && all_neighbors_empty(level, &target, Some(direction.get_opposite()))

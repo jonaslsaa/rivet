@@ -212,8 +212,8 @@ pub use chorus_plant_feature::{CHORUS_PLANT, ChorusPlantFeature};
 pub use end_island_feature::{END_ISLAND, EndIslandFeature};
 pub use end_platform_feature::{END_PLATFORM, EndPlatformFeature};
 pub use end_podium_feature::{
-    CORNER_ROUNDING, EndPodiumFeature, get_location, PODIUM_PILLAR_HEIGHT, PODIUM_RADIUS,
-    RIM_RADIUS,
+    CORNER_ROUNDING, EndPodiumFeature, PODIUM_PILLAR_HEIGHT, PODIUM_RADIUS, RIM_RADIUS,
+    get_location,
 };
 pub use void_start_platform_feature::{
     PLATFORM_OFFSET, PLATFORM_ORIGIN_CHUNK, PLATFORM_RADIUS, PLATFORM_RADIUS_CHUNKS,
