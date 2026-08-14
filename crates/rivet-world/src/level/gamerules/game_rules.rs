@@ -24,7 +24,7 @@ use crate::level::gamerules::game_rule::{
     ArgumentErased, GameRuleErased, GameRuleValue, GameRuleValueCodec, VisitorCaller,
 };
 use crate::level::gamerules::game_rule_category::GameRuleCategory;
-use crate::level::gamerules::game_rule_map;
+use crate::level::gamerules::game_rule_map::{self, GameRuleMap};
 use crate::level::gamerules::game_rule_type::GameRuleType;
 use crate::level::gamerules::game_rule_type_visitor::GameRuleTypeVisitor;
 use rivet_brigadier::arguments::bool_argument_type::BoolArgumentType;
@@ -457,14 +457,12 @@ pub fn bootstrap() -> Arc<GameRuleErased> {
 /// `visitGameRuleTypes`) lands with the server runtime. This unit ports the
 /// game-rule values, the map and the registry.
 ///
-/// `GameRuleMap.CODEC` accessor — the value codec this unit owns (the
-/// dispatched-map codec against the built-in GAME_RULE registry).
-pub fn game_rule_map_codec<Ops: rivet_serialization::dynamic_ops::DynamicOps + 'static>() -> Arc<
-    dyn rivet_serialization::codec::Codec<
-            std::collections::HashMap<Arc<GameRuleErased>, GameRuleValue>,
-            Ops,
-        >,
-> {
+/// `GameRuleMap.CODEC` — the `Codec<GameRuleMap>` the deferred GameRules
+/// aggregate's `GameRuleMap.CODEC.xmap(...)` builds on (the dispatched-map
+/// codec against the built-in GAME_RULE registry, wrapped by the
+/// `ofTrusted`/`map` conversion in `game_rule_map::codec`).
+pub fn game_rule_map_codec<Ops: rivet_serialization::dynamic_ops::DynamicOps + 'static>()
+-> Arc<dyn rivet_serialization::codec::Codec<GameRuleMap, Ops>> {
     game_rule_map::codec::<Ops>(built_in_registry())
 }
 
@@ -602,9 +600,9 @@ mod tests {
             .cloned()
             .unwrap();
 
-        let mut map = std::collections::HashMap::new();
-        map.insert(advance_time.clone(), GameRuleValue::Bool(false));
-        map.insert(random_tick_speed, GameRuleValue::Int(7));
+        let mut map = GameRuleMap::of();
+        map.set(&advance_time, GameRuleValue::Bool(false));
+        map.set(&random_tick_speed, GameRuleValue::Int(7));
 
         let encoded = codec
             .encode_start(&ops, &map)
@@ -634,11 +632,8 @@ mod tests {
 
         let parsed = codec.parse(&ops, &encoded);
         let decoded = parsed.result().expect("decode should succeed");
-        assert_eq!(decoded.len(), 2);
-        assert_eq!(
-            decoded.get(&advance_time),
-            Some(&GameRuleValue::Bool(false))
-        );
+        assert_eq!(decoded.size(), 2);
+        assert_eq!(decoded.get(&advance_time), Some(GameRuleValue::Bool(false)));
     }
 
     /// The dispatched-map codec rejects an out-of-range value for an integer

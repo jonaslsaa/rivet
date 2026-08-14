@@ -20,8 +20,8 @@
 //! ## Ownership and deferrals
 //!
 //! - `GameRuleMap extends SavedData` — the SavedData `dirty` flag is embedded
-//!   directly; the `SavedDataType<TYPE>` registration (`RivetTodo(#388)`)
-//!   defers with the saveddata unit.
+//!   directly; the `SavedDataType<TYPE>` registration is wired as the
+//!   [`game_rule_map::TYPE`] static (the saveddata unit is merged).
 //! - `GameRules` (the aggregate: the `rules` field, `get`/`set`/`copy`/
 //!   `setAll`/`setFromOther` with the `@Nullable ServerLevel`
 //!   `onGameRuleChanged` callback seam, `availableRules`, `getAsString`,

@@ -8,8 +8,8 @@
 //!
 //! `GameRuleMap extends SavedData`: the port embeds the SavedData dirty flag
 //! directly. The `SavedDataType<TYPE>` registration (`Identifier
-//! "game_rules"`, `DataFixTypes.SAVED_DATA_GAME_RULES`) is deferred with the
-//! `mc.world.level.saveddata` unit (`RivetTodo(#388)` marker below).
+//! "game_rules"`, `DataFixTypes.SAVED_DATA_GAME_RULES`) is wired below as the
+//! `TYPE` `LazyLock` static — the `mc.world.level.saveddata` unit is merged.
 //!
 //! ## The dispatched-map codec
 //!
@@ -24,7 +24,9 @@
 
 use crate::level::gamerules::game_rule::{self, GameRuleErased, GameRuleValue};
 use crate::level::gamerules::game_rules;
-use rivet_registry::Registry;
+use crate::level::saveddata::saved_data_type::SavedDataType;
+use crate::level::saveddata::stub_data_fix_types::DataFixTypes;
+use rivet_registry::{Identifier, Registry};
 use rivet_serialization::codec::Codec;
 use rivet_serialization::data_result::DataResult;
 use rivet_serialization::dynamic_ops::DynamicOps;
@@ -35,7 +37,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::{self, Debug};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 /// `GameRuleMap` — the `Reference2ObjectMap<GameRule<?>, Object>` value map
 /// plus Paper's array-backed `idAccess`. The map is keyed by game-rule
@@ -50,14 +52,11 @@ use std::sync::Arc;
 /// tick-thread-confined (OWNERSHIP.md D5), so the interior mutability is
 /// single-thread `RefCell`, not `Arc<RwLock>`.
 ///
-/// `GameRuleMap.TYPE` (deferred) — the `SavedDataType<GameRuleMap>` with key
+/// `GameRuleMap.TYPE` — the `SavedDataType<GameRuleMap>` with key
 /// `"game_rules"`. `SavedDataType` is owned by the `mc.world.level.saveddata`
-/// unit; this unit defers the registration. The `CODEC` is still ported here
-/// (the value codec is this unit's own surface).
-///
-/// RivetTodo(#388): `SavedDataType` unported — the `GameRuleMap.TYPE` stateless
-/// registration (key `minecraft:game_rules`, `GameRuleMap::of` default, `CODEC`,
-/// `DataFixTypes.SAVED_DATA_GAME_RULES`) lands with the saveddata unit.
+/// unit (merged). The `CODEC` is ported here (the value codec is this unit's
+/// own surface); `TYPE` is the `LazyLock` static mirroring Java's `static
+/// final`, pinned to `NbtOps` for the disk runtime.
 ///
 /// No `Clone`: Java's `GameRuleMap` has no public copy — `copyOf` is the only
 /// copy path and always produces a clean map (the private constructor never
@@ -524,16 +523,41 @@ impl<Ops: DynamicOps + 'static> Codec<HashMap<Arc<GameRuleErased>, GameRuleValue
 {
 }
 
-/// `GameRuleMap.CODEC` — the dispatched-map codec `.xmap(ofTrusted, map)`,
-/// ops-generic. The decode map's key type is the identity-keyed
-/// `HashMap` the map-builder round-trips.
+/// `GameRuleMap.CODEC` — `Codec.<GameRule<?>, Object>dispatchedMap(
+/// BuiltInRegistries.GAME_RULE.byNameCodec(), GameRule::valueCodec).xmap(
+/// GameRuleMap::ofTrusted, GameRuleMap::map)`, ops-generic. Java's `static
+/// final Codec<GameRuleMap>`: the dispatched-map value codec (see
+/// `DispatchedMapCodec`) with the `ofTrusted`/`map` conversion. Decode wraps
+/// the identity-keyed map; encode clones the shared map (the codec's encode
+/// path only iterates the entries, so the clone is functionally identical to
+/// Java's reference access).
 pub fn codec<Ops: DynamicOps + 'static>(
     game_rule_registry: &Registry<GameRuleErased>,
-) -> Arc<dyn Codec<HashMap<Arc<GameRuleErased>, GameRuleValue>, Ops>> {
-    Arc::new(DispatchedMapCodec::new(
-        game_rule_registry.by_name_codec::<Ops>(),
-    ))
+) -> Arc<dyn Codec<GameRuleMap, Ops>> {
+    rivet_serialization::codec::xmap(
+        Arc::new(DispatchedMapCodec::new(
+            game_rule_registry.by_name_codec::<Ops>(),
+        )),
+        Arc::new(|map: &HashMap<Arc<GameRuleErased>, GameRuleValue>| {
+            GameRuleMap::of_trusted(map.clone())
+        }),
+        Arc::new(|game_rule_map: &GameRuleMap| game_rule_map.map.borrow().clone()),
+    )
 }
+
+/// `GameRuleMap.TYPE` — `new SavedDataType<>(
+/// Identifier.withDefaultNamespace("game_rules"), GameRuleMap::of, CODEC,
+/// DataFixTypes.SAVED_DATA_GAME_RULES)`. Java's `static final TYPE` singleton is
+/// a `LazyLock` static in the port, mirroring the saveddata unit's `TYPE`
+/// handles; the codec slot is the NbtOps-pinned CODEC the disk runtime uses.
+pub static TYPE: LazyLock<SavedDataType<GameRuleMap>> = LazyLock::new(|| {
+    SavedDataType::new(
+        Identifier::with_default_namespace("game_rules"),
+        Arc::new(GameRuleMap::of),
+        codec::<rivet_nbt::nbt_ops::NbtOps>(game_rules::built_in_registry()),
+        DataFixTypes::SavedDataGameRules,
+    )
+});
 
 #[cfg(test)]
 mod tests {
@@ -671,5 +695,105 @@ mod tests {
         builder.set(&advance_time, GameRuleValue::Bool(false));
         assert_eq!(copy.get(&advance_time), Some(GameRuleValue::Bool(true)));
         assert_eq!(copy.size(), 2);
+    }
+
+    /// `GameRuleMap.TYPE` — the `SavedDataType<GameRuleMap>` handle with key
+    /// `minecraft:game_rules`, the `GameRuleMap::of` default constructor, the
+    /// NbtOps-pinned CODEC, and `SAVED_DATA_GAME_RULES` (Java's `static final
+    /// TYPE`). The constructor produces a fresh empty clean map (`of()`), exactly
+    /// the Java method reference.
+    #[test]
+    fn type_has_expected_identity() {
+        let t: &SavedDataType<GameRuleMap> = &TYPE;
+        assert_eq!(t.id().to_string(), "minecraft:game_rules");
+        assert_eq!(t.data_fix_type(), DataFixTypes::SavedDataGameRules);
+        assert_eq!(t.to_string(), "SavedDataType[minecraft:game_rules]");
+        let constructed = (t.constructor())();
+        assert_eq!(constructed.size(), 0);
+        assert!(!constructed.is_dirty());
+    }
+
+    /// The TYPE codec is Java's `CODEC` (the dispatched map `.xmap(ofTrusted,
+    /// map)`): a game-rule map round-trips through NbtOps with per-key value
+    /// codecs, and `ofTrusted` wraps a fresh map with the same entries, clean
+    /// (the codec's encode path never marks dirty).
+    #[test]
+    fn type_codec_round_trips_through_nbt() {
+        use rivet_nbt::nbt_ops::NbtOps;
+
+        let ops = NbtOps::instance();
+        let registry = built_in_registry();
+        let advance_time = registry.by_id_arc(0).cloned().unwrap();
+
+        let mut map = GameRuleMap::of();
+        map.set(&advance_time, GameRuleValue::Bool(false));
+
+        let codec = TYPE.codec();
+        let encoded = codec
+            .encode_start(&ops, &map)
+            .result()
+            .expect("encode must succeed")
+            .clone();
+        let decoded = codec
+            .decode(&ops, &encoded)
+            .result_or_partial_silent()
+            .expect("decode must succeed")
+            .0;
+        // `decoded` is the fresh `ofTrusted` wrapper built from the encoded
+        // entries, equal to the source and clean (Java's `ofTrusted` never
+        // calls `setDirty`).
+        assert_eq!(&decoded, &map);
+        assert!(!decoded.is_dirty());
+        assert_eq!(decoded.get(&advance_time), Some(GameRuleValue::Bool(false)));
+    }
+
+    /// Malformed/hostile inputs to the TYPE codec: an unknown rule name fails
+    /// the key codec, a wrong-typed value fails the per-key value codec, and a
+    /// non-map input fails `ops.getMap`.
+    #[test]
+    fn type_codec_rejects_malformed_inputs() {
+        use rivet_nbt::byte_tag::ByteTag;
+        use rivet_nbt::compound_tag::CompoundTag;
+        use rivet_nbt::int_tag::IntTag;
+        use rivet_nbt::nbt_ops::NbtOps;
+        use rivet_nbt::string_tag::StringTag;
+        use rivet_nbt::tag::Tag;
+
+        let ops = NbtOps::instance();
+        let codec = TYPE.codec();
+
+        // Unknown rule name — the key codec (`byNameCodec`) errors.
+        let mut unknown = CompoundTag::new();
+        unknown.put("bogus_rule".to_string(), Tag::Byte(ByteTag::value_of(1)));
+        assert!(
+            codec
+                .decode(&ops, &Tag::Compound(unknown))
+                .result()
+                .is_none()
+        );
+
+        // Wrong-typed value for a boolean rule — `Codec.BOOL` (an NBT byte)
+        // rejects a string.
+        let registry = built_in_registry();
+        let advance_time = registry.by_id_arc(0).cloned().unwrap();
+        let mut wrong_value = CompoundTag::new();
+        wrong_value.put(
+            advance_time.id().to_string(),
+            Tag::String(StringTag::value_of("nope".to_string())),
+        );
+        assert!(
+            codec
+                .decode(&ops, &Tag::Compound(wrong_value))
+                .result()
+                .is_none()
+        );
+
+        // A non-map input fails `ops.getMap` before the entry parse.
+        assert!(
+            codec
+                .decode(&ops, &Tag::Int(IntTag::new(5)))
+                .result()
+                .is_none()
+        );
     }
 }
