@@ -31,6 +31,8 @@
 //! (computed once at construction from `rivet_world::superflat`) instead of
 //! the `LevelLightEngine`; the lighting engine unit replaces it when it lands.
 
+use std::collections::HashMap;
+
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_protocol::protocol::game::heightmap_types::HeightmapType;
 use rivet_protocol::protocol::game::level_chunk_packet_data::{
@@ -286,10 +288,21 @@ impl LevelChunk {
     /// packet light payload is derived once through the #184 send seam. The
     /// caller installs nothing: this is a pure value conversion.
     ///
-    /// The proto carries no unpacked ticks and no raw `structures.starts` (its
-    /// `status`, `entities`, and `carving_mask` are proto-only and are not part
-    /// of the promoted base), so the server chunk starts with empty tick vectors
-    /// and no structure starts — nothing is fabricated.
+    /// Structure data the proto carries survives the promotion: `map_values`
+    /// reinstalls the base's `StructureAccess` authority wholesale, so any
+    /// starts/references on the proto are preserved (Java's `setAllStarts(
+    /// protoChunk.getAllStarts())` + `setAllReferences(...)` in the same
+    /// constructor). The typed `HashMap<StructureKey, i64>` starts remain the
+    /// `i64` stand-in for the unported `StructureStart` (#369), readable through
+    /// [`Self::get_all_starts`]. The raw `structures.starts` compound field
+    /// ([`Self::structure_starts`]) stays `None` — that verbatim carry belongs
+    /// to the region-reconstruction path only, and no fabricated starts are
+    /// ever produced.
+    ///
+    /// The proto carries no unpacked ticks (they live on the deferred
+    /// `ProtoChunkTicks` containers), so the server chunk starts with empty
+    /// tick vectors — nothing is fabricated. Its `status`, `entities`, and
+    /// `carving_mask` are proto-only and are not part of the promoted base.
     ///
     /// The FULL-only authority rule is loud and atomic: every status short of
     /// genuine persisted `FULL` is rejected with a typed [`LevelChunkBridgeError::NotFull`]
@@ -511,6 +524,23 @@ impl LevelChunk {
         materialize_block_entities(&outcomes)
     }
 
+    /// `ChunkAccess.getAllStarts()` — the typed structure-starts authority on
+    /// the base (`StructureAccess`, #537). `StructureStart` is unported
+    /// (#369), so each value is the `i64` stand-in; a generated proto's starts
+    /// carry through the FULL promotion untouched, and the region
+    /// reconstruction installs none (the raw `structures.starts` compound is
+    /// carried separately as [`Self::structure_starts`]).
+    pub fn get_all_starts(&self) -> &HashMap<StructureKey, i64> {
+        self.chunk.get_all_starts()
+    }
+
+    /// `ChunkAccess.setAllStarts(Map)` — the typed structure-starts runtime
+    /// mutator (#537): clear + putAll into the chunk's `StructureAccess`
+    /// authority.
+    pub fn set_all_starts(&mut self, starts: HashMap<StructureKey, i64>) {
+        self.chunk.set_all_starts(starts);
+    }
+
     /// The decoded `structures.References` after the >8-chunk distance filter
     /// (#369) — derived from the chunk's `StructureAccess` authority (#537), in
     /// deterministic key-insertion order.
@@ -683,9 +713,7 @@ pub enum LevelChunkBridgeError {
     /// be promoted to a loaded chunk. [`LevelChunk::try_from_full_proto`]
     /// rejects every pre-FULL status before consuming the proto, so the proto
     /// is untouched (atomic refusal).
-    #[error(
-        "UNVERIFIED generated chunk at status {0:?} is not FULL; refusing to promote a non-full chunk"
-    )]
+    #[error("generated chunk at status {0:?} is not FULL; refusing to promote a non-full chunk")]
     NotFull(ChunkStatus),
     /// The chunk carries a persisted Starlight state the #184 send seam cannot
     /// represent.
@@ -1375,9 +1403,12 @@ mod tests {
     /// the chunk position, the stone block mapped to the dense `StateId(1)`,
     /// the worldgen biome mapped by identity (`WorldgenBiomeId(1)` →
     /// `BiomeId(1)`; the default stays plains `BiomeId(40)`), the light
-    /// payload derived through the #184 seam, and no fabricated ticks or
-    /// structure starts — the `new LevelChunk(ServerLevel, ProtoChunk,
-    /// PostLoadProcessor)` promotion surface.
+    /// payload derived through the #184 seam, and no fabricated ticks or raw
+    /// `structures.starts` compound — the `new LevelChunk(ServerLevel,
+    /// ProtoChunk, PostLoadProcessor)` promotion surface. This proto was never
+    /// given structure starts, so the typed `StructureAccess` authority is
+    /// empty too; the carry-through of starts a proto *does* carry is covered
+    /// by its own test.
     #[test]
     fn full_proto_promotes_blocks_biomes_position_and_aux() {
         let chunk = LevelChunk::try_from_full_proto(build_full_proto(ChunkPos::new(3, -2)))
@@ -1398,11 +1429,14 @@ mod tests {
         assert_eq!(section0.biomes().get(0, 0, 0), BiomeId(1));
         assert_eq!(section0.biomes().get(1, 1, 1), BiomeId(40));
 
-        // No fabricated ticks or structure starts: the proto carries neither,
-        // so the promoted chunk starts empty.
+        // No fabricated ticks (they live on the deferred proto containers) and
+        // no raw `structures.starts` compound (that verbatim carry belongs to
+        // the region-reconstruction path only); this proto was never given any
+        // typed starts either, so the authority is empty too.
         assert!(chunk.stored_block_ticks().is_empty());
         assert!(chunk.stored_fluid_ticks().is_empty());
         assert!(chunk.structure_starts().is_none());
+        assert!(chunk.get_all_starts().is_empty());
 
         // The light payload is derived once through the #184 send seam (the
         // default `Null` nibbles → no sky/block update layers).
@@ -1411,6 +1445,42 @@ mod tests {
         assert!(light.block_y_mask().is_empty());
         assert!(light.sky_updates().is_empty());
         assert!(light.block_updates().is_empty());
+    }
+
+    /// A `FULL` proto's typed structure starts and references carry through
+    /// the promotion untouched: `map_values` reinstalls the base's
+    /// `StructureAccess` authority wholesale, mirroring Java's
+    /// `setAllStarts(protoChunk.getAllStarts())` +
+    /// `setAllReferences(protoChunk.getAllReferences())` in the same
+    /// constructor. A proto given a real `StructureKey` start exposes it on
+    /// the promoted chunk — no silent drop.
+    #[test]
+    fn structure_starts_and_references_carry_through_the_conversion() {
+        let mut proto = build_full_proto(ChunkPos::new(2, -1));
+        proto.set_start_for_structure(Identifier::parse("minecraft:village"), 42);
+        proto.add_reference_for_structure(Identifier::parse("minecraft:village"), 7);
+
+        let chunk = LevelChunk::try_from_full_proto(proto).expect("a FULL proto promotes");
+
+        // The typed starts authority carries the exact payload.
+        let starts = chunk.get_all_starts();
+        assert_eq!(starts.len(), 1);
+        assert_eq!(
+            starts.get(&Identifier::parse("minecraft:village")),
+            Some(&42)
+        );
+
+        // The references authority carries too, observable through the derived
+        // `structures_references` (deterministic key-insertion order).
+        let references = chunk.structures_references();
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].identifier.to_string(), "minecraft:village");
+        assert_eq!(references[0].references, vec![7]);
+
+        // The raw `structures.starts` compound stays `None` — that verbatim
+        // carry belongs to the region-reconstruction path only, and is never
+        // fabricated for the generated path.
+        assert!(chunk.structure_starts().is_none());
     }
 
     /// Every persisted status short of genuine `FULL` is refused atomically
