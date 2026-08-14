@@ -85,18 +85,30 @@
 //! one accepted divergence being a rule that writes `AIR` over the topmost
 //! `defaultBlock`). The `Biome`-value reads (`coldEnoughToSnow`,
 //! `shouldMeltFrozenOceanIcebergSlightly`) are the biome-value seams
-//! (RivetTodo #185). `SurfaceRuleData.end` is ported (the
-//! end-stone `block` rule); the `nether`/`overworld`/`overworldLike` builders
-//! remain AIR shims (the `mc.data.worldgen` unit, RivetTodo #179) because a
-//! faithful port needs the biome `HolderGetter` threaded through the settings
-//! bootstrap. The `@Deprecated` single-column [`SurfaceSystem::top_material`]
-//! probe (the carver's grass-replacement call) is ported and composed into the
-//! carver `CarvingContext` seam through [`bind_carver_top_material`]; the
-//! production carver loop that binds it defers (RivetTodo #185).
+//! (RivetTodo #185). `SurfaceRuleData.end` is ported (the end-stone `block`
+//! rule), and `SurfaceRuleData.nether`/`overworld`/`overworldLike` are ported
+//! faithfully (the `mc.data.worldgen` unit, RivetTodo #179) with the biome
+//! `HolderGetter` threaded through the settings bootstrap (the
+//! `noise_generator_settings` callers).
+//!
+//! RivetTodo(#179): the `is_biome` `HolderSet`s the builders resolve are
+//! bound to whatever `HolderGetter<BiomeId>` is handed in. The bootstrap-time
+//! registries (the `worldgen_bootstraps` access and the unit-test accesses)
+//! freeze their own biome registries with fabricated `BiomeId` handles, so the
+//! surface-rule holder identity will NOT match the runtime biome-source
+//! registry until the `#185`/`#177` wiring resolves the same registry both the
+//! `BiomeCondition` and the biome source read. Encode is byte-exact today; the
+//! apply path must not compare holders across registries until then.
+//! The `@Deprecated` single-column [`SurfaceSystem::top_material`] probe (the
+//! carver's grass-replacement call) is ported and composed into the carver
+//! `CarvingContext` seam through [`bind_carver_top_material`]; the production
+//! carver loop that binds it defers (RivetTodo #185).
 
-use crate::biome::{BiomeManager, dense_biome_id};
-use crate::block::BlockState;
+use crate::biome::BiomeManager;
+use crate::biome::biomes;
+use crate::biome::dense_biome_id;
 use crate::block::blocks::Blocks;
+use crate::block::{Block, BlockState};
 use crate::chunk::block_column::BlockColumn;
 use crate::level::dimension::dimension_type::WAY_BELOW_MIN_Y;
 use crate::levelgen::carver::carving_context::CarvingContext;
@@ -113,6 +125,7 @@ use rivet_registry::ResourceKey;
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::core::{BlockPos, ChunkPos, MutableBlockPos};
 use rivet_registry::holder::Holder;
+use rivet_registry::holder_lookup::HolderGetter;
 use rivet_registry::holder_set::HolderSet;
 use rivet_registry::registry_file_codec::{HolderSetCodec, RegistryFixedCodec};
 use rivet_registry::registry_ops::RegistryOpsLookup;
@@ -3072,54 +3085,688 @@ impl BlockColumn<BlockState> for ChunkColumnAdapter<'_> {
 
 // ---------------------------------------------------------------------------
 // SurfaceRuleData builders (the `mc.data.worldgen` unit's static surface, kept
-// here so `noise_generator_settings.rs` compiles unchanged)
+// here so `noise_generator_settings.rs` can compose the real preset trees)
 // ---------------------------------------------------------------------------
+
+/// `SurfaceRuleData.makeStateRule(Block)` — `SurfaceRules.state(block.defaultBlockState())`.
+fn make_state_rule(block: Block) -> ArcRuleSource {
+    state(block.default_block_state())
+}
 
 /// `SurfaceRuleData.air()` — Java's `makeStateRule(Blocks.AIR)` = a `block`
 /// rule carrying the air default state (`SurfaceRules.state`), so it encodes
 /// through the `block` `MATERIAL_RULE` arm exactly like Java.
 pub fn surface_rule_air() -> ArcRuleSource {
-    state(Blocks::AIR.default_block_state())
+    make_state_rule(Blocks::AIR)
 }
 
 /// `SurfaceRuleData.end()` — Java's `return ENDSTONE` =
 /// `makeStateRule(Blocks.END_STONE)` (a `block` rule carrying the end-stone
 /// default state). The end preset's real surface rule.
 pub fn surface_rule_end() -> ArcRuleSource {
-    state(Blocks::END_STONE.default_block_state())
+    make_state_rule(Blocks::END_STONE)
+}
+
+/// `SurfaceRuleData.surfaceNoiseAbove(double)` — the private
+/// `noiseCondition2d(Noises.SURFACE, threshold / 8.25, Double.MAX_VALUE)`
+/// helper.
+fn surface_noise_above(threshold: f64) -> Arc<dyn ConditionSource> {
+    noise_condition_2d_range((*noises::SURFACE).clone(), threshold / 8.25, f64::MAX)
 }
 
 /// `SurfaceRuleData.nether(HolderGetter<Biome>)` — the lava/nylium/soul-sand/
-/// gravel nether surface tree. The port keeps an AIR shim (a `block` rule so
-/// the value still round-trips through `rule_source_codec`): a faithful port
-/// needs the biome `HolderGetter` threaded through the settings bootstrap (the
-/// `mc.data.worldgen` unit, RivetTodo #179) and the biome-value registry
-/// (`RivetTodo #185`/`#178`). Until the `build_surface` production wire
-/// (RivetTodo #177) lands, the shim is inert; once it lands, the nether preset
-/// would silently get an all-air surface — this is the tracked deferral.
-pub(crate) fn surface_rule_nether() -> ArcRuleSource {
-    state(Blocks::AIR.default_block_state())
+/// gravel nether surface tree, ported faithfully from `SurfaceRuleData.java`.
+///
+/// The `HolderGetter<Biome>` resolves each `Biomes.*` key through
+/// `HolderSet.direct(getOrThrow)` exactly like Java's `isBiome`. A missing
+/// biome key panics with Java's `Missing element <key>` message (`getOrThrow`).
+pub(crate) fn surface_rule_nether(biomes_getter: &dyn HolderGetter<BiomeId>) -> ArcRuleSource {
+    let above_nether_lava_level = y_block_check(VerticalAnchor::absolute(31), 0);
+    let above_nether_lava_surface = y_block_check(VerticalAnchor::absolute(32), 0);
+    let nether_band_around_lava_level_bottom = y_start_check(VerticalAnchor::absolute(30), 0);
+    let nether_band_around_lava_level_top =
+        not_condition(y_start_check(VerticalAnchor::absolute(35), 0));
+    let close_to_ceiling = y_block_check(VerticalAnchor::below_top(5), 0);
+    let hole = hole_condition();
+    let soul_sand_layer = noise_condition_2d((*noises::SOUL_SAND_LAYER).clone(), -0.012);
+    let gravel_layer = noise_condition_2d((*noises::GRAVEL_LAYER).clone(), -0.012);
+    let patch = noise_condition_2d((*noises::PATCH).clone(), -0.012);
+    let netherrack = noise_condition_2d((*noises::NETHERRACK).clone(), 0.54);
+    let nether_wart = noise_condition_2d((*noises::NETHER_WART).clone(), 1.17);
+    let nether_state_selector = noise_condition_2d((*noises::NETHER_STATE_SELECTOR).clone(), 0.0);
+    let gravel_patch = if_true(
+        patch.clone(),
+        if_true(
+            nether_band_around_lava_level_bottom.clone(),
+            if_true(
+                nether_band_around_lava_level_top.clone(),
+                make_state_rule(Blocks::GRAVEL),
+            ),
+        ),
+    );
+    sequence(&[
+        if_true(
+            vertical_gradient(
+                "bedrock_floor",
+                VerticalAnchor::bottom(),
+                VerticalAnchor::above_bottom(5),
+            ),
+            make_state_rule(Blocks::BEDROCK),
+        ),
+        if_true(
+            not_condition(vertical_gradient(
+                "bedrock_roof",
+                VerticalAnchor::below_top(5),
+                VerticalAnchor::top(),
+            )),
+            make_state_rule(Blocks::BEDROCK),
+        ),
+        if_true(close_to_ceiling, make_state_rule(Blocks::NETHERRACK)),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::BASALT_DELTAS]),
+            sequence(&[
+                if_true(under_ceiling(), make_state_rule(Blocks::BASALT)),
+                if_true(
+                    under_floor(),
+                    sequence(&[
+                        gravel_patch.clone(),
+                        if_true(
+                            nether_state_selector.clone(),
+                            make_state_rule(Blocks::BASALT),
+                        ),
+                        make_state_rule(Blocks::BLACKSTONE),
+                    ]),
+                ),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::SOUL_SAND_VALLEY]),
+            sequence(&[
+                if_true(
+                    under_ceiling(),
+                    sequence(&[
+                        if_true(
+                            nether_state_selector.clone(),
+                            make_state_rule(Blocks::SOUL_SAND),
+                        ),
+                        make_state_rule(Blocks::SOUL_SOIL),
+                    ]),
+                ),
+                if_true(
+                    under_floor(),
+                    sequence(&[
+                        gravel_patch,
+                        if_true(
+                            nether_state_selector.clone(),
+                            make_state_rule(Blocks::SOUL_SAND),
+                        ),
+                        make_state_rule(Blocks::SOUL_SOIL),
+                    ]),
+                ),
+            ]),
+        ),
+        if_true(
+            on_floor(),
+            sequence(&[
+                if_true(
+                    not_condition(above_nether_lava_surface.clone()),
+                    if_true(hole.clone(), make_state_rule(Blocks::LAVA)),
+                ),
+                if_true(
+                    is_biome(biomes_getter, &[&*biomes::WARPED_FOREST]),
+                    if_true(
+                        not_condition(netherrack.clone()),
+                        if_true(
+                            above_nether_lava_level.clone(),
+                            sequence(&[
+                                if_true(
+                                    nether_wart.clone(),
+                                    make_state_rule(Blocks::WARPED_WART_BLOCK),
+                                ),
+                                make_state_rule(Blocks::WARPED_NYLIUM),
+                            ]),
+                        ),
+                    ),
+                ),
+                if_true(
+                    is_biome(biomes_getter, &[&*biomes::CRIMSON_FOREST]),
+                    if_true(
+                        not_condition(netherrack),
+                        if_true(
+                            above_nether_lava_level.clone(),
+                            sequence(&[
+                                if_true(nether_wart, make_state_rule(Blocks::NETHER_WART_BLOCK)),
+                                make_state_rule(Blocks::CRIMSON_NYLIUM),
+                            ]),
+                        ),
+                    ),
+                ),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::NETHER_WASTES]),
+            sequence(&[
+                if_true(
+                    under_floor(),
+                    if_true(
+                        soul_sand_layer,
+                        sequence(&[
+                            if_true(
+                                not_condition(hole.clone()),
+                                if_true(
+                                    nether_band_around_lava_level_bottom,
+                                    if_true(
+                                        nether_band_around_lava_level_top.clone(),
+                                        make_state_rule(Blocks::SOUL_SAND),
+                                    ),
+                                ),
+                            ),
+                            make_state_rule(Blocks::NETHERRACK),
+                        ]),
+                    ),
+                ),
+                if_true(
+                    on_floor(),
+                    if_true(
+                        above_nether_lava_level,
+                        if_true(
+                            nether_band_around_lava_level_top,
+                            if_true(
+                                gravel_layer,
+                                sequence(&[
+                                    if_true(
+                                        above_nether_lava_surface,
+                                        make_state_rule(Blocks::GRAVEL),
+                                    ),
+                                    if_true(not_condition(hole), make_state_rule(Blocks::GRAVEL)),
+                                ]),
+                            ),
+                        ),
+                    ),
+                ),
+            ]),
+        ),
+        make_state_rule(Blocks::NETHERRACK),
+    ])
 }
 
-/// `SurfaceRuleData.overworld(HolderGetter<Biome>)` — the full overworld
-/// surface tree. The port keeps an AIR shim for the same reason as
-/// `surface_rule_nether` (see there): the biome `HolderGetter` threading is
-/// the `mc.data.worldgen` unit (RivetTodo #179).
-pub(crate) fn surface_rule_overworld() -> ArcRuleSource {
-    state(Blocks::AIR.default_block_state())
+/// `SurfaceRuleData.overworld(HolderGetter<Biome>)` — Java's
+/// `return overworldLike(biomes, true, false, true)`.
+pub(crate) fn surface_rule_overworld(biomes_getter: &dyn HolderGetter<BiomeId>) -> ArcRuleSource {
+    surface_rule_overworld_like(biomes_getter, true, false, true)
 }
 
 /// `SurfaceRuleData.overworldLike(HolderGetter<Biome>, boolean
 /// doPreliminarySurfaceCheck, boolean bedrockRoof, boolean bedrockFloor)` — the
-/// overworld tree parametrized for the `caves`/`floating_islands` presets. The
-/// port keeps an AIR shim for the same reason as `surface_rule_nether` (see
-/// there).
+/// overworld tree parametrized for the `caves`/`floating_islands` presets,
+/// ported faithfully from `SurfaceRuleData.java` (the local ordering and the
+/// final `ImmutableList` builder order preserved exactly).
 pub(crate) fn surface_rule_overworld_like(
-    _do_preliminary_surface_check: bool,
-    _bedrock_roof: bool,
-    _bedrock_floor: bool,
+    biomes_getter: &dyn HolderGetter<BiomeId>,
+    do_preliminary_surface_check: bool,
+    bedrock_roof: bool,
+    bedrock_floor: bool,
 ) -> ArcRuleSource {
-    state(Blocks::AIR.default_block_state())
+    let wooded_badlands_top = y_block_check(VerticalAnchor::absolute(97), 2);
+    let badlands_top = y_block_check(VerticalAnchor::absolute(256), 0);
+    let badlands_height_condition = y_start_check(VerticalAnchor::absolute(63), -1);
+    let badlands_mid = y_start_check(VerticalAnchor::absolute(74), 1);
+    let mangrove_swamp_puddle_level = y_block_check(VerticalAnchor::absolute(60), 0);
+    let swamp_puddle_level = y_block_check(VerticalAnchor::absolute(62), 0);
+    let above_overworld_sea_level = y_block_check(VerticalAnchor::absolute(63), 0);
+    let not_underwater = water_block_check(-1, 0);
+    let above_water = water_block_check(0, 0);
+    let not_under_deep_water = water_start_check(-6, -1);
+    let hole = hole_condition();
+    let frozen_ocean = is_biome(
+        biomes_getter,
+        &[&*biomes::FROZEN_OCEAN, &*biomes::DEEP_FROZEN_OCEAN],
+    );
+    let steep = steep_condition();
+    let grass_or_dirt_if_underwater = sequence(&[
+        if_true(above_water.clone(), make_state_rule(Blocks::GRASS_BLOCK)),
+        make_state_rule(Blocks::DIRT),
+    ]);
+    let sand_or_sandstone_if_ceiling = sequence(&[
+        if_true(on_ceiling(), make_state_rule(Blocks::SANDSTONE)),
+        make_state_rule(Blocks::SAND),
+    ]);
+    let gravel_or_stone_if_ceiling = sequence(&[
+        if_true(on_ceiling(), make_state_rule(Blocks::STONE)),
+        make_state_rule(Blocks::GRAVEL),
+    ]);
+    let biomes_with_sand_and_sandstone = is_biome(
+        biomes_getter,
+        &[&*biomes::WARM_OCEAN, &*biomes::BEACH, &*biomes::SNOWY_BEACH],
+    );
+    let biomes_with_sand_and_very_deep_sandstone = is_biome(biomes_getter, &[&*biomes::DESERT]);
+    let sulfur_cave_bands = sequence(&[
+        if_true(
+            noise_condition_3d_range(
+                (*noises::SULFUR_CAVE_GRADIENT).clone(),
+                -0.4_f32 as f64,
+                -0.1_f32 as f64,
+            ),
+            make_state_rule(Blocks::CINNABAR),
+        ),
+        if_true(
+            noise_condition_3d_range((*noises::SULFUR_CAVE_GRADIENT).clone(), 0.0, 0.4_f32 as f64),
+            make_state_rule(Blocks::SULFUR),
+        ),
+        if_true(
+            noise_condition_3d((*noises::SULFUR_CAVE_GRADIENT).clone(), 0.4_f32 as f64),
+            make_state_rule(Blocks::CINNABAR),
+        ),
+    ]);
+    let common_surface_and_under_rules = sequence(&[
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::STONY_PEAKS]),
+            sequence(&[
+                if_true(
+                    noise_condition_2d_range((*noises::CALCITE).clone(), -0.0125, 0.0125),
+                    make_state_rule(Blocks::CALCITE),
+                ),
+                make_state_rule(Blocks::STONE),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::STONY_SHORE]),
+            sequence(&[
+                if_true(
+                    noise_condition_2d_range((*noises::GRAVEL).clone(), -0.05, 0.05),
+                    gravel_or_stone_if_ceiling.clone(),
+                ),
+                make_state_rule(Blocks::STONE),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::WINDSWEPT_HILLS]),
+            if_true(surface_noise_above(1.0), make_state_rule(Blocks::STONE)),
+        ),
+        if_true(
+            biomes_with_sand_and_sandstone.clone(),
+            sand_or_sandstone_if_ceiling.clone(),
+        ),
+        if_true(
+            biomes_with_sand_and_very_deep_sandstone.clone(),
+            sand_or_sandstone_if_ceiling.clone(),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::DRIPSTONE_CAVES]),
+            make_state_rule(Blocks::STONE),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::SULFUR_CAVES]),
+            sequence(&[sulfur_cave_bands.clone(), make_state_rule(Blocks::STONE)]),
+        ),
+    ]);
+    let powder_snow_under_rule = if_true(
+        noise_condition_2d_range((*noises::POWDER_SNOW).clone(), 0.45, 0.58),
+        if_true(above_water.clone(), make_state_rule(Blocks::POWDER_SNOW)),
+    );
+    let powder_snow_surface_rule = if_true(
+        noise_condition_2d_range((*noises::POWDER_SNOW).clone(), 0.35, 0.6),
+        if_true(above_water.clone(), make_state_rule(Blocks::POWDER_SNOW)),
+    );
+    let biome_under_surface_rule = sequence(&[
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::FROZEN_PEAKS]),
+            sequence(&[
+                if_true(steep.clone(), make_state_rule(Blocks::PACKED_ICE)),
+                if_true(
+                    noise_condition_2d_range((*noises::PACKED_ICE).clone(), -0.5, 0.2),
+                    make_state_rule(Blocks::PACKED_ICE),
+                ),
+                if_true(
+                    noise_condition_2d_range((*noises::ICE).clone(), -0.0625, 0.025),
+                    make_state_rule(Blocks::ICE),
+                ),
+                if_true(above_water.clone(), make_state_rule(Blocks::SNOW_BLOCK)),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::SNOWY_SLOPES]),
+            sequence(&[
+                if_true(steep.clone(), make_state_rule(Blocks::STONE)),
+                powder_snow_under_rule.clone(),
+                if_true(above_water.clone(), make_state_rule(Blocks::SNOW_BLOCK)),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::JAGGED_PEAKS]),
+            make_state_rule(Blocks::STONE),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::GROVE]),
+            sequence(&[powder_snow_under_rule, make_state_rule(Blocks::DIRT)]),
+        ),
+        common_surface_and_under_rules.clone(),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::WINDSWEPT_SAVANNA]),
+            if_true(surface_noise_above(1.75), make_state_rule(Blocks::STONE)),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::WINDSWEPT_GRAVELLY_HILLS]),
+            sequence(&[
+                if_true(surface_noise_above(2.0), gravel_or_stone_if_ceiling.clone()),
+                if_true(surface_noise_above(1.0), make_state_rule(Blocks::STONE)),
+                if_true(surface_noise_above(-1.0), make_state_rule(Blocks::DIRT)),
+                gravel_or_stone_if_ceiling.clone(),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::MANGROVE_SWAMP]),
+            make_state_rule(Blocks::MUD),
+        ),
+        make_state_rule(Blocks::DIRT),
+    ]);
+    let biome_surface_rule = sequence(&[
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::FROZEN_PEAKS]),
+            sequence(&[
+                if_true(steep.clone(), make_state_rule(Blocks::PACKED_ICE)),
+                if_true(
+                    noise_condition_2d_range((*noises::PACKED_ICE).clone(), 0.0, 0.2),
+                    make_state_rule(Blocks::PACKED_ICE),
+                ),
+                if_true(
+                    noise_condition_2d_range((*noises::ICE).clone(), 0.0, 0.025),
+                    make_state_rule(Blocks::ICE),
+                ),
+                if_true(above_water.clone(), make_state_rule(Blocks::SNOW_BLOCK)),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::SNOWY_SLOPES]),
+            sequence(&[
+                if_true(steep.clone(), make_state_rule(Blocks::STONE)),
+                powder_snow_surface_rule.clone(),
+                if_true(above_water.clone(), make_state_rule(Blocks::SNOW_BLOCK)),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::JAGGED_PEAKS]),
+            sequence(&[
+                if_true(steep.clone(), make_state_rule(Blocks::STONE)),
+                if_true(above_water.clone(), make_state_rule(Blocks::SNOW_BLOCK)),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::GROVE]),
+            sequence(&[
+                powder_snow_surface_rule,
+                if_true(above_water.clone(), make_state_rule(Blocks::SNOW_BLOCK)),
+            ]),
+        ),
+        common_surface_and_under_rules.clone(),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::WINDSWEPT_SAVANNA]),
+            sequence(&[
+                if_true(surface_noise_above(1.75), make_state_rule(Blocks::STONE)),
+                if_true(
+                    surface_noise_above(-0.5),
+                    make_state_rule(Blocks::COARSE_DIRT),
+                ),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::WINDSWEPT_GRAVELLY_HILLS]),
+            sequence(&[
+                if_true(surface_noise_above(2.0), gravel_or_stone_if_ceiling.clone()),
+                if_true(surface_noise_above(1.0), make_state_rule(Blocks::STONE)),
+                if_true(
+                    surface_noise_above(-1.0),
+                    grass_or_dirt_if_underwater.clone(),
+                ),
+                gravel_or_stone_if_ceiling.clone(),
+            ]),
+        ),
+        if_true(
+            is_biome(
+                biomes_getter,
+                &[
+                    &*biomes::OLD_GROWTH_PINE_TAIGA,
+                    &*biomes::OLD_GROWTH_SPRUCE_TAIGA,
+                ],
+            ),
+            sequence(&[
+                if_true(
+                    surface_noise_above(1.75),
+                    make_state_rule(Blocks::COARSE_DIRT),
+                ),
+                if_true(surface_noise_above(-0.95), make_state_rule(Blocks::PODZOL)),
+            ]),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::ICE_SPIKES]),
+            if_true(above_water.clone(), make_state_rule(Blocks::SNOW_BLOCK)),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::MANGROVE_SWAMP]),
+            make_state_rule(Blocks::MUD),
+        ),
+        if_true(
+            is_biome(biomes_getter, &[&*biomes::MUSHROOM_FIELDS]),
+            make_state_rule(Blocks::MYCELIUM),
+        ),
+        grass_or_dirt_if_underwater.clone(),
+    ]);
+    let clay_band_1 = noise_condition_2d_range((*noises::SURFACE).clone(), -0.909, -0.5454);
+    let clay_band_2 = noise_condition_2d_range((*noises::SURFACE).clone(), -0.1818, 0.1818);
+    let clay_band_3 = noise_condition_2d_range((*noises::SURFACE).clone(), 0.5454, 0.909);
+    let main_rule_close_to_surface = sequence(&[
+        if_true(
+            on_floor(),
+            sequence(&[
+                if_true(
+                    is_biome(biomes_getter, &[&*biomes::WOODED_BADLANDS]),
+                    if_true(
+                        wooded_badlands_top,
+                        sequence(&[
+                            if_true(clay_band_1.clone(), make_state_rule(Blocks::COARSE_DIRT)),
+                            if_true(clay_band_2.clone(), make_state_rule(Blocks::COARSE_DIRT)),
+                            if_true(clay_band_3.clone(), make_state_rule(Blocks::COARSE_DIRT)),
+                            grass_or_dirt_if_underwater.clone(),
+                        ]),
+                    ),
+                ),
+                if_true(
+                    is_biome(biomes_getter, &[&*biomes::SWAMP]),
+                    if_true(
+                        swamp_puddle_level,
+                        if_true(
+                            not_condition(above_overworld_sea_level.clone()),
+                            if_true(
+                                noise_condition_2d((*noises::SWAMP).clone(), 0.0),
+                                make_state_rule(Blocks::WATER),
+                            ),
+                        ),
+                    ),
+                ),
+                if_true(
+                    is_biome(biomes_getter, &[&*biomes::MANGROVE_SWAMP]),
+                    if_true(
+                        mangrove_swamp_puddle_level,
+                        if_true(
+                            not_condition(above_overworld_sea_level.clone()),
+                            if_true(
+                                noise_condition_2d((*noises::SWAMP).clone(), 0.0),
+                                make_state_rule(Blocks::WATER),
+                            ),
+                        ),
+                    ),
+                ),
+            ]),
+        ),
+        if_true(
+            is_biome(
+                biomes_getter,
+                &[
+                    &*biomes::BADLANDS,
+                    &*biomes::ERODED_BADLANDS,
+                    &*biomes::WOODED_BADLANDS,
+                ],
+            ),
+            sequence(&[
+                if_true(
+                    on_floor(),
+                    sequence(&[
+                        if_true(badlands_top, make_state_rule(Blocks::ORANGE_TERRACOTTA)),
+                        if_true(
+                            badlands_mid.clone(),
+                            sequence(&[
+                                if_true(clay_band_1, make_state_rule(Blocks::TERRACOTTA)),
+                                if_true(clay_band_2, make_state_rule(Blocks::TERRACOTTA)),
+                                if_true(clay_band_3, make_state_rule(Blocks::TERRACOTTA)),
+                                bandlands(),
+                            ]),
+                        ),
+                        if_true(
+                            not_underwater.clone(),
+                            sequence(&[
+                                if_true(on_ceiling(), make_state_rule(Blocks::RED_SANDSTONE)),
+                                make_state_rule(Blocks::RED_SAND),
+                            ]),
+                        ),
+                        if_true(
+                            not_condition(hole.clone()),
+                            make_state_rule(Blocks::ORANGE_TERRACOTTA),
+                        ),
+                        if_true(
+                            not_under_deep_water.clone(),
+                            make_state_rule(Blocks::WHITE_TERRACOTTA),
+                        ),
+                        gravel_or_stone_if_ceiling.clone(),
+                    ]),
+                ),
+                if_true(
+                    badlands_height_condition,
+                    sequence(&[
+                        if_true(
+                            above_overworld_sea_level.clone(),
+                            if_true(
+                                not_condition(badlands_mid),
+                                make_state_rule(Blocks::ORANGE_TERRACOTTA),
+                            ),
+                        ),
+                        bandlands(),
+                    ]),
+                ),
+                if_true(
+                    under_floor(),
+                    if_true(
+                        not_under_deep_water.clone(),
+                        make_state_rule(Blocks::WHITE_TERRACOTTA),
+                    ),
+                ),
+            ]),
+        ),
+        if_true(
+            on_floor(),
+            if_true(
+                not_underwater.clone(),
+                sequence(&[
+                    if_true(
+                        frozen_ocean.clone(),
+                        if_true(
+                            hole.clone(),
+                            sequence(&[
+                                if_true(above_water.clone(), make_state_rule(Blocks::AIR)),
+                                if_true(temperature_condition(), make_state_rule(Blocks::ICE)),
+                                make_state_rule(Blocks::WATER),
+                            ]),
+                        ),
+                    ),
+                    biome_surface_rule,
+                ]),
+            ),
+        ),
+        if_true(
+            not_under_deep_water.clone(),
+            sequence(&[
+                if_true(
+                    on_floor(),
+                    if_true(frozen_ocean, if_true(hole, make_state_rule(Blocks::WATER))),
+                ),
+                if_true(under_floor(), biome_under_surface_rule),
+                if_true(
+                    biomes_with_sand_and_sandstone,
+                    if_true(deep_under_floor(), make_state_rule(Blocks::SANDSTONE)),
+                ),
+                if_true(
+                    biomes_with_sand_and_very_deep_sandstone,
+                    if_true(very_deep_under_floor(), make_state_rule(Blocks::SANDSTONE)),
+                ),
+            ]),
+        ),
+        if_true(
+            on_floor(),
+            sequence(&[
+                if_true(
+                    is_biome(
+                        biomes_getter,
+                        &[&*biomes::FROZEN_PEAKS, &*biomes::JAGGED_PEAKS],
+                    ),
+                    make_state_rule(Blocks::STONE),
+                ),
+                if_true(
+                    is_biome(
+                        biomes_getter,
+                        &[
+                            &*biomes::WARM_OCEAN,
+                            &*biomes::LUKEWARM_OCEAN,
+                            &*biomes::DEEP_LUKEWARM_OCEAN,
+                        ],
+                    ),
+                    sand_or_sandstone_if_ceiling,
+                ),
+                gravel_or_stone_if_ceiling,
+            ]),
+        ),
+    ]);
+    let rule_above_preliminary_surface = if_true(
+        above_preliminary_surface_condition(),
+        main_rule_close_to_surface.clone(),
+    );
+    let mut builder: Vec<ArcRuleSource> = Vec::new();
+    if bedrock_roof {
+        builder.push(if_true(
+            not_condition(vertical_gradient(
+                "bedrock_roof",
+                VerticalAnchor::below_top(5),
+                VerticalAnchor::top(),
+            )),
+            make_state_rule(Blocks::BEDROCK),
+        ));
+    }
+    if bedrock_floor {
+        builder.push(if_true(
+            vertical_gradient(
+                "bedrock_floor",
+                VerticalAnchor::bottom(),
+                VerticalAnchor::above_bottom(5),
+            ),
+            make_state_rule(Blocks::BEDROCK),
+        ));
+    }
+    if do_preliminary_surface_check {
+        builder.push(rule_above_preliminary_surface);
+    } else {
+        builder.push(main_rule_close_to_surface);
+    }
+    builder.push(if_true(
+        is_biome(biomes_getter, &[&*biomes::SULFUR_CAVES]),
+        sulfur_cave_bands,
+    ));
+    builder.push(if_true(
+        vertical_gradient(
+            "deepslate",
+            VerticalAnchor::absolute(0),
+            VerticalAnchor::absolute(8),
+        ),
+        make_state_rule(Blocks::DEEPSLATE),
+    ));
+    sequence(&builder)
 }
 
 // ---------------------------------------------------------------------------
@@ -3232,11 +3879,21 @@ pub fn water_start_check(offset: i32, surface_depth_multiplier: i32) -> Arc<dyn 
     ))
 }
 
-/// `SurfaceRules.isBiome(HolderGetter<Biome>, ResourceKey<Biome>...)` — the
-/// port resolves the biome keys by name against the holder set the caller
-/// provides (the `HolderSet.direct` over `biomes::getOrThrow`).
-pub fn is_biome(biomes: HolderSet<BiomeId>) -> Arc<dyn ConditionSource> {
-    Arc::new(BiomeConditionSource::new(biomes))
+/// `SurfaceRules.isBiome(HolderGetter<Biome>, ResourceKey<Biome>...)` —
+/// Java's `@SafeVarargs` varargs is a fixed-size slice here: the port builds
+/// `HolderSet.direct(getter.getOrThrow(key))` over the keys in argument order
+/// exactly like Java (`HolderSet.direct(biomes::getOrThrow, target)`), so a
+/// missing biome key panics with Java's `Missing element <key>` message and a
+/// single key encodes as the compact bare-identifier holder set.
+pub fn is_biome(
+    biomes_getter: &dyn HolderGetter<BiomeId>,
+    keys: &[&ResourceKey<BiomeId>],
+) -> Arc<dyn ConditionSource> {
+    let holders: Vec<Holder<BiomeId>> = keys
+        .iter()
+        .map(|key| biomes_getter.get_or_throw(key))
+        .collect();
+    Arc::new(BiomeConditionSource::new(HolderSet::direct(holders)))
 }
 
 /// `SurfaceRules.noiseCondition2d(ResourceKey, double)`.
@@ -3454,17 +4111,24 @@ mod tests {
         })
     }
 
-    /// A biome registry with `plains` (id 0) under `Registries.BIOME`.
+    /// A biome registry with the 33 `SurfaceRuleData`-referenced keys (the
+    /// single source of truth in `biome::biomes::SURFACE_RULE_BIOMES`) under
+    /// `Registries.BIOME` (id = the enumerate index over that list, matching the
+    /// settings bootstrap's and the production builder's `BiomeId` handles). The
+    /// codec tests encode the real trees, so every referenced key must resolve
+    /// through the access.
     fn biome_access() -> RegistryAccess {
         let mut builder = RegistryBuilder::new(&*rivet_registry::registries::BIOME);
-        builder.register(
-            &ResourceKey::create(
-                &*rivet_registry::registries::BIOME,
-                Identifier::parse("minecraft:plains"),
-            ),
-            Arc::new(BiomeId::from_id(0)),
-            RegistrationInfo::BUILT_IN,
-        );
+        for (i, name) in biomes::SURFACE_RULE_BIOMES.iter().enumerate() {
+            builder.register(
+                &ResourceKey::create(
+                    &*rivet_registry::registries::BIOME,
+                    Identifier::parse(&format!("minecraft:{name}")),
+                ),
+                Arc::new(BiomeId::from_id(i as u16)),
+                RegistrationInfo::BUILT_IN,
+            );
+        }
         let registry = builder.freeze();
         RegistryAccess::from_pairs(vec![(
             ResourceKey::create_registry_key(Identifier::with_default_namespace("worldgen/biome")),
@@ -3621,38 +4285,386 @@ mod tests {
         assert!(decoded.as_any().is::<BlockRuleSource>());
     }
 
-    /// The four real `SurfaceRuleData` production builders (`nether`,
-    /// `overworld`, and the two `overworldLike` flag combos the fixture pins)
-    /// are still AIR shims (RivetTodo #179). This is a **non-ignored
-    /// tripwire**: once a faithful port replaces a shim, this test must fail
-    /// so the golden harness is extended to the now real tree. Until then it
-    /// pins the deferral — the shims must encode as `minecraft:air`, never
-    /// silently as some other placeholder.
+    /// `(condition type, result type)` for each top-level rule of an encoded
+    /// `sequence` preset — the `SurfaceRuleData.java` declaration-order
+    /// skeleton. A `condition` rule reports its `if_true` condition type and the
+    /// `then_run` result type; a bare rule (the final `NETHERRACK`/`DEEPSLATE`
+    /// fallbacks, or the unwrapped `mainRuleCloseToSurface`) reports an empty
+    /// condition and its own rule type.
+    fn top_level_condition_then(encoded: &serde_json::Value) -> Vec<(&str, &str)> {
+        encoded["sequence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r["if_true"]["type"].as_str().unwrap_or(""),
+                    r["then_run"]["type"]
+                        .as_str()
+                        .or_else(|| r["type"].as_str())
+                        .unwrap_or(""),
+                )
+            })
+            .collect()
+    }
+
+    /// `SurfaceRuleData.nether` builds the Java top-level 8-rule sequence in
+    /// declaration order: bedrock floor, bedrock roof (`not`), the
+    /// `closeToCeiling` netherrack cap, the three biome blocks (basalt deltas,
+    /// soul sand valley, the `ON_FLOOR` lava/nylium block), nether wastes, and
+    /// the final netherrack fallback. A reordered, dropped, or re-typed rule
+    /// fails here. (Byte-exact coverage against the committed PR #597 fixture
+    /// lives in `builders_encode_byte_exactly_to_the_paper_capture`; this
+    /// structural skeleton pins the ordering with a fast lib test.)
     #[test]
-    fn surface_rule_production_builders_are_still_air_shims() {
+    fn nether_tree_matches_java_top_level_ordering() {
         let ops = ops();
         let codec = rule_source_codec::<TestOps>();
-        let builders: [(&str, ArcRuleSource); 4] = [
-            ("nether", surface_rule_nether()),
-            ("overworld", surface_rule_overworld()),
-            (
-                "overworld_like_true_false_true",
-                surface_rule_overworld_like(true, false, true),
-            ),
-            (
-                "overworld_like_false_false_true",
-                surface_rule_overworld_like(false, false, true),
-            ),
-        ];
-        for (name, rule) in builders {
+        let getter = ops.getter(&*rivet_registry::registries::BIOME).unwrap();
+        let encoded = codec
+            .encode_start(&ops, &surface_rule_nether(&getter))
+            .get_or_throw("encode")
+            .clone();
+        assert_eq!(
+            top_level_condition_then(&encoded),
+            vec![
+                ("minecraft:vertical_gradient", "minecraft:block"),
+                ("minecraft:not", "minecraft:block"),
+                ("minecraft:y_above", "minecraft:block"),
+                ("minecraft:biome", "minecraft:sequence"),
+                ("minecraft:biome", "minecraft:sequence"),
+                ("minecraft:stone_depth", "minecraft:sequence"),
+                ("minecraft:biome", "minecraft:sequence"),
+                ("", "minecraft:block"),
+            ]
+        );
+        // The final bare rule is the netherrack fallback (Java's last
+        // `NETHERRACK` element — a plain `block` rule, no `condition` wrapper).
+        assert_eq!(
+            encoded["sequence"][7]["result_state"]["Name"],
+            json!("minecraft:netherrack")
+        );
+        // The three biome rules resolve to basalt deltas, soul sand valley, and
+        // nether wastes in declaration order.
+        let biome_is: Vec<&str> = (0..7)
+            .filter(|&i| encoded["sequence"][i]["if_true"]["type"] == json!("minecraft:biome"))
+            .map(|i| {
+                encoded["sequence"][i]["if_true"]["biome_is"]
+                    .as_str()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            biome_is,
+            vec![
+                "minecraft:basalt_deltas",
+                "minecraft:soul_sand_valley",
+                "minecraft:nether_wastes"
+            ]
+        );
+    }
+
+    /// `SurfaceRuleData.overworld` = `overworldLike(true, false, true)`: the
+    /// Java 4-rule top-level sequence (bedrock floor, the
+    /// `abovePreliminarySurface`-wrapped main rule, the sulfur-caves bands, the
+    /// deepslate gradient).
+    #[test]
+    fn overworld_tree_matches_java_top_level_ordering() {
+        let ops = ops();
+        let codec = rule_source_codec::<TestOps>();
+        let getter = ops.getter(&*rivet_registry::registries::BIOME).unwrap();
+        let encoded = codec
+            .encode_start(&ops, &surface_rule_overworld(&getter))
+            .get_or_throw("encode")
+            .clone();
+        assert_eq!(
+            top_level_condition_then(&encoded),
+            vec![
+                ("minecraft:vertical_gradient", "minecraft:block"),
+                ("minecraft:above_preliminary_surface", "minecraft:sequence"),
+                ("minecraft:biome", "minecraft:sequence"),
+                ("minecraft:vertical_gradient", "minecraft:block"),
+            ]
+        );
+        // The deepslate rule is the last element (Java's final `builder.add`).
+        assert_eq!(
+            encoded["sequence"][3]["if_true"]["random_name"],
+            json!("minecraft:deepslate")
+        );
+    }
+
+    /// The `overworldLike` flags select the Java `ImmutableList` builder
+    /// additions: `bedrockRoof`/`bedrockFloor` prepend their `not`-wrapped /
+    /// plain vertical gradients, `doPreliminarySurfaceCheck` wraps the main
+    /// rule in `abovePreliminarySurface`. The `caves` preset
+    /// `overworldLike(false, true, true)` must carry both bedrocks and the bare
+    /// main rule; `floating_islands` `overworldLike(false, false, false)` must
+    /// carry neither bedrock.
+    ///
+    /// The committed PR #597 fixture byte-exactly covers `overworld` `(true,
+    /// false, true)` and `(false, false, true)` (see
+    /// `builders_encode_byte_exactly_to_the_paper_capture`); the `caves`
+    /// `(false, true, true)` and `floating_islands` `(false, false, false)`
+    /// combos are not in that capture, so the flag selection is pinned here
+    /// structurally against the Java-documented builder additions.
+    #[test]
+    fn overworld_like_flags_control_bedrock_and_preliminary_surface() {
+        let ops = ops();
+        let codec = rule_source_codec::<TestOps>();
+        let getter = ops.getter(&*rivet_registry::registries::BIOME).unwrap();
+
+        let caves = codec
+            .encode_start(
+                &ops,
+                &surface_rule_overworld_like(&getter, false, true, true),
+            )
+            .get_or_throw("encode")
+            .clone();
+        assert_eq!(
+            top_level_condition_then(&caves),
+            vec![
+                ("minecraft:not", "minecraft:block"),
+                ("minecraft:vertical_gradient", "minecraft:block"),
+                ("", "minecraft:sequence"),
+                ("minecraft:biome", "minecraft:sequence"),
+                ("minecraft:vertical_gradient", "minecraft:block"),
+            ]
+        );
+        // The first `not` is the bedrock roof, the vertical gradient the floor.
+        assert_eq!(
+            caves["sequence"][0]["if_true"]["invert"]["random_name"],
+            json!("minecraft:bedrock_roof")
+        );
+        assert_eq!(
+            caves["sequence"][1]["if_true"]["random_name"],
+            json!("minecraft:bedrock_floor")
+        );
+        // No `abovePreliminarySurface` (doPreliminarySurfaceCheck = false).
+        assert!(!caves.to_string().contains("above_preliminary_surface"));
+
+        let floating = codec
+            .encode_start(
+                &ops,
+                &surface_rule_overworld_like(&getter, false, false, false),
+            )
+            .get_or_throw("encode")
+            .clone();
+        assert_eq!(
+            top_level_condition_then(&floating),
+            vec![
+                ("", "minecraft:sequence"),
+                ("minecraft:biome", "minecraft:sequence"),
+                ("minecraft:vertical_gradient", "minecraft:block"),
+            ]
+        );
+        // No bedrock anywhere in the tree.
+        assert!(!floating.to_string().contains("minecraft:bedrock"));
+    }
+
+    /// `SurfaceRules.isBiome` builds `HolderSet.direct(getOrThrow(key))` in
+    /// argument order — a multi-key set encodes as the list in varargs order
+    /// (Java's `isBiome(biomes, WARM_OCEAN, BEACH, SNOWY_BEACH)`).
+    #[test]
+    fn is_biome_preserves_argument_order_in_holder_set() {
+        let ops = ops();
+        let getter = ops.getter(&*rivet_registry::registries::BIOME).unwrap();
+        let cond = is_biome(
+            &getter,
+            &[&*biomes::WARM_OCEAN, &*biomes::BEACH, &*biomes::SNOWY_BEACH],
+        );
+        let codec = condition_source_codec::<TestOps>();
+        let encoded = codec
+            .encode_start(&ops, &cond)
+            .get_or_throw("encode")
+            .clone();
+        assert_eq!(
+            encoded,
+            json!({"type": "minecraft:biome", "biome_is": ["minecraft:warm_ocean", "minecraft:beach", "minecraft:snowy_beach"]})
+        );
+    }
+
+    /// A single-key `isBiome` encodes as the compact bare identifier (Java's
+    /// `HolderSet` list arm degrades a single element), never a one-element
+    /// list.
+    #[test]
+    fn is_biome_single_key_encodes_as_bare_identifier() {
+        let ops = ops();
+        let getter = ops.getter(&*rivet_registry::registries::BIOME).unwrap();
+        let cond = is_biome(&getter, &[&*biomes::BASALT_DELTAS]);
+        let codec = condition_source_codec::<TestOps>();
+        let encoded = codec
+            .encode_start(&ops, &cond)
+            .get_or_throw("encode")
+            .clone();
+        assert_eq!(
+            encoded,
+            json!({"type": "minecraft:biome", "biome_is": "minecraft:basalt_deltas"})
+        );
+    }
+
+    /// `isBiome` resolves keys through `getOrThrow`: a missing biome key panics
+    /// with Java's `Missing element <key>` message (the surface trees would
+    /// otherwise silently build a holder set with a hole).
+    #[test]
+    fn is_biome_missing_key_panics_with_java_message() {
+        let ops = ops();
+        let getter = ops.getter(&*rivet_registry::registries::BIOME).unwrap();
+        let missing = ResourceKey::create(
+            &*rivet_registry::registries::BIOME,
+            Identifier::parse("minecraft:not_a_real_biome"),
+        );
+        let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            is_biome(&getter, &[&missing]);
+        }));
+        let msg = err
+            .unwrap_err()
+            .downcast_ref::<String>()
+            .cloned()
+            .expect("panic message is a String");
+        // Java's `ResourceKey.toString()` is `ResourceKey[registry / id]`.
+        assert_eq!(
+            msg,
+            "Missing element ResourceKey[minecraft:worldgen/biome / minecraft:not_a_real_biome]"
+        );
+    }
+
+    /// The `sulfurCaveBands` float-literal thresholds are widened from float to
+    /// double exactly like Java (`-0.4F`/`0.4F` → `-0.4000000059604645`/
+    /// `0.4000000059604645`, not `-0.4`/`0.4`). The `surfaceNoiseAbove` helper
+    /// thresholds are `threshold / 8.25` in double.
+    #[test]
+    fn sulfur_cave_bands_encode_widened_float_thresholds() {
+        let ops = ops();
+        let codec = rule_source_codec::<TestOps>();
+        let getter = ops.getter(&*rivet_registry::registries::BIOME).unwrap();
+        let encoded = codec
+            .encode_start(&ops, &surface_rule_overworld(&getter))
+            .get_or_throw("encode")
+            .clone();
+        let sulfur = &encoded["sequence"][2]["then_run"]["sequence"];
+        assert_eq!(
+            sulfur[0]["if_true"]["min_threshold"].as_f64(),
+            Some(-0.4_f32 as f64)
+        );
+        assert_eq!(
+            sulfur[0]["if_true"]["max_threshold"].as_f64(),
+            Some(-0.1_f32 as f64)
+        );
+        assert_eq!(sulfur[1]["if_true"]["min_threshold"].as_f64(), Some(0.0));
+        assert_eq!(
+            sulfur[1]["if_true"]["max_threshold"].as_f64(),
+            Some(0.4_f32 as f64)
+        );
+        assert_eq!(
+            sulfur[2]["if_true"]["min_threshold"].as_f64(),
+            Some(0.4_f32 as f64)
+        );
+        assert_eq!(
+            sulfur[2]["if_true"]["max_threshold"].as_f64(),
+            Some(f64::MAX)
+        );
+        assert_eq!(
+            sulfur[0]["if_true"]["noise"],
+            json!("minecraft:sulfur_cave_gradient")
+        );
+        // `surfaceNoiseAbove(threshold)` = `noiseCondition2d(SURFACE,
+        // threshold / 8.25, MAX)` — Java's private helper. The overworld tree's
+        // `windswept_hills` rule (`surfaceNoiseAbove(1.0)`) must carry the
+        // `1.0 / 8.25` double threshold, never `1.0` or a float-widened value.
+        let windswept_hills = &encoded["sequence"][1]["then_run"]["sequence"][2]["then_run"]["then_run"]
+            ["sequence"][1]["sequence"][4]["sequence"][2]["then_run"];
+        assert_eq!(
+            windswept_hills["if_true"]["noise"],
+            json!("minecraft:surface")
+        );
+        assert_eq!(
+            windswept_hills["if_true"]["min_threshold"].as_f64(),
+            Some(1.0 / 8.25)
+        );
+        assert_eq!(
+            windswept_hills["if_true"]["max_threshold"].as_f64(),
+            Some(f64::MAX)
+        );
+    }
+
+    /// The real nether/overworld trees must round-trip through
+    /// `rule_source_codec` (the `MATERIAL_RULE` dispatch) — the production
+    /// `NoiseGeneratorSettings.surface_rule` field stores the erased
+    /// `ArcRuleSource`, so the value codec is the persistence path.
+    #[test]
+    fn nether_and_overworld_round_trip_through_rule_source_codec() {
+        let ops = ops();
+        let codec = rule_source_codec::<TestOps>();
+        let getter = ops.getter(&*rivet_registry::registries::BIOME).unwrap();
+        for rule in [
+            surface_rule_nether(&getter),
+            surface_rule_overworld(&getter),
+            surface_rule_overworld_like(&getter, false, true, true),
+        ] {
             let encoded = codec
                 .encode_start(&ops, &rule)
                 .get_or_throw("encode")
                 .clone();
+            let decoded = codec.parse(&ops, &encoded).get_or_throw("decode").clone();
+            assert!(decoded.as_any().is::<SequenceRuleSource>());
+        }
+    }
+
+    /// Every builder-constructed tree byte-matches the committed PR #597
+    /// fixture (the Paper 26.2 `0a99345` capture of the canonical
+    /// `SurfaceRuleData` trees through `RuleSource.CODEC` under `RegistryOps`).
+    /// The golden harness round-trips the captured JSON through the codec; this
+    /// pins the builder-construction path against the same capture, so a
+    /// threshold, ordering, block, or anchor deviation in the ported builders
+    /// fails here. The fixture covers `nether`, `overworld`
+    /// (`overworldLike(true, false, true)`), `overworld_like_true_false_true`
+    /// (identical), `overworld_like_false_false_true`, `end`, and `air`. The
+    /// `caves` `(false, true, true)` and `floating_islands` `(false, false,
+    /// false)` flag combos are a deliberate, documented deferral: they are not
+    /// in the committed capture (the probe ran against `working/Paper`, outside
+    /// this worktree) and remain structurally pinned by
+    /// `overworld_like_flags_control_bedrock_and_preliminary_surface`. Extending
+    /// the fixture with those two trees is a follow-up probe capture, not a
+    /// weakening of this test.
+    #[test]
+    fn builders_encode_byte_exactly_to_the_paper_capture() {
+        let ops = ops();
+        let codec = rule_source_codec::<TestOps>();
+        let getter = ops.getter(&*rivet_registry::registries::BIOME).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tools/rivet-oracle/fixtures/surface-rule-data/surface-rule-data.json"
+        ))
+        .expect("fixture parses");
+        let cases: Vec<(&str, ArcRuleSource)> = vec![
+            ("nether", surface_rule_nether(&getter)),
+            ("overworld", surface_rule_overworld(&getter)),
+            (
+                "overworld_like_true_false_true",
+                surface_rule_overworld_like(&getter, true, false, true),
+            ),
+            (
+                "overworld_like_false_false_true",
+                surface_rule_overworld_like(&getter, false, false, true),
+            ),
+            ("end", surface_rule_end()),
+            ("air", surface_rule_air()),
+        ];
+        for (name, tree) in cases {
+            let canonical = fixture["presets"]
+                .as_array()
+                .expect("presets array")
+                .iter()
+                .find(|p| p["name"] == name)
+                .expect("preset present")["json"]
+                .clone();
+            let encoded = codec
+                .encode_start(&ops, &tree)
+                .get_or_throw("encode")
+                .clone();
             assert_eq!(
-                encoded,
-                json!({"type": "minecraft:block", "result_state": {"Name": "minecraft:air"}}),
-                "SurfaceRuleData.{name}() is still an AIR shim (RivetTodo #179)"
+                serde_json::to_vec(&encoded).expect("encoded JSON serializes"),
+                serde_json::to_vec(&canonical).expect("canonical JSON serializes"),
+                "{name} builder must encode byte-identically to the Paper capture"
             );
         }
     }
