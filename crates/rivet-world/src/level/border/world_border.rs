@@ -92,7 +92,6 @@ pub const MAX_CENTER_COORDINATE: f64 = 2.9999984E7;
 const EPSILON: f64 = 1.0e-5_f32 as f64;
 
 /// `WorldBorder` — `extends SavedData`.
-#[derive(Clone)]
 pub struct WorldBorder {
     /// `settings` — the immutable `Settings` this border was constructed with.
     settings: Settings,
@@ -668,7 +667,7 @@ impl WorldBorder {
 /// `WorldBorder.BorderExtent` — the private extent interface, as a sum type.
 /// `update()` returns the next extent plus whether `setDirty()` fired inside
 /// the update (only [`MovingBorderExtent`] marks dirty).
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum BorderExtent {
     /// `StaticBorderExtent`.
     Static(StaticBorderExtent),
@@ -1951,9 +1950,8 @@ mod tests {
         // re-applies them (Java `new WorldBorder(Settings)` behaves the same).
         let decoded = codec
             .parse(&JsonOps::INSTANCE, &encoded)
-            .result()
-            .expect("decode")
-            .clone();
+            .result_or_partial_silent()
+            .expect("decode");
         assert_eq!(decoded.get_center_x(), 0.0);
         assert_eq!(decoded.get_size(), MAX_SIZE);
         // The stored `settings` record (private field, read here directly —

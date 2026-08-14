@@ -12,6 +12,13 @@
 use super::world_border::WorldBorder;
 
 /// `BorderChangeListener` — receives border-change notifications.
+///
+/// Every callback takes `&WorldBorder` (never `&mut`): Paper's sole production
+/// listener — `PlayerList.addWorldborderListener`'s anonymous instance — only
+/// reads the border to broadcast the change to players, and `onSetDamagePerBlock`/
+/// `onSetSafeZone` are no-ops. A future listener that mutated on notification
+/// would use tick-thread-confined interior mutability (per OWNERSHIP.md), not
+/// `Arc<RwLock>`.
 pub trait BorderChangeListener: Send + Sync {
     /// `onSetSize(WorldBorder, double newSize)`.
     fn on_set_size(&self, border: &WorldBorder, new_size: f64);
