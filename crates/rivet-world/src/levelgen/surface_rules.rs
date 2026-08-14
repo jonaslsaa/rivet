@@ -4227,9 +4227,9 @@ mod tests {
     /// `closeToCeiling` netherrack cap, the three biome blocks (basalt deltas,
     /// soul sand valley, the `ON_FLOOR` lava/nylium block), nether wastes, and
     /// the final netherrack fallback. A reordered, dropped, or re-typed rule
-    /// fails here. The trees were verified byte-exact against Paper 26.2
-    /// (PR #597's golden harness, whose fixture is not committed here); this
-    /// structural skeleton keeps the ordering pinned without that fixture.
+    /// fails here. (Byte-exact coverage against the committed PR #597 fixture
+    /// lives in `builders_encode_byte_exactly_to_the_paper_capture`; this
+    /// structural skeleton pins the ordering with a fast lib test.)
     #[test]
     fn nether_tree_matches_java_top_level_ordering() {
         let ops = ops();
@@ -4315,12 +4315,12 @@ mod tests {
     /// main rule; `floating_islands` `overworldLike(false, false, false)` must
     /// carry neither bedrock.
     ///
-    /// Byte-exact verification against Paper 26.2 (PR #597's golden harness,
-    /// not committed here) covered `overworld` `(true, false, true)` and the
-    /// probe's `(false, false, true)` combo; the actual `caves` `(false, true,
-    /// true)` and `floating_islands` `(false, false, false)` trees are
-    /// Java-documented here structurally but not byte-exact fixture-verified —
-    /// extend the oracle harness to close that gap.
+    /// The committed PR #597 fixture byte-exactly covers `overworld` `(true,
+    /// false, true)` and `(false, false, true)` (see
+    /// `builders_encode_byte_exactly_to_the_paper_capture`); the `caves`
+    /// `(false, true, true)` and `floating_islands` `(false, false, false)`
+    /// combos are not in that capture, so the flag selection is pinned here
+    /// structurally against the Java-documented builder additions.
     #[test]
     fn overworld_like_flags_control_bedrock_and_preliminary_surface() {
         let ops = ops();
@@ -4521,6 +4521,61 @@ mod tests {
                 .clone();
             let decoded = codec.parse(&ops, &encoded).get_or_throw("decode").clone();
             assert!(decoded.as_any().is::<SequenceRuleSource>());
+        }
+    }
+
+    /// Every builder-constructed tree byte-matches the committed PR #597
+    /// fixture (the Paper 26.2 `0a99345` capture of the canonical
+    /// `SurfaceRuleData` trees through `RuleSource.CODEC` under `RegistryOps`).
+    /// The golden harness round-trips the captured JSON through the codec; this
+    /// pins the builder-construction path against the same capture, so a
+    /// threshold, ordering, block, or anchor deviation in the ported builders
+    /// fails here. The fixture covers `nether`, `overworld`
+    /// (`overworldLike(true, false, true)`), `overworld_like_true_false_true`
+    /// (identical), `overworld_like_false_false_true`, `end`, and `air`; the
+    /// `caves` `(false, true, true)` and `floating_islands` `(false, false,
+    /// false)` flag combos are not captured and remain structurally pinned by
+    /// `overworld_like_flags_control_bedrock_and_preliminary_surface`.
+    #[test]
+    fn builders_encode_byte_exactly_to_the_paper_capture() {
+        let ops = ops();
+        let codec = rule_source_codec::<TestOps>();
+        let getter = ops.getter(&*rivet_registry::registries::BIOME).unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tools/rivet-oracle/fixtures/surface-rule-data/surface-rule-data.json"
+        ))
+        .expect("fixture parses");
+        let cases: Vec<(&str, ArcRuleSource)> = vec![
+            ("nether", surface_rule_nether(&getter)),
+            ("overworld", surface_rule_overworld(&getter)),
+            (
+                "overworld_like_true_false_true",
+                surface_rule_overworld_like(&getter, true, false, true),
+            ),
+            (
+                "overworld_like_false_false_true",
+                surface_rule_overworld_like(&getter, false, false, true),
+            ),
+            ("end", surface_rule_end()),
+            ("air", surface_rule_air()),
+        ];
+        for (name, tree) in cases {
+            let canonical = fixture["presets"]
+                .as_array()
+                .expect("presets array")
+                .iter()
+                .find(|p| p["name"] == name)
+                .expect("preset present")["json"]
+                .clone();
+            let encoded = codec
+                .encode_start(&ops, &tree)
+                .get_or_throw("encode")
+                .clone();
+            assert_eq!(
+                serde_json::to_vec(&encoded).expect("encoded JSON serializes"),
+                serde_json::to_vec(&canonical).expect("canonical JSON serializes"),
+                "{name} builder must encode byte-identically to the Paper capture"
+            );
         }
     }
 
