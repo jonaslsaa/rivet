@@ -5,6 +5,7 @@
 //! plugs into the `rivet-world` facade. The propagation engines defer with the
 //! Starlight unit.
 
+pub mod star_light_engine;
 pub mod star_light_provider_impl;
 
 pub use star_light_provider_impl::StubStarLightProvider;
