@@ -1012,6 +1012,68 @@ mod tests {
     }
 
     #[test]
+    fn a_pass_through_surface_step_cannot_fabricate_carvers() {
+        // Finding-2 guard for the CARVERS rung: a pyramid whose SURFACE step
+        // is a pass-through would label a fresh chunk CARVERS with no surface
+        // data for the carvers to carve through. The pre-check refuses it
+        // before any work runs — as `DataNotCarried { Surface }`, the first
+        // fabrication point on the path (the pass-through SURFACE step refuses
+        // before the CARVERS step is reached). The CARVERS rung's own
+        // `CarversNotGenerated` guard is run_step-level defence-in-depth,
+        // covered separately by `carvers_step_alone_fails_without_surface`.
+        let (mut ctx, biomes_calls, noise_calls, surface_calls, carvers_calls) =
+            recording_context();
+        let mut chunk = proto();
+        // EMPTY -> SS -> SR -> BIOMES(GenerateBiomes) -> NOISE(GenerateNoise)
+        // -> SURFACE(pass-through) -> CARVERS(GenerateCarvers): the SURFACE
+        // step produces no surface data.
+        let pyramid = ChunkPyramid::builder()
+            .step(ChunkStatus::Empty, |s| s)
+            .step(ChunkStatus::StructureStarts, |s| {
+                s.set_task(ChunkStatusTask::GenerateStructureStarts)
+            })
+            .step(ChunkStatus::StructureReferences, |s| {
+                s.add_requirement(ChunkStatus::StructureStarts, 8)
+                    .set_task(ChunkStatusTask::GenerateStructureReferences)
+            })
+            .step(ChunkStatus::Biomes, |s| {
+                s.add_requirement(ChunkStatus::StructureStarts, 8)
+                    .set_task(ChunkStatusTask::GenerateBiomes)
+            })
+            .step(ChunkStatus::Noise, |s| {
+                s.add_requirement(ChunkStatus::StructureStarts, 8)
+                    .add_requirement(ChunkStatus::Biomes, 1)
+                    .set_task(ChunkStatusTask::GenerateNoise)
+            })
+            .step(ChunkStatus::Surface, |s| {
+                s.add_requirement(ChunkStatus::StructureStarts, 8)
+                    .add_requirement(ChunkStatus::Biomes, 1)
+                    .set_task(ChunkStatusTask::PassThrough)
+            })
+            .step(ChunkStatus::Carvers, |s| {
+                s.add_requirement(ChunkStatus::StructureStarts, 8)
+                    .add_requirement(ChunkStatus::Biomes, 1)
+                    .set_task(ChunkStatusTask::GenerateCarvers)
+            })
+            .build();
+        let err = ctx
+            .generate_through(&pyramid, &mut chunk, ChunkStatus::Carvers)
+            .expect_err("pass-through surface cannot fabricate carvers");
+        assert_eq!(
+            err,
+            GenError::DataNotCarried {
+                status: ChunkStatus::Surface
+            }
+        );
+        // The chunk is untouched AND none of the earlier seams ran.
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Empty);
+        assert!(biomes_calls.borrow().is_empty());
+        assert!(noise_calls.borrow().is_empty());
+        assert!(surface_calls.borrow().is_empty());
+        assert!(carvers_calls.borrow().is_empty());
+    }
+
+    #[test]
     fn refused_promotion_is_atomic_across_the_whole_path() {
         // Atomicity: when any step in the target path is refused, no earlier
         // step runs either. A chunk already at STRUCTURE_REFERENCES promoted
