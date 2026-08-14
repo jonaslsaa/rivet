@@ -58,6 +58,29 @@ mod tests {
     }
 
     #[test]
+    fn should_skip_air_check_nan_discard_consumes_one_draw() {
+        // `discardChanceOnAirExposure = NaN`: the first conjunct is false
+        // (`NaN <= 0.0`), and `!(NaN >= 1.0)` is TRUE in IEEE-754 (the rewrite
+        // `NaN < 1.0` would be false), so the body rolls `random.nextFloat() >=
+        // NaN` — which is always false for a finite draw — and consumes exactly
+        // one RNG draw. Pin that consumption: the value drawn after the check
+        // must be a fresh source's SECOND draw (one past the consumed one).
+        for seed in [1i64, 7, 42, 12345, -2] {
+            let mut expected_source = LegacyRandomSource::new(seed);
+            expected_source.next_float();
+            let expected_second = expected_source.next_float();
+
+            let mut checked_source = LegacyRandomSource::new(seed);
+            assert!(!should_skip_air_check(&mut checked_source, f32::NAN));
+            assert_eq!(
+                checked_source.next_float(),
+                expected_second,
+                "seed {seed}: NaN must consume exactly one draw"
+            );
+        }
+    }
+
+    #[test]
     fn should_skip_air_check_mid_discard_draws_next_float() {
         // For `discardChanceOnAirExposure = 0.5` the body is exactly
         // `random.nextFloat() >= 0.5`: the check consumes one draw, so an
