@@ -62,18 +62,18 @@ fn closer_than(a: &BlockPos, b: &BlockPos, distance: f64) -> bool {
 }
 
 /// `net.minecraft.world.level.levelgen.feature.EndPodiumFeature`.
+///
+/// `EndPodiumFeature` — the unregistered podium feature; constructed directly
+/// (no registry insertion), so it carries no `FeatureId`. `Feature.END_PODIUM`
+/// does not exist in `Feature.java`; `EnderDragonFight` builds the feature
+/// per-instance with `new EndPodiumFeature(activated)` (net/minecraft/world/
+/// level/dimension/end/EnderDragonFight.java:472).
 #[derive(Debug)]
 pub struct EndPodiumFeature {
     /// `EndPodiumFeature.active` — whether this podium writes the `END_PORTAL`
     /// (the active portal variant) or plain `AIR` at the center.
     pub active: bool,
 }
-
-/// `EndPodiumFeature` — the unregistered podium feature; constructed directly
-/// (no registry insertion), so it carries no `FeatureId`. `Feature.END_PODIUM`
-/// does not exist in `Feature.java`; `EnderDragonFight` builds the feature
-/// per-instance with `new EndPodiumFeature(activated)` (net/minecraft/world/
-/// level/dimension/end/EnderDragonFight.java:472).
 
 /// `EndPodiumFeature.PODIUM_RADIUS`.
 pub const PODIUM_RADIUS: i32 = 4;
