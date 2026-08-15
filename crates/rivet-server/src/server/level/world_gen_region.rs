@@ -43,11 +43,12 @@
 //! `ServerLevel`. The M2 STUB seam (MANIFEST) absorbs that residual
 //! `ServerLevel` reference as stubs; this value layer decomposes it into the
 //! scalar values the region actually reads (`seed`/`min_y`/`height`/`sea_level`)
-//! plus the injected [`NoiseBiomeSource`] for `getUncachedNoiseBiome`. The
-//! heavy reads (POI update on `setBlock`, block-entity creation, light engine,
-//! difficulty, world border, entity/player collections, registry access) are
-//! not ported and fail or no-op explicitly rather than fabricating access —
-//! each with a `RivetTodo` pointing at the owning unit.
+//! plus the injected [`NoiseBiomeSource`] for `getUncachedNoiseBiome` and the
+//! injected [`RegistryAccess`] for `registryAccess()`. The heavy reads (POI
+//! update on `setBlock`, block-entity creation, light engine, difficulty, world
+//! border, entity/player collections) are not ported and fail or no-op
+//! explicitly rather than fabricating access — each with a `RivetTodo`
+//! pointing at the owning unit.
 //!
 //! ## Biome access
 //!
@@ -63,6 +64,7 @@
 
 use std::sync::Arc;
 
+use rivet_registry::access::RegistryAccess;
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::block_state::BlockState;
 use rivet_registry::core::{BlockPos, ChunkPos, SectionPos};
@@ -87,6 +89,12 @@ use crate::server::level::level_chunk::{BiomeId as ServerBiomeId, StructureKey, 
 /// `Block.UPDATE_ALL` — `UPDATE_NEIGHBORS | UPDATE_CLIENTS` (1 | 2), the flag
 /// `removeBlock`/`destroyBlock` pass to `setBlock`.
 const UPDATE_ALL: i32 = 3;
+
+/// `Block.UPDATE_LIMIT` — the update-limit default `LevelWriter`'s 3-arg
+/// `setBlock`/`destroyBlock` pass to the 4-arg form. The value-layer
+/// `set_block` ignores it (the update machinery defers), so this is a faithful
+/// default, not an operative limit.
+const UPDATE_LIMIT: i32 = 512;
 
 /// `mc.server.level.pipeline.holder` STUB — the `GenerationChunkHolder` read
 /// surface `WorldGenRegion` consumes.
@@ -226,6 +234,13 @@ pub struct WorldGenRegion {
     /// source `getUncachedNoiseBiome` delegates to (the generator realization
     /// defers with its owning unit).
     uncached_biome_source: Arc<dyn NoiseBiomeSource>,
+    /// `level.registryAccess()` — the shared `RegistryAccess` the region
+    /// returns from `registry_access` (the `WorldGenLevel` back-reference the
+    /// selector/composite features resolve their `Holder<PlacedFeature>`s
+    /// through). Owned by value (a cheap `Arc` clone sharing the same frozen
+    /// registries); the injected construction mirrors the `ServerLevel` seam
+    /// like `uncached_biome_source`.
+    registry_access: RegistryAccess,
 }
 
 impl WorldGenRegion {
@@ -233,7 +248,8 @@ impl WorldGenRegion {
     ///
     /// The `ServerLevel` seam is decomposed into the scalar values the region
     /// reads (`seed`/`min_y`/`height`/`sea_level`) and the injected
-    /// `uncached_biome_source` (the `getUncachedNoiseBiome` seam); the `center`
+    /// `uncached_biome_source` (the `getUncachedNoiseBiome` seam) and
+    /// `registry_access` (the `registryAccess()` back-reference); the `center`
     /// `ChunkAccess` is decomposed into its `ChunkPos` (the region reads the
     /// cached chunks through the holder view, never a separate center
     /// reference).
@@ -247,6 +263,7 @@ impl WorldGenRegion {
         height: i32,
         sea_level: i32,
         uncached_biome_source: Arc<dyn NoiseBiomeSource>,
+        registry_access: RegistryAccess,
     ) -> Self {
         let write_radius = generating_step.block_state_write_radius();
         let biome_manager = BiomeManager::new(
@@ -266,6 +283,7 @@ impl WorldGenRegion {
             sea_level,
             biome_manager,
             uncached_biome_source,
+            registry_access,
         }
     }
 
@@ -515,10 +533,10 @@ impl WorldGenRegion {
     }
 
     /// `WorldGenRegion.removeBlock(BlockPos, boolean)` —
-    /// `setBlock(pos, Blocks.AIR.defaultBlockState(), Block.UPDATE_ALL)` (with
-    /// the default `updateLimit = 0`).
+    /// `setBlock(pos, Blocks.AIR.defaultBlockState(), Block.UPDATE_ALL)` with
+    /// `Block.UPDATE_LIMIT` from `LevelWriter`'s three-argument overload.
     pub fn remove_block(&mut self, pos: &BlockPos, _moved_by_piston: bool) -> bool {
-        self.set_block(pos, BlockState::new(StateId(0)), UPDATE_ALL, 0)
+        self.set_block(pos, BlockState::new(StateId(0)), UPDATE_ALL, UPDATE_LIMIT)
     }
 
     /// `WorldGenRegion.ensureCanWrite(BlockPos)` — the writability gate every
@@ -621,6 +639,57 @@ impl WorldGenLevel for WorldGenRegion {
     /// `WorldGenLevel.ensureCanWrite(BlockPos)` — the write-radius gate.
     fn ensure_can_write(&self, pos: &BlockPos) -> bool {
         WorldGenRegion::ensure_can_write(self, pos)
+    }
+
+    /// `LevelWriter.setBlock(BlockPos, BlockState, int)` — the 3-arg trait
+    /// form, delegating to the 4-arg write with Java's `LevelWriter` default
+    /// `updateLimit = Block.UPDATE_LIMIT`.
+    ///
+    /// `&mut self` is the trait's write contract; the delegated write is the
+    /// region's [`set_block`](Self::set_block) (write-radius-gated chunk
+    /// section write, with the `UPDATE_*`-gated side-effects deferred).
+    fn set_block(&mut self, pos: &BlockPos, state: BlockState, flags: u32) -> bool {
+        WorldGenRegion::set_block(self, pos, state, flags as i32, UPDATE_LIMIT)
+    }
+
+    /// `LevelAccessor.destroyBlock(BlockPos, boolean)` — Java's chain
+    /// `destroyBlock(pos, drop)` → `(pos, drop, null)` →
+    /// `(pos, drop, null, UPDATE_LIMIT)` ends in
+    /// `!getBlockState(pos).isAir() && setBlock(pos, AIR, UPDATE_ALL,
+    /// updateLimit)` (WorldGenRegion.java:252). The `dropResources` flag is
+    /// unread — the entity/`breakBlock` side-effects defer.
+    fn destroy_block(&mut self, pos: &BlockPos, _drop: bool) -> bool {
+        !self.get_block_state(pos).is_air()
+            && WorldGenRegion::set_block(
+                self,
+                pos,
+                BlockState::new(StateId(0)),
+                UPDATE_ALL,
+                UPDATE_LIMIT,
+            )
+    }
+
+    /// `LevelReader.isEmptyBlock(BlockPos)` — `getBlockState(pos).isAir()`.
+    fn is_empty_block(&self, pos: &BlockPos) -> bool {
+        self.get_block_state(pos).is_air()
+    }
+
+    /// `WorldGenRegion.registryAccess()` — `level.registryAccess()`, the
+    /// injected shared access (a cheap `Arc` clone; see the field doc).
+    fn registry_access(&self) -> RegistryAccess {
+        self.registry_access.clone()
+    }
+
+    /// `ChunkAccess.markPosForPostProcessing(BlockPos)` — Java's private
+    /// `markPosForPostProcessing` (WorldGenRegion.java:410):
+    /// `this.getChunk(blockPos).markPosForPostProcessing(blockPos)`. The
+    /// chunk-access hop the trait seam folds in is the `get_chunk` read here;
+    /// the base `ChunkAccess` warns and no-ops (`ProtoChunk` overrides it).
+    fn mark_pos_for_post_processing(&mut self, pos: &BlockPos) {
+        let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
+        let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
+        self.get_chunk(chunk_x, chunk_z)
+            .mark_pos_for_post_processing(pos);
     }
 
     /// `BlockGetter.getBlockState(BlockPos)` — the gated chunk block read.
@@ -799,11 +868,15 @@ fn state_is_special_colliding(_state: &StateId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rivet_registry::builder::RegistryBuilder;
     use rivet_registry::core::QuartPos;
+    use rivet_registry::root::AnyBox;
+    use rivet_registry::{Identifier, ResourceKey};
     use rivet_util::StaticCache2D;
     use rivet_world::chunk::status::GENERATION_PYRAMID;
     use rivet_world::chunk::upgrade_data::UpgradeData;
     use rivet_world::level::height_accessor::create as create_accessor;
+    use rivet_world::levelgen::feature::registry_keys::PLACED_FEATURE;
 
     use crate::server::level::level_chunk::{
         BiomeId as ServerBiomeId, container_factory, superflat_content,
@@ -902,12 +975,17 @@ mod tests {
         }
     }
 
+    /// A feature-step region over the injected empty access.
+    fn feature_region() -> WorldGenRegion {
+        region_with_access(RegistryAccess::empty())
+    }
+
     /// A feature-step region: `generatingStep = getStepTo(FEATURES)` from the
     /// shared generation pyramid — `directDependencies = [CARVERS, CARVERS,
     /// STRUCTURE_STARTS x7]` (rings 0..8), write radius 1 — with every ring
     /// chunk present at its ring's allowed status. `cache` is a
     /// `2 * 8 + 1 = 17`-square centered on (0, 0), covering all nine rings.
-    fn feature_region() -> WorldGenRegion {
+    fn region_with_access(registry_access: RegistryAccess) -> WorldGenRegion {
         let step = GENERATION_PYRAMID
             .get_step_to(ChunkStatus::Features)
             .clone();
@@ -929,6 +1007,7 @@ mod tests {
             Arc::new(TestBiomeSource {
                 biome: BiomeId::from_id(40),
             }),
+            registry_access,
         )
     }
 
@@ -1101,6 +1180,7 @@ mod tests {
             Arc::new(TestBiomeSource {
                 biome: BiomeId::from_id(40),
             }),
+            RegistryAccess::empty(),
         );
 
         // Ring 1 (chunk (1,0)) allows CARVERS; the holder has no chunk, so a
@@ -1275,5 +1355,122 @@ mod tests {
             region.get_height_at(Types::WorldSurface, 15, 15),
             SUPERFLAT_MIN_Y + 1
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The WorldGenLevel write/mark/registry seams this slice adds
+    // -----------------------------------------------------------------------
+
+    /// The 3-arg `WorldGenLevel::set_block` (the `LevelWriter` form) delegates
+    /// to the region's 4-arg write with Java's `Block.UPDATE_LIMIT` default —
+    /// a write inside the radius lands, outside is gated.
+    ///
+    /// The call uses the fully-qualified trait form: the region's inherent
+    /// 4-arg `set_block` shadows the trait method by name.
+    #[test]
+    fn set_block_trait_form_delegates_with_the_level_writer_default() {
+        let mut region = feature_region();
+        let inside = BlockPos::new(2, 64, 3);
+        assert!(<WorldGenRegion as WorldGenLevel>::set_block(
+            &mut region,
+            &inside,
+            BlockState::new(StateId(1)),
+            UPDATE_ALL as u32
+        ));
+        assert_eq!(
+            region.get_block_state(&inside),
+            BlockState::new(StateId(1)),
+            "the 3-arg trait write landed inside the radius"
+        );
+
+        let outside = BlockPos::new(33, 64, 0); // chunk (2, 0), outside the write radius
+        assert!(!<WorldGenRegion as WorldGenLevel>::set_block(
+            &mut region,
+            &outside,
+            BlockState::new(StateId(1)),
+            UPDATE_ALL as u32
+        ));
+        assert_eq!(
+            region.get_block_state(&outside),
+            BlockState::new(StateId(0)),
+            "the gated trait write must not land"
+        );
+    }
+
+    /// `destroyBlock` (WorldGenRegion.java:252) —
+    /// `!getBlockState(pos).isAir() && setBlock(pos, AIR, UPDATE_ALL,
+    /// updateLimit)`: a non-air cell is destroyed (reads air after), an
+    /// already-air cell reports `false` and stays air.
+    #[test]
+    fn destroy_block_removes_a_non_air_cell_and_reports_false_for_air() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(4, 64, 5);
+        assert!(region.set_block(&pos, BlockState::new(StateId(1)), UPDATE_ALL, 0));
+        assert!(!region.get_block_state(&pos).is_air());
+
+        assert!(region.destroy_block(&pos, true));
+        assert_eq!(region.get_block_state(&pos), BlockState::new(StateId(0)));
+
+        // An already-air cell: `!isAir()` is false, so no write and `false`.
+        assert!(!region.destroy_block(&pos, false));
+        assert_eq!(region.get_block_state(&pos), BlockState::new(StateId(0)));
+    }
+
+    /// `isEmptyBlock` — `getBlockState(pos).isAir()`, the write-gated read: an
+    /// untouched superflat cell is empty, a written cell is not.
+    #[test]
+    fn is_empty_block_reflects_the_written_state() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(6, 64, 7);
+        assert!(region.is_empty_block(&pos));
+        assert!(region.set_block(&pos, BlockState::new(StateId(1)), UPDATE_ALL, 0));
+        assert!(!region.is_empty_block(&pos));
+    }
+
+    /// `registryAccess()` — `level.registryAccess()`, the injected access: a
+    /// region built over an access carrying the placed-feature registry
+    /// resolves it, and the default empty access reports `None`.
+    #[test]
+    fn registry_access_resolves_the_injected_access() {
+        let placed = RegistryBuilder::new(&*PLACED_FEATURE).freeze();
+        let access = RegistryAccess::from_pairs(vec![(
+            ResourceKey::create_registry_key(Identifier::with_default_namespace(
+                "worldgen/placed_feature",
+            )),
+            Box::new(placed) as AnyBox,
+        )]);
+        let region = region_with_access(access);
+        assert!(
+            region.registry_access().lookup(&*PLACED_FEATURE).is_some(),
+            "the injected access resolves the placed-feature registry"
+        );
+
+        let empty = feature_region();
+        assert!(
+            empty.registry_access().lookup(&*PLACED_FEATURE).is_none(),
+            "the default empty access does not resolve the registry"
+        );
+    }
+
+    /// `markPosForPostProcessing` (WorldGenRegion.java:410) — the private
+    /// method routes `this.getChunk(blockPos).markPosForPostProcessing(blockPos)`
+    /// through the region's gated chunk read: an in-ring position is served
+    /// (the base `ChunkAccess` warns and no-ops; `ProtoChunk` overrides it).
+    #[test]
+    fn mark_pos_for_post_processing_serves_an_in_ring_position() {
+        let mut region = feature_region();
+        // Chunk (0, 0) — inside the cache ring, so the read is served.
+        region.mark_pos_for_post_processing(&BlockPos::new(8, 64, 9));
+    }
+
+    /// A position whose chunk is outside the cache ring fails loudly with the
+    /// unavailable-chunk diagnostic — Java throws `ReportedException` from the
+    /// same `getChunk` path.
+    #[test]
+    #[should_panic(expected = "Requested chunk unavailable during world generation")]
+    fn mark_pos_for_post_processing_fails_loudly_outside_the_cache_ring() {
+        let mut region = feature_region();
+        // Block (200, 64, 0) → chunk (12, 0), distance 12 > the 8-ring cache.
+        region.mark_pos_for_post_processing(&BlockPos::new(200, 64, 0));
     }
 }
