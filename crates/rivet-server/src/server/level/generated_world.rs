@@ -554,7 +554,11 @@ impl GenerationChunkHolder {
     /// is refused as `GenError::LightEngineMissing`, and a target past LIGHT
     /// (SPAWN/FULL) is out of range
     /// ([`GeneratedChunkError::UnsupportedStatus`]). The chunk is left
-    /// untouched by every refusal.
+    /// untouched by every such refusal. (The wired FEATURES rung is the
+    /// exception: it runs Java's priming prologue — heightmap priming, the
+    /// decoration-seed derivation, the bounded 3x3 region read — and then fails
+    /// typed, so the chunk's heightmaps advance while its persisted status is
+    /// never stamped past CARVERS; see [`GenerationChunkHolder::status`].)
     pub fn generate_through(&mut self, target: ChunkStatus) -> Result<(), GeneratedChunkError> {
         self.context
             .generate_through(&GENERATION_PYRAMID, &mut self.chunk, target)
@@ -571,9 +575,9 @@ impl GenerationChunkHolder {
     /// at `CARVERS` (the FEATURES rung fails typed at the first placed feature
     /// whose value decode is unavailable — see [`GenerationChunkHolder::new`]).
     /// No conversion from a sub-FULL `ProtoChunk` exists or may be added without
-    /// the SPAWN/FULL stages (RivetTodo #185), so this always fails loudly with
-    /// the chunk's real status — never stamping FULL and never falling back to
-    /// superflat.
+    /// the unwired SPAWN/FULL stages (RivetTodo #185), so this always fails
+    /// loudly with the chunk's real status — never stamping FULL and never
+    /// falling back to superflat.
     pub fn to_level_chunk(&self) -> Result<LevelChunk, GeneratedChunkError> {
         Err(GeneratedChunkError::InstallRequiresFull(
             self.chunk.get_persisted_status(),
@@ -801,7 +805,10 @@ fn resolve_biome_settings(
     let mut builder = PlainBuilder::default();
     for (step, step_features) in table.features.iter().enumerate() {
         for feature_name in *step_features {
-            let id = PLACED_FEATURE_BY_NAME[feature_name].id as u32;
+            let id = PLACED_FEATURE_BY_NAME
+                .get(feature_name)
+                .ok_or(GenError::SettingsNotGenerated { biome: Some(name) })?
+                .id as u32;
             placed_by_id.entry(id).or_insert(*feature_name);
             builder =
                 builder.add_feature_index(step as i32, Holder::reference(placed_registry_id, id));
