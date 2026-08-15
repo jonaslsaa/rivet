@@ -209,15 +209,17 @@ public final class WorldgenFeatureDataExtractor {
                 "full overworld possible-biome list is degenerate (" + possibleBiomes.size() + " biome(s)) — non-vacuity failed"
             );
         }
-        // `possibleBiomes()` is an ImmutableSet of Holder.Reference, and
-        // Holder.Reference does not override equals/hashCode — its iteration
-        // order is an identity-hash artifact that HotSpot randomizes per JVM.
-        // Under the pinned capture JVM the order happens to coincide with the
-        // deterministic content-derived emission order, but that coincidence is
-        // not guaranteed. Ground the list in the deterministic order instead and
-        // refuse to capture a divergent identity-hash ordering: the fixture
-        // stores the builder emission (first-appearance) order, which is the
-        // only stable representation.
+        // `possibleBiomes()` is `collectPossibleBiomes().distinct().collect(
+        // ImmutableSet.toImmutableSet())`. Guava's `ImmutableSet` preserves
+        // insertion (encounter) order and `distinct()` preserves encounter
+        // order, so the iteration order IS deterministic: the builder emission
+        // (first-appearance) order. The divergence guard below is still
+        // valuable as a defensive invariant — if a future Paper change swaps
+        // the collector for an unordered set (e.g. a plain `HashSet`), the
+        // identity of the FeatureSorter's source list would silently change.
+        // Ground the list in the deterministic order explicitly and refuse to
+        // capture a divergent ordering: the fixture stores the builder emission
+        // (first-appearance) order, which is the stable representation.
         List<String> possibleNames = new ArrayList<>(possibleBiomes.size());
         for (Holder<Biome> h : possibleBiomes) {
             possibleNames.add(h.unwrapKey().map(k -> k.identifier().toString()).orElse("?"));
@@ -391,13 +393,25 @@ public final class WorldgenFeatureDataExtractor {
             JsonObject bj = biomesOut.getAsJsonObject(name);
             int total = 0;
             JsonArray perStep = new JsonArray();
+            JsonArray perStepNames = new JsonArray();
             for (JsonElement step : bj.getAsJsonArray("features")) {
                 total += step.getAsJsonArray().size();
                 perStep.add(step.getAsJsonArray().size());
+                JsonArray stepNames = new JsonArray();
+                for (JsonElement placed : step.getAsJsonArray()) {
+                    stepNames.add(placed.getAsString());
+                }
+                perStepNames.add(stepNames);
             }
             JsonObject p = new JsonObject();
             p.addProperty("total", total);
             p.add("per_step", perStep);
+            // The ordered placed-feature names per step — the same holder-set
+            // order the FeatureSorter consumes. The codegen validator compares
+            // these element-for-element against the `biomes` step lists, so a
+            // within-step reorder (which silently changes FeatureSorter's
+            // global feature indices) fails.
+            p.add("per_step_names", perStepNames);
             perBiome.add(name, p);
         }
         probe.add("per_biome", perBiome);
