@@ -34,7 +34,15 @@
 //! cross-unit STUB pattern as `chorus_growth.rs`), routing `canAttachTo` — the
 //! face-sturdiness of the support neighbour — through the
 //! `WorldGenLevel::is_face_sturdy` seam (RivetTodo #232), exactly as
-//! `vines_feature.rs` does. `SculkVeinBlock.getSpreader()` returns a
+//! `vines_feature.rs` does. That seam is the blocker for production placement:
+//! the only production `WorldGenLevel` impl (the `WorldGenRegion` facade in
+//! `rivet-server`, `mc.server.level.pipeline.region`) does not override
+//! `is_face_sturdy`, so the trait default at `world_gen_level.rs` panics — a
+//! real FEATURES pass would panic on the first placement attempt. The runtime
+//! body ported here is therefore exercised only against the test double
+//! (`TestLevel`, `face_sturdy = true`); placing seed-42 `glow_lichen` in
+//! production still requires the #232 block/shape world-access port.
+//! `SculkVeinBlock.getSpreader()` returns a
 //! `SculkVeinSpreaderConfig` whose replace/spread rules differ; that config is
 //! not ported, so a sculk-vein growth block fails explicitly (RivetTodo #232)
 //! rather than growing with the wrong spreader. Resolving the spreader up front
