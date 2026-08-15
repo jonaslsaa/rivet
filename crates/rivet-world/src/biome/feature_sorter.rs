@@ -41,11 +41,17 @@
 //! The value `PlacedFeature` itself is not resolved (the placed-feature
 //! `HolderLookup` is not threaded through this slice — it defers with #126 like
 //! the rest of placement resolution), so [`StepFeatureData`] holds
-//! `Holder<PlacedFeature>` rather than values. The stored holders are clones;
-//! `index_mapping` keys on the identity captured at first appearance, so
-//! passing a holder borrowed from the source settings resolves for `Reference`
-//! holders unconditionally and for `Direct` holders when the same instance is
-//! passed.
+//! `Holder<PlacedFeature>` rather than values. The stored holders are clones
+//! (for `Direct` holders a Rust clone is a distinct allocation, hence a
+//! distinct identity), so the per-step `index_mapping` registers *both*
+//! spellings of each logical holder — the identity captured at first appearance
+//! (so a holder borrowed from the source settings resolves) and each stored
+//! clone's own identity (so `index_mapping(&features[i])` is `Some(i)`). Java
+//! needs only one key per feature because its `Direct.value()` returns the same
+//! object for the same holder and its `features()` list holds those same
+//! objects; the two keys are the Rust spelling of that single observable
+//! identity. `Reference` holders collapse both spellings to the same
+//! `(registry, id)` key.
 //!
 //! ## Cycle diagnostics
 //!
@@ -110,8 +116,11 @@ impl StepFeatureData {
     /// `StepFeatureData.indexMapping().applyAsInt(feature)` — the feature's
     /// position in `features` (the per-step global index `setFeatureSeed` is
     /// given, and the index used to `features().get(globalIndexOfFeature)`).
-    /// Java's identity lookup returns `-1` for an absent feature; the `Option`
-    /// is the Rust spelling.
+    /// Registers both the first-appearance identity and each stored clone's own
+    /// identity, so `index_mapping(&features[i]) == Some(i)` and a holder
+    /// borrowed from the source settings both resolve — Java's single-identity
+    /// observable contract. Java's identity lookup returns `-1` for an absent
+    /// feature; the `Option` is the Rust spelling.
     pub fn index_mapping(&self, feature: &Holder<PlacedFeature>) -> Option<usize> {
         self.index_mapping
             .get(&placed_feature_key(feature))
@@ -283,7 +292,12 @@ where
                 let (key, feature) = &features_by_index[global_index];
                 let position = features.len();
                 features.push(feature.clone());
+                // Register both the first-appearance identity (source-borrowed
+                // holders) and the stored clone's own identity (`features[i]`);
+                // Java collapses these to one because its value objects are
+                // shared. `Reference` holders collapse both to the same key.
                 index_mapping.insert(*key, position);
+                index_mapping.insert(placed_feature_key(&features[position]), position);
             }
         }
         result.push(StepFeatureData {
@@ -438,10 +452,11 @@ mod tests {
         // with `featureIndex` assigned in source/step/holder order:
         //   A -> 0, B -> 1 (from B1 step 0), C -> 2 (from B1 step 1); B2's C
         //   reuses 2.
-        // Edges (source chains): B1 (0,0)->(1,0)->(2,1); B2 (0,2)->{}.
-        // DFS from the sorted keys [(0,0),(0,2),(1,2)] visits
-        //   (0,0): post-order (2,1),(1,0),(0,0); (0,2): post-order ...,(0,2);
-        //   (1,2) is already discovered.
+        // Edges (source chains), nodes as (step, globalIndex):
+        //   B1 A->B->C = (0,0)->(0,1)->(1,2); B2 C = (0,2)->{}.
+        // DFS from the sorted keys [(0,0),(0,1),(0,2),(1,2)] visits
+        //   (0,0): post-order (1,2),(0,1),(0,0); then (0,2): post-order (0,2);
+        //   (0,1) and (1,2) are already discovered.
         // Reversed: [(0,2),(0,0),(1,0),(2,1)] -> step 0 = [C, A, B], step 1 = [C].
         let sources = [
             Source(vec![step(&[feature(0), feature(1)]), step(&[feature(2)])]),
@@ -519,7 +534,7 @@ mod tests {
         }
         // Exhaustively: the two-step source yields step 0 = [z, x], step 1 = [y]
         // (z gets global index 0, x index 1, y index 2; DFS over the chain
-        // (0,0)->(1,0)->(2,1) reversed gives step 0 [z, x] and step 1 [y]).
+        // (0,0)->(0,1)->(1,2) reversed gives step 0 [z, x] and step 1 [y]).
         assert_eq!(ids(&result[0].features), vec![30, 10]);
         assert_eq!(ids(&result[1].features), vec![20]);
     }
@@ -551,10 +566,14 @@ mod tests {
         // Distinct Direct instances are distinct identities: no content dedup.
         assert_eq!(result[0].features.len(), 2);
         // The mapping round-trips for the holder instances the build saw (the
-        // ones inside the source's holder set).
+        // ones inside the source's holder set) and for the clones stored in
+        // `StepFeatureData.features` (both spellings are registered).
         let set = &sources[0].0[0];
         assert_eq!(result[0].index_mapping(set.get(0)), Some(0));
         assert_eq!(result[0].index_mapping(set.get(1)), Some(1));
+        for (position, holder) in result[0].features.iter().enumerate() {
+            assert_eq!(result[0].index_mapping(holder), Some(position));
+        }
     }
 
     #[test]
