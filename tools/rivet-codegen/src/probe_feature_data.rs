@@ -6,9 +6,10 @@
 //! This is the *live* half of the feature-data gate: it boots the real
 //! `RegistryDataLoader` pipeline and asserts, against the running JVM, that the
 //! emitted fixture is byte-identical to a fresh load and that the anchor counts
-//! (5 reachable biomes, 72 placed features, 70 configured features, per-biome
-//! feature-step totals) reproduce. It guards against a fixture that was
-//! hand-edited or generated from a different jar without failing the drift gate.
+//! (55 possible biomes, 5 reachable biomes, 203 placed features, 170 configured
+//! features, per-biome feature-step totals) reproduce. It guards against a
+//! fixture that was hand-edited or generated from a different jar without
+//! failing the drift gate.
 //!
 //! The extractor writes the probe counts into the fixture JSON itself (a
 //! `probe` object) rather than stdout, because `Bootstrap.wrapStreams()`
@@ -26,9 +27,10 @@ use crate::extract;
 /// The anchor counts a live Paper 26.2 load must reproduce (also asserted by
 /// the codegen-side validation, as the `probe` object keys).
 const ANCHORS: &[(&str, u64)] = &[
+    ("possible_biome_count", 55),
     ("reachable_biome_count", 5),
-    ("placed_feature_count", 72),
-    ("configured_feature_count", 70),
+    ("placed_feature_count", 203),
+    ("configured_feature_count", 170),
 ];
 
 /// Non-vacuity: the reachable biome set must include the deep `lush_caves`
@@ -147,9 +149,10 @@ mod tests {
         let bytes = fixture(
             &["minecraft:lush_caves", "minecraft:beach"],
             &[
+                ("possible_biome_count", 55),
                 ("reachable_biome_count", 5),
-                ("placed_feature_count", 72),
-                ("configured_feature_count", 70),
+                ("placed_feature_count", 203),
+                ("configured_feature_count", 170),
             ],
         );
         check_anchors(&bytes).unwrap();
@@ -160,13 +163,14 @@ mod tests {
         let bytes = fixture(
             &["minecraft:lush_caves", "minecraft:beach"],
             &[
+                ("possible_biome_count", 55),
                 ("reachable_biome_count", 5),
-                ("placed_feature_count", 71),
-                ("configured_feature_count", 70),
+                ("placed_feature_count", 202),
+                ("configured_feature_count", 170),
             ],
         );
         let err = check_anchors(&bytes).unwrap_err();
-        assert!(err.to_string().contains("expected 72"), "got: {err}");
+        assert!(err.to_string().contains("expected 203"), "got: {err}");
     }
 
     #[test]
@@ -174,9 +178,10 @@ mod tests {
         let mut v: Value = serde_json::from_slice(&fixture(
             &["minecraft:lush_caves", "minecraft:beach"],
             &[
+                ("possible_biome_count", 55),
                 ("reachable_biome_count", 5),
-                ("placed_feature_count", 72),
-                ("configured_feature_count", 70),
+                ("placed_feature_count", 203),
+                ("configured_feature_count", 170),
             ],
         ))
         .unwrap();
@@ -190,9 +195,10 @@ mod tests {
         let bytes = fixture(
             &["minecraft:lush_caves"],
             &[
+                ("possible_biome_count", 55),
                 ("reachable_biome_count", 5),
-                ("placed_feature_count", 72),
-                ("configured_feature_count", 70),
+                ("placed_feature_count", 203),
+                ("configured_feature_count", 170),
             ],
         );
         let err = check_anchors(&bytes).unwrap_err();

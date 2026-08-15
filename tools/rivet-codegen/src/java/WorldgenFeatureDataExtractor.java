@@ -8,25 +8,37 @@
 //! `RegistryDataLoader.load(DIMENSION_REGISTRIES)` -> composite access) is
 //! sampled to materialize the deterministic seed-42 decoration data:
 //!
-//!   1. `reachable_biomes` — the biome set that can drive FEATURES placement
-//!      into the committed 2x2 grid {(3,3),(4,3),(3,4),(4,4)}. The chunks that
-//!      can write into that grid (blockStateWriteRadius(1)) are chunks 2..5,
-//!      and each writer's FEATURES pass reads the biome map of its own 3x3
-//!      neighborhood, so the biome read set is chunks 1..6. The biome source is
-//!      sampled at every quart position and every Y quart (-64..319 blocks) —
-//!      the depth parameter varies by Y, so both surface biomes and the deep
-//!      `lush_caves` biome appear.
-//!   2. `biomes` — the full `BiomeGenerationSettings` of each reachable biome:
+//!   1. `possible_biomes` — the FULL overworld `biomeSource.possibleBiomes()`
+//!      list in source order (the exact argument Paper's `ChunkGenerator`
+//!      feeds `FeatureSorter.buildFeaturesPerStep`, `ChunkGenerator.java` 97-100:
+//!      `List.copyOf(biomeSource.possibleBiomes())`). `BiomeSource.
+//!      possibleBiomes()` is `collectPossibleBiomes().distinct().collect(
+//!      ImmutableSet.toImmutableSet())`, and `MultiNoiseBiomeSource.
+//!      collectPossibleBiomes()` is `parameters().values().stream().map(
+//!      Pair::getSecond)` — so this is the `OverworldBiomeBuilder.addBiomes`
+//!      insertion order (addOffCoastBiomes first: mushroom_fields, the deep
+//!      oceans + oceans per temperature, then the inland slices, then the
+//!      underground biomes), deduped by first appearance.
+//!   2. `reachable_biomes` — the seed-42 biome set that can drive FEATURES
+//!      placement into the committed 2x2 grid {(3,3),(4,3),(3,4),(4,4)}. The
+//!      chunks that can write into that grid (blockStateWriteRadius(1)) are
+//!      chunks 2..5, and each writer's FEATURES pass reads the biome map of its
+//!      own 3x3 neighborhood, so the biome read set is chunks 1..6. The biome
+//!      source is sampled at every quart position and every Y quart (-64..319
+//!      blocks) — the depth parameter varies by Y, so both surface biomes and
+//!      the deep `lush_caves` biome appear. This is a subset of
+//!      `possible_biomes` (the convergence non-vacuity anchor), sorted by id.
+//!   3. `biomes` — the full `BiomeGenerationSettings` of EVERY possible biome:
 //!      id, the carver identity names, and the per-step `features` lists (each
 //!      `HolderSet<PlacedFeature>` in the builder's step order, each placed
 //!      feature in the holder-set order).
-//!   3. `placed_features` / `configured_features` — the transitive closure of
+//!   4. `placed_features` / `configured_features` — the transitive closure of
 //!      referenced registry entries, each stored as its full
 //!      `RegistryOps`-encoded JSON (the exact datapack JSON shape: holder
 //!      references are strings, inline values are nested).
 //!
 //! The closure rule (what a future FEATURES port must be able to decode):
-//!   * placed set starts from the reachable biomes' direct per-step placed
+//!   * placed set starts from every possible biome's direct per-step placed
 //!     features, and grows by every placed-feature reference found inside a
 //!     configured feature's RegistryOps-encoded JSON (e.g. `random_selector`
 //!     configs reference `WeightedPlacedFeature` holders);
@@ -37,8 +49,9 @@
 //!     the encoded JSON (a block-state `Name` is an object field, never a bare
 //!     holder ref; only registry-reference holders encode as bare strings).
 //!
-//! Determinism: the reachable biome list is sorted by id (the registry's dense
-//! id order), the per-step feature lists keep the runtime holder-set order, the
+//! Determinism: `possible_biomes` keeps the source (builder) order, the
+//! seed-42 `reachable_biomes` list is sorted by id (the registry's dense id
+//! order), the per-step feature lists keep the runtime holder-set order, the
 //! feature element objects are emitted name-sorted, and the whole dump is
 //! written with a fixed pretty-printer — two independent runs are byte-identical
 //! (the probe asserts this against the committed fixture).
@@ -123,7 +136,7 @@ public final class WorldgenFeatureDataExtractor {
 
         JsonObject root = new JsonObject();
         root.addProperty("format", 1);
-        root.addProperty("generator", "WorldgenFeatureDataExtractor (seed-42 reachable-biome + feature closure)");
+        root.addProperty("generator", "WorldgenFeatureDataExtractor (full overworld possible-biome + seed-42 feature closure)");
         root.addProperty("paper", paper);
         root.addProperty("minecraft_version", mcVersion);
         root.addProperty("protocol_version", SharedConstants.getProtocolVersion());
@@ -171,14 +184,67 @@ public final class WorldgenFeatureDataExtractor {
         // block tags), which feature configs reference — RegistryOps needs it.
         RegistryOps<JsonElement> regOps = RegistryOps.create(JsonOps.INSTANCE, registryAccess);
 
-        // ---- reachable biome set ---------------------------------------------
+        // ---- full possible-biome list (source order) -------------------------
+        // The overworld generator's biome source is the MultiNoiseBiomeSource
+        // built from `OverworldBiomeBuilder.addBiomes` (via the OVERWORLD
+        // parameter-list preset).
         Holder<net.minecraft.world.level.levelgen.presets.WorldPreset> preset =
             registryAccess.lookupOrThrow(Registries.WORLD_PRESET)
                 .getOrThrow(net.minecraft.world.level.levelgen.presets.WorldPresets.NORMAL);
         NoiseBasedChunkGenerator generator = (NoiseBasedChunkGenerator) preset.value().createWorldDimensions().overworld();
+        MultiNoiseBiomeSource biomeSource = (MultiNoiseBiomeSource) generator.getBiomeSource();
+        // `biomeSource.possibleBiomes()` is the exact full overworld list Paper's
+        // ChunkGenerator feeds the FeatureSorter (`ChunkGenerator.java` 97-100:
+        // `FeatureSorter.buildFeaturesPerStep(List.copyOf(biomeSource.
+        // possibleBiomes()), ...)`). `BiomeSource.possibleBiomes()` is
+        // `collectPossibleBiomes().distinct().collect(ImmutableSet.
+        // toImmutableSet())`, and `MultiNoiseBiomeSource.collectPossibleBiomes()`
+        // is `parameters().values().stream().map(Pair::getSecond)` — so this is
+        // the `OverworldBiomeBuilder.addBiomes` first-appearance order
+        // (addOffCoastBiomes: mushroom_fields, deep oceans + oceans per
+        // temperature; then the inland slices; then the underground biomes).
+        List<Holder<Biome>> possibleBiomes = new ArrayList<>(biomeSource.possibleBiomes());
+        if (possibleBiomes.size() < 2) {
+            throw new IllegalStateException(
+                "full overworld possible-biome list is degenerate (" + possibleBiomes.size() + " biome(s)) — non-vacuity failed"
+            );
+        }
+        // `possibleBiomes()` is an ImmutableSet of Holder.Reference, and
+        // Holder.Reference does not override equals/hashCode — its iteration
+        // order is an identity-hash artifact that HotSpot randomizes per JVM.
+        // Under the pinned capture JVM the order happens to coincide with the
+        // deterministic content-derived emission order, but that coincidence is
+        // not guaranteed. Ground the list in the deterministic order instead and
+        // refuse to capture a divergent identity-hash ordering: the fixture
+        // stores the builder emission (first-appearance) order, which is the
+        // only stable representation.
+        List<String> possibleNames = new ArrayList<>(possibleBiomes.size());
+        for (Holder<Biome> h : possibleBiomes) {
+            possibleNames.add(h.unwrapKey().map(k -> k.identifier().toString()).orElse("?"));
+        }
+        List<String> emissionNames = emissionOrder(registryAccess);
+        if (!possibleNames.equals(emissionNames)) {
+            StringBuilder sb = new StringBuilder();
+            sb.append("possibleBiomes() order diverged from the deterministic emission order — refusing to capture an identity-hash artifact.\n");
+            sb.append("possibleBiomes() (").append(possibleNames.size()).append("):\n");
+            for (int i = 0; i < possibleNames.size(); i++) {
+                sb.append("  ").append(possibleNames.get(i)).append("\n");
+            }
+            sb.append("emission order (").append(emissionNames.size()).append("):\n");
+            for (int i = 0; i < emissionNames.size(); i++) {
+                sb.append("  ").append(emissionNames.get(i)).append("\n");
+            }
+            throw new IllegalStateException(sb.toString());
+        }
+        JsonArray possibleArr = new JsonArray();
+        for (String n : possibleNames) {
+            possibleArr.add(n);
+        }
+        root.add("possible_biomes", possibleArr);
+
+        // ---- reachable biome set ---------------------------------------------
         RandomState randomState = RandomState.create(registryAccess, NoiseGeneratorSettings.OVERWORLD, seed);
         Climate.Sampler sampler = randomState.sampler();
-        MultiNoiseBiomeSource biomeSource = (MultiNoiseBiomeSource) generator.getBiomeSource();
 
         int lo = QuartPos.fromBlock(1 << 4);
         int hi = QuartPos.fromBlock((6 << 4) + 15);
@@ -208,21 +274,21 @@ public final class WorldgenFeatureDataExtractor {
 
         // ---- biome generation settings ----------------------------------------
         JsonObject biomesOut = new JsonObject();
-        for (Map.Entry<Integer, String> e : reachable.entrySet()) {
-            int id = e.getKey();
-            String name = e.getValue();
-            Biome biome = biomeReg.getOrThrow(ResourceKey.create(Registries.BIOME, net.minecraft.resources.Identifier.parse(name))).value();
+        for (Holder<Biome> h : possibleBiomes) {
+            String name = h.unwrapKey().map(k -> k.identifier().toString()).orElse("?");
+            Biome biome = h.value();
+            int id = biomeReg.getId(biome);
             JsonObject bj = new JsonObject();
             bj.addProperty("id", id);
             JsonArray carvers = new JsonArray();
-            biome.getGenerationSettings().getCarvers().forEach(h ->
-                carvers.add(h.unwrapKey().map(k -> k.identifier().toString()).orElse("?")));
+            biome.getGenerationSettings().getCarvers().forEach(carver ->
+                carvers.add(carver.unwrapKey().map(k -> k.identifier().toString()).orElse("?")));
             bj.add("carvers", carvers);
             JsonArray steps = new JsonArray();
             for (int step = 0; step < biome.getGenerationSettings().features().size(); step++) {
                 JsonArray names = new JsonArray();
-                for (Holder<PlacedFeature> h : biome.getGenerationSettings().features().get(step)) {
-                    names.add(h.unwrapKey().map(k -> k.identifier().toString()).orElse("?"));
+                for (Holder<PlacedFeature> placed : biome.getGenerationSettings().features().get(step)) {
+                    names.add(placed.unwrapKey().map(k -> k.identifier().toString()).orElse("?"));
                 }
                 steps.add(names);
             }
@@ -316,6 +382,7 @@ public final class WorldgenFeatureDataExtractor {
 
         // ---- probe counts -------------------------------------------------------
         JsonObject probe = new JsonObject();
+        probe.addProperty("possible_biome_count", possibleBiomes.size());
         probe.addProperty("reachable_biome_count", reachable.size());
         probe.addProperty("placed_feature_count", placedNames.size());
         probe.addProperty("configured_feature_count", configuredNames.size());
@@ -379,5 +446,33 @@ public final class WorldgenFeatureDataExtractor {
                 collectFeatureRefs(child, kind, worklist, placedReg, configuredReg);
             }
         }
+    }
+
+    /**
+     * The deterministic, content-derived order of the full overworld possible
+     * biome list: the first-appearance order of the OVERWORLD
+     * MultiNoiseBiomeSourceParameterList's parameter points (the exact stream
+     * `MultiNoiseBiomeSource.collectPossibleBiomes()` reads, deduped). This is
+     * the `OverworldBiomeBuilder.addBiomes` builder order and is independent of
+     * JVM identity hashes.
+     */
+    private static List<String> emissionOrder(RegistryAccess registryAccess) {
+        Registry<net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterList> plistReg =
+            registryAccess.lookupOrThrow(net.minecraft.core.registries.Registries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST);
+        var overworldPlist = plistReg.getOrThrow(
+            net.minecraft.resources.ResourceKey.create(
+                net.minecraft.core.registries.Registries.MULTI_NOISE_BIOME_SOURCE_PARAMETER_LIST,
+                net.minecraft.resources.Identifier.withDefaultNamespace("overworld")
+            )
+        ).value();
+        List<String> emission = new ArrayList<>();
+        Set<String> seen = new java.util.HashSet<>();
+        for (var p : overworldPlist.parameters().values()) {
+            String n = p.getSecond().unwrapKey().map(k -> k.identifier().toString()).orElse("?");
+            if (seen.add(n)) {
+                emission.add(n);
+            }
+        }
+        return emission;
     }
 }

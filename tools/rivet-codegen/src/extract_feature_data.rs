@@ -156,8 +156,9 @@ fn write_manifest(repo_root: &Path, output: &Path, bundler: &Path) -> Result<()>
     source.jar = canonical;
     let bytes = fs::read(output).with_context(|| format!("read {}", output.display()))?;
     let manifest = FixtureManifest {
-        generator: "WorldgenFeatureDataExtractor (seed-42 reachable-biome + feature closure)"
-            .to_string(),
+        generator:
+            "WorldgenFeatureDataExtractor (full overworld possible-biome + seed-42 feature closure)"
+                .to_string(),
         source,
         file: FixtureFile {
             bytes: bytes.len() as u64,
