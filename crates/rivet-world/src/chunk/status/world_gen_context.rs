@@ -90,6 +90,13 @@ use crate::chunk::status::chunk_step::ChunkStep;
 use crate::chunk::status::{ChunkPyramid, ChunkStatus};
 use crate::lighting::level_light_engine::LevelLightEngine;
 
+/// The region-backed decoration seam's failure modes — the typed failures the
+/// `FEATURES` closure body (`addVanillaDecorations`) returns. The `ChunkPos`
+/// comes from `rivet_registry::core`; the closure body (in `rivet-server`) owns
+/// the `WorldGenRegion` the decoration runs against, so this crate carries only
+/// the error shape.
+use rivet_registry::core::ChunkPos;
+
 /// The `generateBiomes` seam closure type.
 type BiomesSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>);
 /// The `generateNoise` seam closure type.
@@ -99,9 +106,9 @@ type SurfaceSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>);
 /// The `generateCarvers` seam closure type.
 type CarversSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>);
 /// The `generateFeatures` seam closure type — returns the decoration body's
-/// typed failure (the region-backed neighbor-cache seam defers with #185, so
-/// the body fails `GenError::FeaturesUnavailable` at its first region read
-/// instead of panicking or silently skipping).
+/// typed failure (the region-backed neighbor-cache seam defers with #126, so
+/// the body fails `GenError::FeaturePlacementDecode` at its first real
+/// placed-feature value decode instead of panicking or silently skipping).
 type FeaturesSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenError>;
 
 /// `WorldGenContext` (value-layer seam shape) — the caller-supplied BIOMES,
@@ -139,8 +146,8 @@ where
     /// is caller-supplied). The seam's ordering guard is what keeps this from
     /// running before CARVERS (the decoration bodies consume the CARVERS-
     /// produced block data). The closure returns the body's typed failure —
-    /// [`GenError::FeaturesUnavailable`] at the first region read when the
-    /// region-backed neighbor cache is unavailable — instead of panicking.
+    /// [`GenError::FeaturePlacementDecode`] at the first real placed-feature
+    /// value decode (#126) — instead of panicking.
     features: Box<FeaturesSeam<T, B, S>>,
     /// The `ThreadedLevelLightEngine` the INITIALIZE_LIGHT/LIGHT tasks store and
     /// route through (Java's `context.lightEngine()`). The facade holds the
@@ -191,14 +198,29 @@ pub enum GenError {
     /// CARVERS-produced block data, so an un-carved chunk must not be
     /// decorated).
     FeaturesNotGenerated,
-    /// The `FEATURES` decoration body could not run — its first region read
-    /// (the 3x3 biome-union gather through the bounded `WorldGenRegion`'s
-    /// neighbor-chunk cache) is unavailable. The caller-supplied body runs the
-    /// region-free `addVanillaDecorations` prologue (heightmap priming, the
-    /// section-origin decoration-seed derivation) and then fails here, typed,
-    /// instead of panicking or silently skipping; the chunk is never stamped
-    /// FEATURES and no decoration body runs.
-    FeaturesUnavailable,
+    /// The `FEATURES` decoration body could not place a configured feature —
+    /// its placed-feature value decode (the `#126`-gated `PlacedFeature` JSON
+    /// path `placeWithBiomeCheck` dereferences) is unavailable. The
+    /// caller-supplied body runs the faithful `addVanillaDecorations` prologue
+    /// (heightmap priming, the section-origin decoration-seed derivation, the
+    /// bounded 3x3 biome-union gather, the per-step FeatureSorter data, the
+    /// exact per-feature seeds) and then fails here, typed, at the exact first
+    /// feature whose decode is missing — never panicking and never silently
+    /// skipping; the chunk is never stamped FEATURES and no placed feature
+    /// body runs.
+    FeaturePlacementDecode {
+        /// The generating chunk's position.
+        chunk_pos: ChunkPos,
+        /// `stepIndex` — the `GenerationStep.Decoration` ordinal being
+        /// decorated.
+        step_index: usize,
+        /// `globalIndexOfFeature` — the feature's FeatureSorter global index
+        /// (the `setFeatureSeed` index).
+        global_feature_index: usize,
+        /// The placed feature's registry key (`minecraft:placed_feature` name,
+        /// e.g. `minecraft:lake_lava_underground`).
+        feature_key: &'static str,
+    },
     /// A wired generation task is installed at a rung it does not own —
     /// `GenerateBiomes` away from `BIOMES`, `GenerateNoise` away from `NOISE`.
     /// Only a malformed crate-internal pyramid can produce this: dispatching it
@@ -233,11 +255,16 @@ impl std::fmt::Display for GenError {
             GenError::FeaturesNotGenerated => {
                 write!(f, "cannot generate FEATURES before the CARVERS task ran")
             }
-            GenError::FeaturesUnavailable => write!(
+            GenError::FeaturePlacementDecode {
+                chunk_pos,
+                step_index,
+                global_feature_index,
+                feature_key,
+            } => write!(
                 f,
-                "cannot run the FEATURES decoration body: its first region read \
-                 (the 3x3 biome-union gather through the bounded WorldGenRegion \
-                 neighbor-chunk cache) is unavailable"
+                "cannot place feature {} (chunk {}, step {}, global feature index {}): \
+                 its placed-feature value decode is unavailable (RivetTodo #126)",
+                feature_key, chunk_pos, step_index, global_feature_index
             ),
             GenError::DataNotCarried { status } => write!(
                 f,
