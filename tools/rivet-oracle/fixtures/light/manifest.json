@@ -1,0 +1,140 @@
+{
+  "format": 1,
+  "paper": "26.2-DEV-main@0a99345",
+  "seed": "42",
+  "level-type": "minecraft:normal",
+  "kind": "light",
+  "note": "Seed-42 LIGHT oracle checkpoint: per-section Starlight sky nibbles + derived sky-emptiness map + light_correct for the committed 3x3 interior {19..21}x{19..21} of a self-contained forced 5x5 grid {18..22}x{18..22}, captured from the pinned Paper runtime by booting a fresh normal-overworld world and force-generating the grid to level 33 (ChunkLevel.byStatus(FULL)), serialized as minecraft:full. FULL is the forced path's ceiling (a level-35 LIGHT ticket is INACCESSIBLE and never generates), and FULL serialization carries the Starlight-computed light arrays (ChunkLightTask's fresh-chunk branch runs lightChunk -> SkyStarLightEngine.light), so the persisted light data IS the LIGHT-stage output this captures. sky_nibbles are the to_vanilla_nibble byte views per light section (keyed by light-section y, None for null sections); sky_emptiness is the per-world-section map derived exactly like StarLightEngine.getEmptySectionsForChunk (absent or hasOnlyAir -> empty). The raw NBT of all 25 forced chunks is committed under chunks/ so the rivet-server engine differential can rebuild the exact context Paper lit in. Non-vacuity: at least one committed chunk must carry a non-null sky nibble with real terrain shadowing, and a non-uniform emptiness map. Regenerate with `rivet-oracle regenerate --light` (twin-boot byte-identity proof).",
+  "captured": [
+    {
+      "path": "light.json",
+      "sha256": "07b63187aa7386e7c01cbb270aa46d01140112c33935855f13c6e48ebc0c8bd6",
+      "bytes": 433657
+    },
+    {
+      "path": "chunks/18.18.nbt",
+      "sha256": "ce0c6acdd625cbfd305f7fdac78c477f40313b71435aa81b8ede74b6010b7fd5",
+      "bytes": 29882
+    },
+    {
+      "path": "chunks/18.19.nbt",
+      "sha256": "316d9d3d69b9e36fa523db24b96d968bfe5f10b701507efb21004998b59948b5",
+      "bytes": 32131
+    },
+    {
+      "path": "chunks/18.20.nbt",
+      "sha256": "15e272120b376274f9b17000efe03270d8a6bd7787ce6f0043c22048b4ebc7a8",
+      "bytes": 34482
+    },
+    {
+      "path": "chunks/18.21.nbt",
+      "sha256": "cf41362304ba3205ad40e84ed245091caac4a492cba8952d91272a7d85018d88",
+      "bytes": 35236
+    },
+    {
+      "path": "chunks/18.22.nbt",
+      "sha256": "b943b04e88b287864912ac29703b800c8f8a0a4b7dd51807cfdf20709a1e1cec",
+      "bytes": 34078
+    },
+    {
+      "path": "chunks/19.18.nbt",
+      "sha256": "039fd5c2983b19a0eb32d79af909ed722a947393784bbd97963c228f8d23b53a",
+      "bytes": 29931
+    },
+    {
+      "path": "chunks/19.19.nbt",
+      "sha256": "ba9481fcfdf89ea4045b4ea7d20aa8264d6e7b5f90ef9f6b7dda5fce8d318ed0",
+      "bytes": 32996
+    },
+    {
+      "path": "chunks/19.20.nbt",
+      "sha256": "66ab48de67349caec0420d3cc234ffd43b7f4298532cf59b678f09f6a977a793",
+      "bytes": 33262
+    },
+    {
+      "path": "chunks/19.21.nbt",
+      "sha256": "e8b2d3870587dad9d10e0bf451781caaf28ee933253563d97c269c1faa59e3ae",
+      "bytes": 34299
+    },
+    {
+      "path": "chunks/19.22.nbt",
+      "sha256": "fd851214639ee31e1be16e6fc12058ec0af145bf7897ca092757c4c9031340d6",
+      "bytes": 35463
+    },
+    {
+      "path": "chunks/20.18.nbt",
+      "sha256": "0dbaba53a1b4384d072a3f2552a8bf602d5513e0d422b3c426534052c2f52813",
+      "bytes": 32891
+    },
+    {
+      "path": "chunks/20.19.nbt",
+      "sha256": "fd7fe634bc8514a92896093a5d7d8c3707163b4af7ef17a633bee6c56e65b78d",
+      "bytes": 39970
+    },
+    {
+      "path": "chunks/20.20.nbt",
+      "sha256": "1093d88cf43c9594b323e307f3d39a2869d3715406f0773cca0652e1b46a08f3",
+      "bytes": 37068
+    },
+    {
+      "path": "chunks/20.21.nbt",
+      "sha256": "3dfba244248d39bb6418a24d79f5eb0221456e87909f34af85c650800f869308",
+      "bytes": 27874
+    },
+    {
+      "path": "chunks/20.22.nbt",
+      "sha256": "2a3f4ffe21d77c5f1737e2c5a49ee26be5ec64c3c9a77c10ffd197e9766f329e",
+      "bytes": 30936
+    },
+    {
+      "path": "chunks/21.18.nbt",
+      "sha256": "b863296b1c427336d8d56390b657f5e75f7f72b8b8fe4d24a84dfaa47087a186",
+      "bytes": 34542
+    },
+    {
+      "path": "chunks/21.19.nbt",
+      "sha256": "2765934874fad62c0d97a746d5d33e3b2919539c1bab8f00bff9be297da03fdf",
+      "bytes": 43080
+    },
+    {
+      "path": "chunks/21.20.nbt",
+      "sha256": "ab6b7f300f203a72c2ff67a1f9dc63920f926e829b463cf9da74d8ec1f18e8ed",
+      "bytes": 38683
+    },
+    {
+      "path": "chunks/21.21.nbt",
+      "sha256": "641d3a73a8646c36f65b63641b70e131594a4fe215b80c0015231fac2e1ba6b0",
+      "bytes": 33120
+    },
+    {
+      "path": "chunks/21.22.nbt",
+      "sha256": "83a5fee16688f34c384abba7bc217ebe65500a4f7d7f4a5d3c150254f441d79c",
+      "bytes": 27819
+    },
+    {
+      "path": "chunks/22.18.nbt",
+      "sha256": "7c8637920550894da4e6fe1d9f3f7a5855be938da64aa6d0bbd3f66b0a2fd68c",
+      "bytes": 41616
+    },
+    {
+      "path": "chunks/22.19.nbt",
+      "sha256": "a33bea3aa86d68f9cdb522ecebdae1753e32b6e45fa35934b277f62e851fa090",
+      "bytes": 44392
+    },
+    {
+      "path": "chunks/22.20.nbt",
+      "sha256": "09c035d88948b7da7ffea0cc546cbc8592a6d70504b10cf241f5860b5cecbe71",
+      "bytes": 34347
+    },
+    {
+      "path": "chunks/22.21.nbt",
+      "sha256": "b92674c86bb49164f4f28f54e2423fc72596ecdf25daec86e562e21154044e5b",
+      "bytes": 33010
+    },
+    {
+      "path": "chunks/22.22.nbt",
+      "sha256": "fcebc57badbace427ddf89578f3c19dfe93c18bf94d690765c402d28d0819052",
+      "bytes": 27921
+    }
+  ]
+}
