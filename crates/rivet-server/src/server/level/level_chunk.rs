@@ -637,7 +637,11 @@ pub(crate) fn container_factory() -> PalettedContainerFactory<StateId, BiomeId> 
     PalettedContainerFactory::new(block_strategy, StateId(0), biome_strategy, BiomeId(40))
 }
 
-fn strategies() -> (Strategy<StateId>, Strategy<BiomeId>) {
+/// `pub(crate)` for the seed-42 LIGHT differential test in `rivet-server`,
+/// which rebuilds a decoded chunk's sections into the server's `StateId` space
+/// via `LevelChunkSection::map_values(&block_strategy, &biome_strategy, ...)`
+/// — the same conversion `from_bridge` performs with `container_factory()`.
+pub(crate) fn strategies() -> (Strategy<StateId>, Strategy<BiomeId>) {
     (
         Strategy::create_for_block_states(Box::new(maps::BlockStateGlobalMap)),
         Strategy::create_for_biomes(Box::new(maps::BiomeGlobalMap)),

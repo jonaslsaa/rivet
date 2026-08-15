@@ -1616,11 +1616,38 @@ impl SkyStarLightEngine {
     /// cache still holds, substituting the untouched original `Null` nibble
     /// for the sections `rewrite_nibble_cache_for_skylight` nulled out (Java's
     /// re-created scratch nibbles never reach the chunk).
+    /// `StarLightEngine.light(lightAccess, chunk, emptySections)` — the
+    /// generation entry: `lightChunk(chunk, true)` (edge-checks).
     pub(crate) fn light(
         &mut self,
         provider: &mut dyn ChunkAccessor,
         chunk: &ChunkAccess<StateId, ServerBiomeId, StructureKey>,
         empty_sections: &[Option<bool>],
+    ) {
+        self.light_impl(provider, chunk, empty_sections, true);
+    }
+
+    /// The per-neighbour `lightChunk(lightAccess, chunk, false)` path from
+    /// `relightChunks` — the idempotent re-light. The only difference from
+    /// [`Self::light`] is `needsEdgeChecks == false`, so the neighbour-light
+    /// pull (`propagateNeighbourLevels`) runs instead of the edge-decrease
+    /// pass. The differential test lights committed chunks against committed
+    /// neighbours through this path.
+    pub(crate) fn relight(
+        &mut self,
+        provider: &mut dyn ChunkAccessor,
+        chunk: &ChunkAccess<StateId, ServerBiomeId, StructureKey>,
+        empty_sections: &[Option<bool>],
+    ) {
+        self.light_impl(provider, chunk, empty_sections, false);
+    }
+
+    fn light_impl(
+        &mut self,
+        provider: &mut dyn ChunkAccessor,
+        chunk: &ChunkAccess<StateId, ServerBiomeId, StructureKey>,
+        empty_sections: &[Option<bool>],
+        needs_edge_checks: bool,
     ) {
         let chunk_x = chunk.get_pos().x();
         let chunk_z = chunk.get_pos().z();
@@ -1657,7 +1684,7 @@ impl SkyStarLightEngine {
             if let Some(map) = ret {
                 self.set_emptiness_map_on_surface(map);
             }
-            self.light_chunk_impl(chunk, true);
+            self.light_chunk_impl(chunk, needs_edge_checks);
             // `setNibbles(chunk, nibbles)` then `updateVisible(lightAccess)`:
             // see the doc above — publish the cache clones, then hand the
             // mutated ones out, substituting the original null for the

@@ -212,6 +212,17 @@ where
         &self.base
     }
 
+    /// Consume the chunk, moving the owned base out. Mirrors
+    /// [`ProtoChunk::into_base`]: the runtime chunk's base state (sections,
+    /// heightmaps, light nibbles, flags, inhabited time, pending block
+    /// entities, post-processing) is the same `ChunkAccess` the provider and
+    /// the serialization seam operate on, so a value move hands it over
+    /// without cloning. Used by the seed-42 LIGHT differential test to feed
+    /// rebuilt chunks to the lighting provider's owned storage.
+    pub fn into_base(self) -> ChunkAccess<T, B, S> {
+        self.base
+    }
+
     /// `LevelChunk.getX()` — Paper's cached `locX`.
     pub fn get_x(&self) -> i32 {
         self.base.get_pos().x()
