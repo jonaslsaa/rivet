@@ -403,9 +403,9 @@ mod tests {
     #[test]
     fn biome_step_orders_are_preserved() {
         let (biomes, _, _) = extract(&fixture()).unwrap();
-        // Every biome has the full 11-step surface, and the non-empty steps
-        // keep the fixture's holder-set order (spot-check the lush_caves step 6
-        // which is the deep cave biome's dense decoration set).
+        // Every biome has the full 11-step surface; lush_caves' steps (the deep
+        // cave biome, including its dense 9-entry step 9 decoration set) must
+        // match the fixture's holder-set order element-for-element.
         for b in &biomes {
             assert_eq!(b.features.len(), 11, "biome {} must have 11 steps", b.name);
         }
