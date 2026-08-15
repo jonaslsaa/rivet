@@ -533,10 +533,10 @@ impl WorldGenRegion {
     }
 
     /// `WorldGenRegion.removeBlock(BlockPos, boolean)` —
-    /// `setBlock(pos, Blocks.AIR.defaultBlockState(), Block.UPDATE_ALL)` (with
-    /// the default `updateLimit = 0`).
+    /// `setBlock(pos, Blocks.AIR.defaultBlockState(), Block.UPDATE_ALL)` with
+    /// `Block.UPDATE_LIMIT` from `LevelWriter`'s three-argument overload.
     pub fn remove_block(&mut self, pos: &BlockPos, _moved_by_piston: bool) -> bool {
-        self.set_block(pos, BlockState::new(StateId(0)), UPDATE_ALL, 0)
+        self.set_block(pos, BlockState::new(StateId(0)), UPDATE_ALL, UPDATE_LIMIT)
     }
 
     /// `WorldGenRegion.ensureCanWrite(BlockPos)` — the writability gate every
