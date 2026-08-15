@@ -394,7 +394,14 @@ fn collect_bare_strings(elem: &Value) -> Vec<&str> {
     fn walk<'a>(elem: &'a Value, out: &mut Vec<&'a str>) {
         match elem {
             Value::String(s) => {
-                if s.starts_with("minecraft:") && !s.contains('.') {
+                // A bare `minecraft:` string is a candidate feature holder
+                // reference. No dot filter: the caller resolves membership in
+                // the fixture's own feature tables exactly as the extractor's
+                // `collectFeatureRefs` does (block-state `Name` values are
+                // object fields, never bare refs, so membership disambiguation
+                // is unambiguous; a future feature key containing a dot is not
+                // dropped).
+                if s.starts_with("minecraft:") {
                     out.push(s.as_str());
                 }
             }
@@ -409,12 +416,10 @@ fn collect_bare_strings(elem: &Value) -> Vec<&str> {
 }
 
 /// Link the fixture to its pinned provenance: the fixture must match the sha256
-/// recorded next to it in `data/feature_data.manifest.json`.
+/// recorded next to it in its sibling `<fixture>.manifest.json` (the same path
+/// `extract-feature-data` writes, so a custom `--output` resolves correctly).
 fn load_provenance(input: &Path) -> Result<SourceProvenance> {
-    let manifest_path = input
-        .parent()
-        .map(|p| p.join("feature_data.manifest.json"))
-        .with_context(|| format!("{} has no parent dir", input.display()))?;
+    let manifest_path = input.with_extension("manifest.json");
     let manifest_json = fs::read_to_string(&manifest_path).with_context(|| {
         format!(
             "read {} (expected next to the pinned fixture)",
@@ -518,9 +523,13 @@ mod tests {
         assert_eq!(source.minecraft_version, "26.2");
         assert_eq!(source.protocol_version, 776);
         assert_eq!(source.world_version, 4903);
-        // The provenance must be the pinned Paper 26.2 commit (0a99345). The
-        // `paper_git` field is crate-private; the jar sha256 of the materialized
-        // server jar is the load-bearing identity and is pinned here.
-        assert_eq!(source.jar_sha256.len(), 64);
+        // The provenance must be the pinned Paper 26.2 build @ 0a99345: the jar
+        // sha256 of the materialized server jar is the load-bearing identity and
+        // is pinned exactly (a different jar — even with a matching 64-char hash
+        // length — fails here).
+        assert_eq!(
+            source.jar_sha256,
+            "e1a027e9481a16ec1da0f0e139d370280050d123a14c022a476c2dc8a697ebda"
+        );
     }
 }
