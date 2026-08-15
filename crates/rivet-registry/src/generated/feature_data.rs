@@ -9,9 +9,12 @@
 // feature closure a FEATURES pass must decode. The `RegistryOps` JSON is the
 // datapack shape (holder refs are bare strings). Closure is by registry
 // membership: every bare string in a configured JSON that names an entry in
-// these tables is a holder reference and resolves here; block-state `Name`s,
-// tags, and provider/dispatch keys are in neither table and are not feature
-// refs. All values are extracted from a live Paper 26.2 load, never hand-typed.
+// these tables is a holder reference and resolves here; block-state `Name`s
+// and tags are in neither table and are not feature refs. A dispatch `type`
+// may equal a table entry's own key (a self-named dispatch, e.g.
+// `minecraft:vines`) — it is then a real member reference that must resolve
+// (an edge to itself, never an escape from the closure). All values are
+// extracted from a live Paper 26.2 load, never hand-typed.
 
 /// The number of `GenerationStep.Decoration` steps (raw_generation ..
 /// top_layer_modification). A biome's `features` slice always holds exactly

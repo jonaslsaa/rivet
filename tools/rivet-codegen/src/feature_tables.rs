@@ -251,9 +251,12 @@ fn render(
          // feature closure a FEATURES pass must decode. The `RegistryOps` JSON is the\n\
          // datapack shape (holder refs are bare strings). Closure is by registry\n\
          // membership: every bare string in a configured JSON that names an entry in\n\
-         // these tables is a holder reference and resolves here; block-state `Name`s,\n\
-         // tags, and provider/dispatch keys are in neither table and are not feature\n\
-         // refs. All values are extracted from a live Paper 26.2 load, never hand-typed.\n\n",
+         // these tables is a holder reference and resolves here; block-state `Name`s\n\
+         // and tags are in neither table and are not feature refs. A dispatch `type`\n\
+         // may equal a table entry's own key (a self-named dispatch, e.g.\n\
+         // `minecraft:vines`) — it is then a real member reference that must resolve\n\
+         // (an edge to itself, never an escape from the closure). All values are\n\
+         // extracted from a live Paper 26.2 load, never hand-typed.\n\n",
     );
 
     out.push_str(

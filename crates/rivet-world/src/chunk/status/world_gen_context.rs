@@ -1661,7 +1661,8 @@ mod tests {
     /// at `FEATURES` unlit, and neither worldgen seam ran. The atomic-refusal
     /// invariant holds for a present-but-provider-less engine, not just an
     /// absent one. (A fresh `EMPTY` chunk cannot reach LIGHT in the value
-    /// layer — the FEATURES rung is unwired — so the light path starts from
+    /// layer — the FEATURES rung's placement bodies are unwired and it fails
+    /// typed at the placement-decode boundary — so the light path starts from
     /// the pre-light `FEATURES` state, where INITIALIZE_LIGHT is the only step
     /// before LIGHT; the biomes/noise assertions prove no earlier step ran.)
     #[test]

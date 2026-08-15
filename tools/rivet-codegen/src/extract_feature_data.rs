@@ -20,12 +20,14 @@
 //!     nested).
 //!
 //! The closure (what a future FEATURES port must be able to decode) starts from
-//! the reachable biomes' direct placed features, and grows to fixpoint over the
-//! RegistryOps-encoded JSON of every configured feature: any bare-string value
-//! that names a placed/configured registry entry is a holder reference. Placed
-//! features are never walked for nested refs (their JSON is only `{feature,
-//! placement}` — placement modifiers reference no features), so the only placed
-//! refs come from configured-feature configs (e.g. `random_selector` weights).
+//! every possible biome's direct per-step placed features — seeded from ALL 55
+//! `biomes` step lists, not just the seed-42-reachable five — and grows to
+//! fixpoint over the RegistryOps-encoded JSON of every configured feature: any
+//! bare-string value that names a placed/configured registry entry is a holder
+//! reference. Placed features are never walked for nested refs (their JSON is
+//! only `{feature, placement}` — placement modifiers reference no features), so
+//! the only placed refs come from configured-feature configs (e.g.
+//! `random_selector` weights).
 //!
 //! Output: `data/feature_data.json` (+ `data/feature_data.manifest.json`
 //! provenance), consumed by a later codegen slice that emits the Rust tables.

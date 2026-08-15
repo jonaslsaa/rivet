@@ -168,7 +168,7 @@ impl fmt::Display for GeneratedChunkError {
             }
             GeneratedChunkError::UnsupportedStatus(status) => write!(
                 f,
-                "generating to {status:?} is unsupported: the FEATURES..FULL stages are unwired (RivetTodo #185)"
+                "generating to {status:?} is unsupported: the SPAWN/FULL stages are unwired (RivetTodo #185)"
             ),
             GeneratedChunkError::InstallRequiresFull(status) => write!(
                 f,
@@ -571,9 +571,9 @@ impl GenerationChunkHolder {
     /// at `CARVERS` (the FEATURES rung fails typed at the first placed feature
     /// whose value decode is unavailable — see [`GenerationChunkHolder::new`]).
     /// No conversion from a sub-FULL `ProtoChunk` exists or may be added without
-    /// the unwired FEATURES..FULL stages (RivetTodo #185), so this always fails
-    /// loudly with the chunk's real status — never stamping FULL and never
-    /// falling back to superflat.
+    /// the SPAWN/FULL stages (RivetTodo #185), so this always fails loudly with
+    /// the chunk's real status — never stamping FULL and never falling back to
+    /// superflat.
     pub fn to_level_chunk(&self) -> Result<LevelChunk, GeneratedChunkError> {
         Err(GeneratedChunkError::InstallRequiresFull(
             self.chunk.get_persisted_status(),
