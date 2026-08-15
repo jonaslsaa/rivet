@@ -1,6 +1,7 @@
 //! Port of `net.minecraft.world.level.chunk.status.WorldGenContext` (MC 26.2)
 //! — the record of per-step worldgen dependencies — plus the value-layer
-//! executor seam that runs the generation DAG through LIGHT.
+//! executor seam that runs the generation DAG (through LIGHT, or through
+//! SPAWN/FULL when the caller attaches those optional seams).
 //!
 //! Java: `WorldGenContext.java` in `working/Paper` — a 6-field record
 //! `(ServerLevel, ChunkGenerator, StructureTemplateManager,
@@ -9,11 +10,11 @@
 //! owning units), and the full `ChunkGenerator` is owned by the generator wave
 //! (#306/#185 — today only the `&dyn ChunkGenerator` seam in
 //! `chunk::chunk_generator` exists), so the record is reduced to the task seam
-//! the generation pyramid through LIGHT actually needs: the caller-supplied
+//! the generation pyramid the executor drives actually needs: the caller-supplied
 //! closures that perform the BIOMES, NOISE, SURFACE, CARVERS, and FEATURES
 //! work, plus the [`StarLightProvider`] the INITIALIZE_LIGHT/LIGHT tasks route
-//! to. The full
-//! record shape returns with the `mc.world.level.chunk.generator` wave
+//! to, plus the optional spawn/full seams the SPAWN/FULL tasks route to (see
+//! below). The full record shape returns with the `mc.world.level.chunk.generator` wave
 //! (RivetTodo #185). The closures are `'static`-owned (a value-layer
 //! simplification): the real worldgen bodies borrow server/region state and run
 //! in the #185 scheduler realization, not through this seam.
@@ -80,8 +81,21 @@
 //! through the [`FeaturesSeam`], since it owns the bounded `WorldGenRegion`),
 //! stamped `FEATURES` only after it returns; the ordering guard keeps it from
 //! running before the CARVERS task ran (the decoration bodies read the
-//! CARVERS-produced block data). The SPAWN/FULL task bodies are *not wired*
-//! (RivetTodo #185): dispatching one returns [`GenError::UnsupportedTask`].
+//! CARVERS-produced block data). The SPAWN/FULL task bodies are *seam-wired*
+//! like the light steps: dispatching [`ChunkStatusTask::GenerateSpawn`] runs
+//! the caller-supplied spawn seam (Java's `generator.spawnOriginalMobs` — the
+//! natural spawner reads the LIGHT-produced light data, so the ordering guard
+//! keeps it from running before the LIGHT task ran), attached through
+//! [`WorldGenContext::with_spawn`]; dispatching [`ChunkStatusTask::Full`] runs
+//! the caller-supplied full seam (Java's `ChunkStatusTasks.full` LevelChunk
+//! conversion, which defers with #185 — the seam body is caller-supplied
+//! precisely so the executor never constructs a LevelChunk or labels a chunk
+//! FULL behind a caller), attached through [`WorldGenContext::with_full`].
+//! With the seam absent the existing typed refusals are preserved: the
+//! target-level precheck reports [`GenError::UnsupportedStatus`], the
+//! step-level dispatch [`GenError::UnsupportedTask`]. The `rivet-server`
+//! holder wires neither seam, so its chunks are never labeled past the
+//! seam's range (its past-LIGHT targets stay [`GenError::UnsupportedStatus`]).
 
 use crate::chunk::proto_chunk::ProtoChunk;
 use crate::chunk::status::chunk_status_task::ChunkStatusTask;
@@ -112,6 +126,23 @@ type CarversSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>);
 /// value decode, with `GenError::SettingsNotGenerated` remaining as the
 /// defensive path for a biome the tables do not carry).
 type FeaturesSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenError>;
+
+/// The `generateSpawn` seam closure type — runs Java's
+/// `ChunkStatusTasks.generateSpawn` (the caller's `generator.spawnOriginalMobs`
+/// natural-spawner body, which spawns CREATURE mobs against the LIGHT-produced
+/// light data through a bounded `WorldGenRegion`). The closure is caller-owned
+/// (the `WorldGenRegion` the spawner reads is a bounded region-backed value in
+/// `rivet-server`, exactly like the FEATURES body), so the executor carries
+/// only the closure and the ordering guard.
+type SpawnSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenError>;
+
+/// The `full` seam closure type — runs Java's `ChunkStatusTasks.full` (the
+/// LevelChunk conversion: `new LevelChunk(level, protoChunk, ...)`, the
+/// `setFullStatus`/`runPostLoad`/`setLoaded`/block-entity/tick-container
+/// wiring, all deferred with #185). The closure is caller-owned because the
+/// executor must never construct a `LevelChunk` (or label a chunk FULL) behind
+/// the caller — the conversion lives with the caller's `LevelChunk` surface.
+type FullSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenError>;
 
 /// `WorldGenContext` (value-layer seam shape) — the caller-supplied BIOMES,
 /// NOISE, SURFACE, CARVERS, and FEATURES worldgen closures, plus the light
@@ -153,6 +184,17 @@ where
     /// [`GenError::SettingsNotGenerated`] remaining as the defensive path for a
     /// biome the tables do not carry — instead of panicking.
     features: Box<FeaturesSeam<T, B, S>>,
+    /// The `ChunkStatusTasks::generateSpawn` seam — runs Java's
+    /// `generator.spawnOriginalMobs` over the chunk (see [`SpawnSeam`]). `None`
+    /// when the caller did not attach it: dispatching `GenerateSpawn` then
+    /// returns the typed `UnsupportedTask`/`UnsupportedStatus` refusal, exactly
+    /// as before the seam existed.
+    spawn: Option<Box<SpawnSeam<T, B, S>>>,
+    /// The `ChunkStatusTasks::full` seam — runs Java's `full` LevelChunk
+    /// conversion (see [`FullSeam`]). `None` when the caller did not attach it
+    /// (the `rivet-server` holder does not — the conversion defers with #185):
+    /// dispatching `Full` then returns the typed refusal.
+    full: Option<Box<FullSeam<T, B, S>>>,
     /// The `ThreadedLevelLightEngine` the INITIALIZE_LIGHT/LIGHT tasks store and
     /// route through (Java's `context.lightEngine()`). The facade holds the
     /// [`StarLightProvider`] (`rivet-server`'s Starlight impl; today
@@ -178,12 +220,17 @@ pub enum GenError {
     /// Java's `NPE` on `context.lightEngine()`), and the seam never installs
     /// one on a run that ends below INITIALIZE_LIGHT.
     LightEngineMissing { status: ChunkStatus },
-    /// The target status is beyond LIGHT (SPAWN/FULL are not wired in the value
-    /// layer — the real worldgen defers with #185).
+    /// The target status is beyond what the context's attached seams reach —
+    /// the SPAWN step needs the caller to have attached the spawn seam
+    /// ([`WorldGenContext::with_spawn`]) and the FULL step the full seam
+    /// ([`WorldGenContext::with_full`]); a caller that wires neither (the
+    /// `rivet-server` holder) leaves SPAWN/FULL unwired, exactly as before the
+    /// seams existed.
     UnsupportedStatus(ChunkStatus),
-    /// A step at a wired status (≤ LIGHT) carries a task body that is not wired
-    /// in the value layer (the SPAWN/FULL bodies defer with #185) — only a
-    /// malformed custom pyramid can produce this.
+    /// A step carries a task body that is not wired in the value layer — the
+    /// `GenerateSpawn`/`Full` step dispatched when the caller attached no spawn
+    /// (`with_spawn`) or full (`with_full`) seam, or a malformed custom pyramid
+    /// installed a task at a rung whose body is otherwise absent.
     UnsupportedTask {
         status: ChunkStatus,
         task: ChunkStatusTask,
@@ -202,6 +249,17 @@ pub enum GenError {
     /// CARVERS-produced block data, so an un-carved chunk must not be
     /// decorated).
     FeaturesNotGenerated,
+    /// The `SPAWN` task dispatched before the `LIGHT` task ran — the
+    /// generation-ordering violation (Java's `generateSpawn` →
+    /// `generator.spawnOriginalMobs` → `spawnMobsForChunkGeneration` reads the
+    /// LIGHT-produced light data through `checkSpawnRules`/
+    /// `isSpawnPositionOk`, so an unlit chunk must not be spawned).
+    SpawnNotGenerated,
+    /// The `FULL` task dispatched before the `SPAWN` task ran — the
+    /// generation-ordering violation (Java's `ChunkStatusTasks.full` hands the
+    /// chunk to the caller only after `generateSpawn` ran, so an un-spawned
+    /// chunk must not be promoted full).
+    FullNotGenerated,
     /// The `FEATURES` decoration body could not place a configured feature —
     /// its placed-feature value decode (the `#126`-gated `PlacedFeature` JSON
     /// path `placeWithBiomeCheck` dereferences) is unavailable. The
@@ -274,6 +332,12 @@ impl std::fmt::Display for GenError {
             GenError::FeaturesNotGenerated => {
                 write!(f, "cannot generate FEATURES before the CARVERS task ran")
             }
+            GenError::SpawnNotGenerated => {
+                write!(f, "cannot generate SPAWN before the LIGHT task ran")
+            }
+            GenError::FullNotGenerated => {
+                write!(f, "cannot generate FULL before the SPAWN task ran")
+            }
             GenError::FeaturePlacementDecode {
                 chunk_pos,
                 step_index,
@@ -307,7 +371,8 @@ impl std::fmt::Display for GenError {
             ),
             GenError::UnsupportedStatus(status) => write!(
                 f,
-                "status {status:?} is not wired in the value layer (RivetTodo #185)"
+                "status {status:?} is not wired in the value layer (the SPAWN/FULL seams defer \
+                 with #185)"
             ),
             GenError::UnsupportedTask { status, task } => write!(
                 f,
@@ -332,6 +397,8 @@ fn ensure_canonical_rung(task: ChunkStatusTask, target: ChunkStatus) -> Result<(
         ChunkStatusTask::GenerateNoise => ChunkStatus::Noise,
         ChunkStatusTask::GenerateSurface => ChunkStatus::Surface,
         ChunkStatusTask::GenerateCarvers => ChunkStatus::Carvers,
+        ChunkStatusTask::GenerateSpawn => ChunkStatus::Spawn,
+        ChunkStatusTask::Full => ChunkStatus::Full,
         _ => return Ok(()),
     };
     if target != canonical {
@@ -365,6 +432,8 @@ where
             surface: Box::new(surface),
             carvers: Box::new(carvers),
             features: Box::new(features),
+            spawn: None,
+            full: None,
             light_engine: None,
         }
     }
@@ -374,6 +443,33 @@ where
     /// tasks can route through it.
     pub fn with_light_engine(mut self, light_engine: LevelLightEngine) -> Self {
         self.light_engine = Some(light_engine);
+        self
+    }
+
+    /// Attaches the `generateSpawn` seam (Java's `context.generator().
+    /// spawnOriginalMobs`, the caller-owned `spawnOriginalMobs` body) so the
+    /// SPAWN task can run it. Left `None` by default (the `rivet-server` holder
+    /// wires neither seam): dispatching `GenerateSpawn` then returns the typed
+    /// [`GenError::UnsupportedTask`]/[`GenError::UnsupportedStatus`] refusal,
+    /// exactly as before the seam existed.
+    pub fn with_spawn(
+        mut self,
+        spawn: impl FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenError> + 'static,
+    ) -> Self {
+        self.spawn = Some(Box::new(spawn));
+        self
+    }
+
+    /// Attaches the `full` seam (Java's `ChunkStatusTasks.full` LevelChunk
+    /// conversion, deferred with #185; the caller owns it because the executor
+    /// must never construct a `LevelChunk` behind the caller's back) so the
+    /// FULL task can run it. Left `None` by default: dispatching `Full` then
+    /// returns the typed refusal.
+    pub fn with_full(
+        mut self,
+        full: impl FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenError> + 'static,
+    ) -> Self {
+        self.full = Some(Box::new(full));
         self
     }
 
@@ -571,11 +667,46 @@ where
                 }
                 (self.features)(chunk)?;
             }
-            ChunkStatusTask::GenerateSpawn | ChunkStatusTask::Full => {
-                return Err(GenError::UnsupportedTask {
-                    status: step.target_status(),
-                    task: step.task(),
-                });
+            ChunkStatusTask::GenerateSpawn => {
+                ensure_canonical_rung(step.task(), step.target_status())?;
+                // `ChunkStatusTasks.generateSpawn` → Java's
+                // `generator.spawnOriginalMobs` (the caller's
+                // `spawnMobsForChunkGeneration` natural-spawner body, attached
+                // with [`Self::with_spawn`]). The spawner reads the
+                // LIGHT-produced light data through `checkSpawnRules`/
+                // `isSpawnPositionOk`, so an unlit chunk is refused before any
+                // write. With no spawn seam attached the step refuses exactly as
+                // before the seam existed.
+                let Some(spawn) = self.spawn.as_mut() else {
+                    return Err(GenError::UnsupportedTask {
+                        status: step.target_status(),
+                        task: step.task(),
+                    });
+                };
+                if !chunk.get_persisted_status().is_or_after(ChunkStatus::Light) {
+                    return Err(GenError::SpawnNotGenerated);
+                }
+                spawn(chunk)?;
+            }
+            ChunkStatusTask::Full => {
+                ensure_canonical_rung(step.task(), step.target_status())?;
+                // `ChunkStatusTasks.full` — Java's LevelChunk conversion
+                // (`new LevelChunk(level, protoChunk, ...)`, deferred #185), the
+                // caller-owned body attached with [`Self::with_full`]. The
+                // executor never constructs a `LevelChunk`; the seam is what
+                // labels the chunk FULL. An un-spawned chunk is refused before
+                // any write. With no full seam attached the step refuses exactly
+                // as before the seam existed.
+                let Some(full) = self.full.as_mut() else {
+                    return Err(GenError::UnsupportedTask {
+                        status: step.target_status(),
+                        task: step.task(),
+                    });
+                };
+                if !chunk.get_persisted_status().is_or_after(ChunkStatus::Spawn) {
+                    return Err(GenError::FullNotGenerated);
+                }
+                full(chunk)?;
             }
         }
         if chunk.get_persisted_status().is_before(step.target_status()) {
@@ -585,10 +716,11 @@ where
     }
 
     /// Generate a chunk from its current persisted status through `target`
-    /// (inclusive, ≤ `LIGHT`), running each step's task in status order.
+    /// (inclusive), running each step's task in status order.
     ///
     /// The `BIOMES`-before-`NOISE`-before-`SURFACE`-before-`CARVERS`-
-    /// before-`FEATURES` ordering is enforced at the *status-order* layer, not
+    /// before-`FEATURES`-before-`LIGHT`-before-`SPAWN`-before-`FULL` ordering is
+    /// enforced at the *status-order* layer, not
     /// just inside the task bodies: a promotion whose
     /// target passes through the `BIOMES`/`NOISE` steps requires that data to
     /// be present — either carried in (the chunk's persisted status was already
@@ -600,8 +732,11 @@ where
     /// chunk untouched. A wired generation task is honored only at its
     /// canonical rung (a malformed pyramid installing `GenerateBiomes` at
     /// `NOISE`, for example, is refused here, so the chunk is never labeled
-    /// `NOISE` by a task that produces no noise data). A target beyond `LIGHT`
-    /// is rejected before any work runs; a target before the current status is
+    /// `NOISE` by a task that produces no noise data). The SPAWN step runs the
+    /// caller's spawn seam (`with_spawn`) and the FULL step the caller's full
+    /// seam (`with_full`); with either seam absent the promotion is refused —
+    /// `UnsupportedStatus` when that seam is the final target, `UnsupportedTask`
+    /// when it lies along the path. A target before the current status is
     /// a demotion error. The INITIALIZE_LIGHT/LIGHT steps are wired (see
     /// [`Self::run_light_task`]) but require a usable light engine — an
     /// engine-less *or provider-less* context targeting them fails
@@ -624,7 +759,15 @@ where
         if target.index() < current.index() {
             return Err(GenError::Demotion { target, current });
         }
-        if target.index() > ChunkStatus::Light.index() {
+        // A target at SPAWN/FULL is reachable only when the caller attached the
+        // matching seam; a caller that wires neither (the `rivet-server` holder)
+        // keeps the past-LIGHT refusals exactly as before the seams existed. The
+        // seam absence is decided here (the final target), while the precheck
+        // below refuses a path that merely passes through a seam-less rung.
+        if target == ChunkStatus::Spawn && self.spawn.is_none() {
+            return Err(GenError::UnsupportedStatus(target));
+        }
+        if target == ChunkStatus::Full && self.full.is_none() {
             return Err(GenError::UnsupportedStatus(target));
         }
         // Validate the whole path before running any step, tracking the
@@ -683,11 +826,37 @@ where
                     }
                     projected = step.target_status();
                 }
-                ChunkStatusTask::GenerateSpawn | ChunkStatusTask::Full => {
-                    return Err(GenError::UnsupportedTask {
-                        status: step.target_status(),
-                        task: step.task(),
-                    });
+                ChunkStatusTask::GenerateSpawn => {
+                    ensure_canonical_rung(step.task(), step.target_status())?;
+                    // Mirrors the run_step arm: with no spawn seam the path is
+                    // refused before any work runs (the chunk keeps its status);
+                    // with one, the LIGHT-produced light must be present.
+                    if self.spawn.is_none() {
+                        return Err(GenError::UnsupportedTask {
+                            status: step.target_status(),
+                            task: step.task(),
+                        });
+                    }
+                    if !projected.is_or_after(ChunkStatus::Light) {
+                        return Err(GenError::SpawnNotGenerated);
+                    }
+                    projected = step.target_status();
+                }
+                ChunkStatusTask::Full => {
+                    ensure_canonical_rung(step.task(), step.target_status())?;
+                    // Mirrors the run_step arm: with no full seam the path is
+                    // refused before any work runs; with one, the SPAWN-produced
+                    // spawn must be present.
+                    if self.full.is_none() {
+                        return Err(GenError::UnsupportedTask {
+                            status: step.target_status(),
+                            task: step.task(),
+                        });
+                    }
+                    if !projected.is_or_after(ChunkStatus::Spawn) {
+                        return Err(GenError::FullNotGenerated);
+                    }
+                    projected = step.target_status();
                 }
                 // Pass-through produces no data: reaching BIOMES/NOISE through
                 // it requires the target status's data to already be carried.
@@ -956,11 +1125,12 @@ mod tests {
         assert_eq!(carvers_calls.borrow().as_slice(), &["carvers"]);
         assert_eq!(features_calls.borrow().as_slice(), &["features"]);
 
-        // A target past LIGHT (SPAWN/FULL) is out of the supported range and
-        // reports UnsupportedStatus instead.
+        // This context wired neither the spawn nor the full seam, so the
+        // SPAWN/FULL targets stay unwired and report UnsupportedStatus (the
+        // seam tests below attach the seams and reach FULL).
         let err = ctx
             .generate_through(&GENERATION_PYRAMID, &mut chunk, ChunkStatus::Full)
-            .expect_err("full is out of range");
+            .expect_err("full is unwired without a full seam");
         assert_eq!(err, GenError::UnsupportedStatus(ChunkStatus::Full));
         assert_eq!(chunk.get_persisted_status(), ChunkStatus::Features);
         assert_eq!(features_calls.borrow().as_slice(), &["features"]);
@@ -1281,7 +1451,7 @@ mod tests {
     fn loading_a_full_chunk_is_an_idempotent_no_op() {
         // A chunk loaded from disk at FULL is confirmed as a no-op through the
         // LOADING pyramid: target == current returns Ok without wiring any
-        // SPAWN/FULL task body (RivetTodo #185).
+        // seam (the FULL conversion defers with #185).
         let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
@@ -1524,10 +1694,10 @@ mod tests {
 
     /// A chunk with its persisted status already at FEATURES — the last status
     /// before the light rungs, and the state a real generated chunk reaches
-    /// before lighting. The generation pyramid's SPAWN/FULL steps are unwired
-    /// (RivetTodo #185), so the light tests seed a chunk that has already
-    /// passed the worldgen rungs and drive the INITIALIZE_LIGHT/LIGHT steps
-    /// directly.
+    /// before lighting. The light tests seed a chunk that has already passed
+    /// the worldgen rungs and drive the INITIALIZE_LIGHT/LIGHT steps directly;
+    /// the SPAWN/FULL seam tests start from the same chunk and attach recording
+    /// spawn/full seams.
     fn features_chunk() -> ProtoChunk<u8, u8, &'static str> {
         let mut chunk = proto();
         chunk.set_persisted_status(ChunkStatus::Features);
@@ -1540,6 +1710,45 @@ mod tests {
 
     fn initialize_light_step() -> &'static ChunkStep {
         GENERATION_PYRAMID.get_step_to(ChunkStatus::InitializeLight)
+    }
+
+    fn spawn_step() -> &'static ChunkStep {
+        GENERATION_PYRAMID.get_step_to(ChunkStatus::Spawn)
+    }
+
+    fn full_step() -> &'static ChunkStep {
+        GENERATION_PYRAMID.get_step_to(ChunkStatus::Full)
+    }
+
+    /// A `WorldGenContext` carrying the full seam-attachment surface a SPAWN/
+    /// FULL run needs: a recording light engine plus recording spawn and full
+    /// seams. The spawn/full closures record their invocation into shared
+    /// `Rc<RefCell<...>>` logs; the light log comes back alongside so a test can
+    /// assert the light step lit exactly once and no more.
+    type SpawnFullContext = (
+        WorldGenContext<u8, u8, &'static str>,
+        Rc<RefCell<Vec<&'static str>>>,
+        Rc<RefCell<Vec<&'static str>>>,
+    );
+
+    fn spawn_full_context() -> (SpawnFullContext, Arc<Mutex<LightLog>>) {
+        let (ctx, _b, _n, _s, _c, _f) = recording_context();
+        let (engine, log) = light_engine();
+        let spawn_calls = Rc::new(RefCell::new(Vec::new()));
+        let full_calls = Rc::new(RefCell::new(Vec::new()));
+        let spawn_log = Rc::clone(&spawn_calls);
+        let full_log = Rc::clone(&full_calls);
+        let ctx = ctx
+            .with_light_engine(engine)
+            .with_spawn(move |_c: &mut ProtoChunk<u8, u8, &'static str>| {
+                spawn_log.borrow_mut().push("spawn");
+                Ok(())
+            })
+            .with_full(move |_c: &mut ProtoChunk<u8, u8, &'static str>| {
+                full_log.borrow_mut().push("full");
+                Ok(())
+            });
+        ((ctx, spawn_calls, full_calls), log)
     }
 
     /// `ChunkLightTask.LightTask.getAsBoolean` on a fresh, unlit chunk: the
@@ -1767,5 +1976,157 @@ mod tests {
         assert!(chunk.is_light_correct());
         assert!(biomes_calls.borrow().is_empty());
         assert!(noise_calls.borrow().is_empty());
+    }
+
+    /// From a synthetic FEATURES chunk with a recording light engine and
+    /// recording spawn/full seams, `generate_through(Full)` runs the light,
+    /// spawn, and full steps each exactly once, in status order, and stamps the
+    /// chunk FULL — the value layer's SPAWN/FULL wiring end to end.
+    #[test]
+    fn generate_through_full_runs_light_spawn_full_in_order_once_each() {
+        let ((mut ctx, spawn_calls, full_calls), log) = spawn_full_context();
+        let mut chunk = features_chunk();
+
+        ctx.generate_through(&GENERATION_PYRAMID, &mut chunk, ChunkStatus::Full)
+            .expect("through full");
+
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Full);
+        assert!(chunk.is_light_correct());
+        let seen = log.lock().unwrap();
+        assert_eq!(seen.lit, vec![(ChunkPos::ZERO, empty_mask())]);
+        assert!(seen.force_loaded.is_empty());
+        assert!(seen.edge_checks.is_empty());
+        assert_eq!(spawn_calls.borrow().as_slice(), &["spawn"]);
+        assert_eq!(full_calls.borrow().as_slice(), &["full"]);
+
+        // A second promotion to FULL is an idempotent no-op — the seams do not
+        // re-run (single execution through the SPAWN/FULL rungs).
+        ctx.generate_through(&GENERATION_PYRAMID, &mut chunk, ChunkStatus::Full)
+            .expect("already full is a no-op");
+        assert_eq!(spawn_calls.borrow().as_slice(), &["spawn"]);
+        assert_eq!(full_calls.borrow().as_slice(), &["full"]);
+    }
+
+    /// The SPAWN step alone on an unlit chunk (seam attached, chunk below
+    /// LIGHT) errors `SpawnNotGenerated` and never runs the spawn body — the
+    /// natural spawner reads light through `checkSpawnRules`, so an unlit chunk
+    /// must not be spawned.
+    #[test]
+    fn spawn_step_alone_fails_without_light() {
+        let ((mut ctx, spawn_calls, _full_calls), _log) = spawn_full_context();
+        let mut chunk = features_chunk();
+
+        let err = ctx
+            .run_step(spawn_step(), &mut chunk)
+            .expect_err("spawn needs light");
+        assert_eq!(err, GenError::SpawnNotGenerated);
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Features);
+        assert!(spawn_calls.borrow().is_empty());
+    }
+
+    /// The FULL step alone on an un-spawned chunk (seam attached, chunk below
+    /// SPAWN) errors `FullNotGenerated` and never runs the full body — Java's
+    /// `ChunkStatusTasks.full` hands the chunk over only after `generateSpawn`
+    /// ran.
+    #[test]
+    fn full_step_alone_fails_without_spawn() {
+        let ((mut ctx, _spawn_calls, full_calls), _log) = spawn_full_context();
+        let mut chunk = features_chunk();
+        chunk.set_persisted_status(ChunkStatus::Light);
+
+        let err = ctx
+            .run_step(full_step(), &mut chunk)
+            .expect_err("full needs spawn");
+        assert_eq!(err, GenError::FullNotGenerated);
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Light);
+        assert!(full_calls.borrow().is_empty());
+    }
+
+    /// Dispatching the SPAWN step on a context with no spawn seam keeps the
+    /// typed refusal the executor always produced — `UnsupportedTask` — and the
+    /// chunk is not labeled SPAWN.
+    #[test]
+    fn spawn_step_without_seam_is_refused() {
+        let (mut ctx, _biomes_calls, _noise_calls, _surface_calls, _carvers_calls, _features_calls) =
+            recording_context();
+        let mut chunk = proto();
+
+        let err = ctx
+            .run_step(spawn_step(), &mut chunk)
+            .expect_err("no spawn seam");
+        assert_eq!(
+            err,
+            GenError::UnsupportedTask {
+                status: ChunkStatus::Spawn,
+                task: ChunkStatusTask::GenerateSpawn,
+            }
+        );
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Empty);
+    }
+
+    /// Dispatching the FULL step on a context with no full seam keeps the typed
+    /// refusal — `UnsupportedTask` — and the chunk is not labeled FULL.
+    #[test]
+    fn full_step_without_seam_is_refused() {
+        let (mut ctx, _biomes_calls, _noise_calls, _surface_calls, _carvers_calls, _features_calls) =
+            recording_context();
+        let mut chunk = proto();
+
+        let err = ctx
+            .run_step(full_step(), &mut chunk)
+            .expect_err("no full seam");
+        assert_eq!(
+            err,
+            GenError::UnsupportedTask {
+                status: ChunkStatus::Full,
+                task: ChunkStatusTask::Full,
+            }
+        );
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Empty);
+    }
+
+    /// Targeting SPAWN without a spawn seam reports `UnsupportedStatus` at the
+    /// target gate before any work runs — the pre-seam refusal.
+    #[test]
+    fn generate_through_spawn_without_spawn_seam_is_refused() {
+        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls, _features_calls) =
+            recording_context();
+        let mut chunk = features_chunk();
+
+        let err = ctx
+            .generate_through(&GENERATION_PYRAMID, &mut chunk, ChunkStatus::Spawn)
+            .expect_err("no spawn seam");
+        assert_eq!(err, GenError::UnsupportedStatus(ChunkStatus::Spawn));
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Features);
+        assert!(biomes_calls.borrow().is_empty());
+        assert!(noise_calls.borrow().is_empty());
+    }
+
+    /// Targeting FULL with a full seam but no spawn seam refuses at the SPAWN
+    /// rung of the precheck walk — `UnsupportedTask{status: Spawn, task:
+    /// GenerateSpawn}` — before any work runs, so the chunk is never lit or
+    /// labeled past FEATURES.
+    #[test]
+    fn generate_through_full_without_spawn_seam_refuses_at_the_precheck() {
+        let (ctx, _b, _n, _s, _c, _f) = recording_context();
+        let (engine, log) = light_engine();
+        let mut ctx = ctx
+            .with_light_engine(engine)
+            .with_full(|_c: &mut ProtoChunk<u8, u8, &'static str>| Ok(()));
+        let mut chunk = features_chunk();
+
+        let err = ctx
+            .generate_through(&GENERATION_PYRAMID, &mut chunk, ChunkStatus::Full)
+            .expect_err("path passes a seam-less spawn rung");
+        assert_eq!(
+            err,
+            GenError::UnsupportedTask {
+                status: ChunkStatus::Spawn,
+                task: ChunkStatusTask::GenerateSpawn,
+            }
+        );
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Features);
+        assert!(!chunk.is_light_correct());
+        assert!(log.lock().unwrap().lit.is_empty());
     }
 }
