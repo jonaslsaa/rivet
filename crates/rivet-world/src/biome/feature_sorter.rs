@@ -42,11 +42,10 @@
 //! `indexMapping`'s reference-identity keeps distinct instances apart. The port
 //! keys `Direct` holders on the inline value's address — the Rust spelling of
 //! per-object identity — which matches `indexMapping` but not
-//! `featureIndex`'s value-equality. This is a documented deviation, confined
-//! to synthetic scenarios: `Direct` placed-feature holders are decode-only
-//! inline values that never occur in registry-loaded biome settings (those are
-//! all `Reference`), and `build_features_per_step` has no production caller in
-//! this slice.
+//! `featureIndex`'s value-equality. This is a documented deviation for direct
+//! holders: registry-loaded biome settings use `Reference` holders, including
+//! the production `build_features_per_step` caller, while `Direct` holders are
+//! decode-only inline values.
 //!
 //! The value `PlacedFeature` itself is not resolved (the placed-feature
 //! `HolderLookup` is not threaded through this slice — it defers with #126 like

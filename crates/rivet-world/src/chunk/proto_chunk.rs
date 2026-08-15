@@ -157,6 +157,22 @@ where
         }
     }
 
+    /// The `ChunkAccess` base — the worldgen spine read surface the value layer
+    /// reads the chunk through (sections, biomes, heightmaps). Java's worldgen
+    /// view (`WorldGenRegion`) holds the chunk as the generic `ChunkAccess`
+    /// base; the Rust bridge exposes the base non-consumingly so a bounded
+    /// region can borrow a `ProtoChunk`'s sections/biomes without moving it
+    /// (`into_base` is the consuming FULL-promotion move).
+    pub fn base(&self) -> &ChunkAccess<T, B, S> {
+        &self.base
+    }
+
+    /// Mutable half of [`base`](Self::base) — the worldgen write surface
+    /// (`setBlock` through the region, `LevelChunkSection::set_noise_biome`).
+    pub fn base_mut(&mut self) -> &mut ChunkAccess<T, B, S> {
+        &mut self.base
+    }
+
     /// `ProtoChunk.getPos()`.
     pub fn get_pos(&self) -> ChunkPos {
         self.base.get_pos()
@@ -248,6 +264,14 @@ where
     /// `doFill` prologue creates the two `Usage.WORLDGEN` heightmaps here.
     pub fn get_or_create_heightmap_unprimed(&mut self, ty: Types) -> &mut Heightmap {
         self.base.get_or_create_heightmap_unprimed(ty)
+    }
+
+    /// `Heightmap.primeHeightmaps(this, types)` — Java
+    /// `ChunkStatusTasks.generateFeatures` primes the four `FINAL_HEIGHTMAPS`
+    /// before it constructs the bounded `WorldGenRegion` (the decoration bodies
+    /// read them).
+    pub fn prime_heightmaps(&mut self, types: &[Types]) {
+        self.base.prime_heightmaps(types);
     }
 
     /// The worldgen `doFill` per-block write (see

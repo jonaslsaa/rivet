@@ -10,8 +10,9 @@
 //! (#306/#185 — today only the `&dyn ChunkGenerator` seam in
 //! `chunk::chunk_generator` exists), so the record is reduced to the task seam
 //! the generation pyramid through LIGHT actually needs: the caller-supplied
-//! closures that perform the BIOMES, NOISE, and SURFACE work, plus the
-//! [`StarLightProvider`] the INITIALIZE_LIGHT/LIGHT tasks route to. The full
+//! closures that perform the BIOMES, NOISE, SURFACE, CARVERS, and FEATURES
+//! work, plus the [`StarLightProvider`] the INITIALIZE_LIGHT/LIGHT tasks route
+//! to. The full
 //! record shape returns with the `mc.world.level.chunk.generator` wave
 //! (RivetTodo #185). The closures are `'static`-owned (a value-layer
 //! simplification): the real worldgen bodies borrow server/region state and run
@@ -74,8 +75,13 @@
 //! `NoiseBasedChunkGenerator.applyCarvers`), stamped `CARVERS` only after it
 //! returns; the ordering guard keeps it from running before the SURFACE task
 //! ran (the carvers consume the SURFACE-produced top material). The FEATURES
-//! and SPAWN/FULL task bodies are *not wired* (RivetTodo #185): dispatching one
-//! returns [`GenError::UnsupportedTask`].
+//! task body is wired (Java's `ChunkStatusTasks.generateFeatures`, whose real
+//! decoration body the caller — `rivet-server`'s generated-world — supplies
+//! through the [`FeaturesSeam`], since it owns the bounded `WorldGenRegion`),
+//! stamped `FEATURES` only after it returns; the ordering guard keeps it from
+//! running before the CARVERS task ran (the decoration bodies read the
+//! CARVERS-produced block data). The SPAWN/FULL task bodies are *not wired*
+//! (RivetTodo #185): dispatching one returns [`GenError::UnsupportedTask`].
 
 use crate::chunk::proto_chunk::ProtoChunk;
 use crate::chunk::status::chunk_status_task::ChunkStatusTask;
@@ -83,6 +89,13 @@ use crate::chunk::status::chunk_status_tasks;
 use crate::chunk::status::chunk_step::ChunkStep;
 use crate::chunk::status::{ChunkPyramid, ChunkStatus};
 use crate::lighting::level_light_engine::LevelLightEngine;
+
+/// The region-backed decoration seam's failure modes — the typed failures the
+/// `FEATURES` closure body (`addVanillaDecorations`) returns. The `ChunkPos`
+/// comes from `rivet_registry::core`; the closure body (in `rivet-server`) owns
+/// the `WorldGenRegion` the decoration runs against, so this crate carries only
+/// the error shape.
+use rivet_registry::core::ChunkPos;
 
 /// The `generateBiomes` seam closure type.
 type BiomesSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>);
@@ -92,11 +105,18 @@ type NoiseSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>);
 type SurfaceSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>);
 /// The `generateCarvers` seam closure type.
 type CarversSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>);
+/// The `generateFeatures` seam closure type — returns the decoration body's
+/// typed failure (the region-backed neighbor-cache seam defers with #126, so
+/// the body fails typed instead of panicking or silently skipping — for
+/// seed-42 `GenError::SettingsNotGenerated` at the full source list's first
+/// unresolvable biome, and `GenError::FeaturePlacementDecode` at the first
+/// real placed-feature value decode once settings resolve).
+type FeaturesSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenError>;
 
 /// `WorldGenContext` (value-layer seam shape) — the caller-supplied BIOMES,
-/// NOISE, SURFACE, and CARVERS worldgen closures, plus the light engine the
-/// INITIALIZE_LIGHT/LIGHT tasks route to, generic over the chunk's block/biome
-/// value types.
+/// NOISE, SURFACE, CARVERS, and FEATURES worldgen closures, plus the light
+/// engine the INITIALIZE_LIGHT/LIGHT tasks route to, generic over the chunk's
+/// block/biome value types.
 pub struct WorldGenContext<T, B, S>
 where
     T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
@@ -121,6 +141,18 @@ where
     /// wired; the seam's ordering guard is what keeps this from running before
     /// SURFACE (the carvers consume the SURFACE-produced top material).
     carvers: Box<CarversSeam<T, B, S>>,
+    /// The `ChunkStatusTasks::generateFeatures` seam — runs the real
+    /// `NoiseBasedChunkGenerator.applyBiomeDecoration` over the chunk (the
+    /// caller, `rivet-server`'s generated world, owns the bounded
+    /// `WorldGenRegion` the decoration bodies read/write through, so the body
+    /// is caller-supplied). The seam's ordering guard is what keeps this from
+    /// running before CARVERS (the decoration bodies consume the CARVERS-
+    /// produced block data). The closure returns the body's typed failure —
+    /// for seed-42 [`GenError::SettingsNotGenerated`] at the full source
+    /// list's first unresolvable biome, and [`GenError::FeaturePlacementDecode`]
+    /// at the first real placed-feature value decode (#126) once settings
+    /// resolve — instead of panicking.
+    features: Box<FeaturesSeam<T, B, S>>,
     /// The `ThreadedLevelLightEngine` the INITIALIZE_LIGHT/LIGHT tasks store and
     /// route through (Java's `context.lightEngine()`). The facade holds the
     /// [`StarLightProvider`] (`rivet-server`'s Starlight impl; today
@@ -150,8 +182,8 @@ pub enum GenError {
     /// layer — the real worldgen defers with #185).
     UnsupportedStatus(ChunkStatus),
     /// A step at a wired status (≤ LIGHT) carries a task body that is not wired
-    /// in the value layer (the FEATURES and SPAWN/FULL bodies defer with #185)
-    /// — only a malformed custom pyramid can produce this.
+    /// in the value layer (the SPAWN/FULL bodies defer with #185) — only a
+    /// malformed custom pyramid can produce this.
     UnsupportedTask {
         status: ChunkStatus,
         task: ChunkStatusTask,
@@ -165,6 +197,49 @@ pub enum GenError {
     /// top material via the top-material binder, so an un-surfaced chunk must
     /// not be carved).
     CarversNotGenerated,
+    /// The `FEATURES` task dispatched before the `CARVERS` task ran — the
+    /// generation-ordering violation (the decoration bodies consume the
+    /// CARVERS-produced block data, so an un-carved chunk must not be
+    /// decorated).
+    FeaturesNotGenerated,
+    /// The `FEATURES` decoration body could not place a configured feature —
+    /// its placed-feature value decode (the `#126`-gated `PlacedFeature` JSON
+    /// path `placeWithBiomeCheck` dereferences) is unavailable. The
+    /// caller-supplied body runs the faithful `addVanillaDecorations` prologue
+    /// (heightmap priming, the section-origin decoration-seed derivation, the
+    /// bounded 3x3 biome-union gather, the per-step FeatureSorter data, the
+    /// exact per-feature seeds) and then fails here, typed, at the exact first
+    /// feature whose decode is missing — never panicking and never silently
+    /// skipping; the chunk is never stamped FEATURES and no placed feature
+    /// body runs.
+    FeaturePlacementDecode {
+        /// The generating chunk's position.
+        chunk_pos: ChunkPos,
+        /// `stepIndex` — the `GenerationStep.Decoration` ordinal being
+        /// decorated.
+        step_index: usize,
+        /// `globalIndexOfFeature` — the feature's FeatureSorter global index
+        /// (the `setFeatureSeed` index).
+        global_feature_index: usize,
+        /// The placed feature's registry key (`minecraft:placed_feature` name,
+        /// e.g. `minecraft:lake_lava_underground`).
+        feature_key: &'static str,
+    },
+    /// The `FEATURES` body could not resolve a possible biome's
+    /// `BiomeGenerationSettings` while building the decoration FeatureSorter.
+    /// Paper builds the sorter once from the FULL `biomeSource.possibleBiomes()`
+    /// list (`ChunkGenerator.java` 97-100) and never fails (every possible
+    /// biome has real settings); Rivet's generated feature tables are scoped to
+    /// the reachable seed-42 biomes, so a full overworld source list cannot
+    /// resolve — it fails typed here at the first missing biome in source order
+    /// (seed-42: `minecraft:mushroom_fields`, the source's first possible
+    /// biome) instead of panicking through the phf index or fabricating/
+    /// skipping the biome. No decoration runs; the chunk stays CARVERS.
+    SettingsNotGenerated {
+        /// The possible biome whose generation settings are missing (`None`
+        /// when the biome's dense id is not in `BIOME_BY_ID` at all).
+        biome: Option<&'static str>,
+    },
     /// A wired generation task is installed at a rung it does not own —
     /// `GenerateBiomes` away from `BIOMES`, `GenerateNoise` away from `NOISE`.
     /// Only a malformed crate-internal pyramid can produce this: dispatching it
@@ -196,6 +271,32 @@ impl std::fmt::Display for GenError {
             GenError::CarversNotGenerated => {
                 write!(f, "cannot generate CARVERS before the SURFACE task ran")
             }
+            GenError::FeaturesNotGenerated => {
+                write!(f, "cannot generate FEATURES before the CARVERS task ran")
+            }
+            GenError::FeaturePlacementDecode {
+                chunk_pos,
+                step_index,
+                global_feature_index,
+                feature_key,
+            } => write!(
+                f,
+                "cannot place feature {} (chunk {}, step {}, global feature index {}): \
+                 its placed-feature value decode is unavailable (RivetTodo #126)",
+                feature_key, chunk_pos, step_index, global_feature_index
+            ),
+            GenError::SettingsNotGenerated { biome } => match biome {
+                Some(biome) => write!(
+                    f,
+                    "cannot build the decoration FeatureSorter: the possible biome {biome} \
+                     has no generated generation settings (RivetTodo #126)"
+                ),
+                None => write!(
+                    f,
+                    "cannot build the decoration FeatureSorter: a possible biome's dense id \
+                     is not in the generated biome table (RivetTodo #126)"
+                ),
+            },
             GenError::DataNotCarried { status } => write!(
                 f,
                 "cannot label the chunk {status:?}: a pass-through step cannot fabricate that data"
@@ -248,7 +349,7 @@ where
     B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
 {
-    /// Wraps the four worldgen seam closures (owned, mirroring the record).
+    /// Wraps the five worldgen seam closures (owned, mirroring the record).
     /// The light engine is left unattached — the slice wires it with
     /// [`Self::with_light_engine`] when a run targets the light statuses.
     pub fn new(
@@ -256,12 +357,14 @@ where
         noise: impl FnMut(&mut ProtoChunk<T, B, S>) + 'static,
         surface: impl FnMut(&mut ProtoChunk<T, B, S>) + 'static,
         carvers: impl FnMut(&mut ProtoChunk<T, B, S>) + 'static,
+        features: impl FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenError> + 'static,
     ) -> Self {
         WorldGenContext {
             biomes: Box::new(biomes),
             noise: Box::new(noise),
             surface: Box::new(surface),
             carvers: Box::new(carvers),
+            features: Box::new(features),
             light_engine: None,
         }
     }
@@ -452,9 +555,23 @@ where
                 ensure_canonical_rung(step.task(), step.target_status())?;
                 self.run_light_task(chunk, ChunkStatus::Light)?;
             }
-            ChunkStatusTask::GenerateFeatures
-            | ChunkStatusTask::GenerateSpawn
-            | ChunkStatusTask::Full => {
+            ChunkStatusTask::GenerateFeatures => {
+                ensure_canonical_rung(step.task(), step.target_status())?;
+                // `ChunkStatusTasks.generateFeatures` → Java's
+                // `NoiseBasedChunkGenerator.applyBiomeDecoration`: the
+                // decoration bodies consume the CARVERS-produced block data
+                // (through the bounded WorldGenRegion reads/writes), so an
+                // un-carved chunk is refused before any write (the features
+                // body never runs and the chunk is never labeled FEATURES).
+                if !chunk
+                    .get_persisted_status()
+                    .is_or_after(ChunkStatus::Carvers)
+                {
+                    return Err(GenError::FeaturesNotGenerated);
+                }
+                (self.features)(chunk)?;
+            }
+            ChunkStatusTask::GenerateSpawn | ChunkStatusTask::Full => {
                 return Err(GenError::UnsupportedTask {
                     status: step.target_status(),
                     task: step.task(),
@@ -470,9 +587,9 @@ where
     /// Generate a chunk from its current persisted status through `target`
     /// (inclusive, ≤ `LIGHT`), running each step's task in status order.
     ///
-    /// The `BIOMES`-before-`NOISE`-before-`SURFACE`-before-`CARVERS` ordering
-    /// is enforced at the *status-order* layer, not just inside the task
-    /// bodies: a promotion whose
+    /// The `BIOMES`-before-`NOISE`-before-`SURFACE`-before-`CARVERS`-
+    /// before-`FEATURES` ordering is enforced at the *status-order* layer, not
+    /// just inside the task bodies: a promotion whose
     /// target passes through the `BIOMES`/`NOISE` steps requires that data to
     /// be present — either carried in (the chunk's persisted status was already
     /// at/after the step) or produced by this run's earlier step. A pyramid
@@ -559,9 +676,14 @@ where
                     needs_light_engine = true;
                     projected = step.target_status();
                 }
-                ChunkStatusTask::GenerateFeatures
-                | ChunkStatusTask::GenerateSpawn
-                | ChunkStatusTask::Full => {
+                ChunkStatusTask::GenerateFeatures => {
+                    ensure_canonical_rung(step.task(), step.target_status())?;
+                    if !projected.is_or_after(ChunkStatus::Carvers) {
+                        return Err(GenError::FeaturesNotGenerated);
+                    }
+                    projected = step.target_status();
+                }
+                ChunkStatusTask::GenerateSpawn | ChunkStatusTask::Full => {
                     return Err(GenError::UnsupportedTask {
                         status: step.target_status(),
                         task: step.task(),
@@ -670,6 +792,7 @@ mod tests {
         Rc<RefCell<Vec<&'static str>>>,
         Rc<RefCell<Vec<&'static str>>>,
         Rc<RefCell<Vec<&'static str>>>,
+        Rc<RefCell<Vec<&'static str>>>,
     );
 
     fn recording_context() -> RecordingContext {
@@ -677,10 +800,12 @@ mod tests {
         let noise_calls = Rc::new(RefCell::new(Vec::new()));
         let surface_calls = Rc::new(RefCell::new(Vec::new()));
         let carvers_calls = Rc::new(RefCell::new(Vec::new()));
+        let features_calls = Rc::new(RefCell::new(Vec::new()));
         let biomes_log = Rc::clone(&biomes_calls);
         let noise_log = Rc::clone(&noise_calls);
         let surface_log = Rc::clone(&surface_calls);
         let carvers_log = Rc::clone(&carvers_calls);
+        let features_log = Rc::clone(&features_calls);
         let ctx = WorldGenContext::new(
             move |_c: &mut ProtoChunk<u8, u8, &'static str>| biomes_log.borrow_mut().push("biomes"),
             move |_c: &mut ProtoChunk<u8, u8, &'static str>| noise_log.borrow_mut().push("noise"),
@@ -690,13 +815,24 @@ mod tests {
             move |_c: &mut ProtoChunk<u8, u8, &'static str>| {
                 carvers_log.borrow_mut().push("carvers")
             },
+            move |_c: &mut ProtoChunk<u8, u8, &'static str>| {
+                features_log.borrow_mut().push("features");
+                Ok(())
+            },
         );
-        (ctx, biomes_calls, noise_calls, surface_calls, carvers_calls)
+        (
+            ctx,
+            biomes_calls,
+            noise_calls,
+            surface_calls,
+            carvers_calls,
+            features_calls,
+        )
     }
 
     #[test]
     fn generate_through_promotes_step_by_step_in_dag_order_through_noise() {
-        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls) =
+        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
 
@@ -726,7 +862,7 @@ mod tests {
 
     #[test]
     fn generating_only_through_biomes_runs_the_biomes_task_once() {
-        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls) =
+        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
         ctx.generate_through(&GENERATION_PYRAMID, &mut chunk, ChunkStatus::Biomes)
@@ -738,7 +874,7 @@ mod tests {
 
     #[test]
     fn promotion_is_idempotent_at_target() {
-        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls) =
+        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
         ctx.generate_through(&GENERATION_PYRAMID, &mut chunk, ChunkStatus::Noise)
@@ -756,7 +892,7 @@ mod tests {
         // The persisted status is the record of what ran: a chunk already at
         // BIOMES (from an earlier generation) may be promoted to NOISE without
         // re-running the BIOMES task.
-        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls) =
+        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
         chunk.set_persisted_status(ChunkStatus::Biomes);
@@ -771,7 +907,7 @@ mod tests {
     fn noise_step_alone_fails_without_biomes() {
         // The honest guard: dispatching the NOISE step directly on a chunk that
         // has not run BIOMES errors, and the chunk is not labeled NOISE.
-        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls) =
+        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
         let noise_step = GENERATION_PYRAMID.get_step_to(ChunkStatus::Noise);
@@ -789,7 +925,7 @@ mod tests {
         // The honest guard: dispatching the SURFACE step directly on a chunk
         // that has not run NOISE errors, and the chunk is not labeled SURFACE
         // (the surface body never runs).
-        let (mut ctx, biomes_calls, noise_calls, surface_calls, _carvers_calls) =
+        let (mut ctx, biomes_calls, noise_calls, surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
         let surface_step = GENERATION_PYRAMID.get_step_to(ChunkStatus::Surface);
@@ -804,35 +940,21 @@ mod tests {
     }
 
     #[test]
-    fn generate_through_carvers_runs_the_wired_carvers_step() {
-        // CARVERS is wired: a fresh EMPTY chunk targeting CARVERS runs BIOMES,
-        // NOISE, SURFACE, then CARVERS in status order and is stamped CARVERS.
-        let (mut ctx, biomes_calls, noise_calls, surface_calls, carvers_calls) =
+    fn generate_through_features_runs_the_wired_features_step() {
+        // FEATURES is wired: a fresh EMPTY chunk targeting FEATURES runs BIOMES,
+        // NOISE, SURFACE, CARVERS, then FEATURES in status order and is stamped
+        // FEATURES.
+        let (mut ctx, biomes_calls, noise_calls, surface_calls, carvers_calls, features_calls) =
             recording_context();
         let mut chunk = proto();
-        ctx.generate_through(&GENERATION_PYRAMID, &mut chunk, ChunkStatus::Carvers)
-            .expect("through carvers");
-        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Carvers);
+        ctx.generate_through(&GENERATION_PYRAMID, &mut chunk, ChunkStatus::Features)
+            .expect("through features");
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Features);
         assert_eq!(biomes_calls.borrow().as_slice(), &["biomes"]);
         assert_eq!(noise_calls.borrow().as_slice(), &["noise"]);
         assert_eq!(surface_calls.borrow().as_slice(), &["surface"]);
         assert_eq!(carvers_calls.borrow().as_slice(), &["carvers"]);
-
-        // The next rung (FEATURES) is still unwired (RivetTodo #185): the
-        // pre-check reports UnsupportedTask before any work runs, and the
-        // already-carved chunk is untouched.
-        let err = ctx
-            .generate_through(&GENERATION_PYRAMID, &mut chunk, ChunkStatus::Features)
-            .expect_err("features not wired");
-        assert_eq!(
-            err,
-            GenError::UnsupportedTask {
-                status: ChunkStatus::Features,
-                task: ChunkStatusTask::GenerateFeatures,
-            }
-        );
-        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Carvers);
-        assert_eq!(carvers_calls.borrow().as_slice(), &["carvers"]);
+        assert_eq!(features_calls.borrow().as_slice(), &["features"]);
 
         // A target past LIGHT (SPAWN/FULL) is out of the supported range and
         // reports UnsupportedStatus instead.
@@ -840,27 +962,23 @@ mod tests {
             .generate_through(&GENERATION_PYRAMID, &mut chunk, ChunkStatus::Full)
             .expect_err("full is out of range");
         assert_eq!(err, GenError::UnsupportedStatus(ChunkStatus::Full));
-        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Carvers);
-        assert_eq!(carvers_calls.borrow().as_slice(), &["carvers"]);
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Features);
+        assert_eq!(features_calls.borrow().as_slice(), &["features"]);
     }
 
     #[test]
-    fn dispatching_an_unwired_step_errors() {
-        // Even the single-step seam refuses the FEATURES body (RivetTodo #185).
-        let (mut ctx, biomes_calls, noise_calls, surface_calls, _carvers_calls) =
+    fn features_step_alone_fails_without_carvers() {
+        // The honest guard: dispatching the FEATURES step directly on a chunk
+        // that has not run CARVERS errors, and the chunk is not labeled FEATURES
+        // (the features body never runs).
+        let (mut ctx, biomes_calls, noise_calls, surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
         let features_step = GENERATION_PYRAMID.get_step_to(ChunkStatus::Features);
         let err = ctx
             .run_step(features_step, &mut chunk)
-            .expect_err("features unwired");
-        assert_eq!(
-            err,
-            GenError::UnsupportedTask {
-                status: ChunkStatus::Features,
-                task: ChunkStatusTask::GenerateFeatures,
-            }
-        );
+            .expect_err("features need carvers");
+        assert_eq!(err, GenError::FeaturesNotGenerated);
         assert_eq!(chunk.get_persisted_status(), ChunkStatus::Empty);
         assert!(biomes_calls.borrow().is_empty());
         assert!(noise_calls.borrow().is_empty());
@@ -872,7 +990,7 @@ mod tests {
         // The honest guard: dispatching the CARVERS step directly on a chunk
         // that has not run SURFACE errors, and the chunk is not labeled CARVERS
         // (the carvers body never runs).
-        let (mut ctx, biomes_calls, noise_calls, surface_calls, carvers_calls) =
+        let (mut ctx, biomes_calls, noise_calls, surface_calls, carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
         let carvers_step = GENERATION_PYRAMID.get_step_to(ChunkStatus::Carvers);
@@ -893,7 +1011,7 @@ mod tests {
         // stubs — they would advance the persisted status without running any
         // biomes task. The seam refuses that on a fresh (EMPTY) chunk: the
         // chunk must not be labeled BIOMES (let alone NOISE) through them.
-        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls) =
+        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
         let err = ctx
@@ -928,7 +1046,7 @@ mod tests {
         // through the loading pyramid: its NOISE step is a pass-through that
         // produces no noise data, so the promotion would label the chunk NOISE
         // with no blocks. Loading only reflects data the chunk already has.
-        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls) =
+        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
         chunk.set_persisted_status(ChunkStatus::Biomes);
@@ -951,7 +1069,7 @@ mod tests {
         // The public single-step seam must not label a fresh EMPTY chunk NOISE
         // through the LOADING pyramid's pass-through NOISE stub (which produces
         // no noise data).
-        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls) =
+        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
         let noise_step = LOADING_PYRAMID.get_step_to(ChunkStatus::Noise);
@@ -972,7 +1090,7 @@ mod tests {
         // Finding-2 guard: a pyramid whose BIOMES step generates biomes but
         // whose NOISE step is a pass-through would label a fresh chunk NOISE
         // with no blocks. The pre-check refuses it before any work runs.
-        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls) =
+        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
         // Build a minimal 5-rung pyramid: EMPTY -> SS -> SR ->
@@ -1021,7 +1139,7 @@ mod tests {
         // before the CARVERS step is reached). The CARVERS rung's own
         // `CarversNotGenerated` guard is run_step-level defence-in-depth,
         // covered separately by `carvers_step_alone_fails_without_surface`.
-        let (mut ctx, biomes_calls, noise_calls, surface_calls, carvers_calls) =
+        let (mut ctx, biomes_calls, noise_calls, surface_calls, carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
         // EMPTY -> SS -> SR -> BIOMES(GenerateBiomes) -> NOISE(GenerateNoise)
@@ -1081,7 +1199,7 @@ mod tests {
         // have BIOMES (an earlier, valid step) in the dispatch loop — the
         // pre-check must refuse before BIOMES runs, leaving the chunk and the
         // biomes seam untouched.
-        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls) =
+        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
         chunk.set_persisted_status(ChunkStatus::StructureReferences);
@@ -1127,7 +1245,7 @@ mod tests {
         // Loading a chunk that already carries NOISE data: the pass-through
         // NOISE step is allowed (the data is present) and leaves the status at
         // NOISE, running no worldgen seam.
-        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls) =
+        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
         chunk.set_persisted_status(ChunkStatus::Noise);
@@ -1141,7 +1259,7 @@ mod tests {
 
     #[test]
     fn demotion_is_rejected() {
-        let (mut ctx, _biomes_calls, _noise_calls, _surface_calls, _carvers_calls) =
+        let (mut ctx, _biomes_calls, _noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
         ctx.generate_through(&GENERATION_PYRAMID, &mut chunk, ChunkStatus::Noise)
@@ -1163,8 +1281,8 @@ mod tests {
     fn loading_a_full_chunk_is_an_idempotent_no_op() {
         // A chunk loaded from disk at FULL is confirmed as a no-op through the
         // LOADING pyramid: target == current returns Ok without wiring any
-        // FEATURES..FULL task body (RivetTodo #185).
-        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls) =
+        // SPAWN/FULL task body (RivetTodo #185).
+        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
         chunk.set_persisted_status(ChunkStatus::Full);
@@ -1180,7 +1298,7 @@ mod tests {
         // The Demotion error is not shadowed by the unwired-status check: a
         // regression against a chunk at an unwired status reports Demotion, so
         // callers matching on it can short-circuit.
-        let (mut ctx, _biomes_calls, _noise_calls, _surface_calls, _carvers_calls) =
+        let (mut ctx, _biomes_calls, _noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
         chunk.set_persisted_status(ChunkStatus::Full);
@@ -1203,7 +1321,7 @@ mod tests {
         // be refused by the pre-check before any work runs — the documented
         // atomicity holds for the task/status mismatch too. The chunk is
         // untouched and neither seam ran.
-        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls) =
+        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
         let pyramid = ChunkPyramid::builder()
@@ -1264,7 +1382,7 @@ mod tests {
         // the NOISE rung. Dispatching it would run the biomes seam and label
         // the chunk NOISE with no noise data — both the pre-check and the
         // runtime guard refuse it before any mutation.
-        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls) =
+        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
         let pyramid = ChunkPyramid::builder()
@@ -1406,9 +1524,10 @@ mod tests {
 
     /// A chunk with its persisted status already at FEATURES — the last status
     /// before the light rungs, and the state a real generated chunk reaches
-    /// before lighting. The generation pyramid's FEATURES..FULL steps are
-    /// unwired (RivetTodo #185), so the light tests seed a chunk that has
-    /// already passed them and drive the INITIALIZE_LIGHT/LIGHT steps directly.
+    /// before lighting. The generation pyramid's SPAWN/FULL steps are unwired
+    /// (RivetTodo #185), so the light tests seed a chunk that has already
+    /// passed the worldgen rungs and drive the INITIALIZE_LIGHT/LIGHT steps
+    /// directly.
     fn features_chunk() -> ProtoChunk<u8, u8, &'static str> {
         let mut chunk = proto();
         chunk.set_persisted_status(ChunkStatus::Features);
@@ -1431,7 +1550,7 @@ mod tests {
     /// advance inside a light task.
     #[test]
     fn generate_through_light_lights_a_fresh_chunk_and_advances_to_light() {
-        let (ctx, _biomes_calls, _noise_calls, _surface_calls, _carvers_calls) =
+        let (ctx, _biomes_calls, _noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let (engine, log) = light_engine();
         let mut ctx = ctx.with_light_engine(engine);
@@ -1457,7 +1576,7 @@ mod tests {
     /// seam because `generate_through` short-circuits at `target == current`.
     #[test]
     fn light_task_loads_an_already_lighted_chunk() {
-        let (ctx, _biomes_calls, _noise_calls, _surface_calls, _carvers_calls) =
+        let (ctx, _biomes_calls, _noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let (engine, log) = light_engine();
         let mut ctx = ctx.with_light_engine(engine);
@@ -1483,7 +1602,7 @@ mod tests {
     /// only path to `forceLoadInChunk`.
     #[test]
     fn a_light_status_chunk_not_light_correct_is_recomputed() {
-        let (ctx, _biomes_calls, _noise_calls, _surface_calls, _carvers_calls) =
+        let (ctx, _biomes_calls, _noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let (engine, log) = light_engine();
         let mut ctx = ctx.with_light_engine(engine);
@@ -1506,7 +1625,7 @@ mod tests {
     /// (Java would NPE on `context.lightEngine()`).
     #[test]
     fn light_requires_the_engine_atomically() {
-        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls) =
+        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = features_chunk();
         let err = ctx
@@ -1547,7 +1666,8 @@ mod tests {
     /// before LIGHT; the biomes/noise assertions prove no earlier step ran.)
     #[test]
     fn a_provider_less_engine_is_refused_atomically() {
-        let (ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls) = recording_context();
+        let (ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls, _features_calls) =
+            recording_context();
         let mut chunk = features_chunk();
         let engine = LevelLightEngine::new(Box::new(create_accessor(-64, 384)), true, true);
         let mut ctx = ctx.with_light_engine(engine);
@@ -1603,7 +1723,7 @@ mod tests {
     /// chunk unlit at `INITIALIZE_LIGHT` (the LIGHT task lights it later).
     #[test]
     fn initialize_light_step_records_the_engine_and_computes_nothing() {
-        let (ctx, _biomes_calls, _noise_calls, _surface_calls, _carvers_calls) =
+        let (ctx, _biomes_calls, _noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let (engine, log) = light_engine();
         let mut ctx = ctx.with_light_engine(engine);
@@ -1633,7 +1753,7 @@ mod tests {
     /// idempotent confirm is what keeps loading from relighting it.
     #[test]
     fn loading_confirms_an_existing_lighted_chunk_idempotently() {
-        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls) =
+        let (mut ctx, biomes_calls, noise_calls, _surface_calls, _carvers_calls, _features_calls) =
             recording_context();
         let mut chunk = proto();
         chunk.set_persisted_status(ChunkStatus::Light);

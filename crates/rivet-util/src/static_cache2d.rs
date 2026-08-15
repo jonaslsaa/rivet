@@ -50,6 +50,32 @@ impl<T> StaticCache2D<T> {
         Self::new(min_x, min_z, size, size, initializer)
     }
 
+    /// A `StaticCache2D` over a pre-built window — the `create`-equivalent for
+    /// entries that cannot be produced by an `&dyn Fn` initializer.
+    ///
+    /// The `&dyn Fn` initializer [`create`](Self::create) forces every entry to
+    /// be produced inside a closure that cannot escape a captured borrow, so a
+    /// window holding borrow-carrying entries (the worldgen region's
+    /// `Box<dyn View + 'a>` holders) has no `create` spelling. `entries` is
+    /// stored verbatim in the same row-major `(x, z)` order `create` fills
+    /// (x-outer, z-inner), and the window bounds are supplied directly.
+    pub fn from_entries(min_x: i32, min_z: i32, size_x: i32, size_z: i32, entries: Vec<T>) -> Self {
+        assert_eq!(
+            entries.len() as i32,
+            size_x * size_z,
+            "StaticCache2D window {size_x}x{size_z} requires {} entries, got {}",
+            size_x * size_z,
+            entries.len()
+        );
+        StaticCache2D {
+            min_x,
+            min_z,
+            size_x,
+            size_z,
+            cache: entries,
+        }
+    }
+
     /// The private Java constructor — a rectangular window `[minX, minX +
     /// sizeX)` by `[minZ, minZ + sizeZ)`, filled eagerly.
     fn new(
