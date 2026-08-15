@@ -14,12 +14,11 @@
 //!
 //! The block-class `instanceof` splits are modelled as an id-identity set for
 //! the double-plant subclasses (every block whose registered instance is a
-//! `DoublePlantBlock` — built via `DoublePlantBlock::new`,
-//! `TallGrassBlock::new`, `TallFlowerBlock::new`, `TallSeagrassBlock::new`,
-//! `PitcherCropBlock::new` or `SmallDripleafBlock::new` — the
-//! `mc.world.level.block` unit owns the classes) and a single-id check for
-//! `MossyCarpetBlock` (`minecraft:pale_moss_carpet` is its only registered
-//! instance).
+//! `DoublePlantBlock` subclass — built via `DoublePlantBlock::new`,
+//! `TallFlowerBlock::new`, `TallSeagrassBlock::new`, `PitcherCropBlock::new`
+//! or `SmallDripleafBlock::new` — the `mc.world.level.block` unit owns the
+//! classes) and a single-id check for `MossyCarpetBlock`
+//! (`minecraft:pale_moss_carpet` is its only registered instance).
 
 use crate::block::blocks::Blocks;
 use crate::block::double_plant_block;
@@ -37,11 +36,10 @@ const UPDATE_CLIENTS: u32 = 2;
 
 /// `stateToPlace.getBlock() instanceof DoublePlantBlock` — the block-identity
 /// set of every double-plant block (any block whose registered instance is a
-/// `DoublePlantBlock` subclass: tall grass and large fern via
-/// `TallGrassBlock::new`, the four tall flowers and pitcher plant via
-/// `TallFlowerBlock::new`/`DoublePlantBlock::new`, tall seagrass via
-/// `TallSeagrassBlock::new`, pitcher crop via `PitcherCropBlock::new` and
-/// small dripleaf via `SmallDripleafBlock::new`).
+/// `DoublePlantBlock` subclass: tall grass, large fern, pitcher plant and the
+/// four tall flowers via `DoublePlantBlock::new`/`TallFlowerBlock::new`, tall
+/// seagrass via `TallSeagrassBlock::new`, pitcher crop via
+/// `PitcherCropBlock::new` and small dripleaf via `SmallDripleafBlock::new`).
 fn is_double_plant(block: BlockId) -> bool {
     const DOUBLE_PLANTS: &[&str] = &[
         "minecraft:tall_grass",
