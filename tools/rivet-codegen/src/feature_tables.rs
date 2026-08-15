@@ -310,10 +310,7 @@ fn render(
         configured,
         "ConfiguredFeatureEntry",
     ));
-    // The section renderers end each section with `};\n\n` (the blank line
-    // separates the sections); the final section must end with a single
-    // trailing newline so the raw `generate` output is byte-identical to the
-    // committed (rustfmt'd) golden.
+    // Section renderers end with `};\n\n`; trim to a single newline to match the rustfmt'd golden.
     out.truncate(out.trim_end().len());
     out.push('\n');
     out
