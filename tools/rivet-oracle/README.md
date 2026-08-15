@@ -37,6 +37,15 @@ builds on top of these fixtures later.
   a FULL serialization's block data IS the FEATURES-decoration output; the
   verifier cross-checks each committed chunk against the generated-expected
   golden at the same coordinates. Twin-boot byte-identity verified.
+- **Seed-42 LIGHT-stage oracle checkpoint** (`light 42`, PR #175/#184): the
+  per-section Starlight sky nibbles + derived sky-emptiness map for the
+  committed 3×3 interior {19..21}² of a self-contained forced 5×5 grid
+  {18..22}², captured by booting a fresh seed-42 normal-overworld world and
+  force-generating the grid to level 33 (`minecraft:full`). FULL serialization
+  carries the Starlight-computed light arrays, so the persisted light data IS
+  the LIGHT-stage output; the rivet-server engine differential re-lights the
+  interior through the real engine and matches it byte-exact. Twin-boot
+  byte-identity verified.
 - The Rust runner `cargo run -p rivet-oracle` verifies every committed
   fixture kind against its manifest's SHA-256s and prints a summary.
 
@@ -85,6 +94,10 @@ rivet-oracle/
     features/           # seed-42 FEATURES oracle checkpoint (PR #631)
       manifest.json     # hash of features.json (kind: features)
       features.json     # 4 committed chunks' surface/bedrock/below_feet
+    light/              # seed-42 LIGHT-stage oracle checkpoint (PR #175/#184)
+      manifest.json     # hashes of light.json + all 25 forced chunk NBTs (kind: light)
+      light.json        # 9 committed chunks' sky nibbles + emptiness map + light_correct
+      chunks/<x>.<z>.nbt # 25 forced chunk NBTs the rivet-server differential rebuilds
   work/                 # scratch space — gitignored, never commit
     run/                # a completed server run (materialized runtime)
     jars/               # copies of the built Paper jars
@@ -606,6 +619,62 @@ partial/corrupt tree hard-fails (exit 1), never a silent green. The tamper
 negative control proves the manifest SHA-256 gate is not vacuous. `verify` (and
 the no-arg `cargo run -p rivet-oracle`) gates on this golden exactly like the
 other load-bearing kinds.
+
+## Seed-42 LIGHT-stage checkpoint: `light`
+
+The seed-42 LIGHT oracle checkpoint is the oracle ground-truth BEFORE any Rivet
+LIGHT-status wiring: a focused Paper 26.2 capture of a deterministic seed-42
+overworld chunk grid forced through real Starlight sky lighting, plus an exact
+Rivet-side verifier and the rivet-server engine differential. It reuses the
+generated-expected/features two-boot capture machinery (level-33 forced tickets,
+`clear_region_files`, the `0a99345` provenance pin) but records stage-specific
+truth for the LIGHT step itself — the per-section sky light nibbles, the derived
+sky-emptiness map, and `light_correct` — so a future Rivet LIGHT-status port
+(the merged `SkyStarLightEngine` / `SkyLightProvider` path) is checked against
+Paper ground truth rather than against nothing.
+
+```bash
+cargo run -p rivet-oracle -- light 42               # verify the committed checkpoint
+cargo run -p rivet-oracle -- light 42 --to out.json # capture a fresh checkpoint
+cargo run -p rivet-oracle -- light 42 --tamper      # negative control (must fail)
+cargo run -p rivet-oracle -- regenerate --light     # twin-boot regenerate the fixture
+```
+
+The Moonrise forced-ticket path can only serialize FULL: a level-35 ticket
+(`ChunkLevel.byStatus(LIGHT)`) is `INACCESSIBLE` to `fullStatus`, so the
+checkpoint captures at level 33, which serializes as `minecraft:full`. That is
+faithful to the LIGHT step because FULL serialization carries the
+Starlight-computed light arrays: `ChunkLightTask`'s fresh-chunk branch runs
+`lightChunk -> StarLightInterface.lightChunk -> SkyStarLightEngine.light`
+(`lightChunk(lightAccess, chunk, true)`), and the resulting nibbles are what
+`SaveUtil` persists (`isLightOn` + `starlight.light_version` 10).
+
+The committed golden is the 3×3 interior {19..21}² of a self-contained forced
+5×5 grid {18..22}², far from seed-42's spawn-area chunks (chunk (-2,0)). Every
+committed chunk's full 1-radius block context and 2-radius emptiness context
+lies inside the forced grid, so Paper's light for the interior is computed over
+exactly the set this checkpoint commits. The raw NBT of all 25 forced chunks is
+committed under `chunks/` so the rivet-server engine differential rebuilds the
+exact context Paper lit in (every chunk reconstructed into the server's
+`StateId` space with its persisted light installed) and re-lights the interior
+via `SkyLightProvider::relight_chunk_with` — the per-neighbour no-edge-checks
+path from Paper's `relightChunks`, whose neighbour-light pull
+(`propagateNeighbourLevels`) reproduces the fixture's east-neighbour water
+dampening at the boundary columns. The published sky nibbles and emptiness map
+must then match the fixture truth byte-exact.
+
+The per-chunk contract: `status` exactly `minecraft:full`, `light_correct`
+true, light sections `-5..=20` (26 sections), per-section `sky_nibbles` as the
+`to_vanilla_nibble` byte views (`None` for a null section), and the derived
+`sky_emptiness` map covering all 24 world sections. Non-vacuity: at least one
+committed chunk must carry a non-null sky nibble with real terrain shadowing
+(not uniformly 0 or uniformly 0xFF), and a non-uniform emptiness map — a
+superflat or all-zeros echo is refused loudly. The tri-state contract mirrors
+features: a wholly absent fixture tree is UNVERIFIED (exit 3), a partial/corrupt
+tree hard-fails (exit 1), never a silent green. The tamper negative control
+proves the manifest SHA-256 gate is not vacuous. `verify` (and the no-arg
+`cargo run -p rivet-oracle`) gates on this golden exactly like the other
+load-bearing kinds.
 
 ## Regenerate: `regenerate`
 
