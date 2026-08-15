@@ -1,5 +1,5 @@
 {
-  "generator": "WorldgenFeatureDataExtractor (seed-42 reachable-biome + feature closure)",
+  "generator": "WorldgenFeatureDataExtractor (full overworld possible-biome + seed-42 feature closure)",
   "source": {
     "jar": "tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar",
     "jar_sha256": "e1a027e9481a16ec1da0f0e139d370280050d123a14c022a476c2dc8a697ebda",
@@ -9,7 +9,7 @@
     "world_version": 4903
   },
   "file": {
-    "bytes": 199140,
-    "sha256": "c31a6075a543609d0d0730c08a8795141a6373d81e8b4ee0aeac207bd5e9ebb8"
+    "bytes": 744065,
+    "sha256": "28615e3f6c74d35027484d8418258ef4f79d8f3d750d7ca4ebe3addcce0315c2"
   }
 }

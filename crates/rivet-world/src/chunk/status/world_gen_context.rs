@@ -108,9 +108,9 @@ type CarversSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>);
 /// The `generateFeatures` seam closure type — returns the decoration body's
 /// typed failure (the region-backed neighbor-cache seam defers with #126, so
 /// the body fails typed instead of panicking or silently skipping — for
-/// seed-42 `GenError::SettingsNotGenerated` at the full source list's first
-/// unresolvable biome, and `GenError::FeaturePlacementDecode` at the first
-/// real placed-feature value decode once settings resolve).
+/// seed-42 `GenError::FeaturePlacementDecode` at the first real placed-feature
+/// value decode, with `GenError::SettingsNotGenerated` remaining as the
+/// defensive path for a biome the tables do not carry).
 type FeaturesSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenError>;
 
 /// `WorldGenContext` (value-layer seam shape) — the caller-supplied BIOMES,
@@ -148,10 +148,10 @@ where
     /// is caller-supplied). The seam's ordering guard is what keeps this from
     /// running before CARVERS (the decoration bodies consume the CARVERS-
     /// produced block data). The closure returns the body's typed failure —
-    /// for seed-42 [`GenError::SettingsNotGenerated`] at the full source
-    /// list's first unresolvable biome, and [`GenError::FeaturePlacementDecode`]
-    /// at the first real placed-feature value decode (#126) once settings
-    /// resolve — instead of panicking.
+    /// for seed-42 [`GenError::FeaturePlacementDecode`] at the first real
+    /// placed-feature value decode (#126), with
+    /// [`GenError::SettingsNotGenerated`] remaining as the defensive path for a
+    /// biome the tables do not carry — instead of panicking.
     features: Box<FeaturesSeam<T, B, S>>,
     /// The `ThreadedLevelLightEngine` the INITIALIZE_LIGHT/LIGHT tasks store and
     /// route through (Java's `context.lightEngine()`). The facade holds the
@@ -229,12 +229,12 @@ pub enum GenError {
     /// `BiomeGenerationSettings` while building the decoration FeatureSorter.
     /// Paper builds the sorter once from the FULL `biomeSource.possibleBiomes()`
     /// list (`ChunkGenerator.java` 97-100) and never fails (every possible
-    /// biome has real settings); Rivet's generated feature tables are scoped to
-    /// the reachable seed-42 biomes, so a full overworld source list cannot
-    /// resolve — it fails typed here at the first missing biome in source order
-    /// (seed-42: `minecraft:mushroom_fields`, the source's first possible
-    /// biome) instead of panicking through the phf index or fabricating/
-    /// skipping the biome. No decoration runs; the chunk stays CARVERS.
+    /// biome has real settings). Rivet's generated tables now cover all 55
+    /// possible biomes, so this is a defensive path: a biome the tables do not
+    /// carry (a hand-edited generated file, or a registry that drifted from the
+    /// fixture) fails typed here in source order instead of panicking through
+    /// the phf index or fabricating/skipping the biome. No decoration runs; the
+    /// chunk stays CARVERS.
     SettingsNotGenerated {
         /// The possible biome whose generation settings are missing (`None`
         /// when the biome's dense id is not in `BIOME_BY_ID` at all).
@@ -1661,7 +1661,8 @@ mod tests {
     /// at `FEATURES` unlit, and neither worldgen seam ran. The atomic-refusal
     /// invariant holds for a present-but-provider-less engine, not just an
     /// absent one. (A fresh `EMPTY` chunk cannot reach LIGHT in the value
-    /// layer — the FEATURES rung is unwired — so the light path starts from
+    /// layer — the FEATURES rung's placement bodies are unwired and it fails
+    /// typed at the placement-decode boundary — so the light path starts from
     /// the pre-light `FEATURES` state, where INITIALIZE_LIGHT is the only step
     /// before LIGHT; the biomes/noise assertions prove no earlier step ran.)
     #[test]

@@ -7,11 +7,12 @@
 //! [`crate::feature_data`]; this module is the codegen half that renders the
 //! validated data as deterministic Rust tables:
 //!
-//! - `BIOME_GENERATION_SETTINGS_BY_NAME` — the five reachable seed-42 biome
-//!   generation settings: the registry id, the carver identity names, and the 11
-//!   `GenerationStep.Decoration` per-step placed-feature lists (step order +
-//!   holder-set order preserved).
-//! - `PLACED_FEATURE_BY_NAME` / `CONFIGURED_FEATURE_BY_NAME` — the reachable
+//! - `BIOME_GENERATION_SETTINGS_BY_NAME` — the generation settings of EVERY
+//!   overworld possible biome (the full `biomeSource.possibleBiomes()` list, in
+//!   the paper argument the FeatureSorter is built from): the registry id, the
+//!   carver identity names, and the 11 `GenerationStep.Decoration` per-step
+//!   placed-feature lists (step order + holder-set order preserved).
+//! - `PLACED_FEATURE_BY_NAME` / `CONFIGURED_FEATURE_BY_NAME` — the full
 //!   placed/configured feature closure's name -> `(full-registry id,
 //!   `RegistryOps` JSON)` entries. The ids are the dense *full-registry* ids
 //!   (not contiguous within this subset — registry identity is preserved by the
@@ -30,7 +31,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use crate::feature_data::{CONFIGURED_FEATURE_COUNT, PLACED_FEATURE_COUNT, REACHABLE_BIOME_COUNT};
+use crate::feature_data::{CONFIGURED_FEATURE_COUNT, PLACED_FEATURE_COUNT, POSSIBLE_BIOME_COUNT};
 use crate::reports::SourceProvenance;
 
 pub fn default_input(repo_root: &Path) -> PathBuf {
@@ -85,9 +86,9 @@ pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> 
     // Anchor the extract against the pinned live-Paper counts (in addition to
     // `validate_structural`'s internal count check, so generation and the
     // `probe-feature-data` anchors cannot silently diverge).
-    if biomes.len() != REACHABLE_BIOME_COUNT {
+    if biomes.len() != POSSIBLE_BIOME_COUNT {
         anyhow::bail!(
-            "extracted {} reachable biomes but a live Paper 26.2 load has {REACHABLE_BIOME_COUNT}",
+            "extracted {} possible biomes but a live Paper 26.2 load has {POSSIBLE_BIOME_COUNT}",
             biomes.len()
         );
     }
@@ -244,14 +245,18 @@ fn render(
         source.jar_sha256.get(..16).unwrap_or(&source.jar_sha256)
     ));
     out.push_str(
-        "// Seed-42 FEATURES data (PR #633): the reachable biome generation settings\n\
-         // and the placed/configured feature closure a FEATURES pass must decode. The\n\
-         // `RegistryOps` JSON is the datapack shape (holder refs are bare strings).\n\
-         // Closure is by registry membership: every bare string in a configured JSON\n\
-         // that names an entry in these tables is a holder reference and resolves\n\
-         // here; block-state `Name`s, tags, and provider/dispatch keys are in neither\n\
-         // table and are not feature refs. All values are extracted from a live Paper\n\
-         // 26.2 load, never hand-typed.\n\n",
+        "// Seed-42 FEATURES data: the generation settings of EVERY overworld possible\n\
+         // biome (the full `biomeSource.possibleBiomes()` list in source order, the\n\
+         // exact argument Paper's FeatureSorter is built from) and the placed/configured\n\
+         // feature closure a FEATURES pass must decode. The `RegistryOps` JSON is the\n\
+         // datapack shape (holder refs are bare strings). Closure is by registry\n\
+         // membership: every bare string in a configured JSON that names an entry in\n\
+         // these tables is a holder reference and resolves here; block-state `Name`s\n\
+         // and tags are in neither table and are not feature refs. A dispatch `type`\n\
+         // may equal a table entry's own key (a self-named dispatch, e.g.\n\
+         // `minecraft:vines`) — it is then a real member reference that must resolve\n\
+         // (an edge to itself, never an escape from the closure). All values are\n\
+         // extracted from a live Paper 26.2 load, never hand-typed.\n\n",
     );
 
     out.push_str(
@@ -262,7 +267,7 @@ fn render(
     );
 
     out.push_str(
-        "/// One reachable seed-42 biome generation setting, read directly by the\n\
+        "/// One overworld possible biome generation setting, read directly by the\n\
          /// FEATURES orchestrator. `features` holds the 11 `GenerationStep.Decoration`\n\
          /// step lists in ordinal order; holder-set order within a step is the builder's\n\
          /// fixed order (part of the decoration semantics — never sorted).\n\
@@ -275,7 +280,7 @@ fn render(
     );
 
     out.push_str(
-        "/// A reachable `minecraft:placed_feature` entry: the full-registry dense id\n\
+        "/// A `minecraft:placed_feature` entry: the full-registry dense id\n\
          /// (registry identity, never an array position) plus the `RegistryOps`-encoded\n\
          /// JSON (the datapack shape) preserving the `feature` holder reference and the\n\
          /// ordered placement-modifier chain.\n\
@@ -284,7 +289,7 @@ fn render(
          \x20   pub id: u16,\n\
          \x20   pub json: &'static str,\n\
          }\n\n\
-         /// A reachable `minecraft:configured_feature` entry: the full-registry dense id\n\
+         /// A `minecraft:configured_feature` entry: the full-registry dense id\n\
          /// plus the `RegistryOps`-encoded JSON preserving the feature `type` dispatch key\n\
          /// and the configuration verbatim.\n\
          #[derive(Clone, Copy, Debug, PartialEq, Eq)]\n\
@@ -311,8 +316,8 @@ fn render(
 fn render_biome_settings(biomes: &[BiomeSettings]) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "/// `minecraft:worldgen/biome` -> the reachable seed-42 generation settings\n\
-         /// ({} biomes, keyed by full biome name; id order).\n",
+        "/// `minecraft:worldgen/biome` -> the overworld generation settings for every\n\
+         /// possible biome ({} biomes, keyed by full biome name; id order).\n",
         biomes.len()
     ));
     out.push_str(
@@ -388,7 +393,7 @@ mod tests {
     #[test]
     fn committed_fixture_extracts_to_pinned_counts() {
         let (biomes, placed, configured) = extract(&fixture()).unwrap();
-        assert_eq!(biomes.len(), REACHABLE_BIOME_COUNT);
+        assert_eq!(biomes.len(), POSSIBLE_BIOME_COUNT);
         assert_eq!(placed.len(), PLACED_FEATURE_COUNT);
         assert_eq!(configured.len(), CONFIGURED_FEATURE_COUNT);
         // Id order is the stable render order.

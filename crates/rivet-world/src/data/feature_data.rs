@@ -4,12 +4,14 @@
 //! The feature data itself lives in the generated registry tables
 //! [`rivet_registry::generated::feature_data`] (emitted by
 //! `tools/rivet-codegen generate` from `data/feature_data.json`, provenance
-//! linked to the live Paper 26.2 load): the five reachable seed-42 biome
-//! generation settings and the placed/configured feature closure as
+//! linked to the live Paper 26.2 load): the generation settings of EVERY
+//! overworld possible biome (the full `biomeSource.possibleBiomes()` list in
+//! source order — the exact argument Paper's FeatureSorter is built from,
+//! `ChunkGenerator.java` 97-100) and the placed/configured feature closure as
 //! `RegistryOps` JSON. This module is the thin runtime read API the FEATURES
 //! orchestrator will bootstrap from — a single re-export point for the tables,
-//! with the committed-file invariants (non-vacuity, step order, registry
-//! identity, exact transitive closure) pinned as tests.
+//! with the committed-file invariants (non-vacuity, full-list coverage, step
+//! order, registry identity, exact transitive closure) pinned as tests.
 //!
 //! Deliberately out of scope (later FEATURES slices): placement modifier
 //! dispatch, feature placement bodies, `WorldGenLevel` writes, and the
@@ -57,10 +59,11 @@ mod tests {
     }
 
     /// Hostile regression for the configured-only-referenced placed feature:
-    /// `minecraft:oak_checked` is a placed feature referenced ONLY by the
-    /// configured `minecraft:trees_water` JSON under the holder key `default`
-    /// (never in any biome step list). The committed tables keep it, and this
-    /// test pins that the holder-key resolution rule used by
+    /// `minecraft:oak_checked` is a placed feature referenced by configured
+    /// features (`minecraft:trees_water`, and in the full closure also
+    /// `trees_savanna` / `trees_windswept_hills`) under the holder key
+    /// `default`, never directly in any biome step list. The committed tables
+    /// keep it, and this test pins that the holder-key resolution rule used by
     /// `committed_tables_keep_the_exact_transitive_closure` rejects a generated
     /// file that dropped it: removing `oak_checked` from the placed table leaves
     /// `trees_water`'s holder reference dangling.
@@ -121,13 +124,16 @@ mod tests {
         walk(v, "", out);
     }
 
-    /// The committed tables are non-vacuous and carry the pinned counts.
+    /// The committed tables are non-vacuous and carry the pinned counts: every
+    /// overworld possible biome (55 — the full list Paper's FeatureSorter is
+    /// built from, not just the five seed-42-reachable biomes) and the complete
+    /// transitive placed/configured-feature closure.
     #[test]
     fn tables_are_non_vacuous_with_pinned_counts() {
         assert_eq!(DECORATION_STEP_COUNT, 11);
-        assert_eq!(BIOME_GENERATION_SETTINGS_BY_NAME.len(), 5);
-        assert_eq!(PLACED_FEATURE_BY_NAME.len(), 72);
-        assert_eq!(CONFIGURED_FEATURE_BY_NAME.len(), 70);
+        assert_eq!(BIOME_GENERATION_SETTINGS_BY_NAME.len(), 55);
+        assert_eq!(PLACED_FEATURE_BY_NAME.len(), 203);
+        assert_eq!(CONFIGURED_FEATURE_BY_NAME.len(), 170);
         for (name, b) in BIOME_GENERATION_SETTINGS_BY_NAME.entries() {
             let name = *name;
             assert_eq!(
@@ -147,35 +153,95 @@ mod tests {
         }
     }
 
+    /// Full-list coverage: the previously-missing full-list head
+    /// (`minecraft:mushroom_fields`, source index 0 — the first biome that used
+    /// to fail typed `SettingsNotGenerated`) and the other formerly out-of-scope
+    /// biomes now resolve. The five seed-42-reachable biomes remain a subset of
+    /// the full possible list.
+    #[test]
+    fn full_possible_list_is_covered() {
+        // The head + the tail of the pinned `POSSIBLE_BIOMES_ORDER` (source
+        // order — order is semantics because it fixes FeatureSorter's global
+        // feature indices).
+        for name in [
+            "minecraft:mushroom_fields",
+            "minecraft:deep_frozen_ocean",
+            "minecraft:sulfur_caves",
+            "minecraft:deep_dark",
+        ] {
+            assert!(
+                BIOME_GENERATION_SETTINGS_BY_NAME.contains_key(name),
+                "full possible list must carry `{name}`"
+            );
+        }
+        // The five reachable seed-42 biomes are a subset of the 55.
+        for name in [
+            "minecraft:beach",
+            "minecraft:dark_forest",
+            "minecraft:lush_caves",
+            "minecraft:ocean",
+            "minecraft:river",
+        ] {
+            assert!(
+                BIOME_GENERATION_SETTINGS_BY_NAME.contains_key(name),
+                "reachable biome `{name}` must be present"
+            );
+        }
+    }
+
     /// The per-step lists keep the `GenerationStep.Decoration` ordinal order and
     /// the builder's holder-set order. Pinned against the live Paper 26.2 seed-42
     /// load (the fixture), which is itself drift-checked by `probe-feature-data`.
+    ///
+    /// Only the truly universal invariants are asserted for EVERY biome: step 0
+    /// (raw_generation) and step 5 (underground_ores) are universally empty, step
+    /// 10 (top_layer_modification) is universally `[freeze_top_layer]`, and the
+    /// three carvers are shared. Steps 1/2/3 vary across the full list (e.g.
+    /// `deep_dark` step 1 is empty, `sulfur_caves` step 1 has four entries, the
+    /// frozen oceans' step 2 adds icebergs, swamp/desert step 3 adds fossils) so
+    /// those per-biome contents are pinned as spot-checks below — never a shared
+    /// assertion.
     #[test]
     fn decoration_step_order_and_content_are_pinned() {
-        let shared = [
-            "minecraft:lake_lava_underground",
-            "minecraft:lake_lava_surface",
-        ];
-        let geode = ["minecraft:amethyst_geode"];
-        let monster = ["minecraft:monster_room", "minecraft:monster_room_deep"];
         for (name, b) in BIOME_GENERATION_SETTINGS_BY_NAME.entries() {
             let name = *name;
             assert!(
                 b.features[0].is_empty(),
-                "biome {name} step 0 must be empty"
+                "biome {name} step 0 (raw_generation) must be empty"
             );
-            assert_eq!(b.features[1], shared, "biome {name} step 1");
-            assert_eq!(b.features[2], geode, "biome {name} step 2");
-            assert_eq!(b.features[3], monster, "biome {name} step 3");
+            assert!(
+                b.features[5].is_empty(),
+                "biome {name} step 5 (underground_ores) must be empty"
+            );
             assert_eq!(
                 b.features[10],
                 ["minecraft:freeze_top_layer"],
                 "biome {name} step 10"
             );
         }
+
+        // Universal step-1/2/3/9 base content is NOT shared — only the direct
+        // seed-42 reachable biomes carry the canonical `[lava lakes]` step 1 and
+        // `[amethyst_geode]` step 2. The full-list head, tail, and variation
+        // biomes are pinned individually below.
+        let lava_lakes = [
+            "minecraft:lake_lava_underground",
+            "minecraft:lake_lava_surface",
+        ];
         let lush = BIOME_GENERATION_SETTINGS_BY_NAME
             .get("minecraft:lush_caves")
             .unwrap();
+        assert_eq!(lush.features[1], lava_lakes, "lush_caves step 1");
+        assert_eq!(
+            lush.features[2],
+            ["minecraft:amethyst_geode"],
+            "lush_caves step 2"
+        );
+        assert_eq!(
+            lush.features[3],
+            ["minecraft:monster_room", "minecraft:monster_room_deep"],
+            "lush_caves step 3"
+        );
         assert_eq!(
             lush.features[9],
             [
@@ -192,8 +258,105 @@ mod tests {
         );
     }
 
-    /// Registry identity survives the subset render: the dense full-registry ids
-    /// (not contiguous within the subset) and the biome ids are exact.
+    /// Per-biome step-content spot-checks across the full list's variation
+    /// surface — the cases that prove the list is genuinely full and faithful
+    /// (not the five-biome subset duplicated):
+    ///   * `mushroom_fields` (source index 0, the former blocker) — step 9 is
+    ///     the mushroom-island vegetation, not the plains/trees default;
+    ///   * `deep_frozen_ocean` — step 2 adds `iceberg_packed`/`iceberg_blue`
+    ///     before the geode, step 4 carries `blue_ice`, step 9 is ocean-ish;
+    ///   * `deep_dark` — step 1 is EMPTY (no lava lakes) and step 7 carries the
+    ///     sculk features;
+    ///   * `sulfur_caves` — step 1 has four entries (adds the sulfur springs),
+    ///     step 7 carries the sulfur spikes;
+    ///   * `swamp` — step 3 adds `fossil_upper`/`fossil_lower` (fossils!) and
+    ///     step 6 drops `ore_gold_extra`/`disk_sand` in favor of `disk_clay`;
+    ///   * `desert` — step 3 carries the same fossils (count 4) and step 4
+    ///     carries `desert_well`.
+    #[test]
+    fn full_list_step_variation_is_pinned() {
+        let get = |name: &str| BIOME_GENERATION_SETTINGS_BY_NAME.get(name).unwrap();
+        let mushroom = get("minecraft:mushroom_fields");
+        assert_eq!(
+            mushroom.features[1],
+            [
+                "minecraft:lake_lava_underground",
+                "minecraft:lake_lava_surface"
+            ]
+        );
+        assert_eq!(
+            mushroom.features[9][1..3],
+            [
+                "minecraft:mushroom_island_vegetation",
+                "minecraft:brown_mushroom_taiga"
+            ]
+        );
+        assert!(!mushroom.features[9].contains(&"minecraft:trees_water"));
+
+        let df_ocean = get("minecraft:deep_frozen_ocean");
+        assert_eq!(
+            df_ocean.features[2],
+            [
+                "minecraft:iceberg_packed",
+                "minecraft:iceberg_blue",
+                "minecraft:amethyst_geode"
+            ]
+        );
+        assert_eq!(df_ocean.features[4], ["minecraft:blue_ice"]);
+
+        let deep_dark = get("minecraft:deep_dark");
+        assert!(
+            deep_dark.features[1].is_empty(),
+            "deep_dark has no lava lakes"
+        );
+        assert_eq!(
+            deep_dark.features[7],
+            ["minecraft:sculk_vein", "minecraft:sculk_patch_deep_dark"]
+        );
+
+        let sulfur = get("minecraft:sulfur_caves");
+        assert_eq!(
+            sulfur.features[1].len(),
+            4,
+            "sulfur_caves step 1 has the sulfur springs"
+        );
+        assert_eq!(
+            sulfur.features[7],
+            ["minecraft:sulfur_spike_cluster", "minecraft:sulfur_spike"]
+        );
+
+        let swamp = get("minecraft:swamp");
+        assert_eq!(
+            swamp.features[3],
+            [
+                "minecraft:fossil_upper",
+                "minecraft:fossil_lower",
+                "minecraft:monster_room",
+                "minecraft:monster_room_deep"
+            ]
+        );
+        assert!(
+            !swamp.features[6].contains(&"minecraft:disk_sand"),
+            "swamp step 6 swaps disk_sand for disk_clay"
+        );
+
+        let desert = get("minecraft:desert");
+        assert_eq!(
+            desert.features[3],
+            [
+                "minecraft:fossil_upper",
+                "minecraft:fossil_lower",
+                "minecraft:monster_room",
+                "minecraft:monster_room_deep"
+            ]
+        );
+        assert_eq!(desert.features[4], ["minecraft:desert_well"]);
+    }
+
+    /// Registry identity survives the full-list render: the dense full-registry
+    /// ids (not contiguous within the subset) and the biome ids are exact —
+    /// including the five seed-42-reachable biomes and the full-list head/tail
+    /// that the five-biome subset never carried.
     #[test]
     fn registry_identity_is_preserved() {
         let id = |name: &str| BIOME_GENERATION_SETTINGS_BY_NAME.get(name).unwrap().id;
@@ -202,6 +365,10 @@ mod tests {
         assert_eq!(id("minecraft:lush_caves"), 30);
         assert_eq!(id("minecraft:ocean"), 35);
         assert_eq!(id("minecraft:river"), 41);
+        assert_eq!(id("minecraft:deep_dark"), 10);
+        assert_eq!(id("minecraft:deep_frozen_ocean"), 11);
+        assert_eq!(id("minecraft:mushroom_fields"), 33);
+        assert_eq!(id("minecraft:sulfur_caves"), 53);
 
         assert_eq!(
             PLACED_FEATURE_BY_NAME
@@ -219,14 +386,20 @@ mod tests {
         );
     }
 
-    /// The committed tables keep the exact transitive closure: every reference
-    /// resolves and every entry is reachable — a dead or dangling entry in a
-    /// hand-edited generated file fails here before any FEATURES pass runs.
+    /// The committed tables keep the exact transitive closure — the runtime
+    /// mirror of the codegen fixture gate's three structurally explicit checks.
+    /// Every reference resolves (typed: a placed feature's `json.feature` must
+    /// be a *configured* feature specifically; a configured feature's holder-key
+    /// ref may be placed or configured; a biome step ref must be placed) and
+    /// every entry is reachable from the biome step lists through a FORWARD
+    /// fixpoint seeded ONLY from those lists — a dead or dangling entry in a
+    /// hand-edited generated file fails here before any FEATURES pass runs, and
+    /// a disconnected mutually-referencing component no biome can reach is never
+    /// self-justifying.
     #[test]
     fn committed_tables_keep_the_exact_transitive_closure() {
-        // placed reachable  = biome step refs ∪ placed refs inside configured JSONs
-        // configured reach = placed `json.feature` refs ∪ configured refs inside
-        //                    configured JSONs (registry-membership disambiguation)
+        // Seed ONLY from the biome step lists (a stale orphan must never be
+        // self-justifying by seeding from every table entry).
         let mut placed_reachable: HashSet<String> = HashSet::new();
         for b in BIOME_GENERATION_SETTINGS_BY_NAME.values() {
             for step in b.features {
@@ -239,38 +412,61 @@ mod tests {
                 }
             }
         }
-
         let mut configured_reachable: HashSet<String> = HashSet::new();
-        for (name, p) in &PLACED_FEATURE_BY_NAME {
-            let v: Value = serde_json::from_str(p.json)
-                .unwrap_or_else(|e| panic!("placed `{name}` json is not parseable: {e}"));
-            let feature = v["feature"]
-                .as_str()
-                .unwrap_or_else(|| panic!("placed `{name}` json.feature is not a string"));
-            assert!(
-                CONFIGURED_FEATURE_BY_NAME.contains_key(feature),
-                "placed `{name}` references configured `{feature}` that is absent from the tables"
-            );
-            configured_reachable.insert(feature.to_string());
-        }
 
-        for (name, c) in &CONFIGURED_FEATURE_BY_NAME {
-            let v: Value = serde_json::from_str(c.json)
-                .unwrap_or_else(|e| panic!("configured json is not parseable: {e}"));
-            let mut bare = Vec::new();
-            collect_bare_strings(&v, &mut bare);
-            for s in bare {
-                if PLACED_FEATURE_BY_NAME.contains_key(s) {
-                    placed_reachable.insert(s.to_string());
-                }
-                if CONFIGURED_FEATURE_BY_NAME.contains_key(s) {
-                    configured_reachable.insert(s.to_string());
+        loop {
+            let mut grew = false;
+
+            // Reachable placed -> their configured-feature ref (typed: must
+            // resolve in the CONFIGURED table — a placed feature can never
+            // reference a placed feature).
+            for name in placed_reachable.clone() {
+                let p = &PLACED_FEATURE_BY_NAME[&name];
+                let v: Value = serde_json::from_str(p.json)
+                    .unwrap_or_else(|e| panic!("placed `{name}` json is not parseable: {e}"));
+                let feature = v["feature"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("placed `{name}` json.feature is not a string"));
+                assert!(
+                    CONFIGURED_FEATURE_BY_NAME.contains_key(feature),
+                    "placed `{name}` references configured `{feature}` that is absent from the \
+                     tables (a dangling or mis-typed holder reference)"
+                );
+                grew |= configured_reachable.insert(feature.to_string());
+            }
+
+            // Reachable configured -> their bare-string refs (by registry
+            // membership; a feature `type` key sharing a feature's name is a
+            // real reachability edge at capture time).
+            for name in configured_reachable.clone() {
+                let c = &CONFIGURED_FEATURE_BY_NAME[&name];
+                let v: Value = serde_json::from_str(c.json)
+                    .unwrap_or_else(|e| panic!("configured `{name}` json is not parseable: {e}"));
+                let mut bare = Vec::new();
+                collect_bare_strings(&v, &mut bare);
+                for s in bare {
+                    if PLACED_FEATURE_BY_NAME.contains_key(s) {
+                        grew |= placed_reachable.insert(s.to_string());
+                    }
+                    if CONFIGURED_FEATURE_BY_NAME.contains_key(s) {
+                        grew |= configured_reachable.insert(s.to_string());
+                    }
                 }
             }
-            // Holder-key refs (`feature`/`default`) are the extractor's encoded
-            // registry references and must resolve — the structurally explicit
-            // mirror of the codegen fixture gate's dangling-holder-ref check
-            // (membership disambiguation above is the reachability walk).
+
+            if !grew {
+                break;
+            }
+        }
+
+        // Dangling holder-key refs (`feature`/`default`) inside configured JSONs
+        // — the extractor's encoded registry references — must resolve in either
+        // table (configured holders legitimately point at both placed and
+        // configured features: `trees_water`→`oak_checked` is placed,
+        // `moss_patch`→`moss_vegetation` is configured).
+        for (name, c) in &CONFIGURED_FEATURE_BY_NAME {
+            let v: Value = serde_json::from_str(c.json)
+                .unwrap_or_else(|e| panic!("configured `{name}` json is not parseable: {e}"));
             let mut holder = Vec::new();
             collect_feature_holder_refs(&v, &mut holder);
             for s in holder {
@@ -282,7 +478,8 @@ mod tests {
             }
         }
 
-        // No dangling refs (checked inline above) and no dead entries.
+        // No dead entries: every table entry must be reachable from the biome
+        // step lists.
         for name in PLACED_FEATURE_BY_NAME.keys() {
             let name = *name;
             assert!(

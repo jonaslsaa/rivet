@@ -9,8 +9,10 @@
 //!     the biome map of its own 3x3 neighborhood, so the biome read set is chunks
 //!     1..6. The biome source is sampled at every quart position and every Y quart
 //!     (-64..319 blocks) because the depth parameter varies by Y.
-//!   * `biomes` — the full `BiomeGenerationSettings` of each reachable biome:
-//!     id, carver identity names, and the per-step placed-feature lists (step
+//!   * `biomes` — the full `BiomeGenerationSettings` of EVERY overworld possible
+//!     biome (the full `biomeSource.possibleBiomes()` list, 55 — the exact set
+//!     Paper's FeatureSorter is built from, `ChunkGenerator.java` 97-100): id,
+//!     carver identity names, and the per-step placed-feature lists (step
 //!     order = `GenerationStep.Decoration` ordinal; holder-set order preserved).
 //!   * `placed_features` / `configured_features` — the transitive closure of
 //!     referenced registry entries, each stored as its full `RegistryOps`-encoded
@@ -18,12 +20,14 @@
 //!     nested).
 //!
 //! The closure (what a future FEATURES port must be able to decode) starts from
-//! the reachable biomes' direct placed features, and grows to fixpoint over the
-//! RegistryOps-encoded JSON of every configured feature: any bare-string value
-//! that names a placed/configured registry entry is a holder reference. Placed
-//! features are never walked for nested refs (their JSON is only `{feature,
-//! placement}` — placement modifiers reference no features), so the only placed
-//! refs come from configured-feature configs (e.g. `random_selector` weights).
+//! every possible biome's direct per-step placed features — seeded from ALL 55
+//! `biomes` step lists, not just the seed-42-reachable five — and grows to
+//! fixpoint over the RegistryOps-encoded JSON of every configured feature: any
+//! bare-string value that names a placed/configured registry entry is a holder
+//! reference. Placed features are never walked for nested refs (their JSON is
+//! only `{feature, placement}` — placement modifiers reference no features), so
+//! the only placed refs come from configured-feature configs (e.g.
+//! `random_selector` weights).
 //!
 //! Output: `data/feature_data.json` (+ `data/feature_data.manifest.json`
 //! provenance), consumed by a later codegen slice that emits the Rust tables.
@@ -156,8 +160,9 @@ fn write_manifest(repo_root: &Path, output: &Path, bundler: &Path) -> Result<()>
     source.jar = canonical;
     let bytes = fs::read(output).with_context(|| format!("read {}", output.display()))?;
     let manifest = FixtureManifest {
-        generator: "WorldgenFeatureDataExtractor (seed-42 reachable-biome + feature closure)"
-            .to_string(),
+        generator:
+            "WorldgenFeatureDataExtractor (full overworld possible-biome + seed-42 feature closure)"
+                .to_string(),
         source,
         file: FixtureFile {
             bytes: bytes.len() as u64,
