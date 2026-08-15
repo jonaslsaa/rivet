@@ -109,13 +109,27 @@ const UPDATE_LIMIT: i32 = 512;
 /// is the Rust-only mutable half: Java's `setBlock` writes through the shared
 /// `ChunkAccess` reference the holder returned, which Rust cannot express
 /// without the mutable accessor.
-pub trait GenerationChunkHolderView: Send {
+///
+/// Generic over the same value types as [`ChunkAccess`] (`T` the block-state
+/// type, `B` the biome type, `S` the caller's structure key) so the worldgen
+/// executor can drive a region over its own chunk element types — the
+/// `BlockState`/`section_reconstruction::BiomeId` `ProtoChunk`s — while the
+/// server's dense `StateId`/`ServerBiomeId` region keeps its block-state
+/// methods on the specialized impl. The trait itself is lifetime-free: the
+/// borrow-carrying region (`WorldGenRegion<'a, T, B, S>`) stores each holder
+/// as `Box<dyn GenerationChunkHolderView<T, B, S> + 'a>`, so a holder that
+/// borrows a chunk (the worldgen center `ProtoChunk` the executor already
+/// owns) or owns one (the ring chunks it generated) both type-check through
+/// the same trait object.
+pub trait GenerationChunkHolderView<T, B, S>: Send
+where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send,
+{
     /// `GenerationChunkHolder.getChunkIfPresentUnchecked(ChunkStatus)` — the
     /// held chunk completed to at least `status`, if any.
-    fn get_chunk_if_present_unchecked(
-        &self,
-        status: ChunkStatus,
-    ) -> Option<&ChunkAccess<StateId, ServerBiomeId, StructureKey>>;
+    fn get_chunk_if_present_unchecked(&self, status: ChunkStatus) -> Option<&ChunkAccess<T, B, S>>;
 
     /// `GenerationChunkHolder.getPersistedStatus()` — the held chunk's status,
     /// or `None` for a holder with no chunk (Java null).
@@ -127,7 +141,7 @@ pub trait GenerationChunkHolderView: Send {
     fn get_chunk_if_present_unchecked_mut(
         &mut self,
         status: ChunkStatus,
-    ) -> Option<&mut ChunkAccess<StateId, ServerBiomeId, StructureKey>>;
+    ) -> Option<&mut ChunkAccess<T, B, S>>;
 }
 
 /// Why a `getChunk(x, z, status, loadOrGenerate)` request failed during world
@@ -205,9 +219,23 @@ impl std::fmt::Display for UnavailableChunkDiagnostic {
 /// values. The value-layer slice implements the ring/status/distance contract,
 /// the write-radius gate, and the minimal [`WorldGenLevel`] facade; the heavy
 /// server reads defer (see the module doc).
-pub struct WorldGenRegion {
+///
+/// Generic over the chunk value types `<T, B, S>` plus the holder lifetime
+/// `'a`. The pure chunk-view methods live on the generic [`impl<'a, T, B, S>`]
+/// (so the worldgen executor's borrow-carrying region can use them); the dense
+/// block-state methods and the [`WorldGenLevel`] impl live on the
+/// `StateId`/`ServerBiomeId`/`StructureKey` specialization. `'a` is the
+/// shortest lifetime the cached holders borrow — `'static` for a region over
+/// owning holders (the server value layer, and the [`WorldGenLevel`] trait's
+/// `'static` bound), a scoped borrow for the executor's center-chunk region.
+pub struct WorldGenRegion<'a, T, B, S>
+where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send,
+{
     /// `cache` — the `StaticCache2D<GenerationChunkHolder>` chunk view.
-    cache: StaticCache2D<Box<dyn GenerationChunkHolderView>>,
+    cache: StaticCache2D<Box<dyn GenerationChunkHolderView<T, B, S> + 'a>>,
     /// `center` (as `getPos()`) — the generating chunk's position.
     center_pos: ChunkPos,
     /// `centerChunkX` — the center chunk's x.
@@ -243,7 +271,12 @@ pub struct WorldGenRegion {
     registry_access: RegistryAccess,
 }
 
-impl WorldGenRegion {
+impl<'a, T, B, S> WorldGenRegion<'a, T, B, S>
+where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send,
+{
     /// `new WorldGenRegion(ServerLevel, StaticCache2D, ChunkStep, ChunkAccess)`.
     ///
     /// The `ServerLevel` seam is decomposed into the scalar values the region
@@ -255,7 +288,7 @@ impl WorldGenRegion {
     /// reference).
     #[allow(clippy::too_many_arguments)] // mirrors the Java constructor's parameter surface.
     pub fn new(
-        cache: StaticCache2D<Box<dyn GenerationChunkHolderView>>,
+        cache: StaticCache2D<Box<dyn GenerationChunkHolderView<T, B, S> + 'a>>,
         center_pos: ChunkPos,
         generating_step: ChunkStep,
         seed: i64,
@@ -305,11 +338,7 @@ impl WorldGenRegion {
     /// `WorldGenRegion.getChunk(int, int)` — the 2-arg form, targeting
     /// `ChunkStatus.EMPTY`. Panics with the unavailable-chunk diagnostic when
     /// the chunk is not available, exactly as Java throws `ReportedException`.
-    pub fn get_chunk(
-        &self,
-        chunk_x: i32,
-        chunk_z: i32,
-    ) -> &ChunkAccess<StateId, ServerBiomeId, StructureKey> {
+    pub fn get_chunk(&self, chunk_x: i32, chunk_z: i32) -> &ChunkAccess<T, B, S> {
         self.try_get_chunk(chunk_x, chunk_z, ChunkStatus::Empty, true)
             .unwrap_or_else(|diagnostic| panic!("{}", diagnostic))
     }
@@ -331,8 +360,7 @@ impl WorldGenRegion {
         chunk_z: i32,
         target_status: ChunkStatus,
         _load_or_generate: bool,
-    ) -> Result<&ChunkAccess<StateId, ServerBiomeId, StructureKey>, UnavailableChunkDiagnostic>
-    {
+    ) -> Result<&ChunkAccess<T, B, S>, UnavailableChunkDiagnostic> {
         let distance = self
             .center_pos
             .get_chessboard_distance_coords(chunk_x, chunk_z);
@@ -378,8 +406,7 @@ impl WorldGenRegion {
         chunk_z: i32,
         target_status: ChunkStatus,
         _load_or_generate: bool,
-    ) -> Result<&mut ChunkAccess<StateId, ServerBiomeId, StructureKey>, UnavailableChunkDiagnostic>
-    {
+    ) -> Result<&mut ChunkAccess<T, B, S>, UnavailableChunkDiagnostic> {
         let distance = self
             .center_pos
             .get_chessboard_distance_coords(chunk_x, chunk_z);
@@ -430,11 +457,7 @@ impl WorldGenRegion {
 
     /// `WorldGenRegion.getChunk(int, int)` mutable half — the 2-arg contract
     /// for `setBlock`.
-    fn get_chunk_mut(
-        &mut self,
-        chunk_x: i32,
-        chunk_z: i32,
-    ) -> &mut ChunkAccess<StateId, ServerBiomeId, StructureKey> {
+    fn get_chunk_mut(&mut self, chunk_x: i32, chunk_z: i32) -> &mut ChunkAccess<T, B, S> {
         self.try_get_chunk_mut(chunk_x, chunk_z, ChunkStatus::Empty, true)
             .unwrap_or_else(|diagnostic| panic!("{}", diagnostic))
     }
@@ -456,7 +479,17 @@ impl WorldGenRegion {
         self.uncached_biome_source
             .get_noise_biome(quart_x, quart_y, quart_z)
     }
+}
 
+/// The dense server specialization — the block-state methods and the
+/// [`WorldGenLevel`] facade over the server's dense chunk value types.
+///
+/// Split from the generic impl because the block-state spine is
+/// `StateId`-specific: the region's reads/writes target `StateId`/`ServerBiomeId`
+/// sections, and the [`WorldGenLevel`] trait is `'static`-bound (see the struct
+/// doc). The generic chunk-view methods the executor's borrow-carrying region
+/// needs live on [`impl<'a, T, B, S> WorldGenRegion<'a, T, B, S>`](WorldGenRegion).
+impl WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
     /// `WorldGenRegion.getFluidState(BlockPos)` — the block's fluid id, with
     /// the same outside-write-zone warning as `getBlockState`.
     ///
@@ -618,9 +651,24 @@ impl WorldGenRegion {
     pub fn get_sea_level(&self) -> i32 {
         self.sea_level
     }
+
+    /// `BlockGetter.getBlockState(BlockPos)` — the gated chunk block read.
+    ///
+    /// Inherent here (not only on the [`WorldGenLevel`] impl) because dense
+    /// methods such as [`is_state_at_position`](Self::is_state_at_position)
+    /// read it off a `&WorldGenRegion<'_, …>` whose region lifetime is not
+    /// `'static`; the trait impl (pinned to `WorldGenRegion<'static, …>`)
+    /// delegates back to this method.
+    pub fn get_block_state(&self, pos: &BlockPos) -> BlockState {
+        let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
+        let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
+        self.warn_if_read_outside_write_zone(chunk_x, chunk_z);
+        let chunk = self.get_chunk(chunk_x, chunk_z);
+        chunk_block_state(chunk, pos)
+    }
 }
 
-impl LevelHeightAccessor for WorldGenRegion {
+impl LevelHeightAccessor for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
     fn get_height(&self) -> i32 {
         self.height
     }
@@ -630,7 +678,13 @@ impl LevelHeightAccessor for WorldGenRegion {
     }
 }
 
-impl WorldGenLevel for WorldGenRegion {
+/// The `WorldGenLevel` facade over the dense specialization. The trait is
+/// `'static`-bound (`LevelHeightAccessor + Send + 'static`), so this impl pins
+/// the region to `'static` holders — the server value layer's owning-holder
+/// region. The worldgen executor's borrow-carrying region never implements the
+/// trait (it only needs the generic chunk-view methods), so its scoped borrow
+/// is not forced to outlive the worldgen objects.
+impl WorldGenLevel for WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> {
     /// `WorldGenLevel.getSeed()`.
     fn get_seed(&self) -> i64 {
         self.seed
@@ -694,11 +748,7 @@ impl WorldGenLevel for WorldGenRegion {
 
     /// `BlockGetter.getBlockState(BlockPos)` — the gated chunk block read.
     fn get_block_state(&self, pos: &BlockPos) -> BlockState {
-        let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
-        let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
-        self.warn_if_read_outside_write_zone(chunk_x, chunk_z);
-        let chunk = self.get_chunk(chunk_x, chunk_z);
-        chunk_block_state(chunk, pos)
+        WorldGenRegion::get_block_state(self, pos)
     }
 
     /// `LevelReader.getBiome(BlockPos)` — `getBiomeManager().getBiome(pos)`
@@ -865,6 +915,107 @@ fn state_is_special_colliding(_state: &StateId) -> bool {
     false
 }
 
+/// A [`GenerationChunkHolderView`] that borrows a chunk — the worldgen
+/// executor's center-chunk adapter.
+///
+/// The executor owns the generating `ProtoChunk` and hands its `&mut` to the
+/// FEATURES body, which borrows it into a region through this adapter instead
+/// of cloning or moving it. `status` is captured at construction: the concrete
+/// `ProtoChunk` carries the persisted status the base `ChunkAccess` does not,
+/// and the region reads it back from the holder seam.
+pub struct CenterHolder<'a, T, B, S>
+where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send,
+{
+    chunk: &'a mut ChunkAccess<T, B, S>,
+    status: ChunkStatus,
+}
+
+impl<'a, T, B, S> CenterHolder<'a, T, B, S>
+where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send,
+{
+    pub fn new(chunk: &'a mut ChunkAccess<T, B, S>, status: ChunkStatus) -> Self {
+        CenterHolder { chunk, status }
+    }
+}
+
+impl<T, B, S> GenerationChunkHolderView<T, B, S> for CenterHolder<'_, T, B, S>
+where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send,
+{
+    fn get_chunk_if_present_unchecked(&self, status: ChunkStatus) -> Option<&ChunkAccess<T, B, S>> {
+        self.status.is_or_after(status).then_some(&*self.chunk)
+    }
+
+    fn get_persisted_status(&self) -> Option<ChunkStatus> {
+        Some(self.status)
+    }
+
+    fn get_chunk_if_present_unchecked_mut(
+        &mut self,
+        status: ChunkStatus,
+    ) -> Option<&mut ChunkAccess<T, B, S>> {
+        self.status.is_or_after(status).then_some(&mut *self.chunk)
+    }
+}
+
+/// A [`GenerationChunkHolderView`] that owns a chunk — the worldgen executor's
+/// ring-chunk adapter.
+///
+/// The executor generates the ring `ProtoChunk`s through CARVERS and moves each
+/// base [`ChunkAccess`] in here (the region reads the base only; the concrete
+/// chunk stays behind). `status` is captured at construction (see
+/// [`CenterHolder`]).
+pub struct OwnedHolder<T, B, S>
+where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send,
+{
+    chunk: ChunkAccess<T, B, S>,
+    status: ChunkStatus,
+}
+
+impl<T, B, S> OwnedHolder<T, B, S>
+where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send,
+{
+    pub fn new(chunk: ChunkAccess<T, B, S>, status: ChunkStatus) -> Self {
+        OwnedHolder { chunk, status }
+    }
+}
+
+impl<T, B, S> GenerationChunkHolderView<T, B, S> for OwnedHolder<T, B, S>
+where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send,
+{
+    fn get_chunk_if_present_unchecked(&self, status: ChunkStatus) -> Option<&ChunkAccess<T, B, S>> {
+        self.status.is_or_after(status).then_some(&self.chunk)
+    }
+
+    fn get_persisted_status(&self) -> Option<ChunkStatus> {
+        Some(self.status)
+    }
+
+    fn get_chunk_if_present_unchecked_mut(
+        &mut self,
+        status: ChunkStatus,
+    ) -> Option<&mut ChunkAccess<T, B, S>> {
+        self.status.is_or_after(status).then_some(&mut self.chunk)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -904,47 +1055,12 @@ mod tests {
         )
     }
 
-    /// A test holder — a single chunk at a persisted status.
-    struct TestHolder {
-        chunk: ChunkAccess<StateId, ServerBiomeId, StructureKey>,
-        status: ChunkStatus,
-    }
-
-    impl TestHolder {
-        fn new(
-            chunk: ChunkAccess<StateId, ServerBiomeId, StructureKey>,
-            status: ChunkStatus,
-        ) -> Self {
-            TestHolder { chunk, status }
-        }
-    }
-
-    impl GenerationChunkHolderView for TestHolder {
-        fn get_chunk_if_present_unchecked(
-            &self,
-            status: ChunkStatus,
-        ) -> Option<&ChunkAccess<StateId, ServerBiomeId, StructureKey>> {
-            self.status.is_or_after(status).then_some(&self.chunk)
-        }
-
-        fn get_persisted_status(&self) -> Option<ChunkStatus> {
-            Some(self.status)
-        }
-
-        fn get_chunk_if_present_unchecked_mut(
-            &mut self,
-            status: ChunkStatus,
-        ) -> Option<&mut ChunkAccess<StateId, ServerBiomeId, StructureKey>> {
-            self.status.is_or_after(status).then_some(&mut self.chunk)
-        }
-    }
-
     /// A test holder with no chunk held (Java `GenerationChunkHolder` whose
     /// `getPersistedStatus()` returns null) — exercises the in-ring diagnostic
     /// branch that has no actual status to report.
     struct TestEmptyHolder;
 
-    impl GenerationChunkHolderView for TestEmptyHolder {
+    impl GenerationChunkHolderView<StateId, ServerBiomeId, StructureKey> for TestEmptyHolder {
         fn get_chunk_if_present_unchecked(
             &self,
             _status: ChunkStatus,
@@ -975,8 +1091,9 @@ mod tests {
         }
     }
 
-    /// A feature-step region over the injected empty access.
-    fn feature_region() -> WorldGenRegion {
+    /// A feature-step region over the injected empty access — a `'static`
+    /// owning-holder region (the [`WorldGenLevel`] shape).
+    fn feature_region() -> WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> {
         region_with_access(RegistryAccess::empty())
     }
 
@@ -985,7 +1102,9 @@ mod tests {
     /// STRUCTURE_STARTS x7]` (rings 0..8), write radius 1 — with every ring
     /// chunk present at its ring's allowed status. `cache` is a
     /// `2 * 8 + 1 = 17`-square centered on (0, 0), covering all nine rings.
-    fn region_with_access(registry_access: RegistryAccess) -> WorldGenRegion {
+    fn region_with_access(
+        registry_access: RegistryAccess,
+    ) -> WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> {
         let step = GENERATION_PYRAMID
             .get_step_to(ChunkStatus::Features)
             .clone();
@@ -993,8 +1112,8 @@ mod tests {
         let cache = StaticCache2D::create(0, 0, 8, &|x, z| {
             let distance = ChunkPos::new(0, 0).get_chessboard_distance_coords(x, z);
             let status = deps[distance.min(deps.len() as i32 - 1) as usize];
-            Box::new(TestHolder::new(test_chunk(ChunkPos::new(x, z)), status))
-                as Box<dyn GenerationChunkHolderView>
+            Box::new(OwnedHolder::new(test_chunk(ChunkPos::new(x, z)), status))
+                as Box<dyn GenerationChunkHolderView<StateId, ServerBiomeId, StructureKey>>
         });
         WorldGenRegion::new(
             cache,
@@ -1167,7 +1286,8 @@ mod tests {
             .get_step_to(ChunkStatus::Features)
             .clone();
         let cache = StaticCache2D::create(0, 0, 1, &|_x, _z| {
-            Box::new(TestEmptyHolder) as Box<dyn GenerationChunkHolderView>
+            Box::new(TestEmptyHolder)
+                as Box<dyn GenerationChunkHolderView<StateId, ServerBiomeId, StructureKey>>
         });
         let region = WorldGenRegion::new(
             cache,
@@ -1371,12 +1491,14 @@ mod tests {
     fn set_block_trait_form_delegates_with_the_level_writer_default() {
         let mut region = feature_region();
         let inside = BlockPos::new(2, 64, 3);
-        assert!(<WorldGenRegion as WorldGenLevel>::set_block(
-            &mut region,
-            &inside,
-            BlockState::new(StateId(1)),
-            UPDATE_ALL as u32
-        ));
+        assert!(
+            <WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_block(
+                &mut region,
+                &inside,
+                BlockState::new(StateId(1)),
+                UPDATE_ALL as u32
+            )
+        );
         assert_eq!(
             region.get_block_state(&inside),
             BlockState::new(StateId(1)),
@@ -1384,12 +1506,14 @@ mod tests {
         );
 
         let outside = BlockPos::new(33, 64, 0); // chunk (2, 0), outside the write radius
-        assert!(!<WorldGenRegion as WorldGenLevel>::set_block(
-            &mut region,
-            &outside,
-            BlockState::new(StateId(1)),
-            UPDATE_ALL as u32
-        ));
+        assert!(
+            !<WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_block(
+                &mut region,
+                &outside,
+                BlockState::new(StateId(1)),
+                UPDATE_ALL as u32
+            )
+        );
         assert_eq!(
             region.get_block_state(&outside),
             BlockState::new(StateId(0)),
