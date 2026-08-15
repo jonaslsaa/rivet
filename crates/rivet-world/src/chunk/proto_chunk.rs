@@ -250,6 +250,14 @@ where
         self.base.get_or_create_heightmap_unprimed(ty)
     }
 
+    /// `Heightmap.primeHeightmaps(this, types)` — Java
+    /// `ChunkStatusTasks.generateFeatures` primes the four `FINAL_HEIGHTMAPS`
+    /// before it constructs the bounded `WorldGenRegion` (the decoration bodies
+    /// read them).
+    pub fn prime_heightmaps(&mut self, types: &[Types]) {
+        self.base.prime_heightmaps(types);
+    }
+
     /// The worldgen `doFill` per-block write (see
     /// [`ChunkAccess::write_worldgen_block`]).
     #[allow(clippy::too_many_arguments)] // the 5 coords/state + the 5 `BlockBehaviour` predicates.
