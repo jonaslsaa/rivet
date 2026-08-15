@@ -58,18 +58,21 @@
 //! fails loudly with [`GeneratedChunkError::InstallRequiresFull`] instead of
 //! fabricating a FULL chunk or falling back to superflat.
 //!
-//! ## The deferred `GenerationChunkHolderView` seam
+//! ## The `GenerationChunkHolderView` seam
 //!
-//! The `WorldGenRegion` view contract is typed to the server's dense chunk
-//! (`ChunkAccess<StateId, ServerBiomeId, StructureKey>`); the worldgen chunk
-//! carries `BlockState` + `section_reconstruction::BiomeId`. Bridging them is
-//! the `ChunkAccess::map_values` conversion, which consumes the chunk and is
-//! wired only from FULL reconstructions (`LevelChunk::from_bridge`) — a sub-FULL
-//! `ProtoChunk` has no such path, so the holder intentionally does not
-//! implement the view trait (RivetTodo #185: the status executor that completes
-//! a chunk to FULL and bridges it lands with the `.chunk.generator` pipeline
-//! unit). The holder hands out the chunk's status and typed generation results
-//! instead.
+//! The `WorldGenRegion` view contract is generic over the chunk value types
+//! (`GenerationChunkHolderView<T, B, S>`), so the worldgen executor's region
+//! (`BlockState`/`section_reconstruction::BiomeId`) uses the generic chunk-view
+//! methods while the dense server region keeps its block-state `WorldGenLevel`
+//! facade on the `StateId`/`ServerBiomeId`/`StructureKey` specialization. The
+//! FEATURES body composes its bounded 3x3 region through [`CenterHolder`] (which
+//! borrows the center chunk's base) and [`OwnedHolder`] (which owns the eight
+//! ring chunks) — see [`compose_feature_region`]. What still defers (RivetTodo
+//! #185) is the FULL-reconstruction bridge: `ChunkAccess::map_values` is wired
+//! only from `LevelChunk::from_bridge`, so a sub-FULL `ProtoChunk` still cannot
+//! be converted into the dense server chunk and never enters the ChunkMap
+//! authority ([`GenerationChunkHolder::to_level_chunk`] fails loudly instead).
+//! The holder hands out the chunk's status and typed generation results too.
 //!
 //! Ownership follows OWNERSHIP.md: the generator/biome source are immutable
 //! per-world config shared by `Arc` (no `Arc<RwLock>` game state — the only
@@ -398,14 +401,17 @@ impl GenerationChunkHolder {
     /// CARVERS body runs the real `applyCarvers` (the overworld-carvers
     /// center-chunk loop — see the noisegen driver's doc for the deferred
     /// `WorldGenRegion`/`StructureManager` seams); the FEATURES body starts
-    /// Java's `ChunkStatusTasks.generateFeatures` — it runs
-    /// `addVanillaDecorations`'s region-free prologue (the four
-    /// `FINAL_HEIGHTMAPS` and the decoration-seed derivation) and then fails
-    /// typed at the first genuinely unavailable dependency: the 3x3
-    /// biome-union gather, whose `level.getChunk` reads go through the bounded
-    /// `WorldGenRegion`'s `StaticCache2D` neighbor-chunk cache the holder
-    /// neither owns nor implements the view trait for (the deferred
-    /// `GenerationChunkHolderView` seam — see the module doc).
+    /// Java's `ChunkStatusTasks.generateFeatures` — `run_biome_decoration`
+    /// runs `addVanillaDecorations` faithfully: the `FINAL_HEIGHTMAPS`
+    /// priming, the decoration-seed derivation, a bounded region-backed 3x3
+    /// composition (`compose_feature_region`: a `WorldGenRegion` that borrows
+    /// the center chunk and owns eight ring chunks generated EMPTY→CARVERS
+    /// through the same real bodies the other closures wire, laid out in
+    /// `StaticCache2D` row-major order), and the Paper-order biome-union
+    /// gather + `retainAll` — and then fails typed at
+    /// `resolve_feature_settings` (`GenError::SettingsNotGenerated`) on the
+    /// FULL possible-biome list's first biome without generated settings
+    /// (seed-42: `minecraft:mushroom_fields`); the chunk stays CARVERS.
     pub fn new(pos: ChunkPos, generator: Arc<OverworldGenerator>) -> Self {
         let height_accessor = create_height_accessor(
             generator.generator().get_min_y(),
