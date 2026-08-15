@@ -311,11 +311,12 @@ fn render(
         "ConfiguredFeatureEntry",
     ));
     // The section renderers end each section with `};\n\n` (the blank line
-    // separates the sections that follow); the final section must end with a
-    // single trailing newline to stay byte-idempotent with the committed
-    // golden artifact (rustfmt collapses the final blank line).
-    let out = out.trim_end().to_string();
-    out + "\n"
+    // separates the sections); the final section must end with a single
+    // trailing newline so the raw `generate` output is byte-identical to the
+    // committed (rustfmt'd) golden.
+    out.truncate(out.trim_end().len());
+    out.push('\n');
+    out
 }
 
 fn render_biome_settings(biomes: &[BiomeSettings]) -> String {
