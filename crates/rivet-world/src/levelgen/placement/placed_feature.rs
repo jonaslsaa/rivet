@@ -291,18 +291,21 @@ mod tests {
         }
     }
 
-    /// The `count` modifier the fixture reuses (identity-only; never dispatched).
-    /// `PlacementModifierType.COUNT` is insertion index 5 in
-    /// `PlacementModifierType.java`'s registration order.
+    /// The `count` modifier the fixture reuses — a real `CountPlacement`
+    /// (`PlacementModifierType.COUNT`, insertion index 5 in
+    /// `PlacementModifierType.java`'s registration order), so any pipeline path
+    /// that dispatches it reaches the wired `#181` leaf.
     fn count_modifier() -> Arc<dyn ErasedPlacementModifier> {
-        Arc::new(IdentityModifier(PlacementModifierTypeId::new(
-            5,
-            "minecraft:count",
-        )))
+        Arc::new(CountPlacement::of_value(1))
     }
 
-    use crate::levelgen::placement::placement_modifier_type::PlacementModifierTypeId;
-    use crate::levelgen::placement::{PlacementContext, PlacementModifier};
+    use crate::levelgen::feature::configurations::RandomBooleanFeatureConfiguration;
+    use crate::levelgen::feature::registry_keys::{CONFIGURED_FEATURE, PLACED_FEATURE};
+    use crate::levelgen::placement::{CountPlacement, InSquarePlacement, PlacementModifierTypeId};
+    use rivet_registry::Identifier;
+    use rivet_registry::access::RegistryAccess;
+    use rivet_registry::root::AnyBox;
+    use rivet_util::random::{LegacyPositionalRandomFactory, LegacyRandomSource};
 
     /// The `worldgen/configured_feature` registry key — the configured-feature
     /// registry a `Holder::Reference` resolves through.
@@ -345,24 +348,6 @@ mod tests {
             &self,
         ) -> Box<dyn Iterator<Item = Holder<ConfiguredFeatureErased>> + '_> {
             Box::new(std::iter::once(Holder::reference(self.0, self.1)))
-        }
-    }
-
-    #[derive(Debug)]
-    struct IdentityModifier(PlacementModifierTypeId);
-
-    impl PlacementModifier for IdentityModifier {
-        fn get_positions<'a, R: RandomSource>(
-            &'a self,
-            _context: &PlacementContext,
-            _random: &mut R,
-            _origin: &BlockPos,
-        ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
-            Box::new(std::iter::empty())
-        }
-
-        fn type_id(&self) -> PlacementModifierTypeId {
-            self.0.clone()
         }
     }
 
@@ -544,6 +529,261 @@ mod tests {
         assert_eq!(debug_a, debug_b);
     }
 
+    /// The two-registry access the selector feature resolves its placed/
+    /// configured-feature holders through — frozen empty configured/placed
+    /// registries (the composed chain's placed branches are inline `Direct`
+    /// holders, so nothing resolves by id). The same access shape
+    /// `feature::test_support::access` builds (that module is `#[cfg(test)]`-
+    /// private to the `feature` unit).
+    fn two_registry_access() -> RegistryAccess {
+        let configured = RegistryBuilder::new(&*CONFIGURED_FEATURE).freeze();
+        let placed = RegistryBuilder::new(&*PLACED_FEATURE).freeze();
+        RegistryAccess::from_pairs(vec![
+            (
+                rivet_registry::ResourceKey::create_registry_key(
+                    Identifier::with_default_namespace("worldgen/configured_feature"),
+                ),
+                Box::new(configured) as AnyBox,
+            ),
+            (
+                rivet_registry::ResourceKey::create_registry_key(
+                    Identifier::with_default_namespace("worldgen/placed_feature"),
+                ),
+                Box::new(placed) as AnyBox,
+            ),
+        ])
+    }
+
+    /// An inline placed feature wrapping the `minecraft:no_op` configured leaf
+    /// (id 0) — returns `true` without drawing, so the selector's own
+    /// `nextBoolean` is the only RNG the branch contributes.
+    fn no_op_placed() -> Holder<PlacedFeature> {
+        Holder::direct(PlacedFeature::new(
+            Holder::direct(no_op_feature()),
+            Vec::new(),
+        ))
+    }
+
+    /// The placed feature the composed-chain test drives: a
+    /// `minecraft:random_boolean_selector` configured feature (id 55, both
+    /// branches the no-op placed leaf) scattered by
+    /// `[minecraft:count, minecraft:in_square]`.
+    fn chain_placed(count: i32) -> PlacedFeature {
+        let selector = ConfiguredFeatureErased {
+            feature: FeatureId::new(55),
+            config: Arc::new(RandomBooleanFeatureConfiguration::new(
+                no_op_placed(),
+                no_op_placed(),
+            )),
+        };
+        PlacedFeature::new(
+            Holder::direct(selector),
+            vec![
+                Arc::new(CountPlacement::of_value(count)) as Arc<dyn ErasedPlacementModifier>,
+                Arc::new(InSquarePlacement::spread()),
+            ],
+        )
+    }
+
+    /// The RNG draws the composed-chain tests pin: `InSquarePlacement`'s two
+    /// `nextInt(16)` and the selector's `nextBoolean`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ChainCall {
+        IntBound(i32),
+        Boolean,
+    }
+
+    /// A `RandomSource` wrapper recording the chain's draws in order — pins the
+    /// exact depth-first interleaving (per-position in_square draws then the
+    /// selector's boolean) rather than an eager two-phase expansion.
+    struct ChainRandom {
+        inner: LegacyRandomSource,
+        calls: Vec<ChainCall>,
+    }
+
+    impl ChainRandom {
+        fn new(seed: i64) -> ChainRandom {
+            ChainRandom {
+                inner: LegacyRandomSource::new(seed),
+                calls: Vec::new(),
+            }
+        }
+    }
+
+    impl rivet_util::RandomSource for ChainRandom {
+        type Positional = LegacyPositionalRandomFactory;
+
+        fn fork(&mut self) -> Self {
+            ChainRandom {
+                inner: self.inner.fork(),
+                calls: self.calls.clone(),
+            }
+        }
+
+        fn fork_positional(&mut self) -> Self::Positional {
+            self.inner.fork_positional()
+        }
+
+        fn set_seed(&mut self, seed: i64) {
+            self.inner.set_seed(seed);
+        }
+
+        fn next_int(&mut self) -> i32 {
+            self.inner.next_int()
+        }
+
+        fn next_int_bound(&mut self, bound: i32) -> i32 {
+            self.calls.push(ChainCall::IntBound(bound));
+            self.inner.next_int_bound(bound)
+        }
+
+        fn next_long(&mut self) -> i64 {
+            self.inner.next_long()
+        }
+
+        fn next_boolean(&mut self) -> bool {
+            self.calls.push(ChainCall::Boolean);
+            self.inner.next_boolean()
+        }
+
+        fn next_float(&mut self) -> f32 {
+            self.inner.next_float()
+        }
+
+        fn next_double(&mut self) -> f64 {
+            self.inner.next_double()
+        }
+
+        fn next_gaussian(&mut self) -> f64 {
+            self.inner.next_gaussian()
+        }
+    }
+
+    #[test]
+    fn composed_chain_interleaves_draws_per_position() {
+        // The depth-first walk behind `placeWithContext` interleaves the RNG
+        // draws of successive chain stages per upstream position, exactly like
+        // Java's lazy `flatMap` + `forEach`:
+        //
+        //   [count(2), in_square] -> random_boolean_selector (id 55)
+        //
+        // For each of the two count positions the walk draws the in_square
+        // `nextInt(16)` pair, then places — the selector draws its
+        // `nextBoolean` and (resolving its inline Direct no-op branches) returns
+        // true. The recorded order is therefore
+        //
+        //   IntBound(16), IntBound(16), Boolean,   // position 1
+        //   IntBound(16), IntBound(16), Boolean,   // position 2
+        //
+        // An eager two-phase expansion (all in_square offsets first, then all
+        // placements) would record IntBound x4 then Boolean x2 — this pins the
+        // per-position interleaving and the absence of eager collection drift in
+        // one exact sequence.
+        let placed = chain_placed(2);
+        let lookup = configured_feature_lookup(Vec::new());
+        let mut level = AccessLevel(two_registry_access());
+        let generator = NoopGenerator;
+        let mut random = ChainRandom::new(42);
+        let placed_any = placed.place(
+            &lookup,
+            &mut level,
+            &generator,
+            &mut random,
+            &BlockPos::new(0, 0, 0),
+        );
+        assert!(
+            placed_any,
+            "the no-op selector branches should have been placed"
+        );
+        assert_eq!(
+            random.calls,
+            vec![
+                ChainCall::IntBound(16),
+                ChainCall::IntBound(16),
+                ChainCall::Boolean,
+                ChainCall::IntBound(16),
+                ChainCall::IntBound(16),
+                ChainCall::Boolean,
+            ]
+        );
+    }
+
+    #[test]
+    fn composed_chain_multiplicity_matches_the_count() {
+        // `count(3)` multiplies the whole downstream chain: three positions,
+        // each pulling its own in_square pair then the selector's boolean —
+        // Java's `IntStream.range(0, count)` flatMap, not a single shared draw
+        // phase. Pins the count multiplicity end-to-end through the full walk.
+        let placed = chain_placed(3);
+        let lookup = configured_feature_lookup(Vec::new());
+        let mut level = AccessLevel(two_registry_access());
+        let generator = NoopGenerator;
+        let mut random = ChainRandom::new(0);
+        let placed_any = placed.place(
+            &lookup,
+            &mut level,
+            &generator,
+            &mut random,
+            &BlockPos::new(0, 0, 0),
+        );
+        assert!(placed_any);
+        assert_eq!(random.calls.len(), 9);
+        assert_eq!(
+            random
+                .calls
+                .iter()
+                .filter(|c| **c == ChainCall::Boolean)
+                .count(),
+            3
+        );
+        assert!(
+            random.calls.chunks_exact(3).all(|triple| triple
+                == [
+                    ChainCall::IntBound(16),
+                    ChainCall::IntBound(16),
+                    ChainCall::Boolean
+                ]),
+            "each position must draw its in_square pair before its boolean, got {:?}",
+            random.calls
+        );
+    }
+
+    /// A `WorldGenLevel` double carrying the two-registry `RegistryAccess` the
+    /// selector feature resolves its placed/configured holders through — the
+    /// `registry_access` seam is the only world surface the composed chain
+    /// touches (`get_block_state` is never reached: the no-op leaves return
+    /// without reading).
+    struct AccessLevel(RegistryAccess);
+
+    impl crate::level::height_accessor::LevelHeightAccessor for AccessLevel {
+        fn get_height(&self) -> i32 {
+            384
+        }
+        fn get_min_y(&self) -> i32 {
+            -64
+        }
+    }
+
+    impl crate::level::WorldGenLevel for AccessLevel {
+        fn get_seed(&self) -> i64 {
+            0
+        }
+
+        fn get_block_state(
+            &self,
+            _pos: &rivet_registry::core::BlockPos,
+        ) -> rivet_registry::block_state::BlockState {
+            // RivetTodo(#399): no real world-access implementation is present —
+            // the state-testing predicates surface the unavailable capability
+            // explicitly (see `StateTestingPredicate::test`).
+            panic!("WorldGenLevel.getBlockState is not implemented (RivetTodo #399)")
+        }
+
+        fn registry_access(&self) -> RegistryAccess {
+            self.0.clone()
+        }
+    }
+
     /// A minimal `WorldGenLevel`/`ChunkGenerator` double over the overworld
     /// window, used by the `place`-reachability tests.
     struct TestLevel;
@@ -583,13 +823,20 @@ mod tests {
         }
     }
 
-    /// The panic payload, as `&str` if it was a format-string `panic!`.
+    /// The panic payload, as `&str` if it was a format-string `panic!`. A
+    /// `panic!` with a bare literal yields a `&'static str` payload; one with
+    /// format arguments yields a `String` — both are recovered.
     fn panic_message<T>(result: std::thread::Result<T>) -> String {
         match result {
             Ok(_) => panic!("expected a panic, got Ok"),
             Err(payload) => payload
                 .downcast_ref::<String>()
                 .cloned()
+                .or_else(|| {
+                    payload
+                        .downcast_ref::<&'static str>()
+                        .map(|s| s.to_string())
+                })
                 .unwrap_or_else(|| format!("{:?}", payload)),
         }
     }
@@ -625,59 +872,50 @@ mod tests {
     }
 
     #[test]
-    fn place_reaches_the_modifier_dispatch_stub() {
-        // The walk expands the origin through the first modifier and stops at
-        // the #181 dispatch STUB, which panics (as documented there). This pins
-        // that the pipeline is wired end-to-end (`place` -> `place_with_context`
-        // -> `place_walk` -> `placement_get_positions`); the depth-first
-        // interleaving the walk performs is not observable until #181 wires
-        // both dispatch points (feature placement panics too). A `Direct` holder
+    fn place_walks_the_count_modifier_to_a_placed_feature() {
+        // The full pipeline is wired end-to-end: `place` -> `place_with_context`
+        // -> `place_walk` -> `placement_get_positions` (dispatching the real
+        // `CountPlacement` leaf, id 5) -> `feature.place` (the no-op feature
+        // id 0, which returns true without touching the level).
+        // `CountPlacement::of_value(1)` yields the origin once, so the walk
+        // places exactly one position and reports `true`. A `Direct` holder
         // resolves without touching the lookup, so an empty lookup suffices.
         let placed = PlacedFeature::new(Holder::direct(no_op_feature()), vec![count_modifier()]);
         let lookup = configured_feature_lookup(Vec::new());
         let mut level = TestLevel;
         let generator = NoopGenerator;
         let mut random = rivet_util::random::LegacyRandomSource::new(42);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            placed.place(
-                &lookup,
-                &mut level,
-                &generator,
-                &mut random,
-                &BlockPos::new(0, 0, 0),
-            )
-        }));
-        let msg = panic_message(result);
-        assert!(
-            msg.contains("placement modifier"),
-            "expected the #181 dispatch panic, got: {msg}"
+        let placed_any = placed.place(
+            &lookup,
+            &mut level,
+            &generator,
+            &mut random,
+            &BlockPos::new(0, 0, 0),
         );
+        assert!(placed_any, "the no-op feature should have been placed");
     }
 
     #[test]
     fn place_with_biome_check_resolves_a_bound_reference() {
         // `placeWithBiomeCheck` threads the same lookup: a `Reference` to a
-        // bound id resolves through the lookup before the modifier dispatch
-        // (which then panics as the #181 stub).
+        // bound id resolves through the lookup, then the walk dispatches the
+        // `CountPlacement` leaf and places the resolved no-op feature (id 0).
         let lookup = configured_feature_lookup(vec![no_op_feature()]);
         let registry_id = lookup.registry_id();
         let placed = PlacedFeature::new(Holder::reference(registry_id, 0), vec![count_modifier()]);
         let mut level = TestLevel;
         let generator = NoopGenerator;
         let mut random = rivet_util::random::LegacyRandomSource::new(42);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            placed.place_with_biome_check(
-                &lookup,
-                &mut level,
-                &generator,
-                &mut random,
-                &BlockPos::new(0, 0, 0),
-            )
-        }));
-        let msg = panic_message(result);
+        let placed_any = placed.place_with_biome_check(
+            &lookup,
+            &mut level,
+            &generator,
+            &mut random,
+            &BlockPos::new(0, 0, 0),
+        );
         assert!(
-            msg.contains("placement modifier"),
-            "expected the #181 dispatch panic after resolving the reference, got: {msg}"
+            placed_any,
+            "the resolved reference's no-op feature should have been placed"
         );
     }
 }

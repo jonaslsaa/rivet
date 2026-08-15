@@ -5,6 +5,10 @@
 //!   bundler jar into `data/block_states.json`
 //! - `generate` — read that JSON and emit Rust registry source into
 //!   `crates/rivet-registry/src/generated/` (committed, feature-gated)
+//! - `extract-feature-data` — dump the deterministic seed-42 feature-data
+//!   foundation (reachable biomes + biome generation settings + the placed /
+//!   configured feature closure) from a live Paper load into
+//!   `data/feature_data.json`
 //! - `reports` — run the vanilla `net.minecraft.data.Main --reports` datagen
 //!   against the materialized Paper 26.2 jar and pin `packets.json`,
 //!   `registries.json`, `blocks.json` with provenance in `data/reports/`
@@ -17,7 +21,10 @@ mod block_states;
 mod extract;
 mod extract_biomes_tags;
 mod extract_block_behaviors;
+mod extract_feature_data;
 mod extract_worldgen;
+mod feature_data;
+mod feature_tables;
 mod generate;
 mod model;
 mod mth_gen;
@@ -25,6 +32,7 @@ mod packets;
 mod probe_biomes_tags;
 mod probe_block_behaviors;
 mod probe_block_states;
+mod probe_feature_data;
 mod probe_worldgen;
 mod registries;
 mod registry_data;
@@ -93,6 +101,15 @@ fn main() -> Result<()> {
             let bundler = flag(&args, "--bundler");
             probe_worldgen::run(bundler)
         }
+        Some("extract-feature-data") => {
+            let bundler = flag(&args, "--bundler");
+            let output = flag(&args, "--output");
+            extract_feature_data::run(bundler, output)
+        }
+        Some("probe-feature-data") => {
+            let bundler = flag(&args, "--bundler");
+            probe_feature_data::run(bundler)
+        }
         Some("reports") => {
             let jar = flag(&args, "--jar");
             let output = flag(&args, "--output");
@@ -122,7 +139,7 @@ fn print_usage() {
         "rivet-codegen — vanilla data extraction + registry codegen\n\
          \n\
          USAGE:\n\
-         \x20   rivet-codegen <extract|generate|registries|mth-gen|probe-block-states|extract-biomes-tags|probe-biomes-tags|extract-block-behaviors|probe-block-behaviors|extract-worldgen|probe-worldgen|reports> [flags]\n\
+         \x20   rivet-codegen <extract|generate|registries|mth-gen|probe-block-states|extract-biomes-tags|probe-biomes-tags|extract-block-behaviors|probe-block-behaviors|extract-worldgen|probe-worldgen|extract-feature-data|probe-feature-data|reports> [flags]\n\
          \n\
          SUBCOMMANDS:\n\
          \x20   extract   Extract the block registry + block states from the Paper 26.2\n\
@@ -179,6 +196,16 @@ fn print_usage() {
          \x20             byte-identity with the committed data/worldgen.json, plus the anchor\n\
          \x20             counts (noise 63, biome 66, presets 2, nether 5, overworld 7594\n\
          \x20             points), issue #354. Flags: --bundler <path>\n\
+         \x20   extract-feature-data  Dump the deterministic seed-42 feature-data foundation (reachable\n\
+         \x20             biomes over the committed grid's decoration context, their full biome\n\
+         \x20             generation settings, and the transitive placed/configured feature closure\n\
+         \x20             as RegistryOps JSON) from a live Paper load into data/feature_data.json\n\
+         \x20             (+ provenance manifest), seed-42 FEATURES checkpoint. Flags: --bundler <path>\n\
+         \x20                     --output <path>   output JSON (default data/feature_data.json)\n\
+         \x20   probe-feature-data  Re-run the feature-data extractor against the real Paper jar and require\n\
+         \x20             byte-identity with the committed data/feature_data.json, plus the anchor\n\
+         \x20             counts (5 reachable biomes, 72 placed, 70 configured), the paper pin, and\n\
+         \x20             non-vacuity. Flags: --bundler <path>\n\
          \x20   reports   Run the vanilla net.minecraft.data.Main --reports datagen against the\n\
          \x20             materialized Paper 26.2 server jar and pin packets.json, registries.json,\n\
          \x20             blocks.json with provenance under data/reports/.\n\

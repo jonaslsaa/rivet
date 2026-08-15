@@ -21,6 +21,10 @@
 //!   `SpawnerData`/`MobSpawnCost` records.
 //! - [`biome_manager`] — the fiddled-distance corner interpolation over the
 //!   `NoiseBiomeSource`, `obfuscateSeed`, and `CHUNK_CENTER_QUART`.
+//! - [`feature_sorter`] — `FeatureSorter.buildFeaturesPerStep` (the DFS
+//!   topological sort over the per-biome feature-step lists) plus
+//!   `StepFeatureData`/`indexMapping`, the per-step feature list + identity
+//!   index mapping the biome decoration pass feeds `setFeatureSeed` with.
 //!
 //! The `mc.world.level.biome.data`/`.source` units build on top of this core.
 
@@ -40,6 +44,7 @@ pub mod biome_special_effects;
 pub mod biomes;
 pub mod checkerboard_column_biome_source;
 pub mod climate;
+pub mod feature_sorter;
 pub mod fixed_biome_source;
 pub mod generated_biome_source;
 pub mod mob_spawn_settings;
@@ -58,6 +63,7 @@ pub use biome_source_type::BiomeSourceTypeId;
 pub use biome_special_effects::BiomeSpecialEffects;
 pub use checkerboard_column_biome_source::CheckerboardColumnBiomeSource;
 pub use climate::{Climate, Parameter, ParameterList, ParameterPoint, Sampler, TargetPoint};
+pub use feature_sorter::{StepFeatureData, build_features_per_step};
 pub use fixed_biome_source::FixedBiomeSource;
 pub use generated_biome_source::{dense_biome_id, overworld_biome_source};
 pub use mob_spawn_settings::MobSpawnSettings;
