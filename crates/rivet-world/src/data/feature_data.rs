@@ -35,9 +35,13 @@ mod tests {
     /// is a feature holder reference only when it names a feature in the tables
     /// (registry-membership disambiguation, mirroring the fixture extractor);
     /// block-state `Name` values like `minecraft:oak_log` are in neither table.
+    /// Mirrors `rivet-codegen`'s `collect_bare_strings` (same walk and
+    /// `minecraft:` prefix filter — a non-`minecraft:` string can never name a
+    /// table entry, so the filter is a pure narrowing and membership
+    /// disambiguation still drops the block-state `Name`s).
     fn collect_bare_strings<'a>(v: &'a Value, out: &mut Vec<&'a str>) {
         match v {
-            Value::String(s) => out.push(s),
+            Value::String(s) if s.starts_with("minecraft:") => out.push(s),
             Value::Array(items) => {
                 for item in items {
                     collect_bare_strings(item, out);
@@ -50,6 +54,71 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    /// Hostile regression for the configured-only-referenced placed feature:
+    /// `minecraft:oak_checked` is a placed feature referenced ONLY by the
+    /// configured `minecraft:trees_water` JSON under the holder key `default`
+    /// (never in any biome step list). The committed tables keep it, and this
+    /// test pins that the holder-key resolution rule used by
+    /// `committed_tables_keep_the_exact_transitive_closure` rejects a generated
+    /// file that dropped it: removing `oak_checked` from the placed table leaves
+    /// `trees_water`'s holder reference dangling.
+    #[test]
+    fn hostile_configured_only_placed_ref_is_caught() {
+        let trees_water = CONFIGURED_FEATURE_BY_NAME
+            .get("minecraft:trees_water")
+            .expect("fixture must carry `minecraft:trees_water`");
+        let v: Value = serde_json::from_str(trees_water.json).unwrap();
+        let mut holder_refs = Vec::new();
+        collect_feature_holder_refs(&v, &mut holder_refs);
+        let holder_refs: HashSet<&str> = holder_refs.into_iter().collect();
+        assert_eq!(
+            holder_refs,
+            ["minecraft:oak_checked", "minecraft:fancy_oak_checked"]
+                .into_iter()
+                .collect::<HashSet<_>>()
+        );
+        assert!(
+            !CONFIGURED_FEATURE_BY_NAME.contains_key("minecraft:oak_checked"),
+            "`minecraft:oak_checked` must not be a configured feature (that would mask the edge)"
+        );
+
+        // Simulate the hand-edit: drop the placed entry the fixture references.
+        let mut placed: HashSet<&str> = PLACED_FEATURE_BY_NAME.keys().copied().collect();
+        placed.remove("minecraft:oak_checked");
+        assert!(
+            !holder_refs
+                .iter()
+                .all(|r| placed.contains(r) || CONFIGURED_FEATURE_BY_NAME.contains_key(r)),
+            "dropping `minecraft:oak_checked` from the placed table must leave a dangling holder \
+             reference"
+        );
+    }
+
+    /// All bare-string values under a *feature-holder key* (`feature`/`default`)
+    /// inside a `RegistryOps`-encoded JSON — the positions the extractor encodes
+    /// as registry-reference holders. Mirrors `rivet-codegen`'s
+    /// `collect_feature_holder_refs`; block-state `Name`s, tag strings, and
+    /// feature `type` dispatch keys are never collected.
+    fn collect_feature_holder_refs<'a>(v: &'a Value, out: &mut Vec<&'a str>) {
+        fn walk<'a>(elem: &'a Value, key: &str, out: &mut Vec<&'a str>) {
+            match elem {
+                Value::String(s) if matches!(key, "feature" | "default") => out.push(s),
+                Value::Array(items) => {
+                    for item in items {
+                        walk(item, key, out);
+                    }
+                }
+                Value::Object(map) => {
+                    for (k, v) in map {
+                        walk(v, k, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        walk(v, "", out);
     }
 
     /// The committed tables are non-vacuous and carry the pinned counts.
@@ -185,7 +254,7 @@ mod tests {
             configured_reachable.insert(feature.to_string());
         }
 
-        for c in CONFIGURED_FEATURE_BY_NAME.values() {
+        for (name, c) in &CONFIGURED_FEATURE_BY_NAME {
             let v: Value = serde_json::from_str(c.json)
                 .unwrap_or_else(|e| panic!("configured json is not parseable: {e}"));
             let mut bare = Vec::new();
@@ -197,6 +266,19 @@ mod tests {
                 if CONFIGURED_FEATURE_BY_NAME.contains_key(s) {
                     configured_reachable.insert(s.to_string());
                 }
+            }
+            // Holder-key refs (`feature`/`default`) are the extractor's encoded
+            // registry references and must resolve — the structurally explicit
+            // mirror of the codegen fixture gate's dangling-holder-ref check
+            // (membership disambiguation above is the reachability walk).
+            let mut holder = Vec::new();
+            collect_feature_holder_refs(&v, &mut holder);
+            for s in holder {
+                assert!(
+                    PLACED_FEATURE_BY_NAME.contains_key(s)
+                        || CONFIGURED_FEATURE_BY_NAME.contains_key(s),
+                    "configured `{name}` holder reference `{s}` is absent from the tables"
+                );
             }
         }
 

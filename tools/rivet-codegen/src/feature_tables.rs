@@ -30,13 +30,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::Value;
 
+use crate::feature_data::{CONFIGURED_FEATURE_COUNT, PLACED_FEATURE_COUNT, REACHABLE_BIOME_COUNT};
 use crate::reports::SourceProvenance;
-
-/// Ground-truth anchors a live Paper 26.2 load must reproduce (kept in sync
-/// with `ANCHORS` in `probe_feature_data.rs`).
-pub const REACHABLE_BIOME_COUNT: usize = 5;
-pub const PLACED_FEATURE_COUNT: usize = 72;
-pub const CONFIGURED_FEATURE_COUNT: usize = 70;
 
 pub fn default_input(repo_root: &Path) -> PathBuf {
     repo_root.join("tools/rivet-codegen/data/feature_data.json")
@@ -249,12 +244,14 @@ fn render(
         source.jar_sha256.get(..16).unwrap_or(&source.jar_sha256)
     ));
     out.push_str(
-        "// Seed-42 FEATURES data (issue #549): the reachable biome generation settings\n\
+        "// Seed-42 FEATURES data (PR #633): the reachable biome generation settings\n\
          // and the placed/configured feature closure a FEATURES pass must decode. The\n\
-         // `RegistryOps` JSON is the datapack shape (holder refs are bare strings);\n\
-         // the closure is exact — every placed `feature` ref and every bare string in a\n\
-         // configured JSON resolves within these tables. All values are extracted from a\n\
-         // live Paper 26.2 load, never hand-typed.\n\n",
+         // `RegistryOps` JSON is the datapack shape (holder refs are bare strings).\n\
+         // Closure is by registry membership: every bare string in a configured JSON\n\
+         // that names an entry in these tables is a holder reference and resolves\n\
+         // here; block-state `Name`s, tags, and provider/dispatch keys are in neither\n\
+         // table and are not feature refs. All values are extracted from a live Paper\n\
+         // 26.2 load, never hand-typed.\n\n",
     );
 
     out.push_str(
