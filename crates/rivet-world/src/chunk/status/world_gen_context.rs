@@ -98,8 +98,11 @@ type NoiseSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>);
 type SurfaceSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>);
 /// The `generateCarvers` seam closure type.
 type CarversSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>);
-/// The `generateFeatures` seam closure type.
-type FeaturesSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>);
+/// The `generateFeatures` seam closure type — returns the decoration body's
+/// typed failure (the region-backed neighbor-cache seam defers with #185, so
+/// the body fails `GenError::FeaturesUnavailable` at its first region read
+/// instead of panicking or silently skipping).
+type FeaturesSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenError>;
 
 /// `WorldGenContext` (value-layer seam shape) — the caller-supplied BIOMES,
 /// NOISE, SURFACE, CARVERS, and FEATURES worldgen closures, plus the light
@@ -135,7 +138,9 @@ where
     /// `WorldGenRegion` the decoration bodies read/write through, so the body
     /// is caller-supplied). The seam's ordering guard is what keeps this from
     /// running before CARVERS (the decoration bodies consume the CARVERS-
-    /// produced block data).
+    /// produced block data). The closure returns the body's typed failure —
+    /// [`GenError::FeaturesUnavailable`] at the first region read when the
+    /// region-backed neighbor cache is unavailable — instead of panicking.
     features: Box<FeaturesSeam<T, B, S>>,
     /// The `ThreadedLevelLightEngine` the INITIALIZE_LIGHT/LIGHT tasks store and
     /// route through (Java's `context.lightEngine()`). The facade holds the
@@ -186,6 +191,14 @@ pub enum GenError {
     /// CARVERS-produced block data, so an un-carved chunk must not be
     /// decorated).
     FeaturesNotGenerated,
+    /// The `FEATURES` decoration body could not run — its first region read
+    /// (the 3x3 biome-union gather through the bounded `WorldGenRegion`'s
+    /// neighbor-chunk cache) is unavailable. The caller-supplied body runs the
+    /// region-free `addVanillaDecorations` prologue (heightmap priming, the
+    /// section-origin decoration-seed derivation) and then fails here, typed,
+    /// instead of panicking or silently skipping; the chunk is never stamped
+    /// FEATURES and no decoration body runs.
+    FeaturesUnavailable,
     /// A wired generation task is installed at a rung it does not own —
     /// `GenerateBiomes` away from `BIOMES`, `GenerateNoise` away from `NOISE`.
     /// Only a malformed crate-internal pyramid can produce this: dispatching it
@@ -220,6 +233,12 @@ impl std::fmt::Display for GenError {
             GenError::FeaturesNotGenerated => {
                 write!(f, "cannot generate FEATURES before the CARVERS task ran")
             }
+            GenError::FeaturesUnavailable => write!(
+                f,
+                "cannot run the FEATURES decoration body: its first region read \
+                 (the 3x3 biome-union gather through the bounded WorldGenRegion \
+                 neighbor-chunk cache) is unavailable"
+            ),
             GenError::DataNotCarried { status } => write!(
                 f,
                 "cannot label the chunk {status:?}: a pass-through step cannot fabricate that data"
@@ -280,7 +299,7 @@ where
         noise: impl FnMut(&mut ProtoChunk<T, B, S>) + 'static,
         surface: impl FnMut(&mut ProtoChunk<T, B, S>) + 'static,
         carvers: impl FnMut(&mut ProtoChunk<T, B, S>) + 'static,
-        features: impl FnMut(&mut ProtoChunk<T, B, S>) + 'static,
+        features: impl FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenError> + 'static,
     ) -> Self {
         WorldGenContext {
             biomes: Box::new(biomes),
@@ -492,7 +511,7 @@ where
                 {
                     return Err(GenError::FeaturesNotGenerated);
                 }
-                (self.features)(chunk);
+                (self.features)(chunk)?;
             }
             ChunkStatusTask::GenerateSpawn | ChunkStatusTask::Full => {
                 return Err(GenError::UnsupportedTask {
@@ -739,7 +758,8 @@ mod tests {
                 carvers_log.borrow_mut().push("carvers")
             },
             move |_c: &mut ProtoChunk<u8, u8, &'static str>| {
-                features_log.borrow_mut().push("features")
+                features_log.borrow_mut().push("features");
+                Ok(())
             },
         );
         (
