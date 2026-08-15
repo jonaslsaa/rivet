@@ -30,13 +30,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::Value;
 
+use crate::feature_data::{
+    CONFIGURED_FEATURE_COUNT, PLACED_FEATURE_COUNT, REACHABLE_BIOME_COUNT,
+};
 use crate::reports::SourceProvenance;
-
-/// Ground-truth anchors a live Paper 26.2 load must reproduce (kept in sync
-/// with `ANCHORS` in `probe_feature_data.rs`).
-pub const REACHABLE_BIOME_COUNT: usize = 5;
-pub const PLACED_FEATURE_COUNT: usize = 72;
-pub const CONFIGURED_FEATURE_COUNT: usize = 70;
 
 pub fn default_input(repo_root: &Path) -> PathBuf {
     repo_root.join("tools/rivet-codegen/data/feature_data.json")

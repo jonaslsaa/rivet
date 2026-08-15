@@ -68,8 +68,8 @@ pub const PER_BIOME_STEP_COUNTS: &[(&str, &[usize])] = &[
 
 /// Validate the fixture at `input` and return the source provenance from its
 /// sibling manifest. Called by `extract-feature-data` (self-validation of a
-/// fresh capture) and by the (later) generation slice; the tests here exercise
-/// it against the committed fixture.
+/// fresh capture) and by the generation slice ([`crate::feature_tables`]); the
+/// tests here exercise it against the committed fixture.
 pub fn validate(input: &Path) -> Result<SourceProvenance> {
     let json = fs::read_to_string(input).with_context(|| format!("read {}", input.display()))?;
     let root = crate::registries::parse_strict(&json)
@@ -78,10 +78,12 @@ pub fn validate(input: &Path) -> Result<SourceProvenance> {
     load_provenance(input)
 }
 
-/// Structural + order + closure validation, independent of the live-Paper
-/// anchors (which only the real fixture passes). `pub(crate)` so the generation
-/// half ([`crate::feature_tables`]) enforces the full contract on the fixture
-/// it renders.
+/// Structural + order + closure validation, run purely on the fixture JSON
+/// (no live Paper needed). Enforces the pinned live-Paper anchors too — the
+/// reachable-biome count, the per-biome step counts, and the placed/configured
+/// table counts — so a hand-edited fixture fails here. `pub(crate)` so the
+/// generation half ([`crate::feature_tables`]) enforces the full contract on
+/// the fixture it renders.
 pub(crate) fn validate_structural(root: &Value) -> Result<()> {
     let object = root
         .as_object()
