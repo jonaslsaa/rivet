@@ -30,9 +30,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use crate::feature_data::{
-    CONFIGURED_FEATURE_COUNT, PLACED_FEATURE_COUNT, REACHABLE_BIOME_COUNT,
-};
+use crate::feature_data::{CONFIGURED_FEATURE_COUNT, PLACED_FEATURE_COUNT, REACHABLE_BIOME_COUNT};
 use crate::reports::SourceProvenance;
 
 pub fn default_input(repo_root: &Path) -> PathBuf {
@@ -248,10 +246,12 @@ fn render(
     out.push_str(
         "// Seed-42 FEATURES data (PR #633): the reachable biome generation settings\n\
          // and the placed/configured feature closure a FEATURES pass must decode. The\n\
-         // `RegistryOps` JSON is the datapack shape (holder refs are bare strings);\n\
-         // the closure is exact — every placed `feature` ref and every bare string in a\n\
-         // configured JSON resolves within these tables. All values are extracted from a\n\
-         // live Paper 26.2 load, never hand-typed.\n\n",
+         // `RegistryOps` JSON is the datapack shape (holder refs are bare strings).\n\
+         // Closure is by registry membership: every bare string in a configured JSON\n\
+         // that names an entry in these tables is a holder reference and resolves\n\
+         // here; block-state `Name`s, tags, and provider/dispatch keys are in neither\n\
+         // table and are not feature refs. All values are extracted from a live Paper\n\
+         // 26.2 load, never hand-typed.\n\n",
     );
 
     out.push_str(

@@ -26,10 +26,28 @@
 //!   * order — reachable biomes are id-sorted and match the `biomes` key set;
 //!     the per-biome per-step arrays are pinned (a step-list reorder changes
 //!     decoration semantics and must fail);
-//!   * closure — every placed feature referenced by the biomes or by a
-//!     configured feature's JSON is present in `placed_features`; every
-//!     configured feature referenced by a placed feature's `feature` field or by
-//!     a configured feature's JSON is present in `configured_features`.
+//!   * closure, two structurally explicit checks (mirrored verbatim by the
+//!     runtime committed-table test in `crates/rivet-world/src/data/feature_data.rs`):
+//!       - dangling refs: a bare string under a *feature-holder key*
+//!         (`feature`/`default`) inside a configured feature's JSON, the
+//!         top-level `feature` of a placed feature, and every biome step-list
+//!         entry (a direct placed-feature reference) must resolve in the
+//!         fixture's own tables. Block-state `Name` values, tag strings, and
+//!         feature `type` dispatch keys are never holder refs (the holder-key
+//!         positions are the only ones the extractor encodes as
+//!         registry-reference holders). Resolving these by table membership
+//!         would silently accept a closure that dropped a referenced entry —
+//!         e.g. a `random_selector` `default` pointing at a placed feature the
+//!         closure omitted (`oak_checked` via `trees_water`).
+//!       - dead entries: every table entry must be reachable from the biomes'
+//!         step lists through the extractor's fixpoint, which resolves every
+//!         bare `minecraft:` string by registry membership (a feature `type`
+//!         key that shares a feature's name, like `minecraft:vines`, is a real
+//!         reachability edge at capture time — membership, not key position,
+//!         disambiguates it).
+//!   * probe — the committed `probe` counts must match the tables, and
+//!     `probe.per_biome` must agree element-for-element with the `biomes` step
+//!     lists (a stale probe object or a drifted `biomes` table fails).
 //!
 //! Regeneration is byte-idempotent (the live probe proves a fresh load is
 //! byte-identical to the committed fixture).
@@ -232,21 +250,22 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
     let placed = validate_feature_table("placed_features", object)?;
     let configured = validate_feature_table("configured_features", object)?;
 
-    // Closure reachability: every feature in the fixture must be reachable from
-    // the biomes' step lists, and every reference must resolve. A fixture with
-    // dead (unreachable) entries or a dangling reference is stale or hand-edited.
+    // Closure, two structurally explicit checks (see the module doc; the
+    // runtime committed-table test in `crates/rivet-world/src/data/feature_data.rs`
+    // mirrors both). A fixture with a dead (unreachable) entry or a dangling
+    // reference is stale or hand-edited.
     //
-    //   placed reachable  = biomes' direct placed features ∪ placed refs found
-    //                       in configured-feature JSONs
-    //   configured reach = placed features' `json.feature` ∪ configured refs
-    //                       found in configured-feature JSONs
-    //
-    // A bare string inside a RegistryOps JSON is a feature holder reference only
-    // when it names a feature in the fixture's own tables; block-state `Name`
-    // values like `minecraft:oak_log` are in neither table and are ignored
-    // (registry-membership disambiguation, mirroring the extractor). A string in
-    // both tables (e.g. `minecraft:oak`) counts as both a placed and a
-    // configured reference, mirroring the extractor's dual-kind walk.
+    // Check 1 — dangling refs. RegistryOps encodes a feature holder reference
+    // as a bare string under a *feature-holder key*: `feature` (a
+    // `random_selector`/`random_boolean_selector`/`vegetation_patch`/`root_system`
+    // sub-feature) or `default` (a `random_selector` default). The top-level
+    // `feature` of a placed feature is its configured-feature ref. Every such
+    // string must resolve in the fixture's own tables — checking by membership
+    // of the *referencing* feature's own table would silently accept a closure
+    // that dropped a referenced entry (e.g. a `random_selector` `default`
+    // pointing at a placed feature the closure omitted). Block-state `Name`
+    // values, tag strings, and feature `type` dispatch keys are never holder
+    // refs and are not collected here.
     let mut direct_placed: HashSet<&str> = HashSet::new();
     for entry in biomes.values() {
         for step in entry["features"].as_array().unwrap() {
@@ -256,6 +275,52 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
         }
     }
 
+    let mut holder_refs: Vec<(&str, &str)> = Vec::new(); // (referencing name, holder ref)
+    for (pname, pentry) in placed {
+        let json = pentry
+            .get("json")
+            .and_then(Value::as_object)
+            .with_context(|| format!("placed feature `{pname}` is missing `json`"))?;
+        let feature_ref = json
+            .get("feature")
+            .and_then(Value::as_str)
+            .with_context(|| format!("placed feature `{pname}` `json.feature` is not a string"))?;
+        holder_refs.push((pname, feature_ref));
+    }
+    for (cname, centry) in configured {
+        let json = centry
+            .get("json")
+            .with_context(|| format!("configured feature `{cname}` is missing `json`"))?;
+        for r in collect_feature_holder_refs(json) {
+            holder_refs.push((cname, r));
+        }
+    }
+    for (from, r) in &holder_refs {
+        if !placed.contains_key(*r) && !configured.contains_key(*r) {
+            bail!(
+                "`{from}` references feature `{r}` that is absent from `placed_features` and \
+                 `configured_features` (a dangling holder reference)"
+            );
+        }
+    }
+
+    // A biome step list is a direct placed-feature reference: every entry must
+    // resolve in `placed_features` (a dangling biome ref would emit a table whose
+    // step list names an absent feature).
+    for p in &direct_placed {
+        if !placed.contains_key(*p) {
+            bail!(
+                "biome step list references placed feature `{p}` that is absent from \
+                 `placed_features`"
+            );
+        }
+    }
+
+    // Check 2 — dead entries. Every table entry must be reachable from the
+    // biomes' step lists through the extractor's fixpoint, which resolves every
+    // bare `minecraft:` string by registry membership (a feature `type` key that
+    // shares a feature's name, like `minecraft:vines`, is a real reachability
+    // edge at capture time — membership, not key position, disambiguates it).
     let mut placed_reachable: HashSet<&str> = direct_placed.clone();
     let mut configured_reachable: HashSet<&str> = HashSet::new();
 
@@ -285,20 +350,6 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
         }
     }
 
-    for p in &placed_reachable {
-        if !placed.contains_key(*p) {
-            bail!(
-                "biome/config references placed feature `{p}` that is absent from `placed_features`"
-            );
-        }
-    }
-    for c in &configured_reachable {
-        if !configured.contains_key(*c) {
-            bail!(
-                "placed/config references configured feature `{c}` that is absent from `configured_features`"
-            );
-        }
-    }
     for p in placed.keys() {
         if !placed_reachable.contains(p.as_str()) {
             bail!(
@@ -349,6 +400,63 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
     check("reachable_biome_count", names.len())?;
     check("placed_feature_count", placed.len())?;
     check("configured_feature_count", configured.len())?;
+
+    // The probe's per-biome observations must agree with the recorded `biomes`
+    // step lists (and with each other): the probe is the extractor's live-Paper
+    // snapshot, so a stale per_biome block means a hand-edited fixture or a
+    // capture whose `biomes` and `probe` drifted.
+    let per_biome = probe
+        .get("per_biome")
+        .and_then(Value::as_object)
+        .context("probe is missing `per_biome`")?;
+    if per_biome.len() != biomes.len() {
+        bail!(
+            "probe.per_biome has {} entries but the fixture has {} biomes",
+            per_biome.len(),
+            biomes.len()
+        );
+    }
+    for (bname, bentry) in per_biome {
+        let b = biomes
+            .get(bname)
+            .with_context(|| format!("probe.per_biome has unknown biome `{bname}`"))?;
+        let per_step = bentry
+            .get("per_step")
+            .and_then(Value::as_array)
+            .with_context(|| format!("probe.per_biome.{bname} is missing `per_step`"))?;
+        let steps = b["features"]
+            .as_array()
+            .with_context(|| format!("biome `{bname}` is missing `features`"))?;
+        if per_step.len() != steps.len() {
+            bail!(
+                "probe.per_biome.{bname}.per_step has {} entries but the biome has {} steps",
+                per_step.len(),
+                steps.len()
+            );
+        }
+        for (i, (recorded, step)) in per_step.iter().zip(steps).enumerate() {
+            let recorded = recorded.as_u64().with_context(|| {
+                format!("probe.per_biome.{bname}.per_step[{i}] is not an integer")
+            })?;
+            let step = step
+                .as_array()
+                .with_context(|| format!("biome `{bname}` step {i} is not an array"))?;
+            if recorded as usize != step.len() {
+                bail!(
+                    "probe.per_biome.{bname}.per_step[{i}] is {recorded} but the biome step has {} features",
+                    step.len()
+                );
+            }
+        }
+        let total = bentry
+            .get("total")
+            .and_then(Value::as_u64)
+            .with_context(|| format!("probe.per_biome.{bname} is missing `total`"))?;
+        let sum: u64 = per_step.iter().filter_map(Value::as_u64).sum();
+        if total != sum {
+            bail!("probe.per_biome.{bname}.total is {total} but the per_step counts sum to {sum}");
+        }
+    }
 
     Ok(())
 }
@@ -430,6 +538,32 @@ fn collect_bare_strings(elem: &Value) -> Vec<&str> {
     }
     let mut out = Vec::new();
     walk(elem, &mut out);
+    out
+}
+
+/// Bare strings under a *feature-holder key* (`feature`/`default`) inside a
+/// configured feature's RegistryOps-encoded JSON — the only positions the
+/// extractor encodes as registry-reference holders (a `random_selector`/`
+/// random_boolean_selector`/`vegetation_patch`/`root_system` sub-feature, or a
+/// `random_selector` default). Block-state `Name` values, tag strings, and
+/// feature `type` dispatch keys are never collected here. The caller resolves
+/// each collected string against the tables (a string can name either a placed
+/// or a configured feature).
+fn collect_feature_holder_refs(elem: &Value) -> Vec<&str> {
+    fn walk<'a>(elem: &'a Value, key: &str, out: &mut Vec<&'a str>) {
+        match elem {
+            Value::String(s) => {
+                if matches!(key, "feature" | "default") {
+                    out.push(s.as_str());
+                }
+            }
+            Value::Array(a) => a.iter().for_each(|e| walk(e, key, out)),
+            Value::Object(o) => o.iter().for_each(|(k, v)| walk(v, k.as_str(), out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(elem, "", &mut out);
     out
 }
 
@@ -534,6 +668,17 @@ mod tests {
     }
 
     #[test]
+    fn stale_probe_per_biome_step_counts_fail() {
+        let mut root = fixture();
+        // A probe.per_biome block whose per_step counts no longer match the
+        // recorded per-biome step lists must fail: the probe is the extractor's
+        // live-Paper observation and must agree with `biomes`.
+        root["probe"]["per_biome"]["minecraft:beach"]["per_step"][1] = serde_json::json!(99);
+        let err = validate_structural(&root).unwrap_err();
+        assert!(err.to_string().contains("per_step"), "got: {err}");
+    }
+
+    #[test]
     fn removed_placed_feature_fails_closure() {
         let mut root = fixture();
         // Drop a placed feature that a biome references: closure must fail.
@@ -548,6 +693,65 @@ mod tests {
         let err = validate_structural(&root).unwrap_err();
         assert!(
             err.to_string().contains("absent from `placed_features`"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn removed_configured_only_placed_feature_fails_dangling() {
+        let mut root = fixture();
+        // `minecraft:oak_checked` is a placed feature referenced ONLY by the
+        // configured `minecraft:trees_water` JSON under the holder key `default`
+        // (never in any biome step list). Dropping it from the tables must fail:
+        // the reference is still present and would dangle. A membership-only
+        // check (resolve refs against the tables being validated) would have
+        // accepted this, because the dropped entry is itself a table member the
+        // reference "resolves" against — the holder-key check makes the edge
+        // structurally explicit.
+        assert!(
+            root["placed_features"]["minecraft:oak_checked"].is_object(),
+            "fixture must carry `minecraft:oak_checked` as a placed feature"
+        );
+        assert!(
+            !root["configured_features"]
+                .as_object()
+                .unwrap()
+                .contains_key("minecraft:oak_checked"),
+            "`minecraft:oak_checked` must not be a configured feature (that would mask the edge)"
+        );
+        root["placed_features"]
+            .as_object_mut()
+            .unwrap()
+            .remove("minecraft:oak_checked");
+        let err = validate_structural(&root).unwrap_err();
+        assert!(
+            err.to_string().contains("dangling holder reference"),
+            "got: {err}"
+        );
+        assert!(
+            err.to_string().contains("minecraft:oak_checked"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn dereferenced_configured_only_placed_feature_fails_dead_entry() {
+        let mut root = fixture();
+        // Point `minecraft:trees_water`'s `default` holder ref away from
+        // `minecraft:oak_checked` while keeping the entry in the table: the
+        // reference now resolves (`minecraft:oak` is a configured member), so no
+        // dangling ref is reported, but `minecraft:oak_checked` becomes
+        // unreachable and must fail the dead-entry check.
+        assert_eq!(
+            root["configured_features"]["minecraft:trees_water"]["json"]["config"]["default"],
+            serde_json::json!("minecraft:oak_checked")
+        );
+        root["configured_features"]["minecraft:trees_water"]["json"]["config"]["default"] =
+            serde_json::json!("minecraft:oak");
+        let err = validate_structural(&root).unwrap_err();
+        assert!(err.to_string().contains("unreachable"), "got: {err}");
+        assert!(
+            err.to_string().contains("minecraft:oak_checked"),
             "got: {err}"
         );
     }
