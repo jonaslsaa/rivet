@@ -17,26 +17,36 @@
 //!
 //! ## Identity semantics
 //!
-//! Java keys the global index map (`Object2IntMap<PlacedFeature>`) and the
-//! per-step `indexMapping` (`Util.createIndexIdentityLookup`) on the *value
-//! object* — for a `Reference` holder the registry stores one value per
-//! `(registry, id)`, and for a `Direct` holder one value per holder instance —
-//! so Java's value identity is exactly the **holder identity**. The Rust port
-//! therefore keys on [`PlacedFeatureKey`]: a `Reference` holder's
-//! `(RegistryId, id)` pair, or a `Direct` holder's inline-value address (the
-//! Rust spelling of Java's per-object identity). The same feature holder seen
-//! in several biomes/steps collapses to one global index and one per-step
-//! entry.
+//! Java's two keyed structures use *different* equality semantics, both over
+//! the resolved value `featureSupplier.value()`:
 //!
-//! A `Reference` holder's key is a pure `(registry, id)` value, so a clone is
-//! the same identity — exactly Java's registry-backed behavior. A `Direct`
-//! holder's key is the inline value's address, so only the same *instance*
-//! collapses; a Rust clone of a `Direct` holder is a distinct identity. Java's
-//! `Direct.value()` returns the same object for the same holder (identity
-//! across clones), so this is a small deviation — but `Direct` placed-feature
-//! holders are decode-only inline values that never occur in registry-loaded
-//! biome settings (those are all `Reference`), so it is limited to synthetic
-//! scenarios.
+//! - the global `featureIndex` is an `Object2IntOpenHashMap<PlacedFeature>`,
+//!   which keys by **value equality** — `PlacedFeature` is a record, so two
+//!   separately-built values compare equal when their `feature` holder and
+//!   `placement` list do;
+//! - the per-step `indexMapping` (`Util.createIndexIdentityLookup`) is a
+//!   `Reference2IntOpenHashMap` (or `ReferenceImmutableList.indexOf` for small
+//!   steps), which keys by **reference identity**.
+//!
+//! For a registry-backed `Reference` holder the two coincide with the port's
+//! `(RegistryId, id)` key: the registry stores exactly one holder (and one
+//! `PlacedFeature` value) per `(registry, id)`, so value-equality, identity,
+//! and the id pair all collapse the same set. The Rust port keys `Reference`
+//! holders on the pure `(registry, id)` value — a clone is the same identity,
+//! exactly Java's registry-backed behavior — and the same holder seen in
+//! several biomes/steps collapses to one global index and one per-step entry.
+//!
+//! A `Direct` holder's inline value has no registry singleton, so Java's two
+//! structures diverge for it: `featureIndex`'s value-equality would collapse
+//! two equal-content `PlacedFeature` values into one global index, while
+//! `indexMapping`'s reference-identity keeps distinct instances apart. The port
+//! keys `Direct` holders on the inline value's address — the Rust spelling of
+//! per-object identity — which matches `indexMapping` but not
+//! `featureIndex`'s value-equality. This is a documented deviation, confined
+//! to synthetic scenarios: `Direct` placed-feature holders are decode-only
+//! inline values that never occur in registry-loaded biome settings (those are
+//! all `Reference`), and `build_features_per_step` has no production caller in
+//! this slice.
 //!
 //! The value `PlacedFeature` itself is not resolved (the placed-feature
 //! `HolderLookup` is not threaded through this slice — it defers with #126 like
@@ -46,12 +56,12 @@
 //! distinct identity), so the per-step `index_mapping` registers *both*
 //! spellings of each logical holder — the identity captured at first appearance
 //! (so a holder borrowed from the source settings resolves) and each stored
-//! clone's own identity (so `index_mapping(&features[i])` is `Some(i)`). Java
-//! needs only one key per feature because its `Direct.value()` returns the same
-//! object for the same holder and its `features()` list holds those same
-//! objects; the two keys are the Rust spelling of that single observable
-//! identity. `Reference` holders collapse both spellings to the same
-//! `(registry, id)` key.
+//! clone's own identity (so `index_mapping(&features[i])` is `Some(i)`).
+//! `indexMapping` is reference-identity in Java: its `features()` list holds
+//! the same value objects the decoration pass later resolves via
+//! `Holder::value`, so one key per feature suffices; the two keys are the Rust
+//! spelling of that single shared-object identity. `Reference` holders
+//! collapse both spellings to the same `(registry, id)` key.
 //!
 //! ## Cycle diagnostics
 //!
@@ -83,9 +93,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
-/// The global-index key — Java keys on the `PlacedFeature` value object, which
-/// for a `Reference` holder is one object per `(registry, id)` and for a
-/// `Direct` holder one object per instance; the Rust spelling of that identity.
+/// The global-index key — the Rust spelling of the identity Java keys on.
+/// `featureIndex` keys the resolved value by value equality, `indexMapping` by
+/// reference identity (see module doc); the port encodes both as holder
+/// identity: a `Reference` holder's `(registry, id)`, or a `Direct` holder's
+/// inline-value address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum PlacedFeatureKey {
     /// `Holder.Reference` — the `(RegistryId, id)` pair.
@@ -566,13 +578,15 @@ mod tests {
 
     #[test]
     fn direct_holder_identity_is_per_instance() {
-        // Java keys `Object2IntMap<PlacedFeature>` on the value object's
-        // reference identity: two distinct `PlacedFeature` objects are distinct
-        // keys even with equal contents. The Rust spelling keys a `Direct`
-        // holder on its inline value's address (Java's per-object identity), so
-        // distinct Direct instances are distinct identities. (`Reference`
-        // holders — the production path — are keyed on the (registry, id) pair
-        // instead, so clones there collapse.)
+        // Rust keys a `Direct` holder on its inline value's address (per-object
+        // identity), so distinct Direct instances are distinct identities and
+        // equal contents do not dedup. This matches Java's per-step
+        // `indexMapping` (`Util.createIndexIdentityLookup`), which is
+        // reference-identity keyed. Java's global `featureIndex`
+        // (`Object2IntOpenHashMap`) is value-equality keyed, so two equal-content
+        // Direct `PlacedFeature` records would collapse to one global index there
+        // — a synthetic-only deviation (no production caller), since registry
+        // `Reference` holders intern one value per `(registry, id)`.
         let a = Holder::direct(no_op_placed(0));
         let b = Holder::direct(no_op_placed(0)); // equal contents, distinct instance
         let sources = [Source(vec![step(&[a.clone(), b.clone()])])];
