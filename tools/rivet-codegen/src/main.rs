@@ -24,6 +24,7 @@ mod extract_block_behaviors;
 mod extract_feature_data;
 mod extract_worldgen;
 mod feature_data;
+mod feature_tables;
 mod generate;
 mod model;
 mod mth_gen;
