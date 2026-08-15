@@ -3,7 +3,7 @@
 // Source jar sha256 e1a027e9481a16ec; provenance linked to data/feature_data.manifest.json.
 // Do not edit by hand — PORTING.md: registries/data are generated, not hand-ported.
 
-// Seed-42 FEATURES data (issue #549): the reachable biome generation settings
+// Seed-42 FEATURES data (PR #633): the reachable biome generation settings
 // and the placed/configured feature closure a FEATURES pass must decode. The
 // `RegistryOps` JSON is the datapack shape (holder refs are bare strings);
 // the closure is exact — every placed `feature` ref and every bare string in a

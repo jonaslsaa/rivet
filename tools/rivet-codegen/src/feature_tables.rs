@@ -246,7 +246,7 @@ fn render(
         source.jar_sha256.get(..16).unwrap_or(&source.jar_sha256)
     ));
     out.push_str(
-        "// Seed-42 FEATURES data (issue #549): the reachable biome generation settings\n\
+        "// Seed-42 FEATURES data (PR #633): the reachable biome generation settings\n\
          // and the placed/configured feature closure a FEATURES pass must decode. The\n\
          // `RegistryOps` JSON is the datapack shape (holder refs are bare strings);\n\
          // the closure is exact — every placed `feature` ref and every bare string in a\n\
