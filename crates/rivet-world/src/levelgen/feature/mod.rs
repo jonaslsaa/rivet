@@ -258,6 +258,7 @@ pub use nether_forest_vegetation_feature::{
     NETHER_FOREST_VEGETATION, NetherForestVegetationFeature,
 };
 pub use no_op_feature::NoOpFeature;
+pub use ore_feature::{ORE, OreFeature};
 pub use scattered_ore_feature::{SCATTERED_ORE, ScatteredOreFeature};
 pub use sculk_patch_feature::{SCULK_PATCH, SculkPatchFeature};
 pub use sea_pickle_feature::{SEA_PICKLE, SeaPickleFeature};
@@ -718,6 +719,15 @@ pub fn feature_place<R: RandomSource>(
                 .downcast_ref::<crate::levelgen::feature::lake_feature::Configuration>()
                 .expect("lake feature must carry a LakeFeature.Configuration");
             LAKE.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.ORE` — the registered `minecraft:ore` leaf (the height probe
+        // runs faithfully; placement defers to the `#399` `canPlaceOre` seam and
+        // the `#232` `BulkSectionAccess` seam).
+        28 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<OreConfiguration>()
+                .expect("ore feature must carry an OreConfiguration");
+            ORE.place_with_config(config, level, chunk_generator, random, origin)
         }
         // `Feature.DELTA`.
         46 => {
