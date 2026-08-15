@@ -1,6 +1,7 @@
 //! Port of `net.minecraft.world.level.chunk.status.WorldGenContext` (MC 26.2)
 //! — the record of per-step worldgen dependencies — plus the value-layer
-//! executor seam that runs the generation DAG through LIGHT.
+//! executor seam that runs the generation DAG (through LIGHT, or through
+//! SPAWN/FULL when the caller attaches those optional seams).
 //!
 //! Java: `WorldGenContext.java` in `working/Paper` — a 6-field record
 //! `(ServerLevel, ChunkGenerator, StructureTemplateManager,
@@ -9,11 +10,11 @@
 //! owning units), and the full `ChunkGenerator` is owned by the generator wave
 //! (#306/#185 — today only the `&dyn ChunkGenerator` seam in
 //! `chunk::chunk_generator` exists), so the record is reduced to the task seam
-//! the generation pyramid through LIGHT actually needs: the caller-supplied
+//! the generation pyramid the executor drives actually needs: the caller-supplied
 //! closures that perform the BIOMES, NOISE, SURFACE, CARVERS, and FEATURES
 //! work, plus the [`StarLightProvider`] the INITIALIZE_LIGHT/LIGHT tasks route
-//! to, plus the optional spawn seam the SPAWN task routes to (see below). The full
-//! record shape returns with the `mc.world.level.chunk.generator` wave
+//! to, plus the optional spawn/full seams the SPAWN/FULL tasks route to (see
+//! below). The full record shape returns with the `mc.world.level.chunk.generator` wave
 //! (RivetTodo #185). The closures are `'static`-owned (a value-layer
 //! simplification): the real worldgen bodies borrow server/region state and run
 //! in the #185 scheduler realization, not through this seam.
