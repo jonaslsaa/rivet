@@ -147,6 +147,7 @@ pub mod delta_feature;
 pub mod disk_feature;
 pub mod geode_feature;
 pub mod lake_feature;
+pub mod multiface_growth_feature;
 pub mod replace_blobs_feature;
 pub mod scattered_ore_feature;
 pub mod sculk_patch_feature;
@@ -209,6 +210,7 @@ use crate::levelgen::feature::configurations::FeatureConfiguration;
 use crate::levelgen::feature::configurations::GeodeConfiguration;
 use crate::levelgen::feature::configurations::HugeMushroomFeatureConfiguration;
 use crate::levelgen::feature::configurations::LayerConfiguration;
+use crate::levelgen::feature::configurations::MultifaceGrowthConfiguration;
 use crate::levelgen::feature::configurations::NetherForestVegetationConfig;
 use crate::levelgen::feature::configurations::NoneFeatureConfiguration;
 use crate::levelgen::feature::configurations::OreConfiguration;
@@ -254,6 +256,7 @@ pub use huge_red_mushroom_feature::{HUGE_RED_MUSHROOM, HugeRedMushroomFeature};
 pub use iceberg_feature::{ICEBERG, IcebergFeature};
 pub use kelp_feature::{KELP, KelpFeature};
 pub use lake_feature::{LAKE, LakeFeature};
+pub use multiface_growth_feature::{MULTIFACE_GROWTH, MultifaceGrowthFeature};
 pub use nether_forest_vegetation_feature::{
     NETHER_FOREST_VEGETATION, NetherForestVegetationFeature,
 };
@@ -767,6 +770,15 @@ pub fn feature_place<R: RandomSource>(
                 .downcast_ref::<SculkPatchConfiguration>()
                 .expect("sculk_patch feature must carry a SculkPatchConfiguration");
             SCULK_PATCH.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.MULTIFACE_GROWTH` — the registered `minecraft:multiface_growth`
+        // leaf (the first step-9 seed-42 feature: `glow_lichen`; see
+        // `multiface_growth_feature`).
+        20 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<MultifaceGrowthConfiguration>()
+                .expect("multiface_growth feature must carry a MultifaceGrowthConfiguration");
+            MULTIFACE_GROWTH.place_with_config(config, level, chunk_generator, random, origin)
         }
         // The end-leaves wave — the four registered End features (each owned by
         // its own `.feature.*` MANIFEST row), all over `NoneFeatureConfiguration`.
