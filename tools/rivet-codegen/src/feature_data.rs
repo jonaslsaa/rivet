@@ -6,14 +6,25 @@
 //!
 //! The fixture is the seed-42 FEATURES data foundation:
 //!
-//!   * `reachable_biomes` — the biome set that can drive FEATURES placement into
-//!     the committed grid {(3,3),(4,3),(3,4),(4,4)} (chunks 1..6, full Y range),
-//!     sorted by registry id.
-//!   * `biomes` — per-biome `BiomeGenerationSettings`: `id`, the carver identity
-//!     names, and the per-step placed-feature name lists. Step `i` is
-//!     `GenerationStep.Decoration.values()[i]` (raw_generation .. top_layer_
-//!     modification); holder-set order within a step is the builder's fixed
-//!     order (part of the decoration semantics).
+//!   * `possible_biomes` — the FULL overworld `biomeSource.possibleBiomes()`
+//!     list in source order: the exact argument Paper's `ChunkGenerator` feeds
+//!     `FeatureSorter.buildFeaturesPerStep` (`ChunkGenerator.java` 97-100:
+//!     `List.copyOf(biomeSource.possibleBiomes())`). `BiomeSource.
+//!     possibleBiomes()` is `collectPossibleBiomes().distinct().collect(
+//!     ImmutableSet.toImmutableSet())`, and `MultiNoiseBiomeSource.
+//!     collectPossibleBiomes()` is `parameters().values().stream().map(
+//!     Pair::getSecond)` — so this is the `OverworldBiomeBuilder.addBiomes`
+//!     first-appearance (emission) order. The order is pinned: a reorder
+//!     changes FeatureSorter's global feature indices and must fail.
+//!   * `reachable_biomes` — the seed-42 biome set that can drive FEATURES
+//!     placement into the committed grid {(3,3),(4,3),(3,4),(4,4)} (chunks
+//!     1..6, full Y range), sorted by registry id. A subset of
+//!     `possible_biomes` (the convergence non-vacuity anchor).
+//!   * `biomes` — per-biome `BiomeGenerationSettings` of EVERY possible biome:
+//!     `id`, the carver identity names, and the per-step placed-feature name
+//!     lists. Step `i` is `GenerationStep.Decoration.values()[i]`
+//!     (raw_generation .. top_layer_modification); holder-set order within a
+//!     step is the builder's fixed order (part of the decoration semantics).
 //!   * `placed_features` / `configured_features` — the transitive closure of
 //!     referenced registry entries, keyed by name with the dense registry `id`
 //!     and the full `RegistryOps`-encoded JSON (the datapack JSON shape).
@@ -23,9 +34,11 @@
 //!     in `data/feature_data.manifest.json` (a hand-edited fixture fails);
 //!   * structure — every top-level field, the counts, and the per-biome step
 //!     arrays;
-//!   * order — reachable biomes are id-sorted and match the `biomes` key set;
-//!     the per-biome per-step arrays are pinned (a step-list reorder changes
-//!     decoration semantics and must fail);
+//!   * order — `possible_biomes` matches the pinned 55-name emission order and
+//!     is a superset of `reachable_biomes`; reachable biomes are id-sorted; the
+//!     `biomes` key set == the possible-biome set; the per-biome per-step arrays
+//!     are pinned (a step-list reorder changes decoration semantics and must
+//!     fail);
 //!   * closure, two structurally explicit checks (mirrored verbatim by the
 //!     runtime committed-table test in `crates/rivet-world/src/data/feature_data.rs`):
 //!       - dangling refs: a bare string under a *feature-holder key*
@@ -63,9 +76,72 @@ use crate::reports::SourceProvenance;
 
 /// Ground-truth anchors a live Paper 26.2 load must reproduce (kept in sync
 /// with `ANCHORS` in `probe_feature_data.rs`).
+pub const POSSIBLE_BIOME_COUNT: usize = 55;
 pub const REACHABLE_BIOME_COUNT: usize = 5;
-pub const PLACED_FEATURE_COUNT: usize = 72;
-pub const CONFIGURED_FEATURE_COUNT: usize = 70;
+pub const PLACED_FEATURE_COUNT: usize = 203;
+pub const CONFIGURED_FEATURE_COUNT: usize = 170;
+
+/// The pinned full-overworld possible-biome list in source (emission) order —
+/// the exact `List.copyOf(biomeSource.possibleBiomes())` Paper feeds the
+/// FeatureSorter (`ChunkGenerator.java` 97-100). The order is part of the
+/// decoration semantics (it fixes FeatureSorter's global feature indices).
+pub const POSSIBLE_BIOMES_ORDER: &[&str] = &[
+    "minecraft:mushroom_fields",
+    "minecraft:deep_frozen_ocean",
+    "minecraft:frozen_ocean",
+    "minecraft:deep_cold_ocean",
+    "minecraft:cold_ocean",
+    "minecraft:deep_ocean",
+    "minecraft:ocean",
+    "minecraft:deep_lukewarm_ocean",
+    "minecraft:lukewarm_ocean",
+    "minecraft:warm_ocean",
+    "minecraft:stony_shore",
+    "minecraft:swamp",
+    "minecraft:mangrove_swamp",
+    "minecraft:snowy_slopes",
+    "minecraft:snowy_plains",
+    "minecraft:snowy_beach",
+    "minecraft:windswept_gravelly_hills",
+    "minecraft:grove",
+    "minecraft:windswept_hills",
+    "minecraft:snowy_taiga",
+    "minecraft:windswept_forest",
+    "minecraft:taiga",
+    "minecraft:plains",
+    "minecraft:meadow",
+    "minecraft:beach",
+    "minecraft:forest",
+    "minecraft:old_growth_spruce_taiga",
+    "minecraft:flower_forest",
+    "minecraft:birch_forest",
+    "minecraft:dark_forest",
+    "minecraft:pale_garden",
+    "minecraft:savanna_plateau",
+    "minecraft:savanna",
+    "minecraft:jungle",
+    "minecraft:badlands",
+    "minecraft:desert",
+    "minecraft:wooded_badlands",
+    "minecraft:jagged_peaks",
+    "minecraft:stony_peaks",
+    "minecraft:frozen_river",
+    "minecraft:river",
+    "minecraft:ice_spikes",
+    "minecraft:old_growth_pine_taiga",
+    "minecraft:sunflower_plains",
+    "minecraft:old_growth_birch_forest",
+    "minecraft:sparse_jungle",
+    "minecraft:bamboo_jungle",
+    "minecraft:eroded_badlands",
+    "minecraft:windswept_savanna",
+    "minecraft:cherry_grove",
+    "minecraft:frozen_peaks",
+    "minecraft:dripstone_caves",
+    "minecraft:lush_caves",
+    "minecraft:sulfur_caves",
+    "minecraft:deep_dark",
+];
 
 /// Non-vacuity: the reachable biome set must include the deep `lush_caves`
 /// biome AND at least one surface biome (decoration evidence).
@@ -73,15 +149,159 @@ pub const REQUIRED_BIOMES: &[&str] = &["minecraft:lush_caves", "minecraft:beach"
 
 /// The pinned per-biome feature-step counts (step order + holder-set order is
 /// part of the decoration semantics; a reorder must fail). Keyed by biome name.
+/// One entry per possible biome (the `biomes` table must carry every biome).
 pub const PER_BIOME_STEP_COUNTS: &[(&str, &[usize])] = &[
+    (
+        "minecraft:mushroom_fields",
+        &[0, 2, 1, 2, 0, 0, 29, 0, 2, 6, 1],
+    ),
+    (
+        "minecraft:deep_frozen_ocean",
+        &[0, 2, 3, 2, 1, 0, 29, 0, 2, 9, 1],
+    ),
+    (
+        "minecraft:frozen_ocean",
+        &[0, 2, 3, 2, 1, 0, 29, 0, 2, 9, 1],
+    ),
+    (
+        "minecraft:deep_cold_ocean",
+        &[0, 2, 1, 2, 0, 0, 29, 0, 2, 11, 1],
+    ),
+    ("minecraft:cold_ocean", &[0, 2, 1, 2, 0, 0, 29, 0, 2, 11, 1]),
+    ("minecraft:deep_ocean", &[0, 2, 1, 2, 0, 0, 29, 0, 2, 11, 1]),
+    ("minecraft:ocean", &[0, 2, 1, 2, 0, 0, 29, 0, 2, 11, 1]),
+    (
+        "minecraft:deep_lukewarm_ocean",
+        &[0, 2, 1, 2, 0, 0, 29, 0, 2, 11, 1],
+    ),
+    (
+        "minecraft:lukewarm_ocean",
+        &[0, 2, 1, 2, 0, 0, 29, 0, 2, 11, 1],
+    ),
+    ("minecraft:warm_ocean", &[0, 2, 1, 2, 0, 0, 29, 0, 2, 12, 1]),
+    ("minecraft:stony_shore", &[0, 2, 1, 2, 0, 0, 29, 0, 2, 8, 1]),
+    ("minecraft:swamp", &[0, 2, 1, 4, 0, 0, 27, 0, 2, 15, 1]),
+    (
+        "minecraft:mangrove_swamp",
+        &[0, 2, 1, 4, 0, 0, 28, 0, 2, 7, 1],
+    ),
+    (
+        "minecraft:snowy_slopes",
+        &[0, 2, 1, 2, 0, 0, 30, 1, 3, 2, 1],
+    ),
+    (
+        "minecraft:snowy_plains",
+        &[0, 2, 1, 2, 0, 0, 29, 0, 2, 9, 1],
+    ),
+    ("minecraft:snowy_beach", &[0, 2, 1, 2, 0, 0, 29, 0, 2, 8, 1]),
+    (
+        "minecraft:windswept_gravelly_hills",
+        &[0, 2, 1, 2, 0, 0, 30, 1, 2, 10, 1],
+    ),
+    ("minecraft:grove", &[0, 2, 1, 2, 0, 0, 30, 1, 3, 3, 1]),
+    (
+        "minecraft:windswept_hills",
+        &[0, 2, 1, 2, 0, 0, 30, 1, 2, 10, 1],
+    ),
+    (
+        "minecraft:snowy_taiga",
+        &[0, 2, 1, 2, 0, 0, 29, 0, 2, 11, 1],
+    ),
+    (
+        "minecraft:windswept_forest",
+        &[0, 2, 1, 2, 0, 0, 30, 1, 2, 10, 1],
+    ),
+    ("minecraft:taiga", &[0, 2, 1, 2, 0, 0, 29, 0, 2, 11, 1]),
+    ("minecraft:plains", &[0, 2, 1, 2, 0, 0, 29, 0, 2, 11, 1]),
+    ("minecraft:meadow", &[0, 2, 1, 2, 0, 0, 30, 1, 2, 6, 1]),
     ("minecraft:beach", &[0, 2, 1, 2, 0, 0, 29, 0, 2, 8, 1]),
+    ("minecraft:forest", &[0, 2, 1, 2, 0, 0, 29, 0, 2, 11, 1]),
+    (
+        "minecraft:old_growth_spruce_taiga",
+        &[0, 2, 2, 2, 0, 0, 29, 0, 2, 14, 1],
+    ),
+    (
+        "minecraft:flower_forest",
+        &[0, 2, 1, 2, 0, 0, 29, 0, 2, 10, 1],
+    ),
+    (
+        "minecraft:birch_forest",
+        &[0, 2, 1, 2, 0, 0, 29, 0, 2, 12, 1],
+    ),
     (
         "minecraft:dark_forest",
         &[0, 2, 1, 2, 0, 0, 29, 0, 2, 11, 1],
     ),
-    ("minecraft:lush_caves", &[0, 2, 1, 2, 0, 0, 30, 0, 2, 9, 1]),
-    ("minecraft:ocean", &[0, 2, 1, 2, 0, 0, 29, 0, 2, 11, 1]),
+    ("minecraft:pale_garden", &[0, 2, 1, 2, 0, 0, 29, 0, 2, 9, 1]),
+    (
+        "minecraft:savanna_plateau",
+        &[0, 2, 1, 2, 0, 0, 29, 0, 2, 10, 1],
+    ),
+    ("minecraft:savanna", &[0, 2, 1, 2, 0, 0, 29, 0, 2, 10, 1]),
+    ("minecraft:jungle", &[0, 2, 1, 2, 0, 0, 29, 0, 2, 12, 1]),
+    ("minecraft:badlands", &[0, 2, 1, 2, 0, 0, 30, 0, 2, 10, 1]),
+    ("minecraft:desert", &[0, 2, 1, 4, 1, 0, 29, 0, 2, 10, 1]),
+    (
+        "minecraft:wooded_badlands",
+        &[0, 2, 1, 2, 0, 0, 30, 0, 2, 11, 1],
+    ),
+    (
+        "minecraft:jagged_peaks",
+        &[0, 2, 1, 2, 0, 0, 30, 1, 3, 1, 1],
+    ),
+    ("minecraft:stony_peaks", &[0, 2, 1, 2, 0, 0, 30, 1, 2, 1, 1]),
+    (
+        "minecraft:frozen_river",
+        &[0, 2, 1, 2, 0, 0, 29, 0, 2, 10, 1],
+    ),
     ("minecraft:river", &[0, 2, 1, 2, 0, 0, 29, 0, 2, 11, 1]),
+    ("minecraft:ice_spikes", &[0, 2, 1, 2, 2, 0, 29, 0, 2, 9, 1]),
+    (
+        "minecraft:old_growth_pine_taiga",
+        &[0, 2, 2, 2, 0, 0, 29, 0, 2, 14, 1],
+    ),
+    (
+        "minecraft:sunflower_plains",
+        &[0, 2, 1, 2, 0, 0, 29, 0, 2, 11, 1],
+    ),
+    (
+        "minecraft:old_growth_birch_forest",
+        &[0, 2, 1, 2, 0, 0, 29, 0, 2, 12, 1],
+    ),
+    (
+        "minecraft:sparse_jungle",
+        &[0, 2, 1, 2, 0, 0, 29, 0, 2, 11, 1],
+    ),
+    (
+        "minecraft:bamboo_jungle",
+        &[0, 2, 1, 2, 0, 0, 29, 0, 2, 12, 1],
+    ),
+    (
+        "minecraft:eroded_badlands",
+        &[0, 2, 1, 2, 0, 0, 30, 0, 2, 10, 1],
+    ),
+    (
+        "minecraft:windswept_savanna",
+        &[0, 2, 1, 2, 0, 0, 29, 0, 2, 9, 1],
+    ),
+    (
+        "minecraft:cherry_grove",
+        &[0, 2, 1, 2, 0, 0, 30, 1, 2, 5, 1],
+    ),
+    (
+        "minecraft:frozen_peaks",
+        &[0, 2, 1, 2, 0, 0, 30, 1, 3, 1, 1],
+    ),
+    (
+        "minecraft:dripstone_caves",
+        &[0, 2, 2, 2, 0, 0, 29, 2, 2, 8, 1],
+    ),
+    ("minecraft:lush_caves", &[0, 2, 1, 2, 0, 0, 30, 0, 2, 9, 1]),
+    (
+        "minecraft:sulfur_caves",
+        &[0, 4, 1, 2, 0, 0, 29, 2, 2, 2, 1],
+    ),
+    ("minecraft:deep_dark", &[0, 0, 1, 2, 0, 0, 29, 2, 0, 8, 1]),
 ];
 
 /// Validate the fixture at `input` and return the source provenance from its
@@ -119,6 +339,7 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
                 | "grid_min_chunk"
                 | "grid_max_chunk"
                 | "committed_grid"
+                | "possible_biomes"
                 | "reachable_biomes"
                 | "biomes"
                 | "placed_features"
@@ -129,7 +350,35 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
         }
     }
 
-    // Reachable biome list: id-sorted names, non-empty, required biomes present.
+    // Full possible-biome list: the pinned emission (source) order — the exact
+    // `List.copyOf(biomeSource.possibleBiomes())` Paper feeds the FeatureSorter.
+    // A reorder or a missing biome changes FeatureSorter's global feature
+    // indices and must fail.
+    let possible = object
+        .get("possible_biomes")
+        .and_then(Value::as_array)
+        .context("feature_data.json is missing `possible_biomes`")?;
+    if possible.len() != POSSIBLE_BIOME_COUNT {
+        bail!(
+            "possible_biomes has {} entries but a live Paper 26.2 load has {POSSIBLE_BIOME_COUNT}",
+            possible.len()
+        );
+    }
+    let mut possible_names: Vec<&str> = Vec::with_capacity(possible.len());
+    for (i, v) in possible.iter().enumerate() {
+        let name = v
+            .as_str()
+            .with_context(|| format!("possible_biomes[{i}] is not a string"))?;
+        crate::registries::validate_name("minecraft:worldgen/biome", name)?;
+        possible_names.push(name);
+    }
+    if possible_names != POSSIBLE_BIOMES_ORDER {
+        bail!("possible_biomes order diverges from the pinned Paper 26.2 emission order");
+    }
+
+    // Reachable biome list: id-sorted names, non-empty, required biomes present,
+    // and a subset of the possible-biome set (the convergence non-vacuity
+    // anchor: what seed-42 actually drives through the committed grid).
     let reachable = object
         .get("reachable_biomes")
         .and_then(Value::as_array)
@@ -146,6 +395,11 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
             .as_str()
             .with_context(|| format!("reachable_biomes[{i}] is not a string"))?;
         crate::registries::validate_name("minecraft:worldgen/biome", name)?;
+        if !possible_names.contains(&name) {
+            bail!(
+                "reachable biome `{name}` is absent from `possible_biomes` (reachable must be a subset of possible)"
+            );
+        }
         names.push(name);
     }
     // Id-sorted is checked below against the `biomes` dense ids (the extractor
@@ -157,21 +411,27 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
         }
     }
 
-    // Biomes: key set == reachable set, each with id, carvers, features.
+    // Biomes: key set == the possible-biome set (the FULL generation settings of
+    // every biome the FeatureSorter can select), each with id, carvers, features.
     let biomes = object
         .get("biomes")
         .and_then(Value::as_object)
         .context("feature_data.json is missing `biomes`")?;
-    if biomes.len() != names.len() {
+    if biomes.len() != possible_names.len() {
         bail!(
-            "`biomes` has {} entries but reachable_biomes has {}",
+            "`biomes` has {} entries but possible_biomes has {}",
             biomes.len(),
-            names.len()
+            possible_names.len()
         );
     }
-    for name in &names {
+    for name in &possible_names {
         if !biomes.contains_key(*name) {
-            bail!("biome `{name}` is reachable but absent from `biomes`");
+            bail!("possible biome `{name}` is absent from `biomes`");
+        }
+    }
+    for name in biomes.keys() {
+        if !possible_names.contains(&name.as_str()) {
+            bail!("biome `{name}` is in `biomes` but absent from `possible_biomes`");
         }
     }
     for (name, entry) in biomes {
@@ -397,6 +657,7 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
         }
         Ok(())
     };
+    check("possible_biome_count", possible_names.len())?;
     check("reachable_biome_count", names.len())?;
     check("placed_feature_count", placed.len())?;
     check("configured_feature_count", configured.len())?;
@@ -623,6 +884,79 @@ mod tests {
     }
 
     #[test]
+    fn possible_biome_count_is_pinned() {
+        let mut root = fixture();
+        // Drop one possible biome from the list: must fail (the FeatureSorter
+        // source list is 55).
+        let mut arr = root["possible_biomes"].as_array().unwrap().clone();
+        arr.pop();
+        root["possible_biomes"] = Value::Array(arr);
+        let err = validate_structural(&root).unwrap_err();
+        assert!(
+            err.to_string().contains("possible_biomes has 54 entries"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn possible_biome_order_is_pinned() {
+        let mut root = fixture();
+        // Swap two entries of the possible list: must fail (the emission order
+        // fixes FeatureSorter's global feature indices).
+        let mut arr = root["possible_biomes"].as_array().unwrap().clone();
+        arr.swap(0, 1);
+        root["possible_biomes"] = Value::Array(arr);
+        let err = validate_structural(&root).unwrap_err();
+        assert!(
+            err.to_string().contains("order diverges from the pinned"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn reachable_biomes_must_be_a_subset_of_possible() {
+        let mut root = fixture();
+        // Replace a reachable name with one that is not in the possible list
+        // (keep the count at 5 so the subset check — not the count check —
+        // fires): must fail.
+        let mut arr = root["reachable_biomes"].as_array().unwrap().clone();
+        arr[0] = serde_json::json!("minecraft:the_end");
+        root["reachable_biomes"] = Value::Array(arr);
+        let err = validate_structural(&root).unwrap_err();
+        assert!(
+            err.to_string().contains("absent from `possible_biomes`"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn biomes_key_set_must_equal_possible_set() {
+        let mut root = fixture();
+        // Remove one biome from `biomes`: must fail (every possible biome needs
+        // its full generation settings). The cardinality check fires first
+        // (55 -> 54).
+        let removed = root["possible_biomes"][0].as_str().unwrap().to_string();
+        root["biomes"].as_object_mut().unwrap().remove(&removed);
+        let err = validate_structural(&root).unwrap_err();
+        assert!(
+            err.to_string().contains("`biomes` has 54 entries"),
+            "got: {err}"
+        );
+
+        // And a `biomes` entry that is not in the possible list must fail too.
+        let mut root = fixture();
+        root["biomes"].as_object_mut().unwrap().insert(
+            "minecraft:the_end".to_string(),
+            serde_json::json!({ "id": 200, "carvers": [], "features": [[],[],[],[],[],[],[],[],[],[],[]] }),
+        );
+        let err = validate_structural(&root).unwrap_err();
+        assert!(
+            err.to_string().contains("`biomes` has 56 entries"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
     fn reachable_biome_order_is_pinned() {
         let mut root = fixture();
         // Reverse the reachable list: must fail (id-sorted order is part of the
@@ -700,36 +1034,48 @@ mod tests {
     #[test]
     fn removed_configured_only_placed_feature_fails_dangling() {
         let mut root = fixture();
-        // `minecraft:oak_checked` is a placed feature referenced ONLY by the
-        // configured `minecraft:trees_water` JSON under the holder key `default`
-        // (never in any biome step list). Dropping it from the tables must fail:
-        // the reference is still present and would dangle. A membership-only
-        // check (resolve refs against the tables being validated) would have
-        // accepted this, because the dropped entry is itself a table member the
-        // reference "resolves" against — the holder-key check makes the edge
-        // structurally explicit.
+        // `minecraft:acacia_checked` is a placed feature referenced ONLY by the
+        // configured `minecraft:trees_savanna` JSON under the holder key
+        // `feature` (never in any biome step list). Dropping it from the tables
+        // must fail: the reference is still present and would dangle. A
+        // membership-only check (resolve refs against the tables being
+        // validated) would have accepted this, because the dropped entry is
+        // itself a table member the reference "resolves" against — the
+        // holder-key check makes the edge structurally explicit.
         assert!(
-            root["placed_features"]["minecraft:oak_checked"].is_object(),
-            "fixture must carry `minecraft:oak_checked` as a placed feature"
+            root["placed_features"]["minecraft:acacia_checked"].is_object(),
+            "fixture must carry `minecraft:acacia_checked` as a placed feature"
         );
         assert!(
             !root["configured_features"]
                 .as_object()
                 .unwrap()
-                .contains_key("minecraft:oak_checked"),
-            "`minecraft:oak_checked` must not be a configured feature (that would mask the edge)"
+                .contains_key("minecraft:acacia_checked"),
+            "`minecraft:acacia_checked` must not be a configured feature (that would mask the edge)"
+        );
+        assert!(
+            !root["biomes"]
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|b| b["features"].as_array().unwrap().iter().any(|s| s
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|p| *p == serde_json::json!("minecraft:acacia_checked")))),
+            "`minecraft:acacia_checked` must not appear in any biome step list (that would mask the edge)"
         );
         root["placed_features"]
             .as_object_mut()
             .unwrap()
-            .remove("minecraft:oak_checked");
+            .remove("minecraft:acacia_checked");
         let err = validate_structural(&root).unwrap_err();
         assert!(
             err.to_string().contains("dangling holder reference"),
             "got: {err}"
         );
         assert!(
-            err.to_string().contains("minecraft:oak_checked"),
+            err.to_string().contains("minecraft:acacia_checked"),
             "got: {err}"
         );
     }
@@ -737,21 +1083,23 @@ mod tests {
     #[test]
     fn dereferenced_configured_only_placed_feature_fails_dead_entry() {
         let mut root = fixture();
-        // Point `minecraft:trees_water`'s `default` holder ref away from
-        // `minecraft:oak_checked` while keeping the entry in the table: the
-        // reference now resolves (`minecraft:oak` is a configured member), so no
-        // dangling ref is reported, but `minecraft:oak_checked` becomes
-        // unreachable and must fail the dead-entry check.
+        // Point `minecraft:trees_savanna`'s `feature` holder ref (the first
+        // weighted placed feature) away from `minecraft:acacia_checked` while
+        // keeping the entry in the table: the reference now resolves
+        // (`minecraft:oak_checked` is a placed member), so no dangling ref is
+        // reported, but `minecraft:acacia_checked` becomes unreachable and must
+        // fail the dead-entry check.
         assert_eq!(
-            root["configured_features"]["minecraft:trees_water"]["json"]["config"]["default"],
-            serde_json::json!("minecraft:oak_checked")
+            root["configured_features"]["minecraft:trees_savanna"]["json"]["config"]["features"][0]
+                ["feature"],
+            serde_json::json!("minecraft:acacia_checked")
         );
-        root["configured_features"]["minecraft:trees_water"]["json"]["config"]["default"] =
-            serde_json::json!("minecraft:oak");
+        root["configured_features"]["minecraft:trees_savanna"]["json"]["config"]["features"][0]["feature"] =
+            serde_json::json!("minecraft:oak_checked");
         let err = validate_structural(&root).unwrap_err();
         assert!(err.to_string().contains("unreachable"), "got: {err}");
         assert!(
-            err.to_string().contains("minecraft:oak_checked"),
+            err.to_string().contains("minecraft:acacia_checked"),
             "got: {err}"
         );
     }
