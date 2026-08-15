@@ -1,8 +1,8 @@
 //! `rivet-codegen` feature-data validation half — consume the committed
 //! `data/feature_data.json` fixture (produced by `extract-feature-data`, see
 //! [`crate::extract_feature_data`]) and validate its structure, provenance,
-//! order, and closure. The Rust table generation that consumes this fixture is
-//! a later slice; this module is the fixture's contract.
+//! order, and closure. The generation half that consumes this fixture is
+//! [`crate::feature_tables`]; this module is the fixture's contract.
 //!
 //! The fixture is the seed-42 FEATURES data foundation:
 //!
@@ -79,8 +79,10 @@ pub fn validate(input: &Path) -> Result<SourceProvenance> {
 }
 
 /// Structural + order + closure validation, independent of the live-Paper
-/// anchors (which only the real fixture passes).
-fn validate_structural(root: &Value) -> Result<()> {
+/// anchors (which only the real fixture passes). `pub(crate)` so the generation
+/// half ([`crate::feature_tables`]) enforces the full contract on the fixture
+/// it renders.
+pub(crate) fn validate_structural(root: &Value) -> Result<()> {
     let object = root
         .as_object()
         .context("feature_data.json root must be a JSON object")?;
@@ -418,7 +420,9 @@ fn collect_bare_strings(elem: &Value) -> Vec<&str> {
 /// Link the fixture to its pinned provenance: the fixture must match the sha256
 /// recorded next to it in its sibling `<fixture>.manifest.json` (the same path
 /// `extract-feature-data` writes, so a custom `--output` resolves correctly).
-fn load_provenance(input: &Path) -> Result<SourceProvenance> {
+/// `pub(crate)` so the generation half pins the same source identity it renders
+/// into the emitted table header.
+pub(crate) fn load_provenance(input: &Path) -> Result<SourceProvenance> {
     let manifest_path = input.with_extension("manifest.json");
     let manifest_json = fs::read_to_string(&manifest_path).with_context(|| {
         format!(
