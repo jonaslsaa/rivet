@@ -509,7 +509,9 @@ impl FeatureId {
 ///
 /// This unit ports the dispatch and covers the leaves it can faithfully
 /// reach: `minecraft:no_op` (id 0, `NoOpFeature` over `NoneFeatureConfiguration`),
-/// this wave (issue #600) the five `.feature.selector` leaves —
+/// the ore unit (`mc.world.level.levelgen.feature.ore`) — `ore` (id 28,
+/// `OreFeature`) and `scattered_ore` (id 51, `ScatteredOreFeature`) — this
+/// wave (issue #600) the five `.feature.selector` leaves —
 /// `random_selector` (id 52, `RandomSelectorFeature` over
 /// `RandomFeatureConfiguration`), `weighted_random_selector` (id 53,
 /// `WeightedRandomSelectorFeature` over `WeightedRandomFeatureConfiguration`),
@@ -522,9 +524,9 @@ impl FeatureId {
 /// `.feature.geology*` leaves, in registry-id order: `spring_feature` (id 4),
 /// `spike` (id 12), `disk` (id 26), `lake` (id 27, the nested
 /// `LakeFeature.Configuration`), `delta_feature` (id 46),
-/// `netherrack_replace_blobs` (id 47), `scattered_ore` (id 51, deferring to the
-/// `#399` `canPlaceOre` seam), `geode` (id 58), and `sculk_patch` (id 62,
-/// deferring to the `#232` SculkSpreader seam) — whose ids are the feature
+/// `netherrack_replace_blobs` (id 47), `scattered_ore` (id 51), `geode` (id 58),
+/// and `sculk_patch` (id 62, deferring to the `#232` SculkSpreader seam) —
+/// whose ids are the feature
 /// registry's insertion indices (protocol ids in `registries.json`; the
 /// registration table's 63 `register(...)` calls are counted directly from
 /// `Feature.java`).

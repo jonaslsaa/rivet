@@ -266,9 +266,10 @@ mod tests {
     }
 
     /// `place` returns `true` unconditionally (Java's final statement) even
-    /// when the per-try write decision is unavailable — the draw/offset walk
-    /// runs before the deferred write branch. Uses a non-zero `size` so the
-    /// per-try offset walk actually runs.
+    /// when no per-try write fires — with an empty target list (or every
+    /// `can_place_ore` gate failing) the write simply may not happen for a
+    /// given try. Uses a non-zero `size` so the per-try offset walk actually
+    /// runs.
     #[test]
     fn place_returns_true_unconditionally() {
         let mut level = crate::levelgen::feature::test_support::TestLevel::over(
