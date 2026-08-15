@@ -105,6 +105,10 @@ pub mod huge_red_mushroom_feature;
 pub mod iceberg_feature;
 pub mod simple_block_feature;
 pub mod snow_and_freeze_feature;
+// The seed-42 feature slice — `UnderwaterMagmaFeature` (the
+// `mc.world.level.levelgen.feature.underwatermagma` manifest unit), wired at
+// id 21.
+pub mod underwater_magma_feature;
 pub mod vines_feature;
 
 // The `net.minecraft.world.level.levelgen.feature.stateproviders` value layer
@@ -220,6 +224,7 @@ use crate::levelgen::feature::configurations::SculkPatchConfiguration;
 use crate::levelgen::feature::configurations::SimpleBlockConfiguration;
 use crate::levelgen::feature::configurations::SpikeConfiguration;
 use crate::levelgen::feature::configurations::SpringConfiguration;
+use crate::levelgen::feature::configurations::UnderwaterMagmaConfiguration;
 use crate::levelgen::feature::configurations::WeightedRandomFeatureConfiguration;
 use crate::levelgen::feature::no_op_feature::NO_OP;
 use rivet_registry::Holder;
@@ -267,6 +272,7 @@ pub use simple_block_feature::{SIMPLE_BLOCK, SimpleBlockFeature};
 pub use snow_and_freeze_feature::{FREEZE_TOP_LAYER, SnowAndFreezeFeature};
 pub use spike_feature::{SPIKE, SpikeFeature};
 pub use spring_feature::{SPRING, SpringFeature};
+pub use underwater_magma_feature::{UNDERWATER_MAGMA, UnderwaterMagmaFeature};
 pub use vines_feature::{VINES, VinesFeature};
 
 // The vegetation-family wave (issue #600) — the `.feature.selector` unit's
@@ -881,6 +887,15 @@ pub fn feature_place<R: RandomSource>(
                 .downcast_ref::<SimpleBlockConfiguration>()
                 .expect("simple_block feature must carry a SimpleBlockConfiguration");
             SIMPLE_BLOCK.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.UNDERWATER_MAGMA` — the registered `minecraft:underwater_magma`
+        // leaf (the water-column floor scan + magma placement slice; the
+        // face-occlusion visibility uses the `#232`/`mc.world.phys.shapes` seam).
+        21 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<UnderwaterMagmaConfiguration>()
+                .expect("underwater_magma feature must carry a UnderwaterMagmaConfiguration");
+            UNDERWATER_MAGMA.place_with_config(config, level, chunk_generator, random, origin)
         }
         // `Feature.BASALT_COLUMNS`.
         45 => {
