@@ -11,16 +11,16 @@
 //! that state (`level.setBlock(targetPos, targetState.state,
 //! Block.UPDATE_CLIENTS)`), before returning `true` unconditionally.
 //!
-//! The offset helpers are fully ported and test-pinned. The write decision
-//! DEFERS: `can_place_ore` evaluates the erased `RuleTest` (`RivetTodo #399`),
-//! and the write routes through `level.set_block` (`RivetTodo #232`). The
-//! port reaches the unconditional `return true` only on the vacuous paths
-//! (empty `target_states`, or `numberOfTries == 0`); on a production
-//! `WorldGenLevel` the per-try read is live and the failure seam is
-//! `can_place_ore` (#399), which panics before the final `return true`.
-//! The shared feature-core `#181` dispatch arm (id 51, in `mod.rs`) resolves
-//! against this unit's `SCATTERED_ORE`; this unit provides the
-//! `ScatteredOreFeature`/`SCATTERED_ORE` types, not the dispatch wiring.
+//! The offset helpers are fully ported and test-pinned, and the write
+//! decision is live: [`can_place_ore`] evaluates the erased `RuleTest` via the
+//! templatesystem `erased_test` downcast dispatch, and the write routes
+//! through `level.set_block(target_pos, target_state.state, UPDATE_CLIENTS)`
+//! (`Block.UPDATE_CLIENTS = 2`, matching Java's `setBlockState` with the
+//! update-flag). `place` returns `true` unconditionally (Java's final
+//! statement) regardless of how many tries wrote. The shared feature-core
+//! `#181` dispatch arm (id 51, in `mod.rs`) resolves against this unit's
+//! `SCATTERED_ORE`; this unit provides the `ScatteredOreFeature`/`SCATTERED_ORE`
+//! types, not the dispatch wiring.
 
 use crate::level::WorldGenLevel;
 use crate::levelgen::feature::FeatureBehavior;
@@ -92,17 +92,12 @@ impl FeatureBehavior<OreConfiguration> for ScatteredOreFeature {
     /// `ScatteredOreFeature.place(FeaturePlaceContext<OreConfiguration>)`:
     /// `numberOfTries = nextInt(size + 1)`; per try the target is offset by
     /// `Math.min(i, 7)` per axis (three `nextFloat` pairs); the first
-    /// `canPlaceOre`-passing target would be written with
-    /// `Block.UPDATE_CLIENTS`. Returns `true` unconditionally (Java's final
-    /// statement).
-    ///
-    /// DEFERS (never a fabricated write): the write decision is
-    /// [`can_place_ore`] (erased `RuleTest`, RivetTodo #399) and the write
-    /// routes through `level.set_block` (RivetTodo #232). The per-try walk
-    /// still consumes the exact Java draws (offset geometry is test-pinned);
-    /// on a production `WorldGenLevel` the per-try read is live, so each try
-    /// completes and the failure seam is `can_place_ore` (#399), which panics
-    /// before any write.
+    /// `canPlaceOre`-passing target is written with `Block.UPDATE_CLIENTS`
+    /// (2). Returns `true` unconditionally (Java's final statement), even when
+    /// no target passed. `can_place_ore` evaluates the erased `RuleTest` via
+    /// the [`erased_test`] dispatch and reads the level (the inlined
+    /// `|pos| level.get_block_state(pos)` mirroring Java's
+    /// `level::getBlockState` block getter).
     fn place<R: RandomSource>(
         &self,
         context: &mut FeaturePlaceContext<'_, OreConfiguration, R>,
@@ -125,7 +120,6 @@ impl FeatureBehavior<OreConfiguration> for ScatteredOreFeature {
             let block_state = level.get_block_state(&target_pos);
 
             for target_state in &config.target_states {
-                // `OreFeature.canPlaceOre(...)` — DEFERS (RivetTodo #399).
                 if can_place_ore(
                     &block_state,
                     |pos| level.get_block_state(pos),
@@ -298,22 +292,16 @@ mod tests {
         );
     }
 
-    /// Non-vacuous drive of the per-try offset walk: with `numberOfTries > 0`
-    /// and at least one target state, each try offsets the target (three
-    /// `nextFloat` pairs) and reads it through `WorldGenLevel::get_block_state`
-    /// — the `TestLevel` read answers from its map, so the walk completes and
-    /// reaches `can_place_ore`, whose erased-`RuleTest` `#399` gate panics
-    /// before any write. This pins the draw order (`nextInt(size + 1)`, then
-    /// per try the `Math.min(i, 7)`-bounded offset pairs) and confirms the
-    /// write branch never fabricates a write. The match below REQUIRES that
-    /// `#399` panic — a `place` returning `Ok` fails the test — so the
-    /// non-vacuity is structural: a seed whose `nextInt(size + 1)` draws 0
-    /// (no tries, no floats, no gate reach) can no longer pass silently. (On a
-    /// production `WorldGenLevel` the read is also live — `WorldGenRegion`
-    /// answers from its chunks — so the failure seam stays `can_place_ore`
-    /// (#399); a `TestLevel` read is likewise not a seam.)
+    /// Non-vacuous drive of the per-try offset walk with a live write: with
+    /// `numberOfTries > 0` and an always-true target, each try offsets the
+    /// target (three `nextFloat` pairs), reads it through the `TestLevel`
+    /// map, passes `can_place_ore`, and records the write with
+    /// `Block.UPDATE_CLIENTS` (2). With discard chance 0 the gate's
+    /// `should_skip_air_check` short-circuits without a draw, so each try
+    /// consumes exactly six floats and writes exactly once: the write count
+    /// equals the float count divided by six.
     #[test]
-    fn place_walks_per_try_offsets_then_panics_at_the_erased_gate() {
+    fn place_walks_per_try_offsets_and_writes_with_update_clients() {
         use crate::levelgen::feature::configurations::TargetBlockState;
         use crate::levelgen::feature::test_support::{
             RecordingRandom, RngCall, TestGenerator, TestLevel, access,
@@ -325,29 +313,28 @@ mod tests {
         let mut level = TestLevel::over(access());
         let origin = BlockPos::new(0, 64, 0);
         let generator = TestGenerator;
+        let ore_state = BlockState::of(BlockId(1));
         let config = OreConfiguration::new_without_discard_chance(
-            vec![TargetBlockState::new(
-                Arc::new(AlwaysTrueTest),
-                BlockState::of(BlockId(0)),
-            )],
+            vec![TargetBlockState::new(Arc::new(AlwaysTrueTest), ore_state)],
             8,
         );
         let mut random = RecordingRandom::new(1);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            SCATTERED_ORE.place(&mut FeaturePlaceContext::new(
-                None,
-                &mut level,
-                &generator,
-                &mut random,
-                &origin,
-                &config,
-            ))
-        }));
-        // Draw order: `nextInt(size + 1)` for numberOfTries, then per try three
-        // `nextFloat` pairs for the offset walk. The first try always consumes
-        // its three pairs before the erased `#399` gate (which panics).
-        let number_of_tries = random.calls.first();
-        match number_of_tries {
+        let result = SCATTERED_ORE.place(&mut FeaturePlaceContext::new(
+            None,
+            &mut level,
+            &generator,
+            &mut random,
+            &origin,
+            &config,
+        ));
+        assert!(
+            result,
+            "ScatteredOreFeature.place returns true unconditionally"
+        );
+        // Draw order: `nextInt(size + 1)` for numberOfTries, then per try the
+        // six offset floats (three axis pairs). The always-true rule and the
+        // discard-chance-0 short-circuit draw nothing.
+        match random.calls.first() {
             Some(RngCall::IntBound(bound)) => assert_eq!(*bound, 9, "nextInt(size + 1)"),
             other => panic!("first draw must be nextInt(size + 1), got {other:?}"),
         }
@@ -359,64 +346,110 @@ mod tests {
             .count();
         assert!(
             per_try_floats > 0,
-            "the walk must reach the erased gate: a non-zero numberOfTries draws at least six floats"
+            "a non-zero numberOfTries draws at least six floats"
         );
         assert_eq!(
             per_try_floats % 6,
             0,
             "each try consumes exactly six floats (three axis pairs)"
         );
-        // The walk MUST reach the `#399` gate and fail there. A `place` that
-        // returns `Ok` means `numberOfTries` was 0 — the loop never ran and
-        // `can_place_ore` was never reached — so this test would have passed
-        // vacuously; requiring the panic makes the non-vacuity structural
-        // rather than an implicit property of the fixed seed.
-        match result {
-            Ok(_) => panic!(
-                "place returned Ok — the per-try walk must reach the erased #399 gate and fail there; \
-                 numberOfTries was 0 (seed drew 0 from nextInt(size + 1))"
-            ),
-            Err(payload) => {
-                let text = payload
-                    .downcast_ref::<&str>()
-                    .copied()
-                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-                    .unwrap_or("<non-string panic>");
-                assert!(
-                    text.contains("RivetTodo #399"),
-                    "the per-try walk reaches the erased gate and fails there, got {text:?}"
-                );
-            }
+        assert_eq!(
+            level.writes.len(),
+            per_try_floats / 6,
+            "each try with an always-true target writes exactly once"
+        );
+        assert_eq!(
+            level.writes_flags.len(),
+            level.writes.len(),
+            "every write records its update flag"
+        );
+        for (i, (pos, state)) in level.writes.iter().enumerate() {
+            assert_eq!(*state, ore_state, "write carries the target state");
+            assert_eq!(
+                level.writes_flags[i], UPDATE_CLIENTS,
+                "scattered-ore writes use Block.UPDATE_CLIENTS (2)"
+            );
+            // Every written position is within MAX_DIST_FROM_ORIGIN of origin
+            // (the per-try offset cap `Math.min(i, 7)`).
+            let dx = (pos.get_x() - origin.get_x()).unsigned_abs();
+            let dy = (pos.get_y() - origin.get_y()).unsigned_abs();
+            let dz = (pos.get_z() - origin.get_z()).unsigned_abs();
+            assert!(dx <= 7 && dy <= 7 && dz <= 7);
         }
     }
 
-    /// `can_place_ore` — the `#399` deferral — is honest: the per-try write
-    /// decision panics with the seam message rather than fabricating a verdict.
+    /// The erased-`RuleTest` dispatch resolution on the `can_place_ore` gate:
+    /// an always-true target passes (drawing nothing — the discard-chance-0
+    /// short-circuit means the air-check roll is never reached), while a
+    /// `BlockStateMatchTest` that never matches fails and also consumes zero
+    /// draws (Java's short-circuit). Both pins run through the same
+    /// `RecordingRandom` draw stream so the zero-draw property is structural.
     #[test]
-    #[should_panic(expected = "RivetTodo #399")]
-    fn can_place_ore_fails_explicitly_until_erased_evaluation_lands() {
+    fn can_place_ore_erased_dispatch_matches_and_skips_without_draws() {
         use crate::levelgen::feature::configurations::TargetBlockState;
         use crate::levelgen::feature::ore_feature::can_place_ore;
+        use crate::levelgen::feature::test_support::RecordingRandom;
         use crate::levelgen::structure::templatesystem::always_true_test::AlwaysTrueTest;
+        use crate::levelgen::structure::templatesystem::block_state_match_test::BlockStateMatchTest;
         use rivet_registry::generated::blocks::BlockId;
         use std::sync::Arc;
 
+        let air = BlockState::of(BlockId(0));
+        let stone = BlockState::of(BlockId::from_name("minecraft:stone").unwrap());
+        let ore_state = BlockState::of(BlockId(1));
+        let target_pos = BlockPos::new(0, 64, 0);
+
+        // Always-true target: the erased dispatch resolves to AlwaysTrueTest,
+        // which matches without drawing, and with discard chance 0.0
+        // `should_skip_air_check` short-circuits true without a draw either.
+        let config = OreConfiguration::new_without_discard_chance(
+            vec![TargetBlockState::new(Arc::new(AlwaysTrueTest), ore_state)],
+            0,
+        );
+        let mut random = RecordingRandom::new(1);
+        assert!(
+            can_place_ore(
+                &air,
+                |_pos| air,
+                &mut random,
+                &config,
+                &config.target_states[0],
+                &target_pos,
+            ),
+            "an always-true rule test passes canPlaceOre"
+        );
+        assert_eq!(
+            random.calls,
+            vec![],
+            "always-true match + discard-chance-0 short-circuit consume zero draws"
+        );
+
+        // Never-match target (BlockStateMatchTest for stone over an air cell):
+        // the erased dispatch evaluates to false, consuming zero draws, so the
+        // gate fails before the air-check roll.
         let config = OreConfiguration::new_without_discard_chance(
             vec![TargetBlockState::new(
-                Arc::new(AlwaysTrueTest),
-                BlockState::of(BlockId(0)),
+                Arc::new(BlockStateMatchTest::new(stone)),
+                ore_state,
             )],
             0,
         );
-        let mut random = LegacyRandomSource::new(1);
-        let target = BlockPos::new(0, 64, 0);
-        let _ = can_place_ore(
-            &BlockState::of(BlockId(0)),
-            |_pos| BlockState::of(BlockId(0)),
-            &mut random,
-            &config,
-            &config.target_states[0],
-            &target,
+        let mut random = RecordingRandom::new(1);
+        assert!(
+            !can_place_ore(
+                &air,
+                |_pos| air,
+                &mut random,
+                &config,
+                &config.target_states[0],
+                &target_pos,
+            ),
+            "a stone-match test over an air cell fails"
+        );
+        assert_eq!(
+            random.calls,
+            vec![],
+            "a non-matching rule test consumes zero draws (Java short-circuit)"
         );
     }
 }

@@ -9,22 +9,21 @@
 //! enclosing-radius elimination pass, then walks each surviving sphere's
 //! bounding box in `x,y,z` order, testing the unit-sphere equation `xd*xd +
 //! yd*yd + zd*zd < 1.0` with the `BitSet` dedup, and writes the first matching
-//! target state via the `BulkSectionAccess` section cache.
+//! target state.
 //!
 //! The port follows the exact Java structure: [`place`] computes the axis
 //! endpoints and probes the height; [`do_place`] runs the data-array /
-//! elimination / per-sphere traversal faithfully. The two *write-decision*
-//! seams defer:
-//! - [`can_place_ore`] DEFERS (RivetTodo #399): its first conjunct evaluates
-//!   `targetState.target().test(state, random)` on the erased `RuleTest`
-//!   carrier, and the templatesystem unit's `ErasedRuleTest` deliberately has
-//!   no object-safe `test` (`RandomSource` is `Sized`, so `RuleTest::test` is
-//!   not dispatchable through `dyn`); the erased-evaluation surface is owned by
-//!   that unit and is not ported anywhere yet. Both `place` bodies route every
-//!   write through it, so neither can place until that lands.
-//! - The `BulkSectionAccess`/`LevelChunkSection` section read/write routes
-//!   through the [`OreSectionAccess`] typed seam (RivetTodo #232: the chunk
-//!   section surface no `WorldGenLevel` provides yet).
+//! elimination / per-sphere traversal faithfully; [`can_place_ore`] applies
+//! the per-cell gate. The write phase routes through the `WorldGenLevel`
+//! surface (`get_block_state`/`set_block`) rather than a `BulkSectionAccess`:
+//! Java's `getSection` returns `null` only when the section index is out of
+//! range, which for the standard section-aligned world height is exactly
+//! `isOutsideBuildHeight(y)` — already excluded by the unit-sphere guard — so
+//! the null branch is dead code and the level read/write is behaviorally
+//! identical (the section state, AIR for an absent/empty section, reflecting
+//! writes made earlier in the same blob). The write is
+//! `section.setBlockState(..., false)` — a raw section write with no
+//! `Block.UPDATE_*` flags — ported as `set_block(pos, state, 0)`.
 //!
 //! `shouldSkipAirCheck` is fully ported and reachable. Fidelity notes
 //! (PORTING.md):
@@ -39,7 +38,6 @@
 //! - `Mth.ceil(spreadXY)` is the f32 ceil cast (saturating); `Mth.floor(xx -
 //!   r)`/`Mth.floor(xx + r)` are the f64 floor overload (both operands are
 //!   double) — `ceil`/`floor_d` respectively. `int` arithmetic wraps.
-//! - `SectionPos.sectionRelative` is `x & 15`.
 //! - `Math.max(Mth.floor(...), xStart)` mirrors Java's `Math.max(int, int)`.
 //! - The `BitSet` index is `x - xStart + (y - yStart) * sizeXZ + (z - zStart) *
 //!   sizeXZ * sizeY`.
@@ -49,10 +47,11 @@ use crate::levelgen::feature::FeatureBehavior;
 use crate::levelgen::feature::FeaturePlaceContext;
 use crate::levelgen::feature::configurations::OreConfiguration;
 use crate::levelgen::feature::configurations::TargetBlockState;
+use crate::levelgen::feature::is_adjacent_to_air;
 use crate::levelgen::heightmap::Types;
+use crate::levelgen::structure::templatesystem::rule_test::erased_test;
 use rivet_registry::block_state::BlockState;
 use rivet_registry::core::BlockPos;
-use rivet_registry::generated::blocks::BlockId;
 use rivet_util::RandomSource;
 use rivet_util::mth::{PI, ceil, floor_d, lerp, sin};
 
@@ -117,62 +116,24 @@ pub fn should_skip_air_check(
 ///         || !isAdjacentToAir(blockGetter, orePos));
 /// ```
 ///
-/// The second conjunct (air-exposure discard) is fully portable: it reads only
-/// the RNG, the discard chance, and the six axis-neighbor states. The FIRST
-/// conjunct DEFERS: `targetState.target` is an `Arc<dyn ErasedRuleTest>`, and
-/// the erased carrier has no object-safe `test` (the templatesystem unit's
-/// documented split; `RandomSource` is `Sized`). Evaluating it would require
-/// the erased-evaluation dispatch that unit owns and has not ported — this
-/// unit must not fabricate it. So `can_place_ore` fails explicitly rather than
-/// fabricating a verdict (the same capability-unavailable seam the `#232`
-/// world seams use), marked `RivetTodo(#399)`. Both `place` bodies route every
-/// write through it, so neither can place until the erased evaluation lands.
-///
-/// The getter is `FnMut`, not `Fn`: `do_place` passes a section-backed getter
-/// that re-enters the mutable `BulkSectionAccess` cache (Java's
-/// `sectionGetter::getBlockState`), and re-entering a mutable access is a
-/// mutation. A read-only getter still satisfies the looser bound.
+/// Fully faithful: the first conjunct evaluates the erased `RuleTest` via the
+/// templatesystem [`erased_test`] downcast dispatch (all six Paper types in
+/// that unit's scope), then the air-exposure discard reads the RNG and the six
+/// axis-neighbor states through `is_adjacent_to_air`. The draw order matches
+/// Java's short-circuit: a rule test on a non-matching state consumes nothing,
+/// a probability roll happens only on a match, and `should_skip_air_check`
+/// rolls only when the rule matched.
 pub fn can_place_ore<R: RandomSource>(
-    _ore_pos_state: &BlockState,
-    _block_getter: impl FnMut(&BlockPos) -> BlockState,
-    _random: &mut R,
-    _config: &OreConfiguration,
-    _target_state: &TargetBlockState,
-    _ore_pos: &BlockPos,
+    ore_pos_state: &BlockState,
+    block_getter: impl Fn(&BlockPos) -> BlockState,
+    random: &mut R,
+    config: &OreConfiguration,
+    target_state: &TargetBlockState,
+    ore_pos: &BlockPos,
 ) -> bool {
-    panic!(
-        "OreFeature.canPlaceOre is not implemented (RivetTodo #399: the erased RuleTest has no object-safe test; the templatesystem unit owns the erased-evaluation dispatch)"
-    )
-}
-
-/// The `BulkSectionAccess`-shaped section surface `do_place` writes through —
-/// `getSection(BlockPos)` returning the mutable `LevelChunkSection` (Java
-/// `null` when the column has no section, which skips the write).
-///
-/// STUB(mc.world.level.levelgen.feature.ore-runtime): the section-level read
-/// seam the blob writes route through. The `#232` chunk section
-/// infrastructure is not reachable from a `WorldGenLevel` yet; concrete worlds
-/// and test doubles override it when they land. The write path is doubly
-/// deferred, but the ordering matters: `do_place` enters this seam (the
-/// `get_or_insert_with` `#232` panic) the moment a write candidate is reached
-/// — BEFORE [`can_place_ore`]'s `#399` gate is consulted. So a write candidate
-/// observably enters the `#232` seam first, and neither a write decision nor a
-/// write is observable until both land.
-pub trait OreSectionAccess {
-    /// `BulkSectionAccess.getSection(BlockPos)` — the mutable section at the
-    /// position, or `None` (Java `null`) when the section is absent.
-    fn get_section(&mut self, pos: &BlockPos) -> Option<OreSection>;
-}
-
-/// `LevelChunkSection` restricted to the ore write surface — the
-/// `getBlockState`/`setBlockState` pair `do_place` uses (the same shape
-/// `ImposterProtoChunk`'s `LevelChunkSection<T, B>` provides).
-pub struct OreSection {
-    /// `getBlockState(int, int, int)` — the section-relative read.
-    pub get_block_state: Box<dyn Fn(i32, i32, i32) -> BlockState>,
-    /// `setBlockState(int, int, int, BlockState)` — the section-relative write
-    /// (Java's `setBlockState(..., false)` — no update flag).
-    pub set_block_state: Box<dyn FnMut(i32, i32, i32, BlockState)>,
+    erased_test(&target_state.target, ore_pos_state, random)
+        && (should_skip_air_check(random, config.discard_chance_on_air_exposure)
+            || !is_adjacent_to_air(block_getter, ore_pos))
 }
 
 /// `OreFeature.place(FeaturePlaceContext<OreConfiguration>)` — the blob axis
@@ -184,8 +145,7 @@ pub struct OreSection {
 /// axis endpoints, then `y0 = originY + nextInt(3) - 2` and `y1 = originY +
 /// nextInt(3) - 2` (two more draws). The height probe reads
 /// `level.get_height_at(Types::OceanFloorWg, xprobe, zprobe)` — a live read
-/// on `WorldGenRegion` (the primed chunk heightmap, `minY + 1` fallback), so
-/// the height probe completes; the failure seam is the write phase.
+/// on `WorldGenRegion` (the primed chunk heightmap, `minY + 1` fallback).
 ///
 /// The probe order is preserved exactly: the `(x_probe, z_probe)` double loop
 /// over the bounding box returns at the first probe whose height clears
@@ -239,11 +199,12 @@ pub fn place<R: RandomSource>(
 /// `placed > 0` as the verdict. `xMin..=xMax` etc. mirror the inclusive Java
 /// `for` loops.
 ///
-/// The write path defers: each cell's placement gate is [`can_place_ore`]
-/// (#399), and the section read/write routes through the [`OreSectionAccess`]
-/// seam (a `LevelChunkSection`-shaped surface no production world provides
-/// yet). The geometry and RNG draw order above that are faithful and
-/// test-pinnable.
+/// Each surviving cell's placement gate is [`can_place_ore`], and a passing
+/// cell is written through the `WorldGenLevel` surface. Java's `BulkSectionAccess`
+/// section cache is not ported (the null-section branch is dead code — see the
+/// module doc), so the write phase reads the level and writes
+/// `set_block(pos, state, 0)` for the section-raw `setBlockState(..., false)`
+/// write.
 ///
 /// `#[allow(clippy::neg_cmp_op_on_partial_ord)]`: the Java culling tests are
 /// literally `!(data[...] <= 0.0)` / `!(r < 0.0)` — a NaN radius survives both
@@ -311,13 +272,14 @@ fn do_place<R: RandomSource>(
         }
     }
 
-    // `try (BulkSectionAccess sectionGetter = new BulkSectionAccess(level))` —
-    // the section cache is opened once for the whole write phase. The seam
-    // panics on the first write candidate reached (RivetTodo #232) — before
-    // `can_place_ore` (#399) is consulted — so a write candidate observably
-    // enters the `#232` seam first; neither a write decision nor a write is
-    // observable until both land.
-    let mut section_access: Option<Box<dyn OreSectionAccess>> = None;
+    // Java's `try (BulkSectionAccess ...)` is not ported: `getSection` returns
+    // null only when the section index is out of range, which for the standard
+    // section-aligned world height is exactly `isOutsideBuildHeight(y)` — a
+    // condition the unit-sphere guard above already excludes — so the null
+    // branch is dead code and the write phase reads/writes through the
+    // `WorldGenLevel` surface instead (see the module doc). The level read
+    // answers the section cache's semantics: AIR for an empty/absent section,
+    // reflecting writes made earlier in the same blob.
     for i in 0..size {
         let r = data[i as usize * 4 + 3];
         if !(r < 0.0) {
@@ -351,70 +313,33 @@ fn do_place<R: RandomSource>(
                                         tested[bit_set_index as usize] = true;
                                         let ore_pos = BlockPos::new(x, y, z);
                                         if level.ensure_can_write(&ore_pos) {
-                                            let section = {
-                                                let access = section_access
-                                                    .get_or_insert_with(|| {
-                                                        panic!("OreFeature.doPlace needs a BulkSectionAccess (RivetTodo #232): the WorldGenLevel does not provide section access")
-                                                    });
-                                                access.get_section(&ore_pos)
-                                            };
-                                            if let Some(mut section) = section {
-                                                let sx = section_relative(x);
-                                                let sy = section_relative(y);
-                                                let sz = section_relative(z);
-                                                let block_state =
-                                                    (section.get_block_state)(sx, sy, sz);
-
-                                                // Java passes
-                                                // `sectionGetter::getBlockState`
-                                                // (`BulkSectionAccess`) as
-                                                // `canPlaceOre`'s blockGetter —
-                                                // the section cache, which
-                                                // returns AIR for a null section
-                                                // and reflects blocks written
-                                                // earlier in the same bulk
-                                                // session. The port mirrors it
-                                                // with a section-backed getter
-                                                // re-entering `OreSectionAccess`
-                                                // (the `#232` seam), never a
-                                                // world-level read.
-                                                let mut block_getter = |pos: &BlockPos| {
-                                                    let access = section_access.as_mut().expect(
-                                                        "section access is open (RivetTodo #232)",
-                                                    );
-                                                    match access.get_section(pos) {
-                                                        Some(section) => {
-                                                            let nx = section_relative(pos.get_x());
-                                                            let ny = section_relative(pos.get_y());
-                                                            let nz = section_relative(pos.get_z());
-                                                            (section.get_block_state)(nx, ny, nz)
-                                                        }
-                                                        // `BulkSectionAccess.getBlockState`
-                                                        // returns
-                                                        // `Blocks.AIR.defaultBlockState()`
-                                                        // for a null section.
-                                                        None => BlockState::of(BlockId(0)),
-                                                    }
-                                                };
-
-                                                for target_state in &config.target_states {
-                                                    if can_place_ore(
-                                                        &block_state,
-                                                        &mut block_getter,
-                                                        random,
-                                                        config,
-                                                        target_state,
+                                            let block_state = level.get_block_state(&ore_pos);
+                                            // Java passes `sectionGetter::getBlockState`
+                                            // as `canPlaceOre`'s blockGetter — the section
+                                            // cache, which returns AIR for a null section
+                                            // and reflects blocks written earlier in the
+                                            // same bulk session. The level read answers
+                                            // both (the region reads its chunks, which the
+                                            // writes have already mutated). The getter is
+                                            // inlined so its borrow of `level` ends when
+                                            // `can_place_ore` returns, freeing `level` for
+                                            // the write.
+                                            for target_state in &config.target_states {
+                                                if can_place_ore(
+                                                    &block_state,
+                                                    |pos: &BlockPos| level.get_block_state(pos),
+                                                    random,
+                                                    config,
+                                                    target_state,
+                                                    &ore_pos,
+                                                ) {
+                                                    level.set_block(
                                                         &ore_pos,
-                                                    ) {
-                                                        (section.set_block_state)(
-                                                            sx,
-                                                            sy,
-                                                            sz,
-                                                            target_state.state,
-                                                        );
-                                                        placed += 1;
-                                                        break;
-                                                    }
+                                                        target_state.state,
+                                                        0,
+                                                    );
+                                                    placed += 1;
+                                                    break;
                                                 }
                                             }
                                         }
@@ -429,13 +354,6 @@ fn do_place<R: RandomSource>(
     }
 
     placed > 0
-}
-
-/// `SectionPos.sectionRelative(int)` — `coord & 15` (the section 16-block
-/// mask). `SectionPos` itself is not ported in this unit; the mask is inlined
-/// at the use site.
-const fn section_relative(coord: i32) -> i32 {
-    coord & 15
 }
 
 #[cfg(test)]
@@ -501,15 +419,6 @@ mod tests {
         }
     }
 
-    /// `sectionRelative` is the 16-block mask `coord & 15`.
-    #[test]
-    fn section_relative_masks_low_4_bits() {
-        assert_eq!(section_relative(15), 15);
-        assert_eq!(section_relative(16), 0);
-        assert_eq!(section_relative(-1), 15);
-        assert_eq!(section_relative(-16), 0);
-    }
-
     /// `place`'s height-probe short-circuit: when no `(x, z)` probe's
     /// `OCEAN_FLOOR_WG` height clears `y_start`, the blob is not placed — the
     /// function consumes exactly the axis draws (`nextFloat` for `dir`, two
@@ -548,11 +457,12 @@ mod tests {
     /// `ss = random.nextDouble() * size / 16.0` draw happens once per sphere
     /// (`size` draws total) before the elimination/BitSet walk. With a column
     /// height that clears the probe, `place` reaches `do_place` and consumes
-    /// exactly the axis draws plus `size` `next_double` draws; the walk then
-    /// either reaches a verdict (no candidate survives to the write seam) or
-    /// fails at the `#232` `BulkSectionAccess` seam — never another panic.
+    /// exactly the axis draws plus `size` `next_double` draws, and the whole
+    /// elimination/write walk completes without a seam panic. With an empty
+    /// `target_states` list no `can_place_ore` test is ever run and nothing is
+    /// written, so the verdict is `false` regardless of geometry.
     #[test]
-    fn do_place_consumes_one_ss_draw_per_sphere_before_any_seam() {
+    fn do_place_consumes_one_ss_draw_per_sphere_and_completes() {
         use crate::levelgen::feature::test_support::{
             RecordingRandom, RngCall, TestGenerator, TestLevel, access,
         };
@@ -564,16 +474,14 @@ mod tests {
         let generator = TestGenerator;
         let config = OreConfiguration::new_without_discard_chance(Vec::new(), 9);
         let mut random = RecordingRandom::new(1);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ORE.place(&mut FeaturePlaceContext::new(
-                None,
-                &mut level,
-                &generator,
-                &mut random,
-                &origin,
-                &config,
-            ))
-        }));
+        let result = ORE.place(&mut FeaturePlaceContext::new(
+            None,
+            &mut level,
+            &generator,
+            &mut random,
+            &origin,
+            &config,
+        ));
         let mut expected = vec![RngCall::Float, RngCall::IntBound(3), RngCall::IntBound(3)];
         for _ in 0..config.size {
             expected.push(RngCall::Double);
@@ -582,19 +490,107 @@ mod tests {
             random.calls, expected,
             "place + do_place consume the axis draws then one ss per sphere"
         );
-        match result {
-            Ok(_) => {}
-            Err(payload) => {
-                let text = payload
-                    .downcast_ref::<&str>()
-                    .copied()
-                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-                    .unwrap_or("<non-string panic>");
-                assert!(
-                    text.contains("RivetTodo #232"),
-                    "the only panic reachable is the #232 section seam, got {text:?}"
-                );
-            }
+        assert!(!result, "no target states -> nothing written -> not placed");
+        assert!(
+            level.writes.is_empty(),
+            "empty target_states writes nothing even with a clearing column"
+        );
+    }
+
+    /// Non-vacuous drive of the full ORE write path: with an always-true target
+    /// and discard chance 0, every in-build-height sphere cell passes
+    /// `can_place_ore` (the `should_skip_air_check` short-circuit skips the
+    /// air-exposure roll and the six neighbor reads), so `do_place` writes the
+    /// target state with flags 0 (`section.setBlockState(..., false)` — no
+    /// `Block.UPDATE_*` flag) and returns `true` (`placed > 0`).
+    #[test]
+    fn do_place_writes_with_flags_zero_when_target_matches() {
+        use crate::level::height_accessor::LevelHeightAccessor;
+        use crate::levelgen::feature::configurations::TargetBlockState;
+        use crate::levelgen::feature::test_support::{
+            RecordingRandom, TestGenerator, TestLevel, access,
+        };
+        use crate::levelgen::structure::templatesystem::always_true_test::AlwaysTrueTest;
+        use rivet_registry::generated::blocks::BlockId;
+        use std::sync::Arc;
+
+        let mut level = TestLevel::over(access());
+        level.height = 64; // clears y_start 60 (size 9 at origin (0, 64, 0)).
+        let origin = BlockPos::new(0, 64, 0);
+        let generator = TestGenerator;
+        let ore_state = BlockState::of(BlockId(1));
+        let config = OreConfiguration::new_without_discard_chance(
+            vec![TargetBlockState::new(Arc::new(AlwaysTrueTest), ore_state)],
+            9,
+        );
+        let mut random = RecordingRandom::new(1);
+        let result = ORE.place(&mut FeaturePlaceContext::new(
+            None,
+            &mut level,
+            &generator,
+            &mut random,
+            &origin,
+            &config,
+        ));
+        assert!(
+            result,
+            "an always-true target writes at least one sphere cell -> placed"
+        );
+        assert!(
+            !level.writes.is_empty(),
+            "the blob's in-build-height sphere cells are written"
+        );
+        for (i, (pos, state)) in level.writes.iter().enumerate() {
+            assert_eq!(*state, ore_state, "write carries the target state");
+            assert_eq!(
+                level.writes_flags[i], 0,
+                "OreFeature writes with flags 0 (section.setBlockState(..., false))"
+            );
+            assert!(
+                !level.is_outside_build_height(pos.get_y()),
+                "written cells pass the Java isOutsideBuildHeight guard"
+            );
         }
+    }
+
+    /// Hostile seam: `WorldGenRegion.setBlock` can refuse a write (chunk not
+    /// writable), and Java's `doPlace` then skips the cell (`placed` unchanged).
+    /// `ensure_can_write = false` must suppress every write, leave `placed ==
+    /// 0`, and flip the verdict to `false` — while the geometry and RNG walk
+    /// still complete.
+    #[test]
+    fn do_place_writes_nothing_when_ensure_can_write_is_false() {
+        use crate::levelgen::feature::configurations::TargetBlockState;
+        use crate::levelgen::feature::test_support::{
+            RecordingRandom, TestGenerator, TestLevel, access,
+        };
+        use crate::levelgen::structure::templatesystem::always_true_test::AlwaysTrueTest;
+        use rivet_registry::generated::blocks::BlockId;
+        use std::sync::Arc;
+
+        let mut level = TestLevel::over(access());
+        level.height = 64;
+        level.can_write = false; // Java's setBlock returns false -> nothing placed.
+        let origin = BlockPos::new(0, 64, 0);
+        let generator = TestGenerator;
+        let ore_state = BlockState::of(BlockId(1));
+        let config = OreConfiguration::new_without_discard_chance(
+            vec![TargetBlockState::new(Arc::new(AlwaysTrueTest), ore_state)],
+            9,
+        );
+        let mut random = RecordingRandom::new(1);
+        let result = ORE.place(&mut FeaturePlaceContext::new(
+            None,
+            &mut level,
+            &generator,
+            &mut random,
+            &origin,
+            &config,
+        ));
+        assert!(!result, "no write succeeded -> placed == 0 -> false");
+        assert!(
+            level.writes.is_empty(),
+            "ensure_can_write == false suppresses every write"
+        );
     }
 }

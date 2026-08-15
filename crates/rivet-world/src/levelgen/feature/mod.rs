@@ -720,9 +720,8 @@ pub fn feature_place<R: RandomSource>(
                 .expect("lake feature must carry a LakeFeature.Configuration");
             LAKE.place_with_config(config, level, chunk_generator, random, origin)
         }
-        // `Feature.ORE` — the registered `minecraft:ore` leaf (the height probe
-        // runs faithfully; placement defers to the `#399` `canPlaceOre` seam and
-        // the `#232` `BulkSectionAccess` seam).
+        // `Feature.ORE` — the registered `minecraft:ore` leaf (the full
+        // geometry/rule-test/write slice; see `ore_feature`).
         28 => {
             let config = (config as &dyn Any)
                 .downcast_ref::<OreConfiguration>()
@@ -744,7 +743,8 @@ pub fn feature_place<R: RandomSource>(
             REPLACE_BLOBS.place_with_config(config, level, chunk_generator, random, origin)
         }
         // `Feature.SCATTERED_ORE` — the registered `minecraft:scattered_ore`
-        // leaf (placement defers to the `#399` `canPlaceOre` seam).
+        // leaf (the full scatter/rule-test/write slice; see
+        // `scattered_ore_feature`).
         51 => {
             let config = (config as &dyn Any)
                 .downcast_ref::<OreConfiguration>()

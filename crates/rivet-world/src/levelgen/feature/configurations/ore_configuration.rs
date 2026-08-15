@@ -10,14 +10,11 @@
 //! `RuleTest target` (`RuleTest.CODEC` — the `"predicate_type"` by-name
 //! dispatch) with a `BlockState state` (`BlockState.CODEC`).
 //!
-//! This unit ports the value layer only. The placement behavior
-//! (`OreFeature`/`ScatteredOreFeature`) writes blocks through
-//! `WorldGenLevel.setBlock`/`getBlockState`, whose seams are not reachable on
-//! the `WorldGenLevel` surface yet (RivetTodo #228/#399) — those defer. Of the
-//! two pure `OreFeature` helpers (see `crate::levelgen::feature::ore_feature`),
-//! `shouldSkipAirCheck` IS ported; `canPlaceOre` DEFERS because its first
-//! conjunct evaluates the erased `RuleTest` (no object-safe `test` exists on
-//! the `ErasedRuleTest` carrier).
+//! This unit ports the value layer. The placement behavior
+//! (`OreFeature`/`ScatteredOreFeature`) reads the world through
+//! `WorldGenLevel::get_block_state`, evaluates each erased `RuleTest` via the
+//! templatesystem `erased_test` downcast dispatch, and writes through
+//! `WorldGenLevel::set_block` — all live (see `crate::levelgen::feature::ore_feature`).
 
 use crate::levelgen::structure::templatesystem::rule_test::ErasedRuleTest;
 use crate::levelgen::structure::templatesystem::rule_test::rule_test_codec;
