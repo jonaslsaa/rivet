@@ -126,12 +126,9 @@ fn validate_structural(root: &Value) -> Result<()> {
         crate::registries::validate_name("minecraft:worldgen/biome", name)?;
         names.push(name);
     }
-    // Id-sorted (the extractor emits id order; a reorder must fail).
-    let mut sorted = names.clone();
-    sorted.sort_unstable();
-    if names != sorted {
-        bail!("reachable_biomes is not sorted by registry id: {names:?}");
-    }
+    // Id-sorted is checked below against the `biomes` dense ids (the extractor
+    // emits the reachable list via a TreeMap keyed by `biomeReg.getId`); the
+    // name order is not the contract — the dense-id order is.
     for required in REQUIRED_BIOMES {
         if !names.contains(required) {
             bail!("reachable biome set is missing required `{required}` (non-vacuity)");
@@ -208,6 +205,23 @@ fn validate_structural(root: &Value) -> Result<()> {
                 crate::registries::validate_name("minecraft:placed_feature", placed)?;
             }
         }
+    }
+
+    // Reachable biomes must be sorted by dense registry id (the extractor emits
+    // them via a TreeMap keyed by `biomeReg.getId`; a reorder or a hand-edited
+    // id reassignment must fail). Names can disagree with id order across
+    // registries, so this checks the ids, not the names.
+    let mut ids = Vec::with_capacity(names.len());
+    for name in &names {
+        let id = biomes
+            .get(*name)
+            .and_then(|e| e.get("id"))
+            .and_then(Value::as_u64)
+            .with_context(|| format!("biome `{name}` is missing `id` for the id-order check"))?;
+        ids.push(id);
+    }
+    if ids.windows(2).any(|w| w[0] >= w[1]) {
+        bail!("reachable_biomes is not sorted by registry id (got ids {ids:?})");
     }
 
     // Feature element tables.
@@ -478,6 +492,26 @@ mod tests {
         root["reachable_biomes"] = Value::Array(arr);
         let err = validate_structural(&root).unwrap_err();
         assert!(err.to_string().contains("not sorted"), "got: {err}");
+    }
+
+    #[test]
+    fn reachable_biome_dense_id_order_is_checked() {
+        let mut root = fixture();
+        // Reassign the beach biome's dense id so the reachable names stay
+        // lexically sorted but the registry-id order breaks (beach is the first
+        // entry, so it needs a higher id than dark_forest to break monotonicity).
+        let beach_id = root["biomes"]["minecraft:beach"]["id"].as_u64().unwrap();
+        let dark_forest_id = root["biomes"]["minecraft:dark_forest"]["id"]
+            .as_u64()
+            .unwrap();
+        root["biomes"]["minecraft:beach"]["id"] = serde_json::json!(dark_forest_id + 1);
+        let err = validate_structural(&root).unwrap_err();
+        assert!(
+            err.to_string().contains("not sorted by registry id"),
+            "got: {err}"
+        );
+        // Sanity: the edit is a real change (beach id differs from its original).
+        assert_ne!(beach_id, dark_forest_id + 1);
     }
 
     #[test]
