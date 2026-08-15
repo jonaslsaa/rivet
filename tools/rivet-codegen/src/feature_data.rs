@@ -457,7 +457,8 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
             .get("id")
             .and_then(Value::as_u64)
             .with_context(|| format!("biome `{name}` is missing `id`"))?;
-        let id = u16::try_from(id).with_context(|| format!("biome `{name}` id out of u16 range"))?;
+        let id =
+            u16::try_from(id).with_context(|| format!("biome `{name}` id out of u16 range"))?;
         biome_ids.push(id);
         entry
             .get("carvers")
@@ -790,9 +791,8 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
             let step_names: Vec<&str> = step
                 .iter()
                 .map(|v| {
-                    v.as_str().with_context(|| {
-                        format!("biome `{bname}` step {i} entry is not a string")
-                    })
+                    v.as_str()
+                        .with_context(|| format!("biome `{bname}` step {i} entry is not a string"))
                 })
                 .collect::<Result<_>>()?;
             let probe_names: Vec<&str> = recorded_names
@@ -1130,10 +1130,7 @@ mod tests {
             .unwrap();
         names.swap(0, 1);
         let err = validate_structural(&root).unwrap_err();
-        assert!(
-            err.to_string().contains("per_step_names"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("per_step_names"), "got: {err}");
     }
 
     #[test]
@@ -1144,7 +1141,10 @@ mod tests {
         let dup = root["biomes"]["minecraft:beach"]["id"].as_u64().unwrap();
         root["biomes"]["minecraft:dark_forest"]["id"] = serde_json::json!(dup);
         let err = validate_structural(&root).unwrap_err();
-        assert!(err.to_string().contains("duplicate registry id"), "got: {err}");
+        assert!(
+            err.to_string().contains("duplicate registry id"),
+            "got: {err}"
+        );
     }
 
     #[test]
