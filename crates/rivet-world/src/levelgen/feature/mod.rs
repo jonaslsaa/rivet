@@ -258,6 +258,7 @@ pub use nether_forest_vegetation_feature::{
     NETHER_FOREST_VEGETATION, NetherForestVegetationFeature,
 };
 pub use no_op_feature::NoOpFeature;
+pub use ore_feature::{ORE, OreFeature};
 pub use scattered_ore_feature::{SCATTERED_ORE, ScatteredOreFeature};
 pub use sculk_patch_feature::{SCULK_PATCH, SculkPatchFeature};
 pub use sea_pickle_feature::{SEA_PICKLE, SeaPickleFeature};
@@ -508,7 +509,9 @@ impl FeatureId {
 ///
 /// This unit ports the dispatch and covers the leaves it can faithfully
 /// reach: `minecraft:no_op` (id 0, `NoOpFeature` over `NoneFeatureConfiguration`),
-/// this wave (issue #600) the five `.feature.selector` leaves —
+/// the ore unit (`mc.world.level.levelgen.feature.ore`) — `ore` (id 28,
+/// `OreFeature`) and `scattered_ore` (id 51, `ScatteredOreFeature`) — this
+/// wave (issue #600) the five `.feature.selector` leaves —
 /// `random_selector` (id 52, `RandomSelectorFeature` over
 /// `RandomFeatureConfiguration`), `weighted_random_selector` (id 53,
 /// `WeightedRandomSelectorFeature` over `WeightedRandomFeatureConfiguration`),
@@ -521,9 +524,9 @@ impl FeatureId {
 /// `.feature.geology*` leaves, in registry-id order: `spring_feature` (id 4),
 /// `spike` (id 12), `disk` (id 26), `lake` (id 27, the nested
 /// `LakeFeature.Configuration`), `delta_feature` (id 46),
-/// `netherrack_replace_blobs` (id 47), `scattered_ore` (id 51, deferring to the
-/// `#399` `canPlaceOre` seam), `geode` (id 58), and `sculk_patch` (id 62,
-/// deferring to the `#232` SculkSpreader seam) — whose ids are the feature
+/// `netherrack_replace_blobs` (id 47), `scattered_ore` (id 51), `geode` (id 58),
+/// and `sculk_patch` (id 62, deferring to the `#232` SculkSpreader seam) —
+/// whose ids are the feature
 /// registry's insertion indices (protocol ids in `registries.json`; the
 /// registration table's 63 `register(...)` calls are counted directly from
 /// `Feature.java`).
@@ -719,6 +722,14 @@ pub fn feature_place<R: RandomSource>(
                 .expect("lake feature must carry a LakeFeature.Configuration");
             LAKE.place_with_config(config, level, chunk_generator, random, origin)
         }
+        // `Feature.ORE` — the registered `minecraft:ore` leaf (the full
+        // geometry/rule-test/write slice; see `ore_feature`).
+        28 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<OreConfiguration>()
+                .expect("ore feature must carry an OreConfiguration");
+            ORE.place_with_config(config, level, chunk_generator, random, origin)
+        }
         // `Feature.DELTA`.
         46 => {
             let config = (config as &dyn Any)
@@ -734,7 +745,8 @@ pub fn feature_place<R: RandomSource>(
             REPLACE_BLOBS.place_with_config(config, level, chunk_generator, random, origin)
         }
         // `Feature.SCATTERED_ORE` — the registered `minecraft:scattered_ore`
-        // leaf (placement defers to the `#399` `canPlaceOre` seam).
+        // leaf (the full scatter/rule-test/write slice; see
+        // `scattered_ore_feature`).
         51 => {
             let config = (config as &dyn Any)
                 .downcast_ref::<OreConfiguration>()
