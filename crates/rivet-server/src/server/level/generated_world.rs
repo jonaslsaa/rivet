@@ -25,13 +25,19 @@
 //! `WorldGenContext::generate_through` supports generation through `CARVERS` —
 //! the BIOMES→NOISE→SURFACE→CARVERS task bodies are wired to the real Paper
 //! drivers (`fillFromNoise` / `buildSurface` / `applyCarvers`), so an EMPTY
-//! chunk can reach CARVERS. The INITIALIZE_LIGHT/LIGHT steps are also
-//! executor-wired but engine-gated (the holder wires no light engine, so it
-//! cannot reach LIGHT). Everything the value layer does not wire is refused
-//! *before* running work: a target in FEATURES..LIGHT hits the unwired FEATURES
-//! rung first (`GenError::UnsupportedTask` — the FEATURES and SPAWN/FULL ladder
-//! is the unwired #185 step), and a target past LIGHT (SPAWN/FULL) is out of
-//! range (`GenError::UnsupportedStatus`). The holder's
+//! chunk can reach CARVERS. The FEATURES task body is also wired: the
+//! caller-supplied [`GenerationChunkHolder::new`] features closure primes the
+//! four `FINAL_HEIGHTMAPS` (Java's `Heightmap.primeHeightmaps` in
+//! `ChunkStatusTasks.generateFeatures`) and then fails loudly at the first
+//! genuinely unavailable dependency — the bounded `WorldGenRegion`
+//! construction, which needs a `StaticCache2D<GenerationChunkHolderView>`
+//! neighbor chunk cache the holder neither owns nor implements (the deferred
+//! view seam below). The INITIALIZE_LIGHT/LIGHT steps are executor-wired but
+//! engine-gated (the holder wires no light engine, so it cannot reach LIGHT).
+//! Everything the value layer does not wire is refused *before* running work: a
+//! path through a light step with no engine is refused as
+//! `GenError::LightEngineMissing`, and a target past LIGHT (SPAWN/FULL) is out
+//! of range (`GenError::UnsupportedStatus`). The holder's
 //! [`GenerationChunkHolder::generate_through`] surfaces these as typed
 //! [`GeneratedChunkError::Generation`] / [`GeneratedChunkError::UnsupportedStatus`]
 //! rather than stamping a status that was never generated. And a generated
@@ -89,7 +95,7 @@ use rivet_world::data::worldgen::worldgen_bootstraps::build_worldgen_registries;
 use rivet_world::level::height_accessor::LevelHeightAccessor;
 use rivet_world::level::height_accessor::create as create_height_accessor;
 use rivet_world::levelgen::blending::blender::Blender;
-use rivet_world::levelgen::heightmap::Types;
+use rivet_world::levelgen::heightmap::{FINAL_HEIGHTMAPS, Types};
 use rivet_world::levelgen::noise::registry_keys::NOISE_SETTINGS;
 use rivet_world::levelgen::noisegen::noise_based_chunk_generator::NoiseBasedChunkGenerator;
 use rivet_world::levelgen::noisegen::noise_generator_settings::OVERWORLD;
@@ -108,8 +114,10 @@ pub enum GeneratedChunkError {
     Generation(GenError),
     /// A target past `LIGHT` — the executor rejected it before running any
     /// work. Naming the requested status makes the downstream boundary explicit.
-    /// (A target in FEATURES..LIGHT is instead refused by the unwired FEATURES
-    /// rung, which surfaces as [`GeneratedChunkError::Generation`].)
+    /// (A target through a light step with no engine is instead refused as
+    /// `GenError::LightEngineMissing`, and the wired-but-blocked FEATURES rung
+    /// unwinds from the bounded `WorldGenRegion` construction — see
+    /// [`GenerationChunkHolder::new`].)
     UnsupportedStatus(ChunkStatus),
     /// The genuine-FULL-only install gate: a generated chunk is a `ProtoChunk`
     /// through `SURFACE` and cannot be converted into the `LevelChunk` (FULL)
@@ -318,8 +326,8 @@ impl BiomeResolver for OverworldNoiseBiomeSource {
 /// A real generated chunk being driven through the pipeline — owns the
 /// worldgen `ProtoChunk` (block element `BlockState`, biome element the
 /// worldgen `section_reconstruction::BiomeId`, structure key the server
-/// `StructureKey`) and the BIOMES→NOISE executor over the shared worldgen
-/// objects.
+/// `StructureKey`) and the BIOMES→NOISE→SURFACE→CARVERS→FEATURES executor over
+/// the shared worldgen objects.
 pub struct GenerationChunkHolder {
     chunk: ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
     context: WorldGenContext<BlockState, WorldgenBiomeId, StructureKey>,
@@ -336,7 +344,13 @@ impl GenerationChunkHolder {
     /// empty blender; the SURFACE body runs the real `buildSurface`; the
     /// CARVERS body runs the real `applyCarvers` (the overworld-carvers
     /// center-chunk loop — see the noisegen driver's doc for the deferred
-    /// `WorldGenRegion`/`StructureManager` seams).
+    /// `WorldGenRegion`/`StructureManager` seams); the FEATURES body starts
+    /// Java's `ChunkStatusTasks.generateFeatures` — it primes the four
+    /// `FINAL_HEIGHTMAPS` (the heightmaps the decoration bodies read) and then
+    /// fails loudly at the first genuinely unavailable dependency: the bounded
+    /// `WorldGenRegion` construction, whose `StaticCache2D` neighbor-chunk
+    /// cache the holder neither owns nor implements the view trait for (the
+    /// deferred `GenerationChunkHolderView` seam — see the module doc).
     pub fn new(pos: ChunkPos, generator: Arc<OverworldGenerator>) -> Self {
         let height_accessor = create_height_accessor(
             generator.generator().get_min_y(),
@@ -429,26 +443,63 @@ impl GenerationChunkHolder {
                     );
                 }
             },
+            {
+                // `ChunkStatusTasks.generateFeatures` (Java) → the caller-owned
+                // decoration body. The real body is
+                // `NoiseBasedChunkGenerator.applyBiomeDecoration` over a bounded
+                // `WorldGenRegion`, but the closure seam is `FnMut(&mut
+                // ProtoChunk) -> ()`, so it cannot return a typed error. What it
+                // CAN run faithfully is the prologue: `Heightmap.primeHeightmaps
+                // (chunk, FINAL_HEIGHTMAPS)` primes the four final heightmaps the
+                // decoration bodies read. It then fails loudly — a precise panic
+                // naming the FIRST genuinely unavailable dependency: the bounded
+                // `WorldGenRegion` construction needs a
+                // `StaticCache2D<GenerationChunkHolderView>` neighbor-chunk cache
+                // that the holder neither owns nor implements the view trait for
+                // (the deferred `map_values`-bridging seam in the module doc). A
+                // later slice lands the region-backed cache (issue #185's `.chunk
+                // .generator` pipeline unit) and replaces this panic with the
+                // real decoration body — the panic must never be "improved" into
+                // a silent skip or a blanket UnsupportedTask. The body does not
+                // capture the generator yet: the panic fires before
+                // `applyBiomeDecoration` would need it.
+                move |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
+                    chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
+                    panic!(
+                        "FEATURES decoration is blocked at its first real dependency: \
+                         constructing the bounded WorldGenRegion for {} requires a \
+                         StaticCache2D<GenerationChunkHolderView> neighbor-chunk cache \
+                         the holder does not own (RivetTodo #185: the status executor that \
+                         completes a chunk to FULL and bridges it lands with the \
+                         `.chunk.generator` pipeline unit)",
+                        chunk.get_pos()
+                    );
+                }
+            },
         );
         GenerationChunkHolder { chunk, context }
     }
 
     /// The chunk's persisted status — `EMPTY` before any step, `CARVERS` after a
     /// successful BIOMES→NOISE→SURFACE→CARVERS run, and never `FULL` (the
-    /// executor refuses to stamp it).
+    /// executor refuses to stamp it). A FEATURES run primes the final heightmaps
+    /// and then unwinds from the bounded `WorldGenRegion` construction, so the
+    /// chunk is never stamped FEATURES.
     pub fn status(&self) -> ChunkStatus {
         self.chunk.get_persisted_status()
     }
 
     /// Drive the chunk from its current persisted status through `target`
     /// (inclusive). The BIOMES→NOISE→SURFACE→CARVERS task bodies are wired (an
-    /// EMPTY chunk can reach CARVERS); a target the value layer does not wire is
-    /// rejected by the executor before any work with a typed error — a chunk
-    /// targeting FEATURES..LIGHT is refused by the unwired FEATURES rung
-    /// ([`GeneratedChunkError::Generation`] carrying
-    /// `GenError::UnsupportedTask`), and a target past LIGHT (SPAWN/FULL) is out
-    /// of range ([`GeneratedChunkError::UnsupportedStatus`]). The chunk is
-    /// left untouched.
+    /// EMPTY chunk can reach CARVERS); the FEATURES task body is wired (it
+    /// primes the final heightmaps and then unwinds from the bounded
+    /// `WorldGenRegion` construction — see [`GenerationChunkHolder::new`]). A
+    /// target the value layer does not wire is rejected by the executor before
+    /// any work with a typed error — a path through a light step with no engine
+    /// is refused as `GenError::LightEngineMissing`, and a target past LIGHT
+    /// (SPAWN/FULL) is out of range
+    /// ([`GeneratedChunkError::UnsupportedStatus`]). The chunk is left
+    /// untouched by every refusal.
     pub fn generate_through(&mut self, target: ChunkStatus) -> Result<(), GeneratedChunkError> {
         self.context
             .generate_through(&GENERATION_PYRAMID, &mut self.chunk, target)
@@ -461,11 +512,13 @@ impl GenerationChunkHolder {
     }
 
     /// The genuine-FULL-only install gate: `ChunkMap::install` accepts only a
-    /// `LevelChunk` (FULL), and a generated chunk is a `ProtoChunk` through
-    /// `CARVERS`. No conversion from a sub-FULL `ProtoChunk` exists or may be
-    /// added without the unwired FEATURES..FULL stages (RivetTodo #185), so this
-    /// always fails loudly with the chunk's real status — never stamping FULL
-    /// and never falling back to superflat.
+    /// `LevelChunk` (FULL), and a generated chunk is a `ProtoChunk` that stops
+    /// at `CARVERS` (the FEATURES rung primes heightmaps then unwinds from the
+    /// bounded `WorldGenRegion` construction — see [`GenerationChunkHolder::new`]).
+    /// No conversion from a sub-FULL `ProtoChunk` exists or may be added without
+    /// the unwired FEATURES..FULL stages (RivetTodo #185), so this always fails
+    /// loudly with the chunk's real status — never stamping FULL and never
+    /// falling back to superflat.
     pub fn to_level_chunk(&self) -> Result<LevelChunk, GeneratedChunkError> {
         Err(GeneratedChunkError::InstallRequiresFull(
             self.chunk.get_persisted_status(),
@@ -487,7 +540,6 @@ mod tests {
     use super::*;
     use crate::server::level::chunk_map::ChunkMap;
     use rivet_registry::generated::block_states::StateId;
-    use rivet_world::chunk::status::ChunkStatusTask;
     use rivet_world::levelgen::heightmap::Types;
 
     /// The shared test realization (built once — the worldgen registry
@@ -881,45 +933,40 @@ mod tests {
         }
     }
 
-    /// Hostile: the stages below the wired BIOMES→NOISE→SURFACE→CARVERS run
-    /// (CARVERS and beyond) are rejected before any work runs, with a typed
-    /// error, and the chunk is never stamped past the supported rung — fresh,
-    /// and again after a successful NOISE.
+    /// Hostile: the stages the holder does not wire are refused before any work
+    /// runs, with a typed error, and the chunk is never stamped past the
+    /// supported rung — fresh, and again after a successful NOISE.
     ///
     /// The value-layer boundary is `LIGHT`: the INITIALIZE_LIGHT/LIGHT steps are
-    /// wired (`WorldGenContext::generate_through`, engine-gated) but the
-    /// FEATURES ladder below them is unwired (RivetTodo #185). A fresh EMPTY
-    /// chunk targeting any of FEATURES..LIGHT is therefore refused by the
-    /// unwired FEATURES rung that the pre-check hits first (`UnsupportedTask`),
-    /// and a target past LIGHT (SPAWN/FULL) is out of range
-    /// (`UnsupportedStatus`). Every refusal happens before any work, so the
-    /// chunk stays EMPTY. CARVERS itself is wired (the real
+    /// wired (`WorldGenContext::generate_through`, engine-gated) but the holder
+    /// wires no light engine, so a fresh EMPTY chunk targeting either is
+    /// refused as `GenError::LightEngineMissing` before any work runs (the
+    /// chunk stays EMPTY). A target past LIGHT (SPAWN/FULL) is out of range
+    /// (`UnsupportedStatus`). CARVERS itself is wired (the real
     /// `NoiseBasedChunkGenerator.applyCarvers`, see
     /// `generate_through_carvers_runs_the_real_apply_carvers`), so a fresh
     /// EMPTY chunk targeting it runs BIOMES→NOISE→SURFACE→CARVERS and is
-    /// stamped CARVERS.
+    /// stamped CARVERS. FEATURES is wired-but-blocked (see
+    /// `generate_through_features_primes_final_heightmaps_then_unwinds`): the
+    /// features body primes the final heightmaps and then unwinds from the
+    /// bounded `WorldGenRegion` construction, so the chunk is never stamped
+    /// FEATURES.
     #[test]
     fn downstream_stages_fail_loudly_and_never_stamp() {
         let generator = test_generator();
         let mut fresh = generator.create_holder(ChunkPos::ZERO);
-        // FEATURES..LIGHT: the unwired FEATURES rung blocks the whole path in
-        // the value layer, before any work runs — even the engine-gated light
-        // steps are unreachable from EMPTY, because the FEATURES step would
-        // have to be the first unwired mutation. The chunk is untouched.
-        for status in [
-            ChunkStatus::Features,
-            ChunkStatus::InitializeLight,
-            ChunkStatus::Light,
-        ] {
+        // INITIALIZE_LIGHT..LIGHT: the path (through the wired FEATURES step)
+        // needs a light engine, and the holder wires none, so the whole path is
+        // refused before any work runs. The chunk is untouched.
+        for status in [ChunkStatus::InitializeLight, ChunkStatus::Light] {
             assert!(
                 matches!(
                     fresh.generate_through(status),
-                    Err(GeneratedChunkError::Generation(GenError::UnsupportedTask {
-                        task: ChunkStatusTask::GenerateFeatures,
-                        ..
-                    }))
+                    Err(GeneratedChunkError::Generation(
+                        GenError::LightEngineMissing { .. }
+                    ))
                 ),
-                "target {status:?} must be rejected by the unwired FEATURES rung"
+                "target {status:?} must be rejected as LightEngineMissing (no light engine)"
             );
             assert_eq!(fresh.status(), ChunkStatus::Empty);
         }
@@ -943,15 +990,15 @@ mod tests {
             .generate_through(ChunkStatus::Carvers)
             .expect("CARVERS");
         assert_eq!(carvers.status(), ChunkStatus::Carvers);
-        // From CARVERS the next unwired stage (FEATURES) still fails loudly and
-        // the persisted status stays CARVERS — never a silent stamp to FULL.
-        let err = carvers.generate_through(ChunkStatus::Features).unwrap_err();
+        // From CARVERS, INITIALIZE_LIGHT is refused as LightEngineMissing
+        // before any work, and the persisted status stays CARVERS — never a
+        // silent stamp past it.
+        let err = carvers
+            .generate_through(ChunkStatus::InitializeLight)
+            .unwrap_err();
         assert!(matches!(
             err,
-            GeneratedChunkError::Generation(GenError::UnsupportedTask {
-                task: ChunkStatusTask::GenerateFeatures,
-                ..
-            })
+            GeneratedChunkError::Generation(GenError::LightEngineMissing { .. })
         ));
         assert_eq!(carvers.status(), ChunkStatus::Carvers);
 
@@ -965,6 +1012,55 @@ mod tests {
             GeneratedChunkError::UnsupportedStatus(ChunkStatus::Full)
         ));
         assert_eq!(holder.status(), ChunkStatus::Noise);
+    }
+
+    /// The FEATURES rung is wired-but-blocked at its first real dependency:
+    /// from a CARVERS chunk it primes the four `FINAL_HEIGHTMAPS` (Java's
+    /// `Heightmap.primeHeightmaps` in `ChunkStatusTasks.generateFeatures`) and
+    /// then fails loudly — a precise panic naming the bounded `WorldGenRegion`
+    /// construction, whose `StaticCache2D<GenerationChunkHolderView>` neighbor
+    /// cache the holder does not own (the deferred `map_values`-bridging seam).
+    /// The chunk is never stamped FEATURES (it stays CARVERS) — no silent skip
+    /// and no blanket `UnsupportedTask`.
+    #[test]
+    fn generate_through_features_primes_final_heightmaps_then_unwinds() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::new(0, 0));
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        assert_eq!(holder.status(), ChunkStatus::Carvers);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            holder.generate_through(ChunkStatus::Features)
+        }));
+        let message = match result {
+            Err(payload) => payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+                .expect("panic payload must be a message string"),
+            Ok(Ok(())) => panic!("FEATURES must not complete without a region-backed cache"),
+            Ok(Err(_)) => panic!(
+                "FEATURES must fail loudly (panic at the first real blocker), not a typed error"
+            ),
+        };
+        assert!(
+            message.contains("WorldGenRegion") && message.contains("StaticCache2D"),
+            "the panic must name the first real blocker (the bounded WorldGenRegion's \
+             StaticCache2D neighbor cache); got: {message}"
+        );
+        // The prologue ran faithfully: all four final heightmaps are primed
+        // (Java primes them for the decoration bodies to read).
+        for ty in FINAL_HEIGHTMAPS {
+            assert!(
+                holder.chunk.heightmaps()[ty as usize].is_some(),
+                "FEATURES must prime the {ty:?} final heightmap before unwinding"
+            );
+        }
+        // The chunk is never stamped FEATURES — the panic unwinds before the
+        // status advance, so it stays CARVERS.
+        assert_eq!(holder.status(), ChunkStatus::Carvers);
     }
 
     /// Hostile: a generated ProtoChunk can never enter the ChunkMap authority —
