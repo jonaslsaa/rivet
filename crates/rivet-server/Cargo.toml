@@ -40,6 +40,9 @@ tempfile = { workspace = true }
 flate2 = { workspace = true }
 # Parsing the committed `registry_data_capture.json` byte-identity fixture.
 serde_json = { workspace = true }
+# The seed-42 LIGHT differential test parses the committed `light.json` oracle
+# fixture (the derive is dev-only, mirroring the rivet-oracle capture side).
+serde = { version = "1", features = ["derive"] }
 # Test-only tracing-subscriber machinery for asserting the RIVET_* trace
 # records (issue #53): the recorder + installers that used to ship in the lib's
 # `movement_trace::test_support` now live here so no production binary carries

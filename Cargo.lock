@@ -716,6 +716,7 @@ dependencies = [
  "rivet-text",
  "rivet-util",
  "rivet-world",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",
