@@ -169,7 +169,9 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     }
 
     /// `LevelAccessor.scheduleTick(BlockPos, Block, int)` — the block
-    /// scheduled-tick seam `LakeFeature.place` consumes
+    /// scheduled-tick seam, consumed by `SimpleBlockFeature.place` when
+    /// `config.scheduleTick()` is set (`level.scheduleTick(origin,
+    /// level.getBlockState(origin).getBlock(), 1)`) and by `LakeFeature.place`
     /// (`level.scheduleTick(placePos, AIR.getBlock(), 0)` schedules the placed
     /// cave-air to tick). `&mut self` mirrors the tick-write contract like
     /// `schedule_tick`.
@@ -190,6 +192,44 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     /// default fails explicitly rather than fabricating the mark.
     fn mark_pos_for_post_processing(&mut self, _pos: &BlockPos) {
         panic!("ChunkAccess.markPosForPostProcessing is not implemented (RivetTodo #232)")
+    }
+
+    /// `Biome.shouldFreeze(LevelReader, BlockPos, boolean)` — the biome
+    /// freeze verdict `SnowAndFreezeFeature` consumes (`level.getBiome(topPos)
+    /// .value().shouldFreeze(level, belowPos, false)`).
+    ///
+    /// `freeze_pos` is the FREEZE position — the cell the verdict is evaluated
+    /// on, the one `SnowAndFreezeFeature` turns to ice (`belowPos`, one block
+    /// below the `MOTION_BLOCKING` column height). Java samples the biome at
+    /// `topPos` (`freeze_pos.above()`), so a faithful implementation MUST
+    /// resolve the biome at `freeze_pos.above()`, never at `freeze_pos` — the
+    /// `SnowAndFreezeFeature` topPos/belowPos split. This seam is only faithful
+    /// for that single caller, and the offset is part of the contract.
+    ///
+    /// STUB(mc.world.level): the biome
+    /// value is not reachable through `WorldGenLevel::get_biome` (it resolves a
+    /// `Holder<BiomeId>`, id only) and `shouldFreeze` reads the `LevelReader`
+    /// brightness/fluid surface (#232), so the verdict is a dedicated seam; the
+    /// default fails explicitly rather than fabricating a freeze. Test doubles
+    /// override it with a fixed verdict.
+    fn should_freeze(&self, _freeze_pos: &BlockPos, _check_neighbors: bool) -> bool {
+        panic!("Biome.shouldFreeze is not implemented (RivetTodo #232)")
+    }
+
+    /// `Biome.shouldSnow(LevelReader, BlockPos)` — the biome snow verdict
+    /// `SnowAndFreezeFeature` consumes (`level.getBiome(topPos).value()
+    /// .shouldSnow(level, topPos)`).
+    ///
+    /// Here `pos` IS the biome-sample position (`topPos`) — unlike
+    /// `should_freeze`, the sample and the evaluated cell are the same, so no
+    /// offset.
+    ///
+    /// STUB(mc.world.level): like
+    /// `should_freeze`, the verdict reads the unported `LevelReader` surface
+    /// (brightness, snow survival); the default fails explicitly rather than
+    /// fabricating a snowfall. Test doubles override it with a fixed verdict.
+    fn should_snow(&self, _pos: &BlockPos) -> bool {
+        panic!("Biome.shouldSnow is not implemented (RivetTodo #232)")
     }
 
     /// `LevelAccessor.destroyBlock(BlockPos, boolean, @Nullable Entity)` — the
