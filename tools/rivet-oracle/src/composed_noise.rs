@@ -1042,6 +1042,13 @@ mod tests {
             "committed generated-expected fixtures at {} are unusable",
             ge_src.display()
         );
+        let fe_src = fixtures_dir().join("features");
+        assert!(
+            fe_src.join("manifest.json").is_file()
+                && fe_src.join(crate::features::FIXTURE_BASENAME).is_file(),
+            "committed features fixtures at {} are unusable",
+            fe_src.display()
+        );
         let root = scratch("gate-cn-only");
         fs::create_dir_all(root.path().join("composed-noise")).unwrap();
         fs::copy(
@@ -1067,6 +1074,20 @@ mod tests {
             ge_src.join(crate::generated_expected::FIXTURE_BASENAME),
             root.path()
                 .join("generated-expected/generated-expected.json"),
+        )
+        .unwrap();
+        // The seed-42 FEATURES checkpoint is the newest load-bearing golden
+        // (PR #175/#232): carry it too, or the gate's positive path fails with
+        // UNVERIFIED on the missing features tree.
+        fs::create_dir_all(root.path().join("features")).unwrap();
+        fs::copy(
+            fe_src.join("manifest.json"),
+            root.path().join("features/manifest.json"),
+        )
+        .unwrap();
+        fs::copy(
+            fe_src.join(crate::features::FIXTURE_BASENAME),
+            root.path().join("features/features.json"),
         )
         .unwrap();
         let result = crate::verify_all_fixture_kinds_from(root.path());

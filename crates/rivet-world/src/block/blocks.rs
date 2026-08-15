@@ -126,6 +126,9 @@ impl Blocks {
     /// `Blocks.BLACKSTONE` (SurfaceRuleData: nether `basaltDeltas`
     /// `UNDER_FLOOR` `netherStateSelector`).
     pub const BLACKSTONE: Block = Block::new(BlockId(924));
+    /// `Blocks.PALE_MOSS_CARPET` (feature: `MossyCarpetBlock.placeAt`, the
+    /// block `SimpleBlockFeature` places through the carpet seam).
+    pub const PALE_MOSS_CARPET: Block = Block::new(BlockId(1189));
     /// `Blocks.MUD` (SurfaceRuleData: overworld `mangroveSwamp`).
     pub const MUD: Block = Block::new(BlockId(1150));
     /// `Blocks.DEEPSLATE`.
@@ -193,18 +196,32 @@ impl Blocks {
     pub const BLUE_ICE: Block = Block::new(BlockId(789));
     /// `Blocks.BAMBOO` (feature: `BambooFeature`).
     pub const BAMBOO: Block = Block::new(BlockId(792));
-    /// `Blocks.SPAWNER` (feature: `DeltaFeature.CANNOT_REPLACE`).
+    /// `Blocks.SPAWNER` (features: `BasaltColumnsFeature` `CANNOT_PLACE_ON`,
+    /// `DeltaFeature.CANNOT_REPLACE`).
     pub const SPAWNER: Block = Block::new(BlockId(198));
-    /// `Blocks.CHEST` (feature: `DeltaFeature.CANNOT_REPLACE`).
+    /// `Blocks.CHEST` (features: `BasaltColumnsFeature` `CANNOT_PLACE_ON`,
+    /// `DeltaFeature.CANNOT_REPLACE`).
     pub const CHEST: Block = Block::new(BlockId(201));
-    /// `Blocks.NETHER_BRICKS` (feature: `DeltaFeature.CANNOT_REPLACE`).
+    /// `Blocks.SNOW` (features: `SnowAndFreezeFeature`, `IcebergFeature`).
+    pub const SNOW: Block = Block::new(BlockId(276));
+    /// `Blocks.GLOWSTONE` (feature: `GlowstoneFeature`).
+    pub const GLOWSTONE: Block = Block::new(BlockId(294));
+    /// `Blocks.VINE` (feature: `VinesFeature`).
+    pub const VINE: Block = Block::new(BlockId(366));
+    /// `Blocks.NETHER_BRICKS` (features: `BasaltColumnsFeature`
+    /// `CANNOT_PLACE_ON`, `DeltaFeature.CANNOT_REPLACE`).
     pub const NETHER_BRICKS: Block = Block::new(BlockId(381));
-    /// `Blocks.NETHER_BRICK_FENCE` (feature: `DeltaFeature.CANNOT_REPLACE`).
+    /// `Blocks.NETHER_BRICK_FENCE` (features: `BasaltColumnsFeature`
+    /// `CANNOT_PLACE_ON`, `DeltaFeature.CANNOT_REPLACE`).
     pub const NETHER_BRICK_FENCE: Block = Block::new(BlockId(382));
-    /// `Blocks.NETHER_BRICK_STAIRS` (feature: `DeltaFeature.CANNOT_REPLACE`).
+    /// `Blocks.NETHER_BRICK_STAIRS` (features: `BasaltColumnsFeature`
+    /// `CANNOT_PLACE_ON`, `DeltaFeature.CANNOT_REPLACE`).
     pub const NETHER_BRICK_STAIRS: Block = Block::new(BlockId(383));
-    /// `Blocks.NETHER_WART` (feature: `DeltaFeature.CANNOT_REPLACE`).
+    /// `Blocks.NETHER_WART` (features: `BasaltColumnsFeature` `CANNOT_PLACE_ON`,
+    /// `DeltaFeature.CANNOT_REPLACE`).
     pub const NETHER_WART: Block = Block::new(BlockId(384));
+    /// `Blocks.MAGMA_BLOCK` (feature: `BasaltColumnsFeature` `CANNOT_PLACE_ON`).
+    pub const MAGMA_BLOCK: Block = Block::new(BlockId(671));
     /// `Blocks.SCULK` (feature: `SculkPatchFeature` — `start.getBlock()
     /// instanceof SculkBehaviour`; only `SculkBlock` and `SculkVeinBlock`
     /// implement the interface).
@@ -278,6 +295,7 @@ mod tests {
             Blocks::WARPED_WART_BLOCK,
             Blocks::CRIMSON_NYLIUM,
             Blocks::BLACKSTONE,
+            Blocks::PALE_MOSS_CARPET,
             Blocks::MUD,
             Blocks::DEEPSLATE,
             Blocks::DEEPSLATE_IRON_ORE,
@@ -311,10 +329,14 @@ mod tests {
             Blocks::BAMBOO,
             Blocks::SPAWNER,
             Blocks::CHEST,
+            Blocks::SNOW,
+            Blocks::GLOWSTONE,
+            Blocks::VINE,
             Blocks::NETHER_BRICKS,
             Blocks::NETHER_BRICK_FENCE,
             Blocks::NETHER_BRICK_STAIRS,
             Blocks::NETHER_WART,
+            Blocks::MAGMA_BLOCK,
             Blocks::SCULK,
             Blocks::SCULK_VEIN,
             Blocks::SCULK_CATALYST,
