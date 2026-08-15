@@ -1090,6 +1090,31 @@ mod tests {
             root.path().join("features/features.json"),
         )
         .unwrap();
+        // The seed-42 LIGHT-stage checkpoint is load-bearing too (PR #184): carry
+        // its full tree — manifest, light.json, and the 25 forced chunk NBTs —
+        // since the manifest binds every captured file by SHA-256.
+        let li_src = fixtures_dir().join("light");
+        assert!(
+            li_src.join("manifest.json").is_file()
+                && li_src.join(crate::light_stage::FIXTURE_BASENAME).is_file(),
+            "committed light fixtures at {} are unusable",
+            li_src.display()
+        );
+        fs::create_dir_all(root.path().join("light/chunks")).unwrap();
+        fs::copy(
+            li_src.join("manifest.json"),
+            root.path().join("light/manifest.json"),
+        )
+        .unwrap();
+        fs::copy(
+            li_src.join(crate::light_stage::FIXTURE_BASENAME),
+            root.path().join("light/light.json"),
+        )
+        .unwrap();
+        for (cx, cz) in crate::light_stage::forced_coordinates() {
+            let name = crate::light_stage::chunk_fixture_path(cx, cz);
+            fs::copy(li_src.join(&name), root.path().join("light").join(&name)).unwrap();
+        }
         let result = crate::verify_all_fixture_kinds_from(root.path());
         assert!(
             result.is_ok(),

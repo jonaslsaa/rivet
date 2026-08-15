@@ -188,6 +188,47 @@ impl SkyLightProvider {
         }
     }
 
+    /// The idempotent re-light of a chunk whose neighbours already carry their
+    /// final light — `relightChunks`' per-neighbour
+    /// `lightChunk(lightAccess, chunk, false)`. The no-edge-checks path pulls
+    /// the neighbours' lateral light into the increase queue
+    /// (`propagate_neighbour_levels`), so a committed interior chunk lit
+    /// against committed neighbours reproduces Paper's byte-identical fixed
+    /// point. The differential test drives the committed seed-42 interior
+    /// through here.
+    pub fn relight_chunk_with(
+        &mut self,
+        chunk: &mut ChunkAccess<StateId, ServerBiomeId, StructureKey>,
+        empty_sections: &[Option<bool>],
+    ) {
+        let mut accessor = CallbackAccessor {
+            chunks: &mut self.chunks,
+            taken: HashMap::new(),
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.engine.relight(&mut accessor, chunk, empty_sections);
+            if let Some(nibbles) = self.engine.take_pending_nibbles() {
+                chunk.set_sky_nibbles(nibbles);
+            }
+            if let Some(map) = self.engine.take_pending_emptiness_map() {
+                chunk.set_sky_emptiness_map(Some(map));
+            }
+        }));
+        if let Err(payload) = result {
+            let taken = std::mem::take(&mut accessor.taken);
+            drop(accessor);
+            for ((x, z), neighbour) in taken {
+                (self.chunks)(x, z, Some(neighbour));
+            }
+            std::panic::resume_unwind(payload);
+        }
+        let taken = std::mem::take(&mut accessor.taken);
+        drop(accessor);
+        for ((x, z), neighbour) in taken {
+            (self.chunks)(x, z, Some(neighbour));
+        }
+    }
+
     /// `StarLightInterface.getSkyLightValue(blockPos, chunk)` with the chunk
     /// already resolved. The status-LIGHT gate (`getPersistedStatus().isOrAfter`)
     /// defers (#185) — `ChunkAccess` carries no persisted status — so the
@@ -410,7 +451,9 @@ mod tests {
     use rivet_world::superflat::{SECTION_COUNT, SUPERFLAT_HEIGHT, SUPERFLAT_MIN_Y};
     use std::sync::{Arc, Mutex};
 
-    use crate::server::level::level_chunk::{container_factory, state_flags, superflat_content};
+    use crate::server::level::level_chunk::{
+        container_factory, state_flags, strategies, superflat_content,
+    };
     use rivet_world::chunk::upgrade_data::UpgradeData;
 
     /// The shared chunk map backing a [`storage_closure`] take/put closure.
@@ -819,5 +862,202 @@ mod tests {
             // Resolves only if `SkyLightProvider` does NOT implement Sync.
             let _ = <SkyLightProvider as AmbiguousIfImpl<_>>::some_item;
         };
+    }
+
+    // --- seed-42 LIGHT differential (Paper 26.2, commit 0a99345) ---
+
+    use rivet_nbt::nbt_io;
+    use rivet_registry::block_state::BlockState;
+    use rivet_util::DataInputStream;
+    use rivet_world::chunk::storage::reconstruct_runtime_chunk;
+    use rivet_world::chunk::storage::section_reconstruction::BiomeId as WorldgenBiomeId;
+    use rivet_world::chunk::storage::serializable_chunk_data::SerializableChunkData;
+    use std::fs;
+    use std::io::Cursor;
+    use std::path::PathBuf;
+
+    /// The committed `light.json` golden — the shape `light_stage.rs` captures.
+    /// The test mirrors the oracle's truth struct locally because `rivet-server`
+    /// cannot depend on `rivet-oracle` (the derive is dev-only).
+    #[derive(serde::Deserialize)]
+    struct LightGolden {
+        seed: i64,
+        format: u32,
+        chunks: std::collections::BTreeMap<String, ChunkLightTruth>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ChunkLightTruth {
+        stored_pos: [i32; 2],
+        status: String,
+        light_correct: bool,
+        min_light_section: i32,
+        max_light_section: i32,
+        sky_nibbles: std::collections::BTreeMap<i32, Option<Vec<u8>>>,
+        sky_emptiness: Vec<bool>,
+    }
+
+    fn load_light_golden() -> LightGolden {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/rivet-oracle/fixtures/light/light.json");
+        let bytes = fs::read(path).expect("seed-42 light.json fixture readable");
+        serde_json::from_slice(&bytes).expect("seed-42 light.json parses")
+    }
+
+    /// The committed forced-grid positions ({18..22}²) and the committed
+    /// interior ({19..21}²) — the same coordinate contracts `light_stage.rs`
+    /// pins. The 5x5 grid is the exact set Paper lit the interior against; the
+    /// differential reproduces that loaded set verbatim.
+    fn forced_coordinates() -> Vec<(i32, i32)> {
+        (18..=22)
+            .flat_map(|x| (18..=22).map(move |z| (x, z)))
+            .collect()
+    }
+
+    fn committed_coordinates() -> Vec<(i32, i32)> {
+        (19..=21)
+            .flat_map(|x| (19..=21).map(move |z| (x, z)))
+            .collect()
+    }
+
+    /// Rebuild one committed seed-42 LIGHT chunk NBT into the server chunk the
+    /// provider lights: the boot's `SerializableChunkData.read` path
+    /// (`reconstruct_runtime_chunk`), the `from_bridge` value re-encode into
+    /// `StateId`, then the base is moved out via the `LevelChunk::into_base`
+    /// seam. The captured post-light state carries the neighbour light the
+    /// engine consumes as its initial conditions.
+    fn rebuild_light_fixture_chunk(
+        cx: i32,
+        cz: i32,
+        height_accessor: SimpleLevelHeightAccessor,
+    ) -> ChunkAccess<StateId, ServerBiomeId, StructureKey> {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../tools/rivet-oracle/fixtures/light/chunks/{cx}.{cz}.nbt"
+        ));
+        let bytes = fs::read(&fixture).expect("seed-42 light chunk fixture readable");
+        let mut input = DataInputStream::new(Cursor::new(bytes));
+        let tag = nbt_io::read_unlimited(&mut input).expect("seed-42 light chunk fixture parses");
+        let data = SerializableChunkData::parse(height_accessor, &tag)
+            .expect("seed-42 light chunk parses")
+            .expect("seed-42 light chunk carries Status");
+        let reconstruction =
+            reconstruct_runtime_chunk(ChunkPos::new(cx, cz), data, height_accessor, true)
+                .expect("seed-42 light chunk reconstructs");
+        let (block_strategy, biome_strategy) = strategies();
+        reconstruction
+            .chunk
+            .map_values(
+                block_strategy,
+                biome_strategy,
+                StateId(0),
+                ServerBiomeId(40),
+                &|state: &BlockState| state.id(),
+                &|biome: &WorldgenBiomeId| ServerBiomeId(biome.0),
+                &|state: &StateId| state_flags(*state),
+            )
+            .expect("seed-42 light chunk value re-encode")
+            .into_base()
+    }
+
+    /// The chunk's in-memory sky emptiness map: per world section `has_only_air`
+    /// (`absent or only air → empty`). Paper does not serialize the emptiness
+    /// map and the reconstruction does not rebuild it, so the test derives it
+    /// exactly like `light_stage.rs` (and Paper's `getEmptySectionsForChunk`).
+    fn sky_emptiness_from_sections(
+        chunk: &ChunkAccess<StateId, ServerBiomeId, StructureKey>,
+    ) -> Vec<bool> {
+        chunk
+            .get_sections()
+            .iter()
+            .map(|s| s.has_only_air())
+            .collect()
+    }
+
+    /// The full differential: rebuild the forced 5x5 from the committed NBTs
+    /// (each carrying its captured post-light neighbour state), then re-light
+    /// the committed 3x3 interior through the real engine and compare the
+    /// published sky nibbles + emptiness map byte-exact against the Paper
+    /// checkpoint.
+    ///
+    /// The captured light is a fixed point: Paper computed every committed
+    /// chunk over exactly this loaded set, and the idempotent re-light
+    /// (`relightChunks`' no-edge-checks path — `propagate_neighbour_levels`
+    /// pulls the neighbours' lateral light into the increase queue) reproduces
+    /// that same final light. So the fixture truth is the expected engine
+    /// output, not merely a stored echo. (`light()`'s edge-checks path would
+    /// not: it re-fills sky from above and only decreases edges, so it cannot
+    /// reproduce the east-neighbour water pull at the boundary columns.)
+    #[test]
+    fn seed42_light_engine_matches_the_paper_light_checkpoint() {
+        let golden = load_light_golden();
+        assert_eq!(golden.seed, 42);
+        assert_eq!(golden.format, 1);
+
+        let height_accessor = overworld();
+        let min_light = height_accessor.get_min_section_y() - 1;
+        let max_light = height_accessor.get_max_section_y() + 1;
+
+        let mut storage = HashMap::new();
+        for (cx, cz) in forced_coordinates() {
+            let mut chunk = rebuild_light_fixture_chunk(cx, cz, height_accessor);
+            chunk.set_sky_emptiness_map(Some(sky_emptiness_from_sections(&chunk)));
+            storage.insert((cx, cz), chunk);
+        }
+
+        let (chunks, shared) = storage_closure(&mut storage);
+        let mut provider = SkyLightProvider::new(height_accessor, true, true, chunks);
+
+        let mut compared_light_sections = 0usize;
+        for (cx, cz) in committed_coordinates() {
+            let key = format!("{cx},{cz}");
+            let truth = golden
+                .chunks
+                .get(&key)
+                .unwrap_or_else(|| panic!("committed seed-42 truth {key} present"));
+            assert_eq!(truth.stored_pos, [cx, cz]);
+            assert_eq!(truth.status, "minecraft:full");
+            assert_eq!(truth.min_light_section, min_light);
+            assert_eq!(truth.max_light_section, max_light);
+            assert!(truth.light_correct);
+
+            let mut center = shared
+                .lock()
+                .unwrap()
+                .remove(&(cx, cz))
+                .expect("center chunk present");
+            provider.relight_chunk_with(&mut center, &[None; SECTION_COUNT]);
+            shared.lock().unwrap().insert((cx, cz), center);
+
+            let shared_guard = shared.lock().unwrap();
+            let lit = shared_guard
+                .get(&(cx, cz))
+                .expect("center chunk present after run");
+            for (index, y) in (min_light..=max_light).enumerate() {
+                let published = lit.sky_nibbles()[index]
+                    .to_vanilla_nibble()
+                    .map(|layer| layer.get_data());
+                let captured = truth
+                    .sky_nibbles
+                    .get(&y)
+                    .unwrap_or_else(|| panic!("captured section {y} for {key}"));
+                assert_eq!(
+                    &published, captured,
+                    "chunk {key} section {y} published sky light differs from Paper"
+                );
+                if published.is_some() {
+                    compared_light_sections += 1;
+                }
+            }
+            assert_eq!(
+                lit.sky_emptiness_map(),
+                Some(truth.sky_emptiness.as_slice()),
+                "chunk {key} emptiness map"
+            );
+            assert_eq!(lit.is_light_correct(), truth.light_correct, "chunk {key}");
+        }
+        assert!(
+            compared_light_sections > 0,
+            "the engine published no light — the comparison is vacuous"
+        );
     }
 }

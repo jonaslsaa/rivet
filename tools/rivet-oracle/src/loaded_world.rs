@@ -162,7 +162,11 @@ fn storage_info(root: &Path) -> RegionStorageInfo {
     )
 }
 
-fn section_predicates() -> SectionBlockPredicates {
+/// The section predicates the loaded-world and seed-42-light extractions share:
+/// air/fluid/random-ticking/lava classification over the world's `BlockState`
+/// space. `pub(crate)` so `light_stage` derives the same per-section emptiness
+/// map from the same section content.
+pub(crate) fn section_predicates() -> SectionBlockPredicates {
     SectionBlockPredicates {
         is_air: |state: &BlockState| state.is_air(),
         is_randomly_ticking: |state: &BlockState| state.random_ticking(),

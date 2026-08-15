@@ -235,8 +235,8 @@ pub(crate) fn check_capture_pin(run_dir: &Path) -> Result<(), Error> {
         }
         crate::PinVerdict::Unavailable { reason } => Err(Error::PinUnavailable {
             reason: format!(
-                "{reason} — the generated-expected capture's content would be stamped with \
-                 {PINNED_PAPER} provenance; refusing to fabricate it"
+                "{reason} — the capture's content would be stamped with {PINNED_PAPER} \
+                 provenance; refusing to fabricate it"
             ),
         }),
     }
