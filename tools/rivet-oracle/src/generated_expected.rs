@@ -328,8 +328,9 @@ fn capture_world(seed: i64) -> Result<WorldManifest, Error> {
 /// state. The entities/poi files carry no block content (spawn-limits are 0),
 /// but they are boot1 leftovers that do not participate in the regenerated
 /// chunk state — clearing them keeps the capture's blank chunk state complete.
-/// The generated-expected handoff passes `crate::OVERWORLD_DIM` (it only ever
-/// reads the overworld); the corpus paths pass `TICKET_DIMS`.
+/// The generated-expected handoff and the features checkpoint pass
+/// `crate::OVERWORLD_DIM` (they only ever read the overworld); the corpus paths
+/// pass `TICKET_DIMS`.
 pub(crate) fn clear_region_files(world_dir: &Path, dims: &[(&str, &str)]) -> Result<(), Error> {
     let mut cleared = 0usize;
     for (dim, _) in dims {
