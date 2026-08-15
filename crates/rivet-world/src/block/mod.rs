@@ -18,6 +18,16 @@ pub mod blocks;
 /// value types themselves live in `rivet-registry` (issue #228).
 pub mod state;
 
+/// STUB(mc.world.level.block) — the
+/// `DoublePlantBlock.placeAt` helper `SimpleBlockFeature` consumes (the block
+/// class itself is owned by this `mc.world.level.block` unit, issue #228).
+pub mod double_plant_block;
+
+/// STUB(mc.world.level.block) — the
+/// `MossyCarpetBlock.placeAt` helper `SimpleBlockFeature` consumes (the block
+/// class itself is owned by this `mc.world.level.block` unit, issue #228).
+pub mod mossy_carpet_block;
+
 pub use rivet_registry::block_state::BlockState;
 use rivet_registry::generated::blocks::BlockId;
 use rivet_registry::state_definition::StateDefinition;
