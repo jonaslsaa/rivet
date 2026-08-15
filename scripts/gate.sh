@@ -1036,6 +1036,9 @@ main() {
       echo "==> rivet-codegen probe-worldgen (live Paper worldgen noise/biome/preset data)"
       cargo run --release --quiet --manifest-path tools/rivet-codegen/Cargo.toml -- \
         probe-worldgen --bundler "$PROBE_BUNDLER"
+      echo "==> rivet-codegen probe-feature-data (live Paper seed-42 FEATURES feature data)"
+      cargo run --release --quiet --manifest-path tools/rivet-codegen/Cargo.toml -- \
+        probe-feature-data --bundler "$PROBE_BUNDLER"
     else
       echo "    SKIPPED (no Paper bundler jar: build working/Paper (paper-bundler-*.jar) or place it in tools/rivet-oracle/work/jars/)"
     fi

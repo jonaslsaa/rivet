@@ -29,6 +29,14 @@ builds on top of these fixtures later.
   mechanism, from a blank chunk state so it is byte-deterministic), and commits
   the per-chunk `surface`/`bedrock`/`below_feet` sample contract the generated
   acceptance compares against. Twin-boot byte-identity verified.
+- **Seed-42 FEATURES oracle checkpoint** (`features 42`, PR #631): the per-chunk
+  `surface`/`bedrock`/`below_feet` fingerprint for the committed 2×2 grid
+  {(3,3),(4,3),(3,4),(4,4)}, captured by booting a fresh seed-42 normal-
+  overworld world and force-generating generated-expected's {-6..=6} forced grid
+  to level 33 (`minecraft:full`). FEATURES is the last block-mutating status, so
+  a FULL serialization's block data IS the FEATURES-decoration output; the
+  verifier cross-checks each committed chunk against the generated-expected
+  golden at the same coordinates. Twin-boot byte-identity verified.
 - The Rust runner `cargo run -p rivet-oracle` verifies every committed
   fixture kind against its manifest's SHA-256s and prints a summary.
 
@@ -74,6 +82,9 @@ rivet-oracle/
     generated-expected/ # seed-42 generated-world ground-truth handoff (PR #563)
       manifest.json     # hash of generated-expected.json (kind: generated-expected)
       generated-expected.json  # 81 FULL spawn-grid chunks' surface/bedrock/below_feet
+    features/           # seed-42 FEATURES oracle checkpoint (PR #631)
+      manifest.json     # hash of features.json (kind: features)
+      features.json     # 4 committed chunks' surface/bedrock/below_feet
   work/                 # scratch space — gitignored, never commit
     run/                # a completed server run (materialized runtime)
     jars/               # copies of the built Paper jars
@@ -547,6 +558,55 @@ pattern, a tiny distinct-block set) is refused loudly, never handed off as
 ground truth. A missing runtime or a missing fixture tree is typed UNVERIFIED
 (exit 3), never a fabricated green.
 
+## Seed-42 FEATURES checkpoint: `features`
+
+The seed-42 FEATURES oracle checkpoint (PR #631) is the oracle ground-truth
+BEFORE any Rivet FEATURES implementation: a focused Paper 26.2 capture of a
+deterministic seed-42 overworld chunk set forced through the FEATURES
+decoration status, plus an exact Rivet-side verifier. It reuses the
+generated-expected two-boot capture machinery (level-33 forced tickets,
+`clear_region_files`, the provenance pin) but records stage-specific truth for
+the decoration step itself, so a future Rivet FEATURES port is checked against
+Paper ground truth rather than against nothing.
+
+```bash
+cargo run -p rivet-oracle -- features 42               # verify the committed checkpoint
+cargo run -p rivet-oracle -- features 42 --to out.json # capture a fresh checkpoint
+cargo run -p rivet-oracle -- features 42 --tamper      # negative control (must fail)
+cargo run -p rivet-oracle -- regenerate --features     # twin-boot regenerate the fixture
+```
+
+The Moonrise forced-ticket path can only serialize FULL: a level-34 ticket
+(`ChunkLevel.byStatus(FEATURES)`) is `INACCESSIBLE` to `fullStatus`, so the
+checkpoint captures at level 33, which serializes as `minecraft:full`. That is
+faithful to the FEATURES step because FEATURES is the last block-mutating
+status: the InitializeLight/Light steps only compute light arrays and never
+touch block data, so a FULL serialization's block states ARE the
+FEATURES-decoration output.
+
+The committed golden is the 2×2 grid {(3,3),(4,3),(3,4),(4,4)} around the
+tree-bearing chunk (4,4), a strict interior subset of generated-expected's
+committed {-4..=4} grid. The FORCED grid is generated-expected's {-6..=6}²
+regime: the FEATURES step is declared with `blockStateWriteRadius(1)`, so a
+chunk's decoration writes one chunk into each neighbor, and only the same
+forced-grid context makes the committed chunks byte-identical to the canonical
+golden — which the verifier enforces by cross-checking every committed chunk
+against generated-expected at the same coordinates (an absent or divergent
+golden is damage, never a silent skip).
+
+The per-chunk contract reuses the loaded-world fingerprint: 16×16 row-major
+`z*16+x` `surface`/`bedrock`/`below_feet` arrays, the sorted distinct block
+set, distinct-state-id count, and section count, plus the chunk status and
+capability flags (a FULL chunk folds no `status:` flag). Non-vacuity: chunk
+(4,4) must carry tree blocks in its surface (a pre-features carvers capture has
+none), the union distinct set must clear the pre-features floor, and the
+bedrock plane must be depth-sampled. The tri-state contract mirrors
+generated-expected: a wholly absent fixture tree is UNVERIFIED (exit 3), a
+partial/corrupt tree hard-fails (exit 1), never a silent green. The tamper
+negative control proves the manifest SHA-256 gate is not vacuous. `verify` (and
+the no-arg `cargo run -p rivet-oracle`) gates on this golden exactly like the
+other load-bearing kinds.
+
 ## Regenerate: `regenerate`
 
 Full regeneration of every fixture kind (boots Paper where a boot is required):
@@ -560,6 +620,7 @@ cargo run -p rivet-oracle -- regenerate --text     # text corpus only (Paper ora
 cargo run -p rivet-oracle -- regenerate --composed-noise   # composed-noise goldens only
 cargo run -p rivet-oracle -- regenerate --surface-column   # post-surface column goldens only
 cargo run -p rivet-oracle -- regenerate --generated-expected  # generated-expected handoff only
+cargo run -p rivet-oracle -- regenerate --features         # seed-42 FEATURES checkpoint only
 ```
 
 The script-driven value-leaf goldens are regenerated outside `regenerate`:
