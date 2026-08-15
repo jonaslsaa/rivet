@@ -347,21 +347,26 @@ mod tests {
         assert_eq!(random.calls, vec![RngCall::Float]);
     }
 
-    /// `floorSearchRange` bounds the scan: a column taller than the search
-    /// range walks only `range - 1` steps, so the reached cell is still water
-    /// and fails `validEdge` — no floor, `false`, no writes.
+    /// `floorSearchRange` bounds the scan: from the origin the DOWN scan walks
+    /// at most `range - 1` steps (y=30 -> y=26 with range 5), so the reached
+    /// cell is still water and fails `validEdge` — no floor, `false`, and — the
+    /// observable pin — zero RNG draws. A buggy scan that ignored the range
+    /// would keep descending to the stone at y=5, find a floor, and start
+    /// drawing the box, so `random.calls.is_empty()` catches it.
     #[test]
     fn floor_search_range_bounds_the_walk() {
         let mut level = TestLevel::over(access());
-        // Water from y=0 up through y=30, so the DOWN scan never exits the
-        // water within `floorSearchRange = 5` (it stops at y=0 after 5 steps,
-        // still water -> invalid edge).
-        for y in 0..=30 {
+        // Water from y=6 up through y=30 (the scan's reach), with the first
+        // non-water cell at y=5 — just beyond the `floorSearchRange = 5`
+        // boundary from the origin at y=30.
+        for y in 6..=30 {
             level.states.insert(BlockPos::new(0, y, 0), water());
         }
-        let config = UnderwaterMagmaConfiguration::new(5, 1, 0.0);
-        let (verdict, _random) = place_with(&mut level, BlockPos::new(0, 30, 0), &config);
+        level.states.insert(BlockPos::new(0, 5, 0), stone());
+        let config = UnderwaterMagmaConfiguration::new(5, 1, 1.0);
+        let (verdict, random) = place_with(&mut level, BlockPos::new(0, 30, 0), &config);
         assert!(!verdict);
+        assert!(random.calls.is_empty());
         assert!(level.writes.is_empty());
     }
 
@@ -382,25 +387,35 @@ mod tests {
     }
 
     /// A stone cell in the box whose `pos.below()` is visible from outside is
-    /// rejected: `!isVisibleFromOutside(level, pos.below(), UP)` fails, so no
-    /// write. Water does not solid-render, so a water cell below is "visible
-    /// from outside".
+    /// rejected by the `!isVisibleFromOutside(level, pos.below(), UP)` check.
+    /// The candidate's four horizontal neighbours are solid stone, so the ONLY
+    /// face that can reject it is the water cell below — deleting the
+    /// `pos.below()` check would let it write, so the empty-writes assertion
+    /// isolates that check. Water does not solid-render, so it is "visible from
+    /// outside".
     #[test]
     fn cell_visible_from_below_is_rejected() {
-        let mut level = water_on_stone_level();
-        // Stone floor at y=9; the box centred on (0,9,0) with radius 2 spans
-        // y=7..=11. Put stone at (0,8,0) with water below (0,7,0) so that
-        // (0,8,0).below() is visible from outside. With probability 1.0 every
-        // cell passes the filter.
-        for y in 7..=11 {
+        let mut level = TestLevel::over(access());
+        // Column: origin (0,10,0) is water with water at (0,9,0), the floor is
+        // stone at (0,8,0), its four horizontal neighbours are solid stone, and
+        // the cell below stays water (visible from outside).
+        for y in 9..=11 {
             level.states.insert(BlockPos::new(0, y, 0), water());
         }
         level.states.insert(BlockPos::new(0, 8, 0), stone());
-        // (0,7,0) stays water (visible from outside).
+        for neighbour in Plane::Horizontal.faces() {
+            level
+                .states
+                .insert(BlockPos::new(0, 8, 0).relative(neighbour), stone());
+        }
+        level.states.insert(BlockPos::new(0, 7, 0), water());
         let config = UnderwaterMagmaConfiguration::new(10, 2, 1.0);
-        let (verdict, _random) = place_with(&mut level, BlockPos::new(0, 10, 0), &config);
+        let (verdict, random) = place_with(&mut level, BlockPos::new(0, 10, 0), &config);
         assert!(!verdict);
         assert!(level.writes.is_empty());
+        // The 5x5x5 box still consumes every draw even though the floor cell is
+        // rejected — consume-before-validate on the full box.
+        assert_eq!(random.calls.len(), 125);
     }
 
     /// A solid stone cell with solid neighbours on every horizontal face is a
