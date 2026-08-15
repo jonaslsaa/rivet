@@ -9,8 +9,10 @@
 //!     the biome map of its own 3x3 neighborhood, so the biome read set is chunks
 //!     1..6. The biome source is sampled at every quart position and every Y quart
 //!     (-64..319 blocks) because the depth parameter varies by Y.
-//!   * `biomes` — the full `BiomeGenerationSettings` of each reachable biome:
-//!     id, carver identity names, and the per-step placed-feature lists (step
+//!   * `biomes` — the full `BiomeGenerationSettings` of EVERY overworld possible
+//!     biome (the full `biomeSource.possibleBiomes()` list, 55 — the exact set
+//!     Paper's FeatureSorter is built from, `ChunkGenerator.java` 97-100): id,
+//!     carver identity names, and the per-step placed-feature lists (step
 //!     order = `GenerationStep.Decoration` ordinal; holder-set order preserved).
 //!   * `placed_features` / `configured_features` — the transitive closure of
 //!     referenced registry entries, each stored as its full `RegistryOps`-encoded

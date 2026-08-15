@@ -386,14 +386,20 @@ mod tests {
         );
     }
 
-    /// The committed tables keep the exact transitive closure: every reference
-    /// resolves and every entry is reachable — a dead or dangling entry in a
-    /// hand-edited generated file fails here before any FEATURES pass runs.
+    /// The committed tables keep the exact transitive closure — the runtime
+    /// mirror of the codegen fixture gate's three structurally explicit checks.
+    /// Every reference resolves (typed: a placed feature's `json.feature` must
+    /// be a *configured* feature specifically; a configured feature's holder-key
+    /// ref may be placed or configured; a biome step ref must be placed) and
+    /// every entry is reachable from the biome step lists through a FORWARD
+    /// fixpoint seeded ONLY from those lists — a dead or dangling entry in a
+    /// hand-edited generated file fails here before any FEATURES pass runs, and
+    /// a disconnected mutually-referencing component no biome can reach is never
+    /// self-justifying.
     #[test]
     fn committed_tables_keep_the_exact_transitive_closure() {
-        // placed reachable  = biome step refs ∪ placed refs inside configured JSONs
-        // configured reach = placed `json.feature` refs ∪ configured refs inside
-        //                    configured JSONs (registry-membership disambiguation)
+        // Seed ONLY from the biome step lists (a stale orphan must never be
+        // self-justifying by seeding from every table entry).
         let mut placed_reachable: HashSet<String> = HashSet::new();
         for b in BIOME_GENERATION_SETTINGS_BY_NAME.values() {
             for step in b.features {
@@ -406,38 +412,61 @@ mod tests {
                 }
             }
         }
-
         let mut configured_reachable: HashSet<String> = HashSet::new();
-        for (name, p) in &PLACED_FEATURE_BY_NAME {
-            let v: Value = serde_json::from_str(p.json)
-                .unwrap_or_else(|e| panic!("placed `{name}` json is not parseable: {e}"));
-            let feature = v["feature"]
-                .as_str()
-                .unwrap_or_else(|| panic!("placed `{name}` json.feature is not a string"));
-            assert!(
-                CONFIGURED_FEATURE_BY_NAME.contains_key(feature),
-                "placed `{name}` references configured `{feature}` that is absent from the tables"
-            );
-            configured_reachable.insert(feature.to_string());
-        }
 
-        for (name, c) in &CONFIGURED_FEATURE_BY_NAME {
-            let v: Value = serde_json::from_str(c.json)
-                .unwrap_or_else(|e| panic!("configured json is not parseable: {e}"));
-            let mut bare = Vec::new();
-            collect_bare_strings(&v, &mut bare);
-            for s in bare {
-                if PLACED_FEATURE_BY_NAME.contains_key(s) {
-                    placed_reachable.insert(s.to_string());
-                }
-                if CONFIGURED_FEATURE_BY_NAME.contains_key(s) {
-                    configured_reachable.insert(s.to_string());
+        loop {
+            let mut grew = false;
+
+            // Reachable placed -> their configured-feature ref (typed: must
+            // resolve in the CONFIGURED table — a placed feature can never
+            // reference a placed feature).
+            for name in placed_reachable.clone() {
+                let p = &PLACED_FEATURE_BY_NAME[&name];
+                let v: Value = serde_json::from_str(p.json)
+                    .unwrap_or_else(|e| panic!("placed `{name}` json is not parseable: {e}"));
+                let feature = v["feature"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("placed `{name}` json.feature is not a string"));
+                assert!(
+                    CONFIGURED_FEATURE_BY_NAME.contains_key(feature),
+                    "placed `{name}` references configured `{feature}` that is absent from the \
+                     tables (a dangling or mis-typed holder reference)"
+                );
+                grew |= configured_reachable.insert(feature.to_string());
+            }
+
+            // Reachable configured -> their bare-string refs (by registry
+            // membership; a feature `type` key sharing a feature's name is a
+            // real reachability edge at capture time).
+            for name in configured_reachable.clone() {
+                let c = &CONFIGURED_FEATURE_BY_NAME[&name];
+                let v: Value = serde_json::from_str(c.json)
+                    .unwrap_or_else(|e| panic!("configured `{name}` json is not parseable: {e}"));
+                let mut bare = Vec::new();
+                collect_bare_strings(&v, &mut bare);
+                for s in bare {
+                    if PLACED_FEATURE_BY_NAME.contains_key(s) {
+                        grew |= placed_reachable.insert(s.to_string());
+                    }
+                    if CONFIGURED_FEATURE_BY_NAME.contains_key(s) {
+                        grew |= configured_reachable.insert(s.to_string());
+                    }
                 }
             }
-            // Holder-key refs (`feature`/`default`) are the extractor's encoded
-            // registry references and must resolve — the structurally explicit
-            // mirror of the codegen fixture gate's dangling-holder-ref check
-            // (membership disambiguation above is the reachability walk).
+
+            if !grew {
+                break;
+            }
+        }
+
+        // Dangling holder-key refs (`feature`/`default`) inside configured JSONs
+        // — the extractor's encoded registry references — must resolve in either
+        // table (configured holders legitimately point at both placed and
+        // configured features: `trees_water`→`oak_checked` is placed,
+        // `moss_patch`→`moss_vegetation` is configured).
+        for (name, c) in &CONFIGURED_FEATURE_BY_NAME {
+            let v: Value = serde_json::from_str(c.json)
+                .unwrap_or_else(|e| panic!("configured `{name}` json is not parseable: {e}"));
             let mut holder = Vec::new();
             collect_feature_holder_refs(&v, &mut holder);
             for s in holder {
@@ -449,7 +478,8 @@ mod tests {
             }
         }
 
-        // No dangling refs (checked inline above) and no dead entries.
+        // No dead entries: every table entry must be reachable from the biome
+        // step lists.
         for name in PLACED_FEATURE_BY_NAME.keys() {
             let name = *name;
             assert!(

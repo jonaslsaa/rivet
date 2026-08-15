@@ -39,28 +39,36 @@
 //!     `biomes` key set == the possible-biome set; the per-biome per-step arrays
 //!     are pinned (a step-list reorder changes decoration semantics and must
 //!     fail);
-//!   * closure, two structurally explicit checks (mirrored verbatim by the
+//!   * closure, three structurally explicit checks (mirrored verbatim by the
 //!     runtime committed-table test in `crates/rivet-world/src/data/feature_data.rs`):
-//!       - dangling refs: a bare string under a *feature-holder key*
-//!         (`feature`/`default`) inside a configured feature's JSON, the
-//!         top-level `feature` of a placed feature, and every biome step-list
-//!         entry (a direct placed-feature reference) must resolve in the
-//!         fixture's own tables. Block-state `Name` values, tag strings, and
-//!         feature `type` dispatch keys are never holder refs (the holder-key
-//!         positions are the only ones the extractor encodes as
-//!         registry-reference holders). Resolving these by table membership
-//!         would silently accept a closure that dropped a referenced entry —
-//!         e.g. a `random_selector` `default` pointing at a placed feature the
-//!         closure omitted (`oak_checked` via `trees_water`).
+//!       - dangling refs: (1) the top-level `feature` of every placed feature
+//!         must resolve in `configured_features` — a placed feature can only
+//!         reference a configured feature, never a placed one; (2) a bare
+//!         string under a *feature-holder key* (`feature`/`default`) inside a
+//!         configured feature's JSON must resolve in either table (configured
+//!         holders legitimately point at both placed and configured features —
+//!         `trees_water`→`oak_checked` is placed, `moss_patch`→`moss_vegetation`
+//!         is configured); (3) every biome step-list entry (a direct
+//!         placed-feature reference) must resolve in `placed_features`.
+//!         Block-state `Name` values, tag strings, and feature `type` dispatch
+//!         keys are never holder refs (the holder-key positions are the only
+//!         ones the extractor encodes as registry-reference holders). Resolving
+//!         by table membership would silently accept a closure that dropped a
+//!         referenced entry — e.g. a `random_selector` `default` pointing at a
+//!         placed feature the closure omitted (`oak_checked` via `trees_water`).
 //!       - dead entries: every table entry must be reachable from the biomes'
 //!         step lists through the extractor's fixpoint, which resolves every
 //!         bare `minecraft:` string by registry membership (a feature `type`
 //!         key that shares a feature's name, like `minecraft:vines`, is a real
 //!         reachability edge at capture time — membership, not key position,
-//!         disambiguates it).
+//!         disambiguates it). The fixpoint is seeded ONLY from the biome step
+//!         lists (not from every table entry) so a stale orphan is never
+//!         self-justifying.
 //!   * probe — the committed `probe` counts must match the tables, and
 //!     `probe.per_biome` must agree element-for-element with the `biomes` step
-//!     lists (a stale probe object or a drifted `biomes` table fails).
+//!     lists (a stale probe object or a drifted `biomes` table fails). The
+//!     probe records `per_step` counts AND the ordered `per_step_names`, so a
+//!     within-step reorder also fails (order is semantics).
 //!
 //! Regeneration is byte-idempotent (the live probe proves a fresh load is
 //! byte-identical to the committed fixture).
@@ -434,6 +442,7 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
             bail!("biome `{name}` is in `biomes` but absent from `possible_biomes`");
         }
     }
+    let mut biome_ids: Vec<u16> = Vec::with_capacity(biomes.len());
     for (name, entry) in biomes {
         crate::registries::validate_name("minecraft:worldgen/biome", name)?;
         let entry = entry
@@ -448,7 +457,8 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
             .get("id")
             .and_then(Value::as_u64)
             .with_context(|| format!("biome `{name}` is missing `id`"))?;
-        let _ = u16::try_from(id).with_context(|| format!("biome `{name}` id out of u16 range"))?;
+        let id = u16::try_from(id).with_context(|| format!("biome `{name}` id out of u16 range"))?;
+        biome_ids.push(id);
         entry
             .get("carvers")
             .and_then(Value::as_array)
@@ -489,6 +499,18 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
         }
     }
 
+    // Biome registry ids are the full-registry dense ids and must be unique
+    // across the possible set (a hand-edited id reassignment or duplicate
+    // would corrupt the deterministic id -> biome identity the runtime and the
+    // generated tables rely on). This mirrors the feature tables' uniqueness
+    // check.
+    biome_ids.sort_unstable();
+    for pair in biome_ids.windows(2) {
+        if pair[0] == pair[1] {
+            bail!("`biomes` has a duplicate registry id `{}`", pair[0]);
+        }
+    }
+
     // Reachable biomes must be sorted by dense registry id (the extractor emits
     // them via a TreeMap keyed by `biomeReg.getId`; a reorder or a hand-edited
     // id reassignment must fail). Names can disagree with id order across
@@ -510,22 +532,28 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
     let placed = validate_feature_table("placed_features", object)?;
     let configured = validate_feature_table("configured_features", object)?;
 
-    // Closure, two structurally explicit checks (see the module doc; the
+    // Closure, three structurally explicit checks (see the module doc; the
     // runtime committed-table test in `crates/rivet-world/src/data/feature_data.rs`
-    // mirrors both). A fixture with a dead (unreachable) entry or a dangling
+    // mirrors them). A fixture with a dead (unreachable) entry or a dangling
     // reference is stale or hand-edited.
     //
-    // Check 1 — dangling refs. RegistryOps encodes a feature holder reference
-    // as a bare string under a *feature-holder key*: `feature` (a
+    // Check 1 — typed dangling refs. RegistryOps encodes a feature holder
+    // reference as a bare string under a *feature-holder key*: `feature` (a
     // `random_selector`/`random_boolean_selector`/`vegetation_patch`/`root_system`
     // sub-feature) or `default` (a `random_selector` default). The top-level
-    // `feature` of a placed feature is its configured-feature ref. Every such
-    // string must resolve in the fixture's own tables — checking by membership
-    // of the *referencing* feature's own table would silently accept a closure
-    // that dropped a referenced entry (e.g. a `random_selector` `default`
-    // pointing at a placed feature the closure omitted). Block-state `Name`
-    // values, tag strings, and feature `type` dispatch keys are never holder
-    // refs and are not collected here.
+    // `feature` of a placed feature is its configured-feature ref and must
+    // resolve in `configured_features` SPECIFICALLY — a placed-only key is
+    // type-invalid (a placed feature's `feature` is always a configured
+    // feature). A configured feature's holder ref may legitimately name either
+    // a placed or a configured feature (e.g. `trees_water`'s `feature` is
+    // placed `fancy_oak_checked`, while `moss_patch`'s `feature` is configured
+    // `moss_vegetation`), so it resolves in either table. Every such string
+    // must resolve in the fixture's own tables — checking by membership of the
+    // *referencing* feature's own table would silently accept a closure that
+    // dropped a referenced entry (e.g. a `random_selector` `default` pointing
+    // at a placed feature the closure omitted). Block-state `Name` values, tag
+    // strings, and feature `type` dispatch keys are never holder refs and are
+    // not collected here.
     let mut direct_placed: HashSet<&str> = HashSet::new();
     for entry in biomes.values() {
         for step in entry["features"].as_array().unwrap() {
@@ -535,7 +563,8 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
         }
     }
 
-    let mut holder_refs: Vec<(&str, &str)> = Vec::new(); // (referencing name, holder ref)
+    // Placed -> configured (typed): a placed feature's top-level `feature` is
+    // its configured-feature ref.
     for (pname, pentry) in placed {
         let json = pentry
             .get("json")
@@ -545,22 +574,27 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
             .get("feature")
             .and_then(Value::as_str)
             .with_context(|| format!("placed feature `{pname}` `json.feature` is not a string"))?;
-        holder_refs.push((pname, feature_ref));
+        if !configured.contains_key(feature_ref) {
+            bail!(
+                "placed feature `{pname}` references configured feature `{feature_ref}` that is \
+                 absent from `configured_features` (a dangling or mis-typed holder reference)"
+            );
+        }
     }
+
+    // Configured -> either table: a configured feature's holder ref names a
+    // placed or a configured feature (both occur in the fixture).
     for (cname, centry) in configured {
         let json = centry
             .get("json")
             .with_context(|| format!("configured feature `{cname}` is missing `json`"))?;
         for r in collect_feature_holder_refs(json) {
-            holder_refs.push((cname, r));
-        }
-    }
-    for (from, r) in &holder_refs {
-        if !placed.contains_key(*r) && !configured.contains_key(*r) {
-            bail!(
-                "`{from}` references feature `{r}` that is absent from `placed_features` and \
-                 `configured_features` (a dangling holder reference)"
-            );
+            if !placed.contains_key(r) && !configured.contains_key(r) {
+                bail!(
+                    "configured feature `{cname}` references feature `{r}` that is absent from \
+                     `placed_features` and `configured_features` (a dangling holder reference)"
+                );
+            }
         }
     }
 
@@ -581,32 +615,54 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
     // bare `minecraft:` string by registry membership (a feature `type` key that
     // shares a feature's name, like `minecraft:vines`, is a real reachability
     // edge at capture time — membership, not key position, disambiguates it).
+    // The walk is a genuine FORWARD reachability seeded ONLY from the biomes'
+    // step lists and iterated to a fixpoint: a disconnected, mutually-
+    // referencing component that no biome can reach must fail as a stale entry
+    // (a walk that seeds from every table entry would let such a component
+    // appear reachable).
     let mut placed_reachable: HashSet<&str> = direct_placed.clone();
     let mut configured_reachable: HashSet<&str> = HashSet::new();
+    loop {
+        let mut grew = false;
 
-    for (pname, pentry) in placed {
-        let json = pentry
-            .get("json")
-            .and_then(Value::as_object)
-            .with_context(|| format!("placed feature `{pname}` is missing `json`"))?;
-        let feature_ref = json
-            .get("feature")
-            .and_then(Value::as_str)
-            .with_context(|| format!("placed feature `{pname}` `json.feature` is not a string"))?;
-        configured_reachable.insert(feature_ref);
-    }
+        // Reachable placed -> their configured-feature ref.
+        for p in placed_reachable.clone() {
+            let pentry = placed
+                .get(p)
+                .expect("a reachable placed feature must be a table member");
+            let json = pentry
+                .get("json")
+                .and_then(Value::as_object)
+                .with_context(|| format!("placed feature `{p}` is missing `json`"))?;
+            let feature_ref = json
+                .get("feature")
+                .and_then(Value::as_str)
+                .with_context(|| format!("placed feature `{p}` `json.feature` is not a string"))?;
+            if configured.contains_key(feature_ref) {
+                grew |= configured_reachable.insert(feature_ref);
+            }
+        }
 
-    for centry in configured.values() {
-        let json = centry
-            .get("json")
-            .context("configured feature is missing `json`")?;
-        for r in collect_bare_strings(json) {
-            if placed.contains_key(r) {
-                placed_reachable.insert(r);
+        // Reachable configured -> their bare-string refs (by membership).
+        for c in configured_reachable.clone() {
+            let centry = configured
+                .get(c)
+                .expect("a reachable configured feature must be a table member");
+            let json = centry
+                .get("json")
+                .with_context(|| format!("configured feature `{c}` is missing `json`"))?;
+            for r in collect_bare_strings(json) {
+                if placed.contains_key(r) {
+                    grew |= placed_reachable.insert(r);
+                }
+                if configured.contains_key(r) {
+                    grew |= configured_reachable.insert(r);
+                }
             }
-            if configured.contains_key(r) {
-                configured_reachable.insert(r);
-            }
+        }
+
+        if !grew {
+            break;
         }
     }
 
@@ -706,6 +762,51 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
                 bail!(
                     "probe.per_biome.{bname}.per_step[{i}] is {recorded} but the biome step has {} features",
                     step.len()
+                );
+            }
+        }
+        // The probe records the ordered placed-feature names per step; the biome
+        // step lists must match element-for-element (a within-step reorder
+        // changes decoration semantics and must fail — the same invariant the
+        // runtime committed-table test pins).
+        let per_step_names = bentry
+            .get("per_step_names")
+            .and_then(Value::as_array)
+            .with_context(|| format!("probe.per_biome.{bname} is missing `per_step_names`"))?;
+        if per_step_names.len() != steps.len() {
+            bail!(
+                "probe.per_biome.{bname}.per_step_names has {} entries but the biome has {} steps",
+                per_step_names.len(),
+                steps.len()
+            );
+        }
+        for (i, (recorded_names, step)) in per_step_names.iter().zip(steps).enumerate() {
+            let recorded_names = recorded_names.as_array().with_context(|| {
+                format!("probe.per_biome.{bname}.per_step_names[{i}] is not an array")
+            })?;
+            let step = step
+                .as_array()
+                .with_context(|| format!("biome `{bname}` step {i} is not an array"))?;
+            let step_names: Vec<&str> = step
+                .iter()
+                .map(|v| {
+                    v.as_str().with_context(|| {
+                        format!("biome `{bname}` step {i} entry is not a string")
+                    })
+                })
+                .collect::<Result<_>>()?;
+            let probe_names: Vec<&str> = recorded_names
+                .iter()
+                .map(|v| {
+                    v.as_str().with_context(|| {
+                        format!("probe.per_biome.{bname}.per_step_names[{i}] entry is not a string")
+                    })
+                })
+                .collect::<Result<_>>()?;
+            if probe_names != step_names {
+                bail!(
+                    "probe.per_biome.{bname}.per_step_names[{i}] does not match the biome step \
+                     (order is semantics: FeatureSorter's per-step holder order) — recorded {probe_names:?} vs {step_names:?}"
                 );
             }
         }
@@ -974,18 +1075,23 @@ mod tests {
         // Reassign the beach biome's dense id so the reachable names stay
         // lexically sorted but the registry-id order breaks (beach is the first
         // entry, so it needs a higher id than dark_forest to break monotonicity).
+        // 66 is above every biome id in the full possible set (max is 65), so
+        // the break is a genuine id-order break and not an id collision.
         let beach_id = root["biomes"]["minecraft:beach"]["id"].as_u64().unwrap();
         let dark_forest_id = root["biomes"]["minecraft:dark_forest"]["id"]
             .as_u64()
             .unwrap();
-        root["biomes"]["minecraft:beach"]["id"] = serde_json::json!(dark_forest_id + 1);
+        root["biomes"]["minecraft:beach"]["id"] = serde_json::json!(66);
         let err = validate_structural(&root).unwrap_err();
         assert!(
             err.to_string().contains("not sorted by registry id"),
             "got: {err}"
         );
-        // Sanity: the edit is a real change (beach id differs from its original).
-        assert_ne!(beach_id, dark_forest_id + 1);
+        // Sanity: the edit is a real change (beach id differs from its original
+        // and from dark_forest's, so the id-order check — not a duplicate-id
+        // check — is what fires).
+        assert_ne!(beach_id, 66);
+        assert_ne!(beach_id, dark_forest_id);
     }
 
     #[test]
@@ -1010,6 +1116,67 @@ mod tests {
         root["probe"]["per_biome"]["minecraft:beach"]["per_step"][1] = serde_json::json!(99);
         let err = validate_structural(&root).unwrap_err();
         assert!(err.to_string().contains("per_step"), "got: {err}");
+    }
+
+    #[test]
+    fn stale_probe_per_biome_step_names_fail() {
+        let mut root = fixture();
+        // A probe.per_biome block whose ordered per-step names no longer match
+        // the biome step lists must fail even when the counts agree: order is
+        // semantics (FeatureSorter's per-step holder order). Swap two names in
+        // beach's step 1 probe.
+        let names = root["probe"]["per_biome"]["minecraft:beach"]["per_step_names"][1]
+            .as_array_mut()
+            .unwrap();
+        names.swap(0, 1);
+        let err = validate_structural(&root).unwrap_err();
+        assert!(
+            err.to_string().contains("per_step_names"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn duplicate_biome_registry_id_fails() {
+        let mut root = fixture();
+        // Duplicate the beach biome's dense registry id onto another biome's id:
+        // the `biomes` table must be a name->id bijection (registry identity).
+        let dup = root["biomes"]["minecraft:beach"]["id"].as_u64().unwrap();
+        root["biomes"]["minecraft:dark_forest"]["id"] = serde_json::json!(dup);
+        let err = validate_structural(&root).unwrap_err();
+        assert!(err.to_string().contains("duplicate registry id"), "got: {err}");
+    }
+
+    #[test]
+    fn placed_to_configured_mis_type_fails() {
+        let mut root = fixture();
+        // Point a placed feature's `json.feature` at a *placed* feature instead
+        // of a configured one: the placed->configured edge is typed and must
+        // fail (a placed feature can only reference a configured feature). Pick a
+        // placed-only name (in placed_features, not in configured_features) so
+        // the mis-type is real — every well-formed placed json.feature resolves
+        // in configured_features.
+        let configured: Vec<String> = root["configured_features"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let placed_only = root["placed_features"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .find(|k| !configured.contains(k))
+            .expect("the full closure has a placed-only feature")
+            .clone();
+        root["placed_features"]["minecraft:lake_lava_underground"]["json"]["feature"] =
+            serde_json::json!(placed_only);
+        let err = validate_structural(&root).unwrap_err();
+        assert!(
+            err.to_string().contains("references configured feature")
+                && err.to_string().contains(&placed_only),
+            "got: {err}"
+        );
     }
 
     #[test]
