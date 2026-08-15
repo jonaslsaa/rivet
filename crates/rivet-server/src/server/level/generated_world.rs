@@ -870,11 +870,8 @@ fn run_biome_decoration(
     let full_possible_biomes = generator.biome_source().possible_biomes();
     let settings_sources =
         resolve_feature_settings(&full_possible_biomes, placed_registry_id, &mut placed_by_id)?;
-    let feature_list = build_features_per_step(
-        &settings_sources,
-        |(settings, _)| settings.features(),
-        false,
-    );
+    let feature_list =
+        build_features_per_step(&settings_sources, |(settings, _)| settings.features(), true);
 
     // The per-step loop — Paper's `addVanillaDecorations`. The structure loop
     // is skipped (the port has no structure manager; Java's
