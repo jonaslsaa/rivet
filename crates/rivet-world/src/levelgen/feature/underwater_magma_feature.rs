@@ -214,15 +214,20 @@ fn is_water_or_air(state: BlockState) -> bool {
 ///   For such blocks `solid_render` is `true`, so `!solid_render()` is `false`,
 ///   matching.
 ///
-/// The seam diverges ONLY for partial-occlusion blocks (`can_occlude` but not
-/// `solid_render`, e.g. leaves), where Java consults the per-direction
+/// The seam diverges ONLY for partial-occlusion blocks — `can_occlude` but not
+/// `solid_render` (in this model the shelves, piston heads, slabs, stairs,
+/// walls and fences, whose occlusion shape is non-empty but not a full block on
+/// every face), where Java consults the per-direction
 /// `occlusionShape.getFaceShape(dir)` and the verdict is direction-dependent.
 /// The seam answers those cells "visible from outside" on every face
 /// (`!solid_render()` is `true`), which is the conservative rejection: such a
 /// cell fails `is_valid_placement`, so magma is not placed on a partially
 /// occluding neighbour. This is a documented divergence, not a silent
 /// fabrication — the pending `mc.world.phys.shapes` unit owns the real
-/// `VoxelShape` model and must replace this seam.
+/// `VoxelShape` model and must replace this seam. (Leaves are NOT in this
+/// divergence class in this model: `minecraft:oak_leaves`'s behavior word
+/// `0x4701C2` has `can_occlude` false, so Java's `getFaceOcclusionShape`
+/// returns `Shapes.empty()` and the seam's `!solid_render()` matches exactly.)
 fn is_visible_from_outside(
     level: &dyn WorldGenLevel,
     pos: &BlockPos,
@@ -282,6 +287,18 @@ mod tests {
         level
     }
 
+    /// Fill an inclusive box with stone — the solid-volume helper for the
+    /// fully-enclosed placement tests.
+    fn fill_stone(level: &mut TestLevel, min: BlockPos, max: BlockPos) {
+        for x in min.get_x()..=max.get_x() {
+            for y in min.get_y()..=max.get_y() {
+                for z in min.get_z()..=max.get_z() {
+                    level.states.insert(BlockPos::new(x, y, z), stone());
+                }
+            }
+        }
+    }
+
     /// The origin is not water — `Column.scan` fails empty, so the feature
     /// returns `false` with no RNG draws and no writes.
     #[test]
@@ -296,20 +313,38 @@ mod tests {
     }
 
     /// The DOWN scan walks the contiguous water column and reports the stone
-    /// floor. With `floorSearchRange` larger than the column, the floor is the
-    /// first non-water cell below the water (y=9). Config `radius = 1`,
-    /// `probability = 0.0` — no cell passes the filter, so the verdict is
-    /// `false`, but the RNG draws reveal the floor scan landed at y=9 (via the
-    /// `(2r+1)^3 = 27` nextFloat draws centred on `(0, 9, 0)`).
+    /// floor. This observes the selected floor directly through the write: with
+    /// `radius = 0` the box is the single floor cell, and `probability = 1.0`
+    /// makes every draw pass the filter, so a write happens exactly when the
+    /// floor cell is a valid placement. The level makes (0, 9, 0) — and only
+    /// that cell — a valid placement (stone with stone below and solid
+    /// horizontal neighbours):
+    ///
+    /// * correct floor y=9 → writes `MAGMA_BLOCK` at (0, 9, 0), verdict `true`;
+    /// * a buggy scan that never descends (floor = origin y=10) → the box cell
+    ///   is water, `is_water_or_air` rejects → `false`, no write;
+    /// * a buggy over-descent (floor = y=8) → the box cell is stone but its
+    ///   `pos.below()` (0, 7, 0) is air/visible → rejected → `false`, no write.
     #[test]
     fn floor_scan_lands_on_the_first_non_water_cell_below_the_column() {
         let mut level = water_on_stone_level();
-        let config = UnderwaterMagmaConfiguration::new(10, 1, 0.0);
+        // (0, 8, 0) below the floor and the four horizontal neighbours of the
+        // floor cell are stone, so (0, 9, 0) is the only valid placement.
+        level.states.insert(BlockPos::new(0, 8, 0), stone());
+        for neighbour in Plane::Horizontal.faces() {
+            level
+                .states
+                .insert(BlockPos::new(0, 9, 0).relative(neighbour), stone());
+        }
+        let config = UnderwaterMagmaConfiguration::new(10, 0, 1.0);
         let (verdict, random) = place_with(&mut level, BlockPos::new(0, 10, 0), &config);
-        assert!(!verdict);
-        // 3x3x3 box around (0, 9, 0), one nextFloat per cell.
-        assert_eq!(random.calls.len(), 27);
-        assert!(random.calls.iter().all(|c| *c == RngCall::Float));
+        assert!(verdict);
+        assert_eq!(level.writes.len(), 1);
+        assert_eq!(level.writes[0].0, BlockPos::new(0, 9, 0));
+        assert_eq!(level.writes[0].1.block(), Blocks::MAGMA_BLOCK.id());
+        assert_eq!(level.writes_flags[0], UPDATE_CLIENTS);
+        // A single box cell -> exactly one draw.
+        assert_eq!(random.calls, vec![RngCall::Float]);
     }
 
     /// `floorSearchRange` bounds the scan: a column taller than the search
@@ -394,6 +429,136 @@ mod tests {
         assert_eq!(level.writes[0].0, BlockPos::new(0, 10, 0));
         assert_eq!(level.writes[0].1.block(), Blocks::MAGMA_BLOCK.id());
         assert_eq!(level.writes_flags[0], UPDATE_CLIENTS);
+    }
+
+    /// A fully-solid box writes every valid cell in exact X/Y/Z-major box
+    /// order, associating each draw with its cell: the 27 box cells each
+    /// consume one `nextFloat`, and the cells that survive `is_valid_placement`
+    /// are written in the same order the box iterates. In this geometry the box
+    /// (radius 1 around the floor at (0,9,0)) spans (-1,8,-1)..(1,10,1); the
+    /// water column's base cell (0,10,0) is unavoidably inside it (the origin's
+    /// column meets the floor), so it — and its four horizontal neighbours at
+    /// y=10, which each see a water face — are rejected while every other cell
+    /// is written. The observable write positions thus pin the iteration order,
+    /// and 27 draws for 22 writes pins consume-before-validate.
+    #[test]
+    fn writes_every_valid_cell_in_box_order() {
+        let mut level = TestLevel::over(access());
+        // Solid box plus its horizontal halo (neighbours reach x,z in -2..=2)
+        // at y=8..=10, and the y=7 layer below the box, so every non-water
+        // cell is a valid placement.
+        fill_stone(
+            &mut level,
+            BlockPos::new(-2, 8, -2),
+            BlockPos::new(2, 10, 2),
+        );
+        fill_stone(&mut level, BlockPos::new(-1, 7, -1), BlockPos::new(1, 7, 1));
+        // Punch the water column back in: the origin above the box and the base
+        // of the column inside it.
+        level.states.insert(BlockPos::new(0, 10, 0), water());
+        level.states.insert(BlockPos::new(0, 11, 0), water());
+
+        let config = UnderwaterMagmaConfiguration::new(10, 1, 1.0);
+        let (verdict, random) = place_with(&mut level, BlockPos::new(0, 11, 0), &config);
+
+        assert!(verdict);
+        // One `nextFloat` per box cell, in box order.
+        assert_eq!(random.calls, vec![RngCall::Float; 27]);
+
+        // The 22 valid cells in box order (z outermost, then y, then x), with
+        // the water column base (0,10,0) and its four y=10 horizontal
+        // neighbours omitted.
+        let expected = vec![
+            BlockPos::new(-1, 8, -1),
+            BlockPos::new(0, 8, -1),
+            BlockPos::new(1, 8, -1),
+            BlockPos::new(-1, 9, -1),
+            BlockPos::new(0, 9, -1),
+            BlockPos::new(1, 9, -1),
+            BlockPos::new(-1, 10, -1),
+            BlockPos::new(1, 10, -1),
+            BlockPos::new(-1, 8, 0),
+            BlockPos::new(0, 8, 0),
+            BlockPos::new(1, 8, 0),
+            BlockPos::new(-1, 9, 0),
+            BlockPos::new(0, 9, 0),
+            BlockPos::new(1, 9, 0),
+            BlockPos::new(-1, 8, 1),
+            BlockPos::new(0, 8, 1),
+            BlockPos::new(1, 8, 1),
+            BlockPos::new(-1, 9, 1),
+            BlockPos::new(0, 9, 1),
+            BlockPos::new(1, 9, 1),
+            BlockPos::new(-1, 10, 1),
+            BlockPos::new(1, 10, 1),
+        ];
+        let positions: Vec<BlockPos> = level.writes.iter().map(|(pos, _)| *pos).collect();
+        assert_eq!(positions, expected);
+        for (_, state) in &level.writes {
+            assert_eq!(state.block(), Blocks::MAGMA_BLOCK.id());
+        }
+        assert!(level.writes_flags.iter().all(|&f| f == UPDATE_CLIENTS));
+    }
+
+    /// A cell with solid support below but one exposed horizontal face is
+    /// rejected: `isValidPlacement` walks the four `Direction.Plane.HORIZONTAL`
+    /// faces, and an air neighbour is visible from outside. Radius 0 centres
+    /// the box on the single floor cell, so the verdict is `false` with no
+    /// writes — and the one draw was still consumed before validity.
+    #[test]
+    fn exposed_horizontal_neighbour_rejects_the_cell() {
+        let mut level = water_on_stone_level();
+        // Floor (0,9,0) with solid below (0,8,0) and three solid horizontal
+        // neighbours; the east neighbour stays air (visible from outside).
+        level.states.insert(BlockPos::new(0, 8, 0), stone());
+        for neighbour in Plane::Horizontal.faces() {
+            if *neighbour != Direction::East {
+                level
+                    .states
+                    .insert(BlockPos::new(0, 9, 0).relative(neighbour), stone());
+            }
+        }
+        let config = UnderwaterMagmaConfiguration::new(10, 0, 1.0);
+        let (verdict, random) = place_with(&mut level, BlockPos::new(0, 10, 0), &config);
+        assert!(!verdict);
+        assert!(level.writes.is_empty());
+        // One box cell -> one draw, consumed before the validity check.
+        assert_eq!(random.calls, vec![RngCall::Float]);
+    }
+
+    /// The conservative partial-occlusion seam: a real partial-occlusion block
+    /// (`minecraft:oak_shelf`, `can_occlude` but not `solid_render` in this
+    /// model) as a horizontal neighbour is answered "visible from outside" by
+    /// the `!solid_render()` seam, so the candidate is rejected — the
+    /// documented conservative divergence until `mc.world.phys.shapes` lands.
+    /// (A faithful per-direction `getFaceShape` verdict could accept the cell;
+    /// this test pins the seam's conservative answer, not a fabricated match.)
+    #[test]
+    fn partial_occlusion_neighbour_is_conservatively_rejected() {
+        let oak_shelf = BlockState::of(BlockId::from_name("minecraft:oak_shelf").unwrap());
+        // Guard the seam premise: oak_shelf is genuinely a partial-occlusion
+        // default in this model — if the generated behavior tables ever change
+        // this, the seam's divergence class needs re-examining.
+        assert!(oak_shelf.can_occlude());
+        assert!(!oak_shelf.solid_render());
+
+        let mut level = water_on_stone_level();
+        // Floor (0,9,0) with solid below and three solid horizontal neighbours;
+        // the east neighbour is the oak_shelf.
+        level.states.insert(BlockPos::new(0, 8, 0), stone());
+        for neighbour in Plane::Horizontal.faces() {
+            if *neighbour != Direction::East {
+                level
+                    .states
+                    .insert(BlockPos::new(0, 9, 0).relative(neighbour), stone());
+            }
+        }
+        level.states.insert(BlockPos::new(1, 9, 0), oak_shelf);
+
+        let config = UnderwaterMagmaConfiguration::new(10, 0, 1.0);
+        let (verdict, _random) = place_with(&mut level, BlockPos::new(0, 10, 0), &config);
+        assert!(!verdict);
+        assert!(level.writes.is_empty());
     }
 
     /// The verdict is `false` when the box draws but no cell survives the
