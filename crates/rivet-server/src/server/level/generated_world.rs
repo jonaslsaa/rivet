@@ -27,17 +27,21 @@
 //! drivers (`fillFromNoise` / `buildSurface` / `applyCarvers`), so an EMPTY
 //! chunk can reach CARVERS. The FEATURES task body is also wired: the
 //! caller-supplied [`GenerationChunkHolder::new`] features closure runs
-//! `addVanillaDecorations`'s region-free prologue — `Heightmap.primeHeightmaps
-//! (chunk, FINAL_HEIGHTMAPS)` (Java's `ChunkStatusTasks.generateFeatures`) and
-//! the decoration-seed derivation (`SectionPos.of(centerPos,
-//! level.getMinSectionY()).origin()` fed to `setDecorationSeed`) — and then
-//! fails typed (`GenError::FeaturesUnavailable`) at the first genuinely
-//! unavailable dependency: the 3x3 biome-union gather, which needs
-//! `level.getChunk` reads through the bounded `WorldGenRegion`'s
-//! `StaticCache2D<GenerationChunkHolderView>` neighbor chunk cache that the
-//! holder neither owns nor implements (the deferred view seam below). The
-//! INITIALIZE_LIGHT/LIGHT steps are executor-wired but
-//! engine-gated (the holder wires no light engine, so it cannot reach LIGHT).
+//! `addVanillaDecorations`'s full region-free prologue and the bounded
+//! region-backed 3x3 biome-union gather — `Heightmap.primeHeightmaps (chunk,
+//! FINAL_HEIGHTMAPS)` (Java's `ChunkStatusTasks.generateFeatures`), the
+//! decoration-seed derivation (`SectionPos.of(centerPos,
+//! level.getMinSectionY()).origin()` fed to `setDecorationSeed`), a
+//! `WorldGenRegion` that borrows the center chunk and owns eight ring chunks
+//! generated EMPTY→CARVERS through the same real bodies the other closures
+//! wire, the Paper-order biome-union gather + `retainAll`, the per-biome
+//! settings resolution from the generated feature tables, the FeatureSorter
+//! per-step data, and the exact decoration/per-feature seeds — and then fails
+//! typed (`GenError::FeaturePlacementDecode`) at the exact first feature whose
+//! placed-feature value decode is unavailable (the `#126` blocker, the seed-42
+//! step-1 `lake_lava_underground`). The INITIALIZE_LIGHT/LIGHT steps are
+//! executor-wired but engine-gated (the holder wires no light engine, so it
+//! cannot reach LIGHT).
 //! Everything the value layer does not wire is refused *before* running work: a
 //! path through a light step with no engine is refused as
 //! `GenError::LightEngineMissing`, and a target past LIGHT (SPAWN/FULL) is out
@@ -69,29 +73,40 @@
 //! interior mutability is `RandomState`'s own uncontended noise cache), the
 //! holder and its `ProtoChunk` live on the sync tick thread by value.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
 use rivet_registry::access::RegistryAccess;
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::block_state::BlockState;
+use rivet_registry::builder::RegistryBuilder;
 use rivet_registry::core::BlockPos;
 use rivet_registry::core::ChunkPos;
 use rivet_registry::core::SectionPos;
+use rivet_registry::generated::biomes::BIOME_BY_ID;
 use rivet_registry::generated::blocks::BlockId;
+use rivet_registry::generated::feature_data::{
+    BIOME_GENERATION_SETTINGS_BY_NAME, PLACED_FEATURE_BY_NAME,
+};
 use rivet_registry::holder::Holder;
+use rivet_registry::holder::RegistryId;
 use rivet_registry::holder_lookup::HolderGetter;
+use rivet_util::StaticCache2D;
 use rivet_util::WorldgenRandom;
 use rivet_util::random_source::XoroshiroRandomSource;
 use rivet_util::random_source::random_support;
 use rivet_world::biome::BiomeManager;
 use rivet_world::biome::BiomeResolver;
 use rivet_world::biome::BiomeSource;
+use rivet_world::biome::biome_generation_settings::{BiomeGenerationSettings, PlainBuilder};
 use rivet_world::biome::biome_manager::NoiseBiomeSource;
 use rivet_world::biome::climate::Sampler;
+use rivet_world::biome::feature_sorter::build_features_per_step;
 use rivet_world::biome::generated_biome_source::{dense_biome_id, overworld_biome_source};
 use rivet_world::biome::multi_noise_biome_source::MultiNoiseBiomeSource;
 use rivet_world::block::blocks::Blocks;
+use rivet_world::chunk::chunk_access::ChunkAccess;
 use rivet_world::chunk::chunk_generator::ChunkGenerator;
 use rivet_world::chunk::proto_chunk::ProtoChunk;
 use rivet_world::chunk::status::{ChunkStatus, GENERATION_PYRAMID, GenError, WorldGenContext};
@@ -104,6 +119,8 @@ use rivet_world::data::worldgen::worldgen_bootstraps::build_worldgen_registries;
 use rivet_world::level::height_accessor::LevelHeightAccessor;
 use rivet_world::level::height_accessor::create as create_height_accessor;
 use rivet_world::levelgen::blending::blender::Blender;
+use rivet_world::levelgen::feature::registry_keys::PLACED_FEATURE;
+use rivet_world::levelgen::generation_step::Decoration;
 use rivet_world::levelgen::heightmap::{FINAL_HEIGHTMAPS, Types};
 use rivet_world::levelgen::noise::registry_keys::NOISE_SETTINGS;
 use rivet_world::levelgen::noisegen::noise_based_chunk_generator::NoiseBasedChunkGenerator;
@@ -112,6 +129,9 @@ use rivet_world::levelgen::noisegen::random_state::RandomState;
 use rivet_world::levelgen::world_generation_context::WorldGenerationContext;
 
 use crate::server::level::level_chunk::{LevelChunk, StructureKey};
+use crate::server::level::world_gen_region::{
+    CenterHolder, GenerationChunkHolderView, OwnedHolder, WorldGenRegion,
+};
 
 /// The overworld generated-chunk error surface — every failure is typed, never
 /// a silent fallback.
@@ -125,8 +145,8 @@ pub enum GeneratedChunkError {
     /// work. Naming the requested status makes the downstream boundary explicit.
     /// (A target through a light step with no engine is instead refused as
     /// `GenError::LightEngineMissing`, and the wired FEATURES rung fails typed
-    /// as `GenError::FeaturesUnavailable` at the region read — see
-    /// [`GenerationChunkHolder::new`].)
+    /// as `GenError::FeaturePlacementDecode` at the first placed-feature value
+    /// decode — see [`GenerationChunkHolder::new`].)
     UnsupportedStatus(ChunkStatus),
     /// The genuine-FULL-only install gate: a generated chunk is a `ProtoChunk`
     /// through `SURFACE` and cannot be converted into the `LevelChunk` (FULL)
@@ -477,50 +497,26 @@ impl GenerationChunkHolder {
             },
             {
                 // `ChunkStatusTasks.generateFeatures` (Java) → the caller-owned
-                // decoration body, typed ([`GenError::FeaturesUnavailable`]).
-                // The real body is `NoiseBasedChunkGenerator.applyBiomeDecoration`
-                // over a bounded `WorldGenRegion`; what this closure CAN run
-                // faithfully is `addVanillaDecorations`'s region-free prologue,
-                // in Java order:
-                //   1. `Heightmap.primeHeightmaps(chunk, FINAL_HEIGHTMAPS)` primes
-                //      the four final heightmaps the decoration bodies read;
-                //   2. `SectionPos.of(centerPos, level.getMinSectionY()).origin()`
-                //      derives the chunk-section origin block position;
-                //   3. `new WorldgenRandom(new XoroshiroRandomSource(
-                //      RandomSupport.generateUniqueSeed()))` is seeded with the
-                //      decoration seed via `setDecorationSeed(seed, origin.getX(),
-                //      origin.getZ())`.
-                // It then returns a typed error at the FIRST genuinely
-                // unavailable dependency: gathering the 3x3 biome union needs
-                // `level.getChunk(chunkPos.x, chunkPos.z)` reads through the
-                // bounded `WorldGenRegion`'s `StaticCache2D<
-                // GenerationChunkHolderView>` neighbor-chunk cache, which the
-                // holder neither owns nor implements the view trait for (the
-                // deferred `map_values`-bridging seam in the module doc). A later
-                // slice lands the region-backed cache (issue #185's `.chunk
-                // .generator` pipeline unit) and replaces this error with the real
-                // decoration body — it must never be "improved" into a silent
-                // skip or a blanket UnsupportedTask. The decoration seed is
-                // computed but not stored: Java's `applyBiomeDecoration` receives
-                // it as a local and uses it to set per-feature seeds inside the
-                // step loop, which cannot run until the biome union is available.
+                // decoration body, typed. The real body is
+                // `NoiseBasedChunkGenerator.applyBiomeDecoration` over a bounded
+                // `WorldGenRegion`; `run_biome_decoration` runs Java's
+                // `addVanillaDecorations` faithfully — the `FINAL_HEIGHTMAPS`
+                // priming, the section-origin decoration-seed derivation, the
+                // bounded 3x3 region (the borrowed center chunk + eight owned
+                // ring chunks generated EMPTY→CARVERS through the same real
+                // bodies the other closures wire), the Paper-order biome-union
+                // gather + `retainAll`, the per-biome settings resolution from
+                // the generated feature tables, the FeatureSorter per-step
+                // data, and the exact per-feature seeds — and then fails typed
+                // (`GenError::FeaturePlacementDecode`) at the exact first
+                // feature whose placed-feature value decode is unavailable (the
+                // `#126` blocker). It must never be "improved" into a silent
+                // skip or a blanket UnsupportedTask. The closure captures one
+                // generator clone (the free helper is why the ownership test's
+                // `strong_count == base + 5` holds).
                 let generator = Arc::clone(&generator);
                 move |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
-                    chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
-                    let origin = SectionPos::of_chunk_pos(
-                        &chunk.get_pos(),
-                        chunk.height_accessor().get_min_section_y(),
-                    )
-                    .origin();
-                    let _decoration_seed = WorldgenRandom::new(XoroshiroRandomSource::new(
-                        random_support::generate_unique_seed(),
-                    ))
-                    .set_decoration_seed(
-                        generator.seed(),
-                        origin.get_x(),
-                        origin.get_z(),
-                    );
-                    Err(GenError::FeaturesUnavailable)
+                    run_biome_decoration(chunk, &generator)
                 }
             },
         );
@@ -529,18 +525,20 @@ impl GenerationChunkHolder {
 
     /// The chunk's persisted status — `EMPTY` before any step, `CARVERS` after a
     /// successful BIOMES→NOISE→SURFACE→CARVERS run, and never `FULL` (the
-    /// executor refuses to stamp it). A FEATURES run primes the final heightmaps
-    /// and then fails typed at the region read, so the chunk is never stamped
-    /// FEATURES.
+    /// executor refuses to stamp it). A FEATURES run primes the final heightmaps,
+    /// drives the bounded 3x3 region, and then fails typed at the first real
+    /// placed-feature value decode (the `#126` blocker), so the chunk is never
+    /// stamped FEATURES.
     pub fn status(&self) -> ChunkStatus {
         self.chunk.get_persisted_status()
     }
 
     /// Drive the chunk from its current persisted status through `target`
     /// (inclusive). The BIOMES→NOISE→SURFACE→CARVERS task bodies are wired (an
-    /// EMPTY chunk can reach CARVERS); the FEATURES task body is wired (it
-    /// primes the final heightmaps and then fails typed at the region read —
-    /// see [`GenerationChunkHolder::new`]). A
+    /// EMPTY chunk can reach CARVERS); the FEATURES task body is wired (it runs
+    /// `addVanillaDecorations`'s bounded 3x3 composition and then fails typed at
+    /// the exact first feature whose value decode is unavailable — see
+    /// [`GenerationChunkHolder::new`]). A
     /// target the value layer does not wire is rejected by the executor before
     /// any work with a typed error — a path through a light step with no engine
     /// is refused as `GenError::LightEngineMissing`, and a target past LIGHT
@@ -560,8 +558,8 @@ impl GenerationChunkHolder {
 
     /// The genuine-FULL-only install gate: `ChunkMap::install` accepts only a
     /// `LevelChunk` (FULL), and a generated chunk is a `ProtoChunk` that stops
-    /// at `CARVERS` (the FEATURES rung fails typed at the region read — see
-    /// [`GenerationChunkHolder::new`]).
+    /// at `CARVERS` (the FEATURES rung fails typed at the placed-feature value
+    /// decode — see [`GenerationChunkHolder::new`]).
     /// No conversion from a sub-FULL `ProtoChunk` exists or may be added without
     /// the unwired FEATURES..FULL stages (RivetTodo #185), so this always fails
     /// loudly with the chunk's real status — never stamping FULL and never
@@ -571,6 +569,329 @@ impl GenerationChunkHolder {
             self.chunk.get_persisted_status(),
         ))
     }
+}
+
+/// A fresh EMPTY worldgen chunk — the same construction the holder uses for its
+/// own chunk, so a ring chunk generated through CARVERS is built with the exact
+/// worldgen element types and void-air out-of-height default.
+fn fresh_worldgen_chunk(
+    pos: ChunkPos,
+    generator: &OverworldGenerator,
+) -> ProtoChunk<BlockState, WorldgenBiomeId, StructureKey> {
+    let height_accessor = create_height_accessor(
+        generator.generator().get_min_y(),
+        generator.generator().get_gen_depth(),
+    );
+    ProtoChunk::new(
+        pos,
+        UpgradeData::empty(height_accessor.get_sections_count() as usize),
+        height_accessor,
+        &current_version_container_factory(),
+        None,
+        Blocks::AIR.default_block_state(),
+        BlockState::of(BlockId(794)),
+        &resolve_state_flags,
+    )
+}
+
+/// Drive a fresh EMPTY chunk through the BIOMES→NOISE→SURFACE→CARVERS rungs the
+/// FEATURES ring reads — the same real bodies the holder's executor closures
+/// wire (Java's `ChunkStatusTasks.generateBiomes/generateNoise/generateSurface/
+/// generateCarvers` for a neighbor chunk Paper generates with the identical
+/// shared worldgen config).
+fn generate_ring_chunk(
+    pos: ChunkPos,
+    generator: &Arc<OverworldGenerator>,
+) -> ChunkAccess<BlockState, WorldgenBiomeId, StructureKey> {
+    let mut chunk = fresh_worldgen_chunk(pos, generator);
+    let source = &generator.biome_source;
+    chunk.fill_biomes_from_noise(source, &source.sampler, &|holder| {
+        WorldgenBiomeId(dense_biome_id(holder))
+    });
+    generator
+        .generator()
+        .fill_from_noise(Blender::empty(), generator.random_state(), &mut chunk);
+    let height_accessor = chunk.height_accessor();
+    let biome_manager = Arc::new(BiomeManager::new(
+        Arc::new(generator.biome_source.clone()),
+        BiomeManager::obfuscate_seed(generator.seed()),
+    ));
+    let generation_context = Arc::new(WorldGenerationContext::new(&**generator, &height_accessor));
+    generator.generator().build_surface(
+        generator.random_state(),
+        biome_manager,
+        generation_context,
+        &mut chunk,
+        None,
+    );
+    let biome_manager = Arc::new(BiomeManager::new(
+        Arc::new(generator.biome_source.clone()),
+        BiomeManager::obfuscate_seed(generator.seed()),
+    ));
+    generator.generator().apply_carvers(
+        &**generator,
+        generator.seed(),
+        generator.random_state(),
+        &biome_manager,
+        Arc::new(generator.biome_source.clone()),
+        &mut chunk,
+    );
+    chunk.into_base()
+}
+
+/// `ChunkGenerator.addVanillaDecorations` (Paper 26.2) over the bounded 3x3
+/// region — the FEATURES body's real prologue and gather, then a typed failure
+/// at the exact first placed feature whose value decode is unavailable.
+///
+/// In Java order:
+///   1. `Heightmap.primeHeightmaps(chunk, FINAL_HEIGHTMAPS)` primes the four
+///      final heightmaps the decoration bodies read;
+///   2. `SectionPos.of(centerPos, level.getMinSectionY()).origin()` derives the
+///      section-origin block position and `setDecorationSeed(seed, origin.x,
+///      origin.z)` the decoration seed;
+///   3. the region is composed: the center `ProtoChunk` (at CARVERS, the rung
+///      the executor guarantees) is borrowed through a [`CenterHolder`], and
+///      the eight ring chunks are generated EMPTY→CARVERS through the same real
+///      bodies and owned through [`OwnedHolder`]s — the `StaticCache2D` the
+///      bounded `WorldGenRegion` reads `level.getChunk` from;
+///   4. the 3x3 biome union is gathered in Paper order (`ChunkPos.rangeClosed
+///      (sectionPos.chunk(), 1)` → sections → `biomes().getAll`) and
+///      `retainAll`-ed against the biome source's possible biomes;
+///   5. the union biomes resolve their `BiomeGenerationSettings` from the
+///      generated feature tables (via a fabricated `PLACED_FEATURE` registry id
+///      so the FeatureSorter keys holder identity), `build_features_per_step`
+///      produces the per-step data, and `generationSteps =
+///      max(Decoration.values().length, featureStepCount)`;
+///   6. the per-step loop runs in Paper order — for the seed-42 origin chunk
+///      every union biome has step 0 empty and step 1 `[lake_lava_underground,
+///      lake_lava_surface]`, so the first feature reached is step 1, global
+///      index 0, `lake_lava_underground` — and fails typed there: its placed
+///      feature value decode (`placeWithBiomeCheck`) is the `#126` blocker.
+///
+/// The exact feature keys/seeds are computed but placement never runs: the
+/// typed error carries the `(chunk, step, global index, key)` of the first
+/// feature whose decode is missing, never panicking and never silently
+/// skipping.
+///
+/// Compose the bounded 3x3 `WorldGenRegion` `addVanillaDecorations` reads:
+/// the borrowed center chunk at CARVERS (the executor's ordering guard) plus
+/// the eight owned ring chunks generated EMPTY→CARVERS. The holders are laid
+/// out in `StaticCache2D::from_entries`'s storage order (X-outer, Z-inner —
+/// the row-major `(x - minX) * sizeZ + (z - minZ)` index), NOT
+/// `ChunkPos::range_closed`'s X-fastest order, which is the transpose: a
+/// `getChunk(x, z)` would otherwise read the neighbor built for `(z, x)`.
+fn compose_feature_region<'a>(
+    chunk: &'a mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+    generator: &Arc<OverworldGenerator>,
+) -> WorldGenRegion<'a, BlockState, WorldgenBiomeId, StructureKey> {
+    let center_pos = chunk.get_pos();
+    let center_status = chunk.get_persisted_status();
+    let mut holders: Vec<
+        Box<dyn GenerationChunkHolderView<BlockState, WorldgenBiomeId, StructureKey> + 'a>,
+    > = Vec::with_capacity(9);
+    // The holders must be in `StaticCache2D::from_entries`'s storage order
+    // (X-outer, Z-inner — index `(x - minX) * sizeZ + (z - minZ)`), not
+    // `ChunkPos::range_closed`'s X-fastest order: the two are transposes, and a
+    // `getChunk(x, z)` would otherwise read the neighbor built for the
+    // transposed `(z, x)`. Ring positions are gathered in storage order first so
+    // the center chunk's borrow is taken exactly once, at its own (index-4) slot.
+    let mut ring_positions = Vec::with_capacity(8);
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            let pos = ChunkPos::new(
+                center_pos.x().wrapping_add(dx),
+                center_pos.z().wrapping_add(dz),
+            );
+            if pos != center_pos {
+                ring_positions.push(pos);
+            }
+        }
+    }
+    for pos in ring_positions {
+        holders.push(Box::new(OwnedHolder::new(
+            generate_ring_chunk(pos, generator),
+            ChunkStatus::Carvers,
+        )));
+    }
+    holders.insert(
+        4,
+        Box::new(CenterHolder::new(chunk.base_mut(), center_status)),
+    );
+    let cache = StaticCache2D::from_entries(center_pos.x() - 1, center_pos.z() - 1, 3, 3, holders);
+    WorldGenRegion::new(
+        cache,
+        center_pos,
+        GENERATION_PYRAMID
+            .get_step_to(ChunkStatus::Features)
+            .clone(),
+        generator.seed(),
+        generator.generator().get_min_y(),
+        generator.generator().get_gen_depth(),
+        generator.generator().get_sea_level(),
+        Arc::new(generator.biome_source.clone()),
+        generator.registry_access().clone(),
+    )
+}
+
+/// `possibleBiomes` — the 3x3 biome union, gathered in Paper order and
+/// `retainAll`-ed against the overworld source's possible biomes. The dense
+/// worldgen biome id maps through `BIOME_BY_ID` (the registry-id-indexed
+/// name table); ids outside the table are skipped (a hostile chunk can't
+/// take the gather down).
+fn gather_possible_biomes(
+    region: &WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey>,
+    generator: &Arc<OverworldGenerator>,
+) -> HashSet<&'static str> {
+    let center_pos = region.get_center();
+    let mut possible_biomes = HashSet::new();
+    for pos in ChunkPos::range_closed(&center_pos, 1) {
+        let chunk_in_range = region.get_chunk(pos.x(), pos.z());
+        for section in chunk_in_range.get_sections() {
+            section.biomes().get_all(|biome: WorldgenBiomeId| {
+                if let Some(name) = BIOME_BY_ID.get(biome.0 as usize) {
+                    possible_biomes.insert(*name);
+                }
+            });
+        }
+    }
+    let possible = generator.biome_source().possible_biomes();
+    possible_biomes.retain(|name| {
+        possible.iter().any(|p| {
+            BIOME_BY_ID
+                .get(dense_biome_id(p) as usize)
+                .is_some_and(|possible_name| *name == *possible_name)
+        })
+    });
+    possible_biomes
+}
+
+/// Resolve each union biome's `BiomeGenerationSettings` from the generated
+/// feature tables. The placed-feature holders are `Holder::Reference` over one
+/// fabricated `PLACED_FEATURE` registry id (the generated tables are keyed by
+/// name; the FeatureSorter keys on holder identity, so a single fabricated
+/// registry collapses the union biomes' shared steps exactly like Paper's
+/// registry does). `placed_by_id` collects the reverse id → key map the typed
+/// error names.
+fn resolve_feature_settings(
+    possible_biomes: &HashSet<&'static str>,
+    placed_registry_id: RegistryId,
+    placed_by_id: &mut HashMap<u32, &'static str>,
+) -> Vec<BiomeGenerationSettings> {
+    let mut settings_sources = Vec::new();
+    for name in possible_biomes {
+        let table = &BIOME_GENERATION_SETTINGS_BY_NAME[name];
+        let mut builder = PlainBuilder::default();
+        for (step, step_features) in table.features.iter().enumerate() {
+            for feature_name in *step_features {
+                let id = PLACED_FEATURE_BY_NAME[feature_name].id as u32;
+                placed_by_id.entry(id).or_insert(*feature_name);
+                builder = builder
+                    .add_feature_index(step as i32, Holder::reference(placed_registry_id, id));
+            }
+        }
+        settings_sources.push(builder.build());
+    }
+    settings_sources
+}
+
+fn run_biome_decoration(
+    chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+    generator: &Arc<OverworldGenerator>,
+) -> Result<(), GenError> {
+    chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
+    let center_pos = chunk.get_pos();
+    let origin =
+        SectionPos::of_chunk_pos(&center_pos, chunk.height_accessor().get_min_section_y()).origin();
+    let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(
+        random_support::generate_unique_seed(),
+    ));
+    let decoration_seed =
+        random.set_decoration_seed(generator.seed(), origin.get_x(), origin.get_z());
+
+    let region = compose_feature_region(chunk, generator);
+    let possible_biomes = gather_possible_biomes(&region, generator);
+
+    // Resolve each union biome's `BiomeGenerationSettings` from the generated
+    // feature tables. The placed-feature holders are `Holder::Reference` over
+    // one fabricated `PLACED_FEATURE` registry id (the generated tables are
+    // keyed by name; the FeatureSorter keys on holder identity, so a single
+    // fabricated registry collapses the four union biomes' shared steps exactly
+    // like Paper's registry does). The `features` lists are `DECORATION_STEP_COUNT`
+    // long (the generated data's step count).
+    let placed_registry_id = RegistryBuilder::new(&*PLACED_FEATURE).registry_id();
+    // Reverse id → key for the typed error: the holders carry the generated
+    // table's placed-feature registry id, and the error names the key.
+    let mut placed_by_id = HashMap::new();
+    let settings_sources =
+        resolve_feature_settings(&possible_biomes, placed_registry_id, &mut placed_by_id);
+    let feature_list = build_features_per_step(&settings_sources, |s| s.features(), false);
+
+    // The per-step loop — Paper's `addVanillaDecorations`. The structure loop
+    // is skipped (the port has no structure manager; Java's
+    // `structureManager.shouldGenerateStructures()` gate is a faithful no-op,
+    // the #185 structures deferral). The step-0 loop has no features (all four
+    // union biomes' step 0 is empty), so the first feature reached is step 1,
+    // global index 0: `minecraft:lake_lava_underground`.
+    let generation_steps = Decoration::VALUES.len().max(feature_list.len());
+    // Paper walks steps in ascending order and, within a step, the sorted
+    // global feature indices; the first feature encountered is the typed
+    // blocker. All four union biomes' step 0 is empty, so the first reached is
+    // step 1, global index 0: `minecraft:lake_lava_underground`.
+    let first_feature = (0..generation_steps).find_map(|step_index| {
+        if step_index >= feature_list.len() {
+            return None;
+        }
+        let step_feature_data = &feature_list[step_index];
+        let mut possible_features_this_step = Vec::new();
+        for settings in &settings_sources {
+            if step_index < settings.features().len() {
+                for holder in settings.features()[step_index].iter() {
+                    if let Some(index) = step_feature_data.index_mapping(holder) {
+                        possible_features_this_step.push(index);
+                    }
+                }
+            }
+        }
+        possible_features_this_step.sort_unstable();
+        possible_features_this_step.dedup();
+        possible_features_this_step
+            .into_iter()
+            .next()
+            .map(|global_feature_index| (step_index, global_feature_index))
+    });
+    let Some((step_index, global_feature_index)) = first_feature else {
+        // No feature in any step of the union. Cannot happen for the four
+        // seed-42 biomes (every one lists lava-lake features in step 1), but
+        // the typed error still names the region rather than silently passing.
+        return Err(GenError::FeaturePlacementDecode {
+            chunk_pos: center_pos,
+            step_index: 0,
+            global_feature_index: 0,
+            feature_key: "minecraft:unknown",
+        });
+    };
+    let feature = &feature_list[step_index].features[global_feature_index];
+    let feature_key = match feature {
+        Holder::Reference { id, .. } => {
+            placed_by_id.get(id).copied().unwrap_or("minecraft:unknown")
+        }
+        Holder::Direct(_) => "minecraft:unknown",
+    };
+    // `setFeatureSeed(decorationSeed, globalIndexOfFeature, stepIndex)` — the
+    // exact per-feature seed Paper sets before placement (which then fails the
+    // #126 decode). The Paper configurable-feature-seed override is a no-op
+    // (no paper config, so `featurePopulationSeed == decorationSeed`).
+    random.set_feature_seed(
+        decoration_seed,
+        global_feature_index as i32,
+        step_index as i32,
+    );
+    Err(GenError::FeaturePlacementDecode {
+        chunk_pos: center_pos,
+        step_index,
+        global_feature_index,
+        feature_key,
+    })
 }
 
 impl fmt::Debug for GenerationChunkHolder {
@@ -587,6 +908,7 @@ mod tests {
     use super::*;
     use crate::server::level::chunk_map::ChunkMap;
     use rivet_registry::generated::block_states::StateId;
+    use rivet_util::RandomSource;
     use rivet_world::levelgen::heightmap::Types;
 
     /// The shared test realization (built once — the worldgen registry
@@ -1060,17 +1382,20 @@ mod tests {
         assert_eq!(holder.status(), ChunkStatus::Noise);
     }
 
-    /// The FEATURES rung runs `addVanillaDecorations`'s region-free prologue —
-    /// `Heightmap.primeHeightmaps(chunk, FINAL_HEIGHTMAPS)` and the decoration
-    /// seed derivation (`SectionPos.of(centerPos, level.getMinSectionY())
-    /// .origin()` fed to `setDecorationSeed(seed, originX, originZ)`) — and then
-    /// fails typed at its first genuinely unavailable dependency: the 3x3 biome
-    /// union gather reads `level.getChunk` through the bounded
-    /// `WorldGenRegion`'s `StaticCache2D<GenerationChunkHolderView>` neighbor
-    /// cache, which the holder does not own (the deferred
-    /// `map_values`-bridging seam). The chunk is never stamped FEATURES (it
-    /// stays CARVERS) — no silent skip, no blanket `UnsupportedTask`, and no
-    /// panic.
+    /// The FEATURES rung runs `addVanillaDecorations`'s full prologue and
+    /// region-backed 3x3 gather — `Heightmap.primeHeightmaps(chunk,
+    /// FINAL_HEIGHTMAPS)`, the decoration-seed derivation (`SectionPos.of(
+    /// centerPos, level.getMinSectionY()).origin()` fed to `setDecorationSeed
+    /// (seed, originX, originZ)`), the bounded `WorldGenRegion` (borrowed
+    /// center + eight owned ring chunks generated EMPTY→CARVERS), the Paper-order
+    /// biome-union gather + `retainAll`, the per-biome settings resolution from
+    /// the generated feature tables, the FeatureSorter per-step data, and the
+    /// exact per-feature seeds — and then fails typed at the exact first
+    /// feature whose placed-feature value decode is unavailable. For seed 42 at
+    /// chunk (0,0) that is step 1 (`RAW_GENERATION`), global index 0,
+    /// `minecraft:lake_lava_underground` (the `#126` decode blocker). The chunk
+    /// is never stamped FEATURES (it stays CARVERS) — no silent skip, no
+    /// blanket `UnsupportedTask`, and no panic.
     #[test]
     fn generate_through_features_runs_prologue_then_fails_typed() {
         let generator = test_generator();
@@ -1083,13 +1408,32 @@ mod tests {
         let err = holder
             .generate_through(ChunkStatus::Features)
             .expect_err("FEATURES must fail typed at the first real blocker");
-        assert!(
-            matches!(
-                err,
-                GeneratedChunkError::Generation(GenError::FeaturesUnavailable)
+        match err {
+            GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
+                chunk_pos,
+                step_index,
+                global_feature_index,
+                feature_key,
+            }) => {
+                assert_eq!(
+                    chunk_pos,
+                    ChunkPos::new(0, 0),
+                    "the blocker names the origin chunk being decorated"
+                );
+                assert_eq!(
+                    step_index, 1,
+                    "the first seed-42 feature sits at RAW_GENERATION step 1"
+                );
+                assert_eq!(global_feature_index, 0, "it is the step's first feature");
+                assert_eq!(
+                    feature_key, "minecraft:lake_lava_underground",
+                    "the #126 decode blocker is the lava lake, not a later feature"
+                );
+            }
+            other => panic!(
+                "FEATURES must fail with FeaturePlacementDecode at lake_lava_underground; got {other:?}"
             ),
-            "FEATURES must fail with the region-unavailable typed error; got {err:?}"
-        );
+        }
 
         // The prologue ran faithfully: all four final heightmaps are primed
         // (Java primes them for the decoration bodies to read).
@@ -1208,5 +1552,140 @@ mod tests {
         assert_eq!(Arc::strong_count(&generator), base + 5);
         drop(holder);
         assert_eq!(Arc::strong_count(&generator), base);
+    }
+
+    /// The FEATURES region is a bounded 3x3 that borrows the center chunk (the
+    /// CARVERS chunk the executor is decorating) and owns the eight ring chunks
+    /// generated EMPTY→CARVERS through the same real bodies. Every one of the
+    /// nine `ChunkPos.rangeClosed(center, 1)` reads resolves to a chunk at its
+    /// own position — the `level.getChunk` surface `addVanillaDecorations` reads
+    /// the biome union from (non-vacuous: a region that silently dropped the
+    /// center borrow or generated the ring with different positions would fail
+    /// the position equality below).
+    #[test]
+    fn feature_region_is_bounded_3x3_borrowing_center_and_owning_ring() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::new(0, 0));
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+
+        let region = compose_feature_region(&mut holder.chunk, &generator);
+        assert_eq!(region.get_center(), ChunkPos::new(0, 0));
+        for pos in ChunkPos::range_closed(&ChunkPos::new(0, 0), 1) {
+            let chunk = region.get_chunk(pos.x(), pos.z());
+            assert_eq!(
+                chunk.get_pos(),
+                pos,
+                "the bounded region must serve every 3x3 chunk at its own position"
+            );
+        }
+    }
+
+    /// The seed-42 origin 3x3 biome union — the exact set the seed-42 (0,0)
+    /// chunk decorates with — is `{minecraft:beach, minecraft:dark_forest,
+    /// minecraft:lush_caves, minecraft:river}` (the pinned union from the live
+    /// Paper load, PROGRESS.md). All four resolve in
+    /// `BIOME_GENERATION_SETTINGS_BY_NAME`, so biome-union → settings resolution
+    /// does not block; the first typed blocker is the step-1 placed-feature
+    /// value decode.
+    #[test]
+    fn seed42_origin_biome_union_is_the_exact_paper_set() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::new(0, 0));
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+
+        let region = compose_feature_region(&mut holder.chunk, &generator);
+        let possible_biomes = gather_possible_biomes(&region, &generator);
+        let mut names: Vec<&str> = possible_biomes.into_iter().collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec![
+                "minecraft:beach",
+                "minecraft:dark_forest",
+                "minecraft:lush_caves",
+                "minecraft:river",
+            ],
+            "the seed-42 origin union must be the pinned Paper set, retainAll-ed against the biome source"
+        );
+        for name in &names {
+            assert!(
+                BIOME_GENERATION_SETTINGS_BY_NAME.contains_key(name),
+                "every union biome must resolve its generation settings"
+            );
+        }
+    }
+
+    /// The FeatureSorter orders the step-1 features by *global first-appearance
+    /// index*, not by registry id: lake_lava_underground (id 80) gets global
+    /// index 0 and lake_lava_surface (id 79) index 1, so the sorted
+    /// possible-features list places the underground lava lake first — the exact
+    /// feature the typed blocker names. The decoration then seeds the random
+    /// with `setFeatureSeed(decorationSeed, globalIndexOfFeature, stepIndex)`;
+    /// pin the exact RNG state that produces (both the ordering and the seed
+    /// are what placement would consume — non-vacuous for the "fail typed at the
+    /// first feature" contract).
+    #[test]
+    fn feature_sorter_orders_lava_lakes_by_global_index_and_seeds_them() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::new(0, 0));
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+
+        let region = compose_feature_region(&mut holder.chunk, &generator);
+        let possible_biomes = gather_possible_biomes(&region, &generator);
+        let placed_registry_id = RegistryBuilder::new(&*PLACED_FEATURE).registry_id();
+        let mut placed_by_id = HashMap::new();
+        let settings_sources =
+            resolve_feature_settings(&possible_biomes, placed_registry_id, &mut placed_by_id);
+        let feature_list = build_features_per_step(&settings_sources, |s| s.features(), false);
+
+        // Every union biome has step 0 empty; step 1 holds the two lava lakes.
+        assert!(
+            feature_list[0].features.is_empty(),
+            "all four union biomes' step 0 (RAW_GENERATION) is empty"
+        );
+        let step1 = &feature_list[1];
+        let global_of = |id: u32| step1.index_mapping(&Holder::reference(placed_registry_id, id));
+        assert_eq!(
+            global_of(80),
+            Some(0),
+            "lake_lava_underground is the step-1 global index 0"
+        );
+        assert_eq!(
+            global_of(79),
+            Some(1),
+            "lake_lava_surface is the step-1 global index 1"
+        );
+        assert_eq!(
+            placed_by_id.get(&80).copied(),
+            Some("minecraft:lake_lava_underground"),
+            "the reverse id→key map names the #126 blocker"
+        );
+
+        // The exact per-feature seed: `setFeatureSeed(decorationSeed, index,
+        // step)` sets `decorationSeed + index + 10000 * step`. For chunk (0,0)
+        // the decoration seed is 42, so lake_lava_underground (index 0, step 1)
+        // seeds with 10042 and the RNG state matches a fresh source seeded
+        // directly with that value.
+        let mut reference = WorldgenRandom::new(XoroshiroRandomSource::new(
+            random_support::generate_unique_seed(),
+        ));
+        reference.set_seed(10042);
+        let mut decorated = WorldgenRandom::new(XoroshiroRandomSource::new(
+            random_support::generate_unique_seed(),
+        ));
+        let decoration_seed = decorated.set_decoration_seed(42, 0, 0);
+        assert_eq!(decoration_seed, 42);
+        decorated.set_feature_seed(decoration_seed, 0, 1);
+        assert_eq!(
+            decorated.next_int(),
+            reference.next_int(),
+            "setFeatureSeed(42, 0, 1) must seed the exact RNG state placement would consume"
+        );
     }
 }
