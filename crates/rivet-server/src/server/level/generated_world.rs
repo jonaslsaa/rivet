@@ -26,13 +26,17 @@
 //! the BIOMES→NOISE→SURFACE→CARVERS task bodies are wired to the real Paper
 //! drivers (`fillFromNoise` / `buildSurface` / `applyCarvers`), so an EMPTY
 //! chunk can reach CARVERS. The FEATURES task body is also wired: the
-//! caller-supplied [`GenerationChunkHolder::new`] features closure primes the
-//! four `FINAL_HEIGHTMAPS` (Java's `Heightmap.primeHeightmaps` in
-//! `ChunkStatusTasks.generateFeatures`) and then fails loudly at the first
-//! genuinely unavailable dependency — the bounded `WorldGenRegion`
-//! construction, which needs a `StaticCache2D<GenerationChunkHolderView>`
-//! neighbor chunk cache the holder neither owns nor implements (the deferred
-//! view seam below). The INITIALIZE_LIGHT/LIGHT steps are executor-wired but
+//! caller-supplied [`GenerationChunkHolder::new`] features closure runs
+//! `addVanillaDecorations`'s region-free prologue — `Heightmap.primeHeightmaps
+//! (chunk, FINAL_HEIGHTMAPS)` (Java's `ChunkStatusTasks.generateFeatures`) and
+//! the decoration-seed derivation (`SectionPos.of(centerPos,
+//! level.getMinSectionY()).origin()` fed to `setDecorationSeed`) — and then
+//! fails typed (`GenError::FeaturesUnavailable`) at the first genuinely
+//! unavailable dependency: the 3x3 biome-union gather, which needs
+//! `level.getChunk` reads through the bounded `WorldGenRegion`'s
+//! `StaticCache2D<GenerationChunkHolderView>` neighbor chunk cache that the
+//! holder neither owns nor implements (the deferred view seam below). The
+//! INITIALIZE_LIGHT/LIGHT steps are executor-wired but
 //! engine-gated (the holder wires no light engine, so it cannot reach LIGHT).
 //! Everything the value layer does not wire is refused *before* running work: a
 //! path through a light step with no engine is refused as
@@ -73,9 +77,13 @@ use rivet_registry::biome_id::BiomeId;
 use rivet_registry::block_state::BlockState;
 use rivet_registry::core::BlockPos;
 use rivet_registry::core::ChunkPos;
+use rivet_registry::core::SectionPos;
 use rivet_registry::generated::blocks::BlockId;
 use rivet_registry::holder::Holder;
 use rivet_registry::holder_lookup::HolderGetter;
+use rivet_util::WorldgenRandom;
+use rivet_util::random_source::XoroshiroRandomSource;
+use rivet_util::random_source::random_support;
 use rivet_world::biome::BiomeManager;
 use rivet_world::biome::BiomeResolver;
 use rivet_world::biome::biome_manager::NoiseBiomeSource;
@@ -115,8 +123,8 @@ pub enum GeneratedChunkError {
     /// A target past `LIGHT` — the executor rejected it before running any
     /// work. Naming the requested status makes the downstream boundary explicit.
     /// (A target through a light step with no engine is instead refused as
-    /// `GenError::LightEngineMissing`, and the wired-but-blocked FEATURES rung
-    /// unwinds from the bounded `WorldGenRegion` construction — see
+    /// `GenError::LightEngineMissing`, and the wired FEATURES rung fails typed
+    /// as `GenError::FeaturesUnavailable` at the region read — see
     /// [`GenerationChunkHolder::new`].)
     UnsupportedStatus(ChunkStatus),
     /// The genuine-FULL-only install gate: a generated chunk is a `ProtoChunk`
@@ -345,12 +353,14 @@ impl GenerationChunkHolder {
     /// CARVERS body runs the real `applyCarvers` (the overworld-carvers
     /// center-chunk loop — see the noisegen driver's doc for the deferred
     /// `WorldGenRegion`/`StructureManager` seams); the FEATURES body starts
-    /// Java's `ChunkStatusTasks.generateFeatures` — it primes the four
-    /// `FINAL_HEIGHTMAPS` (the heightmaps the decoration bodies read) and then
-    /// fails loudly at the first genuinely unavailable dependency: the bounded
-    /// `WorldGenRegion` construction, whose `StaticCache2D` neighbor-chunk
-    /// cache the holder neither owns nor implements the view trait for (the
-    /// deferred `GenerationChunkHolderView` seam — see the module doc).
+    /// Java's `ChunkStatusTasks.generateFeatures` — it runs
+    /// `addVanillaDecorations`'s region-free prologue (the four
+    /// `FINAL_HEIGHTMAPS` and the decoration-seed derivation) and then fails
+    /// typed at the first genuinely unavailable dependency: the 3x3
+    /// biome-union gather, whose `level.getChunk` reads go through the bounded
+    /// `WorldGenRegion`'s `StaticCache2D` neighbor-chunk cache the holder
+    /// neither owns nor implements the view trait for (the deferred
+    /// `GenerationChunkHolderView` seam — see the module doc).
     pub fn new(pos: ChunkPos, generator: Arc<OverworldGenerator>) -> Self {
         let height_accessor = create_height_accessor(
             generator.generator().get_min_y(),
@@ -445,35 +455,50 @@ impl GenerationChunkHolder {
             },
             {
                 // `ChunkStatusTasks.generateFeatures` (Java) → the caller-owned
-                // decoration body. The real body is
-                // `NoiseBasedChunkGenerator.applyBiomeDecoration` over a bounded
-                // `WorldGenRegion`, but the closure seam is `FnMut(&mut
-                // ProtoChunk) -> ()`, so it cannot return a typed error. What it
-                // CAN run faithfully is the prologue: `Heightmap.primeHeightmaps
-                // (chunk, FINAL_HEIGHTMAPS)` primes the four final heightmaps the
-                // decoration bodies read. It then fails loudly — a precise panic
-                // naming the FIRST genuinely unavailable dependency: the bounded
-                // `WorldGenRegion` construction needs a
-                // `StaticCache2D<GenerationChunkHolderView>` neighbor-chunk cache
-                // that the holder neither owns nor implements the view trait for
-                // (the deferred `map_values`-bridging seam in the module doc). A
-                // later slice lands the region-backed cache (issue #185's `.chunk
-                // .generator` pipeline unit) and replaces this panic with the
-                // real decoration body — the panic must never be "improved" into
-                // a silent skip or a blanket UnsupportedTask. The body does not
-                // capture the generator yet: the panic fires before
-                // `applyBiomeDecoration` would need it.
+                // decoration body, typed ([`GenError::FeaturesUnavailable`]).
+                // The real body is `NoiseBasedChunkGenerator.applyBiomeDecoration`
+                // over a bounded `WorldGenRegion`; what this closure CAN run
+                // faithfully is `addVanillaDecorations`'s region-free prologue,
+                // in Java order:
+                //   1. `Heightmap.primeHeightmaps(chunk, FINAL_HEIGHTMAPS)` primes
+                //      the four final heightmaps the decoration bodies read;
+                //   2. `SectionPos.of(centerPos, level.getMinSectionY()).origin()`
+                //      derives the chunk-section origin block position;
+                //   3. `new WorldgenRandom(new XoroshiroRandomSource(
+                //      RandomSupport.generateUniqueSeed()))` is seeded with the
+                //      decoration seed via `setDecorationSeed(seed, origin.getX(),
+                //      origin.getZ())`.
+                // It then returns a typed error at the FIRST genuinely
+                // unavailable dependency: gathering the 3x3 biome union needs
+                // `level.getChunk(chunkPos.x, chunkPos.z)` reads through the
+                // bounded `WorldGenRegion`'s `StaticCache2D<
+                // GenerationChunkHolderView>` neighbor-chunk cache, which the
+                // holder neither owns nor implements the view trait for (the
+                // deferred `map_values`-bridging seam in the module doc). A later
+                // slice lands the region-backed cache (issue #185's `.chunk
+                // .generator` pipeline unit) and replaces this error with the real
+                // decoration body — it must never be "improved" into a silent
+                // skip or a blanket UnsupportedTask. The decoration seed is
+                // computed but not stored: Java's `applyBiomeDecoration` receives
+                // it as a local and uses it to set per-feature seeds inside the
+                // step loop, which cannot run until the biome union is available.
+                let generator = Arc::clone(&generator);
                 move |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
                     chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
-                    panic!(
-                        "FEATURES decoration is blocked at its first real dependency: \
-                         constructing the bounded WorldGenRegion for {} requires a \
-                         StaticCache2D<GenerationChunkHolderView> neighbor-chunk cache \
-                         the holder does not own (RivetTodo #185: the status executor that \
-                         completes a chunk to FULL and bridges it lands with the \
-                         `.chunk.generator` pipeline unit)",
-                        chunk.get_pos()
+                    let origin = SectionPos::of_chunk_pos(
+                        &chunk.get_pos(),
+                        chunk.height_accessor().get_min_section_y(),
+                    )
+                    .origin();
+                    let _decoration_seed = WorldgenRandom::new(XoroshiroRandomSource::new(
+                        random_support::generate_unique_seed(),
+                    ))
+                    .set_decoration_seed(
+                        generator.seed(),
+                        origin.get_x(),
+                        origin.get_z(),
                     );
+                    Err(GenError::FeaturesUnavailable)
                 }
             },
         );
@@ -483,8 +508,8 @@ impl GenerationChunkHolder {
     /// The chunk's persisted status — `EMPTY` before any step, `CARVERS` after a
     /// successful BIOMES→NOISE→SURFACE→CARVERS run, and never `FULL` (the
     /// executor refuses to stamp it). A FEATURES run primes the final heightmaps
-    /// and then unwinds from the bounded `WorldGenRegion` construction, so the
-    /// chunk is never stamped FEATURES.
+    /// and then fails typed at the region read, so the chunk is never stamped
+    /// FEATURES.
     pub fn status(&self) -> ChunkStatus {
         self.chunk.get_persisted_status()
     }
@@ -492,8 +517,8 @@ impl GenerationChunkHolder {
     /// Drive the chunk from its current persisted status through `target`
     /// (inclusive). The BIOMES→NOISE→SURFACE→CARVERS task bodies are wired (an
     /// EMPTY chunk can reach CARVERS); the FEATURES task body is wired (it
-    /// primes the final heightmaps and then unwinds from the bounded
-    /// `WorldGenRegion` construction — see [`GenerationChunkHolder::new`]). A
+    /// primes the final heightmaps and then fails typed at the region read —
+    /// see [`GenerationChunkHolder::new`]). A
     /// target the value layer does not wire is rejected by the executor before
     /// any work with a typed error — a path through a light step with no engine
     /// is refused as `GenError::LightEngineMissing`, and a target past LIGHT
@@ -513,8 +538,8 @@ impl GenerationChunkHolder {
 
     /// The genuine-FULL-only install gate: `ChunkMap::install` accepts only a
     /// `LevelChunk` (FULL), and a generated chunk is a `ProtoChunk` that stops
-    /// at `CARVERS` (the FEATURES rung primes heightmaps then unwinds from the
-    /// bounded `WorldGenRegion` construction — see [`GenerationChunkHolder::new`]).
+    /// at `CARVERS` (the FEATURES rung fails typed at the region read — see
+    /// [`GenerationChunkHolder::new`]).
     /// No conversion from a sub-FULL `ProtoChunk` exists or may be added without
     /// the unwired FEATURES..FULL stages (RivetTodo #185), so this always fails
     /// loudly with the chunk's real status — never stamping FULL and never
@@ -947,10 +972,9 @@ mod tests {
     /// `generate_through_carvers_runs_the_real_apply_carvers`), so a fresh
     /// EMPTY chunk targeting it runs BIOMES→NOISE→SURFACE→CARVERS and is
     /// stamped CARVERS. FEATURES is wired-but-blocked (see
-    /// `generate_through_features_primes_final_heightmaps_then_unwinds`): the
-    /// features body primes the final heightmaps and then unwinds from the
-    /// bounded `WorldGenRegion` construction, so the chunk is never stamped
-    /// FEATURES.
+    /// `generate_through_features_runs_prologue_then_fails_typed`): the
+    /// features body primes the final heightmaps and then fails typed at the
+    /// region read, so the chunk is never stamped FEATURES.
     #[test]
     fn downstream_stages_fail_loudly_and_never_stamp() {
         let generator = test_generator();
@@ -1014,16 +1038,19 @@ mod tests {
         assert_eq!(holder.status(), ChunkStatus::Noise);
     }
 
-    /// The FEATURES rung is wired-but-blocked at its first real dependency:
-    /// from a CARVERS chunk it primes the four `FINAL_HEIGHTMAPS` (Java's
-    /// `Heightmap.primeHeightmaps` in `ChunkStatusTasks.generateFeatures`) and
-    /// then fails loudly — a precise panic naming the bounded `WorldGenRegion`
-    /// construction, whose `StaticCache2D<GenerationChunkHolderView>` neighbor
-    /// cache the holder does not own (the deferred `map_values`-bridging seam).
-    /// The chunk is never stamped FEATURES (it stays CARVERS) — no silent skip
-    /// and no blanket `UnsupportedTask`.
+    /// The FEATURES rung runs `addVanillaDecorations`'s region-free prologue —
+    /// `Heightmap.primeHeightmaps(chunk, FINAL_HEIGHTMAPS)` and the decoration
+    /// seed derivation (`SectionPos.of(centerPos, level.getMinSectionY())
+    /// .origin()` fed to `setDecorationSeed(seed, originX, originZ)`) — and then
+    /// fails typed at its first genuinely unavailable dependency: the 3x3 biome
+    /// union gather reads `level.getChunk` through the bounded
+    /// `WorldGenRegion`'s `StaticCache2D<GenerationChunkHolderView>` neighbor
+    /// cache, which the holder does not own (the deferred
+    /// `map_values`-bridging seam). The chunk is never stamped FEATURES (it
+    /// stays CARVERS) — no silent skip, no blanket `UnsupportedTask`, and no
+    /// panic.
     #[test]
-    fn generate_through_features_primes_final_heightmaps_then_unwinds() {
+    fn generate_through_features_runs_prologue_then_fails_typed() {
         let generator = test_generator();
         let mut holder = generator.create_holder(ChunkPos::new(0, 0));
         holder
@@ -1031,36 +1058,82 @@ mod tests {
             .expect("CARVERS");
         assert_eq!(holder.status(), ChunkStatus::Carvers);
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            holder.generate_through(ChunkStatus::Features)
-        }));
-        let message = match result {
-            Err(payload) => payload
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
-                .expect("panic payload must be a message string"),
-            Ok(Ok(())) => panic!("FEATURES must not complete without a region-backed cache"),
-            Ok(Err(_)) => panic!(
-                "FEATURES must fail loudly (panic at the first real blocker), not a typed error"
-            ),
-        };
+        let err = holder
+            .generate_through(ChunkStatus::Features)
+            .expect_err("FEATURES must fail typed at the first real blocker");
         assert!(
-            message.contains("WorldGenRegion") && message.contains("StaticCache2D"),
-            "the panic must name the first real blocker (the bounded WorldGenRegion's \
-             StaticCache2D neighbor cache); got: {message}"
+            matches!(
+                err,
+                GeneratedChunkError::Generation(GenError::FeaturesUnavailable)
+            ),
+            "FEATURES must fail with the region-unavailable typed error; got {err:?}"
         );
+
         // The prologue ran faithfully: all four final heightmaps are primed
         // (Java primes them for the decoration bodies to read).
         for ty in FINAL_HEIGHTMAPS {
             assert!(
                 holder.chunk.heightmaps()[ty as usize].is_some(),
-                "FEATURES must prime the {ty:?} final heightmap before unwinding"
+                "FEATURES must prime the {ty:?} final heightmap before failing typed"
             );
         }
-        // The chunk is never stamped FEATURES — the panic unwinds before the
-        // status advance, so it stays CARVERS.
+        // The chunk is never stamped FEATURES — the typed error propagates
+        // before the status advance, so it stays CARVERS.
         assert_eq!(holder.status(), ChunkStatus::Carvers);
+    }
+
+    /// The decoration-seed prologue is deterministic and matches the pinned
+    /// seed-42 golden: chunk (0,0) has section origin (0, -64, 0), and
+    /// `setDecorationSeed(42, 0, 0)` == 42 == the world seed (both scale terms
+    /// vanish), so a seed-42 run at the origin chunk decorates with seed 42.
+    /// Chunk (1,0) has origin (16, -64, 0), whose decoration seed is the
+    /// golden `42 ^ (16 * nextLong|1)` — computed here via the same
+    /// `WorldgenRandom` the closure uses, and asserted to differ from the
+    /// world seed (non-vacuous position sensitivity).
+    #[test]
+    fn decoration_prologue_matches_pinned_seed42_golden() {
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(
+            random_support::generate_unique_seed(),
+        ));
+        let origin_seed_00 = random.set_decoration_seed(42, 0, 0);
+        assert_eq!(origin_seed_00, 42, "chunk (0,0) must decorate with seed 42");
+
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(
+            random_support::generate_unique_seed(),
+        ));
+        let origin_seed_10 = random.set_decoration_seed(42, 16, 0);
+        assert_ne!(
+            origin_seed_10, 42,
+            "chunk (1,0) must have a decoration seed different from the world seed"
+        );
+        // The derived seed is the same regardless of the unique seed base
+        // (`set_decoration_seed` resets the source to the world seed first),
+        // which is exactly why it is deterministic per chunk.
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(
+            random_support::generate_unique_seed(),
+        ));
+        assert_eq!(
+            random.set_decoration_seed(42, 16, 0),
+            origin_seed_10,
+            "the decoration seed must not depend on the unique-seed base"
+        );
+    }
+
+    /// The decoration-seed prologue is position- and world-seed-sensitive: a
+    /// different chunk section or a different world seed must derive a
+    /// different decoration seed (non-vacuous — the prologue actually feeds
+    /// position and seed into the RNG).
+    #[test]
+    fn decoration_prologue_seed_is_position_and_seed_sensitive() {
+        let seed = |world_seed: i64, chunk_x: i32, chunk_z: i32| {
+            WorldgenRandom::new(XoroshiroRandomSource::new(
+                random_support::generate_unique_seed(),
+            ))
+            .set_decoration_seed(world_seed, chunk_x, chunk_z)
+        };
+        assert_ne!(seed(42, 0, 0), seed(42, 1, 0), "x position must matter");
+        assert_ne!(seed(42, 0, 0), seed(42, 0, 1), "z position must matter");
+        assert_ne!(seed(42, 0, 0), seed(43, 0, 0), "world seed must matter");
     }
 
     /// Hostile: a generated ProtoChunk can never enter the ChunkMap authority —
@@ -1100,17 +1173,17 @@ mod tests {
 
     /// Ownership: the holder owns its ProtoChunk by value (no `Arc<RwLock>`
     /// game state) while the immutable worldgen config is shared across holders
-    /// by `Arc` — the four executor closures (BIOMES, NOISE, SURFACE, CARVERS)
-    /// each capture a clone. This test builds its own exclusive generator (the
-    /// shared `LazyLock` would be touched by the other parallel tests, making
-    /// the strong count global/racy).
+    /// by `Arc` — the five executor closures (BIOMES, NOISE, SURFACE, CARVERS,
+    /// FEATURES) each capture a clone. This test builds its own exclusive
+    /// generator (the shared `LazyLock` would be touched by the other parallel
+    /// tests, making the strong count global/racy).
     #[test]
     fn holder_owns_chunk_by_value_and_shares_immutable_config() {
         let generator = Arc::new(OverworldGenerator::new(42));
         let base = Arc::strong_count(&generator);
         let holder = generator.create_holder(ChunkPos::new(2, 3));
-        // The four executor closures each hold a clone of the shared generator.
-        assert_eq!(Arc::strong_count(&generator), base + 4);
+        // The five executor closures each hold a clone of the shared generator.
+        assert_eq!(Arc::strong_count(&generator), base + 5);
         drop(holder);
         assert_eq!(Arc::strong_count(&generator), base);
     }
