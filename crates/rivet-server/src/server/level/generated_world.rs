@@ -86,6 +86,7 @@ use rivet_util::random_source::XoroshiroRandomSource;
 use rivet_util::random_source::random_support;
 use rivet_world::biome::BiomeManager;
 use rivet_world::biome::BiomeResolver;
+use rivet_world::biome::BiomeSource;
 use rivet_world::biome::biome_manager::NoiseBiomeSource;
 use rivet_world::biome::climate::Sampler;
 use rivet_world::biome::generated_biome_source::{dense_biome_id, overworld_biome_source};
@@ -167,6 +168,13 @@ pub struct OverworldGenerator {
     generator: NoiseBasedChunkGenerator,
     random_state: &'static RandomState<'static>,
     biome_source: OverworldNoiseBiomeSource,
+    /// The leaked worldgen `RegistryAccess` — the `registryAccess()` back
+    /// reference the FEATURES decoration body (and the `WorldGenRegion` it
+    /// constructs) resolves the placed-feature registry through, and the
+    /// `lookupOrThrow(Registries.STRUCTURE)`/`Registries.PLACED_FEATURE`
+    /// lookups Java's `addVanillaDecorations` performs. Stored alongside the
+    /// random state it already shares the leak of (see [`OverworldGenerator::new`]).
+    access: &'static RegistryAccess,
     seed: i64,
 }
 
@@ -195,6 +203,7 @@ impl OverworldGenerator {
             generator,
             random_state,
             biome_source: OverworldNoiseBiomeSource::new(random_state),
+            access,
             seed,
         }
     }
@@ -202,6 +211,12 @@ impl OverworldGenerator {
     /// The seed this generator was realized for.
     pub fn seed(&self) -> i64 {
         self.seed
+    }
+
+    /// The leaked worldgen `RegistryAccess` — the FEATURES decoration body's
+    /// registry back-reference (`registryAccess()`, `lookupOrThrow`).
+    pub fn registry_access(&self) -> &'static RegistryAccess {
+        self.access
     }
 
     /// The value shell — the source of truth for the real world-surface bodies
@@ -303,6 +318,13 @@ impl OverworldNoiseBiomeSource {
     /// The climate sampler this source samples with.
     pub fn sampler(&self) -> &Sampler {
         &self.sampler
+    }
+
+    /// `BiomeSource.possibleBiomes()` — the overworld source's possible-biome
+    /// set (the `retainAll` argument of Java's `addVanillaDecorations` biome
+    /// union: `possibleBiomes.retainAll(this.biomeSource.possibleBiomes())`).
+    pub fn possible_biomes(&self) -> Vec<Holder<BiomeId>> {
+        self.source.possible_biomes()
     }
 }
 
