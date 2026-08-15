@@ -526,6 +526,19 @@ mod tests {
         let first = render(&biomes, &placed, &configured, &source);
         let second = render(&biomes, &placed, &configured, &source);
         assert_eq!(first, second);
+        // The final section ends with `};\n` exactly: the section renderers
+        // append `};\n\n` (the blank line separates sections), so the last
+        // section must be normalized to a single trailing newline to match the
+        // rustfmt-collapsed committed golden byte-for-byte.
+        assert!(
+            first.ends_with("};\n"),
+            "render must end with a single newline, got tail: {:?}",
+            &first[first.len().saturating_sub(16)..]
+        );
+        assert!(
+            !first.ends_with("\n\n"),
+            "render must not end with a blank line"
+        );
         assert!(first.contains("MC 26.2, protocol 776, world 4903"));
         assert!(first.contains("DECORATION_STEP_COUNT"));
         assert!(first.contains("BIOME_GENERATION_SETTINGS_BY_NAME"));
