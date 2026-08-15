@@ -19,7 +19,9 @@
 //! derived (all fields are value types), consistent with the other
 //! configuration value types.
 
+use crate::block::blocks::Blocks;
 use crate::levelgen::feature::configurations::FeatureConfiguration;
+use rivet_registry::block_state::BlockState;
 use rivet_registry::fluid_id::FluidId;
 use rivet_registry::holder::Holder;
 use rivet_registry::holder_set::HolderSet;
@@ -118,6 +120,30 @@ impl FluidState {
     /// `getType()` — the fluid type id-handle.
     pub fn get_type(&self) -> FluidId {
         self.fluid
+    }
+
+    /// `createLegacyBlock()` — the fluid's legacy block state.
+    ///
+    /// STUB(mc.world.level.material): mirrors `FluidState.createLegacyBlock`,
+    /// which delegates to the fluid type's `Fluid.createLegacyBlock(FluidState)`:
+    /// `EmptyFluid` returns `Blocks.AIR`, `WaterFluid` (both the still and
+    /// flowing water variants) returns
+    /// `Blocks.WATER.defaultBlockState().setValue(LiquidBlock.LEVEL,
+    /// getLegacyLevel(...))`, and `LavaFluid` (still + flowing) returns the lava
+    /// equivalent. A source spring state has `getLegacyLevel = 0`, the default
+    /// `LiquidBlock.LEVEL` value, so the legacy block is the water/lava block's
+    /// default state. The stub carries no per-property level surface, so the
+    /// mapping is by the fluid's type family (the `minecraft:empty`/`water`/
+    /// `lava` block ids).
+    pub fn create_legacy_block(&self) -> BlockState {
+        match self.fluid.id() {
+            // `WaterFluid` — still `minecraft:water` (2) and flowing (1).
+            1 | 2 => BlockState::of(Blocks::WATER.id()),
+            // `LavaFluid` — still `minecraft:lava` (4) and flowing (3).
+            3 | 4 => BlockState::of(Blocks::LAVA.id()),
+            // `EmptyFluid` (and unknown ids degrade to the default fluid).
+            _ => BlockState::of(Blocks::AIR.id()),
+        }
     }
 }
 

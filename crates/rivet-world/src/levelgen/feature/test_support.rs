@@ -32,6 +32,7 @@ use rivet_registry::access::RegistryAccess;
 use rivet_registry::block_state::BlockState;
 use rivet_registry::builder::RegistryBuilder;
 use rivet_registry::core::{BlockPos, Direction};
+use rivet_registry::fluid_id::FluidId;
 use rivet_registry::generated::blocks::BlockId;
 use rivet_registry::root::AnyBox;
 use rivet_registry::{Identifier, ResourceKey};
@@ -156,9 +157,16 @@ pub struct TestLevel {
     /// `should_snow` — the fixed `Biome.shouldSnow` verdict
     /// (`SnowAndFreezeFeature`).
     pub snow: bool,
-    /// `schedule_tick` — the scheduled writes in order (`SimpleBlockFeature`
-    /// with `config.scheduleTick()`).
-    pub scheduled_ticks: Vec<(BlockPos, BlockId, i32)>,
+    /// `mark_pos_for_post_processing` — the positions the geology/cave leaves
+    /// mark for post-processing (in call order).
+    pub post_processing: Vec<BlockPos>,
+    /// `schedule_tick` — the `(pos, fluid, delay)` tick requests the
+    /// geology/cave leaves schedule (in call order).
+    pub ticks: Vec<(BlockPos, FluidId, i32)>,
+    /// `schedule_block_tick` — the `(pos, block, delay)` block tick requests
+    /// `SimpleBlockFeature` (with `config.scheduleTick()`) and `LakeFeature.place`
+    /// (the placed cave-air cells) schedule (in call order).
+    pub block_ticks: Vec<(BlockPos, crate::block::Block, i32)>,
 }
 
 impl TestLevel {
@@ -179,7 +187,9 @@ impl TestLevel {
             face_sturdy_at: HashMap::new(),
             freeze: false,
             snow: false,
-            scheduled_ticks: Vec::new(),
+            post_processing: Vec::new(),
+            ticks: Vec::new(),
+            block_ticks: Vec::new(),
         }
     }
 }
@@ -257,8 +267,16 @@ impl WorldGenLevel for TestLevel {
         self.snow
     }
 
-    fn schedule_tick(&mut self, pos: &BlockPos, block: BlockId, delay: i32) {
-        self.scheduled_ticks.push((*pos, block, delay));
+    fn schedule_tick(&mut self, pos: &BlockPos, fluid: FluidId, delay: i32) {
+        self.ticks.push((*pos, fluid, delay));
+    }
+
+    fn schedule_block_tick(&mut self, pos: &BlockPos, block: crate::block::Block, delay: i32) {
+        self.block_ticks.push((*pos, block, delay));
+    }
+
+    fn mark_pos_for_post_processing(&mut self, pos: &BlockPos) {
+        self.post_processing.push(*pos);
     }
 }
 

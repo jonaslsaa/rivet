@@ -136,6 +136,23 @@ pub mod sub_features;
 pub mod weighted_placed_feature;
 pub mod weighted_random_selector_feature;
 
+// The geology/cave-family wave (`mc.world.level.levelgen.feature.geology-cave-
+// leaves`) — the feature structs that live in this module. Each is owned by its
+// own leaf row (`.feature.delta`/`disk`/`geode`/`lake`/`replaceblobs`/
+// `scattered_ore`/`sculkpatch`/`spike`/`spring`) and wired into the `#181`
+// dispatch hub at its registration id; each config is owned by its own
+// `configurations.*` row (`LakeFeature.Configuration` is nested in
+// `LakeFeature.java`, so it lives in `lake_feature.rs`).
+pub mod delta_feature;
+pub mod disk_feature;
+pub mod geode_feature;
+pub mod lake_feature;
+pub mod replace_blobs_feature;
+pub mod scattered_ore_feature;
+pub mod sculk_patch_feature;
+pub mod spike_feature;
+pub mod spring_feature;
+
 // The shared test double for the `.feature.selector` placement tests — the
 // two-registry access the selector features resolve their holders through, a
 // `WorldGenLevel`/`ChunkGenerator` double over it, and the RNG-call-recording
@@ -186,15 +203,23 @@ use crate::levelgen::feature::configurations::BlockStateConfiguration;
 use crate::levelgen::feature::configurations::ColumnFeatureConfiguration;
 use crate::levelgen::feature::configurations::CompositeFeatureConfiguration;
 use crate::levelgen::feature::configurations::CountConfiguration;
+use crate::levelgen::feature::configurations::DeltaFeatureConfiguration;
+use crate::levelgen::feature::configurations::DiskConfiguration;
 use crate::levelgen::feature::configurations::FeatureConfiguration;
+use crate::levelgen::feature::configurations::GeodeConfiguration;
 use crate::levelgen::feature::configurations::HugeMushroomFeatureConfiguration;
 use crate::levelgen::feature::configurations::LayerConfiguration;
 use crate::levelgen::feature::configurations::NetherForestVegetationConfig;
 use crate::levelgen::feature::configurations::NoneFeatureConfiguration;
+use crate::levelgen::feature::configurations::OreConfiguration;
 use crate::levelgen::feature::configurations::ProbabilityFeatureConfiguration;
 use crate::levelgen::feature::configurations::RandomBooleanFeatureConfiguration;
 use crate::levelgen::feature::configurations::RandomFeatureConfiguration;
+use crate::levelgen::feature::configurations::ReplaceSphereConfiguration;
+use crate::levelgen::feature::configurations::SculkPatchConfiguration;
 use crate::levelgen::feature::configurations::SimpleBlockConfiguration;
+use crate::levelgen::feature::configurations::SpikeConfiguration;
+use crate::levelgen::feature::configurations::SpringConfiguration;
 use crate::levelgen::feature::configurations::WeightedRandomFeatureConfiguration;
 use crate::levelgen::feature::no_op_feature::NO_OP;
 use rivet_registry::Holder;
@@ -217,22 +242,30 @@ pub use blue_ice_feature::{BLUE_ICE, BlueIceFeature};
 pub use coral_claw_feature::{CORAL_CLAW, CoralClawFeature};
 pub use coral_mushroom_feature::{CORAL_MUSHROOM, CoralMushroomFeature};
 pub use coral_tree_feature::{CORAL_TREE, CoralTreeFeature};
+pub use delta_feature::{DELTA, DeltaFeature};
+pub use disk_feature::{DISK, DiskFeature};
 pub use feature_count_tracker::FeatureCountTracker;
 pub use feature_place_context::FeaturePlaceContext;
 pub use fill_layer_feature::{FILL_LAYER, FillLayerFeature};
+pub use geode_feature::{GEODE, GeodeFeature};
 pub use glowstone_feature::{GLOWSTONE_BLOB, GlowstoneFeature};
 pub use huge_brown_mushroom_feature::{HUGE_BROWN_MUSHROOM, HugeBrownMushroomFeature};
 pub use huge_red_mushroom_feature::{HUGE_RED_MUSHROOM, HugeRedMushroomFeature};
 pub use iceberg_feature::{ICEBERG, IcebergFeature};
 pub use kelp_feature::{KELP, KelpFeature};
+pub use lake_feature::{LAKE, LakeFeature};
 pub use nether_forest_vegetation_feature::{
     NETHER_FOREST_VEGETATION, NetherForestVegetationFeature,
 };
 pub use no_op_feature::NoOpFeature;
+pub use scattered_ore_feature::{SCATTERED_ORE, ScatteredOreFeature};
+pub use sculk_patch_feature::{SCULK_PATCH, SculkPatchFeature};
 pub use sea_pickle_feature::{SEA_PICKLE, SeaPickleFeature};
 pub use seagrass_feature::{SEAGRASS, SeagrassFeature};
 pub use simple_block_feature::{SIMPLE_BLOCK, SimpleBlockFeature};
 pub use snow_and_freeze_feature::{FREEZE_TOP_LAYER, SnowAndFreezeFeature};
+pub use spike_feature::{SPIKE, SpikeFeature};
+pub use spring_feature::{SPRING, SpringFeature};
 pub use vines_feature::{VINES, VinesFeature};
 
 // The vegetation-family wave (issue #600) — the `.feature.selector` unit's
@@ -242,6 +275,7 @@ pub use vines_feature::{VINES, VinesFeature};
 pub use random_boolean_selector_feature::{RANDOM_BOOLEAN_SELECTOR, RandomBooleanSelectorFeature};
 pub use random_selector_feature::{RANDOM_SELECTOR, RandomSelectorFeature};
 pub use registry_keys::{CONFIGURED_FEATURE, PLACED_FEATURE};
+pub use replace_blobs_feature::{REPLACE_BLOBS, ReplaceBlobsFeature};
 pub use sequence_feature::{SEQUENCE, SequenceFeature};
 pub use simple_random_selector_feature::{SIMPLE_RANDOM_SELECTOR, SimpleRandomSelectorFeature};
 pub use sub_features::placed_sub_features;
@@ -473,8 +507,8 @@ impl FeatureId {
 /// RandomSource, BlockPos)`, which applies the `ensureCanWrite` gate).
 ///
 /// This unit ports the dispatch and covers the leaves it can faithfully
-/// reach: `minecraft:no_op` (id 0, `NoOpFeature` over `NoneFeatureConfiguration`)
-/// and, this wave (issue #600), the five `.feature.selector` leaves —
+/// reach: `minecraft:no_op` (id 0, `NoOpFeature` over `NoneFeatureConfiguration`),
+/// this wave (issue #600) the five `.feature.selector` leaves —
 /// `random_selector` (id 52, `RandomSelectorFeature` over
 /// `RandomFeatureConfiguration`), `weighted_random_selector` (id 53,
 /// `WeightedRandomSelectorFeature` over `WeightedRandomFeatureConfiguration`),
@@ -482,9 +516,17 @@ impl FeatureId {
 /// `CompositeFeatureConfiguration`), `random_boolean_selector` (id 55,
 /// `RandomBooleanSelectorFeature` over `RandomBooleanFeatureConfiguration`),
 /// and `sequence` (id 56, `SequenceFeature` over
-/// `CompositeFeatureConfiguration`) — whose ids are the feature registry's
-/// insertion indices (protocol ids in `registries.json`; the registration
-/// table's 63 `register(...)` calls are counted directly from `Feature.java`).
+/// `CompositeFeatureConfiguration`) — and this wave
+/// (`mc.world.level.levelgen.feature.geology-cave-leaves`) the nine
+/// `.feature.geology*` leaves, in registry-id order: `spring_feature` (id 4),
+/// `spike` (id 12), `disk` (id 26), `lake` (id 27, the nested
+/// `LakeFeature.Configuration`), `delta_feature` (id 46),
+/// `netherrack_replace_blobs` (id 47), `scattered_ore` (id 51, deferring to the
+/// `#399` `canPlaceOre` seam), `geode` (id 58), and `sculk_patch` (id 62,
+/// deferring to the `#232` SculkSpreader seam) — whose ids are the feature
+/// registry's insertion indices (protocol ids in `registries.json`; the
+/// registration table's 63 `register(...)` calls are counted directly from
+/// `Feature.java`).
 /// Every other registered feature is an unavailable leaf (owned by its own
 /// manifest unit) — dispatching to one fails explicitly with an honest panic
 /// naming the feature id, never fabricating success. `Registry.getValueOrThrow`
@@ -643,6 +685,76 @@ pub fn feature_place<R: RandomSource>(
                 .downcast_ref::<NoneFeatureConfiguration>()
                 .expect("basalt_pillar feature must carry a NoneFeatureConfiguration");
             BASALT_PILLAR.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // The geology/cave-family leaves (this wave,
+        // `mc.world.level.levelgen.feature.geology-cave-leaves`) — each downcasts
+        // to its own config and delegates to `place_with_config` (the
+        // `ensureCanWrite` gate applied here, as Java's `Feature.place(FC, …)`
+        // does). `Feature.SPRING`.
+        4 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<SpringConfiguration>()
+                .expect("spring feature must carry a SpringConfiguration");
+            SPRING.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.SPIKE`.
+        12 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<SpikeConfiguration>()
+                .expect("spike feature must carry a SpikeConfiguration");
+            SPIKE.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.DISK` — the registered `minecraft:disk` leaf.
+        26 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<DiskConfiguration>()
+                .expect("disk feature must carry a DiskConfiguration");
+            DISK.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.LAKE` — the registered `minecraft:lake` leaf (the nested
+        // `LakeFeature.Configuration`).
+        27 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<crate::levelgen::feature::lake_feature::Configuration>()
+                .expect("lake feature must carry a LakeFeature.Configuration");
+            LAKE.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.DELTA`.
+        46 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<DeltaFeatureConfiguration>()
+                .expect("delta feature must carry a DeltaFeatureConfiguration");
+            DELTA.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.REPLACE_BLOBS`.
+        47 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<ReplaceSphereConfiguration>()
+                .expect("replace_blobs feature must carry a ReplaceSphereConfiguration");
+            REPLACE_BLOBS.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.SCATTERED_ORE` — the registered `minecraft:scattered_ore`
+        // leaf (placement defers to the `#399` `canPlaceOre` seam).
+        51 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<OreConfiguration>()
+                .expect("scattered_ore feature must carry an OreConfiguration");
+            SCATTERED_ORE.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.GEODE` — the registered `minecraft:geode` leaf.
+        58 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<GeodeConfiguration>()
+                .expect("geode feature must carry a GeodeConfiguration");
+            GEODE.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.SCULK_PATCH` — the registered `minecraft:sculk_patch` leaf
+        // (placement defers to the `#232` SculkSpreader seam).
+        62 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<SculkPatchConfiguration>()
+                .expect("sculk_patch feature must carry a SculkPatchConfiguration");
+            SCULK_PATCH.place_with_config(config, level, chunk_generator, random, origin)
         }
         // The end-leaves wave — the four registered End features (each owned by
         // its own `.feature.*` MANIFEST row), all over `NoneFeatureConfiguration`.
@@ -823,6 +935,36 @@ pub fn is_adjacent_to_air(block_getter: impl Fn(&BlockPos) -> BlockState, pos: &
     check_neighbors(block_getter, pos, |state| state.is_air())
 }
 
+/// `Feature.markAboveForPostProcessing(WorldGenLevel, BlockPos)` — the
+/// two-up post-processing mark `DiskFeature.placeColumn` and
+/// `LakeFeature.place` reduce to.
+///
+/// ```java
+/// BlockPos.MutableBlockPos pos = placePos.mutable();
+/// for (int i = 0; i < 2; i++) {
+///     pos.move(Direction.UP);
+///     if (level.getBlockState(pos).isAir()) {
+///         return;
+///     }
+///     level.getChunk(pos).markPosForPostProcessing(pos);
+/// }
+/// ```
+///
+/// Java moves the mutable position up twice, returning early on the first air
+/// cell; the port rebuilds each moved position and routes the mark through the
+/// `WorldGenLevel::mark_pos_for_post_processing` seam (the
+/// `getChunk(pos).markPosForPostProcessing(pos)` hop is folded into it, the
+/// smallest typed form the geology/cave leaves need).
+pub fn mark_above_for_post_processing(level: &mut dyn WorldGenLevel, place_pos: &BlockPos) {
+    for steps in 1..=2 {
+        let pos = place_pos.above_steps(steps);
+        if level.get_block_state(&pos).is_air() {
+            return;
+        }
+        level.mark_pos_for_post_processing(&pos);
+    }
+}
+
 /// `BlockStateBase.is(Block)` — the block identity check the End feature
 /// leaves gate their writes on (`EndPlatformFeature`, `EndPodiumFeature`, and
 /// the chorus-growth connection tests).
@@ -974,6 +1116,65 @@ mod tests {
             (
                 56,
                 "sequence feature must carry a CompositeFeatureConfiguration",
+            ),
+        ];
+        for (id, message) in arms {
+            let mut level = TestLevel;
+            let mut random = LegacyRandomSource::new(1);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                feature_place(
+                    FeatureId::new(id),
+                    &NoneFeatureConfiguration::INSTANCE,
+                    &mut level,
+                    &generator,
+                    &mut random,
+                    &origin,
+                )
+            }));
+            match result {
+                Err(payload) => {
+                    let text = payload
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("<non-string panic>");
+                    assert!(
+                        text.contains(message),
+                        "id {id}: expected panic containing {message:?}, got {text:?}"
+                    );
+                }
+                Ok(placed) => panic!("id {id}: expected a wrong-config panic, but placed {placed}"),
+            }
+        }
+    }
+
+    /// The geology/cave-family dispatch arms (this wave,
+    /// `mc.world.level.levelgen.feature.geology-cave-leaves`) pin the feature
+    /// registry's insertion indices (protocol ids in `registries.json`) for
+    /// `spring_feature` (4), `spike` (12), `disk` (26), `lake` (27),
+    /// `delta_feature` (46), `netherrack_replace_blobs` (47), `scattered_ore`
+    /// (51), `geode` (58) and `sculk_patch` (62) — the same wrong-config
+    /// downcast panic pattern as `selector_dispatch_arms_pin_registration_ids`.
+    #[test]
+    fn geology_dispatch_arms_pin_registration_ids() {
+        let generator = TestGenerator;
+        let origin = BlockPos::new(0, 0, 0);
+        // (feature id, expected downcast panic message).
+        let arms = [
+            (4, "spring feature must carry a SpringConfiguration"),
+            (12, "spike feature must carry a SpikeConfiguration"),
+            (26, "disk feature must carry a DiskConfiguration"),
+            (27, "lake feature must carry a LakeFeature.Configuration"),
+            (46, "delta feature must carry a DeltaFeatureConfiguration"),
+            (
+                47,
+                "replace_blobs feature must carry a ReplaceSphereConfiguration",
+            ),
+            (51, "scattered_ore feature must carry an OreConfiguration"),
+            (58, "geode feature must carry a GeodeConfiguration"),
+            (
+                62,
+                "sculk_patch feature must carry a SculkPatchConfiguration",
             ),
         ];
         for (id, message) in arms {

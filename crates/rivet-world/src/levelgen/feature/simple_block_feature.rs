@@ -146,7 +146,7 @@ impl FeatureBehavior<SimpleBlockConfiguration> for SimpleBlockFeature {
 
             if config.schedule_tick() {
                 let placed = level.get_block_state(&origin);
-                level.schedule_tick(&origin, placed.block(), 1);
+                level.schedule_block_tick(&origin, crate::block::Block::new(placed.block()), 1);
             }
 
             true
@@ -225,10 +225,10 @@ mod tests {
         assert!(place_with(&mut level, BlockPos::new(0, 0, 0), stone, true));
         assert_eq!(level.writes.len(), 1);
         assert_eq!(
-            level.scheduled_ticks,
+            level.block_ticks,
             vec![(
                 BlockPos::new(0, 0, 0),
-                BlockId::from_name("minecraft:stone").unwrap(),
+                crate::block::Block::new(BlockId::from_name("minecraft:stone").unwrap()),
                 1,
             )]
         );
@@ -244,7 +244,7 @@ mod tests {
             BlockState::of(BlockId::from_name("minecraft:stone").unwrap()),
             false,
         ));
-        assert!(level.scheduled_ticks.is_empty());
+        assert!(level.block_ticks.is_empty());
     }
 
     /// A double plant (tall grass) requires the cell above empty: with a

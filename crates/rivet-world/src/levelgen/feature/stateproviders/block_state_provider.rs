@@ -177,14 +177,14 @@ pub fn block_state_provider_get_state<R: RandomSource>(
 /// `getOptionalState(WorldGenLevel, RandomSource, BlockPos)` over the erased
 /// carrier — dispatch an erased provider to its optional state.
 ///
-/// The twin of [`block_state_provider_get_state`] for the optional surface
-/// `SimpleBlockFeature.place` consumes (`config.toPlace().getOptionalState(
-/// level, random, origin)`) and `TrunkPlacer.placeBelowTrunkBlock` consumes
-/// (`config.belowTrunkProvider.getOptionalState(...)`): the same closed match,
-/// but calling the concrete `get_optional_state` (Java's virtual
-/// `getOptionalState`). Only `RuleBasedStateProvider` overrides it (returning
-/// `None` when no rule matches and there is no fallback); every other provider
-/// inherits the default, which delegates to `get_state`. The unknown-id arm is
+/// The optional-state twin of [`block_state_provider_get_state`]: a closed
+/// downcast match over the eight concrete providers forwarding to each one's
+/// `get_optional_state` (the default `Some(get_state)`, overridden by
+/// `RuleBasedStateProvider` — so only it can return `None`). Consumed by
+/// `SimpleBlockFeature.place` (`config.toPlace().getOptionalState(level,
+/// random, origin)`), `DiskFeature.placeColumn` (`config.stateProvider()
+/// .getOptionalState(...)`) and `TrunkPlacer.placeBelowTrunkBlock` (`config
+/// .belowTrunkProvider.getOptionalState(...)`). The unknown-id arm is
 /// unreachable for the eight registered types, same as the `get_state`
 /// dispatch.
 pub fn block_state_provider_get_optional_state<R: RandomSource>(
