@@ -157,6 +157,41 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
         panic!("LevelWriter.setBlock is not implemented (RivetTodo #232)")
     }
 
+    /// `LevelAccessor.scheduleTick(BlockPos, Fluid, int)` — the scheduled-tick
+    /// seam `SpringFeature.place` consumes (`level.scheduleTick(origin,
+    /// config.state.getType(), 0)` schedules the placed spring's fluid to flow).
+    /// `&mut self` mirrors the tick-write contract like `set_block`.
+    ///
+    /// RivetTodo(#232): the scheduled-tick machinery is not ported; the default
+    /// fails explicitly rather than fabricating a tick.
+    fn schedule_tick(&mut self, _pos: &BlockPos, _fluid: FluidId, _delay: i32) {
+        panic!("LevelAccessor.scheduleTick is not implemented (RivetTodo #232)")
+    }
+
+    /// `LevelAccessor.scheduleTick(BlockPos, Block, int)` — the block
+    /// scheduled-tick seam `LakeFeature.place` consumes
+    /// (`level.scheduleTick(placePos, AIR.getBlock(), 0)` schedules the placed
+    /// cave-air to tick). `&mut self` mirrors the tick-write contract like
+    /// `schedule_tick`.
+    ///
+    /// RivetTodo(#232): the scheduled-tick machinery is not ported; the default
+    /// fails explicitly rather than fabricating a tick.
+    fn schedule_block_tick(&mut self, _pos: &BlockPos, _block: crate::block::Block, _delay: i32) {
+        panic!("LevelAccessor.scheduleTick(Block) is not implemented (RivetTodo #232)")
+    }
+
+    /// `ChunkAccess.markPosForPostProcessing(BlockPos)` — the post-processing
+    /// mark seam `Feature.markAboveForPostProcessing` reduces to
+    /// (`level.getChunk(pos).markPosForPostProcessing(pos)`). The chunk-access
+    /// hop is folded into this one seam (the smallest typed form the
+    /// geology/cave leaves need).
+    ///
+    /// RivetTodo(#232): the chunk-access implementation is not ported; the
+    /// default fails explicitly rather than fabricating the mark.
+    fn mark_pos_for_post_processing(&mut self, _pos: &BlockPos) {
+        panic!("ChunkAccess.markPosForPostProcessing is not implemented (RivetTodo #232)")
+    }
+
     /// `LevelAccessor.destroyBlock(BlockPos, boolean, @Nullable Entity)` — the
     /// block-destruction seam `EndPodiumFeature.dropPreviousAndSetBlock` and
     /// `EndPlatformFeature`'s `dropResources` path reduce to
