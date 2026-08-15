@@ -39,7 +39,9 @@
 //!   `mc.world.level.levelgen.placement.core` unit): `PlacedFeature`/
 //!   `PlacementContext`/`PlacementFilter`/`PlacementModifier`/
 //!   `PlacementModifierType`; the `#181` codegen modifier dispatch
-//!   (`placement_get_positions`) stays a STUB
+//!   (`placement_get_positions`) is wired as a faithful type-id dispatch over
+//!   all fifteen registered modifier types (the `PlacementModifierType`
+//!   behavior table itself is still the `#181` generated-table stand-in)
 //! - `levelgen::world_generation_context` — the `WorldGenerationContext`
 //!   minY/height window (the `mc.world.level.levelgen.noise` unit's class; only
 //!   the Paper `level()` accessor defers — RivetTodo #232)
