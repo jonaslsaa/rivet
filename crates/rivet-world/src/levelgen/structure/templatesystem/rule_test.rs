@@ -19,12 +19,12 @@
 //! error reproduce Paper's exactly (see `rule_test_codec` / the by-name codec
 //! below).
 //!
-//! `testAgainstWorldState` reads `level.getBlockState(pos)`. As in
-//! `blockpredicates`, the real world-access is not ported (RivetTodo #399), so
-//! the shell resolves through the [`crate::level::WorldGenLevel::get_block_state`]
-//! seam — the same capability-unavailable boundary: `AlwaysTrueTest` overrides
-//! it to return `true` without touching the level; every other rule test
-//! surfaces the unavailable capability through the seam.
+//! `testAgainstWorldState` reads `level.getBlockState(pos)` — resolved through
+//! the [`crate::level::WorldGenLevel::get_block_state`] seam. The production
+//! `WorldGenRegion` provides a live read (merged `#637`), so a generic rule
+//! test evaluates the level state directly. `AlwaysTrueTest` overrides the
+//! shell to return `true` without touching the level; every other rule test
+//! reads through the seam.
 
 use crate::level::WorldGenLevel;
 use crate::levelgen::structure::templatesystem::always_true_test::AlwaysTrueTest;
@@ -72,14 +72,12 @@ pub trait RuleTest: Any + Debug + Send + Sync + 'static {
     /// `RuleTest.testAgainstWorldState(LevelReader, BlockPos, RandomSource)` —
     /// the Java shell: `this.test(level.getBlockState(pos), random)`.
     ///
-    /// The default impl resolves `getBlockState` through the
-    /// capability-unavailable seam ([`crate::level::WorldGenLevel::get_block_state`],
-    /// RivetTodo #399): no production world provides it yet, so calling through
-    /// panics rather than fabricating a state (the same explicit seam
-    /// `blockpredicates` uses). Like Java, the shell is a trait method so the
-    /// override can dispatch: `AlwaysTrueTest` overrides it to return `true`
-    /// without touching the level; every other rule test surfaces the
-    /// unavailable capability through the seam.
+    /// The default impl resolves `getBlockState` through the live
+    /// [`crate::level::WorldGenLevel::get_block_state`] seam — the production
+    /// `WorldGenRegion` provides a real read (merged `#637`). Like Java, the
+    /// shell is a trait method so the override can dispatch: `AlwaysTrueTest`
+    /// overrides it to return `true` without touching the level; every other
+    /// rule test reads the level state directly.
     fn test_against_world_state<R: RandomSource>(
         &self,
         level: &dyn WorldGenLevel,
@@ -299,9 +297,10 @@ mod tests {
     use rivet_serialization::json_ops::JsonOps;
     use serde_json::json;
 
-    /// A minimal `WorldGenLevel` double whose `get_block_state` is the
-    /// unavailable capability (RivetTodo #399) — it panics, exactly like every
-    /// production `WorldGenLevel` before the real world-access lands.
+    /// A minimal `WorldGenLevel` double whose `get_block_state` always panics —
+    /// a hostile stand-in for a level that cannot answer the read, pinning that
+    /// the default shell propagates the failure rather than fabricating a
+    /// state.
     #[derive(Clone, Copy)]
     struct CapabilityGapLevel;
 
@@ -319,7 +318,7 @@ mod tests {
             0
         }
         fn get_block_state(&self, _pos: &BlockPos) -> BlockState {
-            panic!("WorldGenLevel.getBlockState is not implemented (RivetTodo #399)")
+            panic!("getBlockState unavailable on this test double")
         }
     }
 
@@ -349,10 +348,10 @@ mod tests {
 
     #[test]
     fn test_against_world_state_fails_loudly_when_world_access_unavailable() {
-        // `testAgainstWorldState` resolves `level.getBlockState(pos)` — a
-        // capability no production world provides yet — and must fail loudly
-        // (never fabricate a state). `AlwaysTrueTest` overrides the shell to
-        // avoid the seam; a generic rule test does not.
+        // `testAgainstWorldState` resolves `level.getBlockState(pos)` — on a
+        // double whose read panics the shell must fail loudly, never fabricate
+        // a state. `AlwaysTrueTest` overrides the shell to avoid the read; a
+        // generic rule test does not.
         let t = IdentityTest(RuleTestTypes::BLOCK_TEST);
         let origin = BlockPos::new(0, 0, 0);
         let mut random = rivet_util::random::LegacyRandomSource::new(0);

@@ -49,7 +49,7 @@ impl RuleTest for AlwaysTrueTest {
 
     /// `AlwaysTrueTest.testAgainstWorldState` — overridden to `true` without
     /// touching the level (Java's `@Override`; the only rule test that avoids
-    /// the `getBlockState` seam).
+    /// the world-state read).
     fn test_against_world_state<R: RandomSource>(
         &self,
         _level: &dyn WorldGenLevel,
@@ -80,7 +80,7 @@ mod tests {
         assert!(AlwaysTrueTest::INSTANCE.test(&air, &mut random));
         // Java overrides `testAgainstWorldState` to return true without
         // touching the level — the port's trait override dispatches to that
-        // (the default shell would panic on the capability-gap level).
+        // (a read would panic on the hostile test double).
         assert!(AlwaysTrueTest::INSTANCE.test_against_world_state(
             &capability_gap_level(),
             &BlockPos::ZERO,
@@ -119,7 +119,7 @@ mod tests {
             0
         }
         fn get_block_state(&self, _pos: &BlockPos) -> BlockState {
-            panic!("WorldGenLevel.getBlockState is not implemented (RivetTodo #399)")
+            panic!("getBlockState unavailable on this test double")
         }
     }
 }
