@@ -96,10 +96,10 @@ pub trait RuleTest: Any + Debug + Send + Sync + 'static {
 /// blanket impl, so the concrete leaf units only implement `RuleTest`.
 ///
 /// Erased evaluation is deferred: `test` is not object-safe (`RandomSource` is
-/// `Sized`) and no erased-path dispatch is ported (Java reaches `test` through
-/// the abstract method's polymorphic call; the port's concrete leaf types are
-/// known statically). A consumer holding an `Arc<dyn ErasedRuleTest>` can
-/// re-encode it but must downcast to a concrete `RuleTest` to evaluate it.
+/// `Sized`) and the Java abstract-method polymorphic call has no direct Rust
+/// analogue, so a consumer holding an `Arc<dyn ErasedRuleTest>` re-encodes it
+/// or evaluates it through [`erased_test`] (the downcast dispatch this unit
+/// owns — the concrete leaf types are all in this unit's scope).
 pub trait ErasedRuleTest: Any + Debug + Send + Sync + 'static {
     /// `type()` — the registry-held type identity.
     fn type_id(&self) -> RuleTestTypeId;
@@ -115,6 +115,44 @@ impl<T: RuleTest + ?Sized> ErasedRuleTest for T {
 
     fn as_any(&self) -> &dyn Any {
         RuleTest::as_any(self)
+    }
+}
+
+/// Evaluate an erased rule test — the port's analogue of Java's abstract
+/// `RuleTest.test(BlockState, RandomSource)` polymorphic call through the
+/// erased value.
+///
+/// `test` is not object-safe (`RandomSource` is `Sized`), so the erased
+/// carrier is downcast to its concrete type (the `as_any` seam, safe because
+/// the dispatch codec produced it) and dispatched monomorphically — the same
+/// erased-evaluation pattern `BlockPredicate` implements via `test` on the
+/// `dyn` directly. Every registered Paper type resolves; a value of any other
+/// concrete `RuleTest` is impossible through the dispatch but fails loudly
+/// rather than fabricating a verdict.
+pub fn erased_test<R: RandomSource>(
+    rule: &Arc<dyn ErasedRuleTest>,
+    state: &BlockState,
+    random: &mut R,
+) -> bool {
+    if let Some(t) = rule.as_any().downcast_ref::<AlwaysTrueTest>() {
+        RuleTest::test(t, state, random)
+    } else if let Some(t) = rule.as_any().downcast_ref::<BlockMatchTest>() {
+        RuleTest::test(t, state, random)
+    } else if let Some(t) = rule.as_any().downcast_ref::<BlockStateMatchTest>() {
+        RuleTest::test(t, state, random)
+    } else if let Some(t) = rule.as_any().downcast_ref::<TagMatchTest>() {
+        RuleTest::test(t, state, random)
+    } else if let Some(t) = rule.as_any().downcast_ref::<RandomBlockMatchTest>() {
+        RuleTest::test(t, state, random)
+    } else if let Some(t) = rule.as_any().downcast_ref::<RandomBlockStateMatchTest>() {
+        RuleTest::test(t, state, random)
+    } else {
+        let type_id = <dyn ErasedRuleTest as ErasedRuleTest>::type_id(&**rule);
+        panic!(
+            "cannot evaluate an erased rule test of unknown type (type_id {}): \
+             every registered RuleTest is in templatesystem's dispatch scope",
+            type_id.location
+        )
     }
 }
 
@@ -429,6 +467,88 @@ mod tests {
             .downcast_ref::<BlockStateMatchTest>()
             .expect("decoded blockstate_match");
         assert_eq!(as_bsm.block_state, stone);
+    }
+
+    /// The erased-evaluation dispatch resolves every registered type and
+    /// evaluates the concrete test faithfully: the always_true/block_match/
+    /// blockstate_match/tag_match truth tables, and the short-circuit draw
+    /// order of the two random rule tests (a probability roll happens only on a
+    /// state match — the stream position must match Java's exactly).
+    #[test]
+    fn erased_test_dispatches_concrete_types_and_draws() {
+        use crate::block::Block;
+        use crate::levelgen::structure::templatesystem::block_match_test::BlockMatchTest;
+        use crate::levelgen::structure::templatesystem::random_block_match_test::RandomBlockMatchTest;
+        use crate::levelgen::structure::templatesystem::random_block_state_match_test::RandomBlockStateMatchTest;
+        use crate::levelgen::structure::templatesystem::tag_match_test::TagMatchTest;
+        use rivet_registry::generated::blocks::BlockId;
+        use rivet_util::random::LegacyRandomSource;
+
+        let stone = BlockState::of(BlockId::from_name("minecraft:stone").unwrap());
+        let air = BlockState::of(BlockId::from_name("minecraft:air").unwrap());
+        let stone_block = Block::from_name("minecraft:stone").unwrap();
+
+        let always: Arc<dyn ErasedRuleTest> = Arc::new(AlwaysTrueTest::INSTANCE);
+        assert!(erased_test(&always, &air, &mut LegacyRandomSource::new(0)));
+
+        let bm: Arc<dyn ErasedRuleTest> = Arc::new(BlockMatchTest::new(stone_block));
+        assert!(erased_test(&bm, &stone, &mut LegacyRandomSource::new(0)));
+        assert!(!erased_test(&bm, &air, &mut LegacyRandomSource::new(0)));
+
+        let bsm: Arc<dyn ErasedRuleTest> = Arc::new(BlockStateMatchTest::new(stone));
+        assert!(erased_test(&bsm, &stone, &mut LegacyRandomSource::new(0)));
+        assert!(!erased_test(&bsm, &air, &mut LegacyRandomSource::new(0)));
+
+        // `tag_match` needs a `BlockState` whose `is` consults the tag set.
+        // `Registries.BLOCK` is reconstructed over the port's `Block` handle
+        // (the same `block_registry_key()` pattern tag_match_test uses).
+        let block_registry_key = rivet_registry::ResourceKey::create_registry_key(
+            rivet_registry::Identifier::with_default_namespace("block"),
+        );
+        let tag = rivet_registry::TagKey::<Block>::create(
+            &block_registry_key,
+            rivet_registry::Identifier::parse("minecraft:stone"),
+        );
+        let tm: Arc<dyn ErasedRuleTest> = Arc::new(TagMatchTest::new(tag));
+        assert!(!erased_test(&tm, &air, &mut LegacyRandomSource::new(0)));
+
+        // Draw order: the random rule tests roll `nextFloat()` ONLY on a state
+        // match (Java short-circuit). A non-matching state consumes zero draws;
+        // a matching state consumes one. Pin it against fresh reference streams
+        // so the position after the test pins the exact number of draws.
+        for seed in [1i64, 7, 42] {
+            // Non-match: the stream must be untouched — the next draw after the
+            // test is the seed's first float.
+            let mut non_matching = LegacyRandomSource::new(seed);
+            let rbm: Arc<dyn ErasedRuleTest> =
+                Arc::new(RandomBlockMatchTest::new(stone_block, 0.5));
+            assert!(
+                !erased_test(&rbm, &air, &mut non_matching),
+                "non-matching block short-circuits without a draw"
+            );
+            let mut reference = LegacyRandomSource::new(seed);
+            let first = reference.next_float();
+            assert_eq!(
+                non_matching.next_float(),
+                first,
+                "seed {seed}: non-match consumed no draw"
+            );
+
+            // Match: the probability roll consumes exactly the seed's first
+            // float, so the next draw equals the seed's second float.
+            let mut matching = LegacyRandomSource::new(seed);
+            let rbsm: Arc<dyn ErasedRuleTest> =
+                Arc::new(RandomBlockStateMatchTest::new(stone, 0.5));
+            let _ = erased_test(&rbsm, &stone, &mut matching);
+            let mut reference = LegacyRandomSource::new(seed);
+            let _first = reference.next_float();
+            let second = reference.next_float();
+            assert_eq!(
+                matching.next_float(),
+                second,
+                "seed {seed}: matching state consumed exactly one draw"
+            );
+        }
     }
 
     #[test]
