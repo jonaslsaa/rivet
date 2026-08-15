@@ -87,6 +87,21 @@ JVM and to use `anyhow`/`serde`.
   the anchor counts (63 noises / 66 biome climates / 2 presets, nether 5 points,
   overworld 7594 points). This is the live half of the fixture-pinned
   conformance test in `generate`'s `worldgen.rs` tests.
+- **`extract-feature-data`** — compiles and runs
+  `java/WorldgenFeatureDataExtractor.java` against the real Paper jar, sampling
+  the seed-42 biome source over the committed FEATURES grid's decoration
+  context (chunks 1..6, full Y range) to materialize the reachable biome set,
+  each biome's full `BiomeGenerationSettings` (carvers + per-step placed-feature
+  lists), and the transitive placed/configured feature closure as
+  `RegistryOps`-encoded JSON into `data/feature_data.json` (+ provenance
+  manifest), the seed-42 FEATURES checkpoint data foundation. Self-validates
+  the fresh capture against the same contract the probe enforces.
+- **`probe-feature-data`** — re-runs `WorldgenFeatureDataExtractor` against the
+  real Paper jar and requires byte-identity with the committed
+  `data/feature_data.json` plus the anchor counts (5 reachable biomes / 72
+  placed / 70 configured), the pinned Paper provenance, and non-vacuity (the
+  deep `lush_caves` biome AND a surface biome must be reachable). This is the
+  live half of the fixture-pinned conformance gate for the FEATURES checkpoint.
 - **`reports`** — runs the vanilla `net.minecraft.data.Main --reports` datagen
   against the materialized Paper 26.2 server jar and pins the canonical
   `packets.json` / `registries.json` / `blocks.json` reports (with provenance)
@@ -105,6 +120,8 @@ rivet-codegen extract-block-behaviors [--bundler <path>] [--output <path>]
 rivet-codegen probe-block-behaviors  [--bundler <path>]
 rivet-codegen extract-worldgen [--bundler <path>] [--output <path>]
 rivet-codegen probe-worldgen  [--bundler <path>]
+rivet-codegen extract-feature-data [--bundler <path>] [--output <path>]
+rivet-codegen probe-feature-data  [--bundler <path>]
 rivet-codegen reports    [--jar <path>] [--output <dir>] [--verify]
 ```
 
@@ -130,6 +147,8 @@ target/release/rivet-codegen extract-block-behaviors  # -> data/block_behaviors.
 target/release/rivet-codegen probe-block-behaviors    # verify the per-StateId behavior table against live Paper
 target/release/rivet-codegen extract-worldgen         # -> data/worldgen.json + manifest
 target/release/rivet-codegen probe-worldgen           # verify the worldgen noise/biome/preset data against live Paper
+target/release/rivet-codegen extract-feature-data     # -> data/feature_data.json + manifest
+target/release/rivet-codegen probe-feature-data       # verify the seed-42 feature data against live Paper
 target/release/rivet-codegen reports          # -> data/reports/{packets,registries,blocks}.json + manifest.json
 ```
 
@@ -415,6 +434,41 @@ biome table round-trips, tag elements resolve against the shared tables, the
 tag-registry surface is complete, and the `is_overworld`/`is_nether` biome tags
 (superflat presets) exist. The live `probe-biomes-tags` is the counterpart gate
 that re-derives the fixture from a fresh Paper load.
+
+## Feature data (`data/feature_data.json`)
+
+`extract-feature-data` produces the seed-42 FEATURES checkpoint data foundation
+from a live Paper load (the same `RegistryDataLoader` sequence as the worldgen
+extractor, plus the dimension layer so the composite access binds block tags).
+It materializes:
+
+- `reachable_biomes` — the biome set that can drive FEATURES placement into the
+  committed grid {(3,3),(4,3),(3,4),(4,4)}. Each committed chunk's FEATURES pass
+  reads the biome map of its 3x3 neighborhood, and the writers (radius 1) are
+  chunks 2..5, so the biome read set is chunks 1..6. The biome source is sampled
+  at every quart position and every Y quart (-64..319 blocks) because the depth
+  parameter varies by Y (both surface biomes and the deep `lush_caves` biome
+  appear). Emitted id-sorted. For seed 42 this is exactly 5 biomes: beach,
+  dark_forest, lush_caves, ocean, river.
+- `biomes` — per-biome `BiomeGenerationSettings`: the dense registry `id`, the
+  carver identity names, and the per-step placed-feature name lists. Step `i` is
+  `GenerationStep.Decoration.values()[i]` (raw_generation .. top_layer_
+  modification); holder-set order within a step is the builder's fixed order
+  (part of the decoration semantics — the validator pins the per-step counts).
+- `placed_features` / `configured_features` — the transitive closure of
+  referenced registry entries, keyed by name with the full-registry dense `id`
+  and the full `RegistryOps`-encoded JSON (the exact datapack JSON shape: holder
+  references are bare strings, inline values are nested). The closure starts
+  from the biomes' direct placed features and grows to fixpoint over the
+  configured features' encoded JSON: any bare string that names a placed or
+  configured registry entry is a holder reference (block-state `Name` values are
+  object fields, never bare refs; registry membership disambiguates).
+
+The fixture is self-validating: `extract-feature-data` runs the same contract
+the probe enforces (structure, order, closure, provenance sha256). The validator
+in `src/feature_data.rs` pins the reachable-biome id-sorted order, the per-biome
+step counts, the dense-id uniqueness, the transitive closure (every referenced
+feature present, every present feature reachable), and the manifest provenance.
 
 ## Packet-ID tables (`rivet-protocol`)
 
