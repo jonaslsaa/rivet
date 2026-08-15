@@ -64,10 +64,17 @@
 //! replicated exactly, including the `T: Clone` spelling of Java's reference
 //! copy and the `T: Debug` rendering of the surviving-source list.
 //!
-//! Java catches `IllegalStateException` from the recursive reduction probe
-//! (only the cycle diagnostics are ISEs); the port downcasts the panic payload
-//! (`&str` for a literal panic, `String` for a formatted one) and re-throws
-//! anything that is not a cycle diagnostic, mirroring that narrow catch.
+//! Java's reduction probe catches `IllegalStateException` and treats the
+//! removed source as involved whenever the residual still throws one. The
+//! three ISEs `buildFeaturesPerStep` itself can throw are the two cycle
+//! messages and the "DFS bork" invariant check; the invariant is unreachable
+//! (a DFS iteration only leaves `currentlyVisiting` non-empty when it reports
+//! a back-edge, and the caller always throws before the next iteration), so on
+//! reachable inputs the probe only ever sees `"Feature order cycle found"`. The
+//! port mirrors Java's catch exactly — `is_sorter_ise` accepts all three
+//! messages (as the `&str` literal or formatted `String` panic payload) and
+//! re-throws anything else, matching Java's propagation of non-ISE failures
+//! from the probe.
 
 use crate::levelgen::placement::PlacedFeature;
 use rivet_registry::{Holder, HolderSet, RegistryId};
@@ -260,8 +267,9 @@ where
                             i += 1;
                         }
                         Err(payload) => {
-                            if is_cycle_error(payload.as_ref()) {
-                                // Removal still cycles — the source is
+                            if is_sorter_ise(payload.as_ref()) {
+                                // The residual still threw an ISE (on reachable
+                                // inputs, the cycle diagnostic) — the source is
                                 // involved; it stays removed.
                             } else {
                                 resume_unwind(payload);
@@ -346,17 +354,23 @@ fn depth_first_search(
     false
 }
 
-/// Java's reduction probe catches `IllegalStateException` (the cycle
-/// diagnostics); anything else propagates. Both cycle messages start with this
-/// prefix; the plain cycle panic's payload is a `&str` literal, the
-/// involved-sources one a formatted `String`.
-fn is_cycle_error(payload: &(dyn Any + Send)) -> bool {
+/// Java's reduction probe catches `IllegalStateException` — the three ISEs
+/// `buildFeaturesPerStep` can throw (the two cycle messages and the DFS-bork
+/// invariant) — and treats the removed source as involved whenever the
+/// residual still throws one; anything else propagates. The plain cycle
+/// panic's payload is a `&str` literal, the involved-sources one a formatted
+/// `String`.
+fn is_sorter_ise(payload: &(dyn Any + Send)) -> bool {
     if let Some(message) = payload.downcast_ref::<String>() {
-        return message.starts_with("Feature order cycle found");
+        return message.starts_with("Feature order cycle found")
+            || message.starts_with("You somehow broke the universe; DFS bork");
     }
     payload
         .downcast_ref::<&'static str>()
-        .is_some_and(|message| message.starts_with("Feature order cycle found"))
+        .is_some_and(|message| {
+            message.starts_with("Feature order cycle found")
+                || message.starts_with("You somehow broke the universe; DFS bork")
+        })
 }
 
 #[cfg(test)]
@@ -457,7 +471,7 @@ mod tests {
         // DFS from the sorted keys [(0,0),(0,1),(0,2),(1,2)] visits
         //   (0,0): post-order (1,2),(0,1),(0,0); then (0,2): post-order (0,2);
         //   (0,1) and (1,2) are already discovered.
-        // Reversed: [(0,2),(0,0),(1,0),(2,1)] -> step 0 = [C, A, B], step 1 = [C].
+        // Reversed post-order: [(0,2),(0,0),(0,1),(1,2)] -> step 0 = [C, A, B], step 1 = [C].
         let sources = [
             Source(vec![step(&[feature(0), feature(1)]), step(&[feature(2)])]),
             Source(vec![step(&[feature(2)])]),
