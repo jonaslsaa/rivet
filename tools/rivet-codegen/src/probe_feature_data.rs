@@ -33,8 +33,9 @@ const ANCHORS: &[(&str, u64)] = &[
 
 /// Non-vacuity: the reachable biome set must include the deep `lush_caves`
 /// biome AND at least one surface biome (a fixture that cannot distinguish a
-/// decorated seed-42 chunk from an undecorated one is refused loudly).
-const REQUIRED_BIOMES: &[&str] = &["minecraft:lush_caves", "minecraft:beach"];
+/// decorated seed-42 chunk from an undecorated one is refused loudly). Shared
+/// with the codegen validator so the two halves cannot drift apart.
+const REQUIRED_BIOMES: &[&str] = crate::feature_data::REQUIRED_BIOMES;
 
 pub fn run(bundler_flag: Option<&Path>) -> Result<()> {
     let repo_root = extract::find_repo_root()?;
