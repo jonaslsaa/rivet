@@ -58,7 +58,7 @@ pub mod weighted_state_provider;
 
 pub use block_state_provider::{
     BlockStateProvider, ErasedBlockStateProvider, block_state_provider_codec,
-    block_state_provider_get_state, simple, simple_block,
+    block_state_provider_get_optional_state, block_state_provider_get_state, simple, simple_block,
 };
 pub use block_state_provider_type::{
     BlockStateProviderTypeId, BlockStateProviderTypes, block_state_provider_type_by_name,

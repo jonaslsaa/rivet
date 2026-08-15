@@ -181,10 +181,12 @@ fn rewrite_properties(text: &str, seed: i64) -> Result<String, Error> {
 
 /// Write a seed-customized `server.properties` (the committed
 /// `server-normal.properties` with `level-seed` rewritten and `server-port`
-/// isolated from the shared 25599) into the capture work dir, so a capture can
-/// generate any seed while seed 42 stays byte-identical to the committed config.
+/// isolated from the shared 25599) into the capture work dir `work/<subdir>`,
+/// so a capture can generate any seed while seed 42 stays byte-identical to the
+/// committed config. Each capture kind passes its own subdir so two captures
+/// (e.g. `generated-expected` and `features`) never share a scratch config.
 /// Returns the temp properties path.
-fn seed_properties(seed: i64) -> Result<PathBuf, Error> {
+pub(crate) fn seed_properties(seed: i64, subdir: &str) -> Result<PathBuf, Error> {
     let src = crate::crate_dir().join("fixtures/server-normal.properties");
     let text = fs::read_to_string(&src).map_err(|e| {
         Error::Gate(format!(
@@ -193,7 +195,7 @@ fn seed_properties(seed: i64) -> Result<PathBuf, Error> {
         ))
     })?;
     let rewritten = rewrite_properties(&text, seed)?;
-    let dir = crate::crate_dir().join("work/generated-expected");
+    let dir = crate::crate_dir().join("work").join(subdir);
     fs::create_dir_all(&dir)?;
     let path = dir.join("server.properties");
     fs::write(&path, rewritten)?;
@@ -202,9 +204,10 @@ fn seed_properties(seed: i64) -> Result<PathBuf, Error> {
 
 /// The capture's dedicated run dir — a scratch space isolated from the shared
 /// `work/verify/run` the oracle gates (M0/M2/FULL) boot in, so a capture can
-/// never wipe or be wiped by a concurrent gate run.
-fn capture_run_dir() -> PathBuf {
-    crate::crate_dir().join("work/generated-expected/run")
+/// never wipe or be wiped by a concurrent gate run. Each capture kind passes
+/// its own `work/<subdir>/run` so two captures never share a run dir.
+pub(crate) fn capture_run_dir(subdir: &str) -> PathBuf {
+    crate::crate_dir().join("work").join(subdir).join("run")
 }
 
 /// Confirm the server jar the capture actually booted carries the pinned Paper
@@ -217,7 +220,7 @@ fn capture_run_dir() -> PathBuf {
 /// fabricated provenance (D8). Mirrors the gate's `check_pin`: the source of
 /// truth is the materialized server jar the paperclip produced into the run dir
 /// and the JVM actually loaded.
-fn check_capture_pin(run_dir: &Path) -> Result<(), Error> {
+pub(crate) fn check_capture_pin(run_dir: &Path) -> Result<(), Error> {
     let expected = crate::parse_paper_pin(Some(PINNED_PAPER)).ok_or_else(|| {
         Error::Gate("PINNED_PAPER carries no @<commit> pin to verify the capture against".into())
     })?;
@@ -255,8 +258,8 @@ fn capture_world(seed: i64) -> Result<WorldManifest, Error> {
              RIVET_ORACLE_JAR); UNVERIFIED, never a fabricated manifest"
         ))
     })?;
-    let props = seed_properties(seed)?;
-    let run_dir = capture_run_dir();
+    let props = seed_properties(seed, "generated-expected")?;
+    let run_dir = capture_run_dir("generated-expected");
     // The capture's runtime is self-contained in this dedicated dir: the first
     // boot's `prepare_run_dir` materializes libraries/versions/cache here, and
     // later boots and captures reuse them. We deliberately never symlink/copy
@@ -292,7 +295,12 @@ fn capture_world(seed: i64) -> Result<WorldManifest, Error> {
     // forcing the nether/end is dead work and a spurious failure mode (a
     // nether/end that fails to load its grid must not refuse a valid overworld
     // ground-truth capture).
-    crate::inject_forced_tickets(&run_dir.join("world"), &forced, crate::OVERWORLD_DIM)?;
+    crate::inject_forced_tickets(
+        &run_dir.join("world"),
+        &forced,
+        crate::OVERWORLD_DIM,
+        crate::FORCED_TICKET_LEVEL,
+    )?;
     let capture_log = run_dir.with_file_name("boot-generated.log");
     println!("      [boot2] capturing the forced FULL spawn grid...");
     crate::boot_and_shutdown(&run_dir, &capture_log, &jar)?;
@@ -320,9 +328,10 @@ fn capture_world(seed: i64) -> Result<WorldManifest, Error> {
 /// state. The entities/poi files carry no block content (spawn-limits are 0),
 /// but they are boot1 leftovers that do not participate in the regenerated
 /// chunk state — clearing them keeps the capture's blank chunk state complete.
-/// The generated-expected handoff passes `crate::OVERWORLD_DIM` (it only ever
-/// reads the overworld); the corpus paths pass `TICKET_DIMS`.
-fn clear_region_files(world_dir: &Path, dims: &[(&str, &str)]) -> Result<(), Error> {
+/// The generated-expected handoff and the features checkpoint pass
+/// `crate::OVERWORLD_DIM` (they only ever read the overworld); the corpus paths
+/// pass `TICKET_DIMS`.
+pub(crate) fn clear_region_files(world_dir: &Path, dims: &[(&str, &str)]) -> Result<(), Error> {
     let mut cleared = 0usize;
     for (dim, _) in dims {
         let base = world_dir.join("dimensions/minecraft").join(dim);

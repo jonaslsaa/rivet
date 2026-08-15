@@ -82,10 +82,30 @@ pub mod basalt_pillar_feature;
 pub mod block_blob_feature;
 pub mod block_pile_feature;
 pub mod blue_ice_feature;
+pub mod coral_claw_feature;
+pub mod coral_feature;
+pub mod coral_mushroom_feature;
+pub mod coral_tree_feature;
 pub mod kelp_feature;
 pub mod nether_forest_vegetation_feature;
 pub mod sea_pickle_feature;
 pub mod seagrass_feature;
+
+// The surface-fill feature wave (this unit) — the `AbstractHugeMushroomFeature`
+// abstract base and the ten concrete feature structs that live in this module
+// (`mc.world.level.levelgen.feature.surface-fill-leaves`). Each is owned by its
+// own leaf row and wired into the `#181` dispatch hub at its registration id.
+pub mod abstract_huge_mushroom_feature;
+pub mod basalt_columns_feature;
+pub mod block_column_feature;
+pub mod fill_layer_feature;
+pub mod glowstone_feature;
+pub mod huge_brown_mushroom_feature;
+pub mod huge_red_mushroom_feature;
+pub mod iceberg_feature;
+pub mod simple_block_feature;
+pub mod snow_and_freeze_feature;
+pub mod vines_feature;
 
 // The `net.minecraft.world.level.levelgen.feature.stateproviders` value layer
 // (this unit) — the `BlockStateProvider` hierarchy and its declaration-order
@@ -177,13 +197,18 @@ mod chorus_growth;
 use crate::chunk::chunk_generator::ChunkGenerator;
 use crate::level::WorldGenLevel;
 use crate::levelgen::feature::configurations::BlockBlobConfiguration;
+use crate::levelgen::feature::configurations::BlockColumnConfiguration;
 use crate::levelgen::feature::configurations::BlockPileConfiguration;
+use crate::levelgen::feature::configurations::BlockStateConfiguration;
+use crate::levelgen::feature::configurations::ColumnFeatureConfiguration;
 use crate::levelgen::feature::configurations::CompositeFeatureConfiguration;
 use crate::levelgen::feature::configurations::CountConfiguration;
 use crate::levelgen::feature::configurations::DeltaFeatureConfiguration;
 use crate::levelgen::feature::configurations::DiskConfiguration;
 use crate::levelgen::feature::configurations::FeatureConfiguration;
 use crate::levelgen::feature::configurations::GeodeConfiguration;
+use crate::levelgen::feature::configurations::HugeMushroomFeatureConfiguration;
+use crate::levelgen::feature::configurations::LayerConfiguration;
 use crate::levelgen::feature::configurations::NetherForestVegetationConfig;
 use crate::levelgen::feature::configurations::NoneFeatureConfiguration;
 use crate::levelgen::feature::configurations::OreConfiguration;
@@ -192,6 +217,7 @@ use crate::levelgen::feature::configurations::RandomBooleanFeatureConfiguration;
 use crate::levelgen::feature::configurations::RandomFeatureConfiguration;
 use crate::levelgen::feature::configurations::ReplaceSphereConfiguration;
 use crate::levelgen::feature::configurations::SculkPatchConfiguration;
+use crate::levelgen::feature::configurations::SimpleBlockConfiguration;
 use crate::levelgen::feature::configurations::SpikeConfiguration;
 use crate::levelgen::feature::configurations::SpringConfiguration;
 use crate::levelgen::feature::configurations::WeightedRandomFeatureConfiguration;
@@ -207,15 +233,25 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 pub use bamboo_feature::{BAMBOO, BambooFeature};
+pub use basalt_columns_feature::{BASALT_COLUMNS, BasaltColumnsFeature};
 pub use basalt_pillar_feature::{BASALT_PILLAR, BasaltPillarFeature};
 pub use block_blob_feature::{BLOCK_BLOB, BlockBlobFeature};
+pub use block_column_feature::{BLOCK_COLUMN, BlockColumnFeature};
 pub use block_pile_feature::{BLOCK_PILE, BlockPileFeature};
 pub use blue_ice_feature::{BLUE_ICE, BlueIceFeature};
+pub use coral_claw_feature::{CORAL_CLAW, CoralClawFeature};
+pub use coral_mushroom_feature::{CORAL_MUSHROOM, CoralMushroomFeature};
+pub use coral_tree_feature::{CORAL_TREE, CoralTreeFeature};
 pub use delta_feature::{DELTA, DeltaFeature};
 pub use disk_feature::{DISK, DiskFeature};
 pub use feature_count_tracker::FeatureCountTracker;
 pub use feature_place_context::FeaturePlaceContext;
+pub use fill_layer_feature::{FILL_LAYER, FillLayerFeature};
 pub use geode_feature::{GEODE, GeodeFeature};
+pub use glowstone_feature::{GLOWSTONE_BLOB, GlowstoneFeature};
+pub use huge_brown_mushroom_feature::{HUGE_BROWN_MUSHROOM, HugeBrownMushroomFeature};
+pub use huge_red_mushroom_feature::{HUGE_RED_MUSHROOM, HugeRedMushroomFeature};
+pub use iceberg_feature::{ICEBERG, IcebergFeature};
 pub use kelp_feature::{KELP, KelpFeature};
 pub use lake_feature::{LAKE, LakeFeature};
 pub use nether_forest_vegetation_feature::{
@@ -226,8 +262,11 @@ pub use scattered_ore_feature::{SCATTERED_ORE, ScatteredOreFeature};
 pub use sculk_patch_feature::{SCULK_PATCH, SculkPatchFeature};
 pub use sea_pickle_feature::{SEA_PICKLE, SeaPickleFeature};
 pub use seagrass_feature::{SEAGRASS, SeagrassFeature};
+pub use simple_block_feature::{SIMPLE_BLOCK, SimpleBlockFeature};
+pub use snow_and_freeze_feature::{FREEZE_TOP_LAYER, SnowAndFreezeFeature};
 pub use spike_feature::{SPIKE, SpikeFeature};
 pub use spring_feature::{SPRING, SpringFeature};
+pub use vines_feature::{VINES, VinesFeature};
 
 // The vegetation-family wave (issue #600) — the `.feature.selector` unit's
 // slice that lives in this module: `WeightedPlacedFeature` (owned by
@@ -733,6 +772,62 @@ pub fn feature_place<R: RandomSource>(
                 .expect("void_start_platform feature must carry a NoneFeatureConfiguration");
             VOID_START_PLATFORM.place_with_config(config, level, chunk_generator, random, origin)
         }
+        // The surface-fill feature leaves (this unit,
+        // `mc.world.level.levelgen.feature.surface-fill-leaves`) — each
+        // downcasts to its own config and delegates to `place_with_config`
+        // (the `ensureCanWrite` gate applied here, as Java's
+        // `Feature.place(FC, …)` does).
+        // `Feature.HUGE_RED_MUSHROOM`.
+        10 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<HugeMushroomFeatureConfiguration>()
+                .expect("huge_red_mushroom feature must carry a HugeMushroomFeatureConfiguration");
+            HUGE_RED_MUSHROOM.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.HUGE_BROWN_MUSHROOM`.
+        11 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<HugeMushroomFeatureConfiguration>()
+                .expect(
+                    "huge_brown_mushroom feature must carry a HugeMushroomFeatureConfiguration",
+                );
+            HUGE_BROWN_MUSHROOM.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.GLOWSTONE_BLOB`.
+        13 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<NoneFeatureConfiguration>()
+                .expect("glowstone_blob feature must carry a NoneFeatureConfiguration");
+            GLOWSTONE_BLOB.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.FREEZE_TOP_LAYER`.
+        14 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<NoneFeatureConfiguration>()
+                .expect("freeze_top_layer feature must carry a NoneFeatureConfiguration");
+            FREEZE_TOP_LAYER.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.VINES`.
+        15 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<NoneFeatureConfiguration>()
+                .expect("vines feature must carry a NoneFeatureConfiguration");
+            VINES.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.BLOCK_COLUMN`.
+        16 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<BlockColumnConfiguration>()
+                .expect("block_column feature must carry a BlockColumnConfiguration");
+            BLOCK_COLUMN.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.ICEBERG`.
+        24 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<BlockStateConfiguration>()
+                .expect("iceberg feature must carry a BlockStateConfiguration");
+            ICEBERG.place_with_config(config, level, chunk_generator, random, origin)
+        }
         // `Feature.END_PLATFORM`.
         29 => {
             let config = (config as &dyn Any)
@@ -746,6 +841,48 @@ pub fn feature_place<R: RandomSource>(
                 .downcast_ref::<NoneFeatureConfiguration>()
                 .expect("end_island feature must carry a NoneFeatureConfiguration");
             END_ISLAND.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.CORAL_TREE`.
+        35 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<NoneFeatureConfiguration>()
+                .expect("coral_tree feature must carry a NoneFeatureConfiguration");
+            CORAL_TREE.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.CORAL_MUSHROOM`.
+        36 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<NoneFeatureConfiguration>()
+                .expect("coral_mushroom feature must carry a NoneFeatureConfiguration");
+            CORAL_MUSHROOM.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.CORAL_CLAW`.
+        37 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<NoneFeatureConfiguration>()
+                .expect("coral_claw feature must carry a NoneFeatureConfiguration");
+            CORAL_CLAW.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.SIMPLE_BLOCK`.
+        39 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<SimpleBlockConfiguration>()
+                .expect("simple_block feature must carry a SimpleBlockConfiguration");
+            SIMPLE_BLOCK.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.BASALT_COLUMNS`.
+        45 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<ColumnFeatureConfiguration>()
+                .expect("basalt_columns feature must carry a ColumnFeatureConfiguration");
+            BASALT_COLUMNS.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.FILL_LAYER`.
+        48 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<LayerConfiguration>()
+                .expect("fill_layer feature must carry a LayerConfiguration");
+            FILL_LAYER.place_with_config(config, level, chunk_generator, random, origin)
         }
         // The remaining registered features are generated content emitted
         // by `rivet-codegen`; until then they are unavailable leaves. Failing
