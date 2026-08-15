@@ -93,11 +93,11 @@ pub trait RuleTest: Any + Debug + Send + Sync + 'static {
 /// analogue of Java's `RuleTest` value. Every `RuleTest` implements it via the
 /// blanket impl, so the concrete leaf units only implement `RuleTest`.
 ///
-/// Erased evaluation is deferred: `test` is not object-safe (`RandomSource` is
-/// `Sized`) and the Java abstract-method polymorphic call has no direct Rust
-/// analogue, so a consumer holding an `Arc<dyn ErasedRuleTest>` re-encodes it
-/// or evaluates it through [`erased_test`] (the downcast dispatch this unit
-/// owns — the concrete leaf types are all in this unit's scope).
+/// `test` is not object-safe (`RandomSource` is `Sized`), so the erased value
+/// has no direct analogue of the Java abstract-method polymorphic call; a
+/// consumer holding an `Arc<dyn ErasedRuleTest>` evaluates it through
+/// [`erased_test`] (the downcast dispatch this unit owns — the concrete leaf
+/// types are all in this unit's scope).
 pub trait ErasedRuleTest: Any + Debug + Send + Sync + 'static {
     /// `type()` — the registry-held type identity.
     fn type_id(&self) -> RuleTestTypeId;
