@@ -107,8 +107,10 @@ type SurfaceSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>);
 type CarversSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>);
 /// The `generateFeatures` seam closure type — returns the decoration body's
 /// typed failure (the region-backed neighbor-cache seam defers with #126, so
-/// the body fails `GenError::FeaturePlacementDecode` at its first real
-/// placed-feature value decode instead of panicking or silently skipping).
+/// the body fails typed instead of panicking or silently skipping — for
+/// seed-42 `GenError::SettingsNotGenerated` at the full source list's first
+/// unresolvable biome, and `GenError::FeaturePlacementDecode` at the first
+/// real placed-feature value decode once settings resolve).
 type FeaturesSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenError>;
 
 /// `WorldGenContext` (value-layer seam shape) — the caller-supplied BIOMES,
@@ -146,8 +148,10 @@ where
     /// is caller-supplied). The seam's ordering guard is what keeps this from
     /// running before CARVERS (the decoration bodies consume the CARVERS-
     /// produced block data). The closure returns the body's typed failure —
-    /// [`GenError::FeaturePlacementDecode`] at the first real placed-feature
-    /// value decode (#126) — instead of panicking.
+    /// for seed-42 [`GenError::SettingsNotGenerated`] at the full source
+    /// list's first unresolvable biome, and [`GenError::FeaturePlacementDecode`]
+    /// at the first real placed-feature value decode (#126) once settings
+    /// resolve — instead of panicking.
     features: Box<FeaturesSeam<T, B, S>>,
     /// The `ThreadedLevelLightEngine` the INITIALIZE_LIGHT/LIGHT tasks store and
     /// route through (Java's `context.lightEngine()`). The facade holds the
@@ -221,6 +225,21 @@ pub enum GenError {
         /// e.g. `minecraft:lake_lava_underground`).
         feature_key: &'static str,
     },
+    /// The `FEATURES` body could not resolve a possible biome's
+    /// `BiomeGenerationSettings` while building the decoration FeatureSorter.
+    /// Paper builds the sorter once from the FULL `biomeSource.possibleBiomes()`
+    /// list (`ChunkGenerator.java` 97-100) and never fails (every possible
+    /// biome has real settings); Rivet's generated feature tables are scoped to
+    /// the reachable seed-42 biomes, so a full overworld source list cannot
+    /// resolve — it fails typed here at the first missing biome in source order
+    /// (seed-42: `minecraft:mushroom_fields`, the source's first possible
+    /// biome) instead of panicking through the phf index or fabricating/
+    /// skipping the biome. No decoration runs; the chunk stays CARVERS.
+    SettingsNotGenerated {
+        /// The possible biome whose generation settings are missing (`None`
+        /// when the biome's dense id is not in `BIOME_BY_ID` at all).
+        biome: Option<&'static str>,
+    },
     /// A wired generation task is installed at a rung it does not own —
     /// `GenerateBiomes` away from `BIOMES`, `GenerateNoise` away from `NOISE`.
     /// Only a malformed crate-internal pyramid can produce this: dispatching it
@@ -266,6 +285,18 @@ impl std::fmt::Display for GenError {
                  its placed-feature value decode is unavailable (RivetTodo #126)",
                 feature_key, chunk_pos, step_index, global_feature_index
             ),
+            GenError::SettingsNotGenerated { biome } => match biome {
+                Some(biome) => write!(
+                    f,
+                    "cannot build the decoration FeatureSorter: the possible biome {biome} \
+                     has no generated generation settings (RivetTodo #126)"
+                ),
+                None => write!(
+                    f,
+                    "cannot build the decoration FeatureSorter: a possible biome's dense id \
+                     is not in the generated biome table (RivetTodo #126)"
+                ),
+            },
             GenError::DataNotCarried { status } => write!(
                 f,
                 "cannot label the chunk {status:?}: a pass-through step cannot fabricate that data"
