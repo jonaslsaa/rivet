@@ -54,8 +54,10 @@ use std::sync::Arc;
 /// `instanceof MultifaceSpreadeableBlock`; the port models the marker as the
 /// set of blocks whose concrete class extends it (`glow_lichen`, `sculk_vein`),
 /// matched by their stable registry NAMES (name-based matching is robust to
-/// registry reordering, unlike a raw id set).
-fn is_multiface_spreadeable(block: Block) -> bool {
+/// registry reordering, unlike a raw id set). The same predicate is the
+/// `config.placeBlock instanceof MultifaceSpreadeableBlock` gate
+/// `MultifaceGrowthFeature.place` applies before any growth.
+pub(crate) fn is_multiface_spreadeable(block: Block) -> bool {
     matches!(
         block.name(),
         "minecraft:glow_lichen" | "minecraft:sculk_vein"
