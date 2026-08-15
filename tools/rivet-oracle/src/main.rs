@@ -1361,7 +1361,7 @@ fn inject_manifest_metadata(
 /// its serialized payload is content-deterministic. Level 31 (`ENTITY_TICKING`)
 /// would tick the chunk and serialize nondeterministic entity state into the
 /// payloads — the forced FULL capture must stay at 33.
-const FORCED_TICKET_LEVEL: i32 = 33;
+pub(crate) const FORCED_TICKET_LEVEL: i32 = 33;
 /// `ticks_left = Long.MIN_VALUE` — a forced ticket never counts down, so it
 /// holds the chunk persistent for the whole boot.
 const FORCED_TICKET_TICKS_LEFT: i64 = i64::MIN;
@@ -1398,20 +1398,24 @@ const OVERWORLD_DIM: &[(&str, &str)] = &[("overworld", "dimensions/minecraft/ove
 ///
 /// Written between boot1 (world create) and boot2 (capture) so boot2 loads
 /// `coords.len()` persistent chunks per dimension and finishes every forced
-/// coordinate to `minecraft:full` — the forced generation that a spawn boot
-/// never reaches (issue #51 for the corpus; the generated-expected handoff
-/// forces its spawn-area grid the same way).
+/// coordinate to the status whose chunk level is `level` — the forced generation
+/// that a spawn boot never reaches (issue #51 for the corpus; the
+/// generated-expected handoff and the seed-42 light checkpoint both force at
+/// `FORCED_TICKET_LEVEL` 33 → `minecraft:full`, the serialization ceiling of the
+/// forced path; a higher ticket level is `INACCESSIBLE` to `fullStatus` and
+/// loads nothing).
 fn inject_forced_tickets(
     world_dir: &Path,
     coords: &[(i32, i32)],
     dims: &[(&str, &str)],
+    level: i32,
 ) -> Result<(), Error> {
     let mut tickets = Vec::new();
     for (cx, cz) in coords {
         let mut ticket = CompoundTag::new();
         ticket.put_string("type", "minecraft:forced");
         ticket.put_int_array("chunk_pos", vec![*cx, *cz]);
-        ticket.put_int("level", FORCED_TICKET_LEVEL);
+        ticket.put_int("level", level);
         ticket.put_long("ticks_left", FORCED_TICKET_TICKS_LEFT);
         tickets.push(Tag::Compound(ticket));
     }
@@ -1437,7 +1441,7 @@ fn inject_forced_tickets(
         })?;
     }
     println!(
-        "      injected level-{FORCED_TICKET_LEVEL} forced tickets for {} coordinates x {} dimensions",
+        "      injected level-{level} forced tickets for {} coordinates x {} dimensions",
         coords.len(),
         dims.len()
     );
@@ -1641,6 +1645,7 @@ fn full_forced_extraction(
         &run_dir.join("world"),
         crate::corpus::COORDINATES,
         TICKET_DIMS,
+        FORCED_TICKET_LEVEL,
     )?;
     println!("      [boot2] capturing the forced FULL chunks...");
     boot_and_shutdown(run_dir, &capture_log, jar)?;
