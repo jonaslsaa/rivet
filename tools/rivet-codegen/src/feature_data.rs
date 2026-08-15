@@ -202,7 +202,7 @@ fn validate_structural(root: &Value) -> Result<()> {
                 let placed = v.as_str().with_context(|| {
                     format!("biome `{name}` step {i} element {j} is not a string")
                 })?;
-                crate::registries::validate_name("minecraft:placed_feature", placed)?;
+                crate::registries::validate_name("minecraft:worldgen/placed_feature", placed)?;
             }
         }
     }
@@ -363,9 +363,9 @@ fn validate_feature_table<'a>(
         .and_then(Value::as_object)
         .with_context(|| format!("feature_data.json is missing `{field}`"))?;
     let registry = if field == "placed_features" {
-        "minecraft:placed_feature"
+        "minecraft:worldgen/placed_feature"
     } else {
-        "minecraft:configured_feature"
+        "minecraft:worldgen/configured_feature"
     };
     let mut ids: Vec<u16> = Vec::with_capacity(table.len());
     for (name, entry) in table {
