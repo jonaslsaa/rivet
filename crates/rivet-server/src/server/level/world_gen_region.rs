@@ -65,7 +65,7 @@
 //! the same cached-chunk-first read. `getBiomeManager` still exposes the
 //! uncached source-backed manager for callers that need the standalone value.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use rivet_nbt::compound_tag::CompoundTag;
@@ -147,42 +147,29 @@ fn is_dummy_block_entity(tag: &CompoundTag) -> bool {
 }
 
 /// Decode the stored `SpawnData` compound through the partial shape of
-/// `SpawnData.CODEC`. The required `entity` field must be a compound; a
-/// malformed optional field is dropped from the retained partial value. The
-/// record constructor also canonicalizes a valid id and removes an absent or
-/// malformed one.
+/// `SpawnData.CODEC`. The required `entity` field must be a compound; malformed
+/// optional fields are dropped from the retained partial value, unknown
+/// top-level fields are dropped on re-encode, and valid equipment map entries
+/// survive malformed siblings. The record constructor also canonicalizes a
+/// valid id and removes an absent or malformed one.
 fn decode_spawn_data(spawn_data: &CompoundTag) -> Option<CompoundTag> {
-    if !matches!(spawn_data.get("entity"), Some(Tag::Compound(_))) {
-        return None;
+    let entity = spawn_data.get_compound("entity")?.clone();
+    let mut decoded = CompoundTag::new();
+    decoded.put("entity".to_string(), Tag::Compound(entity));
+    if let Some(value) = spawn_data.get("custom_spawn_rules")
+        && let Tag::Compound(rules) = value
+        && let Ok(normalized) = normalize_custom_spawn_rules(rules)
+    {
+        decoded.put("custom_spawn_rules".to_string(), Tag::Compound(normalized));
     }
-    let mut decoded = spawn_data.clone();
-    for field in ["custom_spawn_rules", "equipment"] {
-        if decoded
-            .tags
-            .get(field)
-            .is_some_and(|value| !matches!(value, Tag::Compound(_)))
-        {
-            decoded.remove(field);
-        }
-    }
-    if let Some(Tag::Compound(rules)) = decoded.tags.get_mut("custom_spawn_rules") {
-        match normalize_custom_spawn_rules(rules) {
-            Ok(normalized) => *rules = normalized,
-            Err(()) => {
-                decoded.remove("custom_spawn_rules");
-            }
-        }
-    }
-    if let Some(Tag::Compound(equipment)) = decoded.tags.get_mut("equipment") {
-        let normalized = normalize_equipment(equipment);
-        if let Some(normalized) = normalized {
-            *equipment = normalized;
-        } else {
-            decoded.remove("equipment");
-        }
+    if let Some(value) = spawn_data.get("equipment")
+        && let Tag::Compound(equipment) = value
+        && let Some(normalized) = normalize_equipment(equipment)
+    {
+        decoded.put("equipment".to_string(), Tag::Compound(normalized));
     }
     let Some(Tag::Compound(entity)) = decoded.tags.get_mut("entity") else {
-        unreachable!("entity was checked above")
+        unreachable!("entity was cloned above")
     };
     match entity.get_string("id") {
         Some(id) => match Identifier::try_parse_result(id) {
@@ -275,9 +262,11 @@ fn normalize_slot_drop_chances(value: &Tag) -> Result<Option<Tag>, ()> {
     let mut values = Vec::with_capacity(chances.size());
     for (slot, chance) in chances.entry_set() {
         if !SLOTS.contains(&slot.as_str()) {
-            return Err(());
+            continue;
         }
-        let chance = chance.as_float().ok_or(())?;
+        let Some(chance) = chance.as_float() else {
+            continue;
+        };
         values.push(chance);
         normalized.put(slot.clone(), Tag::Float(FloatTag::value_of(chance)));
     }
@@ -340,10 +329,12 @@ fn decode_spawn_potentials_state(tag: &CompoundTag) -> SpawnPotentialsDecode {
 }
 
 fn decode_spawn_potentials(tag: &CompoundTag) -> Vec<(String, i32)> {
-    match decode_spawn_potentials_state(tag) {
+    let potentials = match decode_spawn_potentials_state(tag) {
         SpawnPotentialsDecode::MissingOrInvalid => Vec::new(),
         SpawnPotentialsDecode::Present(potentials) => potentials,
-    }
+    };
+    spawn_potential_total(&potentials);
+    potentials
 }
 
 fn selected_spawn_potential(tag: &CompoundTag, mut roll: i32) -> Option<CompoundTag> {
@@ -593,6 +584,10 @@ where
     /// region map is only a typed query cache; dropping the region must not
     /// drop the chunk's DUMMY/materialized payload.
     block_entity_nbts: HashMap<BlockPos, CompoundTag>,
+    /// Positions whose pending block entity has been promoted to a live entity.
+    /// A fresh Proto block-entity write has only DUMMY NBT, which Paper replaces
+    /// on a same-block write until a live entity mutator has run.
+    live_block_entities: HashSet<BlockPos>,
 }
 
 impl<'a, T, B, S> WorldGenRegion<'a, T, B, S>
@@ -645,6 +640,7 @@ where
             next_sub_tick_order: 0,
             block_entities: HashMap::new(),
             block_entity_nbts: HashMap::new(),
+            live_block_entities: HashSet::new(),
         }
     }
 
@@ -991,20 +987,21 @@ impl WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
         let same_block = old_state.block() == state.block();
         if state.block() != Blocks::CHEST.id() && state.block() != Blocks::SPAWNER.id() {
             self.block_entities.remove(pos);
+            self.live_block_entities.remove(pos);
             self.remove_persisted_block_entity(pos);
             return;
         }
+        let live_entity = same_block && self.live_block_entities.contains(pos);
         if !same_block {
             self.block_entities.remove(pos);
+            self.live_block_entities.remove(pos);
             self.remove_persisted_block_entity(pos);
         }
-        let existing_tag = self.existing_block_entity_nbt(pos);
-        let tag = if state.block() == Blocks::SPAWNER.id()
-            && existing_tag.as_ref().is_some_and(is_dummy_block_entity)
-        {
-            dummy_block_entity(pos)
+        let tag = if live_entity {
+            self.existing_block_entity_nbt(pos)
+                .unwrap_or_else(|| dummy_block_entity(pos))
         } else {
-            existing_tag.unwrap_or_else(|| dummy_block_entity(pos))
+            dummy_block_entity(pos)
         };
         self.block_entity_nbts.insert(*pos, tag.clone());
         if state.block() == Blocks::CHEST.id() {
@@ -1225,6 +1222,7 @@ impl WorldGenLevel for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> 
             tag.put_string("LootTable", loot_table);
             tag.put_long("LootTableSeed", seed);
             self.persist_block_entity_nbt(pos, tag);
+            self.live_block_entities.insert(*pos);
         }
     }
 
@@ -1309,6 +1307,7 @@ impl WorldGenLevel for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> 
             .put_string("id", entity_id);
         tag.put("SpawnPotentials".to_string(), Tag::List(ListTag::new()));
         self.persist_block_entity_nbt(pos, tag);
+        self.live_block_entities.insert(*pos);
     }
 
     /// `ChunkAccess.markPosForPostProcessing(BlockPos)` — Java's private
@@ -1400,20 +1399,21 @@ impl WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
         let same_block = old_state.block() == state.block();
         if state.block() != Blocks::CHEST.id() && state.block() != Blocks::SPAWNER.id() {
             self.block_entities.remove(pos);
+            self.live_block_entities.remove(pos);
             self.remove_persisted_block_entity(pos);
             return;
         }
+        let live_entity = same_block && self.live_block_entities.contains(pos);
         if !same_block {
             self.block_entities.remove(pos);
+            self.live_block_entities.remove(pos);
             self.remove_persisted_block_entity(pos);
         }
-        let existing_tag = self.existing_block_entity_nbt(pos);
-        let tag = if state.block() == Blocks::SPAWNER.id()
-            && existing_tag.as_ref().is_some_and(is_dummy_block_entity)
-        {
-            dummy_block_entity(pos)
+        let tag = if live_entity {
+            self.existing_block_entity_nbt(pos)
+                .unwrap_or_else(|| dummy_block_entity(pos))
         } else {
-            existing_tag.unwrap_or_else(|| dummy_block_entity(pos))
+            dummy_block_entity(pos)
         };
         self.block_entity_nbts.insert(*pos, tag.clone());
         if state.block() == Blocks::CHEST.id() {
@@ -1577,6 +1577,7 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
             tag.put_string("LootTable", loot_table);
             tag.put_long("LootTableSeed", seed);
             self.persist_block_entity_nbt(pos, tag);
+            self.live_block_entities.insert(*pos);
         }
     }
 
@@ -1661,6 +1662,7 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
             .put_string("id", entity_id);
         tag.put("SpawnPotentials".to_string(), Tag::List(ListTag::new()));
         self.persist_block_entity_nbt(pos, tag);
+        self.live_block_entities.insert(*pos);
     }
 
     /// `ChunkAccess.markPosForPostProcessing(BlockPos)` — the chunk-access hop
@@ -2930,6 +2932,107 @@ mod tests {
     }
 
     #[test]
+    fn same_block_pending_proto_entities_are_replaced_but_live_entities_are_preserved() {
+        let mut region = feature_region();
+        let chest_pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(
+            &chest_pos,
+            Blocks::CHEST.default_block_state(),
+            UPDATE_ALL,
+            0
+        ));
+        let mut pending_chest = dummy_block_entity(&chest_pos);
+        pending_chest.put_string("id", "minecraft:chest");
+        pending_chest.put_string("LootTable", "minecraft:stale");
+        region.persist_block_entity_nbt(&chest_pos, pending_chest);
+        region.materialize_block_entity(
+            &chest_pos,
+            Blocks::CHEST.default_block_state(),
+            Blocks::CHEST.default_block_state(),
+        );
+        let replaced_chest = region
+            .existing_block_entity_nbt(&chest_pos)
+            .expect("fresh chest payload");
+        assert_eq!(
+            replaced_chest.get_string("id").map(String::as_str),
+            Some("DUMMY")
+        );
+        assert!(replaced_chest.get("LootTable").is_none());
+
+        <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_block_entity_loot_table(
+            &mut region,
+            &chest_pos,
+            7,
+            "minecraft:live",
+        );
+        region.materialize_block_entity(
+            &chest_pos,
+            Blocks::CHEST.default_block_state(),
+            Blocks::CHEST.default_block_state(),
+        );
+        let preserved_chest = region
+            .existing_block_entity_nbt(&chest_pos)
+            .expect("live chest payload");
+        assert_eq!(
+            preserved_chest.get_string("LootTable").map(String::as_str),
+            Some("minecraft:live")
+        );
+
+        let spawner_pos = BlockPos::new(1, 64, 0);
+        assert!(region.set_block(
+            &spawner_pos,
+            Blocks::SPAWNER.default_block_state(),
+            UPDATE_ALL,
+            0,
+        ));
+        let mut pending_spawner = dummy_block_entity(&spawner_pos);
+        pending_spawner.put_string("id", "minecraft:mob_spawner");
+        let mut spawn_data = CompoundTag::new();
+        spawn_data.put("entity".to_string(), Tag::Compound(CompoundTag::new()));
+        pending_spawner.put("SpawnData".to_string(), Tag::Compound(spawn_data));
+        region.persist_block_entity_nbt(&spawner_pos, pending_spawner);
+        region.materialize_block_entity(
+            &spawner_pos,
+            Blocks::SPAWNER.default_block_state(),
+            Blocks::SPAWNER.default_block_state(),
+        );
+        let replaced_spawner = region
+            .existing_block_entity_nbt(&spawner_pos)
+            .expect("fresh spawner payload");
+        assert_eq!(
+            replaced_spawner.get_string("id").map(String::as_str),
+            Some("DUMMY")
+        );
+        assert!(replaced_spawner.get("SpawnData").is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "Sum of weights must be <= 2147483647")]
+    fn spawn_potential_overflow_is_rejected_during_region_materialization() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+        region.live_block_entities.insert(pos);
+        let mut tag = dummy_block_entity(&pos);
+        let mut potentials = ListTag::new();
+        for weight in [i32::MAX, 1] {
+            let mut potential = CompoundTag::new();
+            potential.put_int("weight", weight);
+            let mut data = CompoundTag::new();
+            data.put("entity".to_string(), Tag::Compound(CompoundTag::new()));
+            potential.put("data".to_string(), Tag::Compound(data));
+            potentials.list.push(Tag::Compound(potential));
+        }
+        tag.put("SpawnPotentials".to_string(), Tag::List(potentials));
+        region.persist_block_entity_nbt(&pos, tag);
+        region.materialize_block_entity(
+            &pos,
+            Blocks::SPAWNER.default_block_state(),
+            Blocks::SPAWNER.default_block_state(),
+        );
+    }
+
+    #[test]
     fn missing_or_wrong_typed_potentials_use_paper_weight_one_fallback() {
         for wrong_typed_potentials in [false, true] {
             let mut region = feature_region();
@@ -2970,6 +3073,7 @@ mod tests {
         data.put("entity".to_string(), Tag::Compound(entity));
         data.put_int("custom_spawn_rules", 1);
         data.put_string("equipment", "malformed");
+        data.put_int("unknown_spawn_data_field", 9);
         tag.put("SpawnData".to_string(), Tag::Compound(data));
         let mut potentials = ListTag::new();
         let mut potential = CompoundTag::new();
@@ -3018,6 +3122,7 @@ mod tests {
         assert!(saved_data.get("custom_spawn_rules").is_none());
         assert!(saved_data.get("equipment").is_none());
         assert_eq!(saved_data.get_int("selected_field"), None);
+        assert_eq!(saved_data.get_int("unknown_spawn_data_field"), None);
         assert_eq!(
             saved_data
                 .get_compound("entity")
@@ -3069,6 +3174,45 @@ mod tests {
             Some(&CompoundTag::new())
         );
         assert!(saved_data.get("equipment").is_none());
+    }
+
+    #[test]
+    fn spawner_equipment_keeps_valid_partial_slot_drop_chances() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+
+        let mut tag = dummy_block_entity(&pos);
+        let mut data = CompoundTag::new();
+        data.put("entity".to_string(), Tag::Compound(CompoundTag::new()));
+        let mut equipment = CompoundTag::new();
+        equipment.put_string("loot_table", "minecraft:chest");
+        let mut chances = CompoundTag::new();
+        chances.put_float("mainhand", 0.5);
+        chances.put_string("offhand", "malformed");
+        chances.put_float("bogus", 0.75);
+        equipment.put("slot_drop_chances".to_string(), Tag::Compound(chances));
+        data.put("equipment".to_string(), Tag::Compound(equipment));
+        tag.put("SpawnData".to_string(), Tag::Compound(data));
+        region.persist_block_entity_nbt(&pos, tag);
+
+        <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &pos,
+            "minecraft:zombie",
+            None,
+        );
+        let saved_data = region
+            .existing_block_entity_nbt(&pos)
+            .and_then(|tag| tag.get_compound("SpawnData").cloned())
+            .expect("SpawnData retained");
+        let chances = saved_data
+            .get_compound("equipment")
+            .and_then(|equipment| equipment.get_compound("slot_drop_chances"))
+            .expect("valid partial chance map retained");
+        assert_eq!(chances.get_float("mainhand"), Some(0.5));
+        assert!(chances.get("offhand").is_none());
+        assert!(chances.get("bogus").is_none());
     }
 
     #[test]
@@ -3130,7 +3274,8 @@ mod tests {
                 .get_compound("SpawnData")
                 .unwrap()
                 .get_int("selected_field"),
-            Some(11)
+            None,
+            "SpawnData.CODEC drops unknown top-level fields during re-encode"
         );
     }
 
