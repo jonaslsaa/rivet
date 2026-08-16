@@ -983,8 +983,9 @@ where
         }) = self.block_entities.get_mut(pos)
         {
             if let Some(mut roll) = potential_roll {
-                for (_, weight) in spawn_potentials.iter() {
+                for (potential_id, weight) in spawn_potentials.iter() {
                     if roll < *weight {
+                        *next_spawn = Some(potential_id.clone());
                         break;
                     }
                     roll -= *weight;
@@ -1089,8 +1090,9 @@ impl WorldGenLevel for WorldGenRegion<'static, StateId, ServerBiomeId, Structure
         }) = self.block_entities.get_mut(pos)
         {
             if let Some(mut roll) = potential_roll {
-                for (_, weight) in spawn_potentials.iter() {
+                for (potential_id, weight) in spawn_potentials.iter() {
                     if roll < *weight {
+                        *next_spawn = Some(potential_id.clone());
                         break;
                     }
                     roll -= *weight;
