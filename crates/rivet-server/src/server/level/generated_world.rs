@@ -1658,6 +1658,21 @@ mod tests {
         }
     }
 
+    /// The shared generic write gate applies to the FEATURES region that borrows
+    /// the center chunk, not only to the dense server specialization.
+    #[test]
+    fn feature_region_rejects_writes_outside_its_radius() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::new(0, 0));
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+
+        let region = compose_feature_region(&mut holder.chunk, &generator);
+        assert!(region.ensure_can_write(&BlockPos::new(0, 64, 0)));
+        assert!(!region.ensure_can_write(&BlockPos::new(32, 64, 0)));
+    }
+
     /// The seed-42 origin 3x3 biome union — the exact set the seed-42 (0,0)
     /// chunk decorates with — is `{minecraft:beach, minecraft:dark_forest,
     /// minecraft:lush_caves, minecraft:river}` (the pinned union from the live
