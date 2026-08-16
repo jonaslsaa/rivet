@@ -222,25 +222,44 @@ impl NegativeKind {
 /// readable evidence report. With no `--out`, the report is retained under the
 /// ignored oracle work directory.
 pub fn run_cli(args: &[&str]) -> Result<(), Error> {
-    let mut fixture_root = crate::crate_dir().join("fixtures");
-    let mut output = crate::crate_dir().join("work/anvil-roundtrip-v1a");
+    if matches!(args, ["--help"] | ["-h"]) {
+        println!(
+            "usage: cargo run -p rivet-oracle -- anvil-roundtrip-v1a [fixtures] [--out <dir>]"
+        );
+        println!("  exits 0=PASS, 1=FAIL, 3=UNVERIFIED (missing external source evidence)");
+        return Ok(());
+    }
+    let parsed = parse_cli(args)?;
+    run_roundtrip(&parsed.fixture_root, &parsed.output)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CliArgs {
+    fixture_root: PathBuf,
+    output: PathBuf,
+}
+
+fn parse_cli(args: &[&str]) -> Result<CliArgs, Error> {
+    let default_fixture_root = crate::crate_dir().join("fixtures");
+    let default_output = crate::crate_dir().join("work/anvil-roundtrip-v1a");
+    let mut fixture_root = None;
+    let mut output = None;
     let mut i = 0;
     while i < args.len() {
         match args[i] {
-            "--help" | "-h" if args.len() == 1 => {
-                println!(
-                    "usage: cargo run -p rivet-oracle -- anvil-roundtrip-v1a [fixtures] [--out <dir>]"
-                );
-                println!("  exits 0=PASS, 1=FAIL, 3=UNVERIFIED (missing external source evidence)");
-                return Ok(());
-            }
             "--out" => {
                 let Some(path) = args.get(i + 1) else {
                     return Err(Error::Gate(
                         "anvil-roundtrip-v1a --out requires a destination directory".into(),
                     ));
                 };
-                output = PathBuf::from(path);
+                if path.starts_with('-') {
+                    return Err(Error::Gate(
+                        "anvil-roundtrip-v1a --out requires a destination directory, not an option"
+                            .into(),
+                    ));
+                }
+                output = Some(PathBuf::from(path));
                 i += 2;
             }
             value if value.starts_with('-') => {
@@ -249,18 +268,20 @@ pub fn run_cli(args: &[&str]) -> Result<(), Error> {
                 )));
             }
             value => {
-                if fixture_root != crate::crate_dir().join("fixtures") {
+                if fixture_root.is_some() {
                     return Err(Error::Gate(
                         "anvil-roundtrip-v1a accepts only one fixture directory".into(),
                     ));
                 }
-                fixture_root = PathBuf::from(value);
+                fixture_root = Some(PathBuf::from(value));
                 i += 1;
             }
         }
     }
-
-    run_roundtrip(&fixture_root, &output)
+    Ok(CliArgs {
+        fixture_root: fixture_root.unwrap_or(default_fixture_root),
+        output: output.unwrap_or(default_output),
+    })
 }
 
 fn run_roundtrip(fixture_root: &Path, output: &Path) -> Result<(), Error> {
@@ -1850,6 +1871,81 @@ mod tests {
     fn coordinate_parser_accepts_negative_values() {
         assert_eq!(parse_coordinate("-31.0").unwrap(), (-31, 0));
         assert_eq!(parse_region_filename("r.-1.2.mca"), Some((-1, 2)));
+    }
+
+    #[test]
+    fn cli_parser_accepts_zero_or_one_fixture_root_before_or_after_flags() {
+        let default_fixture_root = crate::crate_dir().join("fixtures");
+        let default_output = crate::crate_dir().join("work/anvil-roundtrip-v1a");
+        assert_eq!(
+            parse_cli(&[]).expect("defaults parse"),
+            CliArgs {
+                fixture_root: default_fixture_root.clone(),
+                output: default_output.clone(),
+            }
+        );
+
+        let custom_fixture_root = PathBuf::from("/tmp/custom-fixtures");
+        let custom_output = PathBuf::from("/tmp/custom-output");
+        assert_eq!(
+            parse_cli(&[
+                custom_fixture_root.to_str().unwrap(),
+                "--out",
+                custom_output.to_str().unwrap()
+            ])
+            .expect("fixture root before flag parses"),
+            CliArgs {
+                fixture_root: custom_fixture_root.clone(),
+                output: custom_output.clone(),
+            }
+        );
+        assert_eq!(
+            parse_cli(&[
+                "--out",
+                custom_output.to_str().unwrap(),
+                custom_fixture_root.to_str().unwrap()
+            ])
+            .expect("fixture root after flag parses"),
+            CliArgs {
+                fixture_root: custom_fixture_root,
+                output: custom_output,
+            }
+        );
+    }
+
+    #[test]
+    fn cli_parser_rejects_duplicate_default_and_custom_fixture_roots() {
+        let default_fixture_root = crate::crate_dir().join("fixtures");
+        let default_fixture_root = default_fixture_root.to_str().unwrap();
+        let error = parse_cli(&[default_fixture_root, default_fixture_root])
+            .expect_err("duplicate default fixture root must be rejected");
+        assert!(
+            matches!(error, Error::Gate(message) if message.contains("only one fixture directory"))
+        );
+
+        let custom_fixture_root = "/tmp/custom-fixtures";
+        let error = parse_cli(&[custom_fixture_root, custom_fixture_root])
+            .expect_err("duplicate custom fixture root must be rejected");
+        assert!(
+            matches!(error, Error::Gate(message) if message.contains("only one fixture directory"))
+        );
+    }
+
+    #[test]
+    fn cli_parser_rejects_unknown_flags_and_missing_output_values() {
+        let error = parse_cli(&["--unknown"]).expect_err("unknown flags must be rejected");
+        assert!(
+            matches!(error, Error::Gate(message) if message.contains("unknown anvil-roundtrip-v1a option"))
+        );
+
+        let error = parse_cli(&["--out"]).expect_err("missing output value must be rejected");
+        assert!(
+            matches!(error, Error::Gate(message) if message.contains("requires a destination directory"))
+        );
+
+        let error = parse_cli(&["--out", "--unknown"])
+            .expect_err("flag used as output value must be rejected");
+        assert!(matches!(error, Error::Gate(message) if message.contains("not an option")));
     }
 
     #[test]

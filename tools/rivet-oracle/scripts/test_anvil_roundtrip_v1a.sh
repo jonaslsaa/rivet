@@ -40,6 +40,27 @@ expect_rc_unchanged() {
   fi
 }
 
+expect_rc_source_output_unchanged() {
+  local expected=$1
+  local source_root=$2
+  local output_root=$3
+  shift 3
+  local source_before source_after output_before output_after
+  source_before=$(inventory "$source_root")
+  output_before=$(inventory "$output_root")
+  expect_rc "$expected" "$@"
+  source_after=$(inventory "$source_root")
+  output_after=$(inventory "$output_root")
+  if [ "$source_before" != "$source_after" ]; then
+    printf 'source inventory changed for %s\n' "$source_root" >&2
+    exit 1
+  fi
+  if [ "$output_before" != "$output_after" ]; then
+    printf 'output inventory changed for %s\n' "$output_root" >&2
+    exit 1
+  fi
+}
+
 copy_fixtures() {
   local name=$1
   cp -R "$FIXTURES" "$SCRATCH_DIR/$name"
@@ -84,6 +105,26 @@ for current, dirs, files in os.walk(root, followlinks=False):
 print(hashlib.sha256(material).hexdigest())
 PY
 }
+
+PARSER_FIXTURES=$(copy_fixtures parser-fixtures)
+printf 'source sentinel\n' >"$PARSER_FIXTURES/source-sentinel"
+PARSER_OUTPUT="$SCRATCH_DIR/parser-output"
+mkdir "$PARSER_OUTPUT"
+printf 'output sentinel\n' >"$PARSER_OUTPUT/output-sentinel"
+
+# Parsing must finish before source/output canonicalization or preparation. In
+# particular, repeating the default absolute path must not be mistaken for an
+# omitted positional argument.
+expect_rc_source_output_unchanged 1 "$FIXTURES" "$PARSER_OUTPUT" \
+  run_oracle "$FIXTURES" "$FIXTURES" --out "$PARSER_OUTPUT"
+expect_rc_source_output_unchanged 1 "$PARSER_FIXTURES" "$PARSER_OUTPUT" \
+  run_oracle "$PARSER_FIXTURES" --out "$PARSER_OUTPUT" "$PARSER_FIXTURES"
+expect_rc_source_output_unchanged 1 "$PARSER_FIXTURES" "$PARSER_OUTPUT" \
+  run_oracle "$PARSER_FIXTURES" --unknown --out "$PARSER_OUTPUT"
+expect_rc_source_output_unchanged 1 "$PARSER_FIXTURES" "$PARSER_OUTPUT" \
+  run_oracle "$PARSER_FIXTURES" --out
+expect_rc_source_output_unchanged 1 "$PARSER_FIXTURES" "$PARSER_OUTPUT" \
+  run_oracle --out --unknown "$PARSER_FIXTURES"
 
 PASS_OUT="$SCRATCH_DIR/pass"
 expect_rc_unchanged 0 "$FIXTURES" run_oracle --out "$PASS_OUT"
