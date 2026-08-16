@@ -259,15 +259,9 @@ pub(crate) fn resolve_java() -> Result<(PathBuf, PathBuf)> {
     Ok((PathBuf::from("java"), PathBuf::from("javac")))
 }
 
-/// Unpack the bundler classpath + resolve java/javac, shared by `extract` and
-/// `mth-gen`. Returns (classpath, java, javac).
-pub(crate) fn prepare_runtime(
-    repo_root: &Path,
-    bundler: &Path,
-) -> Result<(String, PathBuf, PathBuf)> {
+pub(crate) fn server_jar_for_bundler(repo_root: &Path, bundler: &Path) -> Result<PathBuf> {
     let cache = repo_root.join("tools/rivet-codegen/.cache");
     fs::create_dir_all(&cache).context("create codegen cache dir")?;
-
     let classpath_dir = cache.join("classpath");
     extract_bundler(bundler, &classpath_dir)?;
 
@@ -277,10 +271,21 @@ pub(crate) fn prepare_runtime(
         .join(&server_jar_rel);
     anyhow::ensure!(
         server_jar.is_file(),
-        "server jar not found at {}",
-        server_jar.display()
+        "server jar not found at {} after extracting {}",
+        server_jar.display(),
+        bundler.display()
     );
+    Ok(server_jar)
+}
 
+/// Unpack the bundler classpath + resolve java/javac, shared by `extract` and
+/// `mth-gen`. Returns (classpath, java, javac).
+pub(crate) fn prepare_runtime(
+    repo_root: &Path,
+    bundler: &Path,
+) -> Result<(String, PathBuf, PathBuf)> {
+    let server_jar = server_jar_for_bundler(repo_root, bundler)?;
+    let classpath_dir = repo_root.join("tools/rivet-codegen/.cache/classpath");
     let classpath = build_classpath(&classpath_dir, &server_jar)?;
     let (java, javac) = resolve_java()?;
     Ok((classpath, java, javac))
@@ -324,5 +329,83 @@ mod tests {
         fs::write(root.path().join(".bundler.sha256"), "sha-b\n").unwrap();
         assert!(!bundler_cache_matches(root.path(), "sha-a"));
         assert!(bundler_cache_matches(root.path(), "sha-b"));
+    }
+
+    #[test]
+    fn server_jar_selection_ignores_conflicting_materialized_jar() {
+        let root = tempfile::tempdir().unwrap();
+        let bundler = root.path().join("override-bundler.jar");
+        fs::write(&bundler, b"override bundler").unwrap();
+        let cache = root.path().join("tools/rivet-codegen/.cache/classpath");
+        let versions = cache.join("META-INF/versions/26.2");
+        fs::create_dir_all(&versions).unwrap();
+        fs::write(
+            cache.join(".bundler.sha256"),
+            crate::reports::sha256_hex(b"override bundler"),
+        )
+        .unwrap();
+        fs::write(
+            cache.join("META-INF/versions.list"),
+            "sha1 26.2 26.2/paper-26.2.jar\n",
+        )
+        .unwrap();
+        fs::write(versions.join("paper-26.2.jar"), b"override server").unwrap();
+
+        let materialized = crate::reports::default_jar(root.path());
+        fs::create_dir_all(materialized.parent().unwrap()).unwrap();
+        fs::write(materialized, b"materialized server").unwrap();
+
+        let selected = server_jar_for_bundler(root.path(), &bundler).unwrap();
+        assert_eq!(fs::read(selected).unwrap(), b"override server");
+    }
+
+    #[test]
+    fn bundler_hash_wins_when_override_mtime_is_not_newer() {
+        use std::time::{Duration, SystemTime};
+
+        for age in [Duration::ZERO, Duration::from_secs(60)] {
+            let root = tempfile::tempdir().unwrap();
+            let cache = root.path().join("classpath");
+            let bundler_a = root.path().join("bundler-a.jar");
+            let bundler_b = root.path().join("bundler-b.jar");
+            write_test_bundler(&bundler_a, b"server A");
+            extract_bundler(&bundler_a, &cache).unwrap();
+            let marker_mtime = fs::metadata(cache.join("META-INF/versions/26.2/paper-26.2.jar"))
+                .unwrap()
+                .modified()
+                .unwrap();
+
+            write_test_bundler(&bundler_b, b"server B");
+            let bundler_b_mtime = marker_mtime
+                .checked_sub(age)
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            fs::File::open(&bundler_b)
+                .unwrap()
+                .set_modified(bundler_b_mtime)
+                .unwrap();
+            extract_bundler(&bundler_b, &cache).unwrap();
+
+            let selected = cache.join("META-INF/versions/26.2/paper-26.2.jar");
+            assert_eq!(fs::read(selected).unwrap(), b"server B");
+        }
+    }
+
+    fn write_test_bundler(path: &Path, server: &[u8]) {
+        let stage = path.with_extension("stage");
+        fs::create_dir_all(stage.join("META-INF/versions/26.2")).unwrap();
+        fs::write(
+            stage.join("META-INF/versions.list"),
+            "sha1 26.2 26.2/paper-26.2.jar\n",
+        )
+        .unwrap();
+        fs::write(stage.join("META-INF/versions/26.2/paper-26.2.jar"), server).unwrap();
+        fs::create_dir_all(stage.join("META-INF/libraries")).unwrap();
+        fs::write(stage.join("META-INF/libraries/placeholder.jar"), b"library").unwrap();
+        let status = Command::new("zip")
+            .current_dir(&stage)
+            .args(["-q", "-r", path.to_str().unwrap(), "META-INF"])
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 }

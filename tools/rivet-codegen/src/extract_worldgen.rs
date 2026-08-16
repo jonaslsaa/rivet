@@ -105,36 +105,11 @@ pub(crate) fn run_extractor(repo_root: &Path, bundler: &Path, output: &Path) -> 
     Ok(out)
 }
 
-/// Resolve the source jar for provenance: `--bundler` points at the bundler,
-/// but the pinned source identity is the materialized server jar (the same one
-/// the report provenance records). Falls back to the bundler's extracted server
-/// jar when no materialized run exists.
-fn source_jar(repo_root: &Path, bundler: &Path) -> PathBuf {
-    let materialized = crate::reports::default_jar(repo_root);
-    if materialized.is_file() {
-        return materialized;
-    }
-    // Fall back to the server jar extracted from the bundler (same bytes as the
-    // materialized run when built from the same Paper tree).
-    let cache = repo_root.join("tools/rivet-codegen/.cache/classpath");
-    if let Ok((_, rel)) = extract::read_versions_list(bundler, &cache) {
-        let candidate = cache.join("META-INF/versions").join(&rel);
-        if candidate.is_file() {
-            return candidate;
-        }
-    }
-    materialized
-}
-
 /// Write `data/worldgen.manifest.json`: the source provenance (same shape as
 /// the reports/biomes manifest) + the fixture's sha256, so the codegen can pin
 /// the fixture to its source.
 fn write_manifest(repo_root: &Path, output: &Path, bundler: &Path) -> Result<()> {
-    let jar = source_jar(repo_root, bundler);
-    if !jar.is_file() {
-        // No jar to record provenance for (e.g. a test-only extraction); skip.
-        return Ok(());
-    }
+    let jar = extract::server_jar_for_bundler(repo_root, bundler)?;
     let mut source = crate::reports::capture_source(&jar, repo_root)?;
     // Record the canonical repo-relative source location (same as the reports
     // manifest) even when the bytes came from the bundler's extracted server jar
