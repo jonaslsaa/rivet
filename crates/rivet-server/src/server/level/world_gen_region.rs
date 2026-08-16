@@ -380,7 +380,11 @@ fn persist_spawner_tag(
         max_nearby_entities,
         required_player_range,
         spawn_range,
-    ] = spawner_numeric_values(tag);
+    ] = if was_dummy {
+        [20, 200, 800, 4, 6, 16, 4]
+    } else {
+        spawner_numeric_values(tag)
+    };
     let mut canonical = CompoundTag::new();
     canonical.put_int("x", pos.get_x());
     canonical.put_int("y", pos.get_y());
@@ -2416,7 +2420,17 @@ mod tests {
             .get_chunk_mut(0, 0)
             .get_block_entity_nbt_mut(&pos)
             .expect("spawner DUMMY tag");
-        tag.put_int("SpawnPotentials", 1);
+        tag.put_short("Delay", 37);
+        tag.put_int("Paper.Delay", 70_000);
+        tag.put_int("MinSpawnDelay", 41);
+        tag.put_int("Paper.MinSpawnDelay", 70_001);
+        tag.put_int("MaxSpawnDelay", 97);
+        tag.put_int("Paper.MaxSpawnDelay", 70_002);
+        tag.put_int("SpawnCount", 2);
+        tag.put_int("MaxNearbyEntities", 11);
+        tag.put_int("RequiredPlayerRange", 23);
+        tag.put_int("SpawnRange", 7);
+        tag.put_string("UnknownField", "drop-me");
         tag.put(
             "SpawnData".to_string(),
             Tag::Compound({
@@ -2430,8 +2444,41 @@ mod tests {
                     }),
                 );
                 spawn_data.put_int("unknown", 7);
+                spawn_data.put(
+                    "custom_spawn_rules".to_string(),
+                    Tag::Compound({
+                        let mut rules = CompoundTag::new();
+                        rules.put_int("block_light_limit", 3);
+                        rules
+                    }),
+                );
                 spawn_data
             }),
+        );
+        tag.put(
+            "SpawnPotentials".to_string(),
+            Tag::List(rivet_nbt::list_tag::ListTag::with_list(vec![
+                Tag::Compound({
+                    let mut entry = CompoundTag::new();
+                    entry.put_int("weight", 1);
+                    entry.put(
+                        "data".to_string(),
+                        Tag::Compound({
+                            let mut data = CompoundTag::new();
+                            data.put(
+                                "entity".to_string(),
+                                Tag::Compound({
+                                    let mut entity = CompoundTag::new();
+                                    entity.put_string("id", "minecraft:creeper");
+                                    entity
+                                }),
+                            );
+                            data
+                        }),
+                    );
+                    entry
+                }),
+            ])),
         );
 
         assert!(<WorldGenRegion<
@@ -2449,28 +2496,47 @@ mod tests {
             &mut region,
             &pos,
             "minecraft:skeleton",
-            None,
+            Some(0),
         );
         let tag = region
             .get_chunk(0, 0)
             .get_block_entity_nbt(&pos)
             .expect("spawner tag remains present");
+        assert_eq!(
+            tag.get_string("id").map(String::as_str),
+            Some("minecraft:mob_spawner")
+        );
+        assert_eq!(tag.get_short("Delay"), Some(20));
+        assert_eq!(tag.get_short("MinSpawnDelay"), Some(200));
+        assert_eq!(tag.get_short("MaxSpawnDelay"), Some(800));
+        assert_eq!(tag.get_short("SpawnCount"), Some(4));
+        assert_eq!(tag.get_short("MaxNearbyEntities"), Some(6));
+        assert_eq!(tag.get_short("RequiredPlayerRange"), Some(16));
+        assert_eq!(tag.get_short("SpawnRange"), Some(4));
+        assert!(matches!(tag.get("Delay"), Some(Tag::Short(_))));
+        assert!(matches!(tag.get("MinSpawnDelay"), Some(Tag::Short(_))));
+        assert!(matches!(tag.get("MaxSpawnDelay"), Some(Tag::Short(_))));
+        assert!(matches!(tag.get("SpawnCount"), Some(Tag::Short(_))));
+        assert!(matches!(tag.get("MaxNearbyEntities"), Some(Tag::Short(_))));
+        assert!(matches!(
+            tag.get("RequiredPlayerRange"),
+            Some(Tag::Short(_))
+        ));
+        assert!(matches!(tag.get("SpawnRange"), Some(Tag::Short(_))));
+        assert!(tag.get("Paper.Delay").is_none());
+        assert!(tag.get("Paper.MinSpawnDelay").is_none());
+        assert!(tag.get("Paper.MaxSpawnDelay").is_none());
+        assert!(tag.get("UnknownField").is_none());
         assert!(
             tag.get_list("SpawnPotentials")
                 .is_some_and(|list| list.list.is_empty())
         );
-        assert!(
-            tag.get_compound("SpawnData")
-                .is_some_and(|data| data.get("unknown").is_none())
-        );
-        assert!(
-            tag.get_compound("SpawnData")
-                .and_then(|data| data.get_compound("custom_spawn_rules"))
-                .is_none()
-        );
+        let spawn_data = tag.get_compound("SpawnData").expect("SpawnData remains");
+        assert!(spawn_data.get("unknown").is_none());
+        assert!(spawn_data.get("custom_spawn_rules").is_none());
         assert_eq!(
-            tag.get_compound("SpawnData")
-                .and_then(|data| data.get_compound("entity"))
+            spawn_data
+                .get_compound("entity")
                 .and_then(|entity| entity.get_string("id"))
                 .map(String::as_str),
             Some("minecraft:skeleton")
