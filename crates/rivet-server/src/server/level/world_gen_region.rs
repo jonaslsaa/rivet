@@ -56,23 +56,23 @@
 //! where `this` is the region as a `NoiseBiomeSource` (the `LevelReader`
 //! default `getNoiseBiome` reads a cached chunk, falling back to
 //! `getUncachedNoiseBiome`). The port cannot hold `Arc<Self>` (the ownership
-//! model forbids a self-referential worldgen view), so the region's
-//! `BiomeManager` is constructed over the same injected uncached source
-//! `getUncachedNoiseBiome` delegates to, and the chunk-cached read defers
-//! (RivetTodo #185 holder). The fiddled-distance corner interpolation itself is
-//! faithfully the `BiomeManager` the region returns from `getBiomeManager`.
+//! model forbids a self-referential worldgen view), so `getBiome` uses the
+//! `BiomeManager` interpolation with an injected quart lookup that performs
+//! the same cached-chunk-first read. `getBiomeManager` still exposes the
+//! uncached source-backed manager for callers that need the standalone value.
 
 use std::sync::Arc;
 
 use rivet_registry::access::RegistryAccess;
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::block_state::BlockState;
-use rivet_registry::core::{BlockPos, ChunkPos, SectionPos};
+use rivet_registry::core::{BlockPos, ChunkPos, QuartPos, SectionPos};
 use rivet_registry::fluid_id::FluidId;
 use rivet_registry::generated::block_behaviors::{
     BEHAVIOR_FLAG_FLUID_EMPTY, BEHAVIOR_FLAG_RANDOM_TICKING, behavior_of,
 };
 use rivet_registry::generated::block_states::StateId;
+use rivet_registry::generated::blocks::BlockId;
 use rivet_registry::holder::Holder;
 use rivet_util::StaticCache2D;
 use rivet_util::mth;
@@ -483,6 +483,17 @@ where
             .get_noise_biome(quart_x, quart_y, quart_z)
     }
 
+    /// `LevelReader.getNoiseBiome(int, int, int)` — read the cached BIOMES
+    /// chunk selected by `QuartPos.toSection`, falling back to the uncached
+    /// server-level source when that chunk is unavailable.
+    fn get_noise_biome_cached(&self, quart_x: i32, quart_y: i32, quart_z: i32) -> Option<B> {
+        let chunk_x = QuartPos::to_section(quart_x);
+        let chunk_z = QuartPos::to_section(quart_z);
+        self.try_get_chunk(chunk_x, chunk_z, ChunkStatus::Biomes, false)
+            .ok()
+            .map(|chunk| chunk.get_noise_biome(quart_x, quart_y, quart_z))
+    }
+
     /// `WorldGenRegion.ensureCanWrite(BlockPos)` — the writability gate every
     /// write checks first.
     ///
@@ -750,11 +761,16 @@ impl WorldGenLevel for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> 
         self.get_block_state(pos)
     }
 
-    /// `LevelReader.getBiome(BlockPos)` — `getBiomeManager().getBiome(pos)`
-    /// (the fiddled-distance read through the injected uncached source; see the
-    /// module doc).
+    /// `LevelReader.getBiome(BlockPos)` — `BiomeManager(this,
+    /// obfuscateSeed(seed)).getBiome(pos)`. Each corner first reads the cached
+    /// BIOMES chunk, with the uncached source as the LevelReader fallback.
     fn get_biome(&self, pos: &BlockPos) -> Holder<BiomeId> {
-        self.get_biome_manager().get_biome(pos)
+        self.biome_manager
+            .get_biome_with(pos, |quart_x, quart_y, quart_z| {
+                self.get_noise_biome_cached(quart_x, quart_y, quart_z)
+                    .map(|biome| Holder::direct(BiomeId::from_id(biome.raw())))
+                    .unwrap_or_else(|| self.get_uncached_noise_biome(quart_x, quart_y, quart_z))
+            })
     }
 
     /// `LevelReader.getHeight(Heightmap.Types, int, int)` — the gated heightmap
@@ -782,10 +798,7 @@ impl WorldGenLevel for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> 
         let chunk_z = SectionPos::block_to_section_coord(z);
         self.warn_if_read_outside_write_zone(chunk_x, chunk_z);
         let chunk = self.get_chunk(chunk_x, chunk_z);
-        match chunk.heightmaps()[ty as usize].as_ref() {
-            Some(heightmap) => heightmap.get_height_at(x & 15, z & 15, chunk.get_min_y()) + 1,
-            None => chunk.get_min_y() + 1,
-        }
+        chunk.get_height_at_readonly(ty, x, z) + 1
     }
 }
 
@@ -913,9 +926,16 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
         self.get_block_state(pos)
     }
 
-    /// `LevelReader.getBiome(BlockPos)` — `getBiomeManager().getBiome(pos)`.
+    /// `LevelReader.getBiome(BlockPos)` — `BiomeManager(this,
+    /// obfuscateSeed(seed)).getBiome(pos)`. Each corner first reads the cached
+    /// BIOMES chunk, with the uncached source as the LevelReader fallback.
     fn get_biome(&self, pos: &BlockPos) -> Holder<BiomeId> {
-        self.get_biome_manager().get_biome(pos)
+        self.biome_manager
+            .get_biome_with(pos, |quart_x, quart_y, quart_z| {
+                self.get_noise_biome_cached(quart_x, quart_y, quart_z)
+                    .map(|biome| Holder::direct(BiomeId::from_id(biome.0)))
+                    .unwrap_or_else(|| self.get_uncached_noise_biome(quart_x, quart_y, quart_z))
+            })
     }
 
     /// `LevelReader.getHeight(Heightmap.Types, int, int)` — the gated heightmap
@@ -926,10 +946,7 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
         let chunk_z = SectionPos::block_to_section_coord(z);
         self.warn_if_read_outside_write_zone(chunk_x, chunk_z);
         let chunk = self.get_chunk(chunk_x, chunk_z);
-        match chunk.heightmaps()[ty as usize].as_ref() {
-            Some(heightmap) => heightmap.get_height_at(x & 15, z & 15, chunk.get_min_y()) + 1,
-            None => chunk.get_min_y() + 1,
-        }
+        chunk.get_height_at_readonly(ty, x, z) + 1
     }
 
     /// `WorldGenRegion.getSeaLevel()` — `level.getSeaLevel()`.
@@ -1087,7 +1104,7 @@ fn chunk_block_state_blockstate(
 ) -> BlockState {
     let y = pos.get_y();
     if chunk.is_outside_build_height(y) {
-        return BlockState::new(StateId(0));
+        return BlockState::of(BlockId(794));
     }
     let section_index = chunk.get_section_index(y);
     let section = chunk.get_section(section_index as usize);
@@ -1383,6 +1400,48 @@ mod tests {
         )
     }
 
+    /// A FEATURES region whose center chunk is supplied by the caller, so reads
+    /// can distinguish the cached BIOMES value from the uncached source.
+    fn region_with_center_chunk(
+        center_chunk: ChunkAccess<StateId, ServerBiomeId, StructureKey>,
+        source_biome: BiomeId,
+    ) -> WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> {
+        let step = GENERATION_PYRAMID
+            .get_step_to(ChunkStatus::Features)
+            .clone();
+        let deps = step.direct_dependencies().as_list().to_vec();
+        let mut center_chunk = Some(center_chunk);
+        let mut holders = Vec::with_capacity(17 * 17);
+        for x in -8..=8 {
+            for z in -8..=8 {
+                let distance = ChunkPos::new(0, 0).get_chessboard_distance_coords(x, z);
+                let status = deps[distance.min(deps.len() as i32 - 1) as usize];
+                let chunk = if x == 0 && z == 0 {
+                    center_chunk.take().expect("center chunk is inserted once")
+                } else {
+                    test_chunk(ChunkPos::new(x, z))
+                };
+                holders.push(Box::new(OwnedHolder::new(chunk, status))
+                    as Box<
+                        dyn GenerationChunkHolderView<StateId, ServerBiomeId, StructureKey>,
+                    >);
+            }
+        }
+        WorldGenRegion::new(
+            StaticCache2D::from_entries(-8, -8, 17, 17, holders),
+            ChunkPos::new(0, 0),
+            step,
+            0,
+            SUPERFLAT_MIN_Y,
+            SUPERFLAT_HEIGHT,
+            -63,
+            Arc::new(TestBiomeSource {
+                biome: source_biome,
+            }),
+            RegistryAccess::empty(),
+        )
+    }
+
     /// The center chunk's position, for the per-ring contract tests.
     fn center() -> ChunkPos {
         ChunkPos::new(0, 0)
@@ -1657,8 +1716,8 @@ mod tests {
     // Biome access
     // -----------------------------------------------------------------------
 
-    /// `getBiome` routes through the injected uncached source via the region's
-    /// `BiomeManager` (the fiddled-distance interpolation).
+    /// `getBiome` uses the region's fiddled-distance interpolation and falls
+    /// back to the injected uncached source when the cached chunk read misses.
     #[test]
     fn get_biome_routes_through_the_injected_source() {
         let region = feature_region();
@@ -1673,6 +1732,28 @@ mod tests {
                 QuartPos::from_block(0),
             ),
             Holder::direct(BiomeId::from_id(40)),
+        );
+    }
+
+    #[test]
+    fn get_biome_prefers_cached_biomes_before_the_uncached_source() {
+        let mut center = test_chunk(center());
+        for section_index in 0..center.get_sections().len() {
+            let section = center.get_section_mut(section_index);
+            for quart_x in 0..4 {
+                for quart_y in 0..4 {
+                    for quart_z in 0..4 {
+                        section.set_noise_biome(quart_x, quart_y, quart_z, ServerBiomeId(0));
+                    }
+                }
+            }
+        }
+        let region = region_with_center_chunk(center, BiomeId::from_id(40));
+        // At block (8,64,8) all eight fiddled corners are in the center chunk.
+        // The cached id 0 therefore wins over the source's plains id 40.
+        assert_eq!(
+            region.get_biome(&BlockPos::new(8, 64, 8)),
+            Holder::direct(BiomeId::from_id(0)),
         );
     }
 
@@ -1728,6 +1809,29 @@ mod tests {
             region.get_height_at(Types::WorldSurface, 15, 15),
             SUPERFLAT_MIN_Y + 1
         );
+    }
+
+    #[test]
+    fn missing_heightmap_reads_actual_blocks_instead_of_a_floor_fallback() {
+        let mut center = test_chunk(center());
+        let section_index = center.get_section_index(64) as usize;
+        center.get_section_mut(section_index).set_block_state(
+            0,
+            0,
+            0,
+            StateId(1),
+            &state_is_air,
+            &state_is_randomly_ticking,
+            &fluid_is_empty,
+            &fluid_is_randomly_ticking,
+            &state_is_special_colliding,
+        );
+        assert!(
+            center.heightmaps()[Types::WorldSurface as usize].is_none(),
+            "the direct section write must leave the final map absent"
+        );
+        let region = region_with_center_chunk(center, BiomeId::from_id(40));
+        assert_eq!(region.get_height_at(Types::WorldSurface, 0, 0), 65);
     }
 
     // -----------------------------------------------------------------------

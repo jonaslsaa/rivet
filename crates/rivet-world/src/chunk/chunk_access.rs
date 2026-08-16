@@ -491,6 +491,30 @@ where
             .map_or(min_y - 1, |hm| hm.get_height_at(x & 15, z & 15, min_y))
     }
 
+    /// Read a column height without requiring mutable access to the chunk. This
+    /// is the same scan `get_height_at` performs when priming a missing map;
+    /// worldgen facades expose their reads through `&self`, so they use this
+    /// method instead of returning a fabricated floor height.
+    pub fn get_height_at_readonly(&self, ty: Types, x: i32, z: i32) -> i32 {
+        let min_y = self.get_min_y();
+        if let Some(heightmap) = self.heightmaps[ty as usize].as_ref() {
+            return heightmap.get_height_at(x & 15, z & 15, min_y);
+        }
+        let highest_section_position = match self.get_highest_filled_section_index() {
+            NO_FILLED_SECTION => min_y + 15,
+            index => {
+                let section_y = self.get_section_y_from_section_index(index);
+                SectionPos::section_to_block_coord(section_y + 1) - 1
+            }
+        };
+        for y in (min_y..=highest_section_position).rev() {
+            if Heightmap::is_opaque(ty, self.flags_at(x & 15, y, z & 15)) {
+                return y;
+            }
+        }
+        min_y - 1
+    }
+
     /// `ChunkAccess.getHighestSectionPosition()` — `getMinY()` when no section
     /// is filled, else `sectionToBlockCoord(getSectionYFromSectionIndex(
     /// getHighestFilledSectionIndex()))`.
