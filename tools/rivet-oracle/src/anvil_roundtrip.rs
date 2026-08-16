@@ -195,8 +195,10 @@ impl NegativeKind {
 
     fn rejection_stage(self) -> RejectionStage {
         match self {
-            Self::Location | Self::Overlap | Self::Truncation => RejectionStage::OpenHeader,
-            Self::Length | Self::Compression | Self::TrailingPayload => RejectionStage::PayloadRead,
+            Self::Location | Self::Overlap => RejectionStage::OpenHeader,
+            Self::Length | Self::Compression | Self::Truncation | Self::TrailingPayload => {
+                RejectionStage::PayloadRead
+            }
         }
     }
 
@@ -263,20 +265,30 @@ pub fn run_cli(args: &[&str]) -> Result<(), Error> {
 fn run_roundtrip(fixture_root: &Path, output: &Path) -> Result<(), Error> {
     let (fixture_root, output) = canonicalize_paths(fixture_root, output)?;
     let source_before = hash_tree(&fixture_root)?;
-    let fixtures = load_fixtures(&fixture_root)?;
-    if fixtures.len() != EXPECTED_CHUNK_COUNT {
-        return Err(Error::Gate(format!(
-            "anvil-roundtrip-v1a requires the committed {EXPECTED_CHUNK_COUNT}-chunk M0 corpus, found {}",
-            fixtures.len()
-        )));
-    }
-    let result = run_roundtrip_inner(&fixture_root, &output, &fixtures, &source_before);
-    let source_after = hash_tree(&fixture_root).map_err(|error| {
+    let result = (|| {
+        let fixtures = load_fixtures(&fixture_root)?;
+        if fixtures.len() != EXPECTED_CHUNK_COUNT {
+            return Err(Error::Gate(format!(
+                "anvil-roundtrip-v1a requires the committed {EXPECTED_CHUNK_COUNT}-chunk M0 corpus, found {}",
+                fixtures.len()
+            )));
+        }
+        run_roundtrip_inner(&fixture_root, &output, &fixtures, &source_before)
+    })();
+    finish_source_validation(&fixture_root, &source_before, result)
+}
+
+fn finish_source_validation(
+    fixture_root: &Path,
+    source_before: &TreeHash,
+    result: Result<(), Error>,
+) -> Result<(), Error> {
+    let source_after = hash_tree(fixture_root).map_err(|error| {
         Error::Gate(format!(
             "anvil-roundtrip-v1a could not re-hash the source tree after execution: {error}"
         ))
     })?;
-    if source_before != source_after {
+    if source_before != &source_after {
         return Err(Error::Gate(format!(
             "anvil-roundtrip-v1a mutated the source fixture tree: before {}, after {}",
             source_before.digest, source_after.digest
@@ -1276,13 +1288,23 @@ fn storage_rejects_corruption(
     fixture: &Fixture,
     kind: NegativeKind,
 ) -> Result<StorageRejection, Error> {
-    let region_dir = regions_root.join("overworld");
-    let artifact = region_dir.join("r.0.0.mca");
+    let source_region_dir = regions_root.join("overworld");
+    let source_artifact = source_region_dir.join("r.0.0.mca");
+    let artifact_label = "overworld/r.0.0.mca";
     let slot = chunk_slot(0, 0, fixture.cx, fixture.cz)
         .map_err(|detail| Error::Gate(format!("anvil-roundtrip-v1a {detail}")))?;
+
+    let storage_root = tempfile::tempdir()?;
+    let region_dir = storage_root.path().join("overworld");
+    fs::create_dir_all(&region_dir)?;
+    let artifact = region_dir.join("r.0.0.mca");
+    let mut bytes = fs::read(&source_artifact)?;
+    isolate_storage_slots(&mut bytes, kind)?;
+    fs::write(&artifact, bytes)?;
+
     let open_result = RegionFile::open_read_only(
         info_for_dimension("overworld"),
-        artifact.clone(),
+        artifact,
         region_dir.clone(),
         RegionFileVersion::VERSION_NONE,
     );
@@ -1296,8 +1318,9 @@ fn storage_rejects_corruption(
                 Err(error) => (RejectionStage::PayloadRead, error.to_string()),
                 Ok(value) => {
                     return Err(Error::Gate(format!(
-                        "anvil-roundtrip-v1a {} corruption reached read-only storage as {value:?} for overworld/r.0.0.mca slot {slot} chunk ({},{}), unrelated to the intended mutation",
+                        "anvil-roundtrip-v1a {} corruption reached read-only storage as {value:?} for {} slot {slot} chunk ({},{}), unrelated to the intended mutation",
                         kind.name(),
+                        artifact_label,
                         fixture.cx,
                         fixture.cz
                     )));
@@ -1308,12 +1331,31 @@ fn storage_rejects_corruption(
     Ok(StorageRejection {
         stage,
         message: format!(
-            "{} RegionFileStorage rejected overworld/r.0.0.mca slot {slot} chunk ({},{}): {error}",
+            "{} RegionFileStorage rejected {} slot {slot} chunk ({},{}): {error}",
             kind.name(),
+            artifact_label,
             fixture.cx,
             fixture.cz
         ),
     })
+}
+
+fn isolate_storage_slots(bytes: &mut [u8], kind: NegativeKind) -> Result<(), Error> {
+    if bytes.len() < 8192 {
+        return Err(Error::Gate(
+            "anvil-roundtrip-v1a cannot isolate storage corruption from a truncated header".into(),
+        ));
+    }
+    for slot in 0..1024usize {
+        let keep = match kind {
+            NegativeKind::Overlap => slot <= 1,
+            _ => slot == kind.target_slot(),
+        };
+        if !keep {
+            bytes[slot * 4..slot * 4 + 4].fill(0);
+        }
+    }
+    Ok(())
 }
 
 fn mutate_region(path: &Path, kind: NegativeKind) -> Result<(), Error> {
@@ -1582,6 +1624,7 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), Error> {
 }
 
 fn canonicalize_paths(fixture_root: &Path, output: &Path) -> Result<(PathBuf, PathBuf), Error> {
+    reject_symlink_path(fixture_root, "fixture root")?;
     let source = fs::canonicalize(fixture_root).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             Error::Unverified(format!(
@@ -1607,7 +1650,23 @@ fn canonicalize_paths(fixture_root: &Path, output: &Path) -> Result<(PathBuf, Pa
     Ok((source, destination))
 }
 
+fn reject_symlink_path(path: &Path, role: &str) -> Result<(), Error> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(Error::Gate(format!(
+            "anvil-roundtrip-v1a {role} symlink is not allowed: {}",
+            path.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::Gate(format!(
+            "anvil-roundtrip-v1a cannot inspect {role} {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
 fn canonical_destination(path: &Path) -> Result<PathBuf, Error> {
+    reject_symlink_path(path, "output")?;
     let mut missing = Vec::new();
     let mut existing = path.to_path_buf();
     while match fs::symlink_metadata(&existing) {
@@ -1646,8 +1705,16 @@ fn canonical_destination(path: &Path) -> Result<PathBuf, Error> {
 }
 
 fn prepare_output(output: &Path) -> Result<(), Error> {
-    if output.exists() {
-        fs::remove_dir_all(output)?;
+    match fs::symlink_metadata(output) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(Error::Gate(format!(
+                "anvil-roundtrip-v1a output symlink is not allowed: {}",
+                output.display()
+            )));
+        }
+        Ok(_) => fs::remove_dir_all(output)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(Error::Io(error)),
     }
     fs::create_dir_all(output)?;
     Ok(())
@@ -1783,7 +1850,7 @@ mod tests {
         assert_eq!(NegativeKind::Length.target_slot(), 0);
         assert_eq!(
             NegativeKind::Truncation.rejection_stage(),
-            RejectionStage::OpenHeader
+            RejectionStage::PayloadRead
         );
         assert_eq!(
             NegativeKind::TrailingPayload.rejection_stage(),
@@ -1862,17 +1929,50 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn canonical_paths_reject_symlink_output_alias() {
+    fn canonical_paths_reject_symlink_fixture_root() {
         use std::os::unix::fs::symlink;
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("source");
         let alias = temp.path().join("alias");
+        let output = temp.path().join("output");
         std::fs::create_dir(&source).expect("source");
         symlink(&source, &alias).expect("symlink");
         assert!(matches!(
-            canonicalize_paths(&source, &alias),
+            canonicalize_paths(&alias, &output),
             Err(Error::Gate(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_output_rejects_symlink_without_deleting_target() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let victim = temp.path().join("victim");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&victim).expect("victim");
+        std::fs::write(victim.join("KEEP"), b"keep").expect("sentinel");
+        symlink(&victim, &alias).expect("symlink");
+        assert!(matches!(prepare_output(&alias), Err(Error::Gate(_))));
+        assert!(victim.join("KEEP").is_file());
+    }
+
+    #[test]
+    fn source_hash_validation_runs_after_failed_execution() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).expect("source");
+        std::fs::write(source.join("manifest.json"), b"before").expect("manifest");
+        let before = hash_tree(&source).expect("source hash");
+        std::fs::write(source.join("manifest.json"), b"after").expect("tamper");
+        let result = finish_source_validation(
+            &source,
+            &before,
+            Err(Error::Unverified("fixture unavailable".into())),
+        );
+        assert!(
+            matches!(result, Err(Error::Gate(message)) if message.contains("mutated the source fixture tree"))
+        );
     }
 
     #[test]

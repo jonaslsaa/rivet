@@ -93,6 +93,10 @@ for negative in report["corruption_negatives"]:
     assert negative["chunk"] in negative["detected"]
     assert negative["mutation"] in negative["detected"]
     assert negative["rejection_stage"] in negative["detected"]
+truncation = next(n for n in report["corruption_negatives"] if n["mutation"] == "truncation")
+assert truncation["rejection_stage"] == "payload-read"
+assert "corrupt chunk [0, 0]" in truncation["detected"]
+assert "local chunk (1,0)" not in truncation["detected"]
 assert report["corruption_negatives"][3]["slot"] == 1
 manifest = json.load(open(sys.argv[1].replace("report.json", "evidence/manifest.json")))
 assert len(manifest["chunks"]) == 432
@@ -100,8 +104,11 @@ PY
 
 MISSING_MANIFEST=$(copy_fixtures missing-manifest)
 rm "$MISSING_MANIFEST/manifest.json"
+MISSING_MANIFEST_BEFORE=$(inventory "$MISSING_MANIFEST")
 expect_rc 3 run_oracle "$MISSING_MANIFEST" --out "$SCRATCH_DIR/missing-manifest-out"
 grep -q "source provenance prerequisite unavailable" "$SCRATCH_DIR/stderr"
+MISSING_MANIFEST_AFTER=$(inventory "$MISSING_MANIFEST")
+[ "$MISSING_MANIFEST_BEFORE" = "$MISSING_MANIFEST_AFTER" ]
 
 MISSING_ARTIFACT=$(copy_fixtures missing-artifact)
 rm "$MISSING_ARTIFACT/chunk/overworld/0.0/0.0.nbt"
@@ -124,6 +131,16 @@ expect_rc 1 run_oracle --out "$FIXTURES/anvil-roundtrip-descendant"
 expect_rc 1 run_oracle --out "$(dirname "$FIXTURES")"
 ln -s "$FIXTURES" "$SCRATCH_DIR/output-alias"
 expect_rc 1 run_oracle --out "$SCRATCH_DIR/output-alias"
+
+OUTPUT_VICTIM="$SCRATCH_DIR/output-victim"
+mkdir "$OUTPUT_VICTIM"
+printf 'keep\n' >"$OUTPUT_VICTIM/KEEP"
+ln -s "$OUTPUT_VICTIM" "$SCRATCH_DIR/output-victim-alias"
+expect_rc 1 run_oracle --out "$SCRATCH_DIR/output-victim-alias"
+[ -f "$OUTPUT_VICTIM/KEEP" ]
+
+ln -s "$FIXTURES" "$SCRATCH_DIR/root-alias"
+expect_rc 1 run_oracle "$SCRATCH_DIR/root-alias" --out "$SCRATCH_DIR/root-alias-out"
 
 SYMLINK_MANIFEST=$(copy_fixtures symlink-manifest)
 mv "$SYMLINK_MANIFEST/manifest.json" "$SYMLINK_MANIFEST/manifest.real"
