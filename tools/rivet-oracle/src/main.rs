@@ -131,6 +131,7 @@
 //! different commit than the resolved paperclip). A stale, swapped, or
 //! unverifiable Paper never passes silently (see gate.sh).
 
+mod anvil_roundtrip;
 mod chunk_level;
 mod composed_noise;
 mod corpus;
@@ -3484,6 +3485,19 @@ fn print_usage() {
     println!(
         "  cargo run -p rivet-oracle -- <dir>          verify <dir> against its manifest.json"
     );
+    println!("  cargo run -p rivet-oracle -- anvil-roundtrip-v1a [fixtures] [--out <dir>]");
+    println!(
+        "                                             storage-only #231 V1a: write all 432 committed"
+    );
+    println!(
+        "                                             M0 CompoundTag fixtures at compression none,"
+    );
+    println!(
+        "                                             reload through fresh read-only storage, run strict"
+    );
+    println!(
+        "                                             region-record scanner and corruption negatives"
+    );
     println!(
         "  cargo run -p rivet-oracle -- verify         M0 gate: boot fresh Paper -> extract -> diff"
     );
@@ -3625,6 +3639,10 @@ fn print_usage() {
 fn run() -> Result<(), Error> {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("anvil-roundtrip-v1a") => {
+            let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+            anvil_roundtrip::run_cli(&rest)
+        }
         Some("verify") => {
             let mut m2 = false;
             let mut full = false;

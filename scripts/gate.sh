@@ -387,6 +387,34 @@ run_oracle_verify() {
   fi
 }
 
+# Storage-only #231 V1a. This is intentionally separate from the Paper boot,
+# FULL hash, and generated-world rows: it proves only the 432 committed M0
+# CompoundTag payloads through RegionFileStorage at compression `none`, with a
+# fresh read-only reload, strict region scanner, and named corruption negatives.
+# Missing provenance/artifacts are UNVERIFIED (3); a mismatch is FAIL (1).
+run_anvil_roundtrip_v1a() {
+  echo "==> anvil-roundtrip-v1a (storage-only #231 round-trip; 432 committed M0 fixtures)"
+  local rc=0
+  cargo run -q -p rivet-oracle -- anvil-roundtrip-v1a \
+    --out "$REPO_DIR/tools/rivet-oracle/work/anvil-roundtrip-v1a" 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "    PASS — storage-only V1a round-trip, strict scanner, and corruption negatives verified"
+  elif [ "$rc" -eq 3 ]; then
+    echo "    UNVERIFIED — V1a provenance or fixture artifacts are missing (exit 3)"
+    ORACLE_UNVERIFIED=1
+    if [ "$REQUIRE_ORACLE" = 1 ]; then
+      echo "    --require-oracle is set: an unverified V1a storage row is a hard failure"
+      exit 1
+    fi
+  elif [ "$rc" -eq 1 ]; then
+    echo "    FAILED — V1a storage round-trip or corruption scanner failed"
+    exit 1
+  else
+    echo "    FAILED — V1a storage oracle crashed or returned unexpected exit $rc"
+    exit 1
+  fi
+}
+
 # The #54 chunk-hash engine (xxh3_64 seed-hash gate). Unlike the other oracle
 # stages it does not boot Paper: `hash-self-check` pins the xxh3_64 known-answer
 # vectors (a wrong variant/endianness fails loudly, never silently corrupting
@@ -951,6 +979,19 @@ main() {
     echo "==> rivet-fuzz --features packets (protocol packet-decode fuzz targets)"
     cargo check -p rivet-fuzz --features packets --bins
     RUSTFLAGS=-Dwarnings cargo clippy -p rivet-fuzz --features packets --all-targets
+  fi
+
+  # --- storage-only #231 V1a oracle ---------------------------------------------
+  # The focused world/tool gate runs this row even without Paper prerequisites.
+  # It never widens the verdict to V1b, generated-world, or FULL serialization.
+  local GATE_ANVIL=false
+  for p in ${PKGS[@]+"${PKGS[@]}"}; do
+    if [ "$p" = "rivet-world" ] || [ "$p" = "rivet-oracle" ]; then
+      GATE_ANVIL=true
+    fi
+  done
+  if [ "$FULL_GATE" = true ] || [ "$GATE_ANVIL" = true ]; then
+    run_anvil_roundtrip_v1a
   fi
 
   # --- manifest regression suite (full gate only) --------------------------------

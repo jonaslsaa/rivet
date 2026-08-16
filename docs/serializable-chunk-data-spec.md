@@ -307,8 +307,8 @@ the **container** schema (`starts`/`References`) is current.
 
 Keys are `Heightmap.Types.getSerializationKey()` (Heightmap.java L144-172):
 `WORLD_SURFACE_WG`, `WORLD_SURFACE`, `OCEAN_FLOOR_WG`, `OCEAN_FLOOR`,
-`MOTION_BLOCKING`, `MOTION_BLOCKING_NO_LEAVES`. Values are long arrays
-(`getRawData`, 256 entries).
+`MOTION_BLOCKING`, `MOTION_BLOCKING_NO_LEAVES`. Values are long arrays over the
+384-block height window: 256 columns packed into 36 longs (`getRawData`).
 
 - `WORLDGEN_HEIGHTMAPS = {OCEAN_FLOOR_WG, WORLD_SURFACE_WG}` for statuses
   `empty`..`surface`.
@@ -453,8 +453,8 @@ Each default below is a load-bearing behavior for read parity:
 
 | field | missing/empty → | source |
 |---|---|---|
-| `Status` (empty string) | `parse` returns **null**; caller drops the chunk (ChunkLoadTask.java L350-352) | L145-147 |
-| `Status` (absent) | `ChunkStatus.EMPTY` | L160, L652-654 |
+| `Status` (absent or wrong type) | `parse` returns **null**; caller drops the chunk (ChunkLoadTask.java L350-352) | L145-147 |
+| `Status` (present but empty string) | `ChunkStatus.EMPTY` | L160, L652-654 |
 | `DataVersion` > current | `printStackTrace()` + `System.exit(1)` unless `-DPaper.ignoreWorldDataVersion` | L150-155 |
 | `xPos`/`zPos` | 0 | L157 |
 | `LastUpdate`/`InhabitedTime` | 0L | L158-159 |
@@ -579,7 +579,7 @@ block fixers; `BlendingData`/retrogen application; deflate/lz4 write parity
    write to the original — the launcher-created New World save noted in memory
    `local-new-world-save`) and load every region record through
    `parse` with the §9 defaults; every chunk either parses or drops exactly as
-   Paper does (empty `Status` → null; newer `DataVersion` honored).
+   Paper does (absent or wrong-typed `Status` → null; present empty `Status` → `ChunkStatus.EMPTY`; newer `DataVersion` honored).
 6. **No mutation on read:** reading a fixture never rewrites the fixture; a
    `parse → write` on a read-only copy must not alter `LastUpdate`/
    `InhabitedTime` (those come only from a `copyOf` save path with a real game
@@ -592,7 +592,7 @@ block fixers; `BlendingData`/retrogen application; deflate/lz4 write parity
 7. `DataLayer` length != 2048 → hard error (not a silent default).
 8. `block_states`/`biomes` with wrong palette/data → `ChunkReadException`
    (not a silent AIR/plains default).
-9. Empty `Status` → `parse` null → chunk dropped.
+9. Absent or wrong-typed `Status` → `parse` null → chunk dropped; a present empty `Status` parses as `ChunkStatus.EMPTY`.
 10. `DataVersion` newer than current → abort (unless the Paper flag is set).
 11. Starlight version != 10 with `isLightOn` present → `lightCorrect = false`
     (no invented fallback).
