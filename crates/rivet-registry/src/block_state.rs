@@ -31,7 +31,7 @@
 use std::fmt;
 
 use crate::block_state_property::{Property, PropertyValue};
-use crate::core::Direction;
+use crate::core::{BlockPos, Direction};
 use crate::generated::block_behaviors::{
     BEHAVIOR_MASK_LIGHT_DAMPENING, BEHAVIOR_MASK_LIGHT_EMISSION, BEHAVIOR_MASK_MAP_COLOR,
     BEHAVIOR_SHIFT_LIGHT_DAMPENING, BEHAVIOR_SHIFT_LIGHT_EMISSION, BEHAVIOR_SHIFT_MAP_COLOR,
@@ -432,6 +432,18 @@ impl BlockState {
             & crate::generated::block_behaviors::BEHAVIOR_MASK_FLUID_ID) as u16
     }
 
+    /// Paper `BlockStateBase.getPostProcessPos` for the four vanilla states
+    /// whose block properties install a post-process callback. Brown and red
+    /// mushrooms mark themselves; soul sand and magma mark the block above.
+    /// Every other vanilla state has the default null callback.
+    pub fn post_process_pos(self, pos: &BlockPos) -> Option<BlockPos> {
+        match self.block().0 {
+            172 | 173 => Some(*pos),
+            286 | 671 => Some(pos.above()),
+            _ => None,
+        }
+    }
+
     /// The state's light dampening in `0..=15` (Paper `getLightDampening`).
     #[inline]
     pub fn light_dampening(self) -> u8 {
@@ -557,6 +569,23 @@ mod tests {
         assert!(!water.fluid_empty());
         assert!(!water.propagates_skylight_down());
         assert!(!water.solid_render());
+    }
+
+    #[test]
+    fn post_process_positions_match_paper_callbacks() {
+        let pos = BlockPos::new(4, 70, -3);
+        for name in ["minecraft:brown_mushroom", "minecraft:red_mushroom"] {
+            let state = BlockState::of(BlockId::from_name(name).unwrap());
+            assert_eq!(state.post_process_pos(&pos), Some(pos), "{name}");
+        }
+        for name in ["minecraft:soul_sand", "minecraft:magma_block"] {
+            let state = BlockState::of(BlockId::from_name(name).unwrap());
+            assert_eq!(state.post_process_pos(&pos), Some(pos.above()), "{name}");
+        }
+        for name in ["minecraft:air", "minecraft:stone", "minecraft:water"] {
+            let state = BlockState::of(BlockId::from_name(name).unwrap());
+            assert_eq!(state.post_process_pos(&pos), None, "{name}");
+        }
     }
 
     #[test]

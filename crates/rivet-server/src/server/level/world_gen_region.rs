@@ -78,6 +78,7 @@ use rivet_util::StaticCache2D;
 use rivet_util::mth;
 use rivet_util::util::log_and_pause_if_in_ide;
 use rivet_world::biome::biome_manager::{BiomeManager, NoiseBiomeSource};
+use rivet_world::block::Block;
 use rivet_world::chunk::chunk_access::ChunkAccess;
 use rivet_world::chunk::status::{ChunkStatus, ChunkStep};
 use rivet_world::chunk::storage::chunk_reconstruction::resolve_state_flags;
@@ -85,6 +86,7 @@ use rivet_world::chunk::storage::section_reconstruction::BiomeId as WorldgenBiom
 use rivet_world::level::WorldGenLevel;
 use rivet_world::level::height_accessor::LevelHeightAccessor;
 use rivet_world::levelgen::heightmap::Types;
+use rivet_world::ticks::{SavedTick, ScheduledTick};
 
 use crate::server::level::level_chunk::{BiomeId as ServerBiomeId, StructureKey, state_flags};
 
@@ -97,6 +99,10 @@ const UPDATE_ALL: i32 = 3;
 /// `set_block` ignores it (the update machinery defers), so this is a faithful
 /// default, not an operative limit.
 const UPDATE_LIMIT: i32 = 512;
+
+/// `Block.UPDATE_KNOWN_SHAPE` — suppresses the automatic post-processing mark
+/// in `WorldGenRegion.setBlock` when the caller already knows the new shape.
+const UPDATE_KNOWN_SHAPE: i32 = 16;
 
 /// `mc.server.level.pipeline.holder` STUB — the `GenerationChunkHolder` read
 /// surface `WorldGenRegion` consumes.
@@ -272,6 +278,13 @@ where
     /// registries); the injected construction mirrors the `ServerLevel` seam
     /// like `uncached_biome_source`.
     registry_access: RegistryAccess,
+    /// `Level.getGameTime()` used by `LevelAccessor.createTick`.
+    /// Generation has no live ServerLevel clock in this value layer, so it is
+    /// explicitly initialized to zero and can be replaced by the owning level
+    /// before scheduling.
+    game_time: i64,
+    /// Monotonic `Level.nextSubTickCount()` replacement for worldgen ticks.
+    next_sub_tick_order: i64,
 }
 
 impl<'a, T, B, S> WorldGenRegion<'a, T, B, S>
@@ -320,12 +333,34 @@ where
             biome_manager,
             uncached_biome_source,
             registry_access,
+            game_time: 0,
+            next_sub_tick_order: 0,
         }
+    }
+
+    /// Set the world clock used by subsequent `createTick` calls.
+    pub fn set_game_time(&mut self, game_time: i64) {
+        self.game_time = game_time;
     }
 
     /// `WorldGenRegion.getCenter()`.
     pub fn get_center(&self) -> ChunkPos {
         self.center_pos
+    }
+
+    /// Block ticks owned by the cached chunks, in cache iteration order. This
+    /// compatibility view exists only for value-layer tests; scheduling itself
+    /// always routes to the chunk containing the scheduled position.
+    pub fn scheduled_block_ticks(&self) -> Vec<SavedTick<Block>> {
+        let mut ticks = Vec::new();
+        self.cache.for_each(|holder| {
+            if let Some(status) = holder.get_persisted_status()
+                && let Some(chunk) = holder.get_chunk_if_present_unchecked(status)
+            {
+                ticks.extend(chunk.get_block_ticks().scheduled_ticks());
+            }
+        });
+        ticks
     }
 
     /// `WorldGenRegion.hasChunk(int, int)` — whether the chessboard distance of
@@ -463,6 +498,24 @@ where
     fn get_chunk_mut(&mut self, chunk_x: i32, chunk_z: i32) -> &mut ChunkAccess<T, B, S> {
         self.try_get_chunk_mut(chunk_x, chunk_z, ChunkStatus::Empty, true)
             .unwrap_or_else(|diagnostic| panic!("{}", diagnostic))
+    }
+
+    /// `LevelAccessor.createTick` followed by `getChunk(pos).getBlockTicks()`.
+    /// The helper is type-agnostic because every `ChunkAccess` owns its block
+    /// tick container in this value model.
+    fn schedule_block_tick_owner(&mut self, pos: &BlockPos, block: Block, delay: i32) {
+        let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
+        let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
+        let trigger_tick = self.game_time.wrapping_add(delay as i64);
+        let sub_tick_order = self.next_sub_tick_order;
+        self.next_sub_tick_order = self.next_sub_tick_order.wrapping_add(1);
+        self.get_chunk_mut(chunk_x, chunk_z)
+            .schedule_block_tick(ScheduledTick::new_normal(
+                block,
+                *pos,
+                trigger_tick,
+                sub_tick_order,
+            ));
     }
 
     /// `WorldGenRegion.getBiomeManager()`.
@@ -637,17 +690,15 @@ impl WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
     /// (`level.updatePOIOnBlockStateChange` on `(flags & UPDATE_SKIP_POI) == 0`,
     /// where `UPDATE_SKIP_POI = 4096`, #185), the block-entity create/remove
     /// (the `hasBlockEntity()` DUMMY proto vs `EntityBlock` level paths and
-    /// the `oldState.hasBlockEntity()` removal, block-entity unit), and the
-    /// shape post-process mark (`getPostProcessPos` on
-    /// `(flags & UPDATE_KNOWN_SHAPE) == 0`, where `UPDATE_KNOWN_SHAPE = 16`,
-    /// #228) — so the value layer does not consume the flags at all (it never
-    /// fabricates the deferred side-effects). The `updateLimit` is likewise
-    /// unread by the ported surface.
+    /// the `oldState.hasBlockEntity()` removal, block-entity unit), defer with
+    /// their owning units. The shape post-process mark is retained for the
+    /// four vanilla states whose `getPostProcessPos` callback is non-null.
+    /// The `updateLimit` is likewise unread by the ported surface.
     pub fn set_block(
         &mut self,
         pos: &BlockPos,
         block_state: BlockState,
-        _update_flags: i32,
+        update_flags: i32,
         _update_limit: i32,
     ) -> bool {
         if !self.ensure_can_write(pos) {
@@ -660,11 +711,22 @@ impl WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
         // threaded from the holder seam (Java's `ProtoChunk.setBlockState` reads
         // `getPersistedStatus().heightmapsAfter()`).
         let persisted_status = self.cache.get(chunk_x, chunk_z).get_persisted_status();
-        let chunk = self.get_chunk_mut(chunk_x, chunk_z);
-        // `oldState` — the previous state `chunk.setBlockState` returns; the
-        // block-entity removal (`oldState.hasBlockEntity()`) and POI update
-        // read it, so the write retains it for those deferred seams (#185).
-        let _old_state = write_block(chunk, pos, block_state, persisted_status);
+        let post_process_pos = (update_flags & UPDATE_KNOWN_SHAPE == 0)
+            .then(|| block_state.post_process_pos(pos))
+            .flatten();
+        {
+            let chunk = self.get_chunk_mut(chunk_x, chunk_z);
+            // `oldState` — the previous state `chunk.setBlockState` returns; the
+            // block-entity removal (`oldState.hasBlockEntity()`) and POI update
+            // read it, so the write retains it for those deferred seams (#185).
+            let _old_state = write_block(chunk, pos, block_state, persisted_status);
+        }
+        if let Some(post_process_pos) = post_process_pos {
+            let post_process_chunk_x = SectionPos::block_to_section_coord(post_process_pos.get_x());
+            let post_process_chunk_z = SectionPos::block_to_section_coord(post_process_pos.get_z());
+            self.get_chunk_mut(post_process_chunk_x, post_process_chunk_z)
+                .mark_pos_for_post_processing(&post_process_pos);
+        }
         true
     }
 
@@ -757,7 +819,7 @@ impl WorldGenLevel for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> 
     fn mark_pos_for_post_processing(&mut self, pos: &BlockPos) {
         let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
         let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
-        self.get_chunk(chunk_x, chunk_z)
+        self.get_chunk_mut(chunk_x, chunk_z)
             .mark_pos_for_post_processing(pos);
     }
 
@@ -805,6 +867,17 @@ impl WorldGenLevel for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> 
         let chunk = self.get_chunk(chunk_x, chunk_z);
         chunk.get_height_at_readonly(ty, x, z) + 1
     }
+
+    /// `LevelAccessor.scheduleTick(BlockPos, Block, int)` — route through the
+    /// owning chunk's `ProtoChunkTicks`.
+    fn schedule_block_tick(
+        &mut self,
+        pos: &BlockPos,
+        block: rivet_world::block::Block,
+        delay: i32,
+    ) {
+        self.schedule_block_tick_owner(pos, block, delay);
+    }
 }
 
 /// The FEATURES-pass specialization — the block-state methods and the
@@ -832,7 +905,7 @@ impl WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
         &mut self,
         pos: &BlockPos,
         block_state: BlockState,
-        _update_flags: i32,
+        update_flags: i32,
         _update_limit: i32,
     ) -> bool {
         if !self.ensure_can_write(pos) {
@@ -843,8 +916,19 @@ impl WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
         // The persisted status threaded from the holder seam — see the dense
         // `set_block`.
         let persisted_status = self.cache.get(chunk_x, chunk_z).get_persisted_status();
-        let chunk = self.get_chunk_mut(chunk_x, chunk_z);
-        let _old_state = write_block_blockstate(chunk, pos, block_state, persisted_status);
+        let post_process_pos = (update_flags & UPDATE_KNOWN_SHAPE == 0)
+            .then(|| block_state.post_process_pos(pos))
+            .flatten();
+        {
+            let chunk = self.get_chunk_mut(chunk_x, chunk_z);
+            let _old_state = write_block_blockstate(chunk, pos, block_state, persisted_status);
+        }
+        if let Some(post_process_pos) = post_process_pos {
+            let post_process_chunk_x = SectionPos::block_to_section_coord(post_process_pos.get_x());
+            let post_process_chunk_z = SectionPos::block_to_section_coord(post_process_pos.get_z());
+            self.get_chunk_mut(post_process_chunk_x, post_process_chunk_z)
+                .mark_pos_for_post_processing(&post_process_pos);
+        }
         true
     }
 
@@ -922,7 +1006,7 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
     fn mark_pos_for_post_processing(&mut self, pos: &BlockPos) {
         let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
         let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
-        self.get_chunk(chunk_x, chunk_z)
+        self.get_chunk_mut(chunk_x, chunk_z)
             .mark_pos_for_post_processing(pos);
     }
 
@@ -959,19 +1043,15 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
         self.sea_level
     }
 
-    /// `LevelAccessor.scheduleTick(BlockPos, Block, int)` — a documented
-    /// no-op. Java's `WorldGenRegion` inherits the `WorldGenLevel` default,
-    /// whose body is empty (the real `scheduleTick` lives on the loaded
-    /// `ServerLevel`'s tick containers, not the worldgen region); `LakeFeature`
-    /// calls it to schedule the placed cave-air, and the scheduled tick is
-    /// invisible to the chunk value the executor observes, so the no-op is the
-    /// faithful value-layer surface.
+    /// `LevelAccessor.scheduleTick(BlockPos, Block, int)` — route through the
+    /// owning chunk's `ProtoChunkTicks`.
     fn schedule_block_tick(
         &mut self,
-        _pos: &BlockPos,
-        _block: rivet_world::block::Block,
-        _delay: i32,
+        pos: &BlockPos,
+        block: rivet_world::block::Block,
+        delay: i32,
     ) {
+        self.schedule_block_tick_owner(pos, block, delay);
     }
 }
 
@@ -1088,10 +1168,11 @@ fn fluid_is_empty(state: &StateId) -> bool {
     behavior_of(*state) & BEHAVIOR_FLAG_FLUID_EMPTY != 0
 }
 
-/// `getFluidState().isRandomlyTicking()` — false (no fluid-random-tick flag in
-/// the generated table; exact for the no-fluid value layer).
-fn fluid_is_randomly_ticking(_state: &StateId) -> bool {
-    false
+/// `getFluidState().isRandomlyTicking()` — lava fluid states randomly tick;
+/// the generated state table carries the fluid registry id even though it does
+/// not carry the fluid behavior flag itself.
+fn fluid_is_randomly_ticking(state: &StateId) -> bool {
+    matches!(BlockState::new(*state).fluid_id(), 3 | 4)
 }
 
 /// `CollisionUtil.isSpecialCollidingBlock(state)` — false (no special-colliding
@@ -1178,10 +1259,11 @@ fn fluid_is_empty_blockstate(state: &BlockState) -> bool {
     state.fluid_empty()
 }
 
-/// `getFluidState().isRandomlyTicking()` — false (no fluid-random-tick flag in
-/// the generated table; exact for the no-fluid value layer).
-fn fluid_is_randomly_ticking_blockstate(_state: &BlockState) -> bool {
-    false
+/// `getFluidState().isRandomlyTicking()` — lava fluid states randomly tick;
+/// the generated state table carries the fluid registry id even though it does
+/// not carry the fluid behavior flag itself.
+fn fluid_is_randomly_ticking_blockstate(state: &BlockState) -> bool {
+    matches!(state.fluid_id(), 3 | 4)
 }
 
 /// `CollisionUtil.isSpecialCollidingBlock(state)` — false (no special-colliding
@@ -1299,6 +1381,7 @@ mod tests {
     use rivet_registry::root::AnyBox;
     use rivet_registry::{Identifier, ResourceKey};
     use rivet_util::StaticCache2D;
+    use rivet_world::block::blocks::Blocks;
     use rivet_world::chunk::status::GENERATION_PYRAMID;
     use rivet_world::chunk::upgrade_data::UpgradeData;
     use rivet_world::level::height_accessor::create as create_accessor;
@@ -1875,6 +1958,45 @@ mod tests {
     }
 
     #[test]
+    fn set_block_marks_only_paper_post_process_states() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(4, 64, 5);
+        let section_index = region.get_chunk(0, 0).get_section_index(pos.get_y()) as usize;
+        let packed_self =
+            ((pos.get_x() & 15) | ((pos.get_y() & 15) << 4) | ((pos.get_z() & 15) << 8)) as i16;
+        let above = pos.above();
+        let packed_above = ((above.get_x() & 15)
+            | ((above.get_y() & 15) << 4)
+            | ((above.get_z() & 15) << 8)) as i16;
+
+        let brown = BlockState::of(BlockId::from_name("minecraft:brown_mushroom").unwrap());
+        assert!(region.set_block(&pos, brown, 0, 0));
+        assert!(region.get_chunk(0, 0).get_post_processing()[section_index].contains(&packed_self));
+
+        let soul_sand = BlockState::of(BlockId::from_name("minecraft:soul_sand").unwrap());
+        assert!(region.set_block(&pos, soul_sand, 0, 0));
+        assert!(
+            region.get_chunk(0, 0).get_post_processing()[section_index].contains(&packed_above)
+        );
+
+        let marked_before_known_shape = region
+            .get_chunk(0, 0)
+            .get_post_processing()
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>();
+        let red = BlockState::of(BlockId::from_name("minecraft:red_mushroom").unwrap());
+        assert!(region.set_block(&pos, red, UPDATE_KNOWN_SHAPE, 0));
+        let marked_after_known_shape = region
+            .get_chunk(0, 0)
+            .get_post_processing()
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>();
+        assert_eq!(marked_after_known_shape, marked_before_known_shape);
+    }
+
+    #[test]
     fn missing_heightmap_reads_actual_blocks_instead_of_a_floor_fallback() {
         let mut center = test_chunk(center());
         let section_index = center.get_section_index(64) as usize;
@@ -1996,15 +2118,48 @@ mod tests {
         );
     }
 
+    /// `scheduleTick(BlockPos, Block, int)` retains a zero-delay stored tick
+    /// and applies ProtoChunkTicks' `(type, position)` deduplication.
+    #[test]
+    fn schedule_block_tick_is_retained_and_deduplicated() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(8, 64, 9);
+        let block = Blocks::CAVE_AIR;
+        <WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::schedule_block_tick(
+            &mut region,
+            &pos,
+            block,
+            0,
+        );
+        <WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::schedule_block_tick(
+            &mut region,
+            &pos,
+            block,
+            0,
+        );
+        let ticks = region.scheduled_block_ticks();
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].r#type, block);
+        assert_eq!(ticks[0].pos, pos);
+        assert_eq!(ticks[0].delay, 0);
+    }
+
     /// `markPosForPostProcessing` (WorldGenRegion.java:410) — the private
     /// method routes `this.getChunk(blockPos).markPosForPostProcessing(blockPos)`
-    /// through the region's gated chunk read: an in-ring position is served
-    /// (the base `ChunkAccess` warns and no-ops; `ProtoChunk` overrides it).
+    /// through the region's gated chunk view and mutates that chunk's section
+    /// offset list.
     #[test]
     fn mark_pos_for_post_processing_serves_an_in_ring_position() {
         let mut region = feature_region();
-        // Chunk (0, 0) — inside the cache ring, so the read is served.
-        region.mark_pos_for_post_processing(&BlockPos::new(8, 64, 9));
+        let pos = BlockPos::new(8, 64, 9);
+        // Chunk (0, 0) — inside the cache ring, so the write is served.
+        region.mark_pos_for_post_processing(&pos);
+        let chunk = region.get_chunk(0, 0);
+        let offsets = chunk.get_post_processing();
+        let section_index = chunk.get_section_index(pos.get_y()) as usize;
+        let packed =
+            ((pos.get_x() & 15) | ((pos.get_y() & 15) << 4) | ((pos.get_z() & 15) << 8)) as i16;
+        assert_eq!(offsets[section_index], vec![packed]);
     }
 
     /// A position whose chunk is outside the cache ring fails loudly with the
@@ -2016,5 +2171,35 @@ mod tests {
         let mut region = feature_region();
         // Block (200, 64, 0) → chunk (12, 0), distance 12 > the 8-ring cache.
         region.mark_pos_for_post_processing(&BlockPos::new(200, 64, 0));
+    }
+
+    /// Paper's `FluidState.isRandomlyTicking` is true for both flowing and
+    /// source lava. The generated block-state table carries the fluid id but
+    /// not this fluid behavior flag, so exercise every reachable lava state
+    /// rather than only the source default.
+    #[test]
+    fn lava_states_are_randomly_ticking_fluids() {
+        let mut found_flowing = false;
+        let mut found_source = false;
+        for raw in 0..rivet_registry::generated::block_states::BLOCK_STATE_COUNT {
+            let state = BlockState::new(StateId(raw));
+            match state.fluid_id() {
+                3 => {
+                    found_flowing = true;
+                    assert!(!state.fluid_empty());
+                    assert!(fluid_is_randomly_ticking(&StateId(raw)));
+                    assert!(fluid_is_randomly_ticking_blockstate(&state));
+                }
+                4 => {
+                    found_source = true;
+                    assert!(!state.fluid_empty());
+                    assert!(fluid_is_randomly_ticking(&StateId(raw)));
+                    assert!(fluid_is_randomly_ticking_blockstate(&state));
+                }
+                _ => {}
+            }
+        }
+        assert!(found_flowing, "the generated table must carry flowing lava");
+        assert!(found_source, "the generated table must carry source lava");
     }
 }

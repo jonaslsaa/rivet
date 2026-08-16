@@ -120,7 +120,22 @@ impl PlacedFeature {
         random: &mut R,
         origin: &BlockPos,
     ) -> bool {
-        let mut selected = false;
+        self.first_placement_position(level, generator, random, origin)
+            .is_some()
+    }
+
+    /// Return the first terminal position selected by the complete placement
+    /// modifier chain. This is the same depth-first walk as
+    /// [`Self::has_placement_positions`], but exposes the position for callers
+    /// that need to prepare or inspect the configured feature's world state.
+    pub fn first_placement_position<R: RandomSource>(
+        &self,
+        level: &mut dyn WorldGenLevel,
+        generator: &dyn ChunkGenerator,
+        random: &mut R,
+        origin: &BlockPos,
+    ) -> Option<BlockPos> {
+        let mut selected = None;
         self.select_walk(0, *origin, level, generator, random, &mut selected);
         selected
     }
@@ -132,13 +147,15 @@ impl PlacedFeature {
         level: &mut dyn WorldGenLevel,
         generator: &dyn ChunkGenerator,
         random: &mut R,
-        selected: &mut bool,
+        selected: &mut Option<BlockPos>,
     ) {
-        if *selected {
+        if selected.is_some() {
             return;
         }
         if index == self.placement.len() {
-            *selected = true;
+            if level.ensure_can_write(&pos) {
+                *selected = Some(pos);
+            }
             return;
         }
         let modifier = &self.placement[index];
@@ -148,7 +165,7 @@ impl PlacedFeature {
         };
         for child in positions {
             self.select_walk(index + 1, child, level, generator, random, selected);
-            if *selected {
+            if selected.is_some() {
                 break;
             }
         }
@@ -862,6 +879,35 @@ mod tests {
         }
     }
 
+    struct RejectingLevel;
+
+    impl crate::level::height_accessor::LevelHeightAccessor for RejectingLevel {
+        fn get_height(&self) -> i32 {
+            384
+        }
+
+        fn get_min_y(&self) -> i32 {
+            -64
+        }
+    }
+
+    impl crate::level::WorldGenLevel for RejectingLevel {
+        fn get_seed(&self) -> i64 {
+            0
+        }
+
+        fn ensure_can_write(&self, _pos: &rivet_registry::core::BlockPos) -> bool {
+            false
+        }
+
+        fn get_block_state(
+            &self,
+            _pos: &rivet_registry::core::BlockPos,
+        ) -> rivet_registry::block_state::BlockState {
+            panic!("WorldGenLevel.getBlockState is not implemented (RivetTodo #399)")
+        }
+    }
+
     impl crate::chunk::ChunkGenerator for NoopGenerator {
         fn get_min_y(&self) -> i32 {
             0
@@ -951,6 +997,26 @@ mod tests {
         let mut level = TestLevel;
         let generator = NoopGenerator;
         let mut random = rivet_util::random::LegacyRandomSource::new(0);
+        assert!(!placed.has_placement_positions(
+            &mut level,
+            &generator,
+            &mut random,
+            &BlockPos::new(0, 0, 0),
+        ));
+    }
+
+    #[test]
+    fn selection_walk_rejects_a_terminal_position_outside_the_write_zone() {
+        let placed = PlacedFeature::new(
+            Holder::direct(no_op_feature()),
+            vec![
+                count_modifier(),
+                Arc::new(RarityFilter::on_average_once_every(1)),
+            ],
+        );
+        let mut level = RejectingLevel;
+        let generator = NoopGenerator;
+        let mut random = rivet_util::random::LegacyRandomSource::new(42);
         assert!(!placed.has_placement_positions(
             &mut level,
             &generator,
