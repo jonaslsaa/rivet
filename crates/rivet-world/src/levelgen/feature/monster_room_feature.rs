@@ -56,10 +56,12 @@
 //! exactly as Java.
 //!
 //! This is a leaf-level port: direct placement and dispatch-id tests exercise
-//! the behavior, but the configured-feature decoder does not yet construct
-//! this feature from `minecraft:monster_room`, and the borrowed
-//! `WorldGenRegion` path does not yet provide the block-entity seams. No
-//! production worldgen execution is claimed here.
+//! the behavior. The configured-feature decoder still does not construct this
+//! feature from `minecraft:monster_room`, and the generated-world FEATURES
+//! pipeline stops at its first unsupported placed-feature value before any
+//! placement dispatch. The production `WorldGenRegion` now materializes the
+//! chest/spawner seams, but seed-42 generation remains unreachable until the
+//! decoder and registry closure land; no production placement is claimed here.
 
 use crate::block::blocks::Blocks;
 use crate::level::WorldGenLevel;
@@ -396,8 +398,10 @@ impl FeatureBehavior<NoneFeatureConfiguration> for MonsterRoomFeature {
         // Spawner — placed at the origin, then its spawn type is set only when
         // the block entity lookup succeeds. Java evaluates that lookup before
         // `randomEntityId`, so a blocked/non-spawner origin consumes no mob
-        // selection draw. The empty `SpawnPotentials` `WeightedList` in
-        // `setEntityId` draws nothing after the selected id.
+        // selection draw. `setEntityId` first calls
+        // `getOrCreateNextSpawnData`: an absent `SpawnData` with non-empty
+        // potentials consumes one weighted-list draw and clears the potentials
+        // after replacing the selected entry's id.
         safe_set_block(
             level,
             &origin,
@@ -405,7 +409,10 @@ impl FeatureBehavior<NoneFeatureConfiguration> for MonsterRoomFeature {
             &can_replace,
         );
         if level.is_spawner_block_entity(&origin) {
-            level.set_spawner_entity(&origin, random_entity_id(random));
+            let potential_roll = level
+                .spawner_potential_weight(&origin)
+                .map(|total| random.next_int_bound(total));
+            level.set_spawner_entity(&origin, random_entity_id(random), potential_roll);
         }
 
         true
@@ -416,7 +423,9 @@ impl FeatureBehavior<NoneFeatureConfiguration> for MonsterRoomFeature {
 mod tests {
     use super::*;
     use crate::block::blocks::Blocks;
-    use crate::levelgen::feature::test_support::{RngCall, TestGenerator, TestLevel, access};
+    use crate::levelgen::feature::test_support::{
+        RngCall, TestBlockEntity, TestGenerator, TestLevel, access,
+    };
     use crate::levelgen::feature::{FeatureId, feature_place};
     use rivet_registry::block_state::BlockState;
     use rivet_registry::block_state_property::PropertyValue;
@@ -444,6 +453,17 @@ mod tests {
                 loot_seed,
                 calls: Vec::new(),
             }
+        }
+
+        fn room_with_spawner_potentials(loot_seed: i64) -> Self {
+            let mut random = Self::room(loot_seed);
+            let mob_roll = random
+                .bounds
+                .pop()
+                .expect("room fixture carries a mob roll");
+            random.bounds.push(0);
+            random.bounds.push(mob_roll);
+            random
         }
     }
 
@@ -592,6 +612,50 @@ mod tests {
             .count();
         assert_eq!(floor_mossy, 48);
         assert_eq!(floor_cobble, 1);
+    }
+
+    #[test]
+    fn existing_spawner_potentials_consume_weighted_draw_and_clear_state() {
+        let mut level = TestLevel::over(access());
+        let origin = BlockPos::new(10, 20, -4);
+        prepare_room(&mut level, origin);
+        level.set_spawner_state(origin, None, vec![("minecraft:zombie".to_string(), 1)]);
+        let mut random = ScriptedRandom::room_with_spawner_potentials(7);
+
+        assert!(place(&mut level, origin, &mut random));
+        assert_eq!(random.calls[60], RngCall::IntBound(1));
+        assert_eq!(random.calls[61], RngCall::IntBound(4));
+        assert_eq!(
+            level.block_entities.get(&origin),
+            Some(&TestBlockEntity::Spawner {
+                next_spawn: Some("minecraft:skeleton".to_string()),
+                spawn_potentials: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn existing_spawner_data_skips_potential_rng_draw() {
+        let mut level = TestLevel::over(access());
+        let origin = BlockPos::new(10, 20, -4);
+        prepare_room(&mut level, origin);
+        level.set_spawner_state(
+            origin,
+            Some("minecraft:spider".to_string()),
+            vec![("minecraft:zombie".to_string(), 1)],
+        );
+        let mut random = ScriptedRandom::room(7);
+
+        assert!(place(&mut level, origin, &mut random));
+        assert_eq!(random.next_bound, 60);
+        assert_eq!(random.calls[60], RngCall::IntBound(4));
+        assert_eq!(
+            level.block_entities.get(&origin),
+            Some(&TestBlockEntity::Spawner {
+                next_spawn: Some("minecraft:skeleton".to_string()),
+                spawn_potentials: Vec::new(),
+            })
+        );
     }
 
     #[test]

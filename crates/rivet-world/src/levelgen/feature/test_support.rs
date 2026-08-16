@@ -42,6 +42,21 @@ use rivet_util::random::{LegacyPositionalRandomFactory, LegacyRandomSource};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// The small live block-entity state the feature fixture exposes. Block states
+/// and entities are intentionally separate: a chest/spawner state only gains a
+/// matching entity when `set_block` materializes it, just as the production
+/// world must do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TestBlockEntity {
+    Chest {
+        loot: Option<(i64, String)>,
+    },
+    Spawner {
+        next_spawn: Option<String>,
+        spawn_potentials: Vec<(String, i32)>,
+    },
+}
+
 /// The two-registry access the selector features resolve their holders
 /// through — frozen empty configured/placed registries (the test configured
 /// features are inline `Direct`, so nothing resolves by id).
@@ -141,6 +156,10 @@ pub struct TestLevel {
     /// The mutable block-state map: `get_block_state` reads it (air for an
     /// unset position), `set_block` writes it.
     pub states: HashMap<BlockPos, BlockState>,
+    /// Live block entities materialized by block writes. This is separate from
+    /// [`states`](Self::states) so tests cannot treat a block-state id as an
+    /// entity lookup result.
+    pub block_entities: HashMap<BlockPos, TestBlockEntity>,
     /// `get_height_at` — the column height returned for every `(x, z)`.
     pub height: i32,
     /// `get_sea_level` — the fixed sea level.
@@ -191,6 +210,7 @@ impl TestLevel {
             writes_flags: Vec::new(),
             destroyed: Vec::new(),
             states: HashMap::new(),
+            block_entities: HashMap::new(),
             height: 0,
             sea_level: 63,
             survive: true,
@@ -204,6 +224,51 @@ impl TestLevel {
             chest_loot: Vec::new(),
             spawner_entities: Vec::new(),
         }
+    }
+
+    fn materialize_block_entity(&mut self, pos: &BlockPos, state: BlockState) {
+        if state.block() == Blocks::CHEST.id() {
+            if !matches!(
+                self.block_entities.get(pos),
+                Some(TestBlockEntity::Chest { .. })
+            ) {
+                self.block_entities
+                    .insert(*pos, TestBlockEntity::Chest { loot: None });
+            }
+        } else if state.block() == Blocks::SPAWNER.id() {
+            if !matches!(
+                self.block_entities.get(pos),
+                Some(TestBlockEntity::Spawner { .. })
+            ) {
+                self.block_entities.insert(
+                    *pos,
+                    TestBlockEntity::Spawner {
+                        next_spawn: None,
+                        spawn_potentials: Vec::new(),
+                    },
+                );
+            }
+        } else {
+            self.block_entities.remove(pos);
+        }
+    }
+
+    /// Seed a pre-existing spawner entity for a state-transition/RNG test.
+    pub fn set_spawner_state(
+        &mut self,
+        pos: BlockPos,
+        next_spawn: Option<String>,
+        spawn_potentials: Vec<(String, i32)>,
+    ) {
+        self.states
+            .insert(pos, Blocks::SPAWNER.default_block_state());
+        self.block_entities.insert(
+            pos,
+            TestBlockEntity::Spawner {
+                next_spawn,
+                spawn_potentials,
+            },
+        );
     }
 }
 
@@ -237,12 +302,15 @@ impl WorldGenLevel for TestLevel {
         self.writes.push((*pos, state));
         self.writes_flags.push(flags);
         self.states.insert(*pos, state);
+        self.materialize_block_entity(pos, state);
         true
     }
 
     fn destroy_block(&mut self, pos: &BlockPos, _drop: bool) -> bool {
         self.destroyed.push(*pos);
-        self.states.insert(*pos, BlockState::of(BlockId(0)));
+        let air = BlockState::of(BlockId(0));
+        self.states.insert(*pos, air);
+        self.materialize_block_entity(pos, air);
         true
     }
 
@@ -294,19 +362,56 @@ impl WorldGenLevel for TestLevel {
     }
 
     fn is_randomizable_container(&self, pos: &BlockPos) -> bool {
-        self.get_block_state(pos).block() == Blocks::CHEST.id()
+        matches!(
+            self.block_entities.get(pos),
+            Some(TestBlockEntity::Chest { .. })
+        )
     }
 
     fn is_spawner_block_entity(&self, pos: &BlockPos) -> bool {
-        self.get_block_state(pos).block() == Blocks::SPAWNER.id()
+        matches!(
+            self.block_entities.get(pos),
+            Some(TestBlockEntity::Spawner { .. })
+        )
     }
 
     fn set_block_entity_loot_table(&mut self, pos: &BlockPos, seed: i64, loot_table: &str) {
-        self.chest_loot.push((*pos, seed, loot_table.to_string()));
+        if let Some(TestBlockEntity::Chest { loot }) = self.block_entities.get_mut(pos) {
+            *loot = Some((seed, loot_table.to_string()));
+            self.chest_loot.push((*pos, seed, loot_table.to_string()));
+        }
     }
 
-    fn set_spawner_entity(&mut self, pos: &BlockPos, entity_id: &str) {
-        self.spawner_entities.push((*pos, entity_id.to_string()));
+    fn spawner_potential_weight(&self, pos: &BlockPos) -> Option<i32> {
+        match self.block_entities.get(pos) {
+            Some(TestBlockEntity::Spawner {
+                next_spawn: None,
+                spawn_potentials,
+            }) if !spawn_potentials.is_empty() => {
+                Some(spawn_potentials.iter().map(|(_, weight)| *weight).sum())
+            }
+            _ => None,
+        }
+    }
+
+    fn set_spawner_entity(&mut self, pos: &BlockPos, entity_id: &str, potential_roll: Option<i32>) {
+        if let Some(TestBlockEntity::Spawner {
+            next_spawn,
+            spawn_potentials,
+        }) = self.block_entities.get_mut(pos)
+        {
+            if let Some(mut roll) = potential_roll {
+                for (_, weight) in spawn_potentials.iter() {
+                    if roll < *weight {
+                        break;
+                    }
+                    roll -= *weight;
+                }
+            }
+            *next_spawn = Some(entity_id.to_string());
+            spawn_potentials.clear();
+            self.spawner_entities.push((*pos, entity_id.to_string()));
+        }
     }
 }
 
