@@ -803,6 +803,7 @@ mod tests {
             )
             .set_value(BlockStateProperties::FACING, Direction::Up)
             .unwrap();
+            assert!(state.has_dynamic_shape(), "{name} must use dynamic queries");
             assert_eq!(
                 context.shape_query(&state, &pos),
                 Ok(shulker_query(ShulkerBoxShape::closed(Direction::Up))),
