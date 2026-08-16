@@ -74,13 +74,27 @@ chmod +x "$SANDBOX/scripts"/*
 git -C "$SANDBOX" init -q
 git -C "$SANDBOX" config user.email test@example.invalid
 git -C "$SANDBOX" config user.name test
-printf '__pycache__/\n*.pyc\n*.log\nfail_*\nhome/\njdk/\ntools/rivet-client/run-scenario.sh\ntools/rivet-oracle/work/\ntools/rivet-reference-oracle/\nworking/\n' > "$SANDBOX/.gitignore"
+printf '__pycache__/\n*.pyc\n*.log\nfail_*\nhome/\njdk/\ntools/rivet-client/run-scenario.sh\ntools/rivet-oracle/run.sh\ntools/rivet-capture/run.sh\ntools/rivet-oracle/work/\ntools/rivet-reference-oracle/\nworking/\n' > "$SANDBOX/.gitignore"
 git -C "$SANDBOX" add .
 git -C "$SANDBOX" commit -qm initial
 CLIENT_TARGET="$(env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR RIVET_CARGO_TARGET_ROOT="$CACHE_ROOT" "$SANDBOX/scripts/cargo-target-dir.sh" target "$SANDBOX")"
 mkdir -p "$CLIENT_TARGET/debug"
 : > "$CLIENT_TARGET/debug/rivet-client"
-env RIVET_CARGO_TARGET_ROOT="$CACHE_ROOT" CARGO_TARGET_DIR="$CLIENT_TARGET" python3 "$SANDBOX/scripts/cargo-provenance.py" sidecar "$SANDBOX" "$CLIENT_TARGET/debug/rivet-client" >/dev/null
+env -u RIVET_CARGO_TARGET_DIR RIVET_CARGO_TARGET_ROOT="$CACHE_ROOT" CARGO_TARGET_DIR="$CLIENT_TARGET" python3 "$SANDBOX/scripts/cargo-provenance.py" sidecar "$SANDBOX" "$CLIENT_TARGET/debug/rivet-client" >/dev/null
+cat > "$CLIENT_TARGET/debug/rivet-parity" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+chmod +x "$CLIENT_TARGET/debug/rivet-parity"
+env -u RIVET_CARGO_TARGET_DIR RIVET_CARGO_TARGET_ROOT="$CACHE_ROOT" CARGO_TARGET_DIR="$CLIENT_TARGET" python3 "$SANDBOX/scripts/cargo-provenance.py" sidecar "$SANDBOX" "$CLIENT_TARGET/debug/rivet-parity" >/dev/null
+mkdir -p "$SANDBOX/tools/rivet-oracle" "$SANDBOX/tools/rivet-capture"
+for wrapper in rivet-oracle rivet-capture; do
+  cat > "$SANDBOX/tools/$wrapper/run.sh" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+  chmod +x "$SANDBOX/tools/$wrapper/run.sh"
+done
 
 # gate.sh now also runs the scenario runner's Paper rows (join/move
 # Paper-vs-Rivet differentials) whenever the paperclip jar and the client binary
@@ -185,7 +199,7 @@ chmod +x "$SANDBOX/home/.cargo/bin/cargo" "$SANDBOX/home/.cargo/bin/cargo-machet
 # Fully controlled PATH: sandbox bin + minimal system dirs. gate.sh prepends
 # $HOME/.cargo/bin itself. JAVA_HOME points at the sandbox jdk so the
 # reference-oracle javac probe is deterministic on hosts with their own JDK.
-GATE="env HOME=$SANDBOX/home JAVA_HOME=$SANDBOX/jdk RIVET_CARGO_TARGET_ROOT=$CACHE_ROOT RIVET_CLIENT_BIN=$CLIENT_TARGET/debug/rivet-client PATH=$SANDBOX/home/.cargo/bin:/usr/bin:/bin $SANDBOX/scripts/gate.sh"
+GATE="env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR HOME=$SANDBOX/home JAVA_HOME=$SANDBOX/jdk RIVET_CARGO_TARGET_ROOT=$CACHE_ROOT RIVET_CLIENT_BIN=$CLIENT_TARGET/debug/rivet-client PATH=$SANDBOX/home/.cargo/bin:/usr/bin:/bin $SANDBOX/scripts/gate.sh"
 
 # Assertions shared by every scenario: the packets step must be scoped to
 # `-p rivet-protocol --features packets` — never widened to `--all-features` or

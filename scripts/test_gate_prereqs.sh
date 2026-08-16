@@ -30,6 +30,42 @@ if [ -z "${REQUIRE_ORACLE:-}" ] && [ -z "${VERIFY_RUNNABLE:-}" ]; then
 fi
 pass "sourcing gate.sh defines functions without running the gate"
 
+# A caller-owned wrapper must remain effective; reporting must not claim that
+# sccache was selected when strict_gate_prepare preserved the custom wrapper.
+CUSTOM_WRAPPER="$TMP/custom-rustc-wrapper"
+printf '#!/bin/bash\nexit 0\n' > "$CUSTOM_WRAPPER"
+chmod +x "$CUSTOM_WRAPPER"
+CUSTOM_TARGET_ROOT="$TMP/custom-target-root"
+mkdir -p "$CUSTOM_TARGET_ROOT"
+CUSTOM_GATE_OUT="$TMP/custom-wrapper-gate.out"
+(
+  unset CARGO_TARGET_DIR RIVET_CARGO_TARGET_DIR RIVET_CARGO_REPO_ID RIVET_CARGO_CHECKOUT_ID RIVET_CARGO_HEAD RIVET_CARGO_STATE_DIGEST
+  export RIVET_CARGO_TARGET_ROOT="$CUSTOM_TARGET_ROOT" RUSTC_WRAPPER="$CUSTOM_WRAPPER"
+  strict_gate_prepare
+) > "$CUSTOM_GATE_OUT" 2>&1
+grep -Fq "sccache inactive (preserving custom RUSTC_WRAPPER=$CUSTOM_WRAPPER)" "$CUSTOM_GATE_OUT" \
+  || fail "custom RUSTC_WRAPPER was not reported as preserved"
+pass "custom RUSTC_WRAPPER is preserved and reported accurately"
+
+# Explicit oracle/capture executable overrides take precedence over the checked-in
+# wrappers, which keeps every gate invocation tied to the attested binary chosen
+# by the caller.
+ORACLE_OVERRIDE="$TMP/oracle-override"
+CAPTURE_OVERRIDE="$TMP/capture-override"
+printf '#!/bin/bash\nprintf "oracle-override %%s\\n" "$*"\n' > "$ORACLE_OVERRIDE"
+printf '#!/bin/bash\nprintf "capture-override %%s\\n" "$*"\n' > "$CAPTURE_OVERRIDE"
+chmod +x "$ORACLE_OVERRIDE" "$CAPTURE_OVERRIDE"
+(
+  export RIVET_ORACLE_BIN="$ORACLE_OVERRIDE" RIVET_CAPTURE_BIN="$CAPTURE_OVERRIDE"
+  rivet_oracle_exec probe
+  rivet_capture_exec probe
+) > "$TMP/override-dispatch.out"
+grep -q '^oracle-override probe$' "$TMP/override-dispatch.out" \
+  || fail "RIVET_ORACLE_BIN override was not dispatched"
+grep -q '^capture-override probe$' "$TMP/override-dispatch.out" \
+  || fail "RIVET_CAPTURE_BIN override was not dispatched"
+pass "oracle and capture overrides are dispatched first"
+
 # --- shim executables ----------------------------------------------------------
 add_stub() { # $1=name, $2=stdout line
   printf '#!/bin/bash\nprintf "%%s\\n" %q\n' "$2" > "$SHIM/$1"
@@ -153,6 +189,12 @@ crash_cargo() {
   printf '#!/bin/bash\nprintf "%%s\\n" "[rivet-parity] panicked at main.rs:123" >&2\nexit 101\n' > "$CARGO_SHIM/cargo"
   chmod +x "$CARGO_SHIM/cargo"
 }
+cat > "$CARGO_SHIM/rivet-parity" <<'EOF'
+#!/bin/bash
+exec cargo "$@"
+EOF
+chmod +x "$CARGO_SHIM/rivet-parity"
+RIVET_PARITY_BIN="$CARGO_SHIM/rivet-parity"
 
 # Dead oracle, gate not in --require-oracle mode: must set ORACLE_UNVERIFIED,
 # return 0 (main decides the exit), and never print VERIFIED.

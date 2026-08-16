@@ -54,7 +54,7 @@ printf '[workspace]\n' > "$SANDBOX/Cargo.toml"
 printf '[package]\nname = "rivet-codegen"\nversion = "0.1.0"\nedition = "2024"\n' \
   > "$SANDBOX/tools/rivet-codegen/Cargo.toml"
 printf '{"entries":[]}' > "$SANDBOX/tools/rivet-oracle/fixtures/chunk-hash/paper/manifest.json"
-printf '__pycache__/\n*.pyc\n*.log\nfail_*\nhome/\njdk/\ntools/rivet-oracle/work/\ntools/rivet-reference-oracle/\nworking/\n' > "$SANDBOX/.gitignore"
+printf '__pycache__/\n*.pyc\n*.log\nfail_*\nhome/\njdk/\ntools/rivet-oracle/run.sh\ntools/rivet-capture/run.sh\ntools/rivet-oracle/work/\ntools/rivet-reference-oracle/\nworking/\n' > "$SANDBOX/.gitignore"
 
 # The full gate runs `python3 scripts/test_analyze_graph.py` (the manifest
 # regression suite), and the marker audit runs `scripts/check_markers.py` +
@@ -94,7 +94,21 @@ git -C "$SANDBOX" commit -qm initial
 CLIENT_TARGET="$(env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR RIVET_CARGO_TARGET_ROOT="$CACHE_ROOT" "$SANDBOX/scripts/cargo-target-dir.sh" target "$SANDBOX")"
 mkdir -p "$CLIENT_TARGET/debug"
 : > "$CLIENT_TARGET/debug/rivet-client"
-env RIVET_CARGO_TARGET_ROOT="$CACHE_ROOT" CARGO_TARGET_DIR="$CLIENT_TARGET" python3 "$SANDBOX/scripts/cargo-provenance.py" sidecar "$SANDBOX" "$CLIENT_TARGET/debug/rivet-client" >/dev/null
+env -u RIVET_CARGO_TARGET_DIR RIVET_CARGO_TARGET_ROOT="$CACHE_ROOT" CARGO_TARGET_DIR="$CLIENT_TARGET" python3 "$SANDBOX/scripts/cargo-provenance.py" sidecar "$SANDBOX" "$CLIENT_TARGET/debug/rivet-client" >/dev/null
+cat > "$CLIENT_TARGET/debug/rivet-parity" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+chmod +x "$CLIENT_TARGET/debug/rivet-parity"
+env -u RIVET_CARGO_TARGET_DIR RIVET_CARGO_TARGET_ROOT="$CACHE_ROOT" CARGO_TARGET_DIR="$CLIENT_TARGET" python3 "$SANDBOX/scripts/cargo-provenance.py" sidecar "$SANDBOX" "$CLIENT_TARGET/debug/rivet-parity" >/dev/null
+mkdir -p "$SANDBOX/tools/rivet-oracle" "$SANDBOX/tools/rivet-capture"
+for wrapper in rivet-oracle rivet-capture; do
+  cat > "$SANDBOX/tools/$wrapper/run.sh" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+  chmod +x "$SANDBOX/tools/$wrapper/run.sh"
+done
 
 # --- satisfy the oracle pre-check --------------------------------------------
 # Same dummy-file/version-stub approach as test_codegen_gate.sh so a green full
@@ -182,7 +196,7 @@ chmod +x "$SANDBOX/home/.cargo/bin/cargo" "$SANDBOX/home/.cargo/bin/cargo-machet
 # Fully controlled PATH: sandbox bin + minimal system dirs. gate.sh prepends
 # $HOME/.cargo/bin itself. JAVA_HOME points at the sandbox jdk so the
 # reference-oracle javac probe is deterministic on hosts with their own JDK.
-GATE="env HOME=$SANDBOX/home JAVA_HOME=$SANDBOX/jdk RIVET_CARGO_TARGET_ROOT=$CACHE_ROOT RIVET_CLIENT_BIN=$CLIENT_TARGET/debug/rivet-client PATH=$SANDBOX/home/.cargo/bin:/usr/bin:/bin $SANDBOX/scripts/gate.sh"
+GATE="env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR HOME=$SANDBOX/home JAVA_HOME=$SANDBOX/jdk RIVET_CARGO_TARGET_ROOT=$CACHE_ROOT RIVET_CLIENT_BIN=$CLIENT_TARGET/debug/rivet-client PATH=$SANDBOX/home/.cargo/bin:/usr/bin:/bin $SANDBOX/scripts/gate.sh"
 
 # Assertions shared by every scenario: the blocks step must be scoped to
 # `-p rivet-registry --features blocks` — never widened to `--all-features` or

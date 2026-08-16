@@ -124,18 +124,21 @@ source "$REPO_DIR/scripts/cargo-target-dir.sh"
 strict_gate_prepare() {
   local digest strict_dir
   cargo_export_namespace "$REPO_DIR"
-  for override in RIVET_CLIENT_BIN RIVET_SERVER_BIN RIVET_ORACLE_BIN RIVET_CAPTURE_BIN; do
+  for override in RIVET_CLIENT_BIN RIVET_SERVER_BIN RIVET_ORACLE_BIN RIVET_CAPTURE_BIN RIVET_PARITY_BIN; do
     if [ -n "${!override:-}" ]; then
       python3 "$REPO_DIR/scripts/cargo-provenance.py" verify "$REPO_DIR" "${!override}"
     fi
   done
-  if command -v sccache >/dev/null 2>&1; then
-    export RUSTC_WRAPPER="${RUSTC_WRAPPER:-$(command -v sccache)}"
+  if [ -n "${RUSTC_WRAPPER:-}" ]; then
+    echo "==> sccache inactive (preserving custom RUSTC_WRAPPER=$RUSTC_WRAPPER)"
+  elif command -v sccache >/dev/null 2>&1; then
+    export RUSTC_WRAPPER="$(command -v sccache)"
     echo "==> sccache active ($RUSTC_WRAPPER)"
   else
     echo "==> sccache inactive (not installed)"
   fi
   digest=$(cargo_state_digest_for "$REPO_DIR")
+  export RIVET_CARGO_STATE_DIGEST="$digest"
   strict_dir=$(cargo_namespace_value "$REPO_DIR" strict)
   mkdir -p "$strict_dir"
   export RIVET_STRICT_BEFORE_DIGEST="$digest"
@@ -159,6 +162,14 @@ strict_gate_verify() {
   fi
   printf '%s\n' "$after" > "$current"
   echo "==> strict gate digest after: $after"
+}
+
+rivet_oracle_exec() {
+  "${RIVET_ORACLE_BIN:-$REPO_DIR/tools/rivet-oracle/run.sh}" "$@"
+}
+
+rivet_capture_exec() {
+  "${RIVET_CAPTURE_BIN:-$REPO_DIR/tools/rivet-capture/run.sh}" "$@"
 }
 
 # ---- oracle prereq pre-check (full gate only) --------------------------------
@@ -248,15 +259,10 @@ oracle_prereq_check() {
   # scenario runner and rivet-capture both need it; the gate never runs the
   # capture step against a missing client binary.
   CLIENT_BIN=""
-  if [ -n "${RIVET_CLIENT_BIN:-}" ]; then
-    if [ -f "$RIVET_CLIENT_BIN" ] && python3 "$REPO_DIR/scripts/cargo-provenance.py" verify "$REPO_DIR" "$RIVET_CLIENT_BIN" >/dev/null 2>&1; then
-      CLIENT_BIN="$RIVET_CLIENT_BIN"
-    fi
+  if CLIENT_BIN="$(cargo_binary_for "$REPO_DIR" rivet-client 2>/dev/null)"; then
+    :
   else
-    client_candidate="$(cargo_target_dir_for "$REPO_DIR")/debug/rivet-client"
-    if [ -f "$client_candidate" ]; then
-      CLIENT_BIN="$client_candidate"
-    fi
+    CLIENT_BIN=""
   fi
   if [ -n "$CLIENT_BIN" ]; then
     echo "  [ok]      rivet-client binary ($CLIENT_BIN)"
@@ -290,8 +296,8 @@ oracle_prereq_check() {
     done
   fi
 
-  # Java 25 JDK for the reference oracle (rivet-parity compiles against Paper via
-  # run.sh) — mirror run.sh's discovery order.
+  # Java 25 JDK for the reference oracle (rivet-parity compiles against Paper
+  # through the reference-oracle run.sh) — mirror its discovery order.
   local javac25="" h mac_home
   for h in "${RIVET_JAVA_HOME:-}" "${JAVA_HOME:-}" "${SDKMAN_CANDIDATES_DIR:-$HOME/.sdkman/candidates}/java/current"; do
     if [ -n "$h" ] && [ -x "$h/bin/javac" ] && [[ "$("$h/bin/javac" -version 2>&1)" == "javac 25"* ]]; then
@@ -316,7 +322,7 @@ oracle_prereq_check() {
     missing=$((missing + 1))
   fi
 
-  # Paper compile jar (rivet-parity's run.sh compiles the reference oracle against it).
+  # Paper compile jar used by rivet-parity's reference-oracle process.
   if [ -n "${RIVET_PAPER_JAR:-}" ] && [ -f "${RIVET_PAPER_JAR}" ]; then
     COMPILE_JAR="$RIVET_PAPER_JAR"
   else
@@ -411,23 +417,23 @@ oracle_prereq_check() {
 # fixtures.
 run_oracle_verify() {
   echo "==> oracle verify (all committed fixture kinds: M0 slice + worldgen samples + M2 regions + text corpus + spline + composed-noise + surface-column)"
-  cargo run -q -p rivet-oracle
+  rivet_oracle_exec
   if [ "$VERIFY_RUNNABLE" = 1 ]; then
     echo "==> oracle verify (M0 sanity gate: green against vanilla itself)"
-    cargo run -q -p rivet-oracle -- verify
+    rivet_oracle_exec verify
     echo "    VERIFIED — fresh Paper boot is byte-identical to the committed golden baseline"
     echo "==> oracle negative control (verify --expect-fail: detects tamper)"
-    cargo run -q -p rivet-oracle -- verify --expect-fail
+    rivet_oracle_exec verify --expect-fail
     echo "==> oracle verify (M2 region gate: normal-overworld none-compression region parity)"
-    cargo run -q -p rivet-oracle -- verify --m2
+    rivet_oracle_exec verify --m2
     echo "    VERIFIED — fresh normal-overworld boot is byte-identical to the committed region baseline"
     echo "==> oracle negative control (verify --m2 --expect-fail: detects tamper)"
-    cargo run -q -p rivet-oracle -- verify --m2 --expect-fail
+    rivet_oracle_exec verify --m2 --expect-fail
     echo "==> oracle verify (M2 FULL region gate: superflat status-FULL region capture, issue #51)"
-    cargo run -q -p rivet-oracle -- verify --full
+    rivet_oracle_exec verify --full
     echo "    VERIFIED — fresh corpus-forced superflat boot is byte-identical to the committed status-FULL region baseline"
     echo "==> oracle negative control (verify --full --expect-fail: detects tamper)"
-    cargo run -q -p rivet-oracle -- verify --full --expect-fail
+    rivet_oracle_exec verify --full --expect-fail
   else
     echo "    UNVERIFIED — oracle verify did not run (see the prereq report above)"
     ORACLE_UNVERIFIED=1
@@ -455,10 +461,10 @@ run_oracle_verify() {
 run_oracle_hash() {
   echo "==> chunk-hash engine (issue #54: xxh3_64 seed-hash gate)"
   echo "==> oracle hash self-check (xxh3_64 known-answer vectors)"
-  cargo run -q -p rivet-oracle -- hash-self-check
+  rivet_oracle_exec hash-self-check
   echo "    VERIFIED — xxh3_64 matches the pinned known-answer vectors"
   echo "==> oracle hash-paper (rebuild committed Paper manifest; must be git-clean)"
-  cargo run -q -p rivet-oracle -- hash-paper
+  rivet_oracle_exec hash-paper
   # The byte-identity check needs a git work tree to compare the rebuild against
   # the committed manifest. The gate shell tests drive gate.sh from a non-git
   # sandbox (cargo stubbed), where the manifest cannot be tracked; there the
@@ -495,7 +501,7 @@ print(f"{len(full)} FULL: " + ", ".join(f"{d}/{cx}.{cz}" for d, cx, cz in full))
   # never imply Paper == Rivet parity); if RIVET_HASH_DIR aliases the paper tree,
   # surface that as a hard failure rather than a silent UNVERIFIED.
   local rc=0
-  cargo run -q -p rivet-oracle -- hash-diff "$paper_dir" "$rivet_dir" 2>&1 || rc=$?
+  rivet_oracle_exec hash-diff "$paper_dir" "$rivet_dir" 2>&1 || rc=$?
   if [ "$rc" -eq 3 ]; then
     # RIVET_HASH_DIR was set, so the comparison was requested and could not
     # complete (incomplete corpus coverage, or a self-diff if it aliases the
@@ -506,7 +512,7 @@ print(f"{len(full)} FULL: " + ", ".join(f"{d}/{cx}.{cz}" for d, cx, cz in full))
   elif [ "$rc" -eq 0 ]; then
     echo "    VERIFIED — Paper-vs-Rivet FULL digests match across the corpus matrix"
     echo "==> oracle hash-diff --expect-fail (tamper negatives: every mutation class must be detected)"
-    cargo run -q -p rivet-oracle -- hash-diff --expect-fail "$paper_dir" "$rivet_dir" all
+    rivet_oracle_exec hash-diff --expect-fail "$paper_dir" "$rivet_dir" all
     echo "    VERIFIED — block/light/heightmap/NBT-order tampering all detected and named"
   else
     echo "    FAILED — hash-diff exited $rc (see the output above)"
@@ -627,7 +633,16 @@ run_rivet_parity() {
     tmp="$(mktemp)"
     # `|| rc=$?` (not set +e) so errexit stays on for every other statement and
     # the failed command's real exit status is captured in $rc.
-    cargo run -q -p rivet-parity -- --require-oracle 2>"$tmp" || rc=$?
+    local parity_bin="${RIVET_PARITY_BIN:-}"
+    if [ -z "$parity_bin" ]; then
+      local parity_target
+      parity_target="$(cargo_target_dir_for "$REPO_DIR")"
+      parity_bin="$parity_target/debug/rivet-parity"
+      cargo_prepare_binaries "$REPO_DIR" "$parity_bin"
+      cargo build --locked -p rivet-parity
+      cargo_stamp_binaries "$REPO_DIR" "$parity_bin"
+    fi
+    "$parity_bin" --require-oracle 2>"$tmp" || rc=$?
     cat "$tmp" >&2
     if [ "$rc" -eq 0 ]; then
       echo "    VERIFIED — rivet-nbt byte-for-byte parity with Paper (within documented divergences)"
@@ -672,13 +687,13 @@ run_rivet_parity() {
 run_join_capture() {
   echo "==> join capture (rivet-capture verify: byte-identity against vanilla join)"
   if [ "$CAPTURE_RUNNABLE" = 1 ]; then
-    cargo run -q -p rivet-capture -- verify
+    rivet_capture_exec verify
     echo "    VERIFIED — fresh Paper join is byte-identical to the committed join fixture"
     echo "==> join capture negative control (rivet-capture verify --expect-fail: detects tamper)"
-    cargo run -q -p rivet-capture -- verify --expect-fail
+    rivet_capture_exec verify --expect-fail
     echo "==> join capture detector discrimination (rivet-capture verify --mutate <kind>: every injected defect must be detected AND named)"
     for kind in reorder delete insert field canon relabel burst entity-id set-time-absent; do
-      cargo run -q -p rivet-capture -- verify --mutate "$kind"
+      rivet_capture_exec verify --mutate "$kind"
     done
   else
     echo "    UNVERIFIED — join capture did not run (see the prereq report above)"
@@ -1215,7 +1230,6 @@ main() {
   cargo machete tools/rivet-codegen
 
   # --- strict provenance verdict -------------------------------------------------
-  cargo_stamp_binaries "$REPO_DIR"
   strict_gate_verify
 
   # --- final verdict ------------------------------------------------------------

@@ -35,7 +35,11 @@ owned_marker() {
   local marker=$1 target=$2 expected_repo=$3
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   python3 - "$marker" "$target" "$expected_repo" <<'PY'
-import json, pathlib, sys
+import json
+import pathlib
+import re
+import sys
+
 marker = pathlib.Path(sys.argv[1])
 target = pathlib.Path(sys.argv[2])
 expected_repo = sys.argv[3]
@@ -45,9 +49,13 @@ except (OSError, ValueError):
     raise SystemExit(1)
 if data.get("version") != 1 or data.get("repo_id") != expected_repo:
     raise SystemExit(1)
-if data.get("target") != str(target):
+if data.get("target") != str(target) or data.get("checkout_id") != target.parent.name:
     raise SystemExit(1)
 if target.name != "iterative" or target.is_symlink():
+    raise SystemExit(1)
+if target.parent.parent.name != expected_repo:
+    raise SystemExit(1)
+if not re.fullmatch(r"[0-9a-f]{64}", target.parent.name):
     raise SystemExit(1)
 PY
 }
@@ -55,7 +63,10 @@ PY
 lock_free() {
   local group=$1 checkout=$2
   python3 - "$group" "$checkout" <<'PY'
-import fcntl, os, sys
+import fcntl
+import os
+import sys
+
 fds = []
 try:
     for path in sys.argv[1:]:
@@ -66,30 +77,62 @@ except (OSError, ValueError):
     raise SystemExit(1)
 finally:
     for fd in fds:
-        try: os.close(fd)
-        except OSError: pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 PY
 }
 
 process_env_live() {
-  local target=$1 line pid
-  if [ -d /proc ]; then
-    for env_file in /proc/[0-9]*/environ; do
-      [ -r "$env_file" ] || continue
-      pid=${env_file#/proc/}; pid=${pid%/environ}
-      [ "$pid" = "$$" ] && continue
-      if tr '\0' '\n' < "$env_file" 2>/dev/null | grep -Fxq "CARGO_TARGET_DIR=$target"; then return 0; fi
-      if tr '\0' '\n' < "$env_file" 2>/dev/null | grep -Fxq "RIVET_CARGO_TARGET_DIR=$target"; then return 0; fi
-    done
-  fi
-  while IFS= read -r line; do
-    pid=${line%% *}
-    [ -n "$pid" ] && [ "$pid" != "$$" ] || continue
-    case "$line" in
-      *"CARGO_TARGET_DIR=$target"*|*"RIVET_CARGO_TARGET_DIR=$target"*) return 0 ;;
-    esac
-  done < <(ps eww -ax -o pid=,command= 2>/dev/null || true)
-  return 1
+  local target=$1 expected
+  expected=$(canonical_dir "$target" 2>/dev/null) || return 1
+  python3 - "$expected" "$$" <<'PY'
+import os
+import pathlib
+import re
+import subprocess
+import sys
+
+expected = sys.argv[1]
+self_pid = sys.argv[2]
+values: list[str] = []
+if pathlib.Path("/proc").is_dir():
+    for env_file in pathlib.Path("/proc").glob("[0-9]*/environ"):
+        pid = env_file.parts[-2]
+        if pid == self_pid:
+            continue
+        try:
+            raw = env_file.read_bytes().split(b"\0")
+        except OSError:
+            continue
+        for item in raw:
+            for prefix in (b"CARGO_TARGET_DIR=", b"RIVET_CARGO_TARGET_DIR="):
+                if item.startswith(prefix):
+                    values.append(item[len(prefix):].decode(errors="surrogateescape"))
+else:
+    try:
+        output = subprocess.check_output(
+            ["ps", "eww", "-ax", "-o", "pid=,command="],
+            text=True,
+            errors="surrogateescape",
+        )
+    except (OSError, subprocess.CalledProcessError):
+        output = ""
+    assignment = re.compile(r"(?:^|\s)(?:CARGO_TARGET_DIR|RIVET_CARGO_TARGET_DIR)=([^\s]+)")
+    for line in output.splitlines():
+        pid = line.split(None, 1)[0] if line.split(None, 1) else ""
+        if pid == self_pid:
+            continue
+        values.extend(match.group(1) for match in assignment.finditer(line))
+for value in values:
+    path = pathlib.Path(value)
+    if not path.is_absolute():
+        continue
+    if os.path.realpath(os.path.normpath(str(path))) == expected:
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
 }
 
 deep_active() {
@@ -131,18 +174,23 @@ prune_namespace() {
 }
 
 worktree_sweep() {
-  local common=$1 current=$2 wt branch head lock dirty status_rc kb
+  local common=$1 current=$2 wt branch head dirty status_rc merge_output merge_rc lock kb
   while IFS=$'\t' read -r wt lock; do
     [ -n "$wt" ] && [ "$wt" != "$current" ] && [ -d "$wt" ] || continue
     branch=$(git -C "$wt" symbolic-ref --short -q HEAD 2>/dev/null || printf '(detached)')
-    head=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || { say "KEEP   $wt [git probe failed]"; continue; }
-    dirty=$(git -C "$wt" status --porcelain 2>/dev/null); status_rc=$?
+    head=$(git -C "$wt" rev-parse --verify HEAD^{commit} 2>/dev/null) || { say "KEEP   $wt [git HEAD probe failed]"; continue; }
+    case "$head" in
+      ''|*[!0-9a-fA-F]*) say "KEEP   $wt [$branch: malformed HEAD]"; continue ;;
+    esac
+    [ "${#head}" -eq 40 ] || [ "${#head}" -eq 64 ] || { say "KEEP   $wt [$branch: malformed HEAD]"; continue; }
+    dirty=$(git -C "$wt" status --porcelain=v1 --untracked-files=all 2>/dev/null); status_rc=$?
     [ "$status_rc" -eq 0 ] || { say "KEEP   $wt [$branch: status probe failed]"; continue; }
+    [ -z "$dirty" ] || { say "KEEP   $wt [$branch: dirty or malformed status]"; continue; }
     if [ -n "$lock" ]; then say "KEEP   $wt [$branch: locked]"; continue; fi
-    if [ -n "$dirty" ]; then say "KEEP   $wt [$branch: dirty]"; continue; fi
-    git -C "$wt" merge-base --is-ancestor "$head" refs/remotes/origin/main >/dev/null 2>&1 || { say "KEEP   $wt [$branch: unmerged]"; continue; }
+    merge_output=$(git -C "$wt" merge-base --is-ancestor "$head" refs/remotes/origin/main 2>/dev/null); merge_rc=$?
+    [ "$merge_rc" -eq 0 ] && [ -z "$merge_output" ] || { say "KEEP   $wt [$branch: merge-base probe failed or malformed]"; continue; }
     kb=$(dir_kb "$wt")
-    say "$(if [ "$DRY" = 1 ]; then printf WOULD; else printf REMOVE; fi) $wt [$branch: clean, merged, $((kb / 1024))MB]"
+    say "$(if [ "$DRY" = 1 ]; then printf WOULD; else printf REMOVE; fi) $wt [$branch, clean, merged, $((kb / 1024))MB]"
     if run git -C "$common" worktree remove "$wt"; then
       REMOVED=$((REMOVED + 1))
       if [ "$branch" != "(detached)" ] && ! run git -C "$common" branch -d "$branch"; then
@@ -151,18 +199,31 @@ worktree_sweep() {
       fi
     fi
   done < <(python3 - "$common" <<'PY'
-import subprocess, sys
-lines = subprocess.check_output(["git", "-C", sys.argv[1], "worktree", "list", "--porcelain"], text=True).splitlines()
+import subprocess
+import sys
+
+lines = subprocess.check_output(
+    ["git", "-C", sys.argv[1], "worktree", "list", "--porcelain"],
+    text=True,
+).splitlines()
 path = None
 locked = False
+
+def flush():
+    if path is not None:
+        print(path + "\t" + ("locked" if locked else ""))
+
 for line in lines + [""]:
     if line.startswith("worktree "):
-        if path is not None:
-            print(path + "\t" + ("locked" if locked else ""))
+        flush()
         path = line[9:]
         locked = False
     elif line == "locked":
         locked = True
+    elif line == "":
+        flush()
+        path = None
+        locked = False
 PY
 )
 }
@@ -180,7 +241,7 @@ main() {
       *) say "unknown argument: $1" >&2; return 2 ;;
     esac
     shift
-  done
+done
   local ns root repo_id group_lock checkout_lock common current minutes
   ns=$(cargo_namespace_json "$REPO_DIR") || return 2
   root=$(printf '%s\n' "$ns" | python3 -c 'import json,sys; print(json.load(sys.stdin)["root"])')

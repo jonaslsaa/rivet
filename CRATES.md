@@ -18,7 +18,7 @@
 | `rivet-api` | `paper-api` shape | Native Rust API surface (M4). |
 | `rivet-ffi` | — | C ABI facade for the JVM adapter; the only crate where `unsafe` is normal. |
 | `tools/rivet-codegen` | — | Excluded from workspace; data extraction + code generation. In-repo, documented (unlike Pumpkin's out-of-tree extractor). |
-| `tools/rivet-harness-common` | — | Shared std-only E2E harness primitives (child-process boot lifecycle, held-port reservations, strict JSONL transcripts, exit contract, named negative controls); depended on by `rivet-capture` and `rivet-client`. Std-only so each harness tool can adopt it without adding external (non-std) packages — the only new lockfile entry is the crate itself. |
+| `tools/rivet-harness-common` | — | Shared E2E harness primitives (child-process boot lifecycle, held-port reservations, strict JSONL transcripts, exit contract, named negative controls, and attested Cargo artifact provenance); depended on by `rivet-capture` and `rivet-client`. |
 | `tools/rivet-oracle` | — | Differential-test harness: runs vanilla/Paper jar, extracts golden fixtures, drives azalea bots, computes PARITY.md. |
 
 Module paths inside crates mirror Java packages (PORTING.md). Crate boundaries exist for compile parallelism and dependency hygiene, not to re-architect.

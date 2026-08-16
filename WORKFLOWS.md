@@ -41,10 +41,10 @@ The serial spine is protocol → join → world → entity → gameplay; tracks 
 ### Parallelism mechanics: when worktrees, when not
 
 Three tiers, isolation matched to conflict risk:
-1. **Within a wave (same session)**: no worktrees. The scaffold pre-creates crates/mod trees/stubs so workflow agents own disjoint files in one checkout — nothing to merge, and one shared cargo `target/` keeps incremental builds warm. This is deliberate (Bun needed 4 worktrees because their agents shared files; we design the sharing away).
+1. **Within a wave (same session)**: no worktrees. The scaffold pre-creates crates/mod trees/stubs so workflow agents own disjoint files in one checkout — nothing to merge. Cargo artifacts use the checkout's external managed namespace, so parallel worktrees cannot collide.
 2. **Across epics/tracks (multiple Claude sessions)**: one session per epic, each in **its own git worktree + branch** (`claude --worktree`, background agents with worktree isolation, or `git worktree add`). Sessions never share a checkout — cross-track conflicts are resolved at PR merge, gated by `scripts/gate.sh` run on the merged result (D10 — no hosted CI). This is the intended way to scale beyond one session: 3–5 concurrent epic sessions, each producing PRs against `main`.
 3. **Shared-file hotspots** (`Cargo.toml`, `lib.rs` mod lists, MANIFEST.tsv): only the wave controller edits these, serially, between waves. If two tracks both need a workspace change, it goes in a tiny standalone PR first.
-Caveats: each worktree gets its own cargo `target/` (disk + cold builds — do not share one via symlink; concurrent cargo runs fight over the lock; consider sccache if this hurts). Keep MANIFEST.tsv updates append/status-only so PR merges of it stay trivial.
+Caveats: each checkout gets a per-repository/per-checkout Cargo namespace under the external Rivet cache; lock wrappers serialize builds and sccache may reuse compilation safely. Keep MANIFEST.tsv updates append/status-only so PR merges of it stay trivial.
 
 ## GitHub process wiring
 

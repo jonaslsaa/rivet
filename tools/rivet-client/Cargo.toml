@@ -11,11 +11,8 @@ publish = false
 
 [dependencies]
 azalea = { git = "https://github.com/azalea-rs/azalea", rev = "6249c295d353b9b3ef68f665b311cba39211fd19" }
-# Shared std-only harness primitives (boot lifecycle, port reservations,
-# strict transcripts, exit contract, negative controls). The crate is
-# intentionally std-only, so this adds no external (non-std) packages to the
-# dependency tree — only the crate itself is a new lockfile entry, letting the
-# scenario runner depend on it across toolchains.
+# Shared harness primitives (boot lifecycle, port reservations, strict
+# transcripts, exit contract, negative controls, and artifact provenance).
 rivet-harness-common = { path = "../rivet-harness-common" }
 getrandom = "0.4"
 # Already in the lockfile (pulled by azalea-crypto), so this adds no new

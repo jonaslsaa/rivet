@@ -306,15 +306,9 @@ fn classify_commit_lookup_error(e: io::Error) -> Error {
     }
 }
 
-/// Locate the `rivet-server` binary: `RIVET_SERVER_BIN` env wins, then the
-/// workspace this harness was built in (`<workspace>/target/debug/rivet-server`).
-///
-/// The fallback resolves against the harness's own manifest dir, so a harness
-/// built inside a worktree selects that worktree's server path. A narrow
-/// freshness guard rejects the fallback when it predates the server entry
-/// point; normal runs rebuild before executing, and the PLAY verdict provides
-/// the load-bearing stale-server check. `RIVET_SERVER_BIN` remains an explicit,
-/// non-commit-bound override for a server in another tree.
+/// Resolve the attested `rivet-server` binary from the current Cargo namespace.
+/// An explicit override is accepted only when its provenance binds it to this
+/// checkout and current source state.
 pub fn ensure_rivet_binary(_crate_root: &Path) -> Result<PathBuf, Error> {
     provenance::resolve("rivet-server", "RIVET_SERVER_BIN").map_err(Error::Unverified)
 }

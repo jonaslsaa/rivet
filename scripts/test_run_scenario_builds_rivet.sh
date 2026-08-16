@@ -38,22 +38,37 @@ mkdir -p "$BIN_DIR"
 # in (the stub runs as a child process that does not inherit the test's shell
 # variables); $TMP from mktemp -d is absolute and space-free.
 SCENARIO_ARGV_LOG="$TMP/argv.log"
-cat > "$BIN_DIR/run-scenario" <<EOF
+SCENARIO_STUB="$TMP/run-scenario-stub"
+cat > "$SCENARIO_STUB" <<EOF
 #!/bin/bash
 echo "\$@" >> "$SCENARIO_ARGV_LOG"
 exit 0
 EOF
-chmod +x "$BIN_DIR/run-scenario"
+chmod +x "$SCENARIO_STUB"
 
-# Cargo shim: records every invocation and exits 0. The wrapper's stable-toolchain
-# build runs from the repo root (`cd "$tool_dir/../.."`), which is $TMP here;
-# the shim is found via the prepended PATH, so its baked-in log path must be
-# absolute and space-free (mktemp -d guarantees that on macOS/Linux).
+# Cargo shim: records every invocation, recreates the explicitly prepared
+# deliverables for successful builds, and exits 0. A successful cargo status
+# without recreation must not satisfy the provenance receipt.
 CARGO_LOG="$TMP/cargo.log"
 cat > "$TMP/cargo" <<EOF
 #!/bin/bash
-echo "\$@" >> "$CARGO_LOG"
-exit 0
+set -e
+printf '%s\\n' "\$*" >> "$CARGO_LOG"
+is_build=0
+is_server=0
+for arg in "\$@"; do
+  [ "\$arg" = build ] && is_build=1
+  [ "\$arg" = rivet-server ] && is_server=1
+done
+if [ "\$is_build" = 1 ]; then
+  mkdir -p "\$CARGO_TARGET_DIR/debug"
+  cp "$SCENARIO_STUB" "\$CARGO_TARGET_DIR/debug/run-scenario"
+  cp "$SCENARIO_STUB" "\$CARGO_TARGET_DIR/debug/rivet-client"
+  if [ "\$is_server" = 1 ]; then
+    cp "$SCENARIO_STUB" "\$CARGO_TARGET_DIR/debug/rivet-server"
+  fi
+  chmod +x "\$CARGO_TARGET_DIR/debug"/*
+fi
 EOF
 chmod +x "$TMP/cargo"
 

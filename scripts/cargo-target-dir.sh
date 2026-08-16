@@ -30,16 +30,27 @@ cargo_target_dir_for() {
   [ "$#" -eq 1 ] || { printf 'usage: cargo_target_dir_for REPO_DIR\n' >&2; return 2; }
   local repo_dir=$1 expected override
   expected=$(cargo_namespace_value "$repo_dir" target) || return
-  override=${CARGO_TARGET_DIR:-}
-  if [ -n "$override" ]; then
+  local override_name
+  for override_name in CARGO_TARGET_DIR RIVET_CARGO_TARGET_DIR; do
+    override=${!override_name:-}
+    if [ -z "$override" ]; then
+      continue
+    fi
     case "$override" in
       /*) ;;
-      *) printf 'CARGO_TARGET_DIR must be absolute: %s\n' "$override" >&2; return 2 ;;
+      *) printf '%s must be absolute: %s\n' "$override_name" "$override" >&2; return 2 ;;
     esac
     local canonical
     canonical=$(python3 - "$override" <<'PY'
-import pathlib, sys
+import pathlib, stat, sys
 p = pathlib.Path(sys.argv[1])
+try:
+    info = p.lstat()
+except FileNotFoundError:
+    info = None
+if info is not None and (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)):
+    print(f"cargo target: managed target must be a real directory: {p}", file=sys.stderr)
+    raise SystemExit(2)
 try:
     print((p.parent.resolve(strict=True) / p.name))
 except OSError as exc:
@@ -48,11 +59,25 @@ except OSError as exc:
 PY
 ) || return 2
     if [ "$canonical" != "$expected" ]; then
-      printf 'CARGO_TARGET_DIR is foreign; expected %s, got %s\n' "$expected" "$canonical" >&2
+      printf '%s is foreign; expected %s, got %s\n' "$override_name" "$expected" "$canonical" >&2
       return 2
     fi
-  fi
-  mkdir -p "$expected"
+  done
+  python3 - "$expected" <<'PY'
+import pathlib, stat, sys
+path = pathlib.Path(sys.argv[1]).absolute()
+current = pathlib.Path(path.anchor)
+for component in path.parts[1:]:
+    current /= component
+    try:
+        info = current.lstat()
+    except FileNotFoundError:
+        current.mkdir()
+        info = current.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        print(f"cargo target: managed path is not a real directory: {current}", file=sys.stderr)
+        raise SystemExit(2)
+PY
   printf '%s\n' "$expected"
 }
 
@@ -69,9 +94,18 @@ cargo_state_digest_for() {
   python3 "$_cargo_provenance" digest "$1"
 }
 
+cargo_prepare_binaries() {
+  [ "$#" -ge 2 ] || { printf 'usage: cargo_prepare_binaries REPO_DIR PATH ...\n' >&2; return 2; }
+  local repo_dir=$1
+  shift
+  python3 "$_cargo_provenance" prepare "$repo_dir" "$@"
+}
+
 cargo_stamp_binaries() {
-  [ "$#" -eq 1 ] || { printf 'usage: cargo_stamp_binaries REPO_DIR\n' >&2; return 2; }
-  python3 "$_cargo_provenance" stamp "$1"
+  [ "$#" -ge 2 ] || { printf 'usage: cargo_stamp_binaries REPO_DIR PATH ...\n' >&2; return 2; }
+  local repo_dir=$1
+  shift
+  python3 "$_cargo_provenance" stamp "$repo_dir" "$@"
 }
 
 cargo_binary_for() {
@@ -99,6 +133,10 @@ cargo_binary_for() {
   target=$(cargo_target_dir_for "$repo_dir") || return
   path="$target/$profile/$name"
   [ -f "$path" ] || { printf 'managed binary is missing: %s\n' "$path" >&2; return 3; }
+  python3 "$_cargo_provenance" verify "$repo_dir" "$path" >/dev/null || {
+    printf 'managed binary provenance is invalid: %s\n' "$path" >&2
+    return 3
+  }
   printf '%s\n' "$path"
 }
 
