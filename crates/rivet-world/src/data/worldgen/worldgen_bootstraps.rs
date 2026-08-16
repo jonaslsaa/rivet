@@ -4,8 +4,8 @@
 //! (NOISE), [`noise_router_data`] (DENSITY_FUNCTION), and
 //! [`noise_generator_settings`] (NOISE_SETTINGS) — through the test seam
 //! `RecordingContext` into frozen `rivet-registry` registries, and returns the
-//! `RegistryAccess` with all five populated (BLOCK, NOISE, DENSITY_FUNCTION,
-//! BIOME, NOISE_SETTINGS). The BLOCK registry rides along for registry-backed
+//! `RegistryAccess` with all six populated (BLOCK, FLUID, NOISE,
+//! DENSITY_FUNCTION, BIOME, NOISE_SETTINGS). The BLOCK registry rides along for registry-backed
 //! worldgen codecs, and the BIOME registry rides along because the NOISE_SETTINGS
 //! bootstrap's `SurfaceRuleData` builders resolve their biome holders through
 //! it. This is the single reusable entry point for code that needs the *real*
@@ -13,8 +13,8 @@
 //! wiring) instead of re-deriving the `RecordingContext` → `RegistryBuilder` →
 //! `freeze` sequence per call site.
 //!
-//! Build order is Java's dependency order: BLOCK is independent, then NOISE
-//! (the density-function bootstrap resolves `Holder<NoiseParameters>` through
+//! Build order is Java's dependency order: BLOCK and FLUID are independent, then
+//! NOISE (the density-function bootstrap resolves `Holder<NoiseParameters>` through
 //! it), DENSITY_FUNCTION, BIOME, and finally NOISE_SETTINGS (which resolves the
 //! `overworld` router functions through the density-function registry and the
 //! `SurfaceRuleData` biome holders through the biome registry).
@@ -22,8 +22,8 @@
 //! `RegistryAccess::from_pairs` consumes each frozen `Registry<T>` and
 //! `Registry<T>` is not `Clone`, so registries are shared by cloning the
 //! access's erased (key, value) entries — never the `Registry<T>` value.
-//! `build_worldgen_registries` freezes BLOCK, NOISE, DENSITY_FUNCTION, and BIOME
-//! once each into a base access, runs the settings bootstrap against a clone of
+//! `build_worldgen_registries` freezes BLOCK, FLUID, NOISE, DENSITY_FUNCTION,
+//! and BIOME once each into a base access, runs the settings bootstrap against a clone of
 //! that access, and composes the returned access from the same base plus the
 //! frozen NOISE_SETTINGS registry via the layered composite. The two accesses therefore
 //! carry the *same* biome registry instance, and the `Holder::Reference`s the
@@ -60,9 +60,12 @@ use crate::levelgen::noisegen::noise_generator_settings::NoiseGeneratorSettings;
 use crate::levelgen::noisegen::noise_router_data::{self, DensityFunctionValue};
 use crate::levelgen::synth::normal_noise::NoiseParameters;
 use rivet_registry::access::{LayeredRegistryAccess, RegistryLayer};
-use rivet_registry::generated::{blocks::BLOCK_BY_NAME, tags::BLOCK_TAG_BY_NAME};
+use rivet_registry::fluid_id::FluidId;
+use rivet_registry::generated::{
+    blocks::BLOCK_BY_NAME, registries::FLUID_BY_NAME, tags::BLOCK_TAG_BY_NAME,
+};
 use rivet_registry::holder::{HolderId, RegistryId};
-use rivet_registry::registries::{BLOCK, BlockType};
+use rivet_registry::registries::{BLOCK, BlockType, FLUID};
 use rivet_registry::registry::{Registry, RegistryKey};
 use rivet_registry::root::AnyBox;
 use rivet_registry::{
@@ -81,6 +84,11 @@ fn noise_key() -> ErasedKey {
 /// `Registries.BLOCK` key erased to the access's stored key type.
 fn block_key() -> ErasedKey {
     ResourceKey::create_registry_key(BLOCK.identifier().clone())
+}
+
+/// `Registries.FLUID` key erased to the access's stored key type.
+fn fluid_key() -> ErasedKey {
+    ResourceKey::create_registry_key(FLUID.identifier().clone())
 }
 
 /// The generated vanilla block registry, including the generated block tags
@@ -120,6 +128,27 @@ fn build_block_registry() -> Registry<BlockType> {
         })
         .collect();
     builder.bind_tags(tags);
+    builder.freeze()
+}
+
+/// The generated vanilla FLUID registry required by registry-backed
+/// `matching_fluids` block-predicate codecs.
+fn build_fluid_registry() -> Registry<FluidId> {
+    let mut entries: Vec<(&str, &u16)> = FLUID_BY_NAME
+        .entries()
+        .map(|(name, id)| (*name, id))
+        .collect();
+    entries.sort_unstable_by_key(|(_, id)| **id);
+
+    let mut builder = RegistryBuilder::new(&*FLUID);
+    for (index, (name, id)) in entries.iter().enumerate() {
+        assert_eq!(**id as usize, index, "generated fluid ids must be dense");
+        builder.register(
+            &ResourceKey::create(&*FLUID, Identifier::parse(name)),
+            Arc::new(FluidId::from_id(**id)),
+            RegistrationInfo::BUILT_IN,
+        );
+    }
     builder.freeze()
 }
 
@@ -254,6 +283,7 @@ fn build_noise_settings_registry(
 pub fn build_worldgen_registries() -> RegistryAccess {
     let base = RegistryAccess::from_pairs(vec![
         (block_key(), Box::new(build_block_registry()) as AnyBox),
+        (fluid_key(), Box::new(build_fluid_registry()) as AnyBox),
         (noise_key(), Box::new(build_noise_registry()) as AnyBox),
         (
             density_function_key(),
@@ -287,6 +317,18 @@ mod tests {
     #[test]
     fn builds_all_worldgen_registries() {
         let access = build_worldgen_registries();
+        let fluids = access.lookup(&*FLUID).expect("FLUID registry");
+        assert_eq!(fluids.key_set().len(), FLUID_BY_NAME.len());
+        assert_eq!(
+            fluids
+                .get_or_throw(&ResourceKey::create(
+                    &*FLUID,
+                    Identifier::parse("minecraft:water"),
+                ))
+                .value(fluids)
+                .id(),
+            2
+        );
         let noise = access
             .lookup(&registry_keys::NOISE)
             .expect("NOISE registry");

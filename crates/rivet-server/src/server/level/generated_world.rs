@@ -160,7 +160,7 @@ use rivet_world::levelgen::world_generation_context::WorldGenerationContext;
 
 use crate::server::level::level_chunk::{LevelChunk, StructureKey};
 use crate::server::level::world_gen_region::{
-    CenterHolder, GenerationChunkHolderView, OwnedHolder, OwnedProtoHolder, WorldGenRegion,
+    CenterHolder, GenerationChunkHolderView, OwnedProtoHolder, WorldGenRegion,
 };
 
 /// The overworld generated-chunk error surface — every failure is typed, never
@@ -769,11 +769,12 @@ fn compose_feature_region<'a>(
                 }
                 ChunkStatus::StructureStarts => {
                     let mut structure_chunk = fresh_worldgen_chunk(pos, generator);
+                    // `ChunkStatusTasks.generateFeatures` primes the final
+                    // maps before decoration, and every dependency chunk must
+                    // carry those persisted maps when the region reads it.
+                    structure_chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
                     structure_chunk.set_persisted_status(ChunkStatus::StructureStarts);
-                    holders.push(Box::new(OwnedHolder::new(
-                        structure_chunk.into_base(),
-                        status,
-                    )));
+                    holders.push(Box::new(OwnedProtoHolder::new(structure_chunk)));
                 }
                 other => {
                     panic!("unsupported FEATURES cache dependency {other:?} at distance {distance}")
@@ -1409,6 +1410,9 @@ impl fmt::Debug for GenerationChunkHolder {
 mod tests {
     use super::*;
     use crate::server::level::chunk_map::ChunkMap;
+    use rivet_nbt::compound_tag::CompoundTag;
+    use rivet_nbt::list_tag::ListTag;
+    use rivet_nbt::tag::Tag;
     use rivet_registry::generated::block_states::StateId;
     use rivet_util::RandomSource;
     use rivet_util::random::LegacyRandomSource;
@@ -1973,6 +1977,14 @@ mod tests {
     /// type, and every placement modifier is selected by its own type rather
     /// than by a positional assumption in the generated list.
     #[test]
+    fn matching_fluids_modifier_decodes_through_generated_fluid_registry() {
+        let generator = test_generator();
+        let modifiers = decode_placement_modifiers("minecraft:disk_clay", &generator)
+            .expect("matching_fluids must resolve the generated FLUID registry");
+        assert_eq!(modifiers.len(), 4);
+    }
+
+    #[test]
     fn lake_placed_feature_decodes_through_registry_holders() {
         let generator = test_generator();
         let decoded = decode_placed_feature("minecraft:lake_lava_underground", &generator)
@@ -2212,6 +2224,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn features_region_persists_status_and_heightmaps_across_the_full_window() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        holder.chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
+        let region = compose_feature_region(&mut holder.chunk, &generator);
+
+        for dx in -8i32..=8 {
+            for dz in -8i32..=8 {
+                let distance = dx.abs().max(dz.abs());
+                let expected_status = if distance <= 1 {
+                    ChunkStatus::Carvers
+                } else {
+                    ChunkStatus::StructureStarts
+                };
+                let chunk = region
+                    .try_get_chunk(dx, dz, expected_status, true)
+                    .expect("every FEATURES dependency must be available");
+                let diagnostic = match region.try_get_chunk(dx, dz, ChunkStatus::Full, true) {
+                    Ok(_) => panic!("FULL must exceed every FEATURES dependency ring"),
+                    Err(diagnostic) => diagnostic,
+                };
+                assert_eq!(diagnostic.actual_status, Some(expected_status));
+                assert_eq!(diagnostic.max_allowed_status, Some(expected_status));
+                for ty in FINAL_HEIGHTMAPS {
+                    assert!(
+                        chunk.heightmaps()[ty as usize].is_some(),
+                        "dependency ({dx},{dz}) must persist {ty:?}"
+                    );
+                }
+            }
+        }
+    }
+
     /// The real FEATURES-pass region must materialize the entities that
     /// `MonsterRoomFeature` queries immediately after chest/spawner writes; the
     /// default `WorldGenLevel` entity seams are panic-only for other worlds.
@@ -2283,6 +2332,241 @@ mod tests {
             &spawner_pos,
             "minecraft:zombie",
             None,
+        );
+        drop(region);
+
+        let chest_tag = holder
+            .chunk
+            .get_block_entity_nbts()
+            .get(&chest_pos)
+            .expect("FEATURES chest NBT must survive region drop");
+        assert_eq!(
+            chest_tag.get_string("id").map(String::as_str),
+            Some("DUMMY")
+        );
+        assert_eq!(
+            chest_tag.get_string("LootTable").map(String::as_str),
+            Some("minecraft:chests/simple_dungeon")
+        );
+        assert_eq!(chest_tag.get_long("LootTableSeed"), Some(42));
+
+        let spawner_tag = holder
+            .chunk
+            .get_block_entity_nbts()
+            .get(&spawner_pos)
+            .expect("FEATURES spawner NBT must survive region drop");
+        let spawn_data = spawner_tag
+            .get_compound("SpawnData")
+            .expect("spawner SpawnData must be persisted");
+        assert_eq!(
+            spawn_data
+                .get_compound("entity")
+                .and_then(|entity| entity.get_string("id"))
+                .map(String::as_str),
+            Some("minecraft:zombie")
+        );
+        assert!(
+            spawner_tag
+                .get_list("SpawnPotentials")
+                .is_some_and(|potentials| potentials.is_empty()),
+            "setEntityId must persist explicit empty SpawnPotentials"
+        );
+    }
+
+    #[test]
+    fn features_region_preserves_spawner_payloads_and_repairs_malformed_nbt() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+
+        let preserved_pos = BlockPos::new(0, 0, 0);
+        let selected_pos = BlockPos::new(1, 0, 0);
+        let malformed_pos = BlockPos::new(2, 0, 0);
+
+        let mut initial_region = compose_feature_region(&mut holder.chunk, &generator);
+        for pos in [preserved_pos, selected_pos, malformed_pos] {
+            assert!(initial_region.set_block(&pos, Blocks::SPAWNER.default_block_state(), 2, 512));
+        }
+        drop(initial_region);
+
+        let mut preserved = CompoundTag::new();
+        preserved.put_int("x", preserved_pos.get_x());
+        preserved.put_int("y", preserved_pos.get_y());
+        preserved.put_int("z", preserved_pos.get_z());
+        preserved.put_string("id", "DUMMY");
+        preserved.put_int("Delay", 17);
+        preserved.put_int("MinSpawnDelay", 31);
+        preserved.put_int("MaxSpawnDelay", 63);
+        preserved.put_int("SpawnCount", 5);
+        preserved.put_int("MaxNearbyEntities", 9);
+        preserved.put_int("RequiredPlayerRange", 12);
+        preserved.put_int("SpawnRange", 6);
+        let mut preserved_entity = CompoundTag::new();
+        preserved_entity.put_string("id", "minecraft:skeleton");
+        preserved_entity.put_int("CustomEntityField", 23);
+        let mut preserved_data = CompoundTag::new();
+        preserved_data.put("entity".to_string(), Tag::Compound(preserved_entity));
+        preserved_data.put_int("CustomSpawnDataField", 29);
+        preserved.put("SpawnData".to_string(), Tag::Compound(preserved_data));
+        let mut preserved_potential = CompoundTag::new();
+        preserved_potential.put_int("weight", 4);
+        let mut preserved_potential_data = CompoundTag::new();
+        let mut preserved_potential_entity = CompoundTag::new();
+        preserved_potential_entity.put_string("id", "minecraft:creeper");
+        preserved_potential_data.put(
+            "entity".to_string(),
+            Tag::Compound(preserved_potential_entity),
+        );
+        preserved_potential.put("data".to_string(), Tag::Compound(preserved_potential_data));
+        let mut preserved_potentials = ListTag::new();
+        preserved_potentials
+            .list
+            .push(Tag::Compound(preserved_potential));
+        preserved.put(
+            "SpawnPotentials".to_string(),
+            Tag::List(preserved_potentials),
+        );
+        holder.chunk.base_mut().set_block_entity_nbt(preserved);
+
+        let mut selected = CompoundTag::new();
+        selected.put_int("x", selected_pos.get_x());
+        selected.put_int("y", selected_pos.get_y());
+        selected.put_int("z", selected_pos.get_z());
+        selected.put_string("id", "DUMMY");
+        selected.put_int("Delay", 19);
+        let mut selected_entry = CompoundTag::new();
+        selected_entry.put_int("weight", 1);
+        let mut selected_data = CompoundTag::new();
+        let mut selected_entity = CompoundTag::new();
+        selected_entity.put_string("id", "minecraft:spider");
+        selected_entity.put_int("SelectedEntityField", 37);
+        selected_data.put("entity".to_string(), Tag::Compound(selected_entity));
+        selected_data.put_int("SelectedSpawnDataField", 41);
+        selected_entry.put("data".to_string(), Tag::Compound(selected_data));
+        let mut selected_potentials = ListTag::new();
+        selected_potentials.list.push(Tag::Compound(selected_entry));
+        selected.put(
+            "SpawnPotentials".to_string(),
+            Tag::List(selected_potentials),
+        );
+        holder.chunk.base_mut().set_block_entity_nbt(selected);
+
+        let mut malformed = CompoundTag::new();
+        malformed.put_int("x", malformed_pos.get_x());
+        malformed.put_int("y", malformed_pos.get_y());
+        malformed.put_int("z", malformed_pos.get_z());
+        malformed.put_string("id", "DUMMY");
+        malformed.put_int("Delay", 23);
+        malformed.put("SpawnData".to_string(), Tag::List(ListTag::new()));
+        holder.chunk.base_mut().set_block_entity_nbt(malformed);
+
+        let mut region = compose_feature_region(&mut holder.chunk, &generator);
+        for pos in [preserved_pos, selected_pos, malformed_pos] {
+            assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), 2, 512));
+        }
+
+        <WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &preserved_pos,
+            "minecraft:zombie",
+            Some(0),
+        );
+        <WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &selected_pos,
+            "minecraft:zombie",
+            Some(0),
+        );
+        <WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &malformed_pos,
+            "minecraft:zombie",
+            Some(0),
+        );
+        drop(region);
+
+        let persisted = holder
+            .chunk
+            .get_block_entity_nbts()
+            .get(&preserved_pos)
+            .expect("preserved spawner payload");
+        for (key, value) in [
+            ("Delay", 17),
+            ("MinSpawnDelay", 31),
+            ("MaxSpawnDelay", 63),
+            ("SpawnCount", 5),
+            ("MaxNearbyEntities", 9),
+            ("RequiredPlayerRange", 12),
+            ("SpawnRange", 6),
+        ] {
+            assert_eq!(persisted.get_int(key), Some(value), "field {key}");
+        }
+        let preserved_data = persisted
+            .get_compound("SpawnData")
+            .expect("preserved SpawnData");
+        assert_eq!(preserved_data.get_int("CustomSpawnDataField"), Some(29));
+        let preserved_entity = preserved_data
+            .get_compound("entity")
+            .expect("preserved entity payload");
+        assert_eq!(
+            preserved_entity.get_string("id").map(String::as_str),
+            Some("minecraft:zombie")
+        );
+        assert_eq!(preserved_entity.get_int("CustomEntityField"), Some(23));
+        assert!(
+            persisted
+                .get_list("SpawnPotentials")
+                .is_some_and(ListTag::is_empty)
+        );
+
+        let selected = holder
+            .chunk
+            .get_block_entity_nbts()
+            .get(&selected_pos)
+            .expect("selected spawner payload");
+        let selected_data = selected
+            .get_compound("SpawnData")
+            .expect("selected potential becomes SpawnData");
+        assert_eq!(selected_data.get_int("SelectedSpawnDataField"), Some(41));
+        assert_eq!(
+            selected_data
+                .get_compound("entity")
+                .and_then(|entity| entity.get_string("id"))
+                .map(String::as_str),
+            Some("minecraft:zombie")
+        );
+        assert_eq!(
+            selected_data
+                .get_compound("entity")
+                .and_then(|entity| entity.get_int("SelectedEntityField")),
+            Some(37)
+        );
+        assert!(
+            selected
+                .get_list("SpawnPotentials")
+                .is_some_and(ListTag::is_empty)
+        );
+
+        let repaired = holder
+            .chunk
+            .get_block_entity_nbts()
+            .get(&malformed_pos)
+            .expect("malformed spawner payload");
+        assert_eq!(repaired.get_int("Delay"), Some(23));
+        assert_eq!(
+            repaired
+                .get_compound("SpawnData")
+                .and_then(|data| data.get_compound("entity"))
+                .and_then(|entity| entity.get_string("id"))
+                .map(String::as_str),
+            Some("minecraft:zombie")
+        );
+        assert!(
+            repaired
+                .get_list("SpawnPotentials")
+                .is_some_and(ListTag::is_empty)
         );
     }
 
