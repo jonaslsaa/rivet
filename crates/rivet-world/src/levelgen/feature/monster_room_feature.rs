@@ -38,11 +38,12 @@
 //!    position and passes the seed to the seam. A missing container skips it.
 //! 5. Spawner: `safeSetBlock(origin, SPAWNER)` writes no RNG; when the
 //!    block-entity lookup succeeds, `randomEntityId(random)` =
-//!    `MOBS[nextInt(4)]` (the `nextInt(4)` mob index — `Util.getRandom`).
-//!    `SpawnerBlockEntity.setEntityId` draws NOTHING internally (the empty
-//!    `SpawnPotentials` `WeightedList.getRandom` short-circuits to
-//!    `Optional.empty()` → `SpawnData::new`). A missing spawner entity skips
-//!    that mob draw, exactly as Java does.
+//!    `MOBS[nextInt(4)]` (the `nextInt(4)` mob index — `Util.getRandom`) is
+//!    drawn first. A pending positive-total `SpawnPotentials` then consumes
+//!    one weighted roll; an empty or zero-total list consumes no roll.
+//!    `SpawnerBlockEntity.setEntityId` clears the potentials after applying
+//!    the selected entry. A missing spawner entity skips every mob draw,
+//!    exactly as Java does.
 //!
 //! A placed chest draws its `nextLong()` immediately after its block write
 //! only when the resulting block entity is a `RandomizableContainer`. The
@@ -409,10 +410,15 @@ impl FeatureBehavior<NoneFeatureConfiguration> for MonsterRoomFeature {
             &can_replace,
         );
         if level.is_spawner_block_entity(&origin) {
+            // `setEntityId` chooses the mob id before `getOrCreateNextSpawnData`
+            // resolves a pending weighted potential. This order is observable
+            // in the shared RandomSource stream.
+            let entity_id = random_entity_id(random);
             let potential_roll = level
                 .spawner_potential_weight(&origin)
+                .filter(|total| *total > 0)
                 .map(|total| random.next_int_bound(total));
-            level.set_spawner_entity(&origin, random_entity_id(random), potential_roll);
+            level.set_spawner_entity(&origin, entity_id, potential_roll);
         }
 
         true
@@ -461,8 +467,8 @@ mod tests {
                 .bounds
                 .pop()
                 .expect("room fixture carries a mob roll");
-            random.bounds.push(0);
             random.bounds.push(mob_roll);
+            random.bounds.push(0);
             random
         }
     }
@@ -623,8 +629,28 @@ mod tests {
         let mut random = ScriptedRandom::room_with_spawner_potentials(7);
 
         assert!(place(&mut level, origin, &mut random));
-        assert_eq!(random.calls[60], RngCall::IntBound(1));
-        assert_eq!(random.calls[61], RngCall::IntBound(4));
+        assert_eq!(random.calls[60], RngCall::IntBound(4));
+        assert_eq!(random.calls[61], RngCall::IntBound(1));
+        assert_eq!(
+            level.block_entities.get(&origin),
+            Some(&TestBlockEntity::Spawner {
+                next_spawn: Some("minecraft:skeleton".to_string()),
+                spawn_potentials: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn zero_total_spawner_potentials_clear_without_weighted_rng() {
+        let mut level = TestLevel::over(access());
+        let origin = BlockPos::new(10, 20, -4);
+        prepare_room(&mut level, origin);
+        level.set_spawner_state(origin, None, vec![("minecraft:zombie".to_string(), 0)]);
+        let mut random = ScriptedRandom::room(7);
+
+        assert!(place(&mut level, origin, &mut random));
+        assert_eq!(random.next_bound, 60);
+        assert_eq!(random.calls[60], RngCall::IntBound(4));
         assert_eq!(
             level.block_entities.get(&origin),
             Some(&TestBlockEntity::Spawner {

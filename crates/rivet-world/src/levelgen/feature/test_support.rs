@@ -388,7 +388,10 @@ impl WorldGenLevel for TestLevel {
                 next_spawn: None,
                 spawn_potentials,
             }) if !spawn_potentials.is_empty() => {
-                Some(spawn_potentials.iter().map(|(_, weight)| *weight).sum())
+                let total = spawn_potentials
+                    .iter()
+                    .fold(0i32, |total, (_, weight)| total.wrapping_add(*weight));
+                (total > 0).then_some(total)
             }
             _ => None,
         }
