@@ -77,7 +77,16 @@ impl TamperKind {
 /// Parse a serialized Level-compound payload into a `CompoundTag`.
 pub fn parse_payload(bytes: &[u8]) -> Result<CompoundTag, String> {
     let mut input = DataInputStream::new(Cursor::new(bytes));
-    nbt_io::read_unlimited(&mut input).map_err(|e| format!("NBT read failed: {e}"))
+    let compound =
+        nbt_io::read_unlimited(&mut input).map_err(|e| format!("NBT read failed: {e}"))?;
+    let cursor = input.into_inner();
+    if cursor.position() != bytes.len() as u64 {
+        return Err(format!(
+            "NBT payload has {} trailing bytes",
+            bytes.len() as u64 - cursor.position()
+        ));
+    }
+    Ok(compound)
 }
 
 /// Re-encode a `CompoundTag` to the unnamed-root serialized form.
@@ -365,6 +374,17 @@ mod tests {
     /// mutation targets present (the shared `fixture_full_payload` builder).
     fn fixture_payload() -> Vec<u8> {
         fixture_full_payload(0, 0)
+    }
+
+    #[test]
+    fn payload_parser_rejects_trailing_bytes() {
+        let mut payload = fixture_payload();
+        payload.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let error = parse_payload(&payload).expect_err("trailing bytes must be rejected");
+        assert!(
+            error.contains("trailing bytes"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
