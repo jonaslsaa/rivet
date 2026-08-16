@@ -290,6 +290,11 @@ where
         self.base.add_packed_post_process(offsets, section_index);
     }
 
+    /// Clear one runtime post-processing section before save composition.
+    pub fn clear_post_processing(&mut self, section_index: usize) {
+        self.base.clear_post_processing(section_index);
+    }
+
     /// `ChunkAccess.setHeightmap(Types, long[])` — adopted by the chunk-load /
     /// `replaceWithPacketData` paths.
     pub fn set_heightmap(&mut self, key: Types, data: &[i64]) {

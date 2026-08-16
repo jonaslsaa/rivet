@@ -693,6 +693,12 @@ where
             .extend_from_slice(packed_offsets);
     }
 
+    /// Clear one runtime post-processing section. This is the mutable half of
+    /// the live `getPostProcessing()` authority used by save composition.
+    pub fn clear_post_processing(&mut self, section_index: usize) {
+        self.post_processing[section_index].clear();
+    }
+
     /// `ChunkAccess.markPosForPostProcessing(BlockPos)` — the base warns and
     /// does nothing (`ProtoChunk` overrides it).
     pub fn mark_pos_for_post_processing(&self, _block_pos: &BlockPos) {

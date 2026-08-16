@@ -3,11 +3,10 @@
 //!
 //! This is the write counterpart to the parse surface in
 //! [`super::serializable_chunk_data`]: given the extracted
-//! [`SerializableChunkData`] (the auxiliary fields `SerializableChunkData.copyOf`
-//! snapshots off the live chunk) and the reconstructed runtime
-//! [`ReconstructedLevelChunk`] (the sections and Starlight nibbles the parse
-//! installed), [`write`] produces the exact wire `CompoundTag` Paper's
-//! `write()` emits.
+//! [`SerializableChunkData`] and the reconstructed runtime
+//! [`ReconstructedLevelChunk`], [`write`] produces the exact wire
+//! `CompoundTag` Paper's `write()` emits. Mutable runtime surfaces are read
+//! from the chunk authority at save time rather than from parse snapshots.
 //!
 //! Field order and omission rules mirror `SerializableChunkData.write()`
 //! exactly: `DataVersion` (first, via `NbtUtils.addCurrentDataVersion`), then
@@ -58,11 +57,11 @@
 //! - The `ChunkBukkitValues` compound is written only when non-empty, matching
 //!   `copyOf`'s `persistentDataContainer.isEmpty()` null-out.
 //!
-//! The input split mirrors `copyOf`: the auxiliary fields live on
-//! [`SerializableChunkData`]; the live sections, heightmaps, and Starlight
-//! nibbles live on the reconstructed chunk (the heightmaps especially: Paper's
-//! `read` primes missing ones before `copyOf`, so the write must read them from
-//! the chunk — the authoritative primed result — not the stored parse map).
+//! The input split mirrors `copyOf`: immutable fields with no modeled runtime
+//! authority remain on [`SerializableChunkData`], while sections, heightmaps,
+//! Starlight nibbles, block entities, post-processing, and structure maps are
+//! read from the reconstructed chunk. Heightmaps especially must come from the
+//! chunk because Paper's `read` primes missing ones before `copyOf`.
 //! [`reconstruct_runtime_chunk`] consumes its [`SerializableChunkData`], so a
 //! round-trip caller keeps a separate parse alive for [`write`] (the tests do
 //! exactly this).
@@ -179,20 +178,65 @@ fn store_section_containers(
 
 /// Mirror `SerializableChunkData.write()`'s `packOffsets`: a `null` (absent)
 /// section becomes an empty list; a non-empty `short[]` becomes a `ShortTag`
-/// list. The parse's `post_processing_sections` already normalizes an empty
-/// wire list to `None` (Java's `!shorts.isEmpty() ? ... : null`).
-fn pack_offsets(post_processing: &[Option<Vec<i16>>]) -> ListTag {
+/// list. The runtime chunk stores absent and empty lists alike, so the empty
+/// lists are normalized to the same omitted-on-copy representation here.
+fn pack_offsets(post_processing: &[Vec<i16>]) -> ListTag {
     let mut list = ListTag::new();
     for offsets in post_processing {
         let mut offsets_tag = ListTag::new();
-        if let Some(offsets) = offsets {
-            for offset in offsets {
-                offsets_tag.add(Tag::Short(ShortTag::value_of(*offset)));
-            }
+        for offset in offsets {
+            offsets_tag.add(Tag::Short(ShortTag::value_of(*offset)));
         }
         list.add(Tag::List(offsets_tag));
     }
     list
+}
+
+/// Build Paper's `structures` container from the live `ChunkAccess` maps.
+///
+/// `References` is fully modeled and therefore comes only from the runtime
+/// map. Empty sets are omitted by `packStructureData`, while non-empty sets
+/// preserve the map's canonicalized insertion order and the signed NBT long
+/// representation of each packed chunk position. Structure starts have a live
+/// key map, but their `StructureStart` payload is still deferred under #369;
+/// an empty compound is the typed container boundary, never a copy of parsed
+/// raw NBT. This deliberately drops stale parsed starts rather than presenting
+/// them as current runtime state.
+fn pack_structures(chunk: &ReconstructedLevelChunk) -> CompoundTag {
+    let mut structures = CompoundTag::new();
+    let mut starts = CompoundTag::new();
+    for identifier in chunk.get_all_starts().keys() {
+        starts.put(identifier.to_string(), Tag::Compound(CompoundTag::new()));
+    }
+    structures.put("starts".to_string(), Tag::Compound(starts));
+
+    let mut references = CompoundTag::new();
+    for (identifier, reference_set) in chunk.get_all_references() {
+        if reference_set.is_empty() {
+            continue;
+        }
+        references.put_long_array(
+            &identifier.to_string(),
+            reference_set
+                .iter()
+                .map(|reference| *reference as i64)
+                .collect(),
+        );
+    }
+    structures.put("References".to_string(), Tag::Compound(references));
+    structures
+}
+
+/// Current block-entity save tags from the strongest modeled runtime authority.
+///
+/// The pending NBT map is the only block-entity save state modeled by Rivet;
+/// materialized `BlockEntity::saveWithFullMetadata` remains deferred under
+/// #341. Reading this map preserves additions, replacements, corrected-position
+/// deduplication, and removals without resurrecting parsed snapshots.
+fn block_entities_for_saving(
+    chunk: &ReconstructedLevelChunk,
+) -> impl Iterator<Item = &CompoundTag> {
+    chunk.pending_block_entities().values()
 }
 
 /// `copyOf`'s heightmap snapshot: the live chunk's `heightmapsAfter()` types,
@@ -374,7 +418,7 @@ pub fn write(data: &SerializableChunkData, chunk: &ReconstructedLevelChunk) -> C
     }
 
     let mut block_entity_tags = ListTag::new();
-    for entity in data.block_entities() {
+    for entity in block_entities_for_saving(chunk) {
         block_entity_tags.add(Tag::Compound(entity.clone()));
     }
     tag.put("block_entities".to_string(), Tag::List(block_entity_tags));
@@ -398,7 +442,7 @@ pub fn write(data: &SerializableChunkData, chunk: &ReconstructedLevelChunk) -> C
 
     tag.put(
         POST_PROCESSING_TAG.to_string(),
-        Tag::List(pack_offsets(data.post_processing_sections())),
+        Tag::List(pack_offsets(chunk.get_base().get_post_processing())),
     );
 
     // `copyOf` snapshots the live chunk's `heightmapsAfter()` set — which after
@@ -416,7 +460,7 @@ pub fn write(data: &SerializableChunkData, chunk: &ReconstructedLevelChunk) -> C
 
     tag.put(
         STRUCTURES_TAG.to_string(),
-        Tag::Compound(data.structure_data().clone()),
+        Tag::Compound(pack_structures(chunk)),
     );
 
     // `copyOf` nulls the PDC when `persistentDataContainer.isEmpty()`, so a
@@ -520,12 +564,10 @@ mod tests {
         }
     }
 
-    /// Parse -> reconstruct -> write once, returning the written payload. The
-    /// reconstruction consumes its [`SerializableChunkData`], so the caller
-    /// keeps a separate parse alive for `write` (the writer's input split is
-    /// data + chunk, mirroring `copyOf`'s split of auxiliary fields and live
-    /// sections).
-    fn write_once(root: &CompoundTag) -> CompoundTag {
+    /// Parse and reconstruct while retaining a separate parse result for the
+    /// writer. `reconstruct_runtime_chunk` consumes its own parse, mirroring
+    /// `copyOf`'s split between immutable fields and live chunk state.
+    fn write_parts(root: &CompoundTag) -> (SerializableChunkData, ReconstructedLevelChunk) {
         let height = height_accessor::create(-64, 384);
         let data = SerializableChunkData::parse(height, root)
             .expect("fixture parses")
@@ -537,7 +579,17 @@ mod tests {
         let reconstruction =
             reconstruct_runtime_chunk(data.stored_pos(), for_reconstruction, height, true)
                 .expect("fixture reconstructs");
-        write(&data, &reconstruction.chunk)
+        (data, reconstruction.chunk)
+    }
+
+    /// Parse -> reconstruct -> write once, returning the written payload. The
+    /// reconstruction consumes its [`SerializableChunkData`], so the caller
+    /// keeps a separate parse alive for `write` (the writer's input split is
+    /// data + chunk, mirroring `copyOf`'s split of auxiliary fields and live
+    /// sections).
+    fn write_once(root: &CompoundTag) -> CompoundTag {
+        let (data, chunk) = write_parts(root);
+        write(&data, &chunk)
     }
 
     /// The loaded-world fixtures are vanilla-format writes: `isLightOn` present
@@ -1009,5 +1061,162 @@ mod tests {
         assert_eq!(tick.get_int("y"), Some(61));
         assert_eq!(tick.get_int("z"), Some(-302));
         assert_eq!(tick.get_int("t"), Some(-59));
+    }
+
+    fn block_entity_tag(id: &str, x: i32, y: i32, z: i32, marker: i32) -> CompoundTag {
+        let mut tag = CompoundTag::new();
+        tag.put_string("id", id);
+        tag.put_int("x", x);
+        tag.put_int("y", y);
+        tag.put_int("z", z);
+        tag.put_int("marker", marker);
+        tag
+    }
+
+    fn written_block_entities(tag: &CompoundTag) -> Vec<CompoundTag> {
+        let Tag::List(entries) = tag.get("block_entities").expect("block_entities written") else {
+            panic!("block_entities must be a list");
+        };
+        entries
+            .list
+            .iter()
+            .map(|entry| match entry {
+                Tag::Compound(entity) => entity.clone(),
+                other => panic!("unexpected block entity tag {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn block_entity_replacement_addition_removal_and_dedup_use_live_authority() {
+        let root = fixture("-19.-21.nbt");
+        let original = root.clone();
+        let (data, mut chunk) = write_parts(&root);
+        let original_pos = *chunk
+            .pending_block_entities()
+            .keys()
+            .next()
+            .expect("fixture has one block entity");
+
+        // Replacement updates the existing position in place instead of
+        // re-reading the parsed `SerializableChunkData` list.
+        chunk.set_block_entity_nbt(block_entity_tag(
+            "minecraft:furnace",
+            original_pos.get_x(),
+            original_pos.get_y(),
+            original_pos.get_z(),
+            1,
+        ));
+        let entities = written_block_entities(&write(&data, &chunk));
+        assert_eq!(entities.len(), 1);
+        assert_eq!(
+            entities[0].get_string("id").map(String::as_str),
+            Some("minecraft:furnace")
+        );
+        assert_eq!(entities[0].get_int("marker"), Some(1));
+
+        // Addition is emitted in the pending-map's insertion order.
+        let added_pos = rivet_registry::core::BlockPos::new(-300, -50, -320);
+        chunk.set_block_entity_nbt(block_entity_tag(
+            "minecraft:chest",
+            added_pos.get_x(),
+            added_pos.get_y(),
+            added_pos.get_z(),
+            2,
+        ));
+        let entities = written_block_entities(&write(&data, &chunk));
+        assert_eq!(entities.len(), 2);
+        assert_eq!(entities[1].get_int("marker"), Some(2));
+
+        // Removal does not resurrect the original pending snapshot.
+        assert!(chunk.remove_block_entity_nbt(&original_pos).is_some());
+        let entities = written_block_entities(&write(&data, &chunk));
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0].get_int("marker"), Some(2));
+
+        // Two serialized positions corrected to one runtime key keep the later
+        // replacement, with exactly one saved entry.
+        let mut dedup = write_parts(&original).1;
+        for pos in dedup
+            .pending_block_entities()
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            dedup.remove_block_entity_nbt(&pos);
+        }
+        let first = block_entity_tag("minecraft:chest", 1, 64, 1, 3);
+        let second = block_entity_tag("minecraft:furnace", 17, 64, 1, 4);
+        dedup.set_block_entity_nbt(first);
+        dedup.set_block_entity_nbt(second);
+        let (dedup_data, _) = write_parts(&original);
+        let entities = written_block_entities(&write(&dedup_data, &dedup));
+        assert_eq!(
+            entities.len(),
+            1,
+            "corrected positions deduplicate in the runtime map"
+        );
+        let corrected = entities
+            .iter()
+            .find(|entity| entity.get_int("marker") == Some(4))
+            .expect("corrected duplicate replacement is retained");
+        assert_eq!(
+            corrected.get_string("id").map(String::as_str),
+            Some("minecraft:furnace")
+        );
+
+        assert_eq!(
+            root, original,
+            "serialization does not mutate source inventory"
+        );
+    }
+
+    #[test]
+    fn post_processing_addition_and_removal_use_live_lists() {
+        let root = fixture("-1.-3.nbt");
+        let (data, mut chunk) = write_parts(&root);
+        chunk.add_packed_post_process(&[7, 9], 0);
+        let written = write(&data, &chunk);
+        let Tag::List(sections) = written.get(POST_PROCESSING_TAG).unwrap() else {
+            panic!("PostProcessing must be a list");
+        };
+        assert_eq!(sections.get_list(0).unwrap().list.len(), 2);
+
+        chunk.clear_post_processing(0);
+        let written = write(&data, &chunk);
+        let Tag::List(sections) = written.get(POST_PROCESSING_TAG).unwrap() else {
+            panic!("PostProcessing must be a list");
+        };
+        assert!(sections.get_list(0).unwrap().list.is_empty());
+    }
+
+    #[test]
+    fn structures_write_current_references_and_start_keys_not_stale_raw_payload() {
+        let mut root = fixture("0.-4.nbt");
+        let mut stale_starts = CompoundTag::new();
+        stale_starts.put_int("stale:structure", 99);
+        root.get_compound_or_empty_mut(STRUCTURES_TAG)
+            .put("starts".to_string(), Tag::Compound(stale_starts));
+        let (data, mut chunk) = write_parts(&root);
+
+        let current = rivet_registry::Identifier::parse("minecraft:village");
+        chunk.set_all_references(vec![(
+            current.clone(),
+            vec![rivet_registry::core::ChunkPos::new(0, -4).pack() as u64],
+        )]);
+        chunk.set_start_for_structure(current.clone(), 42);
+        let written = write(&data, &chunk);
+        let structures = written.get_compound(STRUCTURES_TAG).unwrap();
+        let starts = structures.get_compound("starts").unwrap();
+        assert!(starts.contains("minecraft:village"));
+        assert!(!starts.contains("stale:structure"));
+        assert!(starts.get_compound("minecraft:village").unwrap().is_empty());
+
+        let references = structures.get_compound("References").unwrap();
+        assert_eq!(
+            references.get_long_array("minecraft:village"),
+            Some(&vec![rivet_registry::core::ChunkPos::new(0, -4).pack()])
+        );
+        assert!(!references.contains("minecraft:mineshaft"));
     }
 }
