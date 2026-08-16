@@ -74,7 +74,7 @@ impl DiskConfiguration {
     pub fn state_provider(
         &self,
     ) -> &Arc<dyn crate::levelgen::feature::stateproviders::block_state_provider::ErasedBlockStateProvider>
-    {
+{
         &self.state_provider
     }
 
