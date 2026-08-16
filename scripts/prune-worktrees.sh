@@ -156,33 +156,51 @@ canonical_dir() { # $1 = path; canonical absolute path if it is a real dir, else
 }
 
 canonical_path() {
-  local path=$1 parent base
-  if [ -d "$path" ]; then
-    canonical_dir "$path"
+  local candidate=$1 parent base
+  if [ -d "$candidate" ]; then
+    canonical_dir "$candidate"
     return
   fi
-  parent=$(cd "$(dirname "$path")" 2>/dev/null && pwd -P) || return 0
-  base=$(basename "$path")
+  parent=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || return 0
+  base=$(basename "$candidate")
   printf '%s/%s\n' "$parent" "$base"
 }
 
 has_preserved_work() {
-  local d
-  for d in "$1"/tools/*/work; do
-    [ -d "$d" ] || continue
-    [ -n "$(find "$d" -mindepth 1 -print -quit 2>/dev/null)" ] && return 0
-  done
+  local work_dir
+  [ -d "$1/tools" ] || return 1
+  while IFS= read -r work_dir; do
+    [ -n "$work_dir" ] || continue
+    [ -n "$(find "$work_dir" -mindepth 1 -print -quit 2>/dev/null)" ] && return 0
+  done < <(find "$1/tools" -mindepth 2 -maxdepth 2 -type d -name work -print 2>/dev/null)
   return 1
 }
 
+require_nonnegative_integer() {
+  local option=$1 value=${2-}
+  case "$value" in
+    ''|*[!0-9]*)
+      printf '%s requires a non-negative integer (got %s)\n' "$option" "${value:-<missing>}" >&2
+      return 2
+      ;;
+  esac
+}
+
 prune_cache() {
-  local cache=$1 canonical
+  local cache=$1 wholesale=${2:-0} canonical
   canonical=$(canonical_dir "$cache")
   if [ -n "$SHARED_TARGET" ] && [ "$canonical" = "$SHARED_TARGET" ]; then
     say "REFUSE $cache  [shared cargo target]"
     return 1
   fi
-  if ! is_cargo_scratch "$cache"; then
+  if [ "$wholesale" = 1 ]; then
+    # A tmp child is removed wholesale only with Cargo's root identity marker.
+    # Nested targets are passed with wholesale=0 and may survive partial cleanup.
+    if ! is_cargo_target "$cache"; then
+      say "REFUSE $cache  [not an unambiguous bare cargo target]"
+      return 1
+    fi
+  elif ! is_cargo_scratch "$cache"; then
     say "REFUSE $cache  [not a cargo cache]"
     return 1
   fi
@@ -208,31 +226,38 @@ is_live_build() {
 }
 
 sweep_tmp() {
-  local root tag cache kb mins=${IDLE_MIN:-$((IDLE_HOURS * 60))}
+  local root child cache kb mins=${IDLE_MIN:-$((IDLE_HOURS * 60))}
   for root in "$@"; do
     [ -d "$root" ] || continue
-    while IFS= read -r tag; do
-      [ -n "$tag" ] || continue
-      cache=${tag%/CACHEDIR.TAG}
-      [ -O "$tag" ] || continue
-      if ! is_cargo_scratch "$cache"; then
-        say "KEEP   $cache  [tmp scratch: ambiguous cache marker]"
-        continue
-      fi
-      if is_live_build "$cache"; then
-        say "KEEP   $cache  [tmp scratch: live build]"
-        continue
-      fi
-      if touched_within "$cache" "$mins"; then
-        say "KEEP   $cache  [tmp scratch: active within ${mins}min]"
-        continue
-      fi
-      kb=$(dir_kb "$cache")
-      say "$(act PRUNE)  $cache  [tmp scratch: idle, $((kb / 1024))MB]"
-      if prune_cache "$cache"; then
-        freed_kb=$((freed_kb + kb)); pruned=$((pruned + 1))
-      fi
-    done < <(find "$root" -maxdepth 8 -type f -name CACHEDIR.TAG -user "$(id -un)" -print 2>/dev/null)
+    # Classify each direct tmp child first. A tagged container is never a
+    # wholesale candidate: only a strict bare target or an exact nested target
+    # returned by tmp_cache_dirs may reach the deletion funnel. This preserves
+    # unrelated sentinels in ambiguous containers.
+    while IFS= read -r child; do
+      [ -n "$child" ] || continue
+      while IFS= read -r cache; do
+        [ -n "$cache" ] || continue
+        [ -O "$cache" ] || continue
+        if is_live_build "$cache"; then
+          say "KEEP   $cache  [tmp scratch: live build]"
+          continue
+        fi
+        if touched_within "$cache" "$mins"; then
+          say "KEEP   $cache  [tmp scratch: active within ${mins}min]"
+          continue
+        fi
+        kb=$(dir_kb "$cache")
+        say "$(act PRUNE)  $cache  [tmp scratch: idle, $((kb / 1024))MB]"
+        if is_cargo_target "$cache"; then
+          wholesale=1
+        else
+          wholesale=0
+        fi
+        if prune_cache "$cache" "$wholesale"; then
+          freed_kb=$((freed_kb + kb)); pruned=$((pruned + 1))
+        fi
+      done < <(tmp_cache_dirs "$child")
+    done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -user "$(id -un)" -print 2>/dev/null)
   done
 }
 
@@ -240,10 +265,25 @@ main() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --dry-run) DRY=1 ;;
-      --idle-hours) shift; IDLE_HOURS=${1:?--idle-hours needs a value} ;;
+      --idle-hours)
+        [ "$#" -ge 2 ] || { printf '%s requires a non-negative integer (got <missing>)\n' "$1" >&2; return 2; }
+        require_nonnegative_integer "$1" "$2" || return 2
+        IDLE_HOURS=$2
+        shift
+        ;;
       --no-tmp) SWEEP_TMP=0 ;;
-      --pressure-gb) shift; PRESSURE_GB=${1:?--pressure-gb needs a value} ;;
-      --pressure-idle-min) shift; PRESSURE_IDLE_MIN=${1:?--pressure-idle-min needs a value} ;;
+      --pressure-gb)
+        [ "$#" -ge 2 ] || { printf '%s requires a non-negative integer (got <missing>)\n' "$1" >&2; return 2; }
+        require_nonnegative_integer "$1" "$2" || return 2
+        PRESSURE_GB=$2
+        shift
+        ;;
+      --pressure-idle-min)
+        [ "$#" -ge 2 ] || { printf '%s requires a non-negative integer (got <missing>)\n' "$1" >&2; return 2; }
+        require_nonnegative_integer "$1" "$2" || return 2
+        PRESSURE_IDLE_MIN=$2
+        shift
+        ;;
       *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
     shift

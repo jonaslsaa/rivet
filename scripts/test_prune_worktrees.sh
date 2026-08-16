@@ -37,6 +37,20 @@ source "$SCRIPT_DIR/prune-worktrees.sh"
 fail() { echo "FAIL: $1"; exit 1; }
 pass() { echo "ok:   $1"; }
 
+# CLI thresholds are arithmetic/find inputs, so reject hostile values before
+# repository discovery or any deletion path can run.
+for option in --idle-hours --pressure-gb --pressure-idle-min; do
+  for value in -1 1.5 invalid; do
+    invalid_log="$SANDBOX/invalid-${option#--}-${value//[^[:alnum:]]/_}.log"
+    rc=0
+    bash "$SCRIPT_DIR/prune-worktrees.sh" --no-tmp "$option" "$value" >"$invalid_log" 2>&1 || rc=$?
+    [ "$rc" -eq 2 ] || fail "$option $value returned $rc instead of 2"
+    grep -q "requires a non-negative integer" "$invalid_log" \
+      || fail "$option $value did not report an actionable validation error"
+  done
+done
+pass "negative and non-integer threshold values exit 2 before pruning"
+
 # --- sandbox fixtures (all old, so sweeps treat them as idle) ---------------
 CARGO_TAG='Signature: 8a477f597d28d172789f06886806bc55
 # This file is a cache directory tag created by cargo.
@@ -346,6 +360,14 @@ printf '[workspace]\n' > "$CK5/Cargo.toml"
 mkdir "$CK5/.git"
 mk_tagged "$CK5"
 mk_cargo_target "$CK5/target"
+# hostile: the sweep root itself may carry Cargo markers (for example a
+# shared TMPDIR cache marker). It is never a candidate, even with strict Cargo
+# identity; only children are classified.
+printf '%s\n' "$CARGO_TAG" > "$SWEEP_ROOT/CACHEDIR.TAG"
+printf '{}\n' > "$SWEEP_ROOT/.rustc_info.json"
+mkdir -p "$SWEEP_ROOT/debug/.fingerprint"
+touch "$SWEEP_ROOT/sentinel.txt"
+oldtouch "$SWEEP_ROOT" "$SWEEP_ROOT/CACHEDIR.TAG" "$SWEEP_ROOT/.rustc_info.json" "$SWEEP_ROOT/debug" "$SWEEP_ROOT/debug/.fingerprint" "$SWEEP_ROOT/sentinel.txt"
 # custom-profile-only nested target inside a checkout is deleted too
 CK6="$SWEEP_ROOT/custom-checkout"
 mkdir -p "$CK6/target/dist/.fingerprint"
@@ -361,6 +383,15 @@ printf '[workspace]\n' > "$CK7/target/Cargo.toml"
 mkdir "$CK7/target/.git"
 printf '%s\n' "$CARGO_TAG" > "$CK7/target/CACHEDIR.TAG"
 oldtouch "$CK7" "$CK7/target" "$CK7/target/CACHEDIR.TAG" "$CK7/target/Cargo.toml" "$CK7/target/.git" "$CK7/target/debug" "$CK7/target/debug/.fingerprint"
+# hostile: an ambiguous tagged container holds a genuine nested target and an
+# unrelated sentinel. The exact target may be pruned, but the container itself
+# must survive because it lacks the root .rustc_info.json identity marker.
+AMB="$SWEEP_ROOT/ambiguous-container"
+mkdir -p "$AMB/target"
+printf '%s\n' "$CARGO_TAG" > "$AMB/CACHEDIR.TAG"
+touch "$AMB/sentinel.txt"
+mk_cargo_target "$AMB/target"
+oldtouch "$AMB" "$AMB/CACHEDIR.TAG" "$AMB/sentinel.txt"
 
 DRY=0; IDLE_HOURS=24; freed_kb=0; pruned=0
 sweep_tmp "$SWEEP_ROOT" >/dev/null
@@ -374,7 +405,12 @@ sweep_tmp "$SWEEP_ROOT" >/dev/null
 [ -d "$CK6/target" ] && fail "custom-profile checkout's nested target/ not deleted" || true
 [ -d "$CK7" ] || fail "checkout-at-target-path was deleted wholesale"
 [ -d "$CK7/target" ] || fail "checkout-at-target-path's nested checkout was pruned wholesale"
-pass "real sweep: bare target + nested targets pruned; generic cache and checkouts survive"
+[ -d "$AMB" ] || fail "ambiguous tagged container was deleted wholesale"
+[ -f "$AMB/sentinel.txt" ] || fail "ambiguous container sentinel was deleted"
+[ ! -d "$AMB/target" ] || fail "ambiguous container's exact nested target was not pruned"
+[ -d "$SWEEP_ROOT" ] || fail "sweep root carrying Cargo markers was deleted"
+[ -f "$SWEEP_ROOT/sentinel.txt" ] || fail "sweep root sentinel was deleted"
+pass "real sweep: strict bare targets + exact nested targets pruned; containers and sentinels survive"
 
 # --- dry-run reporting is prospective, not a claim of completed deletion -----
 SWEEP_ROOT2="$SANDBOX/root-sweep2"
@@ -685,6 +721,25 @@ if command -v zsh >/dev/null 2>&1; then
   zout=$(zsh "$SCRIPT_DIR/prune-worktrees.sh" --dry-run --no-tmp 2>&1) || zrc=$?
   echo "$zout" | grep -q "would remove" || fail "zsh direct exec did not run main(): $zout"
   pass "zsh direct exec runs main()"
+
+  # A clean merged worktree must be discoverable and removable under zsh too;
+  # this exercises the full main() path rather than only sourced classifiers.
+  E2EZ="$SANDBOX/e2e-zsh"
+  mkdir -p "$E2EZ/main"
+  git init -q "$E2EZ/main"
+  git -C "$E2EZ/main" config user.email test@example.com
+  git -C "$E2EZ/main" config user.name "test"
+  git -C "$E2EZ/main" config commit.gpgsign false
+  printf 'x\\n' > "$E2EZ/main/a.txt"
+  git -C "$E2EZ/main" add a.txt
+  git -C "$E2EZ/main" commit -qm c1
+  git -C "$E2EZ/main" update-ref refs/remotes/origin/main HEAD
+  git -C "$E2EZ/main" worktree add -q -b feature/merged-zsh "$E2EZ/wt" HEAD
+  zout=$(cd "$E2EZ/main" && zsh "$SCRIPT_DIR/prune-worktrees.sh" --dry-run --no-tmp 2>&1)
+  echo "$zout" | grep -q "WOULD REMOVE .*feature/merged-zsh" \
+    || fail "zsh clean merged worktree was not classified for removal: $zout"
+  [ -d "$E2EZ/wt" ] || fail "zsh clean merged dry-run removed the worktree"
+  pass "zsh clean merged worktree dry-run classifies removal without deleting"
 
   # interactive sourcing must NOT run main (guard false-positive would sweep).
   # Source with --dry-run --no-tmp: a regression stays harmless (no fetch, no
