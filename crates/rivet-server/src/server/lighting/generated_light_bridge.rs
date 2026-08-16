@@ -19,7 +19,7 @@ use rivet_world::chunk::storage::section_reconstruction::{
 use rivet_world::level::height_accessor::SimpleLevelHeightAccessor;
 use rivet_world::levelgen::heightmap::StateFlags;
 use rivet_world::lighting::star_light_engine::get_empty_sections_for_chunk;
-use rivet_world::lighting::star_light_provider::StarLightProvider;
+use rivet_world::lighting::star_light_provider::{LightProviderError, StarLightProvider};
 
 use super::star_light_provider_impl::SkyLightProvider;
 use crate::server::level::level_chunk::{
@@ -132,15 +132,34 @@ impl GeneratedLightBridge {
             }
         } else {
             runtime.set_light_correct(false);
-            let provider_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let empty_sections = get_empty_sections_for_chunk(&runtime);
-                self.provider
-                    .light_chunk_with(runtime.base_mut(), &empty_sections);
-            }));
-            if let Err(payload) = provider_result {
-                return Err(GeneratedLightBridgeError::ProviderPanic(panic_message(
-                    payload,
-                )));
+            let provider_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                || -> Result<(), GeneratedLightBridgeError> {
+                    let empty_sections = get_empty_sections_for_chunk(&runtime);
+                    self.provider
+                        .light_chunk_with(runtime.base_mut(), &empty_sections)
+                        .map_err(|error| match error {
+                            LightProviderError::MissingChunk(pos) => {
+                                GeneratedLightBridgeError::ProviderPanic(format!(
+                                    "center chunk {pos} disappeared from runtime storage"
+                                ))
+                            }
+                            LightProviderError::CallbackPanicked => {
+                                GeneratedLightBridgeError::ProviderPanic(
+                                    "light-provider storage callback panicked".to_string(),
+                                )
+                            }
+                        })?;
+                    Ok(())
+                },
+            ));
+            match provider_result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => return Err(error),
+                Err(payload) => {
+                    return Err(GeneratedLightBridgeError::ProviderPanic(panic_message(
+                        payload,
+                    )));
+                }
             }
             runtime.set_light_correct(true);
             if status == ChunkStatus::InitializeLight {
@@ -258,16 +277,20 @@ mod tests {
     ) {
         let shared = Arc::new(Mutex::new(storage));
         let closure_shared = Arc::clone(&shared);
-        let closure = Box::new(move |x: i32, z: i32, put: Option<LightChunk>| {
-            let mut storage = closure_shared.lock().unwrap();
-            match put {
-                Some(chunk) => {
-                    storage.insert((x, z), chunk);
-                    None
+        let closure = Box::new(
+            move |x: i32, z: i32, put: Option<&mut Option<LightChunk>>| {
+                let mut storage = closure_shared.lock().unwrap();
+                match put {
+                    Some(slot) => {
+                        if let Some(chunk) = slot.take() {
+                            storage.insert((x, z), chunk);
+                        }
+                        None
+                    }
+                    None => storage.remove(&(x, z)),
                 }
-                None => storage.remove(&(x, z)),
-            }
-        });
+            },
+        );
         (closure, shared)
     }
 
@@ -514,8 +537,10 @@ mod tests {
                 }
                 let mut storage = closure_shared.lock().unwrap();
                 match put {
-                    Some(chunk) => {
-                        storage.insert((x, z), chunk);
+                    Some(slot) => {
+                        if let Some(chunk) = slot.take() {
+                            storage.insert((x, z), chunk);
+                        }
                         None
                     }
                     None => storage.remove(&(x, z)),

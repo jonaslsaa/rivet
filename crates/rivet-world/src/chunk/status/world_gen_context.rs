@@ -104,6 +104,7 @@ use crate::chunk::status::chunk_status_tasks;
 use crate::chunk::status::chunk_step::ChunkStep;
 use crate::chunk::status::{ChunkPyramid, ChunkStatus};
 use crate::lighting::level_light_engine::LevelLightEngine;
+use crate::lighting::star_light_provider::LightProviderError;
 
 /// The region-backed decoration seam's failure modes — the typed failures the
 /// `FEATURES` closure body (`addVanillaDecorations`) returns. The `ChunkPos`
@@ -221,6 +222,11 @@ pub enum GenError {
     /// Java's `NPE` on `context.lightEngine()`), and the seam never installs
     /// one on a run that ends below INITIALIZE_LIGHT.
     LightEngineMissing { status: ChunkStatus },
+    /// The provider could not resolve the center chunk from runtime storage.
+    LightChunkMissing { status: ChunkStatus, pos: ChunkPos },
+    /// A provider-owned runtime storage callback panicked before the light
+    /// result could be committed.
+    LightProviderPanicked { status: ChunkStatus },
     /// A persisted light-correct chunk reached the load branch, but the
     /// attached provider cannot complete force-load reconciliation and edge
     /// correction. The chunk remains unchanged and must not be labeled ready.
@@ -373,6 +379,14 @@ impl std::fmt::Display for GenError {
             GenError::LightEngineMissing { status } => write!(
                 f,
                 "cannot run the {status:?} task: no light engine is attached to the context"
+            ),
+            GenError::LightChunkMissing { status, pos } => write!(
+                f,
+                "cannot run the {status:?} task: the center chunk at {pos} is missing"
+            ),
+            GenError::LightProviderPanicked { status } => write!(
+                f,
+                "cannot run the {status:?} task: the light provider storage callback panicked"
             ),
             GenError::PersistedLightLoadUnsupported { status } => write!(
                 f,
@@ -533,7 +547,16 @@ where
             .provider_mut()
             .ok_or(GenError::LightEngineMissing { status })?;
         if Self::is_lighted(chunk) {
-            provider.force_load_in_chunk(chunk.get_pos(), &empty_sections);
+            provider
+                .try_force_load_in_chunk(chunk.get_pos(), &empty_sections)
+                .map_err(|error| match error {
+                    LightProviderError::MissingChunk(pos) => {
+                        GenError::LightChunkMissing { status, pos }
+                    }
+                    LightProviderError::CallbackPanicked => {
+                        GenError::LightProviderPanicked { status }
+                    }
+                })?;
             provider.check_chunk_edges(chunk.get_pos());
             if !provider.supports_persisted_light_load() {
                 return Err(GenError::PersistedLightLoadUnsupported {
@@ -541,8 +564,19 @@ where
                 });
             }
         } else {
+            let was_light_correct = chunk.is_light_correct();
             chunk.set_light_correct(false);
-            provider.light_chunk(chunk.get_pos(), &empty_sections);
+            if let Err(error) = provider.try_light_chunk(chunk.get_pos(), &empty_sections) {
+                chunk.set_light_correct(was_light_correct);
+                return Err(match error {
+                    LightProviderError::MissingChunk(pos) => {
+                        GenError::LightChunkMissing { status, pos }
+                    }
+                    LightProviderError::CallbackPanicked => {
+                        GenError::LightProviderPanicked { status }
+                    }
+                });
+            }
             chunk.set_light_correct(true);
         }
         // `ChunkLightTask`: advance the ProtoChunk at LIGHT's parent to LIGHT.
@@ -1631,6 +1665,7 @@ mod tests {
     struct RecordingLight {
         log: Arc<Mutex<LightLog>>,
         supports_persisted_load: bool,
+        missing_center: bool,
     }
 
     #[derive(Default)]
@@ -1659,6 +1694,18 @@ mod tests {
                 .unwrap()
                 .lit
                 .push((pos, empty_sections.to_vec()));
+        }
+        fn try_light_chunk(
+            &mut self,
+            pos: ChunkPos,
+            empty_sections: &[Option<bool>],
+        ) -> Result<(), LightProviderError> {
+            if self.missing_center {
+                Err(LightProviderError::MissingChunk(pos))
+            } else {
+                self.light_chunk(pos, empty_sections);
+                Ok(())
+            }
         }
         fn force_load_in_chunk(&mut self, pos: ChunkPos, empty_sections: &[Option<bool>]) {
             self.log
@@ -1698,6 +1745,7 @@ mod tests {
         let light = RecordingLight {
             log: Arc::new(Mutex::new(LightLog::default())),
             supports_persisted_load,
+            missing_center: false,
         };
         let log = Arc::clone(&light.log);
         (
@@ -1708,6 +1756,20 @@ mod tests {
                 Box::new(light),
             ),
             log,
+        )
+    }
+
+    fn missing_center_light_engine() -> LevelLightEngine {
+        let light = RecordingLight {
+            log: Arc::new(Mutex::new(LightLog::default())),
+            supports_persisted_load: true,
+            missing_center: true,
+        };
+        LevelLightEngine::with_provider(
+            Box::new(create_accessor(-64, 384)),
+            true,
+            true,
+            Box::new(light),
         )
     }
 
