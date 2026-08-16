@@ -84,11 +84,11 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send {
     /// name — the same `_at` suffix `ChunkAccess::get_height_at` uses for
     /// exactly this collision.
     ///
-    /// RivetTodo(#232): the worldgen `LevelReader` heightmap read is not ported
-    /// yet, so the default fails explicitly (panics) rather than fabricating a
-    /// surface — the same capability-unavailable seam as `get_biome`. Concrete
-    /// worlds and test doubles override it with real behavior when they land.
-    fn get_height_at(&self, _ty: Types, _x: i32, _z: i32) -> i32 {
+    /// The default remains an explicit capability failure for worlds that do
+    /// not own chunk heightmaps. Concrete regions override it with the mutable
+    /// Java behavior: a missing heightmap is primed and persisted before the
+    /// first-available height is returned.
+    fn get_height_at(&mut self, _ty: Types, _x: i32, _z: i32) -> i32 {
         panic!("WorldGenLevel.getHeight is not implemented (RivetTodo #232)")
     }
 

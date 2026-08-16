@@ -318,7 +318,7 @@ impl WorldGenLevel for TestLevel {
         self.access.clone()
     }
 
-    fn get_height_at(&self, _ty: Types, _x: i32, _z: i32) -> i32 {
+    fn get_height_at(&mut self, _ty: Types, _x: i32, _z: i32) -> i32 {
         self.height
     }
 

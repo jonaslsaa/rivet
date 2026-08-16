@@ -56,7 +56,7 @@ impl CountOnEveryLayerPlacement {
 impl PlacementModifier for CountOnEveryLayerPlacement {
     fn get_positions<'a, R: RandomSource>(
         &'a self,
-        context: &PlacementContext,
+        context: &mut PlacementContext,
         random: &mut R,
         origin: &BlockPos,
     ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
@@ -118,7 +118,7 @@ impl PlacementModifier for CountOnEveryLayerPlacement {
 /// counting air-or-fluid gaps above a non-bedrock solid block; return the Y of
 /// the block above the `layerToPlaceOn`-th such gap, or `Integer.MAX_VALUE`.
 fn find_on_ground_y_position(
-    context: &PlacementContext,
+    context: &mut PlacementContext,
     x_start: i32,
     y_start: i32,
     z_start: i32,
@@ -254,11 +254,11 @@ mod tests {
         let modifier = CountOnEveryLayerPlacement::of_int(1);
         let mut level = TestLevel(create(-64, 384));
         let generator = NoopGenerator;
-        let context = PlacementContext::new(&mut level, &generator, None);
+        let mut context = PlacementContext::new(&mut level, &generator, None);
         let mut random = LegacyRandomSource::new(0);
         let origin = BlockPos::new(0, 0, 0);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            modifier.get_positions(&context, &mut random, &origin)
+            modifier.get_positions(&mut context, &mut random, &origin)
         }));
         assert!(
             result.is_err(),
