@@ -147,6 +147,7 @@ pub mod delta_feature;
 pub mod disk_feature;
 pub mod geode_feature;
 pub mod lake_feature;
+pub mod monster_room_feature;
 pub mod replace_blobs_feature;
 pub mod scattered_ore_feature;
 pub mod sculk_patch_feature;
@@ -254,6 +255,7 @@ pub use huge_red_mushroom_feature::{HUGE_RED_MUSHROOM, HugeRedMushroomFeature};
 pub use iceberg_feature::{ICEBERG, IcebergFeature};
 pub use kelp_feature::{KELP, KelpFeature};
 pub use lake_feature::{LAKE, LakeFeature};
+pub use monster_room_feature::{MONSTER_ROOM, MonsterRoomFeature};
 pub use nether_forest_vegetation_feature::{
     NETHER_FOREST_VEGETATION, NetherForestVegetationFeature,
 };
@@ -742,6 +744,16 @@ pub fn feature_place<R: RandomSource>(
                 .downcast_ref::<OreConfiguration>()
                 .expect("ore feature must carry an OreConfiguration");
             ORE.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.MONSTER_ROOM` — the registered `minecraft:monster_room`
+        // leaf (FeatureId 22; both `minecraft:monster_room` and
+        // `minecraft:monster_room_deep` wrap the same configured feature — the
+        // seed-42 selected-chunk path; see `monster_room_feature`).
+        22 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<NoneFeatureConfiguration>()
+                .expect("monster_room feature must carry a NoneFeatureConfiguration");
+            MONSTER_ROOM.place_with_config(config, level, chunk_generator, random, origin)
         }
         // `Feature.DELTA`.
         46 => {
