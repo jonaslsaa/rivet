@@ -218,6 +218,16 @@ where
         self.base.set_sky_nibbles(nibbles);
     }
 
+    /// `StarlightChunk.starlight$getSkyEmptinessMap()`.
+    pub fn sky_emptiness_map(&self) -> Option<&[bool]> {
+        self.base.sky_emptiness_map()
+    }
+
+    /// `StarlightChunk.starlight$setSkyEmptinessMap(Boolean[])`.
+    pub fn set_sky_emptiness_map(&mut self, map: Option<Vec<bool>>) {
+        self.base.set_sky_emptiness_map(map);
+    }
+
     /// `ProtoChunk.getSections()`.
     pub fn get_sections(&self) -> &[LevelChunkSection<T, B>] {
         self.base.get_sections()
@@ -525,6 +535,53 @@ where
     /// genuine `FULL` (see the server `LevelChunk::try_from_full_proto`).
     pub fn into_base(self) -> ChunkAccess<T, B, S> {
         self.base
+    }
+
+    /// Transform the stored block and biome values while retaining every
+    /// proto-only field and every `ChunkAccess` field. The generated LIGHT
+    /// bridge uses this to cross the worldgen/server value boundary without
+    /// promoting the chunk or dropping generation metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub fn map_values<T2, B2>(
+        self,
+        block_strategy: crate::chunk::strategy::Strategy<T2>,
+        biome_strategy: crate::chunk::strategy::Strategy<B2>,
+        air: T2,
+        void_air: T2,
+        default_biome: B2,
+        map_block: &impl Fn(&T) -> T2,
+        map_biome: &impl Fn(&B) -> B2,
+        resolve: &'static (dyn Fn(&T2) -> StateFlags + Sync),
+    ) -> Result<ProtoChunk<T2, B2, S>, String>
+    where
+        T2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+        B2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    {
+        let ProtoChunk {
+            base,
+            entities,
+            status,
+            carving_mask,
+            air: _,
+            void_air: _,
+        } = self;
+        let base = base.map_values(
+            block_strategy,
+            biome_strategy,
+            air.clone(),
+            default_biome,
+            map_block,
+            map_biome,
+            resolve,
+        )?;
+        Ok(ProtoChunk {
+            base,
+            entities,
+            status,
+            carving_mask,
+            air,
+            void_air,
+        })
     }
 }
 

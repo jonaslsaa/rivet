@@ -12,7 +12,9 @@
 //! notify path, and the final generated-serving pipeline wiring into a concrete
 //! chunk storage.
 
+pub mod generated_light_bridge;
 pub mod star_light_engine;
 pub mod star_light_provider_impl;
 
-pub use star_light_provider_impl::SkyLightProvider;
+pub use generated_light_bridge::{GeneratedLightBridge, GeneratedLightBridgeError};
+pub use star_light_provider_impl::{ChunkAccessFn, LightChunk, SkyLightProvider};
