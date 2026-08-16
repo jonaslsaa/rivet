@@ -134,11 +134,14 @@ fn normalized_spawn_data(spawn_data: &CompoundTag) -> Option<CompoundTag> {
     let mut entity = entity.clone();
     normalize_spawn_data_entity_id_in_place(&mut entity);
     normalized.put("entity".to_string(), Tag::Compound(entity));
-    if let Some(rules) = spawn_data
-        .get("custom_spawn_rules")
-        .and_then(normalize_custom_spawn_rules)
-    {
-        normalized.put("custom_spawn_rules".to_string(), Tag::Compound(rules));
+    if let Some(rules) = spawn_data.get("custom_spawn_rules") {
+        match normalize_custom_spawn_rules(rules) {
+            Ok(Some(rules)) => {
+                normalized.put("custom_spawn_rules".to_string(), Tag::Compound(rules));
+            }
+            Ok(None) => {}
+            Err(()) => return None,
+        }
     }
     if let Some(equipment) = spawn_data.get("equipment").and_then(normalize_equipment) {
         normalized.put("equipment".to_string(), Tag::Compound(equipment));
@@ -160,33 +163,51 @@ fn normalize_spawn_data_entity_id_in_place(entity: &mut CompoundTag) {
     }
 }
 
-fn normalize_custom_spawn_rules(tag: &Tag) -> Option<CompoundTag> {
+enum LightRangeDecode {
+    Valid((i32, i32)),
+    Malformed,
+    OutOfRange,
+}
+
+fn normalize_custom_spawn_rules(tag: &Tag) -> Result<Option<CompoundTag>, ()> {
     let Tag::Compound(rules) = tag else {
-        return None;
+        return Ok(None);
     };
     let mut normalized = CompoundTag::new();
     for name in ["block_light_limit", "sky_light_limit"] {
         let Some(raw) = rules.get(name) else {
             continue;
         };
-        let value = decoded_light_range(raw)?;
-        if value != LIGHT_RANGE_DEFAULT {
-            normalized.put(name.to_string(), canonical_light_range(value));
+        match decoded_light_range(raw) {
+            LightRangeDecode::Valid(value) if value != LIGHT_RANGE_DEFAULT => {
+                normalized.put(name.to_string(), canonical_light_range(value));
+            }
+            LightRangeDecode::Valid(_) | LightRangeDecode::Malformed => {}
+            LightRangeDecode::OutOfRange => return Err(()),
         }
     }
-    Some(normalized)
+    Ok(Some(normalized))
 }
 
-fn decoded_light_range(tag: &Tag) -> Option<(i32, i32)> {
+fn decoded_light_range(tag: &Tag) -> LightRangeDecode {
     let values = match tag {
         Tag::List(list) if list.list.len() == 2 => list.list[0].as_int().zip(list.list[1].as_int()),
+        Tag::List(_) => return LightRangeDecode::Malformed,
         Tag::Compound(range) => range
             .get_int("min_inclusive")
             .zip(range.get_int("max_inclusive")),
         value => value.as_int().map(|value| (value, value)),
-    }?;
-    let (min, max) = values;
-    ((0..=15).contains(&min) && (0..=15).contains(&max) && min <= max).then_some((min, max))
+    };
+    let Some((min, max)) = values else {
+        return LightRangeDecode::Malformed;
+    };
+    if min > max {
+        LightRangeDecode::Malformed
+    } else if !(0..=15).contains(&min) || !(0..=15).contains(&max) {
+        LightRangeDecode::OutOfRange
+    } else {
+        LightRangeDecode::Valid((min, max))
+    }
 }
 
 fn canonical_light_range((min, max): (i32, i32)) -> Tag {
@@ -2696,8 +2717,6 @@ mod tests {
         assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
         let mut entity = CompoundTag::new();
         entity.put_string("id", "zombie");
-        let mut rules = CompoundTag::new();
-        rules.put_int("block_light_limit", 20);
         let mut equipment = CompoundTag::new();
         equipment.put_string("loot_table", "chest");
         let mut slot_drop_chances = CompoundTag::new();
@@ -2710,7 +2729,7 @@ mod tests {
         );
         let mut spawn_data = CompoundTag::new();
         spawn_data.put("entity".to_string(), Tag::Compound(entity));
-        spawn_data.put("custom_spawn_rules".to_string(), Tag::Compound(rules));
+        spawn_data.put_int("custom_spawn_rules", 7);
         spawn_data.put("equipment".to_string(), Tag::Compound(equipment));
         spawn_data.put_int("unknown", 7);
         set_spawn_data(&mut region, &pos, Tag::Compound(spawn_data));
@@ -2774,6 +2793,106 @@ mod tests {
             tag.get_compound("SpawnData")
                 .is_some_and(|data| data.get("custom_spawn_rules").is_none())
         );
+    }
+
+    #[test]
+    fn malformed_custom_spawn_rule_field_defaults_without_dropping_valid_sibling() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+        let mut entity = CompoundTag::new();
+        entity.put_string("id", "minecraft:zombie");
+        let mut rules = CompoundTag::new();
+        rules.put_string("block_light_limit", "malformed");
+        rules.put_int("sky_light_limit", 4);
+        let mut spawn_data = CompoundTag::new();
+        spawn_data.put("entity".to_string(), Tag::Compound(entity));
+        spawn_data.put("custom_spawn_rules".to_string(), Tag::Compound(rules));
+        set_spawn_data(&mut region, &pos, Tag::Compound(spawn_data));
+
+        <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &pos,
+            "minecraft:skeleton",
+            None,
+        );
+        let rules = region
+            .get_chunk(0, 0)
+            .get_block_entity_nbt(&pos)
+            .and_then(|tag| tag.get_compound("SpawnData"))
+            .and_then(|data| data.get_compound("custom_spawn_rules"))
+            .expect("custom spawn rules remain");
+        assert!(rules.get("block_light_limit").is_none());
+        assert_eq!(rules.get_int("sky_light_limit"), Some(4));
+    }
+
+    #[test]
+    fn out_of_range_custom_spawn_rule_invalidates_spawn_data_for_weighted_potentials() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+
+        let mut invalid_entity = CompoundTag::new();
+        invalid_entity.put_string("id", "minecraft:zombie");
+        let mut invalid_rules = CompoundTag::new();
+        invalid_rules.put_int("block_light_limit", 20);
+        let mut invalid_spawn_data = CompoundTag::new();
+        invalid_spawn_data.put("entity".to_string(), Tag::Compound(invalid_entity));
+        invalid_spawn_data.put(
+            "custom_spawn_rules".to_string(),
+            Tag::Compound(invalid_rules),
+        );
+        set_spawn_data(&mut region, &pos, Tag::Compound(invalid_spawn_data));
+
+        let mut first_data = CompoundTag::new();
+        let mut first_entity = CompoundTag::new();
+        first_entity.put_string("id", "minecraft:zombie");
+        first_data.put("entity".to_string(), Tag::Compound(first_entity));
+        let mut first_rules = CompoundTag::new();
+        first_rules.put_int("block_light_limit", 1);
+        first_data.put("custom_spawn_rules".to_string(), Tag::Compound(first_rules));
+        let mut first_entry = CompoundTag::new();
+        first_entry.put_int("weight", 2);
+        first_entry.put("data".to_string(), Tag::Compound(first_data));
+
+        let mut second_data = CompoundTag::new();
+        let mut second_entity = CompoundTag::new();
+        second_entity.put_string("id", "minecraft:skeleton");
+        second_data.put("entity".to_string(), Tag::Compound(second_entity));
+        let mut second_rules = CompoundTag::new();
+        second_rules.put_int("sky_light_limit", 4);
+        second_data.put(
+            "custom_spawn_rules".to_string(),
+            Tag::Compound(second_rules),
+        );
+        let mut second_entry = CompoundTag::new();
+        second_entry.put_int("weight", 3);
+        second_entry.put("data".to_string(), Tag::Compound(second_data));
+        spawner_tag_mut(&mut region, &pos).put(
+            "SpawnPotentials".to_string(),
+            Tag::List(rivet_nbt::list_tag::ListTag::with_list(vec![
+                Tag::Compound(first_entry),
+                Tag::Compound(second_entry),
+            ])),
+        );
+
+        assert_eq!(<WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::spawner_potential_weight(
+            &region, &pos,
+        ), Some(5));
+        <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &pos,
+            "minecraft:creeper",
+            Some(2),
+        );
+        let rules = region
+            .get_chunk(0, 0)
+            .get_block_entity_nbt(&pos)
+            .and_then(|tag| tag.get_compound("SpawnData"))
+            .and_then(|data| data.get_compound("custom_spawn_rules"))
+            .expect("weighted potential is selected");
+        assert!(rules.get("block_light_limit").is_none());
+        assert_eq!(rules.get_int("sky_light_limit"), Some(4));
     }
 
     #[test]
