@@ -583,6 +583,52 @@ where
             void_air,
         })
     }
+
+    /// Value-transform this proto without consuming the source. The generated
+    /// LIGHT bridge uses this transaction so mapping failures, provider
+    /// failures, and retries retain the exact caller-owned proto.
+    #[allow(clippy::too_many_arguments)]
+    pub fn map_values_ref<T2, B2>(
+        &self,
+        block_strategy: crate::chunk::strategy::Strategy<T2>,
+        biome_strategy: crate::chunk::strategy::Strategy<B2>,
+        air: T2,
+        void_air: T2,
+        default_biome: B2,
+        map_block: &impl Fn(&T) -> T2,
+        map_biome: &impl Fn(&B) -> B2,
+        resolve: &'static (dyn Fn(&T2) -> StateFlags + Sync),
+    ) -> Result<ProtoChunk<T2, B2, S>, String>
+    where
+        T2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+        B2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+        S: Clone,
+    {
+        let carving_mask = self
+            .carving_mask
+            .as_ref()
+            .map(|mask| {
+                mask.try_clone()
+                    .ok_or_else(|| "carving-mask predicate cannot be cloned".to_string())
+            })
+            .transpose()?;
+        Ok(ProtoChunk {
+            base: self.base.map_values_ref(
+                block_strategy,
+                biome_strategy,
+                air.clone(),
+                default_biome,
+                map_block,
+                map_biome,
+                resolve,
+            )?,
+            entities: self.entities.clone(),
+            status: self.status,
+            carving_mask,
+            air,
+            void_air,
+        })
+    }
 }
 
 // The worldgen surface-driver specialization: `ProtoChunk.setBlockState` and

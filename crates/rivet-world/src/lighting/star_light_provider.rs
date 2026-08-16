@@ -87,6 +87,15 @@ pub trait StarLightProvider {
     /// light at its edges (Java takes the two chunk coordinates).
     fn check_chunk_edges(&mut self, pos: ChunkPos);
 
+    /// Whether [`force_load_in_chunk`](Self::force_load_in_chunk) and
+    /// [`check_chunk_edges`](Self::check_chunk_edges) fully reconcile a
+    /// persisted light-correct chunk. Providers that only expose the phase-A
+    /// callback/no-op seam must return `false`; callers then refuse the load
+    /// rather than claiming a chunk is ready without edge correction.
+    fn supports_persisted_light_load(&self) -> bool {
+        false
+    }
+
     /// `StarLightInterface.getSkyLightValue(BlockPos, ChunkAccess)` — the sky
     /// light at `pos` (Java also takes the already-resolved chunk; the impl
     /// resolves it here).
@@ -168,6 +177,9 @@ mod tests {
         }
         fn check_chunk_edges(&mut self, pos: ChunkPos) {
             self.log.lock().unwrap().edge_checks.push(pos);
+        }
+        fn supports_persisted_light_load(&self) -> bool {
+            true
         }
         fn get_sky_light_value(&self, _pos: BlockPos) -> i32 {
             0

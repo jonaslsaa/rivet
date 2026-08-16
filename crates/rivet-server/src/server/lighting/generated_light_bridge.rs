@@ -42,9 +42,20 @@ pub enum GeneratedLightBridgeError {
     /// LIGHT rung. SPAWN/FULL retain their own downstream owners.
     #[error("generated chunk at {0:?} is outside the pre-FULL LIGHT bridge")]
     UnsupportedStatus(ChunkStatus),
-    /// The dense palette conversion rejected hostile source data.
+    /// The dense palette conversion rejected hostile source data. The proto
+    /// remains borrowed by the bridge and is therefore available for retry.
     #[error("generated LIGHT value bridge failed: {0}")]
     ValueMap(String),
+    /// The provider's load/edge seam is not complete for persisted light.
+    #[error("persisted generated LIGHT at {status:?} cannot be reconciled by the provider")]
+    PersistedLightLoadUnsupported { status: ChunkStatus },
+    /// A provider callback panicked. The generated proto is untouched and can
+    /// be retried after the caller repairs the provider/storage condition.
+    #[error("generated LIGHT provider panicked: {0}")]
+    ProviderPanic(String),
+    /// A non-provider conversion panic was contained before publication.
+    #[error("generated LIGHT conversion panicked: {0}")]
+    ConversionPanic(String),
 }
 
 /// A synchronous value bridge that owns one Starlight provider on the tick
@@ -74,12 +85,11 @@ impl GeneratedLightBridge {
     /// `INITIALIZE_LIGHT` computes nothing. At `LIGHT`, an already-lighted
     /// chunk takes the load/edge-check branch; every other accepted state
     /// clears `light_correct`, computes through Starlight, restores the flag,
-    /// and advances only `INITIALIZE_LIGHT` to `LIGHT`. The returned proto is
-    /// still a proto; the caller owns any later SPAWN/FULL conversion.
-    pub fn light(
-        &mut self,
-        chunk: GeneratedProto,
-    ) -> Result<GeneratedProto, GeneratedLightBridgeError> {
+    /// and advances only `INITIALIZE_LIGHT` to `LIGHT`. The proto is borrowed
+    /// until the complete runtime round trip succeeds, so every refusal,
+    /// conversion error, provider panic, and capability refusal leaves the
+    /// caller's value untouched for inspection or retry.
+    pub fn light(&mut self, chunk: &mut GeneratedProto) -> Result<(), GeneratedLightBridgeError> {
         let status = chunk.get_persisted_status();
         if status.is_before(ChunkStatus::InitializeLight) {
             return Err(GeneratedLightBridgeError::NotReady(status));
@@ -88,31 +98,80 @@ impl GeneratedLightBridge {
             return Err(GeneratedLightBridgeError::UnsupportedStatus(status));
         }
 
-        let already_lighted = status == ChunkStatus::Light && chunk.is_light_correct();
-        let mut runtime = to_runtime(chunk)?;
+        let mut runtime =
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| to_runtime(chunk))) {
+                Ok(Ok(runtime)) => runtime,
+                Ok(Err(error)) => return Err(error),
+                Err(payload) => {
+                    return Err(GeneratedLightBridgeError::ConversionPanic(panic_message(
+                        payload,
+                    )));
+                }
+            };
+        let already_lighted = status == ChunkStatus::Light && runtime.is_light_correct();
         if already_lighted {
-            // The direct-center seam already owns the center value. The
-            // provider's force-load callback is for a storage-owned center;
-            // the edge-check is the only direct-center operation here.
-            self.provider.check_chunk_edges(runtime.get_pos());
+            let pos = runtime.get_pos();
+            let provider_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let empty_sections = get_empty_sections_for_chunk(&runtime);
+                self.provider.force_load_in_chunk(pos, &empty_sections);
+                self.provider.check_chunk_edges(pos);
+                self.provider.supports_persisted_light_load()
+            }));
+            match provider_result {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(GeneratedLightBridgeError::PersistedLightLoadUnsupported {
+                        status,
+                    });
+                }
+                Err(payload) => {
+                    return Err(GeneratedLightBridgeError::ProviderPanic(panic_message(
+                        payload,
+                    )));
+                }
+            }
         } else {
-            let empty_sections = get_empty_sections_for_chunk(&runtime);
             runtime.set_light_correct(false);
-            self.provider
-                .light_chunk_with(runtime.base_mut(), &empty_sections);
+            let provider_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let empty_sections = get_empty_sections_for_chunk(&runtime);
+                self.provider
+                    .light_chunk_with(runtime.base_mut(), &empty_sections);
+            }));
+            if let Err(payload) = provider_result {
+                return Err(GeneratedLightBridgeError::ProviderPanic(panic_message(
+                    payload,
+                )));
+            }
             runtime.set_light_correct(true);
             if status == ChunkStatus::InitializeLight {
                 runtime.set_persisted_status(ChunkStatus::Light);
             }
         }
-        to_generated(runtime)
+
+        let generated =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| to_generated(runtime)))
+                .map_err(|payload| {
+                    GeneratedLightBridgeError::ConversionPanic(panic_message(payload))
+                })??;
+        *chunk = generated;
+        Ok(())
     }
 }
 
-fn to_runtime(chunk: GeneratedProto) -> Result<RuntimeProto, GeneratedLightBridgeError> {
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
+}
+
+fn to_runtime(chunk: &GeneratedProto) -> Result<RuntimeProto, GeneratedLightBridgeError> {
     let (block_strategy, biome_strategy) = strategies();
     chunk
-        .map_values(
+        .map_values_ref(
             block_strategy,
             biome_strategy,
             StateId(0),
@@ -161,6 +220,7 @@ pub fn provider_for_storage(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     use rivet_nbt::compound_tag::CompoundTag;
@@ -290,6 +350,7 @@ mod tests {
             tag
         });
         chunk.mark_pos_for_post_processing(&rivet_registry::core::BlockPos::new(1, -64, 2));
+        chunk.get_or_create_carving_mask().set(1, -64, 2);
         let village = Identifier::parse("minecraft:village");
         chunk.set_start_for_structure(village.clone(), 9);
         chunk.add_reference_for_structure(village.clone(), 4);
@@ -298,39 +359,44 @@ mod tests {
             storage_closure(HashMap::from([((1, 0), runtime_air(ChunkPos::new(1, 0)))]));
         let provider = provider_for_storage(overworld(), true, true, chunks);
         let mut bridge = provider;
-        let result = bridge.light(chunk).expect("generated LIGHT succeeds");
+        bridge.light(&mut chunk).expect("generated LIGHT succeeds");
 
-        assert_eq!(result.get_persisted_status(), ChunkStatus::Light);
-        assert!(result.is_light_correct());
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Light);
+        assert!(chunk.is_light_correct());
         assert_eq!(
-            result.get_sections()[0].get_noise_biome(0, 0, 0),
+            chunk.get_sections()[0].get_noise_biome(0, 0, 0),
             WorldgenBiomeId(1)
         );
         assert_eq!(
-            result.get_block_state(0, SUPERFLAT_MIN_Y, 0),
+            chunk.get_block_state(0, SUPERFLAT_MIN_Y, 0),
             BlockState::of(BlockId(1))
         );
         assert_eq!(
-            result.block_nibbles()[0]
+            chunk.block_nibbles()[0]
                 .to_vanilla_nibble()
                 .unwrap()
                 .get_data(),
             vec![0xAB; ARRAY_SIZE]
         );
-        assert!(result.sky_nibbles()[1].to_vanilla_nibble().is_some());
-        assert!(!result.sky_emptiness_map().unwrap()[0]);
+        assert!(chunk.sky_nibbles()[1].to_vanilla_nibble().is_some());
+        assert!(!chunk.sky_emptiness_map().unwrap()[0]);
         assert_eq!(
-            result.heightmaps()[Types::WorldSurfaceWg as usize]
+            chunk.heightmaps()[Types::WorldSurfaceWg as usize]
                 .as_ref()
                 .unwrap()
                 .get_raw_data(),
             &vec![7; 37]
         );
-        assert_eq!(result.get_entities().len(), 1);
-        assert_eq!(result.get_post_processing()[0].len(), 1);
-        assert_eq!(result.get_start_for_structure(&village), Some(9));
+        assert_eq!(chunk.get_entities().len(), 1);
+        assert!(
+            chunk
+                .get_carving_mask()
+                .is_some_and(|mask| mask.get(1, -64, 2))
+        );
+        assert_eq!(chunk.get_post_processing()[0].len(), 1);
+        assert_eq!(chunk.get_start_for_structure(&village), Some(9));
         assert_eq!(
-            result
+            chunk
                 .get_references_for_structure(&village)
                 .copied()
                 .collect::<Vec<_>>(),
@@ -350,9 +416,11 @@ mod tests {
         let mut bridge = provider_for_storage(overworld(), true, true, chunks);
         // INITIALIZE_LIGHT itself is the executor's record-only rung. This
         // bridge is the subsequent LIGHT task and may compute from that status.
-        let result = bridge.light(chunk).expect("LIGHT from INITIALIZE_LIGHT");
-        assert_eq!(result.get_persisted_status(), ChunkStatus::Light);
-        assert!(result.is_light_correct());
+        bridge
+            .light(&mut chunk)
+            .expect("LIGHT from INITIALIZE_LIGHT");
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Light);
+        assert!(chunk.is_light_correct());
     }
 
     #[test]
@@ -361,22 +429,24 @@ mod tests {
         let mut bridge = provider_for_storage(overworld(), true, true, chunks);
         let mut empty = generated_chunk();
         assert!(matches!(
-            bridge.light(empty),
+            bridge.light(&mut empty),
             Err(GeneratedLightBridgeError::NotReady(ChunkStatus::Empty))
         ));
+        assert_eq!(empty.get_persisted_status(), ChunkStatus::Empty);
 
         empty = generated_chunk();
         empty.set_persisted_status(ChunkStatus::Spawn);
         assert!(matches!(
-            bridge.light(empty),
+            bridge.light(&mut empty),
             Err(GeneratedLightBridgeError::UnsupportedStatus(
                 ChunkStatus::Spawn
             ))
         ));
+        assert_eq!(empty.get_persisted_status(), ChunkStatus::Spawn);
     }
 
     #[test]
-    fn already_lighted_chunk_uses_load_branch_without_recompute() {
+    fn already_lighted_chunk_refuses_without_complete_load_reconciliation() {
         let mut chunk = generated_chunk();
         chunk.set_persisted_status(ChunkStatus::Light);
         chunk.set_light_correct(true);
@@ -384,9 +454,90 @@ mod tests {
         let before = chunk.sky_nibbles()[0].to_vanilla_nibble();
         let (chunks, _shared) = storage_closure(HashMap::new());
         let mut bridge = provider_for_storage(overworld(), true, true, chunks);
-        let result = bridge.light(chunk).expect("already-lighted load branch");
-        assert_eq!(result.get_persisted_status(), ChunkStatus::Light);
-        assert!(result.is_light_correct());
-        assert_eq!(result.sky_nibbles()[0].to_vanilla_nibble(), before);
+        assert!(matches!(
+            bridge.light(&mut chunk),
+            Err(GeneratedLightBridgeError::PersistedLightLoadUnsupported {
+                status: ChunkStatus::Light
+            })
+        ));
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Light);
+        assert!(chunk.is_light_correct());
+        assert_eq!(chunk.sky_nibbles()[0].to_vanilla_nibble(), before);
+    }
+
+    #[test]
+    fn value_map_refusal_preserves_the_proto_and_retry_succeeds() {
+        struct UncloneableMask;
+        impl rivet_world::chunk::carving_mask::Mask for UncloneableMask {
+            fn test(&self, _x: i32, _y: i32, _z: i32) -> bool {
+                false
+            }
+        }
+
+        let mut chunk = generated_chunk();
+        chunk.set_persisted_status(ChunkStatus::InitializeLight);
+        chunk
+            .get_or_create_carving_mask()
+            .set_additional_mask(Box::new(UncloneableMask));
+        let (chunks, _shared) = storage_closure(HashMap::new());
+        let mut bridge = provider_for_storage(overworld(), true, true, chunks);
+
+        assert!(matches!(
+            bridge.light(&mut chunk),
+            Err(GeneratedLightBridgeError::ValueMap(message))
+                if message.contains("carving-mask")
+        ));
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::InitializeLight);
+        assert!(chunk.get_carving_mask().is_some());
+
+        chunk.take_carving_mask();
+        bridge
+            .light(&mut chunk)
+            .expect("retry after value-map refusal succeeds");
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Light);
+        assert!(chunk.is_light_correct());
+    }
+
+    #[test]
+    fn provider_panic_preserves_the_proto_and_retry_succeeds() {
+        let panic_once = Arc::new(AtomicBool::new(true));
+        let closure_panic = Arc::clone(&panic_once);
+        let shared = Arc::new(Mutex::new(HashMap::from([(
+            (1, 0),
+            runtime_air(ChunkPos::new(1, 0)),
+        )])));
+        let closure_shared = Arc::clone(&shared);
+        let chunks: super::super::star_light_provider_impl::ChunkAccessFn =
+            Box::new(move |x, z, put| {
+                if closure_panic.swap(false, Ordering::SeqCst) {
+                    panic!("hostile provider callback");
+                }
+                let mut storage = closure_shared.lock().unwrap();
+                match put {
+                    Some(chunk) => {
+                        storage.insert((x, z), chunk);
+                        None
+                    }
+                    None => storage.remove(&(x, z)),
+                }
+            });
+        let mut bridge = provider_for_storage(overworld(), true, true, chunks);
+        let mut chunk = generated_chunk();
+        chunk.set_persisted_status(ChunkStatus::InitializeLight);
+
+        assert!(matches!(
+            bridge.light(&mut chunk),
+            Err(GeneratedLightBridgeError::ProviderPanic(message))
+                if message.contains("hostile provider callback")
+        ));
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::InitializeLight);
+        assert!(!chunk.is_light_correct());
+
+        bridge
+            .light(&mut chunk)
+            .expect("retry after provider panic succeeds");
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Light);
+        assert!(chunk.is_light_correct());
+        assert!(shared.lock().unwrap().contains_key(&(1, 0)));
     }
 }
