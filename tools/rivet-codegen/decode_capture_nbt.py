@@ -140,6 +140,7 @@ def main():
         "source": {
             "jar": "tools/rivet-capture/fixtures/join/capture.jsonl (canonical join capture, clientbound configuration registry_data)",
             "jar_sha256": payload["capture_sha256"],
+            "paper_git": "0a993450f129c4942c2a9ed45ba047412b4667cf",
             "minecraft_version": "26.2",
             "protocol_version": 776,
             "world_version": 4903,

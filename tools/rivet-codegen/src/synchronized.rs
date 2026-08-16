@@ -387,6 +387,7 @@ fn load_provenance(input: &Path) -> Result<SourceProvenance> {
             actual
         );
     }
+    crate::reports::verify_pinned_source(&manifest.source)?;
     Ok(manifest.source)
 }
 
@@ -482,5 +483,45 @@ mod tests {
         assert!(a.contains("(\"minecraft:worldgen/biome\", &["));
         assert!(a.contains("(\"minecraft:chat_type\", &["));
         assert!(a.contains("\"minecraft:badlands\""));
+    }
+
+    #[test]
+    fn provenance_rejects_unpinned_source() {
+        let root = tempfile::tempdir().unwrap();
+        let input = root.path().join("synchronized_registries.json");
+        let bytes = b"fixture\n";
+        fs::write(&input, bytes).unwrap();
+        let manifest_path = root.path().join("synchronized_registries.manifest.json");
+        for (jar_sha256, paper_git, expected) in [
+            (
+                "deadbeef",
+                crate::reports::PINNED_PAPER_COMMIT,
+                "source SHA",
+            ),
+            (
+                crate::reports::PINNED_JOIN_CAPTURE_SHA256,
+                "deadbeef",
+                "Paper commit",
+            ),
+        ] {
+            fs::write(
+                &manifest_path,
+                serde_json::to_vec(&serde_json::json!({
+                    "source": {
+                        "jar": "capture.jsonl",
+                        "jar_sha256": jar_sha256,
+                        "paper_git": paper_git,
+                        "minecraft_version": "26.2",
+                        "protocol_version": 776,
+                        "world_version": 4903
+                    },
+                    "file": { "sha256": crate::reports::sha256_hex(bytes) }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let error = load_provenance(&input).unwrap_err();
+            assert!(error.to_string().contains(expected), "got: {error}");
+        }
     }
 }

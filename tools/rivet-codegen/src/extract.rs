@@ -331,17 +331,29 @@ fn parse_versions_list(contents: &str, classpath_dir: &Path) -> Result<(String, 
         .context("empty META-INF/versions.list")?;
     let fields: Vec<&str> = line.split_whitespace().collect();
     if fields.len() != 3 {
-        bail!("invalid META-INF/versions.list entry: expected sha1 version path");
+        bail!("invalid META-INF/versions.list entry: expected sha256 version path");
     }
+    let expected_sha256 = fields[0];
+    ensure!(
+        expected_sha256.len() == 64 && expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "invalid server jar SHA-256 in META-INF/versions.list: {expected_sha256}"
+    );
     let version = fields[1].to_owned();
     let rel_path = fields[2].to_owned();
     let versions_root = classpath_dir.join("META-INF/versions");
     validate_directory(&versions_root, classpath_dir, "META-INF/versions")?;
-    validate_relative_file(
+    let server_jar = validate_relative_file(
         &versions_root,
         &rel_path,
         "server path in META-INF/versions.list",
     )?;
+    let actual_sha256 = crate::reports::sha256_hex(
+        &fs::read(&server_jar).with_context(|| format!("read {}", server_jar.display()))?,
+    );
+    ensure!(
+        actual_sha256 == expected_sha256,
+        "server jar SHA-256 mismatch in META-INF/versions.list: expected {expected_sha256}, got {actual_sha256}"
+    );
     Ok((version, rel_path))
 }
 
@@ -674,6 +686,50 @@ mod tests {
     }
 
     #[test]
+    fn cached_server_jar_bytes_must_match_versions_digest() {
+        let root = tempfile::tempdir().unwrap();
+        let bundler = root.path().join("bundler.jar");
+        write_test_bundler(&bundler, b"server");
+        let cache = root.path().join("cache");
+        extract_bundler(&bundler, &cache).unwrap();
+
+        fs::write(
+            cache.join("META-INF/versions/26.2/paper-26.2.jar"),
+            b"tampered server",
+        )
+        .unwrap();
+        let bundler_sha = crate::reports::sha256_hex(&fs::read(&bundler).unwrap());
+        assert!(!bundler_cache_matches(&cache, &bundler_sha));
+    }
+
+    #[test]
+    fn versions_list_digest_mismatch_is_unverified() {
+        let root = tempfile::tempdir().unwrap();
+        let bundler = root.path().join("bundler.jar");
+        write_test_bundler(&bundler, b"server");
+        let cache = root.path().join("cache");
+        extract_bundler(&bundler, &cache).unwrap();
+
+        let marker = cache.join("META-INF/versions.list");
+        let contents = fs::read_to_string(&marker).unwrap();
+        let mut fields = contents.split_whitespace();
+        let _actual_sha = fields.next().unwrap();
+        let version = fields.next().unwrap();
+        let path = fields.next().unwrap();
+        let wrong_sha = "deadbeef".repeat(8);
+        let tampered = format!("{wrong_sha} {version} {path}\n");
+        fs::write(&marker, tampered).unwrap();
+
+        let error = parse_versions_list(&fs::read_to_string(&marker).unwrap(), &cache).unwrap_err();
+        assert!(
+            error.to_string().contains("SHA-256 mismatch"),
+            "got: {error}"
+        );
+        let bundler_sha = crate::reports::sha256_hex(&fs::read(&bundler).unwrap());
+        assert!(!bundler_cache_matches(&cache, &bundler_sha));
+    }
+
+    #[test]
     fn versions_list_rejects_parent_paths() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("META-INF/versions/26.2")).unwrap();
@@ -682,7 +738,14 @@ mod tests {
             b"server",
         )
         .unwrap();
-        let error = parse_versions_list("sha1 26.2 ../outside.jar\n", root.path()).unwrap_err();
+        let error = parse_versions_list(
+            &format!(
+                "{} 26.2 ../outside.jar\n",
+                crate::reports::sha256_hex(b"server")
+            ),
+            root.path(),
+        )
+        .unwrap_err();
         assert!(
             error.to_string().contains("unsafe relative path"),
             "got: {error}"
@@ -778,9 +841,10 @@ mod tests {
     fn write_test_bundler(path: &Path, server: &[u8]) {
         let stage = path.with_extension("stage");
         fs::create_dir_all(stage.join("META-INF/versions/26.2")).unwrap();
+        let server_sha256 = crate::reports::sha256_hex(server);
         fs::write(
             stage.join("META-INF/versions.list"),
-            "sha1 26.2 26.2/paper-26.2.jar\n",
+            format!("{server_sha256} 26.2 26.2/paper-26.2.jar\n"),
         )
         .unwrap();
         fs::write(stage.join("META-INF/versions/26.2/paper-26.2.jar"), server).unwrap();

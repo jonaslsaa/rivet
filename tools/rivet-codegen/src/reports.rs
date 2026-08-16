@@ -45,6 +45,8 @@ const LOG4J_OFF: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 pub(crate) const PINNED_PAPER_COMMIT: &str = "0a993450f129c4942c2a9ed45ba047412b4667cf";
 pub(crate) const PINNED_SERVER_JAR_SHA256: &str =
     "e1a027e9481a16ec1da0f0e139d370280050d123a14c022a476c2dc8a697ebda";
+pub(crate) const PINNED_JOIN_CAPTURE_SHA256: &str =
+    "e78a673617a1eefc8029c43b69bf3cbe7d1f2b6fcf65e3b333f5c85e25f1c533";
 pub(crate) const PINNED_MINECRAFT_VERSION: &str = "26.2";
 pub(crate) const PINNED_PROTOCOL_VERSION: u32 = 776;
 pub(crate) const PINNED_WORLD_VERSION: u32 = 4903;
@@ -391,14 +393,14 @@ pub(crate) struct SourceProvenance {
 }
 
 /// Reject fixture provenance that merely repeats a self-supplied source label.
-/// Every generated table is tied to the exact server jar and Paper checkout
-/// pinned by this repository.
+/// Generated tables are tied to one of the exact server-jar or canonical-join
+/// sources and the Paper checkout pinned by this repository.
 pub(crate) fn verify_pinned_source(source: &SourceProvenance) -> Result<()> {
     ensure!(
-        source.jar_sha256 == PINNED_SERVER_JAR_SHA256,
-        "UNVERIFIED: fixture source jar SHA {} is not the pinned {}",
-        source.jar_sha256,
-        PINNED_SERVER_JAR_SHA256
+        source.jar_sha256 == PINNED_SERVER_JAR_SHA256
+            || source.jar_sha256 == PINNED_JOIN_CAPTURE_SHA256,
+        "UNVERIFIED: fixture source SHA {} is not a pinned source",
+        source.jar_sha256
     );
     ensure!(
         source.paper_git.as_deref() == Some(PINNED_PAPER_COMMIT),
@@ -736,7 +738,7 @@ mod tests {
         source.paper_git = Some(PINNED_PAPER_COMMIT.into());
         source.jar_sha256 = "deadbeef".into();
         let error = verify_pinned_source(&source).unwrap_err();
-        assert!(error.to_string().contains("jar SHA"), "got: {error}");
+        assert!(error.to_string().contains("source SHA"), "got: {error}");
     }
 
     #[test]

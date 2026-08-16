@@ -1090,7 +1090,7 @@ mod tests {
         )
         .unwrap();
         let error = load_provenance(&packets).unwrap_err();
-        assert!(error.to_string().contains("jar SHA"), "got: {error}");
+        assert!(error.to_string().contains("source SHA"), "got: {error}");
     }
 
     #[test]
