@@ -118,27 +118,13 @@ _script_dir="${BASH_SOURCE[0]%/*}"
 [ "$_script_dir" = "${BASH_SOURCE[0]}" ] && _script_dir="."
 REPO_DIR="$(cd "$_script_dir/.." && pwd)"
 
+# shellcheck source=scripts/cargo-target-dir.sh
+source "$REPO_DIR/scripts/cargo-target-dir.sh"
+
 resolved_target_dir_for() {
-  local manifest=$1 metadata target_dir common_dir project_root
-  if command -v cargo >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
-    metadata="$(cargo metadata --locked --no-deps --format-version 1 --manifest-path "$manifest" 2>/dev/null || true)"
-    if [ -n "$metadata" ]; then
-      target_dir="$(printf '%s' "$metadata" | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null || true)"
-      [ -n "$target_dir" ] && { printf '%s\n' "$target_dir"; return 0; }
-    fi
-  fi
-  common_dir="$(git -C "$REPO_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
-  if [ -n "$common_dir" ]; then
-    project_root="$(cd "$(dirname "$common_dir")" && pwd -P)"
-  else
-    project_root="$REPO_DIR"
-  fi
-  target_dir="${CARGO_TARGET_DIR:-$project_root/target-agent-shared}"
-  case "$target_dir" in
-    /*) ;;
-    *) target_dir="$project_root/$target_dir" ;;
-  esac
-  printf '%s\n' "$target_dir"
+  # All workspaces use the same absolute target selected by the lock wrapper;
+  # resolving from the git common directory also works before Cargo has run.
+  cargo_target_dir_for "$REPO_DIR"
 }
 
 # ---- oracle prereq pre-check (full gate only) --------------------------------

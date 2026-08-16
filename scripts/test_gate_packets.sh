@@ -83,7 +83,8 @@ chmod +x "$SANDBOX/tools/rivet-client/run-scenario.sh"
 # The real gate script under test.
 cp "$PWD/scripts/gate.sh" "$SANDBOX/scripts/gate.sh"
 cp "$PWD/scripts/with-build-lock.sh" "$SANDBOX/scripts/with-build-lock.sh"
-chmod +x "$SANDBOX/scripts/gate.sh" "$SANDBOX/scripts/with-build-lock.sh"
+cp "$PWD/scripts/cargo-target-dir.sh" "$SANDBOX/scripts/cargo-target-dir.sh"
+chmod +x "$SANDBOX/scripts/gate.sh" "$SANDBOX/scripts/with-build-lock.sh" "$SANDBOX/scripts/cargo-target-dir.sh"
 
 # --- satisfy the oracle pre-check --------------------------------------------
 # Same dummy-file/version-stub approach as test_gate_features.sh so a green full

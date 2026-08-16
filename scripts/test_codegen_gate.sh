@@ -58,7 +58,8 @@ printf '[package]\nname = "rivet-codegen"\nversion = "0.1.0"\nedition = "2024"\n
 # The real gate script under test.
 cp "$PWD/scripts/gate.sh" "$SANDBOX/scripts/gate.sh"
 cp "$PWD/scripts/with-build-lock.sh" "$SANDBOX/scripts/with-build-lock.sh"
-chmod +x "$SANDBOX/scripts/gate.sh" "$SANDBOX/scripts/with-build-lock.sh"
+cp "$PWD/scripts/cargo-target-dir.sh" "$SANDBOX/scripts/cargo-target-dir.sh"
+chmod +x "$SANDBOX/scripts/gate.sh" "$SANDBOX/scripts/with-build-lock.sh" "$SANDBOX/scripts/cargo-target-dir.sh"
 
 # The full gate runs `python3 scripts/test_analyze_graph.py` (the manifest
 # regression suite, added in #65 M1), and the marker audit runs
