@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::fmt;
 
 use rivet_registry::block_state::BlockState;
+use rivet_registry::block_state_properties::BlockStateProperties;
+use rivet_registry::block_state_property::PropertyValue;
 use rivet_registry::core::{BlockPos, Direction};
 
 /// The three `net.minecraft.world.level.block.SupportType` predicates.
@@ -133,10 +135,13 @@ impl ShapeGeometry {
     }
 
     fn face_supports_center(&self, direction: Direction) -> bool {
-        covers(
-            &self.face_rects(direction),
-            &[FaceRect::new(2.0, 2.0, 14.0, 14.0)],
-        )
+        let target = match direction {
+            Direction::Down | Direction::Up => FaceRect::new(7.0, 7.0, 9.0, 9.0),
+            Direction::North | Direction::South | Direction::West | Direction::East => {
+                FaceRect::new(7.0, 0.0, 9.0, 10.0)
+            }
+        };
+        covers(&self.face_rects(direction), &[target])
     }
 
     fn face_supports_rigid(&self, direction: Direction) -> bool {
@@ -467,7 +472,15 @@ impl BlockShapeContext for DetachedShapeContext {
             .ok_or(ShapeQueryError::DynamicShapeContextMissing { pos: *pos })?;
         match entry {
             DetachedShape::Shulker(shape) if state.block().name() == "minecraft:shulker_box" => {
-                Ok(shulker_query(*shape))
+                let state_facing = shulker_state_facing(*state)
+                    .ok_or(ShapeQueryError::DynamicShapeContextStateMismatch)?;
+                if state_facing != shape.facing {
+                    return Err(ShapeQueryError::DynamicShapeContextStateMismatch);
+                }
+                Ok(shulker_query(ShulkerBoxShape {
+                    facing: state_facing,
+                    ..*shape
+                }))
             }
             DetachedShape::MovingPiston(shape)
                 if state.block().name() == "minecraft:moving_piston" =>
@@ -477,6 +490,15 @@ impl BlockShapeContext for DetachedShapeContext {
             _ => Err(ShapeQueryError::DynamicShapeContextStateMismatch),
         }
     }
+}
+
+fn shulker_state_facing(state: BlockState) -> Option<Direction> {
+    let PropertyValue::Enum(name) = state.get_value(BlockStateProperties::FACING)? else {
+        return None;
+    };
+    Direction::VALUES
+        .into_iter()
+        .find(|direction| direction.get_serialized_name() == name)
 }
 
 fn shulker_query(shape: ShulkerBoxShape) -> ShapeQuery {
@@ -576,6 +598,34 @@ mod tests {
     }
 
     #[test]
+    fn center_support_matches_paper_two_wide_column() {
+        let centered_column = ShapeGeometry::from_box(ShapeBox::new(7.0, 0.0, 7.0, 9.0, 16.0, 9.0));
+        let query =
+            ShapeQuery::from_geometries(&centered_column, &centered_column, &centered_column);
+
+        assert!(!query.is_supporting(SupportType::Full, Direction::Up));
+        assert!(query.is_supporting(SupportType::Center, Direction::Up));
+        assert!(query.is_supporting(SupportType::Center, Direction::Down));
+
+        let off_center = ShapeGeometry::from_box(ShapeBox::new(6.0, 0.0, 7.0, 8.0, 16.0, 9.0));
+        let off_center_query = ShapeQuery::from_geometries(&off_center, &off_center, &off_center);
+        assert!(!off_center_query.is_supporting(SupportType::Center, Direction::Up));
+
+        let north_column = ShapeGeometry::from_box(ShapeBox::new(7.0, 0.0, 0.0, 9.0, 10.0, 2.0));
+        let north_query = ShapeQuery::from_geometries(&north_column, &north_column, &north_column);
+        assert!(north_query.is_supporting(SupportType::Center, Direction::North));
+
+        let short_north_column =
+            ShapeGeometry::from_box(ShapeBox::new(7.0, 0.0, 0.0, 9.0, 9.0, 2.0));
+        let short_north_query = ShapeQuery::from_geometries(
+            &short_north_column,
+            &short_north_column,
+            &short_north_column,
+        );
+        assert!(!short_north_query.is_supporting(SupportType::Center, Direction::North));
+    }
+
+    #[test]
     fn shulker_context_changes_open_collision_and_support() {
         let closed = shulker_query(ShulkerBoxShape::closed(Direction::Up));
         let open = shulker_query(ShulkerBoxShape::open(Direction::Up));
@@ -583,6 +633,23 @@ mod tests {
         assert!(open.is_collision_face_full(Direction::Up));
         assert!(!open.is_supporting(SupportType::Full, Direction::Up));
         assert!(open.is_supporting(SupportType::Full, Direction::Down));
+    }
+
+    #[test]
+    fn detached_shulker_rejects_context_facing_mismatch() {
+        let pos = BlockPos::new(0, 0, 0);
+        let state = BlockState::of(
+            rivet_registry::generated::blocks::BlockId::from_name("minecraft:shulker_box").unwrap(),
+        )
+        .set_value(BlockStateProperties::FACING, Direction::Up)
+        .unwrap();
+        let mut context = DetachedShapeContext::default();
+        context.insert_shulker_box(pos, ShulkerBoxShape::closed(Direction::North));
+
+        assert_eq!(
+            context.shape_query(&state, &pos),
+            Err(ShapeQueryError::DynamicShapeContextStateMismatch)
+        );
     }
 
     #[test]
