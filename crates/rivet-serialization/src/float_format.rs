@@ -67,6 +67,62 @@ pub fn java_double_to_string(value: f64) -> String {
     format_java_decimal(&digits)
 }
 
+/// `Float.compare(float, float)` parity — the IEEE **total order** over f32,
+/// with Java's NaN canonicalization implemented exactly as Java does: both NaN
+/// operands are first canonicalized via [`java_canonicalize_f32`]
+/// (`Float.floatToIntBits` → `0x7fc00000`) and then compared with
+/// `f32::total_cmp`. Canonicalizing first is load-bearing: Java canonicalizes
+/// the operands before comparing, so **every** NaN payload sorts equal — unlike
+/// bare `f32::total_cmp`, which orders NaNs by payload bits.
+///
+/// Ordering (ascending): `-Infinity`, negative finite values, `-0.0`, `+0.0`,
+/// positive finite values, `+Infinity`, `NaN`.
+pub fn java_float_compare(a: f32, b: f32) -> std::cmp::Ordering {
+    java_canonicalize_f32(a).total_cmp(&java_canonicalize_f32(b))
+}
+
+/// `Float.floatToIntBits` NaN canonicalization — every NaN payload becomes the
+/// single `0x7fc00000` (the JDK's `Float.compare` canonicalizes both operands
+/// through `floatToIntBits` before comparing).
+fn java_canonicalize_f32(a: f32) -> f32 {
+    if a.is_nan() {
+        f32::from_bits(0x7fc0_0000)
+    } else {
+        a
+    }
+}
+
+/// `Double.compare(double, double)` parity — the f64 analogue of
+/// [`java_float_compare`]: both NaN operands are canonicalized via
+/// [`java_canonicalize_f64`] (`Double.doubleToLongBits` → `0x7ff8000000000000`)
+/// before the `f64::total_cmp`.
+pub fn java_double_compare(a: f64, b: f64) -> std::cmp::Ordering {
+    java_canonicalize_f64(a).total_cmp(&java_canonicalize_f64(b))
+}
+
+/// `Double.doubleToLongBits` NaN canonicalization — every NaN payload becomes
+/// the single `0x7ff8000000000000`.
+fn java_canonicalize_f64(a: f64) -> f64 {
+    if a.is_nan() {
+        f64::from_bits(0x7ff8_0000_0000_0000)
+    } else {
+        a
+    }
+}
+
+/// `Float.equals(Object)` parity — Java's boxed `Float.equals`: `NaN` equals
+/// `NaN` (any payload), `-0.0` is **distinct** from `+0.0`, and every other
+/// pair compares by value.
+pub fn java_float_equals(a: f32, b: f32) -> bool {
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
+    if a == 0.0 && b == 0.0 {
+        return a.is_sign_negative() == b.is_sign_negative();
+    }
+    a == b
+}
+
 /// The f32 subnormal values whose shortest-round-trip digit string (Ryu) is a
 /// different member of the round-trip class than the one Java prints. Keyed by
 /// raw bits; the value is the exact Java `Float.toString` output.
@@ -297,6 +353,50 @@ mod tests {
         assert_eq!(java_double_to_string(f64::NAN), "NaN");
         assert_eq!(java_double_to_string(f64::INFINITY), "Infinity");
         assert_eq!(java_double_to_string(f64::NEG_INFINITY), "-Infinity");
+    }
+
+    /// `Float.compare`/`Double.compare` total-order parity, including Java's
+    /// NaN canonicalization: any two NaN payloads compare equal, and NaN sorts
+    /// greater than every finite value and infinity. Java canonicalizes both
+    /// NaN operands through `floatToIntBits`/`doubleToLongBits` (to `0x7fc00000`
+    /// / `0x7ff8000000000000`) before comparing, which the canonicalize-then-
+    /// `total_cmp` implementation reproduces.
+    #[test]
+    fn compare_canonicalizes_nan_payloads_like_java() {
+        use std::cmp::Ordering;
+        // Distinct NaN payloads (quiet vs signaling) compare Equal — Java's
+        // `floatToIntBits`/`doubleToLongBits` canonicalize both to the same bits.
+        assert_eq!(
+            java_float_compare(f32::NAN, f32::from_bits(0x7fc0_0001)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            java_double_compare(f64::NAN, f64::from_bits(0x7ff8_0000_0000_0001)),
+            Ordering::Equal
+        );
+        // NaN sorts greater than everything, including +Infinity.
+        assert_eq!(
+            java_float_compare(f32::NAN, f32::INFINITY),
+            Ordering::Greater
+        );
+        assert_eq!(
+            java_double_compare(f64::NAN, f64::INFINITY),
+            Ordering::Greater
+        );
+        assert_eq!(
+            java_float_compare(f32::NEG_INFINITY, f32::NAN),
+            Ordering::Less
+        );
+        // -0.0 < +0.0 (Java `floatToIntBits(-0.0)` = 0x80000000 is a negative
+        // signed int, so it compares less than +0.0's 0x00000000).
+        assert_eq!(java_float_compare(-0.0, 0.0), Ordering::Less);
+        assert_eq!(java_float_compare(0.0, -0.0), Ordering::Greater);
+        assert_eq!(java_double_compare(-0.0, 0.0), Ordering::Less);
+        // Finite ordering is the plain numeric order.
+        assert_eq!(java_float_compare(1.5, 2.5), Ordering::Less);
+        assert_eq!(java_float_compare(-3.0, 1.0), Ordering::Less);
+        assert_eq!(java_float_compare(2.5, 2.5), Ordering::Equal);
+        assert_eq!(java_double_compare(0.1, 0.2), Ordering::Less);
     }
 
     /// The f32/f64 subnormal values where Java's `FloatingDecimal` prints a

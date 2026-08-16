@@ -446,10 +446,16 @@ where
     }
 
     /// `ChunkAccess.setHeightmap(Types, long[])` — `getOrCreateHeightmapUnprimed(key)
-    /// .setRawData(this, key, data)`.
+    /// .setRawData(this, key, data)`; on a length mismatch Java's `setRawData`
+    /// re-primes the heightmap from the chunk's blocks (`primeHeightmaps(this,
+    /// EnumSet.of(type))`), mirrored here through [`Self::prime_heightmaps`].
     pub fn set_heightmap(&mut self, key: Types, data: &[i64]) {
-        self.get_or_create_heightmap_unprimed(key)
+        let matched = self
+            .get_or_create_heightmap_unprimed(key)
             .set_raw_data(data);
+        if !matched {
+            self.prime_heightmaps(&[key]);
+        }
     }
 
     /// `StarlightChunk.starlight$getBlockNibbles()`.

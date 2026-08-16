@@ -19,6 +19,9 @@ use crate::codecs::xor_codec::XorCodec;
 use crate::data_result::DataResult;
 use crate::dynamic_ops::{DynamicOps, Keyable};
 use crate::either::Either;
+use crate::float_format::{
+    java_double_compare, java_double_to_string, java_float_compare, java_float_to_string,
+};
 use crate::functions::DecoderFn;
 use crate::lifecycle::Lifecycle;
 use crate::map_codec::{self, MapCodec};
@@ -324,6 +327,39 @@ where
     )
 }
 
+/// `Codec.optionalFieldOf(String, F default)` — the with-default form of a
+/// NON-lenient optional field.
+///
+/// Java (DFU 10.0.21, verified from the pinned jar's bytecode):
+/// `optionalField(name, codec, false).xmap(o -> o.orElse(default), a ->
+/// Objects.equals(a, default) ? Optional.empty() : Optional.of(a))`. Unlike
+/// [`lenient_optional_field_of`], a present-but-malformed value is a decode
+/// error (the optional field is NOT lenient). The field value defaults on
+/// decode when absent, and is OMITTED on encode when value-equal to `default`.
+pub fn optional_field_of<F, Ops: DynamicOps + 'static>(
+    name: &str,
+    element_codec: Arc<dyn Codec<F, Ops>>,
+    default: F,
+) -> Arc<dyn MapCodec<F, Ops>>
+where
+    F: 'static + Clone + PartialEq + Send + Sync,
+{
+    let inner = optional_field(name.to_string(), element_codec, false);
+    let default_for_decode = default.clone();
+    let default_for_encode = default;
+    map_codec::xmap(
+        inner,
+        Arc::new(move |o: &Option<F>| o.clone().unwrap_or_else(|| default_for_decode.clone())),
+        Arc::new(move |a: &F| {
+            if *a == default_for_encode {
+                None
+            } else {
+                Some(a.clone())
+            }
+        }),
+    )
+}
+
 /// `Codec.recursive(String, Function<Codec<A>, Codec<A>>)`.
 pub fn recursive<A, Ops: DynamicOps + 'static>(
     name: String,
@@ -560,8 +596,8 @@ pub fn float_range<Ops: DynamicOps + 'static>(
 ) -> Arc<dyn Codec<f32, Ops>> {
     flat_xmap(
         float_codec::<Ops>(),
-        Arc::new(move |v: &f32| check_range(*v, min_inclusive, max_inclusive)),
-        Arc::new(move |v: &f32| check_range(*v, min_inclusive, max_inclusive)),
+        Arc::new(move |v: &f32| check_range_f32(*v, min_inclusive, max_inclusive)),
+        Arc::new(move |v: &f32| check_range_f32(*v, min_inclusive, max_inclusive)),
     )
 }
 
@@ -572,12 +608,13 @@ pub fn double_range<Ops: DynamicOps + 'static>(
 ) -> Arc<dyn Codec<f64, Ops>> {
     flat_xmap(
         double_codec::<Ops>(),
-        Arc::new(move |v: &f64| check_range(*v, min_inclusive, max_inclusive)),
-        Arc::new(move |v: &f64| check_range(*v, min_inclusive, max_inclusive)),
+        Arc::new(move |v: &f64| check_range_f64(*v, min_inclusive, max_inclusive)),
+        Arc::new(move |v: &f64| check_range_f64(*v, min_inclusive, max_inclusive)),
     )
 }
 
-/// `Codec.checkRange(N minInclusive, N maxInclusive)` — the private helper.
+/// `Codec.checkRange(N minInclusive, N maxInclusive)` — the private helper
+/// (integer overloads). Integer `compareTo` and `PartialOrd` agree.
 fn check_range<T: PartialOrd + std::fmt::Display>(value: T, min: T, max: T) -> DataResult<T> {
     if value >= min && value <= max {
         DataResult::success(value)
@@ -585,6 +622,44 @@ fn check_range<T: PartialOrd + std::fmt::Display>(value: T, min: T, max: T) -> D
         DataResult::error(format!(
             "Value {} outside of range [{}:{}]",
             value, min, max
+        ))
+    }
+}
+
+/// `Codec.checkRange(Float, Float)` — the f32 overload. Java's generic
+/// `checkRange` calls `Comparable.compareTo`, which for `Float` is the IEEE
+/// **total order** (`Float.compare`): `-0.0f < 0.0f`, `NaN` compares greater
+/// than every value, and distinct NaN payloads compare equal (Java
+/// canonicalizes to `0x7fc00000`). The port uses [`java_float_compare`], and
+/// renders the message with Java's `Float.toString` (Rust `Display` prints
+/// `NaN`/`-0.0` identically but `1.0` as `1`).
+fn check_range_f32(value: f32, min: f32, max: f32) -> DataResult<f32> {
+    let in_range = java_float_compare(value, min) != std::cmp::Ordering::Less
+        && java_float_compare(value, max) != std::cmp::Ordering::Greater;
+    if in_range {
+        DataResult::success(value)
+    } else {
+        DataResult::error(format!(
+            "Value {} outside of range [{}:{}]",
+            java_float_to_string(value),
+            java_float_to_string(min),
+            java_float_to_string(max)
+        ))
+    }
+}
+
+/// `Codec.checkRange(Double, Double)` — the f64 overload (`Double.compare`).
+fn check_range_f64(value: f64, min: f64, max: f64) -> DataResult<f64> {
+    let in_range = java_double_compare(value, min) != std::cmp::Ordering::Less
+        && java_double_compare(value, max) != std::cmp::Ordering::Greater;
+    if in_range {
+        DataResult::success(value)
+    } else {
+        DataResult::error(format!(
+            "Value {} outside of range [{}:{}]",
+            java_double_to_string(value),
+            java_double_to_string(min),
+            java_double_to_string(max)
         ))
     }
 }

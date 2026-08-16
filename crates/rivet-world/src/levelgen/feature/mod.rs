@@ -56,6 +56,12 @@ pub mod configurations;
 mod feature_count_tracker;
 mod feature_place_context;
 
+// The `net.minecraft.world.level.levelgen.feature.stateproviders` value layer
+// — STUB(mc.world.level.levelgen.feature.stateproviders): the `BlockStateProvider`
+// dispatch surface the `.configurations.disk` unit consumes. The full port
+// lives on `origin/main` (PR #559) and replaces this stub when merged.
+pub mod stateproviders;
+
 // The `net.minecraft.world.level.levelgen.feature.featuresize` value layer
 // (issue #391) — the `FeatureSize` hierarchy and its declaration-order codec
 // dispatch. Owned by the `mc.world.level.levelgen.feature.featuresize` unit.
