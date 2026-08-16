@@ -40,6 +40,7 @@
 
 use bytes::BytesMut;
 
+use crate::chunk::carving_mask::CarvingMask;
 use crate::chunk::chunk_access::{ChunkAccess, ChunkStatus};
 use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::paletted_container_factory::PalettedContainerFactory;
@@ -68,6 +69,11 @@ where
     /// for an out-of-range / all-air section. Stored because the block-state
     /// type is the caller's `T`.
     air: T,
+    /// Proto-only serialized entity data carried through SPAWN promotion. Entity
+    /// loading and UUID deduplication remain outside this value slice.
+    proto_entities: Vec<CompoundTag>,
+    /// Proto carving state carried through promotion as a typed stand-in.
+    carving_mask: Option<CarvingMask>,
 }
 
 impl<T, B, S> LevelChunk<T, B, S>
@@ -107,7 +113,12 @@ where
         for ty in FINAL_HEIGHTMAPS {
             base.get_or_create_heightmap_unprimed(ty);
         }
-        LevelChunk { base, air }
+        LevelChunk {
+            base,
+            air,
+            proto_entities: Vec::new(),
+            carving_mask: None,
+        }
     }
 
     /// Wrap an already-built `ChunkAccess` base as a loaded chunk, priming the
@@ -122,11 +133,38 @@ where
     /// `computeIfAbsent`, so a caller who wants the FINAL set materialized on a
     /// base that already carries them gets the existing data, never a reset.
     pub fn from_base(base: ChunkAccess<T, B, S>, air: T) -> Self {
-        let mut base = base;
+        Self::from_base_with_proto_state(base, air, Vec::new(), None)
+    }
+
+    /// Wrap a converted SPAWN proto while carrying the proto-only fields that
+    /// have an honest value representation. Entity loading, deduplication,
+    /// listeners, and block-entity materialization remain typed-outside this
+    /// constructor.
+    pub fn from_base_with_proto_state(
+        mut base: ChunkAccess<T, B, S>,
+        air: T,
+        proto_entities: Vec<CompoundTag>,
+        carving_mask: Option<CarvingMask>,
+    ) -> Self {
         for ty in FINAL_HEIGHTMAPS {
             base.get_or_create_heightmap_unprimed(ty);
         }
-        LevelChunk { base, air }
+        LevelChunk {
+            base,
+            air,
+            proto_entities,
+            carving_mask,
+        }
+    }
+
+    /// Serialized entity data carried from the proto; it is not loaded here.
+    pub fn proto_entities(&self) -> &[CompoundTag] {
+        &self.proto_entities
+    }
+
+    /// The typed carving-mask stand-in carried from the proto.
+    pub fn carving_mask(&self) -> Option<&CarvingMask> {
+        self.carving_mask.as_ref()
     }
 
     /// Value-transform every block state and biome, preserving all other chunk
@@ -159,7 +197,12 @@ where
         T2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         B2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     {
-        let LevelChunk { base, air: _ } = self;
+        let LevelChunk {
+            base,
+            air: _,
+            proto_entities: _,
+            carving_mask: _,
+        } = self;
         let base = base.map_values(
             block_strategy,
             biome_strategy,
@@ -169,7 +212,12 @@ where
             map_biome,
             resolve,
         )?;
-        Ok(LevelChunk { base, air })
+        Ok(LevelChunk {
+            base,
+            air,
+            proto_entities: Vec::new(),
+            carving_mask: None,
+        })
     }
 
     /// `LevelChunk.getBlockState(BlockPos)` — Paper routes it through
@@ -729,7 +777,7 @@ mod tests {
     /// the base already carries is preserved (never reset to the all-zero `new`
     /// priming), the absent `FINAL_HEIGHTMAPS` entries are primed as unprimed,
     /// and the base's inhabited time/light-correct flag survive. This is the
-    /// consumer the server `LevelChunk::try_from_full_proto` relies on after the
+    /// consumer the server `LevelChunk::try_from_spawn_proto` relies on after the
     /// proto's base has been value-mapped into the server value pair.
     #[test]
     fn from_base_preserves_base_state_and_primes_only_missing_final_heightmaps() {

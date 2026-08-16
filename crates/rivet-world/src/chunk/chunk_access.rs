@@ -851,6 +851,75 @@ where
         self.mark_unsaved();
     }
 
+    /// Borrowing, fallible conversion of every section. The source remains
+    /// untouched if any value or target-palette conversion fails.
+    pub fn try_map_sections<T2, B2, E>(
+        &self,
+        block_strategy: &Strategy<T2>,
+        biome_strategy: &Strategy<B2>,
+        map_block: &impl Fn(&T) -> Result<T2, E>,
+        map_biome: &impl Fn(&B) -> Result<B2, E>,
+    ) -> Result<Vec<LevelChunkSection<T2, B2>>, crate::chunk::paletted_container::ValueMapError<E>>
+    where
+        T2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+        B2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    {
+        self.sections
+            .iter()
+            .map(|section| {
+                section.try_map_values(block_strategy, biome_strategy, map_block, map_biome)
+            })
+            .collect()
+    }
+
+    /// Consume the source base after all fallible section work has completed,
+    /// installing the already converted sections without resetting any carried
+    /// state.
+    pub(crate) fn into_mapped<T2, B2>(
+        self,
+        sections: Vec<LevelChunkSection<T2, B2>>,
+        resolve: &'static (dyn Fn(&T2) -> StateFlags + Sync),
+    ) -> ChunkAccess<T2, B2, S>
+    where
+        T2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+        B2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    {
+        let ChunkAccess {
+            pos,
+            upgrade_data,
+            height_accessor,
+            post_processing,
+            unsaved,
+            light_correct,
+            inhabited_time,
+            structure_access,
+            pending_block_entities,
+            heightmaps,
+            block_nibbles,
+            sky_nibbles,
+            sky_emptiness_map,
+            sections: _,
+            resolve: _,
+        } = self;
+        ChunkAccess {
+            pos,
+            upgrade_data,
+            height_accessor,
+            sections,
+            post_processing,
+            unsaved,
+            light_correct,
+            inhabited_time,
+            structure_access,
+            pending_block_entities,
+            heightmaps,
+            block_nibbles,
+            sky_nibbles,
+            sky_emptiness_map,
+            resolve,
+        }
+    }
+
     /// Value-transform the block-state and biome value types while preserving
     /// every other field (sections, heightmaps, light nibbles, pending block
     /// entities, post-processing, flags, structure access). The #516 server

@@ -41,9 +41,12 @@ use crate::block::BlockState;
 use crate::block::blocks::Blocks;
 use crate::chunk::carving_mask::CarvingMask;
 use crate::chunk::chunk_access::{ChunkAccess, ChunkStatus};
+use crate::chunk::level_chunk::LevelChunk;
 use crate::chunk::level_chunk_section::LevelChunkSection;
+use crate::chunk::paletted_container::ValueMapError;
 use crate::chunk::paletted_container_factory::PalettedContainerFactory;
 use crate::chunk::storage::chunk_reconstruction::block_state_predicates;
+use crate::chunk::strategy::Strategy;
 use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::SimpleLevelHeightAccessor;
 use crate::levelgen::carver::CarveChunk;
@@ -55,6 +58,40 @@ use rivet_nbt::compound_tag::CompoundTag;
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::core::{BlockPos, ChunkPos, SectionPos};
 use rivet_registry::holder::Holder;
+
+/// Typed failure for the ownership-preserving SPAWN promotion boundary.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SpawnPromotionError<E> {
+    /// Only a genuine SPAWN proto may enter the FULL conversion.
+    NotSpawn(ChunkStatus),
+    /// The source's light arrays must cover every section plus the two Starlight
+    /// boundary sections before they can be transferred.
+    LightVectorLength {
+        kind: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+    /// The packet/light conversion does not have a representation for this
+    /// persisted Starlight state.
+    UnsupportedLightState { kind: &'static str, index: usize },
+    /// A block/biome mapper or target palette rejected a value.
+    ValueMap(ValueMapError<E>),
+}
+
+/// A failed promotion carries the original source value back unchanged.
+pub struct SpawnPromotionFailure<P, E> {
+    pub source: Box<P>,
+    pub error: E,
+}
+
+impl<P, E: std::fmt::Debug> std::fmt::Debug for SpawnPromotionFailure<P, E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SpawnPromotionFailure")
+            .field("error", &self.error)
+            .finish()
+    }
+}
 
 /// `net.minecraft.world.level.chunk.ProtoChunk` — the worldgen chunk value.
 pub struct ProtoChunk<T, B, S>
@@ -162,7 +199,7 @@ where
     /// view (`WorldGenRegion`) holds the chunk as the generic `ChunkAccess`
     /// base; the Rust bridge exposes the base non-consumingly so a bounded
     /// region can borrow a `ProtoChunk`'s sections/biomes without moving it
-    /// (`into_base` is the consuming FULL-promotion move).
+    /// (`into_base` is the consuming promotion move).
     pub fn base(&self) -> &ChunkAccess<T, B, S> {
         &self.base
     }
@@ -513,6 +550,108 @@ where
         self.base.set_all_references(data);
     }
 
+    /// Atomically promote a genuine SPAWN proto into a value-owned
+    /// `LevelChunk`. All fallible palette/value and light-shape checks happen
+    /// while `self` is still borrowed; a failure returns the exact source proto
+    /// and leaves its status and fields untouched.
+    pub fn try_promote_spawn<T2, B2, E>(
+        self,
+        block_strategy: Strategy<T2>,
+        biome_strategy: Strategy<B2>,
+        air: T2,
+        map_block: &impl Fn(&T) -> Result<T2, E>,
+        map_biome: &impl Fn(&B) -> Result<B2, E>,
+        resolve: &'static (dyn Fn(&T2) -> StateFlags + Sync),
+    ) -> Result<LevelChunk<T2, B2, S>, SpawnPromotionFailure<Self, SpawnPromotionError<E>>>
+    where
+        T2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+        B2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    {
+        let status = self.status;
+        if status != ChunkStatus::Spawn {
+            return Err(SpawnPromotionFailure {
+                source: Box::new(self),
+                error: SpawnPromotionError::NotSpawn(status),
+            });
+        }
+        let expected = self.base.get_sections().len() + 2;
+        let block_len = self.base.block_nibbles().len();
+        if block_len != expected {
+            return Err(SpawnPromotionFailure {
+                source: Box::new(self),
+                error: SpawnPromotionError::LightVectorLength {
+                    kind: "block",
+                    expected,
+                    actual: block_len,
+                },
+            });
+        }
+        let sky_len = self.base.sky_nibbles().len();
+        if sky_len != expected {
+            return Err(SpawnPromotionFailure {
+                source: Box::new(self),
+                error: SpawnPromotionError::LightVectorLength {
+                    kind: "sky",
+                    expected,
+                    actual: sky_len,
+                },
+            });
+        }
+        let block_unknown = self
+            .base
+            .block_nibbles()
+            .iter()
+            .position(SwmrNibbleArray::has_unknown_state_visible);
+        if let Some(index) = block_unknown {
+            return Err(SpawnPromotionFailure {
+                source: Box::new(self),
+                error: SpawnPromotionError::UnsupportedLightState {
+                    kind: "block",
+                    index,
+                },
+            });
+        }
+        let sky_unknown = self
+            .base
+            .sky_nibbles()
+            .iter()
+            .position(SwmrNibbleArray::has_unknown_state_visible);
+        if let Some(index) = sky_unknown {
+            return Err(SpawnPromotionFailure {
+                source: Box::new(self),
+                error: SpawnPromotionError::UnsupportedLightState { kind: "sky", index },
+            });
+        }
+        let sections =
+            match self
+                .base
+                .try_map_sections(&block_strategy, &biome_strategy, map_block, map_biome)
+            {
+                Ok(sections) => sections,
+                Err(error) => {
+                    return Err(SpawnPromotionFailure {
+                        source: Box::new(self),
+                        error: SpawnPromotionError::ValueMap(error),
+                    });
+                }
+            };
+        let ProtoChunk {
+            base,
+            entities,
+            status: _,
+            carving_mask,
+            air: _,
+            void_air: _,
+        } = self;
+        let base = base.into_mapped(sections, resolve);
+        Ok(LevelChunk::from_base_with_proto_state(
+            base,
+            air,
+            entities,
+            carving_mask,
+        ))
+    }
+
     /// Consume the proto and return its `ChunkAccess` base.
     ///
     /// Java's promotion path (`new LevelChunk(ServerLevel, ProtoChunk,
@@ -520,9 +659,10 @@ where
     /// heightmaps, light nibbles, flags, inhabited time, pending block
     /// entities, post-processing, structure access — to the `LevelChunk`
     /// constructor; the port keeps that a value move. The proto-only fields
-    /// (`entities`, `status`, `carvingMask`) are not part of the base and are
-    /// dropped by the caller's typed refusal when the persisted status is not
-    /// genuine `FULL` (see the server `LevelChunk::try_from_full_proto`).
+    /// (`entities`, `status`, `carvingMask`) are not part of the base; the
+    /// consuming SPAWN promotion carries entity and carving state onto the
+    /// `LevelChunk` while the status itself is replaced by the resulting FULL
+    /// value.
     pub fn into_base(self) -> ChunkAccess<T, B, S> {
         self.base
     }
@@ -970,5 +1110,71 @@ mod tests {
         // has quartMinY = -16.
         assert_eq!(calls.first().copied(), Some((0, -16, 0)));
         assert_eq!(calls.last().copied(), Some((3, 79, 3)));
+    }
+
+    #[test]
+    fn spawn_promotion_preserves_proto_only_and_base_state() {
+        let mut proto = stone_proto();
+        proto.set_persisted_status(ChunkStatus::Spawn);
+        proto.mark_pos_for_post_processing(&BlockPos::new(3, 2, 5));
+        proto.get_or_create_carving_mask().set(1, -64, 2);
+        proto.set_light_correct(true);
+        proto.set_start_for_structure("village", 42);
+        proto.add_reference_for_structure("village", 7);
+        proto.base_mut().set_inhabited_time(99);
+        let mut block_entity = CompoundTag::new();
+        block_entity.put_int("x", 1);
+        block_entity.put_int("y", 2);
+        block_entity.put_int("z", 3);
+        proto.base_mut().set_block_entity_nbt(block_entity);
+        let mut entity = CompoundTag::new();
+        entity.put_string("id", "minecraft:pig");
+        proto.add_entity(entity);
+
+        let promoted = proto
+            .try_promote_spawn(
+                block_strategy(),
+                biome_strategy(),
+                0u8,
+                &|value: &u8| Ok::<u8, ()>(*value),
+                &|value: &u8| Ok::<u8, ()>(*value),
+                &|state: &u8| StateFlags {
+                    is_air: *state == 0,
+                    blocks_motion: *state != 0,
+                    has_fluid: false,
+                    is_leaves: false,
+                },
+            )
+            .expect("SPAWN promotion");
+
+        assert_eq!(promoted.get_persisted_status(), ChunkStatus::Full);
+        assert_eq!(promoted.proto_entities().len(), 1);
+        assert!(
+            promoted
+                .carving_mask()
+                .expect("carving mask")
+                .get(1, -64, 2)
+        );
+        assert!(promoted.get_base().is_light_correct());
+        assert_eq!(promoted.get_base().get_inhabited_time(), 99);
+        assert_eq!(promoted.get_base().get_post_processing()[4], vec![0x0523]);
+        assert_eq!(
+            promoted.get_base().get_all_starts().get("village"),
+            Some(&42)
+        );
+        assert_eq!(
+            promoted
+                .get_base()
+                .get_references_for_structure(&"village")
+                .collect::<Vec<_>>(),
+            vec![&7]
+        );
+        assert!(
+            promoted
+                .get_base()
+                .get_block_entity_nbt(&BlockPos::new(1, 2, 3))
+                .is_some()
+        );
+        assert!(promoted.get_base().is_unsaved());
     }
 }

@@ -49,16 +49,14 @@
 //! engine, so it cannot reach LIGHT).
 //! Everything the value layer does not wire is refused *before* running work: a
 //! path through a light step with no engine is refused as
-//! `GenError::LightEngineMissing`, and a target past LIGHT (SPAWN/FULL) is out
-//! of range (`GenError::UnsupportedStatus`). The holder's
+//! `GenError::LightEngineMissing`, and the borrowed executor refuses FULL
+//! because promotion transfers ownership. The holder's
 //! [`GenerationChunkHolder::generate_through`] surfaces these as typed
 //! [`GeneratedChunkError::Generation`] / [`GeneratedChunkError::UnsupportedStatus`]
-//! rather than stamping a status that was never generated. And a generated
-//! chunk can never enter the server authority: [`ChunkMap::install`] accepts
-//! only a `LevelChunk` (the FULL chunk type), and no conversion from a sub-FULL
-//! `ProtoChunk` exists — the [`GenerationChunkHolder::to_level_chunk`] gate
-//! fails loudly with [`GeneratedChunkError::InstallRequiresFull`] instead of
-//! fabricating a FULL chunk or falling back to superflat.
+//! rather than stamping a status that was never generated. Once a genuine SPAWN
+//! proto is available, [`GenerationChunkHolder::into_level_chunk`] performs the
+//! consuming promotion; it returns the holder intact on conversion failure and
+//! does not install into ChunkMap or run later activation.
 //!
 //! ## The `GenerationChunkHolderView` seam
 //!
@@ -69,12 +67,12 @@
 //! facade on the `StateId`/`ServerBiomeId`/`StructureKey` specialization. The
 //! FEATURES body composes its bounded 3x3 region through [`CenterHolder`] (which
 //! borrows the center chunk's base) and [`OwnedHolder`] (which owns the eight
-//! ring chunks) — see [`compose_feature_region`]. What still defers (RivetTodo
-//! #185) is the FULL-reconstruction bridge: `ChunkAccess::map_values` is wired
-//! only from `LevelChunk::from_bridge`, so a sub-FULL `ProtoChunk` still cannot
-//! be converted into the dense server chunk and never enters the ChunkMap
-//! authority ([`GenerationChunkHolder::to_level_chunk`] fails loudly instead).
-//! The holder hands out the chunk's status and typed generation results too.
+//! ring chunks) — see [`compose_feature_region`]. The consuming bridge from a
+//! genuine SPAWN `ProtoChunk` to the dense server `LevelChunk` is implemented
+//! by [`GenerationChunkHolder::into_level_chunk`]; sub-SPAWN sources remain
+//! rejected, and ChunkMap installation plus later activation stay outside this
+//! slice. The holder hands out the chunk's status and typed generation results
+//! too.
 //!
 //! Ownership follows OWNERSHIP.md: the generator/biome source are immutable
 //! per-world config shared by `Arc` (no `Arc<RwLock>` game state — the only
@@ -136,7 +134,7 @@ use rivet_world::levelgen::noisegen::noise_generator_settings::OVERWORLD;
 use rivet_world::levelgen::noisegen::random_state::RandomState;
 use rivet_world::levelgen::world_generation_context::WorldGenerationContext;
 
-use crate::server::level::level_chunk::{LevelChunk, StructureKey};
+use crate::server::level::level_chunk::{LevelChunk, LevelChunkBridgeError, StructureKey};
 use crate::server::level::world_gen_region::{
     CenterHolder, GenerationChunkHolderView, OwnedHolder, WorldGenRegion,
 };
@@ -171,7 +169,7 @@ impl fmt::Display for GeneratedChunkError {
             }
             GeneratedChunkError::UnsupportedStatus(status) => write!(
                 f,
-                "generating to {status:?} is unsupported: the SPAWN/FULL stages are unwired (RivetTodo #185)"
+                "generating to {status:?} is unsupported by the holder's attached worldgen seams"
             ),
             GeneratedChunkError::InstallRequiresFull(status) => write!(
                 f,
@@ -182,6 +180,22 @@ impl fmt::Display for GeneratedChunkError {
 }
 
 impl std::error::Error for GeneratedChunkError {}
+
+/// A failed consuming SPAWN promotion returns the holder, including its
+/// unmodified source proto, so no install can occur on conversion failure.
+pub struct GeneratedChunkPromotionError {
+    pub holder: GenerationChunkHolder,
+    pub error: LevelChunkBridgeError,
+}
+
+impl fmt::Debug for GeneratedChunkPromotionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GeneratedChunkPromotionError")
+            .field("error", &self.error)
+            .finish()
+    }
+}
 
 /// The per-world OVERWORLD generator realization — `NoiseBasedChunkGenerator`
 /// resolved from the merged worldgen registries for a seed, plus the realized
@@ -576,18 +590,34 @@ impl GenerationChunkHolder {
             })
     }
 
-    /// The genuine-FULL-only install gate: `ChunkMap::install` accepts only a
-    /// `LevelChunk` (FULL), and a generated chunk is a `ProtoChunk` that stops
-    /// at `CARVERS` (the FEATURES rung fails typed at the first placed feature
-    /// whose value decode is unavailable — see [`GenerationChunkHolder::new`]).
-    /// No conversion from a sub-FULL `ProtoChunk` exists or may be added without
-    /// the unwired SPAWN/FULL stages (RivetTodo #185), so this always fails
-    /// loudly with the chunk's real status — never stamping FULL and never
-    /// falling back to superflat.
+    /// The borrowed install gate: `ChunkMap::install` accepts only a
+    /// `LevelChunk` (FULL), while this method borrows a `ProtoChunk` and cannot
+    /// transfer its ownership. Use [`GenerationChunkHolder::into_level_chunk`]
+    /// at the genuine SPAWN boundary instead. This method always fails loudly
+    /// with the chunk's real status — never stamping FULL and never falling
+    /// back to superflat.
     pub fn to_level_chunk(&self) -> Result<LevelChunk, GeneratedChunkError> {
         Err(GeneratedChunkError::InstallRequiresFull(
             self.chunk.get_persisted_status(),
         ))
+    }
+
+    /// Consume the holder only at the genuine SPAWN boundary. The returned
+    /// `LevelChunk` is the narrow install-ready value; FULL/loaded status,
+    /// holder replacement, activation callbacks, and scheduling stay with the
+    /// external ChunkMap/scheduler slice. On failure the holder is returned.
+    pub fn into_level_chunk(self) -> Result<LevelChunk, Box<GeneratedChunkPromotionError>> {
+        let GenerationChunkHolder { chunk, context } = self;
+        match LevelChunk::try_from_spawn_proto(chunk) {
+            Ok(level_chunk) => Ok(level_chunk),
+            Err(failure) => Err(Box::new(GeneratedChunkPromotionError {
+                holder: GenerationChunkHolder {
+                    chunk: *failure.source,
+                    context,
+                },
+                error: failure.error,
+            })),
+        }
     }
 }
 
@@ -1574,6 +1604,44 @@ mod tests {
         assert_ne!(seed(42, 0, 0), seed(43, 0, 0), "world seed must matter");
     }
 
+    /// A genuine SPAWN holder can be consumed into the install-ready server
+    /// `LevelChunk`; the consuming boundary does not install it or run later
+    /// activation work.
+    #[test]
+    fn spawn_holder_promotion_is_consuming_and_not_an_install() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder.chunk.set_persisted_status(ChunkStatus::Spawn);
+
+        let level_chunk = holder
+            .into_level_chunk()
+            .expect("a genuine SPAWN holder promotes");
+        let mut map = ChunkMap::empty(4);
+        assert!(map.get_chunk(ChunkPos::ZERO).is_none());
+        map.install(ChunkPos::ZERO, level_chunk);
+        assert!(map.get_chunk(ChunkPos::ZERO).is_some());
+    }
+
+    /// A failed consuming promotion returns the holder and its source proto,
+    /// so callers can inspect or retry the typed boundary without any install.
+    #[test]
+    fn failed_spawn_holder_promotion_returns_the_holder_intact() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::new(1, 1));
+        holder.chunk.set_persisted_status(ChunkStatus::Noise);
+        let failure = match holder.into_level_chunk() {
+            Ok(_) => panic!("a non-SPAWN holder must be rejected"),
+            Err(failure) => failure,
+        };
+        assert!(matches!(
+            failure.error,
+            LevelChunkBridgeError::NotSpawn(ChunkStatus::Noise)
+        ));
+        assert_eq!(failure.holder.status(), ChunkStatus::Noise);
+        let map = ChunkMap::empty(4);
+        assert!(map.get_chunk(ChunkPos::new(1, 1)).is_none());
+    }
+
     /// Hostile: a generated ProtoChunk can never enter the ChunkMap authority —
     /// the install gate fails loudly with the chunk's real status, and an empty
     /// map has no placeholder to serve it (genuine-FULL-only installation).
@@ -1583,7 +1651,7 @@ mod tests {
         let mut holder = generator.create_holder(ChunkPos::ZERO);
         holder.generate_through(ChunkStatus::Noise).expect("NOISE");
 
-        // The install gate rejects the sub-FULL chunk with its real status
+        // The borrowed install gate rejects the chunk with its real status
         // (never FULL, never a superflat fallback).
         assert!(matches!(
             holder.to_level_chunk(),
@@ -1591,8 +1659,9 @@ mod tests {
         ));
 
         // An empty map does not serve the generated position: it holds no
-        // superflat placeholder and `install` accepts only the genuine FULL
-        // `LevelChunk` type, which no sub-FULL ProtoChunk can produce.
+        // superflat placeholder and `install` accepts only a genuine FULL
+        // `LevelChunk` value. The consuming SPAWN promotion is deliberately
+        // separate from this borrowed gate.
         let map = ChunkMap::empty(4);
         assert!(map.get_chunk(ChunkPos::ZERO).is_none());
 
@@ -1607,6 +1676,23 @@ mod tests {
             map.get_chunk(ChunkPos::ZERO).is_some(),
             "genuine FULL LevelChunk must be installable"
         );
+    }
+
+    /// A failed consuming promotion returns the holder and its original status
+    /// instead of losing the generation value on the conversion error.
+    #[test]
+    fn failed_spawn_promotion_returns_holder_intact() {
+        let holder = test_generator().create_holder(ChunkPos::ZERO);
+        let failure = match holder.into_level_chunk() {
+            Ok(_) => panic!("an EMPTY proto must not promote"),
+            Err(failure) => failure,
+        };
+        assert!(matches!(
+            &failure.error,
+            LevelChunkBridgeError::NotSpawn(status) if *status == ChunkStatus::Empty
+        ));
+        assert_eq!(failure.holder.status(), ChunkStatus::Empty);
+        assert_eq!(failure.holder.chunk.get_pos(), ChunkPos::ZERO);
     }
 
     /// Ownership: the holder owns its ProtoChunk by value (no `Arc<RwLock>`

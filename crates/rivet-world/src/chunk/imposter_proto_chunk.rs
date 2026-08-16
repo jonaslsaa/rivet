@@ -102,6 +102,12 @@ where
         &self.wrapped
     }
 
+    /// Consume the imposter when Paper's FULL task reuses an already loaded
+    /// `LevelChunk` instead of constructing a second one.
+    pub fn into_wrapped(self) -> LevelChunk<T, B, S> {
+        self.wrapped
+    }
+
     /// `getBlockState(int, int, int)` (Paper's `final` overload) — the wrapped
     /// chunk's `getBlockStateFinal`.
     pub fn get_block_state(&self, x: i32, y: i32, z: i32) -> T {

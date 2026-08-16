@@ -79,6 +79,20 @@ pub struct PalettedContainer<T: Clone + PartialEq + Send + Sync + 'static> {
     preset_values: Option<Vec<T>>,
 }
 
+/// A value mapper failed before a packed palette could be installed, or the
+/// target strategy rejected the resulting packed palette.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ValueMapError<E> {
+    Mapper(E),
+    Palette(String),
+}
+
+impl<E> From<E> for ValueMapError<E> {
+    fn from(error: E) -> Self {
+        Self::Mapper(error)
+    }
+}
+
 impl<T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static> PalettedContainer<T> {
     /// `PalettedContainer(T initialValue, Strategy<T>)`.
     ///
@@ -633,6 +647,30 @@ impl<T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static> PalettedCon
             target,
             PackedData::with_bits(palette_entries, packed.storage, packed.bits_per_entry),
         )
+    }
+
+    /// Fallible counterpart used by ownership-preserving chunk promotion.
+    /// Mapping is completed while the source container is borrowed, so a
+    /// palette or value conversion failure cannot consume the source chunk.
+    pub fn try_map_values<T2, E>(
+        &self,
+        target: &Strategy<T2>,
+        f: &impl Fn(&T) -> Result<T2, E>,
+    ) -> Result<PalettedContainer<T2>, ValueMapError<E>>
+    where
+        T2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    {
+        let packed = self.pack();
+        let palette_entries = packed
+            .palette_entries
+            .iter()
+            .map(f)
+            .collect::<Result<Vec<_>, _>>()?;
+        PalettedContainer::<T2>::unpack(
+            target,
+            PackedData::with_bits(palette_entries, packed.storage, packed.bits_per_entry),
+        )
+        .map_err(ValueMapError::Palette)
     }
 
     /// The global map (exposed for tests / callers needing the wire global ids).

@@ -183,10 +183,36 @@ impl<
             fluid_count,
             ticking_block_count,
             ticking_fluid_count,
+            special_colliding_blocks,
             states,
             biomes,
-            special_colliding_blocks,
             ticking_blocks,
+        })
+    }
+
+    /// Borrowing, fallible section conversion for atomic chunk promotion.
+    pub fn try_map_values<T2, B2, E>(
+        &self,
+        block_strategy: &Strategy<T2>,
+        biome_strategy: &Strategy<B2>,
+        map_block: &impl Fn(&T) -> Result<T2, E>,
+        map_biome: &impl Fn(&B) -> Result<B2, E>,
+    ) -> Result<LevelChunkSection<T2, B2>, crate::chunk::paletted_container::ValueMapError<E>>
+    where
+        T2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+        B2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    {
+        let states = self.states.try_map_values(block_strategy, map_block)?;
+        let biomes = self.biomes.try_map_values(biome_strategy, map_biome)?;
+        Ok(LevelChunkSection {
+            non_empty_block_count: self.non_empty_block_count,
+            fluid_count: self.fluid_count,
+            ticking_block_count: self.ticking_block_count,
+            ticking_fluid_count: self.ticking_fluid_count,
+            states,
+            biomes,
+            special_colliding_blocks: self.special_colliding_blocks,
+            ticking_blocks: self.ticking_blocks.clone(),
         })
     }
 
