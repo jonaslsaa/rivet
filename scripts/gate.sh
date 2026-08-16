@@ -843,8 +843,9 @@ main() {
     REQUIRE_ORACLE=1
   fi
   if [ -n "${SCOPE:-}" ]; then
-    # shellcheck disable=SC2206
-    SCOPE_ARGS+=($(printf '%s' "$SCOPE" | tr ',' ' '))
+    local SCOPE_WORDS=()
+    read -r -a SCOPE_WORDS <<< "${SCOPE//,/ }"
+    SCOPE_ARGS+=("${SCOPE_WORDS[@]}")
   fi
 
   local PKGS=() PKG_FLAGS=()
