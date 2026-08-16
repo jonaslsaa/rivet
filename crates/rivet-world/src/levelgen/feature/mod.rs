@@ -501,13 +501,18 @@ impl FeatureId {
 
 /// Resolve the registered feature identity used by a configured-feature JSON
 /// dispatch type. The feature registry is the source of truth for the id; this
-/// small value-layer view currently exposes the `minecraft:lake` entry needed
-/// by the seed-42 FEATURES slice. Unknown types are unavailable, never mapped
-/// to a fabricated fallback.
+/// view exposes the configured feature leaves reachable by the seed-42
+/// FEATURES slice. Unknown types are unavailable, never mapped to a fabricated
+/// fallback.
 pub fn feature_id_from_registry_name(name: &str) -> Option<FeatureId> {
     match name {
         // `Feature.LAKE` is the registered `minecraft:lake` singleton.
         "minecraft:lake" => Some(FeatureId::new(27)),
+        // `Feature.MONSTER_ROOM` is the registered `minecraft:monster_room`
+        // singleton used by both monster-room configured entries.
+        "minecraft:monster_room" => Some(FeatureId::new(22)),
+        // `Feature.GEODE` is the registered `minecraft:geode` singleton.
+        "minecraft:geode" => Some(FeatureId::new(58)),
         _ => None,
     }
 }
