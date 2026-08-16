@@ -2091,6 +2091,24 @@ mod tests {
             ),
             None
         );
+        <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &pos,
+            "minecraft:skeleton",
+            None,
+        );
+        let tag = region
+            .get_chunk(0, 0)
+            .get_block_entity_nbt(&pos)
+            .expect("zero-total potentials materialize an empty SpawnData");
+        assert_eq!(
+            tag.get_compound("SpawnData")
+                .and_then(|data| data.get_compound("entity"))
+                .and_then(|entity| entity.get_string("id"))
+                .map(String::as_str),
+            Some("minecraft:skeleton")
+        );
+        assert!(tag.get("SpawnPotentials").is_none());
     }
 
     #[test]
