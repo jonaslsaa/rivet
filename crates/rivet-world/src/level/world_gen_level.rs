@@ -99,10 +99,11 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     /// face-sturdiness seam the `HasSturdyFacePredicate` consumes
     /// (`getBlockState(pos).isFaceSturdy(level, pos, direction)`).
     ///
-    /// The pinned state table already contains Paper's cached
+    /// The pinned state table contains a zero-context sample of Paper's
     /// `SupportType.FULL.isSupporting` result, so this default preserves the
-    /// state-only `BlockStateBase.isFaceSturdy` behavior without fabricating a
-    /// solid-render approximation.
+    /// state-only behavior without fabricating a solid-render approximation.
+    /// It is not authoritative for `hasDynamicShape` states and must not be used
+    /// as a production answer until issue #646 supplies live shape context.
     ///
     /// RivetTodo(#232): the borrowed `WorldGenRegion` chunk-access
     /// implementation remains deferred; a concrete world may override this seam
@@ -113,10 +114,11 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
 
     /// `MultifaceBlock.canAttachTo` — a neighbour is attachable when either
     /// its support shape or collision shape fills the face toward the
-    /// multiface block. The state tables carry both exact cached masks.
+    /// multiface block. The state tables carry both zero-context samples only;
+    /// they are not authoritative for `hasDynamicShape` states.
     ///
     /// RivetTodo(#232): a concrete world may override this seam when dynamic
-    /// shape context lands.
+    /// shape context lands under issue #646.
     fn can_attach_to(&self, _pos: &BlockPos, state: &BlockState, direction: &Direction) -> bool {
         state.can_attach_to(*direction)
     }

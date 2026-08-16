@@ -11,10 +11,12 @@
 //! word (bit layout documented in the probe and re-emitted here), then RLEs
 //! consecutive equal words. It also records the exact per-direction
 //! `SupportType.FULL.isSupporting` result, which delegates to
-//! `getBlockSupportShape`, as a six-bit mask. It records the per-direction full
-//! collision-face mask used by `MultifaceBlock.canAttachTo` as a second mask
-//! table. The `BlockState` newtype in `rivet-registry` decodes all tables; no
-//! behavior is hand-typed.
+//! `getBlockSupportShape`, as a six-bit zero-context mask. It records the
+//! per-direction full collision-face mask used by `MultifaceBlock.canAttachTo`
+//! at the same probe origin as a second mask table. For `hasDynamicShape`
+//! states, both masks are static samples rather than authoritative production
+//! semantics; issue #646 owns the live context-aware contract. The `BlockState`
+//! newtype in `rivet-registry` decodes all tables; no behavior is hand-typed.
 //!
 //! Validation: all three run tables must partition `0..state_count` densely (first starts
 //! at 0, starts strictly increasing, lengths positive, no overlap, sum ==
@@ -489,7 +491,11 @@ fn render(
     out.push_str(
         "// Per-StateId worldgen/heightmap/lighting behavior words (issue #228). The\n\
          // values are Paper's cached state accessors evaluated by BlockBehaviourProbe\n\
-         // against the real Block.BLOCK_STATE_REGISTRY — never hand-typed. Bit layout:\n\
+         // against the real Block.BLOCK_STATE_REGISTRY — never hand-typed. The\n\
+         // support/collision masks below are zero-context samples at the probe\n\
+         // origin; they are not authoritative for hasDynamicShape states, whose\n\
+         // production answers require the live context contract owned by #646.\n\
+         // Bit layout:\n\
          //   bit  0  is_air\n\
          //   bit  1  blocks_motion\n\
          //   bit  2  solid_render\n\
@@ -617,8 +623,11 @@ fn render(
     );
 
     out.push_str(
-        "/// Run-length-encoded Paper `SupportType.FULL` face masks. Bit order is\n\
+        "/// Run-length-encoded Paper `SupportType.FULL` face masks sampled at\n\
+         /// `BlockPos.ZERO` with `EmptyBlockGetter`. Bit order is\n\
          /// `Direction.values()` (`DOWN`, `UP`, `NORTH`, `SOUTH`, `WEST`, `EAST`).\n\
+         /// These samples are not authoritative for `hasDynamicShape` states;\n\
+         /// live context belongs to issue #646.\n\
          pub static BLOCK_FACE_STURDY_RUNS: &[(u16, u16, u8)] = &[\n",
     );
     for run in face_sturdy_runs {
@@ -629,9 +638,10 @@ fn render(
     }
     out.push_str("];\n\n");
     out.push_str(
-        "/// The Paper FULL-face support mask for a state id. Ids outside\n\
-         /// `0..BLOCK_STATE_COUNT` fall back to state 0, mirroring\n\
-         /// `Block.stateById`.\n\
+        "/// The Paper FULL-face support sample for a state id at the probe origin.\n\
+         /// Ids outside `0..BLOCK_STATE_COUNT` fall back to state 0, mirroring\n\
+         /// `Block.stateById`; `hasDynamicShape` states require issue #646 live\n\
+         /// context instead of this static sample.\n\
          pub fn face_sturdy_mask_of(id: StateId) -> u8 {\n\
              let id = id.0 as u32;\n\
              let idx = BLOCK_FACE_STURDY_RUNS.partition_point(|(start, _, _)| *start as u32 <= id);\n\
@@ -648,9 +658,12 @@ fn render(
     );
 
     out.push_str(
-        "/// Run-length-encoded full collision-face masks used by\n\
+        "/// Run-length-encoded full collision-face masks sampled at\n\
+         /// `BlockPos.ZERO` with `EmptyBlockGetter`, as used by\n\
          /// `MultifaceBlock.canAttachTo`. Bit order is `Direction.values()`\n\
-         /// (`DOWN`, `UP`, `NORTH`, `SOUTH`, `WEST`, `EAST`).\n\
+         /// (`DOWN`, `UP`, `NORTH`, `SOUTH`, `WEST`, `EAST`). These samples are\n\
+         /// not authoritative for `hasDynamicShape` states; live context belongs\n\
+         /// to issue #646.\n\
          pub static BLOCK_COLLISION_FACE_RUNS: &[(u16, u16, u8)] = &[\n",
     );
     for run in collision_face_runs {
@@ -661,9 +674,10 @@ fn render(
     }
     out.push_str("];\n\n");
     out.push_str(
-        "/// The Paper full collision-face mask for a state id. Ids outside\n\
-         /// `0..BLOCK_STATE_COUNT` fall back to state 0, mirroring\n\
-         /// `Block.stateById`.\n\
+        "/// The Paper full collision-face sample for a state id at the probe origin.\n\
+         /// Ids outside `0..BLOCK_STATE_COUNT` fall back to state 0, mirroring\n\
+         /// `Block.stateById`; `hasDynamicShape` states require issue #646 live\n\
+         /// context instead of this static sample.\n\
          pub fn collision_face_mask_of(id: StateId) -> u8 {\n\
              let id = id.0 as u32;\n\
              let idx = BLOCK_COLLISION_FACE_RUNS.partition_point(|(start, _, _)| *start as u32 <= id);\n\

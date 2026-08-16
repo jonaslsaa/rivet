@@ -194,7 +194,8 @@ public final class BlockBehaviourProbe {
      * Evaluate SupportType.FULL.isSupporting directly at the probe origin.
      * FULL delegates to state.getBlockSupportShape(level, pos), so this avoids
      * substituting a solid-render or collision approximation for Paper's exact
-     * support predicate.
+     * support predicate. For hasDynamicShape states, the result is only a
+     * probe-origin snapshot; production callers must supply live context.
      */
     private static int faceSturdyMask(BlockState state) {
         int mask = 0;
@@ -207,7 +208,11 @@ public final class BlockBehaviourProbe {
         return mask;
     }
 
-    /** Evaluate the full collision face predicate used by MultifaceBlock. */
+    /**
+     * Evaluate the full collision face predicate used by MultifaceBlock at the
+     * probe origin. For hasDynamicShape states, this is only a zero-context
+     * sample; production callers must supply live context.
+     */
     private static int collisionFaceMask(BlockState state) {
         int mask = 0;
         for (Direction direction : Direction.values()) {

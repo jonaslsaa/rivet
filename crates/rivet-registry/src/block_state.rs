@@ -274,10 +274,12 @@ impl BlockState {
     // --- behavior queries (probe-driven, no world types) --------------------
 
     /// Paper `BlockStateBase.isFaceSturdy(level, pos, direction)` with the
-    /// default `SupportType.FULL`. The generated mask is the exact
-    /// `SupportType.FULL.isSupporting` result over `getBlockSupportShape`, not a
-    /// solid-render or other coarse-block approximation. Direction bits follow
-    /// Java `Direction.values()`: DOWN, UP, NORTH, SOUTH, WEST, EAST.
+    /// default `SupportType.FULL`, sampled at the codegen probe origin. The
+    /// generated mask is the exact zero-context `SupportType.FULL.isSupporting`
+    /// result over `getBlockSupportShape`, not a solid-render or other coarse-
+    /// block approximation. It is not authoritative for `hasDynamicShape`
+    /// states; issue #646 owns their live context-aware contract. Direction bits
+    /// follow Java `Direction.values()`: DOWN, UP, NORTH, SOUTH, WEST, EAST.
     #[inline]
     pub fn is_face_sturdy(self, direction: Direction) -> bool {
         let bit = match direction {
@@ -291,27 +293,34 @@ impl BlockState {
         self.face_sturdy_mask() & bit != 0
     }
 
-    /// The exact six-direction Paper `SupportType.FULL` face-support mask.
+    /// The six-direction Paper `SupportType.FULL` face-support sample at the
+    /// codegen probe origin. It is not authoritative for `hasDynamicShape`
+    /// states; issue #646 owns live context-aware support.
     #[inline]
     pub fn face_sturdy_mask(self) -> u8 {
         face_sturdy_mask_of(self.0)
     }
 
-    /// The exact six-direction Paper full collision-face mask used by
-    /// `MultifaceBlock.canAttachTo`.
+    /// The six-direction Paper full collision-face sample used by
+    /// `MultifaceBlock.canAttachTo` at the codegen probe origin. It is not
+    /// authoritative for `hasDynamicShape` states; issue #646 owns live
+    /// context-aware collision.
     #[inline]
     pub fn collision_face_mask(self) -> u8 {
         collision_face_mask_of(self.0)
     }
 
-    /// `MultifaceBlock.canAttachTo` for a state-only cached shape: a full
-    /// support face or a full collision face on the requested direction.
+    /// State-only `MultifaceBlock.canAttachTo` over the probe-origin samples: a
+    /// full support face or a full collision face on the requested direction.
+    /// This is not authoritative for `hasDynamicShape` states; issue #646 owns
+    /// live context-aware attachment.
     #[inline]
     pub fn can_attach_to(self, direction: Direction) -> bool {
         self.is_face_sturdy(direction) || self.is_collision_face_full(direction)
     }
 
-    /// Whether the cached collision shape fills the requested face.
+    /// Whether the probe-origin collision sample fills the requested face.
+    /// Dynamic-shape states require issue #646 live context instead.
     #[inline]
     pub fn is_collision_face_full(self, direction: Direction) -> bool {
         let bit = match direction {
