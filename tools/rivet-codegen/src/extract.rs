@@ -152,17 +152,17 @@ pub(crate) fn find_repo_root_from(start: PathBuf) -> Result<PathBuf> {
 
 fn extract_bundler(bundler: &Path, classpath_dir: &Path) -> Result<()> {
     let marker = classpath_dir.join("META-INF/versions.list");
-    let need_extract = !marker.is_file()
-        || fs::metadata(&marker)
-            .and_then(|m| m.modified())
-            .ok()
-            .zip(fs::metadata(bundler).and_then(|m| m.modified()).ok())
-            .map(|(marker_mtime, bundler_mtime)| bundler_mtime > marker_mtime)
-            .unwrap_or(true);
-    if !need_extract {
+    let source_marker = classpath_dir.join(".bundler.sha256");
+    let bundler_sha = crate::reports::sha256_hex(&fs::read(bundler).context("read bundler jar")?);
+    let cache_matches = bundler_cache_matches(classpath_dir, &bundler_sha);
+    if marker.is_file() && cache_matches {
         return Ok(());
     }
 
+    if classpath_dir.is_dir() {
+        fs::remove_dir_all(classpath_dir)
+            .with_context(|| format!("clear stale bundler cache {}", classpath_dir.display()))?;
+    }
     fs::create_dir_all(classpath_dir)
         .with_context(|| format!("create {}", classpath_dir.display()))?;
     run_cmd(
@@ -177,7 +177,14 @@ fn extract_bundler(bundler: &Path, classpath_dir: &Path) -> Result<()> {
             "META-INF/libraries/*",
         ],
         "extract server + libraries from bundler jar",
-    )
+    )?;
+    fs::write(source_marker, bundler_sha).context("record bundler cache identity")
+}
+
+fn bundler_cache_matches(classpath_dir: &Path, bundler_sha: &str) -> bool {
+    fs::read_to_string(classpath_dir.join(".bundler.sha256"))
+        .map(|cached| cached.trim() == bundler_sha)
+        .unwrap_or(false)
 }
 
 pub(crate) fn read_versions_list(bundler: &Path, classpath_dir: &Path) -> Result<(String, String)> {
@@ -305,4 +312,17 @@ pub(crate) fn run_cmd_capture(program: &Path, args: &[&str], what: &str) -> Resu
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundler_cache_identity_rejects_conflicting_override() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join(".bundler.sha256"), "sha-b\n").unwrap();
+        assert!(!bundler_cache_matches(root.path(), "sha-a"));
+        assert!(bundler_cache_matches(root.path(), "sha-b"));
+    }
 }
