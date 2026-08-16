@@ -32,7 +32,7 @@
 //! bounded dependency-square composition — the decoration-seed derivation
 //! (`SectionPos.of(centerPos, level.getMinSectionY()).origin()` fed to
 //! `setDecorationSeed`), a `WorldGenRegion` that borrows the center chunk and
-//! owns eight ring chunks generated EMPTY→CARVERS through the same real bodies
+//! owns the direct-dependency neighbors at their required statuses
 //! the other closures wire, and the Paper-order biome-union gather +
 //! `retainAll`. It then resolves generation settings for the FULL
 //! `biomeSource.possibleBiomes()` list in source order and builds the
