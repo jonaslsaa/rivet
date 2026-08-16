@@ -11,9 +11,12 @@ TOOL_DIR="$TMP/tools/rivet-client"
 TARGET_DIR="$TMP/shared-target"
 BIN_DIR="$TARGET_DIR/debug"
 mkdir -p "$TOOL_DIR" "$BIN_DIR" "$TMP/scripts"
+TARGET_DIR="$(cd "$TARGET_DIR" && pwd -P)"
+BIN_DIR="$TARGET_DIR/debug"
 cp "$SCRIPT_DIR/../tools/rivet-client/run-scenario.sh" "$TOOL_DIR/run-scenario.sh"
 cp "$SCRIPT_DIR/with-build-lock.sh" "$TMP/scripts/with-build-lock.sh"
-chmod +x "$TMP/scripts/with-build-lock.sh"
+cp "$SCRIPT_DIR/cargo-target-dir.sh" "$TMP/scripts/cargo-target-dir.sh"
+chmod +x "$TMP/scripts/with-build-lock.sh" "$TMP/scripts/cargo-target-dir.sh"
 
 SCENARIO_ARGV_LOG="$TMP/argv.log"
 cat > "$BIN_DIR/run-scenario" <<EOF
@@ -26,7 +29,7 @@ chmod +x "$BIN_DIR/run-scenario"
 CARGO_LOG="$TMP/cargo.log"
 cat > "$TMP/cargo" <<EOF
 #!/bin/bash
-echo "\$@" >> "$CARGO_LOG"
+printf 'target=%s argv=%s\\n' "\${CARGO_TARGET_DIR-}" "\$*" >> "$CARGO_LOG"
 case " \$* " in
   *" metadata "*) printf '%s\\n' '{"target_directory":"$TARGET_DIR"}' ;;
 esac
@@ -60,8 +63,8 @@ for mode in dwell kick load-world loaded-world recenter generated-world; do
   built_rivet || fail "$mode must build rivet-server (cargo log: $(cat "$CARGO_LOG"))"
   [ "$(wc -l < "$SCENARIO_ARGV_LOG" | tr -d ' ')" = 1 ] || fail "$mode: expected exactly 1 run-scenario invocation"
   grep -qx "$mode" "$SCENARIO_ARGV_LOG" || fail "$mode: mode not passed through (got $(cat "$SCENARIO_ARGV_LOG"))"
-  grep -q -- "metadata.*manifest-path.*rivet-client/Cargo.toml" "$CARGO_LOG" || fail "$mode: tool metadata was not queried"
-  pass "$mode builds rivet-server and uses Cargo's resolved target directory"
+  grep -q -- "target=$TARGET_DIR" "$CARGO_LOG" || fail "$mode: Cargo did not receive the resolved shared target"
+  pass "$mode builds rivet-server and uses the shared target resolver"
 done
 
 for sel in rivet both; do
@@ -98,7 +101,7 @@ pass "invocation from /private/tmp uses the resolved target directory"
 # the locked path above bypasses acquisition and therefore cannot deadlock.
 run_unlocked join
 grep -qx join "$SCENARIO_ARGV_LOG" || fail "standalone locked invocation did not reach the binary"
-grep -q -- "metadata.*manifest-path.*rivet-client/Cargo.toml" "$CARGO_LOG" \
+grep -q -- "target=$TARGET_DIR" "$CARGO_LOG" \
   || fail "standalone invocation did not resolve the Cargo target directory"
 pass "standalone run-scenario acquires the shared lock without recursion"
 

@@ -8,12 +8,14 @@ if [ "${RIVET_BUILD_LOCK_HELD:-0}" != 1 ]; then
   exec "$repo_dir/scripts/with-build-lock.sh" "$repo_dir" "$tool_dir/run-scenario.sh" "$@"
 fi
 
-resolved_target_dir() {
-  local manifest=$1
-  cargo metadata --locked --no-deps --format-version 1 --manifest-path "$manifest" \
-    | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])'
-}
+# Resolve before the first Cargo command so both the nested tool workspace and
+# the main workspace use the same target, even when invoked outside the repo.
+# shellcheck source=scripts/cargo-target-dir.sh
+source "$repo_dir/scripts/cargo-target-dir.sh"
+resolved_target_dir="$(cargo_target_dir_for "$repo_dir")"
+export CARGO_TARGET_DIR="$resolved_target_dir"
 
+tool_target_dir="$CARGO_TARGET_DIR"
 cd "$tool_dir"
 cargo build --locked
 cargo test --locked --bin run-scenario
@@ -36,6 +38,4 @@ if [ "$desired_server" = 1 ]; then
   )
 fi
 
-tool_target_dir="$(resolved_target_dir "$tool_dir/Cargo.toml")"
-export CARGO_TARGET_DIR="$tool_target_dir"
 exec "$tool_target_dir/debug/run-scenario" "$@"

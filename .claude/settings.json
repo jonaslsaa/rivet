@@ -1,7 +1,4 @@
 {
-  "env": {
-    "CARGO_TARGET_DIR": "/Users/jonass@kahoot.com/Documents/Personal/Rivet/target-agent-shared"
-  },
   "permissions": {
     "allow": [
       "Bash(cargo build*)",
