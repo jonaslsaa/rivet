@@ -4,8 +4,11 @@
 //! (NOISE), [`noise_router_data`] (DENSITY_FUNCTION), and
 //! [`noise_generator_settings`] (NOISE_SETTINGS) — through the test seam
 //! `RecordingContext` into frozen `rivet-registry` registries, and returns the
-//! `RegistryAccess` with all four populated (NOISE, DENSITY_FUNCTION, BIOME,
-//! NOISE_SETTINGS). The BIOME registry rides along because the NOISE_SETTINGS
+//! `RegistryAccess` with all six populated (NOISE, DENSITY_FUNCTION, BIOME,
+//! NOISE_SETTINGS, CONFIGURED_FEATURE, PLACED_FEATURE). The feature registries
+//! are currently empty typed registries: they make the worldgen back-reference
+//! boundary real without fabricating feature values, while the feature decoder
+//! remains an explicit downstream stage. The BIOME registry rides along because the NOISE_SETTINGS
 //! bootstrap's `SurfaceRuleData` builders resolve their biome holders through
 //! it. This is the single reusable entry point for code that needs the *real*
 //! overworld noise composition (probes, offline samplers, future worldgen
@@ -53,10 +56,13 @@
 
 use crate::data::worldgen::bootstrap_context::RecordingContext;
 use crate::data::worldgen::noise_data;
+use crate::levelgen::feature::ConfiguredFeatureErased;
+use crate::levelgen::feature::registry_keys::{CONFIGURED_FEATURE, PLACED_FEATURE};
 use crate::levelgen::noise::registry_keys;
 use crate::levelgen::noisegen::noise_generator_settings;
 use crate::levelgen::noisegen::noise_generator_settings::NoiseGeneratorSettings;
 use crate::levelgen::noisegen::noise_router_data::{self, DensityFunctionValue};
+use crate::levelgen::placement::PlacedFeature;
 use crate::levelgen::synth::normal_noise::NoiseParameters;
 use rivet_registry::access::{LayeredRegistryAccess, RegistryLayer};
 use rivet_registry::holder::RegistryId;
@@ -81,6 +87,16 @@ fn density_function_key() -> ErasedKey {
 /// `Registries.NOISE_SETTINGS` key erased to the access's stored key type.
 fn noise_settings_key() -> ErasedKey {
     ResourceKey::create_registry_key(registry_keys::NOISE_SETTINGS.identifier().clone())
+}
+
+/// `Registries.CONFIGURED_FEATURE` key erased to the access's stored key type.
+fn configured_feature_key() -> ErasedKey {
+    ResourceKey::create_registry_key(CONFIGURED_FEATURE.identifier().clone())
+}
+
+/// `Registries.PLACED_FEATURE` key erased to the access's stored key type.
+fn placed_feature_key() -> ErasedKey {
+    ResourceKey::create_registry_key(PLACED_FEATURE.identifier().clone())
 }
 
 /// A frozen NOISE registry (via [`noise_data::bootstrap`]).
@@ -190,17 +206,21 @@ fn build_noise_settings_registry(
     builder.freeze()
 }
 
-/// The worldgen registries — NOISE, DENSITY_FUNCTION, BIOME, NOISE_SETTINGS —
-/// frozen and bundled in a `RegistryAccess`. Build once per world/seed; the
-/// access is cheap to clone (shares the frozen registries).
+/// The worldgen registries — NOISE, DENSITY_FUNCTION, BIOME, NOISE_SETTINGS,
+/// CONFIGURED_FEATURE, and PLACED_FEATURE — frozen and bundled in a
+/// `RegistryAccess`. Build once per world/seed; the access is cheap to clone
+/// (shares the frozen registries).
 ///
-/// The NOISE, DENSITY_FUNCTION, and BIOME registries are frozen once each into
-/// a base access, the settings bootstrap runs against a clone of that access
-/// (sharing the same entries), and the returned access composes the base with
-/// the frozen NOISE_SETTINGS registry via the layered composite. Both accesses
-/// therefore carry the *same* biome registry instance, so the `SurfaceRuleData`
-/// biome holders the settings bootstrap produces pass the codec-path
-/// `can_serialize_in` owner check against the returned access.
+/// The NOISE, DENSITY_FUNCTION, BIOME, and typed feature registries are frozen
+/// once each into a base access, the settings bootstrap runs against a clone of
+/// that access (sharing the same entries), and the returned access composes the
+/// base with the frozen NOISE_SETTINGS registry via the layered composite. Both
+/// accesses therefore carry the *same* biome registry instance, so the
+/// `SurfaceRuleData` biome holders the settings bootstrap produces pass the
+/// codec-path `can_serialize_in` owner check against the returned access. The
+/// feature registries are intentionally empty until the configured/placed
+/// feature decoder lands; their presence makes holder ownership explicit rather
+/// than failing because the registry itself is absent.
 pub fn build_worldgen_registries() -> RegistryAccess {
     let base = RegistryAccess::from_pairs(vec![
         (noise_key(), Box::new(build_noise_registry()) as AnyBox),
@@ -209,6 +229,15 @@ pub fn build_worldgen_registries() -> RegistryAccess {
             Box::new(build_density_function_registry()) as AnyBox,
         ),
         (biome_key(), Box::new(build_biome_registry()) as AnyBox),
+        (
+            configured_feature_key(),
+            Box::new(RegistryBuilder::<ConfiguredFeatureErased>::new(&*CONFIGURED_FEATURE).freeze())
+                as AnyBox,
+        ),
+        (
+            placed_feature_key(),
+            Box::new(RegistryBuilder::<PlacedFeature>::new(&*PLACED_FEATURE).freeze()) as AnyBox,
+        ),
     ]);
     let settings = build_noise_settings_registry(base.clone());
     let settings_access =
@@ -234,7 +263,7 @@ mod tests {
     type TestOps = RegistryOps<serde_json::Value, JsonOps>;
 
     #[test]
-    fn builds_all_four_registries() {
+    fn builds_all_six_registries() {
         let access = build_worldgen_registries();
         let noise = access
             .lookup(&registry_keys::NOISE)
@@ -265,6 +294,14 @@ mod tests {
             biomes.key_set().len(),
             33,
             "the SurfaceRuleData-referenced biomes"
+        );
+        assert!(
+            access.lookup(&*CONFIGURED_FEATURE).is_some(),
+            "configured-feature registry key is present"
+        );
+        assert!(
+            access.lookup(&*PLACED_FEATURE).is_some(),
+            "placed-feature registry key is present"
         );
         // The overworld preset resolves to the real settings (never dummy()).
         let holder = settings.get_or_throw(&OVERWORLD);

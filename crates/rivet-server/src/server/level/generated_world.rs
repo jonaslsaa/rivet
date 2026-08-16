@@ -88,7 +88,6 @@ use std::sync::Arc;
 use rivet_registry::access::RegistryAccess;
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::block_state::BlockState;
-use rivet_registry::builder::RegistryBuilder;
 use rivet_registry::core::BlockPos;
 use rivet_registry::core::ChunkPos;
 use rivet_registry::core::SectionPos;
@@ -791,10 +790,11 @@ fn gather_possible_biomes(
 /// Resolve one possible biome's `BiomeGenerationSettings` from the generated
 /// feature tables.
 ///
-/// The placed-feature holders are `Holder::Reference` over one fabricated
-/// `PLACED_FEATURE` registry id (the generated tables are keyed by name; the
-/// FeatureSorter keys on holder identity, so a single fabricated registry
-/// collapses the biomes' shared steps exactly like Paper's registry does).
+/// The placed-feature holders are `Holder::Reference` over the actual empty
+/// `PLACED_FEATURE` registry carried by the generator access. The generated
+/// tables are keyed by name; the FeatureSorter keys on holder identity, so one
+/// shared registry preserves the biomes' shared steps. Value decoding remains a
+/// typed downstream boundary until the feature registry closure lands.
 /// `placed_by_id` collects the reverse id → key map the typed error names.
 ///
 /// A biome whose dense id is not in `BIOME_BY_ID`, or whose name has no
@@ -873,13 +873,17 @@ fn run_biome_decoration(
     // build the FeatureSorter once from it — Paper's
     // `ChunkGenerator.featuresPerStep` (`ChunkGenerator.java` 97-100), NOT the
     // 3x3 union. The union only picks which global indices execute per step.
-    // The placed-feature holders are `Holder::Reference` over one fabricated
-    // `PLACED_FEATURE` registry id (the generated tables are keyed by name; the
-    // FeatureSorter keys on holder identity, so a single fabricated registry
-    // collapses the biomes' shared steps exactly like Paper's registry does).
+    // The placed-feature holders are `Holder::Reference` over the actual empty
+    // `PLACED_FEATURE` registry carried by the generator access. The generated
+    // tables are keyed by name; the FeatureSorter keys on holder identity, so
+    // one shared registry preserves the biomes' shared steps. Value decoding
+    // remains a typed downstream boundary until the feature registry closure lands.
     // The `features` lists are `DECORATION_STEP_COUNT` long (the generated
     // data's step count).
-    let placed_registry_id = RegistryBuilder::new(&*PLACED_FEATURE).registry_id();
+    let placed_registry_id = generator
+        .registry_access()
+        .lookup_or_throw(&PLACED_FEATURE)
+        .registry_id();
     // Reverse id → key for the typed error: the holders carry the generated
     // table's placed-feature registry id, and the error names the key.
     let mut placed_by_id = HashMap::new();
@@ -1714,7 +1718,10 @@ mod tests {
             .generate_through(ChunkStatus::Carvers)
             .expect("CARVERS");
 
-        let placed_registry_id = RegistryBuilder::new(&*PLACED_FEATURE).registry_id();
+        let placed_registry_id = generator
+            .registry_access()
+            .lookup_or_throw(&PLACED_FEATURE)
+            .registry_id();
         let mut placed_by_id = HashMap::new();
         let mut settings_sources = Vec::new();
         for holder in generator.biome_source().possible_biomes() {
