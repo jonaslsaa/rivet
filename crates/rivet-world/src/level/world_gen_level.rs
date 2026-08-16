@@ -99,10 +99,14 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     /// face-sturdiness seam the `HasSturdyFacePredicate` consumes
     /// (`getBlockState(pos).isFaceSturdy(level, pos, direction)`).
     ///
-    /// RivetTodo(#232): the shape world-access implementation is not ported;
-    /// the default fails explicitly rather than fabricating a result.
-    fn is_face_sturdy(&self, _pos: &BlockPos, _state: &BlockState, _direction: &Direction) -> bool {
-        panic!("BlockStateBase.isFaceSturdy is not implemented (RivetTodo #232)")
+    /// The pinned state table already contains Paper's cached
+    /// `SupportType.FULL.isSupporting` result, so this default preserves the
+    /// state-only `BlockStateBase.isFaceSturdy` behavior without fabricating a
+    /// solid-render approximation. The borrowed `WorldGenRegion` chunk-access
+    /// implementation remains deferred; a concrete world may override this seam
+    /// when dynamic shape context is implemented.
+    fn is_face_sturdy(&self, _pos: &BlockPos, state: &BlockState, direction: &Direction) -> bool {
+        state.is_face_sturdy(*direction)
     }
 
     /// `BlockBehaviour.BlockStateBase.canSurvive(BlockGetter, BlockPos)` — the

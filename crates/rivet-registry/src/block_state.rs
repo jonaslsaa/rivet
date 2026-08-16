@@ -1,9 +1,10 @@
 //! Hand-written `BlockState` value type over the generated global-id tables
 //! (issue #228). This is the "pure table ops, no world types" surface the
 //! worldgen/heightmap/lighting work consumes: it decodes a `StateId` into the
-//! probe-driven behavior word (`generated/block_behaviors.rs`), round-trips
-//! through the mixed-radix property tables (`generated/block_states.rs` +
-//! `block_properties.rs`), and answers block-tag membership
+//! probe-driven behavior word and exact FULL-face support mask
+//! (`generated/block_behaviors.rs`), round-trips through the mixed-radix
+//! property tables (`generated/block_states.rs` + `block_properties.rs`), and
+//! answers block-tag membership
 //! (`generated/tags.rs`). It never reads a world, so it lives in
 //! `rivet-registry` and requires only the `blocks` feature.
 //!
@@ -30,10 +31,11 @@
 use std::fmt;
 
 use crate::block_state_property::{Property, PropertyValue};
+use crate::core::Direction;
 use crate::generated::block_behaviors::{
     BEHAVIOR_MASK_LIGHT_DAMPENING, BEHAVIOR_MASK_LIGHT_EMISSION, BEHAVIOR_MASK_MAP_COLOR,
     BEHAVIOR_SHIFT_LIGHT_DAMPENING, BEHAVIOR_SHIFT_LIGHT_EMISSION, BEHAVIOR_SHIFT_MAP_COLOR,
-    behavior_of,
+    behavior_of, face_sturdy_mask_of,
 };
 use crate::generated::block_properties::{
     BLOCK_PROPERTY_VALUES, BlockPropertyId, MAX_BLOCK_STATE_PROPERTY_COUNT,
@@ -270,6 +272,30 @@ impl BlockState {
     }
 
     // --- behavior queries (probe-driven, no world types) --------------------
+
+    /// Paper `BlockStateBase.isFaceSturdy(level, pos, direction)` with the
+    /// default `SupportType.FULL`. The generated mask is the exact
+    /// `SupportType.FULL.isSupporting` result over `getBlockSupportShape`, not a
+    /// solid-render or other coarse-block approximation. Direction bits follow
+    /// Java `Direction.values()`: DOWN, UP, NORTH, SOUTH, WEST, EAST.
+    #[inline]
+    pub fn is_face_sturdy(self, direction: Direction) -> bool {
+        let bit = match direction {
+            Direction::Down => 1 << 0,
+            Direction::Up => 1 << 1,
+            Direction::North => 1 << 2,
+            Direction::South => 1 << 3,
+            Direction::West => 1 << 4,
+            Direction::East => 1 << 5,
+        };
+        self.face_sturdy_mask() & bit != 0
+    }
+
+    /// The exact six-direction Paper `SupportType.FULL` face-support mask.
+    #[inline]
+    pub fn face_sturdy_mask(self) -> u8 {
+        face_sturdy_mask_of(self.0)
+    }
 
     /// The raw 32-bit behavior word for this state.
     #[inline]
@@ -563,6 +589,41 @@ mod tests {
         assert_eq!(word("minecraft:oak_leaves"), 0x4701C2);
         assert_eq!(word("minecraft:glass"), 0x4000A2);
         assert_eq!(word("minecraft:torch"), 0xE0A0);
+    }
+
+    #[test]
+    fn full_face_support_masks_are_state_and_direction_specific() {
+        let glass = BlockState::of(BlockId::from_name("minecraft:glass").unwrap());
+        assert_eq!(glass.face_sturdy_mask(), 0x3F);
+        assert!(!glass.solid_render());
+        for direction in Direction::VALUES {
+            assert!(glass.is_face_sturdy(direction));
+        }
+
+        let (slab_block, top_values) = digits(
+            "minecraft:oak_slab",
+            &[("type", "top"), ("waterlogged", "false")],
+        );
+        let top_slab = BlockState::new(state_id(slab_block, &top_values));
+        assert_eq!(top_slab.face_sturdy_mask(), 0x02);
+        assert!(top_slab.is_face_sturdy(Direction::Up));
+        assert!(!top_slab.is_face_sturdy(Direction::Down));
+
+        let (_, bottom_values) = digits(
+            "minecraft:oak_slab",
+            &[("type", "bottom"), ("waterlogged", "false")],
+        );
+        let bottom_slab = BlockState::new(state_id(slab_block, &bottom_values));
+        assert_eq!(bottom_slab.face_sturdy_mask(), 0x01);
+        assert!(bottom_slab.is_face_sturdy(Direction::Down));
+        assert!(!bottom_slab.is_face_sturdy(Direction::Up));
+
+        let (_, double_values) = digits(
+            "minecraft:oak_slab",
+            &[("type", "double"), ("waterlogged", "false")],
+        );
+        let double_slab = BlockState::new(state_id(slab_block, &double_values));
+        assert_eq!(double_slab.face_sturdy_mask(), 0x3F);
     }
 
     #[test]

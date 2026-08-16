@@ -5,17 +5,20 @@ import com.google.gson.JsonObject;
 import java.io.PrintWriter;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.SupportType;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.MapColor;
 
 /**
  * Dumps the compact per-{@code StateId} worldgen/heightmap/lighting behavior
- * table from the real Paper 26.2 block-state registry (issue #228).
+ * and full-face-support tables from the real Paper 26.2 block-state registry
+ * (issue #228).
  *
  * Run inside the full bundler classpath (server jar + all libraries), e.g.:
  *   java -cp "<server.jar>:<all lib jars>" BlockBehaviourProbe --output block_behaviors.json --version 26.2
@@ -27,12 +30,16 @@ import net.minecraft.world.level.material.MapColor;
  * reads the world — which is exactly the "pure table ops, no world types"
  * surface the registry's `BlockState` newtype exposes downstream.
  *
- * For each id in 0..state_count the probe evaluates, via the state's real
- * cached accessors:
+ * For each id in 0..state_count the probe evaluates the behavior fields through
+ * the state's real cached accessors:
  *   isAir, blocksMotion, isSolidRender, canOcclude, useShapeForLightOcclusion,
  *   propagatesSkylightDown, getLightDampening, getLightEmission,
  *   isRandomlyTicking, fluidState.isEmpty, and getMapColor(...).id
- * and packs them into a 32-bit word (bits documented below). The words are
+ * and packs them into a 32-bit word (bits documented below). It separately
+ * evaluates {@code SupportType.FULL.isSupporting} directly for all six
+ * directions against {@code EmptyBlockGetter} at {@code BlockPos.ZERO}; FULL
+ * delegates to {@code getBlockSupportShape}. Those direction bits are emitted
+ * as a separate mask table. Both tables are
  * run-length encoded in id order, so the committed fixture stays small and the
  * output is byte-deterministic across runs (the probe's iteration order is
  * fixed). Anchors are printed as key=value lines + `PROBE OK` on success; the
@@ -82,25 +89,40 @@ public final class BlockBehaviourProbe {
         require(count == 32366, "registry size " + count + " != 32366");
         println("state_count=" + count);
 
-        // Run-length encode the per-state words in id order. `stateById` is
-        // dense 0..count (stateById returns AIR default past the end, so the
-        // probe only iterates the valid range).
+        // Run-length encode the per-state words and full-face support masks in
+        // id order. `stateById` is dense 0..count (stateById returns AIR
+        // default past the end, so the probe only iterates the valid range).
         JsonArray runs = new JsonArray();
+        JsonArray faceSturdyRuns = new JsonArray();
         int runStart = 0;
         long runWord = behaviorWord(Block.stateById(0));
+        int faceSturdyRunStart = 0;
+        int faceSturdyMask = faceSturdyMask(Block.stateById(0));
         int runCount = 0;
+        int faceSturdyRunCount = 0;
         for (int id = 1; id < count; id++) {
-            long word = behaviorWord(Block.stateById(id));
+            BlockState state = Block.stateById(id);
+            long word = behaviorWord(state);
             if (word != runWord) {
                 runs.add(run(runStart, id - runStart, runWord));
                 runCount++;
                 runStart = id;
                 runWord = word;
             }
+            int mask = faceSturdyMask(state);
+            if (mask != faceSturdyMask) {
+                faceSturdyRuns.add(maskRun(faceSturdyRunStart, id - faceSturdyRunStart, faceSturdyMask));
+                faceSturdyRunCount++;
+                faceSturdyRunStart = id;
+                faceSturdyMask = mask;
+            }
         }
         runs.add(run(runStart, count - runStart, runWord));
         runCount++;
+        faceSturdyRuns.add(maskRun(faceSturdyRunStart, count - faceSturdyRunStart, faceSturdyMask));
+        faceSturdyRunCount++;
         println("run_count=" + runCount);
+        println("face_sturdy_run_count=" + faceSturdyRunCount);
 
         JsonObject root = new JsonObject();
         root.addProperty("generator",
@@ -108,6 +130,7 @@ public final class BlockBehaviourProbe {
         root.addProperty("minecraft_version", version);
         root.addProperty("state_count", count);
         root.add("runs", runs);
+        root.add("face_sturdy_runs", faceSturdyRuns);
         Gson gson = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
         try (PrintWriter writer = new PrintWriter(output, "UTF-8")) {
             gson.toJson(root, writer);
@@ -122,6 +145,8 @@ public final class BlockBehaviourProbe {
         println("oak_leaves=" + behaviorWord(Block.stateById(Block.getId(Blocks.OAK_LEAVES.defaultBlockState()))));
         println("glass=" + behaviorWord(Block.stateById(Block.getId(Blocks.GLASS.defaultBlockState()))));
         println("torch=" + behaviorWord(Block.stateById(Block.getId(Blocks.TORCH.defaultBlockState()))));
+        println("stone_face_sturdy_mask=" + faceSturdyMask(Blocks.STONE.defaultBlockState()));
+        println("oak_slab_face_sturdy_mask=" + faceSturdyMask(Blocks.OAK_SLAB.defaultBlockState()));
 
         println("PROBE OK");
     }
@@ -132,6 +157,31 @@ public final class BlockBehaviourProbe {
         obj.addProperty("length", length);
         obj.addProperty("word", word);
         return obj;
+    }
+
+    private static JsonObject maskRun(int start, int length, int mask) {
+        JsonObject obj = new JsonObject();
+        obj.addProperty("start", start);
+        obj.addProperty("length", length);
+        obj.addProperty("mask", mask);
+        return obj;
+    }
+
+    /**
+     * Evaluate SupportType.FULL.isSupporting directly at the probe origin.
+     * FULL delegates to state.getBlockSupportShape(level, pos), so this avoids
+     * substituting a solid-render or collision approximation for Paper's exact
+     * support predicate.
+     */
+    private static int faceSturdyMask(BlockState state) {
+        int mask = 0;
+        for (Direction direction : Direction.values()) {
+            if (SupportType.FULL.isSupporting(
+                    state, EmptyBlockGetter.INSTANCE, BlockPos.ZERO, direction)) {
+                mask |= 1 << direction.ordinal();
+            }
+        }
+        return mask;
     }
 
     /** Evaluate the state's behaviors and pack them into the documented word. */
