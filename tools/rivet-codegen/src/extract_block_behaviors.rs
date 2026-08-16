@@ -101,36 +101,27 @@ pub(crate) fn run_extractor(repo_root: &Path, bundler: &Path, output: &Path) -> 
     Ok(out)
 }
 
-/// Resolve the source jar for provenance: `--bundler` points at the bundler,
-/// but the pinned source identity is the materialized server jar (the same one
-/// the report provenance records). Falls back to the bundler's extracted server
-/// jar when no materialized run exists.
-fn source_jar(repo_root: &Path, bundler: &Path) -> PathBuf {
-    let materialized = crate::reports::default_jar(repo_root);
-    if materialized.is_file() {
-        return materialized;
-    }
-    // Fall back to the server jar extracted from the bundler (same bytes as the
-    // materialized run when built from the same Paper tree).
+/// Resolve the server jar extracted from the exact bundler used by the probe.
+/// Never substitute a separately materialized jar: an override bundler is the
+/// source of both the runtime bytes and the recorded provenance.
+fn source_jar(repo_root: &Path, bundler: &Path) -> Result<PathBuf> {
     let cache = repo_root.join("tools/rivet-codegen/.cache/classpath");
-    if let Ok((_, rel)) = extract::read_versions_list(bundler, &cache) {
-        let candidate = cache.join("META-INF/versions").join(&rel);
-        if candidate.is_file() {
-            return candidate;
-        }
-    }
-    materialized
+    let (_, rel) = extract::read_versions_list(bundler, &cache)?;
+    let jar = cache.join("META-INF/versions").join(&rel);
+    anyhow::ensure!(
+        jar.is_file(),
+        "probe server jar not found at {} after extracting {}",
+        jar.display(),
+        bundler.display()
+    );
+    Ok(jar)
 }
 
 /// Write `data/block_behaviors.manifest.json`: the source provenance (same
 /// shape as the reports/biomes manifest) + the fixture's sha256, so the codegen
 /// can pin the fixture to its source.
 fn write_manifest(repo_root: &Path, output: &Path, bundler: &Path) -> Result<()> {
-    let jar = source_jar(repo_root, bundler);
-    if !jar.is_file() {
-        // No jar to record provenance for (e.g. a test-only extraction); skip.
-        return Ok(());
-    }
+    let jar = source_jar(repo_root, bundler)?;
     let mut source = crate::reports::capture_source(&jar, repo_root)?;
     // Record the canonical repo-relative source location (same as the reports
     // manifest) even when the bytes came from the bundler's extracted server jar
@@ -198,4 +189,33 @@ pub fn run(bundler_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()
         output.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_jar_uses_override_runtime_not_materialized_jar() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("tools/rivet-codegen/.cache/classpath");
+        let versions = cache.join("META-INF/versions");
+        fs::create_dir_all(&versions).unwrap();
+        fs::write(
+            cache.join("META-INF/versions.list"),
+            "sha1 26.2 server-26.2.jar\n",
+        )
+        .unwrap();
+        let override_jar = root.path().join("override-paper-bundler.jar");
+        fs::write(&override_jar, b"override bundler").unwrap();
+        let override_server = versions.join("server-26.2.jar");
+        fs::write(&override_server, b"override server").unwrap();
+
+        let materialized = crate::reports::default_jar(root.path());
+        fs::create_dir_all(materialized.parent().unwrap()).unwrap();
+        fs::write(materialized, b"materialized server").unwrap();
+
+        let selected = source_jar(root.path(), &override_jar).unwrap();
+        assert_eq!(fs::read(selected).unwrap(), b"override server");
+    }
 }
