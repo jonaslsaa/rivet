@@ -366,8 +366,8 @@ pub(crate) struct SourceProvenance {
     /// The jar path passed/used at capture time (repo-relative when default).
     pub(crate) jar: String,
     pub(crate) jar_sha256: String,
-    /// Paper commit the jar was built from (best-effort; `working/` may be a
-    /// plain checkout without git metadata).
+    /// Paper commit the jar was built from. New captures require the pinned
+    /// checkout; the option remains deserializable for older fixtures.
     #[serde(skip_serializing_if = "Option::is_none")]
     paper_git: Option<String>,
     pub(crate) minecraft_version: String,
@@ -389,7 +389,7 @@ pub(crate) struct ReportEntry {
 pub(crate) fn capture_source(jar: &Path, repo_root: &Path) -> Result<SourceProvenance> {
     let version = read_version_json(jar)?;
     let jar_sha256 = sha256_hex(&fs::read(jar).context("read source jar")?);
-    let paper_git = read_paper_git(repo_root);
+    let paper_git = Some(read_paper_git(repo_root)?);
     let jar_path = render_jar_path(jar, repo_root);
     Ok(SourceProvenance {
         jar: jar_path,
@@ -433,23 +433,77 @@ fn read_version_json(jar: &Path) -> Result<VersionJson> {
     serde_json::from_slice(&out.stdout).context("parse version.json")
 }
 
-/// Best-effort Paper git commit (the jar is built from `working/Paper`).
-fn read_paper_git(repo_root: &Path) -> Option<String> {
+/// Resolve the primary Rivet checkout from a worktree's shared git directory.
+/// `working/Paper` is a sibling of that primary checkout, not of the ephemeral
+/// worktree in which codegen is running.
+fn primary_checkout(repo_root: &Path) -> Result<PathBuf> {
     let out = Command::new("git")
         .args([
             "-C",
-            repo_root.join("working/Paper").to_str().unwrap(),
+            repo_root.to_str().unwrap(),
             "rev-parse",
-            "HEAD",
+            "--git-common-dir",
         ])
         .output()
-        .ok()?;
-    if out.status.success() {
-        let commit = String::from_utf8_lossy(&out.stdout);
-        Some(commit.trim().to_string())
+        .context("UNVERIFIED: resolve Rivet git common directory")?;
+    ensure!(
+        out.status.success(),
+        "UNVERIFIED: git cannot resolve the Rivet common directory from {}",
+        repo_root.display()
+    );
+    let common_dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    ensure!(
+        !common_dir.is_empty(),
+        "UNVERIFIED: git returned an empty Rivet common directory"
+    );
+    let common_dir = PathBuf::from(common_dir);
+    let common_dir = if common_dir.is_absolute() {
+        common_dir
     } else {
-        None
-    }
+        repo_root.join(common_dir)
+    };
+    let common_dir = fs::canonicalize(&common_dir).with_context(|| {
+        format!(
+            "UNVERIFIED: canonicalize Rivet git common directory {}",
+            common_dir.display()
+        )
+    })?;
+    common_dir.parent().map(Path::to_path_buf).with_context(|| {
+        format!(
+            "UNVERIFIED: Rivet git common directory {} has no primary checkout",
+            common_dir.display()
+        )
+    })
+}
+
+/// Read the pinned Paper commit used to build the jar. Missing or unusable
+/// provenance is an UNVERIFIED extraction failure, never a silently omitted
+/// manifest field.
+fn read_paper_git(repo_root: &Path) -> Result<String> {
+    let primary = primary_checkout(repo_root)?;
+    let paper = primary.join("working/Paper");
+    ensure!(
+        paper.is_dir(),
+        "UNVERIFIED: pinned Paper checkout not found at {} (primary Rivet checkout {})",
+        paper.display(),
+        primary.display()
+    );
+    let out = Command::new("git")
+        .args(["-C", paper.to_str().unwrap(), "rev-parse", "HEAD"])
+        .output()
+        .with_context(|| format!("UNVERIFIED: read Paper git HEAD in {}", paper.display()))?;
+    ensure!(
+        out.status.success(),
+        "UNVERIFIED: Paper checkout at {} has no readable git HEAD",
+        paper.display()
+    );
+    let commit = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    ensure!(
+        !commit.is_empty(),
+        "UNVERIFIED: Paper git HEAD was empty in {}",
+        paper.display()
+    );
+    Ok(commit)
 }
 
 #[derive(Debug, Deserialize)]
@@ -511,6 +565,34 @@ mod tests {
             render_jar_path(outside, repo),
             "tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar"
         );
+    }
+
+    #[test]
+    fn primary_checkout_uses_git_common_dir() {
+        let repo = crate::extract::find_repo_root().unwrap();
+        let common = Command::new("git")
+            .args([
+                "-C",
+                repo.to_str().unwrap(),
+                "rev-parse",
+                "--git-common-dir",
+            ])
+            .output()
+            .unwrap();
+        assert!(common.status.success());
+        let common = String::from_utf8(common.stdout).unwrap();
+        let common = PathBuf::from(common.trim());
+        let common = if common.is_absolute() {
+            common
+        } else {
+            repo.join(common)
+        };
+        let expected = fs::canonicalize(common)
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert_eq!(primary_checkout(&repo).unwrap(), expected);
     }
 
     #[test]

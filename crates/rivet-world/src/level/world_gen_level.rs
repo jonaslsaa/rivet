@@ -102,7 +102,9 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     /// The pinned state table already contains Paper's cached
     /// `SupportType.FULL.isSupporting` result, so this default preserves the
     /// state-only `BlockStateBase.isFaceSturdy` behavior without fabricating a
-    /// solid-render approximation. The borrowed `WorldGenRegion` chunk-access
+    /// solid-render approximation.
+    ///
+    /// RivetTodo(#232): the borrowed `WorldGenRegion` chunk-access
     /// implementation remains deferred; a concrete world may override this seam
     /// when dynamic shape context is implemented.
     fn is_face_sturdy(&self, _pos: &BlockPos, state: &BlockState, direction: &Direction) -> bool {
