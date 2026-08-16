@@ -264,6 +264,14 @@ impl WorldGenLevel for TestLevel {
             .unwrap_or(self.face_sturdy)
     }
 
+    fn can_attach_to(&self, pos: &BlockPos, state: &BlockState, direction: &Direction) -> bool {
+        self.face_sturdy_at
+            .get(&(*pos, *direction))
+            .copied()
+            .unwrap_or(self.face_sturdy)
+            || state.can_attach_to(*direction)
+    }
+
     fn should_freeze(&self, _pos: &BlockPos, _check_neighbors: bool) -> bool {
         self.freeze
     }

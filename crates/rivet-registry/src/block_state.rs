@@ -1,8 +1,8 @@
 //! Hand-written `BlockState` value type over the generated global-id tables
 //! (issue #228). This is the "pure table ops, no world types" surface the
 //! worldgen/heightmap/lighting work consumes: it decodes a `StateId` into the
-//! probe-driven behavior word and exact FULL-face support mask
-//! (`generated/block_behaviors.rs`), round-trips through the mixed-radix
+//! probe-driven behavior word plus exact FULL-face support and collision-face
+//! masks (`generated/block_behaviors.rs`), round-trips through the mixed-radix
 //! property tables (`generated/block_states.rs` + `block_properties.rs`), and
 //! answers block-tag membership
 //! (`generated/tags.rs`). It never reads a world, so it lives in
@@ -35,7 +35,7 @@ use crate::core::Direction;
 use crate::generated::block_behaviors::{
     BEHAVIOR_MASK_LIGHT_DAMPENING, BEHAVIOR_MASK_LIGHT_EMISSION, BEHAVIOR_MASK_MAP_COLOR,
     BEHAVIOR_SHIFT_LIGHT_DAMPENING, BEHAVIOR_SHIFT_LIGHT_EMISSION, BEHAVIOR_SHIFT_MAP_COLOR,
-    behavior_of, face_sturdy_mask_of,
+    behavior_of, collision_face_mask_of, face_sturdy_mask_of,
 };
 use crate::generated::block_properties::{
     BLOCK_PROPERTY_VALUES, BlockPropertyId, MAX_BLOCK_STATE_PROPERTY_COUNT,
@@ -295,6 +295,34 @@ impl BlockState {
     #[inline]
     pub fn face_sturdy_mask(self) -> u8 {
         face_sturdy_mask_of(self.0)
+    }
+
+    /// The exact six-direction Paper full collision-face mask used by
+    /// `MultifaceBlock.canAttachTo`.
+    #[inline]
+    pub fn collision_face_mask(self) -> u8 {
+        collision_face_mask_of(self.0)
+    }
+
+    /// `MultifaceBlock.canAttachTo` for a state-only cached shape: a full
+    /// support face or a full collision face on the requested direction.
+    #[inline]
+    pub fn can_attach_to(self, direction: Direction) -> bool {
+        self.is_face_sturdy(direction) || self.is_collision_face_full(direction)
+    }
+
+    /// Whether the cached collision shape fills the requested face.
+    #[inline]
+    pub fn is_collision_face_full(self, direction: Direction) -> bool {
+        let bit = match direction {
+            Direction::Down => 1 << 0,
+            Direction::Up => 1 << 1,
+            Direction::North => 1 << 2,
+            Direction::South => 1 << 3,
+            Direction::West => 1 << 4,
+            Direction::East => 1 << 5,
+        };
+        self.collision_face_mask() & bit != 0
     }
 
     /// The raw 32-bit behavior word for this state.
@@ -624,6 +652,37 @@ mod tests {
         );
         let double_slab = BlockState::new(state_id(slab_block, &double_values));
         assert_eq!(double_slab.face_sturdy_mask(), 0x3F);
+    }
+
+    #[test]
+    fn multiface_attachment_includes_full_collision_faces() {
+        let leaves = BlockState::of(BlockId::from_name("minecraft:oak_leaves").unwrap());
+        assert_eq!(leaves.face_sturdy_mask(), 0);
+        assert_eq!(leaves.collision_face_mask(), 0x3F);
+        for direction in Direction::VALUES {
+            assert!(leaves.can_attach_to(direction));
+        }
+
+        let glass = BlockState::of(BlockId::from_name("minecraft:glass").unwrap());
+        assert!(glass.can_attach_to(Direction::North));
+    }
+
+    #[test]
+    fn sticky_piston_face_masks_pin_all_direction_bits() {
+        for (id, mask) in [
+            (2235, 1 << 0),
+            (2236, 1 << 1),
+            (2237, 1 << 2),
+            (2238, 1 << 3),
+            (2239, 1 << 4),
+            (2240, 1 << 5),
+        ] {
+            assert_eq!(
+                BlockState::new(StateId(id)).face_sturdy_mask(),
+                mask,
+                "state {id}"
+            );
+        }
     }
 
     #[test]

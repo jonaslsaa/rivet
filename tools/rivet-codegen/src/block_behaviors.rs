@@ -11,11 +11,12 @@
 //! word (bit layout documented in the probe and re-emitted here), then RLEs
 //! consecutive equal words. It also records the exact per-direction
 //! `SupportType.FULL.isSupporting` result, which delegates to
-//! `getBlockSupportShape`, as a six-bit mask and RLEs those masks independently.
-//! The `BlockState` newtype in `rivet-registry` decodes both tables; no behavior
-//! is hand-typed.
+//! `getBlockSupportShape`, as a six-bit mask. It records the per-direction full
+//! collision-face mask used by `MultifaceBlock.canAttachTo` as a second mask
+//! table. The `BlockState` newtype in `rivet-registry` decodes all tables; no
+//! behavior is hand-typed.
 //!
-//! Validation: both run tables must partition `0..state_count` densely (first starts
+//! Validation: all three run tables must partition `0..state_count` densely (first starts
 //! at 0, starts strictly increasing, lengths positive, no overlap, sum ==
 //! count), every run's start/length must fit the emitted `(u16, u16, u32)`
 //! tuple and lie within `state_count`, the accumulation is overflow-checked,
@@ -59,7 +60,7 @@ pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> 
     let root = crate::registries::parse_strict(&json)
         .with_context(|| format!("parse {}", input.display()))?;
 
-    let (runs, face_sturdy_runs) = validate(root)?;
+    let (runs, face_sturdy_runs, collision_face_runs) = validate(root)?;
     // The behavior table must span exactly the same state space as the
     // block-state registry it indexes: a behavior dump regenerated from a
     // differently-sized registry would leave real states silently decoding as
@@ -73,7 +74,7 @@ pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> 
     fs::create_dir_all(&output).with_context(|| format!("create {}", output.display()))?;
     fs::write(
         output.join("block_behaviors.rs"),
-        render(&runs, &face_sturdy_runs, &source),
+        render(&runs, &face_sturdy_runs, &collision_face_runs, &source),
     )
     .context("write generated/block_behaviors.rs")?;
 
@@ -97,6 +98,14 @@ pub(crate) struct Run {
 /// One RLE run of Paper's per-direction `SupportType.FULL` face mask.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FaceSturdyRun {
+    start: u32,
+    length: u32,
+    mask: u8,
+}
+
+/// One RLE run of Paper's per-direction full collision-face mask.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CollisionFaceRun {
     start: u32,
     length: u32,
     mask: u8,
@@ -148,8 +157,9 @@ fn check_state_count_matches(runs: &[Run], block_state_count: u32) -> Result<()>
 /// that extends past `state_count`, a first run not starting at 0,
 /// non-strictly-increasing run starts, runs that overlap or leave a gap, a
 /// total that does not equal `state_count`, `word` with reserved bits set, or a
-/// word field outside its documented bit width.
-fn validate(root: Value) -> Result<(Vec<Run>, Vec<FaceSturdyRun>)> {
+/// word field outside its documented bit width. Both mask tables are subject
+/// to the same dense-partition checks.
+fn validate(root: Value) -> Result<(Vec<Run>, Vec<FaceSturdyRun>, Vec<CollisionFaceRun>)> {
     let obj = root
         .as_object()
         .context("block_behaviors.json root must be a JSON object")?;
@@ -257,8 +267,13 @@ fn validate(root: Value) -> Result<(Vec<Run>, Vec<FaceSturdyRun>)> {
             .context("`face_sturdy_runs` missing from block_behaviors.json")?,
         state_count,
     )?;
+    let collision_face_runs = validate_collision_face_runs(
+        obj.get("collision_face_runs")
+            .context("`collision_face_runs` missing from block_behaviors.json")?,
+        state_count,
+    )?;
 
-    Ok((runs, face_sturdy_runs))
+    Ok((runs, face_sturdy_runs, collision_face_runs))
 }
 
 /// Validate Paper's per-direction `SupportType.FULL` face-mask runs.
@@ -337,6 +352,86 @@ fn validate_face_sturdy_runs(value: &Value, state_count: u64) -> Result<Vec<Face
     Ok(runs)
 }
 
+/// Validate Paper's per-direction full collision-face mask runs.
+fn validate_collision_face_runs(value: &Value, state_count: u64) -> Result<Vec<CollisionFaceRun>> {
+    let runs_value = value
+        .as_array()
+        .context("`collision_face_runs` must be an array")?;
+    if runs_value.is_empty() {
+        bail!("`collision_face_runs` is empty");
+    }
+
+    let mut runs = Vec::with_capacity(runs_value.len());
+    let mut expected_start = 0u64;
+    for (i, run) in runs_value.iter().enumerate() {
+        let run_obj = run
+            .as_object()
+            .with_context(|| format!("collision_face_runs run {i} must be a JSON object"))?;
+        for field in run_obj.keys() {
+            if !matches!(field.as_str(), "start" | "length" | "mask") {
+                bail!("collision_face_runs run {i} has unexpected field `{field}`");
+            }
+        }
+        let start = run_obj
+            .get("start")
+            .and_then(Value::as_u64)
+            .with_context(|| {
+                format!("collision_face_runs run {i} `start` must be a non-negative integer")
+            })?;
+        let length = run_obj
+            .get("length")
+            .and_then(Value::as_u64)
+            .with_context(|| {
+                format!("collision_face_runs run {i} `length` must be a non-negative integer")
+            })?;
+        if length == 0 {
+            bail!("collision_face_runs run {i} has zero length");
+        }
+        let mask = run_obj
+            .get("mask")
+            .and_then(Value::as_u64)
+            .with_context(|| {
+                format!("collision_face_runs run {i} `mask` must be a non-negative integer")
+            })?;
+        if mask > 0x3F {
+            bail!(
+                "collision_face_runs run {i} mask {mask} has bits outside six directions"
+            );
+        }
+        if start > u32::MAX as u64 || length > u32::MAX as u64 {
+            bail!("collision_face_runs run {i} start/length exceeds u32");
+        }
+        if start != expected_start {
+            bail!(
+                "collision_face_runs do not densely partition 0..{state_count}: run {i} starts at {start} but the previous run ends at {expected_start}"
+            );
+        }
+        let end = start
+            .checked_add(length)
+            .with_context(|| format!("collision_face_runs run {i} start+length overflows u64"))?;
+        if end > state_count {
+            bail!(
+                "collision_face_runs run {i} extends past state_count: [{start}, {end}) overruns {state_count}"
+            );
+        }
+        expected_start = expected_start.checked_add(length).with_context(|| {
+            format!("collision_face_runs run {i} length overflows accumulated start")
+        })?;
+        runs.push(CollisionFaceRun {
+            start: start as u32,
+            length: length as u32,
+            mask: mask as u8,
+        });
+    }
+    if expected_start != state_count {
+        bail!(
+            "collision_face_runs cover [0, {expected_start}) but state_count is {state_count}"
+        );
+    }
+
+    Ok(runs)
+}
+
 /// Link the fixture to its pinned provenance: the fixture must match the sha256
 /// recorded next to it in `data/block_behaviors.manifest.json`, and the emitted
 /// header carries that provenance (jar identity + MC/proto/world versions).
@@ -378,7 +473,12 @@ struct FixtureFile {
 }
 
 /// Render `generated/block_behaviors.rs`.
-fn render(runs: &[Run], face_sturdy_runs: &[FaceSturdyRun], source: &SourceProvenance) -> String {
+fn render(
+    runs: &[Run],
+    face_sturdy_runs: &[FaceSturdyRun],
+    collision_face_runs: &[CollisionFaceRun],
+    source: &SourceProvenance,
+) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "// Generated by `tools/rivet-codegen generate` from data/block_behaviors.json\n\
@@ -551,6 +651,38 @@ fn render(runs: &[Run], face_sturdy_runs: &[FaceSturdyRun], source: &SourceProve
          }\n",
     );
 
+    out.push_str(
+        "/// Run-length-encoded full collision-face masks used by\n\
+         /// `MultifaceBlock.canAttachTo`. Bit order is `Direction.values()`\n\
+         /// (`DOWN`, `UP`, `NORTH`, `SOUTH`, `WEST`, `EAST`).\n\
+         pub static BLOCK_COLLISION_FACE_RUNS: &[(u16, u16, u8)] = &[\n",
+    );
+    for run in collision_face_runs {
+        out.push_str(&format!(
+            "    ({}, {}, 0x{:02X}),\n",
+            run.start, run.length, run.mask
+        ));
+    }
+    out.push_str("];\n\n");
+    out.push_str(
+        "/// The Paper full collision-face mask for a state id. Ids outside\n\
+         /// `0..BLOCK_STATE_COUNT` fall back to state 0, mirroring\n\
+         /// `Block.stateById`.\n\
+         pub fn collision_face_mask_of(id: StateId) -> u8 {\n\
+             let id = id.0 as u32;\n\
+             let idx = BLOCK_COLLISION_FACE_RUNS.partition_point(|(start, _, _)| *start as u32 <= id);\n\
+             if idx == 0 {\n\
+                 return BLOCK_COLLISION_FACE_RUNS[0].2;\n\
+             }\n\
+             let (start, len, mask) = BLOCK_COLLISION_FACE_RUNS[idx - 1];\n\
+             if id < start as u32 + len as u32 {\n\
+                 mask\n\
+             } else {\n\
+                 BLOCK_COLLISION_FACE_RUNS[0].2\n\
+             }\n\
+         }\n",
+    );
+
     out
 }
 
@@ -571,15 +703,20 @@ mod tests {
                 {"start": 0, "length": 2, "mask": 0},
                 {"start": 2, "length": 3, "mask": 63},
             ],
+            "collision_face_runs": [
+                {"start": 0, "length": 2, "mask": 0},
+                {"start": 2, "length": 3, "mask": 63},
+            ],
         })
     }
 
     #[test]
     fn dense_partition_passes() {
-        let (runs, face_sturdy_runs) = validate(valid_root()).unwrap();
+        let (runs, face_sturdy_runs, collision_face_runs) = validate(valid_root()).unwrap();
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[1].word, 0x20015);
         assert_eq!(face_sturdy_runs[1].mask, 63);
+        assert_eq!(collision_face_runs[1].mask, 63);
     }
 
     #[test]
@@ -594,6 +731,22 @@ mod tests {
     fn face_sturdy_runs_must_cover_all_states() {
         let mut v = valid_root();
         v["face_sturdy_runs"][1]["length"] = serde_json::json!(2);
+        let err = validate(v).unwrap_err();
+        assert!(err.to_string().contains("cover [0, 4)"), "got: {err}");
+    }
+
+    #[test]
+    fn collision_face_mask_out_of_range_fails() {
+        let mut v = valid_root();
+        v["collision_face_runs"][0]["mask"] = serde_json::json!(64);
+        let err = validate(v).unwrap_err();
+        assert!(err.to_string().contains("six directions"), "got: {err}");
+    }
+
+    #[test]
+    fn collision_face_runs_must_cover_all_states() {
+        let mut v = valid_root();
+        v["collision_face_runs"][1]["length"] = serde_json::json!(2);
         let err = validate(v).unwrap_err();
         assert!(err.to_string().contains("cover [0, 4)"), "got: {err}");
     }
@@ -731,8 +884,11 @@ mod tests {
             "face_sturdy_runs": [
                 {"start": 0, "length": 5, "mask": 0},
             ],
+            "collision_face_runs": [
+                {"start": 0, "length": 5, "mask": 0},
+            ],
         });
-        let (runs, _) = validate(v).unwrap();
+        let (runs, _, _) = validate(v).unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].length, 5);
     }
@@ -800,8 +956,13 @@ mod tests {
             length: 3,
             mask: 0x3F,
         }];
-        let a = render(&runs, &face_sturdy_runs, &source);
-        let b = render(&runs, &face_sturdy_runs, &source);
+        let collision_face_runs = vec![CollisionFaceRun {
+            start: 0,
+            length: 3,
+            mask: 0x3F,
+        }];
+        let a = render(&runs, &face_sturdy_runs, &collision_face_runs, &source);
+        let b = render(&runs, &face_sturdy_runs, &collision_face_runs, &source);
         assert_eq!(a, b);
         assert!(a.contains("MC 26.2, protocol 776, world 4903"));
         assert!(a.contains("e1a027e9481a16ec"));
@@ -819,7 +980,7 @@ mod tests {
         let repo_root = crate::extract::find_repo_root().unwrap();
         let json = fs::read_to_string(default_input(&repo_root)).unwrap();
         let root = crate::registries::parse_strict(&json).unwrap();
-        let (runs, _) = validate(root).unwrap();
+        let (runs, _, _) = validate(root).unwrap();
         let state_count: u64 = runs.iter().map(|r| r.length as u64).sum();
         assert_eq!(state_count, 32366, "registry state count drifted");
 
@@ -855,6 +1016,81 @@ mod tests {
         assert_eq!(decode(u16::MAX as u32), words[0], "far out-of-range");
     }
 
+    /// The emitted `face_sturdy_mask_of` binary search must reproduce Paper's
+    /// mask for every state in the real table, including both boundaries of
+    /// every run and the out-of-range fallback.
+    #[test]
+    fn face_sturdy_mask_of_matches_fixture_masks() {
+        let repo_root = crate::extract::find_repo_root().unwrap();
+        let json = fs::read_to_string(default_input(&repo_root)).unwrap();
+        let root = crate::registries::parse_strict(&json).unwrap();
+        let (_, runs, _) = validate(root).unwrap();
+        let state_count: u64 = runs.iter().map(|r| r.length as u64).sum();
+        assert_eq!(state_count, 32366, "registry state count drifted");
+
+        let mut masks = vec![0u8; state_count as usize];
+        for r in &runs {
+            for mask in masks[r.start as usize..(r.start + r.length) as usize].iter_mut() {
+                *mask = r.mask;
+            }
+        }
+        let decode = |id: u32| -> u8 {
+            let idx = runs.partition_point(|r| r.start <= id);
+            if idx == 0 {
+                return runs[0].mask;
+            }
+            let (start, len, mask) = (
+                runs[idx - 1].start,
+                runs[idx - 1].length,
+                runs[idx - 1].mask,
+            );
+            if id < start + len { mask } else { runs[0].mask }
+        };
+
+        for id in 0..state_count {
+            assert_eq!(decode(id as u32), masks[id as usize], "state {id}");
+        }
+        assert_eq!(decode(state_count as u32), masks[0], "first out-of-range");
+        assert_eq!(decode(u16::MAX as u32), masks[0], "far out-of-range");
+    }
+
+    /// The collision-face decoder uses the same RLE/binary-search contract as
+    /// the support-mask decoder and must reproduce every fixture mask.
+    #[test]
+    fn collision_face_mask_of_matches_fixture_masks() {
+        let repo_root = crate::extract::find_repo_root().unwrap();
+        let json = fs::read_to_string(default_input(&repo_root)).unwrap();
+        let root = crate::registries::parse_strict(&json).unwrap();
+        let (_, _, runs) = validate(root).unwrap();
+        let state_count: u64 = runs.iter().map(|r| r.length as u64).sum();
+        assert_eq!(state_count, 32366, "registry state count drifted");
+
+        let mut masks = vec![0u8; state_count as usize];
+        for r in &runs {
+            for mask in masks[r.start as usize..(r.start + r.length) as usize].iter_mut() {
+                *mask = r.mask;
+            }
+        }
+        let decode = |id: u32| -> u8 {
+            let idx = runs.partition_point(|r| r.start <= id);
+            if idx == 0 {
+                return runs[0].mask;
+            }
+            let (start, len, mask) = (
+                runs[idx - 1].start,
+                runs[idx - 1].length,
+                runs[idx - 1].mask,
+            );
+            if id < start + len { mask } else { runs[0].mask }
+        };
+
+        for id in 0..state_count {
+            assert_eq!(decode(id as u32), masks[id as usize], "state {id}");
+        }
+        assert_eq!(decode(state_count as u32), masks[0], "first out-of-range");
+        assert_eq!(decode(u16::MAX as u32), masks[0], "far out-of-range");
+    }
+
     /// The real fixture must agree with `block_states.json` on the total state
     /// count (`BLOCK_STATE_COUNT`), so a behavior dump from a differently-sized
     /// registry fails `generate` even when it is internally self-consistent.
@@ -864,7 +1100,7 @@ mod tests {
         assert_eq!(registry_state_count(&repo_root).unwrap(), 32366);
         let json = fs::read_to_string(default_input(&repo_root)).unwrap();
         let root = crate::registries::parse_strict(&json).unwrap();
-        let (runs, _) = validate(root).unwrap();
+        let (runs, _, _) = validate(root).unwrap();
         check_state_count_matches(&runs, 32366).unwrap();
     }
 }

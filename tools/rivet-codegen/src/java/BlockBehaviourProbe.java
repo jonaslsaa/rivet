@@ -17,7 +17,7 @@ import net.minecraft.world.level.material.MapColor;
 
 /**
  * Dumps the compact per-{@code StateId} worldgen/heightmap/lighting behavior
- * and full-face-support tables from the real Paper 26.2 block-state registry
+ * and full-face support/attachment tables from the real Paper 26.2 block-state registry
  * (issue #228).
  *
  * Run inside the full bundler classpath (server jar + all libraries), e.g.:
@@ -38,8 +38,9 @@ import net.minecraft.world.level.material.MapColor;
  * and packs them into a 32-bit word (bits documented below). It separately
  * evaluates {@code SupportType.FULL.isSupporting} directly for all six
  * directions against {@code EmptyBlockGetter} at {@code BlockPos.ZERO}; FULL
- * delegates to {@code getBlockSupportShape}. Those direction bits are emitted
- * as a separate mask table. Both tables are
+ * delegates to {@code getBlockSupportShape}. It also evaluates the full-face
+ * collision predicate used by {@code MultifaceBlock.canAttachTo}. Those
+ * direction bits are emitted as separate mask tables. All tables are
  * run-length encoded in id order, so the committed fixture stays small and the
  * output is byte-deterministic across runs (the probe's iteration order is
  * fixed). Anchors are printed as key=value lines + `PROBE OK` on success; the
@@ -94,14 +95,23 @@ public final class BlockBehaviourProbe {
         // default past the end, so the probe only iterates the valid range).
         JsonArray runs = new JsonArray();
         JsonArray faceSturdyRuns = new JsonArray();
+        JsonArray collisionFaceRuns = new JsonArray();
         int runStart = 0;
-        long runWord = behaviorWord(Block.stateById(0));
+        BlockState firstState = Block.stateById(0);
+        require(Block.getId(firstState) == 0, "state 0 resolves to " + Block.getId(firstState));
+        require(Block.stateById(Block.getId(firstState)) == firstState, "state 0 is not identity-stable");
+        long runWord = behaviorWord(firstState);
         int faceSturdyRunStart = 0;
-        int faceSturdyMask = faceSturdyMask(Block.stateById(0));
+        int faceSturdyMask = faceSturdyMask(firstState);
+        int collisionFaceRunStart = 0;
+        int collisionFaceMask = collisionFaceMask(firstState);
         int runCount = 0;
         int faceSturdyRunCount = 0;
+        int collisionFaceRunCount = 0;
         for (int id = 1; id < count; id++) {
             BlockState state = Block.stateById(id);
+            require(Block.getId(state) == id, "state " + id + " resolves to " + Block.getId(state));
+            require(Block.stateById(Block.getId(state)) == state, "state " + id + " is not identity-stable");
             long word = behaviorWord(state);
             if (word != runWord) {
                 runs.add(run(runStart, id - runStart, runWord));
@@ -116,13 +126,23 @@ public final class BlockBehaviourProbe {
                 faceSturdyRunStart = id;
                 faceSturdyMask = mask;
             }
+            int collisionMask = collisionFaceMask(state);
+            if (collisionMask != collisionFaceMask) {
+                collisionFaceRuns.add(maskRun(collisionFaceRunStart, id - collisionFaceRunStart, collisionFaceMask));
+                collisionFaceRunCount++;
+                collisionFaceRunStart = id;
+                collisionFaceMask = collisionMask;
+            }
         }
         runs.add(run(runStart, count - runStart, runWord));
         runCount++;
         faceSturdyRuns.add(maskRun(faceSturdyRunStart, count - faceSturdyRunStart, faceSturdyMask));
         faceSturdyRunCount++;
+        collisionFaceRuns.add(maskRun(collisionFaceRunStart, count - collisionFaceRunStart, collisionFaceMask));
+        collisionFaceRunCount++;
         println("run_count=" + runCount);
         println("face_sturdy_run_count=" + faceSturdyRunCount);
+        println("collision_face_run_count=" + collisionFaceRunCount);
 
         JsonObject root = new JsonObject();
         root.addProperty("generator",
@@ -131,6 +151,7 @@ public final class BlockBehaviourProbe {
         root.addProperty("state_count", count);
         root.add("runs", runs);
         root.add("face_sturdy_runs", faceSturdyRuns);
+        root.add("collision_face_runs", collisionFaceRuns);
         Gson gson = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
         try (PrintWriter writer = new PrintWriter(output, "UTF-8")) {
             gson.toJson(root, writer);
@@ -147,6 +168,8 @@ public final class BlockBehaviourProbe {
         println("torch=" + behaviorWord(Block.stateById(Block.getId(Blocks.TORCH.defaultBlockState()))));
         println("stone_face_sturdy_mask=" + faceSturdyMask(Blocks.STONE.defaultBlockState()));
         println("oak_slab_face_sturdy_mask=" + faceSturdyMask(Blocks.OAK_SLAB.defaultBlockState()));
+        println("oak_leaves_collision_face_mask=" + collisionFaceMask(Blocks.OAK_LEAVES.defaultBlockState()));
+        println("glass_collision_face_mask=" + collisionFaceMask(Blocks.GLASS.defaultBlockState()));
 
         println("PROBE OK");
     }
@@ -178,6 +201,18 @@ public final class BlockBehaviourProbe {
         for (Direction direction : Direction.values()) {
             if (SupportType.FULL.isSupporting(
                     state, EmptyBlockGetter.INSTANCE, BlockPos.ZERO, direction)) {
+                mask |= 1 << direction.ordinal();
+            }
+        }
+        return mask;
+    }
+
+    /** Evaluate the full collision face predicate used by MultifaceBlock. */
+    private static int collisionFaceMask(BlockState state) {
+        int mask = 0;
+        for (Direction direction : Direction.values()) {
+            if (Block.isFaceFull(
+                    state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO), direction)) {
                 mask |= 1 << direction.ordinal();
             }
         }

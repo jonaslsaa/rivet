@@ -7,7 +7,7 @@
 //! through its cached accessors) and asserts, against the running JVM, that a
 //! fresh dump is byte-identical to the committed fixture and that every anchor
 //! the probe documents (state_count 32366, run_count, the representative
-//! behavior words, and the representative FULL-face masks) is present with
+//! behavior words, and the representative support/collision face masks) is present with
 //! the pinned state_count. The anchor *values* are not re-checked here — a probe
 //! bit-packing bug would reproduce consistently — so they are pinned
 //! independently by the word-level, face-mask, and field-level decode tests in
@@ -29,6 +29,7 @@ const ANCHORS: &[&str] = &[
     "state_count",
     "run_count",
     "face_sturdy_run_count",
+    "collision_face_run_count",
     "air",
     "stone",
     "water",
@@ -38,6 +39,8 @@ const ANCHORS: &[&str] = &[
     "torch",
     "stone_face_sturdy_mask",
     "oak_slab_face_sturdy_mask",
+    "oak_leaves_collision_face_mask",
+    "glass_collision_face_mask",
 ];
 
 pub fn run(bundler_flag: Option<&Path>) -> Result<()> {
@@ -107,6 +110,12 @@ fn check_probe_stdout(out: &str) -> Result<()> {
             probes.get("face_sturdy_run_count")
         );
     }
+    if probes.get("collision_face_run_count") != Some(&"3506") {
+        bail!(
+            "probe collision_face_run_count = {:?} but the pinned Paper table expects 3506",
+            probes.get("collision_face_run_count")
+        );
+    }
     Ok(())
 }
 
@@ -125,6 +134,7 @@ mod tests {
                     match *k {
                         "state_count" => format!("{k}=32366"),
                         "face_sturdy_run_count" => format!("{k}=3504"),
+                        "collision_face_run_count" => format!("{k}=3506"),
                         _ => format!("{k}=1"),
                     }
                 })

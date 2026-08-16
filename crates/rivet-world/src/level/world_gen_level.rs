@@ -111,6 +111,16 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
         state.is_face_sturdy(*direction)
     }
 
+    /// `MultifaceBlock.canAttachTo` — a neighbour is attachable when either
+    /// its support shape or collision shape fills the face toward the
+    /// multiface block. The state tables carry both exact cached masks.
+    ///
+    /// RivetTodo(#232): a concrete world may override this seam when dynamic
+    /// shape context lands.
+    fn can_attach_to(&self, _pos: &BlockPos, state: &BlockState, direction: &Direction) -> bool {
+        state.can_attach_to(*direction)
+    }
+
     /// `BlockBehaviour.BlockStateBase.canSurvive(BlockGetter, BlockPos)` — the
     /// survival seam the `WouldSurvivePredicate` consumes
     /// (`state.canSurvive(level, origin.offset(offset))`).
