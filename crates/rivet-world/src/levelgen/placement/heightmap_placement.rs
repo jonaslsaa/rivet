@@ -41,7 +41,7 @@ impl HeightmapPlacement {
 impl PlacementModifier for HeightmapPlacement {
     fn get_positions<'a, R: RandomSource>(
         &'a self,
-        context: &PlacementContext,
+        context: &mut PlacementContext,
         _random: &mut R,
         origin: &BlockPos,
     ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {

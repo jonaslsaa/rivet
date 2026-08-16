@@ -59,7 +59,7 @@ impl HeightRangePlacement {
 impl PlacementModifier for HeightRangePlacement {
     fn get_positions<'a, R: RandomSource>(
         &'a self,
-        context: &PlacementContext,
+        context: &mut PlacementContext,
         random: &mut R,
         origin: &BlockPos,
     ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
@@ -162,8 +162,10 @@ mod tests {
     ) -> Vec<BlockPos> {
         let mut level = TestLevel(create(-64, 384));
         let generator = NoopGenerator;
-        let context = PlacementContext::new(&mut level, &generator, None);
-        modifier.get_positions(&context, random, origin).collect()
+        let mut context = PlacementContext::new(&mut level, &generator, None);
+        modifier
+            .get_positions(&mut context, random, origin)
+            .collect()
     }
 
     #[test]

@@ -160,8 +160,8 @@ impl PlacedFeature {
         }
         let modifier = &self.placement[index];
         let positions = {
-            let context = PlacementContext::new(level, generator, Some(self));
-            placement_get_positions(modifier.as_ref(), &context, random, &pos)
+            let mut context = PlacementContext::new(level, generator, Some(self));
+            placement_get_positions(modifier.as_ref(), &mut context, random, &pos)
         };
         for child in positions {
             self.select_walk(index + 1, child, level, generator, random, selected);
@@ -235,9 +235,9 @@ impl PlacedFeature {
     ///
     /// The `PlacementContext` is reconstructed per expansion rather than once
     /// (as Java constructs it): the context borrows the level mutably and
-    /// placement writes through the same `level` reference, and the context is a
-    /// pure read-only window over `(level, generator, top_feature)`, so every
-    /// reconstruction is behaviorally identical to Java's single context.
+    /// placement writes and lazy heightmap priming use the same `level`
+    /// reference, so every reconstruction is behaviorally identical to Java's
+    /// single context.
     #[allow(clippy::too_many_arguments)] // the resolved-feature `&` + the `place`-signature params
     fn place_walk<R: RandomSource>(
         &self,
@@ -263,8 +263,8 @@ impl PlacedFeature {
         }
         let modifier = &self.placement[index];
         let positions = {
-            let context = PlacementContext::new(level, generator, top_feature);
-            placement_get_positions(modifier.as_ref(), &context, random, &pos)
+            let mut context = PlacementContext::new(level, generator, top_feature);
+            placement_get_positions(modifier.as_ref(), &mut context, random, &pos)
         };
         for child in positions {
             self.place_walk(
