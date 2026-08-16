@@ -102,16 +102,17 @@
 //! `custom_spawn_rules`/`equipment` that is not a compound also fails the decode,
 //! but the error retains an entity-only partial `SpawnData`, so `save` writes it
 //! with only the malformed optional key removed. The port mirrors both
-//! observable outputs and surfaces every drop as a distinct
-//! [`BlockEntityMaterializeDiagnostic`] so it is never silent. The outer shape
-//! of each `SpawnData` codec field is validated like Paper's non-lenient fields
-//! — `entity` is a required compound; a present
-//! `custom_spawn_rules`/`equipment` must be a compound or it is dropped from the
-//! carried `SpawnData`. The retained compounds are re-encoded at the codec
-//! boundary: malformed light-limit shapes use omitted defaults, out-of-range
-//! limits drop the optional field, valid limits use canonical interval forms,
-//! and equipment requires a valid `loot_table` plus numeric slot-drop values;
-//! all-slot equal chances collapse to the scalar form.
+//! observable outputs and surfaces every outer-field drop as a distinct
+//! [`BlockEntityMaterializeDiagnostic`]. The outer shape of each `SpawnData`
+//! codec field is validated like Paper's non-lenient fields — `entity` is a
+//! required compound; a present `custom_spawn_rules`/`equipment` must be a
+//! compound or it is dropped from the carried `SpawnData`. Unknown top-level
+//! fields are ignored by the record codec and therefore disappear on re-encode.
+//! The retained compounds are re-encoded at the codec boundary: malformed
+//! light-limit shapes use omitted defaults, out-of-range limits drop the
+//! optional field, malformed equipment map entries are omitted while valid
+//! partial entries survive, and all-slot equal chances collapse to the scalar
+//! form.
 //!
 //! ## Ordering
 //!
@@ -481,6 +482,7 @@ fn materialize_spawner_update_tag(
             None
         }
     };
+    validate_spawn_potentials(raw);
 
     // BaseSpawner.save (Paper's clamps), minus SpawnPotentials.
     let mut tag = CompoundTag::new();
@@ -519,52 +521,70 @@ fn materialize_spawner_update_tag(
 /// from the carried compound and returns it for the
 /// [`BlockEntityMaterializeDiagnostic::SpawnDataFieldDropped`] surface.
 /// Otherwise the compound is carried through the codec's canonical re-encode:
-/// light-limit intervals use their canonical form, malformed optional equipment
-/// is dropped, and the `SpawnData` record constructor normalizes `entity.id`
-/// (valid id rewritten canonically, invalid/absent/non-string id removed).
+/// unknown top-level fields are dropped, light-limit intervals use their
+/// canonical form, malformed equipment map entries are omitted while valid
+/// partial entries survive, and the `SpawnData` record constructor normalizes
+/// `entity.id` (valid id rewritten canonically, invalid/absent/non-string id
+/// removed).
 fn load_spawn_data(
     spawn_data: &CompoundTag,
 ) -> Result<(CompoundTag, Vec<&'static str>), &'static str> {
-    let Some(entity) = spawn_data.tags.get("entity") else {
+    let Some(entity) = spawn_data.get_compound("entity").cloned() else {
         return Err("SpawnData.entity");
     };
-    if !matches!(entity, Tag::Compound(_)) {
-        return Err("SpawnData.entity");
-    }
-    let mut out = spawn_data.clone();
+    let mut out = CompoundTag::new();
+    out.put("entity".to_string(), Tag::Compound(entity));
     let mut dropped = Vec::new();
-    if let Some(custom_spawn_rules) = out.tags.get("custom_spawn_rules")
-        && !matches!(custom_spawn_rules, Tag::Compound(_))
-    {
-        out.tags.shift_remove("custom_spawn_rules");
-        dropped.push("SpawnData.custom_spawn_rules");
-    }
-    if let Some(equipment) = out.tags.get("equipment")
-        && !matches!(equipment, Tag::Compound(_))
-    {
-        out.tags.shift_remove("equipment");
-        dropped.push("SpawnData.equipment");
-    }
-    if let Some(Tag::Compound(rules)) = out.tags.get_mut("custom_spawn_rules") {
-        match normalize_custom_spawn_rules(rules) {
-            Ok(normalized) => *rules = normalized,
-            Err(()) => {
-                out.tags.shift_remove("custom_spawn_rules");
-                dropped.push("SpawnData.custom_spawn_rules");
+    if let Some(value) = spawn_data.get("custom_spawn_rules") {
+        if let Tag::Compound(rules) = value {
+            match normalize_custom_spawn_rules(rules) {
+                Ok(normalized) => {
+                    out.put("custom_spawn_rules".to_string(), Tag::Compound(normalized));
+                }
+                Err(()) => dropped.push("SpawnData.custom_spawn_rules"),
             }
+        } else {
+            dropped.push("SpawnData.custom_spawn_rules");
         }
     }
-    if let Some(Tag::Compound(equipment)) = out.tags.get_mut("equipment") {
-        let normalized = normalize_equipment(equipment);
-        if let Some(normalized) = normalized {
-            *equipment = normalized;
+    if let Some(value) = spawn_data.get("equipment") {
+        if let Tag::Compound(equipment) = value {
+            if let Some(normalized) = normalize_equipment(equipment) {
+                out.put("equipment".to_string(), Tag::Compound(normalized));
+            } else {
+                dropped.push("SpawnData.equipment");
+            }
         } else {
-            out.tags.shift_remove("equipment");
             dropped.push("SpawnData.equipment");
         }
     }
     normalize_spawn_data_entity_id(out.tags.get_mut("entity"));
     Ok((out, dropped))
+}
+
+fn validate_spawn_potentials(raw: &CompoundTag) {
+    let Some(Tag::List(list)) = raw.get("SpawnPotentials") else {
+        return;
+    };
+    let mut total = 0_i64;
+    for entry in &list.list {
+        let Tag::Compound(entry) = entry else {
+            continue;
+        };
+        let Some(weight) = entry.get_int("weight").filter(|weight| *weight >= 0) else {
+            continue;
+        };
+        let Some(data) = entry.get_compound("data") else {
+            continue;
+        };
+        if load_spawn_data(data).is_err() {
+            continue;
+        }
+        total += i64::from(weight);
+        if total > i64::from(i32::MAX) {
+            panic!("Sum of weights must be <= 2147483647");
+        }
+    }
 }
 
 fn normalize_custom_spawn_rules(rules: &CompoundTag) -> Result<CompoundTag, ()> {
@@ -644,9 +664,11 @@ fn normalize_slot_drop_chances(value: &Tag) -> Result<Option<Tag>, ()> {
     let mut values = Vec::with_capacity(chances.size());
     for (slot, chance) in chances.entry_set() {
         if !SLOTS.contains(&slot.as_str()) {
-            return Err(());
+            continue;
         }
-        let chance = chance.as_float().ok_or(())?;
+        let Some(chance) = chance.as_float() else {
+            continue;
+        };
         values.push(chance);
         normalized.put(slot.clone(), Tag::Float(FloatTag::value_of(chance)));
     }
@@ -1191,6 +1213,84 @@ mod tests {
             panic!("equal slot chances should use the scalar form")
         };
         assert_eq!(chance.value.to_bits(), 0x7fc0_1234);
+    }
+
+    #[test]
+    fn spawner_equipment_keeps_valid_partial_slot_drop_chances() {
+        let mut tag = spawner_tag();
+        let mut spawn_data = tag
+            .get_compound("SpawnData")
+            .expect("spawn data present")
+            .clone();
+        let mut equipment = CompoundTag::new();
+        equipment.put_string("loot_table", "minecraft:chest");
+        let mut chances = CompoundTag::new();
+        chances.put_float("mainhand", 0.5);
+        chances.put_string("offhand", "malformed");
+        chances.put_float("bogus", 0.75);
+        equipment.put("slot_drop_chances".to_string(), Tag::Compound(chances));
+        spawn_data.put("equipment".to_string(), Tag::Compound(equipment));
+        tag.tags
+            .insert("SpawnData".to_string(), Tag::Compound(spawn_data));
+
+        let (info, diagnostics) = materialize_entry(&resolved_outcome(tag));
+        assert!(diagnostics.is_empty());
+        let equipment = info
+            .expect("spawner materializes")
+            .tag()
+            .unwrap()
+            .get_compound("SpawnData")
+            .unwrap()
+            .get_compound("equipment")
+            .cloned()
+            .expect("equipment retained");
+        let chances = equipment
+            .get_compound("slot_drop_chances")
+            .expect("valid partial chance map retained");
+        assert_eq!(chances.get_float("mainhand"), Some(0.5));
+        assert!(chances.get("offhand").is_none());
+        assert!(chances.get("bogus").is_none());
+    }
+
+    #[test]
+    fn spawner_unknown_spawn_data_fields_are_dropped_on_reencode() {
+        let mut tag = spawner_tag();
+        let mut spawn_data = tag
+            .get_compound("SpawnData")
+            .expect("spawn data present")
+            .clone();
+        spawn_data.put_int("unknown_spawn_data_field", 9);
+        tag.tags
+            .insert("SpawnData".to_string(), Tag::Compound(spawn_data));
+
+        let (info, diagnostics) = materialize_entry(&resolved_outcome(tag));
+        assert!(diagnostics.is_empty());
+        let spawn_data = info
+            .expect("spawner materializes")
+            .tag()
+            .unwrap()
+            .get_compound("SpawnData")
+            .cloned()
+            .expect("SpawnData retained");
+        assert!(spawn_data.get("unknown_spawn_data_field").is_none());
+        assert!(spawn_data.get_compound("entity").is_some());
+    }
+
+    #[test]
+    #[should_panic(expected = "Sum of weights must be <= 2147483647")]
+    fn spawn_potential_overflow_is_rejected_during_block_entity_materialization() {
+        let mut tag = spawner_tag();
+        let mut potentials = ListTag::new();
+        for weight in [i32::MAX, 1] {
+            let mut potential = CompoundTag::new();
+            potential.put_int("weight", weight);
+            let mut data = CompoundTag::new();
+            data.put("entity".to_string(), Tag::Compound(CompoundTag::new()));
+            potential.put("data".to_string(), Tag::Compound(data));
+            potentials.list.push(Tag::Compound(potential));
+        }
+        tag.put("SpawnPotentials".to_string(), Tag::List(potentials));
+        let _ = materialize_entry(&resolved_outcome(tag));
     }
 
     #[test]
