@@ -397,10 +397,9 @@ impl FeatureBehavior<NoneFeatureConfiguration> for MonsterRoomFeature {
         // Spawner — placed at the origin, then its spawn type is set only when
         // the block entity lookup succeeds. Java evaluates that lookup before
         // `randomEntityId`, so a blocked/non-spawner origin consumes no mob
-        // selection draw. `setEntityId` first calls
-        // `getOrCreateNextSpawnData`: an absent `SpawnData` with non-empty
-        // potentials consumes one weighted-list draw and clears the potentials
-        // after replacing the selected entry's id.
+        // selection draw. A fresh DUMMY spawner starts with no potential draw;
+        // a loaded spawner with non-empty potentials consumes one weighted-list
+        // draw before clearing them after replacing the selected entry's id.
         safe_set_block(
             level,
             &origin,
