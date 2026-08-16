@@ -210376,7 +210376,7 @@
       "support_center": 63,
       "support_rigid": 63,
       "collision_full": 63,
-      "occlusion_full": 63
+      "occlusion_full": 0
     },
     {
       "name": "shulker_open_up",
@@ -210387,7 +210387,7 @@
       "support_center": 1,
       "support_rigid": 1,
       "collision_full": 3,
-      "occlusion_full": 3
+      "occlusion_full": 0
     },
     {
       "name": "moving_piston_half_east",

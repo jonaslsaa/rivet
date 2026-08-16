@@ -326,6 +326,9 @@ public final class BlockBehaviourProbe {
     }
 
     private static int occlusionFaceMask(BlockState state) {
+        if (!state.canOcclude()) {
+            return 0;
+        }
         int mask = 0;
         for (Direction direction : Direction.values()) {
             if (Block.isShapeFullBlock(state.getFaceOcclusionShape(direction))) {
@@ -395,9 +398,12 @@ public final class BlockBehaviourProbe {
     }
 
     private static int occlusionFaceMask(BlockState state, FixtureGetter level, BlockPos pos) {
+        if (!state.canOcclude()) {
+            return 0;
+        }
         int mask = 0;
         for (Direction direction : Direction.values()) {
-            if (Block.isFaceFull(state.getShape(level, pos), direction)) {
+            if (Block.isShapeFullBlock(state.getFaceOcclusionShape(direction))) {
                 mask |= 1 << direction.ordinal();
             }
         }

@@ -42281,7 +42281,7 @@ pub static DYNAMIC_SHAPE_FIXTURES: &[DynamicShapeFixture] = &[
         support_center: 0x3F,
         support_rigid: 0x3F,
         collision_full: 0x3F,
-        occlusion_full: 0x3F,
+        occlusion_full: 0x00,
     },
     DynamicShapeFixture {
         name: "shulker_open_up",
@@ -42292,7 +42292,7 @@ pub static DYNAMIC_SHAPE_FIXTURES: &[DynamicShapeFixture] = &[
         support_center: 0x01,
         support_rigid: 0x01,
         collision_full: 0x03,
-        occlusion_full: 0x03,
+        occlusion_full: 0x00,
     },
     DynamicShapeFixture {
         name: "moving_piston_half_east",

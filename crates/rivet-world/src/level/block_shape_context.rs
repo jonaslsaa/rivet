@@ -144,15 +144,20 @@ impl ShapeGeometry {
     }
 
     fn face_supports_rigid(&self, direction: Direction) -> bool {
-        covers(
-            &self.face_rects(direction),
-            &[
-                FaceRect::new(0.0, 0.0, 2.0, 16.0),
-                FaceRect::new(14.0, 0.0, 16.0, 16.0),
-                FaceRect::new(2.0, 0.0, 14.0, 2.0),
-                FaceRect::new(2.0, 14.0, 14.0, 16.0),
-            ],
-        )
+        match direction {
+            Direction::Down | Direction::Up => covers(
+                &self.face_rects(direction),
+                &[
+                    FaceRect::new(0.0, 0.0, 2.0, 16.0),
+                    FaceRect::new(14.0, 0.0, 16.0, 16.0),
+                    FaceRect::new(2.0, 0.0, 14.0, 2.0),
+                    FaceRect::new(2.0, 14.0, 14.0, 16.0),
+                ],
+            ),
+            Direction::North | Direction::South | Direction::West | Direction::East => {
+                covers(&self.face_rects(direction), &[FaceRect::full()])
+            }
+        }
     }
 }
 
@@ -341,6 +346,7 @@ pub enum ShapeQueryError {
     DynamicShapeContextUnavailable,
     DynamicShapeContextMissing { pos: BlockPos },
     DynamicShapeContextStateMismatch,
+    DynamicShapeUnsupported,
 }
 
 impl fmt::Display for ShapeQueryError {
@@ -356,6 +362,12 @@ impl fmt::Display for ShapeQueryError {
                 write!(
                     f,
                     "dynamic block shape context does not match the block state"
+                )
+            }
+            Self::DynamicShapeUnsupported => {
+                write!(
+                    f,
+                    "dynamic block shape family is not supported in this slice"
                 )
             }
         }
@@ -481,25 +493,27 @@ impl BlockShapeContext for DetachedShapeContext {
             .entries
             .get(pos)
             .ok_or(ShapeQueryError::DynamicShapeContextMissing { pos: *pos })?;
-        match entry {
-            DetachedShape::Shulker(shape) if is_shulker_box(state) => {
-                let state_facing = shulker_state_facing(*state)
-                    .ok_or(ShapeQueryError::DynamicShapeContextStateMismatch)?;
-                if state_facing != shape.facing {
-                    return Err(ShapeQueryError::DynamicShapeContextStateMismatch);
-                }
-                Ok(shulker_query(ShulkerBoxShape {
-                    facing: state_facing,
-                    ..*shape
-                }))
+        if is_shulker_box(state) {
+            let DetachedShape::Shulker(shape) = entry else {
+                return Err(ShapeQueryError::DynamicShapeContextStateMismatch);
+            };
+            let state_facing = shulker_state_facing(*state)
+                .ok_or(ShapeQueryError::DynamicShapeContextStateMismatch)?;
+            if state_facing != shape.facing {
+                return Err(ShapeQueryError::DynamicShapeContextStateMismatch);
             }
-            DetachedShape::MovingPiston(shape)
-                if state.block().name() == "minecraft:moving_piston" =>
-            {
-                Ok(moving_piston_query(shape))
-            }
-            _ => Err(ShapeQueryError::DynamicShapeContextStateMismatch),
+            return Ok(shulker_query(ShulkerBoxShape {
+                facing: state_facing,
+                ..*shape
+            }));
         }
+        if is_moving_piston(state) {
+            let DetachedShape::MovingPiston(shape) = entry else {
+                return Err(ShapeQueryError::DynamicShapeContextStateMismatch);
+            };
+            return Ok(moving_piston_query(shape));
+        }
+        Err(ShapeQueryError::DynamicShapeUnsupported)
     }
 }
 
@@ -526,6 +540,28 @@ fn is_shulker_box(state: &BlockState) -> bool {
     )
 }
 
+fn is_moving_piston(state: &BlockState) -> bool {
+    state.block().name() == "minecraft:moving_piston"
+}
+
+pub(crate) fn dynamic_shape_fallback(state: &BlockState) -> Option<ShapeQuery> {
+    if is_shulker_box(state) {
+        return Some(ShapeQuery::from_geometries(
+            &ShapeGeometry::block(),
+            &ShapeGeometry::block(),
+            &ShapeGeometry::empty(),
+        ));
+    }
+    if is_moving_piston(state) {
+        return Some(ShapeQuery::from_geometries(
+            &ShapeGeometry::empty(),
+            &ShapeGeometry::empty(),
+            &ShapeGeometry::empty(),
+        ));
+    }
+    None
+}
+
 fn shulker_state_facing(state: BlockState) -> Option<Direction> {
     let PropertyValue::Enum(name) = state.get_value(BlockStateProperties::FACING)? else {
         return None;
@@ -542,7 +578,7 @@ fn shulker_query(shape: ShulkerBoxShape) -> ShapeQuery {
     } else {
         thin_support(shape.facing.get_opposite())
     };
-    ShapeQuery::from_geometries(&support, &collision, &collision)
+    ShapeQuery::from_geometries(&support, &collision, &ShapeGeometry::empty())
 }
 
 fn shulker_collision_geometry(shape: ShulkerBoxShape) -> ShapeGeometry {
@@ -632,6 +668,8 @@ mod tests {
         assert!(!ring_query.is_supporting(SupportType::Full, Direction::Up));
         assert!(!ring_query.is_supporting(SupportType::Center, Direction::Up));
         assert!(ring_query.is_supporting(SupportType::Rigid, Direction::Up));
+        assert!(!center_query.is_supporting(SupportType::Rigid, Direction::North));
+        assert!(full_query.is_supporting(SupportType::Rigid, Direction::North));
     }
 
     #[test]
@@ -716,8 +754,28 @@ mod tests {
     }
 
     #[test]
-    fn dyed_shulker_variants_use_dynamic_shape_context() {
+    fn moving_piston_uses_dynamic_shape_context() {
+        let pos = BlockPos::new(0, 0, 0);
+        let state = BlockState::of(
+            rivet_registry::generated::blocks::BlockId::from_name("minecraft:moving_piston")
+                .unwrap(),
+        )
+        .set_value(BlockStateProperties::FACING, Direction::East)
+        .unwrap();
+        let shape = MovingPistonShape::new(ShapeGeometry::block(), Direction::East, true, 0.5);
+        let mut context = DetachedShapeContext::default();
+        context.insert_moving_piston(pos, shape.clone());
+
+        assert_eq!(
+            context.shape_query(&state, &pos),
+            Ok(moving_piston_query(&shape))
+        );
+    }
+
+    #[test]
+    fn all_shulker_variants_use_dynamic_shape_context() {
         let names = [
+            "minecraft:shulker_box",
             "minecraft:white_shulker_box",
             "minecraft:orange_shulker_box",
             "minecraft:magenta_shulker_box",
@@ -802,18 +860,32 @@ mod tests {
     }
 
     #[test]
-    fn detached_fixtures_match_paper_probe_masks() {
+    fn detached_fixtures_match_paper_probe_masks_and_states() {
+        let shulker_state = BlockState::of(
+            rivet_registry::generated::blocks::BlockId::from_name("minecraft:shulker_box").unwrap(),
+        )
+        .set_value(BlockStateProperties::FACING, Direction::Up)
+        .unwrap();
+        let moving_state = BlockState::of(
+            rivet_registry::generated::blocks::BlockId::from_name("minecraft:moving_piston")
+                .unwrap(),
+        )
+        .set_value(BlockStateProperties::FACING, Direction::East)
+        .unwrap();
         let fixtures = [
             (
                 "shulker_closed_up",
+                shulker_state,
                 shulker_query(ShulkerBoxShape::closed(Direction::Up)),
             ),
             (
                 "shulker_open_up",
+                shulker_state,
                 shulker_query(ShulkerBoxShape::open(Direction::Up)),
             ),
             (
                 "moving_piston_half_east",
+                moving_state,
                 moving_piston_query(&MovingPistonShape::new(
                     ShapeGeometry::block(),
                     Direction::East,
@@ -823,6 +895,7 @@ mod tests {
             ),
             (
                 "moving_piston_start_east",
+                moving_state,
                 moving_piston_query(&MovingPistonShape::new(
                     ShapeGeometry::block(),
                     Direction::East,
@@ -831,10 +904,12 @@ mod tests {
                 )),
             ),
         ];
-        for (name, query) in fixtures {
+        for (name, state, query) in fixtures {
             let fixture = rivet_registry::generated::block_behaviors::dynamic_shape_fixture(name)
                 .expect("fixture emitted by the pinned Paper probe");
             assert!(fixture.dynamic);
+            assert_eq!(fixture.block, state.block().name(), "{name}");
+            assert_eq!(fixture.state_id, state.id(), "{name}");
             assert_eq!(query.support_full_mask(), fixture.support_full, "{name}");
             assert_eq!(
                 query.support_center_mask(),
