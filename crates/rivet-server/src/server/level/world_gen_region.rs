@@ -83,6 +83,7 @@ use rivet_util::util::log_and_pause_if_in_ide;
 use rivet_world::biome::biome_manager::{BiomeManager, NoiseBiomeSource};
 use rivet_world::block::blocks::Blocks;
 use rivet_world::chunk::chunk_access::ChunkAccess;
+use rivet_world::chunk::proto_chunk::ProtoChunk;
 use rivet_world::chunk::status::{ChunkStatus, ChunkStep};
 use rivet_world::chunk::storage::chunk_reconstruction::resolve_state_flags;
 use rivet_world::chunk::storage::section_reconstruction::BiomeId as WorldgenBiomeId;
@@ -601,154 +602,6 @@ where
     }
 }
 
-impl<'a, B, S> WorldGenRegion<'a, BlockState, B, S>
-where
-    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
-    S: Eq + std::hash::Hash + Send,
-{
-    fn is_within_write_zone_worldgen(&self, pos: &BlockPos) -> bool {
-        mth::abs_i32(
-            self.center_chunk_x
-                .wrapping_sub(SectionPos::block_to_section_coord(pos.get_x())),
-        ) <= self.write_radius
-            && mth::abs_i32(
-                self.center_chunk_z
-                    .wrapping_sub(SectionPos::block_to_section_coord(pos.get_z())),
-            ) <= self.write_radius
-    }
-
-    fn ensure_can_write_worldgen(&self, pos: &BlockPos) -> bool {
-        if !self.is_within_write_zone_worldgen(pos) {
-            let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
-            let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
-            log_and_pause_if_in_ide(&format!(
-                "Detected setBlock in a far chunk [{}, {}], pos: {:?}, status: {}",
-                chunk_x,
-                chunk_z,
-                pos,
-                self.generating_step.target_status().serialization_name()
-            ));
-            return false;
-        }
-        true
-    }
-
-    fn warn_if_read_outside_write_zone_worldgen(&self, chunk_x: i32, chunk_z: i32) {
-        if (self.center_chunk_x != chunk_x || self.center_chunk_z != chunk_z)
-            && (mth::abs_i32(self.center_chunk_x.wrapping_sub(chunk_x)) > self.write_radius
-                || mth::abs_i32(self.center_chunk_z.wrapping_sub(chunk_z)) > self.write_radius)
-        {
-            let read_distance = mth::abs_max(
-                mth::abs_i32(self.center_chunk_x.wrapping_sub(chunk_x)),
-                mth::abs_i32(self.center_chunk_z.wrapping_sub(chunk_z)),
-            );
-            log_and_pause_if_in_ide(&format!(
-                "Detected unsafe terrain read during worldgen: reading from chunk [{}, {}] while generating chunk [{}, {}] (distance: {}, write radius: {}), step: {}",
-                chunk_x,
-                chunk_z,
-                self.center_chunk_x,
-                self.center_chunk_z,
-                read_distance,
-                self.write_radius,
-                self.generating_step.target_status().serialization_name()
-            ));
-        }
-    }
-
-    fn materialize_block_entity(&mut self, pos: &BlockPos, state: BlockState) {
-        if state.block() == Blocks::CHEST.id() {
-            if !matches!(
-                self.block_entities.get(pos),
-                Some(WorldgenBlockEntity::Chest { .. })
-            ) {
-                self.block_entities
-                    .insert(*pos, WorldgenBlockEntity::Chest { loot: None });
-            }
-        } else if state.block() == Blocks::SPAWNER.id() {
-            if !matches!(
-                self.block_entities.get(pos),
-                Some(WorldgenBlockEntity::Spawner { .. })
-            ) {
-                self.block_entities.insert(
-                    *pos,
-                    WorldgenBlockEntity::Spawner {
-                        next_spawn: None,
-                        spawn_potentials: Vec::new(),
-                    },
-                );
-            }
-        } else {
-            self.block_entities.remove(pos);
-        }
-    }
-
-    fn set_block_worldgen(&mut self, pos: &BlockPos, state: BlockState, flags: u32) -> bool {
-        if !self.ensure_can_write_worldgen(pos) {
-            return false;
-        }
-        let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
-        let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
-        let persisted_status = self.cache.get(chunk_x, chunk_z).get_persisted_status();
-        let chunk = self.get_chunk_mut(chunk_x, chunk_z);
-        if !chunk.is_outside_build_height(pos.get_y()) {
-            let section_index = chunk.get_section_index(pos.get_y());
-            let section = chunk.get_section_mut(section_index as usize);
-            section.set_block_state(
-                pos.get_x() & 15,
-                pos.get_y() & 15,
-                pos.get_z() & 15,
-                state,
-                &|state| resolve_state_flags(state).is_air,
-                &|state| state.is_in_tag("minecraft:randomly_ticking"),
-                &|state| state.fluid_id() == 0,
-                &|_| false,
-                &|_| false,
-            );
-            if let Some(status) = persisted_status {
-                chunk.update_heightmaps_after(
-                    status.heightmaps_after(),
-                    pos.get_x() & 15,
-                    pos.get_y(),
-                    pos.get_z() & 15,
-                    resolve_state_flags(&state),
-                );
-            }
-        }
-        self.materialize_block_entity(pos, state);
-        let _ = flags;
-        true
-    }
-
-    fn get_block_state_worldgen(&self, pos: &BlockPos) -> BlockState {
-        let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
-        let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
-        self.warn_if_read_outside_write_zone_worldgen(chunk_x, chunk_z);
-        let chunk = self.get_chunk(chunk_x, chunk_z);
-        if chunk.is_outside_build_height(pos.get_y()) {
-            return BlockState::of(BlockId(794));
-        }
-        let section = chunk.get_section(chunk.get_section_index(pos.get_y()) as usize);
-        if section.non_empty_block_count() == 0 {
-            return BlockState::of(BlockId(0));
-        }
-        section.get_block_state(pos.get_x() & 15, pos.get_y() & 15, pos.get_z() & 15)
-    }
-}
-
-impl<B, S> LevelHeightAccessor for WorldGenRegion<'_, BlockState, B, S>
-where
-    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
-    S: Eq + std::hash::Hash + Send,
-{
-    fn get_height(&self) -> i32 {
-        self.height
-    }
-
-    fn get_min_y(&self) -> i32 {
-        self.min_y
-    }
-}
-
 /// The dense server specialization — the block-state methods and the
 /// [`WorldGenLevel`] facade over the server's dense chunk value types.
 ///
@@ -893,122 +746,6 @@ impl LevelHeightAccessor for WorldGenRegion<'_, StateId, ServerBiomeId, Structur
 
     fn get_min_y(&self) -> i32 {
         self.min_y
-    }
-}
-
-/// The worldgen `WorldGenLevel` facade over the composed region. The trait no
-/// longer carries a `'static` bound: Java's FEATURES call operates on the
-/// executor-scoped center-chunk borrow, and the Rust trait now follows that
-/// lifetime instead of excluding the production composition.
-impl<'a, B, S> WorldGenLevel for WorldGenRegion<'a, BlockState, B, S>
-where
-    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
-    S: Eq + std::hash::Hash + Send,
-{
-    fn get_seed(&self) -> i64 {
-        self.seed
-    }
-
-    fn ensure_can_write(&self, pos: &BlockPos) -> bool {
-        self.ensure_can_write_worldgen(pos)
-    }
-
-    fn set_block(&mut self, pos: &BlockPos, state: BlockState, flags: u32) -> bool {
-        self.set_block_worldgen(pos, state, flags)
-    }
-
-    fn destroy_block(&mut self, pos: &BlockPos, _drop: bool) -> bool {
-        !self.get_block_state_worldgen(pos).is_air()
-            && self.set_block_worldgen(pos, BlockState::of(BlockId(0)), UPDATE_ALL as u32)
-    }
-
-    fn registry_access(&self) -> RegistryAccess {
-        self.registry_access.clone()
-    }
-
-    fn get_block_state(&self, pos: &BlockPos) -> BlockState {
-        self.get_block_state_worldgen(pos)
-    }
-
-    fn get_biome(&self, pos: &BlockPos) -> Holder<BiomeId> {
-        self.get_biome_manager().get_biome(pos)
-    }
-
-    fn get_height_at(&self, ty: Types, x: i32, z: i32) -> i32 {
-        let chunk_x = SectionPos::block_to_section_coord(x);
-        let chunk_z = SectionPos::block_to_section_coord(z);
-        self.warn_if_read_outside_write_zone_worldgen(chunk_x, chunk_z);
-        let chunk = self.get_chunk(chunk_x, chunk_z);
-        match chunk.heightmaps()[ty as usize].as_ref() {
-            Some(heightmap) => heightmap.get_height_at(x & 15, z & 15, chunk.get_min_y()) + 1,
-            None => chunk.get_min_y() + 1,
-        }
-    }
-
-    fn is_empty_block(&self, pos: &BlockPos) -> bool {
-        self.get_block_state_worldgen(pos).is_air()
-    }
-
-    fn get_sea_level(&self) -> i32 {
-        self.sea_level
-    }
-
-    fn mark_pos_for_post_processing(&mut self, pos: &BlockPos) {
-        let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
-        let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
-        self.get_chunk_mut(chunk_x, chunk_z)
-            .mark_pos_for_post_processing(pos);
-    }
-
-    fn is_randomizable_container(&self, pos: &BlockPos) -> bool {
-        matches!(
-            self.block_entities.get(pos),
-            Some(WorldgenBlockEntity::Chest { .. })
-        )
-    }
-
-    fn set_block_entity_loot_table(&mut self, pos: &BlockPos, seed: i64, loot_table: &str) {
-        if let Some(WorldgenBlockEntity::Chest { loot }) = self.block_entities.get_mut(pos) {
-            *loot = Some((seed, loot_table.to_string()));
-        }
-    }
-
-    fn is_spawner_block_entity(&self, pos: &BlockPos) -> bool {
-        matches!(
-            self.block_entities.get(pos),
-            Some(WorldgenBlockEntity::Spawner { .. })
-        )
-    }
-
-    fn spawner_potential_weight(&self, pos: &BlockPos) -> Option<i32> {
-        match self.block_entities.get(pos) {
-            Some(WorldgenBlockEntity::Spawner {
-                next_spawn: None,
-                spawn_potentials,
-            }) if !spawn_potentials.is_empty() => {
-                Some(spawn_potentials.iter().map(|(_, weight)| *weight).sum())
-            }
-            _ => None,
-        }
-    }
-
-    fn set_spawner_entity(&mut self, pos: &BlockPos, entity_id: &str, potential_roll: Option<i32>) {
-        if let Some(WorldgenBlockEntity::Spawner {
-            next_spawn,
-            spawn_potentials,
-        }) = self.block_entities.get_mut(pos)
-        {
-            if let Some(mut roll) = potential_roll {
-                for (_, weight) in spawn_potentials.iter() {
-                    if roll < *weight {
-                        break;
-                    }
-                    roll -= *weight;
-                }
-            }
-            *next_spawn = Some(entity_id.to_string());
-            spawn_potentials.clear();
-        }
     }
 }
 
@@ -1650,6 +1387,58 @@ where
         status: ChunkStatus,
     ) -> Option<&mut ChunkAccess<T, B, S>> {
         self.status.is_or_after(status).then_some(&mut self.chunk)
+    }
+}
+
+/// A ring holder that preserves the concrete `ProtoChunk` alongside the base
+/// view exposed to `WorldGenRegion`. The persisted status and heightmaps stay
+/// on the same object the generation helpers produced; the region only borrows
+/// its base for feature reads and writes.
+pub struct OwnedProtoHolder<T, B, S>
+where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send,
+{
+    chunk: ProtoChunk<T, B, S>,
+}
+
+impl<T, B, S> OwnedProtoHolder<T, B, S>
+where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send,
+{
+    pub fn new(chunk: ProtoChunk<T, B, S>) -> Self {
+        OwnedProtoHolder { chunk }
+    }
+}
+
+impl<T, B, S> GenerationChunkHolderView<T, B, S> for OwnedProtoHolder<T, B, S>
+where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send,
+{
+    fn get_chunk_if_present_unchecked(&self, status: ChunkStatus) -> Option<&ChunkAccess<T, B, S>> {
+        self.chunk
+            .get_persisted_status()
+            .is_or_after(status)
+            .then_some(self.chunk.base())
+    }
+
+    fn get_persisted_status(&self) -> Option<ChunkStatus> {
+        Some(self.chunk.get_persisted_status())
+    }
+
+    fn get_chunk_if_present_unchecked_mut(
+        &mut self,
+        status: ChunkStatus,
+    ) -> Option<&mut ChunkAccess<T, B, S>> {
+        self.chunk
+            .get_persisted_status()
+            .is_or_after(status)
+            .then_some(self.chunk.base_mut())
     }
 }
 
