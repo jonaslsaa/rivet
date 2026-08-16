@@ -525,7 +525,8 @@ impl FeatureId {
 /// `CompositeFeatureConfiguration`), `random_boolean_selector` (id 55,
 /// `RandomBooleanSelectorFeature` over `RandomBooleanFeatureConfiguration`),
 /// and `sequence` (id 56, `SequenceFeature` over
-/// `CompositeFeatureConfiguration`) — and this wave
+/// `CompositeFeatureConfiguration`) — the seed-42 `underwater_magma` leaf
+/// (id 21) — and this wave
 /// (`mc.world.level.levelgen.feature.geology-cave-leaves`) the nine
 /// `.feature.geology*` leaves, in registry-id order: `spring_feature` (id 4),
 /// `spike` (id 12), `disk` (id 26), `lake` (id 27, the nested
@@ -1060,6 +1061,37 @@ mod tests {
             &origin,
         );
         assert!(placed);
+    }
+
+    /// The seed-42 `Feature.UNDERWATER_MAGMA` registration (id 21) reaches
+    /// the concrete behavior through the dispatch hub. A zero search range
+    /// makes the configured water origin fail the scan, so this test exercises
+    /// the id/config routing without depending on placement geometry.
+    #[test]
+    fn underwater_magma_dispatch_id_21_reaches_concrete_feature() {
+        let origin = BlockPos::new(0, 10, 0);
+        let mut level = crate::levelgen::feature::test_support::TestLevel::over(
+            crate::levelgen::feature::test_support::access(),
+        );
+        level.states.insert(
+            origin,
+            crate::block::blocks::Blocks::WATER.default_block_state(),
+        );
+        let generator = TestGenerator;
+        let mut random = LegacyRandomSource::new(1);
+        let config = UnderwaterMagmaConfiguration::new(0, 0, 1.0);
+
+        let placed = feature_place(
+            FeatureId::new(21),
+            &config,
+            &mut level,
+            &generator,
+            &mut random,
+            &origin,
+        );
+
+        assert!(!placed);
+        assert_eq!(level.reads.borrow().as_slice(), [origin, origin, origin]);
     }
 
     /// `ConfiguredFeature.place` routes through `feature_place` with the

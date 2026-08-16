@@ -7,9 +7,10 @@
 //! block arithmetic exactly.
 //!
 //! Java iterator-style surfaces (`withinManhattan`, `betweenClosed`,
-//! `neighborColumn`, `spiralAround`, `randomBetweenClosed`) are ported as
-//! materialized `Vec`s with the same iteration order (Java re-iterable
-//! `Iterable`s can be pulled again; Rivet returns one pass). `Rotation`,
+//! `neighborColumn`, `spiralAround`, `randomBetweenClosed`) are ported with
+//! the same iteration order. The existing collection-shaped helpers return
+//! materialized `Vec`s; `betweenClosed` also exposes a lazy iterator for
+//! stream-shaped callers. `Rotation`,
 //! `TraversalNodeStatus`, and `RandomSource` are in `core`/`rivet-util`.
 //!
 //! `CODEC` landed here (`Codec.INT_STREAM.comapFlatMap(Util::fixedSize(…, 3))
@@ -76,6 +77,57 @@ impl Ord for BlockPos {
 impl std::hash::Hash for BlockPos {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         state.write_i32(self.hash_code());
+    }
+}
+
+/// One-pass lazy `BlockPos.betweenClosed` traversal in Java's x-fastest order.
+struct BetweenClosedIterator {
+    min_x: i32,
+    min_y: i32,
+    min_z: i32,
+    width: i32,
+    height: i32,
+    end: i32,
+    index: i32,
+}
+
+impl BetweenClosedIterator {
+    fn new(min_x: i32, min_y: i32, min_z: i32, max_x: i32, max_y: i32, max_z: i32) -> Self {
+        let width = max_x.wrapping_sub(min_x).wrapping_add(1);
+        let height = max_y.wrapping_sub(min_y).wrapping_add(1);
+        let depth = max_z.wrapping_sub(min_z).wrapping_add(1);
+        let end = width.wrapping_mul(height).wrapping_mul(depth);
+        Self {
+            min_x,
+            min_y,
+            min_z,
+            width,
+            height,
+            end,
+            index: 0,
+        }
+    }
+}
+
+impl Iterator for BetweenClosedIterator {
+    type Item = BlockPos;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index == self.end {
+            return None;
+        }
+
+        let index = self.index;
+        self.index = self.index.wrapping_add(1);
+        let x = index % self.width;
+        let slice = index / self.width;
+        let y = slice % self.height;
+        let z = slice / self.height;
+        Some(BlockPos::new(
+            self.min_x.wrapping_add(x),
+            self.min_y.wrapping_add(y),
+            self.min_z.wrapping_add(z),
+        ))
     }
 }
 
@@ -497,6 +549,20 @@ impl BlockPos {
             ));
         }
         out
+    }
+
+    /// `BlockPos.betweenClosed(BlockPos, BlockPos)` as a one-pass lazy iterator.
+    /// The index arithmetic matches the Java stream's x-fastest, then y, then
+    /// z order without materializing the whole box before its consumer runs.
+    pub fn between_closed_iter(a: &BlockPos, b: &BlockPos) -> impl Iterator<Item = BlockPos> {
+        BetweenClosedIterator::new(
+            a.x.min(b.x),
+            a.y.min(b.y),
+            a.z.min(b.z),
+            a.x.max(b.x),
+            a.y.max(b.y),
+            a.z.max(b.z),
+        )
     }
 
     /// `BlockPos.betweenClosed(BlockPos, BlockPos)`.
