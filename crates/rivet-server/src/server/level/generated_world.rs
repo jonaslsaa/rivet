@@ -1411,6 +1411,11 @@ mod tests {
     use crate::server::level::chunk_map::ChunkMap;
     use rivet_registry::generated::block_states::StateId;
     use rivet_util::RandomSource;
+    use rivet_util::random::LegacyRandomSource;
+    use rivet_world::level::WorldGenLevel;
+    use rivet_world::levelgen::feature::FeatureBehavior;
+    use rivet_world::levelgen::feature::configurations::geode_configuration::GeodeConfiguration;
+    use rivet_world::levelgen::feature::monster_room_feature::MONSTER_ROOM;
     use rivet_world::levelgen::heightmap::Types;
 
     /// The shared test realization (built once — the worldgen registry
@@ -2002,6 +2007,21 @@ mod tests {
             feature_id_from_registry_name("minecraft:geode")
                 .expect("the geode dispatch type must be registered")
         );
+
+        let geode = (configured.config.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<GeodeConfiguration>()
+            .expect("the geode dispatch must carry GeodeConfiguration");
+        for holder in geode
+            .geode_block_settings
+            .cannot_replace
+            .iter()
+            .chain(geode.geode_block_settings.invalid_blocks.iter())
+        {
+            assert!(
+                matches!(holder, Holder::Reference { .. }),
+                "registry-backed geode holder sets must not contain direct holders"
+            );
+        }
     }
 
     #[test]
@@ -2190,6 +2210,135 @@ mod tests {
                 .is_err(),
             "the FEATURES cache must stop at the direct dependency radius"
         );
+    }
+
+    /// The real FEATURES-pass region must materialize the entities that
+    /// `MonsterRoomFeature` queries immediately after chest/spawner writes; the
+    /// default `WorldGenLevel` entity seams are panic-only for other worlds.
+    #[test]
+    fn features_region_materializes_monster_room_entities() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let mut region = compose_feature_region(&mut holder.chunk, &generator);
+
+        let chest_pos = BlockPos::new(0, 0, 0);
+        assert!(<WorldGenRegion<
+            '_,
+            BlockState,
+            WorldgenBiomeId,
+            StructureKey,
+        > as WorldGenLevel>::set_block(
+            &mut region,
+            &chest_pos,
+            Blocks::CHEST.default_block_state(),
+            2,
+        ));
+        assert!(<WorldGenRegion<
+            '_,
+            BlockState,
+            WorldgenBiomeId,
+            StructureKey,
+        > as WorldGenLevel>::is_randomizable_container(
+            &region, &chest_pos
+        ));
+        <WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> as WorldGenLevel>::set_block_entity_loot_table(
+            &mut region,
+            &chest_pos,
+            42,
+            "minecraft:chests/simple_dungeon",
+        );
+
+        let spawner_pos = BlockPos::new(1, 0, 0);
+        assert!(<WorldGenRegion<
+            '_,
+            BlockState,
+            WorldgenBiomeId,
+            StructureKey,
+        > as WorldGenLevel>::set_block(
+            &mut region,
+            &spawner_pos,
+            Blocks::SPAWNER.default_block_state(),
+            2,
+        ));
+        assert!(<WorldGenRegion<
+            '_,
+            BlockState,
+            WorldgenBiomeId,
+            StructureKey,
+        > as WorldGenLevel>::is_spawner_block_entity(
+            &region, &spawner_pos
+        ));
+        assert_eq!(
+            <WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> as WorldGenLevel>::spawner_potential_weight(
+                &region,
+                &spawner_pos,
+            ),
+            None
+        );
+        <WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &spawner_pos,
+            "minecraft:zombie",
+            None,
+        );
+    }
+
+    /// A valid room-shaped shell reaches the real leaf's chest/spawner writes
+    /// through the FEATURES region, not just through the leaf test double.
+    #[test]
+    fn monster_room_places_against_the_features_region() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let mut region = compose_feature_region(&mut holder.chunk, &generator);
+        let origin = BlockPos::new(8, 64, 8);
+
+        let mut probe = LegacyRandomSource::new(0);
+        let xr = probe.next_int_bound(2) + 2;
+        let zr = probe.next_int_bound(2) + 2;
+        let min_x = -xr - 1;
+        let max_x = xr + 1;
+        let min_z = -zr - 1;
+        let max_z = zr + 1;
+        let stone = Blocks::STONE.default_block_state();
+        let air = Blocks::AIR.default_block_state();
+        for dx in min_x..=max_x {
+            for dy in -1..=4 {
+                for dz in min_z..=max_z {
+                    let boundary = dx == min_x || dx == max_x || dz == min_z || dz == max_z;
+                    let opening = dx == min_x && dz == 0 && (dy == 0 || dy == 1);
+                    let state = if dy == -1 || dy == 4 || (boundary && !opening && dy == 0) {
+                        stone
+                    } else {
+                        air
+                    };
+                    let pos = origin.offset(dx, dy, dz);
+                    assert!(region.set_block(&pos, state, 2, 512));
+                }
+            }
+        }
+
+        let mut random = LegacyRandomSource::new(0);
+        assert!(MONSTER_ROOM.place_with_config(
+            &NoneFeatureConfiguration,
+            &mut region,
+            generator.as_ref(),
+            &mut random,
+            &origin,
+        ));
+        assert!(<WorldGenRegion<
+            '_,
+            BlockState,
+            WorldgenBiomeId,
+            StructureKey,
+        > as WorldGenLevel>::is_spawner_block_entity(
+            &region, &origin,
+        ));
     }
 
     #[test]

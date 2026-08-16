@@ -14,9 +14,11 @@
 //!
 //! This slice ports the value layer only: the `StaticCache2D` chunk view, the
 //! ring/status/distance contract, biome access, write-radius gating, and the
-//! minimal `WorldGenLevel` facade. It does NOT port the scheduler, the
-//! `ChunkPyramid` tables, server production generation, or generator
-//! realization — those defer with their owning units (#185).
+//! minimal `WorldGenLevel` facade. It does NOT own the scheduler, generator
+//! realization, or dependency-window composition. The FEATURES caller supplies
+//! the complete accumulated window (17x17 for the current step), while this
+//! region enforces the step's ring/status contract; those upstream surfaces
+//! defer with their owning units (#185).
 //!
 //! ## The typed seam
 //!
@@ -998,9 +1000,37 @@ impl WorldGenLevel for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> 
 /// [`is_within_write_zone`]/`warn_if_read_outside_write_zone`) and the scalar
 /// reads live on the generic impl and are shared.
 impl WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
+    fn materialize_block_entity(&mut self, pos: &BlockPos, state: BlockState) {
+        if state.block() == Blocks::CHEST.id() {
+            if !matches!(
+                self.block_entities.get(pos),
+                Some(WorldgenBlockEntity::Chest { .. })
+            ) {
+                self.block_entities
+                    .insert(*pos, WorldgenBlockEntity::Chest { loot: None });
+            }
+        } else if state.block() == Blocks::SPAWNER.id() {
+            if !matches!(
+                self.block_entities.get(pos),
+                Some(WorldgenBlockEntity::Spawner { .. })
+            ) {
+                self.block_entities.insert(
+                    *pos,
+                    WorldgenBlockEntity::Spawner {
+                        next_spawn: None,
+                        spawn_potentials: Vec::new(),
+                    },
+                );
+            }
+        } else {
+            self.block_entities.remove(pos);
+        }
+    }
+
     /// `WorldGenRegion.setBlock(BlockPos, BlockState, int updateFlags, int
     /// updateLimit)` — the write-radius-gated block write, mirroring the dense
-    /// [`set_block`](WorldGenRegion::set_block).
+    /// [`set_block`](WorldGenRegion::set_block) and materializing the live
+    /// chest/spawner state the FEATURES features query after their writes.
     ///
     /// The `heightmapsAfter()` update reads the placed state's `StateFlags`
     /// through `resolve_state_flags` (the `BlockState`-typed resolver, the
@@ -1033,6 +1063,7 @@ impl WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
             self.get_chunk_mut(post_process_chunk_x, post_process_chunk_z)
                 .mark_pos_for_post_processing(&post_process_pos);
         }
+        self.materialize_block_entity(pos, block_state);
         true
     }
 
@@ -1103,6 +1134,57 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
     /// injected shared access (a cheap `Arc` clone).
     fn registry_access(&self) -> RegistryAccess {
         self.registry_access.clone()
+    }
+
+    fn is_randomizable_container(&self, pos: &BlockPos) -> bool {
+        matches!(
+            self.block_entities.get(pos),
+            Some(WorldgenBlockEntity::Chest { .. })
+        )
+    }
+
+    fn set_block_entity_loot_table(&mut self, pos: &BlockPos, seed: i64, loot_table: &str) {
+        if let Some(WorldgenBlockEntity::Chest { loot }) = self.block_entities.get_mut(pos) {
+            *loot = Some((seed, loot_table.to_string()));
+        }
+    }
+
+    fn is_spawner_block_entity(&self, pos: &BlockPos) -> bool {
+        matches!(
+            self.block_entities.get(pos),
+            Some(WorldgenBlockEntity::Spawner { .. })
+        )
+    }
+
+    fn spawner_potential_weight(&self, pos: &BlockPos) -> Option<i32> {
+        match self.block_entities.get(pos) {
+            Some(WorldgenBlockEntity::Spawner {
+                next_spawn: None,
+                spawn_potentials,
+            }) if !spawn_potentials.is_empty() => {
+                Some(spawn_potentials.iter().map(|(_, weight)| *weight).sum())
+            }
+            _ => None,
+        }
+    }
+
+    fn set_spawner_entity(&mut self, pos: &BlockPos, entity_id: &str, potential_roll: Option<i32>) {
+        if let Some(WorldgenBlockEntity::Spawner {
+            next_spawn,
+            spawn_potentials,
+        }) = self.block_entities.get_mut(pos)
+        {
+            if let Some(mut roll) = potential_roll {
+                for (_, weight) in spawn_potentials.iter() {
+                    if roll < *weight {
+                        break;
+                    }
+                    roll -= *weight;
+                }
+            }
+            *next_spawn = Some(entity_id.to_string());
+            spawn_potentials.clear();
+        }
     }
 
     /// `ChunkAccess.markPosForPostProcessing(BlockPos)` — the chunk-access hop
