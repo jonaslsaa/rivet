@@ -40,7 +40,9 @@
 //!    block-entity lookup succeeds, `randomEntityId(random)` =
 //!    `MOBS[nextInt(4)]` (the `nextInt(4)` mob index — `Util.getRandom`) is
 //!    drawn first. A pending positive-total `SpawnPotentials` then consumes
-//!    one weighted roll; an empty or zero-total list consumes no roll.
+//!    one weighted roll; an empty or zero-total decoded list consumes no roll.
+//!    A malformed list field uses Paper's singleton fallback and consumes a
+//!    `nextInt(1)` draw.
 //!    `SpawnerBlockEntity.setEntityId` clears the potentials after applying
 //!    the selected entry. A missing spawner entity skips every mob draw,
 //!    exactly as Java does.
@@ -636,6 +638,29 @@ mod tests {
             Some(&TestBlockEntity::Spawner {
                 next_spawn: Some("minecraft:skeleton".to_string()),
                 spawn_potentials: Vec::new(),
+                spawn_data_malformed: false,
+            })
+        );
+    }
+
+    #[test]
+    fn malformed_spawn_data_keeps_potential_rng_order() {
+        let mut level = TestLevel::over(access());
+        let origin = BlockPos::new(10, 20, -4);
+        prepare_room(&mut level, origin);
+        level.set_malformed_spawn_data_state(origin, vec![("minecraft:zombie".to_string(), 2)]);
+        let mut random = ScriptedRandom::room_with_spawner_potentials(7);
+
+        assert!(place(&mut level, origin, &mut random));
+        assert_eq!(random.next_bound, 61);
+        assert_eq!(random.calls[60], RngCall::IntBound(4));
+        assert_eq!(random.calls[61], RngCall::IntBound(2));
+        assert_eq!(
+            level.block_entities.get(&origin),
+            Some(&TestBlockEntity::Spawner {
+                next_spawn: Some("minecraft:skeleton".to_string()),
+                spawn_potentials: Vec::new(),
+                spawn_data_malformed: true,
             })
         );
     }
@@ -656,6 +681,7 @@ mod tests {
             Some(&TestBlockEntity::Spawner {
                 next_spawn: Some("minecraft:skeleton".to_string()),
                 spawn_potentials: Vec::new(),
+                spawn_data_malformed: false,
             })
         );
     }
@@ -680,6 +706,7 @@ mod tests {
             Some(&TestBlockEntity::Spawner {
                 next_spawn: Some("minecraft:skeleton".to_string()),
                 spawn_potentials: Vec::new(),
+                spawn_data_malformed: false,
             })
         );
     }

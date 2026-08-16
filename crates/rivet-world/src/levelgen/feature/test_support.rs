@@ -54,6 +54,7 @@ pub enum TestBlockEntity {
     Spawner {
         next_spawn: Option<String>,
         spawn_potentials: Vec<(String, i32)>,
+        spawn_data_malformed: bool,
     },
 }
 
@@ -245,6 +246,7 @@ impl TestLevel {
                     TestBlockEntity::Spawner {
                         next_spawn: None,
                         spawn_potentials: Vec::new(),
+                        spawn_data_malformed: false,
                     },
                 );
             }
@@ -267,6 +269,26 @@ impl TestLevel {
             TestBlockEntity::Spawner {
                 next_spawn,
                 spawn_potentials,
+                spawn_data_malformed: false,
+            },
+        );
+    }
+
+    /// Seed a persisted spawner whose `SpawnData` fails the codec while its
+    /// weighted potentials remain valid.
+    pub fn set_malformed_spawn_data_state(
+        &mut self,
+        pos: BlockPos,
+        spawn_potentials: Vec<(String, i32)>,
+    ) {
+        self.states
+            .insert(pos, Blocks::SPAWNER.default_block_state());
+        self.block_entities.insert(
+            pos,
+            TestBlockEntity::Spawner {
+                next_spawn: None,
+                spawn_potentials,
+                spawn_data_malformed: true,
             },
         );
     }
@@ -387,6 +409,7 @@ impl WorldGenLevel for TestLevel {
             Some(TestBlockEntity::Spawner {
                 next_spawn: None,
                 spawn_potentials,
+                ..
             }) if !spawn_potentials.is_empty() => {
                 let total = spawn_potentials
                     .iter()
@@ -401,6 +424,7 @@ impl WorldGenLevel for TestLevel {
         if let Some(TestBlockEntity::Spawner {
             next_spawn,
             spawn_potentials,
+            ..
         }) = self.block_entities.get_mut(pos)
         {
             if let Some(mut roll) = potential_roll {

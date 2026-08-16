@@ -68,6 +68,7 @@ use std::sync::Arc;
 
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_nbt::tag::Tag;
+use rivet_registry::Identifier;
 use rivet_registry::access::RegistryAccess;
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::block_state::BlockState;
@@ -121,50 +122,162 @@ fn persist_chest_tag(tag: &mut CompoundTag, seed: i64, loot_table: &str) {
     tag.put_long("LootTableSeed", seed);
 }
 
-fn checked_spawn_potential_weight(tag: &CompoundTag) -> Option<i32> {
-    if tag.contains("SpawnData") {
-        return None;
-    }
-    let list = tag.get_list("SpawnPotentials")?;
-    if list.is_empty() {
+fn normalized_spawn_data(spawn_data: &CompoundTag) -> Option<CompoundTag> {
+    if !matches!(spawn_data.get("entity"), Some(Tag::Compound(_))) {
         return None;
     }
 
-    let mut total = 0_i64;
-    for entry in &list.list {
-        let Tag::Compound(entry) = entry else {
-            panic!("SpawnPotentials entries must be compounds");
-        };
-        let weight = entry.get_int("weight").unwrap_or_else(|| {
-            panic!("SpawnPotentials entry is missing its weight");
-        });
-        if weight < 0 {
-            panic!("Weight should be >= 0");
-        }
-        total += i64::from(weight);
-        if total > i64::from(i32::MAX) {
-            panic!("Sum of weights must be <= 2147483647");
+    let mut normalized = spawn_data.clone();
+    normalize_spawn_data_entity_id(normalized.tags.get_mut("entity"));
+    if normalized
+        .get("custom_spawn_rules")
+        .is_some_and(|rules| !valid_custom_spawn_rules(rules))
+    {
+        normalized.remove("custom_spawn_rules");
+    }
+    if normalized
+        .get("equipment")
+        .is_some_and(|equipment| !valid_equipment(equipment))
+    {
+        normalized.remove("equipment");
+    }
+    Some(normalized)
+}
+
+fn normalize_spawn_data_entity_id(entity: Option<&mut Tag>) {
+    let Some(Tag::Compound(entity)) = entity else {
+        return;
+    };
+    match entity.get_string("id") {
+        Some(id) => match Identifier::try_parse_result(id) {
+            Ok(Some(identifier)) => entity.put_string("id", &identifier.to_string()),
+            Ok(None) | Err(_) => {
+                entity.remove("id");
+            }
+        },
+        None => {
+            entity.remove("id");
         }
     }
-    (total > 0).then_some(total as i32)
+}
+
+fn valid_custom_spawn_rules(tag: &Tag) -> bool {
+    let Tag::Compound(rules) = tag else {
+        return false;
+    };
+    ["block_light_limit", "sky_light_limit"]
+        .into_iter()
+        .all(|name| rules.get(name).is_none_or(valid_light_range))
+}
+
+fn valid_light_range(tag: &Tag) -> bool {
+    let values = match tag {
+        Tag::List(list) if list.list.len() == 2 => list.list[0].as_int().zip(list.list[1].as_int()),
+        Tag::Compound(range) => range
+            .get_int("min_inclusive")
+            .zip(range.get_int("max_inclusive")),
+        value => value.as_int().map(|value| (value, value)),
+    };
+    let Some((min, max)) = values else {
+        return false;
+    };
+    (0..=15).contains(&min) && (0..=15).contains(&max) && min <= max
+}
+
+fn valid_equipment(tag: &Tag) -> bool {
+    let Tag::Compound(equipment) = tag else {
+        return false;
+    };
+    let Some(loot_table) = equipment.get_string("loot_table") else {
+        return false;
+    };
+    if Identifier::try_parse_result(loot_table)
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        return false;
+    }
+    let Some(slot_drop_chances) = equipment.get("slot_drop_chances") else {
+        return true;
+    };
+    if slot_drop_chances.as_float().is_some() {
+        return true;
+    }
+    let Tag::Compound(chances) = slot_drop_chances else {
+        return false;
+    };
+    chances.tags.iter().all(|(slot, chance)| {
+        matches!(
+            slot.as_str(),
+            "mainhand" | "offhand" | "feet" | "legs" | "chest" | "head" | "body" | "saddle"
+        ) && chance.as_float().is_some()
+    })
+}
+
+type SpawnPotentialEntry = (CompoundTag, i32);
+type DecodedSpawnPotentials = (Vec<SpawnPotentialEntry>, i32);
+
+fn decoded_spawn_potentials(tag: &CompoundTag) -> Result<Option<DecodedSpawnPotentials>, ()> {
+    let Some(list) = tag.get_list("SpawnPotentials") else {
+        return Ok(None);
+    };
+    let mut total = 0_i64;
+    let mut entries = Vec::with_capacity(list.list.len());
+    for raw_entry in &list.list {
+        let Tag::Compound(entry) = raw_entry else {
+            continue;
+        };
+        let Some(weight) = entry.get_int("weight") else {
+            continue;
+        };
+        if weight < 0 {
+            continue;
+        }
+        let Some(data) = entry.get_compound("data").and_then(normalized_spawn_data) else {
+            continue;
+        };
+        total = total.checked_add(i64::from(weight)).ok_or(())?;
+        if total > i64::from(i32::MAX) {
+            return Err(());
+        }
+        entries.push((data, weight));
+    }
+    Ok(Some((entries, total as i32)))
+}
+
+fn fallback_potential_weight(tag: &CompoundTag) -> Option<i32> {
+    if pending_is_dummy(tag) && !tag.contains("SpawnData") && !tag.contains("SpawnPotentials") {
+        None
+    } else {
+        Some(1)
+    }
+}
+
+fn checked_spawn_potential_weight(tag: &CompoundTag) -> Option<i32> {
+    if normalized_spawn_data_from_tag(tag).is_some() {
+        return None;
+    }
+    match decoded_spawn_potentials(tag) {
+        Ok(Some((_, total))) if total > 0 => Some(total),
+        Ok(Some((_, _))) => None,
+        Ok(None) | Err(()) => fallback_potential_weight(tag),
+    }
+}
+
+fn normalized_spawn_data_from_tag(tag: &CompoundTag) -> Option<CompoundTag> {
+    tag.get("SpawnData")
+        .and_then(Tag::as_compound)
+        .and_then(normalized_spawn_data)
 }
 
 fn selected_spawn_data(tag: &CompoundTag, mut roll: i32) -> CompoundTag {
-    let Some(list) = tag.get_list("SpawnPotentials") else {
+    let Ok(Some((entries, _))) = decoded_spawn_potentials(tag) else {
         return CompoundTag::new();
     };
-    for entry in &list.list {
-        let Tag::Compound(entry) = entry else {
-            panic!("SpawnPotentials entries must be compounds");
-        };
-        let weight = entry.get_int("weight").unwrap_or_else(|| {
-            panic!("SpawnPotentials entry is missing its weight");
-        });
-        if weight < 0 {
-            panic!("Weight should be >= 0");
-        }
+    for (data, weight) in entries {
         if roll < weight {
-            return entry.get_compound("data").cloned().unwrap_or_default();
+            return data;
         }
         roll -= weight;
     }
@@ -173,15 +286,8 @@ fn selected_spawn_data(tag: &CompoundTag, mut roll: i32) -> CompoundTag {
 
 fn persist_spawner_tag(tag: &mut CompoundTag, entity_id: &str, potential_roll: Option<i32>) {
     tag.put_string("id", "minecraft:mob_spawner");
-    tag.put_short("Delay", 20);
-    tag.put_short("MinSpawnDelay", 200);
-    tag.put_short("MaxSpawnDelay", 800);
-    tag.put_short("SpawnCount", 4);
-    tag.put_short("MaxNearbyEntities", 6);
-    tag.put_short("RequiredPlayerRange", 16);
-    tag.put_short("SpawnRange", 4);
 
-    let mut spawn_data = tag.get_compound("SpawnData").cloned().unwrap_or_else(|| {
+    let mut spawn_data = normalized_spawn_data_from_tag(tag).unwrap_or_else(|| {
         potential_roll.map_or_else(CompoundTag::new, |roll| selected_spawn_data(tag, roll))
     });
     let entity = spawn_data.get_compound_or_empty_mut("entity");
@@ -1515,6 +1621,16 @@ mod tests {
         region_with_access(RegistryAccess::empty())
     }
 
+    fn spawner_tag_mut<'a>(
+        region: &'a mut WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey>,
+        pos: &BlockPos,
+    ) -> &'a mut CompoundTag {
+        region
+            .get_chunk_mut(0, 0)
+            .get_block_entity_nbt_mut(pos)
+            .expect("spawner block entity tag")
+    }
+
     fn set_spawn_potentials(
         region: &mut WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey>,
         pos: &BlockPos,
@@ -1533,14 +1649,18 @@ mod tests {
                 Tag::Compound(entry)
             })
             .collect();
-        region
-            .get_chunk_mut(0, 0)
-            .get_block_entity_nbt_mut(pos)
-            .expect("spawner DUMMY tag")
-            .put(
-                "SpawnPotentials".to_string(),
-                Tag::List(rivet_nbt::list_tag::ListTag::with_list(entries)),
-            );
+        spawner_tag_mut(region, pos).put(
+            "SpawnPotentials".to_string(),
+            Tag::List(rivet_nbt::list_tag::ListTag::with_list(entries)),
+        );
+    }
+
+    fn set_spawn_data(
+        region: &mut WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey>,
+        pos: &BlockPos,
+        spawn_data: Tag,
+    ) {
+        spawner_tag_mut(region, pos).put("SpawnData".to_string(), spawn_data);
     }
 
     /// A feature-step region: `generatingStep = getStepTo(FEATURES)` from the
@@ -2080,6 +2200,162 @@ mod tests {
     }
 
     #[test]
+    fn existing_spawner_set_entity_id_preserves_loaded_fields() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+        let tag = spawner_tag_mut(&mut region, &pos);
+        tag.put_string("id", "minecraft:mob_spawner");
+        tag.put_short("Delay", 37);
+        tag.put_short("MinSpawnDelay", 41);
+        tag.put_short("MaxSpawnDelay", 97);
+        tag.put_short("SpawnCount", 2);
+        tag.put_short("MaxNearbyEntities", 11);
+        tag.put_short("RequiredPlayerRange", 23);
+        tag.put_short("SpawnRange", 7);
+        tag.put_int("UnrelatedField", 1234);
+        let mut entity = CompoundTag::new();
+        entity.put_string("id", "minecraft:zombie");
+        let mut spawn_data = CompoundTag::new();
+        spawn_data.put("entity".to_string(), Tag::Compound(entity));
+        tag.put("SpawnData".to_string(), Tag::Compound(spawn_data));
+
+        <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &pos,
+            "minecraft:skeleton",
+            None,
+        );
+        let tag = region
+            .get_chunk(0, 0)
+            .get_block_entity_nbt(&pos)
+            .expect("spawner remains materialized");
+        assert_eq!(tag.get_short("Delay"), Some(37));
+        assert_eq!(tag.get_short("MinSpawnDelay"), Some(41));
+        assert_eq!(tag.get_short("MaxSpawnDelay"), Some(97));
+        assert_eq!(tag.get_short("SpawnCount"), Some(2));
+        assert_eq!(tag.get_short("MaxNearbyEntities"), Some(11));
+        assert_eq!(tag.get_short("RequiredPlayerRange"), Some(23));
+        assert_eq!(tag.get_short("SpawnRange"), Some(7));
+        assert_eq!(tag.get_int("UnrelatedField"), Some(1234));
+        assert_eq!(
+            tag.get_compound("SpawnData")
+                .and_then(|data| data.get_compound("entity"))
+                .and_then(|entity| entity.get_string("id"))
+                .map(String::as_str),
+            Some("minecraft:skeleton")
+        );
+    }
+
+    #[test]
+    fn malformed_spawn_data_uses_valid_potentials_for_the_weighted_draw() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+        set_spawn_data(
+            &mut region,
+            &pos,
+            Tag::Int(rivet_nbt::int_tag::IntTag::value_of(7)),
+        );
+        set_spawn_potentials(&mut region, &pos, &[2]);
+        assert_eq!(
+            <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::spawner_potential_weight(
+                &region, &pos
+            ),
+            Some(2)
+        );
+        <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &pos,
+            "minecraft:skeleton",
+            Some(1),
+        );
+        let tag = region
+            .get_chunk(0, 0)
+            .get_block_entity_nbt(&pos)
+            .expect("malformed SpawnData is replaced by selected potential");
+        assert_eq!(
+            tag.get_compound("SpawnData")
+                .and_then(|data| data.get_compound("entity"))
+                .and_then(|entity| entity.get_string("id"))
+                .map(String::as_str),
+            Some("minecraft:skeleton")
+        );
+        assert!(tag.get("SpawnPotentials").is_none());
+    }
+
+    #[test]
+    fn malformed_optional_spawn_data_fields_are_dropped() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+        let mut entity = CompoundTag::new();
+        entity.put_string("id", "minecraft:zombie");
+        let mut spawn_data = CompoundTag::new();
+        spawn_data.put("entity".to_string(), Tag::Compound(entity));
+        spawn_data.put_int("custom_spawn_rules", 7);
+        spawn_data.put_string("equipment", "malformed");
+        set_spawn_data(&mut region, &pos, Tag::Compound(spawn_data));
+        <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &pos,
+            "minecraft:skeleton",
+            None,
+        );
+        let tag = region
+            .get_chunk(0, 0)
+            .get_block_entity_nbt(&pos)
+            .expect("spawner tag remains present");
+        let spawn_data = tag.get_compound("SpawnData").expect("SpawnData remains");
+        assert!(spawn_data.get("custom_spawn_rules").is_none());
+        assert!(spawn_data.get("equipment").is_none());
+    }
+
+    #[test]
+    fn valid_spawn_data_optional_payloads_are_preserved() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+        let mut entity = CompoundTag::new();
+        entity.put_string("id", "minecraft:zombie");
+        let mut rules = CompoundTag::new();
+        rules.put_int("block_light_limit", 3);
+        rules.put_int("sky_light_limit", 15);
+        let mut equipment = CompoundTag::new();
+        equipment.put_string("loot_table", "minecraft:chests/simple_dungeon");
+        equipment.put_float("slot_drop_chances", 0.5);
+        let mut spawn_data = CompoundTag::new();
+        spawn_data.put("entity".to_string(), Tag::Compound(entity));
+        spawn_data.put("custom_spawn_rules".to_string(), Tag::Compound(rules));
+        spawn_data.put("equipment".to_string(), Tag::Compound(equipment));
+        set_spawn_data(&mut region, &pos, Tag::Compound(spawn_data));
+        <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &pos,
+            "minecraft:skeleton",
+            None,
+        );
+        let tag = region
+            .get_chunk(0, 0)
+            .get_block_entity_nbt(&pos)
+            .expect("spawner tag remains present");
+        let spawn_data = tag.get_compound("SpawnData").expect("SpawnData remains");
+        assert_eq!(
+            spawn_data
+                .get_compound("custom_spawn_rules")
+                .and_then(|rules| rules.get_int("block_light_limit")),
+            Some(3)
+        );
+        assert_eq!(
+            spawn_data
+                .get_compound("equipment")
+                .and_then(|equipment| equipment.get_string("loot_table"))
+                .map(String::as_str),
+            Some("minecraft:chests/simple_dungeon")
+        );
+    }
+
+    #[test]
     fn zero_weight_spawn_potentials_are_empty_without_a_rng_bound() {
         let mut region = feature_region();
         let pos = BlockPos::new(0, 64, 0);
@@ -2112,26 +2388,146 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Weight should be >= 0")]
-    fn negative_spawn_potential_weight_is_rejected() {
+    fn malformed_spawn_potential_weight_is_dropped_without_panicking() {
         let mut region = feature_region();
         let pos = BlockPos::new(0, 64, 0);
         assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
         set_spawn_potentials(&mut region, &pos, &[-1]);
-        let _ = <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::spawner_potential_weight(
-            &region, &pos
+        assert_eq!(
+            <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::spawner_potential_weight(
+                &region, &pos
+            ),
+            None
         );
     }
 
     #[test]
-    #[should_panic(expected = "Sum of weights must be <= 2147483647")]
-    fn overflowing_spawn_potential_weight_is_rejected() {
+    fn overflowing_spawn_potential_weight_falls_back_without_panicking() {
         let mut region = feature_region();
         let pos = BlockPos::new(0, 64, 0);
         assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
         set_spawn_potentials(&mut region, &pos, &[i32::MAX, 1]);
-        let _ = <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::spawner_potential_weight(
-            &region, &pos
+        assert_eq!(
+            <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::spawner_potential_weight(
+                &region, &pos
+            ),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn non_compound_spawn_potential_entry_is_dropped_without_panicking() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+        spawner_tag_mut(&mut region, &pos).put(
+            "SpawnPotentials".to_string(),
+            Tag::List(rivet_nbt::list_tag::ListTag::with_list(vec![Tag::Int(
+                rivet_nbt::int_tag::IntTag::value_of(1),
+            )])),
+        );
+        assert_eq!(
+            <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::spawner_potential_weight(
+                &region, &pos
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn wrong_typed_spawn_potentials_use_paper_singleton_fallback() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+        spawner_tag_mut(&mut region, &pos).put_int("SpawnPotentials", 1);
+        assert_eq!(
+            <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::spawner_potential_weight(
+                &region, &pos
+            ),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn malformed_spawn_potential_entries_keep_valid_partial_list() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+        let mut valid = CompoundTag::new();
+        valid.put_int("weight", 2);
+        valid.put(
+            "data".to_string(),
+            Tag::Compound({
+                let mut data = CompoundTag::new();
+                data.put("entity".to_string(), Tag::Compound(CompoundTag::new()));
+                data
+            }),
+        );
+        spawner_tag_mut(&mut region, &pos).put(
+            "SpawnPotentials".to_string(),
+            Tag::List(rivet_nbt::list_tag::ListTag::with_list(vec![
+                Tag::Int(rivet_nbt::int_tag::IntTag::value_of(1)),
+                Tag::Compound(valid),
+            ])),
+        );
+        assert_eq!(
+            <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::spawner_potential_weight(
+                &region, &pos
+            ),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn missing_spawn_potential_weight_is_dropped_without_panicking() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+        let mut entry = CompoundTag::new();
+        entry.put(
+            "data".to_string(),
+            Tag::Compound({
+                let mut data = CompoundTag::new();
+                data.put("entity".to_string(), Tag::Compound(CompoundTag::new()));
+                data
+            }),
+        );
+        spawner_tag_mut(&mut region, &pos).put(
+            "SpawnPotentials".to_string(),
+            Tag::List(rivet_nbt::list_tag::ListTag::with_list(vec![
+                Tag::Compound(entry),
+            ])),
+        );
+        assert_eq!(
+            <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::spawner_potential_weight(
+                &region, &pos
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn malformed_spawn_potential_data_is_dropped_without_panicking() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+        let mut entry = CompoundTag::new();
+        entry.put_int("weight", 1);
+        entry.put(
+            "data".to_string(),
+            Tag::Int(rivet_nbt::int_tag::IntTag::value_of(2)),
+        );
+        spawner_tag_mut(&mut region, &pos).put(
+            "SpawnPotentials".to_string(),
+            Tag::List(rivet_nbt::list_tag::ListTag::with_list(vec![
+                Tag::Compound(entry),
+            ])),
+        );
+        assert_eq!(
+            <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::spawner_potential_weight(
+                &region, &pos
+            ),
+            None
         );
     }
 
