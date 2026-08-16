@@ -51,6 +51,22 @@ for option in --idle-hours --pressure-gb --pressure-idle-min; do
 done
 pass "negative and non-integer threshold values exit 2 before pruning"
 
+for option in --idle-hours --pressure-gb --pressure-idle-min; do
+  normalized_log="$SANDBOX/normalized-${option#--}.log"
+  rc=0
+  bash "$SCRIPT_DIR/prune-worktrees.sh" --dry-run --no-tmp "$option" 08 >"$normalized_log" 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || fail "$option 08 returned $rc instead of accepting decimal leading zeros"
+done
+pass "threshold values with decimal leading zeros are accepted"
+
+rc=0
+bash "$SCRIPT_DIR/prune-worktrees.sh" --dry-run --no-tmp --idle-hours 9223372036854775807 \
+  >"$SANDBOX/overflow-idle-hours.log" 2>&1 || rc=$?
+[ "$rc" -eq 2 ] || fail "overflowing --idle-hours returned $rc instead of 2"
+grep -q "must be at most" "$SANDBOX/overflow-idle-hours.log" \
+  || fail "overflowing --idle-hours did not report its safe upper bound"
+pass "idle-hours values that overflow minute arithmetic exit 2 before pruning"
+
 # --- sandbox fixtures (all old, so sweeps treat them as idle) ---------------
 CARGO_TAG='Signature: 8a477f597d28d172789f06886806bc55
 # This file is a cache directory tag created by cargo.
@@ -345,6 +361,18 @@ touch -m "$W4/target/debug/.fingerprint/hash1/lib-x.json"
 touched_within "$W4/target" 1440 || fail "deep-fresh target was not detected by touched_within"
 pass "touched_within detects a fresh depth-4 fingerprint write in a worktree target/"
 
+# A live Cargo process can receive CARGO_TARGET_DIR from its environment rather
+# than argv. The process listing used by is_live_build must still spare its cache.
+LIVE_CACHE="$SANDBOX/$R3/live-target"
+mk_cargo_target "$LIVE_CACHE"
+# shellcheck disable=SC2329  # is_live_build invokes this ps shim indirectly
+ps() {
+  printf '/usr/local/bin/cargo build --locked CARGO_TARGET_DIR=%s\n' "$LIVE_CACHE"
+}
+is_live_build "$LIVE_CACHE" || fail "live Cargo process with an environment target was not detected"
+unset -f ps
+pass "is_live_build detects CARGO_TARGET_DIR in a live Cargo process environment"
+
 # --- sweep_tmp end to end ----------------------------------------------------
 SWEEP_ROOT="$SANDBOX/root-sweep"
 mkdir -p "$SWEEP_ROOT"
@@ -611,6 +639,34 @@ echo "$out" | grep -q "WOULD REMOVE .*feature/preserved" \
   && fail "preserved work was reported for removal: $out"
 [ -d "$E2EP/wt" ] || fail "preserved worktree disappeared during dry-run"
 pass "nonempty tools/*/work blocks clean merged worktree removal"
+
+# An ignored tools/*/work symlink can point at an external capture directory;
+# find's default non-following behavior must not let it be removed as disposable.
+E2EPS="$SANDBOX/e2e-preserved-symlink"
+mkdir -p "$E2EPS/main"
+git init -q "$E2EPS/main"
+git -C "$E2EPS/main" config user.email test@example.com
+git -C "$E2EPS/main" config user.name "test"
+git -C "$E2EPS/main" config commit.gpgsign false
+printf 'tools/*/work\n' > "$E2EPS/main/.gitignore"
+printf 'x\n' > "$E2EPS/main/a.txt"
+git -C "$E2EPS/main" add .
+git -C "$E2EPS/main" commit -qm c1
+git -C "$E2EPS/main" update-ref refs/remotes/origin/main HEAD
+git -C "$E2EPS/main" worktree add -q -b feature/preserved-symlink "$E2EPS/wt" HEAD
+E2EPS_CAPTURE="$SANDBOX/external-capture"
+mkdir -p "$E2EPS_CAPTURE" "$E2EPS/wt/tools/rivet-oracle"
+ln -s "$E2EPS_CAPTURE" "$E2EPS/wt/tools/rivet-oracle/work"
+printf 'capture\n' > "$E2EPS_CAPTURE/manifest.json"
+[ -z "$(git -C "$E2EPS/wt" status --porcelain)" ] || fail "ignored work symlink dirtied its clean worktree"
+git -C "$E2EPS/wt" check-ignore -q tools/rivet-oracle/work \
+  || fail "work symlink fixture was not ignored"
+cd "$E2EPS/main"
+out=$(bash "$SCRIPT_DIR/prune-worktrees.sh" --no-tmp 2>&1)
+echo "$out" | grep -q "KEEP .*feature/preserved-symlink.*preserved tools/\*/work" \
+  || fail "preserved work symlink did not block clean merged removal: $out"
+[ -d "$E2EPS/wt" ] || fail "preserved work symlink worktree was removed"
+pass "nonempty symlinked tools/*/work blocks clean merged worktree removal"
 
 # --- e2e: a locked worktree is never counted as removed ------------------------
 # `git worktree remove --force` refuses a locked worktree (only remove -f -f

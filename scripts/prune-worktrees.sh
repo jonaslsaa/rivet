@@ -171,19 +171,43 @@ has_preserved_work() {
   [ -d "$1/tools" ] || return 1
   while IFS= read -r work_dir; do
     [ -n "$work_dir" ] || continue
-    [ -n "$(find "$work_dir" -mindepth 1 -print -quit 2>/dev/null)" ] && return 0
-  done < <(find "$1/tools" -mindepth 2 -maxdepth 2 -type d -name work -print 2>/dev/null)
+    [ -d "$work_dir" ] || continue
+    [ -n "$(find -H "$work_dir" -mindepth 1 -print -quit 2>/dev/null)" ] && return 0
+  done < <(find "$1/tools" -mindepth 2 -maxdepth 2 \( -type d -o -type l \) -name work -print 2>/dev/null)
   return 1
 }
 
 require_nonnegative_integer() {
-  local option=$1 value=${2-}
+  local option=$1 value=${2-} max normalized too_large
   case "$value" in
     ''|*[!0-9]*)
       printf '%s requires a non-negative integer (got %s)\n' "$option" "${value:-<missing>}" >&2
       return 2
       ;;
   esac
+
+  normalized=$value
+  while [ "${#normalized}" -gt 1 ] && [ "${normalized#0}" != "$normalized" ]; do
+    normalized=${normalized#0}
+  done
+
+  case "$option" in
+    --idle-hours) max=153722867280912930 ;;
+    *) max=9223372036854775807 ;;
+  esac
+  # shellcheck disable=SC2071  # equal-length decimal strings need lexical comparison
+  if [ "${#normalized}" -gt "${#max}" ]; then
+    too_large=1
+  elif [ "${#normalized}" -eq "${#max}" ] && [[ "$normalized" > "$max" ]]; then
+    too_large=1
+  else
+    too_large=0
+  fi
+  if [ "$too_large" -eq 1 ]; then
+    printf '%s must be at most %s (got %s)\n' "$option" "$max" "$value" >&2
+    return 2
+  fi
+  printf '%s\n' "$normalized"
 }
 
 prune_cache() {
@@ -217,9 +241,12 @@ free_gb() {
 }
 
 is_live_build() {
-  local cache=$1 build_args
-  build_args=$(ps -axo command= 2>/dev/null | grep -E '(^|/)(cargo|rustc)([[:space:]]|$)' || true)
-  case "$build_args" in
+  local cache=$1 build_processes
+  # `ps ewwx` includes the process environment, where CARGO_TARGET_DIR lives
+  # when Cargo receives it from the shell rather than as an argv argument.
+  # shellcheck disable=SC2009  # ps is required here to inspect process environments
+  build_processes=$(ps ewwx 2>/dev/null | grep -E '(^|[[:space:]/])(cargo|rustc)([[:space:]]|$)' || true)
+  case "$build_processes" in
     *"$cache"*) return 0 ;;
   esac
   return 1
@@ -267,21 +294,18 @@ main() {
       --dry-run) DRY=1 ;;
       --idle-hours)
         [ "$#" -ge 2 ] || { printf '%s requires a non-negative integer (got <missing>)\n' "$1" >&2; return 2; }
-        require_nonnegative_integer "$1" "$2" || return 2
-        IDLE_HOURS=$2
+        IDLE_HOURS=$(require_nonnegative_integer "$1" "$2") || return 2
         shift
         ;;
       --no-tmp) SWEEP_TMP=0 ;;
       --pressure-gb)
         [ "$#" -ge 2 ] || { printf '%s requires a non-negative integer (got <missing>)\n' "$1" >&2; return 2; }
-        require_nonnegative_integer "$1" "$2" || return 2
-        PRESSURE_GB=$2
+        PRESSURE_GB=$(require_nonnegative_integer "$1" "$2") || return 2
         shift
         ;;
       --pressure-idle-min)
         [ "$#" -ge 2 ] || { printf '%s requires a non-negative integer (got <missing>)\n' "$1" >&2; return 2; }
-        require_nonnegative_integer "$1" "$2" || return 2
-        PRESSURE_IDLE_MIN=$2
+        PRESSURE_IDLE_MIN=$(require_nonnegative_integer "$1" "$2") || return 2
         shift
         ;;
       *) echo "unknown argument: $1" >&2; exit 2 ;;
