@@ -56,20 +56,14 @@ use rivet_world::lighting::star_light_provider::StarLightProvider;
 use super::star_light_engine::{ChunkAccessor, SkyStarLightEngine};
 use crate::server::level::level_chunk::{BiomeId as ServerBiomeId, StateId, StructureKey};
 
+/// The runtime chunk value a generated LIGHT bridge hands to Starlight.
+pub type LightChunk = ChunkAccess<StateId, ServerBiomeId, StructureKey>;
+
 /// The narrow chunk access the engine lights through: a take/put closure over
-/// the caller's chunk storage. A `None` payload *takes* the chunk at `(x, z)`
-/// (removing it from the caller's storage); a `Some(chunk)` payload *puts* it
-/// back. The provider takes the chunks it lights, buffers any neighbours the
-/// engine resolves during the run, and returns them all afterwards — no global
-/// `ChunkMap` lookup, no shared authoritative state, no fabricated neighbours.
-type ChunkAccessFn = Box<
-    dyn FnMut(
-            i32,
-            i32,
-            Option<ChunkAccess<StateId, ServerBiomeId, StructureKey>>,
-        ) -> Option<ChunkAccess<StateId, ServerBiomeId, StructureKey>>
-        + Send,
->;
+/// the caller's tick-thread chunk storage. A `None` payload *takes* the chunk
+/// at `(x, z)`; a `Some(chunk)` payload puts it back. Missing chunks stay
+/// missing, and the provider never fabricates a neighbour.
+pub type ChunkAccessFn = Box<dyn FnMut(i32, i32, Option<LightChunk>) -> Option<LightChunk> + Send>;
 
 /// The `SkyStarLightEngine`-backed synchronous light provider — the concrete
 /// impl `rivet-server` hands `LevelLightEngine::with_provider`.
