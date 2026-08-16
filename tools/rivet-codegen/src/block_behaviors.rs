@@ -394,9 +394,7 @@ fn validate_collision_face_runs(value: &Value, state_count: u64) -> Result<Vec<C
                 format!("collision_face_runs run {i} `mask` must be a non-negative integer")
             })?;
         if mask > 0x3F {
-            bail!(
-                "collision_face_runs run {i} mask {mask} has bits outside six directions"
-            );
+            bail!("collision_face_runs run {i} mask {mask} has bits outside six directions");
         }
         if start > u32::MAX as u64 || length > u32::MAX as u64 {
             bail!("collision_face_runs run {i} start/length exceeds u32");
@@ -424,9 +422,7 @@ fn validate_collision_face_runs(value: &Value, state_count: u64) -> Result<Vec<C
         });
     }
     if expected_start != state_count {
-        bail!(
-            "collision_face_runs cover [0, {expected_start}) but state_count is {state_count}"
-        );
+        bail!("collision_face_runs cover [0, {expected_start}) but state_count is {state_count}");
     }
 
     Ok(runs)
