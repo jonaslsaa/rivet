@@ -41,8 +41,10 @@
 //!    `MOBS[nextInt(4)]` (the `nextInt(4)` mob index — `Util.getRandom`) is
 //!    drawn first. A pending positive-total `SpawnPotentials` then consumes
 //!    one weighted roll; an empty or zero-total decoded list consumes no roll.
-//!    A malformed list field uses Paper's singleton fallback and consumes a
-//!    `nextInt(1)` draw.
+//!    An absent or wrong-typed list field uses Paper's singleton fallback and
+//!    consumes a `nextInt(1)` draw. A rejected weighted list, such as one whose
+//!    total overflows `int`, leaves the pending entity unavailable and consumes
+//!    no mob-selection RNG.
 //!    `SpawnerBlockEntity.setEntityId` clears the potentials after applying
 //!    the selected entry. A missing spawner entity skips every mob draw,
 //!    exactly as Java does.
