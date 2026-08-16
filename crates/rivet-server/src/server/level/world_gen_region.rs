@@ -484,14 +484,19 @@ where
     }
 
     /// `LevelReader.getNoiseBiome(int, int, int)` — read the cached BIOMES
-    /// chunk selected by `QuartPos.toSection`, falling back to the uncached
-    /// server-level source when that chunk is unavailable.
-    fn get_noise_biome_cached(&self, quart_x: i32, quart_y: i32, quart_z: i32) -> Option<B> {
+    /// chunk selected by `QuartPos.toSection`.
+    ///
+    /// Paper calls `getChunk(..., ChunkStatus.BIOMES, false)` here. An absent
+    /// holder or a request outside the dependency window therefore raises the
+    /// same unavailable-chunk diagnostic as every other region read; it must
+    /// not silently fall back to the uncached server-level source.
+    fn get_noise_biome_cached(&self, quart_x: i32, quart_y: i32, quart_z: i32) -> B {
         let chunk_x = QuartPos::to_section(quart_x);
         let chunk_z = QuartPos::to_section(quart_z);
-        self.try_get_chunk(chunk_x, chunk_z, ChunkStatus::Biomes, false)
-            .ok()
-            .map(|chunk| chunk.get_noise_biome(quart_x, quart_y, quart_z))
+        let chunk = self
+            .try_get_chunk(chunk_x, chunk_z, ChunkStatus::Biomes, false)
+            .unwrap_or_else(|diagnostic| panic!("{diagnostic}"));
+        chunk.get_noise_biome(quart_x, quart_y, quart_z)
     }
 
     /// `WorldGenRegion.ensureCanWrite(BlockPos)` — the writability gate every
@@ -767,9 +772,9 @@ impl WorldGenLevel for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> 
     fn get_biome(&self, pos: &BlockPos) -> Holder<BiomeId> {
         self.biome_manager
             .get_biome_with(pos, |quart_x, quart_y, quart_z| {
-                self.get_noise_biome_cached(quart_x, quart_y, quart_z)
-                    .map(|biome| Holder::direct(BiomeId::from_id(biome.raw())))
-                    .unwrap_or_else(|| self.get_uncached_noise_biome(quart_x, quart_y, quart_z))
+                Holder::direct(BiomeId::from_id(
+                    self.get_noise_biome_cached(quart_x, quart_y, quart_z).raw(),
+                ))
             })
     }
 
@@ -932,9 +937,9 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
     fn get_biome(&self, pos: &BlockPos) -> Holder<BiomeId> {
         self.biome_manager
             .get_biome_with(pos, |quart_x, quart_y, quart_z| {
-                self.get_noise_biome_cached(quart_x, quart_y, quart_z)
-                    .map(|biome| Holder::direct(BiomeId::from_id(biome.0)))
-                    .unwrap_or_else(|| self.get_uncached_noise_biome(quart_x, quart_y, quart_z))
+                Holder::direct(BiomeId::from_id(
+                    self.get_noise_biome_cached(quart_x, quart_y, quart_z).0,
+                ))
             })
     }
 
@@ -1400,6 +1405,42 @@ mod tests {
         )
     }
 
+    /// A FEATURES region whose holder at `missing` has no chunk value, so a
+    /// BIOMES read exercises the typed unavailable diagnostic.
+    fn region_with_missing_holder(
+        missing: ChunkPos,
+    ) -> WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> {
+        let step = GENERATION_PYRAMID
+            .get_step_to(ChunkStatus::Features)
+            .clone();
+        let deps = step.direct_dependencies().as_list().to_vec();
+        let cache = StaticCache2D::create(0, 0, 8, &|x, z| {
+            let pos = ChunkPos::new(x, z);
+            if pos == missing {
+                Box::new(TestEmptyHolder)
+                    as Box<dyn GenerationChunkHolderView<StateId, ServerBiomeId, StructureKey>>
+            } else {
+                let distance = ChunkPos::new(0, 0).get_chessboard_distance_coords(x, z);
+                let status = deps[distance.min(deps.len() as i32 - 1) as usize];
+                Box::new(OwnedHolder::new(test_chunk(pos), status))
+                    as Box<dyn GenerationChunkHolderView<StateId, ServerBiomeId, StructureKey>>
+            }
+        });
+        WorldGenRegion::new(
+            cache,
+            ChunkPos::new(0, 0),
+            step,
+            0,
+            SUPERFLAT_MIN_Y,
+            SUPERFLAT_HEIGHT,
+            -63,
+            Arc::new(TestBiomeSource {
+                biome: BiomeId::from_id(40),
+            }),
+            RegistryAccess::empty(),
+        )
+    }
+
     /// A FEATURES region whose center chunk is supplied by the caller, so reads
     /// can distinguish the cached BIOMES value from the uncached source.
     fn region_with_center_chunk(
@@ -1716,13 +1757,13 @@ mod tests {
     // Biome access
     // -----------------------------------------------------------------------
 
-    /// `getBiome` uses the region's fiddled-distance interpolation and falls
-    /// back to the injected uncached source when the cached chunk read misses.
+    /// `getBiome` uses the region's fiddled-distance interpolation over the
+    /// cached BIOMES chunks.
     #[test]
-    fn get_biome_routes_through_the_injected_source() {
+    fn get_biome_routes_through_the_cached_chunk_view() {
         let region = feature_region();
-        // The test source returns plains (id 40) at every quart; the fiddled
-        // corner read resolves through it.
+        // The cached test chunks carry plains (id 40) at every quart; the
+        // fiddled corner read resolves through the cache.
         let biome = region.get_biome(&BlockPos::new(0, 64, 0));
         assert_eq!(biome, Holder::direct(BiomeId::from_id(40)));
         assert_eq!(
@@ -1755,6 +1796,28 @@ mod tests {
             region.get_biome(&BlockPos::new(8, 64, 8)),
             Holder::direct(BiomeId::from_id(0)),
         );
+    }
+
+    /// A BIOMES read from a ring-2 STRUCTURE_STARTS holder with no chunk must
+    /// preserve Paper's typed unavailable diagnostic instead of falling back to
+    /// the uncached source.
+    #[test]
+    #[should_panic(expected = "maximum allowed status: minecraft:structure_starts")]
+    fn get_noise_biome_rejects_missing_structure_starts_holder() {
+        let region = region_with_missing_holder(ChunkPos::new(2, 0));
+        // Quart x=8 maps to chunk x=2; the FEATURES dependency allows only
+        // STRUCTURE_STARTS there, so the diagnostic names that ring status.
+        region.get_noise_biome_cached(8, 0, 0);
+    }
+
+    /// A biome interpolation that reaches past the 9-ring FEATURES window must
+    /// fail with the unavailable-chunk diagnostic rather than use the uncached
+    /// source and hide the dependency-window violation.
+    #[test]
+    #[should_panic(expected = "actual status: [out of cache bounds]")]
+    fn get_biome_rejects_out_of_window_cached_read() {
+        let region = feature_region();
+        region.get_biome(&BlockPos::new(160, 64, 0));
     }
 
     // -----------------------------------------------------------------------
