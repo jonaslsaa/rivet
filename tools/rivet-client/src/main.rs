@@ -931,23 +931,26 @@ async fn loaded_walk(bot: &Client) -> Value {
     json!({ "before": before, "after": after })
 }
 
-/// The `loaded-recenter` movement route (issue #561): the block-X offsets of
-/// the +x frames the client drives, relative to the observed spawn block. The
-/// real New World spawn block is `(-16, 68, -48)` in chunk `(-1, -3)`, so
-/// offset +16 reaches block X 0 — the first block of chunk `(0, -3)` — and
-/// offset +32 reaches block X 16 — the first block of chunk `(1, -3)`. The
-/// client advertises view distance 2, so the join burst resolves send radius 3
-/// and the send-3 spawn view is the 81-chunk square `(-5..3, -7..1)` — a strict
-/// subset of the booted 117-chunk square `(-6..4, -8..2)`.
+/// The `loaded-recenter` movement route (issue #185 acceptance reroute): the
+/// block-X offsets of the -x frames the client drives, relative to the observed
+/// spawn block. The real New World spawn block is `(-16, 68, -48)` in chunk
+/// `(-1, -3)`, so offset -16 reaches block X -32 — the last block of chunk
+/// `(-2, -3)` — and offset -32 reaches block X -48 — the first block of chunk
+/// `(-3, -3)`. The client advertises view distance 2, so the join burst
+/// resolves send radius 3 and the send-3 spawn view is the 81-chunk square
+/// `(-5..3, -7..1)` — a strict subset of the booted 117-chunk square
+/// `(-6..4, -8..2)`.
 ///
-/// Crossing the FIRST boundary (into chunk `(0, -3)`) enters the x=4 column
-/// `z=-7..1`, which the booted square still contains (`|4-(-1)|-2 = 3`,
-/// `3²+2² = 13 < 16`) — that move must SUCCEED, proving a genuine repeated
-/// chunk-boundary crossing. Crossing the SECOND boundary (into chunk `(1, -3)`)
-/// enters the x=5 column `z=-7..1`, which the booted square does NOT contain
-/// (`x=5` is outside its `-6..4` raster entirely) — the recenter must fail
-/// typed at the first enter cell `(5, -7)`.
-const RECENTER_ROUTE_X_OFFSETS: [f64; 2] = [16.0, 32.0];
+/// Crossing the FIRST boundary (into chunk `(-2, -3)`) enters the x=-6 column
+/// `z=-7..1`, which the booted square still contains — that move must SUCCEED,
+/// proving a genuine repeated chunk-boundary crossing. Crossing the SECOND
+/// boundary (into chunk `(-3, -3)`) enters the x=-7 column `z=-7..1`, which the
+/// booted square does NOT contain (`x=-7` is outside its `-6..4` raster) — and
+/// the real New World's x=-7 column is structure-free (the #185 on-demand load
+/// path reconstructs those chunks), so the second crossing must also SUCCEED,
+/// proving the region-backed on-demand load sustains movement instead of
+/// disconnecting.
+const RECENTER_ROUTE_X_OFFSETS: [f64; 2] = [-16.0, -32.0];
 /// How long to wait between driven movement frames (ms). Longer than the
 /// server's 50 ms tick, so each boundary-crossing frame is processed as its own
 /// tick (a frame's recenter runs against the previously committed center) and
