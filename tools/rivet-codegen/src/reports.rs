@@ -382,14 +382,14 @@ pub(crate) struct ReportEntry {
     pub(crate) sha256: String,
 }
 
-/// Build the source provenance for `jar` from its `version.json` + sha256 (+
-/// best-effort Paper git commit). `pub(crate)` so the biomes+tags half
+/// Build the source provenance for `jar` from its `version.json`, manifest,
+/// and sha256. `pub(crate)` so the biomes+tags half
 /// ([`crate::extract_biomes_tags`]) pins its fixture to the same source
 /// identity.
 pub(crate) fn capture_source(jar: &Path, repo_root: &Path) -> Result<SourceProvenance> {
     let version = read_version_json(jar)?;
     let jar_sha256 = sha256_hex(&fs::read(jar).context("read source jar")?);
-    let paper_git = Some(read_paper_git(repo_root)?);
+    let paper_git = Some(read_paper_git(jar, repo_root)?);
     let jar_path = render_jar_path(jar, repo_root);
     Ok(SourceProvenance {
         jar: jar_path,
@@ -433,10 +433,22 @@ fn read_version_json(jar: &Path) -> Result<VersionJson> {
     serde_json::from_slice(&out.stdout).context("parse version.json")
 }
 
-/// Resolve the primary Rivet checkout from a worktree's shared git directory.
-/// `working/Paper` is a sibling of that primary checkout, not of the ephemeral
-/// worktree in which codegen is running.
-fn primary_checkout(repo_root: &Path) -> Result<PathBuf> {
+/// Read the Paper commit embedded in the exact server jar used for capture.
+/// The checkout is only used to expand Paper's short manifest hash and to reject
+/// a jar built from a different checkout; it is never an independent provenance
+/// source.
+fn read_paper_git(jar: &Path, repo_root: &Path) -> Result<String> {
+    let manifest = Command::new("unzip")
+        .args(["-p", jar.to_str().unwrap(), "META-INF/MANIFEST.MF"])
+        .output()
+        .with_context(|| format!("UNVERIFIED: read Paper manifest from {}", jar.display()))?;
+    ensure!(
+        manifest.status.success(),
+        "UNVERIFIED: Paper jar {} has no readable META-INF/MANIFEST.MF",
+        jar.display()
+    );
+    let jar_commit = parse_paper_git_manifest(&manifest.stdout)?;
+
     let out = Command::new("git")
         .args([
             "-C",
@@ -468,19 +480,15 @@ fn primary_checkout(repo_root: &Path) -> Result<PathBuf> {
             common_dir.display()
         )
     })?;
-    common_dir.parent().map(Path::to_path_buf).with_context(|| {
-        format!(
-            "UNVERIFIED: Rivet git common directory {} has no primary checkout",
-            common_dir.display()
-        )
-    })
-}
-
-/// Read the pinned Paper commit used to build the jar. Missing or unusable
-/// provenance is an UNVERIFIED extraction failure, never a silently omitted
-/// manifest field.
-fn read_paper_git(repo_root: &Path) -> Result<String> {
-    let primary = primary_checkout(repo_root)?;
+    let primary = common_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .with_context(|| {
+            format!(
+                "UNVERIFIED: Rivet git common directory {} has no primary checkout",
+                common_dir.display()
+            )
+        })?;
     let paper = primary.join("working/Paper");
     ensure!(
         paper.is_dir(),
@@ -497,13 +505,38 @@ fn read_paper_git(repo_root: &Path) -> Result<String> {
         "UNVERIFIED: Paper checkout at {} has no readable git HEAD",
         paper.display()
     );
-    let commit = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let checkout_commit = String::from_utf8_lossy(&out.stdout).trim().to_string();
     ensure!(
-        !commit.is_empty(),
+        !checkout_commit.is_empty(),
         "UNVERIFIED: Paper git HEAD was empty in {}",
         paper.display()
     );
-    Ok(commit)
+    resolve_paper_git(jar, &jar_commit, &checkout_commit)
+}
+
+fn resolve_paper_git(jar: &Path, jar_commit: &str, checkout_commit: &str) -> Result<String> {
+    ensure!(
+        checkout_commit.starts_with(jar_commit),
+        "UNVERIFIED: Paper jar {} reports Git-Commit {} but checkout HEAD is {}",
+        jar.display(),
+        jar_commit,
+        checkout_commit
+    );
+    Ok(checkout_commit.to_string())
+}
+
+fn parse_paper_git_manifest(manifest: &[u8]) -> Result<String> {
+    let manifest =
+        std::str::from_utf8(manifest).context("UNVERIFIED: Paper manifest is not UTF-8")?;
+    let commit = manifest
+        .lines()
+        .find_map(|line| line.strip_prefix("Git-Commit:").map(str::trim))
+        .context("UNVERIFIED: Paper manifest has no Git-Commit field")?;
+    ensure!(
+        (7..=40).contains(&commit.len()) && commit.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "UNVERIFIED: Paper manifest Git-Commit field is malformed: {commit:?}"
+    );
+    Ok(commit.to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -568,31 +601,31 @@ mod tests {
     }
 
     #[test]
-    fn primary_checkout_uses_git_common_dir() {
-        let repo = crate::extract::find_repo_root().unwrap();
-        let common = Command::new("git")
-            .args([
-                "-C",
-                repo.to_str().unwrap(),
-                "rev-parse",
-                "--git-common-dir",
-            ])
-            .output()
-            .unwrap();
-        assert!(common.status.success());
-        let common = String::from_utf8(common.stdout).unwrap();
-        let common = PathBuf::from(common.trim());
-        let common = if common.is_absolute() {
-            common
-        } else {
-            repo.join(common)
-        };
-        let expected = fs::canonicalize(common)
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_path_buf();
-        assert_eq!(primary_checkout(&repo).unwrap(), expected);
+    fn jar_manifest_commit_is_expanded_only_after_checkout_match() {
+        let jar = Path::new("/tmp/paper-server.jar");
+        let checkout = "0a993450f129c4942c2a9ed45ba047412b4667cf";
+        assert_eq!(
+            resolve_paper_git(jar, "0a99345", checkout).unwrap(),
+            checkout
+        );
+    }
+
+    #[test]
+    fn jar_checkout_mismatch_is_unverified() {
+        let jar = Path::new("/tmp/paper-server.jar");
+        let result = resolve_paper_git(jar, "0a99345", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn paper_manifest_requires_a_valid_git_commit() {
+        assert!(parse_paper_git_manifest(b"Manifest-Version: 1.0\r\n").is_err());
+        assert!(parse_paper_git_manifest(b"Git-Commit: \r\n").is_err());
+        assert!(parse_paper_git_manifest(b"Git-Commit: not-a-commit\r\n").is_err());
+        assert_eq!(
+            parse_paper_git_manifest(b"Manifest-Version: 1.0\r\nGit-Commit: 0a99345\r\n").unwrap(),
+            "0a99345"
+        );
     }
 
     #[test]
