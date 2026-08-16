@@ -2,10 +2,11 @@
 //! (class, 26.2) — owned by the `mc.world.level.levelgen.feature.underwatermagma`
 //! manifest unit.
 //!
-//! Java: `Feature<UnderwaterMagmaConfiguration>` that first scans the downward
-//! water column at the origin (`Column.scan` with `insideColumn = is(WATER)`,
-//! `validEdge = !is(WATER)`) and returns `false` when there is no water column
-//! floor. Otherwise it builds the axis-aligned box around the floor position
+//! Java: `Feature<UnderwaterMagmaConfiguration>` that scans the water column at
+//! the origin (`Column.scan` with `insideColumn = is(WATER)`, `validEdge =
+//! !is(WATER)`) in the exact UP-then-DOWN order and returns `false` when there
+//! is no water column floor. Otherwise it builds the axis-aligned box around
+//! the floor position
 //! (`placementRadiusAroundFloor` on every axis), iterates its cells in
 //! X/Y/Z-major order, and for every cell where `random.nextFloat() <
 //! placementProbabilityPerValidPosition` places `MAGMA_BLOCK` when the cell is
@@ -14,10 +15,11 @@
 //!
 //! The scan is ported through the `WorldGenLevel::is_state_at_position` seam
 //! (the `LevelReader.isStateAtPosition` Java call `Column.scan` performs) and
-//! the box iteration through `BlockPos::between_closed_pos` (the
+//! the box iteration through the lazy `BlockBox::iter` (the
 //! `betweenClosedStream` Java surface, x-fastest/y/z). The RNG is consumed for
 //! every cell of the box BEFORE the placement validity check — the stream
-//! `.filter` order — so the exact Java draw sequence is preserved.
+//! `.filter` order — so the exact Java draw sequence is preserved without
+//! materializing positions ahead of the stream consumer.
 
 use crate::block::blocks::Blocks;
 use crate::level::WorldGenLevel;
@@ -92,10 +94,10 @@ impl FeatureBehavior<UnderwaterMagmaConfiguration> for UnderwaterMagmaFeature {
         let bounds = BlockBox::new(floor_pos.subtract(&radius), floor_pos.offset_vec(&radius));
 
         let mut placed = 0;
-        for pos in bounds.iterator() {
-            // Java consumes a `nextFloat` for every cell of the box, before the
-            // placement-validity check — the first stream `.filter` runs before
-            // the second, so a rejected cell still draws.
+        for pos in bounds.iter() {
+            // Java consumes a `nextFloat` for every cell of the lazy stream,
+            // before the placement-validity check — the first stream `.filter`
+            // runs before the second, so a rejected cell still draws.
             if random.next_float() < config.placement_probability_per_valid_position
                 && is_valid_placement(level, &pos)
             {
@@ -112,39 +114,44 @@ impl FeatureBehavior<UnderwaterMagmaConfiguration> for UnderwaterMagmaFeature {
 }
 
 /// `UnderwaterMagmaFeature.getFloorY(WorldGenLevel, BlockPos,
-/// UnderwaterMagmaConfiguration)` — the downward water-column floor scan.
+/// UnderwaterMagmaConfiguration)` — the `Column.scan` water-column floor scan.
 ///
-/// Java runs `Column.scan(level, origin, config.floorSearchRange, insideColumn,
-/// validEdge)` and maps the returned `Column` to its floor. The scan fails empty
-/// when the origin cell is not water (`!isStateAtPosition(pos, insideColumn)`);
-/// otherwise it walks DOWN from the origin (starting at `i = 1`, moving one
-/// block per step while the current cell is water) and the reached cell's y is
-/// the floor iff that cell satisfies `validEdge` (is not water). So the floor is
-/// the first non-water cell at-or-below the bottom of the origin's contiguous
-/// water column, bounded by the search range.
+/// Java first checks the origin, then runs `Column.scanDirection` upward and
+/// reads that direction's valid edge, before resetting to the origin and doing
+/// the same downward scan. The returned floor is only the DOWN result; the UP
+/// result is still observed because its reads are part of the behavior.
 fn get_floor_y(
     level: &mut dyn WorldGenLevel,
     origin: &BlockPos,
     config: &UnderwaterMagmaConfiguration,
 ) -> Option<i32> {
-    let is_water = |state: &BlockState| state.block() == Blocks::WATER.id();
+    let inside_column = |state: &BlockState| state.block() == Blocks::WATER.id();
+    let valid_edge = |state: &BlockState| state.block() != Blocks::WATER.id();
 
-    if !level.is_state_at_position(origin, &is_water) {
+    if !level.is_state_at_position(origin, &inside_column) {
         return None;
     }
 
-    let mut y = origin.get_y();
+    let nearest_empty_y = origin.get_y();
+    let mut y = nearest_empty_y;
     let mut i = 1;
-    while i < config.floor_search_range && level.is_state_at_position(&origin.at_y(y), &is_water) {
+    while i < config.floor_search_range
+        && level.is_state_at_position(&origin.at_y(y), &inside_column)
+    {
+        y = y.wrapping_add(1);
+        i += 1;
+    }
+    let _ceiling = level.is_state_at_position(&origin.at_y(y), &valid_edge);
+
+    y = nearest_empty_y;
+    i = 1;
+    while i < config.floor_search_range
+        && level.is_state_at_position(&origin.at_y(y), &inside_column)
+    {
         y = y.wrapping_sub(1);
         i += 1;
     }
-
-    // The reached cell (origin.y - (i - 1)) is the floor iff it satisfies the
-    // `validEdge` predicate (is not water).
-    if level.is_state_at_position(&origin.at_y(y), &|state: &BlockState| {
-        state.block() != Blocks::WATER.id()
-    }) {
+    if level.is_state_at_position(&origin.at_y(y), &valid_edge) {
         Some(y)
     } else {
         None
@@ -601,6 +608,37 @@ mod tests {
         assert!(level.writes.is_empty());
         // 5x5x5 = 125 cells, one draw each.
         assert_eq!(random.calls.len(), 125);
+    }
+
+    /// Hostile: the read log pins `Column.scan`'s origin read, complete UP
+    /// scan (including its valid-edge read), origin reset, and complete DOWN
+    /// scan (including its valid-edge read). The zero probability prevents the
+    /// placement loop from adding any later world reads to the sequence.
+    #[test]
+    fn hostile_column_scan_read_log_is_paper_order() {
+        let mut level = TestLevel::over(access());
+        for y in 10..=11 {
+            level.states.insert(BlockPos::new(0, y, 0), water());
+        }
+        level.states.insert(BlockPos::new(0, 9, 0), stone());
+        let config = UnderwaterMagmaConfiguration::new(4, 0, 0.0);
+        let (verdict, random) = place_with(&mut level, BlockPos::new(0, 10, 0), &config);
+
+        assert!(!verdict);
+        assert_eq!(random.calls, vec![RngCall::Float]);
+        assert_eq!(
+            level.reads.borrow().as_slice(),
+            [
+                BlockPos::new(0, 10, 0),
+                BlockPos::new(0, 10, 0),
+                BlockPos::new(0, 11, 0),
+                BlockPos::new(0, 12, 0),
+                BlockPos::new(0, 12, 0),
+                BlockPos::new(0, 10, 0),
+                BlockPos::new(0, 9, 0),
+                BlockPos::new(0, 9, 0),
+            ]
+        );
     }
 
     /// Hostile: `floorSearchRange = 0` makes the DOWN scan fail immediately —

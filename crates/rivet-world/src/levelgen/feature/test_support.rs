@@ -38,6 +38,7 @@ use rivet_registry::root::AnyBox;
 use rivet_registry::{Identifier, ResourceKey};
 use rivet_util::RandomSource;
 use rivet_util::random::{LegacyPositionalRandomFactory, LegacyRandomSource};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -140,6 +141,8 @@ pub struct TestLevel {
     /// The mutable block-state map: `get_block_state` reads it (air for an
     /// unset position), `set_block` writes it.
     pub states: HashMap<BlockPos, BlockState>,
+    /// Block-state reads in order, for tests that pin world-access sequencing.
+    pub reads: RefCell<Vec<BlockPos>>,
     /// `get_height_at` — the column height returned for every `(x, z)`.
     pub height: i32,
     /// `get_sea_level` — the fixed sea level.
@@ -185,6 +188,7 @@ impl TestLevel {
             writes_flags: Vec::new(),
             destroyed: Vec::new(),
             states: HashMap::new(),
+            reads: RefCell::new(Vec::new()),
             height: 0,
             sea_level: 63,
             survive: true,
@@ -216,6 +220,7 @@ impl WorldGenLevel for TestLevel {
     }
 
     fn get_block_state(&self, pos: &BlockPos) -> BlockState {
+        self.reads.borrow_mut().push(*pos);
         self.states
             .get(pos)
             .copied()
