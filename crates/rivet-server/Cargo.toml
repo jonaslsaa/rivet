@@ -23,6 +23,7 @@ rivet-serialization = { workspace = true }
 rivet-text = { workspace = true }
 rivet-util = { workspace = true }
 rivet-world = { workspace = true }
+serde_json = { workspace = true }
 # `IndexMap` — the insertion-ordered runtime block-entity authority surface
 # the chunk exposes (#537).
 indexmap = { workspace = true }
@@ -38,8 +39,6 @@ tempfile = { workspace = true }
 # Building compressed wire frames in the offline-login integration tests
 # (zlib-encoding the client's `login_acknowledged`).
 flate2 = { workspace = true }
-# Parsing the committed `registry_data_capture.json` byte-identity fixture.
-serde_json = { workspace = true }
 # The seed-42 LIGHT differential test parses the committed `light.json` oracle
 # fixture (the derive is dev-only, mirroring the rivet-oracle capture side).
 serde = { version = "1", features = ["derive"] }
