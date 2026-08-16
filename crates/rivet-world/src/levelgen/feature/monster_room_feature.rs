@@ -408,10 +408,14 @@ impl FeatureBehavior<NoneFeatureConfiguration> for MonsterRoomFeature {
             &can_replace,
         );
         if level.is_spawner_block_entity(&origin) {
+            // Java evaluates the randomEntityId(random) argument before
+            // BaseSpawner.setEntityId enters getOrCreateNextSpawnData and
+            // selects an existing SpawnPotentials entry.
+            let entity_id = random_entity_id(random);
             let potential_roll = level
                 .spawner_potential_weight(&origin)
                 .map(|total| random.next_int_bound(total));
-            level.set_spawner_entity(&origin, random_entity_id(random), potential_roll);
+            level.set_spawner_entity(&origin, entity_id, potential_roll);
         }
 
         true
@@ -460,8 +464,8 @@ mod tests {
                 .bounds
                 .pop()
                 .expect("room fixture carries a mob roll");
-            random.bounds.push(0);
             random.bounds.push(mob_roll);
+            random.bounds.push(0);
             random
         }
     }
@@ -622,8 +626,8 @@ mod tests {
         let mut random = ScriptedRandom::room_with_spawner_potentials(7);
 
         assert!(place(&mut level, origin, &mut random));
-        assert_eq!(random.calls[60], RngCall::IntBound(1));
-        assert_eq!(random.calls[61], RngCall::IntBound(4));
+        assert_eq!(random.calls[60], RngCall::IntBound(4));
+        assert_eq!(random.calls[61], RngCall::IntBound(1));
         assert_eq!(
             level.block_entities.get(&origin),
             Some(&TestBlockEntity::Spawner {

@@ -1139,6 +1139,16 @@ RETIRED_NOTES = {
     "tail; they depend on feature.core (the hub's reverse registration edges "
     "are generated content, not dep edges)",
 }
+# The chunk-status FEATURES note was a durable workflow annotation from the
+# pre-17x17 decoder slice. Drop that stale segment during regeneration rather
+# than carrying claims that no longer describe the production boundary.
+RETIRED_NOTE_MARKERS: dict[str, tuple[str, ...]] = {
+    "mc.world.level.chunk.status": (
+        "bounded 3x3",
+        "SettingsNotGenerated",
+        "placed-feature decode boundary",
+    ),
+}
 FLAG_PACKAGES: dict[str, set[str]] = {
     "network": {"net.minecraft.network"},
     "game": {"net.minecraft.network.protocol.game"},
@@ -1504,6 +1514,16 @@ SPLIT_EDGES: dict[str, set[str]] = {
 # translate-wave must absorb as STUBs because the same-package back-edge is not
 # a dep edge, and the generated-content hubs whose registration tables come from
 # rivet-codegen (extend the #49/#154 codegen) rather than being hand-ported.
+PACKAGE_NOTES: dict[str, str] = {
+    "mc.world.level.chunk.status": (
+        "DONE #185: FEATURES execution now covers the complete 17x17 dependency "
+        "window, with CARVERS at rings 0/1 and STRUCTURE_STARTS through radius 8; "
+        "the biome source resolves all 55 possible biomes, geode and MonsterRoom "
+        "features are crossed, and the typed traversal reaches ore_dirt at step "
+        "6/global 0."
+    ),
+}
+
 SPLIT_NOTES: dict[str, str] = {
     "mc.network.protocol.game.join": (
         "M1 STUB: join packets implement Packet<ClientGamePacketListener> and "
@@ -1821,10 +1841,13 @@ SPLIT_NOTES: dict[str, str] = {
         "consumed by servercache/distance, not by these value types"
     ),
     "mc.server.level.pipeline.region": (
-        "#185: WorldGenRegion, the worldgen chunk-view container holding "
-        "GenerationChunkHolder references (region -> holder). M2 STUB: "
-        "WorldGenRegion.level is the residual ServerLevel seam — absorbed "
-        "as stubs"
+        "DONE #185: WorldGenRegion value layer owns the complete 17x17 FEATURES "
+        "dependency window (CARVERS rings 0/1, STRUCTURE_STARTS through radius 8), "
+        "cached BIOMES diagnostics, durable DUMMY/materialized block-entity NBT, "
+        "and persisted heightmaps. The seed-42 production FEATURES traversal resolves "
+        "all 55 possible biomes; geode and MonsterRoom are crossed before the typed "
+        "ore_dirt boundary at step 6/global 0. Remaining scheduler/ServerLevel wiring "
+        "belongs to the downstream #185 continuation."
     ),
     "mc.server.level": (
         "#227 residual: the untranslated tail — ServerLevel/ServerPlayer + the "
@@ -2078,6 +2101,10 @@ def main() -> None:
         # regeneration without being duplicated on the next carry.
         status, attempts, notes = prev_state.get(unit_id, ("pending", "0", ""))
         existing = notes.split(" | ") if notes else []
+        markers = RETIRED_NOTE_MARKERS.get(unit_id, ())
+        if markers:
+            existing = [seg for seg in existing if not any(marker in seg for marker in markers)]
+            notes = " | ".join(existing)
         for seg in (s for s in authored_notes.split(" | ") if s):
             if seg not in existing:
                 notes = f"{notes} | {seg}".strip(" |")
@@ -2103,7 +2130,7 @@ def main() -> None:
         # units that are not yet done are candidates. Structural SCC pressure
         # stays visible in the cycle column, so a done unit never advertises
         # itself as needing a split (see the module docstring).
-        status, attempts, notes = carry(unit_id, "")
+        status, attempts, notes = carry(unit_id, PACKAGE_NOTES.get(unit_id, ""))
         needs_split = "yes" if (
             status != "done" and len(pkg_files[pkg]) > SPLIT_FILE_THRESHOLD
         ) else ""
