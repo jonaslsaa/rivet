@@ -29,7 +29,7 @@
 //! caller-supplied [`GenerationChunkHolder::new`] features closure runs Java's
 //! `ChunkStatusTasks.generateFeatures` — the `Heightmap.primeHeightmaps(chunk,
 //! FINAL_HEIGHTMAPS)` priming and the `addVanillaDecorations` prologue over a
-//! bounded region-backed 3x3 composition — the decoration-seed derivation
+//! bounded dependency-square composition — the decoration-seed derivation
 //! (`SectionPos.of(centerPos, level.getMinSectionY()).origin()` fed to
 //! `setDecorationSeed`), a `WorldGenRegion` that borrows the center chunk and
 //! owns eight ring chunks generated EMPTY→CARVERS through the same real bodies
@@ -67,7 +67,7 @@
 //! (`BlockState`/`section_reconstruction::BiomeId`) uses the generic chunk-view
 //! methods while the dense server region keeps its block-state `WorldGenLevel`
 //! facade on the `StateId`/`ServerBiomeId`/`StructureKey` specialization. The
-//! FEATURES body composes its bounded 3x3 region through [`CenterHolder`] (which
+//! FEATURES body composes its bounded dependency-square region through [`CenterHolder`] (which
 //! borrows the center chunk's base) and [`OwnedHolder`] (which owns the eight
 //! ring chunks) — see [`compose_feature_region`]. What still defers (RivetTodo
 //! #185) is the FULL-reconstruction bridge: `ChunkAccess::map_values` is wired
@@ -538,7 +538,7 @@ impl GenerationChunkHolder {
     /// The chunk's persisted status — `EMPTY` before any step, `CARVERS` after a
     /// successful BIOMES→NOISE→SURFACE→CARVERS run, and never `FULL` (the
     /// executor refuses to stamp it). A FEATURES run primes the final heightmaps,
-    /// drives the bounded 3x3 region, resolves the FULL possible-biome settings
+    /// drives the bounded dependency-square region, resolves the FULL possible-biome settings
     /// and builds the FeatureSorter, and then fails typed at the first placed
     /// feature whose value decode is unavailable (`FeaturePlacementDecode`, the
     /// `#126` blocker — seed-42: `lake_lava_underground`), so the chunk is never
@@ -561,7 +561,7 @@ impl GenerationChunkHolder {
     /// ([`GeneratedChunkError::UnsupportedStatus`]). The chunk is left
     /// untouched by every such refusal. (The wired FEATURES rung is the
     /// exception: it runs Java's priming prologue — heightmap priming, the
-    /// decoration-seed derivation, the bounded 3x3 region read — and then fails
+    /// decoration-seed derivation, the bounded dependency-square region read — and then fails
     /// typed, so the chunk's heightmaps advance while its persisted status is
     /// never stamped past CARVERS; see [`GenerationChunkHolder::status`].)
     pub fn generate_through(&mut self, target: ChunkStatus) -> Result<(), GeneratedChunkError> {
@@ -708,38 +708,54 @@ fn compose_feature_region<'a>(
 ) -> WorldGenRegion<'a, BlockState, WorldgenBiomeId, StructureKey> {
     let center_pos = chunk.get_pos();
     let center_status = chunk.get_persisted_status();
+    let feature_step = GENERATION_PYRAMID
+        .get_step_to(ChunkStatus::Features)
+        .clone();
+    let dependencies = feature_step.direct_dependencies().as_list().to_vec();
+    let cache_radius = dependencies
+        .len()
+        .checked_sub(1)
+        .expect("FEATURES must have at least the center dependency") as i32;
+    let cache_size = (2 * cache_radius + 1) as usize;
+    let center_index = cache_radius as usize * cache_size + cache_radius as usize;
     let mut holders: Vec<
         Box<dyn GenerationChunkHolderView<BlockState, WorldgenBiomeId, StructureKey> + 'a>,
-    > = Vec::with_capacity(9);
-    // The holders must be in `StaticCache2D::from_entries`'s storage order
-    // (X-outer, Z-inner — index `(x - minX) * sizeZ + (z - minZ)`), not
-    // `ChunkPos::range_closed`'s X-fastest order: the two are transposes, and a
-    // `getChunk(x, z)` would otherwise read the neighbor built for the
-    // transposed `(z, x)`. Ring positions are gathered in storage order first so
-    // the center chunk's borrow is taken exactly once, at its own (index-4) slot.
-    let mut ring_positions = Vec::with_capacity(8);
-    for dx in -1..=1 {
-        for dz in -1..=1 {
+    > = Vec::with_capacity(cache_size * cache_size - 1);
+    // `WorldGenRegion` may validly read every direct-dependency ring, not just
+    // the 3x3 biome-gather window. `StaticCache2D` uses X-outer/Z-inner storage,
+    // so build the complete square in that order and insert the borrowed center
+    // at its row-major center slot. Far rings only require STRUCTURE_STARTS for
+    // FEATURES; the ring-1 neighbors require CARVERS.
+    for dx in -cache_radius..=cache_radius {
+        for dz in -cache_radius..=cache_radius {
             let pos = ChunkPos::new(
                 center_pos.x().wrapping_add(dx),
                 center_pos.z().wrapping_add(dz),
             );
-            if pos != center_pos {
-                ring_positions.push(pos);
+            if pos == center_pos {
+                continue;
             }
+            let distance = dx.abs().max(dz.abs()) as usize;
+            let status = dependencies[distance];
+            let ring_chunk = if status.is_or_after(ChunkStatus::Carvers) {
+                generate_ring_chunk(pos, generator)
+            } else {
+                fresh_worldgen_chunk(pos, generator).into_base()
+            };
+            holders.push(Box::new(OwnedHolder::new(ring_chunk, status)));
         }
     }
-    for pos in ring_positions {
-        holders.push(Box::new(OwnedHolder::new(
-            generate_ring_chunk(pos, generator),
-            ChunkStatus::Carvers,
-        )));
-    }
     holders.insert(
-        4,
+        center_index,
         Box::new(CenterHolder::new(chunk.base_mut(), center_status)),
     );
-    let cache = StaticCache2D::from_entries(center_pos.x() - 1, center_pos.z() - 1, 3, 3, holders);
+    let cache = StaticCache2D::from_entries(
+        center_pos.x() - cache_radius,
+        center_pos.z() - cache_radius,
+        cache_size as i32,
+        cache_size as i32,
+        holders,
+    );
     WorldGenRegion::new(
         cache,
         center_pos,
@@ -1388,7 +1404,7 @@ mod tests {
     /// EMPTY chunk targeting it runs BIOMES→NOISE→SURFACE→CARVERS and is
     /// stamped CARVERS. FEATURES is wired-but-blocked (see
     /// `generate_through_features_runs_prologue_then_fails_typed`): the
-    /// features body primes the final heightmaps, runs the bounded 3x3 region
+    /// features body primes the final heightmaps, runs the bounded dependency-square region
     /// and per-step loop, and fails typed at the first placed feature whose
     /// value decode is unavailable, so the chunk is never stamped FEATURES.
     #[test]
@@ -1656,6 +1672,13 @@ mod tests {
                 "the bounded region must serve every 3x3 chunk at its own position"
             );
         }
+        assert_eq!(
+            region
+                .try_get_chunk(8, 0, ChunkStatus::StructureStarts, true)
+                .expect("the farthest direct dependency ring must be cached")
+                .get_pos(),
+            ChunkPos::new(8, 0)
+        );
     }
 
     /// The seed-42 origin 3x3 biome union — the exact set the seed-42 (0,0)

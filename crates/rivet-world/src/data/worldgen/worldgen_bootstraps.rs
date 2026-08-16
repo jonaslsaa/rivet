@@ -4,9 +4,10 @@
 //! (NOISE), [`noise_router_data`] (DENSITY_FUNCTION), and
 //! [`noise_generator_settings`] (NOISE_SETTINGS) — through the test seam
 //! `RecordingContext` into frozen `rivet-registry` registries, and returns the
-//! `RegistryAccess` with all six populated (NOISE, DENSITY_FUNCTION, BIOME,
-//! NOISE_SETTINGS, CONFIGURED_FEATURE, PLACED_FEATURE). The feature registries
-//! are currently empty typed registries: they make the worldgen back-reference
+//! `RegistryAccess` with six typed registries (NOISE, DENSITY_FUNCTION, BIOME,
+//! NOISE_SETTINGS, CONFIGURED_FEATURE, PLACED_FEATURE). The first four are
+//! populated; the feature registries are currently empty typed registries: they
+//! make the worldgen back-reference
 //! boundary real without fabricating feature values, while the feature decoder
 //! remains an explicit downstream stage. The BIOME registry rides along because the NOISE_SETTINGS
 //! bootstrap's `SurfaceRuleData` builders resolve their biome holders through
