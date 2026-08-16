@@ -401,8 +401,9 @@ impl WorldGenLevel for TestLevel {
         }) = self.block_entities.get_mut(pos)
         {
             if let Some(mut roll) = potential_roll {
-                for (_, weight) in spawn_potentials.iter() {
+                for (potential_id, weight) in spawn_potentials.iter() {
                     if roll < *weight {
+                        *next_spawn = Some(potential_id.clone());
                         break;
                     }
                     roll -= *weight;
