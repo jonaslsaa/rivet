@@ -2325,7 +2325,8 @@ mod tests {
                 &region,
                 &spawner_pos,
             ),
-            None
+            Some(1),
+            "an uninitialized spawner uses Paper's fallback SpawnData weight"
         );
         <WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
             &mut region,

@@ -69,6 +69,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use rivet_nbt::compound_tag::CompoundTag;
+use rivet_nbt::float_tag::FloatTag;
+use rivet_nbt::int_tag::IntTag;
 use rivet_nbt::list_tag::ListTag;
 use rivet_nbt::tag::Tag;
 use rivet_registry::Identifier;
@@ -83,6 +85,7 @@ use rivet_registry::generated::block_behaviors::{
 use rivet_registry::generated::block_states::StateId;
 use rivet_registry::generated::blocks::BlockId;
 use rivet_registry::holder::Holder;
+use rivet_serialization::float_format::java_float_equals;
 use rivet_util::StaticCache2D;
 use rivet_util::mth;
 use rivet_util::util::log_and_pause_if_in_ide;
@@ -152,6 +155,22 @@ fn decode_spawn_data(spawn_data: &CompoundTag) -> Option<CompoundTag> {
             decoded.remove(field);
         }
     }
+    if let Some(Tag::Compound(rules)) = decoded.tags.get_mut("custom_spawn_rules") {
+        match normalize_custom_spawn_rules(rules) {
+            Ok(normalized) => *rules = normalized,
+            Err(()) => {
+                decoded.remove("custom_spawn_rules");
+            }
+        }
+    }
+    if let Some(Tag::Compound(equipment)) = decoded.tags.get_mut("equipment") {
+        let normalized = normalize_equipment(equipment);
+        if let Some(normalized) = normalized {
+            *equipment = normalized;
+        } else {
+            decoded.remove("equipment");
+        }
+    }
     let Some(Tag::Compound(entity)) = decoded.tags.get_mut("entity") else {
         unreachable!("entity was checked above")
     };
@@ -169,6 +188,99 @@ fn decode_spawn_data(spawn_data: &CompoundTag) -> Option<CompoundTag> {
     Some(decoded)
 }
 
+fn normalize_custom_spawn_rules(rules: &CompoundTag) -> Result<CompoundTag, ()> {
+    let mut normalized = CompoundTag::new();
+    for field in ["block_light_limit", "sky_light_limit"] {
+        if let Some(value) = rules.get(field)
+            && let Some(value) = normalize_light_limit(value)?
+        {
+            normalized.put(field.to_string(), value);
+        }
+    }
+    Ok(normalized)
+}
+
+fn normalize_light_limit(value: &Tag) -> Result<Option<Tag>, ()> {
+    let bounds = if let Some(value) = value.as_int() {
+        Some((value, value))
+    } else if let Tag::List(list) = value {
+        if list.list.len() == 2 {
+            list.list[0].as_int().zip(list.list[1].as_int())
+        } else {
+            None
+        }
+    } else if let Tag::Compound(compound) = value {
+        compound
+            .get("min_inclusive")
+            .and_then(Tag::as_int)
+            .zip(compound.get("max_inclusive").and_then(Tag::as_int))
+    } else {
+        None
+    };
+    let Some((min, max)) = bounds else {
+        return Ok(None);
+    };
+    if !(0..=15).contains(&min) || !(0..=15).contains(&max) || min > max {
+        return Err(());
+    }
+    if min == 0 && max == 15 {
+        return Ok(None);
+    }
+    if min == max {
+        Ok(Some(Tag::Int(IntTag::value_of(min))))
+    } else {
+        let mut range = CompoundTag::new();
+        range.put_int("min_inclusive", min);
+        range.put_int("max_inclusive", max);
+        Ok(Some(Tag::Compound(range)))
+    }
+}
+
+fn normalize_equipment(equipment: &CompoundTag) -> Option<CompoundTag> {
+    let loot_table = equipment.get_string("loot_table")?;
+    let identifier = Identifier::try_parse_result(loot_table).ok()??;
+    let slot_drop_chances = match equipment.get("slot_drop_chances") {
+        Some(value) => normalize_slot_drop_chances(value).ok()?,
+        None => None,
+    };
+    let mut normalized = CompoundTag::new();
+    normalized.put_string("loot_table", &identifier.to_string());
+    if let Some(slot_drop_chances) = slot_drop_chances {
+        normalized.put("slot_drop_chances".to_string(), slot_drop_chances);
+    }
+    Some(normalized)
+}
+
+fn normalize_slot_drop_chances(value: &Tag) -> Result<Option<Tag>, ()> {
+    if let Some(chance) = value.as_float() {
+        return Ok(Some(Tag::Float(FloatTag::value_of(chance))));
+    }
+    let Tag::Compound(chances) = value else {
+        return Err(());
+    };
+    const SLOTS: [&str; 8] = [
+        "mainhand", "offhand", "feet", "legs", "chest", "head", "body", "saddle",
+    ];
+    let mut normalized = CompoundTag::new();
+    let mut values = Vec::with_capacity(chances.size());
+    for (slot, chance) in chances.entry_set() {
+        if !SLOTS.contains(&slot.as_str()) {
+            return Err(());
+        }
+        let chance = chance.as_float().ok_or(())?;
+        values.push(chance);
+        normalized.put(slot.clone(), Tag::Float(FloatTag::value_of(chance)));
+    }
+    let Some(first) = values.first().copied() else {
+        return Ok(None);
+    };
+    if values.len() == SLOTS.len() && values.iter().all(|value| java_float_equals(*value, first)) {
+        Ok(Some(Tag::Float(FloatTag::value_of(first))))
+    } else {
+        Ok(Some(Tag::Compound(normalized)))
+    }
+}
+
 fn spawn_data(tag: &CompoundTag) -> Option<CompoundTag> {
     tag.get_compound("SpawnData").and_then(decode_spawn_data)
 }
@@ -181,32 +293,47 @@ fn spawn_data_id(tag: &CompoundTag) -> Option<String> {
         .cloned()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SpawnPotentialsDecode {
+    MissingOrInvalid,
+    Present(Vec<(String, i32)>),
+}
+
 /// Decode `SpawnData.LIST_CODEC` one entry at a time. `ListCodec` retains
 /// partial element values, so malformed entries are discarded while valid
 /// entries remain. A valid SpawnData does not require an entity id.
-fn decode_spawn_potentials(tag: &CompoundTag) -> Vec<(String, i32)> {
-    let Some(list) = tag.get_list("SpawnPotentials") else {
-        return Vec::new();
+fn decode_spawn_potentials_state(tag: &CompoundTag) -> SpawnPotentialsDecode {
+    let Some(Tag::List(list)) = tag.get("SpawnPotentials") else {
+        return SpawnPotentialsDecode::MissingOrInvalid;
     };
-    list.list
-        .iter()
-        .filter_map(|entry| {
-            let Tag::Compound(compound) = entry else {
-                return None;
-            };
-            let weight = compound.get_int("weight")?;
-            if weight < 0 {
-                return None;
-            }
-            let data = decode_spawn_data(compound.get_compound("data")?)?;
-            let id = data
-                .get_compound("entity")
-                .and_then(|entity| entity.get_string("id"))
-                .cloned()
-                .unwrap_or_default();
-            Some((id, weight))
-        })
-        .collect()
+    SpawnPotentialsDecode::Present(
+        list.list
+            .iter()
+            .filter_map(|entry| {
+                let Tag::Compound(compound) = entry else {
+                    return None;
+                };
+                let weight = compound.get_int("weight")?;
+                if weight < 0 {
+                    return None;
+                }
+                let data = decode_spawn_data(compound.get_compound("data")?)?;
+                let id = data
+                    .get_compound("entity")
+                    .and_then(|entity| entity.get_string("id"))
+                    .cloned()
+                    .unwrap_or_default();
+                Some((id, weight))
+            })
+            .collect(),
+    )
+}
+
+fn decode_spawn_potentials(tag: &CompoundTag) -> Vec<(String, i32)> {
+    match decode_spawn_potentials_state(tag) {
+        SpawnPotentialsDecode::MissingOrInvalid => Vec::new(),
+        SpawnPotentialsDecode::Present(potentials) => potentials,
+    }
 }
 
 fn selected_spawn_potential(tag: &CompoundTag, mut roll: i32) -> Option<CompoundTag> {
@@ -235,7 +362,33 @@ fn spawn_potential_total(potentials: &[(String, i32)]) -> Option<i32> {
         .filter(|(_, weight)| *weight >= 0)
         .map(|(_, weight)| i64::from(*weight))
         .sum();
-    (total > 0 && total <= i64::from(i32::MAX)).then_some(total as i32)
+    if total > i64::from(i32::MAX) {
+        panic!("Sum of weights must be <= 2147483647");
+    }
+    (total > 0).then_some(total as i32)
+}
+
+fn spawn_potential_weight(
+    next_spawn: Option<&String>,
+    spawn_potentials: &[(String, i32)],
+    tag: Option<&CompoundTag>,
+) -> Option<i32> {
+    if next_spawn.is_some() {
+        return None;
+    }
+    if let Some(tag) = tag
+        && spawn_data(tag).is_some()
+    {
+        return None;
+    }
+    if !spawn_potentials.is_empty() {
+        return spawn_potential_total(spawn_potentials);
+    }
+    let tag = tag?;
+    match decode_spawn_potentials_state(tag) {
+        SpawnPotentialsDecode::MissingOrInvalid => Some(1),
+        SpawnPotentialsDecode::Present(potentials) => spawn_potential_total(&potentials),
+    }
 }
 
 /// `mc.server.level.pipeline.holder` STUB — the `GenerationChunkHolder` read
@@ -1020,19 +1173,22 @@ impl WorldGenLevel for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> 
     }
 
     fn spawner_potential_weight(&self, pos: &BlockPos) -> Option<i32> {
+        let tag = self.existing_block_entity_nbt(pos);
         if let Some(WorldgenBlockEntity::Spawner {
-            next_spawn: None,
+            next_spawn,
             spawn_potentials,
         }) = self.block_entities.get(pos)
-            && let Some(total) = spawn_potential_total(spawn_potentials)
         {
-            return Some(total);
+            return spawn_potential_weight(next_spawn.as_ref(), spawn_potentials, tag.as_ref());
         }
-        let tag = self.existing_block_entity_nbt(pos)?;
-        if spawn_data(&tag).is_some() {
+        let tag = tag.as_ref()?;
+        if spawn_data(tag).is_some() {
             return None;
         }
-        spawn_potential_total(&decode_spawn_potentials(&tag))
+        match decode_spawn_potentials_state(tag) {
+            SpawnPotentialsDecode::MissingOrInvalid => Some(1),
+            SpawnPotentialsDecode::Present(potentials) => spawn_potential_total(&potentials),
+        }
     }
 
     fn set_spawner_entity(&mut self, pos: &BlockPos, entity_id: &str, potential_roll: Option<i32>) {
@@ -1342,19 +1498,22 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
     }
 
     fn spawner_potential_weight(&self, pos: &BlockPos) -> Option<i32> {
+        let tag = self.existing_block_entity_nbt(pos);
         if let Some(WorldgenBlockEntity::Spawner {
-            next_spawn: None,
+            next_spawn,
             spawn_potentials,
         }) = self.block_entities.get(pos)
-            && let Some(total) = spawn_potential_total(spawn_potentials)
         {
-            return Some(total);
+            return spawn_potential_weight(next_spawn.as_ref(), spawn_potentials, tag.as_ref());
         }
-        let tag = self.existing_block_entity_nbt(pos)?;
-        if spawn_data(&tag).is_some() {
+        let tag = tag.as_ref()?;
+        if spawn_data(tag).is_some() {
             return None;
         }
-        spawn_potential_total(&decode_spawn_potentials(&tag))
+        match decode_spawn_potentials_state(tag) {
+            SpawnPotentialsDecode::MissingOrInvalid => Some(1),
+            SpawnPotentialsDecode::Present(potentials) => spawn_potential_total(&potentials),
+        }
     }
 
     fn set_spawner_entity(&mut self, pos: &BlockPos, entity_id: &str, potential_roll: Option<i32>) {
@@ -2561,15 +2720,78 @@ mod tests {
             Some(2)
         );
         assert_eq!(
-            spawn_potential_total(&[(String::new(), i32::MAX), (String::new(), 1)]),
-            None,
-            "overflow makes the BaseSpawner load unavailable and consumes no RNG"
-        );
-        assert_eq!(
             spawn_potential_total(&[(String::new(), 0)]),
             None,
             "a zero-total list has no selector and consumes no RNG"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "Sum of weights must be <= 2147483647")]
+    fn spawn_potential_weight_overflow_raises_like_paper() {
+        spawn_potential_total(&[(String::new(), i32::MAX), (String::new(), 1)]);
+    }
+
+    #[test]
+    fn idless_spawn_data_survives_materialization_without_a_potential_draw() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+
+        let mut tag = dummy_block_entity(&pos);
+        let mut data = CompoundTag::new();
+        data.put("entity".to_string(), Tag::Compound(CompoundTag::new()));
+        tag.put("SpawnData".to_string(), Tag::Compound(data));
+        let mut potentials = ListTag::new();
+        let mut potential = CompoundTag::new();
+        potential.put_int("weight", 3);
+        let mut potential_data = CompoundTag::new();
+        potential_data.put("entity".to_string(), Tag::Compound(CompoundTag::new()));
+        potential.put("data".to_string(), Tag::Compound(potential_data));
+        potentials.list.push(Tag::Compound(potential));
+        tag.put("SpawnPotentials".to_string(), Tag::List(potentials));
+        region.persist_block_entity_nbt(&pos, tag);
+        region.materialize_block_entity(
+            &pos,
+            Blocks::SPAWNER.default_block_state(),
+            Blocks::SPAWNER.default_block_state(),
+        );
+
+        let mut random = LegacyRandomSource::new(42);
+        let mut baseline = LegacyRandomSource::new(42);
+        let roll = <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::spawner_potential_weight(
+            &region, &pos,
+        )
+        .map(|total| random.next_int_bound(total));
+        assert_eq!(roll, None);
+        assert_eq!(random.next_int_bound(100), baseline.next_int_bound(100));
+    }
+
+    #[test]
+    fn missing_or_wrong_typed_potentials_use_paper_weight_one_fallback() {
+        for wrong_typed_potentials in [false, true] {
+            let mut region = feature_region();
+            let pos = BlockPos::new(0, 64, 0);
+            assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+            let mut tag = dummy_block_entity(&pos);
+            let mut malformed_data = CompoundTag::new();
+            malformed_data.put_string("entity", "wrong");
+            tag.put("SpawnData".to_string(), Tag::Compound(malformed_data));
+            if wrong_typed_potentials {
+                tag.put_string("SpawnPotentials", "wrong");
+            }
+            region.persist_block_entity_nbt(&pos, tag);
+
+            let mut random = LegacyRandomSource::new(42);
+            let mut baseline = LegacyRandomSource::new(42);
+            let total = <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::spawner_potential_weight(
+                &region, &pos,
+            )
+            .expect("Paper's fallback list contains one default SpawnData");
+            assert_eq!(total, 1);
+            let _ = random.next_int_bound(total);
+            assert_ne!(random.next_int_bound(100), baseline.next_int_bound(100));
+        }
     }
 
     #[test]
@@ -2651,6 +2873,39 @@ mod tests {
                 .get_list("SpawnPotentials")
                 .is_some_and(ListTag::is_empty)
         );
+    }
+
+    #[test]
+    fn nested_spawn_data_optionals_are_normalized_before_save() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+
+        let mut tag = dummy_block_entity(&pos);
+        let mut data = CompoundTag::new();
+        data.put("entity".to_string(), Tag::Compound(CompoundTag::new()));
+        let mut rules = CompoundTag::new();
+        rules.put_string("block_light_limit", "malformed");
+        data.put("custom_spawn_rules".to_string(), Tag::Compound(rules));
+        data.put("equipment".to_string(), Tag::Compound(CompoundTag::new()));
+        tag.put("SpawnData".to_string(), Tag::Compound(data));
+        region.persist_block_entity_nbt(&pos, tag);
+
+        <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &pos,
+            "minecraft:zombie",
+            None,
+        );
+        let saved = region
+            .existing_block_entity_nbt(&pos)
+            .expect("spawner save state");
+        let saved_data = saved.get_compound("SpawnData").expect("SpawnData retained");
+        assert_eq!(
+            saved_data.get_compound("custom_spawn_rules"),
+            Some(&CompoundTag::new())
+        );
+        assert!(saved_data.get("equipment").is_none());
     }
 
     #[test]
