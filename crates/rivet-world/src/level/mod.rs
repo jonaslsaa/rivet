@@ -56,7 +56,7 @@ pub mod world_data_configuration;
 pub use block_getter::BlockGetter;
 pub use block_shape_context::{
     BlockShapeContext, DetachedShapeContext, MovingPistonShape, ShapeBox, ShapeGeometry,
-    ShapeQuery, ShapeQueryError, ShulkerBoxShape, SupportType,
+    ShapeQuery, ShapeQueryError, ShulkerAnimationStatus, ShulkerBoxShape, SupportType,
 };
 pub use border::{
     BorderChangeListener, BorderStatus, Settings as WorldBorderSettings, WorldBorder,

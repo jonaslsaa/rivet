@@ -126,12 +126,11 @@ impl ShapeGeometry {
     }
 
     fn face_is_full(&self, direction: Direction) -> bool {
-        let in_block = self
-            .face_rects(direction)
-            .into_iter()
-            .filter(|rect| rect.is_within_block())
-            .collect::<Vec<_>>();
-        covers(&in_block, &[FaceRect::full()])
+        let rects = self.face_rects(direction);
+        if rects.iter().any(|rect| !rect.is_within_block()) {
+            return false;
+        }
+        covers(&rects, &[FaceRect::full()])
     }
 
     fn face_supports_center(&self, direction: Direction) -> bool {
@@ -388,11 +387,21 @@ enum DetachedShape {
     MovingPiston(MovingPistonShape),
 }
 
+/// Paper's shulker-box animation state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShulkerAnimationStatus {
+    Closed,
+    Opening,
+    Opened,
+    Closing,
+}
+
 /// Shulker box block-entity state needed by Paper's support and collision shape.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShulkerBoxShape {
     pub facing: Direction,
     pub progress: f32,
+    pub animation_status: ShulkerAnimationStatus,
 }
 
 impl ShulkerBoxShape {
@@ -400,6 +409,7 @@ impl ShulkerBoxShape {
         Self {
             facing,
             progress: 0.0,
+            animation_status: ShulkerAnimationStatus::Closed,
         }
     }
 
@@ -407,6 +417,7 @@ impl ShulkerBoxShape {
         Self {
             facing,
             progress: 1.0,
+            animation_status: ShulkerAnimationStatus::Opened,
         }
     }
 }
@@ -471,7 +482,7 @@ impl BlockShapeContext for DetachedShapeContext {
             .get(pos)
             .ok_or(ShapeQueryError::DynamicShapeContextMissing { pos: *pos })?;
         match entry {
-            DetachedShape::Shulker(shape) if state.block().name() == "minecraft:shulker_box" => {
+            DetachedShape::Shulker(shape) if is_shulker_box(state) => {
                 let state_facing = shulker_state_facing(*state)
                     .ok_or(ShapeQueryError::DynamicShapeContextStateMismatch)?;
                 if state_facing != shape.facing {
@@ -492,6 +503,29 @@ impl BlockShapeContext for DetachedShapeContext {
     }
 }
 
+fn is_shulker_box(state: &BlockState) -> bool {
+    matches!(
+        state.block().name(),
+        "minecraft:shulker_box"
+            | "minecraft:white_shulker_box"
+            | "minecraft:orange_shulker_box"
+            | "minecraft:magenta_shulker_box"
+            | "minecraft:light_blue_shulker_box"
+            | "minecraft:yellow_shulker_box"
+            | "minecraft:lime_shulker_box"
+            | "minecraft:pink_shulker_box"
+            | "minecraft:gray_shulker_box"
+            | "minecraft:light_gray_shulker_box"
+            | "minecraft:cyan_shulker_box"
+            | "minecraft:purple_shulker_box"
+            | "minecraft:blue_shulker_box"
+            | "minecraft:brown_shulker_box"
+            | "minecraft:green_shulker_box"
+            | "minecraft:red_shulker_box"
+            | "minecraft:black_shulker_box"
+    )
+}
+
 fn shulker_state_facing(state: BlockState) -> Option<Direction> {
     let PropertyValue::Enum(name) = state.get_value(BlockStateProperties::FACING)? else {
         return None;
@@ -502,9 +536,18 @@ fn shulker_state_facing(state: BlockState) -> Option<Direction> {
 }
 
 fn shulker_query(shape: ShulkerBoxShape) -> ShapeQuery {
-    let progress = f64::from(shape.progress.clamp(0.0, 1.0));
-    let shift = progress * 16.0;
-    let collision = match shape.facing {
+    let collision = shulker_collision_geometry(shape);
+    let support = if shape.animation_status == ShulkerAnimationStatus::Closed {
+        ShapeGeometry::block()
+    } else {
+        thin_support(shape.facing.get_opposite())
+    };
+    ShapeQuery::from_geometries(&support, &collision, &collision)
+}
+
+fn shulker_collision_geometry(shape: ShulkerBoxShape) -> ShapeGeometry {
+    let shift = f64::from(shape.progress.clamp(0.0, 1.0)) * 8.0;
+    match shape.facing {
         Direction::Down => {
             ShapeGeometry::from_box(ShapeBox::new(0.0, -shift, 0.0, 16.0, 16.0, 16.0))
         }
@@ -523,13 +566,7 @@ fn shulker_query(shape: ShulkerBoxShape) -> ShapeQuery {
         Direction::East => {
             ShapeGeometry::from_box(ShapeBox::new(0.0, 0.0, 0.0, 16.0 + shift, 16.0, 16.0))
         }
-    };
-    let support = if progress == 0.0 {
-        ShapeGeometry::block()
-    } else {
-        thin_support(shape.facing.get_opposite())
-    };
-    ShapeQuery::from_geometries(&support, &collision, &collision)
+    }
 }
 
 fn thin_support(face: Direction) -> ShapeGeometry {
@@ -598,6 +635,19 @@ mod tests {
     }
 
     #[test]
+    fn protruding_face_rectangles_are_not_clipped_into_full_faces() {
+        let shape = ShapeGeometry::from_boxes([
+            ShapeBox::new(0.0, 0.0, 0.0, 16.0, 16.0, 16.0),
+            ShapeBox::new(0.0, 0.0, 16.0, 16.0, 16.0, 17.0),
+        ]);
+        let query = ShapeQuery::from_geometries(&shape, &shape, &shape);
+
+        assert!(!query.is_supporting(SupportType::Full, Direction::Up));
+        assert!(!query.is_collision_face_full(Direction::Up));
+        assert!(!query.is_occlusion_face_full(Direction::Up));
+    }
+
+    #[test]
     fn center_support_matches_paper_two_wide_column() {
         let centered_column = ShapeGeometry::from_box(ShapeBox::new(7.0, 0.0, 7.0, 9.0, 16.0, 9.0));
         let query =
@@ -633,6 +683,74 @@ mod tests {
         assert!(open.is_collision_face_full(Direction::Up));
         assert!(!open.is_supporting(SupportType::Full, Direction::Up));
         assert!(open.is_supporting(SupportType::Full, Direction::Down));
+    }
+
+    #[test]
+    fn shulker_uses_animation_status_for_closed_support() {
+        let opening = ShulkerBoxShape {
+            facing: Direction::Up,
+            progress: 0.0,
+            animation_status: ShulkerAnimationStatus::Opening,
+        };
+        let closing = ShulkerBoxShape {
+            facing: Direction::Up,
+            progress: 0.0,
+            animation_status: ShulkerAnimationStatus::Closing,
+        };
+
+        assert!(
+            shulker_query(ShulkerBoxShape::closed(Direction::Up))
+                .is_supporting(SupportType::Full, Direction::Up)
+        );
+        assert!(!shulker_query(opening).is_supporting(SupportType::Full, Direction::Up));
+        assert!(!shulker_query(closing).is_supporting(SupportType::Full, Direction::Up));
+    }
+
+    #[test]
+    fn shulker_progress_moves_lid_by_half_a_block() {
+        let shape = ShulkerBoxShape::open(Direction::Up);
+        assert_eq!(
+            shulker_collision_geometry(shape).boxes,
+            vec![ShapeBox::new(0.0, 0.0, 0.0, 16.0, 24.0, 16.0)]
+        );
+    }
+
+    #[test]
+    fn dyed_shulker_variants_use_dynamic_shape_context() {
+        let names = [
+            "minecraft:white_shulker_box",
+            "minecraft:orange_shulker_box",
+            "minecraft:magenta_shulker_box",
+            "minecraft:light_blue_shulker_box",
+            "minecraft:yellow_shulker_box",
+            "minecraft:lime_shulker_box",
+            "minecraft:pink_shulker_box",
+            "minecraft:gray_shulker_box",
+            "minecraft:light_gray_shulker_box",
+            "minecraft:cyan_shulker_box",
+            "minecraft:purple_shulker_box",
+            "minecraft:blue_shulker_box",
+            "minecraft:brown_shulker_box",
+            "minecraft:green_shulker_box",
+            "minecraft:red_shulker_box",
+            "minecraft:black_shulker_box",
+        ];
+        let pos = BlockPos::new(0, 0, 0);
+        let mut context = DetachedShapeContext::default();
+        context.insert_shulker_box(pos, ShulkerBoxShape::closed(Direction::Up));
+
+        for name in names {
+            let state = BlockState::of(
+                rivet_registry::generated::blocks::BlockId::from_name(name).unwrap(),
+            )
+            .set_value(BlockStateProperties::FACING, Direction::Up)
+            .unwrap();
+            assert_eq!(
+                context.shape_query(&state, &pos),
+                Ok(shulker_query(ShulkerBoxShape::closed(Direction::Up))),
+                "{name}"
+            );
+        }
     }
 
     #[test]
