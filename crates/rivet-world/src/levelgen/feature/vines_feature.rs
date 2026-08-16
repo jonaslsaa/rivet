@@ -149,8 +149,8 @@ mod tests {
 
     /// `TestLevel::face_sturdy` defaults true, so the first non-DOWN direction
     /// (UP) is acceptable: the origin is written with the UP face property and
-    /// `true` returns after one write and no draws (the face verdict is the
-    /// `is_face_sturdy` seam, not an RNG draw).
+    /// `true` returns after one write and no draws through the `can_attach_to`
+    /// seam.
     #[test]
     fn attaches_vine_on_the_first_acceptable_face() {
         let mut level = TestLevel::over(access());
@@ -175,9 +175,9 @@ mod tests {
     fn down_neighbour_alone_does_not_attach() {
         let mut level = TestLevel::over(access());
         level.face_sturdy = false;
-        // The `is_face_sturdy` seam in the double is a single boolean, so the
-        // per-direction verdict is exercised through the per-position override
-        // added for this test (the -Y neighbour is sturdy, every other fails).
+        // The `can_attach_to` seam in the double uses a single global boolean,
+        // so this per-direction verdict is exercised through the per-position
+        // override (the -Y neighbour is sturdy, every other face fails).
         level
             .face_sturdy_at
             .insert((BlockPos::new(0, -1, 0), Direction::Up), true);

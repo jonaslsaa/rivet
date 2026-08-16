@@ -117,7 +117,7 @@ pub fn failing_placed() -> Holder<PlacedFeature> {
 ///
 /// The vegetation/aquatic features read the world through
 /// `get_block_state`/`get_height_at`/`get_sea_level`/`is_empty_block`/
-/// `can_survive`/`is_face_sturdy`, so the double carries a mutable block-state
+/// `can_survive`/`is_face_sturdy`/`can_attach_to`, so the double carries a mutable block-state
 /// map (`set_block` records into it and the reads answer from it, air for
 /// unset positions) plus fixed overrides for the other reads. `get_height_at`
 /// returns a single column height for every `(x, z)`; tests that need a
@@ -147,12 +147,11 @@ pub struct TestLevel {
     /// `can_survive` — the fixed survival verdict (Java's block
     /// `canSurvive`, which the vegetation features gate their writes on).
     pub survive: bool,
-    /// `is_face_sturdy` — the fixed face-sturdiness verdict
-    /// (`BlockPileFeature.mayPlaceOn`).
+    /// Fixed face-support verdict used by `is_face_sturdy` and `can_attach_to`.
     pub face_sturdy: bool,
-    /// `is_face_sturdy` per-position overrides — a `(pos, face)` entry, when
-    /// present, answers that exact query instead of the global `face_sturdy`
-    /// (`VinesFeature` walks six faces and needs a per-neighbour verdict).
+    /// Per-position face-support overrides — a `(pos, face)` entry, when
+    /// present, answers the exact face query instead of the global
+    /// `face_sturdy` value.
     pub face_sturdy_at: HashMap<(BlockPos, Direction), bool>,
     /// `should_freeze` — the fixed `Biome.shouldFreeze` verdict
     /// (`SnowAndFreezeFeature`).
