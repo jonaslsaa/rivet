@@ -62,6 +62,24 @@ impl BiomeManager {
     /// `BiomeManager.getBiome(BlockPos)` — the fiddled-distance 8-corner
     /// interpolation over the four surrounding quart cells.
     pub fn get_biome(&self, pos: &BlockPos) -> Holder<BiomeId> {
+        self.get_biome_with(pos, |quart_x, quart_y, quart_z| {
+            self.noise_biome_source
+                .get_noise_biome(quart_x, quart_y, quart_z)
+        })
+    }
+
+    /// Resolve a block position with a caller-provided quart-biome lookup.
+    ///
+    /// `LevelReader.getNoiseBiome` first consults the cached chunk and only
+    /// falls back to the uncached source. Keeping the interpolation here while
+    /// injecting that lookup lets a worldgen region preserve the exact
+    /// `BiomeManager` corner selection without constructing a self-referential
+    /// source over its chunk cache.
+    pub fn get_biome_with(
+        &self,
+        pos: &BlockPos,
+        mut get_noise_biome: impl FnMut(i32, i32, i32) -> Holder<BiomeId>,
+    ) -> Holder<BiomeId> {
         let abs_x = pos.get_x() - 2;
         let abs_y = pos.get_y() - 2;
         let abs_z = pos.get_z() - 2;
@@ -114,8 +132,7 @@ impl BiomeManager {
         } else {
             parent_z + 1
         };
-        self.noise_biome_source
-            .get_noise_biome(biome_x, biome_y, biome_z)
+        get_noise_biome(biome_x, biome_y, biome_z)
     }
 
     /// `BiomeManager.getNoiseBiomeAtPosition(double x, double y, double z)`.

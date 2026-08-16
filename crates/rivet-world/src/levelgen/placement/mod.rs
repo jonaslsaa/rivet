@@ -64,14 +64,16 @@ mod surface_relative_threshold_filter;
 mod surface_water_depth_filter;
 
 pub use biome_filter::{BiomeFilter, biome_filter_codec};
-pub use block_predicate_filter::BlockPredicateFilter;
+pub use block_predicate_filter::{BlockPredicateFilter, block_predicate_filter_codec};
 pub use cave_surface::{CaveSurface, cave_surface_codec};
-pub use count_on_every_layer_placement::CountOnEveryLayerPlacement;
+pub use count_on_every_layer_placement::{
+    CountOnEveryLayerPlacement, count_on_every_layer_placement_codec,
+};
 pub use count_placement::{CountPlacement, count_placement_codec};
 pub use environment_scan_placement::{EnvironmentScanPlacement, environment_scan_placement_codec};
-pub use fixed_placement::FixedPlacement;
+pub use fixed_placement::{FixedPlacement, fixed_placement_codec};
 pub use height_range_placement::{HeightRangePlacement, height_range_placement_codec};
-pub use heightmap_placement::HeightmapPlacement;
+pub use heightmap_placement::{HeightmapPlacement, heightmap_placement_codec};
 pub use in_square_placement::{InSquarePlacement, in_square_placement_codec};
 pub use noise_based_count_placement::{
     NoiseBasedCountPlacement, noise_based_count_placement_codec,
@@ -86,10 +88,10 @@ pub use placement_modifier::{ErasedPlacementModifier, PlacementModifier, placeme
 pub use placement_modifier_type::{
     PlacementModifierType, PlacementModifierTypeId, placement_modifier_type,
 };
-pub use random_offset_placement::RandomOffsetPlacement;
+pub use random_offset_placement::{RandomOffsetPlacement, random_offset_placement_codec};
 pub use rarity_filter::{RarityFilter, rarity_filter_codec};
 pub use repeating_placement::RepeatingPlacement;
 pub use surface_relative_threshold_filter::{
     SurfaceRelativeThresholdFilter, surface_relative_threshold_filter_codec,
 };
-pub use surface_water_depth_filter::SurfaceWaterDepthFilter;
+pub use surface_water_depth_filter::{SurfaceWaterDepthFilter, surface_water_depth_filter_codec};

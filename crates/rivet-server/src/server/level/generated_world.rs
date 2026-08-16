@@ -133,11 +133,14 @@ use rivet_world::data::worldgen::worldgen_bootstraps::build_worldgen_registries;
 use rivet_world::level::height_accessor::LevelHeightAccessor;
 use rivet_world::level::height_accessor::create as create_height_accessor;
 use rivet_world::levelgen::blending::blender::Blender;
-use rivet_world::levelgen::feature::lake_feature::{
-    Configuration as LakeConfiguration, lake_configuration_codec,
+use rivet_world::levelgen::feature::configurations::{
+    FeatureConfiguration, NoneFeatureConfiguration,
 };
+use rivet_world::levelgen::feature::lake_feature::lake_configuration_codec;
 use rivet_world::levelgen::feature::registry_keys::{CONFIGURED_FEATURE, PLACED_FEATURE};
-use rivet_world::levelgen::feature::{ConfiguredFeatureErased, feature_id_from_registry_name};
+use rivet_world::levelgen::feature::{
+    ConfiguredFeatureErased, FeatureId, feature_id_from_registry_name,
+};
 use rivet_world::levelgen::generation_step::Decoration;
 use rivet_world::levelgen::heightmap::{FINAL_HEIGHTMAPS, Types};
 use rivet_world::levelgen::noise::registry_keys::NOISE_SETTINGS;
@@ -145,10 +148,12 @@ use rivet_world::levelgen::noisegen::noise_based_chunk_generator::NoiseBasedChun
 use rivet_world::levelgen::noisegen::noise_generator_settings::OVERWORLD;
 use rivet_world::levelgen::noisegen::random_state::RandomState;
 use rivet_world::levelgen::placement::{
-    ErasedPlacementModifier, PlacedFeature, PlacementContext, biome_filter_codec,
-    count_placement_codec, environment_scan_placement_codec, height_range_placement_codec,
-    in_square_placement_codec, placement_get_positions, rarity_filter_codec,
-    surface_relative_threshold_filter_codec,
+    ErasedPlacementModifier, PlacedFeature, biome_filter_codec, block_predicate_filter_codec,
+    count_on_every_layer_placement_codec, count_placement_codec, environment_scan_placement_codec,
+    fixed_placement_codec, height_range_placement_codec, heightmap_placement_codec,
+    in_square_placement_codec, noise_based_count_placement_codec,
+    noise_threshold_count_placement_codec, random_offset_placement_codec, rarity_filter_codec,
+    surface_relative_threshold_filter_codec, surface_water_depth_filter_codec,
 };
 use rivet_world::levelgen::world_generation_context::WorldGenerationContext;
 
@@ -922,6 +927,12 @@ fn decode_placement_modifier(
         .ok_or_else(|| format!("{label} has no type"))?;
     let value_without_type = without_type(value, label)?;
     let modifier: Arc<dyn ErasedPlacementModifier> = match kind {
+        "minecraft:block_predicate_filter" => Arc::new(decode_value(
+            block_predicate_filter_codec::<FeatureOps>(),
+            ops,
+            &value_without_type,
+            &format!("decode {label} block_predicate_filter"),
+        )?),
         "minecraft:rarity_filter" => Arc::new(decode_value(
             rarity_filter_codec::<FeatureOps>(),
             ops,
@@ -964,6 +975,52 @@ fn decode_placement_modifier(
             &value_without_type,
             &format!("decode {label} count"),
         )?),
+        "minecraft:count_on_every_layer" => Arc::new(decode_value(
+            count_on_every_layer_placement_codec::<FeatureOps>(),
+            ops,
+            &value_without_type,
+            &format!("decode {label} count_on_every_layer"),
+        )?),
+        "minecraft:noise_based_count" => Arc::new(decode_value(
+            rivet_serialization::map_codec::codec_of(
+                noise_based_count_placement_codec::<FeatureOps>(),
+            ),
+            ops,
+            &value_without_type,
+            &format!("decode {label} noise_based_count"),
+        )?),
+        "minecraft:noise_threshold_count" => Arc::new(decode_value(
+            rivet_serialization::map_codec::codec_of(noise_threshold_count_placement_codec::<
+                FeatureOps,
+            >()),
+            ops,
+            &value_without_type,
+            &format!("decode {label} noise_threshold_count"),
+        )?),
+        "minecraft:heightmap" => Arc::new(decode_value(
+            heightmap_placement_codec::<FeatureOps>(),
+            ops,
+            &value_without_type,
+            &format!("decode {label} heightmap"),
+        )?),
+        "minecraft:random_offset" => Arc::new(decode_value(
+            random_offset_placement_codec::<FeatureOps>(),
+            ops,
+            &value_without_type,
+            &format!("decode {label} random_offset"),
+        )?),
+        "minecraft:surface_water_depth_filter" => Arc::new(decode_value(
+            surface_water_depth_filter_codec::<FeatureOps>(),
+            ops,
+            &value_without_type,
+            &format!("decode {label} surface_water_depth_filter"),
+        )?),
+        "minecraft:fixed_placement" => Arc::new(decode_value(
+            fixed_placement_codec::<FeatureOps>(),
+            ops,
+            &value_without_type,
+            &format!("decode {label} fixed_placement"),
+        )?),
         other => {
             return Err(format!(
                 "{label} has unsupported placement modifier {other}"
@@ -991,23 +1048,43 @@ fn decode_configured_feature(
     let config_value = json
         .get("config")
         .ok_or_else(|| format!("{configured_key} JSON has no config"))?;
-    let config: LakeConfiguration = match feature_type {
-        "minecraft:lake" => decode_value(
+    let config: Arc<dyn FeatureConfiguration> = match feature_type {
+        "minecraft:lake" => Arc::new(decode_value(
             lake_configuration_codec::<FeatureOps>(),
             ops,
             config_value,
             &format!("decode {configured_key} config"),
-        )?,
+        )?),
+        "minecraft:monster_room" => Arc::new(NoneFeatureConfiguration),
         other => {
             return Err(format!(
                 "{configured_key} has unsupported feature type {other}"
             ));
         }
     };
-    Ok(ConfiguredFeatureErased {
-        feature,
-        config: Arc::new(config),
-    })
+    Ok(ConfiguredFeatureErased { feature, config })
+}
+
+fn decode_placement_modifiers(
+    placed_key: &str,
+    generator: &OverworldGenerator,
+) -> Result<Vec<Arc<dyn ErasedPlacementModifier>>, String> {
+    let entry = PLACED_FEATURE_BY_NAME
+        .get(placed_key)
+        .ok_or_else(|| format!("missing generated {placed_key} entry"))?;
+    let json: Value = serde_json::from_str(entry.json)
+        .map_err(|error| format!("decode {placed_key} JSON: {error}"))?;
+    let ops =
+        RegistryOps::create_from_access(&JsonOps::INSTANCE, generator.registry_access().clone());
+    json.get("placement")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{placed_key} JSON has no placement list"))?
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            decode_placement_modifier(value, &ops, &format!("{placed_key} placement {index}"))
+        })
+        .collect()
 }
 
 struct DecodedPlacedFeature {
@@ -1056,17 +1133,7 @@ fn decode_placed_feature(
     );
     let configured_registry = configured_builder.freeze();
 
-    let placement = json
-        .get("placement")
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("{placed_key} JSON has no placement list"))?;
-    let modifiers = placement
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            decode_placement_modifier(value, &ops, &format!("{placed_key} placement {index}"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let modifiers = decode_placement_modifiers(placed_key, generator)?;
     let placed_value = Arc::new(PlacedFeature::new(
         Holder::reference(configured_registry_id, configured_id.0),
         modifiers,
@@ -1087,33 +1154,60 @@ fn decode_placed_feature(
     })
 }
 
-fn first_modifier_selects(
+struct FeatureSelectionGenerator {
+    generator: Arc<OverworldGenerator>,
+    feature_key: &'static str,
+}
+
+impl ChunkGenerator for FeatureSelectionGenerator {
+    fn get_min_y(&self) -> i32 {
+        self.generator.get_min_y()
+    }
+
+    fn get_gen_depth(&self) -> i32 {
+        self.generator.get_gen_depth()
+    }
+
+    fn get_biome_generation_settings_has_feature(
+        &self,
+        biome: &Holder<BiomeId>,
+        _feature: &PlacedFeature,
+    ) -> bool {
+        let Holder::Direct(biome) = biome else {
+            return false;
+        };
+        let Some(name) = BIOME_BY_ID.get(biome.0 as usize) else {
+            return false;
+        };
+        BIOME_GENERATION_SETTINGS_BY_NAME
+            .get(name)
+            .is_some_and(|settings| {
+                settings
+                    .features
+                    .iter()
+                    .any(|step| step.contains(&self.feature_key))
+            })
+    }
+}
+
+fn placement_selects(
     region: &mut WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey>,
-    generator: &OverworldGenerator,
+    generator: &Arc<OverworldGenerator>,
     random: &mut WorldgenRandom<XoroshiroRandomSource>,
     origin: &BlockPos,
     feature_key: &'static str,
 ) -> Result<bool, String> {
-    let entry = PLACED_FEATURE_BY_NAME
-        .get(feature_key)
-        .ok_or_else(|| format!("missing generated {feature_key} entry"))?;
-    let json: Value = serde_json::from_str(entry.json)
-        .map_err(|error| format!("decode {feature_key} JSON: {error}"))?;
-    let first = json
-        .get("placement")
-        .and_then(Value::as_array)
-        .and_then(|placement| placement.first())
-        .ok_or_else(|| format!("{feature_key} JSON has no first placement modifier"))?;
-    let ops =
-        RegistryOps::create_from_access(&JsonOps::INSTANCE, generator.registry_access().clone());
-    let modifier =
-        decode_placement_modifier(first, &ops, &format!("{feature_key} first placement"))?;
-    let context = PlacementContext::new(region, generator, None);
-    Ok(
-        placement_get_positions(modifier.as_ref(), &context, random, origin)
-            .next()
-            .is_some(),
-    )
+    let modifiers = decode_placement_modifiers(feature_key, generator)?;
+    let selection_generator = FeatureSelectionGenerator {
+        generator: Arc::clone(generator),
+        feature_key,
+    };
+    let dummy_feature = ConfiguredFeatureErased {
+        feature: FeatureId::new(0),
+        config: Arc::new(NoneFeatureConfiguration),
+    };
+    let placed = PlacedFeature::new(Holder::Direct(dummy_feature), modifiers);
+    Ok(placed.has_placement_positions(region, &selection_generator, random, origin))
 }
 
 fn run_biome_decoration(
@@ -1203,7 +1297,10 @@ fn run_biome_decoration(
                 global_feature_index as i32,
                 step_index as i32,
             );
-            if feature_key == "minecraft:lake_lava_underground" {
+            if matches!(
+                feature_key,
+                "minecraft:lake_lava_underground" | "minecraft:lake_lava_surface"
+            ) {
                 let placed = decode_placed_feature(feature_key, generator).map_err(|_| {
                     GenError::FeaturePlacementDecode {
                         chunk_pos: center_pos,
@@ -1216,13 +1313,13 @@ fn run_biome_decoration(
                 continue;
             }
             let selected =
-                first_modifier_selects(&mut region, generator, &mut random, &origin, feature_key)
+                placement_selects(&mut region, generator, &mut random, &origin, feature_key)
                     .map_err(|_| GenError::FeaturePlacementDecode {
-                    chunk_pos: center_pos,
-                    step_index,
-                    global_feature_index,
-                    feature_key,
-                })?;
+                        chunk_pos: center_pos,
+                        step_index,
+                        global_feature_index,
+                        feature_key,
+                    })?;
             if selected {
                 return Err(GenError::FeaturePlacementDecode {
                     chunk_pos: center_pos,
@@ -1650,6 +1747,21 @@ mod tests {
                 "must not resolve to minecraft:mud_brick_wall's default"
             );
         }
+    }
+
+    #[test]
+    fn feature_region_outside_build_height_reads_void_air() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let min_y = holder.chunk.get_min_y();
+        let region = compose_feature_region(&mut holder.chunk, &generator);
+        assert_eq!(
+            region.get_block_state(&BlockPos::new(0, min_y - 1, 0)),
+            BlockState::of(BlockId(794)),
+        );
     }
 
     /// Hostile: the stages the holder does not wire are refused before any work
