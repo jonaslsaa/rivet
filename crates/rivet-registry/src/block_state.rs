@@ -319,6 +319,14 @@ impl BlockState {
         self.is_face_sturdy(direction) || self.is_collision_face_full(direction)
     }
 
+    /// Whether Paper marks the owning block as having a dynamic shape. Dynamic
+    /// states require live world context for face support and attachment; the
+    /// generated zero-context masks are never authoritative for them.
+    #[inline]
+    pub fn has_dynamic_shape(self) -> bool {
+        crate::generated::block_behaviors::has_dynamic_shape(self.0)
+    }
+
     /// Whether the probe-origin collision sample fills the requested face.
     /// Dynamic-shape states require issue #646 live context instead.
     #[inline]
@@ -661,6 +669,16 @@ mod tests {
         );
         let double_slab = BlockState::new(state_id(slab_block, &double_values));
         assert_eq!(double_slab.face_sturdy_mask(), 0x3F);
+    }
+
+    #[test]
+    fn dynamic_shape_metadata_covers_hostile_states() {
+        let stone = BlockState::of(BlockId::from_name("minecraft:stone").unwrap());
+        let shulker = BlockState::of(BlockId::from_name("minecraft:shulker_box").unwrap());
+        let moving_piston = BlockState::of(BlockId::from_name("minecraft:moving_piston").unwrap());
+        assert!(!stone.has_dynamic_shape());
+        assert!(shulker.has_dynamic_shape());
+        assert!(moving_piston.has_dynamic_shape());
     }
 
     #[test]

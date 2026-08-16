@@ -531,6 +531,7 @@ pub(crate) fn load_provenance(input: &Path, report_name: &str) -> Result<SourceP
             actual
         );
     }
+    crate::reports::verify_pinned_source(&manifest.source)?;
     Ok(manifest.source)
 }
 

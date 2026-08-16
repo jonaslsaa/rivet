@@ -59,6 +59,12 @@ pub fn run(bundler_flag: Option<&Path>) -> Result<()> {
     let scratch = repo_root.join("tools/rivet-codegen/.cache/probe-block-behaviors.json");
 
     let out = crate::extract_block_behaviors::run_extractor(&repo_root, &bundler, &scratch)?;
+    let server_jar = crate::extract::server_jar_for_bundler(&repo_root, &bundler)?;
+    crate::reports::verify_fixture_provenance(
+        &server_jar,
+        &crate::extract_block_behaviors::default_output(&repo_root).with_extension("manifest.json"),
+        &repo_root,
+    )?;
     check_probe_stdout(&out)?;
 
     let fresh_bytes = fs::read(&scratch).context("read fresh fixture")?;

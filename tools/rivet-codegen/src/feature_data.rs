@@ -77,7 +77,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 
 use crate::reports::SourceProvenance;
@@ -334,6 +334,10 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
     let object = root
         .as_object()
         .context("feature_data.json root must be a JSON object")?;
+    ensure!(
+        object.get("paper").and_then(Value::as_str) == Some(crate::extract_feature_data::PAPER_PIN),
+        "feature_data.json `paper` pin does not match the exact Paper 26.2 source"
+    );
     for field in object.keys() {
         if !matches!(
             field.as_str(),
@@ -954,6 +958,7 @@ pub(crate) fn load_provenance(input: &Path) -> Result<SourceProvenance> {
             actual
         );
     }
+    crate::reports::verify_pinned_source(&manifest.source)?;
     Ok(manifest.source)
 }
 
@@ -982,6 +987,14 @@ mod tests {
         // contract (the anchors too, since the extractor produced it).
         let root = fixture();
         validate_structural(&root).unwrap();
+    }
+
+    #[test]
+    fn paper_pin_is_pinned() {
+        let mut root = fixture();
+        root["paper"] = serde_json::json!("26.2-DEV-main@foreign");
+        let err = validate_structural(&root).unwrap_err();
+        assert!(err.to_string().contains("`paper` pin"), "got: {err}");
     }
 
     #[test]

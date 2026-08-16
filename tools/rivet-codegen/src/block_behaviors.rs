@@ -62,7 +62,7 @@ pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> 
     let root = crate::registries::parse_strict(&json)
         .with_context(|| format!("parse {}", input.display()))?;
 
-    let (runs, face_sturdy_runs, collision_face_runs) = validate(root)?;
+    let (runs, face_sturdy_runs, collision_face_runs, dynamic_shape_runs) = validate(root)?;
     // The behavior table must span exactly the same state space as the
     // block-state registry it indexes: a behavior dump regenerated from a
     // differently-sized registry would leave real states silently decoding as
@@ -76,7 +76,13 @@ pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> 
     fs::create_dir_all(&output).with_context(|| format!("create {}", output.display()))?;
     fs::write(
         output.join("block_behaviors.rs"),
-        render(&runs, &face_sturdy_runs, &collision_face_runs, &source),
+        render(
+            &runs,
+            &face_sturdy_runs,
+            &collision_face_runs,
+            &dynamic_shape_runs,
+            &source,
+        ),
     )
     .context("write generated/block_behaviors.rs")?;
 
@@ -112,6 +118,20 @@ pub(crate) struct CollisionFaceRun {
     length: u32,
     mask: u8,
 }
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DynamicShapeRun {
+    start: u32,
+    length: u32,
+    dynamic: bool,
+}
+
+type ValidatedTables = (
+    Vec<Run>,
+    Vec<FaceSturdyRun>,
+    Vec<CollisionFaceRun>,
+    Vec<DynamicShapeRun>,
+);
 
 /// The total number of block states in the registry (`BLOCK_STATE_COUNT`),
 /// re-derived from the extract artifact `block_states.json`: each block
@@ -161,7 +181,7 @@ fn check_state_count_matches(runs: &[Run], block_state_count: u32) -> Result<()>
 /// total that does not equal `state_count`, `word` with reserved bits set, or a
 /// word field outside its documented bit width. Both mask tables are subject
 /// to the same dense-partition checks.
-fn validate(root: Value) -> Result<(Vec<Run>, Vec<FaceSturdyRun>, Vec<CollisionFaceRun>)> {
+fn validate(root: Value) -> Result<ValidatedTables> {
     let obj = root
         .as_object()
         .context("block_behaviors.json root must be a JSON object")?;
@@ -274,8 +294,18 @@ fn validate(root: Value) -> Result<(Vec<Run>, Vec<FaceSturdyRun>, Vec<CollisionF
             .context("`collision_face_runs` missing from block_behaviors.json")?,
         state_count,
     )?;
+    let dynamic_shape_runs = validate_dynamic_shape_runs(
+        obj.get("dynamic_shape_runs")
+            .context("`dynamic_shape_runs` missing from block_behaviors.json")?,
+        state_count,
+    )?;
 
-    Ok((runs, face_sturdy_runs, collision_face_runs))
+    Ok((
+        runs,
+        face_sturdy_runs,
+        collision_face_runs,
+        dynamic_shape_runs,
+    ))
 }
 
 /// Validate Paper's per-direction `SupportType.FULL` face-mask runs.
@@ -456,6 +486,7 @@ fn load_provenance(input: &Path) -> Result<SourceProvenance> {
             actual
         );
     }
+    crate::reports::verify_pinned_source(&manifest.source)?;
     Ok(manifest.source)
 }
 
@@ -470,11 +501,69 @@ struct FixtureFile {
     sha256: String,
 }
 
+fn validate_dynamic_shape_runs(value: &Value, state_count: u64) -> Result<Vec<DynamicShapeRun>> {
+    let runs_value = value
+        .as_array()
+        .context("`dynamic_shape_runs` must be an array")?;
+    if runs_value.is_empty() {
+        bail!("`dynamic_shape_runs` is empty");
+    }
+    let mut out = Vec::with_capacity(runs_value.len());
+    let mut expected_start = 0u64;
+    for (i, run) in runs_value.iter().enumerate() {
+        let obj = run
+            .as_object()
+            .with_context(|| format!("dynamic_shape_runs run {i} must be a JSON object"))?;
+        for field in obj.keys() {
+            if !matches!(field.as_str(), "start" | "length" | "dynamic") {
+                bail!("dynamic_shape_runs run {i} has unexpected field `{field}`");
+            }
+        }
+        let start = obj
+            .get("start")
+            .and_then(Value::as_u64)
+            .with_context(|| format!("dynamic_shape_runs run {i} `start` must be an integer"))?;
+        let length = obj
+            .get("length")
+            .and_then(Value::as_u64)
+            .with_context(|| format!("dynamic_shape_runs run {i} `length` must be an integer"))?;
+        let dynamic = obj
+            .get("dynamic")
+            .and_then(Value::as_bool)
+            .with_context(|| format!("dynamic_shape_runs run {i} `dynamic` must be boolean"))?;
+        if length == 0 {
+            bail!("dynamic_shape_runs run {i} has zero length");
+        }
+        if start != expected_start {
+            bail!(
+                "dynamic_shape_runs do not densely partition 0..{state_count}: run {i} starts at {start} but previous ends at {expected_start}"
+            );
+        }
+        let end = start
+            .checked_add(length)
+            .with_context(|| format!("dynamic_shape_runs run {i} start+length overflows"))?;
+        if end > state_count {
+            bail!("dynamic_shape_runs run {i} extends past state_count");
+        }
+        expected_start = end;
+        out.push(DynamicShapeRun {
+            start: u32::try_from(start).context("dynamic-shape start exceeds u32")?,
+            length: u32::try_from(length).context("dynamic-shape length exceeds u32")?,
+            dynamic,
+        });
+    }
+    if expected_start != state_count {
+        bail!("dynamic_shape_runs cover [0, {expected_start}) but state_count is {state_count}");
+    }
+    Ok(out)
+}
+
 /// Render `generated/block_behaviors.rs`.
 fn render(
     runs: &[Run],
     face_sturdy_runs: &[FaceSturdyRun],
     collision_face_runs: &[CollisionFaceRun],
+    dynamic_shape_runs: &[DynamicShapeRun],
     source: &SourceProvenance,
 ) -> String {
     let mut out = String::new();
@@ -693,6 +782,32 @@ fn render(
          }\n",
     );
 
+    out.push_str(
+        "/// Run-length-encoded `Block.hasDynamicShape()` metadata.\n\
+         /// Dynamic states must not answer context-sensitive shape predicates\n\
+         /// from the zero-context support/collision samples.\n\
+         pub static DYNAMIC_SHAPE_RUNS: &[(u16, u16, bool)] = &[\n",
+    );
+    for run in dynamic_shape_runs {
+        out.push_str(&format!(
+            "    ({}, {}, {}),\n",
+            run.start, run.length, run.dynamic
+        ));
+    }
+    out.push_str("];\n\n");
+    out.push_str(
+        "/// Whether a state requires live world context for shape queries.\n\
+         pub fn has_dynamic_shape(state: StateId) -> bool {\n\
+             let id = state.0 as u32;\n\
+             let idx = DYNAMIC_SHAPE_RUNS.partition_point(|(start, _, _)| *start as u32 <= id);\n\
+             if idx == 0 {\n\
+                 return DYNAMIC_SHAPE_RUNS[0].2;\n\
+             }\n\
+             let (start, len, dynamic) = DYNAMIC_SHAPE_RUNS[idx - 1];\n\
+             if id < start as u32 + len as u32 { dynamic } else { DYNAMIC_SHAPE_RUNS[0].2 }\n\
+         }\n",
+    );
+
     out
 }
 
@@ -717,16 +832,22 @@ mod tests {
                 {"start": 0, "length": 2, "mask": 0},
                 {"start": 2, "length": 3, "mask": 63},
             ],
+            "dynamic_shape_runs": [
+                {"start": 0, "length": 2, "dynamic": false},
+                {"start": 2, "length": 3, "dynamic": true},
+            ],
         })
     }
 
     #[test]
     fn dense_partition_passes() {
-        let (runs, face_sturdy_runs, collision_face_runs) = validate(valid_root()).unwrap();
+        let (runs, face_sturdy_runs, collision_face_runs, dynamic_shape_runs) =
+            validate(valid_root()).unwrap();
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[1].word, 0x20015);
         assert_eq!(face_sturdy_runs[1].mask, 63);
         assert_eq!(collision_face_runs[1].mask, 63);
+        assert!(dynamic_shape_runs[1].dynamic);
     }
 
     #[test]
@@ -897,8 +1018,11 @@ mod tests {
             "collision_face_runs": [
                 {"start": 0, "length": 5, "mask": 0},
             ],
+            "dynamic_shape_runs": [
+                {"start": 0, "length": 5, "dynamic": false},
+            ],
         });
-        let (runs, _, _) = validate(v).unwrap();
+        let (runs, _, _, _) = validate(v).unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].length, 5);
     }
@@ -971,8 +1095,25 @@ mod tests {
             length: 3,
             mask: 0x3F,
         }];
-        let a = render(&runs, &face_sturdy_runs, &collision_face_runs, &source);
-        let b = render(&runs, &face_sturdy_runs, &collision_face_runs, &source);
+        let dynamic_shape_runs = vec![DynamicShapeRun {
+            start: 0,
+            length: 3,
+            dynamic: false,
+        }];
+        let a = render(
+            &runs,
+            &face_sturdy_runs,
+            &collision_face_runs,
+            &dynamic_shape_runs,
+            &source,
+        );
+        let b = render(
+            &runs,
+            &face_sturdy_runs,
+            &collision_face_runs,
+            &dynamic_shape_runs,
+            &source,
+        );
         assert_eq!(a, b);
         assert!(a.contains("MC 26.2, protocol 776, world 4903"));
         assert!(a.contains("e1a027e9481a16ec"));
@@ -990,7 +1131,7 @@ mod tests {
         let repo_root = crate::extract::find_repo_root().unwrap();
         let json = fs::read_to_string(default_input(&repo_root)).unwrap();
         let root = crate::registries::parse_strict(&json).unwrap();
-        let (runs, _, _) = validate(root).unwrap();
+        let (runs, _, _, _) = validate(root).unwrap();
         let state_count: u64 = runs.iter().map(|r| r.length as u64).sum();
         assert_eq!(state_count, 32366, "registry state count drifted");
 
@@ -1034,7 +1175,7 @@ mod tests {
         let repo_root = crate::extract::find_repo_root().unwrap();
         let json = fs::read_to_string(default_input(&repo_root)).unwrap();
         let root = crate::registries::parse_strict(&json).unwrap();
-        let (_, runs, _) = validate(root).unwrap();
+        let (_, runs, _, _) = validate(root).unwrap();
         let state_count: u64 = runs.iter().map(|r| r.length as u64).sum();
         assert_eq!(state_count, 32366, "registry state count drifted");
 
@@ -1071,7 +1212,7 @@ mod tests {
         let repo_root = crate::extract::find_repo_root().unwrap();
         let json = fs::read_to_string(default_input(&repo_root)).unwrap();
         let root = crate::registries::parse_strict(&json).unwrap();
-        let (_, _, runs) = validate(root).unwrap();
+        let (_, _, runs, _) = validate(root).unwrap();
         let state_count: u64 = runs.iter().map(|r| r.length as u64).sum();
         assert_eq!(state_count, 32366, "registry state count drifted");
 
@@ -1110,7 +1251,7 @@ mod tests {
         assert_eq!(registry_state_count(&repo_root).unwrap(), 32366);
         let json = fs::read_to_string(default_input(&repo_root)).unwrap();
         let root = crate::registries::parse_strict(&json).unwrap();
-        let (runs, _, _) = validate(root).unwrap();
+        let (runs, _, _, _) = validate(root).unwrap();
         check_state_count_matches(&runs, 32366).unwrap();
     }
 }

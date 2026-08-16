@@ -57,6 +57,12 @@ pub fn run(bundler_flag: Option<&Path>) -> Result<()> {
     // The extractor writes the fresh fixture JSON to the scratch path. Assert
     // the probe counts inside it, then byte-compare against the committed one.
     crate::extract_feature_data::run_extractor(&repo_root, &bundler, &scratch)?;
+    let server_jar = crate::extract::server_jar_for_bundler(&repo_root, &bundler)?;
+    crate::reports::verify_fixture_provenance(
+        &server_jar,
+        &crate::extract_feature_data::default_output(&repo_root).with_extension("manifest.json"),
+        &repo_root,
+    )?;
     let fresh_bytes = fs::read(&scratch).context("read fresh fixture")?;
     check_anchors(&fresh_bytes)?;
 

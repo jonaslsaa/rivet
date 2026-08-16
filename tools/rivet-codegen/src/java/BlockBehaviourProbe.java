@@ -96,6 +96,7 @@ public final class BlockBehaviourProbe {
         JsonArray runs = new JsonArray();
         JsonArray faceSturdyRuns = new JsonArray();
         JsonArray collisionFaceRuns = new JsonArray();
+        JsonArray dynamicShapeRuns = new JsonArray();
         int runStart = 0;
         BlockState firstState = Block.stateById(0);
         require(Block.getId(firstState) == 0, "state 0 resolves to " + Block.getId(firstState));
@@ -105,6 +106,8 @@ public final class BlockBehaviourProbe {
         int faceSturdyMask = faceSturdyMask(firstState);
         int collisionFaceRunStart = 0;
         int collisionFaceMask = collisionFaceMask(firstState);
+        int dynamicShapeRunStart = 0;
+        boolean dynamicShape = hasDynamicShape(firstState);
         int runCount = 0;
         int faceSturdyRunCount = 0;
         int collisionFaceRunCount = 0;
@@ -133,6 +136,12 @@ public final class BlockBehaviourProbe {
                 collisionFaceRunStart = id;
                 collisionFaceMask = collisionMask;
             }
+            boolean dynamic = hasDynamicShape(state);
+            if (dynamic != dynamicShape) {
+                dynamicShapeRuns.add(boolRun(dynamicShapeRunStart, id - dynamicShapeRunStart, dynamicShape));
+                dynamicShapeRunStart = id;
+                dynamicShape = dynamic;
+            }
         }
         runs.add(run(runStart, count - runStart, runWord));
         runCount++;
@@ -140,9 +149,11 @@ public final class BlockBehaviourProbe {
         faceSturdyRunCount++;
         collisionFaceRuns.add(maskRun(collisionFaceRunStart, count - collisionFaceRunStart, collisionFaceMask));
         collisionFaceRunCount++;
+        dynamicShapeRuns.add(boolRun(dynamicShapeRunStart, count - dynamicShapeRunStart, dynamicShape));
         println("run_count=" + runCount);
         println("face_sturdy_run_count=" + faceSturdyRunCount);
         println("collision_face_run_count=" + collisionFaceRunCount);
+        println("dynamic_shape_state_count=" + dynamicShapeCount(dynamicShapeRuns));
 
         JsonObject root = new JsonObject();
         root.addProperty("generator",
@@ -152,6 +163,7 @@ public final class BlockBehaviourProbe {
         root.add("runs", runs);
         root.add("face_sturdy_runs", faceSturdyRuns);
         root.add("collision_face_runs", collisionFaceRuns);
+        root.add("dynamic_shape_runs", dynamicShapeRuns);
         Gson gson = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
         try (PrintWriter writer = new PrintWriter(output, "UTF-8")) {
             gson.toJson(root, writer);
@@ -188,6 +200,29 @@ public final class BlockBehaviourProbe {
         obj.addProperty("length", length);
         obj.addProperty("mask", mask);
         return obj;
+    }
+
+    private static JsonObject boolRun(int start, int length, boolean value) {
+        JsonObject obj = new JsonObject();
+        obj.addProperty("start", start);
+        obj.addProperty("length", length);
+        obj.addProperty("dynamic", value);
+        return obj;
+    }
+
+    private static boolean hasDynamicShape(BlockState state) {
+        return state.getBlock().hasDynamicShape();
+    }
+
+    private static int dynamicShapeCount(JsonArray runs) {
+        int count = 0;
+        for (var value : runs) {
+            JsonObject run = value.getAsJsonObject();
+            if (run.get("dynamic").getAsBoolean()) {
+                count += run.get("length").getAsInt();
+            }
+        }
+        return count;
     }
 
     /**

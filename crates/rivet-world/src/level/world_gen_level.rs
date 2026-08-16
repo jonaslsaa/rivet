@@ -109,6 +109,11 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     /// implementation remains deferred; a concrete world may override this seam
     /// when dynamic shape context is implemented.
     fn is_face_sturdy(&self, _pos: &BlockPos, state: &BlockState, direction: &Direction) -> bool {
+        assert!(
+            !state.has_dynamic_shape(),
+            "WorldGenLevel.isFaceSturdy requires live shape context for dynamic-shape state {:?}",
+            state
+        );
         state.is_face_sturdy(*direction)
     }
 
@@ -120,6 +125,11 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     /// RivetTodo(#232): a concrete world may override this seam when dynamic
     /// shape context lands under issue #646.
     fn can_attach_to(&self, _pos: &BlockPos, state: &BlockState, direction: &Direction) -> bool {
+        assert!(
+            !state.has_dynamic_shape(),
+            "WorldGenLevel.canAttachTo requires live shape context for dynamic-shape state {:?}",
+            state
+        );
         state.can_attach_to(*direction)
     }
 
@@ -308,5 +318,70 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     fn is_fluid_at_position(&self, pos: &BlockPos, test: &dyn Fn(&FluidId) -> bool) -> bool {
         let state = self.get_block_state(pos);
         test(&FluidId::from_id(state.fluid_id()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    struct ShapeGuardLevel;
+
+    impl LevelHeightAccessor for ShapeGuardLevel {
+        fn get_height(&self) -> i32 {
+            384
+        }
+
+        fn get_min_y(&self) -> i32 {
+            -64
+        }
+    }
+
+    impl WorldGenLevel for ShapeGuardLevel {
+        fn get_seed(&self) -> i64 {
+            42
+        }
+
+        fn get_block_state(&self, _pos: &BlockPos) -> BlockState {
+            BlockState::of(
+                rivet_registry::generated::blocks::BlockId::from_name("minecraft:air").unwrap(),
+            )
+        }
+    }
+
+    #[test]
+    fn static_shape_queries_keep_cached_fast_path() {
+        let level = ShapeGuardLevel;
+        let stone = BlockState::of(
+            rivet_registry::generated::blocks::BlockId::from_name("minecraft:stone").unwrap(),
+        );
+        let pos = BlockPos::new(0, 0, 0);
+        assert!(level.is_face_sturdy(&pos, &stone, &Direction::Up));
+        assert!(level.can_attach_to(&pos, &stone, &Direction::Up));
+    }
+
+    #[test]
+    fn dynamic_shape_queries_fail_fast_for_shulker_and_moving_piston() {
+        let level = ShapeGuardLevel;
+        let pos = BlockPos::new(0, 0, 0);
+        for block in ["minecraft:shulker_box", "minecraft:moving_piston"] {
+            let state = BlockState::of(
+                rivet_registry::generated::blocks::BlockId::from_name(block).unwrap(),
+            );
+            assert!(state.has_dynamic_shape(), "{block} must be dynamic");
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| {
+                    level.is_face_sturdy(&pos, &state, &Direction::Up)
+                }))
+                .is_err()
+            );
+            assert!(
+                catch_unwind(AssertUnwindSafe(|| {
+                    level.can_attach_to(&pos, &state, &Direction::Up)
+                }))
+                .is_err()
+            );
+        }
     }
 }

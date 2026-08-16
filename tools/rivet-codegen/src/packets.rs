@@ -401,6 +401,7 @@ fn load_provenance(input: &Path) -> Result<crate::reports::SourceProvenance> {
             actual
         );
     }
+    crate::reports::verify_pinned_source(&manifest.source)?;
     Ok(manifest.source)
 }
 
@@ -1046,7 +1047,8 @@ mod tests {
                     "generator": "net.minecraft.data.Main --reports",
                     "source": {{
                         "jar": "x",
-                        "jar_sha256": "ab",
+                        "jar_sha256": "e1a027e9481a16ec1da0f0e139d370280050d123a14c022a476c2dc8a697ebda",
+                        "paper_git": "0a993450f129c4942c2a9ed45ba047412b4667cf",
                         "minecraft_version": "26.2",
                         "protocol_version": 776,
                         "world_version": 4903
@@ -1059,6 +1061,36 @@ mod tests {
         let provenance = load_provenance(&packets).unwrap();
         assert_eq!(provenance.minecraft_version, "26.2");
         assert_eq!(provenance.protocol_version, 776);
+    }
+
+    #[test]
+    fn manifest_source_pin_mismatch_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bytes = b"{\"a\":1}";
+        let packets = tmp.path().join("packets.json");
+        fs::write(&packets, bytes).unwrap();
+        let sha = crate::reports::sha256_hex(bytes);
+        fs::write(
+            tmp.path().join("manifest.json"),
+            format!(
+                r#"{{
+                    "format": 1,
+                    "generator": "net.minecraft.data.Main --reports",
+                    "source": {{
+                        "jar": "x",
+                        "jar_sha256": "deadbeef",
+                        "paper_git": "0a993450f129c4942c2a9ed45ba047412b4667cf",
+                        "minecraft_version": "26.2",
+                        "protocol_version": 776,
+                        "world_version": 4903
+                    }},
+                    "reports": [{{ "path": "packets.json", "bytes": 7, "sha256": "{sha}" }}]
+                }}"#
+            ),
+        )
+        .unwrap();
+        let error = load_provenance(&packets).unwrap_err();
+        assert!(error.to_string().contains("jar SHA"), "got: {error}");
     }
 
     #[test]

@@ -204,7 +204,7 @@ fn print_usage() {
          \x20                     --output <path>   output JSON (default data/feature_data.json)\n\
          \x20   probe-feature-data  Re-run the feature-data extractor against the real Paper jar and require\n\
          \x20             byte-identity with the committed data/feature_data.json, plus the anchor\n\
-         \x20             counts (5 reachable biomes, 72 placed, 70 configured), the paper pin, and\n\
+         \x20             counts (5 reachable biomes, 203 placed, 170 configured), the paper pin, and\n\
          \x20             non-vacuity. Flags: --bundler <path>\n\
          \x20   reports   Run the vanilla net.minecraft.data.Main --reports datagen against the\n\
          \x20             materialized Paper 26.2 server jar and pin packets.json, registries.json,\n\

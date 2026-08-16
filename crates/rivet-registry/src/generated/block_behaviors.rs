@@ -23905,3 +23905,36 @@ pub fn collision_face_mask_of(id: StateId) -> u8 {
         BLOCK_COLLISION_FACE_RUNS[0].2
     }
 }
+/// Run-length-encoded `Block.hasDynamicShape()` metadata.
+/// Dynamic states must not answer context-sensitive shape predicates
+/// from the zero-context support/collision samples.
+pub static DYNAMIC_SHAPE_RUNS: &[(u16, u16, bool)] = &[
+    (0, 2309, false),
+    (2309, 12, true),
+    (2321, 12543, false),
+    (14864, 102, true),
+    (14966, 313, false),
+    (15279, 12, true),
+    (15291, 5415, false),
+    (20706, 32, true),
+    (20738, 6424, false),
+    (27162, 1, true),
+    (27163, 3046, false),
+    (30209, 40, true),
+    (30249, 2117, false),
+];
+
+/// Whether a state requires live world context for shape queries.
+pub fn has_dynamic_shape(state: StateId) -> bool {
+    let id = state.0 as u32;
+    let idx = DYNAMIC_SHAPE_RUNS.partition_point(|(start, _, _)| *start as u32 <= id);
+    if idx == 0 {
+        return DYNAMIC_SHAPE_RUNS[0].2;
+    }
+    let (start, len, dynamic) = DYNAMIC_SHAPE_RUNS[idx - 1];
+    if id < start as u32 + len as u32 {
+        dynamic
+    } else {
+        DYNAMIC_SHAPE_RUNS[0].2
+    }
+}

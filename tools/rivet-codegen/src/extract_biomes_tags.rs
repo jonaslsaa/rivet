@@ -42,7 +42,7 @@ pub(crate) fn run_extractor(repo_root: &Path, bundler: &Path, output: &Path) -> 
     let (classpath, java, javac) = extract::prepare_runtime(repo_root, bundler)?;
 
     let cache = repo_root.join("tools/rivet-codegen/.cache");
-    let classpath_dir = cache.join("classpath");
+    let classpath_dir = extract::bundler_cache_dir(&cache, bundler)?;
     let (version, _) = extract::read_versions_list(bundler, &classpath_dir)?;
 
     let helper_dir = cache.join("biometagextractor");
@@ -50,15 +50,11 @@ pub(crate) fn run_extractor(repo_root: &Path, bundler: &Path, output: &Path) -> 
     let helper_src = include_str!("java/BiomeTagExtractor.java");
     let helper_file = helper_dir.join("BiomeTagExtractor.java");
     fs::write(&helper_file, helper_src).context("write BiomeTagExtractor.java")?;
+    let helper_dir_arg = extract::path_to_utf8(&helper_dir, "BiomeTagExtractor output directory")?;
+    let helper_file_arg = extract::path_to_utf8(&helper_file, "BiomeTagExtractor source")?;
     extract::run_cmd(
         &javac,
-        &[
-            "-cp",
-            &classpath,
-            "-d",
-            helper_dir.to_str().unwrap(),
-            helper_file.to_str().unwrap(),
-        ],
+        &["-cp", &classpath, "-d", helper_dir_arg, helper_file_arg],
         "compile BiomeTagExtractor.java",
     )?;
 
@@ -74,8 +70,14 @@ pub(crate) fn run_extractor(repo_root: &Path, bundler: &Path, output: &Path) -> 
         .context("write log4j2-off.xml")?;
     }
 
-    let classpath_arg = format!("{classpath}:{}", helper_dir.display());
-    let log4j_arg = format!("-Dlog4j.configurationFile={}", log4j_off.display());
+    let helper_dir_arg =
+        extract::path_to_utf8(&helper_dir, "BiomeTagExtractor classpath directory")?;
+    let classpath_arg = format!("{classpath}:{helper_dir_arg}");
+    let log4j_arg = format!(
+        "-Dlog4j.configurationFile={}",
+        extract::path_to_utf8(&log4j_off, "log4j configuration")?
+    );
+    let output_arg = extract::path_to_utf8(output, "biome output")?;
     // Capture the helper's stdout (the anchor lines + `PROBE OK`) so the live
     // probe can assert them; the JSON fixture itself is written to `output`.
     let out = extract::run_cmd_capture(
@@ -87,7 +89,7 @@ pub(crate) fn run_extractor(repo_root: &Path, bundler: &Path, output: &Path) -> 
             &log4j_arg,
             "BiomeTagExtractor",
             "--output",
-            output.to_str().unwrap(),
+            output_arg,
             "--version",
             &version,
         ],

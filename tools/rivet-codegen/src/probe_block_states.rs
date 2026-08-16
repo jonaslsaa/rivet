@@ -47,6 +47,12 @@ pub fn run(bundler_flag: Option<&Path>) -> Result<()> {
     );
 
     let (classpath, java, javac) = crate::extract::prepare_runtime(&repo_root, &bundler)?;
+    let server_jar = crate::extract::server_jar_for_bundler(&repo_root, &bundler)?;
+    crate::reports::verify_fixture_provenance(
+        &server_jar,
+        &repo_root.join("tools/rivet-codegen/data/reports/manifest.json"),
+        &repo_root,
+    )?;
 
     let cache = repo_root.join("tools/rivet-codegen/.cache");
     let helper_dir = cache.join("paletteprobe");
@@ -54,15 +60,12 @@ pub fn run(bundler_flag: Option<&Path>) -> Result<()> {
     let helper_src = include_str!("java/GlobalPaletteProbe.java");
     let helper_file = helper_dir.join("GlobalPaletteProbe.java");
     fs::write(&helper_file, helper_src).context("write GlobalPaletteProbe.java")?;
+    let helper_dir_arg =
+        crate::extract::path_to_utf8(&helper_dir, "GlobalPaletteProbe output directory")?;
+    let helper_file_arg = crate::extract::path_to_utf8(&helper_file, "GlobalPaletteProbe source")?;
     crate::extract::run_cmd(
         &javac,
-        &[
-            "-cp",
-            &classpath,
-            "-d",
-            helper_dir.to_str().unwrap(),
-            helper_file.to_str().unwrap(),
-        ],
+        &["-cp", &classpath, "-d", helper_dir_arg, helper_file_arg],
         "compile GlobalPaletteProbe.java",
     )?;
 
@@ -76,8 +79,13 @@ pub fn run(bundler_flag: Option<&Path>) -> Result<()> {
     )
     .context("write log4j2-off.xml")?;
 
-    let classpath_arg = format!("{classpath}:{}", helper_dir.display());
-    let log4j_arg = format!("-Dlog4j.configurationFile={}", log4j_off.display());
+    let helper_dir_arg =
+        crate::extract::path_to_utf8(&helper_dir, "GlobalPaletteProbe classpath directory")?;
+    let classpath_arg = format!("{classpath}:{helper_dir_arg}");
+    let log4j_arg = format!(
+        "-Dlog4j.configurationFile={}",
+        crate::extract::path_to_utf8(&log4j_off, "log4j configuration")?
+    );
     let out = crate::extract::run_cmd_capture(
         &java,
         &[
