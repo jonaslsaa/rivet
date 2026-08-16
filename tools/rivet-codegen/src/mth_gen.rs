@@ -60,15 +60,11 @@ pub fn run(bundler_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()
     let helper_src = include_str!("java/MthGen.java");
     let helper_file = helper_dir.join("MthGen.java");
     fs::write(&helper_file, helper_src).context("write MthGen.java")?;
+    let helper_dir_arg = extract::path_to_utf8(&helper_dir, "MthGen output directory")?;
+    let helper_file_arg = extract::path_to_utf8(&helper_file, "MthGen source")?;
     extract::run_cmd(
         &javac,
-        &[
-            "-cp",
-            &classpath,
-            "-d",
-            helper_dir.to_str().unwrap(),
-            helper_file.to_str().unwrap(),
-        ],
+        &["-cp", &classpath, "-d", helper_dir_arg, helper_file_arg],
         "compile MthGen.java",
     )?;
 
@@ -82,8 +78,12 @@ pub fn run(bundler_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()
     )
     .context("write log4j2-off.xml")?;
 
-    let classpath_arg = format!("{classpath}:{}", helper_dir.display());
-    let log4j_arg = format!("-Dlog4j.configurationFile={}", log4j_off.display());
+    let helper_dir_arg = crate::extract::path_to_utf8(&helper_dir, "MthGen classpath directory")?;
+    let classpath_arg = format!("{classpath}:{helper_dir_arg}");
+    let log4j_arg = format!(
+        "-Dlog4j.configurationFile={}",
+        crate::extract::path_to_utf8(&log4j_off, "log4j configuration")?
+    );
     let out = extract::run_cmd_capture(
         &java,
         &[

@@ -38,8 +38,9 @@ pub fn run(
     // report-driven static-builtin tables (data/reports/registries.json), the
     // block-state global-id table (data/reports/blocks.json), the biome id
     // table + tag network content (data/biomes_tags.json), the block-behavior
-    // table (data/block_behaviors.json), the worldgen noise/biome/preset data
-    // (data/worldgen.json), and the packet tables (written into rivet-protocol
+    // table (data/block_behaviors.json), including the exact FULL-face support
+    // masks, the worldgen noise/biome/preset data (data/worldgen.json), and
+    // the packet tables (written into rivet-protocol
     // by packets::run). `mod.rs` declares the registry-owned ones and is
     // written last so it can never drift from the files it names.
     let block_version = run_blocks(input_flag, output_flag)?;

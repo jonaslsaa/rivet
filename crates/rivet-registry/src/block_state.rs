@@ -1,9 +1,10 @@
 //! Hand-written `BlockState` value type over the generated global-id tables
 //! (issue #228). This is the "pure table ops, no world types" surface the
 //! worldgen/heightmap/lighting work consumes: it decodes a `StateId` into the
-//! probe-driven behavior word (`generated/block_behaviors.rs`), round-trips
-//! through the mixed-radix property tables (`generated/block_states.rs` +
-//! `block_properties.rs`), and answers block-tag membership
+//! probe-driven behavior word plus exact FULL-face support and collision-face
+//! masks (`generated/block_behaviors.rs`), round-trips through the mixed-radix
+//! property tables (`generated/block_states.rs` + `block_properties.rs`), and
+//! answers block-tag membership
 //! (`generated/tags.rs`). It never reads a world, so it lives in
 //! `rivet-registry` and requires only the `blocks` feature.
 //!
@@ -30,10 +31,11 @@
 use std::fmt;
 
 use crate::block_state_property::{Property, PropertyValue};
+use crate::core::Direction;
 use crate::generated::block_behaviors::{
     BEHAVIOR_MASK_LIGHT_DAMPENING, BEHAVIOR_MASK_LIGHT_EMISSION, BEHAVIOR_MASK_MAP_COLOR,
     BEHAVIOR_SHIFT_LIGHT_DAMPENING, BEHAVIOR_SHIFT_LIGHT_EMISSION, BEHAVIOR_SHIFT_MAP_COLOR,
-    behavior_of,
+    behavior_of, collision_face_mask_of, face_sturdy_mask_of,
 };
 use crate::generated::block_properties::{
     BLOCK_PROPERTY_VALUES, BlockPropertyId, MAX_BLOCK_STATE_PROPERTY_COUNT,
@@ -270,6 +272,75 @@ impl BlockState {
     }
 
     // --- behavior queries (probe-driven, no world types) --------------------
+
+    /// Paper `BlockStateBase.isFaceSturdy(level, pos, direction)` with the
+    /// default `SupportType.FULL`, sampled at the codegen probe origin. The
+    /// generated mask is the exact zero-context `SupportType.FULL.isSupporting`
+    /// result over `getBlockSupportShape`, not a solid-render or other coarse-
+    /// block approximation. It is not authoritative for `hasDynamicShape`
+    /// states; issue #646 owns their live context-aware contract. Direction bits
+    /// follow Java `Direction.values()`: DOWN, UP, NORTH, SOUTH, WEST, EAST.
+    #[inline]
+    pub fn is_face_sturdy(self, direction: Direction) -> bool {
+        let bit = match direction {
+            Direction::Down => 1 << 0,
+            Direction::Up => 1 << 1,
+            Direction::North => 1 << 2,
+            Direction::South => 1 << 3,
+            Direction::West => 1 << 4,
+            Direction::East => 1 << 5,
+        };
+        self.face_sturdy_mask() & bit != 0
+    }
+
+    /// The six-direction Paper `SupportType.FULL` face-support sample at the
+    /// codegen probe origin. It is not authoritative for `hasDynamicShape`
+    /// states; issue #646 owns live context-aware support.
+    #[inline]
+    pub fn face_sturdy_mask(self) -> u8 {
+        face_sturdy_mask_of(self.0)
+    }
+
+    /// The six-direction Paper full collision-face sample used by
+    /// `MultifaceBlock.canAttachTo` at the codegen probe origin. It is not
+    /// authoritative for `hasDynamicShape` states; issue #646 owns live
+    /// context-aware collision.
+    #[inline]
+    pub fn collision_face_mask(self) -> u8 {
+        collision_face_mask_of(self.0)
+    }
+
+    /// State-only `MultifaceBlock.canAttachTo` over the probe-origin samples: a
+    /// full support face or a full collision face on the requested direction.
+    /// This is not authoritative for `hasDynamicShape` states; issue #646 owns
+    /// live context-aware attachment.
+    #[inline]
+    pub fn can_attach_to(self, direction: Direction) -> bool {
+        self.is_face_sturdy(direction) || self.is_collision_face_full(direction)
+    }
+
+    /// Whether Paper marks the owning block as having a dynamic shape. Dynamic
+    /// states require live world context for face support and attachment; the
+    /// generated zero-context masks are never authoritative for them.
+    #[inline]
+    pub fn has_dynamic_shape(self) -> bool {
+        crate::generated::block_behaviors::has_dynamic_shape(self.0)
+    }
+
+    /// Whether the probe-origin collision sample fills the requested face.
+    /// Dynamic-shape states require issue #646 live context instead.
+    #[inline]
+    pub fn is_collision_face_full(self, direction: Direction) -> bool {
+        let bit = match direction {
+            Direction::Down => 1 << 0,
+            Direction::Up => 1 << 1,
+            Direction::North => 1 << 2,
+            Direction::South => 1 << 3,
+            Direction::West => 1 << 4,
+            Direction::East => 1 << 5,
+        };
+        self.collision_face_mask() & bit != 0
+    }
 
     /// The raw 32-bit behavior word for this state.
     #[inline]
@@ -563,6 +634,82 @@ mod tests {
         assert_eq!(word("minecraft:oak_leaves"), 0x4701C2);
         assert_eq!(word("minecraft:glass"), 0x4000A2);
         assert_eq!(word("minecraft:torch"), 0xE0A0);
+    }
+
+    #[test]
+    fn full_face_support_masks_are_state_and_direction_specific() {
+        let glass = BlockState::of(BlockId::from_name("minecraft:glass").unwrap());
+        assert_eq!(glass.face_sturdy_mask(), 0x3F);
+        assert!(!glass.solid_render());
+        for direction in Direction::VALUES {
+            assert!(glass.is_face_sturdy(direction));
+        }
+
+        let (slab_block, top_values) = digits(
+            "minecraft:oak_slab",
+            &[("type", "top"), ("waterlogged", "false")],
+        );
+        let top_slab = BlockState::new(state_id(slab_block, &top_values));
+        assert_eq!(top_slab.face_sturdy_mask(), 0x02);
+        assert!(top_slab.is_face_sturdy(Direction::Up));
+        assert!(!top_slab.is_face_sturdy(Direction::Down));
+
+        let (_, bottom_values) = digits(
+            "minecraft:oak_slab",
+            &[("type", "bottom"), ("waterlogged", "false")],
+        );
+        let bottom_slab = BlockState::new(state_id(slab_block, &bottom_values));
+        assert_eq!(bottom_slab.face_sturdy_mask(), 0x01);
+        assert!(bottom_slab.is_face_sturdy(Direction::Down));
+        assert!(!bottom_slab.is_face_sturdy(Direction::Up));
+
+        let (_, double_values) = digits(
+            "minecraft:oak_slab",
+            &[("type", "double"), ("waterlogged", "false")],
+        );
+        let double_slab = BlockState::new(state_id(slab_block, &double_values));
+        assert_eq!(double_slab.face_sturdy_mask(), 0x3F);
+    }
+
+    #[test]
+    fn dynamic_shape_metadata_covers_hostile_states() {
+        let stone = BlockState::of(BlockId::from_name("minecraft:stone").unwrap());
+        let shulker = BlockState::of(BlockId::from_name("minecraft:shulker_box").unwrap());
+        let moving_piston = BlockState::of(BlockId::from_name("minecraft:moving_piston").unwrap());
+        assert!(!stone.has_dynamic_shape());
+        assert!(shulker.has_dynamic_shape());
+        assert!(moving_piston.has_dynamic_shape());
+    }
+
+    #[test]
+    fn multiface_attachment_includes_full_collision_faces() {
+        let leaves = BlockState::of(BlockId::from_name("minecraft:oak_leaves").unwrap());
+        assert_eq!(leaves.face_sturdy_mask(), 0);
+        assert_eq!(leaves.collision_face_mask(), 0x3F);
+        for direction in Direction::VALUES {
+            assert!(leaves.can_attach_to(direction));
+        }
+
+        let glass = BlockState::of(BlockId::from_name("minecraft:glass").unwrap());
+        assert!(glass.can_attach_to(Direction::North));
+    }
+
+    #[test]
+    fn sticky_piston_face_masks_pin_all_direction_bits() {
+        for (id, mask) in [
+            (2235, 1 << 3),
+            (2236, 1 << 4),
+            (2237, 1 << 2),
+            (2238, 1 << 5),
+            (2239, 1 << 0),
+            (2240, 1 << 1),
+        ] {
+            assert_eq!(
+                BlockState::new(StateId(id)).face_sturdy_mask(),
+                mask,
+                "state {id}"
+            );
+        }
     }
 
     #[test]

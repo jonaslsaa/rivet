@@ -12,10 +12,9 @@
 //! `VineBlock.isAcceptableNeighbour` is `MultifaceBlock.canAttachTo(level,
 //! directionToNeighbour, neighbourPos, level.getBlockState(neighbourPos))` —
 //! `Block.isFaceFull(supportShape, opposite) || Block.isFaceFull(collisionShape,
-//! opposite)`, i.e. `neighbourState.isFaceSturdy(level, neighbourPos, opposite)`.
-//! The port maps it to the `WorldGenLevel::is_face_sturdy` seam (RivetTodo #232;
-//! the shape world-access is not ported, so production worlds must override the
-//! seam — test doubles fix the verdict).
+//! opposite)`. The port maps it to the dedicated `WorldGenLevel::can_attach_to`
+//! seam; it must not be reduced to `is_face_sturdy`, because leaves have a full
+//! collision face but no full support face.
 
 use crate::block::blocks::Blocks;
 use crate::level::WorldGenLevel;
@@ -47,15 +46,15 @@ fn property_for_face(direction: &Direction) -> Property {
 
 /// `VineBlock.isAcceptableNeighbour(WorldGenLevel, BlockPos, Direction)` —
 /// `MultifaceBlock.canAttachTo(level, directionToNeighbour, neighbourPos,
-/// level.getBlockState(neighbourPos))`, the face-sturdiness of the neighbour
-/// state on the face toward `origin` (`isFaceSturdy` on the opposite face).
+/// level.getBlockState(neighbourPos))`, checking the neighbour's support or
+/// collision face toward `origin` (`canAttachTo` on the opposite face).
 fn is_acceptable_neighbour(
     level: &dyn WorldGenLevel,
     neighbour_pos: &BlockPos,
     direction: &Direction,
 ) -> bool {
     let neighbour_state = level.get_block_state(neighbour_pos);
-    level.is_face_sturdy(neighbour_pos, &neighbour_state, &direction.get_opposite())
+    level.can_attach_to(neighbour_pos, &neighbour_state, &direction.get_opposite())
 }
 
 /// `net.minecraft.world.level.levelgen.feature.VinesFeature`.
@@ -150,8 +149,8 @@ mod tests {
 
     /// `TestLevel::face_sturdy` defaults true, so the first non-DOWN direction
     /// (UP) is acceptable: the origin is written with the UP face property and
-    /// `true` returns after one write and no draws (the face verdict is the
-    /// `is_face_sturdy` seam, not an RNG draw).
+    /// `true` returns after one write and no draws through the `can_attach_to`
+    /// seam.
     #[test]
     fn attaches_vine_on_the_first_acceptable_face() {
         let mut level = TestLevel::over(access());
@@ -176,15 +175,34 @@ mod tests {
     fn down_neighbour_alone_does_not_attach() {
         let mut level = TestLevel::over(access());
         level.face_sturdy = false;
-        // The `is_face_sturdy` seam in the double is a single boolean, so the
-        // per-direction verdict is exercised through the per-position override
-        // added for this test (the -Y neighbour is sturdy, every other fails).
+        // The `can_attach_to` seam in the double uses a single global boolean,
+        // so this per-direction verdict is exercised through the per-position
+        // override (the -Y neighbour is sturdy, every other face fails).
         level
             .face_sturdy_at
             .insert((BlockPos::new(0, -1, 0), Direction::Up), true);
         let mut random = RecordingRandom::new(7);
         assert!(!place_with(&mut level, BlockPos::new(0, 0, 0), &mut random));
         assert!(level.writes.is_empty());
+        assert!(random.calls.is_empty());
+    }
+
+    #[test]
+    fn attaches_on_full_collision_face_without_sturdy_support() {
+        let mut level = TestLevel::over(access());
+        level.face_sturdy = false;
+        level.states.insert(
+            BlockPos::new(0, 1, 0),
+            BlockState::of(BlockId::from_name("minecraft:oak_leaves").unwrap()),
+        );
+        let mut random = RecordingRandom::new(7);
+        assert!(place_with(&mut level, BlockPos::new(0, 0, 0), &mut random));
+        assert_eq!(level.writes.len(), 1);
+        assert_eq!(level.writes[0].0, BlockPos::new(0, 0, 0));
+        assert_eq!(
+            level.writes[0].1.get_value(BlockStateProperties::UP),
+            Some(PropertyValue::Bool(true))
+        );
         assert!(random.calls.is_empty());
     }
 

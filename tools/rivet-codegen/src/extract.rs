@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 
 /// Canonical output path for the extracted block-state registry.
 pub fn default_output(repo_root: &Path) -> PathBuf {
@@ -45,7 +45,7 @@ pub fn run(bundler_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()
     let cache = repo_root.join("tools/rivet-codegen/.cache");
     fs::create_dir_all(&cache).context("create codegen cache dir")?;
 
-    let classpath_dir = cache.join("classpath");
+    let classpath_dir = bundler_cache_dir(&cache, &bundler)?;
     extract_bundler(&bundler, &classpath_dir)?;
 
     let (version, server_jar_rel) = read_versions_list(&bundler, &classpath_dir)?;
@@ -77,20 +77,21 @@ pub fn run(bundler_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()
     )
     .context("write log4j2-off.xml")?;
 
+    let helper_dir_arg = path_to_utf8(&helper_dir, "BlockDataExtractor output directory")?;
+    let helper_file_arg = path_to_utf8(&helper_file, "BlockDataExtractor source")?;
     run_cmd(
         &javac,
-        &[
-            "-cp",
-            &classpath,
-            "-d",
-            helper_dir.to_str().unwrap(),
-            helper_file.to_str().unwrap(),
-        ],
+        &["-cp", &classpath, "-d", helper_dir_arg, helper_file_arg],
         "compile BlockDataExtractor.java",
     )?;
 
-    let classpath_arg = format!("{classpath}:{}", helper_dir.display());
-    let log4j_arg = format!("-Dlog4j.configurationFile={}", log4j_off.display());
+    let helper_dir_arg = path_to_utf8(&helper_dir, "BlockDataExtractor classpath directory")?;
+    let classpath_arg = format!("{classpath}:{helper_dir_arg}");
+    let log4j_arg = format!(
+        "-Dlog4j.configurationFile={}",
+        path_to_utf8(&log4j_off, "log4j configuration")?
+    );
+    let output_arg = path_to_utf8(&output, "block registry output")?;
     run_cmd(
         &java,
         &[
@@ -100,7 +101,7 @@ pub fn run(bundler_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()
             &log4j_arg,
             "BlockDataExtractor",
             "--output",
-            output.to_str().unwrap(),
+            output_arg,
             "--version",
             &version,
         ],
@@ -150,94 +151,380 @@ pub(crate) fn find_repo_root_from(start: PathBuf) -> Result<PathBuf> {
     }
 }
 
+/// Return the UTF-8 representation required by the Java and unzip command lines.
+/// A hostile filesystem path must classify as UNVERIFIED, never panic.
+pub(crate) fn path_to_utf8<'a>(path: &'a Path, label: &str) -> Result<&'a str> {
+    path.to_str().with_context(|| {
+        format!(
+            "UNVERIFIED: {label} path is not valid UTF-8: {}",
+            path.to_string_lossy()
+        )
+    })
+}
+
+/// Isolate every extracted classpath by the exact SHA-256 of its bundler.
+pub(crate) fn bundler_cache_dir(cache_root: &Path, bundler: &Path) -> Result<PathBuf> {
+    let bundler_sha = crate::reports::sha256_hex(
+        &fs::read(bundler).with_context(|| format!("read bundler {}", bundler.display()))?,
+    );
+    let root = cache_root.join("classpath");
+    match fs::symlink_metadata(&root) {
+        Ok(metadata) => {
+            ensure!(
+                !metadata.file_type().is_symlink(),
+                "UNVERIFIED: classpath cache root is a symlink: {}",
+                root.display()
+            );
+            ensure!(
+                metadata.file_type().is_dir(),
+                "UNVERIFIED: classpath cache root is not a directory: {}",
+                root.display()
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspect {}", root.display()));
+        }
+    }
+    Ok(root.join(bundler_sha))
+}
+
+fn validate_namespace_root(path: &Path, label: &str) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("UNVERIFIED: {label} is missing at {}", path.display()))?;
+    ensure!(
+        !metadata.file_type().is_symlink(),
+        "UNVERIFIED: {label} is a symlink: {}",
+        path.display()
+    );
+    ensure!(
+        metadata.file_type().is_dir(),
+        "UNVERIFIED: {label} is not a directory: {}",
+        path.display()
+    );
+    Ok(())
+}
+
+fn archive_entries(bundler: &Path) -> Result<Vec<String>> {
+    let bundler_arg = path_to_utf8(bundler, "bundler jar")?;
+    let output = Command::new("unzip")
+        .args(["-Z1", bundler_arg])
+        .output()
+        .context("list bundler archive entries")?;
+    if !output.status.success() {
+        bail!("unzip -Z1 failed to list bundler archive entries");
+    }
+    let text = std::str::from_utf8(&output.stdout)
+        .context("UNVERIFIED: bundler archive entry list is not UTF-8")?;
+    Ok(text.lines().map(str::to_owned).collect())
+}
+
+fn validate_archive_path(path: &str, label: &str) -> Result<()> {
+    let path = Path::new(path);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::Prefix(_)
+                    | std::path::Component::RootDir
+                    | std::path::Component::ParentDir
+                    | std::path::Component::CurDir
+            )
+        })
+    {
+        bail!(
+            "UNVERIFIED: {label} contains an unsafe relative path `{}`",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_regular_file(path: &Path, root: &Path, label: &str) -> Result<()> {
+    validate_namespace_root(root, "extracted bundler namespace")?;
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("UNVERIFIED: {label} is missing at {}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        bail!(
+            "UNVERIFIED: {label} is not a regular file: {}",
+            path.display()
+        );
+    }
+    let root = fs::canonicalize(root)
+        .with_context(|| format!("UNVERIFIED: canonicalize cache root {}", root.display()))?;
+    let canonical = fs::canonicalize(path)
+        .with_context(|| format!("UNVERIFIED: canonicalize {label} {}", path.display()))?;
+    if !canonical.starts_with(&root) {
+        bail!(
+            "UNVERIFIED: {label} escapes the extracted bundler namespace: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_directory(path: &Path, root: &Path, label: &str) -> Result<()> {
+    validate_namespace_root(root, "extracted bundler namespace")?;
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("UNVERIFIED: {label} is missing at {}", path.display()))?;
+    if !metadata.file_type().is_dir() {
+        bail!("UNVERIFIED: {label} is not a directory: {}", path.display());
+    }
+    let root = fs::canonicalize(root)
+        .with_context(|| format!("UNVERIFIED: canonicalize cache root {}", root.display()))?;
+    let canonical = fs::canonicalize(path)
+        .with_context(|| format!("UNVERIFIED: canonicalize {label} {}", path.display()))?;
+    if !canonical.starts_with(&root) {
+        bail!(
+            "UNVERIFIED: {label} escapes the extracted bundler namespace: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_relative_file(root: &Path, relative: &str, label: &str) -> Result<PathBuf> {
+    validate_archive_path(relative, label)?;
+    let path = root.join(relative);
+    validate_regular_file(&path, root, label)?;
+    Ok(path)
+}
+
+fn collect_jars(dir: &Path, out: &mut Vec<String>) -> Result<()> {
+    let root = dir
+        .parent()
+        .and_then(Path::parent)
+        .context("library directory has no extracted namespace")?;
+    validate_directory(dir, root, "META-INF/libraries")?;
+    for entry in
+        fs::read_dir(dir).with_context(|| format!("read libraries dir {}", dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() {
+            bail!("UNVERIFIED: library path is a symlink: {}", path.display());
+        }
+        if metadata.file_type().is_dir() {
+            collect_jars(&path, out)?;
+        } else if metadata.file_type().is_file() {
+            if path.extension().is_some_and(|e| e == "jar") {
+                validate_regular_file(&path, root, "library jar")?;
+                out.push(path_to_utf8(&path, "library jar")?.to_owned());
+            }
+        } else {
+            bail!(
+                "UNVERIFIED: library path is not a regular file or directory: {}",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn parse_versions_list(contents: &str, classpath_dir: &Path) -> Result<(String, String)> {
+    let line = contents
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .context("empty META-INF/versions.list")?;
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    if fields.len() != 3 {
+        bail!("invalid META-INF/versions.list entry: expected sha256 version path");
+    }
+    let expected_sha256 = fields[0];
+    ensure!(
+        expected_sha256.len() == 64 && expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "invalid server jar SHA-256 in META-INF/versions.list: {expected_sha256}"
+    );
+    let version = fields[1].to_owned();
+    let rel_path = fields[2].to_owned();
+    let versions_root = classpath_dir.join("META-INF/versions");
+    validate_directory(&versions_root, classpath_dir, "META-INF/versions")?;
+    let server_jar = validate_relative_file(
+        &versions_root,
+        &rel_path,
+        "server path in META-INF/versions.list",
+    )?;
+    let actual_sha256 = crate::reports::sha256_hex(
+        &fs::read(&server_jar).with_context(|| format!("read {}", server_jar.display()))?,
+    );
+    ensure!(
+        actual_sha256 == expected_sha256,
+        "server jar SHA-256 mismatch in META-INF/versions.list: expected {expected_sha256}, got {actual_sha256}"
+    );
+    Ok((version, rel_path))
+}
+
+fn validate_extracted_cache(classpath_dir: &Path, bundler_sha: &str) -> Result<()> {
+    let marker = classpath_dir.join(".bundler.sha256");
+    validate_regular_file(&marker, classpath_dir, "bundler cache marker")?;
+    let cached = fs::read_to_string(&marker).context("read bundler cache marker")?;
+    ensure!(
+        cached.trim() == bundler_sha,
+        "bundler cache marker SHA mismatch"
+    );
+    let versions_list = classpath_dir.join("META-INF/versions.list");
+    validate_regular_file(&versions_list, classpath_dir, "META-INF/versions.list")?;
+    let contents =
+        fs::read_to_string(&versions_list).context("read extracted META-INF/versions.list")?;
+    parse_versions_list(&contents, classpath_dir)?;
+    let libraries = classpath_dir.join("META-INF/libraries");
+    let mut jars = Vec::new();
+    collect_jars(&libraries, &mut jars)?;
+    ensure!(
+        !jars.is_empty(),
+        "no regular library jars in extracted bundler cache"
+    );
+    Ok(())
+}
+
+fn bundler_cache_matches(classpath_dir: &Path, bundler_sha: &str) -> bool {
+    validate_extracted_cache(classpath_dir, bundler_sha).is_ok()
+}
+
 fn extract_bundler(bundler: &Path, classpath_dir: &Path) -> Result<()> {
-    let marker = classpath_dir.join("META-INF/versions.list");
-    let need_extract = !marker.is_file()
-        || fs::metadata(&marker)
-            .and_then(|m| m.modified())
-            .ok()
-            .zip(fs::metadata(bundler).and_then(|m| m.modified()).ok())
-            .map(|(marker_mtime, bundler_mtime)| bundler_mtime > marker_mtime)
-            .unwrap_or(true);
-    if !need_extract {
+    let bundler_sha = crate::reports::sha256_hex(&fs::read(bundler).context("read bundler jar")?);
+    if let Ok(metadata) = fs::symlink_metadata(classpath_dir) {
+        ensure!(
+            !metadata.file_type().is_symlink(),
+            "UNVERIFIED: bundler cache namespace is a symlink: {}",
+            classpath_dir.display()
+        );
+    }
+    if bundler_cache_matches(classpath_dir, &bundler_sha) {
         return Ok(());
     }
 
-    fs::create_dir_all(classpath_dir)
-        .with_context(|| format!("create {}", classpath_dir.display()))?;
+    let entries = archive_entries(bundler)?;
+    let has_versions_list = entries
+        .iter()
+        .any(|entry| entry == "META-INF/versions.list");
+    ensure!(
+        has_versions_list,
+        "UNVERIFIED: bundler lacks META-INF/versions.list"
+    );
+    for entry in &entries {
+        if entry == "META-INF/versions.list"
+            || entry.starts_with("META-INF/versions/")
+            || entry.starts_with("META-INF/libraries/")
+        {
+            validate_archive_path(entry, "bundler archive entry")?;
+        }
+    }
+    ensure!(
+        entries
+            .iter()
+            .any(|entry| entry.starts_with("META-INF/versions/") && !entry.ends_with('/')),
+        "UNVERIFIED: bundler has no server version entry"
+    );
+    ensure!(
+        entries
+            .iter()
+            .any(|entry| entry.starts_with("META-INF/libraries/") && entry.ends_with(".jar")),
+        "UNVERIFIED: bundler has no library jars"
+    );
+
+    let parent = classpath_dir
+        .parent()
+        .context("bundler cache namespace has no parent")?;
+    fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    let tmp = parent.join(format!(".tmp-{}-{}", std::process::id(), bundler_sha));
+    if let Ok(metadata) = fs::symlink_metadata(&tmp) {
+        ensure!(
+            !metadata.file_type().is_symlink(),
+            "UNVERIFIED: temporary bundler extraction path is a symlink: {}",
+            tmp.display()
+        );
+        fs::remove_dir_all(&tmp).with_context(|| format!("clear {}", tmp.display()))?;
+    }
+    fs::create_dir_all(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+    let bundler_arg = path_to_utf8(bundler, "bundler jar")?;
+    let tmp_arg = path_to_utf8(&tmp, "bundler extraction directory")?;
+    let mut unzip_args = vec!["-o", "-q", bundler_arg, "-d", tmp_arg];
+    if entries.iter().any(|entry| entry == "META-INF/MANIFEST.MF") {
+        unzip_args.push("META-INF/MANIFEST.MF");
+    }
+    if entries.iter().any(|entry| entry == "META-INF/main-class") {
+        unzip_args.push("META-INF/main-class");
+    }
+    unzip_args.extend([
+        "META-INF/versions.list",
+        "META-INF/versions/*",
+        "META-INF/libraries/*",
+    ]);
     run_cmd(
         &PathBuf::from("unzip"),
-        &[
-            "-o",
-            "-q",
-            bundler.to_str().unwrap(),
-            "-d",
-            classpath_dir.to_str().unwrap(),
-            "META-INF/versions/*",
-            "META-INF/libraries/*",
-        ],
+        &unzip_args,
         "extract server + libraries from bundler jar",
-    )
+    )?;
+    fs::write(tmp.join(".bundler.sha256"), &bundler_sha)
+        .context("record bundler cache identity")?;
+    if let Err(error) = validate_extracted_cache(&tmp, &bundler_sha) {
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(error);
+    }
+
+    if bundler_cache_matches(classpath_dir, &bundler_sha) {
+        fs::remove_dir_all(&tmp).ok();
+        return Ok(());
+    }
+    match fs::symlink_metadata(classpath_dir) {
+        Ok(metadata) => {
+            ensure!(
+                !metadata.file_type().is_symlink(),
+                "UNVERIFIED: bundler cache namespace became a symlink: {}",
+                classpath_dir.display()
+            );
+            ensure!(
+                metadata.file_type().is_dir(),
+                "UNVERIFIED: bundler cache namespace is not a directory: {}",
+                classpath_dir.display()
+            );
+            fs::remove_dir_all(classpath_dir).with_context(|| {
+                format!("clear stale bundler cache {}", classpath_dir.display())
+            })?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("inspect stale bundler cache {}", classpath_dir.display())
+            });
+        }
+    }
+    fs::rename(&tmp, classpath_dir).with_context(|| {
+        format!(
+            "atomically install bundler cache {} -> {}",
+            tmp.display(),
+            classpath_dir.display()
+        )
+    })?;
+    Ok(())
 }
 
 pub(crate) fn read_versions_list(bundler: &Path, classpath_dir: &Path) -> Result<(String, String)> {
+    let bundler_sha = crate::reports::sha256_hex(&fs::read(bundler).context("read bundler jar")?);
+    ensure!(
+        bundler_cache_matches(classpath_dir, &bundler_sha),
+        "UNVERIFIED: extracted bundler cache is missing, stale, or unsafe"
+    );
     let marker = classpath_dir.join("META-INF/versions.list");
-    let contents = if marker.is_file() {
-        fs::read_to_string(&marker)?
-    } else {
-        // Marker may be from a previous run; re-read from the jar to be safe.
-        let out = Command::new("unzip")
-            .arg("-p")
-            .arg(bundler)
-            .arg("META-INF/versions.list")
-            .output()
-            .context("read META-INF/versions.list from bundler")?;
-        if !out.status.success() {
-            bail!("unzip -p failed to read META-INF/versions.list");
-        }
-        String::from_utf8_lossy(&out.stdout).into_owned()
-    };
-
-    let line = contents
-        .lines()
-        .next()
-        .context("empty META-INF/versions.list")?;
-    let mut fields = line.split_whitespace();
-    let _sha1 = fields.next().context("missing sha1 in versions.list")?;
-    let version = fields
-        .next()
-        .context("missing version in versions.list")?
-        .to_string();
-    let rel_path = fields
-        .next()
-        .context("missing server path in versions.list")?
-        .to_string();
-    Ok((version, rel_path))
+    let contents = fs::read_to_string(&marker)
+        .with_context(|| format!("read extracted {}", marker.display()))?;
+    parse_versions_list(&contents, classpath_dir)
 }
 
 /// Full classpath: server jar + every library jar under META-INF/libraries.
 fn build_classpath(classpath_dir: &Path, server_jar: &Path) -> Result<String> {
-    let mut jars: Vec<String> = vec![server_jar.display().to_string()];
+    validate_regular_file(server_jar, classpath_dir, "selected server jar")?;
     let libs = classpath_dir.join("META-INF/libraries");
-    if libs.is_dir() {
-        collect_jars(&libs, &mut jars)?;
-    }
+    let mut jars = vec![path_to_utf8(server_jar, "selected server jar")?.to_owned()];
+    collect_jars(&libs, &mut jars)?;
     if jars.len() <= 1 {
         bail!("no library jars found under {}", libs.display());
     }
     Ok(jars.join(":"))
-}
-
-fn collect_jars(dir: &Path, out: &mut Vec<String>) -> Result<()> {
-    for entry in fs::read_dir(dir).context("read libraries dir")? {
-        let path = entry?.path();
-        if path.is_dir() {
-            collect_jars(&path, out)?;
-        } else if path.extension().is_some_and(|e| e == "jar") {
-            out.push(path.display().to_string());
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn resolve_java() -> Result<(PathBuf, PathBuf)> {
@@ -252,28 +539,35 @@ pub(crate) fn resolve_java() -> Result<(PathBuf, PathBuf)> {
     Ok((PathBuf::from("java"), PathBuf::from("javac")))
 }
 
+pub(crate) fn server_jar_for_bundler(repo_root: &Path, bundler: &Path) -> Result<PathBuf> {
+    let cache = repo_root.join("tools/rivet-codegen/.cache");
+    fs::create_dir_all(&cache).context("create codegen cache dir")?;
+    let classpath_dir = bundler_cache_dir(&cache, bundler)?;
+    extract_bundler(bundler, &classpath_dir)?;
+
+    let (_, server_jar_rel) = read_versions_list(bundler, &classpath_dir)?;
+    let versions_root = classpath_dir.join("META-INF/versions");
+    let server_jar = validate_relative_file(
+        &versions_root,
+        &server_jar_rel,
+        "selected server jar from META-INF/versions.list",
+    )?;
+    ensure!(
+        server_jar.starts_with(&classpath_dir),
+        "UNVERIFIED: selected server jar escaped bundler cache namespace"
+    );
+    Ok(server_jar)
+}
+
 /// Unpack the bundler classpath + resolve java/javac, shared by `extract` and
 /// `mth-gen`. Returns (classpath, java, javac).
 pub(crate) fn prepare_runtime(
     repo_root: &Path,
     bundler: &Path,
 ) -> Result<(String, PathBuf, PathBuf)> {
+    let server_jar = server_jar_for_bundler(repo_root, bundler)?;
     let cache = repo_root.join("tools/rivet-codegen/.cache");
-    fs::create_dir_all(&cache).context("create codegen cache dir")?;
-
-    let classpath_dir = cache.join("classpath");
-    extract_bundler(bundler, &classpath_dir)?;
-
-    let (_, server_jar_rel) = read_versions_list(bundler, &classpath_dir)?;
-    let server_jar = classpath_dir
-        .join("META-INF/versions")
-        .join(&server_jar_rel);
-    anyhow::ensure!(
-        server_jar.is_file(),
-        "server jar not found at {}",
-        server_jar.display()
-    );
-
+    let classpath_dir = bundler_cache_dir(&cache, bundler)?;
     let classpath = build_classpath(&classpath_dir, &server_jar)?;
     let (java, javac) = resolve_java()?;
     Ok((classpath, java, javac))
@@ -305,4 +599,263 @@ pub(crate) fn run_cmd_capture(program: &Path, args: &[&str], what: &str) -> Resu
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundler_cache_identity_rejects_conflicting_override() {
+        let root = tempfile::tempdir().unwrap();
+        let bundler = root.path().join("bundler.jar");
+        write_test_bundler(&bundler, b"server");
+        let cache = root.path().join("cache");
+        extract_bundler(&bundler, &cache).unwrap();
+        let sha = crate::reports::sha256_hex(&fs::read(&bundler).unwrap());
+        assert!(!bundler_cache_matches(&cache, "sha-a"));
+        assert!(bundler_cache_matches(&cache, &sha));
+    }
+
+    #[test]
+    fn server_jar_selection_ignores_conflicting_materialized_jar() {
+        let root = tempfile::tempdir().unwrap();
+        let bundler = root.path().join("override-bundler.jar");
+        write_test_bundler(&bundler, b"override server");
+        let materialized = crate::reports::default_jar(root.path());
+        fs::create_dir_all(materialized.parent().unwrap()).unwrap();
+        fs::write(materialized, b"materialized server").unwrap();
+
+        let selected = server_jar_for_bundler(root.path(), &bundler).unwrap();
+        assert_eq!(fs::read(selected).unwrap(), b"override server");
+    }
+
+    #[test]
+    fn bundler_hash_wins_when_override_mtime_is_not_newer() {
+        use std::time::{Duration, SystemTime};
+
+        for age in [Duration::ZERO, Duration::from_secs(60)] {
+            let root = tempfile::tempdir().unwrap();
+            let cache = root.path().join("classpath");
+            let bundler_a = root.path().join("bundler-a.jar");
+            let bundler_b = root.path().join("bundler-b.jar");
+            write_test_bundler(&bundler_a, b"server A");
+            extract_bundler(&bundler_a, &cache).unwrap();
+            let marker_mtime = fs::metadata(cache.join("META-INF/versions/26.2/paper-26.2.jar"))
+                .unwrap()
+                .modified()
+                .unwrap();
+
+            write_test_bundler(&bundler_b, b"server B");
+            let bundler_b_mtime = marker_mtime
+                .checked_sub(age)
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            fs::File::open(&bundler_b)
+                .unwrap()
+                .set_modified(bundler_b_mtime)
+                .unwrap();
+            extract_bundler(&bundler_b, &cache).unwrap();
+
+            let selected = cache.join("META-INF/versions/26.2/paper-26.2.jar");
+            assert_eq!(fs::read(selected).unwrap(), b"server B");
+        }
+    }
+
+    #[test]
+    fn bundlers_use_distinct_hash_namespaces() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        let bundler_a = root.path().join("bundler-a.jar");
+        let bundler_b = root.path().join("bundler-b.jar");
+        write_test_bundler(&bundler_a, b"server A");
+        write_test_bundler(&bundler_b, b"server B");
+
+        let cache_a = bundler_cache_dir(&cache, &bundler_a).unwrap();
+        let cache_b = bundler_cache_dir(&cache, &bundler_b).unwrap();
+        assert_ne!(cache_a, cache_b);
+        extract_bundler(&bundler_a, &cache_a).unwrap();
+        extract_bundler(&bundler_b, &cache_b).unwrap();
+        assert_eq!(
+            fs::read(cache_a.join("META-INF/versions/26.2/paper-26.2.jar")).unwrap(),
+            b"server A"
+        );
+        assert_eq!(
+            fs::read(cache_b.join("META-INF/versions/26.2/paper-26.2.jar")).unwrap(),
+            b"server B"
+        );
+    }
+
+    #[test]
+    fn cached_server_jar_bytes_must_match_versions_digest() {
+        let root = tempfile::tempdir().unwrap();
+        let bundler = root.path().join("bundler.jar");
+        write_test_bundler(&bundler, b"server");
+        let cache = root.path().join("cache");
+        extract_bundler(&bundler, &cache).unwrap();
+
+        fs::write(
+            cache.join("META-INF/versions/26.2/paper-26.2.jar"),
+            b"tampered server",
+        )
+        .unwrap();
+        let bundler_sha = crate::reports::sha256_hex(&fs::read(&bundler).unwrap());
+        assert!(!bundler_cache_matches(&cache, &bundler_sha));
+    }
+
+    #[test]
+    fn versions_list_digest_mismatch_is_unverified() {
+        let root = tempfile::tempdir().unwrap();
+        let bundler = root.path().join("bundler.jar");
+        write_test_bundler(&bundler, b"server");
+        let cache = root.path().join("cache");
+        extract_bundler(&bundler, &cache).unwrap();
+
+        let marker = cache.join("META-INF/versions.list");
+        let contents = fs::read_to_string(&marker).unwrap();
+        let mut fields = contents.split_whitespace();
+        let _actual_sha = fields.next().unwrap();
+        let version = fields.next().unwrap();
+        let path = fields.next().unwrap();
+        let wrong_sha = "deadbeef".repeat(8);
+        let tampered = format!("{wrong_sha} {version} {path}\n");
+        fs::write(&marker, tampered).unwrap();
+
+        let error = parse_versions_list(&fs::read_to_string(&marker).unwrap(), &cache).unwrap_err();
+        assert!(
+            error.to_string().contains("SHA-256 mismatch"),
+            "got: {error}"
+        );
+        let bundler_sha = crate::reports::sha256_hex(&fs::read(&bundler).unwrap());
+        assert!(!bundler_cache_matches(&cache, &bundler_sha));
+    }
+
+    #[test]
+    fn versions_list_rejects_parent_paths() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("META-INF/versions/26.2")).unwrap();
+        fs::write(
+            root.path().join("META-INF/versions/26.2/paper-26.2.jar"),
+            b"server",
+        )
+        .unwrap();
+        let error = parse_versions_list(
+            &format!(
+                "{} 26.2 ../outside.jar\n",
+                crate::reports::sha256_hex(b"server")
+            ),
+            root.path(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("unsafe relative path"),
+            "got: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classpath_cache_root_symlink_is_unverified() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let bundler = root.path().join("bundler.jar");
+        write_test_bundler(&bundler, b"server");
+        let cache = root.path().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        let outside = root.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, cache.join("classpath")).unwrap();
+
+        let error = bundler_cache_dir(&cache, &bundler).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("classpath cache root is a symlink"),
+            "got: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classpath_cache_namespace_symlink_is_unverified() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let bundler = root.path().join("bundler.jar");
+        write_test_bundler(&bundler, b"server");
+        let cache = root.path().join("cache");
+        let classpath = bundler_cache_dir(&cache, &bundler).unwrap();
+        let outside = root.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, &classpath).unwrap();
+
+        let error = extract_bundler(&bundler, &classpath).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("bundler cache namespace is a symlink"),
+            "got: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_server_symlink_is_unverified() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let versions = root.path().join("META-INF/versions/26.2");
+        fs::create_dir_all(&versions).unwrap();
+        fs::write(root.path().join("outside.jar"), b"outside").unwrap();
+        symlink(
+            root.path().join("outside.jar"),
+            versions.join("paper-26.2.jar"),
+        )
+        .unwrap();
+        let error = validate_relative_file(
+            &root.path().join("META-INF/versions"),
+            "26.2/paper-26.2.jar",
+            "selected server jar",
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("not a regular file"),
+            "got: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_command_path_is_unverified() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = PathBuf::from(OsString::from_vec(vec![b'/', b't', b'm', b'p', 0xff]));
+        let error = path_to_utf8(&path, "bundler jar").unwrap_err();
+        assert!(
+            error.to_string().contains("not valid UTF-8"),
+            "got: {error}"
+        );
+    }
+
+    fn write_test_bundler(path: &Path, server: &[u8]) {
+        let stage = path.with_extension("stage");
+        fs::create_dir_all(stage.join("META-INF/versions/26.2")).unwrap();
+        let server_sha256 = crate::reports::sha256_hex(server);
+        fs::write(
+            stage.join("META-INF/versions.list"),
+            format!("{server_sha256} 26.2 26.2/paper-26.2.jar\n"),
+        )
+        .unwrap();
+        fs::write(stage.join("META-INF/versions/26.2/paper-26.2.jar"), server).unwrap();
+        fs::create_dir_all(stage.join("META-INF/libraries")).unwrap();
+        fs::write(stage.join("META-INF/libraries/placeholder.jar"), b"library").unwrap();
+        let path_arg = path.to_string_lossy().into_owned();
+        let status = Command::new("zip")
+            .current_dir(&stage)
+            .args(["-q", "-r", &path_arg, "META-INF"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
 }

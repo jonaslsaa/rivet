@@ -40,6 +40,17 @@ const LOG4J_OFF: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <Configuration status="off"><Loggers><Root level="off"/></Loggers></Configuration>
 "#;
 
+/// Every committed Paper-derived fixture in this repository is captured from
+/// this exact clean checkout, never from an arbitrary current HEAD.
+pub(crate) const PINNED_PAPER_COMMIT: &str = "0a993450f129c4942c2a9ed45ba047412b4667cf";
+pub(crate) const PINNED_SERVER_JAR_SHA256: &str =
+    "e1a027e9481a16ec1da0f0e139d370280050d123a14c022a476c2dc8a697ebda";
+pub(crate) const PINNED_JOIN_CAPTURE_SHA256: &str =
+    "e78a673617a1eefc8029c43b69bf3cbe7d1f2b6fcf65e3b333f5c85e25f1c533";
+pub(crate) const PINNED_MINECRAFT_VERSION: &str = "26.2";
+pub(crate) const PINNED_PROTOCOL_VERSION: u32 = 776;
+pub(crate) const PINNED_WORLD_VERSION: u32 = 4903;
+
 /// Default pinned source: the materialized server jar created by the oracle's
 /// first boot (`tools/rivet-oracle work/run/versions/26.2/`). `pub(crate)` so
 /// the biomes+tags half ([`crate::extract_biomes_tags`]) records the same
@@ -92,6 +103,7 @@ pub fn run(jar_flag: Option<&Path>, output_flag: Option<&Path>, verify: bool) ->
     let cache = repo_root.join("tools/rivet-codegen/.cache/reports");
 
     if verify {
+        verify_fixture_provenance(&jar, &output.join("manifest.json"), &repo_root)?;
         return verify_no_drift(&jar, &output, &java, &classpath, &cache);
     }
     capture(&jar, &output, &java, &classpath, &cache, &repo_root)
@@ -268,14 +280,19 @@ fn run_datagen(java: &Path, classpath: &str, scratch: &Path, cache: &Path) -> Re
         fs::write(&log4j_off, LOG4J_OFF).context("write log4j2-off.xml")?;
     }
 
+    let scratch_arg = crate::extract::path_to_utf8(scratch, "reports datagen output")?;
+    let log4j_arg = format!(
+        "-Dlog4j.configurationFile={}",
+        crate::extract::path_to_utf8(&log4j_off, "log4j configuration")?
+    );
     let status = Command::new(java)
         .args(["-Xms512M", "-Xmx2G"])
         .arg("-cp")
         .arg(classpath)
         .arg("--enable-native-access=ALL-UNNAMED")
-        .arg(format!("-Dlog4j.configurationFile={}", log4j_off.display()))
+        .arg(log4j_arg)
         .args(["net.minecraft.data.Main", "--reports", "--output"])
-        .arg(scratch.to_str().unwrap())
+        .arg(scratch_arg)
         .status()
         .with_context(|| format!("spawn {java:?} for net.minecraft.data.Main --reports"))?;
     ensure!(
@@ -366,13 +383,50 @@ pub(crate) struct SourceProvenance {
     /// The jar path passed/used at capture time (repo-relative when default).
     pub(crate) jar: String,
     pub(crate) jar_sha256: String,
-    /// Paper commit the jar was built from (best-effort; `working/` may be a
-    /// plain checkout without git metadata).
+    /// Paper commit the jar was built from. Legacy manifests remain
+    /// deserializable, but generation rejects an absent or non-pinned value.
     #[serde(skip_serializing_if = "Option::is_none")]
-    paper_git: Option<String>,
+    pub(crate) paper_git: Option<String>,
     pub(crate) minecraft_version: String,
     pub(crate) protocol_version: u32,
     pub(crate) world_version: u32,
+}
+
+/// Reject fixture provenance that merely repeats a self-supplied source label.
+/// Generated tables are tied to one of the exact server-jar or canonical-join
+/// sources and the Paper checkout pinned by this repository.
+pub(crate) fn verify_pinned_source(source: &SourceProvenance) -> Result<()> {
+    ensure!(
+        source.jar_sha256 == PINNED_SERVER_JAR_SHA256
+            || source.jar_sha256 == PINNED_JOIN_CAPTURE_SHA256,
+        "UNVERIFIED: fixture source SHA {} is not a pinned source",
+        source.jar_sha256
+    );
+    ensure!(
+        source.paper_git.as_deref() == Some(PINNED_PAPER_COMMIT),
+        "UNVERIFIED: fixture Paper commit {:?} is not the pinned {}",
+        source.paper_git,
+        PINNED_PAPER_COMMIT
+    );
+    ensure!(
+        source.minecraft_version == PINNED_MINECRAFT_VERSION,
+        "UNVERIFIED: fixture Minecraft version {} is not the pinned {}",
+        source.minecraft_version,
+        PINNED_MINECRAFT_VERSION
+    );
+    ensure!(
+        source.protocol_version == PINNED_PROTOCOL_VERSION,
+        "UNVERIFIED: fixture protocol version {} is not the pinned {}",
+        source.protocol_version,
+        PINNED_PROTOCOL_VERSION
+    );
+    ensure!(
+        source.world_version == PINNED_WORLD_VERSION,
+        "UNVERIFIED: fixture world version {} is not the pinned {}",
+        source.world_version,
+        PINNED_WORLD_VERSION
+    );
+    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -382,15 +436,15 @@ pub(crate) struct ReportEntry {
     pub(crate) sha256: String,
 }
 
-/// Build the source provenance for `jar` from its `version.json` + sha256 (+
-/// best-effort Paper git commit). `pub(crate)` so the biomes+tags half
+/// Build the source provenance for `jar` from its `version.json`, manifest,
+/// and sha256. `pub(crate)` so the biomes+tags half
 /// ([`crate::extract_biomes_tags`]) pins its fixture to the same source
 /// identity.
 pub(crate) fn capture_source(jar: &Path, repo_root: &Path) -> Result<SourceProvenance> {
     let version = read_version_json(jar)?;
     let jar_sha256 = sha256_hex(&fs::read(jar).context("read source jar")?);
-    let paper_git = read_paper_git(repo_root);
-    let jar_path = render_jar_path(jar, repo_root);
+    let paper_git = Some(read_paper_git(jar, repo_root)?);
+    let jar_path = render_jar_path(jar, repo_root)?;
     Ok(SourceProvenance {
         jar: jar_path,
         jar_sha256,
@@ -408,48 +462,230 @@ pub(crate) fn capture_source(jar: &Path, repo_root: &Path) -> Result<SourceProve
 /// the checkout (e.g. the primary repo from a worktree), we still record the
 /// canonical repo-relative location. The jar's identity is the sha256, so the
 /// path is provenance context only.
-fn render_jar_path(jar: &Path, repo_root: &Path) -> String {
+fn render_jar_path(jar: &Path, repo_root: &Path) -> Result<String> {
     let canonical_jar = fs::canonicalize(jar).unwrap_or_else(|_| jar.to_path_buf());
     let canonical_root = fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
     if let Ok(rel) = canonical_jar.strip_prefix(&canonical_root) {
-        return rel.display().to_string();
+        return Ok(crate::extract::path_to_utf8(rel, "source jar provenance")?.to_owned());
     }
-    default_jar(repo_root)
+    let default = default_jar(repo_root);
+    let relative = default
         .strip_prefix(repo_root)
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| canonical_jar.display().to_string())
+        .context("UNVERIFIED: default source jar is outside the Rivet checkout")?;
+    Ok(crate::extract::path_to_utf8(relative, "default source jar provenance")?.to_owned())
 }
 
 /// Read `version.json` straight out of the jar — the authoritative MC build
 /// metadata (id, protocol_version, world_version), not a hardcoded constant.
 fn read_version_json(jar: &Path) -> Result<VersionJson> {
+    let jar = utf8_path(jar, "Paper jar")?;
     let out = Command::new("unzip")
-        .arg("-p")
-        .arg(jar)
-        .arg("version.json")
+        .args(["-p", jar, "version.json"])
         .output()
         .context("read version.json from source jar")?;
     ensure!(out.status.success(), "unzip -p version.json failed");
     serde_json::from_slice(&out.stdout).context("parse version.json")
 }
 
-/// Best-effort Paper git commit (the jar is built from `working/Paper`).
-fn read_paper_git(repo_root: &Path) -> Option<String> {
+fn utf8_path<'a>(path: &'a Path, label: &str) -> Result<&'a str> {
+    path.to_str().with_context(|| {
+        format!(
+            "UNVERIFIED: {label} path is not valid UTF-8: {}",
+            path.display()
+        )
+    })
+}
+
+/// Locate the checkout that is allowed to establish Paper provenance. A
+/// worktree must use the primary checkout's `working/Paper`; a missing checkout
+/// is UNVERIFIED rather than an opportunity to trust arbitrary current HEAD.
+fn pinned_paper_checkout(repo_root: &Path) -> Result<PathBuf> {
+    let direct = repo_root.join("working/Paper");
+    if direct.is_dir() {
+        return Ok(direct);
+    }
+    let repo_root_arg = utf8_path(repo_root, "Rivet checkout")?;
     let out = Command::new("git")
+        .args(["-C", repo_root_arg, "rev-parse", "--git-common-dir"])
+        .output()
+        .context("UNVERIFIED: resolve Rivet git common directory")?;
+    ensure!(
+        out.status.success(),
+        "UNVERIFIED: git cannot resolve the Rivet git common directory from {}",
+        repo_root.display()
+    );
+    let common_dir = std::str::from_utf8(&out.stdout)
+        .context("UNVERIFIED: Rivet git common directory is not UTF-8")?
+        .trim();
+    ensure!(
+        !common_dir.is_empty(),
+        "UNVERIFIED: git returned an empty Rivet common directory"
+    );
+    let common_dir = PathBuf::from(common_dir);
+    let common_dir = if common_dir.is_absolute() {
+        common_dir
+    } else {
+        repo_root.join(common_dir)
+    };
+    let common_dir = fs::canonicalize(&common_dir).with_context(|| {
+        format!(
+            "UNVERIFIED: canonicalize Rivet git common directory {}",
+            common_dir.display()
+        )
+    })?;
+    let primary = common_dir.parent().with_context(|| {
+        format!(
+            "UNVERIFIED: Rivet git common directory {} has no primary checkout",
+            common_dir.display()
+        )
+    })?;
+    let paper = primary.join("working/Paper");
+    ensure!(
+        paper.is_dir(),
+        "UNVERIFIED: pinned Paper checkout not found at {} (primary Rivet checkout {})",
+        paper.display(),
+        primary.display()
+    );
+    Ok(paper)
+}
+
+fn read_paper_git(jar: &Path, repo_root: &Path) -> Result<String> {
+    let jar_arg = utf8_path(jar, "Paper jar")?;
+    let manifest = Command::new("unzip")
+        .args(["-p", jar_arg, "META-INF/MANIFEST.MF"])
+        .output()
+        .with_context(|| format!("UNVERIFIED: read Paper manifest from {}", jar.display()))?;
+    ensure!(
+        manifest.status.success(),
+        "UNVERIFIED: Paper jar {} has no readable META-INF/MANIFEST.MF",
+        jar.display()
+    );
+    let jar_commit = parse_paper_git_manifest(&manifest.stdout)?;
+
+    let paper = pinned_paper_checkout(repo_root)?;
+    let paper_arg = utf8_path(&paper, "Paper checkout")?;
+    let out = Command::new("git")
+        .args(["-C", paper_arg, "rev-parse", "HEAD"])
+        .output()
+        .with_context(|| format!("UNVERIFIED: read Paper git HEAD in {}", paper.display()))?;
+    ensure!(
+        out.status.success(),
+        "UNVERIFIED: Paper checkout at {} has no readable git HEAD",
+        paper.display()
+    );
+    let checkout_commit = std::str::from_utf8(&out.stdout)
+        .context("UNVERIFIED: Paper git HEAD is not UTF-8")?
+        .trim()
+        .to_owned();
+    ensure!(
+        !checkout_commit.is_empty(),
+        "UNVERIFIED: Paper git HEAD was empty"
+    );
+
+    let status = Command::new("git")
         .args([
             "-C",
-            repo_root.join("working/Paper").to_str().unwrap(),
-            "rev-parse",
-            "HEAD",
+            paper_arg,
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
         ])
         .output()
-        .ok()?;
-    if out.status.success() {
-        let commit = String::from_utf8_lossy(&out.stdout);
-        Some(commit.trim().to_string())
-    } else {
-        None
-    }
+        .with_context(|| format!("UNVERIFIED: inspect Paper checkout {}", paper.display()))?;
+    ensure!(
+        status.status.success(),
+        "UNVERIFIED: cannot inspect Paper checkout status"
+    );
+    let dirty = std::str::from_utf8(&status.stdout)
+        .context("UNVERIFIED: Paper checkout status is not UTF-8")?;
+    ensure!(
+        dirty.trim().is_empty(),
+        "UNVERIFIED: Paper checkout {} is dirty; provenance requires a clean checkout",
+        paper.display()
+    );
+    resolve_paper_git(jar, &jar_commit, &checkout_commit)
+}
+
+fn resolve_paper_git(jar: &Path, jar_commit: &str, checkout_commit: &str) -> Result<String> {
+    ensure!(
+        PINNED_PAPER_COMMIT.starts_with(jar_commit),
+        "UNVERIFIED: Paper jar {} reports Git-Commit {}, not the pinned Paper commit {}",
+        jar.display(),
+        jar_commit,
+        PINNED_PAPER_COMMIT
+    );
+    ensure!(
+        checkout_commit == PINNED_PAPER_COMMIT,
+        "UNVERIFIED: Paper checkout HEAD is {}, expected exact pinned commit {}",
+        checkout_commit,
+        PINNED_PAPER_COMMIT
+    );
+    Ok(PINNED_PAPER_COMMIT.to_string())
+}
+
+fn parse_paper_git_manifest(manifest: &[u8]) -> Result<String> {
+    let manifest =
+        std::str::from_utf8(manifest).context("UNVERIFIED: Paper manifest is not UTF-8")?;
+    let commit = manifest
+        .lines()
+        .find_map(|line| line.strip_prefix("Git-Commit:").map(str::trim))
+        .context("UNVERIFIED: Paper manifest has no Git-Commit field")?;
+    ensure!(
+        (7..=40).contains(&commit.len()) && commit.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "UNVERIFIED: Paper manifest Git-Commit field is malformed: {commit:?}"
+    );
+    Ok(commit.to_string())
+}
+
+/// Verify that a live probe's exact embedded server jar is the source recorded
+/// by its sibling committed fixture manifest. Fixture bytes alone are not
+/// provenance: a byte-different jar with behaviorally identical output must fail.
+pub(crate) fn verify_fixture_provenance(
+    jar: &Path,
+    manifest_path: &Path,
+    repo_root: &Path,
+) -> Result<()> {
+    let raw = fs::read_to_string(manifest_path).with_context(|| {
+        format!(
+            "UNVERIFIED: read fixture provenance {}",
+            manifest_path.display()
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&raw).with_context(|| {
+        format!(
+            "UNVERIFIED: parse fixture provenance {}",
+            manifest_path.display()
+        )
+    })?;
+    let source = value
+        .get("source")
+        .cloned()
+        .context("UNVERIFIED: fixture provenance has no source object")?;
+    let expected: SourceProvenance =
+        serde_json::from_value(source).context("UNVERIFIED: parse fixture source provenance")?;
+    verify_pinned_source(&expected)?;
+
+    let actual_sha = sha256_hex(&fs::read(jar).context("read live server jar")?);
+    ensure!(
+        actual_sha == expected.jar_sha256,
+        "UNVERIFIED: live server jar SHA {} does not match fixture provenance {}",
+        actual_sha,
+        expected.jar_sha256
+    );
+    let actual = capture_source(jar, repo_root)?;
+    ensure!(
+        actual.jar_sha256 == expected.jar_sha256,
+        "UNVERIFIED: live server jar SHA {} does not match fixture provenance {}",
+        actual.jar_sha256,
+        expected.jar_sha256
+    );
+    ensure!(
+        actual.paper_git == expected.paper_git,
+        "UNVERIFIED: live server jar Git-Commit {:?} does not match fixture provenance {:?}",
+        actual.paper_git,
+        expected.paper_git
+    );
+    verify_pinned_source(&actual)
 }
 
 #[derive(Debug, Deserialize)]
@@ -484,6 +720,28 @@ mod tests {
     }
 
     #[test]
+    fn fixture_source_must_match_exact_pins() {
+        let mut source = SourceProvenance {
+            jar: "paper-26.2.jar".into(),
+            jar_sha256: PINNED_SERVER_JAR_SHA256.into(),
+            paper_git: Some(PINNED_PAPER_COMMIT.into()),
+            minecraft_version: PINNED_MINECRAFT_VERSION.into(),
+            protocol_version: PINNED_PROTOCOL_VERSION,
+            world_version: PINNED_WORLD_VERSION,
+        };
+        verify_pinned_source(&source).unwrap();
+
+        source.paper_git = Some("deadbeef".into());
+        let error = verify_pinned_source(&source).unwrap_err();
+        assert!(error.to_string().contains("Paper commit"), "got: {error}");
+
+        source.paper_git = Some(PINNED_PAPER_COMMIT.into());
+        source.jar_sha256 = "deadbeef".into();
+        let error = verify_pinned_source(&source).unwrap_err();
+        assert!(error.to_string().contains("source SHA"), "got: {error}");
+    }
+
+    #[test]
     fn libraries_dir_is_sibling_of_materialized_run() {
         let jar = Path::new("/run/versions/26.2/paper-26.2.jar");
         assert_eq!(libraries_dir(jar), Path::new("/run/libraries"));
@@ -494,7 +752,7 @@ mod tests {
         let repo = Path::new("/repo");
         let jar = Path::new("/repo/tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar");
         assert_eq!(
-            render_jar_path(jar, repo),
+            render_jar_path(jar, repo).unwrap(),
             "tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar"
         );
     }
@@ -508,9 +766,48 @@ mod tests {
         let outside =
             Path::new("/primary/repo/tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar");
         assert_eq!(
-            render_jar_path(outside, repo),
+            render_jar_path(outside, repo).unwrap(),
             "tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar"
         );
+    }
+
+    #[test]
+    fn jar_manifest_commit_is_expanded_only_after_checkout_match() {
+        let jar = Path::new("/tmp/paper-server.jar");
+        let checkout = "0a993450f129c4942c2a9ed45ba047412b4667cf";
+        assert_eq!(
+            resolve_paper_git(jar, "0a99345", checkout).unwrap(),
+            checkout
+        );
+    }
+
+    #[test]
+    fn jar_checkout_mismatch_is_unverified() {
+        let jar = Path::new("/tmp/paper-server.jar");
+        let result = resolve_paper_git(jar, "0a99345", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn paper_manifest_requires_a_valid_git_commit() {
+        assert!(parse_paper_git_manifest(b"Manifest-Version: 1.0\r\n").is_err());
+        assert!(parse_paper_git_manifest(b"Git-Commit: \r\n").is_err());
+        assert!(parse_paper_git_manifest(b"Git-Commit: not-a-commit\r\n").is_err());
+        assert_eq!(
+            parse_paper_git_manifest(b"Manifest-Version: 1.0\r\nGit-Commit: 0a99345\r\n").unwrap(),
+            "0a99345"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_jar_path_returns_unverified_error() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let jar = PathBuf::from(OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0xff]));
+        let error = read_paper_git(&jar, Path::new("/repo")).unwrap_err();
+        assert!(error.to_string().contains("not valid UTF-8"));
     }
 
     #[test]

@@ -6,15 +6,13 @@
 //! `Block.BLOCK_STATE_REGISTRY` (evaluating every one of the 32,366 states
 //! through its cached accessors) and asserts, against the running JVM, that a
 //! fresh dump is byte-identical to the committed fixture and that every anchor
-//! the probe documents (state_count 32366, run_count, and the representative
-//! air/stone/water/lava/oak_leaves/glass/torch words) is present with the
-//! pinned state_count. The anchor *values* are not re-checked here — a probe
+//! the probe documents (state_count 32366, run_count, the representative
+//! behavior words, and the representative support/collision face masks) is present with
+//! the pinned state_count. The anchor *values* are not re-checked here — a probe
 //! bit-packing bug would reproduce consistently — so they are pinned
-//! independently by the word-level and field-level decode tests in
-//! `rivet-registry` (`behavior_queries_match_probe_anchors` and
-//! `behavior_word_fields_match_paper_semantics`). Together these guard against
-//! a fixture that was hand-edited, generated from a different jar, or emitted
-//! by a mis-packed probe.
+//! independently by the word-level, face-mask, and field-level decode tests in
+//! `rivet-registry`. Together these guard against a fixture that was hand-edited,
+//! generated from a different jar, or emitted by a mis-packed probe.
 //!
 //! Requires the same runtime as `extract`: the bundler jar (`--bundler`,
 //! default `working/Paper`), java + javac on PATH or JAVA_HOME, and unzip.
@@ -30,6 +28,8 @@ use crate::extract;
 const ANCHORS: &[&str] = &[
     "state_count",
     "run_count",
+    "face_sturdy_run_count",
+    "collision_face_run_count",
     "air",
     "stone",
     "water",
@@ -37,6 +37,10 @@ const ANCHORS: &[&str] = &[
     "oak_leaves",
     "glass",
     "torch",
+    "stone_face_sturdy_mask",
+    "oak_slab_face_sturdy_mask",
+    "oak_leaves_collision_face_mask",
+    "glass_collision_face_mask",
 ];
 
 pub fn run(bundler_flag: Option<&Path>) -> Result<()> {
@@ -55,6 +59,12 @@ pub fn run(bundler_flag: Option<&Path>) -> Result<()> {
     let scratch = repo_root.join("tools/rivet-codegen/.cache/probe-block-behaviors.json");
 
     let out = crate::extract_block_behaviors::run_extractor(&repo_root, &bundler, &scratch)?;
+    let server_jar = crate::extract::server_jar_for_bundler(&repo_root, &bundler)?;
+    crate::reports::verify_fixture_provenance(
+        &server_jar,
+        &crate::extract_block_behaviors::default_output(&repo_root).with_extension("manifest.json"),
+        &repo_root,
+    )?;
     check_probe_stdout(&out)?;
 
     let fresh_bytes = fs::read(&scratch).context("read fresh fixture")?;
@@ -100,6 +110,18 @@ fn check_probe_stdout(out: &str) -> Result<()> {
             probes.get("state_count")
         );
     }
+    if probes.get("face_sturdy_run_count") != Some(&"3504") {
+        bail!(
+            "probe face_sturdy_run_count = {:?} but the pinned Paper table expects 3504",
+            probes.get("face_sturdy_run_count")
+        );
+    }
+    if probes.get("collision_face_run_count") != Some(&"3506") {
+        bail!(
+            "probe collision_face_run_count = {:?} but the pinned Paper table expects 3506",
+            probes.get("collision_face_run_count")
+        );
+    }
     Ok(())
 }
 
@@ -113,12 +135,13 @@ mod tests {
             ANCHORS
                 .iter()
                 .map(|k| {
-                    // `state_count` must be the pinned 32366 (the checker
-                    // enforces it); the other anchors are opaque words.
-                    if *k == "state_count" {
-                        format!("{k}=32366")
-                    } else {
-                        format!("{k}=1")
+                    // These two counts are pinned by the checker; the other
+                    // anchors are opaque words.
+                    match *k {
+                        "state_count" => format!("{k}=32366"),
+                        "face_sturdy_run_count" => format!("{k}=3504"),
+                        "collision_face_run_count" => format!("{k}=3506"),
+                        _ => format!("{k}=1"),
                     }
                 })
                 .collect::<Vec<_>>()
