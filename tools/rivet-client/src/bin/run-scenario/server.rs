@@ -325,6 +325,7 @@ pub fn ensure_rivet_binary(crate_root: &Path) -> Result<PathBuf, Error> {
     let workspace_bin = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|parent| parent.join("rivet-server")))
+        .filter(|path| path.is_file())
         .unwrap_or_else(|| cargo_target_dir().join("debug/rivet-server"));
     if !workspace_bin.is_file() {
         return Err(Error::Unverified(format!(
