@@ -670,12 +670,12 @@ mod tests {
     #[test]
     fn sticky_piston_face_masks_pin_all_direction_bits() {
         for (id, mask) in [
-            (2235, 1 << 0),
-            (2236, 1 << 1),
+            (2235, 1 << 3),
+            (2236, 1 << 4),
             (2237, 1 << 2),
-            (2238, 1 << 3),
-            (2239, 1 << 4),
-            (2240, 1 << 5),
+            (2238, 1 << 5),
+            (2239, 1 << 0),
+            (2240, 1 << 1),
         ] {
             assert_eq!(
                 BlockState::new(StateId(id)).face_sturdy_mask(),
