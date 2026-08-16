@@ -19,6 +19,7 @@
 //! to pin the missing-registry failure, and an `ensure_can_write` gate the
 //! tests can trip to pin the return-`false` propagation.
 
+use crate::block::blocks::Blocks;
 use crate::chunk::chunk_generator::ChunkGenerator;
 use crate::level::WorldGenLevel;
 use crate::level::height_accessor::LevelHeightAccessor;
@@ -170,6 +171,12 @@ pub struct TestLevel {
     /// `SimpleBlockFeature` (with `config.scheduleTick()`) and `LakeFeature.place`
     /// (the placed cave-air cells) schedule (in call order).
     pub block_ticks: Vec<(BlockPos, crate::block::Block, i32)>,
+    /// `set_block_entity_loot_table` — the `(pos, seed, loot_table)` chest-loot
+    /// attachments (`MonsterRoomFeature` wall-pass chest) in call order.
+    pub chest_loot: Vec<(BlockPos, i64, String)>,
+    /// `set_spawner_entity` — the `(pos, entity_id)` spawner entity writes
+    /// (`MonsterRoomFeature` final spawner write) in call order.
+    pub spawner_entities: Vec<(BlockPos, String)>,
 }
 
 impl TestLevel {
@@ -194,6 +201,8 @@ impl TestLevel {
             post_processing: Vec::new(),
             ticks: Vec::new(),
             block_ticks: Vec::new(),
+            chest_loot: Vec::new(),
+            spawner_entities: Vec::new(),
         }
     }
 }
@@ -283,6 +292,22 @@ impl WorldGenLevel for TestLevel {
     fn mark_pos_for_post_processing(&mut self, pos: &BlockPos) {
         self.post_processing.push(*pos);
     }
+
+    fn is_randomizable_container(&self, pos: &BlockPos) -> bool {
+        self.get_block_state(pos).block() == Blocks::CHEST.id()
+    }
+
+    fn is_spawner_block_entity(&self, pos: &BlockPos) -> bool {
+        self.get_block_state(pos).block() == Blocks::SPAWNER.id()
+    }
+
+    fn set_block_entity_loot_table(&mut self, pos: &BlockPos, seed: i64, loot_table: &str) {
+        self.chest_loot.push((*pos, seed, loot_table.to_string()));
+    }
+
+    fn set_spawner_entity(&mut self, pos: &BlockPos, entity_id: &str) {
+        self.spawner_entities.push((*pos, entity_id.to_string()));
+    }
 }
 
 /// The `ChunkGenerator` double over the overworld window.
@@ -328,6 +353,8 @@ pub enum RngCall {
     Int,
     /// `nextInt(bound)` — the bound argument.
     IntBound(i32),
+    /// `nextLong()` — the chest-loot seed draw (`MonsterRoomFeature` tail).
+    Long,
     /// `nextBoolean()`.
     Boolean,
     /// `nextFloat()`.
@@ -336,10 +363,9 @@ pub enum RngCall {
     Double,
 }
 
-/// A `RandomSource` wrapper that records every draw, so the tests can pin the
-/// exact Java draw order/arguments the selector features perform (a `boolean`
-/// then a placed feature, a `nextFloat < chance` per weighted entry, a
-/// `nextInt(size)` index, a `nextInt(totalWeight)` selection, …).
+/// A `RandomSource` wrapper that records every draw, so placement tests can
+/// pin the exact Java draw order and arguments (feature selectors' booleans,
+/// weighted-entry rolls and indices, plus feature-specific long/int draws).
 pub struct RecordingRandom {
     /// The wrapped legacy source (deterministic per seed).
     pub inner: LegacyRandomSource,
@@ -385,6 +411,7 @@ impl RandomSource for RecordingRandom {
     }
 
     fn next_long(&mut self) -> i64 {
+        self.calls.push(RngCall::Long);
         self.inner.next_long()
     }
 
