@@ -75,6 +75,9 @@ use rivet_registry::holder::Holder;
 /// chunk with no non-air section.
 pub const NO_FILLED_SECTION: i32 = -1;
 
+/// Paper's lazy block-entity marker used by proto chunks before promotion.
+pub const DUMMY_BLOCK_ENTITY_ID: &str = "DUMMY";
+
 fn filled_empty_light(count: usize) -> Vec<SwmrNibbleArray> {
     (0..count)
         .map(|_| SwmrNibbleArray::new_with_bytes_and_null(None, true))
@@ -640,6 +643,29 @@ where
     /// `ChunkAccess.getBlockEntityNbt(BlockPos)` — `pendingBlockEntities.get(pos)`.
     pub fn get_block_entity_nbt(&self, pos: &BlockPos) -> Option<&CompoundTag> {
         self.pending_block_entities.get(pos)
+    }
+
+    /// Install Paper's lazy proto-chunk block-entity marker. The real block
+    /// entity is materialized from the block state when the pending tag is read.
+    pub fn set_dummy_block_entity_nbt(&mut self, pos: &BlockPos) {
+        let mut tag = CompoundTag::new();
+        tag.put_int("x", pos.get_x());
+        tag.put_int("y", pos.get_y());
+        tag.put_int("z", pos.get_z());
+        tag.put_string("id", DUMMY_BLOCK_ENTITY_ID);
+        self.set_block_entity_nbt(tag);
+    }
+
+    /// Whether a pending tag is Paper's lazy block-entity marker.
+    pub fn is_dummy_block_entity_nbt(&self, pos: &BlockPos) -> bool {
+        self.get_block_entity_nbt(pos)
+            .and_then(|tag| tag.get_string("id"))
+            .is_some_and(|id| id == DUMMY_BLOCK_ENTITY_ID)
+    }
+
+    /// Mutable access for lazy materialization of a pending block entity.
+    pub fn get_block_entity_nbt_mut(&mut self, pos: &BlockPos) -> Option<&mut CompoundTag> {
+        self.pending_block_entities.get_mut(pos)
     }
 
     /// `pendingBlockEntities` — the read-only map, insertion-ordered
@@ -1308,6 +1334,19 @@ mod tests {
                 .map(String::as_str),
             Some("minecraft:furnace")
         );
+
+        base.set_dummy_block_entity_nbt(&pos);
+        assert!(base.is_dummy_block_entity_nbt(&pos));
+        assert_eq!(
+            base.get_block_entity_nbt(&pos)
+                .and_then(|tag| tag.get_string("id"))
+                .map(String::as_str),
+            Some(DUMMY_BLOCK_ENTITY_ID)
+        );
+        base.get_block_entity_nbt_mut(&pos)
+            .expect("dummy tag is mutable")
+            .put_string("id", "minecraft:chest");
+        assert!(!base.is_dummy_block_entity_nbt(&pos));
     }
 
     #[test]

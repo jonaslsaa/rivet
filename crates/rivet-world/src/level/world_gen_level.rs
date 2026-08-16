@@ -287,11 +287,11 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send {
     }
 
     /// `BaseSpawner.getOrCreateNextSpawnData`'s weighted-list draw. `Some(total)`
-    /// means that this spawner has no current `SpawnData` and a non-empty
-    /// `SpawnPotentials`; the feature must consume exactly one
-    /// `random.nextInt(total)` before calling [`set_spawner_entity`]. `None`
-    /// means Java does not draw here (an existing `SpawnData`, or an empty
-    /// potential list).
+    /// means that this spawner has no current `SpawnData` and a non-empty,
+    /// positive-total `SpawnPotentials`; the feature consumes exactly one
+    /// `random.nextInt(total)` after the mob-id draw and before calling
+    /// [`set_spawner_entity`]. `None` means Java does not draw here (an existing
+    /// `SpawnData`, an empty list, or a zero-total list).
     ///
     /// The returned total is deliberately a primitive seam: `RandomSource` is
     /// not object-safe, so the feature owns the exact RNG call while the level
