@@ -231,12 +231,17 @@ fn normalize_equipment(tag: &Tag) -> Option<CompoundTag> {
     let Tag::Compound(chances) = slot_drop_chances else {
         return None;
     };
-    let mut values = Vec::with_capacity(chances.tags.len());
-    for (slot, chance) in &chances.tags {
-        if !EQUIPMENT_SLOTS.contains(&slot.as_str()) {
-            return None;
-        }
-        values.push((slot.clone(), chance.as_float()?));
+    let values: Vec<_> = chances
+        .entry_set()
+        .filter_map(|(slot, chance)| {
+            if !EQUIPMENT_SLOTS.contains(&slot.as_str()) {
+                return None;
+            }
+            chance.as_float().map(|chance| (slot.clone(), chance))
+        })
+        .collect();
+    if values.is_empty() {
+        return Some(normalized);
     }
     if values.len() == EQUIPMENT_SLOTS.len()
         && EQUIPMENT_SLOTS
@@ -2811,6 +2816,80 @@ mod tests {
             .expect("equal NaN chances use the scalar form");
         assert!(chance.is_nan());
         assert_eq!(chance.to_bits(), nan.to_bits());
+    }
+
+    #[test]
+    fn empty_equipment_chance_map_uses_optional_default_codec_form() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+        let mut entity = CompoundTag::new();
+        entity.put_string("id", "minecraft:zombie");
+        let mut equipment = CompoundTag::new();
+        equipment.put_string("loot_table", "minecraft:chests/simple_dungeon");
+        equipment.put(
+            "slot_drop_chances".to_string(),
+            Tag::Compound(CompoundTag::new()),
+        );
+        let mut spawn_data = CompoundTag::new();
+        spawn_data.put("entity".to_string(), Tag::Compound(entity));
+        spawn_data.put("equipment".to_string(), Tag::Compound(equipment));
+        set_spawn_data(&mut region, &pos, Tag::Compound(spawn_data));
+
+        <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &pos,
+            "minecraft:skeleton",
+            None,
+        );
+        let equipment = region
+            .get_chunk(0, 0)
+            .get_block_entity_nbt(&pos)
+            .and_then(|tag| tag.get_compound("SpawnData"))
+            .and_then(|data| data.get_compound("equipment"))
+            .expect("equipment remains");
+        assert_eq!(
+            equipment.get_string("loot_table").map(String::as_str),
+            Some("minecraft:chests/simple_dungeon")
+        );
+        assert!(equipment.get("slot_drop_chances").is_none());
+    }
+
+    #[test]
+    fn partially_malformed_equipment_chances_retain_valid_codec_entries() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+        let mut entity = CompoundTag::new();
+        entity.put_string("id", "minecraft:zombie");
+        let mut equipment = CompoundTag::new();
+        equipment.put_string("loot_table", "minecraft:chests/simple_dungeon");
+        let mut chances = CompoundTag::new();
+        chances.put_float("mainhand", 0.5);
+        chances.put_float("bogus", 0.75);
+        chances.put_string("offhand", "malformed");
+        equipment.put("slot_drop_chances".to_string(), Tag::Compound(chances));
+        let mut spawn_data = CompoundTag::new();
+        spawn_data.put("entity".to_string(), Tag::Compound(entity));
+        spawn_data.put("equipment".to_string(), Tag::Compound(equipment));
+        set_spawn_data(&mut region, &pos, Tag::Compound(spawn_data));
+
+        <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &pos,
+            "minecraft:skeleton",
+            None,
+        );
+        let chances = region
+            .get_chunk(0, 0)
+            .get_block_entity_nbt(&pos)
+            .and_then(|tag| tag.get_compound("SpawnData"))
+            .and_then(|data| data.get_compound("equipment"))
+            .and_then(|equipment| equipment.get_compound("slot_drop_chances"))
+            .expect("partial chance map remains");
+        assert_eq!(chances.get_float("mainhand"), Some(0.5));
+        assert!(chances.get("bogus").is_none());
+        assert!(chances.get("offhand").is_none());
     }
 
     #[test]
