@@ -56,12 +56,11 @@
 //! exactly as Java.
 //!
 //! This is a leaf-level port: direct placement and dispatch-id tests exercise
-//! the behavior. The configured-feature decoder still does not construct this
-//! feature from `minecraft:monster_room`, and the generated-world FEATURES
-//! pipeline stops at its first unsupported placed-feature value before any
-//! placement dispatch. The production `WorldGenRegion` now materializes the
-//! chest/spawner seams, but seed-42 generation remains unreachable until the
-//! decoder and registry closure land; no production placement is claimed here.
+//! the behavior. The generated-world FEATURES decoder now constructs and
+//! dispatches the `minecraft:monster_room` entries before stopping at the first
+//! unsupported placed-feature value (`minecraft:ore_dirt`); the production
+//! FEATURES `WorldGenRegion` materializes the chest/spawner seams those
+//! placements query.
 
 use crate::block::blocks::Blocks;
 use crate::level::WorldGenLevel;

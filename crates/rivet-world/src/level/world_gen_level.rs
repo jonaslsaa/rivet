@@ -260,8 +260,9 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send {
     /// query before the draw preserves the feature's RNG stream when a chest
     /// write is rejected or the position has no matching block entity.
     ///
-    /// RivetTodo(#232): the block-entity surface is not ported; the default
-    /// fails explicitly rather than fabricating a block entity.
+    /// RivetTodo(#232): the default remains an explicit failure for worlds that
+    /// have not implemented the block-entity surface; `WorldGenRegion` overrides
+    /// it for the FEATURES placement path.
     fn is_randomizable_container(&self, _pos: &BlockPos) -> bool {
         panic!(
             "BlockGetter.getBlockEntity(RandomizableContainer) is not implemented (RivetTodo #232)"
@@ -275,8 +276,9 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send {
     /// trait is not generic over `R`; `loot_table` is the NBT `LootTable` value
     /// (e.g. `minecraft:chests/simple_dungeon`).
     ///
-    /// RivetTodo(#232): the block-entity surface is not ported; the default
-    /// fails explicitly rather than fabricating the loot.
+    /// RivetTodo(#232): the default remains an explicit failure for worlds that
+    /// have not implemented the block-entity surface; `WorldGenRegion` overrides
+    /// it for the FEATURES placement path.
     fn set_block_entity_loot_table(&mut self, _pos: &BlockPos, _seed: i64, _loot_table: &str) {
         panic!("RandomizableContainer.setBlockEntityLootTable is not implemented (RivetTodo #232)")
     }
@@ -287,8 +289,9 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send {
     /// missing spawner entity consumes no mob-selection RNG draw. This query
     /// keeps that short-circuit at the feature boundary.
     ///
-    /// RivetTodo(#232): the block-entity surface is not ported; the default
-    /// fails explicitly rather than fabricating a block entity.
+    /// RivetTodo(#232): the default remains an explicit failure for worlds that
+    /// have not implemented the block-entity surface; `WorldGenRegion` overrides
+    /// it for the FEATURES placement path.
     fn is_spawner_block_entity(&self, _pos: &BlockPos) -> bool {
         panic!("BlockGetter.getBlockEntity(SpawnerBlockEntity) is not implemented (RivetTodo #232)")
     }
@@ -312,8 +315,9 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send {
     /// `potential_roll` is `Some`, the level selects that weighted entry before
     /// replacing its entity id; in every case Java clears `spawnPotentials`.
     ///
-    /// RivetTodo(#232): the block-entity surface is not ported; the default
-    /// fails explicitly rather than fabricating the spawner.
+    /// RivetTodo(#232): the default remains an explicit failure for worlds that
+    /// have not implemented the block-entity surface; `WorldGenRegion` overrides
+    /// it for the FEATURES placement path.
     fn set_spawner_entity(
         &mut self,
         _pos: &BlockPos,
