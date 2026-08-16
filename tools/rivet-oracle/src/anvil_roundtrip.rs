@@ -25,6 +25,7 @@ use crate::mutate::encode_payload;
 use crate::{Error, sha256_hex};
 
 const EXPECTED_CHUNK_COUNT: usize = 432;
+const EXPECTED_M0_CAPTURE_COUNT: usize = 435;
 const REGION_FILE_COMPRESSION: &str = "none";
 const ROUNDTRIP_KIND: &str = "anvil-roundtrip-v1a";
 const EXPECTED_M0_SEED: &str = "42";
@@ -707,6 +708,12 @@ fn validate_m0_manifest(manifest: &crate::Manifest) -> Result<(), Error> {
     if chunk_entries != EXPECTED_CHUNK_COUNT {
         return Err(Error::Gate(format!(
             "anvil-roundtrip-v1a requires exactly {EXPECTED_CHUNK_COUNT} manifest chunk entries, found {chunk_entries}"
+        )));
+    }
+    if manifest.captured.len() != EXPECTED_M0_CAPTURE_COUNT {
+        return Err(Error::Gate(format!(
+            "anvil-roundtrip-v1a requires exactly {EXPECTED_M0_CAPTURE_COUNT} manifest entries, found {}",
+            manifest.captured.len()
         )));
     }
     if manifest.level_type.as_deref() != Some("minecraft\\:flat") {
@@ -1624,7 +1631,8 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), Error> {
 }
 
 fn canonicalize_paths(fixture_root: &Path, output: &Path) -> Result<(PathBuf, PathBuf), Error> {
-    reject_symlink_path(fixture_root, "fixture root")?;
+    reject_symlink_components(fixture_root, "fixture root")?;
+    reject_symlink_components(output, "output")?;
     let source = fs::canonicalize(fixture_root).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             Error::Unverified(format!(
@@ -1650,23 +1658,35 @@ fn canonicalize_paths(fixture_root: &Path, output: &Path) -> Result<(PathBuf, Pa
     Ok((source, destination))
 }
 
-fn reject_symlink_path(path: &Path, role: &str) -> Result<(), Error> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(Error::Gate(format!(
-            "anvil-roundtrip-v1a {role} symlink is not allowed: {}",
-            path.display()
-        ))),
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(Error::Gate(format!(
-            "anvil-roundtrip-v1a cannot inspect {role} {}: {error}",
-            path.display()
-        ))),
+fn reject_symlink_components(path: &Path, role: &str) -> Result<(), Error> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        if !matches!(component, std::path::Component::Normal(_)) {
+            continue;
+        }
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(Error::Gate(format!(
+                    "anvil-roundtrip-v1a {role} symlink path component is not allowed: {}",
+                    current.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(Error::Gate(format!(
+                    "anvil-roundtrip-v1a cannot inspect {role} path component {}: {error}",
+                    current.display()
+                )));
+            }
+        }
     }
+    Ok(())
 }
 
 fn canonical_destination(path: &Path) -> Result<PathBuf, Error> {
-    reject_symlink_path(path, "output")?;
+    reject_symlink_components(path, "output")?;
     let mut missing = Vec::new();
     let mut existing = path.to_path_buf();
     while match fs::symlink_metadata(&existing) {
@@ -1705,6 +1725,7 @@ fn canonical_destination(path: &Path) -> Result<PathBuf, Error> {
 }
 
 fn prepare_output(output: &Path) -> Result<(), Error> {
+    reject_symlink_components(output, "output")?;
     match fs::symlink_metadata(output) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             return Err(Error::Gate(format!(
@@ -1945,16 +1966,39 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn prepare_output_rejects_symlink_without_deleting_target() {
+    fn canonical_paths_reject_symlink_ancestors() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let victim = temp.path().join("victim");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&source).expect("source");
+        std::fs::create_dir_all(victim.join("child/out")).expect("victim");
+        symlink(&victim, &alias).expect("symlink");
+        assert!(matches!(
+            canonicalize_paths(&source, &alias.join("child/out")),
+            Err(Error::Gate(_))
+        ));
+        let fixture_root = alias.join("fixtures");
+        assert!(matches!(
+            canonicalize_paths(&fixture_root, &temp.path().join("output")),
+            Err(Error::Gate(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_output_rejects_symlink_ancestor_without_deleting_target() {
         use std::os::unix::fs::symlink;
         let temp = tempfile::tempdir().expect("tempdir");
         let victim = temp.path().join("victim");
         let alias = temp.path().join("alias");
-        std::fs::create_dir(&victim).expect("victim");
-        std::fs::write(victim.join("KEEP"), b"keep").expect("sentinel");
+        let output = alias.join("child/out");
+        std::fs::create_dir_all(victim.join("child/out")).expect("victim");
+        std::fs::write(victim.join("child/out/KEEP"), b"keep").expect("sentinel");
         symlink(&victim, &alias).expect("symlink");
-        assert!(matches!(prepare_output(&alias), Err(Error::Gate(_))));
-        assert!(victim.join("KEEP").is_file());
+        assert!(matches!(prepare_output(&output), Err(Error::Gate(_))));
+        assert!(victim.join("child/out/KEEP").is_file());
     }
 
     #[test]
