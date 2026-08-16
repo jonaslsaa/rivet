@@ -298,14 +298,18 @@ impl OverworldGenerator {
     /// Create a holder with an explicitly proven structure-consumed feature
     /// count. Production callers use [`Self::create_holder`], which leaves the
     /// count unavailable and therefore refuses FEATURES before feature RNG.
-    /// Fixture/oracle callers may use this only when the structure-decoration
-    /// loop is intentionally omitted and its zero feature consumption is part
-    /// of the fixture contract.
-    pub fn create_holder_with_omitted_structure_decorations(
+    /// Fixture/oracle callers may pass `Some(0)` only when they have verified
+    /// that this chunk's structure decoration loop consumed no feature index.
+    pub fn create_holder_with_structure_feature_count(
         self: &Arc<Self>,
         pos: ChunkPos,
+        structure_feature_count: Option<usize>,
     ) -> GenerationChunkHolder {
-        GenerationChunkHolder::new_with_omitted_structure_decorations(pos, Arc::clone(self))
+        GenerationChunkHolder::new_with_structure_feature_count(
+            pos,
+            Arc::clone(self),
+            structure_feature_count,
+        )
     }
 }
 
