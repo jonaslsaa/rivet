@@ -13,11 +13,18 @@
 //! Java default is a no-op body and only `WorldGenRegion` (server.level)
 //! overrides it for debug narration, so no current consumer reads it.
 //!
-//! The trait is `Send` but deliberately NOT `Sync`: the worldgen level is
-//! exclusively `&mut`-borrowed by the feature placement stack on the sync tick
-//! thread (OWNERSHIP.md), and `WorldGenRegion` owns non-`Sync` `ChunkAccess`
-//! values (the paletted-container `dyn` internals are `Send`-only). A `Sync`
-//! bound would force a shared worldgen view that the ownership model forbids.
+//! The trait is `Send` but deliberately NOT `Sync` and NOT `'static`: the
+//! worldgen level is exclusively `&mut`-borrowed by the feature placement stack
+//! on the sync tick thread (OWNERSHIP.md), and `WorldGenRegion` owns non-`Sync`
+//! `ChunkAccess` values (the paletted-container `dyn` internals are
+//! `Send`-only). A `Sync` bound would force a shared worldgen view that the
+//! ownership model forbids, and a `'static` bound would forbid borrowing a
+//! worldgen level that owns data with a shorter lifetime.
+//!
+//! The value types are free: the executor's dense region runs `StateId` block
+//! values while the FEATURES-pass region runs `BlockState` values, so the
+//! production impls specialize the `WorldGenRegion` type parameters rather than
+//! the trait.
 
 use crate::level::height_accessor::LevelHeightAccessor;
 use crate::levelgen::heightmap::Types;
@@ -35,7 +42,7 @@ use rivet_registry::holder::Holder;
 /// rest of the Java `ServerLevelAccessor` ancestor chain (`LevelAccessor`/
 /// `LevelReader`/`BlockGetter`, plus the `LevelWriter` write surface) is ported
 /// by the owning unit.
-pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
+pub trait WorldGenLevel: LevelHeightAccessor + Send {
     /// `WorldGenLevel.getSeed()`.
     fn get_seed(&self) -> i64;
 

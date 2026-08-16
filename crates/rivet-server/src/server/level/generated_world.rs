@@ -29,22 +29,21 @@
 //! caller-supplied [`GenerationChunkHolder::new`] features closure runs Java's
 //! `ChunkStatusTasks.generateFeatures` — the `Heightmap.primeHeightmaps(chunk,
 //! FINAL_HEIGHTMAPS)` priming and the `addVanillaDecorations` prologue over a
-//! bounded region-backed 3x3 composition — the decoration-seed derivation
-//! (`SectionPos.of(centerPos, level.getMinSectionY()).origin()` fed to
-//! `setDecorationSeed`), a `WorldGenRegion` that borrows the center chunk and
-//! owns eight ring chunks generated EMPTY→CARVERS through the same real bodies
-//! the other closures wire, and the Paper-order biome-union gather +
-//! `retainAll`. It then resolves generation settings for the FULL
+//! bounded region-backed FEATURES dependency window — the decoration-seed
+//! derivation (`SectionPos.of(centerPos, level.getMinSectionY()).origin()` fed
+//! to `setDecorationSeed`), a `WorldGenRegion` that borrows the center chunk
+//! and owns the complete 17x17 dependency cache (CARVERS at distances 0/1,
+//! STRUCTURE_STARTS through distance 8), and the Paper-order 3x3 biome-union
+//! gather + `retainAll`. It then resolves generation settings for the FULL
 //! `biomeSource.possibleBiomes()` list in source order and builds the
 //! FeatureSorter once from it (Paper's `ChunkGenerator.featuresPerStep`,
 //! `ChunkGenerator.java` 97-100 — the 3x3 union only picks which feature
 //! indices execute per step). The generated feature tables cover EVERY
 //! overworld possible biome (55 — the full list, not the reachable subset),
-//! so the full list resolves and the run proceeds to the per-step loop, where
-//! it fails typed (`GenError::FeaturePlacementDecode`) at the exact first
-//! placed feature whose value decode is unavailable — seed-42 chunk (0,0):
-//! step 1 (LAKES), global feature index 0, `minecraft:lake_lava_underground`
-//! (#126). The chunk stays CARVERS. The INITIALIZE_LIGHT/
+//! so the full list resolves and the run proceeds to the per-step loop. The
+//! lake entries are decoded from the generated JSON and run with their exact
+//! feature seeds; the seed-42 chunk then stops at the first selected path not
+//! implemented (`minecraft:monster_room`). The chunk stays CARVERS. The INITIALIZE_LIGHT/
 //! LIGHT steps are executor-wired but engine-gated (the holder wires no light
 //! engine, so it cannot reach LIGHT).
 //! Everything the value layer does not wire is refused *before* running work: a
@@ -67,8 +66,8 @@
 //! (`BlockState`/`section_reconstruction::BiomeId`) uses the generic chunk-view
 //! methods while the dense server region keeps its block-state `WorldGenLevel`
 //! facade on the `StateId`/`ServerBiomeId`/`StructureKey` specialization. The
-//! FEATURES body composes its bounded 3x3 region through [`CenterHolder`] (which
-//! borrows the center chunk's base) and [`OwnedHolder`] (which owns the eight
+//! FEATURES body composes its full dependency window through [`CenterHolder`]
+//! (which borrows the center chunk's base) and [`OwnedHolder`] (which owns the
 //! ring chunks) — see [`compose_feature_region`]. What still defers (RivetTodo
 //! #185) is the FULL-reconstruction bridge: `ChunkAccess::map_values` is wired
 //! only from `LevelChunk::from_bridge`, so a sub-FULL `ProtoChunk` still cannot
@@ -85,6 +84,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
+use serde_json::Value;
+
+use rivet_registry::Registry;
 use rivet_registry::access::RegistryAccess;
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::block_state::BlockState;
@@ -95,11 +97,15 @@ use rivet_registry::core::SectionPos;
 use rivet_registry::generated::biomes::BIOME_BY_ID;
 use rivet_registry::generated::blocks::BlockId;
 use rivet_registry::generated::feature_data::{
-    BIOME_GENERATION_SETTINGS_BY_NAME, PLACED_FEATURE_BY_NAME,
+    BIOME_GENERATION_SETTINGS_BY_NAME, CONFIGURED_FEATURE_BY_NAME, PLACED_FEATURE_BY_NAME,
 };
 use rivet_registry::holder::Holder;
 use rivet_registry::holder::RegistryId;
 use rivet_registry::holder_lookup::HolderGetter;
+use rivet_registry::registry_ops::RegistryOps;
+use rivet_registry::{Identifier, RegistrationInfo, ResourceKey};
+use rivet_serialization::codec::Codec;
+use rivet_serialization::json_ops::JsonOps;
 use rivet_util::StaticCache2D;
 use rivet_util::WorldgenRandom;
 use rivet_util::random_source::XoroshiroRandomSource;
@@ -127,13 +133,23 @@ use rivet_world::data::worldgen::worldgen_bootstraps::build_worldgen_registries;
 use rivet_world::level::height_accessor::LevelHeightAccessor;
 use rivet_world::level::height_accessor::create as create_height_accessor;
 use rivet_world::levelgen::blending::blender::Blender;
-use rivet_world::levelgen::feature::registry_keys::PLACED_FEATURE;
+use rivet_world::levelgen::feature::lake_feature::{
+    Configuration as LakeConfiguration, lake_configuration_codec,
+};
+use rivet_world::levelgen::feature::registry_keys::{CONFIGURED_FEATURE, PLACED_FEATURE};
+use rivet_world::levelgen::feature::{ConfiguredFeatureErased, feature_id_from_registry_name};
 use rivet_world::levelgen::generation_step::Decoration;
 use rivet_world::levelgen::heightmap::{FINAL_HEIGHTMAPS, Types};
 use rivet_world::levelgen::noise::registry_keys::NOISE_SETTINGS;
 use rivet_world::levelgen::noisegen::noise_based_chunk_generator::NoiseBasedChunkGenerator;
 use rivet_world::levelgen::noisegen::noise_generator_settings::OVERWORLD;
 use rivet_world::levelgen::noisegen::random_state::RandomState;
+use rivet_world::levelgen::placement::{
+    ErasedPlacementModifier, PlacedFeature, PlacementContext, biome_filter_codec,
+    count_placement_codec, environment_scan_placement_codec, height_range_placement_codec,
+    in_square_placement_codec, placement_get_positions, rarity_filter_codec,
+    surface_relative_threshold_filter_codec,
+};
 use rivet_world::levelgen::world_generation_context::WorldGenerationContext;
 
 use crate::server::level::level_chunk::{LevelChunk, StructureKey};
@@ -152,9 +168,9 @@ pub enum GeneratedChunkError {
     /// A target past `LIGHT` — the executor rejected it before running any
     /// work. Naming the requested status makes the downstream boundary explicit.
     /// (A target through a light step with no engine is instead refused as
-    /// `GenError::LightEngineMissing`, and the wired FEATURES rung fails typed
-    /// as `GenError::FeaturePlacementDecode` at the first placed-feature value
-    /// decode — see [`GenerationChunkHolder::new`].)
+    /// `GenError::LightEngineMissing`, and the wired FEATURES rung stops at
+    /// the first selected path outside the decoded lake slice — see
+    /// [`GenerationChunkHolder::new`].)
     UnsupportedStatus(ChunkStatus),
     /// The genuine-FULL-only install gate: a generated chunk is a `ProtoChunk`
     /// through `SURFACE` and cannot be converted into the `LevelChunk` (FULL)
@@ -405,15 +421,15 @@ impl GenerationChunkHolder {
     /// `WorldGenRegion`/`StructureManager` seams); the FEATURES body starts
     /// Java's `ChunkStatusTasks.generateFeatures` — `run_biome_decoration`
     /// runs `addVanillaDecorations` faithfully: the `FINAL_HEIGHTMAPS`
-    /// priming, the decoration-seed derivation, a bounded region-backed 3x3
-    /// composition (`compose_feature_region`: a `WorldGenRegion` that borrows
-    /// the center chunk and owns eight ring chunks generated EMPTY→CARVERS
-    /// through the same real bodies the other closures wire, laid out in
-    /// `StaticCache2D` row-major order), and the Paper-order biome-union
-    /// gather + `retainAll` — and then fails typed at the first placed
-    /// feature whose value decode is unavailable (seed-42 chunk (0,0): step 1
-    /// (LAKES), global feature index 0, `minecraft:lake_lava_underground`
-    /// (#126)); the chunk stays CARVERS.
+    /// priming, the decoration-seed derivation, a dependency-window composition (`compose_feature_region`: a
+    /// `WorldGenRegion` that borrows the center chunk and owns the 17x17
+    /// FEATURES cache, with CARVERS at distances 0/1 and
+    /// STRUCTURE_STARTS through distance 8), and the Paper-order biome-union
+    /// gather + `retainAll` — and then decodes and runs
+    /// `minecraft:lake_lava_underground` from its registry-backed JSON at the
+    /// exact feature seed before stopping at the first selected unsupported
+    /// path (seed-42 chunk (0,0): `minecraft:monster_room`); the chunk stays
+    /// CARVERS.
     pub fn new(pos: ChunkPos, generator: Arc<OverworldGenerator>) -> Self {
         let height_accessor = create_height_accessor(
             generator.generator().get_min_y(),
@@ -513,18 +529,18 @@ impl GenerationChunkHolder {
                 // `WorldGenRegion`; `run_biome_decoration` runs Java's
                 // `ChunkStatusTasks.generateFeatures` + `addVanillaDecorations`
                 // faithfully — the `FINAL_HEIGHTMAPS` priming, the
-                // section-origin decoration-seed derivation, the bounded 3x3
-                // region (the borrowed center chunk + eight owned ring chunks
-                // generated EMPTY→CARVERS through the same real bodies the
-                // other closures wire), the Paper-order biome-union gather +
-                // `retainAll`, the FULL-source-list settings resolution
-                // (`ChunkGenerator.featuresPerStep`, `ChunkGenerator.java`
-                // 97-100) and FeatureSorter, and the exact per-feature seeds —
-                // and then fails typed (`GenError::FeaturePlacementDecode`) at
-                // the exact first placed feature whose value decode is
-                // unavailable (seed-42 chunk (0,0): step 1, global index 0,
-                // `minecraft:lake_lava_underground` — #126). It must never be
-                // "improved" into a silent skip or a blanket UnsupportedTask.
+                // section-origin decoration-seed derivation, the complete
+                // FEATURES dependency window (the borrowed center chunk plus
+                // the 17x17 cache with CARVERS at distances 0/1 and
+                // STRUCTURE_STARTS through distance 8), and the Paper-order
+                // biome-union gather + `retainAll`, the FULL-source-list
+                // settings resolution (`ChunkGenerator.featuresPerStep`,
+                // `ChunkGenerator.java` 97-100) and FeatureSorter, and the
+                // exact per-feature seeds — and then decodes and runs the
+                // registry-backed `minecraft:lake_lava_underground` entry
+                // before failing typed at the first selected unsupported path
+                // (`minecraft:monster_room`). It must never be "improved" into
+                // a silent skip or a blanket UnsupportedTask.
                 // The closure captures one generator clone (the free helper is
                 // why the ownership test's `strong_count == base + 5` holds).
                 let generator = Arc::clone(&generator);
@@ -539,11 +555,11 @@ impl GenerationChunkHolder {
     /// The chunk's persisted status — `EMPTY` before any step, `CARVERS` after a
     /// successful BIOMES→NOISE→SURFACE→CARVERS run, and never `FULL` (the
     /// executor refuses to stamp it). A FEATURES run primes the final heightmaps,
-    /// drives the bounded 3x3 region, resolves the FULL possible-biome settings
-    /// and builds the FeatureSorter, and then fails typed at the first placed
-    /// feature whose value decode is unavailable (`FeaturePlacementDecode`, the
-    /// `#126` blocker — seed-42: `lake_lava_underground`), so the chunk is never
-    /// stamped FEATURES.
+    /// drives the full dependency-window region, resolves the FULL possible-biome
+    /// settings and builds the FeatureSorter, decodes and runs the registry-backed
+    /// `lake_lava_underground` path, and then fails typed at the first selected
+    /// unsupported path (`FeaturePlacementDecode`, seed-42:
+    /// `minecraft:monster_room`), so the chunk is never stamped FEATURES.
     pub fn status(&self) -> ChunkStatus {
         self.chunk.get_persisted_status()
     }
@@ -552,8 +568,8 @@ impl GenerationChunkHolder {
     /// (inclusive). The BIOMES→NOISE→SURFACE→CARVERS task bodies are wired (an
     /// EMPTY chunk can reach CARVERS); the FEATURES task body is wired (it runs
     /// Java's `ChunkStatusTasks.generateFeatures` + `addVanillaDecorations`'s
-    /// bounded 3x3 composition and then fails typed at the first placed feature
-    /// whose value decode is unavailable — see
+    /// full dependency-window composition, decodes and runs the lake path, and
+    /// then fails typed at the first selected unsupported path — see
     /// [`GenerationChunkHolder::new`]). A
     /// target the value layer does not wire is rejected by the executor before
     /// any work with a typed error — a path through a light step with no engine
@@ -696,57 +712,73 @@ fn generate_ring_chunk(
 /// every run. No placement ever runs, no phf index ever panics, and no biome is
 /// fabricated or silently skipped.
 ///
-/// Compose the bounded 3x3 `WorldGenRegion` `addVanillaDecorations` reads:
-/// the borrowed center chunk at CARVERS (the executor's ordering guard) plus
-/// the eight owned ring chunks generated EMPTY→CARVERS. The holders are laid
-/// out in `StaticCache2D::from_entries`'s storage order (X-outer, Z-inner —
-/// the row-major `(x - minX) * sizeZ + (z - minZ)` index), NOT
-/// `ChunkPos::range_closed`'s X-fastest order, which is the transpose: a
-/// `getChunk(x, z)` would otherwise read the neighbor built for `(z, x)`.
+/// Compose the FEATURES `WorldGenRegion` over the complete accumulated
+/// dependency window of the FEATURES step. Paper's direct dependencies are
+/// `CARVERS` at distances 0 and 1, followed by `STRUCTURE_STARTS` through
+/// distance 8, so the cache is 17x17. The decoration biome union reads only
+/// the center 3x3, but placement and worldgen reads are bounded by the full
+/// status contract and must not be backed by an undersized cache.
 fn compose_feature_region<'a>(
     chunk: &'a mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
     generator: &Arc<OverworldGenerator>,
 ) -> WorldGenRegion<'a, BlockState, WorldgenBiomeId, StructureKey> {
     let center_pos = chunk.get_pos();
     let center_status = chunk.get_persisted_status();
+    let step = GENERATION_PYRAMID
+        .get_step_to(ChunkStatus::Features)
+        .clone();
+    let dependencies = step.direct_dependencies();
+    let radius = dependencies.size() as i32 - 1;
+    let width = radius * 2 + 1;
     let mut holders: Vec<
         Box<dyn GenerationChunkHolderView<BlockState, WorldgenBiomeId, StructureKey> + 'a>,
-    > = Vec::with_capacity(9);
-    // The holders must be in `StaticCache2D::from_entries`'s storage order
-    // (X-outer, Z-inner — index `(x - minX) * sizeZ + (z - minZ)`), not
-    // `ChunkPos::range_closed`'s X-fastest order: the two are transposes, and a
-    // `getChunk(x, z)` would otherwise read the neighbor built for the
-    // transposed `(z, x)`. Ring positions are gathered in storage order first so
-    // the center chunk's borrow is taken exactly once, at its own (index-4) slot.
-    let mut ring_positions = Vec::with_capacity(8);
-    for dx in -1..=1 {
-        for dz in -1..=1 {
+    > = Vec::with_capacity((width * width) as usize);
+
+    // `StaticCache2D::from_entries` stores X outer, Z inner — index
+    // `(x - minX) * sizeZ + (z - minZ)`. Build in that order so every
+    // `getChunk(x, z)` resolves the holder for its own coordinates.
+    for dx in -radius..=radius {
+        for dz in -radius..=radius {
             let pos = ChunkPos::new(
                 center_pos.x().wrapping_add(dx),
                 center_pos.z().wrapping_add(dz),
             );
-            if pos != center_pos {
-                ring_positions.push(pos);
+            if pos == center_pos {
+                continue;
             }
+            let distance = dx.abs().max(dz.abs()) as usize;
+            let status = dependencies.get(distance);
+            let base = match status {
+                ChunkStatus::Carvers => generate_ring_chunk(pos, generator),
+                ChunkStatus::StructureStarts => {
+                    let mut structure_chunk = fresh_worldgen_chunk(pos, generator);
+                    structure_chunk.set_persisted_status(ChunkStatus::StructureStarts);
+                    structure_chunk.into_base()
+                }
+                other => {
+                    panic!("unsupported FEATURES cache dependency {other:?} at distance {distance}")
+                }
+            };
+            holders.push(Box::new(OwnedHolder::new(base, status)));
         }
     }
-    for pos in ring_positions {
-        holders.push(Box::new(OwnedHolder::new(
-            generate_ring_chunk(pos, generator),
-            ChunkStatus::Carvers,
-        )));
-    }
+
+    let center_index = (radius * width + radius) as usize;
     holders.insert(
-        4,
+        center_index,
         Box::new(CenterHolder::new(chunk.base_mut(), center_status)),
     );
-    let cache = StaticCache2D::from_entries(center_pos.x() - 1, center_pos.z() - 1, 3, 3, holders);
+    let cache = StaticCache2D::from_entries(
+        center_pos.x() - radius,
+        center_pos.z() - radius,
+        width,
+        width,
+        holders,
+    );
     WorldGenRegion::new(
         cache,
         center_pos,
-        GENERATION_PYRAMID
-            .get_step_to(ChunkStatus::Features)
-            .clone(),
+        step,
         generator.seed(),
         generator.generator().get_min_y(),
         generator.generator().get_gen_depth(),
@@ -852,6 +884,238 @@ fn resolve_feature_settings(
     Ok(settings_sources)
 }
 
+type FeatureOps = RegistryOps<Value, JsonOps>;
+
+fn decode_value<T: Clone>(
+    codec: Arc<dyn Codec<T, FeatureOps>>,
+    ops: &FeatureOps,
+    value: &Value,
+    label: &str,
+) -> Result<T, String> {
+    let result = codec.parse(ops, value);
+    match result.result() {
+        Some(value) => Ok(value.clone()),
+        None => Err(result
+            .error_ref()
+            .map(|error| format!("{label}: {}", error.message()))
+            .unwrap_or_else(|| format!("{label}: codec returned no result"))),
+    }
+}
+
+fn without_type(value: &Value, label: &str) -> Result<Value, String> {
+    let mut object = value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| format!("{label} must be an object"))?;
+    object.remove("type");
+    Ok(Value::Object(object))
+}
+
+fn decode_placement_modifier(
+    value: &Value,
+    ops: &FeatureOps,
+    label: &str,
+) -> Result<Arc<dyn ErasedPlacementModifier>, String> {
+    let kind = value
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{label} has no type"))?;
+    let value_without_type = without_type(value, label)?;
+    let modifier: Arc<dyn ErasedPlacementModifier> = match kind {
+        "minecraft:rarity_filter" => Arc::new(decode_value(
+            rarity_filter_codec::<FeatureOps>(),
+            ops,
+            &value_without_type,
+            &format!("decode {label} rarity_filter"),
+        )?),
+        "minecraft:in_square" => Arc::new(decode_value(
+            in_square_placement_codec::<FeatureOps>(),
+            ops,
+            &value_without_type,
+            &format!("decode {label} in_square"),
+        )?),
+        "minecraft:height_range" => Arc::new(decode_value(
+            height_range_placement_codec::<FeatureOps>(),
+            ops,
+            &value_without_type,
+            &format!("decode {label} height_range"),
+        )?),
+        "minecraft:environment_scan" => Arc::new(decode_value(
+            environment_scan_placement_codec::<FeatureOps>(),
+            ops,
+            &value_without_type,
+            &format!("decode {label} environment_scan"),
+        )?),
+        "minecraft:surface_relative_threshold_filter" => Arc::new(decode_value(
+            surface_relative_threshold_filter_codec::<FeatureOps>(),
+            ops,
+            &value_without_type,
+            &format!("decode {label} surface_relative_threshold_filter"),
+        )?),
+        "minecraft:biome" => Arc::new(decode_value(
+            biome_filter_codec::<FeatureOps>(),
+            ops,
+            &value_without_type,
+            &format!("decode {label} biome"),
+        )?),
+        "minecraft:count" => Arc::new(decode_value(
+            rivet_serialization::map_codec::codec_of(count_placement_codec::<FeatureOps>()),
+            ops,
+            &value_without_type,
+            &format!("decode {label} count"),
+        )?),
+        other => {
+            return Err(format!(
+                "{label} has unsupported placement modifier {other}"
+            ));
+        }
+    };
+    Ok(modifier)
+}
+
+fn decode_configured_feature(
+    configured_key: &str,
+    ops: &FeatureOps,
+) -> Result<ConfiguredFeatureErased, String> {
+    let entry = CONFIGURED_FEATURE_BY_NAME
+        .get(configured_key)
+        .ok_or_else(|| format!("missing generated {configured_key} entry"))?;
+    let json: Value = serde_json::from_str(entry.json)
+        .map_err(|error| format!("decode {configured_key} JSON: {error}"))?;
+    let feature_type = json
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{configured_key} JSON has no feature type"))?;
+    let feature = feature_id_from_registry_name(feature_type)
+        .ok_or_else(|| format!("{configured_key} has unsupported feature type {feature_type}"))?;
+    let config_value = json
+        .get("config")
+        .ok_or_else(|| format!("{configured_key} JSON has no config"))?;
+    let config: LakeConfiguration = match feature_type {
+        "minecraft:lake" => decode_value(
+            lake_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?,
+        other => {
+            return Err(format!(
+                "{configured_key} has unsupported feature type {other}"
+            ));
+        }
+    };
+    Ok(ConfiguredFeatureErased {
+        feature,
+        config: Arc::new(config),
+    })
+}
+
+struct DecodedPlacedFeature {
+    placed_registry: Registry<PlacedFeature>,
+    configured_registry: Registry<ConfiguredFeatureErased>,
+    placed_holder: Holder<PlacedFeature>,
+}
+
+impl DecodedPlacedFeature {
+    fn place_with_biome_check(
+        &self,
+        level: &mut WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey>,
+        generator: &OverworldGenerator,
+        random: &mut WorldgenRandom<XoroshiroRandomSource>,
+        origin: &BlockPos,
+    ) {
+        let placed = self.placed_holder.value(&self.placed_registry);
+        placed.place_with_biome_check(&self.configured_registry, level, generator, random, origin);
+    }
+}
+
+fn decode_placed_feature(
+    placed_key: &str,
+    generator: &OverworldGenerator,
+) -> Result<DecodedPlacedFeature, String> {
+    let entry = PLACED_FEATURE_BY_NAME
+        .get(placed_key)
+        .ok_or_else(|| format!("missing generated {placed_key} entry"))?;
+    let json: Value = serde_json::from_str(entry.json)
+        .map_err(|error| format!("decode {placed_key} JSON: {error}"))?;
+    let configured_key = json
+        .get("feature")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{placed_key} JSON has no configured feature"))?;
+    let ops =
+        RegistryOps::create_from_access(&JsonOps::INSTANCE, generator.registry_access().clone());
+    let configured = Arc::new(decode_configured_feature(configured_key, &ops)?);
+    let mut configured_builder = RegistryBuilder::new(&*CONFIGURED_FEATURE);
+    let configured_registry_id = configured_builder.registry_id();
+    let configured_resource_key =
+        ResourceKey::create(&*CONFIGURED_FEATURE, Identifier::parse(configured_key));
+    let configured_id = configured_builder.register(
+        &configured_resource_key,
+        configured,
+        RegistrationInfo::BUILT_IN,
+    );
+    let configured_registry = configured_builder.freeze();
+
+    let placement = json
+        .get("placement")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{placed_key} JSON has no placement list"))?;
+    let modifiers = placement
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            decode_placement_modifier(value, &ops, &format!("{placed_key} placement {index}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let placed_value = Arc::new(PlacedFeature::new(
+        Holder::reference(configured_registry_id, configured_id.0),
+        modifiers,
+    ));
+    let mut placed_builder = RegistryBuilder::new(&*PLACED_FEATURE);
+    let placed_registry_id = placed_builder.registry_id();
+    let placed_resource_key = ResourceKey::create(&*PLACED_FEATURE, Identifier::parse(placed_key));
+    let placed_id = placed_builder.register(
+        &placed_resource_key,
+        placed_value,
+        RegistrationInfo::BUILT_IN,
+    );
+    let placed_registry = placed_builder.freeze();
+    Ok(DecodedPlacedFeature {
+        placed_registry,
+        configured_registry,
+        placed_holder: Holder::reference(placed_registry_id, placed_id.0),
+    })
+}
+
+fn first_modifier_selects(
+    region: &mut WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey>,
+    generator: &OverworldGenerator,
+    random: &mut WorldgenRandom<XoroshiroRandomSource>,
+    origin: &BlockPos,
+    feature_key: &'static str,
+) -> Result<bool, String> {
+    let entry = PLACED_FEATURE_BY_NAME
+        .get(feature_key)
+        .ok_or_else(|| format!("missing generated {feature_key} entry"))?;
+    let json: Value = serde_json::from_str(entry.json)
+        .map_err(|error| format!("decode {feature_key} JSON: {error}"))?;
+    let first = json
+        .get("placement")
+        .and_then(Value::as_array)
+        .and_then(|placement| placement.first())
+        .ok_or_else(|| format!("{feature_key} JSON has no first placement modifier"))?;
+    let ops =
+        RegistryOps::create_from_access(&JsonOps::INSTANCE, generator.registry_access().clone());
+    let modifier =
+        decode_placement_modifier(first, &ops, &format!("{feature_key} first placement"))?;
+    let context = PlacementContext::new(region, generator, None);
+    Ok(
+        placement_get_positions(modifier.as_ref(), &context, random, origin)
+            .next()
+            .is_some(),
+    )
+}
+
 fn run_biome_decoration(
     chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
     generator: &Arc<OverworldGenerator>,
@@ -866,7 +1130,7 @@ fn run_biome_decoration(
     let decoration_seed =
         random.set_decoration_seed(generator.seed(), origin.get_x(), origin.get_z());
 
-    let region = compose_feature_region(chunk, generator);
+    let mut region = compose_feature_region(chunk, generator);
     let union_biomes = gather_possible_biomes(&region, generator);
 
     // Resolve the FULL `biomeSource.possibleBiomes()` list in source order and
@@ -895,12 +1159,14 @@ fn run_biome_decoration(
     // the #185 structures deferral).
     let generation_steps = Decoration::VALUES.len().max(feature_list.len());
     // Paper walks steps in ascending order and, within a step, the sorted
-    // global feature indices of the *union* biomes mapped through the full-list
-    // sorter's `indexMapping` — the union selects which indices execute, the
-    // sorter was built from the full possible-biome list.
-    let first_feature = (0..generation_steps).find_map(|step_index| {
+    // global feature indices of the union biomes mapped through the full-list
+    // sorter's `indexMapping`. The decoded lake is the first slice; keep
+    // advancing its exact feature seeds until the first selected path outside
+    // that slice, then stop with a typed boundary.
+    let mut saw_feature = false;
+    for step_index in 0..generation_steps {
         if step_index >= feature_list.len() {
-            return None;
+            continue;
         }
         let step_feature_data = &feature_list[step_index];
         let mut possible_features_this_step = Vec::new();
@@ -922,43 +1188,60 @@ fn run_biome_decoration(
         }
         possible_features_this_step.sort_unstable();
         possible_features_this_step.dedup();
-        possible_features_this_step
-            .into_iter()
-            .next()
-            .map(|global_feature_index| (step_index, global_feature_index))
-    });
-    let Some((step_index, global_feature_index)) = first_feature else {
-        // No feature in any union step. The typed error names the region
-        // rather than silently passing.
+        for global_feature_index in possible_features_this_step {
+            saw_feature = true;
+            let feature = &feature_list[step_index].features[global_feature_index];
+            let feature_key = match feature {
+                Holder::Reference { id, .. } => {
+                    placed_by_id.get(id).copied().unwrap_or("minecraft:unknown")
+                }
+                Holder::Direct(_) => "minecraft:unknown",
+            };
+            // `setFeatureSeed(decorationSeed, globalIndexOfFeature, stepIndex)`.
+            random.set_feature_seed(
+                decoration_seed,
+                global_feature_index as i32,
+                step_index as i32,
+            );
+            if feature_key == "minecraft:lake_lava_underground" {
+                let placed = decode_placed_feature(feature_key, generator).map_err(|_| {
+                    GenError::FeaturePlacementDecode {
+                        chunk_pos: center_pos,
+                        step_index,
+                        global_feature_index,
+                        feature_key,
+                    }
+                })?;
+                placed.place_with_biome_check(&mut region, generator, &mut random, &origin);
+                continue;
+            }
+            let selected =
+                first_modifier_selects(&mut region, generator, &mut random, &origin, feature_key)
+                    .map_err(|_| GenError::FeaturePlacementDecode {
+                    chunk_pos: center_pos,
+                    step_index,
+                    global_feature_index,
+                    feature_key,
+                })?;
+            if selected {
+                return Err(GenError::FeaturePlacementDecode {
+                    chunk_pos: center_pos,
+                    step_index,
+                    global_feature_index,
+                    feature_key,
+                });
+            }
+        }
+    }
+    if !saw_feature {
         return Err(GenError::FeaturePlacementDecode {
             chunk_pos: center_pos,
             step_index: 0,
             global_feature_index: 0,
             feature_key: "minecraft:unknown",
         });
-    };
-    let feature = &feature_list[step_index].features[global_feature_index];
-    let feature_key = match feature {
-        Holder::Reference { id, .. } => {
-            placed_by_id.get(id).copied().unwrap_or("minecraft:unknown")
-        }
-        Holder::Direct(_) => "minecraft:unknown",
-    };
-    // `setFeatureSeed(decorationSeed, globalIndexOfFeature, stepIndex)` — the
-    // exact per-feature seed Paper sets before placement. The Paper
-    // configurable-feature-seed override is a no-op (no paper config, so
-    // `featurePopulationSeed == decorationSeed`).
-    random.set_feature_seed(
-        decoration_seed,
-        global_feature_index as i32,
-        step_index as i32,
-    );
-    Err(GenError::FeaturePlacementDecode {
-        chunk_pos: center_pos,
-        step_index,
-        global_feature_index,
-        feature_key,
-    })
+    }
+    Ok(())
 }
 
 impl fmt::Debug for GenerationChunkHolder {
@@ -1384,9 +1667,10 @@ mod tests {
     /// EMPTY chunk targeting it runs BIOMES→NOISE→SURFACE→CARVERS and is
     /// stamped CARVERS. FEATURES is wired-but-blocked (see
     /// `generate_through_features_runs_prologue_then_fails_typed`): the
-    /// features body primes the final heightmaps, runs the bounded 3x3 region
-    /// and per-step loop, and fails typed at the first placed feature whose
-    /// value decode is unavailable, so the chunk is never stamped FEATURES.
+    /// features body primes the final heightmaps, runs the full dependency-
+    /// window region and per-step loop, decodes and runs the lake path, and
+    /// fails typed at the first selected unsupported path, so the chunk is
+    /// never stamped FEATURES.
     #[test]
     fn downstream_stages_fail_loudly_and_never_stamp() {
         let generator = test_generator();
@@ -1451,27 +1735,25 @@ mod tests {
     }
 
     /// The FEATURES rung runs `addVanillaDecorations`'s full prologue and
-    /// region-backed 3x3 gather — `Heightmap.primeHeightmaps(chunk,
+    /// dependency-window cache — `Heightmap.primeHeightmaps(chunk,
     /// FINAL_HEIGHTMAPS)` (the `ChunkStatusTasks.generateFeatures` priming),
     /// the decoration-seed derivation (`SectionPos.of(centerPos,
     /// level.getMinSectionY()).origin()` fed to `setDecorationSeed(seed,
-    /// originX, originZ)`), the bounded `WorldGenRegion` (borrowed center +
-    /// eight owned ring chunks generated EMPTY→CARVERS), the Paper-order
-    /// biome-union gather + `retainAll`, and then resolves generation settings
-    /// for the FULL `biomeSource.possibleBiomes()` list in source order (the
-    /// exact argument Paper's `ChunkGenerator.featuresPerStep` memoizes,
-    /// `ChunkGenerator.java` 97-100). Every possible biome (55) now resolves,
-    /// so the full-list `FeatureSorter` is built, the per-step loop maps the
-    /// 3x3 union through it, and the FIRST executing global feature index fails
-    /// typed at `GenError::FeaturePlacementDecode` — the new seed-42 frontier.
-    /// For seed 42 chunk (0,0) that is step 1 (lakes), global feature index 0,
-    /// placed key `minecraft:lake_lava_underground` (every non-deep-dark biome
-    /// carries the two lava lakes at step 1, and the ocean union selects index
-    /// 0 first). The chunk is never stamped FEATURES (it stays CARVERS) — no
-    /// silent skip, no blanket `UnsupportedTask`, no phf panic, and no
-    /// fabricated/skipped biome.
+    /// originX, originZ)`), the 17x17 `WorldGenRegion` cache (borrowed center,
+    /// CARVERS at distances 0/1, and STRUCTURE_STARTS through distance 8), the
+    /// Paper-order 3x3 biome-union gather + `retainAll`, and then resolves
+    /// generation settings for the FULL `biomeSource.possibleBiomes()` list in
+    /// source order (the exact argument Paper's `ChunkGenerator.featuresPerStep`
+    /// memoizes, `ChunkGenerator.java` 97-100). Every possible biome (55) now
+    /// resolves, so the full-list `FeatureSorter` is built, the per-step loop
+    /// maps the 3x3 union through it, decodes and runs the registry-backed lake
+    /// path at its exact feature seed, then stops at the first selected path
+    /// outside this slice.
+    /// For seed 42 chunk (0,0), the lakes and amethyst rarity filters drop; the
+    /// count-based `minecraft:monster_room` path is the first selected mismatch.
+    /// The chunk is never stamped FEATURES (it stays CARVERS).
     #[test]
-    fn generate_through_features_runs_prologue_then_fails_typed() {
+    fn generate_through_features_stops_at_first_selected_path_mismatch() {
         let generator = test_generator();
         let mut holder = generator.create_holder(ChunkPos::new(0, 0));
         holder
@@ -1481,7 +1763,7 @@ mod tests {
 
         let err = holder
             .generate_through(ChunkStatus::Features)
-            .expect_err("FEATURES must fail typed at the first real blocker");
+            .expect_err("FEATURES must stop at the first selected mismatch");
         match err {
             GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
                 chunk_pos,
@@ -1490,20 +1772,16 @@ mod tests {
                 feature_key,
             }) => {
                 assert_eq!(chunk_pos, ChunkPos::new(0, 0));
-                assert_eq!(step_index, 1, "first executing step must be lakes");
                 assert_eq!(
-                    global_feature_index, 0,
-                    "first global feature index must be 0"
+                    step_index, 3,
+                    "first selected mismatch must be underground structures"
                 );
-                assert_eq!(
-                    feature_key, "minecraft:lake_lava_underground",
-                    "first placed feature key must be the first lava lake"
-                );
+                assert_eq!(global_feature_index, 2);
+                assert_eq!(feature_key, "minecraft:monster_room");
             }
-            other => panic!(
-                "FEATURES must fail with FeaturePlacementDecode at lake_lava_underground; \
-                 got {other:?}"
-            ),
+            other => {
+                panic!("FEATURES must stop at the selected monster_room mismatch; got {other:?}")
+            }
         }
 
         // The prologue ran faithfully: all four final heightmaps are primed
@@ -1517,6 +1795,29 @@ mod tests {
         // The chunk is never stamped FEATURES — the typed error propagates
         // before the status advance, so it stays CARVERS.
         assert_eq!(holder.status(), ChunkStatus::Carvers);
+    }
+
+    /// The generated placed/configured pair is decoded through registry-backed
+    /// holders. The configured feature identity comes from the JSON dispatch
+    /// type, and every placement modifier is selected by its own type rather
+    /// than by a positional assumption in the generated list.
+    #[test]
+    fn lake_placed_feature_decodes_through_registry_holders() {
+        let generator = test_generator();
+        let decoded = decode_placed_feature("minecraft:lake_lava_underground", &generator)
+            .expect("the seed-42 lake entry must decode");
+        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        assert_eq!(placed.placement().len(), 6);
+        assert!(matches!(
+            placed.feature(),
+            Holder::Reference { registry, .. } if *registry == decoded.configured_registry.registry_id()
+        ));
+        let configured = placed.feature().value(&decoded.configured_registry);
+        assert_eq!(
+            configured.feature,
+            feature_id_from_registry_name("minecraft:lake")
+                .expect("the lake dispatch type must be registered")
+        );
     }
 
     /// The decoration-seed prologue is deterministic and matches the pinned
@@ -1626,16 +1927,14 @@ mod tests {
         assert_eq!(Arc::strong_count(&generator), base);
     }
 
-    /// The FEATURES region is a bounded 3x3 that borrows the center chunk (the
-    /// CARVERS chunk the executor is decorating) and owns the eight ring chunks
-    /// generated EMPTY→CARVERS through the same real bodies. Every one of the
-    /// nine `ChunkPos.rangeClosed(center, 1)` reads resolves to a chunk at its
-    /// own position — the `level.getChunk` surface `addVanillaDecorations` reads
-    /// the biome union from (non-vacuous: a region that silently dropped the
-    /// center borrow or generated the ring with different positions would fail
-    /// the position equality below).
+    /// The FEATURES region uses the complete 17x17 dependency window: it
+    /// borrows the center CARVERS chunk, owns CARVERS chunks at distances 1,
+    /// and owns STRUCTURE_STARTS chunks through distance 8. The nine
+    /// `ChunkPos.rangeClosed(center, 1)` reads used by the biome union still
+    /// resolve to their own positions, and the outer dependency ring is also
+    /// present at its required status.
     #[test]
-    fn feature_region_is_bounded_3x3_borrowing_center_and_owning_ring() {
+    fn feature_region_uses_dependency_window_borrowing_center_and_owning_ring() {
         let generator = test_generator();
         let mut holder = generator.create_holder(ChunkPos::new(0, 0));
         holder
@@ -1649,9 +1948,22 @@ mod tests {
             assert_eq!(
                 chunk.get_pos(),
                 pos,
-                "the bounded region must serve every 3x3 chunk at its own position"
+                "the dependency window must serve every 3x3 chunk at its own position"
             );
         }
+        assert_eq!(
+            region
+                .try_get_chunk(8, 0, ChunkStatus::StructureStarts, true)
+                .expect("the outer FEATURES dependency ring must be present")
+                .get_pos(),
+            ChunkPos::new(8, 0)
+        );
+        assert!(
+            region
+                .try_get_chunk(9, 0, ChunkStatus::Empty, true)
+                .is_err(),
+            "the FEATURES cache must stop at the direct dependency radius"
+        );
     }
 
     /// The seed-42 origin 3x3 biome union — the exact set the seed-42 (0,0)

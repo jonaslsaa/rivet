@@ -80,6 +80,8 @@ use rivet_util::util::log_and_pause_if_in_ide;
 use rivet_world::biome::biome_manager::{BiomeManager, NoiseBiomeSource};
 use rivet_world::chunk::chunk_access::ChunkAccess;
 use rivet_world::chunk::status::{ChunkStatus, ChunkStep};
+use rivet_world::chunk::storage::chunk_reconstruction::resolve_state_flags;
+use rivet_world::chunk::storage::section_reconstruction::BiomeId as WorldgenBiomeId;
 use rivet_world::level::WorldGenLevel;
 use rivet_world::level::height_accessor::LevelHeightAccessor;
 use rivet_world::levelgen::heightmap::Types;
@@ -221,13 +223,14 @@ impl std::fmt::Display for UnavailableChunkDiagnostic {
 /// server reads defer (see the module doc).
 ///
 /// Generic over the chunk value types `<T, B, S>` plus the holder lifetime
-/// `'a`. The pure chunk-view methods live on the generic [`impl<'a, T, B, S>`]
-/// (so the worldgen executor's borrow-carrying region can use them); the dense
-/// block-state methods and the [`WorldGenLevel`] impl live on the
-/// `StateId`/`ServerBiomeId`/`StructureKey` specialization. `'a` is the
-/// shortest lifetime the cached holders borrow — `'static` for a region over
-/// owning holders (the server value layer, and the [`WorldGenLevel`] trait's
-/// `'static` bound), a scoped borrow for the executor's center-chunk region.
+/// `'a`. The pure chunk-view methods — including the write-zone gate the block
+/// writes share — live on the generic [`impl<'a, T, B, S>`] (so the worldgen
+/// executor's borrow-carrying region can use them); the block-state methods and
+/// the [`WorldGenLevel`] impl live on the `StateId`/`ServerBiomeId`/
+/// `StructureKey` and `BlockState`/`WorldgenBiomeId`/`StructureKey`
+/// specializations. `'a` is the shortest lifetime the cached holders borrow —
+/// `'static` for a region over owning holders (the server value layer), a
+/// scoped borrow for the executor's center-chunk region.
 pub struct WorldGenRegion<'a, T, B, S>
 where
     T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
@@ -479,6 +482,88 @@ where
         self.uncached_biome_source
             .get_noise_biome(quart_x, quart_y, quart_z)
     }
+
+    /// `WorldGenRegion.ensureCanWrite(BlockPos)` — the writability gate every
+    /// write checks first.
+    ///
+    /// Type-agnostic (the write-radius gate reads only the scalar `writeRadius`
+    /// and center coordinates), so it lives here for the dense and FEATURES-pass
+    /// specializations to share. Inside the write zone the gate is open; Java's
+    /// upgrade branch (`center.isUpgrading()` → the generation height-accessor
+    /// check) never runs here because `BelowZeroRetrogen` is always null in the
+    /// port, so `isUpgrading()` is always false (RivetTodo #185).
+    pub fn ensure_can_write(&self, pos: &BlockPos) -> bool {
+        if !self.is_within_write_zone(pos) {
+            let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
+            let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
+            // Java logs + IDE-pauses once (`hasSetFarWarned`) and thread-dumps
+            // when debugging; the value layer logs through the shared
+            // `logAndPauseIfInIde` seam and defers the one-time flag + dump.
+            log_and_pause_if_in_ide(&format!(
+                "Detected setBlock in a far chunk [{}, {}], pos: {:?}, status: {}",
+                chunk_x,
+                chunk_z,
+                pos,
+                self.generating_step.target_status().serialization_name()
+            ));
+            return false;
+        }
+        true
+    }
+
+    /// `WorldGenRegion.isWithinWriteZone(BlockPos)`.
+    pub fn is_within_write_zone(&self, pos: &BlockPos) -> bool {
+        self.is_within_write_zone_coords(
+            SectionPos::block_to_section_coord(pos.get_x()),
+            SectionPos::block_to_section_coord(pos.get_z()),
+        )
+    }
+
+    /// The private `isWithinWriteZone(int, int)` half.
+    fn is_within_write_zone_coords(&self, chunk_x: i32, chunk_z: i32) -> bool {
+        mth::abs_i32(self.center_chunk_x.wrapping_sub(chunk_x)) <= self.write_radius
+            && mth::abs_i32(self.center_chunk_z.wrapping_sub(chunk_z)) <= self.write_radius
+    }
+
+    /// `warnIfReadOutsideWriteZone(int, int)` — the unsafe-read warning for a
+    /// non-center chunk outside the write zone (Java still performs the read).
+    fn warn_if_read_outside_write_zone(&self, chunk_x: i32, chunk_z: i32) {
+        if (self.center_chunk_x != chunk_x || self.center_chunk_z != chunk_z)
+            && !self.is_within_write_zone_coords(chunk_x, chunk_z)
+        {
+            let read_distance = mth::abs_max(
+                mth::abs_i32(self.center_chunk_x.wrapping_sub(chunk_x)),
+                mth::abs_i32(self.center_chunk_z.wrapping_sub(chunk_z)),
+            );
+            // Java appends the `currentlyGenerating` narration when set
+            // (RivetTodo #232); the value layer omits it.
+            log_and_pause_if_in_ide(&format!(
+                "Detected unsafe terrain read during worldgen: reading from chunk [{}, {}] while generating chunk [{}, {}] (distance: {}, write radius: {}, step: {})",
+                chunk_x,
+                chunk_z,
+                self.center_chunk_x,
+                self.center_chunk_z,
+                read_distance,
+                self.write_radius,
+                self.generating_step.target_status().serialization_name()
+            ));
+        }
+    }
+
+    /// `WorldGenRegion.getSkyDarken()` — 0 during worldgen.
+    pub fn get_sky_darken(&self) -> i32 {
+        0
+    }
+
+    /// `WorldGenRegion.isClientSide()` — false.
+    pub fn is_client_side(&self) -> bool {
+        false
+    }
+
+    /// `WorldGenRegion.getSeaLevel()` — `level.getSeaLevel()`.
+    pub fn get_sea_level(&self) -> i32 {
+        self.sea_level
+    }
 }
 
 /// The dense server specialization — the block-state methods and the
@@ -486,9 +571,11 @@ where
 ///
 /// Split from the generic impl because the block-state spine is
 /// `StateId`-specific: the region's reads/writes target `StateId`/`ServerBiomeId`
-/// sections, and the [`WorldGenLevel`] trait is `'static`-bound (see the struct
-/// doc). The generic chunk-view methods the executor's borrow-carrying region
-/// needs live on [`impl<'a, T, B, S> WorldGenRegion<'a, T, B, S>`](WorldGenRegion).
+/// sections. The [`WorldGenLevel`] trait is `Send`-bound but NOT `'static`
+/// (see the trait doc), so the dense and FEATURES-pass specializations both
+/// implement it over every region lifetime. The generic chunk-view methods the
+/// executor's borrow-carrying region needs live on
+/// [`impl<'a, T, B, S> WorldGenRegion<'a, T, B, S>`](WorldGenRegion).
 impl WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
     /// `WorldGenRegion.getFluidState(BlockPos)` — the block's fluid id, with
     /// the same outside-write-zone warning as `getBlockState`.
@@ -572,93 +659,13 @@ impl WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
         self.set_block(pos, BlockState::new(StateId(0)), UPDATE_ALL, UPDATE_LIMIT)
     }
 
-    /// `WorldGenRegion.ensureCanWrite(BlockPos)` — the writability gate every
-    /// write checks first.
-    ///
-    /// Inside the write zone the gate is open; Java's upgrade branch
-    /// (`center.isUpgrading()` → the generation height-accessor check) never
-    /// runs here because `BelowZeroRetrogen` is always null in the port, so
-    /// `isUpgrading()` is always false (RivetTodo #185).
-    pub fn ensure_can_write(&self, pos: &BlockPos) -> bool {
-        if !self.is_within_write_zone(pos) {
-            let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
-            let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
-            // Java logs + IDE-pauses once (`hasSetFarWarned`) and thread-dumps
-            // when debugging; the value layer logs through the shared
-            // `logAndPauseIfInIde` seam and defers the one-time flag + dump.
-            log_and_pause_if_in_ide(&format!(
-                "Detected setBlock in a far chunk [{}, {}], pos: {:?}, status: {}",
-                chunk_x,
-                chunk_z,
-                pos,
-                self.generating_step.target_status().serialization_name()
-            ));
-            return false;
-        }
-        true
-    }
-
-    /// `WorldGenRegion.isWithinWriteZone(BlockPos)`.
-    pub fn is_within_write_zone(&self, pos: &BlockPos) -> bool {
-        self.is_within_write_zone_coords(
-            SectionPos::block_to_section_coord(pos.get_x()),
-            SectionPos::block_to_section_coord(pos.get_z()),
-        )
-    }
-
-    /// The private `isWithinWriteZone(int, int)` half.
-    fn is_within_write_zone_coords(&self, chunk_x: i32, chunk_z: i32) -> bool {
-        mth::abs_i32(self.center_chunk_x.wrapping_sub(chunk_x)) <= self.write_radius
-            && mth::abs_i32(self.center_chunk_z.wrapping_sub(chunk_z)) <= self.write_radius
-    }
-
-    /// `warnIfReadOutsideWriteZone(int, int)` — the unsafe-read warning for a
-    /// non-center chunk outside the write zone (Java still performs the read).
-    fn warn_if_read_outside_write_zone(&self, chunk_x: i32, chunk_z: i32) {
-        if (self.center_chunk_x != chunk_x || self.center_chunk_z != chunk_z)
-            && !self.is_within_write_zone_coords(chunk_x, chunk_z)
-        {
-            let read_distance = mth::abs_max(
-                mth::abs_i32(self.center_chunk_x.wrapping_sub(chunk_x)),
-                mth::abs_i32(self.center_chunk_z.wrapping_sub(chunk_z)),
-            );
-            // Java appends the `currentlyGenerating` narration when set
-            // (RivetTodo #232); the value layer omits it.
-            log_and_pause_if_in_ide(&format!(
-                "Detected unsafe terrain read during worldgen: reading from chunk [{}, {}] while generating chunk [{}, {}] (distance: {}, write radius: {}), step: {}",
-                chunk_x,
-                chunk_z,
-                self.center_chunk_x,
-                self.center_chunk_z,
-                read_distance,
-                self.write_radius,
-                self.generating_step.target_status().serialization_name()
-            ));
-        }
-    }
-
-    /// `WorldGenRegion.getSkyDarken()` — 0 during worldgen.
-    pub fn get_sky_darken(&self) -> i32 {
-        0
-    }
-
-    /// `WorldGenRegion.isClientSide()` — false.
-    pub fn is_client_side(&self) -> bool {
-        false
-    }
-
-    /// `WorldGenRegion.getSeaLevel()` — `level.getSeaLevel()`.
-    pub fn get_sea_level(&self) -> i32 {
-        self.sea_level
-    }
-
     /// `BlockGetter.getBlockState(BlockPos)` — the gated chunk block read.
     ///
     /// Inherent here (not only on the [`WorldGenLevel`] impl) because dense
     /// methods such as [`is_state_at_position`](Self::is_state_at_position)
     /// read it off a `&WorldGenRegion<'_, …>` whose region lifetime is not
-    /// `'static`; the trait impl (pinned to `WorldGenRegion<'static, …>`)
-    /// delegates back to this method.
+    /// pinned; the trait impl (over every region lifetime, the trait is
+    /// `Send`-bound but NOT `'static`) delegates back to this method.
     pub fn get_block_state(&self, pos: &BlockPos) -> BlockState {
         let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
         let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
@@ -679,12 +686,10 @@ impl LevelHeightAccessor for WorldGenRegion<'_, StateId, ServerBiomeId, Structur
 }
 
 /// The `WorldGenLevel` facade over the dense specialization. The trait is
-/// `'static`-bound (`LevelHeightAccessor + Send + 'static`), so this impl pins
-/// the region to `'static` holders — the server value layer's owning-holder
-/// region. The worldgen executor's borrow-carrying region never implements the
-/// trait (it only needs the generic chunk-view methods), so its scoped borrow
-/// is not forced to outlive the worldgen objects.
-impl WorldGenLevel for WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> {
+/// `Send`-bound but deliberately NOT `'static` (see the trait doc), so this
+/// impl covers every region lifetime — the server value layer's owning-holder
+/// `'static` region and the executor's borrow-carrying scoped region alike.
+impl WorldGenLevel for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
     /// `WorldGenLevel.getSeed()`.
     fn get_seed(&self) -> i64 {
         self.seed
@@ -692,7 +697,7 @@ impl WorldGenLevel for WorldGenRegion<'static, StateId, ServerBiomeId, Structure
 
     /// `WorldGenLevel.ensureCanWrite(BlockPos)` — the write-radius gate.
     fn ensure_can_write(&self, pos: &BlockPos) -> bool {
-        WorldGenRegion::ensure_can_write(self, pos)
+        self.ensure_can_write(pos)
     }
 
     /// `LevelWriter.setBlock(BlockPos, BlockState, int)` — the 3-arg trait
@@ -703,7 +708,7 @@ impl WorldGenLevel for WorldGenRegion<'static, StateId, ServerBiomeId, Structure
     /// region's [`set_block`](Self::set_block) (write-radius-gated chunk
     /// section write, with the `UPDATE_*`-gated side-effects deferred).
     fn set_block(&mut self, pos: &BlockPos, state: BlockState, flags: u32) -> bool {
-        WorldGenRegion::set_block(self, pos, state, flags as i32, UPDATE_LIMIT)
+        self.set_block(pos, state, flags as i32, UPDATE_LIMIT)
     }
 
     /// `LevelAccessor.destroyBlock(BlockPos, boolean)` — Java's chain
@@ -714,13 +719,7 @@ impl WorldGenLevel for WorldGenRegion<'static, StateId, ServerBiomeId, Structure
     /// unread — the entity/`breakBlock` side-effects defer.
     fn destroy_block(&mut self, pos: &BlockPos, _drop: bool) -> bool {
         !self.get_block_state(pos).is_air()
-            && WorldGenRegion::set_block(
-                self,
-                pos,
-                BlockState::new(StateId(0)),
-                UPDATE_ALL,
-                UPDATE_LIMIT,
-            )
+            && self.set_block(pos, BlockState::new(StateId(0)), UPDATE_ALL, UPDATE_LIMIT)
     }
 
     /// `LevelReader.isEmptyBlock(BlockPos)` — `getBlockState(pos).isAir()`.
@@ -748,7 +747,7 @@ impl WorldGenLevel for WorldGenRegion<'static, StateId, ServerBiomeId, Structure
 
     /// `BlockGetter.getBlockState(BlockPos)` — the gated chunk block read.
     fn get_block_state(&self, pos: &BlockPos) -> BlockState {
-        WorldGenRegion::get_block_state(self, pos)
+        self.get_block_state(pos)
     }
 
     /// `LevelReader.getBiome(BlockPos)` — `getBiomeManager().getBiome(pos)`
@@ -787,6 +786,170 @@ impl WorldGenLevel for WorldGenRegion<'static, StateId, ServerBiomeId, Structure
             Some(heightmap) => heightmap.get_height_at(x & 15, z & 15, chunk.get_min_y()) + 1,
             None => chunk.get_min_y() + 1,
         }
+    }
+}
+
+/// The FEATURES-pass specialization — the block-state methods and the
+/// [`WorldGenLevel`] facade over the executor's `BlockState`/`WorldgenBiomeId`
+/// chunk value types.
+///
+/// The worldgen executor composes its 3x3 `ProtoChunk`s over `BlockState`
+/// sections (the `section_reconstruction` value type) rather than the server's
+/// dense `StateId`, so this specialization carries the same block-state surface
+/// the dense one does: the gated read/write spine over
+/// `ChunkAccess<BlockState, WorldgenBiomeId, StructureKey>` sections, and the
+/// [`WorldGenLevel`] facade the feature placement stack runs against. The
+/// type-agnostic gate (the generic [`ensure_can_write`]/
+/// [`is_within_write_zone`]/`warn_if_read_outside_write_zone`) and the scalar
+/// reads live on the generic impl and are shared.
+impl WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
+    /// `WorldGenRegion.setBlock(BlockPos, BlockState, int updateFlags, int
+    /// updateLimit)` — the write-radius-gated block write, mirroring the dense
+    /// [`set_block`](WorldGenRegion::set_block).
+    ///
+    /// The `heightmapsAfter()` update reads the placed state's `StateFlags`
+    /// through `resolve_state_flags` (the `BlockState`-typed resolver, the
+    /// section_reconstruction analogue of the server's `state_flags`).
+    pub fn set_block(
+        &mut self,
+        pos: &BlockPos,
+        block_state: BlockState,
+        _update_flags: i32,
+        _update_limit: i32,
+    ) -> bool {
+        if !self.ensure_can_write(pos) {
+            return false;
+        }
+        let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
+        let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
+        // The persisted status threaded from the holder seam — see the dense
+        // `set_block`.
+        let persisted_status = self.cache.get(chunk_x, chunk_z).get_persisted_status();
+        let chunk = self.get_chunk_mut(chunk_x, chunk_z);
+        let _old_state = write_block_blockstate(chunk, pos, block_state, persisted_status);
+        true
+    }
+
+    /// `WorldGenRegion.removeBlock(BlockPos, boolean)` — the air-write form.
+    pub fn remove_block(&mut self, pos: &BlockPos, _moved_by_piston: bool) -> bool {
+        self.set_block(pos, BlockState::new(StateId(0)), UPDATE_ALL, UPDATE_LIMIT)
+    }
+
+    /// `BlockGetter.getBlockState(BlockPos)` — the gated chunk block read,
+    /// inherent here for the trait impl to delegate (see the dense
+    /// [`get_block_state`](WorldGenRegion::get_block_state)).
+    pub fn get_block_state(&self, pos: &BlockPos) -> BlockState {
+        let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
+        let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
+        self.warn_if_read_outside_write_zone(chunk_x, chunk_z);
+        let chunk = self.get_chunk(chunk_x, chunk_z);
+        chunk_block_state_blockstate(chunk, pos)
+    }
+}
+
+impl LevelHeightAccessor for WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
+    fn get_height(&self) -> i32 {
+        self.height
+    }
+
+    fn get_min_y(&self) -> i32 {
+        self.min_y
+    }
+}
+
+/// The `WorldGenLevel` facade over the FEATURES-pass specialization — the
+/// block-state surface the feature placement stack runs against during
+/// decoration. The trait is `Send`-bound but NOT `'static` (see the trait
+/// doc), so this impl covers every region lifetime, and the executor's scoped
+/// borrow-carrying region implements it directly.
+impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
+    /// `WorldGenLevel.getSeed()`.
+    fn get_seed(&self) -> i64 {
+        self.seed
+    }
+
+    /// `WorldGenLevel.ensureCanWrite(BlockPos)` — the write-radius gate.
+    fn ensure_can_write(&self, pos: &BlockPos) -> bool {
+        self.ensure_can_write(pos)
+    }
+
+    /// `LevelWriter.setBlock(BlockPos, BlockState, int)` — the 3-arg trait
+    /// form, delegating to the 4-arg write with `LevelWriter`'s default
+    /// `updateLimit = Block.UPDATE_LIMIT`.
+    fn set_block(&mut self, pos: &BlockPos, state: BlockState, flags: u32) -> bool {
+        self.set_block(pos, state, flags as i32, UPDATE_LIMIT)
+    }
+
+    /// `LevelAccessor.destroyBlock(BlockPos, boolean)` — the
+    /// `!getBlockState(pos).isAir() && setBlock(pos, AIR, UPDATE_ALL, ...)`
+    /// chain (WorldGenRegion.java:252); the `drop` side-effects defer.
+    fn destroy_block(&mut self, pos: &BlockPos, _drop: bool) -> bool {
+        !self.get_block_state(pos).is_air()
+            && self.set_block(pos, BlockState::new(StateId(0)), UPDATE_ALL, UPDATE_LIMIT)
+    }
+
+    /// `LevelReader.isEmptyBlock(BlockPos)` — `getBlockState(pos).isAir()`.
+    fn is_empty_block(&self, pos: &BlockPos) -> bool {
+        self.get_block_state(pos).is_air()
+    }
+
+    /// `WorldGenRegion.registryAccess()` — `level.registryAccess()`, the
+    /// injected shared access (a cheap `Arc` clone).
+    fn registry_access(&self) -> RegistryAccess {
+        self.registry_access.clone()
+    }
+
+    /// `ChunkAccess.markPosForPostProcessing(BlockPos)` — the chunk-access hop
+    /// (`get_chunk` then `mark_pos_for_post_processing`).
+    fn mark_pos_for_post_processing(&mut self, pos: &BlockPos) {
+        let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
+        let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
+        self.get_chunk(chunk_x, chunk_z)
+            .mark_pos_for_post_processing(pos);
+    }
+
+    /// `BlockGetter.getBlockState(BlockPos)` — the gated chunk block read.
+    fn get_block_state(&self, pos: &BlockPos) -> BlockState {
+        self.get_block_state(pos)
+    }
+
+    /// `LevelReader.getBiome(BlockPos)` — `getBiomeManager().getBiome(pos)`.
+    fn get_biome(&self, pos: &BlockPos) -> Holder<BiomeId> {
+        self.get_biome_manager().get_biome(pos)
+    }
+
+    /// `LevelReader.getHeight(Heightmap.Types, int, int)` — the gated heightmap
+    /// read (`getChunk(...).getHeight(type, x & 15, z & 15) + 1`), mirroring
+    /// the dense impl.
+    fn get_height_at(&self, ty: Types, x: i32, z: i32) -> i32 {
+        let chunk_x = SectionPos::block_to_section_coord(x);
+        let chunk_z = SectionPos::block_to_section_coord(z);
+        self.warn_if_read_outside_write_zone(chunk_x, chunk_z);
+        let chunk = self.get_chunk(chunk_x, chunk_z);
+        match chunk.heightmaps()[ty as usize].as_ref() {
+            Some(heightmap) => heightmap.get_height_at(x & 15, z & 15, chunk.get_min_y()) + 1,
+            None => chunk.get_min_y() + 1,
+        }
+    }
+
+    /// `WorldGenRegion.getSeaLevel()` — `level.getSeaLevel()`.
+    fn get_sea_level(&self) -> i32 {
+        self.sea_level
+    }
+
+    /// `LevelAccessor.scheduleTick(BlockPos, Block, int)` — a documented
+    /// no-op. Java's `WorldGenRegion` inherits the `WorldGenLevel` default,
+    /// whose body is empty (the real `scheduleTick` lives on the loaded
+    /// `ServerLevel`'s tick containers, not the worldgen region); `LakeFeature`
+    /// calls it to schedule the placed cave-air, and the scheduled tick is
+    /// invisible to the chunk value the executor observes, so the no-op is the
+    /// faithful value-layer surface.
+    fn schedule_block_tick(
+        &mut self,
+        _pos: &BlockPos,
+        _block: rivet_world::block::Block,
+        _delay: i32,
+    ) {
     }
 }
 
@@ -912,6 +1075,96 @@ fn fluid_is_randomly_ticking(_state: &StateId) -> bool {
 /// `CollisionUtil.isSpecialCollidingBlock(state)` — false (no special-colliding
 /// flag in the generated table; exact for the superflat content).
 fn state_is_special_colliding(_state: &StateId) -> bool {
+    false
+}
+
+/// The region's block-state read over the FEATURES-pass `BlockState` value
+/// type — air for an out-of-build-height or all-air position, else the section
+/// storage read (which returns `BlockState` directly since `T = BlockState`).
+fn chunk_block_state_blockstate(
+    chunk: &ChunkAccess<BlockState, WorldgenBiomeId, StructureKey>,
+    pos: &BlockPos,
+) -> BlockState {
+    let y = pos.get_y();
+    if chunk.is_outside_build_height(y) {
+        return BlockState::new(StateId(0));
+    }
+    let section_index = chunk.get_section_index(y);
+    let section = chunk.get_section(section_index as usize);
+    if section.non_empty_block_count() == 0 {
+        return BlockState::new(StateId(0));
+    }
+    section.get_block_state(pos.get_x() & 15, y & 15, pos.get_z() & 15)
+}
+
+/// The region's block-state write over the FEATURES-pass `BlockState` value
+/// type — the section-level `setBlockState` with the `BlockState` behavior
+/// predicates, then the `heightmapsAfter()` update. Mirrors the dense
+/// [`write_block`] (Java `ProtoChunk.setBlockState` / `LevelChunk.setBlockState`),
+/// with the placed state's `StateFlags` resolved through `resolve_state_flags`
+/// (the `BlockState`-typed resolver).
+fn write_block_blockstate(
+    chunk: &mut ChunkAccess<BlockState, WorldgenBiomeId, StructureKey>,
+    pos: &BlockPos,
+    block_state: BlockState,
+    persisted_status: Option<ChunkStatus>,
+) -> BlockState {
+    let y = pos.get_y();
+    if chunk.is_outside_build_height(y) {
+        return BlockState::new(StateId(0));
+    }
+    let section_index = chunk.get_section_index(y);
+    let section = chunk.get_section_mut(section_index as usize);
+    let old_state = section.set_block_state(
+        pos.get_x() & 15,
+        y & 15,
+        pos.get_z() & 15,
+        block_state,
+        &state_is_air_blockstate,
+        &state_is_randomly_ticking_blockstate,
+        &fluid_is_empty_blockstate,
+        &fluid_is_randomly_ticking_blockstate,
+        &state_is_special_colliding_blockstate,
+    );
+    // Java `ProtoChunk.setBlockState`: `getPersistedStatus().heightmapsAfter()`
+    // updated unconditionally for every in-build-height write.
+    if let Some(status) = persisted_status {
+        chunk.update_heightmaps_after(
+            status.heightmaps_after(),
+            pos.get_x() & 15,
+            y,
+            pos.get_z() & 15,
+            resolve_state_flags(&block_state),
+        );
+    }
+    old_state
+}
+
+/// `BlockBehaviour.isAir(state)` — over the `BlockState` value type.
+fn state_is_air_blockstate(state: &BlockState) -> bool {
+    state.is_air()
+}
+
+/// `BlockBehaviour.isRandomlyTicking(state)` — over the `BlockState` value type.
+fn state_is_randomly_ticking_blockstate(state: &BlockState) -> bool {
+    state.random_ticking()
+}
+
+/// `BlockBehaviour.getFluidState(state).isEmpty()` — over the `BlockState`
+/// value type.
+fn fluid_is_empty_blockstate(state: &BlockState) -> bool {
+    state.fluid_empty()
+}
+
+/// `getFluidState().isRandomlyTicking()` — false (no fluid-random-tick flag in
+/// the generated table; exact for the no-fluid value layer).
+fn fluid_is_randomly_ticking_blockstate(_state: &BlockState) -> bool {
+    false
+}
+
+/// `CollisionUtil.isSpecialCollidingBlock(state)` — false (no special-colliding
+/// flag in the generated table; exact for the superflat content).
+fn state_is_special_colliding_blockstate(_state: &BlockState) -> bool {
     false
 }
 

@@ -497,6 +497,19 @@ impl FeatureId {
     }
 }
 
+/// Resolve the registered feature identity used by a configured-feature JSON
+/// dispatch type. The feature registry is the source of truth for the id; this
+/// small value-layer view currently exposes the `minecraft:lake` entry needed
+/// by the seed-42 FEATURES slice. Unknown types are unavailable, never mapped
+/// to a fabricated fallback.
+pub fn feature_id_from_registry_name(name: &str) -> Option<FeatureId> {
+    match name {
+        // `Feature.LAKE` is the registered `minecraft:lake` singleton.
+        "minecraft:lake" => Some(FeatureId::new(27)),
+        _ => None,
+    }
+}
+
 /// The `#181` hub — dispatch a `FeatureId` + erased config to a placement.
 ///
 /// `Feature.java`'s registration table (the `register(...)` calls that bind
