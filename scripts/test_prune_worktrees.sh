@@ -540,6 +540,42 @@ echo "$out" | grep -q "note: 1 branch ref(s) left in place" || fail "stranded: m
 git -C "$E2E4/main" branch --list feature/stranded | grep -q . || fail "stranded: branch was force-deleted"
 pass "e2e refused branch -d is reported and the ref survives (never force-deleted)"
 
+# --- canonical shared target is permanently protected ---------------------------
+PROTECTED="$SANDBOX/protected-shared"
+mk_cargo_target "$PROTECTED"
+SHARED_TARGET=$(canonical_dir "$PROTECTED")
+DRY=1
+out=$(prune_cache "$PROTECTED" 2>&1) || true
+echo "$out" | grep -q "REFUSE .*shared cargo target" \
+  || fail "canonical shared target was not refused: $out"
+[ -d "$PROTECTED" ] || fail "canonical shared target was removed"
+SHARED_TARGET=""
+pass "canonical shared target is refused by the deletion funnel"
+
+# --- e2e: preserved tools/*/work blocks clean merged removal --------------------
+E2EP="$SANDBOX/e2e-preserved"
+mkdir -p "$E2EP/main"
+git init -q "$E2EP/main"
+git -C "$E2EP/main" config user.email test@example.com
+git -C "$E2EP/main" config user.name "test"
+git -C "$E2EP/main" config commit.gpgsign false
+printf 'tools/*/work/\n' > "$E2EP/main/.gitignore"
+printf 'x\n' > "$E2EP/main/a.txt"
+git -C "$E2EP/main" add .
+git -C "$E2EP/main" commit -qm c1
+git -C "$E2EP/main" update-ref refs/remotes/origin/main HEAD
+git -C "$E2EP/main" worktree add -q -b feature/preserved "$E2EP/wt" HEAD
+mkdir -p "$E2EP/wt/tools/rivet-oracle/work"
+printf 'capture\n' > "$E2EP/wt/tools/rivet-oracle/work/manifest.json"
+cd "$E2EP/main"
+out=$(bash "$SCRIPT_DIR/prune-worktrees.sh" --dry-run --no-tmp 2>&1)
+echo "$out" | grep -q "KEEP .*feature/preserved.*preserved tools/\*/work" \
+  || fail "preserved work did not block clean merged removal: $out"
+echo "$out" | grep -q "WOULD REMOVE .*feature/preserved" \
+  && fail "preserved work was reported for removal: $out"
+[ -d "$E2EP/wt" ] || fail "preserved worktree disappeared during dry-run"
+pass "nonempty tools/*/work blocks clean merged worktree removal"
+
 # --- e2e: a locked worktree is never counted as removed ------------------------
 # `git worktree remove --force` refuses a locked worktree (only remove -f -f
 # overrides), so the sweep must report it as kept — not WOULD REMOVE/REMOVE and

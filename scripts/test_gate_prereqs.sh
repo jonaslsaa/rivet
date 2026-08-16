@@ -60,11 +60,11 @@ mkdir -p "$FAKE_FULL/tools/rivet-oracle/work/jars"
 mkdir -p "$FAKE_FULL/working/Paper/paper-server/build/libs"
 mkdir -p "$FAKE_FULL/tools/rivet-oracle/work/run/libraries"
 mkdir -p "$FAKE_FULL/tools/rivet-oracle/work/run/versions/26.2"
-mkdir -p "$FAKE_FULL/tools/rivet-client/target/debug"
+mkdir -p "$FAKE_FULL/target-agent-shared/debug"
 touch "$FAKE_FULL/tools/rivet-oracle/work/jars/paper-paperclip-26.2.local-SNAPSHOT.jar"
 touch "$FAKE_FULL/working/Paper/paper-server/build/libs/paper-server-26.2.local-SNAPSHOT.jar"
 touch "$FAKE_FULL/tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar"
-touch "$FAKE_FULL/tools/rivet-client/target/debug/rivet-client"
+touch "$FAKE_FULL/target-agent-shared/debug/rivet-client"
 
 # Neutralise host JDK discovery via absolute paths (SDKMAN / JAVA_HOME) so the
 # test controls the Java 25 JDK check entirely through the shimmed PATH.
@@ -76,8 +76,9 @@ unset RIVET_ORACLE_JAR RIVET_PAPER_JAR RIVET_PAPER_LIBRARIES RIVET_PAPER_RUNTIME
 # PATH, restoring the real PATH immediately after. Returns the oracle's exit
 # code. $1 = repo dir.
 run_check() {
-  local repo="$1" saved_path="$PATH" rc=0
+  local repo="$1" saved_path="$PATH" saved_target="${CARGO_TARGET_DIR-}" rc=0
   PATH="$SHIM"
+  CARGO_TARGET_DIR="$repo/target-agent-shared"
   REPO_DIR="$repo"
   # set +e: REQUIRE_ORACLE=1 exits 1; we must not abort on that.
   set +e
@@ -85,6 +86,11 @@ run_check() {
   rc=$?
   set -e
   PATH="$saved_path"
+  if [ -n "$saved_target" ]; then
+    CARGO_TARGET_DIR="$saved_target"
+  else
+    unset CARGO_TARGET_DIR
+  fi
   return "$rc"
 }
 

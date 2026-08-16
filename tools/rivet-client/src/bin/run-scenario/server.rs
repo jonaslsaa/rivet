@@ -41,6 +41,8 @@ use std::time::Duration;
 
 use rivet_harness_common::server::ChildServer;
 
+use crate::cargo_target_dir;
+
 /// Name of the paperclip bundler jar we boot through.
 pub const PAPERCLIP_JAR: &str = "paper-paperclip-26.2.local-SNAPSHOT.jar";
 
@@ -306,14 +308,9 @@ fn classify_commit_lookup_error(e: io::Error) -> Error {
 }
 
 /// Locate the `rivet-server` binary: `RIVET_SERVER_BIN` env wins, then the
-/// workspace this harness was built in (`<workspace>/target/debug/rivet-server`).
-///
-/// The fallback resolves against the harness's own manifest dir, so a harness
-/// built inside a worktree selects that worktree's server path. A narrow
-/// freshness guard rejects the fallback when it predates the server entry
-/// point; normal runs rebuild before executing, and the PLAY verdict provides
-/// the load-bearing stale-server check. `RIVET_SERVER_BIN` remains an explicit,
-/// non-commit-bound override for a server in another tree.
+/// sibling binary in Cargo's resolved target directory, then `CARGO_TARGET_DIR`.
+/// The wrapper builds both workspaces into one target, so the sibling path is
+/// the same for a nested tools workspace and the root workspace.
 pub fn ensure_rivet_binary(crate_root: &Path) -> Result<PathBuf, Error> {
     if let Ok(p) = std::env::var("RIVET_SERVER_BIN") {
         let p = PathBuf::from(p);
@@ -325,7 +322,10 @@ pub fn ensure_rivet_binary(crate_root: &Path) -> Result<PathBuf, Error> {
             p.display()
         )));
     }
-    let workspace_bin = crate_root.join("../../target/debug/rivet-server");
+    let workspace_bin = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|parent| parent.join("rivet-server")))
+        .unwrap_or_else(|| cargo_target_dir().join("debug/rivet-server"));
     if !workspace_bin.is_file() {
         return Err(Error::Unverified(format!(
             "rivet-server binary not found at {}. Build it (cargo build -p rivet-server from \

@@ -10,14 +10,21 @@
 #     `git branch -d` is reported with the ref left in place
 #   - anything else idle for more than IDLE_HOURS        -> delete its build caches
 #   - dirty or unmerged checkouts are never removed
+#   - a clean merged checkout with preserved tools/*/work is never removed
 #
 # tools/*/work is NOT a build cache and is never touched: it holds downloaded
 # jars and scenario capture output, which cost a network fetch or a full
 # client/server run to reproduce.
 #
-# Agents also build into throwaway CARGO_TARGET_DIRs under /tmp (review checkouts,
-# probe dirs, per-ticket target dirs), which no worktree sweep can see. Those
-# accumulated to 39GB unnoticed in 2026-08, so the tmp sweep runs by default.
+# Claude sessions share the canonical target-agent-shared cache. The tmp sweep
+# reclaims legacy or explicitly overridden CARGO_TARGET_DIRs under /tmp, which
+# accumulated to 39GB unnoticed in 2026-08. Cargo's CACHEDIR.TAG plus its
+# fingerprint marker identifies build scratch; generic tagged directories and
+# source checkouts remain untouched.
+#
+# Under disk pressure the idle threshold drops to PRESSURE_IDLE_MIN minutes.
+# Caches named by a live cargo/rustc command are spared even when old.
+# Rebuilds are cheap, so stale cache removal is preferable to a full disk.
 #
 # Cargo identifies its own build scratch. Every CARGO_TARGET_DIR carries a
 # CACHEDIR.TAG that cargo itself wrote (a distinctive "created by cargo" line,
@@ -40,12 +47,18 @@
 #     be removed wholesale.
 # Ambiguous tagged directories are left alone.
 #
-# Usage: scripts/prune-worktrees.sh [--dry-run] [--idle-hours N] [--no-tmp]  (default 24)
+# Usage: scripts/prune-worktrees.sh [--dry-run] [--idle-hours N] [--no-tmp]
+#                                   [--pressure-gb N] [--pressure-idle-min N]
+# (default idle threshold: 24 hours)
 set -uo pipefail
 
 DRY=0
 IDLE_HOURS=24
 SWEEP_TMP=1
+PRESSURE_GB=40
+PRESSURE_IDLE_MIN=20
+IDLE_MIN=1440
+SHARED_TARGET=""
 freed_kb=0
 removed=0
 pruned=0
@@ -142,27 +155,84 @@ canonical_dir() { # $1 = path; canonical absolute path if it is a real dir, else
   cd "$r" 2>/dev/null && pwd -P
 }
 
+canonical_path() {
+  local path=$1 parent base
+  if [ -d "$path" ]; then
+    canonical_dir "$path"
+    return
+  fi
+  parent=$(cd "$(dirname "$path")" 2>/dev/null && pwd -P) || return 0
+  base=$(basename "$path")
+  printf '%s/%s\n' "$parent" "$base"
+}
+
+has_preserved_work() {
+  local d
+  for d in "$1"/tools/*/work; do
+    [ -d "$d" ] || continue
+    [ -n "$(find "$d" -mindepth 1 -print -quit 2>/dev/null)" ] && return 0
+  done
+  return 1
+}
+
+prune_cache() {
+  local cache=$1 canonical
+  canonical=$(canonical_dir "$cache")
+  if [ -n "$SHARED_TARGET" ] && [ "$canonical" = "$SHARED_TARGET" ]; then
+    say "REFUSE $cache  [shared cargo target]"
+    return 1
+  fi
+  if ! is_cargo_scratch "$cache"; then
+    say "REFUSE $cache  [not a cargo cache]"
+    return 1
+  fi
+  run rm -rf "$cache"
+}
+
+free_gb() {
+  local available_kb
+  available_kb=$(df -Pk "$1" 2>/dev/null | awk 'NR == 2 { print $4 }')
+  case "$available_kb" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  echo $((available_kb / 1024 / 1024))
+}
+
+is_live_build() {
+  local cache=$1 build_args
+  build_args=$(ps -axo command= 2>/dev/null | grep -E '(^|/)(cargo|rustc)([[:space:]]|$)' || true)
+  case "$build_args" in
+    *"$cache"*) return 0 ;;
+  esac
+  return 1
+}
+
 sweep_tmp() {
-  local root d caches cache kb mins=$((IDLE_HOURS * 60))
+  local root tag cache kb mins=${IDLE_MIN:-$((IDLE_HOURS * 60))}
   for root in "$@"; do
     [ -d "$root" ] || continue
-    while IFS= read -r d; do
-      [ -O "$d" ] || continue
-      caches=$(tmp_cache_dirs "$d")
-      [ -n "$caches" ] || continue
-      while read -r cache; do
-        [ -n "$cache" ] || continue
-        if touched_within "$cache" "$mins"; then
-          say "KEEP   $cache  [tmp scratch: active within ${IDLE_HOURS}h]"
-          continue
-        fi
-        kb=$(dir_kb "$cache")
-        say "$(act PRUNE)  $cache  [tmp scratch: idle, $((kb / 1024))MB]"
-        if run rm -rf "$cache"; then
-          freed_kb=$((freed_kb + kb)); pruned=$((pruned + 1))
-        fi
-      done <<< "$caches"
-    done < <(find "$root" -maxdepth 1 -mindepth 1 -type d -not -name '.*' 2>/dev/null)
+    while IFS= read -r tag; do
+      [ -n "$tag" ] || continue
+      cache=${tag%/CACHEDIR.TAG}
+      [ -O "$tag" ] || continue
+      if ! is_cargo_scratch "$cache"; then
+        say "KEEP   $cache  [tmp scratch: ambiguous cache marker]"
+        continue
+      fi
+      if is_live_build "$cache"; then
+        say "KEEP   $cache  [tmp scratch: live build]"
+        continue
+      fi
+      if touched_within "$cache" "$mins"; then
+        say "KEEP   $cache  [tmp scratch: active within ${mins}min]"
+        continue
+      fi
+      kb=$(dir_kb "$cache")
+      say "$(act PRUNE)  $cache  [tmp scratch: idle, $((kb / 1024))MB]"
+      if prune_cache "$cache"; then
+        freed_kb=$((freed_kb + kb)); pruned=$((pruned + 1))
+      fi
+    done < <(find "$root" -maxdepth 8 -type f -name CACHEDIR.TAG -user "$(id -un)" -print 2>/dev/null)
   done
 }
 
@@ -172,6 +242,8 @@ main() {
       --dry-run) DRY=1 ;;
       --idle-hours) shift; IDLE_HOURS=${1:?--idle-hours needs a value} ;;
       --no-tmp) SWEEP_TMP=0 ;;
+      --pressure-gb) shift; PRESSURE_GB=${1:?--pressure-gb needs a value} ;;
+      --pressure-idle-min) shift; PRESSURE_IDLE_MIN=${1:?--pressure-idle-min needs a value} ;;
       *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
     shift
@@ -191,9 +263,18 @@ main() {
     git -C "$MAIN" fetch origin main -q 2>/dev/null || true
   fi
 
+  SHARED_TARGET=$(canonical_path "$MAIN/target-agent-shared")
+  IDLE_MIN=$((IDLE_HOURS * 60))
+  free=$(free_gb "$MAIN")
+  if [ -n "$free" ] && [ "$free" -lt "$PRESSURE_GB" ]; then
+    IDLE_MIN=$PRESSURE_IDLE_MIN
+    say "PRESSURE ${free}GB free (< ${PRESSURE_GB}GB): pruning caches idle >${IDLE_MIN}min, sparing live builds"
+  fi
+
   while IFS=$'\t' read -r wt lock; do
-    [ "$wt" = "$MAIN" ] && continue
     [ -d "$wt" ] || continue
+    is_main=0
+    [ "$wt" = "$MAIN" ] && is_main=1
 
     branch=$(git -C "$wt" symbolic-ref --short -q HEAD || echo "(detached)")
     head=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || continue
@@ -213,42 +294,45 @@ main() {
     # from the porcelain "locked" field (prefix * matches `git worktree list`).
     [ -n "$lock" ] && state="${state:+$state, }locked"
 
-    if [ -z "$status_fail" ] && [ -z "$dirty" ] && [ -n "$merged" ] && [ -z "$lock" ]; then
-      kb=$(dir_kb "$wt")
-      say "$(act REMOVE) $wt  [$branch: clean, merged, $((kb / 1024))MB]"
-      # No --force: git's dirty-worktree refusal at removal time is the backstop
-      # for a file that lands between the status probe above and this remove.
-      # A plain remove succeeds for every clean+merged+unlocked worktree here.
-      if run git -C "$MAIN" worktree remove "$wt"; then
-        freed_kb=$((freed_kb + kb)); removed=$((removed + 1))
-        if [ "$branch" != "(detached)" ] && ! run git -C "$MAIN" branch -d "$branch"; then
-          say "  WARN: branch '$branch' survived worktree removal (branch -d refused; ref left in place, never force-deleted)"
-          stranded=$((stranded + 1))
+    if [ "$is_main" = 0 ] && [ -z "$status_fail" ] && [ -z "$dirty" ] \
+      && [ -n "$merged" ] && [ -z "$lock" ]; then
+      if has_preserved_work "$wt"; then
+        say "KEEP   $wt  [$branch: clean and merged, preserved tools/*/work]"
+      else
+        kb=$(dir_kb "$wt")
+        say "$(act REMOVE) $wt  [$branch: clean, merged, $((kb / 1024))MB]"
+        # No --force: git's dirty-worktree refusal at removal time is the backstop
+        # for a file that lands between the status probe above and this remove.
+        if run git -C "$MAIN" worktree remove "$wt"; then
+          freed_kb=$((freed_kb + kb)); removed=$((removed + 1))
+          if [ "$branch" != "(detached)" ] && ! run git -C "$MAIN" branch -d "$branch"; then
+            say "  WARN: branch '$branch' survived worktree removal (branch -d refused; ref left in place, never force-deleted)"
+            stranded=$((stranded + 1))
+          fi
         fi
+        continue
       fi
-      continue
     fi
 
     caches=$(cache_dirs "$wt")
     if [ -n "$caches" ]; then
-      age_h=$(( (NOW - $(newest_mtime "$wt" "$caches")) / 3600 ))
-      if [ "$age_h" -ge "$IDLE_HOURS" ]; then
-        while read -r cache; do
-          [ -n "$cache" ] || continue
-          if touched_within "$cache" "$mins"; then
-            say "KEEP   $cache  [$branch: $state, active within ${IDLE_HOURS}h]"
-            continue
-          fi
-          kb=$(dir_kb "$cache")
-          cache_age_h=$(( (NOW - $(file_mtime "$cache")) / 3600 ))
-          say "$(act PRUNE)  $cache  [$branch: $state, idle ${cache_age_h}h, $((kb / 1024))MB]"
-          if run rm -rf "$cache"; then
-            freed_kb=$((freed_kb + kb)); pruned=$((pruned + 1))
-          fi
-        done <<< "$caches"
-      else
-        say "KEEP   $wt  [$branch: active ${age_h}h ago]"
-      fi
+      while read -r cache; do
+        [ -n "$cache" ] || continue
+        if is_live_build "$cache"; then
+          say "KEEP   $cache  [$branch: live build]"
+          continue
+        fi
+        if touched_within "$cache" "$IDLE_MIN"; then
+          say "KEEP   $cache  [$branch: $state, active within ${IDLE_MIN}min]"
+          continue
+        fi
+        kb=$(dir_kb "$cache")
+        cache_age_h=$(( (NOW - $(file_mtime "$cache")) / 3600 ))
+        say "$(act PRUNE)  $cache  [$branch: $state, idle ${cache_age_h}h, $((kb / 1024))MB]"
+        if prune_cache "$cache"; then
+          freed_kb=$((freed_kb + kb)); pruned=$((pruned + 1))
+        fi
+      done <<< "$caches"
     else
       say "KEEP   $wt  [$branch: $state, no build caches]"
     fi
