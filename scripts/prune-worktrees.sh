@@ -1,280 +1,206 @@
-#!/bin/bash
-# prune-worktrees.sh — reclaim disk from accumulated git worktrees and tmp scratch.
-#
-# Rebuilds are cheap in this workspace (cold cargo check ~8s, cold test build
-# ~18s as of 2026-08), so cargo target/ dirs are disposable cache. Policy:
-#   - worktree clean AND fully merged into origin/main  -> remove worktree (+ branch);
-#     "clean" requires the status probe to succeed — a corrupt/unreadable index is
-#     never clean, and removal is a plain `git worktree remove` (no --force) so
-#     git's dirty-refusal at removal time backstops the probe; a refused
-#     `git branch -d` is reported with the ref left in place
-#   - anything else idle for more than IDLE_HOURS        -> delete its build caches
-#   - dirty or unmerged checkouts are never removed
-#
-# tools/*/work is NOT a build cache and is never touched: it holds downloaded
-# jars and scenario capture output, which cost a network fetch or a full
-# client/server run to reproduce.
-#
-# Agents also build into throwaway CARGO_TARGET_DIRs under /tmp (review checkouts,
-# probe dirs, per-ticket target dirs), which no worktree sweep can see. Those
-# accumulated to 39GB unnoticed in 2026-08, so the tmp sweep runs by default.
-#
-# Cargo identifies its own build scratch. Every CARGO_TARGET_DIR carries a
-# CACHEDIR.TAG that cargo itself wrote (a distinctive "created by cargo" line,
-# vs the generic marker any cache tool drops), a .rustc_info.json host-info
-# file, and .fingerprint dirs under each profile (debug, release, custom,
-# cross-compiled, doc). The generic CACHEDIR.TAG marker alone is not enough —
-# the old tag-only check would rm -rf both a source checkout and an unrelated
-# cache on the strength of a marker those dirs can also carry.
-#
-# Two trust tiers, because deleting a whole /tmp child is riskier than pruning
-# a nested target/ that is provably inside a known checkout:
-#   - a directory is removed WHOLESALE (a bare tmp CARGO_TARGET_DIR) only when
-#     it is unambiguous cargo scratch: cargo CACHEDIR.TAG + .rustc_info.json +
-#     .fingerprint, and no source/VCS evidence (Cargo.toml/.git).
-#   - a nested target/ dir (inside a worktree or tmp checkout) is pruned on its
-#     own when it is clearly cargo scratch: cargo CACHEDIR.TAG + .fingerprint,
-#     and no source/VCS evidence. The .rustc_info.json is not required there (a
-#     partial cleanup can drop it), but the source/VCS refusal applies to every
-#     tier — a nested target/ path can itself be a checkout root, and must never
-#     be removed wholesale.
-# Ambiguous tagged directories are left alone.
-#
-# Usage: scripts/prune-worktrees.sh [--dry-run] [--idle-hours N] [--no-tmp]  (default 24)
+#!/usr/bin/env bash
 set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+# shellcheck source=scripts/cargo-target-dir.sh
+source "$SCRIPT_DIR/cargo-target-dir.sh"
 
 DRY=0
 IDLE_HOURS=24
-SWEEP_TMP=1
-freed_kb=0
-removed=0
-pruned=0
-stranded=0
+REMOVED=0
+PRUNED=0
+FREED_KB=0
+STRANDED=0
 
-say() { echo "$@"; }
+say() { printf '%s\n' "$*"; }
 run() { if [ "$DRY" = 1 ]; then say "  DRY: $*"; else "$@"; fi; }
 
-act() { # mutation verb for this mode; a dry run must not claim it happened
-  if [ "$DRY" = 1 ]; then printf 'WOULD %s' "$1"; else printf '%s' "$1"; fi
+valid_hours() {
+  case "${1:-}" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  local value=$1
+  while [ "${value#0}" != "$value" ]; do value=${value#0}; done
+  value=${value:-0}
+  [ "$value" -le 8760 ] 2>/dev/null
 }
 
-dir_kb() { local kb; kb=$(du -sk "$1" 2>/dev/null | cut -f1); echo "${kb:-0}"; }
-
-# Classification is find/grep based (quoted paths, no shell globs), so sourcing
-# this file under zsh — or any shell with failglob semantics — cannot abort on
-# an unmatched pattern.
-
-has_cargo_tag() { # $1 = dir; carries the CACHEDIR.TAG that cargo itself wrote
-  [ -f "$1/CACHEDIR.TAG" ] || return 1
-  grep -q "cache directory tag created by cargo" "$1/CACHEDIR.TAG"
+canonical_dir() {
+  [ -d "$1" ] || return 1
+  (cd "$1" 2>/dev/null && pwd -P)
 }
 
-has_cargo_fingerprint() { # $1 = dir; cargo writes .fingerprint dirs under each profile
-  [ -n "$(find "$1" -maxdepth 4 -type d -name .fingerprint -print -quit 2>/dev/null)" ]
+owned_marker() {
+  local marker=$1 target=$2 expected_repo=$3
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  python3 - "$marker" "$target" "$expected_repo" <<'PY'
+import json, pathlib, sys
+marker = pathlib.Path(sys.argv[1])
+target = pathlib.Path(sys.argv[2])
+expected_repo = sys.argv[3]
+try:
+    data = json.loads(marker.read_text())
+except (OSError, ValueError):
+    raise SystemExit(1)
+if data.get("version") != 1 or data.get("repo_id") != expected_repo:
+    raise SystemExit(1)
+if data.get("target") != str(target):
+    raise SystemExit(1)
+if target.name != "iterative" or target.is_symlink():
+    raise SystemExit(1)
+PY
 }
 
-is_cargo_scratch() { # $1 = dir; clearly cargo build scratch (never a source/VCS root)
-  has_cargo_tag "$1" || return 1
-  has_cargo_fingerprint "$1" || return 1
-  [ -e "$1/Cargo.toml" ] && return 1
-  [ -e "$1/.git" ] && return 1
-  return 0
+lock_free() {
+  local group=$1 checkout=$2
+  python3 - "$group" "$checkout" <<'PY'
+import fcntl, os, sys
+fds = []
+try:
+    for path in sys.argv[1:]:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        fds.append(fd)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except (OSError, ValueError):
+    raise SystemExit(1)
+finally:
+    for fd in fds:
+        try: os.close(fd)
+        except OSError: pass
+PY
 }
 
-is_cargo_target() { # $1 = dir; an unambiguous bare CARGO_TARGET_DIR (safe to rm -rf wholesale)
-  is_cargo_scratch "$1" || return 1
-  [ -f "$1/.rustc_info.json" ] || return 1
-  return 0
+process_env_live() {
+  local target=$1 line pid
+  if [ -d /proc ]; then
+    for env_file in /proc/[0-9]*/environ; do
+      [ -r "$env_file" ] || continue
+      pid=${env_file#/proc/}; pid=${pid%/environ}
+      [ "$pid" = "$$" ] && continue
+      if tr '\0' '\n' < "$env_file" 2>/dev/null | grep -Fxq "CARGO_TARGET_DIR=$target"; then return 0; fi
+      if tr '\0' '\n' < "$env_file" 2>/dev/null | grep -Fxq "RIVET_CARGO_TARGET_DIR=$target"; then return 0; fi
+    done
+  fi
+  while IFS= read -r line; do
+    pid=${line%% *}
+    [ -n "$pid" ] && [ "$pid" != "$$" ] || continue
+    case "$line" in
+      *"CARGO_TARGET_DIR=$target"*|*"RIVET_CARGO_TARGET_DIR=$target"*) return 0 ;;
+    esac
+  done < <(ps eww -ax -o pid=,command= 2>/dev/null || true)
+  return 1
 }
 
-nested_cargo_targets() { # nested target/ dirs inside a checkout; pruned on their own
-  local d
-  [ -d "$1/target" ] && is_cargo_scratch "$1/target" && echo "$1/target"
-  while IFS= read -r d; do
-    [ -d "$d" ] && is_cargo_scratch "$d" && echo "$d"
-  done < <(find "$1/tools" -maxdepth 2 -type d -name target 2>/dev/null)
-  return 0
+deep_active() {
+  local target=$1 minutes=$2
+  [ "$minutes" -lt 1 ] && minutes=1
+  find -P "$target" -type f ! -name .rivet-cargo-target -mmin "-$minutes" -print -quit 2>/dev/null | grep -q .
 }
 
-cache_dirs() { # worktree build caches: nested target/ dirs, pruned on their own
-  nested_cargo_targets "$1"
+dir_kb() { du -sk "$1" 2>/dev/null | { IFS=$'\t ' read -r kb _; printf '%s\n' "${kb:-0}"; }; }
+
+prune_namespace() {
+  local root=$1 repo_id=$2 group_lock=$3 checkout_lock=$4 minutes=$5
+  [ -d "$root" ] || return 0
+  while IFS= read -r marker; do
+    [ -n "$marker" ] || continue
+    local target kb
+    target=$(dirname "$marker")
+    owned_marker "$marker" "$target" "$repo_id" || { say "KEEP   $target [unrecognized marker]"; continue; }
+    [ "$(canonical_dir "$target" 2>/dev/null || true)" = "$target" ] || { say "KEEP   $target [symlinked namespace]"; continue; }
+    if ! lock_free "$group_lock" "$checkout_lock"; then
+      say "KEEP   $target [lock state uncertain or active]"
+      continue
+    fi
+    if process_env_live "$target"; then
+      say "KEEP   $target [managed process is live]"
+      continue
+    fi
+    if deep_active "$target" "$minutes"; then
+      say "KEEP   $target [activity within ${IDLE_HOURS}h]"
+      continue
+    fi
+    kb=$(dir_kb "$target")
+    say "$(if [ "$DRY" = 1 ]; then printf WOULD; else printf PRUNE; fi)  $target [$((kb / 1024))MB]"
+    if run rm -rf -- "$target"; then
+      PRUNED=$((PRUNED + 1))
+      FREED_KB=$((FREED_KB + kb))
+    fi
+  done < <(find -P "$root" -type f -name .rivet-cargo-target -print 2>/dev/null)
 }
 
-newest_mtime() { # $1 = path to stat; $2 = cache dirs (one per line), or empty
-  local newest m d
-  newest=$(stat -f %m "$1" 2>/dev/null || echo 0)
-  while read -r d; do
-    [ -n "$d" ] || continue
-    m=$(stat -f %m "$d" 2>/dev/null || echo 0)
-    [ "$m" -gt "$newest" ] && newest=$m
-  done <<< "${2:-}"
-  echo "$newest"
-}
-
-tmp_cache_dirs() { # a bare cargo target dir, or the cargo target dirs in a checkout
-  if is_cargo_target "$1"; then echo "$1"; return 0; fi
-  nested_cargo_targets "$1"
-}
-
-touched_within() { # cargo writes deep, so a root stat alone would call live builds idle
-  # maxdepth 4: cargo rewrites existing fingerprint files (e.g. .fingerprint/
-  # <hash>/lib-<crate>.json) in place at depth 4, which does not bump the
-  # depth-3 hash dir's mtime — a shallower probe would miss an active build.
-  [ -n "$(find "$1" -maxdepth 4 -mmin "-$2" -print -quit 2>/dev/null)" ]
-}
-
-canonical_dir() { # $1 = path; canonical absolute path if it is a real dir, else empty
-  local r=${1:-}
-  [ -n "$r" ] && [ -d "$r" ] || return 0
-  cd "$r" 2>/dev/null && pwd -P
-}
-
-sweep_tmp() {
-  local root d caches cache kb mins=$((IDLE_HOURS * 60))
-  for root in "$@"; do
-    [ -d "$root" ] || continue
-    while IFS= read -r d; do
-      [ -O "$d" ] || continue
-      caches=$(tmp_cache_dirs "$d")
-      [ -n "$caches" ] || continue
-      while read -r cache; do
-        [ -n "$cache" ] || continue
-        if touched_within "$cache" "$mins"; then
-          say "KEEP   $cache  [tmp scratch: active within ${IDLE_HOURS}h]"
-          continue
-        fi
-        kb=$(dir_kb "$cache")
-        say "$(act PRUNE)  $cache  [tmp scratch: idle, $((kb / 1024))MB]"
-        if run rm -rf "$cache"; then
-          freed_kb=$((freed_kb + kb)); pruned=$((pruned + 1))
-        fi
-      done <<< "$caches"
-    done < <(find "$root" -maxdepth 1 -mindepth 1 -type d -not -name '.*' 2>/dev/null)
-  done
+worktree_sweep() {
+  local common=$1 current=$2 wt branch head lock dirty status_rc kb
+  while IFS=$'\t' read -r wt lock; do
+    [ -n "$wt" ] && [ "$wt" != "$current" ] && [ -d "$wt" ] || continue
+    branch=$(git -C "$wt" symbolic-ref --short -q HEAD 2>/dev/null || printf '(detached)')
+    head=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || { say "KEEP   $wt [git probe failed]"; continue; }
+    dirty=$(git -C "$wt" status --porcelain 2>/dev/null); status_rc=$?
+    [ "$status_rc" -eq 0 ] || { say "KEEP   $wt [$branch: status probe failed]"; continue; }
+    if [ -n "$lock" ]; then say "KEEP   $wt [$branch: locked]"; continue; fi
+    if [ -n "$dirty" ]; then say "KEEP   $wt [$branch: dirty]"; continue; fi
+    git -C "$wt" merge-base --is-ancestor "$head" refs/remotes/origin/main >/dev/null 2>&1 || { say "KEEP   $wt [$branch: unmerged]"; continue; }
+    kb=$(dir_kb "$wt")
+    say "$(if [ "$DRY" = 1 ]; then printf WOULD; else printf REMOVE; fi) $wt [$branch: clean, merged, $((kb / 1024))MB]"
+    if run git -C "$common" worktree remove "$wt"; then
+      REMOVED=$((REMOVED + 1))
+      if [ "$branch" != "(detached)" ] && ! run git -C "$common" branch -d "$branch"; then
+        STRANDED=$((STRANDED + 1))
+        say "KEEP   branch $branch [branch -d refused]"
+      fi
+    fi
+  done < <(python3 - "$common" <<'PY'
+import subprocess, sys
+lines = subprocess.check_output(["git", "-C", sys.argv[1], "worktree", "list", "--porcelain"], text=True).splitlines()
+path = None
+locked = False
+for line in lines + [""]:
+    if line.startswith("worktree "):
+        if path is not None:
+            print(path + "\t" + ("locked" if locked else ""))
+        path = line[9:]
+        locked = False
+    elif line == "locked":
+        locked = True
+PY
+)
 }
 
 main() {
-  while [ $# -gt 0 ]; do
+  while [ "$#" -gt 0 ]; do
     case "$1" in
       --dry-run) DRY=1 ;;
-      --idle-hours) shift; IDLE_HOURS=${1:?--idle-hours needs a value} ;;
-      --no-tmp) SWEEP_TMP=0 ;;
-      *) echo "unknown argument: $1" >&2; exit 2 ;;
+      --no-tmp) : ;;
+      --idle-hours)
+        shift
+        valid_hours "${1:-}" || { say "invalid --idle-hours: ${1:-}" >&2; return 2; }
+        IDLE_HOURS=${1#"${1%%[!0]*}"}; IDLE_HOURS=${IDLE_HOURS:-0}
+        ;;
+      *) say "unknown argument: $1" >&2; return 2 ;;
     esac
     shift
   done
-
-  local MAIN NOW mins
-  MAIN=$(git rev-parse --path-format=absolute --git-common-dir)/..
-  MAIN=$(cd "$MAIN" && pwd)
-  NOW=$(date +%s)
-  mins=$((IDLE_HOURS * 60))
-  freed_kb=0; removed=0; pruned=0
-
-  # Merged-ness is judged against origin/main. A dry run must not touch the
-  # network or move refs (its summary claims "nothing touched"), so fetch only
-  # when actually pruning; a preview then classifies against the existing ref.
-  if [ "$DRY" != 1 ]; then
-    git -C "$MAIN" fetch origin main -q 2>/dev/null || true
-  fi
-
-  while IFS=$'\t' read -r wt lock; do
-    [ "$wt" = "$MAIN" ] && continue
-    [ -d "$wt" ] || continue
-
-    branch=$(git -C "$wt" symbolic-ref --short -q HEAD || echo "(detached)")
-    head=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || continue
-    # A failing status probe must never read as clean: `git status --porcelain`
-    # exits nonzero on a corrupt linked-worktree index while printing nothing,
-    # so without this guard the sweep would treat such a worktree as clean and
-    # remove it wholesale — taking any real uncommitted file with it.
-    status_fail=""
-    dirty=$(git -C "$wt" status --porcelain 2>/dev/null) || status_fail="status probe failed"
-    merged=""
-    git -C "$wt" merge-base --is-ancestor "$head" origin/main 2>/dev/null && merged=merged
-    state="${dirty:+dirty, }${merged:-unmerged}"
-    [ -n "$status_fail" ] && state="status probe failed"
-    # A locked worktree is not removable: `git worktree remove` refuses a lock
-    # (only remove -f -f overrides), so the sweep must report it as kept
-    # rather than count a removal a real run cannot do. The lock reason comes
-    # from the porcelain "locked" field (prefix * matches `git worktree list`).
-    [ -n "$lock" ] && state="${state:+$state, }locked"
-
-    if [ -z "$status_fail" ] && [ -z "$dirty" ] && [ -n "$merged" ] && [ -z "$lock" ]; then
-      kb=$(dir_kb "$wt")
-      say "$(act REMOVE) $wt  [$branch: clean, merged, $((kb / 1024))MB]"
-      # No --force: git's dirty-worktree refusal at removal time is the backstop
-      # for a file that lands between the status probe above and this remove.
-      # A plain remove succeeds for every clean+merged+unlocked worktree here.
-      if run git -C "$MAIN" worktree remove "$wt"; then
-        freed_kb=$((freed_kb + kb)); removed=$((removed + 1))
-        if [ "$branch" != "(detached)" ] && ! run git -C "$MAIN" branch -d "$branch"; then
-          say "  WARN: branch '$branch' survived worktree removal (branch -d refused; ref left in place, never force-deleted)"
-          stranded=$((stranded + 1))
-        fi
-      fi
-      continue
-    fi
-
-    caches=$(cache_dirs "$wt")
-    if [ -n "$caches" ]; then
-      age_h=$(( (NOW - $(newest_mtime "$wt" "$caches")) / 3600 ))
-      if [ "$age_h" -ge "$IDLE_HOURS" ]; then
-        while read -r cache; do
-          [ -n "$cache" ] || continue
-          if touched_within "$cache" "$mins"; then
-            say "KEEP   $cache  [$branch: $state, active within ${IDLE_HOURS}h]"
-            continue
-          fi
-          kb=$(dir_kb "$cache")
-          cache_age_h=$(( (NOW - $(stat -f %m "$cache" 2>/dev/null || echo 0)) / 3600 ))
-          say "$(act PRUNE)  $cache  [$branch: $state, idle ${cache_age_h}h, $((kb / 1024))MB]"
-          if run rm -rf "$cache"; then
-            freed_kb=$((freed_kb + kb)); pruned=$((pruned + 1))
-          fi
-        done <<< "$caches"
-      else
-        say "KEEP   $wt  [$branch: active ${age_h}h ago]"
-      fi
-    else
-      say "KEEP   $wt  [$branch: $state, no build caches]"
-    fi
-  done < <(git -C "$MAIN" worktree list --porcelain | awk '
-    /^worktree /{if (p != "") print p; p = substr($0, 10); r = ""; next}
-    /^locked/{if (p != "") {r = substr($0, 7); print p "\t*" r; p = ""; next}}
-    {next}
-    END{if (p != "") print p}')
-
-  run git -C "$MAIN" worktree prune
-
-  if [ "$SWEEP_TMP" = 1 ]; then
-    # /tmp is a symlink to /private/tmp on macOS, so $TMPDIR often names the
-    # same tree; sweep each canonical root once.
-    local t1 t2
-    t1=$(canonical_dir /private/tmp)
-    t2=$(canonical_dir "${TMPDIR:-}")
-    if [ -n "$t2" ] && [ "$t2" = "$t1" ]; then
-      sweep_tmp "$t1"
-    else
-      sweep_tmp "$t1" "$t2"
-    fi
-  fi
-
-  say "----"
+  local ns root repo_id group_lock checkout_lock common current minutes
+  ns=$(cargo_namespace_json "$REPO_DIR") || return 2
+  root=$(printf '%s\n' "$ns" | python3 -c 'import json,sys; print(json.load(sys.stdin)["root"])')
+  repo_id=$(printf '%s\n' "$ns" | python3 -c 'import json,sys; print(json.load(sys.stdin)["repo_id"])')
+  group_lock=$(printf '%s\n' "$ns" | python3 -c 'import json,sys; print(json.load(sys.stdin)["group_lock"])')
+  checkout_lock=$(printf '%s\n' "$ns" | python3 -c 'import json,sys; print(json.load(sys.stdin)["checkout_lock"])')
+  common=$(printf '%s\n' "$ns" | python3 -c 'import json,sys; print(json.load(sys.stdin)["common_dir"])')
+  current=$(printf '%s\n' "$ns" | python3 -c 'import json,sys; print(json.load(sys.stdin)["top_level"])')
+  minutes=$((IDLE_HOURS * 60))
+  prune_namespace "$root/$repo_id" "$repo_id" "$group_lock" "$checkout_lock" "$minutes"
+  worktree_sweep "$(dirname "$common")" "$current"
   if [ "$DRY" = 1 ]; then
-    say "would remove $removed worktree(s), would prune $pruned build cache(s), would reclaim ~$((freed_kb / 1024 / 1024))GB (dry-run; nothing touched)"
+    say "would remove $REMOVED worktree(s), would prune $PRUNED marker-owned target(s), reclaim ~$((FREED_KB / 1024 / 1024))GB (dry-run; nothing touched)"
   else
-    say "removed $removed worktree(s), pruned $pruned build cache(s), reclaimed ~$((freed_kb / 1024 / 1024))GB"
+    say "removed $REMOVED worktree(s), pruned $PRUNED marker-owned target(s), reclaimed ~$((FREED_KB / 1024 / 1024))GB"
   fi
-  if [ "$stranded" -gt 0 ]; then
-    say "note: $stranded branch ref(s) left in place after worktree removal (branch -d refused; refs are never force-deleted)"
-  fi
+  [ "$STRANDED" -eq 0 ] || say "note: $STRANDED branch ref(s) left in place after branch -d refusal"
+  say "legacy unmarked temporary targets are manual cleanup and were not scanned"
 }
 
-# Run only when executed directly; sourcing this file just defines the
-# functions, so tests can drive the classification in isolation. The zsh
-# branch covers `zsh scripts/prune-worktrees.sh` (ZSH_EVAL_CONTEXT is "toplevel"
-# only for a direct exec, never for `source`), where BASH_SOURCE is empty.
 if [[ "${BASH_SOURCE[0]:-}" == "$0" ]] || [[ "${ZSH_EVAL_CONTEXT:-}" == toplevel ]]; then
   main "$@"
 fi

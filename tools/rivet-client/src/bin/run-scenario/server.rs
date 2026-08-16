@@ -39,6 +39,7 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
+use rivet_harness_common::provenance;
 use rivet_harness_common::server::ChildServer;
 
 /// Name of the paperclip bundler jar we boot through.
@@ -314,46 +315,8 @@ fn classify_commit_lookup_error(e: io::Error) -> Error {
 /// point; normal runs rebuild before executing, and the PLAY verdict provides
 /// the load-bearing stale-server check. `RIVET_SERVER_BIN` remains an explicit,
 /// non-commit-bound override for a server in another tree.
-pub fn ensure_rivet_binary(crate_root: &Path) -> Result<PathBuf, Error> {
-    if let Ok(p) = std::env::var("RIVET_SERVER_BIN") {
-        let p = PathBuf::from(p);
-        if p.is_file() {
-            return Ok(p);
-        }
-        return Err(Error::Unverified(format!(
-            "RIVET_SERVER_BIN is set to {} but it is not a file",
-            p.display()
-        )));
-    }
-    let workspace_bin = crate_root.join("../../target/debug/rivet-server");
-    if !workspace_bin.is_file() {
-        return Err(Error::Unverified(format!(
-            "rivet-server binary not found at {}. Build it (cargo build -p rivet-server from \
-             the selected workspace root) or set RIVET_SERVER_BIN.",
-            workspace_bin.display()
-        )));
-    }
-    // Provenance: the fallback must be fresh relative to the rivet-server
-    // source in the same workspace. Git checkouts stamp changed files with the
-    // checkout time, so a binary built for an older commit predates the newer
-    // source; refuse it rather than booting the wrong server.
-    let src_marker = crate_root.join("../../crates/rivet-server/src/main.rs");
-    let src_modified = fs::metadata(&src_marker)
-        .ok()
-        .and_then(|m| m.modified().ok());
-    let bin_modified = fs::metadata(&workspace_bin)?.modified()?;
-    if let Some(src_modified) = src_modified
-        && bin_modified < src_modified
-    {
-        return Err(Error::Unverified(format!(
-            "rivet-server binary {} is older than its source {} — it is a stale build \
-             from a different commit. Rebuild it in this workspace (cargo build -p \
-             rivet-server) or point RIVET_SERVER_BIN at the intended binary.",
-            workspace_bin.display(),
-            src_marker.display()
-        )));
-    }
-    Ok(workspace_bin)
+pub fn ensure_rivet_binary(_crate_root: &Path) -> Result<PathBuf, Error> {
+    provenance::resolve("rivet-server", "RIVET_SERVER_BIN").map_err(Error::Unverified)
 }
 
 /// Rewrite `server-port=` in a run dir's `server.properties` so every boot

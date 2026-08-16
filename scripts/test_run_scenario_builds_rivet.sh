@@ -14,13 +14,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-TOOL_DIR="$TMP/rivet-client"
-BIN_DIR="$TOOL_DIR/target/debug"
-mkdir -p "$BIN_DIR"
-
-# The real wrapper script under test, copied into the fake tool dir so its
-# relative `./target/debug/run-scenario` resolution points at the stub below.
+FAKE_REPO="$TMP/repo"
+TOOL_DIR="$FAKE_REPO/tools/rivet-client"
+mkdir -p "$TOOL_DIR" "$FAKE_REPO/scripts"
+git -C "$FAKE_REPO" init -q
+git -C "$FAKE_REPO" config user.email test@example.invalid
+git -C "$FAKE_REPO" config user.name test
+printf fake > "$FAKE_REPO/README"
+git -C "$FAKE_REPO" add README
+git -C "$FAKE_REPO" commit -qm initial
 cp "$SCRIPT_DIR/../tools/rivet-client/run-scenario.sh" "$TOOL_DIR/run-scenario.sh"
+cp "$SCRIPT_DIR/cargo-target-dir.sh" "$FAKE_REPO/scripts/"
+cp "$SCRIPT_DIR/cargo-provenance.py" "$FAKE_REPO/scripts/"
+cp "$SCRIPT_DIR/with-build-lock.sh" "$FAKE_REPO/scripts/"
+chmod +x "$FAKE_REPO/scripts"/*
+ROOT="$(mktemp -d "$TMP-cache.XXXXXX")"
+trap 'rm -rf "$TMP" "$ROOT"' EXIT
+TARGET="$(env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR RIVET_CARGO_TARGET_ROOT="$ROOT" "$FAKE_REPO/scripts/cargo-target-dir.sh" target "$FAKE_REPO")"
+BIN_DIR="$TARGET/debug"
+mkdir -p "$BIN_DIR"
 
 # The run-scenario binary stub: records argv, exits 0. The log path is baked
 # in (the stub runs as a child process that does not inherit the test's shell
@@ -53,7 +65,7 @@ pass() { echo "ok:   $1"; }
 run_wrapper() {
   : > "$CARGO_LOG"
   : > "$SCENARIO_ARGV_LOG"
-  PATH="$TMP:$PATH" "$TOOL_DIR/run-scenario.sh" "$@"
+  PATH="$TMP:$PATH" RIVET_CARGO_TARGET_ROOT="$ROOT" env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR "$TOOL_DIR/run-scenario.sh" "$@"
 }
 
 # built_rivet: does the recorded cargo log contain the `-p rivet-server` build?

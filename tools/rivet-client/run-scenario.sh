@@ -1,44 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-tool_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+tool_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+repo_dir="$(cd "$tool_dir/../.." && pwd -P)"
+# shellcheck source=../../scripts/cargo-target-dir.sh
+# shellcheck disable=SC1091
+source "$repo_dir/scripts/cargo-target-dir.sh"
+if ! { [ "${RIVET_BUILD_GROUP_LOCK_FD:-}" = 8 ] && [ "${RIVET_BUILD_LOCK_FD:-}" = 9 ] \
+    && { : >&8; } 2>/dev/null && { : >&9; } 2>/dev/null; }; then
+  exec "$repo_dir/scripts/with-build-lock.sh" "$repo_dir" "$0" "$@"
+fi
+cargo_export_namespace "$repo_dir"
+target_dir="$CARGO_TARGET_DIR"
 cd "$tool_dir"
 
-# Build all binaries (rivet-client + run-scenario) so the runner can find the
-# client binary next to itself in target/debug/.
 cargo build --locked
-
-# Run the runner's own unit tests (port isolation, ServerKind, process-lifecycle
-# cleanup, exit-code classification) before any scenario. Cargo has just built
-# the package, so this adds no new dependency compilation; the azalea build cost
-# is already paid by `cargo build --locked` above.
 cargo test --locked --bin run-scenario
 
-# Build the rivet-server binary (main workspace, stable toolchain) when a mode
-# needs it, so the Paper-only self-check stays exactly as fast as before. The
-# `dwell`, `kick`, `load-world`, `loaded-world`, `recenter`, and
-# `generated-world` subcommands always boot exactly one rivet-server — their
-# server selection is pinned to Rivet even without `--server` (issues #157,
-# #86, #316, #374, #561, and the generated-world seed-42 acceptance contract) —
-# and `--server rivet|both` selects Rivet for the join/move/capture modes. Run
-# from the repo root so cargo resolves the main workspace's stable toolchain
-# (the nested workspace pins nightly).
 needs_rivet=0
 case "${1:-}" in
   dwell | kick | load-world | loaded-world | recenter | generated-world) needs_rivet=1 ;;
 esac
-prev=""
-for a in "$@"; do
-  if [ "$prev" = "--server" ] && { [ "$a" = "rivet" ] || [ "$a" = "both" ]; }; then
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "--server" ] && { [ "$argument" = rivet ] || [ "$argument" = both ]; }; then
     needs_rivet=1
   fi
-  prev="$a"
+  previous=$argument
 done
 if [ "$needs_rivet" = 1 ]; then
-  (
-    cd "$tool_dir/../.."
-    cargo build --locked -p rivet-server
-  )
+  (cd "$repo_dir" && cargo build --locked -p rivet-server)
 fi
-
-exec ./target/debug/run-scenario "$@"
+cargo_stamp_binaries "$repo_dir"
+exec "$target_dir/debug/run-scenario" "$@"

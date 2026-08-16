@@ -162,6 +162,7 @@ const DEFAULT_DWELL_SECONDS: u64 = 41;
 // Machine-stable exit codes. PASS/FAIL/UNVERIFIED are the shared contract
 // (rivet-harness-common::exit); usage errors are a separate 64.
 use rivet_harness_common::exit::{EXIT_FAIL, EXIT_PASS, EXIT_UNVERIFIED};
+use rivet_harness_common::provenance;
 const EXIT_USAGE: u8 = 64;
 
 #[derive(Debug)]
@@ -861,19 +862,10 @@ fn crate_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Path to the `rivet-client` binary, assumed to sit next to this binary in
-/// the same Cargo target dir.
-fn client_binary() -> PathBuf {
-    let sibling = env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|p| p.join("rivet-client")));
-    if let Some(p) = sibling
-        && p.is_file()
-    {
-        return p;
-    }
-    // Fall back to the package's own target dir (cargo run from this crate).
-    crate_root().join("target/debug/rivet-client")
+/// Resolve the client from the exact managed target namespace or an attested
+/// explicit override.
+fn client_binary() -> Result<PathBuf, String> {
+    provenance::resolve("rivet-client", "RIVET_CLIENT_BIN")
 }
 
 /// Resolve `--address` into the first socket address. The port is the
@@ -1060,15 +1052,7 @@ fn world_defaults(crate_root: &Path) -> Result<PathBuf, RunnerError> {
 }
 
 fn ensure_client_binary() -> Result<PathBuf, RunnerError> {
-    let bin = client_binary();
-    if bin.is_file() {
-        Ok(bin)
-    } else {
-        Err(RunnerError::Unverified(format!(
-            "rivet-client binary not found at {} — build it first: cargo build --locked",
-            bin.display()
-        )))
-    }
+    client_binary().map_err(RunnerError::Unverified)
 }
 
 /// Boot one Paper server, join via the client, shut the server down, and return
@@ -3293,7 +3277,7 @@ fn classify_generated_world_boot_failure(error: server::Error, log_path: &Path) 
 /// fixture already carries — so no Paper runtime is a prerequisite for the
 /// acceptance.
 fn run_generated_expected() -> Result<Value, RunnerError> {
-    let oracle_bin = oracle_binary();
+    let oracle_bin = oracle_binary().map_err(RunnerError::Unverified)?;
     let status = Command::new(&oracle_bin)
         .args(["generated-expected"])
         .arg(server::GENERATED_SEED.to_string())
@@ -4028,25 +4012,10 @@ fn corrupt_region_chunk_entry(region_path: &Path, chunk: [i32; 2]) -> io::Result
     Ok(())
 }
 
-/// Resolve the `rivet-oracle` binary: a sibling in the same target dir (the
-/// common `cargo build` layout), then an explicit `RIVET_ORACLE_BIN`, then the
-/// workspace `target/debug` default.
-fn oracle_binary() -> PathBuf {
-    let sibling = env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|p| p.join("rivet-oracle")));
-    if let Some(p) = sibling
-        && p.is_file()
-    {
-        return p;
-    }
-    if let Ok(p) = std::env::var("RIVET_ORACLE_BIN") {
-        let p = PathBuf::from(p);
-        if p.is_file() {
-            return p;
-        }
-    }
-    crate_root().join("../../target/debug/rivet-oracle")
+/// Resolve the oracle from the exact managed target namespace or an attested
+/// explicit override.
+fn oracle_binary() -> Result<PathBuf, String> {
+    provenance::resolve("rivet-oracle", "RIVET_ORACLE_BIN")
 }
 
 /// Map an `rivet-oracle` subcommand exit status onto the runner's error
@@ -4085,7 +4054,7 @@ fn classify_oracle_status(
 /// Invoke `rivet-oracle extract-world <world> --to <json>` and parse the
 /// ground-truth manifest into a `serde_json::Value`.
 fn run_extract_world(world: &Path, work: &Path) -> Result<Value, RunnerError> {
-    let oracle_bin = oracle_binary();
+    let oracle_bin = oracle_binary().map_err(RunnerError::Unverified)?;
     let out = work.join("loaded-manifest.json");
     let status = Command::new(&oracle_bin)
         .args(["extract-world"])

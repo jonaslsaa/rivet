@@ -23,6 +23,7 @@ fail() { echo "FAIL: $1"; exit 1; }
 pass() { echo "ok:   $1"; }
 
 # --- source gate.sh with the real repo only to load its functions -------------
+# shellcheck disable=SC1091
 source "$SCRIPT_DIR/gate.sh"
 if [ -z "${REQUIRE_ORACLE:-}" ] && [ -z "${VERIFY_RUNNABLE:-}" ]; then
   fail "gate.sh did not define its globals (was it executed instead of sourced?)"
@@ -40,9 +41,11 @@ chmod +x "$SHIM/df"
 # awk stub: consume stdin fully (so df doesn't SIGPIPE) using only bash builtins
 # (cat is not on the shimmed PATH), then pull fields 4 / 6 off the second line
 # for the two invocations gate.sh makes.
+# shellcheck disable=SC2016
 printf '#!/bin/bash\nwhile IFS= read -r _; do :; done\nif [[ "$*" == *"NR==2 {print \\$4}"* ]]; then\n  printf "%%s\\n" 900000\nelif [[ "$*" == *"NR==2 {print \\$6}"* ]]; then\n  printf "%%s\\n" "/shim"\nfi\n' > "$SHIM/awk"
 chmod +x "$SHIM/awk"
 # basename stub.
+# shellcheck disable=SC2016
 printf '#!/bin/bash\nprintf "%%s\\n" "${1##*/}"\n' > "$SHIM/basename"
 chmod +x "$SHIM/basename"
 # uname stub: not Darwin, so the macOS java_home path is skipped.
@@ -65,6 +68,7 @@ touch "$FAKE_FULL/tools/rivet-oracle/work/jars/paper-paperclip-26.2.local-SNAPSH
 touch "$FAKE_FULL/working/Paper/paper-server/build/libs/paper-server-26.2.local-SNAPSHOT.jar"
 touch "$FAKE_FULL/tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar"
 touch "$FAKE_FULL/tools/rivet-client/target/debug/rivet-client"
+export RIVET_CLIENT_BIN="$FAKE_FULL/tools/rivet-client/target/debug/rivet-client"
 
 # Neutralise host JDK discovery via absolute paths (SDKMAN / JAVA_HOME) so the
 # test controls the Java 25 JDK check entirely through the shimmed PATH.
@@ -634,8 +638,8 @@ pass "generated-world: RIVET_GENERATED_WORLD=0 -> NOTICE (0 = off, never silent 
 # PASS (exit 0) with the strict flag: the row reports PASS, sets no UNVERIFIED,
 # and the wrapper is invoked with exactly `generated-world`.
 set_gw_exit 0
-RIVET_GENERATED_WORLD=1
-ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+export RIVET_GENERATED_WORLD=1
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; export REPO_DIR="$FAKE_FULL"
 : > "$GW_SCENARIO_LOG"
 run_scenario_generated_world > "$TMP/out_gw1" 2>&1
 [ "$ORACLE_UNVERIFIED" = 0 ] || fail "generated-world: ORACLE_UNVERIFIED set on a PASS"
@@ -648,8 +652,8 @@ pass "generated-world: exit 0 -> PASS, stays verified, invoked with exactly 'gen
 # UNVERIFIED, no ORACLE_UNVERIFIED. run_scenario_generated_world exits the
 # shell in this branch, so it runs in a subshell.
 set_gw_exit 1
-RIVET_GENERATED_WORLD=1
-ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+export RIVET_GENERATED_WORLD=1
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; export REPO_DIR="$FAKE_FULL"
 set +e
 ( run_scenario_generated_world > "$TMP/out_gw2" 2>&1 )
 rc_gw2=$?
@@ -664,8 +668,8 @@ pass "generated-world: exit 1 -> FAILED, hard exit 1, never UNVERIFIED"
 # UNVERIFIED (exit 3) with the strict flag and no --require-oracle: sets
 # ORACLE_UNVERIFIED, returns 0 (main turns it into gate exit 3).
 set_gw_exit 3
-RIVET_GENERATED_WORLD=1
-ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+export RIVET_GENERATED_WORLD=1
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; export REPO_DIR="$FAKE_FULL"
 set +e
 run_scenario_generated_world > "$TMP/out_gw3" 2>&1
 rc_gw3=$?
@@ -695,8 +699,8 @@ pass "generated-world: exit 3 + --require-oracle -> hard exit 1"
 # Crash / unexpected exit (101) with the strict flag: FAIL (exit 1), reported
 # FAILED, never green.
 set_gw_exit 101
-RIVET_GENERATED_WORLD=1
-ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; REPO_DIR="$FAKE_FULL"
+export RIVET_GENERATED_WORLD=1
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0; export REPO_DIR="$FAKE_FULL"
 set +e
 ( run_scenario_generated_world > "$TMP/out_gw5" 2>&1 )
 rc_gw5=$?
@@ -815,6 +819,7 @@ GATE_SOURCE="$SCRIPT_DIR/gate.sh"
 # complete with an empty value so the guard fires the intended message.
 PAPER_LINE="$(grep -n '^    run_scenario_paper_rows$' "$GATE_SOURCE" | cut -d: -f1 || true)"
 [ -n "$PAPER_LINE" ] || fail "gate: '    run_scenario_paper_rows' not found in gate.sh (scenario block anchor missing)"
+# shellcheck disable=SC2016
 GATE_GUARD_LINE="$(grep -nF 'if [ "$FULL_GATE" = true ]; then' "$GATE_SOURCE" | awk -F: -v target="$PAPER_LINE" '$1 <= target { last = $1 } END { print last }' || true)"
 [ -n "$GATE_GUARD_LINE" ] || fail "gate: no FULL_GATE guard at or before line $PAPER_LINE (scenario block not guarded)"
 SCENARIO_BLOCK="$(sed -n "${GATE_GUARD_LINE},\$p" "$GATE_SOURCE" | awk '/^  fi$/ { print; exit } { print }')"

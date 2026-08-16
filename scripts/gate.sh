@@ -116,7 +116,50 @@ SCENARIO_RUNNABLE=0
 # time — sourcing must stay side-effect-free so tests can shim PATH).
 _script_dir="${BASH_SOURCE[0]%/*}"
 [ "$_script_dir" = "${BASH_SOURCE[0]}" ] && _script_dir="."
-REPO_DIR="$(cd "$_script_dir/.." && pwd)"
+REPO_DIR="$(cd "$_script_dir/.." && pwd -P)"
+
+# shellcheck source=scripts/cargo-target-dir.sh
+source "$REPO_DIR/scripts/cargo-target-dir.sh"
+
+strict_gate_prepare() {
+  local digest strict_dir
+  cargo_export_namespace "$REPO_DIR"
+  for override in RIVET_CLIENT_BIN RIVET_SERVER_BIN RIVET_ORACLE_BIN RIVET_CAPTURE_BIN; do
+    if [ -n "${!override:-}" ]; then
+      python3 "$REPO_DIR/scripts/cargo-provenance.py" verify "$REPO_DIR" "${!override}"
+    fi
+  done
+  if command -v sccache >/dev/null 2>&1; then
+    export RUSTC_WRAPPER="${RUSTC_WRAPPER:-$(command -v sccache)}"
+    echo "==> sccache active ($RUSTC_WRAPPER)"
+  else
+    echo "==> sccache inactive (not installed)"
+  fi
+  digest=$(cargo_state_digest_for "$REPO_DIR")
+  strict_dir=$(cargo_namespace_value "$REPO_DIR" strict)
+  mkdir -p "$strict_dir"
+  export RIVET_STRICT_BEFORE_DIGEST="$digest"
+  export RIVET_STRICT_STATE_DIR="$strict_dir"
+  echo "==> strict gate digest before: $digest"
+}
+
+strict_gate_verify() {
+  local after current previous
+  after=$(cargo_state_digest_for "$REPO_DIR")
+  if [ "$after" != "${RIVET_STRICT_BEFORE_DIGEST:-}" ]; then
+    echo "STRICT GATE FAILED: repository state changed during gate" >&2
+    echo "  before: ${RIVET_STRICT_BEFORE_DIGEST:-<missing>}" >&2
+    echo "  after:  $after" >&2
+    return 1
+  fi
+  current="$RIVET_STRICT_STATE_DIR/state-digest"
+  previous="$RIVET_STRICT_STATE_DIR/prior-state-digest"
+  if [ -f "$current" ]; then
+    cp "$current" "$previous"
+  fi
+  printf '%s\n' "$after" > "$current"
+  echo "==> strict gate digest after: $after"
+}
 
 # ---- oracle prereq pre-check (full gate only) --------------------------------
 #
@@ -204,12 +247,16 @@ oracle_prereq_check() {
   # rivet-client (the offline Azalea bot the join-capture harness drives). The
   # scenario runner and rivet-capture both need it; the gate never runs the
   # capture step against a missing client binary.
-  if [ -n "${RIVET_CLIENT_BIN:-}" ] && [ -f "${RIVET_CLIENT_BIN}" ]; then
-    CLIENT_BIN="$RIVET_CLIENT_BIN"
-  elif [ -f "$REPO_DIR/tools/rivet-client/target/debug/rivet-client" ]; then
-    CLIENT_BIN="$REPO_DIR/tools/rivet-client/target/debug/rivet-client"
+  CLIENT_BIN=""
+  if [ -n "${RIVET_CLIENT_BIN:-}" ]; then
+    if [ -f "$RIVET_CLIENT_BIN" ] && python3 "$REPO_DIR/scripts/cargo-provenance.py" verify "$REPO_DIR" "$RIVET_CLIENT_BIN" >/dev/null 2>&1; then
+      CLIENT_BIN="$RIVET_CLIENT_BIN"
+    fi
   else
-    CLIENT_BIN=""
+    client_candidate="$(cargo_target_dir_for "$REPO_DIR")/debug/rivet-client"
+    if [ -f "$client_candidate" ]; then
+      CLIENT_BIN="$client_candidate"
+    fi
   fi
   if [ -n "$CLIENT_BIN" ]; then
     echo "  [ok]      rivet-client binary ($CLIENT_BIN)"
@@ -802,6 +849,7 @@ run_scenario_generated_world() {
 main() {
   export PATH="$HOME/.cargo/bin:$PATH"
   cd "$REPO_DIR"
+  strict_gate_prepare
 
   # --- flags & scope resolution ----------------------------------------------
   local SCOPE_ARGS=()
@@ -815,8 +863,12 @@ main() {
     REQUIRE_ORACLE=1
   fi
   if [ -n "${SCOPE:-}" ]; then
-    # shellcheck disable=SC2206
-    SCOPE_ARGS+=($(printf '%s' "$SCOPE" | tr ',' ' '))
+    local -a scope_values=()
+    local scope_value
+    IFS=', ' read -r -a scope_values <<< "$SCOPE"
+    for scope_value in "${scope_values[@]}"; do
+      [ -n "$scope_value" ] && SCOPE_ARGS+=("$scope_value")
+    done
   fi
 
   local PKGS=() PKG_FLAGS=()
@@ -1162,6 +1214,10 @@ main() {
   cargo machete
   cargo machete tools/rivet-codegen
 
+  # --- strict provenance verdict -------------------------------------------------
+  cargo_stamp_binaries "$REPO_DIR"
+  strict_gate_verify
+
   # --- final verdict ------------------------------------------------------------
   if [ "$ORACLE_UNVERIFIED" = 1 ]; then
     echo
@@ -1177,5 +1233,10 @@ main() {
 # Run only when executed directly; sourcing this file just defines the functions,
 # so tests can drive oracle_prereq_check in isolation.
 if [[ "${BASH_SOURCE[0]:-}" == "$0" ]]; then
-  main "$@"
+  if [ "${RIVET_BUILD_GROUP_LOCK_FD:-}" = 8 ] && [ "${RIVET_BUILD_LOCK_FD:-}" = 9 ] \
+      && { : >&8; } 2>/dev/null && { : >&9; } 2>/dev/null; then
+    main "$@"
+  else
+    exec "$REPO_DIR/scripts/with-build-lock.sh" "$REPO_DIR" "$0" "$@"
+  fi
 fi

@@ -32,7 +32,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 SANDBOX="$(mktemp -d)"
-trap 'rm -rf "$SANDBOX"' EXIT
+CACHE_ROOT="$(mktemp -d "$SANDBOX-cache.XXXXXX")"
+trap 'rm -rf "$SANDBOX" "$CACHE_ROOT"' EXIT
 
 # --- build the sandbox -------------------------------------------------------
 # Same layout the real gate.sh probes (REPO_DIR resolves to $SANDBOX).
@@ -44,6 +45,7 @@ mkdir -p "$SANDBOX/scripts" \
          "$SANDBOX/tools/rivet-oracle/work/run/libraries" \
          "$SANDBOX/tools/rivet-oracle/work/run/versions/26.2" \
          "$SANDBOX/tools/rivet-reference-oracle" \
+         "$SANDBOX/tools/rivet-oracle/fixtures/chunk-hash/paper" \
          "$SANDBOX/working/Paper/paper-server/build/libs"
 
 # Minimal workspace + codegen manifest so gate.sh's --manifest-path / path
@@ -51,6 +53,8 @@ mkdir -p "$SANDBOX/scripts" \
 printf '[workspace]\n' > "$SANDBOX/Cargo.toml"
 printf '[package]\nname = "rivet-codegen"\nversion = "0.1.0"\nedition = "2024"\n' \
   > "$SANDBOX/tools/rivet-codegen/Cargo.toml"
+printf '{"entries":[]}' > "$SANDBOX/tools/rivet-oracle/fixtures/chunk-hash/paper/manifest.json"
+printf '__pycache__/\n*.pyc\n*.log\nfail_*\nhome/\njdk/\ntools/rivet-oracle/work/\ntools/rivet-reference-oracle/\nworking/\n' > "$SANDBOX/.gitignore"
 
 # The full gate runs `python3 scripts/test_analyze_graph.py` (the manifest
 # regression suite), and the marker audit runs `scripts/check_markers.py` +
@@ -60,12 +64,6 @@ printf '[package]\nname = "rivet-codegen"\nversion = "0.1.0"\nedition = "2024"\n
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$SANDBOX/scripts/test_analyze_graph.py"
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$SANDBOX/scripts/check_markers.py"
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$SANDBOX/scripts/test_check_markers.py"
-
-# The oracle pre-check now requires the rivet-client binary (join-capture
-# harness); provide an existing dummy file so the pre-check reports all
-# prerequisites present.
-mkdir -p "$SANDBOX/tools/rivet-client/target/debug"
-: > "$SANDBOX/tools/rivet-client/target/debug/rivet-client"
 
 # gate.sh now also runs the scenario runner's Paper rows (join/move
 # Paper-vs-Rivet differentials) whenever the paperclip jar and the client binary
@@ -79,9 +77,24 @@ exit 0
 EOF
 chmod +x "$SANDBOX/tools/rivet-client/run-scenario.sh"
 
-# The real gate script under test.
+# The real gate and its namespace helpers under test.
 cp "$PWD/scripts/gate.sh" "$SANDBOX/scripts/gate.sh"
-chmod +x "$SANDBOX/scripts/gate.sh"
+cp "$PWD/scripts/cargo-target-dir.sh" "$SANDBOX/scripts/cargo-target-dir.sh"
+cp "$PWD/scripts/cargo-provenance.py" "$SANDBOX/scripts/cargo-provenance.py"
+cp "$PWD/scripts/with-build-lock.sh" "$SANDBOX/scripts/with-build-lock.sh"
+chmod +x "$SANDBOX/scripts/gate.sh" "$SANDBOX/scripts/cargo-target-dir.sh" "$SANDBOX/scripts/cargo-provenance.py" "$SANDBOX/scripts/with-build-lock.sh"
+git -C "$SANDBOX" init -q
+git -C "$SANDBOX" config user.email test@example.invalid
+git -C "$SANDBOX" config user.name test
+git -C "$SANDBOX" add .
+git -C "$SANDBOX" commit -qm initial
+
+# The oracle pre-check now requires the rivet-client binary (join-capture
+# harness); provide an attested dummy in the managed target namespace.
+CLIENT_TARGET="$(env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR RIVET_CARGO_TARGET_ROOT="$CACHE_ROOT" "$SANDBOX/scripts/cargo-target-dir.sh" target "$SANDBOX")"
+mkdir -p "$CLIENT_TARGET/debug"
+: > "$CLIENT_TARGET/debug/rivet-client"
+env RIVET_CARGO_TARGET_ROOT="$CACHE_ROOT" CARGO_TARGET_DIR="$CLIENT_TARGET" python3 "$SANDBOX/scripts/cargo-provenance.py" sidecar "$SANDBOX" "$CLIENT_TARGET/debug/rivet-client" >/dev/null
 
 # --- satisfy the oracle pre-check --------------------------------------------
 # Same dummy-file/version-stub approach as test_codegen_gate.sh so a green full
@@ -169,7 +182,7 @@ chmod +x "$SANDBOX/home/.cargo/bin/cargo" "$SANDBOX/home/.cargo/bin/cargo-machet
 # Fully controlled PATH: sandbox bin + minimal system dirs. gate.sh prepends
 # $HOME/.cargo/bin itself. JAVA_HOME points at the sandbox jdk so the
 # reference-oracle javac probe is deterministic on hosts with their own JDK.
-GATE="env HOME=$SANDBOX/home JAVA_HOME=$SANDBOX/jdk PATH=$SANDBOX/home/.cargo/bin:/usr/bin:/bin $SANDBOX/scripts/gate.sh"
+GATE="env HOME=$SANDBOX/home JAVA_HOME=$SANDBOX/jdk RIVET_CARGO_TARGET_ROOT=$CACHE_ROOT RIVET_CLIENT_BIN=$CLIENT_TARGET/debug/rivet-client PATH=$SANDBOX/home/.cargo/bin:/usr/bin:/bin $SANDBOX/scripts/gate.sh"
 
 # Assertions shared by every scenario: the blocks step must be scoped to
 # `-p rivet-registry --features blocks` — never widened to `--all-features` or

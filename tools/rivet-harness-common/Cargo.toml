@@ -4,17 +4,12 @@ version = "0.1.0"
 edition = "2024"
 license.workspace = true
 publish = false
-description = "Shared std-only primitives for Rivet's E2E harness tools (child-process boot lifecycle, held port reservations, strict JSONL transcripts, exit contract, named negative controls)"
-
-# Intentionally std-only: the current consumers are `rivet-capture` and
-# `rivet-client`; `rivet-oracle` can adopt it later without adding any external
-# (non-std) packages to its dependency tree — the only new lockfile entry is
-# this crate itself. A std-only crate is what makes the shared surface
-# load-bearing across workspaces with different toolchains.
+description = "Shared primitives for Rivet's E2E harness tools (child-process boot lifecycle, held port reservations, strict JSONL transcripts, exit contract, named negative controls, artifact provenance)"
 
 [dependencies]
+sha2 = "0.10"
 
-# The library itself has no dependencies; the test module exercises the
-# generic policies against real JSON lines, so tests use serde_json.
+# The test module exercises the generic policies against real JSON lines, so
+# tests use serde_json.
 [dev-dependencies]
 serde_json = "1"

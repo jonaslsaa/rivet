@@ -59,6 +59,7 @@ use std::process::{Command, ExitCode, Stdio};
 use crate::fixture::Manifest;
 use crate::normalize::{NormalizedPacket, canonicalize};
 use crate::packet::{CapturedPacket, Direction, State};
+use rivet_harness_common::provenance;
 
 const DEFAULT_USERNAME: &str = "RivetProbe";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
@@ -88,10 +89,10 @@ fn state_str(s: State) -> &'static str {
 
 /// Locate the rivet-client binary (offline Azalea bot) the harness drives.
 fn client_binary() -> Result<PathBuf, CaptureError> {
-    let default_bin = crate_root().join("../rivet-client/target/debug/rivet-client");
-    resolve_client_binary(env::var(CLIENT_BIN_ENV).ok(), default_bin)
+    provenance::resolve("rivet-client", CLIENT_BIN_ENV).map_err(CaptureError::Unverified)
 }
 
+#[cfg(test)]
 /// Resolve the client binary from an explicit override or the default sibling
 /// build. A missing binary is a missing prerequisite, not a failure: the shared
 /// exit contract (and `rivet-client run-scenario`) classifies it as UNVERIFIED
