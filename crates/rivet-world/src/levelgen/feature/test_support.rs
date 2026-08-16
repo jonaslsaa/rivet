@@ -19,6 +19,7 @@
 //! to pin the missing-registry failure, and an `ensure_can_write` gate the
 //! tests can trip to pin the return-`false` propagation.
 
+use crate::block::blocks::Blocks;
 use crate::chunk::chunk_generator::ChunkGenerator;
 use crate::level::WorldGenLevel;
 use crate::level::height_accessor::LevelHeightAccessor;
@@ -40,6 +41,22 @@ use rivet_util::RandomSource;
 use rivet_util::random::{LegacyPositionalRandomFactory, LegacyRandomSource};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// The small live block-entity state the feature fixture exposes. Block states
+/// and entities are intentionally separate: a chest/spawner state only gains a
+/// matching entity when `set_block` materializes it, just as the production
+/// world must do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TestBlockEntity {
+    Chest {
+        loot: Option<(i64, String)>,
+    },
+    Spawner {
+        next_spawn: Option<String>,
+        spawn_potentials: Vec<(String, i32)>,
+        spawn_data_malformed: bool,
+    },
+}
 
 /// The two-registry access the selector features resolve their holders
 /// through — frozen empty configured/placed registries (the test configured
@@ -140,6 +157,10 @@ pub struct TestLevel {
     /// The mutable block-state map: `get_block_state` reads it (air for an
     /// unset position), `set_block` writes it.
     pub states: HashMap<BlockPos, BlockState>,
+    /// Live block entities materialized by block writes. This is separate from
+    /// [`states`](Self::states) so tests cannot treat a block-state id as an
+    /// entity lookup result.
+    pub block_entities: HashMap<BlockPos, TestBlockEntity>,
     /// `get_height_at` — the column height returned for every `(x, z)`.
     pub height: i32,
     /// `get_sea_level` — the fixed sea level.
@@ -169,6 +190,12 @@ pub struct TestLevel {
     /// `SimpleBlockFeature` (with `config.scheduleTick()`) and `LakeFeature.place`
     /// (the placed cave-air cells) schedule (in call order).
     pub block_ticks: Vec<(BlockPos, crate::block::Block, i32)>,
+    /// `set_block_entity_loot_table` — the `(pos, seed, loot_table)` chest-loot
+    /// attachments (`MonsterRoomFeature` wall-pass chest) in call order.
+    pub chest_loot: Vec<(BlockPos, i64, String)>,
+    /// `set_spawner_entity` — the `(pos, entity_id)` spawner entity writes
+    /// (`MonsterRoomFeature` final spawner write) in call order.
+    pub spawner_entities: Vec<(BlockPos, String)>,
 }
 
 impl TestLevel {
@@ -183,6 +210,7 @@ impl TestLevel {
             writes_flags: Vec::new(),
             destroyed: Vec::new(),
             states: HashMap::new(),
+            block_entities: HashMap::new(),
             height: 0,
             sea_level: 63,
             survive: true,
@@ -193,7 +221,75 @@ impl TestLevel {
             post_processing: Vec::new(),
             ticks: Vec::new(),
             block_ticks: Vec::new(),
+            chest_loot: Vec::new(),
+            spawner_entities: Vec::new(),
         }
+    }
+
+    fn materialize_block_entity(&mut self, pos: &BlockPos, state: BlockState) {
+        if state.block() == Blocks::CHEST.id() {
+            if !matches!(
+                self.block_entities.get(pos),
+                Some(TestBlockEntity::Chest { .. })
+            ) {
+                self.block_entities
+                    .insert(*pos, TestBlockEntity::Chest { loot: None });
+            }
+        } else if state.block() == Blocks::SPAWNER.id() {
+            if !matches!(
+                self.block_entities.get(pos),
+                Some(TestBlockEntity::Spawner { .. })
+            ) {
+                self.block_entities.insert(
+                    *pos,
+                    TestBlockEntity::Spawner {
+                        next_spawn: None,
+                        spawn_potentials: Vec::new(),
+                        spawn_data_malformed: false,
+                    },
+                );
+            }
+        } else {
+            self.block_entities.remove(pos);
+        }
+    }
+
+    /// Seed a pre-existing spawner entity for a state-transition/RNG test.
+    pub fn set_spawner_state(
+        &mut self,
+        pos: BlockPos,
+        next_spawn: Option<String>,
+        spawn_potentials: Vec<(String, i32)>,
+    ) {
+        self.states
+            .insert(pos, Blocks::SPAWNER.default_block_state());
+        self.block_entities.insert(
+            pos,
+            TestBlockEntity::Spawner {
+                next_spawn,
+                spawn_potentials,
+                spawn_data_malformed: false,
+            },
+        );
+    }
+
+    /// Seed a persisted spawner whose `SpawnData` fails the codec while its
+    /// weighted potentials remain valid.
+    pub fn set_malformed_spawn_data_state(
+        &mut self,
+        pos: BlockPos,
+        spawn_potentials: Vec<(String, i32)>,
+    ) {
+        self.states
+            .insert(pos, Blocks::SPAWNER.default_block_state());
+        self.block_entities.insert(
+            pos,
+            TestBlockEntity::Spawner {
+                next_spawn: None,
+                spawn_potentials,
+                spawn_data_malformed: true,
+            },
+        );
     }
 }
 
@@ -227,12 +323,15 @@ impl WorldGenLevel for TestLevel {
         self.writes.push((*pos, state));
         self.writes_flags.push(flags);
         self.states.insert(*pos, state);
+        self.materialize_block_entity(pos, state);
         true
     }
 
     fn destroy_block(&mut self, pos: &BlockPos, _drop: bool) -> bool {
         self.destroyed.push(*pos);
-        self.states.insert(*pos, BlockState::of(BlockId(0)));
+        let air = BlockState::of(BlockId(0));
+        self.states.insert(*pos, air);
+        self.materialize_block_entity(pos, air);
         true
     }
 
@@ -290,6 +389,65 @@ impl WorldGenLevel for TestLevel {
     fn mark_pos_for_post_processing(&mut self, pos: &BlockPos) {
         self.post_processing.push(*pos);
     }
+
+    fn is_randomizable_container(&self, pos: &BlockPos) -> bool {
+        matches!(
+            self.block_entities.get(pos),
+            Some(TestBlockEntity::Chest { .. })
+        )
+    }
+
+    fn is_spawner_block_entity(&self, pos: &BlockPos) -> bool {
+        matches!(
+            self.block_entities.get(pos),
+            Some(TestBlockEntity::Spawner { .. })
+        )
+    }
+
+    fn set_block_entity_loot_table(&mut self, pos: &BlockPos, seed: i64, loot_table: &str) {
+        if let Some(TestBlockEntity::Chest { loot }) = self.block_entities.get_mut(pos) {
+            *loot = Some((seed, loot_table.to_string()));
+            self.chest_loot.push((*pos, seed, loot_table.to_string()));
+        }
+    }
+
+    fn spawner_potential_weight(&self, pos: &BlockPos) -> Option<i32> {
+        match self.block_entities.get(pos) {
+            Some(TestBlockEntity::Spawner {
+                next_spawn: None,
+                spawn_potentials,
+                ..
+            }) if !spawn_potentials.is_empty() => {
+                let total = spawn_potentials
+                    .iter()
+                    .fold(0i32, |total, (_, weight)| total.wrapping_add(*weight));
+                (total > 0).then_some(total)
+            }
+            _ => None,
+        }
+    }
+
+    fn set_spawner_entity(&mut self, pos: &BlockPos, entity_id: &str, potential_roll: Option<i32>) {
+        if let Some(TestBlockEntity::Spawner {
+            next_spawn,
+            spawn_potentials,
+            ..
+        }) = self.block_entities.get_mut(pos)
+        {
+            if let Some(mut roll) = potential_roll {
+                for (potential_id, weight) in spawn_potentials.iter() {
+                    if roll < *weight {
+                        *next_spawn = Some(potential_id.clone());
+                        break;
+                    }
+                    roll -= *weight;
+                }
+            }
+            *next_spawn = Some(entity_id.to_string());
+            spawn_potentials.clear();
+            self.spawner_entities.push((*pos, entity_id.to_string()));
+        }
+    }
 }
 
 /// The `ChunkGenerator` double over the overworld window.
@@ -335,6 +493,8 @@ pub enum RngCall {
     Int,
     /// `nextInt(bound)` — the bound argument.
     IntBound(i32),
+    /// `nextLong()` — the chest-loot seed draw (`MonsterRoomFeature` tail).
+    Long,
     /// `nextBoolean()`.
     Boolean,
     /// `nextFloat()`.
@@ -343,10 +503,9 @@ pub enum RngCall {
     Double,
 }
 
-/// A `RandomSource` wrapper that records every draw, so the tests can pin the
-/// exact Java draw order/arguments the selector features perform (a `boolean`
-/// then a placed feature, a `nextFloat < chance` per weighted entry, a
-/// `nextInt(size)` index, a `nextInt(totalWeight)` selection, …).
+/// A `RandomSource` wrapper that records every draw, so placement tests can
+/// pin the exact Java draw order and arguments (feature selectors' booleans,
+/// weighted-entry rolls and indices, plus feature-specific long/int draws).
 pub struct RecordingRandom {
     /// The wrapped legacy source (deterministic per seed).
     pub inner: LegacyRandomSource,
@@ -392,6 +551,7 @@ impl RandomSource for RecordingRandom {
     }
 
     fn next_long(&mut self) -> i64 {
+        self.calls.push(RngCall::Long);
         self.inner.next_long()
     }
 

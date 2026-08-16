@@ -274,6 +274,80 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
         panic!("LevelAccessor.destroyBlock is not implemented (RivetTodo #232)")
     }
 
+    /// Whether `getBlockEntity(pos)` is a `RandomizableContainer`.
+    ///
+    /// Java's `RandomizableContainer.setBlockEntityLootTable` draws
+    /// `random.nextLong()` only after this `instanceof` succeeds. Keeping the
+    /// query before the draw preserves the feature's RNG stream when a chest
+    /// write is rejected or the position has no matching block entity.
+    ///
+    /// RivetTodo(#232): the block-entity surface is not ported; the default
+    /// fails explicitly rather than fabricating a block entity.
+    fn is_randomizable_container(&self, _pos: &BlockPos) -> bool {
+        panic!(
+            "BlockGetter.getBlockEntity(RandomizableContainer) is not implemented (RivetTodo #232)"
+        )
+    }
+
+    /// `RandomizableContainer.setBlockEntityLootTable(BlockGetter, RandomSource,
+    /// BlockPos, ResourceKey<LootTable>)` — the chest-loot seam the
+    /// `.feature.monsterroom` leaf consumes. The feature draws the seed after
+    /// [`is_randomizable_container`] succeeds and passes it here because the
+    /// trait is not generic over `R`; `loot_table` is the NBT `LootTable` value
+    /// (e.g. `minecraft:chests/simple_dungeon`).
+    ///
+    /// RivetTodo(#232): the block-entity surface is not ported; the default
+    /// fails explicitly rather than fabricating the loot.
+    fn set_block_entity_loot_table(&mut self, _pos: &BlockPos, _seed: i64, _loot_table: &str) {
+        panic!("RandomizableContainer.setBlockEntityLootTable is not implemented (RivetTodo #232)")
+    }
+
+    /// Whether `getBlockEntity(pos)` is a `SpawnerBlockEntity`.
+    ///
+    /// Java evaluates this `instanceof` before calling `randomEntityId`, so a
+    /// missing spawner entity consumes no mob-selection RNG draw. This query
+    /// keeps that short-circuit at the feature boundary.
+    ///
+    /// RivetTodo(#232): the block-entity surface is not ported; the default
+    /// fails explicitly rather than fabricating a block entity.
+    fn is_spawner_block_entity(&self, _pos: &BlockPos) -> bool {
+        panic!("BlockGetter.getBlockEntity(SpawnerBlockEntity) is not implemented (RivetTodo #232)")
+    }
+
+    /// `BaseSpawner.getOrCreateNextSpawnData`'s weighted-list draw. `Some(total)`
+    /// means that this spawner has no current `SpawnData` and its decoded
+    /// `SpawnPotentials` has a positive total; the feature consumes exactly one
+    /// `random.nextInt(total)` after the mob-id draw and before calling
+    /// [`set_spawner_entity`]. An absent or wrong-typed `SpawnPotentials` field
+    /// uses Paper's singleton fallback and therefore returns `Some(1)`. A
+    /// rejected weighted list (for example, one whose total overflows `int`)
+    /// makes the pending entity unavailable, so it returns `None` without a
+    /// fallback draw. `None` also means Java does not draw here (an existing
+    /// `SpawnData`, an empty list, or a zero-total list).
+    ///
+    /// The returned total is deliberately a primitive seam: `RandomSource` is
+    /// not object-safe, so the feature owns the exact RNG call while the level
+    /// owns weighted-list state and the state transition.
+    fn spawner_potential_weight(&self, _pos: &BlockPos) -> Option<i32> {
+        panic!("BaseSpawner.getOrCreateNextSpawnData is not implemented (RivetTodo #232)")
+    }
+
+    /// `SpawnerBlockEntity.setEntityId(EntityType, RandomSource)` — materialize
+    /// the selected entity id after the optional weighted-list roll. When
+    /// `potential_roll` is `Some`, the level selects that weighted entry before
+    /// replacing its entity id; in every case Java clears `spawnPotentials`.
+    ///
+    /// RivetTodo(#232): the block-entity surface is not ported; the default
+    /// fails explicitly rather than fabricating the spawner.
+    fn set_spawner_entity(
+        &mut self,
+        _pos: &BlockPos,
+        _entity_id: &str,
+        _potential_roll: Option<i32>,
+    ) {
+        panic!("SpawnerBlockEntity.setEntityId is not implemented (RivetTodo #232)")
+    }
+
     /// The registry-access back-reference seam. Java `Holder.value()` needs no
     /// lookup (the holder stores its value); the Rust port's `Reference` is a
     /// pure `(RegistryId, id)` pair, so resolving one — and threading the
