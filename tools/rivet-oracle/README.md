@@ -48,6 +48,14 @@ builds on top of these fixtures later.
   byte-identity verified.
 - The Rust runner `cargo run -p rivet-oracle` verifies every committed
   fixture kind against its manifest's SHA-256s and prints a summary.
+- **Storage-only #231 V1a is green**: `anvil-roundtrip-v1a` writes all 432
+  committed M0 CompoundTag payloads through a fresh `RegionFileStorage` with
+  compression `none`, closes and recreates read-only storage, compares exact
+  source/saved/reloaded payload bytes, proves the saved region tree is not
+  mutated by reload, and runs strict named length/codec/header/overlap/
+  truncation negatives. This is V1a storage evidence only; it does not claim
+  V1b whole-region parity, `SerializableChunkData` reconstruction, or generated
+  FULL parity.
 
 ## Directory layout
 

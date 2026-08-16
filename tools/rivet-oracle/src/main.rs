@@ -131,6 +131,7 @@
 //! different commit than the resolved paperclip). A stale, swapped, or
 //! unverifiable Paper never passes silently (see gate.sh).
 
+mod anvil_roundtrip;
 mod chunk_level;
 mod composed_noise;
 mod corpus;
@@ -275,6 +276,10 @@ struct Captured {
     bytes: u64,
     #[serde(default)]
     dim: Option<String>,
+    #[serde(default)]
+    chunk: Option<String>,
+    #[serde(default)]
+    region: Option<String>,
 }
 
 /// Recorded chunk-generation concurrency provenance in a manifest: the
@@ -447,6 +452,23 @@ fn sha256_hex(data: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
+}
+
+fn raw_corpus_identity(fixture_root: &Path, manifest: &Manifest) -> Result<String, Error> {
+    let mut captures: Vec<&Captured> = manifest
+        .captured
+        .iter()
+        .filter(|captured| captured.path.starts_with("chunk/"))
+        .collect();
+    captures.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut material = Vec::new();
+    for captured in captures {
+        material.extend_from_slice(captured.path.as_bytes());
+        material.push(0);
+        material.extend_from_slice(&fs::read(fixture_root.join(&captured.path))?);
+        material.push(0);
+    }
+    Ok(sha256_hex(&material))
 }
 
 /// Read + structurally validate a manifest.json (format field must be 1).
@@ -3484,6 +3506,19 @@ fn print_usage() {
     println!(
         "  cargo run -p rivet-oracle -- <dir>          verify <dir> against its manifest.json"
     );
+    println!("  cargo run -p rivet-oracle -- anvil-roundtrip-v1a [fixtures] [--out <dir>]");
+    println!(
+        "                                             storage-only #231 V1a: write all 432 committed"
+    );
+    println!(
+        "                                             M0 CompoundTag fixtures at compression none,"
+    );
+    println!(
+        "                                             reload through fresh read-only storage, run strict"
+    );
+    println!(
+        "                                             region-record scanner and corruption negatives"
+    );
     println!(
         "  cargo run -p rivet-oracle -- verify         M0 gate: boot fresh Paper -> extract -> diff"
     );
@@ -3625,6 +3660,10 @@ fn print_usage() {
 fn run() -> Result<(), Error> {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("anvil-roundtrip-v1a") => {
+            let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+            anvil_roundtrip::run_cli(&rest)
+        }
         Some("verify") => {
             let mut m2 = false;
             let mut full = false;

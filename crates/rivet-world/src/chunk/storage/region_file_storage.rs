@@ -24,7 +24,7 @@
 //! generation, upgrades, repair, and migration.
 
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use rivet_nbt::compound_tag::CompoundTag;
@@ -116,8 +116,7 @@ impl RegionFileStorage {
                 let Some(reader) = region.get_chunk_data_input_stream(pos)? else {
                     return Ok(None);
                 };
-                let mut input = DataInputStream::new(reader);
-                nbt_io::read_unlimited(&mut input)?
+                read_payload_exact(reader)?
             };
 
             if self.info.is_chunk_data && get_chunk_coordinate(&serialised_chunk_data) != *pos {
@@ -417,8 +416,7 @@ impl RegionFileStorage {
         // Paper opens the base stream first, then reads the supplement, then
         // parses the base NBT. Preserve that observable error order.
         let oversized_data = region.get_oversized_data(pos.x(), pos.z())?;
-        let mut input = DataInputStream::new(reader);
-        let mut chunk = nbt_io::read_unlimited(&mut input)?;
+        let mut chunk = read_payload_exact(reader)?;
 
         let oversized_level = oversized_data.get_compound_or_empty("Level");
         if let Some(Tag::Compound(level)) = chunk.tags.get_mut("Level") {
@@ -427,6 +425,20 @@ impl RegionFileStorage {
         }
         Ok(chunk)
     }
+}
+
+fn read_payload_exact<R: Read>(reader: R) -> io::Result<CompoundTag> {
+    let mut input = DataInputStream::new(reader);
+    let chunk = nbt_io::read_unlimited(&mut input)?;
+    let mut reader = input.into_inner();
+    let mut trailing = [0u8; 1];
+    if reader.read(&mut trailing)? != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "NBT payload has trailing bytes",
+        ));
+    }
+    Ok(chunk)
 }
 
 /// Whether `error` is Paper's `RegionFileSizeException` — the chunk-buffer cap
@@ -690,6 +702,23 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names, [std::ffi::OsString::from("r.0.0.mca")]);
+    }
+
+    #[test]
+    fn read_only_storage_rejects_trailing_nbt_payload_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut payload = PAPER_CHUNK_0_0.to_vec();
+        payload.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        write_region(dir.path(), ChunkPos::ZERO, 3, &payload);
+        let path = dir.path().join("r.0.0.mca");
+        let before = fs::read(&path).unwrap();
+
+        let mut storage = RegionFileStorage::new_read_only(info(true), dir.path().into());
+        let error = storage.read(&ChunkPos::ZERO).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        storage.close().unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
 
     #[test]
