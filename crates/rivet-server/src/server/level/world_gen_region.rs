@@ -142,6 +142,10 @@ fn dummy_block_entity(pos: &BlockPos) -> CompoundTag {
     tag
 }
 
+fn is_dummy_block_entity(tag: &CompoundTag) -> bool {
+    tag.get_string("id").is_some_and(|id| id == "DUMMY")
+}
+
 /// Decode the stored `SpawnData` compound through the partial shape of
 /// `SpawnData.CODEC`. The required `entity` field must be a compound; a
 /// malformed optional field is dropped from the retained partial value. The
@@ -391,6 +395,9 @@ fn spawn_potential_weight(
         return spawn_potential_total(spawn_potentials);
     }
     let tag = tag?;
+    if is_dummy_block_entity(tag) {
+        return None;
+    }
     match decode_spawn_potentials_state(tag) {
         SpawnPotentialsDecode::MissingOrInvalid => Some(1),
         SpawnPotentialsDecode::Present(potentials) => spawn_potential_total(&potentials),
@@ -991,9 +998,14 @@ impl WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
             self.block_entities.remove(pos);
             self.remove_persisted_block_entity(pos);
         }
-        let tag = self
-            .existing_block_entity_nbt(pos)
-            .unwrap_or_else(|| dummy_block_entity(pos));
+        let existing_tag = self.existing_block_entity_nbt(pos);
+        let tag = if state.block() == Blocks::SPAWNER.id()
+            && existing_tag.as_ref().is_some_and(is_dummy_block_entity)
+        {
+            dummy_block_entity(pos)
+        } else {
+            existing_tag.unwrap_or_else(|| dummy_block_entity(pos))
+        };
         self.block_entity_nbts.insert(*pos, tag.clone());
         if state.block() == Blocks::CHEST.id() {
             let loot = tag
@@ -1244,7 +1256,7 @@ impl WorldGenLevel for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> 
             return spawn_potential_weight(next_spawn.as_ref(), spawn_potentials, tag.as_ref());
         }
         let tag = tag.as_ref()?;
-        if spawn_data(tag).is_some() {
+        if spawn_data(tag).is_some() || is_dummy_block_entity(tag) {
             return None;
         }
         match decode_spawn_potentials_state(tag) {
@@ -1395,9 +1407,14 @@ impl WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
             self.block_entities.remove(pos);
             self.remove_persisted_block_entity(pos);
         }
-        let tag = self
-            .existing_block_entity_nbt(pos)
-            .unwrap_or_else(|| dummy_block_entity(pos));
+        let existing_tag = self.existing_block_entity_nbt(pos);
+        let tag = if state.block() == Blocks::SPAWNER.id()
+            && existing_tag.as_ref().is_some_and(is_dummy_block_entity)
+        {
+            dummy_block_entity(pos)
+        } else {
+            existing_tag.unwrap_or_else(|| dummy_block_entity(pos))
+        };
         self.block_entity_nbts.insert(*pos, tag.clone());
         if state.block() == Blocks::CHEST.id() {
             let loot = tag
@@ -1591,7 +1608,7 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
             return spawn_potential_weight(next_spawn.as_ref(), spawn_potentials, tag.as_ref());
         }
         let tag = tag.as_ref()?;
-        if spawn_data(tag).is_some() {
+        if spawn_data(tag).is_some() || is_dummy_block_entity(tag) {
             return None;
         }
         match decode_spawn_potentials_state(tag) {
@@ -2873,7 +2890,7 @@ mod tests {
     }
 
     #[test]
-    fn idless_spawn_data_survives_materialization_without_a_potential_draw() {
+    fn dummy_spawner_payload_is_ignored_without_a_potential_draw() {
         let mut region = feature_region();
         let pos = BlockPos::new(0, 64, 0);
         assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
@@ -2896,6 +2913,11 @@ mod tests {
             Blocks::SPAWNER.default_block_state(),
             Blocks::SPAWNER.default_block_state(),
         );
+        let materialized = region
+            .existing_block_entity_nbt(&pos)
+            .expect("materialized DUMMY spawner");
+        assert!(materialized.get("SpawnData").is_none());
+        assert!(materialized.get("SpawnPotentials").is_none());
 
         let mut random = LegacyRandomSource::new(42);
         let mut baseline = LegacyRandomSource::new(42);
@@ -2914,6 +2936,7 @@ mod tests {
             let pos = BlockPos::new(0, 64, 0);
             assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
             let mut tag = dummy_block_entity(&pos);
+            tag.put_string("id", "minecraft:mob_spawner");
             let mut malformed_data = CompoundTag::new();
             malformed_data.put_string("entity", "wrong");
             tag.put("SpawnData".to_string(), Tag::Compound(malformed_data));
@@ -3069,6 +3092,7 @@ mod tests {
         let pos = BlockPos::new(0, 64, 0);
         assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
         let mut tag = dummy_block_entity(&pos);
+        tag.put_string("id", "minecraft:mob_spawner");
         let mut potentials = ListTag::new();
         let mut potential = CompoundTag::new();
         potential.put_int("weight", 2);

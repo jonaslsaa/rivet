@@ -2325,8 +2325,8 @@ mod tests {
                 &region,
                 &spawner_pos,
             ),
-            Some(1),
-            "an uninitialized spawner uses Paper's fallback SpawnData weight"
+            None,
+            "a fresh DUMMY spawner has no spawn-potential draw"
         );
         <WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
             &mut region,
@@ -2375,7 +2375,7 @@ mod tests {
     }
 
     #[test]
-    fn features_region_preserves_spawner_payloads_and_repairs_malformed_nbt() {
+    fn features_region_resets_dummy_spawner_payloads_before_materialization() {
         let generator = test_generator();
         let mut holder = generator.create_holder(ChunkPos::ZERO);
         holder
@@ -2466,6 +2466,13 @@ mod tests {
         let mut region = compose_feature_region(&mut holder.chunk, &generator);
         for pos in [preserved_pos, selected_pos, malformed_pos] {
             assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), 2, 512));
+            assert_eq!(
+                <WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> as WorldGenLevel>::spawner_potential_weight(
+                    &region, &pos,
+                ),
+                None,
+                "DUMMY payload must not create a live spawn-potential draw"
+            );
         }
 
         <WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
@@ -2493,29 +2500,29 @@ mod tests {
             .get_block_entity_nbts()
             .get(&preserved_pos)
             .expect("preserved spawner payload");
-        for (key, value) in [
-            ("Delay", 17),
-            ("MinSpawnDelay", 31),
-            ("MaxSpawnDelay", 63),
-            ("SpawnCount", 5),
-            ("MaxNearbyEntities", 9),
-            ("RequiredPlayerRange", 12),
-            ("SpawnRange", 6),
+        for key in [
+            "Delay",
+            "MinSpawnDelay",
+            "MaxSpawnDelay",
+            "SpawnCount",
+            "MaxNearbyEntities",
+            "RequiredPlayerRange",
+            "SpawnRange",
         ] {
-            assert_eq!(persisted.get_int(key), Some(value), "field {key}");
+            assert_eq!(persisted.get_int(key), None, "stale field {key}");
         }
         let preserved_data = persisted
             .get_compound("SpawnData")
-            .expect("preserved SpawnData");
-        assert_eq!(preserved_data.get_int("CustomSpawnDataField"), Some(29));
+            .expect("materialized SpawnData");
+        assert_eq!(preserved_data.get_int("CustomSpawnDataField"), None);
         let preserved_entity = preserved_data
             .get_compound("entity")
-            .expect("preserved entity payload");
+            .expect("materialized entity payload");
         assert_eq!(
             preserved_entity.get_string("id").map(String::as_str),
             Some("minecraft:zombie")
         );
-        assert_eq!(preserved_entity.get_int("CustomEntityField"), Some(23));
+        assert_eq!(preserved_entity.get_int("CustomEntityField"), None);
         assert!(
             persisted
                 .get_list("SpawnPotentials")
@@ -2529,8 +2536,8 @@ mod tests {
             .expect("selected spawner payload");
         let selected_data = selected
             .get_compound("SpawnData")
-            .expect("selected potential becomes SpawnData");
-        assert_eq!(selected_data.get_int("SelectedSpawnDataField"), Some(41));
+            .expect("materialized SpawnData");
+        assert_eq!(selected_data.get_int("SelectedSpawnDataField"), None);
         assert_eq!(
             selected_data
                 .get_compound("entity")
@@ -2542,7 +2549,7 @@ mod tests {
             selected_data
                 .get_compound("entity")
                 .and_then(|entity| entity.get_int("SelectedEntityField")),
-            Some(37)
+            None
         );
         assert!(
             selected
@@ -2555,7 +2562,7 @@ mod tests {
             .get_block_entity_nbts()
             .get(&malformed_pos)
             .expect("malformed spawner payload");
-        assert_eq!(repaired.get_int("Delay"), Some(23));
+        assert_eq!(repaired.get_int("Delay"), None);
         assert_eq!(
             repaired
                 .get_compound("SpawnData")
