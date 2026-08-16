@@ -88,7 +88,6 @@ use std::sync::Arc;
 use rivet_registry::access::RegistryAccess;
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::block_state::BlockState;
-use rivet_registry::builder::RegistryBuilder;
 use rivet_registry::core::BlockPos;
 use rivet_registry::core::ChunkPos;
 use rivet_registry::core::SectionPos;
