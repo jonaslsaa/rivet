@@ -13,6 +13,7 @@
 //! path `world.level.ChunkPos` resolves — never re-ported.
 
 pub mod block_getter;
+pub mod block_shape_context;
 // `world.level.border` — the `mc.world.level.border` unit (`WorldBorder`,
 // `BorderStatus`, `BorderChangeListener` + `package-info` @NullMarked; wave 3).
 pub mod border;
@@ -53,6 +54,10 @@ pub mod world_gen_level;
 pub mod world_data_configuration;
 
 pub use block_getter::BlockGetter;
+pub use block_shape_context::{
+    BlockShapeContext, DetachedShapeContext, MovingPistonShape, ShapeBox, ShapeGeometry,
+    ShapeQuery, ShapeQueryError, ShulkerBoxShape, SupportType,
+};
 pub use border::{
     BorderChangeListener, BorderStatus, Settings as WorldBorderSettings, WorldBorder,
 };

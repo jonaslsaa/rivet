@@ -20,8 +20,8 @@
 //! tests can trip to pin the return-`false` propagation.
 
 use crate::chunk::chunk_generator::ChunkGenerator;
-use crate::level::WorldGenLevel;
 use crate::level::height_accessor::LevelHeightAccessor;
+use crate::level::{BlockShapeContext, DetachedShapeContext, WorldGenLevel};
 use crate::levelgen::feature::configurations::{CountConfiguration, NoneFeatureConfiguration};
 use crate::levelgen::feature::registry_keys::{CONFIGURED_FEATURE, PLACED_FEATURE};
 use crate::levelgen::feature::{ConfiguredFeatureErased, FeatureId};
@@ -153,6 +153,8 @@ pub struct TestLevel {
     /// present, answers the exact face query instead of the global
     /// `face_sturdy` value.
     pub face_sturdy_at: HashMap<(BlockPos, Direction), bool>,
+    /// Detached block-entity shape inputs used by dynamic-shape tests.
+    pub shape_context: DetachedShapeContext,
     /// `should_freeze` — the fixed `Biome.shouldFreeze` verdict
     /// (`SnowAndFreezeFeature`).
     pub freeze: bool,
@@ -188,6 +190,7 @@ impl TestLevel {
             survive: true,
             face_sturdy: true,
             face_sturdy_at: HashMap::new(),
+            shape_context: DetachedShapeContext::default(),
             freeze: false,
             snow: false,
             post_processing: Vec::new(),
@@ -256,19 +259,34 @@ impl WorldGenLevel for TestLevel {
         self.survive
     }
 
-    fn is_face_sturdy(&self, pos: &BlockPos, _state: &BlockState, direction: &Direction) -> bool {
+    fn shape_context(&self) -> Option<&dyn BlockShapeContext> {
+        Some(&self.shape_context)
+    }
+
+    fn is_face_sturdy(&self, pos: &BlockPos, state: &BlockState, direction: &Direction) -> bool {
         self.face_sturdy_at
             .get(&(*pos, *direction))
             .copied()
-            .unwrap_or(self.face_sturdy)
+            .unwrap_or_else(|| {
+                self.shape_query(pos, state)
+                    .unwrap_or_else(|error| panic!("TestLevel.is_face_sturdy: {error}"))
+                    .is_supporting(crate::level::SupportType::Full, *direction)
+                    || self.face_sturdy
+            })
     }
 
     fn can_attach_to(&self, pos: &BlockPos, state: &BlockState, direction: &Direction) -> bool {
         self.face_sturdy_at
             .get(&(*pos, *direction))
             .copied()
-            .unwrap_or(self.face_sturdy)
-            || state.can_attach_to(*direction)
+            .unwrap_or_else(|| {
+                let query = self
+                    .shape_query(pos, state)
+                    .unwrap_or_else(|error| panic!("TestLevel.can_attach_to: {error}"));
+                query.is_supporting(crate::level::SupportType::Full, *direction)
+                    || query.is_collision_face_full(*direction)
+                    || self.face_sturdy
+            })
     }
 
     fn should_freeze(&self, _pos: &BlockPos, _check_neighbors: bool) -> bool {
