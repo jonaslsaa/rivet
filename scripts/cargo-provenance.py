@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
 import stat
 import subprocess
 import sys
@@ -191,6 +192,27 @@ def file_record(repo: pathlib.Path, path: pathlib.Path, submodules: dict[str, st
     return f"{kind}\0{relative}\0{mode:o}\0{digest}\0{marker}\n"
 
 
+def wrapper_fingerprint(name: str) -> str:
+    value = os.environ.get(name, "")
+    if not value:
+        return ""
+    candidate = pathlib.Path(value)
+    if not candidate.is_absolute():
+        resolved_name = shutil.which(value)
+        if resolved_name is None:
+            return f"{value}\0missing"
+        candidate = pathlib.Path(resolved_name)
+    try:
+        resolved = candidate.resolve(strict=True)
+        info = resolved.stat()
+        if not stat.S_ISREG(info.st_mode):
+            return f"{value}\0{resolved}\0not-regular"
+        digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+        return f"{value}\0{resolved}\0{stat.S_IMODE(info.st_mode):o}\0{digest}"
+    except (OSError, ValueError):
+        return f"{value}\0missing"
+
+
 def build_flags() -> dict[str, str]:
     names = {
         "CARGO_BUILD_TARGET",
@@ -203,12 +225,16 @@ def build_flags() -> dict[str, str]:
         "CARGO_PROFILE_RELEASE_OPT_LEVEL",
         "CARGO_TARGET_DIR",
         "RUSTC",
+        "RUSTC_WORKSPACE_WRAPPER",
         "RUSTC_WRAPPER",
         "RUSTFLAGS",
         "RUSTDOCFLAGS",
         "RUSTUP_TOOLCHAIN",
     }
-    return {name: os.environ.get(name, "") for name in sorted(names)}
+    flags = {name: os.environ.get(name, "") for name in sorted(names)}
+    for name in ("CARGO_BUILD_RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTC_WRAPPER"):
+        flags[f"{name}_CONTENT"] = wrapper_fingerprint(name)
+    return flags
 
 
 def strict_digest(repo: pathlib.Path) -> str:
@@ -263,7 +289,9 @@ def ensure_namespace(repo: pathlib.Path) -> dict[str, str]:
         info = None
     if info is not None and (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)):
         raise ValueError(f"managed target marker is not a regular file: {marker}")
-    marker.write_text(
+    reject_hardlink(marker, "managed target marker")
+    write_text_atomic(
+        marker,
         json.dumps(
             {
                 "version": 1,
@@ -273,7 +301,8 @@ def ensure_namespace(repo: pathlib.Path) -> dict[str, str]:
             },
             sort_keys=True,
         )
-        + "\n"
+        + "\n",
+        "managed target marker",
     )
     return ns
 
@@ -332,6 +361,43 @@ def reject_symlink(path: pathlib.Path, label: str) -> None:
         raise ValueError(f"{label} is a symlink: {path}")
 
 
+def reject_hardlink(path: pathlib.Path, label: str) -> None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+        raise ValueError(f"{label} is a hardlink: {path}")
+
+
+def write_text_atomic(path: pathlib.Path, text: str, label: str) -> None:
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(temporary, flags, 0o600)
+    except FileExistsError as exc:
+        raise ValueError(f"{label} temporary path already exists: {temporary}") from exc
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    try:
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def sidecar_path(path: pathlib.Path) -> pathlib.Path:
     return pathlib.Path(str(path) + SIDECAR_SUFFIX)
 
@@ -339,6 +405,7 @@ def sidecar_path(path: pathlib.Path) -> pathlib.Path:
 def parse_fields(path: pathlib.Path) -> dict[str, str]:
     if not regular_non_symlink(path):
         raise ValueError(f"provenance sidecar is not a regular file: {path}")
+    reject_hardlink(path, "provenance sidecar")
     fields: dict[str, str] = {}
     for line in path.read_text().splitlines():
         if not line:
@@ -362,8 +429,10 @@ def write_sidecar(repo: pathlib.Path, path: pathlib.Path) -> pathlib.Path:
     canonical_path = canonical_existing(path)
     sidecar = sidecar_path(path)
     reject_symlink(sidecar, "provenance sidecar")
+    reject_hardlink(sidecar, "provenance sidecar")
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    sidecar.write_text(
+    write_text_atomic(
+        sidecar,
         "\n".join(
             [
                 "version=1",
@@ -376,7 +445,8 @@ def write_sidecar(repo: pathlib.Path, path: pathlib.Path) -> pathlib.Path:
                 f"sha256={digest}",
                 "",
             ]
-        )
+        ),
+        "provenance sidecar",
     )
     return sidecar
 
@@ -422,14 +492,18 @@ def receipt_path(ns: dict[str, str]) -> pathlib.Path:
 
 def write_receipt(path: pathlib.Path, data: dict[str, object]) -> None:
     reject_symlink(path, "build receipt")
-    temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(data, sort_keys=True) + "\n")
-    os.replace(temporary, path)
+    reject_hardlink(path, "build receipt")
+    write_text_atomic(
+        path,
+        json.dumps(data, sort_keys=True) + "\n",
+        "build receipt",
+    )
 
 
 def read_receipt(path: pathlib.Path) -> dict[str, object]:
     if not regular_non_symlink(path):
         raise ValueError(f"missing build receipt: {path}")
+    reject_hardlink(path, "build receipt")
     value = json.loads(path.read_text())
     if not isinstance(value, dict):
         raise ValueError(f"invalid build receipt: {path}")
@@ -460,6 +534,7 @@ def prepare_deliverables(repo: pathlib.Path, paths: Iterable[pathlib.Path]) -> N
         sidecar = sidecar_path(path)
         reject_symlink(path, "deliverable")
         reject_symlink(sidecar, "provenance sidecar")
+        reject_hardlink(sidecar, "provenance sidecar")
         valid = namespace_mode() == "iterative" and valid_sidecar(repo, path)
         if valid:
             entries[str(path)] = {"valid": True, "recreate": False}

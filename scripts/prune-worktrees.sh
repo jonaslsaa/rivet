@@ -118,13 +118,24 @@ else:
             errors="surrogateescape",
         )
     except (OSError, subprocess.CalledProcessError):
-        output = ""
-    assignment = re.compile(r"(?:^|\s)(?:CARGO_TARGET_DIR|RIVET_CARGO_TARGET_DIR)=([^\s]+)")
+        raise SystemExit(0)
+    assignment = re.compile(r"(?:^|\s)(?:CARGO_TARGET_DIR|RIVET_CARGO_TARGET_DIR)=")
     for line in output.splitlines():
-        pid = line.split(None, 1)[0] if line.split(None, 1) else ""
-        if pid == self_pid:
+        fields = line.split(None, 1)
+        if not fields or fields[0] == self_pid:
             continue
-        values.extend(match.group(1) for match in assignment.finditer(line))
+        payload = fields[1] if len(fields) == 2 else ""
+        matches = list(assignment.finditer(payload))
+        for index, match in enumerate(matches):
+            start = match.end()
+            stop = matches[index + 1].start() if index + 1 < len(matches) else len(payload)
+            segment = payload[start:stop]
+            boundaries = [len(segment)]
+            boundaries.extend(item.start() for item in re.finditer(r"\s+", segment))
+            for end in boundaries:
+                value = segment[:end].strip()
+                if value:
+                    values.append(value)
 for value in values:
     path = pathlib.Path(value)
     if not path.is_absolute():

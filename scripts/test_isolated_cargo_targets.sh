@@ -164,6 +164,7 @@ mkdir -p "$PROV/scripts"
 cp "$SCRIPT_DIR/cargo-provenance.py" "$PROV/scripts/"
 cp "$SCRIPT_DIR/cargo-target-dir.sh" "$PROV/scripts/"
 cp "$SCRIPT_DIR/prune-worktrees.sh" "$PROV/scripts/"
+cp "$SCRIPT_DIR/with-build-lock.sh" "$PROV/scripts/"
 chmod +x "$PROV/scripts"/*
 prov_env=(RIVET_CARGO_TARGET_ROOT="$PROV_ROOT")
 prov_target() { env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR "${prov_env[@]}" "$PROV/scripts/cargo-target-dir.sh" target "$PROV"; }
@@ -281,6 +282,28 @@ grep -Fq 'managed process is live' "$TMP/live-prune.out" || fail "canonical live
 [ -d "$PROV_TARGET" ] || fail "live target was pruned through an alias"
 pass "live pruning canonicalizes symlink, slash, and dot aliases"
 
+SPACE_ROOT="$TMP/cache with space"
+mkdir -p "$SPACE_ROOT"
+space_env=(RIVET_CARGO_TARGET_ROOT="$SPACE_ROOT")
+SPACE_TARGET="$(env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR "${space_env[@]}" "$PROV/scripts/cargo-target-dir.sh" ensure "$PROV")"
+find -P "$SPACE_TARGET" -type f -exec touch -m -t 200001010000 {} +
+CARGO_TARGET_DIR="$SPACE_TARGET" env "${space_env[@]}" python3 -c 'import time; time.sleep(60)' &
+SPACE_PID=$!
+sleep 1
+env "${space_env[@]}" "$PROV/scripts/prune-worktrees.sh" --idle-hours 1 > "$TMP/space-prune.out"
+grep -Fq 'managed process is live' "$TMP/space-prune.out" || fail "space-containing live target was not retained"
+[ -d "$SPACE_TARGET" ] || fail "space-containing live target was pruned"
+PS_FAIL_BIN="$TMP/ps-failure-bin"
+mkdir -p "$PS_FAIL_BIN"
+printf '#!/bin/sh\nexit 1\n' > "$PS_FAIL_BIN/ps"
+chmod +x "$PS_FAIL_BIN/ps"
+PATH="$PS_FAIL_BIN:$PATH" env "${space_env[@]}" "$PROV/scripts/prune-worktrees.sh" --idle-hours 1 > "$TMP/ps-failure-prune.out"
+grep -Fq 'managed process is live' "$TMP/ps-failure-prune.out" || fail "ps failure did not retain the target conservatively"
+[ -d "$SPACE_TARGET" ] || fail "ps failure pruned a live target"
+kill "$SPACE_PID" 2>/dev/null || true
+wait "$SPACE_PID" 2>/dev/null || true
+pass "space-containing live targets and ps failures are fail-closed"
+
 # The worktree parser must flush its final record, while malformed status is a
 # keep decision rather than an accidental removal.
 git -C "$PROV" update-ref refs/remotes/origin/main HEAD
@@ -307,5 +330,149 @@ PATH="$FAKE_BIN:$PATH" bash -c 'source "$1"; worktree_sweep "$2" "$3"' bash "$PR
 [ -d "$STATUS_WT" ] || fail "malformed status was treated as clean"
 git -C "$PROV" worktree remove --force "$STATUS_WT"
 pass "malformed status retains the worktree"
+
+# Namespace creation must tolerate first-use races without accepting a symlink
+# or non-directory component created by another process.
+RACE_ROOT="$TMP/race-cache"
+mkdir -p "$RACE_ROOT"
+RACE_OUT="$TMP/race-out"
+RACE_PIDS=()
+for _ in $(seq 1 24); do
+  (
+    env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR RIVET_CARGO_TARGET_ROOT="$RACE_ROOT" \
+      "$SCRIPT_DIR/cargo-target-dir.sh" target "$PROV"
+  ) > "$RACE_OUT.$$.$RANDOM" &
+  RACE_PIDS+=("$!")
+done
+for pid in "${RACE_PIDS[@]}"; do
+  wait "$pid"
+done
+RACE_TARGETS=""
+for race_file in "$RACE_OUT".*; do
+  [ -f "$race_file" ] || continue
+  RACE_TARGETS+="$(cat "$race_file")\n"
+done
+[ -n "$RACE_TARGETS" ] || fail "concurrent first-use namespace creation produced no targets"
+[ "$(printf '%b' "$RACE_TARGETS" | sort -u | wc -l | tr -d ' ')" = 1 ] || fail "concurrent namespace creation disagreed on the target"
+rm -f "$RACE_OUT".*
+pass "concurrent first-use namespace creation is race-safe"
+
+# Lock ownership must be structural, not inferred from caller-controlled file
+# descriptor variables. A managed lock held by another process must still block.
+PROV_NS="$(env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR "${prov_env[@]}" "$PROV/scripts/cargo-target-dir.sh" namespace "$PROV")"
+GROUP_LOCK="$(printf '%s\n' "$PROV_NS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["group_lock"])')"
+CHECKOUT_LOCK="$(printf '%s\n' "$PROV_NS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["checkout_lock"])')"
+LOCK_HOLDER="$TMP/lock-holder.py"
+cat > "$LOCK_HOLDER" <<'PY'
+import fcntl
+import pathlib
+import sys
+import time
+
+ready, *paths = map(pathlib.Path, sys.argv[1:])
+files = [path.open("a+") for path in paths]
+for stream in files:
+    fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+ready.write_text("ready")
+time.sleep(3)
+PY
+python3 "$LOCK_HOLDER" "$TMP/lock-ready" "$GROUP_LOCK" "$CHECKOUT_LOCK" &
+LOCK_PID=$!
+while [ ! -e "$TMP/lock-ready" ]; do sleep 0.05; done
+exec 8<> "$TMP/foreign-fd-8"
+exec 9<> "$TMP/foreign-fd-9"
+LOCK_STARTED="$(date +%s)"
+env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR RIVET_BUILD_GROUP_LOCK_FD=8 RIVET_BUILD_LOCK_FD=9 "${prov_env[@]}" \
+  "$PROV/scripts/with-build-lock.sh" "$PROV" true
+LOCK_ELAPSED=$(( $(date +%s) - LOCK_STARTED ))
+wait "$LOCK_PID"
+[ "$LOCK_ELAPSED" -ge 2 ] || fail "foreign inherited lock descriptors bypassed managed lock acquisition"
+exec 8>&-
+exec 9>&-
+pass "caller-controlled lock descriptors cannot bypass serialization"
+
+# Lock paths and provenance metadata are replacement-only objects: symlinks and
+# hardlinks must not redirect writes outside the managed namespace.
+LOCK_OUTSIDE="$TMP/lock-outside"
+printf lock-sentinel > "$LOCK_OUTSIDE"
+mkdir -p "$(dirname "$GROUP_LOCK")"
+rm -f "$GROUP_LOCK"
+ln -s "$LOCK_OUTSIDE" "$GROUP_LOCK"
+if env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR "${prov_env[@]}" \
+  "$PROV/scripts/with-build-lock.sh" "$PROV" true >/dev/null 2>&1; then
+  fail "symlinked group lock was accepted"
+fi
+[ "$(cat "$LOCK_OUTSIDE")" = lock-sentinel ] || fail "symlinked group lock changed its outside target"
+rm -f "$GROUP_LOCK"
+mkdir -p "$(dirname "$CHECKOUT_LOCK")"
+rm -f "$CHECKOUT_LOCK"
+ln -s "$LOCK_OUTSIDE" "$CHECKOUT_LOCK"
+if env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR "${prov_env[@]}" \
+  "$PROV/scripts/with-build-lock.sh" "$PROV" true >/dev/null 2>&1; then
+  fail "symlinked checkout lock was accepted"
+fi
+[ "$(cat "$LOCK_OUTSIDE")" = lock-sentinel ] || fail "symlinked checkout lock changed its outside target"
+rm -f "$CHECKOUT_LOCK"
+pass "managed lock symlinks are rejected without outside writes"
+
+MARKER="$PROV_TARGET/.rivet-cargo-target"
+MARKER_OUTSIDE="$TMP/marker-outside"
+printf marker-sentinel > "$MARKER_OUTSIDE"
+rm -f "$MARKER"
+ln "$MARKER_OUTSIDE" "$MARKER"
+if env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR "${prov_env[@]}" \
+  python3 "$PROV/scripts/cargo-provenance.py" ensure "$PROV" >/dev/null 2>&1; then
+  fail "hardlinked marker was accepted"
+fi
+[ "$(cat "$MARKER_OUTSIDE")" = marker-sentinel ] || fail "hardlinked marker changed its outside target"
+rm -f "$MARKER"
+env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR "${prov_env[@]}" \
+  python3 "$PROV/scripts/cargo-provenance.py" ensure "$PROV" >/dev/null
+pass "hardlinked markers cannot overwrite outside files"
+
+SIDECAR_HARDLINK_BIN="$PROV_TARGET/debug/sidecar-hardlink"
+SIDECAR_HARDLINK_OUTSIDE="$TMP/sidecar-hardlink-outside"
+mkdir -p "$(dirname "$SIDECAR_HARDLINK_BIN")"
+printf sidecar-binary > "$SIDECAR_HARDLINK_BIN"
+printf sidecar-sentinel > "$SIDECAR_HARDLINK_OUTSIDE"
+ln "$SIDECAR_HARDLINK_OUTSIDE" "$SIDECAR_HARDLINK_BIN.rivet-provenance"
+if env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR "${prov_env[@]}" \
+  python3 "$PROV/scripts/cargo-provenance.py" sidecar "$PROV" "$SIDECAR_HARDLINK_BIN" >/dev/null 2>&1; then
+  fail "hardlinked provenance sidecar was accepted"
+fi
+[ "$(cat "$SIDECAR_HARDLINK_OUTSIDE")" = sidecar-sentinel ] || fail "hardlinked sidecar changed its outside target"
+rm -f "$SIDECAR_HARDLINK_BIN.rivet-provenance" "$SIDECAR_HARDLINK_BIN"
+pass "hardlinked provenance sidecars cannot overwrite outside files"
+
+RECEIPT="$TMP/receipt"
+RECEIPT_OUTSIDE="$TMP/receipt-outside"
+printf receipt-sentinel > "$RECEIPT_OUTSIDE"
+ln -s "$RECEIPT_OUTSIDE" "$RECEIPT.4242.tmp"
+python3 - "$SCRIPT_DIR/cargo-provenance.py" "$RECEIPT" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+spec = importlib.util.spec_from_file_location("cargo_provenance", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+module.os.getpid = lambda: 4242
+try:
+    module.write_receipt(pathlib.Path(sys.argv[2]), {"version": 1})
+except (OSError, ValueError):
+    pass
+PY
+[ "$(cat "$RECEIPT_OUTSIDE")" = receipt-sentinel ] || fail "receipt temporary symlink changed its outside target"
+[ -L "$RECEIPT.4242.tmp" ] || fail "receipt temporary symlink was unexpectedly replaced"
+pass "receipt temporary symlinks cannot redirect writes"
+
+WRAPPER="$TMP/custom-wrapper"
+printf 'wrapper-a\n' > "$WRAPPER"
+WRAPPER_DIGEST_A="$(env RUSTC_WRAPPER="$WRAPPER" "${prov_env[@]}" "$PROV/scripts/cargo-target-dir.sh" digest "$PROV")"
+printf 'wrapper-b\n' > "$WRAPPER"
+WRAPPER_DIGEST_B="$(env RUSTC_WRAPPER="$WRAPPER" "${prov_env[@]}" "$PROV/scripts/cargo-target-dir.sh" digest "$PROV")"
+[ "$WRAPPER_DIGEST_A" != "$WRAPPER_DIGEST_B" ] || fail "custom RUSTC_WRAPPER content mutation did not invalidate the digest"
+pass "custom RUSTC_WRAPPER content changes invalidate provenance"
 
 printf '\nALL ISOLATED CARGO TARGET TESTS PASSED\n'

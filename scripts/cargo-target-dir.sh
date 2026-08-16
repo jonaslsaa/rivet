@@ -72,8 +72,15 @@ for component in path.parts[1:]:
     try:
         info = current.lstat()
     except FileNotFoundError:
-        current.mkdir()
-        info = current.lstat()
+        try:
+            current.mkdir()
+        except FileExistsError:
+            pass
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            print(f"cargo target: managed path disappeared during creation: {current}", file=sys.stderr)
+            raise SystemExit(2)
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
         print(f"cargo target: managed path is not a real directory: {current}", file=sys.stderr)
         raise SystemExit(2)
