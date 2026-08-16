@@ -1245,8 +1245,7 @@ main() {
 # Run only when executed directly; sourcing this file just defines the functions,
 # so tests can drive oracle_prereq_check in isolation.
 if [[ "${BASH_SOURCE[0]:-}" == "$0" ]]; then
-  if [ "${RIVET_BUILD_GROUP_LOCK_FD:-}" = 8 ] && [ "${RIVET_BUILD_LOCK_FD:-}" = 9 ] \
-      && { : >&8; } 2>/dev/null && { : >&9; } 2>/dev/null; then
+  if cargo_build_locks_held "$REPO_DIR"; then
     main "$@"
   else
     exec "$REPO_DIR/scripts/with-build-lock.sh" "$REPO_DIR" "$0" "$@"

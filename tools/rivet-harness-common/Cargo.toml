@@ -8,6 +8,7 @@ description = "Shared primitives for Rivet's E2E harness tools (child-process bo
 
 [dependencies]
 base64.workspace = true
+libc.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
 

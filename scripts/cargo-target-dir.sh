@@ -14,6 +14,76 @@ cargo_namespace_value() {
   cargo_namespace_json "$1" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[sys.argv[1]])' "$2"
 }
 
+cargo_namespace_value_nul() {
+  [ "$#" -eq 2 ] || { printf 'usage: cargo_namespace_value_nul REPO_DIR KEY\n' >&2; return 2; }
+  python3 - "$_cargo_provenance" "$1" "$2" <<'PY'
+import importlib.util
+import os
+import pathlib
+import sys
+
+spec = importlib.util.spec_from_file_location("cargo_provenance", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+value = module.namespace(pathlib.Path(sys.argv[2]))[sys.argv[3]]
+sys.stdout.buffer.write(os.fsencode(value) + b"\0")
+PY
+}
+
+cargo_namespace_path_for() {
+  [ "$#" -eq 2 ] || { printf 'usage: cargo_namespace_path_for REPO_DIR KEY\n' >&2; return 2; }
+  local value
+  IFS= read -r -d '' value < <(cargo_namespace_value_nul "$1" "$2") || return 2
+  printf -v CARGO_NAMESPACE_PATH_RESULT '%s' "$value"
+}
+
+cargo_build_locks_held() {
+  [ "$#" -eq 1 ] || { printf 'usage: cargo_build_locks_held REPO_DIR\n' >&2; return 2; }
+  [ "${RIVET_BUILD_GROUP_LOCK_FD:-}" = 8 ] || return 1
+  [ "${RIVET_BUILD_LOCK_FD:-}" = 9 ] || return 1
+  python3 - "$_cargo_provenance" "$1" <<'PY'
+import fcntl
+import importlib.util
+import os
+import pathlib
+import stat
+import sys
+
+spec = importlib.util.spec_from_file_location("cargo_provenance", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+namespace = module.namespace(pathlib.Path(sys.argv[2]))
+
+def held(fd_number: int, path: str) -> bool:
+    expected = os.lstat(path)
+    actual = os.fstat(fd_number)
+    if (
+        stat.S_ISLNK(expected.st_mode)
+        or not stat.S_ISREG(expected.st_mode)
+        or expected.st_nlink != 1
+        or not stat.S_ISREG(actual.st_mode)
+        or actual.st_nlink != 1
+        or expected.st_dev != actual.st_dev
+        or expected.st_ino != actual.st_ino
+    ):
+        return False
+    try:
+        fcntl.flock(fd_number, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    else:
+        return True
+
+try:
+    if not held(8, namespace["group_lock"]) or not held(9, namespace["checkout_lock"]):
+        raise SystemExit(1)
+except (OSError, ValueError, KeyError):
+    raise SystemExit(1)
+PY
+}
+
 cargo_project_root_for() {
   cargo_namespace_value "$1" top_level
 }
@@ -29,7 +99,9 @@ cargo_checkout_id_for() {
 cargo_target_dir_for() {
   [ "$#" -eq 1 ] || { printf 'usage: cargo_target_dir_for REPO_DIR\n' >&2; return 2; }
   local repo_dir=$1 expected override
-  expected=$(cargo_namespace_value "$repo_dir" target) || return
+  cargo_namespace_path_for "$repo_dir" target || return
+  expected=$CARGO_NAMESPACE_PATH_RESULT
+  CARGO_TARGET_DIR_RESULT=$expected
   local override_name
   for override_name in CARGO_TARGET_DIR RIVET_CARGO_TARGET_DIR; do
     override=${!override_name:-}
@@ -42,6 +114,7 @@ cargo_target_dir_for() {
     esac
     local canonical
     canonical=$(python3 - "$override" <<'PY'
+import os
 import pathlib
 import stat
 import sys
@@ -65,10 +138,11 @@ while True:
     resolved = probe.resolve(strict=True)
     for name in reversed(missing):
         resolved /= name
-    print(resolved)
+    sys.stdout.buffer.write(os.fsencode(str(resolved)) + b"\x1f")
     break
 PY
 ) || return 2
+    canonical=${canonical%$'\x1f'}
     if [ "$canonical" != "$expected" ]; then
       printf '%s is foreign; expected %s, got %s\n' "$override_name" "$expected" "$canonical" >&2
       return 2
@@ -102,7 +176,8 @@ PY
 cargo_prepare_namespace() {
   [ "$#" -eq 1 ] || { printf 'usage: cargo_prepare_namespace REPO_DIR\n' >&2; return 2; }
   local repo_dir=$1 target
-  target=$(cargo_target_dir_for "$repo_dir") || return
+  cargo_target_dir_for "$repo_dir" >/dev/null || return
+  target=$CARGO_TARGET_DIR_RESULT
   python3 "$_cargo_provenance" ensure "$repo_dir" >/dev/null || return
   printf '%s\n' "$target"
 }
@@ -161,7 +236,8 @@ cargo_binary_for() {
 cargo_export_namespace() {
   [ "$#" -eq 1 ] || { printf 'usage: cargo_export_namespace REPO_DIR\n' >&2; return 2; }
   local repo_dir=$1 target
-  target=$(cargo_prepare_namespace "$repo_dir") || return
+  cargo_prepare_namespace "$repo_dir" >/dev/null || return
+  target=$CARGO_TARGET_DIR_RESULT
   export CARGO_TARGET_DIR="$target"
   export RIVET_CARGO_TARGET_DIR="$target"
   local repo_id checkout_id

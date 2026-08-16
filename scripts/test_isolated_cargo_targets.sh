@@ -240,6 +240,56 @@ fi
 rm -f "$SIDECAR_BIN.rivet-provenance" "$SIDECAR_BIN"
 pass "executable, parent, and sidecar symlink escapes are rejected"
 
+SWAP_BIN="$PROV_TARGET/debug/swap-bin"
+SWAP_PARENT="$PROV_TARGET/debug"
+SWAP_OUTSIDE="$TMP/swap-outside"
+mkdir -p "$SWAP_OUTSIDE"
+printf inside > "$SWAP_BIN"
+printf outside > "$SWAP_OUTSIDE/swap-bin"
+env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR "${prov_env[@]}" \
+  python3 "$PROV/scripts/cargo-provenance.py" sidecar "$PROV" "$SWAP_BIN" >/dev/null
+python3 - "$PROV/scripts/cargo-provenance.py" "$PROV" "$SWAP_BIN" "$SWAP_PARENT" "$SWAP_OUTSIDE" <<'PY'
+import importlib.util
+import os
+import pathlib
+import sys
+
+spec = importlib.util.spec_from_file_location("cargo_provenance", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+repo = pathlib.Path(sys.argv[2])
+binary = pathlib.Path(sys.argv[3])
+parent = pathlib.Path(sys.argv[4])
+outside = pathlib.Path(sys.argv[5])
+real_open_directory = module.open_directory
+swapped = False
+
+def swap_after_directory_open(path, create, root=None):
+    global swapped
+    result = real_open_directory(path, create, root)
+    if path == parent and not swapped:
+        os.rename(parent, parent.with_name("debug-before-swap"))
+        os.symlink(outside, parent)
+        swapped = True
+    return result
+
+module.open_directory = swap_after_directory_open
+try:
+    try:
+        module.verify_sidecar(repo, binary)
+    except (OSError, ValueError):
+        pass
+    else:
+        raise SystemExit("ancestor swap was accepted")
+finally:
+    if swapped:
+        parent.unlink()
+        os.rename(parent.with_name("debug-before-swap"), parent)
+PY
+rm -f "$SWAP_BIN.rivet-provenance" "$SWAP_BIN"
+pass "provenance rejects ancestor swaps between validation and reads"
+
 # Namespace and inherited-target aliases are canonicalized without permitting a
 # foreign target. A final target symlink must fail before marker creation.
 ALIAS_ROOT="$TMP/root-alias"
@@ -400,6 +450,14 @@ PY
 python3 "$LOCK_HOLDER" "$TMP/lock-ready" "$GROUP_LOCK" "$CHECKOUT_LOCK" &
 LOCK_PID=$!
 while [ ! -e "$TMP/lock-ready" ]; do sleep 0.05; done
+exec 8<> "$GROUP_LOCK"
+exec 9<> "$CHECKOUT_LOCK"
+if env RIVET_BUILD_GROUP_LOCK_FD=8 RIVET_BUILD_LOCK_FD=9 "${prov_env[@]}" \
+  bash -c 'source "$1"; cargo_build_locks_held "$2"' bash "$PROV/scripts/cargo-target-dir.sh" "$PROV"; then
+  fail "inherited managed descriptors bypassed a lock held by another process"
+fi
+exec 8>&-
+exec 9>&-
 exec 8<> "$TMP/foreign-fd-8"
 exec 9<> "$TMP/foreign-fd-9"
 LOCK_STARTED="$(date +%s)"
@@ -411,6 +469,40 @@ wait "$LOCK_PID"
 exec 8>&-
 exec 9>&-
 pass "caller-controlled lock descriptors cannot bypass serialization"
+
+RACE_TARGET="$PROV_TARGET"
+find -P "$RACE_TARGET" -type f ! -name .rivet-cargo-target -exec touch -m -t 200001010000 {} +
+RACE_READY="$TMP/race-lock-ready"
+RACE_HOLDER="$TMP/race-lock-holder.py"
+cat > "$RACE_HOLDER" <<'PY'
+import fcntl
+import pathlib
+import sys
+import time
+
+ready, *paths = map(pathlib.Path, sys.argv[1:])
+files = [path.open("a+") for path in paths]
+for stream in files:
+    fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+ready.write_text("ready")
+time.sleep(3)
+PY
+(
+  source "$PROV/scripts/prune-worktrees.sh"
+  eval "$(declare -f lock_free | sed '1s/lock_free/original_lock_free/')"
+  race_holder_pid=
+  lock_free() {
+    original_lock_free "$@" || return
+    python3 "$RACE_HOLDER" "$RACE_READY" "$GROUP_LOCK" "$CHECKOUT_LOCK" &
+    race_holder_pid=$!
+    while [ ! -e "$RACE_READY" ]; do sleep 0.01; done
+  }
+  prune_namespace "$PROV_ROOT/$REPO_ID" "$REPO_ID" "$GROUP_LOCK" "$CHECKOUT_LOCK" 60
+  kill "$race_holder_pid" 2>/dev/null || true
+  wait "$race_holder_pid" 2>/dev/null || true
+) > "$TMP/race-prune.out"
+[ -d "$RACE_TARGET" ] || fail "pruner deleted a target after a post-probe lock acquisition"
+pass "pruning holds managed locks through deletion"
 
 # Lock paths and provenance metadata are replacement-only objects: symlinks and
 # hardlinks must not redirect writes outside the managed namespace.
@@ -560,6 +652,38 @@ PATH_DIGEST_B="$(env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR "${prov_env[@
 [ "$PATH_DIGEST_A" != "$PATH_DIGEST_B" ] || fail "lossless Git path capture ignored a newline path"
 rm -f "$NEWLINE_PATH" "$TRAILING_PATH"
 pass "newline and trailing-whitespace paths are losslessly represented"
+
+NEWLINE_ROOT="$TMP/cache-with"$'\n'"root"
+NEWLINE_TARGET="$(env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR \
+  RIVET_CARGO_TARGET_ROOT="$NEWLINE_ROOT" "$PROV/scripts/cargo-target-dir.sh" ensure "$PROV")"
+find -P "$NEWLINE_TARGET" -type f ! -name .rivet-cargo-target -exec touch -m -t 200001010000 {} +
+env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR RIVET_CARGO_TARGET_ROOT="$NEWLINE_ROOT" \
+  "$PROV/scripts/prune-worktrees.sh" --idle-hours 1 > "$TMP/newline-root-prune.out"
+[ ! -d "$NEWLINE_TARGET" ] || fail "newline-containing cache root target was not pruned"
+grep -Fq 'pruned 1 marker-owned target' "$TMP/newline-root-prune.out" || \
+  fail "newline-containing cache root marker was not scanned losslessly"
+pass "newline-containing cache roots survive namespace export and marker scans"
+
+NEWLINE_REPO="$TMP/repository"$'\n'
+mkdir -p "$NEWLINE_REPO"
+git -C "$NEWLINE_REPO" init -q
+git -C "$NEWLINE_REPO" config user.email test@example.invalid
+git -C "$NEWLINE_REPO" config user.name test
+printf newline-repo > "$NEWLINE_REPO/README"
+git -C "$NEWLINE_REPO" add README
+git -C "$NEWLINE_REPO" commit -qm initial
+mkdir -p "$NEWLINE_REPO/scripts"
+cp "$SCRIPT_DIR/cargo-provenance.py" "$NEWLINE_REPO/scripts/"
+cp "$SCRIPT_DIR/cargo-target-dir.sh" "$NEWLINE_REPO/scripts/"
+chmod +x "$NEWLINE_REPO/scripts"/*
+NEWLINE_REPO_TOP_HEX="$(env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR \
+  RIVET_CARGO_TARGET_ROOT="$TMP/newline-repo-cache" "$NEWLINE_REPO/scripts/cargo-target-dir.sh" \
+  namespace "$NEWLINE_REPO" | python3 -c 'import json,sys; print(json.load(sys.stdin)["top_level"].encode().hex())')"
+case "$NEWLINE_REPO_TOP_HEX" in
+  *0a) : ;;
+  *) fail "repository path ending in newline was truncated by Git capture" ;;
+esac
+pass "repository paths ending in newlines are captured losslessly"
 
 DRY_ROOT="$TMP/dry-cache"
 DRY_TARGET="$(env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR RIVET_CARGO_TARGET_ROOT="$DRY_ROOT" \

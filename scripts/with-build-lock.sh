@@ -12,49 +12,23 @@ shift
 source "$repo_dir/scripts/cargo-target-dir.sh"
 cargo_export_namespace "$repo_dir"
 
-namespace=$(cargo_namespace_json "$repo_dir")
-group_lock=$(printf '%s\n' "$namespace" | python3 -c 'import json,sys; print(json.load(sys.stdin)["group_lock"])')
-checkout_lock=$(printf '%s\n' "$namespace" | python3 -c 'import json,sys; print(json.load(sys.stdin)["checkout_lock"])')
-
-if [ "${RIVET_BUILD_GROUP_LOCK_FD:-}" = 8 ] && [ "${RIVET_BUILD_LOCK_FD:-}" = 9 ]; then
-  if python3 - "$group_lock" "$checkout_lock" <<'PY'
-import fcntl
-import os
-import stat
-import sys
-
-
-def authenticate(fd_number: int, expected_path: str) -> None:
-    expected = os.lstat(expected_path)
-    if stat.S_ISLNK(expected.st_mode) or not stat.S_ISREG(expected.st_mode) or expected.st_nlink != 1:
-        raise OSError("managed lock is not a unique regular file")
-    actual = os.fstat(fd_number)
-    if (
-        not stat.S_ISREG(actual.st_mode)
-        or actual.st_nlink != 1
-        or actual.st_dev != expected.st_dev
-        or actual.st_ino != expected.st_ino
-    ):
-        raise OSError("inherited descriptor is not the managed lock inode")
-    fcntl.flock(fd_number, fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-
-try:
-    authenticate(8, sys.argv[1])
-    authenticate(9, sys.argv[2])
-except (OSError, ValueError):
-    raise SystemExit(1)
-PY
-  then
-    exec "$@"
-  fi
+if cargo_build_locks_held "$repo_dir"; then
+  exec "$@"
 fi
 
-python3 - "$group_lock" "$checkout_lock" "$@" <<'PY'
+python3 - "$repo_dir/scripts/cargo-provenance.py" "$repo_dir" "$@" <<'PY'
 import fcntl
+import importlib.util
 import os
+import pathlib
 import stat
 import sys
+
+spec = importlib.util.spec_from_file_location("cargo_provenance", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+namespace = module.namespace(pathlib.Path(sys.argv[2]))
 
 
 def open_directory(path: str) -> int:
@@ -103,7 +77,7 @@ def open_lock(path: str) -> int:
     return fd
 
 
-paths = sys.argv[1:3]
+paths = [namespace["group_lock"], namespace["checkout_lock"]]
 argv = sys.argv[3:]
 fds = []
 try:

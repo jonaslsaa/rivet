@@ -250,8 +250,9 @@ dir_kb() {
 }
 
 remove_namespace() {
-  local root=$1 target=$2 marker=$3
-  python3 - "$root" "$target" "$marker" <<'PY'
+  local root=$1 target=$2 marker=$3 group_lock=$4 checkout_lock=$5
+  python3 - "$root" "$target" "$marker" "$group_lock" "$checkout_lock" <<'PY'
+import fcntl
 import json
 import os
 import stat
@@ -260,8 +261,51 @@ import sys
 root = os.path.abspath(sys.argv[1])
 target = os.path.abspath(sys.argv[2])
 marker = os.path.abspath(sys.argv[3])
+lock_paths = [os.path.abspath(sys.argv[4]), os.path.abspath(sys.argv[5])]
 flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+def open_directory(path: str) -> int:
+    fd = os.open(os.sep, flags)
+    try:
+        for component in [item for item in path.split(os.sep) if item]:
+            next_fd = os.open(component, flags, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+def open_lock(path: str) -> int:
+    parent_fd = open_directory(os.path.dirname(path))
+    name = os.path.basename(path)
+    try:
+        fd = os.open(
+            name,
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=parent_fd,
+        )
+        expected = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        actual = os.fstat(fd)
+        if (
+            stat.S_ISLNK(expected.st_mode)
+            or not stat.S_ISREG(expected.st_mode)
+            or expected.st_nlink != 1
+            or not stat.S_ISREG(actual.st_mode)
+            or actual.st_nlink != 1
+            or expected.st_dev != actual.st_dev
+            or expected.st_ino != actual.st_ino
+        ):
+            raise OSError("lock changed during open")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    finally:
+        os.close(parent_fd)
+
+lock_fds = []
 try:
+    lock_fds = [open_lock(path) for path in lock_paths]
     relative = os.path.relpath(target, root)
     if relative == os.curdir or relative.startswith(os.pardir + os.sep):
         raise OSError("target is outside managed root")
@@ -347,7 +391,7 @@ try:
 except (OSError, ValueError, UnicodeError):
     raise SystemExit(1)
 finally:
-    for fd in reversed(fds):
+    for fd in reversed(lock_fds + fds):
         try:
             os.close(fd)
         except OSError:
@@ -358,12 +402,17 @@ PY
 prune_namespace() {
   local root=$1 repo_id=$2 group_lock=$3 checkout_lock=$4 minutes=$5
   [ -d "$root" ] || return 0
-  local markers
-  if ! markers=$(find -P "$root" -type f -name .rivet-cargo-target -print 2>/dev/null); then
+  local marker_list
+  marker_list=$(mktemp) || {
+    say "KEEP   $root [marker scan failed]"
+    return 0
+  }
+  if ! find -P "$root" -type f -name .rivet-cargo-target -print0 > "$marker_list" 2>/dev/null; then
+    rm -f "$marker_list"
     say "KEEP   $root [marker scan failed]"
     return 0
   fi
-  while IFS= read -r marker; do
+  while IFS= read -r -d '' marker; do
     [ -n "$marker" ] || continue
     local target kb
     target=$(dirname "$marker")
@@ -390,13 +439,14 @@ prune_namespace() {
       say "  DRY: remove namespace $target"
       PRUNED=$((PRUNED + 1))
       FREED_KB=$((FREED_KB + kb))
-    elif remove_namespace "$root" "$target" "$marker"; then
+    elif remove_namespace "$root" "$target" "$marker" "$group_lock" "$checkout_lock"; then
       PRUNED=$((PRUNED + 1))
       FREED_KB=$((FREED_KB + kb))
     else
       say "KEEP   $target [namespace changed during deletion]"
     fi
-  done <<< "$markers"
+  done < "$marker_list"
+  rm -f "$marker_list"
 }
 
 worktree_sweep() {
@@ -468,14 +518,18 @@ main() {
     esac
     shift
 done
-  local ns root repo_id group_lock checkout_lock common current minutes
-  ns=$(cargo_namespace_json "$REPO_DIR") || return 2
-  root=$(printf '%s\n' "$ns" | python3 -c 'import json,sys; print(json.load(sys.stdin)["root"])')
-  repo_id=$(printf '%s\n' "$ns" | python3 -c 'import json,sys; print(json.load(sys.stdin)["repo_id"])')
-  group_lock=$(printf '%s\n' "$ns" | python3 -c 'import json,sys; print(json.load(sys.stdin)["group_lock"])')
-  checkout_lock=$(printf '%s\n' "$ns" | python3 -c 'import json,sys; print(json.load(sys.stdin)["checkout_lock"])')
-  common=$(printf '%s\n' "$ns" | python3 -c 'import json,sys; print(json.load(sys.stdin)["common_dir"])')
-  current=$(printf '%s\n' "$ns" | python3 -c 'import json,sys; print(json.load(sys.stdin)["top_level"])')
+  local root repo_id group_lock checkout_lock common current minutes
+  cargo_namespace_path_for "$REPO_DIR" root || return 2
+  root=$CARGO_NAMESPACE_PATH_RESULT
+  repo_id=$(cargo_namespace_value "$REPO_DIR" repo_id) || return 2
+  cargo_namespace_path_for "$REPO_DIR" group_lock || return 2
+  group_lock=$CARGO_NAMESPACE_PATH_RESULT
+  cargo_namespace_path_for "$REPO_DIR" checkout_lock || return 2
+  checkout_lock=$CARGO_NAMESPACE_PATH_RESULT
+  cargo_namespace_path_for "$REPO_DIR" common_dir || return 2
+  common=$CARGO_NAMESPACE_PATH_RESULT
+  cargo_namespace_path_for "$REPO_DIR" top_level || return 2
+  current=$CARGO_NAMESPACE_PATH_RESULT
   minutes=$((IDLE_HOURS * 60))
   prune_namespace "$root/$repo_id" "$repo_id" "$group_lock" "$checkout_lock" "$minutes"
   worktree_sweep "$(dirname "$common")" "$current"

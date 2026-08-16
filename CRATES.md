@@ -27,6 +27,8 @@ Module paths inside crates mirror Java packages (PORTING.md). Crate boundaries e
 
 **Core:** `tokio` + `tokio-util` (network/IO edges only — D5), `rayon` (worldgen/lighting pools), `crossfire` (mixed sync/async channels between rayon/tick/tokio — proven in Pumpkin's chunk scheduler), `crossbeam` (utilities; **not** per-field `AtomicCell` on game state).
 
+**Filesystem security:** `libc` is used only by `rivet-harness-common` for the platform `O_NOFOLLOW` flag when opening attested binaries; provenance verification must not follow a final symlink while a checked path is being read.
+
 **Data:** `serde` + `serde_json` (configs, datapack JSON — never packets or chunk hot paths), `toml` (config), `slotmap` (entity/holder arenas), `rustc-hash` (FxHashMap default), `indexmap` (order-observable maps), `smallvec`, `bitflags`, `phf` (generated static tables), `uuid`, `bytes`.
 
 **Path-validation regex (issue #340):** `pcre2` is approved for `PathAllowList`. Paper passes `regex:` rules to `FileSystem.getPathMatcher`, whose OpenJDK contract defines them as `java.util.regex.Pattern`; valid rules can therefore require lookaround and numeric or named backreferences. The accepted language is a deliberately Java-compatible subset, not PCRE2's full language: a compatibility validator must reject every construct whose Java meaning has not been established before PCRE2 compiles it. Paper compiles the complete rule list before matching and replaces it with an always-false matcher on any compilation error, so one invalid or unsupported rule must disable the whole list; retaining the other rules would broaden access and is forbidden.

@@ -24,7 +24,10 @@ NAMESPACE_ENV = "RIVET_CARGO_NAMESPACE"
 
 
 def run_git(repo: pathlib.Path, *args: str) -> str:
-    return subprocess.check_output(["git", "-C", str(repo), *args], text=True).rstrip("\r\n")
+    output = subprocess.check_output(["git", "-C", str(repo), *args])
+    if output.endswith(b"\n"):
+        output = output[:-1]
+    return os.fsdecode(output)
 
 
 def canonical_existing(path: pathlib.Path) -> pathlib.Path:
@@ -453,6 +456,54 @@ def revalidate_directories(snapshots: list[tuple[pathlib.Path, os.stat_result]])
             raise ValueError(f"managed directory changed during operation: {path}")
 
 
+def read_regular_file_authenticated(
+    path: pathlib.Path,
+    label: str,
+    root: pathlib.Path,
+) -> bytes:
+    path = lexical_absolute(path)
+    parent_fd, snapshots = open_directory(path.parent, create=False, root=root)
+    fd: int | None = None
+    try:
+        name = path.name
+        info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"{label} is not a regular file: {path}")
+        if info.st_nlink > 1:
+            raise ValueError(f"{label} is a hardlink: {path}")
+        fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+        actual = os.fstat(fd)
+        if (
+            stat.S_ISLNK(actual.st_mode)
+            or not stat.S_ISREG(actual.st_mode)
+            or actual.st_nlink > 1
+            or actual.st_dev != info.st_dev
+            or actual.st_ino != info.st_ino
+        ):
+            raise ValueError(f"{label} changed during open: {path}")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            stat.S_ISLNK(current.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or current.st_nlink > 1
+            or current.st_dev != actual.st_dev
+            or current.st_ino != actual.st_ino
+        ):
+            raise ValueError(f"{label} changed during read: {path}")
+        revalidate_directories(snapshots)
+        return b"".join(chunks)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        os.close(parent_fd)
+
+
 def write_text_atomic(
     path: pathlib.Path,
     text: str,
@@ -521,11 +572,10 @@ def encoded_path(path: pathlib.Path) -> str:
     return base64.b64encode(path_bytes(path)).decode("ascii")
 
 
-def parse_fields(path: pathlib.Path) -> dict[str, object]:
-    if not regular_non_symlink(path):
-        raise ValueError(f"provenance sidecar is not a regular file: {path}")
-    reject_hardlink(path, "provenance sidecar")
-    value = json.loads(path.read_text(encoding="utf-8"))
+def parse_fields(path: pathlib.Path, root: pathlib.Path) -> dict[str, object]:
+    value = json.loads(
+        read_regular_file_authenticated(path, "provenance sidecar", root).decode("utf-8")
+    )
     if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
         raise ValueError(f"invalid provenance sidecar object: {path}")
     return value
@@ -543,7 +593,9 @@ def write_sidecar(repo: pathlib.Path, path: pathlib.Path) -> pathlib.Path:
     sidecar = sidecar_path(path)
     reject_symlink(sidecar, "provenance sidecar")
     reject_hardlink(sidecar, "provenance sidecar")
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    digest = hashlib.sha256(
+        read_regular_file_authenticated(path, "binary", pathlib.Path(ns["target"]))
+    ).hexdigest()
     write_text_atomic(
         sidecar,
         json.dumps(
@@ -576,7 +628,7 @@ def verify_sidecar(repo: pathlib.Path, path: pathlib.Path) -> None:
     canonical_path = canonical_existing(path)
     sidecar = sidecar_path(path)
     reject_symlink(sidecar, "provenance sidecar")
-    fields = parse_fields(sidecar)
+    fields = parse_fields(sidecar, pathlib.Path(ns["target"]))
     expected = {
         "version": 1,
         "repo_id": ns["repo_id"],
@@ -585,7 +637,9 @@ def verify_sidecar(repo: pathlib.Path, path: pathlib.Path) -> None:
         "state_digest": strict_digest(repo),
         "target_b64": encoded_path(pathlib.Path(ns["target"])),
         "path_b64": encoded_path(canonical_path),
-        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "sha256": hashlib.sha256(
+            read_regular_file_authenticated(path, "binary", pathlib.Path(ns["target"]))
+        ).hexdigest(),
     }
     if fields != expected:
         for key, value in expected.items():
