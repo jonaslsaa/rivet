@@ -3,7 +3,6 @@
   "source": {
     "jar": "tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar",
     "jar_sha256": "e1a027e9481a16ec1da0f0e139d370280050d123a14c022a476c2dc8a697ebda",
-    "paper_git": "0a993450f129c4942c2a9ed45ba047412b4667cf",
     "minecraft_version": "26.2",
     "protocol_version": 776,
     "world_version": 4903
