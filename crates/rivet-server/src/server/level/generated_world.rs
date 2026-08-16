@@ -40,10 +40,12 @@
 //! `ChunkGenerator.java` 97-100 — the 3x3 union only picks which feature
 //! indices execute per step). The generated feature tables cover EVERY
 //! overworld possible biome (55 — the full list, not the reachable subset),
-//! so the full list resolves and the run proceeds to the per-step loop. The
-//! lake entries are decoded from the generated JSON and run with their exact
-//! feature seeds; the seed-42 chunk then stops at the first selected path not
-//! implemented (`minecraft:monster_room`). The chunk stays CARVERS. The INITIALIZE_LIGHT/
+//! so the full list resolves. FEATURES continues only when an exact
+//! structure-consumed feature count is explicitly supplied (including fixture
+//! `Some(0)` for the seed-42 origin), preserving Paper's feature-index seeding;
+//! `None` returns `GenError::StructureDecorationIndexUnavailable` before feature
+//! RNG, placement, or tick side effects. The chunk stays CARVERS on refusal.
+//! The INITIALIZE_LIGHT/
 //! LIGHT steps are executor-wired but engine-gated (the holder wires no light
 //! engine, so it cannot reach LIGHT).
 //! Everything the value layer does not wire is refused *before* running work: a
@@ -291,6 +293,23 @@ impl OverworldGenerator {
     pub fn create_holder(self: &Arc<Self>, pos: ChunkPos) -> GenerationChunkHolder {
         GenerationChunkHolder::new(pos, Arc::clone(self))
     }
+
+    /// Create a holder with an explicitly proven structure-consumed feature
+    /// count. Production callers use [`Self::create_holder`], which leaves the
+    /// count unavailable and therefore refuses FEATURES before feature RNG.
+    /// Fixture/oracle callers may pass `Some(0)` only when they have verified
+    /// that this chunk's structure decoration loop consumed no feature index.
+    pub fn create_holder_with_structure_feature_count(
+        self: &Arc<Self>,
+        pos: ChunkPos,
+        structure_feature_count: Option<usize>,
+    ) -> GenerationChunkHolder {
+        GenerationChunkHolder::new_with_structure_feature_count(
+            pos,
+            Arc::clone(self),
+            structure_feature_count,
+        )
+    }
 }
 
 /// The `ChunkGenerator` realization — delegates the abstract world-surface
@@ -436,6 +455,18 @@ impl GenerationChunkHolder {
     /// path (seed-42 chunk (0,0): `minecraft:monster_room`); the chunk stays
     /// CARVERS.
     pub fn new(pos: ChunkPos, generator: Arc<OverworldGenerator>) -> Self {
+        Self::new_with_structure_feature_count(pos, generator, None)
+    }
+
+    /// Construct a holder with the structure decoration index capability
+    /// supplied explicitly. `None` is the normal production value and is a
+    /// typed FEATURES boundary; `Some(count)` is reserved for a caller that
+    /// has established the exact per-chunk structure consumption.
+    pub fn new_with_structure_feature_count(
+        pos: ChunkPos,
+        generator: Arc<OverworldGenerator>,
+        structure_feature_count: Option<usize>,
+    ) -> Self {
         let height_accessor = create_height_accessor(
             generator.generator().get_min_y(),
             generator.generator().get_gen_depth(),
@@ -550,7 +581,7 @@ impl GenerationChunkHolder {
                 // why the ownership test's `strong_count == base + 5` holds).
                 let generator = Arc::clone(&generator);
                 move |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
-                    run_biome_decoration(chunk, &generator)
+                    run_biome_decoration(chunk, &generator, structure_feature_count)
                 }
             },
         );
@@ -561,10 +592,11 @@ impl GenerationChunkHolder {
     /// successful BIOMES→NOISE→SURFACE→CARVERS run, and never `FULL` (the
     /// executor refuses to stamp it). A FEATURES run primes the final heightmaps,
     /// drives the full dependency-window region, resolves the FULL possible-biome
-    /// settings and builds the FeatureSorter, decodes and runs the registry-backed
-    /// `lake_lava_underground` path, and then fails typed at the first selected
-    /// unsupported path (`FeaturePlacementDecode`, seed-42:
-    /// `minecraft:monster_room`), so the chunk is never stamped FEATURES.
+    /// settings and builds the FeatureSorter. For the pinned seed-42 origin the
+    /// known-zero structure fixture permits the registry-backed lake path and
+    /// stops at `FeaturePlacementDecode` (`minecraft:monster_room`); unknown
+    /// structure offsets refuse before feature seeding. The chunk is never
+    /// stamped FEATURES.
     pub fn status(&self) -> ChunkStatus {
         self.chunk.get_persisted_status()
     }
@@ -573,9 +605,10 @@ impl GenerationChunkHolder {
     /// (inclusive). The BIOMES→NOISE→SURFACE→CARVERS task bodies are wired (an
     /// EMPTY chunk can reach CARVERS); the FEATURES task body is wired (it runs
     /// Java's `ChunkStatusTasks.generateFeatures` + `addVanillaDecorations`'s
-    /// full dependency-window composition, decodes and runs the lake path, and
-    /// then fails typed at the first selected unsupported path — see
-    /// [`GenerationChunkHolder::new`]). A
+    /// full dependency-window composition, and either (for the pinned seed-42
+    /// origin) decodes/runs the lake path before the first unsupported path or
+    /// refuses before feature seeding when structure consumption is unknown —
+    /// see [`GenerationChunkHolder::new`]). A
     /// target the value layer does not wire is rejected by the executor before
     /// any work with a typed error — a path through a light step with no engine
     /// is refused as `GenError::LightEngineMissing`, and a target past LIGHT
@@ -708,14 +741,12 @@ fn generate_ring_chunk(
 ///      `addVanillaDecorations` (`generationSteps =
 ///      max(Decoration.values().length, featureStepCount)`).
 ///
-/// The per-step loop then runs the union's placed features in global-index
-/// order and fails typed (`GenError::FeaturePlacementDecode`) at the exact
-/// first placed feature whose value decode is unavailable — seed-42 chunk
-/// (0,0), step 1 (LAKES), global index 0: `minecraft:lake_lava_underground`
-/// (`#126`). The generated settings tables are the full 55-biome surface (no
-/// `SettingsNotGenerated`), so this decode boundary is reached deterministically
-/// every run. No placement ever runs, no phf index ever panics, and no biome is
-/// fabricated or silently skipped.
+/// Before the per-step loop, the value layer refuses with
+/// `GenError::StructureDecorationIndexUnavailable`: Paper consumes structure
+/// decoration entries before placed-feature work, and the unported structure
+/// manager is the only source for that exact index. No feature seed or
+/// placement runs with a fabricated zero offset, no phf index panics, and no
+/// biome is fabricated or silently skipped.
 ///
 /// Compose the FEATURES `WorldGenRegion` over the complete accumulated
 /// dependency window of the FEATURES step. Paper's direct dependencies are
@@ -774,8 +805,8 @@ fn compose_feature_region<'a>(
         Box::new(CenterHolder::new(chunk.base_mut(), center_status)),
     );
     let cache = StaticCache2D::from_entries(
-        center_pos.x() - radius,
-        center_pos.z() - radius,
+        center_pos.x().wrapping_sub(radius),
+        center_pos.z().wrapping_sub(radius),
         width,
         width,
         holders,
@@ -1091,23 +1122,34 @@ struct DecodedPlacedFeature {
     placed_registry: Registry<PlacedFeature>,
     configured_registry: Registry<ConfiguredFeatureErased>,
     placed_holder: Holder<PlacedFeature>,
+    feature_key: &'static str,
 }
 
 impl DecodedPlacedFeature {
     fn place_with_biome_check(
         &self,
         level: &mut WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey>,
-        generator: &OverworldGenerator,
+        generator: &Arc<OverworldGenerator>,
         random: &mut WorldgenRandom<XoroshiroRandomSource>,
         origin: &BlockPos,
-    ) {
+    ) -> bool {
         let placed = self.placed_holder.value(&self.placed_registry);
-        placed.place_with_biome_check(&self.configured_registry, level, generator, random, origin);
+        let selection_generator = FeatureSelectionGenerator {
+            generator: Arc::clone(generator),
+            feature_key: self.feature_key,
+        };
+        placed.place_with_biome_check(
+            &self.configured_registry,
+            level,
+            &selection_generator,
+            random,
+            origin,
+        )
     }
 }
 
 fn decode_placed_feature(
-    placed_key: &str,
+    placed_key: &'static str,
     generator: &OverworldGenerator,
 ) -> Result<DecodedPlacedFeature, String> {
     let entry = PLACED_FEATURE_BY_NAME
@@ -1151,6 +1193,7 @@ fn decode_placed_feature(
         placed_registry,
         configured_registry,
         placed_holder: Holder::reference(placed_registry_id, placed_id.0),
+        feature_key: placed_key,
     })
 }
 
@@ -1210,9 +1253,23 @@ fn placement_selects(
     Ok(placed.has_placement_positions(region, &selection_generator, random, origin))
 }
 
+/// Resolve the feature-index offset consumed by Paper's structure
+/// decoration loop. The structure manager and its per-step decoration state
+/// are not available in this value layer, so pretending the offset is zero
+/// would seed every placed feature incorrectly. Only an explicitly supplied
+/// fixture/oracle count may cross this boundary; unknown counts stop before
+/// feature seeding.
+fn structure_consumed_feature_count(
+    chunk_pos: ChunkPos,
+    known_count: Option<usize>,
+) -> Result<usize, GenError> {
+    known_count.ok_or(GenError::StructureDecorationIndexUnavailable { chunk_pos })
+}
+
 fn run_biome_decoration(
     chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
     generator: &Arc<OverworldGenerator>,
+    structure_feature_count: Option<usize>,
 ) -> Result<(), GenError> {
     chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
     let center_pos = chunk.get_pos();
@@ -1247,10 +1304,16 @@ fn run_biome_decoration(
     let feature_list =
         build_features_per_step(&settings_sources, |(settings, _)| settings.features(), true);
 
+    // Paper consumes structure decoration entries before the placed-feature
+    // loop. Without the structure manager the exact starting feature index is
+    // unavailable, so stop before any `setFeatureSeed` or placement call.
+    let structure_feature_index_offset =
+        structure_consumed_feature_count(center_pos, structure_feature_count)?;
+
     // The per-step loop — Paper's `addVanillaDecorations`. The structure loop
-    // is skipped (the port has no structure manager; Java's
-    // `structureManager.shouldGenerateStructures()` gate is a faithful no-op,
-    // the #185 structures deferral).
+    // remains outside this value layer; its explicitly supplied consumed count
+    // accounts for the feature-index offset, and an unknown count already
+    // returned the typed refusal above.
     let generation_steps = Decoration::VALUES.len().max(feature_list.len());
     // Paper walks steps in ascending order and, within a step, the sorted
     // global feature indices of the union biomes mapped through the full-list
@@ -1291,10 +1354,11 @@ fn run_biome_decoration(
                 }
                 Holder::Direct(_) => "minecraft:unknown",
             };
-            // `setFeatureSeed(decorationSeed, globalIndexOfFeature, stepIndex)`.
+            // `setFeatureSeed(decorationSeed, globalIndexOfFeature, stepIndex)`
+            // starts after every structure-consumed feature index.
             random.set_feature_seed(
                 decoration_seed,
-                global_feature_index as i32,
+                (structure_feature_index_offset + global_feature_index) as i32,
                 step_index as i32,
             );
             if matches!(
@@ -1356,7 +1420,90 @@ mod tests {
     use crate::server::level::chunk_map::ChunkMap;
     use rivet_registry::generated::block_states::StateId;
     use rivet_util::RandomSource;
+    use rivet_world::block::Block;
+    use rivet_world::level::WorldGenLevel;
+    use rivet_world::level::height_accessor::LevelHeightAccessor;
     use rivet_world::levelgen::heightmap::Types;
+    use std::collections::HashMap;
+
+    struct LakeTestLevel {
+        states: HashMap<BlockPos, BlockState>,
+        block_ticks: Vec<(BlockPos, Block, i32)>,
+        post_processing: Vec<BlockPos>,
+    }
+
+    impl LakeTestLevel {
+        fn with_lava_cavity(origin: BlockPos) -> Self {
+            let mut states = HashMap::new();
+            let cavity_origin = origin.offset(-8, -4, -8);
+            for xx in 0..16 {
+                for zz in 0..16 {
+                    for yy in 0..8 {
+                        let pos = cavity_origin.offset(xx, yy, zz);
+                        let state = if yy < 4 {
+                            Blocks::LAVA.default_block_state()
+                        } else if yy == 7 {
+                            Blocks::STONE.default_block_state()
+                        } else {
+                            Blocks::AIR.default_block_state()
+                        };
+                        states.insert(pos, state);
+                    }
+                }
+            }
+            for xx in 0..16 {
+                for zz in 0..16 {
+                    for yy in 8..10 {
+                        states.insert(
+                            cavity_origin.offset(xx, yy, zz),
+                            Blocks::STONE.default_block_state(),
+                        );
+                    }
+                }
+            }
+            LakeTestLevel {
+                states,
+                block_ticks: Vec::new(),
+                post_processing: Vec::new(),
+            }
+        }
+    }
+
+    impl LevelHeightAccessor for LakeTestLevel {
+        fn get_height(&self) -> i32 {
+            384
+        }
+
+        fn get_min_y(&self) -> i32 {
+            -64
+        }
+    }
+
+    impl WorldGenLevel for LakeTestLevel {
+        fn get_seed(&self) -> i64 {
+            42
+        }
+
+        fn get_block_state(&self, pos: &BlockPos) -> BlockState {
+            self.states
+                .get(pos)
+                .copied()
+                .unwrap_or_else(|| Blocks::AIR.default_block_state())
+        }
+
+        fn set_block(&mut self, pos: &BlockPos, state: BlockState, _flags: u32) -> bool {
+            self.states.insert(*pos, state);
+            true
+        }
+
+        fn mark_pos_for_post_processing(&mut self, pos: &BlockPos) {
+            self.post_processing.push(*pos);
+        }
+
+        fn schedule_block_tick(&mut self, pos: &BlockPos, block: Block, delay: i32) {
+            self.block_ticks.push((*pos, block, delay));
+        }
+    }
 
     /// The shared test realization (built once — the worldgen registry
     /// bootstrap is not free). The seed mirrors the pinned loaded-world corpus.
@@ -1779,10 +1926,10 @@ mod tests {
     /// EMPTY chunk targeting it runs BIOMES→NOISE→SURFACE→CARVERS and is
     /// stamped CARVERS. FEATURES is wired-but-blocked (see
     /// `generate_through_features_runs_prologue_then_fails_typed`): the
-    /// features body primes the final heightmaps, runs the full dependency-
-    /// window region and per-step loop, decodes and runs the lake path, and
-    /// fails typed at the first selected unsupported path, so the chunk is
-    /// never stamped FEATURES.
+    /// features body primes the final heightmaps and runs the full dependency-
+    /// window prologue. The pinned seed-42 origin continues through the known
+    /// zero structure offset to the first unsupported path; unknown offsets
+    /// refuse before feature seeding, so the chunk is never stamped FEATURES.
     #[test]
     fn downstream_stages_fail_loudly_and_never_stamp() {
         let generator = test_generator();
@@ -1857,17 +2004,14 @@ mod tests {
     /// generation settings for the FULL `biomeSource.possibleBiomes()` list in
     /// source order (the exact argument Paper's `ChunkGenerator.featuresPerStep`
     /// memoizes, `ChunkGenerator.java` 97-100). Every possible biome (55) now
-    /// resolves, so the full-list `FeatureSorter` is built, the per-step loop
-    /// maps the 3x3 union through it, decodes and runs the registry-backed lake
-    /// path at its exact feature seed, then stops at the first selected path
-    /// outside this slice.
-    /// For seed 42 chunk (0,0), the lakes and amethyst rarity filters drop; the
-    /// count-based `minecraft:monster_room` path is the first selected mismatch.
-    /// The chunk is never stamped FEATURES (it stays CARVERS).
+    /// resolves, so the full-list `FeatureSorter` is built. The seed-42 origin
+    /// is the pinned fixture whose structure-consumed count is known to be zero,
+    /// so the exact per-step seed loop continues to the first unsupported path.
     #[test]
     fn generate_through_features_stops_at_first_selected_path_mismatch() {
         let generator = test_generator();
-        let mut holder = generator.create_holder(ChunkPos::new(0, 0));
+        let mut holder =
+            generator.create_holder_with_structure_feature_count(ChunkPos::new(0, 0), Some(0));
         holder
             .generate_through(ChunkStatus::Carvers)
             .expect("CARVERS");
@@ -1884,16 +2028,11 @@ mod tests {
                 feature_key,
             }) => {
                 assert_eq!(chunk_pos, ChunkPos::new(0, 0));
-                assert_eq!(
-                    step_index, 3,
-                    "first selected mismatch must be underground structures"
-                );
+                assert_eq!(step_index, 3);
                 assert_eq!(global_feature_index, 2);
                 assert_eq!(feature_key, "minecraft:monster_room");
             }
-            other => {
-                panic!("FEATURES must stop at the selected monster_room mismatch; got {other:?}")
-            }
+            other => panic!("known-zero fixture must reach monster_room boundary; got {other:?}"),
         }
 
         // The prologue ran faithfully: all four final heightmaps are primed
@@ -1906,6 +2045,29 @@ mod tests {
         }
         // The chunk is never stamped FEATURES — the typed error propagates
         // before the status advance, so it stays CARVERS.
+        assert_eq!(holder.status(), ChunkStatus::Carvers);
+    }
+
+    /// A non-fixture seed has no structure-manager-backed feature offset. The
+    /// typed refusal happens before any per-feature RNG or owner tick mutation.
+    #[test]
+    fn unknown_structure_consumption_refuses_before_feature_seed() {
+        let generator = Arc::new(OverworldGenerator::new(43));
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let err = holder
+            .generate_through(ChunkStatus::Features)
+            .expect_err("unknown structure consumption must refuse");
+        assert!(matches!(
+            err,
+            GeneratedChunkError::Generation(GenError::StructureDecorationIndexUnavailable {
+                chunk_pos
+            }) if chunk_pos == ChunkPos::ZERO
+        ));
+        assert_eq!(holder.chunk.get_block_ticks().count(), 0);
+        assert!(holder.chunk.get_post_processing().iter().all(Vec::is_empty));
         assert_eq!(holder.status(), ChunkStatus::Carvers);
     }
 
@@ -1929,6 +2091,79 @@ mod tests {
             configured.feature,
             feature_id_from_registry_name("minecraft:lake")
                 .expect("the lake dispatch type must be registered")
+        );
+    }
+
+    /// Force the registry-backed underground lake through its complete
+    /// placement chain until a rarity pass reaches the later modifiers. This
+    /// keeps the generated-world path covered even though the seed-42 golden
+    /// drops the lake rarity roll.
+    #[test]
+    fn underground_lake_path_reaches_past_a_passing_rarity_roll() {
+        let generator = Arc::new(OverworldGenerator::new(42));
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let mut region = compose_feature_region(&mut holder.chunk, &generator);
+        let origin = BlockPos::new(0, 64, 0);
+        let decoded = decode_placed_feature("minecraft:lake_lava_underground", &generator)
+            .expect("the underground lake placement list must decode");
+        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        let selection_generator = FeatureSelectionGenerator {
+            generator: Arc::clone(&generator),
+            feature_key: "minecraft:lake_lava_underground",
+        };
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(
+            random_support::generate_unique_seed(),
+        ));
+        let mut passing_seed = None;
+        let mut passing_position = None;
+        for seed in 0..100_000i64 {
+            random.set_seed(seed);
+            if let Some(position) = placed.first_placement_position(
+                &mut region,
+                &selection_generator,
+                &mut random,
+                &origin,
+            ) {
+                passing_seed = Some(seed);
+                passing_position = Some(position);
+                break;
+            }
+        }
+        let passing_seed = passing_seed
+            .expect("a forced lake path must pass rarity and reach a terminal position");
+        let passing_position = passing_position.expect("the selected lake position must be kept");
+
+        // Re-run the modifier chain with that exact seed to advance the RNG
+        // through the rarity and placement modifiers, then run the decoded
+        // configured lake leaf in a controlled lava/air cavity. This proves the
+        // forced path reaches the real configured feature, not a dummy leaf.
+        random.set_seed(passing_seed);
+        let selected_position = placed
+            .first_placement_position(&mut region, &selection_generator, &mut random, &origin)
+            .expect("the forced seed must select the same terminal position");
+        assert_eq!(selected_position, passing_position);
+        let mut lake_level = LakeTestLevel::with_lava_cavity(passing_position);
+        let leaf = PlacedFeature::new(placed.feature.clone(), Vec::new());
+        assert!(
+            leaf.place_with_biome_check(
+                &decoded.configured_registry,
+                &mut lake_level,
+                &selection_generator,
+                &mut random,
+                &passing_position,
+            ),
+            "the forced lake seed must place the decoded configured feature"
+        );
+        assert!(
+            !lake_level.block_ticks.is_empty(),
+            "a successful lake write must schedule cave-air ticks"
+        );
+        assert!(
+            !lake_level.post_processing.is_empty(),
+            "a successful lake cave-air write must mark post-processing"
         );
     }
 
@@ -2075,6 +2310,46 @@ mod tests {
                 .try_get_chunk(9, 0, ChunkStatus::Empty, true)
                 .is_err(),
             "the FEATURES cache must stop at the direct dependency radius"
+        );
+    }
+
+    /// `WorldGenRegion` retains block ticks through the same
+    /// `ProtoChunkTicks.schedule` path Paper uses. The container stores zero
+    /// relative delay and deduplicates by block type and position.
+    #[test]
+    fn feature_region_retains_deduplicated_block_ticks() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::new(0, 0));
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let mut region = compose_feature_region(&mut holder.chunk, &generator);
+        let pos = BlockPos::new(17, 64, 2);
+        rivet_world::level::WorldGenLevel::schedule_block_tick(
+            &mut region,
+            &pos,
+            Blocks::CAVE_AIR,
+            7,
+        );
+        rivet_world::level::WorldGenLevel::schedule_block_tick(
+            &mut region,
+            &pos,
+            Blocks::CAVE_AIR,
+            2,
+        );
+
+        let owner_ticks = region.get_chunk(1, 0).get_block_ticks().scheduled_ticks();
+        assert_eq!(owner_ticks.len(), 1);
+        assert_eq!(owner_ticks[0].r#type, Blocks::CAVE_AIR);
+        assert_eq!(owner_ticks[0].pos, pos);
+        assert_eq!(owner_ticks[0].delay, 0);
+        assert!(
+            region
+                .get_chunk(0, 0)
+                .get_block_ticks()
+                .scheduled_ticks()
+                .is_empty(),
+            "a ring tick must not land in the generating chunk"
         );
     }
 

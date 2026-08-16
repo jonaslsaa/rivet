@@ -56,6 +56,7 @@ use indexmap::{IndexMap, IndexSet};
 
 use crate::biome::biome_resolver::BiomeResolver;
 use crate::biome::climate::Sampler;
+use crate::block::Block;
 use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::light_chunk::LightChunk;
 use crate::chunk::paletted_container_factory::PalettedContainerFactory;
@@ -66,6 +67,7 @@ use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccessor};
 use crate::levelgen::heightmap::{Heightmap, StateFlags, Types};
 use crate::lighting::swmr_nibble_array::SwmrNibbleArray;
+use crate::ticks::{ProtoChunkTicks, ScheduledTick};
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::core::{BlockPos, ChunkPos, QuartPos, SectionPos};
@@ -103,6 +105,11 @@ where
     /// through `getPostProcessing()[i] == null`, which the deferred
     /// `postProcessGeneration` skips either way).
     post_processing: Vec<Vec<i16>>,
+    /// `getBlockTicks()` — the owning chunk's worldgen tick container.
+    /// `ProtoChunk` and `LevelChunk` expose this through the abstract
+    /// `ChunkAccess` surface in Paper; keeping the value here preserves it
+    /// through the port's value-composition wrappers.
+    block_ticks: ProtoChunkTicks<Block>,
     /// `unsaved`.
     unsaved: bool,
     /// `isLightCorrect`.
@@ -203,6 +210,7 @@ where
             height_accessor,
             sections: sections_vec,
             post_processing: vec![Vec::new(); count],
+            block_ticks: ProtoChunkTicks::new(),
             unsaved: false,
             light_correct: false,
             inhabited_time,
@@ -698,6 +706,24 @@ where
         }
     }
 
+    /// `ChunkAccess.getBlockTicks()` — the owning chunk's block-tick
+    /// container. The worldgen region routes scheduling through this owner,
+    /// never through region-local storage.
+    pub fn get_block_ticks(&self) -> &ProtoChunkTicks<Block> {
+        &self.block_ticks
+    }
+
+    /// Mutable half of [`get_block_ticks`](Self::get_block_ticks) for the
+    /// worldgen scheduler's owner-directed write.
+    pub fn get_block_ticks_mut(&mut self) -> &mut ProtoChunkTicks<Block> {
+        &mut self.block_ticks
+    }
+
+    /// Schedule an owning block tick through the canonical runtime value.
+    pub fn schedule_block_tick(&mut self, tick: ScheduledTick<Block>) {
+        self.block_ticks.schedule(tick);
+    }
+
     /// `ChunkAccess.getPostProcessing()` — the per-section packed-offset lists.
     pub fn get_post_processing(&self) -> &[Vec<i16>] {
         &self.post_processing
@@ -717,13 +743,20 @@ where
             .extend_from_slice(packed_offsets);
     }
 
-    /// `ChunkAccess.markPosForPostProcessing(BlockPos)` — the base warns and
-    /// does nothing (`ProtoChunk` overrides it).
-    pub fn mark_pos_for_post_processing(&self, _block_pos: &BlockPos) {
-        // Java's `LOGGER.warn("... but this operation is not supported.")`.
-        eprintln!(
-            "Trying to mark a block for post processing, but this operation is not supported."
-        );
+    /// `ProtoChunk.markPosForPostProcessing(BlockPos)` — record the packed
+    /// local coordinate in the section's post-processing list when the
+    /// position is inside build height. Worldgen regions expose their chunks
+    /// through this base value, so retaining the mutation here preserves the
+    /// ProtoChunk behavior at the value-layer boundary.
+    pub fn mark_pos_for_post_processing(&mut self, block_pos: &BlockPos) {
+        if !self.is_inside_build_height(block_pos.get_y()) {
+            return;
+        }
+        let section_index = self.get_section_index(block_pos.get_y()) as usize;
+        let packed = ((block_pos.get_x() & 15)
+            | ((block_pos.get_y() & 15) << 4)
+            | ((block_pos.get_z() & 15) << 8)) as i16;
+        self.get_or_create_offset_list(section_index).push(packed);
     }
 
     /// `ChunkAccess.findBlocks(Predicate<BlockState>, BiConsumer<BlockPos,
@@ -909,6 +942,7 @@ where
             height_accessor,
             sections,
             post_processing,
+            block_ticks,
             unsaved,
             light_correct,
             inhabited_time,
@@ -944,6 +978,7 @@ where
         base.unsaved = unsaved;
         base.light_correct = light_correct;
         base.post_processing = post_processing;
+        base.block_ticks = block_ticks;
         base.pending_block_entities = pending_block_entities;
         base.block_nibbles = block_nibbles;
         base.sky_nibbles = sky_nibbles;
@@ -1135,6 +1170,34 @@ mod tests {
         assert!(base.get_sections().iter().all(|s| s.has_only_air()));
         // No heightmap entries yet (the concrete types prime them).
         assert!(base.heightmaps().iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn map_values_preserves_owner_block_ticks() {
+        let mut base = default_base();
+        let pos = BlockPos::new(3, 4, 5);
+        base.schedule_block_tick(ScheduledTick::new_normal(
+            crate::block::blocks::Blocks::AIR,
+            pos,
+            19,
+            7,
+        ));
+        let mapped = base
+            .map_values(
+                block_strategy(),
+                biome_strategy(),
+                0,
+                0,
+                &|value| *value,
+                &|value| *value,
+                &test_flags,
+            )
+            .expect("identity value mapping");
+        let ticks = mapped.get_block_ticks().scheduled_ticks();
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].r#type, crate::block::blocks::Blocks::AIR);
+        assert_eq!(ticks[0].pos, pos);
+        assert_eq!(ticks[0].delay, 0);
     }
 
     #[test]
