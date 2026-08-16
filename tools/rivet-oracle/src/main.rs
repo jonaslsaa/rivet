@@ -3294,10 +3294,27 @@ fn run() -> Result<(), Error> {
             //   cargo run -p rivet-oracle -- composed-noise --tamper   negative control
             //   cargo run -p rivet-oracle -- composed-noise --sample   regenerate from pinned Paper
             let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+            // Strict flags: before, any unknown arg fell through to the verify
+            // branch, so a typo'd `--sampple` exited 0 after verifying instead
+            // of erroring — never a silent misread of the intended mode.
+            let tamper = rest.contains(&"--tamper");
+            let sample = rest.contains(&"--sample");
+            for flag in &rest {
+                if *flag != "--tamper" && *flag != "--sample" {
+                    return Err(Error::Gate(format!(
+                        "composed-noise takes only --tamper/--sample, got {flag}"
+                    )));
+                }
+            }
+            if tamper && sample {
+                return Err(Error::Gate(
+                    "composed-noise --tamper and --sample are mutually exclusive".into(),
+                ));
+            }
             let dir = crate_dir().join("fixtures/composed-noise");
-            if rest.contains(&"--tamper") {
+            if tamper {
                 composed_noise::tamper_negative_control(&dir)
-            } else if rest.contains(&"--sample") {
+            } else if sample {
                 composed_noise::run_probe(&dir)
             } else {
                 // Same missing-fixture classification as the gate path: an
