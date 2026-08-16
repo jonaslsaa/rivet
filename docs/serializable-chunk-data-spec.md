@@ -451,10 +451,10 @@ NBT round-trip is current.
 `parse()` and its helpers handle every field permissively except where noted.
 Each default below is a load-bearing behavior for read parity:
 
-| field | missing/empty → | source |
+| field | condition / result | source |
 |---|---|---|
-| `Status` (empty string) | `parse` returns **null**; caller drops the chunk (ChunkLoadTask.java L350-352) | L145-147 |
-| `Status` (absent) | `ChunkStatus.EMPTY` | L160, L652-654 |
+| `Status` absent or wrong-typed | `getString` returns `Optional.empty()`; `parse` returns **null**; caller drops the chunk (ChunkLoadTask.java L350-352) | L145-147 |
+| `Status` present as an empty `StringTag` | `getString` returns `Optional.of("")`; `parse` reaches codec parsing, which falls back to `ChunkStatus.EMPTY` | L145-147, L160 |
 | `DataVersion` > current | `printStackTrace()` + `System.exit(1)` unless `-DPaper.ignoreWorldDataVersion` | L150-155 |
 | `xPos`/`zPos` | 0 | L157 |
 | `LastUpdate`/`InhabitedTime` | 0L | L158-159 |
@@ -579,7 +579,11 @@ block fixers; `BlendingData`/retrogen application; deflate/lz4 write parity
    write to the original — the launcher-created New World save noted in memory
    `local-new-world-save`) and load every region record through
    `parse` with the §9 defaults; every chunk either parses or drops exactly as
-   Paper does (empty `Status` → null; newer `DataVersion` honored).
+   Paper does (absent or wrong-typed `Status` → `getString` returns
+   `Optional.empty()` → `parse` returns null and the caller drops the chunk;
+   present empty `Status` `StringTag` → `getString` returns `Optional.of("")`,
+   codec parsing is attempted, and `ChunkStatus.EMPTY` is selected as the
+   fallback; newer `DataVersion` honored).
 6. **No mutation on read:** reading a fixture never rewrites the fixture; a
    `parse → write` on a read-only copy must not alter `LastUpdate`/
    `InhabitedTime` (those come only from a `copyOf` save path with a real game
@@ -592,9 +596,13 @@ block fixers; `BlendingData`/retrogen application; deflate/lz4 write parity
 7. `DataLayer` length != 2048 → hard error (not a silent default).
 8. `block_states`/`biomes` with wrong palette/data → `ChunkReadException`
    (not a silent AIR/plains default).
-9. Empty `Status` → `parse` null → chunk dropped.
-10. `DataVersion` newer than current → abort (unless the Paper flag is set).
-11. Starlight version != 10 with `isLightOn` present → `lightCorrect = false`
+9. Absent or wrong-typed `Status` → `getString` returns `Optional.empty()` →
+   `parse` returns null → caller drops the chunk.
+10. Present empty `Status` `StringTag` → `getString` returns `Optional.of("")` →
+    `parse` reaches codec parsing and selects `ChunkStatus.EMPTY` as the
+    fallback; the chunk is not dropped.
+11. `DataVersion` newer than current → abort (unless the Paper flag is set).
+12. Starlight version != 10 with `isLightOn` present → `lightCorrect = false`
     (no invented fallback).
 
 These are the oracle negatives the #231 wave must carry; weakening any of them
