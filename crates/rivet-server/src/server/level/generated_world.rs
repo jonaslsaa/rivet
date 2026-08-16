@@ -40,11 +40,12 @@
 //! `ChunkGenerator.java` 97-100 — the 3x3 union only picks which feature
 //! indices execute per step). The generated feature tables cover EVERY
 //! overworld possible biome (55 — the full list, not the reachable subset),
-//! so the full list resolves. FEATURES continues only when an exact
-//! structure-consumed feature count is explicitly supplied (including fixture
-//! `Some(0)` for the seed-42 origin), preserving Paper's feature-index seeding;
-//! `None` returns `GenError::StructureDecorationIndexUnavailable` before feature
-//! RNG, placement, or tick side effects. The chunk stays CARVERS on refusal.
+//! so the full list resolves. FEATURES continues only for the fixture that
+//! explicitly omits the structure-decoration loop; that loop is not modeled,
+//! and feature seeds therefore use Paper's per-step global feature index with
+//! no fabricated global offset. The normal unavailable boundary returns
+//! `GenError::StructureDecorationUnavailable` before feature RNG, placement,
+//! or tick side effects. The chunk stays CARVERS on refusal.
 //! The INITIALIZE_LIGHT/
 //! LIGHT steps are executor-wired but engine-gated (the holder wires no light
 //! engine, so it cannot reach LIGHT).
@@ -297,18 +298,14 @@ impl OverworldGenerator {
     /// Create a holder with an explicitly proven structure-consumed feature
     /// count. Production callers use [`Self::create_holder`], which leaves the
     /// count unavailable and therefore refuses FEATURES before feature RNG.
-    /// Fixture/oracle callers may pass `Some(0)` only when they have verified
-    /// that this chunk's structure decoration loop consumed no feature index.
-    pub fn create_holder_with_structure_feature_count(
+    /// Fixture/oracle callers may use this only when the structure-decoration
+    /// loop is intentionally omitted and its zero feature consumption is part
+    /// of the fixture contract.
+    pub fn create_holder_with_omitted_structure_decorations(
         self: &Arc<Self>,
         pos: ChunkPos,
-        structure_feature_count: Option<usize>,
     ) -> GenerationChunkHolder {
-        GenerationChunkHolder::new_with_structure_feature_count(
-            pos,
-            Arc::clone(self),
-            structure_feature_count,
-        )
+        GenerationChunkHolder::new_with_omitted_structure_decorations(pos, Arc::clone(self))
     }
 }
 
