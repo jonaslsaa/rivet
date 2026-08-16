@@ -1975,6 +1975,24 @@ mod tests {
         assert_eq!(chunk.get_persisted_status(), ChunkStatus::Features);
     }
 
+    #[test]
+    fn missing_center_is_typed_and_does_not_promote_or_toggle_light() {
+        let (ctx, _biomes_calls, _noise_calls, _surface_calls, _carvers_calls, _features_calls) =
+            recording_context();
+        let mut ctx = ctx.with_light_engine(missing_center_light_engine());
+        let mut chunk = features_chunk();
+
+        assert_eq!(
+            ctx.run_step(light_step(), &mut chunk),
+            Err(GenError::LightChunkMissing {
+                status: ChunkStatus::Light,
+                pos: ChunkPos::ZERO,
+            })
+        );
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Features);
+        assert!(!chunk.is_light_correct());
+    }
+
     /// A provider-less engine is not a usable engine: `LevelLightEngine::new`
     /// (the public constructor) leaves the provider `None` — the seam attaches
     /// one via `with_provider`. `generate_through` must refuse it at the
