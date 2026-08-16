@@ -435,6 +435,16 @@ mod tests {
     }
 
     #[test]
+    fn into_wrapped_reuses_the_existing_level_chunk() {
+        let wrapped = wrapped_chunk();
+        let expected_state = wrapped.get_block_state(0, -64, 0);
+        let imposter = imposter(wrapped, false);
+        let reused = imposter.into_wrapped();
+        assert_eq!(reused.get_pos(), ChunkPos::ZERO);
+        assert_eq!(reused.get_block_state(0, -64, 0), expected_state);
+    }
+
+    #[test]
     fn get_section_always_returns_the_wrapped_chunk_sections() {
         // Java's `getSection` is `allowWrites ? wrapped.getSection :
         // super.getSection`, and `super.getSection(i)` is
