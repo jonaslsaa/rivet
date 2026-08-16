@@ -579,8 +579,10 @@ fn render_surface(surface: &Surface) -> String {
 
 /// `minecraft:item` -> `ITEM`; `minecraft:point_of_interest_type` ->
 /// `POINT_OF_INTEREST_TYPE`. Mirrors the `UPPER_SNAKE` const naming of the
-/// existing `BLOCK_BY_NAME`/`BLOCK_BY_ID` tables.
-fn prefix_for(key: &str) -> String {
+/// existing `BLOCK_BY_NAME`/`BLOCK_BY_ID` tables. `pub(crate)` so the
+/// biomes+tags half ([`crate::biomes_tags`]) can name its element/tag tables the
+/// same way.
+pub(crate) fn prefix_for(key: &str) -> String {
     let path = key.rsplit_once(':').map(|(_, p)| p).unwrap_or(key);
     path.replace(['/', '-'], "_").to_uppercase()
 }

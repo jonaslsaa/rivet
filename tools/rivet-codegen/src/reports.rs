@@ -41,8 +41,10 @@ const LOG4J_OFF: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 "#;
 
 /// Default pinned source: the materialized server jar created by the oracle's
-/// first boot (`tools/rivet-oracle work/run/versions/26.2/`).
-pub fn default_jar(repo_root: &Path) -> PathBuf {
+/// first boot (`tools/rivet-oracle work/run/versions/26.2/`). `pub(crate)` so
+/// the biomes+tags half ([`crate::extract_biomes_tags`]) records the same
+/// canonical source identity.
+pub(crate) fn default_jar(repo_root: &Path) -> PathBuf {
     repo_root.join("tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar")
 }
 
@@ -362,7 +364,7 @@ pub(crate) struct ProvenanceManifest {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct SourceProvenance {
     /// The jar path passed/used at capture time (repo-relative when default).
-    jar: String,
+    pub(crate) jar: String,
     pub(crate) jar_sha256: String,
     /// Paper commit the jar was built from (best-effort; `working/` may be a
     /// plain checkout without git metadata).
@@ -380,7 +382,11 @@ pub(crate) struct ReportEntry {
     pub(crate) sha256: String,
 }
 
-fn capture_source(jar: &Path, repo_root: &Path) -> Result<SourceProvenance> {
+/// Build the source provenance for `jar` from its `version.json` + sha256 (+
+/// best-effort Paper git commit). `pub(crate)` so the biomes+tags half
+/// ([`crate::extract_biomes_tags`]) pins its fixture to the same source
+/// identity.
+pub(crate) fn capture_source(jar: &Path, repo_root: &Path) -> Result<SourceProvenance> {
     let version = read_version_json(jar)?;
     let jar_sha256 = sha256_hex(&fs::read(jar).context("read source jar")?);
     let paper_git = read_paper_git(repo_root);
