@@ -104,22 +104,20 @@ const UPDATE_ALL: i32 = 3;
 /// default, not an operative limit.
 const UPDATE_LIMIT: i32 = 512;
 
+const TRAPPED_CHEST_BLOCK_ID: BlockId = BlockId(470);
+
 fn is_feature_block_entity(state: BlockState) -> bool {
     matches!(
         state.block(),
-        id if id == Blocks::CHEST.id() || id == Blocks::SPAWNER.id()
+        id if id == Blocks::CHEST.id()
+            || id == TRAPPED_CHEST_BLOCK_ID
+            || id == Blocks::SPAWNER.id()
     )
 }
 
 fn pending_is_dummy(tag: &CompoundTag) -> bool {
     tag.get_string("id")
         .is_some_and(|id| id == rivet_world::chunk::chunk_access::DUMMY_BLOCK_ENTITY_ID)
-}
-
-fn persist_chest_tag(tag: &mut CompoundTag, seed: i64, loot_table: &str) {
-    tag.put_string("id", "minecraft:chest");
-    tag.put_string("LootTable", loot_table);
-    tag.put_long("LootTableSeed", seed);
 }
 
 const LIGHT_RANGE_DEFAULT: (i32, i32) = (0, 15);
@@ -168,9 +166,10 @@ fn normalize_custom_spawn_rules(tag: &Tag) -> Option<CompoundTag> {
     };
     let mut normalized = CompoundTag::new();
     for name in ["block_light_limit", "sky_light_limit"] {
-        let Some(value) = rules.get(name).and_then(decoded_light_range) else {
+        let Some(raw) = rules.get(name) else {
             continue;
         };
+        let value = decoded_light_range(raw)?;
         if value != LIGHT_RANGE_DEFAULT {
             normalized.put(name.to_string(), canonical_light_range(value));
         }
@@ -199,6 +198,17 @@ fn canonical_light_range((min, max): (i32, i32)) -> Tag {
             Tag::Int(rivet_nbt::int_tag::IntTag::value_of(max)),
         ]))
     }
+}
+
+fn java_float_equals(left: f32, right: f32) -> bool {
+    let bits = |value: f32| {
+        if value.is_nan() {
+            0x7fc0_0000
+        } else {
+            value.to_bits()
+        }
+    };
+    bits(left) == bits(right)
 }
 
 fn normalize_equipment(tag: &Tag) -> Option<CompoundTag> {
@@ -232,7 +242,9 @@ fn normalize_equipment(tag: &Tag) -> Option<CompoundTag> {
         && EQUIPMENT_SLOTS
             .iter()
             .all(|slot| values.iter().any(|(name, _)| name == slot))
-        && values.iter().all(|(_, chance)| *chance == values[0].1)
+        && values
+            .iter()
+            .all(|(_, chance)| java_float_equals(*chance, values[0].1))
     {
         normalized.put_float("slot_drop_chances", values[0].1);
     } else {
@@ -318,9 +330,76 @@ fn selected_spawn_data(tag: &CompoundTag, mut roll: i32) -> CompoundTag {
     CompoundTag::new()
 }
 
-fn persist_spawner_tag(tag: &mut CompoundTag, entity_id: &str, potential_roll: Option<i32>) {
+fn persist_chest_tag(
+    tag: &CompoundTag,
+    pos: &BlockPos,
+    seed: i64,
+    loot_table: &str,
+    fallback_id: &str,
+) -> CompoundTag {
+    let mut canonical = CompoundTag::new();
+    canonical.put_int("x", pos.get_x());
+    canonical.put_int("y", pos.get_y());
+    canonical.put_int("z", pos.get_z());
+    if let Some(id) = tag.get_string("id").filter(|id| *id == fallback_id) {
+        canonical.put_string("id", id);
+    } else {
+        canonical.put_string("id", fallback_id);
+    }
+    canonical.put_string("LootTable", loot_table);
+    if seed != 0 {
+        canonical.put_long("LootTableSeed", seed);
+    }
+    canonical
+}
+
+fn spawner_numeric_values(tag: &CompoundTag) -> [i32; 7] {
+    [
+        tag.get_int_or("Paper.Delay", tag.get_short_or("Delay", 20) as i32),
+        tag.get_int_or("Paper.MinSpawnDelay", tag.get_int_or("MinSpawnDelay", 200)),
+        tag.get_int_or("Paper.MaxSpawnDelay", tag.get_int_or("MaxSpawnDelay", 800)),
+        tag.get_int_or("SpawnCount", 4),
+        tag.get_int_or("MaxNearbyEntities", 6),
+        tag.get_int_or("RequiredPlayerRange", 16),
+        tag.get_int_or("SpawnRange", 4),
+    ]
+}
+
+fn persist_spawner_tag(
+    tag: &CompoundTag,
+    pos: &BlockPos,
+    entity_id: &str,
+    potential_roll: Option<i32>,
+) -> CompoundTag {
     let was_dummy = pending_is_dummy(tag);
-    tag.put_string("id", "minecraft:mob_spawner");
+    let [
+        delay,
+        min_spawn_delay,
+        max_spawn_delay,
+        spawn_count,
+        max_nearby_entities,
+        required_player_range,
+        spawn_range,
+    ] = spawner_numeric_values(tag);
+    let mut canonical = CompoundTag::new();
+    canonical.put_int("x", pos.get_x());
+    canonical.put_int("y", pos.get_y());
+    canonical.put_int("z", pos.get_z());
+    canonical.put_string("id", "minecraft:mob_spawner");
+    if delay > i16::MAX as i32 {
+        canonical.put_int("Paper.Delay", delay);
+    }
+    canonical.put_short("Delay", delay.min(i16::MAX as i32) as i16);
+    if min_spawn_delay > i16::MAX as i32 || max_spawn_delay > i16::MAX as i32 {
+        canonical.put_int("Paper.MinSpawnDelay", min_spawn_delay);
+        canonical.put_int("Paper.MaxSpawnDelay", max_spawn_delay);
+    }
+    canonical.put_short("MinSpawnDelay", min_spawn_delay.min(i16::MAX as i32) as i16);
+    canonical.put_short("MaxSpawnDelay", max_spawn_delay.min(i16::MAX as i32) as i16);
+    canonical.put_short("SpawnCount", spawn_count as i16);
+    canonical.put_short("MaxNearbyEntities", max_nearby_entities as i16);
+    canonical.put_short("RequiredPlayerRange", required_player_range as i16);
+    canonical.put_short("SpawnRange", spawn_range as i16);
 
     let mut spawn_data = if was_dummy {
         CompoundTag::new()
@@ -329,10 +408,15 @@ fn persist_spawner_tag(tag: &mut CompoundTag, entity_id: &str, potential_roll: O
             potential_roll.map_or_else(CompoundTag::new, |roll| selected_spawn_data(tag, roll))
         })
     };
-    let entity = spawn_data.get_compound_or_empty_mut("entity");
-    entity.put_string("id", entity_id);
-    tag.put("SpawnData".to_string(), Tag::Compound(spawn_data));
-    tag.remove("SpawnPotentials");
+    spawn_data
+        .get_compound_or_empty_mut("entity")
+        .put_string("id", entity_id);
+    canonical.put("SpawnData".to_string(), Tag::Compound(spawn_data));
+    canonical.put(
+        "SpawnPotentials".to_string(),
+        Tag::List(rivet_nbt::list_tag::ListTag::new()),
+    );
+    canonical
 }
 
 /// `mc.server.level.pipeline.holder` STUB — the `GenerationChunkHolder` read
@@ -743,37 +827,38 @@ where
     B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash + Send,
 {
-    fn pending_block_entity_matches(
-        &self,
-        pos: &BlockPos,
-        block_id: BlockId,
-        entity_id: &str,
-    ) -> bool {
+    fn pending_block_entity_matches(&self, pos: &BlockPos, entity_id: &str) -> bool {
         let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
         let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
         let Some(tag) = self.get_chunk(chunk_x, chunk_z).get_block_entity_nbt(pos) else {
             return false;
         };
-        pending_entity_tag_matches(
-            tag,
-            self.get_block_state_worldgen(pos).block() == block_id,
-            entity_id,
-        )
+        let block = self.get_block_state_worldgen(pos).block();
+        let state_matches = match entity_id {
+            "minecraft:chest" => block == Blocks::CHEST.id(),
+            "minecraft:trapped_chest" => block == TRAPPED_CHEST_BLOCK_ID,
+            "minecraft:mob_spawner" => block == Blocks::SPAWNER.id(),
+            _ => false,
+        };
+        pending_entity_tag_matches(tag, state_matches, entity_id)
     }
 
     fn update_pending_block_entity(
         &mut self,
         pos: &BlockPos,
-        update: impl FnOnce(&mut CompoundTag),
+        update: impl FnOnce(CompoundTag) -> CompoundTag,
     ) {
         let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
         let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
-        if let Some(tag) = self
-            .get_chunk_mut(chunk_x, chunk_z)
-            .get_block_entity_nbt_mut(pos)
-        {
-            update(tag);
-        }
+        let Some(tag) = self
+            .get_chunk(chunk_x, chunk_z)
+            .get_block_entity_nbt(pos)
+            .cloned()
+        else {
+            return;
+        };
+        self.get_chunk_mut(chunk_x, chunk_z)
+            .set_block_entity_nbt(update(tag));
     }
 
     fn is_within_write_zone_worldgen(&self, pos: &BlockPos) -> bool {
@@ -908,37 +993,38 @@ where
 /// borrow-carrying region, while this specialization serves dense server
 /// holders.
 impl WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
-    fn pending_block_entity_matches(
-        &self,
-        pos: &BlockPos,
-        block_id: BlockId,
-        entity_id: &str,
-    ) -> bool {
+    fn pending_block_entity_matches(&self, pos: &BlockPos, entity_id: &str) -> bool {
         let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
         let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
         let Some(tag) = self.get_chunk(chunk_x, chunk_z).get_block_entity_nbt(pos) else {
             return false;
         };
-        pending_entity_tag_matches(
-            tag,
-            self.get_block_state(pos).block() == block_id,
-            entity_id,
-        )
+        let block = self.get_block_state(pos).block();
+        let state_matches = match entity_id {
+            "minecraft:chest" => block == Blocks::CHEST.id(),
+            "minecraft:trapped_chest" => block == TRAPPED_CHEST_BLOCK_ID,
+            "minecraft:mob_spawner" => block == Blocks::SPAWNER.id(),
+            _ => false,
+        };
+        pending_entity_tag_matches(tag, state_matches, entity_id)
     }
 
     fn update_pending_block_entity(
         &mut self,
         pos: &BlockPos,
-        update: impl FnOnce(&mut CompoundTag),
+        update: impl FnOnce(CompoundTag) -> CompoundTag,
     ) {
         let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
         let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
-        if let Some(tag) = self
-            .get_chunk_mut(chunk_x, chunk_z)
-            .get_block_entity_nbt_mut(pos)
-        {
-            update(tag);
-        }
+        let Some(tag) = self
+            .get_chunk(chunk_x, chunk_z)
+            .get_block_entity_nbt(pos)
+            .cloned()
+        else {
+            return;
+        };
+        self.get_chunk_mut(chunk_x, chunk_z)
+            .set_block_entity_nbt(update(tag));
     }
 
     /// `WorldGenRegion.getFluidState(BlockPos)` — the block's fluid id, with
@@ -1201,15 +1287,23 @@ where
     }
 
     fn is_randomizable_container(&self, pos: &BlockPos) -> bool {
-        self.pending_block_entity_matches(pos, Blocks::CHEST.id(), "minecraft:chest")
+        self.pending_block_entity_matches(pos, "minecraft:chest")
+            || self.pending_block_entity_matches(pos, "minecraft:trapped_chest")
     }
 
     fn set_block_entity_loot_table(&mut self, pos: &BlockPos, seed: i64, loot_table: &str) {
-        self.update_pending_block_entity(pos, |tag| persist_chest_tag(tag, seed, loot_table));
+        let fallback_id = if self.get_block_state_worldgen(pos).block() == TRAPPED_CHEST_BLOCK_ID {
+            "minecraft:trapped_chest"
+        } else {
+            "minecraft:chest"
+        };
+        self.update_pending_block_entity(pos, |tag| {
+            persist_chest_tag(&tag, pos, seed, loot_table, fallback_id)
+        });
     }
 
     fn is_spawner_block_entity(&self, pos: &BlockPos) -> bool {
-        self.pending_block_entity_matches(pos, Blocks::SPAWNER.id(), "minecraft:mob_spawner")
+        self.pending_block_entity_matches(pos, "minecraft:mob_spawner")
     }
 
     fn spawner_potential_weight(&self, pos: &BlockPos) -> Option<i32> {
@@ -1222,7 +1316,7 @@ where
 
     fn set_spawner_entity(&mut self, pos: &BlockPos, entity_id: &str, potential_roll: Option<i32>) {
         self.update_pending_block_entity(pos, |tag| {
-            persist_spawner_tag(tag, entity_id, potential_roll)
+            persist_spawner_tag(&tag, pos, entity_id, potential_roll)
         });
     }
 }
@@ -1282,15 +1376,23 @@ impl WorldGenLevel for WorldGenRegion<'static, StateId, ServerBiomeId, Structure
     }
 
     fn is_randomizable_container(&self, pos: &BlockPos) -> bool {
-        self.pending_block_entity_matches(pos, Blocks::CHEST.id(), "minecraft:chest")
+        self.pending_block_entity_matches(pos, "minecraft:chest")
+            || self.pending_block_entity_matches(pos, "minecraft:trapped_chest")
     }
 
     fn set_block_entity_loot_table(&mut self, pos: &BlockPos, seed: i64, loot_table: &str) {
-        self.update_pending_block_entity(pos, |tag| persist_chest_tag(tag, seed, loot_table));
+        let fallback_id = if self.get_block_state(pos).block() == TRAPPED_CHEST_BLOCK_ID {
+            "minecraft:trapped_chest"
+        } else {
+            "minecraft:chest"
+        };
+        self.update_pending_block_entity(pos, |tag| {
+            persist_chest_tag(&tag, pos, seed, loot_table, fallback_id)
+        });
     }
 
     fn is_spawner_block_entity(&self, pos: &BlockPos) -> bool {
-        self.pending_block_entity_matches(pos, Blocks::SPAWNER.id(), "minecraft:mob_spawner")
+        self.pending_block_entity_matches(pos, "minecraft:mob_spawner")
     }
 
     fn spawner_potential_weight(&self, pos: &BlockPos) -> Option<i32> {
@@ -1303,7 +1405,7 @@ impl WorldGenLevel for WorldGenRegion<'static, StateId, ServerBiomeId, Structure
 
     fn set_spawner_entity(&mut self, pos: &BlockPos, entity_id: &str, potential_roll: Option<i32>) {
         self.update_pending_block_entity(pos, |tag| {
-            persist_spawner_tag(tag, entity_id, potential_roll)
+            persist_spawner_tag(&tag, pos, entity_id, potential_roll)
         });
     }
 
@@ -2253,7 +2355,56 @@ mod tests {
                 .and_then(|rules| rules.get_int("block_light_limit")),
             Some(3)
         );
-        assert!(spawner_tag.get("SpawnPotentials").is_none());
+        assert!(
+            spawner_tag
+                .get_list("SpawnPotentials")
+                .is_some_and(|list| list.list.is_empty())
+        );
+    }
+
+    #[test]
+    fn fresh_spawner_materialization_saves_paper_defaults_and_empty_potentials() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+        <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &pos,
+            "minecraft:skeleton",
+            None,
+        );
+        let tag = region
+            .get_chunk(0, 0)
+            .get_block_entity_nbt(&pos)
+            .expect("spawner tag remains present");
+        assert_eq!(
+            tag.get_string("id").map(String::as_str),
+            Some("minecraft:mob_spawner")
+        );
+        assert_eq!(tag.get_int("x"), Some(0));
+        assert_eq!(tag.get_int("y"), Some(64));
+        assert_eq!(tag.get_int("z"), Some(0));
+        assert_eq!(tag.get_short("Delay"), Some(20));
+        assert_eq!(tag.get_short("MinSpawnDelay"), Some(200));
+        assert_eq!(tag.get_short("MaxSpawnDelay"), Some(800));
+        assert_eq!(tag.get_short("SpawnCount"), Some(4));
+        assert_eq!(tag.get_short("MaxNearbyEntities"), Some(6));
+        assert_eq!(tag.get_short("RequiredPlayerRange"), Some(16));
+        assert_eq!(tag.get_short("SpawnRange"), Some(4));
+        assert!(tag.get("Paper.Delay").is_none());
+        assert!(tag.get("Paper.MinSpawnDelay").is_none());
+        assert!(tag.get("Paper.MaxSpawnDelay").is_none());
+        assert!(
+            tag.get_list("SpawnPotentials")
+                .is_some_and(|list| list.list.is_empty())
+        );
+        assert_eq!(
+            tag.get_compound("SpawnData")
+                .and_then(|data| data.get_compound("entity"))
+                .and_then(|entity| entity.get_string("id"))
+                .map(String::as_str),
+            Some("minecraft:skeleton")
+        );
     }
 
     #[test]
@@ -2304,7 +2455,10 @@ mod tests {
             .get_chunk(0, 0)
             .get_block_entity_nbt(&pos)
             .expect("spawner tag remains present");
-        assert!(tag.get("SpawnPotentials").is_none());
+        assert!(
+            tag.get_list("SpawnPotentials")
+                .is_some_and(|list| list.list.is_empty())
+        );
         assert!(
             tag.get_compound("SpawnData")
                 .is_some_and(|data| data.get("unknown").is_none())
@@ -2363,6 +2517,105 @@ mod tests {
         > as WorldGenLevel>::is_spawner_block_entity(
             &region, &chest_pos,
         ));
+
+        let spawner_tag = region
+            .get_chunk_mut(0, 0)
+            .get_block_entity_nbt_mut(&spawner_pos)
+            .expect("spawner tag");
+        spawner_tag.put_string("id", "minecraft:chest");
+        assert!(!<WorldGenRegion<
+            'static,
+            StateId,
+            ServerBiomeId,
+            StructureKey,
+        > as WorldGenLevel>::is_randomizable_container(
+            &region,
+            &spawner_pos,
+        ));
+
+        let trapped_pos = BlockPos::new(2, 64, 0);
+        assert!(region.set_block(&trapped_pos, BlockState::new(StateId(11208)), UPDATE_ALL, 0,));
+        region
+            .get_chunk_mut(0, 0)
+            .get_block_entity_nbt_mut(&trapped_pos)
+            .expect("trapped chest tag")
+            .put_string("id", "minecraft:chest");
+        assert!(!<WorldGenRegion<
+            'static,
+            StateId,
+            ServerBiomeId,
+            StructureKey,
+        > as WorldGenLevel>::is_randomizable_container(
+            &region,
+            &trapped_pos,
+        ));
+        region
+            .get_chunk_mut(0, 0)
+            .get_block_entity_nbt_mut(&trapped_pos)
+            .expect("trapped chest tag")
+            .put_string("id", "minecraft:trapped_chest");
+        assert!(<WorldGenRegion<
+            'static,
+            StateId,
+            ServerBiomeId,
+            StructureKey,
+        > as WorldGenLevel>::is_randomizable_container(
+            &region,
+            &trapped_pos,
+        ));
+    }
+
+    #[test]
+    fn trapped_chest_entity_and_loot_survive_a_blocked_safe_set() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        let trapped_chest = BlockState::new(StateId(11208));
+        assert!(region.set_block(&pos, trapped_chest, UPDATE_ALL, 0));
+        assert_eq!(
+            region
+                .get_chunk(0, 0)
+                .get_block_entity_nbt(&pos)
+                .and_then(|tag| tag.get_string("id"))
+                .map(String::as_str),
+            Some("DUMMY")
+        );
+        assert!(<WorldGenRegion<
+            'static,
+            StateId,
+            ServerBiomeId,
+            StructureKey,
+        > as WorldGenLevel>::is_randomizable_container(
+            &region, &pos
+        ));
+
+        let tag = region
+            .get_chunk_mut(0, 0)
+            .get_block_entity_nbt_mut(&pos)
+            .expect("trapped chest DUMMY tag");
+        tag.put_string("unknown", "drop-me");
+        <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_block_entity_loot_table(
+            &mut region,
+            &pos,
+            0,
+            "minecraft:chests/simple_dungeon",
+        );
+        let tag = region
+            .get_chunk(0, 0)
+            .get_block_entity_nbt(&pos)
+            .expect("trapped chest tag remains present");
+        assert_eq!(
+            tag.get_string("id").map(String::as_str),
+            Some("minecraft:trapped_chest")
+        );
+        assert_eq!(
+            tag.get_string("LootTable").map(String::as_str),
+            Some("minecraft:chests/simple_dungeon")
+        );
+        assert!(tag.get("LootTableSeed").is_none());
+        assert!(tag.get("unknown").is_none());
+        assert_eq!(tag.get_int("x"), Some(0));
+        assert_eq!(tag.get_int("y"), Some(64));
+        assert_eq!(tag.get_int("z"), Some(0));
     }
 
     #[test]
@@ -2410,11 +2663,7 @@ mod tests {
                 .map(String::as_str),
             Some("minecraft:skeleton")
         );
-        assert!(
-            spawn_data
-                .get_compound("custom_spawn_rules")
-                .is_some_and(CompoundTag::is_empty)
-        );
+        assert!(spawn_data.get("custom_spawn_rules").is_none());
         let equipment = spawn_data
             .get_compound("equipment")
             .expect("equipment remains");
@@ -2423,6 +2672,79 @@ mod tests {
             Some("minecraft:chest")
         );
         assert_eq!(equipment.get_float("slot_drop_chances"), Some(0.5));
+    }
+
+    #[test]
+    fn malformed_custom_spawn_rules_drop_the_optional_as_a_whole() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+        let mut entity = CompoundTag::new();
+        entity.put_string("id", "minecraft:zombie");
+        let mut rules = CompoundTag::new();
+        rules.put_int("block_light_limit", 3);
+        rules.put_int("sky_light_limit", 20);
+        let mut spawn_data = CompoundTag::new();
+        spawn_data.put("entity".to_string(), Tag::Compound(entity));
+        spawn_data.put("custom_spawn_rules".to_string(), Tag::Compound(rules));
+        set_spawn_data(&mut region, &pos, Tag::Compound(spawn_data));
+
+        <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &pos,
+            "minecraft:skeleton",
+            None,
+        );
+        let tag = region
+            .get_chunk(0, 0)
+            .get_block_entity_nbt(&pos)
+            .expect("spawner tag remains present");
+        assert!(
+            tag.get_compound("SpawnData")
+                .is_some_and(|data| data.get("custom_spawn_rules").is_none())
+        );
+    }
+
+    #[test]
+    fn all_eight_nan_equipment_chances_use_the_scalar_codec_form() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+        let mut entity = CompoundTag::new();
+        entity.put_string("id", "minecraft:zombie");
+        let mut equipment = CompoundTag::new();
+        equipment.put_string("loot_table", "minecraft:chests/simple_dungeon");
+        let mut chances = CompoundTag::new();
+        let nan = f32::from_bits(0x7fc0_1234);
+        for slot in EQUIPMENT_SLOTS {
+            chances.put_float(slot, nan);
+        }
+        equipment.put("slot_drop_chances".to_string(), Tag::Compound(chances));
+        let mut spawn_data = CompoundTag::new();
+        spawn_data.put("entity".to_string(), Tag::Compound(entity));
+        spawn_data.put("equipment".to_string(), Tag::Compound(equipment));
+        set_spawn_data(&mut region, &pos, Tag::Compound(spawn_data));
+
+        <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &pos,
+            "minecraft:skeleton",
+            None,
+        );
+        let tag = region
+            .get_chunk(0, 0)
+            .get_block_entity_nbt(&pos)
+            .expect("spawner tag remains present");
+        let equipment = tag
+            .get_compound("SpawnData")
+            .and_then(|data| data.get_compound("equipment"))
+            .expect("equipment remains");
+        let chance = equipment
+            .get("slot_drop_chances")
+            .and_then(Tag::as_float)
+            .expect("equal NaN chances use the scalar form");
+        assert!(chance.is_nan());
+        assert_eq!(chance.to_bits(), nan.to_bits());
     }
 
     #[test]
@@ -2463,7 +2785,7 @@ mod tests {
         assert_eq!(tag.get_short("MaxNearbyEntities"), Some(11));
         assert_eq!(tag.get_short("RequiredPlayerRange"), Some(23));
         assert_eq!(tag.get_short("SpawnRange"), Some(7));
-        assert_eq!(tag.get_int("UnrelatedField"), Some(1234));
+        assert!(tag.get("UnrelatedField").is_none());
         assert_eq!(
             tag.get_compound("SpawnData")
                 .and_then(|data| data.get_compound("entity"))
@@ -2471,6 +2793,49 @@ mod tests {
                 .map(String::as_str),
             Some("minecraft:skeleton")
         );
+    }
+
+    #[test]
+    fn spawner_paper_numeric_precedence_and_saved_types_match_paper() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+        let tag = spawner_tag_mut(&mut region, &pos);
+        tag.put_short("Delay", 37);
+        tag.put_int("Paper.Delay", 70_000);
+        tag.put_int("MinSpawnDelay", 41);
+        tag.put_int("Paper.MinSpawnDelay", 70_000);
+        tag.put_int("MaxSpawnDelay", 97);
+        tag.put_int("SpawnCount", 70_000);
+        tag.put_int("MaxNearbyEntities", -70_000);
+        tag.put_string("RequiredPlayerRange", "malformed");
+        tag.put_int("SpawnRange", 7);
+        tag.put_string("unknown", "drop-me");
+
+        <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &pos,
+            "minecraft:skeleton",
+            None,
+        );
+        let tag = region
+            .get_chunk(0, 0)
+            .get_block_entity_nbt(&pos)
+            .expect("spawner tag remains present");
+        assert_eq!(tag.get_int("Paper.Delay"), Some(70_000));
+        assert_eq!(tag.get_short("Delay"), Some(i16::MAX));
+        assert_eq!(tag.get_int("Paper.MinSpawnDelay"), Some(70_000));
+        assert_eq!(tag.get_int("Paper.MaxSpawnDelay"), Some(97));
+        assert_eq!(tag.get_short("MinSpawnDelay"), Some(i16::MAX));
+        assert_eq!(tag.get_short("MaxSpawnDelay"), Some(97));
+        assert_eq!(tag.get_short("SpawnCount"), Some(70_000_i32 as i16));
+        assert_eq!(
+            tag.get_short("MaxNearbyEntities"),
+            Some((-70_000_i32) as i16)
+        );
+        assert_eq!(tag.get_short("RequiredPlayerRange"), Some(16));
+        assert_eq!(tag.get_short("SpawnRange"), Some(7));
+        assert!(tag.get("unknown").is_none());
     }
 
     #[test]
@@ -2507,7 +2872,10 @@ mod tests {
                 .map(String::as_str),
             Some("minecraft:skeleton")
         );
-        assert!(tag.get("SpawnPotentials").is_none());
+        assert!(
+            tag.get_list("SpawnPotentials")
+                .is_some_and(|list| list.list.is_empty())
+        );
     }
 
     #[test]
@@ -2610,7 +2978,10 @@ mod tests {
                 .map(String::as_str),
             Some("minecraft:skeleton")
         );
-        assert!(tag.get("SpawnPotentials").is_none());
+        assert!(
+            tag.get_list("SpawnPotentials")
+                .is_some_and(|list| list.list.is_empty())
+        );
     }
 
     #[test]
