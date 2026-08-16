@@ -423,14 +423,22 @@ fn render_jar_path(jar: &Path, repo_root: &Path) -> String {
 /// Read `version.json` straight out of the jar — the authoritative MC build
 /// metadata (id, protocol_version, world_version), not a hardcoded constant.
 fn read_version_json(jar: &Path) -> Result<VersionJson> {
+    let jar = utf8_path(jar, "Paper jar")?;
     let out = Command::new("unzip")
-        .arg("-p")
-        .arg(jar)
-        .arg("version.json")
+        .args(["-p", jar, "version.json"])
         .output()
         .context("read version.json from source jar")?;
     ensure!(out.status.success(), "unzip -p version.json failed");
     serde_json::from_slice(&out.stdout).context("parse version.json")
+}
+
+fn utf8_path<'a>(path: &'a Path, label: &str) -> Result<&'a str> {
+    path.to_str().with_context(|| {
+        format!(
+            "UNVERIFIED: {label} path is not valid UTF-8: {}",
+            path.display()
+        )
+    })
 }
 
 /// Read the Paper commit embedded in the exact server jar used for capture.
@@ -438,8 +446,9 @@ fn read_version_json(jar: &Path) -> Result<VersionJson> {
 /// a jar built from a different checkout; it is never an independent provenance
 /// source.
 fn read_paper_git(jar: &Path, repo_root: &Path) -> Result<String> {
+    let jar_arg = utf8_path(jar, "Paper jar")?;
     let manifest = Command::new("unzip")
-        .args(["-p", jar.to_str().unwrap(), "META-INF/MANIFEST.MF"])
+        .args(["-p", jar_arg, "META-INF/MANIFEST.MF"])
         .output()
         .with_context(|| format!("UNVERIFIED: read Paper manifest from {}", jar.display()))?;
     ensure!(
@@ -449,13 +458,9 @@ fn read_paper_git(jar: &Path, repo_root: &Path) -> Result<String> {
     );
     let jar_commit = parse_paper_git_manifest(&manifest.stdout)?;
 
+    let repo_root_arg = utf8_path(repo_root, "Rivet checkout")?;
     let out = Command::new("git")
-        .args([
-            "-C",
-            repo_root.to_str().unwrap(),
-            "rev-parse",
-            "--git-common-dir",
-        ])
+        .args(["-C", repo_root_arg, "rev-parse", "--git-common-dir"])
         .output()
         .context("UNVERIFIED: resolve Rivet git common directory")?;
     ensure!(
@@ -496,8 +501,9 @@ fn read_paper_git(jar: &Path, repo_root: &Path) -> Result<String> {
         paper.display(),
         primary.display()
     );
+    let paper_arg = utf8_path(&paper, "Paper checkout")?;
     let out = Command::new("git")
-        .args(["-C", paper.to_str().unwrap(), "rev-parse", "HEAD"])
+        .args(["-C", paper_arg, "rev-parse", "HEAD"])
         .output()
         .with_context(|| format!("UNVERIFIED: read Paper git HEAD in {}", paper.display()))?;
     ensure!(
@@ -626,6 +632,17 @@ mod tests {
             parse_paper_git_manifest(b"Manifest-Version: 1.0\r\nGit-Commit: 0a99345\r\n").unwrap(),
             "0a99345"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_jar_path_returns_unverified_error() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let jar = PathBuf::from(OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0xff]));
+        let error = read_paper_git(&jar, Path::new("/repo")).unwrap_err();
+        assert!(error.to_string().contains("not valid UTF-8"));
     }
 
     #[test]
