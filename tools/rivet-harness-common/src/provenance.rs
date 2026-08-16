@@ -1,8 +1,15 @@
+use base64::Engine;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 
 fn target_dir() -> Result<PathBuf, String> {
     let value = env::var("RIVET_CARGO_TARGET_DIR")
@@ -31,7 +38,22 @@ fn sidecar(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.rivet-provenance", path.display()))
 }
 
-fn fields(path: &Path) -> Result<BTreeMap<String, String>, String> {
+fn path_bytes(path: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        path.as_os_str().as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        path.to_string_lossy().as_bytes().to_vec()
+    }
+}
+
+fn encoded_path(path: &Path) -> String {
+    base64::engine::general_purpose::STANDARD.encode(path_bytes(path))
+}
+
+fn fields(path: &Path) -> Result<BTreeMap<String, Value>, String> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("provenance {}: {error}", path.display()))?;
     if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
@@ -40,24 +62,24 @@ fn fields(path: &Path) -> Result<BTreeMap<String, String>, String> {
             path.display()
         ));
     }
+    #[cfg(unix)]
+    if metadata.nlink() > 1 {
+        return Err(format!(
+            "provenance sidecar is a hardlink: {}",
+            path.display()
+        ));
+    }
     let text = fs::read_to_string(path)
         .map_err(|error| format!("provenance {}: {error}", path.display()))?;
-    let mut values = BTreeMap::new();
-    for line in text.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        let (key, value) = line
-            .split_once('=')
-            .ok_or_else(|| format!("invalid provenance sidecar line: {}", path.display()))?;
-        if key.is_empty() || values.insert(key.to_owned(), value.to_owned()).is_some() {
-            return Err(format!(
-                "invalid provenance sidecar field: {}",
-                path.display()
-            ));
-        }
-    }
-    Ok(values)
+    let value: Value = serde_json::from_str(&text)
+        .map_err(|error| format!("invalid provenance sidecar {}: {error}", path.display()))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("invalid provenance sidecar object: {}", path.display()))?;
+    Ok(object
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect())
 }
 
 fn reject_symlink_path(path: &Path, label: &str) -> Result<(), String> {
@@ -177,26 +199,39 @@ pub fn verify(path: &Path) -> Result<(), String> {
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(format!("binary is not a regular file: {}", path.display()));
     }
+    #[cfg(unix)]
+    if metadata.nlink() > 1 {
+        return Err(format!("binary is a hardlink: {}", path.display()));
+    }
     let sidecar = sidecar(&path);
     let values = fields(&sidecar)?;
     let expected = BTreeMap::from([
-        ("version".to_owned(), "1".to_owned()),
-        ("repo_id".to_owned(), managed_env("RIVET_CARGO_REPO_ID")?),
+        ("version".to_owned(), Value::from(1)),
+        (
+            "repo_id".to_owned(),
+            Value::String(managed_env("RIVET_CARGO_REPO_ID")?),
+        ),
         (
             "checkout_id".to_owned(),
-            managed_env("RIVET_CARGO_CHECKOUT_ID")?,
+            Value::String(managed_env("RIVET_CARGO_CHECKOUT_ID")?),
         ),
-        ("head".to_owned(), managed_env("RIVET_CARGO_HEAD")?),
+        (
+            "head".to_owned(),
+            Value::String(managed_env("RIVET_CARGO_HEAD")?),
+        ),
         (
             "state_digest".to_owned(),
-            managed_env("RIVET_CARGO_STATE_DIGEST")?,
+            Value::String(managed_env("RIVET_CARGO_STATE_DIGEST")?),
         ),
-        ("target".to_owned(), target.to_string_lossy().into_owned()),
         (
-            "path".to_owned(),
-            canonical_path.to_string_lossy().into_owned(),
+            "target_b64".to_owned(),
+            Value::String(encoded_path(&target)),
         ),
-        ("sha256".to_owned(), sha256(&path)?),
+        (
+            "path_b64".to_owned(),
+            Value::String(encoded_path(&canonical_path)),
+        ),
+        ("sha256".to_owned(), Value::String(sha256(&path)?)),
     ]);
     if values != expected {
         return Err(format!("{} has invalid provenance", path.display()));

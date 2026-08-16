@@ -263,6 +263,14 @@ if env CARGO_TARGET_DIR="$TMP/foreign" "${prov_env[@]}" "$PROV/scripts/cargo-tar
   fail "foreign inherited target was accepted"
 fi
 pass "target aliases canonicalize while foreign inherited targets fail"
+FIRST_USE_ROOT="$TMP/first-use/missing/cache"
+FIRST_USE_TARGET="$(env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR RIVET_CARGO_TARGET_ROOT="$FIRST_USE_ROOT" \
+  "$PROV/scripts/cargo-target-dir.sh" namespace "$PROV" | python3 -c 'import json,sys; print(json.load(sys.stdin)["target"])')"
+[ ! -e "$FIRST_USE_ROOT" ] || fail "first-use setup unexpectedly created the target parent"
+FIRST_USE_RESOLVED="$(env -u RIVET_CARGO_TARGET_DIR RIVET_CARGO_TARGET_ROOT="$FIRST_USE_ROOT" \
+  CARGO_TARGET_DIR="$FIRST_USE_TARGET" "$PROV/scripts/cargo-target-dir.sh" target "$PROV")"
+[ "$FIRST_USE_RESOLVED" = "$FIRST_USE_TARGET" ] || fail "exact first-use target override was rejected"
+pass "exact expected target overrides permit missing checkout parents on first use"
 
 # A live process must retain the target even when it exports a symlink,
 # trailing-slash, and dot-component spelling of the namespace.
@@ -300,9 +308,22 @@ chmod +x "$PS_FAIL_BIN/ps"
 PATH="$PS_FAIL_BIN:$PATH" env "${space_env[@]}" "$PROV/scripts/prune-worktrees.sh" --idle-hours 1 > "$TMP/ps-failure-prune.out"
 grep -Fq 'managed process is live' "$TMP/ps-failure-prune.out" || fail "ps failure did not retain the target conservatively"
 [ -d "$SPACE_TARGET" ] || fail "ps failure pruned a live target"
+PS_MALFORMED_BIN="$TMP/ps-malformed-bin"
+mkdir -p "$PS_MALFORMED_BIN"
+printf '#!/bin/sh\nprintf "malformed ps output\\n"\n' > "$PS_MALFORMED_BIN/ps"
+chmod +x "$PS_MALFORMED_BIN/ps"
+PATH="$PS_MALFORMED_BIN:$PATH" env "${space_env[@]}" "$PROV/scripts/prune-worktrees.sh" --idle-hours 1 > "$TMP/ps-malformed-prune.out"
+grep -Fq 'managed process is live' "$TMP/ps-malformed-prune.out" || fail "malformed successful ps did not retain the target"
+[ -d "$SPACE_TARGET" ] || fail "malformed successful ps pruned a live target"
 kill "$SPACE_PID" 2>/dev/null || true
 wait "$SPACE_PID" 2>/dev/null || true
-pass "space-containing live targets and ps failures are fail-closed"
+FIND_FAIL_BIN="$TMP/find-failure-bin"
+mkdir -p "$FIND_FAIL_BIN"
+printf '#!/bin/sh\nexit 1\n' > "$FIND_FAIL_BIN/find"
+chmod +x "$FIND_FAIL_BIN/find"
+PATH="$FIND_FAIL_BIN:$PATH" env "${space_env[@]}" "$PROV/scripts/prune-worktrees.sh" --idle-hours 1 > "$TMP/find-failure-prune.out"
+[ -d "$SPACE_TARGET" ] || fail "find failure pruned a target"
+pass "space-containing live targets and uncertain liveness/activity scans are fail-closed"
 
 # The worktree parser must flush its final record, while malformed status is a
 # keep decision rather than an accidental removal.
@@ -414,6 +435,17 @@ fi
 [ "$(cat "$LOCK_OUTSIDE")" = lock-sentinel ] || fail "symlinked checkout lock changed its outside target"
 rm -f "$CHECKOUT_LOCK"
 pass "managed lock symlinks are rejected without outside writes"
+LOCK_HARDLINK_OUTSIDE="$TMP/lock-hardlink-outside"
+printf lock-hardlink-sentinel > "$LOCK_HARDLINK_OUTSIDE"
+rm -f "$GROUP_LOCK"
+ln "$LOCK_HARDLINK_OUTSIDE" "$GROUP_LOCK"
+if env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR "${prov_env[@]}" \
+  "$PROV/scripts/with-build-lock.sh" "$PROV" true >/dev/null 2>&1; then
+  fail "hardlinked group lock was accepted"
+fi
+[ "$(cat "$LOCK_HARDLINK_OUTSIDE")" = lock-hardlink-sentinel ] || fail "hardlinked lock changed outside content"
+rm -f "$GROUP_LOCK"
+pass "hardlinked managed locks are rejected without outside writes"
 
 MARKER="$PROV_TARGET/.rivet-cargo-target"
 MARKER_OUTSIDE="$TMP/marker-outside"
@@ -444,6 +476,22 @@ fi
 rm -f "$SIDECAR_HARDLINK_BIN.rivet-provenance" "$SIDECAR_HARDLINK_BIN"
 pass "hardlinked provenance sidecars cannot overwrite outside files"
 
+HARDLINK_BIN="$PROV_TARGET/debug/hardlinked-bin"
+HARDLINK_BIN_OUTSIDE="$TMP/hardlinked-bin-outside"
+printf hardlink-binary > "$HARDLINK_BIN_OUTSIDE"
+ln "$HARDLINK_BIN_OUTSIDE" "$HARDLINK_BIN"
+if env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR "${prov_env[@]}" \
+  python3 "$PROV/scripts/cargo-provenance.py" sidecar "$PROV" "$HARDLINK_BIN" >/dev/null 2>&1; then
+  fail "hardlinked deliverable binary was stamped"
+fi
+if env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR "${prov_env[@]}" \
+  "$PROV/scripts/cargo-target-dir.sh" binary "$PROV" hardlinked-bin >/dev/null 2>&1; then
+  fail "hardlinked deliverable binary was resolved"
+fi
+[ "$(cat "$HARDLINK_BIN_OUTSIDE")" = hardlink-binary ] || fail "hardlinked binary attack changed outside content"
+rm -f "$HARDLINK_BIN"
+pass "hardlinked deliverable binaries are rejected by stamping and resolution"
+
 RECEIPT="$TMP/receipt"
 RECEIPT_OUTSIDE="$TMP/receipt-outside"
 printf receipt-sentinel > "$RECEIPT_OUTSIDE"
@@ -466,6 +514,66 @@ PY
 [ "$(cat "$RECEIPT_OUTSIDE")" = receipt-sentinel ] || fail "receipt temporary symlink changed its outside target"
 [ -L "$RECEIPT.4242.tmp" ] || fail "receipt temporary symlink was unexpectedly replaced"
 pass "receipt temporary symlinks cannot redirect writes"
+
+STATE_NS="$(env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR "${prov_env[@]}" \
+  "$PROV/scripts/cargo-target-dir.sh" namespace "$PROV")"
+STRICT_DIR="$(printf '%s\n' "$STATE_NS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["strict"])')"
+STATE_DIGEST="$(env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR "${prov_env[@]}" \
+  "$PROV/scripts/cargo-target-dir.sh" digest "$PROV")"
+STATE_OUTSIDE="$TMP/state-outside"
+printf state-sentinel > "$STATE_OUTSIDE"
+ln -s "$STATE_OUTSIDE" "$STRICT_DIR/state-digest"
+if env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR "${prov_env[@]}" \
+  python3 "$PROV/scripts/cargo-provenance.py" record-state "$PROV" "$STATE_DIGEST" >/dev/null 2>&1; then
+  fail "symlinked state digest was accepted"
+fi
+[ "$(cat "$STATE_OUTSIDE")" = state-sentinel ] || fail "symlinked state digest changed outside content"
+rm -f "$STRICT_DIR/state-digest"
+printf current-state > "$STATE_OUTSIDE"
+ln "$STATE_OUTSIDE" "$STRICT_DIR/state-digest"
+if env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR "${prov_env[@]}" \
+  python3 "$PROV/scripts/cargo-provenance.py" record-state "$PROV" "$STATE_DIGEST" >/dev/null 2>&1; then
+  fail "hardlinked state digest was accepted"
+fi
+[ "$(cat "$STATE_OUTSIDE")" = current-state ] || fail "hardlinked state digest changed outside content"
+rm -f "$STRICT_DIR/state-digest"
+pass "state digest symlink and hardlink replacements are rejected"
+
+RUSTC_FAKE="$TMP/fake-rustc"
+printf 'compiler-a\n' > "$RUSTC_FAKE"
+RUSTC_DIGEST_A="$(env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR RUSTC="$RUSTC_FAKE" "${prov_env[@]}" \
+  "$PROV/scripts/cargo-target-dir.sh" digest "$PROV")"
+printf 'compiler-b\n' > "$RUSTC_FAKE"
+RUSTC_DIGEST_B="$(env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR RUSTC="$RUSTC_FAKE" "${prov_env[@]}" \
+  "$PROV/scripts/cargo-target-dir.sh" digest "$PROV")"
+[ "$RUSTC_DIGEST_A" != "$RUSTC_DIGEST_B" ] || fail "in-place RUSTC replacement did not invalidate provenance"
+pass "compiler executable replacement invalidates strict provenance"
+
+NEWLINE_PATH="$PROV/$'trailing \nnewline'"
+printf path-content > "$NEWLINE_PATH"
+PATH_DIGEST_A="$(env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR "${prov_env[@]}" \
+  "$PROV/scripts/cargo-target-dir.sh" digest "$PROV")"
+TRAILING_PATH="$PROV/trailing-path"
+printf path-content > "$TRAILING_PATH"
+PATH_DIGEST_B="$(env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR "${prov_env[@]}" \
+  "$PROV/scripts/cargo-target-dir.sh" digest "$PROV")"
+[ "$PATH_DIGEST_A" != "$PATH_DIGEST_B" ] || fail "lossless Git path capture ignored a newline path"
+rm -f "$NEWLINE_PATH" "$TRAILING_PATH"
+pass "newline and trailing-whitespace paths are losslessly represented"
+
+DRY_ROOT="$TMP/dry-cache"
+DRY_TARGET="$(env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR RIVET_CARGO_TARGET_ROOT="$DRY_ROOT" \
+  "$PROV/scripts/cargo-target-dir.sh" ensure "$PROV")"
+find -P "$DRY_TARGET" -type f ! -name .rivet-cargo-target -exec touch -m -t 200001010000 {} +
+DRY_NS="$(env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR RIVET_CARGO_TARGET_ROOT="$DRY_ROOT" \
+  "$PROV/scripts/cargo-target-dir.sh" namespace "$PROV")"
+DRY_GROUP="$(printf '%s\n' "$DRY_NS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["group_lock"])')"
+DRY_CHECKOUT="$(printf '%s\n' "$DRY_NS" | python3 -c 'import json,sys; print(json.load(sys.stdin)["checkout_lock"])')"
+env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR RIVET_CARGO_TARGET_ROOT="$DRY_ROOT" \
+  "$PROV/scripts/prune-worktrees.sh" --dry-run --idle-hours 1 > "$TMP/dry-run.out"
+[ -d "$DRY_TARGET" ] || fail "dry-run removed a namespace"
+[ ! -e "$DRY_GROUP" ] && [ ! -e "$DRY_CHECKOUT" ] || fail "dry-run created lock files"
+pass "dry-run pruning is side-effect free"
 
 WRAPPER="$TMP/custom-wrapper"
 printf 'wrapper-a\n' > "$WRAPPER"

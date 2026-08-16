@@ -140,7 +140,10 @@ strict_gate_prepare() {
   digest=$(cargo_state_digest_for "$REPO_DIR")
   export RIVET_CARGO_STATE_DIGEST="$digest"
   strict_dir=$(cargo_namespace_value "$REPO_DIR" strict)
-  mkdir -p "$strict_dir"
+  [ -d "$strict_dir" ] && [ ! -L "$strict_dir" ] || {
+    echo "strict namespace directory is not a real directory: $strict_dir" >&2
+    return 1
+  }
   export RIVET_STRICT_BEFORE_DIGEST="$digest"
   export RIVET_STRICT_STATE_DIR="$strict_dir"
   echo "==> strict gate digest before: $digest"
@@ -155,12 +158,7 @@ strict_gate_verify() {
     echo "  after:  $after" >&2
     return 1
   fi
-  current="$RIVET_STRICT_STATE_DIR/state-digest"
-  previous="$RIVET_STRICT_STATE_DIR/prior-state-digest"
-  if [ -f "$current" ]; then
-    cp "$current" "$previous"
-  fi
-  printf '%s\n' "$after" > "$current"
+  python3 "$REPO_DIR/scripts/cargo-provenance.py" record-state "$REPO_DIR" "$after"
   echo "==> strict gate digest after: $after"
 }
 

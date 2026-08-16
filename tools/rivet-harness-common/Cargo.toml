@@ -7,6 +7,8 @@ publish = false
 description = "Shared primitives for Rivet's E2E harness tools (child-process boot lifecycle, held port reservations, strict JSONL transcripts, exit contract, named negative controls, artifact provenance)"
 
 [dependencies]
+base64.workspace = true
+serde_json.workspace = true
 sha2 = "0.10"
 
 # The test module exercises the generic policies against real JSON lines, so

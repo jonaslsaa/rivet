@@ -37,6 +37,8 @@ cd "$(dirname "$0")/.."
 SANDBOX="$(mktemp -d)"
 CACHE_ROOT="$(mktemp -d "$SANDBOX-cache.XXXXXX")"
 trap 'rm -rf "$SANDBOX" "$CACHE_ROOT"' EXIT
+RUSTC_STUB="$SANDBOX/rustc"
+printf 'compiler-stub\n' > "$RUSTC_STUB"
 
 # --- build the sandbox -------------------------------------------------------
 # Repo layout the real gate.sh probes (REPO_DIR resolves to $SANDBOX).
@@ -86,13 +88,13 @@ git -C "$SANDBOX" commit -qm initial
 CLIENT_TARGET="$(env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR RIVET_CARGO_TARGET_ROOT="$CACHE_ROOT" "$SANDBOX/scripts/cargo-target-dir.sh" target "$SANDBOX")"
 mkdir -p "$CLIENT_TARGET/debug"
 : > "$CLIENT_TARGET/debug/rivet-client"
-env -u RIVET_CARGO_TARGET_DIR RIVET_CARGO_TARGET_ROOT="$CACHE_ROOT" CARGO_TARGET_DIR="$CLIENT_TARGET" python3 "$SANDBOX/scripts/cargo-provenance.py" sidecar "$SANDBOX" "$CLIENT_TARGET/debug/rivet-client" >/dev/null
+env -u RIVET_CARGO_TARGET_DIR RUSTC="$RUSTC_STUB" RIVET_CARGO_TARGET_ROOT="$CACHE_ROOT" CARGO_TARGET_DIR="$CLIENT_TARGET" python3 "$SANDBOX/scripts/cargo-provenance.py" sidecar "$SANDBOX" "$CLIENT_TARGET/debug/rivet-client" >/dev/null
 cat > "$CLIENT_TARGET/debug/rivet-parity" <<'EOF'
 #!/bin/bash
 exit 0
 EOF
 chmod +x "$CLIENT_TARGET/debug/rivet-parity"
-env -u RIVET_CARGO_TARGET_DIR RIVET_CARGO_TARGET_ROOT="$CACHE_ROOT" CARGO_TARGET_DIR="$CLIENT_TARGET" python3 "$SANDBOX/scripts/cargo-provenance.py" sidecar "$SANDBOX" "$CLIENT_TARGET/debug/rivet-parity" >/dev/null
+env -u RIVET_CARGO_TARGET_DIR RUSTC="$RUSTC_STUB" RIVET_CARGO_TARGET_ROOT="$CACHE_ROOT" CARGO_TARGET_DIR="$CLIENT_TARGET" python3 "$SANDBOX/scripts/cargo-provenance.py" sidecar "$SANDBOX" "$CLIENT_TARGET/debug/rivet-parity" >/dev/null
 mkdir -p "$SANDBOX/tools/rivet-oracle" "$SANDBOX/tools/rivet-capture"
 for wrapper in rivet-oracle rivet-capture; do
   cat > "$SANDBOX/tools/$wrapper/run.sh" <<'EOF'
@@ -211,7 +213,7 @@ chmod +x "$SANDBOX/home/.cargo/bin/cargo" "$SANDBOX/home/.cargo/bin/cargo-machet
 # ~/.cargo/bin cannot leak in and flip the fallback profile non-deterministically.
 # JAVA_HOME points at the sandbox jdk so the reference-oracle javac probe is
 # deterministic on hosts that have their own JDK configured.
-GATE="env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR HOME=$SANDBOX/home JAVA_HOME=$SANDBOX/jdk RIVET_CARGO_TARGET_ROOT=$CACHE_ROOT RIVET_CLIENT_BIN=$CLIENT_TARGET/debug/rivet-client PATH=$SANDBOX/home/.cargo/bin:/usr/bin:/bin $SANDBOX/scripts/gate.sh"
+GATE="env -u CARGO_TARGET_DIR -u RIVET_CARGO_TARGET_DIR HOME=$SANDBOX/home JAVA_HOME=$SANDBOX/jdk RIVET_CARGO_TARGET_ROOT=$CACHE_ROOT RUSTC=$RUSTC_STUB RIVET_CLIENT_BIN=$CLIENT_TARGET/debug/rivet-client PATH=$SANDBOX/home/.cargo/bin:/usr/bin:/bin $SANDBOX/scripts/gate.sh"
 
 # run_scenarios <profile-name> <nextest-presence>
 #   nextest-presence: "nextest" installs the cargo-nextest stub; anything else

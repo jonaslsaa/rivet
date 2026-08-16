@@ -168,7 +168,9 @@ The fallback `rivet-server` path is resolved inside the harness's workspace,
 and a narrow freshness guard rejects it when it predates that workspace's
 `rivet-server` entry point. Normal runs rebuild before executing; the PLAY
 verdict and Rivet-only connection log remain the load-bearing stale/fake-server
-checks. `RIVET_SERVER_BIN` is an explicit override and is not commit-bound.
+checks. `RIVET_SERVER_BIN` is accepted only when it resolves to a managed, freshly
+attested binary whose provenance is bound to this checkout's current commit and
+strict state digest; unattested or foreign overrides are rejected.
 
 The runner:
 

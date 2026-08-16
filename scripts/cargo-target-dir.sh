@@ -42,20 +42,31 @@ cargo_target_dir_for() {
     esac
     local canonical
     canonical=$(python3 - "$override" <<'PY'
-import pathlib, stat, sys
-p = pathlib.Path(sys.argv[1])
-try:
-    info = p.lstat()
-except FileNotFoundError:
-    info = None
-if info is not None and (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)):
-    print(f"cargo target: managed target must be a real directory: {p}", file=sys.stderr)
-    raise SystemExit(2)
-try:
-    print((p.parent.resolve(strict=True) / p.name))
-except OSError as exc:
-    print(f"cargo target: cannot canonicalize {p}: {exc}", file=sys.stderr)
-    raise SystemExit(2)
+import pathlib
+import stat
+import sys
+
+path = pathlib.Path(sys.argv[1]).absolute()
+missing = []
+probe = path
+while True:
+    try:
+        info = probe.lstat()
+    except FileNotFoundError:
+        missing.append(probe.name)
+        if probe == probe.parent:
+            print(f"cargo target: cannot resolve parent of {path}", file=sys.stderr)
+            raise SystemExit(2)
+        probe = probe.parent
+        continue
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        print(f"cargo target: managed path is not a real directory: {probe}", file=sys.stderr)
+        raise SystemExit(2)
+    resolved = probe.resolve(strict=True)
+    for name in reversed(missing):
+        resolved /= name
+    print(resolved)
+    break
 PY
 ) || return 2
     if [ "$canonical" != "$expected" ]; then
