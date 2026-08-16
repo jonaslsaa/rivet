@@ -250,7 +250,7 @@ fn normalize_equipment(tag: &Tag) -> Option<CompoundTag> {
         return Some(normalized);
     }
     let Tag::Compound(chances) = slot_drop_chances else {
-        return None;
+        return Some(normalized);
     };
     let values: Vec<_> = chances
         .entry_set()
@@ -2893,6 +2893,140 @@ mod tests {
             .expect("weighted potential is selected");
         assert!(rules.get("block_light_limit").is_none());
         assert_eq!(rules.get_int("sky_light_limit"), Some(4));
+    }
+
+    #[test]
+    fn wrong_typed_equipment_chance_list_defaults_in_selected_potential() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+
+        let mut first_data = CompoundTag::new();
+        let mut first_entity = CompoundTag::new();
+        first_entity.put_string("id", "minecraft:zombie");
+        first_data.put("entity".to_string(), Tag::Compound(first_entity));
+        let mut first_entry = CompoundTag::new();
+        first_entry.put_int("weight", 1);
+        first_entry.put("data".to_string(), Tag::Compound(first_data));
+
+        let mut second_data = CompoundTag::new();
+        let mut second_entity = CompoundTag::new();
+        second_entity.put_string("id", "minecraft:skeleton");
+        second_data.put("entity".to_string(), Tag::Compound(second_entity));
+        let mut equipment = CompoundTag::new();
+        equipment.put_string("loot_table", "minecraft:chests/simple_dungeon");
+        equipment.put(
+            "slot_drop_chances".to_string(),
+            Tag::List(rivet_nbt::list_tag::ListTag::new()),
+        );
+        second_data.put("equipment".to_string(), Tag::Compound(equipment));
+        let mut second_entry = CompoundTag::new();
+        second_entry.put_int("weight", 1);
+        second_entry.put("data".to_string(), Tag::Compound(second_data));
+
+        spawner_tag_mut(&mut region, &pos).put(
+            "SpawnPotentials".to_string(),
+            Tag::List(rivet_nbt::list_tag::ListTag::with_list(vec![
+                Tag::Compound(first_entry),
+                Tag::Compound(second_entry),
+            ])),
+        );
+        assert_eq!(<WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::spawner_potential_weight(
+            &region, &pos,
+        ), Some(2));
+
+        <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &pos,
+            "minecraft:creeper",
+            Some(1),
+        );
+        let tag = region
+            .get_chunk(0, 0)
+            .get_block_entity_nbt(&pos)
+            .expect("spawner tag remains present");
+        let spawn_data = tag.get_compound("SpawnData").expect("SpawnData remains");
+        assert_eq!(
+            spawn_data
+                .get_compound("entity")
+                .and_then(|entity| entity.get_string("id"))
+                .map(String::as_str),
+            Some("minecraft:creeper")
+        );
+        let equipment = spawn_data
+            .get_compound("equipment")
+            .expect("equipment remains");
+        assert_eq!(
+            equipment.get_string("loot_table").map(String::as_str),
+            Some("minecraft:chests/simple_dungeon")
+        );
+        assert!(equipment.get("slot_drop_chances").is_none());
+        assert!(
+            tag.get_list("SpawnPotentials")
+                .is_some_and(|list| list.list.is_empty())
+        );
+    }
+
+    #[test]
+    fn scalar_equipment_chance_survives_selected_potential() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
+
+        let mut first_data = CompoundTag::new();
+        let mut first_entity = CompoundTag::new();
+        first_entity.put_string("id", "minecraft:zombie");
+        first_data.put("entity".to_string(), Tag::Compound(first_entity));
+        let mut first_entry = CompoundTag::new();
+        first_entry.put_int("weight", 2);
+        first_entry.put("data".to_string(), Tag::Compound(first_data));
+
+        let mut second_data = CompoundTag::new();
+        let mut second_entity = CompoundTag::new();
+        second_entity.put_string("id", "minecraft:skeleton");
+        second_data.put("entity".to_string(), Tag::Compound(second_entity));
+        let mut equipment = CompoundTag::new();
+        equipment.put_string("loot_table", "minecraft:chests/simple_dungeon");
+        equipment.put_float("slot_drop_chances", 0.25);
+        second_data.put("equipment".to_string(), Tag::Compound(equipment));
+        let mut second_entry = CompoundTag::new();
+        second_entry.put_int("weight", 3);
+        second_entry.put("data".to_string(), Tag::Compound(second_data));
+
+        spawner_tag_mut(&mut region, &pos).put(
+            "SpawnPotentials".to_string(),
+            Tag::List(rivet_nbt::list_tag::ListTag::with_list(vec![
+                Tag::Compound(first_entry),
+                Tag::Compound(second_entry),
+            ])),
+        );
+        assert_eq!(<WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::spawner_potential_weight(
+            &region, &pos,
+        ), Some(5));
+
+        <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &pos,
+            "minecraft:creeper",
+            Some(2),
+        );
+        let tag = region
+            .get_chunk(0, 0)
+            .get_block_entity_nbt(&pos)
+            .expect("spawner tag remains present");
+        let equipment = tag
+            .get_compound("SpawnData")
+            .and_then(|data| data.get_compound("equipment"))
+            .expect("equipment remains");
+        assert_eq!(
+            equipment.get_string("loot_table").map(String::as_str),
+            Some("minecraft:chests/simple_dungeon")
+        );
+        assert_eq!(equipment.get_float("slot_drop_chances"), Some(0.25));
+        assert!(
+            tag.get_list("SpawnPotentials")
+                .is_some_and(|list| list.list.is_empty())
+        );
     }
 
     #[test]
