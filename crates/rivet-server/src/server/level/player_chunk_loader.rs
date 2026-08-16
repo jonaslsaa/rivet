@@ -227,6 +227,10 @@ pub struct PlayerChunkLoader {
     /// `add_and_send_chunks` (compiled out of non-test builds).
     #[cfg(test)]
     fail_chunk_encoding: bool,
+    /// Test seam for injecting an update encode failure at an entered-cell
+    /// index (compiled out of non-test builds).
+    #[cfg(test)]
+    fail_update_at_enter: Option<usize>,
 }
 
 impl PlayerChunkLoader {
@@ -239,6 +243,8 @@ impl PlayerChunkLoader {
             last_tick_distance: i32::MIN,
             #[cfg(test)]
             fail_chunk_encoding: false,
+            #[cfg(test)]
+            fail_update_at_enter: None,
         }
     }
 
@@ -344,7 +350,7 @@ impl PlayerChunkLoader {
     /// path, reduced to the M1 direct-send world (issue #521).
     ///
     /// Whenever any tracked input changed (the center, the send/tick
-    /// distances, or both), this emits in Java's `update()` wire order:
+    /// distances, or both), this prepares Java's `update()` wire order:
     /// the `ClientboundSetChunkCacheRadiusPacket` if the send distance changed
     /// (the `lastSentChunkRadius != sendViewDistance` guard), the
     /// `ClientboundSetSimulationDistancePacket` if the tick distance changed,
@@ -376,6 +382,11 @@ impl PlayerChunkLoader {
     /// #185 — so the guard recomputes exactly when an output could change, and
     /// an intra-chunk move with unchanged distances emits nothing (the same
     /// "nothing we care about changed" early return).
+    ///
+    /// The packet batch and loader state are transactional: all cache packets
+    /// and entered chunks are encoded before the new center/distances are
+    /// committed. An encode or lookup error therefore returns no packets and
+    /// leaves the loader ready to retry the same transition.
     ///
     /// **No silent substitution.** Each entered position resolves through
     /// `encode_chunk_with_light`, which honors `MissingChunkPolicy`:
@@ -426,11 +437,11 @@ impl PlayerChunkLoader {
         // after the distance-map updates (which send unload packets
         // synchronously — deferred with #185). Java compares against the
         // *sent* values (`lastSentChunkRadius`/`lastSentSimulationDistance`),
-        // which are committed wherever the corresponding packet is emitted —
-        // in `add` and here — so they fold into `lastSendDistance`/
-        // `lastTickDistance`. The radius/simulation packets precede the center
-        // packet, so the client's cache is sized and located before any chunk
-        // arrives.
+        // represented by the committed `lastSendDistance`/`lastTickDistance`
+        // here. The radius/simulation packets precede the center packet, so the
+        // client's cache is sized and located before any chunk arrives; this
+        // synchronous slice commits those values only after the complete batch
+        // encodes.
         let mut packets = Vec::new();
         if self.last_send_distance != send {
             packets.push(PlayPacket::new(
@@ -450,15 +461,6 @@ impl PlayerChunkLoader {
                 )?,
             ));
         }
-
-        // Java `update()` commits the new center + distances before the center
-        // packet (`this.lastChunkX = currentChunkX` etc. precede the send) and
-        // before the chunk walk, so the enter-set diff is against the committed
-        // center.
-        self.last_chunk_x = current_x;
-        self.last_chunk_z = current_z;
-        self.last_send_distance = send;
-        self.last_tick_distance = tick;
 
         // Java sends the center packet last in `update()` "so that the client
         // does not ignore any of our unload chunk packets above", gated on the
@@ -483,11 +485,22 @@ impl PlayerChunkLoader {
         // union bounding box in the deterministic X-major/Z-minor raster.
         let next_view = ChunkTrackingView::of(ChunkPos::new(current_x, current_z), send);
         let mut bodies = Vec::new();
+        let mut enter_index = 0;
         ChunkTrackingView::difference(
             &prev_view,
             &next_view,
             |pos| {
+                #[cfg(test)]
+                if self.fail_update_at_enter == Some(enter_index) {
+                    bodies.push(Err(format!(
+                        "forced update view-chunk encode failure at enter index {enter_index}"
+                    )));
+                } else {
+                    bodies.push(encode_chunk_with_light(pos, world));
+                }
+                #[cfg(not(test))]
                 bodies.push(encode_chunk_with_light(pos, world));
+                enter_index += 1;
             },
             |_| {},
         );
@@ -498,6 +511,13 @@ impl PlayerChunkLoader {
                 body,
             ));
         }
+
+        // Commit only after every packet body has encoded successfully. The
+        // caller receives either the complete transition or no packets at all.
+        self.last_chunk_x = current_x;
+        self.last_chunk_z = current_z;
+        self.last_send_distance = send;
+        self.last_tick_distance = tick;
         Ok(packets)
     }
 
@@ -526,6 +546,13 @@ impl PlayerChunkLoader {
     #[cfg(test)]
     fn set_fail_chunk_encoding(&mut self, fail: bool) {
         self.fail_chunk_encoding = fail;
+    }
+
+    /// Test seam: fail an update at a specific entered-cell index. Compiles out
+    /// of non-test builds.
+    #[cfg(test)]
+    fn set_fail_update_at_enter(&mut self, enter_index: Option<usize>) {
+        self.fail_update_at_enter = enter_index;
     }
 }
 
@@ -665,6 +692,8 @@ mod tests {
     };
     use rivet_protocol::varint21_frame_decoder::Varint21FrameDecoder;
     use std::sync::Arc;
+
+    use super::super::level_chunk::LevelChunk;
 
     /// The #194 capture fixture's first `level_chunk_with_light` body (coords
     /// -5/-4). All 117 bodies in the capture are byte-identical apart from the
@@ -963,6 +992,18 @@ mod tests {
         out
     }
 
+    fn install_view(world: &mut ServerLevel, view: ChunkTrackingView) {
+        view.for_each(|pos| world.chunk_map_mut().install(pos, LevelChunk::new(pos)));
+    }
+
+    fn loader_state(loader: &PlayerChunkLoader) -> (ChunkPos, i32, i32) {
+        (
+            loader.last_chunk_pos(),
+            loader.last_send_distance(),
+            loader.last_tick_distance(),
+        )
+    }
+
     #[test]
     fn update_emits_cache_center_then_only_newly_entered_chunks_in_raster_order() {
         let (_loader, packets) = loader_after_east_move();
@@ -1091,27 +1132,116 @@ mod tests {
     }
 
     #[test]
-    fn update_on_require_loaded_errors_typed_without_silent_substitution() {
-        // A region-backed world (RequireLoaded) with only the spawn chunk
-        // loaded: any enter cell outside it is missing, and the update path
-        // fails typed `UNVERIFIED` — no generation fallback, no silent spawn
-        // substitution. The loader is pre-add, so its initial state matches
-        // Java's `lastSendDistance = Integer.MIN_VALUE`; the degenerate
-        // previous view makes the diff fall back to the full next view (Java's
-        // `difference` else-branch), so the error fires on the first missing
-        // cell of the 117-cell view.
+    fn update_first_failure_leaves_state_unchanged() {
         let mut world = ServerLevel::new(super::super::server_level::ServerLevelConfig {
             missing_chunk_policy: MissingChunkPolicy::RequireLoaded,
             ..Default::default()
         });
         let mut loader = PlayerChunkLoader::new(world.view().center());
+        let before = loader_state(&loader);
+
         let err = loader
             .update(&mut world, ChunkPos::new(1, 0), None)
             .unwrap_err();
-        assert!(
-            err.contains("UNVERIFIED region-backed chunk"),
-            "typed UNVERIFIED missing-chunk failure: {err}"
-        );
+        assert!(err.contains("UNVERIFIED region-backed chunk"));
         assert!(err.contains("fallback are disabled"));
+        assert_eq!(loader_state(&loader), before);
+    }
+
+    #[test]
+    fn update_same_center_retry_after_chunks_become_available_emits_full_set_once() {
+        let mut world = ServerLevel::new(super::super::server_level::ServerLevelConfig {
+            missing_chunk_policy: MissingChunkPolicy::RequireLoaded,
+            ..Default::default()
+        });
+        let mut loader = PlayerChunkLoader::new(world.view().center());
+        let target = ChunkPos::new(1, 0);
+
+        assert!(loader.update(&mut world, target, None).is_err());
+        assert_eq!(loader.last_chunk_pos(), ChunkPos::ZERO);
+
+        install_view(&mut world, ChunkTrackingView::of(target, 4));
+        let packets = loader.update(&mut world, target, None).unwrap();
+        assert_eq!(packets.len(), 3 + 117);
+        assert_eq!(packets[0].id, PlayClientbound::SetChunkCacheRadius.id());
+        assert_eq!(packets[1].id, PlayClientbound::SetSimulationDistance.id());
+        assert_eq!(packets[2].id, PlayClientbound::SetChunkCacheCenter.id());
+        let coords: Vec<ChunkPos> = packets[3..]
+            .iter()
+            .map(|packet| chunk_body_coords(&packet.body))
+            .collect();
+        assert_eq!(
+            coords,
+            expected_raster()
+                .into_iter()
+                .map(|pos| { ChunkPos::new(pos.x() + target.x(), pos.z() + target.z()) })
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(loader_state(&loader), (target, 4, 4));
+
+        assert!(loader.update(&mut world, target, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn update_failure_after_encoded_chunks_returns_no_partial_transition() {
+        let mut world = overworld();
+        let mut loader = PlayerChunkLoader::new(world.view().center());
+        loader.add_and_send_chunks(&mut world, None).unwrap();
+        let before = loader_state(&loader);
+        loader.set_fail_update_at_enter(Some(1));
+
+        let err = loader
+            .update(&mut world, ChunkPos::new(1, 0), None)
+            .unwrap_err();
+        assert!(err.contains("enter index 1"));
+        assert_eq!(loader_state(&loader), before);
+
+        loader.set_fail_update_at_enter(None);
+        let packets = loader
+            .update(&mut world, ChunkPos::new(1, 0), None)
+            .unwrap();
+        assert_eq!(packets.len(), 1 + east_move_enter().len());
+        assert_eq!(loader.last_chunk_pos(), ChunkPos::new(1, 0));
+    }
+
+    #[test]
+    fn repeated_update_failure_keeps_the_same_retryable_state() {
+        let mut world = overworld();
+        let mut loader = PlayerChunkLoader::new(world.view().center());
+        loader.add_and_send_chunks(&mut world, None).unwrap();
+        let before = loader_state(&loader);
+        loader.set_fail_update_at_enter(Some(0));
+
+        for _ in 0..2 {
+            let err = loader
+                .update(&mut world, ChunkPos::new(1, 0), None)
+                .unwrap_err();
+            assert!(err.contains("enter index 0"));
+            assert_eq!(loader_state(&loader), before);
+        }
+    }
+
+    #[test]
+    fn update_distance_failure_preserves_old_distance_and_success_commits_it() {
+        let mut world = overworld();
+        let mut loader = PlayerChunkLoader::new(world.view().center());
+        loader.add_and_send_chunks(&mut world, None).unwrap();
+
+        let shrink = loader.update(&mut world, ChunkPos::ZERO, Some(2)).unwrap();
+        assert_eq!(shrink.len(), 1);
+        assert_eq!(loader_state(&loader), (ChunkPos::ZERO, 3, 4));
+
+        loader.set_fail_update_at_enter(Some(0));
+        let err = loader
+            .update(&mut world, ChunkPos::ZERO, Some(8))
+            .unwrap_err();
+        assert!(err.contains("enter index 0"));
+        assert_eq!(loader_state(&loader), (ChunkPos::ZERO, 3, 4));
+
+        loader.set_fail_update_at_enter(None);
+        let grow = loader.update(&mut world, ChunkPos::ZERO, Some(8)).unwrap();
+        assert_eq!(grow.len(), 1 + 36);
+        assert_eq!(grow[0].id, PlayClientbound::SetChunkCacheRadius.id());
+        assert_eq!(loader_state(&loader), (ChunkPos::ZERO, 4, 4));
     }
 }

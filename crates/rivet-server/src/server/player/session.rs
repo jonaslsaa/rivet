@@ -888,8 +888,8 @@ impl PlayerSessionManager {
                 // A typed missing-chunk failure (the `RequireLoaded` UNVERIFIED
                 // error — no generation fallback, no silent substitution) or an
                 // encode failure is a server-side fault; Paper disconnects on a
-                // chunk send failure. The connection is being torn down, so the
-                // loader state `update` committed for the new center is moot.
+                // chunk send failure. The loader remains at its previous center
+                // until the complete update batch encodes successfully.
                 tracing::warn!(%id, %e, "disconnecting play session on chunk-loader update failure");
                 let _ = ctx.connections.send(
                     id,
