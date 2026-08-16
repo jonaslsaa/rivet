@@ -32,8 +32,8 @@
 //! bounded dependency-square composition — the decoration-seed derivation
 //! (`SectionPos.of(centerPos, level.getMinSectionY()).origin()` fed to
 //! `setDecorationSeed`), a `WorldGenRegion` that borrows the center chunk and
-//! owns the direct-dependency neighbors at their required statuses
-//! the other closures wire, and the Paper-order biome-union gather +
+//! owns the direct-dependency neighbors at their required statuses, and the
+//! Paper-order biome-union gather +
 //! `retainAll`. It then resolves generation settings for the FULL
 //! `biomeSource.possibleBiomes()` list in source order and builds the
 //! FeatureSorter once from it (Paper's `ChunkGenerator.featuresPerStep`,
@@ -68,8 +68,8 @@
 //! methods while the dense server region keeps its block-state `WorldGenLevel`
 //! facade on the `StateId`/`ServerBiomeId`/`StructureKey` specialization. The
 //! FEATURES body composes its bounded dependency-square region through [`CenterHolder`] (which
-//! borrows the center chunk's base) and [`OwnedHolder`] (which owns the eight
-//! ring chunks) — see [`compose_feature_region`]. What still defers (RivetTodo
+//! borrows the center chunk's base) and [`OwnedHolder`] (which owns the direct
+//! dependency neighbors) — see [`compose_feature_region`]. What still defers (RivetTodo
 //! #185) is the FULL-reconstruction bridge: `ChunkAccess::map_values` is wired
 //! only from `LevelChunk::from_bridge`, so a sub-FULL `ProtoChunk` still cannot
 //! be converted into the dense server chunk and never enters the ChunkMap
