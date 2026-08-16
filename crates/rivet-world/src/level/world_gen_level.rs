@@ -35,7 +35,7 @@ use rivet_registry::holder::Holder;
 /// rest of the Java `ServerLevelAccessor` ancestor chain (`LevelAccessor`/
 /// `LevelReader`/`BlockGetter`, plus the `LevelWriter` write surface) is ported
 /// by the owning unit.
-pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
+pub trait WorldGenLevel: LevelHeightAccessor + Send {
     /// `WorldGenLevel.getSeed()`.
     fn get_seed(&self) -> i64;
 
@@ -286,15 +286,33 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
         panic!("BlockGetter.getBlockEntity(SpawnerBlockEntity) is not implemented (RivetTodo #232)")
     }
 
-    /// `SpawnerBlockEntity.setEntityId(EntityType, RandomSource)` — the final
-    /// `MonsterRoomFeature.place` mutation after the feature has drawn
-    /// `randomEntityId`. Java's empty `SpawnPotentials` list does not draw
-    /// again; the seam receives the selected id and materializes the block
-    /// entity's spawn data.
+    /// `BaseSpawner.getOrCreateNextSpawnData`'s weighted-list draw. `Some(total)`
+    /// means that this spawner has no current `SpawnData` and a non-empty
+    /// `SpawnPotentials`; the feature must consume exactly one
+    /// `random.nextInt(total)` before calling [`set_spawner_entity`]. `None`
+    /// means Java does not draw here (an existing `SpawnData`, or an empty
+    /// potential list).
+    ///
+    /// The returned total is deliberately a primitive seam: `RandomSource` is
+    /// not object-safe, so the feature owns the exact RNG call while the level
+    /// owns weighted-list state and the state transition.
+    fn spawner_potential_weight(&self, _pos: &BlockPos) -> Option<i32> {
+        panic!("BaseSpawner.getOrCreateNextSpawnData is not implemented (RivetTodo #232)")
+    }
+
+    /// `SpawnerBlockEntity.setEntityId(EntityType, RandomSource)` — materialize
+    /// the selected entity id after the optional weighted-list roll. When
+    /// `potential_roll` is `Some`, the level selects that weighted entry before
+    /// replacing its entity id; in every case Java clears `spawnPotentials`.
     ///
     /// RivetTodo(#232): the block-entity surface is not ported; the default
     /// fails explicitly rather than fabricating the spawner.
-    fn set_spawner_entity(&mut self, _pos: &BlockPos, _entity_id: &str) {
+    fn set_spawner_entity(
+        &mut self,
+        _pos: &BlockPos,
+        _entity_id: &str,
+        _potential_roll: Option<i32>,
+    ) {
         panic!("SpawnerBlockEntity.setEntityId is not implemented (RivetTodo #232)")
     }
 

@@ -45,10 +45,12 @@
 //! scalar values the region actually reads (`seed`/`min_y`/`height`/`sea_level`)
 //! plus the injected [`NoiseBiomeSource`] for `getUncachedNoiseBiome` and the
 //! injected [`RegistryAccess`] for `registryAccess()`. The heavy reads (POI
-//! update on `setBlock`, block-entity creation, light engine, difficulty, world
-//! border, entity/player collections) are not ported and fail or no-op
-//! explicitly rather than fabricating access — each with a `RivetTodo`
-//! pointing at the owning unit.
+//! update on `setBlock`, persisted block-entity loading, light engine,
+//! difficulty, world border, entity/player collections) remain unported and
+//! fail or no-op explicitly rather than fabricating access — each with a
+//! `RivetTodo` pointing at the owning unit. Feature-local chest/spawner entities
+//! created by this region's writes are the narrow exception needed by
+//! `MonsterRoomFeature`.
 //!
 //! ## Biome access
 //!
@@ -62,6 +64,7 @@
 //! (RivetTodo #185 holder). The fiddled-distance corner interpolation itself is
 //! faithfully the `BiomeManager` the region returns from `getBiomeManager`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use rivet_registry::access::RegistryAccess;
@@ -73,13 +76,16 @@ use rivet_registry::generated::block_behaviors::{
     BEHAVIOR_FLAG_FLUID_EMPTY, BEHAVIOR_FLAG_RANDOM_TICKING, behavior_of,
 };
 use rivet_registry::generated::block_states::StateId;
+use rivet_registry::generated::blocks::BlockId;
 use rivet_registry::holder::Holder;
 use rivet_util::StaticCache2D;
 use rivet_util::mth;
 use rivet_util::util::log_and_pause_if_in_ide;
 use rivet_world::biome::biome_manager::{BiomeManager, NoiseBiomeSource};
+use rivet_world::block::blocks::Blocks;
 use rivet_world::chunk::chunk_access::ChunkAccess;
 use rivet_world::chunk::status::{ChunkStatus, ChunkStep};
+use rivet_world::chunk::storage::chunk_reconstruction::resolve_state_flags;
 use rivet_world::level::WorldGenLevel;
 use rivet_world::level::height_accessor::LevelHeightAccessor;
 use rivet_world::levelgen::heightmap::Types;
@@ -95,6 +101,21 @@ const UPDATE_ALL: i32 = 3;
 /// `set_block` ignores it (the update machinery defers), so this is a faithful
 /// default, not an operative limit.
 const UPDATE_LIMIT: i32 = 512;
+
+/// The block-entity state needed by feature placement. This is deliberately a
+/// small live state map rather than a block-state shortcut: `setBlock` creates
+/// an entity when the written block requires one, and the feature's entity
+/// queries only succeed for that live entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WorldgenBlockEntity {
+    Chest {
+        loot: Option<(i64, String)>,
+    },
+    Spawner {
+        next_spawn: Option<String>,
+        spawn_potentials: Vec<(String, i32)>,
+    },
+}
 
 /// `mc.server.level.pipeline.holder` STUB — the `GenerationChunkHolder` read
 /// surface `WorldGenRegion` consumes.
@@ -269,6 +290,10 @@ where
     /// registries); the injected construction mirrors the `ServerLevel` seam
     /// like `uncached_biome_source`.
     registry_access: RegistryAccess,
+    /// Live block entities created by this region's block writes. The region
+    /// does not infer an entity from a pre-existing block-state id; loading
+    /// persisted entities belongs to the chunk/block-entity unit.
+    block_entities: HashMap<BlockPos, WorldgenBlockEntity>,
 }
 
 impl<'a, T, B, S> WorldGenRegion<'a, T, B, S>
@@ -317,6 +342,7 @@ where
             biome_manager,
             uncached_biome_source,
             registry_access,
+            block_entities: HashMap::new(),
         }
     }
 
@@ -481,15 +507,190 @@ where
     }
 }
 
+impl<'a, B, S> WorldGenRegion<'a, BlockState, B, S>
+where
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send,
+{
+    fn is_within_write_zone_worldgen(&self, pos: &BlockPos) -> bool {
+        mth::abs_i32(
+            self.center_chunk_x
+                .wrapping_sub(SectionPos::block_to_section_coord(pos.get_x())),
+        ) <= self.write_radius
+            && mth::abs_i32(
+                self.center_chunk_z
+                    .wrapping_sub(SectionPos::block_to_section_coord(pos.get_z())),
+            ) <= self.write_radius
+    }
+
+    fn ensure_can_write_worldgen(&self, pos: &BlockPos) -> bool {
+        if !self.is_within_write_zone_worldgen(pos) {
+            let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
+            let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
+            log_and_pause_if_in_ide(&format!(
+                "Detected setBlock in a far chunk [{}, {}], pos: {:?}, status: {}",
+                chunk_x,
+                chunk_z,
+                pos,
+                self.generating_step.target_status().serialization_name()
+            ));
+            return false;
+        }
+        true
+    }
+
+    fn warn_if_read_outside_write_zone_worldgen(&self, chunk_x: i32, chunk_z: i32) {
+        if (self.center_chunk_x != chunk_x || self.center_chunk_z != chunk_z)
+            && (mth::abs_i32(self.center_chunk_x.wrapping_sub(chunk_x)) > self.write_radius
+                || mth::abs_i32(self.center_chunk_z.wrapping_sub(chunk_z)) > self.write_radius)
+        {
+            let read_distance = mth::abs_max(
+                mth::abs_i32(self.center_chunk_x.wrapping_sub(chunk_x)),
+                mth::abs_i32(self.center_chunk_z.wrapping_sub(chunk_z)),
+            );
+            log_and_pause_if_in_ide(&format!(
+                "Detected unsafe terrain read during worldgen: reading from chunk [{}, {}] while generating chunk [{}, {}] (distance: {}, write radius: {}), step: {}",
+                chunk_x,
+                chunk_z,
+                self.center_chunk_x,
+                self.center_chunk_z,
+                read_distance,
+                self.write_radius,
+                self.generating_step.target_status().serialization_name()
+            ));
+        }
+    }
+
+    fn materialize_block_entity(&mut self, pos: &BlockPos, state: BlockState) {
+        if state.block() == Blocks::CHEST.id() {
+            if !matches!(
+                self.block_entities.get(pos),
+                Some(WorldgenBlockEntity::Chest { .. })
+            ) {
+                self.block_entities
+                    .insert(*pos, WorldgenBlockEntity::Chest { loot: None });
+            }
+        } else if state.block() == Blocks::SPAWNER.id() {
+            if !matches!(
+                self.block_entities.get(pos),
+                Some(WorldgenBlockEntity::Spawner { .. })
+            ) {
+                self.block_entities.insert(
+                    *pos,
+                    WorldgenBlockEntity::Spawner {
+                        next_spawn: None,
+                        spawn_potentials: Vec::new(),
+                    },
+                );
+            }
+        } else {
+            self.block_entities.remove(pos);
+        }
+    }
+
+    fn set_block_worldgen(&mut self, pos: &BlockPos, state: BlockState, flags: u32) -> bool {
+        if !self.ensure_can_write_worldgen(pos) {
+            return false;
+        }
+        let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
+        let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
+        let persisted_status = self.cache.get(chunk_x, chunk_z).get_persisted_status();
+        let chunk = self.get_chunk_mut(chunk_x, chunk_z);
+        if !chunk.is_outside_build_height(pos.get_y()) {
+            let section_index = chunk.get_section_index(pos.get_y());
+            let section = chunk.get_section_mut(section_index as usize);
+            section.set_block_state(
+                pos.get_x() & 15,
+                pos.get_y() & 15,
+                pos.get_z() & 15,
+                state,
+                &|state| resolve_state_flags(state).is_air,
+                &|state| state.is_in_tag("minecraft:randomly_ticking"),
+                &|state| state.fluid_id() == 0,
+                &|_| false,
+                &|_| false,
+            );
+            if let Some(status) = persisted_status {
+                chunk.update_heightmaps_after(
+                    status.heightmaps_after(),
+                    pos.get_x() & 15,
+                    pos.get_y(),
+                    pos.get_z() & 15,
+                    resolve_state_flags(&state),
+                );
+            }
+        }
+        self.materialize_block_entity(pos, state);
+        let _ = flags;
+        true
+    }
+
+    fn get_block_state_worldgen(&self, pos: &BlockPos) -> BlockState {
+        let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
+        let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
+        self.warn_if_read_outside_write_zone_worldgen(chunk_x, chunk_z);
+        let chunk = self.get_chunk(chunk_x, chunk_z);
+        if chunk.is_outside_build_height(pos.get_y()) {
+            return BlockState::of(BlockId(794));
+        }
+        let section = chunk.get_section(chunk.get_section_index(pos.get_y()) as usize);
+        if section.non_empty_block_count() == 0 {
+            return BlockState::of(BlockId(0));
+        }
+        section.get_block_state(pos.get_x() & 15, pos.get_y() & 15, pos.get_z() & 15)
+    }
+}
+
+impl<B, S> LevelHeightAccessor for WorldGenRegion<'_, BlockState, B, S>
+where
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send,
+{
+    fn get_height(&self) -> i32 {
+        self.height
+    }
+
+    fn get_min_y(&self) -> i32 {
+        self.min_y
+    }
+}
+
 /// The dense server specialization — the block-state methods and the
 /// [`WorldGenLevel`] facade over the server's dense chunk value types.
 ///
 /// Split from the generic impl because the block-state spine is
 /// `StateId`-specific: the region's reads/writes target `StateId`/`ServerBiomeId`
-/// sections, and the [`WorldGenLevel`] trait is `'static`-bound (see the struct
-/// doc). The generic chunk-view methods the executor's borrow-carrying region
-/// needs live on [`impl<'a, T, B, S> WorldGenRegion<'a, T, B, S>`](WorldGenRegion).
+/// sections. The generic `BlockState` facade above serves the executor's
+/// borrow-carrying region, while this specialization serves dense server
+/// holders.
 impl WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
+    fn materialize_block_entity(&mut self, pos: &BlockPos, state: BlockState) {
+        if state.block() == Blocks::CHEST.id() {
+            if !matches!(
+                self.block_entities.get(pos),
+                Some(WorldgenBlockEntity::Chest { .. })
+            ) {
+                self.block_entities
+                    .insert(*pos, WorldgenBlockEntity::Chest { loot: None });
+            }
+        } else if state.block() == Blocks::SPAWNER.id() {
+            if !matches!(
+                self.block_entities.get(pos),
+                Some(WorldgenBlockEntity::Spawner { .. })
+            ) {
+                self.block_entities.insert(
+                    *pos,
+                    WorldgenBlockEntity::Spawner {
+                        next_spawn: None,
+                        spawn_potentials: Vec::new(),
+                    },
+                );
+            }
+        } else {
+            self.block_entities.remove(pos);
+        }
+    }
+
     /// `WorldGenRegion.getFluidState(BlockPos)` — the block's fluid id, with
     /// the same outside-write-zone warning as `getBlockState`.
     ///
@@ -562,6 +763,7 @@ impl WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
         // block-entity removal (`oldState.hasBlockEntity()`) and POI update
         // read it, so the write retains it for those deferred seams (#185).
         let _old_state = write_block(chunk, pos, block_state, persisted_status);
+        self.materialize_block_entity(pos, block_state);
         true
     }
 
@@ -678,12 +880,126 @@ impl LevelHeightAccessor for WorldGenRegion<'_, StateId, ServerBiomeId, Structur
     }
 }
 
+/// The worldgen `WorldGenLevel` facade over the composed region. The trait no
+/// longer carries a `'static` bound: Java's FEATURES call operates on the
+/// executor-scoped center-chunk borrow, and the Rust trait now follows that
+/// lifetime instead of excluding the production composition.
+impl<'a, B, S> WorldGenLevel for WorldGenRegion<'a, BlockState, B, S>
+where
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send,
+{
+    fn get_seed(&self) -> i64 {
+        self.seed
+    }
+
+    fn ensure_can_write(&self, pos: &BlockPos) -> bool {
+        self.ensure_can_write_worldgen(pos)
+    }
+
+    fn set_block(&mut self, pos: &BlockPos, state: BlockState, flags: u32) -> bool {
+        self.set_block_worldgen(pos, state, flags)
+    }
+
+    fn destroy_block(&mut self, pos: &BlockPos, _drop: bool) -> bool {
+        !self.get_block_state_worldgen(pos).is_air()
+            && self.set_block_worldgen(pos, BlockState::of(BlockId(0)), UPDATE_ALL as u32)
+    }
+
+    fn registry_access(&self) -> RegistryAccess {
+        self.registry_access.clone()
+    }
+
+    fn get_block_state(&self, pos: &BlockPos) -> BlockState {
+        self.get_block_state_worldgen(pos)
+    }
+
+    fn get_biome(&self, pos: &BlockPos) -> Holder<BiomeId> {
+        self.get_biome_manager().get_biome(pos)
+    }
+
+    fn get_height_at(&self, ty: Types, x: i32, z: i32) -> i32 {
+        let chunk_x = SectionPos::block_to_section_coord(x);
+        let chunk_z = SectionPos::block_to_section_coord(z);
+        self.warn_if_read_outside_write_zone_worldgen(chunk_x, chunk_z);
+        let chunk = self.get_chunk(chunk_x, chunk_z);
+        match chunk.heightmaps()[ty as usize].as_ref() {
+            Some(heightmap) => heightmap.get_height_at(x & 15, z & 15, chunk.get_min_y()) + 1,
+            None => chunk.get_min_y() + 1,
+        }
+    }
+
+    fn is_empty_block(&self, pos: &BlockPos) -> bool {
+        self.get_block_state_worldgen(pos).is_air()
+    }
+
+    fn get_sea_level(&self) -> i32 {
+        self.sea_level
+    }
+
+    fn mark_pos_for_post_processing(&mut self, pos: &BlockPos) {
+        let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
+        let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
+        self.get_chunk_mut(chunk_x, chunk_z)
+            .mark_pos_for_post_processing(pos);
+    }
+
+    fn is_randomizable_container(&self, pos: &BlockPos) -> bool {
+        matches!(
+            self.block_entities.get(pos),
+            Some(WorldgenBlockEntity::Chest { .. })
+        )
+    }
+
+    fn set_block_entity_loot_table(&mut self, pos: &BlockPos, seed: i64, loot_table: &str) {
+        if let Some(WorldgenBlockEntity::Chest { loot }) = self.block_entities.get_mut(pos) {
+            *loot = Some((seed, loot_table.to_string()));
+        }
+    }
+
+    fn is_spawner_block_entity(&self, pos: &BlockPos) -> bool {
+        matches!(
+            self.block_entities.get(pos),
+            Some(WorldgenBlockEntity::Spawner { .. })
+        )
+    }
+
+    fn spawner_potential_weight(&self, pos: &BlockPos) -> Option<i32> {
+        match self.block_entities.get(pos) {
+            Some(WorldgenBlockEntity::Spawner {
+                next_spawn: None,
+                spawn_potentials,
+            }) if !spawn_potentials.is_empty() => {
+                Some(spawn_potentials.iter().map(|(_, weight)| *weight).sum())
+            }
+            _ => None,
+        }
+    }
+
+    fn set_spawner_entity(&mut self, pos: &BlockPos, entity_id: &str, potential_roll: Option<i32>) {
+        if let Some(WorldgenBlockEntity::Spawner {
+            next_spawn,
+            spawn_potentials,
+        }) = self.block_entities.get_mut(pos)
+        {
+            if let Some(mut roll) = potential_roll {
+                for (_, weight) in spawn_potentials.iter() {
+                    if roll < *weight {
+                        break;
+                    }
+                    roll -= *weight;
+                }
+            }
+            *next_spawn = Some(entity_id.to_string());
+            spawn_potentials.clear();
+        }
+    }
+}
+
 /// The `WorldGenLevel` facade over the dense specialization. The trait is
-/// `'static`-bound (`LevelHeightAccessor + Send + 'static`), so this impl pins
-/// the region to `'static` holders — the server value layer's owning-holder
-/// region. The worldgen executor's borrow-carrying region never implements the
-/// trait (it only needs the generic chunk-view methods), so its scoped borrow
-/// is not forced to outlive the worldgen objects.
+/// implemented for owning server holders as well as the scoped worldgen region
+/// above; the two value types remain separate because the server chunk map uses
+/// dense `StateId` sections while the executor composes `BlockState` sections.
 impl WorldGenLevel for WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> {
     /// `WorldGenLevel.getSeed()`.
     fn get_seed(&self) -> i64 {
@@ -732,6 +1048,57 @@ impl WorldGenLevel for WorldGenRegion<'static, StateId, ServerBiomeId, Structure
     /// injected shared access (a cheap `Arc` clone; see the field doc).
     fn registry_access(&self) -> RegistryAccess {
         self.registry_access.clone()
+    }
+
+    fn is_randomizable_container(&self, pos: &BlockPos) -> bool {
+        matches!(
+            self.block_entities.get(pos),
+            Some(WorldgenBlockEntity::Chest { .. })
+        )
+    }
+
+    fn set_block_entity_loot_table(&mut self, pos: &BlockPos, seed: i64, loot_table: &str) {
+        if let Some(WorldgenBlockEntity::Chest { loot }) = self.block_entities.get_mut(pos) {
+            *loot = Some((seed, loot_table.to_string()));
+        }
+    }
+
+    fn is_spawner_block_entity(&self, pos: &BlockPos) -> bool {
+        matches!(
+            self.block_entities.get(pos),
+            Some(WorldgenBlockEntity::Spawner { .. })
+        )
+    }
+
+    fn spawner_potential_weight(&self, pos: &BlockPos) -> Option<i32> {
+        match self.block_entities.get(pos) {
+            Some(WorldgenBlockEntity::Spawner {
+                next_spawn: None,
+                spawn_potentials,
+            }) if !spawn_potentials.is_empty() => {
+                Some(spawn_potentials.iter().map(|(_, weight)| *weight).sum())
+            }
+            _ => None,
+        }
+    }
+
+    fn set_spawner_entity(&mut self, pos: &BlockPos, entity_id: &str, potential_roll: Option<i32>) {
+        if let Some(WorldgenBlockEntity::Spawner {
+            next_spawn,
+            spawn_potentials,
+        }) = self.block_entities.get_mut(pos)
+        {
+            if let Some(mut roll) = potential_roll {
+                for (_, weight) in spawn_potentials.iter() {
+                    if roll < *weight {
+                        break;
+                    }
+                    roll -= *weight;
+                }
+            }
+            *next_spawn = Some(entity_id.to_string());
+            spawn_potentials.clear();
+        }
     }
 
     /// `ChunkAccess.markPosForPostProcessing(BlockPos)` — Java's private
@@ -1024,6 +1391,7 @@ mod tests {
     use rivet_registry::root::AnyBox;
     use rivet_registry::{Identifier, ResourceKey};
     use rivet_util::StaticCache2D;
+    use rivet_world::block::blocks::Blocks;
     use rivet_world::chunk::status::GENERATION_PYRAMID;
     use rivet_world::chunk::upgrade_data::UpgradeData;
     use rivet_world::level::height_accessor::create as create_accessor;
@@ -1369,6 +1737,46 @@ mod tests {
         );
     }
 
+    /// `setBlock` materializes the live block-entity surface used by feature
+    /// placement, and replacing an entity block removes the old entity. A block
+    /// state alone is never treated as a successful entity query.
+    #[test]
+    fn block_entity_writes_materialize_and_remove_live_entities() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+
+        assert!(region.set_block(&pos, Blocks::CHEST.default_block_state(), UPDATE_ALL, 0,));
+        assert!(matches!(
+            region.block_entities.get(&pos),
+            Some(WorldgenBlockEntity::Chest { .. })
+        ));
+        assert!(<WorldGenRegion<
+            'static,
+            StateId,
+            ServerBiomeId,
+            StructureKey,
+        > as WorldGenLevel>::is_randomizable_container(
+            &region, &pos
+        ));
+
+        assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0,));
+        assert!(matches!(
+            region.block_entities.get(&pos),
+            Some(WorldgenBlockEntity::Spawner { .. })
+        ));
+        assert!(<WorldGenRegion<
+            'static,
+            StateId,
+            ServerBiomeId,
+            StructureKey,
+        > as WorldGenLevel>::is_spawner_block_entity(
+            &region, &pos
+        ));
+
+        assert!(region.remove_block(&pos, false));
+        assert!(!region.block_entities.contains_key(&pos));
+    }
+
     /// `removeBlock` routes through `setBlock(AIR, UPDATE_ALL)`: gated outside
     /// the radius, effective inside.
     #[test]
@@ -1446,6 +1854,74 @@ mod tests {
         assert_eq!(
             region.get_height_at(Types::WorldSurface, 0, 0),
             SUPERFLAT_MIN_Y + 1
+        );
+    }
+
+    /// Block writes create live chest/spawner entities; entity queries do not
+    /// infer them from a state id. The same test also pins the spawner's
+    /// weighted-potential state transition used by `MonsterRoomFeature`.
+    #[test]
+    fn feature_block_writes_materialize_live_entities() {
+        let mut region = feature_region();
+        let chest_pos = BlockPos::new(0, 64, 0);
+        assert!(<WorldGenRegion<
+            'static,
+            StateId,
+            ServerBiomeId,
+            StructureKey,
+        > as WorldGenLevel>::set_block(
+            &mut region,
+            &chest_pos,
+            Blocks::CHEST.default_block_state(),
+            2,
+        ));
+        assert!(<WorldGenRegion<
+            'static,
+            StateId,
+            ServerBiomeId,
+            StructureKey,
+        > as WorldGenLevel>::is_randomizable_container(
+            &region, &chest_pos,
+        ));
+
+        let spawner_pos = BlockPos::new(1, 64, 0);
+        region.block_entities.insert(
+            spawner_pos,
+            WorldgenBlockEntity::Spawner {
+                next_spawn: None,
+                spawn_potentials: vec![("minecraft:zombie".to_string(), 2)],
+            },
+        );
+        assert!(<WorldGenRegion<
+            'static,
+            StateId,
+            ServerBiomeId,
+            StructureKey,
+        > as WorldGenLevel>::set_block(
+            &mut region,
+            &spawner_pos,
+            Blocks::SPAWNER.default_block_state(),
+            2,
+        ));
+        assert_eq!(
+            <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::spawner_potential_weight(
+                &region,
+                &spawner_pos,
+            ),
+            Some(2)
+        );
+        <WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::set_spawner_entity(
+            &mut region,
+            &spawner_pos,
+            "minecraft:skeleton",
+            Some(0),
+        );
+        assert_eq!(
+            region.block_entities.get(&spawner_pos),
+            Some(&WorldgenBlockEntity::Spawner {
+                next_spawn: Some("minecraft:skeleton".to_string()),
+                spawn_potentials: Vec::new(),
+            })
         );
     }
 
