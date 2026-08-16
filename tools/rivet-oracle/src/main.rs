@@ -276,6 +276,10 @@ struct Captured {
     bytes: u64,
     #[serde(default)]
     dim: Option<String>,
+    #[serde(default)]
+    chunk: Option<String>,
+    #[serde(default)]
+    region: Option<String>,
 }
 
 /// Recorded chunk-generation concurrency provenance in a manifest: the
@@ -448,6 +452,23 @@ fn sha256_hex(data: &[u8]) -> String {
         let _ = write!(s, "{b:02x}");
     }
     s
+}
+
+fn raw_corpus_identity(fixture_root: &Path, manifest: &Manifest) -> Result<String, Error> {
+    let mut captures: Vec<&Captured> = manifest
+        .captured
+        .iter()
+        .filter(|captured| captured.path.starts_with("chunk/"))
+        .collect();
+    captures.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut material = Vec::new();
+    for captured in captures {
+        material.extend_from_slice(captured.path.as_bytes());
+        material.push(0);
+        material.extend_from_slice(&fs::read(fixture_root.join(&captured.path))?);
+        material.push(0);
+    }
+    Ok(sha256_hex(&material))
 }
 
 /// Read + structurally validate a manifest.json (format field must be 1).

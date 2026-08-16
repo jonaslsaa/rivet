@@ -8,20 +8,36 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use rivet_nbt::compound_tag::CompoundTag;
+use rivet_nbt::nbt_io;
 use rivet_registry::core::ChunkPos;
-use rivet_world::chunk::storage::{RegionFileStorage, RegionStorageInfo, get_chunk_coordinate};
+use rivet_util::DataInputStream;
+use rivet_world::chunk::storage::{
+    RegionFile, RegionFileStorage, RegionFileVersion, RegionStorageInfo, get_chunk_coordinate,
+};
 use rivet_world::level::{end, nether, overworld};
 use serde::Serialize;
 
-use crate::mutate::{encode_payload, parse_payload};
+use crate::mutate::encode_payload;
 use crate::{Error, sha256_hex};
 
 const EXPECTED_CHUNK_COUNT: usize = 432;
 const REGION_FILE_COMPRESSION: &str = "none";
 const ROUNDTRIP_KIND: &str = "anvil-roundtrip-v1a";
+const EXPECTED_M0_SEED: &str = "42";
+const EXPECTED_M0_PAPER: &str = "26.2-DEV-main@0a99345";
+const EXPECTED_M0_PAPER_VERSION: &str = "26.2";
+const EXPECTED_M0_PAPER_COMMIT: &str = "0a993450f129c4942c2a9ed45ba047412b4667cf";
+const EXPECTED_M0_MANIFEST_SHA256: &str =
+    "0a3d588439ab34ce1d15cf2d6d783c2f544d1af48cb82fedff6717da618e1e9d";
+/// SHA-256 of sorted canonical relative chunk paths and their raw payload bytes.
+const EXPECTED_M0_CORPUS_RAW_SHA256: &str =
+    "d36da5bef3cddc5845f7ebe745d5eedae91119020515960b8be8b6e6d9a24089";
+const EXPECTED_DIMENSIONS: [&str; 3] = ["overworld", "the_nether", "the_end"];
+const EXPECTED_AXIS_LEN: i32 = 12;
 
 #[derive(Debug, Clone)]
 struct Fixture {
@@ -34,7 +50,7 @@ struct Fixture {
     source_tag: CompoundTag,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct PayloadHash {
     bytes: usize,
     sha256: String,
@@ -42,7 +58,7 @@ struct PayloadHash {
     xxh3_64_canonical: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct RecordMetadata {
     region_file: String,
     slot: usize,
@@ -53,20 +69,23 @@ struct RecordMetadata {
     payload_bytes: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ChunkEvidence {
     dim: String,
     region: String,
     cx: i32,
     cz: i32,
     fixture_path: String,
+    source_path: String,
+    saved_path: String,
+    reloaded_path: String,
     source: PayloadHash,
     saved: PayloadHash,
     reloaded: PayloadHash,
     record: RecordMetadata,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct TreeEntry {
     path: String,
     bytes: usize,
@@ -75,8 +94,11 @@ struct TreeEntry {
 
 #[derive(Debug, Clone, Serialize)]
 struct NegativeEvidence {
-    name: String,
+    mutation: String,
     artifact: String,
+    slot: usize,
+    chunk: String,
+    rejection_stage: String,
     detected: String,
 }
 
@@ -89,9 +111,16 @@ struct Report {
     source_manifest_sha256: String,
     source_manifest_kind: String,
     source_seed: String,
+    source_paper: String,
+    source_paper_version: String,
+    source_paper_commit: String,
+    source_corpus_sha256: String,
     region_file_compression: String,
     expected_chunk_count: usize,
     source_chunk_count: usize,
+    source_tree_hash_before_roundtrip: String,
+    source_tree_hash_after_roundtrip: String,
+    source_tree_file_count: usize,
     region_tree_hash_before_read_only_reload: String,
     region_tree_hash_after_read_only_reload: String,
     region_tree_file_count: usize,
@@ -101,10 +130,18 @@ struct Report {
     non_evidence: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct PayloadManifest {
+    format: u32,
+    kind: String,
+    chunks: Vec<ChunkEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct TreeHash {
     digest: String,
     files: Vec<TreeEntry>,
+    directories: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +156,22 @@ enum NegativeKind {
     Location,
     Overlap,
     Truncation,
+    TrailingPayload,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RejectionStage {
+    OpenHeader,
+    PayloadRead,
+}
+
+impl RejectionStage {
+    fn name(self) -> &'static str {
+        match self {
+            Self::OpenHeader => "open/header",
+            Self::PayloadRead => "payload-read",
+        }
+    }
 }
 
 impl NegativeKind {
@@ -129,16 +182,32 @@ impl NegativeKind {
             Self::Location => "location-header",
             Self::Overlap => "sector-overlap",
             Self::Truncation => "truncation",
+            Self::TrailingPayload => "trailing-payload",
         }
     }
 
-    fn all() -> [Self; 5] {
+    fn target_slot(self) -> usize {
+        match self {
+            Self::Overlap => 1,
+            _ => 0,
+        }
+    }
+
+    fn rejection_stage(self) -> RejectionStage {
+        match self {
+            Self::Location | Self::Overlap | Self::Truncation => RejectionStage::OpenHeader,
+            Self::Length | Self::Compression | Self::TrailingPayload => RejectionStage::PayloadRead,
+        }
+    }
+
+    fn all() -> [Self; 6] {
         [
             Self::Length,
             Self::Compression,
             Self::Location,
             Self::Overlap,
             Self::Truncation,
+            Self::TrailingPayload,
         ]
     }
 }
@@ -159,6 +228,7 @@ pub fn run_cli(args: &[&str]) -> Result<(), Error> {
                 println!(
                     "usage: cargo run -p rivet-oracle -- anvil-roundtrip-v1a [fixtures] [--out <dir>]"
                 );
+                println!("  exits 0=PASS, 1=FAIL, 3=UNVERIFIED (missing external source evidence)");
                 return Ok(());
             }
             "--out" => {
@@ -191,24 +261,54 @@ pub fn run_cli(args: &[&str]) -> Result<(), Error> {
 }
 
 fn run_roundtrip(fixture_root: &Path, output: &Path) -> Result<(), Error> {
-    let fixtures = load_fixtures(fixture_root)?;
+    let (fixture_root, output) = canonicalize_paths(fixture_root, output)?;
+    let source_before = hash_tree(&fixture_root)?;
+    let fixtures = load_fixtures(&fixture_root)?;
     if fixtures.len() != EXPECTED_CHUNK_COUNT {
-        return Err(Error::Unverified(format!(
+        return Err(Error::Gate(format!(
             "anvil-roundtrip-v1a requires the committed {EXPECTED_CHUNK_COUNT}-chunk M0 corpus, found {}",
             fixtures.len()
         )));
     }
+    let result = run_roundtrip_inner(&fixture_root, &output, &fixtures, &source_before);
+    let source_after = hash_tree(&fixture_root).map_err(|error| {
+        Error::Gate(format!(
+            "anvil-roundtrip-v1a could not re-hash the source tree after execution: {error}"
+        ))
+    })?;
+    if source_before != source_after {
+        return Err(Error::Gate(format!(
+            "anvil-roundtrip-v1a mutated the source fixture tree: before {}, after {}",
+            source_before.digest, source_after.digest
+        )));
+    }
+    result
+}
 
+fn run_roundtrip_inner(
+    fixture_root: &Path,
+    output: &Path,
+    fixtures: &[Fixture],
+    source_before: &TreeHash,
+) -> Result<(), Error> {
     prepare_output(output)?;
     let regions_root = output.join("regions");
+    let evidence_root = output.join("evidence");
     fs::create_dir_all(&regions_root)?;
+    fs::create_dir_all(&evidence_root)?;
     let mut saved_hashes = HashMap::new();
 
-    write_fixture_regions(&fixtures, &regions_root, &mut saved_hashes)?;
+    write_fixture_regions(fixtures, &regions_root, &evidence_root, &mut saved_hashes)?;
     let before_reload = hash_tree(&regions_root)?;
-    let records = scan_region_tree(&regions_root, &fixtures)?;
+    let records = scan_region_tree(&regions_root, fixtures)?;
 
-    let reloaded_hashes = read_fresh_read_only(&fixtures, &regions_root, &saved_hashes, &records)?;
+    let reloaded_hashes = read_fresh_read_only(
+        fixtures,
+        &regions_root,
+        &evidence_root,
+        &saved_hashes,
+        &records,
+    )?;
     let after_reload = hash_tree(&regions_root)?;
     if before_reload.digest != after_reload.digest {
         return Err(Error::Gate(format!(
@@ -218,7 +318,7 @@ fn run_roundtrip(fixture_root: &Path, output: &Path) -> Result<(), Error> {
     }
 
     let mut chunks = Vec::with_capacity(fixtures.len());
-    for fixture in &fixtures {
+    for fixture in fixtures {
         let key = fixture_key(fixture);
         let source = payload_hash(&fixture.source_bytes, &fixture.source_tag)?;
         let saved = saved_hashes.get(&key).ok_or_else(|| {
@@ -248,6 +348,9 @@ fn run_roundtrip(fixture_root: &Path, output: &Path) -> Result<(), Error> {
             cx: fixture.cx,
             cz: fixture.cz,
             fixture_path: fixture.path.clone(),
+            source_path: stage_payload_path("source", fixture),
+            saved_path: stage_payload_path("saved", fixture),
+            reloaded_path: stage_payload_path("reloaded", fixture),
             source,
             saved: saved.clone(),
             reloaded: reloaded.clone(),
@@ -255,15 +358,42 @@ fn run_roundtrip(fixture_root: &Path, output: &Path) -> Result<(), Error> {
         });
     }
 
-    let negatives = run_corruption_negatives(output, &regions_root, &fixtures)?;
+    let negatives = run_corruption_negatives(output, &regions_root, fixtures)?;
     let manifest_bytes = fs::read(fixture_root.join("manifest.json"))?;
     let manifest = crate::load_manifest(fixture_root)?;
-    let source_seed = manifest.seed.clone().ok_or_else(|| {
-        Error::Unverified("M0 fixture manifest is missing seed provenance".into())
-    })?;
+    let source_seed = manifest
+        .seed
+        .clone()
+        .ok_or_else(|| Error::Gate("M0 fixture manifest is missing seed provenance".into()))?;
     let source_kind = manifest.kind.clone().ok_or_else(|| {
-        Error::Unverified("M0 fixture manifest is missing capture-kind provenance".into())
+        Error::Gate("M0 fixture manifest is missing capture-kind provenance".into())
     })?;
+    let source_paper = manifest
+        .paper
+        .clone()
+        .ok_or_else(|| Error::Gate("M0 fixture manifest is missing Paper provenance".into()))?;
+    let source_paper_commit = crate::parse_paper_pin(Some(&source_paper))
+        .ok_or_else(|| Error::Gate("M0 fixture manifest Paper provenance has no commit".into()))?;
+    let source_paper_version = source_paper
+        .split_once('-')
+        .map(|(version, _)| version.to_string())
+        .ok_or_else(|| Error::Gate("M0 fixture manifest Paper provenance has no version".into()))?;
+    let source_after = hash_tree(fixture_root)?;
+    if source_before != &source_after {
+        return Err(Error::Gate(format!(
+            "anvil-roundtrip-v1a mutated the source fixture tree before report emission: before {}, after {}",
+            source_before.digest, source_after.digest
+        )));
+    }
+
+    let payload_manifest = PayloadManifest {
+        format: 1,
+        kind: ROUNDTRIP_KIND.to_string(),
+        chunks: chunks.clone(),
+    };
+    let payload_manifest_bytes = serde_json::to_vec_pretty(&payload_manifest)
+        .map_err(|e| Error::Gate(format!("cannot serialize payload evidence manifest: {e}")))?;
+    fs::write(evidence_root.join("manifest.json"), payload_manifest_bytes)?;
 
     let report = Report {
         format: 1,
@@ -273,9 +403,16 @@ fn run_roundtrip(fixture_root: &Path, output: &Path) -> Result<(), Error> {
         source_manifest_sha256: sha256_hex(&manifest_bytes),
         source_manifest_kind: source_kind,
         source_seed,
+        source_paper,
+        source_paper_version,
+        source_paper_commit,
+        source_corpus_sha256: EXPECTED_M0_CORPUS_RAW_SHA256.to_string(),
         region_file_compression: REGION_FILE_COMPRESSION.to_string(),
         expected_chunk_count: EXPECTED_CHUNK_COUNT,
         source_chunk_count: fixtures.len(),
+        source_tree_hash_before_roundtrip: source_before.digest.clone(),
+        source_tree_hash_after_roundtrip: source_after.digest,
+        source_tree_file_count: source_after.files.len(),
         region_tree_hash_before_read_only_reload: before_reload.digest,
         region_tree_hash_after_read_only_reload: after_reload.digest,
         region_tree_file_count: before_reload.files.len(),
@@ -302,13 +439,42 @@ fn run_roundtrip(fixture_root: &Path, output: &Path) -> Result<(), Error> {
 }
 
 fn load_fixtures(fixture_root: &Path) -> Result<Vec<Fixture>, Error> {
-    if !fixture_root.is_dir() || !fixture_root.join("manifest.json").is_file() {
-        return Err(Error::Unverified(format!(
-            "anvil-roundtrip-v1a missing fixture provenance/artifacts at {}",
+    let root_metadata = fs::symlink_metadata(fixture_root).map_err(|error| {
+        Error::Unverified(format!(
+            "anvil-roundtrip-v1a source fixture prerequisite unavailable at {}: {error}",
+            fixture_root.display()
+        ))
+    })?;
+    if !root_metadata.file_type().is_dir() {
+        return Err(Error::Gate(format!(
+            "anvil-roundtrip-v1a fixture root is not a regular directory: {}",
             fixture_root.display()
         )));
     }
+
+    let manifest_path = fixture_root.join("manifest.json");
+    let manifest_metadata = fs::symlink_metadata(&manifest_path).map_err(|error| {
+        Error::Unverified(format!(
+            "anvil-roundtrip-v1a source provenance prerequisite unavailable at {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    if !manifest_metadata.file_type().is_file() {
+        return Err(Error::Gate(format!(
+            "anvil-roundtrip-v1a manifest is not a regular file: {}",
+            manifest_path.display()
+        )));
+    }
+    let manifest_bytes = fs::read(&manifest_path)?;
     let declared_manifest = crate::load_manifest(fixture_root)?;
+    validate_m0_manifest(&declared_manifest)?;
+    let manifest_sha256 = sha256_hex(&manifest_bytes);
+    if manifest_sha256 != EXPECTED_M0_MANIFEST_SHA256 {
+        return Err(Error::Gate(format!(
+            "anvil-roundtrip-v1a committed M0 manifest identity mismatch: expected {}, found {}",
+            EXPECTED_M0_MANIFEST_SHA256, manifest_sha256
+        )));
+    }
     for captured in &declared_manifest.captured {
         if !is_safe_relative_path(&captured.path) {
             return Err(Error::Gate(format!(
@@ -316,24 +482,35 @@ fn load_fixtures(fixture_root: &Path) -> Result<Vec<Fixture>, Error> {
                 captured.path
             )));
         }
-        if !fixture_root.join(&captured.path).exists() {
-            return Err(Error::Unverified(format!(
-                "anvil-roundtrip-v1a missing captured artifact {}",
+        ensure_no_symlink_components(fixture_root, &captured.path)?;
+        let path = fixture_root.join(&captured.path);
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            Error::Unverified(format!(
+                "anvil-roundtrip-v1a source capture prerequisite unavailable for {}: {error}",
+                captured.path
+            ))
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(Error::Gate(format!(
+                "anvil-roundtrip-v1a manifest artifact is not a regular file: {}",
                 captured.path
             )));
         }
     }
+
     let manifest = crate::verify_fixtures(fixture_root)?;
-    if manifest.kind.as_deref() != Some(crate::KIND_M0) {
-        return Err(Error::Unverified(format!(
-            "anvil-roundtrip-v1a requires manifest kind m0, found {:?}",
-            manifest.kind
+    let chunk_root = fixture_root.join("chunk");
+    let chunk_root_metadata = fs::symlink_metadata(&chunk_root).map_err(|error| {
+        Error::Unverified(format!(
+            "anvil-roundtrip-v1a source chunk prerequisite unavailable at {}: {error}",
+            chunk_root.display()
+        ))
+    })?;
+    if !chunk_root_metadata.file_type().is_dir() {
+        return Err(Error::Gate(format!(
+            "anvil-roundtrip-v1a chunk root is not a regular directory: {}",
+            chunk_root.display()
         )));
-    }
-    if manifest.seed.is_none() || manifest.paper.is_none() {
-        return Err(Error::Unverified(
-            "anvil-roundtrip-v1a requires seed and Paper provenance in manifest.json".into(),
-        ));
     }
 
     let mut expected_paths = HashSet::new();
@@ -358,18 +535,10 @@ fn load_fixtures(fixture_root: &Path) -> Result<Vec<Fixture>, Error> {
             )));
         }
         let dim = parts[1].to_string();
-        if !matches!(dim.as_str(), "overworld" | "the_nether" | "the_end") {
+        if !EXPECTED_DIMENSIONS.contains(&dim.as_str()) {
             return Err(Error::Gate(format!(
                 "anvil-roundtrip-v1a unsupported fixture dimension in tuple path: {}",
                 captured.path
-            )));
-        }
-        if let Some(declared_dim) = captured.dim.as_deref()
-            && declared_dim != dim
-        {
-            return Err(Error::Gate(format!(
-                "anvil-roundtrip-v1a fixture dimension provenance mismatch for {}: path {}, manifest {}",
-                captured.path, dim, declared_dim
             )));
         }
         let region = parts[2].to_string();
@@ -387,26 +556,38 @@ fn load_fixtures(fixture_root: &Path) -> Result<Vec<Fixture>, Error> {
                 captured.path
             )));
         }
+        if captured.dim.as_deref() != Some(dim.as_str()) {
+            return Err(Error::Gate(format!(
+                "anvil-roundtrip-v1a manifest dimension mismatch for {}: path {}, manifest {:?}",
+                captured.path, dim, captured.dim
+            )));
+        }
+        if captured.chunk.as_deref() != Some(stem) {
+            return Err(Error::Gate(format!(
+                "anvil-roundtrip-v1a manifest chunk mismatch for {}: path {}, manifest {:?}",
+                captured.path, stem, captured.chunk
+            )));
+        }
+        if captured.region.as_deref() != Some(region.as_str()) {
+            return Err(Error::Gate(format!(
+                "anvil-roundtrip-v1a manifest region mismatch for {}: path {}, manifest {:?}",
+                captured.path, region, captured.region
+            )));
+        }
+        if !(0..EXPECTED_AXIS_LEN).contains(&cx) || !(0..EXPECTED_AXIS_LEN).contains(&cz) {
+            return Err(Error::Gate(format!(
+                "anvil-roundtrip-v1a fixture coordinate outside exact 12x12 corpus: {} ({cx},{cz})",
+                captured.path
+            )));
+        }
         if !expected_tuples.insert((dim.clone(), region.clone(), cx, cz)) {
             return Err(Error::Gate(format!(
                 "anvil-roundtrip-v1a duplicate fixture tuple {dim}/{region}/{cx}.{cz}"
             )));
         }
         let path = fixture_root.join(&captured.path);
-        let metadata = fs::symlink_metadata(&path).map_err(|e| {
-            Error::Unverified(format!(
-                "anvil-roundtrip-v1a missing fixture artifact {}: {e}",
-                captured.path
-            ))
-        })?;
-        if !metadata.file_type().is_file() {
-            return Err(Error::Gate(format!(
-                "anvil-roundtrip-v1a fixture artifact is not a regular file: {}",
-                captured.path
-            )));
-        }
         let source_bytes = fs::read(&path)?;
-        let source_tag = parse_payload(&source_bytes)
+        let source_tag = parse_payload_exact(&source_bytes)
             .map_err(|e| Error::Gate(format!("cannot parse {}: {e}", captured.path)))?;
         fixtures.push(Fixture {
             dim,
@@ -419,14 +600,160 @@ fn load_fixtures(fixture_root: &Path) -> Result<Vec<Fixture>, Error> {
         });
     }
     if fixtures.len() != EXPECTED_CHUNK_COUNT {
-        return Err(Error::Unverified(format!(
+        return Err(Error::Gate(format!(
             "anvil-roundtrip-v1a fixture manifest contains {} chunk entries, expected {EXPECTED_CHUNK_COUNT}",
             fixtures.len()
         )));
     }
+    let expected_per_dimension = (EXPECTED_AXIS_LEN * EXPECTED_AXIS_LEN) as usize;
+    for dim in EXPECTED_DIMENSIONS {
+        let count = fixtures.iter().filter(|fixture| fixture.dim == dim).count();
+        if count != expected_per_dimension {
+            return Err(Error::Gate(format!(
+                "anvil-roundtrip-v1a dimension {dim} contains {count} chunks, expected {expected_per_dimension}"
+            )));
+        }
+        for cx in 0..EXPECTED_AXIS_LEN {
+            for cz in 0..EXPECTED_AXIS_LEN {
+                if !expected_tuples.contains(&(dim.to_string(), "0.0".to_string(), cx, cz)) {
+                    return Err(Error::Gate(format!(
+                        "anvil-roundtrip-v1a exact corpus is missing {dim}/0.0/{cx}.{cz}.nbt"
+                    )));
+                }
+            }
+        }
+    }
     verify_fixture_tree_closure(fixture_root, &expected_paths, &fixtures)?;
+    let corpus_sha256 = crate::raw_corpus_identity(fixture_root, &manifest)?;
+    if corpus_sha256 != EXPECTED_M0_CORPUS_RAW_SHA256 {
+        return Err(Error::Gate(format!(
+            "anvil-roundtrip-v1a committed M0 corpus identity mismatch: expected {}, found {}",
+            EXPECTED_M0_CORPUS_RAW_SHA256, corpus_sha256
+        )));
+    }
     fixtures.sort_by_key(fixture_key);
     Ok(fixtures)
+}
+
+fn validate_m0_manifest(manifest: &crate::Manifest) -> Result<(), Error> {
+    let chunk_entries = manifest
+        .captured
+        .iter()
+        .filter(|c| c.path.starts_with("chunk/"))
+        .count();
+    if matches!(manifest.kind.as_deref(), None | Some(""))
+        || matches!(manifest.seed.as_deref(), None | Some(""))
+        || matches!(manifest.paper.as_deref(), None | Some(""))
+    {
+        return Err(Error::Gate(
+            "anvil-roundtrip-v1a manifest is missing M0 provenance (kind, seed, or Paper)".into(),
+        ));
+    }
+    if manifest.kind.as_deref() != Some(crate::KIND_M0) {
+        return Err(Error::Gate(format!(
+            "anvil-roundtrip-v1a requires manifest kind m0, found {:?}",
+            manifest.kind
+        )));
+    }
+    if manifest.seed.as_deref() != Some(EXPECTED_M0_SEED) {
+        return Err(Error::Gate(format!(
+            "anvil-roundtrip-v1a requires manifest seed {}, found {:?}",
+            EXPECTED_M0_SEED, manifest.seed
+        )));
+    }
+    if manifest.paper.as_deref() != Some(EXPECTED_M0_PAPER) {
+        return Err(Error::Gate(format!(
+            "anvil-roundtrip-v1a requires Paper provenance {}, found {:?}",
+            EXPECTED_M0_PAPER, manifest.paper
+        )));
+    }
+    let commit = crate::parse_paper_pin(manifest.paper.as_deref()).ok_or_else(|| {
+        Error::Gate("anvil-roundtrip-v1a manifest Paper provenance has no commit".into())
+    })?;
+    if !EXPECTED_M0_PAPER_COMMIT.starts_with(&commit) {
+        return Err(Error::Gate(format!(
+            "anvil-roundtrip-v1a requires Paper commit {}, found {}",
+            EXPECTED_M0_PAPER_COMMIT, commit
+        )));
+    }
+    let version = manifest
+        .paper
+        .as_deref()
+        .and_then(|paper| paper.split_once('-').map(|(v, _)| v));
+    if version != Some(EXPECTED_M0_PAPER_VERSION) {
+        return Err(Error::Gate(format!(
+            "anvil-roundtrip-v1a requires Paper version {}, found {:?}",
+            EXPECTED_M0_PAPER_VERSION, version
+        )));
+    }
+    if manifest.chunk_count != Some(EXPECTED_CHUNK_COUNT as u64) {
+        return Err(Error::Gate(format!(
+            "anvil-roundtrip-v1a requires manifest chunk-count {}, found {:?}",
+            EXPECTED_CHUNK_COUNT, manifest.chunk_count
+        )));
+    }
+    if chunk_entries != EXPECTED_CHUNK_COUNT {
+        return Err(Error::Gate(format!(
+            "anvil-roundtrip-v1a requires exactly {EXPECTED_CHUNK_COUNT} manifest chunk entries, found {chunk_entries}"
+        )));
+    }
+    if manifest.level_type.as_deref() != Some("minecraft\\:flat") {
+        return Err(Error::Gate(format!(
+            "anvil-roundtrip-v1a requires manifest level-type minecraft\\:flat, found {:?}",
+            manifest.level_type
+        )));
+    }
+    if manifest.region_file_compression.as_deref() != Some(REGION_FILE_COMPRESSION) {
+        return Err(Error::Gate(format!(
+            "anvil-roundtrip-v1a requires manifest region-file-compression none, found {:?}",
+            manifest.region_file_compression
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_no_symlink_components(root: &Path, relative: &str) -> Result<(), Error> {
+    let mut current = root.to_path_buf();
+    for component in Path::new(relative).components() {
+        let std::path::Component::Normal(name) = component else {
+            continue;
+        };
+        current.push(name);
+        let metadata = fs::symlink_metadata(&current).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Error::Unverified(format!(
+                    "anvil-roundtrip-v1a source capture prerequisite unavailable at {}: {error}",
+                    current.display()
+                ))
+            } else {
+                Error::Gate(format!(
+                    "anvil-roundtrip-v1a cannot inspect manifest path component {}: {error}",
+                    current.display()
+                ))
+            }
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(Error::Gate(format!(
+                "anvil-roundtrip-v1a symlink path component is not allowed: {}",
+                current.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn parse_payload_exact(bytes: &[u8]) -> Result<CompoundTag, String> {
+    let mut input = DataInputStream::new(Cursor::new(bytes));
+    let tag =
+        nbt_io::read_unlimited(&mut input).map_err(|error| format!("NBT read failed: {error}"))?;
+    let cursor = input.into_inner();
+    if cursor.position() != bytes.len() as u64 {
+        return Err(format!(
+            "NBT payload has {} trailing bytes",
+            bytes.len() as u64 - cursor.position()
+        ));
+    }
+    Ok(tag)
 }
 
 fn verify_fixture_tree_closure(
@@ -435,9 +762,15 @@ fn verify_fixture_tree_closure(
     fixtures: &[Fixture],
 ) -> Result<(), Error> {
     let chunk_root = fixture_root.join("chunk");
-    if !chunk_root.is_dir() {
-        return Err(Error::Unverified(format!(
-            "anvil-roundtrip-v1a missing chunk fixture directory {}",
+    let metadata = fs::symlink_metadata(&chunk_root).map_err(|error| {
+        Error::Unverified(format!(
+            "anvil-roundtrip-v1a source chunk prerequisite unavailable at {}: {error}",
+            chunk_root.display()
+        ))
+    })?;
+    if !metadata.file_type().is_dir() {
+        return Err(Error::Gate(format!(
+            "anvil-roundtrip-v1a chunk root is not a regular directory: {}",
             chunk_root.display()
         )));
     }
@@ -479,8 +812,12 @@ fn verify_fixture_tree_closure(
 fn write_fixture_regions(
     fixtures: &[Fixture],
     regions_root: &Path,
+    evidence_root: &Path,
     saved_hashes: &mut HashMap<String, PayloadHash>,
 ) -> Result<(), Error> {
+    for fixture in fixtures {
+        persist_stage_payload(evidence_root, "source", fixture, &fixture.source_bytes)?;
+    }
     rivet_world::chunk::storage::RegionFileVersion::configure(REGION_FILE_COMPRESSION);
     let mut by_dim: BTreeMap<&str, Vec<&Fixture>> = BTreeMap::new();
     for fixture in fixtures {
@@ -506,6 +843,7 @@ fn write_fixture_regions(
             let bytes = encode_payload(&tag)
                 .map_err(|e| Error::Gate(format!("encoding saved {} failed: {e}", fixture.path)))?;
             let hash = payload_hash(&bytes, &tag)?;
+            persist_stage_payload(evidence_root, "saved", fixture, &bytes)?;
             if bytes != fixture.source_bytes {
                 return Err(Error::Gate(format!(
                     "anvil-roundtrip-v1a saved payload mismatch at {}: source {} saved {}",
@@ -529,6 +867,7 @@ fn write_fixture_regions(
 fn read_fresh_read_only(
     fixtures: &[Fixture],
     regions_root: &Path,
+    evidence_root: &Path,
     saved_hashes: &HashMap<String, PayloadHash>,
     records: &BTreeMap<String, RegionScan>,
 ) -> Result<HashMap<String, PayloadHash>, Error> {
@@ -550,6 +889,7 @@ fn read_fresh_read_only(
                 Error::Gate(format!("encoding reloaded {} failed: {e}", fixture.path))
             })?;
             let hash = payload_hash(&bytes, &tag)?;
+            persist_stage_payload(evidence_root, "reloaded", fixture, &bytes)?;
             let saved = saved_hashes.get(&fixture_key(fixture)).ok_or_else(|| {
                 Error::Gate(format!("saved evidence absent for {}", fixture.path))
             })?;
@@ -636,11 +976,23 @@ fn scan_region_file(
     })?;
     let bytes = fs::read(path)?;
     if bytes.len() < 8192 || bytes.len() % 4096 != 0 {
+        let ((cx, cz), artifact) = expected.iter().next().ok_or_else(|| {
+            scanner_error(
+                dim,
+                path,
+                "truncation",
+                "no expected chunk identifies the mutation",
+            )
+        })?;
         return Err(scanner_error(
             dim,
             path,
             "truncation",
-            "header/file length is not a complete sector layout",
+            &format!(
+                "{artifact} slot {} chunk ({cx},{cz}) header/file length is not a complete sector layout",
+                chunk_slot(region_x, region_z, *cx, *cz)
+                    .map_err(|detail| { scanner_error(dim, path, "truncation", &detail) })?
+            ),
         ));
     }
     let total_sectors = bytes.len() / 4096;
@@ -657,14 +1009,20 @@ fn scan_region_file(
         if packed == 0 {
             continue;
         }
-        let cx = region_x * 32 + (slot as i32 & 31);
-        let cz = region_z * 32 + (slot as i32 >> 5);
+        let (cx, cz) = checked_chunk_coordinate(region_x, region_z, slot).map_err(|detail| {
+            scanner_error(
+                dim,
+                path,
+                "location-header",
+                &format!("slot {slot}: {detail}"),
+            )
+        })?;
         let artifact = expected.get(&(cx, cz)).ok_or_else(|| {
             scanner_error(
                 dim,
                 path,
                 "location-header",
-                &format!("extra allocated record at chunk ({cx},{cz})"),
+                &format!("extra allocated record at slot {slot} chunk ({cx},{cz})"),
             )
         })?;
         let sector_offset = packed >> 8;
@@ -674,7 +1032,9 @@ fn scan_region_file(
                 dim,
                 path,
                 "location-header",
-                &format!("{artifact} chunk ({cx},{cz}) has invalid location {packed:#x}"),
+                &format!(
+                    "{artifact} slot {slot} chunk ({cx},{cz}) has invalid location {packed:#x}"
+                ),
             ));
         }
         let start = usize::try_from(sector_offset).map_err(|_| {
@@ -693,7 +1053,7 @@ fn scan_region_file(
                 dim,
                 path,
                 "truncation",
-                &format!("{artifact} chunk ({cx},{cz}) extends beyond file bounds"),
+                &format!("{artifact} slot {slot} chunk ({cx},{cz}) extends beyond file bounds"),
             ));
         }
         for (sector, occupied) in used.iter_mut().enumerate().take(end).skip(start) {
@@ -702,7 +1062,7 @@ fn scan_region_file(
                     dim,
                     path,
                     "sector-overlap",
-                    &format!("{artifact} chunk ({cx},{cz}) overlaps sector {sector}"),
+                    &format!("{artifact} slot {slot} chunk ({cx},{cz}) overlaps sector {sector}"),
                 ));
             }
             *occupied = true;
@@ -714,7 +1074,7 @@ fn scan_region_file(
                 dim,
                 path,
                 "truncation",
-                &format!("{artifact} chunk ({cx},{cz}) has no five-byte record header"),
+                &format!("{artifact} slot {slot} chunk ({cx},{cz}) has no five-byte record header"),
             ));
         }
         let length_i32 = i32::from_be_bytes(
@@ -727,7 +1087,7 @@ fn scan_region_file(
                 dim,
                 path,
                 "length",
-                &format!("{artifact} chunk ({cx},{cz}) declares length {length_i32}"),
+                &format!("{artifact} slot {slot} chunk ({cx},{cz}) declares length {length_i32}"),
             ));
         }
         let compression = bytes[record_start + 4];
@@ -737,7 +1097,7 @@ fn scan_region_file(
                 path,
                 "compression-byte",
                 &format!(
-                    "{artifact} chunk ({cx},{cz}) declares codec {compression}, expected none (3)"
+                    "{artifact} slot {slot} chunk ({cx},{cz}) declares codec {compression}, expected none (3)"
                 ),
             ));
         }
@@ -751,18 +1111,25 @@ fn scan_region_file(
                 dim,
                 path,
                 "length",
-                &format!("{artifact} chunk ({cx},{cz}) length exceeds allocated sectors"),
+                &format!(
+                    "{artifact} slot {slot} chunk ({cx},{cz}) length exceeds allocated sectors"
+                ),
             ));
         }
         let payload_bytes = length - 1;
         let payload_start = record_start + 5;
         let payload_end = payload_start + payload_bytes;
-        let tag = parse_payload(&bytes[payload_start..payload_end]).map_err(|e| {
+        let tag = parse_payload_exact(&bytes[payload_start..payload_end]).map_err(|e| {
+            let kind = if e.contains("trailing bytes") {
+                "trailing-payload"
+            } else {
+                "truncation"
+            };
             scanner_error(
                 dim,
                 path,
-                "truncation",
-                &format!("{artifact} chunk ({cx},{cz}) payload parse failed: {e}"),
+                kind,
+                &format!("{artifact} slot {slot} chunk ({cx},{cz}) payload parse failed: {e}"),
             )
         })?;
         let actual = get_chunk_coordinate(&tag);
@@ -772,7 +1139,7 @@ fn scan_region_file(
                 path,
                 "coordinates",
                 &format!(
-                    "{artifact} slot ({cx},{cz}) contains payload coordinate ({},{})",
+                    "{artifact} slot {slot} chunk ({cx},{cz}) contains payload coordinate ({},{})",
                     actual.x(),
                     actual.z()
                 ),
@@ -804,6 +1171,12 @@ fn scan_region_file(
     Ok(RegionScan { records })
 }
 
+#[derive(Debug)]
+struct StorageRejection {
+    stage: RejectionStage,
+    message: String,
+}
+
 fn run_corruption_negatives(
     output: &Path,
     regions_root: &Path,
@@ -811,12 +1184,29 @@ fn run_corruption_negatives(
 ) -> Result<Vec<NegativeEvidence>, Error> {
     let negative_root = output.join("negatives");
     fs::create_dir_all(&negative_root)?;
-    let first = fixtures
+    if !fixtures
         .iter()
-        .find(|f| f.dim == "overworld" && f.cx == 0 && f.cz == 0)
-        .ok_or_else(|| Error::Unverified("negative controls need overworld/0.0/0.0.nbt".into()))?;
+        .any(|f| f.dim == "overworld" && f.cx == 0 && f.cz == 0)
+    {
+        return Err(Error::Unverified("anvil-roundtrip-v1a negative-control evidence unavailable: missing overworld/0.0/0.0.nbt".into()));
+    }
     let mut results = Vec::new();
     for kind in NegativeKind::all() {
+        let target_slot = kind.target_slot();
+        let target = fixtures
+            .iter()
+            .find(|fixture| {
+                fixture.dim == "overworld"
+                    && fixture.cx == (target_slot as i32 & 31)
+                    && fixture.cz == (target_slot as i32 >> 5)
+            })
+            .ok_or_else(|| {
+                Error::Gate(format!(
+                    "anvil-roundtrip-v1a negative {} target slot {} is absent",
+                    kind.name(),
+                    target_slot
+                ))
+            })?;
         let root = negative_root.join(kind.name());
         copy_tree(regions_root, &root.join("regions"))?;
         let artifact = root.join("regions/overworld/r.0.0.mca");
@@ -839,18 +1229,43 @@ fn run_corruption_negatives(
                 )));
             }
         };
-        if !scanner_error.contains(kind.name()) || !scanner_error.contains("r.0.0.mca") {
+        let target_chunk = format!("chunk ({},{})", target.cx, target.cz);
+        if !scanner_error.contains(kind.name())
+            || !scanner_error.contains("r.0.0.mca")
+            || !scanner_error.contains(&target_chunk)
+            || !scanner_error.contains(&format!("slot {target_slot}"))
+        {
             return Err(Error::Gate(format!(
-                "anvil-roundtrip-v1a corruption negative `{}` did not name its intended artifact {}: {scanner_error}",
+                "anvil-roundtrip-v1a corruption negative `{}` did not attribute intended artifact {}, slot {}, and {}: {scanner_error}",
                 kind.name(),
-                artifact.display()
+                artifact.display(),
+                target_slot,
+                target_chunk
             )));
         }
-        let storage_error = storage_rejects_corruption(&root.join("regions"), first, kind)?;
+        let storage = storage_rejects_corruption(&root.join("regions"), target, kind)?;
+        if storage.stage != kind.rejection_stage() {
+            return Err(Error::Gate(format!(
+                "anvil-roundtrip-v1a corruption negative `{}` was rejected at {} instead of {} for slot {} {}: {}",
+                kind.name(),
+                storage.stage.name(),
+                kind.rejection_stage().name(),
+                target_slot,
+                target_chunk,
+                storage.message
+            )));
+        }
         results.push(NegativeEvidence {
-            name: kind.name().to_string(),
-            artifact: format!("overworld/r.0.0.mca chunk ({},{})", first.cx, first.cz),
-            detected: format!("strict scanner: {scanner_error}; storage: {storage_error}"),
+            mutation: kind.name().to_string(),
+            artifact: "overworld/r.0.0.mca".to_string(),
+            slot: target_slot,
+            chunk: format!("{}.{}", target.cx, target.cz),
+            rejection_stage: storage.stage.name().to_string(),
+            detected: format!(
+                "strict scanner: {scanner_error}; storage stage {}: {}",
+                storage.stage.name(),
+                storage.message
+            ),
         });
     }
     Ok(results)
@@ -860,25 +1275,45 @@ fn storage_rejects_corruption(
     regions_root: &Path,
     fixture: &Fixture,
     kind: NegativeKind,
-) -> Result<String, Error> {
-    let mut storage = RegionFileStorage::new_read_only(
+) -> Result<StorageRejection, Error> {
+    let region_dir = regions_root.join("overworld");
+    let artifact = region_dir.join("r.0.0.mca");
+    let slot = chunk_slot(0, 0, fixture.cx, fixture.cz)
+        .map_err(|detail| Error::Gate(format!("anvil-roundtrip-v1a {detail}")))?;
+    let open_result = RegionFile::open_read_only(
         info_for_dimension("overworld"),
-        regions_root.join("overworld"),
+        artifact.clone(),
+        region_dir.clone(),
+        RegionFileVersion::VERSION_NONE,
     );
-    match storage.read(&ChunkPos::new(fixture.cx, fixture.cz)) {
-        Err(error) => Ok(format!(
-            "{} RegionFileStorage rejected overworld/r.0.0.mca chunk ({},{}): {error}",
+    let (stage, error) = match open_result {
+        Err(error) => (RejectionStage::OpenHeader, error.to_string()),
+        Ok(region) => {
+            drop(region);
+            let mut storage =
+                RegionFileStorage::new_read_only(info_for_dimension("overworld"), region_dir);
+            match storage.read(&ChunkPos::new(fixture.cx, fixture.cz)) {
+                Err(error) => (RejectionStage::PayloadRead, error.to_string()),
+                Ok(value) => {
+                    return Err(Error::Gate(format!(
+                        "anvil-roundtrip-v1a {} corruption reached read-only storage as {value:?} for overworld/r.0.0.mca slot {slot} chunk ({},{}), unrelated to the intended mutation",
+                        kind.name(),
+                        fixture.cx,
+                        fixture.cz
+                    )));
+                }
+            }
+        }
+    };
+    Ok(StorageRejection {
+        stage,
+        message: format!(
+            "{} RegionFileStorage rejected overworld/r.0.0.mca slot {slot} chunk ({},{}): {error}",
             kind.name(),
             fixture.cx,
             fixture.cz
-        )),
-        Ok(value) => Err(Error::Gate(format!(
-            "anvil-roundtrip-v1a {} corruption reached read-only storage as {value:?} for overworld/r.0.0.mca chunk ({},{})",
-            kind.name(),
-            fixture.cx,
-            fixture.cz
-        ))),
-    }
+        ),
+    })
 }
 
 fn mutate_region(path: &Path, kind: NegativeKind) -> Result<(), Error> {
@@ -897,9 +1332,63 @@ fn mutate_region(path: &Path, kind: NegativeKind) -> Result<(), Error> {
             let new_len = (sector_start + 5).min(bytes.len());
             bytes.truncate(new_len);
         }
+        NegativeKind::TrailingPayload => {
+            let length = i32::from_be_bytes(
+                bytes[sector_start..sector_start + 4]
+                    .try_into()
+                    .expect("record length"),
+            );
+            if length < 1 {
+                return Err(Error::Gate(
+                    "cannot append trailing payload to invalid record".into(),
+                ));
+            }
+            let record_end = sector_start
+                .checked_add(((location & 0xff) as usize) * 4096)
+                .ok_or_else(|| Error::Gate("trailing payload record bounds overflow".into()))?;
+            let append_at = sector_start
+                .checked_add(4)
+                .and_then(|offset| offset.checked_add(length as usize))
+                .ok_or_else(|| Error::Gate("trailing payload offset overflow".into()))?;
+            let append_end = append_at
+                .checked_add(4)
+                .ok_or_else(|| Error::Gate("trailing payload end overflow".into()))?;
+            if append_end > record_end || append_end > bytes.len() {
+                return Err(Error::Gate(
+                    "record has no sector padding for trailing payload".into(),
+                ));
+            }
+            let expanded_length = length
+                .checked_add(4)
+                .ok_or_else(|| Error::Gate("trailing payload length overflow".into()))?;
+            bytes[sector_start..sector_start + 4].copy_from_slice(&expanded_length.to_be_bytes());
+            bytes[append_at..append_end].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        }
     }
     fs::write(path, bytes)?;
     Ok(())
+}
+
+fn persist_stage_payload(
+    evidence_root: &Path,
+    stage: &str,
+    fixture: &Fixture,
+    bytes: &[u8],
+) -> Result<(), Error> {
+    let path = evidence_root.join(stage).join(&fixture.path);
+    let parent = path.parent().ok_or_else(|| {
+        Error::Gate(format!(
+            "anvil-roundtrip-v1a evidence path has no parent: {}",
+            path.display()
+        ))
+    })?;
+    fs::create_dir_all(parent)?;
+    fs::write(path, bytes)?;
+    Ok(())
+}
+
+fn stage_payload_path(stage: &str, fixture: &Fixture) -> String {
+    format!("evidence/{stage}/{}", fixture.path)
 }
 
 fn payload_hash(bytes: &[u8], tag: &CompoundTag) -> Result<PayloadHash, Error> {
@@ -929,8 +1418,26 @@ fn hash_tree(root: &Path) -> Result<TreeHash, Error> {
         });
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut directories = Vec::new();
+    for path in collect_directories(root)? {
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|e| Error::Gate(format!("cannot relativize saved directory: {e}")))?
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        directories.push(relative);
+    }
+    directories.sort();
     let mut material = String::new();
+    for directory in &directories {
+        material.push('D');
+        material.push('\0');
+        material.push_str(directory);
+        material.push('\n');
+    }
     for file in &files {
+        material.push('F');
+        material.push('\0');
         material.push_str(&file.path);
         material.push('\0');
         material.push_str(&file.sha256);
@@ -939,7 +1446,45 @@ fn hash_tree(root: &Path) -> Result<TreeHash, Error> {
     Ok(TreeHash {
         digest: sha256_hex(material.as_bytes()),
         files,
+        directories,
     })
+}
+
+fn collect_directories(root: &Path) -> Result<Vec<PathBuf>, Error> {
+    if !root.is_dir() {
+        return Err(Error::Gate(format!(
+            "artifact directory is missing: {}",
+            root.display()
+        )));
+    }
+    let mut directories = Vec::new();
+    collect_directories_inner(root, &mut directories)?;
+    directories.sort();
+    Ok(directories)
+}
+
+fn collect_directories_inner(root: &Path, directories: &mut Vec<PathBuf>) -> Result<(), Error> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            return Err(Error::Gate(format!(
+                "aliased artifact is not allowed: {}",
+                path.display()
+            )));
+        }
+        if file_type.is_dir() {
+            directories.push(path.clone());
+            collect_directories_inner(&path, directories)?;
+        } else if !file_type.is_file() {
+            return Err(Error::Gate(format!(
+                "unsupported artifact entry: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn collect_files(root: &Path) -> Result<Vec<PathBuf>, Error> {
@@ -1036,6 +1581,70 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+fn canonicalize_paths(fixture_root: &Path, output: &Path) -> Result<(PathBuf, PathBuf), Error> {
+    let source = fs::canonicalize(fixture_root).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            Error::Unverified(format!(
+                "anvil-roundtrip-v1a missing fixture provenance/artifacts at {}: {error}",
+                fixture_root.display()
+            ))
+        } else {
+            Error::Gate(format!(
+                "anvil-roundtrip-v1a cannot canonicalize fixture root {}: {error}",
+                fixture_root.display()
+            ))
+        }
+    })?;
+    let destination = canonical_destination(output)?;
+    if destination == source || destination.starts_with(&source) || source.starts_with(&destination)
+    {
+        return Err(Error::Gate(format!(
+            "anvil-roundtrip-v1a source/output paths overlap: source {}, output {}",
+            source.display(),
+            destination.display()
+        )));
+    }
+    Ok((source, destination))
+}
+
+fn canonical_destination(path: &Path) -> Result<PathBuf, Error> {
+    let mut missing = Vec::new();
+    let mut existing = path.to_path_buf();
+    while match fs::symlink_metadata(&existing) {
+        Ok(_) => false,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => {
+            return Err(Error::Gate(format!(
+                "anvil-roundtrip-v1a cannot inspect output {}: {error}",
+                existing.display()
+            )));
+        }
+    } {
+        let Some(name) = existing.file_name() else {
+            return Err(Error::Gate(format!(
+                "anvil-roundtrip-v1a output has no canonicalizable parent: {}",
+                path.display()
+            )));
+        };
+        missing.push(name.to_os_string());
+        existing = existing
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+    }
+    let mut canonical = fs::canonicalize(&existing).map_err(|error| {
+        Error::Gate(format!(
+            "anvil-roundtrip-v1a cannot canonicalize output {}: {error}",
+            path.display()
+        ))
+    })?;
+    for component in missing.iter().rev() {
+        canonical.push(component);
+    }
+    Ok(canonical)
+}
+
 fn prepare_output(output: &Path) -> Result<(), Error> {
     if output.exists() {
         fs::remove_dir_all(output)?;
@@ -1093,6 +1702,49 @@ fn info_for_dimension(dim: &str) -> RegionStorageInfo {
     )
 }
 
+fn checked_chunk_coordinate(
+    region_x: i32,
+    region_z: i32,
+    slot: usize,
+) -> Result<(i32, i32), String> {
+    let base_x = region_x
+        .checked_mul(32)
+        .ok_or_else(|| format!("region x {region_x} overflows chunk coordinate arithmetic"))?;
+    let base_z = region_z
+        .checked_mul(32)
+        .ok_or_else(|| format!("region z {region_z} overflows chunk coordinate arithmetic"))?;
+    let local_x = (slot & 31) as i32;
+    let local_z = (slot >> 5) as i32;
+    let cx = base_x
+        .checked_add(local_x)
+        .ok_or_else(|| format!("chunk x base {base_x} overflows at slot {slot}"))?;
+    let cz = base_z
+        .checked_add(local_z)
+        .ok_or_else(|| format!("chunk z base {base_z} overflows at slot {slot}"))?;
+    Ok((cx, cz))
+}
+
+fn chunk_slot(region_x: i32, region_z: i32, cx: i32, cz: i32) -> Result<usize, String> {
+    let region_base_x = region_x
+        .checked_mul(32)
+        .ok_or_else(|| format!("region x {region_x} overflows chunk coordinate arithmetic"))?;
+    let region_base_z = region_z
+        .checked_mul(32)
+        .ok_or_else(|| format!("region z {region_z} overflows chunk coordinate arithmetic"))?;
+    let local_x = cx
+        .checked_sub(region_base_x)
+        .ok_or_else(|| format!("chunk x {cx} underflows region base {region_base_x}"))?;
+    let local_z = cz
+        .checked_sub(region_base_z)
+        .ok_or_else(|| format!("chunk z {cz} underflows region base {region_base_z}"))?;
+    if !(0..32).contains(&local_x) || !(0..32).contains(&local_z) {
+        return Err(format!(
+            "chunk ({cx},{cz}) is outside region ({region_x},{region_z})"
+        ));
+    }
+    Ok((local_z as usize) * 32 + local_x as usize)
+}
+
 fn scanner_error(dim: &str, path: &Path, kind: &str, detail: &str) -> Error {
     Error::Gate(format!(
         "anvil-roundtrip-v1a {kind} corruption in {dim}/{}: {detail}",
@@ -1113,11 +1765,9 @@ mod tests {
     }
 
     #[test]
-    fn negative_names_are_load_bearing() {
-        let names: Vec<_> = NegativeKind::all()
-            .into_iter()
-            .map(NegativeKind::name)
-            .collect();
+    fn negative_names_and_targets_are_load_bearing() {
+        let kinds = NegativeKind::all();
+        let names: Vec<_> = kinds.into_iter().map(NegativeKind::name).collect();
         assert_eq!(
             names,
             [
@@ -1125,8 +1775,109 @@ mod tests {
                 "compression-byte",
                 "location-header",
                 "sector-overlap",
-                "truncation"
+                "truncation",
+                "trailing-payload"
             ]
         );
+        assert_eq!(NegativeKind::Overlap.target_slot(), 1);
+        assert_eq!(NegativeKind::Length.target_slot(), 0);
+        assert_eq!(
+            NegativeKind::Truncation.rejection_stage(),
+            RejectionStage::OpenHeader
+        );
+        assert_eq!(
+            NegativeKind::TrailingPayload.rejection_stage(),
+            RejectionStage::PayloadRead
+        );
+    }
+
+    #[test]
+    fn committed_identity_recomputes_from_manifest_and_raw_bytes() {
+        let root = crate::crate_dir().join("fixtures");
+        let manifest = crate::load_manifest(&root).expect("committed manifest must parse");
+        assert_eq!(
+            crate::raw_corpus_identity(&root, &manifest).expect("raw corpus must hash"),
+            EXPECTED_M0_CORPUS_RAW_SHA256
+        );
+        let bytes = fs::read(root.join("manifest.json")).expect("manifest must read");
+        assert_eq!(sha256_hex(&bytes), EXPECTED_M0_MANIFEST_SHA256);
+    }
+
+    #[test]
+    fn malformed_provenance_is_fail() {
+        let root = crate::crate_dir().join("fixtures");
+        let mut manifest = crate::load_manifest(&root).expect("committed manifest must parse");
+        manifest.seed = Some(String::new());
+        assert!(matches!(
+            validate_m0_manifest(&manifest),
+            Err(Error::Gate(_))
+        ));
+        let mut manifest = crate::load_manifest(&root).expect("committed manifest must parse");
+        manifest.paper = Some(String::new());
+        assert!(matches!(
+            validate_m0_manifest(&manifest),
+            Err(Error::Gate(_))
+        ));
+        let mut manifest = crate::load_manifest(&root).expect("committed manifest must parse");
+        let extra = manifest
+            .captured
+            .iter()
+            .find(|captured| captured.path.starts_with("chunk/"))
+            .expect("committed manifest has chunks")
+            .clone();
+        manifest.captured.push(extra);
+        assert!(matches!(
+            validate_m0_manifest(&manifest),
+            Err(Error::Gate(_))
+        ));
+    }
+
+    #[test]
+    fn strict_payload_parser_rejects_trailing_bytes() {
+        let tag = CompoundTag::new();
+        let bytes = encode_payload(&tag).expect("empty compound encodes");
+        let mut corrupted = bytes.clone();
+        corrupted.push(0);
+        assert!(parse_payload_exact(&corrupted).is_err());
+    }
+
+    #[test]
+    fn canonical_paths_reject_equal_nested_and_ancestor_outputs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        std::fs::create_dir(&source).expect("source");
+        assert!(matches!(
+            canonicalize_paths(&source, &source),
+            Err(Error::Gate(_))
+        ));
+        assert!(matches!(
+            canonicalize_paths(&source, &source.join("nested")),
+            Err(Error::Gate(_))
+        ));
+        assert!(matches!(
+            canonicalize_paths(&source, temp.path()),
+            Err(Error::Gate(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_paths_reject_symlink_output_alias() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("source");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&source).expect("source");
+        symlink(&source, &alias).expect("symlink");
+        assert!(matches!(
+            canonicalize_paths(&source, &alias),
+            Err(Error::Gate(_))
+        ));
+    }
+
+    #[test]
+    fn checked_region_coordinate_arithmetic_rejects_overflow() {
+        assert!(checked_chunk_coordinate(i32::MAX, 0, 0).is_err());
+        assert!(chunk_slot(i32::MAX, 0, 0, 0).is_err());
     }
 }
