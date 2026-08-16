@@ -118,6 +118,29 @@ _script_dir="${BASH_SOURCE[0]%/*}"
 [ "$_script_dir" = "${BASH_SOURCE[0]}" ] && _script_dir="."
 REPO_DIR="$(cd "$_script_dir/.." && pwd)"
 
+resolved_target_dir_for() {
+  local manifest=$1 metadata target_dir common_dir project_root
+  if command -v cargo >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    metadata="$(cargo metadata --locked --no-deps --format-version 1 --manifest-path "$manifest" 2>/dev/null || true)"
+    if [ -n "$metadata" ]; then
+      target_dir="$(printf '%s' "$metadata" | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null || true)"
+      [ -n "$target_dir" ] && { printf '%s\n' "$target_dir"; return 0; }
+    fi
+  fi
+  common_dir="$(git -C "$REPO_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  if [ -n "$common_dir" ]; then
+    project_root="$(cd "$(dirname "$common_dir")" && pwd -P)"
+  else
+    project_root="$REPO_DIR"
+  fi
+  target_dir="${CARGO_TARGET_DIR:-$project_root/target-agent-shared}"
+  case "$target_dir" in
+    /*) ;;
+    *) target_dir="$project_root/$target_dir" ;;
+  esac
+  printf '%s\n' "$target_dir"
+}
+
 # ---- oracle prereq pre-check (full gate only) --------------------------------
 #
 # Validates the prerequisites the two oracle steps need and prints an actionable
@@ -127,7 +150,7 @@ REPO_DIR="$(cd "$_script_dir/.." && pwd)"
 # RIVET_PAPER_RUNTIME_JAR; RIVET_JAVA_HOME / JAVA_HOME / SDKMAN. With
 # REQUIRE_ORACLE=1 any missing prereq is a hard failure (exit 1).
 oracle_prereq_check() {
-  local missing=0
+  local missing=0 client_target_dir client_candidate
   JAVA_BARE_OK=0; PYTHON3_OK=0; DISK_OK=0; JAVAC25_OK=0
   PAPERCLIP_JAR=""; COMPILE_JAR=""; LIBRARIES_DIR=""; RUNTIME_JAR=""
   # VERIFY_RUNNABLE / PARITY_RUNNABLE / CAPTURE_RUNNABLE / SCENARIO_RUNNABLE are
@@ -204,12 +227,15 @@ oracle_prereq_check() {
   # rivet-client (the offline Azalea bot the join-capture harness drives). The
   # scenario runner and rivet-capture both need it; the gate never runs the
   # capture step against a missing client binary.
+  CLIENT_BIN=""
   if [ -n "${RIVET_CLIENT_BIN:-}" ] && [ -f "${RIVET_CLIENT_BIN}" ]; then
     CLIENT_BIN="$RIVET_CLIENT_BIN"
-  elif [ -f "$REPO_DIR/tools/rivet-client/target/debug/rivet-client" ]; then
-    CLIENT_BIN="$REPO_DIR/tools/rivet-client/target/debug/rivet-client"
   else
-    CLIENT_BIN=""
+    client_target_dir="$(resolved_target_dir_for "$REPO_DIR/tools/rivet-client/Cargo.toml")"
+    client_candidate="$client_target_dir/debug/rivet-client"
+    if [ -f "$client_candidate" ]; then
+      CLIENT_BIN="$client_candidate"
+    fi
   fi
   if [ -n "$CLIENT_BIN" ]; then
     echo "  [ok]      rivet-client binary ($CLIENT_BIN)"
@@ -1174,8 +1200,12 @@ main() {
   echo "GATE GREEN"
 }
 
-# Run only when executed directly; sourcing this file just defines the functions,
-# so tests can drive oracle_prereq_check in isolation.
+# The strict gate owns the shared build lock for its complete process tree. Sourcing
+# this file remains side-effect-free for focused tests.
 if [[ "${BASH_SOURCE[0]:-}" == "$0" ]]; then
-  main "$@"
+  if [ "${RIVET_BUILD_LOCK_HELD:-0}" = 1 ]; then
+    main "$@"
+  else
+    exec "$REPO_DIR/scripts/with-build-lock.sh" "$REPO_DIR" "$REPO_DIR/scripts/gate.sh" "$@"
+  fi
 fi

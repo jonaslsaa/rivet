@@ -857,12 +857,29 @@ fn usage() -> String {
     )
 }
 
-fn crate_root() -> PathBuf {
+pub(crate) fn crate_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Path to the `rivet-client` binary, assumed to sit next to this binary in
-/// the same Cargo target dir.
+pub(crate) fn cargo_target_dir() -> PathBuf {
+    if let Ok(target_dir) = env::var("CARGO_TARGET_DIR") {
+        let path = PathBuf::from(target_dir);
+        if path.is_absolute() {
+            return path;
+        }
+        return crate_root().join(path);
+    }
+    if let Ok(exe) = env::current_exe()
+        && let Some(debug_dir) = exe.parent()
+        && debug_dir.file_name().is_some_and(|name| name == "debug")
+        && let Some(target_dir) = debug_dir.parent()
+    {
+        return target_dir.to_path_buf();
+    }
+    PathBuf::from("target-agent-shared")
+}
+
+/// Path to the `rivet-client` binary, resolved from Cargo's target directory.
 fn client_binary() -> PathBuf {
     let sibling = env::current_exe()
         .ok()
@@ -872,8 +889,7 @@ fn client_binary() -> PathBuf {
     {
         return p;
     }
-    // Fall back to the package's own target dir (cargo run from this crate).
-    crate_root().join("target/debug/rivet-client")
+    cargo_target_dir().join("debug/rivet-client")
 }
 
 /// Resolve `--address` into the first socket address. The port is the
@@ -4030,7 +4046,7 @@ fn corrupt_region_chunk_entry(region_path: &Path, chunk: [i32; 2]) -> io::Result
 
 /// Resolve the `rivet-oracle` binary: a sibling in the same target dir (the
 /// common `cargo build` layout), then an explicit `RIVET_ORACLE_BIN`, then the
-/// workspace `target/debug` default.
+/// resolved Cargo target directory.
 fn oracle_binary() -> PathBuf {
     let sibling = env::current_exe()
         .ok()
@@ -4046,7 +4062,7 @@ fn oracle_binary() -> PathBuf {
             return p;
         }
     }
-    crate_root().join("../../target/debug/rivet-oracle")
+    cargo_target_dir().join("debug/rivet-oracle")
 }
 
 /// Map an `rivet-oracle` subcommand exit status onto the runner's error
