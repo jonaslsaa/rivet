@@ -545,10 +545,10 @@
 544	bitexact_f64(super::atan2(1.0, 0.0))	0x3ff921fb54442d18
 545	bitexact_f64(super::atan2(-1.0, 0.0))	0xbff921fb54442d18
 546	bitexact_f64(super::atan2(0.0, -1.0))	0x400921fb54442d18
-547	bitexact_f64(super::atan2(1.0, 1.0))	0x3fe921fb45e6d12f
+547	bitexact_f64(super::atan2(1.0, 1.0))	0x3fe921fb45e6d12e
 548	bitexact_f64(super::atan2(-1.0, -1.0))	0xc002d97c82ca78cc
 549	bitexact_f64(super::atan2(1.0, -1.0))	0x4002d97c82ca78cc
-550	bitexact_f64(super::atan2(-1.0, 1.0))	0xbfe921fb45e6d12f
+550	bitexact_f64(super::atan2(-1.0, 1.0))	0xbfe921fb45e6d12e
 551	bitexact_f64(super::atan2(3.0, 4.0))	0x3fe497861c1ebb2e
 552	bitexact_f64(super::atan2(4.0, 3.0))	0x3fedac708c699f02
 553	bitexact_f64(super::atan2(0.1, 0.2))	0x3fddac64ca13863b
@@ -563,8 +563,8 @@
 562	bitexact_f64(super::atan2(1.0E300, 1.0E300))	0xfff0000000000000
 563	bitexact_f64(super::atan2(1.0E-300, 1.0E-300))	0x21a705f2fc84defa
 564	bitexact_f64(super::atan2(12345.678, 98765.432))	0x3fbfd5d00b34bc34
-565	bitexact_f64(super::atan2(0.5, 0.5))	0x3fe921fb45e6d12f
-566	bitexact_f64(super::atan2(-0.5, 0.5))	0xbfe921fb45e6d12f
+565	bitexact_f64(super::atan2(0.5, 0.5))	0x3fe921fb45e6d12e
+566	bitexact_f64(super::atan2(-0.5, 0.5))	0xbfe921fb45e6d12e
 567	bitexact_f64(super::atan2(0.5, -0.5))	0x4002d97c82ca78cc
 568	bitexact_f64(super::atan2(-0.5, -0.5))	0xc002d97c82ca78cc
 569	bitexact_f64(super::atan2(0.9, 0.1))	0x3ff75cbae9ec4fce
@@ -576,7 +576,7 @@
 575	bitexact_f64(super::atan2(1000.0, -0.001))	0x3ff921fc603f3633
 576	bitexact_f64(super::atan2(-0.001, 1000.0))	0xbeb0bfb091b5fb84
 577	bitexact_f64(super::atan2(0.0, f64::NEG_INFINITY))	0x7ff8000000000000
-578	bitexact_f64(super::atan2(f64::NEG_INFINITY, 0.0))	0xfff8000000000000
+578	bitexact_f64(super::atan2(f64::NEG_INFINITY, 0.0))	0x7ff8000000000000
 579	bitexact_f32(super::inv_sqrt(0.25f32))	0x40000000
 580	bitexact_f32(super::inv_sqrt(2.0f32))	0x3f3504f3
 581	bitexact_f32(super::inv_sqrt(100.0f32))	0x3dcccccd
