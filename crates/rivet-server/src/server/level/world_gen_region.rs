@@ -2728,7 +2728,10 @@ mod tests {
         let diagnostic = region
             .get_noise_biome_cached(8, 0, 0)
             .expect_err("the in-ring empty holder must reject the BIOMES read");
-        assert_eq!(diagnostic.max_allowed_status, Some(ChunkStatus::StructureStarts));
+        assert_eq!(
+            diagnostic.max_allowed_status,
+            Some(ChunkStatus::StructureStarts)
+        );
         assert_eq!(diagnostic.actual_status, None);
         let message = diagnostic.to_string();
         assert!(message.contains("requesting chunk [2, 0]"));
