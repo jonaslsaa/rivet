@@ -32,13 +32,15 @@
 //! `MultifaceSpreader.DefaultSpreaderConfig`; that config and the shared
 //! `MultifaceBlock` state/attach logic are ported here faithfully (the same
 //! cross-unit STUB pattern as `chorus_growth.rs`), routing `canAttachTo` — the
-//! face-sturdiness of the support neighbour — through the
-//! `WorldGenLevel::is_face_sturdy` seam (RivetTodo #232), exactly as
-//! `vines_feature.rs` does. That seam is the blocker for production placement:
+//! support-OR-collision face fullness of the support neighbour — through the
+//! `WorldGenLevel::can_attach_to` seam (RivetTodo #232), exactly as
+//! `vines_feature.rs` routes its face-sturdiness. That seam is the blocker for
+//! production placement:
 //! the only production `WorldGenLevel` impl (the `WorldGenRegion` facade in
 //! `rivet-server`, `mc.server.level.pipeline.region`) does not override
-//! `is_face_sturdy`, so the trait default at `world_gen_level.rs` panics — a
-//! real FEATURES pass would panic on the first placement attempt. The runtime
+//! `can_attach_to`, so the trait default at `world_gen_level.rs` fails
+//! explicitly on any dynamic (non-static-table) shape — a real FEATURES pass
+//! would abort on the first placement attempt against such a cell. The runtime
 //! body ported here is therefore exercised only against the test double
 //! (`TestLevel`, `face_sturdy = true`); placing seed-42 `glow_lichen` in
 //! production still requires the #232 block/shape world-access port.
@@ -98,8 +100,11 @@ fn has_face(state: BlockState, face: &Direction) -> bool {
 /// Direction)` — the face is supported (always true for the multiface-spreadeable
 /// blocks, which do not override `isFaceSupported`) and either the cell is not
 /// already this block or the face is not yet present; then the neighbour on the
-/// face must be attachable (`MultifaceBlock.canAttachTo` = the support/
-/// collision shape is full on the opposite face — the `is_face_sturdy` seam).
+/// face must be attachable. `MultifaceBlock.canAttachTo` accepts the neighbour
+/// when its support face `.getBlockSupportShape` OR its full collision face
+/// `.getCollisionShape` is full on the opposite face — so a support-non-full
+/// but collision-full neighbour (a leaf, an open shulker box) is still
+/// attachable. Routed through `WorldGenLevel::can_attach_to` (the #232 seam).
 fn is_valid_state_for_placement(
     block: Block,
     level: &dyn WorldGenLevel,
@@ -112,7 +117,7 @@ fn is_valid_state_for_placement(
     }
     let neighbour_pos = placement_pos.relative(placement_direction);
     let neighbour_state = level.get_block_state(&neighbour_pos);
-    level.is_face_sturdy(
+    level.can_attach_to(
         &neighbour_pos,
         &neighbour_state,
         &placement_direction.get_opposite(),
@@ -496,6 +501,7 @@ impl FeatureBehavior<MultifaceGrowthConfiguration> for MultifaceGrowthFeature {
 mod tests {
     use super::*;
     use crate::block::blocks::Blocks;
+    use crate::level::{ShulkerAnimationStatus, ShulkerBoxShape};
     use crate::levelgen::feature::test_support::{
         RecordingRandom, RngCall, TestGenerator, TestLevel, access,
     };
@@ -539,6 +545,16 @@ mod tests {
     /// test, where no cell may ever attach.
     fn on_nothing() -> HolderSet<BlockType> {
         HolderSet::empty()
+    }
+
+    /// A `canBePlacedOn` set containing the shulker box (a collision-full but
+    /// support-non-full block when open) as registry-reference members, so a
+    /// growth cell can attach to it through the `getStateForPlacement` gate.
+    fn on_open_shulker() -> HolderSet<BlockType> {
+        HolderSet::direct(vec![Holder::reference(
+            RegistryId(0),
+            Block::from_name("minecraft:shulker_box").unwrap().id().0 as u32,
+        )])
     }
 
     fn place_with<R: rivet_util::RandomSource>(
@@ -820,6 +836,74 @@ mod tests {
         // air, none in `canBePlacedOn`), so the search starts at NORTH. Its
         // placement list is the valid dirs minus SOUTH (4-shuffle, 3 draws),
         // then the cell (0,0,-1) grows on its first placement direction.
+        assert_eq!(level.writes.len(), 1);
+        let (pos, state) = &level.writes[0];
+        assert_eq!(*pos, BlockPos::new(0, 0, -1));
+        assert_eq!(
+            state.block(),
+            Block::from_name("minecraft:glow_lichen").unwrap().id()
+        );
+        assert_eq!(
+            state.get_value(BlockStateProperties::UP),
+            Some(PropertyValue::Bool(true))
+        );
+        assert_eq!(level.post_processing, vec![BlockPos::new(0, 0, -1)]);
+        assert_eq!(
+            random.calls,
+            vec![
+                RngCall::IntBound(5),
+                RngCall::IntBound(4),
+                RngCall::IntBound(3),
+                RngCall::IntBound(2),
+                // getShuffledDirectionsExcept(NORTH.getOpposite() = SOUTH).
+                RngCall::IntBound(4),
+                RngCall::IntBound(3),
+                RngCall::IntBound(2),
+                // The growth's spread draw (chance 0 → no fire).
+                RngCall::Float,
+            ]
+        );
+    }
+
+    /// Regression for the Paper-fidelity disjunct in `MultifaceBlock.canAttachTo`
+    /// (support face full OR full collision face): the growth cell attaches to a
+    /// neighbour whose support face is NOT full but whose collision face IS full
+    /// — an open shulker box. `is_valid_state_for_placement` must route through
+    /// `WorldGenLevel::can_attach_to` (the `isFaceFull(supportShape) ||
+    /// isFaceFull(collisionShape)` disjunct), not `is_face_sturdy` (support-only).
+    ///
+    /// The shulker sits at the search cell's UP neighbour (0,1,-1), open and
+    /// facing DOWN: its support shape is a top slab (the DOWN face is not full,
+    /// so support-only `is_face_sturdy` returns false and would reject the
+    /// growth), while its collision shape fills the DOWN face (so the full
+    /// collision disjunct makes `can_attach_to` true — the growth writes).
+    #[test]
+    fn attaches_to_collision_full_support_non_full_neighbour() {
+        let mut level = TestLevel::over(access());
+        // The search cell (0,0,-1) attaches on its UP face to the open
+        // DOWN-facing shulker at (0,1,-1). Not an explicit face override: the
+        // shulker's dynamic shape drives the support/collision verdict.
+        let shulker_pos = BlockPos::new(0, 1, -1);
+        level.states.insert(
+            shulker_pos,
+            BlockState::of(Block::from_name("minecraft:shulker_box").unwrap().id())
+                .set_value(BlockStateProperties::FACING, Direction::Down)
+                .unwrap(),
+        );
+        level.shape_context.insert_shulker_box(
+            shulker_pos,
+            ShulkerBoxShape {
+                facing: Direction::Down,
+                progress: 1.0,
+                animation_status: ShulkerAnimationStatus::Opened,
+            },
+        );
+        let mut random = RecordingRandom::new(42);
+        let config = config(0.0, on_open_shulker());
+        let result = place_with(&mut level, BlockPos::new(0, 0, 0), &mut random, &config);
+        assert!(result);
+        // The search cell (0,0,-1) grows on its first placement direction (UP),
+        // attaching to the collision-full shulker.
         assert_eq!(level.writes.len(), 1);
         let (pos, state) = &level.writes[0];
         assert_eq!(*pos, BlockPos::new(0, 0, -1));
