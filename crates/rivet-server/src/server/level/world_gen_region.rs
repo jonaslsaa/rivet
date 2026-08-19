@@ -2719,14 +2719,20 @@ mod tests {
 
     /// A BIOMES read from a ring-2 STRUCTURE_STARTS holder with no chunk must
     /// preserve Paper's typed unavailable diagnostic instead of falling back to
-    /// the uncached source.
+    /// the uncached source. The `Result` form makes the diagnostic explicit.
     #[test]
-    #[should_panic(expected = "maximum allowed status: minecraft:structure_starts")]
     fn get_noise_biome_rejects_missing_structure_starts_holder() {
         let region = region_with_missing_holder(ChunkPos::new(2, 0));
         // Quart x=8 maps to chunk x=2; the FEATURES dependency allows only
         // STRUCTURE_STARTS there, so the diagnostic names that ring status.
-        region.get_noise_biome_cached(8, 0, 0);
+        let diagnostic = region
+            .get_noise_biome_cached(8, 0, 0)
+            .expect_err("the in-ring empty holder must reject the BIOMES read");
+        assert_eq!(diagnostic.max_allowed_status, Some(ChunkStatus::StructureStarts));
+        assert_eq!(diagnostic.actual_status, None);
+        let message = diagnostic.to_string();
+        assert!(message.contains("requesting chunk [2, 0]"));
+        assert!(message.contains("maximum allowed status: minecraft:structure_starts"));
     }
 
     /// A biome interpolation that reaches past the 9-ring FEATURES window must
