@@ -283,8 +283,8 @@ oldtouch "$W3/target" "$W3/target/CACHEDIR.TAG" "$W3/target/debug" "$W3/target/d
 # the cache dir itself is the newest; the root stays older. mtimes are read
 # back via stat (touch -t is local-time, so no fixed epoch constants).
 touch -m -t 202002020000 "$W3/target"
-want=$(stat -f %m "$W3/target")
-root_m=$(stat -f %m "$W3")
+want=$(file_mtime "$W3/target")
+root_m=$(file_mtime "$W3")
 [ "$root_m" -lt "$want" ] || fail "fixture: root mtime should be older than cache"
 newest=$(newest_mtime "$W3" "$W3/target")
 [ "$newest" -eq "$want" ] || fail "newest_mtime did not max cache mtimes: got $newest want $want"

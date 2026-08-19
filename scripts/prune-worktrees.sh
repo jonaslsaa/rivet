@@ -100,12 +100,25 @@ cache_dirs() { # worktree build caches: nested target/ dirs, pruned on their own
   nested_cargo_targets "$1"
 }
 
+file_mtime() { # $1 = path; mtime in epoch seconds, or 0 if it cannot be read
+  # BSD stat (macOS) and GNU/uutils stat (Linux) spell this differently and each
+  # rejects the other's flag. Probing one spelling only looks like a missing file:
+  # the mtime reads 0, every cache dates to the epoch, and live build caches get
+  # pruned as "idle". Try both.
+  local m
+  if m=$(stat -c %Y "$1" 2>/dev/null); then :
+  elif m=$(stat -f %m "$1" 2>/dev/null); then :
+  else m=0
+  fi
+  echo "${m:-0}"
+}
+
 newest_mtime() { # $1 = path to stat; $2 = cache dirs (one per line), or empty
   local newest m d
-  newest=$(stat -f %m "$1" 2>/dev/null || echo 0)
+  newest=$(file_mtime "$1")
   while read -r d; do
     [ -n "$d" ] || continue
-    m=$(stat -f %m "$d" 2>/dev/null || echo 0)
+    m=$(file_mtime "$d")
     [ "$m" -gt "$newest" ] && newest=$m
   done <<< "${2:-}"
   echo "$newest"
@@ -227,7 +240,7 @@ main() {
             continue
           fi
           kb=$(dir_kb "$cache")
-          cache_age_h=$(( (NOW - $(stat -f %m "$cache" 2>/dev/null || echo 0)) / 3600 ))
+          cache_age_h=$(( (NOW - $(file_mtime "$cache")) / 3600 ))
           say "$(act PRUNE)  $cache  [$branch: $state, idle ${cache_age_h}h, $((kb / 1024))MB]"
           if run rm -rf "$cache"; then
             freed_kb=$((freed_kb + kb)); pruned=$((pruned + 1))
@@ -249,9 +262,9 @@ main() {
 
   if [ "$SWEEP_TMP" = 1 ]; then
     # /tmp is a symlink to /private/tmp on macOS, so $TMPDIR often names the
-    # same tree; sweep each canonical root once.
+    # same tree; canonical_dir resolves both to one root, swept once.
     local t1 t2
-    t1=$(canonical_dir /private/tmp)
+    t1=$(canonical_dir /tmp)
     t2=$(canonical_dir "${TMPDIR:-}")
     if [ -n "$t2" ] && [ "$t2" = "$t1" ]; then
       sweep_tmp "$t1"
