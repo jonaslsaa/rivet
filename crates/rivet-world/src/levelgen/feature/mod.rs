@@ -774,7 +774,7 @@ pub fn feature_place<R: RandomSource>(
         // `Feature.MULTIFACE_GROWTH` — the registered `minecraft:multiface_growth`
         // leaf (the step-9 seed-42 feature body for `glow_lichen`; see
         // `multiface_growth_feature`). Reachable but production-blocked: the
-        // `is_face_sturdy` seam (RivetTodo #232) is not overridden by the real
+        // `can_attach_to` seam (RivetTodo #232) is not overridden by the real
         // `WorldGenRegion` facade, so a production placement would panic.
         20 => {
             let config = (config as &dyn Any)
