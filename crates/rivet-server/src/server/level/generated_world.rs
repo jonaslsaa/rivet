@@ -53,12 +53,14 @@
 //! of range (`GenError::UnsupportedStatus`). The holder's
 //! [`GenerationChunkHolder::generate_through`] surfaces these as typed
 //! [`GeneratedChunkError::Generation`] / [`GeneratedChunkError::UnsupportedStatus`]
-//! rather than stamping a status that was never generated. And a generated
-//! chunk can never enter the server authority: [`ChunkMap::install`] accepts
-//! only a `LevelChunk` (the FULL chunk type), and no conversion from a sub-FULL
-//! `ProtoChunk` exists — the [`GenerationChunkHolder::to_level_chunk`] gate
-//! fails loudly with [`GeneratedChunkError::InstallRequiresFull`] instead of
-//! fabricating a FULL chunk or falling back to superflat.
+//! rather than stamping a status that was never generated. A generated chunk
+//! enters the server authority only through the consuming
+//! [`GenerationChunkHolder::into_level_chunk`] FULL promotion, which moves the
+//! `ProtoChunk` out and calls [`LevelChunk::try_from_full_proto`]; every
+//! genuine pre-FULL persisted status is refused atomically with
+//! [`GeneratedChunkError::Convert`] (carrying [`LevelChunkBridgeError::NotFull`])
+//! — no sub-FULL proto is ever fabricated into a FULL chunk or falls back to
+//! superflat.
 //!
 //! ## The `GenerationChunkHolderView` seam
 //!
@@ -69,12 +71,12 @@
 //! facade on the `StateId`/`ServerBiomeId`/`StructureKey` specialization. The
 //! FEATURES body composes its full dependency window through [`CenterHolder`]
 //! (which borrows the center chunk's base) and [`OwnedHolder`] (which owns the
-//! ring chunks) — see [`compose_feature_region`]. What still defers (RivetTodo
-//! #185) is the FULL-reconstruction bridge: `ChunkAccess::map_values` is wired
-//! only from `LevelChunk::from_bridge`, so a sub-FULL `ProtoChunk` still cannot
-//! be converted into the dense server chunk and never enters the ChunkMap
-//! authority ([`GenerationChunkHolder::to_level_chunk`] fails loudly instead).
-//! The holder hands out the chunk's status and typed generation results too.
+//! ring chunks) — see [`compose_feature_region`]. A sub-FULL `ProtoChunk` still
+//! cannot be converted into the dense server chunk (only a genuine FULL proto is
+//! promoted by [`GenerationChunkHolder::into_level_chunk`] → [`LevelChunk::try_from_full_proto`]),
+//! so a pre-FULL generated chunk never enters the ChunkMap authority — the
+//! refusal is atomic and typed. The holder hands out the chunk's status and
+//! typed generation results too.
 //!
 //! Ownership follows OWNERSHIP.md: the generator/biome source are immutable
 //! per-world config shared by `Arc` (no `Arc<RwLock>` game state — the only
@@ -158,7 +160,7 @@ use rivet_world::levelgen::placement::{
 };
 use rivet_world::levelgen::world_generation_context::WorldGenerationContext;
 
-use crate::server::level::level_chunk::{LevelChunk, StructureKey};
+use crate::server::level::level_chunk::{LevelChunk, LevelChunkBridgeError, StructureKey};
 use crate::server::level::world_gen_region::{
     CenterHolder, GenerationChunkHolderView, OwnedProtoHolder, WorldGenRegion,
 };
@@ -178,11 +180,12 @@ pub enum GeneratedChunkError {
     /// the first selected path outside the decoded lake slice — see
     /// [`GenerationChunkHolder::new`].)
     UnsupportedStatus(ChunkStatus),
-    /// The genuine-FULL-only install gate: a generated chunk is a `ProtoChunk`
-    /// through `SURFACE` and cannot be converted into the `LevelChunk` (FULL)
-    /// that `ChunkMap::install` requires. The status is the chunk's actual
-    /// persisted status — never `FULL` (the spine does not fabricate it).
-    InstallRequiresFull(ChunkStatus),
+    /// The FULL conversion refused: the `LevelChunk` bridge rejected the proto
+    /// before consuming it ([`LevelChunkBridgeError::NotFull`] for any genuine
+    /// pre-FULL persisted status, `UnsupportedLightState`/`PaletteMap` for the
+    /// value/light hostile cases). The chunk is left untouched — the proto is
+    /// never half-promoted.
+    Convert(LevelChunkBridgeError),
 }
 
 impl fmt::Display for GeneratedChunkError {
@@ -195,9 +198,9 @@ impl fmt::Display for GeneratedChunkError {
                 f,
                 "generating to {status:?} is unsupported: the SPAWN/FULL stages are unwired (RivetTodo #185)"
             ),
-            GeneratedChunkError::InstallRequiresFull(status) => write!(
+            GeneratedChunkError::Convert(inner) => write!(
                 f,
-                "a generated chunk at {status:?} cannot enter the ChunkMap: only a genuine FULL LevelChunk may be installed"
+                "a generated chunk could not be promoted to a FULL LevelChunk: {inner}"
             ),
         }
     }
@@ -601,18 +604,22 @@ impl GenerationChunkHolder {
             })
     }
 
-    /// The genuine-FULL-only install gate: `ChunkMap::install` accepts only a
-    /// `LevelChunk` (FULL), and a generated chunk is a `ProtoChunk` that stops
-    /// at `CARVERS` (the FEATURES rung fails typed at the first placed feature
-    /// whose value decode is unavailable — see [`GenerationChunkHolder::new`]).
-    /// No conversion from a sub-FULL `ProtoChunk` exists or may be added without
-    /// the unwired SPAWN/FULL stages (RivetTodo #185), so this always fails
-    /// loudly with the chunk's real status — never stamping FULL and never
-    /// falling back to superflat.
-    pub fn to_level_chunk(&self) -> Result<LevelChunk, GeneratedChunkError> {
-        Err(GeneratedChunkError::InstallRequiresFull(
-            self.chunk.get_persisted_status(),
-        ))
+    /// Consume the holder and promote its chunk to a loaded `LevelChunk` — the
+    /// FULL conversion (`ChunkFullTask.run`'s `new LevelChunk(level, protoChunk,
+    /// postLoad)`, Paper `LevelChunk.java` 177). The chunk is moved out of the
+    /// holder by value (tick-thread owned, never `Arc<RwLock>`) and
+    /// [`LevelChunk::try_from_full_proto`] consumes the `ProtoChunk`.
+    ///
+    /// The refusal is atomic and typed: every genuine pre-FULL persisted status
+    /// is rejected as [`GeneratedChunkError::Convert`] carrying
+    /// [`LevelChunkBridgeError::NotFull`] before the proto is consumed, so no
+    /// holder/chunk mutation, partial install, clone, or status fabrication ever
+    /// happens on failure. A `FULL` proto with a hostile persisted Starlight
+    /// state or a palette the server value pair cannot re-encode is likewise
+    /// refused as `Convert` (`UnsupportedLightState`/`PaletteMap`) before the
+    /// value transform consumes it.
+    pub fn into_level_chunk(self) -> Result<LevelChunk, GeneratedChunkError> {
+        LevelChunk::try_from_full_proto(self.chunk).map_err(GeneratedChunkError::Convert)
     }
 }
 
@@ -1410,6 +1417,7 @@ impl fmt::Debug for GenerationChunkHolder {
 mod tests {
     use super::*;
     use crate::server::level::chunk_map::ChunkMap;
+    use crate::server::level::server_level::{ServerLevel, ServerLevelConfig};
     use rivet_nbt::compound_tag::CompoundTag;
     use rivet_nbt::list_tag::ListTag;
     use rivet_nbt::tag::Tag;
@@ -1421,6 +1429,7 @@ mod tests {
     use rivet_world::levelgen::feature::configurations::geode_configuration::GeodeConfiguration;
     use rivet_world::levelgen::feature::monster_room_feature::MONSTER_ROOM;
     use rivet_world::levelgen::heightmap::Types;
+    use rivet_world::lighting::swmr_nibble_array::{ARRAY_SIZE, InitState, SwmrNibbleArray};
 
     /// The shared test realization (built once — the worldgen registry
     /// bootstrap is not free). The seed mirrors the pinned loaded-world corpus.
@@ -2133,39 +2142,183 @@ mod tests {
         assert_ne!(seed(42, 0, 0), seed(43, 0, 0), "world seed must matter");
     }
 
-    /// Hostile: a generated ProtoChunk can never enter the ChunkMap authority —
-    /// the install gate fails loudly with the chunk's real status, and an empty
-    /// map has no placeholder to serve it (genuine-FULL-only installation).
+    /// The consuming FULL conversion promotes a genuine-FULL proto into a
+    /// loaded `LevelChunk` (`ChunkFullTask.run`'s `new LevelChunk(level,
+    /// protoChunk, postLoad)`, Paper `LevelChunk.java` 177): a holder whose
+    /// chunk is stamped genuine persisted `FULL` is moved out (tick-thread
+    /// owned, by value) and `try_from_full_proto` consumes it. Real generated
+    /// content (a NOISE-generated chunk) is promoted with its position.
     #[test]
-    fn generated_chunk_never_reaches_chunkmap_authority() {
+    fn into_level_chunk_promotes_a_genuine_full_proto() {
         let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::new(3, -2));
+        holder.generate_through(ChunkStatus::Noise).expect("NOISE");
+        holder.chunk.set_persisted_status(ChunkStatus::Full);
+
+        let chunk = holder
+            .into_level_chunk()
+            .expect("a genuine FULL generated chunk promotes");
+        assert_eq!(chunk.pos(), ChunkPos::new(3, -2));
+        assert_eq!(chunk.get_x(), 3);
+        assert_eq!(chunk.get_z(), -2);
+        assert_eq!(chunk.get_min_y(), -64);
+        assert_eq!(chunk.get_height(), 384);
+    }
+
+    /// Every genuine pre-FULL persisted status is refused atomically when the
+    /// holder is consumed, with a typed `Convert` carrying the bridge's
+    /// `NotFull(actual_status)` — the status gate fires before the proto is
+    /// consumed, so there is no clone, no partial promote, and no status
+    /// fabrication. A fresh EMPTY holder and a real generated (NOISE) holder
+    /// both refuse with their actual status.
+    #[test]
+    fn every_pre_full_status_is_refused_atomically_on_consumption() {
+        let generator = test_generator();
+        for status in ChunkStatus::ALL {
+            if status == ChunkStatus::Full {
+                continue;
+            }
+            let mut holder = generator.create_holder(ChunkPos::ZERO);
+            holder.chunk.set_persisted_status(status);
+            let error = holder
+                .into_level_chunk()
+                .err()
+                .expect("a pre-FULL holder must not promote");
+            assert!(
+                matches!(
+                    &error,
+                    GeneratedChunkError::Convert(LevelChunkBridgeError::NotFull(s))
+                        if *s == status
+                ),
+                "expected Convert(NotFull({status:?})), got {error:?}"
+            );
+        }
+        // A real generated chunk (NOISE, not an arbitrary stamp) refuses with
+        // its actual persisted status — the boundary holds on genuine data.
         let mut holder = generator.create_holder(ChunkPos::ZERO);
         holder.generate_through(ChunkStatus::Noise).expect("NOISE");
-
-        // The install gate rejects the sub-FULL chunk with its real status
-        // (never FULL, never a superflat fallback).
+        assert_eq!(holder.chunk.get_persisted_status(), ChunkStatus::Noise);
         assert!(matches!(
-            holder.to_level_chunk(),
-            Err(GeneratedChunkError::InstallRequiresFull(ChunkStatus::Noise))
+            holder.into_level_chunk(),
+            Err(GeneratedChunkError::Convert(
+                LevelChunkBridgeError::NotFull(ChunkStatus::Noise)
+            ))
         ));
+    }
 
-        // An empty map does not serve the generated position: it holds no
-        // superflat placeholder and `install` accepts only the genuine FULL
-        // `LevelChunk` type, which no sub-FULL ProtoChunk can produce.
-        let map = ChunkMap::empty(4);
-        assert!(map.get_chunk(ChunkPos::ZERO).is_none());
-
-        // Positive control: the boundary is real — `install` accepts a genuine
-        // `LevelChunk` (the only FULL representation), proving the gate is not
-        // "reject everything" but exactly "reject everything except FULL". If a
-        // future ProtoChunk-to-LevelChunk fabrication path were added, it would
-        // have to produce this genuine FULL chunk to be served.
-        let mut map = ChunkMap::empty(4);
-        map.install(ChunkPos::ZERO, LevelChunk::new(ChunkPos::ZERO));
-        assert!(
-            map.get_chunk(ChunkPos::ZERO).is_some(),
-            "genuine FULL LevelChunk must be installable"
+    /// Consuming the holder is a move, not a clone: `into_level_chunk(self)`
+    /// drops the holder (and its five executor closures) when it succeeds, so
+    /// the shared immutable config's strong count returns to its base — the
+    /// chunk left the holder by value, never copied. Built on an exclusive
+    /// generator so no parallel test interferes with the strong count.
+    #[test]
+    fn into_level_chunk_moves_the_chunk_out_no_clone() {
+        let generator = Arc::new(OverworldGenerator::new(42));
+        let base = Arc::strong_count(&generator);
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder.chunk.set_persisted_status(ChunkStatus::Full);
+        assert_eq!(Arc::strong_count(&generator), base + 5);
+        let _chunk = holder.into_level_chunk().expect("FULL promotes");
+        assert_eq!(
+            Arc::strong_count(&generator),
+            base,
+            "the consumed holder must drop its five closure clones"
         );
+    }
+
+    /// Conversion-error atomicity at the holder boundary: a `FULL` proto
+    /// carrying a hostile persisted Starlight state is refused as
+    /// `Convert(UnsupportedLightState)` — the same value-layer gate that
+    /// `try_from_full_proto` runs before the `map_values` transform — rather
+    /// than a fabricated or half-promoted chunk. The promoted position is never
+    /// produced, so the caller cannot install it.
+    #[test]
+    fn conversion_error_is_atomic_for_hostile_full_proto() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder.chunk.set_persisted_status(ChunkStatus::Full);
+        // `InitState::Other` is a persisted Starlight state the #184 send seam
+        // cannot represent — it must surface as Convert(UnsupportedLightState),
+        // not a panic or a partial promote.
+        let mut nibbles = vec![SwmrNibbleArray::new_with_bytes(vec![0xAB; ARRAY_SIZE]); 26];
+        nibbles[3] = SwmrNibbleArray::new_with_state(None, InitState::Other(5));
+        holder.chunk.set_block_nibbles(nibbles);
+        assert!(matches!(
+            holder.into_level_chunk(),
+            Err(GeneratedChunkError::Convert(
+                LevelChunkBridgeError::UnsupportedLightState(_)
+            ))
+        ));
+    }
+
+    /// The install seam composes exactly: a refused conversion never reaches
+    /// the map (no partial install — `install` only ever runs on a promoted
+    /// `Ok(LevelChunk)`), so an empty map stays empty at the generated position.
+    #[test]
+    fn no_install_on_conversion_refusal() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::new(3, 4));
+        holder.generate_through(ChunkStatus::Noise).expect("NOISE");
+        assert!(holder.into_level_chunk().is_err());
+
+        // The map remains untouched: `install` is never called with a refused
+        // conversion. (The composition boundary — install only on `Ok` — is
+        // what keeps the authority empty here.)
+        let map = ChunkMap::empty(4);
+        assert!(
+            map.get_chunk(ChunkPos::new(3, 4)).is_none(),
+            "a refused conversion must not pre-install anything"
+        );
+    }
+
+    /// A promoted chunk installs at exactly its own position through the
+    /// tick-thread seam `chunk_map_mut().install(pos, chunk)`: it is served at
+    /// that position and nowhere else.
+    #[test]
+    fn promoted_chunk_installs_at_exact_position() {
+        let generator = test_generator();
+        let pos = ChunkPos::new(7, -3);
+        let chunk = {
+            let mut holder = generator.create_holder(pos);
+            holder.chunk.set_persisted_status(ChunkStatus::Full);
+            holder.into_level_chunk().expect("FULL promotes")
+        };
+
+        let mut world = ServerLevel::new_region_backed(ServerLevelConfig::default());
+        world.chunk_map_mut().install(pos, chunk);
+        assert_eq!(world.chunk_map().get_chunk(pos).unwrap().pos(), pos);
+        assert!(
+            world.chunk_map().get_chunk(ChunkPos::ZERO).is_none(),
+            "installing at {pos:?} must not fabricate the spawn chunk"
+        );
+    }
+
+    /// Duplicate/replacement semantics of the install seam match the current
+    /// `ChunkMap` contract: `install` is `chunks.insert(pos, chunk)`, so a
+    /// second install at the same position atomically replaces the first (the
+    /// map stays one chunk, serving the replacement), never duplicating.
+    #[test]
+    fn install_replaces_existing_chunk_at_same_position() {
+        let generator = test_generator();
+        let pos = ChunkPos::new(1, 1);
+        let promote = |generator: Arc<OverworldGenerator>| {
+            let mut holder = generator.create_holder(pos);
+            holder.chunk.set_persisted_status(ChunkStatus::Full);
+            holder.into_level_chunk().expect("FULL promotes")
+        };
+
+        let mut world = ServerLevel::new_region_backed(ServerLevelConfig::default());
+        let first = promote(generator.clone());
+        world.chunk_map_mut().install(pos, first);
+        let second = promote(generator);
+        world.chunk_map_mut().install(pos, second);
+
+        assert_eq!(
+            world.chunk_map().len(),
+            1,
+            "replacement must not grow the map"
+        );
+        assert_eq!(world.chunk_map().get_chunk(pos).unwrap().pos(), pos);
     }
 
     /// Ownership: the holder owns its ProtoChunk by value (no `Arc<RwLock>`
