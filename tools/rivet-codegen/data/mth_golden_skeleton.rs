@@ -8,11 +8,7 @@ use crate::random::RandomSource;
 /// bit-exact.
 #[inline]
 fn bitexact_f32(v: f32) -> u32 {
-    if v.is_nan() {
-        0x7fc00000
-    } else {
-        v.to_bits()
-    }
+    if v.is_nan() { 0x7fc00000 } else { v.to_bits() }
 }
 /// double bits with Java `Double.doubleToLongBits` NaN-canonicalization (D14);
 /// non-NaN values stay bit-exact.
@@ -44,7 +40,9 @@ fn golden_0() {
     assert_eq!(bitexact_f32(super::sin(-1000000.0)), @@14@@);
     assert_eq!(bitexact_f32(super::sin(12345.6789)), @@15@@);
     assert_eq!(bitexact_f32(super::sin(1.7976931348623157E308)), @@16@@);
-    assert_eq!(bitexact_f32(super::sin(2.2250738585072014E-308)), @@17@@);
+    assert_eq!(
+        bitexact_f32(super::sin(2.2250738585072014E-308)),
+@@17@@);
     assert_eq!(bitexact_f32(super::sin(4.9E-324)), @@18@@);
     assert_eq!(bitexact_f32(super::sin(1.0E308)), @@19@@);
     assert_eq!(bitexact_f32(super::cos(0.0)), @@20@@);
@@ -64,7 +62,9 @@ fn golden_0() {
     assert_eq!(bitexact_f32(super::cos(-1000000.0)), @@34@@);
     assert_eq!(bitexact_f32(super::cos(12345.6789)), @@35@@);
     assert_eq!(bitexact_f32(super::cos(1.7976931348623157E308)), @@36@@);
-    assert_eq!(bitexact_f32(super::cos(2.2250738585072014E-308)), @@37@@);
+    assert_eq!(
+        bitexact_f32(super::cos(2.2250738585072014E-308)),
+@@37@@);
     assert_eq!(bitexact_f32(super::cos(4.9E-324)), @@38@@);
     assert_eq!(bitexact_f32(super::cos(1.0E308)), @@39@@);
 }
@@ -233,72 +233,109 @@ fn golden_3() {
     assert_eq!(super::clamp(-2147483648, -1, 1), @@182@@);
     assert_eq!(super::clamp(2147483647, -1, 1), @@183@@);
     assert_eq!(super::clamp(-9223372036854775808i64, -1i64, 1i64), @@184@@);
-    assert_eq!(bitexact_f32(super::clamp_f32(5.0f32, 0.0, 10.0)), @@185@@);
-    assert_eq!(bitexact_f32(super::clamp_f32(-5.0f32, 0.0, 10.0)), @@186@@);
-    assert_eq!(bitexact_f32(super::clamp_f32(15.0f32, 0.0, 10.0)), @@187@@);
-    assert_eq!(bitexact_f32(super::clamp_f32(f32::NAN, 0.0, 10.0)), @@188@@);
-    assert_eq!(bitexact_f32(super::clamp_f32(5.0f32, 0.0, f32::NAN)),
+    assert_eq!(
+        bitexact_f32(super::clamp_f32(5.0f32, 0.0, 10.0)),
+@@185@@);
+    assert_eq!(
+        bitexact_f32(super::clamp_f32(-5.0f32, 0.0, 10.0)),
+@@186@@);
+    assert_eq!(
+        bitexact_f32(super::clamp_f32(15.0f32, 0.0, 10.0)),
+@@187@@);
+    assert_eq!(
+        bitexact_f32(super::clamp_f32(f32::NAN, 0.0, 10.0)),
+@@188@@);
+    assert_eq!(
+        bitexact_f32(super::clamp_f32(5.0f32, 0.0, f32::NAN)),
 @@189@@);
-    assert_eq!(bitexact_f32(super::clamp_f32(0.5f32, 0.0, 10.0)), @@190@@);
-    assert_eq!(bitexact_f64(super::clamp_f64(5.0, 0.0, 10.0)),
+    assert_eq!(
+        bitexact_f32(super::clamp_f32(0.5f32, 0.0, 10.0)),
+@@190@@);
+    assert_eq!(
+        bitexact_f64(super::clamp_f64(5.0, 0.0, 10.0)),
 @@191@@);
-    assert_eq!(bitexact_f64(super::clamp_f64(-5.0, 0.0, 10.0)),
+    assert_eq!(
+        bitexact_f64(super::clamp_f64(-5.0, 0.0, 10.0)),
 @@192@@);
-    assert_eq!(bitexact_f64(super::clamp_f64(15.0, 0.0, 10.0)),
+    assert_eq!(
+        bitexact_f64(super::clamp_f64(15.0, 0.0, 10.0)),
 @@193@@);
-    assert_eq!(bitexact_f64(super::clamp_f64(f64::NAN, 0.0, 10.0)),
+    assert_eq!(
+        bitexact_f64(super::clamp_f64(f64::NAN, 0.0, 10.0)),
 @@194@@);
-    assert_eq!(bitexact_f64(super::clamp_f64(5.0, 0.0, f64::NAN)),
+    assert_eq!(
+        bitexact_f64(super::clamp_f64(5.0, 0.0, f64::NAN)),
 @@195@@);
-    assert_eq!(bitexact_f64(super::clamp_f64(0.5, 0.0, 10.0)),
+    assert_eq!(
+        bitexact_f64(super::clamp_f64(0.5, 0.0, 10.0)),
 @@196@@);
 }
 
 #[test]
 fn golden_4() {
     // clampedLerp/lerp/lerpInt/lerpDiscrete
-    assert_eq!(bitexact_f64(super::clamped_lerp(-1.0, 1.0, 5.0)),
+    assert_eq!(
+        bitexact_f64(super::clamped_lerp(-1.0, 1.0, 5.0)),
 @@197@@);
-    assert_eq!(bitexact_f64(super::clamped_lerp(0.0, 1.0, 5.0)),
+    assert_eq!(
+        bitexact_f64(super::clamped_lerp(0.0, 1.0, 5.0)),
 @@198@@);
-    assert_eq!(bitexact_f64(super::clamped_lerp(0.25, 1.0, 5.0)),
+    assert_eq!(
+        bitexact_f64(super::clamped_lerp(0.25, 1.0, 5.0)),
 @@199@@);
-    assert_eq!(bitexact_f64(super::clamped_lerp(0.5, 1.0, 5.0)),
+    assert_eq!(
+        bitexact_f64(super::clamped_lerp(0.5, 1.0, 5.0)),
 @@200@@);
-    assert_eq!(bitexact_f64(super::clamped_lerp(0.75, 1.0, 5.0)),
+    assert_eq!(
+        bitexact_f64(super::clamped_lerp(0.75, 1.0, 5.0)),
 @@201@@);
-    assert_eq!(bitexact_f64(super::clamped_lerp(1.0, 1.0, 5.0)),
+    assert_eq!(
+        bitexact_f64(super::clamped_lerp(1.0, 1.0, 5.0)),
 @@202@@);
-    assert_eq!(bitexact_f64(super::clamped_lerp(2.0, 1.0, 5.0)),
+    assert_eq!(
+        bitexact_f64(super::clamped_lerp(2.0, 1.0, 5.0)),
 @@203@@);
-    assert_eq!(bitexact_f64(super::clamped_lerp(f64::NAN, 1.0, 5.0)),
+    assert_eq!(
+        bitexact_f64(super::clamped_lerp(f64::NAN, 1.0, 5.0)),
 @@204@@);
-    assert_eq!(bitexact_f32(super::clamped_lerp_f32(-1.0f32, 1.0, 5.0)),
+    assert_eq!(
+        bitexact_f32(super::clamped_lerp_f32(-1.0f32, 1.0, 5.0)),
 @@205@@);
-    assert_eq!(bitexact_f32(super::clamped_lerp_f32(0.0f32, 1.0, 5.0)),
+    assert_eq!(
+        bitexact_f32(super::clamped_lerp_f32(0.0f32, 1.0, 5.0)),
 @@206@@);
-    assert_eq!(bitexact_f32(super::clamped_lerp_f32(0.25f32, 1.0, 5.0)),
+    assert_eq!(
+        bitexact_f32(super::clamped_lerp_f32(0.25f32, 1.0, 5.0)),
 @@207@@);
-    assert_eq!(bitexact_f32(super::clamped_lerp_f32(0.5f32, 1.0, 5.0)),
+    assert_eq!(
+        bitexact_f32(super::clamped_lerp_f32(0.5f32, 1.0, 5.0)),
 @@208@@);
-    assert_eq!(bitexact_f32(super::clamped_lerp_f32(1.0f32, 1.0, 5.0)),
+    assert_eq!(
+        bitexact_f32(super::clamped_lerp_f32(1.0f32, 1.0, 5.0)),
 @@209@@);
-    assert_eq!(bitexact_f32(super::clamped_lerp_f32(2.0f32, 1.0, 5.0)),
+    assert_eq!(
+        bitexact_f32(super::clamped_lerp_f32(2.0f32, 1.0, 5.0)),
 @@210@@);
-    assert_eq!(bitexact_f32(super::clamped_lerp_f32(f32::NAN, 1.0, 5.0)),
+    assert_eq!(
+        bitexact_f32(super::clamped_lerp_f32(f32::NAN, 1.0, 5.0)),
 @@211@@);
-    assert_eq!(bitexact_f64(super::lerp(-1.0, 1.0, 5.0)), @@212@@);
+    assert_eq!(
+        bitexact_f64(super::lerp(-1.0, 1.0, 5.0)),
+@@212@@);
     assert_eq!(bitexact_f64(super::lerp(0.0, 1.0, 5.0)), @@213@@);
     assert_eq!(bitexact_f64(super::lerp(0.5, 1.0, 5.0)), @@214@@);
     assert_eq!(bitexact_f64(super::lerp(1.0, 1.0, 5.0)), @@215@@);
     assert_eq!(bitexact_f64(super::lerp(2.0, 1.0, 5.0)), @@216@@);
-    assert_eq!(bitexact_f64(super::lerp(f64::NAN, 1.0, 5.0)),
+    assert_eq!(
+        bitexact_f64(super::lerp(f64::NAN, 1.0, 5.0)),
 @@217@@);
     assert_eq!(bitexact_f32(super::lerp_f32(-1.0f32, 1.0, 5.0)), @@218@@);
     assert_eq!(bitexact_f32(super::lerp_f32(0.0f32, 1.0, 5.0)), @@219@@);
     assert_eq!(bitexact_f32(super::lerp_f32(0.5f32, 1.0, 5.0)), @@220@@);
     assert_eq!(bitexact_f32(super::lerp_f32(1.0f32, 1.0, 5.0)), @@221@@);
-    assert_eq!(bitexact_f32(super::lerp_f32(f32::NAN, 1.0, 5.0)), @@222@@);
+    assert_eq!(
+        bitexact_f32(super::lerp_f32(f32::NAN, 1.0, 5.0)),
+@@222@@);
     assert_eq!(super::lerp_int(0.5, 10, 20), @@223@@);
     assert_eq!(super::lerp_int(-0.5, 10, 20), @@224@@);
     assert_eq!(super::lerp_int(0.0, 10, 20), @@225@@);
@@ -306,9 +343,13 @@ fn golden_4() {
     assert_eq!(super::lerp_discrete(0.5, 10, 20), @@227@@);
     assert_eq!(super::lerp_discrete(0.0, 10, 20), @@228@@);
     assert_eq!(super::lerp_discrete(0.5, 10, 11), @@229@@);
-    assert_eq!(bitexact_f64(super::lerp2(0.5, 0.5, 0.0, 10.0, 20.0, 30.0)),
+    assert_eq!(
+        bitexact_f64(super::lerp2(0.5, 0.5, 0.0, 10.0, 20.0, 30.0)),
 @@230@@);
-    assert_eq!(bitexact_f64(super::lerp3(0.5, 0.5, 0.5, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0)),
+    assert_eq!(
+        bitexact_f64(super::lerp3(
+            0.5, 0.5, 0.5, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0
+        )),
 @@231@@);
 }
 
@@ -350,14 +391,22 @@ fn golden_6() {
     assert_eq!(bitexact_f32(super::wrap_degrees_f32(0.0f32)), @@259@@);
     assert_eq!(bitexact_f32(super::wrap_degrees_f32(359.9f32)), @@260@@);
     assert_eq!(bitexact_f32(super::wrap_degrees_f32(-359.9f32)), @@261@@);
-    assert_eq!(bitexact_f32(super::wrap_degrees_f32(179.999f32)), @@262@@);
+    assert_eq!(
+        bitexact_f32(super::wrap_degrees_f32(179.999f32)),
+@@262@@);
     assert_eq!(bitexact_f32(super::wrap_degrees_f32(f32::NAN)), @@263@@);
-    assert_eq!(bitexact_f32(super::wrap_degrees_f32(3.4028235E38f32)),
+    assert_eq!(
+        bitexact_f32(super::wrap_degrees_f32(3.4028235E38f32)),
 @@264@@);
-    assert_eq!(bitexact_f32(super::wrap_degrees_f32(-3.4028235E38f32)),
+    assert_eq!(
+        bitexact_f32(super::wrap_degrees_f32(-3.4028235E38f32)),
 @@265@@);
-    assert_eq!(bitexact_f32(super::wrap_degrees_f32(1.4E-45f32)), @@266@@);
-    assert_eq!(bitexact_f32(super::wrap_degrees_f32(-1.4E-45f32)), @@267@@);
+    assert_eq!(
+        bitexact_f32(super::wrap_degrees_f32(1.4E-45f32)),
+@@266@@);
+    assert_eq!(
+        bitexact_f32(super::wrap_degrees_f32(-1.4E-45f32)),
+@@267@@);
     assert_eq!(bitexact_f32(super::wrap_degrees_f32(-0.0f32)), @@268@@);
     assert_eq!(bitexact_f32(super::wrap_degrees_f32(1.0E-4f32)), @@269@@);
     assert_eq!(bitexact_f32(super::wrap_degrees_f32(270.0f32)), @@270@@);
@@ -372,39 +421,66 @@ fn golden_6() {
     assert_eq!(bitexact_f32(super::wrap_degrees_i64(-360i64)), @@279@@);
     assert_eq!(bitexact_f32(super::wrap_degrees_i64(540i64)), @@280@@);
     assert_eq!(bitexact_f32(super::wrap_degrees_i64(-540i64)), @@281@@);
-    assert_eq!(bitexact_f32(super::wrap_degrees_i64(9223372036854775807i64)),
+    assert_eq!(
+        bitexact_f32(super::wrap_degrees_i64(9223372036854775807i64)),
 @@282@@);
-    assert_eq!(bitexact_f32(super::wrap_degrees_i64(-9223372036854775808i64)),
+    assert_eq!(
+        bitexact_f32(super::wrap_degrees_i64(-9223372036854775808i64)),
 @@283@@);
     assert_eq!(bitexact_f32(super::wrap_degrees_i64(0i64)), @@284@@);
     assert_eq!(bitexact_f32(super::wrap_degrees_i64(359i64)), @@285@@);
     assert_eq!(bitexact_f32(super::wrap_degrees_i64(1i64)), @@286@@);
-    assert_eq!(bitexact_f64(super::wrap_degrees_f64(180.0)), @@287@@);
-    assert_eq!(bitexact_f64(super::wrap_degrees_f64(-180.0)),
+    assert_eq!(
+        bitexact_f64(super::wrap_degrees_f64(180.0)),
+@@287@@);
+    assert_eq!(
+        bitexact_f64(super::wrap_degrees_f64(-180.0)),
 @@288@@);
-    assert_eq!(bitexact_f64(super::wrap_degrees_f64(181.0)), @@289@@);
-    assert_eq!(bitexact_f64(super::wrap_degrees_f64(-181.0)),
+    assert_eq!(
+        bitexact_f64(super::wrap_degrees_f64(181.0)),
+@@289@@);
+    assert_eq!(
+        bitexact_f64(super::wrap_degrees_f64(-181.0)),
 @@290@@);
-    assert_eq!(bitexact_f64(super::wrap_degrees_f64(360.0)), @@291@@);
-    assert_eq!(bitexact_f64(super::wrap_degrees_f64(-360.0)),
+    assert_eq!(
+        bitexact_f64(super::wrap_degrees_f64(360.0)),
+@@291@@);
+    assert_eq!(
+        bitexact_f64(super::wrap_degrees_f64(-360.0)),
 @@292@@);
-    assert_eq!(bitexact_f64(super::wrap_degrees_f64(540.0)), @@293@@);
-    assert_eq!(bitexact_f64(super::wrap_degrees_f64(-540.0)),
+    assert_eq!(
+        bitexact_f64(super::wrap_degrees_f64(540.0)),
+@@293@@);
+    assert_eq!(
+        bitexact_f64(super::wrap_degrees_f64(-540.0)),
 @@294@@);
-    assert_eq!(bitexact_f64(super::wrap_degrees_f64(179.999)),
+    assert_eq!(
+        bitexact_f64(super::wrap_degrees_f64(179.999)),
 @@295@@);
-    assert_eq!(bitexact_f64(super::wrap_degrees_f64(1.0E18)),
+    assert_eq!(
+        bitexact_f64(super::wrap_degrees_f64(1.0E18)),
 @@296@@);
-    assert_eq!(bitexact_f64(super::wrap_degrees_f64(-1.0E18)),
+    assert_eq!(
+        bitexact_f64(super::wrap_degrees_f64(-1.0E18)),
 @@297@@);
-    assert_eq!(bitexact_f64(super::wrap_degrees_f64(f64::NAN)),
+    assert_eq!(
+        bitexact_f64(super::wrap_degrees_f64(f64::NAN)),
 @@298@@);
-    assert_eq!(bitexact_f64(super::wrap_degrees_f64(f64::INFINITY)),
+    assert_eq!(
+        bitexact_f64(super::wrap_degrees_f64(f64::INFINITY)),
 @@299@@);
-    assert_eq!(bitexact_f64(super::wrap_degrees_f64(0.0)), @@300@@);
-    assert_eq!(bitexact_f64(super::wrap_degrees_f64(-0.0)), @@301@@);
-    assert_eq!(bitexact_f64(super::wrap_degrees_f64(90.0)), @@302@@);
-    assert_eq!(bitexact_f64(super::wrap_degrees_f64(270.0)), @@303@@);
+    assert_eq!(
+        bitexact_f64(super::wrap_degrees_f64(0.0)),
+@@300@@);
+    assert_eq!(
+        bitexact_f64(super::wrap_degrees_f64(-0.0)),
+@@301@@);
+    assert_eq!(
+        bitexact_f64(super::wrap_degrees_f64(90.0)),
+@@302@@);
+    assert_eq!(
+        bitexact_f64(super::wrap_degrees_f64(270.0)),
+@@303@@);
     assert_eq!(bitexact_f32(super::wrap_degrees90(45.0f32)), @@304@@);
     assert_eq!(bitexact_f32(super::wrap_degrees90(-45.0f32)), @@305@@);
     assert_eq!(bitexact_f32(super::wrap_degrees90(90.0f32)), @@306@@);
@@ -426,20 +502,30 @@ fn golden_6() {
 #[test]
 fn golden_7() {
     // degreesDifference/rotateIfNecessary/approach
-    assert_eq!(bitexact_f32(super::degrees_difference(10.0, 350.0)), @@320@@);
-    assert_eq!(bitexact_f32(super::degrees_difference(350.0, 10.0)), @@321@@);
-    assert_eq!(bitexact_f32(super::degrees_difference(0.0, 180.0)), @@322@@);
-    assert_eq!(bitexact_f32(super::degrees_difference_abs(10.0, 350.0)),
+    assert_eq!(
+        bitexact_f32(super::degrees_difference(10.0, 350.0)),
+@@320@@);
+    assert_eq!(
+        bitexact_f32(super::degrees_difference(350.0, 10.0)),
+@@321@@);
+    assert_eq!(
+        bitexact_f32(super::degrees_difference(0.0, 180.0)),
+@@322@@);
+    assert_eq!(
+        bitexact_f32(super::degrees_difference_abs(10.0, 350.0)),
 @@323@@);
-    assert_eq!(bitexact_f32(super::rotate_if_necessary(10.0, 350.0, 30.0)),
+    assert_eq!(
+        bitexact_f32(super::rotate_if_necessary(10.0, 350.0, 30.0)),
 @@324@@);
-    assert_eq!(bitexact_f32(super::rotate_if_necessary(0.0, 20.0, 90.0)),
+    assert_eq!(
+        bitexact_f32(super::rotate_if_necessary(0.0, 20.0, 90.0)),
 @@325@@);
     assert_eq!(bitexact_f32(super::approach(0.0, 10.0, 3.0)), @@326@@);
     assert_eq!(bitexact_f32(super::approach(10.0, 0.0, 3.0)), @@327@@);
     assert_eq!(bitexact_f32(super::approach(5.0, 5.0, 3.0)), @@328@@);
     assert_eq!(bitexact_f32(super::approach(0.0, 10.0, -3.0)), @@329@@);
-    assert_eq!(bitexact_f32(super::approach_degrees(10.0, 350.0, 45.0)),
+    assert_eq!(
+        bitexact_f32(super::approach_degrees(10.0, 350.0, 45.0)),
 @@330@@);
 }
 
@@ -637,29 +723,41 @@ fn golden_10() {
     assert_eq!(super::is_multiple_of(-1, 5), @@503@@);
     assert_eq!(super::is_multiple_of(-6, 5), @@504@@);
     assert_eq!(super::is_multiple_of(6, 5), @@505@@);
-    assert_eq!(bitexact_f32(super::positive_modulo_f32(7.5f32, 3.0f32)),
+    assert_eq!(
+        bitexact_f32(super::positive_modulo_f32(7.5f32, 3.0f32)),
 @@506@@);
-    assert_eq!(bitexact_f32(super::positive_modulo_f32(-7.5f32, 3.0f32)),
+    assert_eq!(
+        bitexact_f32(super::positive_modulo_f32(-7.5f32, 3.0f32)),
 @@507@@);
-    assert_eq!(bitexact_f32(super::positive_modulo_f32(7.5f32, -3.0f32)),
+    assert_eq!(
+        bitexact_f32(super::positive_modulo_f32(7.5f32, -3.0f32)),
 @@508@@);
-    assert_eq!(bitexact_f32(super::positive_modulo_f32(-7.5f32, -3.0f32)),
+    assert_eq!(
+        bitexact_f32(super::positive_modulo_f32(-7.5f32, -3.0f32)),
 @@509@@);
-    assert_eq!(bitexact_f32(super::positive_modulo_f32(0.0f32, 3.0f32)),
+    assert_eq!(
+        bitexact_f32(super::positive_modulo_f32(0.0f32, 3.0f32)),
 @@510@@);
-    assert_eq!(bitexact_f32(super::positive_modulo_f32(-0.0f32, 3.0f32)),
+    assert_eq!(
+        bitexact_f32(super::positive_modulo_f32(-0.0f32, 3.0f32)),
 @@511@@);
-    assert_eq!(bitexact_f64(super::positive_modulo_f64(7.5, 3.0)),
+    assert_eq!(
+        bitexact_f64(super::positive_modulo_f64(7.5, 3.0)),
 @@512@@);
-    assert_eq!(bitexact_f64(super::positive_modulo_f64(-7.5, 3.0)),
+    assert_eq!(
+        bitexact_f64(super::positive_modulo_f64(-7.5, 3.0)),
 @@513@@);
-    assert_eq!(bitexact_f64(super::positive_modulo_f64(7.5, -3.0)),
+    assert_eq!(
+        bitexact_f64(super::positive_modulo_f64(7.5, -3.0)),
 @@514@@);
-    assert_eq!(bitexact_f64(super::positive_modulo_f64(-7.5, -3.0)),
+    assert_eq!(
+        bitexact_f64(super::positive_modulo_f64(-7.5, -3.0)),
 @@515@@);
-    assert_eq!(bitexact_f64(super::positive_modulo_f64(0.0, 3.0)),
+    assert_eq!(
+        bitexact_f64(super::positive_modulo_f64(0.0, 3.0)),
 @@516@@);
-    assert_eq!(bitexact_f64(super::positive_modulo_f64(-0.0, 3.0)),
+    assert_eq!(
+        bitexact_f64(super::positive_modulo_f64(-0.0, 3.0)),
 @@517@@);
 }
 
@@ -736,18 +834,29 @@ fn golden_12() {
     assert_eq!(bitexact_f64(super::atan2(-0.1, 0.2)), @@554@@);
     assert_eq!(bitexact_f64(super::atan2(0.1, -0.2)), @@555@@);
     assert_eq!(bitexact_f64(super::atan2(-0.1, -0.2)), @@556@@);
-    assert_eq!(bitexact_f64(super::atan2(f64::NAN, 1.0)), @@557@@);
-    assert_eq!(bitexact_f64(super::atan2(1.0, f64::NAN)), @@558@@);
-    assert_eq!(bitexact_f64(super::atan2(f64::INFINITY, 1.0)),
+    assert_eq!(
+        bitexact_f64(super::atan2(f64::NAN, 1.0)),
+@@557@@);
+    assert_eq!(
+        bitexact_f64(super::atan2(1.0, f64::NAN)),
+@@558@@);
+    assert_eq!(
+        bitexact_f64(super::atan2(f64::INFINITY, 1.0)),
 @@559@@);
-    assert_eq!(bitexact_f64(super::atan2(1.0, f64::INFINITY)),
+    assert_eq!(
+        bitexact_f64(super::atan2(1.0, f64::INFINITY)),
 @@560@@);
-    assert_eq!(bitexact_f64(super::atan2(1.7976931348623157E308, 4.9E-324)),
+    assert_eq!(
+        bitexact_f64(super::atan2(1.7976931348623157E308, 4.9E-324)),
 @@561@@);
-    assert_eq!(bitexact_f64(super::atan2(1.0E300, 1.0E300)), @@562@@);
-    assert_eq!(bitexact_f64(super::atan2(1.0E-300, 1.0E-300)),
+    assert_eq!(
+        bitexact_f64(super::atan2(1.0E300, 1.0E300)),
+@@562@@);
+    assert_eq!(
+        bitexact_f64(super::atan2(1.0E-300, 1.0E-300)),
 @@563@@);
-    assert_eq!(bitexact_f64(super::atan2(12345.678, 98765.432)),
+    assert_eq!(
+        bitexact_f64(super::atan2(12345.678, 98765.432)),
 @@564@@);
     assert_eq!(bitexact_f64(super::atan2(0.5, 0.5)), {
         // ARCH-SELECTED (D14): reads COS_TAB[181]; aarch64 provenance literal,
@@ -783,11 +892,17 @@ fn golden_12() {
     assert_eq!(bitexact_f64(super::atan2(1.0, 10.0)), @@572@@);
     assert_eq!(bitexact_f64(super::atan2(-10.0, 1.0)), @@573@@);
     assert_eq!(bitexact_f64(super::atan2(1.0, -10.0)), @@574@@);
-    assert_eq!(bitexact_f64(super::atan2(1000.0, -0.001)), @@575@@);
-    assert_eq!(bitexact_f64(super::atan2(-0.001, 1000.0)), @@576@@);
-    assert_eq!(bitexact_f64(super::atan2(0.0, f64::NEG_INFINITY)),
+    assert_eq!(
+        bitexact_f64(super::atan2(1000.0, -0.001)),
+@@575@@);
+    assert_eq!(
+        bitexact_f64(super::atan2(-0.001, 1000.0)),
+@@576@@);
+    assert_eq!(
+        bitexact_f64(super::atan2(0.0, f64::NEG_INFINITY)),
 @@577@@);
-    assert_eq!(bitexact_f64(super::atan2(f64::NEG_INFINITY, 0.0)),
+    assert_eq!(
+        bitexact_f64(super::atan2(f64::NEG_INFINITY, 0.0)),
 @@578@@);
 }
 
@@ -809,45 +924,71 @@ fn golden_13() {
     assert_eq!(bitexact_f64(super::inv_sqrt_f64(100.0)), @@591@@);
     assert_eq!(bitexact_f64(super::inv_sqrt_f64(1.0)), @@592@@);
     assert_eq!(bitexact_f64(super::inv_sqrt_f64(4.0)), @@593@@);
-    assert_eq!(bitexact_f64(super::inv_sqrt_f64(1.7976931348623157E308)),
+    assert_eq!(
+        bitexact_f64(super::inv_sqrt_f64(1.7976931348623157E308)),
 @@594@@);
-    assert_eq!(bitexact_f64(super::inv_sqrt_f64(4.9E-324)), @@595@@);
+    assert_eq!(
+        bitexact_f64(super::inv_sqrt_f64(4.9E-324)),
+@@595@@);
     assert_eq!(bitexact_f64(super::inv_sqrt_f64(0.0)), @@596@@);
     assert_eq!(bitexact_f64(super::inv_sqrt_f64(-1.0)), @@597@@);
-    assert_eq!(bitexact_f64(super::inv_sqrt_f64(1.0E-300)), @@598@@);
-    assert_eq!(bitexact_f64(super::inv_sqrt_f64(f64::INFINITY)),
+    assert_eq!(
+        bitexact_f64(super::inv_sqrt_f64(1.0E-300)),
+@@598@@);
+    assert_eq!(
+        bitexact_f64(super::inv_sqrt_f64(f64::INFINITY)),
 @@599@@);
     assert_eq!(bitexact_f64(super::fast_inv_sqrt(0.25)), @@600@@);
     assert_eq!(bitexact_f64(super::fast_inv_sqrt(2.0)), @@601@@);
-    assert_eq!(bitexact_f64(super::fast_inv_sqrt(100.0)), @@602@@);
+    assert_eq!(
+        bitexact_f64(super::fast_inv_sqrt(100.0)),
+@@602@@);
     assert_eq!(bitexact_f64(super::fast_inv_sqrt(1.0)), @@603@@);
     assert_eq!(bitexact_f64(super::fast_inv_sqrt(4.0)), @@604@@);
-    assert_eq!(bitexact_f64(super::fast_inv_sqrt(1.7976931348623157E308)),
+    assert_eq!(
+        bitexact_f64(super::fast_inv_sqrt(1.7976931348623157E308)),
 @@605@@);
-    assert_eq!(bitexact_f64(super::fast_inv_sqrt(4.9E-324)), @@606@@);
+    assert_eq!(
+        bitexact_f64(super::fast_inv_sqrt(4.9E-324)),
+@@606@@);
     assert_eq!(bitexact_f64(super::fast_inv_sqrt(0.0)), @@607@@);
     assert_eq!(bitexact_f64(super::fast_inv_sqrt(-1.0)), @@608@@);
-    assert_eq!(bitexact_f64(super::fast_inv_sqrt(1.0E-300)), @@609@@);
-    assert_eq!(bitexact_f64(super::fast_inv_sqrt(1.0E300)), @@610@@);
+    assert_eq!(
+        bitexact_f64(super::fast_inv_sqrt(1.0E-300)),
+@@609@@);
+    assert_eq!(
+        bitexact_f64(super::fast_inv_sqrt(1.0E300)),
+@@610@@);
     assert_eq!(bitexact_f64(super::fast_inv_sqrt(0.5)), @@611@@);
     assert_eq!(bitexact_f64(super::fast_inv_sqrt(0.1)), @@612@@);
-    assert_eq!(bitexact_f64(super::fast_inv_sqrt(12345.678)),
+    assert_eq!(
+        bitexact_f64(super::fast_inv_sqrt(12345.678)),
 @@613@@);
-    assert_eq!(bitexact_f64(super::fast_inv_sqrt(f64::NAN)), @@614@@);
+    assert_eq!(
+        bitexact_f64(super::fast_inv_sqrt(f64::NAN)),
+@@614@@);
     assert_eq!(bitexact_f32(super::fast_inv_cube_root(1.0f32)), @@615@@);
     assert_eq!(bitexact_f32(super::fast_inv_cube_root(8.0f32)), @@616@@);
     assert_eq!(bitexact_f32(super::fast_inv_cube_root(27.0f32)), @@617@@);
     assert_eq!(bitexact_f32(super::fast_inv_cube_root(0.5f32)), @@618@@);
-    assert_eq!(bitexact_f32(super::fast_inv_cube_root(100.0f32)), @@619@@);
+    assert_eq!(
+        bitexact_f32(super::fast_inv_cube_root(100.0f32)),
+@@619@@);
     assert_eq!(bitexact_f32(super::fast_inv_cube_root(0.0f32)), @@620@@);
     assert_eq!(bitexact_f32(super::fast_inv_cube_root(2.0f32)), @@621@@);
-    assert_eq!(bitexact_f32(super::fast_inv_cube_root(3.4028235E38f32)),
+    assert_eq!(
+        bitexact_f32(super::fast_inv_cube_root(3.4028235E38f32)),
 @@622@@);
-    assert_eq!(bitexact_f32(super::fast_inv_cube_root(1.4E-45f32)), @@623@@);
+    assert_eq!(
+        bitexact_f32(super::fast_inv_cube_root(1.4E-45f32)),
+@@623@@);
     assert_eq!(bitexact_f32(super::fast_inv_cube_root(-8.0f32)), @@624@@);
     assert_eq!(bitexact_f32(super::fast_inv_cube_root(-1.0f32)), @@625@@);
-    assert_eq!(bitexact_f32(super::fast_inv_cube_root(f32::NAN)), @@626@@);
-    assert_eq!(bitexact_f32(super::fast_inv_cube_root(f32::INFINITY)),
+    assert_eq!(
+        bitexact_f32(super::fast_inv_cube_root(f32::NAN)),
+@@626@@);
+    assert_eq!(
+        bitexact_f32(super::fast_inv_cube_root(f32::INFINITY)),
 @@627@@);
 }
 
@@ -890,27 +1031,37 @@ fn golden_14() {
 #[test]
 fn golden_15() {
     // misc math
-    assert_eq!(bitexact_f32(super::catmullrom(0.5, 0.0, 1.0, 2.0, 3.0)),
+    assert_eq!(
+        bitexact_f32(super::catmullrom(0.5, 0.0, 1.0, 2.0, 3.0)),
 @@649@@);
-    assert_eq!(bitexact_f32(super::catmullrom(0.0, 0.0, 1.0, 2.0, 3.0)),
+    assert_eq!(
+        bitexact_f32(super::catmullrom(0.0, 0.0, 1.0, 2.0, 3.0)),
 @@650@@);
-    assert_eq!(bitexact_f32(super::catmullrom(1.0, 0.0, 1.0, 2.0, 3.0)),
+    assert_eq!(
+        bitexact_f32(super::catmullrom(1.0, 0.0, 1.0, 2.0, 3.0)),
 @@651@@);
     assert_eq!(bitexact_f64(super::smoothstep(0.0)), @@652@@);
     assert_eq!(bitexact_f64(super::smoothstep(0.5)), @@653@@);
     assert_eq!(bitexact_f64(super::smoothstep(1.0)), @@654@@);
     assert_eq!(bitexact_f64(super::smoothstep(-0.5)), @@655@@);
     assert_eq!(bitexact_f64(super::smoothstep(2.0)), @@656@@);
-    assert_eq!(bitexact_f64(super::smoothstep(f64::NAN)), @@657@@);
-    assert_eq!(bitexact_f64(super::smoothstep_derivative(0.0)),
+    assert_eq!(
+        bitexact_f64(super::smoothstep(f64::NAN)),
+@@657@@);
+    assert_eq!(
+        bitexact_f64(super::smoothstep_derivative(0.0)),
 @@658@@);
-    assert_eq!(bitexact_f64(super::smoothstep_derivative(0.5)),
+    assert_eq!(
+        bitexact_f64(super::smoothstep_derivative(0.5)),
 @@659@@);
-    assert_eq!(bitexact_f64(super::smoothstep_derivative(1.0)),
+    assert_eq!(
+        bitexact_f64(super::smoothstep_derivative(1.0)),
 @@660@@);
-    assert_eq!(bitexact_f64(super::smoothstep_derivative(-0.5)),
+    assert_eq!(
+        bitexact_f64(super::smoothstep_derivative(-0.5)),
 @@661@@);
-    assert_eq!(bitexact_f64(super::smoothstep_derivative(2.0)),
+    assert_eq!(
+        bitexact_f64(super::smoothstep_derivative(2.0)),
 @@662@@);
     assert_eq!(super::sign(0.0), @@663@@);
     assert_eq!(super::sign(-0.0), @@664@@);
@@ -922,11 +1073,15 @@ fn golden_15() {
     assert_eq!(super::sign(f64::INFINITY), @@670@@);
     assert_eq!(bitexact_f32(super::rot_lerp(0.5, 10.0, 350.0)), @@671@@);
     assert_eq!(bitexact_f32(super::rot_lerp(0.5, 350.0, 10.0)), @@672@@);
-    assert_eq!(bitexact_f64(super::rot_lerp_f64(0.5, 10.0, 350.0)),
+    assert_eq!(
+        bitexact_f64(super::rot_lerp_f64(0.5, 10.0, 350.0)),
 @@673@@);
     assert_eq!(bitexact_f32(super::rot_lerp_rad(0.5, 0.0, 3.5)), @@674@@);
-    assert_eq!(bitexact_f32(super::rot_lerp_rad(0.5, 0.0, -3.5)), @@675@@);
-    assert_eq!(bitexact_f32(super::rot_lerp_rad(0.5, 1.0, 1.0 + 6.3)),
+    assert_eq!(
+        bitexact_f32(super::rot_lerp_rad(0.5, 0.0, -3.5)),
+@@675@@);
+    assert_eq!(
+        bitexact_f32(super::rot_lerp_rad(0.5, 1.0, 1.0 + 6.3)),
 @@676@@);
     assert_eq!(bitexact_f32(super::triangle_wave(1.0, 4.0)), @@677@@);
     assert_eq!(bitexact_f32(super::triangle_wave(2.0, 4.0)), @@678@@);
@@ -940,59 +1095,90 @@ fn golden_15() {
     assert_eq!(bitexact_f32(super::square_f32(1.5)), @@686@@);
     assert_eq!(bitexact_f32(super::cube(2.0)), @@687@@);
     assert_eq!(bitexact_f64(super::square_f64(1.5)), @@688@@);
-    assert_eq!(bitexact_f64(super::clamped_map(5.0, 0.0, 10.0, 100.0, 200.0)),
+    assert_eq!(
+        bitexact_f64(super::clamped_map(5.0, 0.0, 10.0, 100.0, 200.0)),
 @@689@@);
-    assert_eq!(bitexact_f64(super::map(5.0, 0.0, 10.0, 100.0, 200.0)),
+    assert_eq!(
+        bitexact_f64(super::map(5.0, 0.0, 10.0, 100.0, 200.0)),
 @@690@@);
-    assert_eq!(bitexact_f64(super::inverse_lerp(5.0, 0.0, 10.0)),
+    assert_eq!(
+        bitexact_f64(super::inverse_lerp(5.0, 0.0, 10.0)),
 @@691@@);
-    assert_eq!(bitexact_f64(super::clamped_map(-5.0, 0.0, 10.0, 100.0, 200.0)),
+    assert_eq!(
+        bitexact_f64(super::clamped_map(-5.0, 0.0, 10.0, 100.0, 200.0)),
 @@692@@);
-    assert_eq!(bitexact_f64(super::map(-5.0, 0.0, 10.0, 100.0, 200.0)),
+    assert_eq!(
+        bitexact_f64(super::map(-5.0, 0.0, 10.0, 100.0, 200.0)),
 @@693@@);
-    assert_eq!(bitexact_f64(super::inverse_lerp(-5.0, 0.0, 10.0)),
+    assert_eq!(
+        bitexact_f64(super::inverse_lerp(-5.0, 0.0, 10.0)),
 @@694@@);
-    assert_eq!(bitexact_f64(super::clamped_map(15.0, 0.0, 10.0, 100.0, 200.0)),
+    assert_eq!(
+        bitexact_f64(super::clamped_map(15.0, 0.0, 10.0, 100.0, 200.0)),
 @@695@@);
-    assert_eq!(bitexact_f64(super::map(15.0, 0.0, 10.0, 100.0, 200.0)),
+    assert_eq!(
+        bitexact_f64(super::map(15.0, 0.0, 10.0, 100.0, 200.0)),
 @@696@@);
-    assert_eq!(bitexact_f64(super::inverse_lerp(15.0, 0.0, 10.0)),
+    assert_eq!(
+        bitexact_f64(super::inverse_lerp(15.0, 0.0, 10.0)),
 @@697@@);
-    assert_eq!(bitexact_f64(super::clamped_map(5.0, 10.0, 0.0, 100.0, 200.0)),
+    assert_eq!(
+        bitexact_f64(super::clamped_map(5.0, 10.0, 0.0, 100.0, 200.0)),
 @@698@@);
-    assert_eq!(bitexact_f64(super::map(5.0, 10.0, 0.0, 100.0, 200.0)),
+    assert_eq!(
+        bitexact_f64(super::map(5.0, 10.0, 0.0, 100.0, 200.0)),
 @@699@@);
-    assert_eq!(bitexact_f64(super::inverse_lerp(5.0, 10.0, 0.0)),
+    assert_eq!(
+        bitexact_f64(super::inverse_lerp(5.0, 10.0, 0.0)),
 @@700@@);
-    assert_eq!(bitexact_f32(super::clamped_map_f32(5.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32)),
+    assert_eq!(
+        bitexact_f32(super::clamped_map_f32(
+            5.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32
+        )),
 @@701@@);
-    assert_eq!(bitexact_f32(super::map_f32(5.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32)),
+    assert_eq!(
+        bitexact_f32(super::map_f32(5.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32)),
 @@702@@);
-    assert_eq!(bitexact_f32(super::clamped_map_f32(-5.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32)),
+    assert_eq!(
+        bitexact_f32(super::clamped_map_f32(
+            -5.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32
+        )),
 @@703@@);
-    assert_eq!(bitexact_f32(super::map_f32(-5.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32)),
+    assert_eq!(
+        bitexact_f32(super::map_f32(-5.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32)),
 @@704@@);
-    assert_eq!(bitexact_f32(super::clamped_map_f32(15.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32)),
+    assert_eq!(
+        bitexact_f32(super::clamped_map_f32(
+            15.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32
+        )),
 @@705@@);
-    assert_eq!(bitexact_f32(super::map_f32(15.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32)),
+    assert_eq!(
+        bitexact_f32(super::map_f32(15.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32)),
 @@706@@);
 }
 
 #[test]
 fn golden_16() {
     // length/quantize/ceilDiv/roundToward
-    assert_eq!(bitexact_f64(super::length_squared(3.0, 4.0)),
+    assert_eq!(
+        bitexact_f64(super::length_squared(3.0, 4.0)),
 @@707@@);
     assert_eq!(bitexact_f64(super::length(3.0, 4.0)), @@708@@);
     assert_eq!(bitexact_f32(super::length_f32(3.0, 4.0)), @@709@@);
-    assert_eq!(bitexact_f32(super::length_f32(1.0E20f32, 1.0f32)), @@710@@);
-    assert_eq!(bitexact_f32(super::length_f32(1.0000007f32, 1.5000008f32)),
+    assert_eq!(
+        bitexact_f32(super::length_f32(1.0E20f32, 1.0f32)),
+@@710@@);
+    assert_eq!(
+        bitexact_f32(super::length_f32(1.0000007f32, 1.5000008f32)),
 @@711@@);
-    assert_eq!(bitexact_f64(super::length_squared_xyz(1.0, 2.0, 2.0)),
+    assert_eq!(
+        bitexact_f64(super::length_squared_xyz(1.0, 2.0, 2.0)),
 @@712@@);
-    assert_eq!(bitexact_f64(super::length_xyz(1.0, 2.0, 2.0)),
+    assert_eq!(
+        bitexact_f64(super::length_xyz(1.0, 2.0, 2.0)),
 @@713@@);
-    assert_eq!(bitexact_f32(super::length_squared_xyz_f32(1.0, 2.0, 2.0)),
+    assert_eq!(
+        bitexact_f32(super::length_squared_xyz_f32(1.0, 2.0, 2.0)),
 @@714@@);
     assert_eq!(super::quantize(7.5, 4), @@715@@);
     assert_eq!(super::quantize(-7.5, 4), @@716@@);
@@ -1196,15 +1382,20 @@ fn golden_17() {
     assert_eq!(bitexact_f64(r123456789.next_gaussian()), @@893@@);
     assert_eq!(bitexact_f64(r123456789.next_gaussian()), @@894@@);
     assert_eq!(bitexact_f64(r123456789.next_gaussian()), @@895@@);
-    assert_eq!(bitexact_f64(r123456789.triangle_f64(1.0, 2.0)),
+    assert_eq!(
+        bitexact_f64(r123456789.triangle_f64(1.0, 2.0)),
 @@896@@);
-    assert_eq!(bitexact_f64(r123456789.triangle_f64(1.0, 2.0)),
+    assert_eq!(
+        bitexact_f64(r123456789.triangle_f64(1.0, 2.0)),
 @@897@@);
-    assert_eq!(bitexact_f64(r123456789.triangle_f64(1.0, 2.0)),
+    assert_eq!(
+        bitexact_f64(r123456789.triangle_f64(1.0, 2.0)),
 @@898@@);
-    assert_eq!(bitexact_f64(r123456789.triangle_f64(1.0, 2.0)),
+    assert_eq!(
+        bitexact_f64(r123456789.triangle_f64(1.0, 2.0)),
 @@899@@);
-    assert_eq!(bitexact_f64(r123456789.triangle_f64(1.0, 2.0)),
+    assert_eq!(
+        bitexact_f64(r123456789.triangle_f64(1.0, 2.0)),
 @@900@@);
     assert_eq!(r123456789.next_int_between_inclusive(10, 20), @@901@@);
     assert_eq!(r123456789.next_int_between_inclusive(10, 20), @@902@@);
@@ -1252,11 +1443,21 @@ fn golden_17() {
     assert_eq!(bitexact_f64(rNEG1.next_gaussian()), @@944@@);
     assert_eq!(bitexact_f64(rNEG1.next_gaussian()), @@945@@);
     assert_eq!(bitexact_f64(rNEG1.next_gaussian()), @@946@@);
-    assert_eq!(bitexact_f64(rNEG1.triangle_f64(1.0, 2.0)), @@947@@);
-    assert_eq!(bitexact_f64(rNEG1.triangle_f64(1.0, 2.0)), @@948@@);
-    assert_eq!(bitexact_f64(rNEG1.triangle_f64(1.0, 2.0)), @@949@@);
-    assert_eq!(bitexact_f64(rNEG1.triangle_f64(1.0, 2.0)), @@950@@);
-    assert_eq!(bitexact_f64(rNEG1.triangle_f64(1.0, 2.0)), @@951@@);
+    assert_eq!(
+        bitexact_f64(rNEG1.triangle_f64(1.0, 2.0)),
+@@947@@);
+    assert_eq!(
+        bitexact_f64(rNEG1.triangle_f64(1.0, 2.0)),
+@@948@@);
+    assert_eq!(
+        bitexact_f64(rNEG1.triangle_f64(1.0, 2.0)),
+@@949@@);
+    assert_eq!(
+        bitexact_f64(rNEG1.triangle_f64(1.0, 2.0)),
+@@950@@);
+    assert_eq!(
+        bitexact_f64(rNEG1.triangle_f64(1.0, 2.0)),
+@@951@@);
     assert_eq!(rNEG1.next_int_between_inclusive(10, 20), @@952@@);
     assert_eq!(rNEG1.next_int_between_inclusive(10, 20), @@953@@);
     assert_eq!(rNEG1.next_int_between_inclusive(10, 20), @@954@@);
@@ -1278,20 +1479,35 @@ fn golden_17() {
     assert_eq!(rNEG9223372036854775808.next_int_bound(5), @@970@@);
     assert_eq!(rNEG9223372036854775808.next_int_bound(5), @@971@@);
     assert_eq!(rNEG9223372036854775808.next_int_bound(5), @@972@@);
-    assert_eq!(bitexact_f32(rNEG9223372036854775808.next_float()), @@973@@);
-    assert_eq!(bitexact_f32(rNEG9223372036854775808.next_float()), @@974@@);
-    assert_eq!(bitexact_f32(rNEG9223372036854775808.next_float()), @@975@@);
-    assert_eq!(bitexact_f32(rNEG9223372036854775808.next_float()), @@976@@);
-    assert_eq!(bitexact_f32(rNEG9223372036854775808.next_float()), @@977@@);
-    assert_eq!(bitexact_f64(rNEG9223372036854775808.next_double()),
+    assert_eq!(
+        bitexact_f32(rNEG9223372036854775808.next_float()),
+@@973@@);
+    assert_eq!(
+        bitexact_f32(rNEG9223372036854775808.next_float()),
+@@974@@);
+    assert_eq!(
+        bitexact_f32(rNEG9223372036854775808.next_float()),
+@@975@@);
+    assert_eq!(
+        bitexact_f32(rNEG9223372036854775808.next_float()),
+@@976@@);
+    assert_eq!(
+        bitexact_f32(rNEG9223372036854775808.next_float()),
+@@977@@);
+    assert_eq!(
+        bitexact_f64(rNEG9223372036854775808.next_double()),
 @@978@@);
-    assert_eq!(bitexact_f64(rNEG9223372036854775808.next_double()),
+    assert_eq!(
+        bitexact_f64(rNEG9223372036854775808.next_double()),
 @@979@@);
-    assert_eq!(bitexact_f64(rNEG9223372036854775808.next_double()),
+    assert_eq!(
+        bitexact_f64(rNEG9223372036854775808.next_double()),
 @@980@@);
-    assert_eq!(bitexact_f64(rNEG9223372036854775808.next_double()),
+    assert_eq!(
+        bitexact_f64(rNEG9223372036854775808.next_double()),
 @@981@@);
-    assert_eq!(bitexact_f64(rNEG9223372036854775808.next_double()),
+    assert_eq!(
+        bitexact_f64(rNEG9223372036854775808.next_double()),
 @@982@@);
     assert_eq!(rNEG9223372036854775808.next_long(), @@983@@);
     assert_eq!(rNEG9223372036854775808.next_long(), @@984@@);
@@ -1303,25 +1519,35 @@ fn golden_17() {
     assert_eq!(rNEG9223372036854775808.next_boolean(), @@990@@);
     assert_eq!(rNEG9223372036854775808.next_boolean(), @@991@@);
     assert_eq!(rNEG9223372036854775808.next_boolean(), @@992@@);
-    assert_eq!(bitexact_f64(rNEG9223372036854775808.next_gaussian()),
+    assert_eq!(
+        bitexact_f64(rNEG9223372036854775808.next_gaussian()),
 @@993@@);
-    assert_eq!(bitexact_f64(rNEG9223372036854775808.next_gaussian()),
+    assert_eq!(
+        bitexact_f64(rNEG9223372036854775808.next_gaussian()),
 @@994@@);
-    assert_eq!(bitexact_f64(rNEG9223372036854775808.next_gaussian()),
+    assert_eq!(
+        bitexact_f64(rNEG9223372036854775808.next_gaussian()),
 @@995@@);
-    assert_eq!(bitexact_f64(rNEG9223372036854775808.next_gaussian()),
+    assert_eq!(
+        bitexact_f64(rNEG9223372036854775808.next_gaussian()),
 @@996@@);
-    assert_eq!(bitexact_f64(rNEG9223372036854775808.next_gaussian()),
+    assert_eq!(
+        bitexact_f64(rNEG9223372036854775808.next_gaussian()),
 @@997@@);
-    assert_eq!(bitexact_f64(rNEG9223372036854775808.triangle_f64(1.0, 2.0)),
+    assert_eq!(
+        bitexact_f64(rNEG9223372036854775808.triangle_f64(1.0, 2.0)),
 @@998@@);
-    assert_eq!(bitexact_f64(rNEG9223372036854775808.triangle_f64(1.0, 2.0)),
+    assert_eq!(
+        bitexact_f64(rNEG9223372036854775808.triangle_f64(1.0, 2.0)),
 @@999@@);
-    assert_eq!(bitexact_f64(rNEG9223372036854775808.triangle_f64(1.0, 2.0)),
+    assert_eq!(
+        bitexact_f64(rNEG9223372036854775808.triangle_f64(1.0, 2.0)),
 @@1000@@);
-    assert_eq!(bitexact_f64(rNEG9223372036854775808.triangle_f64(1.0, 2.0)),
+    assert_eq!(
+        bitexact_f64(rNEG9223372036854775808.triangle_f64(1.0, 2.0)),
 @@1001@@);
-    assert_eq!(bitexact_f64(rNEG9223372036854775808.triangle_f64(1.0, 2.0)),
+    assert_eq!(
+        bitexact_f64(rNEG9223372036854775808.triangle_f64(1.0, 2.0)),
 @@1002@@);
     assert_eq!(
         rNEG9223372036854775808.next_int_between_inclusive(10, 20),
@@ -1355,11 +1581,21 @@ fn golden_17() {
     assert_eq!(bitexact_f32(r244837814047284.next_float()), @@1026@@);
     assert_eq!(bitexact_f32(r244837814047284.next_float()), @@1027@@);
     assert_eq!(bitexact_f32(r244837814047284.next_float()), @@1028@@);
-    assert_eq!(bitexact_f64(r244837814047284.next_double()), @@1029@@);
-    assert_eq!(bitexact_f64(r244837814047284.next_double()), @@1030@@);
-    assert_eq!(bitexact_f64(r244837814047284.next_double()), @@1031@@);
-    assert_eq!(bitexact_f64(r244837814047284.next_double()), @@1032@@);
-    assert_eq!(bitexact_f64(r244837814047284.next_double()), @@1033@@);
+    assert_eq!(
+        bitexact_f64(r244837814047284.next_double()),
+@@1029@@);
+    assert_eq!(
+        bitexact_f64(r244837814047284.next_double()),
+@@1030@@);
+    assert_eq!(
+        bitexact_f64(r244837814047284.next_double()),
+@@1031@@);
+    assert_eq!(
+        bitexact_f64(r244837814047284.next_double()),
+@@1032@@);
+    assert_eq!(
+        bitexact_f64(r244837814047284.next_double()),
+@@1033@@);
     assert_eq!(r244837814047284.next_long(), @@1034@@);
     assert_eq!(r244837814047284.next_long(), @@1035@@);
     assert_eq!(r244837814047284.next_long(), @@1036@@);
@@ -1370,25 +1606,35 @@ fn golden_17() {
     assert_eq!(r244837814047284.next_boolean(), @@1041@@);
     assert_eq!(r244837814047284.next_boolean(), @@1042@@);
     assert_eq!(r244837814047284.next_boolean(), @@1043@@);
-    assert_eq!(bitexact_f64(r244837814047284.next_gaussian()),
+    assert_eq!(
+        bitexact_f64(r244837814047284.next_gaussian()),
 @@1044@@);
-    assert_eq!(bitexact_f64(r244837814047284.next_gaussian()),
+    assert_eq!(
+        bitexact_f64(r244837814047284.next_gaussian()),
 @@1045@@);
-    assert_eq!(bitexact_f64(r244837814047284.next_gaussian()),
+    assert_eq!(
+        bitexact_f64(r244837814047284.next_gaussian()),
 @@1046@@);
-    assert_eq!(bitexact_f64(r244837814047284.next_gaussian()),
+    assert_eq!(
+        bitexact_f64(r244837814047284.next_gaussian()),
 @@1047@@);
-    assert_eq!(bitexact_f64(r244837814047284.next_gaussian()),
+    assert_eq!(
+        bitexact_f64(r244837814047284.next_gaussian()),
 @@1048@@);
-    assert_eq!(bitexact_f64(r244837814047284.triangle_f64(1.0, 2.0)),
+    assert_eq!(
+        bitexact_f64(r244837814047284.triangle_f64(1.0, 2.0)),
 @@1049@@);
-    assert_eq!(bitexact_f64(r244837814047284.triangle_f64(1.0, 2.0)),
+    assert_eq!(
+        bitexact_f64(r244837814047284.triangle_f64(1.0, 2.0)),
 @@1050@@);
-    assert_eq!(bitexact_f64(r244837814047284.triangle_f64(1.0, 2.0)),
+    assert_eq!(
+        bitexact_f64(r244837814047284.triangle_f64(1.0, 2.0)),
 @@1051@@);
-    assert_eq!(bitexact_f64(r244837814047284.triangle_f64(1.0, 2.0)),
+    assert_eq!(
+        bitexact_f64(r244837814047284.triangle_f64(1.0, 2.0)),
 @@1052@@);
-    assert_eq!(bitexact_f64(r244837814047284.triangle_f64(1.0, 2.0)),
+    assert_eq!(
+        bitexact_f64(r244837814047284.triangle_f64(1.0, 2.0)),
 @@1053@@);
     assert_eq!(r244837814047284.next_int_between_inclusive(10, 20), @@1054@@);
     assert_eq!(r244837814047284.next_int_between_inclusive(10, 20), @@1055@@);
@@ -1403,37 +1649,55 @@ fn golden_18() {
     let mut r999 = crate::random_source::SingleThreadedRandomSource::new(999i64);
     // Mth RNG helpers
     assert_eq!(super::next_int(&mut r0, 3, 10), @@1057@@);
-    assert_eq!(bitexact_f32(super::next_float(&mut r0, 1.0, 2.0)), @@1058@@);
-    assert_eq!(bitexact_f64(super::next_double(&mut r0, 1.0, 2.0)),
+    assert_eq!(
+        bitexact_f32(super::next_float(&mut r0, 1.0, 2.0)),
+@@1058@@);
+    assert_eq!(
+        bitexact_f64(super::next_double(&mut r0, 1.0, 2.0)),
 @@1059@@);
     assert_eq!(super::random_between_inclusive(&mut r0, 10, 30), @@1060@@);
-    assert_eq!(bitexact_f32(super::random_between(&mut r0, 5.0, 10.0)),
+    assert_eq!(
+        bitexact_f32(super::random_between(&mut r0, 5.0, 10.0)),
 @@1061@@);
     assert_eq!(bitexact_f32(super::normal(&mut r0, 100.0, 5.0)), @@1062@@);
     assert_eq!(super::next_int(&mut r1, 3, 10), @@1063@@);
-    assert_eq!(bitexact_f32(super::next_float(&mut r1, 1.0, 2.0)), @@1064@@);
-    assert_eq!(bitexact_f64(super::next_double(&mut r1, 1.0, 2.0)),
+    assert_eq!(
+        bitexact_f32(super::next_float(&mut r1, 1.0, 2.0)),
+@@1064@@);
+    assert_eq!(
+        bitexact_f64(super::next_double(&mut r1, 1.0, 2.0)),
 @@1065@@);
     assert_eq!(super::random_between_inclusive(&mut r1, 10, 30), @@1066@@);
-    assert_eq!(bitexact_f32(super::random_between(&mut r1, 5.0, 10.0)),
+    assert_eq!(
+        bitexact_f32(super::random_between(&mut r1, 5.0, 10.0)),
 @@1067@@);
     assert_eq!(bitexact_f32(super::normal(&mut r1, 100.0, 5.0)), @@1068@@);
     assert_eq!(super::next_int(&mut r7, 3, 10), @@1069@@);
-    assert_eq!(bitexact_f32(super::next_float(&mut r7, 1.0, 2.0)), @@1070@@);
-    assert_eq!(bitexact_f64(super::next_double(&mut r7, 1.0, 2.0)),
+    assert_eq!(
+        bitexact_f32(super::next_float(&mut r7, 1.0, 2.0)),
+@@1070@@);
+    assert_eq!(
+        bitexact_f64(super::next_double(&mut r7, 1.0, 2.0)),
 @@1071@@);
     assert_eq!(super::random_between_inclusive(&mut r7, 10, 30), @@1072@@);
-    assert_eq!(bitexact_f32(super::random_between(&mut r7, 5.0, 10.0)),
+    assert_eq!(
+        bitexact_f32(super::random_between(&mut r7, 5.0, 10.0)),
 @@1073@@);
     assert_eq!(bitexact_f32(super::normal(&mut r7, 100.0, 5.0)), @@1074@@);
     assert_eq!(super::next_int(&mut r999, 3, 10), @@1075@@);
-    assert_eq!(bitexact_f32(super::next_float(&mut r999, 1.0, 2.0)), @@1076@@);
-    assert_eq!(bitexact_f64(super::next_double(&mut r999, 1.0, 2.0)),
+    assert_eq!(
+        bitexact_f32(super::next_float(&mut r999, 1.0, 2.0)),
+@@1076@@);
+    assert_eq!(
+        bitexact_f64(super::next_double(&mut r999, 1.0, 2.0)),
 @@1077@@);
     assert_eq!(super::random_between_inclusive(&mut r999, 10, 30), @@1078@@);
-    assert_eq!(bitexact_f32(super::random_between(&mut r999, 5.0, 10.0)),
+    assert_eq!(
+        bitexact_f32(super::random_between(&mut r999, 5.0, 10.0)),
 @@1079@@);
-    assert_eq!(bitexact_f32(super::normal(&mut r999, 100.0, 5.0)), @@1080@@);
+    assert_eq!(
+        bitexact_f32(super::normal(&mut r999, 100.0, 5.0)),
+@@1080@@);
 }
 
 #[test]
