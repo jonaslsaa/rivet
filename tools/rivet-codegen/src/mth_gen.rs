@@ -256,14 +256,16 @@ fn render_asin(asin: &[String]) -> String {
     }
     s.push_str("];\n");
     s.push('\n');
+    s.push_str("#[cfg(target_arch = \"aarch64\")]\n");
+    s.push_str("pub use super::mth_cos_tab_aarch64::COS_TAB;\n");
     s.push_str("/// Architecture-selected COS_TAB (D14). x86_64 Linux + Temurin 25 is the\n");
     s.push_str("/// primary release-gate target; aarch64 retains its own verified table.\n");
     s.push_str("#[cfg(target_arch = \"x86_64\")]\n");
     s.push_str("pub use super::mth_cos_tab_x86_64::COS_TAB;\n");
-    s.push_str("#[cfg(target_arch = \"aarch64\")]\n");
-    s.push_str("pub use super::mth_cos_tab_aarch64::COS_TAB;\n");
     s.push_str("#[cfg(not(any(target_arch = \"x86_64\", target_arch = \"aarch64\")))]\n");
-    s.push_str("compile_error!(\"Rivet supports COS_TAB parity on x86_64 and aarch64 only; add native Paper Mth parity for this arch (D14)\");\n");
+    s.push_str("compile_error!(\n");
+    s.push_str("    \"Rivet supports COS_TAB parity on x86_64 and aarch64 only; add native Paper Mth parity for this arch (D14)\"\n");
+    s.push_str(");\n");
     s
 }
 

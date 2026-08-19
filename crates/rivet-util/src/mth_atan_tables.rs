@@ -268,11 +268,13 @@ pub const ASIN_TAB: [f64; 257] = [
     f64::from_bits(0x3ff921fb54442d18),
 ];
 
+#[cfg(target_arch = "aarch64")]
+pub use super::mth_cos_tab_aarch64::COS_TAB;
 /// Architecture-selected COS_TAB (D14). x86_64 Linux + Temurin 25 is the
 /// primary release-gate target; aarch64 retains its own verified table.
 #[cfg(target_arch = "x86_64")]
 pub use super::mth_cos_tab_x86_64::COS_TAB;
-#[cfg(target_arch = "aarch64")]
-pub use super::mth_cos_tab_aarch64::COS_TAB;
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-compile_error!("Rivet supports COS_TAB parity on x86_64 and aarch64 only; add native Paper Mth parity for this arch (D14)");
+compile_error!(
+    "Rivet supports COS_TAB parity on x86_64 and aarch64 only; add native Paper Mth parity for this arch (D14)"
+);
