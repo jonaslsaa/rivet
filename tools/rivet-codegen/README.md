@@ -30,10 +30,19 @@ JVM and to use `anyhow`/`serde`.
   those tables.
 - **`mth-gen`** — regenerates the Mth tables + golden tests
   (`crates/rivet-util/src/mth_sin_table.rs`, `mth_atan_tables.rs`,
-  `mth_golden_tests.rs`) from the real Paper `Mth` class. These files are
-  `GENERATED — do not hand-edit`; this is the checked-in generator that makes
-  regeneration possible. Idempotent: over the current committed files it
-  reproduces them byte-for-byte (`git diff` stays clean).
+  `mth_cos_tab_{x86_64,aarch64}.rs`, `mth_golden_tests.rs`) from the real Paper
+  `Mth` class. These files are `GENERATED — do not hand-edit`; this is the
+  checked-in generator that makes regeneration possible. Idempotent per arch:
+  over the current committed files it reproduces them byte-for-byte on the
+  matching host (`git diff` stays clean). `COS_TAB` is architecture-dependent
+  (D14) and only the **host arch's** module is written: on x86_64 (the primary
+  release-gate target) this writes `mth_cos_tab_x86_64.rs`; the committed
+  `mth_cos_tab_aarch64.rs` is provenance-checked — generated and verified on
+  native aarch64, never substituted or silently overwritten by an x86_64 run
+  (an aarch64 host regenerates it idempotently). The golden expectation values
+  are NaN-canonicalized via Java `floatToIntBits`/`doubleToLongBits`
+  (`bitexact_f32`/`bitexact_f64` in the test), because hardware-created NaN
+  sign/payload is architecture-undefined; every non-NaN value stays bit-exact.
 - **`extract-biomes-tags`** — compiles and runs `java/BiomeTagExtractor.java`
   against the real Paper jar, reproducing `WorldLoader.load`
   (vanilla pack -> STATIC layer -> `TagLoader.loadTagsForExistingRegistries`
@@ -174,28 +183,49 @@ so reruns are fast. Pass `--bundler` to point at a different jar.
 ## How the Mth tables + golden tests are generated (`mth-gen`)
 
 `crates/rivet-util/src/mth_sin_table.rs` / `mth_atan_tables.rs` /
-`mth_golden_tests.rs` are marked `GENERATED — do not hand-edit` but had no
-checked-in generator (regeneration was impossible). `mth-gen` is that
-generator. The Mth tables and every golden expected value are computed by the
-**real compiled Paper `Mth` class** — nothing is hand-copied:
+`mth_cos_tab_{x86_64,aarch64}.rs` / `mth_golden_tests.rs` are marked
+`GENERATED — do not hand-edit` but had no checked-in generator (regeneration
+was impossible). `mth-gen` is that generator. The Mth tables and every golden
+expected value are computed by the **real compiled Paper `Mth` class** —
+nothing is hand-copied:
 
 1. unpack the bundler classpath (same `extract` machinery);
 2. compile `src/java/MthGen.java` against it. `MthGen.java` is itself generated
    by `scripts/gen_mth_gen.py` from `data/mth_vectors.tsv` (the `(lhs => rhs)`
    pairs extracted from the committed golden file) — it calls the exact Java
    overload each Rust fn mirrors and prints each result as the committed Rust
-   literal;
+   literal. Float/double results go through `Float.floatToIntBits`/
+   `Double.doubleToLongBits` (not the `Raw` variants) so NaN sign/payload —
+   which is hardware-architecture-undefined (D14) — is canonicalized, while
+   every non-NaN value is bit-exact and identical to the Raw forms;
 3. `MthGen` prints the `SIN`/`ASIN_TAB`/`COS_TAB` arrays and the 1156 vectors;
 4. `mth_gen.rs` substitutes those values into `data/mth_golden_skeleton.rs`
    (the committed golden file with every expected `rhs` replaced by a `@@N@@`
-   placeholder) and emits the two table files, then pipes everything through
+   placeholder) and emits the table files, then pipes everything through
    `rustfmt` — the committed files are rustfmt-idempotent, so the output
-   matches them byte-for-byte.
+   matches them byte-for-byte. The golden compares float/double bits via the
+   `bitexact_f32`/`bitexact_f64` helpers, which canonicalize NaNs to the
+   canonical bit-pattern exactly as `floatToIntBits`/`doubleToLongBits` do.
 
-Regeneration is **idempotent**: `git diff` stays clean when run over the
-current committed files. Regenerate after bumping the Paper version or
-correcting a golden expectation; a value that diverges from Java shows up as a
-`git diff` hunk to review.
+Regeneration is **idempotent per arch**: `git diff` stays clean when run over
+the current committed files on the matching host. `COS_TAB` is
+architecture-dependent (D14) — Paper builds it at class-init with
+`java.lang.Math.cos`/`asin`, whose HotSpot intrinsics differ by up to 1 ULP
+between x86_64 and aarch64. `mth-gen` therefore writes only the **host arch's**
+`COS_TAB` module:
+  - on **x86_64** (primary release-gate target) it writes
+    `mth_cos_tab_x86_64.rs` and leaves `mth_cos_tab_aarch64.rs` untouched —
+    the committed aarch64 variant is provenance-checked (generated + verified
+    on native aarch64 Paper) and must never be substituted or silently
+    overwritten;
+  - on **aarch64** it regenerates `mth_cos_tab_aarch64.rs` idempotently from
+    native Paper.
+`ASIN_TAB` is identical on both supported arches and lives in
+`mth_atan_tables.rs`, which re-exports the correctly arch-selected `COS_TAB`
+via `cfg(target_arch)`.
+
+Regenerate after bumping the Paper version or correcting a golden expectation;
+a value that diverges from Java shows up as a `git diff` hunk to review.
 
 ### Authoring a change to the golden file
 

@@ -160,7 +160,12 @@ fn print_usage() {
          \x20                     --output <dir>   registry output dir (default crates/rivet-registry/src/generated)\n\
          \x20   mth-gen   Regenerate the Mth tables + golden tests in crates/rivet-util/src\n\
          \x20             from the real Paper Mth class (SIN/ASIN_TAB/COS_TAB + all\n\
-         \x20             1156 golden vectors). Idempotent: `git diff` stays clean.\n\
+         \x20             1156 golden vectors). Idempotent per arch: `git diff` stays clean\n\
+         \x20             on the matching host. COS_TAB is arch-dependent (D14): only the\n\
+         \x20             HOST arch's module (mth_cos_tab_x86_64.rs on x86_64,\n\
+         \x20             mth_cos_tab_aarch64.rs on aarch64) is written; the committed\n\
+         \x20             aarch64 table is provenance-checked and never overwritten by an\n\
+         \x20             x86_64 run.\n\
          \x20             Flags: --bundler <path>   path to paper-bundler-26.2*.jar\n\
          \x20                     --output <dir>    repo root to write under (default repo root)\n\
          \x20   probe-block-states  Compile + run GlobalPaletteProbe.java against the real\n\

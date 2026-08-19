@@ -1,13 +1,13 @@
-// GENERATED from net.minecraft.util.Mth (working/Paper) - do not hand-edit.
+// GENERATED from net.minecraft.util.Mth (working/Paper) — do not hand-edit.
 // ASIN_TAB[ind] = Math.asin(ind/256.0); ind in [0,257).
 //
-// COS_TAB is architecture-dependent: Paper 26.2 builds both tables at
-// class-init time with java.lang.Math.cos/asin, whose HotSpot intrinsics
-// differ by up to 1 ULP between x86_64 and aarch64 (D14). ASIN_TAB is
-// identical on both supported arches; COS_TAB is selected at COMPILE TIME from
-// the per-arch generated module matching the build target. Each arch's table
-// is generated independently on that platform via the codegen path - never
-// hand-edited, never substituted.
+// COS_TAB is architecture-dependent (D14): Paper 26.2 builds the tables at
+// class-init with java.lang.Math.cos/asin, whose HotSpot intrinsics differ by
+// up to 1 ULP between x86_64 and aarch64. ASIN_TAB is identical on both
+// supported arches; COS_TAB is selected at COMPILE TIME from the per-arch
+// generated module matching the build target. Each arch's table is generated
+// independently on that platform via the codegen path — never hand-edited,
+// never substituted.
 pub const ASIN_TAB: [f64; 257] = [
     f64::from_bits(0x0000000000000000),
     f64::from_bits(0x3f700002aaabdddf),
@@ -275,4 +275,4 @@ pub use super::mth_cos_tab_x86_64::COS_TAB;
 #[cfg(target_arch = "aarch64")]
 pub use super::mth_cos_tab_aarch64::COS_TAB;
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-compile_error!("Rivet supports C O S _ T A B parity on x86_64 and aarch64 only; add native Paper Mth parity for this arch (D14)");
+compile_error!("Rivet supports COS_TAB parity on x86_64 and aarch64 only; add native Paper Mth parity for this arch (D14)");
