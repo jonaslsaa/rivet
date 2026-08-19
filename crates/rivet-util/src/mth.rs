@@ -189,11 +189,16 @@ pub fn max_f64(a: f64, b: f64) -> f64 {
     } else if b > a {
         b
     } else {
-        // a == b. Java `Math.max` makes +0.0 win when the operands are
-        // ±0.0; return either for any other equal pair. Written with
-        // explicit comparisons (never `f64::max`) so the signed-zero
-        // result does not depend on optimization level.
-        if a == 0.0 { 0.0 } else { a }
+        // a == b. Java `Math.max` returns the FIRST operand for same-sign
+        // equal pairs (e.g. `Math.max(-0.0, -0.0)` is -0.0), and only forces
+        // +0.0 when a pair of zeroes differ in sign. Written with explicit
+        // bit/sign checks (never `f64::max`) so the signed-zero result does
+        // not depend on optimization level.
+        if a == 0.0 && a.is_sign_negative() != b.is_sign_negative() {
+            0.0
+        } else {
+            a
+        }
     }
 }
 
@@ -211,11 +216,16 @@ pub fn min_f32(a: f32, b: f32) -> f32 {
     } else if b < a {
         b
     } else {
-        // a == b. Java `Math.min` makes -0.0 win when the operands are
-        // ±0.0; return either for any other equal pair. Written with
-        // explicit comparisons (never `f32::min`) so the signed-zero
-        // result does not depend on optimization level.
-        if a == 0.0 { -0.0 } else { a }
+        // a == b. Java `Math.min` returns the FIRST operand for same-sign
+        // equal pairs (e.g. `Math.min(0.0, 0.0)` is +0.0), and only forces
+        // -0.0 when a pair of zeroes differ in sign. Written with explicit
+        // bit/sign checks (never `f32::min`) so the signed-zero result does
+        // not depend on optimization level.
+        if a == 0.0 && a.is_sign_negative() != b.is_sign_negative() {
+            -0.0
+        } else {
+            a
+        }
     }
 }
 
@@ -230,11 +240,15 @@ pub fn max_f32(a: f32, b: f32) -> f32 {
     } else if b > a {
         b
     } else {
-        // a == b. Java `Math.max` makes +0.0 win when the operands are
-        // ±0.0; return either for any other equal pair. Written with
-        // explicit comparisons (never `f32::max`) so the signed-zero
-        // result does not depend on optimization level.
-        if a == 0.0 { 0.0 } else { a }
+        // a == b. Java `Math.max` returns the FIRST operand for same-sign
+        // equal pairs, and only forces +0.0 when a pair of zeroes differ in
+        // sign. Written with explicit sign checks (never `f32::max`) so the
+        // signed-zero result does not depend on optimization level.
+        if a == 0.0 && a.is_sign_negative() != b.is_sign_negative() {
+            0.0
+        } else {
+            a
+        }
     }
 }
 
@@ -249,11 +263,15 @@ pub fn min_f64(a: f64, b: f64) -> f64 {
     } else if b < a {
         b
     } else {
-        // a == b. Java `Math.min` makes -0.0 win when the operands are
-        // ±0.0; return either for any other equal pair. Written with
-        // explicit comparisons (never `f64::min`) so the signed-zero
-        // result does not depend on optimization level.
-        if a == 0.0 { -0.0 } else { a }
+        // a == b. Java `Math.min` returns the FIRST operand for same-sign
+        // equal pairs, and only forces -0.0 when a pair of zeroes differ in
+        // sign. Written with explicit sign checks (never `f64::min`) so the
+        // signed-zero result does not depend on optimization level.
+        if a == 0.0 && a.is_sign_negative() != b.is_sign_negative() {
+            -0.0
+        } else {
+            a
+        }
     }
 }
 
@@ -1378,6 +1396,9 @@ mod tests {
         assert_eq!(max_f64(-0.0, 0.0), 0.0);
         assert!(max_f64(-0.0, 0.0).is_sign_positive());
         assert!(max_f64(0.0, -0.0).is_sign_positive());
+        // Java returns the first operand for same-sign zero pairs.
+        assert!(max_f64(-0.0, -0.0).is_sign_negative());
+        assert!(max_f64(0.0, 0.0).is_sign_positive());
     }
 
     #[test]
@@ -1399,6 +1420,9 @@ mod tests {
         assert_eq!(min_f32(-0.0, 0.0), -0.0);
         assert!(min_f32(-0.0, 0.0).is_sign_negative());
         assert!(min_f32(0.0, -0.0).is_sign_negative());
+        // Java returns the first operand for same-sign zero pairs.
+        assert!(min_f32(0.0, 0.0).is_sign_positive());
+        assert!(min_f32(-0.0, -0.0).is_sign_negative());
     }
 
     #[test]
@@ -1418,6 +1442,9 @@ mod tests {
         assert_eq!(max_f32(-0.0, 0.0), 0.0);
         assert!(max_f32(-0.0, 0.0).is_sign_positive());
         assert!(max_f32(0.0, -0.0).is_sign_positive());
+        // Java returns the first operand for same-sign zero pairs.
+        assert!(max_f32(-0.0, -0.0).is_sign_negative());
+        assert!(max_f32(0.0, 0.0).is_sign_positive());
     }
 
     #[test]
@@ -1435,6 +1462,9 @@ mod tests {
         assert_eq!(min_f64(-0.0, 0.0), -0.0);
         assert!(min_f64(-0.0, 0.0).is_sign_negative());
         assert!(min_f64(0.0, -0.0).is_sign_negative());
+        // Java returns the first operand for same-sign zero pairs.
+        assert!(min_f64(0.0, 0.0).is_sign_positive());
+        assert!(min_f64(-0.0, -0.0).is_sign_negative());
     }
 
     #[test]
