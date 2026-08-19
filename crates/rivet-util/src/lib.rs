@@ -37,6 +37,10 @@ pub mod known_pack;
 pub mod linear_congruential_generator;
 pub mod mth;
 pub mod mth_atan_tables;
+#[cfg(target_arch = "x86_64")]
+pub mod mth_cos_tab_x86_64;
+#[cfg(target_arch = "aarch64")]
+pub mod mth_cos_tab_aarch64;
 pub mod mth_sin_table;
 pub mod mth_stubs;
 pub mod problem_reporter;
