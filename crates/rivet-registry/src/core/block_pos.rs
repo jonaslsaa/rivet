@@ -96,7 +96,10 @@ impl BetweenClosedIterator {
         let width = max_x.wrapping_sub(min_x).wrapping_add(1);
         let height = max_y.wrapping_sub(min_y).wrapping_add(1);
         let depth = max_z.wrapping_sub(min_z).wrapping_add(1);
-        let end = width.wrapping_mul(height).wrapping_mul(depth);
+        // Match `between_closed`: guard a degenerate (negative wrapping) `end`
+        // against the ~2^31-step loop the Java stream's `index == end` check
+        // would otherwise run, returning an empty iterator instead.
+        let end = width.wrapping_mul(height).wrapping_mul(depth).max(0);
         Self {
             min_x,
             min_y,
