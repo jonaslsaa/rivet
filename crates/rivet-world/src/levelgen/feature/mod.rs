@@ -513,6 +513,23 @@ pub fn feature_id_from_registry_name(name: &str) -> Option<FeatureId> {
         "minecraft:monster_room" => Some(FeatureId::new(22)),
         // `Feature.GEODE` is the registered `minecraft:geode` singleton.
         "minecraft:geode" => Some(FeatureId::new(58)),
+        // The Batch 2 seed-42 dispatch leaves — each registered `minecraft:…`
+        // singleton at its feature-registry insertion index (the `#181`
+        // protocol ids in the dispatch hub). `Feature.SPRING` (4), `FREEZE_TOP_LAYER`
+        // (14), `VINES` (15), `BLOCK_COLUMN` (16), `DISK` (26), `ORE` (28),
+        // `SEAGRASS` (33), `SIMPLE_BLOCK` (39), `RANDOM_SELECTOR` (52),
+        // `SIMPLE_RANDOM_SELECTOR` (54), and `RANDOM_BOOLEAN_SELECTOR` (55).
+        "minecraft:spring_feature" => Some(FeatureId::new(4)),
+        "minecraft:freeze_top_layer" => Some(FeatureId::new(14)),
+        "minecraft:vines" => Some(FeatureId::new(15)),
+        "minecraft:block_column" => Some(FeatureId::new(16)),
+        "minecraft:disk" => Some(FeatureId::new(26)),
+        "minecraft:ore" => Some(FeatureId::new(28)),
+        "minecraft:seagrass" => Some(FeatureId::new(33)),
+        "minecraft:simple_block" => Some(FeatureId::new(39)),
+        "minecraft:random_selector" => Some(FeatureId::new(52)),
+        "minecraft:simple_random_selector" => Some(FeatureId::new(54)),
+        "minecraft:random_boolean_selector" => Some(FeatureId::new(55)),
         _ => None,
     }
 }

@@ -41,10 +41,12 @@
 //! indices execute per step). The generated feature tables cover EVERY
 //! overworld possible biome (55 — the full list, not the reachable subset),
 //! so the full list resolves and the run proceeds to the per-step loop. The
-//! lake, amethyst-geode, and monster-room entries are decoded from the generated
-//! JSON and run with their exact feature seeds; the seed-42 chunk then stops at
-//! the first selected path not implemented (`minecraft:ore_dirt`). The chunk
-//! stays CARVERS. The INITIALIZE_LIGHT/
+//! lake, amethyst-geode, monster-room, and the Batch 2 dispatch leaves (ore,
+//! disk, spring, simple_block, block_column, vines, seagrass, freeze_top_layer)
+//! are decoded from the generated JSON and run with their exact feature seeds;
+//! the seed-42 chunk then stops at the first selected path whose leaf remains
+//! typed-unavailable (`minecraft:underwater_magma` at step 6/global index 26).
+//! The chunk stays CARVERS. The INITIALIZE_LIGHT/
 //! LIGHT steps are executor-wired but engine-gated (the holder wires no light
 //! engine, so it cannot reach LIGHT).
 //! Everything the value layer does not wire is refused *before* running work: a
@@ -89,6 +91,7 @@ use serde_json::Value;
 
 use rivet_registry::Registry;
 use rivet_registry::access::RegistryAccess;
+use rivet_registry::access::{LayeredRegistryAccess, RegistryLayer};
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::block_state::BlockState;
 use rivet_registry::builder::RegistryBuilder;
@@ -133,7 +136,16 @@ use rivet_world::data::worldgen::worldgen_bootstraps::build_worldgen_registries;
 use rivet_world::level::height_accessor::LevelHeightAccessor;
 use rivet_world::level::height_accessor::create as create_height_accessor;
 use rivet_world::levelgen::blending::blender::Blender;
+use rivet_world::levelgen::feature::configurations::block_column_configuration::block_column_configuration_codec;
+use rivet_world::levelgen::feature::configurations::composite_feature_configuration::composite_feature_configuration_codec;
+use rivet_world::levelgen::feature::configurations::disk_configuration::disk_configuration_codec;
 use rivet_world::levelgen::feature::configurations::geode_configuration::geode_configuration_codec;
+use rivet_world::levelgen::feature::configurations::ore_configuration::ore_configuration_codec;
+use rivet_world::levelgen::feature::configurations::probability_feature_configuration::probability_feature_configuration_codec;
+use rivet_world::levelgen::feature::configurations::random_boolean_feature_configuration::random_boolean_feature_configuration_codec;
+use rivet_world::levelgen::feature::configurations::random_feature_configuration::random_feature_configuration_codec;
+use rivet_world::levelgen::feature::configurations::simple_block_configuration::simple_block_configuration_codec;
+use rivet_world::levelgen::feature::configurations::spring_configuration::spring_configuration_codec;
 use rivet_world::levelgen::feature::configurations::{
     FeatureConfiguration, NoneFeatureConfiguration,
 };
@@ -225,6 +237,13 @@ pub struct OverworldGenerator {
     /// lookups Java's `addVanillaDecorations` performs. Stored alongside the
     /// random state it already shares the leak of (see [`OverworldGenerator::new`]).
     access: &'static RegistryAccess,
+    /// The leaked feature `RegistryAccess` — the worldgen access composed with
+    /// the frozen placed/configured-feature registries the seed-42 decoder and
+    /// the selector/composite features resolve their recursive `Holder`
+    /// references through (the `worldgen/placed_feature` /
+    /// `worldgen/configured_feature` back-reference the `#181` dispatch and the
+    /// Batch 2 selector arms require). See [`build_feature_access`].
+    feature_access: &'static RegistryAccess,
     seed: i64,
 }
 
@@ -249,11 +268,14 @@ impl OverworldGenerator {
             settings_holder.value(settings_registry).clone()
         };
         let generator = NoiseBasedChunkGenerator::new(Holder::Direct(settings));
+        let feature_access: &'static RegistryAccess =
+            Box::leak(Box::new(build_feature_access(access)));
         OverworldGenerator {
             generator,
             random_state,
             biome_source: OverworldNoiseBiomeSource::new(random_state),
             access,
+            feature_access,
             seed,
         }
     }
@@ -267,6 +289,12 @@ impl OverworldGenerator {
     /// registry back-reference (`registryAccess()`, `lookupOrThrow`).
     pub fn registry_access(&self) -> &'static RegistryAccess {
         self.access
+    }
+
+    /// The leaked feature `RegistryAccess` — the worldgen access composed with
+    /// the frozen placed/configured-feature registries (see the struct field).
+    pub fn feature_access(&self) -> &'static RegistryAccess {
+        self.feature_access
     }
 
     /// The value shell — the source of truth for the real world-surface bodies
@@ -906,6 +934,48 @@ fn resolve_feature_settings(
 
 type FeatureOps = RegistryOps<Value, JsonOps>;
 
+/// The shared seed-42 feature `RegistryAccess` — the worldgen access composed
+/// with the frozen placed/configured-feature registries the decoder and the
+/// selector/composite features resolve their recursive `Holder` references
+/// through.
+///
+/// The two feature registries are frozen up front (empty, present): the
+/// `RegistryFileCodec` holder codecs the Batch 2 selectors and the biome
+/// generation settings route through require the registry to *exist* in the
+/// decode ops to resolve even an inline `Direct` placed/configured holder, and
+/// the runtime `place_with_biome_check` path resolves `Holder::Reference` ids
+/// against the owning registry. The shared freeze means both the decode ops
+/// (`RegistryOps::create_from_access`) and the `WorldGenLevel::registry_access`
+/// back-reference observe the same registry ids — the `#181` back-reference
+/// rule that keeps a decoded `Reference` resolvable at placement time.
+fn build_feature_access(worldgen: &RegistryAccess) -> RegistryAccess {
+    let placed = RegistryBuilder::new(&*PLACED_FEATURE).freeze();
+    let configured = RegistryBuilder::new(&*CONFIGURED_FEATURE).freeze();
+    let feature_layer = RegistryAccess::from_pairs(vec![
+        (
+            ResourceKey::create_registry_key(Identifier::with_default_namespace(
+                "worldgen/placed_feature",
+            )),
+            Box::new(placed) as rivet_registry::root::AnyBox,
+        ),
+        (
+            ResourceKey::create_registry_key(Identifier::with_default_namespace(
+                "worldgen/configured_feature",
+            )),
+            Box::new(configured) as rivet_registry::root::AnyBox,
+        ),
+    ]);
+    // Layer the feature registries (Static) over the worldgen registries
+    // (Worldgen). The composite merges the disjoint key sets — the first layer
+    // wins only on a key collision, of which there are none between
+    // `worldgen/placed_feature`/`worldgen/configured_feature` and the worldgen
+    // NOISE/DENSITY_FUNCTION/BIOME/NOISE_SETTINGS keys.
+    LayeredRegistryAccess::new(vec![RegistryLayer::Static, RegistryLayer::Worldgen])
+        .replace_from(RegistryLayer::Static, &[feature_layer])
+        .replace_from(RegistryLayer::Worldgen, std::slice::from_ref(worldgen))
+        .composite_access()
+}
+
 fn decode_value<T: Clone>(
     codec: Arc<dyn Codec<T, FeatureOps>>,
     ops: &FeatureOps,
@@ -1077,6 +1147,65 @@ fn decode_configured_feature(
             config_value,
             &format!("decode {configured_key} config"),
         )?),
+        // Batch 2 dispatch leaves (issue #600 config-decode wave) — each
+        // downcast to its own config codec. The config value shapes are the
+        // generated `RegistryOps` JSON verbatim, decoded faithfully.
+        "minecraft:ore" => Arc::new(decode_value(
+            ore_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:disk" => Arc::new(decode_value(
+            disk_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:spring_feature" => Arc::new(decode_value(
+            spring_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:simple_block" => Arc::new(decode_value(
+            simple_block_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:block_column" => Arc::new(decode_value(
+            block_column_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:vines" => Arc::new(NoneFeatureConfiguration),
+        "minecraft:seagrass" => Arc::new(decode_value(
+            probability_feature_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:freeze_top_layer" => Arc::new(NoneFeatureConfiguration),
+        "minecraft:random_selector" => Arc::new(decode_value(
+            random_feature_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:simple_random_selector" => Arc::new(decode_value(
+            composite_feature_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:random_boolean_selector" => Arc::new(decode_value(
+            random_boolean_feature_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
         other => {
             return Err(format!(
                 "{configured_key} has unsupported feature type {other}"
@@ -1088,15 +1217,14 @@ fn decode_configured_feature(
 
 fn decode_placement_modifiers(
     placed_key: &str,
-    generator: &OverworldGenerator,
+    access: &RegistryAccess,
 ) -> Result<Vec<Arc<dyn ErasedPlacementModifier>>, String> {
     let entry = PLACED_FEATURE_BY_NAME
         .get(placed_key)
         .ok_or_else(|| format!("missing generated {placed_key} entry"))?;
     let json: Value = serde_json::from_str(entry.json)
         .map_err(|error| format!("decode {placed_key} JSON: {error}"))?;
-    let ops =
-        RegistryOps::create_from_access(&JsonOps::INSTANCE, generator.registry_access().clone());
+    let ops = RegistryOps::create_from_access(&JsonOps::INSTANCE, access.clone());
     json.get("placement")
         .and_then(Value::as_array)
         .ok_or_else(|| format!("{placed_key} JSON has no placement list"))?
@@ -1141,7 +1269,7 @@ fn decode_placed_feature(
         .and_then(Value::as_str)
         .ok_or_else(|| format!("{placed_key} JSON has no configured feature"))?;
     let ops =
-        RegistryOps::create_from_access(&JsonOps::INSTANCE, generator.registry_access().clone());
+        RegistryOps::create_from_access(&JsonOps::INSTANCE, generator.feature_access().clone());
     let configured = Arc::new(decode_configured_feature(configured_key, &ops)?);
     let mut configured_builder = RegistryBuilder::new(&*CONFIGURED_FEATURE);
     let configured_registry_id = configured_builder.registry_id();
@@ -1154,7 +1282,7 @@ fn decode_placed_feature(
     );
     let configured_registry = configured_builder.freeze();
 
-    let modifiers = decode_placement_modifiers(placed_key, generator)?;
+    let modifiers = decode_placement_modifiers(placed_key, generator.feature_access())?;
     let placed_value = Arc::new(PlacedFeature::new(
         Holder::reference(configured_registry_id, configured_id.0),
         modifiers,
@@ -1192,7 +1320,20 @@ fn configured_feature_is_executable(placed_key: &str) -> Result<bool, String> {
         .map_err(|error| format!("decode {configured_key} JSON: {error}"))?;
     Ok(matches!(
         configured_json.get("type").and_then(Value::as_str),
-        Some("minecraft:lake") | Some("minecraft:monster_room") | Some("minecraft:geode")
+        Some("minecraft:lake")
+            | Some("minecraft:monster_room")
+            | Some("minecraft:geode")
+            | Some("minecraft:ore")
+            | Some("minecraft:disk")
+            | Some("minecraft:spring_feature")
+            | Some("minecraft:simple_block")
+            | Some("minecraft:block_column")
+            | Some("minecraft:vines")
+            | Some("minecraft:seagrass")
+            | Some("minecraft:freeze_top_layer")
+            | Some("minecraft:random_selector")
+            | Some("minecraft:simple_random_selector")
+            | Some("minecraft:random_boolean_selector")
     ))
 }
 
@@ -1239,7 +1380,7 @@ fn placement_selects(
     origin: &BlockPos,
     feature_key: &'static str,
 ) -> Result<bool, String> {
-    let modifiers = decode_placement_modifiers(feature_key, generator)?;
+    let modifiers = decode_placement_modifiers(feature_key, generator.feature_access())?;
     let selection_generator = FeatureSelectionGenerator {
         generator: Arc::clone(generator),
         feature_key,
@@ -1418,7 +1559,11 @@ mod tests {
     use rivet_util::random::LegacyRandomSource;
     use rivet_world::level::WorldGenLevel;
     use rivet_world::levelgen::feature::FeatureBehavior;
+    use rivet_world::levelgen::feature::configurations::ProbabilityFeatureConfiguration;
+    use rivet_world::levelgen::feature::configurations::disk_configuration::DiskConfiguration;
     use rivet_world::levelgen::feature::configurations::geode_configuration::GeodeConfiguration;
+    use rivet_world::levelgen::feature::configurations::ore_configuration::OreConfiguration;
+    use rivet_world::levelgen::feature::configurations::spring_configuration::SpringConfiguration;
     use rivet_world::levelgen::feature::monster_room_feature::MONSTER_ROOM;
     use rivet_world::levelgen::heightmap::Types;
 
@@ -1927,9 +2072,11 @@ mod tests {
     /// unsupported selected path stops the slice.
     /// For seed 42 chunk (0,0), the lakes and amethyst rarity filters drop;
     /// `minecraft:amethyst_geode` and `minecraft:monster_room` execute through
-    /// their registry-backed leaves, and the first unsupported selected path is
-    /// `minecraft:ore_dirt` at step 6/global index 0. The chunk is never stamped
-    /// FEATURES (it stays CARVERS).
+    /// their registry-backed leaves, and the Batch 2 ore/disk spring/block
+    /// decode arms advance the run through the full UNDERGROUND_ORES step. The
+    /// first unsupported *selected* path is the typed-unavailable
+    /// `minecraft:underwater_magma` at step 6/global index 26. The chunk is
+    /// never stamped FEATURES (it stays CARVERS).
     #[test]
     fn generate_through_features_stops_at_first_selected_path_mismatch() {
         let generator = test_generator();
@@ -1951,11 +2098,13 @@ mod tests {
             }) => {
                 assert_eq!(chunk_pos, ChunkPos::new(0, 0));
                 assert_eq!(step_index, 6);
-                assert_eq!(global_feature_index, 0);
-                assert_eq!(feature_key, "minecraft:ore_dirt");
+                assert_eq!(global_feature_index, 26);
+                assert_eq!(feature_key, "minecraft:underwater_magma");
             }
             other => {
-                panic!("FEATURES must stop at the selected ore_dirt mismatch; got {other:?}")
+                panic!(
+                    "FEATURES must stop at the selected underwater_magma mismatch; got {other:?}"
+                )
             }
         }
 
@@ -1979,8 +2128,9 @@ mod tests {
     #[test]
     fn matching_fluids_modifier_decodes_through_generated_fluid_registry() {
         let generator = test_generator();
-        let modifiers = decode_placement_modifiers("minecraft:disk_clay", &generator)
-            .expect("matching_fluids must resolve the generated FLUID registry");
+        let modifiers =
+            decode_placement_modifiers("minecraft:disk_clay", generator.feature_access())
+                .expect("matching_fluids must resolve the generated FLUID registry");
         assert_eq!(modifiers.len(), 4);
     }
 
@@ -2075,6 +2225,188 @@ mod tests {
             )
             .expect("amethyst geode placement must decode"),
             "the full placed-feature chain must reject the failed rarity filter"
+        );
+    }
+
+    /// The Batch 2 decoder arms decode the generated configured/placed JSON of
+    /// each dispatch leaf seated in the seed-42 closure. These focused tests
+    /// cover the decoder arms directly — the runtime stops earlier at the
+    /// step-6 underwater_magma boundary, so the later-step leaves (springs,
+    /// seagrass, simple_block, selectors, freeze_top_layer) cannot be reached
+    /// end-to-end and get their own independent decode coverage here.
+    #[test]
+    fn ore_dirt_decodes_through_the_batch2_ore_arm() {
+        let generator = test_generator();
+        let decoded = decode_placed_feature("minecraft:ore_dirt", &generator)
+            .expect("the seed-42 ore_dirt entry must decode");
+        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        assert_eq!(placed.placement().len(), 4);
+        let configured = placed.feature().value(&decoded.configured_registry);
+        assert_eq!(
+            configured.feature,
+            feature_id_from_registry_name("minecraft:ore")
+                .expect("the ore dispatch type must be registered")
+        );
+        let ore = (configured.config.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<OreConfiguration>()
+            .expect("the ore dispatch must carry OreConfiguration");
+        assert_eq!(ore.size, 33);
+        assert_eq!(ore.target_states.len(), 1);
+    }
+
+    #[test]
+    fn disk_sand_decodes_through_the_batch2_disk_arm() {
+        let generator = test_generator();
+        let decoded = decode_placed_feature("minecraft:disk_sand", &generator)
+            .expect("the seed-42 disk_sand entry must decode");
+        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        assert_eq!(placed.placement().len(), 5);
+        let configured = placed.feature().value(&decoded.configured_registry);
+        assert_eq!(
+            configured.feature,
+            feature_id_from_registry_name("minecraft:disk")
+                .expect("the disk dispatch type must be registered")
+        );
+        let disk = (configured.config.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<DiskConfiguration>()
+            .expect("the disk dispatch must carry DiskConfiguration");
+        assert_eq!(disk.half_height, 2);
+    }
+
+    #[test]
+    fn spring_water_decodes_through_the_batch2_spring_arm() {
+        let generator = test_generator();
+        let decoded = decode_placed_feature("minecraft:spring_water", &generator)
+            .expect("the seed-42 spring_water entry must decode");
+        let configured = decoded
+            .placed_holder
+            .value(&decoded.placed_registry)
+            .feature()
+            .value(&decoded.configured_registry);
+        assert_eq!(
+            configured.feature,
+            feature_id_from_registry_name("minecraft:spring_feature")
+                .expect("the spring_feature dispatch type must be registered")
+        );
+        let spring = (configured.config.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<SpringConfiguration>()
+            .expect("the spring dispatch must carry SpringConfiguration");
+        assert_eq!(spring.valid_blocks.iter().count(), 11);
+    }
+
+    #[test]
+    fn seagrass_cold_decodes_through_the_batch2_seagrass_arm() {
+        let generator = test_generator();
+        let decoded = decode_placed_feature("minecraft:seagrass_cold", &generator)
+            .expect("the seed-42 seagrass_cold entry must decode");
+        let configured = decoded
+            .placed_holder
+            .value(&decoded.placed_registry)
+            .feature()
+            .value(&decoded.configured_registry);
+        assert_eq!(
+            configured.feature,
+            feature_id_from_registry_name("minecraft:seagrass")
+                .expect("the seagrass dispatch type must be registered")
+        );
+        let seagrass = (configured.config.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<ProbabilityFeatureConfiguration>()
+            .expect("the seagrass dispatch must carry ProbabilityFeatureConfiguration");
+        assert_eq!(seagrass.probability, 0.3);
+    }
+
+    #[test]
+    fn freeze_top_layer_decodes_through_the_batch2_arm() {
+        let generator = test_generator();
+        let decoded = decode_placed_feature("minecraft:freeze_top_layer", &generator)
+            .expect("the freeze_top_layer entry must decode");
+        let configured = decoded
+            .placed_holder
+            .value(&decoded.placed_registry)
+            .feature()
+            .value(&decoded.configured_registry);
+        assert_eq!(
+            configured.feature,
+            feature_id_from_registry_name("minecraft:freeze_top_layer")
+                .expect("the freeze_top_layer dispatch type must be registered")
+        );
+        assert!(
+            (configured.config.as_ref() as &dyn std::any::Any)
+                .downcast_ref::<NoneFeatureConfiguration>()
+                .is_some(),
+            "freeze_top_layer must carry a NoneFeatureConfiguration"
+        );
+    }
+
+    /// The seed-42 end-to-end run advances through the entire UNDERGROUND_ORES
+    /// step and refuses at the first selected typed-unavailable leaf
+    /// (`minecraft:underwater_magma`, global 26) WITHOUT mutating the RNG past
+    /// the refusal: the run returns typed immediately and never consumes
+    /// additional draws, so the chunk stays CARVERS and the leaf is never
+    /// stamped. The typed-unavailable dispatch (id 21) also rejects loudly.
+    #[test]
+    fn seed42_does_not_mutate_rng_past_the_underwater_magma_refusal() {
+        // The dispatch itself refuses typed-unavailable leaves at id 21:
+        // `feature_place` panics naming the id rather than fabricating success.
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::new(0, 0));
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let err = holder
+            .generate_through(ChunkStatus::Features)
+            .expect_err("FEATURES must refuse at the selected mismatch");
+        assert!(matches!(
+            err,
+            GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
+                step_index: 6,
+                global_feature_index: 26,
+                feature_key: "minecraft:underwater_magma",
+                ..
+            })
+        ));
+        assert_eq!(holder.status(), ChunkStatus::Carvers);
+    }
+
+    /// The three Batch 2 selector leaves are wired in the decoder, and the
+    /// runtime stops earlier at the step-6 underwater_magma boundary so these
+    /// later-step arms are exercised independently here. Full recursive decode
+    /// of a selector's inline placed/configured sub-features defers with the
+    /// `#126` codec stubs (`configured_feature_direct_codec` and the inline
+    /// `placement_modifier_codec` — issue #126, not yet ported), so the wire
+    /// surface is pinned: each selector dispatch type routes to its config
+    /// codec arm and the recursive sub-feature decode fails typed naming the
+    /// `#126` deferral, never fabricating a holder.
+    #[test]
+    fn selector_dispatch_types_are_registered() {
+        for (type_name, id) in [
+            ("minecraft:random_selector", 52),
+            ("minecraft:simple_random_selector", 54),
+            ("minecraft:random_boolean_selector", 55),
+        ] {
+            assert_eq!(
+                feature_id_from_registry_name(type_name),
+                Some(FeatureId::new(id)),
+                "the {type_name} selector dispatch type must be registered"
+            );
+        }
+    }
+
+    /// A selector's recursive inline sub-feature decode fails typed with the
+    /// `#126` codec deferral (the inline `ConfiguredFeature`/placement-modifier
+    /// codecs are not yet ported), rather than fabricating a placeholder holder
+    /// or silently dropping the reference. This is the honest boundary for the
+    /// Batch 2 selector arms given the runtime stops at step 6.
+    #[test]
+    fn selector_recursive_inline_decode_defers_with_126() {
+        let generator = test_generator();
+        let err = match decode_placed_feature("minecraft:forest_flowers", &generator) {
+            Ok(_) => panic!("the inline-sub-feature decode must fail typed"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("#126") || err.contains("issue #126") || err.contains("STUB"),
+            "the selector decode must name the #126 deferral, got: {err}"
         );
     }
 
