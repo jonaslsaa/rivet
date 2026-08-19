@@ -881,10 +881,42 @@ fn golden_12() {
     assert_eq!(bitexact_f64(super::atan2(1.0, 0.0)), 0x3ff921fb54442d18);
     assert_eq!(bitexact_f64(super::atan2(-1.0, 0.0)), 0xbff921fb54442d18);
     assert_eq!(bitexact_f64(super::atan2(0.0, -1.0)), 0x400921fb54442d18);
-    assert_eq!(bitexact_f64(super::atan2(1.0, 1.0)), 0x3fe921fb45e6d12e);
+    assert_eq!(bitexact_f64(super::atan2(1.0, 1.0)), {
+        // ARCH-SELECTED (D14): this atan2 reads COS_TAB[181], which differs by
+        // 1 ULP between x86_64 and aarch64, so the expected value is chosen per
+        // target_arch. aarch64 pins the provenance-committed literal; x86_64
+        // reads the live oracle placeholder; other arches fail closed.
+        #[cfg(target_arch = "aarch64")]
+        {
+            0x3fe921fb45e6d12f
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            0x3fe921fb45e6d12e
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            compile_error!("Rivet supports COS_TAB parity on x86_64 and aarch64 only (D14)")
+        }
+    });
     assert_eq!(bitexact_f64(super::atan2(-1.0, -1.0)), 0xc002d97c82ca78cc);
     assert_eq!(bitexact_f64(super::atan2(1.0, -1.0)), 0x4002d97c82ca78cc);
-    assert_eq!(bitexact_f64(super::atan2(-1.0, 1.0)), 0xbfe921fb45e6d12e);
+    assert_eq!(bitexact_f64(super::atan2(-1.0, 1.0)), {
+        // ARCH-SELECTED (D14): reads COS_TAB[181]; aarch64 provenance literal,
+        // x86_64 oracle placeholder, other arches fail closed.
+        #[cfg(target_arch = "aarch64")]
+        {
+            0xbfe921fb45e6d12f
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            0xbfe921fb45e6d12e
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            compile_error!("Rivet supports COS_TAB parity on x86_64 and aarch64 only (D14)")
+        }
+    });
     assert_eq!(bitexact_f64(super::atan2(3.0, 4.0)), 0x3fe497861c1ebb2e);
     assert_eq!(bitexact_f64(super::atan2(4.0, 3.0)), 0x3fedac708c699f02);
     assert_eq!(bitexact_f64(super::atan2(0.1, 0.2)), 0x3fddac64ca13863b);
@@ -923,8 +955,38 @@ fn golden_12() {
         bitexact_f64(super::atan2(12345.678, 98765.432)),
         0x3fbfd5d00b34bc34
     );
-    assert_eq!(bitexact_f64(super::atan2(0.5, 0.5)), 0x3fe921fb45e6d12e);
-    assert_eq!(bitexact_f64(super::atan2(-0.5, 0.5)), 0xbfe921fb45e6d12e);
+    assert_eq!(bitexact_f64(super::atan2(0.5, 0.5)), {
+        // ARCH-SELECTED (D14): reads COS_TAB[181]; aarch64 provenance literal,
+        // x86_64 oracle placeholder, other arches fail closed.
+        #[cfg(target_arch = "aarch64")]
+        {
+            0x3fe921fb45e6d12f
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            0x3fe921fb45e6d12e
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            compile_error!("Rivet supports COS_TAB parity on x86_64 and aarch64 only (D14)")
+        }
+    });
+    assert_eq!(bitexact_f64(super::atan2(-0.5, 0.5)), {
+        // ARCH-SELECTED (D14): reads COS_TAB[181]; aarch64 provenance literal,
+        // x86_64 oracle placeholder, other arches fail closed.
+        #[cfg(target_arch = "aarch64")]
+        {
+            0xbfe921fb45e6d12f
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            0xbfe921fb45e6d12e
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            compile_error!("Rivet supports COS_TAB parity on x86_64 and aarch64 only (D14)")
+        }
+    });
     assert_eq!(bitexact_f64(super::atan2(0.5, -0.5)), 0x4002d97c82ca78cc);
     assert_eq!(bitexact_f64(super::atan2(-0.5, -0.5)), 0xc002d97c82ca78cc);
     assert_eq!(bitexact_f64(super::atan2(0.9, 0.1)), 0x3ff75cbae9ec4fce);

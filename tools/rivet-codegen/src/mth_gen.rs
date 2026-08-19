@@ -117,11 +117,16 @@ pub fn run(bundler_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()
     if let Some(dir) = golden_out.parent() {
         fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     }
-    fs::write(
-        &golden_out,
-        render_golden(&repo_root, &parsed.vectors).context("render golden")?,
-    )
-    .with_context(|| format!("write {}", golden_out.display()))?;
+    let rendered = render_golden(&repo_root, &parsed.vectors).context("render golden")?;
+    fs::write(&golden_out, &rendered).with_context(|| format!("write {}", golden_out.display()))?;
+
+    // Fail-closed cross-check (D14): the four arch-selected atan2 rows read
+    // COS_TAB[181], which differs between x86_64 and aarch64 by 1 ULP. Verify
+    // the aarch64 expected bits asserted in the rendered golden equal what
+    // faithful atan2 arithmetic over the *committed* aarch64 COS_TAB produces,
+    // so the aarch64 branch can never silently drift from its provenance table.
+    verify_arch_selected_aarch64_bits(&repo_root, &rendered)
+        .context("arch-selected aarch64 golden cross-check")?;
 
     let sin_out = out_dir.join(SIN_REL);
     fs::write(&sin_out, render_sin(&parsed.sin))
@@ -319,6 +324,176 @@ fn render_golden(repo_root: &Path, vectors: &[String]) -> Result<String> {
     );
 
     rustfmt(repo_root, &filled).with_context(|| "rustfmt golden tests")
+}
+
+/// The four golden `atan2` rows whose expected value is arch-selected (D14):
+/// `(y, x)` and the placeholder index. Each reads COS_TAB[181], whose x86_64
+/// and aarch64 values differ by 1 ULP, so the same (y, x) yields a different
+/// last mantissa bit per arch. Both arches' expected bits must come from their
+/// own committed COS_TAB — never hand-hard-coded inconsistently.
+///
+/// `want` is the aarch64 expected magnitude bits (from the committed aarch64
+/// COS_TAB via faithful atan2); the generator verifies the rendered golden
+/// asserts exactly these for the aarch64 branch. The needle strings mirror the
+/// Rust literals emitted in the golden (`1.0`, `-1.0`, `0.5`, `-0.5`).
+const ARCH_SELECTED_ATAN2: [(usize, f64, f64, &str); 4] = [
+    (547, 1.0, 1.0, "super::atan2(1.0, 1.0)"),
+    (550, -1.0, 1.0, "super::atan2(-1.0, 1.0)"),
+    (565, 0.5, 0.5, "super::atan2(0.5, 0.5)"),
+    (566, -0.5, 0.5, "super::atan2(-0.5, 0.5)"),
+];
+
+/// Faithful `Mth.atan2` (fast inverse sqrt + 257-entry LUT), mirroring
+/// `crates/rivet-util/src/mth.rs::atan2` but parameterized on the COS_TAB so
+/// the generator can derive per-arch expected bits from each committed table.
+/// Passed ASIN is arch-independent and identical on both arches.
+fn faithful_atan2(y0: f64, x0: f64, asin: &[f64; 257], cos: &[f64; 257]) -> f64 {
+    let mut y = y0;
+    let mut x = x0;
+    let d2 = x * x + y * y;
+    if d2.is_nan() {
+        return f64::NAN;
+    }
+    let neg_y = y < 0.0;
+    if neg_y {
+        y = -y;
+    }
+    let neg_x = x < 0.0;
+    if neg_x {
+        x = -x;
+    }
+    let steep = y > x;
+    if steep {
+        // Java's `t = x; x = y; y = t` kept verbatim (see `atan2` doc).
+        #[allow(clippy::manual_swap)]
+        {
+            let t = x;
+            x = y;
+            y = t;
+        }
+    }
+    let rinv = faithful_fast_inv_sqrt(d2);
+    x *= rinv;
+    y *= rinv;
+    let yp = FRAC_BIAS + y;
+    let index = ((yp.to_bits() as i64) as i32) as usize;
+    let phi = asin[index];
+    let c_phi = cos[index];
+    let s_phi = yp - FRAC_BIAS;
+    let sd = y * c_phi - x * s_phi;
+    let d = (6.0 + sd * sd) * sd * 0.16666666666666666;
+    let mut theta = phi + d;
+    if steep {
+        theta = std::f64::consts::FRAC_PI_2 - theta;
+    }
+    if neg_x {
+        theta = std::f64::consts::PI - theta;
+    }
+    if neg_y {
+        theta = -theta;
+    }
+    theta
+}
+
+fn faithful_fast_inv_sqrt(mut x: f64) -> f64 {
+    let xhalf = 0.5 * x;
+    let mut i = x.to_bits() as i64;
+    i = 6910469410427058090i64.wrapping_sub(i >> 1);
+    x = f64::from_bits(i as u64);
+    x * (1.5 - xhalf * x * x)
+}
+
+const FRAC_BIAS: f64 = f64::from_bits(0x42b0000000000000);
+
+/// Parse a committed `[f64; 257]` table file (`f64::from_bits(0x...)` rows).
+fn read_f64_table_257(repo_root: &Path, rel: &str) -> Result<[f64; 257]> {
+    let path = repo_root.join(rel);
+    let src =
+        fs::read_to_string(&path).with_context(|| format!("read table {}", path.display()))?;
+    let mut out = [0.0f64; 257];
+    let mut n = 0;
+    for line in src.lines() {
+        let hex = line.split("0x").nth(1).and_then(|s| s.split(')').next());
+        let Some(hex) = hex else { continue };
+        let hex = hex.trim_start_matches("0x").trim();
+        if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+        let bits = u64::from_str_radix(hex, 16).context("parse f64 bits")?;
+        out[n] = f64::from_bits(bits);
+        n += 1;
+    }
+    anyhow::ensure!(n == 257, "{rel}: expected 257 entries, found {n}");
+    Ok(out)
+}
+
+/// Double-to-long-bits (canonicalize NaN like `Double.doubleToLongBits`, D14).
+fn d2l(v: f64) -> u64 {
+    if v.is_nan() {
+        0x7ff8_0000_0000_0000
+    } else {
+        v.to_bits()
+    }
+}
+
+/// Verify the aarch64 branch of each arch-selected golden row matches the
+/// faithful atan2 result over the committed aarch64 COS_TAB (+ ASIN). Fails
+/// closed so a stale/mismatched aarch64 literal is caught at generation time.
+fn verify_arch_selected_aarch64_bits(repo_root: &Path, rendered: &str) -> Result<()> {
+    let asin = read_f64_table_257(repo_root, ATAN_REL)?;
+    let cos_a64 = read_f64_table_257(repo_root, COS_A64_REL)?;
+
+    for &(idx, y, x, needle) in &ARCH_SELECTED_ATAN2 {
+        // Full canonical double-to-long bits (includes the sign bit, matching
+        // the asserted literal in the golden's aarch64 block).
+        let want = d2l(faithful_atan2(y, x, &asin, &cos_a64));
+        let ph = format!("@@{idx}@@");
+        // Locate the assertion containing this placeholder's row: the skeleton
+        // rendered (already substituted on x86_64) keeps the aarch64 literal in
+        // the block that holds the *filled* x86 value for this idx. Instead,
+        // parse the rendered block by scanning around the known assertion line.
+        // Robust approach: find the `atan2(Y, X)` call unique to this row and
+        // read the `0x...` literal in the `#[cfg(target_arch = "aarch64")]`
+        // arm right after it.
+        let pos = rendered.find(needle).ok_or_else(|| {
+            anyhow!("arch-selected row #{idx} ({needle}) not found in rendered golden")
+        })?;
+        let assert_start = rendered[..pos].rfind("assert_eq!").unwrap_or(pos);
+        let block_start = rendered[assert_start..]
+            .find("ARCH-SELECTED")
+            .ok_or_else(|| anyhow!("row #{idx} ({needle}) is not an ARCH-SELECTED golden row"))?
+            + assert_start;
+        // Within the block, find the aarch64 arm's hex literal.
+        let a64_seg = &rendered[block_start..];
+        let a64_lit = extract_aarch64_literal(a64_seg).ok_or_else(|| {
+            anyhow!("row #{idx} ({needle}) missing aarch64 literal in ARCH-SELECTED block")
+        })?;
+        anyhow::ensure!(
+            a64_lit == want,
+            "row #{idx} ({needle}): rendered aarch64 expected {a64_lit:#018x} but faithful atan2 \
+             over the committed aarch64 COS_TAB yields {want:#018x}; aarch64 COS_TAB or golden \
+             literal is stale (D14)"
+        );
+        // Also confirm the placeholder was actually filled (no residual marker).
+        anyhow::ensure!(
+            !rendered.matches(&ph).any(|_| true),
+            "row #{idx}: placeholder {ph} left unfilled in golden"
+        );
+    }
+    Ok(())
+}
+
+/// Extract the hex literal from an ARCH-SELECTED block's aarch64 arm
+/// (`#[cfg(target_arch = "aarch64")] { 0x... }`).
+fn extract_aarch64_literal(block: &str) -> Option<u64> {
+    let marker = "#[cfg(target_arch = \"aarch64\")]";
+    let start = block.find(marker)?;
+    let arm = &block[start + marker.len()..];
+    let brace = arm.find('{')?;
+    let close = arm.find('}')?;
+    let core = arm[brace + 1..close].trim();
+    let hex = core.strip_prefix("0x")?;
+    u64::from_str_radix(hex, 16).ok()
 }
 
 /// Pipe source through rustfmt (the repo toolchain) for canonical formatting.

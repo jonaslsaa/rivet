@@ -224,6 +224,25 @@ between x86_64 and aarch64. `mth-gen` therefore writes only the **host arch's**
 `mth_atan_tables.rs`, which re-exports the correctly arch-selected `COS_TAB`
 via `cfg(target_arch)`.
 
+### Arch-selected golden expected values (D14)
+
+Because `atan2` reads `COS_TAB` and that table differs by 1 ULP between x86_64
+and aarch64, the four golden rows that happen to read the differing `COS_TAB[181]`
+slot (`atan2(1,1)`, `atan2(-1,1)`, `atan2(0.5,0.5)`, `atan2(-0.5,0.5)`) have
+**arch-selected expected values**: their `rhs` is a `#[cfg(target_arch)]` block
+with an `aarch64` provenance-committed literal, an `x86_64` branch holding the
+live oracle value, and a `compile_error!` fall-through so unsupported
+architectures fail closed. Every other golden `rhs` stays a single plain
+literal (bit-exact on both arches).
+
+The skeleton keeps that block with an `@@N@@` placeholder in the `x86_64` branch;
+`mth-gen` fills it with the live x86_64 oracle value. The `aarch64` literal is
+provenance-checked at generation time: `mth-gen` computes the four `atan2`
+results with *faithful atan2 arithmetic* over the **committed aarch64 `COS_TAB`**
+(+ arch-independent `ASIN_TAB`) and hard-fails if the rendered golden's aarch64
+literal disagrees — so a stale aarch64 table or literal is caught instead of
+silently propagating.
+
 Regenerate after bumping the Paper version or correcting a golden expectation;
 a value that diverges from Java shows up as a `git diff` hunk to review.
 

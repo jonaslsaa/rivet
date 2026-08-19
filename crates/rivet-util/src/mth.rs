@@ -814,8 +814,15 @@ pub fn inverse_lerp_f32(value: f32, min: f32, max: f32) -> f32 {
 /// `Mth.atan2(double y, double x)` — the table-based implementation from
 /// `Mth.java` (fast inverse sqrt + 257-entry asin/cos LUT). Never `f64::atan2`.
 pub fn atan2(y: f64, x: f64) -> f64 {
-    let mut y = y;
-    let mut x = x;
+    atan2_with_tables(y, x, &ASIN_TAB, &COS_TAB)
+}
+
+/// The atan2 core with an explicit ASIN_TAB/COS_TAB pair, so tests can drive it
+/// against BOTH committed per-arch COS_TAB modules (D14) to pin the arch-sensitive
+/// expected bits without depending on the compile-time `cfg(target_arch)` selector.
+fn atan2_with_tables(y0: f64, x0: f64, asin: &[f64; 257], cos: &[f64; 257]) -> f64 {
+    let mut y = y0;
+    let mut x = x0;
     let d2 = x * x + y * y;
     if d2.is_nan() {
         return f64::NAN;
@@ -846,8 +853,8 @@ pub fn atan2(y: f64, x: f64) -> f64 {
     // `longBitsToDouble`/`as` on the sign+exponent+high-mantissa bits keeps
     // index in [0, 256] for the 257-entry LUT.
     let index = ((yp.to_bits() as i64) as i32) as usize;
-    let phi = ASIN_TAB[index];
-    let c_phi = COS_TAB[index];
+    let phi = asin[index];
+    let c_phi = cos[index];
     let s_phi = yp - FRAC_BIAS;
     let sd = y * c_phi - x * s_phi;
     let d = (6.0 + sd * sd) * sd * 0.16666666666666666;
@@ -1472,5 +1479,111 @@ mod tests {
         assert!(min_f64(f64::NAN, 1.0).is_nan());
         assert!(min_f64(1.0, f64::NAN).is_nan());
         assert!(min_f64(f64::NAN, f64::NAN).is_nan());
+    }
+
+    // Both per-arch COS_TAB modules are unconditionally compiled at the crate
+    // root (see `lib.rs`), so on any host — including this x86_64 one — both
+    // variants are represented. These tests drive the table-parameterized
+    // `atan2` core against each to pin that the four arch-selected golden rows
+    // really do depend on the selected COS_TAB.
+    fn atan2_bits_with(y: f64, x: f64, cos: &[f64; 257]) -> u64 {
+        Some(super::atan2_with_tables(y, x, &super::ASIN_TAB, cos))
+            .map(|v| {
+                if v.is_nan() {
+                    0x7ff8000000000000
+                } else {
+                    v.to_bits()
+                }
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn atan2_x86_and_aarch64_tables_differ_at_index_181() {
+        // The four arch-sensitive golden rows all read COS_TAB[181], and the two
+        // committed tables differ exactly there (by the last mantissa bit).
+        let x86 = &crate::mth_cos_tab_x86_64::COS_TAB;
+        let a64 = &crate::mth_cos_tab_aarch64::COS_TAB;
+        assert_eq!(
+            x86[181].to_bits(),
+            0x3fe6a13cc8a9b946,
+            "committed x86_64 COS_TAB[181] must match the provenance value"
+        );
+        assert_eq!(
+            a64[181].to_bits(),
+            0x3fe6a13cc8a9b947,
+            "committed aarch64 COS_TAB[181] must match the provenance value"
+        );
+    }
+
+    #[test]
+    fn atan2_arch_sensitive_four_rows_differ_by_low_bit() {
+        let x86 = &crate::mth_cos_tab_x86_64::COS_TAB;
+        let a64 = &crate::mth_cos_tab_aarch64::COS_TAB;
+        let cases: &[(f64, f64)] = &[(1.0, 1.0), (-1.0, 1.0), (0.5, 0.5), (-0.5, 0.5)];
+        for &(y, x) in cases {
+            let bx = atan2_bits_with(y, x, x86);
+            let ba = atan2_bits_with(y, x, a64);
+            assert_ne!(
+                bx, ba,
+                "atan2({y}, {x}) must differ between x86_64 ({bx:#018x}) and aarch64 ({ba:#018x}) COS_TAB"
+            );
+            // The difference is confined to the last mantissa bit (1 ULP).
+            assert!(
+                (bx ^ ba).count_ones() <= 1,
+                "expected at most a 1-ULP difference, got diff={:#018x}",
+                bx ^ ba
+            );
+        }
+    }
+
+    #[test]
+    fn atan2_unchanged_rows_are_bit_identical_across_arches() {
+        let x86 = &crate::mth_cos_tab_x86_64::COS_TAB;
+        let a64 = &crate::mth_cos_tab_aarch64::COS_TAB;
+        // Non-NaN golden atan2 rows that must NOT depend on the arch COS_TAB
+        // selection (verified by faithful atan2 arithmetic + committed tables).
+        let cases: &[(f64, f64)] = &[
+            (0.0, 0.0),
+            (0.0, 1.0),
+            (1.0, 0.0),
+            (-1.0, 0.0),
+            (0.0, -1.0),
+            (-1.0, -1.0),
+            (1.0, -1.0),
+            (3.0, 4.0),
+            (4.0, 3.0),
+            (0.1, 0.2),
+            (-0.1, 0.2),
+            (0.1, -0.2),
+            (-0.1, -0.2),
+            (0.9, 0.1),
+            (0.1, 0.9),
+            (10.0, 1.0),
+            (1.0, 10.0),
+            (-10.0, 1.0),
+            (1.0, -10.0),
+            (1000.0, -0.001),
+            (-0.001, 1000.0),
+            (1.0E-300, 1.0E-300),
+            (12345.678, 98765.432),
+        ];
+        for &(y, x) in cases {
+            let bx = atan2_bits_with(y, x, x86);
+            let ba = atan2_bits_with(y, x, a64);
+            assert_eq!(
+                bx, ba,
+                "atan2({y}, {x}) must be bit-identical across the two COS_TAB variants"
+            );
+        }
+    }
+
+    #[test]
+    fn atan2_x86_host_expected_oracle_bits() {
+        let x86 = &crate::mth_cos_tab_x86_64::COS_TAB;
+        assert_eq!(atan2_bits_with(1.0, 1.0, x86), 0x3fe921fb45e6d12e);
+        assert_eq!(atan2_bits_with(-1.0, 1.0, x86), 0xbfe921fb45e6d12e);
+        assert_eq!(atan2_bits_with(0.5, 0.5, x86), 0x3fe921fb45e6d12e);
+        assert_eq!(atan2_bits_with(-0.5, 0.5, x86), 0xbfe921fb45e6d12e);
     }
 }
