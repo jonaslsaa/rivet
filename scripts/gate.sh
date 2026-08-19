@@ -119,6 +119,7 @@ _script_dir="${BASH_SOURCE[0]%/*}"
 REPO_DIR="$(cd "$_script_dir/.." && pwd)"
 
 # shellcheck source=scripts/cargo-target-dir.sh
+# shellcheck disable=SC1091  # sources a sibling script; shellcheck only follows it with -x
 source "$REPO_DIR/scripts/cargo-target-dir.sh"
 
 resolved_target_dir_for() {

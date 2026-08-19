@@ -44,18 +44,18 @@ pass "tools workspace metadata resolves the canonical target"
 
 nested_target="$REPO_DIR/target-agent-shared"
 mkdir -p "$nested_target"
-[ "$(cd "$REPO_DIR" && "$REPO_DIR/scripts/with-build-lock.sh" "$REPO_DIR" env -u CARGO_TARGET_DIR \
+[ "$(cd "$REPO_DIR" && env -u CARGO_TARGET_DIR "$REPO_DIR/scripts/with-build-lock.sh" "$REPO_DIR" \
     cargo metadata --locked --no-deps --format-version 1 --manifest-path "$REPO_DIR/Cargo.toml" \
     | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')" = "$EXPECTED" ] \
   || fail "nested worktree metadata resolved a different target"
 pass "nested worktree metadata resolves the canonical target"
 
-[ "$(cd /private/tmp && "$REPO_DIR/scripts/with-build-lock.sh" "$REPO_DIR" \
+[ "$(cd /tmp && "$REPO_DIR/scripts/with-build-lock.sh" "$REPO_DIR" \
     env CARGO_TARGET_DIR="$EXPECTED" cargo metadata --locked --no-deps --format-version 1 \
     --manifest-path "$REPO_DIR/tools/rivet-client/Cargo.toml" \
     | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')" = "$EXPECTED" ] \
-  || fail "/private/tmp invocation resolved a different target"
-pass "/private/tmp invocation resolves the canonical target through the environment"
+  || fail "out-of-repo invocation resolved a different target"
+pass "out-of-repo invocation resolves the canonical target through the environment"
 
 relative_log=$(mktemp)
 if CARGO_TARGET_DIR=relative-target "$REPO_DIR/scripts/with-build-lock.sh" "$REPO_DIR" \

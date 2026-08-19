@@ -88,14 +88,14 @@ grep -q -- "test --locked --bin run-scenario" "$CARGO_LOG" || fail "loaded-world
 pass "the runner's own unit tests run before the scenario"
 
 # The script resolves both manifests from its own location, so changing cwd to
-# the macOS /private/tmp spelling must not send execution back to a stale local
-# target/debug path.
+# a directory outside the repo (here /tmp; on macOS /private/tmp) must not send
+# execution back to a stale local target/debug path.
 (
-  cd /private/tmp
+  cd /tmp
   run_wrapper loaded-world
 )
-grep -qx loaded-world "$SCENARIO_ARGV_LOG" || fail "invocation from /private/tmp did not reach the resolved binary"
-pass "invocation from /private/tmp uses the resolved target directory"
+grep -qx loaded-world "$SCENARIO_ARGV_LOG" || fail "invocation from an out-of-repo directory did not reach the resolved binary"
+pass "invocation from an out-of-repo directory uses the resolved target directory"
 
 # An unlocked standalone invocation acquires the same lock that the gate owns;
 # the locked path above bypasses acquisition and therefore cannot deadlock.

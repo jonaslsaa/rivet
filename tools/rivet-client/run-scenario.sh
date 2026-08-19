@@ -11,6 +11,7 @@ fi
 # Resolve before the first Cargo command so both the nested tool workspace and
 # the main workspace use the same target, even when invoked outside the repo.
 # shellcheck source=scripts/cargo-target-dir.sh
+# shellcheck disable=SC1091  # sources a sibling script; shellcheck only follows it with -x
 source "$repo_dir/scripts/cargo-target-dir.sh"
 resolved_target_dir="$(cargo_target_dir_for "$repo_dir")"
 export CARGO_TARGET_DIR="$resolved_target_dir"
