@@ -23,6 +23,8 @@ fail() { echo "FAIL: $1"; exit 1; }
 pass() { echo "ok:   $1"; }
 
 # --- source gate.sh with the real repo only to load its functions -------------
+# shellcheck source=scripts/gate.sh
+# shellcheck disable=SC1091  # sources a sibling script; shellcheck only follows it with -x
 source "$SCRIPT_DIR/gate.sh"
 if [ -z "${REQUIRE_ORACLE:-}" ] && [ -z "${VERIFY_RUNNABLE:-}" ]; then
   fail "gate.sh did not define its globals (was it executed instead of sourced?)"
