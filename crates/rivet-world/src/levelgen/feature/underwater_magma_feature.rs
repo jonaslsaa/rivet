@@ -11,7 +11,9 @@
 //! X/Y/Z-major order, and for every cell where `random.nextFloat() <
 //! placementProbabilityPerValidPosition` places `MAGMA_BLOCK` when the cell is
 //! a valid placement (a non-water/non-air cell whose faces are not visible from
-//! outside). The feature returns `true` iff at least one cell was placed.
+//! outside, judged per direction via Paper's exact
+//! `isShapeFullBlock(getFaceOcclusionShape)` verdict). The feature returns
+//! `true` iff at least one cell was placed.
 //!
 //! The scan is ported through the `WorldGenLevel::is_state_at_position` seam
 //! (the `LevelReader.isStateAtPosition` Java call `Column.scan` performs) and
@@ -205,43 +207,25 @@ fn is_water_or_air(state: BlockState) -> bool {
 ///     || !Block.isShapeFullBlock(faceOcclusionShape);
 /// ```
 ///
-/// RivetTodo(#232, mc.world.phys.shapes): the `VoxelShape`/`Shapes` world
-/// (`world.phys.shapes` manifest unit, still pending) is not ported, so the
-/// per-direction `getFaceOcclusionShape(...).getFaceShape(dir)` case cannot be
-/// computed faithfully here. The seam below uses `!state.solid_render()` — the
-/// exact value of Paper's cached `Block.isShapeFullBlock(occlusionShape)` for
-/// the two full-occlusion cases:
-///
-/// * `getFaceOcclusionShape` returns `EMPTY_OCCLUSION_SHAPES` (i.e.
-///   `Shapes.empty()`, so "visible from outside") exactly when the full
-///   occlusion shape is empty — `!canOcclude()`. For such blocks `solid_render`
-///   is `false`, so `!solid_render()` is `true`, matching.
-/// * `getFaceOcclusionShape` returns `FULL_BLOCK_OCCLUSION_SHAPES` exactly when
-///   `isSolidRender()`, so "not visible from outside" (`isShapeFullBlock` true).
-///   For such blocks `solid_render` is `true`, so `!solid_render()` is `false`,
-///   matching.
-///
-/// The seam diverges ONLY for partial-occlusion blocks — `can_occlude` but not
-/// `solid_render` (in this model the shelves, piston heads, slabs, stairs,
-/// walls and fences, whose occlusion shape is non-empty but not a full block on
-/// every face), where Java consults the per-direction
-/// `occlusionShape.getFaceShape(dir)` and the verdict is direction-dependent.
-/// The seam answers those cells "visible from outside" on every face
-/// (`!solid_render()` is `true`), which is the conservative rejection: such a
-/// cell fails `is_valid_placement`, so magma is not placed on a partially
-/// occluding neighbour. This is a documented divergence, not a silent
-/// fabrication — the pending `mc.world.phys.shapes` unit owns the real
-/// `VoxelShape` model and must replace this seam. (Leaves are NOT in this
-/// divergence class in this model: `minecraft:oak_leaves`'s behavior word
-/// `0x4701C2` has `can_occlude` false, so Java's `getFaceOcclusionShape`
-/// returns `Shapes.empty()` and the seam's `!solid_render()` matches exactly.)
+/// Paper's `occlusionShapesByFace[direction]` is, after `initCache`,
+/// `EMPTY_OCCLUSION_SHAPES` when the full occlusion shape is empty, or
+/// `FULL_BLOCK_OCCLUSION_SHAPES` when `isSolidRender()`, or otherwise the
+/// exact `occlusionShape.getFaceShape(direction)`. Java's visible-from-outside
+/// verdict is therefore, per direction, `!Block.isShapeFullBlock(
+/// getFaceOcclusionShape(direction))` — exactly the per-direction bit the
+/// #653 occlusion query (`WorldGenLevel::is_occlusion_face_full`, which in turn
+/// answers `occlusion_face_mask` from the pinned probe data) provides. This is
+/// the faithful per-direction verdict for every case (empty/full/partial
+/// occlusion), so the earlier `!solid_render()` shortcut (which was wrong for
+/// partial-occlusion faces) is replaced by the dynamic shape support/occlusion
+/// facilities from #653.
 fn is_visible_from_outside(
     level: &dyn WorldGenLevel,
     pos: &BlockPos,
-    _covered_direction: &Direction,
+    covered_direction: &Direction,
 ) -> bool {
     let state = level.get_block_state(pos);
-    !state.solid_render()
+    !level.is_occlusion_face_full(pos, &state, covered_direction)
 }
 
 #[cfg(test)]
@@ -548,25 +532,20 @@ mod tests {
         assert_eq!(random.calls, vec![RngCall::Float]);
     }
 
-    /// The conservative partial-occlusion seam: a real partial-occlusion block
-    /// (`minecraft:oak_shelf`, `can_occlude` but not `solid_render` in this
-    /// model) as a horizontal neighbour is answered "visible from outside" by
-    /// the `!solid_render()` seam, so the candidate is rejected — the
-    /// documented conservative divergence until `mc.world.phys.shapes` lands.
-    /// (A faithful per-direction `getFaceShape` verdict could accept the cell;
-    /// this test pins the seam's conservative answer, not a fabricated match.)
+    /// A partial-occlusion block whose face toward the candidate is NOT full
+    /// leaves that face visible from outside, so the candidate is rejected. As
+    /// the EAST neighbour of the floor cell, `minecraft:oak_shelf`'s West face
+    /// (`getFaceOcclusionShape`, occ_mask = South only) is not a full block, so
+    /// `isVisibleFromOutside` is true and the cell fails validity — the exact
+    /// per-direction verdict, not the whole-block conservative shortcut.
     #[test]
-    fn partial_occlusion_neighbour_is_conservatively_rejected() {
+    fn partial_occlusion_non_full_face_is_visible() {
         let oak_shelf = BlockState::of(BlockId::from_name("minecraft:oak_shelf").unwrap());
-        // Guard the seam premise: oak_shelf is genuinely a partial-occlusion
-        // default in this model — if the generated behavior tables ever change
-        // this, the seam's divergence class needs re-examining.
-        assert!(oak_shelf.can_occlude());
         assert!(!oak_shelf.solid_render());
 
         let mut level = water_on_stone_level();
         // Floor (0,9,0) with solid below and three solid horizontal neighbours;
-        // the east neighbour is the oak_shelf.
+        // the east neighbour is the oak_shelf (West face not full).
         level.states.insert(BlockPos::new(0, 8, 0), stone());
         for neighbour in Plane::Horizontal.faces() {
             if *neighbour != Direction::East {
@@ -581,6 +560,186 @@ mod tests {
         let (verdict, _random) = place_with(&mut level, BlockPos::new(0, 10, 0), &config);
         assert!(!verdict);
         assert!(level.writes.is_empty());
+    }
+
+    /// Mixed `0 < p < 1` on a fully-solid box: every cell draws exactly one
+    /// `nextFloat` (consume-before-validate, so 27 draws for the 27-cell box),
+    /// and the cells that survive BOTH the probability filter and the
+    /// placement-validity check are written in box order. The deterministic
+    /// seed-42 draw sequence decides which cells pass the `nextFloat < 0.5`
+    /// filter; the written positions pin that surviving set AND the
+    /// consume-before-validate interleaving (a rejected cell still drew, so the
+    /// count is 27 even though only 13 write). The `reads` log pins the
+    /// interleaving at the other seam: each cell's placement-validity world
+    /// reads (`pos`, `pos.below()`, and the four horizontal neighbours) are
+    /// interleaved between the RNG draws, so a `nextFloat` is consumed before
+    /// the validity world reads for every cell — the exact Java stream
+    /// `.filter(...).filter(...)` order.
+    #[test]
+    fn mixed_probability_interleaves_draws_before_validity_reads() {
+        // Full-solid box radius 1 around floor at (0,9,0) + halo — the same
+        // geometry as `writes_every_valid_cell_in_box_order`, but filtered by
+        // p=0.5 instead of 1.0.
+        let mut level = TestLevel::over(access());
+        fill_stone(
+            &mut level,
+            BlockPos::new(-2, 8, -2),
+            BlockPos::new(2, 10, 2),
+        );
+        fill_stone(&mut level, BlockPos::new(-1, 7, -1), BlockPos::new(1, 7, 1));
+        level.states.insert(BlockPos::new(0, 10, 0), water());
+        level.states.insert(BlockPos::new(0, 11, 0), water());
+
+        let config = UnderwaterMagmaConfiguration::new(10, 1, 0.5);
+        let (verdict, random) = place_with(&mut level, BlockPos::new(0, 11, 0), &config);
+
+        assert!(verdict);
+        // One `nextFloat` per box cell, in box order — all consumed before the
+        // validity check, so rejected cells still drew.
+        assert_eq!(random.calls, vec![RngCall::Float; 27]);
+
+        // The seed-42 deterministic surviving set, in box order: the cells that
+        // pass both the p=0.5 filter and validity. (Determined by the pinned
+        // LegacyRandomSource seed 42; the count 13 < 27 over the same geometry
+        // as the p=1.0 test above pins the probability filter removing cells.)
+        let expected = vec![
+            BlockPos::new(0, 8, -1),
+            BlockPos::new(-1, 9, -1),
+            BlockPos::new(0, 9, -1),
+            BlockPos::new(-1, 10, -1),
+            BlockPos::new(-1, 8, 0),
+            BlockPos::new(1, 8, 0),
+            BlockPos::new(-1, 9, 0),
+            BlockPos::new(0, 9, 0),
+            BlockPos::new(1, 9, 0),
+            BlockPos::new(-1, 9, 1),
+            BlockPos::new(0, 9, 1),
+            BlockPos::new(1, 9, 1),
+            BlockPos::new(1, 10, 1),
+        ];
+        let positions: Vec<BlockPos> = level.writes.iter().map(|(pos, _)| *pos).collect();
+        assert_eq!(positions, expected);
+        for (_, state) in &level.writes {
+            assert_eq!(state.block(), Blocks::MAGMA_BLOCK.id());
+        }
+        assert!(level.writes_flags.iter().all(|&f| f == UPDATE_CLIENTS));
+
+        // Interleaving: the `Column.scan` floor reads (8 reads) come FIRST and
+        // consume no RNG—the floor search completes before the box loop draws.
+        // Then, per box cell in X/Y/Z-major order, the RNG draws once BEFORE
+        // the placement-validity world reads. A cell that the probability
+        // filter rejects (float >= p) performs NO validity reads — its draw was
+        // consumed but the stream short-circuited before the second `.filter`
+        // — while a cell that survives the filter performs its validity reads
+        // (own position, below, then horizontal faces until the first visible
+        // face). The exact seed-42 log below pins this interleaving read-by-read
+        // against the draw sequence: the reads are grouped by box cell in box
+        // order, each group preceded by one `nextFloat`, and rejected cells
+        // contribute no reads.
+        //
+        // To keep the log readable we assert the full deterministic read log
+        // (floor-scan prefix + box-validity reads) exactly. The floor-scan
+        // prefix is the same 8-read sequence the hostile
+        // `hostile_column_scan_read_log_is_paper_order` test pins; the box
+        // groups follow the seed-42 filtered cell set.
+        let reads: Vec<BlockPos> = level.reads.borrow().clone();
+        // The exact deterministic read log (dumped from this test's fixed
+        // geometry and seed 42). The 8-read floor-scan prefix matches the
+        // hostile `hostile_column_scan_read_log_is_paper_order` sequence; the
+        // box groups then interleave one draw per cell with that cell's
+        // validity reads, with probability-rejected cells contributing no reads.
+        assert_eq!(
+            reads,
+            [
+                BlockPos::new(0, 11, 0),
+                BlockPos::new(0, 11, 0),
+                BlockPos::new(0, 12, 0),
+                BlockPos::new(0, 12, 0),
+                BlockPos::new(0, 11, 0),
+                BlockPos::new(0, 10, 0),
+                BlockPos::new(0, 9, 0),
+                BlockPos::new(0, 9, 0),
+                BlockPos::new(0, 8, -1),
+                BlockPos::new(0, 7, -1),
+                BlockPos::new(0, 8, -2),
+                BlockPos::new(1, 8, -1),
+                BlockPos::new(0, 8, 0),
+                BlockPos::new(-1, 8, -1),
+                BlockPos::new(-1, 9, -1),
+                BlockPos::new(-1, 8, -1),
+                BlockPos::new(-1, 9, -2),
+                BlockPos::new(0, 9, -1),
+                BlockPos::new(-1, 9, 0),
+                BlockPos::new(-2, 9, -1),
+                BlockPos::new(0, 9, -1),
+                BlockPos::new(0, 8, -1),
+                BlockPos::new(0, 9, -2),
+                BlockPos::new(1, 9, -1),
+                BlockPos::new(0, 9, 0),
+                BlockPos::new(-1, 9, -1),
+                BlockPos::new(-1, 10, -1),
+                BlockPos::new(-1, 9, -1),
+                BlockPos::new(-1, 10, -2),
+                BlockPos::new(0, 10, -1),
+                BlockPos::new(-1, 10, 0),
+                BlockPos::new(-2, 10, -1),
+                BlockPos::new(-1, 8, 0),
+                BlockPos::new(-1, 7, 0),
+                BlockPos::new(-1, 8, -1),
+                BlockPos::new(0, 8, 0),
+                BlockPos::new(-1, 8, 1),
+                BlockPos::new(-2, 8, 0),
+                BlockPos::new(1, 8, 0),
+                BlockPos::new(1, 7, 0),
+                BlockPos::new(1, 8, -1),
+                BlockPos::new(2, 8, 0),
+                BlockPos::new(1, 8, 1),
+                BlockPos::new(0, 8, 0),
+                BlockPos::new(-1, 9, 0),
+                BlockPos::new(-1, 8, 0),
+                BlockPos::new(-1, 9, -1),
+                BlockPos::new(0, 9, 0),
+                BlockPos::new(-1, 9, 1),
+                BlockPos::new(-2, 9, 0),
+                BlockPos::new(0, 9, 0),
+                BlockPos::new(0, 8, 0),
+                BlockPos::new(0, 9, -1),
+                BlockPos::new(1, 9, 0),
+                BlockPos::new(0, 9, 1),
+                BlockPos::new(-1, 9, 0),
+                BlockPos::new(1, 9, 0),
+                BlockPos::new(1, 8, 0),
+                BlockPos::new(1, 9, -1),
+                BlockPos::new(2, 9, 0),
+                BlockPos::new(1, 9, 1),
+                BlockPos::new(0, 9, 0),
+                BlockPos::new(0, 10, 0),
+                BlockPos::new(-1, 9, 1),
+                BlockPos::new(-1, 8, 1),
+                BlockPos::new(-1, 9, 0),
+                BlockPos::new(0, 9, 1),
+                BlockPos::new(-1, 9, 2),
+                BlockPos::new(-2, 9, 1),
+                BlockPos::new(0, 9, 1),
+                BlockPos::new(0, 8, 1),
+                BlockPos::new(0, 9, 0),
+                BlockPos::new(1, 9, 1),
+                BlockPos::new(0, 9, 2),
+                BlockPos::new(-1, 9, 1),
+                BlockPos::new(1, 9, 1),
+                BlockPos::new(1, 8, 1),
+                BlockPos::new(1, 9, 0),
+                BlockPos::new(2, 9, 1),
+                BlockPos::new(1, 9, 2),
+                BlockPos::new(0, 9, 1),
+                BlockPos::new(1, 10, 1),
+                BlockPos::new(1, 9, 1),
+                BlockPos::new(1, 10, 0),
+                BlockPos::new(2, 10, 1),
+                BlockPos::new(1, 10, 2),
+                BlockPos::new(0, 10, 1),
+            ]
+        );
     }
 
     /// The verdict is `false` when the box draws but no cell survives the
@@ -652,5 +811,52 @@ mod tests {
         assert!(!verdict);
         assert!(random.calls.is_empty());
         assert!(level.writes.is_empty());
+    }
+
+    /// A partial-occlusion block with a FULL occlusion face across a face still
+    /// occludes that face: `minecraft:oak_shelf` is `can_occlude` but not
+    /// `solid_render`, and its `getFaceOcclusionShape(SOUTH)` returns a full
+    /// block shape while its other faces do not (occ_mask = South only). As the
+    /// NORTH neighbour of the floor cell, its South face closes the floor cell,
+    /// so the exact per-direction occlusion verdict accepts the placement — the
+    /// old `!solid_render()` shortcut would have answered "visible from
+    /// outside" on every face and rejected it. This pins that the seam now
+    /// computes Paper's exact per-direction `isShapeFullBlock(
+    /// getFaceOcclusionShape(dir))` instead of the whole-block conservative
+    /// shortcut.
+    #[test]
+    fn partial_occlusion_full_face_still_occludes() {
+        let oak_shelf = BlockState::of(BlockId::from_name("minecraft:oak_shelf").unwrap());
+        // Guard the seam premise: oak_shelf is genuinely a partial-occlusion
+        // block whose South occlusion face is full in this model's generated
+        // tables — if the behavior tables ever change this, the test's premise
+        // needs re-examining.
+        assert!(!oak_shelf.solid_render());
+        let full_faces = oak_shelf.occlusion_face_mask();
+        // South (bit 3) full, exactly one full face expected.
+        assert_eq!(full_faces, 1 << Direction::South.get_3d_data_value() as u8);
+
+        let mut level = water_on_stone_level();
+        level.states.insert(BlockPos::new(0, 8, 0), stone());
+        for neighbour in Plane::Horizontal.faces() {
+            if *neighbour != Direction::North {
+                level
+                    .states
+                    .insert(BlockPos::new(0, 9, 0).relative(neighbour), stone());
+            }
+        }
+        level.states.insert(BlockPos::new(0, 9, -1), oak_shelf);
+
+        let config = UnderwaterMagmaConfiguration::new(10, 0, 1.0);
+        let (verdict, random) = place_with(&mut level, BlockPos::new(0, 10, 0), &config);
+        assert!(verdict);
+        assert_eq!(
+            level.writes,
+            vec![(
+                BlockPos::new(0, 9, 0),
+                Blocks::MAGMA_BLOCK.default_block_state()
+            )]
+        );
+        assert_eq!(random.calls, vec![RngCall::Float]);
     }
 }
