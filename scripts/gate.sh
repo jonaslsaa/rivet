@@ -218,7 +218,7 @@ oracle_prereq_check() {
   if [ -n "${RIVET_CLIENT_BIN:-}" ] && [ -f "${RIVET_CLIENT_BIN}" ]; then
     CLIENT_BIN="$RIVET_CLIENT_BIN"
   else
-    client_target_dir="$(resolved_target_dir_for "$REPO_DIR/tools/rivet-client/Cargo.toml")"
+    client_target_dir="$(resolved_target_dir_for)"
     client_candidate="$client_target_dir/debug/rivet-client"
     if [ -f "$client_candidate" ]; then
       CLIENT_BIN="$client_candidate"
