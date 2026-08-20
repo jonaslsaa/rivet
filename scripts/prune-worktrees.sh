@@ -155,17 +155,6 @@ canonical_dir() { # $1 = path; canonical absolute path if it is a real dir, else
   cd "$r" 2>/dev/null && pwd -P
 }
 
-canonical_path() {
-  local candidate=$1 parent base
-  if [ -d "$candidate" ]; then
-    canonical_dir "$candidate"
-    return
-  fi
-  parent=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || return 0
-  base=$(basename "$candidate")
-  printf '%s/%s\n' "$parent" "$base"
-}
-
 has_preserved_work() {
   local work_dir
   [ -d "$1/tools" ] || return 1
