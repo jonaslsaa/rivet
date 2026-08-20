@@ -188,6 +188,12 @@ impl SkyLightProvider {
         chunk: &mut ChunkAccess<StateId, ServerBiomeId, StructureKey>,
         empty_sections: &[Option<bool>],
     ) -> Result<(), LightProviderError> {
+        // Restore any neighbour a previous run took but could not put back
+        // (a storage callback panicked mid-put). The value bridge calls this
+        // directly and never goes through the position seams that flush these,
+        // so a stranded chunk from a failed bridge run must be returned to its
+        // original slot before the next run — never left owned by the provider.
+        self.flush_pending_restores()?;
         let mut accessor = CallbackAccessor {
             chunks: &mut self.chunks,
             taken: HashMap::new(),
@@ -292,6 +298,9 @@ impl SkyLightProvider {
         chunk: &mut ChunkAccess<StateId, ServerBiomeId, StructureKey>,
         empty_sections: &[Option<bool>],
     ) -> Result<(), LightProviderError> {
+        // Same invariants as [`Self::light_chunk_with`]: return any chunk a
+        // previous run stranded before this run begins.
+        self.flush_pending_restores()?;
         let mut accessor = CallbackAccessor {
             chunks: &mut self.chunks,
             taken: HashMap::new(),
@@ -784,6 +793,74 @@ mod tests {
             .try_light_chunk(ChunkPos::ZERO, &superflat_empty_sections())
             .expect("retry after storage repair succeeds");
         assert!(shared.lock().unwrap().contains_key(&(0, 0)));
+    }
+
+    /// A neighbour whose put callback panicked on one run is stranded in
+    /// `pending_restores` (the centre's put retained it). The *value bridge*
+    /// calls `light_chunk_with` directly — which now flushes pending restores
+    /// before the next run — so a retry returns the stranded neighbour to its
+    /// original slot before lighting again. This is the bridge-retry resource
+    /// invariant the reviewer flagged.
+    #[test]
+    fn light_chunk_with_flushes_a_stranded_neighbour_before_the_next_run() {
+        // Panic once when putting the neighbour back; the centre's own put is
+        // on the caller's storage too, so the one-time panic strands whichever
+        // put arrives first. The centre must remain present for the retry.
+        let first_put = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut storage = HashMap::new();
+        let center = ChunkPos::new(0, 0);
+        storage.insert((center.x(), center.z()), superflat_chunk(center));
+        let mut neighbour = superflat_chunk(ChunkPos::new(1, 0));
+        neighbour.set_light_correct(true);
+        storage.insert((1, 0), neighbour);
+        let (closure_fn, shared) = {
+            let first_put = Arc::clone(&first_put);
+            let shared = Arc::new(Mutex::new(storage));
+            let closure_shared = Arc::clone(&shared);
+            let closure: ChunkAccessFn = Box::new(move |x, z, put| {
+                if put.is_some() && first_put.swap(false, Ordering::SeqCst) {
+                    panic!("put callback failed once");
+                }
+                let mut storage = closure_shared.lock().unwrap();
+                if let Some(slot) = put {
+                    if let Some(chunk) = slot.take() {
+                        storage.insert((x, z), chunk);
+                    }
+                    None
+                } else {
+                    storage.remove(&(x, z))
+                }
+            });
+            (closure, shared)
+        };
+        let mut provider = SkyLightProvider::new(overworld(), true, true, closure_fn);
+        let mut chunk = superflat_chunk(center);
+
+        // First run: one put panics and strands its chunk in pending_restores.
+        assert_eq!(
+            provider.light_chunk_with(&mut chunk, &superflat_empty_sections()),
+            Err(LightProviderError::CallbackPanicked)
+        );
+        assert_eq!(provider.pending_restores.len(), 1);
+
+        // Retry through the same value path: the stranded neighbour is flushed
+        // and put back into the caller's storage before the next run begins.
+        provider
+            .light_chunk_with(&mut chunk, &superflat_empty_sections())
+            .expect("retry succeeds");
+        let map = shared.lock().unwrap();
+        assert!(
+            map.contains_key(&(0, 0)),
+            "centre restored to its original slot"
+        );
+        assert!(
+            map.contains_key(&(1, 0)),
+            "stranded neighbour returned to its original slot"
+        );
+        assert!(
+            provider.pending_restores.is_empty(),
+            "no chunk remains owned by the provider"
+        );
     }
 
     /// A light-correct neighbour present in the caller's storage is resolved by
