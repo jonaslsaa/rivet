@@ -38,6 +38,11 @@ The canonical translation guide. Every implementer and reviewer prompt includes 
 ## Minecraft-specific
 
 - **RNG parity is sacred.** `LegacyRandomSource` (java.util.Random LCG), `XoroshiroRandomSource`, and `Mth.sin`'s 65536-entry lookup table are ported bit-exactly in `rivet-util` with golden tests against Java-generated fixtures. Never substitute `rand` or `f32::sin` in gameplay/worldgen code.
+- **`Mth` transcendentals (`COS_TAB`/`ASIN_TAB`) are native-platform parity (D14).** Paper 26.2 builds them at class-init time with `java.lang.Math.cos`/`Math.asin`. The resulting `COS_TAB` differs by up to 1 ULP between x86_64 and aarch64 — exactly 11 of its 257 entries — while `ASIN_TAB` is bit-identical.
+  - Rivet carries **independently generated, compile-time selected per-architecture `COS_TAB` variants** and matches **native Paper per supported platform**, not a single cross-platform constant. `ASIN_TAB` is shared because it is bit-identical on both supported architectures. x86_64 Linux with Temurin 25 is the primary development/release-gate target; aarch64 stays supported and must have its own verified generated `COS_TAB`.
+  - Canonicalize floating golden bits with `Float.floatToIntBits`/`Double.doubleToLongBits` semantics (canonical NaN, every non-NaN bit exact), matching the oracle.
+  - **`Math.min`/`Math.max` return the first operand for same-sign zero pairs.** For mixed-sign zeroes, `max` returns `+0.0` and `min` returns `-0.0`; port with explicit sign bits, never Rust's `f32::min`, `f32::max`, `f64::min`, or `f64::max`.
+  - **Never** substitute `StrictMath` and **never hand-edit** a generated table. Regenerate on each target via the fail-closed codegen path (host-architecture-only writes, provenance-checked aarch64 table, `compile_error!` on unsupported architectures).
 - Hashing used in game logic (e.g. `String.hashCode`, position hashes) is ported exactly — Java's `hashCode` algorithms live in `rivet-util::java_hash`.
 - Codec/DataFixerUpper: `rivet-serialization` ports the DFU Codec API shape (MIT). External formats (JSON datapacks, configs) may use `serde` underneath, but Codec semantics (error accumulation, partial results) are preserved.
 - NBT: `rivet-nbt`, ported types + SNBT; golden round-trip tests against real region files.

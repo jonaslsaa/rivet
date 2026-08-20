@@ -307,8 +307,9 @@ the **container** schema (`starts`/`References`) is current.
 
 Keys are `Heightmap.Types.getSerializationKey()` (Heightmap.java L144-172):
 `WORLD_SURFACE_WG`, `WORLD_SURFACE`, `OCEAN_FLOOR_WG`, `OCEAN_FLOOR`,
-`MOTION_BLOCKING`, `MOTION_BLOCKING_NO_LEAVES`. Values are long arrays
-(`getRawData`, 256 entries).
+`MOTION_BLOCKING`, `MOTION_BLOCKING_NO_LEAVES`. Values are long arrays over the
+height window: 384 blocks in the Overworld and 256 in the Nether and End. The
+256 columns are packed into 37 longs (`getRawData`) in every dimension.
 
 - `WORLDGEN_HEIGHTMAPS = {OCEAN_FLOOR_WG, WORLD_SURFACE_WG}` for statuses
   `empty`..`surface`.

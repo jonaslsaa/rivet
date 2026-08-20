@@ -1,5 +1,8 @@
-import java.util.HashMap;
-import java.util.Map;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Comparator;
+import java.util.List;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -11,6 +14,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.AttachFace;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.ChestType;
+import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.block.state.properties.RedstoneSide;
 
 /**
@@ -25,8 +29,10 @@ import net.minecraft.world.level.block.state.properties.RedstoneSide;
  *   1. the registry has 32366 states (the codegen's BLOCK_STATE_COUNT);
  *   2. Paper assigns states block by block in registry order, each block a
  *      contiguous range, partitioning 0..32366 without gaps or overlap;
- *   3. each block's default state id falls inside its range;
- *   4. representative anchor states match the codegen's golden probes
+ *   3. every state's id, block, default marker, and serialized properties feed
+ *      the complete cross-language digest checked by the Rust caller;
+ *   4. each block's default state id falls inside its range;
+ *   5. representative anchor states match the codegen's golden probes
  *      (air=0, acacia_button wall/north/false=10780, redstone_wire 4011..5306,
  *      chest single/north/true=3987).
  *
@@ -50,28 +56,40 @@ public final class GlobalPaletteProbe {
         // the registry and verify every state id falls exactly where the block
         // range math says it must.
         int expectedBase = 0;
+        MessageDigest stateDigest = sha256();
         for (Block block : BuiltInRegistries.BLOCK) {
-            java.util.List<BlockState> states = block.getStateDefinition().getPossibleStates();
+            List<BlockState> states = block.getStateDefinition().getPossibleStates();
             int base = Block.getId(states.get(0));
             int count = states.size();
+            String blockName = BuiltInRegistries.BLOCK.getKey(block).toString();
             require(base == expectedBase,
-                "block " + BuiltInRegistries.BLOCK.getKey(block) + " base " + base
-                    + " != expected " + expectedBase);
-            // Contiguous within the block, in getPossibleStates() order.
+                "block " + blockName + " base " + base + " != expected " + expectedBase);
+            // Contiguous within the block, in getPossibleStates() order. Every
+            // state also contributes to the complete cross-language digest:
+            // id, block name, default marker, and every serialized property.
             for (int i = 0; i < count; i++) {
-                require(Block.getId(states.get(i)) == base + i,
-                    "block " + BuiltInRegistries.BLOCK.getKey(block) + " state " + i
-                        + " id " + Block.getId(states.get(i)) + " != " + (base + i));
+                BlockState state = states.get(i);
+                int id = Block.getId(state);
+                require(id == base + i,
+                    "block " + blockName + " state " + i
+                        + " id " + id + " != " + (base + i));
+                updateStateDigest(
+                    stateDigest,
+                    id,
+                    blockName,
+                    state == block.defaultBlockState(),
+                    state);
             }
             // Default state inside the range.
             int def = Block.getId(block.defaultBlockState());
             require(def >= base && def < base + count,
-                "block " + BuiltInRegistries.BLOCK.getKey(block) + " default " + def
+                "block " + blockName + " default " + def
                     + " outside [" + base + ", " + (base + count) + ")");
             expectedBase = base + count;
         }
         require(expectedBase == size,
             "block ranges end at " + expectedBase + " != registry size " + size);
+        println("state_digest_sha256=" + hex(stateDigest.digest()));
 
         // 3. Representative anchors the codegen bakes into its golden probes.
         int air = Block.getId(Blocks.AIR.defaultBlockState());
@@ -121,6 +139,53 @@ public final class GlobalPaletteProbe {
         println("reverse_missing_is_air=1");
 
         println("PROBE OK");
+    }
+
+    private static MessageDigest sha256() {
+        try {
+            return MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException error) {
+            throw new IllegalStateException("SHA-256 unavailable", error);
+        }
+    }
+
+    private static void updateStateDigest(
+            MessageDigest digest,
+            int id,
+            String blockName,
+            boolean isDefault,
+            BlockState state) {
+        List<Property.Value<?>> properties = state.getValues()
+            .sorted(Comparator.comparing(value -> value.property().getName()))
+            .toList();
+
+        StringBuilder line = new StringBuilder();
+        line.append("id=").append(id)
+            .append('\t').append("block=").append(blockName)
+            .append('\t').append("default=").append(isDefault ? '1' : '0')
+            .append('\t').append("properties=");
+        for (int i = 0; i < properties.size(); i++) {
+            if (i != 0) {
+                line.append(',');
+            }
+            Property.Value<?> entry = properties.get(i);
+            line.append(entry.property().getName())
+                .append('=')
+                .append(entry.valueName());
+        }
+        line.append('\n');
+        digest.update(line.toString().getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String hex(byte[] bytes) {
+        char[] alphabet = "0123456789abcdef".toCharArray();
+        char[] output = new char[bytes.length * 2];
+        for (int i = 0; i < bytes.length; i++) {
+            int value = bytes[i] & 0xff;
+            output[i * 2] = alphabet[value >>> 4];
+            output[i * 2 + 1] = alphabet[value & 0x0f];
+        }
+        return new String(output);
     }
 
     private static void println(String line) {
