@@ -1,44 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-tool_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+tool_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+repo_dir="$(cd "$tool_dir/../.." && pwd -P)"
+
+if [ "${RIVET_BUILD_LOCK_HELD:-0}" != 1 ]; then
+  exec "$repo_dir/scripts/with-build-lock.sh" "$repo_dir" "$tool_dir/run-scenario.sh" "$@"
+fi
+
+# Resolve before the first Cargo command so both the nested tool workspace and
+# the main workspace use the same target, even when invoked outside the repo.
+# shellcheck source=scripts/cargo-target-dir.sh
+# shellcheck disable=SC1091  # sources a sibling script; shellcheck only follows it with -x
+source "$repo_dir/scripts/cargo-target-dir.sh"
+resolved_target_dir="$(cargo_target_dir_for "$repo_dir")"
+export CARGO_TARGET_DIR="$resolved_target_dir"
+
+tool_target_dir="$CARGO_TARGET_DIR"
 cd "$tool_dir"
-
-# Build all binaries (rivet-client + run-scenario) so the runner can find the
-# client binary next to itself in target/debug/.
 cargo build --locked
-
-# Run the runner's own unit tests (port isolation, ServerKind, process-lifecycle
-# cleanup, exit-code classification) before any scenario. Cargo has just built
-# the package, so this adds no new dependency compilation; the azalea build cost
-# is already paid by `cargo build --locked` above.
 cargo test --locked --bin run-scenario
 
-# Build the rivet-server binary (main workspace, stable toolchain) when a mode
-# needs it, so the Paper-only self-check stays exactly as fast as before. The
-# `dwell`, `kick`, `load-world`, `loaded-world`, `recenter`, and
-# `generated-world` subcommands always boot exactly one rivet-server — their
-# server selection is pinned to Rivet even without `--server` (issues #157,
-# #86, #316, #374, #561, and the generated-world seed-42 acceptance contract) —
-# and `--server rivet|both` selects Rivet for the join/move/capture modes. Run
-# from the repo root so cargo resolves the main workspace's stable toolchain
-# (the nested workspace pins nightly).
-needs_rivet=0
+desired_server=0
 case "${1:-}" in
-  dwell | kick | load-world | loaded-world | recenter | generated-world) needs_rivet=1 ;;
+  dwell | kick | load-world | loaded-world | recenter | generated-world) desired_server=1 ;;
 esac
-prev=""
-for a in "$@"; do
-  if [ "$prev" = "--server" ] && { [ "$a" = "rivet" ] || [ "$a" = "both" ]; }; then
-    needs_rivet=1
+previous=""
+for argument in "$@"; do
+  if [ "$previous" = "--server" ] && { [ "$argument" = rivet ] || [ "$argument" = both ]; }; then
+    desired_server=1
   fi
-  prev="$a"
+  previous=$argument
 done
-if [ "$needs_rivet" = 1 ]; then
+if [ "$desired_server" = 1 ]; then
   (
-    cd "$tool_dir/../.."
+    cd "$repo_dir"
     cargo build --locked -p rivet-server
   )
 fi
 
-exec ./target/debug/run-scenario "$@"
+exec "$tool_target_dir/debug/run-scenario" "$@"
