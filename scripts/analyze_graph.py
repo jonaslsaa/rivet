@@ -1519,8 +1519,8 @@ PACKAGE_NOTES: dict[str, str] = {
         "DONE #185: FEATURES execution now covers the complete 17x17 dependency "
         "window, with CARVERS at rings 0/1 and STRUCTURE_STARTS through radius 8; "
         "the biome source resolves all 55 possible biomes, geode and MonsterRoom "
-        "features are crossed, and the typed traversal reaches ore_dirt at step "
-        "6/global 0."
+        "features are crossed, and the typed traversal reaches underwater_magma "
+        "at step 6/global index 26."
     ),
 }
 
@@ -1846,8 +1846,8 @@ SPLIT_NOTES: dict[str, str] = {
         "cached BIOMES diagnostics, durable DUMMY/materialized block-entity NBT, "
         "and persisted heightmaps. The seed-42 production FEATURES traversal resolves "
         "all 55 possible biomes; geode and MonsterRoom are crossed before the typed "
-        "ore_dirt boundary at step 6/global 0. Remaining scheduler/ServerLevel wiring "
-        "belongs to the downstream #185 continuation."
+        "underwater_magma boundary at step 6/global index 26. Remaining "
+        "scheduler/ServerLevel wiring belongs to the downstream #185 continuation."
     ),
     "mc.server.level": (
         "#227 residual: the untranslated tail — ServerLevel/ServerPlayer + the "

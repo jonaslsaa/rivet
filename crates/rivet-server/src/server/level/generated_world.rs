@@ -462,8 +462,8 @@ impl GenerationChunkHolder {
     /// gather + `retainAll` — and then decodes and runs the registry-backed
     /// lake, amethyst-geode, and monster-room paths at their exact feature
     /// seeds before stopping at the first selected unsupported path (seed-42
-    /// chunk (0,0): `minecraft:ore_dirt` at step 6/global 0); the chunk stays
-    /// CARVERS.
+    /// chunk (0,0): `minecraft:underwater_magma` at step 6/global 26); the chunk
+    /// stays CARVERS.
     pub fn new(pos: ChunkPos, generator: Arc<OverworldGenerator>) -> Self {
         let height_accessor = create_height_accessor(
             generator.generator().get_min_y(),
@@ -573,7 +573,8 @@ impl GenerationChunkHolder {
                 // exact per-feature seeds — and then decodes and runs the
                 // registry-backed lake, amethyst-geode, and monster-room
                 // entries before failing typed at the first selected
-                // unsupported path (`minecraft:ore_dirt`, step 6/global 0).
+                // unsupported path (`minecraft:underwater_magma`, step
+                // 6/global 26).
                 // It must never be "improved" into a silent skip or a blanket
                 // UnsupportedTask.
                 // The closure captures one generator clone (the free helper is
@@ -594,8 +595,8 @@ impl GenerationChunkHolder {
     /// the biome union), resolves the FULL possible-biome settings and builds
     /// the FeatureSorter, decodes and runs the registry-backed lake, geode, and
     /// monster-room paths, and then fails typed at the first selected unsupported
-    /// path (`FeaturePlacementDecode`, seed-42: `minecraft:ore_dirt` at
-    /// step 6/global 0), so the chunk is never stamped FEATURES.
+    /// path (`FeaturePlacementDecode`, seed-42: `minecraft:underwater_magma` at
+    /// step 6/global 26), so the chunk is never stamped FEATURES.
     pub fn status(&self) -> ChunkStatus {
         self.chunk.get_persisted_status()
     }
@@ -749,7 +750,8 @@ fn generate_ring_chunk(
 /// executing decoded lake, amethyst-geode, and monster-room leaves with their
 /// exact feature seeds. It fails typed (`GenError::FeaturePlacementDecode`) at
 /// the first unsupported selected feature — seed-42 chunk (0,0), step 6/global
-/// index 0: `minecraft:ore_dirt`. The generated settings tables are the full
+/// index 26: `minecraft:underwater_magma`. The generated settings tables are the
+/// full
 /// 55-biome surface (no `SettingsNotGenerated`), so this boundary is reached
 /// deterministically every run. No biome is fabricated or silently skipped.
 ///
@@ -2232,8 +2234,9 @@ mod tests {
     /// each dispatch leaf seated in the seed-42 closure. These focused tests
     /// cover the decoder arms directly — the runtime stops earlier at the
     /// step-6 underwater_magma boundary, so the later-step leaves (springs,
-    /// seagrass, simple_block, selectors, freeze_top_layer) cannot be reached
-    /// end-to-end and get their own independent decode coverage here.
+    /// seagrass, freeze_top_layer) cannot be reached end-to-end and get their
+    /// own independent decode coverage here. The simple_block, block_column,
+    /// and vines arms are not separately exercised by these tests.
     #[test]
     fn ore_dirt_decodes_through_the_batch2_ore_arm() {
         let generator = test_generator();
