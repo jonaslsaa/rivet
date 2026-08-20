@@ -589,8 +589,8 @@ impl GenerationChunkHolder {
                 // (`minecraft:dark_forest_vegetation`, step 9/global 17).
                 // It must never be "improved" into a silent skip or a blanket
                 // UnsupportedTask.
-                // The closure captures one generator clone (the free helper is
-                // why the ownership test's `strong_count == base + 5` holds).
+                // The closure captures one generator clone; together with the
+                // SPAWN closure below, the ownership test observes six clones.
                 let generator = Arc::clone(&generator);
                 move |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
                     run_biome_decoration(chunk, &generator)
@@ -2834,7 +2834,7 @@ mod tests {
     }
 
     /// Consuming the holder is a move, not a clone: `into_level_chunk(self)`
-    /// drops the holder (and its five executor closures) when it succeeds, so
+    /// drops the holder (and its six executor closures) when it succeeds, so
     /// the shared immutable config's strong count returns to its base — the
     /// chunk left the holder by value, never copied. Built on an exclusive
     /// generator so no parallel test interferes with the strong count.
@@ -2844,12 +2844,12 @@ mod tests {
         let base = Arc::strong_count(&generator);
         let mut holder = generator.create_holder(ChunkPos::ZERO);
         holder.chunk.set_persisted_status(ChunkStatus::Full);
-        assert_eq!(Arc::strong_count(&generator), base + 5);
+        assert_eq!(Arc::strong_count(&generator), base + 6);
         let _chunk = holder.into_level_chunk().expect("FULL promotes");
         assert_eq!(
             Arc::strong_count(&generator),
             base,
-            "the consumed holder must drop its five closure clones"
+            "the consumed holder must drop its six closure clones"
         );
     }
 
