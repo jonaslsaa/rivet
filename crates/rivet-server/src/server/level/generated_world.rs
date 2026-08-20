@@ -1676,6 +1676,19 @@ fn run_spawn(
     // `BiomeManager.getBiome` fiddled-distance interpolation over cached quart
     // cells — see [`resolve_spawn_biome_name`].
     let biome_name = resolve_spawn_biome_name(chunk, generator);
+
+    // Java constructs and decoration-seeds the random before entering
+    // `NaturalSpawner.spawnMobsForChunkGeneration`, where mob settings are read.
+    // `setDecorationSeed` overwrites the unique seed; no random draw occurs yet.
+    let mut random = WorldgenRandom::new(LegacyRandomSource::new(
+        random_support::generate_unique_seed(),
+    ));
+    random.set_decoration_seed(
+        generator.seed(),
+        center_pos.get_min_block_x(),
+        center_pos.get_min_block_z(),
+    );
+
     // `MOB_SPAWN_SETTINGS_BY_NAME` is keyed by biome name; a biome the tables
     // do not carry (a drifted registry) fails typed rather than fabricating.
     let mob_settings = match biome_name {
@@ -1695,20 +1708,6 @@ fn run_spawn(
             });
         }
     };
-
-    // `while (random.nextFloat() < getCreatureProbability())` — the decoration
-    // seed RNG construction: `new WorldgenRandom(new LegacyRandomSource(
-    // generateUniqueSeed()))` then `setDecorationSeed(seed, minX, minZ)`. The
-    // decoration seed overwrites the unique seed (Java's `setDecorationSeed`
-    // re-seeds), so no draw is observable before the population loop.
-    let mut random = WorldgenRandom::new(LegacyRandomSource::new(
-        random_support::generate_unique_seed(),
-    ));
-    random.set_decoration_seed(
-        generator.seed(),
-        center_pos.get_min_block_x(),
-        center_pos.get_min_block_z(),
-    );
 
     // `mobs.isEmpty() || !gameRules.get(SPAWN_MOBS)` → faithful no-op (advance).
     if mob_settings.creature.is_empty() {
