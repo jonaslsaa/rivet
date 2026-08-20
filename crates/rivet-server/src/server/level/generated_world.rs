@@ -41,12 +41,12 @@
 //! indices execute per step). The generated feature tables cover EVERY
 //! overworld possible biome (55 — the full list, not the reachable subset),
 //! so the full list resolves and the run proceeds to the per-step loop. The
-//! lake, amethyst-geode, monster-room, and the Batch 2/3 dispatch leaves (ore,
+//! lake, amethyst-geode, monster-room, and the Batch 2/3/4 dispatch leaves (ore,
 //! disk, spring, simple_block, block_column, vines, seagrass, freeze_top_layer,
-//! underwater_magma) are decoded from the generated JSON and run with their
-//! exact feature seeds; the seed-42 chunk then stops at the first selected path
-//! whose leaf remains typed-unavailable (`minecraft:glow_lichen`, the Batch 4
-//! `minecraft:multiface_growth`, at step 9/global index 0).
+//! underwater_magma, multiface_growth) are decoded from the generated JSON and
+//! run with their exact feature seeds; seed-42 `minecraft:glow_lichen` now
+//! executes, then the chunk stops at the next selected typed-unavailable path:
+//! `minecraft:dark_forest_vegetation` at step 9/global index 17.
 //! The chunk stays CARVERS. The INITIALIZE_LIGHT/
 //! LIGHT steps are executor-wired but engine-gated (the holder wires no light
 //! engine, so it cannot reach LIGHT).
@@ -141,6 +141,7 @@ use rivet_world::levelgen::feature::configurations::block_column_configuration::
 use rivet_world::levelgen::feature::configurations::composite_feature_configuration::composite_feature_configuration_codec;
 use rivet_world::levelgen::feature::configurations::disk_configuration::disk_configuration_codec;
 use rivet_world::levelgen::feature::configurations::geode_configuration::geode_configuration_codec;
+use rivet_world::levelgen::feature::configurations::multiface_growth_configuration::multiface_growth_configuration_codec;
 use rivet_world::levelgen::feature::configurations::ore_configuration::ore_configuration_codec;
 use rivet_world::levelgen::feature::configurations::probability_feature_configuration::probability_feature_configuration_codec;
 use rivet_world::levelgen::feature::configurations::random_boolean_feature_configuration::random_boolean_feature_configuration_codec;
@@ -462,10 +463,11 @@ impl GenerationChunkHolder {
     /// FEATURES cache (288 ring holders, with CARVERS at distances 0/1 and
     /// STRUCTURE_STARTS through distance 8), and the Paper-order biome-union
     /// gather + `retainAll` — and then decodes and runs the registry-backed
-    /// lake, amethyst-geode, monster-room, and underwater_magma paths at their
-    /// exact feature seeds before stopping at the first selected unsupported
-    /// path (seed-42 chunk (0,0): `minecraft:glow_lichen` at step 9/global 0);
-    /// the chunk stays CARVERS.
+    /// lake, amethyst-geode, monster-room, underwater_magma, and glow_lichen
+    /// paths at their exact feature seeds before stopping at the first selected
+    /// unsupported path (seed-42 chunk (0,0):
+    /// `minecraft:dark_forest_vegetation` at step 9/global 17); the chunk stays
+    /// CARVERS.
     pub fn new(pos: ChunkPos, generator: Arc<OverworldGenerator>) -> Self {
         let height_accessor = create_height_accessor(
             generator.generator().get_min_y(),
@@ -573,10 +575,10 @@ impl GenerationChunkHolder {
                 // settings resolution (`ChunkGenerator.featuresPerStep`,
                 // `ChunkGenerator.java` 97-100) and FeatureSorter, and the
                 // exact per-feature seeds — and then decodes and runs the
-                // registry-backed lake, amethyst-geode, monster-room, and
-                // underwater_magma entries before failing typed at the first
-                // selected unsupported path (`minecraft:glow_lichen`, step
-                // 9/global 0).
+                // registry-backed lake, amethyst-geode, monster-room,
+                // underwater_magma, and glow_lichen entries before failing
+                // typed at the first selected unsupported path
+                // (`minecraft:dark_forest_vegetation`, step 9/global 17).
                 // It must never be "improved" into a silent skip or a blanket
                 // UnsupportedTask.
                 // The closure captures one generator clone (the free helper is
@@ -596,10 +598,10 @@ impl GenerationChunkHolder {
     /// drives the full 17x17 dependency-window region (the 3x3 window is only
     /// the biome union), resolves the FULL possible-biome settings and builds
     /// the FeatureSorter, decodes and runs the registry-backed lake, geode,
-    /// monster-room, and underwater_magma paths, and then fails typed at the
-    /// first selected unsupported path (`FeaturePlacementDecode`, seed-42:
-    /// `minecraft:glow_lichen` at step 9/global 0), so the chunk is never
-    /// stamped FEATURES.
+    /// monster-room, underwater_magma, and glow_lichen paths, and then fails
+    /// typed at the first selected unsupported path (`FeaturePlacementDecode`,
+    /// seed-42: `minecraft:dark_forest_vegetation` at step 9/global 17), so the
+    /// chunk is never stamped FEATURES.
     pub fn status(&self) -> ChunkStatus {
         self.chunk.get_persisted_status()
     }
@@ -750,14 +752,14 @@ fn generate_ring_chunk(
 ///      max(Decoration.values().length, featureStepCount)`).
 ///
 /// The per-step loop runs the union's placed features in global-index order,
-/// executing decoded lake, amethyst-geode, monster-room, and underwater_magma
-/// leaves with their exact feature seeds. It fails typed
+/// executing decoded lake, amethyst-geode, monster-room, underwater_magma, and
+/// glow_lichen leaves with their exact feature seeds. It fails typed
 /// (`GenError::FeaturePlacementDecode`) at the first unsupported selected
-/// feature — seed-42 chunk (0,0), step 9/global index 0:
-/// `minecraft:glow_lichen` (Batch 4 `minecraft:multiface_growth`). The generated
-/// settings tables are the full 55-biome surface (no `SettingsNotGenerated`), so
-/// this boundary is reached
-/// deterministically every run. No biome is fabricated or silently skipped.
+/// feature — seed-42 chunk (0,0), step 9/global index 17:
+/// `minecraft:dark_forest_vegetation`. The generated settings tables are the
+/// full 55-biome surface (no `SettingsNotGenerated`), so this boundary is
+/// reached deterministically every run. No biome is fabricated or silently
+/// skipped.
 ///
 /// Compose the FEATURES `WorldGenRegion` over the complete accumulated
 /// dependency window of the FEATURES step. Paper's direct dependencies are
@@ -1200,6 +1202,12 @@ fn decode_configured_feature(
             config_value,
             &format!("decode {configured_key} config"),
         )?),
+        "minecraft:multiface_growth" => Arc::new(decode_value(
+            multiface_growth_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
         "minecraft:random_selector" => Arc::new(decode_value(
             random_feature_configuration_codec::<FeatureOps>(),
             ops,
@@ -1344,6 +1352,7 @@ fn configured_feature_is_executable(placed_key: &str) -> Result<bool, String> {
             | Some("minecraft:seagrass")
             | Some("minecraft:freeze_top_layer")
             | Some("minecraft:underwater_magma")
+            | Some("minecraft:multiface_growth")
             | Some("minecraft:random_selector")
             | Some("minecraft:simple_random_selector")
             | Some("minecraft:random_boolean_selector")
@@ -1572,6 +1581,7 @@ mod tests {
     use rivet_util::random::LegacyRandomSource;
     use rivet_world::level::WorldGenLevel;
     use rivet_world::levelgen::feature::FeatureBehavior;
+    use rivet_world::levelgen::feature::configurations::MultifaceGrowthConfiguration;
     use rivet_world::levelgen::feature::configurations::ProbabilityFeatureConfiguration;
     use rivet_world::levelgen::feature::configurations::UnderwaterMagmaConfiguration;
     use rivet_world::levelgen::feature::configurations::disk_configuration::DiskConfiguration;
@@ -2090,10 +2100,10 @@ mod tests {
     /// and underwater_magma decode arms advance the run through the full
     /// UNDERGROUND_ORES step — underwater_magma (global 26) now executes but
     /// places no magma in this dry origin union, so it consumes no placement
-    /// RNG past its scan. The first unsupported *selected* path is the
-    /// typed-unavailable `minecraft:glow_lichen` (`minecraft:multiface_growth`,
-    /// the Batch 4 leaf) at step 9/global index 0. The chunk is never stamped
-    /// FEATURES (it stays CARVERS).
+    /// RNG past its scan. Batch 4 then decodes and executes `glow_lichen` through
+    /// `minecraft:multiface_growth`. The next unsupported *selected* path is
+    /// `minecraft:dark_forest_vegetation` at step 9/global index 17. The chunk is
+    /// never stamped FEATURES (it stays CARVERS).
     #[test]
     fn generate_through_features_stops_at_first_selected_path_mismatch() {
         let generator = test_generator();
@@ -2115,11 +2125,13 @@ mod tests {
             }) => {
                 assert_eq!(chunk_pos, ChunkPos::new(0, 0));
                 assert_eq!(step_index, 9);
-                assert_eq!(global_feature_index, 0);
-                assert_eq!(feature_key, "minecraft:glow_lichen");
+                assert_eq!(global_feature_index, 17);
+                assert_eq!(feature_key, "minecraft:dark_forest_vegetation");
             }
             other => {
-                panic!("FEATURES must stop at the selected glow_lichen mismatch; got {other:?}")
+                panic!(
+                    "FEATURES must stop at the selected dark_forest_vegetation mismatch; got {other:?}"
+                )
             }
         }
 
@@ -2246,8 +2258,8 @@ mod tests {
     /// The Batch 2/3 decoder arms decode the generated configured/placed JSON of
     /// each dispatch leaf seated in the seed-42 closure. These focused tests
     /// cover the decoder arms directly — the runtime stops at the step-9
-    /// glow_lichen boundary, so the later-step leaves (springs, seagrass,
-    /// freeze_top_layer) cannot be reached end-to-end and get their own
+    /// dark_forest_vegetation boundary, so the later-step leaves (springs,
+    /// seagrass, freeze_top_layer) cannot be reached end-to-end and get their own
     /// independent decode coverage here. The simple_block, block_column, and
     /// vines arms are not separately exercised by these tests.
     #[test]
@@ -2389,19 +2401,49 @@ mod tests {
         assert_eq!(cfg.placement_radius_around_floor, 1);
     }
 
+    /// The Batch 4 `minecraft:glow_lichen` configured entry decodes through the
+    /// registry-backed `minecraft:multiface_growth` arm into FeatureId 20 with
+    /// Paper's exact generated configuration and five-modifier placement chain.
+    #[test]
+    fn glow_lichen_decodes_through_the_batch4_arm() {
+        let generator = test_generator();
+        assert_eq!(
+            feature_id_from_registry_name("minecraft:multiface_growth"),
+            Some(FeatureId::new(20)),
+            "the multiface_growth dispatch type must be registered at id 20"
+        );
+        let decoded = decode_placed_feature("minecraft:glow_lichen", &generator)
+            .expect("the seed-42 glow_lichen entry must decode");
+        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        assert_eq!(placed.placement().len(), 5);
+        let configured = placed.feature().value(&decoded.configured_registry);
+        assert_eq!(configured.feature, FeatureId::new(20));
+        let cfg = (configured.config.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<MultifaceGrowthConfiguration>()
+            .expect("glow_lichen must carry MultifaceGrowthConfiguration");
+        assert_eq!(cfg.place_block.name(), "minecraft:glow_lichen");
+        assert_eq!(cfg.search_range, 20);
+        assert!(!cfg.can_place_on_floor);
+        assert!(cfg.can_place_on_ceiling);
+        assert!(cfg.can_place_on_wall);
+        assert_eq!(cfg.chance_of_spreading.to_bits(), 0.5f32.to_bits());
+        assert_eq!(cfg.can_be_placed_on.size(), 10);
+    }
+
     /// The seed-42 end-to-end run advances through the entire UNDERGROUND_ORES
     /// step — now including the registry-backed `minecraft:underwater_magma`
     /// leaf at global index 26, which dispatches through the id-21 arm and
     /// executes its column-scanned placement. In this dry origin union
     /// (beach/dark_forest/lush_caves/river) the water-column floor scan fails,
     /// so the feature returns false having consumed no placement-box RNG. The
-    /// run then continues through VEGETAL_DECORATION-free steps and refuses at
-    /// the first unsupported *selected* leaf WITHOUT mutating the RNG past the
-    /// refusal: the run returns typed immediately at
-    /// `minecraft:glow_lichen` (Batch 4 `minecraft:multiface_growth`), never
-    /// consuming additional draws, so the chunk stays CARVERS and the leaf is
-    /// never stamped. The typed-unavailable dispatch (id 21) no longer refuses;
-    /// the id-21 concrete feature is reached.
+    /// run then continues into VEGETAL_DECORATION, where Batch 4 decodes and
+    /// executes `minecraft:glow_lichen` through `minecraft:multiface_growth`.
+    /// It refuses at the next unsupported *selected* leaf WITHOUT mutating the
+    /// RNG past that refusal: the run returns typed immediately at
+    /// `minecraft:dark_forest_vegetation` (step 9/global 17), so the chunk stays
+    /// CARVERS and FEATURES is never stamped. The typed-unavailable dispatches
+    /// for underwater magma (id 21) and multiface growth (id 20) no longer
+    /// refuse; both concrete features are reached.
     #[test]
     fn seed42_does_not_mutate_rng_past_the_next_selected_unsupported_leaf() {
         let generator = test_generator();
@@ -2412,20 +2454,23 @@ mod tests {
         let err = holder
             .generate_through(ChunkStatus::Features)
             .expect_err("FEATURES must refuse at the selected mismatch");
-        assert!(matches!(
-            err,
-            GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
-                step_index: 9,
-                global_feature_index: 0,
-                feature_key: "minecraft:glow_lichen",
-                ..
-            })
-        ));
+        assert!(
+            matches!(
+                &err,
+                GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
+                    step_index: 9,
+                    global_feature_index: 17,
+                    feature_key: "minecraft:dark_forest_vegetation",
+                    ..
+                })
+            ),
+            "unexpected next FEATURES boundary: {err:?}"
+        );
         assert_eq!(holder.status(), ChunkStatus::Carvers);
     }
 
     /// The three Batch 2 selector leaves are wired in the decoder, and the
-    /// runtime stops at the step-9 glow_lichen boundary so these
+    /// runtime stops at the step-9 dark_forest_vegetation boundary so these
     /// later-step arms are exercised independently here. Full recursive decode
     /// of a selector's inline placed/configured sub-features defers with the
     /// `#126` codec stubs (`configured_feature_direct_codec` and the inline

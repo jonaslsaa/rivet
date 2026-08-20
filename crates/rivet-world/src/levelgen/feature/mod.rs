@@ -540,6 +540,7 @@ pub fn feature_id_from_registry_name(name: &str) -> Option<FeatureId> {
         "minecraft:simple_random_selector" => Some(FeatureId::new(54)),
         "minecraft:random_boolean_selector" => Some(FeatureId::new(55)),
         "minecraft:underwater_magma" => Some(FeatureId::new(21)),
+        "minecraft:multiface_growth" => Some(FeatureId::new(20)),
         _ => None,
     }
 }
@@ -828,9 +829,8 @@ pub fn feature_place<R: RandomSource>(
         }
         // `Feature.MULTIFACE_GROWTH` — the registered `minecraft:multiface_growth`
         // leaf (the step-9 seed-42 feature body for `glow_lichen`; see
-        // `multiface_growth_feature`). Reachable but production-blocked: the
-        // `can_attach_to` seam (RivetTodo #232) is not overridden by the real
-        // `WorldGenRegion` facade, so a production placement would panic.
+        // `multiface_growth_feature`). Attachment uses the shared
+        // `WorldGenLevel::can_attach_to` support-or-collision face query.
         20 => {
             let config = (config as &dyn Any)
                 .downcast_ref::<MultifaceGrowthConfiguration>()
