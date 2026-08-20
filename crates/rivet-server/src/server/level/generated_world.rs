@@ -49,7 +49,7 @@
 //! engine, so it cannot reach LIGHT).
 //! Everything the value layer does not wire is refused *before* running work: a
 //! path through a light step with no engine is refused as
-//! `GenError::LightEngineMissing`, and a target past LIGHT (SPAWN/FULL) is out
+//! `GenError::LightEngineMissing`, and a target past LIGHT (FULL) is out
 //! of range (`GenError::UnsupportedStatus`). The holder's
 //! [`GenerationChunkHolder::generate_through`] surfaces these as typed
 //! [`GeneratedChunkError::Generation`] / [`GeneratedChunkError::UnsupportedStatus`]
@@ -94,11 +94,13 @@ use rivet_registry::block_state::BlockState;
 use rivet_registry::builder::RegistryBuilder;
 use rivet_registry::core::BlockPos;
 use rivet_registry::core::ChunkPos;
+use rivet_registry::core::QuartPos;
 use rivet_registry::core::SectionPos;
 use rivet_registry::generated::biomes::BIOME_BY_ID;
 use rivet_registry::generated::blocks::BlockId;
 use rivet_registry::generated::feature_data::{
-    BIOME_GENERATION_SETTINGS_BY_NAME, CONFIGURED_FEATURE_BY_NAME, PLACED_FEATURE_BY_NAME,
+    BIOME_GENERATION_SETTINGS_BY_NAME, CONFIGURED_FEATURE_BY_NAME, MOB_SPAWN_SETTINGS_BY_NAME,
+    PLACED_FEATURE_BY_NAME,
 };
 use rivet_registry::holder::Holder;
 use rivet_registry::holder::RegistryId;
@@ -109,6 +111,7 @@ use rivet_serialization::codec::Codec;
 use rivet_serialization::json_ops::JsonOps;
 use rivet_util::StaticCache2D;
 use rivet_util::WorldgenRandom;
+use rivet_util::random::LegacyRandomSource;
 use rivet_util::random_source::XoroshiroRandomSource;
 use rivet_util::random_source::random_support;
 use rivet_world::biome::BiomeManager;
@@ -193,7 +196,7 @@ impl fmt::Display for GeneratedChunkError {
             }
             GeneratedChunkError::UnsupportedStatus(status) => write!(
                 f,
-                "generating to {status:?} is unsupported: the SPAWN/FULL stages are unwired (RivetTodo #185)"
+                "generating to {status:?} is unsupported: the FULL stage is unwired (RivetTodo #185)"
             ),
             GeneratedChunkError::InstallRequiresFull(status) => write!(
                 f,
@@ -556,6 +559,20 @@ impl GenerationChunkHolder {
                 }
             },
         );
+        let context = context.with_spawn({
+            // `ChunkStatusTasks.generateSpawn` → Java's
+            // `NoiseBasedChunkGenerator.spawnOriginalMobs`
+            // (`NaturalSpawner.spawnMobsForChunkGeneration`). See [`run_spawn`]:
+            // the genuine evaluate of `disableMobGeneration`, the center biome's
+            // `MobSpawnSettings` (`MOB_SPAWN_SETTINGS_BY_NAME`), the `SPAWN_MOBS`
+            // rule, and the empty/non-empty CREATURE gate — never a bare no-op.
+            let generator = Arc::clone(&generator);
+            move |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
+                // The overworld ships `spawn_mobs = true` (the rule's default);
+                // a world's actual overlay is deferred with the level unit.
+                run_spawn(chunk, &generator, true)
+            }
+        });
         GenerationChunkHolder { chunk, context }
     }
 
@@ -582,7 +599,7 @@ impl GenerationChunkHolder {
     /// target the value layer does not wire is rejected by the executor before
     /// any work with a typed error — a path through a light step with no engine
     /// is refused as `GenError::LightEngineMissing`, and a target past LIGHT
-    /// (SPAWN/FULL) is out of range
+    /// (FULL) is out of range
     /// ([`GeneratedChunkError::UnsupportedStatus`]). The chunk is left
     /// untouched by every such refusal. (The wired FEATURES rung is the
     /// exception: it runs Java's priming prologue — heightmap priming, the
@@ -590,6 +607,12 @@ impl GenerationChunkHolder {
     /// the 3x3 biome union read — and then fails typed, so the chunk's
     /// heightmaps advance while its persisted status is never stamped past
     /// CARVERS; see [`GenerationChunkHolder::status`].)
+    ///
+    /// The SPAWN rung is wired as a seam driven by
+    /// [`GenerationChunkHolder::with_spawn`] (the whole-world `spawnOriginalMobs`
+    /// gen-step applied to this chunk), not through the `generate_through`
+    /// ladder: the holder wires no light engine, so no status past CARVERS is
+    /// reached through this path, and FULL remains unwired (RivetTodo #185).
     pub fn generate_through(&mut self, target: ChunkStatus) -> Result<(), GeneratedChunkError> {
         self.context
             .generate_through(&GENERATION_PYRAMID, &mut self.chunk, target)
@@ -606,7 +629,7 @@ impl GenerationChunkHolder {
     /// at `CARVERS` (the FEATURES rung fails typed at the first placed feature
     /// whose value decode is unavailable — see [`GenerationChunkHolder::new`]).
     /// No conversion from a sub-FULL `ProtoChunk` exists or may be added without
-    /// the unwired SPAWN/FULL stages (RivetTodo #185), so this always fails
+    /// the unwired FULL stage (RivetTodo #185), so this always fails
     /// loudly with the chunk's real status — never stamping FULL and never
     /// falling back to superflat.
     pub fn to_level_chunk(&self) -> Result<LevelChunk, GeneratedChunkError> {
@@ -1397,6 +1420,157 @@ fn run_biome_decoration(
     Ok(())
 }
 
+/// Resolve the SPAWN seam's center biome exactly as
+/// `WorldGenRegion.getBiome(center.getWorldPosition().atY(getMaxY()))` does.
+///
+/// This must use `BiomeManager.getBiome`, not a direct quart lookup: Java's
+/// fiddled-distance resolver chooses one of eight surrounding quart samples.
+/// All x/z samples are still inside the center chunk, so the injected lookup can
+/// read the borrowed center proto directly without constructing a self-
+/// referential region. `ChunkAccess.getNoiseBiome` also performs Java's vertical
+/// clamping for the two top-edge quart candidates.
+fn resolve_center_biome_name(
+    chunk: &ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+    generator: &OverworldGenerator,
+) -> Option<&'static str> {
+    let center = chunk.get_pos();
+    let top_y = chunk
+        .get_min_y()
+        .wrapping_add(chunk.get_height())
+        .wrapping_sub(1);
+    let position = BlockPos::new(
+        center.get_min_block_x().wrapping_add(8),
+        top_y,
+        center.get_min_block_z().wrapping_add(8),
+    );
+    let biome_manager = BiomeManager::new(
+        Arc::new(generator.biome_source.clone()),
+        BiomeManager::obfuscate_seed(generator.seed()),
+    );
+    let biome = biome_manager.get_biome_with(&position, |quart_x, quart_y, quart_z| {
+        let dense = chunk.get_noise_biome(quart_x, quart_y, quart_z).0;
+        Holder::direct(BiomeId::from_id(dense))
+    });
+    BIOME_BY_ID.get(dense_biome_id(&biome) as usize).copied()
+}
+
+/// `ChunkStatusTasks.generateSpawn` → Java's `generator.spawnOriginalMobs`
+/// (`NoiseBasedChunkGenerator.spawnOriginalMobs`, paper-server) over the SPAWN
+/// step's `WorldGenRegion` — the G2 SPAWN seam body.
+///
+/// In Java order (`NoiseBasedChunkGenerator.spawnOriginalMobs`, 26.2):
+///   1. `if (!this.settings.value().disableMobGeneration())` — the generator
+///      settings' `disableMobGeneration` gate (the overworld preset sets it
+///      `false`). When disabled, the spawn step is a faithful no-op (no RNG, no
+///      population) and the caller advances to SPAWN.
+///   2. `center = worldGenRegion.getCenter()`; `biome =
+///      worldGenRegion.getBiome(center.getWorldPosition().atY(worldGenRegion.getMaxY()))`
+///      — the center biome at the max build height.
+///   3. `random = new WorldgenRandom(new LegacyRandomSource(
+///      RandomSupport.generateUniqueSeed()))`;
+///      `random.setDecorationSeed(worldGenRegion.getSeed(), center.getMinBlockX(),
+///      center.getMinBlockZ())` — the decoration seed overwrites the
+///      unique seed (the seed that would have been consumed is never drawn).
+///   4. `NaturalSpawner.spawnMobsForChunkGeneration(worldGenRegion, biome,
+///      center, random)`:
+///      - `mobSettings = biome.value().getMobSettings()`;
+///        `mobs = mobSettings.getMobs(MobCategory.CREATURE)`.
+///      - `if (!mobs.isEmpty() && level.getLevel().getGameRules().get(GameRules.SPAWN_MOBS))`
+///        → the real empty/non-empty CREATURE gate AND the `SPAWN_MOBS` rule.
+///        When either disqualifies, the body is a faithful no-op — no RNG draw,
+///        no entity — and the caller advances to SPAWN.
+///      - Non-empty + rule on: Java enters the `while (random.nextFloat() <
+///        mobSettings.getCreatureProbability())` population loop (weighted
+///        `getRandom`, count draw, top-block lookup, and `EntityType.create`).
+///        Entity construction is deferred (RivetTodo #185, the entity/level
+///        units), so the Rivet seam refuses typed
+///        `GenError::CreatureSpawnNotGenerated` at exactly this boundary —
+///        before pretending entities were produced. The chunk is never stamped
+///        SPAWN and the observable block/biome/chunk state is unchanged.
+///
+/// The outcome is faithful to the pinned acceptance biome: the seed-42 center
+/// biome is `minecraft:river`, whose CREATURE list is EMPTY, so the genuine
+/// evaluation lands on the empty-list → advance path (zero entities), with the
+/// decoration seed still derived from `generateUniqueSeed` → `setDecorationSeed`
+/// (the no-op runs the RNG construction Java always performs). Never a bare
+/// no-op and never a fixture-specific shortcut: the empty/non-empty gate and the
+/// `SPAWN_MOBS` rule are genuinely evaluated.
+fn run_spawn(
+    chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+    generator: &Arc<OverworldGenerator>,
+    spawn_mobs_rule: bool,
+) -> Result<(), GenError> {
+    let center_pos = chunk.get_pos();
+
+    // Step 1: `disableMobGeneration` gate — `this.settings.value().
+    // disableMobGeneration()`. The overworld preset sets it `false`; when a
+    // settings value disables mob generation, the spawn step is a faithful
+    // no-op (no RNG, no population) and the caller advances to SPAWN.
+    if generator.generator().disable_mob_generation() {
+        return Ok(());
+    }
+
+    // Steps 2-4: center biome at maxY, then the RNG + NaturalSpawner gate. The
+    // center biome is resolved with Java's exact `BiomeManager.getBiome`
+    // fiddled-distance interpolation over the center chunk's cached quart cells
+    // — see [`resolve_center_biome_name`].
+    let biome_name = resolve_center_biome_name(chunk, generator);
+    // `MOB_SPAWN_SETTINGS_BY_NAME` is keyed by biome name; a biome the tables
+    // do not carry (a drifted registry) fails typed rather than fabricating.
+    let mob_settings = match biome_name {
+        Some(name) => match MOB_SPAWN_SETTINGS_BY_NAME.get(name) {
+            Some(ms) => ms,
+            None => {
+                return Err(GenError::CreatureSpawnNotGenerated {
+                    chunk_pos: center_pos,
+                    biome: biome_name,
+                });
+            }
+        },
+        None => {
+            return Err(GenError::CreatureSpawnNotGenerated {
+                chunk_pos: center_pos,
+                biome: None,
+            });
+        }
+    };
+
+    // `while (random.nextFloat() < getCreatureProbability())` — the decoration
+    // seed RNG construction: `new WorldgenRandom(new LegacyRandomSource(
+    // generateUniqueSeed()))` then `setDecorationSeed(seed, minX, minZ)`. The
+    // decoration seed overwrites the unique seed (Java's `setDecorationSeed`
+    // re-seeds), so no draw is observable before the population loop.
+    let mut random = WorldgenRandom::new(LegacyRandomSource::new(
+        random_support::generate_unique_seed(),
+    ));
+    random.set_decoration_seed(
+        generator.seed(),
+        center_pos.get_min_block_x(),
+        center_pos.get_min_block_z(),
+    );
+
+    // `mobs.isEmpty() || !gameRules.get(SPAWN_MOBS)` → faithful no-op (advance).
+    if mob_settings.creature.is_empty() {
+        return Ok(());
+    }
+    // `SPAWN_MOBS` rule: `level.getLevel().getGameRules().get(SPAWN_MOBS)`.
+    // The seam genuinely evaluates the rule — `false` bypasses population
+    // faithfully (no RNG draw beyond the decoration seed, no entity). The rule
+    // value is threaded from the caller (the holder's closure captures the
+    // overworld default `true`; a world's actual rule overlay is deferred with
+    // the level/gamerules unit — RivetTodo #185).
+    if !spawn_mobs_rule {
+        return Ok(());
+    }
+
+    // Non-empty CREATURE list with the rule on: entity construction is deferred
+    // (RivetTodo #185), so refuse typed before pretending entities were produced.
+    Err(GenError::CreatureSpawnNotGenerated {
+        chunk_pos: center_pos,
+        biome: biome_name,
+    })
+}
+
 impl fmt::Debug for GenerationChunkHolder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GenerationChunkHolder")
@@ -1415,7 +1589,6 @@ mod tests {
     use rivet_nbt::tag::Tag;
     use rivet_registry::generated::block_states::StateId;
     use rivet_util::RandomSource;
-    use rivet_util::random::LegacyRandomSource;
     use rivet_world::level::WorldGenLevel;
     use rivet_world::levelgen::feature::FeatureBehavior;
     use rivet_world::levelgen::feature::configurations::geode_configuration::GeodeConfiguration;
@@ -1836,7 +2009,7 @@ mod tests {
     /// wired (`WorldGenContext::generate_through`, engine-gated) but the holder
     /// wires no light engine, so a fresh EMPTY chunk targeting either is
     /// refused as `GenError::LightEngineMissing` before any work runs (the
-    /// chunk stays EMPTY). A target past LIGHT (SPAWN/FULL) is out of range
+    /// chunk stays EMPTY). A target past LIGHT (FULL) is out of range
     /// (`UnsupportedStatus`). CARVERS itself is wired (the real
     /// `NoiseBasedChunkGenerator.applyCarvers`, see
     /// `generate_through_carvers_runs_the_real_apply_carvers`), so a fresh
@@ -1866,14 +2039,23 @@ mod tests {
             );
             assert_eq!(fresh.status(), ChunkStatus::Empty);
         }
-        // SPAWN/FULL are past the LIGHT range: rejected as UnsupportedStatus.
+        // SPAWN is wired (the spawn seam is attached) but its path runs through
+        // the light steps, which need a light engine the holder does not wire →
+        // rejected as LightEngineMissing before any work. FULL is still unwired
+        // (no full seam), so it is rejected as UnsupportedStatus.
         for status in [ChunkStatus::Spawn, ChunkStatus::Full] {
+            let result = fresh.generate_through(status);
             assert!(
                 matches!(
-                    fresh.generate_through(status),
-                    Err(GeneratedChunkError::UnsupportedStatus(s)) if s == status
+                    &result,
+                    Err(GeneratedChunkError::Generation(
+                        GenError::LightEngineMissing { .. }
+                    ))
+                ) || matches!(
+                    &result,
+                    Err(GeneratedChunkError::UnsupportedStatus(s)) if *s == status
                 ),
-                "target {status:?} must be rejected as UnsupportedStatus"
+                "target {status:?} must be rejected by the path's unlit/unsupported boundary"
             );
             assert_eq!(fresh.status(), ChunkStatus::Empty);
         }
@@ -2170,8 +2352,8 @@ mod tests {
 
     /// Ownership: the holder owns its ProtoChunk by value (no `Arc<RwLock>`
     /// game state) while the immutable worldgen config is shared across holders
-    /// by `Arc` — the five executor closures (BIOMES, NOISE, SURFACE, CARVERS,
-    /// FEATURES) each capture a clone. This test builds its own exclusive
+    /// by `Arc` — the six executor closures (BIOMES, NOISE, SURFACE, CARVERS,
+    /// FEATURES, SPAWN) each capture a clone. This test builds its own exclusive
     /// generator (the shared `LazyLock` would be touched by the other parallel
     /// tests, making the strong count global/racy).
     #[test]
@@ -2179,8 +2361,8 @@ mod tests {
         let generator = Arc::new(OverworldGenerator::new(42));
         let base = Arc::strong_count(&generator);
         let holder = generator.create_holder(ChunkPos::new(2, 3));
-        // The five executor closures each hold a clone of the shared generator.
-        assert_eq!(Arc::strong_count(&generator), base + 5);
+        // The six executor closures each hold a clone of the shared generator.
+        assert_eq!(Arc::strong_count(&generator), base + 6);
         drop(holder);
         assert_eq!(Arc::strong_count(&generator), base);
     }
@@ -2795,5 +2977,117 @@ mod tests {
             reference.next_int(),
             "setFeatureSeed(42, 0, 1) must seed the exact RNG state placement would consume"
         );
+    }
+
+    /// Drive the SPAWN seam to the resolve step and force the center biome at
+    /// the max build height to `biome`, returning the fresh chunk. The holder is
+    /// driven through CARVERS (the real worldgen rungs) so the center biome is
+    /// genuinely filled; `run_spawn` composes its own SPAWN-step region.
+    fn spawn_seam_holder_with_center_biome(
+        generator: &Arc<OverworldGenerator>,
+        pos: ChunkPos,
+        biome_id: u16,
+    ) -> GenerationChunkHolder {
+        let mut holder = generator.create_holder(pos);
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        // `BiomeManager.getBiome` can select any of the eight surrounding quart
+        // corners. At max build height both y candidates clamp to the top
+        // section's final quart row, while all x/z candidates remain inside the
+        // center chunk. Fill that whole 4x4 row so the test controls the exact
+        // Java resolver rather than only one direct quart lookup.
+        let top_y = holder
+            .chunk
+            .get_min_y()
+            .wrapping_add(holder.chunk.get_height())
+            .wrapping_sub(1);
+        let section_index = holder.chunk.get_section_index(top_y);
+        let section = holder.chunk.get_section_mut(section_index as usize);
+        for quart_x in 0..4 {
+            for quart_z in 0..4 {
+                section.set_noise_biome(quart_x, 3, quart_z, WorldgenBiomeId(biome_id));
+            }
+        }
+        holder
+    }
+
+    /// The pinned seed-42 acceptance biome (0,0 center at maxY) is
+    /// `minecraft:river`: an EMPTY CREATURE list. Starting from the SPAWN
+    /// parent's completed status, the real executor dispatches `run_spawn`,
+    /// genuinely evaluates the settings/list/rule gates, and stamps SPAWN with
+    /// zero entities.
+    #[test]
+    fn spawn_seam_river_advances_to_spawn_with_zero_entities() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::new(0, 0));
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let name = resolve_center_biome_name(&holder.chunk, &generator);
+        assert_eq!(name, Some("minecraft:river"));
+
+        // G1 owns the preceding LIGHT computation. Pin its completed parent
+        // status here so this focused G2 test exercises the actual SPAWN step,
+        // including the executor-owned status publication.
+        holder.chunk.set_persisted_status(ChunkStatus::Light);
+        holder.chunk.set_light_correct(true);
+        let roster = holder.chunk.get_entities().len();
+        holder
+            .generate_through(ChunkStatus::Spawn)
+            .expect("empty CREATURE list advances to SPAWN");
+        assert_eq!(holder.status(), ChunkStatus::Spawn);
+        assert_eq!(holder.chunk.get_entities().len(), roster);
+    }
+
+    /// A biome with a non-empty CREATURE list, SPAWN_MOBS=false: `run_spawn`
+    /// bypasses population faithfully (Ok, zero entities) — the rule genuinely
+    /// gates the non-empty path.
+    #[test]
+    fn spawn_seam_spawn_mobs_false_bypasses_population() {
+        let generator = test_generator();
+        // beach (id 3) has a non-empty CREATURE list (turtle).
+        let mut holder = spawn_seam_holder_with_center_biome(&generator, ChunkPos::new(0, 0), 3);
+        let status_before = holder.chunk.get_persisted_status();
+        let roster = holder.chunk.get_entities().len();
+        run_spawn(&mut holder.chunk, &generator, false).expect("rule off bypasses population");
+        assert_eq!(holder.chunk.get_persisted_status(), status_before);
+        assert_eq!(holder.chunk.get_entities().len(), roster);
+    }
+
+    /// A biome with a non-empty CREATURE list and SPAWN_MOBS=true: `run_spawn`
+    /// refuses typed `CreatureSpawnNotGenerated` before pretending entities were
+    /// produced, leaving the chunk's status and observable state atomic.
+    #[test]
+    fn spawn_seam_non_empty_creature_refuses_typed() {
+        let generator = test_generator();
+        // beach (id 3) has a non-empty CREATURE list (turtle).
+        let mut holder = spawn_seam_holder_with_center_biome(&generator, ChunkPos::new(0, 0), 3);
+        let resolved = resolve_center_biome_name(&holder.chunk, &generator);
+        assert_eq!(
+            resolved,
+            Some("minecraft:beach"),
+            "center biome must resolve to beach after the write"
+        );
+        holder.chunk.set_persisted_status(ChunkStatus::Light);
+        holder.chunk.set_light_correct(true);
+        let roster = holder.chunk.get_entities().len();
+        let err = holder
+            .generate_through(ChunkStatus::Spawn)
+            .expect_err("non-empty CREATURE refuses");
+        assert!(
+            matches!(
+                err,
+                GeneratedChunkError::Generation(GenError::CreatureSpawnNotGenerated {
+                    biome: Some("minecraft:beach"),
+                    ..
+                })
+            ),
+            "got: {err}"
+        );
+        // Atomic: executor did not stamp SPAWN and no entity was fabricated.
+        assert_eq!(holder.status(), ChunkStatus::Light);
+        assert!(holder.chunk.is_light_correct());
+        assert_eq!(holder.chunk.get_entities().len(), roster);
     }
 }
