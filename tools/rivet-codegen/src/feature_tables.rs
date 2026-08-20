@@ -189,31 +189,32 @@ fn extract_mob_settings(value: &Value, biomes: &[BiomeSettings]) -> Result<Vec<M
             .with_context(|| format!("mob_settings `{name}` is missing `creature`"))?;
         let mut creature = Vec::with_capacity(creature_arr.len());
         for e in creature_arr {
-            let e = e
-                .as_object()
-                .with_context(|| format!("mob_settings `{name}` has a non-object creature entry"))?;
+            let e = e.as_object().with_context(|| {
+                format!("mob_settings `{name}` has a non-object creature entry")
+            })?;
             let ty = e
                 .get("type")
                 .and_then(Value::as_str)
                 .with_context(|| format!("mob_settings `{name}` creature entry missing `type`"))?
                 .to_string();
             crate::registries::validate_name("minecraft:entity_type", &ty)?;
-            let min = e
-                .get("min")
-                .and_then(Value::as_u64)
-                .with_context(|| format!("mob_settings `{name}` creature `{ty}` missing `min`"))?
-                as u32;
-            let max = e
-                .get("max")
-                .and_then(Value::as_u64)
-                .with_context(|| format!("mob_settings `{name}` creature `{ty}` missing `max`"))?
-                as u32;
-            let weight = e
-                .get("weight")
-                .and_then(Value::as_u64)
-                .with_context(|| format!("mob_settings `{name}` creature `{ty}` missing `weight`"))?
-                as u32;
-            creature.push(CreatureSpawner { ty, min, max, weight });
+            let min =
+                e.get("min").and_then(Value::as_u64).with_context(|| {
+                    format!("mob_settings `{name}` creature `{ty}` missing `min`")
+                })? as u32;
+            let max =
+                e.get("max").and_then(Value::as_u64).with_context(|| {
+                    format!("mob_settings `{name}` creature `{ty}` missing `max`")
+                })? as u32;
+            let weight = e.get("weight").and_then(Value::as_u64).with_context(|| {
+                format!("mob_settings `{name}` creature `{ty}` missing `weight`")
+            })? as u32;
+            creature.push(CreatureSpawner {
+                ty,
+                min,
+                max,
+                weight,
+            });
         }
         out.push(MobSettings {
             name: name.clone(),
@@ -230,7 +231,7 @@ fn extract_mob_settings(value: &Value, biomes: &[BiomeSettings]) -> Result<Vec<M
             .map(|b| b.id)
             .unwrap_or_default()
     };
-    out.sort_unstable_by(|a, b| id_of(&a.name).cmp(&id_of(&b.name)));
+    out.sort_unstable_by_key(|entry| id_of(&entry.name));
     Ok(out)
 }
 
@@ -750,11 +751,19 @@ mod tests {
         assert_eq!(beach.creature[0].max, 5);
         assert_eq!(beach.creature[0].weight, 5);
         // dark_forest has the four-tuple sorted in holder-set order.
-        let dark = mob.iter().find(|m| m.name == "minecraft:dark_forest").unwrap();
+        let dark = mob
+            .iter()
+            .find(|m| m.name == "minecraft:dark_forest")
+            .unwrap();
         let tys: Vec<&str> = dark.creature.iter().map(|c| c.ty.as_str()).collect();
         assert_eq!(
             tys,
-            ["minecraft:sheep", "minecraft:pig", "minecraft:chicken", "minecraft:cow"]
+            [
+                "minecraft:sheep",
+                "minecraft:pig",
+                "minecraft:chicken",
+                "minecraft:cow"
+            ]
         );
         // Render order is biome id order (matches the `biomes` table order).
         let beach_id = biomes

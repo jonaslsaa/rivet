@@ -550,9 +550,9 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
             .and_then(Value::as_array)
             .with_context(|| format!("mob_settings `{name}` is missing `creature`"))?;
         for (i, e) in creature.iter().enumerate() {
-            let e = e
-                .as_object()
-                .with_context(|| format!("mob_settings `{name}` creature[{i}] must be an object"))?;
+            let e = e.as_object().with_context(|| {
+                format!("mob_settings `{name}` creature[{i}] must be an object")
+            })?;
             for field in e.keys() {
                 if !matches!(field.as_str(), "type" | "min" | "max" | "weight") {
                     bail!("mob_settings `{name}` creature[{i}] has unexpected field `{field}`");
@@ -563,15 +563,15 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
                 .and_then(Value::as_str)
                 .with_context(|| format!("mob_settings `{name}` creature[{i}] missing `type`"))?;
             crate::registries::validate_name("minecraft:entity_type", ty)?;
-            e.get("min").and_then(Value::as_u64).with_context(|| {
-                format!("mob_settings `{name}` creature[{i}] missing `min`")
-            })?;
-            e.get("max").and_then(Value::as_u64).with_context(|| {
-                format!("mob_settings `{name}` creature[{i}] missing `max`")
-            })?;
-            e.get("weight").and_then(Value::as_u64).with_context(|| {
-                format!("mob_settings `{name}` creature[{i}] missing `weight`")
-            })?;
+            e.get("min")
+                .and_then(Value::as_u64)
+                .with_context(|| format!("mob_settings `{name}` creature[{i}] missing `min`"))?;
+            e.get("max")
+                .and_then(Value::as_u64)
+                .with_context(|| format!("mob_settings `{name}` creature[{i}] missing `max`"))?;
+            e.get("weight")
+                .and_then(Value::as_u64)
+                .with_context(|| format!("mob_settings `{name}` creature[{i}] missing `weight`"))?;
         }
     }
 
