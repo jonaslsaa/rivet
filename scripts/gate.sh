@@ -225,6 +225,7 @@ oracle_prereq_check() {
     fi
   fi
   if [ -n "$CLIENT_BIN" ]; then
+    export RIVET_CLIENT_BIN="$CLIENT_BIN"
     echo "  [ok]      rivet-client binary ($CLIENT_BIN)"
   else
     echo "  [MISSING] rivet-client binary — build it first (cd tools/rivet-client && cargo build --locked) or set RIVET_CLIENT_BIN"
