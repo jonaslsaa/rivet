@@ -863,11 +863,7 @@ pub(crate) fn crate_root() -> PathBuf {
 
 pub(crate) fn cargo_target_dir() -> PathBuf {
     if let Ok(target_dir) = env::var("CARGO_TARGET_DIR") {
-        let path = PathBuf::from(target_dir);
-        if path.is_absolute() {
-            return path;
-        }
-        return crate_root().join(path);
+        return PathBuf::from(target_dir);
     }
     if let Ok(exe) = env::current_exe()
         && let Some(profile_dir) = exe.parent()
