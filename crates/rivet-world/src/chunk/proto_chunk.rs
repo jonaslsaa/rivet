@@ -37,6 +37,7 @@
 
 use crate::biome::biome_resolver::BiomeResolver;
 use crate::biome::climate::Sampler;
+use crate::block::Block;
 use crate::block::BlockState;
 use crate::block::blocks::Blocks;
 use crate::chunk::carving_mask::CarvingMask;
@@ -321,6 +322,18 @@ where
     /// throws otherwise; the guard defers with the status unit (#185).
     pub fn get_noise_biome(&self, quart_x: i32, quart_y: i32, quart_z: i32) -> B {
         self.base.get_noise_biome(quart_x, quart_y, quart_z)
+    }
+
+    /// `ChunkAccess.getBlockTicks()` — the worldgen block-tick container
+    /// owned by this proto chunk. The storage lives on the generic base so
+    /// promotion/value mapping cannot accidentally drop it.
+    pub fn get_block_ticks(&self) -> &crate::ticks::ProtoChunkTicks<Block> {
+        self.base.get_block_ticks()
+    }
+
+    /// Mutable half of [`get_block_ticks`](Self::get_block_ticks).
+    pub fn get_block_ticks_mut(&mut self) -> &mut crate::ticks::ProtoChunkTicks<Block> {
+        self.base.get_block_ticks_mut()
     }
 
     /// `ProtoChunk.getPersistedStatus()`.

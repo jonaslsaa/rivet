@@ -51,7 +51,7 @@ impl BlockPredicateFilter {
 impl PlacementFilter for BlockPredicateFilter {
     fn should_place<R: RandomSource>(
         &self,
-        context: &PlacementContext,
+        context: &mut PlacementContext,
         _random: &mut R,
         origin: &BlockPos,
     ) -> bool {
@@ -173,10 +173,10 @@ mod tests {
         );
         let mut level = TestLevel(create(-64, 384));
         let generator = NoopGenerator;
-        let context = PlacementContext::new(&mut level, &generator, None);
+        let mut context = PlacementContext::new(&mut level, &generator, None);
         let mut random = LegacyRandomSource::new(0);
         let result: Vec<_> =
-            PlacementModifier::get_positions(&filter, &context, &mut random, &origin).collect();
+            PlacementModifier::get_positions(&filter, &mut context, &mut random, &origin).collect();
         assert_eq!(result, vec![origin]);
     }
 

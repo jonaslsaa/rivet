@@ -59,7 +59,7 @@ impl SurfaceRelativeThresholdFilter {
 impl PlacementFilter for SurfaceRelativeThresholdFilter {
     fn should_place<R: RandomSource>(
         &self,
-        context: &PlacementContext,
+        context: &mut PlacementContext,
         _random: &mut R,
         origin: &BlockPos,
     ) -> bool {
@@ -155,7 +155,7 @@ mod tests {
             panic!("WorldGenLevel.getBlockState is not implemented (RivetTodo #399)")
         }
 
-        fn get_height_at(&self, _ty: Types, _x: i32, _z: i32) -> i32 {
+        fn get_height_at(&mut self, _ty: Types, _x: i32, _z: i32) -> i32 {
             self.surface
         }
     }
@@ -181,8 +181,8 @@ mod tests {
         origin: &BlockPos,
     ) -> Vec<BlockPos> {
         let generator = NoopGenerator;
-        let context = PlacementContext::new(level, &generator, None);
-        PlacementModifier::get_positions(filter, &context, random, origin).collect()
+        let mut context = PlacementContext::new(level, &generator, None);
+        PlacementModifier::get_positions(filter, &mut context, random, origin).collect()
     }
 
     #[test]

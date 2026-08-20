@@ -108,6 +108,69 @@ impl PlacedFeature {
         self.place_with_context(lookup, level, generator, random, origin, Some(self))
     }
 
+    /// Walk the complete placement chain without invoking the configured
+    /// feature. This is the selection half of `placeWithContext`: modifiers
+    /// still run lazily, depth-first, with the same top-feature and world-state
+    /// context, while the caller can stop at the first selected feature whose
+    /// leaf implementation is outside its current slice.
+    pub fn has_placement_positions<R: RandomSource>(
+        &self,
+        level: &mut dyn WorldGenLevel,
+        generator: &dyn ChunkGenerator,
+        random: &mut R,
+        origin: &BlockPos,
+    ) -> bool {
+        self.first_placement_position(level, generator, random, origin)
+            .is_some()
+    }
+
+    /// Return the first terminal position selected by the complete placement
+    /// modifier chain. This is the same depth-first walk as
+    /// [`Self::has_placement_positions`], but exposes the position for callers
+    /// that need to prepare or inspect the configured feature's world state.
+    pub fn first_placement_position<R: RandomSource>(
+        &self,
+        level: &mut dyn WorldGenLevel,
+        generator: &dyn ChunkGenerator,
+        random: &mut R,
+        origin: &BlockPos,
+    ) -> Option<BlockPos> {
+        let mut selected = None;
+        self.select_walk(0, *origin, level, generator, random, &mut selected);
+        selected
+    }
+
+    fn select_walk<R: RandomSource>(
+        &self,
+        index: usize,
+        pos: BlockPos,
+        level: &mut dyn WorldGenLevel,
+        generator: &dyn ChunkGenerator,
+        random: &mut R,
+        selected: &mut Option<BlockPos>,
+    ) {
+        if selected.is_some() {
+            return;
+        }
+        if index == self.placement.len() {
+            if level.ensure_can_write(&pos) {
+                *selected = Some(pos);
+            }
+            return;
+        }
+        let modifier = &self.placement[index];
+        let positions = {
+            let mut context = PlacementContext::new(level, generator, Some(self));
+            placement_get_positions(modifier.as_ref(), &mut context, random, &pos)
+        };
+        for child in positions {
+            self.select_walk(index + 1, child, level, generator, random, selected);
+            if selected.is_some() {
+                break;
+            }
+        }
+    }
+
     /// `placeWithContext` — walk `Stream.of(origin)` depth-first through each
     /// modifier's `getPositions` and place the configured feature at every
     /// resulting position. The `MutableBoolean placedAny` is a plain `bool`; the
@@ -172,9 +235,9 @@ impl PlacedFeature {
     ///
     /// The `PlacementContext` is reconstructed per expansion rather than once
     /// (as Java constructs it): the context borrows the level mutably and
-    /// placement writes through the same `level` reference, and the context is a
-    /// pure read-only window over `(level, generator, top_feature)`, so every
-    /// reconstruction is behaviorally identical to Java's single context.
+    /// placement writes and lazy heightmap priming use the same `level`
+    /// reference, so every reconstruction is behaviorally identical to Java's
+    /// single context.
     #[allow(clippy::too_many_arguments)] // the resolved-feature `&` + the `place`-signature params
     fn place_walk<R: RandomSource>(
         &self,
@@ -200,8 +263,8 @@ impl PlacedFeature {
         }
         let modifier = &self.placement[index];
         let positions = {
-            let context = PlacementContext::new(level, generator, top_feature);
-            placement_get_positions(modifier.as_ref(), &context, random, &pos)
+            let mut context = PlacementContext::new(level, generator, top_feature);
+            placement_get_positions(modifier.as_ref(), &mut context, random, &pos)
         };
         for child in positions {
             self.place_walk(
@@ -301,7 +364,9 @@ mod tests {
 
     use crate::levelgen::feature::configurations::RandomBooleanFeatureConfiguration;
     use crate::levelgen::feature::registry_keys::{CONFIGURED_FEATURE, PLACED_FEATURE};
-    use crate::levelgen::placement::{CountPlacement, InSquarePlacement, PlacementModifierTypeId};
+    use crate::levelgen::placement::{
+        CountPlacement, InSquarePlacement, PlacementModifierTypeId, RarityFilter,
+    };
     use rivet_registry::Identifier;
     use rivet_registry::access::RegistryAccess;
     use rivet_registry::root::AnyBox;
@@ -814,6 +879,35 @@ mod tests {
         }
     }
 
+    struct RejectingLevel;
+
+    impl crate::level::height_accessor::LevelHeightAccessor for RejectingLevel {
+        fn get_height(&self) -> i32 {
+            384
+        }
+
+        fn get_min_y(&self) -> i32 {
+            -64
+        }
+    }
+
+    impl crate::level::WorldGenLevel for RejectingLevel {
+        fn get_seed(&self) -> i64 {
+            0
+        }
+
+        fn ensure_can_write(&self, _pos: &rivet_registry::core::BlockPos) -> bool {
+            false
+        }
+
+        fn get_block_state(
+            &self,
+            _pos: &rivet_registry::core::BlockPos,
+        ) -> rivet_registry::block_state::BlockState {
+            panic!("WorldGenLevel.getBlockState is not implemented (RivetTodo #399)")
+        }
+    }
+
     impl crate::chunk::ChunkGenerator for NoopGenerator {
         fn get_min_y(&self) -> i32 {
             0
@@ -869,6 +963,66 @@ mod tests {
             msg.contains("Trying to access unbound value"),
             "expected the holder-resolution panic, got: {msg}"
         );
+    }
+
+    #[test]
+    fn selection_walk_reaches_later_modifier_acceptance() {
+        let placed = PlacedFeature::new(
+            Holder::direct(no_op_feature()),
+            vec![
+                count_modifier(),
+                Arc::new(RarityFilter::on_average_once_every(1)),
+            ],
+        );
+        let mut level = TestLevel;
+        let generator = NoopGenerator;
+        let mut random = rivet_util::random::LegacyRandomSource::new(42);
+        assert!(placed.has_placement_positions(
+            &mut level,
+            &generator,
+            &mut random,
+            &BlockPos::new(0, 0, 0),
+        ));
+    }
+
+    #[test]
+    fn selection_walk_rejects_at_a_later_modifier() {
+        let placed = PlacedFeature::new(
+            Holder::direct(no_op_feature()),
+            vec![
+                count_modifier(),
+                Arc::new(RarityFilter::on_average_once_every(2_147_483_647)),
+            ],
+        );
+        let mut level = TestLevel;
+        let generator = NoopGenerator;
+        let mut random = rivet_util::random::LegacyRandomSource::new(0);
+        assert!(!placed.has_placement_positions(
+            &mut level,
+            &generator,
+            &mut random,
+            &BlockPos::new(0, 0, 0),
+        ));
+    }
+
+    #[test]
+    fn selection_walk_rejects_a_terminal_position_outside_the_write_zone() {
+        let placed = PlacedFeature::new(
+            Holder::direct(no_op_feature()),
+            vec![
+                count_modifier(),
+                Arc::new(RarityFilter::on_average_once_every(1)),
+            ],
+        );
+        let mut level = RejectingLevel;
+        let generator = NoopGenerator;
+        let mut random = rivet_util::random::LegacyRandomSource::new(42);
+        assert!(!placed.has_placement_positions(
+            &mut level,
+            &generator,
+            &mut random,
+            &BlockPos::new(0, 0, 0),
+        ));
     }
 
     #[test]

@@ -105,6 +105,10 @@ pub mod huge_red_mushroom_feature;
 pub mod iceberg_feature;
 pub mod simple_block_feature;
 pub mod snow_and_freeze_feature;
+// The seed-42 feature slice — `UnderwaterMagmaFeature` (the
+// `mc.world.level.levelgen.feature.underwatermagma` manifest unit), wired at
+// id 21.
+pub mod underwater_magma_feature;
 pub mod vines_feature;
 
 // The `net.minecraft.world.level.levelgen.feature.stateproviders` value layer
@@ -147,6 +151,8 @@ pub mod delta_feature;
 pub mod disk_feature;
 pub mod geode_feature;
 pub mod lake_feature;
+pub mod monster_room_feature;
+pub mod multiface_growth_feature;
 pub mod replace_blobs_feature;
 pub mod scattered_ore_feature;
 pub mod sculk_patch_feature;
@@ -209,6 +215,7 @@ use crate::levelgen::feature::configurations::FeatureConfiguration;
 use crate::levelgen::feature::configurations::GeodeConfiguration;
 use crate::levelgen::feature::configurations::HugeMushroomFeatureConfiguration;
 use crate::levelgen::feature::configurations::LayerConfiguration;
+use crate::levelgen::feature::configurations::MultifaceGrowthConfiguration;
 use crate::levelgen::feature::configurations::NetherForestVegetationConfig;
 use crate::levelgen::feature::configurations::NoneFeatureConfiguration;
 use crate::levelgen::feature::configurations::OreConfiguration;
@@ -220,6 +227,7 @@ use crate::levelgen::feature::configurations::SculkPatchConfiguration;
 use crate::levelgen::feature::configurations::SimpleBlockConfiguration;
 use crate::levelgen::feature::configurations::SpikeConfiguration;
 use crate::levelgen::feature::configurations::SpringConfiguration;
+use crate::levelgen::feature::configurations::UnderwaterMagmaConfiguration;
 use crate::levelgen::feature::configurations::WeightedRandomFeatureConfiguration;
 use crate::levelgen::feature::no_op_feature::NO_OP;
 use rivet_registry::Holder;
@@ -254,6 +262,8 @@ pub use huge_red_mushroom_feature::{HUGE_RED_MUSHROOM, HugeRedMushroomFeature};
 pub use iceberg_feature::{ICEBERG, IcebergFeature};
 pub use kelp_feature::{KELP, KelpFeature};
 pub use lake_feature::{LAKE, LakeFeature};
+pub use monster_room_feature::{MONSTER_ROOM, MonsterRoomFeature};
+pub use multiface_growth_feature::{MULTIFACE_GROWTH, MultifaceGrowthFeature};
 pub use nether_forest_vegetation_feature::{
     NETHER_FOREST_VEGETATION, NetherForestVegetationFeature,
 };
@@ -267,6 +277,7 @@ pub use simple_block_feature::{SIMPLE_BLOCK, SimpleBlockFeature};
 pub use snow_and_freeze_feature::{FREEZE_TOP_LAYER, SnowAndFreezeFeature};
 pub use spike_feature::{SPIKE, SpikeFeature};
 pub use spring_feature::{SPRING, SpringFeature};
+pub use underwater_magma_feature::{UNDERWATER_MAGMA, UnderwaterMagmaFeature};
 pub use vines_feature::{VINES, VinesFeature};
 
 // The vegetation-family wave (issue #600) — the `.feature.selector` unit's
@@ -497,6 +508,43 @@ impl FeatureId {
     }
 }
 
+/// Resolve the registered feature identity used by a configured-feature JSON
+/// dispatch type. The feature registry is the source of truth for the id; this
+/// view exposes the configured feature leaves reachable by the seed-42
+/// FEATURES slice. Unknown types are unavailable, never mapped to a fabricated
+/// fallback.
+pub fn feature_id_from_registry_name(name: &str) -> Option<FeatureId> {
+    match name {
+        // `Feature.LAKE` is the registered `minecraft:lake` singleton.
+        "minecraft:lake" => Some(FeatureId::new(27)),
+        // `Feature.MONSTER_ROOM` is the registered `minecraft:monster_room`
+        // singleton used by both monster-room configured entries.
+        "minecraft:monster_room" => Some(FeatureId::new(22)),
+        // `Feature.GEODE` is the registered `minecraft:geode` singleton.
+        "minecraft:geode" => Some(FeatureId::new(58)),
+        // The Batch 2 seed-42 dispatch leaves — each registered `minecraft:…`
+        // singleton at its feature-registry insertion index (the `#181`
+        // protocol ids in the dispatch hub). `Feature.SPRING` (4), `FREEZE_TOP_LAYER`
+        // (14), `VINES` (15), `BLOCK_COLUMN` (16), `DISK` (26), `ORE` (28),
+        // `SEAGRASS` (33), `SIMPLE_BLOCK` (39), `RANDOM_SELECTOR` (52),
+        // `SIMPLE_RANDOM_SELECTOR` (54), and `RANDOM_BOOLEAN_SELECTOR` (55).
+        "minecraft:spring_feature" => Some(FeatureId::new(4)),
+        "minecraft:freeze_top_layer" => Some(FeatureId::new(14)),
+        "minecraft:vines" => Some(FeatureId::new(15)),
+        "minecraft:block_column" => Some(FeatureId::new(16)),
+        "minecraft:disk" => Some(FeatureId::new(26)),
+        "minecraft:ore" => Some(FeatureId::new(28)),
+        "minecraft:seagrass" => Some(FeatureId::new(33)),
+        "minecraft:simple_block" => Some(FeatureId::new(39)),
+        "minecraft:random_selector" => Some(FeatureId::new(52)),
+        "minecraft:simple_random_selector" => Some(FeatureId::new(54)),
+        "minecraft:random_boolean_selector" => Some(FeatureId::new(55)),
+        "minecraft:underwater_magma" => Some(FeatureId::new(21)),
+        "minecraft:multiface_growth" => Some(FeatureId::new(20)),
+        _ => None,
+    }
+}
+
 /// The `#181` hub — dispatch a `FeatureId` + erased config to a placement.
 ///
 /// `Feature.java`'s registration table (the `register(...)` calls that bind
@@ -519,7 +567,8 @@ impl FeatureId {
 /// `CompositeFeatureConfiguration`), `random_boolean_selector` (id 55,
 /// `RandomBooleanSelectorFeature` over `RandomBooleanFeatureConfiguration`),
 /// and `sequence` (id 56, `SequenceFeature` over
-/// `CompositeFeatureConfiguration`) — and this wave
+/// `CompositeFeatureConfiguration`) — the seed-42 `underwater_magma` leaf
+/// (id 21) — and this wave
 /// (`mc.world.level.levelgen.feature.geology-cave-leaves`) the nine
 /// `.feature.geology*` leaves, in registry-id order: `spring_feature` (id 4),
 /// `spike` (id 12), `disk` (id 26), `lake` (id 27, the nested
@@ -730,6 +779,16 @@ pub fn feature_place<R: RandomSource>(
                 .expect("ore feature must carry an OreConfiguration");
             ORE.place_with_config(config, level, chunk_generator, random, origin)
         }
+        // `Feature.MONSTER_ROOM` — the registered `minecraft:monster_room`
+        // leaf (FeatureId 22; both `minecraft:monster_room` and
+        // `minecraft:monster_room_deep` wrap the same configured feature — the
+        // seed-42 selected-chunk path; see `monster_room_feature`).
+        22 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<NoneFeatureConfiguration>()
+                .expect("monster_room feature must carry a NoneFeatureConfiguration");
+            MONSTER_ROOM.place_with_config(config, level, chunk_generator, random, origin)
+        }
         // `Feature.DELTA`.
         46 => {
             let config = (config as &dyn Any)
@@ -767,6 +826,16 @@ pub fn feature_place<R: RandomSource>(
                 .downcast_ref::<SculkPatchConfiguration>()
                 .expect("sculk_patch feature must carry a SculkPatchConfiguration");
             SCULK_PATCH.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.MULTIFACE_GROWTH` — the registered `minecraft:multiface_growth`
+        // leaf (the step-9 seed-42 feature body for `glow_lichen`; see
+        // `multiface_growth_feature`). Attachment uses the shared
+        // `WorldGenLevel::can_attach_to` support-or-collision face query.
+        20 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<MultifaceGrowthConfiguration>()
+                .expect("multiface_growth feature must carry a MultifaceGrowthConfiguration");
+            MULTIFACE_GROWTH.place_with_config(config, level, chunk_generator, random, origin)
         }
         // The end-leaves wave — the four registered End features (each owned by
         // its own `.feature.*` MANIFEST row), all over `NoneFeatureConfiguration`.
@@ -881,6 +950,15 @@ pub fn feature_place<R: RandomSource>(
                 .downcast_ref::<SimpleBlockConfiguration>()
                 .expect("simple_block feature must carry a SimpleBlockConfiguration");
             SIMPLE_BLOCK.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.UNDERWATER_MAGMA` — the registered `minecraft:underwater_magma`
+        // leaf (the water-column floor scan + magma placement slice; the
+        // face-occlusion visibility uses the `#232`/`mc.world.phys.shapes` seam).
+        21 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<UnderwaterMagmaConfiguration>()
+                .expect("underwater_magma feature must carry a UnderwaterMagmaConfiguration");
+            UNDERWATER_MAGMA.place_with_config(config, level, chunk_generator, random, origin)
         }
         // `Feature.BASALT_COLUMNS`.
         45 => {
@@ -1045,6 +1123,37 @@ mod tests {
             &origin,
         );
         assert!(placed);
+    }
+
+    /// The seed-42 `Feature.UNDERWATER_MAGMA` registration (id 21) reaches
+    /// the concrete behavior through the dispatch hub. A zero search range
+    /// makes the configured water origin fail the scan, so this test exercises
+    /// the id/config routing without depending on placement geometry.
+    #[test]
+    fn underwater_magma_dispatch_id_21_reaches_concrete_feature() {
+        let origin = BlockPos::new(0, 10, 0);
+        let mut level = crate::levelgen::feature::test_support::TestLevel::over(
+            crate::levelgen::feature::test_support::access(),
+        );
+        level.states.insert(
+            origin,
+            crate::block::blocks::Blocks::WATER.default_block_state(),
+        );
+        let generator = TestGenerator;
+        let mut random = LegacyRandomSource::new(1);
+        let config = UnderwaterMagmaConfiguration::new(0, 0, 1.0);
+
+        let placed = feature_place(
+            FeatureId::new(21),
+            &config,
+            &mut level,
+            &generator,
+            &mut random,
+            &origin,
+        );
+
+        assert!(!placed);
+        assert_eq!(level.reads.borrow().as_slice(), [origin, origin, origin]);
     }
 
     /// `ConfiguredFeature.place` routes through `feature_place` with the

@@ -50,7 +50,7 @@ impl BiomeFilter {
 impl PlacementFilter for BiomeFilter {
     fn should_place<R: RandomSource>(
         &self,
-        context: &PlacementContext,
+        context: &mut PlacementContext,
         _random: &mut R,
         origin: &BlockPos,
     ) -> bool {
@@ -195,11 +195,16 @@ mod tests {
             accessor: create(-64, 384),
         };
         let generator = NoopGenerator;
-        let context = PlacementContext::new(&mut level, &generator, None);
+        let mut context = PlacementContext::new(&mut level, &generator, None);
         let origin = BlockPos::new(0, 0, 0);
         let mut random = rivet_util::random::LegacyRandomSource::new(0);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            PlacementFilter::should_place(&BiomeFilter::INSTANCE, &context, &mut random, &origin)
+            PlacementFilter::should_place(
+                &BiomeFilter::INSTANCE,
+                &mut context,
+                &mut random,
+                &origin,
+            )
         }));
         assert!(
             result.is_err(),
@@ -233,11 +238,15 @@ mod tests {
             accessor: create(-64, 384),
         };
         let generator = AnsweringGenerator { member: true };
-        let context = PlacementContext::new(&mut level, &generator, Some(&top_feature));
+        let mut context = PlacementContext::new(&mut level, &generator, Some(&top_feature));
         let origin = BlockPos::new(0, 0, 0);
         let mut random = rivet_util::random::LegacyRandomSource::new(0);
-        let result =
-            PlacementFilter::should_place(&BiomeFilter::INSTANCE, &context, &mut random, &origin);
+        let result = PlacementFilter::should_place(
+            &BiomeFilter::INSTANCE,
+            &mut context,
+            &mut random,
+            &origin,
+        );
         assert!(result, "member biome must keep the origin");
     }
 
@@ -253,11 +262,15 @@ mod tests {
             accessor: create(-64, 384),
         };
         let generator = AnsweringGenerator { member: false };
-        let context = PlacementContext::new(&mut level, &generator, Some(&top_feature));
+        let mut context = PlacementContext::new(&mut level, &generator, Some(&top_feature));
         let origin = BlockPos::new(0, 0, 0);
         let mut random = rivet_util::random::LegacyRandomSource::new(0);
-        let result =
-            PlacementFilter::should_place(&BiomeFilter::INSTANCE, &context, &mut random, &origin);
+        let result = PlacementFilter::should_place(
+            &BiomeFilter::INSTANCE,
+            &mut context,
+            &mut random,
+            &origin,
+        );
         assert!(!result, "non-member biome must drop the origin");
     }
 

@@ -59,7 +59,7 @@ pub trait RepeatingPlacement: Debug + Send + Sync + 'static {
     /// consumes the iterator incrementally.
     fn get_positions<'a, R: RandomSource>(
         &'a self,
-        _context: &PlacementContext,
+        _context: &mut PlacementContext,
         random: &mut R,
         origin: &BlockPos,
     ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
@@ -127,7 +127,7 @@ mod tests {
     impl PlacementModifier for FixedRepeat {
         fn get_positions<'a, R: RandomSource>(
             &'a self,
-            context: &PlacementContext,
+            context: &mut PlacementContext,
             random: &mut R,
             origin: &BlockPos,
         ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
@@ -144,12 +144,12 @@ mod tests {
     fn positions(repeat: &FixedRepeat, origin: &BlockPos) -> Vec<BlockPos> {
         let mut level = TestLevel(create(-64, 384));
         let generator = NoopGenerator;
-        let context = PlacementContext::new(&mut level, &generator, None);
+        let mut context = PlacementContext::new(&mut level, &generator, None);
         let mut random = LegacyRandomSource::new(0);
         // UFCS: `FixedRepeat` implements both `PlacementModifier` and
         // `RepeatingPlacement`, each with a `get_positions` — Java's single
         // inherited method maps to the `PlacementModifier` trait entry.
-        <FixedRepeat as PlacementModifier>::get_positions(repeat, &context, &mut random, origin)
+        <FixedRepeat as PlacementModifier>::get_positions(repeat, &mut context, &mut random, origin)
             .collect()
     }
 

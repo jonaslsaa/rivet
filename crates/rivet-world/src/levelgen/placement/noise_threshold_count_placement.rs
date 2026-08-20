@@ -75,7 +75,7 @@ impl PlacementModifier for NoiseThresholdCountPlacement {
     /// `getPositions` — the inherited `RepeatingPlacement` shell (lazy).
     fn get_positions<'a, R: RandomSource>(
         &'a self,
-        context: &PlacementContext,
+        context: &mut PlacementContext,
         random: &mut R,
         origin: &BlockPos,
     ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {

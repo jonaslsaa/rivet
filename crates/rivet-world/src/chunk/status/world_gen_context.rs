@@ -335,6 +335,14 @@ pub enum GenError {
         /// when the biome's dense id is not in `BIOME_BY_ID` at all).
         biome: Option<&'static str>,
     },
+    /// `ChunkGenerator.addVanillaDecorations` cannot establish the exact
+    /// structure-consumed feature index because the structure manager and its
+    /// decoration state are not ported. Feature seeds and placement must stop
+    /// before this boundary rather than assuming zero structure consumption.
+    StructureDecorationIndexUnavailable {
+        /// The generating chunk whose decoration order is unavailable.
+        chunk_pos: ChunkPos,
+    },
     /// A wired generation task is installed at a rung it does not own —
     /// `GenerateBiomes` away from `BIOMES`, `GenerateNoise` away from `NOISE`.
     /// Only a malformed crate-internal pyramid can produce this: dispatching it
@@ -398,6 +406,11 @@ impl std::fmt::Display for GenError {
                      is not in the generated biome table (RivetTodo #126)"
                 ),
             },
+            GenError::StructureDecorationIndexUnavailable { chunk_pos } => write!(
+                f,
+                "cannot decorate chunk {chunk_pos}: structure-consumed feature index is unavailable \
+                 without the structure manager"
+            ),
             GenError::DataNotCarried { status } => write!(
                 f,
                 "cannot label the chunk {status:?}: a pass-through step cannot fabricate that data"

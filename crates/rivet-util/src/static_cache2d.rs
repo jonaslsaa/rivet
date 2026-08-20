@@ -124,8 +124,8 @@ impl<T> StaticCache2D<T> {
     /// `StaticCache2D.contains(int x, int z)` — whether the coordinate is
     /// inside the window.
     pub fn contains(&self, x: i32, z: i32) -> bool {
-        let delta_x = x - self.min_x;
-        let delta_z = z - self.min_z;
+        let delta_x = x.wrapping_sub(self.min_x);
+        let delta_z = z.wrapping_sub(self.min_z);
         delta_x >= 0 && delta_x < self.size_x && delta_z >= 0 && delta_z < self.size_z
     }
 
@@ -140,8 +140,8 @@ impl<T> StaticCache2D<T> {
     /// (z - minZ)` (Java's `deltaX * this.sizeZ + deltaZ`; the port iterates
     /// x-major so the index formula matches Java's column-major storage).
     fn get_index(&self, x: i32, z: i32) -> usize {
-        let delta_x = x - self.min_x;
-        let delta_z = z - self.min_z;
+        let delta_x = x.wrapping_sub(self.min_x);
+        let delta_z = z.wrapping_sub(self.min_z);
         (delta_x * self.size_z + delta_z) as usize
     }
 }
@@ -177,6 +177,18 @@ mod tests {
         assert_eq!(*cache.get(2, 2), (2, 2));
         assert_eq!(*cache.get(-2, -2), (-2, -2));
         assert_eq!(*cache.get(0, 0), (0, 0));
+    }
+
+    #[test]
+    fn contains_uses_wrapping_coordinate_deltas() {
+        let cache = StaticCache2D::from_entries(i32::MIN, i32::MIN, 1, 1, vec![()]);
+        assert!(cache.contains(i32::MIN, i32::MIN));
+        assert!(!cache.contains(i32::MAX, i32::MAX));
+        let message = std::panic::catch_unwind(|| cache.get(i32::MAX, i32::MAX))
+            .expect_err("out-of-range get must use the Java-style bounds failure")
+            .downcast::<String>()
+            .unwrap();
+        assert!(message.contains("Requested out of range value"));
     }
 
     #[test]
