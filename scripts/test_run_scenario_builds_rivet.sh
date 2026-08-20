@@ -8,7 +8,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 TOOL_DIR="$TMP/tools/rivet-client"
-TARGET_DIR="$TMP/shared-target"
+TARGET_DIR="$TMP/target"
 BIN_DIR="$TARGET_DIR/debug"
 mkdir -p "$TOOL_DIR" "$BIN_DIR" "$TMP/scripts"
 TARGET_DIR="$(cd "$TARGET_DIR" && pwd -P)"
@@ -63,8 +63,8 @@ for mode in dwell kick load-world loaded-world recenter generated-world; do
   built_rivet || fail "$mode must build rivet-server (cargo log: $(cat "$CARGO_LOG"))"
   [ "$(wc -l < "$SCENARIO_ARGV_LOG" | tr -d ' ')" = 1 ] || fail "$mode: expected exactly 1 run-scenario invocation"
   grep -qx "$mode" "$SCENARIO_ARGV_LOG" || fail "$mode: mode not passed through (got $(cat "$SCENARIO_ARGV_LOG"))"
-  grep -q -- "target=$TARGET_DIR" "$CARGO_LOG" || fail "$mode: Cargo did not receive the resolved shared target"
-  pass "$mode builds rivet-server and uses the shared target resolver"
+  grep -q -- "target=$TARGET_DIR" "$CARGO_LOG" || fail "$mode: Cargo did not receive the resolved checkout target"
+  pass "$mode builds rivet-server and uses the checkout target resolver"
 done
 
 for sel in rivet both; do
@@ -103,7 +103,7 @@ run_unlocked join
 grep -qx join "$SCENARIO_ARGV_LOG" || fail "standalone locked invocation did not reach the binary"
 grep -q -- "target=$TARGET_DIR" "$CARGO_LOG" \
   || fail "standalone invocation did not resolve the Cargo target directory"
-pass "standalone run-scenario acquires the shared lock without recursion"
+pass "standalone run-scenario acquires the repository build lock without recursion"
 
 echo
 echo "ALL RUN-SCENARIO RIVET-BUILD TESTS PASSED"
