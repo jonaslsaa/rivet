@@ -180,11 +180,13 @@ pub enum GeneratedChunkError {
     /// the first selected path outside the decoded lake slice — see
     /// [`GenerationChunkHolder::new`].)
     UnsupportedStatus(ChunkStatus),
-    /// The FULL conversion refused: the `LevelChunk` bridge rejected the proto
-    /// before consuming it ([`LevelChunkBridgeError::NotFull`] for any genuine
-    /// pre-FULL persisted status, `UnsupportedLightState`/`PaletteMap` for the
-    /// value/light hostile cases). The chunk is left untouched — the proto is
-    /// never half-promoted.
+    /// The FULL conversion refused: the `LevelChunk` bridge rejected the proto.
+    /// [`LevelChunkBridgeError::NotFull`] fires before the proto is consumed
+    /// for any genuine pre-FULL persisted status; `UnsupportedLightState` fires
+    /// before the value transform, and `PaletteMap` arises from the `map_values`
+    /// re-encode itself. A refusal never produces a partial `LevelChunk` or an
+    /// install — the holder is consumed on every outcome (it is a self-taking
+    /// API), so no half-promoted chunk ever escapes.
     Convert(LevelChunkBridgeError),
 }
 
@@ -610,14 +612,19 @@ impl GenerationChunkHolder {
     /// holder by value (tick-thread owned, never `Arc<RwLock>`) and
     /// [`LevelChunk::try_from_full_proto`] consumes the `ProtoChunk`.
     ///
-    /// The refusal is atomic and typed: every genuine pre-FULL persisted status
-    /// is rejected as [`GeneratedChunkError::Convert`] carrying
-    /// [`LevelChunkBridgeError::NotFull`] before the proto is consumed, so no
-    /// holder/chunk mutation, partial install, clone, or status fabrication ever
-    /// happens on failure. A `FULL` proto with a hostile persisted Starlight
-    /// state or a palette the server value pair cannot re-encode is likewise
-    /// refused as `Convert` (`UnsupportedLightState`/`PaletteMap`) before the
-    /// value transform consumes it.
+    /// The conversion is atomic and typed: a refusal produces no partial
+    /// `LevelChunk`, no install, no clone, and no status fabrication. Every
+    /// genuine pre-FULL persisted status is rejected as
+    /// [`GeneratedChunkError::Convert`] carrying [`LevelChunkBridgeError::NotFull`]
+    /// before the `ProtoChunk` is consumed. A `FULL` proto with a hostile
+    /// persisted Starlight state is refused as `Convert(UnsupportedLightState)`
+    /// before the value transform consumes it; a palette the server value pair
+    /// cannot re-encode fails as `Convert(PaletteMap)` from the
+    /// `map_values` re-encode itself (the proto is consumed in that hostile
+    /// case, but no `LevelChunk` is ever produced). Because this is a consuming
+    /// (`self`) API, on *any* outcome the holder is dropped — the caller never
+    /// recovers the original `ProtoChunk`; the guarantee is only that no
+    /// half-promoted chunk or install ever escapes.
     pub fn into_level_chunk(self) -> Result<LevelChunk, GeneratedChunkError> {
         LevelChunk::try_from_full_proto(self.chunk).map_err(GeneratedChunkError::Convert)
     }
@@ -1416,7 +1423,6 @@ impl fmt::Debug for GenerationChunkHolder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::level::chunk_map::ChunkMap;
     use crate::server::level::server_level::{ServerLevel, ServerLevelConfig};
     use rivet_nbt::compound_tag::CompoundTag;
     use rivet_nbt::list_tag::ListTag;
@@ -2252,21 +2258,29 @@ mod tests {
     }
 
     /// The install seam composes exactly: a refused conversion never reaches
-    /// the map (no partial install — `install` only ever runs on a promoted
-    /// `Ok(LevelChunk)`), so an empty map stays empty at the generated position.
+    /// the map. The composition pattern — promote, and only on `Ok` call
+    /// `chunk_map_mut().install(pos, chunk)` — is what keeps the authority
+    /// empty, so this test drives that exact composition against one
+    /// `ServerLevel` and asserts nothing is installed at the refused position.
     #[test]
     fn no_install_on_conversion_refusal() {
         let generator = test_generator();
-        let mut holder = generator.create_holder(ChunkPos::new(3, 4));
+        let pos = ChunkPos::new(3, 4);
+        let mut holder = generator.create_holder(pos);
         holder.generate_through(ChunkStatus::Noise).expect("NOISE");
-        assert!(holder.into_level_chunk().is_err());
 
-        // The map remains untouched: `install` is never called with a refused
-        // conversion. (The composition boundary — install only on `Ok` — is
-        // what keeps the authority empty here.)
-        let map = ChunkMap::empty(4);
+        // The refused conversion must not reach the install seam: only the
+        // `Ok(LevelChunk)` arm calls `install`, so the map stays empty at the
+        // refused position even though the composition ran.
+        let world = ServerLevel::new_region_backed(ServerLevelConfig::default());
         assert!(
-            map.get_chunk(ChunkPos::new(3, 4)).is_none(),
+            holder.into_level_chunk().is_err(),
+            "a NOISE chunk must not promote as FULL"
+        );
+        // The composition boundary: install only on success. A refused
+        // conversion never reaches `install`, so the position is not served.
+        assert!(
+            world.chunk_map().get_chunk(pos).is_none(),
             "a refused conversion must not pre-install anything"
         );
     }
@@ -2296,29 +2310,44 @@ mod tests {
     /// Duplicate/replacement semantics of the install seam match the current
     /// `ChunkMap` contract: `install` is `chunks.insert(pos, chunk)`, so a
     /// second install at the same position atomically replaces the first (the
-    /// map stays one chunk, serving the replacement), never duplicating.
+    /// map stays one chunk, serving the *replacement*, never duplicating or
+    /// keeping the first). The two promoted chunks are observably
+    /// distinguishable by a typed structure start, so the assertion proves the
+    /// second is served and the first is gone — not merely that the map has one
+    /// entry.
     #[test]
     fn install_replaces_existing_chunk_at_same_position() {
         let generator = test_generator();
         let pos = ChunkPos::new(1, 1);
-        let promote = |generator: Arc<OverworldGenerator>| {
+        let promote = |generator: Arc<OverworldGenerator>, start: i64| {
             let mut holder = generator.create_holder(pos);
+            holder
+                .chunk
+                .set_start_for_structure(Identifier::parse("minecraft:village"), start);
             holder.chunk.set_persisted_status(ChunkStatus::Full);
             holder.into_level_chunk().expect("FULL promotes")
         };
 
         let mut world = ServerLevel::new_region_backed(ServerLevelConfig::default());
-        let first = promote(generator.clone());
-        world.chunk_map_mut().install(pos, first);
-        let second = promote(generator);
-        world.chunk_map_mut().install(pos, second);
+        world
+            .chunk_map_mut()
+            .install(pos, promote(generator.clone(), 42));
+        world.chunk_map_mut().install(pos, promote(generator, 99));
 
         assert_eq!(
             world.chunk_map().len(),
             1,
             "replacement must not grow the map"
         );
-        assert_eq!(world.chunk_map().get_chunk(pos).unwrap().pos(), pos);
+        let served = world.chunk_map().get_chunk(pos).expect("position served");
+        // The second install's chunk is what the map serves: start 99, not the
+        // replaced first chunk's 42.
+        assert_eq!(
+            served
+                .get_all_starts()
+                .get(&Identifier::parse("minecraft:village")),
+            Some(&99)
+        );
     }
 
     /// Ownership: the holder owns its ProtoChunk by value (no `Arc<RwLock>`
