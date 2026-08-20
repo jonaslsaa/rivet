@@ -298,6 +298,35 @@ fn block_pos_between_closed() {
 }
 
 #[test]
+fn block_pos_between_closed_degenerate_overflow_is_empty() {
+    // width=height=46341 (box (0,0,0)..(46340,46340,0)) wraps
+    // width*height*depth to a negative i32, so Java's `index == end` check
+    // would loop ~2^31 steps. Rivet's `.max(0)` guard returns an empty
+    // iterator instead. Lock both the lazy iterator and the materialized
+    // `between_closed` to that deliberate divergence.
+    let a = BlockPos::new(0, 0, 0);
+    let b = BlockPos::new(46340, 46340, 0);
+    assert_eq!(
+        BlockPos::between_closed_iter(&a, &b).count(),
+        0,
+        "lazy iterator must be empty on a negative wrapping end"
+    );
+    let materialized: Vec<BlockPos> = BlockPos::between_closed(
+        a.get_x(),
+        a.get_y(),
+        a.get_z(),
+        b.get_x(),
+        b.get_y(),
+        b.get_z(),
+    );
+    assert_eq!(
+        materialized,
+        Vec::<BlockPos>::new(),
+        "materialized between_closed must also be empty on a negative wrapping end"
+    );
+}
+
+#[test]
 fn block_pos_neighbor_column() {
     // neighborColumn(0,0,0, 3): the column plus N/E/S/W neighbor columns.
     let cols = BlockPos::neighbor_column(0, 0, 0, 3);

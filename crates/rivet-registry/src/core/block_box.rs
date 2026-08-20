@@ -7,8 +7,8 @@
 //! component-wise `BlockPos.min`/`BlockPos.max`, so `BlockBox::new`
 //! canonicalizes out-of-order corners and the accessors return the stored
 //! (normalized) values. `iterator()` yields the cells of
-//! `BlockPos.betweenClosed(min, max)` in X/Y/Z-major order — materialized as a
-//! `Vec` like the other Java re-iterable surfaces in this crate.
+//! `BlockPos.betweenClosed(min, max)` in X/Y/Z-major order as a materialized
+//! `Vec`; `iter()` provides the same order lazily for stream-shaped callers.
 //!
 //! RivetTodo(#206): `aabb()` (`AABB.encapsulatingFullBlocks(min, max)`) returns
 //! the `world.phys.AABB` value type, deferred with the JOML/math value types
@@ -83,6 +83,13 @@ impl BlockBox {
     /// `BlockBox.iterator()` — the cells of `BlockPos.betweenClosed(min, max)`.
     pub fn iterator(&self) -> Vec<BlockPos> {
         BlockPos::between_closed_pos(&self.min, &self.max)
+    }
+
+    /// `BlockBox.stream()` — a lazy one-pass traversal of the inclusive cells.
+    /// This is the stream-shaped surface used by feature placement so positions
+    /// are produced only as the consumer reaches them.
+    pub fn iter(&self) -> impl Iterator<Item = BlockPos> {
+        BlockPos::between_closed_iter(&self.min, &self.max)
     }
 
     /// `BlockBox.sizeX()` — `max.getX() - min.getX() + 1`.

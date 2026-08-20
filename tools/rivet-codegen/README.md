@@ -30,10 +30,19 @@ JVM and to use `anyhow`/`serde`.
   those tables.
 - **`mth-gen`** — regenerates the Mth tables + golden tests
   (`crates/rivet-util/src/mth_sin_table.rs`, `mth_atan_tables.rs`,
-  `mth_golden_tests.rs`) from the real Paper `Mth` class. These files are
-  `GENERATED — do not hand-edit`; this is the checked-in generator that makes
-  regeneration possible. Idempotent: over the current committed files it
-  reproduces them byte-for-byte (`git diff` stays clean).
+  `mth_cos_tab_{x86_64,aarch64}.rs`, `mth_golden_tests.rs`) from the real Paper
+  `Mth` class. These files are `GENERATED — do not hand-edit`; this is the
+  checked-in generator that makes regeneration possible. Idempotent per arch:
+  over the current committed files it reproduces them byte-for-byte on the
+  matching host (`git diff` stays clean). `COS_TAB` is architecture-dependent
+  (D14) and only the **host arch's** module is written: on x86_64 (the primary
+  release-gate target) this writes `mth_cos_tab_x86_64.rs`; the committed
+  `mth_cos_tab_aarch64.rs` is provenance-checked — generated and verified on
+  native aarch64, never substituted or silently overwritten by an x86_64 run
+  (an aarch64 host regenerates it idempotently). The golden expectation values
+  are NaN-canonicalized via Java `floatToIntBits`/`doubleToLongBits`
+  (`bitexact_f32`/`bitexact_f64` in the test), because hardware-created NaN
+  sign/payload is architecture-undefined; every non-NaN value stays bit-exact.
 - **`extract-biomes-tags`** — compiles and runs `java/BiomeTagExtractor.java`
   against the real Paper jar, reproducing `WorldLoader.load`
   (vanilla pack -> STATIC layer -> `TagLoader.loadTagsForExistingRegistries`
@@ -49,10 +58,11 @@ JVM and to use `anyhow`/`serde`.
   `biomes_tags.rs` tests.
 - **`probe-block-states`** — compiles and runs `java/GlobalPaletteProbe.java`
   against the real Paper jar and cross-checks the emitted block-state global-id
-  table (issue #154): size 32366, per-block contiguous ranges partitioning the
-  id space, defaults in range, and the representative anchor ids. This is the
-  live half of the fixture-pinned conformance test in `generate`'s
-  `block_states.rs` tests.
+  table (issue #154): a canonical digest over all 32,366 ids, block names,
+  default markers, and serialized properties must match committed
+  `data/reports/blocks.json`; size/range/default invariants and representative
+  anchor ids remain additional diagnostics. This is the live half of the
+  fixture-pinned conformance test in `generate`'s `block_states.rs` tests.
 - **`extract-block-behaviors`** — compiles and runs `java/BlockBehaviourProbe.java`
   against the real Paper jar, boots `Bootstrap` + the `Blocks` static init
   (which `initCache`s every state against `EmptyBlockGetter`), evaluates all
@@ -174,28 +184,68 @@ so reruns are fast. Pass `--bundler` to point at a different jar.
 ## How the Mth tables + golden tests are generated (`mth-gen`)
 
 `crates/rivet-util/src/mth_sin_table.rs` / `mth_atan_tables.rs` /
-`mth_golden_tests.rs` are marked `GENERATED — do not hand-edit` but had no
-checked-in generator (regeneration was impossible). `mth-gen` is that
-generator. The Mth tables and every golden expected value are computed by the
-**real compiled Paper `Mth` class** — nothing is hand-copied:
+`mth_cos_tab_{x86_64,aarch64}.rs` / `mth_golden_tests.rs` are marked
+`GENERATED — do not hand-edit` but had no checked-in generator (regeneration
+was impossible). `mth-gen` is that generator. The Mth tables and every golden
+expected value are computed by the **real compiled Paper `Mth` class** —
+nothing is hand-copied:
 
 1. unpack the bundler classpath (same `extract` machinery);
 2. compile `src/java/MthGen.java` against it. `MthGen.java` is itself generated
    by `scripts/gen_mth_gen.py` from `data/mth_vectors.tsv` (the `(lhs => rhs)`
    pairs extracted from the committed golden file) — it calls the exact Java
    overload each Rust fn mirrors and prints each result as the committed Rust
-   literal;
+   literal. Float/double results go through `Float.floatToIntBits`/
+   `Double.doubleToLongBits` (not the `Raw` variants) so NaN sign/payload —
+   which is hardware-architecture-undefined (D14) — is canonicalized, while
+   every non-NaN value is bit-exact and identical to the Raw forms;
 3. `MthGen` prints the `SIN`/`ASIN_TAB`/`COS_TAB` arrays and the 1156 vectors;
 4. `mth_gen.rs` substitutes those values into `data/mth_golden_skeleton.rs`
    (the committed golden file with every expected `rhs` replaced by a `@@N@@`
-   placeholder) and emits the two table files, then pipes everything through
+   placeholder) and emits the table files, then pipes everything through
    `rustfmt` — the committed files are rustfmt-idempotent, so the output
-   matches them byte-for-byte.
+   matches them byte-for-byte. The golden compares float/double bits via the
+   `bitexact_f32`/`bitexact_f64` helpers, which canonicalize NaNs to the
+   canonical bit-pattern exactly as `floatToIntBits`/`doubleToLongBits` do.
 
-Regeneration is **idempotent**: `git diff` stays clean when run over the
-current committed files. Regenerate after bumping the Paper version or
-correcting a golden expectation; a value that diverges from Java shows up as a
-`git diff` hunk to review.
+Regeneration is **idempotent per arch**: `git diff` stays clean when run over
+the current committed files on the matching host. `COS_TAB` is
+architecture-dependent (D14) — Paper builds it at class-init with
+`java.lang.Math.cos`/`asin`, whose HotSpot intrinsics differ by up to 1 ULP
+between x86_64 and aarch64. `mth-gen` therefore writes only the **host arch's**
+`COS_TAB` module:
+  - on **x86_64** (primary release-gate target) it writes
+    `mth_cos_tab_x86_64.rs` and leaves `mth_cos_tab_aarch64.rs` untouched —
+    the committed aarch64 variant is provenance-checked (generated + verified
+    on native aarch64 Paper) and must never be substituted or silently
+    overwritten;
+  - on **aarch64** it regenerates `mth_cos_tab_aarch64.rs` idempotently from
+    native Paper.
+`ASIN_TAB` is identical on both supported arches and lives in
+`mth_atan_tables.rs`, which re-exports the correctly arch-selected `COS_TAB`
+via `cfg(target_arch)`.
+
+### Arch-selected golden expected values (D14)
+
+Because `atan2` reads `COS_TAB` and that table differs by 1 ULP between x86_64
+and aarch64, the four golden rows that happen to read the differing `COS_TAB[181]`
+slot (`atan2(1,1)`, `atan2(-1,1)`, `atan2(0.5,0.5)`, `atan2(-0.5,0.5)`) have
+**arch-selected expected values**: their `rhs` is a `#[cfg(target_arch)]` block
+with an `aarch64` provenance-committed literal, an `x86_64` branch holding the
+live oracle value, and a `compile_error!` fall-through so unsupported
+architectures fail closed. Every other golden `rhs` stays a single plain
+literal (bit-exact on both arches).
+
+The skeleton keeps that block with an `@@N@@` placeholder in the `x86_64` branch;
+`mth-gen` fills it with the live x86_64 oracle value. The `aarch64` literal is
+provenance-checked at generation time: `mth-gen` computes the four `atan2`
+results with *faithful atan2 arithmetic* over the **committed aarch64 `COS_TAB`**
+(+ arch-independent `ASIN_TAB`) and hard-fails if the rendered golden's aarch64
+literal disagrees — so a stale aarch64 table or literal is caught instead of
+silently propagating.
+
+Regenerate after bumping the Paper version or correcting a golden expectation;
+a value that diverges from Java shows up as a `git diff` hunk to review.
 
 ### Authoring a change to the golden file
 
@@ -231,7 +281,39 @@ independent runs), so the committed files are the no-drift baseline.
 Source pinning is recorded in `data/reports/manifest.json`: the source jar's
 sha256, the Paper git commit it was built from, and the MC/protocol/world
 versions read straight out of the jar's `version.json`. The jar path is stored
-repo-relative (machine-independent); the jar identity is the sha256.
+repo-relative (machine-independent); the SHA records the historical capture's
+physical identity, while live rebuilds are authorized by the pinned semantic
+contract and mandatory complete no-drift comparison below.
+
+### Why the jar SHA is advisory, not authoritative (issue #670)
+
+`gate.sh` could not complete on a clean machine because the live-probe
+provenance boundary required the materialized Paper server jar's raw SHA-256 to
+equal the historical fixture SHA exactly. But Paper jar bytes are **not
+reproducible**: clean builds of the exact pinned Paper commit
+`0a993450f129c4942c2a9ed45ba047412b4667cf` produced several different jar
+hashes (`e94fba6b…`, `88ccec84…`), differing only in `javac`-generated synthetic
+local-variable debug names in one `EntityCommand.class`; executable bytecode and
+the Paper manifest commit are unchanged, and the historical `e1a027e9…` capture
+bytes are not archived.
+
+So the physical jar SHA is treated as **recorded/advisory cross-build
+provenance** for the live boundary, not a permanent identity. The durable,
+deterministic contract that actually authorizes a fresh build is:
+
+- the live jar's `Git-Commit` is a validated 7–40 hex prefix of the pinned Paper commit;
+- a clean exact `working/Paper` checkout (full HEAD == the pin, not dirty);
+- the MC/protocol/world versions read from the jar's `version.json`;
+- the deterministic live probe/datagen output being byte-identical to the
+  committed fixtures (including the twin-run no-drift gate).
+
+Committed manifests are still validated strictly (a committed capture may only
+name one of the pinned capture SHAs + the pinned commit + versions), so a
+committed manifest can never self-assert an arbitrary source; only a *freshly
+built* pinned-commit jar may proceed — on its deterministic semantic identity —
+to the live no-drift comparison that authorizes it. A jar SHA that differs from
+the committed capture prints a clear `note:` as an advisory, and the semantic
+comparison still runs to completion.
 
 The source jar is the oracle's materialization at
 `tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar` (gitignored; absent

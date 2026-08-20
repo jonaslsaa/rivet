@@ -26,6 +26,9 @@
 //! production impls specialize the `WorldGenRegion` type parameters rather than
 //! the trait.
 
+use crate::level::block_shape_context::{
+    BlockShapeContext, ShapeQuery, ShapeQueryError, SupportType, dynamic_shape_fallback,
+};
 use crate::level::height_accessor::LevelHeightAccessor;
 use crate::levelgen::heightmap::Types;
 use rivet_registry::access::RegistryAccess;
@@ -102,42 +105,91 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send {
         panic!("WorldGenLevel.isUnobstructed is not implemented (RivetTodo #232)")
     }
 
-    /// `BlockStateBase.isFaceSturdy(BlockGetter, BlockPos, Direction)` — the
-    /// face-sturdiness seam the `HasSturdyFacePredicate` consumes
-    /// (`getBlockState(pos).isFaceSturdy(level, pos, direction)`).
-    ///
-    /// The pinned state table contains a zero-context sample of Paper's
-    /// `SupportType.FULL.isSupporting` result, so this default preserves the
-    /// state-only behavior without fabricating a solid-render approximation.
-    /// It is not authoritative for `hasDynamicShape` states and must not be used
-    /// as a production answer until issue #646 supplies live shape context.
-    ///
-    /// RivetTodo(#232): the borrowed `WorldGenRegion` chunk-access
-    /// implementation remains deferred; a concrete world may override this seam
-    /// when dynamic shape context is implemented.
-    fn is_face_sturdy(&self, _pos: &BlockPos, state: &BlockState, direction: &Direction) -> bool {
-        assert!(
-            !state.has_dynamic_shape(),
-            "WorldGenLevel.isFaceSturdy requires live shape context for dynamic-shape state {:?}",
-            state
-        );
-        state.is_face_sturdy(*direction)
+    /// A live WorldGenRegion implementation supplies this context when its
+    /// typed block-entity bridge lands under #185/#341. Test doubles use the
+    /// detached context in `block_shape_context`; the default intentionally
+    /// exposes the capability boundary instead of inventing block entities.
+    fn shape_context(&self) -> Option<&dyn BlockShapeContext> {
+        None
     }
 
-    /// `MultifaceBlock.canAttachTo` — a neighbour is attachable when either
-    /// its support shape or collision shape fills the face toward the
-    /// multiface block. The state tables carry both zero-context samples only;
-    /// they are not authoritative for `hasDynamicShape` states.
-    ///
-    /// RivetTodo(#232): a concrete world may override this seam when dynamic
-    /// shape context lands under issue #646.
-    fn can_attach_to(&self, _pos: &BlockPos, state: &BlockState, direction: &Direction) -> bool {
-        assert!(
-            !state.has_dynamic_shape(),
-            "WorldGenLevel.canAttachTo requires live shape context for dynamic-shape state {:?}",
-            state
-        );
-        state.can_attach_to(*direction)
+    /// Resolve the support, collision, and occlusion faces for a state. Static
+    /// states use generated Paper tables; dynamic states must go through the
+    /// live or detached context and never read those zero-context samples.
+    fn shape_query(
+        &self,
+        pos: &BlockPos,
+        state: &BlockState,
+    ) -> Result<ShapeQuery, ShapeQueryError> {
+        if !state.has_dynamic_shape() {
+            return Ok(ShapeQuery::from_static_state(*state));
+        }
+
+        let fallback =
+            || dynamic_shape_fallback(state).ok_or(ShapeQueryError::DynamicShapeUnsupported);
+        let context = self
+            .shape_context()
+            .ok_or(ShapeQueryError::DynamicShapeContextUnavailable)?;
+        match context.shape_query(state, pos) {
+            Ok(query) => Ok(query),
+            Err(ShapeQueryError::DynamicShapeContextMissing { .. }) => fallback(),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// `BlockStateBase.isFaceSturdy(BlockGetter, BlockPos, Direction)` with an
+    /// explicit `SupportType`.
+    fn is_face_sturdy_with(
+        &self,
+        pos: &BlockPos,
+        state: &BlockState,
+        direction: &Direction,
+        support_type: SupportType,
+    ) -> Result<bool, ShapeQueryError> {
+        Ok(self
+            .shape_query(pos, state)?
+            .is_supporting(support_type, *direction))
+    }
+
+    /// `SupportType.FULL` face sturdiness used by worldgen predicates.
+    fn is_face_sturdy(&self, pos: &BlockPos, state: &BlockState, direction: &Direction) -> bool {
+        self.is_face_sturdy_with(pos, state, direction, SupportType::Full)
+            .unwrap_or_else(|error| panic!("WorldGenLevel.isFaceSturdy: {error}"))
+    }
+
+    /// Full collision-face query used by `MultifaceBlock.canAttachTo`.
+    fn is_collision_face_full(
+        &self,
+        pos: &BlockPos,
+        state: &BlockState,
+        direction: &Direction,
+    ) -> bool {
+        self.shape_query(pos, state)
+            .unwrap_or_else(|error| panic!("WorldGenLevel.isCollisionFaceFull: {error}"))
+            .is_collision_face_full(*direction)
+    }
+
+    /// Full occlusion-face query used by face-occlusion callers.
+    fn is_occlusion_face_full(
+        &self,
+        pos: &BlockPos,
+        state: &BlockState,
+        direction: &Direction,
+    ) -> bool {
+        self.shape_query(pos, state)
+            .unwrap_or_else(|error| panic!("WorldGenLevel.getFaceOcclusionShape: {error}"))
+            .is_occlusion_face_full(*direction)
+    }
+
+    /// `MultifaceBlock.canAttachTo` — support OR full collision on the
+    /// opposite neighbour face. Leaves therefore remain attachable even though
+    /// their support face is not full.
+    fn can_attach_to(&self, pos: &BlockPos, state: &BlockState, direction: &Direction) -> bool {
+        let query = self
+            .shape_query(pos, state)
+            .unwrap_or_else(|error| panic!("WorldGenLevel.canAttachTo: {error}"));
+        query.is_supporting(SupportType::Full, *direction)
+            || query.is_collision_face_full(*direction)
     }
 
     /// `BlockBehaviour.BlockStateBase.canSurvive(BlockGetter, BlockPos)` — the
@@ -405,6 +457,7 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::level::{DetachedShapeContext, ShulkerBoxShape};
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     struct ShapeGuardLevel;
@@ -431,6 +484,36 @@ mod tests {
         }
     }
 
+    struct DetachedShapeLevel {
+        context: DetachedShapeContext,
+    }
+
+    impl LevelHeightAccessor for DetachedShapeLevel {
+        fn get_height(&self) -> i32 {
+            384
+        }
+
+        fn get_min_y(&self) -> i32 {
+            -64
+        }
+    }
+
+    impl WorldGenLevel for DetachedShapeLevel {
+        fn get_seed(&self) -> i64 {
+            42
+        }
+
+        fn get_block_state(&self, _pos: &BlockPos) -> BlockState {
+            BlockState::of(
+                rivet_registry::generated::blocks::BlockId::from_name("minecraft:air").unwrap(),
+            )
+        }
+
+        fn shape_context(&self) -> Option<&dyn BlockShapeContext> {
+            Some(&self.context)
+        }
+    }
+
     #[test]
     fn static_shape_queries_keep_cached_fast_path() {
         let level = ShapeGuardLevel;
@@ -443,7 +526,50 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_shape_queries_fail_fast_for_shulker_and_moving_piston() {
+    fn dynamic_shape_queries_use_detached_context() {
+        let pos = BlockPos::new(0, 0, 0);
+        let mut context = DetachedShapeContext::default();
+        context.insert_shulker_box(pos, ShulkerBoxShape::open(Direction::Up));
+        let level = DetachedShapeLevel { context };
+        let state = BlockState::of(
+            rivet_registry::generated::blocks::BlockId::from_name("minecraft:shulker_box").unwrap(),
+        );
+        assert!(!level.is_face_sturdy(&pos, &state, &Direction::Up));
+        assert!(level.is_face_sturdy(&pos, &state, &Direction::Down));
+        assert!(level.can_attach_to(&pos, &state, &Direction::Up));
+        assert!(!level.is_occlusion_face_full(&pos, &state, &Direction::Up));
+    }
+
+    #[test]
+    fn dynamic_shape_queries_use_paper_missing_entity_fallbacks() {
+        let pos = BlockPos::new(0, 0, 0);
+        let level = DetachedShapeLevel {
+            context: DetachedShapeContext::default(),
+        };
+        let shulker = BlockState::of(
+            rivet_registry::generated::blocks::BlockId::from_name("minecraft:shulker_box").unwrap(),
+        );
+        let shulker_query = level.shape_query(&pos, &shulker).unwrap();
+        for direction in Direction::VALUES {
+            assert!(shulker_query.is_supporting(crate::level::SupportType::Full, direction));
+            assert!(shulker_query.is_collision_face_full(direction));
+            assert!(!shulker_query.is_occlusion_face_full(direction));
+        }
+
+        let piston = BlockState::of(
+            rivet_registry::generated::blocks::BlockId::from_name("minecraft:moving_piston")
+                .unwrap(),
+        );
+        let piston_query = level.shape_query(&pos, &piston).unwrap();
+        for direction in Direction::VALUES {
+            assert!(!piston_query.is_supporting(crate::level::SupportType::Full, direction));
+            assert!(!piston_query.is_collision_face_full(direction));
+            assert!(!piston_query.is_occlusion_face_full(direction));
+        }
+    }
+
+    #[test]
+    fn dynamic_shape_queries_fail_fast_without_context() {
         let level = ShapeGuardLevel;
         let pos = BlockPos::new(0, 0, 0);
         for block in ["minecraft:shulker_box", "minecraft:moving_piston"] {
@@ -462,6 +588,48 @@ mod tests {
                     level.can_attach_to(&pos, &state, &Direction::Up)
                 }))
                 .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn dynamic_shape_context_state_mismatch_does_not_use_missing_entity_fallback() {
+        let pos = BlockPos::new(0, 0, 0);
+        let mut context = DetachedShapeContext::default();
+        context.insert_shulker_box(pos, ShulkerBoxShape::closed(Direction::Up));
+        let level = DetachedShapeLevel { context };
+        let piston = BlockState::of(
+            rivet_registry::generated::blocks::BlockId::from_name("minecraft:moving_piston")
+                .unwrap(),
+        );
+
+        assert_eq!(
+            level.shape_query(&pos, &piston),
+            Err(ShapeQueryError::DynamicShapeContextStateMismatch)
+        );
+    }
+
+    #[test]
+    fn unsupported_dynamic_shape_families_return_typed_errors() {
+        let level = DetachedShapeLevel {
+            context: DetachedShapeContext::default(),
+        };
+        let pos = BlockPos::new(0, 0, 0);
+        for block in [
+            "minecraft:bamboo",
+            "minecraft:scaffolding",
+            "minecraft:powder_snow",
+            "minecraft:pointed_dripstone",
+            "minecraft:sulfur_spike",
+        ] {
+            let state = BlockState::of(
+                rivet_registry::generated::blocks::BlockId::from_name(block).unwrap(),
+            );
+            assert!(state.has_dynamic_shape(), "{block} must be dynamic");
+            assert_eq!(
+                level.shape_query(&pos, &state),
+                Err(ShapeQueryError::DynamicShapeUnsupported),
+                "{block}"
             );
         }
     }
