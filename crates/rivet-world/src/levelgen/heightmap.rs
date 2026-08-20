@@ -281,6 +281,7 @@ pub fn types_codec<Ops: DynamicOps + 'static>() -> EnumCodec<Types, Ops> {
 /// `isOpaque` predicate and the `chunk` back-reference are resolved by the
 /// caller passing an explicit topmost-opaque-y getter (OWNERSHIP.md — no stored
 /// `&ChunkAccess`).
+#[derive(Clone)]
 pub struct Heightmap {
     data: SimpleBitStorage,
 }

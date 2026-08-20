@@ -34,6 +34,7 @@ const TAG_INDICES: &str = "Indices";
 const TAG_SIDES: &str = "Sides";
 
 /// `net.minecraft.world.level.chunk.UpgradeData`.
+#[derive(Clone)]
 pub struct UpgradeData {
     /// `index` — per-section arrays of packed block coordinates to re-upgrade
     /// (`coordinate >> 8 & 15` is y, `>> 4 & 15` z, `& 15` x; see

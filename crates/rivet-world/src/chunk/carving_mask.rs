@@ -78,6 +78,20 @@ impl CarvingMask {
         self.additional_mask = Some(additional_mask);
     }
 
+    /// Borrow-preserving clone for value-boundary transactions. The optional
+    /// predicate is intentionally not guessed or fabricated; callers receive
+    /// `None` and can refuse rather than silently changing carving behavior.
+    pub fn try_clone(&self) -> Option<Self> {
+        if self.additional_mask.is_some() {
+            return None;
+        }
+        Some(Self {
+            min_y: self.min_y,
+            mask: self.mask.clone(),
+            additional_mask: None,
+        })
+    }
+
     /// `set(int, int, int)`.
     pub fn set(&mut self, x: i32, y: i32, z: i32) {
         let index = get_index(x, y, z, self.min_y);
