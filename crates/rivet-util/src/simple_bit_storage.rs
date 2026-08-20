@@ -41,7 +41,7 @@ impl fmt::Display for InitializationException {
 impl std::error::Error for InitializationException {}
 
 /// `net.minecraft.util.SimpleBitStorage`.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SimpleBitStorage {
     data: Vec<i64>,
     bits: i32,

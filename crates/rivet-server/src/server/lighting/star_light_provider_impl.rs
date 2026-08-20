@@ -21,12 +21,12 @@
 //! The engine resolves neighbour chunks through the provider's *narrow chunk
 //! access* — a take/put closure over the caller's chunk storage, mirroring
 //! Java's `LightChunkGetter` without a global `ChunkMap` lookup or any shared
-//! authoritative state (OWNERSHIP.md). The caller hands an owned chunk out on
-//! take (`None` payload) and receives it back on put (`Some` payload); the
-//! provider buffers the neighbours it resolves during a run and returns them
-//! afterwards — on the panic path too, where the engine's `light` re-unwinds
-//! after its finally-equivalent cache clear and the provider puts every taken
-//! chunk back before resuming the original panic. No neighbour is fabricated
+//! authoritative state (OWNERSHIP.md). The caller returns an owned chunk from
+//! a `None` take operation and consumes a put slot only after committing it to
+//! storage. The provider buffers neighbours it resolves during a run and
+//! returns them afterwards — on the panic path too, where the engine's `light`
+//! re-unwinds after its finally-equivalent cache clear. A put callback panic
+//! retains the uncommitted chunk for a later retry; no neighbour is fabricated
 //! and none is dropped.
 //!
 //! The pos-only trait seam ([`StarLightProvider::light_chunk`]) is the take/put
@@ -41,7 +41,7 @@
 //! What defers with #184: block light (the `block_nibbles` stay empty), live
 //! `blockChange`/`sectionChange`/`relightChunks`/`checkChunkEdges`, the client
 //! notify path, and the final status/pipeline wiring (the frozen
-//! `world_gen_context.rs` caller drives `light_chunk` through the trait seam;
+//! `world_gen_context.rs` caller drives `try_light_chunk` through the trait seam;
 //! the concrete chunk storage it would resolve into lands with the chunk map).
 
 use std::collections::{HashMap, HashSet};
@@ -51,24 +51,21 @@ use rivet_world::chunk::chunk_access::ChunkAccess;
 use rivet_world::chunk::data_layer::DataLayer;
 use rivet_world::level::LevelHeightAccessor;
 use rivet_world::level::height_accessor::SimpleLevelHeightAccessor;
-use rivet_world::lighting::star_light_provider::StarLightProvider;
+use rivet_world::lighting::star_light_provider::{LightProviderError, StarLightProvider};
 
 use super::star_light_engine::{ChunkAccessor, SkyStarLightEngine};
 use crate::server::level::level_chunk::{BiomeId as ServerBiomeId, StateId, StructureKey};
 
+/// The runtime chunk value a generated LIGHT bridge hands to Starlight.
+pub type LightChunk = ChunkAccess<StateId, ServerBiomeId, StructureKey>;
+
 /// The narrow chunk access the engine lights through: a take/put closure over
-/// the caller's chunk storage. A `None` payload *takes* the chunk at `(x, z)`
-/// (removing it from the caller's storage); a `Some(chunk)` payload *puts* it
-/// back. The provider takes the chunks it lights, buffers any neighbours the
-/// engine resolves during the run, and returns them all afterwards — no global
-/// `ChunkMap` lookup, no shared authoritative state, no fabricated neighbours.
-type ChunkAccessFn = Box<
-    dyn FnMut(
-            i32,
-            i32,
-            Option<ChunkAccess<StateId, ServerBiomeId, StructureKey>>,
-        ) -> Option<ChunkAccess<StateId, ServerBiomeId, StructureKey>>
-        + Send,
+/// the caller's tick-thread chunk storage. A `None` operation takes the chunk
+/// at `(x, z)` and returns it; a `Some(&mut slot)` operation puts the owned
+/// value back. Put callbacks should consume the slot only after committing the
+/// chunk to storage, so a panic before commit leaves the value recoverable.
+pub type ChunkAccessFn = Box<
+    dyn for<'a> FnMut(i32, i32, Option<&'a mut Option<LightChunk>>) -> Option<LightChunk> + Send,
 >;
 
 /// The `SkyStarLightEngine`-backed synchronous light provider — the concrete
@@ -90,6 +87,8 @@ pub struct SkyLightProvider {
     has_block_light: bool,
     /// The narrow take/put chunk access (see [`ChunkAccessFn`]).
     chunks: ChunkAccessFn,
+    /// Chunks whose storage callback panicked before accepting ownership.
+    pending_restores: Vec<(i32, i32, LightChunk)>,
 }
 
 impl SkyLightProvider {
@@ -113,6 +112,7 @@ impl SkyLightProvider {
             has_sky_light,
             has_block_light,
             chunks,
+            pending_restores: Vec::new(),
         }
     }
 
@@ -121,8 +121,11 @@ impl SkyLightProvider {
     fn take_chunk(
         &mut self,
         pos: ChunkPos,
-    ) -> Option<ChunkAccess<StateId, ServerBiomeId, StructureKey>> {
-        (self.chunks)(pos.x(), pos.z(), None)
+    ) -> Result<Option<ChunkAccess<StateId, ServerBiomeId, StructureKey>>, LightProviderError> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (self.chunks)(pos.x(), pos.z(), None)
+        }))
+        .map_err(|_| LightProviderError::CallbackPanicked)
     }
 
     /// Put an owned chunk back at `pos`.
@@ -130,8 +133,44 @@ impl SkyLightProvider {
         &mut self,
         pos: ChunkPos,
         chunk: ChunkAccess<StateId, ServerBiomeId, StructureKey>,
-    ) {
-        (self.chunks)(pos.x(), pos.z(), Some(chunk));
+    ) -> Result<(), LightProviderError> {
+        let mut slot = Some(chunk);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (self.chunks)(pos.x(), pos.z(), Some(&mut slot));
+        }));
+        if result.is_err() || slot.is_some() {
+            if let Some(chunk) = slot {
+                self.pending_restores.push((pos.x(), pos.z(), chunk));
+            }
+            return Err(LightProviderError::CallbackPanicked);
+        }
+        Ok(())
+    }
+
+    fn flush_pending_restores(&mut self) -> Result<(), LightProviderError> {
+        let pending = std::mem::take(&mut self.pending_restores);
+        let mut callback_panicked = false;
+        for (x, z, chunk) in pending {
+            callback_panicked |= self.put_chunk(ChunkPos::new(x, z), chunk).is_err();
+        }
+        if callback_panicked {
+            Err(LightProviderError::CallbackPanicked)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Attempt every restoration even when one storage callback panics. A
+    /// caller-supplied engine panic is handled separately and always wins.
+    fn restore_chunks(
+        &mut self,
+        taken: HashMap<(i32, i32), ChunkAccess<StateId, ServerBiomeId, StructureKey>>,
+    ) -> bool {
+        let mut callback_panicked = false;
+        for ((x, z), chunk) in taken {
+            callback_panicked |= self.put_chunk(ChunkPos::new(x, z), chunk).is_err();
+        }
+        callback_panicked
     }
 
     /// `SkyStarLightEngine.lightChunk(chunk, emptySections)` on an explicitly
@@ -148,7 +187,13 @@ impl SkyLightProvider {
         &mut self,
         chunk: &mut ChunkAccess<StateId, ServerBiomeId, StructureKey>,
         empty_sections: &[Option<bool>],
-    ) {
+    ) -> Result<(), LightProviderError> {
+        // Restore any neighbour a previous run took but could not put back
+        // (a storage callback panicked mid-put). The value bridge calls this
+        // directly and never goes through the position seams that flush these,
+        // so a stranded chunk from a failed bridge run must be returned to its
+        // original slot before the next run — never left owned by the provider.
+        self.flush_pending_restores()?;
         let mut accessor = CallbackAccessor {
             chunks: &mut self.chunks,
             taken: HashMap::new(),
@@ -174,17 +219,69 @@ impl SkyLightProvider {
             // `self.chunks` is available again.
             let taken = std::mem::take(&mut accessor.taken);
             drop(accessor);
-            for ((x, z), neighbour) in taken {
-                (self.chunks)(x, z, Some(neighbour));
-            }
+            self.restore_chunks(taken);
             std::panic::resume_unwind(payload);
         }
         // Return the neighbours the run resolved — drop the accessor to end its
         // borrow of the callback, then put each buffered chunk back.
         let taken = std::mem::take(&mut accessor.taken);
         drop(accessor);
-        for ((x, z), neighbour) in taken {
-            (self.chunks)(x, z, Some(neighbour));
+        if self.restore_chunks(taken) {
+            return Err(LightProviderError::CallbackPanicked);
+        }
+        Ok(())
+    }
+
+    /// The fallible position seam used by status generation. Missing centers
+    /// are refusals, not successful no-ops that could promote the ProtoChunk.
+    pub fn try_light_chunk(
+        &mut self,
+        pos: ChunkPos,
+        empty_sections: &[Option<bool>],
+    ) -> Result<(), LightProviderError> {
+        self.flush_pending_restores()?;
+        let Some(mut chunk) = self.take_chunk(pos)? else {
+            return Err(LightProviderError::MissingChunk(pos));
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.light_chunk_with(&mut chunk, empty_sections)
+        }));
+        let put_result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.put_chunk(pos, chunk)));
+        match result {
+            Err(payload) => {
+                let _ = put_result;
+                std::panic::resume_unwind(payload);
+            }
+            Ok(inner) => match put_result {
+                Err(_) | Ok(Err(LightProviderError::CallbackPanicked)) => {
+                    Err(LightProviderError::CallbackPanicked)
+                }
+                Ok(Ok(())) => inner,
+                Ok(Err(error)) => Err(error),
+            },
+        }
+    }
+
+    /// The fallible persisted-load seam. It must resolve and restore the
+    /// center even though the operation itself does not recompute light.
+    pub fn try_force_load_in_chunk(
+        &mut self,
+        pos: ChunkPos,
+        _empty_sections: &[Option<bool>],
+    ) -> Result<(), LightProviderError> {
+        self.flush_pending_restores()?;
+        let Some(chunk) = self.take_chunk(pos)? else {
+            return Err(LightProviderError::MissingChunk(pos));
+        };
+        let put_result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.put_chunk(pos, chunk)));
+        match put_result {
+            Err(_) | Ok(Err(LightProviderError::CallbackPanicked)) => {
+                Err(LightProviderError::CallbackPanicked)
+            }
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(error),
         }
     }
 
@@ -200,7 +297,10 @@ impl SkyLightProvider {
         &mut self,
         chunk: &mut ChunkAccess<StateId, ServerBiomeId, StructureKey>,
         empty_sections: &[Option<bool>],
-    ) {
+    ) -> Result<(), LightProviderError> {
+        // Same invariants as [`Self::light_chunk_with`]: return any chunk a
+        // previous run stranded before this run begins.
+        self.flush_pending_restores()?;
         let mut accessor = CallbackAccessor {
             chunks: &mut self.chunks,
             taken: HashMap::new(),
@@ -217,16 +317,15 @@ impl SkyLightProvider {
         if let Err(payload) = result {
             let taken = std::mem::take(&mut accessor.taken);
             drop(accessor);
-            for ((x, z), neighbour) in taken {
-                (self.chunks)(x, z, Some(neighbour));
-            }
+            self.restore_chunks(taken);
             std::panic::resume_unwind(payload);
         }
         let taken = std::mem::take(&mut accessor.taken);
         drop(accessor);
-        for ((x, z), neighbour) in taken {
-            (self.chunks)(x, z, Some(neighbour));
+        if self.restore_chunks(taken) {
+            return Err(LightProviderError::CallbackPanicked);
         }
+        Ok(())
     }
 
     /// `StarLightInterface.getSkyLightValue(blockPos, chunk)` with the chunk
@@ -377,37 +476,39 @@ impl StarLightProvider for SkyLightProvider {
     }
 
     fn light_chunk(&mut self, pos: ChunkPos, empty_sections: &[Option<bool>]) {
-        // `StarLightInterface.lightChunk(chunk, emptySections)` — the pos-only
-        // seam resolves the chunk through the take/put callback (Java's
-        // `ChunkLightTask` passes the chunk directly; the seam passes the
-        // position and the impl resolves it). A chunk absent from the caller's
-        // storage is a no-op — nothing to light.
-        let Some(mut chunk) = self.take_chunk(pos) else {
-            return;
-        };
-        // The centre chunk was taken from the caller's storage, so a panicking
-        // run must still put it back (`light_chunk_with` restores the
-        // neighbours it took). Catch, put the centre back, then resume the
-        // original panic — the centre is never dropped and never lost.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.light_chunk_with(&mut chunk, empty_sections);
-        }));
-        self.put_chunk(pos, chunk);
-        if let Err(payload) = result {
-            std::panic::resume_unwind(payload);
+        // Preserve the legacy no-op for a missing center; status generation
+        // uses `try_light_chunk` below when absence must be observable.
+        match self.try_light_chunk(pos, empty_sections) {
+            Ok(()) | Err(LightProviderError::MissingChunk(_)) => {}
+            Err(LightProviderError::CallbackPanicked) => {
+                panic!("light-provider storage callback panicked");
+            }
         }
     }
 
-    fn force_load_in_chunk(&mut self, pos: ChunkPos, _empty_sections: &[Option<bool>]) {
-        // `StarLightInterface.forceLoadInChunk` confirms an already-lighted
-        // chunk in place without recomputing (the LIGHT task's already-lighted
-        // branch). This slice has no loaded-chunk registry to add to, so the
-        // confirmation is the take/put round-trip; the registry effect defers
-        // with the chunk map (#184).
-        let Some(chunk) = self.take_chunk(pos) else {
-            return;
-        };
-        self.put_chunk(pos, chunk);
+    fn try_light_chunk(
+        &mut self,
+        pos: ChunkPos,
+        empty_sections: &[Option<bool>],
+    ) -> Result<(), LightProviderError> {
+        SkyLightProvider::try_light_chunk(self, pos, empty_sections)
+    }
+
+    fn force_load_in_chunk(&mut self, pos: ChunkPos, empty_sections: &[Option<bool>]) {
+        match self.try_force_load_in_chunk(pos, empty_sections) {
+            Ok(()) | Err(LightProviderError::MissingChunk(_)) => {}
+            Err(LightProviderError::CallbackPanicked) => {
+                panic!("light-provider storage callback panicked");
+            }
+        }
+    }
+
+    fn try_force_load_in_chunk(
+        &mut self,
+        pos: ChunkPos,
+        empty_sections: &[Option<bool>],
+    ) -> Result<(), LightProviderError> {
+        SkyLightProvider::try_force_load_in_chunk(self, pos, empty_sections)
     }
 
     fn relight_chunks(&mut self, _chunks: &HashSet<ChunkPos>) {
@@ -449,6 +550,7 @@ mod tests {
     use rivet_world::lighting::level_light_engine::LevelLightEngine;
     use rivet_world::lighting::swmr_nibble_array::SwmrNibbleArray;
     use rivet_world::superflat::{SECTION_COUNT, SUPERFLAT_HEIGHT, SUPERFLAT_MIN_Y};
+    use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
 
     use crate::server::level::level_chunk::{
@@ -475,19 +577,24 @@ mod tests {
     ) -> (ChunkAccessFn, SharedStorage) {
         let shared = Arc::new(Mutex::new(std::mem::take(storage)));
         let closure_shared = Arc::clone(&shared);
-        let closure = Box::new(
-            move |x: i32,
-                  z: i32,
-                  put: Option<ChunkAccess<StateId, ServerBiomeId, StructureKey>>| {
-                let mut map = closure_shared.lock().unwrap();
-                if let Some(chunk) = put {
-                    map.insert((x, z), chunk);
-                    None
-                } else {
-                    map.remove(&(x, z))
-                }
-            },
-        );
+        let closure =
+            Box::new(
+                move |x: i32,
+                      z: i32,
+                      put: Option<
+                    &mut Option<ChunkAccess<StateId, ServerBiomeId, StructureKey>>,
+                >| {
+                    let mut map = closure_shared.lock().unwrap();
+                    if let Some(slot) = put {
+                        if let Some(chunk) = slot.take() {
+                            map.insert((x, z), chunk);
+                        }
+                        None
+                    } else {
+                        map.remove(&(x, z))
+                    }
+                },
+            );
         (closure, shared)
     }
 
@@ -495,7 +602,7 @@ mod tests {
     /// "no loaded neighbours" case (the engine's `relaxed` cache setup
     /// tolerates it).
     fn no_chunks() -> ChunkAccessFn {
-        Box::new(|_x, _z, put: Option<ChunkAccess<StateId, ServerBiomeId, StructureKey>>| put)
+        Box::new(|_x, _z, _put| None)
     }
 
     /// The server's superflat chunk at `pos` — a single stone layer at block
@@ -550,7 +657,9 @@ mod tests {
         let mut provider = SkyLightProvider::new(overworld(), true, true, no_chunks());
         let mut chunk = superflat_chunk(ChunkPos::new(0, 0));
 
-        provider.light_chunk_with(&mut chunk, &superflat_empty_sections());
+        provider
+            .light_chunk_with(&mut chunk, &superflat_empty_sections())
+            .expect("lighting succeeds");
 
         let nibbles = chunk.sky_nibbles();
         assert_eq!(nibbles.len(), SECTION_COUNT + 2);
@@ -587,7 +696,9 @@ mod tests {
         let mut provider = SkyLightProvider::new(overworld(), true, true, no_chunks());
         let mut chunk = all_air_chunk(ChunkPos::new(0, 0));
 
-        provider.light_chunk_with(&mut chunk, &all_air_empty_sections());
+        provider
+            .light_chunk_with(&mut chunk, &all_air_empty_sections())
+            .expect("lighting succeeds");
 
         for nibble in chunk.sky_nibbles() {
             assert!(nibble.is_null_nibble_visible());
@@ -636,6 +747,120 @@ mod tests {
         provider.light_chunk(ChunkPos::new(5, 5), &superflat_empty_sections());
         let after: Vec<_> = shared.lock().unwrap().keys().copied().collect();
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn checked_light_refuses_a_missing_center_without_promotion() {
+        let mut provider = SkyLightProvider::new(overworld(), true, true, no_chunks());
+        assert_eq!(
+            provider.try_light_chunk(ChunkPos::ZERO, &superflat_empty_sections()),
+            Err(LightProviderError::MissingChunk(ChunkPos::ZERO))
+        );
+    }
+
+    #[test]
+    fn put_callback_panic_retains_the_center_for_retry() {
+        let first_put = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let shared = Arc::new(Mutex::new(HashMap::from([(
+            (0, 0),
+            superflat_chunk(ChunkPos::ZERO),
+        )])));
+        let closure_shared = Arc::clone(&shared);
+        let chunks: ChunkAccessFn = Box::new(move |x, z, put| {
+            if put.is_some() && first_put.swap(false, Ordering::SeqCst) {
+                panic!("put callback failed once");
+            }
+            let mut storage = closure_shared.lock().unwrap();
+            if let Some(slot) = put {
+                if let Some(chunk) = slot.take() {
+                    storage.insert((x, z), chunk);
+                }
+                None
+            } else {
+                storage.remove(&(x, z))
+            }
+        });
+        let mut provider = SkyLightProvider::new(overworld(), true, true, chunks);
+
+        assert_eq!(
+            provider.try_light_chunk(ChunkPos::ZERO, &superflat_empty_sections()),
+            Err(LightProviderError::CallbackPanicked)
+        );
+        assert_eq!(provider.pending_restores.len(), 1);
+        assert!(!shared.lock().unwrap().contains_key(&(0, 0)));
+
+        provider
+            .try_light_chunk(ChunkPos::ZERO, &superflat_empty_sections())
+            .expect("retry after storage repair succeeds");
+        assert!(shared.lock().unwrap().contains_key(&(0, 0)));
+    }
+
+    /// A neighbour whose put callback panicked on one run is stranded in
+    /// `pending_restores` (the centre's put retained it). The *value bridge*
+    /// calls `light_chunk_with` directly — which now flushes pending restores
+    /// before the next run — so a retry returns the stranded neighbour to its
+    /// original slot before lighting again. This is the bridge-retry resource
+    /// invariant the reviewer flagged.
+    #[test]
+    fn light_chunk_with_flushes_a_stranded_neighbour_before_the_next_run() {
+        // Panic once when putting the neighbour back; the centre's own put is
+        // on the caller's storage too, so the one-time panic strands whichever
+        // put arrives first. The centre must remain present for the retry.
+        let first_put = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut storage = HashMap::new();
+        let center = ChunkPos::new(0, 0);
+        storage.insert((center.x(), center.z()), superflat_chunk(center));
+        let mut neighbour = superflat_chunk(ChunkPos::new(1, 0));
+        neighbour.set_light_correct(true);
+        storage.insert((1, 0), neighbour);
+        let (closure_fn, shared) = {
+            let first_put = Arc::clone(&first_put);
+            let shared = Arc::new(Mutex::new(storage));
+            let closure_shared = Arc::clone(&shared);
+            let closure: ChunkAccessFn = Box::new(move |x, z, put| {
+                if put.is_some() && first_put.swap(false, Ordering::SeqCst) {
+                    panic!("put callback failed once");
+                }
+                let mut storage = closure_shared.lock().unwrap();
+                if let Some(slot) = put {
+                    if let Some(chunk) = slot.take() {
+                        storage.insert((x, z), chunk);
+                    }
+                    None
+                } else {
+                    storage.remove(&(x, z))
+                }
+            });
+            (closure, shared)
+        };
+        let mut provider = SkyLightProvider::new(overworld(), true, true, closure_fn);
+        let mut chunk = superflat_chunk(center);
+
+        // First run: one put panics and strands its chunk in pending_restores.
+        assert_eq!(
+            provider.light_chunk_with(&mut chunk, &superflat_empty_sections()),
+            Err(LightProviderError::CallbackPanicked)
+        );
+        assert_eq!(provider.pending_restores.len(), 1);
+
+        // Retry through the same value path: the stranded neighbour is flushed
+        // and put back into the caller's storage before the next run begins.
+        provider
+            .light_chunk_with(&mut chunk, &superflat_empty_sections())
+            .expect("retry succeeds");
+        let map = shared.lock().unwrap();
+        assert!(
+            map.contains_key(&(0, 0)),
+            "centre restored to its original slot"
+        );
+        assert!(
+            map.contains_key(&(1, 0)),
+            "stranded neighbour returned to its original slot"
+        );
+        assert!(
+            provider.pending_restores.is_empty(),
+            "no chunk remains owned by the provider"
+        );
     }
 
     /// A light-correct neighbour present in the caller's storage is resolved by
@@ -776,7 +1001,9 @@ mod tests {
     fn resolved_chunk_readers_see_the_computed_light() {
         let mut provider = SkyLightProvider::new(overworld(), true, true, no_chunks());
         let mut chunk = superflat_chunk(ChunkPos::new(0, 0));
-        provider.light_chunk_with(&mut chunk, &superflat_empty_sections());
+        provider
+            .light_chunk_with(&mut chunk, &superflat_empty_sections())
+            .expect("lighting succeeds");
         chunk.set_light_correct(true);
 
         // Stone at y=-64 blocks sky: 0 at the floor, full sky above it.
@@ -815,7 +1042,9 @@ mod tests {
         // An all-air chunk reads as open sky everywhere (15 via the
         // emptiness-map fallback), and its data layer is null (all null nibbles).
         let mut air = all_air_chunk(ChunkPos::new(0, 0));
-        provider.light_chunk_with(&mut air, &all_air_empty_sections());
+        provider
+            .light_chunk_with(&mut air, &all_air_empty_sections())
+            .expect("lighting succeeds");
         air.set_light_correct(true);
         assert_eq!(
             provider.get_sky_light_value_in(&air, BlockPos::new(0, 64, 0)),
@@ -1025,7 +1254,9 @@ mod tests {
                 .unwrap()
                 .remove(&(cx, cz))
                 .expect("center chunk present");
-            provider.relight_chunk_with(&mut center, &[None; SECTION_COUNT]);
+            provider
+                .relight_chunk_with(&mut center, &[None; SECTION_COUNT])
+                .expect("relighting succeeds");
             shared.lock().unwrap().insert((cx, cz), center);
 
             let shared_guard = shared.lock().unwrap();
