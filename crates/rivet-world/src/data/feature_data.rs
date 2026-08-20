@@ -22,7 +22,7 @@
 
 pub use rivet_registry::generated::feature_data::{
     BIOME_GENERATION_SETTINGS_BY_NAME, CONFIGURED_FEATURE_BY_NAME, DECORATION_STEP_COUNT,
-    PLACED_FEATURE_BY_NAME,
+    MOB_SPAWN_SETTINGS_BY_NAME, PLACED_FEATURE_BY_NAME,
 };
 
 #[cfg(test)]
@@ -186,6 +186,54 @@ mod tests {
                 BIOME_GENERATION_SETTINGS_BY_NAME.contains_key(name),
                 "reachable biome `{name}` must be present"
             );
+        }
+    }
+
+    /// The mob-spawn table mirrors the generation-settings table: same key set
+    /// (EVERY possible biome), and the two biomes the SPAWN seam's acceptance/
+    /// refusal paths concretely depend on are pinned — `river` (seed-42's center
+    /// biome) has an EMPTY CREATURE list (zero entities is correct), `beach`
+    /// carries a turtle spawner (the non-empty refusal path).
+    #[test]
+    fn mob_spawn_settings_cover_possible_biomes() {
+        assert_eq!(MOB_SPAWN_SETTINGS_BY_NAME.len(), 55);
+        // Same key set as the generation settings.
+        for (name, _) in MOB_SPAWN_SETTINGS_BY_NAME.entries() {
+            assert!(
+                BIOME_GENERATION_SETTINGS_BY_NAME.contains_key(*name),
+                "mob settings carry `{name}` not in generation settings"
+            );
+        }
+        for (name, _) in BIOME_GENERATION_SETTINGS_BY_NAME.entries() {
+            assert!(
+                MOB_SPAWN_SETTINGS_BY_NAME.contains_key(*name),
+                "generation settings carry `{name}` not in mob settings"
+            );
+        }
+        // seed-42 center biome `river`: empty CREATURE list, 0.1 probability.
+        let river = MOB_SPAWN_SETTINGS_BY_NAME.get("minecraft:river").unwrap();
+        let _ = river.creature_probability; // presence sanity
+        assert_eq!(river.creature.len(), 0, "river CREATURE list must be empty");
+        assert_eq!(river.creature_probability, 0.1);
+        // `beach`: one turtle spawner (the non-empty refusal path), ordered.
+        let beach = MOB_SPAWN_SETTINGS_BY_NAME.get("minecraft:beach").unwrap();
+        assert_eq!(beach.creature.len(), 1);
+        assert_eq!(beach.creature[0].ty, "minecraft:turtle");
+        assert_eq!(beach.creature[0].min, 2);
+        assert_eq!(beach.creature[0].max, 5);
+        assert_eq!(beach.creature[0].weight, 5);
+        // Every non-empty CREATURE entry has min <= max (the `SpawnerData`
+        // codec invariant the extractor's live load preserves).
+        for (name, m) in MOB_SPAWN_SETTINGS_BY_NAME.entries() {
+            for s in m.creature {
+                assert!(
+                    s.min <= s.max,
+                    "biome {name} creature {} min {} > max {}",
+                    s.ty,
+                    s.min,
+                    s.max
+                );
+            }
         }
     }
 

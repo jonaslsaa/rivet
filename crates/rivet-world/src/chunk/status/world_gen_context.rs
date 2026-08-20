@@ -292,6 +292,19 @@ pub enum GenError {
     /// LIGHT-produced light data through `checkSpawnRules`/
     /// `isSpawnPositionOk`, so an unlit chunk must not be spawned).
     SpawnNotGenerated,
+    /// The SPAWN seam reached a non-empty CREATURE spawner list (with the
+    /// `SPAWN_MOBS` rule enabled) but entity construction is not ported, so it
+    /// refuses typed before pretending entities were produced (RivetTodo #185:
+    /// the entity/level units). This is the faithful non-empty path: Java would
+    /// draw a random spawner and instantiate mobs; Rivet stops at the exact
+    /// point instead of fabricating entities.
+    CreatureSpawnNotGenerated {
+        /// The generating chunk's position.
+        chunk_pos: ChunkPos,
+        /// The resolving center biome's name (the `MOB_SPAWN_SETTINGS_BY_NAME`
+        /// key), or `None` when the biome's dense id is not in `BIOME_BY_ID`.
+        biome: Option<&'static str>,
+    },
     /// The `FULL` task dispatched before the `SPAWN` task ran — the
     /// generation-ordering violation (Java's `ChunkStatusTasks.full` hands the
     /// chunk to the caller only after `generateSpawn` ran, so an un-spawned
@@ -380,6 +393,11 @@ impl std::fmt::Display for GenError {
             GenError::SpawnNotGenerated => {
                 write!(f, "cannot generate SPAWN before the LIGHT task ran")
             }
+            GenError::CreatureSpawnNotGenerated { chunk_pos, biome } => write!(
+                f,
+                "cannot spawn CREATURE mobs for chunk {chunk_pos} (biome {biome:?}): \
+                 entity construction is not ported (RivetTodo #185)"
+            ),
             GenError::FullNotGenerated => {
                 write!(f, "cannot generate FULL before the SPAWN task ran")
             }

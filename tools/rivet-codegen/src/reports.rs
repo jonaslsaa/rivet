@@ -59,6 +59,14 @@ pub(crate) const PINNED_SERVER_JAR_SHA256: &str =
     "e1a027e9481a16ec1da0f0e139d370280050d123a14c022a476c2dc8a697ebda";
 pub(crate) const PINNED_JOIN_CAPTURE_SHA256: &str =
     "e78a673617a1eefc8029c43b69bf3cbe7d1f2b6fcf65e3b333f5c85e25f1c533";
+// A server jar regenerated from the pinned clean Paper checkout. The Paper
+// build is non-reproducible (two fresh builds of the same commit yield
+// different jars), so this records the jar the G2 SPAWN feature_data fixture
+// was regenerated from. `capture_source` independently verifies the jar's
+// `Git-Commit` equals the pinned commit AND the checkout is clean, so this
+// is a build of the exact pinned source, never an arbitrary jar.
+pub(crate) const PINNED_SERVER_JAR_SHA256_FEATURE_DATA: &str =
+    "88ccec843a9c94b938d71105294e3d064786dbc29bcd1e0da6417fb8c2c93446";
 pub(crate) const PINNED_MINECRAFT_VERSION: &str = "26.2";
 pub(crate) const PINNED_PROTOCOL_VERSION: u32 = 776;
 pub(crate) const PINNED_WORLD_VERSION: u32 = 4903;
@@ -421,6 +429,7 @@ pub(crate) struct SourceProvenance {
 pub(crate) fn verify_pinned_source(source: &SourceProvenance) -> Result<()> {
     ensure!(
         source.jar_sha256 == PINNED_SERVER_JAR_SHA256
+            || source.jar_sha256 == PINNED_SERVER_JAR_SHA256_FEATURE_DATA
             || source.jar_sha256 == PINNED_JOIN_CAPTURE_SHA256,
         "UNVERIFIED: fixture source SHA {} is not a pinned source",
         source.jar_sha256
