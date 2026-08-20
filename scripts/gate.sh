@@ -123,8 +123,9 @@ REPO_DIR="$(cd "$_script_dir/.." && pwd)"
 source "$REPO_DIR/scripts/cargo-target-dir.sh"
 
 resolved_target_dir_for() {
-  # All workspaces use the same absolute target selected by the lock wrapper;
-  # resolving from the git common directory also works before Cargo has run.
+  # All workspaces launched from this checkout use its one absolute target.
+  # Linked worktrees resolve different targets so Cargo fingerprints can never
+  # reuse a dependency compiled from another checkout's source tree.
   cargo_target_dir_for "$REPO_DIR"
 }
 

@@ -62,11 +62,11 @@ mkdir -p "$FAKE_FULL/tools/rivet-oracle/work/jars"
 mkdir -p "$FAKE_FULL/working/Paper/paper-server/build/libs"
 mkdir -p "$FAKE_FULL/tools/rivet-oracle/work/run/libraries"
 mkdir -p "$FAKE_FULL/tools/rivet-oracle/work/run/versions/26.2"
-mkdir -p "$FAKE_FULL/target-agent-shared/debug"
+mkdir -p "$FAKE_FULL/target/debug"
 touch "$FAKE_FULL/tools/rivet-oracle/work/jars/paper-paperclip-26.2.local-SNAPSHOT.jar"
 touch "$FAKE_FULL/working/Paper/paper-server/build/libs/paper-server-26.2.local-SNAPSHOT.jar"
 touch "$FAKE_FULL/tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar"
-touch "$FAKE_FULL/target-agent-shared/debug/rivet-client"
+touch "$FAKE_FULL/target/debug/rivet-client"
 
 # Neutralise host JDK discovery via absolute paths (SDKMAN / JAVA_HOME) so the
 # test controls the Java 25 JDK check entirely through the shimmed PATH.
@@ -80,7 +80,7 @@ unset RIVET_ORACLE_JAR RIVET_PAPER_JAR RIVET_PAPER_LIBRARIES RIVET_PAPER_RUNTIME
 run_check() {
   local repo="$1" saved_path="$PATH" saved_target="${CARGO_TARGET_DIR-}" rc=0
   PATH="$SHIM"
-  CARGO_TARGET_DIR="$repo/target-agent-shared"
+  CARGO_TARGET_DIR="$repo/target"
   REPO_DIR="$repo"
   # set +e: REQUIRE_ORACLE=1 exits 1; we must not abort on that.
   set +e
@@ -135,8 +135,8 @@ add_stub python3 'Python 3.14.6'
 run_check "$FAKE_FULL" > "$TMP/out3" 2>&1
 [ "$VERIFY_RUNNABLE" = 1 ] || fail "verify not runnable with all prereqs present"
 [ "$PARITY_RUNNABLE" = 1 ] || fail "parity not runnable with all prereqs present"
-[ "$SCENARIO_RUNNABLE" = 1 ] || fail "scenario not runnable with all prereqs present"
-[ "$RIVET_CLIENT_BIN" = "$FAKE_FULL/target-agent-shared/debug/rivet-client" ] \
+[ "$SCENARIO_RUNNABLE" = 1 ] || { cat "$TMP/out3"; fail "scenario not runnable with all prereqs present"; }
+[ "$RIVET_CLIENT_BIN" = "$FAKE_FULL/target/debug/rivet-client" ] \
   || fail "resolved client binary was not exported to downstream capture/scenario tools"
 grep -q "all oracle prerequisites present" "$TMP/out3" || fail "present-report missing"
 grep -q "MISSING" "$TMP/out3" && fail "MISSING reported despite all prereqs present"

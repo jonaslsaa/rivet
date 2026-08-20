@@ -8,11 +8,11 @@
 //! fresh dump is byte-identical to the committed fixture and that every anchor
 //! the probe documents (state_count 32366, run_count, the representative
 //! behavior words, and the representative support/collision face masks) is present with
-//! the pinned state_count. The anchor *values* are not re-checked here — a probe
-//! bit-packing bug would reproduce consistently — so they are pinned
-//! independently by the word-level, face-mask, and field-level decode tests in
-//! `rivet-registry`. Together these guard against a fixture that was hand-edited,
-//! generated from a different jar, or emitted by a mis-packed probe.
+//! the exact pinned counts. The live probe therefore cannot silently drift in run
+//! partitioning, dynamic-state coverage, or fixture coverage; the registry decode
+//! tests independently pin the emitted words and masks. Together these guard
+//! against a fixture that was hand-edited, generated from a different jar, or
+//! emitted by a mis-packed probe.
 //!
 //! Requires the same runtime as `extract`: the bundler jar (`--bundler`,
 //! default `working/Paper`), java + javac on PATH or JAVA_HOME, and unzip.
@@ -29,7 +29,12 @@ const ANCHORS: &[&str] = &[
     "state_count",
     "run_count",
     "face_sturdy_run_count",
+    "center_support_run_count",
+    "rigid_support_run_count",
     "collision_face_run_count",
+    "occlusion_face_run_count",
+    "dynamic_shape_state_count",
+    "dynamic_fixture_count",
     "air",
     "stone",
     "water",
@@ -110,17 +115,22 @@ fn check_probe_stdout(out: &str) -> Result<()> {
             probes.get("state_count")
         );
     }
-    if probes.get("face_sturdy_run_count") != Some(&"3504") {
-        bail!(
-            "probe face_sturdy_run_count = {:?} but the pinned Paper table expects 3504",
-            probes.get("face_sturdy_run_count")
-        );
-    }
-    if probes.get("collision_face_run_count") != Some(&"3506") {
-        bail!(
-            "probe collision_face_run_count = {:?} but the pinned Paper table expects 3506",
-            probes.get("collision_face_run_count")
-        );
+    for (key, expected) in [
+        ("run_count", "16757"),
+        ("face_sturdy_run_count", "3504"),
+        ("center_support_run_count", "12277"),
+        ("rigid_support_run_count", "3504"),
+        ("collision_face_run_count", "3506"),
+        ("occlusion_face_run_count", "2509"),
+        ("dynamic_shape_state_count", "199"),
+        ("dynamic_fixture_count", "4"),
+    ] {
+        if probes.get(key) != Some(&expected) {
+            bail!(
+                "probe {key} = {:?} but the pinned Paper table expects {expected}",
+                probes.get(key)
+            );
+        }
     }
     Ok(())
 }
@@ -135,12 +145,18 @@ mod tests {
             ANCHORS
                 .iter()
                 .map(|k| {
-                    // These two counts are pinned by the checker; the other
-                    // anchors are opaque words.
+                    // Count anchors are pinned by the checker; the other
+                    // anchors are opaque representative values.
                     match *k {
                         "state_count" => format!("{k}=32366"),
+                        "run_count" => format!("{k}=16757"),
                         "face_sturdy_run_count" => format!("{k}=3504"),
+                        "center_support_run_count" => format!("{k}=12277"),
+                        "rigid_support_run_count" => format!("{k}=3504"),
                         "collision_face_run_count" => format!("{k}=3506"),
+                        "occlusion_face_run_count" => format!("{k}=2509"),
+                        "dynamic_shape_state_count" => format!("{k}=199"),
+                        "dynamic_fixture_count" => format!("{k}=4"),
                         _ => format!("{k}=1"),
                     }
                 })
@@ -166,6 +182,13 @@ mod tests {
         let out = probe_output().replace("state_count=32366", "state_count=32365");
         let err = check_probe_stdout(&out).unwrap_err();
         assert!(err.to_string().contains("expects 32366"), "got: {err}");
+    }
+
+    #[test]
+    fn wrong_run_count_fails() {
+        let out = probe_output().replace("run_count=16757", "run_count=16756");
+        let err = check_probe_stdout(&out).unwrap_err();
+        assert!(err.to_string().contains("expects 16757"), "got: {err}");
     }
 
     #[test]
