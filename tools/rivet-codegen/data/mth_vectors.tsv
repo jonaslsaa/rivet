@@ -1,55 +1,55 @@
-0	super::sin(0.0).to_bits()	0x00000000
-1	super::sin(1.0).to_bits()	0x3f57695c
-2	super::sin(2.0).to_bits()	0x3f68c9b2
-3	super::sin(3.0).to_bits()	0x3e108520
-4	super::sin(0.5).to_bits()	0x3ef5752e
-5	super::sin(3.141592653589793).to_bits()	0x250d3132
-6	super::sin(1.5707963267948966).to_bits()	0x3f800000
-7	super::sin(6.283185307179586).to_bits()	0x00000000
-8	super::sin(-3.141592653589793).to_bits()	0x250d3132
-9	super::sin(-1.5707963267948966).to_bits()	0xbf800000
-10	super::sin(100.0).to_bits()	0xbf01a5b4
-11	super::sin(1000.0).to_bits()	0x3f53ad24
-12	super::sin(10000.0).to_bits()	0xbe9c7373
-13	super::sin(1000000.0).to_bits()	0xbeb337e3
-14	super::sin(-1000000.0).to_bits()	0x3eb337e3
-15	super::sin(12345.6789).to_bits()	0xbf3418e1
-16	super::sin(1.7976931348623157E308).to_bits()	0xb8c90fdb
-17	super::sin(2.2250738585072014E-308).to_bits()	0x00000000
-18	super::sin(4.9E-324).to_bits()	0x00000000
-19	super::sin(1.0E308).to_bits()	0xb8c90fdb
-20	super::cos(0.0).to_bits()	0x3f800000
-21	super::cos(1.0).to_bits()	0x3f0a5341
-22	super::cos(2.0).to_bits()	0xbed5088d
-23	super::cos(3.0).to_bits()	0xbf7d7007
-24	super::cos(0.5).to_bits()	0x3f60a9d2
-25	super::cos(3.141592653589793).to_bits()	0xbf800000
-26	super::cos(1.5707963267948966).to_bits()	0x250d3132
-27	super::cos(6.283185307179586).to_bits()	0x3f800000
-28	super::cos(-3.141592653589793).to_bits()	0xbf800000
-29	super::cos(-1.5707963267948966).to_bits()	0x00000000
-30	super::cos(100.0).to_bits()	0x3f5cbe46
-31	super::cos(1000.0).to_bits()	0x3f0ff9e5
-32	super::cos(10000.0).to_bits()	0xbf73c16c
-33	super::cos(1000000.0).to_bits()	0x3f6fcdf4
-34	super::cos(-1000000.0).to_bits()	0x3f6fcdf4
-35	super::cos(12345.6789).to_bits()	0x3f35efd3
-36	super::cos(1.7976931348623157E308).to_bits()	0xb8c90fdb
-37	super::cos(2.2250738585072014E-308).to_bits()	0x3f800000
-38	super::cos(4.9E-324).to_bits()	0x3f800000
-39	super::cos(1.0E308).to_bits()	0xb8c90fdb
-40	super::sqrt(0.0f32).to_bits()	0x00000000
-41	super::sqrt(1.0f32).to_bits()	0x3f800000
-42	super::sqrt(2.0f32).to_bits()	0x3fb504f3
-43	super::sqrt(3.0f32).to_bits()	0x3fddb3d7
-44	super::sqrt(0.25f32).to_bits()	0x3f000000
-45	super::sqrt(100.0f32).to_bits()	0x41200000
-46	super::sqrt(3.4028235E38f32).to_bits()	0x5f7fffff
-47	super::sqrt(1.4E-45f32).to_bits()	0x1a3504f3
-48	super::sqrt(f32::NAN).to_bits()	0x7fc00000
-49	super::sqrt(f32::INFINITY).to_bits()	0x7f800000
-50	super::sqrt(4.0f32).to_bits()	0x40000000
-51	super::sqrt(1.0E30f32).to_bits()	0x58635fa9
+0	bitexact_f32(super::sin(0.0))	0x00000000
+1	bitexact_f32(super::sin(1.0))	0x3f57695c
+2	bitexact_f32(super::sin(2.0))	0x3f68c9b2
+3	bitexact_f32(super::sin(3.0))	0x3e108520
+4	bitexact_f32(super::sin(0.5))	0x3ef5752e
+5	bitexact_f32(super::sin(3.141592653589793))	0x250d3132
+6	bitexact_f32(super::sin(1.5707963267948966))	0x3f800000
+7	bitexact_f32(super::sin(6.283185307179586))	0x00000000
+8	bitexact_f32(super::sin(-3.141592653589793))	0x250d3132
+9	bitexact_f32(super::sin(-1.5707963267948966))	0xbf800000
+10	bitexact_f32(super::sin(100.0))	0xbf01a5b4
+11	bitexact_f32(super::sin(1000.0))	0x3f53ad24
+12	bitexact_f32(super::sin(10000.0))	0xbe9c7373
+13	bitexact_f32(super::sin(1000000.0))	0xbeb337e3
+14	bitexact_f32(super::sin(-1000000.0))	0x3eb337e3
+15	bitexact_f32(super::sin(12345.6789))	0xbf3418e1
+16	bitexact_f32(super::sin(1.7976931348623157E308))	0xb8c90fdb
+17	bitexact_f32(super::sin(2.2250738585072014E-308))	0x00000000
+18	bitexact_f32(super::sin(4.9E-324))	0x00000000
+19	bitexact_f32(super::sin(1.0E308))	0xb8c90fdb
+20	bitexact_f32(super::cos(0.0))	0x3f800000
+21	bitexact_f32(super::cos(1.0))	0x3f0a5341
+22	bitexact_f32(super::cos(2.0))	0xbed5088d
+23	bitexact_f32(super::cos(3.0))	0xbf7d7007
+24	bitexact_f32(super::cos(0.5))	0x3f60a9d2
+25	bitexact_f32(super::cos(3.141592653589793))	0xbf800000
+26	bitexact_f32(super::cos(1.5707963267948966))	0x250d3132
+27	bitexact_f32(super::cos(6.283185307179586))	0x3f800000
+28	bitexact_f32(super::cos(-3.141592653589793))	0xbf800000
+29	bitexact_f32(super::cos(-1.5707963267948966))	0x00000000
+30	bitexact_f32(super::cos(100.0))	0x3f5cbe46
+31	bitexact_f32(super::cos(1000.0))	0x3f0ff9e5
+32	bitexact_f32(super::cos(10000.0))	0xbf73c16c
+33	bitexact_f32(super::cos(1000000.0))	0x3f6fcdf4
+34	bitexact_f32(super::cos(-1000000.0))	0x3f6fcdf4
+35	bitexact_f32(super::cos(12345.6789))	0x3f35efd3
+36	bitexact_f32(super::cos(1.7976931348623157E308))	0xb8c90fdb
+37	bitexact_f32(super::cos(2.2250738585072014E-308))	0x3f800000
+38	bitexact_f32(super::cos(4.9E-324))	0x3f800000
+39	bitexact_f32(super::cos(1.0E308))	0xb8c90fdb
+40	bitexact_f32(super::sqrt(0.0f32))	0x00000000
+41	bitexact_f32(super::sqrt(1.0f32))	0x3f800000
+42	bitexact_f32(super::sqrt(2.0f32))	0x3fb504f3
+43	bitexact_f32(super::sqrt(3.0f32))	0x3fddb3d7
+44	bitexact_f32(super::sqrt(0.25f32))	0x3f000000
+45	bitexact_f32(super::sqrt(100.0f32))	0x41200000
+46	bitexact_f32(super::sqrt(3.4028235E38f32))	0x5f7fffff
+47	bitexact_f32(super::sqrt(1.4E-45f32))	0x1a3504f3
+48	bitexact_f32(super::sqrt(f32::NAN))	0x7fc00000
+49	bitexact_f32(super::sqrt(f32::INFINITY))	0x7f800000
+50	bitexact_f32(super::sqrt(4.0f32))	0x40000000
+51	bitexact_f32(super::sqrt(1.0E30f32))	0x58635fa9
 52	super::floor_d(-1.5)	-2i32
 53	super::floor_d(-1.0)	-1i32
 54	super::floor_d(-0.5)	-1i32
@@ -173,54 +173,54 @@
 172	super::abs_max(-2147483648i32, 2147483647i32)	2147483647i32
 173	super::chessboard_distance(3, 7, -2, 10)	5i32
 174	super::chessboard_distance(-5, 0, 5, 0)	10i32
-175	super::abs(-1.5f32).to_bits()	0x3fc00000
-176	super::abs(1.5f32).to_bits()	0x3fc00000
-177	super::abs(f32::NAN).to_bits()	0x7fc00000
-178	super::abs(1.4E-45f32).to_bits()	0x00000001
+175	bitexact_f32(super::abs(-1.5f32))	0x3fc00000
+176	bitexact_f32(super::abs(1.5f32))	0x3fc00000
+177	bitexact_f32(super::abs(f32::NAN))	0x7fc00000
+178	bitexact_f32(super::abs(1.4E-45f32))	0x00000001
 179	super::clamp(5, 0, 10)	5i32
 180	super::clamp(-5, 0, 10)	0i32
 181	super::clamp(15, 0, 10)	10i32
 182	super::clamp(-2147483648, -1, 1)	-1i32
 183	super::clamp(2147483647, -1, 1)	1i32
 184	super::clamp(-9223372036854775808i64, -1i64, 1i64)	-1i64
-185	super::clamp_f32(5.0f32, 0.0, 10.0).to_bits()	0x40a00000
-186	super::clamp_f32(-5.0f32, 0.0, 10.0).to_bits()	0x00000000
-187	super::clamp_f32(15.0f32, 0.0, 10.0).to_bits()	0x41200000
-188	super::clamp_f32(f32::NAN, 0.0, 10.0).to_bits()	0x7fc00000
-189	super::clamp_f32(5.0f32, 0.0, f32::NAN).to_bits()	0x7fc00000
-190	super::clamp_f32(0.5f32, 0.0, 10.0).to_bits()	0x3f000000
-191	super::clamp_f64(5.0, 0.0, 10.0).to_bits()	0x4014000000000000
-192	super::clamp_f64(-5.0, 0.0, 10.0).to_bits()	0x0000000000000000
-193	super::clamp_f64(15.0, 0.0, 10.0).to_bits()	0x4024000000000000
-194	super::clamp_f64(f64::NAN, 0.0, 10.0).to_bits()	0x7ff8000000000000
-195	super::clamp_f64(5.0, 0.0, f64::NAN).to_bits()	0x7ff8000000000000
-196	super::clamp_f64(0.5, 0.0, 10.0).to_bits()	0x3fe0000000000000
-197	super::clamped_lerp(-1.0, 1.0, 5.0).to_bits()	0x3ff0000000000000
-198	super::clamped_lerp(0.0, 1.0, 5.0).to_bits()	0x3ff0000000000000
-199	super::clamped_lerp(0.25, 1.0, 5.0).to_bits()	0x4000000000000000
-200	super::clamped_lerp(0.5, 1.0, 5.0).to_bits()	0x4008000000000000
-201	super::clamped_lerp(0.75, 1.0, 5.0).to_bits()	0x4010000000000000
-202	super::clamped_lerp(1.0, 1.0, 5.0).to_bits()	0x4014000000000000
-203	super::clamped_lerp(2.0, 1.0, 5.0).to_bits()	0x4014000000000000
-204	super::clamped_lerp(f64::NAN, 1.0, 5.0).to_bits()	0x7ff8000000000000
-205	super::clamped_lerp_f32(-1.0f32, 1.0, 5.0).to_bits()	0x3f800000
-206	super::clamped_lerp_f32(0.0f32, 1.0, 5.0).to_bits()	0x3f800000
-207	super::clamped_lerp_f32(0.25f32, 1.0, 5.0).to_bits()	0x40000000
-208	super::clamped_lerp_f32(0.5f32, 1.0, 5.0).to_bits()	0x40400000
-209	super::clamped_lerp_f32(1.0f32, 1.0, 5.0).to_bits()	0x40a00000
-210	super::clamped_lerp_f32(2.0f32, 1.0, 5.0).to_bits()	0x40a00000
-211	super::clamped_lerp_f32(f32::NAN, 1.0, 5.0).to_bits()	0x7fc00000
-212	super::lerp(-1.0, 1.0, 5.0).to_bits()	0xc008000000000000
-213	super::lerp(0.0, 1.0, 5.0).to_bits()	0x3ff0000000000000
-214	super::lerp(0.5, 1.0, 5.0).to_bits()	0x4008000000000000
-215	super::lerp(1.0, 1.0, 5.0).to_bits()	0x4014000000000000
-216	super::lerp(2.0, 1.0, 5.0).to_bits()	0x4022000000000000
-217	super::lerp(f64::NAN, 1.0, 5.0).to_bits()	0x7ff8000000000000
-218	super::lerp_f32(-1.0f32, 1.0, 5.0).to_bits()	0xc0400000
-219	super::lerp_f32(0.0f32, 1.0, 5.0).to_bits()	0x3f800000
-220	super::lerp_f32(0.5f32, 1.0, 5.0).to_bits()	0x40400000
-221	super::lerp_f32(1.0f32, 1.0, 5.0).to_bits()	0x40a00000
-222	super::lerp_f32(f32::NAN, 1.0, 5.0).to_bits()	0x7fc00000
+185	bitexact_f32(super::clamp_f32(5.0f32, 0.0, 10.0))	0x40a00000
+186	bitexact_f32(super::clamp_f32(-5.0f32, 0.0, 10.0))	0x00000000
+187	bitexact_f32(super::clamp_f32(15.0f32, 0.0, 10.0))	0x41200000
+188	bitexact_f32(super::clamp_f32(f32::NAN, 0.0, 10.0))	0x7fc00000
+189	bitexact_f32(super::clamp_f32(5.0f32, 0.0, f32::NAN))	0x7fc00000
+190	bitexact_f32(super::clamp_f32(0.5f32, 0.0, 10.0))	0x3f000000
+191	bitexact_f64(super::clamp_f64(5.0, 0.0, 10.0))	0x4014000000000000
+192	bitexact_f64(super::clamp_f64(-5.0, 0.0, 10.0))	0x0000000000000000
+193	bitexact_f64(super::clamp_f64(15.0, 0.0, 10.0))	0x4024000000000000
+194	bitexact_f64(super::clamp_f64(f64::NAN, 0.0, 10.0))	0x7ff8000000000000
+195	bitexact_f64(super::clamp_f64(5.0, 0.0, f64::NAN))	0x7ff8000000000000
+196	bitexact_f64(super::clamp_f64(0.5, 0.0, 10.0))	0x3fe0000000000000
+197	bitexact_f64(super::clamped_lerp(-1.0, 1.0, 5.0))	0x3ff0000000000000
+198	bitexact_f64(super::clamped_lerp(0.0, 1.0, 5.0))	0x3ff0000000000000
+199	bitexact_f64(super::clamped_lerp(0.25, 1.0, 5.0))	0x4000000000000000
+200	bitexact_f64(super::clamped_lerp(0.5, 1.0, 5.0))	0x4008000000000000
+201	bitexact_f64(super::clamped_lerp(0.75, 1.0, 5.0))	0x4010000000000000
+202	bitexact_f64(super::clamped_lerp(1.0, 1.0, 5.0))	0x4014000000000000
+203	bitexact_f64(super::clamped_lerp(2.0, 1.0, 5.0))	0x4014000000000000
+204	bitexact_f64(super::clamped_lerp(f64::NAN, 1.0, 5.0))	0x7ff8000000000000
+205	bitexact_f32(super::clamped_lerp_f32(-1.0f32, 1.0, 5.0))	0x3f800000
+206	bitexact_f32(super::clamped_lerp_f32(0.0f32, 1.0, 5.0))	0x3f800000
+207	bitexact_f32(super::clamped_lerp_f32(0.25f32, 1.0, 5.0))	0x40000000
+208	bitexact_f32(super::clamped_lerp_f32(0.5f32, 1.0, 5.0))	0x40400000
+209	bitexact_f32(super::clamped_lerp_f32(1.0f32, 1.0, 5.0))	0x40a00000
+210	bitexact_f32(super::clamped_lerp_f32(2.0f32, 1.0, 5.0))	0x40a00000
+211	bitexact_f32(super::clamped_lerp_f32(f32::NAN, 1.0, 5.0))	0x7fc00000
+212	bitexact_f64(super::lerp(-1.0, 1.0, 5.0))	0xc008000000000000
+213	bitexact_f64(super::lerp(0.0, 1.0, 5.0))	0x3ff0000000000000
+214	bitexact_f64(super::lerp(0.5, 1.0, 5.0))	0x4008000000000000
+215	bitexact_f64(super::lerp(1.0, 1.0, 5.0))	0x4014000000000000
+216	bitexact_f64(super::lerp(2.0, 1.0, 5.0))	0x4022000000000000
+217	bitexact_f64(super::lerp(f64::NAN, 1.0, 5.0))	0x7ff8000000000000
+218	bitexact_f32(super::lerp_f32(-1.0f32, 1.0, 5.0))	0xc0400000
+219	bitexact_f32(super::lerp_f32(0.0f32, 1.0, 5.0))	0x3f800000
+220	bitexact_f32(super::lerp_f32(0.5f32, 1.0, 5.0))	0x40400000
+221	bitexact_f32(super::lerp_f32(1.0f32, 1.0, 5.0))	0x40a00000
+222	bitexact_f32(super::lerp_f32(f32::NAN, 1.0, 5.0))	0x7fc00000
 223	super::lerp_int(0.5, 10, 20)	15i32
 224	super::lerp_int(-0.5, 10, 20)	5i32
 225	super::lerp_int(0.0, 10, 20)	10i32
@@ -228,8 +228,8 @@
 227	super::lerp_discrete(0.5, 10, 20)	15i32
 228	super::lerp_discrete(0.0, 10, 20)	10i32
 229	super::lerp_discrete(0.5, 10, 11)	11i32
-230	super::lerp2(0.5, 0.5, 0.0, 10.0, 20.0, 30.0).to_bits()	0x402e000000000000
-231	super::lerp3(0.5, 0.5, 0.5, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0).to_bits()	0x400c000000000000
+230	bitexact_f64(super::lerp2(0.5, 0.5, 0.0, 10.0, 20.0, 30.0))	0x402e000000000000
+231	bitexact_f64(super::lerp3(0.5, 0.5, 0.5, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0))	0x400c000000000000
 232	super::wrap_degrees(180i32)	-180i32
 233	super::wrap_degrees(-180i32)	-180i32
 234	super::wrap_degrees(181i32)	-179i32
@@ -248,87 +248,87 @@
 247	super::wrap_degrees(-2147483648i32)	-128i32
 248	super::wrap_degrees(1000000i32)	-80i32
 249	super::wrap_degrees(-1000000i32)	80i32
-250	super::wrap_degrees_f32(180.0f32).to_bits()	0xc3340000
-251	super::wrap_degrees_f32(-180.0f32).to_bits()	0xc3340000
-252	super::wrap_degrees_f32(181.0f32).to_bits()	0xc3330000
-253	super::wrap_degrees_f32(-181.0f32).to_bits()	0x43330000
-254	super::wrap_degrees_f32(360.0f32).to_bits()	0x00000000
-255	super::wrap_degrees_f32(-360.0f32).to_bits()	0x80000000
-256	super::wrap_degrees_f32(540.0f32).to_bits()	0xc3340000
-257	super::wrap_degrees_f32(-540.0f32).to_bits()	0xc3340000
-258	super::wrap_degrees_f32(720.0f32).to_bits()	0x00000000
-259	super::wrap_degrees_f32(0.0f32).to_bits()	0x00000000
-260	super::wrap_degrees_f32(359.9f32).to_bits()	0xbdccd000
-261	super::wrap_degrees_f32(-359.9f32).to_bits()	0x3dccd000
-262	super::wrap_degrees_f32(179.999f32).to_bits()	0x4333ffbe
-263	super::wrap_degrees_f32(f32::NAN).to_bits()	0x7fc00000
-264	super::wrap_degrees_f32(3.4028235E38f32).to_bits()	0x00000000
-265	super::wrap_degrees_f32(-3.4028235E38f32).to_bits()	0x80000000
-266	super::wrap_degrees_f32(1.4E-45f32).to_bits()	0x00000001
-267	super::wrap_degrees_f32(-1.4E-45f32).to_bits()	0x80000001
-268	super::wrap_degrees_f32(-0.0f32).to_bits()	0x80000000
-269	super::wrap_degrees_f32(1.0E-4f32).to_bits()	0x38d1b717
-270	super::wrap_degrees_f32(270.0f32).to_bits()	0xc2b40000
-271	super::wrap_degrees_f32(-270.0f32).to_bits()	0x42b40000
-272	super::wrap_degrees_f32(90.0f32).to_bits()	0x42b40000
-273	super::wrap_degrees_f32(-90.0f32).to_bits()	0xc2b40000
-274	super::wrap_degrees_i64(180i64).to_bits()	0xc3340000
-275	super::wrap_degrees_i64(-180i64).to_bits()	0xc3340000
-276	super::wrap_degrees_i64(181i64).to_bits()	0xc3330000
-277	super::wrap_degrees_i64(-181i64).to_bits()	0x43330000
-278	super::wrap_degrees_i64(360i64).to_bits()	0x00000000
-279	super::wrap_degrees_i64(-360i64).to_bits()	0x00000000
-280	super::wrap_degrees_i64(540i64).to_bits()	0xc3340000
-281	super::wrap_degrees_i64(-540i64).to_bits()	0xc3340000
-282	super::wrap_degrees_i64(9223372036854775807i64).to_bits()	0x40e00000
-283	super::wrap_degrees_i64(-9223372036854775808i64).to_bits()	0xc1000000
-284	super::wrap_degrees_i64(0i64).to_bits()	0x00000000
-285	super::wrap_degrees_i64(359i64).to_bits()	0xbf800000
-286	super::wrap_degrees_i64(1i64).to_bits()	0x3f800000
-287	super::wrap_degrees_f64(180.0).to_bits()	0xc066800000000000
-288	super::wrap_degrees_f64(-180.0).to_bits()	0xc066800000000000
-289	super::wrap_degrees_f64(181.0).to_bits()	0xc066600000000000
-290	super::wrap_degrees_f64(-181.0).to_bits()	0x4066600000000000
-291	super::wrap_degrees_f64(360.0).to_bits()	0x0000000000000000
-292	super::wrap_degrees_f64(-360.0).to_bits()	0x8000000000000000
-293	super::wrap_degrees_f64(540.0).to_bits()	0xc066800000000000
-294	super::wrap_degrees_f64(-540.0).to_bits()	0xc066800000000000
-295	super::wrap_degrees_f64(179.999).to_bits()	0x40667ff7ced91687
-296	super::wrap_degrees_f64(1.0E18).to_bits()	0xc054000000000000
-297	super::wrap_degrees_f64(-1.0E18).to_bits()	0x4054000000000000
-298	super::wrap_degrees_f64(f64::NAN).to_bits()	0x7ff8000000000000
-299	super::wrap_degrees_f64(f64::INFINITY).to_bits()	0x7ff8000000000000
-300	super::wrap_degrees_f64(0.0).to_bits()	0x0000000000000000
-301	super::wrap_degrees_f64(-0.0).to_bits()	0x8000000000000000
-302	super::wrap_degrees_f64(90.0).to_bits()	0x4056800000000000
-303	super::wrap_degrees_f64(270.0).to_bits()	0xc056800000000000
-304	super::wrap_degrees90(45.0f32).to_bits()	0xc2340000
-305	super::wrap_degrees90(-45.0f32).to_bits()	0xc2340000
-306	super::wrap_degrees90(90.0f32).to_bits()	0x00000000
-307	super::wrap_degrees90(-90.0f32).to_bits()	0x80000000
-308	super::wrap_degrees90(44.0f32).to_bits()	0x42300000
-309	super::wrap_degrees90(-44.0f32).to_bits()	0xc2300000
-310	super::wrap_degrees90(46.0f32).to_bits()	0xc2300000
-311	super::wrap_degrees90(-46.0f32).to_bits()	0x42300000
-312	super::wrap_degrees90(135.0f32).to_bits()	0xc2340000
-313	super::wrap_degrees90(-135.0f32).to_bits()	0xc2340000
-314	super::wrap_degrees90(180.0f32).to_bits()	0x00000000
-315	super::wrap_degrees90(-180.0f32).to_bits()	0x80000000
-316	super::wrap_degrees90(0.0f32).to_bits()	0x00000000
-317	super::wrap_degrees90(f32::NAN).to_bits()	0x7fc00000
-318	super::wrap_degrees90(89.0f32).to_bits()	0xbf800000
-319	super::wrap_degrees90(179.0f32).to_bits()	0xbf800000
-320	super::degrees_difference(10.0, 350.0).to_bits()	0xc1a00000
-321	super::degrees_difference(350.0, 10.0).to_bits()	0x41a00000
-322	super::degrees_difference(0.0, 180.0).to_bits()	0xc3340000
-323	super::degrees_difference_abs(10.0, 350.0).to_bits()	0x41a00000
-324	super::rotate_if_necessary(10.0, 350.0, 30.0).to_bits()	0x43b90000
-325	super::rotate_if_necessary(0.0, 20.0, 90.0).to_bits()	0x00000000
-326	super::approach(0.0, 10.0, 3.0).to_bits()	0x40400000
-327	super::approach(10.0, 0.0, 3.0).to_bits()	0x40e00000
-328	super::approach(5.0, 5.0, 3.0).to_bits()	0x40a00000
-329	super::approach(0.0, 10.0, -3.0).to_bits()	0x40400000
-330	super::approach_degrees(10.0, 350.0, 45.0).to_bits()	0xc1200000
+250	bitexact_f32(super::wrap_degrees_f32(180.0f32))	0xc3340000
+251	bitexact_f32(super::wrap_degrees_f32(-180.0f32))	0xc3340000
+252	bitexact_f32(super::wrap_degrees_f32(181.0f32))	0xc3330000
+253	bitexact_f32(super::wrap_degrees_f32(-181.0f32))	0x43330000
+254	bitexact_f32(super::wrap_degrees_f32(360.0f32))	0x00000000
+255	bitexact_f32(super::wrap_degrees_f32(-360.0f32))	0x80000000
+256	bitexact_f32(super::wrap_degrees_f32(540.0f32))	0xc3340000
+257	bitexact_f32(super::wrap_degrees_f32(-540.0f32))	0xc3340000
+258	bitexact_f32(super::wrap_degrees_f32(720.0f32))	0x00000000
+259	bitexact_f32(super::wrap_degrees_f32(0.0f32))	0x00000000
+260	bitexact_f32(super::wrap_degrees_f32(359.9f32))	0xbdccd000
+261	bitexact_f32(super::wrap_degrees_f32(-359.9f32))	0x3dccd000
+262	bitexact_f32(super::wrap_degrees_f32(179.999f32))	0x4333ffbe
+263	bitexact_f32(super::wrap_degrees_f32(f32::NAN))	0x7fc00000
+264	bitexact_f32(super::wrap_degrees_f32(3.4028235E38f32))	0x00000000
+265	bitexact_f32(super::wrap_degrees_f32(-3.4028235E38f32))	0x80000000
+266	bitexact_f32(super::wrap_degrees_f32(1.4E-45f32))	0x00000001
+267	bitexact_f32(super::wrap_degrees_f32(-1.4E-45f32))	0x80000001
+268	bitexact_f32(super::wrap_degrees_f32(-0.0f32))	0x80000000
+269	bitexact_f32(super::wrap_degrees_f32(1.0E-4f32))	0x38d1b717
+270	bitexact_f32(super::wrap_degrees_f32(270.0f32))	0xc2b40000
+271	bitexact_f32(super::wrap_degrees_f32(-270.0f32))	0x42b40000
+272	bitexact_f32(super::wrap_degrees_f32(90.0f32))	0x42b40000
+273	bitexact_f32(super::wrap_degrees_f32(-90.0f32))	0xc2b40000
+274	bitexact_f32(super::wrap_degrees_i64(180i64))	0xc3340000
+275	bitexact_f32(super::wrap_degrees_i64(-180i64))	0xc3340000
+276	bitexact_f32(super::wrap_degrees_i64(181i64))	0xc3330000
+277	bitexact_f32(super::wrap_degrees_i64(-181i64))	0x43330000
+278	bitexact_f32(super::wrap_degrees_i64(360i64))	0x00000000
+279	bitexact_f32(super::wrap_degrees_i64(-360i64))	0x00000000
+280	bitexact_f32(super::wrap_degrees_i64(540i64))	0xc3340000
+281	bitexact_f32(super::wrap_degrees_i64(-540i64))	0xc3340000
+282	bitexact_f32(super::wrap_degrees_i64(9223372036854775807i64))	0x40e00000
+283	bitexact_f32(super::wrap_degrees_i64(-9223372036854775808i64))	0xc1000000
+284	bitexact_f32(super::wrap_degrees_i64(0i64))	0x00000000
+285	bitexact_f32(super::wrap_degrees_i64(359i64))	0xbf800000
+286	bitexact_f32(super::wrap_degrees_i64(1i64))	0x3f800000
+287	bitexact_f64(super::wrap_degrees_f64(180.0))	0xc066800000000000
+288	bitexact_f64(super::wrap_degrees_f64(-180.0))	0xc066800000000000
+289	bitexact_f64(super::wrap_degrees_f64(181.0))	0xc066600000000000
+290	bitexact_f64(super::wrap_degrees_f64(-181.0))	0x4066600000000000
+291	bitexact_f64(super::wrap_degrees_f64(360.0))	0x0000000000000000
+292	bitexact_f64(super::wrap_degrees_f64(-360.0))	0x8000000000000000
+293	bitexact_f64(super::wrap_degrees_f64(540.0))	0xc066800000000000
+294	bitexact_f64(super::wrap_degrees_f64(-540.0))	0xc066800000000000
+295	bitexact_f64(super::wrap_degrees_f64(179.999))	0x40667ff7ced91687
+296	bitexact_f64(super::wrap_degrees_f64(1.0E18))	0xc054000000000000
+297	bitexact_f64(super::wrap_degrees_f64(-1.0E18))	0x4054000000000000
+298	bitexact_f64(super::wrap_degrees_f64(f64::NAN))	0x7ff8000000000000
+299	bitexact_f64(super::wrap_degrees_f64(f64::INFINITY))	0x7ff8000000000000
+300	bitexact_f64(super::wrap_degrees_f64(0.0))	0x0000000000000000
+301	bitexact_f64(super::wrap_degrees_f64(-0.0))	0x8000000000000000
+302	bitexact_f64(super::wrap_degrees_f64(90.0))	0x4056800000000000
+303	bitexact_f64(super::wrap_degrees_f64(270.0))	0xc056800000000000
+304	bitexact_f32(super::wrap_degrees90(45.0f32))	0xc2340000
+305	bitexact_f32(super::wrap_degrees90(-45.0f32))	0xc2340000
+306	bitexact_f32(super::wrap_degrees90(90.0f32))	0x00000000
+307	bitexact_f32(super::wrap_degrees90(-90.0f32))	0x80000000
+308	bitexact_f32(super::wrap_degrees90(44.0f32))	0x42300000
+309	bitexact_f32(super::wrap_degrees90(-44.0f32))	0xc2300000
+310	bitexact_f32(super::wrap_degrees90(46.0f32))	0xc2300000
+311	bitexact_f32(super::wrap_degrees90(-46.0f32))	0x42300000
+312	bitexact_f32(super::wrap_degrees90(135.0f32))	0xc2340000
+313	bitexact_f32(super::wrap_degrees90(-135.0f32))	0xc2340000
+314	bitexact_f32(super::wrap_degrees90(180.0f32))	0x00000000
+315	bitexact_f32(super::wrap_degrees90(-180.0f32))	0x80000000
+316	bitexact_f32(super::wrap_degrees90(0.0f32))	0x00000000
+317	bitexact_f32(super::wrap_degrees90(f32::NAN))	0x7fc00000
+318	bitexact_f32(super::wrap_degrees90(89.0f32))	0xbf800000
+319	bitexact_f32(super::wrap_degrees90(179.0f32))	0xbf800000
+320	bitexact_f32(super::degrees_difference(10.0, 350.0))	0xc1a00000
+321	bitexact_f32(super::degrees_difference(350.0, 10.0))	0x41a00000
+322	bitexact_f32(super::degrees_difference(0.0, 180.0))	0xc3340000
+323	bitexact_f32(super::degrees_difference_abs(10.0, 350.0))	0x41a00000
+324	bitexact_f32(super::rotate_if_necessary(10.0, 350.0, 30.0))	0x43b90000
+325	bitexact_f32(super::rotate_if_necessary(0.0, 20.0, 90.0))	0x00000000
+326	bitexact_f32(super::approach(0.0, 10.0, 3.0))	0x40400000
+327	bitexact_f32(super::approach(10.0, 0.0, 3.0))	0x40e00000
+328	bitexact_f32(super::approach(5.0, 5.0, 3.0))	0x40a00000
+329	bitexact_f32(super::approach(0.0, 10.0, -3.0))	0x40400000
+330	bitexact_f32(super::approach_degrees(10.0, 350.0, 45.0))	0xc1200000
 331	super::get_int(Some("42"), -1)	42i32
 332	super::get_int(Some("-42"), -1)	-42i32
 333	super::get_int(Some("+42"), -1)	42i32
@@ -440,26 +440,26 @@
 439	super::log2(-2147483648)	31i32
 440	super::log2(7)	2i32
 441	super::log2(6)	2i32
-442	super::frac(1.5f32).to_bits()	0x3f000000
-443	super::frac(-1.5f32).to_bits()	0x3f000000
-444	super::frac(0.5f32).to_bits()	0x3f000000
-445	super::frac(-0.5f32).to_bits()	0x3f000000
-446	super::frac(3.9f32).to_bits()	0x3f666668
-447	super::frac(-3.9f32).to_bits()	0x3dccccc0
-448	super::frac(0.0f32).to_bits()	0x00000000
-449	super::frac(-0.0f32).to_bits()	0x80000000
-450	super::frac(f32::NAN).to_bits()	0x7fc00000
-451	super::frac_f64(1.5).to_bits()	0x3fe0000000000000
-452	super::frac_f64(-1.5).to_bits()	0x3fe0000000000000
-453	super::frac_f64(0.5).to_bits()	0x3fe0000000000000
-454	super::frac_f64(-0.5).to_bits()	0x3fe0000000000000
-455	super::frac_f64(3.9).to_bits()	0x3feccccccccccccc
-456	super::frac_f64(-3.9).to_bits()	0x3fb99999999999a0
-457	super::frac_f64(0.0).to_bits()	0x0000000000000000
-458	super::frac_f64(-0.0).to_bits()	0x8000000000000000
-459	super::frac_f64(f64::NAN).to_bits()	0x7ff8000000000000
-460	super::frac_f64(1.0E20).to_bits()	0x4413af1d78b58c40
-461	super::frac_f64(-1.0E20).to_bits()	0xc413af1d78b58c40
+442	bitexact_f32(super::frac(1.5f32))	0x3f000000
+443	bitexact_f32(super::frac(-1.5f32))	0x3f000000
+444	bitexact_f32(super::frac(0.5f32))	0x3f000000
+445	bitexact_f32(super::frac(-0.5f32))	0x3f000000
+446	bitexact_f32(super::frac(3.9f32))	0x3f666668
+447	bitexact_f32(super::frac(-3.9f32))	0x3dccccc0
+448	bitexact_f32(super::frac(0.0f32))	0x00000000
+449	bitexact_f32(super::frac(-0.0f32))	0x80000000
+450	bitexact_f32(super::frac(f32::NAN))	0x7fc00000
+451	bitexact_f64(super::frac_f64(1.5))	0x3fe0000000000000
+452	bitexact_f64(super::frac_f64(-1.5))	0x3fe0000000000000
+453	bitexact_f64(super::frac_f64(0.5))	0x3fe0000000000000
+454	bitexact_f64(super::frac_f64(-0.5))	0x3fe0000000000000
+455	bitexact_f64(super::frac_f64(3.9))	0x3feccccccccccccc
+456	bitexact_f64(super::frac_f64(-3.9))	0x3fb99999999999a0
+457	bitexact_f64(super::frac_f64(0.0))	0x0000000000000000
+458	bitexact_f64(super::frac_f64(-0.0))	0x8000000000000000
+459	bitexact_f64(super::frac_f64(f64::NAN))	0x7ff8000000000000
+460	bitexact_f64(super::frac_f64(1.0E20))	0x4413af1d78b58c40
+461	bitexact_f64(super::frac_f64(-1.0E20))	0xc413af1d78b58c40
 462	super::get_seed(1, 2, 3)	-33674130277896i64
 463	super::get_seed(0, 0, 0)	0i64
 464	super::get_seed(-1, 1, -1)	60311958971344i64
@@ -504,18 +504,18 @@
 503	super::is_multiple_of(-1, 5)	false
 504	super::is_multiple_of(-6, 5)	false
 505	super::is_multiple_of(6, 5)	false
-506	super::positive_modulo_f32(7.5f32, 3.0f32).to_bits()	0x3fc00000
-507	super::positive_modulo_f32(-7.5f32, 3.0f32).to_bits()	0x3fc00000
-508	super::positive_modulo_f32(7.5f32, -3.0f32).to_bits()	0xbfc00000
-509	super::positive_modulo_f32(-7.5f32, -3.0f32).to_bits()	0xbfc00000
-510	super::positive_modulo_f32(0.0f32, 3.0f32).to_bits()	0x00000000
-511	super::positive_modulo_f32(-0.0f32, 3.0f32).to_bits()	0x00000000
-512	super::positive_modulo_f64(7.5, 3.0).to_bits()	0x3ff8000000000000
-513	super::positive_modulo_f64(-7.5, 3.0).to_bits()	0x3ff8000000000000
-514	super::positive_modulo_f64(7.5, -3.0).to_bits()	0xbff8000000000000
-515	super::positive_modulo_f64(-7.5, -3.0).to_bits()	0xbff8000000000000
-516	super::positive_modulo_f64(0.0, 3.0).to_bits()	0x0000000000000000
-517	super::positive_modulo_f64(-0.0, 3.0).to_bits()	0x0000000000000000
+506	bitexact_f32(super::positive_modulo_f32(7.5f32, 3.0f32))	0x3fc00000
+507	bitexact_f32(super::positive_modulo_f32(-7.5f32, 3.0f32))	0x3fc00000
+508	bitexact_f32(super::positive_modulo_f32(7.5f32, -3.0f32))	0xbfc00000
+509	bitexact_f32(super::positive_modulo_f32(-7.5f32, -3.0f32))	0xbfc00000
+510	bitexact_f32(super::positive_modulo_f32(0.0f32, 3.0f32))	0x00000000
+511	bitexact_f32(super::positive_modulo_f32(-0.0f32, 3.0f32))	0x00000000
+512	bitexact_f64(super::positive_modulo_f64(7.5, 3.0))	0x3ff8000000000000
+513	bitexact_f64(super::positive_modulo_f64(-7.5, 3.0))	0x3ff8000000000000
+514	bitexact_f64(super::positive_modulo_f64(7.5, -3.0))	0xbff8000000000000
+515	bitexact_f64(super::positive_modulo_f64(-7.5, -3.0))	0xbff8000000000000
+516	bitexact_f64(super::positive_modulo_f64(0.0, 3.0))	0x0000000000000000
+517	bitexact_f64(super::positive_modulo_f64(-0.0, 3.0))	0x0000000000000000
 518	super::pack_degrees(0.0f32)	0
 519	super::pack_degrees(45.0f32)	32
 520	super::pack_degrees(90.0f32)	64
@@ -531,101 +531,101 @@
 530	super::pack_degrees(f32::NAN)	0
 531	super::pack_degrees(1.0f32)	0
 532	super::pack_degrees(-1.0f32)	-1
-533	super::unpack_degrees(0).to_bits()	0x00000000
-534	super::unpack_degrees(45).to_bits()	0x427d2000
-535	super::unpack_degrees(90).to_bits()	0x42fd2000
-536	super::unpack_degrees(-1).to_bits()	0xbfb40000
-537	super::unpack_degrees(-90).to_bits()	0xc2fd2000
-538	super::unpack_degrees(-128).to_bits()	0xc3340000
-539	super::unpack_degrees(127).to_bits()	0x43329800
-540	super::unpack_degrees(1).to_bits()	0x3fb40000
-541	super::unpack_degrees(-2).to_bits()	0xc0340000
-542	super::atan2(0.0, 0.0).to_bits()	0x0000000000000000
-543	super::atan2(0.0, 1.0).to_bits()	0x0000000000000000
-544	super::atan2(1.0, 0.0).to_bits()	0x3ff921fb54442d18
-545	super::atan2(-1.0, 0.0).to_bits()	0xbff921fb54442d18
-546	super::atan2(0.0, -1.0).to_bits()	0x400921fb54442d18
-547	super::atan2(1.0, 1.0).to_bits()	0x3fe921fb45e6d12f
-548	super::atan2(-1.0, -1.0).to_bits()	0xc002d97c82ca78cc
-549	super::atan2(1.0, -1.0).to_bits()	0x4002d97c82ca78cc
-550	super::atan2(-1.0, 1.0).to_bits()	0xbfe921fb45e6d12f
-551	super::atan2(3.0, 4.0).to_bits()	0x3fe497861c1ebb2e
-552	super::atan2(4.0, 3.0).to_bits()	0x3fedac708c699f02
-553	super::atan2(0.1, 0.2).to_bits()	0x3fddac64ca13863b
-554	super::atan2(-0.1, 0.2).to_bits()	0xbfddac64ca13863b
-555	super::atan2(0.1, -0.2).to_bits()	0x40056c6ebb01bc51
-556	super::atan2(-0.1, -0.2).to_bits()	0xc0056c6ebb01bc51
-557	super::atan2(f64::NAN, 1.0).to_bits()	0x7ff8000000000000
-558	super::atan2(1.0, f64::NAN).to_bits()	0x7ff8000000000000
-559	super::atan2(f64::INFINITY, 1.0).to_bits()	0x7ff0000000000000
-560	super::atan2(1.0, f64::INFINITY).to_bits()	0xfff0000000000000
-561	super::atan2(1.7976931348623157E308, 4.9E-324).to_bits()	0x7ff0000000000000
-562	super::atan2(1.0E300, 1.0E300).to_bits()	0xfff0000000000000
-563	super::atan2(1.0E-300, 1.0E-300).to_bits()	0x21a705f2fc84defa
-564	super::atan2(12345.678, 98765.432).to_bits()	0x3fbfd5d00b34bc34
-565	super::atan2(0.5, 0.5).to_bits()	0x3fe921fb45e6d12f
-566	super::atan2(-0.5, 0.5).to_bits()	0xbfe921fb45e6d12f
-567	super::atan2(0.5, -0.5).to_bits()	0x4002d97c82ca78cc
-568	super::atan2(-0.5, -0.5).to_bits()	0xc002d97c82ca78cc
-569	super::atan2(0.9, 0.1).to_bits()	0x3ff75cbae9ec4fce
-570	super::atan2(0.1, 0.9).to_bits()	0x3fbc5406a57dd4a5
-571	super::atan2(10.0, 1.0).to_bits()	0x3ff789c03d6f94c5
-572	super::atan2(1.0, 10.0).to_bits()	0x3fb983b16d49852c
-573	super::atan2(-10.0, 1.0).to_bits()	0xbff789c03d6f94c5
-574	super::atan2(1.0, -10.0).to_bits()	0x400855ddc8d9e0ef
-575	super::atan2(1000.0, -0.001).to_bits()	0x3ff921fc603f3633
-576	super::atan2(-0.001, 1000.0).to_bits()	0xbeb0bfb091b5fb84
-577	super::atan2(0.0, f64::NEG_INFINITY).to_bits()	0x7ff8000000000000
-578	super::atan2(f64::NEG_INFINITY, 0.0).to_bits()	0xfff8000000000000
-579	super::inv_sqrt(0.25f32).to_bits()	0x40000000
-580	super::inv_sqrt(2.0f32).to_bits()	0x3f3504f3
-581	super::inv_sqrt(100.0f32).to_bits()	0x3dcccccd
-582	super::inv_sqrt(1.0f32).to_bits()	0x3f800000
-583	super::inv_sqrt(4.0f32).to_bits()	0x3f000000
-584	super::inv_sqrt(3.4028235E38f32).to_bits()	0x1f800001
-585	super::inv_sqrt(1.4E-45f32).to_bits()	0x64b504f3
-586	super::inv_sqrt(0.0f32).to_bits()	0x7f800000
-587	super::inv_sqrt(-1.0f32).to_bits()	0x7fc00000
-588	super::inv_sqrt(f32::INFINITY).to_bits()	0x00000000
-589	super::inv_sqrt_f64(0.25).to_bits()	0x4000000000000000
-590	super::inv_sqrt_f64(2.0).to_bits()	0x3fe6a09e667f3bcc
-591	super::inv_sqrt_f64(100.0).to_bits()	0x3fb999999999999a
-592	super::inv_sqrt_f64(1.0).to_bits()	0x3ff0000000000000
-593	super::inv_sqrt_f64(4.0).to_bits()	0x3fe0000000000000
-594	super::inv_sqrt_f64(1.7976931348623157E308).to_bits()	0x1ff0000000000001
-595	super::inv_sqrt_f64(4.9E-324).to_bits()	0x6180000000000000
-596	super::inv_sqrt_f64(0.0).to_bits()	0x7ff0000000000000
-597	super::inv_sqrt_f64(-1.0).to_bits()	0x7ff8000000000000
-598	super::inv_sqrt_f64(1.0E-300).to_bits()	0x5f138d352e5096af
-599	super::inv_sqrt_f64(f64::INFINITY).to_bits()	0x0000000000000000
-600	super::fast_inv_sqrt(0.25).to_bits()	0x3ffff223eb08e347
-601	super::fast_inv_sqrt(2.0).to_bits()	0x3fe69f2aee57a7ac
-602	super::fast_inv_sqrt(100.0).to_bits()	0x3fb98f6d1f8767e4
-603	super::fast_inv_sqrt(1.0).to_bits()	0x3feff223eb08e347
-604	super::fast_inv_sqrt(4.0).to_bits()	0x3fdff223eb08e347
-605	super::fast_inv_sqrt(1.7976931348623157E308).to_bits()	0x1feff223eb08e348
-606	super::fast_inv_sqrt(4.9E-324).to_bits()	0x5ff1307c95c7e9c0
-607	super::fast_inv_sqrt(0.0).to_bits()	0x5ff1307c95c7e9c0
-608	super::fast_inv_sqrt(-1.0).to_bits()	0x7ff0000000000000
-609	super::fast_inv_sqrt(1.0E-300).to_bits()	0x5f1384c08b81fb0b
-610	super::fast_inv_sqrt(1.0E300).to_bits()	0x20ca26bf40fcf9ae
-611	super::fast_inv_sqrt(0.5).to_bits()	0x3ff69f2aee57a7ac
-612	super::fast_inv_sqrt(0.1).to_bits()	0x40094200d5218bb0
-613	super::fast_inv_sqrt(12345.678).to_bits()	0x3f826ab1bcf1c727
-614	super::fast_inv_sqrt(f64::NAN).to_bits()	0x7ff8000000000000
-615	super::fast_inv_cube_root(1.0f32).to_bits()	0x3f800008
-616	super::fast_inv_cube_root(8.0f32).to_bits()	0x3f000008
-617	super::fast_inv_cube_root(27.0f32).to_bits()	0x3eaaaab7
-618	super::fast_inv_cube_root(0.5f32).to_bits()	0x3fa14518
-619	super::fast_inv_cube_root(100.0f32).to_bits()	0x3e5c9d38
-620	super::fast_inv_cube_root(0.0f32).to_bits()	0x7fc00000
-621	super::fast_inv_cube_root(2.0f32).to_bits()	0x3f4b2ff6
-622	super::fast_inv_cube_root(3.4028235E38f32).to_bits()	0x2a214518
-623	super::fast_inv_cube_root(1.4E-45f32).to_bits()	0x5e8c5c5f
-624	super::fast_inv_cube_root(-8.0f32).to_bits()	0x6910deb6
-625	super::fast_inv_cube_root(-1.0f32).to_bits()	0x6990deb6
-626	super::fast_inv_cube_root(f32::NAN).to_bits()	0x7fc00000
-627	super::fast_inv_cube_root(f32::INFINITY).to_bits()	0x2990deb6
+533	bitexact_f32(super::unpack_degrees(0))	0x00000000
+534	bitexact_f32(super::unpack_degrees(45))	0x427d2000
+535	bitexact_f32(super::unpack_degrees(90))	0x42fd2000
+536	bitexact_f32(super::unpack_degrees(-1))	0xbfb40000
+537	bitexact_f32(super::unpack_degrees(-90))	0xc2fd2000
+538	bitexact_f32(super::unpack_degrees(-128))	0xc3340000
+539	bitexact_f32(super::unpack_degrees(127))	0x43329800
+540	bitexact_f32(super::unpack_degrees(1))	0x3fb40000
+541	bitexact_f32(super::unpack_degrees(-2))	0xc0340000
+542	bitexact_f64(super::atan2(0.0, 0.0))	0x0000000000000000
+543	bitexact_f64(super::atan2(0.0, 1.0))	0x0000000000000000
+544	bitexact_f64(super::atan2(1.0, 0.0))	0x3ff921fb54442d18
+545	bitexact_f64(super::atan2(-1.0, 0.0))	0xbff921fb54442d18
+546	bitexact_f64(super::atan2(0.0, -1.0))	0x400921fb54442d18
+547	bitexact_f64(super::atan2(1.0, 1.0))	{ // ARCH-SELECTED (D14): this atan2 reads COS_TAB[181], which differs by 1 // ULP between x86_64 and aarch64, so the expected value is chosen per // target_arch. aarch64 pins the provenance-committed literal; x86_64 // reads the live oracle placeholder; other arches fail closed. #[cfg(target_arch = "aarch64")] { 0x3fe921fb45e6d12f } #[cfg(target_arch = "x86_64")] { 0x3fe921fb45e6d12e } #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))] { compile_error!("Rivet supports COS_TAB parity on x86_64 and aarch64 only (D14)") } }
+548	bitexact_f64(super::atan2(-1.0, -1.0))	0xc002d97c82ca78cc
+549	bitexact_f64(super::atan2(1.0, -1.0))	0x4002d97c82ca78cc
+550	bitexact_f64(super::atan2(-1.0, 1.0))	{ // ARCH-SELECTED (D14): reads COS_TAB[181]; aarch64 provenance literal, // x86_64 oracle placeholder, other arches fail closed. #[cfg(target_arch = "aarch64")] { 0xbfe921fb45e6d12f } #[cfg(target_arch = "x86_64")] { 0xbfe921fb45e6d12e } #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))] { compile_error!("Rivet supports COS_TAB parity on x86_64 and aarch64 only (D14)") } }
+551	bitexact_f64(super::atan2(3.0, 4.0))	0x3fe497861c1ebb2e
+552	bitexact_f64(super::atan2(4.0, 3.0))	0x3fedac708c699f02
+553	bitexact_f64(super::atan2(0.1, 0.2))	0x3fddac64ca13863b
+554	bitexact_f64(super::atan2(-0.1, 0.2))	0xbfddac64ca13863b
+555	bitexact_f64(super::atan2(0.1, -0.2))	0x40056c6ebb01bc51
+556	bitexact_f64(super::atan2(-0.1, -0.2))	0xc0056c6ebb01bc51
+557	bitexact_f64(super::atan2(f64::NAN, 1.0))	0x7ff8000000000000
+558	bitexact_f64(super::atan2(1.0, f64::NAN))	0x7ff8000000000000
+559	bitexact_f64(super::atan2(f64::INFINITY, 1.0))	0x7ff0000000000000
+560	bitexact_f64(super::atan2(1.0, f64::INFINITY))	0xfff0000000000000
+561	bitexact_f64(super::atan2(1.7976931348623157E308, 4.9E-324))	0x7ff0000000000000
+562	bitexact_f64(super::atan2(1.0E300, 1.0E300))	0xfff0000000000000
+563	bitexact_f64(super::atan2(1.0E-300, 1.0E-300))	0x21a705f2fc84defa
+564	bitexact_f64(super::atan2(12345.678, 98765.432))	0x3fbfd5d00b34bc34
+565	bitexact_f64(super::atan2(0.5, 0.5))	{ // ARCH-SELECTED (D14): reads COS_TAB[181]; aarch64 provenance literal, // x86_64 oracle placeholder, other arches fail closed. #[cfg(target_arch = "aarch64")] { 0x3fe921fb45e6d12f } #[cfg(target_arch = "x86_64")] { 0x3fe921fb45e6d12e } #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))] { compile_error!("Rivet supports COS_TAB parity on x86_64 and aarch64 only (D14)") } }
+566	bitexact_f64(super::atan2(-0.5, 0.5))	{ // ARCH-SELECTED (D14): reads COS_TAB[181]; aarch64 provenance literal, // x86_64 oracle placeholder, other arches fail closed. #[cfg(target_arch = "aarch64")] { 0xbfe921fb45e6d12f } #[cfg(target_arch = "x86_64")] { 0xbfe921fb45e6d12e } #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))] { compile_error!("Rivet supports COS_TAB parity on x86_64 and aarch64 only (D14)") } }
+567	bitexact_f64(super::atan2(0.5, -0.5))	0x4002d97c82ca78cc
+568	bitexact_f64(super::atan2(-0.5, -0.5))	0xc002d97c82ca78cc
+569	bitexact_f64(super::atan2(0.9, 0.1))	0x3ff75cbae9ec4fce
+570	bitexact_f64(super::atan2(0.1, 0.9))	0x3fbc5406a57dd4a5
+571	bitexact_f64(super::atan2(10.0, 1.0))	0x3ff789c03d6f94c5
+572	bitexact_f64(super::atan2(1.0, 10.0))	0x3fb983b16d49852c
+573	bitexact_f64(super::atan2(-10.0, 1.0))	0xbff789c03d6f94c5
+574	bitexact_f64(super::atan2(1.0, -10.0))	0x400855ddc8d9e0ef
+575	bitexact_f64(super::atan2(1000.0, -0.001))	0x3ff921fc603f3633
+576	bitexact_f64(super::atan2(-0.001, 1000.0))	0xbeb0bfb091b5fb84
+577	bitexact_f64(super::atan2(0.0, f64::NEG_INFINITY))	0x7ff8000000000000
+578	bitexact_f64(super::atan2(f64::NEG_INFINITY, 0.0))	0x7ff8000000000000
+579	bitexact_f32(super::inv_sqrt(0.25f32))	0x40000000
+580	bitexact_f32(super::inv_sqrt(2.0f32))	0x3f3504f3
+581	bitexact_f32(super::inv_sqrt(100.0f32))	0x3dcccccd
+582	bitexact_f32(super::inv_sqrt(1.0f32))	0x3f800000
+583	bitexact_f32(super::inv_sqrt(4.0f32))	0x3f000000
+584	bitexact_f32(super::inv_sqrt(3.4028235E38f32))	0x1f800001
+585	bitexact_f32(super::inv_sqrt(1.4E-45f32))	0x64b504f3
+586	bitexact_f32(super::inv_sqrt(0.0f32))	0x7f800000
+587	bitexact_f32(super::inv_sqrt(-1.0f32))	0x7fc00000
+588	bitexact_f32(super::inv_sqrt(f32::INFINITY))	0x00000000
+589	bitexact_f64(super::inv_sqrt_f64(0.25))	0x4000000000000000
+590	bitexact_f64(super::inv_sqrt_f64(2.0))	0x3fe6a09e667f3bcc
+591	bitexact_f64(super::inv_sqrt_f64(100.0))	0x3fb999999999999a
+592	bitexact_f64(super::inv_sqrt_f64(1.0))	0x3ff0000000000000
+593	bitexact_f64(super::inv_sqrt_f64(4.0))	0x3fe0000000000000
+594	bitexact_f64(super::inv_sqrt_f64(1.7976931348623157E308))	0x1ff0000000000001
+595	bitexact_f64(super::inv_sqrt_f64(4.9E-324))	0x6180000000000000
+596	bitexact_f64(super::inv_sqrt_f64(0.0))	0x7ff0000000000000
+597	bitexact_f64(super::inv_sqrt_f64(-1.0))	0x7ff8000000000000
+598	bitexact_f64(super::inv_sqrt_f64(1.0E-300))	0x5f138d352e5096af
+599	bitexact_f64(super::inv_sqrt_f64(f64::INFINITY))	0x0000000000000000
+600	bitexact_f64(super::fast_inv_sqrt(0.25))	0x3ffff223eb08e347
+601	bitexact_f64(super::fast_inv_sqrt(2.0))	0x3fe69f2aee57a7ac
+602	bitexact_f64(super::fast_inv_sqrt(100.0))	0x3fb98f6d1f8767e4
+603	bitexact_f64(super::fast_inv_sqrt(1.0))	0x3feff223eb08e347
+604	bitexact_f64(super::fast_inv_sqrt(4.0))	0x3fdff223eb08e347
+605	bitexact_f64(super::fast_inv_sqrt(1.7976931348623157E308))	0x1feff223eb08e348
+606	bitexact_f64(super::fast_inv_sqrt(4.9E-324))	0x5ff1307c95c7e9c0
+607	bitexact_f64(super::fast_inv_sqrt(0.0))	0x5ff1307c95c7e9c0
+608	bitexact_f64(super::fast_inv_sqrt(-1.0))	0x7ff0000000000000
+609	bitexact_f64(super::fast_inv_sqrt(1.0E-300))	0x5f1384c08b81fb0b
+610	bitexact_f64(super::fast_inv_sqrt(1.0E300))	0x20ca26bf40fcf9ae
+611	bitexact_f64(super::fast_inv_sqrt(0.5))	0x3ff69f2aee57a7ac
+612	bitexact_f64(super::fast_inv_sqrt(0.1))	0x40094200d5218bb0
+613	bitexact_f64(super::fast_inv_sqrt(12345.678))	0x3f826ab1bcf1c727
+614	bitexact_f64(super::fast_inv_sqrt(f64::NAN))	0x7ff8000000000000
+615	bitexact_f32(super::fast_inv_cube_root(1.0f32))	0x3f800008
+616	bitexact_f32(super::fast_inv_cube_root(8.0f32))	0x3f000008
+617	bitexact_f32(super::fast_inv_cube_root(27.0f32))	0x3eaaaab7
+618	bitexact_f32(super::fast_inv_cube_root(0.5f32))	0x3fa14518
+619	bitexact_f32(super::fast_inv_cube_root(100.0f32))	0x3e5c9d38
+620	bitexact_f32(super::fast_inv_cube_root(0.0f32))	0x7fc00000
+621	bitexact_f32(super::fast_inv_cube_root(2.0f32))	0x3f4b2ff6
+622	bitexact_f32(super::fast_inv_cube_root(3.4028235E38f32))	0x2a214518
+623	bitexact_f32(super::fast_inv_cube_root(1.4E-45f32))	0x5e8c5c5f
+624	bitexact_f32(super::fast_inv_cube_root(-8.0f32))	0x6910deb6
+625	bitexact_f32(super::fast_inv_cube_root(-1.0f32))	0x6990deb6
+626	bitexact_f32(super::fast_inv_cube_root(f32::NAN))	0x7fc00000
+627	bitexact_f32(super::fast_inv_cube_root(f32::INFINITY))	0x2990deb6
 628	super::hsv_to_argb(0.0f32, 1.0f32, 1.0f32, 0)	16711680i32
 629	super::hsv_to_argb(0.5f32, 1.0f32, 1.0f32, 0)	65535i32
 630	super::hsv_to_argb(0.33f32, 0.5f32, 0.7f32, 0)	6009433i32
@@ -647,20 +647,20 @@
 646	super::hsv_to_argb(0.5, 1.0, 1.0, 128)	-2147418113i32
 647	super::hsv_to_argb(0.33, 0.5, 0.7, 255)	-10767783i32
 648	super::hsv_to_rgb(0.5, 1.0, 1.0)	65535i32
-649	super::catmullrom(0.5, 0.0, 1.0, 2.0, 3.0).to_bits()	0x3fc00000
-650	super::catmullrom(0.0, 0.0, 1.0, 2.0, 3.0).to_bits()	0x3f800000
-651	super::catmullrom(1.0, 0.0, 1.0, 2.0, 3.0).to_bits()	0x40000000
-652	super::smoothstep(0.0).to_bits()	0x0000000000000000
-653	super::smoothstep(0.5).to_bits()	0x3fe0000000000000
-654	super::smoothstep(1.0).to_bits()	0x3ff0000000000000
-655	super::smoothstep(-0.5).to_bits()	0xc003000000000000
-656	super::smoothstep(2.0).to_bits()	0x4040000000000000
-657	super::smoothstep(f64::NAN).to_bits()	0x7ff8000000000000
-658	super::smoothstep_derivative(0.0).to_bits()	0x0000000000000000
-659	super::smoothstep_derivative(0.5).to_bits()	0x3ffe000000000000
-660	super::smoothstep_derivative(1.0).to_bits()	0x0000000000000000
-661	super::smoothstep_derivative(-0.5).to_bits()	0x4030e00000000000
-662	super::smoothstep_derivative(2.0).to_bits()	0x405e000000000000
+649	bitexact_f32(super::catmullrom(0.5, 0.0, 1.0, 2.0, 3.0))	0x3fc00000
+650	bitexact_f32(super::catmullrom(0.0, 0.0, 1.0, 2.0, 3.0))	0x3f800000
+651	bitexact_f32(super::catmullrom(1.0, 0.0, 1.0, 2.0, 3.0))	0x40000000
+652	bitexact_f64(super::smoothstep(0.0))	0x0000000000000000
+653	bitexact_f64(super::smoothstep(0.5))	0x3fe0000000000000
+654	bitexact_f64(super::smoothstep(1.0))	0x3ff0000000000000
+655	bitexact_f64(super::smoothstep(-0.5))	0xc003000000000000
+656	bitexact_f64(super::smoothstep(2.0))	0x4040000000000000
+657	bitexact_f64(super::smoothstep(f64::NAN))	0x7ff8000000000000
+658	bitexact_f64(super::smoothstep_derivative(0.0))	0x0000000000000000
+659	bitexact_f64(super::smoothstep_derivative(0.5))	0x3ffe000000000000
+660	bitexact_f64(super::smoothstep_derivative(1.0))	0x0000000000000000
+661	bitexact_f64(super::smoothstep_derivative(-0.5))	0x4030e00000000000
+662	bitexact_f64(super::smoothstep_derivative(2.0))	0x405e000000000000
 663	super::sign(0.0)	0i32
 664	super::sign(-0.0)	0i32
 665	super::sign(1.0)	1i32
@@ -669,50 +669,50 @@
 668	super::sign(-0.5)	-1i32
 669	super::sign(f64::NAN)	-1i32
 670	super::sign(f64::INFINITY)	1i32
-671	super::rot_lerp(0.5, 10.0, 350.0).to_bits()	0x00000000
-672	super::rot_lerp(0.5, 350.0, 10.0).to_bits()	0x43b40000
-673	super::rot_lerp_f64(0.5, 10.0, 350.0).to_bits()	0x0000000000000000
-674	super::rot_lerp_rad(0.5, 0.0, 3.5).to_bits()	0xbfb21fb6
-675	super::rot_lerp_rad(0.5, 0.0, -3.5).to_bits()	0x3fb21fb6
-676	super::rot_lerp_rad(0.5, 1.0, 1.0 + 6.3).to_bits()	0x3f81137e
-677	super::triangle_wave(1.0, 4.0).to_bits()	0x00000000
-678	super::triangle_wave(2.0, 4.0).to_bits()	0xbf800000
-679	super::triangle_wave(3.0, 4.0).to_bits()	0x00000000
-680	super::triangle_wave(4.0, 4.0).to_bits()	0x3f800000
-681	super::triangle_wave(-1.0, 4.0).to_bits()	0x40000000
+671	bitexact_f32(super::rot_lerp(0.5, 10.0, 350.0))	0x00000000
+672	bitexact_f32(super::rot_lerp(0.5, 350.0, 10.0))	0x43b40000
+673	bitexact_f64(super::rot_lerp_f64(0.5, 10.0, 350.0))	0x0000000000000000
+674	bitexact_f32(super::rot_lerp_rad(0.5, 0.0, 3.5))	0xbfb21fb6
+675	bitexact_f32(super::rot_lerp_rad(0.5, 0.0, -3.5))	0x3fb21fb6
+676	bitexact_f32(super::rot_lerp_rad(0.5, 1.0, 1.0 + 6.3))	0x3f81137e
+677	bitexact_f32(super::triangle_wave(1.0, 4.0))	0x00000000
+678	bitexact_f32(super::triangle_wave(2.0, 4.0))	0xbf800000
+679	bitexact_f32(super::triangle_wave(3.0, 4.0))	0x00000000
+680	bitexact_f32(super::triangle_wave(4.0, 4.0))	0x3f800000
+681	bitexact_f32(super::triangle_wave(-1.0, 4.0))	0x40000000
 682	super::square_i32(5)	25i32
 683	super::square_i32(-5)	25i32
 684	super::square_i64(3037000499i64)	9223372030926249001i64
 685	super::square_i64(-3037000499i64)	9223372030926249001i64
-686	super::square_f32(1.5).to_bits()	0x40100000
-687	super::cube(2.0).to_bits()	0x41000000
-688	super::square_f64(1.5).to_bits()	0x4002000000000000
-689	super::clamped_map(5.0, 0.0, 10.0, 100.0, 200.0).to_bits()	0x4062c00000000000
-690	super::map(5.0, 0.0, 10.0, 100.0, 200.0).to_bits()	0x4062c00000000000
-691	super::inverse_lerp(5.0, 0.0, 10.0).to_bits()	0x3fe0000000000000
-692	super::clamped_map(-5.0, 0.0, 10.0, 100.0, 200.0).to_bits()	0x4059000000000000
-693	super::map(-5.0, 0.0, 10.0, 100.0, 200.0).to_bits()	0x4049000000000000
-694	super::inverse_lerp(-5.0, 0.0, 10.0).to_bits()	0xbfe0000000000000
-695	super::clamped_map(15.0, 0.0, 10.0, 100.0, 200.0).to_bits()	0x4069000000000000
-696	super::map(15.0, 0.0, 10.0, 100.0, 200.0).to_bits()	0x406f400000000000
-697	super::inverse_lerp(15.0, 0.0, 10.0).to_bits()	0x3ff8000000000000
-698	super::clamped_map(5.0, 10.0, 0.0, 100.0, 200.0).to_bits()	0x4062c00000000000
-699	super::map(5.0, 10.0, 0.0, 100.0, 200.0).to_bits()	0x4062c00000000000
-700	super::inverse_lerp(5.0, 10.0, 0.0).to_bits()	0x3fe0000000000000
-701	super::clamped_map_f32(5.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32).to_bits()	0x43160000
-702	super::map_f32(5.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32).to_bits()	0x43160000
-703	super::clamped_map_f32(-5.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32).to_bits()	0x42c80000
-704	super::map_f32(-5.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32).to_bits()	0x42480000
-705	super::clamped_map_f32(15.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32).to_bits()	0x43480000
-706	super::map_f32(15.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32).to_bits()	0x437a0000
-707	super::length_squared(3.0, 4.0).to_bits()	0x4039000000000000
-708	super::length(3.0, 4.0).to_bits()	0x4014000000000000
-709	super::length_f32(3.0, 4.0).to_bits()	0x40a00000
-710	super::length_f32(1.0E20f32, 1.0f32).to_bits()	0x60ad78ec
-711	super::length_f32(1.0000007f32, 1.5000008f32).to_bits()	0x3fe6c163
-712	super::length_squared_xyz(1.0, 2.0, 2.0).to_bits()	0x4022000000000000
-713	super::length_xyz(1.0, 2.0, 2.0).to_bits()	0x4008000000000000
-714	super::length_squared_xyz_f32(1.0, 2.0, 2.0).to_bits()	0x41100000
+686	bitexact_f32(super::square_f32(1.5))	0x40100000
+687	bitexact_f32(super::cube(2.0))	0x41000000
+688	bitexact_f64(super::square_f64(1.5))	0x4002000000000000
+689	bitexact_f64(super::clamped_map(5.0, 0.0, 10.0, 100.0, 200.0))	0x4062c00000000000
+690	bitexact_f64(super::map(5.0, 0.0, 10.0, 100.0, 200.0))	0x4062c00000000000
+691	bitexact_f64(super::inverse_lerp(5.0, 0.0, 10.0))	0x3fe0000000000000
+692	bitexact_f64(super::clamped_map(-5.0, 0.0, 10.0, 100.0, 200.0))	0x4059000000000000
+693	bitexact_f64(super::map(-5.0, 0.0, 10.0, 100.0, 200.0))	0x4049000000000000
+694	bitexact_f64(super::inverse_lerp(-5.0, 0.0, 10.0))	0xbfe0000000000000
+695	bitexact_f64(super::clamped_map(15.0, 0.0, 10.0, 100.0, 200.0))	0x4069000000000000
+696	bitexact_f64(super::map(15.0, 0.0, 10.0, 100.0, 200.0))	0x406f400000000000
+697	bitexact_f64(super::inverse_lerp(15.0, 0.0, 10.0))	0x3ff8000000000000
+698	bitexact_f64(super::clamped_map(5.0, 10.0, 0.0, 100.0, 200.0))	0x4062c00000000000
+699	bitexact_f64(super::map(5.0, 10.0, 0.0, 100.0, 200.0))	0x4062c00000000000
+700	bitexact_f64(super::inverse_lerp(5.0, 10.0, 0.0))	0x3fe0000000000000
+701	bitexact_f32(super::clamped_map_f32(5.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32))	0x43160000
+702	bitexact_f32(super::map_f32(5.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32))	0x43160000
+703	bitexact_f32(super::clamped_map_f32(-5.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32))	0x42c80000
+704	bitexact_f32(super::map_f32(-5.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32))	0x42480000
+705	bitexact_f32(super::clamped_map_f32(15.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32))	0x43480000
+706	bitexact_f32(super::map_f32(15.0f32, 0.0f32, 10.0f32, 100.0f32, 200.0f32))	0x437a0000
+707	bitexact_f64(super::length_squared(3.0, 4.0))	0x4039000000000000
+708	bitexact_f64(super::length(3.0, 4.0))	0x4014000000000000
+709	bitexact_f32(super::length_f32(3.0, 4.0))	0x40a00000
+710	bitexact_f32(super::length_f32(1.0E20f32, 1.0f32))	0x60ad78ec
+711	bitexact_f32(super::length_f32(1.0000007f32, 1.5000008f32))	0x3fe6c163
+712	bitexact_f64(super::length_squared_xyz(1.0, 2.0, 2.0))	0x4022000000000000
+713	bitexact_f64(super::length_xyz(1.0, 2.0, 2.0))	0x4008000000000000
+714	bitexact_f32(super::length_squared_xyz_f32(1.0, 2.0, 2.0))	0x41100000
 715	super::quantize(7.5, 4)	4i32
 716	super::quantize(-7.5, 4)	-8i32
 717	super::quantize(100.0, 16)	96i32
@@ -767,16 +767,16 @@
 766	r1.next_int_bound(5)	4i32
 767	r1.next_int_bound(5)	2i32
 768	r1.next_int_bound(5)	2i32
-769	r1.next_float().to_bits()	0x3f6fe49d
-770	r1.next_float().to_bits()	0x3ef96384
-771	r1.next_float().to_bits()	0x3ecb5a6e
-772	r1.next_float().to_bits()	0x3f69f978
-773	r1.next_float().to_bits()	0x3eb1ede2
-774	r1.next_double().to_bits()	0x3fc4653d00000000
-775	r1.next_double().to_bits()	0x3fd79dbce0000000
-776	r1.next_double().to_bits()	0x3feba9ae40000000
-777	r1.next_double().to_bits()	0x3fe1419d80000000
-778	r1.next_double().to_bits()	0x3fe2aad5c0000000
+769	bitexact_f32(r1.next_float())	0x3f6fe49d
+770	bitexact_f32(r1.next_float())	0x3ef96384
+771	bitexact_f32(r1.next_float())	0x3ecb5a6e
+772	bitexact_f32(r1.next_float())	0x3f69f978
+773	bitexact_f32(r1.next_float())	0x3eb1ede2
+774	bitexact_f64(r1.next_double())	0x3fc4653d00000000
+775	bitexact_f64(r1.next_double())	0x3fd79dbce0000000
+776	bitexact_f64(r1.next_double())	0x3feba9ae40000000
+777	bitexact_f64(r1.next_double())	0x3fe1419d80000000
+778	bitexact_f64(r1.next_double())	0x3fe2aad5c0000000
 779	r1.next_long()	780266760877150279i64
 780	r1.next_long()	-4396325885451314877i64
 781	r1.next_long()	-6936482374120670025i64
@@ -787,16 +787,16 @@
 786	r1.next_boolean()	true
 787	r1.next_boolean()	true
 788	r1.next_boolean()	false
-789	r1.next_gaussian().to_bits()	0x3fdb4bc679e68cf4
-790	r1.next_gaussian().to_bits()	0xbfe406477a919a7f
-791	r1.next_gaussian().to_bits()	0xbff292e9cfcec7de
-792	r1.next_gaussian().to_bits()	0x4006a55727d633c9
-793	r1.next_gaussian().to_bits()	0x3fd6bffeb657b36f
-794	r1.triangle_f64(1.0, 2.0).to_bits()	0x3ffe0979c8000000
-795	r1.triangle_f64(1.0, 2.0).to_bits()	0x3fe660850b000000
-796	r1.triangle_f64(1.0, 2.0).to_bits()	0x3fd19ec540000000
-797	r1.triangle_f64(1.0, 2.0).to_bits()	0x4003a78e9c000000
-798	r1.triangle_f64(1.0, 2.0).to_bits()	0x3ff5a95198000000
+789	bitexact_f64(r1.next_gaussian())	0x3fdb4bc679e68cf4
+790	bitexact_f64(r1.next_gaussian())	0xbfe406477a919a7f
+791	bitexact_f64(r1.next_gaussian())	0xbff292e9cfcec7de
+792	bitexact_f64(r1.next_gaussian())	0x4006a55727d633c9
+793	bitexact_f64(r1.next_gaussian())	0x3fd6bffeb657b36f
+794	bitexact_f64(r1.triangle_f64(1.0, 2.0))	0x3ffe0979c8000000
+795	bitexact_f64(r1.triangle_f64(1.0, 2.0))	0x3fe660850b000000
+796	bitexact_f64(r1.triangle_f64(1.0, 2.0))	0x3fd19ec540000000
+797	bitexact_f64(r1.triangle_f64(1.0, 2.0))	0x4003a78e9c000000
+798	bitexact_f64(r1.triangle_f64(1.0, 2.0))	0x3ff5a95198000000
 799	r1.next_int_between_inclusive(10, 20)	18i32
 800	r1.next_int_between_inclusive(10, 20)	20i32
 801	r1.next_int_between_inclusive(10, 20)	20i32
@@ -818,16 +818,16 @@
 817	r42.next_int_bound(5)	2i32
 818	r42.next_int_bound(5)	1i32
 819	r42.next_int_bound(5)	0i32
-820	r42.next_float().to_bits()	0x3f486c40
-821	r42.next_float().to_bits()	0x3f7f88a1
-822	r42.next_float().to_bits()	0x3f6b5910
-823	r42.next_float().to_bits()	0x3e1b9af0
-824	r42.next_float().to_bits()	0x3edf7bbe
-825	r42.next_double().to_bits()	0x3fdc25ae20000000
-826	r42.next_double().to_bits()	0x3fedc7bb00000000
-827	r42.next_double().to_bits()	0x3fe98b9060000000
-828	r42.next_double().to_bits()	0x3fc34523e0000000
-829	r42.next_double().to_bits()	0x3fd5a6d660000000
+820	bitexact_f32(r42.next_float())	0x3f486c40
+821	bitexact_f32(r42.next_float())	0x3f7f88a1
+822	bitexact_f32(r42.next_float())	0x3f6b5910
+823	bitexact_f32(r42.next_float())	0x3e1b9af0
+824	bitexact_f32(r42.next_float())	0x3edf7bbe
+825	bitexact_f64(r42.next_double())	0x3fdc25ae20000000
+826	bitexact_f64(r42.next_double())	0x3fedc7bb00000000
+827	bitexact_f64(r42.next_double())	0x3fe98b9060000000
+828	bitexact_f64(r42.next_double())	0x3fc34523e0000000
+829	bitexact_f64(r42.next_double())	0x3fd5a6d660000000
 830	r42.next_long()	4623885210859241458i64
 831	r42.next_long()	6736035388467870105i64
 832	r42.next_long()	2926660232063067186i64
@@ -838,16 +838,16 @@
 837	r42.next_boolean()	false
 838	r42.next_boolean()	true
 839	r42.next_boolean()	true
-840	r42.next_gaussian().to_bits()	0xbfd1b79c94791c2a
-841	r42.next_gaussian().to_bits()	0xbfb57d066f4ea165
-842	r42.next_gaussian().to_bits()	0x3ff417e442ae6000
-843	r42.next_gaussian().to_bits()	0xbfd4d14503bb4c01
-844	r42.next_gaussian().to_bits()	0xbfc62e607fda46c2
-845	r42.triangle_f64(1.0, 2.0).to_bits()	0x3ff423c900000000
-846	r42.triangle_f64(1.0, 2.0).to_bits()	0x3ff88f8c80000000
-847	r42.triangle_f64(1.0, 2.0).to_bits()	0x3feb3cedc0000000
-848	r42.triangle_f64(1.0, 2.0).to_bits()	0x3fef042800000000
-849	r42.triangle_f64(1.0, 2.0).to_bits()	0x3fd2233a80000000
+840	bitexact_f64(r42.next_gaussian())	0xbfd1b79c94791c2a
+841	bitexact_f64(r42.next_gaussian())	0xbfb57d066f4ea165
+842	bitexact_f64(r42.next_gaussian())	0x3ff417e442ae6000
+843	bitexact_f64(r42.next_gaussian())	0xbfd4d14503bb4c01
+844	bitexact_f64(r42.next_gaussian())	0xbfc62e607fda46c2
+845	bitexact_f64(r42.triangle_f64(1.0, 2.0))	0x3ff423c900000000
+846	bitexact_f64(r42.triangle_f64(1.0, 2.0))	0x3ff88f8c80000000
+847	bitexact_f64(r42.triangle_f64(1.0, 2.0))	0x3feb3cedc0000000
+848	bitexact_f64(r42.triangle_f64(1.0, 2.0))	0x3fef042800000000
+849	bitexact_f64(r42.triangle_f64(1.0, 2.0))	0x3fd2233a80000000
 850	r42.next_int_between_inclusive(10, 20)	12i32
 851	r42.next_int_between_inclusive(10, 20)	12i32
 852	r42.next_int_between_inclusive(10, 20)	18i32
@@ -869,16 +869,16 @@
 868	r123456789.next_int_bound(5)	1i32
 869	r123456789.next_int_bound(5)	0i32
 870	r123456789.next_int_bound(5)	4i32
-871	r123456789.next_float().to_bits()	0x3e7ecd30
-872	r123456789.next_float().to_bits()	0x3f22205f
-873	r123456789.next_float().to_bits()	0x3e8c793c
-874	r123456789.next_float().to_bits()	0x3f002291
-875	r123456789.next_float().to_bits()	0x3f105f17
-876	r123456789.next_double().to_bits()	0x3fda256d20000000
-877	r123456789.next_double().to_bits()	0x3fee54c2e0000000
-878	r123456789.next_double().to_bits()	0x3fe3155a60000000
-879	r123456789.next_double().to_bits()	0x3fd12f08e0000000
-880	r123456789.next_double().to_bits()	0x3fdefc4fc0000000
+871	bitexact_f32(r123456789.next_float())	0x3e7ecd30
+872	bitexact_f32(r123456789.next_float())	0x3f22205f
+873	bitexact_f32(r123456789.next_float())	0x3e8c793c
+874	bitexact_f32(r123456789.next_float())	0x3f002291
+875	bitexact_f32(r123456789.next_float())	0x3f105f17
+876	bitexact_f64(r123456789.next_double())	0x3fda256d20000000
+877	bitexact_f64(r123456789.next_double())	0x3fee54c2e0000000
+878	bitexact_f64(r123456789.next_double())	0x3fe3155a60000000
+879	bitexact_f64(r123456789.next_double())	0x3fd12f08e0000000
+880	bitexact_f64(r123456789.next_double())	0x3fdefc4fc0000000
 881	r123456789.next_long()	-9218142432141340534i64
 882	r123456789.next_long()	8938299083908680542i64
 883	r123456789.next_long()	2269987056764843472i64
@@ -889,16 +889,16 @@
 888	r123456789.next_boolean()	true
 889	r123456789.next_boolean()	false
 890	r123456789.next_boolean()	true
-891	r123456789.next_gaussian().to_bits()	0x3ffaa1a40863febb
-892	r123456789.next_gaussian().to_bits()	0x3fe33c4214958786
-893	r123456789.next_gaussian().to_bits()	0xbffe23ba6997f903
-894	r123456789.next_gaussian().to_bits()	0xbfd927895784aa68
-895	r123456789.next_gaussian().to_bits()	0xbfff34e2d83a0b91
-896	r123456789.triangle_f64(1.0, 2.0).to_bits()	0x4005664650000000
-897	r123456789.triangle_f64(1.0, 2.0).to_bits()	0x3fefccd480000000
-898	r123456789.triangle_f64(1.0, 2.0).to_bits()	0x3ff5fb6e30000000
-899	r123456789.triangle_f64(1.0, 2.0).to_bits()	0x3fef8fa280000000
-900	r123456789.triangle_f64(1.0, 2.0).to_bits()	0xbfdb97cfc0000000
+891	bitexact_f64(r123456789.next_gaussian())	0x3ffaa1a40863febb
+892	bitexact_f64(r123456789.next_gaussian())	0x3fe33c4214958786
+893	bitexact_f64(r123456789.next_gaussian())	0xbffe23ba6997f903
+894	bitexact_f64(r123456789.next_gaussian())	0xbfd927895784aa68
+895	bitexact_f64(r123456789.next_gaussian())	0xbfff34e2d83a0b91
+896	bitexact_f64(r123456789.triangle_f64(1.0, 2.0))	0x4005664650000000
+897	bitexact_f64(r123456789.triangle_f64(1.0, 2.0))	0x3fefccd480000000
+898	bitexact_f64(r123456789.triangle_f64(1.0, 2.0))	0x3ff5fb6e30000000
+899	bitexact_f64(r123456789.triangle_f64(1.0, 2.0))	0x3fef8fa280000000
+900	bitexact_f64(r123456789.triangle_f64(1.0, 2.0))	0xbfdb97cfc0000000
 901	r123456789.next_int_between_inclusive(10, 20)	14i32
 902	r123456789.next_int_between_inclusive(10, 20)	15i32
 903	r123456789.next_int_between_inclusive(10, 20)	20i32
@@ -920,16 +920,16 @@
 919	rNEG1.next_int_bound(5)	0i32
 920	rNEG1.next_int_bound(5)	4i32
 921	rNEG1.next_int_bound(5)	2i32
-922	rNEG1.next_float().to_bits()	0x3f0f2e80
-923	rNEG1.next_float().to_bits()	0x3f3b456d
-924	rNEG1.next_float().to_bits()	0x3f196703
-925	rNEG1.next_float().to_bits()	0x3eb3d118
-926	rNEG1.next_float().to_bits()	0x3f6e2493
-927	rNEG1.next_double().to_bits()	0x3fdd127000000000
-928	rNEG1.next_double().to_bits()	0x3fd578b9e0000000
-929	rNEG1.next_double().to_bits()	0x3f67e6c960000000
-930	rNEG1.next_double().to_bits()	0x3fc35fb0a0000000
-931	rNEG1.next_double().to_bits()	0x3fe6368aa0000000
+922	bitexact_f32(rNEG1.next_float())	0x3f0f2e80
+923	bitexact_f32(rNEG1.next_float())	0x3f3b456d
+924	bitexact_f32(rNEG1.next_float())	0x3f196703
+925	bitexact_f32(rNEG1.next_float())	0x3eb3d118
+926	bitexact_f32(rNEG1.next_float())	0x3f6e2493
+927	bitexact_f64(rNEG1.next_double())	0x3fdd127000000000
+928	bitexact_f64(rNEG1.next_double())	0x3fd578b9e0000000
+929	bitexact_f64(rNEG1.next_double())	0x3f67e6c960000000
+930	bitexact_f64(rNEG1.next_double())	0x3fc35fb0a0000000
+931	bitexact_f64(rNEG1.next_double())	0x3fe6368aa0000000
 932	rNEG1.next_long()	1946119930767781179i64
 933	rNEG1.next_long()	-5598838322766633025i64
 934	rNEG1.next_long()	6472470557549166806i64
@@ -940,16 +940,16 @@
 939	rNEG1.next_boolean()	false
 940	rNEG1.next_boolean()	false
 941	rNEG1.next_boolean()	true
-942	rNEG1.next_gaussian().to_bits()	0xbfe16df531b2d58f
-943	rNEG1.next_gaussian().to_bits()	0x3fe0311a5a30f323
-944	rNEG1.next_gaussian().to_bits()	0xbff6b70d3db41fbc
-945	rNEG1.next_gaussian().to_bits()	0xbff9a80cd6c66a19
-946	rNEG1.next_gaussian().to_bits()	0xbfd60f65dc9659fc
-947	rNEG1.triangle_f64(1.0, 2.0).to_bits()	0x3fe55f9330000000
-948	rNEG1.triangle_f64(1.0, 2.0).to_bits()	0x3ff4a1bac0000000
-949	rNEG1.triangle_f64(1.0, 2.0).to_bits()	0x4005442892800000
-950	rNEG1.triangle_f64(1.0, 2.0).to_bits()	0x40034fbe50000000
-951	rNEG1.triangle_f64(1.0, 2.0).to_bits()	0x40022c0084000000
+942	bitexact_f64(rNEG1.next_gaussian())	0xbfe16df531b2d58f
+943	bitexact_f64(rNEG1.next_gaussian())	0x3fe0311a5a30f323
+944	bitexact_f64(rNEG1.next_gaussian())	0xbff6b70d3db41fbc
+945	bitexact_f64(rNEG1.next_gaussian())	0xbff9a80cd6c66a19
+946	bitexact_f64(rNEG1.next_gaussian())	0xbfd60f65dc9659fc
+947	bitexact_f64(rNEG1.triangle_f64(1.0, 2.0))	0x3fe55f9330000000
+948	bitexact_f64(rNEG1.triangle_f64(1.0, 2.0))	0x3ff4a1bac0000000
+949	bitexact_f64(rNEG1.triangle_f64(1.0, 2.0))	0x4005442892800000
+950	bitexact_f64(rNEG1.triangle_f64(1.0, 2.0))	0x40034fbe50000000
+951	bitexact_f64(rNEG1.triangle_f64(1.0, 2.0))	0x40022c0084000000
 952	rNEG1.next_int_between_inclusive(10, 20)	19i32
 953	rNEG1.next_int_between_inclusive(10, 20)	19i32
 954	rNEG1.next_int_between_inclusive(10, 20)	11i32
@@ -971,16 +971,16 @@
 970	rNEG9223372036854775808.next_int_bound(5)	4i32
 971	rNEG9223372036854775808.next_int_bound(5)	4i32
 972	rNEG9223372036854775808.next_int_bound(5)	0i32
-973	rNEG9223372036854775808.next_float().to_bits()	0x3f70f5b4
-974	rNEG9223372036854775808.next_float().to_bits()	0x3e343340
-975	rNEG9223372036854775808.next_float().to_bits()	0x3e8cc6c4
-976	rNEG9223372036854775808.next_float().to_bits()	0x3ea03924
-977	rNEG9223372036854775808.next_float().to_bits()	0x3e03fd9c
-978	rNEG9223372036854775808.next_double().to_bits()	0x3fd78cea40000000
-979	rNEG9223372036854775808.next_double().to_bits()	0x3fe690caa0000000
-980	rNEG9223372036854775808.next_double().to_bits()	0x3f56b828c0000000
-981	rNEG9223372036854775808.next_double().to_bits()	0x3f82e47be0000000
-982	rNEG9223372036854775808.next_double().to_bits()	0x3fe203af00000000
+973	bitexact_f32(rNEG9223372036854775808.next_float())	0x3f70f5b4
+974	bitexact_f32(rNEG9223372036854775808.next_float())	0x3e343340
+975	bitexact_f32(rNEG9223372036854775808.next_float())	0x3e8cc6c4
+976	bitexact_f32(rNEG9223372036854775808.next_float())	0x3ea03924
+977	bitexact_f32(rNEG9223372036854775808.next_float())	0x3e03fd9c
+978	bitexact_f64(rNEG9223372036854775808.next_double())	0x3fd78cea40000000
+979	bitexact_f64(rNEG9223372036854775808.next_double())	0x3fe690caa0000000
+980	bitexact_f64(rNEG9223372036854775808.next_double())	0x3f56b828c0000000
+981	bitexact_f64(rNEG9223372036854775808.next_double())	0x3f82e47be0000000
+982	bitexact_f64(rNEG9223372036854775808.next_double())	0x3fe203af00000000
 983	rNEG9223372036854775808.next_long()	4664870386390374308i64
 984	rNEG9223372036854775808.next_long()	5274012497411174555i64
 985	rNEG9223372036854775808.next_long()	275355961613117157i64
@@ -991,16 +991,16 @@
 990	rNEG9223372036854775808.next_boolean()	true
 991	rNEG9223372036854775808.next_boolean()	true
 992	rNEG9223372036854775808.next_boolean()	true
-993	rNEG9223372036854775808.next_gaussian().to_bits()	0x3fd7d4517f1180e5
-994	rNEG9223372036854775808.next_gaussian().to_bits()	0x3fd97377da512484
-995	rNEG9223372036854775808.next_gaussian().to_bits()	0x3fb01d3638e3d2fe
-996	rNEG9223372036854775808.next_gaussian().to_bits()	0x3fee20708fc3e4bd
-997	rNEG9223372036854775808.next_gaussian().to_bits()	0x3fdc3b0b51c9c8c3
-998	rNEG9223372036854775808.triangle_f64(1.0, 2.0).to_bits()	0x3ffeabcdf2c00000
-999	rNEG9223372036854775808.triangle_f64(1.0, 2.0).to_bits()	0x3fdc8dd290000000
-1000	rNEG9223372036854775808.triangle_f64(1.0, 2.0).to_bits()	0xbfa514ba00000000
-1001	rNEG9223372036854775808.triangle_f64(1.0, 2.0).to_bits()	0x3ff362b900000000
-1002	rNEG9223372036854775808.triangle_f64(1.0, 2.0).to_bits()	0x3ffddffec0000000
+993	bitexact_f64(rNEG9223372036854775808.next_gaussian())	0x3fd7d4517f1180e5
+994	bitexact_f64(rNEG9223372036854775808.next_gaussian())	0x3fd97377da512484
+995	bitexact_f64(rNEG9223372036854775808.next_gaussian())	0x3fb01d3638e3d2fe
+996	bitexact_f64(rNEG9223372036854775808.next_gaussian())	0x3fee20708fc3e4bd
+997	bitexact_f64(rNEG9223372036854775808.next_gaussian())	0x3fdc3b0b51c9c8c3
+998	bitexact_f64(rNEG9223372036854775808.triangle_f64(1.0, 2.0))	0x3ffeabcdf2c00000
+999	bitexact_f64(rNEG9223372036854775808.triangle_f64(1.0, 2.0))	0x3fdc8dd290000000
+1000	bitexact_f64(rNEG9223372036854775808.triangle_f64(1.0, 2.0))	0xbfa514ba00000000
+1001	bitexact_f64(rNEG9223372036854775808.triangle_f64(1.0, 2.0))	0x3ff362b900000000
+1002	bitexact_f64(rNEG9223372036854775808.triangle_f64(1.0, 2.0))	0x3ffddffec0000000
 1003	rNEG9223372036854775808.next_int_between_inclusive(10, 20)	17i32
 1004	rNEG9223372036854775808.next_int_between_inclusive(10, 20)	13i32
 1005	rNEG9223372036854775808.next_int_between_inclusive(10, 20)	14i32
@@ -1022,16 +1022,16 @@
 1021	r244837814047284.next_int_bound(5)	2i32
 1022	r244837814047284.next_int_bound(5)	4i32
 1023	r244837814047284.next_int_bound(5)	2i32
-1024	r244837814047284.next_float().to_bits()	0x3f00dd9e
-1025	r244837814047284.next_float().to_bits()	0x3f274dad
-1026	r244837814047284.next_float().to_bits()	0x3ddb3370
-1027	r244837814047284.next_float().to_bits()	0x3f78edbe
-1028	r244837814047284.next_float().to_bits()	0x3f7f0bfc
-1029	r244837814047284.next_double().to_bits()	0x3f9dfa5760000000
-1030	r244837814047284.next_double().to_bits()	0x3fec8bcdc0000000
-1031	r244837814047284.next_double().to_bits()	0x3fd24ad880000000
-1032	r244837814047284.next_double().to_bits()	0x3fee3a07a0000000
-1033	r244837814047284.next_double().to_bits()	0x3fd87c9b60000000
+1024	bitexact_f32(r244837814047284.next_float())	0x3f00dd9e
+1025	bitexact_f32(r244837814047284.next_float())	0x3f274dad
+1026	bitexact_f32(r244837814047284.next_float())	0x3ddb3370
+1027	bitexact_f32(r244837814047284.next_float())	0x3f78edbe
+1028	bitexact_f32(r244837814047284.next_float())	0x3f7f0bfc
+1029	bitexact_f64(r244837814047284.next_double())	0x3f9dfa5760000000
+1030	bitexact_f64(r244837814047284.next_double())	0x3fec8bcdc0000000
+1031	bitexact_f64(r244837814047284.next_double())	0x3fd24ad880000000
+1032	bitexact_f64(r244837814047284.next_double())	0x3fee3a07a0000000
+1033	bitexact_f64(r244837814047284.next_double())	0x3fd87c9b60000000
 1034	r244837814047284.next_long()	-8658503656214245666i64
 1035	r244837814047284.next_long()	7722813782141551780i64
 1036	r244837814047284.next_long()	5968427110623386406i64
@@ -1042,50 +1042,50 @@
 1041	r244837814047284.next_boolean()	true
 1042	r244837814047284.next_boolean()	true
 1043	r244837814047284.next_boolean()	false
-1044	r244837814047284.next_gaussian().to_bits()	0x3fea0dc18be1aac5
-1045	r244837814047284.next_gaussian().to_bits()	0xbfeb326113ef8922
-1046	r244837814047284.next_gaussian().to_bits()	0x3ff0950dee23f71f
-1047	r244837814047284.next_gaussian().to_bits()	0x3ffe263181e013a0
-1048	r244837814047284.next_gaussian().to_bits()	0x3fd7bdbc5c56242f
-1049	r244837814047284.triangle_f64(1.0, 2.0).to_bits()	0xbfe5dc9ef0000000
-1050	r244837814047284.triangle_f64(1.0, 2.0).to_bits()	0xbfd2f38108000000
-1051	r244837814047284.triangle_f64(1.0, 2.0).to_bits()	0x4000e733e0000000
-1052	r244837814047284.triangle_f64(1.0, 2.0).to_bits()	0x3fe9d70880000000
-1053	r244837814047284.triangle_f64(1.0, 2.0).to_bits()	0x3fda0adf00000000
+1044	bitexact_f64(r244837814047284.next_gaussian())	0x3fea0dc18be1aac5
+1045	bitexact_f64(r244837814047284.next_gaussian())	0xbfeb326113ef8922
+1046	bitexact_f64(r244837814047284.next_gaussian())	0x3ff0950dee23f71f
+1047	bitexact_f64(r244837814047284.next_gaussian())	0x3ffe263181e013a0
+1048	bitexact_f64(r244837814047284.next_gaussian())	0x3fd7bdbc5c56242f
+1049	bitexact_f64(r244837814047284.triangle_f64(1.0, 2.0))	0xbfe5dc9ef0000000
+1050	bitexact_f64(r244837814047284.triangle_f64(1.0, 2.0))	0xbfd2f38108000000
+1051	bitexact_f64(r244837814047284.triangle_f64(1.0, 2.0))	0x4000e733e0000000
+1052	bitexact_f64(r244837814047284.triangle_f64(1.0, 2.0))	0x3fe9d70880000000
+1053	bitexact_f64(r244837814047284.triangle_f64(1.0, 2.0))	0x3fda0adf00000000
 1054	r244837814047284.next_int_between_inclusive(10, 20)	13i32
 1055	r244837814047284.next_int_between_inclusive(10, 20)	11i32
 1056	r244837814047284.next_int_between_inclusive(10, 20)	16i32
 1057	super::next_int(&mut r0, 3, 10)	8i32
-1058	super::next_float(&mut r0, 1.0, 2.0).to_bits()	0x3fea6ca8
-1059	super::next_double(&mut r0, 1.0, 2.0).to_bits()	0x3ff3d93cb8000000
+1058	bitexact_f32(super::next_float(&mut r0, 1.0, 2.0))	0x3fea6ca8
+1059	bitexact_f64(super::next_double(&mut r0, 1.0, 2.0))	0x3ff3d93cb8000000
 1060	super::random_between_inclusive(&mut r0, 10, 30)	21i32
-1061	super::random_between(&mut r0, 5.0, 10.0).to_bits()	0x40d172b6
-1062	super::normal(&mut r0, 100.0, 5.0).to_bits()	0x42d34f45
+1061	bitexact_f32(super::random_between(&mut r0, 5.0, 10.0))	0x40d172b6
+1062	bitexact_f32(super::normal(&mut r0, 100.0, 5.0))	0x42d34f45
 1063	super::next_int(&mut r1, 3, 10)	8i32
-1064	super::next_float(&mut r1, 1.0, 2.0).to_bits()	0x3f8cdc4e
-1065	super::next_double(&mut r1, 1.0, 2.0).to_bits()	0x3ff68fb0e8000000
+1064	bitexact_f32(super::next_float(&mut r1, 1.0, 2.0))	0x3f8cdc4e
+1065	bitexact_f64(super::next_double(&mut r1, 1.0, 2.0))	0x3ff68fb0e8000000
 1066	super::random_between_inclusive(&mut r1, 10, 30)	30i32
-1067	super::random_between(&mut r1, 5.0, 10.0).to_bits()	0x40a5cc33
-1068	super::normal(&mut r1, 100.0, 5.0).to_bits()	0x42c7752c
+1067	bitexact_f32(super::random_between(&mut r1, 5.0, 10.0))	0x40a5cc33
+1068	bitexact_f32(super::normal(&mut r1, 100.0, 5.0))	0x42c7752c
 1069	super::next_int(&mut r7, 3, 10)	8i32
-1070	super::next_float(&mut r7, 1.0, 2.0).to_bits()	0x3fd1bb9a
-1071	super::next_double(&mut r7, 1.0, 2.0).to_bits()	0x3ffbfc9940000000
+1070	bitexact_f32(super::next_float(&mut r7, 1.0, 2.0))	0x3fd1bb9a
+1071	bitexact_f64(super::next_double(&mut r7, 1.0, 2.0))	0x3ffbfc9940000000
 1072	super::random_between_inclusive(&mut r7, 10, 30)	29i32
-1073	super::random_between(&mut r7, 5.0, 10.0).to_bits()	0x40ee7f2e
-1074	super::normal(&mut r7, 100.0, 5.0).to_bits()	0x42cdd6f3
+1073	bitexact_f32(super::random_between(&mut r7, 5.0, 10.0))	0x40ee7f2e
+1074	bitexact_f32(super::normal(&mut r7, 100.0, 5.0))	0x42cdd6f3
 1075	super::next_int(&mut r999, 3, 10)	8i32
-1076	super::next_float(&mut r999, 1.0, 2.0).to_bits()	0x3ff36cb0
-1077	super::next_double(&mut r999, 1.0, 2.0).to_bits()	0x3ffba242b0000000
+1076	bitexact_f32(super::next_float(&mut r999, 1.0, 2.0))	0x3ff36cb0
+1077	bitexact_f64(super::next_double(&mut r999, 1.0, 2.0))	0x3ffba242b0000000
 1078	super::random_between_inclusive(&mut r999, 10, 30)	18i32
-1079	super::random_between(&mut r999, 5.0, 10.0).to_bits()	0x40dcccf2
-1080	super::normal(&mut r999, 100.0, 5.0).to_bits()	0x42beeac0
-1081	super::wobble(1.0).to_bits()	0x3ff000000ac25f71
-1082	super::wobble(0.0).to_bits()	0x3e58cccb1f4da321
-1083	super::wobble(-1.0).to_bits()	0xbff000000ac610f8
-1084	super::wobble(123.456).to_bits()	0x405edd2f1a8c2473
-1085	super::wobble(-987.654).to_bits()	0xc08edd3b645dea5b
-1086	super::wobble(3.0E-4).to_bits()	0x3f33a98d6381af98
-1087	super::wobble(-3.0E-4).to_bits()	0xbf33a98d6d5c23ed
+1079	bitexact_f32(super::random_between(&mut r999, 5.0, 10.0))	0x40dcccf2
+1080	bitexact_f32(super::normal(&mut r999, 100.0, 5.0))	0x42beeac0
+1081	bitexact_f64(super::wobble(1.0))	0x3ff000000ac25f71
+1082	bitexact_f64(super::wobble(0.0))	0x3e58cccb1f4da321
+1083	bitexact_f64(super::wobble(-1.0))	0xbff000000ac610f8
+1084	bitexact_f64(super::wobble(123.456))	0x405edd2f1a8c2473
+1085	bitexact_f64(super::wobble(-987.654))	0xc08edd3b645dea5b
+1086	bitexact_f64(super::wobble(3.0E-4))	0x3f33a98d6381af98
+1087	bitexact_f64(super::wobble(-3.0E-4))	0xbf33a98d6d5c23ed
 1088	super::create_insecure_uuid(&mut crate::random_source::SingleThreadedRandomSource::new( 1i64 )) .most	-4964420948893086504i64
 1089	super::create_insecure_uuid(&mut crate::random_source::SingleThreadedRandomSource::new( 1i64 )) .least	-6270402184529184366i64
 1090	super::create_insecure_uuid(&mut crate::random_source::SingleThreadedRandomSource::new( 42i64 )) .most	-5025562857975166217i64
