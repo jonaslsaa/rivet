@@ -253,7 +253,7 @@ is_live_build() {
 }
 
 sweep_tmp() {
-  local root child cache kb mins=${IDLE_MIN:-$((IDLE_HOURS * 60))}
+  local root child cache kb wholesale mins=${IDLE_MIN:-$((IDLE_HOURS * 60))}
   for root in "$@"; do
     [ -d "$root" ] || continue
     # Classify each direct tmp child first. A tagged container is never a
@@ -313,7 +313,7 @@ main() {
     shift
   done
 
-  local MAIN NOW mins
+  local MAIN NOW mins free
   MAIN=$(git rev-parse --path-format=absolute --git-common-dir)/..
   MAIN=$(cd "$MAIN" && pwd)
   NOW=$(date +%s)

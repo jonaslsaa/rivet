@@ -76,10 +76,22 @@ CARGO_TARGET_DIR="$new_parent" "$REPO_DIR/scripts/with-build-lock.sh" "$REPO_DIR
 rm -rf "$PROJECT_ROOT/.tmp-shared-target-tests"
 pass "absolute overrides create nested parents and lock the exact target"
 
-bash -n "$REPO_DIR/scripts/cargo-target-dir.sh" "$REPO_DIR/scripts/with-build-lock.sh" "$REPO_DIR/scripts/gate.sh" \
-  "$REPO_DIR/scripts/prune-worktrees.sh" "$REPO_DIR/tools/rivet-client/run.sh" \
+for script in \
+  "$REPO_DIR/scripts/cargo-target-dir.sh" \
+  "$REPO_DIR/scripts/with-build-lock.sh" \
+  "$REPO_DIR/scripts/gate.sh" \
+  "$REPO_DIR/scripts/prune-worktrees.sh" \
+  "$REPO_DIR/tools/rivet-client/run.sh" \
   "$REPO_DIR/tools/rivet-client/run-scenario.sh"
+do
+  bash -n "$script"
+done
 pass "shared-target shell entry points pass bash syntax checks"
+
+if grep -Eq '/usr/bin/(lockf|flock|env)' "$REPO_DIR/scripts/with-build-lock.sh"; then
+  fail "build lock utility paths must be resolved through PATH"
+fi
+pass "build lock utilities are resolved portably through PATH"
 
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck -e SC2207,SC2009 "$REPO_DIR/scripts/cargo-target-dir.sh" "$REPO_DIR/scripts/with-build-lock.sh" "$REPO_DIR/scripts/gate.sh" \
