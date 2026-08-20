@@ -874,7 +874,7 @@ pub(crate) fn cargo_target_dir() -> PathBuf {
     {
         return target_dir.to_path_buf();
     }
-    crate_root().join("../../target-agent-shared")
+    crate_root().join("../../target")
 }
 
 /// Path to the `rivet-client` binary, resolved from Cargo's target directory.

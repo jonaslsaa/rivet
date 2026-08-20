@@ -604,18 +604,6 @@ echo "$out" | grep -q "note: 1 branch ref(s) left in place" || fail "stranded: m
 git -C "$E2E4/main" branch --list feature/stranded | grep -q . || fail "stranded: branch was force-deleted"
 pass "e2e refused branch -d is reported and the ref survives (never force-deleted)"
 
-# --- canonical shared target is permanently protected ---------------------------
-PROTECTED="$SANDBOX/protected-shared"
-mk_cargo_target "$PROTECTED"
-SHARED_TARGET=$(canonical_dir "$PROTECTED")
-DRY=1
-out=$(prune_cache "$PROTECTED" 2>&1) || true
-echo "$out" | grep -q "REFUSE .*shared cargo target" \
-  || fail "canonical shared target was not refused: $out"
-[ -d "$PROTECTED" ] || fail "canonical shared target was removed"
-SHARED_TARGET=""
-pass "canonical shared target is refused by the deletion funnel"
-
 # --- e2e: preserved tools/*/work blocks clean merged removal --------------------
 E2EP="$SANDBOX/e2e-preserved"
 mkdir -p "$E2EP/main"

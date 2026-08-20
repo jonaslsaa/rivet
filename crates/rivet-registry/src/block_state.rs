@@ -1,8 +1,8 @@
 //! Hand-written `BlockState` value type over the generated global-id tables
 //! (issue #228). This is the "pure table ops, no world types" surface the
 //! worldgen/heightmap/lighting work consumes: it decodes a `StateId` into the
-//! probe-driven behavior word plus exact FULL-face support and collision-face
-//! masks (`generated/block_behaviors.rs`), round-trips through the mixed-radix
+//! probe-driven behavior word plus exact FULL/CENTER/RIGID support, collision-face,
+//! and occlusion-face masks (`generated/block_behaviors.rs`), round-trips through the mixed-radix
 //! property tables (`generated/block_states.rs` + `block_properties.rs`), and
 //! answers block-tag membership
 //! (`generated/tags.rs`). It never reads a world, so it lives in
@@ -35,7 +35,8 @@ use crate::core::Direction;
 use crate::generated::block_behaviors::{
     BEHAVIOR_MASK_LIGHT_DAMPENING, BEHAVIOR_MASK_LIGHT_EMISSION, BEHAVIOR_MASK_MAP_COLOR,
     BEHAVIOR_SHIFT_LIGHT_DAMPENING, BEHAVIOR_SHIFT_LIGHT_EMISSION, BEHAVIOR_SHIFT_MAP_COLOR,
-    behavior_of, collision_face_mask_of, face_sturdy_mask_of,
+    behavior_of, center_support_mask_of, collision_face_mask_of, face_sturdy_mask_of,
+    occlusion_face_mask_of, rigid_support_mask_of,
 };
 use crate::generated::block_properties::{
     BLOCK_PROPERTY_VALUES, BlockPropertyId, MAX_BLOCK_STATE_PROPERTY_COUNT,
@@ -299,6 +300,24 @@ impl BlockState {
     #[inline]
     pub fn face_sturdy_mask(self) -> u8 {
         face_sturdy_mask_of(self.0)
+    }
+
+    /// The six-direction `SupportType.CENTER` sample at the probe origin.
+    #[inline]
+    pub fn center_support_mask(self) -> u8 {
+        center_support_mask_of(self.0)
+    }
+
+    /// The six-direction `SupportType.RIGID` sample at the probe origin.
+    #[inline]
+    pub fn rigid_support_mask(self) -> u8 {
+        rigid_support_mask_of(self.0)
+    }
+
+    /// The six-direction full occlusion-face sample at the probe origin.
+    #[inline]
+    pub fn occlusion_face_mask(self) -> u8 {
+        occlusion_face_mask_of(self.0)
     }
 
     /// The six-direction Paper full collision-face sample used by
