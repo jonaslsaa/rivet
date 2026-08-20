@@ -20,10 +20,17 @@ touch "$lock_path"
 # Linux/WSL) both take a lock file followed by the command to run under it.
 # Select whichever the host provides so the shared-target contract works on
 # both CI and local development machines.
-if command -v /usr/bin/lockf >/dev/null 2>&1; then
-  exec /usr/bin/lockf "$lock_path" /usr/bin/env -u RIVET_BUILD_LOCK_HELD \
-    RIVET_BUILD_LOCK_HELD=1 CARGO_TARGET_DIR="$target_dir" "$@"
+env_cmd=$(command -v env) || {
+  echo "env not found in PATH" >&2
+  exit 1
+}
+if lock_cmd=$(command -v lockf); then
+  :
+elif lock_cmd=$(command -v flock); then
+  :
 else
-  exec /usr/bin/flock "$lock_path" /usr/bin/env -u RIVET_BUILD_LOCK_HELD \
-    RIVET_BUILD_LOCK_HELD=1 CARGO_TARGET_DIR="$target_dir" "$@"
+  echo "neither lockf nor flock found in PATH" >&2
+  exit 1
 fi
+exec "$lock_cmd" "$lock_path" "$env_cmd" -u RIVET_BUILD_LOCK_HELD \
+  RIVET_BUILD_LOCK_HELD=1 CARGO_TARGET_DIR="$target_dir" "$@"
