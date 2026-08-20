@@ -2258,10 +2258,12 @@ mod tests {
     }
 
     /// The install seam composes exactly: a refused conversion never reaches
-    /// the map. The composition pattern — promote, and only on `Ok` call
-    /// `chunk_map_mut().install(pos, chunk)` — is what keeps the authority
-    /// empty, so this test drives that exact composition against one
-    /// `ServerLevel` and asserts nothing is installed at the refused position.
+    /// the map. This drives the real composition — promote, and only on `Ok`
+    /// call `chunk_map_mut().install(pos, chunk)` — against one mutable
+    /// `ServerLevel`; a NOISE chunk's refusal means the `Ok` arm never runs, so
+    /// the position is not served and no pre-existing chunk is replaced. (If a
+    /// conversion ever started returning `Ok` for a pre-FULL proto, the `panic`
+    /// fires; if the composition installed on refusal, the assertion fails.)
     #[test]
     fn no_install_on_conversion_refusal() {
         let generator = test_generator();
@@ -2269,19 +2271,21 @@ mod tests {
         let mut holder = generator.create_holder(pos);
         holder.generate_through(ChunkStatus::Noise).expect("NOISE");
 
-        // The refused conversion must not reach the install seam: only the
-        // `Ok(LevelChunk)` arm calls `install`, so the map stays empty at the
-        // refused position even though the composition ran.
-        let world = ServerLevel::new_region_backed(ServerLevelConfig::default());
-        assert!(
-            holder.into_level_chunk().is_err(),
-            "a NOISE chunk must not promote as FULL"
-        );
-        // The composition boundary: install only on success. A refused
-        // conversion never reaches `install`, so the position is not served.
+        let mut world = ServerLevel::new_region_backed(ServerLevelConfig::default());
+        match holder.into_level_chunk() {
+            Ok(chunk) => {
+                world.chunk_map_mut().install(pos, chunk);
+                panic!("a NOISE chunk must not promote as FULL");
+            }
+            Err(_) => {
+                // The composition boundary: install only on Ok. A refused
+                // conversion reaches no install, so the position is unserved
+                // and any pre-existing chunk would be untouched.
+            }
+        }
         assert!(
             world.chunk_map().get_chunk(pos).is_none(),
-            "a refused conversion must not pre-install anything"
+            "a refused conversion must not reach the install seam"
         );
     }
 
