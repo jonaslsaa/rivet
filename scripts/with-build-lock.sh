@@ -13,13 +13,17 @@ shift
 # shellcheck disable=SC1091  # sources a sibling script; shellcheck only follows it with -x
 source "$repo_dir/scripts/cargo-target-dir.sh"
 target_dir=$(cargo_target_dir_for "$repo_dir")
-lock_path="${target_dir}.lock"
-mkdir -p "$(dirname "$lock_path")"
+project_root=$(cargo_project_root_for "$repo_dir")
+lock_path="$project_root/cargo-build.lock"
+if [ -L "$lock_path" ] || { [ -e "$lock_path" ] && [ ! -f "$lock_path" ]; }; then
+  printf 'repository build lock must be a regular file: %s\n' "$lock_path" >&2
+  exit 2
+fi
 touch "$lock_path"
 # The lock utility differs by platform: lockf (macOS) and flock (util-linux,
 # Linux/WSL) both take a lock file followed by the command to run under it.
-# Select whichever the host provides so the shared-target contract works on
-# both CI and local development machines.
+# Targets stay checkout-local for fingerprint correctness, while this one
+# repository-wide lock keeps heavyweight builds from competing for resources.
 env_cmd=$(command -v env) || {
   echo "env not found in PATH" >&2
   exit 1
