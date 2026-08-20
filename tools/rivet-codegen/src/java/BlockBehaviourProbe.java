@@ -204,6 +204,7 @@ public final class BlockBehaviourProbe {
         println("occlusion_face_run_count=" + occlusionFaceRunCount);
         println("dynamic_shape_state_count=" + dynamicShapeCount(dynamicShapeRuns));
 
+        JsonArray dynamicFixtures = dynamicFixtures();
         JsonObject root = new JsonObject();
         root.addProperty("generator",
             "BlockBehaviourProbe (Bootstrap + Block.BLOCK_STATE_REGISTRY)");
@@ -216,7 +217,7 @@ public final class BlockBehaviourProbe {
         root.add("collision_face_runs", collisionFaceRuns);
         root.add("occlusion_face_runs", occlusionFaceRuns);
         root.add("dynamic_shape_runs", dynamicShapeRuns);
-        root.add("dynamic_fixtures", dynamicFixtures());
+        root.add("dynamic_fixtures", dynamicFixtures);
         Gson gson = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
         try (PrintWriter writer = new PrintWriter(output, "UTF-8")) {
             gson.toJson(root, writer);
@@ -235,7 +236,7 @@ public final class BlockBehaviourProbe {
         println("oak_slab_face_sturdy_mask=" + faceSturdyMask(Blocks.OAK_SLAB.defaultBlockState()));
         println("oak_leaves_collision_face_mask=" + collisionFaceMask(Blocks.OAK_LEAVES.defaultBlockState()));
         println("glass_collision_face_mask=" + collisionFaceMask(Blocks.GLASS.defaultBlockState()));
-        println("dynamic_fixture_count=4");
+        println("dynamic_fixture_count=" + dynamicFixtures.size());
 
         println("PROBE OK");
     }

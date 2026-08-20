@@ -115,13 +115,8 @@ fn check_probe_stdout(out: &str) -> Result<()> {
             probes.get("state_count")
         );
     }
-    if probes.get("face_sturdy_run_count") != Some(&"3504") {
-        bail!(
-            "probe face_sturdy_run_count = {:?} but the pinned Paper table expects 3504",
-            probes.get("face_sturdy_run_count")
-        );
-    }
     for (key, expected) in [
+        ("run_count", "16757"),
         ("face_sturdy_run_count", "3504"),
         ("center_support_run_count", "12277"),
         ("rigid_support_run_count", "3504"),
@@ -154,6 +149,7 @@ mod tests {
                     // anchors are opaque representative values.
                     match *k {
                         "state_count" => format!("{k}=32366"),
+                        "run_count" => format!("{k}=16757"),
                         "face_sturdy_run_count" => format!("{k}=3504"),
                         "center_support_run_count" => format!("{k}=12277"),
                         "rigid_support_run_count" => format!("{k}=3504"),
@@ -186,6 +182,13 @@ mod tests {
         let out = probe_output().replace("state_count=32366", "state_count=32365");
         let err = check_probe_stdout(&out).unwrap_err();
         assert!(err.to_string().contains("expects 32366"), "got: {err}");
+    }
+
+    #[test]
+    fn wrong_run_count_fails() {
+        let out = probe_output().replace("run_count=16757", "run_count=16756");
+        let err = check_probe_stdout(&out).unwrap_err();
+        assert!(err.to_string().contains("expects 16757"), "got: {err}");
     }
 
     #[test]

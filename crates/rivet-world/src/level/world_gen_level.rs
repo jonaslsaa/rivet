@@ -158,7 +158,7 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
         direction: &Direction,
     ) -> bool {
         self.shape_query(pos, state)
-            .unwrap_or_else(|error| panic!("WorldGenLevel.getCollisionShape: {error}"))
+            .unwrap_or_else(|error| panic!("WorldGenLevel.isCollisionFaceFull: {error}"))
             .is_collision_face_full(*direction)
     }
 
