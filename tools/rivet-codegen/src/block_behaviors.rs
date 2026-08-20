@@ -12,19 +12,19 @@
 //! consecutive equal words. It also records the exact per-direction
 //! `SupportType.FULL.isSupporting` result, which delegates to
 //! `getBlockSupportShape`, as a six-bit zero-context mask. It records the
-//! per-direction full collision-face mask used by `MultifaceBlock.canAttachTo`
-//! at the same probe origin as a second mask table. For `hasDynamicShape`
-//! states, both masks are static samples rather than authoritative production
+//! per-direction full `SupportType.CENTER` and `SupportType.RIGID` masks, the
+//! full collision-face mask used by `MultifaceBlock.canAttachTo`, and the full
+//! occlusion-face mask at the same probe origin. For `hasDynamicShape` states,
+//! these masks are static samples rather than authoritative production
 //! semantics; issue #646 owns the live context-aware contract. The `BlockState`
 //! newtype in `rivet-registry` decodes all tables; no behavior is hand-typed.
 //!
-//! Validation: all three run tables must partition `0..state_count` densely (first starts
-//! at 0, starts strictly increasing, lengths positive, no overlap, sum ==
-//! count), every run's start/length must fit the emitted `(u16, u16, u32)`
-//! tuple and lie within `state_count`, the accumulation is overflow-checked,
-//! the word's reserved bits (27..32) must be zero, and the fixture must match
-//! its provenance manifest sha256. `state_count` is pinned to 32366 (the
-//! emitted `BLOCK_STATE_COUNT`) by the live probe.
+//! Validation: every run table must partition `0..state_count` densely (first starts at
+//! 0, starts strictly increasing, lengths positive, no overlap, sum == count), every run's
+//! start/length must fit the emitted `(u16, u16, u32)` tuple and lie within `state_count`,
+//! the accumulation is overflow-checked, the word's reserved bits (27..32) must be zero,
+//! and the fixture must match its provenance manifest sha256. `state_count` is pinned to
+//! 32366 (the emitted `BLOCK_STATE_COUNT`) by the live probe.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -62,7 +62,16 @@ pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> 
     let root = crate::registries::parse_strict(&json)
         .with_context(|| format!("parse {}", input.display()))?;
 
-    let (runs, face_sturdy_runs, collision_face_runs, dynamic_shape_runs) = validate(root)?;
+    let (
+        runs,
+        face_sturdy_runs,
+        center_support_runs,
+        rigid_support_runs,
+        collision_face_runs,
+        occlusion_face_runs,
+        dynamic_shape_runs,
+        dynamic_fixtures,
+    ) = validate(root)?;
     // The behavior table must span exactly the same state space as the
     // block-state registry it indexes: a behavior dump regenerated from a
     // differently-sized registry would leave real states silently decoding as
@@ -79,8 +88,12 @@ pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> 
         render(
             &runs,
             &face_sturdy_runs,
+            &center_support_runs,
+            &rigid_support_runs,
             &collision_face_runs,
+            &occlusion_face_runs,
             &dynamic_shape_runs,
+            &dynamic_fixtures,
             &source,
         ),
     )
@@ -126,11 +139,28 @@ pub(crate) struct DynamicShapeRun {
     dynamic: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct DynamicFixture {
+    name: String,
+    block: String,
+    state_id: u32,
+    dynamic: bool,
+    support_full: u8,
+    support_center: u8,
+    support_rigid: u8,
+    collision_full: u8,
+    occlusion_full: u8,
+}
+
 type ValidatedTables = (
     Vec<Run>,
     Vec<FaceSturdyRun>,
+    Vec<FaceSturdyRun>,
+    Vec<FaceSturdyRun>,
     Vec<CollisionFaceRun>,
+    Vec<FaceSturdyRun>,
     Vec<DynamicShapeRun>,
+    Vec<DynamicFixture>,
 );
 
 /// The total number of block states in the registry (`BLOCK_STATE_COUNT`),
@@ -289,9 +319,24 @@ fn validate(root: Value) -> Result<ValidatedTables> {
             .context("`face_sturdy_runs` missing from block_behaviors.json")?,
         state_count,
     )?;
+    let center_support_runs = validate_face_sturdy_runs(
+        obj.get("center_support_runs")
+            .context("`center_support_runs` missing from block_behaviors.json")?,
+        state_count,
+    )?;
+    let rigid_support_runs = validate_face_sturdy_runs(
+        obj.get("rigid_support_runs")
+            .context("`rigid_support_runs` missing from block_behaviors.json")?,
+        state_count,
+    )?;
     let collision_face_runs = validate_collision_face_runs(
         obj.get("collision_face_runs")
             .context("`collision_face_runs` missing from block_behaviors.json")?,
+        state_count,
+    )?;
+    let occlusion_face_runs = validate_face_sturdy_runs(
+        obj.get("occlusion_face_runs")
+            .context("`occlusion_face_runs` missing from block_behaviors.json")?,
         state_count,
     )?;
     let dynamic_shape_runs = validate_dynamic_shape_runs(
@@ -299,12 +344,21 @@ fn validate(root: Value) -> Result<ValidatedTables> {
             .context("`dynamic_shape_runs` missing from block_behaviors.json")?,
         state_count,
     )?;
+    let dynamic_fixtures = validate_dynamic_fixtures(
+        obj.get("dynamic_fixtures")
+            .context("`dynamic_fixtures` missing from block_behaviors.json")?,
+        state_count,
+    )?;
 
     Ok((
         runs,
         face_sturdy_runs,
+        center_support_runs,
+        rigid_support_runs,
         collision_face_runs,
+        occlusion_face_runs,
         dynamic_shape_runs,
+        dynamic_fixtures,
     ))
 }
 
@@ -558,12 +612,104 @@ fn validate_dynamic_shape_runs(value: &Value, state_count: u64) -> Result<Vec<Dy
     Ok(out)
 }
 
+fn validate_dynamic_fixtures(value: &Value, state_count: u64) -> Result<Vec<DynamicFixture>> {
+    let values = value
+        .as_array()
+        .context("`dynamic_fixtures` must be an array")?;
+    if values.is_empty() {
+        bail!("`dynamic_fixtures` is empty");
+    }
+    let mut fixtures = Vec::with_capacity(values.len());
+    let mut names = std::collections::HashSet::new();
+    for (index, value) in values.iter().enumerate() {
+        let object = value
+            .as_object()
+            .with_context(|| format!("dynamic_fixtures fixture {index} must be an object"))?;
+        for field in object.keys() {
+            if !matches!(
+                field.as_str(),
+                "name"
+                    | "block"
+                    | "state_id"
+                    | "dynamic"
+                    | "support_full"
+                    | "support_center"
+                    | "support_rigid"
+                    | "collision_full"
+                    | "occlusion_full"
+            ) {
+                bail!("dynamic_fixtures fixture {index} has unexpected field `{field}`");
+            }
+        }
+        let name = object
+            .get("name")
+            .and_then(Value::as_str)
+            .with_context(|| format!("dynamic_fixtures fixture {index} `name` must be a string"))?;
+        if !names.insert(name) {
+            bail!("dynamic_fixtures fixture {index} duplicates name `{name}`");
+        }
+        let block = object
+            .get("block")
+            .and_then(Value::as_str)
+            .with_context(|| {
+                format!("dynamic_fixtures fixture {index} `block` must be a string")
+            })?;
+        let state_id = object
+            .get("state_id")
+            .and_then(Value::as_u64)
+            .with_context(|| {
+                format!("dynamic_fixtures fixture {index} `state_id` must be an integer")
+            })?;
+        if state_id >= state_count {
+            bail!(
+                "dynamic_fixtures fixture {index} state_id {state_id} is outside state_count {state_count}"
+            );
+        }
+        let dynamic = object
+            .get("dynamic")
+            .and_then(Value::as_bool)
+            .with_context(|| {
+                format!("dynamic_fixtures fixture {index} `dynamic` must be boolean")
+            })?;
+        if !dynamic {
+            bail!("dynamic_fixtures fixture {index} is not marked dynamic");
+        }
+        let mask = |field: &str| -> Result<u8> {
+            let value = object.get(field).and_then(Value::as_u64).with_context(|| {
+                format!("dynamic_fixtures fixture {index} `{field}` must be an integer")
+            })?;
+            if value > 0x3F {
+                bail!(
+                    "dynamic_fixtures fixture {index} `{field}` mask {value} has bits outside six directions"
+                );
+            }
+            Ok(value as u8)
+        };
+        fixtures.push(DynamicFixture {
+            name: name.to_string(),
+            block: block.to_string(),
+            state_id: state_id as u32,
+            dynamic,
+            support_full: mask("support_full")?,
+            support_center: mask("support_center")?,
+            support_rigid: mask("support_rigid")?,
+            collision_full: mask("collision_full")?,
+            occlusion_full: mask("occlusion_full")?,
+        });
+    }
+    Ok(fixtures)
+}
+
 /// Render `generated/block_behaviors.rs`.
 fn render(
     runs: &[Run],
     face_sturdy_runs: &[FaceSturdyRun],
+    center_support_runs: &[FaceSturdyRun],
+    rigid_support_runs: &[FaceSturdyRun],
     collision_face_runs: &[CollisionFaceRun],
+    occlusion_face_runs: &[FaceSturdyRun],
     dynamic_shape_runs: &[DynamicShapeRun],
+    dynamic_fixtures: &[DynamicFixture],
     source: &SourceProvenance,
 ) -> String {
     let mut out = String::new();
@@ -708,7 +854,7 @@ fn render(
              } else {\n\
                  BLOCK_BEHAVIOR_RUNS[0].2\n\
              }\n\
-         }\n",
+         }\n\n",
     );
 
     out.push_str(
@@ -743,17 +889,31 @@ fn render(
              } else {\n\
                  BLOCK_FACE_STURDY_RUNS[0].2\n\
              }\n\
-         }\n",
+         }\n\n",
     );
 
+    for (name, runs, description) in [
+        ("CENTER_SUPPORT", center_support_runs, "SupportType.CENTER"),
+        ("RIGID_SUPPORT", rigid_support_runs, "SupportType.RIGID"),
+    ] {
+        out.push_str(&format!(
+            "/// Run-length-encoded Paper `{description}` face masks at the probe origin.\n/// Dynamic-shape states require live context instead of these samples.\npub static BLOCK_{name}_RUNS: &[(u16, u16, u8)] = &[\n"
+        ));
+        for run in runs {
+            out.push_str(&format!(
+                "    ({}, {}, 0x{:02X}),\n",
+                run.start, run.length, run.mask
+            ));
+        }
+        out.push_str("];\n\n");
+        let lower = name.to_ascii_lowercase();
+        out.push_str(&format!(
+            "/// The Paper `{description}` face sample for a state id.\npub fn {lower}_mask_of(id: StateId) -> u8 {{\n    let id = id.0 as u32;\n    let idx = BLOCK_{name}_RUNS.partition_point(|(start, _, _)| *start as u32 <= id);\n    if idx == 0 {{ return BLOCK_{name}_RUNS[0].2; }}\n    let (start, len, mask) = BLOCK_{name}_RUNS[idx - 1];\n    if id < start as u32 + len as u32 {{ mask }} else {{ BLOCK_{name}_RUNS[0].2 }}\n}}\n\n"
+        ));
+    }
+
     out.push_str(
-        "/// Run-length-encoded full collision-face masks sampled at\n\
-         /// `BlockPos.ZERO` with `EmptyBlockGetter`, as used by\n\
-         /// `MultifaceBlock.canAttachTo`. Bit order is `Direction.values()`\n\
-         /// (`DOWN`, `UP`, `NORTH`, `SOUTH`, `WEST`, `EAST`). These samples are\n\
-         /// not authoritative for `hasDynamicShape` states; live context belongs\n\
-         /// to issue #646.\n\
-         pub static BLOCK_COLLISION_FACE_RUNS: &[(u16, u16, u8)] = &[\n",
+        "/// Run-length-encoded full collision-face masks sampled at\n/// `BlockPos.ZERO` with `EmptyBlockGetter`, as used by\n/// `MultifaceBlock.canAttachTo`. Bit order is `Direction.values()`\n/// (`DOWN`, `UP`, `NORTH`, `SOUTH`, `WEST`, `EAST`). These samples are\n/// not authoritative for `hasDynamicShape` states; live context belongs\n/// to issue #646.\npub static BLOCK_COLLISION_FACE_RUNS: &[(u16, u16, u8)] = &[\n",
     );
     for run in collision_face_runs {
         out.push_str(&format!(
@@ -779,11 +939,50 @@ fn render(
              } else {\n\
                  BLOCK_COLLISION_FACE_RUNS[0].2\n\
              }\n\
-         }\n",
+         }\n\n",
     );
 
+    out.push_str("/// Run-length-encoded full occlusion-face masks at the probe origin.\npub static BLOCK_OCCLUSION_FACE_RUNS: &[(u16, u16, u8)] = &[\n");
+    for run in occlusion_face_runs {
+        out.push_str(&format!(
+            "    ({}, {}, 0x{:02X}),\n",
+            run.start, run.length, run.mask
+        ));
+    }
+    out.push_str("];\n\n");
     out.push_str(
-        "/// Run-length-encoded `Block.hasDynamicShape()` metadata.\n\
+        "/// The Paper full occlusion-face sample for a state id.\n\
+         pub fn occlusion_face_mask_of(id: StateId) -> u8 {\n\
+             let id = id.0 as u32;\n\
+             let idx = BLOCK_OCCLUSION_FACE_RUNS.partition_point(|(start, _, _)| *start as u32 <= id);\n\
+             if idx == 0 { return BLOCK_OCCLUSION_FACE_RUNS[0].2; }\n\
+             let (start, len, mask) = BLOCK_OCCLUSION_FACE_RUNS[idx - 1];\n\
+             if id < start as u32 + len as u32 { mask } else { BLOCK_OCCLUSION_FACE_RUNS[0].2 }\n\
+         }\n\n",
+    );
+
+    out.push_str("/// Pinned dynamic-shape fixtures emitted by the Paper probe.\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub struct DynamicShapeFixture {\n    pub name: &'static str,\n    pub block: &'static str,\n    pub state_id: StateId,\n    pub dynamic: bool,\n    pub support_full: u8,\n    pub support_center: u8,\n    pub support_rigid: u8,\n    pub collision_full: u8,\n    pub occlusion_full: u8,\n}\n\npub static DYNAMIC_SHAPE_FIXTURES: &[DynamicShapeFixture] = &[\n");
+    for fixture in dynamic_fixtures {
+        out.push_str(&format!(
+            "    DynamicShapeFixture {{ name: {:?}, block: {:?}, state_id: StateId({}), dynamic: {}, support_full: 0x{:02X}, support_center: 0x{:02X}, support_rigid: 0x{:02X}, collision_full: 0x{:02X}, occlusion_full: 0x{:02X} }},\n",
+            fixture.name,
+            fixture.block,
+            fixture.state_id,
+            fixture.dynamic,
+            fixture.support_full,
+            fixture.support_center,
+            fixture.support_rigid,
+            fixture.collision_full,
+            fixture.occlusion_full,
+        ));
+    }
+    out.push_str("];\n\n");
+    out.push_str(
+        "/// Resolve a named pinned dynamic-shape fixture.\n\
+         pub fn dynamic_shape_fixture(name: &str) -> Option<&'static DynamicShapeFixture> {\n\
+             DYNAMIC_SHAPE_FIXTURES.iter().find(|fixture| fixture.name == name)\n\
+         }\n\n\
+         /// Run-length-encoded `Block.hasDynamicShape()` metadata.\n\
          /// Dynamic states must not answer context-sensitive shape predicates\n\
          /// from the zero-context support/collision samples.\n\
          pub static DYNAMIC_SHAPE_RUNS: &[(u16, u16, bool)] = &[\n",
@@ -805,7 +1004,7 @@ fn render(
              }\n\
              let (start, len, dynamic) = DYNAMIC_SHAPE_RUNS[idx - 1];\n\
              if id < start as u32 + len as u32 { dynamic } else { DYNAMIC_SHAPE_RUNS[0].2 }\n\
-         }\n",
+         }\n\n",
     );
 
     out
@@ -828,7 +1027,19 @@ mod tests {
                 {"start": 0, "length": 2, "mask": 0},
                 {"start": 2, "length": 3, "mask": 63},
             ],
+            "center_support_runs": [
+                {"start": 0, "length": 2, "mask": 0},
+                {"start": 2, "length": 3, "mask": 63},
+            ],
+            "rigid_support_runs": [
+                {"start": 0, "length": 2, "mask": 0},
+                {"start": 2, "length": 3, "mask": 63},
+            ],
             "collision_face_runs": [
+                {"start": 0, "length": 2, "mask": 0},
+                {"start": 2, "length": 3, "mask": 63},
+            ],
+            "occlusion_face_runs": [
                 {"start": 0, "length": 2, "mask": 0},
                 {"start": 2, "length": 3, "mask": 63},
             ],
@@ -836,18 +1047,35 @@ mod tests {
                 {"start": 0, "length": 2, "dynamic": false},
                 {"start": 2, "length": 3, "dynamic": true},
             ],
+            "dynamic_fixtures": [
+                {"name": "test_dynamic", "block": "minecraft:test", "state_id": 2, "dynamic": true,
+                 "support_full": 63, "support_center": 63, "support_rigid": 63,
+                 "collision_full": 63, "occlusion_full": 63}
+            ],
         })
     }
 
     #[test]
     fn dense_partition_passes() {
-        let (runs, face_sturdy_runs, collision_face_runs, dynamic_shape_runs) =
-            validate(valid_root()).unwrap();
+        let (
+            runs,
+            face_sturdy_runs,
+            center_support_runs,
+            rigid_support_runs,
+            collision_face_runs,
+            occlusion_face_runs,
+            dynamic_shape_runs,
+            dynamic_fixtures,
+        ) = validate(valid_root()).unwrap();
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[1].word, 0x20015);
         assert_eq!(face_sturdy_runs[1].mask, 63);
+        assert_eq!(center_support_runs[1].mask, 63);
+        assert_eq!(rigid_support_runs[1].mask, 63);
         assert_eq!(collision_face_runs[1].mask, 63);
+        assert_eq!(occlusion_face_runs[1].mask, 63);
         assert!(dynamic_shape_runs[1].dynamic);
+        assert_eq!(dynamic_fixtures[0].support_full, 63);
     }
 
     #[test]
@@ -949,6 +1177,53 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_dynamic_fixture_name_fails() {
+        let mut v = valid_root();
+        let fixture = v["dynamic_fixtures"][0].clone();
+        v["dynamic_fixtures"] = serde_json::json!([fixture.clone(), fixture]);
+        let err = validate(v).unwrap_err();
+        assert!(err.to_string().contains("duplicates name"), "got: {err}");
+    }
+
+    #[test]
+    fn non_dynamic_fixture_fails() {
+        let mut v = valid_root();
+        v["dynamic_fixtures"][0]["dynamic"] = serde_json::json!(false);
+        let err = validate(v).unwrap_err();
+        assert!(err.to_string().contains("not marked dynamic"), "got: {err}");
+    }
+
+    #[test]
+    fn dynamic_fixture_state_id_out_of_range_fails() {
+        let mut v = valid_root();
+        v["dynamic_fixtures"][0]["state_id"] = serde_json::json!(5);
+        let err = validate(v).unwrap_err();
+        assert!(
+            err.to_string().contains("outside state_count"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn dynamic_fixture_mask_out_of_range_fails() {
+        let mut v = valid_root();
+        v["dynamic_fixtures"][0]["support_full"] = serde_json::json!(64);
+        let err = validate(v).unwrap_err();
+        assert!(
+            err.to_string().contains("outside six directions"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn dynamic_fixture_unknown_field_fails() {
+        let mut v = valid_root();
+        v["dynamic_fixtures"][0]["extra"] = serde_json::json!(1);
+        let err = validate(v).unwrap_err();
+        assert!(err.to_string().contains("unexpected field"), "got: {err}");
+    }
+
+    #[test]
     fn empty_runs_fail() {
         let mut v = valid_root();
         v["runs"] = serde_json::json!([]);
@@ -1015,14 +1290,28 @@ mod tests {
             "face_sturdy_runs": [
                 {"start": 0, "length": 5, "mask": 0},
             ],
+            "center_support_runs": [
+                {"start": 0, "length": 5, "mask": 0},
+            ],
+            "rigid_support_runs": [
+                {"start": 0, "length": 5, "mask": 0},
+            ],
             "collision_face_runs": [
+                {"start": 0, "length": 5, "mask": 0},
+            ],
+            "occlusion_face_runs": [
                 {"start": 0, "length": 5, "mask": 0},
             ],
             "dynamic_shape_runs": [
                 {"start": 0, "length": 5, "dynamic": false},
             ],
+            "dynamic_fixtures": [
+                {"name": "test_dynamic", "block": "minecraft:test", "state_id": 0, "dynamic": true,
+                 "support_full": 0, "support_center": 0, "support_rigid": 0,
+                 "collision_full": 0, "occlusion_full": 0}
+            ],
         });
-        let (runs, _, _, _) = validate(v).unwrap();
+        let (runs, _, _, _, _, _, _, _) = validate(v).unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].length, 5);
     }
@@ -1068,6 +1357,65 @@ mod tests {
     }
 
     #[test]
+    fn mutated_fixture_bytes_fail_provenance() {
+        let repo_root = crate::extract::find_repo_root().unwrap();
+        let source_fixture = default_input(&repo_root);
+        let source_manifest = source_fixture.with_file_name("block_behaviors.manifest.json");
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = temp.path().join("block_behaviors.json");
+        let manifest = temp.path().join("block_behaviors.manifest.json");
+        fs::copy(source_fixture, &fixture).unwrap();
+        fs::copy(source_manifest, &manifest).unwrap();
+        let mut bytes = fs::read(&fixture).unwrap();
+        bytes[0] ^= 1;
+        fs::write(&fixture, bytes).unwrap();
+        let err = load_provenance(&fixture).unwrap_err();
+        assert!(
+            err.to_string().contains("does not match its provenance"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn mutated_fixture_manifest_digest_fails_provenance() {
+        let repo_root = crate::extract::find_repo_root().unwrap();
+        let source_fixture = default_input(&repo_root);
+        let source_manifest = source_fixture.with_file_name("block_behaviors.manifest.json");
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = temp.path().join("block_behaviors.json");
+        let manifest = temp.path().join("block_behaviors.manifest.json");
+        fs::copy(source_fixture, &fixture).unwrap();
+        fs::copy(source_manifest, &manifest).unwrap();
+        let mut value: Value =
+            serde_json::from_str(&fs::read_to_string(&manifest).unwrap()).unwrap();
+        value["file"]["sha256"] = serde_json::json!("00");
+        fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+        let err = load_provenance(&fixture).unwrap_err();
+        assert!(
+            err.to_string().contains("does not match its provenance"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn mutated_fixture_source_provenance_fails_pinned_source() {
+        let repo_root = crate::extract::find_repo_root().unwrap();
+        let source_fixture = default_input(&repo_root);
+        let source_manifest = source_fixture.with_file_name("block_behaviors.manifest.json");
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = temp.path().join("block_behaviors.json");
+        let manifest = temp.path().join("block_behaviors.manifest.json");
+        fs::copy(source_fixture, &fixture).unwrap();
+        fs::copy(source_manifest, &manifest).unwrap();
+        let mut value: Value =
+            serde_json::from_str(&fs::read_to_string(&manifest).unwrap()).unwrap();
+        value["source"]["paper_git"] = serde_json::json!("deadbeef");
+        fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();
+        let err = load_provenance(&fixture).unwrap_err();
+        assert!(err.to_string().contains("Paper commit"), "got: {err}");
+    }
+
+    #[test]
     fn rendering_is_deterministic_and_carries_provenance() {
         let source: SourceProvenance = serde_json::from_str(
             r#"{"jar":"paper-26.2.jar","jar_sha256":"e1a027e9481a16ec1da0f0e139d370280050d123a14c022a476c2dc8a697ebda","minecraft_version":"26.2","protocol_version":776,"world_version":4903}"#,
@@ -1090,28 +1438,50 @@ mod tests {
             length: 3,
             mask: 0x3F,
         }];
+        let center_support_runs = face_sturdy_runs.clone();
+        let rigid_support_runs = face_sturdy_runs.clone();
         let collision_face_runs = vec![CollisionFaceRun {
             start: 0,
             length: 3,
             mask: 0x3F,
         }];
+        let occlusion_face_runs = face_sturdy_runs.clone();
         let dynamic_shape_runs = vec![DynamicShapeRun {
             start: 0,
             length: 3,
             dynamic: false,
         }];
+        let dynamic_fixtures = vec![DynamicFixture {
+            name: "test".to_string(),
+            block: "minecraft:test".to_string(),
+            state_id: 0,
+            dynamic: true,
+            support_full: 0x3F,
+            support_center: 0x3F,
+            support_rigid: 0x3F,
+            collision_full: 0x3F,
+            occlusion_full: 0x3F,
+        }];
         let a = render(
             &runs,
             &face_sturdy_runs,
+            &center_support_runs,
+            &rigid_support_runs,
             &collision_face_runs,
+            &occlusion_face_runs,
             &dynamic_shape_runs,
+            &dynamic_fixtures,
             &source,
         );
         let b = render(
             &runs,
             &face_sturdy_runs,
+            &center_support_runs,
+            &rigid_support_runs,
             &collision_face_runs,
+            &occlusion_face_runs,
             &dynamic_shape_runs,
+            &dynamic_fixtures,
             &source,
         );
         assert_eq!(a, b);
@@ -1131,7 +1501,7 @@ mod tests {
         let repo_root = crate::extract::find_repo_root().unwrap();
         let json = fs::read_to_string(default_input(&repo_root)).unwrap();
         let root = crate::registries::parse_strict(&json).unwrap();
-        let (runs, _, _, _) = validate(root).unwrap();
+        let (runs, _, _, _, _, _, _, _) = validate(root).unwrap();
         let state_count: u64 = runs.iter().map(|r| r.length as u64).sum();
         assert_eq!(state_count, 32366, "registry state count drifted");
 
@@ -1175,7 +1545,7 @@ mod tests {
         let repo_root = crate::extract::find_repo_root().unwrap();
         let json = fs::read_to_string(default_input(&repo_root)).unwrap();
         let root = crate::registries::parse_strict(&json).unwrap();
-        let (_, runs, _, _) = validate(root).unwrap();
+        let (_, runs, _, _, _, _, _, _) = validate(root).unwrap();
         let state_count: u64 = runs.iter().map(|r| r.length as u64).sum();
         assert_eq!(state_count, 32366, "registry state count drifted");
 
@@ -1212,7 +1582,7 @@ mod tests {
         let repo_root = crate::extract::find_repo_root().unwrap();
         let json = fs::read_to_string(default_input(&repo_root)).unwrap();
         let root = crate::registries::parse_strict(&json).unwrap();
-        let (_, _, runs, _) = validate(root).unwrap();
+        let (_, _, runs, _, _, _, _, _) = validate(root).unwrap();
         let state_count: u64 = runs.iter().map(|r| r.length as u64).sum();
         assert_eq!(state_count, 32366, "registry state count drifted");
 
@@ -1251,7 +1621,7 @@ mod tests {
         assert_eq!(registry_state_count(&repo_root).unwrap(), 32366);
         let json = fs::read_to_string(default_input(&repo_root)).unwrap();
         let root = crate::registries::parse_strict(&json).unwrap();
-        let (runs, _, _, _) = validate(root).unwrap();
+        let (runs, _, _, _, _, _, _, _) = validate(root).unwrap();
         check_state_count_matches(&runs, 32366).unwrap();
     }
 }

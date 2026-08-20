@@ -105,6 +105,10 @@ pub mod huge_red_mushroom_feature;
 pub mod iceberg_feature;
 pub mod simple_block_feature;
 pub mod snow_and_freeze_feature;
+// The seed-42 feature slice — `UnderwaterMagmaFeature` (the
+// `mc.world.level.levelgen.feature.underwatermagma` manifest unit), wired at
+// id 21.
+pub mod underwater_magma_feature;
 pub mod vines_feature;
 
 // The `net.minecraft.world.level.levelgen.feature.stateproviders` value layer
@@ -221,6 +225,7 @@ use crate::levelgen::feature::configurations::SculkPatchConfiguration;
 use crate::levelgen::feature::configurations::SimpleBlockConfiguration;
 use crate::levelgen::feature::configurations::SpikeConfiguration;
 use crate::levelgen::feature::configurations::SpringConfiguration;
+use crate::levelgen::feature::configurations::UnderwaterMagmaConfiguration;
 use crate::levelgen::feature::configurations::WeightedRandomFeatureConfiguration;
 use crate::levelgen::feature::no_op_feature::NO_OP;
 use rivet_registry::Holder;
@@ -269,6 +274,7 @@ pub use simple_block_feature::{SIMPLE_BLOCK, SimpleBlockFeature};
 pub use snow_and_freeze_feature::{FREEZE_TOP_LAYER, SnowAndFreezeFeature};
 pub use spike_feature::{SPIKE, SpikeFeature};
 pub use spring_feature::{SPRING, SpringFeature};
+pub use underwater_magma_feature::{UNDERWATER_MAGMA, UnderwaterMagmaFeature};
 pub use vines_feature::{VINES, VinesFeature};
 
 // The vegetation-family wave (issue #600) — the `.feature.selector` unit's
@@ -556,7 +562,8 @@ pub fn feature_id_from_registry_name(name: &str) -> Option<FeatureId> {
 /// `CompositeFeatureConfiguration`), `random_boolean_selector` (id 55,
 /// `RandomBooleanSelectorFeature` over `RandomBooleanFeatureConfiguration`),
 /// and `sequence` (id 56, `SequenceFeature` over
-/// `CompositeFeatureConfiguration`) — and this wave
+/// `CompositeFeatureConfiguration`) — the seed-42 `underwater_magma` leaf
+/// (id 21) — and this wave
 /// (`mc.world.level.levelgen.feature.geology-cave-leaves`) the nine
 /// `.feature.geology*` leaves, in registry-id order: `spring_feature` (id 4),
 /// `spike` (id 12), `disk` (id 26), `lake` (id 27, the nested
@@ -929,6 +936,15 @@ pub fn feature_place<R: RandomSource>(
                 .expect("simple_block feature must carry a SimpleBlockConfiguration");
             SIMPLE_BLOCK.place_with_config(config, level, chunk_generator, random, origin)
         }
+        // `Feature.UNDERWATER_MAGMA` — the registered `minecraft:underwater_magma`
+        // leaf (the water-column floor scan + magma placement slice; the
+        // face-occlusion visibility uses the `#232`/`mc.world.phys.shapes` seam).
+        21 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<UnderwaterMagmaConfiguration>()
+                .expect("underwater_magma feature must carry a UnderwaterMagmaConfiguration");
+            UNDERWATER_MAGMA.place_with_config(config, level, chunk_generator, random, origin)
+        }
         // `Feature.BASALT_COLUMNS`.
         45 => {
             let config = (config as &dyn Any)
@@ -1092,6 +1108,37 @@ mod tests {
             &origin,
         );
         assert!(placed);
+    }
+
+    /// The seed-42 `Feature.UNDERWATER_MAGMA` registration (id 21) reaches
+    /// the concrete behavior through the dispatch hub. A zero search range
+    /// makes the configured water origin fail the scan, so this test exercises
+    /// the id/config routing without depending on placement geometry.
+    #[test]
+    fn underwater_magma_dispatch_id_21_reaches_concrete_feature() {
+        let origin = BlockPos::new(0, 10, 0);
+        let mut level = crate::levelgen::feature::test_support::TestLevel::over(
+            crate::levelgen::feature::test_support::access(),
+        );
+        level.states.insert(
+            origin,
+            crate::block::blocks::Blocks::WATER.default_block_state(),
+        );
+        let generator = TestGenerator;
+        let mut random = LegacyRandomSource::new(1);
+        let config = UnderwaterMagmaConfiguration::new(0, 0, 1.0);
+
+        let placed = feature_place(
+            FeatureId::new(21),
+            &config,
+            &mut level,
+            &generator,
+            &mut random,
+            &origin,
+        );
+
+        assert!(!placed);
+        assert_eq!(level.reads.borrow().as_slice(), [origin, origin, origin]);
     }
 
     /// `ConfiguredFeature.place` routes through `feature_place` with the
