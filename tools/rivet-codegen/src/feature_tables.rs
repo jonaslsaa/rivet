@@ -231,7 +231,7 @@ fn extract_mob_settings(value: &Value, biomes: &[BiomeSettings]) -> Result<Vec<M
             .map(|b| b.id)
             .unwrap_or_default()
     };
-    out.sort_unstable_by(|a, b| id_of(&a.name).cmp(&id_of(&b.name)));
+    out.sort_unstable_by_key(|entry| id_of(&entry.name));
     Ok(out)
 }
 
