@@ -98,7 +98,6 @@ use rivet_registry::block_state::BlockState;
 use rivet_registry::builder::RegistryBuilder;
 use rivet_registry::core::BlockPos;
 use rivet_registry::core::ChunkPos;
-use rivet_registry::core::QuartPos;
 use rivet_registry::core::SectionPos;
 use rivet_registry::generated::biomes::BIOME_BY_ID;
 use rivet_registry::generated::blocks::BlockId;
@@ -113,6 +112,7 @@ use rivet_registry::registry_ops::RegistryOps;
 use rivet_registry::{Identifier, RegistrationInfo, ResourceKey};
 use rivet_serialization::codec::Codec;
 use rivet_serialization::json_ops::JsonOps;
+use rivet_util::RandomSource;
 use rivet_util::StaticCache2D;
 use rivet_util::WorldgenRandom;
 use rivet_util::random::LegacyRandomSource;
@@ -596,9 +596,10 @@ impl GenerationChunkHolder {
             // `ChunkStatusTasks.generateSpawn` → Java's
             // `NoiseBasedChunkGenerator.spawnOriginalMobs`
             // (`NaturalSpawner.spawnMobsForChunkGeneration`). See [`run_spawn`]:
-            // the genuine evaluate of `disableMobGeneration`, the center biome's
-            // `MobSpawnSettings` (`MOB_SPAWN_SETTINGS_BY_NAME`), the `SPAWN_MOBS`
-            // rule, and the empty/non-empty CREATURE gate — never a bare no-op.
+            // the genuine evaluation of `disableMobGeneration`, the exact
+            // chunk-minimum biome's `MobSpawnSettings`
+            // (`MOB_SPAWN_SETTINGS_BY_NAME`), the `SPAWN_MOBS` rule, and the
+            // first creature-probability roll — never a bare no-op.
             let generator = Arc::clone(&generator);
             move |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
                 // The overworld ships `spawn_mobs = true` (the rule's default);
@@ -1583,16 +1584,18 @@ fn run_biome_decoration(
     Ok(())
 }
 
-/// Resolve the SPAWN seam's center biome exactly as
+/// Resolve the SPAWN seam's biome exactly as
 /// `WorldGenRegion.getBiome(center.getWorldPosition().atY(getMaxY()))` does.
 ///
-/// This must use `BiomeManager.getBiome`, not a direct quart lookup: Java's
-/// fiddled-distance resolver chooses one of eight surrounding quart samples.
-/// All x/z samples are still inside the center chunk, so the injected lookup can
-/// read the borrowed center proto directly without constructing a self-
-/// referential region. `ChunkAccess.getNoiseBiome` also performs Java's vertical
-/// clamping for the two top-edge quart candidates.
-fn resolve_center_biome_name(
+/// `ChunkPos.getWorldPosition()` is the chunk's minimum block coordinate, not
+/// its geometric center. This must use `BiomeManager.getBiome`, not a direct
+/// quart lookup: Java's fiddled-distance resolver chooses one of eight
+/// surrounding quart samples. At the chunk-minimum x/z edge, candidates may
+/// address the neighboring chunk; the current detached holder only supplies the
+/// center proto, so the pinned acceptance query must select an in-chunk sample
+/// until G4 composes the shared generated workspace. `ChunkAccess.getNoiseBiome`
+/// performs Java's vertical clamping for the two top-edge quart candidates.
+fn resolve_spawn_biome_name(
     chunk: &ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
     generator: &OverworldGenerator,
 ) -> Option<&'static str> {
@@ -1601,11 +1604,8 @@ fn resolve_center_biome_name(
         .get_min_y()
         .wrapping_add(chunk.get_height())
         .wrapping_sub(1);
-    let position = BlockPos::new(
-        center.get_min_block_x().wrapping_add(8),
-        top_y,
-        center.get_min_block_z().wrapping_add(8),
-    );
+    // Paper's `ChunkPos.getWorldPosition()` returns `(minBlockX, 0, minBlockZ)`.
+    let position = BlockPos::new(center.get_min_block_x(), top_y, center.get_min_block_z());
     let biome_manager = BiomeManager::new(
         Arc::new(generator.biome_source.clone()),
         BiomeManager::obfuscate_seed(generator.seed()),
@@ -1628,7 +1628,8 @@ fn resolve_center_biome_name(
 ///      population) and the caller advances to SPAWN.
 ///   2. `center = worldGenRegion.getCenter()`; `biome =
 ///      worldGenRegion.getBiome(center.getWorldPosition().atY(worldGenRegion.getMaxY()))`
-///      — the center biome at the max build height.
+///      — the biome at the chunk-minimum block coordinate and max build height
+///      (`ChunkPos.getWorldPosition()` is `(minBlockX, 0, minBlockZ)`).
 ///   3. `random = new WorldgenRandom(new LegacyRandomSource(
 ///      RandomSupport.generateUniqueSeed()))`;
 ///      `random.setDecorationSeed(worldGenRegion.getSeed(), center.getMinBlockX(),
@@ -1642,22 +1643,19 @@ fn resolve_center_biome_name(
 ///        → the real empty/non-empty CREATURE gate AND the `SPAWN_MOBS` rule.
 ///        When either disqualifies, the body is a faithful no-op — no RNG draw,
 ///        no entity — and the caller advances to SPAWN.
-///      - Non-empty + rule on: Java enters the `while (random.nextFloat() <
-///        mobSettings.getCreatureProbability())` population loop (weighted
-///        `getRandom`, count draw, top-block lookup, and `EntityType.create`).
-///        Entity construction is deferred (RivetTodo #185, the entity/level
-///        units), so the Rivet seam refuses typed
-///        `GenError::CreatureSpawnNotGenerated` at exactly this boundary —
-///        before pretending entities were produced. The chunk is never stamped
-///        SPAWN and the observable block/biome/chunk state is unchanged.
+///      - Non-empty + rule on: Java evaluates `while (random.nextFloat() <
+///        mobSettings.getCreatureProbability())`. A failed first roll exits with
+///        zero entities. If the roll enters the population loop, weighted
+///        selection, count, placement, and entity construction remain deferred
+///        (RivetTodo #185), so the seam refuses typed
+///        `GenError::CreatureSpawnNotGenerated` before any unsupported-loop draw
+///        or fabricated entity. The chunk is never stamped SPAWN on refusal.
 ///
-/// The outcome is faithful to the pinned acceptance biome: the seed-42 center
-/// biome is `minecraft:river`, whose CREATURE list is EMPTY, so the genuine
-/// evaluation lands on the empty-list → advance path (zero entities), with the
-/// decoration seed still derived from `generateUniqueSeed` → `setDecorationSeed`
-/// (the no-op runs the RNG construction Java always performs). Never a bare
-/// no-op and never a fixture-specific shortcut: the empty/non-empty gate and the
-/// `SPAWN_MOBS` rule are genuinely evaluated.
+/// The pinned seed-42 origin resolves `minecraft:dark_forest`, whose CREATURE
+/// list is non-empty with probability 0.1. Its decoration-seeded first roll is
+/// 0.7275637, so the exact while condition fails and Paper advances with zero
+/// entities. This is never a fixture-specific shortcut: the list, rule, and RNG
+/// condition are genuinely evaluated in Java order.
 fn run_spawn(
     chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
     generator: &Arc<OverworldGenerator>,
@@ -1673,11 +1671,11 @@ fn run_spawn(
         return Ok(());
     }
 
-    // Steps 2-4: center biome at maxY, then the RNG + NaturalSpawner gate. The
-    // center biome is resolved with Java's exact `BiomeManager.getBiome`
-    // fiddled-distance interpolation over the center chunk's cached quart cells
-    // — see [`resolve_center_biome_name`].
-    let biome_name = resolve_center_biome_name(chunk, generator);
+    // Steps 2-4: the chunk-minimum biome at maxY, then the RNG +
+    // NaturalSpawner gate. The biome is resolved with Java's exact
+    // `BiomeManager.getBiome` fiddled-distance interpolation over cached quart
+    // cells — see [`resolve_spawn_biome_name`].
+    let biome_name = resolve_spawn_biome_name(chunk, generator);
     // `MOB_SPAWN_SETTINGS_BY_NAME` is keyed by biome name; a biome the tables
     // do not carry (a drifted registry) fails typed rather than fabricating.
     let mob_settings = match biome_name {
@@ -1726,8 +1724,17 @@ fn run_spawn(
         return Ok(());
     }
 
-    // Non-empty CREATURE list with the rule on: entity construction is deferred
-    // (RivetTodo #185), so refuse typed before pretending entities were produced.
+    // `while (random.nextFloat() < getCreatureProbability())`: the condition
+    // itself is observable even when no population iteration runs. The pinned
+    // seed-42 origin roll is 0.7275637, so Paper exits here with zero entities.
+    if random.next_float() >= mob_settings.creature_probability {
+        return Ok(());
+    }
+
+    // The first roll entered the population loop. Weighted selection, count,
+    // placement checks, and entity construction are deferred (RivetTodo #185),
+    // so refuse typed before consuming any unsupported-loop draws or pretending
+    // entities were produced.
     Err(GenError::CreatureSpawnNotGenerated {
         chunk_pos: center_pos,
         biome: biome_name,
@@ -3412,11 +3419,11 @@ mod tests {
         );
     }
 
-    /// Drive the SPAWN seam to the resolve step and force the center biome at
-    /// the max build height to `biome`, returning the fresh chunk. The holder is
-    /// driven through CARVERS (the real worldgen rungs) so the center biome is
-    /// genuinely filled; `run_spawn` composes its own SPAWN-step region.
-    fn spawn_seam_holder_with_center_biome(
+    /// Drive the SPAWN seam to the resolve step and force the center proto's
+    /// top biome row to `biome`, returning the fresh chunk. The holder is driven
+    /// through CARVERS (the real worldgen rungs) before the focused override;
+    /// `run_spawn` composes its own SPAWN-step region.
+    fn spawn_seam_holder_with_top_biome(
         generator: &Arc<OverworldGenerator>,
         pos: ChunkPos,
         biome_id: u16,
@@ -3427,9 +3434,9 @@ mod tests {
             .expect("CARVERS");
         // `BiomeManager.getBiome` can select any of the eight surrounding quart
         // corners. At max build height both y candidates clamp to the top
-        // section's final quart row, while all x/z candidates remain inside the
-        // center chunk. Fill that whole 4x4 row so the test controls the exact
-        // Java resolver rather than only one direct quart lookup.
+        // section's final quart row. The detached center proto wraps x/z quart
+        // coordinates exactly as its current lookup does, so filling the whole
+        // 4x4 row controls this focused seam without assuming one direct quart.
         let top_y = holder
             .chunk
             .get_min_y()
@@ -3445,20 +3452,25 @@ mod tests {
         holder
     }
 
-    /// The pinned seed-42 acceptance biome (0,0 center at maxY) is
-    /// `minecraft:river`: an EMPTY CREATURE list. Starting from the SPAWN
-    /// parent's completed status, the real executor dispatches `run_spawn`,
-    /// genuinely evaluates the settings/list/rule gates, and stamps SPAWN with
-    /// zero entities.
+    /// Paper 26.2's pinned seed-42 query for chunk (0,0) is block (0,319,0),
+    /// not the geometric center. The real BIOMES fill plus fiddled-distance
+    /// lookup resolves `minecraft:dark_forest`: a non-empty CREATURE list with
+    /// probability 0.1. `setDecorationSeed(42, 0, 0)` produces first roll
+    /// 0.7275637, so Java's while condition fails and SPAWN advances with zero
+    /// entities.
     #[test]
-    fn spawn_seam_river_advances_to_spawn_with_zero_entities() {
+    fn spawn_seam_dark_forest_failed_roll_advances_with_zero_entities() {
         let generator = test_generator();
         let mut holder = generator.create_holder(ChunkPos::new(0, 0));
         holder
             .generate_through(ChunkStatus::Carvers)
             .expect("CARVERS");
-        let name = resolve_center_biome_name(&holder.chunk, &generator);
-        assert_eq!(name, Some("minecraft:river"));
+        let name = resolve_spawn_biome_name(&holder.chunk, &generator);
+        assert_eq!(name, Some("minecraft:dark_forest"));
+
+        let mut probe = WorldgenRandom::new(LegacyRandomSource::new(0));
+        assert_eq!(probe.set_decoration_seed(42, 0, 0), 42);
+        assert_eq!(probe.next_float().to_bits(), 0.7275637f32.to_bits());
 
         // G1 owns the preceding LIGHT computation. Pin its completed parent
         // status here so this focused G2 test exercises the actual SPAWN step,
@@ -3468,7 +3480,7 @@ mod tests {
         let roster = holder.chunk.get_entities().len();
         holder
             .generate_through(ChunkStatus::Spawn)
-            .expect("empty CREATURE list advances to SPAWN");
+            .expect("failed creature-probability roll advances to SPAWN");
         assert_eq!(holder.status(), ChunkStatus::Spawn);
         assert_eq!(holder.chunk.get_entities().len(), roster);
     }
@@ -3480,7 +3492,7 @@ mod tests {
     fn spawn_seam_spawn_mobs_false_bypasses_population() {
         let generator = test_generator();
         // beach (id 3) has a non-empty CREATURE list (turtle).
-        let mut holder = spawn_seam_holder_with_center_biome(&generator, ChunkPos::new(0, 0), 3);
+        let mut holder = spawn_seam_holder_with_top_biome(&generator, ChunkPos::new(0, 0), 3);
         let status_before = holder.chunk.get_persisted_status();
         let roster = holder.chunk.get_entities().len();
         run_spawn(&mut holder.chunk, &generator, false).expect("rule off bypasses population");
@@ -3488,19 +3500,28 @@ mod tests {
         assert_eq!(holder.chunk.get_entities().len(), roster);
     }
 
-    /// A biome with a non-empty CREATURE list and SPAWN_MOBS=true: `run_spawn`
-    /// refuses typed `CreatureSpawnNotGenerated` before pretending entities were
-    /// produced, leaving the chunk's status and observable state atomic.
+    /// A non-empty CREATURE list with SPAWN_MOBS=true and an entering first
+    /// probability roll refuses typed before weighted selection or entity work.
+    /// Paper's seed-42 decoration RNG at chunk (-8,-4) rolls 0.090480566 < 0.1.
     #[test]
-    fn spawn_seam_non_empty_creature_refuses_typed() {
+    fn spawn_seam_entered_population_refuses_typed() {
         let generator = test_generator();
-        // beach (id 3) has a non-empty CREATURE list (turtle).
-        let mut holder = spawn_seam_holder_with_center_biome(&generator, ChunkPos::new(0, 0), 3);
-        let resolved = resolve_center_biome_name(&holder.chunk, &generator);
+        let pos = ChunkPos::new(-8, -4);
+        let mut probe = WorldgenRandom::new(LegacyRandomSource::new(0));
+        probe.set_decoration_seed(
+            generator.seed(),
+            pos.get_min_block_x(),
+            pos.get_min_block_z(),
+        );
+        assert_eq!(probe.next_float().to_bits(), 0.090480566f32.to_bits());
+
+        // beach (id 3) has a non-empty CREATURE list (turtle) at probability 0.1.
+        let mut holder = spawn_seam_holder_with_top_biome(&generator, pos, 3);
+        let resolved = resolve_spawn_biome_name(&holder.chunk, &generator);
         assert_eq!(
             resolved,
             Some("minecraft:beach"),
-            "center biome must resolve to beach after the write"
+            "spawn query must resolve to beach after the focused top-row write"
         );
         holder.chunk.set_persisted_status(ChunkStatus::Light);
         holder.chunk.set_light_correct(true);
