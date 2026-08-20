@@ -57,7 +57,9 @@ printf '[package]\nname = "rivet-codegen"\nversion = "0.1.0"\nedition = "2024"\n
 
 # The real gate script under test.
 cp "$PWD/scripts/gate.sh" "$SANDBOX/scripts/gate.sh"
-chmod +x "$SANDBOX/scripts/gate.sh"
+cp "$PWD/scripts/with-build-lock.sh" "$SANDBOX/scripts/with-build-lock.sh"
+cp "$PWD/scripts/cargo-target-dir.sh" "$SANDBOX/scripts/cargo-target-dir.sh"
+chmod +x "$SANDBOX/scripts/gate.sh" "$SANDBOX/scripts/with-build-lock.sh" "$SANDBOX/scripts/cargo-target-dir.sh"
 
 # The full gate runs `python3 scripts/test_analyze_graph.py` (the manifest
 # regression suite, added in #65 M1), and the marker audit runs
@@ -71,8 +73,8 @@ printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$SANDBOX/scripts/t
 # The oracle pre-check now requires the rivet-client binary (join-capture
 # harness); provide an existing dummy file so the pre-check reports all
 # prerequisites present.
-mkdir -p "$SANDBOX/tools/rivet-client/target/debug"
-: > "$SANDBOX/tools/rivet-client/target/debug/rivet-client"
+mkdir -p "$SANDBOX/target/debug"
+: > "$SANDBOX/target/debug/rivet-client"
 
 # gate.sh now also runs the scenario runner's Paper rows (join/move
 # Paper-vs-Rivet differentials) whenever the paperclip jar and the client binary
@@ -82,7 +84,7 @@ mkdir -p "$SANDBOX/tools/rivet-client/target/debug"
 mkdir -p "$SANDBOX/tools/rivet-client"
 cat > "$SANDBOX/tools/rivet-client/run-scenario.sh" <<'EOF'
 #!/bin/bash
-exit 0
+[ "${RIVET_BUILD_LOCK_HELD:-0}" = 1 ]
 EOF
 chmod +x "$SANDBOX/tools/rivet-client/run-scenario.sh"
 
@@ -183,7 +185,7 @@ chmod +x "$SANDBOX/home/.cargo/bin/cargo" "$SANDBOX/home/.cargo/bin/cargo-machet
 # ~/.cargo/bin cannot leak in and flip the fallback profile non-deterministically.
 # JAVA_HOME points at the sandbox jdk so the reference-oracle javac probe is
 # deterministic on hosts that have their own JDK configured.
-GATE="env HOME=$SANDBOX/home JAVA_HOME=$SANDBOX/jdk PATH=$SANDBOX/home/.cargo/bin:/usr/bin:/bin $SANDBOX/scripts/gate.sh"
+GATE="env HOME=$SANDBOX/home JAVA_HOME=$SANDBOX/jdk CARGO_TARGET_DIR=$SANDBOX/target PATH=$SANDBOX/home/.cargo/bin:/usr/bin:/bin $SANDBOX/scripts/gate.sh"
 
 # run_scenarios <profile-name> <nextest-presence>
 #   nextest-presence: "nextest" installs the cargo-nextest stub; anything else

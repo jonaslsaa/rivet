@@ -28,8 +28,48 @@ fn fixture() -> Value {
 }
 
 /// `Double.doubleToLongBits` — the fixture's golden representation.
+///
+/// The Java probe captures bits via `Double.doubleToLongBits`, which
+/// canonicalizes every NaN payload to `0x7ff8_0000_0000_0000` (D14).
+/// Hardware-created NaN sign/payload is architecture-undefined, so a NaN
+/// value must be canonicalized to the single canonical NaN before comparing;
+/// every non-NaN value stays bit-exact.
 fn bits(v: f64) -> i64 {
-    v.to_bits() as i64
+    if v.is_nan() {
+        0x7ff8_0000_0000_0000i64
+    } else {
+        v.to_bits() as i64
+    }
+}
+
+#[cfg(test)]
+mod bits_helper {
+    use super::bits;
+
+    /// `bits` must canonicalize a hardware-created NaN (sign/payload
+    /// architecture-undefined) to Java's canonical NaN from
+    /// `Double.doubleToLongBits`, while keeping every non-NaN bit exact.
+    #[test]
+    fn canonicalizes_nan() {
+        assert_eq!(bits(f64::NAN), 0x7ff8_0000_0000_0000);
+        // Negative-sign NaN and a NaN with a non-zero payload are still NaNs
+        // and must collapse to the same canonical pattern.
+        let neg_nan = f64::from_bits(0xfff8_0000_0000_0001);
+        assert!(neg_nan.is_nan());
+        assert_eq!(bits(neg_nan), 0x7ff8_0000_0000_0000);
+        assert_eq!(
+            bits(f64::from_bits(0x7ff0_0000_0000_0001)),
+            0x7ff8_0000_0000_0000
+        );
+    }
+
+    #[test]
+    fn non_nan_stays_bit_exact() {
+        assert_eq!(bits(1.0), 0x3ff0_0000_0000_0000u64 as i64);
+        assert_eq!(bits(-0.0), 0x8000_0000_0000_0000u64 as i64);
+        assert_eq!(bits(f64::INFINITY), 0x7ff0_0000_0000_0000u64 as i64);
+        assert_eq!(bits(-f64::INFINITY), 0xfff0_0000_0000_0000u64 as i64);
+    }
 }
 
 /// The probe emits `octaves` as `List.toString()` (e.g. "[-3, -2, -1, 0, 1,
