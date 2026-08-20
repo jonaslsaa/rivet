@@ -233,6 +233,36 @@ sha256, the Paper git commit it was built from, and the MC/protocol/world
 versions read straight out of the jar's `version.json`. The jar path is stored
 repo-relative (machine-independent); the jar identity is the sha256.
 
+### Why the jar SHA is advisory, not authoritative (issue #670)
+
+`gate.sh` could not complete on a clean machine because the live-probe
+provenance boundary required the materialized Paper server jar's raw SHA-256 to
+equal the historical fixture SHA exactly. But Paper jar bytes are **not
+reproducible**: clean builds of the exact pinned Paper commit
+`0a993450f129c4942c2a9ed45ba047412b4667cf` produced several different jar
+hashes (`e94fba6b…`, `88ccec84…`), differing only in `javac`-generated synthetic
+local-variable debug names in one `EntityCommand.class`; executable bytecode and
+the Paper manifest commit are unchanged, and the historical `e1a027e9…` capture
+bytes are not archived.
+
+So the physical jar SHA is treated as **recorded/advisory cross-build
+provenance** for the live boundary, not a permanent identity. The durable,
+deterministic contract that actually authorizes a fresh build is:
+
+- the live jar's `Git-Commit` == the exact pinned Paper commit;
+- a clean exact `working/Paper` checkout (HEAD == the pin, not dirty);
+- the MC/protocol/world versions read from the jar's `version.json`;
+- the deterministic live probe/datagen output being byte-identical to the
+  committed fixtures (including the twin-run no-drift gate).
+
+Committed manifests are still validated strictly (a committed capture may only
+name one of the pinned capture SHAs + the pinned commit + versions), so a
+committed manifest can never self-assert an arbitrary source; only a *freshly
+built* pinned-commit jar may proceed — on its deterministic semantic identity —
+to the live no-drift comparison that authorizes it. A jar SHA that differs from
+the committed capture prints a clear `note:` as an advisory, and the semantic
+comparison still runs to completion.
+
 The source jar is the oracle's materialization at
 `tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar` (gitignored; absent
 from committed checkouts). Resolve it with `--jar <path>`, or

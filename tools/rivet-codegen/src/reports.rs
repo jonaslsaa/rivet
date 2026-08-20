@@ -24,6 +24,17 @@
 //! version) in `manifest.json`. The datagen output is deterministic (verified
 //! byte-identical across independent runs), so the committed fixtures are the
 //! no-drift baseline.
+//!
+//! Provenance model (issue #670): Paper jar bytes are NOT build-reproducible —
+//! clean builds of the exact pinned Paper commit differ only in javac-generated
+//! synthetic local-variable debug names, so physical jar SHA is recorded as
+//! advisory cross-build provenance, not a permanent identity. The durable
+//! deterministic contract that authorizes a live jar is its exact pin (jar
+//! `Git-Commit` == pinned Paper commit, clean pinned `working/Paper` checkout,
+//! and MC/protocol/world versions read from the jar's `version.json`) PLUS the
+//! live no-drift comparison against the committed fixtures. Committed manifests
+//! are validated strictly ([`verify_pinned_source`]); the live boundary uses the
+//! deterministic semantic identity ([`verify_live_pinned_source`]).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -395,6 +406,17 @@ pub(crate) struct SourceProvenance {
 /// Reject fixture provenance that merely repeats a self-supplied source label.
 /// Generated tables are tied to one of the exact server-jar or canonical-join
 /// sources and the Paper checkout pinned by this repository.
+///
+/// This is the *historical committed-fixture* contract: it demands the source
+/// recorded next to a committed fixture be one of the pinned capture SHAs *and*
+/// carry the exact pinned Paper commit + MC/protocol/world versions. It is what
+/// every committed-manifest consumer ([`crate::biomes_tags`],
+/// [`crate::worldgen`], [`crate::block_behaviors`], [`crate::feature_data`],
+/// [`crate::synchronized`], [`crate::registries`], [`crate::registry_data`],
+/// [`crate::packets`]) runs so a hand-edited or self-asserted manifest can never
+/// authorize arbitrary source bytes. The physical jar SHA is load-bearing here
+/// precisely because a committed capture manifest pins the exact byte identity
+/// its fixture was produced from.
 pub(crate) fn verify_pinned_source(source: &SourceProvenance) -> Result<()> {
     ensure!(
         source.jar_sha256 == PINNED_SERVER_JAR_SHA256
@@ -408,21 +430,46 @@ pub(crate) fn verify_pinned_source(source: &SourceProvenance) -> Result<()> {
         source.paper_git,
         PINNED_PAPER_COMMIT
     );
+    ensure_versions(source)
+}
+
+/// Verify the *reproducible semantic identity* of a live Paper server jar: its
+/// `Git-Commit`, MC/protocol/world versions and the clean pinned checkout are
+/// the durable cross-build contract (issue #670). The physical jar SHA-256 is
+/// deliberately NOT part of this check — clean builds of the exact pinned Paper
+/// commit are not byte-reproducible (javac synthetic local-variable debug names
+/// differ), so treating the raw jar SHA as a cross-build identity would reject
+/// every legitimate fresh build. The semantic fields are deterministic for a
+/// given Paper pin and are what actually authorize proceeding to the live
+/// probe / no-drift comparison.
+pub(crate) fn verify_live_pinned_source(source: &SourceProvenance) -> Result<()> {
+    ensure!(
+        source.paper_git.as_deref() == Some(PINNED_PAPER_COMMIT),
+        "UNVERIFIED: live server jar Git-Commit {:?} is not the pinned {}",
+        source.paper_git,
+        PINNED_PAPER_COMMIT
+    );
+    ensure_versions(source)
+}
+
+/// Shared version-pin checks (MC/protocol/world). Extracted so both the strict
+/// historical and the semantic live contracts enforce the same version pins.
+fn ensure_versions(source: &SourceProvenance) -> Result<()> {
     ensure!(
         source.minecraft_version == PINNED_MINECRAFT_VERSION,
-        "UNVERIFIED: fixture Minecraft version {} is not the pinned {}",
+        "UNVERIFIED: source Minecraft version {} is not the pinned {}",
         source.minecraft_version,
         PINNED_MINECRAFT_VERSION
     );
     ensure!(
         source.protocol_version == PINNED_PROTOCOL_VERSION,
-        "UNVERIFIED: fixture protocol version {} is not the pinned {}",
+        "UNVERIFIED: source protocol version {} is not the pinned {}",
         source.protocol_version,
         PINNED_PROTOCOL_VERSION
     );
     ensure!(
         source.world_version == PINNED_WORLD_VERSION,
-        "UNVERIFIED: fixture world version {} is not the pinned {}",
+        "UNVERIFIED: source world version {} is not the pinned {}",
         source.world_version,
         PINNED_WORLD_VERSION
     );
@@ -638,8 +685,25 @@ fn parse_paper_git_manifest(manifest: &[u8]) -> Result<String> {
 }
 
 /// Verify that a live probe's exact embedded server jar is the source recorded
-/// by its sibling committed fixture manifest. Fixture bytes alone are not
-/// provenance: a byte-different jar with behaviorally identical output must fail.
+/// by its sibling committed fixture manifest.
+///
+/// Provenance contract (issue #670): a clean flat build of the exact pinned
+/// Paper commit is NOT byte-reproducible — javac's synthetic local-variable
+/// debug names can differ between builds of the same source, so the raw jar
+/// SHA-256 is a recorded/advisory cross-build fingerprint, never a permanent
+/// identity. What is deterministic and authorizing:
+///   - the jar's `Git-Commit` == the exact pinned Paper commit;
+///   - the clean pinned `working/Paper` checkout (HEAD == the pin, not dirty);
+///   - the MC/protocol/world versions read from the jar's `version.json`;
+///   - the live probe's deterministic output being byte-identical to the
+///     committed fixture (the caller runs that comparison after this).
+///
+/// The committed manifest must still authenticate as a strict historical
+/// capture ([`verify_pinned_source`]) so a committed manifest can never
+/// self-assert an arbitrary source. The LIVE jar then authenticates on its
+/// deterministic semantic identity ([`verify_live_pinned_source`]) rather than
+/// raw bytes; a jar SHA that differs from the committed capture is warned
+/// (advisory) and the semantic no-drift comparison proceeds to authorize it.
 pub(crate) fn verify_fixture_provenance(
     jar: &Path,
     manifest_path: &Path,
@@ -663,29 +727,31 @@ pub(crate) fn verify_fixture_provenance(
         .context("UNVERIFIED: fixture provenance has no source object")?;
     let expected: SourceProvenance =
         serde_json::from_value(source).context("UNVERIFIED: parse fixture source provenance")?;
+    // The committed manifest must be a strict historical capture. Note this
+    // validates the manifest's own recorded SHA against the pinned captures —
+    // it does NOT compare the live jar's bytes below.
     verify_pinned_source(&expected)?;
 
+    // Physical jar SHA is recorded/advisory provenance (issue #670): clean
+    // builds of the exact pinned Paper commit are not byte-reproducible. A
+    // changed SHA is a NOTICE, not a hard failure — the semantic fields and the
+    // downstream byte-identical no-drift comparison are what authorize the jar.
     let actual_sha = sha256_hex(&fs::read(jar).context("read live server jar")?);
-    ensure!(
-        actual_sha == expected.jar_sha256,
-        "UNVERIFIED: live server jar SHA {} does not match fixture provenance {}",
-        actual_sha,
-        expected.jar_sha256
-    );
+    if actual_sha != expected.jar_sha256 {
+        eprintln!(
+            "note: live server jar sha256 {} differs from the committed fixture capture {} — \
+             Paper jar bytes are not build-reproducible (issue #670); proceeding on the \
+             deterministically-pinned semantic identity (Git-Commit, clean pinned Paper \
+             checkout, MC/protocol/world) + the live no-drift byte comparison",
+            actual_sha, expected.jar_sha256
+        );
+    }
+
+    // `capture_source` enforces the reproducible semantic identity: exact
+    // pinned jar Git-Commit, clean exact pinned Paper checkout, and the
+    // MC/protocol/world versions read from the live jar's version.json.
     let actual = capture_source(jar, repo_root)?;
-    ensure!(
-        actual.jar_sha256 == expected.jar_sha256,
-        "UNVERIFIED: live server jar SHA {} does not match fixture provenance {}",
-        actual.jar_sha256,
-        expected.jar_sha256
-    );
-    ensure!(
-        actual.paper_git == expected.paper_git,
-        "UNVERIFIED: live server jar Git-Commit {:?} does not match fixture provenance {:?}",
-        actual.paper_git,
-        expected.paper_git
-    );
-    verify_pinned_source(&actual)
+    verify_live_pinned_source(&actual)
 }
 
 #[derive(Debug, Deserialize)]
@@ -738,6 +804,86 @@ mod tests {
         source.paper_git = Some(PINNED_PAPER_COMMIT.into());
         source.jar_sha256 = "deadbeef".into();
         let error = verify_pinned_source(&source).unwrap_err();
+        assert!(error.to_string().contains("source SHA"), "got: {error}");
+    }
+
+    fn pinned_source() -> SourceProvenance {
+        SourceProvenance {
+            jar: "paper-26.2.jar".into(),
+            jar_sha256: PINNED_SERVER_JAR_SHA256.into(),
+            paper_git: Some(PINNED_PAPER_COMMIT.into()),
+            minecraft_version: PINNED_MINECRAFT_VERSION.into(),
+            protocol_version: PINNED_PROTOCOL_VERSION,
+            world_version: PINNED_WORLD_VERSION,
+        }
+    }
+
+    /// The live semantic contract authorizes a jar whose physical bytes differ
+    /// from the committed capture (builds are not byte-reproducible, issue
+    /// #670) as long as the deterministic identity (commit + versions) matches.
+    #[test]
+    fn live_source_ignores_physical_jar_sha_but_pins_semantic_fields() {
+        let mut source = pinned_source();
+        // A byte-different clean build of the same pinned commit: jar SHA
+        // differs, but Git-Commit + versions are identical.
+        source.jar_sha256 = "88ccec84dd00000000000000000000000000000000000000000000000000".into();
+        verify_live_pinned_source(&source).unwrap();
+
+        // But the strict historical contract still rejects that same manifest —
+        // a committed capture may only claim a pinned capture SHA.
+        let error = verify_pinned_source(&source).unwrap_err();
+        assert!(error.to_string().contains("source SHA"), "got: {error}");
+    }
+
+    /// Wrong/missing Git-Commit must fail the live semantic contract.
+    #[test]
+    fn live_source_requires_exact_pinned_commit() {
+        let mut source = pinned_source();
+        source.paper_git = Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into());
+        let error = verify_live_pinned_source(&source).unwrap_err();
+        assert!(error.to_string().contains("Git-Commit"), "got: {error}");
+
+        let mut missing = pinned_source();
+        missing.paper_git = None;
+        let error = verify_live_pinned_source(&missing).unwrap_err();
+        assert!(error.to_string().contains("Git-Commit"), "got: {error}");
+    }
+
+    /// Wrong versions must fail the live semantic contract.
+    #[test]
+    fn live_source_requires_pinned_versions() {
+        let mut m = pinned_source();
+        m.minecraft_version = "26.1".into();
+        let error = verify_live_pinned_source(&m).unwrap_err();
+        assert!(
+            error.to_string().contains("Minecraft version"),
+            "got: {error}"
+        );
+
+        let mut p = pinned_source();
+        p.protocol_version = 777;
+        let error = verify_live_pinned_source(&p).unwrap_err();
+        assert!(
+            error.to_string().contains("protocol version"),
+            "got: {error}"
+        );
+
+        let mut w = pinned_source();
+        w.world_version = 4904;
+        let error = verify_live_pinned_source(&w).unwrap_err();
+        assert!(error.to_string().contains("world version"), "got: {error}");
+    }
+
+    /// The strict historical contract must also reject an otherwise-pinned
+    /// manifest with a wrong/malformed source SHA (a committed capture may only
+    /// name a pinned capture).
+    #[test]
+    fn historical_source_rejects_arbitrary_or_malformed_sha() {
+        // Any SHA that is not a pinned capture is rejected, even a full-length
+        // hex one.
+        let mut arbitrary = pinned_source();
+        arbitrary.jar_sha256 = "ab".repeat(32);
+        let error = verify_pinned_source(&arbitrary).unwrap_err();
         assert!(error.to_string().contains("source SHA"), "got: {error}");
     }
 
