@@ -565,4 +565,127 @@ mod tests {
         assert!(chunk.is_light_correct());
         assert!(shared.lock().unwrap().contains_key(&(1, 0)));
     }
+
+    /// Drive a generated centre through the LIGHT status rung end to end: a
+    /// `WorldGenContext` carries the real `GeneratedLightBridge` through
+    /// [`WorldGenContext::with_light`], `generate_through(Light)` dispatches the
+    /// Light step to the seam, and the bridge lights the generated proto,
+    /// persisting the computed sky nibbles/emptiness and the LIGHT status back
+    /// into it. This pins the reviewer-flagged integration: the write-back
+    /// bridge is reachable from the LIGHT task, not only from its own unit
+    /// tests.
+    #[test]
+    fn light_status_task_runs_the_bridge_and_persists_write_back() {
+        use rivet_world::chunk::status::{GENERATION_PYRAMID, GenError, WorldGenContext};
+
+        let mut chunk = generated_chunk();
+        chunk.set_persisted_status(ChunkStatus::InitializeLight);
+        assert!(!chunk.is_light_correct());
+
+        let (chunks, shared) =
+            storage_closure(HashMap::from([((1, 0), runtime_air(ChunkPos::new(1, 0)))]));
+        let mut bridge = provider_for_storage(overworld(), true, true, chunks);
+
+        let mut ctx = WorldGenContext::new(
+            |_c: &mut GeneratedProto| {},
+            |_c: &mut GeneratedProto| {},
+            |_c: &mut GeneratedProto| {},
+            |_c: &mut GeneratedProto| {},
+            |_c: &mut GeneratedProto| Ok(()),
+        )
+        .with_light(move |c: &mut GeneratedProto| {
+            bridge.light(c).map_err(|error| match error {
+                GeneratedLightBridgeError::NotReady(status)
+                | GeneratedLightBridgeError::UnsupportedStatus(status) => {
+                    GenError::UnsupportedStatus(status)
+                }
+                GeneratedLightBridgeError::PersistedLightLoadUnsupported { status } => {
+                    GenError::PersistedLightLoadUnsupported { status }
+                }
+                _ => GenError::LightChunkMissing {
+                    status: ChunkStatus::Light,
+                    pos: c.get_pos(),
+                },
+            })
+        });
+
+        ctx.generate_through(&GENERATION_PYRAMID, &mut chunk, ChunkStatus::Light)
+            .expect("through LIGHT with the real bridge");
+
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Light);
+        assert!(chunk.is_light_correct());
+        // The bridge's write-back persisted real sky light: the floor light
+        // section is no longer null (the engine computed it), a sky emptiness
+        // map is present, and the stone-bearing section is non-empty.
+        assert!(
+            chunk.sky_nibbles()[1].to_vanilla_nibble().is_some(),
+            "the engine computed the floor light section"
+        );
+        let emptiness = chunk.sky_emptiness_map().expect("emptiness map persisted");
+        assert!(
+            !emptiness[0],
+            "the stone section is non-empty in the persisted map"
+        );
+        // The neighbour was returned to its original slot.
+        assert!(shared.lock().unwrap().contains_key(&(1, 0)));
+    }
+
+    /// A light seam that fails to reconcile a persisted light load is a typed
+    /// refusal that leaves the generated proto untouched — the same
+    /// `PersistedLightLoadUnsupported` the engine-position path reports.
+    #[test]
+    fn light_status_task_persisted_load_refusal_is_atomic() {
+        use rivet_world::chunk::status::{GENERATION_PYRAMID, GenError, WorldGenContext};
+
+        let mut chunk = generated_chunk();
+        chunk.set_persisted_status(ChunkStatus::Light);
+        chunk.set_light_correct(true);
+        chunk.set_sky_emptiness_map(Some(vec![false; 24]));
+        let before = chunk.sky_nibbles()[0].to_vanilla_nibble();
+
+        let (chunks, _shared) = storage_closure(HashMap::new());
+        let mut bridge = provider_for_storage(overworld(), true, true, chunks);
+        let mut ctx = WorldGenContext::new(
+            |_c: &mut GeneratedProto| {},
+            |_c: &mut GeneratedProto| {},
+            |_c: &mut GeneratedProto| {},
+            |_c: &mut GeneratedProto| {},
+            |_c: &mut GeneratedProto| Ok(()),
+        )
+        .with_light(move |c: &mut GeneratedProto| {
+            bridge.light(c).map_err(|error| match error {
+                GeneratedLightBridgeError::NotReady(status)
+                | GeneratedLightBridgeError::UnsupportedStatus(status) => {
+                    GenError::UnsupportedStatus(status)
+                }
+                GeneratedLightBridgeError::PersistedLightLoadUnsupported { status } => {
+                    GenError::PersistedLightLoadUnsupported { status }
+                }
+                _ => GenError::LightChunkMissing {
+                    status: ChunkStatus::Light,
+                    pos: c.get_pos(),
+                },
+            })
+        });
+        // The LIGHT step on an already-lighted (Light, light-correct) chunk is
+        // the load branch — dispatch it directly (generate_through short-circuits
+        // its idempotent target == current case before reaching the step).
+        let step = GENERATION_PYRAMID.get_step_to(ChunkStatus::Light);
+        let err = ctx
+            .run_step(step, &mut chunk)
+            .expect_err("persisted load must refuse without edge reconciliation");
+        assert!(
+            matches!(
+                err,
+                GenError::PersistedLightLoadUnsupported {
+                    status: ChunkStatus::Light
+                }
+            ),
+            "unexpected error: {err:?}"
+        );
+        // The generated proto is untouched: status, light-correct, nibbles.
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Light);
+        assert!(chunk.is_light_correct());
+        assert_eq!(chunk.sky_nibbles()[0].to_vanilla_nibble(), before);
+    }
 }

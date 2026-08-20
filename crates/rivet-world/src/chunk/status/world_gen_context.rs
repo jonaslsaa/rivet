@@ -61,9 +61,14 @@
 //!    advance, and the only status advance that happens inside a light task.
 //!    Fresh light data is published by the attached `rivet-server`
 //!    `SkyLightProvider`; persisted loads require the provider's explicit edge-
-//!    reconciliation capability and otherwise return a typed refusal. The
-//!    provider seam still owns the concrete runtime storage and keeps the
-//!    `GenerationChunkHolder`/`ChunkMap` boundary with #185.
+//!    reconciliation capability and otherwise return a typed refusal. The LIGHT
+//!    step also dispatches a caller-attached light write-back seam
+//!    ([`WorldGenContext::with_light`] — `rivet-server`'s `GeneratedLightBridge`,
+//!    which maps the generated center to runtime values, lights it, and persists
+//!    the computed sky nibbles/emptiness/status back into the chunk); without it
+//!    the engine-position path above runs. The provider seam still owns the
+//!    concrete runtime storage and keeps the `GenerationChunkHolder`/`ChunkMap`
+//!    boundary with #185.
 //!
 //! A target already at/after the chunk's status is handled before any work:
 //! `target == current` is an idempotent no-op at *any* status (so a loaded
@@ -146,6 +151,21 @@ type SpawnSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenE
 /// the caller — the conversion lives with the caller's `LevelChunk` surface.
 type FullSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenError>;
 
+/// The `LIGHT` write-back seam — runs the caller-owned copy of the light
+/// result into the chunk (Java's `ChunkLightTask.LightTask` computing light into
+/// the `ChunkAccess` it is handed). The generic value layer cannot reference
+/// `rivet-server`'s `GeneratedProto`/`RuntimeProto` value types, so the actual
+/// round trip (worldgen proto → runtime `StateId`/server-biome values → the
+/// `SkyLightProvider` → runtime proto → worldgen proto, persisting the computed
+/// sky nibbles/emptiness/state/status back into the center) is the caller's —
+/// exactly like the [`SpawnSeam`]`/`[`FullSeam`] the SPAWN/FULL tasks dispatch.
+/// `None` when the caller did not attach it: dispatching `Light` then falls back
+/// to the engine-position path ([`Self::run_light_task`]) for contexts that
+/// attach only a [`LevelLightEngine`] (e.g. the faithful-dispatch tests), or
+/// refuses `UnsupportedTask`/`UnsupportedStatus` exactly as before the seam
+/// existed.
+type LightSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenError>;
+
 /// `WorldGenContext` (value-layer seam shape) — the caller-supplied BIOMES,
 /// NOISE, SURFACE, CARVERS, and FEATURES worldgen closures, plus the light
 /// engine the INITIALIZE_LIGHT/LIGHT tasks route to, generic over the chunk's
@@ -205,6 +225,12 @@ where
     /// (the seam's worldgen runs below INITIALIZE_LIGHT, and the idempotent
     /// loaded-chunk confirm never dispatches a light task).
     light_engine: Option<LevelLightEngine>,
+    /// The `LIGHT` write-back seam — the caller-owned copy of the computed
+    /// light into the chunk (see [`LightSeam`]). `None` when the caller did not
+    /// attach it: dispatching `Light` then routes through the engine-position
+    /// path ([`Self::run_light_task`]) or refuses, exactly as before the seam
+    /// existed.
+    light: Option<Box<LightSeam<T, B, S>>>,
 }
 
 /// The executor seam's failure modes.
@@ -458,6 +484,7 @@ where
             spawn: None,
             full: None,
             light_engine: None,
+            light: None,
         }
     }
 
@@ -466,6 +493,21 @@ where
     /// tasks can route through it.
     pub fn with_light_engine(mut self, light_engine: LevelLightEngine) -> Self {
         self.light_engine = Some(light_engine);
+        self
+    }
+
+    /// Attaches the `LIGHT` write-back seam — the caller-owned copy of the
+    /// computed light into the chunk (see [`LightSeam`]; `rivet-server`'s
+    /// `GeneratedLightBridge::light` runs the real provider and persists the
+    /// sky nibbles/emptiness/state/status back into the generated center). Left
+    /// `None` by default: dispatching `Light` then routes through the
+    /// engine-position path ([`Self::run_light_task`]) for contexts that attach
+    /// only a [`LevelLightEngine`].
+    pub fn with_light(
+        mut self,
+        light: impl FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenError> + 'static,
+    ) -> Self {
+        self.light = Some(Box::new(light));
         self
     }
 
@@ -698,7 +740,18 @@ where
             }
             ChunkStatusTask::Light => {
                 ensure_canonical_rung(step.task(), step.target_status())?;
-                self.run_light_task(chunk, ChunkStatus::Light)?;
+                // A caller-attached light seam (the `rivet-server` write-back
+                // bridge) is the authoritative path: it runs the real provider
+                // over the generated center and persists the computed light +
+                // status back into the chunk. Without one, the engine-position
+                // path ([`Self::run_light_task`]) keeps the faithful
+                // LightTask dispatch for contexts that attach only a
+                // `LevelLightEngine`.
+                if let Some(light) = self.light.as_mut() {
+                    light(chunk)?;
+                } else {
+                    self.run_light_task(chunk, ChunkStatus::Light)?;
+                }
             }
             ChunkStatusTask::GenerateFeatures => {
                 ensure_canonical_rung(step.task(), step.target_status())?;
@@ -865,7 +918,12 @@ where
                 }
                 ChunkStatusTask::Light => {
                     ensure_canonical_rung(step.task(), step.target_status())?;
-                    needs_light_engine = true;
+                    // With a caller-attached light seam the write-back bridge is
+                    // authoritative and needs no engine at this rung; without it
+                    // the engine-position path needs one.
+                    if self.light.is_none() {
+                        needs_light_engine = true;
+                    }
                     projected = step.target_status();
                 }
                 ChunkStatusTask::GenerateFeatures => {
