@@ -419,6 +419,7 @@ fn read_f64_table_257(repo_root: &Path, rel: &str) -> Result<[f64; 257]> {
         if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
             continue;
         }
+        anyhow::ensure!(n < out.len(), "{rel}: expected 257 entries, found more");
         let bits = u64::from_str_radix(hex, 16).context("parse f64 bits")?;
         out[n] = f64::from_bits(bits);
         n += 1;
@@ -521,4 +522,25 @@ fn rustfmt(repo_root: &Path, src: &str) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_f64_table_rejects_excess_entries_without_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = (0..258)
+            .map(|bits| format!("f64::from_bits(0x{bits:016x}),"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(dir.path().join("table.rs"), rows).unwrap();
+
+        let error = read_f64_table_257(dir.path(), "table.rs").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "table.rs: expected 257 entries, found more"
+        );
+    }
 }
