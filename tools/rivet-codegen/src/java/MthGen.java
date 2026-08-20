@@ -11,8 +11,12 @@ import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
 public class MthGen {
-    static void pF(float v) { System.out.printf("0x%08x%n", Float.floatToRawIntBits(v)); }
-    static void pD(double v) { System.out.printf("0x%016x%n", Double.doubleToRawLongBits(v)); }
+    // floatToIntBits/doubleToLongBits (not the Raw variants): hardware-created
+    // NaN sign/payload is architecture-undefined (D14), so the oracle emits the
+    // canonical NaN bit-pattern; every non-NaN value is bit-exact and identical
+    // to the Raw forms.
+    static void pF(float v) { System.out.printf("0x%08x%n", Float.floatToIntBits(v)); }
+    static void pD(double v) { System.out.printf("0x%016x%n", Double.doubleToLongBits(v)); }
     static void pI(int v) { System.out.println(v + "i32"); }
     static void pL(long v) { System.out.println(v + "i64"); }
     static void pB(byte v) { System.out.println(v); }
