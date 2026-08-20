@@ -157,8 +157,12 @@ import org.joml.Quaternionf;
 import org.joml.Vector3f;
 
 public class MthGen {
-    static void pF(float v) { System.out.printf("0x%08x%n", Float.floatToRawIntBits(v)); }
-    static void pD(double v) { System.out.printf("0x%016x%n", Double.doubleToRawLongBits(v)); }
+    // floatToIntBits/doubleToLongBits (not the Raw variants): hardware-created
+    // NaN sign/payload is architecture-undefined (D14), so the oracle emits the
+    // canonical NaN bit-pattern; every non-NaN value is bit-exact and identical
+    // to the Raw forms.
+    static void pF(float v) { System.out.printf("0x%08x%n", Float.floatToIntBits(v)); }
+    static void pD(double v) { System.out.printf("0x%016x%n", Double.doubleToLongBits(v)); }
     static void pI(int v) { System.out.println(v + "i32"); }
     static void pL(long v) { System.out.println(v + "i64"); }
     static void pB(byte v) { System.out.println(v); }
@@ -368,6 +372,16 @@ def parse_sections() -> dict[int, tuple[str, str]]:
 
 def emit_one(idx: int, lhs: str, rhs: str) -> str | None:
     lhs = lhs.strip()
+    # The golden compares float/double bits via the NaN-canonicalizing
+    # bitexact_f32/bitexact_f64 helpers (D14) instead of `.to_bits()`: unwrap
+    # the helper so the inner `super::fn(...)` / rng call is translated as usual.
+    m = re.match(r"bitexact_f(?:32|64)\((.*?)\)$", lhs, re.S)
+    if m:
+        inner = m.group(1).strip()
+        # The vector lhs carries rhs as its second bitexact arg is not part of
+        # lhs (it is the expected value, a placeholder in the skeleton), so
+        # inner is exactly the expression whose bits we recompute.
+        lhs = inner
     m = re.match(r"super::(\w+)\((.*?)\)(\.to_bits\(\))?$", lhs)
     if m:
         fn = m.group(1)
