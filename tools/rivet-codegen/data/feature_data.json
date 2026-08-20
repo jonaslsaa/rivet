@@ -4217,6 +4217,1256 @@
       ]
     }
   },
+  "mob_settings": {
+    "minecraft:mushroom_fields": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:mooshroom",
+          "min": 4,
+          "max": 8,
+          "weight": 8
+        }
+      ]
+    },
+    "minecraft:deep_frozen_ocean": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:polar_bear",
+          "min": 1,
+          "max": 2,
+          "weight": 1
+        }
+      ]
+    },
+    "minecraft:frozen_ocean": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:polar_bear",
+          "min": 1,
+          "max": 2,
+          "weight": 1
+        }
+      ]
+    },
+    "minecraft:deep_cold_ocean": {
+      "creature_spawn_probability": 0.1,
+      "creature": []
+    },
+    "minecraft:cold_ocean": {
+      "creature_spawn_probability": 0.1,
+      "creature": []
+    },
+    "minecraft:deep_ocean": {
+      "creature_spawn_probability": 0.1,
+      "creature": []
+    },
+    "minecraft:ocean": {
+      "creature_spawn_probability": 0.1,
+      "creature": []
+    },
+    "minecraft:deep_lukewarm_ocean": {
+      "creature_spawn_probability": 0.1,
+      "creature": []
+    },
+    "minecraft:lukewarm_ocean": {
+      "creature_spawn_probability": 0.1,
+      "creature": []
+    },
+    "minecraft:warm_ocean": {
+      "creature_spawn_probability": 0.1,
+      "creature": []
+    },
+    "minecraft:stony_shore": {
+      "creature_spawn_probability": 0.1,
+      "creature": []
+    },
+    "minecraft:swamp": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:frog",
+          "min": 2,
+          "max": 5,
+          "weight": 10
+        }
+      ]
+    },
+    "minecraft:mangrove_swamp": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:frog",
+          "min": 2,
+          "max": 5,
+          "weight": 10
+        }
+      ]
+    },
+    "minecraft:snowy_slopes": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:rabbit",
+          "min": 2,
+          "max": 3,
+          "weight": 4
+        },
+        {
+          "type": "minecraft:goat",
+          "min": 1,
+          "max": 3,
+          "weight": 5
+        }
+      ]
+    },
+    "minecraft:snowy_plains": {
+      "creature_spawn_probability": 0.07,
+      "creature": [
+        {
+          "type": "minecraft:rabbit",
+          "min": 2,
+          "max": 3,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:polar_bear",
+          "min": 1,
+          "max": 2,
+          "weight": 1
+        }
+      ]
+    },
+    "minecraft:snowy_beach": {
+      "creature_spawn_probability": 0.1,
+      "creature": []
+    },
+    "minecraft:windswept_gravelly_hills": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:llama",
+          "min": 4,
+          "max": 6,
+          "weight": 5
+        }
+      ]
+    },
+    "minecraft:grove": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:wolf",
+          "min": 1,
+          "max": 1,
+          "weight": 1
+        },
+        {
+          "type": "minecraft:rabbit",
+          "min": 2,
+          "max": 3,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:fox",
+          "min": 2,
+          "max": 4,
+          "weight": 4
+        }
+      ]
+    },
+    "minecraft:windswept_hills": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:llama",
+          "min": 4,
+          "max": 6,
+          "weight": 5
+        }
+      ]
+    },
+    "minecraft:snowy_taiga": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:wolf",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:rabbit",
+          "min": 2,
+          "max": 3,
+          "weight": 4
+        },
+        {
+          "type": "minecraft:fox",
+          "min": 2,
+          "max": 4,
+          "weight": 8
+        }
+      ]
+    },
+    "minecraft:windswept_forest": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:llama",
+          "min": 4,
+          "max": 6,
+          "weight": 5
+        }
+      ]
+    },
+    "minecraft:taiga": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:wolf",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:rabbit",
+          "min": 2,
+          "max": 3,
+          "weight": 4
+        },
+        {
+          "type": "minecraft:fox",
+          "min": 2,
+          "max": 4,
+          "weight": 8
+        }
+      ]
+    },
+    "minecraft:plains": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:horse",
+          "min": 2,
+          "max": 6,
+          "weight": 5
+        },
+        {
+          "type": "minecraft:donkey",
+          "min": 1,
+          "max": 3,
+          "weight": 1
+        }
+      ]
+    },
+    "minecraft:meadow": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:donkey",
+          "min": 1,
+          "max": 2,
+          "weight": 1
+        },
+        {
+          "type": "minecraft:rabbit",
+          "min": 2,
+          "max": 6,
+          "weight": 2
+        },
+        {
+          "type": "minecraft:sheep",
+          "min": 2,
+          "max": 4,
+          "weight": 2
+        }
+      ]
+    },
+    "minecraft:beach": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:turtle",
+          "min": 2,
+          "max": 5,
+          "weight": 5
+        }
+      ]
+    },
+    "minecraft:forest": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:wolf",
+          "min": 4,
+          "max": 4,
+          "weight": 5
+        }
+      ]
+    },
+    "minecraft:old_growth_spruce_taiga": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:wolf",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:rabbit",
+          "min": 2,
+          "max": 3,
+          "weight": 4
+        },
+        {
+          "type": "minecraft:fox",
+          "min": 2,
+          "max": 4,
+          "weight": 8
+        }
+      ]
+    },
+    "minecraft:flower_forest": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:rabbit",
+          "min": 2,
+          "max": 3,
+          "weight": 4
+        }
+      ]
+    },
+    "minecraft:birch_forest": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        }
+      ]
+    },
+    "minecraft:dark_forest": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        }
+      ]
+    },
+    "minecraft:pale_garden": {
+      "creature_spawn_probability": 0.1,
+      "creature": []
+    },
+    "minecraft:savanna_plateau": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:horse",
+          "min": 2,
+          "max": 6,
+          "weight": 1
+        },
+        {
+          "type": "minecraft:donkey",
+          "min": 1,
+          "max": 1,
+          "weight": 1
+        },
+        {
+          "type": "minecraft:armadillo",
+          "min": 2,
+          "max": 3,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:llama",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:wolf",
+          "min": 4,
+          "max": 8,
+          "weight": 8
+        }
+      ]
+    },
+    "minecraft:savanna": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:horse",
+          "min": 2,
+          "max": 6,
+          "weight": 1
+        },
+        {
+          "type": "minecraft:donkey",
+          "min": 1,
+          "max": 1,
+          "weight": 1
+        },
+        {
+          "type": "minecraft:armadillo",
+          "min": 2,
+          "max": 3,
+          "weight": 10
+        }
+      ]
+    },
+    "minecraft:jungle": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:parrot",
+          "min": 1,
+          "max": 2,
+          "weight": 40
+        },
+        {
+          "type": "minecraft:panda",
+          "min": 1,
+          "max": 2,
+          "weight": 1
+        }
+      ]
+    },
+    "minecraft:badlands": {
+      "creature_spawn_probability": 0.03,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:armadillo",
+          "min": 1,
+          "max": 2,
+          "weight": 6
+        }
+      ]
+    },
+    "minecraft:desert": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:rabbit",
+          "min": 2,
+          "max": 3,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:camel",
+          "min": 1,
+          "max": 1,
+          "weight": 1
+        }
+      ]
+    },
+    "minecraft:wooded_badlands": {
+      "creature_spawn_probability": 0.04,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:armadillo",
+          "min": 1,
+          "max": 2,
+          "weight": 6
+        },
+        {
+          "type": "minecraft:wolf",
+          "min": 4,
+          "max": 8,
+          "weight": 2
+        }
+      ]
+    },
+    "minecraft:jagged_peaks": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:goat",
+          "min": 1,
+          "max": 3,
+          "weight": 5
+        }
+      ]
+    },
+    "minecraft:stony_peaks": {
+      "creature_spawn_probability": 0.1,
+      "creature": []
+    },
+    "minecraft:frozen_river": {
+      "creature_spawn_probability": 0.1,
+      "creature": []
+    },
+    "minecraft:river": {
+      "creature_spawn_probability": 0.1,
+      "creature": []
+    },
+    "minecraft:ice_spikes": {
+      "creature_spawn_probability": 0.07,
+      "creature": [
+        {
+          "type": "minecraft:rabbit",
+          "min": 2,
+          "max": 3,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:polar_bear",
+          "min": 1,
+          "max": 2,
+          "weight": 1
+        }
+      ]
+    },
+    "minecraft:old_growth_pine_taiga": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:wolf",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:rabbit",
+          "min": 2,
+          "max": 3,
+          "weight": 4
+        },
+        {
+          "type": "minecraft:fox",
+          "min": 2,
+          "max": 4,
+          "weight": 8
+        }
+      ]
+    },
+    "minecraft:sunflower_plains": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:horse",
+          "min": 2,
+          "max": 6,
+          "weight": 5
+        },
+        {
+          "type": "minecraft:donkey",
+          "min": 1,
+          "max": 3,
+          "weight": 1
+        }
+      ]
+    },
+    "minecraft:old_growth_birch_forest": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        }
+      ]
+    },
+    "minecraft:sparse_jungle": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:wolf",
+          "min": 2,
+          "max": 4,
+          "weight": 8
+        }
+      ]
+    },
+    "minecraft:bamboo_jungle": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:parrot",
+          "min": 1,
+          "max": 2,
+          "weight": 40
+        },
+        {
+          "type": "minecraft:panda",
+          "min": 1,
+          "max": 2,
+          "weight": 80
+        }
+      ]
+    },
+    "minecraft:eroded_badlands": {
+      "creature_spawn_probability": 0.03,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:armadillo",
+          "min": 1,
+          "max": 2,
+          "weight": 6
+        }
+      ]
+    },
+    "minecraft:windswept_savanna": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:sheep",
+          "min": 4,
+          "max": 4,
+          "weight": 12
+        },
+        {
+          "type": "minecraft:pig",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:chicken",
+          "min": 4,
+          "max": 4,
+          "weight": 10
+        },
+        {
+          "type": "minecraft:cow",
+          "min": 4,
+          "max": 4,
+          "weight": 8
+        },
+        {
+          "type": "minecraft:horse",
+          "min": 2,
+          "max": 6,
+          "weight": 1
+        },
+        {
+          "type": "minecraft:donkey",
+          "min": 1,
+          "max": 1,
+          "weight": 1
+        },
+        {
+          "type": "minecraft:armadillo",
+          "min": 2,
+          "max": 3,
+          "weight": 10
+        }
+      ]
+    },
+    "minecraft:cherry_grove": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:pig",
+          "min": 1,
+          "max": 2,
+          "weight": 1
+        },
+        {
+          "type": "minecraft:rabbit",
+          "min": 2,
+          "max": 6,
+          "weight": 2
+        },
+        {
+          "type": "minecraft:sheep",
+          "min": 2,
+          "max": 4,
+          "weight": 2
+        }
+      ]
+    },
+    "minecraft:frozen_peaks": {
+      "creature_spawn_probability": 0.1,
+      "creature": [
+        {
+          "type": "minecraft:goat",
+          "min": 1,
+          "max": 3,
+          "weight": 5
+        }
+      ]
+    },
+    "minecraft:dripstone_caves": {
+      "creature_spawn_probability": 0.1,
+      "creature": []
+    },
+    "minecraft:lush_caves": {
+      "creature_spawn_probability": 0.1,
+      "creature": []
+    },
+    "minecraft:sulfur_caves": {
+      "creature_spawn_probability": 0.1,
+      "creature": []
+    },
+    "minecraft:deep_dark": {
+      "creature_spawn_probability": 0.1,
+      "creature": []
+    }
+  },
   "placed_features": {
     "minecraft:acacia_checked": {
       "id": 1,

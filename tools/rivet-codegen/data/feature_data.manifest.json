@@ -2,14 +2,14 @@
   "generator": "WorldgenFeatureDataExtractor (full overworld possible-biome + seed-42 feature closure)",
   "source": {
     "jar": "tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar",
-    "jar_sha256": "e1a027e9481a16ec1da0f0e139d370280050d123a14c022a476c2dc8a697ebda",
+    "jar_sha256": "88ccec843a9c94b938d71105294e3d064786dbc29bcd1e0da6417fb8c2c93446",
     "paper_git": "0a993450f129c4942c2a9ed45ba047412b4667cf",
     "minecraft_version": "26.2",
     "protocol_version": 776,
     "world_version": 4903
   },
   "file": {
-    "bytes": 744065,
-    "sha256": "28615e3f6c74d35027484d8418258ef4f79d8f3d750d7ca4ebe3addcce0315c2"
+    "bytes": 769760,
+    "sha256": "02c972e3a199a9a83d5748a21d48b8d4becebdafd70daea35d15fcb6266683ea"
   }
 }

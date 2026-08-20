@@ -62,8 +62,39 @@ struct FeatureEntry {
     json: String,
 }
 
+/// One validated biome's mob-spawn settings (the `mob_settings` table of the
+/// fixture): `creature_spawn_probability` plus the ordered CREATURE
+/// `WeightedList<SpawnerData>` — the exact data
+/// `NaturalSpawner.spawnMobsForChunkGeneration` reads
+/// (`mobSettings.getMobs(MobCategory.CREATURE)`).
+#[derive(Debug)]
+struct MobSettings {
+    name: String,
+    /// `MobSpawnSettings.creatureGenerationProbability`.
+    creature_probability: f32,
+    /// The ordered CREATURE `Weighted<SpawnerData>` list, builder (holder-set)
+    /// order preserved — a reorder changes the weighted selection.
+    creature: Vec<CreatureSpawner>,
+}
+
+/// One CREATURE `Weighted<SpawnerData>` entry — `type` (the full
+/// `minecraft:entity_type` key), `minCount`, `maxCount`, and the `Weighted`
+/// `weight`.
+#[derive(Debug)]
+struct CreatureSpawner {
+    ty: String,
+    min: u32,
+    max: u32,
+    weight: u32,
+}
+
 /// The fully-validated fixture tables, each ordered by id.
-type Validated = (Vec<BiomeSettings>, Vec<FeatureEntry>, Vec<FeatureEntry>);
+type Validated = (
+    Vec<BiomeSettings>,
+    Vec<FeatureEntry>,
+    Vec<FeatureEntry>,
+    Vec<MobSettings>,
+);
 
 pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> {
     let repo_root = crate::extract::find_repo_root()?;
@@ -82,7 +113,7 @@ pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> 
     // The full fixture contract (structure, order, closure) + the pinned
     // provenance; a hand-edited or foreign fixture fails generation.
     crate::feature_data::validate_structural(&root)?;
-    let (biomes, placed, configured) = extract(&root)?;
+    let (biomes, placed, configured, mob) = extract(&root)?;
     // Anchor the extract against the pinned live-Paper counts (in addition to
     // `validate_structural`'s internal count check, so generation and the
     // `probe-feature-data` anchors cannot silently diverge).
@@ -109,7 +140,7 @@ pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> 
     fs::create_dir_all(&output).with_context(|| format!("create {}", output.display()))?;
     fs::write(
         output.join("feature_data.rs"),
-        render(&biomes, &placed, &configured, &source),
+        render(&biomes, &placed, &configured, &mob, &source),
     )
     .context("write generated/feature_data.rs")?;
 
@@ -129,7 +160,78 @@ fn extract(root: &Value) -> Result<Validated> {
     let biomes = extract_biomes(&root["biomes"])?;
     let placed = extract_feature_table("placed_features", root)?;
     let configured = extract_feature_table("configured_features", root)?;
-    Ok((biomes, placed, configured))
+    let mob = extract_mob_settings(&root["mob_settings"], &biomes)?;
+    Ok((biomes, placed, configured, mob))
+}
+
+/// Extract the per-possible-biome `mob_settings` (the `mob_settings` fixture
+/// table, keyed by the same names as `biomes`). The output is sorted by the
+/// biome's registry id (the same stable render order the `biomes` table uses),
+/// resolved from `biomes`.
+fn extract_mob_settings(value: &Value, biomes: &[BiomeSettings]) -> Result<Vec<MobSettings>> {
+    let obj = value
+        .as_object()
+        .context("`mob_settings` element table must be a JSON object")?;
+    let mut out = Vec::with_capacity(obj.len());
+    for (name, entry) in obj {
+        crate::registries::validate_name("minecraft:worldgen/biome", name)?;
+        let entry = entry
+            .as_object()
+            .with_context(|| format!("mob_settings `{name}` entry must be a JSON object"))?;
+        let creature_probability = entry
+            .get("creature_spawn_probability")
+            .and_then(Value::as_f64)
+            .with_context(|| format!("mob_settings `{name}` missing creature_spawn_probability"))?
+            as f32;
+        let creature_arr = entry
+            .get("creature")
+            .and_then(Value::as_array)
+            .with_context(|| format!("mob_settings `{name}` is missing `creature`"))?;
+        let mut creature = Vec::with_capacity(creature_arr.len());
+        for e in creature_arr {
+            let e = e
+                .as_object()
+                .with_context(|| format!("mob_settings `{name}` has a non-object creature entry"))?;
+            let ty = e
+                .get("type")
+                .and_then(Value::as_str)
+                .with_context(|| format!("mob_settings `{name}` creature entry missing `type`"))?
+                .to_string();
+            crate::registries::validate_name("minecraft:entity_type", &ty)?;
+            let min = e
+                .get("min")
+                .and_then(Value::as_u64)
+                .with_context(|| format!("mob_settings `{name}` creature `{ty}` missing `min`"))?
+                as u32;
+            let max = e
+                .get("max")
+                .and_then(Value::as_u64)
+                .with_context(|| format!("mob_settings `{name}` creature `{ty}` missing `max`"))?
+                as u32;
+            let weight = e
+                .get("weight")
+                .and_then(Value::as_u64)
+                .with_context(|| format!("mob_settings `{name}` creature `{ty}` missing `weight`"))?
+                as u32;
+            creature.push(CreatureSpawner { ty, min, max, weight });
+        }
+        out.push(MobSettings {
+            name: name.clone(),
+            creature_probability,
+            creature,
+        });
+    }
+    // Match the biome-settings table's stable render order (biome id order,
+    // resolved from the `biomes` table).
+    let id_of = |name: &str| -> u16 {
+        biomes
+            .iter()
+            .find(|b| b.name == name)
+            .map(|b| b.id)
+            .unwrap_or_default()
+    };
+    out.sort_unstable_by(|a, b| id_of(&a.name).cmp(&id_of(&b.name)));
+    Ok(out)
 }
 
 fn extract_biomes(value: &Value) -> Result<Vec<BiomeSettings>> {
@@ -231,6 +333,7 @@ fn render(
     biomes: &[BiomeSettings],
     placed: &[FeatureEntry],
     configured: &[FeatureEntry],
+    mob: &[MobSettings],
     source: &SourceProvenance,
 ) -> String {
     let mut out = String::new();
@@ -296,10 +399,31 @@ fn render(
          pub struct ConfiguredFeatureEntry {\n\
          \x20   pub id: u16,\n\
          \x20   pub json: &'static str,\n\
+         }\n\n\
+         /// A biome's `MobSpawnSettings` (the CREATURE surface the SPAWN seam\n\
+         /// reads — `NaturalSpawner.spawnMobsForChunkGeneration` uses\n\
+         /// `mobSettings.getMobs(MobCategory.CREATURE)` and\n\
+         /// `mobSettings.getCreatureProbability()`). Keyed by biome name; the\n\
+         /// same key set as `BIOME_GENERATION_SETTINGS_BY_NAME`.\n\
+         #[derive(Clone, Copy, Debug, PartialEq)]\n\
+         pub struct BiomeMobSettings {\n\
+         \x20   pub creature_probability: f32,\n\
+         \x20   pub creature: &'static [CreatureSpawnerData],\n\
+         }\n\n\
+         /// One CREATURE `Weighted<SpawnerData>` entry — the entity type,\n\
+         /// min/max count, and the weighted-list weight (builder/held order\n\
+         /// preserved; a reorder changes the weighted selection).\n\
+         #[derive(Clone, Copy, Debug, PartialEq, Eq)]\n\
+         pub struct CreatureSpawnerData {\n\
+         \x20   pub ty: &'static str,\n\
+         \x20   pub min: u32,\n\
+         \x20   pub max: u32,\n\
+         \x20   pub weight: u32,\n\
          }\n\n",
     );
 
     out.push_str(&render_biome_settings(biomes));
+    out.push_str(&render_mob_settings(mob));
     out.push_str(&render_feature_entries(
         "PLACED_FEATURE_BY_NAME",
         placed,
@@ -362,6 +486,46 @@ fn render_biome_settings(biomes: &[BiomeSettings]) -> String {
     out
 }
 
+fn render_mob_settings(mob: &[MobSettings]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "/// `minecraft:worldgen/biome` -> the mob-spawn settings for every possible\n\
+         /// biome ({} biomes, keyed by full biome name; id order). The `creature`\n\
+         /// spawner list is the ordered CREATURE `WeightedList<SpawnerData>`\n\
+         /// `MobSpawnSettings.getMobs(MobCategory.CREATURE)` returns \\u2014 the only\n\
+         /// category `NaturalSpawner.spawnMobsForChunkGeneration` reads \\u2014 and\n\
+         /// `creature_probability` is `getCreatureProbability()`.\n\
+         pub static MOB_SPAWN_SETTINGS_BY_NAME: phf::Map<&'static str, BiomeMobSettings> = phf::phf_map! {{\n",
+        mob.len()
+    ));
+    for m in mob {
+        let creature = m
+            .creature
+            .iter()
+            .map(|c| {
+                format!(
+                    "CreatureSpawnerData {{ ty: {:?}, min: {}, max: {}, weight: {} }}",
+                    c.ty, c.min, c.max, c.weight
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let creature_ref = if m.creature.is_empty() {
+            "&[]".to_string()
+        } else {
+            format!("&[{creature}]")
+        };
+        // The probability is written as a float literal; a value like 0.1 is
+        // the same f32 as Paper's `creatureGenerationProbability`.
+        out.push_str(&format!(
+            "    {:?} => BiomeMobSettings {{ creature_probability: {:?}, creature: {creature_ref} }},\n",
+            m.name, m.creature_probability
+        ));
+    }
+    out.push_str("};\n\n");
+    out
+}
+
 fn render_feature_entries(const_name: &str, entries: &[FeatureEntry], entry_type: &str) -> String {
     let mut out = String::new();
     // Each physical line must already carry its `/// ` prefix — a string-literal
@@ -398,10 +562,11 @@ mod tests {
     /// The committed fixture extracts to the pinned counts, in id order.
     #[test]
     fn committed_fixture_extracts_to_pinned_counts() {
-        let (biomes, placed, configured) = extract(&fixture()).unwrap();
+        let (biomes, placed, configured, _mob) = extract(&fixture()).unwrap();
         assert_eq!(biomes.len(), POSSIBLE_BIOME_COUNT);
         assert_eq!(placed.len(), PLACED_FEATURE_COUNT);
         assert_eq!(configured.len(), CONFIGURED_FEATURE_COUNT);
+        assert_eq!(_mob.len(), POSSIBLE_BIOME_COUNT);
         // Id order is the stable render order.
         assert!(biomes.windows(2).all(|w| w[0].id < w[1].id));
         assert!(placed.windows(2).all(|w| w[0].id < w[1].id));
@@ -410,7 +575,7 @@ mod tests {
 
     #[test]
     fn biome_step_orders_are_preserved() {
-        let (biomes, _, _) = extract(&fixture()).unwrap();
+        let (biomes, _, _, _) = extract(&fixture()).unwrap();
         // Every biome has the full 11-step surface; lush_caves' steps (the deep
         // cave biome, including its dense 9-entry step 9 decoration set) must
         // match the fixture's holder-set order element-for-element.
@@ -451,7 +616,7 @@ mod tests {
 
     #[test]
     fn placed_configured_identity_is_preserved() {
-        let (_, placed, configured) = extract(&fixture()).unwrap();
+        let (_, placed, configured, _) = extract(&fixture()).unwrap();
         // The dense full-registry ids are not contiguous within the subset, but
         // they are unique (registry identity). The reference amethyst_geode
         // entry pins the concrete full-registry ids.
@@ -472,7 +637,7 @@ mod tests {
         // The re-serialized RegistryOps JSON is parseable and preserves the
         // datapack shape (placed: `feature` + `placement`; configured: `type` +
         // `config`).
-        let (_, placed, configured) = extract(&fixture()).unwrap();
+        let (_, placed, configured, _) = extract(&fixture()).unwrap();
         for e in &placed {
             let v: Value = serde_json::from_str(&e.json).unwrap();
             assert!(v["feature"].is_string(), "{} missing feature ref", e.name);
@@ -490,7 +655,7 @@ mod tests {
     /// tables.
     #[test]
     fn render_preserves_closure() {
-        let (biomes, placed, configured) = extract(&fixture()).unwrap();
+        let (biomes, placed, configured, _mob) = extract(&fixture()).unwrap();
         let placed_names: std::collections::HashSet<&str> =
             placed.iter().map(|e| e.name.as_str()).collect();
         let configured_names: std::collections::HashSet<&str> =
@@ -519,13 +684,13 @@ mod tests {
 
     #[test]
     fn rendering_is_deterministic() {
-        let (biomes, placed, configured) = extract(&fixture()).unwrap();
+        let (biomes, placed, configured, mob) = extract(&fixture()).unwrap();
         let source: SourceProvenance = serde_json::from_str(
             r#"{"jar":"paper-26.2.jar","jar_sha256":"e1a027e9481a16ec1da0f0e139d370280050d123a14c022a476c2dc8a697ebda","minecraft_version":"26.2","protocol_version":776,"world_version":4903}"#,
         )
         .unwrap();
-        let first = render(&biomes, &placed, &configured, &source);
-        let second = render(&biomes, &placed, &configured, &source);
+        let first = render(&biomes, &placed, &configured, &mob, &source);
+        let second = render(&biomes, &placed, &configured, &mob, &source);
         assert_eq!(first, second);
         // The final section ends with `};\n` exactly: the section renderers
         // append `};\n\n` (the blank line separates sections), so the last
@@ -547,5 +712,64 @@ mod tests {
         assert!(first.contains("PLACED_FEATURE_BY_NAME"));
         assert!(first.contains("CONFIGURED_FEATURE_BY_NAME"));
         assert!(first.contains("PlacedFeatureEntry { id: 2u16, json:"));
+        assert!(first.contains("MOB_SPAWN_SETTINGS_BY_NAME"));
+        assert!(first.contains("BiomeMobSettings"));
+        assert!(first.contains("CreatureSpawnerData"));
+        // The river biome (seed-42's center biome) has an EMPTY CREATURE list —
+        // the SPAWN acceptance path.
+        assert!(
+            first.contains(
+                "\"minecraft:river\" => BiomeMobSettings { creature_probability: 0.1, creature: &[] }"
+            ),
+            "river biome must render with an empty CREATURE list"
+        );
+    }
+
+    /// The mob-settings extraction preserves the ordered CREATURE spawner list
+    /// (type/min/max/weight), the `creature_spawn_probability`, and the biome
+    /// id-order render ordering.
+    #[test]
+    fn mob_settings_extract_preserves_order_and_values() {
+        let (biomes, _, _, mob) = extract(&fixture()).unwrap();
+        assert_eq!(mob.len(), POSSIBLE_BIOME_COUNT);
+        // The `biomes` and `mob` tables are keyed by the same biome set.
+        let mut biome_names: Vec<_> = biomes.iter().map(|b| b.name.as_str()).collect();
+        biome_names.sort_unstable();
+        let mut mob_names: Vec<_> = mob.iter().map(|m| m.name.as_str()).collect();
+        mob_names.sort_unstable();
+        assert_eq!(biome_names, mob_names);
+        // river has an empty CREATURE list (the SPAWN acceptance path); beach
+        // has exactly one turtle spawner (the refusal path).
+        let river = mob.iter().find(|m| m.name == "minecraft:river").unwrap();
+        assert!(river.creature.is_empty());
+        assert_eq!(river.creature_probability, 0.1);
+        let beach = mob.iter().find(|m| m.name == "minecraft:beach").unwrap();
+        assert_eq!(beach.creature.len(), 1);
+        assert_eq!(beach.creature[0].ty, "minecraft:turtle");
+        assert_eq!(beach.creature[0].min, 2);
+        assert_eq!(beach.creature[0].max, 5);
+        assert_eq!(beach.creature[0].weight, 5);
+        // dark_forest has the four-tuple sorted in holder-set order.
+        let dark = mob.iter().find(|m| m.name == "minecraft:dark_forest").unwrap();
+        let tys: Vec<&str> = dark.creature.iter().map(|c| c.ty.as_str()).collect();
+        assert_eq!(
+            tys,
+            ["minecraft:sheep", "minecraft:pig", "minecraft:chicken", "minecraft:cow"]
+        );
+        // Render order is biome id order (matches the `biomes` table order).
+        let beach_id = biomes
+            .iter()
+            .find(|b| b.name == "minecraft:beach")
+            .unwrap()
+            .id;
+        let river_id = biomes
+            .iter()
+            .find(|b| b.name == "minecraft:river")
+            .unwrap()
+            .id;
+        let pos = |m: &MobSettings| mob.iter().position(|x| x.name == m.name).unwrap();
+        let beach_mob = mob.iter().find(|m| m.name == "minecraft:beach").unwrap();
+        let river_mob = mob.iter().find(|m| m.name == "minecraft:river").unwrap();
+        assert_eq!(pos(beach_mob) < pos(river_mob), beach_id < river_id);
     }
 }

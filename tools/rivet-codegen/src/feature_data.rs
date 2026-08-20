@@ -354,6 +354,7 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
                 | "possible_biomes"
                 | "reachable_biomes"
                 | "biomes"
+                | "mob_settings"
                 | "placed_features"
                 | "configured_features"
                 | "probe"
@@ -501,6 +502,76 @@ pub(crate) fn validate_structural(root: &Value) -> Result<()> {
                 })?;
                 crate::registries::validate_name("minecraft:worldgen/placed_feature", placed)?;
             }
+        }
+    }
+
+    // Mob settings: key set == the possible-biome set, each with
+    // creature_spawn_probability and the ordered CREATURE spawner list (the
+    // `Weighted<SpawnerData>` list `NaturalSpawner.spawnMobsForChunkGeneration`
+    // reads — `mobSettings.getMobs(MobCategory.CREATURE)`). The spawners are
+    // emitted in builder (holder-set) order; a reorder changes the weighted
+    // selection and must fail.
+    let mob = object
+        .get("mob_settings")
+        .and_then(Value::as_object)
+        .context("feature_data.json is missing `mob_settings`")?;
+    if mob.len() != possible_names.len() {
+        bail!(
+            "`mob_settings` has {} entries but possible_biomes has {}",
+            mob.len(),
+            possible_names.len()
+        );
+    }
+    for name in &possible_names {
+        if !mob.contains_key(*name) {
+            bail!("possible biome `{name}` is absent from `mob_settings`");
+        }
+    }
+    for name in mob.keys() {
+        if !possible_names.contains(&name.as_str()) {
+            bail!("biome `{name}` is in `mob_settings` but absent from `possible_biomes`");
+        }
+    }
+    for (name, entry) in mob {
+        let entry = entry
+            .as_object()
+            .with_context(|| format!("mob_settings `{name}` entry must be an object"))?;
+        for field in entry.keys() {
+            if !matches!(field.as_str(), "creature_spawn_probability" | "creature") {
+                bail!("mob_settings `{name}` has unexpected field `{field}`");
+            }
+        }
+        entry
+            .get("creature_spawn_probability")
+            .and_then(Value::as_f64)
+            .with_context(|| format!("mob_settings `{name}` missing creature_spawn_probability"))?;
+        let creature = entry
+            .get("creature")
+            .and_then(Value::as_array)
+            .with_context(|| format!("mob_settings `{name}` is missing `creature`"))?;
+        for (i, e) in creature.iter().enumerate() {
+            let e = e
+                .as_object()
+                .with_context(|| format!("mob_settings `{name}` creature[{i}] must be an object"))?;
+            for field in e.keys() {
+                if !matches!(field.as_str(), "type" | "min" | "max" | "weight") {
+                    bail!("mob_settings `{name}` creature[{i}] has unexpected field `{field}`");
+                }
+            }
+            let ty = e
+                .get("type")
+                .and_then(Value::as_str)
+                .with_context(|| format!("mob_settings `{name}` creature[{i}] missing `type`"))?;
+            crate::registries::validate_name("minecraft:entity_type", ty)?;
+            e.get("min").and_then(Value::as_u64).with_context(|| {
+                format!("mob_settings `{name}` creature[{i}] missing `min`")
+            })?;
+            e.get("max").and_then(Value::as_u64).with_context(|| {
+                format!("mob_settings `{name}` creature[{i}] missing `max`")
+            })?;
+            e.get("weight").and_then(Value::as_u64).with_context(|| {
+                format!("mob_settings `{name}` creature[{i}] missing `weight`")
+            })?;
         }
     }
 
@@ -1301,7 +1372,7 @@ mod tests {
         // length — fails here).
         assert_eq!(
             source.jar_sha256,
-            "e1a027e9481a16ec1da0f0e139d370280050d123a14c022a476c2dc8a697ebda"
+            crate::reports::PINNED_SERVER_JAR_SHA256_FEATURE_DATA
         );
     }
 }
