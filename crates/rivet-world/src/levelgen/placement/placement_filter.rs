@@ -25,7 +25,7 @@ pub trait PlacementFilter: Debug + Send + Sync + 'static {
     /// overridable predicate.
     fn should_place<R: RandomSource>(
         &self,
-        context: &PlacementContext,
+        context: &mut PlacementContext,
         random: &mut R,
         origin: &BlockPos,
     ) -> bool;
@@ -43,7 +43,7 @@ pub trait PlacementFilter: Debug + Send + Sync + 'static {
 impl<F: PlacementFilter + ?Sized> PlacementModifier for F {
     fn get_positions<'a, R: RandomSource>(
         &'a self,
-        context: &PlacementContext,
+        context: &mut PlacementContext,
         random: &mut R,
         origin: &BlockPos,
     ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
@@ -111,7 +111,7 @@ mod tests {
     impl PlacementFilter for EvenFilter {
         fn should_place<R: RandomSource>(
             &self,
-            _context: &PlacementContext,
+            _context: &mut PlacementContext,
             random: &mut R,
             _origin: &BlockPos,
         ) -> bool {
@@ -128,9 +128,9 @@ mod tests {
     fn filter_positions(filter: &EvenFilter, random: &mut LegacyRandomSource) -> Vec<BlockPos> {
         let mut level = TestLevel(create(-64, 384));
         let generator = NoopGenerator;
-        let context = PlacementContext::new(&mut level, &generator, None);
+        let mut context = PlacementContext::new(&mut level, &generator, None);
         let origin = BlockPos::new(1, 2, 3);
-        PlacementModifier::get_positions(filter, &context, random, &origin).collect()
+        PlacementModifier::get_positions(filter, &mut context, random, &origin).collect()
     }
 
     #[test]

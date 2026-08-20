@@ -39,6 +39,9 @@ impl Blocks {
     pub const PODZOL: Block = Block::new(BlockId(11));
     /// `Blocks.COBBLESTONE`.
     pub const COBBLESTONE: Block = Block::new(BlockId(12));
+    /// `Blocks.MOSSY_COBBLESTONE` (feature: `MonsterRoomFeature` — the
+    /// `dy == -1 && random.nextInt(4) != 0` floor fill).
+    pub const MOSSY_COBBLESTONE: Block = Block::new(BlockId(192));
     /// `Blocks.OAK_PLANKS`.
     pub const OAK_PLANKS: Block = Block::new(BlockId(13));
     /// `Blocks.BEDROCK`.
@@ -256,6 +259,7 @@ mod tests {
             Blocks::COARSE_DIRT,
             Blocks::PODZOL,
             Blocks::COBBLESTONE,
+            Blocks::MOSSY_COBBLESTONE,
             Blocks::OAK_PLANKS,
             Blocks::BEDROCK,
             Blocks::WATER,

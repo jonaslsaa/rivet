@@ -171,7 +171,10 @@ impl<T> HolderSet<T> {
     /// block/fluid holder, a `Reference` in the matching registry, against the
     /// set). The set is over the matching registry by construction, so the id
     /// compare is the faithful equivalent of `Reference.equals` on a
-    /// same-registry holder.
+    /// same-registry holder. Direct members are intentionally excluded: a
+    /// block/fluid state carries a registry reference, and Java's direct-holder
+    /// equality does not match that reference (nor can the placeholder value
+    /// type provide a registry id).
     pub fn contains_id(&self, id: u32) -> bool {
         self.contents()
             .iter()
@@ -290,6 +293,13 @@ mod tests {
         assert_eq!(set.get(1), &holder(1));
         assert!(set.contains(&holder(0)));
         assert!(!set.contains(&holder(9)));
+    }
+
+    #[test]
+    fn contains_id_only_matches_registry_references() {
+        let set = HolderSet::direct(vec![Holder::direct(TestElement(0)), holder(1)]);
+        assert!(!set.contains_id(0));
+        assert!(set.contains_id(1));
     }
 
     #[test]

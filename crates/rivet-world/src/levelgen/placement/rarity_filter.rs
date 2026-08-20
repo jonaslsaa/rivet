@@ -45,7 +45,7 @@ impl RarityFilter {
 impl PlacementFilter for RarityFilter {
     fn should_place<R: RandomSource>(
         &self,
-        _context: &PlacementContext,
+        _context: &mut PlacementContext,
         random: &mut R,
         _origin: &BlockPos,
     ) -> bool {
@@ -142,8 +142,8 @@ mod tests {
     ) -> Vec<BlockPos> {
         let mut level = TestLevel(create(-64, 384));
         let generator = NoopGenerator;
-        let context = PlacementContext::new(&mut level, &generator, None);
-        PlacementModifier::get_positions(filter, &context, random, origin).collect()
+        let mut context = PlacementContext::new(&mut level, &generator, None);
+        PlacementModifier::get_positions(filter, &mut context, random, origin).collect()
     }
 
     #[test]

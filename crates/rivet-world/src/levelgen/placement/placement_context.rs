@@ -116,19 +116,9 @@ impl<'a> PlacementContext<'a> {
     }
 
     /// `getHeight(Heightmap.Types, int, int)` — `this.level.getHeight(type, x, z)`
-    /// — the `LevelReader.getHeight` heightmap read, delegating to the
-    /// `WorldGenLevel` trait-default seam.
-    ///
-    /// Consumed by the surface-relative placement filters
-    /// (`SurfaceRelativeThresholdFilter`, `SurfaceWaterDepthFilter`),
-    /// `HeightmapPlacement`, `CountOnEveryLayerPlacement`, and by
-    /// `PlacedFeature.placeWithContext`-style callers. The read reaches into
-    /// the worldgen `LevelReader` heightmap surface, which defers with the
-    /// block-state worldgen slice (#228); the `WorldGenLevel` default fails
-    /// explicitly rather than fabricating a surface, so a level that answers
-    /// `getHeight` (a test double or a real world once #228 lands) keeps the
-    /// concrete filter bodies executable.
-    pub fn get_height(&self, ty: Types, x: i32, z: i32) -> i32 {
+    /// — the mutable `WorldGenLevel` heightmap read. Regions prime and persist
+    /// missing maps here just as Java's `ChunkAccess.getHeight` does.
+    pub fn get_height(&mut self, ty: Types, x: i32, z: i32) -> i32 {
         self.level.get_height_at(ty, x, z)
     }
 }

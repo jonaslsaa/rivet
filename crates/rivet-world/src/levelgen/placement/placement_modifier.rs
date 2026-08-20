@@ -71,7 +71,7 @@ pub trait PlacementModifier: Debug + Send + Sync + 'static {
     /// returns an owning iterator, so this is always satisfiable.
     fn get_positions<'a, R: RandomSource>(
         &'a self,
-        context: &PlacementContext,
+        context: &mut PlacementContext,
         random: &mut R,
         origin: &BlockPos,
     ) -> Box<dyn Iterator<Item = BlockPos> + 'a>;
@@ -131,7 +131,7 @@ impl<M: PlacementModifier> ErasedPlacementModifier for M {
 /// id 8 leaf is `minecraft:count_on_every_layer`) — so it has no dispatch arm.
 pub fn placement_get_positions<'a, R: RandomSource>(
     modifier: &'a dyn ErasedPlacementModifier,
-    context: &PlacementContext,
+    context: &mut PlacementContext,
     random: &mut R,
     origin: &BlockPos,
 ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
@@ -301,7 +301,7 @@ mod tests {
     impl PlacementModifier for IdentityModifier {
         fn get_positions<'a, R: RandomSource>(
             &'a self,
-            _context: &PlacementContext,
+            _context: &mut PlacementContext,
             _random: &mut R,
             _origin: &BlockPos,
         ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
@@ -326,8 +326,8 @@ mod tests {
         let erased: &dyn ErasedPlacementModifier = modifier;
         let mut level = TestLevel;
         let generator = NoopGenerator;
-        let context = PlacementContext::new(&mut level, &generator, None);
-        placement_get_positions(erased, &context, random, origin).collect()
+        let mut context = PlacementContext::new(&mut level, &generator, None);
+        placement_get_positions(erased, &mut context, random, origin).collect()
     }
 
     /// The same leaf called directly (not through the dispatch) — the parity
@@ -339,8 +339,8 @@ mod tests {
     ) -> Vec<BlockPos> {
         let mut level = TestLevel;
         let generator = NoopGenerator;
-        let context = PlacementContext::new(&mut level, &generator, None);
-        PlacementModifier::get_positions(modifier, &context, random, origin).collect()
+        let mut context = PlacementContext::new(&mut level, &generator, None);
+        PlacementModifier::get_positions(modifier, &mut context, random, origin).collect()
     }
 
     /// The RNG draws the tests assert on (a subset of the `feature.selector`
@@ -479,11 +479,11 @@ mod tests {
         let erased: &dyn ErasedPlacementModifier = &modifier;
         let mut level = TestLevel;
         let generator = NoopGenerator;
-        let context = PlacementContext::new(&mut level, &generator, None);
+        let mut context = PlacementContext::new(&mut level, &generator, None);
         let origin = BlockPos::new(0, 0, 0);
         let mut random = LegacyRandomSource::new(0);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = placement_get_positions(erased, &context, &mut random, &origin);
+            let _ = placement_get_positions(erased, &mut context, &mut random, &origin);
         }));
         assert_eq!(
             panic_message(result),
@@ -501,11 +501,11 @@ mod tests {
         let erased: &dyn ErasedPlacementModifier = &modifier;
         let mut level = TestLevel;
         let generator = NoopGenerator;
-        let context = PlacementContext::new(&mut level, &generator, None);
+        let mut context = PlacementContext::new(&mut level, &generator, None);
         let origin = BlockPos::new(0, 0, 0);
         let mut random = LegacyRandomSource::new(0);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = placement_get_positions(erased, &context, &mut random, &origin);
+            let _ = placement_get_positions(erased, &mut context, &mut random, &origin);
         }));
         assert_eq!(
             panic_message(result),
@@ -756,9 +756,9 @@ mod tests {
         let origin = BlockPos::new(1, 2, 3);
         let mut level = TestLevel;
         let generator = NoopGenerator;
-        let context = PlacementContext::new(&mut level, &generator, None);
+        let mut context = PlacementContext::new(&mut level, &generator, None);
         let mut random = LegacyRandomSource::new(0);
-        let mut it = placement_get_positions(&modifier, &context, &mut random, &origin);
+        let mut it = placement_get_positions(&modifier, &mut context, &mut random, &origin);
         for _ in 0..3 {
             assert_eq!(it.next(), Some(origin));
         }

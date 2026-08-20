@@ -13,11 +13,18 @@
 //! Java default is a no-op body and only `WorldGenRegion` (server.level)
 //! overrides it for debug narration, so no current consumer reads it.
 //!
-//! The trait is `Send` but deliberately NOT `Sync`: the worldgen level is
-//! exclusively `&mut`-borrowed by the feature placement stack on the sync tick
-//! thread (OWNERSHIP.md), and `WorldGenRegion` owns non-`Sync` `ChunkAccess`
-//! values (the paletted-container `dyn` internals are `Send`-only). A `Sync`
-//! bound would force a shared worldgen view that the ownership model forbids.
+//! The trait is `Send` but deliberately NOT `Sync` and NOT `'static`: the
+//! worldgen level is exclusively `&mut`-borrowed by the feature placement stack
+//! on the sync tick thread (OWNERSHIP.md), and `WorldGenRegion` owns non-`Sync`
+//! `ChunkAccess` values (the paletted-container `dyn` internals are
+//! `Send`-only). A `Sync` bound would force a shared worldgen view that the
+//! ownership model forbids, and a `'static` bound would forbid borrowing a
+//! worldgen level that owns data with a shorter lifetime.
+//!
+//! The value types are free: the executor's dense region runs `StateId` block
+//! values while the FEATURES-pass region runs `BlockState` values, so the
+//! production impls specialize the `WorldGenRegion` type parameters rather than
+//! the trait.
 
 use crate::level::block_shape_context::{
     BlockShapeContext, ShapeQuery, ShapeQueryError, SupportType, dynamic_shape_fallback,
@@ -38,7 +45,7 @@ use rivet_registry::holder::Holder;
 /// rest of the Java `ServerLevelAccessor` ancestor chain (`LevelAccessor`/
 /// `LevelReader`/`BlockGetter`, plus the `LevelWriter` write surface) is ported
 /// by the owning unit.
-pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
+pub trait WorldGenLevel: LevelHeightAccessor + Send {
     /// `WorldGenLevel.getSeed()`.
     fn get_seed(&self) -> i64;
 
@@ -80,11 +87,11 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     /// name — the same `_at` suffix `ChunkAccess::get_height_at` uses for
     /// exactly this collision.
     ///
-    /// RivetTodo(#232): the worldgen `LevelReader` heightmap read is not ported
-    /// yet, so the default fails explicitly (panics) rather than fabricating a
-    /// surface — the same capability-unavailable seam as `get_biome`. Concrete
-    /// worlds and test doubles override it with real behavior when they land.
-    fn get_height_at(&self, _ty: Types, _x: i32, _z: i32) -> i32 {
+    /// The default remains an explicit capability failure for worlds that do
+    /// not own chunk heightmaps. Concrete regions override it with the mutable
+    /// Java behavior: a missing heightmap is primed and persisted before the
+    /// first-available height is returned.
+    fn get_height_at(&mut self, _ty: Types, _x: i32, _z: i32) -> i32 {
         panic!("WorldGenLevel.getHeight is not implemented (RivetTodo #232)")
     }
 
@@ -324,6 +331,80 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send + 'static {
     /// default fails explicitly rather than fabricating a destruction.
     fn destroy_block(&mut self, _pos: &BlockPos, _drop: bool) -> bool {
         panic!("LevelAccessor.destroyBlock is not implemented (RivetTodo #232)")
+    }
+
+    /// Whether `getBlockEntity(pos)` is a `RandomizableContainer`.
+    ///
+    /// Java's `RandomizableContainer.setBlockEntityLootTable` draws
+    /// `random.nextLong()` only after this `instanceof` succeeds. Keeping the
+    /// query before the draw preserves the feature's RNG stream when a chest
+    /// write is rejected or the position has no matching block entity.
+    ///
+    /// RivetTodo(#232): the default remains an explicit failure for worlds that
+    /// have not implemented the block-entity surface; `WorldGenRegion` overrides
+    /// it for the FEATURES placement path.
+    fn is_randomizable_container(&self, _pos: &BlockPos) -> bool {
+        panic!(
+            "BlockGetter.getBlockEntity(RandomizableContainer) is not implemented (RivetTodo #232)"
+        )
+    }
+
+    /// `RandomizableContainer.setBlockEntityLootTable(BlockGetter, RandomSource,
+    /// BlockPos, ResourceKey<LootTable>)` — the chest-loot seam the
+    /// `.feature.monsterroom` leaf consumes. The feature draws the seed after
+    /// [`is_randomizable_container`] succeeds and passes it here because the
+    /// trait is not generic over `R`; `loot_table` is the NBT `LootTable` value
+    /// (e.g. `minecraft:chests/simple_dungeon`).
+    ///
+    /// RivetTodo(#232): the default remains an explicit failure for worlds that
+    /// have not implemented the block-entity surface; `WorldGenRegion` overrides
+    /// it for the FEATURES placement path.
+    fn set_block_entity_loot_table(&mut self, _pos: &BlockPos, _seed: i64, _loot_table: &str) {
+        panic!("RandomizableContainer.setBlockEntityLootTable is not implemented (RivetTodo #232)")
+    }
+
+    /// Whether `getBlockEntity(pos)` is a `SpawnerBlockEntity`.
+    ///
+    /// Java evaluates this `instanceof` before calling `randomEntityId`, so a
+    /// missing spawner entity consumes no mob-selection RNG draw. This query
+    /// keeps that short-circuit at the feature boundary.
+    ///
+    /// RivetTodo(#232): the default remains an explicit failure for worlds that
+    /// have not implemented the block-entity surface; `WorldGenRegion` overrides
+    /// it for the FEATURES placement path.
+    fn is_spawner_block_entity(&self, _pos: &BlockPos) -> bool {
+        panic!("BlockGetter.getBlockEntity(SpawnerBlockEntity) is not implemented (RivetTodo #232)")
+    }
+
+    /// `BaseSpawner.getOrCreateNextSpawnData`'s weighted-list draw. `Some(total)`
+    /// means that this spawner has no current `SpawnData` and a non-empty
+    /// `SpawnPotentials`; the feature must consume exactly one
+    /// `random.nextInt(total)` before calling [`set_spawner_entity`]. `None`
+    /// means Java does not draw here (an existing `SpawnData`, or an empty
+    /// potential list).
+    ///
+    /// The returned total is deliberately a primitive seam: `RandomSource` is
+    /// not object-safe, so the feature owns the exact RNG call while the level
+    /// owns weighted-list state and the state transition.
+    fn spawner_potential_weight(&self, _pos: &BlockPos) -> Option<i32> {
+        panic!("BaseSpawner.getOrCreateNextSpawnData is not implemented (RivetTodo #232)")
+    }
+
+    /// `SpawnerBlockEntity.setEntityId(EntityType, RandomSource)` — materialize
+    /// the selected entity id after the optional weighted-list roll. When
+    /// `potential_roll` is `Some`, the level selects that weighted entry before
+    /// replacing its entity id; in every case Java clears `spawnPotentials`.
+    ///
+    /// RivetTodo(#232): the default remains an explicit failure for worlds that
+    /// have not implemented the block-entity surface; `WorldGenRegion` overrides
+    /// it for the FEATURES placement path.
+    fn set_spawner_entity(
+        &mut self,
+        _pos: &BlockPos,
+        _entity_id: &str,
+        _potential_roll: Option<i32>,
+    ) {
+        panic!("SpawnerBlockEntity.setEntityId is not implemented (RivetTodo #232)")
     }
 
     /// The registry-access back-reference seam. Java `Holder.value()` needs no

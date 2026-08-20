@@ -34,7 +34,7 @@ impl InSquarePlacement {
 impl PlacementModifier for InSquarePlacement {
     fn get_positions<'a, R: RandomSource>(
         &'a self,
-        _context: &PlacementContext,
+        _context: &mut PlacementContext,
         random: &mut R,
         origin: &BlockPos,
     ) -> Box<dyn Iterator<Item = BlockPos> + 'a> {
@@ -115,9 +115,9 @@ mod tests {
     fn spread_positions(random: &mut LegacyRandomSource, origin: &BlockPos) -> Vec<BlockPos> {
         let mut level = TestLevel(create(-64, 384));
         let generator = NoopGenerator;
-        let context = PlacementContext::new(&mut level, &generator, None);
+        let mut context = PlacementContext::new(&mut level, &generator, None);
         InSquarePlacement::spread()
-            .get_positions(&context, random, origin)
+            .get_positions(&mut context, random, origin)
             .collect()
     }
 
