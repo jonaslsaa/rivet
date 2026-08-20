@@ -797,7 +797,7 @@ fn entry_identity(dir: &OwnedFd, name: &CStr) -> io::Result<(Identity, FileType)
 #[cfg(unix)]
 fn link_count(fd: &impl AsFd) -> io::Result<u64> {
     rustix::fs::fstat(fd)
-        .map(|stat| u64::from(stat.st_nlink))
+        .map(|stat| stat.st_nlink)
         .map_err(io::Error::from)
 }
 

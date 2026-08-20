@@ -1,4 +1,6 @@
 /target
+/target-agent-shared/
+/target-agent-shared.lock
 /working
 /working/
 .DS_Store

@@ -62,8 +62,8 @@ printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$SANDBOX/scripts/t
 
 # The oracle pre-check requires the rivet-client binary (join-capture harness);
 # provide an existing dummy file so the pre-check reports all prereqs present.
-mkdir -p "$SANDBOX/tools/rivet-client/target/debug"
-: > "$SANDBOX/tools/rivet-client/target/debug/rivet-client"
+mkdir -p "$SANDBOX/target-agent-shared/debug"
+: > "$SANDBOX/target-agent-shared/debug/rivet-client"
 
 # gate.sh now also runs the scenario runner's Paper rows (join/move
 # Paper-vs-Rivet differentials) whenever the paperclip jar and the client binary
@@ -73,13 +73,15 @@ mkdir -p "$SANDBOX/tools/rivet-client/target/debug"
 mkdir -p "$SANDBOX/tools/rivet-client"
 cat > "$SANDBOX/tools/rivet-client/run-scenario.sh" <<'EOF'
 #!/bin/bash
-exit 0
+[ "${RIVET_BUILD_LOCK_HELD:-0}" = 1 ]
 EOF
 chmod +x "$SANDBOX/tools/rivet-client/run-scenario.sh"
 
 # The real gate script under test.
 cp "$PWD/scripts/gate.sh" "$SANDBOX/scripts/gate.sh"
-chmod +x "$SANDBOX/scripts/gate.sh"
+cp "$PWD/scripts/with-build-lock.sh" "$SANDBOX/scripts/with-build-lock.sh"
+cp "$PWD/scripts/cargo-target-dir.sh" "$SANDBOX/scripts/cargo-target-dir.sh"
+chmod +x "$SANDBOX/scripts/gate.sh" "$SANDBOX/scripts/with-build-lock.sh" "$SANDBOX/scripts/cargo-target-dir.sh"
 
 # --- satisfy the oracle pre-check --------------------------------------------
 # Same dummy-file/version-stub approach as test_gate_features.sh so a green full
@@ -165,7 +167,7 @@ chmod +x "$SANDBOX/home/.cargo/bin/cargo" "$SANDBOX/home/.cargo/bin/cargo-machet
 # Fully controlled PATH: sandbox bin + minimal system dirs. gate.sh prepends
 # $HOME/.cargo/bin itself. JAVA_HOME points at the sandbox jdk so the
 # reference-oracle javac probe is deterministic on hosts with their own JDK.
-GATE="env HOME=$SANDBOX/home JAVA_HOME=$SANDBOX/jdk PATH=$SANDBOX/home/.cargo/bin:/usr/bin:/bin $SANDBOX/scripts/gate.sh"
+GATE="env HOME=$SANDBOX/home JAVA_HOME=$SANDBOX/jdk CARGO_TARGET_DIR=$SANDBOX/target-agent-shared PATH=$SANDBOX/home/.cargo/bin:/usr/bin:/bin $SANDBOX/scripts/gate.sh"
 
 # Assertions shared by every scenario: the fuzz step must be scoped to
 # `-p rivet-fuzz --features packets` — never widened to `--all-features` or
