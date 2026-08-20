@@ -32,6 +32,7 @@ use indexmap::{IndexMap, IndexSet};
 use std::collections::HashMap;
 
 /// `net.minecraft.world.level.chunk.StructureAccess`.
+#[derive(Clone)]
 pub struct StructureAccess<S> {
     /// `structureStarts` — structure id -> start. `StructureStart` is absent,
     /// so the start value is modeled as an `i64`.

@@ -159,6 +159,13 @@ impl NoiseBasedChunkGenerator {
         settings_value(&self.settings).noise_settings.min_y()
     }
 
+    /// `settings.value().disableMobGeneration()` — the `@Deprecated`
+    /// `spawnOriginalMobs` gate: when the settings disable mob generation the
+    /// SPAWN seam is a faithful no-op.
+    pub fn disable_mob_generation(&self) -> bool {
+        settings_value(&self.settings).disable_mob_generation
+    }
+
     /// `getInterpolatedNoiseValue(RandomState, FunctionContext)` — the
     /// `@VisibleForTesting` single-column density probe.
     pub fn get_interpolated_noise_value(

@@ -1,4 +1,7 @@
 /target
+/target-agent-shared/
+/target-agent-shared.lock
+/cargo-build.lock
 /working
 /working/
 .DS_Store

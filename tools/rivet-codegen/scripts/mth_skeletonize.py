@@ -83,7 +83,16 @@ def main() -> None:
         # The rhs span is from the top-level comma to the closing paren.
         comma_off = _top_level_comma(text, start)
         placeholder = f"@@{n}@@"
-        pieces.append((comma_off + 1, end, placeholder, lhs, rhs))
+        if "ARCH-SELECTED (D14)" in rhs:
+            # Arch-selected expected value (D14): the committed golden holds a
+            # `#[cfg(target_arch)]` block whose x86_64 branch is the live value
+            # and whose aarch64 branch is a provenance literal. Round-trip by
+            # replacing ONLY the x86_64 branch literal with the @@N@@ placeholder,
+            # keeping the cfg structure + aarch64 literal intact.
+            skeleton_rhs = _placeholderize_arch_rhs(rhs, placeholder, n)
+        else:
+            skeleton_rhs = placeholder
+        pieces.append((comma_off + 1, end, skeleton_rhs, lhs, rhs))
 
     parts = []
     cursor = 0
@@ -115,6 +124,25 @@ def _top_level_comma(text: str, assert_start: int) -> int:
             return j
         j += 1
     raise ValueError("no top-level comma")
+
+
+def _placeholderize_arch_rhs(rhs: str, placeholder: str, n: int) -> str:
+    """Replace the x86_64-branch value inside an ARCH-SELECTED cfg block with the
+    placeholder, preserving the aarch64 provenance literal and the compile_error
+    fall-through, so skeletonize --> render is a stable round-trip."""
+    marker = '#[cfg(target_arch = "x86_64")]'
+    if marker not in rhs:
+        raise ValueError(f"ARCH-SELECTED rhs #{n} missing x86_64 arm: {rhs!r}")
+    head, _, tail = rhs.partition(marker)
+    # The x86_64 arm is `{ <value> }` immediately after the marker.
+    brace = tail.find("{")
+    close = tail.find("}")
+    if brace < 0 or close < 0 or close <= brace:
+        raise ValueError(f"ARCH-SELECTED rhs #{n} malformed x86_64 arm: {rhs!r}")
+    core = tail[brace + 1 : close].strip()
+    if core.startswith("0x"):
+        return f"{head}{marker}{{ {placeholder} }}{tail[close + 1:]}"
+    raise ValueError(f"ARCH-SELECTED rhs #{n} unexpected x86_64 value: {core!r}")
 
 
 if __name__ == "__main__":

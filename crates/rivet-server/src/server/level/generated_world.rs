@@ -41,15 +41,18 @@
 //! indices execute per step). The generated feature tables cover EVERY
 //! overworld possible biome (55 — the full list, not the reachable subset),
 //! so the full list resolves and the run proceeds to the per-step loop. The
-//! lake, amethyst-geode, and monster-room entries are decoded from the generated
-//! JSON and run with their exact feature seeds; the seed-42 chunk then stops at
-//! the first selected path not implemented (`minecraft:ore_dirt`). The chunk
-//! stays CARVERS. The INITIALIZE_LIGHT/
+//! lake, amethyst-geode, monster-room, and the Batch 2/3/4 dispatch leaves (ore,
+//! disk, spring, simple_block, block_column, vines, seagrass, freeze_top_layer,
+//! underwater_magma, multiface_growth) are decoded from the generated JSON and
+//! run with their exact feature seeds; seed-42 `minecraft:glow_lichen` now
+//! executes, then the chunk stops at the next selected typed-unavailable path:
+//! `minecraft:dark_forest_vegetation` at step 9/global index 17.
+//! The chunk stays CARVERS. The INITIALIZE_LIGHT/
 //! LIGHT steps are executor-wired but engine-gated (the holder wires no light
 //! engine, so it cannot reach LIGHT).
 //! Everything the value layer does not wire is refused *before* running work: a
 //! path through a light step with no engine is refused as
-//! `GenError::LightEngineMissing`, and a target past LIGHT (SPAWN/FULL) is out
+//! `GenError::LightEngineMissing`, and a target past LIGHT (FULL) is out
 //! of range (`GenError::UnsupportedStatus`). The holder's
 //! [`GenerationChunkHolder::generate_through`] surfaces these as typed
 //! [`GeneratedChunkError::Generation`] / [`GeneratedChunkError::UnsupportedStatus`]
@@ -91,16 +94,19 @@ use serde_json::Value;
 
 use rivet_registry::Registry;
 use rivet_registry::access::RegistryAccess;
+use rivet_registry::access::{LayeredRegistryAccess, RegistryLayer};
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::block_state::BlockState;
 use rivet_registry::builder::RegistryBuilder;
 use rivet_registry::core::BlockPos;
 use rivet_registry::core::ChunkPos;
+use rivet_registry::core::QuartPos;
 use rivet_registry::core::SectionPos;
 use rivet_registry::generated::biomes::BIOME_BY_ID;
 use rivet_registry::generated::blocks::BlockId;
 use rivet_registry::generated::feature_data::{
-    BIOME_GENERATION_SETTINGS_BY_NAME, CONFIGURED_FEATURE_BY_NAME, PLACED_FEATURE_BY_NAME,
+    BIOME_GENERATION_SETTINGS_BY_NAME, CONFIGURED_FEATURE_BY_NAME, MOB_SPAWN_SETTINGS_BY_NAME,
+    PLACED_FEATURE_BY_NAME,
 };
 use rivet_registry::holder::Holder;
 use rivet_registry::holder::RegistryId;
@@ -111,6 +117,7 @@ use rivet_serialization::codec::Codec;
 use rivet_serialization::json_ops::JsonOps;
 use rivet_util::StaticCache2D;
 use rivet_util::WorldgenRandom;
+use rivet_util::random::LegacyRandomSource;
 use rivet_util::random_source::XoroshiroRandomSource;
 use rivet_util::random_source::random_support;
 use rivet_world::biome::BiomeManager;
@@ -135,7 +142,18 @@ use rivet_world::data::worldgen::worldgen_bootstraps::build_worldgen_registries;
 use rivet_world::level::height_accessor::LevelHeightAccessor;
 use rivet_world::level::height_accessor::create as create_height_accessor;
 use rivet_world::levelgen::blending::blender::Blender;
+use rivet_world::levelgen::feature::configurations::block_column_configuration::block_column_configuration_codec;
+use rivet_world::levelgen::feature::configurations::composite_feature_configuration::composite_feature_configuration_codec;
+use rivet_world::levelgen::feature::configurations::disk_configuration::disk_configuration_codec;
 use rivet_world::levelgen::feature::configurations::geode_configuration::geode_configuration_codec;
+use rivet_world::levelgen::feature::configurations::multiface_growth_configuration::multiface_growth_configuration_codec;
+use rivet_world::levelgen::feature::configurations::ore_configuration::ore_configuration_codec;
+use rivet_world::levelgen::feature::configurations::probability_feature_configuration::probability_feature_configuration_codec;
+use rivet_world::levelgen::feature::configurations::random_boolean_feature_configuration::random_boolean_feature_configuration_codec;
+use rivet_world::levelgen::feature::configurations::random_feature_configuration::random_feature_configuration_codec;
+use rivet_world::levelgen::feature::configurations::simple_block_configuration::simple_block_configuration_codec;
+use rivet_world::levelgen::feature::configurations::spring_configuration::spring_configuration_codec;
+use rivet_world::levelgen::feature::configurations::underwater_magma_configuration::underwater_magma_configuration_codec;
 use rivet_world::levelgen::feature::configurations::{
     FeatureConfiguration, NoneFeatureConfiguration,
 };
@@ -198,7 +216,7 @@ impl fmt::Display for GeneratedChunkError {
             }
             GeneratedChunkError::UnsupportedStatus(status) => write!(
                 f,
-                "generating to {status:?} is unsupported: the SPAWN/FULL stages are unwired (RivetTodo #185)"
+                "generating to {status:?} is unsupported: the FULL stage is unwired (RivetTodo #185)"
             ),
             GeneratedChunkError::Convert(inner) => write!(
                 f,
@@ -230,6 +248,13 @@ pub struct OverworldGenerator {
     /// lookups Java's `addVanillaDecorations` performs. Stored alongside the
     /// random state it already shares the leak of (see [`OverworldGenerator::new`]).
     access: &'static RegistryAccess,
+    /// The leaked feature `RegistryAccess` — the worldgen access composed with
+    /// the frozen placed/configured-feature registries the seed-42 decoder and
+    /// the selector/composite features resolve their recursive `Holder`
+    /// references through (the `worldgen/placed_feature` /
+    /// `worldgen/configured_feature` back-reference the `#181` dispatch and the
+    /// Batch 2 selector arms require). See [`build_feature_access`].
+    feature_access: &'static RegistryAccess,
     seed: i64,
 }
 
@@ -254,11 +279,14 @@ impl OverworldGenerator {
             settings_holder.value(settings_registry).clone()
         };
         let generator = NoiseBasedChunkGenerator::new(Holder::Direct(settings));
+        let feature_access: &'static RegistryAccess =
+            Box::leak(Box::new(build_feature_access(access)));
         OverworldGenerator {
             generator,
             random_state,
             biome_source: OverworldNoiseBiomeSource::new(random_state),
             access,
+            feature_access,
             seed,
         }
     }
@@ -272,6 +300,12 @@ impl OverworldGenerator {
     /// registry back-reference (`registryAccess()`, `lookupOrThrow`).
     pub fn registry_access(&self) -> &'static RegistryAccess {
         self.access
+    }
+
+    /// The leaked feature `RegistryAccess` — the worldgen access composed with
+    /// the frozen placed/configured-feature registries (see the struct field).
+    pub fn feature_access(&self) -> &'static RegistryAccess {
+        self.feature_access
     }
 
     /// The value shell — the source of truth for the real world-surface bodies
@@ -437,9 +471,10 @@ impl GenerationChunkHolder {
     /// FEATURES cache (288 ring holders, with CARVERS at distances 0/1 and
     /// STRUCTURE_STARTS through distance 8), and the Paper-order biome-union
     /// gather + `retainAll` — and then decodes and runs the registry-backed
-    /// lake, amethyst-geode, and monster-room paths at their exact feature
-    /// seeds before stopping at the first selected unsupported path (seed-42
-    /// chunk (0,0): `minecraft:ore_dirt` at step 6/global 0); the chunk stays
+    /// lake, amethyst-geode, monster-room, underwater_magma, and glow_lichen
+    /// paths at their exact feature seeds before stopping at the first selected
+    /// unsupported path (seed-42 chunk (0,0):
+    /// `minecraft:dark_forest_vegetation` at step 9/global 17); the chunk stays
     /// CARVERS.
     pub fn new(pos: ChunkPos, generator: Arc<OverworldGenerator>) -> Self {
         let height_accessor = create_height_accessor(
@@ -548,9 +583,10 @@ impl GenerationChunkHolder {
                 // settings resolution (`ChunkGenerator.featuresPerStep`,
                 // `ChunkGenerator.java` 97-100) and FeatureSorter, and the
                 // exact per-feature seeds — and then decodes and runs the
-                // registry-backed lake, amethyst-geode, and monster-room
-                // entries before failing typed at the first selected
-                // unsupported path (`minecraft:ore_dirt`, step 6/global 0).
+                // registry-backed lake, amethyst-geode, monster-room,
+                // underwater_magma, and glow_lichen entries before failing
+                // typed at the first selected unsupported path
+                // (`minecraft:dark_forest_vegetation`, step 9/global 17).
                 // It must never be "improved" into a silent skip or a blanket
                 // UnsupportedTask.
                 // The closure captures one generator clone (the free helper is
@@ -561,6 +597,20 @@ impl GenerationChunkHolder {
                 }
             },
         );
+        let context = context.with_spawn({
+            // `ChunkStatusTasks.generateSpawn` → Java's
+            // `NoiseBasedChunkGenerator.spawnOriginalMobs`
+            // (`NaturalSpawner.spawnMobsForChunkGeneration`). See [`run_spawn`]:
+            // the genuine evaluate of `disableMobGeneration`, the center biome's
+            // `MobSpawnSettings` (`MOB_SPAWN_SETTINGS_BY_NAME`), the `SPAWN_MOBS`
+            // rule, and the empty/non-empty CREATURE gate — never a bare no-op.
+            let generator = Arc::clone(&generator);
+            move |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
+                // The overworld ships `spawn_mobs = true` (the rule's default);
+                // a world's actual overlay is deferred with the level unit.
+                run_spawn(chunk, &generator, true)
+            }
+        });
         GenerationChunkHolder { chunk, context }
     }
 
@@ -569,10 +619,11 @@ impl GenerationChunkHolder {
     /// executor refuses to stamp it). A FEATURES run primes the final heightmaps,
     /// drives the full 17x17 dependency-window region (the 3x3 window is only
     /// the biome union), resolves the FULL possible-biome settings and builds
-    /// the FeatureSorter, decodes and runs the registry-backed lake, geode, and
-    /// monster-room paths, and then fails typed at the first selected unsupported
-    /// path (`FeaturePlacementDecode`, seed-42: `minecraft:ore_dirt` at
-    /// step 6/global 0), so the chunk is never stamped FEATURES.
+    /// the FeatureSorter, decodes and runs the registry-backed lake, geode,
+    /// monster-room, underwater_magma, and glow_lichen paths, and then fails
+    /// typed at the first selected unsupported path (`FeaturePlacementDecode`,
+    /// seed-42: `minecraft:dark_forest_vegetation` at step 9/global 17), so the
+    /// chunk is never stamped FEATURES.
     pub fn status(&self) -> ChunkStatus {
         self.chunk.get_persisted_status()
     }
@@ -587,7 +638,7 @@ impl GenerationChunkHolder {
     /// target the value layer does not wire is rejected by the executor before
     /// any work with a typed error — a path through a light step with no engine
     /// is refused as `GenError::LightEngineMissing`, and a target past LIGHT
-    /// (SPAWN/FULL) is out of range
+    /// (FULL) is out of range
     /// ([`GeneratedChunkError::UnsupportedStatus`]). The chunk is left
     /// untouched by every such refusal. (The wired FEATURES rung is the
     /// exception: it runs Java's priming prologue — heightmap priming, the
@@ -595,6 +646,12 @@ impl GenerationChunkHolder {
     /// the 3x3 biome union read — and then fails typed, so the chunk's
     /// heightmaps advance while its persisted status is never stamped past
     /// CARVERS; see [`GenerationChunkHolder::status`].)
+    ///
+    /// The SPAWN rung is wired as a seam driven by
+    /// [`GenerationChunkHolder::with_spawn`] (the whole-world `spawnOriginalMobs`
+    /// gen-step applied to this chunk), not through the `generate_through`
+    /// ladder: the holder wires no light engine, so no status past CARVERS is
+    /// reached through this path, and FULL remains unwired (RivetTodo #185).
     pub fn generate_through(&mut self, target: ChunkStatus) -> Result<(), GeneratedChunkError> {
         self.context
             .generate_through(&GENERATION_PYRAMID, &mut self.chunk, target)
@@ -732,12 +789,14 @@ fn generate_ring_chunk(
 ///      max(Decoration.values().length, featureStepCount)`).
 ///
 /// The per-step loop runs the union's placed features in global-index order,
-/// executing decoded lake, amethyst-geode, and monster-room leaves with their
-/// exact feature seeds. It fails typed (`GenError::FeaturePlacementDecode`) at
-/// the first unsupported selected feature — seed-42 chunk (0,0), step 6/global
-/// index 0: `minecraft:ore_dirt`. The generated settings tables are the full
-/// 55-biome surface (no `SettingsNotGenerated`), so this boundary is reached
-/// deterministically every run. No biome is fabricated or silently skipped.
+/// executing decoded lake, amethyst-geode, monster-room, underwater_magma, and
+/// glow_lichen leaves with their exact feature seeds. It fails typed
+/// (`GenError::FeaturePlacementDecode`) at the first unsupported selected
+/// feature — seed-42 chunk (0,0), step 9/global index 17:
+/// `minecraft:dark_forest_vegetation`. The generated settings tables are the
+/// full 55-biome surface (no `SettingsNotGenerated`), so this boundary is
+/// reached deterministically every run. No biome is fabricated or silently
+/// skipped.
 ///
 /// Compose the FEATURES `WorldGenRegion` over the complete accumulated
 /// dependency window of the FEATURES step. Paper's direct dependencies are
@@ -920,6 +979,48 @@ fn resolve_feature_settings(
 
 type FeatureOps = RegistryOps<Value, JsonOps>;
 
+/// The shared seed-42 feature `RegistryAccess` — the worldgen access composed
+/// with the frozen placed/configured-feature registries the decoder and the
+/// selector/composite features resolve their recursive `Holder` references
+/// through.
+///
+/// The two feature registries are frozen up front (empty, present): the
+/// `RegistryFileCodec` holder codecs the Batch 2 selectors and the biome
+/// generation settings route through require the registry to *exist* in the
+/// decode ops to resolve even an inline `Direct` placed/configured holder, and
+/// the runtime `place_with_biome_check` path resolves `Holder::Reference` ids
+/// against the owning registry. The shared freeze means both the decode ops
+/// (`RegistryOps::create_from_access`) and the `WorldGenLevel::registry_access`
+/// back-reference observe the same registry ids — the `#181` back-reference
+/// rule that keeps a decoded `Reference` resolvable at placement time.
+fn build_feature_access(worldgen: &RegistryAccess) -> RegistryAccess {
+    let placed = RegistryBuilder::new(&*PLACED_FEATURE).freeze();
+    let configured = RegistryBuilder::new(&*CONFIGURED_FEATURE).freeze();
+    let feature_layer = RegistryAccess::from_pairs(vec![
+        (
+            ResourceKey::create_registry_key(Identifier::with_default_namespace(
+                "worldgen/placed_feature",
+            )),
+            Box::new(placed) as rivet_registry::root::AnyBox,
+        ),
+        (
+            ResourceKey::create_registry_key(Identifier::with_default_namespace(
+                "worldgen/configured_feature",
+            )),
+            Box::new(configured) as rivet_registry::root::AnyBox,
+        ),
+    ]);
+    // Layer the feature registries (Static) over the worldgen registries
+    // (Worldgen). The composite merges the disjoint key sets — the first layer
+    // wins only on a key collision, of which there are none between
+    // `worldgen/placed_feature`/`worldgen/configured_feature` and the worldgen
+    // NOISE/DENSITY_FUNCTION/BIOME/NOISE_SETTINGS keys.
+    LayeredRegistryAccess::new(vec![RegistryLayer::Static, RegistryLayer::Worldgen])
+        .replace_from(RegistryLayer::Static, &[feature_layer])
+        .replace_from(RegistryLayer::Worldgen, std::slice::from_ref(worldgen))
+        .composite_access()
+}
+
 fn decode_value<T: Clone>(
     codec: Arc<dyn Codec<T, FeatureOps>>,
     ops: &FeatureOps,
@@ -1091,6 +1192,77 @@ fn decode_configured_feature(
             config_value,
             &format!("decode {configured_key} config"),
         )?),
+        // Batch 2 dispatch leaves (issue #600 config-decode wave) — each
+        // downcast to its own config codec. The config value shapes are the
+        // generated `RegistryOps` JSON verbatim, decoded faithfully.
+        "minecraft:ore" => Arc::new(decode_value(
+            ore_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:disk" => Arc::new(decode_value(
+            disk_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:spring_feature" => Arc::new(decode_value(
+            spring_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:simple_block" => Arc::new(decode_value(
+            simple_block_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:block_column" => Arc::new(decode_value(
+            block_column_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:vines" => Arc::new(NoneFeatureConfiguration),
+        "minecraft:seagrass" => Arc::new(decode_value(
+            probability_feature_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:freeze_top_layer" => Arc::new(NoneFeatureConfiguration),
+        "minecraft:underwater_magma" => Arc::new(decode_value(
+            underwater_magma_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:multiface_growth" => Arc::new(decode_value(
+            multiface_growth_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:random_selector" => Arc::new(decode_value(
+            random_feature_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:simple_random_selector" => Arc::new(decode_value(
+            composite_feature_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:random_boolean_selector" => Arc::new(decode_value(
+            random_boolean_feature_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
         other => {
             return Err(format!(
                 "{configured_key} has unsupported feature type {other}"
@@ -1102,15 +1274,14 @@ fn decode_configured_feature(
 
 fn decode_placement_modifiers(
     placed_key: &str,
-    generator: &OverworldGenerator,
+    access: &RegistryAccess,
 ) -> Result<Vec<Arc<dyn ErasedPlacementModifier>>, String> {
     let entry = PLACED_FEATURE_BY_NAME
         .get(placed_key)
         .ok_or_else(|| format!("missing generated {placed_key} entry"))?;
     let json: Value = serde_json::from_str(entry.json)
         .map_err(|error| format!("decode {placed_key} JSON: {error}"))?;
-    let ops =
-        RegistryOps::create_from_access(&JsonOps::INSTANCE, generator.registry_access().clone());
+    let ops = RegistryOps::create_from_access(&JsonOps::INSTANCE, access.clone());
     json.get("placement")
         .and_then(Value::as_array)
         .ok_or_else(|| format!("{placed_key} JSON has no placement list"))?
@@ -1155,7 +1326,7 @@ fn decode_placed_feature(
         .and_then(Value::as_str)
         .ok_or_else(|| format!("{placed_key} JSON has no configured feature"))?;
     let ops =
-        RegistryOps::create_from_access(&JsonOps::INSTANCE, generator.registry_access().clone());
+        RegistryOps::create_from_access(&JsonOps::INSTANCE, generator.feature_access().clone());
     let configured = Arc::new(decode_configured_feature(configured_key, &ops)?);
     let mut configured_builder = RegistryBuilder::new(&*CONFIGURED_FEATURE);
     let configured_registry_id = configured_builder.registry_id();
@@ -1168,7 +1339,7 @@ fn decode_placed_feature(
     );
     let configured_registry = configured_builder.freeze();
 
-    let modifiers = decode_placement_modifiers(placed_key, generator)?;
+    let modifiers = decode_placement_modifiers(placed_key, generator.feature_access())?;
     let placed_value = Arc::new(PlacedFeature::new(
         Holder::reference(configured_registry_id, configured_id.0),
         modifiers,
@@ -1206,7 +1377,22 @@ fn configured_feature_is_executable(placed_key: &str) -> Result<bool, String> {
         .map_err(|error| format!("decode {configured_key} JSON: {error}"))?;
     Ok(matches!(
         configured_json.get("type").and_then(Value::as_str),
-        Some("minecraft:lake") | Some("minecraft:monster_room") | Some("minecraft:geode")
+        Some("minecraft:lake")
+            | Some("minecraft:monster_room")
+            | Some("minecraft:geode")
+            | Some("minecraft:ore")
+            | Some("minecraft:disk")
+            | Some("minecraft:spring_feature")
+            | Some("minecraft:simple_block")
+            | Some("minecraft:block_column")
+            | Some("minecraft:vines")
+            | Some("minecraft:seagrass")
+            | Some("minecraft:freeze_top_layer")
+            | Some("minecraft:underwater_magma")
+            | Some("minecraft:multiface_growth")
+            | Some("minecraft:random_selector")
+            | Some("minecraft:simple_random_selector")
+            | Some("minecraft:random_boolean_selector")
     ))
 }
 
@@ -1253,7 +1439,7 @@ fn placement_selects(
     origin: &BlockPos,
     feature_key: &'static str,
 ) -> Result<bool, String> {
-    let modifiers = decode_placement_modifiers(feature_key, generator)?;
+    let modifiers = decode_placement_modifiers(feature_key, generator.feature_access())?;
     let selection_generator = FeatureSelectionGenerator {
         generator: Arc::clone(generator),
         feature_key,
@@ -1411,6 +1597,157 @@ fn run_biome_decoration(
     Ok(())
 }
 
+/// Resolve the SPAWN seam's center biome exactly as
+/// `WorldGenRegion.getBiome(center.getWorldPosition().atY(getMaxY()))` does.
+///
+/// This must use `BiomeManager.getBiome`, not a direct quart lookup: Java's
+/// fiddled-distance resolver chooses one of eight surrounding quart samples.
+/// All x/z samples are still inside the center chunk, so the injected lookup can
+/// read the borrowed center proto directly without constructing a self-
+/// referential region. `ChunkAccess.getNoiseBiome` also performs Java's vertical
+/// clamping for the two top-edge quart candidates.
+fn resolve_center_biome_name(
+    chunk: &ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+    generator: &OverworldGenerator,
+) -> Option<&'static str> {
+    let center = chunk.get_pos();
+    let top_y = chunk
+        .get_min_y()
+        .wrapping_add(chunk.get_height())
+        .wrapping_sub(1);
+    let position = BlockPos::new(
+        center.get_min_block_x().wrapping_add(8),
+        top_y,
+        center.get_min_block_z().wrapping_add(8),
+    );
+    let biome_manager = BiomeManager::new(
+        Arc::new(generator.biome_source.clone()),
+        BiomeManager::obfuscate_seed(generator.seed()),
+    );
+    let biome = biome_manager.get_biome_with(&position, |quart_x, quart_y, quart_z| {
+        let dense = chunk.get_noise_biome(quart_x, quart_y, quart_z).0;
+        Holder::direct(BiomeId::from_id(dense))
+    });
+    BIOME_BY_ID.get(dense_biome_id(&biome) as usize).copied()
+}
+
+/// `ChunkStatusTasks.generateSpawn` → Java's `generator.spawnOriginalMobs`
+/// (`NoiseBasedChunkGenerator.spawnOriginalMobs`, paper-server) over the SPAWN
+/// step's `WorldGenRegion` — the G2 SPAWN seam body.
+///
+/// In Java order (`NoiseBasedChunkGenerator.spawnOriginalMobs`, 26.2):
+///   1. `if (!this.settings.value().disableMobGeneration())` — the generator
+///      settings' `disableMobGeneration` gate (the overworld preset sets it
+///      `false`). When disabled, the spawn step is a faithful no-op (no RNG, no
+///      population) and the caller advances to SPAWN.
+///   2. `center = worldGenRegion.getCenter()`; `biome =
+///      worldGenRegion.getBiome(center.getWorldPosition().atY(worldGenRegion.getMaxY()))`
+///      — the center biome at the max build height.
+///   3. `random = new WorldgenRandom(new LegacyRandomSource(
+///      RandomSupport.generateUniqueSeed()))`;
+///      `random.setDecorationSeed(worldGenRegion.getSeed(), center.getMinBlockX(),
+///      center.getMinBlockZ())` — the decoration seed overwrites the
+///      unique seed (the seed that would have been consumed is never drawn).
+///   4. `NaturalSpawner.spawnMobsForChunkGeneration(worldGenRegion, biome,
+///      center, random)`:
+///      - `mobSettings = biome.value().getMobSettings()`;
+///        `mobs = mobSettings.getMobs(MobCategory.CREATURE)`.
+///      - `if (!mobs.isEmpty() && level.getLevel().getGameRules().get(GameRules.SPAWN_MOBS))`
+///        → the real empty/non-empty CREATURE gate AND the `SPAWN_MOBS` rule.
+///        When either disqualifies, the body is a faithful no-op — no RNG draw,
+///        no entity — and the caller advances to SPAWN.
+///      - Non-empty + rule on: Java enters the `while (random.nextFloat() <
+///        mobSettings.getCreatureProbability())` population loop (weighted
+///        `getRandom`, count draw, top-block lookup, and `EntityType.create`).
+///        Entity construction is deferred (RivetTodo #185, the entity/level
+///        units), so the Rivet seam refuses typed
+///        `GenError::CreatureSpawnNotGenerated` at exactly this boundary —
+///        before pretending entities were produced. The chunk is never stamped
+///        SPAWN and the observable block/biome/chunk state is unchanged.
+///
+/// The outcome is faithful to the pinned acceptance biome: the seed-42 center
+/// biome is `minecraft:river`, whose CREATURE list is EMPTY, so the genuine
+/// evaluation lands on the empty-list → advance path (zero entities), with the
+/// decoration seed still derived from `generateUniqueSeed` → `setDecorationSeed`
+/// (the no-op runs the RNG construction Java always performs). Never a bare
+/// no-op and never a fixture-specific shortcut: the empty/non-empty gate and the
+/// `SPAWN_MOBS` rule are genuinely evaluated.
+fn run_spawn(
+    chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+    generator: &Arc<OverworldGenerator>,
+    spawn_mobs_rule: bool,
+) -> Result<(), GenError> {
+    let center_pos = chunk.get_pos();
+
+    // Step 1: `disableMobGeneration` gate — `this.settings.value().
+    // disableMobGeneration()`. The overworld preset sets it `false`; when a
+    // settings value disables mob generation, the spawn step is a faithful
+    // no-op (no RNG, no population) and the caller advances to SPAWN.
+    if generator.generator().disable_mob_generation() {
+        return Ok(());
+    }
+
+    // Steps 2-4: center biome at maxY, then the RNG + NaturalSpawner gate. The
+    // center biome is resolved with Java's exact `BiomeManager.getBiome`
+    // fiddled-distance interpolation over the center chunk's cached quart cells
+    // — see [`resolve_center_biome_name`].
+    let biome_name = resolve_center_biome_name(chunk, generator);
+    // `MOB_SPAWN_SETTINGS_BY_NAME` is keyed by biome name; a biome the tables
+    // do not carry (a drifted registry) fails typed rather than fabricating.
+    let mob_settings = match biome_name {
+        Some(name) => match MOB_SPAWN_SETTINGS_BY_NAME.get(name) {
+            Some(ms) => ms,
+            None => {
+                return Err(GenError::CreatureSpawnNotGenerated {
+                    chunk_pos: center_pos,
+                    biome: biome_name,
+                });
+            }
+        },
+        None => {
+            return Err(GenError::CreatureSpawnNotGenerated {
+                chunk_pos: center_pos,
+                biome: None,
+            });
+        }
+    };
+
+    // `while (random.nextFloat() < getCreatureProbability())` — the decoration
+    // seed RNG construction: `new WorldgenRandom(new LegacyRandomSource(
+    // generateUniqueSeed()))` then `setDecorationSeed(seed, minX, minZ)`. The
+    // decoration seed overwrites the unique seed (Java's `setDecorationSeed`
+    // re-seeds), so no draw is observable before the population loop.
+    let mut random = WorldgenRandom::new(LegacyRandomSource::new(
+        random_support::generate_unique_seed(),
+    ));
+    random.set_decoration_seed(
+        generator.seed(),
+        center_pos.get_min_block_x(),
+        center_pos.get_min_block_z(),
+    );
+
+    // `mobs.isEmpty() || !gameRules.get(SPAWN_MOBS)` → faithful no-op (advance).
+    if mob_settings.creature.is_empty() {
+        return Ok(());
+    }
+    // `SPAWN_MOBS` rule: `level.getLevel().getGameRules().get(SPAWN_MOBS)`.
+    // The seam genuinely evaluates the rule — `false` bypasses population
+    // faithfully (no RNG draw beyond the decoration seed, no entity). The rule
+    // value is threaded from the caller (the holder's closure captures the
+    // overworld default `true`; a world's actual rule overlay is deferred with
+    // the level/gamerules unit — RivetTodo #185).
+    if !spawn_mobs_rule {
+        return Ok(());
+    }
+
+    // Non-empty CREATURE list with the rule on: entity construction is deferred
+    // (RivetTodo #185), so refuse typed before pretending entities were produced.
+    Err(GenError::CreatureSpawnNotGenerated {
+        chunk_pos: center_pos,
+        biome: biome_name,
+    })
+}
+
 impl fmt::Debug for GenerationChunkHolder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GenerationChunkHolder")
@@ -1429,10 +1766,15 @@ mod tests {
     use rivet_nbt::tag::Tag;
     use rivet_registry::generated::block_states::StateId;
     use rivet_util::RandomSource;
-    use rivet_util::random::LegacyRandomSource;
     use rivet_world::level::WorldGenLevel;
     use rivet_world::levelgen::feature::FeatureBehavior;
+    use rivet_world::levelgen::feature::configurations::MultifaceGrowthConfiguration;
+    use rivet_world::levelgen::feature::configurations::ProbabilityFeatureConfiguration;
+    use rivet_world::levelgen::feature::configurations::UnderwaterMagmaConfiguration;
+    use rivet_world::levelgen::feature::configurations::disk_configuration::DiskConfiguration;
     use rivet_world::levelgen::feature::configurations::geode_configuration::GeodeConfiguration;
+    use rivet_world::levelgen::feature::configurations::ore_configuration::OreConfiguration;
+    use rivet_world::levelgen::feature::configurations::spring_configuration::SpringConfiguration;
     use rivet_world::levelgen::feature::monster_room_feature::MONSTER_ROOM;
     use rivet_world::levelgen::heightmap::Types;
     use rivet_world::lighting::swmr_nibble_array::{ARRAY_SIZE, InitState, SwmrNibbleArray};
@@ -1851,7 +2193,7 @@ mod tests {
     /// wired (`WorldGenContext::generate_through`, engine-gated) but the holder
     /// wires no light engine, so a fresh EMPTY chunk targeting either is
     /// refused as `GenError::LightEngineMissing` before any work runs (the
-    /// chunk stays EMPTY). A target past LIGHT (SPAWN/FULL) is out of range
+    /// chunk stays EMPTY). A target past LIGHT (FULL) is out of range
     /// (`UnsupportedStatus`). CARVERS itself is wired (the real
     /// `NoiseBasedChunkGenerator.applyCarvers`, see
     /// `generate_through_carvers_runs_the_real_apply_carvers`), so a fresh
@@ -1881,14 +2223,23 @@ mod tests {
             );
             assert_eq!(fresh.status(), ChunkStatus::Empty);
         }
-        // SPAWN/FULL are past the LIGHT range: rejected as UnsupportedStatus.
+        // SPAWN is wired (the spawn seam is attached) but its path runs through
+        // the light steps, which need a light engine the holder does not wire →
+        // rejected as LightEngineMissing before any work. FULL is still unwired
+        // (no full seam), so it is rejected as UnsupportedStatus.
         for status in [ChunkStatus::Spawn, ChunkStatus::Full] {
+            let result = fresh.generate_through(status);
             assert!(
                 matches!(
-                    fresh.generate_through(status),
-                    Err(GeneratedChunkError::UnsupportedStatus(s)) if s == status
+                    &result,
+                    Err(GeneratedChunkError::Generation(
+                        GenError::LightEngineMissing { .. }
+                    ))
+                ) || matches!(
+                    &result,
+                    Err(GeneratedChunkError::UnsupportedStatus(s)) if *s == status
                 ),
-                "target {status:?} must be rejected as UnsupportedStatus"
+                "target {status:?} must be rejected by the path's unlit/unsupported boundary"
             );
             assert_eq!(fresh.status(), ChunkStatus::Empty);
         }
@@ -1942,9 +2293,14 @@ mod tests {
     /// unsupported selected path stops the slice.
     /// For seed 42 chunk (0,0), the lakes and amethyst rarity filters drop;
     /// `minecraft:amethyst_geode` and `minecraft:monster_room` execute through
-    /// their registry-backed leaves, and the first unsupported selected path is
-    /// `minecraft:ore_dirt` at step 6/global index 0. The chunk is never stamped
-    /// FEATURES (it stays CARVERS).
+    /// their registry-backed leaves, and the Batch 2/3 ore/disk/spring/block
+    /// and underwater_magma decode arms advance the run through the full
+    /// UNDERGROUND_ORES step — underwater_magma (global 26) now executes but
+    /// places no magma in this dry origin union, so it consumes no placement
+    /// RNG past its scan. Batch 4 then decodes and executes `glow_lichen` through
+    /// `minecraft:multiface_growth`. The next unsupported *selected* path is
+    /// `minecraft:dark_forest_vegetation` at step 9/global index 17. The chunk is
+    /// never stamped FEATURES (it stays CARVERS).
     #[test]
     fn generate_through_features_stops_at_first_selected_path_mismatch() {
         let generator = test_generator();
@@ -1965,12 +2321,14 @@ mod tests {
                 feature_key,
             }) => {
                 assert_eq!(chunk_pos, ChunkPos::new(0, 0));
-                assert_eq!(step_index, 6);
-                assert_eq!(global_feature_index, 0);
-                assert_eq!(feature_key, "minecraft:ore_dirt");
+                assert_eq!(step_index, 9);
+                assert_eq!(global_feature_index, 17);
+                assert_eq!(feature_key, "minecraft:dark_forest_vegetation");
             }
             other => {
-                panic!("FEATURES must stop at the selected ore_dirt mismatch; got {other:?}")
+                panic!(
+                    "FEATURES must stop at the selected dark_forest_vegetation mismatch; got {other:?}"
+                )
             }
         }
 
@@ -1994,8 +2352,9 @@ mod tests {
     #[test]
     fn matching_fluids_modifier_decodes_through_generated_fluid_registry() {
         let generator = test_generator();
-        let modifiers = decode_placement_modifiers("minecraft:disk_clay", &generator)
-            .expect("matching_fluids must resolve the generated FLUID registry");
+        let modifiers =
+            decode_placement_modifiers("minecraft:disk_clay", generator.feature_access())
+                .expect("matching_fluids must resolve the generated FLUID registry");
         assert_eq!(modifiers.len(), 4);
     }
 
@@ -2090,6 +2449,262 @@ mod tests {
             )
             .expect("amethyst geode placement must decode"),
             "the full placed-feature chain must reject the failed rarity filter"
+        );
+    }
+
+    /// The Batch 2/3 decoder arms decode the generated configured/placed JSON of
+    /// each dispatch leaf seated in the seed-42 closure. These focused tests
+    /// cover the decoder arms directly — the runtime stops at the step-9
+    /// dark_forest_vegetation boundary, so the later-step leaves (springs,
+    /// seagrass, freeze_top_layer) cannot be reached end-to-end and get their own
+    /// independent decode coverage here. The simple_block, block_column, and
+    /// vines arms are not separately exercised by these tests.
+    #[test]
+    fn ore_dirt_decodes_through_the_batch2_ore_arm() {
+        let generator = test_generator();
+        let decoded = decode_placed_feature("minecraft:ore_dirt", &generator)
+            .expect("the seed-42 ore_dirt entry must decode");
+        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        assert_eq!(placed.placement().len(), 4);
+        let configured = placed.feature().value(&decoded.configured_registry);
+        assert_eq!(
+            configured.feature,
+            feature_id_from_registry_name("minecraft:ore")
+                .expect("the ore dispatch type must be registered")
+        );
+        let ore = (configured.config.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<OreConfiguration>()
+            .expect("the ore dispatch must carry OreConfiguration");
+        assert_eq!(ore.size, 33);
+        assert_eq!(ore.target_states.len(), 1);
+    }
+
+    #[test]
+    fn disk_sand_decodes_through_the_batch2_disk_arm() {
+        let generator = test_generator();
+        let decoded = decode_placed_feature("minecraft:disk_sand", &generator)
+            .expect("the seed-42 disk_sand entry must decode");
+        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        assert_eq!(placed.placement().len(), 5);
+        let configured = placed.feature().value(&decoded.configured_registry);
+        assert_eq!(
+            configured.feature,
+            feature_id_from_registry_name("minecraft:disk")
+                .expect("the disk dispatch type must be registered")
+        );
+        let disk = (configured.config.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<DiskConfiguration>()
+            .expect("the disk dispatch must carry DiskConfiguration");
+        assert_eq!(disk.half_height, 2);
+    }
+
+    #[test]
+    fn spring_water_decodes_through_the_batch2_spring_arm() {
+        let generator = test_generator();
+        let decoded = decode_placed_feature("minecraft:spring_water", &generator)
+            .expect("the seed-42 spring_water entry must decode");
+        let configured = decoded
+            .placed_holder
+            .value(&decoded.placed_registry)
+            .feature()
+            .value(&decoded.configured_registry);
+        assert_eq!(
+            configured.feature,
+            feature_id_from_registry_name("minecraft:spring_feature")
+                .expect("the spring_feature dispatch type must be registered")
+        );
+        let spring = (configured.config.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<SpringConfiguration>()
+            .expect("the spring dispatch must carry SpringConfiguration");
+        assert_eq!(spring.valid_blocks.iter().count(), 11);
+    }
+
+    #[test]
+    fn seagrass_cold_decodes_through_the_batch2_seagrass_arm() {
+        let generator = test_generator();
+        let decoded = decode_placed_feature("minecraft:seagrass_cold", &generator)
+            .expect("the seed-42 seagrass_cold entry must decode");
+        let configured = decoded
+            .placed_holder
+            .value(&decoded.placed_registry)
+            .feature()
+            .value(&decoded.configured_registry);
+        assert_eq!(
+            configured.feature,
+            feature_id_from_registry_name("minecraft:seagrass")
+                .expect("the seagrass dispatch type must be registered")
+        );
+        let seagrass = (configured.config.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<ProbabilityFeatureConfiguration>()
+            .expect("the seagrass dispatch must carry ProbabilityFeatureConfiguration");
+        assert_eq!(seagrass.probability, 0.3);
+    }
+
+    #[test]
+    fn freeze_top_layer_decodes_through_the_batch2_arm() {
+        let generator = test_generator();
+        let decoded = decode_placed_feature("minecraft:freeze_top_layer", &generator)
+            .expect("the freeze_top_layer entry must decode");
+        let configured = decoded
+            .placed_holder
+            .value(&decoded.placed_registry)
+            .feature()
+            .value(&decoded.configured_registry);
+        assert_eq!(
+            configured.feature,
+            feature_id_from_registry_name("minecraft:freeze_top_layer")
+                .expect("the freeze_top_layer dispatch type must be registered")
+        );
+        assert!(
+            (configured.config.as_ref() as &dyn std::any::Any)
+                .downcast_ref::<NoneFeatureConfiguration>()
+                .is_some(),
+            "freeze_top_layer must carry a NoneFeatureConfiguration"
+        );
+    }
+
+    /// The Batch 3 `minecraft:underwater_magma` configured entry (the seed-42
+    /// global-26 leaf) decodes through the registry-backed arm into a
+    /// `FeatureId::new(21)` holder carrying its exact `UnderwaterMagmaConfiguration`
+    /// (floor search range 5, probability 0.5, radius 1), and its full
+    /// placed-feature chain (count uniform, in_square, height_range,
+    /// OCEAN_FLOOR_WG surface_relative_threshold_filter -2, biome) decodes to
+    /// five placement modifiers. This proves the configured/placed pair is
+    /// decodable and dispatchable — the id-21 concrete feature is now reached
+    /// rather than refused.
+    #[test]
+    fn underwater_magma_decodes_through_the_batch3_arm() {
+        let generator = test_generator();
+        assert_eq!(
+            feature_id_from_registry_name("minecraft:underwater_magma"),
+            Some(FeatureId::new(21)),
+            "the underwater_magma dispatch type must be registered at id 21"
+        );
+        let decoded = decode_placed_feature("minecraft:underwater_magma", &generator)
+            .expect("the seed-42 underwater_magma entry must decode");
+        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        assert_eq!(placed.placement().len(), 5);
+        let configured = placed.feature().value(&decoded.configured_registry);
+        assert_eq!(
+            configured.feature,
+            FeatureId::new(21),
+            "the underwater_magma dispatch must resolve to Feature.UNDERWATER_MAGMA"
+        );
+        let cfg = (configured.config.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<UnderwaterMagmaConfiguration>()
+            .expect("the underwater_magma dispatch must carry UnderwaterMagmaConfiguration");
+        assert_eq!(cfg.floor_search_range, 5);
+        assert_eq!(cfg.placement_probability_per_valid_position, 0.5);
+        assert_eq!(cfg.placement_radius_around_floor, 1);
+    }
+
+    /// The Batch 4 `minecraft:glow_lichen` configured entry decodes through the
+    /// registry-backed `minecraft:multiface_growth` arm into FeatureId 20 with
+    /// Paper's exact generated configuration and five-modifier placement chain.
+    #[test]
+    fn glow_lichen_decodes_through_the_batch4_arm() {
+        let generator = test_generator();
+        assert_eq!(
+            feature_id_from_registry_name("minecraft:multiface_growth"),
+            Some(FeatureId::new(20)),
+            "the multiface_growth dispatch type must be registered at id 20"
+        );
+        let decoded = decode_placed_feature("minecraft:glow_lichen", &generator)
+            .expect("the seed-42 glow_lichen entry must decode");
+        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        assert_eq!(placed.placement().len(), 5);
+        let configured = placed.feature().value(&decoded.configured_registry);
+        assert_eq!(configured.feature, FeatureId::new(20));
+        let cfg = (configured.config.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<MultifaceGrowthConfiguration>()
+            .expect("glow_lichen must carry MultifaceGrowthConfiguration");
+        assert_eq!(cfg.place_block.name(), "minecraft:glow_lichen");
+        assert_eq!(cfg.search_range, 20);
+        assert!(!cfg.can_place_on_floor);
+        assert!(cfg.can_place_on_ceiling);
+        assert!(cfg.can_place_on_wall);
+        assert_eq!(cfg.chance_of_spreading.to_bits(), 0.5f32.to_bits());
+        assert_eq!(cfg.can_be_placed_on.size(), 10);
+    }
+
+    /// The seed-42 end-to-end run advances through the entire UNDERGROUND_ORES
+    /// step — now including the registry-backed `minecraft:underwater_magma`
+    /// leaf at global index 26, which dispatches through the id-21 arm and
+    /// executes its column-scanned placement. In this dry origin union
+    /// (beach/dark_forest/lush_caves/river) the water-column floor scan fails,
+    /// so the feature returns false having consumed no placement-box RNG. The
+    /// run then continues into VEGETAL_DECORATION, where Batch 4 decodes and
+    /// executes `minecraft:glow_lichen` through `minecraft:multiface_growth`.
+    /// It refuses at the next unsupported *selected* leaf WITHOUT mutating the
+    /// RNG past that refusal: the run returns typed immediately at
+    /// `minecraft:dark_forest_vegetation` (step 9/global 17), so the chunk stays
+    /// CARVERS and FEATURES is never stamped. The typed-unavailable dispatches
+    /// for underwater magma (id 21) and multiface growth (id 20) no longer
+    /// refuse; both concrete features are reached.
+    #[test]
+    fn seed42_does_not_mutate_rng_past_the_next_selected_unsupported_leaf() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::new(0, 0));
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let err = holder
+            .generate_through(ChunkStatus::Features)
+            .expect_err("FEATURES must refuse at the selected mismatch");
+        assert!(
+            matches!(
+                &err,
+                GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
+                    step_index: 9,
+                    global_feature_index: 17,
+                    feature_key: "minecraft:dark_forest_vegetation",
+                    ..
+                })
+            ),
+            "unexpected next FEATURES boundary: {err:?}"
+        );
+        assert_eq!(holder.status(), ChunkStatus::Carvers);
+    }
+
+    /// The three Batch 2 selector leaves are wired in the decoder, and the
+    /// runtime stops at the step-9 dark_forest_vegetation boundary so these
+    /// later-step arms are exercised independently here. Full recursive decode
+    /// of a selector's inline placed/configured sub-features defers with the
+    /// `#126` codec stubs (`configured_feature_direct_codec` and the inline
+    /// `placement_modifier_codec` — issue #126, not yet ported), so the wire
+    /// surface is pinned: each selector dispatch type routes to its config
+    /// codec arm and the recursive sub-feature decode fails typed naming the
+    /// `#126` deferral, never fabricating a holder.
+    #[test]
+    fn selector_dispatch_types_are_registered() {
+        for (type_name, id) in [
+            ("minecraft:random_selector", 52),
+            ("minecraft:simple_random_selector", 54),
+            ("minecraft:random_boolean_selector", 55),
+        ] {
+            assert_eq!(
+                feature_id_from_registry_name(type_name),
+                Some(FeatureId::new(id)),
+                "the {type_name} selector dispatch type must be registered"
+            );
+        }
+    }
+
+    /// A selector's recursive inline sub-feature decode fails typed with the
+    /// `#126` codec deferral (the inline `ConfiguredFeature`/placement-modifier
+    /// codecs are not yet ported), rather than fabricating a placeholder holder
+    /// or silently dropping the reference. This is the honest boundary for the
+    /// Batch 2 selector arms given the runtime stops at step 6.
+    #[test]
+    fn selector_recursive_inline_decode_defers_with_126() {
+        let generator = test_generator();
+        let err = match decode_placed_feature("minecraft:forest_flowers", &generator) {
+            Ok(_) => panic!("the inline-sub-feature decode must fail typed"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("#126") || err.contains("issue #126") || err.contains("STUB"),
+            "the selector decode must name the #126 deferral, got: {err}"
         );
     }
 
@@ -2356,8 +2971,8 @@ mod tests {
 
     /// Ownership: the holder owns its ProtoChunk by value (no `Arc<RwLock>`
     /// game state) while the immutable worldgen config is shared across holders
-    /// by `Arc` — the five executor closures (BIOMES, NOISE, SURFACE, CARVERS,
-    /// FEATURES) each capture a clone. This test builds its own exclusive
+    /// by `Arc` — the six executor closures (BIOMES, NOISE, SURFACE, CARVERS,
+    /// FEATURES, SPAWN) each capture a clone. This test builds its own exclusive
     /// generator (the shared `LazyLock` would be touched by the other parallel
     /// tests, making the strong count global/racy).
     #[test]
@@ -2365,8 +2980,8 @@ mod tests {
         let generator = Arc::new(OverworldGenerator::new(42));
         let base = Arc::strong_count(&generator);
         let holder = generator.create_holder(ChunkPos::new(2, 3));
-        // The five executor closures each hold a clone of the shared generator.
-        assert_eq!(Arc::strong_count(&generator), base + 5);
+        // The six executor closures each hold a clone of the shared generator.
+        assert_eq!(Arc::strong_count(&generator), base + 6);
         drop(holder);
         assert_eq!(Arc::strong_count(&generator), base);
     }
@@ -2981,5 +3596,117 @@ mod tests {
             reference.next_int(),
             "setFeatureSeed(42, 0, 1) must seed the exact RNG state placement would consume"
         );
+    }
+
+    /// Drive the SPAWN seam to the resolve step and force the center biome at
+    /// the max build height to `biome`, returning the fresh chunk. The holder is
+    /// driven through CARVERS (the real worldgen rungs) so the center biome is
+    /// genuinely filled; `run_spawn` composes its own SPAWN-step region.
+    fn spawn_seam_holder_with_center_biome(
+        generator: &Arc<OverworldGenerator>,
+        pos: ChunkPos,
+        biome_id: u16,
+    ) -> GenerationChunkHolder {
+        let mut holder = generator.create_holder(pos);
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        // `BiomeManager.getBiome` can select any of the eight surrounding quart
+        // corners. At max build height both y candidates clamp to the top
+        // section's final quart row, while all x/z candidates remain inside the
+        // center chunk. Fill that whole 4x4 row so the test controls the exact
+        // Java resolver rather than only one direct quart lookup.
+        let top_y = holder
+            .chunk
+            .get_min_y()
+            .wrapping_add(holder.chunk.get_height())
+            .wrapping_sub(1);
+        let section_index = holder.chunk.get_section_index(top_y);
+        let section = holder.chunk.get_section_mut(section_index as usize);
+        for quart_x in 0..4 {
+            for quart_z in 0..4 {
+                section.set_noise_biome(quart_x, 3, quart_z, WorldgenBiomeId(biome_id));
+            }
+        }
+        holder
+    }
+
+    /// The pinned seed-42 acceptance biome (0,0 center at maxY) is
+    /// `minecraft:river`: an EMPTY CREATURE list. Starting from the SPAWN
+    /// parent's completed status, the real executor dispatches `run_spawn`,
+    /// genuinely evaluates the settings/list/rule gates, and stamps SPAWN with
+    /// zero entities.
+    #[test]
+    fn spawn_seam_river_advances_to_spawn_with_zero_entities() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::new(0, 0));
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let name = resolve_center_biome_name(&holder.chunk, &generator);
+        assert_eq!(name, Some("minecraft:river"));
+
+        // G1 owns the preceding LIGHT computation. Pin its completed parent
+        // status here so this focused G2 test exercises the actual SPAWN step,
+        // including the executor-owned status publication.
+        holder.chunk.set_persisted_status(ChunkStatus::Light);
+        holder.chunk.set_light_correct(true);
+        let roster = holder.chunk.get_entities().len();
+        holder
+            .generate_through(ChunkStatus::Spawn)
+            .expect("empty CREATURE list advances to SPAWN");
+        assert_eq!(holder.status(), ChunkStatus::Spawn);
+        assert_eq!(holder.chunk.get_entities().len(), roster);
+    }
+
+    /// A biome with a non-empty CREATURE list, SPAWN_MOBS=false: `run_spawn`
+    /// bypasses population faithfully (Ok, zero entities) — the rule genuinely
+    /// gates the non-empty path.
+    #[test]
+    fn spawn_seam_spawn_mobs_false_bypasses_population() {
+        let generator = test_generator();
+        // beach (id 3) has a non-empty CREATURE list (turtle).
+        let mut holder = spawn_seam_holder_with_center_biome(&generator, ChunkPos::new(0, 0), 3);
+        let status_before = holder.chunk.get_persisted_status();
+        let roster = holder.chunk.get_entities().len();
+        run_spawn(&mut holder.chunk, &generator, false).expect("rule off bypasses population");
+        assert_eq!(holder.chunk.get_persisted_status(), status_before);
+        assert_eq!(holder.chunk.get_entities().len(), roster);
+    }
+
+    /// A biome with a non-empty CREATURE list and SPAWN_MOBS=true: `run_spawn`
+    /// refuses typed `CreatureSpawnNotGenerated` before pretending entities were
+    /// produced, leaving the chunk's status and observable state atomic.
+    #[test]
+    fn spawn_seam_non_empty_creature_refuses_typed() {
+        let generator = test_generator();
+        // beach (id 3) has a non-empty CREATURE list (turtle).
+        let mut holder = spawn_seam_holder_with_center_biome(&generator, ChunkPos::new(0, 0), 3);
+        let resolved = resolve_center_biome_name(&holder.chunk, &generator);
+        assert_eq!(
+            resolved,
+            Some("minecraft:beach"),
+            "center biome must resolve to beach after the write"
+        );
+        holder.chunk.set_persisted_status(ChunkStatus::Light);
+        holder.chunk.set_light_correct(true);
+        let roster = holder.chunk.get_entities().len();
+        let err = holder
+            .generate_through(ChunkStatus::Spawn)
+            .expect_err("non-empty CREATURE refuses");
+        assert!(
+            matches!(
+                err,
+                GeneratedChunkError::Generation(GenError::CreatureSpawnNotGenerated {
+                    biome: Some("minecraft:beach"),
+                    ..
+                })
+            ),
+            "got: {err}"
+        );
+        // Atomic: executor did not stamp SPAWN and no entity was fabricated.
+        assert_eq!(holder.status(), ChunkStatus::Light);
+        assert!(holder.chunk.is_light_correct());
+        assert_eq!(holder.chunk.get_entities().len(), roster);
     }
 }

@@ -37,6 +37,13 @@ pub mod known_pack;
 pub mod linear_congruential_generator;
 pub mod mth;
 pub mod mth_atan_tables;
+/// Both per-arch COS_TAB modules are compiled unconditionally so the whole
+/// workspace can structurally reference either variant (tests prove both are
+/// represented regardless of host). The production *selection* happens in
+/// `mth_atan_tables.rs` via `cfg(target_arch)`; unsupported architectures fail
+/// closed there (`compile_error!`).
+pub mod mth_cos_tab_aarch64;
+pub mod mth_cos_tab_x86_64;
 pub mod mth_sin_table;
 pub mod mth_stubs;
 pub mod problem_reporter;

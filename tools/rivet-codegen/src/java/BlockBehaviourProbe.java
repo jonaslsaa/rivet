@@ -11,8 +11,15 @@ import net.minecraft.server.Bootstrap;
 import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.ShulkerBoxBlock;
 import net.minecraft.world.level.block.SupportType;
+import net.minecraft.world.level.block.piston.MovingPistonBlock;
+import net.minecraft.world.level.block.piston.PistonMovingBlockEntity;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.ShulkerBoxBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.material.FluidState;
+import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.level.material.MapColor;
 
 /**
@@ -95,7 +102,10 @@ public final class BlockBehaviourProbe {
         // default past the end, so the probe only iterates the valid range).
         JsonArray runs = new JsonArray();
         JsonArray faceSturdyRuns = new JsonArray();
+        JsonArray centerSupportRuns = new JsonArray();
+        JsonArray rigidSupportRuns = new JsonArray();
         JsonArray collisionFaceRuns = new JsonArray();
+        JsonArray occlusionFaceRuns = new JsonArray();
         JsonArray dynamicShapeRuns = new JsonArray();
         int runStart = 0;
         BlockState firstState = Block.stateById(0);
@@ -104,13 +114,22 @@ public final class BlockBehaviourProbe {
         long runWord = behaviorWord(firstState);
         int faceSturdyRunStart = 0;
         int faceSturdyMask = faceSturdyMask(firstState);
+        int centerSupportRunStart = 0;
+        int centerSupportMask = centerSupportMask(firstState);
+        int rigidSupportRunStart = 0;
+        int rigidSupportMask = rigidSupportMask(firstState);
         int collisionFaceRunStart = 0;
         int collisionFaceMask = collisionFaceMask(firstState);
+        int occlusionFaceRunStart = 0;
+        int occlusionFaceMask = occlusionFaceMask(firstState);
         int dynamicShapeRunStart = 0;
         boolean dynamicShape = hasDynamicShape(firstState);
         int runCount = 0;
         int faceSturdyRunCount = 0;
+        int centerSupportRunCount = 0;
+        int rigidSupportRunCount = 0;
         int collisionFaceRunCount = 0;
+        int occlusionFaceRunCount = 0;
         for (int id = 1; id < count; id++) {
             BlockState state = Block.stateById(id);
             require(Block.getId(state) == id, "state " + id + " resolves to " + Block.getId(state));
@@ -129,12 +148,33 @@ public final class BlockBehaviourProbe {
                 faceSturdyRunStart = id;
                 faceSturdyMask = mask;
             }
+            int centerMask = centerSupportMask(state);
+            if (centerMask != centerSupportMask) {
+                centerSupportRuns.add(maskRun(centerSupportRunStart, id - centerSupportRunStart, centerSupportMask));
+                centerSupportRunCount++;
+                centerSupportRunStart = id;
+                centerSupportMask = centerMask;
+            }
+            int rigidMask = rigidSupportMask(state);
+            if (rigidMask != rigidSupportMask) {
+                rigidSupportRuns.add(maskRun(rigidSupportRunStart, id - rigidSupportRunStart, rigidSupportMask));
+                rigidSupportRunCount++;
+                rigidSupportRunStart = id;
+                rigidSupportMask = rigidMask;
+            }
             int collisionMask = collisionFaceMask(state);
             if (collisionMask != collisionFaceMask) {
                 collisionFaceRuns.add(maskRun(collisionFaceRunStart, id - collisionFaceRunStart, collisionFaceMask));
                 collisionFaceRunCount++;
                 collisionFaceRunStart = id;
                 collisionFaceMask = collisionMask;
+            }
+            int occlusionMask = occlusionFaceMask(state);
+            if (occlusionMask != occlusionFaceMask) {
+                occlusionFaceRuns.add(maskRun(occlusionFaceRunStart, id - occlusionFaceRunStart, occlusionFaceMask));
+                occlusionFaceRunCount++;
+                occlusionFaceRunStart = id;
+                occlusionFaceMask = occlusionMask;
             }
             boolean dynamic = hasDynamicShape(state);
             if (dynamic != dynamicShape) {
@@ -147,14 +187,24 @@ public final class BlockBehaviourProbe {
         runCount++;
         faceSturdyRuns.add(maskRun(faceSturdyRunStart, count - faceSturdyRunStart, faceSturdyMask));
         faceSturdyRunCount++;
+        centerSupportRuns.add(maskRun(centerSupportRunStart, count - centerSupportRunStart, centerSupportMask));
+        centerSupportRunCount++;
+        rigidSupportRuns.add(maskRun(rigidSupportRunStart, count - rigidSupportRunStart, rigidSupportMask));
+        rigidSupportRunCount++;
         collisionFaceRuns.add(maskRun(collisionFaceRunStart, count - collisionFaceRunStart, collisionFaceMask));
         collisionFaceRunCount++;
+        occlusionFaceRuns.add(maskRun(occlusionFaceRunStart, count - occlusionFaceRunStart, occlusionFaceMask));
+        occlusionFaceRunCount++;
         dynamicShapeRuns.add(boolRun(dynamicShapeRunStart, count - dynamicShapeRunStart, dynamicShape));
         println("run_count=" + runCount);
         println("face_sturdy_run_count=" + faceSturdyRunCount);
+        println("center_support_run_count=" + centerSupportRunCount);
+        println("rigid_support_run_count=" + rigidSupportRunCount);
         println("collision_face_run_count=" + collisionFaceRunCount);
+        println("occlusion_face_run_count=" + occlusionFaceRunCount);
         println("dynamic_shape_state_count=" + dynamicShapeCount(dynamicShapeRuns));
 
+        JsonArray dynamicFixtures = dynamicFixtures();
         JsonObject root = new JsonObject();
         root.addProperty("generator",
             "BlockBehaviourProbe (Bootstrap + Block.BLOCK_STATE_REGISTRY)");
@@ -162,8 +212,12 @@ public final class BlockBehaviourProbe {
         root.addProperty("state_count", count);
         root.add("runs", runs);
         root.add("face_sturdy_runs", faceSturdyRuns);
+        root.add("center_support_runs", centerSupportRuns);
+        root.add("rigid_support_runs", rigidSupportRuns);
         root.add("collision_face_runs", collisionFaceRuns);
+        root.add("occlusion_face_runs", occlusionFaceRuns);
         root.add("dynamic_shape_runs", dynamicShapeRuns);
+        root.add("dynamic_fixtures", dynamicFixtures);
         Gson gson = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
         try (PrintWriter writer = new PrintWriter(output, "UTF-8")) {
             gson.toJson(root, writer);
@@ -182,6 +236,7 @@ public final class BlockBehaviourProbe {
         println("oak_slab_face_sturdy_mask=" + faceSturdyMask(Blocks.OAK_SLAB.defaultBlockState()));
         println("oak_leaves_collision_face_mask=" + collisionFaceMask(Blocks.OAK_LEAVES.defaultBlockState()));
         println("glass_collision_face_mask=" + collisionFaceMask(Blocks.GLASS.defaultBlockState()));
+        println("dynamic_fixture_count=" + dynamicFixtures.size());
 
         println("PROBE OK");
     }
@@ -233,10 +288,21 @@ public final class BlockBehaviourProbe {
      * probe-origin snapshot; production callers must supply live context.
      */
     private static int faceSturdyMask(BlockState state) {
+        return supportMask(state, SupportType.FULL);
+    }
+
+    private static int centerSupportMask(BlockState state) {
+        return supportMask(state, SupportType.CENTER);
+    }
+
+    private static int rigidSupportMask(BlockState state) {
+        return supportMask(state, SupportType.RIGID);
+    }
+
+    private static int supportMask(BlockState state, SupportType supportType) {
         int mask = 0;
         for (Direction direction : Direction.values()) {
-            if (SupportType.FULL.isSupporting(
-                    state, EmptyBlockGetter.INSTANCE, BlockPos.ZERO, direction)) {
+            if (supportType.isSupporting(state, EmptyBlockGetter.INSTANCE, BlockPos.ZERO, direction)) {
                 mask |= 1 << direction.ordinal();
             }
         }
@@ -257,6 +323,110 @@ public final class BlockBehaviourProbe {
             }
         }
         return mask;
+    }
+
+    private static int occlusionFaceMask(BlockState state) {
+        if (!state.canOcclude()) {
+            return 0;
+        }
+        var shape = state.getOcclusionShape();
+        int mask = 0;
+        for (Direction direction : Direction.values()) {
+            if (Block.isFaceFull(shape, direction)) {
+                mask |= 1 << direction.ordinal();
+            }
+        }
+        return mask;
+    }
+
+    private static JsonArray dynamicFixtures() throws Exception {
+        JsonArray fixtures = new JsonArray();
+        BlockPos pos = BlockPos.ZERO;
+        BlockState shulkerState = Blocks.SHULKER_BOX.defaultBlockState().setValue(ShulkerBoxBlock.FACING, Direction.UP);
+
+        ShulkerBoxBlockEntity closed = new ShulkerBoxBlockEntity(pos, shulkerState);
+        fixtures.add(dynamicFixture("shulker_closed_up", shulkerState, new FixtureGetter(shulkerState, closed), pos));
+
+        ShulkerBoxBlockEntity open = new ShulkerBoxBlockEntity(pos, shulkerState);
+        setPrivateFloat(open, "progress", 1.0F);
+        setPrivateEnum(open, "animationStatus", "OPENED");
+        fixtures.add(dynamicFixture("shulker_open_up", shulkerState, new FixtureGetter(shulkerState, open), pos));
+
+        BlockState movingState = Blocks.MOVING_PISTON.defaultBlockState().setValue(MovingPistonBlock.FACING, Direction.EAST);
+        PistonMovingBlockEntity moving = new PistonMovingBlockEntity(
+            pos, movingState, Blocks.STONE.defaultBlockState(), Direction.EAST, true, false);
+        setPrivateFloat(moving, "progress", 0.5F);
+        fixtures.add(dynamicFixture("moving_piston_half_east", movingState, new FixtureGetter(movingState, moving), pos));
+
+        PistonMovingBlockEntity movingClosed = new PistonMovingBlockEntity(
+            pos, movingState, Blocks.STONE.defaultBlockState(), Direction.EAST, true, false);
+        fixtures.add(dynamicFixture("moving_piston_start_east", movingState, new FixtureGetter(movingState, movingClosed), pos));
+        return fixtures;
+    }
+
+    private static JsonObject dynamicFixture(String name, BlockState state, FixtureGetter level, BlockPos pos) {
+        JsonObject fixture = new JsonObject();
+        fixture.addProperty("name", name);
+        fixture.addProperty("block", BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString());
+        fixture.addProperty("state_id", Block.getId(state));
+        fixture.addProperty("dynamic", state.getBlock().hasDynamicShape());
+        fixture.addProperty("support_full", supportMask(state, SupportType.FULL, level, pos));
+        fixture.addProperty("support_center", supportMask(state, SupportType.CENTER, level, pos));
+        fixture.addProperty("support_rigid", supportMask(state, SupportType.RIGID, level, pos));
+        fixture.addProperty("collision_full", collisionFaceMask(state, level, pos));
+        fixture.addProperty("occlusion_full", occlusionFaceMask(state));
+        return fixture;
+    }
+
+    private static int supportMask(BlockState state, SupportType supportType, FixtureGetter level, BlockPos pos) {
+        int mask = 0;
+        for (Direction direction : Direction.values()) {
+            if (supportType.isSupporting(state, level, pos, direction)) {
+                mask |= 1 << direction.ordinal();
+            }
+        }
+        return mask;
+    }
+
+    private static int collisionFaceMask(BlockState state, FixtureGetter level, BlockPos pos) {
+        int mask = 0;
+        for (Direction direction : Direction.values()) {
+            if (Block.isFaceFull(state.getCollisionShape(level, pos), direction)) {
+                mask |= 1 << direction.ordinal();
+            }
+        }
+        return mask;
+    }
+
+    private static void setPrivateFloat(Object object, String fieldName, float value) throws Exception {
+        var field = object.getClass().getDeclaredField(fieldName);
+        field.setAccessible(true);
+        field.setFloat(object, value);
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private static void setPrivateEnum(Object object, String fieldName, String value) throws Exception {
+        var field = object.getClass().getDeclaredField(fieldName);
+        field.setAccessible(true);
+        field.set(object, Enum.valueOf((Class<? extends Enum>) field.getType(), value));
+    }
+
+    private static final class FixtureGetter implements net.minecraft.world.level.BlockGetter {
+        private final BlockState state;
+        private final BlockEntity entity;
+
+        FixtureGetter(BlockState state, BlockEntity entity) {
+            this.state = state;
+            this.entity = entity;
+        }
+
+        @Override public BlockEntity getBlockEntity(BlockPos pos) { return pos.equals(BlockPos.ZERO) ? entity : null; }
+        @Override public BlockState getBlockState(BlockPos pos) { return state; }
+        @Override public BlockState getBlockStateIfLoaded(BlockPos pos) { return state; }
+        @Override public FluidState getFluidIfLoaded(BlockPos pos) { return Fluids.EMPTY.defaultFluidState(); }
+        @Override public FluidState getFluidState(BlockPos pos) { return Fluids.EMPTY.defaultFluidState(); }
+        @Override public int getHeight() { return 384; }
+        @Override public int getMinY() { return -64; }
     }
 
     /** Evaluate the state's behaviors and pack them into the documented word. */

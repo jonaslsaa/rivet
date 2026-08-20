@@ -45,6 +45,15 @@ use rivet_registry::core::{BlockPos, ChunkPos, SectionPos};
 
 use crate::chunk::data_layer::DataLayer;
 
+/// A light-provider operation could not complete without fabricating state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LightProviderError {
+    /// The provider's runtime storage did not contain the requested center.
+    MissingChunk(ChunkPos),
+    /// A provider-owned storage callback panicked while taking or restoring a chunk.
+    CallbackPanicked,
+}
+
 /// The Starlight engine surface — `StarLightInterface`'s public ops, object
 /// safe so `LevelLightEngine` can own it as `Box<dyn StarLightProvider>`.
 pub trait StarLightProvider {
@@ -70,6 +79,17 @@ pub trait StarLightProvider {
     /// `StarLightInterface` holds a `LightChunkGetter`).
     fn light_chunk(&mut self, pos: ChunkPos, empty_sections: &[Option<bool>]);
 
+    /// Fallible variant used by status generation when a missing center must
+    /// prevent promotion. Legacy providers default to the infallible seam.
+    fn try_light_chunk(
+        &mut self,
+        pos: ChunkPos,
+        empty_sections: &[Option<bool>],
+    ) -> Result<(), LightProviderError> {
+        self.light_chunk(pos, empty_sections);
+        Ok(())
+    }
+
     /// `StarLightInterface.forceLoadInChunk(int, int, Boolean[])` — register a
     /// chunk as loaded for the light engine (its per-section emptiness
     /// `empty_sections`) without recomputing its light. The LIGHT task's
@@ -77,6 +97,17 @@ pub trait StarLightProvider {
     /// `ChunkLightTask.LightTask`), so a chunk that is light-correct and at/after
     /// `LIGHT` is confirmed in place rather than relit.
     fn force_load_in_chunk(&mut self, pos: ChunkPos, empty_sections: &[Option<bool>]);
+
+    /// Fallible variant used by status generation when a missing center must
+    /// prevent promotion. Legacy providers default to the infallible seam.
+    fn try_force_load_in_chunk(
+        &mut self,
+        pos: ChunkPos,
+        empty_sections: &[Option<bool>],
+    ) -> Result<(), LightProviderError> {
+        self.force_load_in_chunk(pos, empty_sections);
+        Ok(())
+    }
 
     /// `StarLightInterface.relightChunks(Set<ChunkPos>, Consumer<ChunkPos>,
     /// IntConsumer)` — recompute light for the given chunks. The completion
@@ -86,6 +117,15 @@ pub trait StarLightProvider {
     /// `StarLightInterface.checkChunkEdges(int, int)` — re-check the chunk's
     /// light at its edges (Java takes the two chunk coordinates).
     fn check_chunk_edges(&mut self, pos: ChunkPos);
+
+    /// Whether [`force_load_in_chunk`](Self::force_load_in_chunk) and
+    /// [`check_chunk_edges`](Self::check_chunk_edges) fully reconcile a
+    /// persisted light-correct chunk. Providers that only expose the phase-A
+    /// callback/no-op seam must return `false`; callers then refuse the load
+    /// rather than claiming a chunk is ready without edge correction.
+    fn supports_persisted_light_load(&self) -> bool {
+        false
+    }
 
     /// `StarLightInterface.getSkyLightValue(BlockPos, ChunkAccess)` — the sky
     /// light at `pos` (Java also takes the already-resolved chunk; the impl
@@ -168,6 +208,9 @@ mod tests {
         }
         fn check_chunk_edges(&mut self, pos: ChunkPos) {
             self.log.lock().unwrap().edge_checks.push(pos);
+        }
+        fn supports_persisted_light_load(&self) -> bool {
+            true
         }
         fn get_sky_light_value(&self, _pos: BlockPos) -> i32 {
             0

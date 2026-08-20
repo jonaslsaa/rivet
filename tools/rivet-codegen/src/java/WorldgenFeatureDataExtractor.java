@@ -99,7 +99,10 @@ import net.minecraft.tags.TagLoader;
 import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.Climate;
+import net.minecraft.world.level.biome.MobSpawnSettings;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSource;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.MobCategory;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
 import net.minecraft.world.level.levelgen.RandomState;
@@ -298,6 +301,36 @@ public final class WorldgenFeatureDataExtractor {
             biomesOut.add(name, bj);
         }
         root.add("biomes", biomesOut);
+
+        // ---- mob spawn settings ------------------------------------------------
+        // Every possible biome's `MobSpawnSettings`: the CREATURE spawners (the
+        // only category `NaturalSpawner.spawnMobsForChunkGeneration` reads:
+        // `mobSettings.getMobs(MobCategory.CREATURE)`) as an ordered
+        // `Weighted<SpawnerData>` list (type/min/max/weight), plus
+        // `creatureGenerationProbability`. Keyed by biome name (the same key set
+        // as `biomes`), so the SPAWN seam resolves the center biome's settings by
+        // name.
+        JsonObject mobSettingsOut = new JsonObject();
+        for (Holder<Biome> h : possibleBiomes) {
+            String name = h.unwrapKey().map(k -> k.identifier().toString()).orElse("?");
+            Biome biome = h.value();
+            MobSpawnSettings ms = biome.getMobSettings();
+            JsonObject mo = new JsonObject();
+            mo.addProperty("creature_spawn_probability", ms.getCreatureProbability());
+            JsonArray creature = new JsonArray();
+            for (var w : ms.getMobs(MobCategory.CREATURE).unwrap()) {
+                MobSpawnSettings.SpawnerData sd = w.value();
+                JsonObject e = new JsonObject();
+                e.addProperty("type", EntityType.getKey(sd.type()).toString());
+                e.addProperty("min", sd.minCount());
+                e.addProperty("max", sd.maxCount());
+                e.addProperty("weight", w.weight());
+                creature.add(e);
+            }
+            mo.add("creature", creature);
+            mobSettingsOut.add(name, mo);
+        }
+        root.add("mob_settings", mobSettingsOut);
 
         // ---- feature closure ---------------------------------------------------
         // placedNames starts from the biomes' direct placed features.

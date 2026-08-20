@@ -59,10 +59,16 @@
 //!    `setLightCorrect(true)`), and a ProtoChunk at `LIGHT.getParent()`
 //!    (`INITIALIZE_LIGHT`) advances to `LIGHT` — `ChunkLightTask`'s status
 //!    advance, and the only status advance that happens inside a light task.
-//!    Real light data is never produced here: the provider is the `rivet-server`
-//!    Starlight impl (today `StubStarLightProvider`), so the slice is faithful
-//!    to the *dispatch* — the engine that computes the nibbles defers with the
-//!    `ca.spottedleaf.moonrise.patches.starlight.light` unit (#184).
+//!    Fresh light data is published by the attached `rivet-server`
+//!    `SkyLightProvider`; persisted loads require the provider's explicit edge-
+//!    reconciliation capability and otherwise return a typed refusal. The LIGHT
+//!    step also dispatches a caller-attached light write-back seam
+//!    ([`WorldGenContext::with_light`] — `rivet-server`'s `GeneratedLightBridge`,
+//!    which maps the generated center to runtime values, lights it, and persists
+//!    the computed sky nibbles/emptiness/status back into the chunk); without it
+//!    the engine-position path above runs. The provider seam still owns the
+//!    concrete runtime storage and keeps the `GenerationChunkHolder`/`ChunkMap`
+//!    boundary with #185.
 //!
 //! A target already at/after the chunk's status is handled before any work:
 //! `target == current` is an idempotent no-op at *any* status (so a loaded
@@ -103,6 +109,7 @@ use crate::chunk::status::chunk_status_tasks;
 use crate::chunk::status::chunk_step::ChunkStep;
 use crate::chunk::status::{ChunkPyramid, ChunkStatus};
 use crate::lighting::level_light_engine::LevelLightEngine;
+use crate::lighting::star_light_provider::LightProviderError;
 
 /// The region-backed decoration seam's failure modes — the typed failures the
 /// `FEATURES` closure body (`addVanillaDecorations`) returns. The `ChunkPos`
@@ -143,6 +150,21 @@ type SpawnSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenE
 /// executor must never construct a `LevelChunk` (or label a chunk FULL) behind
 /// the caller — the conversion lives with the caller's `LevelChunk` surface.
 type FullSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenError>;
+
+/// The `LIGHT` write-back seam — runs the caller-owned copy of the light
+/// result into the chunk (Java's `ChunkLightTask.LightTask` computing light into
+/// the `ChunkAccess` it is handed). The generic value layer cannot reference
+/// `rivet-server`'s `GeneratedProto`/`RuntimeProto` value types, so the actual
+/// round trip (worldgen proto → runtime `StateId`/server-biome values → the
+/// `SkyLightProvider` → runtime proto → worldgen proto, persisting the computed
+/// sky nibbles/emptiness/state/status back into the center) is the caller's —
+/// exactly like the [`SpawnSeam`]`/`[`FullSeam`] the SPAWN/FULL tasks dispatch.
+/// `None` when the caller did not attach it: dispatching `Light` then falls back
+/// to the engine-position path ([`Self::run_light_task`]) for contexts that
+/// attach only a [`LevelLightEngine`] (e.g. the faithful-dispatch tests), or
+/// refuses `UnsupportedTask`/`UnsupportedStatus` exactly as before the seam
+/// existed.
+type LightSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenError>;
 
 /// `WorldGenContext` (value-layer seam shape) — the caller-supplied BIOMES,
 /// NOISE, SURFACE, CARVERS, and FEATURES worldgen closures, plus the light
@@ -198,11 +220,17 @@ where
     /// The `ThreadedLevelLightEngine` the INITIALIZE_LIGHT/LIGHT tasks store and
     /// route through (Java's `context.lightEngine()`). The facade holds the
     /// [`StarLightProvider`] (`rivet-server`'s Starlight impl; today
-    /// `StubStarLightProvider`) that actually lights the chunk — see the module
+    /// `SkyLightProvider`) that actually lights the chunk — see the module
     /// doc. `None` when the chunk does not carry the light-engine dependency
     /// (the seam's worldgen runs below INITIALIZE_LIGHT, and the idempotent
     /// loaded-chunk confirm never dispatches a light task).
     light_engine: Option<LevelLightEngine>,
+    /// The `LIGHT` write-back seam — the caller-owned copy of the computed
+    /// light into the chunk (see [`LightSeam`]). `None` when the caller did not
+    /// attach it: dispatching `Light` then routes through the engine-position
+    /// path ([`Self::run_light_task`]) or refuses, exactly as before the seam
+    /// existed.
+    light: Option<Box<LightSeam<T, B, S>>>,
 }
 
 /// The executor seam's failure modes.
@@ -220,6 +248,15 @@ pub enum GenError {
     /// Java's `NPE` on `context.lightEngine()`), and the seam never installs
     /// one on a run that ends below INITIALIZE_LIGHT.
     LightEngineMissing { status: ChunkStatus },
+    /// The provider could not resolve the center chunk from runtime storage.
+    LightChunkMissing { status: ChunkStatus, pos: ChunkPos },
+    /// A provider-owned runtime storage callback panicked before the light
+    /// result could be committed.
+    LightProviderPanicked { status: ChunkStatus },
+    /// A persisted light-correct chunk reached the load branch, but the
+    /// attached provider cannot complete force-load reconciliation and edge
+    /// correction. The chunk remains unchanged and must not be labeled ready.
+    PersistedLightLoadUnsupported { status: ChunkStatus },
     /// The target status is beyond what the context's attached seams reach —
     /// the SPAWN step needs the caller to have attached the spawn seam
     /// ([`WorldGenContext::with_spawn`]) and the FULL step the full seam
@@ -255,6 +292,19 @@ pub enum GenError {
     /// LIGHT-produced light data through `checkSpawnRules`/
     /// `isSpawnPositionOk`, so an unlit chunk must not be spawned).
     SpawnNotGenerated,
+    /// The SPAWN seam reached a non-empty CREATURE spawner list (with the
+    /// `SPAWN_MOBS` rule enabled) but entity construction is not ported, so it
+    /// refuses typed before pretending entities were produced (RivetTodo #185:
+    /// the entity/level units). This is the faithful non-empty path: Java would
+    /// draw a random spawner and instantiate mobs; Rivet stops at the exact
+    /// point instead of fabricating entities.
+    CreatureSpawnNotGenerated {
+        /// The generating chunk's position.
+        chunk_pos: ChunkPos,
+        /// The resolving center biome's name (the `MOB_SPAWN_SETTINGS_BY_NAME`
+        /// key), or `None` when the biome's dense id is not in `BIOME_BY_ID`.
+        biome: Option<&'static str>,
+    },
     /// The `FULL` task dispatched before the `SPAWN` task ran — the
     /// generation-ordering violation (Java's `ChunkStatusTasks.full` hands the
     /// chunk to the caller only after `generateSpawn` ran, so an un-spawned
@@ -343,6 +393,11 @@ impl std::fmt::Display for GenError {
             GenError::SpawnNotGenerated => {
                 write!(f, "cannot generate SPAWN before the LIGHT task ran")
             }
+            GenError::CreatureSpawnNotGenerated { chunk_pos, biome } => write!(
+                f,
+                "cannot spawn CREATURE mobs for chunk {chunk_pos} (biome {biome:?}): \
+                 entity construction is not ported (RivetTodo #185)"
+            ),
             GenError::FullNotGenerated => {
                 write!(f, "cannot generate FULL before the SPAWN task ran")
             }
@@ -381,6 +436,18 @@ impl std::fmt::Display for GenError {
             GenError::LightEngineMissing { status } => write!(
                 f,
                 "cannot run the {status:?} task: no light engine is attached to the context"
+            ),
+            GenError::LightChunkMissing { status, pos } => write!(
+                f,
+                "cannot run the {status:?} task: the center chunk at {pos} is missing"
+            ),
+            GenError::LightProviderPanicked { status } => write!(
+                f,
+                "cannot run the {status:?} task: the light provider storage callback panicked"
+            ),
+            GenError::PersistedLightLoadUnsupported { status } => write!(
+                f,
+                "cannot load the persisted {status:?} chunk: the light provider cannot complete edge reconciliation"
             ),
             GenError::UnsupportedStatus(status) => write!(
                 f,
@@ -448,6 +515,7 @@ where
             spawn: None,
             full: None,
             light_engine: None,
+            light: None,
         }
     }
 
@@ -456,6 +524,21 @@ where
     /// tasks can route through it.
     pub fn with_light_engine(mut self, light_engine: LevelLightEngine) -> Self {
         self.light_engine = Some(light_engine);
+        self
+    }
+
+    /// Attaches the `LIGHT` write-back seam — the caller-owned copy of the
+    /// computed light into the chunk (see [`LightSeam`]; `rivet-server`'s
+    /// `GeneratedLightBridge::light` runs the real provider and persists the
+    /// sky nibbles/emptiness/state/status back into the generated center). Left
+    /// `None` by default: dispatching `Light` then routes through the
+    /// engine-position path ([`Self::run_light_task`]) for contexts that attach
+    /// only a [`LevelLightEngine`].
+    pub fn with_light(
+        mut self,
+        light: impl FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenError> + 'static,
+    ) -> Self {
+        self.light = Some(Box::new(light));
         self
     }
 
@@ -512,10 +595,11 @@ where
     /// chunk is *loaded* (`forceLoadInChunk` + `checkChunkEdges`), otherwise it
     /// is recomputed (`setLightCorrect(false)` → `lightChunk` →
     /// `setLightCorrect(true)`), then a ProtoChunk at `LIGHT.getParent()` is
-    /// advanced to `LIGHT`. The provider is `rivet-server`'s Starlight impl
-    /// (today `StubStarLightProvider`): the nibble computation defers with the
-    /// `starlight.light` unit (#184), so the light-correct flag toggling and the
-    /// status advance carry the slice's semantics. The INITIALIZE_LIGHT task
+    /// advanced to `LIGHT`. The provider is `rivet-server`'s synchronous
+    /// `SkyLightProvider`: fresh recomputation publishes the available nibble
+    /// result, while a provider that cannot complete persisted edge
+    /// reconciliation returns a typed refusal after the force-load/check-edge
+    /// sequence. The INITIALIZE_LIGHT task
     /// never reaches here — it records the engine and computes nothing (see the
     /// [`Self::run_step`] `InitializeLight` arm).
     fn run_light_task(
@@ -536,11 +620,36 @@ where
             .provider_mut()
             .ok_or(GenError::LightEngineMissing { status })?;
         if Self::is_lighted(chunk) {
-            provider.force_load_in_chunk(chunk.get_pos(), &empty_sections);
+            provider
+                .try_force_load_in_chunk(chunk.get_pos(), &empty_sections)
+                .map_err(|error| match error {
+                    LightProviderError::MissingChunk(pos) => {
+                        GenError::LightChunkMissing { status, pos }
+                    }
+                    LightProviderError::CallbackPanicked => {
+                        GenError::LightProviderPanicked { status }
+                    }
+                })?;
             provider.check_chunk_edges(chunk.get_pos());
+            if !provider.supports_persisted_light_load() {
+                return Err(GenError::PersistedLightLoadUnsupported {
+                    status: chunk.get_persisted_status(),
+                });
+            }
         } else {
+            let was_light_correct = chunk.is_light_correct();
             chunk.set_light_correct(false);
-            provider.light_chunk(chunk.get_pos(), &empty_sections);
+            if let Err(error) = provider.try_light_chunk(chunk.get_pos(), &empty_sections) {
+                chunk.set_light_correct(was_light_correct);
+                return Err(match error {
+                    LightProviderError::MissingChunk(pos) => {
+                        GenError::LightChunkMissing { status, pos }
+                    }
+                    LightProviderError::CallbackPanicked => {
+                        GenError::LightProviderPanicked { status }
+                    }
+                });
+            }
             chunk.set_light_correct(true);
         }
         // `ChunkLightTask`: advance the ProtoChunk at LIGHT's parent to LIGHT.
@@ -662,7 +771,18 @@ where
             }
             ChunkStatusTask::Light => {
                 ensure_canonical_rung(step.task(), step.target_status())?;
-                self.run_light_task(chunk, ChunkStatus::Light)?;
+                // A caller-attached light seam (the `rivet-server` write-back
+                // bridge) is the authoritative path: it runs the real provider
+                // over the generated center and persists the computed light +
+                // status back into the chunk. Without one, the engine-position
+                // path ([`Self::run_light_task`]) keeps the faithful
+                // LightTask dispatch for contexts that attach only a
+                // `LevelLightEngine`.
+                if let Some(light) = self.light.as_mut() {
+                    light(chunk)?;
+                } else {
+                    self.run_light_task(chunk, ChunkStatus::Light)?;
+                }
             }
             ChunkStatusTask::GenerateFeatures => {
                 ensure_canonical_rung(step.task(), step.target_status())?;
@@ -829,7 +949,12 @@ where
                 }
                 ChunkStatusTask::Light => {
                     ensure_canonical_rung(step.task(), step.target_status())?;
-                    needs_light_engine = true;
+                    // With a caller-attached light seam the write-back bridge is
+                    // authoritative and needs no engine at this rung; without it
+                    // the engine-position path needs one.
+                    if self.light.is_none() {
+                        needs_light_engine = true;
+                    }
                     projected = step.target_status();
                 }
                 ChunkStatusTask::GenerateFeatures => {
@@ -1628,6 +1753,8 @@ mod tests {
     #[derive(Clone)]
     struct RecordingLight {
         log: Arc<Mutex<LightLog>>,
+        supports_persisted_load: bool,
+        missing_center: bool,
     }
 
     #[derive(Default)]
@@ -1657,6 +1784,18 @@ mod tests {
                 .lit
                 .push((pos, empty_sections.to_vec()));
         }
+        fn try_light_chunk(
+            &mut self,
+            pos: ChunkPos,
+            empty_sections: &[Option<bool>],
+        ) -> Result<(), LightProviderError> {
+            if self.missing_center {
+                Err(LightProviderError::MissingChunk(pos))
+            } else {
+                self.light_chunk(pos, empty_sections);
+                Ok(())
+            }
+        }
         fn force_load_in_chunk(&mut self, pos: ChunkPos, empty_sections: &[Option<bool>]) {
             self.log
                 .lock()
@@ -1667,6 +1806,9 @@ mod tests {
         fn relight_chunks(&mut self, _chunks: &HashSet<ChunkPos>) {}
         fn check_chunk_edges(&mut self, pos: ChunkPos) {
             self.log.lock().unwrap().edge_checks.push(pos);
+        }
+        fn supports_persisted_light_load(&self) -> bool {
+            self.supports_persisted_load
         }
         fn get_sky_light_value(&self, _pos: BlockPos) -> i32 {
             0
@@ -1683,8 +1825,16 @@ mod tests {
     }
 
     fn light_engine() -> (LevelLightEngine, Arc<Mutex<LightLog>>) {
+        light_engine_with_persisted_load(true)
+    }
+
+    fn light_engine_with_persisted_load(
+        supports_persisted_load: bool,
+    ) -> (LevelLightEngine, Arc<Mutex<LightLog>>) {
         let light = RecordingLight {
             log: Arc::new(Mutex::new(LightLog::default())),
+            supports_persisted_load,
+            missing_center: false,
         };
         let log = Arc::clone(&light.log);
         (
@@ -1695,6 +1845,20 @@ mod tests {
                 Box::new(light),
             ),
             log,
+        )
+    }
+
+    fn missing_center_light_engine() -> LevelLightEngine {
+        let light = RecordingLight {
+            log: Arc::new(Mutex::new(LightLog::default())),
+            supports_persisted_load: true,
+            missing_center: true,
+        };
+        LevelLightEngine::with_provider(
+            Box::new(create_accessor(-64, 384)),
+            true,
+            true,
+            Box::new(light),
         )
     }
 
@@ -1817,6 +1981,30 @@ mod tests {
         assert_eq!(seen.edge_checks, vec![ChunkPos::ZERO]);
     }
 
+    #[test]
+    fn persisted_light_load_refuses_without_edge_reconciliation() {
+        let (ctx, _biomes_calls, _noise_calls, _surface_calls, _carvers_calls, _features_calls) =
+            recording_context();
+        let (engine, log) = light_engine_with_persisted_load(false);
+        let mut ctx = ctx.with_light_engine(engine);
+        let mut chunk = proto();
+        chunk.set_persisted_status(ChunkStatus::Full);
+        chunk.set_light_correct(true);
+
+        assert_eq!(
+            ctx.run_step(light_step(), &mut chunk),
+            Err(GenError::PersistedLightLoadUnsupported {
+                status: ChunkStatus::Full
+            })
+        );
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Full);
+        assert!(chunk.is_light_correct());
+        let seen = log.lock().unwrap();
+        assert!(seen.lit.is_empty());
+        assert_eq!(seen.force_loaded, vec![(ChunkPos::ZERO, empty_mask())]);
+        assert_eq!(seen.edge_checks, vec![ChunkPos::ZERO]);
+    }
+
     /// Java's `LightTask` branch is the conjunction
     /// `isLightCorrect() && isOrAfter(LIGHT)` — a chunk at `LIGHT` that is not
     /// light-correct is *recomputed* (`setLightCorrect(false)` → `lightChunk`
@@ -1874,6 +2062,24 @@ mod tests {
             }
         );
         assert_eq!(chunk.get_persisted_status(), ChunkStatus::Features);
+    }
+
+    #[test]
+    fn missing_center_is_typed_and_does_not_promote_or_toggle_light() {
+        let (ctx, _biomes_calls, _noise_calls, _surface_calls, _carvers_calls, _features_calls) =
+            recording_context();
+        let mut ctx = ctx.with_light_engine(missing_center_light_engine());
+        let mut chunk = features_chunk();
+
+        assert_eq!(
+            ctx.run_step(light_step(), &mut chunk),
+            Err(GenError::LightChunkMissing {
+                status: ChunkStatus::Light,
+                pos: ChunkPos::ZERO,
+            })
+        );
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Features);
+        assert!(!chunk.is_light_correct());
     }
 
     /// A provider-less engine is not a usable engine: `LevelLightEngine::new`

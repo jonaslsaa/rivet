@@ -991,6 +991,60 @@ where
         base.structure_access = structure_access;
         Ok(base)
     }
+
+    /// Value-transform this chunk without consuming the source. This is the
+    /// transactional counterpart to [`Self::map_values`]: all owned metadata
+    /// is cloned and the paletted values are rebuilt from borrowed containers,
+    /// so a conversion error cannot consume or partially mutate the source.
+    #[allow(clippy::too_many_arguments)]
+    pub fn map_values_ref<T2, B2>(
+        &self,
+        block_strategy: Strategy<T2>,
+        biome_strategy: Strategy<B2>,
+        air: T2,
+        default_biome: B2,
+        map_block: &impl Fn(&T) -> T2,
+        map_biome: &impl Fn(&B) -> B2,
+        resolve: &'static (dyn Fn(&T2) -> StateFlags + Sync),
+    ) -> Result<ChunkAccess<T2, B2, S>, String>
+    where
+        T2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+        B2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+        S: Clone,
+    {
+        let factory = PalettedContainerFactory::new(
+            block_strategy.clone(),
+            air,
+            biome_strategy.clone(),
+            default_biome,
+        );
+        let sections = self
+            .sections
+            .iter()
+            .map(|section| {
+                section.map_values_ref(&block_strategy, &biome_strategy, map_block, map_biome)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut base = ChunkAccess::new(
+            self.pos,
+            self.upgrade_data.clone(),
+            self.height_accessor,
+            &factory,
+            self.inhabited_time,
+            Some(sections),
+            resolve,
+        );
+        base.unsaved = self.unsaved;
+        base.light_correct = self.light_correct;
+        base.post_processing = self.post_processing.clone();
+        base.pending_block_entities = self.pending_block_entities.clone();
+        base.block_nibbles = self.block_nibbles.clone();
+        base.sky_nibbles = self.sky_nibbles.clone();
+        base.sky_emptiness_map = self.sky_emptiness_map.clone();
+        base.heightmaps = self.heightmaps.clone();
+        base.structure_access = self.structure_access.clone();
+        Ok(base)
+    }
 }
 
 impl<T, B, S> LightChunk<T> for ChunkAccess<T, B, S>

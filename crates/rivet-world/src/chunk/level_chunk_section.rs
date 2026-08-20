@@ -190,6 +190,32 @@ impl<
         })
     }
 
+    /// Value-transform this section without consuming the source. The bridge
+    /// uses this transactional form so a hostile palette failure leaves the
+    /// caller-owned generated chunk available for retry.
+    pub fn map_values_ref<T2, B2>(
+        &self,
+        block_strategy: &Strategy<T2>,
+        biome_strategy: &Strategy<B2>,
+        map_block: &impl Fn(&T) -> T2,
+        map_biome: &impl Fn(&B) -> B2,
+    ) -> Result<LevelChunkSection<T2, B2>, String>
+    where
+        T2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+        B2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    {
+        Ok(LevelChunkSection {
+            non_empty_block_count: self.non_empty_block_count,
+            fluid_count: self.fluid_count,
+            ticking_block_count: self.ticking_block_count,
+            ticking_fluid_count: self.ticking_fluid_count,
+            states: self.states.map_values(block_strategy, map_block)?,
+            biomes: self.biomes.map_values(biome_strategy, map_biome)?,
+            special_colliding_blocks: self.special_colliding_blocks,
+            ticking_blocks: self.ticking_blocks.clone(),
+        })
+    }
+
     /// `getBlockState(int, int, int)`.
     pub fn get_block_state(&self, x: i32, y: i32, z: i32) -> T {
         self.states.get(x, y, z)

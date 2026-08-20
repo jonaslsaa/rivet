@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 
 /// `ca.spottedleaf.moonrise.common.list.ShortList`.
+#[derive(Clone)]
 pub struct ShortList {
     /// `map` — value → current index (Java's `Short2ShortOpenHashMap` with the
     /// `Short.MIN_VALUE` default-return sentinel; `None` is the Rust
