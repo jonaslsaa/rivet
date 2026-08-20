@@ -164,9 +164,9 @@ fn print_usage() {
          \x20             Flags: --bundler <path>   path to paper-bundler-26.2*.jar\n\
          \x20                     --output <dir>    repo root to write under (default repo root)\n\
          \x20   probe-block-states  Compile + run GlobalPaletteProbe.java against the real\n\
-         \x20             Paper jar and cross-check the emitted block-state global-id table\n\
-         \x20             (issue #154): live size/contiguity/defaults + the representative\n\
-         \x20             anchor ids. Flags: --bundler <path>  path to paper-bundler-26.2*.jar\n\
+         \x20             Paper jar and cross-check every emitted block-state id, block, default,\n\
+         \x20             and property via a complete digest, plus structural/anchor diagnostics\n\
+         \x20             (issue #154). Flags: --bundler <path>  path to paper-bundler-26.2*.jar\n\
          \x20   extract-biomes-tags  Dump the deterministic biome id table + tag network\n\
          \x20             content from a live Paper registry load (BiomeTagExtractor.java)\n\
          \x20             into data/biomes_tags.json (+ provenance manifest), issue #49.\n\

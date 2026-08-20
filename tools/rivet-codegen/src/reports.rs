@@ -29,9 +29,10 @@
 //! clean builds of the exact pinned Paper commit differ only in javac-generated
 //! synthetic local-variable debug names, so physical jar SHA is recorded as
 //! advisory cross-build provenance, not a permanent identity. The durable
-//! deterministic contract that authorizes a live jar is its exact pin (jar
-//! `Git-Commit` == pinned Paper commit, clean pinned `working/Paper` checkout,
-//! and MC/protocol/world versions read from the jar's `version.json`) PLUS the
+//! deterministic contract that authorizes a live jar is its pin: the manifest
+//! carries a validated 7–40 hex prefix of the pinned Paper commit, the clean
+//! `working/Paper` checkout is at the exact full commit, and MC/protocol/world
+//! versions come from the jar's `version.json` — PLUS the
 //! live no-drift comparison against the committed fixtures. Committed manifests
 //! are validated strictly ([`verify_pinned_source`]); the live boundary uses the
 //! deterministic semantic identity ([`verify_live_pinned_source`]).
@@ -610,7 +611,16 @@ fn read_paper_git(jar: &Path, repo_root: &Path) -> Result<String> {
     let jar_commit = parse_paper_git_manifest(&manifest.stdout)?;
 
     let paper = pinned_paper_checkout(repo_root)?;
-    let paper_arg = utf8_path(&paper, "Paper checkout")?;
+    let checkout_commit = read_clean_paper_checkout_commit(&paper)?;
+    resolve_paper_git(jar, &jar_commit, &checkout_commit)
+}
+
+/// Read a Paper checkout's exact HEAD only after proving that tracked and
+/// untracked content is clean. Kept as a separate production helper so the
+/// fail-closed dirty-checkout branch is exercised against a real temporary git
+/// repository in tests rather than mocked command output.
+fn read_clean_paper_checkout_commit(paper: &Path) -> Result<String> {
+    let paper_arg = utf8_path(paper, "Paper checkout")?;
     let out = Command::new("git")
         .args(["-C", paper_arg, "rev-parse", "HEAD"])
         .output()
@@ -650,7 +660,7 @@ fn read_paper_git(jar: &Path, repo_root: &Path) -> Result<String> {
         "UNVERIFIED: Paper checkout {} is dirty; provenance requires a clean checkout",
         paper.display()
     );
-    resolve_paper_git(jar, &jar_commit, &checkout_commit)
+    Ok(checkout_commit)
 }
 
 fn resolve_paper_git(jar: &Path, jar_commit: &str, checkout_commit: &str) -> Result<String> {
@@ -692,8 +702,8 @@ fn parse_paper_git_manifest(manifest: &[u8]) -> Result<String> {
 /// debug names can differ between builds of the same source, so the raw jar
 /// SHA-256 is a recorded/advisory cross-build fingerprint, never a permanent
 /// identity. What is deterministic and authorizing:
-///   - the jar's `Git-Commit` == the exact pinned Paper commit;
-///   - the clean pinned `working/Paper` checkout (HEAD == the pin, not dirty);
+///   - the jar's `Git-Commit` is a validated 7–40 hex prefix of the pin;
+///   - the clean pinned `working/Paper` checkout (full HEAD == the pin, not dirty);
 ///   - the MC/protocol/world versions read from the jar's `version.json`;
 ///   - the live probe's deterministic output being byte-identical to the
 ///     committed fixture (the caller runs that comparison after this).
@@ -732,26 +742,27 @@ pub(crate) fn verify_fixture_provenance(
     // it does NOT compare the live jar's bytes below.
     verify_pinned_source(&expected)?;
 
+    // `capture_source` reads the live jar once for its SHA and enforces the
+    // semantic provenance inputs: a validated manifest commit prefix, the exact
+    // clean pinned Paper checkout, and MC/protocol/world versions. Reuse its
+    // computed SHA below rather than hashing the entire jar a second time.
+    let actual = capture_source(jar, repo_root)?;
+    verify_live_pinned_source(&actual)?;
+
     // Physical jar SHA is recorded/advisory provenance (issue #670): clean
     // builds of the exact pinned Paper commit are not byte-reproducible. A
     // changed SHA is a NOTICE, not a hard failure — the semantic fields and the
-    // downstream byte-identical no-drift comparison are what authorize the jar.
-    let actual_sha = sha256_hex(&fs::read(jar).context("read live server jar")?);
-    if actual_sha != expected.jar_sha256 {
+    // downstream complete no-drift comparison are what authorize the jar.
+    if actual.jar_sha256 != expected.jar_sha256 {
         eprintln!(
             "note: live server jar sha256 {} differs from the committed fixture capture {} — \
              Paper jar bytes are not build-reproducible (issue #670); proceeding on the \
-             deterministically-pinned semantic identity (Git-Commit, clean pinned Paper \
-             checkout, MC/protocol/world) + the live no-drift byte comparison",
-            actual_sha, expected.jar_sha256
+             deterministically-pinned semantic identity (validated Git-Commit prefix, exact \
+             clean pinned Paper checkout, MC/protocol/world) + the live no-drift comparison",
+            actual.jar_sha256, expected.jar_sha256
         );
     }
-
-    // `capture_source` enforces the reproducible semantic identity: exact
-    // pinned jar Git-Commit, clean exact pinned Paper checkout, and the
-    // MC/protocol/world versions read from the live jar's version.json.
-    let actual = capture_source(jar, repo_root)?;
-    verify_live_pinned_source(&actual)
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -932,6 +943,44 @@ mod tests {
         let jar = Path::new("/tmp/paper-server.jar");
         let result = resolve_paper_git(jar, "0a99345", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn jar_manifest_wrong_same_length_prefix_is_unverified() {
+        let jar = Path::new("/tmp/paper-server.jar");
+        let error = resolve_paper_git(jar, "0a99344", PINNED_PAPER_COMMIT).unwrap_err();
+        assert!(
+            error.to_string().contains("reports Git-Commit"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn dirty_paper_checkout_is_unverified() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git command failed: {args:?}");
+        };
+        git(&["init", "--quiet"]);
+        git(&["config", "user.email", "rivet-codegen@example.invalid"]);
+        git(&["config", "user.name", "Rivet Codegen Test"]);
+        fs::write(repo.join("tracked.txt"), "pinned\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["commit", "--quiet", "-m", "fixture"]);
+
+        let clean_head = read_clean_paper_checkout_commit(repo).unwrap();
+        assert_eq!(clean_head.len(), 40);
+
+        fs::write(repo.join("untracked.txt"), "dirty\n").unwrap();
+        let error = read_clean_paper_checkout_commit(repo).unwrap_err();
+        assert!(error.to_string().contains("is dirty"), "got: {error}");
     }
 
     #[test]

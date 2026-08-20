@@ -49,10 +49,11 @@ JVM and to use `anyhow`/`serde`.
   `biomes_tags.rs` tests.
 - **`probe-block-states`** — compiles and runs `java/GlobalPaletteProbe.java`
   against the real Paper jar and cross-checks the emitted block-state global-id
-  table (issue #154): size 32366, per-block contiguous ranges partitioning the
-  id space, defaults in range, and the representative anchor ids. This is the
-  live half of the fixture-pinned conformance test in `generate`'s
-  `block_states.rs` tests.
+  table (issue #154): a canonical digest over all 32,366 ids, block names,
+  default markers, and serialized properties must match committed
+  `data/reports/blocks.json`; size/range/default invariants and representative
+  anchor ids remain additional diagnostics. This is the live half of the
+  fixture-pinned conformance test in `generate`'s `block_states.rs` tests.
 - **`extract-block-behaviors`** — compiles and runs `java/BlockBehaviourProbe.java`
   against the real Paper jar, boots `Bootstrap` + the `Blocks` static init
   (which `initCache`s every state against `EmptyBlockGetter`), evaluates all
@@ -231,7 +232,9 @@ independent runs), so the committed files are the no-drift baseline.
 Source pinning is recorded in `data/reports/manifest.json`: the source jar's
 sha256, the Paper git commit it was built from, and the MC/protocol/world
 versions read straight out of the jar's `version.json`. The jar path is stored
-repo-relative (machine-independent); the jar identity is the sha256.
+repo-relative (machine-independent); the SHA records the historical capture's
+physical identity, while live rebuilds are authorized by the pinned semantic
+contract and mandatory complete no-drift comparison below.
 
 ### Why the jar SHA is advisory, not authoritative (issue #670)
 
@@ -249,8 +252,8 @@ So the physical jar SHA is treated as **recorded/advisory cross-build
 provenance** for the live boundary, not a permanent identity. The durable,
 deterministic contract that actually authorizes a fresh build is:
 
-- the live jar's `Git-Commit` == the exact pinned Paper commit;
-- a clean exact `working/Paper` checkout (HEAD == the pin, not dirty);
+- the live jar's `Git-Commit` is a validated 7–40 hex prefix of the pinned Paper commit;
+- a clean exact `working/Paper` checkout (full HEAD == the pin, not dirty);
 - the MC/protocol/world versions read from the jar's `version.json`;
 - the deterministic live probe/datagen output being byte-identical to the
   committed fixtures (including the twin-run no-drift gate).
