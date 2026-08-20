@@ -16,9 +16,10 @@
 # jars and scenario capture output, which cost a network fetch or a full
 # client/server run to reproduce.
 #
-# Claude sessions share the canonical target-agent-shared cache. The tmp sweep
-# reclaims legacy or explicitly overridden CARGO_TARGET_DIRs under /tmp, which
-# accumulated to 39GB unnoticed in 2026-08. Cargo's CACHEDIR.TAG plus its
+# Each checkout owns its local target/ cache, so Cargo fingerprints never cross
+# worktree source trees. The tmp sweep reclaims legacy or explicitly overridden
+# CARGO_TARGET_DIRs under /tmp, which accumulated to 39GB unnoticed in 2026-08.
+# Cargo's CACHEDIR.TAG plus its
 # fingerprint marker identifies build scratch; generic tagged directories and
 # source checkouts remain untouched.
 #
@@ -58,7 +59,6 @@ SWEEP_TMP=1
 PRESSURE_GB=40
 PRESSURE_IDLE_MIN=20
 IDLE_MIN=1440
-SHARED_TARGET=""
 freed_kb=0
 removed=0
 pruned=0
@@ -211,12 +211,7 @@ require_nonnegative_integer() {
 }
 
 prune_cache() {
-  local cache=$1 wholesale=${2:-0} canonical
-  canonical=$(canonical_dir "$cache")
-  if [ -n "$SHARED_TARGET" ] && [ "$canonical" = "$SHARED_TARGET" ]; then
-    say "REFUSE $cache  [shared cargo target]"
-    return 1
-  fi
+  local cache=$1 wholesale=${2:-0}
   if [ "$wholesale" = 1 ]; then
     # A tmp child is removed wholesale only with Cargo's root identity marker.
     # Nested targets are passed with wholesale=0 and may survive partial cleanup.
@@ -327,7 +322,6 @@ main() {
     git -C "$MAIN" fetch origin main -q 2>/dev/null || true
   fi
 
-  SHARED_TARGET=$(canonical_path "$MAIN/target-agent-shared")
   IDLE_MIN=$((IDLE_HOURS * 60))
   free=$(free_gb "$MAIN")
   if [ -n "$free" ] && [ "$free" -lt "$PRESSURE_GB" ]; then

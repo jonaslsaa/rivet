@@ -73,8 +73,8 @@ printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$SANDBOX/scripts/t
 # The oracle pre-check now requires the rivet-client binary (join-capture
 # harness); provide an existing dummy file so the pre-check reports all
 # prerequisites present.
-mkdir -p "$SANDBOX/target-agent-shared/debug"
-: > "$SANDBOX/target-agent-shared/debug/rivet-client"
+mkdir -p "$SANDBOX/target/debug"
+: > "$SANDBOX/target/debug/rivet-client"
 
 # gate.sh now also runs the scenario runner's Paper rows (join/move
 # Paper-vs-Rivet differentials) whenever the paperclip jar and the client binary
@@ -185,7 +185,7 @@ chmod +x "$SANDBOX/home/.cargo/bin/cargo" "$SANDBOX/home/.cargo/bin/cargo-machet
 # ~/.cargo/bin cannot leak in and flip the fallback profile non-deterministically.
 # JAVA_HOME points at the sandbox jdk so the reference-oracle javac probe is
 # deterministic on hosts that have their own JDK configured.
-GATE="env HOME=$SANDBOX/home JAVA_HOME=$SANDBOX/jdk CARGO_TARGET_DIR=$SANDBOX/target-agent-shared PATH=$SANDBOX/home/.cargo/bin:/usr/bin:/bin $SANDBOX/scripts/gate.sh"
+GATE="env HOME=$SANDBOX/home JAVA_HOME=$SANDBOX/jdk CARGO_TARGET_DIR=$SANDBOX/target PATH=$SANDBOX/home/.cargo/bin:/usr/bin:/bin $SANDBOX/scripts/gate.sh"
 
 # run_scenarios <profile-name> <nextest-presence>
 #   nextest-presence: "nextest" installs the cargo-nextest stub; anything else
