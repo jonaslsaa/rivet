@@ -71,7 +71,7 @@ touch "$FAKE_FULL/target-agent-shared/debug/rivet-client"
 # Neutralise host JDK discovery via absolute paths (SDKMAN / JAVA_HOME) so the
 # test controls the Java 25 JDK check entirely through the shimmed PATH.
 unset RIVET_ORACLE_JAR RIVET_PAPER_JAR RIVET_PAPER_LIBRARIES RIVET_PAPER_RUNTIME_JAR \
-      RIVET_JAVA_HOME JAVA_HOME SDKMAN_CANDIDATES_DIR
+      RIVET_CLIENT_BIN RIVET_JAVA_HOME JAVA_HOME SDKMAN_CANDIDATES_DIR
 
 # run_check: run oracle_prereq_check in the CURRENT shell (so its global outputs
 # VERIFY_RUNNABLE/PARITY_RUNNABLE are visible after it returns) with a shimmed
@@ -136,6 +136,8 @@ run_check "$FAKE_FULL" > "$TMP/out3" 2>&1
 [ "$VERIFY_RUNNABLE" = 1 ] || fail "verify not runnable with all prereqs present"
 [ "$PARITY_RUNNABLE" = 1 ] || fail "parity not runnable with all prereqs present"
 [ "$SCENARIO_RUNNABLE" = 1 ] || fail "scenario not runnable with all prereqs present"
+[ "$RIVET_CLIENT_BIN" = "$FAKE_FULL/target-agent-shared/debug/rivet-client" ] \
+  || fail "resolved client binary was not exported to downstream capture/scenario tools"
 grep -q "all oracle prerequisites present" "$TMP/out3" || fail "present-report missing"
 grep -q "MISSING" "$TMP/out3" && fail "MISSING reported despite all prereqs present"
 pass "all prereqs present: all steps runnable, no MISSING reported"

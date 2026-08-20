@@ -289,6 +289,8 @@ sweep_tmp() {
 }
 
 main() {
+  local MAIN NOW free wt lock is_main branch head status_fail dirty merged state kb
+
   while [ $# -gt 0 ]; do
     case "$1" in
       --dry-run) DRY=1 ;;
@@ -313,11 +315,9 @@ main() {
     shift
   done
 
-  local MAIN NOW mins free
   MAIN=$(git rev-parse --path-format=absolute --git-common-dir)/..
   MAIN=$(cd "$MAIN" && pwd)
   NOW=$(date +%s)
-  mins=$((IDLE_HOURS * 60))
   freed_kb=0; removed=0; pruned=0
 
   # Merged-ness is judged against origin/main. A dry run must not touch the

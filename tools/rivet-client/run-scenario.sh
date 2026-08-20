@@ -30,7 +30,7 @@ for argument in "$@"; do
   if [ "$previous" = "--server" ] && { [ "$argument" = rivet ] || [ "$argument" = both ]; }; then
     desired_server=1
   fi
-  previous=$argument
+  previous="$argument"
 done
 if [ "$desired_server" = 1 ]; then
   (

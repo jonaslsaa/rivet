@@ -863,20 +863,18 @@ pub(crate) fn crate_root() -> PathBuf {
 
 pub(crate) fn cargo_target_dir() -> PathBuf {
     if let Ok(target_dir) = env::var("CARGO_TARGET_DIR") {
-        let path = PathBuf::from(target_dir);
-        if path.is_absolute() {
-            return path;
-        }
-        return crate_root().join(path);
+        return PathBuf::from(target_dir);
     }
     if let Ok(exe) = env::current_exe()
-        && let Some(debug_dir) = exe.parent()
-        && debug_dir.file_name().is_some_and(|name| name == "debug")
-        && let Some(target_dir) = debug_dir.parent()
+        && let Some(profile_dir) = exe.parent()
+        && profile_dir
+            .file_name()
+            .is_some_and(|name| name == "debug" || name == "release")
+        && let Some(target_dir) = profile_dir.parent()
     {
         return target_dir.to_path_buf();
     }
-    PathBuf::from("target-agent-shared")
+    crate_root().join("../../target-agent-shared")
 }
 
 /// Path to the `rivet-client` binary, resolved from Cargo's target directory.
