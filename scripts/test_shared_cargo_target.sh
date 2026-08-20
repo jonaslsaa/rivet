@@ -77,6 +77,38 @@ grep -q "must be the current checkout target" "$foreign_log" \
 rm -f "$foreign_log"
 pass "absolute overrides cannot collapse distinct checkout targets"
 
+SYMLINK_REPO=$(mktemp -d)
+SYMLINK_DEST=$(mktemp -d)
+mkdir -p "$SYMLINK_REPO/scripts"
+cp "$REPO_DIR/scripts/cargo-target-dir.sh" "$SYMLINK_REPO/scripts/cargo-target-dir.sh"
+ln -s "$SYMLINK_DEST" "$SYMLINK_REPO/target"
+symlink_log=$(mktemp)
+if env -u CARGO_TARGET_DIR "$REPO_DIR/scripts/with-build-lock.sh" "$SYMLINK_REPO" true \
+    >"$symlink_log" 2>&1; then
+  rm -rf "$SYMLINK_REPO" "$SYMLINK_DEST" "$symlink_log"
+  fail "symlinked checkout target was accepted"
+fi
+grep -q "must be a real directory" "$symlink_log" \
+  || fail "symlinked target rejection was not actionable"
+rm -rf "$SYMLINK_REPO" "$SYMLINK_DEST" "$symlink_log"
+pass "checkout targets cannot redirect fingerprints through symlinks"
+
+LOCK_REPO=$(mktemp -d)
+LOCK_DEST=$(mktemp)
+mkdir -p "$LOCK_REPO/scripts"
+cp "$REPO_DIR/scripts/cargo-target-dir.sh" "$LOCK_REPO/scripts/cargo-target-dir.sh"
+ln -s "$LOCK_DEST" "$LOCK_REPO/cargo-build.lock"
+lock_log=$(mktemp)
+if env -u CARGO_TARGET_DIR "$REPO_DIR/scripts/with-build-lock.sh" "$LOCK_REPO" true \
+    >"$lock_log" 2>&1; then
+  rm -rf "$LOCK_REPO" "$LOCK_DEST" "$lock_log"
+  fail "symlinked repository build lock was accepted"
+fi
+grep -q "must be a regular file" "$lock_log" \
+  || fail "symlinked lock rejection was not actionable"
+rm -rf "$LOCK_REPO" "$LOCK_DEST" "$lock_log"
+pass "repository build lock cannot redirect through a symlink"
+
 # A linked-worktree regression pins the root cause of the stale fingerprint
 # failure found by PR #675: both checkouts of the same package IDs must resolve
 # different target directories even though they share one git common directory.

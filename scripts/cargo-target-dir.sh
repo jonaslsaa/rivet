@@ -46,6 +46,10 @@ cargo_target_dir_for() {
     fi
   fi
 
+  if [ -L "$expected" ] || { [ -e "$expected" ] && [ ! -d "$expected" ]; }; then
+    printf 'checkout Cargo target must be a real directory: %s\n' "$expected" >&2
+    return 2
+  fi
   mkdir -p "$expected"
   (cd "$expected" && pwd -P)
 }
