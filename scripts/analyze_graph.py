@@ -1516,11 +1516,11 @@ SPLIT_EDGES: dict[str, set[str]] = {
 # rivet-codegen (extend the #49/#154 codegen) rather than being hand-ported.
 PACKAGE_NOTES: dict[str, str] = {
     "mc.world.level.chunk.status": (
-        "DONE #185: FEATURES execution now covers the complete 17x17 dependency "
-        "window, with CARVERS at rings 0/1 and STRUCTURE_STARTS through radius 8; "
-        "the biome source resolves all 55 possible biomes, geode and MonsterRoom "
-        "features are crossed, and the typed traversal reaches underwater_magma "
-        "at step 6/global index 26."
+        "DONE #185: FEATURES execution covers the complete 17x17 dependency window, "
+        "with CARVERS at rings 0/1 and STRUCTURE_STARTS through radius 8; the biome "
+        "source resolves all 55 possible biomes, and the seed-42 traversal executes "
+        "geode, MonsterRoom, underwater_magma, and glow_lichen before reaching "
+        "dark_forest_vegetation at step 9/global index 17."
     ),
 }
 
@@ -1845,9 +1845,10 @@ SPLIT_NOTES: dict[str, str] = {
         "dependency window (CARVERS rings 0/1, STRUCTURE_STARTS through radius 8), "
         "cached BIOMES diagnostics, durable DUMMY/materialized block-entity NBT, "
         "and persisted heightmaps. The seed-42 production FEATURES traversal resolves "
-        "all 55 possible biomes; geode and MonsterRoom are crossed before the typed "
-        "underwater_magma boundary at step 6/global index 26. Remaining "
-        "scheduler/ServerLevel wiring belongs to the downstream #185 continuation."
+        "all 55 possible biomes; geode, MonsterRoom, underwater_magma, and glow_lichen "
+        "execute before the typed dark_forest_vegetation boundary at step 9/global "
+        "index 17. Remaining scheduler/ServerLevel wiring belongs to the downstream "
+        "#185 continuation."
     ),
     "mc.server.level": (
         "#227 residual: the untranslated tail — ServerLevel/ServerPlayer + the "
