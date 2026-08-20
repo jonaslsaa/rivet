@@ -299,7 +299,7 @@ impl ShapeQuery {
     }
 
     fn bit(direction: Direction) -> u8 {
-        1 << direction.get_3d_data_value()
+        1u8 << (direction.get_3d_data_value() as u32)
     }
 
     pub fn is_supporting(self, support_type: SupportType, direction: Direction) -> bool {
