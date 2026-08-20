@@ -20,8 +20,8 @@
 //! tests can trip to pin the return-`false` propagation.
 
 use crate::chunk::chunk_generator::ChunkGenerator;
-use crate::level::WorldGenLevel;
 use crate::level::height_accessor::LevelHeightAccessor;
+use crate::level::{BlockShapeContext, DetachedShapeContext, WorldGenLevel};
 use crate::levelgen::feature::configurations::{CountConfiguration, NoneFeatureConfiguration};
 use crate::levelgen::feature::registry_keys::{CONFIGURED_FEATURE, PLACED_FEATURE};
 use crate::levelgen::feature::{ConfiguredFeatureErased, FeatureId};
@@ -153,6 +153,8 @@ pub struct TestLevel {
     /// present, answers the exact face query instead of the global
     /// `face_sturdy` value.
     pub face_sturdy_at: HashMap<(BlockPos, Direction), bool>,
+    /// Detached block-entity shape inputs used by dynamic-shape tests.
+    pub shape_context: DetachedShapeContext,
     /// `should_freeze` — the fixed `Biome.shouldFreeze` verdict
     /// (`SnowAndFreezeFeature`).
     pub freeze: bool,
@@ -188,6 +190,7 @@ impl TestLevel {
             survive: true,
             face_sturdy: true,
             face_sturdy_at: HashMap::new(),
+            shape_context: DetachedShapeContext::default(),
             freeze: false,
             snow: false,
             post_processing: Vec::new(),
@@ -256,19 +259,50 @@ impl WorldGenLevel for TestLevel {
         self.survive
     }
 
-    fn is_face_sturdy(&self, pos: &BlockPos, _state: &BlockState, direction: &Direction) -> bool {
-        self.face_sturdy_at
-            .get(&(*pos, *direction))
-            .copied()
-            .unwrap_or(self.face_sturdy)
+    fn shape_context(&self) -> Option<&dyn BlockShapeContext> {
+        Some(&self.shape_context)
+    }
+
+    fn is_face_sturdy(&self, pos: &BlockPos, state: &BlockState, direction: &Direction) -> bool {
+        if let Some(value) = self.face_sturdy_at.get(&(*pos, *direction)) {
+            return *value;
+        }
+        if !self.face_sturdy {
+            return false;
+        }
+        if state.has_dynamic_shape() {
+            return self
+                .shape_query(pos, state)
+                .map(|query| query.is_supporting(crate::level::SupportType::Full, *direction))
+                .unwrap_or(self.face_sturdy);
+        }
+        self.face_sturdy
     }
 
     fn can_attach_to(&self, pos: &BlockPos, state: &BlockState, direction: &Direction) -> bool {
-        self.face_sturdy_at
+        let support = self
+            .face_sturdy_at
             .get(&(*pos, *direction))
             .copied()
-            .unwrap_or(self.face_sturdy)
-            || state.can_attach_to(*direction)
+            .unwrap_or_else(|| {
+                if !self.face_sturdy {
+                    return false;
+                }
+                if state.has_dynamic_shape() {
+                    return self
+                        .shape_query(pos, state)
+                        .map(|query| {
+                            query.is_supporting(crate::level::SupportType::Full, *direction)
+                        })
+                        .unwrap_or(self.face_sturdy);
+                }
+                self.face_sturdy
+            });
+        let collision = self
+            .shape_query(pos, state)
+            .map(|query| query.is_collision_face_full(*direction))
+            .unwrap_or(false);
+        support || collision
     }
 
     fn should_freeze(&self, _pos: &BlockPos, _check_neighbors: bool) -> bool {
@@ -412,5 +446,68 @@ impl RandomSource for RecordingRandom {
 
     fn next_gaussian(&mut self) -> f64 {
         self.inner.next_gaussian()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::level::{ShulkerAnimationStatus, ShulkerBoxShape, WorldGenLevel};
+
+    #[test]
+    fn fixed_face_support_does_not_get_overridden_by_static_shape() {
+        let mut level = TestLevel::over(access());
+        level.face_sturdy = false;
+        let pos = BlockPos::new(0, 0, 0);
+        let stone = BlockState::of(BlockId::from_name("minecraft:stone").unwrap());
+
+        assert!(!level.is_face_sturdy(&pos, &stone, &Direction::Up));
+    }
+
+    #[test]
+    fn dynamic_shape_answers_do_not_get_masked_by_default_fallback() {
+        let mut level = TestLevel::over(access());
+        let pos = BlockPos::new(0, 0, 0);
+        level.shape_context.insert_shulker_box(
+            pos,
+            ShulkerBoxShape {
+                facing: Direction::Up,
+                progress: 1.0,
+                animation_status: ShulkerAnimationStatus::Opened,
+            },
+        );
+        let state = BlockState::of(BlockId::from_name("minecraft:shulker_box").unwrap());
+
+        assert!(!level.is_face_sturdy(&pos, &state, &Direction::Up));
+    }
+
+    #[test]
+    fn attachment_keeps_collision_fallback_when_face_override_is_false() {
+        let mut level = TestLevel::over(access());
+        let pos = BlockPos::new(0, 0, 0);
+        level.shape_context.insert_shulker_box(
+            pos,
+            ShulkerBoxShape {
+                facing: Direction::Up,
+                progress: 1.0,
+                animation_status: ShulkerAnimationStatus::Opened,
+            },
+        );
+        level.face_sturdy_at.insert((pos, Direction::Up), false);
+        let state = BlockState::of(BlockId::from_name("minecraft:shulker_box").unwrap());
+
+        assert!(level.can_attach_to(&pos, &state, &Direction::Up));
+    }
+
+    #[test]
+    fn unsupported_dynamic_shape_uses_configured_fallback_in_test_level() {
+        let mut level = TestLevel::over(access());
+        let pos = BlockPos::new(0, 0, 0);
+        let bamboo = BlockState::of(BlockId::from_name("minecraft:bamboo").unwrap());
+
+        assert!(bamboo.has_dynamic_shape());
+        assert!(level.is_face_sturdy(&pos, &bamboo, &Direction::Up));
+        level.face_sturdy = false;
+        assert!(!level.is_face_sturdy(&pos, &bamboo, &Direction::Up));
     }
 }
