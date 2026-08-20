@@ -41,11 +41,12 @@
 //! indices execute per step). The generated feature tables cover EVERY
 //! overworld possible biome (55 — the full list, not the reachable subset),
 //! so the full list resolves and the run proceeds to the per-step loop. The
-//! lake, amethyst-geode, monster-room, and the Batch 2 dispatch leaves (ore,
-//! disk, spring, simple_block, block_column, vines, seagrass, freeze_top_layer)
-//! are decoded from the generated JSON and run with their exact feature seeds;
-//! the seed-42 chunk then stops at the first selected path whose leaf remains
-//! typed-unavailable (`minecraft:underwater_magma` at step 6/global index 26).
+//! lake, amethyst-geode, monster-room, and the Batch 2/3 dispatch leaves (ore,
+//! disk, spring, simple_block, block_column, vines, seagrass, freeze_top_layer,
+//! underwater_magma) are decoded from the generated JSON and run with their
+//! exact feature seeds; the seed-42 chunk then stops at the first selected path
+//! whose leaf remains typed-unavailable (`minecraft:glow_lichen`, the Batch 4
+//! `minecraft:multiface_growth`, at step 9/global index 0).
 //! The chunk stays CARVERS. The INITIALIZE_LIGHT/
 //! LIGHT steps are executor-wired but engine-gated (the holder wires no light
 //! engine, so it cannot reach LIGHT).
@@ -146,6 +147,7 @@ use rivet_world::levelgen::feature::configurations::random_boolean_feature_confi
 use rivet_world::levelgen::feature::configurations::random_feature_configuration::random_feature_configuration_codec;
 use rivet_world::levelgen::feature::configurations::simple_block_configuration::simple_block_configuration_codec;
 use rivet_world::levelgen::feature::configurations::spring_configuration::spring_configuration_codec;
+use rivet_world::levelgen::feature::configurations::underwater_magma_configuration::underwater_magma_configuration_codec;
 use rivet_world::levelgen::feature::configurations::{
     FeatureConfiguration, NoneFeatureConfiguration,
 };
@@ -460,10 +462,10 @@ impl GenerationChunkHolder {
     /// FEATURES cache (288 ring holders, with CARVERS at distances 0/1 and
     /// STRUCTURE_STARTS through distance 8), and the Paper-order biome-union
     /// gather + `retainAll` — and then decodes and runs the registry-backed
-    /// lake, amethyst-geode, and monster-room paths at their exact feature
-    /// seeds before stopping at the first selected unsupported path (seed-42
-    /// chunk (0,0): `minecraft:underwater_magma` at step 6/global 26); the chunk
-    /// stays CARVERS.
+    /// lake, amethyst-geode, monster-room, and underwater_magma paths at their
+    /// exact feature seeds before stopping at the first selected unsupported
+    /// path (seed-42 chunk (0,0): `minecraft:glow_lichen` at step 9/global 0);
+    /// the chunk stays CARVERS.
     pub fn new(pos: ChunkPos, generator: Arc<OverworldGenerator>) -> Self {
         let height_accessor = create_height_accessor(
             generator.generator().get_min_y(),
@@ -571,10 +573,10 @@ impl GenerationChunkHolder {
                 // settings resolution (`ChunkGenerator.featuresPerStep`,
                 // `ChunkGenerator.java` 97-100) and FeatureSorter, and the
                 // exact per-feature seeds — and then decodes and runs the
-                // registry-backed lake, amethyst-geode, and monster-room
-                // entries before failing typed at the first selected
-                // unsupported path (`minecraft:underwater_magma`, step
-                // 6/global 26).
+                // registry-backed lake, amethyst-geode, monster-room, and
+                // underwater_magma entries before failing typed at the first
+                // selected unsupported path (`minecraft:glow_lichen`, step
+                // 9/global 0).
                 // It must never be "improved" into a silent skip or a blanket
                 // UnsupportedTask.
                 // The closure captures one generator clone (the free helper is
@@ -593,10 +595,11 @@ impl GenerationChunkHolder {
     /// executor refuses to stamp it). A FEATURES run primes the final heightmaps,
     /// drives the full 17x17 dependency-window region (the 3x3 window is only
     /// the biome union), resolves the FULL possible-biome settings and builds
-    /// the FeatureSorter, decodes and runs the registry-backed lake, geode, and
-    /// monster-room paths, and then fails typed at the first selected unsupported
-    /// path (`FeaturePlacementDecode`, seed-42: `minecraft:underwater_magma` at
-    /// step 6/global 26), so the chunk is never stamped FEATURES.
+    /// the FeatureSorter, decodes and runs the registry-backed lake, geode,
+    /// monster-room, and underwater_magma paths, and then fails typed at the
+    /// first selected unsupported path (`FeaturePlacementDecode`, seed-42:
+    /// `minecraft:glow_lichen` at step 9/global 0), so the chunk is never
+    /// stamped FEATURES.
     pub fn status(&self) -> ChunkStatus {
         self.chunk.get_persisted_status()
     }
@@ -747,12 +750,13 @@ fn generate_ring_chunk(
 ///      max(Decoration.values().length, featureStepCount)`).
 ///
 /// The per-step loop runs the union's placed features in global-index order,
-/// executing decoded lake, amethyst-geode, and monster-room leaves with their
-/// exact feature seeds. It fails typed (`GenError::FeaturePlacementDecode`) at
-/// the first unsupported selected feature — seed-42 chunk (0,0), step 6/global
-/// index 26: `minecraft:underwater_magma`. The generated settings tables are the
-/// full
-/// 55-biome surface (no `SettingsNotGenerated`), so this boundary is reached
+/// executing decoded lake, amethyst-geode, monster-room, and underwater_magma
+/// leaves with their exact feature seeds. It fails typed
+/// (`GenError::FeaturePlacementDecode`) at the first unsupported selected
+/// feature — seed-42 chunk (0,0), step 9/global index 0:
+/// `minecraft:glow_lichen` (Batch 4 `minecraft:multiface_growth`). The generated
+/// settings tables are the full 55-biome surface (no `SettingsNotGenerated`), so
+/// this boundary is reached
 /// deterministically every run. No biome is fabricated or silently skipped.
 ///
 /// Compose the FEATURES `WorldGenRegion` over the complete accumulated
@@ -1190,6 +1194,12 @@ fn decode_configured_feature(
             &format!("decode {configured_key} config"),
         )?),
         "minecraft:freeze_top_layer" => Arc::new(NoneFeatureConfiguration),
+        "minecraft:underwater_magma" => Arc::new(decode_value(
+            underwater_magma_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
         "minecraft:random_selector" => Arc::new(decode_value(
             random_feature_configuration_codec::<FeatureOps>(),
             ops,
@@ -1333,6 +1343,7 @@ fn configured_feature_is_executable(placed_key: &str) -> Result<bool, String> {
             | Some("minecraft:vines")
             | Some("minecraft:seagrass")
             | Some("minecraft:freeze_top_layer")
+            | Some("minecraft:underwater_magma")
             | Some("minecraft:random_selector")
             | Some("minecraft:simple_random_selector")
             | Some("minecraft:random_boolean_selector")
@@ -1562,6 +1573,7 @@ mod tests {
     use rivet_world::level::WorldGenLevel;
     use rivet_world::levelgen::feature::FeatureBehavior;
     use rivet_world::levelgen::feature::configurations::ProbabilityFeatureConfiguration;
+    use rivet_world::levelgen::feature::configurations::UnderwaterMagmaConfiguration;
     use rivet_world::levelgen::feature::configurations::disk_configuration::DiskConfiguration;
     use rivet_world::levelgen::feature::configurations::geode_configuration::GeodeConfiguration;
     use rivet_world::levelgen::feature::configurations::ore_configuration::OreConfiguration;
@@ -2074,11 +2086,14 @@ mod tests {
     /// unsupported selected path stops the slice.
     /// For seed 42 chunk (0,0), the lakes and amethyst rarity filters drop;
     /// `minecraft:amethyst_geode` and `minecraft:monster_room` execute through
-    /// their registry-backed leaves, and the Batch 2 ore/disk spring/block
-    /// decode arms advance the run through the full UNDERGROUND_ORES step. The
-    /// first unsupported *selected* path is the typed-unavailable
-    /// `minecraft:underwater_magma` at step 6/global index 26. The chunk is
-    /// never stamped FEATURES (it stays CARVERS).
+    /// their registry-backed leaves, and the Batch 2/3 ore/disk/spring/block
+    /// and underwater_magma decode arms advance the run through the full
+    /// UNDERGROUND_ORES step — underwater_magma (global 26) now executes but
+    /// places no magma in this dry origin union, so it consumes no placement
+    /// RNG past its scan. The first unsupported *selected* path is the
+    /// typed-unavailable `minecraft:glow_lichen` (`minecraft:multiface_growth`,
+    /// the Batch 4 leaf) at step 9/global index 0. The chunk is never stamped
+    /// FEATURES (it stays CARVERS).
     #[test]
     fn generate_through_features_stops_at_first_selected_path_mismatch() {
         let generator = test_generator();
@@ -2099,14 +2114,12 @@ mod tests {
                 feature_key,
             }) => {
                 assert_eq!(chunk_pos, ChunkPos::new(0, 0));
-                assert_eq!(step_index, 6);
-                assert_eq!(global_feature_index, 26);
-                assert_eq!(feature_key, "minecraft:underwater_magma");
+                assert_eq!(step_index, 9);
+                assert_eq!(global_feature_index, 0);
+                assert_eq!(feature_key, "minecraft:glow_lichen");
             }
             other => {
-                panic!(
-                    "FEATURES must stop at the selected underwater_magma mismatch; got {other:?}"
-                )
+                panic!("FEATURES must stop at the selected glow_lichen mismatch; got {other:?}")
             }
         }
 
@@ -2230,13 +2243,13 @@ mod tests {
         );
     }
 
-    /// The Batch 2 decoder arms decode the generated configured/placed JSON of
+    /// The Batch 2/3 decoder arms decode the generated configured/placed JSON of
     /// each dispatch leaf seated in the seed-42 closure. These focused tests
-    /// cover the decoder arms directly — the runtime stops earlier at the
-    /// step-6 underwater_magma boundary, so the later-step leaves (springs,
-    /// seagrass, freeze_top_layer) cannot be reached end-to-end and get their
-    /// own independent decode coverage here. The simple_block, block_column,
-    /// and vines arms are not separately exercised by these tests.
+    /// cover the decoder arms directly — the runtime stops at the step-9
+    /// glow_lichen boundary, so the later-step leaves (springs, seagrass,
+    /// freeze_top_layer) cannot be reached end-to-end and get their own
+    /// independent decode coverage here. The simple_block, block_column, and
+    /// vines arms are not separately exercised by these tests.
     #[test]
     fn ore_dirt_decodes_through_the_batch2_ore_arm() {
         let generator = test_generator();
@@ -2341,16 +2354,56 @@ mod tests {
         );
     }
 
-    /// The seed-42 end-to-end run advances through the entire UNDERGROUND_ORES
-    /// step and refuses at the first selected typed-unavailable leaf
-    /// (`minecraft:underwater_magma`, global 26) WITHOUT mutating the RNG past
-    /// the refusal: the run returns typed immediately and never consumes
-    /// additional draws, so the chunk stays CARVERS and the leaf is never
-    /// stamped. The typed-unavailable dispatch (id 21) also rejects loudly.
+    /// The Batch 3 `minecraft:underwater_magma` configured entry (the seed-42
+    /// global-26 leaf) decodes through the registry-backed arm into a
+    /// `FeatureId::new(21)` holder carrying its exact `UnderwaterMagmaConfiguration`
+    /// (floor search range 5, probability 0.5, radius 1), and its full
+    /// placed-feature chain (count uniform, in_square, height_range,
+    /// OCEAN_FLOOR_WG surface_relative_threshold_filter -2, biome) decodes to
+    /// five placement modifiers. This proves the configured/placed pair is
+    /// decodable and dispatchable — the id-21 concrete feature is now reached
+    /// rather than refused.
     #[test]
-    fn seed42_does_not_mutate_rng_past_the_underwater_magma_refusal() {
-        // The dispatch itself refuses typed-unavailable leaves at id 21:
-        // `feature_place` panics naming the id rather than fabricating success.
+    fn underwater_magma_decodes_through_the_batch3_arm() {
+        let generator = test_generator();
+        assert_eq!(
+            feature_id_from_registry_name("minecraft:underwater_magma"),
+            Some(FeatureId::new(21)),
+            "the underwater_magma dispatch type must be registered at id 21"
+        );
+        let decoded = decode_placed_feature("minecraft:underwater_magma", &generator)
+            .expect("the seed-42 underwater_magma entry must decode");
+        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        assert_eq!(placed.placement().len(), 5);
+        let configured = placed.feature().value(&decoded.configured_registry);
+        assert_eq!(
+            configured.feature,
+            FeatureId::new(21),
+            "the underwater_magma dispatch must resolve to Feature.UNDERWATER_MAGMA"
+        );
+        let cfg = (configured.config.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<UnderwaterMagmaConfiguration>()
+            .expect("the underwater_magma dispatch must carry UnderwaterMagmaConfiguration");
+        assert_eq!(cfg.floor_search_range, 5);
+        assert_eq!(cfg.placement_probability_per_valid_position, 0.5);
+        assert_eq!(cfg.placement_radius_around_floor, 1);
+    }
+
+    /// The seed-42 end-to-end run advances through the entire UNDERGROUND_ORES
+    /// step — now including the registry-backed `minecraft:underwater_magma`
+    /// leaf at global index 26, which dispatches through the id-21 arm and
+    /// executes its column-scanned placement. In this dry origin union
+    /// (beach/dark_forest/lush_caves/river) the water-column floor scan fails,
+    /// so the feature returns false having consumed no placement-box RNG. The
+    /// run then continues through VEGETAL_DECORATION-free steps and refuses at
+    /// the first unsupported *selected* leaf WITHOUT mutating the RNG past the
+    /// refusal: the run returns typed immediately at
+    /// `minecraft:glow_lichen` (Batch 4 `minecraft:multiface_growth`), never
+    /// consuming additional draws, so the chunk stays CARVERS and the leaf is
+    /// never stamped. The typed-unavailable dispatch (id 21) no longer refuses;
+    /// the id-21 concrete feature is reached.
+    #[test]
+    fn seed42_does_not_mutate_rng_past_the_next_selected_unsupported_leaf() {
         let generator = test_generator();
         let mut holder = generator.create_holder(ChunkPos::new(0, 0));
         holder
@@ -2362,9 +2415,9 @@ mod tests {
         assert!(matches!(
             err,
             GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
-                step_index: 6,
-                global_feature_index: 26,
-                feature_key: "minecraft:underwater_magma",
+                step_index: 9,
+                global_feature_index: 0,
+                feature_key: "minecraft:glow_lichen",
                 ..
             })
         ));
@@ -2372,7 +2425,7 @@ mod tests {
     }
 
     /// The three Batch 2 selector leaves are wired in the decoder, and the
-    /// runtime stops earlier at the step-6 underwater_magma boundary so these
+    /// runtime stops at the step-9 glow_lichen boundary so these
     /// later-step arms are exercised independently here. Full recursive decode
     /// of a selector's inline placed/configured sub-features defers with the
     /// `#126` codec stubs (`configured_feature_direct_codec` and the inline

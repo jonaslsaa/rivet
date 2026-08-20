@@ -536,6 +536,7 @@ pub fn feature_id_from_registry_name(name: &str) -> Option<FeatureId> {
         "minecraft:random_selector" => Some(FeatureId::new(52)),
         "minecraft:simple_random_selector" => Some(FeatureId::new(54)),
         "minecraft:random_boolean_selector" => Some(FeatureId::new(55)),
+        "minecraft:underwater_magma" => Some(FeatureId::new(21)),
         _ => None,
     }
 }
