@@ -227,9 +227,16 @@ fn chunk_heightmaps(
 /// entities, post-processing, structures, persistent data) live on
 /// [`SerializableChunkData`]; the live sections, heightmaps, and Starlight
 /// nibbles live on the reconstructed [`ReconstructedLevelChunk`]. `LastUpdate`
-/// is the parsed carry (a live save would pass the current game time, exactly
-/// what `copyOf` reads from `level.getGameTime()`).
-pub fn write(data: &SerializableChunkData, chunk: &ReconstructedLevelChunk) -> CompoundTag {
+/// comes from the explicit `game_time` argument, matching the value
+/// `SerializableChunkData.copyOf` snapshots from `level.getGameTime()`.
+///
+/// `InhabitedTime` remains sourced from the reconstructed chunk, exactly as
+/// `copyOf` snapshots it from `chunk.getInhabitedTime()`.
+pub fn write(
+    data: &SerializableChunkData,
+    chunk: &ReconstructedLevelChunk,
+    game_time: i64,
+) -> CompoundTag {
     let mut tag = CompoundTag::new();
     add_current_data_version(&mut tag);
     // Paper's `write()` emits `this.chunkPos`/`this.minSectionY`, which `copyOf`
@@ -241,7 +248,7 @@ pub fn write(data: &SerializableChunkData, chunk: &ReconstructedLevelChunk) -> C
     tag.put_int("xPos", pos.x());
     tag.put_int("yPos", chunk.height_accessor().get_min_section_y());
     tag.put_int("zPos", pos.z());
-    tag.put_long("LastUpdate", data.last_update_time());
+    tag.put_long("LastUpdate", game_time);
     tag.put_long("InhabitedTime", chunk.get_inhabited_time());
     tag.put_string("Status", data.status().serialization_name());
     // `blending_data` is never written: Paper's `parse` decodes it through
@@ -526,18 +533,26 @@ mod tests {
     /// data + chunk, mirroring `copyOf`'s split of auxiliary fields and live
     /// sections).
     fn write_once(root: &CompoundTag) -> CompoundTag {
+        write_once_with_game_time(root, |data| data.last_update_time())
+    }
+
+    fn write_once_with_game_time(
+        root: &CompoundTag,
+        game_time: impl FnOnce(&SerializableChunkData) -> i64,
+    ) -> CompoundTag {
         let height = height_accessor::create(-64, 384);
         let data = SerializableChunkData::parse(height, root)
             .expect("fixture parses")
             .expect("fixture has a Status");
         assert_eq!(data.validate_full_for_reconstruction(), Ok(()));
+        let game_time = game_time(&data);
         let for_reconstruction = SerializableChunkData::parse(height, root)
             .expect("fixture parses")
             .expect("fixture has a Status");
         let reconstruction =
             reconstruct_runtime_chunk(data.stored_pos(), for_reconstruction, height, true)
                 .expect("fixture reconstructs");
-        write(&data, &reconstruction.chunk)
+        write(&data, &reconstruction.chunk, game_time)
     }
 
     /// The loaded-world fixtures are vanilla-format writes: `isLightOn` present
@@ -801,6 +816,35 @@ mod tests {
         // reproduce it structurally (the write adds no Starlight state side
         // effects that a second pass would erase).
         assert_write_idempotent(&fixture("-1.-3.nbt"));
+    }
+
+    #[test]
+    fn explicit_game_time_overrides_parsed_last_update_at_i64_boundaries() {
+        // `copyOf` snapshots LastUpdate from the live level's game time, not
+        // from the parsed chunk payload. Exercise both signed i64 endpoints
+        // while keeping the parsed value distinct, and verify InhabitedTime
+        // still comes from the reconstructed chunk.
+        let mut root = fixture("-1.-3.nbt");
+        root.put_long("LastUpdate", 0);
+        let expected_inhabited_time = root
+            .get_long("InhabitedTime")
+            .expect("fixture has InhabitedTime");
+        assert_eq!(root.get_long("LastUpdate"), Some(0));
+
+        for game_time in [i64::MIN, i64::MAX] {
+            assert_ne!(game_time, root.get_long("LastUpdate").unwrap());
+            let written = write_once_with_game_time(&root, |_| game_time);
+            assert_eq!(
+                written.get_long("LastUpdate"),
+                Some(game_time),
+                "explicit game time wins over parsed LastUpdate"
+            );
+            assert_eq!(
+                written.get_long("InhabitedTime"),
+                Some(expected_inhabited_time),
+                "InhabitedTime remains sourced from the chunk"
+            );
+        }
     }
 
     #[test]
