@@ -110,7 +110,7 @@ impl RegistryAccess {
         // Remove only tentatively. `try_unwrap` can still observe another
         // owner between any preliminary count check and the unwrap; put the
         // exact entry back at its original position when that happens.
-        let entry = self.registries.swap_remove(index);
+        let entry = self.registries.remove(index);
         let entry = match Arc::try_unwrap(entry) {
             Ok(entry) => entry,
             Err(entry) => {
