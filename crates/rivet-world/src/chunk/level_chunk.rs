@@ -729,7 +729,7 @@ mod tests {
     /// the base already carries is preserved (never reset to the all-zero `new`
     /// priming), the absent `FINAL_HEIGHTMAPS` entries are primed as unprimed,
     /// and the base's inhabited time/light-correct flag survive. This is the
-    /// consumer the server `LevelChunk::try_from_full_proto` relies on after the
+    /// consumer the server persisted/generated proto bridge relies on after the
     /// proto's base has been value-mapped into the server value pair.
     #[test]
     fn from_base_preserves_base_state_and_primes_only_missing_final_heightmaps() {

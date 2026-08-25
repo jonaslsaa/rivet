@@ -59,9 +59,9 @@
 //! rather than stamping a status that was never generated. A generated chunk
 //! enters the server authority only through the consuming
 //! [`GenerationChunkHolder::into_level_chunk`] FULL promotion, which moves the
-//! `ProtoChunk` out and calls [`LevelChunk::try_from_full_proto`]; every
-//! genuine pre-FULL persisted status is refused atomically with
-//! [`GeneratedChunkError::Convert`] (carrying [`LevelChunkBridgeError::NotFull`])
+//! `ProtoChunk` out and calls [`LevelChunk::from_generated_spawn_proto`]; every
+//! non-SPAWN generated parent status is refused atomically with
+//! [`GeneratedChunkError::Convert`] (carrying [`LevelChunkBridgeError::GeneratedStatusNotSpawn`])
 //! — no sub-FULL proto is ever fabricated into a FULL chunk or falls back to
 //! superflat.
 //!
@@ -75,8 +75,8 @@
 //! FEATURES body composes its full dependency window through [`CenterHolder`]
 //! (which borrows the center chunk's base) and [`OwnedHolder`] (which owns the
 //! ring chunks) — see [`compose_feature_region`]. A sub-FULL `ProtoChunk` still
-//! cannot be converted into the dense server chunk (only a genuine FULL proto is
-//! promoted by [`GenerationChunkHolder::into_level_chunk`] → [`LevelChunk::try_from_full_proto`]),
+//! cannot be converted into the dense server chunk (only an exact SPAWN-parent proto is
+//! promoted by [`GenerationChunkHolder::into_level_chunk`] → [`LevelChunk::from_generated_spawn_proto`]),
 //! so a pre-FULL generated chunk never enters the ChunkMap authority — the
 //! refusal is atomic and typed. The holder hands out the chunk's status and
 //! typed generation results too.
@@ -88,7 +88,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use serde_json::Value;
 
@@ -126,7 +126,7 @@ use rivet_world::biome::BiomeSource;
 use rivet_world::biome::biome_generation_settings::{BiomeGenerationSettings, PlainBuilder};
 use rivet_world::biome::biome_manager::NoiseBiomeSource;
 use rivet_world::biome::climate::Sampler;
-use rivet_world::biome::feature_sorter::build_features_per_step;
+use rivet_world::biome::feature_sorter::{StepFeatureData, build_features_per_step};
 use rivet_world::biome::generated_biome_source::{dense_biome_id, overworld_biome_source};
 use rivet_world::biome::multi_noise_biome_source::MultiNoiseBiomeSource;
 use rivet_world::block::blocks::Blocks;
@@ -199,8 +199,8 @@ pub enum GeneratedChunkError {
     /// [`GenerationChunkHolder::new`].)
     UnsupportedStatus(ChunkStatus),
     /// The FULL conversion refused: the `LevelChunk` bridge rejected the proto.
-    /// [`LevelChunkBridgeError::NotFull`] fires before the proto is consumed
-    /// for any genuine pre-FULL persisted status; `UnsupportedLightState` fires
+    /// [`LevelChunkBridgeError::GeneratedStatusNotSpawn`] fires before the proto is consumed
+    /// for any non-SPAWN generated parent status; `UnsupportedLightState` fires
     /// before the value transform, and `PaletteMap` arises from the `map_values`
     /// re-encode itself. A refusal never produces a partial `LevelChunk` or an
     /// install — the holder is consumed on every outcome (it is a self-taking
@@ -216,7 +216,7 @@ impl fmt::Display for GeneratedChunkError {
             }
             GeneratedChunkError::UnsupportedStatus(status) => write!(
                 f,
-                "generating to {status:?} is unsupported: the FULL stage is unwired (RivetTodo #185)"
+                "generating to {status:?} is unsupported: FULL is a consuming promotion boundary"
             ),
             GeneratedChunkError::Convert(inner) => write!(
                 f,
@@ -228,13 +228,40 @@ impl fmt::Display for GeneratedChunkError {
 
 impl std::error::Error for GeneratedChunkError {}
 
+/// Errors while extracting the immutable generated FEATURES workspace.
+#[derive(Debug, thiserror::Error)]
+pub enum GeneratedWorkspaceError {
+    /// A generated registry/settings boundary refused the workspace.
+    #[error(transparent)]
+    Generation(#[from] GenError),
+}
+
+impl From<GeneratedWorkspaceError> for GenError {
+    fn from(error: GeneratedWorkspaceError) -> Self {
+        match error {
+            GeneratedWorkspaceError::Generation(error) => error,
+        }
+    }
+}
+
+/// The immutable decoration plan shared by every holder in one world.
+///
+/// Paper memoizes `ChunkGenerator.featuresPerStep` from the full possible-biome
+/// list. Keep the same settings sources, holder-id diagnostics, and sorter in
+/// the per-world generator instead of rebuilding them for every FEATURES target.
+struct FeaturePlan {
+    placed_by_id: HashMap<u32, &'static str>,
+    settings_sources: Vec<(BiomeGenerationSettings, &'static str)>,
+    feature_list: Vec<StepFeatureData>,
+}
+
 /// The per-world OVERWORLD generator realization — `NoiseBasedChunkGenerator`
 /// resolved from the merged worldgen registries for a seed, plus the realized
 /// `RandomState` and overworld biome source.
 ///
 /// `RandomState` borrows the registries it resolves, so the immutable worldgen
 /// `RegistryAccess` and the `RandomState` are leaked once per world/seed
-/// (`Box::leak` → `'static`); the value shell's `NoiseBasedChunkGenerator`
+/// (`Box::leak` → `'static'`); the value shell's `NoiseBasedChunkGenerator`
 /// holds its settings as a `Holder::Direct` (a `Reference` holder would panic
 /// without a threaded `HolderLookup` — see `settings_value`).
 pub struct OverworldGenerator {
@@ -256,6 +283,10 @@ pub struct OverworldGenerator {
     /// Batch 2 selector arms require). See [`build_feature_access`].
     feature_access: &'static RegistryAccess,
     seed: i64,
+    /// Lazily built once per immutable world/seed, matching Paper's memoized
+    /// `featuresPerStep`; the typed error is cached too so retries do not repeat
+    /// an invalid workspace extraction.
+    feature_plan: OnceLock<Result<FeaturePlan, GeneratedWorkspaceError>>,
 }
 
 impl OverworldGenerator {
@@ -288,7 +319,39 @@ impl OverworldGenerator {
             access,
             feature_access,
             seed,
+            feature_plan: OnceLock::new(),
         }
+    }
+
+    fn feature_plan(&self) -> Result<&FeaturePlan, GeneratedWorkspaceError> {
+        self.feature_plan
+            .get_or_init(|| {
+                let placed_registry_id = RegistryBuilder::new(&*PLACED_FEATURE).registry_id();
+                let mut placed_by_id = HashMap::new();
+                let full_possible_biomes = self.biome_source.possible_biomes();
+                let settings_sources = resolve_feature_settings(
+                    &full_possible_biomes,
+                    placed_registry_id,
+                    &mut placed_by_id,
+                )
+                .map_err(GeneratedWorkspaceError::from)?;
+                let feature_list = build_features_per_step(
+                    &settings_sources,
+                    |(settings, _)| settings.features(),
+                    true,
+                );
+                Ok(FeaturePlan {
+                    placed_by_id,
+                    settings_sources,
+                    feature_list,
+                })
+            })
+            .as_ref()
+            .map_err(|error| match error {
+                GeneratedWorkspaceError::Generation(error) => {
+                    GeneratedWorkspaceError::Generation(*error)
+                }
+            })
     }
 
     /// The seed this generator was realized for.
@@ -450,6 +513,11 @@ impl BiomeResolver for OverworldNoiseBiomeSource {
 pub struct GenerationChunkHolder {
     chunk: ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
     context: WorldGenContext<BlockState, WorldgenBiomeId, StructureKey>,
+    /// A typed FEATURES boundary is deterministic for the immutable world plan.
+    /// Cache it after the first partial attempt so retrying the holder is
+    /// idempotent and never repeats feature placement against a partially
+    /// mutated proto.
+    features_failure: Option<GenError>,
 }
 
 impl GenerationChunkHolder {
@@ -612,7 +680,11 @@ impl GenerationChunkHolder {
                 run_spawn(chunk, &generator, true)
             }
         });
-        GenerationChunkHolder { chunk, context }
+        GenerationChunkHolder {
+            chunk,
+            context,
+            features_failure: None,
+        }
     }
 
     /// The chunk's persisted status — `EMPTY` before any step, `CARVERS` after a
@@ -636,45 +708,71 @@ impl GenerationChunkHolder {
     /// full dependency-window composition, decodes and runs the lake, geode,
     /// and monster-room paths, and then fails typed at the first selected
     /// unsupported path — see [`GenerationChunkHolder::new`]). A
-    /// target the value layer does not wire is rejected by the executor before
-    /// any work with a typed error — a path through a light step with no engine
-    /// is refused as `GenError::LightEngineMissing`, and a target past LIGHT
-    /// (FULL) is out of range
+    /// target the borrowed executor cannot complete is rejected before any
+    /// work with a typed error — a path through a light step with no engine
+    /// is refused as `GenError::LightEngineMissing`, and a target at FULL
+    /// stops before borrowed execution
     /// ([`GeneratedChunkError::UnsupportedStatus`]). The chunk is left
     /// untouched by every such refusal. (The wired FEATURES rung is the
     /// exception: it runs Java's priming prologue — heightmap priming, the
     /// decoration-seed derivation, the complete 17x17 dependency window, and
     /// the 3x3 biome union read — and then fails typed, so the chunk's
-    /// heightmaps advance while its persisted status is never stamped past
+    /// the center proto is rolled back while its persisted status remains
     /// CARVERS; see [`GenerationChunkHolder::status`].)
     ///
     /// The SPAWN rung is wired as a seam driven by
     /// [`GenerationChunkHolder::with_spawn`] (the whole-world `spawnOriginalMobs`
     /// gen-step applied to this chunk), not through the `generate_through`
     /// ladder: the holder wires no light engine, so no status past CARVERS is
-    /// reached through this path, and FULL remains unwired (RivetTodo #185).
+    /// reached through this path. FULL is deliberately a separate consuming
+    /// promotion after an exact SPAWN parent, not a borrowed executor rung.
     pub fn generate_through(&mut self, target: ChunkStatus) -> Result<(), GeneratedChunkError> {
-        self.context
-            .generate_through(&GENERATION_PYRAMID, &mut self.chunk, target)
-            .map_err(|error| match error {
-                GenError::UnsupportedStatus(status) => {
-                    GeneratedChunkError::UnsupportedStatus(status)
+        if target.index() >= ChunkStatus::Features.index()
+            && let Some(error) = self.features_failure
+        {
+            return Err(GeneratedChunkError::Generation(error));
+        }
+        let features_snapshot = (self.chunk.get_persisted_status() == ChunkStatus::Carvers
+            && target.index() >= ChunkStatus::Features.index())
+        .then(|| snapshot_generated_chunk(&self.chunk));
+        let result = self
+            .context
+            .generate_through(&GENERATION_PYRAMID, &mut self.chunk, target);
+        match result {
+            Ok(()) => Ok(()),
+            Err(GenError::UnsupportedStatus(status)) => {
+                Err(GeneratedChunkError::UnsupportedStatus(status))
+            }
+            Err(error) => {
+                // A FEATURES body can place real data before it reaches its
+                // typed boundary. The status deliberately remains CARVERS, so
+                // cache that terminal boundary and make later attempts return
+                // the same error without repeating placement against the
+                // partially realized proto.
+                if self.chunk.get_persisted_status() == ChunkStatus::Carvers
+                    && target.index() >= ChunkStatus::Features.index()
+                {
+                    if let Some(snapshot) = features_snapshot {
+                        self.chunk = snapshot;
+                    }
+                    self.features_failure = Some(error);
                 }
-                other => GeneratedChunkError::Generation(other),
-            })
+                Err(GeneratedChunkError::Generation(error))
+            }
+        }
     }
 
     /// Consume the holder and promote its chunk to a loaded `LevelChunk` — the
     /// FULL conversion (`ChunkFullTask.run`'s `new LevelChunk(level, protoChunk,
     /// postLoad)`, Paper `LevelChunk.java` 177). The chunk is moved out of the
     /// holder by value (tick-thread owned, never `Arc<RwLock>`) and
-    /// [`LevelChunk::try_from_full_proto`] consumes the `ProtoChunk`.
+    /// [`LevelChunk::from_generated_spawn_proto`] consumes the `ProtoChunk`.
     ///
     /// The conversion is atomic and typed: a refusal produces no partial
     /// `LevelChunk`, no install, no clone, and no status fabrication. Every
-    /// genuine pre-FULL persisted status is rejected as
-    /// [`GeneratedChunkError::Convert`] carrying [`LevelChunkBridgeError::NotFull`]
-    /// before the `ProtoChunk` is consumed. A `FULL` proto with a hostile
+    /// non-SPAWN generated parent status is rejected as
+    /// [`GeneratedChunkError::Convert`] carrying [`LevelChunkBridgeError::GeneratedStatusNotSpawn`]
+    /// before the `ProtoChunk` is consumed. A SPAWN-parent proto with a hostile
     /// persisted Starlight state is refused as `Convert(UnsupportedLightState)`
     /// before the value transform consumes it; a palette the server value pair
     /// cannot re-encode fails as `Convert(PaletteMap)` from the
@@ -684,8 +782,33 @@ impl GenerationChunkHolder {
     /// recovers the original `ProtoChunk`; the guarantee is only that no
     /// half-promoted chunk or install ever escapes.
     pub fn into_level_chunk(self) -> Result<LevelChunk, GeneratedChunkError> {
-        LevelChunk::try_from_full_proto(self.chunk).map_err(GeneratedChunkError::Convert)
+        LevelChunk::from_generated_spawn_proto(self.chunk).map_err(GeneratedChunkError::Convert)
     }
+}
+
+/// Clone a generated proto's owned representation before the FEATURES task.
+///
+/// `ProtoChunk` intentionally stays a value type without a blanket `Clone`
+/// implementation, so this uses its transactional value-map seam with the same
+/// worldgen strategies and identity mappers. The generated registry tables are
+/// fixed and valid; a failure here is an invariant violation before any feature
+/// body is allowed to run.
+fn snapshot_generated_chunk(
+    chunk: &ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+) -> ProtoChunk<BlockState, WorldgenBiomeId, StructureKey> {
+    let factory = current_version_container_factory();
+    chunk
+        .map_values_ref(
+            factory.block_states_strategy().clone(),
+            factory.biome_strategy().clone(),
+            *factory.default_block_state(),
+            BlockState::of(BlockId(794)),
+            *factory.default_biome(),
+            &|state: &BlockState| *state,
+            &|biome: &WorldgenBiomeId| *biome,
+            &resolve_state_flags,
+        )
+        .expect("the generated proto must snapshot through its own value strategies")
 }
 
 /// A fresh EMPTY worldgen chunk — the same construction the holder uses for its
@@ -1478,17 +1601,13 @@ fn run_biome_decoration(
     // `PLACED_FEATURE` registry id (the generated tables are keyed by name; the
     // FeatureSorter keys on holder identity, so a single fabricated registry
     // collapses the biomes' shared steps exactly like Paper's registry does).
-    // The `features` lists are `DECORATION_STEP_COUNT` long (the generated
-    // data's step count).
-    let placed_registry_id = RegistryBuilder::new(&*PLACED_FEATURE).registry_id();
-    // Reverse id → key for the typed error: the holders carry the generated
-    // table's placed-feature registry id, and the error names the key.
-    let mut placed_by_id = HashMap::new();
-    let full_possible_biomes = generator.biome_source().possible_biomes();
-    let settings_sources =
-        resolve_feature_settings(&full_possible_biomes, placed_registry_id, &mut placed_by_id)?;
-    let feature_list =
-        build_features_per_step(&settings_sources, |(settings, _)| settings.features(), true);
+    // The `features` lists and sorter are built once in the immutable per-world
+    // plan (`OverworldGenerator::feature_plan`), matching Paper's memoized
+    // `featuresPerStep` rather than rebuilding them for each target extraction.
+    let plan = generator.feature_plan()?;
+    let placed_by_id = &plan.placed_by_id;
+    let settings_sources = &plan.settings_sources;
+    let feature_list = &plan.feature_list;
 
     // The per-step loop — Paper's `addVanillaDecorations`. The structure loop
     // is skipped (the port has no structure manager; Java's
@@ -1770,6 +1889,7 @@ mod tests {
     use rivet_nbt::compound_tag::CompoundTag;
     use rivet_nbt::list_tag::ListTag;
     use rivet_nbt::tag::Tag;
+    use rivet_registry::fluid_id::FluidId;
     use rivet_registry::generated::block_states::StateId;
     use rivet_util::RandomSource;
     use rivet_world::level::WorldGenLevel;
@@ -1784,6 +1904,7 @@ mod tests {
     use rivet_world::levelgen::feature::monster_room_feature::MONSTER_ROOM;
     use rivet_world::levelgen::heightmap::Types;
     use rivet_world::lighting::swmr_nibble_array::{ARRAY_SIZE, InitState, SwmrNibbleArray};
+    use rivet_world::ticks::ScheduledTick;
 
     /// The shared test realization (built once — the worldgen registry
     /// bootstrap is not free). The seed mirrors the pinned loaded-world corpus.
@@ -2191,7 +2312,7 @@ mod tests {
         );
     }
 
-    /// Hostile: the stages the holder does not wire are refused before any work
+    /// Hostile: stages the holder cannot complete are refused before any work
     /// runs, with a typed error, and the chunk is never stamped past the
     /// supported rung — fresh, and again after a successful NOISE.
     ///
@@ -2199,8 +2320,8 @@ mod tests {
     /// wired (`WorldGenContext::generate_through`, engine-gated) but the holder
     /// wires no light engine, so a fresh EMPTY chunk targeting either is
     /// refused as `GenError::LightEngineMissing` before any work runs (the
-    /// chunk stays EMPTY). A target past LIGHT (FULL) is out of range
-    /// (`UnsupportedStatus`). CARVERS itself is wired (the real
+    /// chunk stays EMPTY). A target at FULL stops at the consuming promotion
+    /// boundary (`UnsupportedStatus`). CARVERS itself is wired (the real
     /// `NoiseBasedChunkGenerator.applyCarvers`, see
     /// `generate_through_carvers_runs_the_real_apply_carvers`), so a fresh
     /// EMPTY chunk targeting it runs BIOMES→NOISE→SURFACE→CARVERS and is
@@ -2231,8 +2352,8 @@ mod tests {
         }
         // SPAWN is wired (the spawn seam is attached) but its path runs through
         // the light steps, which need a light engine the holder does not wire →
-        // rejected as LightEngineMissing before any work. FULL is still unwired
-        // (no full seam), so it is rejected as UnsupportedStatus.
+        // rejected as LightEngineMissing before any work. FULL is a separate
+        // consuming promotion boundary, so it is rejected as UnsupportedStatus.
         for status in [ChunkStatus::Spawn, ChunkStatus::Full] {
             let result = fresh.generate_through(status);
             assert!(
@@ -2338,16 +2459,32 @@ mod tests {
             }
         }
 
-        // The prologue ran faithfully: all four final heightmaps are primed
-        // (Java primes them for the decoration bodies to read).
+        // The prologue may prime final heightmaps internally, but the holder's
+        // transaction rolls the center proto back after the typed boundary.
         for ty in FINAL_HEIGHTMAPS {
             assert!(
-                holder.chunk.heightmaps()[ty as usize].is_some(),
-                "FEATURES must prime the {ty:?} final heightmap before failing typed"
+                holder.chunk.heightmaps()[ty as usize].is_none(),
+                "a failed FEATURES transaction must roll back {ty:?}"
             );
         }
         // The chunk is never stamped FEATURES — the typed error propagates
         // before the status advance, so it stays CARVERS.
+        assert_eq!(holder.status(), ChunkStatus::Carvers);
+
+        // A retry is an idempotent terminal boundary: the holder returns the
+        // cached typed failure instead of replaying partial feature placement.
+        let retry = holder
+            .generate_through(ChunkStatus::Features)
+            .expect_err("the cached FEATURES boundary must remain refused");
+        assert!(matches!(
+            retry,
+            GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
+                chunk_pos,
+                step_index: 9,
+                global_feature_index: 17,
+                feature_key: "minecraft:dark_forest_vegetation",
+            }) if chunk_pos == ChunkPos::ZERO
+        ));
         assert_eq!(holder.status(), ChunkStatus::Carvers);
     }
 
@@ -2769,40 +2906,122 @@ mod tests {
         assert_ne!(seed(42, 0, 0), seed(43, 0, 0), "world seed must matter");
     }
 
-    /// The consuming FULL conversion promotes a genuine-FULL proto into a
-    /// loaded `LevelChunk` (`ChunkFullTask.run`'s `new LevelChunk(level,
-    /// protoChunk, postLoad)`, Paper `LevelChunk.java` 177): a holder whose
-    /// chunk is stamped genuine persisted `FULL` is moved out (tick-thread
-    /// owned, by value) and `try_from_full_proto` consumes it. Real generated
-    /// content (a NOISE-generated chunk) is promoted with its position.
+    /// The consuming FULL seam receives a semantically valid SPAWN parent proto
+    /// (`ChunkFullTask.run`'s `new LevelChunk(level, protoChunk, postLoad)`,
+    /// Paper `LevelChunk.java` 177): no generated proto is stamped `FULL`.
+    /// This unit constructs the parent directly because the holder's normal
+    /// LIGHT/SPAWN prerequisites remain a downstream scheduler concern. The
+    /// holder moves its SPAWN chunk out by value, and the returned runtime chunk
+    /// reports persisted `FULL`; represented entities and block ticks are
+    /// retained for their deferred runtime hooks.
     #[test]
-    fn into_level_chunk_promotes_a_genuine_full_proto() {
+    fn full_seam_promotes_semantically_valid_spawn_parent() {
         let generator = test_generator();
         let mut holder = generator.create_holder(ChunkPos::new(3, -2));
         holder.generate_through(ChunkStatus::Noise).expect("NOISE");
-        holder.chunk.set_persisted_status(ChunkStatus::Full);
+        let mut entity = CompoundTag::new();
+        entity.put_string("id", "minecraft:pig");
+        holder.chunk.add_entity(entity);
+        holder
+            .chunk
+            .get_block_ticks_mut()
+            .schedule(ScheduledTick::probe(Blocks::AIR, BlockPos::new(1, -64, 1)));
+        holder
+            .chunk
+            .get_fluid_ticks_mut()
+            .schedule(ScheduledTick::probe(
+                FluidId::WATER,
+                BlockPos::new(2, -63, 2),
+            ));
+        let mut block_entity = CompoundTag::new();
+        block_entity.put_int("x", 2);
+        block_entity.put_int("y", -63);
+        block_entity.put_int("z", 3);
+        block_entity.put_string("id", "minecraft:chest");
+        holder.chunk.base_mut().set_block_entity_nbt(block_entity);
+        holder
+            .chunk
+            .mark_pos_for_post_processing(&BlockPos::new(4, -63, 5));
+        holder
+            .chunk
+            .set_heightmap(Types::WorldSurface, &vec![7; 37]);
+        holder.chunk.set_sky_emptiness_map(Some(vec![true; 24]));
+        holder.chunk.set_light_correct(true);
+        holder.chunk.base_mut().set_inhabited_time(1234);
+        let village = Identifier::parse("minecraft:village");
+        holder.chunk.set_start_for_structure(village.clone(), 11);
+        holder.chunk.add_reference_for_structure(village, 13);
+        holder.chunk.set_persisted_status(ChunkStatus::Spawn);
 
         let chunk = holder
             .into_level_chunk()
-            .expect("a genuine FULL generated chunk promotes");
+            .expect("the SPAWN-parent generated chunk promotes");
         assert_eq!(chunk.pos(), ChunkPos::new(3, -2));
         assert_eq!(chunk.get_x(), 3);
         assert_eq!(chunk.get_z(), -2);
         assert_eq!(chunk.get_min_y(), -64);
         assert_eq!(chunk.get_height(), 384);
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Full);
+        assert_eq!(chunk.post_load_entities().len(), 1);
+        assert_eq!(chunk.stored_block_ticks().len(), 1);
+        assert_eq!(chunk.stored_fluid_ticks().len(), 1);
+        assert_eq!(chunk.pending_block_entities().len(), 1);
+        assert!(chunk.is_light_correct());
+        assert_eq!(chunk.inhabited_time(), 1234);
+        assert!(chunk.is_unsaved());
+        assert_eq!(chunk.sky_emptiness_map(), Some(&[true; 24][..]));
+        assert_eq!(chunk.post_processing()[0].len(), 1);
+        assert_eq!(
+            chunk
+                .get_all_starts()
+                .get(&Identifier::parse("minecraft:village")),
+            Some(&11)
+        );
+        assert_eq!(chunk.structures_references()[0].references, vec![13]);
+        let (_, world_surface) = chunk
+            .client_heightmaps()
+            .into_iter()
+            .find(|(ty, _)| {
+                *ty == rivet_protocol::protocol::game::heightmap_types::HeightmapType::WorldSurface
+            })
+            .expect("FULL promotion carries final heightmaps");
+        assert_eq!(world_surface, vec![7; 37]);
     }
 
-    /// Every genuine pre-FULL persisted status is refused atomically when the
+    /// The ordinary holder cannot claim the SPAWN-parent seam without the
+    /// downstream LIGHT/SPAWN prerequisites. A failed end-to-end attempt leaves
+    /// the actual status below SPAWN, and the consuming conversion refuses that
+    /// status rather than treating it as a ready generated parent.
+    #[test]
+    fn holder_cannot_claim_spawn_readiness_without_prerequisites() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::new(-4, 6));
+        let generation = holder.generate_through(ChunkStatus::Spawn);
+        assert!(
+            generation.is_err(),
+            "the normal holder lacks LIGHT prerequisites"
+        );
+        let actual_status = holder.status();
+        assert_ne!(actual_status, ChunkStatus::Spawn);
+        assert!(matches!(
+            holder.into_level_chunk(),
+            Err(GeneratedChunkError::Convert(
+                LevelChunkBridgeError::GeneratedStatusNotSpawn(status)
+            )) if status == actual_status
+        ));
+    }
+
+    /// Every status except the exact SPAWN parent is refused atomically when the
     /// holder is consumed, with a typed `Convert` carrying the bridge's
-    /// `NotFull(actual_status)` — the status gate fires before the proto is
+    /// `GeneratedStatusNotSpawn(actual_status)` — the status gate fires before the proto is
     /// consumed, so there is no clone, no partial promote, and no status
     /// fabrication. A fresh EMPTY holder and a real generated (NOISE) holder
     /// both refuse with their actual status.
     #[test]
-    fn every_pre_full_status_is_refused_atomically_on_consumption() {
+    fn every_non_spawn_status_is_refused_atomically_on_consumption() {
         let generator = test_generator();
         for status in ChunkStatus::ALL {
-            if status == ChunkStatus::Full {
+            if status == ChunkStatus::Spawn {
                 continue;
             }
             let mut holder = generator.create_holder(ChunkPos::ZERO);
@@ -2810,14 +3029,14 @@ mod tests {
             let error = holder
                 .into_level_chunk()
                 .err()
-                .expect("a pre-FULL holder must not promote");
+                .expect("a non-SPAWN holder must not promote");
             assert!(
                 matches!(
                     &error,
-                    GeneratedChunkError::Convert(LevelChunkBridgeError::NotFull(s))
+                    GeneratedChunkError::Convert(LevelChunkBridgeError::GeneratedStatusNotSpawn(s))
                         if *s == status
                 ),
-                "expected Convert(NotFull({status:?})), got {error:?}"
+                "expected Convert(GeneratedStatusNotSpawn({status:?})), got {error:?}"
             );
         }
         // A real generated chunk (NOISE, not an arbitrary stamp) refuses with
@@ -2828,7 +3047,7 @@ mod tests {
         assert!(matches!(
             holder.into_level_chunk(),
             Err(GeneratedChunkError::Convert(
-                LevelChunkBridgeError::NotFull(ChunkStatus::Noise)
+                LevelChunkBridgeError::GeneratedStatusNotSpawn(ChunkStatus::Noise)
             ))
         ));
     }
@@ -2843,7 +3062,7 @@ mod tests {
         let generator = Arc::new(OverworldGenerator::new(42));
         let base = Arc::strong_count(&generator);
         let mut holder = generator.create_holder(ChunkPos::ZERO);
-        holder.chunk.set_persisted_status(ChunkStatus::Full);
+        holder.chunk.set_persisted_status(ChunkStatus::Spawn);
         assert_eq!(Arc::strong_count(&generator), base + 6);
         let _chunk = holder.into_level_chunk().expect("FULL promotes");
         assert_eq!(
@@ -2853,17 +3072,17 @@ mod tests {
         );
     }
 
-    /// Conversion-error atomicity at the holder boundary: a `FULL` proto
+    /// Conversion-error atomicity at the holder boundary: a SPAWN-parent proto
     /// carrying a hostile persisted Starlight state is refused as
     /// `Convert(UnsupportedLightState)` — the same value-layer gate that
-    /// `try_from_full_proto` runs before the `map_values` transform — rather
+    /// `from_generated_spawn_proto` runs before the `map_values` transform — rather
     /// than a fabricated or half-promoted chunk. The promoted position is never
     /// produced, so the caller cannot install it.
     #[test]
-    fn conversion_error_is_atomic_for_hostile_full_proto() {
+    fn conversion_error_is_atomic_for_hostile_spawn_parent() {
         let generator = test_generator();
         let mut holder = generator.create_holder(ChunkPos::ZERO);
-        holder.chunk.set_persisted_status(ChunkStatus::Full);
+        holder.chunk.set_persisted_status(ChunkStatus::Spawn);
         // `InitState::Other` is a persisted Starlight state the #184 send seam
         // cannot represent — it must surface as Convert(UnsupportedLightState),
         // not a panic or a partial promote.
@@ -2883,10 +3102,11 @@ mod tests {
     /// call `chunk_map_mut().install(pos, chunk)` — against one mutable
     /// `ServerLevel`; a NOISE chunk's refusal means the `Ok` arm never runs, so
     /// the position is not served and no pre-existing chunk is replaced. (If a
-    /// conversion ever started returning `Ok` for a pre-FULL proto, the `panic`
-    /// fires; if the composition installed on refusal, the assertion fails.)
+    /// conversion ever started returning `Ok` for a non-SPAWN proto, the
+    /// `panic` fires; if the composition installed on refusal, the assertion
+    /// fails.)
     #[test]
-    fn no_install_on_conversion_refusal() {
+    fn no_install_on_non_spawn_conversion_refusal() {
         let generator = test_generator();
         let pos = ChunkPos::new(3, 4);
         let mut holder = generator.create_holder(pos);
@@ -2919,7 +3139,7 @@ mod tests {
         let pos = ChunkPos::new(7, -3);
         let chunk = {
             let mut holder = generator.create_holder(pos);
-            holder.chunk.set_persisted_status(ChunkStatus::Full);
+            holder.chunk.set_persisted_status(ChunkStatus::Spawn);
             holder.into_level_chunk().expect("FULL promotes")
         };
 
@@ -2949,7 +3169,7 @@ mod tests {
             holder
                 .chunk
                 .set_start_for_structure(Identifier::parse("minecraft:village"), start);
-            holder.chunk.set_persisted_status(ChunkStatus::Full);
+            holder.chunk.set_persisted_status(ChunkStatus::Spawn);
             holder.into_level_chunk().expect("FULL promotes")
         };
 

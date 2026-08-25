@@ -21,9 +21,9 @@
 //! - `setBlockEntity`/`getBlockEntity`/`getBlockEntities` (the block-entity
 //!   unit); the port keeps `pendingBlockEntities` on the base and
 //!   `removeBlockEntity`'s pending half;
-//! - the `ProtoChunkTicks<Block>`/`ProtoChunkTicks<Fluid>` containers and
-//!   `getBlockTicks`/`getFluidTicks`/`getTicksForSerialization` (the
-//!   `world.ticks` unit);
+//! - `getTicksForSerialization` and runtime tick execution/registration (the
+//!   `world.ticks` unit); the value layer carries both block and fluid
+//!   `ProtoChunkTicks` containers and exposes their owner-directed accessors.
 //! - `setStartForStructure`'s `BelowZeroRetrogen` bound check and
 //!   `setBelowZeroRetrogen`/`getBelowZeroRetrogen` (`BelowZeroRetrogen` is
 //!   unported; the base's setter is used unchanged);
@@ -163,7 +163,7 @@ where
     /// view (`WorldGenRegion`) holds the chunk as the generic `ChunkAccess`
     /// base; the Rust bridge exposes the base non-consumingly so a bounded
     /// region can borrow a `ProtoChunk`'s sections/biomes without moving it
-    /// (`into_base` is the consuming FULL-promotion move).
+    /// (`into_base_and_entities` is the consuming FULL-promotion move).
     pub fn base(&self) -> &ChunkAccess<T, B, S> {
         &self.base
     }
@@ -334,6 +334,21 @@ where
     /// Mutable half of [`get_block_ticks`](Self::get_block_ticks).
     pub fn get_block_ticks_mut(&mut self) -> &mut crate::ticks::ProtoChunkTicks<Block> {
         self.base.get_block_ticks_mut()
+    }
+
+    /// `ChunkAccess.getFluidTicks()` — the worldgen fluid-tick container
+    /// owned by this proto chunk and carried through FULL promotion.
+    pub fn get_fluid_ticks(
+        &self,
+    ) -> &crate::ticks::ProtoChunkTicks<rivet_registry::fluid_id::FluidId> {
+        self.base.get_fluid_ticks()
+    }
+
+    /// Mutable half of [`get_fluid_ticks`](Self::get_fluid_ticks).
+    pub fn get_fluid_ticks_mut(
+        &mut self,
+    ) -> &mut crate::ticks::ProtoChunkTicks<rivet_registry::fluid_id::FluidId> {
+        self.base.get_fluid_ticks_mut()
     }
 
     /// `ProtoChunk.getPersistedStatus()`.
@@ -536,18 +551,25 @@ where
         self.base.set_all_references(data);
     }
 
-    /// Consume the proto and return its `ChunkAccess` base.
+    /// Consume the proto's owned representation for the FULL promotion.
     ///
-    /// Java's promotion path (`new LevelChunk(ServerLevel, ProtoChunk,
-    /// PostLoadProcessor)`) hands the proto's owned base state — sections,
-    /// heightmaps, light nibbles, flags, inhabited time, pending block
-    /// entities, post-processing, structure access — to the `LevelChunk`
-    /// constructor; the port keeps that a value move. The proto-only fields
-    /// (`entities`, `status`, `carvingMask`) are not part of the base and are
-    /// dropped by the caller's typed refusal when the persisted status is not
-    /// genuine `FULL` (see the server `LevelChunk::try_from_full_proto`).
-    pub fn into_base(self) -> ChunkAccess<T, B, S> {
-        self.base
+    /// The Java `ChunkStatusTasks.full` task receives the parent SPAWN
+    /// `ProtoChunk` and constructs a `LevelChunk`; it does not first stamp the
+    /// proto `FULL`. The base carries sections, heightmaps, light nibbles,
+    /// flags, inhabited time, pending block entities, post-processing, ticks,
+    /// and structure access. The generated entity NBT list is returned for the
+    /// caller-owned post-load boundary; `status` and `carving_mask` are
+    /// proto-only and are intentionally not part of the runtime chunk.
+    pub fn into_base_and_entities(self) -> (ChunkAccess<T, B, S>, Vec<CompoundTag>) {
+        let ProtoChunk {
+            base,
+            entities,
+            status: _,
+            carving_mask: _,
+            air: _,
+            void_air: _,
+        } = self;
+        (base, entities)
     }
 
     /// Transform the stored block and biome values while retaining every
@@ -613,6 +635,7 @@ where
         resolve: &'static (dyn Fn(&T2) -> StateFlags + Sync),
     ) -> Result<ProtoChunk<T2, B2, S>, String>
     where
+        T: Eq + std::hash::Hash,
         T2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         B2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         S: Clone,
