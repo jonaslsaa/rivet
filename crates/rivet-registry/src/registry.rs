@@ -44,6 +44,26 @@ use rivet_util::random::RandomSource;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Lease held by a frozen staged registry while its owner builder is reserved.
+/// A staged registry shares its owner's `RegistryId` so decoded holders remain
+/// valid for the final registry; the lease prevents owner reuse while it lives.
+pub(crate) struct StagedRegistryLease {
+    active: Arc<AtomicBool>,
+}
+
+impl StagedRegistryLease {
+    pub(crate) fn new(active: Arc<AtomicBool>) -> Self {
+        Self { active }
+    }
+}
+
+impl Drop for StagedRegistryLease {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+    }
+}
 
 /// The registry key type — `Registry<T>.key()`.
 ///
@@ -103,6 +123,9 @@ pub struct Registry<T> {
     /// Frozen named tag sets (`HolderSet.Named<T>` members; #126 widens the
     /// surface, the id space is already the contract).
     tags: HashMap<TagKey<T>, Vec<HolderId>>,
+    /// Keeps the staged owner's identity reserved until this temporary registry
+    /// is dropped. Normal registries leave this as `None`.
+    _staged_lease: Option<StagedRegistryLease>,
 }
 
 impl<T> Registry<T> {
@@ -122,6 +145,7 @@ impl<T> Registry<T> {
         default_id: Option<u32>,
         default_key: Option<Identifier>,
         tags: HashMap<TagKey<T>, Vec<HolderId>>,
+        staged_lease: Option<StagedRegistryLease>,
     ) -> Self {
         Registry {
             key,
@@ -136,6 +160,7 @@ impl<T> Registry<T> {
             default_id,
             default_key,
             tags,
+            _staged_lease: staged_lease,
         }
     }
 

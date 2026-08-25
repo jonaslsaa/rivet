@@ -45,13 +45,14 @@ use crate::ResourceKey;
 use crate::TagKey;
 use crate::holder::{HolderId, RegistryId};
 use crate::registration_info::RegistrationInfo;
-use crate::registry::{Registry, RegistryKey};
+use crate::registry::{Registry, RegistryKey, StagedRegistryLease};
 
 use rivet_serialization::lifecycle::Lifecycle;
 
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// Monotonic per-instance registry identity source (OWNERSHIP.md §Registries:
 /// `RegistryId` is a per-instance u32, distinct from the registry key). A
@@ -104,6 +105,46 @@ pub struct RegistryBuilder<T> {
     /// a repeat call returns the same provisional id, and `freeze()` reports
     /// each unbound key exactly once.
     pending_unbound: HashMap<ResourceKey<T>, HolderId>,
+    /// Set while a staged registry with this builder's identity is alive.
+    /// Owner mutation/freezing is blocked until the staged registry is dropped.
+    stage_active: Arc<AtomicBool>,
+}
+
+/// A key-only registry builder borrowed from its final owner.
+///
+/// This type exists only for mutually recursive registry decoding. Its lifetime
+/// is tied to the final [`RegistryBuilder`], so the owner cannot be frozen or
+/// otherwise reused until this staged view is dropped.
+pub struct StagedRegistryBuilder<'a, T> {
+    inner: RegistryBuilder<T>,
+    owner: PhantomData<&'a mut RegistryBuilder<T>>,
+    lease: Option<StagedRegistryLease>,
+}
+
+impl<'a, T> StagedRegistryBuilder<'a, T> {
+    /// The staged view's reserved registry identity.
+    pub fn registry_id(&self) -> RegistryId {
+        self.inner.registry_id()
+    }
+
+    /// Register a key-only placeholder in the staged view.
+    pub fn register(
+        &mut self,
+        key: &ResourceKey<T>,
+        value: Arc<T>,
+        info: RegistrationInfo,
+    ) -> BuilderHolder {
+        self.inner.register(key, value, info)
+    }
+
+    /// Freeze the staged view after all recursive keys have been reserved.
+    pub fn freeze(mut self) -> Registry<T> {
+        let lease = self
+            .lease
+            .take()
+            .expect("staged registry lease already consumed");
+        self.inner.freeze_with_lease(Some(lease))
+    }
 }
 
 impl<T> RegistryBuilder<T> {
@@ -116,6 +157,38 @@ impl<T> RegistryBuilder<T> {
         Self::with_intrusive(key, false)
     }
 
+    /// Borrow this builder while constructing a key-only staged registry view.
+    ///
+    /// The staged view reuses the owner's `RegistryId` only while the owner is
+    /// reserved by the lease. It snapshots all owner entries so pre-existing
+    /// registrations remain visible during decoding; the owner cannot mutate or
+    /// freeze until the temporary view is dropped.
+    pub fn staged(&mut self) -> StagedRegistryBuilder<'_, T> {
+        assert!(
+            !self.stage_active.swap(true, Ordering::AcqRel),
+            "registry builder already has a staged view"
+        );
+        let mut inner =
+            Self::with_intrusive_and_id(&self.key, self.intrusive.is_some(), self.registry_id);
+        inner.values = self.values.clone();
+        inner.keys = self.keys.clone();
+        inner.by_location = self.by_location.clone();
+        inner.by_key = self.by_key.clone();
+        inner.by_value = self.by_value.clone();
+        inner.registration_infos = self.registration_infos.clone();
+        inner.lifecycle = self.lifecycle;
+        inner.default_id = self.default_id;
+        inner.default_key = self.default_key.clone();
+        inner.tags = self.tags.clone();
+        inner.intrusive = self.intrusive.clone();
+        inner.pending_unbound = self.pending_unbound.clone();
+        StagedRegistryBuilder {
+            inner,
+            owner: PhantomData,
+            lease: Some(StagedRegistryLease::new(Arc::clone(&self.stage_active))),
+        }
+    }
+
     /// `MappedRegistry(ResourceKey, Lifecycle, boolean intrusiveHolders)`.
     ///
     /// The initial `Lifecycle` param is likewise Stable-only for #124 (see
@@ -125,9 +198,18 @@ impl<T> RegistryBuilder<T> {
     }
 
     fn with_intrusive(key: &ResourceKey<Registry<T>>, intrusive_holders: bool) -> Self {
+        let registry_id = RegistryId(NEXT_REGISTRY_ID.fetch_add(1, Ordering::Relaxed));
+        Self::with_intrusive_and_id(key, intrusive_holders, registry_id)
+    }
+
+    fn with_intrusive_and_id(
+        key: &ResourceKey<Registry<T>>,
+        intrusive_holders: bool,
+        registry_id: RegistryId,
+    ) -> Self {
         RegistryBuilder {
             key: key.clone(),
-            registry_id: RegistryId(NEXT_REGISTRY_ID.fetch_add(1, Ordering::Relaxed)),
+            registry_id,
             values: Vec::new(),
             keys: Vec::new(),
             by_location: HashMap::new(),
@@ -140,6 +222,7 @@ impl<T> RegistryBuilder<T> {
             tags: HashMap::new(),
             intrusive: intrusive_holders.then(HashMap::new),
             pending_unbound: HashMap::new(),
+            stage_active: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -153,6 +236,13 @@ impl<T> RegistryBuilder<T> {
     /// The builder's `RegistryId`.
     pub fn registry_id(&self) -> RegistryId {
         self.registry_id
+    }
+
+    fn assert_stage_inactive(&self) {
+        assert!(
+            !self.stage_active.load(Ordering::Acquire),
+            "registry builder cannot be reused while its staged registry is alive"
+        );
     }
 
     /// Identity helper — `Arc::as_ptr` of a freshly-wrapped value.
@@ -190,6 +280,7 @@ impl<T> RegistryBuilder<T> {
         value: Arc<T>,
         info: RegistrationInfo,
     ) -> BuilderHolder {
+        self.assert_stage_inactive();
         if self.by_location.contains_key(key.identifier()) {
             panic!("Adding duplicate key '{}' to registry", key);
         }
@@ -237,6 +328,7 @@ impl<T> RegistryBuilder<T> {
     /// builder — an intrusive registry only ever creates holders from values,
     /// never from bare keys. Preserved here exactly.
     pub fn get_or_create_holder(&mut self, key: &ResourceKey<T>) -> BuilderHolder {
+        self.assert_stage_inactive();
         if let Some(&id) = self.by_key.get(key) {
             return HolderId(id);
         }
@@ -265,6 +357,7 @@ impl<T> RegistryBuilder<T> {
     /// of `create_intrusive_holder` must not treat the return as a final id —
     /// match `register`'s return, as Java callers match `register`'s.
     pub fn create_intrusive_holder(&mut self, value: Arc<T>) -> BuilderHolder {
+        self.assert_stage_inactive();
         let intrusive = self
             .intrusive
             .as_mut()
@@ -296,6 +389,7 @@ impl<T> RegistryBuilder<T> {
     /// tag member ids (pre-freeze). Member holders must reference registered
     /// elements in this minimal shape; `HolderSet.Named` binding is #126.
     pub fn bind_tags(&mut self, pending: Vec<(TagKey<T>, Vec<BuilderHolder>)>) {
+        self.assert_stage_inactive();
         for (tag, holders) in pending {
             self.tags.insert(tag, holders);
         }
@@ -321,6 +415,11 @@ impl<T> RegistryBuilder<T> {
     /// impossible here: tags only exist after `bind_tags` in this minimal
     /// shape, and a consumed builder cannot be frozen twice.)
     pub fn freeze(self) -> Registry<T> {
+        self.assert_stage_inactive();
+        self.freeze_with_lease(None)
+    }
+
+    fn freeze_with_lease(self, staged_lease: Option<StagedRegistryLease>) -> Registry<T> {
         let mut unbound: Vec<Identifier> = self
             .pending_unbound
             .keys()
@@ -364,6 +463,7 @@ impl<T> RegistryBuilder<T> {
             self.default_id,
             self.default_key,
             self.tags,
+            staged_lease,
         )
     }
 
@@ -412,6 +512,62 @@ mod tests {
         let b = RegistryBuilder::<TestElement>::new(&key());
         assert_ne!(a.registry_id(), b.registry_id());
         assert_ne!(a.registry_id(), RegistryId(u32::MAX));
+    }
+
+    #[test]
+    fn staged_builder_reserves_owner_identity_until_drop() {
+        let mut owner = RegistryBuilder::<TestElement>::new(&key());
+        register(&mut owner, "existing", 7);
+        let owner_id = owner.registry_id();
+        let staged = owner.staged();
+        assert_eq!(staged.registry_id(), owner_id);
+        let staged_registry = staged.freeze();
+        assert_eq!(staged_registry.registry_id(), owner_id);
+        assert_eq!(staged_registry.size(), 1);
+        assert_eq!(
+            staged_registry.get_value(&element_key("existing")),
+            Some(&TestElement(7))
+        );
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            register(&mut owner, "new", 8);
+        }));
+        assert!(
+            result.is_err(),
+            "owner reuse must be blocked by the staged lease"
+        );
+
+        drop(staged_registry);
+        register(&mut owner, "new", 8);
+        let frozen = owner.freeze();
+        assert_eq!(frozen.registry_id(), owner_id);
+        assert_eq!(frozen.size(), 2);
+    }
+
+    #[test]
+    fn staged_registration_failure_does_not_publish_or_corrupt_owner() {
+        let mut owner = RegistryBuilder::<TestElement>::new(&key());
+        register(&mut owner, "existing", 7);
+        let owner_id = owner.registry_id();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut staged = owner.staged();
+            // The snapshot includes the pre-existing key, so a failed staged
+            // registration cannot be mistaken for a successful publication.
+            staged.register(
+                &element_key("existing"),
+                Arc::new(TestElement(8)),
+                RegistrationInfo::BUILT_IN,
+            );
+        }));
+        assert!(result.is_err());
+        assert_eq!(owner.registry_id(), owner_id);
+        let frozen = owner.freeze();
+        assert_eq!(frozen.registry_id(), owner_id);
+        assert_eq!(frozen.size(), 1);
+        assert_eq!(
+            frozen.get_value(&element_key("existing")),
+            Some(&TestElement(7))
+        );
     }
 
     #[test]
