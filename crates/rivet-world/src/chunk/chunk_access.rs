@@ -910,7 +910,7 @@ where
         }
         if section_y < min_light_section {
             section_y = min_light_section;
-            local_y = section_y << 4;
+            local_y = section_y.wrapping_shl(4);
         }
 
         let nibbles = &self.sky_nibbles;

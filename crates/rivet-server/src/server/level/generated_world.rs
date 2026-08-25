@@ -2183,7 +2183,14 @@ fn run_spawn_in_region(
                 if region.is_inside_build_height(y)
                     && is_spawn_position_ok(region, spawner.ty, &spawn_pos)
                 {
+                    // Paper keeps EntityType dimensions as Java floats until the
+                    // AABB constructor promotes them to doubles. Converting the
+                    // exact f32 values here preserves both the clamp endpoints
+                    // and the raw getSpawnAABB coordinates (not the rounded
+                    // decimal literals' f64 approximations).
                     let (width, height) = spawn_dimensions(spawner.ty);
+                    let width = f64::from(width);
+                    let height = f64::from(height);
                     let fx = (x as f64).clamp(xo as f64 + width, xo as f64 + 16.0 - width);
                     let fz = (z as f64).clamp(zo as f64 + width, zo as f64 + 16.0 - width);
                     let entity_pos = BlockPos::containing(fx, y as f64, fz);
@@ -2291,13 +2298,34 @@ fn is_pathfindable_land(state: BlockState) -> bool {
     let name = state.block().name();
     match name {
         // These block classes override the default LAND predicate to false.
-        "minecraft:soul_sand" | "minecraft:dirt_path" | "minecraft:farmland" => false,
+        "minecraft:soul_sand"
+        | "minecraft:dirt_path"
+        | "minecraft:farmland"
+        | "minecraft:mud"
+        | "minecraft:cactus"
+        | "minecraft:scaffolding"
+        | "minecraft:iron_bars"
+        | "minecraft:glass_pane"
+        | "minecraft:chain" => false,
+        name if name.ends_with("_fence") || name.ends_with("_wall") => false,
         name if name.ends_with("_slab") || name.ends_with("_stairs") => false,
+        name if name.ends_with("_door") || name.ends_with("_trapdoor") => state
+            .get_value(BlockStateProperties::OPEN)
+            .is_some_and(|value| matches!(value, PropertyValue::Bool(true))),
+        name if name.ends_with("_fence_gate") => state
+            .get_value(BlockStateProperties::OPEN)
+            .is_some_and(|value| matches!(value, PropertyValue::Bool(true))),
+        "minecraft:water" | "minecraft:bubble_column" => true,
+        "minecraft:lava" => false,
         "minecraft:snow" => matches!(
             state.get_value(BlockStateProperties::LAYERS),
             Some(PropertyValue::Int(layers)) if layers < 5
         ),
-        _ => spawn_collision_shape(state).is_some_and(|shape| !shape.is_full()),
+        // The default BlockBehaviour predicate is `!isCollisionShapeFullBlock`.
+        // The generated collision-face mask is the exact full-face VoxelShape
+        // query available in this registry slice, so it answers the default
+        // without collapsing a partial shape into blocksMotion.
+        _ => state.collision_face_mask() != 0x3F,
     }
 }
 
@@ -2324,16 +2352,22 @@ fn is_spawn_position_ok(
 /// tables. The entity-specific spawnable-on tags are checked later by each
 /// entity's `checkSpawnRules`, not by the placement type.
 fn is_valid_spawn_floor(state: BlockState, entity_type: &str) -> bool {
+    let name = state.block().name();
+    // PowderSnowBlock's dynamic collision does not make its support shape
+    // dynamic: the default block-support shape is full, and its spawn floor is
+    // explicitly valid for polar bears through their alternate rule.
+    if entity_type == "minecraft:polar_bear" && name == "minecraft:powder_snow" {
+        return true;
+    }
     if state.has_dynamic_shape() {
         return false;
     }
-    if (entity_type == "minecraft:ocelot" || entity_type == "minecraft:parrot")
-        && state.is_in_tag("minecraft:leaves")
-    {
-        return true;
-    }
+    // Blocks.java installs these predicates on the block properties, replacing
+    // the default sturdy-up + low-emission test. Keep the override order ahead
+    // of the generic face query because glass, for example, is sturdy but has a
+    // deliberate `never` predicate.
     if matches!(
-        state.block().name(),
+        name,
         "minecraft:soul_sand"
             | "minecraft:carved_pumpkin"
             | "minecraft:jack_o_lantern"
@@ -2342,23 +2376,33 @@ fn is_valid_spawn_floor(state: BlockState, entity_type: &str) -> bool {
     ) {
         return true;
     }
-    // The generated spawn tags do not include these blocks, but retaining the
-    // explicit never list keeps the BlockBehaviour override honest when a
-    // future creature table reaches one.
     if matches!(
-        state.block().name(),
-        "minecraft:air"
-            | "minecraft:cave_air"
-            | "minecraft:void_air"
-            | "minecraft:water"
-            | "minecraft:lava"
-            | "minecraft:fire"
-            | "minecraft:soul_fire"
-            | "minecraft:torch"
-            | "minecraft:soul_torch"
-            | "minecraft:redstone_torch"
-            | "minecraft:redstone_wall_torch"
-    ) {
+        name,
+        "minecraft:bedrock"
+            | "minecraft:glass"
+            | "minecraft:barrier"
+            | "minecraft:moving_piston"
+            | "minecraft:repeater"
+            | "minecraft:chorus_flower"
+            | "minecraft:scaffolding"
+            | "minecraft:tinted_glass"
+    ) || name.ends_with("_trapdoor")
+        || name.ends_with("_grate")
+        || name.ends_with("_stained_glass")
+    {
+        return false;
+    }
+    // Blocks.java's `ocelotOrParrot` predicate is used by every leaves
+    // property set and by firefly bush. It is entity-specific rather than a
+    // general leaves rule.
+    if matches!(entity_type, "minecraft:ocelot" | "minecraft:parrot")
+        && (state.is_in_tag("minecraft:leaves") || name == "minecraft:firefly_bush")
+    {
+        return true;
+    }
+    if name == "minecraft:magma_block" {
+        // MagmaBlock's override is `entityType.fireImmune()`; no generated
+        // CREATURE entry is fire immune.
         return false;
     }
     state.is_face_sturdy(rivet_registry::core::Direction::Up) && state.light_emission() < 14
@@ -2456,38 +2500,60 @@ impl SpawnCollisionShape {
 /// use Paper's six-face collision sample; leaves/vegetation/fluids are empty;
 /// partial snow/cactus shapes retain their VoxelShape bounds.
 fn spawn_collision_shape(state: BlockState) -> Option<SpawnCollisionShape> {
+    let name = state.block().name();
+    // PowderSnowBlock is marked dynamic because its entity collision context
+    // changes the shape. Every generated CREATURE candidate that can legally
+    // occupy powder snow in this slice is a polar bear (the other creature
+    // rules reject the dangerous block), and PolarBear is not in the
+    // powder-snow-walkable tag, so Paper's entity-context collision is empty.
+    // Keep this explicit dynamic fallback local to the spawn query rather than
+    // consulting the zero-context registry sample.
+    if name == "minecraft:powder_snow" {
+        return Some(SpawnCollisionShape::Empty);
+    }
     if state.has_dynamic_shape() {
         return None;
     }
-    let name = state.block().name();
-    if state.is_air() || !state.fluid_empty() {
-        return Some(SpawnCollisionShape::Empty);
-    }
-    if state.is_in_tag("minecraft:leaves")
+    if state.is_air()
         || matches!(
             name,
-            "minecraft:short_grass"
-                | "minecraft:fern"
-                | "minecraft:dead_bush"
-                | "minecraft:bush"
-                | "minecraft:short_dry_grass"
-                | "minecraft:tall_dry_grass"
-                | "minecraft:seagrass"
-                | "minecraft:tall_seagrass"
-                | "minecraft:fire"
-                | "minecraft:soul_fire"
-                | "minecraft:vine"
-                | "minecraft:glow_lichen"
-                | "minecraft:tall_grass"
-                | "minecraft:large_fern"
-                | "minecraft:crimson_roots"
-                | "minecraft:warped_roots"
-                | "minecraft:nether_sprouts"
-                | "minecraft:red_mushroom"
-                | "minecraft:brown_mushroom"
+            "minecraft:water" | "minecraft:lava" | "minecraft:bubble_column"
         )
     {
         return Some(SpawnCollisionShape::Empty);
+    }
+    // Waterlogged solids retain their block collision shape in Paper; only
+    // the standalone liquid blocks above are empty. Vegetation and other
+    // no-collision blocks are the exact empty-shape cases used by generation.
+    if matches!(
+        name,
+        "minecraft:short_grass"
+            | "minecraft:fern"
+            | "minecraft:dead_bush"
+            | "minecraft:bush"
+            | "minecraft:short_dry_grass"
+            | "minecraft:tall_dry_grass"
+            | "minecraft:seagrass"
+            | "minecraft:tall_seagrass"
+            | "minecraft:fire"
+            | "minecraft:soul_fire"
+            | "minecraft:vine"
+            | "minecraft:glow_lichen"
+            | "minecraft:tall_grass"
+            | "minecraft:large_fern"
+            | "minecraft:crimson_roots"
+            | "minecraft:warped_roots"
+            | "minecraft:nether_sprouts"
+            | "minecraft:red_mushroom"
+            | "minecraft:brown_mushroom"
+    ) {
+        return Some(SpawnCollisionShape::Empty);
+    }
+    // Paper's cached collision-shape face query is an exact full-face test.
+    // Unlike the heightmap's blocksMotion bit, it correctly classifies leaves,
+    // glass, and waterlogged full blocks as full collision cubes.
+    if state.collision_face_mask() == 0x3F {
+        return Some(SpawnCollisionShape::Full);
     }
     if name == "minecraft:snow" {
         let Some(PropertyValue::Int(layers)) = state.get_value(BlockStateProperties::LAYERS) else {
@@ -2513,12 +2579,10 @@ fn spawn_collision_shape(state: BlockState) -> Option<SpawnCollisionShape> {
             max_z: 15.0 / 16.0,
         });
     }
-    if state.collision_face_mask() == 0x3F && state.blocks_motion() {
-        return Some(SpawnCollisionShape::Full);
-    }
     // A non-full colliding shape (fence, stair, button, etc.) is not safe to
-    // collapse into a block-motion bit. Refuse it until the shared VoxelShape
-    // registry surface can provide its exact boxes.
+    // collapse into a cube. Refuse it until the shared VoxelShape registry
+    // surface can provide its exact boxes; dynamic states are handled by the
+    // #646 context seam rather than by a blocksMotion approximation.
     None
 }
 
@@ -2715,7 +2779,9 @@ fn entity_spawn_floor(state: BlockState, entity_type: &str, biome_name: &str) ->
 /// `EntityType.getSpawnAABB` dimensions for every current CREATURE entry.
 /// The generated entity registry is not landed yet, but these are the exact
 /// Paper 26.2 base dimensions used before construction (scale defaults to 1).
-fn spawn_dimensions(entity_type: &str) -> (f64, f64) {
+/// They remain `f32` because Paper stores dimensions as Java floats and only
+/// promotes them when constructing the double-precision AABB.
+fn spawn_dimensions(entity_type: &str) -> (f32, f32) {
     match entity_type {
         "minecraft:armadillo" => (0.7, 0.65),
         "minecraft:camel" => (1.7, 2.375),
@@ -2813,12 +2879,14 @@ fn check_spawn_rules(
     random: &mut impl RandomSource,
 ) -> bool {
     // `SpawnPlacements.checkSpawnRules` delegates to each registered static
-    // predicate. All generated CREATURE entries use a CHUNK_GENERATION reason,
-    // so the animal-family methods retain their brightness requirement.
-    if !is_bright_enough_to_spawn(region, pos) {
-        return false;
+    // predicate. Ocelot's predicate is intentionally only its 2/3 random roll;
+    // it does not inherit Animal's brightness or floor test.
+    if entity_type == "minecraft:ocelot" {
+        return random.next_int_bound(3) != 0;
     }
-    if entity_type == "minecraft:ocelot" && random.next_int_bound(3) == 0 {
+    // All remaining generated CREATURE entries use an animal-family rule for
+    // CHUNK_GENERATION, so the completed-light brightness requirement applies.
+    if !is_bright_enough_to_spawn(region, pos) {
         return false;
     }
     if entity_type == "minecraft:turtle" && pos.get_y() >= region.get_sea_level().wrapping_add(4) {
@@ -5315,6 +5383,46 @@ mod tests {
         assert_eq!(spawn_dimensions("minecraft:sheep"), (0.9, 1.3));
         assert_eq!(spawn_dimensions("minecraft:turtle"), (1.2, 0.4));
         assert_eq!(spawn_dimensions("minecraft:camel"), (1.7, 2.375));
+    }
+
+    #[test]
+    fn spawn_dimensions_preserve_java_float_to_aabb_promotion() {
+        let (width, height) = spawn_dimensions("minecraft:donkey");
+        assert_eq!(width, 1.3964844_f32);
+        assert_eq!(height, 1.5_f32);
+        assert_eq!(f64::from(width), 1.396484375_f64);
+    }
+
+    #[test]
+    fn spawn_collision_uses_exact_full_face_shape_metadata() {
+        let leaves = BlockState::of(BlockId::from_name("minecraft:oak_leaves").unwrap());
+        let glass = BlockState::of(BlockId::from_name("minecraft:glass").unwrap());
+        let stone = BlockState::of(BlockId::from_name("minecraft:stone").unwrap());
+        let powder_snow = BlockState::of(BlockId::from_name("minecraft:powder_snow").unwrap());
+
+        assert!(spawn_collision_shape(leaves).is_some_and(|shape| shape.is_full()));
+        assert!(spawn_collision_shape(glass).is_some_and(|shape| shape.is_full()));
+        assert!(spawn_collision_shape(stone).is_some_and(|shape| shape.is_full()));
+        assert!(spawn_collision_shape(powder_snow).is_some_and(|shape| !shape.is_full()));
+        assert!(!is_valid_empty_spawn_block(leaves, "minecraft:parrot"));
+        assert!(!is_valid_empty_spawn_block(glass, "minecraft:cow"));
+        assert!(!is_valid_spawn_floor(glass, "minecraft:cow"));
+        assert!(is_valid_spawn_floor(powder_snow, "minecraft:polar_bear"));
+    }
+
+    #[test]
+    fn spawn_land_pathfindability_matches_block_overrides() {
+        let stone = BlockState::of(BlockId::from_name("minecraft:stone").unwrap());
+        let stairs = BlockState::of(BlockId::from_name("minecraft:oak_stairs").unwrap());
+        let fence = BlockState::of(BlockId::from_name("minecraft:oak_fence").unwrap());
+        let slab = BlockState::of(BlockId::from_name("minecraft:oak_slab").unwrap());
+        let ladder = BlockState::of(BlockId::from_name("minecraft:ladder").unwrap());
+
+        assert!(!is_pathfindable_land(stone));
+        assert!(!is_pathfindable_land(stairs));
+        assert!(!is_pathfindable_land(fence));
+        assert!(!is_pathfindable_land(slab));
+        assert!(is_pathfindable_land(ladder));
     }
 
     #[test]
