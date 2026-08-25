@@ -68,6 +68,15 @@ pub type ChunkAccessFn = Box<
     dyn for<'a> FnMut(i32, i32, Option<&'a mut Option<LightChunk>>) -> Option<LightChunk> + Send,
 >;
 
+/// Tick-thread-owned runtime light storage. The callback form remains the
+/// narrow bridge used by existing callers; generated-light workspaces use the
+/// owned form so mutable storage never hides behind `Arc<Mutex>` or global
+/// state.
+enum ChunkStorage {
+    Callback(ChunkAccessFn),
+    Owned(HashMap<(i32, i32), LightChunk>),
+}
+
 /// The `SkyStarLightEngine`-backed synchronous light provider — the concrete
 /// impl `rivet-server` hands `LevelLightEngine::with_provider`.
 pub struct SkyLightProvider {
@@ -85,8 +94,9 @@ pub struct SkyLightProvider {
     has_sky_light: bool,
     /// `hasBlockLight` — whether the block reader is active.
     has_block_light: bool,
-    /// The narrow take/put chunk access (see [`ChunkAccessFn`]).
-    chunks: ChunkAccessFn,
+    /// The narrow take/put chunk access (or finite owned storage) used by the
+    /// provider. Owned storage is confined to the tick-thread provider value.
+    chunks: ChunkStorage,
     /// Chunks whose storage callback panicked before accepting ownership.
     pending_restores: Vec<(i32, i32, LightChunk)>,
 }
@@ -111,21 +121,50 @@ impl SkyLightProvider {
             max_light_section: max_section + 1,
             has_sky_light,
             has_block_light,
-            chunks,
+            chunks: ChunkStorage::Callback(chunks),
             pending_restores: Vec::new(),
         }
     }
 
-    /// Take the chunk at `pos` as owned from the caller's storage (`None` when
+    /// Build a provider over finite, tick-thread-owned runtime chunks. The
+    /// caller must supply real section/block data; the provider never creates
+    /// missing neighbours or placeholder light arrays.
+    pub fn with_owned_storage(
+        height_accessor: SimpleLevelHeightAccessor,
+        has_sky_light: bool,
+        has_block_light: bool,
+        chunks: HashMap<(i32, i32), LightChunk>,
+    ) -> Self {
+        let min_section = height_accessor.get_min_section_y();
+        let max_section = height_accessor.get_max_section_y();
+        SkyLightProvider {
+            engine: SkyStarLightEngine::new(&height_accessor),
+            min_section,
+            max_section,
+            min_light_section: min_section - 1,
+            max_light_section: max_section + 1,
+            has_sky_light,
+            has_block_light,
+            chunks: ChunkStorage::Owned(chunks),
+            pending_restores: Vec::new(),
+        }
+    }
+
+    /// Take the chunk at `pos` as owned from the provider storage (`None` when
     /// it is not present).
     fn take_chunk(
         &mut self,
         pos: ChunkPos,
     ) -> Result<Option<ChunkAccess<StateId, ServerBiomeId, StructureKey>>, LightProviderError> {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            (self.chunks)(pos.x(), pos.z(), None)
-        }))
-        .map_err(|_| LightProviderError::CallbackPanicked)
+        match &mut self.chunks {
+            ChunkStorage::Owned(chunks) => Ok(chunks.remove(&(pos.x(), pos.z()))),
+            ChunkStorage::Callback(chunks) => {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    (chunks)(pos.x(), pos.z(), None)
+                }))
+                .map_err(|_| LightProviderError::CallbackPanicked)
+            }
+        }
     }
 
     /// Put an owned chunk back at `pos`.
@@ -134,10 +173,19 @@ impl SkyLightProvider {
         pos: ChunkPos,
         chunk: ChunkAccess<StateId, ServerBiomeId, StructureKey>,
     ) -> Result<(), LightProviderError> {
+        if let ChunkStorage::Owned(chunks) = &mut self.chunks {
+            chunks.insert((pos.x(), pos.z()), chunk);
+            return Ok(());
+        }
         let mut slot = Some(chunk);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            (self.chunks)(pos.x(), pos.z(), Some(&mut slot));
-        }));
+        let result = match &mut self.chunks {
+            ChunkStorage::Owned(_) => unreachable!("owned storage returned above"),
+            ChunkStorage::Callback(chunks) => {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    (chunks)(pos.x(), pos.z(), Some(&mut slot))
+                }))
+            }
+        };
         if result.is_err() || slot.is_some() {
             if let Some(chunk) = slot {
                 self.pending_restores.push((pos.x(), pos.z(), chunk));
@@ -145,6 +193,88 @@ impl SkyLightProvider {
             return Err(LightProviderError::CallbackPanicked);
         }
         Ok(())
+    }
+
+    /// Whether this provider owns finite runtime storage rather than a
+    /// caller-owned callback. Generated-light workspaces use this to expose a
+    /// real engine dependency without pretending a callback/global map exists.
+    pub fn has_owned_runtime_storage(&self) -> bool {
+        matches!(&self.chunks, ChunkStorage::Owned(chunks) if !chunks.is_empty())
+    }
+
+    /// Whether owned runtime storage contains `pos`. Callback-backed providers
+    /// cannot prove coverage without taking ownership, so they report false.
+    pub fn has_owned_runtime_chunk(&self, pos: ChunkPos) -> bool {
+        matches!(&self.chunks, ChunkStorage::Owned(chunks) if chunks.contains_key(&(pos.x(), pos.z())))
+    }
+
+    /// Whether the owned chunk is usable as an already-lit LIGHT neighbour.
+    /// Paper's `SkyStarLightEngine.canUseChunk` rejects a neighbour that is not
+    /// light-correct; merely having a value in the workspace is not enough.
+    pub fn has_owned_usable_runtime_chunk(&self, pos: ChunkPos) -> bool {
+        matches!(
+            &self.chunks,
+            ChunkStorage::Owned(chunks)
+                if chunks
+                    .get(&(pos.x(), pos.z()))
+                    .is_some_and(|chunk| chunk.is_light_correct())
+        )
+    }
+
+    /// Whether this concrete provider has a supported generated-light channel.
+    /// The current engine computes sky light only; block-light queue wiring is
+    /// still deferred, so a normal overworld request (both channels enabled)
+    /// must refuse rather than stamp LIGHT as if block light were complete.
+    /// Sky-only is supported only when the dimension genuinely disables block
+    /// light.
+    pub fn supports_generated_light(&self) -> bool {
+        self.has_sky_light && !self.has_block_light
+    }
+
+    /// Force-load a runtime center supplied by the generated-light bridge.
+    ///
+    /// The compute path receives the center by mutable reference rather than
+    /// inserting it into provider storage. For finite owned storage this is a
+    /// complete load association: the center is already the value being
+    /// processed, while neighbours remain in the provider workspace. The
+    /// callback path still validates that its center slot exists and restores
+    /// the value, preserving the G1 callback contract.
+    pub fn try_force_load_in_chunk_with(
+        &mut self,
+        pos: ChunkPos,
+        _empty_sections: &[Option<bool>],
+    ) -> Result<(), LightProviderError> {
+        self.flush_pending_restores()?;
+        if matches!(&self.chunks, ChunkStorage::Owned(_)) {
+            return Ok(());
+        }
+        let Some(existing) = self.take_chunk(pos)? else {
+            return Err(LightProviderError::MissingChunk(pos));
+        };
+        self.put_chunk(pos, existing)
+    }
+
+    /// Consume the provider's owned runtime storage for workspace write-back.
+    /// Callback-backed providers return `None` when no chunk was stranded. If a
+    /// callback put panic left chunks in `pending_restores`, those chunks are
+    /// returned in an owned map instead of being dropped with the provider.
+    pub fn into_owned_storage(self) -> Option<HashMap<(i32, i32), LightChunk>> {
+        let pending_restores = self.pending_restores;
+        match self.chunks {
+            ChunkStorage::Owned(mut chunks) => {
+                for (x, z, chunk) in pending_restores {
+                    chunks.insert((x, z), chunk);
+                }
+                Some(chunks)
+            }
+            ChunkStorage::Callback(_) if pending_restores.is_empty() => None,
+            ChunkStorage::Callback(_) => Some(
+                pending_restores
+                    .into_iter()
+                    .map(|(x, z, chunk)| ((x, z), chunk))
+                    .collect(),
+            ),
+        }
     }
 
     fn flush_pending_restores(&mut self) -> Result<(), LightProviderError> {
@@ -446,7 +576,7 @@ impl SkyLightProvider {
 /// the buffered chunks back once the run completes — on the panic path too, so
 /// the caller's storage always gets every chunk it handed out back.
 struct CallbackAccessor<'a> {
-    chunks: &'a mut ChunkAccessFn,
+    chunks: &'a mut ChunkStorage,
     taken: HashMap<(i32, i32), ChunkAccess<StateId, ServerBiomeId, StructureKey>>,
 }
 
@@ -457,7 +587,15 @@ impl ChunkAccessor for CallbackAccessor<'_> {
         chunk_z: i32,
     ) -> Option<&ChunkAccess<StateId, ServerBiomeId, StructureKey>> {
         if !self.taken.contains_key(&(chunk_x, chunk_z)) {
-            let chunk = (self.chunks)(chunk_x, chunk_z, None)?;
+            let chunk = match self.chunks {
+                ChunkStorage::Owned(chunks) => chunks.remove(&(chunk_x, chunk_z)),
+                ChunkStorage::Callback(chunks) => {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        (chunks)(chunk_x, chunk_z, None)
+                    }))
+                    .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+                }
+            }?;
             self.taken.insert((chunk_x, chunk_z), chunk);
         }
         self.taken.get(&(chunk_x, chunk_z))
@@ -519,6 +657,14 @@ impl StarLightProvider for SkyLightProvider {
     fn check_chunk_edges(&mut self, _pos: ChunkPos) {
         // `StarLightInterface.checkChunkEdges` re-checks a chunk's edge light;
         // the edge-check unit defers (#184).
+    }
+
+    fn supports_persisted_light_load(&self) -> bool {
+        // `checkChunkEdges` is still deferred with the edge-check unit (#184),
+        // so neither storage form may claim that a persisted load was fully
+        // reconciled. The LIGHT task refuses this branch typed after invoking
+        // force-load and edge-check in Paper order.
+        false
     }
 
     fn get_sky_light_value(&self, _pos: BlockPos) -> i32 {

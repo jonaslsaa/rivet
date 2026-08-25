@@ -81,6 +81,11 @@ where
     /// are deferred, but the target is required because Paper clears the
     /// carrier from `setPersistedStatus` exactly when that target is reached.
     upgrading: Option<ChunkStatus>,
+    /// Whether `ChunkStatusTasks.initializeLight` associated its light engine
+    /// with this proto. Paper retains the engine reference on `ProtoChunk`; the
+    /// value layer keeps the observable association marker here while the
+    /// tick-thread-owned engine/provider remains on `WorldGenContext`.
+    light_engine_attached: bool,
 }
 
 impl<T, B, S> ProtoChunk<T, B, S>
@@ -122,6 +127,7 @@ where
             air,
             void_air,
             upgrading: None,
+            light_engine_attached: false,
         }
     }
 
@@ -516,14 +522,19 @@ where
         self.carving_mask.take()
     }
 
-    /// `ProtoChunk.setLightEngine(LevelLightEngine)` — the engine is not
-    /// ported, so there is no field to store.
+    /// `ProtoChunk.setLightEngine(LevelLightEngine)`.
     ///
-    /// STUB(mc.world.level.lighting.engine): the `LevelLightEngine` field and
-    /// the worldgen light writes it drives are deferred with the lighting
-    /// engine unit (#184); a real port stores the engine here.
+    /// The provider itself is owned by the tick-thread generation context, not
+    /// by the proto. This marker preserves the observable association made by
+    /// Paper's `INITIALIZE_LIGHT` task without creating a second owner or a
+    /// shared game-state handle.
     pub fn set_light_engine(&mut self) {
-        // No field: the light engine is not ported (#184).
+        self.light_engine_attached = true;
+    }
+
+    /// Whether `INITIALIZE_LIGHT` associated a light engine with this proto.
+    pub fn has_light_engine(&self) -> bool {
+        self.light_engine_attached
     }
 
     /// `ChunkAccess.getUpgradeData()`.
@@ -631,6 +642,7 @@ where
             air: _,
             void_air: _,
             upgrading,
+            light_engine_attached,
         } = self;
         let base = base.map_values(
             block_strategy,
@@ -649,6 +661,7 @@ where
             air,
             void_air,
             upgrading,
+            light_engine_attached,
         })
     }
 
@@ -697,6 +710,7 @@ where
             air,
             void_air,
             upgrading: self.upgrading,
+            light_engine_attached: self.light_engine_attached,
         })
     }
 }

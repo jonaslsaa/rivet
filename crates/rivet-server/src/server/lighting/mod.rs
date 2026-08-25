@@ -16,5 +16,8 @@ pub mod generated_light_bridge;
 pub mod star_light_engine;
 pub mod star_light_provider_impl;
 
-pub use generated_light_bridge::{GeneratedLightBridge, GeneratedLightBridgeError};
+pub use generated_light_bridge::{
+    GENERATED_LIGHT_NEIGHBOR_RADIUS, GeneratedLightBridge, GeneratedLightBridgeError,
+    GeneratedLightWorkspace, GeneratedLightWorkspaceError,
+};
 pub use star_light_provider_impl::{ChunkAccessFn, LightChunk, SkyLightProvider};

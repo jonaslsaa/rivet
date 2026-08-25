@@ -203,6 +203,7 @@ use crate::server::level::level_chunk::{LevelChunk, LevelChunkBridgeError, Struc
 use crate::server::level::world_gen_region::{
     CenterHolder, GenerationChunkHolderView, OwnedProtoHolder, WorldGenRegion,
 };
+use crate::server::lighting::GeneratedLightWorkspace;
 
 /// The overworld generated-chunk error surface — every failure is typed, never
 /// a silent fallback.
@@ -1081,6 +1082,15 @@ impl GenerationChunkHolder {
         }
     }
 
+    /// Attach a finite generated-light workspace in place. This is the stable
+    /// handoff for the owning G4 scheduler: normal construction remains
+    /// provider-less and boot does not fabricate runtime chunks, while the
+    /// owner can attach its already-composed tick-thread workspace.
+    #[allow(dead_code)]
+    pub(crate) fn attach_generated_light_workspace(&mut self, workspace: GeneratedLightWorkspace) {
+        self.context.attach_generated_light_task(workspace);
+    }
+
     /// The chunk's persisted status — `EMPTY` before any step, `CARVERS` after a
     /// successful BIOMES→NOISE→SURFACE→CARVERS run, and never `FULL` (the
     /// executor refuses to stamp it). A FEATURES run primes the final heightmaps,
@@ -1115,10 +1125,11 @@ impl GenerationChunkHolder {
     /// full dependency-window composition, decodes and runs the lake, geode,
     /// and monster-room paths, and then fails typed at the first selected
     /// unsupported path — see [`GenerationChunkHolder::new`]). A
-    /// target the borrowed executor cannot complete is rejected before any
-    /// work with a typed error — a path through a light step with no engine
-    /// is refused as `GenError::LightEngineMissing`, and a target at FULL
-    /// stops before borrowed execution
+    /// target the value layer does not wire is rejected by the executor before
+    /// any work with a typed error — a path through a light step with no
+    /// attached generated workspace/engine is refused as
+    /// `GenError::LightEngineMissing`, and a target past LIGHT
+    /// (FULL) is out of range
     /// ([`GeneratedChunkError::UnsupportedStatus`]). The chunk is left
     /// untouched by every such refusal. (The wired FEATURES rung is the
     /// exception: it runs Java's priming prologue — heightmap priming, the
@@ -1127,10 +1138,13 @@ impl GenerationChunkHolder {
     /// rolled back to the status and data it had before this call; see
     /// [`GenerationChunkHolder::status`].)
     ///
-    /// The SPAWN rung is intentionally absent from this center-only executor:
-    /// Paper's task requires the scheduler-owned radius-one cache. Call
-    /// [`Self::generate_spawn_with_region`] after LIGHT instead; FULL remains
-    /// unwired (RivetTodo #185).
+    /// The SPAWN rung is wired as a seam driven by
+    /// [`GenerationChunkHolder::with_spawn`] (the whole-world `spawnOriginalMobs`
+    /// gen-step applied to this chunk), not through the `generate_through`
+    /// ladder: the holder wires no light engine by default, so no status past
+    /// CARVERS is reached unless its G4 owner attaches a workspace. FULL is
+    /// deliberately a separate consuming promotion after an exact SPAWN
+    /// parent, not a borrowed executor rung.
     pub fn generate_through(&mut self, target: ChunkStatus) -> Result<(), GeneratedChunkError> {
         // FULL is always the consuming ProtoChunk → LevelChunk boundary. It
         // must win even after a cached FEATURES failure: callers must never

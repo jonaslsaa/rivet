@@ -2,16 +2,19 @@
 //!
 //! `GenerationChunkHolder` owns a worldgen `ProtoChunk`, while Starlight owns
 //! runtime `StateId`/server-biome values. This module keeps that boundary
-//! explicit: the caller supplies a provider whose take/put callback belongs to
-//! the tick-thread runtime storage, and this value seam maps the center chunk
+//! explicit: the caller supplies either a narrow take/put callback or one
+//! finite, tick-thread-owned workspace; this value seam maps the center chunk
 //! across the boundary, lights it, then maps it back. It does not install a
 //! chunk, attach a live `ChunkMap`, or promote a status past `LIGHT`.
 
+use std::collections::{HashMap, HashSet};
+
 use rivet_registry::block_state::BlockState;
+use rivet_registry::core::ChunkPos;
 use rivet_registry::generated::blocks::BlockId;
 use rivet_world::block::blocks::Blocks;
 use rivet_world::chunk::proto_chunk::ProtoChunk;
-use rivet_world::chunk::status::ChunkStatus;
+use rivet_world::chunk::status::{ChunkStatus, GenError, GeneratedLightTask};
 use rivet_world::chunk::storage::chunk_reconstruction::resolve_state_flags;
 use rivet_world::chunk::storage::section_reconstruction::{
     BiomeId as WorldgenBiomeId, current_version_container_factory,
@@ -21,7 +24,7 @@ use rivet_world::levelgen::heightmap::StateFlags;
 use rivet_world::lighting::star_light_engine::get_empty_sections_for_chunk;
 use rivet_world::lighting::star_light_provider::{LightProviderError, StarLightProvider};
 
-use super::star_light_provider_impl::SkyLightProvider;
+use super::star_light_provider_impl::{LightChunk, SkyLightProvider};
 use crate::server::level::level_chunk::{
     BiomeId as ServerBiomeId, StateId, StructureKey, state_flags, strategies,
 };
@@ -31,6 +34,33 @@ pub type GeneratedProto = ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>;
 
 /// The runtime value pair used by [`SkyLightProvider`].
 pub type RuntimeProto = ProtoChunk<StateId, ServerBiomeId, StructureKey>;
+
+/// The exact finite runtime coverage required by one generated LIGHT task.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum GeneratedLightWorkspaceError {
+    /// No runtime neighbour storage was supplied.
+    #[error("generated LIGHT workspace at {center:?} has no runtime neighbours")]
+    EmptyStorage { center: ChunkPos },
+    /// A required radius-two neighbour is absent.
+    #[error("generated LIGHT workspace at {center:?} is missing neighbour {pos:?}")]
+    MissingNeighbour { center: ChunkPos, pos: ChunkPos },
+    /// A required neighbour is present but cannot be used by Starlight because
+    /// it is not already light-correct.
+    #[error("generated LIGHT workspace neighbour {pos:?} at {center:?} is not light-correct")]
+    NeighbourNotLightCorrect { center: ChunkPos, pos: ChunkPos },
+    /// Storage contains a chunk outside the exact radius-two neighbourhood.
+    #[error("generated LIGHT workspace at {center:?} contains unexpected chunk {pos:?}")]
+    UnexpectedChunk { center: ChunkPos, pos: ChunkPos },
+    /// A storage key does not agree with the runtime chunk's own position.
+    #[error(
+        "generated LIGHT workspace storage key ({key_x}, {key_z}) contains runtime chunk at {actual:?}"
+    )]
+    ChunkPositionMismatch {
+        key_x: i32,
+        key_z: i32,
+        actual: ChunkPos,
+    },
+}
 
 /// Why the generated LIGHT bridge refused to run.
 #[derive(Debug, thiserror::Error)]
@@ -46,6 +76,10 @@ pub enum GeneratedLightBridgeError {
     /// remains borrowed by the bridge and is therefore available for retry.
     #[error("generated LIGHT value bridge failed: {0}")]
     ValueMap(String),
+    /// The provider's block-light channel is enabled but not yet computed by
+    /// this sky-only generated LIGHT bridge.
+    #[error("generated LIGHT requires unsupported block-light completion at {0:?}")]
+    UnsupportedLightChannel(ChunkStatus),
     /// The provider's load/edge seam is not complete for persisted light.
     #[error("persisted generated LIGHT at {status:?} cannot be reconciled by the provider")]
     PersistedLightLoadUnsupported { status: ChunkStatus },
@@ -80,6 +114,54 @@ impl GeneratedLightBridge {
         &mut self.provider
     }
 
+    /// Convert a borrowed generated proto into the runtime value pair used by
+    /// the owned provider. This narrow crate-local seam lets the G4 owner build
+    /// one workspace without duplicating the value mapping.
+    pub(crate) fn runtime_from_generated(
+        chunk: &GeneratedProto,
+    ) -> Result<RuntimeProto, GeneratedLightBridgeError> {
+        to_runtime(chunk)
+    }
+
+    /// Convert a runtime proto back to the generated value pair used by the
+    /// holder. This is the inverse of [`Self::runtime_from_generated`].
+    fn generated_from_runtime(
+        chunk: RuntimeProto,
+    ) -> Result<GeneratedProto, GeneratedLightBridgeError> {
+        to_generated(chunk)
+    }
+
+    /// Whether this bridge owns a non-empty finite runtime workspace. Callback
+    /// bridges deliberately report false: their storage belongs to the caller
+    /// and cannot be proven usable without taking chunks.
+    pub fn has_owned_runtime_storage(&self) -> bool {
+        self.provider.has_owned_runtime_storage()
+    }
+
+    /// Whether this bridge has the sky-light channel used by generated LIGHT.
+    pub fn supports_generated_light(&self) -> bool {
+        self.provider.supports_generated_light()
+    }
+
+    /// Whether the owned workspace contains the required runtime chunk.
+    pub fn has_owned_runtime_chunk(&self, pos: rivet_registry::core::ChunkPos) -> bool {
+        self.provider.has_owned_runtime_chunk(pos)
+    }
+
+    /// Whether the owned workspace contains a usable, light-correct runtime
+    /// neighbour.
+    pub fn has_owned_usable_runtime_chunk(&self, pos: rivet_registry::core::ChunkPos) -> bool {
+        self.provider.has_owned_usable_runtime_chunk(pos)
+    }
+
+    /// Consume the bridge's finite provider storage for transactional
+    /// generated-workspace write-back. Callback-backed bridges return `None`
+    /// when clean; any chunks stranded by a callback panic are returned in an
+    /// owned map so consuming extraction cannot discard them.
+    pub fn into_owned_runtime_storage(self) -> Option<HashMap<(i32, i32), LightChunk>> {
+        self.provider.into_owned_storage()
+    }
+
     /// Run the Paper LIGHT task over a generated center value.
     ///
     /// `INITIALIZE_LIGHT` computes nothing. At `LIGHT`, an already-lighted
@@ -97,33 +179,48 @@ impl GeneratedLightBridge {
         if status.is_after(ChunkStatus::Light) {
             return Err(GeneratedLightBridgeError::UnsupportedStatus(status));
         }
+        if !self.supports_generated_light() {
+            return Err(GeneratedLightBridgeError::UnsupportedLightChannel(status));
+        }
 
-        let mut runtime =
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| to_runtime(chunk))) {
-                Ok(Ok(runtime)) => runtime,
-                Ok(Err(error)) => return Err(error),
-                Err(payload) => {
-                    return Err(GeneratedLightBridgeError::ConversionPanic(panic_message(
-                        payload,
-                    )));
-                }
-            };
+        let mut runtime = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Self::runtime_from_generated(chunk)
+        })) {
+            Ok(Ok(runtime)) => runtime,
+            Ok(Err(error)) => return Err(error),
+            Err(payload) => {
+                return Err(GeneratedLightBridgeError::ConversionPanic(panic_message(
+                    payload,
+                )));
+            }
+        };
         let already_lighted = status == ChunkStatus::Light && runtime.is_light_correct();
         if already_lighted {
             let pos = runtime.get_pos();
             let provider_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let empty_sections = get_empty_sections_for_chunk(&runtime);
-                self.provider.force_load_in_chunk(pos, &empty_sections);
+                self.provider
+                    .try_force_load_in_chunk_with(pos, &empty_sections)
+                    .map_err(|error| match error {
+                        LightProviderError::MissingChunk(_) => {
+                            GeneratedLightBridgeError::PersistedLightLoadUnsupported { status }
+                        }
+                        LightProviderError::CallbackPanicked => {
+                            GeneratedLightBridgeError::ProviderPanic(
+                                "light-provider storage callback panicked".to_string(),
+                            )
+                        }
+                    })?;
                 self.provider.check_chunk_edges(pos);
-                self.provider.supports_persisted_light_load()
+                if self.provider.supports_persisted_light_load() {
+                    Ok(())
+                } else {
+                    Err(GeneratedLightBridgeError::PersistedLightLoadUnsupported { status })
+                }
             }));
             match provider_result {
-                Ok(true) => {}
-                Ok(false) => {
-                    return Err(GeneratedLightBridgeError::PersistedLightLoadUnsupported {
-                        status,
-                    });
-                }
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => return Err(error),
                 Err(payload) => {
                     return Err(GeneratedLightBridgeError::ProviderPanic(panic_message(
                         payload,
@@ -167,11 +264,10 @@ impl GeneratedLightBridge {
             }
         }
 
-        let generated =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| to_generated(runtime)))
-                .map_err(|payload| {
-                    GeneratedLightBridgeError::ConversionPanic(panic_message(payload))
-                })??;
+        let generated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Self::generated_from_runtime(runtime)
+        }))
+        .map_err(|payload| GeneratedLightBridgeError::ConversionPanic(panic_message(payload)))??;
         *chunk = generated;
         Ok(())
     }
@@ -235,6 +331,238 @@ pub fn provider_for_storage(
     ))
 }
 
+/// Build a generated-light bridge over finite runtime chunks owned by the
+/// caller's tick-thread workspace.
+pub fn provider_for_owned_storage(
+    height_accessor: SimpleLevelHeightAccessor,
+    has_sky_light: bool,
+    has_block_light: bool,
+    chunks: HashMap<(i32, i32), LightChunk>,
+) -> GeneratedLightBridge {
+    GeneratedLightBridge::new(SkyLightProvider::with_owned_storage(
+        height_accessor,
+        has_sky_light,
+        has_block_light,
+        chunks,
+    ))
+}
+
+/// The radius of the finite runtime window required by one Starlight LIGHT
+/// task. Paper's Moonrise LIGHT step has a write radius of two; the owned
+/// workspace therefore requires the complete 5x5 window around its center.
+pub const GENERATED_LIGHT_NEIGHBOR_RADIUS: i32 = 2;
+
+fn required_light_neighbors(center: ChunkPos) -> Vec<ChunkPos> {
+    let mut neighbors = Vec::with_capacity(24);
+    for dz in -GENERATED_LIGHT_NEIGHBOR_RADIUS..=GENERATED_LIGHT_NEIGHBOR_RADIUS {
+        for dx in -GENERATED_LIGHT_NEIGHBOR_RADIUS..=GENERATED_LIGHT_NEIGHBOR_RADIUS {
+            if dx != 0 || dz != 0 {
+                neighbors.push(ChunkPos::new(
+                    center.x().wrapping_add(dx),
+                    center.z().wrapping_add(dz),
+                ));
+            }
+        }
+    }
+    neighbors
+}
+
+/// A finite, tick-thread-owned generated-light workspace.
+///
+/// The center remains the caller's borrowed worldgen `ProtoChunk`; this value
+/// owns exactly the 24 runtime neighbours in Paper's radius-two LIGHT window.
+/// G4 converts its real generated support chunks into [`LightChunk`] values and
+/// supplies them here. No chunk is installed into `ChunkMap`, and a partial,
+/// empty, extra, or mis-keyed window is rejected at construction.
+pub struct GeneratedLightWorkspace {
+    bridge: GeneratedLightBridge,
+    center: ChunkPos,
+    required_neighbors: Vec<ChunkPos>,
+}
+
+impl GeneratedLightWorkspace {
+    /// Build a workspace over the exact radius-two runtime neighbour window
+    /// already owned by the current tick thread. Validation borrows `chunks`
+    /// first; ownership transfers only after every check succeeds, so every
+    /// refusal leaves the caller's authoritative map intact for recovery.
+    pub fn new(
+        height_accessor: SimpleLevelHeightAccessor,
+        has_sky_light: bool,
+        has_block_light: bool,
+        center: ChunkPos,
+        chunks: &mut HashMap<(i32, i32), LightChunk>,
+    ) -> Result<Self, GeneratedLightWorkspaceError> {
+        let required_neighbors = required_light_neighbors(center);
+        let expected = required_neighbors.iter().copied().collect::<HashSet<_>>();
+        if chunks.is_empty() {
+            return Err(GeneratedLightWorkspaceError::EmptyStorage { center });
+        }
+        for (&(key_x, key_z), chunk) in chunks.iter() {
+            let actual = chunk.get_pos();
+            if actual != ChunkPos::new(key_x, key_z) {
+                return Err(GeneratedLightWorkspaceError::ChunkPositionMismatch {
+                    key_x,
+                    key_z,
+                    actual,
+                });
+            }
+            if !expected.contains(&actual) {
+                return Err(GeneratedLightWorkspaceError::UnexpectedChunk {
+                    center,
+                    pos: actual,
+                });
+            }
+            if !chunk.is_light_correct() {
+                return Err(GeneratedLightWorkspaceError::NeighbourNotLightCorrect {
+                    center,
+                    pos: actual,
+                });
+            }
+        }
+        if let Some(pos) = required_neighbors
+            .iter()
+            .copied()
+            .find(|pos| !chunks.contains_key(&(pos.x(), pos.z())))
+        {
+            return Err(GeneratedLightWorkspaceError::MissingNeighbour { center, pos });
+        }
+
+        let chunks = std::mem::take(chunks);
+        Ok(Self {
+            bridge: provider_for_owned_storage(
+                height_accessor,
+                has_sky_light,
+                has_block_light,
+                chunks,
+            ),
+            center,
+            required_neighbors,
+        })
+    }
+
+    /// The holder center this workspace is bound to.
+    pub fn center(&self) -> ChunkPos {
+        self.center
+    }
+
+    /// Whether the workspace has a real provider and complete owned runtime
+    /// coverage. Construction rejects incomplete coverage; this remains a
+    /// runtime capability check for the executor's preflight contract.
+    pub fn has_usable_engine(&self) -> bool {
+        self.bridge.has_owned_runtime_storage() && self.bridge.supports_generated_light()
+    }
+
+    /// The exact radius-two neighbour positions required by this workspace.
+    pub fn required_neighbors(&self) -> &[ChunkPos] {
+        &self.required_neighbors
+    }
+
+    /// Consume the finite runtime storage when the owner is rotating or
+    /// handing the workspace to another tick-thread-owned integration.
+    pub fn into_owned_runtime_storage(self) -> Option<HashMap<(i32, i32), LightChunk>> {
+        self.bridge.into_owned_runtime_storage()
+    }
+
+    fn missing_neighbor(&self) -> Option<ChunkPos> {
+        self.required_neighbors
+            .iter()
+            .copied()
+            .find(|pos| !self.bridge.has_owned_usable_runtime_chunk(*pos))
+    }
+
+    fn map_error(status: ChunkStatus, error: GeneratedLightBridgeError) -> GenError {
+        match error {
+            GeneratedLightBridgeError::NotReady(status)
+            | GeneratedLightBridgeError::UnsupportedStatus(status) => {
+                GenError::UnsupportedStatus(status)
+            }
+            GeneratedLightBridgeError::UnsupportedLightChannel(status) => {
+                GenError::LightEngineMissing { status }
+            }
+            GeneratedLightBridgeError::PersistedLightLoadUnsupported { status } => {
+                GenError::PersistedLightLoadUnsupported { status }
+            }
+            GeneratedLightBridgeError::ProviderPanic(_) => {
+                GenError::LightProviderPanicked { status }
+            }
+            GeneratedLightBridgeError::ValueMap(_)
+            | GeneratedLightBridgeError::ConversionPanic(_) => GenError::LightTaskFailed { status },
+        }
+    }
+}
+
+impl GeneratedLightTask<BlockState, WorldgenBiomeId, StructureKey> for GeneratedLightWorkspace {
+    fn has_usable_engine(&self) -> bool {
+        Self::has_usable_engine(self)
+    }
+
+    fn validate_light(&self, chunk: &GeneratedProto) -> Result<(), GenError> {
+        if chunk.get_pos() != self.center {
+            return Err(GenError::LightChunkMissing {
+                status: ChunkStatus::Light,
+                pos: self.center,
+            });
+        }
+        if !self.has_usable_engine() {
+            return Err(GenError::LightEngineMissing {
+                status: ChunkStatus::Light,
+            });
+        }
+        if let Some(pos) = self.missing_neighbor() {
+            return Err(GenError::LightChunkMissing {
+                status: ChunkStatus::Light,
+                pos,
+            });
+        }
+        Ok(())
+    }
+
+    fn initialize_light(&mut self, chunk: &mut GeneratedProto) -> Result<(), GenError> {
+        if chunk.get_pos() != self.center {
+            return Err(GenError::LightChunkMissing {
+                status: ChunkStatus::InitializeLight,
+                pos: self.center,
+            });
+        }
+        if !self.has_usable_engine() {
+            return Err(GenError::LightEngineMissing {
+                status: ChunkStatus::InitializeLight,
+            });
+        }
+        // Paper associates the engine before its initializeLight future is
+        // returned. The runtime provider remains owned by this workspace.
+        chunk.set_light_engine();
+        Ok(())
+    }
+
+    fn light(&mut self, chunk: &mut GeneratedProto) -> Result<(), GenError> {
+        let status = chunk.get_persisted_status();
+        if chunk.get_pos() != self.center {
+            return Err(GenError::LightChunkMissing {
+                status: ChunkStatus::Light,
+                pos: self.center,
+            });
+        }
+        if status.is_before(ChunkStatus::InitializeLight) || status.is_after(ChunkStatus::Light) {
+            return Err(GenError::UnsupportedStatus(status));
+        }
+        if !self.has_usable_engine() {
+            return Err(GenError::LightEngineMissing {
+                status: ChunkStatus::Light,
+            });
+        }
+        if let Some(pos) = self.missing_neighbor() {
+            return Err(GenError::LightChunkMissing {
+                status: ChunkStatus::Light,
+                pos,
+            });
+        }
+        self.bridge
+            .light(chunk)
+            .map_err(|error| Self::map_error(ChunkStatus::Light, error))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,6 +577,7 @@ mod tests {
     use rivet_world::chunk::chunk_access::ChunkAccess;
     use rivet_world::chunk::level_chunk_section::LevelChunkSection;
     use rivet_world::chunk::paletted_container::PalettedContainer;
+    use rivet_world::chunk::status::WorldGenContext;
     use rivet_world::chunk::storage::chunk_reconstruction::block_state_predicates;
     use rivet_world::chunk::upgrade_data::UpgradeData;
     use rivet_world::level::LevelHeightAccessor;
@@ -305,6 +634,13 @@ mod tests {
             None,
             &runtime_state_flags,
         )
+    }
+
+    fn light_correct_runtime_air(pos: ChunkPos) -> LightChunk {
+        let mut chunk = runtime_air(pos);
+        chunk.set_light_correct(true);
+        chunk.set_sky_emptiness_map(Some(vec![true; 24]));
+        chunk
     }
 
     fn generated_chunk() -> GeneratedProto {
@@ -380,7 +716,7 @@ mod tests {
 
         let (chunks, shared) =
             storage_closure(HashMap::from([((1, 0), runtime_air(ChunkPos::new(1, 0)))]));
-        let provider = provider_for_storage(overworld(), true, true, chunks);
+        let provider = provider_for_storage(overworld(), true, false, chunks);
         let mut bridge = provider;
         bridge.light(&mut chunk).expect("generated LIGHT succeeds");
 
@@ -436,7 +772,7 @@ mod tests {
         let mut chunk = generated_chunk();
         chunk.set_persisted_status(ChunkStatus::InitializeLight);
         let (chunks, _shared) = storage_closure(HashMap::new());
-        let mut bridge = provider_for_storage(overworld(), true, true, chunks);
+        let mut bridge = provider_for_storage(overworld(), true, false, chunks);
         // INITIALIZE_LIGHT itself is the executor's record-only rung. This
         // bridge is the subsequent LIGHT task and may compute from that status.
         bridge
@@ -447,9 +783,37 @@ mod tests {
     }
 
     #[test]
+    fn generated_light_capability_requires_supported_channels() {
+        let (sky_only_chunks, _) = storage_closure(HashMap::new());
+        assert!(
+            provider_for_storage(overworld(), true, false, sky_only_chunks)
+                .supports_generated_light()
+        );
+
+        let (overworld_chunks, _) = storage_closure(HashMap::new());
+        let mut overworld_bridge = provider_for_storage(overworld(), true, true, overworld_chunks);
+        assert!(!overworld_bridge.supports_generated_light());
+        let mut chunk = generated_chunk();
+        chunk.set_persisted_status(ChunkStatus::InitializeLight);
+        assert!(matches!(
+            overworld_bridge.light(&mut chunk),
+            Err(GeneratedLightBridgeError::UnsupportedLightChannel(
+                ChunkStatus::InitializeLight
+            ))
+        ));
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::InitializeLight);
+
+        let (block_only_chunks, _) = storage_closure(HashMap::new());
+        assert!(
+            !provider_for_storage(overworld(), false, true, block_only_chunks)
+                .supports_generated_light()
+        );
+    }
+
+    #[test]
     fn pre_light_and_post_light_statuses_are_typed_refusals() {
         let (chunks, _shared) = storage_closure(HashMap::new());
-        let mut bridge = provider_for_storage(overworld(), true, true, chunks);
+        let mut bridge = provider_for_storage(overworld(), true, false, chunks);
         let mut empty = generated_chunk();
         assert!(matches!(
             bridge.light(&mut empty),
@@ -476,7 +840,7 @@ mod tests {
         chunk.set_sky_emptiness_map(Some(vec![false; 24]));
         let before = chunk.sky_nibbles()[0].to_vanilla_nibble();
         let (chunks, _shared) = storage_closure(HashMap::new());
-        let mut bridge = provider_for_storage(overworld(), true, true, chunks);
+        let mut bridge = provider_for_storage(overworld(), true, false, chunks);
         assert!(matches!(
             bridge.light(&mut chunk),
             Err(GeneratedLightBridgeError::PersistedLightLoadUnsupported {
@@ -503,7 +867,7 @@ mod tests {
             .get_or_create_carving_mask()
             .set_additional_mask(Box::new(UncloneableMask));
         let (chunks, _shared) = storage_closure(HashMap::new());
-        let mut bridge = provider_for_storage(overworld(), true, true, chunks);
+        let mut bridge = provider_for_storage(overworld(), true, false, chunks);
 
         assert!(matches!(
             bridge.light(&mut chunk),
@@ -546,7 +910,7 @@ mod tests {
                     None => storage.remove(&(x, z)),
                 }
             });
-        let mut bridge = provider_for_storage(overworld(), true, true, chunks);
+        let mut bridge = provider_for_storage(overworld(), true, false, chunks);
         let mut chunk = generated_chunk();
         chunk.set_persisted_status(ChunkStatus::InitializeLight);
 
@@ -564,6 +928,47 @@ mod tests {
         assert_eq!(chunk.get_persisted_status(), ChunkStatus::Light);
         assert!(chunk.is_light_correct());
         assert!(shared.lock().unwrap().contains_key(&(1, 0)));
+    }
+
+    #[test]
+    fn consuming_callback_bridge_returns_stranded_chunk_ownership() {
+        let panic_once = Arc::new(AtomicBool::new(true));
+        let closure_panic = Arc::clone(&panic_once);
+        let shared = Arc::new(Mutex::new(HashMap::from([(
+            (0, 0),
+            runtime_air(ChunkPos::ZERO),
+        )])));
+        let closure_shared = Arc::clone(&shared);
+        let chunks: super::super::star_light_provider_impl::ChunkAccessFn =
+            Box::new(move |x, z, put| {
+                if put.is_some() && closure_panic.swap(false, Ordering::SeqCst) {
+                    panic!("hostile put callback");
+                }
+                let mut storage = closure_shared.lock().unwrap();
+                match put {
+                    Some(slot) => {
+                        if let Some(chunk) = slot.take() {
+                            storage.insert((x, z), chunk);
+                        }
+                        None
+                    }
+                    None => storage.remove(&(x, z)),
+                }
+            });
+        let mut bridge = provider_for_storage(overworld(), true, false, chunks);
+
+        assert_eq!(
+            bridge
+                .provider_mut()
+                .try_light_chunk(ChunkPos::ZERO, &[Some(true); 24]),
+            Err(LightProviderError::CallbackPanicked)
+        );
+        assert!(!shared.lock().unwrap().contains_key(&(0, 0)));
+
+        let recovered = bridge
+            .into_owned_runtime_storage()
+            .expect("consuming extraction must return stranded callback storage");
+        assert!(recovered.contains_key(&(0, 0)));
     }
 
     /// Drive a generated centre through the LIGHT status rung end to end: a
@@ -584,7 +989,7 @@ mod tests {
 
         let (chunks, shared) =
             storage_closure(HashMap::from([((1, 0), runtime_air(ChunkPos::new(1, 0)))]));
-        let mut bridge = provider_for_storage(overworld(), true, true, chunks);
+        let mut bridge = provider_for_storage(overworld(), true, false, chunks);
 
         let mut ctx = WorldGenContext::new(
             |_c: &mut GeneratedProto| {},
@@ -644,7 +1049,7 @@ mod tests {
         let before = chunk.sky_nibbles()[0].to_vanilla_nibble();
 
         let (chunks, _shared) = storage_closure(HashMap::new());
-        let mut bridge = provider_for_storage(overworld(), true, true, chunks);
+        let mut bridge = provider_for_storage(overworld(), true, false, chunks);
         let mut ctx = WorldGenContext::new(
             |_c: &mut GeneratedProto| {},
             |_c: &mut GeneratedProto| {},
@@ -687,5 +1092,289 @@ mod tests {
         assert_eq!(chunk.get_persisted_status(), ChunkStatus::Light);
         assert!(chunk.is_light_correct());
         assert_eq!(chunk.sky_nibbles()[0].to_vanilla_nibble(), before);
+    }
+
+    fn workspace_context(
+        workspace: GeneratedLightWorkspace,
+    ) -> WorldGenContext<BlockState, WorldgenBiomeId, StructureKey> {
+        WorldGenContext::new(
+            |_c: &mut GeneratedProto| {},
+            |_c: &mut GeneratedProto| {},
+            |_c: &mut GeneratedProto| {},
+            |_c: &mut GeneratedProto| {},
+            |_c: &mut GeneratedProto| Ok(()),
+        )
+        .with_generated_light_task(workspace)
+    }
+
+    fn workspace_with_all_neighbors(center: ChunkPos) -> GeneratedLightWorkspace {
+        let mut chunks = required_light_neighbors(center)
+            .into_iter()
+            .map(|pos| ((pos.x(), pos.z()), light_correct_runtime_air(pos)))
+            .collect();
+        GeneratedLightWorkspace::new(overworld(), true, false, center, &mut chunks)
+            .expect("complete radius-two light window")
+    }
+
+    #[test]
+    fn required_light_neighbors_wrap_chunk_coordinates_like_java_ints() {
+        let center = ChunkPos::new(i32::MAX, i32::MIN);
+        let neighbors = required_light_neighbors(center);
+
+        assert_eq!(neighbors.len(), 24);
+        assert!(neighbors.contains(&ChunkPos::new(i32::MAX.wrapping_add(2), i32::MIN)));
+        assert!(neighbors.contains(&ChunkPos::new(i32::MAX, i32::MIN.wrapping_sub(2))));
+    }
+
+    #[test]
+    fn generated_workspace_associates_at_initialize_then_computes_at_light() {
+        use rivet_world::chunk::status::GENERATION_PYRAMID;
+
+        let mut chunk = generated_chunk();
+        chunk.set_persisted_status(ChunkStatus::Carvers);
+        let mut ctx = workspace_context(workspace_with_all_neighbors(ChunkPos::ZERO));
+
+        ctx.run_step(
+            GENERATION_PYRAMID.get_step_to(ChunkStatus::InitializeLight),
+            &mut chunk,
+        )
+        .expect("INITIALIZE_LIGHT association");
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::InitializeLight);
+        assert!(chunk.has_light_engine());
+        assert!(!chunk.is_light_correct());
+
+        ctx.run_step(
+            GENERATION_PYRAMID.get_step_to(ChunkStatus::Light),
+            &mut chunk,
+        )
+        .expect("LIGHT compute");
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Light);
+        assert!(chunk.is_light_correct());
+        assert!(chunk.sky_emptiness_map().is_some());
+        assert!(
+            chunk
+                .sky_nibbles()
+                .iter()
+                .any(|nibble| nibble.to_vanilla_nibble().is_some()),
+            "LIGHT must persist at least one computed sky nibble"
+        );
+    }
+
+    #[test]
+    fn generated_workspace_load_branch_refuses_without_edge_reconciliation() {
+        use rivet_world::chunk::status::{GENERATION_PYRAMID, GenError};
+
+        let mut chunk = generated_chunk();
+        chunk.set_persisted_status(ChunkStatus::Light);
+        chunk.set_light_correct(true);
+        chunk.set_sky_emptiness_map(Some(vec![false; 24]));
+        let before = chunk.sky_nibbles()[0].to_vanilla_nibble();
+        let mut ctx = workspace_context(workspace_with_all_neighbors(ChunkPos::ZERO));
+
+        let err = ctx
+            .run_step(
+                GENERATION_PYRAMID.get_step_to(ChunkStatus::Light),
+                &mut chunk,
+            )
+            .expect_err("edge reconciliation is not implemented");
+        assert_eq!(
+            err,
+            GenError::PersistedLightLoadUnsupported {
+                status: ChunkStatus::Light
+            }
+        );
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Light);
+        assert!(chunk.is_light_correct());
+        assert_eq!(chunk.sky_nibbles()[0].to_vanilla_nibble(), before);
+    }
+
+    #[test]
+    fn generated_workspace_rejects_partial_coverage_before_attachment() {
+        let center = ChunkPos::ZERO;
+        let missing = ChunkPos::new(2, 0);
+        let mut chunks: HashMap<_, _> = required_light_neighbors(center)
+            .into_iter()
+            .filter(|pos| *pos != missing)
+            .map(|pos| ((pos.x(), pos.z()), light_correct_runtime_air(pos)))
+            .collect();
+        let before = chunks.len();
+
+        let err = match GeneratedLightWorkspace::new(overworld(), true, false, center, &mut chunks)
+        {
+            Ok(_) => panic!("partial radius-two window must be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(chunks.len(), before);
+        assert_eq!(
+            err,
+            GeneratedLightWorkspaceError::MissingNeighbour {
+                center,
+                pos: missing,
+            }
+        );
+    }
+
+    #[test]
+    fn generated_workspace_rejects_unsupported_light_channel() {
+        use rivet_world::chunk::status::{GENERATION_PYRAMID, GenError};
+
+        let center = ChunkPos::ZERO;
+        let mut chunks = required_light_neighbors(center)
+            .into_iter()
+            .map(|pos| ((pos.x(), pos.z()), light_correct_runtime_air(pos)))
+            .collect();
+        let workspace = GeneratedLightWorkspace::new(overworld(), false, true, center, &mut chunks)
+            .expect("coverage is complete even though sky light is disabled");
+        let mut ctx = workspace_context(workspace);
+        let mut chunk = generated_chunk();
+        chunk.set_persisted_status(ChunkStatus::Carvers);
+
+        let err = ctx
+            .run_step(
+                GENERATION_PYRAMID.get_step_to(ChunkStatus::InitializeLight),
+                &mut chunk,
+            )
+            .expect_err("block-only generated lighting is not implemented");
+        assert_eq!(
+            err,
+            GenError::LightEngineMissing {
+                status: ChunkStatus::InitializeLight
+            }
+        );
+        assert!(!chunk.has_light_engine());
+    }
+
+    #[test]
+    fn generated_workspace_rejects_overworld_block_light_until_computed() {
+        use rivet_world::chunk::status::{GENERATION_PYRAMID, GenError};
+
+        let center = ChunkPos::ZERO;
+        let mut chunks = required_light_neighbors(center)
+            .into_iter()
+            .map(|pos| ((pos.x(), pos.z()), light_correct_runtime_air(pos)))
+            .collect();
+        let workspace = GeneratedLightWorkspace::new(overworld(), true, true, center, &mut chunks)
+            .expect("coverage is complete even though block light is not computed");
+        let mut ctx = workspace_context(workspace);
+        let mut chunk = generated_chunk();
+        chunk.set_persisted_status(ChunkStatus::Carvers);
+
+        let err = ctx
+            .run_step(
+                GENERATION_PYRAMID.get_step_to(ChunkStatus::InitializeLight),
+                &mut chunk,
+            )
+            .expect_err("normal overworld LIGHT must wait for block-light support");
+        assert_eq!(
+            err,
+            GenError::LightEngineMissing {
+                status: ChunkStatus::InitializeLight
+            }
+        );
+        assert!(!chunk.has_light_engine());
+    }
+
+    #[test]
+    fn generated_workspace_rejects_unusable_light_neighbor() {
+        let center = ChunkPos::ZERO;
+        let unusable = ChunkPos::new(2, 0);
+        let mut chunks: HashMap<_, _> = required_light_neighbors(center)
+            .into_iter()
+            .map(|pos| ((pos.x(), pos.z()), light_correct_runtime_air(pos)))
+            .collect();
+        chunks.insert((unusable.x(), unusable.z()), runtime_air(unusable));
+
+        let before = chunks.len();
+        let err = match GeneratedLightWorkspace::new(overworld(), true, false, center, &mut chunks)
+        {
+            Ok(_) => panic!("an unlit neighbour must be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(chunks.len(), before);
+        assert_eq!(
+            err,
+            GeneratedLightWorkspaceError::NeighbourNotLightCorrect {
+                center,
+                pos: unusable,
+            }
+        );
+    }
+
+    #[test]
+    fn generated_workspace_preserves_storage_on_miskey_and_extra_refusals() {
+        let center = ChunkPos::ZERO;
+        let mut miskeyed: HashMap<_, _> = required_light_neighbors(center)
+            .into_iter()
+            .map(|pos| ((pos.x(), pos.z()), light_correct_runtime_air(pos)))
+            .collect();
+        let moved = miskeyed
+            .remove(&(2, 0))
+            .expect("radius-two neighbour exists");
+        miskeyed.insert((99, 99), moved);
+        let before = miskeyed.len();
+        let error =
+            match GeneratedLightWorkspace::new(overworld(), true, false, center, &mut miskeyed) {
+                Ok(_) => panic!("mis-keyed runtime storage must be rejected"),
+                Err(error) => error,
+            };
+        assert!(matches!(
+            error,
+            GeneratedLightWorkspaceError::ChunkPositionMismatch { .. }
+        ));
+        assert_eq!(miskeyed.len(), before);
+
+        let mut extra: HashMap<_, _> = required_light_neighbors(center)
+            .into_iter()
+            .map(|pos| ((pos.x(), pos.z()), light_correct_runtime_air(pos)))
+            .collect();
+        extra.insert((99, 99), light_correct_runtime_air(ChunkPos::new(99, 99)));
+        let before = extra.len();
+        let error = match GeneratedLightWorkspace::new(overworld(), true, false, center, &mut extra)
+        {
+            Ok(_) => panic!("extra runtime storage must be rejected"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            GeneratedLightWorkspaceError::UnexpectedChunk { .. }
+        ));
+        assert_eq!(extra.len(), before);
+    }
+
+    #[test]
+    fn generated_workspace_rejects_empty_and_miscentered_coverage() {
+        let center = ChunkPos::ZERO;
+        let mut empty_chunks = HashMap::new();
+        let empty_error =
+            match GeneratedLightWorkspace::new(overworld(), true, false, center, &mut empty_chunks)
+            {
+                Ok(_) => panic!("empty runtime window must be rejected"),
+                Err(err) => err,
+            };
+        assert!(empty_chunks.is_empty());
+        assert_eq!(
+            empty_error,
+            GeneratedLightWorkspaceError::EmptyStorage { center }
+        );
+
+        let mut chunks: HashMap<_, _> = required_light_neighbors(center)
+            .into_iter()
+            .map(|pos| ((pos.x(), pos.z()), light_correct_runtime_air(pos)))
+            .collect();
+        chunks.insert((center.x(), center.z()), light_correct_runtime_air(center));
+        let before = chunks.len();
+        let center_error =
+            match GeneratedLightWorkspace::new(overworld(), true, false, center, &mut chunks) {
+                Ok(_) => panic!("center must remain borrowed, not stored"),
+                Err(err) => err,
+            };
+        assert_eq!(chunks.len(), before);
+        assert_eq!(
+            center_error,
+            GeneratedLightWorkspaceError::UnexpectedChunk {
+                center,
+                pos: center
+            }
+        );
     }
 }

@@ -157,6 +157,37 @@ type SpawnSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenE
 /// existed.
 type LightSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenError>;
 
+/// A complete generated-light task owned by the generation context.
+///
+/// This is the typed handoff for a server-side finite light workspace: the
+/// implementation owns its tick-thread provider/storage and exposes only the
+/// two Paper status-task operations. `has_usable_engine` is deliberately
+/// separate from the LIGHT callback so the executor still refuses
+/// `INITIALIZE_LIGHT` before mutating the proto when the provider/storage
+/// dependency is absent.
+pub trait GeneratedLightTask<T, B, S>: 'static
+where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash,
+{
+    /// Whether the task carries a usable engine/provider dependency.
+    fn has_usable_engine(&self) -> bool;
+
+    /// Validate coverage needed by the center-only LIGHT task without mutating
+    /// the generated chunk. Implementations use this hook for deterministic
+    /// refusals such as a missing required neighbour; failures discovered only
+    /// while computing remain transactional failures from [`Self::light`].
+    fn validate_light(&self, chunk: &ProtoChunk<T, B, S>) -> Result<(), GenError>;
+
+    /// Paper's `ChunkStatusTasks.initializeLight`: associate the engine and
+    /// initialize light sources, without computing or advancing LIGHT.
+    fn initialize_light(&mut self, chunk: &mut ProtoChunk<T, B, S>) -> Result<(), GenError>;
+
+    /// Paper's dedicated LIGHT task, including load-vs-compute semantics.
+    fn light(&mut self, chunk: &mut ProtoChunk<T, B, S>) -> Result<(), GenError>;
+}
+
 /// `WorldGenContext` (value-layer seam shape) — the caller-supplied BIOMES,
 /// NOISE, SURFACE, CARVERS, and FEATURES worldgen closures, plus the light
 /// engine the INITIALIZE_LIGHT/LIGHT tasks route to, generic over the chunk's
@@ -217,6 +248,11 @@ where
     /// path ([`Self::run_light_task`]) or refuses, exactly as before the seam
     /// existed.
     light: Option<Box<LightSeam<T, B, S>>>,
+    /// A complete generated-light implementation that owns its finite
+    /// tick-thread workspace/provider. This is the server handoff for a
+    /// generated light workspace; it keeps engine capability and LIGHT
+    /// execution in one value-owned owner.
+    generated_light: Option<Box<dyn GeneratedLightTask<T, B, S>>>,
 }
 
 /// The executor seam's failure modes.
@@ -234,7 +270,8 @@ pub enum GenError {
     /// Java's `NPE` on `context.lightEngine()`), and the seam never installs
     /// one on a run that ends below INITIALIZE_LIGHT.
     LightEngineMissing { status: ChunkStatus },
-    /// The provider could not resolve the center chunk from runtime storage.
+    /// The generated-light workspace could not resolve a required runtime
+    /// chunk, including a center/coverage mismatch.
     LightChunkMissing { status: ChunkStatus, pos: ChunkPos },
     /// A provider-owned runtime storage callback panicked before the light
     /// result could be committed.
@@ -243,6 +280,10 @@ pub enum GenError {
     /// attached provider cannot complete force-load reconciliation and edge
     /// correction. The chunk remains unchanged and must not be labeled ready.
     PersistedLightLoadUnsupported { status: ChunkStatus },
+    /// The attached generated-light bridge refused after its typed provider,
+    /// value-map, or conversion boundary. The bridge is transactional, so the
+    /// proto remains unchanged and the caller may inspect or retry it.
+    LightTaskFailed { status: ChunkStatus },
     /// The target status is beyond what this borrowed executor can complete —
     /// SPAWN needs the caller's spawn seam; FULL is a consuming representation
     /// change owned by the server holder and is completed outside this loop.
@@ -415,7 +456,7 @@ impl std::fmt::Display for GenError {
             ),
             GenError::LightChunkMissing { status, pos } => write!(
                 f,
-                "cannot run the {status:?} task: the center chunk at {pos} is missing"
+                "cannot run the {status:?} task: the required runtime chunk at {pos} is missing"
             ),
             GenError::LightProviderPanicked { status } => write!(
                 f,
@@ -424,6 +465,10 @@ impl std::fmt::Display for GenError {
             GenError::PersistedLightLoadUnsupported { status } => write!(
                 f,
                 "cannot load the persisted {status:?} chunk: the light provider cannot complete edge reconciliation"
+            ),
+            GenError::LightTaskFailed { status } => write!(
+                f,
+                "cannot run the {status:?} task: the generated-light bridge refused transactionally"
             ),
             GenError::UnsupportedStatus(status) => write!(
                 f,
@@ -469,7 +514,7 @@ impl<T, B, S> WorldGenContext<T, B, S>
 where
     T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
-    S: Eq + std::hash::Hash,
+    S: Eq + std::hash::Hash + 'static,
 {
     /// Wraps the five worldgen seam closures (owned, mirroring the record).
     /// The light engine is left unattached — the slice wires it with
@@ -490,6 +535,7 @@ where
             spawn: None,
             light_engine: None,
             light: None,
+            generated_light: None,
         }
     }
 
@@ -513,6 +559,24 @@ where
         light: impl FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenError> + 'static,
     ) -> Self {
         self.light = Some(Box::new(light));
+        self
+    }
+
+    /// Attaches a complete generated-light task in place. Unlike
+    /// [`Self::with_light`], this task carries the engine/provider capability
+    /// and the transactional LIGHT implementation in one tick-thread-owned
+    /// value.
+    pub fn attach_generated_light_task(&mut self, task: impl GeneratedLightTask<T, B, S>) {
+        self.generated_light = Some(Box::new(task));
+    }
+
+    /// Attaches a complete generated-light task. Unlike [`Self::with_light`],
+    /// this task carries the engine/provider capability and the transactional
+    /// LIGHT implementation in one tick-thread-owned value. The generation
+    /// preflight still requires [`GeneratedLightTask::has_usable_engine`]
+    /// before it will run `INITIALIZE_LIGHT`.
+    pub fn with_generated_light_task(mut self, task: impl GeneratedLightTask<T, B, S>) -> Self {
+        self.attach_generated_light_task(task);
         self
     }
 
@@ -545,6 +609,9 @@ where
     /// single-step guards both require it, so a provider-less engine never lets
     /// earlier steps mutate a chunk before the light failure.
     fn has_usable_light_engine(&self) -> bool {
+        if let Some(task) = self.generated_light.as_ref() {
+            return task.has_usable_engine();
+        }
         self.light_engine
             .as_ref()
             .is_some_and(|e| e.provider().is_some())
@@ -724,22 +791,38 @@ where
                 // — but computes nothing: no light-correct toggle, no provider
                 // call. A chunk stays at `INITIALIZE_LIGHT` until the LIGHT
                 // task lights or loads it.
-                if !self.has_usable_light_engine() {
-                    return Err(GenError::LightEngineMissing {
-                        status: ChunkStatus::InitializeLight,
-                    });
+                if let Some(task) = self.generated_light.as_mut() {
+                    if !task.has_usable_engine() {
+                        return Err(GenError::LightEngineMissing {
+                            status: ChunkStatus::InitializeLight,
+                        });
+                    }
+                    task.initialize_light(chunk)?;
+                } else {
+                    if !self.has_usable_light_engine() {
+                        return Err(GenError::LightEngineMissing {
+                            status: ChunkStatus::InitializeLight,
+                        });
+                    }
+                    // `initializeLightSources` is a Paper no-op in the
+                    // Starlight rewrite; the association itself is observable
+                    // on ProtoChunk and is recorded before the task completes.
+                    chunk.set_light_engine();
                 }
             }
             ChunkStatusTask::Light => {
                 ensure_canonical_rung(step.task(), step.target_status())?;
-                // A caller-attached light seam (the `rivet-server` write-back
-                // bridge) is the authoritative path: it runs the real provider
-                // over the generated center and persists the computed light +
-                // status back into the chunk. Without one, the engine-position
-                // path ([`Self::run_light_task`]) keeps the faithful
-                // LightTask dispatch for contexts that attach only a
-                // `LevelLightEngine`.
-                if let Some(light) = self.light.as_mut() {
+                // A complete generated-light task owns the finite provider
+                // workspace and is authoritative for the LIGHT write-back.
+                // The older split seam remains for the G1 value-layer tests.
+                if let Some(task) = self.generated_light.as_mut() {
+                    if !task.has_usable_engine() {
+                        return Err(GenError::LightEngineMissing {
+                            status: ChunkStatus::Light,
+                        });
+                    }
+                    task.light(chunk)?;
+                } else if let Some(light) = self.light.as_mut() {
                     light(chunk)?;
                 } else {
                     self.run_light_task(chunk, ChunkStatus::Light)?;
@@ -924,6 +1007,14 @@ where
                 }
                 ChunkStatusTask::Light => {
                     ensure_canonical_rung(step.task(), step.target_status())?;
+                    // A generated workspace can prove its finite neighbour
+                    // coverage before INITIALIZE_LIGHT mutates the chunk. Keep
+                    // deterministic coverage refusals atomic across the whole
+                    // promotion path; runtime provider failures remain
+                    // transactional at the LIGHT task boundary.
+                    if let Some(task) = self.generated_light.as_ref() {
+                        task.validate_light(chunk)?;
+                    }
                     // With a caller-attached light seam the write-back bridge is
                     // authoritative and needs no engine at this rung; without it
                     // the engine-position path needs one.
