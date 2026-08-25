@@ -73,14 +73,15 @@ class EvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             region_dir = Path(directory)
             region = bytearray(3 * 4096)
-            struct.pack_into(">I", region, 0, (2 << 8) | 1)
+            index = 3 + 4 * 32
+            struct.pack_into(">I", region, index * 4, (2 << 8) | 1)
             struct.pack_into(">I", region, 2 * 4096, 1)
             region[2 * 4096 + 4] = 0x82  # external zlib/deflate stream
-            path = region_dir / "r.0.0.mca"
+            path = region_dir / "r.1.-2.mca"
             path.write_bytes(region)
-            (region_dir / "c.0.0.mcc").write_bytes(zlib.compress(b"external-nbt"))
-            self.assertEqual(capture.read_region(path, (0, 0))[(0, 0)], b"external-nbt")
-            self.assertEqual(validate.read_region(path, (0, 0))[(0, 0)], b"external-nbt")
+            (region_dir / "c.35.-60.mcc").write_bytes(zlib.compress(b"external-nbt"))
+            self.assertEqual(capture.read_region(path, (1, -2))[(3, 4)], b"external-nbt")
+            self.assertEqual(validate.read_region(path, (1, -2))[(3, 4)], b"external-nbt")
 
     def test_seed_signed_conversion_and_scheduler_order(self):
         self.assertEqual(capture.java_seed("12807505919197044144"), -5639238154512507472)
@@ -96,6 +97,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertRegex(semantic, r"^[0-9a-f]{64}$")
         self.assertTrue(details["light_correct"])
         self.assertEqual(details["heightmaps"], ["WORLD_SURFACE", "MOTION_BLOCKING", "OCEAN_FLOOR"])
+        self.assertEqual(capture.chunk_details(raw, (0, 0))["heightmaps"], details["heightmaps"])
 
     def test_negative_chunk_evidence_cases(self):
         with self.assertRaises(validate.Failed):
@@ -124,6 +126,52 @@ class EvidenceTests(unittest.TestCase):
             path.write_text("Done (1s)!\\n[ERROR] self-authored fallback\\n")
             with self.assertRaises(validate.Failed):
                 validate._validate_log(path, "0" * 64, capture=False)
+
+    def test_runtime_config_and_marker_order_are_fail_closed(self):
+        seed = validate.EXPECTED_SEEDS[0]
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            capture.write_configs(run, seed, 24001, 24002)
+            config = {
+                "server_properties": capture.file_record(run / "provenance/server.properties", "provenance/server.properties"),
+                "runtime_server_properties": capture.file_record(run / "server.properties", "server.properties"),
+                "paper_global": capture.file_record(run / "provenance/config/paper-global.yml", "provenance/config/paper-global.yml"),
+                "paper_world_defaults": capture.file_record(run / "provenance/config/paper-world-defaults.yml", "provenance/config/paper-world-defaults.yml"),
+                "runtime_paper_global": capture.file_record(run / "config/paper-global.yml", "config/paper-global.yml"),
+                "runtime_paper_world_defaults": capture.file_record(run / "config/paper-world-defaults.yml", "config/paper-world-defaults.yml"),
+                "eula": capture.file_record(run / "provenance/eula.txt", "provenance/eula.txt"),
+                "runtime_eula": capture.file_record(run / "eula.txt", "eula.txt"),
+            }
+            manifest = {
+                "ports": {"configured_server": 24001, "configured_query": 24002},
+                "config": config,
+                "simulation": {"random_tick_speed": 0, "do_daylight_cycle": False, "do_weather_cycle": False, "do_mob_spawning": False, "spawn_limits": 0},
+            }
+            validate._validate_config(run, seed, manifest)
+            manifest["ports"]["configured_server"] = 0
+            with self.assertRaises(validate.Failed):
+                validate._validate_config(run, seed, manifest)
+            manifest["ports"]["configured_server"] = 24001
+            (run / "config/paper-global.yml").write_text("tampered\\n")
+            manifest["config"]["runtime_paper_global"] = capture.file_record(run / "config/paper-global.yml", "config/paper-global.yml")
+            with self.assertRaises(validate.Failed):
+                validate._validate_config(run, seed, manifest)
+
+            token = "a" * 64
+            log = run / "ordered.log"
+            log.write_text(
+                "Done (1s)!\\n"
+                "RIVET_SIMULATION_FROZEN randomTickSpeed=0\\n"
+                "RIVET_PROBE_READY targets=8 closure=2451\\n"
+                f"RIVET_CAPTURE_TOKEN={token}\\n"
+                "[MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads\\n"
+                "Stopping server\\n"
+                "All dimensions are saved\\n"
+            )
+            validate._validate_log(log, token, capture=True)
+            log.write_text(log.read_text().replace(f"RIVET_CAPTURE_TOKEN={token}", "RIVET_CAPTURE_TOKEN=" + token + "\\nRIVET_PROBE_READY"))
+            with self.assertRaises(validate.Failed):
+                validate._validate_log(log, token, capture=True)
 
     def test_copied_run_root_is_failed(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -10,11 +10,11 @@ claim.
 from __future__ import annotations
 
 import argparse
-import gzip
 import hashlib
 import json
 import re
 import struct
+import subprocess
 import sys
 import zlib
 import zipfile
@@ -65,7 +65,7 @@ def jar_manifest(path: Path) -> dict[str, str]:
     except (OSError, KeyError, zipfile.BadZipFile) as exc:
         raise Failed(f"Paper jar manifest is unreadable: {path}: {exc}") from exc
     result: dict[str, str] = {}
-    for line in text.replace("\\r\\n", "\\n").splitlines():
+    for line in text.replace("\r\n", "\n").splitlines():
         if ":" in line:
             key, value = line.split(":", 1)
             result[key.strip()] = value.strip()
@@ -77,6 +77,17 @@ def java_seed(seed: str) -> int:
     if not 0 <= value < 1 << 64:
         raise Failed(f"seed is not an unsigned Java-long representation: {seed}")
     return value - (1 << 64) if value >= 1 << 63 else value
+
+
+def validate_paper_source(source_root: Path) -> None:
+    if source_root.name != "Paper" or len(source_root.parts) < 2 or source_root.parts[-2:] != ("working", "Paper") or not source_root.is_dir() or source_root.is_symlink():
+        raise Failed("Paper source provenance does not identify the pinned working/Paper tree")
+    revision = subprocess.run(["git", "-C", str(source_root), "rev-parse", "HEAD"], capture_output=True, text=True, check=False)
+    if revision.returncode != 0 or revision.stdout.strip() != EXPECTED_PAPER:
+        raise Failed("Paper source tree is not at the pinned 26.2 revision")
+    status = subprocess.run(["git", "-C", str(source_root), "status", "--porcelain"], capture_output=True, text=True, check=False)
+    if status.returncode != 0 or status.stdout.strip():
+        raise Failed("Paper source tree is dirty")
 
 
 def closure(targets: list[tuple[int, int]], radius: int) -> list[tuple[int, int]]:
@@ -106,8 +117,15 @@ def parse_properties(text: str) -> dict[str, str]:
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             key, value = line.split("=", 1)
-            result[key.strip()] = value.strip()
+            key = key.strip()
+            if key in result:
+                raise Failed(f"duplicate server.properties key: {key}")
+            result[key] = value.strip()
     return result
+
+
+def properties_text(seed: str) -> str:
+    return (HERE / "fixtures" / "server.properties").read_text().replace("<seed>", str(java_seed(seed)))
 
 
 def expected_properties(seed: str) -> dict[str, str]:
@@ -318,6 +336,8 @@ def validate_inventory(run: Path, manifest: dict[str, Any]) -> None:
 
 
 def _read_json(path: Path, label: str) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise Failed(f"{label} is absent or symlinked")
     try:
         value = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
@@ -338,8 +358,15 @@ def _validate_worldgen_settings(run: Path, expected_seed: str, manifest: dict[st
     recorded = manifest.get("worldgen_settings", {})
     if recorded.get("path") != "world/data/minecraft/worldgen_settings.dat" or recorded.get("source_path") != "world/dimensions/minecraft/overworld/data/minecraft/world_gen_settings.dat":
         raise Failed("worldgen settings provenance paths are wrong")
-    if recorded.get("sha256") != sha256(source_bytes) or recorded.get("source_sha256") != sha256(source_bytes) or recorded.get("bytes") != len(source_bytes):
+    if (
+        recorded.get("sha256") != sha256(source_bytes)
+        or recorded.get("source_sha256") != sha256(source_bytes)
+        or recorded.get("bytes") != len(source_bytes)
+        or recorded.get("source_bytes") != len(source_bytes)
+    ):
         raise Failed("worldgen settings hash/size provenance mismatch")
+    if recorded.get("data_version") != EXPECTED_DATA_VERSION or recorded.get("seed") != str(java_seed(expected_seed)) or recorded.get("generator") != "minecraft:noise" or recorded.get("generate_structures") is not True:
+        raise Failed("worldgen settings metadata provenance is incomplete or wrong")
     try:
         root = parse(strict_decompress(source_bytes, gzip_stream=True))
     except NbtError as exc:
@@ -380,8 +407,9 @@ def _validate_log(path: Path, token: str, *, capture: bool) -> None:
     if capture:
         ready_at = text.rfind("RIVET_PROBE_READY")
         token_at = text.rfind("RIVET_CAPTURE_TOKEN=" + token)
-        if not (done_at < ready_at <= token_at < stopping_at):
-            raise Failed("Paper probe-ready/token marker is not before graceful stop")
+        frozen_at = text.rfind("RIVET_SIMULATION_FROZEN")
+        if not (frozen_at >= 0 and done_at < ready_at <= token_at < stopping_at and frozen_at < ready_at):
+            raise Failed("Paper simulation/probe-ready/token markers are not ordered before graceful stop")
 
 
 def _validate_config(run: Path, seed: str, manifest: dict[str, Any]) -> None:
@@ -393,27 +421,50 @@ def _validate_config(run: Path, seed: str, manifest: dict[str, Any]) -> None:
     if provenance.read_text() != properties_text(seed):
         raise Failed("server.properties provenance differs from pinned fixture")
     actual_properties = parse_properties(actual.read_text())
+    if set(actual_properties) != set(expected):
+        raise Failed("runtime server.properties keys differ from pinned normal-overworld config")
     ports = manifest.get("ports", {})
+    configured_server = ports.get("configured_server")
+    configured_query = ports.get("configured_query")
+    if not isinstance(configured_server, int) or configured_server <= 0:
+        raise Failed("Paper server port is absent or zero")
+    if not isinstance(configured_query, int) or configured_query <= 0 or configured_query == configured_server:
+        raise Failed("Paper query port is absent, zero, or collides with the server port")
     for key, value in expected.items():
         if key == "server-port":
-            if actual_properties.get(key) != str(ports.get("configured_server")) or ports.get("configured_server", 0) <= 0:
-                raise Failed("Paper server port is not a fresh dynamic port")
+            expected_value = str(configured_server)
         elif key == "query.port":
-            if actual_properties.get(key) != str(ports.get("configured_query")) or ports.get("configured_query", 0) <= 0:
-                raise Failed("Paper query port is not a fresh dynamic port")
-        elif actual_properties.get(key) != value:
-            raise Failed("Paper server.properties route differs from pinned normal-overworld config")
-    for relative, fixture in [("provenance/config/paper-global.yml", "paper-global.yml"), ("provenance/config/paper-world-defaults.yml", "paper-world-defaults.yml")]:
-        path = run / relative
-        if path.is_symlink() or not path.is_file() or path.read_bytes() != (HERE / "fixtures" / fixture).read_bytes():
-            raise Failed(f"pinned config provenance differs: {relative}")
-    if manifest.get("config", {}).get("server_properties", {}).get("sha256") != sha256(provenance.read_bytes()):
-        raise Failed("server.properties manifest hash mismatch")
-    for key, relative in (("runtime_paper_global", "config/paper-global.yml"), ("runtime_paper_world_defaults", "config/paper-world-defaults.yml")):
-        path = run / relative
-        record = manifest.get("config", {}).get(key, {})
+            expected_value = str(configured_query)
+        else:
+            expected_value = value
+        if actual_properties.get(key) != expected_value:
+            raise Failed("runtime server.properties route differs from pinned normal-overworld config")
+    config = manifest.get("config", {})
+    records = {
+        "server_properties": (provenance, "provenance/server.properties"),
+        "runtime_server_properties": (actual, "server.properties"),
+        "eula": (run / "provenance/eula.txt", "provenance/eula.txt"),
+        "runtime_eula": (run / "eula.txt", "eula.txt"),
+    }
+    for key, (path, relative) in records.items():
+        record = config.get(key, {})
         if path.is_symlink() or not path.is_file() or record.get("path") != relative or record.get("sha256") != sha256(path.read_bytes()) or record.get("bytes") != path.stat().st_size:
-            raise Failed(f"runtime Paper config provenance is absent or tampered: {relative}")
+            raise Failed(f"config provenance is absent or tampered: {relative}")
+    if (run / "provenance/eula.txt").read_bytes() != b"eula=true\n" or (run / "eula.txt").read_bytes() != b"eula=true\n":
+        raise Failed("runtime or provenance eula is not pinned")
+    for key, relative, fixture in (
+        ("paper_global", "provenance/config/paper-global.yml", "paper-global.yml"),
+        ("paper_world_defaults", "provenance/config/paper-world-defaults.yml", "paper-world-defaults.yml"),
+        ("runtime_paper_global", "config/paper-global.yml", "paper-global.yml"),
+        ("runtime_paper_world_defaults", "config/paper-world-defaults.yml", "paper-world-defaults.yml"),
+    ):
+        path = run / relative
+        record = config.get(key, {})
+        fixture_bytes = (HERE / "fixtures" / fixture).read_bytes()
+        if path.is_symlink() or not path.is_file() or path.read_bytes() != fixture_bytes:
+            raise Failed(f"pinned runtime/provenance config differs: {relative}")
+        if record.get("path") != relative or record.get("sha256") != sha256(fixture_bytes) or record.get("bytes") != len(fixture_bytes):
+            raise Failed(f"config manifest provenance is absent or tampered: {relative}")
     simulation = manifest.get("simulation")
     if simulation != {"random_tick_speed": 0, "do_daylight_cycle": False, "do_weather_cycle": False, "do_mob_spawning": False, "spawn_limits": 0}:
         raise Failed("simulation is not frozen by the pinned contract")
@@ -447,7 +498,12 @@ def _validate_tickets(run: Path, expected_closure: list[tuple[int, int]], manife
     if coordinates != expected_closure or manifest.get("ticket", {}).get("coordinates") != [list(item) for item in expected_closure]:
         raise Failed("forced ticket set/order is not the exact scheduler closure")
     digest = sha256(path.read_bytes())
-    if manifest.get("ticket", {}).get("post_exit_sha256") != digest or manifest.get("ticket", {}).get("held_through_stop") is not True:
+    ticket_manifest = manifest.get("ticket", {})
+    if (
+        ticket_manifest.get("injected_sha256") != digest
+        or ticket_manifest.get("post_exit_sha256") != digest
+        or ticket_manifest.get("held_through_stop") is not True
+    ):
         raise Failed("ticket lifecycle/hash provenance is incomplete")
 
 
@@ -482,33 +538,80 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
     paper_jar = manifest.get("paper_jar", {})
     source_root = Path(paper_jar.get("source_root", ""))
     source_jar = Path(paper_jar.get("path", ""))
-    if source_root.name != "Paper" or not str(source_root).endswith("/working/Paper") or source_jar.name != "paper-paperclip-26.2.local-SNAPSHOT.jar" or paper_jar.get("source_revision") != EXPECTED_PAPER or not paper_jar.get("built_after_ns"):
+    if paper_jar.get("source_revision") != EXPECTED_PAPER or not isinstance(paper_jar.get("built_after_ns"), int) or paper_jar.get("built_after_ns") <= 0:
         raise Failed("Paper source/build provenance is not the pinned fresh source")
-    if not source_jar.is_file() or source_jar.is_symlink() or source_jar.stat().st_mtime_ns < int(paper_jar["built_after_ns"]) or paper_jar.get("sha256") != sha256(source_jar.read_bytes()) or paper_jar.get("bytes") != source_jar.stat().st_size or jar_manifest(source_jar).get("Main-Class") != "io.papermc.paperclip.Main":
+    validate_paper_source(source_root)
+    if source_jar.name != "paper-paperclip-26.2.local-SNAPSHOT.jar" or not source_jar.is_file() or source_jar.is_symlink() or not source_jar.resolve().is_relative_to(source_root.resolve()):
+        raise Failed("built Paperclip jar is outside the pinned Paper source tree")
+    if source_jar.stat().st_mtime_ns < int(paper_jar["built_after_ns"]) or paper_jar.get("sha256") != sha256(source_jar.read_bytes()) or paper_jar.get("bytes") != source_jar.stat().st_size:
         raise Failed("built Paperclip jar provenance is absent, stale, or tampered")
+    if jar_manifest(source_jar).get("Main-Class") != "io.papermc.paperclip.Main":
+        raise Failed("built Paperclip jar is not the pinned Paperclip launcher")
     source_server = paper_jar.get("source_server_jar", {})
     server_path = Path(source_server.get("path", ""))
-    if server_path.name != "paper-server-26.2.local-SNAPSHOT.jar" or not server_path.is_file() or server_path.is_symlink() or source_server.get("git_commit") != EXPECTED_PAPER_SHORT or source_server.get("sha256") != sha256(server_path.read_bytes()) or source_server.get("bytes") != server_path.stat().st_size or jar_manifest(server_path).get("Git-Commit") != EXPECTED_PAPER_SHORT:
+    if server_path.name != "paper-server-26.2.local-SNAPSHOT.jar" or not server_path.is_file() or server_path.is_symlink() or not server_path.resolve().is_relative_to(source_root.resolve()):
+        raise Failed("built Paper server jar is outside the pinned Paper source tree")
+    if (
+        server_path.stat().st_mtime_ns < int(paper_jar["built_after_ns"])
+        or source_server.get("git_commit") != EXPECTED_PAPER_SHORT
+        or source_server.get("sha256") != sha256(server_path.read_bytes())
+        or source_server.get("bytes") != server_path.stat().st_size
+        or jar_manifest(server_path).get("Git-Commit") != EXPECTED_PAPER_SHORT
+    ):
         raise Failed("built Paper server jar does not prove the pinned source")
     runtime = paper_jar.get("materialized_runtime", {})
-    runtime_path = run / runtime.get("path", "")
+    runtime_relative = runtime.get("path")
+    if runtime_relative != "versions/26.2/paper-26.2.jar":
+        raise Failed("fresh materialized Paper runtime path is not pinned")
+    runtime_path = run / runtime_relative
     if runtime_path.is_symlink() or not runtime_path.is_file() or runtime.get("git_commit") != EXPECTED_PAPER_SHORT or runtime.get("sha256") != sha256(runtime_path.read_bytes()) or runtime.get("bytes") != runtime_path.stat().st_size:
         raise Failed("fresh materialized Paper runtime provenance is absent, stale, or tampered")
+    if jar_manifest(runtime_path).get("Git-Commit") != EXPECTED_PAPER_SHORT:
+        raise Failed("fresh materialized Paper runtime does not prove the pinned source")
     probe_artifact = manifest.get("probe_artifact", {})
-    probe_path = run / probe_artifact.get("path", "")
+    probe_relative = probe_artifact.get("path")
+    if probe_relative != "plugins/RivetPaperNormalFullProbe.jar":
+        raise Failed("compiled main-thread probe path is not pinned")
+    probe_path = run / probe_relative
     probe_source = HERE / "src/PaperNormalFullProbe.java"
     plugin_yml = HERE / "src/plugin.yml"
     if probe_path.is_symlink() or not probe_path.is_file() or probe_artifact.get("sha256") != sha256(probe_path.read_bytes()) or probe_artifact.get("bytes") != probe_path.stat().st_size or paper_jar.get("probe_source_sha256") != sha256(probe_source.read_bytes()) or paper_jar.get("probe_plugin_yml_sha256") != sha256(plugin_yml.read_bytes()):
         raise Failed("compiled main-thread probe provenance is absent or tampered")
+    try:
+        with zipfile.ZipFile(probe_path) as archive:
+            if archive.read("plugin.yml") != plugin_yml.read_bytes() or "org/rivet/paper_normal_full/PaperNormalFullProbe.class" not in archive.namelist():
+                raise Failed("compiled main-thread probe jar does not contain the pinned source and entrypoint")
+    except (KeyError, zipfile.BadZipFile) as exc:
+        raise Failed("compiled main-thread probe jar is malformed") from exc
     if manifest.get("run_root") != str(run.resolve()) or manifest.get("run_id") != run.name:
         raise Failed("run was copied or its self-identifying root was rewritten")
     token = manifest.get("capture_token", "")
-    if not TOKEN_RE.fullmatch(token) or not (run / "capture.token").is_file() or (run / "capture.token").read_text().strip() != token:
+    token_path = run / "capture.token"
+    if not TOKEN_RE.fullmatch(token) or token_path.is_symlink() or not token_path.is_file() or token_path.read_text().strip() != token:
         raise Failed("capture token is absent/malformed/mismatched")
     _validate_log(run / "server-create.log", token, capture=False)
     _validate_log(run / "server.log", token, capture=True)
+    for key, relative in (("world_create", "server-create.log"), ("capture", "server.log")):
+        path = run / relative
+        record = manifest.get("logs", {}).get(key, {})
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or record.get("path") != relative
+            or record.get("sha256") != sha256(path.read_bytes())
+            or record.get("bytes") != path.stat().st_size
+        ):
+            raise Failed(f"Paper log provenance is absent or tampered: {relative}")
     driver_log = run / "driver.log"
-    if driver_log.is_symlink() or not driver_log.is_file() or manifest.get("driver_log", {}).get("sha256") != sha256(driver_log.read_bytes()) or "RIVET_TICKETS_INJECTED=" not in driver_log.read_text() or "RIVET_CAPTURE_STOP_EXIT=0" not in driver_log.read_text():
+    driver_text = driver_log.read_text() if driver_log.is_file() and not driver_log.is_symlink() else ""
+    injected_sha = manifest.get("ticket", {}).get("injected_sha256")
+    if (
+        driver_log.is_symlink()
+        or not driver_log.is_file()
+        or manifest.get("driver_log", {}).get("sha256") != sha256(driver_log.read_bytes())
+        or f"RIVET_TICKETS_INJECTED={injected_sha}" not in driver_text
+        or "RIVET_CAPTURE_STOP_EXIT=0" not in driver_text
+    ):
         raise Failed("driver lifecycle provenance is absent or tampered")
     process = manifest.get("process", {})
     if process.get("exit_code") != 0 or process.get("clean_stop") is not True or process.get("probe_ready_before_stop") is not True:
@@ -531,8 +634,24 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
     if closure_data.get("sha256") != sha256(json.dumps(expected_closure, separators=(",", ":")).encode()):
         raise Failed("closure digest mismatch")
     ports = manifest.get("ports", {})
-    if ports.get("fixture_server") != 0 or ports.get("fixture_query") != 0 or not isinstance(ports.get("configured_server"), int) or not isinstance(ports.get("configured_query"), int) or ports.get("configured_server") <= 0 or ports.get("configured_query") <= 0 or ports.get("configured_server") == ports.get("configured_query") or ports.get("capture", {}).get("server") != ports.get("configured_server"):
-        raise Failed("dynamic port provenance is absent or static")
+    configured_server = ports.get("configured_server")
+    configured_query = ports.get("configured_query")
+    boot1_ports = ports.get("boot1", {})
+    capture_ports = ports.get("capture", {})
+    if (
+        ports.get("fixture_server") != 0
+        or ports.get("fixture_query") != 0
+        or not isinstance(configured_server, int)
+        or not isinstance(configured_query, int)
+        or configured_server <= 0
+        or configured_query <= 0
+        or configured_server == configured_query
+        or not isinstance(boot1_ports.get("server"), int)
+        or boot1_ports.get("server") != configured_server
+        or not isinstance(capture_ports.get("server"), int)
+        or capture_ports.get("server") != configured_server
+    ):
+        raise Failed("dynamic server/query port provenance is absent, zero, or static")
     preflight = manifest.get("preflight", {})
     if preflight.get("fresh_isolated_world_root") is not True or preflight.get("world_absent_before_boot1") is not True or preflight.get("boot1_created_world") is not True or preflight.get("reset_before_ticket_injection") is not True or preflight.get("before_injection_data_paths") != [] or preflight.get("before_injection_ticket_paths") != [] or preflight.get("no_preexisting_target_support_data") is not True or preflight.get("no_preexisting_tickets") is not True:
         raise Failed("preflight did not prove a fresh clean target/support/ticket root")
@@ -581,8 +700,8 @@ def validate_bundle(bundle_dir: Path) -> None:
     if bundle.get("contract_sha256") != sha256(CONTRACT_PATH.read_bytes()):
         raise Failed("bundle contract is stale or self-authored")
     attempts_per_seed = bundle.get("attempts_per_seed")
-    if bundle.get("seeds") != EXPECTED_SEEDS or bundle.get("targets") != [list(item) for item in EXPECTED_TARGETS] or bundle.get("closure_radius") != EXPECTED_RADIUS or not isinstance(attempts_per_seed, int) or attempts_per_seed < 3:
-        raise Failed("bundle corpus contract is incomplete or wrong")
+    if bundle.get("seeds") != EXPECTED_SEEDS or bundle.get("targets") != [list(item) for item in EXPECTED_TARGETS] or bundle.get("closure_radius") != EXPECTED_RADIUS or attempts_per_seed != 3:
+        raise Failed("bundle corpus contract is incomplete or not exactly four seeds x three runs")
     runs = bundle.get("runs")
     if not isinstance(runs, list):
         raise Failed("bundle runs list is absent")

@@ -467,6 +467,14 @@ def observed_ports(log: str) -> dict[str, int]:
     return {"server": int(server[-1]) if server else 0, "query": int(query[-1]) if query else 0}
 
 
+def require_dynamic_server_port(observed: dict[str, int], configured: int, label: str) -> None:
+    port = observed.get("server", 0)
+    if configured <= 0 or port <= 0:
+        raise Failed(f"{label} did not prove a nonzero dynamic server port")
+    if port != configured:
+        raise Failed(f"{label} server port {port} differs from configured dynamic port {configured}")
+
+
 def _wait_for(log: Path, *, ready: str, failed: str | None, timeout: float) -> str:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -652,7 +660,7 @@ def chunk_details(raw: bytes, coordinate: tuple[int, int]) -> dict[str, Any]:
         raise Failed(f"{coordinate} did not serialize isLightOn=true")
     if heightmaps is None or heightmaps.kind != 10:
         raise Failed(f"{coordinate} has no Heightmaps compound")
-    required = {"WORLD_SURFACE", "MOTION_BLOCKING", "OCEAN_FLOOR"}
+    required = ("WORLD_SURFACE", "MOTION_BLOCKING", "OCEAN_FLOOR")
     selected: dict[str, Tag] = {}
     for name in required:
         item = heightmaps.value.get(name)
@@ -694,7 +702,7 @@ def chunk_details(raw: bytes, coordinate: tuple[int, int]) -> dict[str, Any]:
     return {
         "status": status.value,
         "light_correct": True,
-        "heightmaps": sorted(required),
+        "heightmaps": list(required),
         "heightmap_ranges": {name: [min(values), max(values)] for name, values in decoded.items()},
         "palette_names": sorted(palette_names),
         "raw_sha256": sha256(raw),
@@ -752,8 +760,8 @@ def extract_run(
     if signature_before != signature_after:
         raise Failed("world changed during post-exit read-only extraction")
     probe_path = run / "probe.json"
-    if not probe_path.is_file():
-        raise Failed("Paper probe did not leave probe.json")
+    if probe_path.is_symlink() or not probe_path.is_file():
+        raise Failed("Paper probe did not leave a regular probe.json")
     try:
         probe = json.loads(probe_path.read_text())
     except json.JSONDecodeError as exc:
@@ -787,12 +795,19 @@ def extract_run(
         "closure": {"radius": RADIUS, "order": "lexicographic x,z after Paper scheduler radius-11 expansion", "coordinates": [[x, z] for x, z in closure], "sha256": sha256(json.dumps(closure, separators=(",", ":")).encode())},
         "ticket": {"type": "minecraft:forced", "level": TICKET_LEVEL, "ticks_left": TICKET_TICKS_LEFT, "coordinates": [[x, z] for x, z in closure], "injected_sha256": injected_ticket_sha, "post_exit_sha256": sha256(ticket_path.read_bytes()), "held_through_stop": True},
         "ports": {"fixture_server": 0, "fixture_query": 0, "configured_server": configured_ports[0], "configured_query": configured_ports[1], "boot1": boot1["ports"], "capture": capture["ports"]},
+        "logs": {
+            "world_create": file_record(run / "server-create.log", "server-create.log"),
+            "capture": file_record(run / "server.log", "server.log"),
+        },
         "config": {
             "server_properties": file_record(run / "provenance/server.properties", "provenance/server.properties"),
+            "runtime_server_properties": file_record(run / "server.properties", "server.properties"),
             "paper_global": file_record(run / "provenance/config/paper-global.yml", "provenance/config/paper-global.yml"),
             "paper_world_defaults": file_record(run / "provenance/config/paper-world-defaults.yml", "provenance/config/paper-world-defaults.yml"),
             "runtime_paper_global": file_record(run / "config/paper-global.yml", "config/paper-global.yml"),
             "runtime_paper_world_defaults": file_record(run / "config/paper-world-defaults.yml", "config/paper-world-defaults.yml"),
+            "eula": file_record(run / "provenance/eula.txt", "provenance/eula.txt"),
+            "runtime_eula": file_record(run / "eula.txt", "eula.txt"),
         },
         "worldgen_settings": settings,
         "preflight": preflight,
@@ -818,14 +833,15 @@ def run_one(
     timeout: float,
 ) -> None:
     run.mkdir(parents=True)
-    if (run / "world").exists():
-        raise Failed("fresh run root already contains a world before Paper boot")
+    if any(run.iterdir()):
+        raise Failed("fresh run root is not empty before Paper boot")
     configured_ports = allocate_dynamic_ports()
     write_configs(run, seed, *configured_ports)
     copy_fixture_provenance(run)
     token = secrets.token_hex(32)
     (run / "capture.token").write_text(token + "\n")
     boot1 = boot_and_stop(run, paperclip, java_home, "server-create.log", timeout=timeout)
+    require_dynamic_server_port(boot1["ports"], configured_ports[0], "Paper world-creation boot")
     world = run / "world"
     settings = capture_settings(world, seed, run)
     before, tickets_before, after = reset_world_support_data(world)
@@ -859,6 +875,7 @@ def run_one(
         f"-Drivet.probe.targets={encoded_targets}",
     ]
     capture = boot_and_stop(run, paperclip, java_home, "server.log", plugin_args=plugin_args, timeout=timeout)
+    require_dynamic_server_port(capture["ports"], configured_ports[0], "Paper FULL capture boot")
     extract_run(run, seed, attempt, token, boot1, capture, run_paper_info, java_info, closure, settings, preflight, ticket_path, injected_sha, configured_ports)
     (run / "driver.log").write_text(f"RIVET_TICKETS_INJECTED={injected_sha}\nRIVET_CAPTURE_STOP_EXIT=0\n")
     # The capture manifest is deliberately rewritten only before returning so
@@ -882,8 +899,8 @@ def ensure_output(path: Path) -> Path:
 
 
 def capture_bundle(output: Path, source: Path, attempts: int, timeout: float) -> Path:
-    if attempts < 3:
-        raise Failed("at least three isolated roots per seed are required")
+    if attempts != 3:
+        raise Failed("exactly three isolated roots per seed are required by the corpus contract")
     java_home, java_info = toolchain(source)
     paperclip, paper_info = build_paper(source, java_home)
     bundle = ensure_output(output)
