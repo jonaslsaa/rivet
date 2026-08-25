@@ -1631,7 +1631,11 @@ fn generated_feature_array<'a>(
 /// expose configured-feature sub-features (the selector families), plus the
 /// vegetation-patch holder used by the generated corpus. All other config data
 /// is feature-local and must not be recursively interpreted as holders.
-fn generated_configured_object(
+///
+/// This entry point receives the complete configured-feature object, including
+/// its root `type` and `config` fields. Keeping that boundary explicit prevents
+/// callers from accidentally walking an object while skipping its configuration.
+fn generated_holder_refs(
     object: &serde_json::Map<String, Value>,
     out: &mut Vec<GeneratedFeatureNode>,
     context: &str,
@@ -1729,6 +1733,16 @@ fn generated_configured_object(
     Ok(())
 }
 
+/// Compatibility-named wrapper for inline configured holders. Both inline and
+/// named registry entries use the same complete `{type, config}` traversal.
+fn generated_configured_object(
+    object: &serde_json::Map<String, Value>,
+    out: &mut Vec<GeneratedFeatureNode>,
+    context: &str,
+) -> Result<(), String> {
+    generated_holder_refs(object, out, context)
+}
+
 fn generated_feature_edges(
     node: GeneratedFeatureNode,
 ) -> Result<Vec<GeneratedFeatureNode>, String> {
@@ -1759,7 +1773,7 @@ fn generated_feature_edges(
                 .as_object()
                 .ok_or_else(|| format!("{name} JSON must be an object"))?;
             let mut refs = Vec::new();
-            generated_configured_object(object, &mut refs, name)?;
+            generated_holder_refs(object, &mut refs, name)?;
             Ok(refs)
         }
     }
@@ -1824,9 +1838,10 @@ fn build_generated_feature_closure(
     let configured_entries = sorted_configured_feature_entries()?;
     validate_generated_feature_closure(&placed_entries, &configured_entries)?;
 
-    // Build temporary lookup snapshots with fresh identities. After decoding,
-    // the temporary registries are dropped and their identities are transferred
-    // to the final builders, so decoded holder references resolve without ever
+    // Build temporary lookup tables through move-based staging. The owner
+    // builders' state is transferred into the staged builders, not cloned, and
+    // the frozen tables are consumed back into mutable builders after decode.
+    // Thus the holder identities used by decoding are preserved without ever
     // exposing two live registries with one identity.
     let mut placed_builder = RegistryBuilder::new(&*PLACED_FEATURE);
     let mut configured_builder = RegistryBuilder::new(&*CONFIGURED_FEATURE);
@@ -1870,7 +1885,7 @@ fn build_generated_feature_closure(
             RegistrationInfo::BUILT_IN,
         );
     }
-    let staged_feature_layer = RegistryAccess::from_pairs(vec![
+    let mut staged_feature_layer = RegistryAccess::from_pairs(vec![
         (
             ResourceKey::create_registry_key(Identifier::with_default_namespace(
                 "worldgen/placed_feature",
@@ -1912,7 +1927,15 @@ fn build_generated_feature_closure(
     }
     drop(ops);
     drop(staged_access);
-    drop(staged_feature_layer);
+    // All access clones are gone, so the staged registries can be moved back
+    // into builders. This consumes the temporary frozen tables before the
+    // final freeze and therefore transfers, rather than duplicates, identity.
+    let mut placed_builder = staged_feature_layer
+        .take_registry(&*PLACED_FEATURE)?
+        .into_builder();
+    let mut configured_builder = staged_feature_layer
+        .take_registry(&*CONFIGURED_FEATURE)?
+        .into_builder();
 
     for (id, &name) in configured_slots.iter().enumerate() {
         let identifier = name
@@ -1931,10 +1954,9 @@ fn build_generated_feature_closure(
                 }),
             }),
         };
-        configured_builder.register(
+        configured_builder.replace_registered(
             &ResourceKey::create(&*CONFIGURED_FEATURE, identifier),
             value,
-            RegistrationInfo::BUILT_IN,
         );
     }
     for (id, &name) in placed_slots.iter().enumerate() {
@@ -1952,11 +1974,8 @@ fn build_generated_feature_closure(
                 Vec::new(),
             )),
         };
-        placed_builder.register(
-            &ResourceKey::create(&*PLACED_FEATURE, identifier),
-            value,
-            RegistrationInfo::BUILT_IN,
-        );
+        placed_builder
+            .replace_registered(&ResourceKey::create(&*PLACED_FEATURE, identifier), value);
     }
     Ok((placed_builder.freeze(), configured_builder.freeze()))
 }
@@ -5261,6 +5280,68 @@ mod tests {
         )
         .expect_err("missing nested weighted data holder must fail");
         assert!(error.contains("missing configured feature minecraft:missing_nested_feature"));
+    }
+
+    #[test]
+    fn generated_closure_reads_root_config_for_real_selector_cycles() {
+        let entry = CONFIGURED_FEATURE_BY_NAME
+            .get("minecraft:dark_forest_vegetation")
+            .expect("real selector fixture");
+        let mut json: Value = serde_json::from_str(entry.json).expect("fixture JSON");
+        // `default` is a PlacedFeature holder. Point it at the real placed entry
+        // whose configured holder points back to this configured root. A walker
+        // that ignores the root `config` object cannot observe this cycle.
+        json["config"]["default"] = serde_json::json!("minecraft:dark_forest_vegetation");
+        let error = validate_generated_feature_graph(
+            [GeneratedFeatureNode::Configured(
+                "minecraft:dark_forest_vegetation",
+            )],
+            &mut |node| {
+                if node == GeneratedFeatureNode::Configured("minecraft:dark_forest_vegetation") {
+                    let mut refs = Vec::new();
+                    generated_configured_object(
+                        json.as_object().expect("configured object"),
+                        &mut refs,
+                        "minecraft:dark_forest_vegetation",
+                    )?;
+                    Ok(refs)
+                } else {
+                    generated_feature_edges(node)
+                }
+            },
+        )
+        .expect_err("root configured-feature config must participate in cycle checks");
+        assert!(error.contains("generated feature closure cycle"));
+    }
+
+    #[test]
+    fn generated_closure_reads_real_vegetation_patch_holder_without_scanning_metadata() {
+        let entry = CONFIGURED_FEATURE_BY_NAME
+            .get("minecraft:moss_patch")
+            .expect("real vegetation-patch fixture");
+        let mut json: Value = serde_json::from_str(entry.json).expect("fixture JSON");
+        // This is a real Holder<PlacedFeature> shape under `vegetation_feature`.
+        json["config"]["vegetation_feature"]["feature"] =
+            serde_json::json!("minecraft:missing_nested_feature");
+        let error = generated_configured_object(
+            json.as_object().expect("configured object"),
+            &mut Vec::new(),
+            "minecraft:moss_patch",
+        )
+        .expect_err("missing vegetation holder must fail closure validation");
+        assert!(error.contains("missing configured feature minecraft:missing_nested_feature"));
+
+        // Other resource strings in the same config are metadata, not holder
+        // edges; they must not be looked up as configured or placed features.
+        let mut metadata_only: Value = serde_json::from_str(entry.json).expect("fixture JSON");
+        metadata_only["config"]["replaceable"] =
+            serde_json::json!("#minecraft:missing_but_not_a_feature_holder");
+        generated_configured_object(
+            metadata_only.as_object().expect("configured object"),
+            &mut Vec::new(),
+            "minecraft:moss_patch",
+        )
+        .expect("metadata resource strings are intentionally opaque");
     }
 
     #[test]
