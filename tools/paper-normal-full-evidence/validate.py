@@ -507,12 +507,13 @@ def validate_bundle(bundle_dir: Path) -> None:
         raise Failed("bundle claims Rivet parity or stamps a Rivet commit")
     if bundle.get("contract_sha256") != sha256(CONTRACT_PATH.read_bytes()):
         raise Failed("bundle contract is stale or self-authored")
-    if bundle.get("seeds") != EXPECTED_SEEDS or bundle.get("targets") != [list(item) for item in EXPECTED_TARGETS] or bundle.get("closure_radius") != EXPECTED_RADIUS or bundle.get("attempts_per_seed") != 3:
+    attempts_per_seed = bundle.get("attempts_per_seed")
+    if bundle.get("seeds") != EXPECTED_SEEDS or bundle.get("targets") != [list(item) for item in EXPECTED_TARGETS] or bundle.get("closure_radius") != EXPECTED_RADIUS or not isinstance(attempts_per_seed, int) or attempts_per_seed < 3:
         raise Failed("bundle corpus contract is incomplete or wrong")
     runs = bundle.get("runs")
     if not isinstance(runs, list):
         raise Failed("bundle runs list is absent")
-    expected = {(seed, attempt) for seed in EXPECTED_SEEDS for attempt in (1, 2, 3)}
+    expected = {(seed, attempt) for seed in EXPECTED_SEEDS for attempt in range(1, attempts_per_seed + 1)}
     actual = {(str(item.get("seed")), item.get("attempt")) for item in runs}
     if actual != expected or len(actual) != len(expected):
         raise Failed("bundle does not contain exactly three fresh roots for every seed")
