@@ -44,9 +44,12 @@
 //! lake, amethyst-geode, monster-room, and the Batch 2/3/4 dispatch leaves (ore,
 //! disk, spring, simple_block, block_column, vines, seagrass, freeze_top_layer,
 //! underwater_magma, multiface_growth) are decoded from the generated JSON and
-//! run with their exact feature seeds; seed-42 `minecraft:glow_lichen` now
-//! executes, then the chunk stops at the next selected typed-unavailable path:
-//! `minecraft:dark_forest_vegetation` at step 9/global index 17.
+//! run with their exact feature seeds. The generated placed/configured closure
+//! resolves the random-selector root through the shared registries; Paper's
+//! seed-42 draw misses the 0.025 and 0.05 branches, then selects
+//! `minecraft:dark_oak_leaf_litter` at the 0.6666667 branch. Its supported
+//! placement chain then reaches the next honest boundary, the
+//! `minecraft:patch_grass_forest` world-state seam at step 9/global index 59.
 //! The chunk stays CARVERS. The INITIALIZE_LIGHT/
 //! LIGHT steps are executor-wired but engine-gated (the holder wires no light
 //! engine, so it cannot reach LIGHT). The public
@@ -113,12 +116,13 @@ use rivet_registry::generated::biomes::BIOME_BY_ID;
 use rivet_registry::generated::block_behaviors::{StaticCollisionBox, static_collision_shape_of};
 use rivet_registry::generated::blocks::BlockId;
 use rivet_registry::generated::feature_data::{
-    BIOME_GENERATION_SETTINGS_BY_NAME, CONFIGURED_FEATURE_BY_NAME, MOB_SPAWN_SETTINGS_BY_NAME,
-    PLACED_FEATURE_BY_NAME,
+    BIOME_GENERATION_SETTINGS_BY_NAME, CONFIGURED_FEATURE_BY_NAME, ConfiguredFeatureEntry,
+    MOB_SPAWN_SETTINGS_BY_NAME, PLACED_FEATURE_BY_NAME, PlacedFeatureEntry,
 };
 use rivet_registry::holder::Holder;
 use rivet_registry::holder::RegistryId;
 use rivet_registry::holder_lookup::HolderGetter;
+use rivet_registry::holder_set::HolderSet;
 use rivet_registry::registry_ops::RegistryOps;
 use rivet_registry::{Identifier, RegistrationInfo, ResourceKey};
 use rivet_serialization::codec::Codec;
@@ -128,8 +132,8 @@ use rivet_util::WorldgenRandom;
 use rivet_util::random::LegacyRandomSource;
 use rivet_util::random_source::XoroshiroRandomSource;
 use rivet_util::random_source::random_support;
-use rivet_util::weighted::WeightedRandom;
-use rivet_util::{PositionalRandomFactory, RandomSource};
+use rivet_util::weighted::{Weighted, WeightedList, WeightedRandom};
+use rivet_util::RandomSource;
 use rivet_world::biome::BiomeManager;
 use rivet_world::biome::BiomeResolver;
 use rivet_world::biome::BiomeSource;
@@ -154,22 +158,23 @@ use rivet_world::level::height_accessor::create as create_height_accessor;
 use rivet_world::level::{WorldBorderSettings, WorldGenLevel};
 use rivet_world::levelgen::blending::blender::Blender;
 use rivet_world::levelgen::feature::configurations::block_column_configuration::block_column_configuration_codec;
-use rivet_world::levelgen::feature::configurations::composite_feature_configuration::composite_feature_configuration_codec;
 use rivet_world::levelgen::feature::configurations::disk_configuration::disk_configuration_codec;
 use rivet_world::levelgen::feature::configurations::geode_configuration::geode_configuration_codec;
+use rivet_world::levelgen::feature::configurations::huge_mushroom_feature_configuration::huge_mushroom_feature_configuration_codec;
 use rivet_world::levelgen::feature::configurations::multiface_growth_configuration::multiface_growth_configuration_codec;
 use rivet_world::levelgen::feature::configurations::ore_configuration::ore_configuration_codec;
 use rivet_world::levelgen::feature::configurations::probability_feature_configuration::probability_feature_configuration_codec;
-use rivet_world::levelgen::feature::configurations::random_boolean_feature_configuration::random_boolean_feature_configuration_codec;
-use rivet_world::levelgen::feature::configurations::random_feature_configuration::random_feature_configuration_codec;
 use rivet_world::levelgen::feature::configurations::simple_block_configuration::simple_block_configuration_codec;
 use rivet_world::levelgen::feature::configurations::spring_configuration::spring_configuration_codec;
 use rivet_world::levelgen::feature::configurations::underwater_magma_configuration::underwater_magma_configuration_codec;
+use rivet_world::levelgen::feature::configurations::weighted_random_feature_configuration::WeightedRandomFeatureConfiguration;
 use rivet_world::levelgen::feature::configurations::{
-    FeatureConfiguration, NoneFeatureConfiguration,
+    CompositeFeatureConfiguration, FeatureConfiguration, NoneFeatureConfiguration,
+    RandomBooleanFeatureConfiguration, RandomFeatureConfiguration,
 };
 use rivet_world::levelgen::feature::lake_feature::lake_configuration_codec;
 use rivet_world::levelgen::feature::registry_keys::{CONFIGURED_FEATURE, PLACED_FEATURE};
+use rivet_world::levelgen::feature::weighted_placed_feature::WeightedPlacedFeature;
 use rivet_world::levelgen::feature::{
     ConfiguredFeatureErased, FeatureId, feature_id_from_registry_name,
 };
@@ -743,8 +748,8 @@ impl GenerationChunkHolder {
     /// gather + `retainAll` — and then decodes and runs the registry-backed
     /// lake, amethyst-geode, monster-room, underwater_magma, and glow_lichen
     /// paths at their exact feature seeds before stopping at the first selected
-    /// unsupported path (seed-42 chunk (0,0):
-    /// `minecraft:dark_forest_vegetation` at step 9/global 17); the chunk stays
+    /// unsupported path (seed-42 chunk (0,0): the selector chooses
+    /// `minecraft:patch_grass_forest` at step 9/global 59); the chunk stays
     /// CARVERS.
     pub fn new(pos: ChunkPos, generator: Arc<OverworldGenerator>) -> Self {
         let height_accessor = create_height_accessor(
@@ -856,7 +861,7 @@ impl GenerationChunkHolder {
                 // registry-backed lake, amethyst-geode, monster-room,
                 // underwater_magma, and glow_lichen entries before failing
                 // typed at the first selected unsupported path
-                // (`minecraft:dark_forest_vegetation`, step 9/global 17).
+                // (`minecraft:patch_grass_forest`, step 9/global 59 after selector dispatch).
                 // It must never be "improved" into a silent skip or a blanket
                 // UnsupportedTask.
                 // The closure captures one generator clone; the holder keeps
@@ -890,7 +895,7 @@ impl GenerationChunkHolder {
     /// the FeatureSorter, decodes and runs the registry-backed lake, geode,
     /// monster-room, underwater_magma, and glow_lichen paths, and then fails
     /// typed at the first selected unsupported path (`FeaturePlacementDecode`,
-    /// seed-42: `minecraft:dark_forest_vegetation` at step 9/global 17), so the
+    /// seed-42: `minecraft:patch_grass_forest` at step 9/global 59 after selector dispatch), so the
     /// chunk is never stamped FEATURES.
     pub fn status(&self) -> ChunkStatus {
         self.chunk.get_persisted_status()
@@ -1215,8 +1220,10 @@ fn generate_ring_chunk(
 /// executing decoded lake, amethyst-geode, monster-room, underwater_magma, and
 /// glow_lichen leaves with their exact feature seeds. It fails typed
 /// (`GenError::FeaturePlacementDecode`) at the first unsupported selected
-/// feature — seed-42 chunk (0,0), step 9/global index 17:
-/// `minecraft:dark_forest_vegetation`. The generated settings tables are the
+/// nested feature — seed-42 chunk (0,0), step 9/global index 17 selects
+/// `minecraft:dark_oak_leaf_litter`; the run then reaches
+/// `minecraft:patch_grass_forest` at global index 59, whose world-state
+/// `canSurvive` seam is not yet implemented. The generated settings tables are the
 /// full 55-biome surface (no `SettingsNotGenerated`), so this boundary is
 /// reached deterministically every run. No biome is fabricated or silently
 /// skipped.
@@ -1300,7 +1307,7 @@ fn compose_feature_region<'a>(
         generator.generator().get_gen_depth(),
         generator.generator().get_sea_level(),
         Arc::new(generator.biome_source.clone()),
-        generator.registry_access().clone(),
+        generator.feature_access().clone(),
     )
 }
 
@@ -1402,23 +1409,37 @@ fn resolve_feature_settings(
 
 type FeatureOps = RegistryOps<Value, JsonOps>;
 
+/// A generated configured feature whose registered feature type is known but
+/// whose concrete configuration unit has not landed yet. It is a real registry
+/// value, not a selector fallback: named and inline holders resolve normally,
+/// and selecting this value refuses at the feature dispatch boundary.
+#[derive(Debug)]
+struct DeferredGeneratedFeatureConfiguration {
+    configured_key: String,
+}
+
+impl FeatureConfiguration for DeferredGeneratedFeatureConfiguration {
+    fn unavailable_feature(&self) -> Option<&str> {
+        Some(&self.configured_key)
+    }
+}
+
 /// The shared seed-42 feature `RegistryAccess` — the worldgen access composed
 /// with the frozen placed/configured-feature registries the decoder and the
 /// selector/composite features resolve their recursive `Holder` references
 /// through.
 ///
-/// The two feature registries are frozen up front (empty, present): the
-/// `RegistryFileCodec` holder codecs the Batch 2 selectors and the biome
-/// generation settings route through require the registry to *exist* in the
-/// decode ops to resolve even an inline `Direct` placed/configured holder, and
-/// the runtime `place_with_biome_check` path resolves `Holder::Reference` ids
-/// against the owning registry. The shared freeze means both the decode ops
-/// (`RegistryOps::create_from_access`) and the `WorldGenLevel::registry_access`
-/// back-reference observe the same registry ids — the `#181` back-reference
-/// rule that keeps a decoded `Reference` resolvable at placement time.
+/// The two feature registries are built as one generated closure, not as
+/// empty placeholders. The generated ids are full registry ids (not PHF map
+/// iteration order); synthetic gap values preserve those ids, and the final
+/// values keep the same registry identities the staged `RegistryOps` decode
+/// used. A key-only staged view is necessary because
+/// placed and configured features are mutually recursive; it is dropped before
+/// the final frozen registries are published, so a decode failure cannot leak a
+/// partially populated access into the world.
 fn build_feature_access(worldgen: &RegistryAccess) -> RegistryAccess {
-    let placed = RegistryBuilder::new(&*PLACED_FEATURE).freeze();
-    let configured = RegistryBuilder::new(&*CONFIGURED_FEATURE).freeze();
+    let (placed, configured) = build_generated_feature_closure(worldgen)
+        .unwrap_or_else(|error| panic!("generated feature closure refused atomically: {error}"));
     let feature_layer = RegistryAccess::from_pairs(vec![
         (
             ResourceKey::create_registry_key(Identifier::with_default_namespace(
@@ -1442,6 +1463,502 @@ fn build_feature_access(worldgen: &RegistryAccess) -> RegistryAccess {
         .replace_from(RegistryLayer::Static, &[feature_layer])
         .replace_from(RegistryLayer::Worldgen, std::slice::from_ref(worldgen))
         .composite_access()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum GeneratedFeatureNode {
+    Placed(&'static str),
+    Configured(&'static str),
+}
+
+fn sorted_placed_feature_entries()
+-> Result<Vec<(&'static str, &'static PlacedFeatureEntry)>, String> {
+    let mut entries: Vec<_> = PLACED_FEATURE_BY_NAME
+        .entries()
+        .map(|(name, entry)| (*name, entry))
+        .collect();
+    entries.sort_unstable_by_key(|(_, entry)| entry.id);
+    for ((previous_name, previous), (name, entry)) in entries.iter().zip(entries.iter().skip(1)) {
+        if previous.id == entry.id {
+            return Err(format!(
+                "placed features {previous_name} and {name} share generated id {}",
+                entry.id
+            ));
+        }
+    }
+    Ok(entries)
+}
+
+fn sorted_configured_feature_entries()
+-> Result<Vec<(&'static str, &'static ConfiguredFeatureEntry)>, String> {
+    let mut entries: Vec<_> = CONFIGURED_FEATURE_BY_NAME
+        .entries()
+        .map(|(name, entry)| (*name, entry))
+        .collect();
+    entries.sort_unstable_by_key(|(_, entry)| entry.id);
+    for ((previous_name, previous), (name, entry)) in entries.iter().zip(entries.iter().skip(1)) {
+        if previous.id == entry.id {
+            return Err(format!(
+                "configured features {previous_name} and {name} share generated id {}",
+                entry.id
+            ));
+        }
+    }
+    Ok(entries)
+}
+
+fn placed_name_slots(
+    entries: &[(&'static str, &'static PlacedFeatureEntry)],
+) -> Vec<Option<&'static str>> {
+    let mut slots = vec![None; entries.last().map_or(0, |(_, entry)| entry.id as usize + 1)];
+    for &(name, entry) in entries {
+        slots[entry.id as usize] = Some(name);
+    }
+    slots
+}
+
+fn configured_name_slots(
+    entries: &[(&'static str, &'static ConfiguredFeatureEntry)],
+) -> Vec<Option<&'static str>> {
+    let mut slots = vec![None; entries.last().map_or(0, |(_, entry)| entry.id as usize + 1)];
+    for &(name, entry) in entries {
+        slots[entry.id as usize] = Some(name);
+    }
+    slots
+}
+
+#[derive(Clone, Copy, Debug)]
+enum GeneratedHolderKind {
+    Placed,
+    Configured,
+}
+
+fn generated_placed_node(name: &str) -> Option<GeneratedFeatureNode> {
+    PLACED_FEATURE_BY_NAME
+        .entries()
+        .find(|(candidate, _)| **candidate == name)
+        .map(|(candidate, _)| GeneratedFeatureNode::Placed(candidate))
+}
+
+fn generated_configured_node(name: &str) -> Option<GeneratedFeatureNode> {
+    CONFIGURED_FEATURE_BY_NAME
+        .entries()
+        .find(|(candidate, _)| **candidate == name)
+        .map(|(candidate, _)| GeneratedFeatureNode::Configured(candidate))
+}
+
+/// Add a named holder edge, preserving the registry type encoded by the holder
+/// position. Inline values are walked recursively instead of being treated as
+/// registry names. This is deliberately not a generic JSON string walk: block
+/// names, provider types, tags, placement metadata, and other resource strings
+/// are not feature-holder references.
+fn generated_named_holder(
+    value: &Value,
+    kind: GeneratedHolderKind,
+    out: &mut Vec<GeneratedFeatureNode>,
+    context: &str,
+) -> Result<(), String> {
+    let name = value
+        .as_str()
+        .ok_or_else(|| format!("{context} holder must be a name or inline object"))?;
+    let node = match kind {
+        GeneratedHolderKind::Placed => generated_placed_node(name),
+        GeneratedHolderKind::Configured => generated_configured_node(name),
+    };
+    out.push(node.ok_or_else(|| {
+        let registry = match kind {
+            GeneratedHolderKind::Placed => "placed",
+            GeneratedHolderKind::Configured => "configured",
+        };
+        format!("{context} references missing {registry} feature {name}")
+    })?);
+    Ok(())
+}
+
+/// Walk a `Holder<PlacedFeature>` encoded by `PlacedFeature.CODEC`. Its inline
+/// form is `{feature: <Holder<ConfiguredFeature>>, placement: [...]}`. The
+/// placement list is intentionally opaque; Paper's `ConfiguredFeature` closure
+/// only follows the placed feature's configured-feature holder.
+fn generated_placed_holder(
+    value: &Value,
+    out: &mut Vec<GeneratedFeatureNode>,
+    context: &str,
+) -> Result<(), String> {
+    if value.is_string() {
+        return generated_named_holder(value, GeneratedHolderKind::Placed, out, context);
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{context} placed holder must be a name or object"))?;
+    let feature = object
+        .get("feature")
+        .ok_or_else(|| format!("{context} inline placed holder has no feature"))?;
+    if !object.contains_key("placement") {
+        return Err(format!("{context} inline placed holder has no placement"));
+    }
+    generated_configured_holder(feature, out, &format!("{context}.feature"))
+}
+
+/// Walk a `Holder<ConfiguredFeature>` encoded by `ConfiguredFeature.CODEC`.
+/// Named holders become graph nodes; inline configured values are traversed by
+/// their concrete configuration shape without inventing a registry node.
+fn generated_configured_holder(
+    value: &Value,
+    out: &mut Vec<GeneratedFeatureNode>,
+    context: &str,
+) -> Result<(), String> {
+    if value.is_string() {
+        return generated_named_holder(value, GeneratedHolderKind::Configured, out, context);
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{context} configured holder must be a name or object"))?;
+    generated_configured_object(object, out, context)
+}
+
+fn generated_feature_array<'a>(
+    value: &'a Value,
+    context: &str,
+    field: &str,
+) -> Result<&'a [Value], String> {
+    value
+        .as_array()
+        .map(Vec::as_slice)
+        .ok_or_else(|| format!("{context} {field} must be an array"))
+}
+
+/// Follow exactly the generated configuration shapes whose Paper value types
+/// expose configured-feature sub-features (the selector families), plus the
+/// vegetation-patch holder used by the generated corpus. All other config data
+/// is feature-local and must not be recursively interpreted as holders.
+fn generated_configured_object(
+    object: &serde_json::Map<String, Value>,
+    out: &mut Vec<GeneratedFeatureNode>,
+    context: &str,
+) -> Result<(), String> {
+    let feature_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{context} inline configured feature has no type"))?;
+    let config = object
+        .get("config")
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("{context} inline configured feature has no object config"))?;
+    let mut holder = |value: &Value, field: &str| {
+        generated_placed_holder(value, out, &format!("{context} {field}"))
+    };
+    match feature_type {
+        "minecraft:random_selector" => {
+            for (index, entry) in generated_feature_array(
+                config
+                    .get("features")
+                    .ok_or_else(|| format!("{context} has no features list"))?,
+                context,
+                "features",
+            )?
+            .iter()
+            .enumerate()
+            {
+                let feature = entry
+                    .get("feature")
+                    .ok_or_else(|| format!("{context} features[{index}] has no feature"))?;
+                holder(feature, &format!("features[{index}].feature"))?;
+            }
+            holder(
+                config
+                    .get("default")
+                    .ok_or_else(|| format!("{context} has no default"))?,
+                "default",
+            )?;
+        }
+        "minecraft:random_boolean_selector" => {
+            holder(
+                config
+                    .get("feature_true")
+                    .ok_or_else(|| format!("{context} has no feature_true"))?,
+                "feature_true",
+            )?;
+            holder(
+                config
+                    .get("feature_false")
+                    .ok_or_else(|| format!("{context} has no feature_false"))?,
+                "feature_false",
+            )?;
+        }
+        "minecraft:simple_random_selector" | "minecraft:sequence" => {
+            for (index, feature) in generated_feature_array(
+                config
+                    .get("features")
+                    .ok_or_else(|| format!("{context} has no features list"))?,
+                context,
+                "features",
+            )?
+            .iter()
+            .enumerate()
+            {
+                holder(feature, &format!("features[{index}]"))?;
+            }
+        }
+        "minecraft:weighted_random_selector" => {
+            for (index, entry) in generated_feature_array(
+                config
+                    .get("features")
+                    .ok_or_else(|| format!("{context} has no features list"))?,
+                context,
+                "features",
+            )?
+            .iter()
+            .enumerate()
+            {
+                let data = entry
+                    .get("data")
+                    .ok_or_else(|| format!("{context} features[{index}] has no data"))?;
+                holder(data, &format!("features[{index}].data"))?;
+            }
+        }
+        "minecraft:vegetation_patch" | "minecraft:waterlogged_vegetation_patch" => {
+            holder(
+                config
+                    .get("vegetation_feature")
+                    .ok_or_else(|| format!("{context} has no vegetation_feature"))?,
+                "vegetation_feature",
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn generated_feature_edges(
+    node: GeneratedFeatureNode,
+) -> Result<Vec<GeneratedFeatureNode>, String> {
+    match node {
+        GeneratedFeatureNode::Placed(name) => {
+            let entry = PLACED_FEATURE_BY_NAME
+                .get(name)
+                .ok_or_else(|| format!("missing generated placed feature {name}"))?;
+            let json: Value = serde_json::from_str(entry.json)
+                .map_err(|error| format!("decode {name} JSON: {error}"))?;
+            let object = json
+                .as_object()
+                .ok_or_else(|| format!("{name} JSON must be an object"))?;
+            let configured = object
+                .get("feature")
+                .ok_or_else(|| format!("{name} JSON has no configured feature"))?;
+            let mut refs = Vec::new();
+            generated_configured_holder(configured, &mut refs, name)?;
+            Ok(refs)
+        }
+        GeneratedFeatureNode::Configured(name) => {
+            let entry = CONFIGURED_FEATURE_BY_NAME
+                .get(name)
+                .ok_or_else(|| format!("missing generated configured feature {name}"))?;
+            let json: Value = serde_json::from_str(entry.json)
+                .map_err(|error| format!("decode {name} JSON: {error}"))?;
+            let object = json
+                .as_object()
+                .ok_or_else(|| format!("{name} JSON must be an object"))?;
+            let mut refs = Vec::new();
+            generated_configured_object(object, &mut refs, name)?;
+            Ok(refs)
+        }
+    }
+}
+
+fn validate_generated_feature_graph(
+    roots: impl IntoIterator<Item = GeneratedFeatureNode>,
+    edges: &mut dyn FnMut(GeneratedFeatureNode) -> Result<Vec<GeneratedFeatureNode>, String>,
+) -> Result<(), String> {
+    fn walk(
+        node: GeneratedFeatureNode,
+        state: &mut HashMap<GeneratedFeatureNode, u8>,
+        path: &mut Vec<GeneratedFeatureNode>,
+        edges: &mut dyn FnMut(GeneratedFeatureNode) -> Result<Vec<GeneratedFeatureNode>, String>,
+    ) -> Result<(), String> {
+        match state.get(&node).copied() {
+            Some(2) => return Ok(()),
+            Some(1) => {
+                return Err(format!(
+                    "generated feature closure cycle at {node:?} via {path:?}"
+                ));
+            }
+            _ => {}
+        }
+        state.insert(node, 1);
+        path.push(node);
+        for edge in edges(node)? {
+            walk(edge, state, path, edges)?;
+        }
+        path.pop();
+        state.insert(node, 2);
+        Ok(())
+    }
+
+    let mut state = HashMap::new();
+    let mut path = Vec::new();
+    for root in roots {
+        walk(root, &mut state, &mut path, edges)?;
+    }
+    Ok(())
+}
+
+fn validate_generated_feature_closure(
+    placed_entries: &[(&'static str, &'static PlacedFeatureEntry)],
+    configured_entries: &[(&'static str, &'static ConfiguredFeatureEntry)],
+) -> Result<(), String> {
+    let roots = placed_entries
+        .iter()
+        .map(|&(name, _)| GeneratedFeatureNode::Placed(name))
+        .chain(
+            configured_entries
+                .iter()
+                .map(|&(name, _)| GeneratedFeatureNode::Configured(name)),
+        );
+    validate_generated_feature_graph(roots, &mut generated_feature_edges)
+}
+
+fn build_generated_feature_closure(
+    worldgen: &RegistryAccess,
+) -> Result<(Registry<PlacedFeature>, Registry<ConfiguredFeatureErased>), String> {
+    let placed_entries = sorted_placed_feature_entries()?;
+    let configured_entries = sorted_configured_feature_entries()?;
+    validate_generated_feature_closure(&placed_entries, &configured_entries)?;
+
+    // Build temporary lookup snapshots with fresh identities. After decoding,
+    // the temporary registries are dropped and their identities are transferred
+    // to the final builders, so decoded holder references resolve without ever
+    // exposing two live registries with one identity.
+    let mut placed_builder = RegistryBuilder::new(&*PLACED_FEATURE);
+    let mut configured_builder = RegistryBuilder::new(&*CONFIGURED_FEATURE);
+    let mut staged_placed_builder = placed_builder.staged();
+    let mut staged_configured_builder = configured_builder.staged();
+    let configured_registry_id = staged_configured_builder.registry_id();
+    let placed_slots = placed_name_slots(&placed_entries);
+    let configured_slots = configured_name_slots(&configured_entries);
+    let configured_gap_id = configured_slots
+        .iter()
+        .position(Option::is_none)
+        .ok_or_else(|| "generated closure has no configured gap sentinel".to_string())?
+        as u32;
+    for (id, &name) in configured_slots.iter().enumerate() {
+        let identifier = name
+            .map(Identifier::parse)
+            .unwrap_or_else(|| Identifier::parse(&format!("rivet:generated_configured_gap_{id}")));
+        let value = Arc::new(ConfiguredFeatureErased {
+            feature: FeatureId::new(u32::MAX),
+            config: Arc::new(DeferredGeneratedFeatureConfiguration {
+                configured_key: format!("rivet:generated_configured_gap_{id}"),
+            }),
+        });
+        staged_configured_builder.register(
+            &ResourceKey::create(&*CONFIGURED_FEATURE, identifier),
+            value,
+            RegistrationInfo::BUILT_IN,
+        );
+    }
+    for (id, &name) in placed_slots.iter().enumerate() {
+        let identifier = name
+            .map(Identifier::parse)
+            .unwrap_or_else(|| Identifier::parse(&format!("rivet:generated_placed_gap_{id}")));
+        let value = Arc::new(PlacedFeature::new(
+            Holder::reference(configured_registry_id, configured_gap_id),
+            Vec::new(),
+        ));
+        staged_placed_builder.register(
+            &ResourceKey::create(&*PLACED_FEATURE, identifier),
+            value,
+            RegistrationInfo::BUILT_IN,
+        );
+    }
+    let staged_feature_layer = RegistryAccess::from_pairs(vec![
+        (
+            ResourceKey::create_registry_key(Identifier::with_default_namespace(
+                "worldgen/placed_feature",
+            )),
+            Box::new(staged_placed_builder.freeze()) as rivet_registry::root::AnyBox,
+        ),
+        (
+            ResourceKey::create_registry_key(Identifier::with_default_namespace(
+                "worldgen/configured_feature",
+            )),
+            Box::new(staged_configured_builder.freeze()) as rivet_registry::root::AnyBox,
+        ),
+    ]);
+    let staged_access =
+        LayeredRegistryAccess::new(vec![RegistryLayer::Static, RegistryLayer::Worldgen])
+            .replace_from(
+                RegistryLayer::Static,
+                std::slice::from_ref(&staged_feature_layer),
+            )
+            .replace_from(RegistryLayer::Worldgen, std::slice::from_ref(worldgen))
+            .composite_access();
+    let ops = RegistryOps::create_from_access(&JsonOps::INSTANCE, staged_access.clone());
+
+    let mut decoded_configured = HashMap::with_capacity(configured_entries.len());
+    for &(name, _) in &configured_entries {
+        let decoded = decode_configured_feature(name, &ops, &staged_access)?;
+        decoded_configured.insert(name, Arc::new(decoded));
+    }
+    let mut decoded_placed = HashMap::with_capacity(placed_entries.len());
+    for &(name, _) in &placed_entries {
+        let entry = PLACED_FEATURE_BY_NAME
+            .get(name)
+            .ok_or_else(|| format!("missing generated {name} entry"))?;
+        let json: Value = serde_json::from_str(entry.json)
+            .map_err(|error| format!("decode {name} JSON: {error}"))?;
+        let placed =
+            decode_placed_feature_value(&json, &ops, &staged_access, &format!("decode {name}"))?;
+        decoded_placed.insert(name, Arc::new(placed));
+    }
+    drop(ops);
+    drop(staged_access);
+    drop(staged_feature_layer);
+
+    for (id, &name) in configured_slots.iter().enumerate() {
+        let identifier = name
+            .map(Identifier::parse)
+            .unwrap_or_else(|| Identifier::parse(&format!("rivet:generated_configured_gap_{id}")));
+        let value = match name {
+            Some(name) => Arc::clone(
+                decoded_configured
+                    .get(name)
+                    .ok_or_else(|| format!("decoded configured feature {name} is missing"))?,
+            ),
+            None => Arc::new(ConfiguredFeatureErased {
+                feature: FeatureId::new(u32::MAX),
+                config: Arc::new(DeferredGeneratedFeatureConfiguration {
+                    configured_key: format!("rivet:generated_configured_gap_{id}"),
+                }),
+            }),
+        };
+        configured_builder.register(
+            &ResourceKey::create(&*CONFIGURED_FEATURE, identifier),
+            value,
+            RegistrationInfo::BUILT_IN,
+        );
+    }
+    for (id, &name) in placed_slots.iter().enumerate() {
+        let identifier = name
+            .map(Identifier::parse)
+            .unwrap_or_else(|| Identifier::parse(&format!("rivet:generated_placed_gap_{id}")));
+        let value = match name {
+            Some(name) => Arc::clone(
+                decoded_placed
+                    .get(name)
+                    .ok_or_else(|| format!("decoded placed feature {name} is missing"))?,
+            ),
+            None => Arc::new(PlacedFeature::new(
+                Holder::reference(configured_registry_id, configured_gap_id),
+                Vec::new(),
+            )),
+        };
+        placed_builder.register(
+            &ResourceKey::create(&*PLACED_FEATURE, identifier),
+            value,
+            RegistrationInfo::BUILT_IN,
+        );
+    }
+    Ok((placed_builder.freeze(), configured_builder.freeze()))
 }
 
 fn decode_value<T: Clone>(
@@ -1583,15 +2100,127 @@ fn decode_placement_modifier(
     Ok(modifier)
 }
 
-fn decode_configured_feature(
-    configured_key: &str,
+fn decode_placement_list(
+    placement: &Value,
     ops: &FeatureOps,
+    label: &str,
+) -> Result<Vec<Arc<dyn ErasedPlacementModifier>>, String> {
+    placement
+        .as_array()
+        .ok_or_else(|| format!("{label} placement must be an array"))?
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            decode_placement_modifier(value, ops, &format!("{label} placement {index}"))
+        })
+        .collect()
+}
+
+fn configured_holder_from_value(
+    value: &Value,
+    ops: &FeatureOps,
+    access: &RegistryAccess,
+    label: &str,
+) -> Result<Holder<ConfiguredFeatureErased>, String> {
+    match value {
+        Value::String(name) => {
+            let registry = access
+                .lookup(&*CONFIGURED_FEATURE)
+                .ok_or_else(|| format!("{label} configured-feature registry is missing"))?;
+            let key = ResourceKey::create(&*CONFIGURED_FEATURE, Identifier::parse(name));
+            registry
+                .get(&key)
+                .ok_or_else(|| format!("{label} references missing configured feature {name}"))
+        }
+        Value::Object(_) => Ok(Holder::direct(decode_configured_feature_value(
+            label, value, ops, access,
+        )?)),
+        _ => Err(format!(
+            "{label} configured feature must be a name or object"
+        )),
+    }
+}
+
+fn placed_holder_from_value(
+    value: &Value,
+    ops: &FeatureOps,
+    access: &RegistryAccess,
+    label: &str,
+) -> Result<Holder<PlacedFeature>, String> {
+    match value {
+        Value::String(name) => {
+            let registry = access
+                .lookup(&*PLACED_FEATURE)
+                .ok_or_else(|| format!("{label} placed-feature registry is missing"))?;
+            let key = ResourceKey::create(&*PLACED_FEATURE, Identifier::parse(name));
+            registry
+                .get(&key)
+                .ok_or_else(|| format!("{label} references missing placed feature {name}"))
+        }
+        Value::Object(object) => {
+            let feature = object
+                .get("feature")
+                .ok_or_else(|| format!("{label} inline placed feature has no feature"))?;
+            let configured = configured_holder_from_value(feature, ops, access, label)?;
+            let placement = object
+                .get("placement")
+                .ok_or_else(|| format!("{label} inline placed feature has no placement"))?;
+            Ok(Holder::direct(PlacedFeature::new(
+                configured,
+                decode_placement_list(placement, ops, label)?,
+            )))
+        }
+        _ => Err(format!("{label} placed feature must be a name or object")),
+    }
+}
+
+fn decode_placed_feature_value(
+    value: &Value,
+    ops: &FeatureOps,
+    access: &RegistryAccess,
+    label: &str,
+) -> Result<PlacedFeature, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{label} placed feature must be an object"))?;
+    let feature = object
+        .get("feature")
+        .ok_or_else(|| format!("{label} placed feature has no feature"))?;
+    let configured = configured_holder_from_value(feature, ops, access, label)?;
+    let placement = object
+        .get("placement")
+        .ok_or_else(|| format!("{label} placed feature has no placement"))?;
+    Ok(PlacedFeature::new(
+        configured,
+        decode_placement_list(placement, ops, label)?,
+    ))
+}
+
+fn decode_selector_placed_list(
+    config: &Value,
+    field: &str,
+    ops: &FeatureOps,
+    access: &RegistryAccess,
+    label: &str,
+) -> Result<Vec<Holder<PlacedFeature>>, String> {
+    config
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{label} config has no {field} list"))?
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            placed_holder_from_value(value, ops, access, &format!("{label} {field}[{index}]"))
+        })
+        .collect()
+}
+
+fn decode_configured_feature_value(
+    configured_key: &str,
+    json: &Value,
+    ops: &FeatureOps,
+    access: &RegistryAccess,
 ) -> Result<ConfiguredFeatureErased, String> {
-    let entry = CONFIGURED_FEATURE_BY_NAME
-        .get(configured_key)
-        .ok_or_else(|| format!("missing generated {configured_key} entry"))?;
-    let json: Value = serde_json::from_str(entry.json)
-        .map_err(|error| format!("decode {configured_key} JSON: {error}"))?;
     let feature_type = json
         .get("type")
         .and_then(Value::as_str)
@@ -1615,9 +2244,6 @@ fn decode_configured_feature(
             config_value,
             &format!("decode {configured_key} config"),
         )?),
-        // Batch 2 dispatch leaves (issue #600 config-decode wave) — each
-        // downcast to its own config codec. The config value shapes are the
-        // generated `RegistryOps` JSON verbatim, decoded faithfully.
         "minecraft:ore" => Arc::new(decode_value(
             ore_configuration_codec::<FeatureOps>(),
             ops,
@@ -1648,14 +2274,13 @@ fn decode_configured_feature(
             config_value,
             &format!("decode {configured_key} config"),
         )?),
-        "minecraft:vines" => Arc::new(NoneFeatureConfiguration),
+        "minecraft:vines" | "minecraft:freeze_top_layer" => Arc::new(NoneFeatureConfiguration),
         "minecraft:seagrass" => Arc::new(decode_value(
             probability_feature_configuration_codec::<FeatureOps>(),
             ops,
             config_value,
             &format!("decode {configured_key} config"),
         )?),
-        "minecraft:freeze_top_layer" => Arc::new(NoneFeatureConfiguration),
         "minecraft:underwater_magma" => Arc::new(decode_value(
             underwater_magma_configuration_codec::<FeatureOps>(),
             ops,
@@ -1668,31 +2293,124 @@ fn decode_configured_feature(
             config_value,
             &format!("decode {configured_key} config"),
         )?),
-        "minecraft:random_selector" => Arc::new(decode_value(
-            random_feature_configuration_codec::<FeatureOps>(),
+        "minecraft:huge_red_mushroom" | "minecraft:huge_brown_mushroom" => Arc::new(decode_value(
+            huge_mushroom_feature_configuration_codec::<FeatureOps>(),
             ops,
             config_value,
             &format!("decode {configured_key} config"),
         )?),
-        "minecraft:simple_random_selector" => Arc::new(decode_value(
-            composite_feature_configuration_codec::<FeatureOps>(),
-            ops,
-            config_value,
-            &format!("decode {configured_key} config"),
-        )?),
-        "minecraft:random_boolean_selector" => Arc::new(decode_value(
-            random_boolean_feature_configuration_codec::<FeatureOps>(),
-            ops,
-            config_value,
-            &format!("decode {configured_key} config"),
-        )?),
-        other => {
-            return Err(format!(
-                "{configured_key} has unsupported feature type {other}"
-            ));
+        "minecraft:random_selector" => {
+            let features = config_value
+                .get("features")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("{configured_key} config has no features list"))?
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let chance = item.get("chance").and_then(Value::as_f64).ok_or_else(|| {
+                        format!("{configured_key} features[{index}] has no chance")
+                    })? as f32;
+                    let feature = item.get("feature").ok_or_else(|| {
+                        format!("{configured_key} features[{index}] has no feature")
+                    })?;
+                    Ok(WeightedPlacedFeature::new(
+                        placed_holder_from_value(
+                            feature,
+                            ops,
+                            access,
+                            &format!("{configured_key} features[{index}]"),
+                        )?,
+                        chance,
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let default = config_value
+                .get("default")
+                .ok_or_else(|| format!("{configured_key} config has no default"))?;
+            Arc::new(RandomFeatureConfiguration::new(
+                features,
+                placed_holder_from_value(
+                    default,
+                    ops,
+                    access,
+                    &format!("{configured_key} default"),
+                )?,
+            ))
         }
+        "minecraft:random_boolean_selector" => Arc::new(RandomBooleanFeatureConfiguration::new(
+            placed_holder_from_value(
+                config_value
+                    .get("feature_true")
+                    .ok_or_else(|| format!("{configured_key} config has no feature_true"))?,
+                ops,
+                access,
+                &format!("{configured_key} feature_true"),
+            )?,
+            placed_holder_from_value(
+                config_value
+                    .get("feature_false")
+                    .ok_or_else(|| format!("{configured_key} config has no feature_false"))?,
+                ops,
+                access,
+                &format!("{configured_key} feature_false"),
+            )?,
+        )),
+        "minecraft:simple_random_selector" | "minecraft:sequence" => {
+            Arc::new(CompositeFeatureConfiguration::new(HolderSet::direct(
+                decode_selector_placed_list(config_value, "features", ops, access, configured_key)?,
+            )))
+        }
+        "minecraft:weighted_random_selector" => {
+            let entries = config_value
+                .get("features")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("{configured_key} config has no features list"))?;
+            let weighted = entries
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let weight = item.get("weight").and_then(Value::as_i64).ok_or_else(|| {
+                        format!("{configured_key} features[{index}] has no weight")
+                    })?;
+                    let weight = i32::try_from(weight).map_err(|_| {
+                        format!("{configured_key} features[{index}] weight is out of range")
+                    })?;
+                    let data = item
+                        .get("data")
+                        .ok_or_else(|| format!("{configured_key} features[{index}] has no data"))?;
+                    Ok(Weighted::new(
+                        placed_holder_from_value(
+                            data,
+                            ops,
+                            access,
+                            &format!("{configured_key} features[{index}]"),
+                        )?,
+                        weight,
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Arc::new(WeightedRandomFeatureConfiguration::new(
+                WeightedList::of_weighted_list(&weighted),
+            ))
+        }
+        _ => Arc::new(DeferredGeneratedFeatureConfiguration {
+            configured_key: configured_key.to_string(),
+        }),
     };
     Ok(ConfiguredFeatureErased { feature, config })
+}
+
+fn decode_configured_feature(
+    configured_key: &str,
+    ops: &FeatureOps,
+    access: &RegistryAccess,
+) -> Result<ConfiguredFeatureErased, String> {
+    let entry = CONFIGURED_FEATURE_BY_NAME
+        .get(configured_key)
+        .ok_or_else(|| format!("missing generated {configured_key} entry"))?;
+    let json: Value = serde_json::from_str(entry.json)
+        .map_err(|error| format!("decode {configured_key} JSON: {error}"))?;
+    decode_configured_feature_value(configured_key, &json, ops, access)
 }
 
 fn decode_placement_modifiers(
@@ -1717,8 +2435,8 @@ fn decode_placement_modifiers(
 }
 
 struct DecodedPlacedFeature {
-    placed_registry: Registry<PlacedFeature>,
-    configured_registry: Registry<ConfiguredFeatureErased>,
+    placed_registry: &'static Registry<PlacedFeature>,
+    configured_registry: &'static Registry<ConfiguredFeatureErased>,
     placed_holder: Holder<PlacedFeature>,
 }
 
@@ -1730,8 +2448,8 @@ impl DecodedPlacedFeature {
         random: &mut WorldgenRandom<XoroshiroRandomSource>,
         origin: &BlockPos,
     ) {
-        let placed = self.placed_holder.value(&self.placed_registry);
-        placed.place_with_biome_check(&self.configured_registry, level, generator, random, origin);
+        let placed = self.placed_holder.value(self.placed_registry);
+        placed.place_with_biome_check(self.configured_registry, level, generator, random, origin);
     }
 }
 
@@ -1739,47 +2457,25 @@ fn decode_placed_feature(
     placed_key: &str,
     generator: &OverworldGenerator,
 ) -> Result<DecodedPlacedFeature, String> {
-    let entry = PLACED_FEATURE_BY_NAME
-        .get(placed_key)
-        .ok_or_else(|| format!("missing generated {placed_key} entry"))?;
-    let json: Value = serde_json::from_str(entry.json)
-        .map_err(|error| format!("decode {placed_key} JSON: {error}"))?;
-    let configured_key = json
-        .get("feature")
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("{placed_key} JSON has no configured feature"))?;
-    let ops =
-        RegistryOps::create_from_access(&JsonOps::INSTANCE, generator.feature_access().clone());
-    let configured = Arc::new(decode_configured_feature(configured_key, &ops)?);
-    let mut configured_builder = RegistryBuilder::new(&*CONFIGURED_FEATURE);
-    let configured_registry_id = configured_builder.registry_id();
-    let configured_resource_key =
-        ResourceKey::create(&*CONFIGURED_FEATURE, Identifier::parse(configured_key));
-    let configured_id = configured_builder.register(
-        &configured_resource_key,
-        configured,
-        RegistrationInfo::BUILT_IN,
-    );
-    let configured_registry = configured_builder.freeze();
-
-    let modifiers = decode_placement_modifiers(placed_key, generator.feature_access())?;
-    let placed_value = Arc::new(PlacedFeature::new(
-        Holder::reference(configured_registry_id, configured_id.0),
-        modifiers,
-    ));
-    let mut placed_builder = RegistryBuilder::new(&*PLACED_FEATURE);
-    let placed_registry_id = placed_builder.registry_id();
-    let placed_resource_key = ResourceKey::create(&*PLACED_FEATURE, Identifier::parse(placed_key));
-    let placed_id = placed_builder.register(
-        &placed_resource_key,
-        placed_value,
-        RegistrationInfo::BUILT_IN,
-    );
-    let placed_registry = placed_builder.freeze();
+    if !PLACED_FEATURE_BY_NAME.contains_key(placed_key) {
+        return Err(format!("missing generated {placed_key} entry"));
+    }
+    let placed_registry = generator
+        .feature_access()
+        .lookup(&*PLACED_FEATURE)
+        .ok_or_else(|| "generated placed-feature registry is missing".to_string())?;
+    let configured_registry = generator
+        .feature_access()
+        .lookup(&*CONFIGURED_FEATURE)
+        .ok_or_else(|| "generated configured-feature registry is missing".to_string())?;
+    let key = ResourceKey::create(&*PLACED_FEATURE, Identifier::parse(placed_key));
+    let placed_holder = placed_registry
+        .get(&key)
+        .ok_or_else(|| format!("generated placed-feature holder {placed_key} is missing"))?;
     Ok(DecodedPlacedFeature {
         placed_registry,
         configured_registry,
-        placed_holder: Holder::reference(placed_registry_id, placed_id.0),
+        placed_holder,
     })
 }
 
@@ -1813,9 +2509,13 @@ fn configured_feature_is_executable(placed_key: &str) -> Result<bool, String> {
             | Some("minecraft:freeze_top_layer")
             | Some("minecraft:underwater_magma")
             | Some("minecraft:multiface_growth")
+            | Some("minecraft:huge_brown_mushroom")
+            | Some("minecraft:huge_red_mushroom")
             | Some("minecraft:random_selector")
+            | Some("minecraft:weighted_random_selector")
             | Some("minecraft:simple_random_selector")
             | Some("minecraft:random_boolean_selector")
+            | Some("minecraft:sequence")
     ))
 }
 
@@ -1868,11 +2568,38 @@ fn placement_selects(
         feature_key,
     };
     let dummy_feature = ConfiguredFeatureErased {
-        feature: FeatureId::new(0),
-        config: Arc::new(NoneFeatureConfiguration),
+        feature: FeatureId::new(u32::MAX),
+        config: Arc::new(DeferredGeneratedFeatureConfiguration {
+            configured_key: format!("{feature_key} placement selection"),
+        }),
     };
     let placed = PlacedFeature::new(Holder::Direct(dummy_feature), modifiers);
     Ok(placed.has_placement_positions(region, &selection_generator, random, origin))
+}
+
+fn generated_boundary_feature_key(
+    payload: &(dyn std::any::Any + Send),
+    fallback: &'static str,
+) -> &'static str {
+    let message = if let Some(message) = payload.downcast_ref::<String>() {
+        message.as_str()
+    } else if let Some(message) = payload.downcast_ref::<&'static str>() {
+        message
+    } else {
+        return fallback;
+    };
+    let prefix = "generated feature ";
+    let Some(name) = message
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.split(' ').next())
+    else {
+        return fallback;
+    };
+    PLACED_FEATURE_BY_NAME
+        .entries()
+        .find(|(candidate, _)| **candidate == name)
+        .map(|(candidate, _)| *candidate)
+        .unwrap_or(fallback)
 }
 
 fn run_biome_decoration(
@@ -1979,12 +2706,37 @@ fn run_biome_decoration(
                     generator: Arc::clone(generator),
                     feature_key,
                 };
-                placed.place_with_biome_check(
-                    &mut region,
-                    &dispatch_generator,
-                    &mut random,
-                    &origin,
-                );
+                let placement = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    placed.place_with_biome_check(
+                        &mut region,
+                        &dispatch_generator,
+                        &mut random,
+                        &origin,
+                    );
+                }));
+                if let Err(payload) = placement {
+                    if payload.downcast_ref::<String>().is_some_and(|message| {
+                        message.starts_with("generated feature ")
+                            || message.contains("BlockStateBase.canSurvive is not implemented")
+                    }) || payload
+                        .downcast_ref::<&'static str>()
+                        .is_some_and(|message| {
+                            message.starts_with("generated feature ")
+                                || message.contains("BlockStateBase.canSurvive is not implemented")
+                        })
+                    {
+                        return Err(GenError::FeaturePlacementDecode {
+                            chunk_pos: center_pos,
+                            step_index,
+                            global_feature_index,
+                            feature_key: generated_boundary_feature_key(
+                                payload.as_ref(),
+                                feature_key,
+                            ),
+                        });
+                    }
+                    std::panic::resume_unwind(payload);
+                }
                 continue;
             }
             let selected =
@@ -3350,6 +4102,7 @@ mod tests {
     use rivet_util::RandomSource;
     use rivet_world::level::WorldGenLevel;
     use rivet_world::levelgen::feature::FeatureBehavior;
+    use rivet_world::levelgen::feature::configurations::HugeMushroomFeatureConfiguration;
     use rivet_world::levelgen::feature::configurations::MultifaceGrowthConfiguration;
     use rivet_world::levelgen::feature::configurations::ProbabilityFeatureConfiguration;
     use rivet_world::levelgen::feature::configurations::UnderwaterMagmaConfiguration;
@@ -3938,9 +4691,11 @@ mod tests {
     /// UNDERGROUND_ORES step — underwater_magma (global 26) now executes but
     /// places no magma in this dry origin union, so it consumes no placement
     /// RNG past its scan. Batch 4 then decodes and executes `glow_lichen` through
-    /// `minecraft:multiface_growth`. The next unsupported *selected* path is
-    /// `minecraft:dark_forest_vegetation` at step 9/global index 17. The chunk is
-    /// never stamped FEATURES; the holder restores its pre-call status and data.
+    /// `minecraft:multiface_growth`. The random-selector branch at global 17
+    /// selects `minecraft:dark_oak_leaf_litter`; the next typed boundary is
+    /// `minecraft:patch_grass_forest` at step 9/global index 59 when its
+    /// simple-block leaf reaches the unimplemented `canSurvive` seam. The chunk
+    /// is never stamped FEATURES (it stays CARVERS).
     #[test]
     fn generate_through_features_rolls_back_fresh_holder_and_caches_failure() {
         let generator = test_generator();
@@ -3960,12 +4715,12 @@ mod tests {
             }) => {
                 assert_eq!(chunk_pos, ChunkPos::new(0, 0));
                 assert_eq!(step_index, 9);
-                assert_eq!(global_feature_index, 17);
-                assert_eq!(feature_key, "minecraft:dark_forest_vegetation");
+                assert_eq!(global_feature_index, 59);
+                assert_eq!(feature_key, "minecraft:patch_grass_forest");
             }
             other => {
                 panic!(
-                    "FEATURES must stop at the selected dark_forest_vegetation mismatch; got {other:?}"
+                    "FEATURES must stop at the selected patch_grass_forest boundary; got {other:?}"
                 )
             }
         }
@@ -4138,13 +4893,13 @@ mod tests {
         let generator = test_generator();
         let decoded = decode_placed_feature("minecraft:lake_lava_underground", &generator)
             .expect("the seed-42 lake entry must decode");
-        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        let placed = decoded.placed_holder.value(decoded.placed_registry);
         assert_eq!(placed.placement().len(), 6);
         assert!(matches!(
             placed.feature(),
             Holder::Reference { registry, .. } if *registry == decoded.configured_registry.registry_id()
         ));
-        let configured = placed.feature().value(&decoded.configured_registry);
+        let configured = placed.feature().value(decoded.configured_registry);
         assert_eq!(
             configured.feature,
             feature_id_from_registry_name("minecraft:lake")
@@ -4157,12 +4912,12 @@ mod tests {
         let generator = test_generator();
         let decoded = decode_placed_feature("minecraft:amethyst_geode", &generator)
             .expect("the amethyst geode entry must decode");
-        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        let placed = decoded.placed_holder.value(decoded.placed_registry);
         assert!(matches!(
             placed.feature(),
             Holder::Reference { registry, .. } if *registry == decoded.configured_registry.registry_id()
         ));
-        let configured = placed.feature().value(&decoded.configured_registry);
+        let configured = placed.feature().value(decoded.configured_registry);
         assert_eq!(
             configured.feature,
             feature_id_from_registry_name("minecraft:geode")
@@ -4230,7 +4985,7 @@ mod tests {
     /// The Batch 2/3 decoder arms decode the generated configured/placed JSON of
     /// each dispatch leaf seated in the seed-42 closure. These focused tests
     /// cover the decoder arms directly — the runtime stops at the step-9
-    /// dark_forest_vegetation boundary, so the later-step leaves (springs,
+    /// dark-oak selector boundary, so the later-step leaves (springs,
     /// seagrass, freeze_top_layer) cannot be reached end-to-end and get their own
     /// independent decode coverage here. The simple_block, block_column, and
     /// vines arms are not separately exercised by these tests.
@@ -4239,9 +4994,9 @@ mod tests {
         let generator = test_generator();
         let decoded = decode_placed_feature("minecraft:ore_dirt", &generator)
             .expect("the seed-42 ore_dirt entry must decode");
-        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        let placed = decoded.placed_holder.value(decoded.placed_registry);
         assert_eq!(placed.placement().len(), 4);
-        let configured = placed.feature().value(&decoded.configured_registry);
+        let configured = placed.feature().value(decoded.configured_registry);
         assert_eq!(
             configured.feature,
             feature_id_from_registry_name("minecraft:ore")
@@ -4259,9 +5014,9 @@ mod tests {
         let generator = test_generator();
         let decoded = decode_placed_feature("minecraft:disk_sand", &generator)
             .expect("the seed-42 disk_sand entry must decode");
-        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        let placed = decoded.placed_holder.value(decoded.placed_registry);
         assert_eq!(placed.placement().len(), 5);
-        let configured = placed.feature().value(&decoded.configured_registry);
+        let configured = placed.feature().value(decoded.configured_registry);
         assert_eq!(
             configured.feature,
             feature_id_from_registry_name("minecraft:disk")
@@ -4280,9 +5035,9 @@ mod tests {
             .expect("the seed-42 spring_water entry must decode");
         let configured = decoded
             .placed_holder
-            .value(&decoded.placed_registry)
+            .value(decoded.placed_registry)
             .feature()
-            .value(&decoded.configured_registry);
+            .value(decoded.configured_registry);
         assert_eq!(
             configured.feature,
             feature_id_from_registry_name("minecraft:spring_feature")
@@ -4301,9 +5056,9 @@ mod tests {
             .expect("the seed-42 seagrass_cold entry must decode");
         let configured = decoded
             .placed_holder
-            .value(&decoded.placed_registry)
+            .value(decoded.placed_registry)
             .feature()
-            .value(&decoded.configured_registry);
+            .value(decoded.configured_registry);
         assert_eq!(
             configured.feature,
             feature_id_from_registry_name("minecraft:seagrass")
@@ -4322,9 +5077,9 @@ mod tests {
             .expect("the freeze_top_layer entry must decode");
         let configured = decoded
             .placed_holder
-            .value(&decoded.placed_registry)
+            .value(decoded.placed_registry)
             .feature()
-            .value(&decoded.configured_registry);
+            .value(decoded.configured_registry);
         assert_eq!(
             configured.feature,
             feature_id_from_registry_name("minecraft:freeze_top_layer")
@@ -4357,9 +5112,9 @@ mod tests {
         );
         let decoded = decode_placed_feature("minecraft:underwater_magma", &generator)
             .expect("the seed-42 underwater_magma entry must decode");
-        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        let placed = decoded.placed_holder.value(decoded.placed_registry);
         assert_eq!(placed.placement().len(), 5);
-        let configured = placed.feature().value(&decoded.configured_registry);
+        let configured = placed.feature().value(decoded.configured_registry);
         assert_eq!(
             configured.feature,
             FeatureId::new(21),
@@ -4386,9 +5141,9 @@ mod tests {
         );
         let decoded = decode_placed_feature("minecraft:glow_lichen", &generator)
             .expect("the seed-42 glow_lichen entry must decode");
-        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        let placed = decoded.placed_holder.value(decoded.placed_registry);
         assert_eq!(placed.placement().len(), 5);
-        let configured = placed.feature().value(&decoded.configured_registry);
+        let configured = placed.feature().value(decoded.configured_registry);
         assert_eq!(configured.feature, FeatureId::new(20));
         let cfg = (configured.config.as_ref() as &dyn std::any::Any)
             .downcast_ref::<MultifaceGrowthConfiguration>()
@@ -4410,10 +5165,11 @@ mod tests {
     /// so the feature returns false having consumed no placement-box RNG. The
     /// run then continues into VEGETAL_DECORATION, where Batch 4 decodes and
     /// executes `minecraft:glow_lichen` through `minecraft:multiface_growth`.
-    /// It refuses at the next unsupported *selected* leaf WITHOUT mutating the
+    /// It refuses at the next unsupported *selected* path WITHOUT mutating the
     /// RNG past that refusal: the run returns typed immediately at
-    /// `minecraft:dark_forest_vegetation` (step 9/global 17), so the chunk stays
-    /// CARVERS and FEATURES is never stamped. The typed-unavailable dispatches
+    /// `minecraft:patch_grass_forest` (step 9/global 59), when its simple-block
+    /// leaf reaches the unimplemented `canSurvive` seam. The chunk stays CARVERS
+    /// and FEATURES is never stamped. The typed-unavailable dispatches
     /// for underwater magma (id 21) and multiface growth (id 20) no longer
     /// refuse; both concrete features are reached.
     #[test]
@@ -4431,8 +5187,8 @@ mod tests {
                 &err,
                 GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
                     step_index: 9,
-                    global_feature_index: 17,
-                    feature_key: "minecraft:dark_forest_vegetation",
+                    global_feature_index: 59,
+                    feature_key: "minecraft:patch_grass_forest",
                     ..
                 })
             ),
@@ -4442,14 +5198,10 @@ mod tests {
     }
 
     /// The three Batch 2 selector leaves are wired in the decoder, and the
-    /// runtime stops at the step-9 dark_forest_vegetation boundary so these
-    /// later-step arms are exercised independently here. Full recursive decode
-    /// of a selector's inline placed/configured sub-features defers with the
-    /// `#126` codec stubs (`configured_feature_direct_codec` and the inline
-    /// `placement_modifier_codec` — issue #126, not yet ported), so the wire
-    /// surface is pinned: each selector dispatch type routes to its config
-    /// codec arm and the recursive sub-feature decode fails typed naming the
-    /// `#126` deferral, never fabricating a holder.
+    /// generated closure now gives their named and inline placed holders one
+    /// shared registry identity. A concrete configuration unit that is not yet
+    /// ported remains an explicit deferred value and refuses only if selected;
+    /// it is never replaced by a selector-specific branch or a no-op.
     #[test]
     fn selector_dispatch_types_are_registered() {
         for (type_name, id) in [
@@ -4465,22 +5217,255 @@ mod tests {
         }
     }
 
-    /// A selector's recursive inline sub-feature decode fails typed with the
-    /// `#126` codec deferral (the inline `ConfiguredFeature`/placement-modifier
-    /// codecs are not yet ported), rather than fabricating a placeholder holder
-    /// or silently dropping the reference. This is the honest boundary for the
-    /// Batch 2 selector arms given the runtime stops at step 6.
     #[test]
-    fn selector_recursive_inline_decode_defers_with_126() {
-        let generator = test_generator();
-        let err = match decode_placed_feature("minecraft:forest_flowers", &generator) {
-            Ok(_) => panic!("the inline-sub-feature decode must fail typed"),
-            Err(e) => e,
-        };
+    fn generated_closure_follows_selector_and_vegetation_holders() {
+        let selector_edges = generated_feature_edges(GeneratedFeatureNode::Configured(
+            "minecraft:dark_forest_vegetation",
+        ))
+        .expect("selector closure edges");
+        assert!(selector_edges.contains(&GeneratedFeatureNode::Placed(
+            "minecraft:dark_oak_leaf_litter",
+        )));
         assert!(
-            err.contains("#126") || err.contains("issue #126") || err.contains("STUB"),
-            "the selector decode must name the #126 deferral, got: {err}"
+            selector_edges.contains(&GeneratedFeatureNode::Placed("minecraft:oak_leaf_litter",))
         );
+
+        let vegetation_edges =
+            generated_feature_edges(GeneratedFeatureNode::Configured("minecraft:moss_patch"))
+                .expect("vegetation-patch closure edge");
+        assert_eq!(
+            vegetation_edges,
+            vec![GeneratedFeatureNode::Configured(
+                "minecraft:moss_vegetation"
+            )]
+        );
+    }
+
+    #[test]
+    fn generated_closure_follows_weighted_data_inside_real_nested_json() {
+        let entry = CONFIGURED_FEATURE_BY_NAME
+            .get("minecraft:sulfur_spring")
+            .expect("weighted generated fixture");
+        let mut json: Value = serde_json::from_str(entry.json).expect("fixture JSON");
+        // Keep the real weighted-random-selector / data / inline sequence shape,
+        // but replace one nested configured holder with a missing named holder.
+        json["config"]["features"][0]["data"]["feature"]["config"]["features"][0] = serde_json::json!({
+            "feature": "minecraft:missing_nested_feature",
+            "placement": [],
+        });
+        let mut edges = Vec::new();
+        let error = generated_configured_object(
+            json.as_object().expect("configured object"),
+            &mut edges,
+            "minecraft:sulfur_spring",
+        )
+        .expect_err("missing nested weighted data holder must fail");
+        assert!(error.contains("missing configured feature minecraft:missing_nested_feature"));
+    }
+
+    #[test]
+    fn generated_graph_rejects_missing_references_and_cycles() {
+        let missing =
+            validate_generated_feature_graph([GeneratedFeatureNode::Placed("root")], &mut |node| {
+                match node {
+                    GeneratedFeatureNode::Placed("root") => {
+                        Ok(vec![GeneratedFeatureNode::Configured("missing")])
+                    }
+                    GeneratedFeatureNode::Configured("missing") => {
+                        Err("missing generated configured feature missing".to_string())
+                    }
+                    other => Err(format!("unexpected node {other:?}")),
+                }
+            })
+            .expect_err("missing graph edge must fail before publication");
+        assert!(missing.contains("missing generated configured feature missing"));
+
+        let cycle =
+            validate_generated_feature_graph([GeneratedFeatureNode::Placed("root")], &mut |node| {
+                match node {
+                    GeneratedFeatureNode::Placed("root") => {
+                        Ok(vec![GeneratedFeatureNode::Configured("branch")])
+                    }
+                    GeneratedFeatureNode::Configured("branch") => {
+                        Ok(vec![GeneratedFeatureNode::Placed("root")])
+                    }
+                    other => Err(format!("unexpected node {other:?}")),
+                }
+            })
+            .expect_err("cyclic graph must fail before publication");
+        assert!(cycle.contains("generated feature closure cycle"));
+    }
+
+    /// The generated closure preserves full generated ids and one registry
+    /// identity for every placed/configured entry. Synthetic gap values retain
+    /// insertion positions that are absent from the generated name tables. The
+    /// dark-forest selector's inline placed
+    /// mushroom holders and named branches therefore resolve through the same
+    /// `RegistryOps` access as the root feature.
+    #[test]
+    fn generated_selector_closure_preserves_full_registry_identity() {
+        let generator = test_generator();
+        let placed = generator
+            .feature_access()
+            .lookup(&*PLACED_FEATURE)
+            .expect("generated placed registry");
+        let configured = generator
+            .feature_access()
+            .lookup(&*CONFIGURED_FEATURE)
+            .expect("generated configured registry");
+        let placed_entries = sorted_placed_feature_entries().expect("generated placed ids");
+        let configured_entries =
+            sorted_configured_feature_entries().expect("generated configured ids");
+        assert_eq!(
+            placed.size(),
+            placed_name_slots(&placed_entries).len() as i32
+        );
+        assert_eq!(
+            configured.size(),
+            configured_name_slots(&configured_entries).len() as i32
+        );
+        for (name, entry) in placed_entries {
+            let key = ResourceKey::create(&*PLACED_FEATURE, Identifier::parse(name));
+            assert!(matches!(
+                placed.get(&key),
+                Some(Holder::Reference { registry, id })
+                    if registry == placed.registry_id() && id == entry.id as u32
+            ));
+        }
+        for (name, entry) in configured_entries {
+            let key = ResourceKey::create(&*CONFIGURED_FEATURE, Identifier::parse(name));
+            assert!(matches!(
+                configured.get(&key),
+                Some(Holder::Reference { registry, id })
+                    if registry == configured.registry_id() && id == entry.id as u32
+            ));
+        }
+        decode_placed_feature("minecraft:dark_forest_vegetation", &generator)
+            .expect("the random-selector root must decode through the generated closure");
+    }
+
+    /// Inline selector branches retain their concrete configured holders. The
+    /// two mushroom branches are executable registered features (ids 11 and 10),
+    /// while the named dark-oak branch remains a registry reference to the
+    /// deferred tree leaf; no branch is flattened into a no-op.
+    #[test]
+    fn generated_selector_keeps_inline_mushroom_branches_typed() {
+        let generator = test_generator();
+        let configured = generator
+            .feature_access()
+            .lookup(&*CONFIGURED_FEATURE)
+            .expect("generated configured registry");
+        let key = ResourceKey::create(
+            &*CONFIGURED_FEATURE,
+            Identifier::parse("minecraft:dark_forest_vegetation"),
+        );
+        let root = configured.get(&key).expect("dark forest configured holder");
+        let root = root.value(configured);
+        let selector = (root.config.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<RandomFeatureConfiguration>()
+            .expect("dark forest must retain random selector configuration");
+        assert_eq!(selector.features.len(), 7);
+        for (branch, expected_id) in selector.features[..2].iter().zip([11_u32, 10_u32]) {
+            let Holder::Direct(placed) = branch.feature() else {
+                panic!("mushroom selector branch must remain inline");
+            };
+            let configured_branch = placed.feature().value(configured);
+            assert_eq!(configured_branch.feature, FeatureId::new(expected_id));
+            assert!(
+                (configured_branch.config.as_ref() as &dyn std::any::Any)
+                    .downcast_ref::<HugeMushroomFeatureConfiguration>()
+                    .is_some(),
+                "mushroom branch must decode its concrete configuration"
+            );
+        }
+        assert!(matches!(
+            selector.features[2].feature(),
+            Holder::Reference { registry, id }
+                if *registry == generator
+                    .feature_access()
+                    .lookup(&*PLACED_FEATURE)
+                    .expect("generated placed registry")
+                    .registry_id()
+                    && *id == PLACED_FEATURE_BY_NAME
+                        .get("minecraft:dark_oak_leaf_litter")
+                        .expect("dark oak placed entry")
+                        .id as u32
+        ));
+    }
+
+    /// Gap slots are real registry positions but fail closed with a sentinel
+    /// feature id rather than accidentally dispatching Feature.NO_OP (id 0).
+    #[test]
+    fn generated_registry_gaps_never_use_no_op_id() {
+        let generator = test_generator();
+        let configured = generator
+            .feature_access()
+            .lookup(&*CONFIGURED_FEATURE)
+            .expect("generated configured registry");
+        let entries = sorted_configured_feature_entries().expect("generated configured ids");
+        let gap_id = configured_name_slots(&entries)
+            .iter()
+            .position(Option::is_none)
+            .expect("generated configured gap");
+        let gap = configured
+            .by_id(gap_id as i32)
+            .expect("configured gap value");
+        assert_eq!(gap.feature, FeatureId::new(u32::MAX));
+        assert!(gap.config.unavailable_feature().is_some());
+    }
+
+    /// Every synthetic placed-feature slot points at the configured sentinel,
+    /// never at configured id 0. This keeps a missing generated entry from
+    /// silently dispatching whatever real feature occupies the first slot.
+    #[test]
+    fn generated_placed_gaps_point_at_the_fail_closed_sentinel() {
+        let generator = test_generator();
+        let placed = generator
+            .feature_access()
+            .lookup(&*PLACED_FEATURE)
+            .expect("generated placed registry");
+        let configured = generator
+            .feature_access()
+            .lookup(&*CONFIGURED_FEATURE)
+            .expect("generated configured registry");
+        let configured_entries =
+            sorted_configured_feature_entries().expect("generated configured ids");
+        let configured_gap_id = configured_name_slots(&configured_entries)
+            .iter()
+            .position(Option::is_none)
+            .expect("generated configured gap") as u32;
+        let placed_entries = sorted_placed_feature_entries().expect("generated placed ids");
+        let placed_gap_id = placed_name_slots(&placed_entries)
+            .iter()
+            .position(Option::is_none)
+            .expect("generated placed gap") as i32;
+        let gap = placed.by_id(placed_gap_id).expect("placed gap value");
+        assert!(matches!(
+            gap.feature(),
+            Holder::Reference { registry, id }
+                if *registry == configured.registry_id() && *id == configured_gap_id
+        ));
+    }
+
+    /// Paper's `RandomSelectorFeature.place` draws one float per weighted entry
+    /// in list order and stops at the first hit. The selector is reached only
+    /// after its parent `dark_forest_vegetation` placed feature consumes the two
+    /// `InSquarePlacement` `nextInt(16)` draws. At seed 42, step 9/global 17,
+    /// those placement draws are followed by two misses and a third draw that
+    /// selects `minecraft:dark_oak_leaf_litter`; the next failure is therefore
+    /// the selected tree configuration, not the selector or an alternate branch.
+    #[test]
+    fn seed42_dark_forest_selector_selects_dark_oak_leaf_litter() {
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        random.set_feature_seed(42, 17, 9);
+        assert_eq!(random.next_int_bound(16), 15);
+        assert_eq!(random.next_int_bound(16), 7);
+        let first = random.next_float();
+        let second = random.next_float();
+        let third = random.next_float();
+        assert!(first >= 0.025);
+        assert!(second >= 0.05);
+        assert!(third < 0.6666667);
     }
 
     /// The decoration-seed prologue is deterministic and matches the pinned
