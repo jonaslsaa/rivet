@@ -1404,7 +1404,7 @@ fn open_stable_read(path: &Path) -> std::io::Result<fs::File> {
         openat2(
             CWD,
             path,
-            OFlags::RDONLY,
+            OFlags::RDONLY | OFlags::NONBLOCK,
             Mode::empty(),
             ResolveFlags::NO_SYMLINKS,
         )
