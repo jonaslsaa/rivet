@@ -76,9 +76,14 @@ booted — a stale or unverifiable Paper fails loudly, never silently (mirrors
 
 `capture --runs N` additionally proves Paper-vs-Paper determinism: every boot's
 normalized capture must be byte-identical to every other. The fields the
-normalizer rewrites (spawn X/Z, entity ids, keepalive ids, `set_time`, chunk
-coordinates) are exactly the ones the server randomizes per boot; everything
-else is compared and must match.
+normalizer rewrites (spawn X/Z, player-list latency, entity ids, keepalive ids,
+`set_time`, chunk coordinates) are exactly the fields the server varies per
+boot or schedule; everything else is compared and must match. Configuration keepalive
+frames are the one exception to packet presence: Paper emits them once per
+second from `ServerCommonPacketListenerImpl.keepConnectionAlive` while the
+asynchronous registry join is in progress, so their presence/interleaving is
+scheduler-dependent. They are omitted only from the canonical fixture; raw
+invariants still require every configuration request/echo pair.
 
 ## Independent detectors (#195)
 

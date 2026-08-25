@@ -133,22 +133,67 @@ fn check_teleport_ack(packets: &[CapturedPacket], f: &mut Vec<Failure>) {
 }
 
 fn check_keepalive_echo(packets: &[CapturedPacket], f: &mut Vec<Failure>) {
-    let mut challenges: Vec<Vec<u8>> = Vec::new();
-    for p in packets {
-        if p.state == State::Play {
-            if p.direction == Direction::Clientbound && p.id == 44 {
-                challenges.push(p.body.clone());
-            } else if p.direction == Direction::Serverbound && p.id == 28 {
-                let echoed = challenges.iter().find(|c| **c == p.body);
-                if echoed.is_none() {
+    // Configuration and play use different packet ids, but each is the same
+    // Paper keepConnectionAlive request/echo contract. Track them separately so
+    // a response from one protocol state cannot satisfy a challenge in another.
+    let states = [
+        (
+            State::Configuration,
+            Direction::Clientbound,
+            4,
+            Direction::Serverbound,
+            4,
+            true,
+        ),
+        (
+            State::Play,
+            Direction::Clientbound,
+            44,
+            Direction::Serverbound,
+            28,
+            false,
+        ),
+    ];
+
+    for (state, request_dir, request_id, response_dir, response_id, require_all) in states {
+        let mut challenges: Vec<(Vec<u8>, bool)> = Vec::new();
+        for p in packets {
+            if p.state != state {
+                continue;
+            }
+            if p.direction == request_dir && p.id == request_id {
+                challenges.push((p.body.clone(), false));
+            } else if p.direction == response_dir && p.id == response_id {
+                let echoed = challenges
+                    .iter_mut()
+                    .find(|(body, matched)| !*matched && *body == p.body);
+                if let Some((_, matched)) = echoed {
+                    *matched = true;
+                } else {
                     f.push(Failure::new(
                         "keepalive",
                         format!(
                             "{} with body {}",
-                            pkt_identity(State::Play, Direction::Serverbound, 28),
+                            pkt_identity(state, response_dir, response_id),
                             crate::fixture::hex(&p.body)
                         ),
-                        "serverbound keep_alive does not echo any prior clientbound keep_alive body",
+                        "serverbound keep_alive does not echo any prior unmatched clientbound keep_alive body",
+                    ));
+                }
+            }
+        }
+
+        if require_all {
+            for (body, matched) in challenges {
+                if !matched {
+                    f.push(Failure::new(
+                        "keepalive",
+                        format!(
+                            "{} with body {}",
+                            pkt_identity(state, request_dir, request_id),
+                            crate::fixture::hex(&body)
+                        ),
+                        "clientbound keep_alive was never echoed by a matching serverbound keep_alive",
                     ));
                 }
             }
@@ -414,6 +459,65 @@ mod tests {
         v.push(pkt(State::Play, Direction::Serverbound, 28, vec![0; 8]));
         let fails = check(&v);
         assert!(fails.iter().any(|x| x.kind == "keepalive"), "{fails:?}");
+    }
+
+    #[test]
+    fn configuration_keepalive_requires_exact_one_to_one_echoes() {
+        let challenge = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let request = pkt(
+            State::Configuration,
+            Direction::Clientbound,
+            4,
+            challenge.clone(),
+        );
+        let response = pkt(
+            State::Configuration,
+            Direction::Serverbound,
+            4,
+            challenge.clone(),
+        );
+
+        let clean = check(&[request.clone(), response.clone()]);
+        assert!(!clean.iter().any(|x| x.kind == "keepalive"), "{clean:?}");
+
+        let missing = check(std::slice::from_ref(&request));
+        assert!(
+            missing
+                .iter()
+                .any(|x| x.kind == "keepalive" && x.message.contains("never echoed")),
+            "{missing:?}"
+        );
+
+        let wrong = check(&[
+            request.clone(),
+            pkt(State::Configuration, Direction::Serverbound, 4, vec![9; 8]),
+        ]);
+        assert!(wrong.iter().any(|x| x.kind == "keepalive"), "{wrong:?}");
+
+        let extra = check(&[
+            request.clone(),
+            response.clone(),
+            pkt(State::Configuration, Direction::Serverbound, 4, challenge),
+        ]);
+        assert!(extra.iter().any(|x| x.kind == "keepalive"), "{extra:?}");
+
+        // A non-keepalive packet with the same eight bytes is not an echo and
+        // cannot satisfy the outstanding request.
+        let wrong_kind = check(&[
+            request,
+            pkt(
+                State::Configuration,
+                Direction::Serverbound,
+                7,
+                vec![1, 2, 3, 4, 5, 6, 7, 8],
+            ),
+        ]);
+        assert!(
+            wrong_kind
+                .iter()
+                .any(|x| x.kind == "keepalive" && x.message.contains("never echoed")),
+            "{wrong_kind:?}"
+        );
     }
 
     #[test]

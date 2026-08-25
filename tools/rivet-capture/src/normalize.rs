@@ -8,10 +8,15 @@
 //!   around the fixed world spawn), which shifts the spawn position, the chunk
 //!   view square, and every entity/position coordinate;
 //! - the player entity id (a server-side counter);
-//! - keepalive ids (the server picks a random long, the client echoes it);
+//! - the player-list latency (Paper's keepalive RTT estimate);
+//! - keepalive ids (the server emits a wall-clock challenge, the client echoes it);
 //! - the `set_time` body (tick-dependent world clock state).
 //!
-//! Everything else on the join path is byte-deterministic for a fixed seed +
+//! Configuration keepalives are watchdog traffic emitted once per second while
+//! Paper's asynchronous registry join is in progress. Their presence and
+//! interleaving therefore depend on scheduling, so the canonical form omits
+//! those configuration-only frames while raw relationship checks still validate
+//! every request/echo pair. Everything else on the join path is byte-deterministic for a fixed seed +
 //! superflat config + offline bot identity (verified across fresh boots by
 //! `verify`). This module rewrites exactly those nondeterministic fields,
 //! leaving every other byte untouched, and records each rewrite with a
@@ -112,12 +117,108 @@ fn zero_bytes(body: &mut [u8], off: usize, n: usize) {
     }
 }
 
+/// Rewrite every `UPDATE_LATENCY` value in a player-info update to zero.
+///
+/// Paper constructs the join packet with `ServerCommonPacketListenerImpl.latency()`.
+/// That value is updated from the keepalive RTT calculator, so it depends on the
+/// scheduling and loopback timing of the fresh capture. The packet's action mask
+/// and entry fields are parsed according to `ClientboundPlayerInfoUpdatePacket`;
+/// unsupported optional display-name payloads fail closed and remain byte-exact.
+fn normalize_player_info_latency(body: &[u8]) -> Option<Vec<u8>> {
+    let mut off = 0;
+    let actions = *body.get(off)?;
+    off += 1;
+    let entry_count = frame::read_varint(body, &mut off)?;
+    if entry_count < 0 {
+        return None;
+    }
+    let mut latency_ranges = Vec::new();
+
+    for _ in 0..entry_count {
+        frame::read_bytes(body, &mut off, 16)?; // profile UUID
+        if actions & (1 << 0) != 0 {
+            read_string(body, &mut off)?; // profile name
+            let property_count = frame::read_varint(body, &mut off)?;
+            if property_count < 0 {
+                return None;
+            }
+            for _ in 0..property_count {
+                read_string(body, &mut off)?; // property name
+                read_string(body, &mut off)?; // property value
+                if *body.get(off)? != 0 {
+                    off += 1;
+                    read_string(body, &mut off)?; // property signature
+                } else {
+                    off += 1;
+                }
+            }
+        }
+        if actions & (1 << 1) != 0 {
+            // A non-null chat session is outside this fixture's join shape. Keep
+            // it byte-exact rather than guessing at its nested key encoding.
+            if *body.get(off)? != 0 {
+                return None;
+            }
+            off += 1;
+        }
+        if actions & (1 << 2) != 0 {
+            frame::read_varint(body, &mut off)?; // game mode
+        }
+        if actions & (1 << 3) != 0 {
+            off = off.checked_add(1)?; // listed
+            body.get(off - 1)?;
+        }
+        if actions & (1 << 4) != 0 {
+            let start = off;
+            frame::read_varint(body, &mut off)?; // latency
+            latency_ranges.push((start, off));
+        }
+        if actions & (1 << 5) != 0 {
+            // The trusted display-name component is NBT. The join packet carries
+            // null; fail closed for a non-null component.
+            if *body.get(off)? != 0 {
+                return None;
+            }
+            off += 1;
+        }
+        if actions & (1 << 6) != 0 {
+            frame::read_varint(body, &mut off)?; // list order
+        }
+        if actions & (1 << 7) != 0 {
+            off = off.checked_add(1)?; // show hat
+            body.get(off - 1)?;
+        }
+    }
+    if off != body.len() || latency_ranges.is_empty() {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(body.len());
+    let mut copied = 0;
+    for (start, end) in latency_ranges {
+        out.extend_from_slice(&body[copied..start]);
+        frame::write_varint(&mut out, 0);
+        copied = end;
+    }
+    out.extend_from_slice(&body[copied..]);
+    Some(out)
+}
+
+/// Read a VarInt-prefixed UTF-8 string from a packet body.
+fn read_string(body: &[u8], off: &mut usize) -> Option<()> {
+    let len = frame::read_varint(body, off)?;
+    if len < 0 {
+        return None;
+    }
+    frame::read_bytes(body, off, len as usize).map(|_| ())
+}
+
 /// Normalize a single packet body. Returns the normalized body plus a note.
 ///
-/// Every rewrite here is a field the Paper server randomizes per boot (spawn
-/// offset, entity ids, teleport ids, keepalive ids, tick-dependent set_time),
-/// documented with a one-line justification so the fixture manifest stays
-/// self-describing.
+/// Every rewrite here is a field the Paper server varies per boot or schedule
+/// (spawn offset, entity ids, teleport ids, player-list latency, keepalive ids,
+/// tick-dependent set_time), documented with a one-line justification so the
+/// fixture manifest stays self-describing.
 pub fn normalize_packet(packet: &CapturedPacket, spawn: Option<SpawnCtx>) -> NormalizedPacket {
     let (body, note) = match (packet.state, packet.direction, packet.id) {
         // login_finished: [UUID playerUUID][String username][VarInt props]
@@ -158,6 +259,20 @@ pub fn normalize_packet(packet: &CapturedPacket, spawn: Option<SpawnCtx>) -> Nor
                 "player entity id (server-assigned counter) -> 1".into(),
             )
         }
+        // player_info_update: Paper's initial player-list packet carries the
+        // connection latency measured by its keepalive RTT calculator. Zero only
+        // that UPDATE_LATENCY field; every profile, action, and list-order byte
+        // remains protocol-exact.
+        (State::Play, Direction::Clientbound, 70) => match normalize_player_info_latency(&packet.body) {
+            Some(body) => (
+                body,
+                "player-list latency (fresh-join keepalive RTT) -> 0".into(),
+            ),
+            None => (
+                packet.body.clone(),
+                "player_info_update latency normalization FAILED — raw body kept".into(),
+            ),
+        },
         // player_position: rewrite the teleport id, x/z, delta dx/dz and the
         // rotation floats; keep y (superflat spawn height is deterministic).
         // Body: [VarInt id][x][y][z][dx][dy][dz][yaw][pitch][flags...]
@@ -249,8 +364,13 @@ pub fn normalize_packet(packet: &CapturedPacket, spawn: Option<SpawnCtx>) -> Nor
             }
         }
         // keep_alive: body is an 8-byte random long (server → client) or the
-        // client's echo (client → server).
-        (State::Play, Direction::Clientbound, 44) | (State::Play, Direction::Serverbound, 28) => {
+        // client's echo (client → server). Paper uses the same one-second
+        // keepConnectionAlive tick in configuration and play, so the id is
+        // nondeterministic in every state where the packet can appear.
+        (State::Configuration, Direction::Clientbound, 4)
+        | (State::Configuration, Direction::Serverbound, 4)
+        | (State::Play, Direction::Clientbound, 44)
+        | (State::Play, Direction::Serverbound, 28) => {
             let mut body = packet.body.clone();
             zero_bytes(&mut body, 0, 8);
             (body, "keepalive id (server-random long) -> 0".into())
@@ -494,11 +614,10 @@ fn canonical_set_time(body: &[u8]) -> Option<Vec<u8>> {
 fn is_racy(state: State, direction: Direction, id: i32) -> bool {
     matches!(
         (state, direction, id),
-        // keepalives arrive at a server-chosen instant, possibly interleaved.
+        // Play keepalives arrive at a server-chosen instant, possibly interleaved.
+        // Configuration keepalives are omitted entirely by `omit_from_canonical`.
         (State::Play, Direction::Clientbound, 44)
             | (State::Play, Direction::Serverbound, 28)
-            | (State::Configuration, Direction::Clientbound, 4)
-            | (State::Configuration, Direction::Serverbound, 4)
             // per-tick client traffic: count depends on tick alignment.
             | (State::Play, Direction::Serverbound, 33) // move_player_status_only
             | (State::Play, Direction::Serverbound, 13) // client_tick_end
@@ -509,6 +628,18 @@ fn is_racy(state: State, direction: Direction, id: i32) -> bool {
             // set_time: canonicalized, so a single sample suffices.
             | (State::Play, Direction::Clientbound, 113)
     )
+}
+
+/// Paper's `ServerCommonPacketListenerImpl.keepConnectionAlive` emits a
+/// configuration keepalive every second while the asynchronous registry join is
+/// in progress. Whether that watchdog crosses the capture's configuration
+/// window depends on boot and loopback scheduling, so it is not part of the
+/// fixture's protocol-content contract. Raw invariants still validate every
+/// request/echo pair before this canonical-only omission.
+fn omit_from_canonical(state: State, direction: Direction, id: i32) -> bool {
+    state == State::Configuration
+        && id == 4
+        && matches!(direction, Direction::Clientbound | Direction::Serverbound)
 }
 
 /// Build the canonical, deterministic packet list from a raw capture.
@@ -532,6 +663,9 @@ pub fn canonicalize(packets: &[CapturedPacket]) -> Vec<NormalizedPacket> {
 
     let mut out = Vec::new();
     for (_key, group) in groups {
+        if omit_from_canonical(group[0].state, group[0].direction, group[0].id) {
+            continue;
+        }
         if is_racy(group[0].state, group[0].direction, group[0].id) {
             // Sample the first occurrence only.
             if let Some(first) = group.first() {
@@ -630,11 +764,59 @@ mod tests {
         assert_eq!(frame::read_i32(&n.body, &mut off), Some(0));
     }
 
+    fn player_info_body(latency: i32) -> Vec<u8> {
+        // All eight actions, one offline RivetProbe entry, null chat/display
+        // names, and the initial list order/show-hat fields.
+        let mut body = vec![0xff, 1];
+        body.extend_from_slice(&[0; 16]); // profile UUID
+        write_varint(&mut body, 10);
+        body.extend_from_slice(b"RivetProbe");
+        body.push(0); // profile properties
+        body.push(0); // chat session
+        write_varint(&mut body, 0); // game mode
+        body.push(1); // listed
+        write_varint(&mut body, latency);
+        body.push(0); // display name
+        write_varint(&mut body, 0); // list order
+        body.push(1); // show hat
+        body
+    }
+
+    #[test]
+    fn normalize_player_info_latency_to_zero() {
+        let n = normalize_packet(
+            &pkt(
+                State::Play,
+                Direction::Clientbound,
+                70,
+                player_info_body(28),
+            ),
+            None,
+        );
+        assert_eq!(n.body, player_info_body(0));
+        assert!(n.note.contains("latency"));
+    }
+
+    #[test]
+    fn normalize_player_info_does_not_mask_profile_mutation() {
+        let mut tampered = player_info_body(28);
+        // The profile name starts after the action mask, count, UUID, and its
+        // ten-byte VarInt-prefixed name length.
+        tampered[19] ^= 1;
+        let normalized = normalize_packet(
+            &pkt(State::Play, Direction::Clientbound, 70, tampered),
+            None,
+        );
+        assert_ne!(normalized.body, player_info_body(0));
+    }
+
     #[test]
     fn normalize_keepalive_zeroes_long() {
         let body = 0xDEADBEEFCAFEBABEu64 as i64 as i128;
         let body = (body as i64).to_be_bytes().to_vec();
         for (state, dir, id) in [
+            (State::Configuration, Direction::Clientbound, 4),
+            (State::Configuration, Direction::Serverbound, 4),
             (State::Play, Direction::Clientbound, 44),
             (State::Play, Direction::Serverbound, 28),
         ] {
@@ -749,6 +931,46 @@ mod tests {
         let canon = canonicalize(&packets);
         assert_eq!(canon.len(), 1);
         assert_eq!(canon[0].id, 13);
+    }
+
+    #[test]
+    fn canonicalize_omits_configuration_keepalives_but_keeps_known_packs() {
+        let packets = vec![
+            pkt(
+                State::Configuration,
+                Direction::Clientbound,
+                4,
+                123i64.to_be_bytes().to_vec(),
+            ),
+            pkt(
+                State::Configuration,
+                Direction::Serverbound,
+                4,
+                123i64.to_be_bytes().to_vec(),
+            ),
+            pkt(State::Configuration, Direction::Serverbound, 7, vec![0]),
+        ];
+        let canon = canonicalize(&packets);
+        assert_eq!(canon.len(), 1);
+        assert_eq!(canon[0].id, 7);
+        assert_eq!(canon[0].direction, Direction::Serverbound);
+    }
+
+    #[test]
+    fn canonicalize_does_not_mask_known_pack_response_payload() {
+        let empty = canonicalize(&[pkt(
+            State::Configuration,
+            Direction::Serverbound,
+            7,
+            vec![0],
+        )]);
+        let nonempty = canonicalize(&[pkt(
+            State::Configuration,
+            Direction::Serverbound,
+            7,
+            vec![1],
+        )]);
+        assert_ne!(empty[0].body, nonempty[0].body);
     }
 
     // -- update_advancements display-canonicalization e2e (#221) --------------
