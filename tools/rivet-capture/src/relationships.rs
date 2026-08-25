@@ -8,8 +8,8 @@
 //! - teleport → ack: every `accept_teleportation` id must echo an issued
 //!   `player_position` id, in order (Paper gates `handleMovePlayer` on
 //!   `awaitingPositionFromClient` being cleared by the ack).
-//! - keepalive request → echo: every `serverbound keep_alive` body must equal a
-//!   *prior* `clientbound keep_alive` body (the server disconnects on an
+//! - keepalive request → echo: every `serverbound keep_alive` body must equal the
+//!   oldest pending `clientbound keep_alive` body (the server disconnects on an
 //!   unmatched or out-of-order echo).
 //! - spawn consistency: the spawn `player_position` y equals the movement
 //!   sample y and the `set_default_spawn_position` y; the chunk column of the
@@ -162,7 +162,7 @@ fn check_keepalive_echo(packets: &[CapturedPacket], f: &mut Vec<Failure>) {
                 continue;
             }
             if p.direction == request_dir && p.id == request_id {
-                if require_all && p.body.len() != 8 {
+                if p.body.len() != 8 {
                     f.push(Failure::new(
                         "keepalive",
                         format!(
@@ -171,14 +171,14 @@ fn check_keepalive_echo(packets: &[CapturedPacket], f: &mut Vec<Failure>) {
                             crate::fixture::hex(&p.body)
                         ),
                         format!(
-                            "configuration keep_alive body has length {}, expected exactly 8 bytes",
+                            "keep_alive body has length {}, expected exactly 8 bytes",
                             p.body.len()
                         ),
                     ));
                 }
                 challenges.push((p.body.clone(), false));
             } else if p.direction == response_dir && p.id == response_id {
-                if require_all && p.body.len() != 8 {
+                if p.body.len() != 8 {
                     f.push(Failure::new(
                         "keepalive",
                         format!(
@@ -187,16 +187,29 @@ fn check_keepalive_echo(packets: &[CapturedPacket], f: &mut Vec<Failure>) {
                             crate::fixture::hex(&p.body)
                         ),
                         format!(
-                            "configuration keep_alive body has length {}, expected exactly 8 bytes",
+                            "keep_alive body has length {}, expected exactly 8 bytes",
                             p.body.len()
                         ),
                     ));
                 }
-                let echoed = challenges
-                    .iter_mut()
-                    .find(|(body, matched)| !*matched && *body == p.body);
-                if let Some((_, matched)) = echoed {
-                    *matched = true;
+                // Paper's pendingKeepAlives.peek() requires responses to
+                // consume the oldest outstanding challenge, not any matching
+                // challenge later in the queue.
+                if let Some((body, matched)) = challenges.iter_mut().find(|(_, matched)| !*matched)
+                {
+                    if *body == p.body {
+                        *matched = true;
+                    } else {
+                        f.push(Failure::new(
+                            "keepalive",
+                            format!(
+                                "{} with body {}",
+                                pkt_identity(state, response_dir, response_id),
+                                crate::fixture::hex(&p.body)
+                            ),
+                            "serverbound keep_alive does not echo the oldest prior unmatched clientbound keep_alive body",
+                        ));
+                    }
                 } else {
                     f.push(Failure::new(
                         "keepalive",
@@ -491,6 +504,58 @@ mod tests {
     }
 
     #[test]
+    fn configuration_keepalive_echoes_are_fifo() {
+        let a = vec![1; 8];
+        let b = vec![2; 8];
+        let clean = check(&[
+            pkt(State::Configuration, Direction::Clientbound, 4, a.clone()),
+            pkt(State::Configuration, Direction::Clientbound, 4, b.clone()),
+            pkt(State::Configuration, Direction::Serverbound, 4, a.clone()),
+            pkt(State::Configuration, Direction::Serverbound, 4, b.clone()),
+        ]);
+        assert!(!clean.iter().any(|x| x.kind == "keepalive"), "{clean:?}");
+
+        let out_of_order = check(&[
+            pkt(State::Configuration, Direction::Clientbound, 4, a),
+            pkt(State::Configuration, Direction::Clientbound, 4, b.clone()),
+            pkt(State::Configuration, Direction::Serverbound, 4, b),
+            pkt(State::Configuration, Direction::Serverbound, 4, vec![1; 8]),
+        ]);
+        assert!(
+            out_of_order
+                .iter()
+                .any(|x| x.kind == "keepalive" && x.message.contains("oldest")),
+            "{out_of_order:?}"
+        );
+    }
+
+    #[test]
+    fn play_keepalive_echoes_are_fifo() {
+        let a = vec![1; 8];
+        let b = vec![2; 8];
+        let clean = check(&[
+            pkt(State::Play, Direction::Clientbound, 44, a.clone()),
+            pkt(State::Play, Direction::Clientbound, 44, b.clone()),
+            pkt(State::Play, Direction::Serverbound, 28, a.clone()),
+            pkt(State::Play, Direction::Serverbound, 28, b.clone()),
+        ]);
+        assert!(!clean.iter().any(|x| x.kind == "keepalive"), "{clean:?}");
+
+        let out_of_order = check(&[
+            pkt(State::Play, Direction::Clientbound, 44, a),
+            pkt(State::Play, Direction::Clientbound, 44, b.clone()),
+            pkt(State::Play, Direction::Serverbound, 28, b),
+            pkt(State::Play, Direction::Serverbound, 28, vec![1; 8]),
+        ]);
+        assert!(
+            out_of_order
+                .iter()
+                .any(|x| x.kind == "keepalive" && x.message.contains("oldest")),
+            "{out_of_order:?}"
+        );
+    }
+
+    #[test]
     fn configuration_keepalive_requires_exact_one_to_one_echoes() {
         let challenge = vec![1, 2, 3, 4, 5, 6, 7, 8];
         let request = pkt(
@@ -579,6 +644,28 @@ mod tests {
                     x.kind == "keepalive" && x.message.contains("expected exactly 8 bytes")
                 }),
                 "malformed response with {len} bytes was accepted: {malformed_response:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn play_keepalive_bodies_must_be_exactly_eight_bytes_across_duplicates() {
+        let valid = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        for len in [0, 1, 7, 9] {
+            let malformed = vec![9; len];
+            let failures = check(&[
+                pkt(State::Play, Direction::Clientbound, 44, valid.clone()),
+                pkt(State::Play, Direction::Serverbound, 28, valid.clone()),
+                pkt(State::Play, Direction::Clientbound, 44, malformed.clone()),
+                pkt(State::Play, Direction::Serverbound, 28, malformed),
+            ]);
+            let length_failures = failures
+                .iter()
+                .filter(|x| x.kind == "keepalive" && x.message.contains("expected exactly 8 bytes"))
+                .count();
+            assert_eq!(
+                length_failures, 2,
+                "malformed duplicate pair with {len} bytes was not fully validated: {failures:?}"
             );
         }
     }

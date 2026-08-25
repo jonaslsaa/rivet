@@ -608,26 +608,32 @@ fn canonical_set_time(body: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Racy packet ids: their per-boot COUNT or exact placement in the stream is
-/// timing-dependent, so the canonical form keeps only the first occurrence as a
-/// deterministic sample (compared for byte identity, not count).
-fn is_racy(state: State, direction: Direction, id: i32) -> bool {
+fn is_play_keepalive(state: State, direction: Direction, id: i32) -> bool {
     matches!(
         (state, direction, id),
-        // Play keepalives arrive at a server-chosen instant, possibly interleaved.
-        // Configuration keepalives are omitted entirely by `omit_from_canonical`.
-        (State::Play, Direction::Clientbound, 44)
-            | (State::Play, Direction::Serverbound, 28)
-            // per-tick client traffic: count depends on tick alignment.
-            | (State::Play, Direction::Serverbound, 33) // move_player_status_only
-            | (State::Play, Direction::Serverbound, 13) // client_tick_end
-            // the movement sample: the first position packet after spawn.
-            | (State::Play, Direction::Serverbound, 30) // move_player_pos
-            // chunk-batch acks: one per batch, timing-dependent.
-            | (State::Play, Direction::Serverbound, 11) // chunk_batch_received
-            // set_time: canonicalized, so a single sample suffices.
-            | (State::Play, Direction::Clientbound, 113)
+        (State::Play, Direction::Clientbound, 44) | (State::Play, Direction::Serverbound, 28)
     )
+}
+
+/// Racy packet ids: their per-boot COUNT or exact placement in the stream is
+/// timing-dependent, so the canonical form keeps only the first occurrence as a
+/// deterministic sample (compared for byte identity, not count). Play
+/// keepalives are sampled only when every present body is a valid wire Long;
+/// malformed bodies remain visible for the raw invariant detector.
+fn is_racy(state: State, direction: Direction, id: i32) -> bool {
+    is_play_keepalive(state, direction, id)
+        || matches!(
+            (state, direction, id),
+            // per-tick client traffic: count depends on tick alignment.
+            (State::Play, Direction::Serverbound, 33) // move_player_status_only
+                | (State::Play, Direction::Serverbound, 13) // client_tick_end
+                // the movement sample: the first position packet after spawn.
+                | (State::Play, Direction::Serverbound, 30) // move_player_pos
+                // chunk-batch acks: one per batch, timing-dependent.
+                | (State::Play, Direction::Serverbound, 11) // chunk_batch_received
+                // set_time: canonicalized, so a single sample suffices.
+                | (State::Play, Direction::Clientbound, 113)
+        )
 }
 
 /// Paper's `ServerCommonPacketListenerImpl.keepConnectionAlive` emits a
@@ -671,8 +677,14 @@ pub fn canonicalize(packets: &[CapturedPacket]) -> Vec<NormalizedPacket> {
             continue;
         }
         if is_racy(group[0].state, group[0].direction, group[0].id) {
-            // Sample the first occurrence only.
-            if let Some(first) = group.first() {
+            if is_play_keepalive(group[0].state, group[0].direction, group[0].id)
+                && group.iter().any(|p| p.body.len() != 8)
+            {
+                // Keep malformed play keepalives visible so the raw detector
+                // cannot be bypassed by racy first-occurrence sampling.
+                out.extend(group);
+            } else if let Some(first) = group.first() {
+                // Sample the first occurrence only for well-formed racy traffic.
                 out.push(first.clone());
             }
         } else if group[0].id == 45 && group[0].state == State::Play {
@@ -971,6 +983,40 @@ mod tests {
             )]);
             assert_eq!(canon.len(), 1, "malformed body was omitted: {body:?}");
             assert_eq!(canon[0].body.len(), body.len());
+        }
+    }
+
+    #[test]
+    fn canonicalize_keeps_malformed_play_keepalive_duplicates_visible() {
+        let valid = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        for len in [0, 1, 7, 9] {
+            let malformed = vec![9; len];
+            let canon = canonicalize(&[
+                pkt(State::Play, Direction::Clientbound, 44, valid.clone()),
+                pkt(State::Play, Direction::Clientbound, 44, malformed.clone()),
+                pkt(State::Play, Direction::Serverbound, 28, valid.clone()),
+                pkt(State::Play, Direction::Serverbound, 28, malformed),
+            ]);
+            assert_eq!(
+                canon
+                    .iter()
+                    .filter(|p| p.state == State::Play
+                        && p.direction == Direction::Clientbound
+                        && p.id == 44)
+                    .count(),
+                2,
+                "malformed clientbound duplicate was sampled away: {canon:?}"
+            );
+            assert_eq!(
+                canon
+                    .iter()
+                    .filter(|p| p.state == State::Play
+                        && p.direction == Direction::Serverbound
+                        && p.id == 28)
+                    .count(),
+                2,
+                "malformed serverbound duplicate was sampled away: {canon:?}"
+            );
         }
     }
 
