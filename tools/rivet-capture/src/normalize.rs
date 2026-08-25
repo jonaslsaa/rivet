@@ -1022,6 +1022,17 @@ mod tests {
 
     #[test]
     fn canonicalize_does_not_mask_known_pack_response_payload() {
+        // ServerboundSelectKnownPacks is [count][namespace][id][version] × count.
+        // Use a real non-empty response here, not merely a different count byte,
+        // so a future canonicalizer cannot accidentally replace the payload with
+        // the empty Azalea response while still passing this regression.
+        let mut accepted = Vec::new();
+        write_varint(&mut accepted, 1);
+        for value in ["minecraft", "core", "26.2"] {
+            write_varint(&mut accepted, value.len() as i32);
+            accepted.extend_from_slice(value.as_bytes());
+        }
+
         let empty = canonicalize(&[pkt(
             State::Configuration,
             Direction::Serverbound,
@@ -1032,8 +1043,11 @@ mod tests {
             State::Configuration,
             Direction::Serverbound,
             7,
-            vec![1],
+            accepted.clone(),
         )]);
+        assert_eq!(empty.len(), 1);
+        assert_eq!(nonempty.len(), 1);
+        assert_eq!(nonempty[0].body, accepted);
         assert_ne!(empty[0].body, nonempty[0].body);
     }
 
