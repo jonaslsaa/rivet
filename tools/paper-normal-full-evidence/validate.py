@@ -408,7 +408,10 @@ def _validate_log(path: Path, token: str, *, capture: bool) -> None:
 
     done_at = unique_marker("Done (")
     stopping_at = unique_marker("Stopping server")
-    saved_at = unique_marker("All dimensions are saved")
+    saved_positions = [match.start() for match in re.finditer(re.escape("All dimensions are saved"), text)]
+    if not saved_positions:
+        raise Failed("Paper log marker is missing: All dimensions are saved")
+    saved_at = saved_positions[-1]
     if not (done_at < stopping_at < saved_at):
         raise Failed("Paper graceful-stop markers are out of order")
     if capture:
