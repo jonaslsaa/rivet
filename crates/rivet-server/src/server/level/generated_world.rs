@@ -203,7 +203,7 @@ use crate::server::level::level_chunk::{LevelChunk, LevelChunkBridgeError, Struc
 use crate::server::level::world_gen_region::{
     CenterHolder, GenerationChunkHolderView, OwnedProtoHolder, WorldGenRegion,
 };
-use crate::server::lighting::GeneratedLightWorkspace;
+use crate::server::lighting::{GeneratedLightStorage, GeneratedLightWorkspace};
 
 /// The overworld generated-chunk error surface — every failure is typed, never
 /// a silent fallback.
@@ -835,7 +835,7 @@ impl BiomeResolver for OverworldNoiseBiomeSource {
 /// the shared worldgen objects.
 pub struct GenerationChunkHolder {
     chunk: ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
-    context: WorldGenContext<BlockState, WorldgenBiomeId, StructureKey>,
+    context: WorldGenContext<BlockState, WorldgenBiomeId, StructureKey, GeneratedLightStorage>,
     /// A typed FEATURES boundary is deterministic for the immutable world plan.
     /// Cache it after the first partial attempt so retrying the holder is
     /// idempotent and never repeats feature placement against a partially
@@ -1085,10 +1085,32 @@ impl GenerationChunkHolder {
     /// Attach a finite generated-light workspace in place. This is the stable
     /// handoff for the owning G4 scheduler: normal construction remains
     /// provider-less and boot does not fabricate runtime chunks, while the
-    /// owner can attach its already-composed tick-thread workspace.
+    /// owner can attach its already-composed tick-thread workspace. If this
+    /// holder was
+    /// already carrying a task, its complete owned runtime storage is detached
+    /// and returned before the replacement is installed.
     #[allow(dead_code)]
-    pub(crate) fn attach_generated_light_workspace(&mut self, workspace: GeneratedLightWorkspace) {
-        self.context.attach_generated_light_task(workspace);
+    pub(crate) fn attach_generated_light_workspace(
+        &mut self,
+        workspace: GeneratedLightWorkspace,
+    ) -> Option<GeneratedLightStorage> {
+        self.context.attach_generated_light_task(workspace)
+    }
+
+    /// Detach the current generated-light workspace without consuming the
+    /// holder. This is the G4 recovery path after success, a typed generation
+    /// error, or a caught panic.
+    #[allow(dead_code)]
+    pub(crate) fn take_generated_light_storage(&mut self) -> Option<GeneratedLightStorage> {
+        self.context.take_generated_light_storage()
+    }
+
+    /// Tear down the holder while explicitly recovering any runtime chunks
+    /// still owned by its generated-light task. `Drop` cannot return values, so
+    /// owners must use this method when abandoning a holder.
+    #[allow(dead_code)]
+    pub(crate) fn into_generated_light_storage(self) -> Option<GeneratedLightStorage> {
+        self.context.into_generated_light_storage()
     }
 
     /// The chunk's persisted status — `EMPTY` before any step, `CARVERS` after a

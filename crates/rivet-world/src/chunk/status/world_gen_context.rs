@@ -165,11 +165,12 @@ type LightSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenE
 /// separate from the LIGHT callback so the executor still refuses
 /// `INITIALIZE_LIGHT` before mutating the proto when the provider/storage
 /// dependency is absent.
-pub trait GeneratedLightTask<T, B, S>: 'static
+pub trait GeneratedLightTask<T, B, S, R = ()>: 'static
 where
     T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
+    R: Send + 'static,
 {
     /// Whether the task carries a usable engine/provider dependency.
     fn has_usable_engine(&self) -> bool;
@@ -186,17 +187,25 @@ where
 
     /// Paper's dedicated LIGHT task, including load-vs-compute semantics.
     fn light(&mut self, chunk: &mut ProtoChunk<T, B, S>) -> Result<(), GenError>;
+
+    /// Detach every runtime value still owned by this task. The executor uses
+    /// this consuming handoff when a generation attempt succeeds, fails typed,
+    /// is replaced, or is torn down after a panic; the caller therefore never
+    /// loses the finite LIGHT workspace merely because the task wrapper is
+    /// dropped.
+    fn take_owned_runtime_storage(&mut self) -> Option<R>;
 }
 
 /// `WorldGenContext` (value-layer seam shape) — the caller-supplied BIOMES,
 /// NOISE, SURFACE, CARVERS, and FEATURES worldgen closures, plus the light
 /// engine the INITIALIZE_LIGHT/LIGHT tasks route to, generic over the chunk's
 /// block/biome value types.
-pub struct WorldGenContext<T, B, S>
+pub struct WorldGenContext<T, B, S, R = ()>
 where
     T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash,
+    R: Send + 'static,
 {
     /// The `ChunkStatusTasks::generateBiomes` seam — fills the chunk's biomes.
     /// The real body is `ChunkGenerator.createBiomes` (deferred #185); the
@@ -252,7 +261,7 @@ where
     /// tick-thread workspace/provider. This is the server handoff for a
     /// generated light workspace; it keeps engine capability and LIGHT
     /// execution in one value-owned owner.
-    generated_light: Option<Box<dyn GeneratedLightTask<T, B, S>>>,
+    generated_light: Option<Box<dyn GeneratedLightTask<T, B, S, R>>>,
 }
 
 /// The executor seam's failure modes.
@@ -510,11 +519,12 @@ fn ensure_canonical_rung(task: ChunkStatusTask, target: ChunkStatus) -> Result<(
     Ok(())
 }
 
-impl<T, B, S> WorldGenContext<T, B, S>
+impl<T, B, S, R> WorldGenContext<T, B, S, R>
 where
     T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     S: Eq + std::hash::Hash + 'static,
+    R: Send + 'static,
 {
     /// Wraps the five worldgen seam closures (owned, mirroring the record).
     /// The light engine is left unattached — the slice wires it with
@@ -565,9 +575,45 @@ where
     /// Attaches a complete generated-light task in place. Unlike
     /// [`Self::with_light`], this task carries the engine/provider capability
     /// and the transactional LIGHT implementation in one tick-thread-owned
-    /// value.
-    pub fn attach_generated_light_task(&mut self, task: impl GeneratedLightTask<T, B, S>) {
+    /// value. Replacing an existing task first detaches its owned runtime
+    /// storage and returns it to the caller.
+    pub fn attach_generated_light_task(
+        &mut self,
+        task: impl GeneratedLightTask<T, B, S, R>,
+    ) -> Option<R> {
+        // Extract while the old task is still in the context. If a custom task
+        // panics during extraction, the context retains it for a later recovery
+        // attempt instead of dropping its runtime owner during unwinding.
+        let detached = self
+            .generated_light
+            .as_mut()
+            .map(|task| task.take_owned_runtime_storage());
         self.generated_light = Some(Box::new(task));
+        detached.flatten()
+    }
+
+    /// Detach the generated-light task's owned runtime storage without
+    /// consuming the generation context. This is the recovery path after a
+    /// successful run, a typed generation error, or a caught task panic.
+    pub fn take_generated_light_storage(&mut self) -> Option<R> {
+        let detached = self
+            .generated_light
+            .as_mut()
+            .map(|task| task.take_owned_runtime_storage());
+        // Only remove the wrapper after its extraction completed. A panic in a
+        // custom extraction implementation therefore leaves the task—and its
+        // still-owned storage—recoverable in this context.
+        if detached.is_some() {
+            self.generated_light.take();
+        }
+        detached.flatten()
+    }
+
+    /// Consume the context while explicitly extracting any runtime storage
+    /// still owned by its generated-light task. Callers use this for teardown
+    /// instead of relying on `Drop`, which cannot return values.
+    pub fn into_generated_light_storage(mut self) -> Option<R> {
+        self.take_generated_light_storage()
     }
 
     /// Attaches a complete generated-light task. Unlike [`Self::with_light`],
@@ -575,8 +621,8 @@ where
     /// LIGHT implementation in one tick-thread-owned value. The generation
     /// preflight still requires [`GeneratedLightTask::has_usable_engine`]
     /// before it will run `INITIALIZE_LIGHT`.
-    pub fn with_generated_light_task(mut self, task: impl GeneratedLightTask<T, B, S>) -> Self {
-        self.attach_generated_light_task(task);
+    pub fn with_generated_light_task(mut self, task: impl GeneratedLightTask<T, B, S, R>) -> Self {
+        let _ = self.attach_generated_light_task(task);
         self
     }
 
