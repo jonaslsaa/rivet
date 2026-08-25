@@ -8,8 +8,8 @@
 //! - teleport → ack: every `accept_teleportation` id must echo an issued
 //!   `player_position` id, in order (Paper gates `handleMovePlayer` on
 //!   `awaitingPositionFromClient` being cleared by the ack).
-//! - keepalive request → echo: every `serverbound keep_alive` body must equal a
-//!   *prior* `clientbound keep_alive` body (the server disconnects on an
+//! - keepalive request → echo: every `serverbound keep_alive` body must equal the
+//!   oldest pending `clientbound keep_alive` body (the server disconnects on an
 //!   unmatched or out-of-order echo).
 //! - spawn consistency: the spawn `player_position` y equals the movement
 //!   sample y and the `set_default_spawn_position` y; the chunk column of the
@@ -133,22 +133,108 @@ fn check_teleport_ack(packets: &[CapturedPacket], f: &mut Vec<Failure>) {
 }
 
 fn check_keepalive_echo(packets: &[CapturedPacket], f: &mut Vec<Failure>) {
-    let mut challenges: Vec<Vec<u8>> = Vec::new();
-    for p in packets {
-        if p.state == State::Play {
-            if p.direction == Direction::Clientbound && p.id == 44 {
-                challenges.push(p.body.clone());
-            } else if p.direction == Direction::Serverbound && p.id == 28 {
-                let echoed = challenges.iter().find(|c| **c == p.body);
-                if echoed.is_none() {
+    // Configuration and play use different packet ids, but each is the same
+    // Paper keepConnectionAlive request/echo contract. Track them separately so
+    // a response from one protocol state cannot satisfy a challenge in another.
+    let states = [
+        (
+            State::Configuration,
+            Direction::Clientbound,
+            4,
+            Direction::Serverbound,
+            4,
+            true,
+        ),
+        (
+            State::Play,
+            Direction::Clientbound,
+            44,
+            Direction::Serverbound,
+            28,
+            false,
+        ),
+    ];
+
+    for (state, request_dir, request_id, response_dir, response_id, require_all) in states {
+        let mut challenges: Vec<(Vec<u8>, bool)> = Vec::new();
+        for p in packets {
+            if p.state != state {
+                continue;
+            }
+            if p.direction == request_dir && p.id == request_id {
+                if p.body.len() != 8 {
                     f.push(Failure::new(
                         "keepalive",
                         format!(
                             "{} with body {}",
-                            pkt_identity(State::Play, Direction::Serverbound, 28),
+                            pkt_identity(state, request_dir, request_id),
                             crate::fixture::hex(&p.body)
                         ),
-                        "serverbound keep_alive does not echo any prior clientbound keep_alive body",
+                        format!(
+                            "keep_alive body has length {}, expected exactly 8 bytes",
+                            p.body.len()
+                        ),
+                    ));
+                }
+                challenges.push((p.body.clone(), false));
+            } else if p.direction == response_dir && p.id == response_id {
+                if p.body.len() != 8 {
+                    f.push(Failure::new(
+                        "keepalive",
+                        format!(
+                            "{} with body {}",
+                            pkt_identity(state, response_dir, response_id),
+                            crate::fixture::hex(&p.body)
+                        ),
+                        format!(
+                            "keep_alive body has length {}, expected exactly 8 bytes",
+                            p.body.len()
+                        ),
+                    ));
+                }
+                // Paper's pendingKeepAlives.peek() requires responses to
+                // consume the oldest outstanding challenge, not any matching
+                // challenge later in the queue.
+                if let Some((body, matched)) = challenges.iter_mut().find(|(_, matched)| !*matched)
+                {
+                    if *body == p.body {
+                        *matched = true;
+                    } else {
+                        f.push(Failure::new(
+                            "keepalive",
+                            format!(
+                                "{} with body {}",
+                                pkt_identity(state, response_dir, response_id),
+                                crate::fixture::hex(&p.body)
+                            ),
+                            "serverbound keep_alive does not echo the oldest prior unmatched clientbound keep_alive body",
+                        ));
+                    }
+                } else {
+                    f.push(Failure::new(
+                        "keepalive",
+                        format!(
+                            "{} with body {}",
+                            pkt_identity(state, response_dir, response_id),
+                            crate::fixture::hex(&p.body)
+                        ),
+                        "serverbound keep_alive does not echo any prior unmatched clientbound keep_alive body",
+                    ));
+                }
+            }
+        }
+
+        if require_all {
+            for (body, matched) in challenges {
+                if !matched {
+                    f.push(Failure::new(
+                        "keepalive",
+                        format!(
+                            "{} with body {}",
+                            pkt_identity(state, request_dir, request_id),
+                            crate::fixture::hex(&body)
+                        ),
+                        "clientbound keep_alive was never echoed by a matching serverbound keep_alive",
                     ));
                 }
             }
@@ -250,20 +336,21 @@ fn check_entity_ids(packets: &[CapturedPacket], f: &mut Vec<Failure>) {
     // (the joining player), so every entity id must be 1.
     let mut seen: Vec<(&str, i32)> = Vec::new();
 
-    // writeInt heads (49, 34).
+    // writeInt heads (49, 34). Inspect every occurrence: a later malformed
+    // entity packet must not hide behind the first packet of its identity.
     for (id, name) in [(49, "login"), (34, "entity_event")] {
-        if let Some(p) = packets
-            .iter()
-            .find(|p| p.state == State::Play && p.direction == Direction::Clientbound && p.id == id)
-            && let Some(b) = p.body.get(0..4)
-        {
-            seen.push((name, i32::from_be_bytes([b[0], b[1], b[2], b[3]])));
+        for p in packets.iter().filter(|p| {
+            p.state == State::Play && p.direction == Direction::Clientbound && p.id == id
+        }) {
+            if let Some(b) = p.body.get(0..4) {
+                seen.push((name, i32::from_be_bytes([b[0], b[1], b[2], b[3]])));
+            }
         }
     }
 
     // VarInt heads: 99 set_entity_data, 131 update_attributes, 101
     // set_entity_motion, 53/54/56 move_entity_pos{,rot}/{rot}, 83 rotate_head,
-    // 1 add_entity.
+    // 1 add_entity. Inspect every occurrence for the same reason.
     for (id, name) in [
         (99, "set_entity_data"),
         (131, "update_attributes"),
@@ -274,12 +361,12 @@ fn check_entity_ids(packets: &[CapturedPacket], f: &mut Vec<Failure>) {
         (83, "rotate_head"),
         (1, "add_entity"),
     ] {
-        if let Some(p) = packets
-            .iter()
-            .find(|p| p.state == State::Play && p.direction == Direction::Clientbound && p.id == id)
-            && let Some(v) = frame::read_varint(&p.body, &mut 0)
-        {
-            seen.push((name, v));
+        for p in packets.iter().filter(|p| {
+            p.state == State::Play && p.direction == Direction::Clientbound && p.id == id
+        }) {
+            if let Some(v) = frame::read_varint(&p.body, &mut 0) {
+                seen.push((name, v));
+            }
         }
     }
 
@@ -417,6 +504,173 @@ mod tests {
     }
 
     #[test]
+    fn configuration_keepalive_echoes_are_fifo() {
+        let a = vec![1; 8];
+        let b = vec![2; 8];
+        let clean = check(&[
+            pkt(State::Configuration, Direction::Clientbound, 4, a.clone()),
+            pkt(State::Configuration, Direction::Clientbound, 4, b.clone()),
+            pkt(State::Configuration, Direction::Serverbound, 4, a.clone()),
+            pkt(State::Configuration, Direction::Serverbound, 4, b.clone()),
+        ]);
+        assert!(!clean.iter().any(|x| x.kind == "keepalive"), "{clean:?}");
+
+        let out_of_order = check(&[
+            pkt(State::Configuration, Direction::Clientbound, 4, a),
+            pkt(State::Configuration, Direction::Clientbound, 4, b.clone()),
+            pkt(State::Configuration, Direction::Serverbound, 4, b),
+            pkt(State::Configuration, Direction::Serverbound, 4, vec![1; 8]),
+        ]);
+        assert!(
+            out_of_order
+                .iter()
+                .any(|x| x.kind == "keepalive" && x.message.contains("oldest")),
+            "{out_of_order:?}"
+        );
+    }
+
+    #[test]
+    fn play_keepalive_echoes_are_fifo() {
+        let a = vec![1; 8];
+        let b = vec![2; 8];
+        let clean = check(&[
+            pkt(State::Play, Direction::Clientbound, 44, a.clone()),
+            pkt(State::Play, Direction::Clientbound, 44, b.clone()),
+            pkt(State::Play, Direction::Serverbound, 28, a.clone()),
+            pkt(State::Play, Direction::Serverbound, 28, b.clone()),
+        ]);
+        assert!(!clean.iter().any(|x| x.kind == "keepalive"), "{clean:?}");
+
+        let out_of_order = check(&[
+            pkt(State::Play, Direction::Clientbound, 44, a),
+            pkt(State::Play, Direction::Clientbound, 44, b.clone()),
+            pkt(State::Play, Direction::Serverbound, 28, b),
+            pkt(State::Play, Direction::Serverbound, 28, vec![1; 8]),
+        ]);
+        assert!(
+            out_of_order
+                .iter()
+                .any(|x| x.kind == "keepalive" && x.message.contains("oldest")),
+            "{out_of_order:?}"
+        );
+    }
+
+    #[test]
+    fn configuration_keepalive_requires_exact_one_to_one_echoes() {
+        let challenge = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let request = pkt(
+            State::Configuration,
+            Direction::Clientbound,
+            4,
+            challenge.clone(),
+        );
+        let response = pkt(
+            State::Configuration,
+            Direction::Serverbound,
+            4,
+            challenge.clone(),
+        );
+
+        let clean = check(&[request.clone(), response.clone()]);
+        assert!(!clean.iter().any(|x| x.kind == "keepalive"), "{clean:?}");
+
+        let missing = check(std::slice::from_ref(&request));
+        assert!(
+            missing
+                .iter()
+                .any(|x| x.kind == "keepalive" && x.message.contains("never echoed")),
+            "{missing:?}"
+        );
+
+        let wrong = check(&[
+            request.clone(),
+            pkt(State::Configuration, Direction::Serverbound, 4, vec![9; 8]),
+        ]);
+        assert!(wrong.iter().any(|x| x.kind == "keepalive"), "{wrong:?}");
+
+        let extra = check(&[
+            request.clone(),
+            response.clone(),
+            pkt(State::Configuration, Direction::Serverbound, 4, challenge),
+        ]);
+        assert!(extra.iter().any(|x| x.kind == "keepalive"), "{extra:?}");
+
+        // A non-keepalive packet with the same eight bytes is not an echo and
+        // cannot satisfy the outstanding request.
+        let wrong_kind = check(&[
+            request,
+            pkt(
+                State::Configuration,
+                Direction::Serverbound,
+                7,
+                vec![1, 2, 3, 4, 5, 6, 7, 8],
+            ),
+        ]);
+        assert!(
+            wrong_kind
+                .iter()
+                .any(|x| x.kind == "keepalive" && x.message.contains("never echoed")),
+            "{wrong_kind:?}"
+        );
+    }
+
+    #[test]
+    fn configuration_keepalive_bodies_must_be_exactly_eight_bytes() {
+        for len in [0, 1, 7, 9] {
+            let malformed_request = check(&[pkt(
+                State::Configuration,
+                Direction::Clientbound,
+                4,
+                vec![0; len],
+            )]);
+            assert!(
+                malformed_request.iter().any(|x| {
+                    x.kind == "keepalive" && x.message.contains("expected exactly 8 bytes")
+                }),
+                "malformed request with {len} bytes was accepted: {malformed_request:?}"
+            );
+
+            let malformed_response = check(&[
+                pkt(State::Configuration, Direction::Clientbound, 4, vec![0; 8]),
+                pkt(
+                    State::Configuration,
+                    Direction::Serverbound,
+                    4,
+                    vec![0; len],
+                ),
+            ]);
+            assert!(
+                malformed_response.iter().any(|x| {
+                    x.kind == "keepalive" && x.message.contains("expected exactly 8 bytes")
+                }),
+                "malformed response with {len} bytes was accepted: {malformed_response:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn play_keepalive_bodies_must_be_exactly_eight_bytes_across_duplicates() {
+        let valid = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        for len in [0, 1, 7, 9] {
+            let malformed = vec![9; len];
+            let failures = check(&[
+                pkt(State::Play, Direction::Clientbound, 44, valid.clone()),
+                pkt(State::Play, Direction::Serverbound, 28, valid.clone()),
+                pkt(State::Play, Direction::Clientbound, 44, malformed.clone()),
+                pkt(State::Play, Direction::Serverbound, 28, malformed),
+            ]);
+            let length_failures = failures
+                .iter()
+                .filter(|x| x.kind == "keepalive" && x.message.contains("expected exactly 8 bytes"))
+                .count();
+            assert_eq!(
+                length_failures, 2,
+                "malformed duplicate pair with {len} bytes was not fully validated: {failures:?}"
+            );
+        }
+    }
+
+    #[test]
     fn spawn_y_mismatch_fails() {
         let mut v = base_play();
         // bump the movement sample's y by 1.
@@ -454,5 +708,57 @@ mod tests {
     fn entity_ids_agree() {
         let fails = check(&base_play());
         assert!(!fails.iter().any(|x| x.kind == "entity-id"), "{fails:?}");
+    }
+
+    #[test]
+    fn entity_ids_validate_later_write_int_occurrence() {
+        let mut packets = base_play();
+        // Both occurrences share the same packet identity. The first remains a
+        // valid player entity packet while the later occurrence is corrupted;
+        // a `.find` implementation would inspect only the first and miss this.
+        packets.push(pkt(
+            State::Play,
+            Direction::Clientbound,
+            34,
+            vec![0, 0, 0, 1, 0],
+        ));
+        packets.push(pkt(
+            State::Play,
+            Direction::Clientbound,
+            34,
+            vec![0, 0, 0, 1, 0],
+        ));
+        let clean = check(&packets);
+        assert!(!clean.iter().any(|x| x.kind == "entity-id"), "{clean:?}");
+
+        packets[5].body[3] = 2;
+        let failures = check(&packets);
+        assert!(
+            failures
+                .iter()
+                .any(|x| x.kind == "entity-id" && x.message.contains("entity id 2")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn entity_ids_validate_later_varint_occurrence() {
+        let mut packets = base_play();
+        // Both occurrences share the same packet identity. The first remains a
+        // valid player entity packet while the later occurrence is corrupted;
+        // a `.find` implementation would inspect only the first and miss this.
+        packets.push(pkt(State::Play, Direction::Clientbound, 99, vec![1, 0]));
+        packets.push(pkt(State::Play, Direction::Clientbound, 99, vec![1, 0]));
+        let clean = check(&packets);
+        assert!(!clean.iter().any(|x| x.kind == "entity-id"), "{clean:?}");
+
+        packets[5].body[0] = 2;
+        let failures = check(&packets);
+        assert!(
+            failures
+                .iter()
+                .any(|x| x.kind == "entity-id" && x.message.contains("entity id 2")),
+            "{failures:?}"
+        );
     }
 }
