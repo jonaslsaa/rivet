@@ -619,8 +619,8 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
     boot1, capture = process.get("boot1", {}), process.get("capture", {})
     if boot1.get("exit_code") != 0 or capture.get("exit_code") != 0 or boot1.get("clean_stop") is not True or capture.get("clean_stop") is not True:
         raise Failed("one of the Paper boots was not a clean zero exit")
-    if process.get("log") != "server.log" or capture.get("log") != "server.log":
-        raise Failed("capture log route is wrong")
+    if process.get("log") != "server.log" or boot1.get("log") != "server-create.log" or capture.get("log") != "server.log":
+        raise Failed("Paper boot log route is wrong")
     _validate_config(run, expected_seed, manifest)
     if manifest.get("dimension") != "minecraft:overworld" or manifest.get("level_type") != "minecraft:normal" or manifest.get("generate_structures") is not True:
         raise Failed("wrong dimension/worldgen route")
