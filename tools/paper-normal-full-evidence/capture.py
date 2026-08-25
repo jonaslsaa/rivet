@@ -607,7 +607,7 @@ def chunk_details(raw: bytes, coordinate: tuple[int, int]) -> dict[str, Any]:
             for slot in range(7):
                 values.append((word >> (slot * 9)) & 0x1FF)
         values = values[:256]
-        if len(values) != 256 or any(value > 383 for value in values):
+        if len(values) != 256 or any(value > 384 for value in values):
             raise Failed(f"{coordinate} has out-of-range {name} heightmap")
         decoded[name] = values
     if len({tuple(values) for values in decoded.values()}) < 2:
