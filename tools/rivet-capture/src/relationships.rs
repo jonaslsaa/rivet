@@ -295,20 +295,21 @@ fn check_entity_ids(packets: &[CapturedPacket], f: &mut Vec<Failure>) {
     // (the joining player), so every entity id must be 1.
     let mut seen: Vec<(&str, i32)> = Vec::new();
 
-    // writeInt heads (49, 34).
+    // writeInt heads (49, 34). Inspect every occurrence: a later malformed
+    // entity packet must not hide behind the first packet of its identity.
     for (id, name) in [(49, "login"), (34, "entity_event")] {
-        if let Some(p) = packets
-            .iter()
-            .find(|p| p.state == State::Play && p.direction == Direction::Clientbound && p.id == id)
-            && let Some(b) = p.body.get(0..4)
-        {
-            seen.push((name, i32::from_be_bytes([b[0], b[1], b[2], b[3]])));
+        for p in packets.iter().filter(|p| {
+            p.state == State::Play && p.direction == Direction::Clientbound && p.id == id
+        }) {
+            if let Some(b) = p.body.get(0..4) {
+                seen.push((name, i32::from_be_bytes([b[0], b[1], b[2], b[3]])));
+            }
         }
     }
 
     // VarInt heads: 99 set_entity_data, 131 update_attributes, 101
     // set_entity_motion, 53/54/56 move_entity_pos{,rot}/{rot}, 83 rotate_head,
-    // 1 add_entity.
+    // 1 add_entity. Inspect every occurrence for the same reason.
     for (id, name) in [
         (99, "set_entity_data"),
         (131, "update_attributes"),
@@ -319,12 +320,12 @@ fn check_entity_ids(packets: &[CapturedPacket], f: &mut Vec<Failure>) {
         (83, "rotate_head"),
         (1, "add_entity"),
     ] {
-        if let Some(p) = packets
-            .iter()
-            .find(|p| p.state == State::Play && p.direction == Direction::Clientbound && p.id == id)
-            && let Some(v) = frame::read_varint(&p.body, &mut 0)
-        {
-            seen.push((name, v));
+        for p in packets.iter().filter(|p| {
+            p.state == State::Play && p.direction == Direction::Clientbound && p.id == id
+        }) {
+            if let Some(v) = frame::read_varint(&p.body, &mut 0) {
+                seen.push((name, v));
+            }
         }
     }
 
@@ -558,5 +559,50 @@ mod tests {
     fn entity_ids_agree() {
         let fails = check(&base_play());
         assert!(!fails.iter().any(|x| x.kind == "entity-id"), "{fails:?}");
+    }
+
+    #[test]
+    fn entity_ids_validate_later_write_int_occurrence() {
+        let mut packets = base_play();
+        // A second entity_event packet is valid when it carries the same player
+        // id as the first entity-bearing packet.
+        packets.push(pkt(
+            State::Play,
+            Direction::Clientbound,
+            34,
+            vec![0, 0, 0, 1, 0],
+        ));
+        let clean = check(&packets);
+        assert!(!clean.iter().any(|x| x.kind == "entity-id"), "{clean:?}");
+
+        // The later occurrence must not be hidden by the valid first packet.
+        packets[4].body[3] = 2;
+        let failures = check(&packets);
+        assert!(
+            failures
+                .iter()
+                .any(|x| x.kind == "entity-id" && x.message.contains("entity id 2")),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn entity_ids_validate_later_varint_occurrence() {
+        let mut packets = base_play();
+        // A later set_entity_data packet is valid when it carries the same
+        // player id as login.
+        packets.push(pkt(State::Play, Direction::Clientbound, 99, vec![1, 0]));
+        let clean = check(&packets);
+        assert!(!clean.iter().any(|x| x.kind == "entity-id"), "{clean:?}");
+
+        // The later occurrence must not be hidden by the valid first packet.
+        packets[4].body[0] = 2;
+        let failures = check(&packets);
+        assert!(
+            failures
+                .iter()
+                .any(|x| x.kind == "entity-id" && x.message.contains("entity id 2")),
+            "{failures:?}"
+        );
     }
 }
