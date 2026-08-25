@@ -402,6 +402,57 @@ run_oracle_verify() {
   fi
 }
 
+# Source-disjoint Stage-B/G4 generated normal-overworld FULL parity. This is a
+# dedicated verifier, never a generic fixture-manifest walk and never a
+# generated-expected/superflat substitution. It owns the typed 0/1/3 outcome:
+# absent genuine sides are UNVERIFIED (3), malformed/tampered/divergent output
+# is FAIL (1), and byte-identical closure is PASS (0).
+run_oracle_generated_full() {
+  # G4 promotion is deliberately opt-in.  The direct verifier remains strict,
+  # but ordinary pre-G4/full gates must not become unreleasable merely because
+  # the generated corpus has not been captured yet.
+  if [ -z "${RIVET_GENERATED_FULL:-}" ] || [ "${RIVET_GENERATED_FULL}" = 0 ]; then
+    echo "==> oracle verify-generated-full (Stage-B normal-overworld FULL parity; issue #175)"
+    echo "    NOTICE — promotion is inactive for the pre-G4 gate; set RIVET_GENERATED_FULL=1 to activate the strict row"
+    return 0
+  fi
+  echo "==> oracle verify-generated-full (Stage-B normal-overworld FULL parity; issue #175)"
+  local rc=0
+  cargo run -q -p rivet-oracle -- verify-generated-full 2>&1 || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "    PASS — four-seed normal-overworld FULL corpus matches byte-for-byte"
+    local tamper_rc=0
+    echo "==> oracle verify-generated-full --tamper all (named payload tamper controls)"
+    cargo run -q -p rivet-oracle -- verify-generated-full --tamper all 2>&1 || tamper_rc=$?
+    if [ "$tamper_rc" -eq 0 ]; then
+      echo "    PASS — block/light/heightmap/NBT-order/key/LastUpdate tampering detected and named exactly"
+    elif [ "$tamper_rc" -eq 3 ]; then
+      echo "    UNVERIFIED — generated-full tamper controls could not run"
+      ORACLE_UNVERIFIED=1
+      if [ "$REQUIRE_ORACLE" = 1 ]; then
+        echo "    --require-oracle is set: unverified generated-full tamper controls are a hard failure"
+        exit 1
+      fi
+    else
+      echo "    FAILED — generated-full tamper controls did not prove exact named mismatches"
+      exit 1
+    fi
+  elif [ "$rc" -eq 3 ]; then
+    echo "    UNVERIFIED — generated-full Paper/Rivet provenance or genuine FULL output is missing"
+    ORACLE_UNVERIFIED=1
+    if [ "$REQUIRE_ORACLE" = 1 ]; then
+      echo "    --require-oracle is set: an unverified generated-full row is a hard failure"
+      exit 1
+    fi
+  elif [ "$rc" -eq 1 ]; then
+    echo "    FAILED — generated-full parity, closure, provenance, or tamper validation failed"
+    exit 1
+  else
+    echo "    FAILED — generated-full verifier crashed or returned unexpected exit $rc"
+    exit 1
+  fi
+}
+
 # Storage-only #231 V1a. This is intentionally separate from the Paper boot,
 # FULL hash, and generated-world rows: it proves only the 432 committed M0
 # CompoundTag payloads through RegionFileStorage at compression `none`, with a
@@ -1104,6 +1155,7 @@ main() {
   # --- oracle steps (full gate only; the oracle verifies the whole server) -----
   if [ "$FULL_GATE" = true ]; then
     run_oracle_verify
+    run_oracle_generated_full
     run_oracle_hash
     run_oracle_self_test
     run_rivet_parity

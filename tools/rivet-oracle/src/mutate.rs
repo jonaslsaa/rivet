@@ -38,19 +38,21 @@ pub enum TamperKind {
     Heightmap,
     NbtOrder,
     NbtKey,
+    LastUpdate,
 }
 
 impl TamperKind {
-    pub const ALL: [TamperKind; 5] = [
+    pub const ALL: [TamperKind; 6] = [
         TamperKind::Block,
         TamperKind::Light,
         TamperKind::Heightmap,
         TamperKind::NbtOrder,
         TamperKind::NbtKey,
+        TamperKind::LastUpdate,
     ];
 
     /// Parse the CLI name (`block`, `light`, `heightmap`, `nbt-order`,
-    /// `nbt-key`).
+    /// `nbt-key`, `last-update`).
     pub fn from_cli(name: &str) -> Option<TamperKind> {
         match name {
             "block" => Some(TamperKind::Block),
@@ -58,6 +60,7 @@ impl TamperKind {
             "heightmap" => Some(TamperKind::Heightmap),
             "nbt-order" => Some(TamperKind::NbtOrder),
             "nbt-key" => Some(TamperKind::NbtKey),
+            "last-update" => Some(TamperKind::LastUpdate),
             _ => None,
         }
     }
@@ -70,6 +73,7 @@ impl TamperKind {
             TamperKind::Heightmap => "heightmap",
             TamperKind::NbtOrder => "nbt-order",
             TamperKind::NbtKey => "nbt-key",
+            TamperKind::LastUpdate => "last-update",
         }
     }
 }
@@ -135,9 +139,11 @@ pub fn fixture_full_payload(cx: i32, cz: i32) -> Vec<u8> {
 #[cfg(test)]
 pub fn fixture_full_payload_with_seed(cx: i32, cz: i32, seed: i64) -> Vec<u8> {
     let mut root = CompoundTag::new();
-    root.put_string("Status", "minecraft:full");
+    root.put_int("DataVersion", 4903);
     root.put_int("xPos", cx);
+    root.put_int("yPos", -4);
     root.put_int("zPos", cz);
+    root.put_string("Status", "minecraft:full");
     // Root tick counters `SerializableChunkData.write()` emits from Level state
     // (`LastUpdate` = game time, `InhabitedTime` = per-chunk inhabited time).
     // These are time-based, not seed-based — a fresh world is 0 for every seed,
@@ -170,6 +176,14 @@ pub fn fixture_full_payload_with_seed(cx: i32, cz: i32, seed: i64) -> Vec<u8> {
     // any seed pair, never just an opposite-parity pair.
     bs.put_long_array("data", seed_block_data(seed, cx, cz));
     section.put("block_states".to_string(), Tag::Compound(bs));
+    let mut biomes = CompoundTag::new();
+    biomes.put(
+        "palette".to_string(),
+        Tag::List(ListTag::with_list(vec![Tag::String(
+            rivet_nbt::string_tag::StringTag::value_of("minecraft:plains".to_string()),
+        )])),
+    );
+    section.put("biomes".to_string(), Tag::Compound(biomes));
     section.put_byte_array("SkyLight", vec![0i8; 2048]);
     section.put_byte_array("BlockLight", vec![0i8; 2048]);
     root.put(
@@ -239,6 +253,7 @@ pub fn tamper(bytes: &[u8], kind: TamperKind) -> Result<Vec<u8>, String> {
         TamperKind::Heightmap => tamper_heightmap(&mut compound)?,
         TamperKind::NbtOrder => tamper_nbt_order(&mut compound)?,
         TamperKind::NbtKey => tamper_nbt_key(&mut compound)?,
+        TamperKind::LastUpdate => tamper_last_update(&mut compound)?,
     }
     encode_payload(&compound)
 }
@@ -358,6 +373,14 @@ fn tamper_nbt_key(compound: &mut CompoundTag) -> Result<(), String> {
     Ok(())
 }
 
+fn tamper_last_update(compound: &mut CompoundTag) -> Result<(), String> {
+    if compound.get_long("LastUpdate").is_none() {
+        return Err("chunk root has no LastUpdate to mutate".into());
+    }
+    compound.put_long("LastUpdate", 1);
+    Ok(())
+}
+
 fn sections_mut(compound: &mut CompoundTag) -> Result<&mut ListTag, String> {
     if !matches!(compound.tags.get("sections"), Some(Tag::List(_))) {
         return Err("sections is not a list".into());
@@ -428,6 +451,10 @@ mod tests {
                         crate::semantic_hash::canonical_xxh3_64(&m).unwrap(),
                         "inserting a key is a content change, not order-only"
                     );
+                }
+                TamperKind::LastUpdate => {
+                    assert_eq!(orig.get_long("LastUpdate"), Some(0));
+                    assert_eq!(m.get_long("LastUpdate"), Some(1));
                 }
             }
             assert_ne!(

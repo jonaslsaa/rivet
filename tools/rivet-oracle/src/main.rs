@@ -137,6 +137,7 @@ mod composed_noise;
 mod corpus;
 mod features;
 mod generated_expected;
+mod generated_full;
 mod hash;
 mod hash_manifest;
 mod light_stage;
@@ -1016,13 +1017,14 @@ fn verify_fixtures_dir(dir: &Path) -> Result<(), Error> {
 /// (recursive — `fixtures/worldgen/` and `fixtures/regions/overworld-normal/`
 /// both qualify today, and kinds may nest arbitrarily). Kinds verify
 /// independently and can grow without a format migration. The
-/// `<root>/composed-noise`, `<root>/generated-expected`, `<root>/features`,
-/// and `<root>/light` dirs are excluded: each golden has a strict
+/// `<root>/composed-noise`, `<root>/generated-expected`, `<root>/generated-full`,
+/// `<root>/features`, and `<root>/light` dirs are excluded: each golden has a strict
 /// missing-prerequisite contract of its own, handled by dedicated steps after
 /// the generic kinds.
 fn all_fixture_manifests_from(root: &Path) -> Vec<PathBuf> {
     let composed_noise = root.join("composed-noise");
     let generated_expected = root.join("generated-expected");
+    let generated_full = root.join("generated-full");
     let features = root.join("features");
     let light = root.join("light");
     let mut out = Vec::new();
@@ -1039,6 +1041,7 @@ fn all_fixture_manifests_from(root: &Path) -> Vec<PathBuf> {
                 }
                 if path == composed_noise
                     || path == generated_expected
+                    || path == generated_full
                     || path == features
                     || path == light
                 {
@@ -1116,6 +1119,9 @@ fn verify_all_fixture_kinds_from(root: &Path) -> Result<(), Error> {
             kinds.len()
         );
     }
+    // generated-full is intentionally excluded from this generic/no-argument
+    // fixture walk: it is uncommitted G4 promotion evidence and gate.sh owns its
+    // sole explicit tri-state row plus tamper controls.
     verify_composed_noise_step(&composed_noise_dir)?;
     // The post-surface column oracle (issue #179): beyond the manifest hashes,
     // assert the SURFACE-checkpoint goldens (pinned provenance, the #175 matrix,
@@ -3167,8 +3173,10 @@ fn run_hash_diff(paper_dir: &Path, rivet_dir: &Path) -> Result<bool, Error> {
         )));
     }
 
-    // Required corpus coordinates: a required coordinate with no FULL entry on
-    // either side means the sweep cannot claim coverage — UNVERIFIED.
+    // The generic hash engine remains dimension-agnostic: a required coordinate
+    // is covered when either Paper-side dimension has a FULL payload. The
+    // source-disjoint generated-full verifier owns the stricter overworld-only
+    // target closure separately.
     let mut required_missing = Vec::new();
     for (x, z) in corpus::COORDINATES {
         let paper_has = paper.full_entry("the_nether", *x, *z).is_some()
@@ -3182,10 +3190,8 @@ fn run_hash_diff(paper_dir: &Path, rivet_dir: &Path) -> Result<bool, Error> {
         }
     }
     if !required_missing.is_empty() {
-        return Err(Error::Gate(format!(
-            "required corpus coordinates with no FULL data on both sides: {} — a green \
-             sweep over the #175 matrix is not yet achievable (needs #51 to capture \
-             status-FULL regions and Rivet worldgen to reach FULL); UNVERIFIED, never green",
+        return Err(Error::Unverified(format!(
+            "required corpus coordinates with no FULL data on both sides: {} — a green sweep over the #175 matrix is not yet achievable",
             required_missing.join(", ")
         )));
     }
@@ -3682,6 +3688,15 @@ fn print_usage() {
     println!(
         "                                             runtime; --tamper is the negative control"
     );
+    println!("  cargo run -p rivet-oracle -- verify-generated-full [--contract <path>]");
+    println!("                                             [--paper <root>] [--rivet <root>]");
+    println!("                                             normal-overworld FULL parity over the");
+    println!(
+        "                                             four-seed, four-region Stage-B contract;"
+    );
+    println!(
+        "                                             --tamper [kind|all] runs named negatives"
+    );
     println!("  cargo run -p rivet-oracle -- features <seed> [--to <out> | --tamper]");
     println!("                                             seed-42 FEATURES oracle checkpoint:");
     println!("                                             verify the committed level-33-forced");
@@ -3858,6 +3873,19 @@ fn run() -> Result<(), Error> {
             //   cargo run -p rivet-oracle -- generated-expected <seed> --tamper    negative control
             let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
             generated_expected::run_cli(&rest)
+        }
+        Some("verify-generated-full") => {
+            // Source-disjoint Stage-B/G4 normal-overworld FULL parity verifier.
+            // Default paths are fixtures/generated-full/{contract.json,paper/}
+            // and work/generated-full/rivet/. Optional --contract/--paper/--rivet
+            // overrides are used by synthetic tests and capture tooling; --tamper
+            // (or --expect-fail) runs the committed tamper controls.
+            let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+            match rest.as_slice() {
+                [] => generated_full::verify_default(),
+                ["--tamper"] | ["--expect-fail"] => generated_full::tamper_negative_default(None),
+                _ => generated_full::run_cli(&rest),
+            }
         }
         Some("features") => {
             // The seed-42 FEATURES oracle checkpoint (PR #175/#232): the
@@ -5452,7 +5480,7 @@ mod tests {
     // committed live capture (only (0,0) FULL) cannot do, pre-worldgen.
 
     /// Write a chunk-hash fixture tree: FULL payloads for the given coordinates
-    /// under `chunk/the_nether/0.0/`, plus the serialized `HashManifest`. The
+    /// under `chunk/overworld/0.0/`, plus the serialized `HashManifest`. The
     /// tree is exactly what `run_hash_paper`/`hash-rivet` produce from a real
     /// region capture, so `run_hash_diff` treats it identically.
     fn write_hash_fixture_tree(root: &Path, coords: &[(i32, i32)]) -> PathBuf {
@@ -5467,7 +5495,16 @@ mod tests {
         let chunk_dir = root.join("chunk").join("the_nether").join("0.0");
         fs::create_dir_all(&chunk_dir).unwrap();
         for (cx, cz) in coords {
-            let bytes = crate::mutate::fixture_full_payload_with_seed(*cx, *cz, seed);
+            // The generic hash-engine tests intentionally exercise a Nether
+            // region tree. The shared fixture builder models overworld FULL
+            // payloads, so bind this test-only payload to the Nether's
+            // minSectionY before deriving its manifest.
+            let mut payload = crate::mutate::parse_payload(
+                &crate::mutate::fixture_full_payload_with_seed(*cx, *cz, seed),
+            )
+            .unwrap();
+            payload.put_int("yPos", 0);
+            let bytes = crate::mutate::encode_payload(&payload).unwrap();
             fs::write(chunk_dir.join(format!("{cx}.{cz}.nbt")), bytes).unwrap();
         }
         let manifest =

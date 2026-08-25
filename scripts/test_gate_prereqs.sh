@@ -807,7 +807,99 @@ grep -q "^    PASS" "$TMP/out_rc5" && fail "recenter: PASS printed despite a cra
 grep -q "^    UNVERIFIED" "$TMP/out_rc5" && fail "recenter: UNVERIFIED printed for a crash (classification is FAIL, exit 1)"
 pass "recenter: exit 101 -> FAILED, hard exit 1, never UNVERIFIED"
 
-# --- test 10: loaded-world + recenter + generated-world rows wired into the ----
+# --- test 10: generated-full oracle row keeps the dedicated 0/1/3 contract --
+# The row is activated only by RIVET_GENERATED_FULL=1: a complete four-seed
+# corpus runs the verifier and its tamper controls, absent genuine output is
+# UNVERIFIED (3), malformed/divergent output is FAIL (1), and --require-oracle
+# promotes exit 3 to a hard exit 1. The cargo shim records exact argv.
+GEN_FULL_LOG="$TMP/generated-full-invocations.log"
+GEN_FULL_EXIT_FILE="$TMP/generated-full-exit"
+# The generated FULL row is an explicit promotion activation, not an ordinary
+# pre-G4 prerequisite.  The inactive path must be an explicit NOTICE and must
+# not invoke Cargo or set the global UNVERIFIED verdict.
+unset RIVET_GENERATED_FULL
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0
+: > "$GEN_FULL_LOG"
+PATH="$CARGO_SHIM:$PATH"
+run_oracle_generated_full > "$TMP/out_gf_pre_g4" 2>&1
+PATH="$saved_path"
+[ "$ORACLE_UNVERIFIED" = 0 ] || fail "generated-full: pre-G4 NOTICE set ORACLE_UNVERIFIED"
+grep -q "NOTICE" "$TMP/out_gf_pre_g4" || fail "generated-full: pre-G4 inactive path did not print NOTICE"
+grep -q "pre-G4" "$TMP/out_gf_pre_g4" || fail "generated-full: pre-G4 NOTICE did not name the promotion gate"
+[ ! -s "$GEN_FULL_LOG" ] || fail "generated-full: pre-G4 inactive path invoked Cargo"
+pass "generated-full: pre-G4 inactive path is explicit NOTICE with no verifier invocation"
+
+RIVET_GENERATED_FULL=""
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0
+: > "$GEN_FULL_LOG"
+PATH="$CARGO_SHIM:$PATH"
+run_oracle_generated_full > "$TMP/out_gf_empty" 2>&1
+PATH="$saved_path"
+[ "$ORACLE_UNVERIFIED" = 0 ] || fail "generated-full: empty env must stay pre-G4 inactive"
+grep -q "NOTICE" "$TMP/out_gf_empty" || fail "generated-full: empty env did not print NOTICE"
+[ ! -s "$GEN_FULL_LOG" ] || fail "generated-full: empty env invoked Cargo"
+pass "generated-full: empty env is explicitly inactive"
+
+RIVET_GENERATED_FULL=1
+export RIVET_GENERATED_FULL
+printf '%s\n' 0 > "$GEN_FULL_EXIT_FILE"
+set_generated_full_exit() { printf '%s\n' "$1" > "$GEN_FULL_EXIT_FILE"; }
+cat > "$CARGO_SHIM/cargo" <<GFEof
+#!/bin/bash
+echo "\$@" >> '$GEN_FULL_LOG'
+exit "\$(cat '$GEN_FULL_EXIT_FILE')"
+GFEof
+chmod +x "$CARGO_SHIM/cargo"
+
+set_generated_full_exit 0
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0
+: > "$GEN_FULL_LOG"
+PATH="$CARGO_SHIM:$PATH"
+run_oracle_generated_full > "$TMP/out_gf0" 2>&1
+PATH="$saved_path"
+[ "$ORACLE_UNVERIFIED" = 0 ] || fail "generated-full: PASS set ORACLE_UNVERIFIED"
+grep -q "^    PASS" "$TMP/out_gf0" || fail "generated-full: PASS not printed for exit 0"
+[ "$(wc -l < "$GEN_FULL_LOG" | tr -d ' ')" = 2 ] || fail "generated-full: PASS should run verifier plus tamper control"
+grep -qx -- "run -q -p rivet-oracle -- verify-generated-full" "$GEN_FULL_LOG" || fail "generated-full: verifier argv drifted"
+grep -qx -- "run -q -p rivet-oracle -- verify-generated-full --tamper all" "$GEN_FULL_LOG" || fail "generated-full: tamper-all argv drifted"
+pass "generated-full: exit 0 -> PASS plus exact tamper-all argv"
+
+set_generated_full_exit 1
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0
+PATH="$CARGO_SHIM:$PATH"
+set +e
+( run_oracle_generated_full > "$TMP/out_gf1" 2>&1 )
+rc_gf1=$?
+set -e
+PATH="$saved_path"
+[ "$rc_gf1" = 1 ] || fail "generated-full: FAIL should exit 1 (got $rc_gf1)"
+[ "$ORACLE_UNVERIFIED" = 0 ] || fail "generated-full: FAIL set ORACLE_UNVERIFIED"
+grep -q "^    FAILED" "$TMP/out_gf1" || fail "generated-full: FAILED not printed for exit 1"
+pass "generated-full: exit 1 -> FAILED, hard exit 1"
+
+set_generated_full_exit 3
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0
+PATH="$CARGO_SHIM:$PATH"
+run_oracle_generated_full > "$TMP/out_gf3" 2>&1
+PATH="$saved_path"
+[ "$ORACLE_UNVERIFIED" = 1 ] || fail "generated-full: exit 3 did not set ORACLE_UNVERIFIED"
+grep -q "^    UNVERIFIED" "$TMP/out_gf3" || fail "generated-full: UNVERIFIED not printed for exit 3"
+pass "generated-full: exit 3 -> UNVERIFIED, gate remains mergeable"
+
+set_generated_full_exit 3
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=1
+PATH="$CARGO_SHIM:$PATH"
+set +e
+( run_oracle_generated_full > "$TMP/out_gf4" 2>&1 )
+rc_gf4=$?
+set -e
+PATH="$saved_path"
+REQUIRE_ORACLE=0
+[ "$rc_gf4" = 1 ] || fail "generated-full: exit 3 + --require-oracle should exit 1 (got $rc_gf4)"
+grep -q "hard failure" "$TMP/out_gf4" || fail "generated-full: require-oracle hard-failure message missing"
+pass "generated-full: exit 3 + --require-oracle -> hard exit 1"
+
+# --- test 11: loaded-world + recenter + generated-world rows wired into the ----
 # --- full-gate block ------------------------------------------------------------
 # The classification tests above drive run_scenario_loaded_world,
 # run_scenario_recenter, and run_scenario_generated_world directly, but a row

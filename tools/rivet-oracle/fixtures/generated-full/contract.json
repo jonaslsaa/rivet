@@ -1,0 +1,45 @@
+{
+  "format": 1,
+  "kind": "generated-full",
+  "corpus-version": "v1",
+  "stage": "FULL",
+  "seeds": [
+    5207638315753790570,
+    12807505919197044144,
+    5246862266665176429,
+    3423572188437197996
+  ],
+  "level-type": "minecraft:normal",
+  "dimension": "overworld",
+  "region-file-compression": "none",
+  "status": "minecraft:full",
+  "hash-algorithm": "xxh3_64",
+  "hash-scope": "payload-only",
+  "chunk-concurrency": {
+    "worker-threads": 1,
+    "io-threads": 1
+  },
+  "normalization-rule": "LastUpdate=0",
+  "regions": [
+    "-1.-1",
+    "-1.0",
+    "0.-1",
+    "0.0"
+  ],
+  "coordinates": [
+    { "x": 0, "z": 0 },
+    { "x": 15, "z": 15 },
+    { "x": 31, "z": 31 },
+    { "x": -1, "z": -1 },
+    { "x": -16, "z": -16 },
+    { "x": -31, "z": -31 },
+    { "x": -1, "z": 0 },
+    { "x": 0, "z": -1 }
+  ],
+  "artifact-paths": {
+    "paper-materialized-jar": "work/generated-full/artifacts/paper-26.2.jar",
+    "paper-capture-properties": "fixtures/generated-full/server-normal-full.properties",
+    "rivet-producer-binary": "work/generated-full/artifacts/rivet-capture",
+    "rivet-capture-config": "work/generated-full/artifacts/rivet-capture-config.json"
+  }
+}

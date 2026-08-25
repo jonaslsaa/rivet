@@ -27,5 +27,8 @@ rivet-registry = { path = "../../crates/rivet-registry", features = ["blocks"] }
 # committed golden is never mutated; TempDir guarantees the scratch dir is
 # removed on every path.
 tempfile = { workspace = true }
+# `openat2(2)` with RESOLVE_NO_SYMLINKS makes evidence acquisition atomic with
+# respect to symlink substitution in every path component on Linux.
+rustix = { version = "1.1", features = ["fs"] }
 
 [dev-dependencies]

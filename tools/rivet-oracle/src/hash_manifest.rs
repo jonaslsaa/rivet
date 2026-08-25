@@ -52,6 +52,7 @@ pub const PAPER_PIN: &str = "0a99345";
 
 /// A single chunk's digests in a `HashManifest`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ChunkHashEntry {
     pub dim: String,
     pub region: String,
@@ -121,6 +122,7 @@ fn fmt_coord(cx: i32, cz: i32) -> String {
 /// A `HashManifest` (the #54 format). Serialized in committed field order so a
 /// rebuild is byte-identical.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct HashManifest {
     pub format: u64,
     #[serde(rename = "hash-algorithm")]
@@ -145,6 +147,7 @@ pub struct HashManifest {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Concurrency {
     #[serde(rename = "worker-threads")]
     pub worker_threads: u32,
@@ -301,6 +304,19 @@ pub fn build_from_payloads(
 /// `structures`, final heightmaps, `isLightOn`, starlight version — issue #51),
 /// so a chunk stamped FULL that Paper did not actually finish is a hard error,
 /// never silently compared.
+/// Payload bytes captured from one stable file descriptor.  The generated
+/// FULL verifier uses this representation after opening each payload with
+/// `RESOLVE_NO_SYMLINKS`; hashing the bytes here avoids reopening the path after
+/// metadata validation.
+#[derive(Debug, Clone)]
+pub struct PayloadBytes {
+    pub dim: String,
+    pub region: String,
+    pub cx: i32,
+    pub cz: i32,
+    pub bytes: Vec<u8>,
+}
+
 pub fn build_from_payloads_with(
     dir: &Path,
     seed: &str,
@@ -308,8 +324,7 @@ pub fn build_from_payloads_with(
     provenance: &CaptureProvenance,
 ) -> Result<HashManifest, String> {
     let chunk_dir = dir.join("chunk");
-    let mut entries = Vec::new();
-    let mut full_count = 0usize;
+    let mut payloads = Vec::new();
 
     if chunk_dir.is_dir() {
         let mut dims: Vec<PathBuf> = std::fs::read_dir(&chunk_dir)
@@ -344,37 +359,64 @@ pub fn build_from_payloads_with(
                     let (cx, cz) = parse_chunk_filename(&file)?;
                     let bytes = std::fs::read(&file)
                         .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-                    let compound = parse_payload(&bytes)?;
-                    let status = compound
-                        .get_string("Status")
-                        .cloned()
-                        .unwrap_or_else(|| "unknown".to_string());
-                    if status == "full" {
-                        return Err(format!(
-                            "chunk {dim}/{cx}.{cz} has bare root Status `full`: Paper's \
-                             `ChunkStatus.CODEC` always serializes the FULL status as \
-                             `minecraft:full`, so a bare `full` is an off-spec tree and must \
-                             be refused loudly, never silently recorded as non-FULL"
-                        ));
-                    }
-                    if is_full_status(&status) {
-                        full_count += 1;
-                        validate_full_payload(&compound, &dim, cx, cz)?;
-                    }
-                    entries.push(ChunkHashEntry {
+                    payloads.push(PayloadBytes {
                         dim: dim.clone(),
                         region: region.clone(),
                         cx,
                         cz,
-                        status: status.clone(),
-                        bytes: bytes.len(),
-                        xxh3_64: xxh3_64_hex(&bytes),
-                        sha256: crate::sha256_hex(&bytes),
-                        xxh3_64_canonical: crate::semantic_hash::canonical_xxh3_64(&compound)?,
+                        bytes,
                     });
                 }
             }
         }
+    }
+
+    build_from_payload_bytes_with(&payloads, seed, level_type, provenance)
+}
+
+/// Build a manifest from already-captured payload bytes.  Callers that acquire
+/// evidence through stable file descriptors must use this entry point rather
+/// than `build_from_payloads_with`, which intentionally retains its path-based
+/// fixture-tree API for the older generic oracle modes.
+pub fn build_from_payload_bytes_with(
+    payloads: &[PayloadBytes],
+    seed: &str,
+    level_type: &str,
+    provenance: &CaptureProvenance,
+) -> Result<HashManifest, String> {
+    let mut entries = Vec::with_capacity(payloads.len());
+    let mut full_count = 0usize;
+
+    for payload in payloads {
+        let compound = parse_payload(&payload.bytes)?;
+        let status = compound
+            .get_string("Status")
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+        if status == "full" {
+            return Err(format!(
+                "chunk {}/{}/{}.{} has bare root Status `full`: Paper's \
+                 `ChunkStatus.CODEC` always serializes the FULL status as \
+                 `minecraft:full`, so a bare `full` is an off-spec tree and must \
+                 be refused loudly, never silently recorded as non-FULL",
+                payload.dim, payload.region, payload.cx, payload.cz
+            ));
+        }
+        if is_full_status(&status) {
+            full_count += 1;
+            validate_full_payload(&compound, &payload.dim, payload.cx, payload.cz)?;
+        }
+        entries.push(ChunkHashEntry {
+            dim: payload.dim.clone(),
+            region: payload.region.clone(),
+            cx: payload.cx,
+            cz: payload.cz,
+            status,
+            bytes: payload.bytes.len(),
+            xxh3_64: xxh3_64_hex(&payload.bytes),
+            sha256: crate::sha256_hex(&payload.bytes),
+            xxh3_64_canonical: crate::semantic_hash::canonical_xxh3_64(&compound)?,
+        });
     }
 
     // Deterministic ordering (dim, region, cx, cz) so the committed manifest is
@@ -412,6 +454,7 @@ pub fn build_from_payloads_with(
 /// `starlight.light_version` written by a light-correct FULL chunk
 /// (`SaveUtil.STARLIGHT_LIGHT_VERSION`, 10).
 const STARLIGHT_LIGHT_VERSION: i32 = 10;
+const CURRENT_DATA_VERSION: i32 = 4903;
 
 /// The packed length of a FINAL heightmap as `long[]`. A heightmap is a
 /// `SimpleBitStorage` over 256 entries at 9 bits each: `valuesPerLong =
@@ -453,11 +496,53 @@ fn validate_full_payload(
         ));
     }
     let mut missing: Vec<&'static str> = Vec::new();
-    if !matches!(
-        compound.tags.get("structures"),
-        Some(rivet_nbt::tag::Tag::Compound(_))
-    ) {
-        missing.push("structures");
+    match compound.get_int("DataVersion") {
+        Some(version) if version == CURRENT_DATA_VERSION => {}
+        Some(version) => {
+            return Err(format!(
+                "chunk {at} has DataVersion {version}, expected pinned Minecraft 26.2 value {CURRENT_DATA_VERSION}"
+            ));
+        }
+        None => missing.push("DataVersion"),
+    }
+    let expected_min_section_y = match dim {
+        "overworld" => -4,
+        "the_nether" | "the_end" => 0,
+        _ => {
+            return Err(format!(
+                "chunk {at} is in an unsupported dimension for FULL validation"
+            ));
+        }
+    };
+    match compound.get_int("yPos") {
+        Some(y) if y == expected_min_section_y => {}
+        Some(y) => {
+            return Err(format!(
+                "chunk {at} has yPos {y}, expected dimension minSectionY {expected_min_section_y}"
+            ));
+        }
+        None => missing.push("yPos"),
+    }
+    match compound.tags.get("structures") {
+        Some(rivet_nbt::tag::Tag::Compound(structures)) => {
+            // SerializableChunkData always emits both structure sub-compounds
+            // for a FULL LevelChunk.  Merely carrying an empty `structures`
+            // marker would let a hand-built/synthetic payload masquerade as a
+            // finished Paper chunk.
+            if !matches!(
+                structures.tags.get("starts"),
+                Some(rivet_nbt::tag::Tag::Compound(_))
+            ) {
+                missing.push("structures.starts");
+            }
+            if !matches!(
+                structures.tags.get("References"),
+                Some(rivet_nbt::tag::Tag::Compound(_))
+            ) {
+                missing.push("structures.References");
+            }
+        }
+        _ => missing.push("structures"),
     }
     // lightCorrect (spec §6) is the gate for isLightOn/starlight.light_version
     // being written at all: a FULL chunk without them was not light-correct.
@@ -504,25 +589,81 @@ fn validate_full_payload(
             missing.join(", ")
         ));
     }
-    // Section-local light shape (spec §5): every `SkyLight`/`BlockLight` byte
-    // array on a section is exactly 2048 bytes (16x16x16 nibbles). A wrong
-    // length is a hard IllegalArgumentException in Java (`DataLayer`) — the
-    // validator refuses to compare a chunk whose light data is malformed.
-    if let Some(sections) = compound.get_list("sections") {
-        for sec in &sections.list {
-            let rivet_nbt::tag::Tag::Compound(sec) = sec else {
-                continue;
-            };
-            for key in ["SkyLight", "BlockLight"] {
-                if let Some(rivet_nbt::tag::Tag::ByteArray(arr)) = sec.tags.get(key)
-                    && arr.data.len() != 2048
-                {
-                    return Err(format!(
-                        "chunk {at} section {key} has {} bytes, expected 2048 \
-                         (16x16x16 nibble array)",
-                        arr.data.len()
-                    ));
-                }
+    // Paper always writes a sections ListTag. Every emitted section is a
+    // compound with a unique, light-bounded Y. Interior sections carry
+    // codec-shaped block-state and biome compounds; the one-section boundary
+    // padding may be light-only. Light arrays, when present, are exact DataLayers.
+    let sections = compound
+        .get_list("sections")
+        .ok_or_else(|| format!("chunk {at} has no sections ListTag"))?;
+    if sections.list.is_empty() {
+        return Err(format!("chunk {at} has an empty sections ListTag"));
+    }
+    let max_section_y = if dim == "overworld" { 19 } else { 15 };
+    // Paper/Starlight serializes the light neighborhood too: WorldUtil's
+    // light-section range is one section below the block range through one
+    // section above it.  These boundary sections are legitimate (for example
+    // overworld Y=-5 and End Y=-1) and must not be rejected as malformed.
+    let light_min_section_y = expected_min_section_y - 1;
+    let light_max_section_y = max_section_y + 1;
+    let mut section_ys = std::collections::HashSet::new();
+    for sec_tag in &sections.list {
+        let rivet_nbt::tag::Tag::Compound(sec) = sec_tag else {
+            return Err(format!(
+                "chunk {at} sections contains a non-compound element"
+            ));
+        };
+        let Some(y) = sec.get_byte("Y") else {
+            return Err(format!("chunk {at} section is missing byte Y"));
+        };
+        let y = i32::from(y);
+        if y < light_min_section_y || y > light_max_section_y {
+            return Err(format!(
+                "chunk {at} section Y {y} is outside Paper light-section bounds {light_min_section_y}..={light_max_section_y}"
+            ));
+        }
+        if !section_ys.insert(y) {
+            return Err(format!("chunk {at} contains duplicate section Y {y}"));
+        }
+        // The one-section light padding emitted by Paper/Starlight is a
+        // legitimate light-only section: it may carry SkyLight/BlockLight and
+        // no block-state or biome container. Interior sections must carry the
+        // normal LevelChunk block-state and biome containers; if a boundary
+        // section does carry either container, validate its palette as usual.
+        let in_block_bounds = y >= expected_min_section_y && y <= max_section_y;
+        if let Some(block_states) = sec.get_compound("block_states") {
+            let block_palette = block_states.get_list("palette").ok_or_else(|| {
+                format!("chunk {at} section Y {y} block_states has no palette ListTag")
+            })?;
+            if block_palette.list.is_empty() {
+                return Err(format!(
+                    "chunk {at} section Y {y} block_states palette is empty"
+                ));
+            }
+        } else if in_block_bounds {
+            return Err(format!(
+                "chunk {at} section Y {y} has no block_states compound"
+            ));
+        }
+        if let Some(biomes) = sec.get_compound("biomes") {
+            let biome_palette = biomes
+                .get_list("palette")
+                .ok_or_else(|| format!("chunk {at} section Y {y} biomes has no palette ListTag"))?;
+            if biome_palette.list.is_empty() {
+                return Err(format!("chunk {at} section Y {y} biomes palette is empty"));
+            }
+        } else if in_block_bounds {
+            return Err(format!("chunk {at} section Y {y} has no biomes compound"));
+        }
+        for key in ["SkyLight", "BlockLight"] {
+            if let Some(rivet_nbt::tag::Tag::ByteArray(arr)) = sec.tags.get(key)
+                && arr.data.len() != 2048
+            {
+                return Err(format!(
+                    "chunk {at} section {key} has {} bytes, expected 2048 \
+                     (16x16x16 nibble array)",
+                    arr.data.len()
+                ));
             }
         }
     }
@@ -908,9 +1049,39 @@ mod tests {
         let compound = parse_payload(&fixture_full_payload(0, 0)).unwrap();
         validate_full_payload(&compound, "overworld", 0, 0).expect("genuine FULL validates");
 
+        let mut no_data_version = compound.clone();
+        no_data_version.tags.swap_remove("DataVersion");
+        assert!(validate_full_payload(&no_data_version, "overworld", 0, 0).is_err());
+
+        let mut wrong_data_version = compound.clone();
+        wrong_data_version.put_int("DataVersion", CURRENT_DATA_VERSION - 1);
+        assert!(validate_full_payload(&wrong_data_version, "overworld", 0, 0).is_err());
+
+        let mut wrong_y_pos = compound.clone();
+        wrong_y_pos.put_int("yPos", -3);
+        assert!(validate_full_payload(&wrong_y_pos, "overworld", 0, 0).is_err());
+
+        let mut no_sections = compound.clone();
+        no_sections.tags.swap_remove("sections");
+        assert!(validate_full_payload(&no_sections, "overworld", 0, 0).is_err());
+
         let mut no_structures = compound.clone();
         no_structures.tags.swap_remove("structures");
         assert!(validate_full_payload(&no_structures, "overworld", 0, 0).is_err());
+
+        let mut no_structure_starts = compound.clone();
+        no_structure_starts
+            .get_compound_or_empty_mut("structures")
+            .tags
+            .swap_remove("starts");
+        assert!(validate_full_payload(&no_structure_starts, "overworld", 0, 0).is_err());
+
+        let mut no_structure_references = compound.clone();
+        no_structure_references
+            .get_compound_or_empty_mut("structures")
+            .tags
+            .swap_remove("References");
+        assert!(validate_full_payload(&no_structure_references, "overworld", 0, 0).is_err());
 
         let mut short_hm = compound.clone();
         short_hm
@@ -938,6 +1109,32 @@ mod tests {
             );
         }
         assert!(validate_full_payload(&bad_light, "overworld", 0, 0).is_err());
+
+        let mut non_compound_section = compound.clone();
+        non_compound_section.get_list_or_empty_mut("sections").list[0] =
+            Tag::String(rivet_nbt::string_tag::StringTag::value_of("bad".into()));
+        assert!(validate_full_payload(&non_compound_section, "overworld", 0, 0).is_err());
+
+        let mut no_section_y = compound.clone();
+        if let Tag::Compound(section) = &mut no_section_y.get_list_or_empty_mut("sections").list[0]
+        {
+            section.tags.swap_remove("Y");
+        }
+        assert!(validate_full_payload(&no_section_y, "overworld", 0, 0).is_err());
+
+        let mut duplicate_section_y = compound.clone();
+        let duplicate = duplicate_section_y.get_list_or_empty_mut("sections").list[0].clone();
+        duplicate_section_y
+            .get_list_or_empty_mut("sections")
+            .list
+            .push(duplicate);
+        assert!(validate_full_payload(&duplicate_section_y, "overworld", 0, 0).is_err());
+
+        let mut no_biomes = compound.clone();
+        if let Tag::Compound(section) = &mut no_biomes.get_list_or_empty_mut("sections").list[0] {
+            section.tags.swap_remove("biomes");
+        }
+        assert!(validate_full_payload(&no_biomes, "overworld", 0, 0).is_err());
 
         let mut no_light_flag = compound.clone();
         no_light_flag.tags.swap_remove("isLightOn");
