@@ -399,16 +399,23 @@ def _validate_log(path: Path, token: str, *, capture: bool) -> None:
         required += ["RIVET_PROBE_READY", "RIVET_CAPTURE_TOKEN=" + token, "RIVET_SIMULATION_FROZEN"]
     if any(marker not in text for marker in required):
         raise Failed(f"Paper log is missing a required {'capture' if capture else 'create'} marker")
-    done_at = text.find("Done (")
-    stopping_at = text.rfind("Stopping server")
-    saved_at = text.rfind("All dimensions are saved")
-    if not (0 <= done_at < stopping_at < saved_at):
+
+    def unique_marker(marker: str) -> int:
+        positions = [match.start() for match in re.finditer(re.escape(marker), text)]
+        if len(positions) != 1:
+            raise Failed(f"Paper log marker is missing or duplicated: {marker}")
+        return positions[0]
+
+    done_at = unique_marker("Done (")
+    stopping_at = unique_marker("Stopping server")
+    saved_at = unique_marker("All dimensions are saved")
+    if not (done_at < stopping_at < saved_at):
         raise Failed("Paper graceful-stop markers are out of order")
     if capture:
-        ready_at = text.rfind("RIVET_PROBE_READY")
-        token_at = text.rfind("RIVET_CAPTURE_TOKEN=" + token)
-        frozen_at = text.rfind("RIVET_SIMULATION_FROZEN")
-        if not (frozen_at >= 0 and done_at < ready_at <= token_at < stopping_at and frozen_at < ready_at):
+        ready_at = unique_marker("RIVET_PROBE_READY")
+        token_at = unique_marker("RIVET_CAPTURE_TOKEN=" + token)
+        frozen_at = unique_marker("RIVET_SIMULATION_FROZEN")
+        if not (done_at < frozen_at < ready_at <= token_at < stopping_at):
             raise Failed("Paper simulation/probe-ready/token markers are not ordered before graceful stop")
 
 

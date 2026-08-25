@@ -132,7 +132,7 @@ public final class PaperNormalFullProbe extends JavaPlugin {
                 // isChunkLoaded guard; it is not used to trigger generation.
                 Chunk bukkitChunk = world.getChunkAt(coordinate[0], coordinate[1]);
                 ChunkAccess access = ((CraftChunk) bukkitChunk).getHandle(ChunkStatus.FULL);
-                String status = "minecraft:" + access.getPersistedStatus().getName();
+                String status = access.getPersistedStatus().getName();
                 boolean lightCorrect = access.isLightCorrect();
                 int worldSurface = access.getHeight(Heightmap.Types.WORLD_SURFACE, 8, 8);
                 int motionBlocking = access.getHeight(Heightmap.Types.MOTION_BLOCKING, 8, 8);
