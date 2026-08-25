@@ -117,8 +117,8 @@ impl SkyLightProvider {
             engine: SkyStarLightEngine::new(&height_accessor),
             min_section,
             max_section,
-            min_light_section: min_section - 1,
-            max_light_section: max_section + 1,
+            min_light_section: min_section.wrapping_sub(1),
+            max_light_section: max_section.wrapping_add(1),
             has_sky_light,
             has_block_light,
             chunks: ChunkStorage::Callback(chunks),
@@ -141,8 +141,8 @@ impl SkyLightProvider {
             engine: SkyStarLightEngine::new(&height_accessor),
             min_section,
             max_section,
-            min_light_section: min_section - 1,
-            max_light_section: max_section + 1,
+            min_light_section: min_section.wrapping_sub(1),
+            max_light_section: max_section.wrapping_add(1),
             has_sky_light,
             has_block_light,
             chunks: ChunkStorage::Owned(chunks),
@@ -489,11 +489,11 @@ impl SkyLightProvider {
         }
         if section_y < min_light_section {
             section_y = min_light_section;
-            y = section_y << 4;
+            y = section_y.wrapping_shl(4);
         }
 
         let nibbles = chunk.sky_nibbles();
-        let immediate = &nibbles[(section_y - min_light_section) as usize];
+        let immediate = &nibbles[(section_y.wrapping_sub(min_light_section)) as usize];
         if !immediate.is_null_nibble_visible() {
             return immediate.get_visible(x, y, z);
         }
@@ -504,9 +504,9 @@ impl SkyLightProvider {
 
         // Are we above this chunk's lowest empty section? Walk the world
         // sections from the top down for the lowest non-empty one.
-        let mut lowest_y = min_light_section - 1;
+        let mut lowest_y = min_light_section.wrapping_sub(1);
         for curr_y in (min_section..=max_section).rev() {
-            if emptiness_map[(curr_y - min_section) as usize] {
+            if emptiness_map[(curr_y.wrapping_sub(min_section)) as usize] {
                 continue;
             }
             lowest_y = curr_y;
@@ -519,8 +519,8 @@ impl SkyLightProvider {
 
         // This nibble depends solely on the skylight data above it: find the
         // first non-null data above (one exists, as the walk just found it).
-        for curr_y in (section_y + 1)..=max_light_section {
-            let nibble = &nibbles[(curr_y - min_light_section) as usize];
+        for curr_y in section_y.wrapping_add(1)..=max_light_section {
+            let nibble = &nibbles[(curr_y.wrapping_sub(min_light_section)) as usize];
             if !nibble.is_null_nibble_visible() {
                 return nibble.get_visible(x, 0, z);
             }
@@ -545,7 +545,7 @@ impl SkyLightProvider {
         if cy < self.min_light_section || cy > self.max_light_section {
             return 0;
         }
-        let nibble = &chunk.block_nibbles()[(cy - self.min_light_section) as usize];
+        let nibble = &chunk.block_nibbles()[(cy.wrapping_sub(self.min_light_section)) as usize];
         nibble.get_visible(pos.get_x(), y, pos.get_z())
     }
 
@@ -566,7 +566,8 @@ impl SkyLightProvider {
             return None;
         }
         chunk.sky_emptiness_map()?;
-        chunk.sky_nibbles()[(section_y - self.min_light_section) as usize].to_vanilla_nibble()
+        chunk.sky_nibbles()[(section_y.wrapping_sub(self.min_light_section)) as usize]
+            .to_vanilla_nibble()
     }
 }
 
@@ -1369,8 +1370,8 @@ mod tests {
         assert_eq!(golden.format, 1);
 
         let height_accessor = overworld();
-        let min_light = height_accessor.get_min_section_y() - 1;
-        let max_light = height_accessor.get_max_section_y() + 1;
+        let min_light = height_accessor.get_min_section_y().wrapping_sub(1);
+        let max_light = height_accessor.get_max_section_y().wrapping_add(1);
 
         let mut storage = HashMap::new();
         for (cx, cz) in forced_coordinates() {
