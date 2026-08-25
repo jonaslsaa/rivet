@@ -644,7 +644,7 @@ def reset_world_support_data(world: Path) -> tuple[list[str], list[str], list[st
     return before, tickets_before, after
 
 
-def chunk_details(raw: bytes, coordinate: tuple[int, int]) -> dict[str, Any]:
+def chunk_details(raw: bytes, coordinate: tuple[int, int], *, target: bool) -> dict[str, Any]:
     try:
         root = parse(raw)
     except NbtError as exc:
@@ -656,7 +656,10 @@ def chunk_details(raw: bytes, coordinate: tuple[int, int]) -> dict[str, Any]:
     heightmaps = get_any(root, "Heightmaps")
     if status is None or status.kind != 8 or status.value != "minecraft:full":
         raise Failed(f"{coordinate} did not serialize minecraft:full")
-    if light is None or light.kind != 1 or not light.value:
+    if light is None or light.kind != 1:
+        raise Failed(f"{coordinate} did not serialize an isLightOn byte")
+    light_correct = bool(light.value)
+    if target and not light_correct:
         raise Failed(f"{coordinate} did not serialize isLightOn=true")
     if heightmaps is None or heightmaps.kind != 10:
         raise Failed(f"{coordinate} has no Heightmaps compound")
@@ -701,7 +704,7 @@ def chunk_details(raw: bytes, coordinate: tuple[int, int]) -> dict[str, Any]:
         raise Failed(f"{coordinate} has a flat/under-varied block palette")
     return {
         "status": status.value,
-        "light_correct": True,
+        "light_correct": light_correct,
         "heightmaps": list(required),
         "heightmap_ranges": {name: [min(values), max(values)] for name, values in decoded.items()},
         "palette_names": sorted(palette_names),
@@ -743,7 +746,7 @@ def extract_run(
         relative = f"chunks/{x}.{z}.nbt"
         path = run / relative
         path.write_bytes(raw)
-        details = chunk_details(raw, (x, z))
+        details = chunk_details(raw, (x, z), target=(x, z) in TARGETS)
         details.update({"x": x, "z": z, "raw_path": relative})
         chunks.append(details)
     ticket_coordinates = read_ticket_coordinates(ticket_path)

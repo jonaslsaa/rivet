@@ -97,7 +97,10 @@ class EvidenceTests(unittest.TestCase):
         self.assertRegex(semantic, r"^[0-9a-f]{64}$")
         self.assertTrue(details["light_correct"])
         self.assertEqual(details["heightmaps"], ["WORLD_SURFACE", "MOTION_BLOCKING", "OCEAN_FLOOR"])
-        self.assertEqual(capture.chunk_details(raw, (0, 0))["heightmaps"], details["heightmaps"])
+        self.assertEqual(capture.chunk_details(raw, (0, 0), target=True)["heightmaps"], details["heightmaps"])
+        _, _, support_details = validate.validate_chunk(valid_chunk(light=False), (0, 0), target=False)
+        self.assertFalse(support_details["light_correct"])
+        self.assertFalse(capture.chunk_details(valid_chunk(light=False), (0, 0), target=False)["light_correct"])
 
     def test_negative_chunk_evidence_cases(self):
         with self.assertRaises(validate.Failed):

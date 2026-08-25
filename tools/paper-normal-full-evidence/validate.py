@@ -267,7 +267,10 @@ def validate_chunk(raw: bytes, coordinate: tuple[int, int], *, target: bool) -> 
     if status != "minecraft:full":
         raise Failed(f"{coordinate} is {status}, not minecraft:full")
     light = get_any(root, "isLightOn")
-    if light is None or light.kind != 1 or not light.value:
+    if light is None or light.kind != 1:
+        raise Failed(f"{coordinate} has no isLightOn byte")
+    light_correct = bool(light.value)
+    if target and not light_correct:
         raise Failed(f"{coordinate} is not light-correct")
     heightmaps, heightmap_names = _heightmaps(root, coordinate)
     names = _block_palette_names(root, coordinate)
@@ -276,7 +279,7 @@ def validate_chunk(raw: bytes, coordinate: tuple[int, int], *, target: bool) -> 
     semantic = sha256(canonical_without_dynamic(root))
     details = {
         "status": status,
-        "light_correct": True,
+        "light_correct": light_correct,
         "heightmaps": heightmap_names,
         "heightmap_ranges": {name: [min(values), max(values)] for name, values in heightmaps.items()},
         "palette_names": sorted(names),
@@ -686,7 +689,7 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
         if entry.get("raw_sha256") != sha256(raw) or entry.get("raw_bytes") != len(raw):
             raise Failed(f"raw NBT hash mismatch: {coordinate}")
         _, semantic_hash, details = validate_chunk(raw, coordinate, target=coordinate in EXPECTED_TARGETS)
-        if entry.get("status") != details["status"] or entry.get("semantic_sha256") != semantic_hash or entry.get("light_correct") is not True or entry.get("heightmaps") != details["heightmaps"]:
+        if entry.get("status") != details["status"] or entry.get("semantic_sha256") != semantic_hash or entry.get("light_correct") != details["light_correct"] or entry.get("heightmaps") != details["heightmaps"]:
             raise Failed(f"chunk status/light/heightmap/semantic evidence mismatch: {coordinate}")
         semantic[coordinate] = semantic_hash
     if manifest.get("semantic_hash_dynamic_fields") != ["InhabitedTime", "LastUpdate"]:
