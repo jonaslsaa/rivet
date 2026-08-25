@@ -36,7 +36,11 @@ builds on top of these fixtures later.
   to level 33 (`minecraft:full`). FEATURES is the last block-mutating status, so
   a FULL serialization's block data IS the FEATURES-decoration output; the
   verifier cross-checks each committed chunk against the generated-expected
-  golden at the same coordinates. Twin-boot byte-identity verified.
+  golden at the same coordinates. A features-only `feature_observations` layer
+  additionally pins the positional magma_block (UnderwaterMagmaFeature, #644)
+  and glow_lichen (MultifaceGrowthFeature, #645) occurrences, so those leaves
+  are non-vacuously covered. This remains feature-leaf evidence, not a claim of
+  full block-volume or FULL parity. Twin-boot byte-identity verified.
 - **Seed-42 LIGHT-stage oracle checkpoint** (`light 42`, PR #175/#184): the
   per-section Starlight sky nibbles + derived sky-emptiness map for the
   committed 3×3 interior {19..21}² of a self-contained forced 5×5 grid
@@ -627,6 +631,21 @@ partial/corrupt tree hard-fails (exit 1), never a silent green. The tamper
 negative control proves the manifest SHA-256 gate is not vacuous. `verify` (and
 the no-arg `cargo run -p rivet-oracle`) gates on this golden exactly like the
 other load-bearing kinds.
+
+The checkpoint also pins the leaf features it covers, via a features-only
+observation layer (`feature_observations`) kept out of the shared
+`WorldManifest`: the positional `{block, index (z*16+x), y}` occurrences of
+`magma_block` (UnderwaterMagmaFeature, PR #644) and `glow_lichen`
+(MultifaceGrowthFeature/`glow_lichen`, PR #645). `surface`/`bedrock`/
+`below_feet` do not locate these — magma sits on the ocean floor below the
+surface water and glow_lichen attaches in the water column/caves — so the
+golden records them directly. The verifier requires a `magma_block` in a
+submerged column (`surface[index] == water`), the pinned UnderwaterMagma
+ocean-floor signature, and at least one `glow_lichen`. The observations are
+feature-leaf evidence only; they do not claim full feature dispatch or
+FULL/generated-world parity. Tamper negatives remove each set (and relocate
+magma off the ocean floor) and must fail verification, so the #644/#645
+coverage is non-vacuous.
 
 ## Seed-42 LIGHT-stage checkpoint: `light`
 

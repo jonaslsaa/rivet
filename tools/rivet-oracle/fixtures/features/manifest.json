@@ -4,12 +4,12 @@
   "seed": "42",
   "level-type": "minecraft:normal",
   "kind": "features",
-  "note": "Seed-42 FEATURES oracle checkpoint (PR #175/#232): the per-chunk surface/bedrock/below_feet fingerprint for the committed 2x2 grid {(3,3),(4,3),(3,4),(4,4)} captured from the pinned Paper runtime by booting a fresh normal-overworld world and force-generating generated-expected's {-6..6}x{-6..6} forced grid to level 33 (ChunkLevel.byStatus(FULL)), serialized as minecraft:full. FULL is the forced path's ceiling (a level-34 ticket is INACCESSIBLE and never generates), and FEATURES is the last block-mutating status, so a FULL serialization's block data IS the FEATURES-decoration output this captures. The forced grid is generated-expected's regime because the FEATURES step writes one chunk into each neighbor (blockStateWriteRadius(1)): only the same forced-grid context makes the committed chunks byte-identical to the canonical golden, which the verifier cross-checks chunk-for-chunk. Arrays are 16x16 row-major z*16+x; surface is the highest non-air block, bedrock at y=-60, below_feet at y=-61. Non-vacuity: chunk (4,4) must carry tree blocks in its surface (the decoration evidence). Regenerate with `rivet-oracle regenerate --features` (twin-boot byte-identity proof).",
+  "note": "Seed-42 FEATURES oracle checkpoint (PR #175/#232): the per-chunk surface/bedrock/below_feet fingerprint for the committed 2x2 grid {(3,3),(4,3),(3,4),(4,4)} captured from the pinned Paper runtime by booting a fresh normal-overworld world and force-generating generated-expected's {-6..6}x{-6..6} forced grid to level 33 (ChunkLevel.byStatus(FULL)), serialized as minecraft:full. FULL is the forced path's ceiling (a level-34 ticket is INACCESSIBLE and never generates), and FEATURES is the last block-mutating status, so a FULL serialization's block data IS the FEATURES-decoration output this captures. The forced grid is generated-expected's regime because the FEATURES step writes one chunk into each neighbor (blockStateWriteRadius(1)): only the same forced-grid context makes the committed chunks byte-identical to the canonical golden, which the verifier cross-checks chunk-for-chunk. Arrays are 16x16 row-major z*16+x; surface is the highest non-air block, bedrock at y=-60, below_feet at y=-61. Non-vacuity: chunk (4,4) must carry tree blocks in its surface (the decoration evidence). The checkpoint also records a feature-only observation layer (feature_observations): the positional occurrences of magma_block (UnderwaterMagmaFeature, PR #644) and glow_lichen (MultifaceGrowthFeature/glow_lichen, PR #645); verification requires a submerged-column magma_block (the pinned ocean-floor signature) and at least one glow_lichen. This is feature-leaf evidence only, not full generated-world parity. Regenerate with `rivet-oracle regenerate --features` (twin-boot byte-identity proof).",
   "captured": [
     {
       "path": "features.json",
-      "sha256": "2d186f6233795d1c3c7f9873cf57e76f1997cde573a3bf9a8a520955a86f2c8a",
-      "bytes": 66348
+      "sha256": "2d52a38f2fca8674951bace7b735c503e02a35a5be0c11f8778fa0f2ebd0d740",
+      "bytes": 67552
     }
   ]
 }
