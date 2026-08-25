@@ -755,6 +755,8 @@ def run_one(
     timeout: float,
 ) -> None:
     run.mkdir(parents=True)
+    if (run / "world").exists():
+        raise Failed("fresh run root already contains a world before Paper boot")
     write_configs(run, seed)
     copy_fixture_provenance(run)
     token = secrets.token_hex(32)
@@ -767,6 +769,7 @@ def run_one(
         raise Failed(f"preflight support/ticket roots were not empty: {after}")
     preflight = {
         "fresh_isolated_world_root": True,
+        "world_absent_before_boot1": True,
         "boot1_created_world": True,
         "before_injection_data_paths": after,
         "boot1_generated_data_paths_removed": before,

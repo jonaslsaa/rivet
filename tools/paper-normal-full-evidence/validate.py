@@ -461,7 +461,7 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
     if ports.get("configured_server") != 0 or ports.get("configured_query") != 0 or not isinstance(ports.get("capture", {}).get("server"), int) or ports.get("capture", {}).get("server") < 0:
         raise Failed("dynamic port provenance is absent or static")
     preflight = manifest.get("preflight", {})
-    if preflight.get("fresh_isolated_world_root") is not True or preflight.get("boot1_created_world") is not True or preflight.get("reset_before_ticket_injection") is not True or preflight.get("before_injection_data_paths") != [] or preflight.get("before_injection_ticket_paths") != [] or preflight.get("no_preexisting_target_support_data") is not True or preflight.get("no_preexisting_tickets") is not True:
+    if preflight.get("fresh_isolated_world_root") is not True or preflight.get("world_absent_before_boot1") is not True or preflight.get("boot1_created_world") is not True or preflight.get("reset_before_ticket_injection") is not True or preflight.get("before_injection_data_paths") != [] or preflight.get("before_injection_ticket_paths") != [] or preflight.get("no_preexisting_target_support_data") is not True or preflight.get("no_preexisting_tickets") is not True:
         raise Failed("preflight did not prove a fresh clean target/support/ticket root")
     _validate_worldgen_settings(run, expected_seed, manifest)
     _validate_tickets(run, expected_closure, manifest)
