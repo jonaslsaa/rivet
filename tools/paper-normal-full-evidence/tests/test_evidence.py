@@ -94,6 +94,13 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(result.returncode, 3)
             self.assertIn("UNVERIFIED", result.stdout)
 
+    def test_error_log_is_failed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "server.log"
+            path.write_text("Done (1s)!\\n[ERROR] self-authored fallback\\n")
+            with self.assertRaises(validate.Failed):
+                validate._validate_log(path, "0" * 64, capture=False)
+
     def test_copied_run_root_is_failed(self):
         with tempfile.TemporaryDirectory() as directory:
             run = Path(directory) / "copy"
