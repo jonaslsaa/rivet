@@ -29,6 +29,15 @@
 //! `ChunkBukkitValues` compound when a non-empty PDC is carried, and the
 //! Starlight tail (`isLightOn` clobbered false + `starlight.light_version`).
 //!
+//! The typed block/fluid tick lists are intentionally written from the parsed
+//! pending values verbatim. Reconstruction carries [`SavedTick`] values but
+//! does not install authoritative `LevelChunkTicks`/`ProtoChunkTicks` runtime
+//! containers, so this writer must not invent a rebase from serialized
+//! `LastUpdate`. Paper preserves pending ticks unchanged and only repacks live
+//! queued ticks against the level's current game time. The live-save seam for
+//! #522/#231 must eventually snapshot those runtime containers before calling
+//! this writer, so newly scheduled, removed, or unpacked ticks are included.
+//!
 //! The paletted-container encoding reuses the exact `pack()`-produced
 //! `PackedData` the parse consumes: the `palette` list is the packed
 //! `palette_entries` (blocks via `NbtUtils.writeBlockState`, biomes as plain
@@ -454,9 +463,10 @@ pub fn write(
 /// through the faithful `SavedTick.codec(byNameCodec).listOf()` codecs (the
 /// exact `BLOCK_TICKS_CODEC`/`FLUID_TICKS_CODEC` Paper caches). The parse
 /// already filtered the typed values to the stored chunk (Paper's
-/// `filterTickListForChunk`), so this reproduces what `copyOf`'s
-/// `chunk.getTicksForSerialization(level.getGameTime())` would hand to
-/// `write()`.
+/// `filterTickListForChunk`). These values remain pending in the current
+/// reconstruction, and Paper's `LevelChunkTicks.pack` / `ProtoChunkTicks.pack`
+/// preserve pending values unchanged; only live queued runtime ticks are
+/// repacked against the current game time.
 fn save_ticks(tag: &mut CompoundTag, data: &SerializableChunkData) {
     // The accessors expose the stored ticks as slices; `CompoundTag::store`
     // encodes through the `Vec`-shaped tick-list codec, so the owned value is
@@ -532,6 +542,9 @@ mod tests {
     /// keeps a separate parse alive for `write` (the writer's input split is
     /// data + chunk, mirroring `copyOf`'s split of auxiliary fields and live
     /// sections).
+    /// Preserve the parse/write fixed point by passing the parsed
+    /// `LastUpdate` as the explicit game-time argument. A live save will pass
+    /// the level's current game time instead.
     fn write_once(root: &CompoundTag) -> CompoundTag {
         write_once_with_game_time(root, |data| data.last_update_time())
     }
@@ -845,6 +858,64 @@ mod tests {
                 "InhabitedTime remains sourced from the chunk"
             );
         }
+    }
+
+    fn stored_tick(id: &str, x: i32, y: i32, z: i32, delay: i32) -> CompoundTag {
+        let mut tick = CompoundTag::new();
+        tick.put_string("i", id);
+        tick.put_int("x", x);
+        tick.put_int("y", y);
+        tick.put_int("z", z);
+        tick.put_int("t", delay);
+        tick.put_int("p", 0);
+        tick
+    }
+
+    fn put_single_stored_tick(
+        root: &mut CompoundTag,
+        field: &str,
+        id: &str,
+        x: i32,
+        y: i32,
+        z: i32,
+        delay: i32,
+    ) {
+        root.put(
+            field.to_string(),
+            Tag::List(ListTag::with_list(vec![Tag::Compound(stored_tick(
+                id, x, y, z, delay,
+            ))])),
+        );
+    }
+
+    fn written_tick_delay(root: &CompoundTag, field: &str) -> i32 {
+        let Tag::List(ticks) = root.get(field).expect("tick list written") else {
+            panic!("{field} must be a list");
+        };
+        let Tag::Compound(tick) = &ticks.list[0] else {
+            panic!("{field} entry must be a compound");
+        };
+        tick.get_int("t").expect("tick delay written")
+    }
+
+    #[test]
+    fn pending_block_and_fluid_ticks_keep_delays_when_game_time_changes() {
+        // Paper's LevelChunkTicks/ProtoChunkTicks preserve pending SavedTicks
+        // unchanged. Only queued runtime ticks are unpacked and repacked against
+        // the current game time, and reconstruction has not installed those
+        // authoritative runtime containers yet.
+        let mut root = fixture("-1.-3.nbt");
+        let parsed_game_time = 41;
+        let current_game_time = 100;
+        root.put_long("LastUpdate", parsed_game_time);
+        put_single_stored_tick(&mut root, "block_ticks", "minecraft:sand", -1, 64, -33, 7);
+        put_single_stored_tick(&mut root, "fluid_ticks", "minecraft:water", -2, 63, -34, 7);
+
+        assert_eq!(root.get_long("LastUpdate"), Some(parsed_game_time));
+        let written = write_once_with_game_time(&root, |_| current_game_time);
+        assert_eq!(written.get_long("LastUpdate"), Some(current_game_time));
+        assert_eq!(written_tick_delay(&written, "block_ticks"), 7);
+        assert_eq!(written_tick_delay(&written, "fluid_ticks"), 7);
     }
 
     #[test]
