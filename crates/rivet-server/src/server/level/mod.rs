@@ -41,6 +41,10 @@ pub use chunk_result::ChunkResult;
 pub use chunk_tracking_view::ChunkTrackingView;
 pub use entity_id_allocator::EntityIdAllocator;
 pub use full_chunk_status::FullChunkStatus;
+pub use generated_world::{
+    GeneratedChunkError, GenerationChunkHolder, OverworldGenerator, SpawnRegionError,
+    SpawnRegionProtos,
+};
 pub use level_chunk::{BiomeId, LevelChunk, LevelChunkSaveError, StateId};
 pub use player_chunk_loader::{
     PlayPacket, PlayerChunkLoader, encode_play_frame, get_client_view_distance,

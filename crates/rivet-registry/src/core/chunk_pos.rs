@@ -79,14 +79,17 @@ impl ChunkPos {
 
     /// `ChunkPos.minFromRegion(int, int)`.
     pub fn min_from_region(region_x: i32, region_z: i32) -> ChunkPos {
-        ChunkPos::new(region_x << REGION_BITS, region_z << REGION_BITS)
+        ChunkPos::new(
+            region_x.wrapping_shl(REGION_BITS as u32),
+            region_z.wrapping_shl(REGION_BITS as u32),
+        )
     }
 
     /// `ChunkPos.maxFromRegion(int, int)`.
     pub fn max_from_region(region_x: i32, region_z: i32) -> ChunkPos {
         ChunkPos::new(
-            (region_x << REGION_BITS).wrapping_add(31),
-            (region_z << REGION_BITS).wrapping_add(31),
+            region_x.wrapping_shl(REGION_BITS as u32).wrapping_add(31),
+            region_z.wrapping_shl(REGION_BITS as u32).wrapping_add(31),
         )
     }
 
@@ -171,12 +174,12 @@ impl ChunkPos {
 
     /// `ChunkPos.getMinBlockX()`.
     pub fn get_min_block_x(&self) -> i32 {
-        SectionPos::section_to_block_coord(self.x)
+        self.x.wrapping_shl(SectionPos::SECTION_BITS as u32)
     }
 
     /// `ChunkPos.getMinBlockZ()`.
     pub fn get_min_block_z(&self) -> i32 {
-        SectionPos::section_to_block_coord(self.z)
+        self.z.wrapping_shl(SectionPos::SECTION_BITS as u32)
     }
 
     /// `ChunkPos.getMaxBlockX()`.
@@ -226,12 +229,12 @@ impl ChunkPos {
 
     /// `ChunkPos.getBlockX(int)`.
     pub fn get_block_x(&self, offset: i32) -> i32 {
-        SectionPos::section_to_block_coord_offset(self.x, offset)
+        self.get_min_block_x().wrapping_add(offset)
     }
 
     /// `ChunkPos.getBlockZ(int)`.
     pub fn get_block_z(&self, offset: i32) -> i32 {
-        SectionPos::section_to_block_coord_offset(self.z, offset)
+        self.get_min_block_z().wrapping_add(offset)
     }
 
     /// `ChunkPos.getMiddleBlockPosition(int)`.
@@ -291,11 +294,11 @@ impl ChunkPos {
 
     /// `ChunkPos.rangeClosed(ChunkPos, ChunkPos)` — X-major, then Z.
     pub fn range_closed_pos(from: &ChunkPos, to: &ChunkPos) -> Vec<ChunkPos> {
-        let x_size = (from.x.wrapping_sub(to.x)).wrapping_abs() + 1;
-        let z_size = (from.z.wrapping_sub(to.z)).wrapping_abs() + 1;
+        let x_size = (from.x.wrapping_sub(to.x)).wrapping_abs().wrapping_add(1);
+        let z_size = (from.z.wrapping_sub(to.z)).wrapping_abs().wrapping_add(1);
         let x_diff = if from.x < to.x { 1 } else { -1 };
         let z_diff = if from.z < to.z { 1 } else { -1 };
-        let mut out = Vec::with_capacity((x_size * z_size) as usize);
+        let mut out = Vec::with_capacity(x_size.wrapping_mul(z_size) as usize);
         let mut pos = *from;
         loop {
             out.push(pos);
@@ -321,5 +324,42 @@ impl std::fmt::Display for ChunkPos {
 }
 
 const fn pack_const(x: i32, z: i32) -> i64 {
-    (x as i64 & COORD_MASK) | ((z as i64 & COORD_MASK) << 32)
+    (((x as u64) & COORD_MASK as u64) | (((z as u64) & COORD_MASK as u64) << 32)) as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_block_coordinates_wrap_like_java_ints() {
+        let pos = ChunkPos::new(i32::MAX, i32::MIN);
+        assert_eq!(pos.get_min_block_x(), i32::MAX.wrapping_shl(4));
+        assert_eq!(pos.get_min_block_z(), i32::MIN.wrapping_shl(4));
+        assert_eq!(
+            pos.get_block_x(15),
+            i32::MAX.wrapping_shl(4).wrapping_add(15)
+        );
+        assert_eq!(
+            pos.get_block_z(15),
+            i32::MIN.wrapping_shl(4).wrapping_add(15)
+        );
+        assert_eq!(
+            ChunkPos::min_from_region(i32::MAX, i32::MIN),
+            ChunkPos::new(i32::MAX.wrapping_shl(5), i32::MIN.wrapping_shl(5))
+        );
+        assert_eq!(
+            ChunkPos::max_from_region(i32::MAX, i32::MIN),
+            ChunkPos::new(
+                i32::MAX.wrapping_shl(5).wrapping_add(31),
+                i32::MIN.wrapping_shl(5).wrapping_add(31)
+            )
+        );
+    }
+
+    #[test]
+    fn packed_coordinates_round_trip_at_signed_extremes() {
+        let pos = ChunkPos::new(i32::MAX, i32::MIN);
+        assert_eq!(ChunkPos::unpack(pos.pack()), pos);
+    }
 }

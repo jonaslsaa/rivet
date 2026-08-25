@@ -77,6 +77,10 @@ where
     air: T,
     /// `Blocks.VOID_AIR.defaultBlockState()` — returned outside build height.
     void_air: T,
+    /// `BelowZeroRetrogen`'s target status. The retrogen value and bedrock mask
+    /// are deferred, but the target is required because Paper clears the
+    /// carrier from `setPersistedStatus` exactly when that target is reached.
+    upgrading: Option<ChunkStatus>,
 }
 
 impl<T, B, S> ProtoChunk<T, B, S>
@@ -117,6 +121,7 @@ where
             carving_mask: None,
             air,
             void_air,
+            upgrading: None,
         }
     }
 
@@ -356,11 +361,36 @@ where
         self.status
     }
 
-    /// `ProtoChunk.setPersistedStatus(ChunkStatus)` — stores and marks unsaved
-    /// (Java also clears `belowZeroRetrogen` once past its target status).
+    /// `ProtoChunk.setPersistedStatus(ChunkStatus)` — stores and marks unsaved.
+    /// Paper also clears `belowZeroRetrogen` once the persisted status reaches
+    /// its target, not merely when the SPAWN task runs.
     pub fn set_persisted_status(&mut self, status: ChunkStatus) {
         self.status = status;
+        if self
+            .upgrading
+            .is_some_and(|target| status.is_or_after(target))
+        {
+            self.upgrading = None;
+        }
         self.base.mark_unsaved();
+    }
+
+    /// `ChunkAccess.isUpgrading()` — true while a below-zero retrogen carrier
+    /// remains attached. The target is retained so status publication can clear
+    /// it at the same point as Paper.
+    pub fn is_upgrading(&self) -> bool {
+        self.upgrading.is_some()
+    }
+
+    /// Attach a loaded `BelowZeroRetrogen` carrier with its Paper target status.
+    pub fn set_upgrading(&mut self, target_status: ChunkStatus) {
+        self.upgrading = Some(target_status);
+    }
+
+    /// Remove the deferred retrogen carrier explicitly, mirroring
+    /// `ProtoChunk.setBelowZeroRetrogen(null)`.
+    pub fn clear_upgrading(&mut self) {
+        self.upgrading = None;
     }
 
     /// `ChunkAccess.isLightCorrect()` — the light-correct flag the LIGHT task
@@ -599,6 +629,7 @@ where
             carving_mask,
             air: _,
             void_air: _,
+            upgrading,
         } = self;
         let base = base.map_values(
             block_strategy,
@@ -616,6 +647,7 @@ where
             carving_mask,
             air,
             void_air,
+            upgrading,
         })
     }
 
@@ -663,6 +695,7 @@ where
             carving_mask,
             air,
             void_air,
+            upgrading: self.upgrading,
         })
     }
 }
@@ -799,7 +832,7 @@ where
     }
 
     fn is_upgrading(&self) -> bool {
-        false
+        ProtoChunk::is_upgrading(self)
     }
 
     fn get_block_state(&self, pos: &BlockPos) -> BlockState {
@@ -943,6 +976,21 @@ mod tests {
         proto.set_persisted_status(ChunkStatus::Full);
         assert_eq!(proto.get_persisted_status(), ChunkStatus::Full);
         assert!(proto.base.is_unsaved());
+    }
+
+    #[test]
+    fn retrogen_clears_only_when_persisted_status_reaches_target() {
+        let mut proto = stone_proto();
+        proto.set_upgrading(ChunkStatus::Spawn);
+        proto.set_persisted_status(ChunkStatus::Light);
+        assert!(proto.is_upgrading());
+        proto.set_persisted_status(ChunkStatus::Spawn);
+        assert!(!proto.is_upgrading());
+
+        let mut earlier_target = stone_proto();
+        earlier_target.set_upgrading(ChunkStatus::Features);
+        earlier_target.set_persisted_status(ChunkStatus::Features);
+        assert!(!earlier_target.is_upgrading());
     }
 
     #[test]

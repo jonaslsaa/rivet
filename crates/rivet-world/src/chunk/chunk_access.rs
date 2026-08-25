@@ -877,6 +877,72 @@ where
         self.light_correct
     }
 
+    /// Read the published block-light level at an absolute position. The light
+    /// arrays include the one-section boundary on either side of the build
+    /// height, so their index is relative to `minSectionY - 1`, exactly as the
+    /// Starlight provider's `getBlockLightValue` path is.
+    pub fn get_block_light_at(&self, x: i32, y: i32, z: i32) -> i32 {
+        let section_y = y >> 4;
+        let min_light_section = self.height_accessor.get_min_section_y().wrapping_sub(1);
+        let max_light_section = self.height_accessor.get_max_section_y().wrapping_add(1);
+        if section_y < min_light_section || section_y > max_light_section {
+            return 0;
+        }
+        self.block_nibbles
+            .get((section_y - min_light_section) as usize)
+            .map_or(0, |nibble| nibble.get_visible(x, y, z))
+    }
+
+    /// Read the published sky-light level at an absolute position using the
+    /// completed Starlight sky data. A null immediate nibble depends on the
+    /// sky-emptiness map and the first non-null section above it; an absent map
+    /// is deliberately represented as `None` so world-generation callers can
+    /// fail closed rather than treating malformed LIGHT data as daylight.
+    pub fn get_sky_light_at(&self, x: i32, y: i32, z: i32) -> Option<i32> {
+        let min_section = self.height_accessor.get_min_section_y();
+        let max_section = self.height_accessor.get_max_section_y();
+        let min_light_section = min_section.wrapping_sub(1);
+        let max_light_section = max_section.wrapping_add(1);
+        let mut section_y = y >> 4;
+        let mut local_y = y;
+        if section_y > max_light_section {
+            return Some(15);
+        }
+        if section_y < min_light_section {
+            section_y = min_light_section;
+            local_y = section_y << 4;
+        }
+
+        let nibbles = &self.sky_nibbles;
+        let immediate = nibbles.get((section_y - min_light_section) as usize)?;
+        if !immediate.is_null_nibble_visible() {
+            return Some(immediate.get_visible(x, local_y, z));
+        }
+
+        let emptiness_map = self.sky_emptiness_map.as_deref()?;
+        let mut lowest_y = min_light_section.wrapping_sub(1);
+        for curr_y in (min_section..=max_section).rev() {
+            if emptiness_map
+                .get((curr_y - min_section) as usize)
+                .copied()?
+            {
+                continue;
+            }
+            lowest_y = curr_y;
+            break;
+        }
+        if section_y > lowest_y {
+            return Some(15);
+        }
+        for curr_y in section_y.wrapping_add(1)..=max_light_section {
+            let nibble = nibbles.get((curr_y - min_light_section) as usize)?;
+            if !nibble.is_null_nibble_visible() {
+                return Some(nibble.get_visible(x, 0, z));
+            }
+        }
+        None
+    }
+
     /// `ChunkAccess.setLightCorrect(boolean)` — sets the flag and marks unsaved.
     pub fn set_light_correct(&mut self, light_correct: bool) {
         self.light_correct = light_correct;

@@ -956,6 +956,28 @@ where
         0
     }
 
+    /// Read the completed LIGHT values carried by the cached chunk. Paper's
+    /// `WorldGenRegion.getRawBrightness` delegates to the level light engine;
+    /// this value layer has no engine object in the region, so the equivalent
+    /// completed result is the visible Starlight nibble data published on the
+    /// LIGHT-complete `ChunkAccess`. A chunk that is not light-correct, has a
+    /// missing sky-emptiness map for a null sky nibble, or has malformed light
+    /// section storage is unavailable and returns `None` rather than assuming
+    /// daylight or accepting a candidate on static block opacity alone.
+    pub fn get_raw_brightness(&self, pos: &BlockPos) -> Option<i32> {
+        let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
+        let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
+        let chunk = self
+            .try_get_chunk(chunk_x, chunk_z, ChunkStatus::Light, false)
+            .ok()?;
+        if !chunk.is_light_correct() {
+            return None;
+        }
+        let block = chunk.get_block_light_at(pos.get_x(), pos.get_y(), pos.get_z());
+        let sky = chunk.get_sky_light_at(pos.get_x(), pos.get_y(), pos.get_z())?;
+        Some(block.max(sky.saturating_sub(self.get_sky_darken())))
+    }
+
     /// `WorldGenRegion.isClientSide()` — false.
     pub fn is_client_side(&self) -> bool {
         false
