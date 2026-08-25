@@ -4,9 +4,10 @@ Runs the real Java Paper server (the oracle), captures golden fixtures, and
 verifies them. M0 is the harness's foundation: a fixed-seed superflat world
 with a deterministic chunk-NBT fixture slice. M2 extends the same harness to
 the normal-overworld generator: semantic worldgen samples (density / biome /
-surface) plus a none-compression region chunk capture, per issue #51. The full
-differential logic (worldgen chunk-hash diffs vs Rivet, packet round-trips)
-builds on top of these fixtures later.
+surface) plus a none-compression region chunk capture, per issue #51. The
+source-disjoint generated normal-overworld FULL parity harness is also wired as
+the Stage-B/G4 promotion row; the broader differential logic (worldgen chunk-hash
+diffs vs Rivet, packet round-trips) builds on top of these fixtures later.
 
 ## Status: what works
 
@@ -50,6 +51,14 @@ builds on top of these fixtures later.
   the LIGHT-stage output; the rivet-server engine differential re-lights the
   interior through the real engine and matches it byte-exact. Twin-boot
   byte-identity verified.
+- **Generated normal-overworld FULL parity** (`verify-generated-full`, Stage-B/G4,
+  issue #175): a source-disjoint four-seed/four-region contract verifies Paper
+  and Rivet overworld FULL payloads byte-for-byte, with strict provenance,
+  closure, anti-superflat, and named block/light/heightmap/NBT-order/key/
+  LastUpdate tamper controls. The promotion row is opt-in via
+  `RIVET_GENERATED_FULL=1` until the genuine Paper/Rivet capture is present;
+  wholly absent evidence is UNVERIFIED, while malformed or linked evidence is
+  FAIL.
 - The Rust runner `cargo run -p rivet-oracle` verifies every committed
   fixture kind against its manifest's SHA-256s and prints a summary.
 - **Storage-only #231 V1a is green**: `anvil-roundtrip-v1a` writes all 432
@@ -110,7 +119,12 @@ rivet-oracle/
       manifest.json     # hashes of light.json + all 25 forced chunk NBTs (kind: light)
       light.json        # 9 committed chunks' sky nibbles + emptiness map + light_correct
       chunks/<x>.<z>.nbt # 25 forced chunk NBTs the rivet-server differential rebuilds
+    generated-full/     # Stage-B/G4 normal-overworld FULL contract and evidence
+      contract.json     # strict four-seed/four-region schema and artifact paths
+      server-normal-full.properties # canonical Paper producer template
+      paper/<seed>/      # Paper-side provenance/config/manifest/payload trees (when captured)
   work/                 # scratch space — gitignored, never commit
+    generated-full/rivet/<seed>/ # Rivet-side generated FULL evidence (when captured)
     run/                # a completed server run (materialized runtime)
     jars/               # copies of the built Paper jars
     logs/               # server stdout logs
@@ -582,6 +596,30 @@ contract: a superflat echo (all-air bedrock plane at -60, one repeated surface
 pattern, a tiny distinct-block set) is refused loudly, never handed off as
 ground truth. A missing runtime or a missing fixture tree is typed UNVERIFIED
 (exit 3), never a fabricated green.
+
+## Generated normal-overworld FULL parity: `verify-generated-full`
+
+The Stage-B/G4 row is deliberately source-disjoint from the loaded-world,
+superflat-FULL, and generated-expected fixtures. It compares four pinned seeds
+across the eight origin-adjacent/seam coordinates in the overworld only. The
+contract, Paper producer template, and eventual Paper evidence live under
+`fixtures/generated-full/`; Rivet evidence is kept under the gitignored
+`work/generated-full/rivet/` tree.
+
+```bash
+cargo run -p rivet-oracle -- verify-generated-full
+cargo run -p rivet-oracle -- verify-generated-full --tamper all
+RIVET_GENERATED_FULL=1 scripts/gate.sh --full
+```
+
+The verifier derives every digest from payload bytes read through stable opened
+file descriptors. Contract, producer executable/config, and nested payload
+metadata are checked on those same descriptors; symlink and hardlink aliases,
+nonregular files, and malformed metadata are hard failures. A wholly absent
+capture remains **3 UNVERIFIED**, while partial closure, stale provenance, and
+any parity or tamper mismatch are **1 FAIL**. Until both genuine sides are
+captured, the ordinary full gate prints an explicit pre-G4 NOTICE unless
+`RIVET_GENERATED_FULL=1` activates this strict row.
 
 ## Seed-42 FEATURES checkpoint: `features`
 
