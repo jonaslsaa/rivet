@@ -43,9 +43,11 @@
 use crate::Identifier;
 use crate::ResourceKey;
 use crate::TagKey;
+use crate::access::RegistryAccess;
 use crate::holder::{HolderId, RegistryId};
 use crate::registration_info::RegistrationInfo;
 use crate::registry::{Registry, RegistryKey, RegistryParts};
+use crate::root::AnyBox;
 
 use rivet_serialization::lifecycle::Lifecycle;
 
@@ -110,10 +112,10 @@ pub struct RegistryBuilder<T> {
 ///
 /// Construction consumes the one authoritative builder. While the transaction
 /// is building, it is the only mutable owner; after `freeze`, it is the only
-/// owner of the frozen table. `take_frozen` and `adopt_frozen` are the explicit
-/// hand-off around a temporary `RegistryAccess`: callers must adopt the table
-/// before mutating it again. No replacement builder or identity lease exists,
-/// so one `RegistryId` cannot name two live phases.
+/// owner of the frozen table. `access_transaction` is the scoped hand-off around
+/// a temporary `RegistryAccess`; its drop path adopts the table before callers
+/// can mutate the builder again. No replacement builder or identity lease
+/// exists, so one `RegistryId` cannot name two live phases.
 pub struct RegistryBuilderTransaction<T> {
     state: TransactionState<T>,
 }
@@ -122,6 +124,97 @@ enum TransactionState<T> {
     Building(RegistryBuilder<T>),
     Frozen(Registry<T>),
     Empty,
+}
+
+/// An ownership-safe erased access containing one or more frozen transaction
+/// registries. During the handoff, each transaction is temporarily empty and
+/// its frozen registry is owned by this access; dropping the handoff takes each
+/// registry back and adopts it into the still-borrowed transaction whenever the
+/// access is uniquely owned. This preserves the exact owner on decode errors
+/// and panics without a replacement builder or a second live registry.
+pub struct RegistryAccessTransaction<'a> {
+    access: RegistryAccess,
+    recoveries: Vec<Box<dyn RegistryRecovery + 'a>>,
+}
+
+trait RegistryRecovery {
+    fn matches(&self, key: &Identifier) -> bool;
+    fn recover(&mut self, access: &mut RegistryAccess);
+}
+
+struct TypedRegistryRecovery<'a, T> {
+    key: RegistryKey<T>,
+    transaction: &'a mut RegistryBuilderTransaction<T>,
+}
+
+impl<T: Send + Sync + 'static> RegistryRecovery for TypedRegistryRecovery<'_, T> {
+    fn matches(&self, key: &Identifier) -> bool {
+        self.key.identifier() == key
+    }
+
+    fn recover(&mut self, access: &mut RegistryAccess) {
+        // A cloned access deliberately prevents an ownership take. In that
+        // case the frozen registry remains the sole live owner in `access`; it
+        // is not cloned or dropped through a replacement transaction.
+        if let Ok(registry) = access.take_registry(&self.key) {
+            self.transaction.adopt_frozen(registry);
+        }
+    }
+}
+
+impl<'a> RegistryAccessTransaction<'a> {
+    /// Borrow the temporary access used by recursive codecs.
+    pub fn access(&self) -> &RegistryAccess {
+        &self.access
+    }
+
+    /// Add another frozen transaction registry to this single ownership handoff.
+    /// The transaction must be frozen; no second live owner is created.
+    pub fn add_transaction<T: Send + Sync + 'static>(
+        &mut self,
+        transaction: &'a mut RegistryBuilderTransaction<T>,
+    ) {
+        transaction.freeze();
+        let key = transaction.frozen_ref().key().clone();
+        assert!(
+            !self
+                .access
+                .list_registry_keys()
+                .iter()
+                .any(|existing| existing.identifier() == key.identifier()),
+            "duplicate registry key in transaction access: {key}"
+        );
+        let registry = transaction.take_frozen();
+        let erased = ResourceKey::create_registry_key(key.identifier().clone());
+        self.access
+            .registries
+            .push(std::sync::Arc::new((erased, Box::new(registry) as AnyBox)));
+        self.recoveries.push(Box::new(TypedRegistryRecovery {
+            key,
+            transaction,
+        }));
+    }
+
+    /// Remove a uniquely-owned frozen registry from the temporary access.
+    /// Successful removal retires its recovery slot; failures leave the access
+    /// and recovery slot unchanged so its borrowed transaction can recover it.
+    pub fn take_registry<T: Send + Sync + 'static>(
+        &mut self,
+        key: &RegistryKey<T>,
+    ) -> Result<Registry<T>, String> {
+        let registry = self.access.take_registry(key)?;
+        self.recoveries
+            .retain(|recovery| !recovery.matches(key.identifier()));
+        Ok(registry)
+    }
+}
+
+impl Drop for RegistryAccessTransaction<'_> {
+    fn drop(&mut self) {
+        for recovery in &mut self.recoveries {
+            recovery.recover(&mut self.access);
+        }
+    }
 }
 
 impl<T> RegistryBuilderTransaction<T> {
@@ -151,9 +244,14 @@ impl<T> RegistryBuilderTransaction<T> {
     pub fn freeze(&mut self) -> &Registry<T> {
         match &self.state {
             TransactionState::Building(builder) => builder.validate_freeze(),
-            TransactionState::Frozen(registry) => return registry,
+            TransactionState::Frozen(_) => return self.frozen_ref(),
             TransactionState::Empty => panic!("registry transaction has no owner"),
         }
+        self.transition_to_frozen();
+        self.frozen_ref()
+    }
+
+    fn transition_to_frozen(&mut self) {
         let state = std::mem::replace(&mut self.state, TransactionState::Empty);
         self.state = match state {
             TransactionState::Building(builder) => TransactionState::Frozen(builder.freeze_validated()),
@@ -161,17 +259,20 @@ impl<T> RegistryBuilderTransaction<T> {
                 unreachable!("validated building transaction was replaced")
             }
         };
+    }
+
+    fn frozen_ref(&self) -> &Registry<T> {
         match &self.state {
             TransactionState::Frozen(registry) => registry,
             TransactionState::Building(_) | TransactionState::Empty => {
-                unreachable!("freeze always leaves a frozen transaction")
+                unreachable!("transaction is not frozen")
             }
         }
     }
 
     /// Move the temporary frozen registry into an erased access. The
     /// transaction becomes empty until [`Self::adopt_frozen`] receives it back.
-    pub fn take_frozen(&mut self) -> Registry<T> {
+    fn take_frozen(&mut self) -> Registry<T> {
         match std::mem::replace(&mut self.state, TransactionState::Empty) {
             TransactionState::Frozen(registry) => registry,
             TransactionState::Building(builder) => {
@@ -185,7 +286,7 @@ impl<T> RegistryBuilderTransaction<T> {
     /// Adopt a uniquely-owned frozen registry back as the authoritative
     /// mutable builder, preserving its `RegistryId` and every registered
     /// holder id. This is the commit half of a recursive decode transaction.
-    pub fn adopt_frozen(&mut self, registry: Registry<T>) {
+    fn adopt_frozen(&mut self, registry: Registry<T>) {
         assert!(
             matches!(self.state, TransactionState::Empty),
             "registry transaction already owns a phase"
@@ -200,6 +301,27 @@ impl<T> RegistryBuilderTransaction<T> {
             TransactionState::Building(builder) => builder,
             TransactionState::Frozen(registry) => registry.into_builder(),
             TransactionState::Empty => panic!("registry transaction has no owner"),
+        }
+    }
+
+    /// Borrow this transaction while moving its frozen registry into an access
+    /// handoff. The transaction is empty only while the returned guard lives;
+    /// its drop path adopts the registry back after an early return or panic.
+    pub fn access_transaction(&mut self) -> RegistryAccessTransaction<'_>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.freeze();
+        let registry = self.take_frozen();
+        let key = registry.key().clone();
+        let erased = ResourceKey::create_registry_key(key.identifier().clone());
+        let access = RegistryAccess::from_pairs(vec![(erased, Box::new(registry) as AnyBox)]);
+        RegistryAccessTransaction {
+            access,
+            recoveries: vec![Box::new(TypedRegistryRecovery {
+                key,
+                transaction: self,
+            })],
         }
     }
 }
@@ -624,6 +746,31 @@ mod tests {
         let final_registry = transaction.into_builder().freeze();
         assert_eq!(final_registry.registry_id(), registry_id);
         assert_eq!(final_registry.size(), 2);
+    }
+
+    #[test]
+    fn access_handoff_recovers_owner_after_early_return_and_panic() {
+        let mut transaction = RegistryBuilder::<TestElement>::new(&key()).into_transaction();
+        register(transaction.builder_mut(), "existing", 7);
+        let registry_id = transaction.registry_id();
+        {
+            let handoff = transaction.access_transaction();
+            assert_eq!(handoff.access().lookup(&key()).unwrap().registry_id(), registry_id);
+            // An early return drops the handoff. Its borrowed transaction must
+            // regain the same frozen owner, not a replacement identity.
+        }
+        register(transaction.builder_mut(), "after_return", 8);
+
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _handoff = transaction.access_transaction();
+            panic!("decode failed");
+        }));
+        assert!(panic_result.is_err());
+        register(transaction.builder_mut(), "after_panic", 9);
+
+        let registry = transaction.into_builder().freeze();
+        assert_eq!(registry.registry_id(), registry_id);
+        assert_eq!(registry.size(), 3);
     }
 
     #[test]

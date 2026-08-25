@@ -210,7 +210,7 @@ pub mod registry_ops;
 pub mod core;
 
 pub use access::RegistryAccess;
-pub use builder::{RegistryBuilder, RegistryBuilderTransaction};
+pub use builder::{RegistryAccessTransaction, RegistryBuilder, RegistryBuilderTransaction};
 pub use holder::{Holder, HolderId, HolderKind, RegistryId};
 pub use holder_lookup::{
     HolderGetter, HolderLookup, HolderLookupProvider, HolderOwner, RegistryGetter, RegistryLookup,

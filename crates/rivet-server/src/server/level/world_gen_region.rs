@@ -1586,6 +1586,22 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
         self.seed
     }
 
+    /// `BlockBehaviour.BlockStateBase.canSurvive` for the vegetation states
+    /// reached by the seed-42 FEATURES slice. Paper's `VegetationBlock` checks
+    /// only the block below against `BlockTags.SUPPORTS_VEGETATION`; keeping
+    /// this as a world-backed read (rather than a state-only shortcut) is
+    /// important because the feature's random offset can land across chunks.
+    fn can_survive(&self, state: &BlockState, pos: &BlockPos) -> bool {
+        match state.block().name() {
+            "minecraft:short_grass" | "minecraft:fern" | "minecraft:firefly_bush" => self
+                .get_block_state(&pos.below())
+                .is_in_tag("minecraft:supports_vegetation"),
+            other => panic!(
+                "WorldGenRegion.canSurvive is not implemented for {other} (RivetTodo #232)"
+            ),
+        }
+    }
+
     /// `WorldGenLevel.ensureCanWrite(BlockPos)` — the write-radius gate.
     fn ensure_can_write(&self, pos: &BlockPos) -> bool {
         self.ensure_can_write(pos)

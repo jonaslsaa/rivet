@@ -49,7 +49,7 @@
 //! seed-42 draw misses the 0.025 and 0.05 branches, then selects
 //! `minecraft:dark_oak_leaf_litter` at the 0.6666667 branch. Its supported
 //! placement chain then reaches the next honest boundary, the
-//! `minecraft:patch_grass_forest` world-state seam at step 9/global index 59.
+//! `minecraft:freeze_top_layer` world-state seam at step 10/global index 0.
 //! The chunk stays CARVERS. The INITIALIZE_LIGHT/
 //! LIGHT steps are executor-wired but engine-gated (the holder wires no light
 //! engine, so it cannot reach LIGHT). The public
@@ -749,7 +749,7 @@ impl GenerationChunkHolder {
     /// lake, amethyst-geode, monster-room, underwater_magma, and glow_lichen
     /// paths at their exact feature seeds before stopping at the first selected
     /// unsupported path (seed-42 chunk (0,0): the selector chooses
-    /// `minecraft:patch_grass_forest` at step 9/global 59); the chunk stays
+    /// `minecraft:freeze_top_layer` at step 10/global 0); the chunk stays
     /// CARVERS.
     pub fn new(pos: ChunkPos, generator: Arc<OverworldGenerator>) -> Self {
         let height_accessor = create_height_accessor(
@@ -861,7 +861,7 @@ impl GenerationChunkHolder {
                 // registry-backed lake, amethyst-geode, monster-room,
                 // underwater_magma, and glow_lichen entries before failing
                 // typed at the first selected unsupported path
-                // (`minecraft:patch_grass_forest`, step 9/global 59 after selector dispatch).
+                // (`minecraft:freeze_top_layer`, step 10/global 0 after selector dispatch).
                 // It must never be "improved" into a silent skip or a blanket
                 // UnsupportedTask.
                 // The closure captures one generator clone; the holder keeps
@@ -895,7 +895,7 @@ impl GenerationChunkHolder {
     /// the FeatureSorter, decodes and runs the registry-backed lake, geode,
     /// monster-room, underwater_magma, and glow_lichen paths, and then fails
     /// typed at the first selected unsupported path (`FeaturePlacementDecode`,
-    /// seed-42: `minecraft:patch_grass_forest` at step 9/global 59 after selector dispatch), so the
+    /// seed-42: `minecraft:freeze_top_layer` at step 10/global 0 after selector dispatch), so the
     /// chunk is never stamped FEATURES.
     pub fn status(&self) -> ChunkStatus {
         self.chunk.get_persisted_status()
@@ -1222,8 +1222,8 @@ fn generate_ring_chunk(
 /// (`GenError::FeaturePlacementDecode`) at the first unsupported selected
 /// nested feature — seed-42 chunk (0,0), step 9/global index 17 selects
 /// `minecraft:dark_oak_leaf_litter`; the run then reaches
-/// `minecraft:patch_grass_forest` at global index 59, whose world-state
-/// `canSurvive` seam is not yet implemented. The generated settings tables are the
+/// `minecraft:freeze_top_layer` at step 10/global index 0, whose biome
+/// `shouldFreeze` world-state seam is not yet implemented. The generated settings tables are the
 /// full 55-biome surface (no `SettingsNotGenerated`), so this boundary is
 /// reached deterministically every run. No biome is fabricated or silently
 /// skipped.
@@ -1839,10 +1839,9 @@ fn build_generated_feature_closure(
     validate_generated_feature_closure(&placed_entries, &configured_entries)?;
 
     // Build temporary lookup tables through one-owner transactions. Each
-    // transaction consumes its authoritative builder; freezing moves that same
-    // owner into a registry, and adoption moves it back after decoding. There
-    // is never a concurrently live replacement builder or a second authority
-    // with either registry identity.
+    // transaction owns the only builder for its identity; the access handoff
+    // borrows those transactions while moving their frozen registries into the
+    // temporary access, and its drop path adopts them back on every early exit.
     let mut placed_transaction = RegistryBuilder::new(&*PLACED_FEATURE).into_transaction();
     let mut configured_transaction = RegistryBuilder::new(&*CONFIGURED_FEATURE).into_transaction();
     let configured_registry_id = configured_transaction.registry_id();
@@ -1883,27 +1882,13 @@ fn build_generated_feature_closure(
             RegistrationInfo::BUILT_IN,
         );
     }
-    placed_transaction.freeze();
-    configured_transaction.freeze();
-    let mut staged_feature_layer = RegistryAccess::from_pairs(vec![
-        (
-            ResourceKey::create_registry_key(Identifier::with_default_namespace(
-                "worldgen/placed_feature",
-            )),
-            Box::new(placed_transaction.take_frozen()) as rivet_registry::root::AnyBox,
-        ),
-        (
-            ResourceKey::create_registry_key(Identifier::with_default_namespace(
-                "worldgen/configured_feature",
-            )),
-            Box::new(configured_transaction.take_frozen()) as rivet_registry::root::AnyBox,
-        ),
-    ]);
+    let mut staged_handoff = placed_transaction.access_transaction();
+    staged_handoff.add_transaction(&mut configured_transaction);
     let staged_access =
         LayeredRegistryAccess::new(vec![RegistryLayer::Static, RegistryLayer::Worldgen])
             .replace_from(
                 RegistryLayer::Static,
-                std::slice::from_ref(&staged_feature_layer),
+                std::slice::from_ref(staged_handoff.access()),
             )
             .replace_from(RegistryLayer::Worldgen, std::slice::from_ref(worldgen))
             .composite_access();
@@ -1925,56 +1910,72 @@ fn build_generated_feature_closure(
             decode_placed_feature_value(&json, &ops, &staged_access, &format!("decode {name}"))?;
         decoded_placed.insert(name, Arc::new(placed));
     }
+    // Resolve every decoded value before taking either registry out of the
+    // handoff. Thus every fallible path still drops the handoff with both
+    // frozen registries present, and both borrowed transactions recover them.
+    let configured_values: Vec<(Identifier, Arc<ConfiguredFeatureErased>)> = configured_slots
+        .iter()
+        .enumerate()
+        .map(|(id, &name)| {
+            let identifier = name
+                .map(Identifier::parse)
+                .unwrap_or_else(|| Identifier::parse(&format!("rivet:generated_configured_gap_{id}")));
+            let value = match name {
+                Some(name) => Arc::clone(
+                    decoded_configured
+                        .get(name)
+                        .ok_or_else(|| format!("decoded configured feature {name} is missing"))?,
+                ),
+                None => Arc::new(ConfiguredFeatureErased {
+                    feature: FeatureId::new(u32::MAX),
+                    config: Arc::new(DeferredGeneratedFeatureConfiguration {
+                        configured_key: format!("rivet:generated_configured_gap_{id}"),
+                    }),
+                }),
+            };
+            Ok((identifier, value))
+        })
+        .collect::<Result<_, String>>()?;
+    let placed_values: Vec<(Identifier, Arc<PlacedFeature>)> = placed_slots
+        .iter()
+        .enumerate()
+        .map(|(id, &name)| {
+            let identifier = name
+                .map(Identifier::parse)
+                .unwrap_or_else(|| Identifier::parse(&format!("rivet:generated_placed_gap_{id}")));
+            let value = match name {
+                Some(name) => Arc::clone(
+                    decoded_placed
+                        .get(name)
+                        .ok_or_else(|| format!("decoded placed feature {name} is missing"))?,
+                ),
+                None => Arc::new(PlacedFeature::new(
+                    Holder::reference(configured_registry_id, configured_gap_id),
+                    Vec::new(),
+                )),
+            };
+            Ok((identifier, value))
+        })
+        .collect::<Result<_, String>>()?;
+
     drop(ops);
     drop(staged_access);
-    // All access clones are gone, so the temporary frozen registries can be
-    // adopted back by their original transactions. This consumes each table
-    // before the final freeze and therefore transfers, rather than duplicates,
-    // identity.
-    placed_transaction.adopt_frozen(staged_feature_layer.take_registry(&*PLACED_FEATURE)?);
-    configured_transaction.adopt_frozen(staged_feature_layer.take_registry(&*CONFIGURED_FEATURE)?);
-    let mut placed_builder = placed_transaction.into_builder();
-    let mut configured_builder = configured_transaction.into_builder();
+    let mut placed_builder = staged_handoff
+        .take_registry(&*PLACED_FEATURE)?
+        .into_builder();
+    let mut configured_builder = staged_handoff
+        .take_registry(&*CONFIGURED_FEATURE)?
+        .into_builder();
+    drop(staged_handoff);
 
-    for (id, &name) in configured_slots.iter().enumerate() {
-        let identifier = name
-            .map(Identifier::parse)
-            .unwrap_or_else(|| Identifier::parse(&format!("rivet:generated_configured_gap_{id}")));
-        let value = match name {
-            Some(name) => Arc::clone(
-                decoded_configured
-                    .get(name)
-                    .ok_or_else(|| format!("decoded configured feature {name} is missing"))?,
-            ),
-            None => Arc::new(ConfiguredFeatureErased {
-                feature: FeatureId::new(u32::MAX),
-                config: Arc::new(DeferredGeneratedFeatureConfiguration {
-                    configured_key: format!("rivet:generated_configured_gap_{id}"),
-                }),
-            }),
-        };
+    for (identifier, value) in configured_values {
         configured_builder.replace_registered(
             &ResourceKey::create(&*CONFIGURED_FEATURE, identifier),
             value,
         );
     }
-    for (id, &name) in placed_slots.iter().enumerate() {
-        let identifier = name
-            .map(Identifier::parse)
-            .unwrap_or_else(|| Identifier::parse(&format!("rivet:generated_placed_gap_{id}")));
-        let value = match name {
-            Some(name) => Arc::clone(
-                decoded_placed
-                    .get(name)
-                    .ok_or_else(|| format!("decoded placed feature {name} is missing"))?,
-            ),
-            None => Arc::new(PlacedFeature::new(
-                Holder::reference(configured_registry_id, configured_gap_id),
-                Vec::new(),
-            )),
-        };
-        placed_builder
-            .replace_registered(&ResourceKey::create(&*PLACED_FEATURE, identifier), value);
+    for (identifier, value) in placed_values {
+        placed_builder.replace_registered(&ResourceKey::create(&*PLACED_FEATURE, identifier), value);
     }
     Ok((placed_builder.freeze(), configured_builder.freeze()))
 }
@@ -2735,12 +2736,18 @@ fn run_biome_decoration(
                 if let Err(payload) = placement {
                     if payload.downcast_ref::<String>().is_some_and(|message| {
                         message.starts_with("generated feature ")
-                            || message.contains("BlockStateBase.canSurvive is not implemented")
+                            || (message.contains("BlockStateBase.canSurvive is not implemented")
+                                || message.contains("WorldGenRegion.canSurvive is not implemented")
+                                || message.contains("Biome.shouldFreeze is not implemented")
+                                || message.contains("Biome.shouldSnow is not implemented"))
                     }) || payload
                         .downcast_ref::<&'static str>()
                         .is_some_and(|message| {
                             message.starts_with("generated feature ")
-                                || message.contains("BlockStateBase.canSurvive is not implemented")
+                                || (message.contains("BlockStateBase.canSurvive is not implemented")
+                                || message.contains("WorldGenRegion.canSurvive is not implemented")
+                                || message.contains("Biome.shouldFreeze is not implemented")
+                                || message.contains("Biome.shouldSnow is not implemented"))
                         })
                     {
                         return Err(GenError::FeaturePlacementDecode {
@@ -4711,8 +4718,8 @@ mod tests {
     /// RNG past its scan. Batch 4 then decodes and executes `glow_lichen` through
     /// `minecraft:multiface_growth`. The random-selector branch at global 17
     /// selects `minecraft:dark_oak_leaf_litter`; the next typed boundary is
-    /// `minecraft:patch_grass_forest` at step 9/global index 59 when its
-    /// simple-block leaf reaches the unimplemented `canSurvive` seam. The chunk
+    /// `minecraft:freeze_top_layer` at step 10/global index 0 when its
+    /// biome freeze query reaches the unimplemented `shouldFreeze` seam. The chunk
     /// is never stamped FEATURES (it stays CARVERS).
     #[test]
     fn generate_through_features_rolls_back_fresh_holder_and_caches_failure() {
@@ -4732,13 +4739,13 @@ mod tests {
                 feature_key,
             }) => {
                 assert_eq!(chunk_pos, ChunkPos::new(0, 0));
-                assert_eq!(step_index, 9);
-                assert_eq!(global_feature_index, 59);
-                assert_eq!(feature_key, "minecraft:patch_grass_forest");
+                assert_eq!(step_index, 10);
+                assert_eq!(global_feature_index, 0);
+                assert_eq!(feature_key, "minecraft:freeze_top_layer");
             }
             other => {
                 panic!(
-                    "FEATURES must stop at the selected patch_grass_forest boundary; got {other:?}"
+                    "FEATURES must stop at the selected freeze_top_layer boundary; got {other:?}"
                 )
             }
         }
@@ -5185,8 +5192,8 @@ mod tests {
     /// executes `minecraft:glow_lichen` through `minecraft:multiface_growth`.
     /// It refuses at the next unsupported *selected* path WITHOUT mutating the
     /// RNG past that refusal: the run returns typed immediately at
-    /// `minecraft:patch_grass_forest` (step 9/global 59), when its simple-block
-    /// leaf reaches the unimplemented `canSurvive` seam. The chunk stays CARVERS
+    /// `minecraft:freeze_top_layer` (step 10/global 0), when its biome freeze
+    /// query reaches the unimplemented `shouldFreeze` seam. The chunk stays CARVERS
     /// and FEATURES is never stamped. The typed-unavailable dispatches
     /// for underwater magma (id 21) and multiface growth (id 20) no longer
     /// refuse; both concrete features are reached.
@@ -5204,9 +5211,9 @@ mod tests {
             matches!(
                 &err,
                 GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
-                    step_index: 9,
-                    global_feature_index: 59,
-                    feature_key: "minecraft:patch_grass_forest",
+                    step_index: 10,
+                    global_feature_index: 0,
+                    feature_key: "minecraft:freeze_top_layer",
                     ..
                 })
             ),
