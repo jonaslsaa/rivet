@@ -29,8 +29,8 @@ Paper server; it is not a parity result.
   `FULL` plus lit. Extraction reads the world only after process exit and zero
   exit status.
 - Raw decompressed chunk NBT is saved and hashed without rewriting. A separate
-  canonical semantic hash sorts compound keys and removes only
-  `Data.InhabitedTime` and `Data.LastUpdate`, which are documented save-clock
+  canonical semantic hash sorts compound keys and removes only the root
+  `InhabitedTime` and `LastUpdate` fields, which are documented save-clock
   fields. The raw bytes remain authoritative.
 - Paper 26.2 stores the SavedData source at
   `world/dimensions/minecraft/overworld/data/minecraft/world_gen_settings.dat`.

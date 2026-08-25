@@ -203,16 +203,15 @@ def clone(root: Tag) -> Tag:
 def canonical_without_dynamic(root: Tag) -> bytes:
     """Canonicalize compound keys after documented save-clock removal.
 
-    Paper changes ``Data.InhabitedTime`` and ``Data.LastUpdate`` as a function
-    of the boot/save clock.  They are removed only from the semantic digest;
+    Paper's chunk serializer writes ``InhabitedTime`` and ``LastUpdate`` at the
+    root of a chunk payload and changes them as a function of the boot/save
+    clock.  They are removed only from the semantic digest;
     raw decompressed bytes and raw hashes are never changed.
     """
     result = clone(root)
     if result.kind == 10:
-        data = result.value.get("Data")
-        container = data.value if data is not None and data.kind == 10 else result.value
         for key in ("InhabitedTime", "LastUpdate"):
-            container.pop(key, None)
+            result.value.pop(key, None)
     return encode(result, canonical=True)
 
 

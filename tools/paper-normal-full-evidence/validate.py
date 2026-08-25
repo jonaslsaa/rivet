@@ -487,7 +487,7 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
         if entry.get("status") != details["status"] or entry.get("semantic_sha256") != semantic_hash or entry.get("light_correct") is not True or entry.get("heightmaps") != details["heightmaps"]:
             raise Failed(f"chunk status/light/heightmap/semantic evidence mismatch: {coordinate}")
         semantic[coordinate] = semantic_hash
-    if manifest.get("semantic_hash_dynamic_fields") != ["Data.InhabitedTime", "Data.LastUpdate"]:
+    if manifest.get("semantic_hash_dynamic_fields") != ["InhabitedTime", "LastUpdate"]:
         raise Failed("semantic hash dynamic-field contract is not narrowly documented")
     validate_inventory(run, manifest)
     return semantic

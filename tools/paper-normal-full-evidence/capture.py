@@ -738,7 +738,7 @@ def extract_run(
         "chunks": chunks,
         "inventory": inventory,
         "extraction": {"post_exit_read_only": True, "started_ns": extraction_started_ns, "world_signature_before": signature_before, "world_signature_after": signature_after},
-        "semantic_hash_dynamic_fields": ["Data.InhabitedTime", "Data.LastUpdate"],
+        "semantic_hash_dynamic_fields": ["InhabitedTime", "LastUpdate"],
     }
     (run / "capture.json").write_text(json.dumps(manifest, indent=2, sort_keys=False) + "\n")
 

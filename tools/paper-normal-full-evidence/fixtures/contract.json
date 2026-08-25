@@ -41,8 +41,8 @@
     "spawn_limits": 0
   },
   "semantic_normalizations": [
-    "Data.InhabitedTime (per-chunk game-time counter; raw bytes remain authoritative)",
-    "Data.LastUpdate (save-clock field when present; raw bytes remain authoritative)"
+    "InhabitedTime (root per-chunk game-time counter; raw bytes remain authoritative)",
+    "LastUpdate (root save-clock field when present; raw bytes remain authoritative)"
   ],
   "parity_claim": null,
   "server_properties": {
