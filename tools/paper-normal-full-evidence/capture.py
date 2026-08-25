@@ -23,6 +23,7 @@ import re
 import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -101,12 +102,14 @@ def _strict_decompress(data: bytes, *, gzip_stream: bool = False) -> bytes:
         raw = obj.decompress(data) + obj.flush()
     except zlib.error as exc:
         raise Failed(f"compressed payload is malformed: {exc}") from exc
+    if not obj.eof:
+        raise Failed("compressed payload ended before end-of-stream")
     if obj.unused_data or obj.unconsumed_tail:
         raise Failed("compressed payload has trailing or unconsumed bytes")
     return raw
 
 
-def read_region(path: Path) -> dict[tuple[int, int], bytes]:
+def read_region(path: Path, region_coordinates: tuple[int, int]) -> dict[tuple[int, int], bytes]:
     data = path.read_bytes()
     if len(data) < 8192 or len(data) % 4096:
         raise Failed(f"malformed region framing: {path}")
@@ -130,15 +133,25 @@ def read_region(path: Path) -> dict[tuple[int, int], bytes]:
         if length < 1 or length > count * 4096 - 4:
             raise Failed(f"invalid chunk length in {path}")
         payload = data[start + 5 : start + 4 + length]
-        if compression == 1:
+        coordinate = (index % 32, index // 32)
+        global_coordinate = (region_coordinates[0] * 32 + coordinate[0], region_coordinates[1] * 32 + coordinate[1])
+        external = compression & 0x80
+        codec = compression & 0x7F
+        if external:
+            if length != 1:
+                raise Failed(f"external region stub has unexpected length in {path}")
+            external_path = path.parent / f"c.{global_coordinate[0]}.{global_coordinate[1]}.mcc"
+            if not external_path.is_file() or external_path.is_symlink():
+                raise Failed(f"external chunk payload is absent: {external_path}")
+            payload = external_path.read_bytes()
+        if codec == 1:
             raw = _strict_decompress(payload, gzip_stream=True)
-        elif compression == 2:
+        elif codec == 2:
             raw = _strict_decompress(payload)
-        elif compression == 3:
+        elif codec == 3:
             raw = payload
         else:
-            raise Failed(f"unsupported chunk compression {compression} in {path}")
-        coordinate = (index % 32, index // 32)
+            raise Failed(f"unsupported chunk compression {codec} in {path}")
         result[coordinate] = raw
     return result
 
@@ -149,11 +162,13 @@ def world_chunks(world: Path) -> dict[tuple[int, int], bytes]:
         raise Failed(f"overworld region directory is absent: {region_dir}")
     result: dict[tuple[int, int], bytes] = {}
     for path in sorted(region_dir.iterdir()):
+        if path.name.endswith(".mcc"):
+            continue
         match = REGION_RE.fullmatch(path.name)
         if not match:
             raise Failed(f"unexpected file in region directory: {path.name}")
         rx, rz = int(match.group(1)), int(match.group(2))
-        for (lx, lz), raw in read_region(path).items():
+        for (lx, lz), raw in read_region(path, (rx, rz)).items():
             coordinate = (rx * 32 + lx, rz * 32 + lz)
             if coordinate in result:
                 raise Failed(f"duplicate global chunk {coordinate}")
@@ -201,9 +216,21 @@ def walk_data_paths(world: Path) -> list[str]:
     return sorted(result)
 
 
-def properties_text(seed: str) -> str:
+def properties_text(seed: str, *, server_port: int = 0, query_port: int = 0) -> str:
     template = (HERE / "fixtures" / "server.properties").read_text()
-    return template.replace("<seed>", str(java_seed(seed)))
+    text = template.replace("<seed>", str(java_seed(seed)))
+    return text.replace("server-port=0", f"server-port={server_port}").replace("query.port=0", f"query.port={query_port}")
+
+
+def allocate_dynamic_ports() -> tuple[int, int]:
+    ports: list[int] = []
+    for _ in range(2):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            ports.append(sock.getsockname()[1])
+    if len(set(ports)) != 2 or any(port <= 0 for port in ports):
+        raise Failed("OS did not provide two distinct dynamic ports")
+    return ports[0], ports[1]
 
 
 def parse_properties(text: str) -> dict[str, str]:
@@ -388,21 +415,40 @@ def build_paper(source: Path, java_home: Path) -> tuple[Path, dict[str, str]]:
     )
     if result.returncode != 0:
         raise Failed(f"Paper build failed ({result.returncode}):\n{result.stdout[-4000:]}\n{result.stderr[-4000:]}")
-    jars = sorted((source / "paper-server/build/libs").glob("paper-paperclip-*.jar"))
-    if len(jars) != 1 or jars[0].stat().st_mtime_ns < started:
-        raise Failed("Paper build did not produce one fresh paper-paperclip jar")
-    manifest = _jar_manifest(jars[0])
-    if manifest.get("Main-Class") != "io.papermc.paperclip.Main":
-        raise Failed("built jar is not the Paperclip launcher")
-    return jars[0], {"path": str(jars[0]), "sha256": sha256(jars[0].read_bytes()), "bytes": jars[0].stat().st_size, "manifest_main": manifest["Main-Class"]}
+    build_libs = source / "paper-server/build/libs"
+    paperclip = build_libs / "paper-paperclip-26.2.local-SNAPSHOT.jar"
+    server_jar = build_libs / "paper-server-26.2.local-SNAPSHOT.jar"
+    if not paperclip.is_file() or paperclip.stat().st_mtime_ns < started or not server_jar.is_file() or server_jar.stat().st_mtime_ns < started:
+        raise Failed("Paper build did not produce fresh pinned Paperclip and server jars")
+    manifest = _jar_manifest(paperclip)
+    server_manifest = _jar_manifest(server_jar)
+    if manifest.get("Main-Class") != "io.papermc.paperclip.Main" or server_manifest.get("Git-Commit") != PAPER_SHORT:
+        raise Failed("built jars do not prove the pinned Paper revision")
+    return paperclip, {
+        "path": str(paperclip),
+        "sha256": sha256(paperclip.read_bytes()),
+        "bytes": paperclip.stat().st_size,
+        "manifest_main": manifest["Main-Class"],
+        "source_root": str(source.resolve()),
+        "source_revision": PAPER_REVISION,
+        "built_after_ns": started,
+        "source_server_jar": {
+            "path": str(server_jar),
+            "sha256": sha256(server_jar.read_bytes()),
+            "bytes": server_jar.stat().st_size,
+            "git_commit": server_manifest.get("Git-Commit"),
+            "implementation_version": server_manifest.get("Implementation-Version"),
+        },
+    }
 
 
-def write_configs(run: Path, seed: str) -> None:
+def write_configs(run: Path, seed: str, server_port: int, query_port: int) -> None:
     (run / "config").mkdir(parents=True, exist_ok=True)
     (run / "provenance/config").mkdir(parents=True, exist_ok=True)
-    server = properties_text(seed)
+    server = properties_text(seed, server_port=server_port, query_port=query_port)
+    fixture_server = properties_text(seed)
     (run / "server.properties").write_text(server)
-    (run / "provenance/server.properties").write_text(server)
+    (run / "provenance/server.properties").write_text(fixture_server)
     for name in ("paper-global.yml", "paper-world-defaults.yml"):
         data = (HERE / "fixtures" / name).read_bytes()
         (run / "config" / name).write_bytes(data)
@@ -531,13 +577,24 @@ def compile_probe(run: Path, java_home: Path) -> tuple[Path, dict[str, Any]]:
     result = subprocess.run([str(java_home / "bin/jar"), "cf", str(jar), "-C", str(classes), "."], cwd=HERE, text=True, capture_output=True, check=False, env=env)
     if result.returncode != 0:
         raise Failed(f"Paper probe jar creation failed: {result.stderr}")
+    probe_source = HERE / "src/PaperNormalFullProbe.java"
+    probe_plugin = HERE / "src/plugin.yml"
     return jar, {
-        "path": str(runtime.relative_to(run)),
-        "sha256": sha256(runtime.read_bytes()),
-        "bytes": runtime.stat().st_size,
-        "git_commit": runtime_manifest.get("Git-Commit"),
-        "implementation_version": runtime_manifest.get("Implementation-Version"),
-        "libraries_count": len(libraries),
+        "runtime": {
+            "path": str(runtime.relative_to(run)),
+            "sha256": sha256(runtime.read_bytes()),
+            "bytes": runtime.stat().st_size,
+            "git_commit": runtime_manifest.get("Git-Commit"),
+            "implementation_version": runtime_manifest.get("Implementation-Version"),
+            "libraries_count": len(libraries),
+        },
+        "artifact": {
+            "path": str(jar.relative_to(run)),
+            "sha256": sha256(jar.read_bytes()),
+            "bytes": jar.stat().st_size,
+        },
+        "source_sha256": sha256(probe_source.read_bytes()),
+        "plugin_yml_sha256": sha256(probe_plugin.read_bytes()),
     }
 
 
@@ -584,6 +641,8 @@ def chunk_details(raw: bytes, coordinate: tuple[int, int]) -> dict[str, Any]:
         root = parse(raw)
     except NbtError as exc:
         raise Failed(f"malformed/trailing chunk NBT at {coordinate}: {exc}") from exc
+    if root.kind != 10 or root.value.get("DataVersion") != Tag(3, DATA_VERSION) or root.value.get("xPos") != Tag(3, coordinate[0]) or root.value.get("zPos") != Tag(3, coordinate[1]):
+        raise Failed(f"{coordinate} has wrong chunk DataVersion or coordinates")
     status = get_any(root, "Status")
     light = get_any(root, "isLightOn")
     heightmaps = get_any(root, "Heightmaps")
@@ -658,6 +717,7 @@ def extract_run(
     preflight: dict[str, Any],
     ticket_path: Path,
     injected_ticket_sha: str,
+    configured_ports: tuple[int, int],
 ) -> None:
     extraction_started_ns = time.time_ns()
     if capture["ended_ns"] > extraction_started_ns:
@@ -711,6 +771,7 @@ def extract_run(
         "rivet_commit": None,
         "paper_revision": PAPER_REVISION,
         "paper_jar": paper_info,
+        "probe_artifact": paper_info.get("probe_artifact"),
         "java": {"vendor": java_info["vendor"], "version": java_info["version"], "major": int(java_info["major"]), "home": java_info["home"]},
         "seed": seed,
         "java_seed": str(java_seed(seed)),
@@ -725,11 +786,13 @@ def extract_run(
         "targets": [[x, z] for x, z in TARGETS],
         "closure": {"radius": RADIUS, "order": "lexicographic x,z after Paper scheduler radius-11 expansion", "coordinates": [[x, z] for x, z in closure], "sha256": sha256(json.dumps(closure, separators=(",", ":")).encode())},
         "ticket": {"type": "minecraft:forced", "level": TICKET_LEVEL, "ticks_left": TICKET_TICKS_LEFT, "coordinates": [[x, z] for x, z in closure], "injected_sha256": injected_ticket_sha, "post_exit_sha256": sha256(ticket_path.read_bytes()), "held_through_stop": True},
-        "ports": {"configured_server": 0, "configured_query": 0, "boot1": boot1["ports"], "capture": capture["ports"]},
+        "ports": {"fixture_server": 0, "fixture_query": 0, "configured_server": configured_ports[0], "configured_query": configured_ports[1], "boot1": boot1["ports"], "capture": capture["ports"]},
         "config": {
             "server_properties": file_record(run / "provenance/server.properties", "provenance/server.properties"),
             "paper_global": file_record(run / "provenance/config/paper-global.yml", "provenance/config/paper-global.yml"),
             "paper_world_defaults": file_record(run / "provenance/config/paper-world-defaults.yml", "provenance/config/paper-world-defaults.yml"),
+            "runtime_paper_global": file_record(run / "config/paper-global.yml", "config/paper-global.yml"),
+            "runtime_paper_world_defaults": file_record(run / "config/paper-world-defaults.yml", "config/paper-world-defaults.yml"),
         },
         "worldgen_settings": settings,
         "preflight": preflight,
@@ -757,7 +820,8 @@ def run_one(
     run.mkdir(parents=True)
     if (run / "world").exists():
         raise Failed("fresh run root already contains a world before Paper boot")
-    write_configs(run, seed)
+    configured_ports = allocate_dynamic_ports()
+    write_configs(run, seed, *configured_ports)
     copy_fixture_provenance(run)
     token = secrets.token_hex(32)
     (run / "capture.token").write_text(token + "\n")
@@ -779,9 +843,12 @@ def run_one(
         "no_preexisting_tickets": not tickets_before,
         "reset_before_ticket_injection": True,
     }
-    _, runtime_info = compile_probe(run, java_home)
+    _, probe_info = compile_probe(run, java_home)
     run_paper_info = dict(paper_info)
-    run_paper_info["materialized_runtime"] = runtime_info
+    run_paper_info["materialized_runtime"] = probe_info["runtime"]
+    run_paper_info["probe_artifact"] = probe_info["artifact"]
+    run_paper_info["probe_source_sha256"] = probe_info["source_sha256"]
+    run_paper_info["probe_plugin_yml_sha256"] = probe_info["plugin_yml_sha256"]
     ticket_path, injected_sha = write_tickets(world, closure)
     encoded_closure = ";".join(f"{x},{z}" for x, z in closure)
     encoded_targets = ";".join(f"{x},{z}" for x, z in TARGETS)
@@ -792,7 +859,7 @@ def run_one(
         f"-Drivet.probe.targets={encoded_targets}",
     ]
     capture = boot_and_stop(run, paperclip, java_home, "server.log", plugin_args=plugin_args, timeout=timeout)
-    extract_run(run, seed, attempt, token, boot1, capture, run_paper_info, java_info, closure, settings, preflight, ticket_path, injected_sha)
+    extract_run(run, seed, attempt, token, boot1, capture, run_paper_info, java_info, closure, settings, preflight, ticket_path, injected_sha, configured_ports)
     (run / "driver.log").write_text(f"RIVET_TICKETS_INJECTED={injected_sha}\nRIVET_CAPTURE_STOP_EXIT=0\n")
     # The capture manifest is deliberately rewritten only before returning so
     # the driver log can itself be listed as provenance without touching world.

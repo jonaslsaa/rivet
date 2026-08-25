@@ -82,10 +82,25 @@ public final class PaperNormalFullProbe extends JavaPlugin {
     }
 
     private boolean spawnLimitsAreZero() {
-        // The pinned paper-world-defaults.yml sets all eight categories to 0.
-        // The plugin cannot read Paper's YAML model through the Bukkit API, so
-        // this is recorded as a driver/config assertion and checked by the
-        // validator against the exact fixture bytes.
+        // These are the Paper world-defaults categories represented by Bukkit's
+        // spawn-limit API.  MISC is intentionally excluded: it is not a mob
+        // spawning category and has no corresponding fixture limit.
+        org.bukkit.entity.SpawnCategory[] categories = {
+            org.bukkit.entity.SpawnCategory.MONSTER,
+            org.bukkit.entity.SpawnCategory.ANIMAL,
+            org.bukkit.entity.SpawnCategory.WATER_ANIMAL,
+            org.bukkit.entity.SpawnCategory.WATER_AMBIENT,
+            org.bukkit.entity.SpawnCategory.WATER_UNDERGROUND_CREATURE,
+            org.bukkit.entity.SpawnCategory.AMBIENT,
+            org.bukkit.entity.SpawnCategory.AXOLOTL
+        };
+        for (org.bukkit.entity.SpawnCategory category : categories) {
+            if (world.getSpawnLimit(category) != 0) {
+                getLogger().warning("RIVET_NONZERO_SPAWN_LIMIT category=" + category
+                    + " value=" + world.getSpawnLimit(category));
+                return false;
+            }
+        }
         return true;
     }
 

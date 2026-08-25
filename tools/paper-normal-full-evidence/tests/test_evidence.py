@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
@@ -37,6 +38,9 @@ def valid_chunk(status: str = "minecraft:full", light: bool = True, height_len: 
         "OCEAN_FLOOR": Tag(12, packed_heightmap(2)[:height_len]),
     }
     root = Tag(10, {
+        "DataVersion": Tag(3, validate.EXPECTED_DATA_VERSION),
+        "xPos": Tag(3, 0),
+        "zPos": Tag(3, 0),
         "Status": Tag(8, status),
         "isLightOn": Tag(1, int(light)),
         "Heightmaps": Tag(10, heightmaps),
@@ -57,6 +61,26 @@ class EvidenceTests(unittest.TestCase):
         )
         with self.assertRaises(NbtError):
             parse(duplicate)
+
+    def test_compressed_stream_requires_end_marker(self):
+        compressed = zlib.compress(b"abc")
+        with self.assertRaises(capture.Failed):
+            capture._strict_decompress(compressed[:-1])
+        with self.assertRaises(validate.Failed):
+            validate.strict_decompress(compressed[:-1])
+
+    def test_external_mcc_chunk_is_loaded_from_stub(self):
+        with tempfile.TemporaryDirectory() as directory:
+            region_dir = Path(directory)
+            region = bytearray(3 * 4096)
+            struct.pack_into(">I", region, 0, (2 << 8) | 1)
+            struct.pack_into(">I", region, 2 * 4096, 1)
+            region[2 * 4096 + 4] = 0x82  # external zlib/deflate stream
+            path = region_dir / "r.0.0.mca"
+            path.write_bytes(region)
+            (region_dir / "c.0.0.mcc").write_bytes(zlib.compress(b"external-nbt"))
+            self.assertEqual(capture.read_region(path, (0, 0))[(0, 0)], b"external-nbt")
+            self.assertEqual(validate.read_region(path, (0, 0))[(0, 0)], b"external-nbt")
 
     def test_seed_signed_conversion_and_scheduler_order(self):
         self.assertEqual(capture.java_seed("12807505919197044144"), -5639238154512507472)
