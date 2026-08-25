@@ -46,6 +46,11 @@ pub trait AnyRegistry: Any + Debug + Send + Sync {
     /// `as_any` — the sole downcast seam (Java's erased `Registry<?>` cast).
     fn as_any(&self) -> &dyn Any;
 
+    /// Move through the erased boundary when a uniquely-owned access is being
+    /// dismantled. Borrowed callers continue to use `as_any`; this is only for
+    /// explicit ownership transfer, never for ordinary lookup.
+    fn into_any(self: Box<Self>) -> Box<dyn Any>;
+
     /// `MappedRegistry.registryLifecycle()` — exposed through the erased
     /// boundary so `RegistryOps`'s `HolderLookupAdapter` can report the real
     /// lifecycle without a downcast. (`Registry<T>: Debug` is hand-written, so
@@ -60,6 +65,10 @@ pub trait AnyRegistry: Any + Debug + Send + Sync {
 
 impl<T: Send + Sync + 'static> AnyRegistry for Registry<T> {
     fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
         self
     }
 

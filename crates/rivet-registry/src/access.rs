@@ -82,6 +82,51 @@ impl RegistryAccess {
         }
     }
 
+    /// Remove a uniquely-owned typed registry from this access. Layered and
+    /// cloned accesses must be dropped first; refusing while an `Arc` remains
+    /// is what prevents an ownership transfer from silently cloning a live
+    /// registry identity.
+    pub fn take_registry<E>(&mut self, key: &RegistryKey<E>) -> Result<Registry<E>, String>
+    where
+        E: Send + Sync + 'static,
+    {
+        let erased = ResourceKey::create_registry_key(key.identifier().clone());
+        let index = self
+            .registries
+            .iter()
+            .position(|entry| entry.0 == erased)
+            .ok_or_else(|| format!("Missing registry: {key}"))?;
+        // Check the erased type before removing anything. A failed typed take
+        // must leave the access unchanged just like a failed ownership take.
+        if self.registries[index]
+            .1
+            .as_any()
+            .downcast_ref::<Registry<E>>()
+            .is_none()
+        {
+            return Err(format!("Registry {key} has an unexpected element type"));
+        }
+
+        // Remove only tentatively. `try_unwrap` can still observe another
+        // owner between any preliminary count check and the unwrap; put the
+        // exact entry back at its original position when that happens.
+        let entry = self.registries.swap_remove(index);
+        let entry = match Arc::try_unwrap(entry) {
+            Ok(entry) => entry,
+            Err(entry) => {
+                self.registries.insert(index, entry);
+                return Err(format!(
+                    "Cannot take registry {key} while another access still owns it"
+                ));
+            }
+        };
+        let (_, boxed) = entry;
+        Ok(*boxed
+            .into_any()
+            .downcast::<Registry<E>>()
+            .expect("registry type was checked before ownership transfer"))
+    }
+
     /// Wrap already-shared entries (the layered composite).
     fn from_entries(entries: Vec<ErasedEntry>) -> Self {
         RegistryAccess {
@@ -337,6 +382,9 @@ mod tests {
     #[derive(Debug)]
     struct TestElement;
 
+    #[derive(Debug)]
+    struct OtherElement;
+
     fn element_key() -> RegistryKey<TestElement> {
         ResourceKey::create_registry_key(Identifier::with_default_namespace("test"))
     }
@@ -414,6 +462,36 @@ mod tests {
             a.as_any().downcast_ref::<Registry<TestElement>>().unwrap(),
             b.as_any().downcast_ref::<Registry<TestElement>>().unwrap(),
         ));
+    }
+
+    #[test]
+    fn failed_take_from_shared_access_preserves_registry_entry() {
+        let mut access = access_with_one_registry();
+        let copy = access.clone();
+        let error = access
+            .take_registry(&element_key())
+            .expect_err("shared access must reject ownership transfer");
+        assert!(error.contains("another access still owns it"));
+        assert!(access.lookup(&element_key()).is_some());
+
+        drop(copy);
+        let registry = access
+            .take_registry(&element_key())
+            .expect("the entry remains available after the failed take");
+        assert_eq!(registry.size(), 0);
+        assert!(access.lookup(&element_key()).is_none());
+    }
+
+    #[test]
+    fn failed_take_with_wrong_type_preserves_registry_entry() {
+        let mut access = access_with_one_registry();
+        let wrong_key: RegistryKey<OtherElement> =
+            ResourceKey::create_registry_key(Identifier::with_default_namespace("test"));
+        let error = access
+            .take_registry(&wrong_key)
+            .expect_err("typed take must reject an unexpected registry type");
+        assert!(error.contains("unexpected element type"));
+        assert!(access.lookup(&element_key()).is_some());
     }
 
     #[test]
