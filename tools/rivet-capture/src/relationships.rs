@@ -162,8 +162,36 @@ fn check_keepalive_echo(packets: &[CapturedPacket], f: &mut Vec<Failure>) {
                 continue;
             }
             if p.direction == request_dir && p.id == request_id {
+                if require_all && p.body.len() != 8 {
+                    f.push(Failure::new(
+                        "keepalive",
+                        format!(
+                            "{} with body {}",
+                            pkt_identity(state, request_dir, request_id),
+                            crate::fixture::hex(&p.body)
+                        ),
+                        format!(
+                            "configuration keep_alive body has length {}, expected exactly 8 bytes",
+                            p.body.len()
+                        ),
+                    ));
+                }
                 challenges.push((p.body.clone(), false));
             } else if p.direction == response_dir && p.id == response_id {
+                if require_all && p.body.len() != 8 {
+                    f.push(Failure::new(
+                        "keepalive",
+                        format!(
+                            "{} with body {}",
+                            pkt_identity(state, response_dir, response_id),
+                            crate::fixture::hex(&p.body)
+                        ),
+                        format!(
+                            "configuration keep_alive body has length {}, expected exactly 8 bytes",
+                            p.body.len()
+                        ),
+                    ));
+                }
                 let echoed = challenges
                     .iter_mut()
                     .find(|(body, matched)| !*matched && *body == p.body);
@@ -522,6 +550,40 @@ mod tests {
     }
 
     #[test]
+    fn configuration_keepalive_bodies_must_be_exactly_eight_bytes() {
+        for len in [0, 1, 7, 9] {
+            let malformed_request = check(&[pkt(
+                State::Configuration,
+                Direction::Clientbound,
+                4,
+                vec![0; len],
+            )]);
+            assert!(
+                malformed_request.iter().any(|x| {
+                    x.kind == "keepalive" && x.message.contains("expected exactly 8 bytes")
+                }),
+                "malformed request with {len} bytes was accepted: {malformed_request:?}"
+            );
+
+            let malformed_response = check(&[
+                pkt(State::Configuration, Direction::Clientbound, 4, vec![0; 8]),
+                pkt(
+                    State::Configuration,
+                    Direction::Serverbound,
+                    4,
+                    vec![0; len],
+                ),
+            ]);
+            assert!(
+                malformed_response.iter().any(|x| {
+                    x.kind == "keepalive" && x.message.contains("expected exactly 8 bytes")
+                }),
+                "malformed response with {len} bytes was accepted: {malformed_response:?}"
+            );
+        }
+    }
+
+    #[test]
     fn spawn_y_mismatch_fails() {
         let mut v = base_play();
         // bump the movement sample's y by 1.
@@ -564,8 +626,15 @@ mod tests {
     #[test]
     fn entity_ids_validate_later_write_int_occurrence() {
         let mut packets = base_play();
-        // A second entity_event packet is valid when it carries the same player
-        // id as the first entity-bearing packet.
+        // Both occurrences share the same packet identity. The first remains a
+        // valid player entity packet while the later occurrence is corrupted;
+        // a `.find` implementation would inspect only the first and miss this.
+        packets.push(pkt(
+            State::Play,
+            Direction::Clientbound,
+            34,
+            vec![0, 0, 0, 1, 0],
+        ));
         packets.push(pkt(
             State::Play,
             Direction::Clientbound,
@@ -575,8 +644,7 @@ mod tests {
         let clean = check(&packets);
         assert!(!clean.iter().any(|x| x.kind == "entity-id"), "{clean:?}");
 
-        // The later occurrence must not be hidden by the valid first packet.
-        packets[4].body[3] = 2;
+        packets[5].body[3] = 2;
         let failures = check(&packets);
         assert!(
             failures
@@ -589,14 +657,15 @@ mod tests {
     #[test]
     fn entity_ids_validate_later_varint_occurrence() {
         let mut packets = base_play();
-        // A later set_entity_data packet is valid when it carries the same
-        // player id as login.
+        // Both occurrences share the same packet identity. The first remains a
+        // valid player entity packet while the later occurrence is corrupted;
+        // a `.find` implementation would inspect only the first and miss this.
+        packets.push(pkt(State::Play, Direction::Clientbound, 99, vec![1, 0]));
         packets.push(pkt(State::Play, Direction::Clientbound, 99, vec![1, 0]));
         let clean = check(&packets);
         assert!(!clean.iter().any(|x| x.kind == "entity-id"), "{clean:?}");
 
-        // The later occurrence must not be hidden by the valid first packet.
-        packets[4].body[0] = 2;
+        packets[5].body[0] = 2;
         let failures = check(&packets);
         assert!(
             failures

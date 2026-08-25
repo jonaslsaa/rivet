@@ -1643,7 +1643,7 @@
       "id_name": "minecraft:player_info_update",
       "sha256": "fc2ec920a88bd266cad8cd0751d9331b0846adc9a0585573d27b1d6ee4ab78e8",
       "bytes": 37,
-      "note": ""
+      "note": "player-list latency (fresh-join keepalive RTT) -> 0"
     },
     {
       "state": "play",

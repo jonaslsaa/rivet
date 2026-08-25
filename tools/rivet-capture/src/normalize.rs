@@ -635,7 +635,9 @@ fn is_racy(state: State, direction: Direction, id: i32) -> bool {
 /// in progress. Whether that watchdog crosses the capture's configuration
 /// window depends on boot and loopback scheduling, so it is not part of the
 /// fixture's protocol-content contract. Raw invariants still validate every
-/// request/echo pair before this canonical-only omission.
+/// request/echo pair before this canonical-only omission. The caller additionally
+/// requires every omitted keepalive body to be exactly one wire Long, so malformed
+/// traffic cannot be hidden by omission.
 fn omit_from_canonical(state: State, direction: Direction, id: i32) -> bool {
     state == State::Configuration
         && id == 4
@@ -663,7 +665,9 @@ pub fn canonicalize(packets: &[CapturedPacket]) -> Vec<NormalizedPacket> {
 
     let mut out = Vec::new();
     for (_key, group) in groups {
-        if omit_from_canonical(group[0].state, group[0].direction, group[0].id) {
+        if omit_from_canonical(group[0].state, group[0].direction, group[0].id)
+            && group.iter().all(|p| p.body.len() == 8)
+        {
             continue;
         }
         if is_racy(group[0].state, group[0].direction, group[0].id) {
@@ -954,6 +958,20 @@ mod tests {
         assert_eq!(canon.len(), 1);
         assert_eq!(canon[0].id, 7);
         assert_eq!(canon[0].direction, Direction::Serverbound);
+    }
+
+    #[test]
+    fn canonicalize_keeps_malformed_configuration_keepalives_visible() {
+        for body in [vec![], vec![0; 7], vec![0; 9]] {
+            let canon = canonicalize(&[pkt(
+                State::Configuration,
+                Direction::Clientbound,
+                4,
+                body.clone(),
+            )]);
+            assert_eq!(canon.len(), 1, "malformed body was omitted: {body:?}");
+            assert_eq!(canon[0].body.len(), body.len());
+        }
     }
 
     #[test]
