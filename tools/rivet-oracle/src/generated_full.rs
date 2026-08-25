@@ -1395,7 +1395,8 @@ fn java_seed_long(seed: u64) -> i64 {
 /// no-symlink rule, then all validation and reads below use the returned fd.
 /// This is deliberately a single acquisition operation: a prior
 /// `symlink_metadata` check followed by `File::open(path)` would leave a rename
-/// or link-substitution window.
+/// or link-substitution window. `O_NONBLOCK` ensures a FIFO cannot stall before
+/// its descriptor metadata identifies it as a forbidden nonregular artifact.
 fn open_stable_read(path: &Path) -> std::io::Result<fs::File> {
     #[cfg(target_os = "linux")]
     {
@@ -2266,6 +2267,47 @@ mod tests {
                 Err(Error::Gate(message)) if message.contains("hardlink")
             ));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fifo_contract_is_a_nonregular_hard_failure_without_blocking() {
+        use rustix::fs::{CWD, Mode, mkfifoat};
+
+        let temp = tempfile::tempdir().unwrap();
+        let contract_path = temp.path().join(CONTRACT_BASENAME);
+        mkfifoat(CWD, &contract_path, Mode::from_raw_mode(0o600)).unwrap();
+        assert!(matches!(
+            load_contract(&contract_path),
+            Err(Error::Gate(message)) if message.contains("not a regular file")
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fifo_evidence_fails_fast_as_nonregular() {
+        let temp = tempfile::tempdir().unwrap();
+        let fifo = temp.path().join("evidence");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::Mode::from_raw_mode(0o600),
+        )
+        .unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            tx.send(read_stable_file(&fifo, "generated-full FIFO evidence"))
+                .unwrap();
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("opening a FIFO must not block while checking evidence metadata");
+        worker.join().unwrap();
+        assert!(matches!(
+            result,
+            Err(Error::Gate(message)) if message.contains("not a regular file")
+        ));
     }
 
     #[cfg(unix)]
