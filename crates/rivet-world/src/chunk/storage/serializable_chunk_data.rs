@@ -10,9 +10,10 @@
 //! the stored chunk position, and carried as typed stored values on the parse
 //! result. A FULL chunk carrying stored ticks now reconstructs, carrying the
 //! typed values for the caller's runtime composition — the parser neither
-//! executes, schedules, generates, installs, nor writes them (the
-//! `LevelChunkTicks`/`ProtoChunkTicks` containers now live in `ticks` (#522),
-//! but the wiring that installs them defers with the tick-execution slice).
+//! executes, schedules, generates, nor installs them (the writer preserves the
+//! pending values unchanged). The `LevelChunkTicks`/`ProtoChunkTicks` containers
+//! now live in `ticks` (#522), but the wiring that installs them defers with the
+//! tick-execution slice.
 //! `UpgradeData`'s
 //! neighbor tick lists remain behind
 //! the `UnsupportedUpgradeData` boundary: they are decodable (with the Java
@@ -664,8 +665,8 @@ impl SerializableChunkData {
         // parse and are carried. The runtime tick containers
         // (`LevelChunkTicks`/`ProtoChunkTicks`) exist in `ticks` (#522) but are
         // not wired in, so a FULL chunk with stored ticks now reconstructs with
-        // the values carried — nothing is scheduled, generated, installed, or
-        // written.
+        // the values carried — nothing is scheduled, generated, or installed;
+        // the writer re-emits the pending values unchanged.
         // `below_zero_retrogen` is deliberately not checked here: Paper's
         // LEVELCHUNK branch of `SerializableChunkData.read` never consults it
         // (only the proto branch does), so a FULL chunk carrying one loads as-is.
@@ -2304,7 +2305,7 @@ mod tests {
         // valid sibling survives. The typed stored list carries exactly that
         // valid tick (filtered to the stored chunk (0,0)); a FULL chunk carrying
         // stored ticks now reconstructs (the typed values are carried, nothing
-        // schedules them, #370).
+        // schedules them, and the writer preserves them, #370).
         let mut chunk = top_level("minecraft:full");
         chunk.put(
             "block_ticks".into(),
