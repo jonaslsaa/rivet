@@ -1,0 +1,64 @@
+{
+  "format": 1,
+  "kind": "paper-normal-overworld-full",
+  "paper_revision": "0a993450f129c4942c2a9ed45ba047412b4667cf",
+  "paper_version": "26.2",
+  "java_vendor": "Eclipse Adoptium / Temurin",
+  "java_major": 25,
+  "seed_encoding": "unsigned 64-bit corpus text; level-seed and worldgen_settings.dat use signed Java long",
+  "dimension": "minecraft:overworld",
+  "level_type": "minecraft:normal",
+  "generate_structures": true,
+  "seeds": [
+    "5207638315753790570",
+    "12807505919197044144",
+    "5246862266665176429",
+    "3423572188437197996"
+  ],
+  "targets": [
+    [0, 0],
+    [15, 15],
+    [31, 31],
+    [-1, -1],
+    [-16, -16],
+    [-31, -31],
+    [-1, 0],
+    [0, -1]
+  ],
+  "support_radius": 11,
+  "ticket": {
+    "type": "minecraft:forced",
+    "level": 33,
+    "ticks_left": -9223372036854775808,
+    "data_version": 4903
+  },
+  "dynamic_ports": true,
+  "frozen_simulation": {
+    "random_tick_speed": 0,
+    "do_daylight_cycle": false,
+    "do_weather_cycle": false,
+    "do_mob_spawning": false,
+    "spawn_limits": 0
+  },
+  "semantic_normalizations": [
+    "Data.InhabitedTime (per-chunk game-time counter; raw bytes remain authoritative)",
+    "Data.LastUpdate (save-clock field when present; raw bytes remain authoritative)"
+  ],
+  "parity_claim": null,
+  "server_properties": {
+    "level-seed": "<seed>",
+    "level-type": "minecraft:normal",
+    "generate-structures": "true",
+    "level-name": "world",
+    "server-port": "0",
+    "query.port": "0",
+    "online-mode": "false",
+    "enable-status": "false",
+    "view-distance": "3",
+    "simulation-distance": "3",
+    "spawn-protection": "0",
+    "region-file-compression": "deflate",
+    "sync-chunk-writes": "true",
+    "max-tick-time": "-1"
+  }
+}
