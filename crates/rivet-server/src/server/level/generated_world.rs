@@ -1432,11 +1432,11 @@ impl FeatureConfiguration for DeferredGeneratedFeatureConfiguration {
 /// The two feature registries are built as one generated closure, not as
 /// empty placeholders. The generated ids are full registry ids (not PHF map
 /// iteration order); synthetic gap values preserve those ids, and the final
-/// values keep the same registry identities the staged `RegistryOps` decode
-/// used. A key-only staged view is necessary because
-/// placed and configured features are mutually recursive; it is dropped before
-/// the final frozen registries are published, so a decode failure cannot leak a
-/// partially populated access into the world.
+/// values keep the same registry identities the temporary `RegistryOps` decode
+/// used. One-owner transactions are necessary because placed and configured
+/// features are mutually recursive; they are adopted only after the temporary
+/// access is fully dropped, so a decode failure cannot publish a partially
+/// populated access into the world.
 fn build_feature_access(worldgen: &RegistryAccess) -> RegistryAccess {
     let (placed, configured) = build_generated_feature_closure(worldgen)
         .unwrap_or_else(|error| panic!("generated feature closure refused atomically: {error}"));
@@ -1838,16 +1838,14 @@ fn build_generated_feature_closure(
     let configured_entries = sorted_configured_feature_entries()?;
     validate_generated_feature_closure(&placed_entries, &configured_entries)?;
 
-    // Build temporary lookup tables through move-based staging. The owner
-    // builders' state is transferred into the staged builders, not cloned, and
-    // the frozen tables are consumed back into mutable builders after decode.
-    // Thus the holder identities used by decoding are preserved without ever
-    // exposing two live registries with one identity.
-    let mut placed_builder = RegistryBuilder::new(&*PLACED_FEATURE);
-    let mut configured_builder = RegistryBuilder::new(&*CONFIGURED_FEATURE);
-    let mut staged_placed_builder = placed_builder.staged();
-    let mut staged_configured_builder = configured_builder.staged();
-    let configured_registry_id = staged_configured_builder.registry_id();
+    // Build temporary lookup tables through one-owner transactions. Each
+    // transaction consumes its authoritative builder; freezing moves that same
+    // owner into a registry, and adoption moves it back after decoding. There
+    // is never a concurrently live replacement builder or a second authority
+    // with either registry identity.
+    let mut placed_transaction = RegistryBuilder::new(&*PLACED_FEATURE).into_transaction();
+    let mut configured_transaction = RegistryBuilder::new(&*CONFIGURED_FEATURE).into_transaction();
+    let configured_registry_id = configured_transaction.registry_id();
     let placed_slots = placed_name_slots(&placed_entries);
     let configured_slots = configured_name_slots(&configured_entries);
     let configured_gap_id = configured_slots
@@ -1865,7 +1863,7 @@ fn build_generated_feature_closure(
                 configured_key: format!("rivet:generated_configured_gap_{id}"),
             }),
         });
-        staged_configured_builder.register(
+        configured_transaction.builder_mut().register(
             &ResourceKey::create(&*CONFIGURED_FEATURE, identifier),
             value,
             RegistrationInfo::BUILT_IN,
@@ -1879,24 +1877,26 @@ fn build_generated_feature_closure(
             Holder::reference(configured_registry_id, configured_gap_id),
             Vec::new(),
         ));
-        staged_placed_builder.register(
+        placed_transaction.builder_mut().register(
             &ResourceKey::create(&*PLACED_FEATURE, identifier),
             value,
             RegistrationInfo::BUILT_IN,
         );
     }
+    placed_transaction.freeze();
+    configured_transaction.freeze();
     let mut staged_feature_layer = RegistryAccess::from_pairs(vec![
         (
             ResourceKey::create_registry_key(Identifier::with_default_namespace(
                 "worldgen/placed_feature",
             )),
-            Box::new(staged_placed_builder.freeze()) as rivet_registry::root::AnyBox,
+            Box::new(placed_transaction.take_frozen()) as rivet_registry::root::AnyBox,
         ),
         (
             ResourceKey::create_registry_key(Identifier::with_default_namespace(
                 "worldgen/configured_feature",
             )),
-            Box::new(staged_configured_builder.freeze()) as rivet_registry::root::AnyBox,
+            Box::new(configured_transaction.take_frozen()) as rivet_registry::root::AnyBox,
         ),
     ]);
     let staged_access =
@@ -1927,15 +1927,14 @@ fn build_generated_feature_closure(
     }
     drop(ops);
     drop(staged_access);
-    // All access clones are gone, so the staged registries can be moved back
-    // into builders. This consumes the temporary frozen tables before the
-    // final freeze and therefore transfers, rather than duplicates, identity.
-    let mut placed_builder = staged_feature_layer
-        .take_registry(&*PLACED_FEATURE)?
-        .into_builder();
-    let mut configured_builder = staged_feature_layer
-        .take_registry(&*CONFIGURED_FEATURE)?
-        .into_builder();
+    // All access clones are gone, so the temporary frozen registries can be
+    // adopted back by their original transactions. This consumes each table
+    // before the final freeze and therefore transfers, rather than duplicates,
+    // identity.
+    placed_transaction.adopt_frozen(staged_feature_layer.take_registry(&*PLACED_FEATURE)?);
+    configured_transaction.adopt_frozen(staged_feature_layer.take_registry(&*CONFIGURED_FEATURE)?);
+    let mut placed_builder = placed_transaction.into_builder();
+    let mut configured_builder = configured_transaction.into_builder();
 
     for (id, &name) in configured_slots.iter().enumerate() {
         let identifier = name

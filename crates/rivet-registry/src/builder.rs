@@ -45,13 +45,13 @@ use crate::ResourceKey;
 use crate::TagKey;
 use crate::holder::{HolderId, RegistryId};
 use crate::registration_info::RegistrationInfo;
-use crate::registry::{Registry, RegistryKey, RegistryParts, StagedRegistryLease};
+use crate::registry::{Registry, RegistryKey, RegistryParts};
 
 use rivet_serialization::lifecycle::Lifecycle;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Monotonic per-instance registry identity source (OWNERSHIP.md §Registries:
 /// `RegistryId` is a per-instance u32, distinct from the registry key). A
@@ -104,94 +104,102 @@ pub struct RegistryBuilder<T> {
     /// a repeat call returns the same provisional id, and `freeze()` reports
     /// each unbound key exactly once.
     pending_unbound: HashMap<ResourceKey<T>, HolderId>,
-    /// Set while a staged registry with this builder's identity is alive.
-    /// Owner mutation/freezing is blocked until the staged registry is dropped.
-    stage_active: Arc<AtomicBool>,
 }
 
-/// A key-only registry builder borrowed from its final owner.
+/// An ownership transaction for mutually recursive registry decoding.
 ///
-/// This type exists only for mutually recursive registry decoding. Its lifetime
-/// is tied to the final [`RegistryBuilder`]: an abandoned transaction restores
-/// the owner, while a committed transaction leaves the owner as a fresh builder
-/// with a distinct identity.
-pub struct StagedRegistryBuilder<'a, T> {
-    /// The final owner is replaced with a fresh builder while this transaction
-    /// is active. If the transaction is abandoned, the rollback snapshot is
-    /// restored into it, so staged mutations cannot leak into the owner.
-    owner: &'a mut RegistryBuilder<T>,
-    /// The original owner builder, moved rather than cloned.
-    inner: Option<RegistryBuilder<T>>,
-    /// Immutable rollback state captured before staged mutations begin. This
-    /// clones only the Arc-backed table state, never a live `Registry`.
-    rollback: Option<RegistryParts<T>>,
-    lease: Option<StagedRegistryLease>,
+/// Construction consumes the one authoritative builder. While the transaction
+/// is building, it is the only mutable owner; after `freeze`, it is the only
+/// owner of the frozen table. `take_frozen` and `adopt_frozen` are the explicit
+/// hand-off around a temporary `RegistryAccess`: callers must adopt the table
+/// before mutating it again. No replacement builder or identity lease exists,
+/// so one `RegistryId` cannot name two live phases.
+pub struct RegistryBuilderTransaction<T> {
+    state: TransactionState<T>,
 }
 
-impl<'a, T> StagedRegistryBuilder<'a, T> {
-    /// The staged view's reserved registry identity.
+enum TransactionState<T> {
+    Building(RegistryBuilder<T>),
+    Frozen(Registry<T>),
+    Empty,
+}
+
+impl<T> RegistryBuilderTransaction<T> {
+    /// The transaction's single logical registry identity.
     pub fn registry_id(&self) -> RegistryId {
-        self.inner
-            .as_ref()
-            .expect("staged registry builder already frozen")
-            .registry_id()
+        match &self.state {
+            TransactionState::Building(builder) => builder.registry_id(),
+            TransactionState::Frozen(registry) => registry.registry_id(),
+            TransactionState::Empty => panic!("registry transaction has no owner"),
+        }
     }
 
-    /// Register a key-only placeholder in the staged view.
-    pub fn register(
-        &mut self,
-        key: &ResourceKey<T>,
-        value: Arc<T>,
-        info: RegistrationInfo,
-    ) -> BuilderHolder {
-        self.inner
-            .as_mut()
-            .expect("staged registry builder already frozen")
-            .register(key, value, info)
+    /// Borrow the authoritative mutable builder while it is in the building
+    /// phase. A frozen transaction has no mutable owner until it is adopted.
+    pub fn builder_mut(&mut self) -> &mut RegistryBuilder<T> {
+        match &mut self.state {
+            TransactionState::Building(builder) => builder,
+            TransactionState::Frozen(_) => panic!("registry transaction is frozen"),
+            TransactionState::Empty => panic!("registry transaction has no owner"),
+        }
     }
 
-    /// Create a provisional holder in the staged view. This is forwarded so
-    /// freeze validation failures can exercise the same unbound-key checks as a
-    /// normal builder and still roll the moved owner back on drop.
-    pub fn get_or_create_holder(&mut self, key: &ResourceKey<T>) -> BuilderHolder {
-        self.inner
-            .as_mut()
-            .expect("staged registry builder already frozen")
-            .get_or_create_holder(key)
+    /// Freeze the authoritative builder in place and return the sole frozen
+    /// registry view. Validation occurs before the state is moved, so a panic
+    /// leaves the builder (including intrusive and pending-unbound holders)
+    /// available for recovery.
+    pub fn freeze(&mut self) -> &Registry<T> {
+        match &self.state {
+            TransactionState::Building(builder) => builder.validate_freeze(),
+            TransactionState::Frozen(registry) => return registry,
+            TransactionState::Empty => panic!("registry transaction has no owner"),
+        }
+        let state = std::mem::replace(&mut self.state, TransactionState::Empty);
+        self.state = match state {
+            TransactionState::Building(builder) => TransactionState::Frozen(builder.freeze_validated()),
+            TransactionState::Frozen(_) | TransactionState::Empty => {
+                unreachable!("validated building transaction was replaced")
+            }
+        };
+        match &self.state {
+            TransactionState::Frozen(registry) => registry,
+            TransactionState::Building(_) | TransactionState::Empty => {
+                unreachable!("freeze always leaves a frozen transaction")
+            }
+        }
     }
 
-    /// Freeze the staged view after all recursive keys have been reserved.
-    ///
-    /// The original builder is moved into the returned registry; it is not
-    /// copied into a second live registry. The owner remains a fresh builder
-    /// with a different identity after this transaction commits.
-    pub fn freeze(mut self) -> Registry<T> {
-        let inner = self
-            .inner
-            .as_ref()
-            .expect("staged registry builder already frozen");
-        inner.validate_freeze();
-        let lease = self
-            .lease
-            .take()
-            .expect("staged registry lease already consumed");
-        self.inner
-            .take()
-            .expect("staged registry builder already frozen")
-            .freeze_validated_with_lease(Some(lease))
+    /// Move the temporary frozen registry into an erased access. The
+    /// transaction becomes empty until [`Self::adopt_frozen`] receives it back.
+    pub fn take_frozen(&mut self) -> Registry<T> {
+        match std::mem::replace(&mut self.state, TransactionState::Empty) {
+            TransactionState::Frozen(registry) => registry,
+            TransactionState::Building(builder) => {
+                self.state = TransactionState::Building(builder);
+                panic!("registry transaction must be frozen before take_frozen")
+            }
+            TransactionState::Empty => panic!("registry transaction has no owner"),
+        }
     }
-}
 
-impl<T> Drop for StagedRegistryBuilder<'_, T> {
-    fn drop(&mut self) {
-        // A panic in register or freeze validation restores the pre-stage
-        // snapshot. A successful freeze takes `inner`, so there is nothing to
-        // restore and the owner remains the fresh replacement builder.
-        if self.inner.is_some()
-            && let Some(rollback) = self.rollback.take()
-        {
-            *self.owner = RegistryBuilder::from_frozen_parts(rollback);
-            self.inner.take();
+    /// Adopt a uniquely-owned frozen registry back as the authoritative
+    /// mutable builder, preserving its `RegistryId` and every registered
+    /// holder id. This is the commit half of a recursive decode transaction.
+    pub fn adopt_frozen(&mut self, registry: Registry<T>) {
+        assert!(
+            matches!(self.state, TransactionState::Empty),
+            "registry transaction already owns a phase"
+        );
+        self.state = TransactionState::Building(registry.into_builder());
+    }
+
+    /// Recover the transaction's owner after decoding, whether the caller
+    /// adopted a temporary frozen registry or never froze the builder.
+    pub fn into_builder(self) -> RegistryBuilder<T> {
+        match self.state {
+            TransactionState::Building(builder) => builder,
+            TransactionState::Frozen(registry) => registry.into_builder(),
+            TransactionState::Empty => panic!("registry transaction has no owner"),
         }
     }
 }
@@ -206,48 +214,12 @@ impl<T> RegistryBuilder<T> {
         Self::with_intrusive(key, false)
     }
 
-    /// Borrow this builder while constructing a key-only staged registry view.
-    ///
-    /// The staged view moves the owner's complete state instead of cloning it.
-    /// The owner is replaced with a fresh identity while the transaction runs;
-    /// dropping the staged view without freezing restores the original owner,
-    /// while a successful freeze transfers that identity to the returned
-    /// registry.
-    pub fn staged(&mut self) -> StagedRegistryBuilder<'_, T> {
-        assert!(
-            !self.stage_active.swap(true, Ordering::AcqRel),
-            "registry builder already has a staged view"
-        );
-        let key = self.key.clone();
-        let intrusive_holders = self.intrusive.is_some();
-        let owner_stage_active = Arc::clone(&self.stage_active);
-        let rollback = RegistryParts {
-            key: self.key.clone(),
-            registry_id: self.registry_id,
-            values: self.values.clone(),
-            keys: self.keys.clone(),
-            by_location: self.by_location.clone(),
-            by_key: self.by_key.clone(),
-            by_value: self.by_value.clone(),
-            registration_infos: self.registration_infos.clone(),
-            lifecycle: self.lifecycle,
-            default_id: self.default_id,
-            default_key: self.default_key.clone(),
-            tags: self.tags.clone(),
-            intrusive: self.intrusive.clone(),
-            pending_unbound: self.pending_unbound.clone(),
-        };
-        let replacement = Self::with_intrusive(&key, intrusive_holders);
-        let mut inner = std::mem::replace(self, replacement);
-        // The lease belongs to the transaction, not to the moved builder. The
-        // moved builder must remain writable while the staged view is alive.
-        inner.stage_active = Arc::new(AtomicBool::new(false));
-        let lease = StagedRegistryLease::new(owner_stage_active);
-        StagedRegistryBuilder {
-            owner: self,
-            inner: Some(inner),
-            rollback: Some(rollback),
-            lease: Some(lease),
+    /// Consume this builder into the sole owner of a recursive decode
+    /// transaction. Unlike the removed split-phase staging API, this does not
+    /// borrow or replace the caller's builder.
+    pub fn into_transaction(self) -> RegistryBuilderTransaction<T> {
+        RegistryBuilderTransaction {
+            state: TransactionState::Building(self),
         }
     }
 
@@ -284,7 +256,6 @@ impl<T> RegistryBuilder<T> {
             tags: HashMap::new(),
             intrusive: intrusive_holders.then(HashMap::new),
             pending_unbound: HashMap::new(),
-            stage_active: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -325,7 +296,6 @@ impl<T> RegistryBuilder<T> {
             tags,
             intrusive,
             pending_unbound,
-            stage_active: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -339,13 +309,6 @@ impl<T> RegistryBuilder<T> {
     /// The builder's `RegistryId`.
     pub fn registry_id(&self) -> RegistryId {
         self.registry_id
-    }
-
-    fn assert_stage_inactive(&self) {
-        assert!(
-            !self.stage_active.load(Ordering::Acquire),
-            "registry builder cannot be reused while its staged registry is alive"
-        );
     }
 
     /// Identity helper — `Arc::as_ptr` of a freshly-wrapped value.
@@ -383,7 +346,6 @@ impl<T> RegistryBuilder<T> {
         value: Arc<T>,
         info: RegistrationInfo,
     ) -> BuilderHolder {
-        self.assert_stage_inactive();
         if self.by_location.contains_key(key.identifier()) {
             panic!("Adding duplicate key '{}' to registry", key);
         }
@@ -424,7 +386,6 @@ impl<T> RegistryBuilder<T> {
     /// stored `Arc` updates the identity index atomically while preserving the
     /// holder id and all key/registration metadata.
     pub fn replace_registered(&mut self, key: &ResourceKey<T>, value: Arc<T>) -> BuilderHolder {
-        self.assert_stage_inactive();
         let id = *self
             .by_key
             .get(key)
@@ -455,7 +416,6 @@ impl<T> RegistryBuilder<T> {
     /// builder — an intrusive registry only ever creates holders from values,
     /// never from bare keys. Preserved here exactly.
     pub fn get_or_create_holder(&mut self, key: &ResourceKey<T>) -> BuilderHolder {
-        self.assert_stage_inactive();
         if let Some(&id) = self.by_key.get(key) {
             return HolderId(id);
         }
@@ -484,7 +444,6 @@ impl<T> RegistryBuilder<T> {
     /// of `create_intrusive_holder` must not treat the return as a final id —
     /// match `register`'s return, as Java callers match `register`'s.
     pub fn create_intrusive_holder(&mut self, value: Arc<T>) -> BuilderHolder {
-        self.assert_stage_inactive();
         let intrusive = self
             .intrusive
             .as_mut()
@@ -516,7 +475,6 @@ impl<T> RegistryBuilder<T> {
     /// tag member ids (pre-freeze). Member holders must reference registered
     /// elements in this minimal shape; `HolderSet.Named` binding is #126.
     pub fn bind_tags(&mut self, pending: Vec<(TagKey<T>, Vec<BuilderHolder>)>) {
-        self.assert_stage_inactive();
         for (tag, holders) in pending {
             self.tags.insert(tag, holders);
         }
@@ -542,14 +500,14 @@ impl<T> RegistryBuilder<T> {
     /// impossible here: tags only exist after `bind_tags` in this minimal
     /// shape, and a consumed builder cannot be frozen twice.)
     pub fn freeze(self) -> Registry<T> {
-        self.assert_stage_inactive();
         self.validate_freeze();
-        self.freeze_validated_with_lease(None)
+        self.freeze_validated()
     }
 
     /// Validate the Java `MappedRegistry.freeze()` preconditions without
-    /// consuming the builder. Staged transactions use this before taking the
-    /// moved owner state so a validation panic can still roll it back.
+    /// consuming the builder. Transactions call this before moving the
+    /// authoritative builder into the frozen phase, so a validation panic
+    /// leaves intrusive and pending-unbound holder state recoverable.
     fn validate_freeze(&self) {
         let mut unbound: Vec<Identifier> = self
             .pending_unbound
@@ -582,7 +540,7 @@ impl<T> RegistryBuilder<T> {
         }
     }
 
-    fn freeze_validated_with_lease(self, staged_lease: Option<StagedRegistryLease>) -> Registry<T> {
+    fn freeze_validated(self) -> Registry<T> {
         Registry::from_builder(
             RegistryParts {
                 key: self.key,
@@ -600,7 +558,6 @@ impl<T> RegistryBuilder<T> {
                 intrusive: self.intrusive,
                 pending_unbound: self.pending_unbound,
             },
-            staged_lease,
         )
     }
 
@@ -652,88 +609,69 @@ mod tests {
     }
 
     #[test]
-    fn staged_builder_transfers_identity_and_preexisting_entries() {
-        let mut owner = RegistryBuilder::<TestElement>::new(&key());
-        register(&mut owner, "existing", 7);
-        let owner_id = owner.registry_id();
-        let staged_registry = owner.staged().freeze();
-        assert_eq!(staged_registry.registry_id(), owner_id);
-        assert_eq!(staged_registry.size(), 1);
-        assert_eq!(
-            staged_registry.get_value(&element_key("existing")),
-            Some(&TestElement(7))
-        );
-
-        // The owner is a fresh builder after a committed move, so it cannot
-        // expose a second live registry with the staged identity.
-        assert_ne!(owner.registry_id(), owner_id);
-        register(&mut owner, "new", 8);
-        let owner_registry = owner.freeze();
-        assert_ne!(owner_registry.registry_id(), staged_registry.registry_id());
-        assert_eq!(owner_registry.size(), 1);
+    fn transaction_transfers_identity_without_a_replacement_builder() {
+        let mut transaction = RegistryBuilder::<TestElement>::new(&key()).into_transaction();
+        register(transaction.builder_mut(), "existing", 7);
+        let registry_id = transaction.registry_id();
+        assert_eq!(transaction.freeze().registry_id(), registry_id);
+        let staged = transaction.take_frozen();
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            transaction.builder_mut();
+        }))
+        .is_err());
+        transaction.adopt_frozen(staged);
+        register(transaction.builder_mut(), "new", 8);
+        let final_registry = transaction.into_builder().freeze();
+        assert_eq!(final_registry.registry_id(), registry_id);
+        assert_eq!(final_registry.size(), 2);
     }
 
     #[test]
-    fn frozen_staged_registry_can_be_updated_without_cloning_identity() {
-        let mut owner = RegistryBuilder::<TestElement>::new(&key());
-        register(&mut owner, "existing", 7);
-        let owner_id = owner.registry_id();
-        let staged_registry = owner.staged().freeze();
-        let mut builder = staged_registry.into_builder();
-        builder.replace_registered(&element_key("existing"), Arc::new(TestElement(8)));
-        let final_registry = builder.freeze();
-        assert_eq!(final_registry.registry_id(), owner_id);
-        assert_eq!(final_registry.size(), 1);
-        assert_eq!(
-            final_registry.get_value(&element_key("existing")),
-            Some(&TestElement(8))
-        );
-    }
-
-    #[test]
-    fn staged_registration_failure_does_not_publish_or_corrupt_owner() {
-        let mut owner = RegistryBuilder::<TestElement>::new(&key());
-        register(&mut owner, "existing", 7);
-        let owner_id = owner.registry_id();
+    fn transaction_freeze_validation_failure_preserves_pending_holders() {
+        let mut transaction = RegistryBuilder::<TestElement>::new(&key()).into_transaction();
+        let pending = element_key("never_registered");
+        transaction.builder_mut().get_or_create_holder(&pending);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut staged = owner.staged();
-            // The snapshot includes the pre-existing key, so a failed staged
-            // registration cannot be mistaken for a successful publication.
-            staged.register(
-                &element_key("existing"),
-                Arc::new(TestElement(8)),
-                RegistrationInfo::BUILT_IN,
-            );
+            transaction.freeze();
         }));
         assert!(result.is_err());
-        assert_eq!(owner.registry_id(), owner_id);
-        let frozen = owner.freeze();
-        assert_eq!(frozen.registry_id(), owner_id);
-        assert_eq!(frozen.size(), 1);
-        assert_eq!(
-            frozen.get_value(&element_key("existing")),
-            Some(&TestElement(7))
-        );
+        // The same pending holder remains owned by the transaction and can be
+        // completed after the failed validation.
+        register(transaction.builder_mut(), "never_registered", 7);
+        let registry = transaction.into_builder().freeze();
+        assert_eq!(registry.get_value(&pending), Some(&TestElement(7)));
     }
 
     #[test]
-    fn staged_freeze_validation_failure_rolls_back_owner_atomically() {
-        let mut owner = RegistryBuilder::<TestElement>::new(&key());
-        register(&mut owner, "existing", 7);
-        let owner_id = owner.registry_id();
+    fn transaction_freeze_validation_failure_preserves_intrusive_holders() {
+        let mut transaction = RegistryBuilder::<TestElement>::new_with_intrusive(&key())
+            .into_transaction();
+        let value = Arc::new(TestElement(7));
+        transaction
+            .builder_mut()
+            .create_intrusive_holder(Arc::clone(&value));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut staged = owner.staged();
-            staged.get_or_create_holder(&element_key("never_registered"));
-            staged.freeze();
+            transaction.freeze();
         }));
         assert!(result.is_err());
-        let frozen = owner.freeze();
-        assert_eq!(frozen.registry_id(), owner_id);
-        assert_eq!(frozen.size(), 1);
-        assert_eq!(
-            frozen.get_value(&element_key("existing")),
-            Some(&TestElement(7))
-        );
+        transaction
+            .builder_mut()
+            .register(&element_key("intrusive"), value, RegistrationInfo::BUILT_IN);
+        let registry = transaction.into_builder().freeze();
+        assert_eq!(registry.get_value(&element_key("intrusive")), Some(&TestElement(7)));
+    }
+
+    #[test]
+    fn transaction_registration_failure_does_not_corrupt_owner() {
+        let mut transaction = RegistryBuilder::<TestElement>::new(&key()).into_transaction();
+        register(transaction.builder_mut(), "existing", 7);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            register(transaction.builder_mut(), "existing", 8);
+        }));
+        assert!(result.is_err());
+        let registry = transaction.into_builder().freeze();
+        assert_eq!(registry.size(), 1);
+        assert_eq!(registry.get_value(&element_key("existing")), Some(&TestElement(7)));
     }
 
     #[test]
