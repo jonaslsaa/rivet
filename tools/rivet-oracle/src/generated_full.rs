@@ -1399,9 +1399,9 @@ fn java_seed_long(seed: u64) -> i64 {
 fn open_stable_read(path: &Path) -> std::io::Result<fs::File> {
     #[cfg(target_os = "linux")]
     {
-        use rustix::fs::{openat2, CWD, Mode, OFlags, ResolveFlags};
+        use rustix::fs::{CWD, Mode, OFlags, ResolveFlags, openat2};
 
-        return openat2(
+        openat2(
             CWD,
             path,
             OFlags::RDONLY,
@@ -1409,19 +1409,23 @@ fn open_stable_read(path: &Path) -> std::io::Result<fs::File> {
             ResolveFlags::NO_SYMLINKS,
         )
         .map(fs::File::from)
-        .map_err(std::io::Error::from);
+        .map_err(std::io::Error::from)
     }
 
     #[cfg(not(target_os = "linux"))]
     {
-        fs::File::open(path)
+        let _ = path;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "stable no-symlink evidence opening requires Linux openat2",
+        ))
     }
 }
 
 fn is_symlink_open_error(error: &std::io::Error) -> bool {
     #[cfg(target_os = "linux")]
     {
-        return error.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error());
+        error.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error())
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -1432,9 +1436,7 @@ fn is_symlink_open_error(error: &std::io::Error) -> bool {
 
 fn reject_hardlink_metadata(metadata: &fs::Metadata, path: &Path, what: &str) -> Result<(), Error> {
     #[cfg(unix)]
-    if metadata.file_type().is_file()
-        && std::os::unix::fs::MetadataExt::nlink(metadata) > 1
-    {
+    if metadata.file_type().is_file() && std::os::unix::fs::MetadataExt::nlink(metadata) > 1 {
         return Err(Error::Gate(format!(
             "{what} {} is a hardlink (link count > 1); aliased payloads are forbidden",
             path.display()
@@ -1519,7 +1521,7 @@ fn read_jar_git_commit_opened(file: &fs::File) -> Result<Option<String>, Error> 
         if !output.status.success() {
             return Ok(None);
         }
-        return Ok(output
+        Ok(output
             .stdout
             .split(|byte| *byte == b'\n')
             .filter_map(|line| std::str::from_utf8(line).ok())
@@ -1529,7 +1531,7 @@ fn read_jar_git_commit_opened(file: &fs::File) -> Result<Option<String>, Error> 
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .map(str::to_string)
-            }));
+            }))
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -1663,6 +1665,7 @@ fn read_executable_file(path: &Path) -> Result<Vec<u8>, Error> {
     Ok(bytes)
 }
 
+#[cfg(test)]
 fn require_executable(path: &Path) -> Result<(), Error> {
     read_executable_file(path).map(|_| ())
 }
@@ -2357,6 +2360,31 @@ mod tests {
         assert!(matches!(
             verify_synthetic_roots(&contract, &paper_root, &rivet_root),
             Err(Error::Gate(message)) if message.contains("hardlink")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_payload_symlink_is_a_hard_failure() {
+        let contract = test_contract();
+        let temp = tempfile::tempdir().unwrap();
+        let paper_root = temp.path().join("paper");
+        let rivet_root = temp.path().join("rivet");
+        write_seed_set(&paper_root, &contract, "paper", 42);
+        write_seed_set(&rivet_root, &contract, "rivet", 42);
+
+        let seed = contract.seeds[0];
+        let paper_payload = paper_root
+            .join(seed.to_string())
+            .join("chunk/overworld/0.0/0.0.nbt");
+        let rivet_payload = rivet_root
+            .join(seed.to_string())
+            .join("chunk/overworld/0.0/0.0.nbt");
+        fs::remove_file(&rivet_payload).unwrap();
+        std::os::unix::fs::symlink(&paper_payload, &rivet_payload).unwrap();
+        assert!(matches!(
+            verify_synthetic_roots(&contract, &paper_root, &rivet_root),
+            Err(Error::Gate(message)) if message.contains("symlink")
         ));
     }
 
