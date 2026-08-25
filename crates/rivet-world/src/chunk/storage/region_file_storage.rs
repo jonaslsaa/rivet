@@ -55,6 +55,7 @@ pub struct RegionFileStorage {
     folder: PathBuf,
     sync: bool,
     read_only: bool,
+    version: RegionFileVersion,
     region_cache: Vec<(i64, RegionFile)>,
     non_existing_region_files: Vec<i64>,
     #[cfg(test)]
@@ -63,11 +64,26 @@ pub struct RegionFileStorage {
 
 impl RegionFileStorage {
     pub fn new(info: RegionStorageInfo, folder: PathBuf, sync: bool) -> Self {
+        Self::new_with_version(info, folder, sync, RegionFileVersion::get_selected())
+    }
+
+    /// Construct storage with a startup-snapshotted codec selection.
+    ///
+    /// The normal [`Self::new`] constructor preserves the server-wide selected
+    /// codec. Workers use this explicit form so a later configuration mutation
+    /// cannot change the codec of an already-started writer.
+    pub fn new_with_version(
+        info: RegionStorageInfo,
+        folder: PathBuf,
+        sync: bool,
+        version: RegionFileVersion,
+    ) -> Self {
         Self {
             info,
             folder,
             sync,
             read_only: false,
+            version,
             region_cache: Vec::new(),
             non_existing_region_files: Vec::new(),
             #[cfg(test)]
@@ -78,11 +94,21 @@ impl RegionFileStorage {
     /// Existing-only storage for world boot: no create/write descriptor,
     /// repair, backup, padding, or sync-on-close behavior.
     pub fn new_read_only(info: RegionStorageInfo, folder: PathBuf) -> Self {
+        Self::new_read_only_with_version(info, folder, RegionFileVersion::get_selected())
+    }
+
+    /// Construct read-only storage with a startup-snapshotted codec selection.
+    pub fn new_read_only_with_version(
+        info: RegionStorageInfo,
+        folder: PathBuf,
+        version: RegionFileVersion,
+    ) -> Self {
         Self {
             info,
             folder,
             sync: false,
             read_only: true,
+            version,
             region_cache: Vec::new(),
             non_existing_region_files: Vec::new(),
             #[cfg(test)]
@@ -169,6 +195,14 @@ impl RegionFileStorage {
     /// CREATE before wrapping the output stream), but no chunk bytes reach
     /// disk — the error propagates before anything is written to the file.
     pub fn write(&mut self, pos: &ChunkPos, value: Option<CompoundTag>) -> io::Result<()> {
+        self.write_ref(pos, value.as_ref())
+    }
+
+    /// Borrowed form of [`Self::write`] for callers that must retain ownership
+    /// of a save while the storage operation is in flight. In particular, a
+    /// worker can recover the exact current `ChunkSave` if serialization or
+    /// region finalization panics instead of moving its tag into this method.
+    pub fn write_ref(&mut self, pos: &ChunkPos, value: Option<&CompoundTag>) -> io::Result<()> {
         self.ensure_writable()?;
         let region_index = match self.get_region_file(pos, value.is_none())? {
             Some(index) => index,
@@ -183,7 +217,7 @@ impl RegionFileStorage {
             let mut writer = region.get_chunk_data_output_stream(pos)?;
             {
                 let mut out = DataOutputStream::new(&mut writer);
-                nbt_io::write(&value, &mut out)?;
+                nbt_io::write(value, &mut out)?;
             }
             // Paper calls `region.setOversized(x, z, false)` between the NBT
             // write and `output.close()`: clear any legacy Aikar oversized
@@ -290,7 +324,7 @@ impl RegionFileStorage {
             self.info.clone(),
             region_path,
             self.folder.clone(),
-            RegionFileVersion::get_selected(),
+            self.version,
             self.sync,
         )?;
         self.region_cache.insert(0, (key, region));
@@ -355,14 +389,14 @@ impl RegionFileStorage {
                 self.info.clone(),
                 region_path,
                 self.folder.clone(),
-                RegionFileVersion::get_selected(),
+                self.version,
             )?
         } else {
             RegionFile::open(
                 self.info.clone(),
                 region_path,
                 self.folder.clone(),
-                RegionFileVersion::get_selected(),
+                self.version,
                 self.sync,
             )?
         };
