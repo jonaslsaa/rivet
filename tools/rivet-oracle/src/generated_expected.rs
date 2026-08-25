@@ -109,13 +109,39 @@ pub const FORCE_GRID_MAX: i32 = 6;
 /// `PINNED_SEED` — and hash-bound — it is inside the bytes the manifest SHA-256
 /// covers, so an attacker editing it to fake the pinned seed breaks the hash
 /// gate.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GoldenWorld {
     /// The seed the golden content was generated under (the `--to` capture
     /// writes the actual seed; committed verification requires `PINNED_SEED`).
     pub seed: i64,
     #[serde(flatten)]
     pub world: WorldManifest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GoldenWorldWire {
+    seed: i64,
+    format: u32,
+    overworld_region: String,
+    chunks: BTreeMap<String, loaded_world::ChunkFingerprint>,
+}
+
+impl<'de> Deserialize<'de> for GoldenWorld {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = GoldenWorldWire::deserialize(deserializer)?;
+        Ok(Self {
+            seed: wire.seed,
+            world: WorldManifest {
+                format: wire.format,
+                overworld_region: wire.overworld_region,
+                chunks: wire.chunks,
+            },
+        })
+    }
 }
 
 /// The committed grid coordinates, deterministically ordered (x-major).
@@ -421,6 +447,8 @@ pub fn load(dir: &Path) -> Result<GoldenWorld, Error> {
     let path = dir.join(FIXTURE_BASENAME);
     let raw = fs::read_to_string(&path)
         .map_err(|e| Error::Manifest(format!("cannot read {}: {e}", path.display())))?;
+    crate::reject_duplicate_json_keys(raw.as_bytes())
+        .map_err(|e| Error::Manifest(format!("invalid {FIXTURE_BASENAME}: {e}")))?;
     let golden: GoldenWorld = serde_json::from_str(&raw)
         .map_err(|e| Error::Manifest(format!("invalid {FIXTURE_BASENAME}: {e}")))?;
     if golden.world.format != 1 {
@@ -671,6 +699,9 @@ struct GeneratedExpectedManifest<'a> {
 /// describes the seed the golden content was actually captured under.
 pub fn regenerate_manifest(dir: &Path) -> Result<(), Error> {
     let data = fs::read(dir.join(FIXTURE_BASENAME))?;
+    crate::reject_duplicate_json_keys(&data).map_err(|e| {
+        Error::Manifest(format!("cannot read {FIXTURE_BASENAME}: {e}"))
+    })?;
     let golden: GoldenWorld = serde_json::from_slice(&data)
         .map_err(|e| Error::Manifest(format!("cannot read seed from {FIXTURE_BASENAME}: {e}")))?;
     let seed_str = golden.seed.to_string();

@@ -390,6 +390,8 @@ pub fn load(dir: &Path) -> Result<FeaturesGolden, Error> {
     let path = dir.join(FIXTURE_BASENAME);
     let raw = fs::read_to_string(&path)
         .map_err(|e| Error::Manifest(format!("cannot read {}: {e}", path.display())))?;
+    crate::reject_duplicate_json_keys(raw.as_bytes())
+        .map_err(|e| Error::Manifest(format!("invalid {FIXTURE_BASENAME}: {e}")))?;
     let golden: FeaturesGolden = serde_json::from_str(&raw)
         .map_err(|e| Error::Manifest(format!("invalid {FIXTURE_BASENAME}: {e}")))?;
     if golden.world.format != 1 {
@@ -408,6 +410,8 @@ fn load_features_manifest(dir: &Path) -> Result<FeaturesManifest, Error> {
     let path = dir.join("manifest.json");
     let raw = fs::read_to_string(&path)
         .map_err(|e| Error::Manifest(format!("cannot read {}: {e}", path.display())))?;
+    crate::reject_duplicate_json_keys(raw.as_bytes())
+        .map_err(|e| Error::Manifest(format!("invalid features manifest schema: {e}")))?;
     serde_json::from_str(&raw)
         .map_err(|e| Error::Manifest(format!("invalid features manifest schema: {e}")))
 }
@@ -866,6 +870,9 @@ fn load_generated_expected_for_features(
     }
 
     let raw_manifest = fs::read_to_string(&manifest)?;
+    crate::reject_duplicate_json_keys(raw_manifest.as_bytes()).map_err(|e| {
+        Error::Manifest(format!("invalid generated-expected manifest.json: {e}"))
+    })?;
     let strict: StrictGeneratedExpectedManifest = serde_json::from_str(&raw_manifest)
         .map_err(|e| Error::Manifest(format!("invalid generated-expected manifest.json: {e}")))?;
     if strict.format != 1 {
@@ -1501,6 +1508,38 @@ mod tests {
     }
 
     #[test]
+    fn generated_expected_dependency_rejects_unknown_golden_fields_after_rehash() {
+        let scratch = scratch_generated_expected("unknown-golden-field");
+        let golden_path = scratch.join(generated_expected::FIXTURE_BASENAME);
+        let mut golden: serde_json::Value =
+            serde_json::from_slice(&fs::read(&golden_path).unwrap()).unwrap();
+        golden["unexpected_top_level"] = serde_json::json!(true);
+        let bytes = serde_json::to_vec(&golden).unwrap();
+        fs::write(&golden_path, &bytes).unwrap();
+
+        let manifest_path = scratch.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["captured"][0]["sha256"] = serde_json::Value::String(crate::sha256_hex(&bytes));
+        manifest["captured"][0]["bytes"] = serde_json::Value::from(bytes.len());
+        fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+
+        let result = load_generated_expected_for_features(&scratch);
+        let _ = fs::remove_dir_all(&scratch);
+        let err = result.expect_err(
+            "an unknown generated-expected golden field must fail even after rehash",
+        );
+        assert!(
+            matches!(&err, crate::Error::Manifest(_)),
+            "unknown generated-expected golden field must be Error::Manifest, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("unknown field"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn generated_expected_dependency_requires_pinned_paper() {
         let scratch = scratch_generated_expected("wrong-paper");
         let manifest_path = scratch.join("manifest.json");
@@ -1889,6 +1928,52 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_feature_chunk_key_with_canonical_last_is_rejected() {
+        let dir = fixtures_dir().join("features");
+        require_fixture(&dir);
+        let golden: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join(FIXTURE_BASENAME)).unwrap()).unwrap();
+        let mut altered = golden["chunks"]["3,3"].clone();
+        let original = altered["surface"][0].clone();
+        altered["surface"][0] = if original == serde_json::json!("minecraft:air") {
+            serde_json::json!("minecraft:stone")
+        } else {
+            serde_json::json!("minecraft:air")
+        };
+        let raw = duplicate_nested_object_entry(&golden, "chunks", "3,3", &altered);
+        let err = verify_scratch_raw(raw, "duplicate-chunk-key")
+            .expect_err("duplicate chunk keys must fail even with canonical value last");
+        assert!(
+            err.to_string().contains("duplicate JSON object key")
+                && err.to_string().contains("3,3"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn duplicate_feature_observation_key_with_canonical_last_is_rejected() {
+        let dir = fixtures_dir().join("features");
+        require_fixture(&dir);
+        let golden: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join(FIXTURE_BASENAME)).unwrap()).unwrap();
+        let mut altered = golden["feature_observations"]["3,3"].clone();
+        altered.as_array_mut().unwrap()[0]["y"] = serde_json::json!(999);
+        let raw = duplicate_nested_object_entry(
+            &golden,
+            "feature_observations",
+            "3,3",
+            &altered,
+        );
+        let err = verify_scratch_raw(raw, "duplicate-observation-key")
+            .expect_err("duplicate observation keys must fail even with canonical value last");
+        assert!(
+            err.to_string().contains("duplicate JSON object key")
+                && err.to_string().contains("3,3"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn feature_manifest_unknown_or_missing_provenance_key_is_rejected() {
         let dir = fixtures_dir().join("features");
         require_fixture(&dir);
@@ -2171,6 +2256,78 @@ mod tests {
         fs::write(
             scratch.join("manifest.json"),
             serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let result = verify_features(&scratch);
+        let _ = fs::remove_dir_all(&scratch);
+        result
+    }
+
+    /// Build a fixture JSON object with one nested object key repeated. The
+    /// altered value is first and the canonical value is last, matching the
+    /// tamper that ordinary BTreeMap deserialization would silently accept.
+    fn duplicate_nested_object_entry(
+        golden: &serde_json::Value,
+        outer_key: &str,
+        inner_key: &str,
+        first_value: &serde_json::Value,
+    ) -> String {
+        let root = golden.as_object().unwrap();
+        let mut root_entries = Vec::new();
+        for (key, value) in root {
+            let key_json = serde_json::to_string(key).unwrap();
+            if key != outer_key {
+                root_entries.push(format!(
+                    "{key_json}:{}",
+                    serde_json::to_string(value).unwrap()
+                ));
+                continue;
+            }
+            let nested = value.as_object().unwrap();
+            let mut nested_entries = Vec::new();
+            for (nested_key, canonical) in nested {
+                let nested_key_json = serde_json::to_string(nested_key).unwrap();
+                if nested_key == inner_key {
+                    nested_entries.push(format!(
+                        "{nested_key_json}:{}",
+                        serde_json::to_string(first_value).unwrap()
+                    ));
+                }
+                nested_entries.push(format!(
+                    "{nested_key_json}:{}",
+                    serde_json::to_string(canonical).unwrap()
+                ));
+            }
+            root_entries.push(format!(
+                "{key_json}:{{{}}}",
+                nested_entries.join(",")
+            ));
+        }
+        format!("{{{}}}", root_entries.join(","))
+    }
+
+    /// Verify raw fixture JSON after rebuilding its captured SHA. Unlike
+    /// `verify_scratch_values`, this preserves duplicate object keys so the
+    /// duplicate-key detector itself is exercised rather than serde's map
+    /// overwrite behavior.
+    fn verify_scratch_raw(raw: String, tag: &str) -> Result<(), crate::Error> {
+        let scratch = std::env::temp_dir().join(format!(
+            "rivet-oracle-features-raw-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&scratch);
+        fs::create_dir_all(&scratch).unwrap();
+        let bytes = raw.as_bytes();
+        fs::write(scratch.join(FIXTURE_BASENAME), bytes).unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(fixtures_dir().join("features/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        manifest["captured"][0]["sha256"] = serde_json::Value::String(crate::sha256_hex(bytes));
+        manifest["captured"][0]["bytes"] = serde_json::Value::from(bytes.len());
+        fs::write(
+            scratch.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
         )
         .unwrap();
         let result = verify_features(&scratch);
