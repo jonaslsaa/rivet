@@ -84,10 +84,11 @@ impl ChunkSave {
 }
 
 /// How a [`ChunkStorageWorker`] call failed.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum StorageWorkerError {
     /// The send half was already shut down (drain/close has begun); the owned
     /// save request is returned so the caller does not lose it.
+    #[error("chunk storage worker send closed")]
     SendClosed(ChunkSave),
 }
 
@@ -630,14 +631,16 @@ impl ChunkStorageWorker {
         // send may still complete; the worker's normal drain or panic recovery
         // accounts for them before finalization. No later enqueue can return Ok.
         self.shared.stop_accepting();
+        // A test may have paused the worker while an accepted sender is blocked
+        // on a full channel. Release it before waiting for that sender, or
+        // shutdown would deadlock in the test-only harness (production never
+        // pauses).
+        #[cfg(test)]
+        self.shared.set_paused(false);
         self.shared.wait_for_senders();
         // Drop the send half: the worker drains the remaining queue, then sees
         // `Disconnected`, flushes, closes, and returns.
         self.tx = None;
-        // A test may have paused the worker; release it so it can reach the
-        // drain/flush/close and return (production never pauses).
-        #[cfg(test)]
-        self.shared.set_paused(false);
 
         let worker_outcome = match self.handle.take() {
             Some(handle) => handle.join().unwrap_or_else(|_| WorkerThreadOutcome {
@@ -1147,12 +1150,26 @@ mod tests {
     #[test]
     fn shutdown_drains_fifo_and_rejects_new_saves_with_ownership_returned() {
         let temp = tempfile::tempdir().unwrap();
-        let mut worker = start_paused_worker(temp.path(), 4);
+        let mut worker = start_paused_worker(temp.path(), 1);
         let pos = ChunkPos::new(-4, 9);
         worker.enqueue(save_at(pos, 1)).unwrap();
-        worker.enqueue(save_at(pos, 2)).unwrap();
+
+        // Reserve a second accepted send and block it behind the paused worker's
+        // full queue. Shutdown must release the pause before waiting for this
+        // sender, otherwise the public transition would deadlock.
+        let tx = worker.tx.as_ref().unwrap().clone();
+        let shared = Arc::clone(&worker.shared);
+        assert!(shared.begin_enqueue());
+        let sender = thread::spawn(move || {
+            let result = tx.send(save_at(pos, 2));
+            drop(tx);
+            shared.finish_enqueue();
+            result
+        });
+        worker.shared.wait_for_active_senders(1);
 
         let outcome = worker.shutdown();
+        assert!(sender.join().unwrap().is_ok());
         assert!(outcome.first_error.is_none());
         assert!(!outcome.panicked);
 
