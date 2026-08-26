@@ -939,8 +939,9 @@ where
     ///
     /// The base is rebuilt through [`Self::new`] (the section-Y layout and the
     /// FULL heightmap priming), then every owned field `Self::new` reset —
-    /// unsaved, light-correct, post-processing, pending block entities, light
-    /// nibbles, heightmaps, structure access — is reinstalled from the source,
+    /// unsaved, light-correct, post-processing, block/fluid ticks, pending
+    /// block entities, light nibbles, heightmaps, structure access — is
+    /// reinstalled from the source,
     /// so the conversion is a pure re-type with no semantic change.
     #[allow(clippy::too_many_arguments)] // the two strategies + the re-encoded
     // air/default-biome defaults + the two mappers + the resolve closure — the
