@@ -1014,6 +1014,9 @@ struct FeaturesCapturedFile {
 /// #595) — regeneration never stamps a hardcoded 42.
 pub fn regenerate_manifest(dir: &Path) -> Result<(), Error> {
     let data = fs::read(dir.join(FIXTURE_BASENAME))?;
+    crate::reject_duplicate_json_keys(&data).map_err(|e| {
+        Error::Manifest(format!("cannot read {FIXTURE_BASENAME}: {e}"))
+    })?;
     let golden: FeaturesGolden = serde_json::from_slice(&data)
         .map_err(|e| Error::Manifest(format!("cannot read seed from {FIXTURE_BASENAME}: {e}")))?;
     let seed_str = golden.seed.to_string();
@@ -2197,6 +2200,39 @@ mod tests {
         assert!(
             text.contains("\"seed\": \"999\""),
             "regenerated manifest must carry the golden's actual seed, got: {text}"
+        );
+    }
+
+    #[test]
+    fn regenerate_manifest_rejects_duplicate_golden_key_with_canonical_last() {
+        let dir = fixtures_dir().join("features");
+        require_fixture(&dir);
+        let scratch = std::env::temp_dir().join(format!(
+            "rivet-oracle-features-regen-duplicate-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&scratch);
+        fs::create_dir_all(&scratch).unwrap();
+
+        let golden: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join(FIXTURE_BASENAME)).unwrap()).unwrap();
+        let mut altered = golden["chunks"]["3,3"].clone();
+        let original = altered["surface"][0].clone();
+        altered["surface"][0] = if original == serde_json::json!("minecraft:air") {
+            serde_json::json!("minecraft:stone")
+        } else {
+            serde_json::json!("minecraft:air")
+        };
+        let raw = duplicate_nested_object_entry(&golden, "chunks", "3,3", &altered);
+        fs::write(scratch.join(FIXTURE_BASENAME), raw).unwrap();
+
+        let err = regenerate_manifest(&scratch)
+            .expect_err("regenerate_manifest must reject duplicate golden keys");
+        let _ = fs::remove_dir_all(&scratch);
+        let message = err.to_string();
+        assert!(
+            message.contains("duplicate JSON object key") && message.contains("3,3"),
+            "unexpected duplicate-key error: {message}"
         );
     }
 
