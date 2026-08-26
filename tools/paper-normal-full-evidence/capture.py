@@ -735,6 +735,7 @@ def extract_run(
     settings: dict[str, Any],
     preflight: dict[str, Any],
     ticket_path: Path,
+    injected_ticket_path: Path,
     injected_ticket_sha: str,
     configured_ports: tuple[int, int],
 ) -> None:
@@ -759,9 +760,13 @@ def extract_run(
         details = chunk_details(raw, (x, z), target=(x, z) in TARGETS)
         details.update({"x": x, "z": z, "raw_path": relative})
         chunks.append(details)
+    if injected_ticket_path.is_symlink() or not injected_ticket_path.is_file() or sha256(injected_ticket_path.read_bytes()) != injected_ticket_sha:
+        raise Failed("immutable injected ticket provenance is absent or tampered")
+    if read_ticket_coordinates(injected_ticket_path) != closure:
+        raise Failed("injected forced ticket order/set differs from scheduler closure")
     ticket_coordinates = read_ticket_coordinates(ticket_path)
-    if ticket_coordinates != closure:
-        raise Failed("post-exit forced ticket order/set differs from scheduler closure")
+    if len(ticket_coordinates) != len(set(ticket_coordinates)) or sorted(ticket_coordinates) != closure:
+        raise Failed("post-exit forced ticket set differs from scheduler closure")
     inventory: list[dict[str, Any]] = []
     for path in inventory_paths(world):
         relative = str(path.relative_to(world))
@@ -806,7 +811,7 @@ def extract_run(
         "simulation": {"random_tick_speed": 0, "do_daylight_cycle": False, "do_weather_cycle": False, "do_mob_spawning": False, "spawn_limits": 0},
         "targets": [[x, z] for x, z in TARGETS],
         "closure": {"radius": RADIUS, "order": "lexicographic x,z after Paper scheduler radius-11 expansion", "coordinates": [[x, z] for x, z in closure], "sha256": sha256(json.dumps(closure, separators=(",", ":")).encode())},
-        "ticket": {"type": "minecraft:forced", "level": TICKET_LEVEL, "ticks_left": TICKET_TICKS_LEFT, "coordinates": [[x, z] for x, z in closure], "injected_sha256": injected_ticket_sha, "post_exit_sha256": sha256(ticket_path.read_bytes()), "held_through_stop": True},
+        "ticket": {"type": "minecraft:forced", "level": TICKET_LEVEL, "ticks_left": TICKET_TICKS_LEFT, "coordinates": [[x, z] for x, z in closure], "injected_path": "provenance/chunk_tickets.dat", "injected_sha256": injected_ticket_sha, "post_exit_path": "world/dimensions/minecraft/overworld/data/minecraft/chunk_tickets.dat", "post_exit_sha256": sha256(ticket_path.read_bytes()), "held_through_stop": True},
         "ports": {"fixture_server": 0, "fixture_query": 0, "configured_server": configured_ports[0], "configured_query": configured_ports[1], "boot1": boot1["ports"], "capture": capture["ports"]},
         "logs": {
             "world_create": file_record(run / "server-create.log", "server-create.log"),
@@ -879,6 +884,8 @@ def run_one(
     run_paper_info["probe_source_sha256"] = probe_info["source_sha256"]
     run_paper_info["probe_plugin_yml_sha256"] = probe_info["plugin_yml_sha256"]
     ticket_path, injected_sha = write_tickets(world, closure)
+    injected_ticket_path = run / "provenance/chunk_tickets.dat"
+    injected_ticket_path.write_bytes(ticket_path.read_bytes())
     encoded_closure = ";".join(f"{x},{z}" for x, z in closure)
     encoded_targets = ";".join(f"{x},{z}" for x, z in TARGETS)
     plugin_args = [
@@ -889,7 +896,7 @@ def run_one(
     ]
     capture = boot_and_stop(run, paperclip, java_home, "server.log", plugin_args=plugin_args, timeout=timeout)
     require_dynamic_server_port(capture["ports"], configured_ports[0], "Paper FULL capture boot")
-    extract_run(run, seed, attempt, token, boot1, capture, run_paper_info, java_info, closure, settings, preflight, ticket_path, injected_sha, configured_ports)
+    extract_run(run, seed, attempt, token, boot1, capture, run_paper_info, java_info, closure, settings, preflight, ticket_path, injected_ticket_path, injected_sha, configured_ports)
     (run / "driver.log").write_text(f"RIVET_TICKETS_INJECTED={injected_sha}\nRIVET_CAPTURE_STOP_EXIT=0\n")
     # The capture manifest is deliberately rewritten only before returning so
     # the driver log can itself be listed as provenance without touching world.

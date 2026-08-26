@@ -19,7 +19,10 @@ Paper server; it is not a parity result.
   `(-1,-1)`, `(-16,-16)`, `(-31,-31)`, `(-1,0)`, `(0,-1)`.
 - The Paper scheduler support closure is the sorted target expansion by radius
   11. Forced tickets are exactly `minecraft:forced`, level `33`, with
-  `ticks_left=Long.MIN_VALUE`; their NBT list follows the frozen closure order.
+  `ticks_left=Long.MIN_VALUE`; the immutable injected NBT list follows the
+  frozen closure order. Paper's persisted ticket map may reorder that list, so
+  post-exit validation checks the exact set and the injected/post-exit hashes
+  separately.
 - Each seed gets three fresh isolated two-boot roots. Boot one creates the
   normal world. The driver removes all target/support region, POI, entity,
   `.mcc`, and ticket data before injecting tickets and starting boot two.

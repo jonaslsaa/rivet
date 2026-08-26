@@ -561,37 +561,52 @@ def _validate_config(run: Path, seed: str, manifest: dict[str, Any]) -> None:
 
 
 def _validate_tickets(run: Path, expected_closure: list[tuple[int, int]], manifest: dict[str, Any]) -> None:
-    path = run / "world/dimensions/minecraft/overworld/data/minecraft/chunk_tickets.dat"
-    if path.is_symlink() or not path.is_file():
-        raise Failed("post-stop forced tickets are absent")
-    try:
-        root = parse(strict_decompress(path.read_bytes(), gzip_stream=True))
-    except NbtError as exc:
-        raise Failed(f"chunk_tickets.dat is malformed/trailing: {exc}") from exc
-    if root.kind != 10 or root.value.get("DataVersion") != Tag(3, EXPECTED_DATA_VERSION):
-        raise Failed("chunk_tickets.dat DataVersion is not 4903")
-    data = root.value.get("data") if root.kind == 10 else None
-    tickets = data.value.get("tickets") if data and data.kind == 10 else None
-    if tickets is None or tickets.kind != 9 or tickets.value[0] != 10:
-        raise Failed("chunk_tickets.dat has no compound data.tickets list")
-    coordinates: list[tuple[int, int]] = []
-    for ticket in tickets.value[1]:
-        if ticket.kind != 10:
-            raise Failed("ticket list contains a non-compound")
-        values = ticket.value
-        if values.get("type") != Tag(8, "minecraft:forced") or values.get("level") != Tag(3, EXPECTED_TICKET_LEVEL) or values.get("ticks_left") != Tag(4, EXPECTED_TICKS_LEFT):
-            raise Failed("ticket is not the exact held level-33 forced ticket")
-        position = values.get("chunk_pos")
-        if position is None or position.kind != 11 or len(position.value) != 2:
-            raise Failed("ticket chunk_pos is malformed")
-        coordinates.append((position.value[0], position.value[1]))
-    if coordinates != expected_closure or manifest.get("ticket", {}).get("coordinates") != [list(item) for item in expected_closure]:
-        raise Failed("forced ticket set/order is not the exact scheduler closure")
-    digest = sha256(path.read_bytes())
     ticket_manifest = manifest.get("ticket", {})
+    injected_relative = ticket_manifest.get("injected_path")
+    post_relative = ticket_manifest.get("post_exit_path")
+    if injected_relative != "provenance/chunk_tickets.dat" or post_relative != "world/dimensions/minecraft/overworld/data/minecraft/chunk_tickets.dat":
+        raise Failed("ticket provenance paths are not pinned")
+    injected_path = run / injected_relative
+    post_path = run / post_relative
+    for path, label in ((injected_path, "injected"), (post_path, "post-stop")):
+        if path.is_symlink() or not path.is_file():
+            raise Failed(f"{label} forced tickets are absent or symlinked")
+
+    def coordinates_from(path: Path) -> list[tuple[int, int]]:
+        try:
+            root = parse(strict_decompress(path.read_bytes(), gzip_stream=True))
+        except NbtError as exc:
+            raise Failed(f"chunk_tickets.dat is malformed/trailing: {path}: {exc}") from exc
+        if root.kind != 10 or root.value.get("DataVersion") != Tag(3, EXPECTED_DATA_VERSION):
+            raise Failed(f"chunk_tickets.dat DataVersion is not 4903: {path}")
+        data = root.value.get("data")
+        tickets = data.value.get("tickets") if data is not None and data.kind == 10 else None
+        if tickets is None or tickets.kind != 9 or tickets.value[0] != 10:
+            raise Failed(f"chunk_tickets.dat has no compound data.tickets list: {path}")
+        coordinates: list[tuple[int, int]] = []
+        for ticket in tickets.value[1]:
+            if ticket.kind != 10:
+                raise Failed("ticket list contains a non-compound")
+            values = ticket.value
+            if values.get("type") != Tag(8, "minecraft:forced") or values.get("level") != Tag(3, EXPECTED_TICKET_LEVEL) or values.get("ticks_left") != Tag(4, EXPECTED_TICKS_LEFT):
+                raise Failed("ticket is not the exact held level-33 forced ticket")
+            position = values.get("chunk_pos")
+            if position is None or position.kind != 11 or len(position.value) != 2:
+                raise Failed("ticket chunk_pos is malformed")
+            coordinates.append((position.value[0], position.value[1]))
+        return coordinates
+
+    injected_coordinates = coordinates_from(injected_path)
+    post_coordinates = coordinates_from(post_path)
+    if injected_coordinates != expected_closure:
+        raise Failed("injected forced ticket order/set differs from scheduler closure")
+    if len(post_coordinates) != len(set(post_coordinates)) or sorted(post_coordinates) != expected_closure:
+        raise Failed("post-exit forced ticket set differs from scheduler closure")
+    if ticket_manifest.get("coordinates") != [list(item) for item in expected_closure]:
+        raise Failed("forced ticket manifest coordinates differ from scheduler closure")
     if (
-        ticket_manifest.get("injected_sha256") != digest
-        or ticket_manifest.get("post_exit_sha256") != digest
+        ticket_manifest.get("injected_sha256") != sha256(injected_path.read_bytes())
+        or ticket_manifest.get("post_exit_sha256") != sha256(post_path.read_bytes())
         or ticket_manifest.get("held_through_stop") is not True
     ):
         raise Failed("ticket lifecycle/hash provenance is incomplete")
@@ -646,7 +661,14 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
         raise Failed("wrong producer, kind, or manifest format")
     if manifest.get("parity_claim") is not None or manifest.get("rivet_commit") is not None:
         raise Failed("evidence contains a parity claim or Rivet commit")
-    if manifest.get("seed") != expected_seed or manifest.get("java_seed") != str(java_seed(expected_seed)) or manifest.get("attempt") != expected_attempt:
+    if (
+        type(manifest.get("seed")) is not str
+        or manifest.get("seed") != expected_seed
+        or type(manifest.get("java_seed")) is not str
+        or manifest.get("java_seed") != str(java_seed(expected_seed))
+        or type(manifest.get("attempt")) is not int
+        or manifest.get("attempt") != expected_attempt
+    ):
         raise Failed("wrong seed or attempt")
     if manifest.get("paper_revision") != EXPECTED_PAPER:
         raise Failed("wrong or stale Paper revision")
@@ -761,14 +783,16 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
     if (
         ports.get("fixture_server") != 0
         or ports.get("fixture_query") != 0
-        or not isinstance(configured_server, int)
-        or not isinstance(configured_query, int)
-        or configured_server <= 0
-        or configured_query <= 0
+        or type(configured_server) is not int
+        or type(configured_query) is not int
+        or not 1 <= configured_server <= 65535
+        or not 1 <= configured_query <= 65535
         or configured_server == configured_query
-        or not isinstance(boot1_ports.get("server"), int)
+        or type(boot1_ports.get("server")) is not int
+        or not 1 <= boot1_ports.get("server", 0) <= 65535
         or boot1_ports.get("server") != configured_server
-        or not isinstance(capture_ports.get("server"), int)
+        or type(capture_ports.get("server")) is not int
+        or not 1 <= capture_ports.get("server", 0) <= 65535
         or capture_ports.get("server") != configured_server
     ):
         raise Failed("dynamic server/query port provenance is absent, zero, or static")
@@ -826,7 +850,13 @@ def validate_bundle(bundle_dir: Path) -> None:
     if bundle.get("contract_sha256") != sha256(CONTRACT_PATH.read_bytes()):
         raise Failed("bundle contract is stale or self-authored")
     attempts_per_seed = bundle.get("attempts_per_seed")
-    if bundle.get("seeds") != EXPECTED_SEEDS or bundle.get("targets") != [list(item) for item in EXPECTED_TARGETS] or bundle.get("closure_radius") != EXPECTED_RADIUS or attempts_per_seed != 3:
+    if (
+        bundle.get("seeds") != EXPECTED_SEEDS
+        or bundle.get("targets") != [list(item) for item in EXPECTED_TARGETS]
+        or bundle.get("closure_radius") != EXPECTED_RADIUS
+        or type(attempts_per_seed) is not int
+        or attempts_per_seed != 3
+    ):
         raise Failed("bundle corpus contract is incomplete or not exactly four seeds x three runs")
     runs = bundle.get("runs")
     if not isinstance(runs, list):

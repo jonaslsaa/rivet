@@ -86,6 +86,28 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(capture.read_region(path, (1, -2))[(3, 4)], b"external-nbt")
             self.assertEqual(validate.read_region(path, (1, -2))[(3, 4)], b"external-nbt")
 
+    def test_persisted_ticket_map_order_is_validated_as_a_set(self):
+        closure = [(0, 0), (0, 1), (1, 0)]
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            injected = run / "provenance/chunk_tickets.dat"
+            post = run / "world/dimensions/minecraft/overworld/data/minecraft/chunk_tickets.dat"
+            injected.parent.mkdir(parents=True)
+            post.parent.mkdir(parents=True)
+            injected.write_bytes(capture.ticket_nbt(closure))
+            post.write_bytes(capture.ticket_nbt([closure[1], closure[2], closure[0]]))
+            manifest = {
+                "ticket": {
+                    "coordinates": [list(item) for item in closure],
+                    "injected_path": "provenance/chunk_tickets.dat",
+                    "injected_sha256": capture.sha256(injected.read_bytes()),
+                    "post_exit_path": "world/dimensions/minecraft/overworld/data/minecraft/chunk_tickets.dat",
+                    "post_exit_sha256": capture.sha256(post.read_bytes()),
+                    "held_through_stop": True,
+                }
+            }
+            validate._validate_tickets(run, closure, manifest)
+
     def test_seed_signed_conversion_and_scheduler_order(self):
         self.assertEqual(capture.java_seed("12807505919197044144"), -5639238154512507472)
         closure = capture.scheduler_closure(capture.TARGETS, capture.RADIUS)
