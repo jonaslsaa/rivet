@@ -1956,10 +1956,7 @@ mod tests {
             panic!("unusable generated task must fail in preflight")
         }
 
-        fn light(
-            &mut self,
-            _chunk: &mut ProtoChunk<u8, u8, &'static str>,
-        ) -> Result<(), GenError> {
+        fn light(&mut self, _chunk: &mut ProtoChunk<u8, u8, &'static str>) -> Result<(), GenError> {
             panic!("unusable generated task must fail in preflight")
         }
 
@@ -2071,15 +2068,21 @@ mod tests {
         let mut ctx = ctx.with_light(|_chunk| {
             panic!("legacy LIGHT seam must not run when generated task is attached")
         });
-        assert!(ctx
-            .attach_generated_light_task(UnusableGeneratedTask)
-            .is_none());
+        assert!(
+            ctx.attach_generated_light_task(UnusableGeneratedTask)
+                .is_none()
+        );
         let mut chunk = proto();
 
         let error = ctx
             .generate_through(&GENERATION_PYRAMID, &mut chunk, ChunkStatus::Light)
             .expect_err("unusable generated task must fail before dispatch");
-        assert_eq!(error, GenError::LightEngineMissing { status: ChunkStatus::Light });
+        assert_eq!(
+            error,
+            GenError::LightEngineMissing {
+                status: ChunkStatus::Light
+            }
+        );
         assert_eq!(chunk.get_persisted_status(), ChunkStatus::Empty);
     }
 
