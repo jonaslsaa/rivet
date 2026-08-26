@@ -40,8 +40,11 @@
 //! `ChunkGenerator.java` 97-100 — the 3x3 union only picks which feature
 //! indices execute per step). The generated feature tables cover EVERY
 //! overworld possible biome (55 — the full list, not the reachable subset),
-//! so the full list resolves and the run proceeds to the per-step loop. The
-//! lake, amethyst-geode, monster-room, and the Batch 2/3/4 dispatch leaves (ore,
+//! so the full list resolves. FEATURES only proceeds when the caller has
+//! supplied a proven structure-decoration capability; otherwise it returns
+//! `GenError::StructureDecorationIndexUnavailable` before feature RNG or
+//! placement. With that capability, the lake, amethyst-geode, monster-room,
+//! and the Batch 2/3/4 dispatch leaves (ore,
 //! disk, spring, simple_block, block_column, vines, seagrass, freeze_top_layer,
 //! underwater_magma, multiface_growth) are decoded from the generated JSON and
 //! run with their exact feature seeds. The generated placed/configured closure
@@ -95,8 +98,10 @@
 //! interior mutability is `RandomState`'s own uncontended noise cache), the
 //! holder and its `ProtoChunk` live on the sync tick thread by value.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use serde_json::Value;
@@ -211,8 +216,7 @@ pub enum GeneratedChunkError {
     /// work. Naming the requested status makes the downstream boundary explicit.
     /// (A target through a light step with no engine is instead refused as
     /// `GenError::LightEngineMissing`, and the wired FEATURES rung stops at
-    /// the first selected path outside the decoded lake slice — see
-    /// [`GenerationChunkHolder::new`].)
+    /// its first typed generation boundary — see [`GenerationChunkHolder::new`].)
     UnsupportedStatus(ChunkStatus),
     /// The FULL conversion refused: the `LevelChunk` bridge rejected the proto.
     /// [`LevelChunkBridgeError::GeneratedStatusNotSpawn`] fires before the proto is consumed
@@ -357,6 +361,7 @@ struct FeaturePlan {
     feature_list: Vec<StepFeatureData>,
 }
 
+<<<<<<< HEAD
 /// The caller-owned radius-one SPAWN workspace. The center remains in the
 /// [`GenerationChunkHolder`]; this value owns only the eight neighbouring
 /// protos, all on the same tick thread. No `Arc<RwLock>` or clone-backed cache
@@ -457,6 +462,62 @@ impl SpawnRegionProtos {
     }
 }
 
+pub type FeatureWritebacks = Vec<(
+    ChunkPos,
+    ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+)>;
+
+/// The caller-owned FEATURES dependency workspace.
+///
+/// Paper's `WorldGenRegion` borrows scheduler-owned `GenerationChunkHolder`s;
+/// this standalone value layer has no live scheduler yet, so the caller can
+/// provide that ownership explicitly through this sync-thread workspace. A
+/// decoration pass reads snapshots of its ring chunks, then replaces every
+/// owned dependency entry atomically after the region completes. This preserves
+/// heightmap, post-processing, block-entity, and tick mutations even when they
+/// occur outside the block-state write radius. Failed passes never mutate this
+/// map.
+type OwnedDependencyChunks =
+    Rc<RefCell<HashMap<ChunkPos, ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>>>>;
+
+#[derive(Clone, Default)]
+pub struct FeatureWorkspace {
+    chunks: OwnedDependencyChunks,
+}
+
+impl FeatureWorkspace {
+    /// Create an empty scheduler-owned dependency workspace.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert or replace an authoritative generated dependency chunk.
+    pub fn insert(&self, chunk: ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>) {
+        let pos = chunk.get_pos();
+        self.chunks.borrow_mut().insert(pos, chunk);
+    }
+
+    /// Inspect one authoritative dependency chunk without exposing its map
+    /// borrow beyond the synchronous callback.
+    pub fn with_chunk<R>(
+        &self,
+        pos: ChunkPos,
+        f: impl FnOnce(Option<&ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>>) -> R,
+    ) -> R {
+        f(self.chunks.borrow().get(&pos))
+    }
+
+    /// Number of authoritative dependency chunks currently retained.
+    pub fn len(&self) -> usize {
+        self.chunks.borrow().len()
+    }
+
+    /// Whether this workspace has no authoritative dependency chunks.
+    pub fn is_empty(&self) -> bool {
+        self.chunks.borrow().is_empty()
+    }
+}
+
 /// The per-world OVERWORLD generator realization — `NoiseBasedChunkGenerator`
 /// resolved from the merged worldgen registries for a seed, plus the realized
 /// `RandomState` and overworld biome source.
@@ -477,6 +538,10 @@ pub struct OverworldGenerator {
     /// lookups Java's `addVanillaDecorations` performs. Stored alongside the
     /// random state it already shares the leak of (see [`OverworldGenerator::new`]).
     access: &'static RegistryAccess,
+    /// Paper's per-world `paperConfig().featureSeeds.features` overrides,
+    /// keyed by the configured feature resource key (`PlacedFeature.feature()`),
+    /// not by the surrounding placed-feature key.
+    feature_seeds: HashMap<String, i64>,
     /// The leaked feature `RegistryAccess` — the worldgen access composed with
     /// the frozen placed/configured-feature registries the seed-42 decoder and
     /// the selector/composite features resolve their recursive `Holder`
@@ -500,6 +565,13 @@ impl OverworldGenerator {
     /// router/sampler/surface system. The generator's settings holder is the
     /// resolved `overworld` value (Direct), matching the shell's value model.
     pub fn new(seed: i64) -> Self {
+        Self::new_with_feature_seeds(seed, HashMap::new())
+    }
+
+    /// Realize the OVERWORLD generator with Paper's per-configured-feature
+    /// population-seed overrides. A value of `-1` has Paper's sentinel meaning:
+    /// retain the ordinary decoration seed and consume no extra draws.
+    pub fn new_with_feature_seeds(seed: i64, feature_seeds: HashMap<String, i64>) -> Self {
         let access: &'static RegistryAccess = Box::leak(Box::new(build_worldgen_registries()));
         let random_state: &'static RandomState<'static> = Box::leak(Box::new(
             RandomState::create_from_provider(access, &OVERWORLD, seed),
@@ -519,6 +591,7 @@ impl OverworldGenerator {
             random_state,
             biome_source: OverworldNoiseBiomeSource::new(random_state),
             access,
+            feature_seeds,
             feature_access,
             seed,
             feature_plan: OnceLock::new(),
@@ -592,9 +665,57 @@ impl OverworldGenerator {
 
     /// Create a generation holder for `pos`, wiring the BIOMES→NOISE executor
     /// closures over the shared worldgen objects (`self` is `Arc`-shared so the
-    /// `'static` closures capture a cheap clone).
+    /// `'static` closures capture a cheap clone). Structure decoration is not
+    /// available in this value layer, so FEATURES refuses before feature RNG
+    /// unless the caller supplies the consumed per-step index explicitly.
     pub fn create_holder(self: &Arc<Self>, pos: ChunkPos) -> GenerationChunkHolder {
         GenerationChunkHolder::new(pos, Arc::clone(self))
+    }
+
+    /// Create a holder with an explicitly proven number of structure decoration
+    /// entries consumed before placed-feature work in every decoration step.
+    /// `Some(0)` is valid only for a caller that has established that no
+    /// structures run for this chunk; `None` preserves the typed unavailable
+    /// boundary and performs no feature RNG or placement.
+    pub fn create_holder_with_structure_feature_count(
+        self: &Arc<Self>,
+        pos: ChunkPos,
+        structure_feature_count: Option<usize>,
+    ) -> GenerationChunkHolder {
+        GenerationChunkHolder::new_with_structure_feature_count(
+            pos,
+            Arc::clone(self),
+            structure_feature_count,
+        )
+    }
+
+    /// Create a holder attached to caller-owned dependency chunks. Holders
+    /// sharing one workspace observe successful FEATURES writes exactly as the
+    /// scheduler's shared `GenerationChunkHolder`s would.
+    pub fn create_holder_with_workspace(
+        self: &Arc<Self>,
+        pos: ChunkPos,
+        feature_workspace: FeatureWorkspace,
+    ) -> GenerationChunkHolder {
+        GenerationChunkHolder::new_with_workspace(pos, Arc::clone(self), feature_workspace)
+    }
+
+    /// Create a workspace-backed holder with an explicitly proven structure
+    /// decoration capability. The supplied count is a capability proof for the
+    /// unported structure loop; it does not alter Paper's independent placed-
+    /// feature `globalIndexOfFeature` seed.
+    pub fn create_holder_with_workspace_and_structure_feature_count(
+        self: &Arc<Self>,
+        pos: ChunkPos,
+        feature_workspace: FeatureWorkspace,
+        structure_feature_count: Option<usize>,
+    ) -> GenerationChunkHolder {
+        GenerationChunkHolder::new_with_workspace_and_structure_feature_count(
+            pos,
+            Arc::clone(self),
+            feature_workspace,
+            structure_feature_count,
+        )
     }
 }
 
@@ -725,6 +846,12 @@ pub struct GenerationChunkHolder {
     /// the same source of truth as the executor closure, without reaching into
     /// the closure or introducing shared game-state locks.
     generator: Arc<OverworldGenerator>,
+    /// Successful FEATURES decoration retains a diagnostic copy of the
+    /// concrete distance-1 writebacks. The authoritative copies live in
+    /// `feature_workspace` and therefore outlive the temporary region.
+    feature_writebacks: FeatureWritebacks,
+    pending_feature_writebacks: Rc<RefCell<Option<FeatureWritebacks>>>,
+    feature_workspace: FeatureWorkspace,
 }
 
 impl GenerationChunkHolder {
@@ -740,7 +867,10 @@ impl GenerationChunkHolder {
     /// center-chunk loop — see the noisegen driver's doc for the deferred
     /// `WorldGenRegion`/`StructureManager` seams); the FEATURES body starts
     /// Java's `ChunkStatusTasks.generateFeatures` — `run_biome_decoration`
-    /// runs `addVanillaDecorations` faithfully: the `FINAL_HEIGHTMAPS`
+    /// first requires the caller-proven structure-decoration capability and
+    /// otherwise refuses before mutating the center or feature RNG. With that
+    /// capability, it runs `addVanillaDecorations` faithfully: the
+    /// `FINAL_HEIGHTMAPS`
     /// priming, the decoration-seed derivation, a dependency-window composition (`compose_feature_region`: a
     /// `WorldGenRegion` that borrows the center chunk and owns the 17x17
     /// FEATURES cache (288 ring holders, with CARVERS at distances 0/1 and
@@ -752,6 +882,54 @@ impl GenerationChunkHolder {
     /// `minecraft:freeze_top_layer` at step 10/global 0); the chunk stays
     /// CARVERS.
     pub fn new(pos: ChunkPos, generator: Arc<OverworldGenerator>) -> Self {
+        Self::new_with_workspace_and_structure_feature_count(
+            pos,
+            generator,
+            FeatureWorkspace::new(),
+            None,
+        )
+    }
+
+    /// Create a holder with an explicitly proven structure decoration
+    /// capability. `None` is the normal production value and is a typed
+    /// FEATURES boundary; `Some(_)` is reserved for a caller that has
+    /// established the structure loop's availability for this chunk.
+    pub fn new_with_structure_feature_count(
+        pos: ChunkPos,
+        generator: Arc<OverworldGenerator>,
+        structure_feature_count: Option<usize>,
+    ) -> Self {
+        Self::new_with_workspace_and_structure_feature_count(
+            pos,
+            generator,
+            FeatureWorkspace::new(),
+            structure_feature_count,
+        )
+    }
+
+    /// Create a holder whose FEATURES dependency chunks are persisted in the
+    /// caller-owned workspace after successful decoration.
+    pub fn new_with_workspace(
+        pos: ChunkPos,
+        generator: Arc<OverworldGenerator>,
+        feature_workspace: FeatureWorkspace,
+    ) -> Self {
+        Self::new_with_workspace_and_structure_feature_count(
+            pos,
+            generator,
+            feature_workspace,
+            None,
+        )
+    }
+
+    /// Create a workspace-backed holder with an explicitly proven structure
+    /// decoration capability.
+    pub fn new_with_workspace_and_structure_feature_count(
+        pos: ChunkPos,
+        generator: Arc<OverworldGenerator>,
+        feature_workspace: FeatureWorkspace,
+        structure_feature_count: Option<usize>,
+    ) -> Self {
         let height_accessor = create_height_accessor(
             generator.generator().get_min_y(),
             generator.generator().get_gen_depth(),
@@ -773,6 +951,7 @@ impl GenerationChunkHolder {
             BlockState::of(BlockId(794)),
             &resolve_state_flags,
         );
+        let pending_feature_writebacks = Rc::new(RefCell::new(None));
         let context = WorldGenContext::new(
             {
                 let generator = Arc::clone(&generator);
@@ -867,8 +1046,21 @@ impl GenerationChunkHolder {
                 // The closure captures one generator clone; the holder keeps
                 // one additional handle for the shared SPAWN-region API.
                 let generator = Arc::clone(&generator);
+                let writeback_sink = Rc::clone(&pending_feature_writebacks);
+                let feature_workspace = feature_workspace.clone();
                 move |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
-                    run_biome_decoration(chunk, &generator)
+                    match run_biome_decoration(
+                        chunk,
+                        &generator,
+                        &feature_workspace,
+                        structure_feature_count,
+                    ) {
+                        Ok(writebacks) => {
+                            *writeback_sink.borrow_mut() = Some(writebacks);
+                            Ok(())
+                        }
+                        Err(error) => Err(error),
+                    }
                 }
             },
         );
@@ -884,6 +1076,9 @@ impl GenerationChunkHolder {
             context,
             features_failure: None,
             generator,
+            feature_writebacks: Vec::new(),
+            pending_feature_writebacks,
+            feature_workspace,
         }
     }
 
@@ -899,6 +1094,19 @@ impl GenerationChunkHolder {
     /// chunk is never stamped FEATURES.
     pub fn status(&self) -> ChunkStatus {
         self.chunk.get_persisted_status()
+    }
+
+    /// Consume the successful FEATURES dependency writebacks in canonical
+    /// distance-1 order. Failed or not-yet-run FEATURES passes return an empty
+    /// vector; the center chunk remains owned by this holder.
+    pub fn take_feature_writebacks(&mut self) -> FeatureWritebacks {
+        std::mem::take(&mut self.feature_writebacks)
+    }
+
+    /// The caller-owned dependency workspace used by this holder's FEATURES
+    /// pass. It can be shared with neighboring holders on the sync tick thread.
+    pub fn feature_workspace(&self) -> FeatureWorkspace {
+        self.feature_workspace.clone()
     }
 
     /// Drive the chunk from its current persisted status through `target`
@@ -951,24 +1159,34 @@ impl GenerationChunkHolder {
             .context
             .generate_through(&GENERATION_PYRAMID, &mut self.chunk, target);
         match result {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                if features_snapshot.is_some() {
+                    self.feature_writebacks = self
+                        .pending_feature_writebacks
+                        .borrow_mut()
+                        .take()
+                        .unwrap_or_default();
+                }
+                Ok(())
+            }
             Err(GenError::UnsupportedStatus(status)) => {
+                self.pending_feature_writebacks.borrow_mut().take();
                 Err(GeneratedChunkError::UnsupportedStatus(status))
             }
             Err(error) => {
-                // A FEATURES body can place real data before it reaches its
-                // typed boundary. The status deliberately remains CARVERS, so
-                // cache that terminal boundary and make later attempts return
-                // the same error without repeating placement against the
-                // partially realized proto.
-                if is_features_failure(error)
-                    && self.chunk.get_persisted_status() == ChunkStatus::Carvers
-                    && target.index() >= ChunkStatus::Features.index()
-                {
-                    if let Some(snapshot) = features_snapshot {
-                        self.chunk = snapshot;
+                self.pending_feature_writebacks.borrow_mut().take();
+                // A direct FEATURES request is transactional from the
+                // caller's starting status through the entire path. Restore
+                // whenever that path had a snapshot, even for a non-cacheable
+                // error: lower-rung work must not leak merely because the
+                // FEATURES body returned a different typed failure. Cache only
+                // the stable FEATURES boundary errors, so retries do not replay
+                // a partially mutated decoration attempt.
+                if let Some(snapshot) = features_snapshot {
+                    self.chunk = snapshot;
+                    if is_features_failure(error) {
+                        self.features_failure = Some(error);
                     }
-                    self.features_failure = Some(error);
                 }
                 Err(GeneratedChunkError::Generation(error))
             }
@@ -1218,15 +1436,18 @@ fn generate_ring_chunk(
 ///
 /// The per-step loop runs the union's placed features in global-index order,
 /// executing decoded lake, amethyst-geode, monster-room, underwater_magma, and
-/// glow_lichen leaves with their exact feature seeds. It fails typed
-/// (`GenError::FeaturePlacementDecode`) at the first unsupported selected
-/// nested feature — seed-42 chunk (0,0), step 9/global index 17 selects
-/// `minecraft:dark_oak_leaf_litter`; the run then reaches
-/// `minecraft:freeze_top_layer` at step 10/global index 0, whose biome
-/// `shouldFreeze` world-state seam is not yet implemented. The generated settings tables are the
-/// full 55-biome surface (no `SettingsNotGenerated`), so this boundary is
-/// reached deterministically every run. No biome is fabricated or silently
-/// skipped.
+/// glow_lichen leaves with their exact feature seeds. On seed-42 chunk (0,0),
+/// step 9/global index 17's `dark_forest_vegetation` parent selects no position:
+/// all 16 count/in-square candidates fail its max-depth-zero water filter, so
+/// the run reaches `minecraft:freeze_top_layer` at step 10/global index 0, whose
+/// biome `shouldFreeze` world-state seam is not yet implemented. A separate
+/// tree-bearing seed-42 chunk (4,4) does reach the same outer step-9/global-17
+/// parent; its selector falls through to `oak_leaf_litter`, whose
+/// `would_survive` state is the current unsupported `oak_sapling` seam. The
+/// typed error names the outer placed feature in both cases. The generated
+/// settings tables are the full 55-biome surface (no `SettingsNotGenerated`),
+/// so these boundaries are reached without fabricated or silently skipped
+/// features.
 ///
 /// Compose the FEATURES `WorldGenRegion` over the complete accumulated
 /// dependency window of the FEATURES step. Paper's direct dependencies are
@@ -1234,9 +1455,22 @@ fn generate_ring_chunk(
 /// distance 8, so the cache is 17x17. The decoration biome union reads only
 /// the center 3x3, but placement and worldgen reads are bounded by the full
 /// status contract and must not be backed by an undersized cache.
+#[cfg_attr(not(test), allow(dead_code))]
 fn compose_feature_region<'a>(
     chunk: &'a mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
     generator: &Arc<OverworldGenerator>,
+) -> WorldGenRegion<'a, BlockState, WorldgenBiomeId, StructureKey> {
+    compose_feature_region_with_workspace(chunk, generator, None)
+}
+
+/// Compose a FEATURES region over snapshots of the caller-owned dependency
+/// workspace. The snapshots make the region transactional: no workspace entry
+/// is changed until the decoration pass succeeds, while successful owned proto
+/// values can be moved back into the authoritative workspace.
+fn compose_feature_region_with_workspace<'a>(
+    chunk: &'a mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+    generator: &Arc<OverworldGenerator>,
+    workspace: Option<&FeatureWorkspace>,
 ) -> WorldGenRegion<'a, BlockState, WorldgenBiomeId, StructureKey> {
     let center_pos = chunk.get_pos();
     let center_status = chunk.get_persisted_status();
@@ -1264,19 +1498,28 @@ fn compose_feature_region<'a>(
             }
             let distance = dx.abs().max(dz.abs()) as usize;
             let status = dependencies.get(distance);
+            // A workspace entry is copied before the region can mutate it. The
+            // copy preserves every represented ProtoChunk field, including
+            // heightmaps, post-processing, block entities, and scheduled ticks.
+            let existing = workspace.and_then(|workspace| {
+                workspace.with_chunk(pos, |chunk| chunk.map(snapshot_generated_chunk))
+            });
             match status {
                 ChunkStatus::Carvers => {
-                    holders.push(Box::new(OwnedProtoHolder::new(generate_ring_chunk(
-                        pos, generator,
-                    ))));
+                    holders.push(Box::new(OwnedProtoHolder::new(
+                        existing.unwrap_or_else(|| generate_ring_chunk(pos, generator)),
+                    )));
                 }
                 ChunkStatus::StructureStarts => {
-                    let mut structure_chunk = fresh_worldgen_chunk(pos, generator);
-                    // `ChunkStatusTasks.generateFeatures` primes the final
-                    // maps before decoration, and every dependency chunk must
-                    // carry those persisted maps when the region reads it.
-                    structure_chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
-                    structure_chunk.set_persisted_status(ChunkStatus::StructureStarts);
+                    let structure_chunk = existing.unwrap_or_else(|| {
+                        let mut chunk = fresh_worldgen_chunk(pos, generator);
+                        // `ChunkStatusTasks.generateFeatures` primes the final
+                        // maps before decoration, and every dependency chunk
+                        // must carry those persisted maps when the region reads it.
+                        chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
+                        chunk.set_persisted_status(ChunkStatus::StructureStarts);
+                        chunk
+                    });
                     holders.push(Box::new(OwnedProtoHolder::new(structure_chunk)));
                 }
                 other => {
@@ -1292,8 +1535,8 @@ fn compose_feature_region<'a>(
         Box::new(CenterHolder::new(chunk.base_mut(), center_status)),
     );
     let cache = StaticCache2D::from_entries(
-        center_pos.x() - radius,
-        center_pos.z() - radius,
+        center_pos.x().wrapping_sub(radius),
+        center_pos.z().wrapping_sub(radius),
         width,
         width,
         holders,
@@ -2499,6 +2742,41 @@ fn decode_placed_feature(
     })
 }
 
+fn configured_feature_key_for_placed(placed_key: &str) -> Result<String, String> {
+    let placed_entry = PLACED_FEATURE_BY_NAME
+        .get(placed_key)
+        .ok_or_else(|| format!("missing generated {placed_key} entry"))?;
+    let placed_json: Value = serde_json::from_str(placed_entry.json)
+        .map_err(|error| format!("decode {placed_key} JSON: {error}"))?;
+    placed_json
+        .get("feature")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{placed_key} JSON has no configured feature"))
+}
+
+fn set_paper_feature_seed(
+    random: &mut WorldgenRandom<XoroshiroRandomSource>,
+    generator: &OverworldGenerator,
+    decoration_seed: i64,
+    origin: &BlockPos,
+    placed_key: &str,
+    global_feature_index: usize,
+    step_index: usize,
+) {
+    let feature_population_seed = configured_feature_key_for_placed(placed_key)
+        .ok()
+        .and_then(|configured_key| generator.feature_seeds.get(&configured_key).copied())
+        .filter(|seed| *seed != -1)
+        .map(|seed| random.set_decoration_seed(seed, origin.get_x(), origin.get_z()))
+        .unwrap_or(decoration_seed);
+    random.set_feature_seed(
+        feature_population_seed,
+        global_feature_index as i32,
+        step_index as i32,
+    );
+}
+
 fn configured_feature_is_executable(placed_key: &str) -> Result<bool, String> {
     let placed_entry = PLACED_FEATURE_BY_NAME
         .get(placed_key)
@@ -2625,7 +2903,38 @@ fn generated_boundary_feature_key(
 fn run_biome_decoration(
     chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
     generator: &Arc<OverworldGenerator>,
-) -> Result<(), GenError> {
+    workspace: &FeatureWorkspace,
+    structure_feature_count: Option<usize>,
+) -> Result<FeatureWritebacks, GenError> {
+    // Paper executes the structure loop before placed features whenever the
+    // structure manager enables it. This value layer has no structure manager,
+    // so only a caller-proven capability may cross the boundary. The count is
+    // deliberately not added to placed-feature seeds: pinned Paper 26.2 uses
+    // `globalIndexOfFeature` independently for the placed-feature loop.
+    let _structure_feature_count =
+        structure_feature_count.ok_or(GenError::StructureDecorationIndexUnavailable {
+            chunk_pos: chunk.get_pos(),
+        })?;
+    run_biome_decoration_through(
+        chunk,
+        generator,
+        workspace,
+        Decoration::VALUES
+            .len()
+            .max(generator.feature_plan()?.feature_list.len()),
+    )
+}
+
+/// The decoration body with a caller-chosen exclusive step bound. Production
+/// runs every step; the seed-1 spring regression bounds execution at the
+/// FLUID_SPRINGS step so the pass ends on a real spring placement instead of a
+/// later unsupported seam.
+fn run_biome_decoration_through(
+    chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+    generator: &Arc<OverworldGenerator>,
+    workspace: &FeatureWorkspace,
+    max_steps: usize,
+) -> Result<FeatureWritebacks, GenError> {
     chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
     let center_pos = chunk.get_pos();
     let origin =
@@ -2636,7 +2945,7 @@ fn run_biome_decoration(
     let decoration_seed =
         random.set_decoration_seed(generator.seed(), origin.get_x(), origin.get_z());
 
-    let mut region = compose_feature_region(chunk, generator);
+    let mut region = compose_feature_region_with_workspace(chunk, generator, Some(workspace));
     let union_biomes = gather_possible_biomes(&region, generator);
 
     // Resolve the FULL `biomeSource.possibleBiomes()` list in source order and
@@ -2655,18 +2964,18 @@ fn run_biome_decoration(
     let settings_sources = &plan.settings_sources;
     let feature_list = &plan.feature_list;
 
-    // The per-step loop — Paper's `addVanillaDecorations`. The structure loop
-    // is skipped (the port has no structure manager; Java's
-    // `structureManager.shouldGenerateStructures()` gate is a faithful no-op,
-    // the #185 structures deferral).
+    // The per-step loop — Paper's `addVanillaDecorations`. The structure body
+    // remains deferred with the unported structure manager, but the capability
+    // check above prevents this path from pretending that the structure loop
+    // consumed no work. Once a caller proves the capability, placed-feature
+    // seeds still use Paper's independent `globalIndexOfFeature`.
     let generation_steps = Decoration::VALUES.len().max(feature_list.len());
     // Paper walks steps in ascending order and, within a step, the sorted
     // global feature indices of the union biomes mapped through the full-list
     // sorter's `indexMapping`. Registry-backed configured features execute
     // through their exact placed-feature chains; unsupported selected leaves
     // stop the run with a typed boundary.
-    let mut saw_feature = false;
-    for step_index in 0..generation_steps {
+    for step_index in 0..max_steps.min(generation_steps) {
         if step_index >= feature_list.len() {
             continue;
         }
@@ -2691,7 +3000,6 @@ fn run_biome_decoration(
         possible_features_this_step.sort_unstable();
         possible_features_this_step.dedup();
         for global_feature_index in possible_features_this_step {
-            saw_feature = true;
             let feature = &feature_list[step_index].features[global_feature_index];
             let feature_key = match feature {
                 Holder::Reference { id, .. } => {
@@ -2699,11 +3007,19 @@ fn run_biome_decoration(
                 }
                 Holder::Direct(_) => "minecraft:unknown",
             };
-            // `setFeatureSeed(decorationSeed, globalIndexOfFeature, stepIndex)`.
-            random.set_feature_seed(
+            // Paper's configurable population seed path uses the configured
+            // feature holder (`PlacedFeature.feature()`), not the surrounding
+            // placed-feature key. A configured seed other than `-1` reseeds via
+            // `setDecorationSeed` first, consuming its two scale draws, then
+            // `setFeatureSeed` receives that derived population seed.
+            set_paper_feature_seed(
+                &mut random,
+                generator,
                 decoration_seed,
-                global_feature_index as i32,
-                step_index as i32,
+                &origin,
+                feature_key,
+                global_feature_index,
+                step_index,
             );
             let executable = configured_feature_is_executable(feature_key).map_err(|_| {
                 GenError::FeaturePlacementDecode {
@@ -2785,15 +3101,23 @@ fn run_biome_decoration(
             }
         }
     }
-    if !saw_feature {
-        return Err(GenError::FeaturePlacementDecode {
-            chunk_pos: center_pos,
-            step_index: 0,
-            global_feature_index: 0,
-            feature_key: "minecraft:unknown",
-        });
+    let owned_entries = region.into_owned_proto_entries();
+    let mut retained_writebacks = Vec::with_capacity(8);
+    for (pos, chunk) in owned_entries {
+        // Move every owned proto into the authoritative workspace. Paper's
+        // region borrows these scheduler-owned chunks, so heightmaps,
+        // post-processing, block entities, and scheduled ticks must survive
+        // even outside the block-state write radius. Keep the public holder
+        // diagnostic limited to the eight distance-one entries for the
+        // FEATURES write zone.
+        let distance_one = center_pos.get_chessboard_distance_coords(pos.x(), pos.z()) == 1;
+        let diagnostic = distance_one.then(|| snapshot_generated_chunk(&chunk));
+        workspace.insert(chunk);
+        if let Some(diagnostic) = diagnostic {
+            retained_writebacks.push((pos, diagnostic));
+        }
     }
-    Ok(())
+    Ok(retained_writebacks)
 }
 
 /// Compose the SPAWN step's exact radius-one `WorldGenRegion` cache. The
@@ -4151,6 +4475,224 @@ mod tests {
         GENERATOR.clone()
     }
 
+    fn feature_holder(generator: &Arc<OverworldGenerator>, pos: ChunkPos) -> GenerationChunkHolder {
+        generator.create_holder_with_structure_feature_count(pos, Some(0))
+    }
+
+    fn transaction_probe_holder(
+        generator: &Arc<OverworldGenerator>,
+        starting_status: ChunkStatus,
+    ) -> GenerationChunkHolder {
+        let mut chunk = fresh_worldgen_chunk(ChunkPos::ZERO, generator);
+        chunk.set_persisted_status(starting_status);
+        let context = WorldGenContext::new(
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
+                chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
+                Err(GenError::FeaturePlacementDecode {
+                    chunk_pos: ChunkPos::ZERO,
+                    step_index: 9,
+                    global_feature_index: 17,
+                    feature_key: "minecraft:dark_forest_vegetation",
+                })
+            },
+        );
+        GenerationChunkHolder {
+            chunk,
+            context,
+            features_failure: None,
+            feature_writebacks: Vec::new(),
+            pending_feature_writebacks: Rc::new(RefCell::new(None)),
+            feature_workspace: FeatureWorkspace::new(),
+        }
+    }
+
+    /// A direct FEATURES seam probe that writes the east distance-1 dependency
+    /// chunk, then either succeeds (publishing the writeback) or fails after
+    /// priming the center and staging the writeback. This keeps ownership and
+    /// rollback coverage independent of the seed-42 feature boundary.
+    fn writeback_probe_holder(
+        generator: &Arc<OverworldGenerator>,
+        fail: bool,
+    ) -> GenerationChunkHolder {
+        let mut chunk = fresh_worldgen_chunk(ChunkPos::ZERO, generator);
+        chunk.set_persisted_status(ChunkStatus::Carvers);
+        let pending_feature_writebacks = Rc::new(RefCell::new(None));
+        let writeback_sink = Rc::clone(&pending_feature_writebacks);
+        let generator = Arc::clone(generator);
+        let context = WorldGenContext::new(
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            move |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
+                if fail {
+                    chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
+                }
+                let mut region = compose_feature_region(chunk, &generator);
+                assert!(region.set_block(
+                    &BlockPos::new(16, 64, 0),
+                    Blocks::STONE.default_block_state(),
+                    2,
+                    512,
+                ));
+                *writeback_sink.borrow_mut() = Some(region.into_distance_one_proto_writebacks());
+                if fail {
+                    Err(GenError::FeaturePlacementDecode {
+                        chunk_pos: ChunkPos::ZERO,
+                        step_index: 9,
+                        global_feature_index: 17,
+                        feature_key: "minecraft:dark_forest_vegetation",
+                    })
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        GenerationChunkHolder {
+            chunk,
+            context,
+            features_failure: None,
+            feature_writebacks: Vec::new(),
+            pending_feature_writebacks,
+            feature_workspace: FeatureWorkspace::new(),
+        }
+    }
+
+    /// Build a successful FEATURES seam that mutates both the distance-one
+    /// write zone and a farther cached dependency. The latter covers the
+    /// owner-directed heightmap/post-processing/tick state that a temporary
+    /// region must return to its workspace even though `setBlock` itself is
+    /// gated to distance one.
+    fn workspace_writeback_probe_holder(
+        generator: &Arc<OverworldGenerator>,
+        workspace: &FeatureWorkspace,
+    ) -> GenerationChunkHolder {
+        let mut chunk = fresh_worldgen_chunk(ChunkPos::ZERO, generator);
+        chunk.set_persisted_status(ChunkStatus::Carvers);
+        let pending_feature_writebacks = Rc::new(RefCell::new(None));
+        let generator_for_context = Arc::clone(generator);
+        let workspace_for_context = workspace.clone();
+        let context = WorldGenContext::new(
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            move |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
+                let mut region = compose_feature_region_with_workspace(
+                    chunk,
+                    &generator_for_context,
+                    Some(&workspace_for_context),
+                );
+                assert!(region.set_block(
+                    &BlockPos::new(16, 64, 0),
+                    Blocks::STONE.default_block_state(),
+                    2,
+                    512,
+                ));
+                <WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> as WorldGenLevel>::schedule_tick(
+                    &mut region,
+                    &BlockPos::new(128, 64, 0),
+                    FluidId(4),
+                    0,
+                );
+                region.mark_pos_for_post_processing(&BlockPos::new(128, 64, 0));
+                for (pos, dependency) in region.into_owned_proto_entries() {
+                    workspace_for_context.insert(dependency);
+                    assert!(
+                        pos != ChunkPos::ZERO,
+                        "the center must remain owned by the generation holder"
+                    );
+                }
+                Ok(())
+            },
+        );
+        GenerationChunkHolder {
+            chunk,
+            context,
+            features_failure: None,
+            feature_writebacks: Vec::new(),
+            pending_feature_writebacks,
+            feature_workspace: workspace.clone(),
+        }
+    }
+
+    fn assert_generated_proto_equal(
+        actual: &ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+        expected: &ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+    ) {
+        assert_eq!(actual.get_pos(), expected.get_pos());
+        assert_eq!(
+            actual.get_persisted_status(),
+            expected.get_persisted_status()
+        );
+        let actual_heightmaps: Vec<Option<Vec<i64>>> = actual
+            .heightmaps()
+            .iter()
+            .map(|heightmap| heightmap.as_ref().map(|map| map.get_raw_data().to_vec()))
+            .collect();
+        let expected_heightmaps: Vec<Option<Vec<i64>>> = expected
+            .heightmaps()
+            .iter()
+            .map(|heightmap| heightmap.as_ref().map(|map| map.get_raw_data().to_vec()))
+            .collect();
+        assert_eq!(actual_heightmaps, expected_heightmaps);
+        for y in actual.get_min_y()..actual.get_min_y() + actual.get_height() {
+            for z in 0..16 {
+                for x in 0..16 {
+                    assert_eq!(
+                        actual.get_block_state(x, y, z),
+                        expected.get_block_state(x, y, z),
+                        "block mismatch at ({x}, {y}, {z})"
+                    );
+                }
+            }
+        }
+        for (actual_section, expected_section) in
+            actual.get_sections().iter().zip(expected.get_sections())
+        {
+            assert_eq!(
+                actual_section.non_empty_block_count(),
+                expected_section.non_empty_block_count()
+            );
+            for y in 0..4 {
+                for z in 0..4 {
+                    for x in 0..4 {
+                        assert_eq!(
+                            actual_section.biomes().get(x, y, z),
+                            expected_section.biomes().get(x, y, z),
+                            "biome mismatch at section cell ({x}, {y}, {z})"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(actual.get_entities(), expected.get_entities());
+        assert_eq!(
+            actual.get_block_entity_nbts(),
+            expected.get_block_entity_nbts()
+        );
+        assert_eq!(actual.get_post_processing(), expected.get_post_processing());
+        assert_eq!(
+            actual.get_block_ticks().scheduled_ticks(),
+            expected.get_block_ticks().scheduled_ticks()
+        );
+        assert_eq!(
+            actual.get_fluid_ticks().scheduled_ticks(),
+            expected.get_fluid_ticks().scheduled_ticks()
+        );
+        assert_eq!(actual.get_all_starts(), expected.get_all_starts());
+        assert_eq!(actual.get_all_references(), expected.get_all_references());
+        assert_eq!(actual.base().is_unsaved(), expected.base().is_unsaved());
+        assert_eq!(
+            actual.get_carving_mask().map(|mask| mask.to_array()),
+            expected.get_carving_mask().map(|mask| mask.to_array())
+        );
+    }
+
     /// The `ChunkGenerator` realization delegates to the noisegen shell's real
     /// bodies — the `.chunk.generator` reconciliation note's single source of
     /// truth, grounded in the overworld preset's geometry (min_y -64, height
@@ -4669,7 +5211,7 @@ mod tests {
     #[test]
     fn light_refusal_does_not_cache_features_failure() {
         let generator = test_generator();
-        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        let mut holder = feature_holder(&generator, ChunkPos::ZERO);
         holder
             .generate_through(ChunkStatus::Carvers)
             .expect("CARVERS");
@@ -4695,6 +5237,39 @@ mod tests {
             )
         ));
         assert_eq!(holder.status(), ChunkStatus::Carvers);
+    }
+
+    /// Without a structure-decoration authority, FEATURES refuses before
+    /// heightmap priming, feature RNG, placement, or dependency writeback. A
+    /// caller that has proved the capability must opt into the separate holder
+    /// constructor used by the seed-42 execution fixtures.
+    #[test]
+    fn unavailable_structure_decoration_refuses_without_mutation() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        let expected = generator.create_holder(ChunkPos::ZERO);
+
+        let error = holder
+            .generate_through(ChunkStatus::Features)
+            .expect_err("missing structure decoration authority must refuse");
+        assert!(matches!(
+            error,
+            GeneratedChunkError::Generation(
+                GenError::StructureDecorationIndexUnavailable { chunk_pos }
+            ) if chunk_pos == ChunkPos::ZERO
+        ));
+        assert_generated_proto_equal(&holder.chunk, &expected.chunk);
+        assert_eq!(holder.status(), ChunkStatus::Empty);
+        assert!(holder.take_feature_writebacks().is_empty());
+
+        let retry = holder
+            .generate_through(ChunkStatus::Features)
+            .expect_err("the unavailable structure boundary must cache");
+        assert!(matches!(
+            retry,
+            GeneratedChunkError::Generation(GenError::StructureDecorationIndexUnavailable { .. })
+        ));
+        assert_generated_proto_equal(&holder.chunk, &expected.chunk);
     }
 
     /// The FEATURES rung runs `addVanillaDecorations`'s full prologue and
@@ -4727,7 +5302,7 @@ mod tests {
     #[test]
     fn generate_through_features_rolls_back_fresh_holder_and_caches_failure() {
         let generator = test_generator();
-        let mut holder = generator.create_holder(ChunkPos::new(0, 0));
+        let mut holder = feature_holder(&generator, ChunkPos::new(0, 0));
         let fresh = generator.create_holder(ChunkPos::new(0, 0));
         assert_eq!(holder.status(), ChunkStatus::Empty);
 
@@ -4759,6 +5334,10 @@ mod tests {
         // merely leave the status below FEATURES.
         assert_eq!(holder.status(), fresh.status());
         assert_eq!(holder.status(), ChunkStatus::Empty);
+        assert!(
+            holder.take_feature_writebacks().is_empty(),
+            "a failed FEATURES transaction must discard dependency writebacks"
+        );
         let holder_heightmaps: Vec<Option<Vec<i64>>> = holder
             .chunk
             .heightmaps()
@@ -4876,13 +5455,184 @@ mod tests {
         );
     }
 
+    #[test]
+    fn features_transaction_restores_every_lower_start_status_and_retry() {
+        let generator = test_generator();
+        for starting_status in [
+            ChunkStatus::Empty,
+            ChunkStatus::Biomes,
+            ChunkStatus::Noise,
+            ChunkStatus::Surface,
+            ChunkStatus::Carvers,
+            ChunkStatus::StructureStarts,
+            ChunkStatus::StructureReferences,
+        ] {
+            let expected = transaction_probe_holder(&generator, starting_status);
+            let mut holder = transaction_probe_holder(&generator, starting_status);
+
+            let error = holder
+                .generate_through(ChunkStatus::Features)
+                .expect_err("FEATURES must hit the pinned typed boundary");
+            assert!(matches!(
+                error,
+                GeneratedChunkError::Generation(GenError::FeaturePlacementDecode { .. })
+                    | GeneratedChunkError::Generation(GenError::SettingsNotGenerated { .. })
+                    | GeneratedChunkError::Generation(
+                        GenError::StructureDecorationIndexUnavailable { .. }
+                    )
+            ));
+            assert_eq!(holder.status(), starting_status);
+            assert_generated_proto_equal(&holder.chunk, &expected.chunk);
+            assert!(
+                holder.take_feature_writebacks().is_empty(),
+                "failed FEATURES from {starting_status:?} must not publish writebacks"
+            );
+
+            let retry = holder
+                .generate_through(ChunkStatus::Features)
+                .expect_err("the failure must be cached for retry");
+            assert!(matches!(
+                retry,
+                GeneratedChunkError::Generation(GenError::FeaturePlacementDecode { .. })
+                    | GeneratedChunkError::Generation(GenError::SettingsNotGenerated { .. })
+                    | GeneratedChunkError::Generation(
+                        GenError::StructureDecorationIndexUnavailable { .. }
+                    )
+            ));
+            assert_eq!(holder.status(), starting_status);
+            assert_generated_proto_equal(&holder.chunk, &expected.chunk);
+        }
+    }
+
+    #[test]
+    fn successful_features_publish_distance_one_writebacks() {
+        let generator = Arc::new(OverworldGenerator::new(42));
+        let mut holder = writeback_probe_holder(&generator, false);
+
+        holder
+            .generate_through(ChunkStatus::Features)
+            .expect("the successful FEATURES seam must publish its writeback");
+        assert_eq!(holder.status(), ChunkStatus::Features);
+        let writebacks = holder.take_feature_writebacks();
+        let positions: Vec<_> = writebacks.iter().map(|(pos, _)| *pos).collect();
+        assert_eq!(
+            positions,
+            vec![
+                ChunkPos::new(-1, -1),
+                ChunkPos::new(-1, 0),
+                ChunkPos::new(-1, 1),
+                ChunkPos::new(0, -1),
+                ChunkPos::new(0, 1),
+                ChunkPos::new(1, -1),
+                ChunkPos::new(1, 0),
+                ChunkPos::new(1, 1),
+            ],
+            "successful FEATURES writebacks must preserve cache order"
+        );
+        let east = writebacks
+            .into_iter()
+            .find(|(pos, _)| *pos == ChunkPos::new(1, 0))
+            .map(|(_, chunk)| chunk)
+            .expect("east distance-1 writeback");
+        assert_eq!(
+            east.get_block_state(0, 64, 0),
+            Blocks::STONE.default_block_state(),
+            "the owner must receive the cross-chunk feature write"
+        );
+        assert!(
+            holder.take_feature_writebacks().is_empty(),
+            "writebacks are consumed exactly once"
+        );
+    }
+
+    #[test]
+    fn successful_features_persist_all_owned_dependency_mutations() {
+        let generator = Arc::new(OverworldGenerator::new(42));
+        let workspace = FeatureWorkspace::new();
+        let mut holder = workspace_writeback_probe_holder(&generator, &workspace);
+
+        holder
+            .generate_through(ChunkStatus::Features)
+            .expect("the successful FEATURES seam must publish all owned dependencies");
+        assert_eq!(holder.status(), ChunkStatus::Features);
+        assert_eq!(workspace.len(), 17 * 17 - 1);
+
+        workspace.with_chunk(ChunkPos::new(1, 0), |chunk| {
+            let chunk = chunk.expect("the distance-one owner must be retained");
+            assert_eq!(
+                chunk.get_block_state(0, 64, 0),
+                Blocks::STONE.default_block_state(),
+                "distance-one block writes must reach the authoritative workspace"
+            );
+        });
+        workspace.with_chunk(ChunkPos::new(8, 0), |chunk| {
+            let chunk = chunk.expect("the far dependency owner must be retained");
+            let section_index = chunk.get_section_index(64) as usize;
+            assert_eq!(
+                chunk.get_post_processing()[section_index],
+                vec![0],
+                "far dependency post-processing must survive region teardown"
+            );
+            let ticks = chunk.get_fluid_ticks().scheduled_ticks();
+            assert_eq!(ticks.len(), 1);
+            assert_eq!(ticks[0].r#type, FluidId(4));
+            assert_eq!(ticks[0].pos, BlockPos::new(128, 64, 0));
+        });
+    }
+
+    #[test]
+    fn failed_features_drop_staged_writebacks_and_restore_before_retry() {
+        let generator = Arc::new(OverworldGenerator::new(42));
+        let expected = {
+            let mut expected = fresh_worldgen_chunk(ChunkPos::ZERO, &generator);
+            expected.set_persisted_status(ChunkStatus::Carvers);
+            expected
+        };
+        let mut holder = writeback_probe_holder(&generator, true);
+
+        let error = holder
+            .generate_through(ChunkStatus::Features)
+            .expect_err("the failing FEATURES seam must roll back");
+        assert!(matches!(
+            error,
+            GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
+                step_index: 9,
+                global_feature_index: 17,
+                feature_key: "minecraft:dark_forest_vegetation",
+                ..
+            })
+        ));
+        assert_eq!(holder.status(), ChunkStatus::Carvers);
+        assert_generated_proto_equal(&holder.chunk, &expected);
+        assert!(
+            holder.take_feature_writebacks().is_empty(),
+            "failed FEATURES must never publish staged dependency mutations"
+        );
+
+        let retry = holder
+            .generate_through(ChunkStatus::Features)
+            .expect_err("the failed FEATURES attempt must be cached");
+        assert!(matches!(
+            retry,
+            GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
+                step_index: 9,
+                global_feature_index: 17,
+                feature_key: "minecraft:dark_forest_vegetation",
+                ..
+            })
+        ));
+        assert_eq!(holder.status(), ChunkStatus::Carvers);
+        assert_generated_proto_equal(&holder.chunk, &expected);
+        assert!(holder.take_feature_writebacks().is_empty());
+    }
+
     /// FULL remains the consuming ProtoChunk → LevelChunk boundary even after
     /// FEATURES has reached its cached typed failure. The historical FEATURES
     /// error must never shadow the stable FULL UnsupportedStatus response.
     #[test]
     fn full_rejection_precedes_cached_features_failure() {
         let generator = test_generator();
-        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        let mut holder = feature_holder(&generator, ChunkPos::ZERO);
         let features_error = holder
             .generate_through(ChunkStatus::Features)
             .expect_err("FEATURES must stop at its typed boundary");
@@ -5012,11 +5762,12 @@ mod tests {
 
     /// The Batch 2/3 decoder arms decode the generated configured/placed JSON of
     /// each dispatch leaf seated in the seed-42 closure. These focused tests
-    /// cover the decoder arms directly — the runtime stops at the step-9
-    /// dark-oak selector boundary, so the later-step leaves (springs,
-    /// seagrass, freeze_top_layer) cannot be reached end-to-end and get their own
-    /// independent decode coverage here. The simple_block, block_column, and
-    /// vines arms are not separately exercised by these tests.
+    /// cover the decoder arms directly — the seed-42 dark-forest parent is
+    /// rejected by its surface-water filter before the nested selector executes,
+    /// and the runtime then stops at the step-10 `freeze_top_layer` boundary.
+    /// The later-step leaves therefore get their own independent decode coverage
+    /// here. The simple_block, block_column, and vines arms are not separately
+    /// exercised by these tests.
     #[test]
     fn ore_dirt_decodes_through_the_batch2_ore_arm() {
         let generator = test_generator();
@@ -5200,10 +5951,62 @@ mod tests {
     /// and FEATURES is never stamped. The typed-unavailable dispatches
     /// for underwater magma (id 21) and multiface growth (id 20) no longer
     /// refuse; both concrete features are reached.
+    ///
+    /// Seed-1 chunk (0,0) reaches a real `minecraft:spring_water` placement:
+    /// the spring leaf previously panicked in the unimplemented
+    /// `LevelAccessor.scheduleTick` seam. With the fluid routing implemented,
+    /// the pass must retain the scheduled fluid tick in the owning chunk. The
+    /// run is bounded at the FLUID_SPRINGS step so the pass ends on the spring
+    /// itself rather than the later unsupported seagrass seam.
+    #[test]
+    fn seed1_spring_water_places_and_schedules_fluid_tick() {
+        let generator = Arc::new(OverworldGenerator::new(1));
+        let mut holder = feature_holder(&generator, ChunkPos::ZERO);
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let workspace = FeatureWorkspace::new();
+        let writebacks = run_biome_decoration_through(
+            &mut holder.chunk,
+            &generator,
+            &workspace,
+            Decoration::FluidSprings as usize + 1,
+        )
+        .expect("the seed-1 FLUID_SPRINGS-bounded pass must not panic");
+        assert!(
+            !writebacks.is_empty(),
+            "a real spring write must reach a distance-one owner or the center"
+        );
+        // The spring schedules in its owning chunk; collect the retained
+        // ticks across the workspace owners and the center.
+        let center_ticks = holder.chunk.get_fluid_ticks().scheduled_ticks().to_vec();
+        let mut total_ticks = center_ticks.len();
+        let mut ticks_seen = center_ticks;
+        for (pos, _) in &writebacks {
+            workspace.with_chunk(*pos, |chunk| {
+                if let Some(chunk) = chunk {
+                    let ticks = chunk.get_fluid_ticks().scheduled_ticks();
+                    total_ticks += ticks.len();
+                    ticks_seen.extend(ticks.iter().cloned());
+                }
+            });
+        }
+        assert!(
+            total_ticks >= 1,
+            "seed-1 spring_water must schedule a fluid tick somewhere"
+        );
+        assert_eq!(ticks_seen.len(), total_ticks);
+        // Zero delay against the region's default game time: every spring's
+        // flow is due immediately (`gameTime + 0`).
+        for tick in &ticks_seen {
+            assert_eq!(tick.delay, 0);
+        }
+    }
+
     #[test]
     fn seed42_does_not_mutate_rng_past_the_next_selected_unsupported_leaf() {
         let generator = test_generator();
-        let mut holder = generator.create_holder(ChunkPos::new(0, 0));
+        let mut holder = feature_holder(&generator, ChunkPos::new(0, 0));
         holder
             .generate_through(ChunkStatus::Carvers)
             .expect("CARVERS");
@@ -5556,6 +6359,355 @@ mod tests {
         assert!(first >= 0.025);
         assert!(second >= 0.05);
         assert!(third < 0.6666667);
+    }
+
+    #[test]
+    fn paper_feature_seed_override_reseeds_from_configured_feature_and_preserves_draw_order() {
+        let configured_seed = 987_654_321_i64;
+        let mut feature_seeds = HashMap::new();
+        feature_seeds.insert("minecraft:lake_lava".to_string(), configured_seed);
+        let generator = OverworldGenerator::new_with_feature_seeds(42, feature_seeds);
+        let origin = BlockPos::new(16, -64, 0);
+
+        let mut actual = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let decoration_seed = actual.set_decoration_seed(42, origin.get_x(), origin.get_z());
+        set_paper_feature_seed(
+            &mut actual,
+            &generator,
+            decoration_seed,
+            &origin,
+            "minecraft:lake_lava_underground",
+            2,
+            1,
+        );
+
+        let mut expected = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let expected_decoration_seed =
+            expected.set_decoration_seed(42, origin.get_x(), origin.get_z());
+        let expected_population_seed =
+            expected.set_decoration_seed(configured_seed, origin.get_x(), origin.get_z());
+        assert_eq!(expected_decoration_seed, decoration_seed);
+        expected.set_feature_seed(expected_population_seed, 2, 1);
+        assert_eq!(actual.next_long(), expected.next_long());
+        assert_eq!(actual.next_long(), expected.next_long());
+    }
+
+    /// Paper's structure loop owns a separate RNG index. Even when a caller
+    /// proves that structure decoration is available, placed-feature seeding
+    /// remains `globalIndexOfFeature`, not `structure_count + globalIndex`.
+    #[test]
+    fn paper_feature_seed_does_not_invent_a_structure_offset() {
+        let generator = OverworldGenerator::new(42);
+        let origin = BlockPos::new(0, -64, 0);
+        let mut actual = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let decoration_seed = actual.set_decoration_seed(42, origin.get_x(), origin.get_z());
+        set_paper_feature_seed(
+            &mut actual,
+            &generator,
+            decoration_seed,
+            &origin,
+            "minecraft:lake_lava_underground",
+            17,
+            9,
+        );
+
+        let mut expected = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        expected.set_decoration_seed(42, origin.get_x(), origin.get_z());
+        expected.set_feature_seed(decoration_seed, 17, 9);
+        let mut invented_offset = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        invented_offset.set_decoration_seed(42, origin.get_x(), origin.get_z());
+        invented_offset.set_feature_seed(decoration_seed, 20, 9);
+
+        assert_eq!(actual.next_long(), expected.next_long());
+        assert_ne!(actual.next_long(), invented_offset.next_long());
+    }
+
+    #[test]
+    fn paper_feature_seed_minus_one_skips_override_draws() {
+        let mut feature_seeds = HashMap::new();
+        feature_seeds.insert("minecraft:lake_lava".to_string(), -1);
+        let generator = OverworldGenerator::new_with_feature_seeds(42, feature_seeds);
+        let origin = BlockPos::new(16, -64, 0);
+
+        let mut actual = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let decoration_seed = actual.set_decoration_seed(42, origin.get_x(), origin.get_z());
+        set_paper_feature_seed(
+            &mut actual,
+            &generator,
+            decoration_seed,
+            &origin,
+            "minecraft:lake_lava_underground",
+            2,
+            1,
+        );
+
+        let mut expected = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        expected.set_decoration_seed(42, origin.get_x(), origin.get_z());
+        expected.set_feature_seed(decoration_seed, 2, 1);
+        assert_eq!(actual.next_long(), expected.next_long());
+        assert_eq!(actual.next_long(), expected.next_long());
+    }
+
+    /// The seed-42 dark-forest parent consumes its count and square-placement
+    /// draws, but Paper's `SurfaceWaterDepthFilter.forMaxDepth(0)` rejects all
+    /// 16 candidates before the heightmap, biome, or nested random-selector
+    /// feature runs. Keep this separate from the direct dark-oak survival check:
+    /// an empty parent placement is not a dark-oak execution boundary.
+    #[test]
+    fn seed42_dark_forest_surface_filter_rejects_before_dark_oak_would_survive() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let mut region = compose_feature_region(&mut holder.chunk, &generator);
+        let origin = BlockPos::new(0, -64, 0);
+        let decoded = decode_placed_feature("minecraft:dark_forest_vegetation", &generator)
+            .expect("dark forest placement modifiers");
+        let placed = decoded.placed_holder.value(decoded.placed_registry);
+        let selection_generator = FeatureSelectionGenerator {
+            generator: Arc::clone(&generator),
+            feature_key: "minecraft:dark_forest_vegetation",
+        };
+
+        // CountPlacement and InSquarePlacement select the exact first candidate
+        // Paper uses for step 9/global 17. The next modifier is the water-depth
+        // filter, so the candidate's complete parent prefix must be rejected.
+        let dummy_feature = ConfiguredFeatureErased {
+            feature: FeatureId::new(u32::MAX),
+            config: Arc::new(DeferredGeneratedFeatureConfiguration {
+                configured_key: "dark forest placement probe".to_string(),
+            }),
+        };
+        let prefix = PlacedFeature::new(
+            Holder::Direct(dummy_feature),
+            placed.placement()[..2].to_vec(),
+        );
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        random.set_feature_seed(42, 17, 9);
+        let candidate = prefix
+            .first_placement_position(&mut region, &selection_generator, &mut random, &origin)
+            .expect("the first two placement modifiers must select a candidate");
+        assert_eq!(candidate, BlockPos::new(15, -64, 7));
+
+        let ocean_floor = region.get_height_at(Types::OceanFloor, 15, 7);
+        let world_surface = region.get_height_at(Types::WorldSurface, 15, 7);
+        assert!(
+            world_surface - ocean_floor > 0,
+            "the pinned candidate must be submerged for max-depth-zero filtering"
+        );
+
+        let filtered_prefix = PlacedFeature::new(
+            Holder::Direct(ConfiguredFeatureErased {
+                feature: FeatureId::new(u32::MAX),
+                config: Arc::new(DeferredGeneratedFeatureConfiguration {
+                    configured_key: "dark forest filter probe".to_string(),
+                }),
+            }),
+            placed.placement()[..3].to_vec(),
+        );
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        random.set_feature_seed(42, 17, 9);
+        assert_eq!(
+            filtered_prefix.first_placement_position(
+                &mut region,
+                &selection_generator,
+                &mut random,
+                &origin,
+            ),
+            None,
+            "all 16 count/in-square candidates must fail the max-depth-zero filter"
+        );
+
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        random.set_feature_seed(42, 17, 9);
+        let parent_selection = placed.first_placement_position(
+            &mut region,
+            &selection_generator,
+            &mut random,
+            &origin,
+        );
+        assert_eq!(parent_selection, None);
+
+        // The same WorldGenRegion implements the Paper VegetationBlock rule for
+        // dark-oak saplings: only the block below and the supports_vegetation
+        // tag decide survival. This direct counterfactual proves the nested
+        // `would_survive` seam independently of the rejected parent path.
+        let support_pos = BlockPos::new(0, 0, 0);
+        let sapling_pos = support_pos.above();
+        let dark_oak_sapling = BlockState::of(
+            BlockId::from_name("minecraft:dark_oak_sapling")
+                .expect("dark oak sapling block must be generated"),
+        );
+        assert!(region.set_block(
+            &support_pos,
+            BlockState::of(BlockId::from_name("minecraft:stone").expect("stone")),
+            0,
+            512,
+        ));
+        assert!(
+            !region.can_survive(&dark_oak_sapling, &sapling_pos),
+            "dark-oak saplings must reject blocks outside supports_vegetation"
+        );
+        assert!(region.set_block(
+            &support_pos,
+            BlockState::of(BlockId::from_name("minecraft:dirt").expect("dirt")),
+            0,
+            512,
+        ));
+        assert!(
+            region.can_survive(&dark_oak_sapling, &sapling_pos),
+            "dark-oak saplings must survive on supports_vegetation blocks"
+        );
+
+        // Exercise the actual `dark_oak_leaf_litter` `would_survive` placement
+        // modifier over the dry counterfactual, not only the direct world-level
+        // predicate. This is the exact nested boundary the seed-42 selector
+        // would reach on a candidate that survives the parent placement chain.
+        let mut survival_random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        assert!(
+            placement_selects(
+                &mut region,
+                &generator,
+                &mut survival_random,
+                &sapling_pos,
+                "minecraft:dark_oak_leaf_litter",
+            )
+            .expect("dark-oak would-survive placement must decode")
+        );
+        assert!(region.set_block(
+            &support_pos,
+            BlockState::of(BlockId::from_name("minecraft:stone").expect("stone")),
+            0,
+            512,
+        ));
+        let mut survival_random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        assert!(
+            !placement_selects(
+                &mut region,
+                &generator,
+                &mut survival_random,
+                &sapling_pos,
+                "minecraft:dark_oak_leaf_litter",
+            )
+            .expect("dark-oak would-survive placement must decode")
+        );
+    }
+
+    /// The tree-bearing seed-42 fixture follows a different path from the
+    /// all-water origin: its outer typed boundary is still the parent placed
+    /// feature at step 9/global 17, while the nested selector falls through to
+    /// `oak_leaf_litter`, whose `would_survive` state is `oak_sapling`.
+    #[test]
+    fn seed42_chunk44_reports_outer_dark_forest_and_nested_oak_boundary() {
+        let generator = test_generator();
+        let mut holder = feature_holder(&generator, ChunkPos::new(4, 4));
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let error = holder
+            .generate_through(ChunkStatus::Features)
+            .expect_err("the nested oak survival seam must refuse FEATURES");
+        assert!(matches!(
+            error,
+            GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
+                chunk_pos,
+                step_index: 9,
+                global_feature_index: 17,
+                feature_key: "minecraft:dark_forest_vegetation",
+            }) if chunk_pos == ChunkPos::new(4, 4)
+        ));
+
+        // The typed error deliberately names the outer decoration dispatch. Pin
+        // the nested path separately so a future diagnostic cannot confuse the
+        // parent boundary with the configured/placed tree leaf that panicked.
+        assert_eq!(
+            configured_feature_key_for_placed("minecraft:oak_leaf_litter")
+                .expect("oak leaf litter placed feature must resolve"),
+            "minecraft:oak_leaf_litter"
+        );
+        let mut nested_holder = generator.create_holder(ChunkPos::new(4, 4));
+        nested_holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let mut region = compose_feature_region(&mut nested_holder.chunk, &generator);
+        let decoded = decode_placed_feature("minecraft:oak_leaf_litter", &generator)
+            .expect("oak leaf litter placement must decode");
+        let nested = decoded.placed_holder.value(decoded.placed_registry);
+        let selection_generator = FeatureSelectionGenerator {
+            generator: Arc::clone(&generator),
+            feature_key: "minecraft:oak_leaf_litter",
+        };
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            nested.first_placement_position(
+                &mut region,
+                &selection_generator,
+                &mut random,
+                &BlockPos::new(79, 67, 67),
+            )
+        }))
+        .expect_err("oak_leaf_litter must reach its oak_sapling would_survive seam");
+        let message = if let Some(message) = panic.downcast_ref::<String>() {
+            message.as_str()
+        } else if let Some(message) = panic.downcast_ref::<&'static str>() {
+            message
+        } else {
+            "<non-string panic>"
+        };
+        assert_eq!(
+            message,
+            "WorldGenRegion.canSurvive is not implemented for minecraft:oak_sapling (RivetTodo #232)"
+        );
+    }
+
+    /// A valid FEATURES pass may have no selected feature positions. Exercise
+    /// the real decoration loop with an empty per-step plan to ensure the pass
+    /// returns success instead of inventing a `FeaturePlacementDecode` error.
+    #[test]
+    fn empty_feature_steps_are_a_valid_decoration_pass() {
+        let generator = Arc::new(OverworldGenerator::new(42));
+        let placed_registry_id = RegistryBuilder::new(&*PLACED_FEATURE).registry_id();
+        let mut placed_by_id = HashMap::new();
+        let settings_sources = resolve_feature_settings(
+            &generator.biome_source.possible_biomes(),
+            placed_registry_id,
+            &mut placed_by_id,
+        )
+        .expect("the generated overworld settings must resolve");
+        let mut feature_list = build_features_per_step(
+            &settings_sources,
+            |(settings, _)| settings.features(),
+            false,
+        );
+        assert!(
+            !feature_list.is_empty(),
+            "the real overworld plan must contain decoration steps"
+        );
+        for step in &mut feature_list {
+            step.features.clear();
+        }
+        assert!(
+            generator
+                .feature_plan
+                .set(Ok(FeaturePlan {
+                    placed_by_id,
+                    settings_sources: Vec::new(),
+                    feature_list,
+                }))
+                .is_ok()
+        );
+
+        let mut chunk = fresh_worldgen_chunk(ChunkPos::ZERO, &generator);
+        chunk.set_persisted_status(ChunkStatus::Carvers);
+        let workspace = FeatureWorkspace::new();
+        let writebacks = run_biome_decoration(&mut chunk, &generator, &workspace, Some(0))
+            .expect("an empty selected-feature pass must succeed");
+        assert_eq!(
+            writebacks.len(),
+            8,
+            "the successful pass still returns its eight owned distance-one dependency holders"
+        );
     }
 
     /// The decoration-seed prologue is deterministic and matches the pinned
@@ -5958,6 +7110,56 @@ mod tests {
                 .try_get_chunk(9, 0, ChunkStatus::Empty, true)
                 .is_err(),
             "the FEATURES cache must stop at the direct dependency radius"
+        );
+    }
+
+    #[test]
+    fn features_region_retains_distance_one_proto_writebacks_in_cache_order() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let mut region = compose_feature_region(&mut holder.chunk, &generator);
+        let east_pos = BlockPos::new(16, 64, 0);
+        assert!(<WorldGenRegion<
+            '_,
+            BlockState,
+            WorldgenBiomeId,
+            StructureKey,
+        > as WorldGenLevel>::set_block(
+            &mut region,
+            &east_pos,
+            Blocks::STONE.default_block_state(),
+            2,
+        ));
+
+        let writebacks = region.into_distance_one_proto_writebacks();
+        let positions: Vec<_> = writebacks.iter().map(|(pos, _)| *pos).collect();
+        assert_eq!(positions.len(), 8, "all eight distance-1 protos stay owned");
+        assert_eq!(
+            positions,
+            vec![
+                ChunkPos::new(-1, -1),
+                ChunkPos::new(-1, 0),
+                ChunkPos::new(-1, 1),
+                ChunkPos::new(0, -1),
+                ChunkPos::new(0, 1),
+                ChunkPos::new(1, -1),
+                ChunkPos::new(1, 0),
+                ChunkPos::new(1, 1),
+            ],
+            "writebacks preserve StaticCache2D's x-major/z-inner order"
+        );
+        let east = writebacks
+            .into_iter()
+            .find(|(pos, _)| *pos == ChunkPos::new(1, 0))
+            .map(|(_, chunk)| chunk)
+            .expect("east distance-1 proto writeback");
+        assert_eq!(
+            east.get_block_state(0, 64, 0),
+            Blocks::STONE.default_block_state(),
+            "a successful feature-region write must survive region consumption"
         );
     }
 

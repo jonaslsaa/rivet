@@ -441,6 +441,14 @@ where
         &mut self,
         status: ChunkStatus,
     ) -> Option<&mut ChunkAccess<T, B, S>>;
+
+    /// Consume an owned holder and recover its concrete `ProtoChunk`, when the
+    /// holder preserves one. Borrowed and base-only holders return `None`.
+    /// This is the ownership seam used to retain successful FEATURES writes to
+    /// dependency chunks after the region cache is consumed.
+    fn into_owned_proto(self: Box<Self>) -> Option<ProtoChunk<T, B, S>> {
+        None
+    }
 }
 
 /// Why a `getChunk(x, z, status, loadOrGenerate)` request failed during world
@@ -705,6 +713,41 @@ where
         &mut self.world_border
     }
 
+    /// Consume the region and retain every concrete proto chunk in its cache.
+    /// The cache is stored x-major/z-inner, and the returned entries preserve
+    /// that canonical order. The borrowed center and any base-only holders are
+    /// intentionally omitted.
+    pub fn into_owned_proto_entries(self) -> Vec<(ChunkPos, ProtoChunk<T, B, S>)> {
+        let radius = self.generating_step.direct_dependencies().size() as i32 - 1;
+        let width = radius * 2 + 1;
+        let center_pos = self.center_pos;
+        self.cache
+            .into_entries()
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, holder)| {
+                let dx = index as i32 / width - radius;
+                let dz = index as i32 % width - radius;
+                let pos = ChunkPos::new(
+                    center_pos.x().wrapping_add(dx),
+                    center_pos.z().wrapping_add(dz),
+                );
+                holder.into_owned_proto().map(|chunk| (pos, chunk))
+            })
+            .collect()
+    }
+
+    /// Consume the region and retain the concrete proto chunks in the
+    /// FEATURES write zone's distance-1 dependency ring. The returned subset
+    /// keeps the canonical x-major/z-inner order.
+    pub fn into_distance_one_proto_writebacks(self) -> Vec<(ChunkPos, ProtoChunk<T, B, S>)> {
+        let center_pos = self.center_pos;
+        self.into_owned_proto_entries()
+            .into_iter()
+            .filter(|(pos, _)| center_pos.get_chessboard_distance_coords(pos.x(), pos.z()) == 1)
+            .collect()
+    }
+
     /// Block ticks owned by the cached chunks, in cache iteration order. This
     /// compatibility view exists only for value-layer tests; scheduling itself
     /// always routes to the chunk containing the scheduled position.
@@ -869,6 +912,23 @@ where
         self.get_chunk_mut(chunk_x, chunk_z)
             .schedule_block_tick(ScheduledTick::new_normal(
                 block,
+                *pos,
+                trigger_tick,
+                sub_tick_order,
+            ));
+    }
+
+    /// `LevelAccessor.scheduleTick(BlockPos, Fluid, int)` — route through the
+    /// owning chunk's `ProtoChunkTicks`, matching the block-tick path above.
+    fn schedule_fluid_tick_owner(&mut self, pos: &BlockPos, fluid: FluidId, delay: i32) {
+        let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
+        let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
+        let trigger_tick = self.game_time.wrapping_add(delay as i64);
+        let sub_tick_order = self.next_sub_tick_order;
+        self.next_sub_tick_order = self.next_sub_tick_order.wrapping_add(1);
+        self.get_chunk_mut(chunk_x, chunk_z)
+            .schedule_fluid_tick(ScheduledTick::new_normal(
+                fluid,
                 *pos,
                 trigger_tick,
                 sub_tick_order,
@@ -1438,6 +1498,12 @@ impl WorldGenLevel for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> 
         chunk.get_height_at(ty, x, z) + 1
     }
 
+    /// `LevelAccessor.scheduleTick(BlockPos, Fluid, int)` — route through the
+    /// owning chunk's `ProtoChunkTicks`.
+    fn schedule_tick(&mut self, pos: &BlockPos, fluid: FluidId, delay: i32) {
+        self.schedule_fluid_tick_owner(pos, fluid, delay);
+    }
+
     /// `LevelAccessor.scheduleTick(BlockPos, Block, int)` — route through the
     /// owning chunk's `ProtoChunkTicks`.
     fn schedule_block_tick(
@@ -1587,13 +1653,17 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
     }
 
     /// `BlockBehaviour.BlockStateBase.canSurvive` for the vegetation states
-    /// reached by the seed-42 FEATURES slice. Paper's `VegetationBlock` checks
+    /// reached by the seed-42 FEATURES slice, including the stage-0 dark oak
+    /// sapling used by `dark_oak_leaf_litter`. Paper's `VegetationBlock` checks
     /// only the block below against `BlockTags.SUPPORTS_VEGETATION`; keeping
     /// this as a world-backed read (rather than a state-only shortcut) is
     /// important because the feature's random offset can land across chunks.
     fn can_survive(&self, state: &BlockState, pos: &BlockPos) -> bool {
         match state.block().name() {
-            "minecraft:short_grass" | "minecraft:fern" | "minecraft:firefly_bush" => self
+            "minecraft:short_grass"
+            | "minecraft:fern"
+            | "minecraft:firefly_bush"
+            | "minecraft:dark_oak_sapling" => self
                 .get_block_state(&pos.below())
                 .is_in_tag("minecraft:supports_vegetation"),
             other => {
@@ -1795,6 +1865,12 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
     /// `WorldGenRegion.getSeaLevel()` — `level.getSeaLevel()`.
     fn get_sea_level(&self) -> i32 {
         self.sea_level
+    }
+
+    /// `LevelAccessor.scheduleTick(BlockPos, Fluid, int)` — route through the
+    /// owning chunk's `ProtoChunkTicks`.
+    fn schedule_tick(&mut self, pos: &BlockPos, fluid: FluidId, delay: i32) {
+        self.schedule_fluid_tick_owner(pos, fluid, delay);
     }
 
     /// `LevelAccessor.scheduleTick(BlockPos, Block, int)` — route through the
@@ -2176,6 +2252,10 @@ where
             .get_persisted_status()
             .is_or_after(status)
             .then_some(self.chunk.base_mut())
+    }
+
+    fn into_owned_proto(self: Box<Self>) -> Option<ProtoChunk<T, B, S>> {
+        Some(self.chunk)
     }
 }
 
@@ -3623,6 +3703,32 @@ mod tests {
         let ticks = region.scheduled_block_ticks();
         assert_eq!(ticks.len(), 1);
         assert_eq!(ticks[0].r#type, block);
+        assert_eq!(ticks[0].pos, pos);
+        assert_eq!(ticks[0].delay, 0);
+    }
+
+    /// `scheduleTick(BlockPos, Fluid, int)` retains the zero-delay fluid tick
+    /// in the owning chunk and applies `ProtoChunkTicks` deduplication.
+    #[test]
+    fn schedule_fluid_tick_is_retained_and_deduplicated() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(8, 64, 9);
+        let fluid = FluidId(4);
+        <WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::schedule_tick(
+            &mut region,
+            &pos,
+            fluid,
+            0,
+        );
+        <WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> as WorldGenLevel>::schedule_tick(
+            &mut region,
+            &pos,
+            fluid,
+            0,
+        );
+        let ticks = region.get_chunk(0, 0).get_fluid_ticks().scheduled_ticks();
+        assert_eq!(ticks.len(), 1);
+        assert_eq!(ticks[0].r#type, fluid);
         assert_eq!(ticks[0].pos, pos);
         assert_eq!(ticks[0].delay, 0);
     }
