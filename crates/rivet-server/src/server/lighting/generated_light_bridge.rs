@@ -55,11 +55,14 @@ pub enum GeneratedLightWorkspaceError {
     /// No runtime neighbour storage was supplied.
     #[error("generated LIGHT workspace at {center:?} has no runtime neighbours")]
     EmptyStorage { center: ChunkPos },
-    /// A required radius-two neighbour is absent.
+    /// A required radius-one neighbour is absent. Radius-two neighbours are
+    /// an optional cache/write window and may be absent, exactly like
+    /// Starlight's `setupCaches(..., tryToLoadChunksFor2Radius=true)` path.
     #[error("generated LIGHT workspace at {center:?} is missing neighbour {pos:?}")]
     MissingNeighbour { center: ChunkPos, pos: ChunkPos },
-    /// A required neighbour is present but cannot be used by Starlight because
-    /// it is not already light-correct.
+    /// A required radius-one neighbour is present but cannot be used by
+    /// Starlight because it is not already light-correct. Radius-two entries
+    /// are optional and are filtered by the engine's `canUseChunk` gate.
     #[error("generated LIGHT workspace neighbour {pos:?} at {center:?} is not light-correct")]
     NeighbourNotLightCorrect { center: ChunkPos, pos: ChunkPos },
     /// Storage contains a chunk outside the exact radius-two neighbourhood.
@@ -361,15 +364,20 @@ pub fn provider_for_owned_storage(
     ))
 }
 
-/// The radius of the finite runtime window required by one Starlight LIGHT
-/// task. Paper's Moonrise LIGHT step has a write radius of two; the owned
-/// workspace therefore requires the complete 5x5 window around its center.
+/// The radius of the finite runtime cache/write window used by one
+/// Starlight LIGHT task. Paper's Moonrise LIGHT step probes a 5x5 window, but
+/// its radius-two entries are optional: only the inner radius-one neighbours
+/// are required to be usable before the first LIGHT construction.
 pub const GENERATED_LIGHT_NEIGHBOR_RADIUS: i32 = 2;
+/// The radius whose chunks must already be usable by the first generated LIGHT
+/// task. This mirrors the scheduler's actual prerequisite rather than treating
+/// the radius-two cache/write window as a generation dependency.
+pub const GENERATED_LIGHT_REQUIRED_RADIUS: i32 = 1;
 
-fn required_light_neighbors(center: ChunkPos) -> Vec<ChunkPos> {
-    let mut neighbors = Vec::with_capacity(24);
-    for dz in -GENERATED_LIGHT_NEIGHBOR_RADIUS..=GENERATED_LIGHT_NEIGHBOR_RADIUS {
-        for dx in -GENERATED_LIGHT_NEIGHBOR_RADIUS..=GENERATED_LIGHT_NEIGHBOR_RADIUS {
+fn neighbors_at_radius(center: ChunkPos, radius: i32) -> Vec<ChunkPos> {
+    let mut neighbors = Vec::with_capacity((radius * 2 + 1).pow(2) as usize - 1);
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
             if dx != 0 || dz != 0 {
                 neighbors.push(ChunkPos::new(
                     center.x().wrapping_add(dx),
@@ -381,13 +389,23 @@ fn required_light_neighbors(center: ChunkPos) -> Vec<ChunkPos> {
     neighbors
 }
 
+fn required_light_neighbors(center: ChunkPos) -> Vec<ChunkPos> {
+    neighbors_at_radius(center, GENERATED_LIGHT_REQUIRED_RADIUS)
+}
+
+fn light_window_neighbors(center: ChunkPos) -> Vec<ChunkPos> {
+    neighbors_at_radius(center, GENERATED_LIGHT_NEIGHBOR_RADIUS)
+}
+
 /// A finite, tick-thread-owned generated-light workspace.
 ///
 /// The center remains the caller's borrowed worldgen `ProtoChunk`; this value
-/// owns exactly the 24 runtime neighbours in Paper's radius-two LIGHT window.
-/// G4 converts its real generated support chunks into [`LightChunk`] values and
-/// supplies them here. No chunk is installed into `ChunkMap`, and a partial,
-/// empty, extra, or mis-keyed window is rejected at construction.
+/// owns the runtime neighbours supplied in Paper's radius-two LIGHT window.
+/// The eight radius-one neighbours are required and must already be usable;
+/// radius-two entries are optional cache/write support and may be absent or
+/// unlit. G4 converts its real generated support chunks into [`LightChunk`]
+/// values and supplies them here. No chunk is installed into `ChunkMap`, and
+/// an empty, extra, or mis-keyed window is rejected at construction.
 pub struct GeneratedLightWorkspace {
     /// `None` after the owner has detached the finite runtime workspace. A
     /// detached task remains safely droppable but cannot be run again.
@@ -397,10 +415,13 @@ pub struct GeneratedLightWorkspace {
 }
 
 impl GeneratedLightWorkspace {
-    /// Build a workspace over the exact radius-two runtime neighbour window
-    /// already owned by the current tick thread. Validation borrows `chunks`
-    /// first; ownership transfers only after every check succeeds, so every
-    /// refusal leaves the caller's authoritative map intact for recovery.
+    /// Build a workspace over the runtime neighbour window already owned by the
+    /// current tick thread. All radius-one entries must be present and
+    /// light-correct; radius-two entries are optional and, when present, may be
+    /// unlit because Starlight's `canUseChunk` gate simply excludes them.
+    /// Validation borrows `chunks` first; ownership transfers only after every
+    /// check succeeds, so every refusal leaves the caller's authoritative map
+    /// intact for recovery.
     pub fn new(
         height_accessor: SimpleLevelHeightAccessor,
         has_sky_light: bool,
@@ -418,7 +439,10 @@ impl GeneratedLightWorkspace {
             });
         }
         let required_neighbors = required_light_neighbors(center);
-        let expected = required_neighbors.iter().copied().collect::<HashSet<_>>();
+        let required = required_neighbors.iter().copied().collect::<HashSet<_>>();
+        let expected = light_window_neighbors(center)
+            .into_iter()
+            .collect::<HashSet<_>>();
         if chunks.is_empty() {
             return Err(GeneratedLightWorkspaceError::EmptyStorage { center });
         }
@@ -437,7 +461,11 @@ impl GeneratedLightWorkspace {
                     pos: actual,
                 });
             }
-            if !chunk.is_light_correct() {
+            // The first generated LIGHT task needs a usable inner ring. The
+            // radius-two cache/write window is optional; Starlight's
+            // `canUseChunk` filter legitimately excludes an absent or unlit
+            // outer-ring chunk during initial construction.
+            if required.contains(&actual) && !chunk.is_light_correct() {
                 return Err(GeneratedLightWorkspaceError::NeighbourNotLightCorrect {
                     center,
                     pos: actual,
@@ -1166,7 +1194,7 @@ mod tests {
     }
 
     fn all_neighbor_storage(center: ChunkPos) -> GeneratedLightStorage {
-        required_light_neighbors(center)
+        light_window_neighbors(center)
             .into_iter()
             .map(|pos| ((pos.x(), pos.z()), light_correct_runtime_air(pos)))
             .collect()
@@ -1211,9 +1239,13 @@ mod tests {
         let center = ChunkPos::new(i32::MAX, i32::MIN);
         let neighbors = required_light_neighbors(center);
 
-        assert_eq!(neighbors.len(), 24);
-        assert!(neighbors.contains(&ChunkPos::new(i32::MAX.wrapping_add(2), i32::MIN)));
-        assert!(neighbors.contains(&ChunkPos::new(i32::MAX, i32::MIN.wrapping_sub(2))));
+        assert_eq!(neighbors.len(), 8);
+        assert!(neighbors.contains(&ChunkPos::new(i32::MAX.wrapping_add(1), i32::MIN)));
+        assert!(neighbors.contains(&ChunkPos::new(i32::MAX, i32::MIN.wrapping_sub(1))));
+        let window = light_window_neighbors(center);
+        assert_eq!(window.len(), 24);
+        assert!(window.contains(&ChunkPos::new(i32::MAX.wrapping_add(2), i32::MIN)));
+        assert!(window.contains(&ChunkPos::new(i32::MAX, i32::MIN.wrapping_sub(2))));
     }
 
     #[test]
@@ -1412,10 +1444,10 @@ mod tests {
     }
 
     #[test]
-    fn generated_workspace_rejects_partial_coverage_before_attachment() {
+    fn generated_workspace_rejects_missing_required_radius_one_before_attachment() {
         let center = ChunkPos::ZERO;
-        let missing = ChunkPos::new(2, 0);
-        let mut chunks: HashMap<_, _> = required_light_neighbors(center)
+        let missing = ChunkPos::new(1, 0);
+        let mut chunks: HashMap<_, _> = light_window_neighbors(center)
             .into_iter()
             .filter(|pos| *pos != missing)
             .map(|pos| ((pos.x(), pos.z()), light_correct_runtime_air(pos)))
@@ -1424,7 +1456,7 @@ mod tests {
 
         let err = match GeneratedLightWorkspace::new(overworld(), true, false, center, &mut chunks)
         {
-            Ok(_) => panic!("partial radius-two window must be rejected"),
+            Ok(_) => panic!("missing radius-one prerequisite must be rejected"),
             Err(err) => err,
         };
         assert_eq!(chunks.len(), before);
@@ -1435,6 +1467,66 @@ mod tests {
                 pos: missing,
             }
         );
+    }
+
+    #[test]
+    fn generated_workspace_accepts_missing_radius_two_neighbor() {
+        use rivet_world::chunk::status::GENERATION_PYRAMID;
+
+        let center = ChunkPos::ZERO;
+        let missing = ChunkPos::new(2, 0);
+        let mut chunks = all_neighbor_storage(center);
+        chunks.remove(&(missing.x(), missing.z()));
+        let workspace = GeneratedLightWorkspace::new(overworld(), true, false, center, &mut chunks)
+            .expect("radius-two cache entries are optional");
+        let mut ctx = workspace_context(workspace);
+        let mut chunk = generated_chunk();
+        chunk.set_persisted_status(ChunkStatus::Carvers);
+        ctx.run_step(
+            GENERATION_PYRAMID.get_step_to(ChunkStatus::InitializeLight),
+            &mut chunk,
+        )
+        .expect("INITIALIZE_LIGHT only needs the usable inner ring");
+        ctx.run_step(
+            GENERATION_PYRAMID.get_step_to(ChunkStatus::Light),
+            &mut chunk,
+        )
+        .expect("first LIGHT does not require the missing outer cache entry");
+        let storage = ctx
+            .take_generated_light_storage()
+            .expect("workspace storage remains recoverable");
+        assert_eq!(storage.len(), 23);
+        assert!(!storage.contains_key(&(missing.x(), missing.z())));
+    }
+
+    #[test]
+    fn generated_workspace_accepts_unlit_radius_two_neighbor_and_engine_skips_it() {
+        use rivet_world::chunk::status::GENERATION_PYRAMID;
+
+        let center = ChunkPos::ZERO;
+        let unlit = ChunkPos::new(2, 0);
+        let mut chunks = all_neighbor_storage(center);
+        chunks.insert((unlit.x(), unlit.z()), runtime_air(unlit));
+        let workspace = GeneratedLightWorkspace::new(overworld(), true, false, center, &mut chunks)
+            .expect("an unlit radius-two cache entry is optional");
+        let mut ctx = workspace_context(workspace);
+        let mut chunk = generated_chunk();
+        chunk.set_persisted_status(ChunkStatus::Carvers);
+        ctx.run_step(
+            GENERATION_PYRAMID.get_step_to(ChunkStatus::InitializeLight),
+            &mut chunk,
+        )
+        .expect("INITIALIZE_LIGHT only needs the usable inner ring");
+        ctx.run_step(
+            GENERATION_PYRAMID.get_step_to(ChunkStatus::Light),
+            &mut chunk,
+        )
+        .expect("first LIGHT skips an unlit outer cache entry");
+        let storage = ctx
+            .take_generated_light_storage()
+            .expect("workspace storage remains recoverable");
+        assert!(storage.contains_key(&(unlit.x(), unlit.z())));
+        assert!(!storage[&(unlit.x(), unlit.z())].is_light_correct());
     }
 
     #[test]
@@ -1489,10 +1581,10 @@ mod tests {
     }
 
     #[test]
-    fn generated_workspace_rejects_unusable_light_neighbor() {
+    fn generated_workspace_rejects_unusable_required_radius_one_neighbor() {
         let center = ChunkPos::ZERO;
-        let unusable = ChunkPos::new(2, 0);
-        let mut chunks: HashMap<_, _> = required_light_neighbors(center)
+        let unusable = ChunkPos::new(1, 0);
+        let mut chunks: HashMap<_, _> = light_window_neighbors(center)
             .into_iter()
             .map(|pos| ((pos.x(), pos.z()), light_correct_runtime_air(pos)))
             .collect();
@@ -1501,7 +1593,7 @@ mod tests {
         let before = chunks.len();
         let err = match GeneratedLightWorkspace::new(overworld(), true, false, center, &mut chunks)
         {
-            Ok(_) => panic!("an unlit neighbour must be rejected"),
+            Ok(_) => panic!("an unlit radius-one prerequisite must be rejected"),
             Err(err) => err,
         };
         assert_eq!(chunks.len(), before);
@@ -1517,7 +1609,7 @@ mod tests {
     #[test]
     fn generated_workspace_preserves_storage_on_miskey_and_extra_refusals() {
         let center = ChunkPos::ZERO;
-        let mut miskeyed: HashMap<_, _> = required_light_neighbors(center)
+        let mut miskeyed: HashMap<_, _> = light_window_neighbors(center)
             .into_iter()
             .map(|pos| ((pos.x(), pos.z()), light_correct_runtime_air(pos)))
             .collect();
