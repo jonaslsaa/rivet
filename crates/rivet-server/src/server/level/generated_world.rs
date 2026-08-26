@@ -2298,6 +2298,12 @@ fn is_pathfindable_land(state: BlockState) -> bool {
     if name == "minecraft:powder_snow" {
         return true;
     }
+    // Scaffolding does not override `BlockBehaviour.isPathfindable`: its
+    // empty collision context selects the stable, non-full shape, so the
+    // inherited LAND predicate is true even though the block is dynamic.
+    if name == "minecraft:scaffolding" {
+        return true;
+    }
     if state.has_dynamic_shape() {
         return false;
     }
@@ -2308,7 +2314,6 @@ fn is_pathfindable_land(state: BlockState) -> bool {
         | "minecraft:farmland"
         | "minecraft:mud"
         | "minecraft:cactus"
-        | "minecraft:scaffolding"
         | "minecraft:iron_bars"
         | "minecraft:chain"
         | "minecraft:anvil"
@@ -2324,6 +2329,7 @@ fn is_pathfindable_land(state: BlockState) -> bool {
         | "minecraft:chest"
         | "minecraft:trapped_chest"
         | "minecraft:copper_chest"
+        | "minecraft:ender_chest"
         | "minecraft:chorus_plant"
         | "minecraft:cocoa"
         | "minecraft:composter"
@@ -2368,6 +2374,8 @@ fn is_pathfindable_land(state: BlockState) -> bool {
             || name.ends_with("_shelf")
             || name.ends_with("_pane")
             || name.ends_with("_bars")
+            || name.ends_with("_chain")
+            || name.ends_with("_copper_golem_statue")
             || name.ends_with("_wall_hanging_sign") =>
         {
             false
@@ -2656,7 +2664,10 @@ fn spawn_collision_shape(
                     ) && state
                         .get_value(BlockStateProperties::BOTTOM)
                         .is_some_and(|value| matches!(value, PropertyValue::Bool(true)))
-                        && entity_min_y > pos.get_y() as f64 - 1.0e-5 =>
+                        // `SHAPE_BELOW_BLOCK` is two pixels tall; the
+                        // entity context must be above that shape, not merely
+                        // above the block's bottom face.
+                        && entity_min_y > pos.get_y() as f64 + 2.0 / 16.0 - 1.0e-5 =>
                 {
                     SpawnCollisionShape::Box(SpawnShapeBox::new(
                         0.0,
@@ -5711,7 +5722,7 @@ mod tests {
                 .is_some_and(|shape| shape.intersects(0, 0, 0, &inside_scaffolding))
         );
         assert!(
-            spawn_collision_shape(
+            !spawn_collision_shape(
                 unstable_scaffolding,
                 &pos,
                 SpawnCollisionContext::Entity {
@@ -5720,6 +5731,18 @@ mod tests {
                 }
             )
             .is_some_and(|shape| shape.intersects(0, 0, 0, &inside_scaffolding))
+        );
+        let above_unstable_scaffolding = SpawnAabb::new(0.4, 0.2, 0.4, 0.6, 0.3, 0.6);
+        assert!(
+            spawn_collision_shape(
+                unstable_scaffolding,
+                &pos,
+                SpawnCollisionContext::Entity {
+                    entity_type: "minecraft:cow",
+                    entity_min_y: 0.2,
+                }
+            )
+            .is_some_and(|shape| shape.intersects(0, 0, 0, &above_unstable_scaffolding))
         );
         assert!(
             spawn_collision_shape(bamboo, &pos, SpawnCollisionContext::Empty)
@@ -5782,6 +5805,11 @@ mod tests {
         let cake = BlockState::of(BlockId::from_name("minecraft:cake").unwrap());
         let flower_pot = BlockState::of(BlockId::from_name("minecraft:flower_pot").unwrap());
         let lantern = BlockState::of(BlockId::from_name("minecraft:lantern").unwrap());
+        let scaffolding = BlockState::of(BlockId::from_name("minecraft:scaffolding").unwrap());
+        let ender_chest = BlockState::of(BlockId::from_name("minecraft:ender_chest").unwrap());
+        let copper_chain = BlockState::of(BlockId::from_name("minecraft:copper_chain").unwrap());
+        let exposed_copper_statue =
+            BlockState::of(BlockId::from_name("minecraft:exposed_copper_golem_statue").unwrap());
         let water = BlockState::of(BlockId::from_name("minecraft:water").unwrap());
         let lava = BlockState::of(BlockId::from_name("minecraft:lava").unwrap());
         let closed_door = BlockState::of(BlockId::from_name("minecraft:oak_door").unwrap());
@@ -5796,6 +5824,10 @@ mod tests {
         assert!(!is_pathfindable_land(cake));
         assert!(!is_pathfindable_land(flower_pot));
         assert!(!is_pathfindable_land(lantern));
+        assert!(is_pathfindable_land(scaffolding));
+        assert!(!is_pathfindable_land(ender_chest));
+        assert!(!is_pathfindable_land(copper_chain));
+        assert!(!is_pathfindable_land(exposed_copper_statue));
         assert!(!is_pathfindable_land(closed_door));
         assert!(is_pathfindable_land(open_door));
         assert!(is_pathfindable_land(ladder));

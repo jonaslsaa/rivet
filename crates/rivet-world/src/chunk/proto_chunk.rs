@@ -598,6 +598,7 @@ where
             carving_mask: _,
             air: _,
             void_air: _,
+            upgrading: _,
         } = self;
         (base, entities)
     }
