@@ -1399,6 +1399,61 @@ fn retain_overworld_only(root: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+/// Prune an extracted Paper capture tree to the contract's exact payload
+/// closure. The `--all-regions` extraction dumps every saved chunk in the four
+/// origin-adjacent regions — including the spawn-area chunks every genuine
+/// boot saves — while the contract covers only the eight forced corpus
+/// coordinates. Without this prune the verifier's exact payload-closure check
+/// would refuse genuine evidence as having "extra paths". Every pruned file
+/// was produced by the same boot, so dropping it cannot hide divergence: the
+/// remaining bytes are still compared in full against the Rivet side.
+fn prune_to_contract_closure(root: &Path, contract: &GeneratedContract) -> Result<(), Error> {
+    let keep = expected_paths(contract);
+    let dim_root = root.join("chunk").join(&contract.dimension);
+    for region_entry in fs::read_dir(&dim_root)
+        .map_err(|error| Error::Gate(format!("cannot read {}: {error}", dim_root.display())))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Error::Io)?
+    {
+        let region_path = region_entry.path();
+        reject_symlink(&region_path, "generated-full extracted region")?;
+        if !is_real_dir(&region_path) {
+            return Err(Error::Gate(format!(
+                "generated-full extracted region {} is not a directory",
+                region_path.display()
+            )));
+        }
+        for file_entry in fs::read_dir(&region_path)
+            .map_err(|error| {
+                Error::Gate(format!("cannot read {}: {error}", region_path.display()))
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Error::Io)?
+        {
+            let path = file_entry.path();
+            reject_symlink(&path, "generated-full extracted payload")?;
+            if !keep.contains(
+                path.strip_prefix(root)
+                    .map(|relative| relative.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+                    .as_str(),
+            ) {
+                fs::remove_file(&path).map_err(Error::Io)?;
+            }
+        }
+        if fs::read_dir(&region_path)
+            .map_err(|error| {
+                Error::Gate(format!("cannot read {}: {error}", region_path.display()))
+            })?
+            .next()
+            .is_none()
+        {
+            fs::remove_dir(&region_path).map_err(Error::Io)?;
+        }
+    }
+    Ok(())
+}
+
 fn check_snapshot_closure(root: &Path) -> Result<(), Error> {
     let expected = BTreeSet::from([
         "chunk".to_string(),
@@ -1730,8 +1785,9 @@ fn run_fresh_replay_with_paper_boots(
                 observed,
             )?;
             normalize_last_update_tree(&paper_output)?;
-            rehash_captured(&paper_output)?;
             retain_overworld_only(&paper_output)?;
+            prune_to_contract_closure(&paper_output, contract)?;
+            rehash_captured(&paper_output)?;
             write_seed_config(&paper_output, contract, seed)?;
             let paper_snapshot = paper_seed_root.join(format!("snapshot-{boot}"));
             snapshot_tree(&paper_output, &paper_snapshot)?;
@@ -4011,6 +4067,86 @@ mod tests {
 
     fn test_contract() -> GeneratedContract {
         canonical_contract()
+    }
+
+    /// A genuine `--all-regions` Paper extraction carries every saved chunk in
+    /// the four origin-adjacent regions, not just the eight forced corpus
+    /// coordinates. The prune must reduce that tree to the exact contract
+    /// closure (dropping off-contract payloads and emptying non-covered
+    /// regions) while keeping every on-contract payload byte-identical.
+    #[test]
+    fn prune_to_contract_closure_keeps_only_contract_payloads() {
+        let contract = test_contract();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("output");
+        // Contract payloads plus genuine-boot extras: spawn-area chunks and a
+        // whole region directory the contract does not cover.
+        for coordinate in &contract.coordinates {
+            let region = region_for(coordinate.x, coordinate.z);
+            let dir = root.join("chunk").join(&contract.dimension).join(&region);
+            fs::create_dir_all(&dir).unwrap();
+            let payload = mutate::fixture_full_payload_with_seed(coordinate.x, coordinate.z, 1);
+            fs::write(
+                dir.join(format!("{}.{}.nbt", coordinate.x, coordinate.z)),
+                payload.clone(),
+            )
+            .unwrap();
+        }
+        let dim_root = root.join("chunk").join(&contract.dimension);
+        let spawn_dir = dim_root.join("0.0");
+        fs::write(spawn_dir.join("4.7.nbt"), b"spawn-area extra chunk").unwrap();
+        fs::write(spawn_dir.join("-5.12.nbt"), b"spawn-area extra chunk 2").unwrap();
+        let other_region = dim_root.join("1.0");
+        fs::create_dir_all(&other_region).unwrap();
+        fs::write(other_region.join("32.0.nbt"), b"outside declared closure").unwrap();
+
+        prune_to_contract_closure(&root, &contract).unwrap();
+
+        for coordinate in &contract.coordinates {
+            let path = dim_root
+                .join(region_for(coordinate.x, coordinate.z))
+                .join(format!("{}.{}.nbt", coordinate.x, coordinate.z));
+            assert_eq!(
+                fs::read(&path).unwrap(),
+                mutate::fixture_full_payload_with_seed(coordinate.x, coordinate.z, 1),
+                "on-contract payload {path:?} must survive the prune unchanged"
+            );
+        }
+        assert!(!spawn_dir.join("4.7.nbt").exists());
+        assert!(!spawn_dir.join("-5.12.nbt").exists());
+        assert!(!other_region.exists(), "emptied region dir is removed");
+    }
+
+    /// A malformed extraction must still fail loudly: the prune runs before
+    /// discovery, but it never deletes or rewrites an on-contract payload, so
+    /// tampered bytes still reach the verifier's exactly-one-mismatch gate.
+    #[test]
+    fn prune_preserves_on_contract_bytes_for_verifier_discrimination() {
+        let contract = test_contract();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("output");
+        let target = contract.coordinates.first().unwrap().clone();
+        let dir = root
+            .join("chunk")
+            .join(&contract.dimension)
+            .join(region_for(target.x, target.z));
+        fs::create_dir_all(&dir).unwrap();
+        let original = mutate::fixture_full_payload_with_seed(target.x, target.z, 1);
+        fs::write(
+            dir.join(format!("{}.{}.nbt", target.x, target.z)),
+            &original,
+        )
+        .unwrap();
+        fs::write(dir.join("9.9.nbt"), b"extra").unwrap();
+
+        prune_to_contract_closure(&root, &contract).unwrap();
+
+        assert_eq!(
+            fs::read(dir.join(format!("{}.{}.nbt", target.x, target.z))).unwrap(),
+            original,
+            "the prune must be byte-preserving for kept payloads"
+        );
+        assert!(!dir.join("9.9.nbt").exists());
     }
 
     fn write_provenance(root: &Path, provenance: &GeneratedProvenance) {
