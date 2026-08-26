@@ -1207,18 +1207,34 @@ impl GenerationChunkHolder {
             return Err(GeneratedChunkError::Generation(error));
         }
         let current = self.chunk.get_persisted_status();
-        // The holder can actually enter FEATURES only for a direct FEATURES
-        // request: LIGHT/SPAWN are preflight-invalid without a light engine,
-        // while FULL is a separate consuming promotion boundary. Snapshot the
-        // whole proto before any call that can enter FEATURES, regardless of
-        // whether its current status is EMPTY, an intermediate rung, or
-        // CARVERS.
-        let features_snapshot = (current.index() < ChunkStatus::Features.index()
-            && target == ChunkStatus::Features)
-            .then(|| snapshot_generated_chunk(&self.chunk));
-        let result = self
-            .context
-            .generate_through(&GENERATION_PYRAMID, &mut self.chunk, target);
+        // A LIGHT or SPAWN request can enter the FEATURES body before a later
+        // light prerequisite fails. Snapshot the whole proto before every
+        // non-FULL path that reaches FEATURES, not only a direct FEATURES
+        // request. The released generic boundary restores this value on every
+        // typed error and panic, including all shared ChunkAccess writes and
+        // the terminal failure cache.
+        let can_enter_features = current.index() < ChunkStatus::Features.index()
+            && target.index() >= ChunkStatus::Features.index();
+        let features_snapshot = can_enter_features.then(|| snapshot_generated_chunk(&self.chunk));
+        let prior_features_failure = self.features_failure;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.context
+                .generate_through(&GENERATION_PYRAMID, &mut self.chunk, target)
+        }));
+        let result = match result {
+            Ok(result) => result,
+            Err(payload) => {
+                // A FEATURES closure is caller-owned and may panic after it
+                // has written blocks, heightmaps, or other ChunkAccess state.
+                // Restore before resuming the original panic so the holder is
+                // retryable and its failure state is unchanged.
+                if let Some(snapshot) = features_snapshot {
+                    self.chunk = snapshot;
+                    self.features_failure = prior_features_failure;
+                }
+                std::panic::resume_unwind(payload);
+            }
+        };
         match result {
             Ok(()) => {
                 if features_snapshot.is_some() {
@@ -1230,26 +1246,36 @@ impl GenerationChunkHolder {
                 }
                 Ok(())
             }
-            Err(GenError::UnsupportedStatus(status)) => {
-                self.pending_feature_writebacks.borrow_mut().take();
-                Err(GeneratedChunkError::UnsupportedStatus(status))
-            }
             Err(error) => {
                 self.pending_feature_writebacks.borrow_mut().take();
-                // A direct FEATURES request is transactional from the
-                // caller's starting status through the entire path. Restore
-                // whenever that path had a snapshot, even for a non-cacheable
-                // error: lower-rung work must not leak merely because the
-                // FEATURES body returned a different typed failure. Cache only
-                // the stable FEATURES boundary errors, so retries do not replay
-                // a partially mutated decoration attempt.
+                // Any typed failure after entering this path rolls back the
+                // complete pre-FEATURES value. A failure produced by the
+                // FEATURES body remains the one cached terminal boundary; a
+                // later LIGHT/SPAWN refusal does not poison that cache.
+                let entered_features = can_enter_features
+                    && (self.chunk.get_persisted_status().index() >= ChunkStatus::Features.index()
+                        || is_features_failure(error));
                 if let Some(snapshot) = features_snapshot {
                     self.chunk = snapshot;
-                    if is_features_failure(error) {
-                        self.features_failure = Some(error);
-                    }
+                    self.features_failure = prior_features_failure;
                 }
-                Err(GeneratedChunkError::Generation(error))
+                if entered_features && is_features_failure(error) {
+                    self.features_failure = Some(error);
+                }
+                match error {
+                    GenError::UnsupportedStatus(status) => {
+                        Err(GeneratedChunkError::UnsupportedStatus(status))
+                    }
+                    error => Err(GeneratedChunkError::Generation(error)),
+                }
+            }
+                }
+                match error {
+                    GenError::UnsupportedStatus(status) => {
+                        Err(GeneratedChunkError::UnsupportedStatus(status))
+                    }
+                    error => Err(GeneratedChunkError::Generation(error)),
+                }
             }
         }
     }
@@ -5431,6 +5457,124 @@ mod tests {
             GeneratedChunkError::Generation(GenError::StructureDecorationIndexUnavailable { .. })
         ));
         assert_generated_proto_equal(&holder.chunk, &expected.chunk);
+    }
+
+    /// A typed FEATURES failure reached through a LIGHT target must restore
+    /// every pre-FEATURES field, not merely the persisted status. This is the
+    /// counterfactual that used to bypass the direct-FEATURES snapshot.
+    #[test]
+    fn light_target_features_failure_rolls_back_the_complete_proto() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder.attach_generated_light_workspace(full_light_workspace_for_test(ChunkPos::ZERO));
+
+        let err = holder
+            .generate_through(ChunkStatus::Light)
+            .expect_err("the FEATURES boundary must be reached before LIGHT");
+        assert!(matches!(
+            err,
+            GeneratedChunkError::Generation(GenError::FeaturePlacementDecode { .. })
+                | GeneratedChunkError::Generation(GenError::SettingsNotGenerated { .. })
+                | GeneratedChunkError::Generation(
+                    GenError::StructureDecorationIndexUnavailable { .. }
+                )
+        ));
+        assert_eq!(holder.status(), ChunkStatus::Empty);
+        assert!(
+            holder
+                .chunk
+                .get_sections()
+                .iter()
+                .all(|section| section.has_only_air())
+        );
+        assert!(holder.chunk.heightmaps().iter().all(Option::is_none));
+        assert!(holder.chunk.get_post_processing().iter().all(Vec::is_empty));
+        assert!(holder.chunk.get_entities().is_empty());
+        assert!(holder.chunk.get_block_entity_nbts().is_empty());
+        assert!(holder.chunk.get_block_ticks().scheduled_ticks().is_empty());
+        assert!(holder.chunk.get_fluid_ticks().scheduled_ticks().is_empty());
+        assert!(holder.chunk.get_all_starts().is_empty());
+        assert!(holder.chunk.get_all_references().is_empty());
+        assert!(!holder.chunk.base().is_unsaved());
+        assert!(holder.features_failure.is_some());
+    }
+
+    /// SPAWN has the same FEATURES prefix as LIGHT. A usable generated-light
+    /// workspace makes the path preflight-valid, so the holder must take the
+    /// same transactional snapshot before the decoration boundary and restore
+    /// the fresh proto when FEATURES fails.
+    #[test]
+    fn spawn_target_features_failure_rolls_back_the_complete_proto() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::new(0, 1));
+        holder.attach_generated_light_workspace(full_light_workspace_for_test(ChunkPos::new(0, 1)));
+
+        let err = holder
+            .generate_through(ChunkStatus::Spawn)
+            .expect_err("the FEATURES boundary must be reached before SPAWN");
+        assert!(matches!(
+            err,
+            GeneratedChunkError::Generation(GenError::FeaturePlacementDecode { .. })
+                | GeneratedChunkError::Generation(GenError::SettingsNotGenerated { .. })
+                | GeneratedChunkError::Generation(
+                    GenError::StructureDecorationIndexUnavailable { .. }
+                )
+        ));
+        assert_eq!(holder.status(), ChunkStatus::Empty);
+        assert!(
+            holder
+                .chunk
+                .get_sections()
+                .iter()
+                .all(|section| section.has_only_air())
+        );
+        assert!(holder.chunk.heightmaps().iter().all(Option::is_none));
+        assert!(holder.chunk.get_post_processing().iter().all(Vec::is_empty));
+        assert!(holder.chunk.get_entities().is_empty());
+        assert!(holder.chunk.get_block_entity_nbts().is_empty());
+        assert!(holder.chunk.get_block_ticks().scheduled_ticks().is_empty());
+        assert!(holder.chunk.get_fluid_ticks().scheduled_ticks().is_empty());
+        assert!(holder.chunk.get_all_starts().is_empty());
+        assert!(holder.chunk.get_all_references().is_empty());
+        assert!(!holder.chunk.base().is_unsaved());
+        assert!(holder.features_failure.is_some());
+    }
+
+    /// A panic from the caller-owned FEATURES seam must use the same rollback
+    /// boundary as a typed feature error, then resume the original payload.
+    #[test]
+    fn features_panic_rolls_back_the_complete_proto_before_resuming() {
+        let generator = test_generator();
+        let context = WorldGenContext::new(
+            |_chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {},
+            |_chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {},
+            |_chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {},
+            |_chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {},
+            |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
+                chunk.set_block_state(0, chunk.get_min_y(), 0, BlockState::of(BlockId(1)));
+                panic!("test FEATURES panic");
+            },
+        );
+        let mut holder = GenerationChunkHolder {
+            chunk: fresh_worldgen_chunk(ChunkPos::ZERO, &generator),
+            context,
+            features_failure: None,
+        };
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            holder
+                .generate_through(ChunkStatus::Features)
+                .expect("the FEATURES panic must resume");
+        }));
+        assert!(panic.is_err());
+        assert_eq!(holder.status(), ChunkStatus::Empty);
+        assert_eq!(
+            holder.chunk.get_block_state(0, holder.chunk.get_min_y(), 0),
+            Blocks::AIR.default_block_state()
+        );
+        assert!(holder.chunk.heightmaps().iter().all(Option::is_none));
+        assert!(holder.chunk.get_post_processing().iter().all(Vec::is_empty));
+        assert!(holder.features_failure.is_none());
     }
 
     /// The FEATURES rung runs `addVanillaDecorations`'s full prologue and
