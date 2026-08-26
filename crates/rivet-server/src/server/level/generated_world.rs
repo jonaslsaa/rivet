@@ -716,9 +716,9 @@ impl GenerationChunkHolder {
     /// untouched by every such refusal. (The wired FEATURES rung is the
     /// exception: it runs Java's priming prologue — heightmap priming, the
     /// decoration-seed derivation, the complete 17x17 dependency window, and
-    /// the 3x3 biome union read — and then fails typed, so the chunk's
-    /// the center proto is rolled back while its persisted status remains
-    /// CARVERS; see [`GenerationChunkHolder::status`].)
+    /// the 3x3 biome union read — and then fails typed, so the center proto is
+    /// rolled back to the status and data it had before this call; see
+    /// [`GenerationChunkHolder::status`].)
     ///
     /// The SPAWN rung is wired as a seam driven by
     /// [`GenerationChunkHolder::with_spawn`] (the whole-world `spawnOriginalMobs`
@@ -732,9 +732,16 @@ impl GenerationChunkHolder {
         {
             return Err(GeneratedChunkError::Generation(error));
         }
-        let features_snapshot = (self.chunk.get_persisted_status() == ChunkStatus::Carvers
-            && target.index() >= ChunkStatus::Features.index())
-        .then(|| snapshot_generated_chunk(&self.chunk));
+        let current = self.chunk.get_persisted_status();
+        // The holder can actually enter FEATURES only for a direct FEATURES
+        // request: LIGHT/SPAWN are preflight-invalid without a light engine,
+        // while FULL is a separate consuming promotion boundary. Snapshot the
+        // whole proto before any call that can enter FEATURES, regardless of
+        // whether its current status is EMPTY, an intermediate rung, or
+        // CARVERS.
+        let features_snapshot = (current.index() < ChunkStatus::Features.index()
+            && target == ChunkStatus::Features)
+            .then(|| snapshot_generated_chunk(&self.chunk));
         let result = self
             .context
             .generate_through(&GENERATION_PYRAMID, &mut self.chunk, target);
@@ -2478,15 +2485,13 @@ mod tests {
     /// RNG past its scan. Batch 4 then decodes and executes `glow_lichen` through
     /// `minecraft:multiface_growth`. The next unsupported *selected* path is
     /// `minecraft:dark_forest_vegetation` at step 9/global index 17. The chunk is
-    /// never stamped FEATURES (it stays CARVERS).
+    /// never stamped FEATURES; the holder restores its pre-call status and data.
     #[test]
-    fn generate_through_features_stops_at_first_selected_path_mismatch() {
+    fn generate_through_features_rolls_back_fresh_holder_and_caches_failure() {
         let generator = test_generator();
         let mut holder = generator.create_holder(ChunkPos::new(0, 0));
-        holder
-            .generate_through(ChunkStatus::Carvers)
-            .expect("CARVERS");
-        assert_eq!(holder.status(), ChunkStatus::Carvers);
+        let fresh = generator.create_holder(ChunkPos::new(0, 0));
+        assert_eq!(holder.status(), ChunkStatus::Empty);
 
         let err = holder
             .generate_through(ChunkStatus::Features)
@@ -2510,17 +2515,98 @@ mod tests {
             }
         }
 
-        // The prologue may prime final heightmaps internally, but the holder's
-        // transaction rolls the center proto back after the typed boundary.
+        // The FEATURES prologue and earlier generation rungs may mutate every
+        // part of the center proto before the typed placement boundary. A
+        // failed transaction must restore the fresh EMPTY representation, not
+        // merely leave the status below FEATURES.
+        assert_eq!(holder.status(), fresh.status());
+        assert_eq!(holder.status(), ChunkStatus::Empty);
+        let holder_heightmaps: Vec<Option<Vec<i64>>> = holder
+            .chunk
+            .heightmaps()
+            .iter()
+            .map(|heightmap| heightmap.as_ref().map(|map| map.get_raw_data().to_vec()))
+            .collect();
+        let fresh_heightmaps: Vec<Option<Vec<i64>>> = fresh
+            .chunk
+            .heightmaps()
+            .iter()
+            .map(|heightmap| heightmap.as_ref().map(|map| map.get_raw_data().to_vec()))
+            .collect();
+        assert_eq!(holder_heightmaps, fresh_heightmaps);
         for ty in FINAL_HEIGHTMAPS {
             assert!(
                 holder.chunk.heightmaps()[ty as usize].is_none(),
                 "a failed FEATURES transaction must roll back {ty:?}"
             );
         }
-        // The chunk is never stamped FEATURES — the typed error propagates
-        // before the status advance, so it stays CARVERS.
-        assert_eq!(holder.status(), ChunkStatus::Carvers);
+
+        let min_y = holder.chunk.get_min_y();
+        let max_y = min_y + holder.chunk.get_height();
+        for y in min_y..max_y {
+            for z in 0..16 {
+                for x in 0..16 {
+                    assert_eq!(
+                        holder.chunk.get_block_state(x, y, z),
+                        fresh.chunk.get_block_state(x, y, z),
+                        "a failed FEATURES transaction must roll back block ({x}, {y}, {z})"
+                    );
+                }
+            }
+        }
+        for (holder_section, fresh_section) in holder
+            .chunk
+            .get_sections()
+            .iter()
+            .zip(fresh.chunk.get_sections())
+        {
+            assert_eq!(
+                holder_section.non_empty_block_count(),
+                fresh_section.non_empty_block_count(),
+                "a failed FEATURES transaction must roll back section block counts"
+            );
+            for y in 0..4 {
+                for z in 0..4 {
+                    for x in 0..4 {
+                        assert_eq!(
+                            holder_section.biomes().get(x, y, z),
+                            fresh_section.biomes().get(x, y, z),
+                            "a failed FEATURES transaction must roll back biome writes"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(holder.chunk.get_entities(), fresh.chunk.get_entities());
+        assert_eq!(
+            holder.chunk.get_block_entity_nbts(),
+            fresh.chunk.get_block_entity_nbts()
+        );
+        assert_eq!(
+            holder.chunk.get_post_processing(),
+            fresh.chunk.get_post_processing()
+        );
+        assert_eq!(
+            holder.chunk.get_block_ticks().scheduled_ticks(),
+            fresh.chunk.get_block_ticks().scheduled_ticks()
+        );
+        assert_eq!(
+            holder.chunk.get_fluid_ticks().scheduled_ticks(),
+            fresh.chunk.get_fluid_ticks().scheduled_ticks()
+        );
+        assert_eq!(holder.chunk.get_all_starts(), fresh.chunk.get_all_starts());
+        assert_eq!(
+            holder.chunk.get_all_references(),
+            fresh.chunk.get_all_references()
+        );
+        assert_eq!(
+            holder.chunk.base().is_unsaved(),
+            fresh.chunk.base().is_unsaved()
+        );
+        assert_eq!(
+            holder.chunk.get_carving_mask().map(|mask| mask.to_array()),
+            fresh.chunk.get_carving_mask().map(|mask| mask.to_array())
+        );
 
         // A retry is an idempotent terminal boundary: the holder returns the
         // cached typed failure instead of replaying partial feature placement.
@@ -2536,7 +2622,20 @@ mod tests {
                 feature_key: "minecraft:dark_forest_vegetation",
             }) if chunk_pos == ChunkPos::ZERO
         ));
-        assert_eq!(holder.status(), ChunkStatus::Carvers);
+        assert_eq!(holder.status(), ChunkStatus::Empty);
+        assert_eq!(holder.chunk.get_entities(), fresh.chunk.get_entities());
+        assert_eq!(
+            holder.chunk.get_block_entity_nbts(),
+            fresh.chunk.get_block_entity_nbts()
+        );
+        assert!(
+            holder
+                .chunk
+                .get_sections()
+                .iter()
+                .all(|section| section.has_only_air()),
+            "cached retry must not replay partial feature block writes"
+        );
     }
 
     /// The generated placed/configured pair is decoded through registry-backed
