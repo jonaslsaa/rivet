@@ -31,7 +31,10 @@ Paper server; it is not a parity result.
 - Raw decompressed chunk NBT is saved and hashed without rewriting. A separate
   canonical semantic hash sorts compound keys and removes only the root
   `InhabitedTime` and `LastUpdate` fields, which are documented save-clock
-  fields. The raw bytes remain authoritative.
+  fields. The raw bytes remain authoritative. Paper's Starlight save hook
+  intentionally writes `isLightOn=false`; persisted lit evidence is the exact
+  `starlight.light_version=10` marker together with `minecraft:full` status,
+  matching Paper's `SerializableChunkData` load rule.
 - Paper 26.2 stores the SavedData source at
   `world/dimensions/minecraft/overworld/data/minecraft/world_gen_settings.dat`.
   The driver preserves those exact bytes at the contract capture path

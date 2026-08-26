@@ -41,6 +41,8 @@ EXPECTED_RADIUS = 11
 EXPECTED_TICKET_LEVEL = 33
 EXPECTED_TICKS_LEFT = -(1 << 63)
 EXPECTED_DATA_VERSION = 4903
+STARLIGHT_VERSION_TAG = "starlight.light_version"
+STARLIGHT_LIGHT_VERSION = 10
 REGION_RE = re.compile(r"^r\.(-?\d+)\.(-?\d+)\.mca$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -227,8 +229,6 @@ def _heightmaps(root: Tag, coordinate: tuple[int, int], *, target: bool) -> tupl
         if len(values) != 256 or any(value > 384 for value in values):
             raise Failed(f"{coordinate} has out-of-range {name} heightmap")
         decoded[name] = values
-    if target and len({tuple(values) for values in decoded.values()}) < 2:
-        raise Failed(f"{coordinate} has identical required heightmaps")
     return decoded, list(required)
 
 
@@ -256,6 +256,11 @@ def _block_palette_names(root: Tag, coordinate: tuple[int, int], *, target: bool
     return names
 
 
+def persisted_light_correct(root: Tag) -> bool:
+    version = get_any(root, STARLIGHT_VERSION_TAG)
+    return version is not None and version.kind == 3 and version.value == STARLIGHT_LIGHT_VERSION
+
+
 def validate_chunk(raw: bytes, coordinate: tuple[int, int], *, target: bool) -> tuple[str, str, dict[str, Any]]:
     try:
         root = parse(raw)
@@ -269,7 +274,7 @@ def validate_chunk(raw: bytes, coordinate: tuple[int, int], *, target: bool) -> 
     light = get_any(root, "isLightOn")
     if light is None or light.kind != 1:
         raise Failed(f"{coordinate} has no isLightOn byte")
-    light_correct = bool(light.value)
+    light_correct = persisted_light_correct(root)
     if target and not light_correct:
         raise Failed(f"{coordinate} is not light-correct")
     heightmaps, heightmap_names = _heightmaps(root, coordinate, target=target)

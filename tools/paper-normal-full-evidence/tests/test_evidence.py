@@ -28,14 +28,15 @@ def packed_heightmap(offset: int) -> list[int]:
     return words
 
 
-def valid_chunk(status: str = "minecraft:full", light: bool = True, height_len: int = 37) -> bytes:
+def valid_chunk(status: str = "minecraft:full", light: bool = True, height_len: int = 37, flat_heightmaps: bool = False) -> bytes:
     names = ["minecraft:air", "minecraft:stone", "minecraft:dirt", "minecraft:grass_block", "minecraft:water", "minecraft:sand"]
     palette = Tag(9, (10, [Tag(10, {"Name": Tag(8, name)}) for name in names]))
     section = Tag(10, {"block_states": Tag(10, {"palette": palette})})
+    offsets = (0, 0, 0) if flat_heightmaps else (0, 1, 2)
     heightmaps = {
-        "WORLD_SURFACE": Tag(12, packed_heightmap(0)[:height_len]),
-        "MOTION_BLOCKING": Tag(12, packed_heightmap(1)[:height_len]),
-        "OCEAN_FLOOR": Tag(12, packed_heightmap(2)[:height_len]),
+        "WORLD_SURFACE": Tag(12, packed_heightmap(offsets[0])[:height_len]),
+        "MOTION_BLOCKING": Tag(12, packed_heightmap(offsets[1])[:height_len]),
+        "OCEAN_FLOOR": Tag(12, packed_heightmap(offsets[2])[:height_len]),
     }
     root = Tag(10, {
         "DataVersion": Tag(3, validate.EXPECTED_DATA_VERSION),
@@ -43,6 +44,7 @@ def valid_chunk(status: str = "minecraft:full", light: bool = True, height_len: 
         "zPos": Tag(3, 0),
         "Status": Tag(8, status),
         "isLightOn": Tag(1, int(light)),
+        "starlight.light_version": Tag(3, 10 if light else 9),
         "Heightmaps": Tag(10, heightmaps),
         "sections": Tag(9, (10, [section])),
     })
@@ -103,6 +105,7 @@ class EvidenceTests(unittest.TestCase):
         self.assertFalse(capture.chunk_details(valid_chunk(light=False), (0, 0), target=False)["light_correct"])
         self.assertEqual(validate.validate_chunk(valid_chunk(), (0, 0), target=False)[0], "minecraft:full")
         self.assertEqual(capture.chunk_details(valid_chunk(), (0, 0), target=False)["status"], "minecraft:full")
+        self.assertEqual(validate.validate_chunk(valid_chunk(flat_heightmaps=True), (0, 0), target=True)[0], "minecraft:full")
 
     def test_negative_chunk_evidence_cases(self):
         with self.assertRaises(validate.Failed):

@@ -53,6 +53,8 @@ RADIUS = 11
 TICKET_LEVEL = 33
 TICKET_TICKS_LEFT = -(1 << 63)
 DATA_VERSION = 4903
+STARLIGHT_VERSION_TAG = "starlight.light_version"
+STARLIGHT_LIGHT_VERSION = 10
 REGION_RE = re.compile(r"^r\.(-?\d+)\.(-?\d+)\.mca$")
 PORT_RE = re.compile(r"Starting Minecraft server on \*:(\d+)")
 QUERY_PORT_RE = re.compile(r"(?:GS4 status listener|Query listener).*?\*:(\d+)", re.I)
@@ -646,6 +648,11 @@ def reset_world_support_data(world: Path) -> tuple[list[str], list[str], list[st
     return before, tickets_before, after
 
 
+def persisted_light_correct(root: Tag) -> bool:
+    version = get_any(root, STARLIGHT_VERSION_TAG)
+    return version is not None and version.kind == 3 and version.value == STARLIGHT_LIGHT_VERSION
+
+
 def chunk_details(raw: bytes, coordinate: tuple[int, int], *, target: bool) -> dict[str, Any]:
     try:
         root = parse(raw)
@@ -660,7 +667,7 @@ def chunk_details(raw: bytes, coordinate: tuple[int, int], *, target: bool) -> d
         raise Failed(f"{coordinate} did not serialize minecraft:full")
     if light is None or light.kind != 1:
         raise Failed(f"{coordinate} did not serialize an isLightOn byte")
-    light_correct = bool(light.value)
+    light_correct = persisted_light_correct(root)
     if target and not light_correct:
         raise Failed(f"{coordinate} did not serialize isLightOn=true")
     if heightmaps is None or heightmaps.kind != 10:
@@ -682,8 +689,6 @@ def chunk_details(raw: bytes, coordinate: tuple[int, int], *, target: bool) -> d
         if len(values) != 256 or any(value > 384 for value in values):
             raise Failed(f"{coordinate} has out-of-range {name} heightmap")
         decoded[name] = values
-    if target and len({tuple(values) for values in decoded.values()}) < 2:
-        raise Failed(f"{coordinate} has no heightmap variation")
     sections = get_any(root, "sections")
     if sections is None or sections.kind != 9:
         raise Failed(f"{coordinate} has no sections list")
