@@ -1386,6 +1386,7 @@ impl GenerationChunkHolder {
             chunk,
             context,
             features_failure: _,
+            generator: _,
         } = self;
         let generated_light_storage = context.into_generated_light_storage();
         match LevelChunk::from_generated_spawn_proto(chunk) {
@@ -5499,12 +5500,16 @@ mod tests {
         assert!(holder.features_failure.is_some());
     }
 
-    /// SPAWN has the same FEATURES prefix as LIGHT. A usable generated-light
-    /// workspace makes the path preflight-valid, so the holder must take the
-    /// same transactional snapshot before the decoration boundary and restore
-    /// the fresh proto when FEATURES fails.
+    /// SPAWN has the same FEATURES prefix as LIGHT, but the shared-SPAWN
+    /// semantics on this executor keep a center-only `generate_through(SPAWN)`
+    /// at its typed seam refusal: Paper's `generateSpawn` needs the
+    /// scheduler-owned radius-one cache, so the region API
+    /// ([`GenerationChunkHolder::generate_spawn_with_region`]) is the only SPAWN
+    /// entry and no borrowed run reaches the decoration boundary here. The
+    /// refusal is decided in preflight — nothing is mutated and the terminal
+    /// FEATURES-failure cache stays untouched.
     #[test]
-    fn spawn_target_features_failure_rolls_back_the_complete_proto() {
+    fn spawn_target_preflight_refusal_preserves_the_complete_proto() {
         let generator = test_generator();
         let mut holder = generator.create_holder(ChunkPos::new(0, 1));
         holder.attach_generated_light_workspace(full_light_workspace_for_test(ChunkPos::new(0, 1)));
@@ -5512,14 +5517,13 @@ mod tests {
         let err = holder
             .generate_through(ChunkStatus::Spawn)
             .expect_err("the FEATURES boundary must be reached before SPAWN");
-        assert!(matches!(
-            err,
-            GeneratedChunkError::Generation(GenError::FeaturePlacementDecode { .. })
-                | GeneratedChunkError::Generation(GenError::SettingsNotGenerated { .. })
-                | GeneratedChunkError::Generation(
-                    GenError::StructureDecorationIndexUnavailable { .. }
-                )
-        ));
+        assert!(
+            matches!(
+                err,
+                GeneratedChunkError::UnsupportedStatus(ChunkStatus::Spawn)
+            ),
+            "center-only SPAWN must refuse at the region-seam boundary: {err:?}"
+        );
         assert_eq!(holder.status(), ChunkStatus::Empty);
         assert!(
             holder
@@ -5537,7 +5541,9 @@ mod tests {
         assert!(holder.chunk.get_all_starts().is_empty());
         assert!(holder.chunk.get_all_references().is_empty());
         assert!(!holder.chunk.base().is_unsaved());
-        assert!(holder.features_failure.is_some());
+        // The seam refusal precedes every FEATURES entry, so no terminal
+        // boundary was cached.
+        assert!(holder.features_failure.is_none());
     }
 
     /// A panic from the caller-owned FEATURES seam must use the same rollback
@@ -5559,6 +5565,7 @@ mod tests {
             chunk: fresh_worldgen_chunk(ChunkPos::ZERO, &generator),
             context,
             features_failure: None,
+            generator,
         };
 
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
