@@ -49,7 +49,13 @@
 //! `minecraft:dark_forest_vegetation` at step 9/global index 17.
 //! The chunk stays CARVERS. The INITIALIZE_LIGHT/
 //! LIGHT steps are executor-wired but engine-gated (the holder wires no light
-//! engine, so it cannot reach LIGHT).
+//! engine, so it cannot reach LIGHT). The public
+//! [`GenerationChunkHolder::generate_spawn_with_region`] API is the standalone
+//! SPAWN foundation: it requires the scheduler-owned radius-one
+//! [`SpawnRegionProtos`] workspace, so it is intentionally not attached to the
+//! center-only executor yet. No live ticket/ChunkMap caller reaches SPAWN or
+//! FULL in this slice; ordinary `generate_through(SPAWN)` therefore refuses at
+//! the missing-workspace seam rather than fabricating a detached region.
 //! Everything the value layer does not wire is refused *before* running work: a
 //! path through a light step with no engine is refused as
 //! `GenError::LightEngineMissing`, and a target past LIGHT (FULL) is out
@@ -368,8 +374,11 @@ pub struct SpawnRegionProtos {
 impl SpawnRegionProtos {
     /// Build the exact 3x3 cache around `center` from eight owned neighbours.
     /// Input order is irrelevant; cache iteration is canonicalized by chunk
-    /// coordinates when the Paper `WorldGenRegion` is composed. Detached and
-    /// existing test callers retain the default Paper border.
+    /// coordinates when the Paper `WorldGenRegion` is composed. This explicit
+    /// default-border constructor is only for callers that truly have Paper's
+    /// default border; a world-aware scheduler must use
+    /// [`Self::new_with_world_border_settings`] so its current-bounds snapshot
+    /// cannot be silently replaced.
     pub fn new(
         center: ChunkPos,
         neighbours: impl IntoIterator<Item = ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>>,
@@ -859,10 +868,12 @@ impl GenerationChunkHolder {
             },
         );
         // SPAWN is deliberately not attached to this center-only executor.
-        // Paper's `generateSpawn` constructs a radius-one `WorldGenRegion`; the
-        // production scheduler must call `generate_spawn_with_region` with its
-        // owned eight-neighbour workspace rather than silently reverting to a
-        // detached holder execution.
+        // Paper's `generateSpawn` constructs a radius-one `WorldGenRegion`, and
+        // this holder owns only its center proto. The later scheduler/G4 owner
+        // must call `generate_spawn_with_region` with its owned eight-neighbour
+        // workspace; until that attachment exists, ordinary
+        // `generate_through(ChunkStatus::Spawn)` remains a typed refusal rather
+        // than silently reverting to a detached center-only spawn.
         GenerationChunkHolder {
             chunk,
             context,
@@ -2623,6 +2634,18 @@ impl SpawnShapeBox {
         .intersects(entity)
     }
 
+    fn intersects_raw(self, block_x: i32, block_y: i32, block_z: i32, entity: &SpawnAabb) -> bool {
+        SpawnAabb::new(
+            block_x as f64 + self.min_x,
+            block_y as f64 + self.min_y,
+            block_z as f64 + self.min_z,
+            block_x as f64 + self.max_x,
+            block_y as f64 + self.max_y,
+            block_z as f64 + self.max_z,
+        )
+        .intersects_raw(entity)
+    }
+
     fn is_full(self) -> bool {
         self.min_x == 0.0
             && self.min_y == 0.0
@@ -2661,21 +2684,28 @@ impl SpawnCollisionShape {
     fn is_full(self) -> bool {
         match self {
             Self::Full => true,
-            Self::Empty | Self::Multi(_) => false,
+            Self::Empty | Self::Multi(_) | Self::StaticBoxes(_) => false,
             Self::Box(shape) => shape.is_full(),
-            Self::StaticBoxes(boxes) => boxes.len() == 1 && static_box_is_full(boxes[0]),
         }
     }
 
     fn intersects(self, block_x: i32, block_y: i32, block_z: i32, entity: &SpawnAabb) -> bool {
         match self {
             Self::Empty => false,
+            // Paper's BlockCollisions takes the optimized Shapes.block() path
+            // for an exact full cube, whose AABB test is raw (without the
+            // partial-shape CollisionUtil epsilon).
             Self::Full => SpawnShapeBox::new(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)
-                .intersects(block_x, block_y, block_z, entity),
+                .intersects_raw(block_x, block_y, block_z, entity),
             Self::Box(shape) => shape.intersects(block_x, block_y, block_z, entity),
-            Self::StaticBoxes(boxes) => boxes.iter().copied().any(|shape| {
-                static_box_to_spawn_shape(shape).intersects(block_x, block_y, block_z, entity)
-            }),
+            // Every StaticBoxes value is a partial VoxelShape. Exact full-cube
+            // table entries are normalized to Self::Full below, so this path
+            // always uses CollisionUtil's 1e-7 overlap margin.
+            Self::StaticBoxes(boxes) => boxes
+                .iter()
+                .copied()
+                .map(static_box_to_spawn_shape)
+                .any(|shape| shape.intersects(block_x, block_y, block_z, entity)),
             Self::Multi(shapes) => shapes
                 .into_iter()
                 .any(|shape| shape.intersects(block_x, block_y, block_z, entity)),
@@ -2794,7 +2824,11 @@ fn spawn_collision_shape(
     // the complete union of boxes for stairs, fences, plates, and all other
     // partial shapes.
     if let Some(boxes) = static_collision_shape_of(state.id()) {
-        return Some(SpawnCollisionShape::StaticBoxes(boxes));
+        return Some(if boxes.len() == 1 && static_box_is_full(boxes[0]) {
+            SpawnCollisionShape::Full
+        } else {
+            SpawnCollisionShape::StaticBoxes(boxes)
+        });
     }
 
     if state.is_air()
@@ -2860,36 +2894,75 @@ fn spawn_collision_shape(
     None
 }
 
-fn block_offset(pos: &BlockPos) -> (f64, f64) {
+fn block_offset_with_max(pos: &BlockPos, max_horizontal_offset: f64) -> (f64, f64) {
     let seed = rivet_util::mth::get_seed(pos.get_x(), 0, pos.get_z());
     let x = (((seed & 15) as f32 / 15.0_f32) as f64 - 0.5) * 0.5;
     let z = ((((seed >> 8) & 15) as f32 / 15.0_f32) as f64 - 0.5) * 0.5;
-    (x.clamp(-0.25, 0.25), z.clamp(-0.25, 0.25))
+    (
+        x.clamp(-max_horizontal_offset, max_horizontal_offset),
+        z.clamp(-max_horizontal_offset, max_horizontal_offset),
+    )
+}
+
+fn block_offset(pos: &BlockPos) -> (f64, f64) {
+    block_offset_with_max(pos, 0.25)
+}
+
+fn speleothem_offset(pos: &BlockPos) -> (f64, f64) {
+    // Paper's SpeleothemBlock.MAX_HORIZONTAL_OFFSET is
+    // SHAPE_BASE.min(X) = 2/16, not BlockBehaviour's default 1/4.
+    block_offset_with_max(pos, 2.0 / 16.0)
 }
 
 fn speleothem_collision_shape(state: BlockState, pos: &BlockPos) -> Option<SpawnCollisionShape> {
-    let min_max = match state.get_value(BlockStateProperties::SPELEOTHEM_THICKNESS) {
-        Some(PropertyValue::Enum("tip_merge")) => (5.0 / 16.0, 11.0 / 16.0, 0.0, 1.0),
-        Some(PropertyValue::Enum("tip")) => {
-            match state.get_value(BlockStateProperties::VERTICAL_DIRECTION) {
-                Some(PropertyValue::Enum("up")) => (5.0 / 16.0, 11.0 / 16.0, 0.0, 11.0 / 16.0),
-                Some(PropertyValue::Enum("down")) => (5.0 / 16.0, 11.0 / 16.0, 5.0 / 16.0, 1.0),
-                _ => return None,
+    // Keep all six axes explicit. `Block.column(sizeXZ, minY, maxY)` uses the
+    // same X/Z diameter, but spelling out both horizontal bounds prevents the
+    // vertical max from being reused as a Z bound when this table changes.
+    let (min_x, min_y, min_z, max_x, max_y, max_z) =
+        match state.get_value(BlockStateProperties::SPELEOTHEM_THICKNESS) {
+            Some(PropertyValue::Enum("tip_merge")) => {
+                (5.0 / 16.0, 0.0, 5.0 / 16.0, 11.0 / 16.0, 1.0, 11.0 / 16.0)
             }
-        }
-        Some(PropertyValue::Enum("frustum")) => (4.0 / 16.0, 12.0 / 16.0, 0.0, 1.0),
-        Some(PropertyValue::Enum("middle")) => (3.0 / 16.0, 13.0 / 16.0, 0.0, 1.0),
-        Some(PropertyValue::Enum("base")) => (2.0 / 16.0, 14.0 / 16.0, 0.0, 1.0),
-        _ => return None,
-    };
-    let (offset_x, offset_z) = block_offset(pos);
+            Some(PropertyValue::Enum("tip")) => {
+                match state.get_value(BlockStateProperties::VERTICAL_DIRECTION) {
+                    Some(PropertyValue::Enum("up")) => (
+                        5.0 / 16.0,
+                        0.0,
+                        5.0 / 16.0,
+                        11.0 / 16.0,
+                        11.0 / 16.0,
+                        11.0 / 16.0,
+                    ),
+                    Some(PropertyValue::Enum("down")) => (
+                        5.0 / 16.0,
+                        5.0 / 16.0,
+                        5.0 / 16.0,
+                        11.0 / 16.0,
+                        1.0,
+                        11.0 / 16.0,
+                    ),
+                    _ => return None,
+                }
+            }
+            Some(PropertyValue::Enum("frustum")) => {
+                (4.0 / 16.0, 0.0, 4.0 / 16.0, 12.0 / 16.0, 1.0, 12.0 / 16.0)
+            }
+            Some(PropertyValue::Enum("middle")) => {
+                (3.0 / 16.0, 0.0, 3.0 / 16.0, 13.0 / 16.0, 1.0, 13.0 / 16.0)
+            }
+            Some(PropertyValue::Enum("base")) => {
+                (2.0 / 16.0, 0.0, 2.0 / 16.0, 14.0 / 16.0, 1.0, 14.0 / 16.0)
+            }
+            _ => return None,
+        };
+    let (offset_x, offset_z) = speleothem_offset(pos);
     Some(SpawnCollisionShape::Box(SpawnShapeBox::new(
-        min_max.0 + offset_x,
-        min_max.2,
-        min_max.0 + offset_z,
-        min_max.1 + offset_x,
-        min_max.3,
-        min_max.1 + offset_z,
+        min_x + offset_x,
+        min_y,
+        min_z + offset_z,
+        max_x + offset_x,
+        max_y,
+        max_z + offset_z,
     )))
 }
 
@@ -2916,12 +2989,28 @@ impl SpawnAabb {
     }
 
     fn intersects(self, other: &Self) -> bool {
+        self.intersects_with_epsilon(other)
+    }
+
+    fn intersects_raw(self, other: &Self) -> bool {
         self.min_x < other.max_x
             && self.max_x > other.min_x
             && self.min_y < other.max_y
             && self.max_y > other.min_y
             && self.min_z < other.max_z
             && self.max_z > other.min_z
+    }
+
+    /// Paper's `CollisionUtil.voxelShapeIntersect`: touching or overlapping by
+    /// at most `COLLISION_EPSILON` is not a collision for partial VoxelShapes.
+    fn intersects_with_epsilon(self, other: &Self) -> bool {
+        const COLLISION_EPSILON: f64 = 1.0e-7;
+        self.min_x - other.max_x < -COLLISION_EPSILON
+            && self.max_x - other.min_x > COLLISION_EPSILON
+            && self.min_y - other.max_y < -COLLISION_EPSILON
+            && self.max_y - other.min_y > COLLISION_EPSILON
+            && self.min_z - other.max_z < -COLLISION_EPSILON
+            && self.max_z - other.min_z > COLLISION_EPSILON
     }
 }
 
@@ -3717,10 +3806,12 @@ mod tests {
             );
             assert_eq!(fresh.status(), ChunkStatus::Empty);
         }
-        // SPAWN is wired (the spawn seam is attached) but its path runs through
-        // the light steps, which need a light engine the holder does not wire →
-        // rejected as LightEngineMissing before any work. FULL is a separate
-        // consuming promotion boundary, so it is rejected as UnsupportedStatus.
+        // The center-only holder intentionally has no SPAWN seam: the later
+        // scheduler/G4 owner must supply the radius-one workspace. A fresh
+        // request reaches the earlier light prerequisite first, so it is
+        // rejected as LightEngineMissing before the missing seam is observed.
+        // FULL is a separate consuming promotion boundary, so it is rejected as
+        // UnsupportedStatus.
         for status in [ChunkStatus::Spawn, ChunkStatus::Full] {
             let result = fresh.generate_through(status);
             assert!(
@@ -3768,6 +3859,26 @@ mod tests {
             GeneratedChunkError::UnsupportedStatus(ChunkStatus::Full)
         ));
         assert_eq!(holder.status(), ChunkStatus::Noise);
+    }
+
+    /// The center-only holder has no fake SPAWN seam: ordinary status-driven
+    /// promotion stops at the exact workspace/scheduler attachment boundary.
+    /// The public `generate_spawn_with_region` path below is the usable SPAWN
+    /// foundation; the later scheduler/G4 owner must supply its radius-one
+    /// `SpawnRegionProtos` workspace before invoking it.
+    #[test]
+    fn center_only_holder_spawn_refuses_without_workspace_scheduler() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder.chunk.set_persisted_status(ChunkStatus::Light);
+        let err = holder
+            .generate_through(ChunkStatus::Spawn)
+            .expect_err("center-only SPAWN cannot fabricate a radius-one region");
+        assert!(matches!(
+            err,
+            GeneratedChunkError::UnsupportedStatus(ChunkStatus::Spawn)
+        ));
+        assert_eq!(holder.status(), ChunkStatus::Light);
     }
 
     /// A whole-path LIGHT refusal happens during prevalidation, before the
@@ -5593,16 +5704,22 @@ mod tests {
     }
 
     #[test]
-    fn spawn_brightness_reads_completed_light_nibbles() {
+    fn spawn_brightness_reads_completed_light_nibbles_and_drives_rules() {
         let generator = test_generator();
         let pos = ChunkPos::new(-8, -4);
         let mut holder = flat_spawn_holder(&generator, pos, 3);
         let mut workspace = spawn_region_workspace(&generator, pos, 3);
         let region = compose_spawn_region(&mut holder.chunk, &mut workspace, &generator)
             .expect("radius-one workspace");
-        assert!(is_bright_enough_to_spawn(
+        let candidate = BlockPos::new(pos.get_min_block_x(), 1, pos.get_min_block_z());
+        assert!(is_bright_enough_to_spawn(&region, &candidate));
+        let mut random = LegacyRandomSource::new(0x5eed);
+        assert!(check_spawn_rules(
             &region,
-            &BlockPos::new(pos.get_min_block_x(), 1, pos.get_min_block_z())
+            "minecraft:turtle",
+            "minecraft:beach",
+            &candidate,
+            &mut random,
         ));
     }
 
@@ -5663,14 +5780,20 @@ mod tests {
     fn spawn_brightness_fails_closed_without_light_correctness() {
         let generator = test_generator();
         let pos = ChunkPos::new(-8, -4);
-        let mut holder = generator.create_holder(pos);
-        holder.chunk.set_persisted_status(ChunkStatus::Light);
+        let mut holder = flat_spawn_holder(&generator, pos, 3);
+        holder.chunk.set_light_correct(false);
         let mut workspace = spawn_region_workspace(&generator, pos, 3);
         let region = compose_spawn_region(&mut holder.chunk, &mut workspace, &generator)
             .expect("radius-one workspace");
-        assert!(!is_bright_enough_to_spawn(
+        let candidate = BlockPos::new(pos.get_min_block_x(), 1, pos.get_min_block_z());
+        assert!(!is_bright_enough_to_spawn(&region, &candidate));
+        let mut random = LegacyRandomSource::new(0x5eed);
+        assert!(!check_spawn_rules(
             &region,
-            &BlockPos::new(pos.get_min_block_x(), 1, pos.get_min_block_z())
+            "minecraft:turtle",
+            "minecraft:beach",
+            &candidate,
+            &mut random,
         ));
     }
 
@@ -5822,6 +5945,112 @@ mod tests {
         assert_eq!(width, 1.3964844_f32);
         assert_eq!(height, 1.5_f32);
         assert_eq!(f64::from(width), 1.396484375_f64);
+    }
+
+    #[test]
+    fn spawn_collision_uses_paper_epsilon_and_speleothem_offset_cap() {
+        const EPSILON: f64 = 1.0e-7;
+        // The dynamic partial shape has a half-height, so this exercises the
+        // Box path rather than accidentally testing a full cube.
+        let dynamic_partial = SpawnShapeBox::new(0.0, 0.0, 0.0, 1.0, 0.5, 1.0);
+        let at_epsilon = SpawnAabb::new(1.0 - EPSILON, 0.25, 0.25, 1.5, 0.4, 0.75);
+        let beyond_epsilon = SpawnAabb::new(1.0 - 2.0 * EPSILON, 0.25, 0.25, 1.5, 0.4, 0.75);
+        // CollisionUtil.voxelShapeIntersect ignores contact and overlap up to
+        // its 1e-7 epsilon for partial VoxelShapes, but accepts a larger overlap.
+        assert!(!dynamic_partial.intersects(0, 0, 0, &at_epsilon));
+        assert!(dynamic_partial.intersects(0, 0, 0, &beyond_epsilon));
+
+        const STATIC_PARTIAL_BOXES: &[StaticCollisionBox] = &[StaticCollisionBox {
+            min_x: 0,
+            min_y: 0,
+            min_z: 0,
+            max_x: 32,
+            max_y: 16,
+            max_z: 32,
+        }];
+        let static_partial = SpawnCollisionShape::StaticBoxes(STATIC_PARTIAL_BOXES);
+        assert!(!static_partial.intersects(0, 0, 0, &at_epsilon));
+        assert!(static_partial.intersects(0, 0, 0, &beyond_epsilon));
+
+        // Paper's optimized Shapes.block() branch uses raw AABB intersection,
+        // so the same endpoint remains a collision for an exact full cube.
+        assert!(SpawnCollisionShape::Full.intersects(0, 0, 0, &at_epsilon));
+
+        let mut negative_endpoint = None;
+        let mut positive_endpoint = None;
+        for x in -128..=128 {
+            for z in -128..=128 {
+                let pos = BlockPos::new(x, 0, z);
+                let seed = rivet_util::mth::get_seed(x, 0, z);
+                if seed & 15 == 0 {
+                    negative_endpoint = Some(pos);
+                }
+                if seed & 15 == 15 {
+                    positive_endpoint = Some(pos);
+                }
+                if negative_endpoint.is_some() && positive_endpoint.is_some() {
+                    break;
+                }
+            }
+            if negative_endpoint.is_some() && positive_endpoint.is_some() {
+                break;
+            }
+        }
+        let negative_endpoint = negative_endpoint.expect("seed search must find low nibble");
+        let positive_endpoint = positive_endpoint.expect("seed search must find high nibble");
+        assert_eq!(speleothem_offset(&negative_endpoint).0, -2.0 / 16.0);
+        assert_eq!(speleothem_offset(&positive_endpoint).0, 2.0 / 16.0);
+    }
+
+    #[test]
+    fn speleothem_collision_bounds_match_paper_columns_on_all_variants() {
+        let pos = BlockPos::new(0, 0, 0);
+        let pointed = BlockState::of(BlockId::from_name("minecraft:pointed_dripstone").unwrap());
+        let offset = speleothem_offset(&pos);
+        let cases = [
+            ("tip_merge", "up", 5.0 / 16.0, 11.0 / 16.0, 0.0, 1.0),
+            ("tip", "up", 5.0 / 16.0, 11.0 / 16.0, 0.0, 11.0 / 16.0),
+            ("tip", "down", 5.0 / 16.0, 11.0 / 16.0, 5.0 / 16.0, 1.0),
+            ("frustum", "up", 4.0 / 16.0, 12.0 / 16.0, 0.0, 1.0),
+            ("middle", "up", 3.0 / 16.0, 13.0 / 16.0, 0.0, 1.0),
+            ("base", "up", 2.0 / 16.0, 14.0 / 16.0, 0.0, 1.0),
+        ];
+        for (thickness, direction, min_xz, max_xz, min_y, max_y) in cases {
+            let state = pointed
+                .set_value(
+                    BlockStateProperties::SPELEOTHEM_THICKNESS,
+                    PropertyValue::Enum(thickness),
+                )
+                .unwrap()
+                .set_value(
+                    BlockStateProperties::VERTICAL_DIRECTION,
+                    PropertyValue::Enum(direction),
+                )
+                .unwrap();
+            let Some(SpawnCollisionShape::Box(shape)) = speleothem_collision_shape(state, &pos)
+            else {
+                panic!("expected a box for pointed dripstone {thickness}/{direction}");
+            };
+            assert_eq!(shape.min_x, min_xz + offset.0);
+            assert_eq!(shape.max_x, max_xz + offset.0);
+            assert_eq!(shape.min_z, min_xz + offset.1);
+            assert_eq!(shape.max_z, max_xz + offset.1);
+            assert_eq!(shape.min_y, min_y);
+            assert_eq!(shape.max_y, max_y);
+
+            // A thin AABB immediately inside the true Z max collides, while a
+            // same-sized AABB immediately beyond it does not. This guards the
+            // horizontal max independently of the vertical max.
+            let x0 = shape.min_x + 0.1;
+            let x1 = x0 + 0.05;
+            let y0 = shape.min_y + (shape.max_y - shape.min_y) / 2.0;
+            let y1 = y0 + 0.05;
+            let inside_z = shape.max_z - 0.1;
+            let inside = SpawnAabb::new(x0, y0, inside_z, x1, y1, shape.max_z - 0.05);
+            let outside = SpawnAabb::new(x0, y0, shape.max_z + 2.0e-7, x1, y1, shape.max_z + 0.05);
+            assert!(SpawnCollisionShape::Box(shape).intersects(0, 0, 0, &inside));
+            assert!(!SpawnCollisionShape::Box(shape).intersects(0, 0, 0, &outside));
+        }
     }
 
     #[test]
@@ -6207,6 +6436,10 @@ mod tests {
         ));
     }
 
+    /// The public workspace→SPAWN path uses the caller's current border
+    /// snapshot, not a default border hidden inside region composition. The
+    /// default workspace reaches the typed entity boundary; the explicit
+    /// one-block border rejects candidates first and advances cleanly.
     #[test]
     fn configured_border_reaches_spawn_through_public_workspace_api() {
         let generator = test_generator();

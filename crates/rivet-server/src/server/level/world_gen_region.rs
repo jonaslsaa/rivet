@@ -639,7 +639,8 @@ where
     /// Construct a region with an owned stationary WorldBorder snapshot. The
     /// caller supplies value settings rather than a live border reference;
     /// normalize them here so an active lerp is never replayed from the
-    /// value-layer's zero game time.
+    /// value-layer's zero game time. World-aware callers must use this explicit
+    /// constructor; [`Self::new`] is only the Paper-default convenience path.
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_world_border_settings(
         cache: StaticCache2D<Box<dyn GenerationChunkHolderView<T, B, S> + 'a>>,
