@@ -1060,11 +1060,16 @@ where
                     // transactional at the LIGHT task boundary.
                     if let Some(task) = self.generated_light.as_ref() {
                         task.validate_light(chunk)?;
-                    }
-                    // With a caller-attached light seam the write-back bridge is
-                    // authoritative and needs no engine at this rung; without it
-                    // the engine-position path needs one.
-                    if self.light.is_none() {
+                        // `run_step` gives a complete generated-light task
+                        // precedence over the older split `light` seam. Keep
+                        // the preflight in lockstep so an unusable generated
+                        // task cannot let earlier steps mutate the proto merely
+                        // because a legacy seam is also attached.
+                        needs_light_engine = true;
+                    } else if self.light.is_none() {
+                        // With a caller-attached light seam the write-back
+                        // bridge is authoritative and needs no engine at this
+                        // rung; without it the engine-position path needs one.
                         needs_light_engine = true;
                     }
                     projected = step.target_status();
@@ -1926,6 +1931,43 @@ mod tests {
         }
     }
 
+    /// A generated task with an unusable provider. The legacy split LIGHT seam
+    /// is attached alongside it to pin the executor's precedence and atomic
+    /// preflight: the generated task wins, and no earlier step may run before
+    /// the final capability refusal.
+    struct UnusableGeneratedTask;
+
+    impl GeneratedLightTask<u8, u8, &'static str> for UnusableGeneratedTask {
+        fn has_usable_engine(&self) -> bool {
+            false
+        }
+
+        fn validate_light(
+            &self,
+            _chunk: &ProtoChunk<u8, u8, &'static str>,
+        ) -> Result<(), GenError> {
+            Ok(())
+        }
+
+        fn initialize_light(
+            &mut self,
+            _chunk: &mut ProtoChunk<u8, u8, &'static str>,
+        ) -> Result<(), GenError> {
+            panic!("unusable generated task must fail in preflight")
+        }
+
+        fn light(
+            &mut self,
+            _chunk: &mut ProtoChunk<u8, u8, &'static str>,
+        ) -> Result<(), GenError> {
+            panic!("unusable generated task must fail in preflight")
+        }
+
+        fn take_owned_runtime_storage(&mut self) -> Option<()> {
+            None
+        }
+    }
+
     fn light_engine() -> (LevelLightEngine, Arc<Mutex<LightLog>>) {
         light_engine_with_persisted_load(true)
     }
@@ -2020,6 +2062,25 @@ mod tests {
             },
         );
         ((ctx, spawn_calls), log)
+    }
+
+    #[test]
+    fn generated_light_preflight_wins_over_legacy_light_seam_atomically() {
+        let (ctx, _biomes_calls, _noise_calls, _surface_calls, _carvers_calls, _features_calls) =
+            recording_context();
+        let mut ctx = ctx.with_light(|_chunk| {
+            panic!("legacy LIGHT seam must not run when generated task is attached")
+        });
+        assert!(ctx
+            .attach_generated_light_task(UnusableGeneratedTask)
+            .is_none());
+        let mut chunk = proto();
+
+        let error = ctx
+            .generate_through(&GENERATION_PYRAMID, &mut chunk, ChunkStatus::Light)
+            .expect_err("unusable generated task must fail before dispatch");
+        assert_eq!(error, GenError::LightEngineMissing { status: ChunkStatus::Light });
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Empty);
     }
 
     /// `ChunkLightTask.LightTask.getAsBoolean` on a fresh, unlit chunk: the
