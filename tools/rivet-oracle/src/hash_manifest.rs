@@ -611,6 +611,7 @@ fn validate_full_payload(
     let light_min_section_y = expected_min_section_y - 1;
     let light_max_section_y = max_section_y + 1;
     let mut section_ys = std::collections::HashSet::new();
+    let mut previous_section_y = None;
     for sec_tag in &sections.list {
         let rivet_nbt::tag::Tag::Compound(sec) = sec_tag else {
             return Err(format!(
@@ -629,6 +630,14 @@ fn validate_full_payload(
         if !section_ys.insert(y) {
             return Err(format!("chunk {at} contains duplicate section Y {y}"));
         }
+        if let Some(previous) = previous_section_y
+            && y <= previous
+        {
+            return Err(format!(
+                "chunk {at} sections are not in Paper's ascending Y order: {previous} then {y}"
+            ));
+        }
+        previous_section_y = Some(y);
         let in_block_bounds = y >= expected_min_section_y && y <= max_section_y;
         let has_block_states = sec.tags.contains_key("block_states");
         let has_biomes = sec.tags.contains_key("biomes");
@@ -1445,6 +1454,15 @@ mod tests {
             .push(Tag::Compound(section));
         validate_full_payload(&upper_boundary, "overworld", 0, 0)
             .expect("a light-bearing upper boundary is part of Paper's accepted closure");
+
+        let mut reversed = upper_boundary;
+        reversed.get_list_or_empty_mut("sections").list.reverse();
+        let error = validate_full_payload(&reversed, "overworld", 0, 0)
+            .expect_err("Paper writes section data in ascending Y order");
+        assert!(
+            error.contains("ascending Y order"),
+            "reversed sections must be rejected as malformed Paper evidence: {error}"
+        );
     }
 
     /// A bare `full` root Status is never FULL: Paper serializes the FULL status
