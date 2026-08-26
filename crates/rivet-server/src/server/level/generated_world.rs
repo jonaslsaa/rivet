@@ -104,6 +104,7 @@ use rivet_registry::core::BlockPos;
 use rivet_registry::core::ChunkPos;
 use rivet_registry::core::SectionPos;
 use rivet_registry::generated::biomes::BIOME_BY_ID;
+use rivet_registry::generated::block_behaviors::{StaticCollisionBox, static_collision_shape_of};
 use rivet_registry::generated::blocks::BlockId;
 use rivet_registry::generated::feature_data::{
     BIOME_GENERATION_SETTINGS_BY_NAME, CONFIGURED_FEATURE_BY_NAME, MOB_SPAWN_SETTINGS_BY_NAME,
@@ -142,9 +143,9 @@ use rivet_world::chunk::storage::section_reconstruction::{
 };
 use rivet_world::chunk::upgrade_data::UpgradeData;
 use rivet_world::data::worldgen::worldgen_bootstraps::build_worldgen_registries;
-use rivet_world::level::WorldGenLevel;
 use rivet_world::level::height_accessor::LevelHeightAccessor;
 use rivet_world::level::height_accessor::create as create_height_accessor;
+use rivet_world::level::{WorldBorderSettings, WorldGenLevel};
 use rivet_world::levelgen::blending::blender::Blender;
 use rivet_world::levelgen::feature::configurations::block_column_configuration::block_column_configuration_codec;
 use rivet_world::levelgen::feature::configurations::composite_feature_configuration::composite_feature_configuration_codec;
@@ -358,15 +359,36 @@ pub struct SpawnRegionProtos {
         ChunkPos,
         ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
     )>,
+    /// Owned current-bounds snapshot for the production SPAWN region. This is
+    /// a value copy, never a borrow or moved live `WorldBorder`; the snapshot
+    /// is normalized to a stationary extent at construction time.
+    world_border_settings: WorldBorderSettings,
 }
 
 impl SpawnRegionProtos {
     /// Build the exact 3x3 cache around `center` from eight owned neighbours.
     /// Input order is irrelevant; cache iteration is canonicalized by chunk
-    /// coordinates when the Paper `WorldGenRegion` is composed.
+    /// coordinates when the Paper `WorldGenRegion` is composed. Detached and
+    /// existing test callers retain the default Paper border.
     pub fn new(
         center: ChunkPos,
         neighbours: impl IntoIterator<Item = ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>>,
+    ) -> Result<Self, SpawnRegionError> {
+        Self::new_with_world_border_settings(
+            center,
+            neighbours,
+            WorldBorderSettings::default_settings(),
+        )
+    }
+
+    /// Build a radius-one workspace with an owned current-bounds WorldBorder
+    /// snapshot. The supplied settings may describe an active interpolation;
+    /// only its current center/current size are retained and the resulting
+    /// region is stationary (`lerp_time = 0`).
+    pub fn new_with_world_border_settings(
+        center: ChunkPos,
+        neighbours: impl IntoIterator<Item = ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>>,
+        settings: WorldBorderSettings,
     ) -> Result<Self, SpawnRegionError> {
         let mut by_pos = HashMap::with_capacity(8);
         for chunk in neighbours {
@@ -391,12 +413,22 @@ impl SpawnRegionProtos {
         }
         let mut neighbours: Vec<_> = by_pos.into_iter().collect();
         neighbours.sort_by_key(|(pos, _)| (pos.x(), pos.z()));
-        Ok(Self { center, neighbours })
+        Ok(Self {
+            center,
+            neighbours,
+            world_border_settings: settings.current_bounds_snapshot(),
+        })
     }
 
     /// The center this workspace surrounds.
     pub fn center(&self) -> ChunkPos {
         self.center
+    }
+
+    /// The stationary current-bounds snapshot used when composing the
+    /// production-capable `WorldGenRegion`.
+    pub fn world_border_settings(&self) -> WorldBorderSettings {
+        self.world_border_settings
     }
 
     /// Return the eight neighbour protos to the tick-thread scheduler after
@@ -2019,6 +2051,7 @@ fn compose_spawn_region<'a>(
         }
     }
 
+    let world_border_settings = workspace.world_border_settings();
     let center_status = center.get_persisted_status();
     let center_base = center.base_mut();
     let mut holders: Vec<
@@ -2032,7 +2065,7 @@ fn compose_spawn_region<'a>(
     // center at row-major slot 4 restores the complete 3x3 cache order.
     holders.insert(4, Box::new(CenterHolder::new(center_base, center_status)));
 
-    Ok(WorldGenRegion::new(
+    Ok(WorldGenRegion::new_with_world_border_settings(
         StaticCache2D::from_entries(
             center_pos.x().wrapping_sub(1),
             center_pos.z().wrapping_sub(1),
@@ -2048,6 +2081,7 @@ fn compose_spawn_region<'a>(
         generator.get_sea_level(),
         Arc::new(generator.biome_source.clone()),
         generator.registry_access().clone(),
+        world_border_settings,
     ))
 }
 
@@ -2202,24 +2236,24 @@ fn run_spawn_in_region(
                             &entity_pos,
                             &mut level_random,
                         )
-                        && spawn_obstruction_ok(region, spawner.ty, fx, y, fz, width, height)
                     {
-                        // The current entity registry has no constructor or
-                        // insertion surface for these mob types. The candidate
-                        // has nevertheless consumed exactly the same placement
-                        // gates as Paper; do not classify this as placement
-                        // failure and do not fabricate entity NBT. Paper
-                        // consumes the population RNG for `Mob.snapTo`'s yaw
-                        // before any post-construction checks; consume that
-                        // draw even though this value layer stops at the
-                        // intentional unsupported-construction boundary.
+                        // Entity construction and Entity.snapTo happen before
+                        // Mob.checkSpawnObstruction in Paper. Consume the yaw
+                        // draw for every candidate that reaches that boundary,
+                        // including a candidate whose post-construction
+                        // obstruction check rejects it.
                         consume_spawn_snap_yaw(&mut random);
-                        return Err(SpawnRegionError::UnsupportedEntity {
-                            chunk_pos: center_pos,
-                            biome: biome_name,
-                            entity_type: spawner.ty,
-                            position: entity_pos,
-                        });
+                        if spawn_obstruction_ok(region, spawner.ty, fx, y, fz, width, height) {
+                            // The current entity registry has no constructor or
+                            // insertion surface for these mob types. Do not
+                            // fabricate entity NBT at the intentional boundary.
+                            return Err(SpawnRegionError::UnsupportedEntity {
+                                chunk_pos: center_pos,
+                                biome: biome_name,
+                                entity_type: spawner.ty,
+                                position: entity_pos,
+                            });
+                        }
                     }
                 }
 
@@ -2383,7 +2417,7 @@ fn is_pathfindable_land(state: BlockState) -> bool {
             || name.ends_with("_candle_cake")
             || name.ends_with("_skull")
             || name.ends_with("_head")
-            || name.starts_with("potted_")
+            || name.starts_with("minecraft:potted_")
             || name.ends_with("_shelf")
             || name.ends_with("_pane")
             || name.ends_with("_bars")
@@ -2538,12 +2572,12 @@ fn is_valid_empty_spawn_block(state: BlockState, entity_type: &str, pos: &BlockP
         && !is_dangerous_spawn_block(state, entity_type)
 }
 
-/// A compact VoxelShape slice for generation-time collision checks. The
-/// generated registry does not yet expose arbitrary VoxelShape boxes, so this
-/// keeps the exact empty/full/known worldgen shapes that occur in the dynamic
-/// block families. Unknown static shapes remain unavailable for obstruction
-/// checks; `is_valid_empty_spawn_block` separately uses their generated
-/// full-face mask for Paper's empty-context full-block predicate.
+/// A compact VoxelShape slice for generation-time collision checks. Static
+/// state boxes come from the pinned Paper `VoxelShape.toAabbs()` fixture;
+/// position/context-sensitive dynamic families remain explicit below. Unknown
+/// dynamic shapes stay unavailable for obstruction checks, while
+/// `is_valid_empty_spawn_block` separately uses the generated full-face mask
+/// for Paper's empty-context full-block predicate.
 #[derive(Clone, Copy)]
 struct SpawnShapeBox {
     min_x: f64,
@@ -2599,9 +2633,11 @@ impl SpawnShapeBox {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum SpawnCollisionContext<'a> {
     Empty,
+    #[allow(dead_code)]
     Entity {
         entity_type: &'a str,
         entity_min_y: f64,
@@ -2613,6 +2649,8 @@ enum SpawnCollisionShape {
     Empty,
     Full,
     Box(SpawnShapeBox),
+    /// Exact static Paper collision boxes from the generated StateId table.
+    StaticBoxes(&'static [StaticCollisionBox]),
     /// Paper's empty-context scaffolding shape: a full top plate and four
     /// corner posts. The empty collision context reports `isAbove(..., true)`
     /// as true, selecting `SHAPE_STABLE` for every scaffolding state.
@@ -2625,6 +2663,7 @@ impl SpawnCollisionShape {
             Self::Full => true,
             Self::Empty | Self::Multi(_) => false,
             Self::Box(shape) => shape.is_full(),
+            Self::StaticBoxes(boxes) => boxes.len() == 1 && static_box_is_full(boxes[0]),
         }
     }
 
@@ -2634,11 +2673,35 @@ impl SpawnCollisionShape {
             Self::Full => SpawnShapeBox::new(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)
                 .intersects(block_x, block_y, block_z, entity),
             Self::Box(shape) => shape.intersects(block_x, block_y, block_z, entity),
+            Self::StaticBoxes(boxes) => boxes.iter().copied().any(|shape| {
+                static_box_to_spawn_shape(shape).intersects(block_x, block_y, block_z, entity)
+            }),
             Self::Multi(shapes) => shapes
                 .into_iter()
                 .any(|shape| shape.intersects(block_x, block_y, block_z, entity)),
         }
     }
+}
+
+fn static_box_to_spawn_shape(shape: StaticCollisionBox) -> SpawnShapeBox {
+    let unit = |value: i8| f64::from(value) / 32.0;
+    SpawnShapeBox::new(
+        unit(shape.min_x),
+        unit(shape.min_y),
+        unit(shape.min_z),
+        unit(shape.max_x),
+        unit(shape.max_y),
+        unit(shape.max_z),
+    )
+}
+
+fn static_box_is_full(shape: StaticCollisionBox) -> bool {
+    shape.min_x == 0
+        && shape.min_y == 0
+        && shape.min_z == 0
+        && shape.max_x == 32
+        && shape.max_y == 32
+        && shape.max_z == 32
 }
 
 /// The collision boxes yielded by `BlockState.getCollisionShape` for the
@@ -2726,6 +2789,13 @@ fn spawn_collision_shape(
     if state.has_dynamic_shape() {
         return None;
     }
+    // Every non-dynamic StateId is covered by the Paper-generated static
+    // collision table. Unlike behavior words or face masks, this preserves
+    // the complete union of boxes for stairs, fences, plates, and all other
+    // partial shapes.
+    if let Some(boxes) = static_collision_shape_of(state.id()) {
+        return Some(SpawnCollisionShape::StaticBoxes(boxes));
+    }
 
     if state.is_air()
         || matches!(
@@ -2787,9 +2857,6 @@ fn spawn_collision_shape(
             15.0 / 16.0,
         )));
     }
-    // A non-full colliding shape (fence, stair, button, etc.) is not safe to
-    // collapse into a cube. Refuse it until the shared VoxelShape registry
-    // surface can provide its exact boxes.
     None
 }
 
@@ -3071,9 +3138,9 @@ fn no_collision(
 }
 
 /// The post-construction `Mob.checkSpawnObstruction` gate available without an
-/// entity instance. Paper re-runs the AABB through `isUnobstructed(entity)`
-/// using the entity collision context before scanning liquids; this matters for
-/// context-sensitive blocks such as powder snow and scaffolding.
+/// entity instance. Paper's `isUnobstructed(entity)` path in `WorldGenRegion`
+/// checks hard-colliding entities, not block VoxelShapes; the initial
+/// NaturalSpawner `noCollision(AABB)` call is the sole block-shape query.
 fn spawn_obstruction_ok(
     region: &WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey>,
     entity_type: &str,
@@ -3084,22 +3151,6 @@ fn spawn_obstruction_ok(
     height: f64,
 ) -> bool {
     let entity = spawn_aabb(x, y, z, width, height);
-    // NaturalSpawner's first collision query uses CollisionContext.empty(),
-    // while Mob.checkSpawnObstruction calls isUnobstructed(this) with the
-    // candidate entity context. Dynamic blocks such as powder snow and
-    // scaffolding can therefore disagree between the two queries.
-    if !collision_free(
-        region,
-        entity,
-        SpawnCollisionContext::Entity {
-            entity_type,
-            entity_min_y: entity.min_y,
-        },
-    )
-    .unwrap_or(false)
-    {
-        return false;
-    }
     let min_x = rivet_util::mth::floor_d(entity.min_x);
     let max_x = rivet_util::mth::floor_d(entity.max_x - f64::EPSILON);
     let min_y = rivet_util::mth::floor_d(entity.min_y);
@@ -5652,6 +5703,24 @@ mod tests {
     }
 
     #[test]
+    fn spawn_failed_obstruction_still_consumes_paper_snap_yaw_draw() {
+        let mut actual = WorldgenRandom::new(LegacyRandomSource::new(0x5eed));
+        let mut expected = WorldgenRandom::new(LegacyRandomSource::new(0x5eed));
+        let obstruction_ok = false;
+        // The candidate passed the pre-construction gates and reached
+        // Entity.snapTo. Its post-construction obstruction result is false,
+        // but the yaw draw has already happened in Paper's order.
+        consume_spawn_snap_yaw(&mut actual);
+        assert!(!obstruction_ok);
+        let _paper_yaw = expected.next_float();
+        assert_eq!(
+            actual.next_int_bound(5),
+            expected.next_int_bound(5),
+            "a failed obstruction check must not restore or skip the snap yaw draw"
+        );
+    }
+
+    #[test]
     fn spawn_unsupported_boundary_consumes_paper_snap_yaw_draw() {
         let mut actual = WorldgenRandom::new(LegacyRandomSource::new(0x5eed));
         let mut expected = WorldgenRandom::new(LegacyRandomSource::new(0x5eed));
@@ -5891,12 +5960,45 @@ mod tests {
             spawn_collision_shape(moving_piston, &pos, SpawnCollisionContext::Empty)
                 .is_some_and(|shape| !shape.is_full())
         );
-        // Stairs have an intentionally unported partial VoxelShape. Paper's
-        // empty-spawn check asks only `isCollisionShapeFullBlock`, so the
-        // generated static full-face sample keeps this candidate valid even
-        // though obstruction checks still refuse the unknown shape.
-        assert!(spawn_collision_shape(stairs, &pos, SpawnCollisionContext::Empty).is_none());
+        assert!(
+            static_collision_shape_of(moving_piston.id()).is_none(),
+            "dynamic states must never resolve through the static collision table"
+        );
+        // Static stairs and fences resolve through the exact generated Paper
+        // VoxelShape unions rather than failing closed. Their geometry is
+        // partial, so the empty-spawn full-block predicate still accepts the
+        // candidate while the initial noCollision query can intersect it.
+        assert!(
+            spawn_collision_shape(stairs, &pos, SpawnCollisionContext::Empty)
+                .is_some_and(|shape| !shape.is_full())
+        );
+        let fence = BlockState::of(BlockId::from_name("minecraft:oak_fence").unwrap());
+        assert!(
+            spawn_collision_shape(fence, &pos, SpawnCollisionContext::Empty)
+                .is_some_and(|shape| !shape.is_full())
+        );
         assert!(is_valid_empty_spawn_block(stairs, "minecraft:cow", &pos));
+        assert!(is_valid_empty_spawn_block(fence, "minecraft:cow", &pos));
+        assert!(static_collision_shape_of(stairs.id()).is_some_and(|boxes| !boxes.is_empty()));
+        assert!(static_collision_shape_of(fence.id()).is_some_and(|boxes| !boxes.is_empty()));
+        let low_stair_entity = SpawnAabb::new(0.1, 0.1, 0.1, 0.2, 0.2, 0.2);
+        assert!(
+            spawn_collision_shape(stairs, &pos, SpawnCollisionContext::Empty)
+                .is_some_and(|shape| shape.intersects(0, 0, 0, &low_stair_entity))
+        );
+        let fence_post_entity = SpawnAabb::new(0.45, 0.1, 0.45, 0.55, 0.2, 0.55);
+        assert!(
+            spawn_collision_shape(fence, &pos, SpawnCollisionContext::Empty)
+                .is_some_and(|shape| shape.intersects(0, 0, 0, &fence_post_entity))
+        );
+        assert!(
+            static_collision_shape_of(stone_pressure_plate.id())
+                .is_some_and(|boxes| boxes.is_empty())
+        );
+        assert!(
+            spawn_collision_shape(stone_pressure_plate, &pos, SpawnCollisionContext::Empty)
+                .is_some_and(|shape| !shape.is_full())
+        );
         assert!(!is_valid_empty_spawn_block(
             stone_pressure_plate,
             "minecraft:cow",
@@ -5940,6 +6042,57 @@ mod tests {
     }
 
     #[test]
+    fn static_collision_intersects_exact_boxes_and_leaves_dynamic_states_without_static_geometry() {
+        let stairs = BlockState::of(BlockId::from_name("minecraft:oak_stairs").unwrap());
+        let pos = BlockPos::new(0, 0, 0);
+        let boxes = static_collision_shape_of(stairs.id()).expect("static stair geometry");
+        assert!(!boxes.is_empty());
+        let shape = spawn_collision_shape(stairs, &pos, SpawnCollisionContext::Empty)
+            .expect("generated static stair geometry");
+
+        let mut covered = None;
+        let mut gap = None;
+        'cells: for x in 0_i32..32 {
+            for y in 0_i32..32 {
+                for z in 0_i32..32 {
+                    let covered_cell = boxes.iter().any(|box_| {
+                        i32::from(box_.min_x) <= x
+                            && x < i32::from(box_.max_x)
+                            && i32::from(box_.min_y) <= y
+                            && y < i32::from(box_.max_y)
+                            && i32::from(box_.min_z) <= z
+                            && z < i32::from(box_.max_z)
+                    });
+                    if covered_cell && covered.is_none() {
+                        covered = Some((x, y, z));
+                    } else if !covered_cell && gap.is_none() {
+                        gap = Some((x, y, z));
+                    }
+                    if covered.is_some() && gap.is_some() {
+                        break 'cells;
+                    }
+                }
+            }
+        }
+        let cell_aabb = |(x, y, z): (i32, i32, i32)| {
+            SpawnAabb::new(
+                x as f64 / 32.0 + 0.01,
+                y as f64 / 32.0 + 0.01,
+                z as f64 / 32.0 + 0.01,
+                (x + 1) as f64 / 32.0 - 0.01,
+                (y + 1) as f64 / 32.0 - 0.01,
+                (z + 1) as f64 / 32.0 - 0.01,
+            )
+        };
+        assert!(shape.intersects(0, 0, 0, &cell_aabb(covered.expect("covered stair cell"))));
+        assert!(!shape.intersects(0, 0, 0, &cell_aabb(gap.expect("stair gap cell"))));
+
+        let moving_piston = BlockState::of(BlockId::from_name("minecraft:moving_piston").unwrap());
+        assert!(moving_piston.has_dynamic_shape());
+        assert!(static_collision_shape_of(moving_piston.id()).is_none());
+    }
+
+    #[test]
     fn spawn_land_pathfindability_matches_block_overrides() {
         let stone = BlockState::of(BlockId::from_name("minecraft:stone").unwrap());
         let stairs = BlockState::of(BlockId::from_name("minecraft:oak_stairs").unwrap());
@@ -5949,6 +6102,9 @@ mod tests {
         let powder_snow = BlockState::of(BlockId::from_name("minecraft:powder_snow").unwrap());
         let cake = BlockState::of(BlockId::from_name("minecraft:cake").unwrap());
         let flower_pot = BlockState::of(BlockId::from_name("minecraft:flower_pot").unwrap());
+        let potted_oak_sapling =
+            BlockState::of(BlockId::from_name("minecraft:potted_oak_sapling").unwrap());
+        let dried_ghast = BlockState::of(BlockId::from_name("minecraft:dried_ghast").unwrap());
         let lantern = BlockState::of(BlockId::from_name("minecraft:lantern").unwrap());
         let scaffolding = BlockState::of(BlockId::from_name("minecraft:scaffolding").unwrap());
         let bamboo = BlockState::of(BlockId::from_name("minecraft:bamboo").unwrap());
@@ -5983,6 +6139,12 @@ mod tests {
         assert!(!is_pathfindable_land(slab));
         assert!(!is_pathfindable_land(cake));
         assert!(!is_pathfindable_land(flower_pot));
+        // Block names are namespaced; the Paper default LAND predicate must
+        // recognize the registered `minecraft:potted_*` family as non-empty.
+        assert!(!is_pathfindable_land(potted_oak_sapling));
+        // DriedGhastBlock overrides LAND pathfinding to false even though its
+        // generated shape metadata is not a substitute for the class override.
+        assert!(!is_pathfindable_land(dried_ghast));
         assert!(!is_pathfindable_land(lantern));
         assert!(is_pathfindable_land(scaffolding));
         // These partial-collision classes have concrete Paper predicates:
@@ -6043,6 +6205,34 @@ mod tests {
             "minecraft:fox",
             &BlockPos::new(2, 1, 0),
         ));
+    }
+
+    #[test]
+    fn configured_border_reaches_spawn_through_public_workspace_api() {
+        let generator = test_generator();
+        let pos = ChunkPos::new(-8, -4);
+        let mut default_holder = flat_spawn_holder(&generator, pos, 3);
+        let mut default_workspace = spawn_region_workspace(&generator, pos, 3);
+        assert!(matches!(
+            default_holder.generate_spawn_with_region(&mut default_workspace),
+            Err(GeneratedChunkError::SpawnRegion(
+                SpawnRegionError::UnsupportedEntity { .. }
+            ))
+        ));
+
+        let mut configured_holder = flat_spawn_holder(&generator, pos, 3);
+        let neighbours = spawn_region_workspace(&generator, pos, 3).into_neighbours();
+        let settings =
+            WorldBorderSettings::new(10_000.0, 10_000.0, 0.2, 5.0, 5, 300, 1.0, 200, 99.0);
+        let mut configured_workspace =
+            SpawnRegionProtos::new_with_world_border_settings(pos, neighbours, settings)
+                .expect("complete configured radius-one workspace");
+        assert_eq!(configured_workspace.world_border_settings().lerp_time(), 0);
+        assert_eq!(configured_workspace.world_border_settings().size(), 1.0);
+        configured_holder
+            .generate_spawn_with_region(&mut configured_workspace)
+            .expect("configured border excludes every candidate before entity construction");
+        assert_eq!(configured_holder.status(), ChunkStatus::Spawn);
     }
 
     #[test]

@@ -98,7 +98,7 @@ use rivet_world::chunk::status::{ChunkStatus, ChunkStep};
 use rivet_world::chunk::storage::chunk_reconstruction::resolve_state_flags;
 use rivet_world::chunk::storage::section_reconstruction::BiomeId as WorldgenBiomeId;
 use rivet_world::level::height_accessor::LevelHeightAccessor;
-use rivet_world::level::{WorldBorder, WorldGenLevel};
+use rivet_world::level::{WorldBorder, WorldBorderSettings, WorldGenLevel};
 use rivet_world::levelgen::heightmap::Types;
 use rivet_world::ticks::{SavedTick, ScheduledTick};
 
@@ -622,11 +622,45 @@ where
         uncached_biome_source: Arc<dyn NoiseBiomeSource>,
         registry_access: RegistryAccess,
     ) -> Self {
+        Self::new_with_world_border_settings(
+            cache,
+            center_pos,
+            generating_step,
+            seed,
+            min_y,
+            height,
+            sea_level,
+            uncached_biome_source,
+            registry_access,
+            WorldBorderSettings::default_settings(),
+        )
+    }
+
+    /// Construct a region with an owned stationary WorldBorder snapshot. The
+    /// caller supplies value settings rather than a live border reference;
+    /// normalize them here so an active lerp is never replayed from the
+    /// value-layer's zero game time.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_world_border_settings(
+        cache: StaticCache2D<Box<dyn GenerationChunkHolderView<T, B, S> + 'a>>,
+        center_pos: ChunkPos,
+        generating_step: ChunkStep,
+        seed: i64,
+        min_y: i32,
+        height: i32,
+        sea_level: i32,
+        uncached_biome_source: Arc<dyn NoiseBiomeSource>,
+        registry_access: RegistryAccess,
+        settings: WorldBorderSettings,
+    ) -> Self {
         let write_radius = generating_step.block_state_write_radius();
         let biome_manager = BiomeManager::new(
             uncached_biome_source.clone(),
             BiomeManager::obfuscate_seed(seed),
         );
+        let border_settings = settings.current_bounds_snapshot();
+        let mut world_border = WorldBorder::new(border_settings);
+        world_border.apply_initial_settings(0);
         WorldGenRegion {
             center_chunk_x: center_pos.x(),
             center_chunk_z: center_pos.z(),
@@ -638,7 +672,7 @@ where
             min_y,
             height,
             sea_level,
-            world_border: WorldBorder::default(),
+            world_border,
             biome_manager,
             uncached_biome_source,
             registry_access,

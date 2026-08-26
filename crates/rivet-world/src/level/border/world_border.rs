@@ -1181,6 +1181,25 @@ impl Settings {
         self.lerp_target
     }
 
+    /// Normalize a live border settings snapshot for a detached generated
+    /// region. The live extent's current size is already the size visible at
+    /// the snapshot point; carrying its interpolation metadata would replay a
+    /// moving border from an unrelated game time. Paper's region therefore
+    /// receives the current center/current size as a stationary extent.
+    pub fn current_bounds_snapshot(self) -> Settings {
+        Settings::new(
+            self.center_x,
+            self.center_z,
+            self.damage_per_block,
+            self.safe_zone,
+            self.warning_blocks,
+            self.warning_time,
+            self.size,
+            0,
+            self.size,
+        )
+    }
+
     /// `Settings.CODEC` — the nine-field record codec (see the module doc for
     /// the 6+3 composition). All fields are mandatory `fieldOf`s in Java's
     /// declaration order.
@@ -1864,6 +1883,19 @@ mod tests {
         assert_eq!(settings.size(), 100.0);
         assert_eq!(settings.lerp_time(), 0);
         assert_eq!(settings.lerp_target(), 100.0);
+    }
+
+    #[test]
+    fn current_bounds_snapshot_freezes_live_border_extent() {
+        let mut border =
+            WorldBorder::new(Settings::new(10.0, 20.0, 0.4, 8.0, 7, 30, 100.0, 50, 200.0));
+        border.apply_initial_settings(1000);
+        let snapshot = Settings::from_world_border(&border).current_bounds_snapshot();
+        assert_eq!(snapshot.center_x(), 10.0);
+        assert_eq!(snapshot.center_z(), 20.0);
+        assert_eq!(snapshot.size(), 100.0);
+        assert_eq!(snapshot.lerp_time(), 0);
+        assert_eq!(snapshot.lerp_target(), 100.0);
     }
 
     #[test]

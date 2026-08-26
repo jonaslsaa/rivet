@@ -3,6 +3,10 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import java.io.PrintWriter;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -21,6 +25,8 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.level.material.MapColor;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.shapes.CollisionContext;
 
 /**
  * Dumps the compact per-{@code StateId} worldgen/heightmap/lighting behavior
@@ -107,6 +113,11 @@ public final class BlockBehaviourProbe {
         JsonArray collisionFaceRuns = new JsonArray();
         JsonArray occlusionFaceRuns = new JsonArray();
         JsonArray dynamicShapeRuns = new JsonArray();
+        JsonArray collisionShapes = new JsonArray();
+        JsonArray collisionShapeIds = new JsonArray();
+        Map<List<Integer>, Integer> collisionShapeIdsByBoxes = new HashMap<>();
+        collisionShapes.add(shape(List.of()));
+        collisionShapeIdsByBoxes.put(List.of(), 0);
         int runStart = 0;
         BlockState firstState = Block.stateById(0);
         require(Block.getId(firstState) == 0, "state 0 resolves to " + Block.getId(firstState));
@@ -124,6 +135,9 @@ public final class BlockBehaviourProbe {
         int occlusionFaceMask = occlusionFaceMask(firstState);
         int dynamicShapeRunStart = 0;
         boolean dynamicShape = hasDynamicShape(firstState);
+        collisionShapeIds.add(dynamicShape
+            ? -1
+            : staticCollisionShapeId(firstState, collisionShapes, collisionShapeIdsByBoxes));
         int runCount = 0;
         int faceSturdyRunCount = 0;
         int centerSupportRunCount = 0;
@@ -182,6 +196,9 @@ public final class BlockBehaviourProbe {
                 dynamicShapeRunStart = id;
                 dynamicShape = dynamic;
             }
+            collisionShapeIds.add(dynamic
+                ? -1
+                : staticCollisionShapeId(state, collisionShapes, collisionShapeIdsByBoxes));
         }
         runs.add(run(runStart, count - runStart, runWord));
         runCount++;
@@ -203,6 +220,9 @@ public final class BlockBehaviourProbe {
         println("collision_face_run_count=" + collisionFaceRunCount);
         println("occlusion_face_run_count=" + occlusionFaceRunCount);
         println("dynamic_shape_state_count=" + dynamicShapeCount(dynamicShapeRuns));
+        println("static_collision_shape_count=" + collisionShapes.size());
+        println("static_collision_box_count=" + collisionBoxCount(collisionShapes));
+        println("static_collision_max_boxes=" + collisionMaxBoxCount(collisionShapes));
 
         JsonArray dynamicFixtures = dynamicFixtures();
         JsonObject root = new JsonObject();
@@ -217,6 +237,8 @@ public final class BlockBehaviourProbe {
         root.add("collision_face_runs", collisionFaceRuns);
         root.add("occlusion_face_runs", occlusionFaceRuns);
         root.add("dynamic_shape_runs", dynamicShapeRuns);
+        root.add("collision_shapes", collisionShapes);
+        root.add("collision_shape_ids", collisionShapeIds);
         root.add("dynamic_fixtures", dynamicFixtures);
         Gson gson = new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
         try (PrintWriter writer = new PrintWriter(output, "UTF-8")) {
@@ -276,6 +298,72 @@ public final class BlockBehaviourProbe {
             if (run.get("dynamic").getAsBoolean()) {
                 count += run.get("length").getAsInt();
             }
+        }
+        return count;
+    }
+
+    private static int staticCollisionShapeId(
+        BlockState state, JsonArray shapes, Map<List<Integer>, Integer> idsByBoxes
+    ) {
+        List<Integer> boxes = new ArrayList<>();
+        for (AABB box : state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO, CollisionContext.empty()).toAabbs()) {
+            boxes.add(scaledCoordinate(box.minX, "minX"));
+            boxes.add(scaledCoordinate(box.minY, "minY"));
+            boxes.add(scaledCoordinate(box.minZ, "minZ"));
+            boxes.add(scaledCoordinate(box.maxX, "maxX"));
+            boxes.add(scaledCoordinate(box.maxY, "maxY"));
+            boxes.add(scaledCoordinate(box.maxZ, "maxZ"));
+        }
+        require(boxes.size() % 6 == 0, "collision shape box coordinate count is not a multiple of six");
+        require(boxes.size() / 6 <= 15, "collision shape has more than 15 boxes");
+        List<Integer> key = List.copyOf(boxes);
+        Integer existing = idsByBoxes.get(key);
+        if (existing != null) {
+            return existing;
+        }
+        int id = shapes.size();
+        idsByBoxes.put(key, id);
+        shapes.add(shape(key));
+        return id;
+    }
+
+    private static int scaledCoordinate(double value, String axis) {
+        double scaled = value * 32.0;
+        long rounded = Math.round(scaled);
+        require(Math.abs(scaled - rounded) < 1.0E-9, "collision " + axis + " is not a 1/32 coordinate: " + value);
+        require(rounded >= -8 && rounded <= 48, "collision " + axis + " is outside [-0.25, 1.5]: " + value);
+        return (int)rounded;
+    }
+
+    private static JsonObject shape(List<Integer> boxes) {
+        JsonObject object = new JsonObject();
+        JsonArray values = new JsonArray();
+        for (int i = 0; i < boxes.size(); i += 6) {
+            JsonObject box = new JsonObject();
+            box.addProperty("min_x", boxes.get(i));
+            box.addProperty("min_y", boxes.get(i + 1));
+            box.addProperty("min_z", boxes.get(i + 2));
+            box.addProperty("max_x", boxes.get(i + 3));
+            box.addProperty("max_y", boxes.get(i + 4));
+            box.addProperty("max_z", boxes.get(i + 5));
+            values.add(box);
+        }
+        object.add("boxes", values);
+        return object;
+    }
+
+    private static int collisionBoxCount(JsonArray shapes) {
+        int count = 0;
+        for (var value : shapes) {
+            count += value.getAsJsonObject().getAsJsonArray("boxes").size();
+        }
+        return count;
+    }
+
+    private static int collisionMaxBoxCount(JsonArray shapes) {
+        int count = 0;
+        for (var value : shapes) {
+            count = Math.max(count, value.getAsJsonObject().getAsJsonArray("boxes").size());
         }
         return count;
     }
