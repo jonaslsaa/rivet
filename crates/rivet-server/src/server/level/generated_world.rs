@@ -138,7 +138,7 @@ use rivet_util::random::LegacyRandomSource;
 use rivet_util::random_source::XoroshiroRandomSource;
 use rivet_util::random_source::random_support;
 use rivet_util::weighted::{Weighted, WeightedList, WeightedRandom};
-use rivet_util::RandomSource;
+use rivet_util::{PositionalRandomFactory, RandomSource};
 use rivet_world::biome::BiomeManager;
 use rivet_world::biome::BiomeResolver;
 use rivet_world::biome::BiomeSource;
@@ -361,7 +361,6 @@ struct FeaturePlan {
     feature_list: Vec<StepFeatureData>,
 }
 
-<<<<<<< HEAD
 /// The caller-owned radius-one SPAWN workspace. The center remains in the
 /// [`GenerationChunkHolder`]; this value owns only the eight neighbouring
 /// protos, all on the same tick thread. No `Arc<RwLock>` or clone-backed cache
@@ -4504,6 +4503,7 @@ mod tests {
             chunk,
             context,
             features_failure: None,
+            generator: Arc::clone(generator),
             feature_writebacks: Vec::new(),
             pending_feature_writebacks: Rc::new(RefCell::new(None)),
             feature_workspace: FeatureWorkspace::new(),
@@ -4523,6 +4523,7 @@ mod tests {
         let pending_feature_writebacks = Rc::new(RefCell::new(None));
         let writeback_sink = Rc::clone(&pending_feature_writebacks);
         let generator = Arc::clone(generator);
+        let context_generator = Arc::clone(&generator);
         let context = WorldGenContext::new(
             |_| {},
             |_| {},
@@ -4532,7 +4533,7 @@ mod tests {
                 if fail {
                     chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
                 }
-                let mut region = compose_feature_region(chunk, &generator);
+                let mut region = compose_feature_region(chunk, &context_generator);
                 assert!(region.set_block(
                     &BlockPos::new(16, 64, 0),
                     Blocks::STONE.default_block_state(),
@@ -4556,6 +4557,7 @@ mod tests {
             chunk,
             context,
             features_failure: None,
+            generator,
             feature_writebacks: Vec::new(),
             pending_feature_writebacks,
             feature_workspace: FeatureWorkspace::new(),
@@ -4614,6 +4616,7 @@ mod tests {
             chunk,
             context,
             features_failure: None,
+            generator: Arc::clone(generator),
             feature_writebacks: Vec::new(),
             pending_feature_writebacks,
             feature_workspace: workspace.clone(),
