@@ -5663,6 +5663,7 @@ mod tests {
         let pointed_dripstone =
             BlockState::of(BlockId::from_name("minecraft:pointed_dripstone").unwrap());
         let moving_piston = BlockState::of(BlockId::from_name("minecraft:moving_piston").unwrap());
+        let firefly_bush = BlockState::of(BlockId::from_name("minecraft:firefly_bush").unwrap());
         let rail = BlockState::of(BlockId::from_name("minecraft:rail").unwrap());
         let powered_rail = BlockState::of(BlockId::from_name("minecraft:powered_rail").unwrap());
         let activator_rail =
@@ -5790,6 +5791,9 @@ mod tests {
             "minecraft:cow",
             &pos
         ));
+        assert!(is_valid_spawn_floor(firefly_bush, "minecraft:ocelot"));
+        assert!(is_valid_spawn_floor(firefly_bush, "minecraft:parrot"));
+        assert!(!is_valid_spawn_floor(firefly_bush, "minecraft:cow"));
         assert!(!is_valid_spawn_floor(glass, "minecraft:cow"));
         assert!(!is_valid_spawn_floor(powder_snow, "minecraft:polar_bear"));
         assert!(is_valid_spawn_floor(
@@ -5823,6 +5827,12 @@ mod tests {
         let copper_chain = BlockState::of(BlockId::from_name("minecraft:copper_chain").unwrap());
         let exposed_copper_statue =
             BlockState::of(BlockId::from_name("minecraft:exposed_copper_golem_statue").unwrap());
+        let exposed_copper_lantern =
+            BlockState::of(BlockId::from_name("minecraft:exposed_copper_lantern").unwrap());
+        let exposed_copper_rod =
+            BlockState::of(BlockId::from_name("minecraft:exposed_copper_lightning_rod").unwrap());
+        let exposed_copper_chest =
+            BlockState::of(BlockId::from_name("minecraft:exposed_copper_chest").unwrap());
         let water = BlockState::of(BlockId::from_name("minecraft:water").unwrap());
         let lava = BlockState::of(BlockId::from_name("minecraft:lava").unwrap());
         let closed_door = BlockState::of(BlockId::from_name("minecraft:oak_door").unwrap());
