@@ -14,6 +14,6 @@ The final FULL executor wave should therefore be removed from G4's batch executi
 
 ## Data boundary
 
-The promotion already transfers the representations Rivet models on the proto/base: sections, heightmaps, light nibbles and light-correct state, inhabited time, unsaved state, pending block-entity NBT, post-processing offsets, block and fluid ticks, and typed structure starts/references. Serialized entity NBT is carried as `post_load_entities` until ServerLevel authority can run Paper's `postLoadProtoChunk` callback.
+The promotion already transfers the representations Rivet models on the proto/base: sections, heightmaps, light nibbles and light-correct state, inhabited time, unsaved state, pending block-entity NBT, post-processing offsets, block/fluid ticks, and typed structure starts/references. Serialized entity NBT is carried as `post_load_entities` until ServerLevel authority can run Paper's `postLoadProtoChunk` callback.
 
 G4 must perform the remaining ServerLevel-owned Paper actions only where their runtime authorities exist: post-load processing, block-entity registration, tick-container registration, loaded/full-status callbacks, and the unsaved listener. Do not invent registration or spawn behavior in the value-layer conversion; keep those boundaries issue-linked (`RivetTodo(#185)`) until the corresponding ServerLevel units are present.
