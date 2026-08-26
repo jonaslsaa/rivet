@@ -239,9 +239,15 @@ mod tests {
 
     #[test]
     fn accepts_escaped_keys_and_rejects_their_decoded_duplicate() {
+        // The scanner dedups on decoded key text: `"a"` decodes to "a",
+        // so it must collide with a plain `"a"` in the same object.
         let error = from_slice::<serde_json::Value>(br#"{"a":1,"a":2}"#)
             .expect_err("decoded duplicate key");
         assert!(error.contains("duplicate JSON object key"));
+
+        // Distinct keys that merely share escape encodings stay accepted.
+        from_slice::<serde_json::Value>(br#"{"a":1,"b":2}"#)
+            .expect("escaped and plain distinct keys are accepted");
     }
 
     #[test]
