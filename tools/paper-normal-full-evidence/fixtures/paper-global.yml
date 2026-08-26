@@ -1,0 +1,4 @@
+# Independent FULL evidence pin. Never share a mutable Paper config with another run.
+chunk-system:
+  io-threads: 1
+  worker-threads: 1

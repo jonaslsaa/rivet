@@ -1,0 +1,11 @@
+# Zero spawn limits keep entities out of deterministic FULL payloads.
+entities:
+  spawning:
+    spawn-limits:
+      ambient: 0
+      axolotls: 0
+      creature: 0
+      monster: 0
+      underground_water_creature: 0
+      water_ambient: 0
+      water_creature: 0

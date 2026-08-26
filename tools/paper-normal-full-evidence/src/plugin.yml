@@ -1,0 +1,7 @@
+name: RivetPaperNormalFullProbe
+version: 1.0.0
+main: org.rivet.paper_normal_full.PaperNormalFullProbe
+api-version: '1.21'
+load: POSTWORLD
+author: Rivet evidence tooling
+description: Independent main-thread observer for Paper normal-overworld FULL evidence
