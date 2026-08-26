@@ -61,7 +61,13 @@ diffs vs Rivet, packet round-trips) builds on top of these fixtures later.
   FAIL. Stable evidence opening is deliberately Linux-only (`openat2` with
   `RESOLVE_NO_SYMLINKS` and `/proc/self/fd`); non-Linux platforms fail
   explicitly instead of taking an insecure pathname-reopen fallback. Linux
-  x86_64 is the primary tested target.
+  x86_64 is the primary tested target. Replay records label commit-derived
+  hashes as `paper-revision-identity-sha256` and
+  `rivet-revision-identity-sha256`; these are revision identities, not
+  source-content snapshots. Paper clean shutdown requires the post-READY
+  `All dimensions are saved` marker and exit 0 or conventional SIGTERM exit
+  143. The dedicated Rivet producer's exit 4 is BLOCKED/UNVERIFIED until its
+  real FULL pipeline exists.
 - The Rust runner `cargo run -p rivet-oracle` verifies every committed
   fixture kind against its manifest's SHA-256s and prints a summary.
 - **Storage-only #231 V1a is green**: `anvil-roundtrip-v1a` writes all 432
@@ -852,17 +858,20 @@ come from the committed M2 region payloads via the rivet-nbt codec.
   a missing/empty payload source is **UNVERIFIED (3)** — never a fabricated
   zero-chunk manifest that could make a later diff vacuously green.
 - `hash-rivet <dir>` — reads a Rivet region tree (`chunk/<dim>/<region>/<cx>.<cz>.nbt`).
-  There is no Rivet FULL serialization yet, so it exits **3 UNVERIFIED**, never
-  green (Rivet chunk serialization is #231/#15; the Paper FULL side is now
-  covered by #51's corpus-forced superflat capture).
+  A wholly absent tree, missing `chunk/`, or a present tree that has not yet
+  reached FULL is **3 UNVERIFIED**. Present non-directories, nonregular entries,
+  malformed manifests/payloads, partial trees, and invalid NBT are **1 FAIL**;
+  no malformed existing evidence is downgraded to a missing prerequisite.
 - `hash-diff <paper> <rivet>` — compares Paper vs Rivet manifests. Refuses
   differing provenance (seed/algorithm/paper/concurrency) AND refuses a
   Paper-vs-Paper self-diff (both args the same tree — canonicalized, so a
   symlink alias is caught too): a self-comparison can never imply Paper ==
-  Rivet parity, so it is UNVERIFIED (3), never a PASS. Only FULL entries are
-  compared; a Paper-only or Rivet-only FULL chunk, a raw-digest difference, or a
-  missing required corpus coordinate are each real divergence — never a vacuous
-  green. Exit 0 = PASS, 1 = FAIL (names each chunk), 3 = UNVERIFIED, 64 = usage.
+  Rivet parity, so it is UNVERIFIED (3), never a PASS. Missing Rivet evidence,
+  self-diff/provenance/coverage prerequisites remain UNVERIFIED; existing
+  malformed manifests or corrupted raw trees are FAIL (1). Only FULL entries
+  are compared; a Paper-only or Rivet-only FULL chunk or a raw-digest
+  difference is real divergence — never a vacuous green. Exit 0 = PASS,
+  1 = FAIL (names each chunk), 3 = UNVERIFIED, 64 = usage.
 - `hash-diff --expect-fail <paper> <rivet> [kind]` — negative control: corrupt a
   copy of the **Rivet** baseline and require the tampered chunk named **and only
   it** — a FAIL for any other reason (a different chunk, a provenance mismatch,

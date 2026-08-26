@@ -807,11 +807,12 @@ grep -q "^    PASS" "$TMP/out_rc5" && fail "recenter: PASS printed despite a cra
 grep -q "^    UNVERIFIED" "$TMP/out_rc5" && fail "recenter: UNVERIFIED printed for a crash (classification is FAIL, exit 1)"
 pass "recenter: exit 101 -> FAILED, hard exit 1, never UNVERIFIED"
 
-# --- test 10: generated-full oracle row keeps the dedicated 0/1/3 contract --
+# --- test 10: generated-full oracle row keeps the dedicated 0/1/3/4 contract --
 # The row is activated only by RIVET_GENERATED_FULL=1: a complete four-seed
 # corpus runs the verifier and its tamper controls, absent genuine output is
-# UNVERIFIED (3), malformed/divergent output is FAIL (1), and --require-oracle
-# promotes exit 3 to a hard exit 1. The cargo shim records exact argv.
+# UNVERIFIED (3), a dedicated producer capability boundary is BLOCKED (4),
+# malformed/divergent output is FAIL (1), and --require-oracle promotes both
+# non-PASS outcomes to a hard exit 1. The cargo shim records exact argv.
 GEN_FULL_LOG="$TMP/generated-full-invocations.log"
 GEN_FULL_EXIT_FILE="$TMP/generated-full-exit"
 # The generated FULL row is an explicit promotion activation, not an ordinary
@@ -876,6 +877,28 @@ PATH="$saved_path"
 [ "$ORACLE_UNVERIFIED" = 0 ] || fail "generated-full: FAIL set ORACLE_UNVERIFIED"
 grep -q "^    FAILED" "$TMP/out_gf1" || fail "generated-full: FAILED not printed for exit 1"
 pass "generated-full: exit 1 -> FAILED, hard exit 1"
+
+set_generated_full_exit 4
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0
+PATH="$CARGO_SHIM:$PATH"
+run_oracle_generated_full > "$TMP/out_gf4_blocked" 2>&1
+PATH="$saved_path"
+[ "$ORACLE_UNVERIFIED" = 1 ] || fail "generated-full: dedicated producer BLOCKED did not set ORACLE_UNVERIFIED"
+grep -q "^    BLOCKED/UNVERIFIED" "$TMP/out_gf4_blocked" || fail "generated-full: BLOCKED/UNVERIFIED not printed for exit 4"
+pass "generated-full: dedicated producer exit 4 -> BLOCKED/UNVERIFIED"
+
+set_generated_full_exit 4
+ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=1
+PATH="$CARGO_SHIM:$PATH"
+set +e
+( run_oracle_generated_full > "$TMP/out_gf4_required" 2>&1 )
+rc_gf4_required=$?
+set -e
+PATH="$saved_path"
+REQUIRE_ORACLE=0
+[ "$rc_gf4_required" = 1 ] || fail "generated-full: exit 4 + --require-oracle should exit 1 (got $rc_gf4_required)"
+grep -q "blocked generated-full producer" "$TMP/out_gf4_required" || fail "generated-full: require-oracle BLOCKED message missing"
+pass "generated-full: exit 4 + --require-oracle -> hard exit 1"
 
 set_generated_full_exit 3
 ORACLE_UNVERIFIED=0; REQUIRE_ORACLE=0

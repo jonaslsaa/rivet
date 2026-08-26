@@ -165,8 +165,8 @@ pub struct PaperObserved {
     pub paper_jar_sha256: String,
     #[serde(rename = "paper-config-sha256")]
     pub paper_config_sha256: String,
-    #[serde(rename = "paper-source-sha256")]
-    pub paper_source_sha256: String,
+    #[serde(rename = "paper-revision-identity-sha256")]
+    pub paper_revision_identity_sha256: String,
     pub pid: u32,
     #[serde(rename = "started-unix-nanos")]
     pub started_unix_nanos: u128,
@@ -199,8 +199,8 @@ pub struct RivetObserved {
     pub rivet_executable_sha256: String,
     #[serde(rename = "rivet-config-sha256")]
     pub rivet_config_sha256: String,
-    #[serde(rename = "rivet-source-sha256")]
-    pub rivet_source_sha256: String,
+    #[serde(rename = "rivet-revision-identity-sha256")]
+    pub rivet_revision_identity_sha256: String,
     pub pid: u32,
     #[serde(rename = "started-unix-nanos")]
     pub started_unix_nanos: u128,
@@ -234,6 +234,21 @@ pub struct ReplayRecord {
     pub paper_observed: Vec<PaperObserved>,
     #[serde(rename = "rivet-observed")]
     pub rivet_observed: Vec<RivetObserved>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LatestReplay {
+    schema: String,
+    nonce: String,
+    #[serde(rename = "replay-root")]
+    replay_root: String,
+}
+
+#[derive(Debug, Clone)]
+struct ReplaySnapshotEvidence {
+    root: PathBuf,
+    manifest: HashManifest,
 }
 
 #[cfg(test)]
@@ -407,7 +422,11 @@ fn canonical_contract() -> GeneratedContract {
 
 /// Load and structurally validate the generated-FULL contract.
 pub fn load_contract(path: &Path) -> Result<GeneratedContract, Error> {
-    let raw_bytes = read_stable_file(path, "generated-full contract")?;
+    let raw_bytes = read_stable_file_capped(
+        path,
+        "generated-full contract",
+        crate::json::MAX_JSON_BYTES as u64,
+    )?;
     std::str::from_utf8(&raw_bytes).map_err(|e| {
         Error::Gate(format!(
             "generated-full contract {} is not UTF-8: {e}",
@@ -475,13 +494,109 @@ struct ArtifactIdentity {
     capture_config_sha256: String,
 }
 
+#[derive(Debug)]
+struct StagedFile {
+    path: PathBuf,
+    /// Descriptor held open on the staged file for the whole replay: a later
+    /// path swap cannot redirect any consumer away from attested contents.
+    #[allow(dead_code)]
+    file: fs::File,
+    /// Contents read exactly once through the stable descriptor at staging
+    /// time; later consumers never reopen anything by pathname.
+    #[allow(dead_code)]
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct StagedArtifacts {
+    paper_jar: StagedFile,
+    paper_properties: StagedFile,
+    rivet_binary: StagedFile,
+    rivet_config: StagedFile,
+    identity: ArtifactIdentity,
+}
+
 const REPLAY_SCHEMA: &str = "generated-full-replay-v1";
+const LATEST_REPLAY_SCHEMA: &str = "generated-full-latest-replay-v1";
+const LATEST_REPLAY_BASENAME: &str = "latest-replay.json";
 const PAPER_READY_TIMEOUT: Duration = Duration::from_secs(180);
 const PRODUCER_READY_TIMEOUT: Duration = Duration::from_secs(30);
 const PROCESS_POLL: Duration = Duration::from_millis(100);
 const PAPER_READY_MARKER: &str = "Done (";
 const RIVET_READY_MARKER: &str = "RIVET_GENERATED_FULL_READY";
-const PAPER_EXPECTED_EXIT: i32 = 0;
+const PAPER_CLEAN_SAVE_MARKER: &str = "All dimensions are saved";
+
+#[derive(Debug, Clone, Copy)]
+enum ExpectedLifecycle {
+    PaperClean,
+    ProducerExit(i32),
+}
+
+fn process_exit_code(status: std::process::ExitStatus) -> i32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        status
+            .code()
+            .or_else(|| status.signal().map(|signal| 128 + signal))
+            .unwrap_or(-1)
+    }
+    #[cfg(not(unix))]
+    {
+        status.code().unwrap_or(-1)
+    }
+}
+
+fn validate_expected_lifecycle(
+    pid: u32,
+    exit_code: i32,
+    log_bytes: &[u8],
+    ready_offset: usize,
+    expected_lifecycle: ExpectedLifecycle,
+) -> Result<(), Error> {
+    match expected_lifecycle {
+        ExpectedLifecycle::PaperClean => {
+            // Paper's clean shutdown is SIGTERM-driven. On Unix a direct
+            // child reports signal 15 (rendered as the conventional 143),
+            // while wrappers may return 143 and some Paper builds return 0.
+            // The save marker is the authoritative lifecycle witness; an
+            // arbitrary successful-looking producer exit is never accepted.
+            if !matches!(exit_code, 0 | 143) {
+                return Err(Error::Gate(format!(
+                    "Paper process {pid} exited with code {exit_code}; clean SIGTERM lifecycle requires exit 0 or 143"
+                )));
+            }
+            let post_ready = String::from_utf8_lossy(
+                log_bytes
+                    .get(ready_offset.min(log_bytes.len())..)
+                    .unwrap_or(&[]),
+            );
+            if !post_ready.contains(PAPER_CLEAN_SAVE_MARKER) {
+                return Err(Error::Gate(format!(
+                    "Paper process {pid} exited {exit_code} without the clean-save marker {PAPER_CLEAN_SAVE_MARKER:?} after READY"
+                )));
+            }
+        }
+        ExpectedLifecycle::ProducerExit(expected) => {
+            if exit_code == 4
+                && let Some(message) = String::from_utf8_lossy(log_bytes).lines().find_map(|line| {
+                    line.strip_prefix("RIVET_GENERATED_FULL_BLOCKED:")
+                        .map(str::trim)
+                        .filter(|message| !message.is_empty())
+                        .map(str::to_string)
+                })
+            {
+                return Err(Error::Blocked(message));
+            }
+            if exit_code != expected {
+                return Err(Error::Gate(format!(
+                    "generated-full producer {pid} exited with code {exit_code}; expected dedicated exit {expected}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
 
 fn now_unix_nanos() -> Result<u128, Error> {
     SystemTime::now()
@@ -510,6 +625,7 @@ fn apply_controller_environment(
     environment
 }
 
+#[derive(Debug)]
 struct ProcessObservation {
     pid: u32,
     started_unix_nanos: u128,
@@ -529,7 +645,7 @@ fn process_observation(
     log_path: &Path,
     ready_marker: &str,
     timeout: Duration,
-    expected_exit: Option<i32>,
+    expected_lifecycle: ExpectedLifecycle,
 ) -> Result<ProcessObservation, Error> {
     if log_path.exists() {
         return Err(Error::Gate(format!(
@@ -615,14 +731,14 @@ fn process_observation(
             "generated-full producer {pid} emitted {ready_count} {ready_marker:?} markers; exactly one is required"
         )));
     }
-    let exit_code = status.code().unwrap_or(-1);
-    if expected_exit.is_some_and(|expected| exit_code != expected)
-        || expected_exit.is_none() && !status.success()
-    {
-        return Err(Error::Gate(format!(
-            "generated-full producer {pid} exited with code {exit_code}; launched evidence is failed"
-        )));
-    }
+    let exit_code = process_exit_code(status);
+    validate_expected_lifecycle(
+        pid,
+        exit_code,
+        &log_bytes,
+        child.ready_offset(),
+        expected_lifecycle,
+    )?;
     Ok(ProcessObservation {
         pid,
         started_unix_nanos,
@@ -636,6 +752,327 @@ fn process_observation(
     })
 }
 
+fn clear_latest_replay(base: &Path) -> Result<(), Error> {
+    let path = base.join(LATEST_REPLAY_BASENAME);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(Error::Gate(format!(
+                    "generated-full latest replay pointer {} is a symlink",
+                    path.display()
+                )));
+            }
+            reject_hardlink_metadata(&metadata, &path, "generated-full latest replay pointer")?;
+            fs::remove_file(&path).map_err(Error::Io)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::Gate(format!(
+            "generated-full latest replay pointer {} cannot be inspected: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn publish_latest_replay(base: &Path, nonce: &str, replay_root: &Path) -> Result<(), Error> {
+    let path = base.join(LATEST_REPLAY_BASENAME);
+    let record = LatestReplay {
+        schema: LATEST_REPLAY_SCHEMA.to_string(),
+        nonce: nonce.to_string(),
+        replay_root: replay_root.display().to_string(),
+    };
+    let bytes = serde_json::to_vec_pretty(&record).map_err(|error| {
+        Error::Gate(format!(
+            "cannot serialize generated-full latest replay pointer: {error}"
+        ))
+    })?;
+    write_fresh_file(&path, &bytes, "latest replay pointer")?;
+    Ok(())
+}
+
+fn load_latest_replay(base: &Path) -> Result<ReplayRecord, Error> {
+    let pointer_path = base.join(LATEST_REPLAY_BASENAME);
+    let bytes = read_stable_file_capped(
+        &pointer_path,
+        "generated-full latest replay pointer",
+        crate::json::MAX_JSON_BYTES as u64,
+    )?;
+    let pointer: LatestReplay = crate::json::from_slice(&bytes).map_err(|error| {
+        Error::Gate(format!(
+            "generated-full latest replay pointer {} is malformed: {error}",
+            pointer_path.display()
+        ))
+    })?;
+    if pointer.schema != LATEST_REPLAY_SCHEMA || pointer.nonce.is_empty() {
+        return Err(Error::Gate(format!(
+            "generated-full latest replay pointer {} has an invalid schema or nonce",
+            pointer_path.display()
+        )));
+    }
+    let expected_root = base.join(format!("replay-{}", pointer.nonce));
+    if Path::new(&pointer.replay_root) != expected_root {
+        return Err(Error::Gate(format!(
+            "generated-full latest replay pointer {} names an unexpected replay root",
+            pointer_path.display()
+        )));
+    }
+    reject_symlink_components(&expected_root, "generated-full retained replay")?;
+    if !is_real_dir(&expected_root) {
+        return Err(Error::Gate(format!(
+            "generated-full retained replay root {} is absent or not a directory",
+            expected_root.display()
+        )));
+    }
+    for side in ["paper", "rivet"] {
+        let side_root = expected_root.join(side);
+        let metadata = fs::symlink_metadata(&side_root).map_err(|error| {
+            Error::Gate(format!(
+                "generated-full retained replay {side} root {} is absent or cannot be inspected: {error}",
+                side_root.display()
+            ))
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+            return Err(Error::Gate(format!(
+                "generated-full retained replay {side} root {} is not a regular directory",
+                side_root.display()
+            )));
+        }
+        reject_hardlink_metadata(
+            &metadata,
+            &side_root,
+            "generated-full retained replay side root",
+        )?;
+    }
+    let record_path = expected_root.join("replay.json");
+    let record_bytes = read_stable_file_capped(
+        &record_path,
+        "generated-full retained replay record",
+        crate::json::MAX_JSON_BYTES as u64,
+    )
+    .map_err(|error| match error {
+        Error::Unverified(message) => Error::Gate(format!(
+            "generated-full retained replay record {} is absent or partial: {message}",
+            record_path.display()
+        )),
+        other => other,
+    })?;
+    let record: ReplayRecord = crate::json::from_slice(&record_bytes).map_err(|error| {
+        Error::Gate(format!(
+            "generated-full retained replay record {} is malformed: {error}",
+            record_path.display()
+        ))
+    })?;
+    if record.schema != REPLAY_SCHEMA
+        || record.lifecycle != "completed"
+        || record.nonce != pointer.nonce
+        || record.controller_root != expected_root.display().to_string()
+    {
+        return Err(Error::Gate(format!(
+            "generated-full retained replay record {} is incomplete or not owned by this pointer",
+            record_path.display()
+        )));
+    }
+    Ok(record)
+}
+
+/// Bind a retained observation path to the exact verifier-owned location that
+/// the fresh replay writes for its side, seed, and capture boot.  The replay
+/// record is untrusted input once `--tamper` is invoked: checking only that a
+/// path is somewhere below `controller_root` would let a tampered record swap
+/// Paper/Rivet sides or point at another seed's clean snapshot.
+fn bind_replay_snapshot_root(
+    record: &ReplayRecord,
+    root: &Path,
+    seed: u64,
+    side: &str,
+) -> Result<Option<u8>, Error> {
+    let controller_root = Path::new(&record.controller_root);
+    let (recorded_side_root, expected_side_root) = match side {
+        "paper" => (&record.paper_root, controller_root.join("paper")),
+        "rivet" => (&record.rivet_root, controller_root.join("rivet")),
+        other => {
+            return Err(Error::Gate(format!(
+                "generated-full retained replay has unknown observation side {other:?}"
+            )));
+        }
+    };
+    if Path::new(recorded_side_root) != expected_side_root {
+        return Err(Error::Gate(format!(
+            "generated-full retained replay {side} root {} is not the controller-owned {} root {}",
+            recorded_side_root,
+            side,
+            expected_side_root.display()
+        )));
+    }
+
+    let seed_root = expected_side_root.join(seed.to_string());
+    let (expected_root, paper_boot) = match side {
+        "paper" => {
+            if root.parent() != Some(seed_root.as_path()) {
+                return Err(Error::Gate(format!(
+                    "generated-full retained Paper seed-{seed} snapshot {} is not directly under {}",
+                    root.display(),
+                    seed_root.display()
+                )));
+            }
+            let name = root.file_name().and_then(|value| value.to_str()).ok_or_else(|| {
+                Error::Gate(format!(
+                    "generated-full retained Paper seed-{seed} snapshot {} has no canonical UTF-8 name",
+                    root.display()
+                ))
+            })?;
+            let suffix = name.strip_prefix("snapshot-").ok_or_else(|| {
+                Error::Gate(format!(
+                    "generated-full retained Paper seed-{seed} snapshot {name:?} has an unexpected name; expected snapshot-1 or snapshot-2"
+                ))
+            })?;
+            let boot = suffix.parse::<u8>().map_err(|_| {
+                Error::Gate(format!(
+                    "generated-full retained Paper seed-{seed} snapshot {name:?} has a non-numeric boot name"
+                ))
+            })?;
+            if !(1..=2).contains(&boot) || name != format!("snapshot-{boot}") {
+                return Err(Error::Gate(format!(
+                    "generated-full retained Paper seed-{seed} snapshot {name:?} has an unexpected boot name; expected snapshot-1 or snapshot-2"
+                )));
+            }
+            (seed_root.join(name), Some(boot))
+        }
+        "rivet" => (seed_root.join("snapshot"), None),
+        _ => unreachable!("side was matched above"),
+    };
+    if root != expected_root {
+        return Err(Error::Gate(format!(
+            "generated-full retained {side} seed-{seed} snapshot {} is not the expected verifier-owned path {}",
+            root.display(),
+            expected_root.display()
+        )));
+    }
+    Ok(paper_boot)
+}
+
+/// Validate every observation root in a retained replay record before hashing
+/// any snapshot.  This rejects side/seed swaps, duplicate roots, skipped or
+/// unexpected Paper boot names, and extra seeds that the record could otherwise
+/// hide behind a valid in-root snapshot.
+fn validate_replay_observation_layout(
+    record: &ReplayRecord,
+    contract: &GeneratedContract,
+) -> Result<(), Error> {
+    let expected_seeds = contract.seeds.iter().copied().collect::<BTreeSet<_>>();
+    if expected_seeds.is_empty() {
+        return Err(Error::Gate(
+            "generated-full retained replay cannot validate an empty seed contract".into(),
+        ));
+    }
+    let max_paper_observations = expected_seeds.len().checked_mul(2).ok_or_else(|| {
+        Error::Gate("generated-full retained Paper observation cap overflowed".into())
+    })?;
+    if record.paper_observed.len() > max_paper_observations {
+        return Err(Error::Gate(format!(
+            "generated-full retained replay has {} Paper observations, above the {max_paper_observations}-observation cap",
+            record.paper_observed.len()
+        )));
+    }
+    if record.rivet_observed.len() > expected_seeds.len() {
+        return Err(Error::Gate(format!(
+            "generated-full retained replay has {} Rivet observations, above the {}-observation cap",
+            record.rivet_observed.len(),
+            expected_seeds.len()
+        )));
+    }
+    let mut seen_roots = BTreeSet::new();
+    let mut paper_boots = std::collections::BTreeMap::<u64, BTreeSet<u8>>::new();
+
+    for observation in &record.paper_observed {
+        if !expected_seeds.contains(&observation.seed) {
+            return Err(Error::Gate(format!(
+                "generated-full retained replay has an unexpected Paper seed {}",
+                observation.seed
+            )));
+        }
+        let root = PathBuf::from(&observation.root);
+        let Some(boot) = bind_replay_snapshot_root(record, &root, observation.seed, "paper")?
+        else {
+            unreachable!("Paper observations always carry a boot number")
+        };
+        if !seen_roots.insert(root.clone()) {
+            return Err(Error::Gate(format!(
+                "generated-full retained replay reuses observation root {}",
+                root.display()
+            )));
+        }
+        paper_boots
+            .entry(observation.seed)
+            .or_default()
+            .insert(boot);
+    }
+
+    let mut rivet_seeds = BTreeSet::new();
+    for observation in &record.rivet_observed {
+        if !expected_seeds.contains(&observation.seed) {
+            return Err(Error::Gate(format!(
+                "generated-full retained replay has an unexpected Rivet seed {}",
+                observation.seed
+            )));
+        }
+        let root = PathBuf::from(&observation.root);
+        if bind_replay_snapshot_root(record, &root, observation.seed, "rivet")?.is_some() {
+            unreachable!("Rivet observations never carry a Paper boot number")
+        }
+        if !seen_roots.insert(root.clone()) {
+            return Err(Error::Gate(format!(
+                "generated-full retained replay reuses observation root {}",
+                root.display()
+            )));
+        }
+        if !rivet_seeds.insert(observation.seed) {
+            return Err(Error::Gate(format!(
+                "generated-full retained replay has duplicate Rivet observations for seed {}",
+                observation.seed
+            )));
+        }
+    }
+
+    let mut capture_count = None;
+    for &seed in &expected_seeds {
+        let Some(boots) = paper_boots.get(&seed) else {
+            return Err(Error::Gate(format!(
+                "generated-full retained replay is partial: no Paper capture observation for seed {seed}"
+            )));
+        };
+        let Some(&last) = boots.iter().next_back() else {
+            unreachable!("an inserted Paper seed always has a boot")
+        };
+        let expected = (1..=last).collect::<BTreeSet<_>>();
+        if boots != &expected {
+            return Err(Error::Gate(format!(
+                "generated-full retained Paper seed-{seed} capture boots {boots:?} are not a contiguous sequence starting at snapshot-1"
+            )));
+        }
+        if !matches!(boots.len(), 1 | 2) {
+            return Err(Error::Gate(format!(
+                "generated-full retained Paper seed-{seed} has {} capture boots; expected one ordinary or two refresh captures",
+                boots.len()
+            )));
+        }
+        if capture_count
+            .replace(boots.len())
+            .is_some_and(|count| count != boots.len())
+        {
+            return Err(Error::Gate(
+                "generated-full retained replay has inconsistent Paper capture counts across seeds"
+                    .into(),
+            ));
+        }
+        if !rivet_seeds.contains(&seed) {
+            return Err(Error::Gate(format!(
+                "generated-full retained replay is partial: no Rivet observation for seed {seed}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn allocate_replay_root() -> Result<(String, PathBuf), Error> {
     let base = crate::crate_dir().join("work/generated-full");
     fs::create_dir_all(&base).map_err(|error| {
@@ -645,6 +1082,7 @@ fn allocate_replay_root() -> Result<(String, PathBuf), Error> {
         ))
     })?;
     reject_symlink_components(&base, "generated-full replay base")?;
+    clear_latest_replay(&base)?;
     for attempt in 0..8u32 {
         let now = now_unix_nanos()?;
         let nonce = format!("{:x}-{}-{}", now, std::process::id(), attempt);
@@ -671,6 +1109,30 @@ fn allocate_replay_root() -> Result<(String, PathBuf), Error> {
 }
 
 fn snapshot_tree(src: &Path, dst: &Path) -> Result<(), Error> {
+    snapshot_tree_with_limits(
+        src,
+        dst,
+        MAX_EVIDENCE_ENTRIES,
+        hash_manifest::MAX_TOTAL_PAYLOAD_BYTES as u64,
+    )
+}
+
+#[cfg(test)]
+fn snapshot_tree_with_limits_for_test(
+    src: &Path,
+    dst: &Path,
+    max_entries: usize,
+    max_bytes: u64,
+) -> Result<(), Error> {
+    snapshot_tree_with_limits(src, dst, max_entries, max_bytes)
+}
+
+fn snapshot_tree_with_limits(
+    src: &Path,
+    dst: &Path,
+    max_entries: usize,
+    max_bytes: u64,
+) -> Result<(), Error> {
     reject_symlink_components(src, "generated-full producer output")?;
     if !src.exists() {
         return Err(Error::Gate(format!(
@@ -692,6 +1154,8 @@ fn snapshot_tree(src: &Path, dst: &Path) -> Result<(), Error> {
     }
     fs::create_dir_all(dst)?;
     let mut stack = vec![(src.to_path_buf(), dst.to_path_buf(), 0usize)];
+    let mut aggregate_entries = 0usize;
+    let mut aggregate_bytes = 0u64;
     while let Some((from, to, depth)) = stack.pop() {
         if depth > 8 {
             return Err(Error::Gate(format!(
@@ -699,15 +1163,27 @@ fn snapshot_tree(src: &Path, dst: &Path) -> Result<(), Error> {
                 from.display()
             )));
         }
-        let entries = fs::read_dir(&from)?.collect::<Result<Vec<_>, _>>()?;
-        if entries.len() > MAX_EVIDENCE_ENTRIES {
-            return Err(Error::Gate(format!(
-                "generated-full output directory {} exceeds the {}-entry cap",
-                from.display(),
-                MAX_EVIDENCE_ENTRIES
-            )));
-        }
-        for entry in entries {
+        let mut directory_entries = 0usize;
+        for entry in fs::read_dir(&from)? {
+            let entry = entry?;
+            directory_entries = directory_entries.checked_add(1).ok_or_else(|| {
+                Error::Gate("generated-full output directory entry count overflowed".into())
+            })?;
+            if directory_entries > max_entries {
+                return Err(Error::Gate(format!(
+                    "generated-full output directory {} exceeds the {}-entry cap",
+                    from.display(),
+                    max_entries
+                )));
+            }
+            aggregate_entries = aggregate_entries.checked_add(1).ok_or_else(|| {
+                Error::Gate("generated-full producer snapshot entry count overflowed".into())
+            })?;
+            if aggregate_entries > max_entries {
+                return Err(Error::Gate(format!(
+                    "generated-full producer snapshot exceeds the {max_entries}-entry aggregate cap"
+                )));
+            }
             let source = entry.path();
             let target = to.join(entry.file_name());
             reject_symlink(&source, "generated-full producer output")?;
@@ -723,6 +1199,19 @@ fn snapshot_tree(src: &Path, dst: &Path) -> Result<(), Error> {
                 };
                 let bytes =
                     read_stable_file_capped(&source, "generated-full producer output", cap)?;
+                aggregate_bytes =
+                    aggregate_bytes
+                        .checked_add(bytes.len() as u64)
+                        .ok_or_else(|| {
+                            Error::Gate(
+                                "generated-full producer snapshot byte count overflowed".into(),
+                            )
+                        })?;
+                if aggregate_bytes > max_bytes {
+                    return Err(Error::Gate(format!(
+                        "generated-full producer snapshot exceeds the {max_bytes}-byte aggregate cap"
+                    )));
+                }
                 let mut file = fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
@@ -741,12 +1230,77 @@ fn snapshot_tree(src: &Path, dst: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+fn open_stable_directory(path: &Path, what: &str) -> Result<fs::File, Error> {
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::fs::{CWD, Mode, OFlags, ResolveFlags, openat2};
+        let file = openat2(
+            CWD,
+            path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW,
+            Mode::empty(),
+            ResolveFlags::NO_SYMLINKS,
+        )
+        .map(fs::File::from)
+        .map_err(std::io::Error::from)
+        .map_err(|error| {
+            Error::Gate(format!(
+                "{what} {} cannot be opened as a fresh regular directory without following links: {error}",
+                path.display()
+            ))
+        })?;
+        let metadata = file.metadata().map_err(|error| {
+            Error::Gate(format!(
+                "{what} {} cannot be inspected through its opened directory descriptor: {error}",
+                path.display()
+            ))
+        })?;
+        if !metadata.file_type().is_dir() {
+            return Err(Error::Gate(format!(
+                "{what} {} is not a regular directory",
+                path.display()
+            )));
+        }
+        reject_hardlink_metadata(&metadata, path, what)?;
+        Ok(file)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (path, what);
+        Err(Error::Gate(
+            "descriptor-relative generated-full output validation requires Linux openat2".into(),
+        ))
+    }
+}
+
+fn require_fresh_output_root(path: &Path, what: &str) -> Result<(), Error> {
+    reject_symlink_components(path.parent().unwrap_or_else(|| Path::new(".")), what)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Err(Error::Gate(format!(
+            "{what} {} already exists as {}; producer output roots must be fresh and absent",
+            path.display(),
+            if metadata.file_type().is_symlink() {
+                "a symlink"
+            } else if metadata.file_type().is_dir() {
+                "a directory"
+            } else {
+                "an existing entry"
+            }
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::Gate(format!(
+            "{what} {} cannot be checked for freshness: {error}",
+            path.display()
+        ))),
+    }
+}
+
 fn write_seed_config(
     root: &Path,
     contract: &GeneratedContract,
     seed: u64,
 ) -> Result<PathBuf, Error> {
-    fs::create_dir_all(root).map_err(Error::Io)?;
+    let root_descriptor = open_stable_directory(root, "generated-full seed-config root")?;
     let config = serde_json::json!({
         "seed-u64": seed,
         "seed-java-long": java_seed_long(seed),
@@ -756,42 +1310,36 @@ fn write_seed_config(
         "status": &contract.status,
         "stage": &contract.stage,
     });
-    let path = root.join(SEED_CONFIG_BASENAME);
     let bytes = serde_json::to_vec_pretty(&config).map_err(|error| {
         Error::Gate(format!(
             "cannot serialize generated-full seed config: {error}"
         ))
     })?;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(Error::Io)?;
+    #[cfg(target_os = "linux")]
+    let mut file = {
+        use rustix::fs::{Mode, OFlags, openat};
+        use std::os::fd::AsFd;
+        openat(
+            root_descriptor.as_fd(),
+            SEED_CONFIG_BASENAME,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW,
+            Mode::from_raw_mode(0o644),
+        )
+        .map(fs::File::from)
+        .map_err(std::io::Error::from)
+        .map_err(Error::Io)?
+    };
+    #[cfg(not(target_os = "linux"))]
+    let mut file = {
+        let _ = &mut root_descriptor;
+        return Err(Error::Gate(
+            "descriptor-relative generated-full seed-config writes require Linux openat2".into(),
+        ));
+    };
     file.write_all(&bytes).map_err(Error::Io)?;
     file.write_all(b"\n").map_err(Error::Io)?;
     file.sync_all().map_err(Error::Io)?;
-    Ok(path)
-}
-
-fn copy_immutable_file(src: &Path, dst: &Path, what: &str) -> Result<String, Error> {
-    let bytes = read_stable_file(src, what)?;
-    if dst.exists() {
-        return Err(Error::Gate(format!(
-            "generated-full verifier input {} already exists; refusing to reuse it",
-            dst.display()
-        )));
-    }
-    if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent).map_err(Error::Io)?;
-    }
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(dst)
-        .map_err(Error::Io)?;
-    file.write_all(&bytes).map_err(Error::Io)?;
-    file.sync_all().map_err(Error::Io)?;
-    Ok(crate::sha256_hex(&bytes))
+    Ok(root.join(SEED_CONFIG_BASENAME))
 }
 
 fn write_fresh_file(path: &Path, bytes: &[u8], what: &str) -> Result<(), Error> {
@@ -809,6 +1357,24 @@ fn write_fresh_file(path: &Path, bytes: &[u8], what: &str) -> Result<(), Error> 
     file.write_all(bytes).map_err(Error::Io)?;
     file.sync_all().map_err(Error::Io)?;
     Ok(())
+}
+
+fn open_staged_file(
+    path: PathBuf,
+    what: &str,
+    expected_sha256: &str,
+    cap: u64,
+) -> Result<StagedFile, Error> {
+    let mut file = open_stable_regular(&path, what)?;
+    let bytes = read_opened_file_capped(&mut file, &path, what, cap)?;
+    let sha256 = crate::sha256_hex(&bytes);
+    if sha256 != expected_sha256 {
+        return Err(Error::Gate(format!(
+            "{what} {} changed while staging; expected SHA-256 {expected_sha256}, got {sha256}",
+            path.display()
+        )));
+    }
+    Ok(StagedFile { path, file, bytes })
 }
 
 fn retain_overworld_only(root: &Path) -> Result<(), Error> {
@@ -968,7 +1534,7 @@ fn paper_observed(
     identity: &ArtifactIdentity,
     process: ProcessObservation,
     manifest: &HashManifest,
-    source_sha256: &str,
+    revision_identity_sha256: &str,
     config_sha256: &str,
 ) -> PaperObserved {
     PaperObserved {
@@ -980,7 +1546,7 @@ fn paper_observed(
         env: process.env,
         paper_jar_sha256: identity.materialized_jar_sha256.clone(),
         paper_config_sha256: config_sha256.to_string(),
-        paper_source_sha256: source_sha256.to_string(),
+        paper_revision_identity_sha256: revision_identity_sha256.to_string(),
         pid: process.pid,
         started_unix_nanos: process.started_unix_nanos,
         ready_count: process.ready_count,
@@ -998,7 +1564,7 @@ fn rivet_observed(
     identity: &ArtifactIdentity,
     process: ProcessObservation,
     manifest: &HashManifest,
-    source_sha256: &str,
+    revision_identity_sha256: &str,
 ) -> RivetObserved {
     RivetObserved {
         schema: "rivet-observed-v1".to_string(),
@@ -1009,7 +1575,7 @@ fn rivet_observed(
         env: process.env,
         rivet_executable_sha256: identity.capture_binary_sha256.clone(),
         rivet_config_sha256: identity.capture_config_sha256.clone(),
-        rivet_source_sha256: source_sha256.to_string(),
+        rivet_revision_identity_sha256: revision_identity_sha256.to_string(),
         pid: process.pid,
         started_unix_nanos: process.started_unix_nanos,
         ready_count: process.ready_count,
@@ -1039,18 +1605,13 @@ fn write_replay_record(root: &Path, record: &ReplayRecord) -> Result<(), Error> 
     Ok(())
 }
 
-fn run_fresh_replay(
-    contract: &GeneratedContract,
-    artifacts: &ArtifactInputs,
-    identity: &ArtifactIdentity,
-) -> Result<(), Error> {
-    run_fresh_replay_with_paper_boots(contract, artifacts, identity, 2)
+fn run_fresh_replay(contract: &GeneratedContract, artifacts: &ArtifactInputs) -> Result<(), Error> {
+    run_fresh_replay_with_paper_boots(contract, artifacts, 2)
 }
 
 fn run_fresh_replay_with_paper_boots(
     contract: &GeneratedContract,
     artifacts: &ArtifactInputs,
-    identity: &ArtifactIdentity,
     paper_boots: u8,
 ) -> Result<(), Error> {
     if !(2..=3).contains(&paper_boots) {
@@ -1059,8 +1620,25 @@ fn run_fresh_replay_with_paper_boots(
     let (nonce, replay_root) = allocate_replay_root()?;
     let inputs = replay_root.join("inputs");
     fs::create_dir(&inputs).map_err(Error::Io)?;
-    let paper_source_sha256 = crate::sha256_hex(identity.paper_commit.as_bytes());
-    let rivet_source_sha256 = crate::sha256_hex(identity.rivet_commit.as_bytes());
+    let staged = artifacts.stage(&replay_root)?;
+    let identity = &staged.identity;
+    let paper_revision_identity_sha256 = crate::sha256_hex(identity.paper_commit.as_bytes());
+    let rivet_revision_identity_sha256 = crate::sha256_hex(identity.rivet_commit.as_bytes());
+    // Post-attestation reads consume the staged descriptors' captured bytes:
+    // nothing is reopened by pathname, so a path swap between staging and use
+    // cannot substitute different contents.
+    let staged_paper_properties = &staged.paper_properties.bytes;
+    if crate::sha256_hex(staged_paper_properties) != identity.paper_config_template_sha256 {
+        return Err(Error::Gate(
+            "generated-full staged Paper capture properties changed after attestation".into(),
+        ));
+    }
+    let staged_rivet_config = &staged.rivet_config.bytes;
+    if crate::sha256_hex(staged_rivet_config) != identity.capture_config_sha256 {
+        return Err(Error::Gate(
+            "generated-full staged Rivet capture config changed after attestation".into(),
+        ));
+    }
     let mut paper_observations = Vec::new();
     let mut rivet_observations = Vec::new();
 
@@ -1069,31 +1647,24 @@ fn run_fresh_replay_with_paper_boots(
         let paper_seed_root = replay_root.join("paper").join(&seed_text);
         let rivet_seed_root = replay_root.join("rivet").join(&seed_text);
         let paper_run = paper_seed_root.join("run");
-        let paper_output = paper_seed_root.join("output");
         let rivet_output = rivet_seed_root.join("output");
         fs::create_dir_all(&paper_seed_root).map_err(Error::Io)?;
         fs::create_dir_all(&rivet_seed_root).map_err(Error::Io)?;
-        let _seed_config = write_seed_config(&inputs.join(&seed_text), contract, seed)?;
+        let seed_input_root = inputs.join(&seed_text);
+        fs::create_dir(&seed_input_root).map_err(Error::Io)?;
+        let _seed_config = write_seed_config(&seed_input_root, contract, seed)?;
         let paper_properties = inputs.join(format!("paper-{seed}.properties"));
-        let paper_config =
-            rewrite_paper_properties_for_seed(&identity.paper_config_template, seed)?;
+        let paper_config = rewrite_paper_properties_for_seed(staged_paper_properties, seed)?;
         let paper_config_sha256 = crate::sha256_hex(&paper_config);
         write_fresh_file(
             &paper_properties,
             &paper_config,
             "generated-full Paper seed properties",
         )?;
-        let rivet_config = inputs.join("rivet-generated-full-config.json");
-        if !rivet_config.exists() {
-            copy_immutable_file(
-                &artifacts.rivet_config,
-                &rivet_config,
-                "generated-full Rivet producer config",
-            )?;
-        }
+        let rivet_config = &staged.rivet_config;
 
         prepare_run_dir(&paper_run, &paper_properties)?;
-        let mut paper_processes = Vec::new();
+        let mut paper_captures = Vec::new();
         for boot in 0..paper_boots {
             let paper_log = replay_root
                 .join("logs")
@@ -1103,13 +1674,13 @@ fn run_fresh_replay_with_paper_boots(
                 "-Xms512M".to_string(),
                 "-Xmx2G".to_string(),
                 "-jar".to_string(),
-                artifacts.paper_jar.display().to_string(),
+                staged.paper_jar.path.display().to_string(),
                 "nogui".to_string(),
             ];
             let mut paper_command = Command::new("java");
             paper_command
                 .args(["-Xms512M", "-Xmx2G", "-jar"])
-                .arg(&artifacts.paper_jar)
+                .arg(&staged.paper_jar.path)
                 .arg("nogui")
                 .current_dir(&paper_run);
             let paper_process = process_observation(
@@ -1119,9 +1690,8 @@ fn run_fresh_replay_with_paper_boots(
                 &paper_log,
                 PAPER_READY_MARKER,
                 PAPER_READY_TIMEOUT,
-                Some(PAPER_EXPECTED_EXIT),
+                ExpectedLifecycle::PaperClean,
             )?;
-            paper_processes.push(paper_process);
             if boot == 0 {
                 let coordinates = contract
                     .coordinates
@@ -1134,46 +1704,64 @@ fn run_fresh_replay_with_paper_boots(
                     OVERWORLD_DIM,
                     FORCED_TICKET_LEVEL,
                 )?;
+                continue;
             }
+
+            // Every post-injection boot is a capture boot. Keep each raw tree
+            // and derive its manifest independently; refresh-determinism must
+            // prove that no earlier Paper capture diverged before Rivet is
+            // allowed into the parity comparison.
+            let paper_output = paper_seed_root.join(format!("output-{boot}"));
+            let observed = parse_boot_thread_counts(&String::from_utf8_lossy(&read_stable_file(
+                &paper_log,
+                "generated-full Paper raw log",
+            )?))
+            .map(|(worker_threads, io_threads)| crate::ChunkConcurrency {
+                worker_threads,
+                io_threads,
+            });
+            verify_forced_load(&paper_log, contract.coordinates.len(), OVERWORLD_DIM)?;
+            require_fresh_output_root(&paper_output, "generated-full Paper output root")?;
+            extract_fresh_fixtures(
+                &paper_run.join("world"),
+                &paper_output,
+                true,
+                KIND_FULL,
+                observed,
+            )?;
+            normalize_last_update_tree(&paper_output)?;
+            rehash_captured(&paper_output)?;
+            retain_overworld_only(&paper_output)?;
+            write_seed_config(&paper_output, contract, seed)?;
+            let paper_snapshot = paper_seed_root.join(format!("snapshot-{boot}"));
+            snapshot_tree(&paper_output, &paper_snapshot)?;
+            let paper_manifest =
+                raw_manifest_from_snapshot(contract, &paper_snapshot, seed, "paper")?;
+            paper_captures.push((boot, paper_manifest, (paper_process, paper_snapshot)));
         }
-        let capture_log = replay_root
-            .join("logs")
-            .join(format!("paper-{seed}-{}.log", paper_boots - 1));
-        let observed = parse_boot_thread_counts(&String::from_utf8_lossy(&read_stable_file(
-            &capture_log,
-            "generated-full Paper raw log",
-        )?))
-        .map(|(worker_threads, io_threads)| crate::ChunkConcurrency {
-            worker_threads,
-            io_threads,
-        });
-        verify_forced_load(&capture_log, contract.coordinates.len(), OVERWORLD_DIM)?;
-        extract_fresh_fixtures(
-            &paper_run.join("world"),
-            &paper_output,
-            true,
-            KIND_FULL,
-            observed,
-        )?;
-        normalize_last_update_tree(&paper_output)?;
-        rehash_captured(&paper_output)?;
-        retain_overworld_only(&paper_output)?;
-        write_seed_config(&paper_output, contract, seed)?;
-        let paper_snapshot = paper_seed_root.join("snapshot");
-        snapshot_tree(&paper_output, &paper_snapshot)?;
-        let paper_manifest = raw_manifest_from_snapshot(contract, &paper_snapshot, seed, "paper")?;
-        for paper_process in paper_processes {
+        if paper_captures.is_empty() {
+            return Err(Error::Gate(format!(
+                "generated-full Paper seed {seed} produced no post-injection capture boots"
+            )));
+        }
+        let capture_manifests = paper_captures
+            .iter()
+            .map(|(boot, manifest, _)| (*boot, manifest.clone()))
+            .collect::<Vec<_>>();
+        let paper_manifest = verify_capture_determinism(seed, &capture_manifests)?;
+        for (_, paper_manifest, (paper_process, paper_snapshot)) in paper_captures {
             paper_observations.push(paper_observed(
                 seed,
                 &paper_snapshot,
                 identity,
                 paper_process,
                 &paper_manifest,
-                &paper_source_sha256,
+                &paper_revision_identity_sha256,
                 &paper_config_sha256,
             ));
         }
 
+        require_fresh_output_root(&rivet_output, "generated-full Rivet producer output root")?;
         let rivet_log = replay_root.join("logs").join(format!("rivet-{seed}.log"));
         let coordinates_json = serde_json::to_string(&contract.coordinates).map_err(|error| {
             Error::Gate(format!(
@@ -1181,20 +1769,20 @@ fn run_fresh_replay_with_paper_boots(
             ))
         })?;
         let rivet_argv = vec![
-            artifacts.rivet_binary.display().to_string(),
+            staged.rivet_binary.path.display().to_string(),
             "--generated-full".to_string(),
             "--seed".to_string(),
             seed_text.clone(),
             "--coordinates".to_string(),
             coordinates_json.clone(),
             "--config".to_string(),
-            rivet_config.display().to_string(),
+            rivet_config.path.display().to_string(),
             "--output".to_string(),
             rivet_output.display().to_string(),
             "--nonce".to_string(),
             nonce.clone(),
         ];
-        let mut rivet_command = Command::new(&artifacts.rivet_binary);
+        let mut rivet_command = Command::new(&staged.rivet_binary.path);
         rivet_command
             .arg("--generated-full")
             .arg("--seed")
@@ -1202,7 +1790,7 @@ fn run_fresh_replay_with_paper_boots(
             .arg("--coordinates")
             .arg(&coordinates_json)
             .arg("--config")
-            .arg(&rivet_config)
+            .arg(&rivet_config.path)
             .arg("--output")
             .arg(&rivet_output)
             .arg("--nonce")
@@ -1215,7 +1803,7 @@ fn run_fresh_replay_with_paper_boots(
             &rivet_log,
             RIVET_READY_MARKER,
             PRODUCER_READY_TIMEOUT,
-            Some(0),
+            ExpectedLifecycle::ProducerExit(0),
         )?;
         write_seed_config(&rivet_output, contract, seed)?;
         let rivet_snapshot = rivet_seed_root.join("snapshot");
@@ -1227,7 +1815,7 @@ fn run_fresh_replay_with_paper_boots(
             identity,
             rivet_process,
             &rivet_manifest,
-            &rivet_source_sha256,
+            &rivet_revision_identity_sha256,
         ));
         let mismatches = manifest_mismatches(contract, seed, &paper_manifest, &rivet_manifest);
         if !mismatches.is_empty() {
@@ -1262,13 +1850,259 @@ fn run_fresh_replay_with_paper_boots(
         rivet_observed: rivet_observations,
     };
     write_replay_record(&replay_root, &record)?;
+    publish_latest_replay(
+        &crate::crate_dir().join("work/generated-full"),
+        &record.nonce,
+        &replay_root,
+    )?;
     println!(
         "PARITY_VERIFIED: generated-full fresh replay matched ({} seeds, {} coordinates, {} Paper boots, {} Rivet runs)",
         contract.seeds.len(),
         contract.coordinates.len(),
-        contract.seeds.len() * paper_boots as usize,
+        contract.seeds.len() * (paper_boots as usize - 1),
         contract.seeds.len()
     );
+    Ok(())
+}
+
+fn verify_capture_determinism(
+    seed: u64,
+    captures: &[(u8, HashManifest)],
+) -> Result<HashManifest, Error> {
+    let Some((first_boot, first_manifest)) = captures.first() else {
+        return Err(Error::Gate(format!(
+            "generated-full Paper seed {seed} produced no capture-boot evidence"
+        )));
+    };
+    for (boot, manifest) in captures.iter().skip(1) {
+        if manifest != first_manifest {
+            return Err(Error::Gate(format!(
+                "generated-full Paper determinism FAIL for seed {seed}: capture boots {first_boot} and {boot} differ in verifier-derived byte/manifest observations"
+            )));
+        }
+    }
+    Ok(first_manifest.clone())
+}
+
+fn replay_snapshot_manifest(
+    record: &ReplayRecord,
+    observation_root: &str,
+    contract: &GeneratedContract,
+    seed: u64,
+    side: &str,
+) -> Result<ReplaySnapshotEvidence, Error> {
+    let replay_root = Path::new(&record.controller_root);
+    let root = PathBuf::from(observation_root);
+    bind_replay_snapshot_root(record, &root, seed, side)?;
+    reject_symlink_components(&root, "generated-full retained replay snapshot")?;
+    let root_descriptor = open_stable_directory(&root, "generated-full retained replay snapshot")?;
+    let root_metadata = root_descriptor.metadata().map_err(|error| {
+        Error::Gate(format!(
+            "generated-full retained replay snapshot {} cannot be inspected through its opened directory descriptor: {error}",
+            root.display()
+        ))
+    })?;
+    let canonical_root = root.canonicalize().map_err(|error| {
+        Error::Gate(format!(
+            "generated-full retained replay snapshot {} cannot be resolved: {error}",
+            root.display()
+        ))
+    })?;
+    let canonical_replay = replay_root.canonicalize().map_err(|error| {
+        Error::Gate(format!(
+            "generated-full retained replay root {} cannot be resolved: {error}",
+            replay_root.display()
+        ))
+    })?;
+    if !canonical_root.starts_with(&canonical_replay) || canonical_root == canonical_replay {
+        return Err(Error::Gate(format!(
+            "generated-full retained {side} seed-{seed} snapshot {} escapes the controller-owned replay root",
+            root.display()
+        )));
+    }
+    let manifest = raw_manifest_from_snapshot(contract, &root, seed, side)?;
+    verify_directory_path_matches_descriptor(
+        &root,
+        &root_metadata,
+        "generated-full retained replay snapshot",
+    )?;
+    Ok(ReplaySnapshotEvidence { root, manifest })
+}
+
+fn validate_replay_observation(
+    record: &ReplayRecord,
+    observation: &PaperObserved,
+    contract: &GeneratedContract,
+    side: &str,
+) -> Result<ReplaySnapshotEvidence, Error> {
+    let evidence =
+        replay_snapshot_manifest(record, &observation.root, contract, observation.seed, side)?;
+    if observation.schema != "paper-observed-v1"
+        || observation.ready_count != 1
+        || observation.exit_code != 0 && observation.exit_code != 143
+        || observation.payload_digests != raw_payload_digests(&evidence.manifest)
+    {
+        return Err(Error::Gate(format!(
+            "generated-full retained {side} seed-{} observation does not match verifier-derived snapshot evidence",
+            observation.seed
+        )));
+    }
+    Ok(evidence)
+}
+
+fn validate_rivet_observation(
+    record: &ReplayRecord,
+    observation: &RivetObserved,
+    contract: &GeneratedContract,
+) -> Result<ReplaySnapshotEvidence, Error> {
+    let evidence = replay_snapshot_manifest(
+        record,
+        &observation.root,
+        contract,
+        observation.seed,
+        "rivet",
+    )?;
+    if observation.schema != "rivet-observed-v1"
+        || observation.ready_count != 1
+        || observation.exit_code != 0
+        || observation.payload_digests != raw_payload_digests(&evidence.manifest)
+    {
+        return Err(Error::Gate(format!(
+            "generated-full retained Rivet seed-{} observation does not match verifier-derived snapshot evidence",
+            observation.seed
+        )));
+    }
+    Ok(evidence)
+}
+
+fn run_tamper_from_latest(
+    contract: &GeneratedContract,
+    selected: Option<TamperKind>,
+) -> Result<(), Error> {
+    let base = crate::crate_dir().join("work/generated-full");
+    let record = load_latest_replay(&base).map_err(|error| match error {
+        Error::Unverified(message) => Error::Blocked(message),
+        other => other,
+    })?;
+    let expected_paper_root = Path::new(&record.controller_root).join("paper");
+    let expected_rivet_root = Path::new(&record.controller_root).join("rivet");
+    if record.paper_root != expected_paper_root.display().to_string()
+        || record.rivet_root != expected_rivet_root.display().to_string()
+    {
+        return Err(Error::Gate(
+            "generated-full retained replay record has untrusted side roots".into(),
+        ));
+    }
+    reject_symlink_components(&expected_paper_root, "generated-full retained Paper root")?;
+    reject_symlink_components(&expected_rivet_root, "generated-full retained Rivet root")?;
+    validate_replay_observation_layout(&record, contract)?;
+    let kinds = selected.map_or_else(|| TamperKind::ALL.to_vec(), |kind| vec![kind]);
+    let mut paper_by_seed: std::collections::BTreeMap<u64, Vec<ReplaySnapshotEvidence>> =
+        Default::default();
+    for observation in &record.paper_observed {
+        let value = validate_replay_observation(&record, observation, contract, "paper")?;
+        paper_by_seed
+            .entry(observation.seed)
+            .or_default()
+            .push(value);
+    }
+    let mut rivet_by_seed: std::collections::BTreeMap<u64, ReplaySnapshotEvidence> =
+        Default::default();
+    for observation in &record.rivet_observed {
+        if rivet_by_seed
+            .insert(
+                observation.seed,
+                validate_rivet_observation(&record, observation, contract)?,
+            )
+            .is_some()
+        {
+            return Err(Error::Gate(format!(
+                "generated-full retained replay has duplicate Rivet observations for seed {}",
+                observation.seed
+            )));
+        }
+    }
+    for &seed in &contract.seeds {
+        let papers = paper_by_seed.get(&seed).ok_or_else(|| {
+            Error::Blocked(format!(
+                "generated-full retained replay has no Paper capture prerequisite for seed {seed}"
+            ))
+        })?;
+        let rivet = rivet_by_seed.get(&seed).ok_or_else(|| {
+            Error::Blocked(format!(
+                "generated-full retained replay has no Rivet capture prerequisite for seed {seed}"
+            ))
+        })?;
+        let paper_manifest = &papers[0].manifest;
+        for other in papers.iter().skip(1) {
+            if other.manifest != *paper_manifest {
+                return Err(Error::Gate(format!(
+                    "generated-full Paper determinism FAIL for seed {seed}: retained capture boots diverge"
+                )));
+            }
+        }
+        let mismatches = manifest_mismatches(contract, seed, paper_manifest, &rivet.manifest);
+        if !mismatches.is_empty() {
+            return Err(Error::Gate(format!(
+                "generated-full retained replay is not parity-clean for seed {seed}; tamper controls cannot run before replay parity"
+            )));
+        }
+        if seed != contract.seeds[0] {
+            continue;
+        }
+        let target = contract.coordinates.first().ok_or_else(|| {
+            Error::Gate("generated-full contract has no tamper target coordinate".into())
+        })?;
+        let target_relative = format!(
+            "chunk/{}/{}/{}.{}.nbt",
+            contract.dimension,
+            region_for(target.x, target.z),
+            target.x,
+            target.z
+        );
+        for &kind in &kinds {
+            let scratch = tempfile::tempdir().map_err(|error| {
+                Error::Gate(format!(
+                    "generated-full tamper scratch directory failed: {error}"
+                ))
+            })?;
+            let scratch_root = scratch.path().join("rivet");
+            snapshot_tree(&rivet.root, &scratch_root)?;
+            let scratch_target = scratch_root.join(&target_relative);
+            let bytes = read_stable_file(&scratch_target, "generated-full tamper target")?;
+            let tampered = mutate::tamper(&bytes, kind).map_err(Error::Gate)?;
+            fs::write(&scratch_target, tampered).map_err(Error::Io)?;
+            match raw_manifest_from_snapshot(contract, &scratch_root, seed, "rivet") {
+                Err(Error::Gate(message)) if kind == TamperKind::LastUpdate => {
+                    if !message.contains("LastUpdate") {
+                        return Err(Error::NegativeControl { message });
+                    }
+                }
+                Err(error) => return Err(error),
+                Ok(tampered_manifest) => {
+                    let mismatches =
+                        manifest_mismatches(contract, seed, paper_manifest, &tampered_manifest);
+                    if mismatches.len() != 1 || mismatches[0].coordinate != target.tuple() {
+                        return Err(Error::NegativeControl {
+                            message: format!(
+                                "generated-full {} tamper was not the only mismatch at overworld/{}.{}",
+                                kind.cli_name(),
+                                target.x,
+                                target.z
+                            ),
+                        });
+                    }
+                }
+            }
+            println!(
+                "tamper control PASS: {} changed only seed={} overworld/{}.{}",
+                kind.cli_name(),
+                seed,
+                target.x,
+                target.z
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1322,46 +2156,43 @@ impl ArtifactInputs {
         })
     }
 
-    fn identity(&self) -> Result<ArtifactIdentity, Error> {
-        let read_hash = |label: &str, path: &Path| -> Result<(Vec<u8>, String), Error> {
-            let bytes = read_stable_file(path, &format!("generated-full expected {label}"))?;
-            if bytes.is_empty() {
-                return Err(Error::Gate(format!(
-                    "generated-full expected {label} {} is empty; an existing artifact is malformed",
-                    path.display()
-                )));
-            }
-            let digest = crate::sha256_hex(&bytes);
-            Ok((bytes, digest))
-        };
+    fn stage(&self, replay_root: &Path) -> Result<StagedArtifacts, Error> {
+        let artifacts_root = replay_root.join("artifacts");
+        fs::create_dir(&artifacts_root).map_err(Error::Io)?;
+        let inputs_root = replay_root.join("inputs");
+        let staged_paper_jar = artifacts_root.join("paper-26.2.jar");
+        let staged_paper_properties = artifacts_root.join("server-normal-full.properties");
+        let staged_rivet_binary = artifacts_root.join("rivet-generated-full");
+        let staged_rivet_config = inputs_root.join("rivet-generated-full-config.json");
+
         let mut paper_jar = open_stable_regular(
             &self.paper_jar,
             "generated-full expected Paper materialized jar",
         )?;
-        let mut paper_jar_bytes = Vec::new();
-        paper_jar.read_to_end(&mut paper_jar_bytes).map_err(|error| {
-            Error::Gate(format!(
-                "generated-full Paper materialized jar {} cannot be read through its opened descriptor: {error}",
-                self.paper_jar.display()
-            ))
-        })?;
+        let paper_jar_bytes = read_opened_file_capped(
+            &mut paper_jar,
+            &self.paper_jar,
+            "generated-full Paper materialized jar",
+            MAX_EVIDENCE_FILE_BYTES,
+        )?;
         if paper_jar_bytes.is_empty() {
             return Err(Error::Gate(format!(
                 "generated-full Paper materialized jar {} is empty; an existing artifact is malformed",
                 self.paper_jar.display()
             )));
         }
-        let materialized_jar_sha256 = crate::sha256_hex(&paper_jar_bytes);
-        let paper_commit = read_jar_git_commit_opened(&paper_jar).map_err(|e| {
-            Error::Gate(format!(
-                "generated-full Paper jar attestation failed for existing artifact: {e}"
-            ))
-        })?.ok_or_else(|| {
-            Error::Gate(format!(
-                "generated-full Paper jar {} has no Git-Commit manifest attribute; existing artifact is not a pinned Paper server jar",
-                self.paper_jar.display()
-            ))
-        })?;
+        let paper_commit = read_jar_git_commit_opened(&paper_jar)
+            .map_err(|error| {
+                Error::Gate(format!(
+                    "generated-full Paper jar attestation failed for existing artifact: {error}"
+                ))
+            })?
+            .ok_or_else(|| {
+                Error::Gate(format!(
+                    "generated-full Paper jar {} has no Git-Commit manifest attribute; existing artifact is not a pinned Paper server jar",
+                    self.paper_jar.display()
+                ))
+            })?;
         if paper_commit != hash_manifest::PAPER_PIN {
             return Err(Error::Gate(format!(
                 "generated-full Paper jar {} carries Git-Commit {paper_commit}, expected authoritative PAPER_PIN {}",
@@ -1369,17 +2200,129 @@ impl ArtifactInputs {
                 hash_manifest::PAPER_PIN
             )));
         }
-        let paper_properties = read_canonical_paper_properties(&self.paper_properties)?;
-        let rivet_binary = read_executable_file(&self.rivet_binary)?;
-        let (_, capture_config_sha256) = read_hash("Rivet capture config", &self.rivet_config)?;
-        Ok(ArtifactIdentity {
-            paper_commit: hash_manifest::PAPER_PIN.to_string(),
-            materialized_jar_sha256,
-            paper_config_template_sha256: crate::sha256_hex(&paper_properties),
-            paper_config_template: paper_properties,
-            rivet_commit: self.rivet_commit.clone(),
-            capture_binary_sha256: crate::sha256_hex(&rivet_binary),
-            capture_config_sha256,
+        write_fresh_file(
+            &staged_paper_jar,
+            &paper_jar_bytes,
+            "staged Paper materialized jar",
+        )?;
+        drop(paper_jar);
+
+        let mut rivet_binary =
+            open_stable_regular(&self.rivet_binary, "generated-full Rivet producer binary")?;
+        let rivet_binary_metadata = rivet_binary.metadata().map_err(|error| {
+            Error::Gate(format!(
+                "Rivet producer binary {} cannot be inspected through its opened descriptor: {error}",
+                self.rivet_binary.display()
+            ))
+        })?;
+        #[cfg(unix)]
+        let rivet_binary_mode = {
+            use std::os::unix::fs::PermissionsExt;
+            if rivet_binary_metadata.permissions().mode() & 0o111 == 0 {
+                return Err(Error::Gate(format!(
+                    "Rivet producer binary {} is not executable; existing artifact is malformed",
+                    self.rivet_binary.display()
+                )));
+            }
+            rivet_binary_metadata.permissions().mode()
+        };
+        let rivet_binary_bytes = read_opened_file_capped(
+            &mut rivet_binary,
+            &self.rivet_binary,
+            "Rivet producer binary",
+            MAX_EVIDENCE_FILE_BYTES,
+        )?;
+        if rivet_binary_bytes.is_empty() {
+            return Err(Error::Gate(format!(
+                "Rivet producer binary {} is empty; an existing artifact is malformed",
+                self.rivet_binary.display()
+            )));
+        }
+        write_fresh_file(
+            &staged_rivet_binary,
+            &rivet_binary_bytes,
+            "staged Rivet producer binary",
+        )?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::symlink_metadata(&staged_rivet_binary)
+                .map_err(Error::Io)?
+                .permissions();
+            permissions.set_mode(rivet_binary_mode);
+            fs::set_permissions(&staged_rivet_binary, permissions).map_err(Error::Io)?;
+        }
+        drop(rivet_binary);
+
+        let mut rivet_config =
+            open_stable_regular(&self.rivet_config, "generated-full Rivet capture config")?;
+        let rivet_config_bytes = read_opened_file_capped(
+            &mut rivet_config,
+            &self.rivet_config,
+            "generated-full Rivet capture config",
+            MAX_EVIDENCE_FILE_BYTES,
+        )?;
+        if rivet_config_bytes.is_empty() {
+            return Err(Error::Gate(format!(
+                "generated-full Rivet capture config {} is empty; an existing artifact is malformed",
+                self.rivet_config.display()
+            )));
+        }
+        write_fresh_file(
+            &staged_rivet_config,
+            &rivet_config_bytes,
+            "staged Rivet capture config",
+        )?;
+        drop(rivet_config);
+
+        let paper_config_template = read_canonical_paper_properties(&self.paper_properties)?;
+        write_fresh_file(
+            &staged_paper_properties,
+            &paper_config_template,
+            "staged Paper capture properties",
+        )?;
+        let paper_jar_sha256 = crate::sha256_hex(&paper_jar_bytes);
+        let paper_properties_sha256 = crate::sha256_hex(&paper_config_template);
+        let rivet_binary_sha256 = crate::sha256_hex(&rivet_binary_bytes);
+        let rivet_config_sha256 = crate::sha256_hex(&rivet_config_bytes);
+        let paper_jar = open_staged_file(
+            staged_paper_jar,
+            "generated-full staged Paper materialized jar",
+            &paper_jar_sha256,
+            MAX_EVIDENCE_FILE_BYTES,
+        )?;
+        let paper_properties = open_staged_file(
+            staged_paper_properties,
+            "generated-full staged Paper capture properties",
+            &paper_properties_sha256,
+            MAX_EVIDENCE_FILE_BYTES,
+        )?;
+        let rivet_binary = open_staged_file(
+            staged_rivet_binary,
+            "generated-full staged Rivet producer binary",
+            &rivet_binary_sha256,
+            MAX_EVIDENCE_FILE_BYTES,
+        )?;
+        let rivet_config = open_staged_file(
+            staged_rivet_config,
+            "generated-full staged Rivet capture config",
+            &rivet_config_sha256,
+            MAX_EVIDENCE_FILE_BYTES,
+        )?;
+        Ok(StagedArtifacts {
+            paper_jar,
+            paper_properties,
+            rivet_binary,
+            rivet_config,
+            identity: ArtifactIdentity {
+                paper_commit: hash_manifest::PAPER_PIN.to_string(),
+                materialized_jar_sha256: paper_jar_sha256,
+                paper_config_template_sha256: paper_properties_sha256,
+                paper_config_template,
+                rivet_commit: self.rivet_commit.clone(),
+                capture_binary_sha256: rivet_binary_sha256,
+                capture_config_sha256: rivet_config_sha256,
+            },
         })
     }
 }
@@ -1390,8 +2333,7 @@ pub fn verify_default() -> Result<(), Error> {
     verify_fixture_outer_closure(&fixture_root)?;
     let contract = load_contract(&fixture_root.join(CONTRACT_BASENAME))?;
     let artifacts = ArtifactInputs::from_contract(&contract)?;
-    let identity = artifacts.identity()?;
-    run_fresh_replay(&contract, &artifacts, &identity)
+    run_fresh_replay(&contract, &artifacts)
 }
 
 #[cfg(test)]
@@ -1761,7 +2703,11 @@ fn read_seed_config(
     side: &str,
 ) -> Result<String, Error> {
     let path = root.join(SEED_CONFIG_BASENAME);
-    let bytes = read_stable_file(&path, "generated-full seed config")?;
+    let bytes = read_stable_file_capped(
+        &path,
+        "generated-full seed config",
+        crate::json::MAX_JSON_BYTES as u64,
+    )?;
     let config: SeedConfig = crate::json::from_slice(&bytes).map_err(|e| {
         Error::Gate(format!(
             "generated-full {side} seed-{seed} config is malformed: {e}"
@@ -1793,7 +2739,11 @@ fn read_provenance(
     allow_synthetic: bool,
 ) -> Result<GeneratedProvenance, Error> {
     let path = root.join(PROVENANCE_BASENAME);
-    let raw = read_stable_file(&path, "generated-full provenance")?;
+    let raw = read_stable_file_capped(
+        &path,
+        "generated-full provenance",
+        crate::json::MAX_JSON_BYTES as u64,
+    )?;
     let raw = std::str::from_utf8(&raw).map_err(|e| {
         Error::Gate(format!(
             "generated-full {side} seed-{seed} provenance {} is not UTF-8: {e}",
@@ -2350,6 +3300,86 @@ fn reject_hardlink_metadata(metadata: &fs::Metadata, path: &Path, what: &str) ->
     Ok(())
 }
 
+#[cfg(unix)]
+fn stable_metadata_fingerprint(
+    metadata: &fs::Metadata,
+) -> (u64, u64, u64, u32, u64, i64, i64, i64, i64) {
+    use std::os::unix::fs::MetadataExt;
+    (
+        metadata.len(),
+        metadata.dev(),
+        metadata.ino(),
+        metadata.mode(),
+        metadata.nlink(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+        metadata.ctime(),
+        metadata.ctime_nsec(),
+    )
+}
+
+#[cfg(not(unix))]
+fn stable_metadata_fingerprint(metadata: &fs::Metadata) -> (u64, bool, Option<SystemTime>) {
+    (
+        metadata.len(),
+        metadata.permissions().readonly(),
+        metadata.modified().ok(),
+    )
+}
+
+fn verify_path_matches_descriptor(
+    path: &Path,
+    descriptor_metadata: &fs::Metadata,
+    what: &str,
+) -> Result<(), Error> {
+    let path_metadata = fs::symlink_metadata(path).map_err(|error| {
+        Error::Gate(format!(
+            "{what} {} cannot be re-stat'ed after descriptor acquisition: {error}",
+            path.display()
+        ))
+    })?;
+    if path_metadata.file_type().is_symlink() {
+        return Err(Error::Gate(format!(
+            "{what} {} was replaced by a symlink while being read",
+            path.display()
+        )));
+    }
+    if !path_metadata.file_type().is_file()
+        || stable_metadata_fingerprint(&path_metadata)
+            != stable_metadata_fingerprint(descriptor_metadata)
+    {
+        return Err(Error::Gate(format!(
+            "{what} {} was replaced or changed while being read; descriptor and pathname metadata differ",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn verify_directory_path_matches_descriptor(
+    path: &Path,
+    descriptor_metadata: &fs::Metadata,
+    what: &str,
+) -> Result<(), Error> {
+    let path_metadata = fs::symlink_metadata(path).map_err(|error| {
+        Error::Gate(format!(
+            "{what} {} cannot be re-stat'ed after descriptor acquisition: {error}",
+            path.display()
+        ))
+    })?;
+    if path_metadata.file_type().is_symlink()
+        || !path_metadata.file_type().is_dir()
+        || stable_metadata_fingerprint(&path_metadata)
+            != stable_metadata_fingerprint(descriptor_metadata)
+    {
+        return Err(Error::Gate(format!(
+            "{what} {} was replaced or changed while being read; descriptor and pathname metadata differ",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn open_stable_regular(path: &Path, what: &str) -> Result<fs::File, Error> {
     let file = match open_stable_read(path) {
         Ok(file) => file,
@@ -2385,6 +3415,7 @@ fn open_stable_regular(path: &Path, what: &str) -> Result<fs::File, Error> {
         )));
     }
     reject_hardlink_metadata(&metadata, path, what)?;
+    verify_path_matches_descriptor(path, &metadata, what)?;
     Ok(file)
 }
 
@@ -2396,36 +3427,56 @@ fn read_stable_file(path: &Path, what: &str) -> Result<Vec<u8>, Error> {
     read_stable_file_capped(path, what, MAX_EVIDENCE_FILE_BYTES)
 }
 
-fn read_stable_file_capped(path: &Path, what: &str, cap: u64) -> Result<Vec<u8>, Error> {
+pub(crate) fn read_stable_file_capped(path: &Path, what: &str, cap: u64) -> Result<Vec<u8>, Error> {
     let mut file = open_stable_regular(path, what)?;
-    let metadata = file.metadata().map_err(|error| {
+    read_opened_file_capped(&mut file, path, what, cap)
+}
+
+fn read_opened_file_capped(
+    file: &mut fs::File,
+    path: &Path,
+    what: &str,
+    cap: u64,
+) -> Result<Vec<u8>, Error> {
+    let initial = file.metadata().map_err(|error| {
         Error::Gate(format!(
             "{what} {} cannot be inspected through its opened descriptor: {error}",
             path.display()
         ))
     })?;
-    if metadata.len() > cap {
+    verify_path_matches_descriptor(path, &initial, what)?;
+    let initial_len = initial.len();
+    if initial_len > cap {
         return Err(Error::Gate(format!(
             "{what} {} is {} bytes, above the {}-byte cap",
             path.display(),
-            metadata.len(),
+            initial_len,
             cap
         )));
     }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.read_to_end(&mut bytes).map_err(|error| {
+    let mut bytes = vec![0; initial_len as usize];
+    file.read_exact(&mut bytes).map_err(|error| {
         Error::Gate(format!(
-            "{what} {} cannot be read through its opened descriptor: {error}",
+            "{what} {} was truncated while being read at its initial {}-byte length: {error}",
+            path.display(),
+            initial_len
+        ))
+    })?;
+    let final_descriptor = file.metadata().map_err(|error| {
+        Error::Gate(format!(
+            "{what} {} cannot be re-inspected through its opened descriptor: {error}",
             path.display()
         ))
     })?;
-    if bytes.len() as u64 > cap {
+    if stable_metadata_fingerprint(&final_descriptor) != stable_metadata_fingerprint(&initial)
+        || final_descriptor.len() != initial_len
+    {
         return Err(Error::Gate(format!(
-            "{what} {} grew beyond its {}-byte cap while being read",
-            path.display(),
-            cap
+            "{what} {} changed while being read; descriptor metadata was not stable",
+            path.display()
         )));
     }
+    verify_path_matches_descriptor(path, &final_descriptor, what)?;
     Ok(bytes)
 }
 
@@ -2561,7 +3612,8 @@ fn is_regular_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn read_executable_file(path: &Path) -> Result<Vec<u8>, Error> {
+#[cfg(test)]
+fn require_executable(path: &Path) -> Result<(), Error> {
     let mut file = open_stable_regular(path, "generated-full Rivet producer binary")?;
     #[cfg(unix)]
     {
@@ -2579,30 +3631,28 @@ fn read_executable_file(path: &Path) -> Result<Vec<u8>, Error> {
             )));
         }
     }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(|error| {
-        Error::Gate(format!(
-            "Rivet producer binary {} cannot be read through its opened descriptor: {error}",
-            path.display()
-        ))
-    })?;
+    let bytes = read_opened_file_capped(
+        &mut file,
+        path,
+        "generated-full Rivet producer binary",
+        MAX_EVIDENCE_FILE_BYTES,
+    )?;
     if bytes.is_empty() {
         return Err(Error::Gate(format!(
-            "Rivet producer binary {} is empty; an existing artifact is malformed",
+            "Rivet producer binary {} is empty; existing artifact is malformed",
             path.display()
         )));
     }
-    Ok(bytes)
-}
-
-#[cfg(test)]
-fn require_executable(path: &Path) -> Result<(), Error> {
-    read_executable_file(path).map(|_| ())
+    Ok(())
 }
 
 #[cfg(test)]
 fn read_manifest(path: &Path) -> Result<HashManifest, Error> {
-    let raw = read_stable_file(path, "generated-full manifest")?;
+    let raw = read_stable_file_capped(
+        path,
+        "generated-full manifest",
+        crate::json::MAX_JSON_BYTES as u64,
+    )?;
     let raw = std::str::from_utf8(&raw).map_err(|e| {
         Error::Gate(format!(
             "generated-full manifest {} is not UTF-8: {e}",
@@ -2943,17 +3993,14 @@ pub fn run_cli(args: &[&str]) -> Result<(), Error> {
     let fixture_root = crate::crate_dir().join("fixtures/generated-full");
     let contract_path = contract_path.unwrap_or_else(|| fixture_root.join(CONTRACT_BASENAME));
     let contract = load_contract(&contract_path)?;
-    if tamper.is_some() {
-        return Err(Error::Blocked(
-            "generated-full tamper controls require a completed fresh replay snapshot; caller-provided evidence roots are not accepted".into(),
-        ));
+    if let Some(selected) = tamper {
+        return run_tamper_from_latest(&contract, selected);
     }
     let artifacts = ArtifactInputs::from_contract(&contract)?;
-    let identity = artifacts.identity()?;
     if refresh_determinism {
-        run_fresh_replay_with_paper_boots(&contract, &artifacts, &identity, 3)
+        run_fresh_replay_with_paper_boots(&contract, &artifacts, 3)
     } else {
-        run_fresh_replay(&contract, &artifacts, &identity)
+        run_fresh_replay(&contract, &artifacts)
     }
 }
 
@@ -3035,6 +4082,150 @@ mod tests {
         assert!(contract.coordinates.iter().any(|c| c.tuple() == (0, -1)));
         assert!(java_seed_long(contract.seeds[1]) < 0);
         validate_contract(&contract).unwrap();
+    }
+
+    #[test]
+    fn nested_snapshot_entry_and_byte_caps_are_aggregate() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir_all(source.join("left")).unwrap();
+        fs::create_dir_all(source.join("right")).unwrap();
+        fs::write(source.join("left/payload"), b"abc").unwrap();
+        fs::write(source.join("right/payload"), b"def").unwrap();
+
+        let entry_result = snapshot_tree_with_limits_for_test(
+            &source,
+            &temp.path().join("entry-snapshot"),
+            3,
+            100,
+        );
+        assert!(
+            matches!(entry_result, Err(Error::Gate(message)) if message.contains("aggregate cap"))
+        );
+
+        let byte_result =
+            snapshot_tree_with_limits_for_test(&source, &temp.path().join("byte-snapshot"), 100, 5);
+        assert!(
+            matches!(byte_result, Err(Error::Gate(message)) if message.contains("aggregate cap"))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn producer_output_root_requires_fresh_directory_and_cannot_write_external_tree() {
+        let contract = test_contract();
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("output");
+        require_fresh_output_root(&output, "test producer output").unwrap();
+        fs::create_dir(&output).unwrap();
+        assert!(matches!(
+            require_fresh_output_root(&output, "test producer output"),
+            Err(Error::Gate(message)) if message.contains("already exists")
+        ));
+
+        let external = temp.path().join("external");
+        fs::create_dir(&external).unwrap();
+        fs::remove_dir(&output).unwrap();
+        std::os::unix::fs::symlink(&external, &output).unwrap();
+        let result = write_seed_config(&output, &contract, 42);
+        assert!(
+            matches!(result, Err(Error::Gate(message)) if message.contains("without following links"))
+        );
+        assert!(!external.join(SEED_CONFIG_BASENAME).exists());
+    }
+
+    #[test]
+    fn lifecycle_accepts_only_clean_paper_or_strict_producer_outcomes() {
+        validate_expected_lifecycle(
+            7,
+            143,
+            b"READY\nAll dimensions are saved\n",
+            0,
+            ExpectedLifecycle::PaperClean,
+        )
+        .unwrap();
+        validate_expected_lifecycle(
+            7,
+            0,
+            b"READY\nAll dimensions are saved\n",
+            0,
+            ExpectedLifecycle::PaperClean,
+        )
+        .unwrap();
+        assert!(matches!(
+            validate_expected_lifecycle(7, 1, b"READY\nAll dimensions are saved\n", 0, ExpectedLifecycle::PaperClean),
+            Err(Error::Gate(message)) if message.contains("exit 0 or 143")
+        ));
+        assert!(matches!(
+            validate_expected_lifecycle(7, 143, b"READY\n", 0, ExpectedLifecycle::PaperClean),
+            Err(Error::Gate(message)) if message.contains("clean-save marker")
+        ));
+        assert!(matches!(
+            validate_expected_lifecycle(8, 4, b"RIVET_GENERATED_FULL_BLOCKED: not wired\n", 0, ExpectedLifecycle::ProducerExit(0)),
+            Err(Error::Blocked(message)) if message.contains("not wired")
+        ));
+        assert!(matches!(
+            validate_expected_lifecycle(8, 143, b"READY\n", 0, ExpectedLifecycle::ProducerExit(0)),
+            Err(Error::Gate(message)) if message.contains("expected dedicated exit 0")
+        ));
+    }
+
+    #[test]
+    fn replay_schema_names_revision_identity_digests_without_source_aliases() {
+        let observation = PaperObserved {
+            schema: "paper-observed-v1".into(),
+            seed: 42,
+            root: "/tmp/paper".into(),
+            argv: Vec::new(),
+            cwd: "/tmp".into(),
+            env: Default::default(),
+            paper_jar_sha256: "0".repeat(64),
+            paper_config_sha256: "1".repeat(64),
+            paper_revision_identity_sha256: "2".repeat(64),
+            pid: 1,
+            started_unix_nanos: 1,
+            ready_count: 1,
+            stopped_unix_nanos: 2,
+            exit_code: 143,
+            raw_log_sha256: "3".repeat(64),
+            payload_digests: Vec::new(),
+            producer_manifest_sha256: None,
+        };
+        let value = serde_json::to_value(observation).unwrap();
+        let object = value.as_object().unwrap();
+        assert!(object.contains_key("paper-revision-identity-sha256"));
+        assert!(!object.contains_key("paper-source-sha256"));
+    }
+
+    #[test]
+    fn equal_capture_boot_manifests_pass_determinism_refresh() {
+        let contract = test_contract();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp
+            .path()
+            .join("rivet")
+            .join(contract.seeds[0].to_string());
+        write_tree(&root, &contract, "rivet", contract.seeds[0], 42);
+        let manifest = read_manifest(&root.join(MANIFEST_BASENAME)).unwrap();
+        let result =
+            verify_capture_determinism(42, &[(1, manifest.clone()), (2, manifest.clone())]);
+        assert_eq!(result.unwrap(), manifest);
+    }
+
+    #[test]
+    fn divergent_capture_boot_manifests_fail_determinism_refresh() {
+        let contract = test_contract();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp
+            .path()
+            .join("rivet")
+            .join(contract.seeds[0].to_string());
+        write_tree(&root, &contract, "rivet", contract.seeds[0], 42);
+        let first = read_manifest(&root.join(MANIFEST_BASENAME)).unwrap();
+        let mut second = first.clone();
+        second.entries[0].sha256 = "f".repeat(64);
+        let error = verify_capture_determinism(42, &[(1, first), (2, second)]).unwrap_err();
+        assert!(error.to_string().contains("capture boots 1 and 2"));
     }
 
     #[cfg(target_os = "linux")]
@@ -3167,6 +4358,52 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn paper_clean_lifecycle_accepts_sigterm_143_with_save_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("paper.log");
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(
+            "trap 'echo All dimensions are saved; exit 143' TERM; echo 'Done (0s)!'; while :; do sleep 0.01; done",
+        );
+        let observation = process_observation(
+            &mut command,
+            vec!["sh".into(), "-c".into()],
+            temp.path(),
+            &log,
+            "Done (",
+            Duration::from_secs(2),
+            ExpectedLifecycle::PaperClean,
+        )
+        .unwrap();
+        assert_eq!(observation.exit_code, 143);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dedicated_producer_exit_4_is_blocked_not_clean_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let log = temp.path().join("producer.log");
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("echo 'RIVET_GENERATED_FULL_BLOCKED: FULL pipeline unavailable'; exit 4");
+        let error = process_observation(
+            &mut command,
+            vec!["sh".into(), "-c".into()],
+            temp.path(),
+            &log,
+            RIVET_READY_MARKER,
+            Duration::from_secs(2),
+            ExpectedLifecycle::ProducerExit(0),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, Error::Blocked(message) if message.contains("FULL pipeline unavailable"))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn fifo_contract_is_a_nonregular_hard_failure_without_blocking() {
         use rustix::fs::{CWD, Mode, mkfifoat};
 
@@ -3268,6 +4505,40 @@ mod tests {
             verify_synthetic_roots(&contract, &paper_root, &rivet_root),
             Err(Error::Gate(message)) if message.contains("not a directory")
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn producer_output_symlink_cannot_write_external_tree() {
+        let contract = test_contract();
+        let temp = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let output = temp.path().join("producer-output");
+        std::os::unix::fs::symlink(external.path(), &output).unwrap();
+        assert!(matches!(
+            require_fresh_output_root(&output, "generated-full producer output root"),
+            Err(Error::Gate(message)) if message.contains("already exists")
+        ));
+        assert!(write_seed_config(&output, &contract, contract.seeds[0]).is_err());
+        assert!(!external.path().join(SEED_CONFIG_BASENAME).exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn snapshot_tree_enforces_aggregate_entry_cap_across_nested_dirs() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        fs::create_dir_all(source.join("left")).unwrap();
+        fs::create_dir_all(source.join("right")).unwrap();
+        for (dir, offset) in [("left", 0usize), ("right", MAX_EVIDENCE_ENTRIES / 2)] {
+            for index in 0..(MAX_EVIDENCE_ENTRIES / 2 + 1) {
+                fs::write(source.join(dir).join(format!("{index}").as_str()), [0u8])
+                    .unwrap_or_else(|error| panic!("write {} {offset}: {error}", index));
+            }
+        }
+        let error = snapshot_tree(&source, &destination).unwrap_err();
+        assert!(error.to_string().contains("aggregate cap"));
     }
 
     #[cfg(target_os = "linux")]
@@ -3583,5 +4854,88 @@ mod tests {
         out.write_all(&payload).unwrap();
         out.push(0);
         assert!(mutate::parse_payload(&out).is_err());
+    }
+
+    /// Counterfactual: if the verifier reopened an identity-checked artifact by
+    /// pathname, an attacker could swap the path to different bytes between
+    /// hashing and use and the replay would silently execute the substitute.
+    /// Staging must capture the attested bytes once through the stable
+    /// descriptor so every later consumer sees exactly what was hashed.
+    #[test]
+    fn staged_artifact_path_swap_after_staging_cannot_change_consumed_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = temp.path().join("artifact");
+        fs::write(&original, b"attested artifact bytes").unwrap();
+        let sha256 = crate::sha256_hex(b"attested artifact bytes");
+
+        // Stage through the real acquisition path: stable open, capped read,
+        // hash binding against the expected digest.
+        let staged = open_staged_file(
+            original.clone(),
+            "generated-full staged counterfactual artifact",
+            &sha256,
+            MAX_EVIDENCE_FILE_BYTES,
+        )
+        .unwrap();
+        assert_eq!(staged.bytes, b"attested artifact bytes");
+
+        // Path-swap attack: replace the staged pathname with different bytes
+        // (and even with a symlink to yet another file) after identity was
+        // bound. The captured bytes must be untouched — no reopen happens.
+        fs::remove_file(&original).unwrap();
+        fs::write(&original, b"substituted bytes").unwrap();
+        assert_eq!(staged.bytes, b"attested artifact bytes");
+
+        let decoy = temp.path().join("decoy");
+        fs::write(&decoy, b"decoy bytes").unwrap();
+        fs::remove_file(&original).unwrap();
+        std::os::unix::fs::symlink(&decoy, &original).unwrap();
+        assert_eq!(staged.bytes, b"attested artifact bytes");
+    }
+
+    /// Counterfactual: a staged file whose on-path contents diverge from the
+    /// attestation digest must fail staging outright instead of executing or
+    /// comparing against unattested material.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn open_staged_file_fails_when_staged_contents_diverge_from_attestation() {
+        let temp = tempfile::tempdir().unwrap();
+        let staged = temp.path().join("staged-artifact");
+        fs::write(&staged, b"not what was attested").unwrap();
+
+        let result = open_staged_file(
+            staged,
+            "generated-full staged divergent artifact",
+            &crate::sha256_hex(b"attested"),
+            MAX_EVIDENCE_FILE_BYTES,
+        );
+        assert!(
+            matches!(result, Err(Error::Gate(message)) if message.contains("changed while staging"))
+        );
+    }
+
+    /// Counterfactual for the stable-read primitive itself: swapping the
+    /// pathname onto different bytes between descriptor acquisition and the
+    /// post-read re-stat must be detected as a path/descriptor mismatch, not
+    /// silently consumed as evidence of the original file.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stable_read_rejects_pathname_swapped_to_different_file_mid_flight() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("swappable");
+        fs::write(&target, b"genuine evidence").unwrap();
+
+        // Acquire the descriptor exactly as open_stable_regular does, then
+        // swap the pathname before verify_path_matches_descriptor would run.
+        let mut file = open_stable_regular(&target, "generated-full swap probe").unwrap();
+        fs::remove_file(&target).unwrap();
+        fs::write(&target, b"tampered evidence").unwrap();
+        let result = read_opened_file_capped(&mut file, &target, "generated-full swap probe", 1024);
+        assert!(matches!(
+            result,
+            Err(Error::Gate(message))
+                if message.contains("replaced or changed") || message.contains("was truncated")
+                    || message.contains("changed while being read")
+        ));
     }
 }

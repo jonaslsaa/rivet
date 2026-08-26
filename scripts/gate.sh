@@ -404,9 +404,10 @@ run_oracle_verify() {
 
 # Source-disjoint Stage-B/G4 generated normal-overworld FULL parity. This is a
 # dedicated verifier, never a generic fixture-manifest walk and never a
-# generated-expected/superflat substitution. It owns the typed 0/1/3 outcome:
-# absent genuine sides are UNVERIFIED (3), malformed/tampered/divergent output
-# is FAIL (1), and byte-identical closure is PASS (0).
+# generated-expected/superflat substitution. It owns the typed 0/1/3/4 outcome:
+# absent genuine sides are UNVERIFIED (3), a dedicated producer capability
+# boundary is BLOCKED (4), malformed/tampered/divergent output is FAIL (1), and
+# byte-identical closure is PASS (0).
 run_oracle_generated_full() {
   # G4 promotion is deliberately opt-in.  The direct verifier remains strict,
   # but ordinary pre-G4/full gates must not become unreleasable merely because
@@ -442,6 +443,13 @@ run_oracle_generated_full() {
     ORACLE_UNVERIFIED=1
     if [ "$REQUIRE_ORACLE" = 1 ]; then
       echo "    --require-oracle is set: an unverified generated-full row is a hard failure"
+      exit 1
+    fi
+  elif [ "$rc" -eq 4 ]; then
+    echo "    BLOCKED/UNVERIFIED — Rivet generated-full producer reported its dedicated capability boundary"
+    ORACLE_UNVERIFIED=1
+    if [ "$REQUIRE_ORACLE" = 1 ]; then
+      echo "    --require-oracle is set: a blocked generated-full producer is a hard failure"
       exit 1
     fi
   elif [ "$rc" -eq 1 ]; then
