@@ -1882,21 +1882,21 @@ fn build_generated_feature_closure(
             RegistrationInfo::BUILT_IN,
         );
     }
-    let mut staged_handoff = placed_transaction.access_transaction();
-    staged_handoff.add_transaction(&mut configured_transaction);
-    let staged_access =
+    let mut feature_handoff = placed_transaction.access_transaction();
+    feature_handoff.add_transaction(&mut configured_transaction);
+    let decode_access =
         LayeredRegistryAccess::new(vec![RegistryLayer::Static, RegistryLayer::Worldgen])
             .replace_from(
                 RegistryLayer::Static,
-                std::slice::from_ref(staged_handoff.access()),
+                std::slice::from_ref(feature_handoff.access()),
             )
             .replace_from(RegistryLayer::Worldgen, std::slice::from_ref(worldgen))
             .composite_access();
-    let ops = RegistryOps::create_from_access(&JsonOps::INSTANCE, staged_access.clone());
+    let ops = RegistryOps::create_from_access(&JsonOps::INSTANCE, decode_access.clone());
 
     let mut decoded_configured = HashMap::with_capacity(configured_entries.len());
     for &(name, _) in &configured_entries {
-        let decoded = decode_configured_feature(name, &ops, &staged_access)?;
+        let decoded = decode_configured_feature(name, &ops, &decode_access)?;
         decoded_configured.insert(name, Arc::new(decoded));
     }
     let mut decoded_placed = HashMap::with_capacity(placed_entries.len());
@@ -1907,7 +1907,7 @@ fn build_generated_feature_closure(
         let json: Value = serde_json::from_str(entry.json)
             .map_err(|error| format!("decode {name} JSON: {error}"))?;
         let placed =
-            decode_placed_feature_value(&json, &ops, &staged_access, &format!("decode {name}"))?;
+            decode_placed_feature_value(&json, &ops, &decode_access, &format!("decode {name}"))?;
         decoded_placed.insert(name, Arc::new(placed));
     }
     // Resolve every decoded value before taking either registry out of the
@@ -1917,9 +1917,9 @@ fn build_generated_feature_closure(
         .iter()
         .enumerate()
         .map(|(id, &name)| {
-            let identifier = name
-                .map(Identifier::parse)
-                .unwrap_or_else(|| Identifier::parse(&format!("rivet:generated_configured_gap_{id}")));
+            let identifier = name.map(Identifier::parse).unwrap_or_else(|| {
+                Identifier::parse(&format!("rivet:generated_configured_gap_{id}"))
+            });
             let value = match name {
                 Some(name) => Arc::clone(
                     decoded_configured
@@ -1959,14 +1959,14 @@ fn build_generated_feature_closure(
         .collect::<Result<_, String>>()?;
 
     drop(ops);
-    drop(staged_access);
-    let mut placed_builder = staged_handoff
+    drop(decode_access);
+    let mut placed_builder = feature_handoff
         .take_registry(&*PLACED_FEATURE)?
         .into_builder();
-    let mut configured_builder = staged_handoff
+    let mut configured_builder = feature_handoff
         .take_registry(&*CONFIGURED_FEATURE)?
         .into_builder();
-    drop(staged_handoff);
+    drop(feature_handoff);
 
     for (identifier, value) in configured_values {
         configured_builder.replace_registered(
@@ -1975,7 +1975,8 @@ fn build_generated_feature_closure(
         );
     }
     for (identifier, value) in placed_values {
-        placed_builder.replace_registered(&ResourceKey::create(&*PLACED_FEATURE, identifier), value);
+        placed_builder
+            .replace_registered(&ResourceKey::create(&*PLACED_FEATURE, identifier), value);
     }
     Ok((placed_builder.freeze(), configured_builder.freeze()))
 }
@@ -2744,10 +2745,12 @@ fn run_biome_decoration(
                         .downcast_ref::<&'static str>()
                         .is_some_and(|message| {
                             message.starts_with("generated feature ")
-                                || (message.contains("BlockStateBase.canSurvive is not implemented")
-                                || message.contains("WorldGenRegion.canSurvive is not implemented")
-                                || message.contains("Biome.shouldFreeze is not implemented")
-                                || message.contains("Biome.shouldSnow is not implemented"))
+                                || (message
+                                    .contains("BlockStateBase.canSurvive is not implemented")
+                                    || message
+                                        .contains("WorldGenRegion.canSurvive is not implemented")
+                                    || message.contains("Biome.shouldFreeze is not implemented")
+                                    || message.contains("Biome.shouldSnow is not implemented"))
                         })
                     {
                         return Err(GenError::FeaturePlacementDecode {

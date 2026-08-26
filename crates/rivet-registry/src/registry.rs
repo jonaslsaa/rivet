@@ -81,7 +81,7 @@ pub(crate) struct RegistryParts<T> {
     pub(crate) default_key: Option<Identifier>,
     pub(crate) tags: HashMap<TagKey<T>, Vec<HolderId>>,
     /// Mutable-phase state not retained by a frozen registry. Keeping it in
-    /// the transfer bundle makes staged rollback lossless.
+    /// the transfer bundle keeps ownership recovery lossless.
     pub(crate) intrusive: Option<HashMap<usize, Arc<T>>>,
     pub(crate) pending_unbound: HashMap<ResourceKey<T>, HolderId>,
 }

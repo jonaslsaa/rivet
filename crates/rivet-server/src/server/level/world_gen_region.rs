@@ -1596,9 +1596,9 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
             "minecraft:short_grass" | "minecraft:fern" | "minecraft:firefly_bush" => self
                 .get_block_state(&pos.below())
                 .is_in_tag("minecraft:supports_vegetation"),
-            other => panic!(
-                "WorldGenRegion.canSurvive is not implemented for {other} (RivetTodo #232)"
-            ),
+            other => {
+                panic!("WorldGenRegion.canSurvive is not implemented for {other} (RivetTodo #232)")
+            }
         }
     }
 
