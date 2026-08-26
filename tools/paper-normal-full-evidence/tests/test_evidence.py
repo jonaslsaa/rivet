@@ -151,6 +151,16 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(result.returncode, 3)
             self.assertIn("UNVERIFIED", result.stdout)
 
+    def test_nested_evidence_symlink_is_failed_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "bundle"
+            root.mkdir()
+            outside = Path(directory) / "outside"
+            outside.mkdir()
+            (root / "runs").symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(validate.Failed):
+                validate._reject_symlinks_under(root, "evidence bundle")
+
     def test_bundle_rejects_malformed_run_entry_and_symlink_root(self):
         contract = json.loads((HERE / "fixtures/contract.json").read_text())
         with tempfile.TemporaryDirectory() as directory:

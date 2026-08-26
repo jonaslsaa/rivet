@@ -845,6 +845,7 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
 def validate_bundle(bundle_dir: Path) -> None:
     if not bundle_dir.is_dir() or bundle_dir.is_symlink():
         raise Unverified(f"bundle directory is absent or symlinked: {bundle_dir}")
+    _reject_symlinks_under(bundle_dir, "evidence bundle")
     contract = _read_json(CONTRACT_PATH, "pinned contract")
     bundle_path = bundle_dir / "bundle.json"
     if not bundle_path.is_file() or bundle_path.is_symlink():
