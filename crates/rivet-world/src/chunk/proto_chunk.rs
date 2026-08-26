@@ -610,6 +610,7 @@ where
             air: _,
             void_air: _,
             upgrading: _,
+            light_engine_attached: _,
         } = self;
         (base, entities)
     }
