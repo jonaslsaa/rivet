@@ -369,15 +369,14 @@ fn validate(root: Value) -> Result<ValidatedTables> {
             .context("`dynamic_shape_runs` missing from block_behaviors.json")?,
         state_count,
     )?;
-    let (collision_boxes, collision_shapes, collision_shape_ids) =
-        validate_collision_shapes(
-            obj.get("collision_shapes")
-                .context("`collision_shapes` missing from block_behaviors.json")?,
-            obj.get("collision_shape_ids")
-                .context("`collision_shape_ids` missing from block_behaviors.json")?,
-            state_count,
-            &dynamic_shape_runs,
-        )?;
+    let (collision_boxes, collision_shapes, collision_shape_ids) = validate_collision_shapes(
+        obj.get("collision_shapes")
+            .context("`collision_shapes` missing from block_behaviors.json")?,
+        obj.get("collision_shape_ids")
+            .context("`collision_shape_ids` missing from block_behaviors.json")?,
+        state_count,
+        &dynamic_shape_runs,
+    )?;
     let dynamic_fixtures = validate_dynamic_fixtures(
         obj.get("dynamic_fixtures")
             .context("`dynamic_fixtures` missing from block_behaviors.json")?,
@@ -581,7 +580,9 @@ fn validate_collision_shapes(
         let shape_boxes = object
             .get("boxes")
             .and_then(Value::as_array)
-            .with_context(|| format!("collision_shapes shape {shape_id} `boxes` must be an array"))?;
+            .with_context(|| {
+                format!("collision_shapes shape {shape_id} `boxes` must be an array")
+            })?;
         if shape_boxes.len() > u8::MAX as usize {
             bail!("collision_shapes shape {shape_id} has too many boxes");
         }
@@ -651,9 +652,9 @@ fn validate_collision_shapes(
     }
     let mut shape_ids = Vec::with_capacity(ids.len());
     for (state_id, value) in ids.iter().enumerate() {
-        let id = value.as_i64().with_context(|| {
-            format!("collision_shape_ids state {state_id} must be an integer")
-        })?;
+        let id = value
+            .as_i64()
+            .with_context(|| format!("collision_shape_ids state {state_id} must be an integer"))?;
         let dynamic = dynamic_shape_at(dynamic_shape_runs, state_id as u32);
         if dynamic {
             if id != -1 {
@@ -1348,7 +1349,10 @@ mod tests {
         let mut v = valid_root();
         v["collision_shape_ids"][2] = serde_json::json!(0);
         let err = validate(v).unwrap_err();
-        assert!(err.to_string().contains("dynamic but has shape id"), "got: {err}");
+        assert!(
+            err.to_string().contains("dynamic but has shape id"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -1363,7 +1367,10 @@ mod tests {
             "max_z": 1
         }]);
         let err = validate(v).unwrap_err();
-        assert!(err.to_string().contains("shape 0 must be the empty shape"), "got: {err}");
+        assert!(
+            err.to_string().contains("shape 0 must be the empty shape"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -1751,7 +1758,10 @@ mod tests {
             max_y: 32,
             max_z: 32,
         }];
-        let collision_shapes = vec![CollisionShape { start: 0, length: 1 }];
+        let collision_shapes = vec![CollisionShape {
+            start: 0,
+            length: 1,
+        }];
         let collision_shape_ids = vec![0, 0, 0];
         let dynamic_fixtures = vec![DynamicFixture {
             name: "test".to_string(),
@@ -1918,7 +1928,10 @@ mod tests {
         let root = crate::registries::parse_strict(&json).unwrap();
         let (_, _, _, _, _, _, dynamic_runs, boxes, shapes, shape_ids, _) = validate(root).unwrap();
         assert_eq!(shapes.len(), 318, "Paper static geometry dedup drifted");
-        assert!(shapes[0].length == 0, "geometry zero must be the empty shape");
+        assert!(
+            shapes[0].length == 0,
+            "geometry zero must be the empty shape"
+        );
         assert_eq!(
             shapes.iter().filter(|shape| shape.length != 0).count(),
             317,
@@ -1934,8 +1947,18 @@ mod tests {
             shape_ids.iter().filter(|id| **id != u16::MAX).count(),
             32167
         );
-        assert_eq!(dynamic_runs.iter().filter(|run| run.dynamic).map(|run| run.length).sum::<u32>(), 199);
-        assert!(boxes.len() > 317, "non-empty geometries must carry their boxes");
+        assert_eq!(
+            dynamic_runs
+                .iter()
+                .filter(|run| run.dynamic)
+                .map(|run| run.length)
+                .sum::<u32>(),
+            199
+        );
+        assert!(
+            boxes.len() > 317,
+            "non-empty geometries must carry their boxes"
+        );
         assert!(shapes.iter().all(|shape| shape.length <= 15));
     }
 
