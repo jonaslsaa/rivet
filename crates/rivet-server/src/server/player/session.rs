@@ -61,6 +61,8 @@ use rivet_protocol::generated::packets::play::serverbound::PacketType as Serverb
 use rivet_protocol::protocol::common::clientbound_disconnect::ClientboundDisconnectPacket;
 use rivet_protocol::protocol::common::clientbound_keep_alive::ClientboundKeepAlivePacket;
 use rivet_protocol::protocol::common::serverbound_keep_alive::ServerboundKeepAlivePacket;
+use rivet_protocol::protocol::game::clientbound_player_position::ClientboundPlayerPositionPacket;
+use rivet_protocol::protocol::game::position_move_rotation::PositionMoveRotation;
 use rivet_text::Component;
 
 use crate::server::keepalive::{KEEPALIVE_LIMIT_NS, KeepaliveResponseOutcome, KeepaliveState};
@@ -111,6 +113,11 @@ pub const PLAY_CLIENTBOUND_KEEP_ALIVE_ID: u32 =
 /// play, so only the play id is needed here).
 pub const PLAY_CLIENTBOUND_DISCONNECT_ID: u32 =
     rivet_protocol::generated::packets::play::clientbound::PacketType::Disconnect.id();
+
+/// The clientbound `player_position` packet id in the play protocol (issue
+/// #544) — the teleport packet `internalTeleport` sends.
+pub const PLAY_CLIENTBOUND_PLAYER_POSITION_ID: u32 =
+    rivet_protocol::generated::packets::play::clientbound::PacketType::PlayerPosition.id();
 
 /// The tick-owned play session manager — one instance per server, owning the
 /// `ServerLevel` (tick-confined), the entity-id allocator (`ServerLevel.
@@ -341,6 +348,15 @@ impl PlayerSessionManager {
     /// when the connection has no session.
     pub fn chunk_center(&self, id: ConnectionId) -> Option<rivet_registry::core::ChunkPos> {
         self.sessions.get(&id).map(|s| s.loader.last_chunk_pos())
+    }
+
+    /// The cache radius the session's `PlayerChunkLoader` last emitted (the
+    /// `lastSendDistance` half of the committed view state — issue #544 test
+    /// observability). `None` when the connection has no session.
+    pub fn loader_send_distance(&self, id: ConnectionId) -> Option<i32> {
+        self.sessions
+            .get(&id)
+            .map(|s| s.loader.last_send_distance())
     }
 
     /// The first `firstGood` anchor of a live session (issue #158 test
@@ -681,6 +697,43 @@ impl PlayerSessionManager {
                 player.abs_snap_to(x, y, z, player.yaw(), player.pitch());
                 movement.anchors.on_move_accepted(x, y, z);
                 trace_teleport_ack(id, ack_id, AckOutcome::Accepted, Some([x, y, z]));
+                // Issue #544: Paper ends the accepted-ack path with
+                // `this.player.level().getChunkSource().move(this.player)` —
+                // Moonrise's re-center. A server-driven teleport can land far
+                // from the loader's center without ever passing through normal
+                // movement, so the ack is where chunk-stream authority moves.
+                // The pending marker was consumed above (the accept applied
+                // exactly once); a stale/wrong id took the `Ignored` arm and
+                // never reaches this recenter. An intra-chunk destination (the
+                // ordinary spawn handoff — the loader is built centered on
+                // spawn) hits `update`'s nothing-to-do guard and emits nothing,
+                // so spawn behavior is unchanged.
+                let new_chunk = rivet_registry::core::ChunkPos::containing(
+                    &rivet_registry::core::BlockPos::containing(x, y, z),
+                );
+                let requested_view_distance = session.requested_view_distance;
+                let recenter =
+                    session
+                        .loader
+                        .update(&mut self.level, new_chunk, requested_view_distance);
+                match recenter {
+                    Ok(packets) => self.send_loader_packets(ctx, id, packets),
+                    Err(e) => {
+                        // The typed missing-chunk failure (no generation
+                        // fallback, no silent substitution) or an encode failure
+                        // is a server-side fault; Paper disconnects on a chunk
+                        // send failure. The connection is being torn down, so
+                        // the loader state `update` committed for the new center
+                        // is moot.
+                        tracing::warn!(%id, %e, "disconnecting play session on chunk-loader update failure");
+                        let _ = ctx.connections.send(
+                            id,
+                            OutboundEvent::Disconnect {
+                                reason: DisconnectReason::Unsupported(format!("chunk update: {e}")),
+                            },
+                        );
+                    }
+                }
             }
             TeleportAckOutcome::InvalidMovementKick => {
                 tracing::warn!(%id, "teleport ack with no pending teleport");
@@ -725,6 +778,97 @@ impl PlayerSessionManager {
         let _ = ctx
             .connections
             .send(id, OutboundEvent::Disconnect { reason });
+    }
+
+    /// Queue the loader's ordered send-set (cache packets + entered chunks)
+    /// over the bounded outbound channel, exactly like the join burst's
+    /// `PlaySender` path. A send failure (outbound overflow / gone connection)
+    /// prunes the connection — the same backpressure policy as every other
+    /// tick→network send.
+    fn send_loader_packets(
+        &mut self,
+        ctx: &mut TickContext,
+        id: ConnectionId,
+        packets: Vec<crate::server::level::player_chunk_loader::PlayPacket>,
+    ) {
+        for packet in packets {
+            if let Err(e) = self
+                .sender
+                .send_packet(ctx.connections, id, packet.id, &packet.body)
+            {
+                tracing::warn!(%id, %e, "disconnecting play session on chunk send");
+                return;
+            }
+        }
+    }
+
+    /// `ServerGamePacketListenerImpl.internalTeleport(destination, relatives)`
+    /// (issue #544) — the authoritative server-driven teleport: advance the
+    /// `awaitingTeleport` id (`++awaitingTeleport`, reset when it *lands on*
+    /// `Integer.MAX_VALUE`, in [`TeleportAckState::begin_teleport`]), snap the
+    /// player to the absolute destination (`teleportSetPosition` — the M1
+    /// relatives set is empty, so the destination is already absolute), record
+    /// the awaited position, and send the `player_position` packet embedding the
+    /// new id. Like Java, this does NOT touch the chunk stream: the loader
+    /// recenters at the ack lifecycle point
+    /// ([`Self::dispatch_accept_teleportation`], the Paper-faithful
+    /// `getChunkSource().move(player)` hook), not here — the client is still
+    /// anchored to its old cache center until it acknowledges.
+    ///
+    /// The spawn teleport in [`Self::spawn_session`] predates any session (the
+    /// loader is built centered on spawn right after), so callers of this path
+    /// are by construction non-spawn teleports whose accepted position differs
+    /// from the loader's center — exactly the #544 gap.
+    pub fn teleport_player(
+        &mut self,
+        ctx: &mut TickContext,
+        id: ConnectionId,
+        x: f64,
+        y: f64,
+        z: f64,
+    ) {
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        // `Entity.teleportTo(x, y, z)` delegates to
+        // `teleportTo(x, y, z, getYRot(), getXRot())` — an x/y/z teleport
+        // preserves the player's current rotation, and the packet must carry
+        // exactly what the player was snapped to.
+        let (yaw, pitch) = (session.player.yaw(), session.player.pitch());
+        // `internalTeleport`: the id advance + awaited-position record, then
+        // `teleportSetPosition(destination, relatives)` with an empty relative
+        // set — an unconditional absolute snap preserving nothing but rotation.
+        let teleport_id = session.movement.teleport.begin_teleport(x, y, z);
+        session.player.abs_snap_to(x, y, z, yaw, pitch);
+        session.movement.anchors.on_move_accepted(x, y, z);
+        // `this.send(ClientboundPlayerPositionPacket.of(awaitingTeleport,
+        // destination, relatives))`.
+        let packet = ClientboundPlayerPositionPacket::new(
+            teleport_id,
+            PositionMoveRotation::new(
+                rivet_registry::core::Vec3::new(x, y, z),
+                rivet_registry::core::Vec3::new(0.0, 0.0, 0.0),
+                yaw,
+                pitch,
+            ),
+            Vec::new(),
+        );
+        match self
+            .sender
+            .encode_body(ClientboundPlayerPositionPacket::stream_codec(), &packet)
+        {
+            Ok(body) => {
+                if let Err(e) = self.sender.send_packet(
+                    ctx.connections,
+                    id,
+                    PLAY_CLIENTBOUND_PLAYER_POSITION_ID,
+                    &body,
+                ) {
+                    tracing::warn!(%id, %e, "disconnecting play session on teleport send");
+                }
+            }
+            Err(e) => tracing::warn!(%id, %e, "encoding player_position teleport"),
+        }
     }
 
     /// `ServerGamePacketListenerImpl.handleMovePlayer` (the M1 subset) — the
@@ -868,22 +1012,7 @@ impl PlayerSessionManager {
                 .loader
                 .update(&mut self.level, new_chunk, session.requested_view_distance);
         match recenter {
-            Ok(packets) => {
-                // Queue the ordered cache-center + newly entered chunks over the
-                // bounded outbound channel, exactly like the join burst's
-                // `PlaySender` path. A send failure (outbound overflow / gone
-                // connection) prunes the connection — the same backpressure
-                // policy as every other tick→network send.
-                for packet in packets {
-                    if let Err(e) =
-                        self.sender
-                            .send_packet(ctx.connections, id, packet.id, &packet.body)
-                    {
-                        tracing::warn!(%id, %e, "disconnecting play session on chunk send");
-                        return;
-                    }
-                }
-            }
+            Ok(packets) => self.send_loader_packets(ctx, id, packets),
             Err(e) => {
                 // A typed missing-chunk failure (the `RequireLoaded` UNVERIFIED
                 // error — no generation fallback, no silent substitution) or an
@@ -3218,6 +3347,361 @@ mod tests {
             registry.take_disconnect_reason(ID),
             Some(DisconnectReason::Overflow),
             "the recorded reason is the outbound overflow"
+        );
+    }
+
+    // ---- Issue #544: chunk-stream recenter after an authoritative teleport --
+
+    /// Decode a `player_position` body into `(id, (x, y, z), relatives_mask)` —
+    /// the varint teleport id, the `PositionMoveRotation` position (3 BE
+    /// doubles), the delta vec3 and rotations (skipped), then the 4-byte BE
+    /// relatives bitmask.
+    fn player_position_body(body: &[u8]) -> (i32, [f64; 3], i32) {
+        let mut buf = FriendlyByteBuf::new(bytes::BytesMut::from(body));
+        let id = buf.read_var_int();
+        let pos = [buf.read_double(), buf.read_double(), buf.read_double()];
+        let _delta = [buf.read_double(), buf.read_double(), buf.read_double()];
+        let _y_rot = buf.read_float();
+        let _x_rot = buf.read_float();
+        let relatives = buf.read_int();
+        assert_eq!(
+            buf.readable_bytes(),
+            0,
+            "player_position body fully consumed"
+        );
+        (id, pos, relatives)
+    }
+
+    /// A session joined by a view-8 client (send radius 4, the 117-chunk spawn
+    /// square) with the spawn teleport acked — ready for a server-driven far
+    /// teleport.
+    fn acked_view8_session() -> (
+        ConnectionRegistry,
+        tokio::sync::mpsc::Receiver<OutboundEvent>,
+        PlayerSessionManager,
+    ) {
+        let (mut registry, mut out_rx) = connected_registry();
+        let manager = PlayerSessionManager::new(default_session_config(
+            256,
+            ServerLevelConfig::M1_FIXTURE_SEED,
+        ));
+        apply_enter_play_vd(&mut registry, 8);
+        let manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
+        drain_outbound_frames(&mut out_rx);
+        (registry, out_rx, manager)
+    }
+
+    /// A bare tick context over `registry` for driving direct calls (the
+    /// teleport path) without routing inbound frames.
+    fn direct_ctx(registry: &mut ConnectionRegistry) -> TickContext<'_> {
+        TickContext {
+            tick: 1,
+            now_ns: 0,
+            now_ms: 0,
+            connections: registry,
+            inbound: Vec::new(),
+        }
+    }
+
+    /// A far authoritative teleport to negative coordinates sends the
+    /// `player_position` packet embedding the advanced awaited id, snaps the
+    /// player immediately (server authority), and — only at the ack lifecycle
+    /// point — recenters the loader onto the new chunk, sending exactly the
+    /// missing view around it (no duplicates, no re-sent cells of the old view).
+    #[test]
+    fn far_negative_teleport_ack_recenters_and_sends_the_missing_view() {
+        let (mut registry, mut out_rx, mut manager) = acked_view8_session();
+
+        // Server-driven teleport to block (-1600,-63,-1600): chunk (-100,-100),
+        // entirely outside the send-4 spawn square around (0,0).
+        let mut ctx = direct_ctx(&mut registry);
+        manager.teleport_player(&mut ctx, ID, -1600.0, -63.0, -1600.0);
+        drop(ctx);
+
+        // The teleport itself queues ONLY the player_position packet — no
+        // chunk-stream packets before the ack.
+        let sent = drain_outbound_frames(&mut out_rx);
+        assert_eq!(sent.len(), 1, "the teleport queues exactly one packet");
+        assert_eq!(
+            sent[0].0, PLAY_CLIENTBOUND_PLAYER_POSITION_ID,
+            "it is the player_position packet"
+        );
+        let (teleport_id, pos, relatives) = player_position_body(&sent[0].1);
+        assert_eq!(teleport_id, 2, "awaitingTeleport advanced 1 → 2");
+        assert_eq!(pos, [-1600.0, -63.0, -1600.0], "absolute destination");
+        assert_eq!(relatives, 0, "empty relative set");
+        assert_eq!(
+            manager.player_position(ID).unwrap().x,
+            -1600.0,
+            "the player snapped to the destination immediately (server authority)"
+        );
+        assert_eq!(
+            manager.chunk_center(ID),
+            Some(ChunkPos::ZERO),
+            "the loader has NOT recentered before the ack"
+        );
+
+        // The client acknowledges id 2: NOW the chunk stream follows.
+        let manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(2))]);
+        assert_eq!(
+            manager.chunk_center(ID),
+            Some(ChunkPos::new(-100, -100)),
+            "the matching ack recenters the loader to the new chunk"
+        );
+        let recenter = drain_outbound_frames(&mut out_rx);
+        assert!(!recenter.is_empty(), "the ack queues the missing view");
+        assert_eq!(
+            recenter[0].0,
+            rivet_protocol::generated::packets::play::clientbound::PacketType::SetChunkCacheCenter
+                .id(),
+            "the recenter leads with the cache-center packet"
+        );
+        assert_eq!(
+            center_body_coords(&recenter[0].1),
+            ChunkPos::new(-100, -100)
+        );
+        let entered: Vec<ChunkPos> = recenter[1..]
+            .iter()
+            .map(|(_, body)| chunk_body_coords(body))
+            .collect();
+        let expected = expected_enter(ChunkPos::ZERO, 4, ChunkPos::new(-100, -100), 4);
+        assert_eq!(entered.len(), expected.len(), "enter count matches");
+        assert_eq!(
+            entered
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>(),
+            expected,
+            "every emitted chunk is a newly entered cell of the new view"
+        );
+        let seen: std::collections::HashSet<ChunkPos> = entered.iter().copied().collect();
+        assert_eq!(seen.len(), entered.len(), "no duplicate sends");
+        for p in &entered {
+            assert!(
+                !ChunkTrackingView::of(ChunkPos::ZERO, 4).contains_pos(p),
+                "no cell from the original view is re-sent: {p}"
+            );
+        }
+    }
+
+    /// A stale/wrong ack id does not recenter: the loader keeps its old center
+    /// and no chunk packets are queued; nothing about the pending teleport
+    /// changes (the silent-ignore arm of `handleAcceptTeleportPacket`).
+    #[test]
+    fn wrong_ack_after_far_teleport_does_not_recenter() {
+        let (mut registry, mut out_rx, mut manager) = acked_view8_session();
+
+        let mut ctx = direct_ctx(&mut registry);
+        manager.teleport_player(&mut ctx, ID, -1600.0, -63.0, -1600.0);
+        drop(ctx);
+        drain_outbound_frames(&mut out_rx);
+
+        let manager = run_tick(
+            manager,
+            &mut registry,
+            vec![(ID, accept_teleport_frame(999))],
+        );
+        assert_eq!(
+            manager.chunk_center(ID),
+            Some(ChunkPos::ZERO),
+            "a stale/wrong ack never recenters"
+        );
+        assert!(
+            drain_outbound_frames(&mut out_rx).is_empty(),
+            "a stale/wrong ack queues no chunk packets"
+        );
+    }
+
+    /// The matching ack applies exactly once: a replayed ack for the same id
+    /// hits the Paper `invalid_player_movement` kick path (matching id, no
+    /// pending position), never a second recenter — no duplicate chunks queued.
+    #[test]
+    fn matching_ack_applies_the_recenter_exactly_once() {
+        let (mut registry, mut out_rx, mut manager) = acked_view8_session();
+
+        let mut ctx = direct_ctx(&mut registry);
+        manager.teleport_player(&mut ctx, ID, -1600.0, -63.0, -1600.0);
+        drop(ctx);
+        drain_outbound_frames(&mut out_rx);
+
+        let manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(2))]);
+        let first = drain_outbound_frames(&mut out_rx);
+        assert!(!first.is_empty(), "the first matching ack recenters");
+        assert_eq!(manager.chunk_center(ID), Some(ChunkPos::new(-100, -100)));
+
+        // The pending marker was consumed but the id still matches (Java keeps
+        // `awaitingTeleport`): this is the InvalidMovementKick arm — never a
+        // second `update` call.
+        run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(2))]);
+        assert!(
+            drained_disconnect_reason(&mut out_rx).is_some(),
+            "a replayed ack kicks (matching id, nothing pending)"
+        );
+        assert!(
+            drain_outbound_frames(&mut out_rx).is_empty(),
+            "no duplicate recenter on the replayed ack"
+        );
+    }
+
+    /// Repeated teleports never duplicate chunks within a send-set, and each
+    /// accepted teleport's enter set is exactly the diff of consecutive views —
+    /// including a teleport back over previously-visited ground, whose cells
+    /// were left behind at the intermediate center and are therefore correctly
+    /// re-sent once on re-entry (the client dropped them; unloads are #185).
+    #[test]
+    fn repeated_teleports_never_duplicate_chunks() {
+        let (mut registry, mut out_rx, manager) = acked_view8_session();
+        let mut current = manager;
+
+        // The loader's committed state before each hop: (center, send radius).
+        let mut prev = (
+            current.chunk_center(ID).unwrap(),
+            current.loader_send_distance(ID).unwrap(),
+        );
+        for (i, dest) in [
+            (-1600.0, -63.0, -1600.0), // chunk (-100,-100): negative coords
+            (1600.0, -63.0, -800.0),   // chunk (100,-50): positive x / negative z
+            (-1600.0, -63.0, -1600.0), // back to (-100,-100): re-enter visited ground
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut ctx = direct_ctx(&mut registry);
+            current.teleport_player(&mut ctx, ID, dest.0, dest.1, dest.2);
+            drop(ctx);
+            drain_outbound_frames(&mut out_rx);
+            let expected_id = 2 + i as i32;
+            current = run_tick(
+                current,
+                &mut registry,
+                vec![(ID, accept_teleport_frame(expected_id))],
+            );
+            let new_center = current.chunk_center(ID).unwrap();
+            let send = current.loader_send_distance(ID).unwrap();
+            assert_eq!(send, 4);
+
+            let recenter = drain_outbound_frames(&mut out_rx);
+            let entered: Vec<ChunkPos> = recenter[1..]
+                .iter()
+                .map(|(_, body)| chunk_body_coords(body))
+                .collect();
+            let expected = expected_enter(prev.0, prev.1, new_center, send);
+            assert_eq!(
+                entered
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::HashSet<_>>(),
+                expected,
+                "the enter set is exactly the consecutive-view diff"
+            );
+            assert_eq!(
+                entered.len(),
+                expected.len(),
+                "no duplicate chunk within one send-set"
+            );
+            prev = (new_center, 4);
+        }
+        assert_eq!(
+            current.chunk_center(ID),
+            Some(ChunkPos::new(-100, -100)),
+            "final center is the last teleport's chunk"
+        );
+    }
+
+    /// The typed-failure counterfactual on the teleport path: in a RequireLoaded
+    /// world whose region holds only the spawn view, a far teleport's ack fails
+    /// typed `UNVERIFIED` and disconnects — no generation fallback, no silent
+    /// substitution, and no partial send-set queued.
+    #[test]
+    fn far_teleport_ack_on_require_loaded_world_disconnects_typed() {
+        // Spawn view fully installed (the burst must succeed); the far
+        // destination's cells are genuinely absent from the region source.
+        let mut level = ServerLevel::new(ServerLevelConfig {
+            missing_chunk_policy: crate::server::level::MissingChunkPolicy::RequireLoaded,
+            ..Default::default()
+        });
+        let spawn_view = ChunkTrackingView::of(ChunkPos::ZERO, 3);
+        let mut positions = Vec::new();
+        spawn_view.for_each(|p| positions.push(p));
+        for pos in positions {
+            level
+                .chunk_map_mut()
+                .install(pos, crate::server::level::LevelChunk::new(pos));
+        }
+        let mut config = default_session_config(256, ServerLevelConfig::M1_FIXTURE_SEED);
+        config.level = level;
+
+        let (mut registry, mut out_rx) = connected_registry();
+        let manager = PlayerSessionManager::new(config);
+        apply_enter_play(&mut registry);
+        let mut manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
+        drain_outbound_frames(&mut out_rx);
+
+        let mut ctx = direct_ctx(&mut registry);
+        // Far teleport into unloaded territory: the teleport packet itself is
+        // still sent (Paper sends the position first), but the ack's recenter
+        // fails typed.
+        manager.teleport_player(&mut ctx, ID, -1600.0, -63.0, -1600.0);
+        drop(ctx);
+        let sent = drain_outbound_frames(&mut out_rx);
+        assert_eq!(sent.len(), 1, "only the teleport packet precedes the ack");
+
+        let _manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(2))]);
+        let reason =
+            drained_disconnect_reason(&mut out_rx).expect("the failed recenter disconnects");
+        match reason {
+            DisconnectReason::Unsupported(message) => {
+                assert!(
+                    message.contains("UNVERIFIED"),
+                    "the typed missing-chunk error survives: {message}"
+                );
+                assert!(
+                    message.contains("fallback are disabled"),
+                    "no generation fallback: {message}"
+                );
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+        assert!(
+            drain_outbound_frames(&mut out_rx).is_empty(),
+            "a failed recenter queues no packets"
+        );
+    }
+
+    /// The spawn handoff is unchanged (counterfactual): the join-time ack of
+    /// the spawn teleport (id 1) hits `update`'s nothing-to-do guard — the
+    /// loader is built centered on spawn — and emits nothing beyond what the
+    /// burst already sent, with no disconnect.
+    #[test]
+    fn spawn_teleport_ack_emits_no_extra_chunks() {
+        let (mut registry, mut out_rx) = connected_registry();
+        let manager = PlayerSessionManager::new(default_session_config(
+            256,
+            ServerLevelConfig::M1_FIXTURE_SEED,
+        ));
+        apply_enter_play_vd(&mut registry, 8);
+
+        // Tick 1 spawns the session + burst (the spawn teleport id 1 pending).
+        let manager = run_tick(manager, &mut registry, vec![]);
+        let burst = drain_outbound_frames(&mut out_rx);
+        assert!(
+            burst
+                .iter()
+                .any(|(id, _)| *id == PLAY_CLIENTBOUND_PLAYER_POSITION_ID),
+            "the burst embeds the spawn teleport"
+        );
+
+        // The spawn ack: the loader is already centered on spawn, so the
+        // recenter emits nothing.
+        let _manager = run_tick(manager, &mut registry, vec![(ID, accept_teleport_frame(1))]);
+        assert!(
+            drain_outbound_frames(&mut out_rx).is_empty(),
+            "the spawn handoff ack emits no extra chunk-stream packets"
+        );
+        assert_eq!(
+            drained_disconnect_reason(&mut out_rx),
+            None,
+            "and does not disconnect"
         );
     }
 }
