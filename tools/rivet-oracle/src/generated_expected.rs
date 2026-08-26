@@ -699,9 +699,8 @@ struct GeneratedExpectedManifest<'a> {
 /// describes the seed the golden content was actually captured under.
 pub fn regenerate_manifest(dir: &Path) -> Result<(), Error> {
     let data = fs::read(dir.join(FIXTURE_BASENAME))?;
-    crate::reject_duplicate_json_keys(&data).map_err(|e| {
-        Error::Manifest(format!("cannot read {FIXTURE_BASENAME}: {e}"))
-    })?;
+    crate::reject_duplicate_json_keys(&data)
+        .map_err(|e| Error::Manifest(format!("cannot read {FIXTURE_BASENAME}: {e}")))?;
     let golden: GoldenWorld = serde_json::from_slice(&data)
         .map_err(|e| Error::Manifest(format!("cannot read seed from {FIXTURE_BASENAME}: {e}")))?;
     let seed_str = golden.seed.to_string();

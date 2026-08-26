@@ -870,9 +870,8 @@ fn load_generated_expected_for_features(
     }
 
     let raw_manifest = fs::read_to_string(&manifest)?;
-    crate::reject_duplicate_json_keys(raw_manifest.as_bytes()).map_err(|e| {
-        Error::Manifest(format!("invalid generated-expected manifest.json: {e}"))
-    })?;
+    crate::reject_duplicate_json_keys(raw_manifest.as_bytes())
+        .map_err(|e| Error::Manifest(format!("invalid generated-expected manifest.json: {e}")))?;
     let strict: StrictGeneratedExpectedManifest = serde_json::from_str(&raw_manifest)
         .map_err(|e| Error::Manifest(format!("invalid generated-expected manifest.json: {e}")))?;
     if strict.format != 1 {
@@ -1014,9 +1013,8 @@ struct FeaturesCapturedFile {
 /// #595) — regeneration never stamps a hardcoded 42.
 pub fn regenerate_manifest(dir: &Path) -> Result<(), Error> {
     let data = fs::read(dir.join(FIXTURE_BASENAME))?;
-    crate::reject_duplicate_json_keys(&data).map_err(|e| {
-        Error::Manifest(format!("cannot read {FIXTURE_BASENAME}: {e}"))
-    })?;
+    crate::reject_duplicate_json_keys(&data)
+        .map_err(|e| Error::Manifest(format!("cannot read {FIXTURE_BASENAME}: {e}")))?;
     let golden: FeaturesGolden = serde_json::from_slice(&data)
         .map_err(|e| Error::Manifest(format!("cannot read seed from {FIXTURE_BASENAME}: {e}")))?;
     let seed_str = golden.seed.to_string();
@@ -1525,13 +1523,16 @@ mod tests {
             serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
         manifest["captured"][0]["sha256"] = serde_json::Value::String(crate::sha256_hex(&bytes));
         manifest["captured"][0]["bytes"] = serde_json::Value::from(bytes.len());
-        fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
 
         let result = load_generated_expected_for_features(&scratch);
         let _ = fs::remove_dir_all(&scratch);
-        let err = result.expect_err(
-            "an unknown generated-expected golden field must fail even after rehash",
-        );
+        let err = result
+            .expect_err("an unknown generated-expected golden field must fail even after rehash");
         assert!(
             matches!(&err, crate::Error::Manifest(_)),
             "unknown generated-expected golden field must be Error::Manifest, got {err:?}"
@@ -1961,12 +1962,7 @@ mod tests {
             serde_json::from_slice(&fs::read(dir.join(FIXTURE_BASENAME)).unwrap()).unwrap();
         let mut altered = golden["feature_observations"]["3,3"].clone();
         altered.as_array_mut().unwrap()[0]["y"] = serde_json::json!(999);
-        let raw = duplicate_nested_object_entry(
-            &golden,
-            "feature_observations",
-            "3,3",
-            &altered,
-        );
+        let raw = duplicate_nested_object_entry(&golden, "feature_observations", "3,3", &altered);
         let err = verify_scratch_raw(raw, "duplicate-observation-key")
             .expect_err("duplicate observation keys must fail even with canonical value last");
         assert!(
@@ -2334,10 +2330,7 @@ mod tests {
                     serde_json::to_string(canonical).unwrap()
                 ));
             }
-            root_entries.push(format!(
-                "{key_json}:{{{}}}",
-                nested_entries.join(",")
-            ));
+            root_entries.push(format!("{key_json}:{{{}}}", nested_entries.join(",")));
         }
         format!("{{{}}}", root_entries.join(","))
     }
