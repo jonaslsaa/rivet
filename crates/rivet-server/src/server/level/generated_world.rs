@@ -4855,9 +4855,9 @@ mod tests {
             retry,
             GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
                 chunk_pos,
-                step_index: 9,
-                global_feature_index: 17,
-                feature_key: "minecraft:dark_forest_vegetation",
+                step_index: 10,
+                global_feature_index: 0,
+                feature_key: "minecraft:freeze_top_layer",
             }) if chunk_pos == ChunkPos::ZERO
         ));
         assert_eq!(holder.status(), ChunkStatus::Empty);
