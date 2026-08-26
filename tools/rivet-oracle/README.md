@@ -58,7 +58,10 @@ diffs vs Rivet, packet round-trips) builds on top of these fixtures later.
   LastUpdate tamper controls. The promotion row is opt-in via
   `RIVET_GENERATED_FULL=1` until the genuine Paper/Rivet capture is present;
   wholly absent evidence is UNVERIFIED, while malformed or linked evidence is
-  FAIL.
+  FAIL. Stable evidence opening is deliberately Linux-only (`openat2` with
+  `RESOLVE_NO_SYMLINKS` and `/proc/self/fd`); non-Linux platforms fail
+  explicitly instead of taking an insecure pathname-reopen fallback. Linux
+  x86_64 is the primary tested target.
 - The Rust runner `cargo run -p rivet-oracle` verifies every committed
   fixture kind against its manifest's SHA-256s and prints a summary.
 - **Storage-only #231 V1a is green**: `anvil-roundtrip-v1a` writes all 432

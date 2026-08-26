@@ -5496,15 +5496,9 @@ mod tests {
         fs::create_dir_all(&chunk_dir).unwrap();
         for (cx, cz) in coords {
             // The generic hash-engine tests intentionally exercise a Nether
-            // region tree. The shared fixture builder models overworld FULL
-            // payloads, so bind this test-only payload to the Nether's
-            // minSectionY before deriving its manifest.
-            let mut payload = crate::mutate::parse_payload(
-                &crate::mutate::fixture_full_payload_with_seed(*cx, *cz, seed),
-            )
-            .unwrap();
-            payload.put_int("yPos", 0);
-            let bytes = crate::mutate::encode_payload(&payload).unwrap();
+            // region tree, so use the Nether's exact FULL section closure.
+            let bytes =
+                crate::mutate::fixture_full_payload_for_dimension(*cx, *cz, seed, "the_nether");
             fs::write(chunk_dir.join(format!("{cx}.{cz}.nbt")), bytes).unwrap();
         }
         let manifest =
@@ -5848,8 +5842,10 @@ mod tests {
         // Structures removal: restore Status to full but drop the `structures`
         // compound — the FULL validator refuses the payload at manifest build, so
         // the comparator can never compare a chunk Paper did not actually finish.
-        let mut root =
-            crate::mutate::parse_payload(&crate::mutate::fixture_full_payload(cx, cz)).unwrap();
+        let mut root = crate::mutate::parse_payload(
+            &crate::mutate::fixture_full_payload_for_dimension(cx, cz, 42, "the_nether"),
+        )
+        .unwrap();
         root.tags.swap_remove("structures");
         fs::write(&target, crate::mutate::encode_payload(&root).unwrap()).unwrap();
         assert!(
@@ -5861,8 +5857,10 @@ mod tests {
         // section's `SkyLight` array below its 2048-byte packed size. The FULL
         // validator refuses malformed light data at manifest build (spec §5), so
         // the comparator never compares a chunk whose light was not finalized.
-        let mut root =
-            crate::mutate::parse_payload(&crate::mutate::fixture_full_payload(cx, cz)).unwrap();
+        let mut root = crate::mutate::parse_payload(
+            &crate::mutate::fixture_full_payload_for_dimension(cx, cz, 42, "the_nether"),
+        )
+        .unwrap();
         let sections = root.get_list_or_empty_mut("sections");
         if let rivet_nbt::tag::Tag::Compound(sec) = &mut sections.list[0] {
             sec.tags.insert(

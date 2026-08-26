@@ -590,9 +590,10 @@ fn validate_full_payload(
         ));
     }
     // Paper always writes a sections ListTag. Every emitted section is a
-    // compound with a unique, light-bounded Y. Interior sections carry
-    // codec-shaped block-state and biome compounds; the one-section boundary
-    // padding may be light-only. Light arrays, when present, are exact DataLayers.
+    // compound with a unique, light-bounded Y. Every interior section carries
+    // codec-shaped block-state and biome compounds; each optional boundary is
+    // emitted only when it carries light state. Light arrays, when present, are
+    // exact DataLayers.
     let sections = compound
         .get_list("sections")
         .ok_or_else(|| format!("chunk {at} has no sections ListTag"))?;
@@ -602,8 +603,11 @@ fn validate_full_payload(
     let max_section_y = if dim == "overworld" { 19 } else { 15 };
     // Paper/Starlight serializes the light neighborhood too: WorldUtil's
     // light-section range is one section below the block range through one
-    // section above it.  These boundary sections are legitimate (for example
-    // overworld Y=-5 and End Y=-1) and must not be rejected as malformed.
+    // section above it. `SerializableChunkData.copyOf` emits every interior
+    // block section, while either boundary section is emitted only when its
+    // light state exists. Thus the exact accepted closure is all interior Ys
+    // plus optional light-only boundary Ys; arbitrary subsets and a single
+    // section are not Paper FULL payloads.
     let light_min_section_y = expected_min_section_y - 1;
     let light_max_section_y = max_section_y + 1;
     let mut section_ys = std::collections::HashSet::new();
@@ -625,49 +629,196 @@ fn validate_full_payload(
         if !section_ys.insert(y) {
             return Err(format!("chunk {at} contains duplicate section Y {y}"));
         }
-        // The one-section light padding emitted by Paper/Starlight is a
-        // legitimate light-only section: it may carry SkyLight/BlockLight and
-        // no block-state or biome container. Interior sections must carry the
-        // normal LevelChunk block-state and biome containers; if a boundary
-        // section does carry either container, validate its palette as usual.
         let in_block_bounds = y >= expected_min_section_y && y <= max_section_y;
-        if let Some(block_states) = sec.get_compound("block_states") {
-            let block_palette = block_states.get_list("palette").ok_or_else(|| {
-                format!("chunk {at} section Y {y} block_states has no palette ListTag")
-            })?;
-            if block_palette.list.is_empty() {
-                return Err(format!(
-                    "chunk {at} section Y {y} block_states palette is empty"
-                ));
-            }
-        } else if in_block_bounds {
+        let has_block_states = sec.tags.contains_key("block_states");
+        let has_biomes = sec.tags.contains_key("biomes");
+        if in_block_bounds {
+            validate_codec_container(sec, &at, y, "block_states", true)?;
+            validate_codec_container(sec, &at, y, "biomes", false)?;
+        } else if has_block_states || has_biomes {
             return Err(format!(
-                "chunk {at} section Y {y} has no block_states compound"
+                "chunk {at} boundary section Y {y} carries block_states/biomes; Paper light-only boundary sections must not carry block or biome containers"
             ));
         }
-        if let Some(biomes) = sec.get_compound("biomes") {
-            let biome_palette = biomes
-                .get_list("palette")
-                .ok_or_else(|| format!("chunk {at} section Y {y} biomes has no palette ListTag"))?;
-            if biome_palette.list.is_empty() {
-                return Err(format!("chunk {at} section Y {y} biomes palette is empty"));
-            }
-        } else if in_block_bounds {
-            return Err(format!("chunk {at} section Y {y} has no biomes compound"));
-        }
         for key in ["SkyLight", "BlockLight"] {
-            if let Some(rivet_nbt::tag::Tag::ByteArray(arr)) = sec.tags.get(key)
-                && arr.data.len() != 2048
-            {
-                return Err(format!(
-                    "chunk {at} section {key} has {} bytes, expected 2048 \
-                     (16x16x16 nibble array)",
-                    arr.data.len()
-                ));
+            if let Some(tag) = sec.tags.get(key) {
+                let rivet_nbt::tag::Tag::ByteArray(arr) = tag else {
+                    return Err(format!(
+                        "chunk {at} section {key} has the wrong NBT type; Paper expects a ByteArray"
+                    ));
+                };
+                if arr.data.len() != 2048 {
+                    return Err(format!(
+                        "chunk {at} section {key} has {} bytes, expected 2048 \
+                         (16x16x16 nibble array)",
+                        arr.data.len()
+                    ));
+                }
             }
+        }
+        for key in ["starlight.blocklight_state", "starlight.skylight_state"] {
+            if let Some(tag) = sec.tags.get(key) {
+                let rivet_nbt::tag::Tag::Int(state) = tag else {
+                    return Err(format!(
+                        "chunk {at} section {key} has the wrong NBT type; Paper expects an Int"
+                    ));
+                };
+                if state.value <= 0 {
+                    return Err(format!(
+                        "chunk {at} section {key} has state {}; Paper only emits positive light states",
+                        state.value
+                    ));
+                }
+            }
+        }
+        if !in_block_bounds
+            && ![
+                "SkyLight",
+                "BlockLight",
+                "starlight.blocklight_state",
+                "starlight.skylight_state",
+            ]
+            .iter()
+            .any(|key| sec.tags.contains_key(*key))
+        {
+            return Err(format!(
+                "chunk {at} boundary section Y {y} has no light state; Paper emits a boundary only when a light nibble or positive Starlight state exists"
+            ));
+        }
+    }
+    for y in expected_min_section_y..=max_section_y {
+        if !section_ys.contains(&y) {
+            return Err(format!(
+                "chunk {at} is missing required Paper block section Y {y}; FULL section closure is {expected_min_section_y}..={max_section_y} plus optional boundary light sections"
+            ));
         }
     }
     Ok(())
+}
+
+/// Validate the NBT shape accepted by Paper's PalettedContainer codec. The
+/// codec is a compound with a non-empty palette and an optional packed LONG
+/// stream (`data`); single-value palettes omit `data`, while non-singleton
+/// palettes carry exactly the SimpleBitStorage packed length.
+fn validate_codec_container(
+    section: &rivet_nbt::compound_tag::CompoundTag,
+    at: &str,
+    y: i32,
+    key: &str,
+    block_states: bool,
+) -> Result<(), String> {
+    let Some(tag) = section.tags.get(key) else {
+        return Err(format!("chunk {at} section Y {y} has no {key} compound"));
+    };
+    let rivet_nbt::tag::Tag::Compound(container) = tag else {
+        return Err(format!(
+            "chunk {at} section Y {y} {key} has the wrong NBT type; Paper expects a Compound"
+        ));
+    };
+    let Some(palette_tag) = container.tags.get("palette") else {
+        return Err(format!(
+            "chunk {at} section Y {y} {key} has no palette ListTag"
+        ));
+    };
+    let rivet_nbt::tag::Tag::List(palette) = palette_tag else {
+        return Err(format!(
+            "chunk {at} section Y {y} {key}.palette has the wrong NBT type; Paper expects a List"
+        ));
+    };
+    if palette.list.is_empty() {
+        return Err(format!("chunk {at} section Y {y} {key} palette is empty"));
+    }
+    for (index, entry) in palette.list.iter().enumerate() {
+        if block_states {
+            let rivet_nbt::tag::Tag::Compound(state) = entry else {
+                return Err(format!(
+                    "chunk {at} section Y {y} block_states.palette entry {index} is not a Compound"
+                ));
+            };
+            match state.tags.get("Name") {
+                Some(rivet_nbt::tag::Tag::String(name)) if !name.value.is_empty() => {}
+                Some(_) => {
+                    return Err(format!(
+                        "chunk {at} section Y {y} block_states.palette entry {index} Name is not a non-empty String"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "chunk {at} section Y {y} block_states.palette entry {index} has no Name"
+                    ));
+                }
+            }
+            if let Some(properties) = state.tags.get("Properties") {
+                let rivet_nbt::tag::Tag::Compound(properties) = properties else {
+                    return Err(format!(
+                        "chunk {at} section Y {y} block_states.palette entry {index} Properties is not a Compound"
+                    ));
+                };
+                if properties
+                    .tags
+                    .values()
+                    .any(|value| !matches!(value, rivet_nbt::tag::Tag::String(_)))
+                {
+                    return Err(format!(
+                        "chunk {at} section Y {y} block_states.palette entry {index} Properties contains a non-String value"
+                    ));
+                }
+            }
+        } else if !matches!(entry, rivet_nbt::tag::Tag::String(name) if !name.value.is_empty()) {
+            return Err(format!(
+                "chunk {at} section Y {y} biomes.palette entry {index} is not a non-empty String"
+            ));
+        }
+    }
+
+    let palette_size = palette.list.len();
+    let bits = ceil_log2(palette_size);
+    let disk_bits = if block_states && (1..=4).contains(&bits) {
+        4
+    } else {
+        bits
+    };
+    let entry_count: usize = if block_states { 4096 } else { 64 };
+    let expected_longs = match disk_bits {
+        0 => 0,
+        bits => {
+            let values_per_long = 64usize
+                .checked_div(bits)
+                .filter(|values| *values != 0)
+                .ok_or_else(|| {
+                    format!(
+                        "chunk {at} section Y {y} {key} palette requires unsupported {bits}-bit storage"
+                    )
+                })?;
+            entry_count.div_ceil(values_per_long)
+        }
+    };
+    match container.tags.get("data") {
+        None if disk_bits == 0 => Ok(()),
+        None => Err(format!(
+            "chunk {at} section Y {y} {key} palette has {palette_size} entries but no packed data"
+        )),
+        Some(rivet_nbt::tag::Tag::LongArray(data)) if disk_bits == 0 => Err(format!(
+            "chunk {at} section Y {y} {key} single-value palette must omit packed data, got {} longs",
+            data.data.len()
+        )),
+        Some(rivet_nbt::tag::Tag::LongArray(data)) if data.data.len() == expected_longs => Ok(()),
+        Some(rivet_nbt::tag::Tag::LongArray(data)) => Err(format!(
+            "chunk {at} section Y {y} {key} packed data has {} longs, expected {expected_longs}",
+            data.data.len()
+        )),
+        Some(_) => Err(format!(
+            "chunk {at} section Y {y} {key}.data has the wrong NBT type; Paper expects a LongArray"
+        )),
+    }
+}
+
+fn ceil_log2(value: usize) -> usize {
+    if value <= 1 {
+        0
+    } else {
+        (usize::BITS - (value - 1).leading_zeros()) as usize
+    }
 }
 
 /// Parse `<cx>.<cz>.nbt` from a fixture path.
@@ -1043,6 +1194,7 @@ mod tests {
     fn validate_full_payload_accepts_genuine_full_and_rejects_shapes() {
         use crate::mutate::{fixture_full_payload, parse_payload};
         use rivet_nbt::byte_array_tag::ByteArrayTag;
+        use rivet_nbt::int_tag::IntTag;
         use rivet_nbt::long_array_tag::LongArrayTag;
         use rivet_nbt::tag::Tag;
 
@@ -1110,6 +1262,62 @@ mod tests {
         }
         assert!(validate_full_payload(&bad_light, "overworld", 0, 0).is_err());
 
+        for key in ["SkyLight", "BlockLight"] {
+            let mut wrong_light_type = compound.clone();
+            let sections = wrong_light_type.get_list_or_empty_mut("sections");
+            if let Tag::Compound(sec) = &mut sections.list[0] {
+                sec.tags.insert(key.to_string(), Tag::Int(IntTag::new(1)));
+            }
+            assert!(
+                validate_full_payload(&wrong_light_type, "overworld", 0, 0).is_err(),
+                "present {key} with a non-ByteArray NBT type must be rejected"
+            );
+        }
+
+        let block_section = compound
+            .get_list("sections")
+            .unwrap()
+            .list
+            .iter()
+            .position(|tag| {
+                matches!(
+                    tag,
+                    Tag::Compound(section) if section.tags.contains_key("block_states")
+                )
+            })
+            .unwrap();
+        let mut wrong_codec_container = compound.clone();
+        if let Tag::Compound(section) =
+            &mut wrong_codec_container.get_list_or_empty_mut("sections").list[block_section]
+        {
+            section
+                .tags
+                .insert("block_states".to_string(), Tag::Int(IntTag::new(1)));
+        }
+        assert!(validate_full_payload(&wrong_codec_container, "overworld", 0, 0).is_err());
+
+        let mut wrong_codec_data_type = compound.clone();
+        if let Tag::Compound(section) =
+            &mut wrong_codec_data_type.get_list_or_empty_mut("sections").list[block_section]
+        {
+            let states = section.get_compound_or_empty_mut("block_states");
+            states
+                .tags
+                .insert("data".to_string(), Tag::Int(IntTag::new(1)));
+        }
+        assert!(validate_full_payload(&wrong_codec_data_type, "overworld", 0, 0).is_err());
+
+        let mut missing_codec_data = compound.clone();
+        if let Tag::Compound(section) =
+            &mut missing_codec_data.get_list_or_empty_mut("sections").list[block_section]
+        {
+            section
+                .get_compound_or_empty_mut("block_states")
+                .tags
+                .swap_remove("data");
+        }
+        assert!(validate_full_payload(&missing_codec_data, "overworld", 0, 0).is_err());
+
         let mut non_compound_section = compound.clone();
         non_compound_section.get_list_or_empty_mut("sections").list[0] =
             Tag::String(rivet_nbt::string_tag::StringTag::value_of("bad".into()));
@@ -1131,7 +1339,21 @@ mod tests {
         assert!(validate_full_payload(&duplicate_section_y, "overworld", 0, 0).is_err());
 
         let mut no_biomes = compound.clone();
-        if let Tag::Compound(section) = &mut no_biomes.get_list_or_empty_mut("sections").list[0] {
+        let block_section = no_biomes
+            .get_list("sections")
+            .unwrap()
+            .list
+            .iter()
+            .position(|tag| {
+                matches!(
+                    tag,
+                    Tag::Compound(section) if section.tags.contains_key("block_states")
+                )
+            })
+            .unwrap();
+        if let Tag::Compound(section) =
+            &mut no_biomes.get_list_or_empty_mut("sections").list[block_section]
+        {
             section.tags.swap_remove("biomes");
         }
         assert!(validate_full_payload(&no_biomes, "overworld", 0, 0).is_err());
@@ -1169,6 +1391,60 @@ mod tests {
             "bare `full` is never written by Paper's ChunkStatus.CODEC (namespace:path) and \
              must be refused as FULL, not compared against Paper"
         );
+    }
+
+    #[test]
+    fn full_validator_rejects_single_section_and_empty_boundary_evidence() {
+        use rivet_nbt::compound_tag::CompoundTag;
+        use rivet_nbt::tag::Tag;
+
+        let compound = parse_payload(&crate::mutate::fixture_full_payload(0, 0)).unwrap();
+        let interior = compound
+            .get_list("sections")
+            .unwrap()
+            .list
+            .iter()
+            .find(|tag| {
+                matches!(
+                    tag,
+                    Tag::Compound(section) if section.tags.contains_key("block_states")
+                )
+            })
+            .cloned()
+            .unwrap();
+        let mut single_section = compound.clone();
+        single_section.get_list_or_empty_mut("sections").list = vec![interior];
+        let error = validate_full_payload(&single_section, "overworld", 0, 0)
+            .expect_err("one section cannot represent Paper's FULL closure");
+        assert!(
+            error.contains("missing required Paper block section"),
+            "single-section rejection must name the missing closure: {error}"
+        );
+
+        let mut empty_boundary = compound.clone();
+        if let Tag::Compound(section) =
+            &mut empty_boundary.get_list_or_empty_mut("sections").list[0]
+        {
+            section.tags.clear();
+            section.put_byte("Y", -5);
+        }
+        let error = validate_full_payload(&empty_boundary, "overworld", 0, 0)
+            .expect_err("Paper never emits an empty boundary section");
+        assert!(
+            error.contains("boundary section Y -5") && error.contains("no light state"),
+            "empty-boundary rejection must name the missing light state: {error}"
+        );
+
+        let mut upper_boundary = compound;
+        let mut section = CompoundTag::new();
+        section.put_byte("Y", 20);
+        section.put_byte_array("SkyLight", vec![0i8; 2048]);
+        upper_boundary
+            .get_list_or_empty_mut("sections")
+            .list
+            .push(Tag::Compound(section));
+        validate_full_payload(&upper_boundary, "overworld", 0, 0)
+            .expect("a light-bearing upper boundary is part of Paper's accepted closure");
     }
 
     /// A bare `full` root Status is never FULL: Paper serializes the FULL status

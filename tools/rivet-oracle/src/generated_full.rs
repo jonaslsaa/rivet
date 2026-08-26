@@ -10,6 +10,12 @@
 //! source of a digest.  This matters for both the byte-level parity gate and
 //! the tamper controls, which rebuild only the derived manifest after changing
 //! one payload.
+//!
+//! Stable evidence acquisition is intentionally Linux-only: it uses `openat2`
+//! with `RESOLVE_NO_SYMLINKS`, plus `/proc/self/fd` for the opened Paper jar.
+//! There is no insecure portable-Unix fallback; non-Linux callers receive an
+//! explicit unsupported-platform failure. Linux x86_64 is the primary tested
+//! target, while other Linux architectures use the same kernel contract.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -1608,8 +1614,8 @@ fn reject_symlink_if_present(path: &Path, what: &str) -> Result<(), Error> {
 /// A payload tree must contain independent files.  A hardlink can make a
 /// supposedly isolated Paper/Rivet side mutate the other side or make a
 /// scratch tamper modify the source fixture, so link count is part of the
-/// closure contract.  Unix is the supported oracle platform; other platforms
-/// retain the symlink/type checks above.
+/// closure contract.  Hardlink checks are available on Unix; stable evidence
+/// consumption itself remains explicitly Linux-only (see `open_stable_read`).
 fn reject_hardlink(path: &Path, what: &str) -> Result<(), Error> {
     let metadata = fs::symlink_metadata(path).map_err(|e| {
         Error::Gate(format!(
@@ -2163,6 +2169,7 @@ mod tests {
         validate_contract(&contract).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn strict_metadata_schema_rejects_unknown_fields() {
         let contract = test_contract();
@@ -2233,6 +2240,7 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn absent_contract_is_unverified_but_existing_nonregular_contract_fails() {
         let temp = tempfile::tempdir().unwrap();
@@ -2266,6 +2274,26 @@ mod tests {
                 load_contract(&contract_path),
                 Err(Error::Gate(message)) if message.contains("hardlink")
             ));
+        }
+    }
+
+    #[test]
+    fn stable_evidence_platform_contract_is_explicit() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("evidence");
+        fs::write(&path, b"stable evidence").unwrap();
+        let result = open_stable_read(&path);
+
+        #[cfg(target_os = "linux")]
+        {
+            let file = result.expect("Linux stable evidence uses openat2");
+            assert!(file.metadata().unwrap().file_type().is_file());
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let error = result.expect_err("non-Linux stable evidence is explicit unsupported");
+            assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+            assert!(error.to_string().contains("Linux openat2"));
         }
     }
 
@@ -2310,7 +2338,7 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn absent_rivet_binary_is_unverified_but_existing_binary_failures_are_hard() {
         let temp = tempfile::tempdir().unwrap();
@@ -2374,7 +2402,7 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn broken_symlink_roots_and_hardlinked_payloads_fail_closed() {
         let contract = test_contract();
@@ -2405,7 +2433,7 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn nested_payload_symlink_is_a_hard_failure() {
         let contract = test_contract();
@@ -2430,6 +2458,7 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn stale_wrong_seed_provenance_is_a_hard_failure() {
         let contract = test_contract();
@@ -2452,6 +2481,7 @@ mod tests {
         assert!(matches!(result, Err(Error::Gate(_))));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn lying_wrong_seed_payloads_name_every_expected_chunk() {
         let contract = test_contract();
@@ -2477,6 +2507,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn every_tamper_kind_is_exactly_one_named_mismatch() {
         let contract = test_contract();
@@ -2490,6 +2521,51 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn symmetric_malformed_single_section_evidence_is_rejected() {
+        use rivet_nbt::tag::Tag;
+
+        let contract = test_contract();
+        let temp = tempfile::tempdir().unwrap();
+        let paper_root = temp.path().join("paper");
+        let rivet_root = temp.path().join("rivet");
+        write_seed_set(&paper_root, &contract, "paper", 42);
+        write_seed_set(&rivet_root, &contract, "rivet", 42);
+
+        let seed = contract.seeds[0];
+        let relative = expected_payload_path(&contract, &contract.coordinates[0]);
+        for root in [&paper_root, &rivet_root] {
+            let path = root.join(seed.to_string()).join(&relative);
+            let payload = fs::read(&path).unwrap();
+            let compound = mutate::parse_payload(&payload).unwrap();
+            let interior = compound
+                .get_list("sections")
+                .unwrap()
+                .list
+                .iter()
+                .find(|tag| {
+                    matches!(
+                        tag,
+                        Tag::Compound(section) if section.tags.contains_key("block_states")
+                    )
+                })
+                .cloned()
+                .unwrap();
+            let mut malformed = compound;
+            malformed.get_list_or_empty_mut("sections").list = vec![interior];
+            fs::write(&path, mutate::encode_payload(&malformed).unwrap()).unwrap();
+        }
+
+        let error = verify_synthetic_roots(&contract, &paper_root, &rivet_root)
+            .expect_err("identical malformed Paper/Rivet evidence must not compare green");
+        assert!(
+            matches!(error, Error::Gate(ref message) if message.contains("missing required Paper block section")),
+            "symmetric malformed evidence must fail in schema validation: {error}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn self_diff_alias_is_a_hard_failure() {
         let contract = test_contract();
@@ -2503,6 +2579,7 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn missing_overworld_and_noncanonical_filenames_fail_with_distinct_verdicts() {
         let contract = test_contract();
@@ -2575,6 +2652,7 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn malformed_extra_and_symlink_payloads_are_hard_failures() {
         let contract = test_contract();
@@ -2592,6 +2670,7 @@ mod tests {
         assert!(matches!(result, Err(Error::Gate(_))));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn identical_worldgen_content_is_rejected_as_superflat_echo() {
         let contract = test_contract();

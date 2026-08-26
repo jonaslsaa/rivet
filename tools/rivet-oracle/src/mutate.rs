@@ -122,26 +122,22 @@ pub fn fixture_full_payload(cx: i32, cz: i32) -> Vec<u8> {
     fixture_full_payload_with_seed(cx, cz, 42)
 }
 
-/// Like `fixture_full_payload`, but carries the given world seed into the
-/// chunk's worldgen *content* (the `block_states.data` per-block array), so
-/// two payloads built for the same coordinate under different seeds hash
-/// differently — the deterministic analogue of the #175 7(e) bogus-seed
-/// negative without booting Paper.
-///
-/// The seed is deliberately **not** injected into the root `LastUpdate` /
-/// `InhabitedTime` tick counters: those are game/inhabited time, which in a
-/// fresh world are 0 for every seed and never a function of the world seed.
-/// The mechanism Paper actually has is that a different seed generates
-/// different worldgen content, so this builder folds the seed into the
-/// per-block placement array — an honest, multi-bit stand-in for that content
-/// difference (a single palette-name parity bit would model only two worlds
-/// and collide for same-parity seeds).
+/// Build a structurally faithful FULL payload for one Paper dimension. The
+/// generic hash-manifest tests exercise Nether payloads, while generated-FULL
+/// tests exercise the overworld; keeping the section closure dimension-aware
+/// prevents a test fixture from accidentally relying on an invalid `yPos`-
+/// only rewrite.
 #[cfg(test)]
-pub fn fixture_full_payload_with_seed(cx: i32, cz: i32, seed: i64) -> Vec<u8> {
+pub fn fixture_full_payload_for_dimension(cx: i32, cz: i32, seed: i64, dimension: &str) -> Vec<u8> {
+    let (min_section_y, max_section_y) = match dimension {
+        "overworld" => (-4, 19),
+        "the_nether" | "the_end" => (0, 15),
+        other => panic!("unsupported fixture dimension {other}"),
+    };
     let mut root = CompoundTag::new();
     root.put_int("DataVersion", 4903);
     root.put_int("xPos", cx);
-    root.put_int("yPos", -4);
+    root.put_int("yPos", min_section_y);
     root.put_int("zPos", cz);
     root.put_string("Status", "minecraft:full");
     // Root tick counters `SerializableChunkData.write()` emits from Level state
@@ -150,45 +146,51 @@ pub fn fixture_full_payload_with_seed(cx: i32, cz: i32, seed: i64) -> Vec<u8> {
     // so they are fixed constants here, never derived from `seed`.
     root.put_long("LastUpdate", 0);
     root.put_long("InhabitedTime", 0);
-    let mut section = CompoundTag::new();
-    section.put_byte("Y", 0);
-    let mut bs = CompoundTag::new();
-    let mut palette = CompoundTag::new();
-    // The palette name alternates by coordinate only (air/stone) — the
-    // seed-dependent part of this chunk's content lives in the `data` array
-    // below, not here.
-    palette.put_string(
-        "Name",
-        if (cx + cz) % 2 == 0 {
-            "minecraft:air"
-        } else {
-            "minecraft:stone"
-        },
-    );
-    bs.put(
-        "palette".to_string(),
-        Tag::List(ListTag::with_list(vec![Tag::Compound(palette)])),
-    );
-    // The seed folds into the `block_states.data` long array — the per-block
-    // packed placement real worldgen derives from the seed. Different seeds at
-    // the same coordinate produce different arrays, so two trees compared
-    // coordinate-for-coordinate (as the diff does) differ at every chunk for
-    // any seed pair, never just an opposite-parity pair.
-    bs.put_long_array("data", seed_block_data(seed, cx, cz));
-    section.put("block_states".to_string(), Tag::Compound(bs));
-    let mut biomes = CompoundTag::new();
-    biomes.put(
-        "palette".to_string(),
-        Tag::List(ListTag::with_list(vec![Tag::String(
-            rivet_nbt::string_tag::StringTag::value_of("minecraft:plains".to_string()),
-        )])),
-    );
-    section.put("biomes".to_string(), Tag::Compound(biomes));
-    section.put_byte_array("SkyLight", vec![0i8; 2048]);
-    section.put_byte_array("BlockLight", vec![0i8; 2048]);
+    let mut sections = Vec::new();
+    // Paper's light neighborhood is one section below through one section above
+    // the block range. A boundary is emitted only when light state exists; this
+    // fixture includes the lower boundary and every block section, with no
+    // empty upper boundary.
+    for section_y in (min_section_y - 1)..=max_section_y {
+        let mut section = CompoundTag::new();
+        section.put_byte("Y", section_y as i8);
+        if section_y >= min_section_y {
+            let mut bs = CompoundTag::new();
+            let palettes = ["minecraft:air", "minecraft:stone"]
+                .into_iter()
+                .map(|name| {
+                    let mut palette = CompoundTag::new();
+                    palette.put_string("Name", name);
+                    Tag::Compound(palette)
+                })
+                .collect();
+            bs.put(
+                "palette".to_string(),
+                Tag::List(ListTag::with_list(palettes)),
+            );
+            // The seed folds into the `block_states.data` long array — the
+            // per-block packed placement real worldgen derives from the seed.
+            // Different seeds at the same coordinate produce different arrays,
+            // so two trees compared coordinate-for-coordinate differ at every
+            // chunk, never just an opposite-parity pair.
+            bs.put_long_array("data", seed_block_data(seed, cx, cz));
+            section.put("block_states".to_string(), Tag::Compound(bs));
+            let mut biomes = CompoundTag::new();
+            biomes.put(
+                "palette".to_string(),
+                Tag::List(ListTag::with_list(vec![Tag::String(
+                    rivet_nbt::string_tag::StringTag::value_of("minecraft:plains".to_string()),
+                )])),
+            );
+            section.put("biomes".to_string(), Tag::Compound(biomes));
+        }
+        section.put_byte_array("SkyLight", vec![0i8; 2048]);
+        section.put_byte_array("BlockLight", vec![0i8; 2048]);
+        sections.push(Tag::Compound(section));
+    }
     root.put(
         "sections".to_string(),
-        Tag::List(ListTag::with_list(vec![Tag::Compound(section)])),
+        Tag::List(ListTag::with_list(sections)),
     );
     let mut heightmaps = CompoundTag::new();
     for key in [
@@ -210,6 +212,25 @@ pub fn fixture_full_payload_with_seed(cx: i32, cz: i32, seed: i64) -> Vec<u8> {
     root.put_byte("isLightOn", 0);
     root.put_int("starlight.light_version", 10);
     encode_payload(&root).expect("fixture payload encodes")
+}
+
+/// Like `fixture_full_payload`, but carries the given world seed into the
+/// chunk's worldgen *content* (the `block_states.data` per-block array), so
+/// two payloads built for the same coordinate under different seeds hash
+/// differently — the deterministic analogue of the #175 7(e) bogus-seed
+/// negative without booting Paper.
+///
+/// The seed is deliberately **not** injected into the root `LastUpdate` /
+/// `InhabitedTime` tick counters: those are game/inhabited time, which in a
+/// fresh world are 0 for every seed and never a function of the world seed.
+/// The mechanism Paper actually has is that a different seed generates
+/// different worldgen content, so this builder folds the seed into the
+/// per-block placement array — an honest, multi-bit stand-in for that content
+/// difference (a single palette-name parity bit would model only two worlds
+/// and collide for same-parity seeds).
+#[cfg(test)]
+pub fn fixture_full_payload_with_seed(cx: i32, cz: i32, seed: i64) -> Vec<u8> {
+    fixture_full_payload_for_dimension(cx, cz, seed, "overworld")
 }
 
 /// Deterministic per-chunk block data derived from the world seed: a fixed
@@ -267,8 +288,12 @@ fn tamper_block(compound: &mut CompoundTag) -> Result<(), String> {
         let Tag::Compound(section) = &mut sections.list[i] else {
             continue;
         };
-        let bs = section.get_compound_or_empty_mut("block_states");
-        let palette = bs.get_list_or_empty_mut("palette");
+        let Some(Tag::Compound(bs)) = section.tags.get_mut("block_states") else {
+            continue;
+        };
+        let Some(Tag::List(palette)) = bs.tags.get_mut("palette") else {
+            continue;
+        };
         for j in 0..palette.list.len() {
             let Tag::Compound(entry) = &mut palette.list[j] else {
                 continue;
@@ -468,27 +493,34 @@ mod tests {
     fn palette_name(c: &CompoundTag) -> String {
         c.get_list("sections")
             .unwrap()
-            .get_compound(0)
-            .unwrap()
-            .get_compound("block_states")
-            .unwrap()
-            .get_list("palette")
-            .unwrap()
-            .get_compound(0)
-            .unwrap()
-            .get_string("Name")
-            .unwrap()
-            .clone()
+            .list
+            .iter()
+            .find_map(|tag| {
+                let Tag::Compound(section) = tag else {
+                    return None;
+                };
+                section
+                    .get_compound("block_states")
+                    .and_then(|states| states.get_list("palette"))
+                    .and_then(|palette| palette.get_compound(0))
+                    .and_then(|entry| entry.get_string("Name"))
+                    .cloned()
+            })
+            .expect("a block section has a block palette")
     }
 
     fn light(c: &CompoundTag) -> Vec<i8> {
         c.get_list("sections")
             .unwrap()
-            .get_compound(0)
-            .unwrap()
-            .get_byte_array("SkyLight")
-            .unwrap()
-            .clone()
+            .list
+            .iter()
+            .find_map(|tag| {
+                let Tag::Compound(section) = tag else {
+                    return None;
+                };
+                section.get_byte_array("SkyLight").cloned()
+            })
+            .expect("a section has SkyLight")
     }
 
     /// The first `LongArray` in the `Heightmaps` compound — the exact array
