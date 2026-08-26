@@ -41,7 +41,7 @@ pub use chunk_result::ChunkResult;
 pub use chunk_tracking_view::ChunkTrackingView;
 pub use entity_id_allocator::EntityIdAllocator;
 pub use full_chunk_status::FullChunkStatus;
-pub use level_chunk::{BiomeId, LevelChunk, StateId};
+pub use level_chunk::{BiomeId, LevelChunk, LevelChunkSaveError, StateId};
 pub use player_chunk_loader::{
     PlayPacket, PlayerChunkLoader, encode_play_frame, get_client_view_distance,
     get_load_view_distance, get_send_view_distance, get_tick_distance,
@@ -49,5 +49,8 @@ pub use player_chunk_loader::{
 pub use region_backed::{
     RegionBackedBootError, RegionChunkSource, RegionLevelPreparation, RegionWorldLayout,
 };
-pub use server_level::{MissingChunkPolicy, ServerLevel, ServerLevelConfig, overworld_dimension};
+pub use server_level::{
+    MissingChunkPolicy, NormalSaveError, NormalSaveResult, ServerLevel, ServerLevelConfig,
+    overworld_dimension,
+};
 pub use world_gen_region::{GenerationChunkHolderView, UnavailableChunkDiagnostic, WorldGenRegion};

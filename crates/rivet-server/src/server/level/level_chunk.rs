@@ -34,6 +34,7 @@
 use std::collections::HashMap;
 
 use rivet_nbt::compound_tag::CompoundTag;
+use rivet_nbt::tag::Tag;
 use rivet_protocol::protocol::game::heightmap_types::HeightmapType;
 use rivet_protocol::protocol::game::level_chunk_packet_data::{
     BlockEntityInfo, LevelChunkPacketData,
@@ -59,7 +60,10 @@ use rivet_world::chunk::storage::ChunkReconstruction;
 use rivet_world::chunk::storage::block_entity_materialization::{
     BlockEntityMaterialization, materialize_block_entities,
 };
+use rivet_world::chunk::storage::chunk_nbt_writer::write_live;
 use rivet_world::chunk::storage::section_reconstruction::BiomeId as WorldgenBiomeId;
+use rivet_world::chunk::storage::section_reconstruction::current_version_container_factory;
+use rivet_world::chunk::storage::serializable_chunk_data::LiveChunkSaveData;
 use rivet_world::chunk::storage::serializable_chunk_data::{
     BlockEntityChunkKind, SerializedBlockEntityOutcome, StructureReference,
     reconstruct_block_entities,
@@ -231,6 +235,94 @@ impl LevelChunk {
     /// #369 installer consumes this.
     pub fn structure_starts(&self) -> Option<&CompoundTag> {
         self.structure_starts.as_ref()
+    }
+
+    /// Snapshot this already-canonical server chunk into Paper's current-version
+    /// FULL chunk NBT. This is tick-thread-only by ownership: the canonical
+    /// value is copied and transformed before the returned tag leaves the world.
+    pub fn snapshot_for_save(&self, game_time: i64) -> Result<CompoundTag, LevelChunkSaveError> {
+        if !self.get_all_starts().is_empty() && self.structure_starts.is_none() {
+            return Err(LevelChunkSaveError::UnserializableStructureStarts);
+        }
+        let factory = current_version_container_factory();
+        let world_chunk = self
+            .chunk
+            .copy()
+            .map_values(
+                factory.block_states_strategy().clone(),
+                factory.biome_strategy().clone(),
+                BlockState::new(StateId(0)),
+                WorldgenBiomeId(40),
+                &|state: &StateId| BlockState::new(*state),
+                &|biome: &BiomeId| WorldgenBiomeId(biome.raw()),
+                &rivet_world::chunk::storage::chunk_reconstruction::resolve_state_flags,
+            )
+            .map_err(LevelChunkSaveError::PaletteMap)?;
+
+        // Paper's `packStructureData` always emits both child compounds, even
+        // when both maps are empty; this is an Option/field-presence contract,
+        // not an optimization. The typed `i64` StructureStart stand-in is not
+        // a wire StructureStart and is therefore not fabricated into `starts`;
+        // only an existing raw starts compound is carried verbatim. A typed
+        // stand-in without that raw payload was rejected before conversion.
+        let mut structures = CompoundTag::new();
+        structures.put(
+            "starts".to_string(),
+            Tag::Compound(self.structure_starts.clone().unwrap_or_default()),
+        );
+        let mut reference_map = CompoundTag::new();
+        for reference in self.structures_references() {
+            // `packStructureData` omits empty LongSets, while retaining the
+            // unconditional References child compound itself.
+            if reference.references.is_empty() {
+                continue;
+            }
+            let identifier = reference.identifier.to_string();
+            reference_map.put_long_array(&identifier, reference.references);
+        }
+        structures.put("References".to_string(), Tag::Compound(reference_map));
+
+        let post_processing_sections = self
+            .chunk
+            .get_base()
+            .get_post_processing()
+            .iter()
+            .map(|offsets| (!offsets.is_empty()).then(|| offsets.clone()))
+            .collect();
+        // Paper's `LevelChunk.getBlockEntityNbtForSaving` preserves a pending
+        // (not-yet-materialized) entry and forces `keepPacked=true` on the copy.
+        // Never mutate the canonical authority: the save owns these tags.
+        let block_entities = self
+            .pending_block_entities()
+            .values()
+            .cloned()
+            .map(|mut tag| {
+                tag.put_boolean("keepPacked", true);
+                tag
+            })
+            .collect();
+        let data = LiveChunkSaveData::from_full_runtime(
+            world_chunk.height_accessor().get_min_section_y(),
+            world_chunk.get_inhabited_time(),
+            world_chunk.get_base().get_upgrade_data().copy(),
+            world_chunk.is_light_correct(),
+            block_entities,
+            structures,
+            self.stored_block_ticks.clone(),
+            self.stored_fluid_ticks.clone(),
+            post_processing_sections,
+        );
+        Ok(write_live(
+            &data,
+            &world_chunk,
+            game_time,
+            |state: &BlockState| Tag::Compound(rivet_nbt::nbt_utils::write_block_state(*state)),
+            |biome: &WorldgenBiomeId| {
+                Tag::String(rivet_nbt::string_tag::StringTag::value_of(
+                    rivet_registry::generated::biomes::BIOME_BY_ID[biome.0 as usize].to_string(),
+                ))
+            },
+        ))
     }
 
     pub fn from_bridge(reconstruction: ChunkReconstruction) -> Result<Self, LevelChunkBridgeError> {
@@ -423,9 +515,34 @@ impl LevelChunk {
         self.chunk.get_base().is_unsaved()
     }
 
+    /// `ChunkAccess.tryMarkSaved()` on the canonical tick-thread chunk.
+    pub fn try_mark_saved(&mut self) -> bool {
+        self.chunk.try_mark_saved()
+    }
+
+    /// Restore the honest dirty bit after an enqueue rejection.
+    pub fn mark_unsaved(&mut self) {
+        self.chunk.mark_unsaved()
+    }
+
+    /// `ChunkAccess.addPackedPostProcess` for an already-canonical chunk.
+    pub fn add_packed_post_process(&mut self, offsets: &[i16], section_index: usize) {
+        self.chunk.add_packed_post_process(offsets, section_index);
+    }
+
     /// `ChunkAccess.getInhabitedTime()` carried through generated promotion.
     pub fn inhabited_time(&self) -> i64 {
         self.chunk.get_base().get_inhabited_time()
+    }
+
+    /// `ChunkAccess.setInhabitedTime(long)` on the canonical chunk.
+    pub fn set_inhabited_time(&mut self, inhabited_time: i64) {
+        self.chunk.set_inhabited_time(inhabited_time);
+    }
+
+    /// `ChunkAccess.setLightCorrect(boolean)` on the canonical chunk.
+    pub fn set_light_correct(&mut self, light_correct: bool) {
+        self.chunk.set_light_correct(light_correct);
     }
 
     /// Paper's Starlight sky emptiness map, carried until the lighting/runtime
@@ -748,6 +865,18 @@ fn light_data_from_nibbles(
     build_light_update_data(&sky_layers, &block_layers)
 }
 
+/// A save snapshot could not be built from the canonical server chunk.
+#[derive(Debug, thiserror::Error)]
+pub enum LevelChunkSaveError {
+    /// The owned value transform rejected a hostile palette mapping.
+    #[error("failed to snapshot canonical chunk for save: {0}")]
+    PaletteMap(String),
+    /// The live structure map contains typed stand-ins but no retained raw
+    /// `StructureStart` payload that can be emitted faithfully.
+    #[error("cannot serialize live structure starts without a retained raw StructureStart payload")]
+    UnserializableStructureStarts,
+}
+
 /// A reconstructed chunk carries a persisted Starlight initialisation state
 /// this port does not understand (`InitState::Other`). Paper keeps the raw int
 /// through `toVanillaNibble` and re-emits it on save; the port's packet seam
@@ -867,8 +996,8 @@ pub(crate) fn superflat_content() -> rivet_world::superflat::SuperflatChunkConte
 #[cfg(test)]
 mod tests {
     use super::{
-        BiomeId, LevelChunk, LevelChunkBridgeError, StateId, StructureKey, WorldgenBiomeId,
-        strategies,
+        BiomeId, LevelChunk, LevelChunkBridgeError, LevelChunkSaveError, StateId, StructureKey,
+        WorldgenBiomeId, strategies,
     };
     use bytes::BytesMut;
     use rivet_nbt::compound_tag::CompoundTag;
@@ -1192,6 +1321,27 @@ mod tests {
         let references = chunk.structures_references();
         assert_eq!(references.len(), 1);
         assert_eq!(references[0].references, vec![5, 9]);
+    }
+
+    #[test]
+    fn save_omits_empty_structure_reference_sets_but_keeps_children() {
+        let mut chunk = LevelChunk::new(ChunkPos::ZERO);
+        chunk.set_all_references(vec![(Identifier::parse("minecraft:village"), vec![])]);
+
+        let saved = chunk
+            .snapshot_for_save(0)
+            .expect("empty references are representable as an empty map");
+        let structures = saved
+            .get_compound("structures")
+            .expect("structures present");
+        assert!(structures.get_compound("starts").is_some());
+        let references = structures
+            .get_compound("References")
+            .expect("References child remains present");
+        assert!(
+            references.is_empty(),
+            "empty LongSets are omitted from References"
+        );
     }
 
     /// A dense id map (global id = value), matching the server `StateId`/biome
@@ -1555,6 +1705,10 @@ mod tests {
         // carry belongs to the region-reconstruction path only, and is never
         // fabricated for the generated path.
         assert!(chunk.structure_starts().is_none());
+        assert!(matches!(
+            chunk.snapshot_for_save(0),
+            Err(LevelChunkSaveError::UnserializableStructureStarts)
+        ));
     }
 
     /// Every persisted status short of genuine `FULL` is refused atomically

@@ -92,6 +92,11 @@ impl ChunkMap {
         self.chunks.get(&pos)
     }
 
+    /// Tick-thread mutable access to an already-loaded canonical chunk.
+    pub fn get_chunk_mut(&mut self, pos: ChunkPos) -> Option<&mut LevelChunk> {
+        self.chunks.get_mut(&pos)
+    }
+
     /// Install an owned reconstructed chunk at `pos`, replacing any previously
     /// loaded chunk there. The #516 region-backed boot composes the read-only
     /// world into an empty map by installing every chunk of the view square

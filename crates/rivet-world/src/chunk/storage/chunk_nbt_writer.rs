@@ -89,6 +89,7 @@ use rivet_registry::block_state::BlockState;
 use rivet_serialization::codec::{self, Codec};
 
 use crate::block::Block;
+use crate::chunk::level_chunk::LevelChunk;
 use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::paletted_container::PackedData;
 use crate::chunk::registry_codecs::{block_by_name_codec, fluid_by_name_codec};
@@ -96,7 +97,7 @@ use crate::chunk::status::{ChunkStatus, ChunkType};
 use crate::chunk::storage::chunk_reconstruction::ReconstructedLevelChunk;
 use crate::chunk::storage::section_reconstruction::BiomeId;
 use crate::chunk::storage::serializable_chunk_data::{
-    BLOCK_LIGHT_TAG, BLOCKLIGHT_STATE_TAG, SKY_LIGHT_TAG, SKYLIGHT_STATE_TAG,
+    BLOCK_LIGHT_TAG, BLOCKLIGHT_STATE_TAG, LiveChunkSaveData, SKY_LIGHT_TAG, SKYLIGHT_STATE_TAG,
     STARLIGHT_LIGHT_VERSION, STARLIGHT_VERSION_TAG, SerializableChunkData, StoredHeightmaps,
     write_heightmaps,
 };
@@ -166,22 +167,27 @@ fn biome_element(biome: &BiomeId) -> Tag {
 /// section's containers pack with their own strategies — `pack()` re-encodes
 /// the storage against a fresh `HashMapPalette`, the exact inverse of the
 /// parse's `unpack`, so a genuine section round-trips byte-identically.
-fn store_section_containers(
+fn store_section_containers<T, B>(
     section_tag: &mut CompoundTag,
-    section: &LevelChunkSection<BlockState, BiomeId>,
-) {
+    section: &LevelChunkSection<T, B>,
+    encode_block: impl Fn(&T) -> Tag + Copy,
+    encode_biome: impl Fn(&B) -> Tag + Copy,
+) where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+{
     section_tag.put(
         "block_states".to_string(),
         Tag::Compound(encode_paletted_container(
             &section.states().pack(),
-            block_state_element,
+            encode_block,
         )),
     );
     section_tag.put(
         "biomes".to_string(),
         Tag::Compound(encode_paletted_container(
             &section.biomes().pack(),
-            biome_element,
+            encode_biome,
         )),
     );
 }
@@ -211,10 +217,15 @@ fn pack_offsets(post_processing: &[Option<Vec<i16>>]) -> ListTag {
 /// the primed value, not a dropped key — the reconstructed chunk is the
 /// authoritative result. `write_heightmaps` then emits ordinal order, matching
 /// Paper's `write` iterating the `EnumMap`.
-fn chunk_heightmaps(
-    chunk: &ReconstructedLevelChunk,
+fn chunk_heightmaps<T, B, S>(
+    chunk: &LevelChunk<T, B, S>,
     heightmaps_after: &[Types],
-) -> StoredHeightmaps {
+) -> StoredHeightmaps
+where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash,
+{
     let mut stored: StoredHeightmaps = std::array::from_fn(|_| None);
     for ty in heightmaps_after {
         let index = *ty as usize;
@@ -246,6 +257,28 @@ pub fn write(
     chunk: &ReconstructedLevelChunk,
     game_time: i64,
 ) -> CompoundTag {
+    let live = LiveChunkSaveData::from_serializable(data);
+    write_live(&live, chunk, game_time, block_state_element, biome_element)
+}
+
+/// Encode an owned current-version snapshot against any canonical runtime
+/// `LevelChunk`. The section palette/light/heightmap/tick codecs are the same
+/// ones used by [`write`]; callers only supply the registry-value encoders for
+/// their runtime value pair.
+pub fn write_live<T, B, S, EB, EU>(
+    data: &LiveChunkSaveData,
+    chunk: &LevelChunk<T, B, S>,
+    game_time: i64,
+    encode_block: EB,
+    encode_biome: EU,
+) -> CompoundTag
+where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash,
+    EB: Fn(&T) -> Tag + Copy,
+    EU: Fn(&B) -> Tag + Copy,
+{
     let mut tag = CompoundTag::new();
     add_current_data_version(&mut tag);
     // Paper's `write()` emits `this.chunkPos`/`this.minSectionY`, which `copyOf`
@@ -258,8 +291,8 @@ pub fn write(
     tag.put_int("yPos", chunk.height_accessor().get_min_section_y());
     tag.put_int("zPos", pos.z());
     tag.put_long("LastUpdate", game_time);
-    tag.put_long("InhabitedTime", chunk.get_inhabited_time());
-    tag.put_string("Status", data.status().serialization_name());
+    tag.put_long("InhabitedTime", data.inhabited_time());
+    tag.put_string("Status", data.status.serialization_name());
     // `blending_data` is never written: Paper's `parse` decodes it through
     // `BlendingData.Packed.CODEC` (`orElse(null)` on failure), `read` unpacks
     // it into the chunk, and `copyOf` re-packs + `write` re-encodes only a
@@ -273,7 +306,7 @@ pub fn write(
     // it — even when it decoded. The proto branch writes it verbatim (the
     // `BelowZeroRetrogen.CODEC` is not ported, #336); the FULL reconstruction
     // this writer serves never reaches that branch.
-    if data.status().chunk_type() == ChunkType::ProtoChunk
+    if data.status.chunk_type() == ChunkType::ProtoChunk
         && let Some(raw) = data.raw_below_zero_retrogen()
     {
         tag.put(
@@ -298,7 +331,7 @@ pub fn write(
     // `isLightCorrect()`. Hoisted before the section loop: it also gates the
     // per-section light-array/state-INT emission (see below), not just
     // `isLightOn` and the Starlight tail.
-    let light_correct = chunk.is_light_correct();
+    let light_correct = data.light_correct();
 
     let mut section_tags = ListTag::new();
     // The Starlight loop bounds: min light section = minSection - 1, max light
@@ -324,7 +357,7 @@ pub fn write(
 
         let mut section_tag = CompoundTag::new();
         if let Some(chunk_section) = chunk_section {
-            store_section_containers(&mut section_tag, chunk_section);
+            store_section_containers(&mut section_tag, chunk_section, encode_block, encode_biome);
         }
         // Light arrays and Starlight state INTs are written only for a
         // light-correct chunk. Paper's `copyOf` snapshots both from the live
@@ -399,7 +432,7 @@ pub fn write(
     // reconstruction accepts only FULL chunks, so a reconstructable chunk never
     // reaches this branch — retained for exact parity and guarded by the status
     // so a proto status cannot silently drop them.
-    if data.status().chunk_type() == ChunkType::ProtoChunk {
+    if data.status.chunk_type() == ChunkType::ProtoChunk {
         let mut entity_tags = ListTag::new();
         for entity in data.entities() {
             entity_tags.add(Tag::Compound(entity.clone()));
@@ -426,7 +459,7 @@ pub fn write(
         "Heightmaps".to_string(),
         Tag::Compound(write_heightmaps(chunk_heightmaps(
             chunk,
-            data.status().heightmaps_after(),
+            data.status.heightmaps_after(),
         ))),
     );
 
@@ -451,7 +484,7 @@ pub fn write(
     // (`!isBefore(LIGHT)` is `is_or_after(LIGHT)`). The gate reuses the same
     // chunk light-correct flag the `isLightOn` write used, matching Paper's
     // `this.lightCorrect` in both.
-    if light_correct && data.status().is_or_after(ChunkStatus::Light) {
+    if light_correct && data.status.is_or_after(ChunkStatus::Light) {
         tag.put_boolean("isLightOn", false);
         tag.put_int(STARLIGHT_VERSION_TAG, STARLIGHT_LIGHT_VERSION);
     }
@@ -467,7 +500,7 @@ pub fn write(
 /// reconstruction, and Paper's `LevelChunkTicks.pack` / `ProtoChunkTicks.pack`
 /// preserve pending values unchanged; only live queued runtime ticks are
 /// repacked against the current game time.
-fn save_ticks(tag: &mut CompoundTag, data: &SerializableChunkData) {
+fn save_ticks(tag: &mut CompoundTag, data: &LiveChunkSaveData) {
     // The accessors expose the stored ticks as slices; `CompoundTag::store`
     // encodes through the `Vec`-shaped tick-list codec, so the owned value is
     // collected once per save.
