@@ -82,8 +82,8 @@ def java_seed(seed: str) -> int:
 
 
 def validate_paper_source(source_root: Path) -> None:
-    if source_root.name != "Paper" or len(source_root.parts) < 2 or source_root.parts[-2:] != ("working", "Paper") or not source_root.is_dir() or source_root.is_symlink():
-        raise Failed("Paper source provenance does not identify the pinned working/Paper tree")
+    if source_root.name != "Paper" or not source_root.is_dir() or source_root.is_symlink():
+        raise Failed("Paper source provenance does not identify a real Paper tree")
     revision = subprocess.run(["git", "-C", str(source_root), "rev-parse", "HEAD"], capture_output=True, text=True, check=False)
     if revision.returncode != 0 or revision.stdout.strip() != EXPECTED_PAPER:
         raise Failed("Paper source tree is not at the pinned 26.2 revision")
@@ -420,6 +420,12 @@ def _read_json(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
+def _reject_symlinks_under(root: Path, label: str) -> None:
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            raise Failed(f"{label} contains a symlink: {path}")
+
+
 def _validate_worldgen_settings(run: Path, expected_seed: str, manifest: dict[str, Any]) -> None:
     source = run / "world/dimensions/minecraft/overworld/data/minecraft/world_gen_settings.dat"
     contract_copy = run / "world/data/minecraft/worldgen_settings.dat"
@@ -656,6 +662,7 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
     world = run / "world"
     if world.is_symlink() or not world.is_dir():
         raise Failed("Paper world root is absent or symlinked")
+    _reject_symlinks_under(run, "Paper run root")
     manifest = _read_json(run / "capture.json", "capture manifest")
     if manifest.get("format") != 1 or manifest.get("kind") != contract["kind"] or manifest.get("producer") != PRODUCER:
         raise Failed("wrong producer, kind, or manifest format")
