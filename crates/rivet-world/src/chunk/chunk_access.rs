@@ -257,6 +257,36 @@ where
         self.height_accessor
     }
 
+    /// An owned tick-thread snapshot of this canonical chunk access value.
+    /// Every represented field is copied; no shared game-state handle crosses
+    /// the persistence boundary.
+    pub fn copy(&self) -> ChunkAccess<T, B, S>
+    where
+        T: Clone,
+        B: Clone,
+        S: Clone,
+    {
+        ChunkAccess {
+            pos: self.pos,
+            upgrade_data: self.upgrade_data.copy(),
+            height_accessor: self.height_accessor,
+            sections: self.sections.iter().map(LevelChunkSection::copy).collect(),
+            post_processing: self.post_processing.clone(),
+            block_ticks: self.block_ticks.clone(),
+            fluid_ticks: self.fluid_ticks.clone(),
+            unsaved: self.unsaved,
+            light_correct: self.light_correct,
+            inhabited_time: self.inhabited_time,
+            structure_access: self.structure_access.clone(),
+            pending_block_entities: self.pending_block_entities.clone(),
+            heightmaps: self.heightmaps.clone(),
+            block_nibbles: self.block_nibbles.clone(),
+            sky_nibbles: self.sky_nibbles.clone(),
+            sky_emptiness_map: self.sky_emptiness_map.clone(),
+            resolve: self.resolve,
+        }
+    }
+
     /// `LevelHeightAccessor.getMaxY()`.
     pub fn get_max_y(&self) -> i32 {
         self.height_accessor.get_max_y()

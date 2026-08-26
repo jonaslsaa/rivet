@@ -53,7 +53,7 @@ pub mod section_reconstruction;
 pub mod serializable_chunk_data;
 
 pub use block_entity_materialization::{BlockEntityMaterializeError, materialize_block_entities};
-pub use chunk_nbt_writer::{encode_paletted_container, write};
+pub use chunk_nbt_writer::{encode_paletted_container, write, write_live};
 pub use chunk_reconstruction::{
     ChunkReconstruction, ChunkReconstructionError, ReconstructedLevelChunk,
     reconstruct_runtime_chunk,

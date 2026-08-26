@@ -129,6 +129,21 @@ where
         LevelChunk { base, air }
     }
 
+    /// Copy the canonical runtime chunk into an owned value for persistence.
+    /// The copy includes sections, heightmaps, light, dirty state, inhabited
+    /// time, pending block entities, post-processing, structures, and ticks.
+    pub fn copy(&self) -> Self
+    where
+        T: Clone,
+        B: Clone,
+        S: Clone,
+    {
+        Self {
+            base: self.base.copy(),
+            air: self.air.clone(),
+        }
+    }
+
     /// Value-transform every block state and biome, preserving all other chunk
     /// state (sections, heightmaps, light nibbles, pending block entities,
     /// post-processing, block/fluid ticks, flags). The #516 server bridge uses
@@ -287,7 +302,7 @@ where
     }
 
     /// `ChunkAccess.addPackedPostProcess` during chunk load.
-    pub(crate) fn add_packed_post_process(&mut self, offsets: &[i16], section_index: usize) {
+    pub fn add_packed_post_process(&mut self, offsets: &[i16], section_index: usize) {
         self.base.add_packed_post_process(offsets, section_index);
     }
 

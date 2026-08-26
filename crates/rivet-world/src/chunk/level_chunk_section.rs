@@ -147,6 +147,21 @@ impl<
         }
     }
 
+    /// Copy this section as an owned value, including cached counts and the
+    /// Moonrise ticking-position list.
+    pub fn copy(&self) -> Self {
+        Self {
+            non_empty_block_count: self.non_empty_block_count,
+            fluid_count: self.fluid_count,
+            ticking_block_count: self.ticking_block_count,
+            ticking_fluid_count: self.ticking_fluid_count,
+            states: self.states.copy(),
+            biomes: self.biomes.copy(),
+            special_colliding_blocks: self.special_colliding_blocks,
+            ticking_blocks: self.ticking_blocks.clone(),
+        }
+    }
+
     /// Value-transform the states and biomes containers into `T2`/`B2` with the
     /// target strategies, mapping each palette entry through the caller's
     /// `map_block`/`map_biome` closures — the wire-identical re-encode the #516

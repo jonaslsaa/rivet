@@ -8,8 +8,9 @@
 //! ports only the M1 world object behind the single superflat spawn chunk
 //! (issue #156): the dimension key, the respawn data (`LevelData.RespawnData`),
 //! the height access (minY/height), the sea level, and the `ChunkMap` owner.
-//! The tick method, entity storage, weather/time, game rules, and the full
-//! `Level` base surface are deferred with the owning units.
+//! The tick method, entity storage, weather, game rules, and the full `Level`
+//! base surface are deferred with the owning units. The bounded authoritative
+//! game-time accessor needed for explicit chunk-save `LastUpdate` is included.
 //!
 //! Per OWNERSHIP §Ownership tree the world is tick-thread-owned (the "one
 //! owner: the tick thread" rule): the `ServerLevel` lives on the tick thread
@@ -37,7 +38,11 @@ use rivet_world::level::RespawnData;
 use rivet_world::superflat::{SUPERFLAT_HEIGHT, SUPERFLAT_MIN_Y};
 
 use super::chunk_map::ChunkMap;
+use super::chunk_storage_worker::{
+    ChunkSave, ChunkStorageWorker, StorageWorkerError, StorageWorkerOutcome,
+};
 use super::chunk_tracking_view::ChunkTrackingView;
+use super::level_chunk::LevelChunkSaveError;
 use super::region_backed::{RegionBackedBootError, RegionChunkSource};
 
 /// How the player send path handles a position absent from `ChunkMap`.
@@ -47,6 +52,26 @@ use super::region_backed::{RegionBackedBootError, RegionChunkSource};
 pub enum MissingChunkPolicy {
     RepeatSpawnFixture,
     RequireLoaded,
+}
+
+/// Outcome of one explicit tick-thread normal-save attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NormalSaveResult {
+    /// The canonical chunk was clean and no snapshot or enqueue occurred.
+    SkippedClean,
+    /// An owned snapshot was accepted by the bounded storage worker.
+    Enqueued,
+}
+
+/// Why an explicit normal save did not enqueue its owned request.
+#[derive(Debug, thiserror::Error)]
+pub enum NormalSaveError {
+    #[error("chunk {0:?} is not loaded")]
+    MissingChunk(ChunkPos),
+    #[error(transparent)]
+    Snapshot(#[from] LevelChunkSaveError),
+    #[error("chunk save enqueue was rejected after dirty recovery")]
+    EnqueueRejected(ChunkSave),
 }
 
 /// `Level.OVERWORLD` — `ResourceKey.create(Registries.DIMENSION,
@@ -153,6 +178,9 @@ pub struct ServerLevel {
     simulation_distance: i32,
     missing_chunk_policy: MissingChunkPolicy,
     is_flat: bool,
+    /// Authoritative `ServerLevel.getGameTime()` for current-version chunk
+    /// `LastUpdate`. This is world time, not a future autosave-aging clock.
+    game_time: i64,
     /// The read-only region chunk source (issue #185): `Some` only for the
     /// region-backed boot, which moves its prepared source in after installing
     /// the boot-time view square. The `PlayerChunkLoader` recenter resolves a
@@ -210,6 +238,7 @@ impl ServerLevel {
             simulation_distance: config.simulation_distance,
             missing_chunk_policy: config.missing_chunk_policy,
             is_flat: config.is_flat,
+            game_time: 0,
             region_source: None,
             _confinement: std::marker::PhantomData,
         }
@@ -223,6 +252,18 @@ impl ServerLevel {
     /// `ServerLevel.getSeed()`.
     pub fn seed(&self) -> i64 {
         self.seed
+    }
+
+    /// `ServerLevel.getGameTime()` — the explicit world time used by normal
+    /// chunk save `LastUpdate`. No autosave-aging semantics are attached.
+    pub fn game_time(&self) -> i64 {
+        self.game_time
+    }
+
+    /// Tick-thread setter used by the future authoritative tick driver and by
+    /// focused save tests; it does not advance or coalesce any autosave clock.
+    pub fn set_game_time(&mut self, game_time: i64) {
+        self.game_time = game_time;
     }
 
     /// `LevelHeightAccessor.getMinY()`.
@@ -342,11 +383,65 @@ impl ServerLevel {
         self.chunk_map_mut().install(pos, chunk);
         Ok(())
     }
+
+    /// Perform one explicit normal save on the tick thread.
+    ///
+    /// Paper's ordering is preserved: clean chunks are skipped; the canonical
+    /// `LevelChunk` is snapshotted first; only a successful snapshot then calls
+    /// `tryMarkSaved`; only then is the owned `ChunkSave` handed to the bounded
+    /// worker. If the worker has closed, the owned request is returned and the
+    /// chunk is marked dirty again, so no save is lost. Worker shutdown/drain/
+    /// flush/close/join remains the durability boundary.
+    pub fn save_chunk(
+        &mut self,
+        pos: ChunkPos,
+        worker: &ChunkStorageWorker,
+    ) -> Result<NormalSaveResult, NormalSaveError> {
+        let game_time = self.game_time;
+        let save = {
+            let chunk = self
+                .chunk_map_mut()
+                .get_chunk_mut(pos)
+                .ok_or(NormalSaveError::MissingChunk(pos))?;
+            if !chunk.is_unsaved() {
+                return Ok(NormalSaveResult::SkippedClean);
+            }
+            let tag = chunk.snapshot_for_save(game_time)?;
+            let save = ChunkSave::new(pos, tag);
+            if !chunk.try_mark_saved() {
+                return Ok(NormalSaveResult::SkippedClean);
+            }
+            save
+        };
+
+        match worker.enqueue(save) {
+            Ok(()) => Ok(NormalSaveResult::Enqueued),
+            Err(StorageWorkerError::SendClosed(save)) => {
+                if let Some(chunk) = self.chunk_map_mut().get_chunk_mut(pos) {
+                    chunk.mark_unsaved();
+                }
+                Err(NormalSaveError::EnqueueRejected(save))
+            }
+        }
+    }
+
+    /// Reach the storage worker's graceful durability boundary explicitly.
+    pub fn shutdown_chunk_storage(worker: &mut ChunkStorageWorker) -> StorageWorkerOutcome {
+        worker.shutdown()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rivet_nbt::compound_tag::CompoundTag;
+    use rivet_nbt::tag::Tag;
+    use rivet_world::chunk::status::ChunkStatus;
+    use rivet_world::chunk::storage::serializable_chunk_data::SerializableChunkData;
+    use rivet_world::chunk::storage::{
+        RegionFileStorage, RegionFileVersion, RegionStorageInfo, reconstruct_runtime_chunk,
+    };
+    use rivet_world::level::height_accessor;
 
     fn overworld() -> ServerLevel {
         ServerLevel::new(ServerLevelConfig::default())
@@ -428,6 +523,288 @@ mod tests {
         // `chunk_map_mut` is the tick-thread mutator (`&mut self`).
         let chunk_map = world.chunk_map_mut();
         assert_eq!(chunk_map.get_chunk(ChunkPos::ZERO).unwrap().get_x(), 0);
+    }
+
+    #[test]
+    fn game_time_is_authoritative_save_time_not_an_aging_clock() {
+        let mut world = overworld();
+        assert_eq!(world.game_time(), 0);
+        world.set_game_time(i64::MAX);
+        assert_eq!(world.game_time(), i64::MAX);
+    }
+
+    fn storage_info() -> RegionStorageInfo {
+        RegionStorageInfo::new(
+            "normal-save-test".to_string(),
+            rivet_world::level::overworld(),
+            "region".to_string(),
+            true,
+        )
+    }
+
+    fn start_storage_worker(folder: &std::path::Path) -> ChunkStorageWorker {
+        ChunkStorageWorker::start(
+            storage_info(),
+            folder.to_path_buf(),
+            1,
+            RegionFileVersion::VERSION_NONE,
+        )
+        .expect("storage worker starts")
+    }
+
+    fn block_entity(id: &str, x: i32, y: i32, z: i32) -> CompoundTag {
+        let mut tag = CompoundTag::new();
+        tag.put_string("id", id);
+        tag.put_int("x", x);
+        tag.put_int("y", y);
+        tag.put_int("z", z);
+        tag
+    }
+
+    #[test]
+    fn clean_normal_save_skips_without_enqueue() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut worker = start_storage_worker(temp.path());
+        let mut world = overworld();
+        assert_eq!(
+            world.save_chunk(ChunkPos::ZERO, &worker).unwrap(),
+            NormalSaveResult::SkippedClean
+        );
+        let outcome = ServerLevel::shutdown_chunk_storage(&mut worker);
+        assert!(outcome.first_error.is_none());
+        let mut reader = RegionFileStorage::new_read_only_with_version(
+            storage_info(),
+            temp.path().to_path_buf(),
+            RegionFileVersion::VERSION_NONE,
+        );
+        assert!(reader.read(&ChunkPos::ZERO).unwrap().is_none());
+        reader.close().unwrap();
+    }
+
+    #[test]
+    fn normal_save_roundtrips_canonical_chunk_through_storage_and_reconstruction() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut worker = start_storage_worker(temp.path());
+        let mut world = overworld();
+        world.set_game_time(17_001);
+        let pos = ChunkPos::ZERO;
+        {
+            let chunk = world.chunk_map_mut().get_chunk_mut(pos).unwrap();
+            chunk.set_inhabited_time(731);
+            chunk.set_light_correct(true);
+            chunk.add_packed_post_process(&[0x0523], 4);
+            chunk.set_block_entity_nbt(block_entity("minecraft:chest", 1, -63, 1));
+            chunk.set_all_references(vec![(
+                rivet_registry::Identifier::parse("minecraft:village"),
+                vec![pos.pack() as u64],
+            )]);
+            chunk.mark_unsaved();
+        }
+
+        assert_eq!(
+            world.save_chunk(pos, &worker).unwrap(),
+            NormalSaveResult::Enqueued
+        );
+        assert!(!world.chunk_map().get_chunk(pos).unwrap().is_unsaved());
+        // Pending live tags remain the authority and are not mutated by the
+        // save-time `keepPacked=true` copy.
+        assert!(
+            world
+                .chunk_map()
+                .get_chunk(pos)
+                .unwrap()
+                .pending_block_entities()
+                .values()
+                .next()
+                .unwrap()
+                .get_boolean("keepPacked")
+                .is_none()
+        );
+        // The queued ChunkSave owns its NBT. A later live mutation cannot alter
+        // the request already accepted by the worker.
+        {
+            let chunk = world.chunk_map_mut().get_chunk_mut(pos).unwrap();
+            chunk.set_block_entity_nbt(block_entity("minecraft:furnace", 1, -63, 1));
+            chunk.mark_unsaved();
+        }
+        let outcome = ServerLevel::shutdown_chunk_storage(&mut worker);
+        assert!(!outcome.panicked);
+        assert!(outcome.first_error.is_none());
+
+        let mut reader = RegionFileStorage::new_read_only_with_version(
+            storage_info(),
+            temp.path().to_path_buf(),
+            RegionFileVersion::VERSION_NONE,
+        );
+        let root = reader
+            .read(&pos)
+            .unwrap()
+            .expect("accepted normal save is durable after graceful shutdown");
+        assert_eq!(root.get_long("LastUpdate"), Some(17_001));
+        assert_eq!(root.get_long("InhabitedTime"), Some(731));
+        assert_eq!(
+            root.get_string("Status").map(String::as_str),
+            Some("minecraft:full")
+        );
+        assert_eq!(root.get_boolean("isLightOn"), Some(false));
+        assert_eq!(root.get_int("starlight.light_version"), Some(10));
+        let structures = root
+            .get_compound("structures")
+            .expect("structures compound");
+        assert!(structures.get_compound("starts").is_some());
+        assert!(structures.get_compound("References").is_some());
+        assert_eq!(
+            structures
+                .get_compound("References")
+                .unwrap()
+                .get_long_array("minecraft:village"),
+            Some(&vec![pos.pack()])
+        );
+        let Tag::List(block_entities) = root.get("block_entities").unwrap() else {
+            panic!("block_entities must be a list");
+        };
+        let Tag::Compound(saved_entity) = &block_entities.list[0] else {
+            panic!("saved block entity must be a compound");
+        };
+        assert_eq!(saved_entity.get_boolean("keepPacked"), Some(true));
+
+        let accessor = height_accessor::create(-64, 384);
+        let parsed = SerializableChunkData::parse(accessor, &root)
+            .unwrap()
+            .expect("saved FULL chunk carries a status");
+        assert_eq!(parsed.status(), ChunkStatus::Full);
+        assert_eq!(parsed.inhabited_time(), 731);
+        assert!(parsed.validate_full_for_reconstruction().is_ok());
+        let reconstruction = reconstruct_runtime_chunk(pos, parsed, accessor, true)
+            .expect("saved FULL chunk reconstructs without generation or fallback");
+        assert_eq!(
+            reconstruction.chunk.get_persisted_status(),
+            ChunkStatus::Full
+        );
+        assert_eq!(
+            reconstruction
+                .chunk
+                .get_block_state(0, -64, 0)
+                .block()
+                .name(),
+            "minecraft:stone"
+        );
+        assert_eq!(reconstruction.chunk.pending_block_entities().len(), 1);
+        assert_eq!(
+            reconstruction
+                .chunk
+                .pending_block_entities()
+                .values()
+                .next()
+                .and_then(|tag| tag.get_string("id"))
+                .map(String::as_str),
+            Some("minecraft:chest")
+        );
+        // `install_lights` may dirty a reloaded chunk while restoring the
+        // represented light state. That is not a generation/fallback signal;
+        // Status, terrain, and metadata above came from the saved payload.
+        assert!(!reconstruction.chunk.get_sections().is_empty());
+        reader.close().unwrap();
+    }
+
+    #[test]
+    fn rejected_normal_save_returns_owned_request_and_keeps_chunk_dirty() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut worker = start_storage_worker(temp.path());
+        let mut world = overworld();
+        world.set_game_time(99);
+        world
+            .chunk_map_mut()
+            .get_chunk_mut(ChunkPos::ZERO)
+            .unwrap()
+            .mark_unsaved();
+        worker.shutdown();
+
+        let error = world
+            .save_chunk(ChunkPos::ZERO, &worker)
+            .expect_err("closed worker rejects without dropping the request");
+        let NormalSaveError::EnqueueRejected(save) = error else {
+            panic!("expected owned enqueue rejection");
+        };
+        assert_eq!(save.pos, ChunkPos::ZERO);
+        assert_eq!(save.tag.get_long("LastUpdate"), Some(99));
+        assert!(
+            world
+                .chunk_map()
+                .get_chunk(ChunkPos::ZERO)
+                .unwrap()
+                .is_unsaved()
+        );
+    }
+
+    #[test]
+    fn tampered_saved_status_is_rejected_without_generation_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut worker = start_storage_worker(temp.path());
+        let mut world = overworld();
+        world
+            .chunk_map_mut()
+            .get_chunk_mut(ChunkPos::ZERO)
+            .unwrap()
+            .mark_unsaved();
+        world.save_chunk(ChunkPos::ZERO, &worker).unwrap();
+        worker.shutdown();
+        let mut reader = RegionFileStorage::new_read_only_with_version(
+            storage_info(),
+            temp.path().to_path_buf(),
+            RegionFileVersion::VERSION_NONE,
+        );
+        let mut root = reader.read(&ChunkPos::ZERO).unwrap().unwrap();
+        root.put_string("Status", "minecraft:noise");
+        let parsed = SerializableChunkData::parse(height_accessor::create(-64, 384), &root)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            parsed.validate_full_for_reconstruction(),
+            Err(rivet_world::chunk::storage::serializable_chunk_data::SerializableChunkDataError::UnsupportedChunkStatus {
+                status: ChunkStatus::Noise
+            })
+        ));
+        reader.close().unwrap();
+    }
+
+    #[test]
+    fn corrupt_saved_light_payload_is_rejected_without_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut worker = start_storage_worker(temp.path());
+        let mut world = overworld();
+        world
+            .chunk_map_mut()
+            .get_chunk_mut(ChunkPos::ZERO)
+            .unwrap()
+            .mark_unsaved();
+        world.save_chunk(ChunkPos::ZERO, &worker).unwrap();
+        worker.shutdown();
+
+        let mut reader = RegionFileStorage::new_read_only_with_version(
+            storage_info(),
+            temp.path().to_path_buf(),
+            RegionFileVersion::VERSION_NONE,
+        );
+        let mut root = reader.read(&ChunkPos::ZERO).unwrap().unwrap();
+        let sections = root.get_list_or_empty_mut("sections");
+        let Tag::Compound(section) = &mut sections.list[0] else {
+            panic!("saved section must be a compound");
+        };
+        section.put_byte_array("BlockLight", vec![0; 1]);
+        let accessor = height_accessor::create(-64, 384);
+        let parsed = SerializableChunkData::parse(accessor, &root)
+            .unwrap()
+            .unwrap();
+        let error = match reconstruct_runtime_chunk(ChunkPos::ZERO, parsed, accessor, true) {
+            Ok(_) => panic!("malformed light must not silently regenerate or fallback"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            rivet_world::chunk::storage::ChunkReconstructionError::SectionPanic(_)
+        ));
+        reader.close().unwrap();
     }
 
     #[test]

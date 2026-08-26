@@ -370,6 +370,132 @@ pub enum SerializableChunkDataError {
     HeightAccessorSectionCountMismatch { parsed: usize, construction: usize },
 }
 
+/// Owned fields captured from a canonical runtime chunk for Paper's normal
+/// `SerializableChunkData.copyOf` save path.
+///
+/// Sections, heightmaps, and light nibbles remain on the caller's owned
+/// runtime chunk and are passed to [`crate::chunk::storage::chunk_nbt_writer::write_live`].
+/// Everything here is an owned value crossing the tick-thread/worker boundary
+/// only after the writer has produced the final `CompoundTag`.
+#[derive(Clone)]
+pub struct LiveChunkSaveData {
+    pub(crate) min_section_y: i32,
+    pub(crate) inhabited_time: i64,
+    pub(crate) status: ChunkStatus,
+    pub(crate) upgrade_data: UpgradeData,
+    pub(crate) light_correct: bool,
+    pub(crate) below_zero_retrogen: Option<CompoundTag>,
+    pub(crate) carving_mask: Option<Vec<i64>>,
+    pub(crate) entities: Vec<CompoundTag>,
+    pub(crate) block_entities: Vec<CompoundTag>,
+    pub(crate) structure_data: CompoundTag,
+    pub(crate) persistent_data_container: Option<Tag>,
+    pub(crate) stored_block_ticks: Vec<SavedTick<Block>>,
+    pub(crate) stored_fluid_ticks: Vec<SavedTick<FluidId>>,
+    pub(crate) post_processing_sections: Vec<Option<Vec<i16>>>,
+}
+
+impl LiveChunkSaveData {
+    /// Construct the FULL save fields from an already-canonical runtime chunk.
+    /// The proto-only fields intentionally remain absent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_full_runtime(
+        min_section_y: i32,
+        inhabited_time: i64,
+        upgrade_data: UpgradeData,
+        light_correct: bool,
+        block_entities: Vec<CompoundTag>,
+        structure_data: CompoundTag,
+        stored_block_ticks: Vec<SavedTick<Block>>,
+        stored_fluid_ticks: Vec<SavedTick<FluidId>>,
+        post_processing_sections: Vec<Option<Vec<i16>>>,
+    ) -> Self {
+        Self {
+            min_section_y,
+            inhabited_time,
+            status: ChunkStatus::Full,
+            upgrade_data,
+            light_correct,
+            below_zero_retrogen: None,
+            carving_mask: None,
+            entities: Vec::new(),
+            block_entities,
+            structure_data,
+            persistent_data_container: None,
+            stored_block_ticks,
+            stored_fluid_ticks,
+            post_processing_sections,
+        }
+    }
+
+    /// Capture the auxiliary fields from parsed data while retaining the same
+    /// omission inputs the current-version writer already consumes.
+    pub fn from_serializable(data: &SerializableChunkData) -> Self {
+        Self {
+            min_section_y: data.min_section_y,
+            inhabited_time: data.inhabited_time,
+            status: data.status,
+            upgrade_data: data.upgrade_data.copy(),
+            light_correct: data.light_correct,
+            below_zero_retrogen: data
+                .effective_below_zero_retrogen
+                .then(|| data.raw_below_zero_retrogen.clone())
+                .flatten(),
+            carving_mask: data.carving_mask.clone(),
+            entities: data.entities.clone(),
+            block_entities: data.block_entities.clone(),
+            structure_data: data.structure_data.clone(),
+            persistent_data_container: data.persistent_data_container.clone(),
+            stored_block_ticks: data.stored_block_ticks.clone(),
+            stored_fluid_ticks: data.stored_fluid_ticks.clone(),
+            post_processing_sections: data.post_processing_sections.clone(),
+        }
+    }
+
+    pub fn min_section_y(&self) -> i32 {
+        self.min_section_y
+    }
+    pub fn inhabited_time(&self) -> i64 {
+        self.inhabited_time
+    }
+    pub fn status(&self) -> ChunkStatus {
+        self.status
+    }
+    pub fn upgrade_data(&self) -> &UpgradeData {
+        &self.upgrade_data
+    }
+    pub fn light_correct(&self) -> bool {
+        self.light_correct
+    }
+    pub fn raw_below_zero_retrogen(&self) -> Option<&CompoundTag> {
+        self.below_zero_retrogen.as_ref()
+    }
+    pub fn entities(&self) -> &[CompoundTag] {
+        &self.entities
+    }
+    pub fn carving_mask(&self) -> Option<&[i64]> {
+        self.carving_mask.as_deref()
+    }
+    pub fn block_entities(&self) -> &[CompoundTag] {
+        &self.block_entities
+    }
+    pub fn structure_data(&self) -> &CompoundTag {
+        &self.structure_data
+    }
+    pub fn persistent_data_container(&self) -> Option<&Tag> {
+        self.persistent_data_container.as_ref()
+    }
+    pub fn stored_block_ticks(&self) -> &[SavedTick<Block>] {
+        &self.stored_block_ticks
+    }
+    pub fn stored_fluid_ticks(&self) -> &[SavedTick<FluidId>] {
+        &self.stored_fluid_ticks
+    }
+    pub fn post_processing_sections(&self) -> &[Option<Vec<i16>>] {
+        &self.post_processing_sections
+    }
+}
+
 /// The current-version, top-level extraction result from Paper's
 /// `SerializableChunkData.parse`. Section palette decoding remains at the
 /// explicit `section_tags` seam until #336 lands.
