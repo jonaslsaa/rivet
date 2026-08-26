@@ -2480,7 +2480,7 @@ fn is_valid_spawn_floor(state: BlockState, entity_type: &str) -> bool {
     // property set and by firefly bush. It is entity-specific rather than a
     // general leaves rule.
     if matches!(entity_type, "minecraft:ocelot" | "minecraft:parrot")
-        && state.is_in_tag("minecraft:leaves")
+        && (state.is_in_tag("minecraft:leaves") || name == "minecraft:firefly_bush")
     {
         return true;
     }
@@ -2624,34 +2624,33 @@ fn spawn_collision_shape(
     // full-cube fallback. Powder snow is empty for CollisionContext.empty(),
     // but a walkable mob standing above it sees the full collision cube in
     // Mob.checkSpawnObstruction's entity context.
-    let dynamic_shape =
-        match name {
-            "minecraft:powder_snow" => Some(match context {
-                SpawnCollisionContext::Entity {
-                    entity_type,
-                    entity_min_y,
-                } if matches!(entity_type, "minecraft:rabbit" | "minecraft:fox")
-                    && entity_min_y > pos.get_y() as f64 + 1.0 - 1.0e-5 =>
-                {
-                    SpawnCollisionShape::Full
-                }
-                _ => SpawnCollisionShape::Empty,
-            }),
-            "minecraft:moving_piston" => Some(SpawnCollisionShape::Empty),
-            name if name.ends_with("shulker_box") => Some(SpawnCollisionShape::Full),
-            "minecraft:bamboo" => Some(SpawnCollisionShape::Box(
-                SpawnShapeBox::new(6.5 / 16.0, 0.0, 6.5 / 16.0, 9.5 / 16.0, 1.0, 9.5 / 16.0)
-                    .translated(block_offset(pos).0, 0.0, block_offset(pos).1),
-            )),
-            "minecraft:scaffolding" => {
-                let stable = [
-                    SpawnShapeBox::new(0.0, 14.0 / 16.0, 0.0, 1.0, 1.0, 1.0),
-                    SpawnShapeBox::new(0.0, 0.0, 0.0, 2.0 / 16.0, 1.0, 2.0 / 16.0),
-                    SpawnShapeBox::new(14.0 / 16.0, 0.0, 0.0, 1.0, 1.0, 2.0 / 16.0),
-                    SpawnShapeBox::new(0.0, 0.0, 14.0 / 16.0, 2.0 / 16.0, 1.0, 1.0),
-                    SpawnShapeBox::new(14.0 / 16.0, 0.0, 14.0 / 16.0, 1.0, 1.0, 1.0),
-                ];
-                let entity_shape = match context {
+    let dynamic_shape = match name {
+        "minecraft:powder_snow" => Some(match context {
+            SpawnCollisionContext::Entity {
+                entity_type,
+                entity_min_y,
+            } if matches!(entity_type, "minecraft:rabbit" | "minecraft:fox")
+                && entity_min_y > pos.get_y() as f64 + 1.0 - 1.0e-5 =>
+            {
+                SpawnCollisionShape::Full
+            }
+            _ => SpawnCollisionShape::Empty,
+        }),
+        "minecraft:moving_piston" => Some(SpawnCollisionShape::Empty),
+        name if name.ends_with("shulker_box") => Some(SpawnCollisionShape::Full),
+        "minecraft:bamboo" => Some(SpawnCollisionShape::Box(
+            SpawnShapeBox::new(6.5 / 16.0, 0.0, 6.5 / 16.0, 9.5 / 16.0, 1.0, 9.5 / 16.0)
+                .translated(block_offset(pos).0, 0.0, block_offset(pos).1),
+        )),
+        "minecraft:scaffolding" => {
+            let stable = [
+                SpawnShapeBox::new(0.0, 14.0 / 16.0, 0.0, 1.0, 1.0, 1.0),
+                SpawnShapeBox::new(0.0, 0.0, 0.0, 2.0 / 16.0, 1.0, 2.0 / 16.0),
+                SpawnShapeBox::new(14.0 / 16.0, 0.0, 0.0, 1.0, 1.0, 2.0 / 16.0),
+                SpawnShapeBox::new(0.0, 0.0, 14.0 / 16.0, 2.0 / 16.0, 1.0, 1.0),
+                SpawnShapeBox::new(14.0 / 16.0, 0.0, 14.0 / 16.0, 1.0, 1.0, 1.0),
+            ];
+            let entity_shape = match context {
                 SpawnCollisionContext::Empty => SpawnCollisionShape::Multi(stable),
                 SpawnCollisionContext::Entity { entity_min_y, .. }
                     if entity_min_y > pos.get_y() as f64 + 1.0 - 1.0e-5 =>
@@ -2680,14 +2679,14 @@ fn spawn_collision_shape(
                 }
                 SpawnCollisionContext::Entity { .. } => SpawnCollisionShape::Empty,
             };
-                Some(entity_shape)
-            }
-            "minecraft:pointed_dripstone" | "minecraft:sulfur_spike" => {
-                Some(speleothem_collision_shape(state, pos)?)
-            }
-            _ if state.has_dynamic_shape() => None,
-            _ => None,
-        };
+            Some(entity_shape)
+        }
+        "minecraft:pointed_dripstone" | "minecraft:sulfur_spike" => {
+            Some(speleothem_collision_shape(state, pos)?)
+        }
+        _ if state.has_dynamic_shape() => None,
+        _ => None,
+    };
     if dynamic_shape.is_some() {
         return dynamic_shape;
     }
@@ -5732,9 +5731,23 @@ mod tests {
             )
             .is_some_and(|shape| shape.intersects(0, 0, 0, &inside_scaffolding))
         );
+        // The context's entity is above SHAPE_BELOW_BLOCK, so the selected
+        // shape is the two-pixel lower plate; it is below the entity AABB and
+        // therefore does not itself intersect it.
+        assert!(matches!(
+            spawn_collision_shape(
+                unstable_scaffolding,
+                &pos,
+                SpawnCollisionContext::Entity {
+                    entity_type: "minecraft:cow",
+                    entity_min_y: 0.2,
+                }
+            ),
+            Some(SpawnCollisionShape::Box(_))
+        ));
         let above_unstable_scaffolding = SpawnAabb::new(0.4, 0.2, 0.4, 0.6, 0.3, 0.6);
         assert!(
-            spawn_collision_shape(
+            !spawn_collision_shape(
                 unstable_scaffolding,
                 &pos,
                 SpawnCollisionContext::Entity {
