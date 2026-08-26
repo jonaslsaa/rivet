@@ -394,6 +394,16 @@ def toolchain(source: Path) -> tuple[Path, dict[str, str]]:
     release_match = re.search(r'version "([^"]+)', version_text)
     if version.returncode != 0 or major_match is None or release_match is None or int(major_match.group(1)) != JAVA_MAJOR or "Temurin" not in version_text:
         raise Unverified("JAVA_HOME is not explicit Temurin 25")
+    if not source.is_absolute() or source != source.resolve() or not source.is_dir() or source.is_symlink():
+        raise Unverified("Paper source must be a canonical checkout directory")
+    top_level = subprocess.run(
+        ["git", "-C", str(source), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if top_level.returncode != 0 or Path(top_level.stdout.strip()).resolve() != source:
+        raise Unverified("Paper source override is not the canonical checkout root")
     source_rev = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"], capture_output=True, text=True, check=False)
     if source_rev.returncode != 0 or source_rev.stdout.strip() != PAPER_REVISION:
         raise Unverified(f"Paper source is not pinned to {PAPER_REVISION}")

@@ -319,23 +319,47 @@ def _heightmaps(root: Tag, coordinate: tuple[int, int], *, target: bool) -> tupl
     return decoded, list(required)
 
 
-def _block_state_data_words(palette_size: int) -> int:
-    """Return the exact on-disk long-array length for a block-state palette.
+def _packed_bits(palette_size: int, *, biome: bool) -> int:
+    if palette_size <= 0:
+        raise Failed("paletted container has an empty palette")
+    if palette_size == 1:
+        return 0
+    minimum = 1 if biome else 4
+    return max(minimum, (palette_size - 1).bit_length())
 
-    Paper's block-state PalettedContainer uses zero-bit storage for a palette
-    with at most one entry, four bits through sixteen entries, eight bits
-    through 256 entries, and the global ceil(log2(size)) configuration above
-    that.  The storage has 4096 entries and is packed into 64-bit words.
-    """
-    if palette_size <= 1:
-        bits = 0
-    elif palette_size <= 16:
-        bits = 4
-    elif palette_size <= 256:
-        bits = 8
-    else:
-        bits = (palette_size - 1).bit_length()
-    return (4096 * bits + 63) // 64
+
+def _packed_words(entry_count: int, bits: int) -> int:
+    return (entry_count * bits + 63) // 64
+
+
+def _decode_packed_values(
+    data: Tag | None,
+    *,
+    palette_size: int,
+    entry_count: int,
+    biome: bool,
+    label: str,
+) -> None:
+    bits = _packed_bits(palette_size, biome=biome)
+    expected_words = _packed_words(entry_count, bits)
+    if bits == 0:
+        if data is not None:
+            raise Failed(f"{label} zero-bit container must omit data")
+        return
+    if data is None or data.kind != 12 or len(data.value) != expected_words:
+        raise Failed(f"{label} has the wrong packed data shape")
+    mask = (1 << bits) - 1
+    words = [value & ((1 << 64) - 1) for value in data.value]
+    for index in range(entry_count):
+        bit = index * bits
+        word = bit // 64
+        shift = bit % 64
+        value = (words[word] >> shift) & mask
+        spill = shift + bits - 64
+        if spill > 0:
+            value |= (words[word + 1] & ((1 << spill) - 1)) << (bits - spill)
+        if value >= palette_size:
+            raise Failed(f"{label} packed index {value} at {index} exceeds palette size {palette_size}")
 
 
 def _block_palette_names(root: Tag, coordinate: tuple[int, int], *, target: bool) -> set[str]:
@@ -351,10 +375,7 @@ def _block_palette_names(root: Tag, coordinate: tuple[int, int], *, target: bool
             raise Failed(f"{coordinate} section list contains non-compounds")
         states = section.value.get("block_states")
         if states is None:
-            # Paper creates the default AIR container when block_states is
-            # absent.  Absence is valid; a present malformed codec payload is
-            # not.
-            continue
+            raise Failed(f"{coordinate} section has no block_states codec")
         if states.kind != 10:
             raise Failed(f"{coordinate} block_states is not a compound")
         palette = states.value.get("palette")
@@ -364,11 +385,13 @@ def _block_palette_names(root: Tag, coordinate: tuple[int, int], *, target: bool
         if palette_kind != 10 or not isinstance(palette_items, list):
             raise Failed(f"{coordinate} block_states palette is not a compound list")
         data = states.value.get("data")
-        if data is not None and data.kind != 12:
-            raise Failed(f"{coordinate} block_states data is not a long array")
-        expected_words = _block_state_data_words(len(palette_items))
-        if expected_words and (data is None or len(data.value) != expected_words):
-            raise Failed(f"{coordinate} block_states data is missing or has the wrong packed length")
+        _decode_packed_values(
+            data,
+            palette_size=len(palette_items),
+            entry_count=4096,
+            biome=False,
+            label=f"{coordinate} block_states",
+        )
         for entry in palette_items:
             if entry.kind != 10:
                 raise Failed(f"{coordinate} block_states palette contains a non-compound")
@@ -376,6 +399,30 @@ def _block_palette_names(root: Tag, coordinate: tuple[int, int], *, target: bool
             if name is None or name.kind != 8:
                 raise Failed(f"{coordinate} block_states palette entry has no string Name")
             names.add(name.value)
+
+        biomes = section.value.get("biomes")
+        if biomes is None or biomes.kind != 10:
+            raise Failed(f"{coordinate} section has no biomes codec")
+        biome_palette = biomes.value.get("palette")
+        if (
+            biome_palette is None
+            or biome_palette.kind != 9
+            or not isinstance(biome_palette.value, tuple)
+            or len(biome_palette.value) != 2
+        ):
+            raise Failed(f"{coordinate} biomes palette is absent or malformed")
+        biome_kind, biome_items = biome_palette.value
+        if biome_kind != 8 or not isinstance(biome_items, list):
+            raise Failed(f"{coordinate} biomes palette is not a string list")
+        _decode_packed_values(
+            biomes.value.get("data"),
+            palette_size=len(biome_items),
+            entry_count=64,
+            biome=True,
+            label=f"{coordinate} biomes",
+        )
+        if any(not isinstance(item.value, str) for item in biome_items):
+            raise Failed(f"{coordinate} biomes palette contains a malformed entry")
     if target and len(names) < 6:
         raise Failed(f"{coordinate} has a flat/under-varied block palette")
     return names
@@ -418,6 +465,26 @@ def validate_chunk(raw: bytes, coordinate: tuple[int, int], *, target: bool) -> 
         "semantic_sha256": semantic,
     }
     return status, semantic, details
+
+
+def world_tree_signature(world: Path) -> str:
+    rows: list[str] = []
+    for path in sorted(world.rglob("*")):
+        if path.is_symlink():
+            raise Failed(f"Paper world tree contains a symlink: {path}")
+        if path.is_file():
+            before = path.stat()
+            data = path.read_bytes()
+            after = path.stat()
+            before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            if before_identity != after_identity:
+                raise Failed(f"Paper world file changed while validating: {path}")
+            rows.append(
+                f"{path.relative_to(world)}\\0{before.st_dev}\\0{before.st_ino}\\0{before.st_size}"
+                f"\\0{before.st_mtime_ns}\\0{sha256(data)}"
+            )
+    return sha256("\\n".join(rows).encode())
 
 
 def inventory_paths(world: Path) -> set[str]:
@@ -918,6 +985,8 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
     extraction = manifest.get("extraction", {})
     if extraction.get("post_exit_read_only") is not True or extraction.get("started_ns", 0) < capture.get("ended_ns", 1) or extraction.get("world_signature_before") != extraction.get("world_signature_after"):
         raise Failed("extraction was not post-exit/read-only")
+    if world_tree_signature(world) != extraction.get("world_signature_after"):
+        raise Failed("Paper world content or stable file identities changed after extraction")
     chunks = manifest.get("chunks")
     if not isinstance(chunks, list) or [(item.get("x"), item.get("z")) for item in chunks] != expected_closure:
         raise Failed("chunk evidence does not cover exact closure in order")

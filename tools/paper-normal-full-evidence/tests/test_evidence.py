@@ -30,6 +30,21 @@ def packed_heightmap(offset: int) -> list[int]:
     return words
 
 
+def packed_values(values: list[int], bits: int) -> list[int]:
+    words = [0] * ((len(values) * bits + 63) // 64)
+    mask = (1 << bits) - 1
+    for index, value in enumerate(values):
+        bit = index * bits
+        word = bit // 64
+        shift = bit % 64
+        packed = value & mask
+        low_bits = min(bits, 64 - shift)
+        words[word] |= (packed & ((1 << low_bits) - 1)) << shift
+        if shift + bits > 64:
+            words[word + 1] |= packed >> (64 - shift)
+    return [word - (1 << 64) if word >= (1 << 63) else word for word in words]
+
+
 def valid_chunk(
     status: str = "minecraft:full",
     light: bool = True,
@@ -42,7 +57,10 @@ def valid_chunk(
     states = {"palette": palette}
     if block_data:
         states["data"] = Tag(12, [0] * 256)
-    section = Tag(10, {"block_states": Tag(10, states)})
+    biomes = Tag(10, {
+        "palette": Tag(9, (8, [Tag(8, "minecraft:plains")])),
+    })
+    section = Tag(10, {"block_states": Tag(10, states), "biomes": biomes})
     offsets = (0, 0, 0) if flat_heightmaps else (0, 1, 2)
     heightmaps = {
         "WORLD_SURFACE": Tag(12, packed_heightmap(offsets[0])[:height_len]),
@@ -141,6 +159,49 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(capture.chunk_details(valid_chunk(), (0, 0), target=False)["status"], "minecraft:full")
         self.assertEqual(validate.validate_chunk(valid_chunk(flat_heightmaps=True), (0, 0), target=True)[0], "minecraft:full")
 
+    def test_paletted_container_width_boundaries_and_index_rejection(self):
+        for palette_size in (1, 2, 16, 17, 256, 257):
+            bits = validate._packed_bits(palette_size, biome=False)
+            expected_bits = 0 if palette_size == 1 else max(4, (palette_size - 1).bit_length())
+            self.assertEqual(bits, expected_bits)
+            root = parse(valid_chunk())
+            states = root.value["sections"].value[1][0].value["block_states"]
+            entries = [Tag(10, {"Name": Tag(8, f"minecraft:test_{index}")}) for index in range(palette_size)]
+            states.value["palette"] = Tag(9, (10, entries))
+            if palette_size == 1:
+                states.value.pop("data", None)
+            else:
+                states.value["data"] = Tag(12, packed_values([palette_size - 1] * 4096, bits))
+            validate.validate_chunk(encode(root), (0, 0), target=False)
+
+        root = parse(valid_chunk())
+        states = root.value["sections"].value[1][0].value["block_states"]
+        states.value["palette"] = Tag(9, (10, [Tag(10, {"Name": Tag(8, "minecraft:a")})] * 3))
+        states.value["data"] = Tag(12, packed_values([3] + [0] * 4095, 4))
+        with self.assertRaises(validate.Failed):
+            validate.validate_chunk(encode(root), (0, 0), target=False)
+
+    def test_biome_container_width_boundaries_and_index_rejection(self):
+        for palette_size in (1, 2, 4, 5, 8, 9):
+            bits = validate._packed_bits(palette_size, biome=True)
+            expected_bits = 0 if palette_size == 1 else (palette_size - 1).bit_length()
+            self.assertEqual(bits, expected_bits)
+            root = parse(valid_chunk())
+            biomes = root.value["sections"].value[1][0].value["biomes"]
+            biomes.value["palette"] = Tag(9, (8, [Tag(8, f"minecraft:test_{index}") for index in range(palette_size)]))
+            if palette_size == 1:
+                biomes.value.pop("data", None)
+            else:
+                biomes.value["data"] = Tag(12, packed_values([palette_size - 1] * 64, bits))
+            validate.validate_chunk(encode(root), (0, 0), target=False)
+
+        root = parse(valid_chunk())
+        biomes = root.value["sections"].value[1][0].value["biomes"]
+        biomes.value["palette"] = Tag(9, (8, [Tag(8, "minecraft:a")] * 3))
+        biomes.value["data"] = Tag(12, packed_values([3] + [0] * 63, 2))
+        with self.assertRaises(validate.Failed):
+            validate.validate_chunk(encode(root), (0, 0), target=False)
+
     def test_negative_chunk_evidence_cases(self):
         with self.assertRaises(validate.Failed):
             validate.validate_chunk(valid_chunk(status="minecraft:biomes"), (0, 0), target=True)
@@ -209,6 +270,7 @@ class EvidenceTests(unittest.TestCase):
             path.write_bytes(b"mutated!")
             os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
             self.assertNotEqual(before, capture.world_tree_signature(world))
+            self.assertNotEqual(before, validate.world_tree_signature(world))
 
     def test_stable_paperclip_artifact_rejects_replacement(self):
         with tempfile.TemporaryDirectory() as directory:
