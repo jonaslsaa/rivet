@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 
 use rivet_registry::block_state::BlockState;
 use rivet_registry::core::ChunkPos;
+use rivet_world::chunk::paletted_container_factory::PalettedContainerFactory;
 use rivet_world::chunk::status::ChunkStatus;
 use rivet_world::chunk::storage::region_file_storage::{
     RegionFileStorage, get_region_file_coordinates,
@@ -67,6 +68,7 @@ const BELOW_BEDROCK_Y: i32 = -61;
 
 /// One chunk's ground-truth fingerprint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChunkFingerprint {
     /// The chunk's `Status` serialization name (e.g. `minecraft:full`).
     pub status: String,
@@ -101,6 +103,7 @@ pub struct ChunkFingerprint {
 
 /// The deterministic ground-truth manifest for one disposable world copy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorldManifest {
     /// A stable manifest-format marker.
     pub format: u32,
@@ -110,6 +113,29 @@ pub struct WorldManifest {
     /// Per-chunk fingerprints keyed by `"<x>,<z>"`.
     pub chunks: BTreeMap<String, ChunkFingerprint>,
 }
+
+/// One observed occurrence of a feature-palette block inside a chunk. The
+/// seed-42 FEATURES oracle pins the presence of `magma_block` (UnderwaterMagma
+/// Feature) and `glow_lichen` (MultifaceGrowthFeature) positionally — the block
+/// name, the column (`z*16+x`) it sits in, and the absolute world Y — so a
+/// future Rivet FEATURES port is checked against Paper ground truth rather than
+/// against nothing. `index` is the 16×16 row-major column (`z*16+x`), matching
+/// the `surface`/`bedrock`/`below_feet` sample contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FeatureObservation {
+    /// The allowlisted feature block (`minecraft:magma_block` /
+    /// `minecraft:glow_lichen`).
+    pub block: String,
+    /// The column `z*16+x` (0..=255) the block was observed in.
+    pub index: usize,
+    /// The absolute world Y of the observed block.
+    pub y: i32,
+}
+
+/// The feature-block allowlist the FEATURES oracle observes positionally.
+pub(crate) const FEATURE_OBSERVATION_BLOCKS: &[&str] =
+    &["minecraft:magma_block", "minecraft:glow_lichen"];
 
 /// Why a read-only world extraction failed. `Unverified` is a missing
 /// prerequisite (no overworld region layout / no region files) — the harness
@@ -190,6 +216,48 @@ pub(crate) fn section_predicates() -> SectionBlockPredicates {
 /// than fabricating a green.
 pub fn extract_world(root: &Path) -> Result<WorldManifest, ExtractError> {
     let region_dir = overworld_region_dir(root);
+    let mut chunks = BTreeMap::new();
+    visit_region_chunks(
+        root,
+        &mut |pos: &ChunkPos,
+              data: &SerializableChunkData,
+              height: &SimpleLevelHeightAccessor,
+              factory: &PalettedContainerFactory<BlockState, BiomeId>,
+              predicates: &SectionBlockPredicates| {
+            let fingerprint = fingerprint_chunk(data, factory, predicates, height)?;
+            chunks.insert(format!("{},{}", pos.x(), pos.z()), fingerprint);
+            Ok(())
+        },
+    )?;
+    Ok(WorldManifest {
+        format: 1,
+        overworld_region: region_dir
+            .strip_prefix(root)
+            .unwrap_or(&region_dir)
+            .to_string_lossy()
+            .into_owned(),
+        chunks,
+    })
+}
+
+/// Walk every allocated overworld region chunk of a disposable world copy,
+/// invoking `body` with the parsed `SerializableChunkData` (and the height /
+/// container-factory / predicates it needs to reconstruct sections). Shared by
+/// `extract_world` (the per-chunk fingerprint) and
+/// `extract_feature_observations` (the feature-palette positions) so both read
+/// the same region files the same way. Returns `ExtractError::Unverified` when
+/// the overworld region layout is absent, never a fabricated green.
+fn visit_region_chunks<F>(root: &Path, mut body: F) -> Result<(), ExtractError>
+where
+    F: FnMut(
+        &ChunkPos,
+        &SerializableChunkData,
+        &SimpleLevelHeightAccessor,
+        &PalettedContainerFactory<BlockState, BiomeId>,
+        &SectionBlockPredicates,
+    ) -> Result<(), ExtractError>,
+{
+    let region_dir = overworld_region_dir(root);
     let entries = match std::fs::read_dir(&region_dir) {
         Ok(entries) => entries.collect::<Result<Vec<_>, _>>()?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -224,7 +292,6 @@ pub fn extract_world(root: &Path) -> Result<WorldManifest, ExtractError> {
         )));
     }
 
-    let mut chunks = BTreeMap::new();
     let mut storage = RegionFileStorage::new_read_only(storage_info(root), region_dir.clone());
     let height = height_accessor::create(OVERWORLD_MIN_Y, OVERWORLD_HEIGHT);
     let factory = current_version_container_factory();
@@ -253,22 +320,89 @@ pub fn extract_world(root: &Path) -> Result<WorldManifest, ExtractError> {
                         )));
                     }
                 };
-
-                let fingerprint = fingerprint_chunk(&data, &factory, &predicates, &height)?;
-                chunks.insert(format!("{},{}", pos.x(), pos.z()), fingerprint);
+                body(&pos, &data, &height, &factory, &predicates)?;
             }
         }
     }
 
-    Ok(WorldManifest {
-        format: 1,
-        overworld_region: region_dir
-            .strip_prefix(root)
-            .unwrap_or(&region_dir)
-            .to_string_lossy()
-            .into_owned(),
-        chunks,
-    })
+    Ok(())
+}
+
+/// Extract the positional occurrences of the FEATURES-palette blocks
+/// (`magma_block`, `glow_lichen`) from a disposable world copy, keyed by
+/// `"<x>,<z>"`. Each observation records the block, the column (`z*16+x`), and
+/// the absolute world Y. The set for a chunk is sorted by `(block, y, index)`
+/// so twin-boot captures are byte-identical.
+pub fn extract_feature_observations(
+    root: &Path,
+) -> Result<BTreeMap<String, Vec<FeatureObservation>>, ExtractError> {
+    let mut observations: BTreeMap<String, Vec<FeatureObservation>> = BTreeMap::new();
+    visit_region_chunks(
+        root,
+        &mut |pos: &ChunkPos,
+              data: &SerializableChunkData,
+              height: &SimpleLevelHeightAccessor,
+              factory: &PalettedContainerFactory<BlockState, BiomeId>,
+              predicates: &SectionBlockPredicates| {
+            let chunk_obs = observe_feature_blocks(data, height, factory, predicates)?;
+            if !chunk_obs.is_empty() {
+                observations.insert(format!("{},{}", pos.x(), pos.z()), chunk_obs);
+            }
+            Ok(())
+        },
+    )?;
+    Ok(observations)
+}
+
+/// Collect the allowlisted feature-palette blocks for one chunk, sorted by
+/// `(block, y, index)` for byte-determinism.
+fn observe_feature_blocks(
+    data: &SerializableChunkData,
+    height: &SimpleLevelHeightAccessor,
+    factory: &PalettedContainerFactory<BlockState, BiomeId>,
+    predicates: &SectionBlockPredicates,
+) -> Result<Vec<FeatureObservation>, ExtractError> {
+    let min_section = height.get_min_section_y();
+    let max_section = height.get_max_section_y();
+    let reconstruction = reconstruct_sections(
+        data.section_tags(),
+        min_section,
+        max_section,
+        factory,
+        *predicates,
+    )
+    .map_err(|e| {
+        ExtractError::Gate(format!(
+            "reconstructing sections of chunk {}: {e}",
+            data.stored_pos()
+        ))
+    })?;
+
+    let mut out = Vec::new();
+    for (index, section) in reconstruction.sections.iter().enumerate() {
+        let Some(section) = section else { continue };
+        let section_y = min_section + index as i32;
+        for local_x in 0..CHUNK_SIZE {
+            for local_z in 0..CHUNK_SIZE {
+                for local_y in 0..SECTION_SIZE {
+                    let state = section.get_block_state(local_x, local_y, local_z);
+                    if state.is_air() {
+                        continue;
+                    }
+                    let name = state.block().name();
+                    if FEATURE_OBSERVATION_BLOCKS.contains(&name) {
+                        out.push(FeatureObservation {
+                            block: name.to_owned(),
+                            index: (local_z * CHUNK_SIZE + local_x) as usize,
+                            y: section_y * SECTION_SIZE + local_y,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| (&a.block, a.y, a.index).cmp(&(&b.block, b.y, b.index)));
+    Ok(out)
 }
 
 fn fingerprint_chunk(

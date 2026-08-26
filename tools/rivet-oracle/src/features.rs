@@ -54,6 +54,22 @@
 //! bedrock plane must be depth-sampled — a capture that cannot distinguish a
 //! decorated seed-42 chunk from an undecorated one is refused loudly.
 //!
+//! The checkpoint ALSO pins the leaf features this checkpoint exists to cover,
+//! through a features-only observation layer (`feature_observations` on the
+//! golden, kept OUT of the shared `WorldManifest` so generated-expected's
+//! cross-check byte-identity is untouched): the positional occurrences of
+//! `magma_block` (UnderwaterMagmaFeature, PR #644) and `glow_lichen`
+//! (MultifaceGrowthFeature/`glow_lichen`, PR #645). `surface`/`bedrock`/
+//! `below_feet` do not locate these — magma sits on the ocean floor below the
+//! surface water and glow_lichen attaches in the water column/caves — so they
+//! are recorded as `{block, index (z*16+x), y}` observations. Validation
+//! requires a `magma_block` in a submerged column (`surface[index] == water`),
+//! the pinned UnderwaterMagma ocean-floor signature, and at least one
+//! `glow_lichen`. Tamper negatives
+//! prove removing either set, or relocating magma off the ocean floor, is
+//! detected. This is feature-leaf evidence only; it does not claim full
+//! block-volume or FULL parity for the generated world.
+//!
 //! Honesty rules (mirror generated-expected, D8: never fabricate expected
 //! content, never silently fall back to a superflat/undecorated capture):
 //!
@@ -88,11 +104,11 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::Error;
 use crate::generated_expected::{
     capture_run_dir, check_capture_pin, clear_region_files, seed_properties,
 };
 use crate::loaded_world::{self, WorldManifest};
-use crate::{CapturedFile, Error};
 
 /// The fixture kind name (matches the manifest `kind` and the regenerate flag).
 pub const KIND: &str = "features";
@@ -144,13 +160,51 @@ const MIN_DISTINCT_UNION: usize = 15;
 /// the world fields at top level too), so it is both structurally bound —
 /// verification reads it back and requires `PINNED_SEED` — and hash-bound — it
 /// is inside the bytes the manifest SHA-256 covers.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FeaturesGolden {
     /// The seed the golden content was generated under (the `--to` capture
     /// writes the actual seed; committed verification requires `PINNED_SEED`).
     pub seed: i64,
     #[serde(flatten)]
     pub world: WorldManifest,
+    /// The positional occurrences of the FEATURES-palette blocks
+    /// (`magma_block` = UnderwaterMagmaFeature, `glow_lichen` =
+    /// MultifaceGrowthFeature), keyed by committed chunk `"<x>,<z>"`. This is
+    /// a features-only evidence layer: the shared `WorldManifest` fingerprint
+    /// (surface/bedrock/below_feet) does not locate these because they sit
+    /// below the surface water / in the water column, so the committed
+    /// checkpoint pins them here. The field is required: an older golden without
+    /// this evidence is not a valid checkpoint, and the decoration contract also
+    /// refuses a capture without either leaf's observations.
+    pub feature_observations: BTreeMap<String, Vec<loaded_world::FeatureObservation>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FeaturesGoldenWire {
+    seed: i64,
+    format: u32,
+    overworld_region: String,
+    chunks: BTreeMap<String, loaded_world::ChunkFingerprint>,
+    feature_observations: BTreeMap<String, Vec<loaded_world::FeatureObservation>>,
+}
+
+impl<'de> Deserialize<'de> for FeaturesGolden {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = FeaturesGoldenWire::deserialize(deserializer)?;
+        Ok(Self {
+            seed: wire.seed,
+            world: WorldManifest {
+                format: wire.format,
+                overworld_region: wire.overworld_region,
+                chunks: wire.chunks,
+            },
+            feature_observations: wire.feature_observations,
+        })
+    }
 }
 
 /// The committed grid coordinates, deterministically ordered (x-major).
@@ -173,9 +227,18 @@ fn forced_coordinates() -> Vec<(i32, i32)> {
 /// Boot the pinned Paper on a fresh seed world, force the committed grid's
 /// neighborhood through the FEATURES decoration (level-33 tickets → `minecraft:full`,
 /// whose block data is the FEATURES-decoration output), and extract the
-/// deterministic per-chunk fingerprint. A missing Paper runtime is
-/// `Error::Unverified` — a missing prerequisite, never a fabricated green.
-fn capture_world(seed: i64) -> Result<WorldManifest, Error> {
+/// deterministic per-chunk fingerprint plus the feature-palette observations. A
+/// missing Paper runtime is `Error::Unverified` — a missing prerequisite, never
+/// a fabricated green.
+fn capture_world(
+    seed: i64,
+) -> Result<
+    (
+        WorldManifest,
+        BTreeMap<String, Vec<loaded_world::FeatureObservation>>,
+    ),
+    Error,
+> {
     let jar = crate::ensure_jar().map_err(|e| {
         Error::Unverified(format!(
             "features capture needs the pinned Paper runtime: {e} \
@@ -228,7 +291,30 @@ fn capture_world(seed: i64) -> Result<WorldManifest, Error> {
         loaded_world::ExtractError::Gate(m) => Error::Gate(m),
         loaded_world::ExtractError::Io(io) => Error::Io(io),
     })?;
-    filter_to_committed(&manifest, &committed)
+    let observations = loaded_world::extract_feature_observations(&run_dir.join("world")).map_err(
+        |e| match e {
+            loaded_world::ExtractError::Unverified(m) => Error::Unverified(m),
+            loaded_world::ExtractError::Gate(m) => Error::Gate(m),
+            loaded_world::ExtractError::Io(io) => Error::Io(io),
+        },
+    )?;
+    let world = filter_to_committed(&manifest, &committed)?;
+    let obs = filter_observations_to_committed(&observations, &committed);
+    Ok((world, obs))
+}
+
+/// Keep only the committed-grid chunks' feature observations.
+fn filter_observations_to_committed(
+    observations: &BTreeMap<String, Vec<loaded_world::FeatureObservation>>,
+    grid: &[(i32, i32)],
+) -> BTreeMap<String, Vec<loaded_world::FeatureObservation>> {
+    let mut out = BTreeMap::new();
+    for (cx, cz) in grid {
+        if let Some(obs) = observations.get(&format!("{cx},{cz}")) {
+            out.insert(format!("{cx},{cz}"), obs.clone());
+        }
+    }
+    out
 }
 
 /// Keep only the committed-grid chunks and require every one to be at the
@@ -273,11 +359,16 @@ pub fn capture_to(seed: i64, to: &Path) -> Result<(), Error> {
     if to.exists() {
         fs::remove_file(to)?;
     }
-    let world = capture_world(seed)?;
+    let (world, observations) = capture_world(seed)?;
     // Refuse a capture that does not meet the decoration contract — a bad
     // capture must never be handed off as the checkpoint's ground truth.
     validate_world(&world)?;
-    let golden = FeaturesGolden { seed, world };
+    validate_observations(&world, &observations)?;
+    let golden = FeaturesGolden {
+        seed,
+        world,
+        feature_observations: observations,
+    };
     let json = serde_json::to_string(&golden)
         .map_err(|e| Error::Gate(format!("serializing features golden: {e}")))?;
     if let Some(parent) = to.parent()
@@ -299,6 +390,8 @@ pub fn load(dir: &Path) -> Result<FeaturesGolden, Error> {
     let path = dir.join(FIXTURE_BASENAME);
     let raw = fs::read_to_string(&path)
         .map_err(|e| Error::Manifest(format!("cannot read {}: {e}", path.display())))?;
+    crate::reject_duplicate_json_keys(raw.as_bytes())
+        .map_err(|e| Error::Manifest(format!("invalid {FIXTURE_BASENAME}: {e}")))?;
     let golden: FeaturesGolden = serde_json::from_str(&raw)
         .map_err(|e| Error::Manifest(format!("invalid {FIXTURE_BASENAME}: {e}")))?;
     if golden.world.format != 1 {
@@ -310,9 +403,38 @@ pub fn load(dir: &Path) -> Result<FeaturesGolden, Error> {
     Ok(golden)
 }
 
+/// Parse the features manifest with its exact schema. The generic fixture
+/// verifier intentionally accepts several historical manifest shapes; this
+/// checkpoint does not, because provenance is part of the evidence.
+fn load_features_manifest(dir: &Path) -> Result<FeaturesManifest, Error> {
+    let path = dir.join("manifest.json");
+    let raw = fs::read_to_string(&path)
+        .map_err(|e| Error::Manifest(format!("cannot read {}: {e}", path.display())))?;
+    crate::reject_duplicate_json_keys(raw.as_bytes())
+        .map_err(|e| Error::Manifest(format!("invalid features manifest schema: {e}")))?;
+    serde_json::from_str(&raw)
+        .map_err(|e| Error::Manifest(format!("invalid features manifest schema: {e}")))
+}
+
 /// Assert the committed golden's provenance, manifest hashes, forced-grid shape,
 /// per-chunk status/flag contract, and FEATURES-decoration non-vacuity.
 pub fn verify_features(dir: &Path) -> Result<(), Error> {
+    let strict_manifest = load_features_manifest(dir)?;
+    if strict_manifest.format != 1
+        || strict_manifest.paper != PINNED_PAPER
+        || strict_manifest.seed != PINNED_SEED.to_string()
+        || strict_manifest.level_type != "minecraft:normal"
+        || strict_manifest.kind != KIND
+    {
+        return Err(Error::Manifest(format!(
+            "features manifest provenance must be exactly format=1, paper={PINNED_PAPER}, seed={PINNED_SEED}, level-type=minecraft:normal, kind={KIND}; got format={}, paper={:?}, seed={:?}, level-type={:?}, kind={:?}",
+            strict_manifest.format,
+            strict_manifest.paper,
+            strict_manifest.seed,
+            strict_manifest.level_type,
+            strict_manifest.kind
+        )));
+    }
     let manifest = crate::verify_fixtures(dir)?;
     // 0. The SHA-256 binding is load-bearing, not optional: verify_fixtures only
     //    checks the files the manifest DOES list, so a manifest with no captured
@@ -352,6 +474,8 @@ pub fn verify_features(dir: &Path) -> Result<(), Error> {
     }
 
     validate_world(&golden.world)?;
+    validate_observations(&golden.world, &golden.feature_observations)?;
+    validate_canonical_observations(&golden.feature_observations)?;
     cross_check_generated_expected(&golden.world)?;
     Ok(())
 }
@@ -514,6 +638,301 @@ fn validate_world(world: &WorldManifest) -> Result<(), Error> {
     Ok(())
 }
 
+/// The block the UnderwaterMagmaFeature places.
+const MAGMA_BLOCK: &str = "minecraft:magma_block";
+/// The block MultifaceGrowthFeature places for the `glow_lichen` configured
+/// feature.
+const GLOW_LICHEN_BLOCK: &str = "minecraft:glow_lichen";
+
+/// Assert the feature-palette observations pin both the leaf features this
+/// checkpoint exists to cover: UnderwaterMagmaFeature (`magma_block`) and
+/// MultifaceGrowthFeature (`glow_lichen`). This is the non-vacuity for PRs
+/// #644/#645 — a capture whose feature blocks cannot be attributed to them (or
+/// that carries none) is refused, never handed off as ground truth.
+///
+/// Underwater-magma signature: the observed `magma_block` must sit in a
+/// submerged column, whose `surface` entry is water. That pins the Paper
+/// observation to an ocean-floor placement without making an implementation
+/// claim about every possible magma producer.
+///
+/// Glow-lichen evidence is the positional observation of the configured
+/// `glow_lichen` feature's output; this checkpoint does not claim full feature
+/// dispatch or generated-world parity.
+pub fn validate_observations(
+    world: &WorldManifest,
+    observations: &BTreeMap<String, Vec<loaded_world::FeatureObservation>>,
+) -> Result<(), Error> {
+    // Observations are scoped to the committed grid. Rejecting an unknown key
+    // prevents a tampered fixture from hiding evidence in an ignored chunk.
+    for key in observations.keys() {
+        if !world.chunks.contains_key(key) {
+            return Err(Error::Manifest(format!(
+                "features observation key {key} is not a committed chunk — refusing evidence outside the checkpoint grid"
+            )));
+        }
+    }
+
+    // Central diagnostics: nothing to count below unless a structurally valid
+    // observation exists.
+    let mut magma_count = 0usize;
+    let mut submerged_magma = 0usize;
+    let mut lichen_count = 0usize;
+    for (key, fp) in &world.chunks {
+        let Some(obs) = observations.get(key) else {
+            continue;
+        };
+        let mut positions = BTreeSet::new();
+        for o in obs {
+            if o.index >= 16 * 16 {
+                return Err(Error::Manifest(format!(
+                    "features observation in chunk {key} has column index {} outside the z*16+x 16x16 contract",
+                    o.index
+                )));
+            }
+            if !(-64..=319).contains(&o.y) {
+                return Err(Error::Manifest(format!(
+                    "features observation in chunk {key} has y={} outside the captured overworld section bounds [-64,319]",
+                    o.y
+                )));
+            }
+            if !positions.insert((o.index, o.y)) {
+                return Err(Error::Manifest(format!(
+                    "features observation in chunk {key} duplicates payload position index={}, y={}",
+                    o.index, o.y
+                )));
+            }
+            match o.block.as_str() {
+                MAGMA_BLOCK => {
+                    magma_count += 1;
+                    // The column's surface (highest non-air) must be water: the
+                    // magma sits on the floor of a submerged column.
+                    if fp
+                        .surface
+                        .get(o.index)
+                        .is_some_and(|surface| surface == "minecraft:water")
+                    {
+                        submerged_magma += 1;
+                    }
+                }
+                GLOW_LICHEN_BLOCK => lichen_count += 1,
+                other => {
+                    return Err(Error::Manifest(format!(
+                        "features observation in chunk {key} contains unsupported block {other:?}"
+                    )));
+                }
+            }
+        }
+    }
+
+    if magma_count == 0 {
+        return Err(Error::Manifest(
+            "no committed FEATURES chunk observes a magma_block — UnderwaterMagmaFeature's \
+             ocean-floor placement is absent; the #644 leaf is vacuous"
+                .into(),
+        ));
+    }
+    if submerged_magma == 0 {
+        return Err(Error::Manifest(
+            "no observed magma_block sits in a submerged column (surface=water) — the \
+             UnderwaterMagmaFeature ocean-floor signature is absent"
+                .into(),
+        ));
+    }
+    if lichen_count == 0 {
+        return Err(Error::Manifest(
+            "no committed FEATURES chunk observes a glow_lichen — MultifaceGrowthFeature's \
+             glow_lichen placement is absent; the #645 leaf is vacuous"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The exact positional feature tuples captured from the pinned seed-42 Paper
+/// payload. The generic observation contract above proves the shape and leaf
+/// non-vacuity; this second gate binds the observations to the canonical payload
+/// geometry so a tampered fixture cannot relocate blocks to another water column
+/// or recompute a local count/hash and still pass.
+fn canonical_observations() -> BTreeMap<&'static str, Vec<(&'static str, usize, i32)>> {
+    BTreeMap::from([
+        (
+            "3,3",
+            vec![
+                (GLOW_LICHEN_BLOCK, 114, -33),
+                (GLOW_LICHEN_BLOCK, 212, -5),
+                (GLOW_LICHEN_BLOCK, 143, 15),
+                (GLOW_LICHEN_BLOCK, 125, 16),
+                (GLOW_LICHEN_BLOCK, 148, 30),
+                (GLOW_LICHEN_BLOCK, 2, 50),
+            ],
+        ),
+        (
+            "3,4",
+            vec![
+                (GLOW_LICHEN_BLOCK, 150, 8),
+                (GLOW_LICHEN_BLOCK, 151, 12),
+                (GLOW_LICHEN_BLOCK, 151, 13),
+                (GLOW_LICHEN_BLOCK, 139, 29),
+                (GLOW_LICHEN_BLOCK, 156, 29),
+                (MAGMA_BLOCK, 3, 7),
+                (MAGMA_BLOCK, 4, 7),
+                (MAGMA_BLOCK, 5, 7),
+                (MAGMA_BLOCK, 20, 7),
+                (MAGMA_BLOCK, 21, 8),
+            ],
+        ),
+        (
+            "4,3",
+            vec![
+                (GLOW_LICHEN_BLOCK, 151, -51),
+                (GLOW_LICHEN_BLOCK, 159, -50),
+                (GLOW_LICHEN_BLOCK, 174, -50),
+                (GLOW_LICHEN_BLOCK, 216, -43),
+                (GLOW_LICHEN_BLOCK, 198, -1),
+                (GLOW_LICHEN_BLOCK, 128, 15),
+            ],
+        ),
+    ])
+}
+
+fn validate_canonical_observations(
+    observations: &BTreeMap<String, Vec<loaded_world::FeatureObservation>>,
+) -> Result<(), Error> {
+    let expected = canonical_observations();
+    let actual: BTreeMap<String, Vec<(&str, usize, i32)>> = observations
+        .iter()
+        .map(|(key, values)| {
+            let mut tuples: Vec<_> = values
+                .iter()
+                .map(|o| (o.block.as_str(), o.index, o.y))
+                .collect();
+            tuples.sort_unstable();
+            (key.clone(), tuples)
+        })
+        .collect();
+    let expected: BTreeMap<String, Vec<(&str, usize, i32)>> = expected
+        .into_iter()
+        .map(|(key, mut values)| {
+            values.sort_unstable();
+            (key.to_owned(), values)
+        })
+        .collect();
+    if actual != expected {
+        return Err(Error::Manifest(format!(
+            "features observations diverge from the canonical seed-42 payload geometry: expected {expected:?}, got {actual:?}"
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictGeneratedExpectedManifest {
+    format: u64,
+    paper: String,
+    seed: String,
+    #[serde(rename = "level-type")]
+    level_type: String,
+    kind: String,
+    #[serde(rename = "note")]
+    _note: String,
+    captured: Vec<StrictCapturedFile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictCapturedFile {
+    path: String,
+    sha256: String,
+    bytes: u64,
+}
+
+/// Load and fully verify the generated-expected dependency for the FEATURES
+/// cross-check.
+///
+/// This dependency is distinct from the FEATURES fixture tree: either missing
+/// file is partial/tampered handoff damage, not an absent prerequisite. Check
+/// both before invoking the dependency verifier so its loader-level
+/// `Unverified` classification cannot leak through this checkpoint as exit 3.
+fn load_generated_expected_for_features(
+    dir: &Path,
+) -> Result<crate::generated_expected::GoldenWorld, Error> {
+    let manifest = dir.join("manifest.json");
+    let golden = dir.join(crate::generated_expected::FIXTURE_BASENAME);
+    if !manifest.is_file() || !golden.is_file() {
+        return Err(Error::Manifest(format!(
+            "features cross-check needs a complete generated-expected golden in {} (both \
+             manifest.json and {}) — a missing dependency file is partial/tampered fixture damage, \
+             not an absent prerequisite; refusing to classify it as UNVERIFIED",
+            dir.display(),
+            crate::generated_expected::FIXTURE_BASENAME
+        )));
+    }
+
+    let raw_manifest = fs::read_to_string(&manifest)?;
+    crate::reject_duplicate_json_keys(raw_manifest.as_bytes())
+        .map_err(|e| Error::Manifest(format!("invalid generated-expected manifest.json: {e}")))?;
+    let strict: StrictGeneratedExpectedManifest = serde_json::from_str(&raw_manifest)
+        .map_err(|e| Error::Manifest(format!("invalid generated-expected manifest.json: {e}")))?;
+    if strict.format != 1 {
+        return Err(Error::Manifest(format!(
+            "generated-expected manifest format {} != 1",
+            strict.format
+        )));
+    }
+    if strict.paper != crate::generated_expected::PINNED_PAPER {
+        return Err(Error::Manifest(format!(
+            "generated-expected dependency paper {:?} != pinned {}",
+            strict.paper,
+            crate::generated_expected::PINNED_PAPER
+        )));
+    }
+    if strict.seed != crate::generated_expected::PINNED_SEED.to_string() {
+        return Err(Error::Manifest(format!(
+            "generated-expected dependency seed {:?} != pinned {}",
+            strict.seed,
+            crate::generated_expected::PINNED_SEED
+        )));
+    }
+    if strict.level_type != "minecraft:normal" {
+        return Err(Error::Manifest(format!(
+            "generated-expected dependency level-type {:?} is not minecraft:normal — the FEATURES \
+             checkpoint requires the normal-overworld ground-truth handoff",
+            strict.level_type
+        )));
+    }
+    if strict.kind != crate::generated_expected::KIND {
+        return Err(Error::Manifest(format!(
+            "generated-expected dependency kind {:?} != {}",
+            strict.kind,
+            crate::generated_expected::KIND
+        )));
+    }
+    crate::require_single_captured(
+        &crate::load_manifest(dir)?,
+        crate::generated_expected::FIXTURE_BASENAME,
+    )?;
+    let captured = strict.captured.first().ok_or_else(|| {
+        Error::Manifest(format!(
+            "generated-expected manifest must bind exactly one captured entry for {}",
+            crate::generated_expected::FIXTURE_BASENAME
+        ))
+    })?;
+    if strict.captured.len() != 1
+        || captured.path != crate::generated_expected::FIXTURE_BASENAME
+        || captured.sha256.is_empty()
+        || captured.bytes == 0
+    {
+        return Err(Error::Manifest(format!(
+            "generated-expected manifest must bind exactly one non-empty captured entry for {}",
+            crate::generated_expected::FIXTURE_BASENAME
+        )));
+    }
+
+    crate::generated_expected::verify_generated_expected_step(dir)?;
+    crate::generated_expected::load(dir)
+}
+
 /// Cross-check every committed chunk against the generated-expected golden at
 /// the same coordinates. This is the byte-identity that makes the FEATURES
 /// checkpoint the canonical seed-42 decoration rather than a capture-regime
@@ -525,15 +944,14 @@ fn validate_world(world: &WorldManifest) -> Result<(), Error> {
 /// silent skip.
 fn cross_check_generated_expected(world: &WorldManifest) -> Result<(), Error> {
     let dir = crate::crate_dir().join("fixtures/generated-expected");
-    if !dir.join("manifest.json").is_file() {
-        return Err(Error::Manifest(
-            "features cross-check needs the generated-expected golden (fixtures/\
-             generated-expected), which is ABSENT — the FEATURES checkpoint cannot be \
-             distinguished from a capture-regime artifact without it"
-                .into(),
-        ));
-    }
-    let golden = crate::generated_expected::load(&dir)?;
+    cross_check_generated_expected_in(world, &dir)
+}
+
+fn cross_check_generated_expected_in(world: &WorldManifest, dir: &Path) -> Result<(), Error> {
+    // Do not use a merely parseable or partial generated-expected tree as an
+    // oracle. Its exact files, SHA, Paper/normal-overworld provenance, seed,
+    // forced-grid shape, and anti-superflat contract must pass first.
+    let golden = load_generated_expected_for_features(dir)?;
     for (key, fp) in &world.chunks {
         let expected = golden.world.chunks.get(key).ok_or_else(|| {
             Error::Manifest(format!(
@@ -569,16 +987,25 @@ fn format_set(set: &BTreeSet<String>) -> String {
 /// `fixtures/features/manifest.json`, serialized in the exact committed field
 /// order so regeneration is byte-identical (git-clean), mirroring the
 /// generated-expected manifest convention.
-#[derive(serde::Serialize)]
-struct FeaturesManifest<'a> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FeaturesManifest {
     format: u64,
-    paper: &'a str,
-    seed: &'a str,
+    paper: String,
+    seed: String,
     #[serde(rename = "level-type")]
-    level_type: &'a str,
-    kind: &'a str,
-    note: &'a str,
-    captured: Vec<CapturedFile>,
+    level_type: String,
+    kind: String,
+    note: String,
+    captured: Vec<FeaturesCapturedFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FeaturesCapturedFile {
+    path: String,
+    sha256: String,
+    bytes: usize,
 }
 
 /// Write `fixtures/features/manifest.json` from the freshly generated golden
@@ -586,15 +1013,17 @@ struct FeaturesManifest<'a> {
 /// #595) — regeneration never stamps a hardcoded 42.
 pub fn regenerate_manifest(dir: &Path) -> Result<(), Error> {
     let data = fs::read(dir.join(FIXTURE_BASENAME))?;
+    crate::reject_duplicate_json_keys(&data)
+        .map_err(|e| Error::Manifest(format!("cannot read {FIXTURE_BASENAME}: {e}")))?;
     let golden: FeaturesGolden = serde_json::from_slice(&data)
         .map_err(|e| Error::Manifest(format!("cannot read seed from {FIXTURE_BASENAME}: {e}")))?;
     let seed_str = golden.seed.to_string();
     let manifest = FeaturesManifest {
         format: 1,
-        paper: PINNED_PAPER,
-        seed: &seed_str,
-        level_type: "minecraft:normal",
-        kind: KIND,
+        paper: PINNED_PAPER.to_owned(),
+        seed: seed_str,
+        level_type: "minecraft:normal".to_owned(),
+        kind: KIND.to_owned(),
         note: "Seed-42 FEATURES oracle checkpoint (PR #175/#232): the per-chunk \
                surface/bedrock/below_feet fingerprint for the committed 2x2 grid \
                {(3,3),(4,3),(3,4),(4,4)} captured from the pinned Paper runtime by booting a \
@@ -609,9 +1038,15 @@ pub fn regenerate_manifest(dir: &Path) -> Result<(), Error> {
                the canonical golden, which the verifier cross-checks chunk-for-chunk. Arrays \
                are 16x16 row-major z*16+x; surface is the highest non-air block, bedrock at \
                y=-60, below_feet at y=-61. Non-vacuity: chunk (4,4) must carry tree blocks in \
-               its surface (the decoration evidence). Regenerate with `rivet-oracle \
-               regenerate --features` (twin-boot byte-identity proof).",
-        captured: vec![CapturedFile {
+               its surface (the decoration evidence). The checkpoint also records a \
+               feature-only observation layer (feature_observations): the positional \
+               occurrences of magma_block (UnderwaterMagmaFeature, PR #644) and glow_lichen \
+               (MultifaceGrowthFeature/glow_lichen, PR #645); verification requires a \
+               submerged-column magma_block (the pinned ocean-floor signature) and at least one \
+               glow_lichen. This is feature-leaf evidence only, not full generated-world parity. \
+               Regenerate with `rivet-oracle regenerate --features` (twin-boot byte-identity proof)."
+            .to_owned(),
+        captured: vec![FeaturesCapturedFile {
             path: FIXTURE_BASENAME.to_string(),
             sha256: crate::sha256_hex(&data),
             bytes: data.len(),
@@ -630,11 +1065,11 @@ pub fn regenerate_manifest(dir: &Path) -> Result<(), Error> {
 /// nondeterministic pair is never committed.
 pub fn run_probe(dir: &Path) -> Result<(), Error> {
     println!("[1/3] forced FEATURES capture A: fresh seed-42 Paper boot under the 1/1 pin...");
-    let a = capture_world(PINNED_SEED)?;
+    let (world_a, obs_a) = capture_world(PINNED_SEED)?;
     println!("[2/3] forced FEATURES capture B: fresh seed-42 Paper boot under the 1/1 pin...");
-    let b = capture_world(PINNED_SEED)?;
+    let (world_b, obs_b) = capture_world(PINNED_SEED)?;
 
-    if a != b {
+    if (&world_a, &obs_a) != (&world_b, &obs_b) {
         return Err(Error::Gate(
             "features twin-boot byte-identity check failed — the two independent Paper \
              captures produced DIFFERENT world manifests; refusing to commit a nondeterministic \
@@ -645,14 +1080,17 @@ pub fn run_probe(dir: &Path) -> Result<(), Error> {
     // Validate the (byte-identical) capture against the decoration contract
     // AND the canonical-golden cross-check BEFORE committing — two
     // equally-wrong captures must be refused.
-    validate_world(&a)?;
-    cross_check_generated_expected(&a)?;
+    validate_world(&world_a)?;
+    validate_observations(&world_a, &obs_a)?;
+    validate_canonical_observations(&obs_a)?;
+    cross_check_generated_expected(&world_a)?;
 
     println!("[3/3] byte-identical + contract-valid; writing the committed checkpoint...");
     fs::create_dir_all(dir)?;
     let golden = FeaturesGolden {
         seed: PINNED_SEED,
-        world: a,
+        world: world_a,
+        feature_observations: obs_a,
     };
     let json = serde_json::to_string(&golden)
         .map_err(|e| Error::Gate(format!("serializing features golden: {e}")))?;
@@ -809,6 +1247,7 @@ fn parse_cli(rest: &[&str]) -> Result<CliArgs, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::generated_expected;
 
     fn fixtures_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures")
@@ -825,6 +1264,20 @@ mod tests {
                 dir.display()
             );
         }
+    }
+
+    fn scratch_generated_expected(tag: &str) -> PathBuf {
+        let source = fixtures_dir().join("generated-expected");
+        let scratch = std::env::temp_dir().join(format!(
+            "rivet-oracle-features-generated-expected-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&scratch);
+        fs::create_dir_all(&scratch).unwrap();
+        for filename in ["manifest.json", generated_expected::FIXTURE_BASENAME] {
+            fs::copy(source.join(filename), scratch.join(filename)).unwrap();
+        }
+        scratch
     }
 
     #[test]
@@ -903,6 +1356,214 @@ mod tests {
         cross_check_generated_expected(&golden.world).expect(
             "committed features chunks must match generated-expected at every sampled field",
         );
+    }
+
+    #[test]
+    fn partial_generated_expected_dependency_is_a_hard_failure() {
+        let source = fixtures_dir().join("generated-expected/manifest.json");
+        let scratch = std::env::temp_dir().join(format!(
+            "rivet-oracle-features-generated-expected-partial-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&scratch);
+        fs::create_dir_all(&scratch).unwrap();
+        fs::copy(source, scratch.join("manifest.json")).unwrap();
+
+        let result = load_generated_expected_for_features(&scratch);
+        let _ = fs::remove_dir_all(&scratch);
+        let err = result.expect_err(
+            "a generated-expected manifest without its golden must hard-fail the FEATURES verifier",
+        );
+        assert!(
+            matches!(&err, crate::Error::Manifest(_)),
+            "partial generated-expected dependency must be Error::Manifest, got {err:?}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("generated-expected.json"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("partial/tampered"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn generated_expected_dependency_requires_exact_captured_binding() {
+        let source = fixtures_dir().join("generated-expected/manifest.json");
+        let original: serde_json::Value =
+            serde_json::from_slice(&fs::read(source).unwrap()).unwrap();
+        let captured = original["captured"][0].clone();
+        let cases = [
+            ("empty-captured", serde_json::json!([])),
+            (
+                "relabeled-captured",
+                serde_json::json!([{
+                    "path": "other.json",
+                    "sha256": captured["sha256"].clone(),
+                    "bytes": captured["bytes"].clone(),
+                }]),
+            ),
+        ];
+        for (tag, captured) in cases {
+            let scratch = scratch_generated_expected(tag);
+            let mut manifest = original.clone();
+            manifest["captured"] = captured;
+            fs::write(
+                scratch.join("manifest.json"),
+                serde_json::to_vec_pretty(&manifest).unwrap(),
+            )
+            .unwrap();
+
+            let result = load_generated_expected_for_features(&scratch);
+            let _ = fs::remove_dir_all(&scratch);
+            let err = result.expect_err("generated-expected binding tamper must hard-fail");
+            assert!(
+                matches!(&err, crate::Error::Manifest(_)),
+                "tampered generated-expected binding must be Error::Manifest, got {err:?}"
+            );
+            assert!(
+                err.to_string().contains("exactly one captured entry"),
+                "unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_expected_dependency_requires_normal_level_type() {
+        let scratch = scratch_generated_expected("flat-level-type");
+        let manifest_path = scratch.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["level-type"] = serde_json::json!("minecraft:flat");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let result = load_generated_expected_for_features(&scratch);
+        let _ = fs::remove_dir_all(&scratch);
+        let err = result.expect_err("flat generated-expected level type must hard-fail");
+        assert!(
+            matches!(&err, crate::Error::Manifest(_)),
+            "flat generated-expected level type must be Error::Manifest, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("not minecraft:normal"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn generated_expected_tamper_outside_features_grid_is_rejected() {
+        let scratch = scratch_generated_expected("outside-features-grid");
+        let golden_path = scratch.join(generated_expected::FIXTURE_BASENAME);
+        let mut golden = generated_expected::load(&scratch).unwrap();
+        let fingerprint = golden
+            .world
+            .chunks
+            .get_mut("0,0")
+            .expect("generated-expected includes an outside-grid chunk");
+        fingerprint.surface[0] = if fingerprint.surface[0] == "minecraft:water" {
+            "minecraft:stone".into()
+        } else {
+            "minecraft:water".into()
+        };
+        fs::write(&golden_path, serde_json::to_vec(&golden).unwrap()).unwrap();
+
+        let features = load(&fixtures_dir().join("features")).unwrap();
+        let result = cross_check_generated_expected_in(&features.world, &scratch);
+        let _ = fs::remove_dir_all(&scratch);
+        assert!(
+            matches!(&result, Err(crate::Error::HashMismatch { .. })),
+            "outside-grid generated-expected tamper must fail its dependency hash gate, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn generated_expected_dependency_rejects_unknown_manifest_fields() {
+        let scratch = scratch_generated_expected("unknown-manifest-field");
+        let manifest_path = scratch.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["unexpected"] = serde_json::json!(true);
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let result = load_generated_expected_for_features(&scratch);
+        let _ = fs::remove_dir_all(&scratch);
+        let err = result.expect_err("unknown generated-expected manifest field must hard-fail");
+        assert!(
+            matches!(&err, crate::Error::Manifest(_)),
+            "unknown generated-expected field must be Error::Manifest, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("unknown field"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn generated_expected_dependency_rejects_unknown_golden_fields_after_rehash() {
+        let scratch = scratch_generated_expected("unknown-golden-field");
+        let golden_path = scratch.join(generated_expected::FIXTURE_BASENAME);
+        let mut golden: serde_json::Value =
+            serde_json::from_slice(&fs::read(&golden_path).unwrap()).unwrap();
+        golden["unexpected_top_level"] = serde_json::json!(true);
+        let bytes = serde_json::to_vec(&golden).unwrap();
+        fs::write(&golden_path, &bytes).unwrap();
+
+        let manifest_path = scratch.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["captured"][0]["sha256"] = serde_json::Value::String(crate::sha256_hex(&bytes));
+        manifest["captured"][0]["bytes"] = serde_json::Value::from(bytes.len());
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let result = load_generated_expected_for_features(&scratch);
+        let _ = fs::remove_dir_all(&scratch);
+        let err = result
+            .expect_err("an unknown generated-expected golden field must fail even after rehash");
+        assert!(
+            matches!(&err, crate::Error::Manifest(_)),
+            "unknown generated-expected golden field must be Error::Manifest, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("unknown field"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn generated_expected_dependency_requires_pinned_paper() {
+        let scratch = scratch_generated_expected("wrong-paper");
+        let manifest_path = scratch.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["paper"] = serde_json::json!("26.2-DEV-main@wrong");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let result = load_generated_expected_for_features(&scratch);
+        let _ = fs::remove_dir_all(&scratch);
+        let err = result.expect_err("wrong generated-expected paper pin must hard-fail");
+        assert!(
+            matches!(&err, crate::Error::Manifest(_)),
+            "wrong generated-expected paper must be Error::Manifest, got {err:?}"
+        );
+        assert!(err.to_string().contains("paper"), "unexpected error: {err}");
     }
 
     #[test]
@@ -1061,10 +1722,381 @@ mod tests {
     }
 
     #[test]
+    fn feature_manifest_requires_normal_level_type_and_exact_schema() {
+        let dir = fixtures_dir().join("features");
+        require_fixture(&dir);
+        for level_type in [None, Some("minecraft:flat")] {
+            let scratch = std::env::temp_dir().join(format!(
+                "rivet-oracle-features-level-type-{}-{}",
+                if level_type.is_some() {
+                    "flat"
+                } else {
+                    "missing"
+                },
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&scratch);
+            fs::create_dir_all(&scratch).unwrap();
+            fs::copy(dir.join(FIXTURE_BASENAME), scratch.join(FIXTURE_BASENAME)).unwrap();
+            let mut manifest: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(dir.join("manifest.json")).unwrap())
+                    .unwrap();
+            if let Some(level_type) = level_type {
+                manifest["level-type"] = serde_json::Value::String(level_type.to_owned());
+            } else {
+                manifest.as_object_mut().unwrap().remove("level-type");
+            }
+            fs::write(
+                scratch.join("manifest.json"),
+                serde_json::to_string_pretty(&manifest).unwrap(),
+            )
+            .unwrap();
+            let err = verify_features(&scratch)
+                .expect_err("features provenance must reject missing/non-normal level-type");
+            let _ = fs::remove_dir_all(&scratch);
+            assert!(
+                err.to_string().contains("provenance") || err.to_string().contains("schema"),
+                "unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn tamper_negative_control_detects_corruption() {
         let dir = fixtures_dir().join("features");
         require_fixture(&dir);
         tamper_negative_control(&dir).expect("tamper must be detected");
+    }
+
+    /// The committed features golden must still verify with the new
+    /// observation layer present (redundant with `committed_features_verifies`,
+    /// but pins the full golden including observations round-trips through
+    /// verify).
+    #[test]
+    fn committed_features_observations_verify() {
+        let dir = fixtures_dir().join("features");
+        require_fixture(&dir);
+        let golden = load(&dir).unwrap();
+        assert!(
+            !golden.feature_observations.is_empty(),
+            "the committed golden must carry feature-palette observations"
+        );
+        verify_features(&dir).expect("committed features golden with observations verifies");
+    }
+
+    /// Removing every magma_block observation must fail verification — the
+    /// UnderwaterMagmaFeature evidence is not optional.
+    #[test]
+    fn removing_magma_observations_is_detected() {
+        let dir = fixtures_dir().join("features");
+        require_fixture(&dir);
+        let mut golden = load(&dir).unwrap();
+        let mut stripped = BTreeMap::new();
+        for (k, mut v) in golden.feature_observations.clone() {
+            v.retain(|o| o.block != MAGMA_BLOCK);
+            if !v.is_empty() {
+                stripped.insert(k, v);
+            }
+        }
+        // Guard: the committed golden actually has magma observations to strip.
+        assert_ne!(
+            stripped, golden.feature_observations,
+            "the committed golden must carry magma observations for this tamper test to be real"
+        );
+        golden.feature_observations = stripped;
+        let err = verify_scratch_golden(&golden, "no-magma")
+            .expect_err("a golden with no magma observations must be refused");
+        assert!(
+            err.to_string().contains("magma_block"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Removing every glow_lichen observation must fail verification — the
+    /// MultifaceGrowthFeature (glow_lichen) evidence is not optional.
+    #[test]
+    fn removing_glow_lichen_observations_is_detected() {
+        let dir = fixtures_dir().join("features");
+        require_fixture(&dir);
+        let mut golden = load(&dir).unwrap();
+        let mut stripped = BTreeMap::new();
+        for (k, mut v) in golden.feature_observations.clone() {
+            v.retain(|o| o.block != GLOW_LICHEN_BLOCK);
+            if !v.is_empty() {
+                stripped.insert(k, v);
+            }
+        }
+        assert_ne!(
+            stripped, golden.feature_observations,
+            "the committed golden must carry glow_lichen observations for this tamper test to be real"
+        );
+        golden.feature_observations = stripped;
+        let err = verify_scratch_golden(&golden, "no-lichen")
+            .expect_err("a golden with no glow_lichen observations must be refused");
+        assert!(
+            err.to_string().contains("glow_lichen"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Relocating every observed magma_block to a non-submerged (dry) column must
+    /// fail verification — the UnderwaterMagmaFeature modulation of the ocean
+    /// floor, not a stray magma block in stone, is the pinned signature.
+    #[test]
+    fn magma_moved_out_of_water_is_detected() {
+        let dir = fixtures_dir().join("features");
+        require_fixture(&dir);
+        let golden = load(&dir).unwrap();
+        // Guard: at least one submerged magma observation exists (it does),
+        // so this negative control cannot pass vacuously.
+        assert!(
+            golden
+                .feature_observations
+                .iter()
+                .any(|(key, observations)| {
+                    let fp = golden.world.chunks.get(key).unwrap();
+                    observations.iter().any(|o| {
+                        o.block == MAGMA_BLOCK
+                            && fp
+                                .surface
+                                .get(o.index)
+                                .is_some_and(|surface| surface == "minecraft:water")
+                    })
+                }),
+            "committed golden must carry submerged magma observations"
+        );
+        let mut tampered = golden.feature_observations.clone();
+        // Move every magma observation into a column whose surface is NOT water
+        // (dry). The disambiguation then refuses: no submerged magma remains.
+        for v in tampered.values_mut() {
+            for o in v.iter_mut() {
+                if o.block == MAGMA_BLOCK {
+                    // Find a dry column (surface != water) to relocate to.
+                    let fp = golden.world.chunks.get("3,4").unwrap();
+                    o.index = fp
+                        .surface
+                        .iter()
+                        .position(|s| s != "minecraft:water")
+                        .expect("3,4 has dry columns");
+                }
+            }
+        }
+        assert_ne!(
+            tampered, golden.feature_observations,
+            "the relocation must actually change the magma observations"
+        );
+        let mut g2 = golden.clone();
+        g2.feature_observations = tampered;
+        let err = verify_scratch_golden(&g2, "magma-dry")
+            .expect_err("a golden with no submerged magma must be refused");
+        assert!(
+            err.to_string().contains("submerged") || err.to_string().contains("duplicates"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_feature_golden_key_is_rejected_after_rehash() {
+        let dir = fixtures_dir().join("features");
+        require_fixture(&dir);
+        let golden: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join(FIXTURE_BASENAME)).unwrap()).unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+        let mut tampered = golden;
+        tampered["unknown_top_level"] = serde_json::Value::Bool(true);
+        let err = verify_scratch_values(tampered, manifest, "unknown-golden")
+            .expect_err("unknown feature golden keys must fail even after rehash");
+        assert!(
+            err.to_string().contains("unknown field"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_feature_observation_key_is_rejected_after_rehash() {
+        let dir = fixtures_dir().join("features");
+        require_fixture(&dir);
+        let mut golden: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join(FIXTURE_BASENAME)).unwrap()).unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+        golden["feature_observations"]["3,3"][0]["unknown_observation_field"] =
+            serde_json::Value::Bool(true);
+        let err = verify_scratch_values(golden, manifest, "unknown-observation")
+            .expect_err("unknown observation keys must fail even after rehash");
+        assert!(
+            err.to_string().contains("unknown field"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn duplicate_feature_chunk_key_with_canonical_last_is_rejected() {
+        let dir = fixtures_dir().join("features");
+        require_fixture(&dir);
+        let golden: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join(FIXTURE_BASENAME)).unwrap()).unwrap();
+        let mut altered = golden["chunks"]["3,3"].clone();
+        let original = altered["surface"][0].clone();
+        altered["surface"][0] = if original == serde_json::json!("minecraft:air") {
+            serde_json::json!("minecraft:stone")
+        } else {
+            serde_json::json!("minecraft:air")
+        };
+        let raw = duplicate_nested_object_entry(&golden, "chunks", "3,3", &altered);
+        let err = verify_scratch_raw(raw, "duplicate-chunk-key")
+            .expect_err("duplicate chunk keys must fail even with canonical value last");
+        assert!(
+            err.to_string().contains("duplicate JSON object key")
+                && err.to_string().contains("3,3"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn duplicate_feature_observation_key_with_canonical_last_is_rejected() {
+        let dir = fixtures_dir().join("features");
+        require_fixture(&dir);
+        let golden: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join(FIXTURE_BASENAME)).unwrap()).unwrap();
+        let mut altered = golden["feature_observations"]["3,3"].clone();
+        altered.as_array_mut().unwrap()[0]["y"] = serde_json::json!(999);
+        let raw = duplicate_nested_object_entry(&golden, "feature_observations", "3,3", &altered);
+        let err = verify_scratch_raw(raw, "duplicate-observation-key")
+            .expect_err("duplicate observation keys must fail even with canonical value last");
+        assert!(
+            err.to_string().contains("duplicate JSON object key")
+                && err.to_string().contains("3,3"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn feature_manifest_unknown_or_missing_provenance_key_is_rejected() {
+        let dir = fixtures_dir().join("features");
+        require_fixture(&dir);
+        let golden: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join(FIXTURE_BASENAME)).unwrap()).unwrap();
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+        manifest["unknown_provenance"] = serde_json::Value::Bool(true);
+        let err = verify_scratch_values(golden.clone(), manifest, "unknown-manifest")
+            .expect_err("unknown manifest provenance must fail");
+        assert!(
+            err.to_string().contains("unknown field"),
+            "unexpected error: {err}"
+        );
+
+        let mut missing: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+        missing.as_object_mut().unwrap().remove("level-type");
+        let err = verify_scratch_values(golden, missing, "missing-level-type")
+            .expect_err("missing level-type provenance must fail");
+        assert!(
+            err.to_string().contains("missing field"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn duplicate_feature_observation_is_rejected_after_rehash() {
+        let dir = fixtures_dir().join("features");
+        require_fixture(&dir);
+        let mut golden = load(&dir).unwrap();
+        let duplicate = golden.feature_observations["3,3"][0].clone();
+        golden
+            .feature_observations
+            .get_mut("3,3")
+            .unwrap()
+            .push(duplicate);
+        let err = verify_scratch_golden(&golden, "duplicate-observation")
+            .expect_err("duplicate payload positions must fail");
+        assert!(
+            err.to_string().contains("duplicates"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn generated_expected_seed_tamper_with_stale_manifest_is_rejected() {
+        let features_dir = fixtures_dir().join("features");
+        let generated_dir = fixtures_dir().join("generated-expected");
+        require_fixture(&features_dir);
+        assert!(generated_dir.join("manifest.json").is_file());
+        let scratch = std::env::temp_dir().join(format!(
+            "rivet-oracle-features-stale-generated-expected-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&scratch);
+        fs::create_dir_all(&scratch).unwrap();
+        fs::copy(
+            generated_dir.join("manifest.json"),
+            scratch.join("manifest.json"),
+        )
+        .unwrap();
+        let mut generated: serde_json::Value = serde_json::from_slice(
+            &fs::read(generated_dir.join(generated_expected::FIXTURE_BASENAME)).unwrap(),
+        )
+        .unwrap();
+        generated["seed"] = serde_json::Value::from(999);
+        fs::write(
+            scratch.join(generated_expected::FIXTURE_BASENAME),
+            serde_json::to_vec(&generated).unwrap(),
+        )
+        .unwrap();
+        let features = load(&features_dir).unwrap();
+        let result = cross_check_generated_expected_in(&features.world, &scratch);
+        let _ = fs::remove_dir_all(&scratch);
+        let err = result.expect_err("seed 42 -> 999 with stale generated manifest must fail");
+        assert!(
+            err.to_string().contains("hash mismatch") || err.to_string().contains("size mismatch"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn relocated_or_recomputed_feature_position_is_rejected() {
+        let dir = fixtures_dir().join("features");
+        require_fixture(&dir);
+        let mut golden = load(&dir).unwrap();
+        let observation = golden
+            .feature_observations
+            .get_mut("3,3")
+            .and_then(|values| values.first_mut())
+            .expect("canonical glow_lichen observation");
+        observation.index = 20;
+        observation.y = 123;
+        let err = verify_scratch_golden(&golden, "relocated-position")
+            .expect_err("a relocated observation must not pass by surface/count checks");
+        assert!(
+            err.to_string().contains("bounds") || err.to_string().contains("canonical"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn duplicate_feature_position_is_rejected() {
+        let dir = fixtures_dir().join("features");
+        require_fixture(&dir);
+        let mut golden = load(&dir).unwrap();
+        let duplicate = golden
+            .feature_observations
+            .get("3,3")
+            .and_then(|values| values.first())
+            .cloned()
+            .expect("canonical feature observation");
+        golden
+            .feature_observations
+            .get_mut("3,3")
+            .unwrap()
+            .push(duplicate);
+        let err = verify_scratch_golden(&golden, "duplicate-position")
+            .expect_err("duplicate feature positions must be refused");
+        assert!(
+            err.to_string().contains("duplicates"),
+            "unexpected error: {err}"
+        );
     }
 
     /// A wrong-seed golden — content generated under a seed OTHER than the pinned
@@ -1167,23 +2199,52 @@ mod tests {
         );
     }
 
-    /// Write `world` into a scratch dir under a valid hash-gated manifest and
-    /// run the full verify against it. Returns the verify error (the caller
-    /// asserts it is a rejection).
-    fn verify_scratch_world(world: &WorldManifest, tag: &str) -> crate::Error {
+    #[test]
+    fn regenerate_manifest_rejects_duplicate_golden_key_with_canonical_last() {
+        let dir = fixtures_dir().join("features");
+        require_fixture(&dir);
+        let scratch = std::env::temp_dir().join(format!(
+            "rivet-oracle-features-regen-duplicate-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&scratch);
+        fs::create_dir_all(&scratch).unwrap();
+
+        let golden: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join(FIXTURE_BASENAME)).unwrap()).unwrap();
+        let mut altered = golden["chunks"]["3,3"].clone();
+        let original = altered["surface"][0].clone();
+        altered["surface"][0] = if original == serde_json::json!("minecraft:air") {
+            serde_json::json!("minecraft:stone")
+        } else {
+            serde_json::json!("minecraft:air")
+        };
+        let raw = duplicate_nested_object_entry(&golden, "chunks", "3,3", &altered);
+        fs::write(scratch.join(FIXTURE_BASENAME), raw).unwrap();
+
+        let err = regenerate_manifest(&scratch)
+            .expect_err("regenerate_manifest must reject duplicate golden keys");
+        let _ = fs::remove_dir_all(&scratch);
+        let message = err.to_string();
+        assert!(
+            message.contains("duplicate JSON object key") && message.contains("3,3"),
+            "unexpected duplicate-key error: {message}"
+        );
+    }
+
+    /// Write a full `FeaturesGolden` into a scratch dir under a valid
+    /// hash-gated manifest and run the full verify against it. Returns the
+    /// verify result (callers assert success or a specific rejection).
+    fn verify_scratch_golden(golden: &FeaturesGolden, tag: &str) -> Result<(), crate::Error> {
         let scratch = std::env::temp_dir().join(format!(
             "rivet-oracle-features-{tag}-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&scratch);
         fs::create_dir_all(&scratch).unwrap();
-        let golden = FeaturesGolden {
-            seed: PINNED_SEED,
-            world: world.clone(),
-        };
         fs::write(
             scratch.join(FIXTURE_BASENAME),
-            serde_json::to_string(&golden).unwrap(),
+            serde_json::to_string(golden).unwrap(),
         )
         .unwrap();
         let data = fs::read(scratch.join(FIXTURE_BASENAME)).unwrap();
@@ -1203,7 +2264,119 @@ mod tests {
         .unwrap();
         let result = verify_features(&scratch);
         let _ = fs::remove_dir_all(&scratch);
-        result.expect_err("the checkpoint must be rejected by the decoration contract")
+        result
+    }
+
+    /// Verify arbitrary JSON after rebuilding its captured SHA. Negative tests
+    /// use this so failures are attributable to strict schema/provenance gates,
+    /// not the manifest hash.
+    fn verify_scratch_values(
+        golden: serde_json::Value,
+        mut manifest: serde_json::Value,
+        tag: &str,
+    ) -> Result<(), crate::Error> {
+        let scratch = std::env::temp_dir().join(format!(
+            "rivet-oracle-features-values-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&scratch);
+        fs::create_dir_all(&scratch).unwrap();
+        let bytes = serde_json::to_vec(&golden).unwrap();
+        fs::write(scratch.join(FIXTURE_BASENAME), &bytes).unwrap();
+        manifest["captured"][0]["sha256"] = serde_json::Value::String(crate::sha256_hex(&bytes));
+        manifest["captured"][0]["bytes"] = serde_json::Value::from(bytes.len());
+        fs::write(
+            scratch.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let result = verify_features(&scratch);
+        let _ = fs::remove_dir_all(&scratch);
+        result
+    }
+
+    /// Build a fixture JSON object with one nested object key repeated. The
+    /// altered value is first and the canonical value is last, matching the
+    /// tamper that ordinary BTreeMap deserialization would silently accept.
+    fn duplicate_nested_object_entry(
+        golden: &serde_json::Value,
+        outer_key: &str,
+        inner_key: &str,
+        first_value: &serde_json::Value,
+    ) -> String {
+        let root = golden.as_object().unwrap();
+        let mut root_entries = Vec::new();
+        for (key, value) in root {
+            let key_json = serde_json::to_string(key).unwrap();
+            if key != outer_key {
+                root_entries.push(format!(
+                    "{key_json}:{}",
+                    serde_json::to_string(value).unwrap()
+                ));
+                continue;
+            }
+            let nested = value.as_object().unwrap();
+            let mut nested_entries = Vec::new();
+            for (nested_key, canonical) in nested {
+                let nested_key_json = serde_json::to_string(nested_key).unwrap();
+                if nested_key == inner_key {
+                    nested_entries.push(format!(
+                        "{nested_key_json}:{}",
+                        serde_json::to_string(first_value).unwrap()
+                    ));
+                }
+                nested_entries.push(format!(
+                    "{nested_key_json}:{}",
+                    serde_json::to_string(canonical).unwrap()
+                ));
+            }
+            root_entries.push(format!("{key_json}:{{{}}}", nested_entries.join(",")));
+        }
+        format!("{{{}}}", root_entries.join(","))
+    }
+
+    /// Verify raw fixture JSON after rebuilding its captured SHA. Unlike
+    /// `verify_scratch_values`, this preserves duplicate object keys so the
+    /// duplicate-key detector itself is exercised rather than serde's map
+    /// overwrite behavior.
+    fn verify_scratch_raw(raw: String, tag: &str) -> Result<(), crate::Error> {
+        let scratch = std::env::temp_dir().join(format!(
+            "rivet-oracle-features-raw-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&scratch);
+        fs::create_dir_all(&scratch).unwrap();
+        let bytes = raw.as_bytes();
+        fs::write(scratch.join(FIXTURE_BASENAME), bytes).unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(fixtures_dir().join("features/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        manifest["captured"][0]["sha256"] = serde_json::Value::String(crate::sha256_hex(bytes));
+        manifest["captured"][0]["bytes"] = serde_json::Value::from(bytes.len());
+        fs::write(
+            scratch.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let result = verify_features(&scratch);
+        let _ = fs::remove_dir_all(&scratch);
+        result
+    }
+
+    /// Write `world` into a scratch dir and run the full verify against it,
+    /// expecting rejection (the shared schema-degradation tests). No feature
+    /// observations are attached, so a world that passes `validate_world` but
+    /// carries no feature-palette evidence is rejected by the observation
+    /// contract rather than handed off.
+    fn verify_scratch_world(world: &WorldManifest, tag: &str) -> crate::Error {
+        let golden = FeaturesGolden {
+            seed: PINNED_SEED,
+            world: world.clone(),
+            feature_observations: BTreeMap::new(),
+        };
+        verify_scratch_golden(&golden, tag)
+            .expect_err("the checkpoint must be rejected by the decoration contract")
     }
 
     /// A WorldManifest with the committed 2x2 grid at the given status; each

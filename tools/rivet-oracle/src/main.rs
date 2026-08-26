@@ -145,7 +145,7 @@ mod mutate;
 mod semantic_hash;
 mod surface_column;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt;
 use std::fs;
@@ -454,6 +454,97 @@ fn sha256_hex(data: &[u8]) -> String {
     s
 }
 
+/// Reject duplicate object keys before serde can overwrite them in a map.
+///
+/// JSON object keys are semantically unique for every fixture consumed by this
+/// harness. `serde_json`'s normal map deserialization keeps the last value, so
+/// a canonical-value-last duplicate would otherwise evade a freshly rebuilt
+/// manifest hash and the typed schema checks below.
+pub(crate) fn reject_duplicate_json_keys(data: &[u8]) -> Result<(), String> {
+    use serde::de::{DeserializeSeed, Deserializer as _, MapAccess, SeqAccess, Visitor};
+
+    struct Detector;
+
+    impl<'de> DeserializeSeed<'de> for Detector {
+        type Value = ();
+
+        fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_any(self)
+        }
+    }
+
+    impl<'de> Visitor<'de> for Detector {
+        type Value = ();
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a JSON value with unique object keys")
+        }
+
+        fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+            Ok(())
+        }
+
+        fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+            Ok(())
+        }
+
+        fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+            Ok(())
+        }
+
+        fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+            Ok(())
+        }
+
+        fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
+            Ok(())
+        }
+
+        fn visit_string<E>(self, _value: String) -> Result<Self::Value, E> {
+            Ok(())
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(())
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            while sequence.next_element_seed(Detector)?.is_some() {}
+            Ok(())
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut keys = BTreeSet::new();
+            while let Some(key) = map.next_key::<String>()? {
+                if !keys.insert(key.clone()) {
+                    return Err(serde::de::Error::custom(format!(
+                        "duplicate JSON object key {key:?}"
+                    )));
+                }
+                map.next_value_seed(Detector)?;
+            }
+            Ok(())
+        }
+    }
+
+    let mut deserializer = serde_json::Deserializer::from_slice(data);
+    deserializer
+        .deserialize_any(Detector)
+        .map_err(|error| error.to_string())?;
+    deserializer
+        .end()
+        .map_err(|error| format!("trailing JSON data: {error}"))
+}
+
 fn raw_corpus_identity(fixture_root: &Path, manifest: &Manifest) -> Result<String, Error> {
     let mut captures: Vec<&Captured> = manifest
         .captured
@@ -476,6 +567,8 @@ fn load_manifest(dir: &Path) -> Result<Manifest, Error> {
     let manifest_path = dir.join("manifest.json");
     let raw = fs::read_to_string(&manifest_path)
         .map_err(|e| Error::Manifest(format!("cannot read {}: {e}", manifest_path.display())))?;
+    reject_duplicate_json_keys(raw.as_bytes())
+        .map_err(|e| Error::Manifest(format!("invalid manifest.json: {e}")))?;
     let manifest: Manifest = serde_json::from_str(&raw)
         .map_err(|e| Error::Manifest(format!("invalid manifest.json: {e}")))?;
     if manifest.format != 1 {
