@@ -97,8 +97,8 @@ use rivet_world::chunk::proto_chunk::ProtoChunk;
 use rivet_world::chunk::status::{ChunkStatus, ChunkStep};
 use rivet_world::chunk::storage::chunk_reconstruction::resolve_state_flags;
 use rivet_world::chunk::storage::section_reconstruction::BiomeId as WorldgenBiomeId;
-use rivet_world::level::WorldGenLevel;
 use rivet_world::level::height_accessor::LevelHeightAccessor;
+use rivet_world::level::{WorldBorder, WorldGenLevel};
 use rivet_world::levelgen::heightmap::Types;
 use rivet_world::ticks::{SavedTick, ScheduledTick};
 
@@ -555,6 +555,11 @@ where
     height: i32,
     /// `level.getSeaLevel()`.
     sea_level: i32,
+    /// `level.getWorldBorder()` — the generated region keeps the same live
+    /// border representation used by `SpawnPlacementTypes.ON_GROUND`.
+    /// Worldgen callers default to Paper's default border and may replace it
+    /// when composing a region for a configured world.
+    world_border: WorldBorder,
     /// `biomeManager` — `new BiomeManager(this, obfuscateSeed(seed))`, the
     /// source routed to the injected uncached source (see the module doc).
     biome_manager: BiomeManager,
@@ -633,6 +638,7 @@ where
             min_y,
             height,
             sea_level,
+            world_border: WorldBorder::default(),
             biome_manager,
             uncached_biome_source,
             registry_access,
@@ -652,6 +658,16 @@ where
     /// `WorldGenRegion.getCenter()`.
     pub fn get_center(&self) -> ChunkPos {
         self.center_pos
+    }
+
+    /// `Level.getWorldBorder()` for the generated region.
+    pub fn world_border(&self) -> &WorldBorder {
+        &self.world_border
+    }
+
+    /// Mutable world-border access for the owning worldgen composition path.
+    pub fn world_border_mut(&mut self) -> &mut WorldBorder {
+        &mut self.world_border
     }
 
     /// Block ticks owned by the cached chunks, in cache iteration order. This
@@ -960,14 +976,16 @@ where
     /// `WorldGenRegion.getRawBrightness` delegates to the level light engine;
     /// this value layer has no engine object in the region, so the equivalent
     /// completed result is the visible Starlight nibble data published on the
-    /// LIGHT-complete `ChunkAccess`. A chunk that is not light-correct or has
-    /// malformed light section storage is unavailable and returns `None`; the
-    /// Starlight open-sky fallback remains full brightness for null sky data.
+    /// cached `ChunkAccess`. Paper's light engine resolves the holder at EMPTY;
+    /// SPAWN neighbours may be only BIOMES while their completed light data is
+    /// already published. A chunk that is not light-correct or has malformed
+    /// light section storage is unavailable and returns `None`; the Starlight
+    /// open-sky fallback remains full brightness for null sky data.
     pub fn get_raw_brightness(&self, pos: &BlockPos) -> Option<i32> {
         let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
         let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
         let chunk = self
-            .try_get_chunk(chunk_x, chunk_z, ChunkStatus::Light, false)
+            .try_get_chunk(chunk_x, chunk_z, ChunkStatus::Empty, false)
             .ok()?;
         if !chunk.is_light_correct() {
             return None;

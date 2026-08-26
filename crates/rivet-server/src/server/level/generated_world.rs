@@ -2300,9 +2300,10 @@ fn adjust_spawn_y(
 }
 
 /// `BlockState.isPathfindable(PathComputationType.LAND)`. The generated
-/// collision-face table supplies the static full-shape answer; dynamic or
-/// otherwise unavailable shapes fail closed and leave the height candidate
-/// unchanged rather than treating a non-pathfindable block as air.
+/// collision-face table supplies the default full-shape answer. The explicit
+/// class families below mirror Paper overrides; context-sensitive classes are
+/// listed by their concrete registered block names rather than collapsing all
+/// dynamic shapes into one answer.
 fn is_pathfindable_land(state: BlockState) -> bool {
     let name = state.block().name();
     // PowderSnowBlock explicitly overrides LAND pathfinding to true even
@@ -2310,20 +2311,20 @@ fn is_pathfindable_land(state: BlockState) -> bool {
     if name == "minecraft:powder_snow" {
         return true;
     }
-    // Scaffolding does not override `BlockBehaviour.isPathfindable`: its
-    // empty collision context selects the stable, non-full shape, so the
-    // inherited LAND predicate is true even though the block is dynamic.
+    // Scaffolding inherits BlockBehaviour.isPathfindable: its empty collision
+    // context selects the stable, non-full shape, so LAND is true.
     if name == "minecraft:scaffolding" {
         return true;
-    }
-    if state.has_dynamic_shape() {
-        return false;
     }
     match name {
         // These block classes override the default LAND predicate to false.
         "minecraft:soul_sand"
         | "minecraft:dirt_path"
         | "minecraft:farmland"
+        | "minecraft:bamboo"
+        | "minecraft:moving_piston"
+        | "minecraft:pointed_dripstone"
+        | "minecraft:sulfur_spike"
         | "minecraft:mud"
         | "minecraft:cactus"
         | "minecraft:iron_bars"
@@ -2391,7 +2392,9 @@ fn is_pathfindable_land(state: BlockState) -> bool {
             || name.ends_with("_lightning_rod")
             || name.ends_with("_copper_chest")
             || name.ends_with("_copper_golem_statue")
-            || name.ends_with("_wall_hanging_sign") =>
+            || name.ends_with("_wall_hanging_sign")
+            || name == "minecraft:shulker_box"
+            || name.ends_with("_shulker_box") =>
         {
             false
         }
@@ -2410,10 +2413,11 @@ fn is_pathfindable_land(state: BlockState) -> bool {
             Some(PropertyValue::Int(layers)) if layers < 5
         ),
         // The default BlockBehaviour predicate is `!isCollisionShapeFullBlock`.
-        // The generated collision-face mask is the exact full-face VoxelShape
-        // query available in this registry slice, so it answers the default
-        // without collapsing a partial shape into blocksMotion.
-        _ => state.collision_face_mask() != 0x3F,
+        // Dynamic states still require a live collision context; an unknown
+        // dynamic shape must not be inferred from its zero-context samples.
+        // Static states can use the generated full-face mask for Paper's
+        // empty-context full-block predicate.
+        _ => !state.has_dynamic_shape() && state.collision_face_mask() != 0x3F,
     }
 }
 
@@ -2427,6 +2431,13 @@ fn is_spawn_position_ok(
     // placement predicate must not impose ON_GROUND's empty-block/floor gate.
     if matches!(entity_type, "minecraft:fox" | "minecraft:panda") {
         return true;
+    }
+    // `SpawnPlacementTypes.ON_GROUND` checks the candidate block against the
+    // live `Level.getWorldBorder()` before any floor or empty-block predicates.
+    // The region carries that same WorldBorder representation; NO_RESTRICTIONS
+    // above intentionally remains border-independent like Paper.
+    if !region.world_border().is_within_bounds(pos) {
+        return false;
     }
     let below = pos.below();
     let below_state = region.get_block_state(&below);
@@ -2508,13 +2519,19 @@ fn is_valid_spawn_floor(state: BlockState, entity_type: &str) -> bool {
 }
 
 fn is_valid_empty_spawn_block(state: BlockState, entity_type: &str, pos: &BlockPos) -> bool {
-    // `NaturalSpawner.isValidEmptySpawnBlock` uses the complete collision shape,
-    // not the render/occlusion bit. An unavailable shape fails closed so the
-    // entity boundary is never reached on an unverified candidate.
-    let Some(shape) = spawn_collision_shape(state, pos, SpawnCollisionContext::Empty) else {
-        return false;
+    // `NaturalSpawner.isValidEmptySpawnBlock` only asks whether the empty
+    // collision shape is a full block, then applies signal/fluid/tag/danger
+    // predicates. Known dynamic shapes use their concrete Paper fallback;
+    // unknown dynamic shapes fail closed because their context is unavailable.
+    // For an unknown static shape, the generated full-face mask still answers
+    // the exact empty-context full-block predicate, so a partial shape must
+    // follow Paper rather than being blanket-rejected.
+    let is_full = match spawn_collision_shape(state, pos, SpawnCollisionContext::Empty) {
+        Some(shape) => shape.is_full(),
+        None if !state.has_dynamic_shape() => state.collision_face_mask() == 0x3F,
+        None => return false,
     };
-    !shape.is_full()
+    !is_full
         && !is_signal_source(state)
         && state.fluid_empty()
         && !state.is_in_tag("minecraft:prevent_mob_spawning_inside")
@@ -2524,8 +2541,9 @@ fn is_valid_empty_spawn_block(state: BlockState, entity_type: &str, pos: &BlockP
 /// A compact VoxelShape slice for generation-time collision checks. The
 /// generated registry does not yet expose arbitrary VoxelShape boxes, so this
 /// keeps the exact empty/full/known worldgen shapes that occur in the dynamic
-/// block families. Unknown static shapes still fail closed rather than turning
-/// an unverified candidate into a spawn.
+/// block families. Unknown static shapes remain unavailable for obstruction
+/// checks; `is_valid_empty_spawn_block` separately uses their generated
+/// full-face mask for Paper's empty-context full-block predicate.
 #[derive(Clone, Copy)]
 struct SpawnShapeBox {
     min_x: f64,
@@ -5538,6 +5556,34 @@ mod tests {
     }
 
     #[test]
+    fn spawn_brightness_reads_biomes_neighbour_with_completed_light() {
+        let generator = test_generator();
+        let center = ChunkPos::ZERO;
+        let mut holder = flat_spawn_holder(&generator, center, 3);
+        let mut workspace = spawn_region_workspace(&generator, center, 3);
+        let neighbour_pos = ChunkPos::new(1, 0);
+        let (_, neighbour) = workspace
+            .neighbours
+            .iter_mut()
+            .find(|(pos, _)| *pos == neighbour_pos)
+            .expect("east neighbour");
+        let mut sky_nibbles = neighbour.sky_nibbles().to_vec();
+        for nibble in &mut sky_nibbles {
+            nibble.set_full();
+            nibble.update_visible();
+        }
+        neighbour.set_sky_nibbles(sky_nibbles);
+        neighbour.set_light_correct(true);
+        assert_eq!(neighbour.get_persisted_status(), ChunkStatus::Biomes);
+        let region = compose_spawn_region(&mut holder.chunk, &mut workspace, &generator)
+            .expect("radius-one workspace");
+        assert_eq!(
+            region.get_raw_brightness(&BlockPos::new(16, 1, 0)),
+            Some(15)
+        );
+    }
+
+    #[test]
     fn spawn_brightness_uses_open_sky_fallback_for_null_nibbles() {
         let generator = test_generator();
         let pos = ChunkPos::new(-8, -4);
@@ -5720,7 +5766,11 @@ mod tests {
         let scaffolding = BlockState::of(BlockId::from_name("minecraft:scaffolding").unwrap());
         let pointed_dripstone =
             BlockState::of(BlockId::from_name("minecraft:pointed_dripstone").unwrap());
+        let sulfur_spike = BlockState::of(BlockId::from_name("minecraft:sulfur_spike").unwrap());
         let moving_piston = BlockState::of(BlockId::from_name("minecraft:moving_piston").unwrap());
+        let stairs = BlockState::of(BlockId::from_name("minecraft:oak_stairs").unwrap());
+        let stone_pressure_plate =
+            BlockState::of(BlockId::from_name("minecraft:stone_pressure_plate").unwrap());
         let firefly_bush = BlockState::of(BlockId::from_name("minecraft:firefly_bush").unwrap());
         let rail = BlockState::of(BlockId::from_name("minecraft:rail").unwrap());
         let powered_rail = BlockState::of(BlockId::from_name("minecraft:powered_rail").unwrap());
@@ -5834,9 +5884,24 @@ mod tests {
                 .is_some_and(|shape| !shape.is_full())
         );
         assert!(
+            spawn_collision_shape(sulfur_spike, &pos, SpawnCollisionContext::Empty)
+                .is_some_and(|shape| !shape.is_full())
+        );
+        assert!(
             spawn_collision_shape(moving_piston, &pos, SpawnCollisionContext::Empty)
                 .is_some_and(|shape| !shape.is_full())
         );
+        // Stairs have an intentionally unported partial VoxelShape. Paper's
+        // empty-spawn check asks only `isCollisionShapeFullBlock`, so the
+        // generated static full-face sample keeps this candidate valid even
+        // though obstruction checks still refuse the unknown shape.
+        assert!(spawn_collision_shape(stairs, &pos, SpawnCollisionContext::Empty).is_none());
+        assert!(is_valid_empty_spawn_block(stairs, "minecraft:cow", &pos));
+        assert!(!is_valid_empty_spawn_block(
+            stone_pressure_plate,
+            "minecraft:cow",
+            &pos
+        ));
         assert!(!is_valid_empty_spawn_block(
             leaves,
             "minecraft:parrot",
@@ -5886,6 +5951,13 @@ mod tests {
         let flower_pot = BlockState::of(BlockId::from_name("minecraft:flower_pot").unwrap());
         let lantern = BlockState::of(BlockId::from_name("minecraft:lantern").unwrap());
         let scaffolding = BlockState::of(BlockId::from_name("minecraft:scaffolding").unwrap());
+        let bamboo = BlockState::of(BlockId::from_name("minecraft:bamboo").unwrap());
+        let pointed_dripstone =
+            BlockState::of(BlockId::from_name("minecraft:pointed_dripstone").unwrap());
+        let sulfur_spike = BlockState::of(BlockId::from_name("minecraft:sulfur_spike").unwrap());
+        let stone_pressure_plate =
+            BlockState::of(BlockId::from_name("minecraft:stone_pressure_plate").unwrap());
+        let iron_bars = BlockState::of(BlockId::from_name("minecraft:iron_bars").unwrap());
         let ender_chest = BlockState::of(BlockId::from_name("minecraft:ender_chest").unwrap());
         let copper_chain = BlockState::of(BlockId::from_name("minecraft:copper_chain").unwrap());
         let exposed_copper_statue =
@@ -5913,6 +5985,14 @@ mod tests {
         assert!(!is_pathfindable_land(flower_pot));
         assert!(!is_pathfindable_land(lantern));
         assert!(is_pathfindable_land(scaffolding));
+        // These partial-collision classes have concrete Paper predicates:
+        // BambooStalkBlock and SpeleothemBlock return false, while
+        // BasePressurePlateBlock inherits the default non-full answer.
+        assert!(!is_pathfindable_land(bamboo));
+        assert!(!is_pathfindable_land(pointed_dripstone));
+        assert!(!is_pathfindable_land(sulfur_spike));
+        assert!(is_pathfindable_land(stone_pressure_plate));
+        assert!(!is_pathfindable_land(iron_bars));
         assert!(!is_pathfindable_land(ender_chest));
         assert!(!is_pathfindable_land(copper_chain));
         assert!(!is_pathfindable_land(exposed_copper_statue));
@@ -5926,6 +6006,43 @@ mod tests {
         assert!(is_pathfindable_land(powder_snow));
         assert!(is_pathfindable_land(water));
         assert!(!is_pathfindable_land(lava));
+    }
+
+    #[test]
+    fn spawn_on_ground_respects_region_world_border_edges() {
+        let generator = test_generator();
+        let center = ChunkPos::ZERO;
+        let mut holder = flat_spawn_holder(&generator, center, 3);
+        let mut workspace = spawn_region_workspace(&generator, center, 3);
+        let mut region = compose_spawn_region(&mut holder.chunk, &mut workspace, &generator)
+            .expect("radius-one workspace");
+        // Bounds are [0, 2) on both axes, matching WorldBorder's half-open
+        // `isWithinBounds` check. All three candidates have a sand floor and
+        // two air blocks, so only the border result distinguishes them.
+        region.world_border_mut().set_center(1.0, 1.0);
+        region.world_border_mut().set_size(2.0);
+        assert!(is_spawn_position_ok(
+            &region,
+            "minecraft:cow",
+            &BlockPos::new(0, 1, 0),
+        ));
+        assert!(is_spawn_position_ok(
+            &region,
+            "minecraft:cow",
+            &BlockPos::new(1, 1, 0),
+        ));
+        assert!(!is_spawn_position_ok(
+            &region,
+            "minecraft:cow",
+            &BlockPos::new(2, 1, 0),
+        ));
+        // NO_RESTRICTIONS is a separate Paper placement type and remains
+        // border-independent.
+        assert!(is_spawn_position_ok(
+            &region,
+            "minecraft:fox",
+            &BlockPos::new(2, 1, 0),
+        ));
     }
 
     #[test]
