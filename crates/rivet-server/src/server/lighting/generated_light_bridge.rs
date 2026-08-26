@@ -507,7 +507,7 @@ impl GeneratedLightWorkspace {
         })
     }
 
-    /// The exact radius-two neighbour positions required by this workspace.
+    /// The exact radius-one neighbour positions required by this workspace.
     pub fn required_neighbors(&self) -> &[ChunkPos] {
         &self.required_neighbors
     }
