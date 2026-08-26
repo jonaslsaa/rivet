@@ -64,12 +64,13 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaises(NbtError):
             parse(duplicate)
 
-    def test_compressed_stream_requires_end_marker(self):
+    def test_compressed_stream_requires_exact_end_marker(self):
         compressed = zlib.compress(b"abc")
-        with self.assertRaises(capture.Failed):
-            capture._strict_decompress(compressed[:-1])
-        with self.assertRaises(validate.Failed):
-            validate.strict_decompress(compressed[:-1])
+        for malformed in (compressed[:-1], compressed + b"trailing"):
+            with self.assertRaises(capture.Failed):
+                capture._strict_decompress(malformed)
+            with self.assertRaises(validate.Failed):
+                validate.strict_decompress(malformed)
 
     def test_external_mcc_chunk_is_loaded_from_stub(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -128,6 +129,39 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(result.returncode, 3)
             self.assertIn("UNVERIFIED", result.stdout)
 
+    def test_bundle_rejects_malformed_run_entry_and_symlink_root(self):
+        contract = json.loads((HERE / "fixtures/contract.json").read_text())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle = root / "bundle"
+            bundle.mkdir()
+            (bundle / "bundle.json").write_text(json.dumps({
+                "format": 1,
+                "kind": contract["kind"],
+                "producer": validate.PRODUCER,
+                "parity_claim": None,
+                "rivet_commit": None,
+                "paper_revision": validate.EXPECTED_PAPER,
+                "contract_sha256": validate.sha256((HERE / "fixtures/contract.json").read_bytes()),
+                "seeds": validate.EXPECTED_SEEDS,
+                "targets": [list(item) for item in validate.EXPECTED_TARGETS],
+                "closure_radius": validate.EXPECTED_RADIUS,
+                "attempts_per_seed": 3,
+                "runs": [{"seed": int(validate.EXPECTED_SEEDS[0]), "attempt": 1, "path": "runs/seed/1"}],
+            }))
+            with self.assertRaises(validate.Failed):
+                validate.validate_bundle(bundle)
+            link = root / "bundle-link"
+            link.symlink_to(bundle, target_is_directory=True)
+            result = subprocess.run(
+                [sys.executable, str(HERE / "validate.py"), str(link)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 3)
+            self.assertIn("UNVERIFIED", result.stdout)
+
     def test_error_log_is_failed(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "server.log"
@@ -155,6 +189,12 @@ class EvidenceTests(unittest.TestCase):
                 "config": config,
                 "simulation": {"random_tick_speed": 0, "do_daylight_cycle": False, "do_weather_cycle": False, "do_mob_spawning": False, "spawn_limits": 0},
             }
+            runtime_server = run / "server.properties"
+            runtime_server.write_text(runtime_server.read_text().replace("level-type=minecraft:normal", "level-type=minecraft\\:normal") + "unknown-paper-default=true\\n")
+            manifest["config"]["runtime_server_properties"] = capture.file_record(runtime_server, "server.properties")
+            runtime_global = run / "config/paper-global.yml"
+            runtime_global.write_text(runtime_global.read_text() + "extra-paper-default: true\\n")
+            manifest["config"]["runtime_paper_global"] = capture.file_record(runtime_global, "config/paper-global.yml")
             validate._validate_config(run, seed, manifest)
             manifest["ports"]["configured_server"] = 0
             with self.assertRaises(validate.Failed):
@@ -168,10 +208,10 @@ class EvidenceTests(unittest.TestCase):
             token = "a" * 64
             log = run / "ordered.log"
             log.write_text(
-                "Done (1s)!\\n"
                 "RIVET_SIMULATION_FROZEN randomTickSpeed=0\\n"
                 "RIVET_PROBE_READY targets=8 closure=2451\\n"
                 f"RIVET_CAPTURE_TOKEN={token}\\n"
+                "Done (1s)!\\n"
                 "[MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads\\n"
                 "Stopping server\\n"
                 "All dimensions are saved\\n"

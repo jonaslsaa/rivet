@@ -113,16 +113,33 @@ def strict_decompress(data: bytes, *, gzip_stream: bool = False) -> bytes:
     return raw
 
 
+def _unescape_property(value: str) -> str:
+    result: list[str] = []
+    escaped = False
+    escapes = {"t": "\t", "r": "\r", "n": "\n", "f": "\f"}
+    for character in value:
+        if escaped:
+            result.append(escapes.get(character, character))
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        else:
+            result.append(character)
+    if escaped:
+        result.append("\\")
+    return "".join(result)
+
+
 def parse_properties(text: str) -> dict[str, str]:
     result: dict[str, str] = {}
     for line in text.splitlines():
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             key, value = line.split("=", 1)
-            key = key.strip()
+            key = _unescape_property(key.strip())
             if key in result:
                 raise Failed(f"duplicate server.properties key: {key}")
-            result[key] = value.strip()
+            result[key] = _unescape_property(value.strip())
     return result
 
 
@@ -133,6 +150,54 @@ def properties_text(seed: str) -> str:
 def expected_properties(seed: str) -> dict[str, str]:
     fixture = parse_properties((HERE / "fixtures" / "server.properties").read_text())
     return {key: (str(java_seed(seed)) if value == "<seed>" else value) for key, value in fixture.items()}
+
+
+def _yaml_values(text: str) -> dict[tuple[str, ...], list[str]]:
+    """Extract scalar paths needed from Paper's generated YAML.
+
+    Paper rewrites the fixture files with its complete defaults on first boot.
+    A small indentation-aware reader is enough for the scalar contract paths;
+    it also lets validation reject duplicate effective keys without depending
+    on an optional YAML package.
+    """
+    values: dict[tuple[str, ...], list[str]] = {}
+    stack: list[tuple[int, str]] = []
+    for raw_line in text.splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        line = raw_line.strip()
+        if line in {"---", "..."} or line.startswith("-") or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        while stack and indent <= stack[-1][0]:
+            stack.pop()
+        if not value:
+            stack.append((indent, key))
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        path = tuple(item[1] for item in stack) + (key,)
+        values.setdefault(path, []).append(value)
+    return values
+
+
+def _validate_paper_yaml(run: Path) -> None:
+    for key, relative, fixture_name in (
+        ("paper_global", "provenance/config/paper-global.yml", "paper-global.yml"),
+        ("paper_world_defaults", "provenance/config/paper-world-defaults.yml", "paper-world-defaults.yml"),
+    ):
+        fixture = (HERE / "fixtures" / fixture_name).read_text()
+        runtime_relative = relative.removeprefix("provenance/")
+        runtime = run / runtime_relative
+        runtime_values = _yaml_values(runtime.read_text())
+        fixture_values = _yaml_values(fixture)
+        for path, expected in fixture_values.items():
+            actual = runtime_values.get(path)
+            if actual != expected:
+                raise Failed(f"runtime Paper YAML does not preserve {key} path {'.'.join(path)}")
 
 
 def read_region(path: Path, region_coordinates: tuple[int, int]) -> dict[tuple[int, int], bytes]:
@@ -426,7 +491,7 @@ def _validate_log(path: Path, token: str, *, capture: bool) -> None:
         ready_at = unique_marker("RIVET_PROBE_READY")
         token_at = unique_marker("RIVET_CAPTURE_TOKEN=" + token)
         frozen_at = unique_marker("RIVET_SIMULATION_FROZEN")
-        if not (done_at < frozen_at < ready_at <= token_at < stopping_at):
+        if not (frozen_at < ready_at <= token_at < done_at < stopping_at):
             raise Failed("Paper simulation/probe-ready/token markers are not ordered before graceful stop")
 
 
@@ -439,8 +504,8 @@ def _validate_config(run: Path, seed: str, manifest: dict[str, Any]) -> None:
     if provenance.read_text() != properties_text(seed):
         raise Failed("server.properties provenance differs from pinned fixture")
     actual_properties = parse_properties(actual.read_text())
-    if set(actual_properties) != set(expected):
-        raise Failed("runtime server.properties keys differ from pinned normal-overworld config")
+    if not set(expected).issubset(actual_properties):
+        raise Failed("runtime server.properties is missing a pinned normal-overworld key")
     ports = manifest.get("ports", {})
     configured_server = ports.get("configured_server")
     configured_query = ports.get("configured_query")
@@ -473,16 +538,23 @@ def _validate_config(run: Path, seed: str, manifest: dict[str, Any]) -> None:
     for key, relative, fixture in (
         ("paper_global", "provenance/config/paper-global.yml", "paper-global.yml"),
         ("paper_world_defaults", "provenance/config/paper-world-defaults.yml", "paper-world-defaults.yml"),
-        ("runtime_paper_global", "config/paper-global.yml", "paper-global.yml"),
-        ("runtime_paper_world_defaults", "config/paper-world-defaults.yml", "paper-world-defaults.yml"),
     ):
         path = run / relative
         record = config.get(key, {})
         fixture_bytes = (HERE / "fixtures" / fixture).read_bytes()
         if path.is_symlink() or not path.is_file() or path.read_bytes() != fixture_bytes:
-            raise Failed(f"pinned runtime/provenance config differs: {relative}")
+            raise Failed(f"pinned provenance config differs: {relative}")
         if record.get("path") != relative or record.get("sha256") != sha256(fixture_bytes) or record.get("bytes") != len(fixture_bytes):
             raise Failed(f"config manifest provenance is absent or tampered: {relative}")
+    for key, relative in (
+        ("runtime_paper_global", "config/paper-global.yml"),
+        ("runtime_paper_world_defaults", "config/paper-world-defaults.yml"),
+    ):
+        path = run / relative
+        record = config.get(key, {})
+        if path.is_symlink() or not path.is_file() or record.get("path") != relative or record.get("sha256") != sha256(path.read_bytes()) or record.get("bytes") != path.stat().st_size:
+            raise Failed(f"runtime Paper config provenance is absent or tampered: {relative}")
+    _validate_paper_yaml(run)
     simulation = manifest.get("simulation")
     if simulation != {"random_tick_speed": 0, "do_daylight_cycle": False, "do_weather_cycle": False, "do_mob_spawning": False, "spawn_limits": 0}:
         raise Failed("simulation is not frozen by the pinned contract")
@@ -523,6 +595,30 @@ def _validate_tickets(run: Path, expected_closure: list[tuple[int, int]], manife
         or ticket_manifest.get("held_through_stop") is not True
     ):
         raise Failed("ticket lifecycle/hash provenance is incomplete")
+
+
+def _validate_process_timing(manifest: dict[str, Any]) -> None:
+    process = manifest.get("process", {})
+    boot1 = process.get("boot1", {})
+    capture = process.get("capture", {})
+    extraction = manifest.get("extraction", {})
+    timestamps = [
+        boot1.get("started_ns"),
+        boot1.get("stop_command_ns"),
+        boot1.get("ended_ns"),
+        capture.get("started_ns"),
+        capture.get("stop_command_ns"),
+        capture.get("ended_ns"),
+        extraction.get("started_ns"),
+    ]
+    if any(type(value) is not int or value <= 0 for value in timestamps):
+        raise Failed("Paper process/extraction timestamps are absent or malformed")
+    if not (
+        boot1["started_ns"] <= boot1["stop_command_ns"] <= boot1["ended_ns"]
+        <= capture["started_ns"] <= capture["stop_command_ns"] <= capture["ended_ns"]
+        <= extraction["started_ns"]
+    ):
+        raise Failed("Paper process/extraction timestamps are out of order")
 
 
 def _validate_probe(run: Path, token: str, expected_closure: list[tuple[int, int]]) -> None:
@@ -590,6 +686,8 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
     if jar_manifest(runtime_path).get("Git-Commit") != EXPECTED_PAPER_SHORT:
         raise Failed("fresh materialized Paper runtime does not prove the pinned source")
     probe_artifact = manifest.get("probe_artifact", {})
+    if paper_jar.get("probe_artifact") != probe_artifact:
+        raise Failed("compiled probe provenance is duplicated inconsistently")
     probe_relative = probe_artifact.get("path")
     if probe_relative != "plugins/RivetPaperNormalFullProbe.jar":
         raise Failed("compiled main-thread probe path is not pinned")
@@ -642,6 +740,7 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
         raise Failed("one of the Paper boots was not a clean zero exit")
     if process.get("log") != "server.log" or boot1.get("log") != "server-create.log" or capture.get("log") != "server.log":
         raise Failed("Paper boot log route is wrong")
+    _validate_process_timing(manifest)
     _validate_config(run, expected_seed, manifest)
     if manifest.get("dimension") != "minecraft:overworld" or manifest.get("level_type") != "minecraft:normal" or manifest.get("generate_structures") is not True:
         raise Failed("wrong dimension/worldgen route")
@@ -691,13 +790,19 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
     semantic: dict[tuple[int, int], str] = {}
     for entry, coordinate in zip(chunks, expected_closure):
         raw = actual_chunks[coordinate]
-        raw_path = run / entry.get("raw_path", "")
+        expected_raw_path = f"chunks/{coordinate[0]}.{coordinate[1]}.nbt"
+        if entry.get("raw_path") != expected_raw_path:
+            raise Failed(f"chunk raw path is not the pinned closure path: {coordinate}")
+        raw_path = run / expected_raw_path
         if raw_path.is_symlink() or not raw_path.is_file() or raw_path.read_bytes() != raw:
             raise Failed(f"post-exit raw decompressed payload mismatch: {coordinate}")
         if entry.get("raw_sha256") != sha256(raw) or entry.get("raw_bytes") != len(raw):
             raise Failed(f"raw NBT hash mismatch: {coordinate}")
         _, semantic_hash, details = validate_chunk(raw, coordinate, target=coordinate in EXPECTED_TARGETS)
-        if entry.get("status") != details["status"] or entry.get("semantic_sha256") != semantic_hash or entry.get("light_correct") != details["light_correct"] or entry.get("heightmaps") != details["heightmaps"]:
+        if any(
+            entry.get(key) != details[key]
+            for key in ("status", "light_correct", "heightmaps", "heightmap_ranges", "palette_names")
+        ) or entry.get("semantic_sha256") != semantic_hash:
             raise Failed(f"chunk status/light/heightmap/semantic evidence mismatch: {coordinate}")
         semantic[coordinate] = semantic_hash
     if manifest.get("semantic_hash_dynamic_fields") != ["InhabitedTime", "LastUpdate"]:
@@ -727,18 +832,29 @@ def validate_bundle(bundle_dir: Path) -> None:
     if not isinstance(runs, list):
         raise Failed("bundle runs list is absent")
     expected = {(seed, attempt) for seed in EXPECTED_SEEDS for attempt in range(1, attempts_per_seed + 1)}
-    actual = {(str(item.get("seed")), item.get("attempt")) for item in runs}
+    if len(runs) != len(expected) or any(
+        not isinstance(item, dict)
+        or type(item.get("seed")) is not str
+        or item.get("seed") not in EXPECTED_SEEDS
+        or type(item.get("attempt")) is not int
+        or item.get("attempt") < 1
+        or item.get("attempt") > attempts_per_seed
+        or type(item.get("path")) is not str
+        for item in runs
+    ):
+        raise Failed("bundle run entries are malformed")
+    actual = {(item["seed"], item["attempt"]) for item in runs}
     if actual != expected or len(actual) != len(expected):
         raise Failed("bundle does not contain exactly three fresh roots for every seed")
     expected_paths = {str(Path("runs") / seed / str(attempt)) for seed, attempt in expected}
-    listed_paths = {item.get("path") for item in runs}
+    listed_paths = {item["path"] for item in runs}
     if listed_paths != expected_paths:
         raise Failed("bundle run paths are incomplete or duplicated")
     actual_dirs = {str(path.relative_to(bundle_dir)) for path in (bundle_dir / "runs").glob("*/*") if path.is_dir() and not path.is_symlink()}
     if actual_dirs != expected_paths:
         raise Failed("bundle contains an unlisted, stale, or symlinked run root")
     semantic_by_seed: dict[str, dict[tuple[int, int], str]] = {}
-    for item in sorted(runs, key=lambda value: (str(value.get("seed")), int(value.get("attempt", 0)))):
+    for item in sorted(runs, key=lambda value: (value["seed"], value["attempt"])):
         path = bundle_dir / item["path"]
         if path.resolve().parent.parent != (bundle_dir / "runs").resolve() or not str(path.resolve()).startswith(str((bundle_dir / "runs").resolve()) + "/"):
             raise Failed("run root escaped the isolated bundle output")
@@ -754,11 +870,11 @@ def main(argv: list[str]) -> int:
     parser.add_argument("bundle", type=Path)
     args = parser.parse_args(argv)
     try:
-        validate_bundle(args.bundle.resolve())
+        validate_bundle(args.bundle.expanduser())
     except Unverified as exc:
         print(f"UNVERIFIED: {exc}")
         return 3
-    except (Failed, OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (Failed, OSError, AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         print(f"FAILED: {exc}")
         return 1
     print("VERIFIED: independent Paper normal-overworld FULL evidence")

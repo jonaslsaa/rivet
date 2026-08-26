@@ -28,8 +28,9 @@ Paper server; it is not a parity result.
   after the probe proves the full closure is loaded and every target is
   `FULL` plus lit. Extraction reads the world only after process exit and zero
   exit status.
-- Raw decompressed chunk NBT is saved and hashed without rewriting. A separate
-  canonical semantic hash sorts compound keys and removes only the root
+- Raw decompressed chunk NBT is saved and hashed without rewriting. The capture
+  command runs the same fail-closed validator before returning success. A
+  separate canonical semantic hash sorts compound keys and removes only the root
   `InhabitedTime` and `LastUpdate` fields, which are documented save-clock
   fields. The raw bytes remain authoritative. Paper's Starlight save hook
   intentionally writes `isLightOn=false`; persisted lit evidence is the exact
@@ -41,6 +42,10 @@ Paper server; it is not a parity result.
   `world/data/minecraft/worldgen_settings.dat` and records both source and copy
   hashes. The validator checks that the route is normal noise, not flat, and
   that the seed/structures/DataVersion are exact.
+- Paper rewrites `server.properties` and expands both YAML files with defaults
+  on first boot. The validator checks the pinned property values and effective
+  Paper YAML paths while preserving exact fixture copies as provenance; it does
+  not mistake Paper's generated defaults for a configuration mismatch.
 
 ## Runtime prerequisites
 

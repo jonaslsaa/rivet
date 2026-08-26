@@ -31,6 +31,7 @@ import zlib
 from pathlib import Path
 from typing import Any, Iterable
 
+import validate as evidence_validate
 from nbt import NbtError, Tag, encode, get_any, get_compound, parse
 
 HERE = Path(__file__).resolve().parent
@@ -945,7 +946,13 @@ def capture_bundle(output: Path, source: Path, attempts: int, timeout: float) ->
         "closure_radius": RADIUS,
         "runs": runs,
     }
-    (bundle / "bundle.json").write_text(json.dumps(bundle_manifest, indent=2) + "\n")
+    bundle_manifest_path = bundle / "bundle.json"
+    bundle_manifest_path.write_text(json.dumps(bundle_manifest, indent=2) + "\n")
+    try:
+        evidence_validate.validate_bundle(bundle)
+    except (evidence_validate.Failed, evidence_validate.Unverified, OSError, AttributeError, KeyError, TypeError, ValueError) as exc:
+        bundle_manifest_path.unlink(missing_ok=True)
+        raise Failed(f"captured bundle did not pass its fail-closed validator: {exc}") from exc
     return bundle
 
 
