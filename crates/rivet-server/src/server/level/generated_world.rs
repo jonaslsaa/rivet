@@ -1186,13 +1186,13 @@ impl GenerationChunkHolder {
     /// rolled back to the status and data it had before this call; see
     /// [`GenerationChunkHolder::status`].)
     ///
-    /// The SPAWN rung is wired as a seam driven by
-    /// [`GenerationChunkHolder::with_spawn`] (the whole-world `spawnOriginalMobs`
-    /// gen-step applied to this chunk), not through the `generate_through`
-    /// ladder: the holder wires no light engine by default, so no status past
-    /// CARVERS is reached unless its G4 owner attaches a workspace. FULL is
-    /// deliberately a separate consuming promotion after an exact SPAWN
-    /// parent, not a borrowed executor rung.
+    /// The SPAWN rung is intentionally absent from this center-only executor:
+    /// Paper's `generateSpawn` needs the scheduler-owned radius-one cache, so
+    /// [`Self::generate_spawn_with_region`] is the only SPAWN entry and a
+    /// `generate_through(SPAWN)` request refuses in preflight as
+    /// `GeneratedChunkError::UnsupportedStatus`. FULL is deliberately a separate
+    /// consuming promotion after an exact SPAWN parent, not a borrowed executor
+    /// rung.
     pub fn generate_through(&mut self, target: ChunkStatus) -> Result<(), GeneratedChunkError> {
         // FULL is always the consuming ProtoChunk → LevelChunk boundary. It
         // must win even after a cached FEATURES failure: callers must never
