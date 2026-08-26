@@ -896,8 +896,8 @@ where
     /// Read the published sky-light level at an absolute position using the
     /// completed Starlight sky data. A null immediate nibble depends on the
     /// sky-emptiness map and the first non-null section above it; an absent map
-    /// is deliberately represented as `None` so world-generation callers can
-    /// fail closed rather than treating malformed LIGHT data as daylight.
+    /// is full brightness when the map or an above-section nibble is absent,
+    /// matching `StarLightInterface.getSkyLightValue`.
     pub fn get_sky_light_at(&self, x: i32, y: i32, z: i32) -> Option<i32> {
         let min_section = self.height_accessor.get_min_section_y();
         let max_section = self.height_accessor.get_max_section_y();
@@ -919,7 +919,9 @@ where
             return Some(immediate.get_visible(x, local_y, z));
         }
 
-        let emptiness_map = self.sky_emptiness_map.as_deref()?;
+        let Some(emptiness_map) = self.sky_emptiness_map.as_deref() else {
+            return Some(15);
+        };
         let mut lowest_y = min_light_section.wrapping_sub(1);
         for curr_y in (min_section..=max_section).rev() {
             if emptiness_map
@@ -940,7 +942,7 @@ where
                 return Some(nibble.get_visible(x, 0, z));
             }
         }
-        None
+        Some(15)
     }
 
     /// `ChunkAccess.setLightCorrect(boolean)` — sets the flag and marks unsaved.
@@ -1518,6 +1520,18 @@ mod tests {
         base.set_light_correct(true);
         assert!(base.is_light_correct());
         assert!(base.is_unsaved());
+    }
+
+    #[test]
+    fn null_sky_nibbles_use_starlight_open_sky_fallback() {
+        let mut base = default_base();
+        // LIGHT-correct open-sky chunks can carry null sky nibbles with no
+        // emptiness map. Starlight returns full sky light rather than treating
+        // the missing metadata as darkness.
+        assert_eq!(base.get_sky_light_at(0, 0, 0), Some(15));
+        base.set_sky_emptiness_map(Some(vec![true; accessor().get_sections_count() as usize]));
+        // An all-empty map also has no non-null section above the query.
+        assert_eq!(base.get_sky_light_at(0, 0, 0), Some(15));
     }
 
     #[test]
