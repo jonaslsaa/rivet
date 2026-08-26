@@ -2208,7 +2208,12 @@ fn run_spawn_in_region(
                         // insertion surface for these mob types. The candidate
                         // has nevertheless consumed exactly the same placement
                         // gates as Paper; do not classify this as placement
-                        // failure and do not fabricate entity NBT.
+                        // failure and do not fabricate entity NBT. Paper
+                        // consumes the population RNG for `Mob.snapTo`'s yaw
+                        // before any post-construction checks; consume that
+                        // draw even though this value layer stops at the
+                        // intentional unsupported-construction boundary.
+                        consume_spawn_snap_yaw(&mut random);
                         return Err(SpawnRegionError::UnsupportedEntity {
                             chunk_pos: center_pos,
                             biome: biome_name,
@@ -2223,6 +2228,13 @@ fn run_spawn_in_region(
         }
     }
     Ok(())
+}
+
+/// Consume the population RNG draw used by Paper's `Entity.snapTo` yaw during
+/// the entity-construction boundary. Keeping it named makes the intentional
+/// unsupported-entity stop auditable alongside the candidate offset draws.
+fn consume_spawn_snap_yaw(random: &mut impl RandomSource) {
+    let _ = random.next_float();
 }
 
 /// Java's four-attempt candidate offset block, including the retry loop that
@@ -2375,6 +2387,9 @@ fn is_pathfindable_land(state: BlockState) -> bool {
             || name.ends_with("_pane")
             || name.ends_with("_bars")
             || name.ends_with("_chain")
+            || name.ends_with("_lantern")
+            || name.ends_with("_lightning_rod")
+            || name.ends_with("_copper_chest")
             || name.ends_with("_copper_golem_statue")
             || name.ends_with("_wall_hanging_sign") =>
         {
@@ -5523,6 +5538,31 @@ mod tests {
     }
 
     #[test]
+    fn spawn_brightness_uses_open_sky_fallback_for_null_nibbles() {
+        let generator = test_generator();
+        let pos = ChunkPos::new(-8, -4);
+        let mut holder = flat_spawn_holder(&generator, pos, 3);
+        let null_sky = (0..holder.chunk.sky_nibbles().len())
+            .map(|_| SwmrNibbleArray::new_with_bytes_and_null(None, true))
+            .collect();
+        holder.chunk.set_sky_nibbles(null_sky);
+        holder.chunk.set_sky_emptiness_map(None);
+        let mut workspace = spawn_region_workspace(&generator, pos, 3);
+        let region = compose_spawn_region(&mut holder.chunk, &mut workspace, &generator)
+            .expect("radius-one workspace");
+        let candidate = BlockPos::new(pos.get_min_block_x(), 1, pos.get_min_block_z());
+        assert!(is_bright_enough_to_spawn(&region, &candidate));
+        let mut random = LegacyRandomSource::new(0x5eed);
+        assert!(check_spawn_rules(
+            &region,
+            "minecraft:turtle",
+            "minecraft:beach",
+            &candidate,
+            &mut random,
+        ));
+    }
+
+    #[test]
     fn spawn_brightness_fails_closed_without_light_correctness() {
         let generator = test_generator();
         let pos = ChunkPos::new(-8, -4);
@@ -5562,6 +5602,24 @@ mod tests {
         assert_eq!(
             actual.next_float().to_bits(),
             expected.next_float().to_bits()
+        );
+    }
+
+    #[test]
+    fn spawn_unsupported_boundary_consumes_paper_snap_yaw_draw() {
+        let mut actual = WorldgenRandom::new(LegacyRandomSource::new(0x5eed));
+        let mut expected = WorldgenRandom::new(LegacyRandomSource::new(0x5eed));
+        consume_spawn_snap_yaw(&mut actual);
+        let _paper_yaw = expected.next_float();
+        assert_eq!(
+            actual.next_float().to_bits(),
+            expected.next_float().to_bits(),
+            "the unsupported boundary must consume Paper's snap yaw"
+        );
+        assert_eq!(
+            actual.next_int_bound(5),
+            expected.next_int_bound(5),
+            "the next candidate draw must follow Paper's snap yaw"
         );
     }
 
@@ -5756,7 +5814,12 @@ mod tests {
                     entity_min_y: 0.2,
                 }
             )
-            .is_some_and(|shape| shape.intersects(0, 0, 0, &above_unstable_scaffolding))
+            .is_some_and(|shape| shape.intersects(
+                0,
+                0,
+                0,
+                &above_unstable_scaffolding
+            ))
         );
         assert!(
             spawn_collision_shape(bamboo, &pos, SpawnCollisionContext::Empty)
@@ -5830,9 +5893,11 @@ mod tests {
         let exposed_copper_lantern =
             BlockState::of(BlockId::from_name("minecraft:exposed_copper_lantern").unwrap());
         let exposed_copper_rod =
-            BlockState::of(BlockId::from_name("minecraft:exposed_copper_lightning_rod").unwrap());
+            BlockState::of(BlockId::from_name("minecraft:exposed_lightning_rod").unwrap());
         let exposed_copper_chest =
             BlockState::of(BlockId::from_name("minecraft:exposed_copper_chest").unwrap());
+        let exposed_copper_block =
+            BlockState::of(BlockId::from_name("minecraft:exposed_copper").unwrap());
         let water = BlockState::of(BlockId::from_name("minecraft:water").unwrap());
         let lava = BlockState::of(BlockId::from_name("minecraft:lava").unwrap());
         let closed_door = BlockState::of(BlockId::from_name("minecraft:oak_door").unwrap());
@@ -5851,6 +5916,10 @@ mod tests {
         assert!(!is_pathfindable_land(ender_chest));
         assert!(!is_pathfindable_land(copper_chain));
         assert!(!is_pathfindable_land(exposed_copper_statue));
+        assert!(!is_pathfindable_land(exposed_copper_lantern));
+        assert!(!is_pathfindable_land(exposed_copper_rod));
+        assert!(!is_pathfindable_land(exposed_copper_chest));
+        assert!(!is_pathfindable_land(exposed_copper_block));
         assert!(!is_pathfindable_land(closed_door));
         assert!(is_pathfindable_land(open_door));
         assert!(is_pathfindable_land(ladder));
