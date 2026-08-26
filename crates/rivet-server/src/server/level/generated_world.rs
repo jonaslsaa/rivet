@@ -3714,7 +3714,7 @@ mod tests {
             .expect("CARVERS");
 
         let light_error = holder
-            .generate_through(ChunkStatus::Spawn)
+            .generate_through(ChunkStatus::Light)
             .expect_err("the holder has no usable light engine");
         assert!(matches!(
             light_error,
