@@ -140,6 +140,7 @@ mod generated_expected;
 mod generated_full;
 mod hash;
 mod hash_manifest;
+mod json;
 mod light_stage;
 mod loaded_world;
 mod mutate;
@@ -209,6 +210,11 @@ enum Error {
     /// input, or a malformed capture tree) — maps to exit 3 UNVERIFIED, never a
     /// fabricated green.
     Unverified(String),
+    /// A launched dedicated producer reached an explicit, truthful capability
+    /// boundary. This is distinct from an absent prerequisite and from a
+    /// failed/malformed replay; callers must report BLOCKED with the missing
+    /// production API rather than fabricating evidence.
+    Blocked(String),
     /// The `verify --expect-fail` negative control failed: the boot -> extract
     /// -> pin-check -> diff pipeline did not detect (and name) the deliberately
     /// corrupted baseline chunk.
@@ -255,6 +261,7 @@ impl fmt::Display for Error {
                  tools/rivet-oracle/work/jars/)."
             ),
             Error::Unverified(m) => write!(f, "{m}"),
+            Error::Blocked(m) => write!(f, "BLOCKED: {m}"),
             Error::NegativeControl { message } => write!(f, "{message}"),
         }
     }
@@ -319,7 +326,7 @@ impl ChunkConcurrency {
 /// the level-type/compression strings.
 const KIND_M0: &str = "m0";
 const KIND_M2: &str = "m2";
-const KIND_FULL: &str = "full";
+pub(crate) const KIND_FULL: &str = "full";
 
 /// The fixture manifest (subset of fields; unknown fields are ignored).
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -725,7 +732,7 @@ fn parse_manifest_commit(manifest_text: &str) -> Option<String> {
 /// `[MoonriseCommon] Paper is using N worker threads, M I/O threads`. Returns
 /// `(worker, io)` when exactly one such line is present; `None` when the line
 /// is absent or the log is ambiguous (two pin lines = something is wrong).
-fn parse_boot_thread_counts(log_text: &str) -> Option<(u32, u32)> {
+pub(crate) fn parse_boot_thread_counts(log_text: &str) -> Option<(u32, u32)> {
     let mut counts = None;
     for line in log_text.lines() {
         let Some((_, rest)) = line.split_once(" is using ") else {
@@ -1371,7 +1378,7 @@ fn ensure_jar() -> Result<PathBuf, Error> {
 /// (M0 superflat: `fixtures/server.properties`; M2 normal overworld:
 /// `fixtures/server-normal.properties`), guaranteeing config parity by
 /// construction.
-fn prepare_run_dir(run_dir: &Path, server_properties_src: &Path) -> Result<(), Error> {
+pub(crate) fn prepare_run_dir(run_dir: &Path, server_properties_src: &Path) -> Result<(), Error> {
     let libs = run_dir.join("libraries");
     let reuse_libs = libs.is_dir()
         && fs::read_dir(&libs)
@@ -1571,7 +1578,7 @@ fn boot_and_shutdown(run_dir: &Path, log_path: &Path, jar: &Path) -> Result<(), 
 /// region capture, issue #266). `observed` is the chunk concurrency the boot
 /// actually ran with (parsed from the boot log): for M2 region captures it is
 /// recorded as `chunk-concurrency` provenance; M0 never records it.
-fn extract_fresh_fixtures(
+pub(crate) fn extract_fresh_fixtures(
     world_dir: &Path,
     out_dir: &Path,
     chunks_only: bool,
@@ -1689,7 +1696,8 @@ const TICKET_DIMS: &[(&str, &str)] = &[
 /// forcing or verifying the nether/end is dead work and a spurious failure
 /// mode (a nether/end that fails to load its grid must not refuse a valid
 /// overworld ground-truth capture). The corpus path keeps all of `TICKET_DIMS`.
-const OVERWORLD_DIM: &[(&str, &str)] = &[("overworld", "dimensions/minecraft/overworld")];
+pub(crate) const OVERWORLD_DIM: &[(&str, &str)] =
+    &[("overworld", "dimensions/minecraft/overworld")];
 
 /// Write a `minecraft:forced` ticket for every coordinate in `coords` into each
 /// dimension's `chunk_tickets.dat` (gzip NBT), mirroring the Moonrise
@@ -1707,7 +1715,7 @@ const OVERWORLD_DIM: &[(&str, &str)] = &[("overworld", "dimensions/minecraft/ove
 /// `FORCED_TICKET_LEVEL` 33 → `minecraft:full`, the serialization ceiling of the
 /// forced path; a higher ticket level is `INACCESSIBLE` to `fullStatus` and
 /// loads nothing).
-fn inject_forced_tickets(
+pub(crate) fn inject_forced_tickets(
     world_dir: &Path,
     coords: &[(i32, i32)],
     dims: &[(&str, &str)],
@@ -1782,7 +1790,7 @@ fn normalize_last_update(bytes: &[u8]) -> Option<Vec<u8>> {
 /// byte-identity check and to the committed baseline, so the FULL gate compares
 /// worldgen content, not the save-clock artifact. Returns how many payloads
 /// changed.
-fn normalize_last_update_tree(dir: &Path) -> Result<usize, Error> {
+pub(crate) fn normalize_last_update_tree(dir: &Path) -> Result<usize, Error> {
     let mut count = 0usize;
     let mut walk = vec![dir.to_path_buf()];
     while let Some(d) = walk.pop() {
@@ -1812,7 +1820,7 @@ fn normalize_last_update_tree(dir: &Path) -> Result<usize, Error> {
 /// The manifest is rewritten with the same `serde_json::to_string_pretty` +
 /// trailing-newline formatting as `inject_manifest_metadata`, so regeneration
 /// stays byte-stable.
-fn rehash_captured(dir: &Path) -> Result<(), Error> {
+pub(crate) fn rehash_captured(dir: &Path) -> Result<(), Error> {
     let manifest_path = dir.join("manifest.json");
     let mut root: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&manifest_path).map_err(|e| {
@@ -1860,7 +1868,7 @@ fn rehash_captured(dir: &Path) -> Result<(), Error> {
 /// dimension to have loaded at least `expected` chunks. The check is
 /// dimension-aware, so a partially-succeeded injection (some dimensions loaded,
 /// others 0) is refused too.
-fn verify_forced_load(
+pub(crate) fn verify_forced_load(
     log_path: &Path,
     expected: usize,
     dims: &[(&str, &str)],
@@ -3077,10 +3085,57 @@ fn run_hash_paper(dir: Option<&Path>) -> Result<(), Error> {
 /// Load a `HashManifest` from a `manifest.json`.
 fn load_hash_manifest(dir: &Path) -> Result<hash_manifest::HashManifest, Error> {
     let path = dir.join("manifest.json");
-    let raw = fs::read_to_string(&path)
-        .map_err(|e| Error::Gate(format!("cannot read {}: {e}", path.display())))?;
-    serde_json::from_str(&raw)
-        .map_err(|e| Error::Gate(format!("invalid hash manifest {}: {e}", path.display())))
+    let raw =
+        fs::read(&path).map_err(|e| Error::Gate(format!("cannot read {}: {e}", path.display())))?;
+    let supplied: hash_manifest::HashManifest = crate::json::from_slice(&raw)
+        .map_err(|e| Error::Gate(format!("invalid hash manifest {}: {e}", path.display())))?;
+    // When a raw payload tree is present, manifests are diagnostic metadata
+    // only: rebuild the digest table from those immutable payload bytes and
+    // reject a supplied table that is stale, relabeled, or hashes a different
+    // tree. The committed #54 Paper manifest is intentionally manifest-only;
+    // its payload source is the separately committed M2 region tree and the
+    // hash-paper command is the producer for that table. Keep that established
+    // source layout explicit rather than pretending an absent tree was read.
+    let chunk = dir.join("chunk");
+    let raw_tree_present = match fs::symlink_metadata(&chunk) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(Error::Gate(format!(
+                "hash manifest {} has a symlinked raw payload tree {}; refusing aliased evidence",
+                path.display(),
+                chunk.display()
+            )));
+        }
+        Ok(_) => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(Error::Gate(format!(
+                "cannot inspect raw payload tree {}: {error}",
+                chunk.display()
+            )));
+        }
+    };
+    if raw_tree_present {
+        let provenance = hash_manifest::CaptureProvenance {
+            level_type: supplied.level_type.clone(),
+            region_file_compression: supplied.region_file_compression.clone(),
+            corpus_version: supplied.corpus_version.clone(),
+        };
+        let derived = hash_manifest::build_from_raw_tree_with(
+            dir,
+            &supplied.seed,
+            &supplied.level_type,
+            &provenance,
+        )
+        .map_err(Error::Gate)?;
+        if supplied != derived {
+            return Err(Error::Gate(format!(
+                "hash manifest {} is not the payload-derived manifest; producer-supplied digests are diagnostic only",
+                path.display()
+            )));
+        }
+        return Ok(derived);
+    }
+    Ok(supplied)
 }
 
 /// `hash-rivet`: read a Rivet chunk tree. There is no Rivet chunk
@@ -3464,6 +3519,7 @@ fn fmt_hash_coord(cx: i32, cz: i32) -> String {
 /// world with no region layout) exits 3, never a bare FAIL.
 const EXIT_FAIL: i32 = 1;
 const EXIT_UNVERIFIED: i32 = 3;
+const EXIT_BLOCKED: i32 = 4;
 const EXIT_USAGE: i32 = 64;
 
 /// Map a [`run()`] error onto the shared exit-code contract. An
@@ -3474,6 +3530,7 @@ const EXIT_USAGE: i32 = 64;
 fn exit_code_for_run_error(e: &Error) -> i32 {
     match e {
         Error::Unverified(_) => EXIT_UNVERIFIED,
+        Error::Blocked(_) => EXIT_BLOCKED,
         _ => EXIT_FAIL,
     }
 }
@@ -3689,13 +3746,16 @@ fn print_usage() {
         "                                             runtime; --tamper is the negative control"
     );
     println!("  cargo run -p rivet-oracle -- verify-generated-full [--contract <path>]");
-    println!("                                             [--paper <root>] [--rivet <root>]");
+    println!("                                             [--refresh-determinism]");
     println!("                                             normal-overworld FULL parity over the");
     println!(
         "                                             four-seed, four-region Stage-B contract;"
     );
     println!(
-        "                                             --tamper [kind|all] runs named negatives"
+        "                                             the verifier owns fresh Paper/Rivet roots"
+    );
+    println!(
+        "                                             and rejects caller-supplied evidence trees"
     );
     println!("  cargo run -p rivet-oracle -- features <seed> [--to <out> | --tamper]");
     println!("                                             seed-42 FEATURES oracle checkpoint:");
@@ -3876,14 +3936,13 @@ fn run() -> Result<(), Error> {
         }
         Some("verify-generated-full") => {
             // Source-disjoint Stage-B/G4 normal-overworld FULL parity verifier.
-            // Default paths are fixtures/generated-full/{contract.json,paper/}
-            // and work/generated-full/rivet/. Optional --contract/--paper/--rivet
-            // overrides are used by synthetic tests and capture tooling; --tamper
-            // (or --expect-fail) runs the committed tamper controls.
+            // The controller validates the committed contract and owns fresh
+            // Paper/Rivet roots under work/generated-full; caller-supplied
+            // evidence roots are rejected. --refresh-determinism requests a
+            // third Paper boot before the dedicated producer is run.
             let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
             match rest.as_slice() {
                 [] => generated_full::verify_default(),
-                ["--tamper"] | ["--expect-fail"] => generated_full::tamper_negative_default(None),
                 _ => generated_full::run_cli(&rest),
             }
         }
@@ -5492,11 +5551,13 @@ mod tests {
     /// manifest records that seed — so a tree under a different seed is a
     /// genuinely different world, which is the #175 7(e) bogus-seed mechanism.
     fn write_hash_fixture_tree_seeded(root: &Path, coords: &[(i32, i32)], seed: i64) -> PathBuf {
-        let chunk_dir = root.join("chunk").join("the_nether").join("0.0");
-        fs::create_dir_all(&chunk_dir).unwrap();
         for (cx, cz) in coords {
             // The generic hash-engine tests intentionally exercise a Nether
-            // region tree, so use the Nether's exact FULL section closure.
+            // region tree, so use the Nether's exact FULL section closure and
+            // the Anvil region selected by floor-division (including negatives).
+            let region = format!("{}.{}", cx.div_euclid(32), cz.div_euclid(32));
+            let chunk_dir = root.join("chunk").join("the_nether").join(region);
+            fs::create_dir_all(&chunk_dir).unwrap();
             let bytes =
                 crate::mutate::fixture_full_payload_for_dimension(*cx, *cz, seed, "the_nether");
             fs::write(chunk_dir.join(format!("{cx}.{cz}.nbt")), bytes).unwrap();

@@ -39,7 +39,7 @@
   "artifact-paths": {
     "paper-materialized-jar": "work/generated-full/artifacts/paper-26.2.jar",
     "paper-capture-properties": "fixtures/generated-full/server-normal-full.properties",
-    "rivet-producer-binary": "work/generated-full/artifacts/rivet-capture",
-    "rivet-capture-config": "work/generated-full/artifacts/rivet-capture-config.json"
+    "rivet-producer-binary": "work/generated-full/artifacts/rivet-generated-full",
+    "rivet-capture-config": "work/generated-full/artifacts/rivet-generated-full-config.json"
   }
 }

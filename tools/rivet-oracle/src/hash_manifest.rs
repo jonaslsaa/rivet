@@ -50,6 +50,13 @@ pub const CORPUS_VERSION: &str = "v1";
 /// The Paper commit the committed Paper manifest was captured against.
 pub const PAPER_PIN: &str = "0a99345";
 
+/// Evidence caps are part of the verifier contract.  A producer cannot make
+/// the controller allocate unbounded memory by declaring an enormous payload
+/// or by repeating coordinates indefinitely.
+pub const MAX_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_PAYLOAD_COUNT: usize = 8192;
+pub const MAX_TOTAL_PAYLOAD_BYTES: usize = 512 * 1024 * 1024;
+
 /// A single chunk's digests in a `HashManifest`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -91,27 +98,30 @@ fn is_full_status(status: &str) -> bool {
     status == "minecraft:full"
 }
 
-/// Reject a manifest whose FULL entries carry a duplicate (dim, cx, cz). A
-/// well-formed capture has exactly one chunk per coordinate, and the comparator
-/// resolves a FULL chunk by `full_entry` (first match) — so a duplicate would
-/// be **silently deduplicated**: whichever FULL entry sorts first wins and the
-/// other is never compared, turning a malformed tree into a possibly-green diff
-/// instead of a loud failure. The manifest is the digest table the whole gate
-/// trusts, so a duplicate FULL coordinate is a hard error at build, never a
-/// silent dedup.
-pub fn reject_duplicate_full(entries: &[ChunkHashEntry]) -> Result<(), String> {
+/// Reject a manifest whose entries carry a duplicate (dim, cx, cz). The
+/// verifier derives entries from an exact filename closure, but generic hash
+/// callers may provide a manifest-shaped source with mixed statuses. Checking
+/// every status prevents a non-FULL duplicate from becoming a later FULL entry
+/// through a producer-supplied manifest edit.
+pub fn reject_duplicate_coordinates(entries: &[ChunkHashEntry]) -> Result<(), String> {
     let mut seen: std::collections::HashSet<(&str, i32, i32)> = std::collections::HashSet::new();
-    for e in entries.iter().filter(|e| e.is_full()) {
+    for e in entries {
         if !seen.insert((e.dim.as_str(), e.cx, e.cz)) {
             return Err(format!(
-                "duplicate FULL chunk at {}/{}: a malformed capture tree must be rejected, \
-                 never silently deduplicated (the comparator's full_entry would drop one)",
+                "duplicate chunk coordinate at {}/{}: a malformed capture tree must be rejected, \
+                 never silently deduplicated",
                 e.dim,
                 fmt_coord(e.cx, e.cz)
             ));
         }
     }
     Ok(())
+}
+
+/// Compatibility name for callers that only care about the FULL subset. The
+/// implementation intentionally checks all entries now.
+pub fn reject_duplicate_full(entries: &[ChunkHashEntry]) -> Result<(), String> {
+    reject_duplicate_coordinates(entries)
 }
 
 /// `<cx>.<cz>` coordinate display used in manifest errors.
@@ -304,7 +314,125 @@ pub fn build_from_payloads(
 /// `structures`, final heightmaps, `isLightOn`, starlight version — issue #51),
 /// so a chunk stamped FULL that Paper did not actually finish is a hard error,
 /// never silently compared.
-/// Payload bytes captured from one stable file descriptor.  The generated
+/// Derive a manifest from the raw payload tree, never from a producer-supplied
+/// digest table. The optional `manifest.json` at the root is metadata only; all
+/// payload names, coordinates, statuses, lengths, xxh3 digests, SHA-256
+/// digests, and canonical digests come from the bytes acquired here.
+pub fn build_from_raw_tree_with(
+    dir: &Path,
+    seed: &str,
+    level_type: &str,
+    provenance: &CaptureProvenance,
+) -> Result<HashManifest, String> {
+    let chunk_dir = dir.join("chunk");
+    let metadata = std::fs::symlink_metadata(&chunk_dir)
+        .map_err(|e| format!("cannot inspect {}: {e}", chunk_dir.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(format!(
+            "{} is not a regular chunk directory",
+            chunk_dir.display()
+        ));
+    }
+    let mut payloads = Vec::new();
+    for dim_entry in sorted_entries(&chunk_dir)? {
+        reject_tree_entry(&dim_entry, "dimension")?;
+        let dim_path = dim_entry.path();
+        if !dim_entry
+            .file_type()
+            .map_err(|e| format!("cannot inspect {}: {e}", dim_path.display()))?
+            .is_dir()
+        {
+            return Err(format!(
+                "non-directory entry under chunk/: {}",
+                dim_path.display()
+            ));
+        }
+        let dim = dim_entry.file_name().to_string_lossy().into_owned();
+        for region_entry in sorted_entries(&dim_path)? {
+            reject_tree_entry(&region_entry, "region")?;
+            let region_path = region_entry.path();
+            if !region_entry
+                .file_type()
+                .map_err(|e| format!("cannot inspect {}: {e}", region_path.display()))?
+                .is_dir()
+            {
+                return Err(format!(
+                    "non-directory entry under {}",
+                    region_path.display()
+                ));
+            }
+            let region = region_entry.file_name().to_string_lossy().into_owned();
+            for file_entry in sorted_entries(&region_path)? {
+                reject_tree_entry(&file_entry, "payload")?;
+                let path = file_entry.path();
+                if !file_entry
+                    .file_type()
+                    .map_err(|e| format!("cannot inspect {}: {e}", path.display()))?
+                    .is_file()
+                {
+                    return Err(format!("non-file payload entry {}", path.display()));
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("nbt") {
+                    return Err(format!("extra non-NBT payload entry {}", path.display()));
+                }
+                let (cx, cz) = parse_chunk_filename(&path)?;
+                let expected_region = format!("{}.{}", cx.div_euclid(32), cz.div_euclid(32));
+                if region != expected_region {
+                    return Err(format!(
+                        "payload {} is in region {}, expected {}",
+                        path.display(),
+                        region,
+                        expected_region
+                    ));
+                }
+                let bytes = std::fs::read(&path)
+                    .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+                payloads.push(PayloadBytes {
+                    dim: dim.clone(),
+                    region: region.clone(),
+                    cx,
+                    cz,
+                    bytes,
+                });
+            }
+        }
+    }
+    if payloads.is_empty() {
+        return Err(format!(
+            "raw payload tree {} contains no .nbt payloads",
+            chunk_dir.display()
+        ));
+    }
+    build_from_payload_bytes_with(&payloads, seed, level_type, provenance)
+}
+
+fn sorted_entries(path: &Path) -> Result<Vec<std::fs::DirEntry>, String> {
+    let mut entries = std::fs::read_dir(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("cannot enumerate {}: {e}", path.display()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    Ok(entries)
+}
+
+fn reject_tree_entry(entry: &std::fs::DirEntry, kind: &str) -> Result<(), String> {
+    let path = entry.path();
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|e| format!("cannot inspect {kind} {}: {e}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!("{kind} {} is a symlink", path.display()));
+    }
+    #[cfg(unix)]
+    if metadata.file_type().is_file() {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() > 1 {
+            return Err(format!("{kind} {} is a hardlink", path.display()));
+        }
+    }
+    Ok(())
+}
+
+/// Payload bytes captured from one stable file descriptor. The generated
 /// FULL verifier uses this representation after opening each payload with
 /// `RESOLVE_NO_SYMLINKS`; hashing the bytes here avoids reopening the path after
 /// metadata validation.
@@ -384,11 +512,70 @@ pub fn build_from_payload_bytes_with(
     level_type: &str,
     provenance: &CaptureProvenance,
 ) -> Result<HashManifest, String> {
+    if payloads.len() > MAX_PAYLOAD_COUNT {
+        return Err(format!(
+            "payload count {} exceeds verifier cap {}",
+            payloads.len(),
+            MAX_PAYLOAD_COUNT
+        ));
+    }
+    let total_bytes = payloads.iter().try_fold(0usize, |total, payload| {
+        if payload.bytes.len() > MAX_PAYLOAD_BYTES {
+            return Err(format!(
+                "payload {}/{}/{}.{} is {} bytes, above the {}-byte cap",
+                payload.dim,
+                payload.region,
+                payload.cx,
+                payload.cz,
+                payload.bytes.len(),
+                MAX_PAYLOAD_BYTES
+            ));
+        }
+        total
+            .checked_add(payload.bytes.len())
+            .ok_or_else(|| "total payload byte count overflowed the verifier cap".to_string())
+    })?;
+    if total_bytes > MAX_TOTAL_PAYLOAD_BYTES {
+        return Err(format!(
+            "payload tree is {} bytes, above the {}-byte cap",
+            total_bytes, MAX_TOTAL_PAYLOAD_BYTES
+        ));
+    }
+
     let mut entries = Vec::with_capacity(payloads.len());
     let mut full_count = 0usize;
 
     for payload in payloads {
+        let expected_region = format!(
+            "{}.{}",
+            payload.cx.div_euclid(32),
+            payload.cz.div_euclid(32)
+        );
+        if payload.region != expected_region {
+            return Err(format!(
+                "payload {}/{}/{}.{} is in region {}, expected {}",
+                payload.dim,
+                payload.region,
+                payload.cx,
+                payload.cz,
+                payload.region,
+                expected_region
+            ));
+        }
         let compound = parse_payload(&payload.bytes)?;
+        let stored_coordinates = (compound.get_int("xPos"), compound.get_int("zPos"));
+        if stored_coordinates != (Some(payload.cx), Some(payload.cz)) {
+            return Err(format!(
+                "payload {}/{}/{}.{} stores xPos/zPos {:?}, expected ({}, {})",
+                payload.dim,
+                payload.region,
+                payload.cx,
+                payload.cz,
+                stored_coordinates,
+                payload.cx,
+                payload.cz
+            ));
+        }
         let status = compound
             .get_string("Status")
             .cloned()
@@ -780,46 +967,79 @@ fn validate_codec_container(
         }
     }
 
+    // This is Paper's Strategy/Configuration table, not a generic ceil-log2
+    // approximation. Blocks reserve four local bits through sixteen states and
+    // switch to the global configuration at nine bits. Biomes switch at four.
+    // SimpleBitStorage stores floor(64 / bits) values in each long.
     let palette_size = palette.list.len();
-    let bits = ceil_log2(palette_size);
-    let disk_bits = if block_states && (1..=4).contains(&bits) {
-        4
-    } else {
-        bits
-    };
     let entry_count: usize = if block_states { 4096 } else { 64 };
-    let expected_longs = match disk_bits {
-        0 => 0,
-        bits => {
-            let values_per_long = 64usize
-                .checked_div(bits)
-                .filter(|values| *values != 0)
-                .ok_or_else(|| {
-                    format!(
-                        "chunk {at} section Y {y} {key} palette requires unsupported {bits}-bit storage"
-                    )
-                })?;
-            entry_count.div_ceil(values_per_long)
+    let bits = if palette_size == 1 {
+        0
+    } else {
+        let minimum = ceil_log2(palette_size);
+        if block_states {
+            minimum.max(4)
+        } else {
+            minimum
         }
     };
-    match container.tags.get("data") {
-        None if disk_bits == 0 => Ok(()),
-        None => Err(format!(
-            "chunk {at} section Y {y} {key} palette has {palette_size} entries but no packed data"
-        )),
-        Some(rivet_nbt::tag::Tag::LongArray(data)) if disk_bits == 0 => Err(format!(
+    if bits > 32 {
+        return Err(format!(
+            "chunk {at} section Y {y} {key} palette requires unsupported {bits}-bit storage"
+        ));
+    }
+    let expected_longs = if bits == 0 {
+        0
+    } else {
+        let values_per_long = 64usize.checked_div(bits).ok_or_else(|| {
+            format!("chunk {at} section Y {y} {key} has no values-per-long for {bits} bits")
+        })?;
+        entry_count.div_ceil(values_per_long)
+    };
+    let Some(data_tag) = container.tags.get("data") else {
+        return if bits == 0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "chunk {at} section Y {y} {key} palette has {palette_size} entries but no packed data"
+            ))
+        };
+    };
+    let rivet_nbt::tag::Tag::LongArray(data) = data_tag else {
+        return Err(format!(
+            "chunk {at} section Y {y} {key}.data has the wrong NBT type; Paper expects a LongArray"
+        ));
+    };
+    if bits == 0 {
+        return Err(format!(
             "chunk {at} section Y {y} {key} single-value palette must omit packed data, got {} longs",
             data.data.len()
-        )),
-        Some(rivet_nbt::tag::Tag::LongArray(data)) if data.data.len() == expected_longs => Ok(()),
-        Some(rivet_nbt::tag::Tag::LongArray(data)) => Err(format!(
+        ));
+    }
+    if data.data.len() != expected_longs {
+        return Err(format!(
             "chunk {at} section Y {y} {key} packed data has {} longs, expected {expected_longs}",
             data.data.len()
-        )),
-        Some(_) => Err(format!(
-            "chunk {at} section Y {y} {key}.data has the wrong NBT type; Paper expects a LongArray"
-        )),
+        ));
     }
+
+    // Decode every logical entry.  Checking only the packed length accepts a
+    // p2 container whose data contains index 2 (or a global p257 container
+    // containing an index outside its palette), which Paper rejects while
+    // unpacking through Palette.valueFor.
+    let values_per_long = 64 / bits;
+    let mask = (1u64 << bits) - 1;
+    for index in 0..entry_count {
+        let word = index / values_per_long;
+        let shift = (index % values_per_long) * bits;
+        let value = ((data.data[word] as u64) >> shift) & mask;
+        if value >= palette_size as u64 {
+            return Err(format!(
+                "chunk {at} section Y {y} {key} data index {index} decodes to palette index {value}, outside palette size {palette_size}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn ceil_log2(value: usize) -> usize {
@@ -839,10 +1059,18 @@ fn parse_chunk_filename(path: &Path) -> Result<(i32, i32), String> {
     let (cx, cz) = stem
         .split_once('.')
         .ok_or_else(|| format!("chunk name {stem} is not <cx>.<cz>"))?;
-    Ok((
-        cx.parse().map_err(|e| format!("bad cx in {stem}: {e}"))?,
-        cz.parse().map_err(|e| format!("bad cz in {stem}: {e}"))?,
-    ))
+    let cx_value = cx
+        .parse::<i32>()
+        .map_err(|e| format!("bad cx in {stem}: {e}"))?;
+    let cz_value = cz
+        .parse::<i32>()
+        .map_err(|e| format!("bad cz in {stem}: {e}"))?;
+    if cx != cx_value.to_string() || cz != cz_value.to_string() {
+        return Err(format!(
+            "chunk name {stem} has noncanonical coordinate spelling"
+        ));
+    }
+    Ok((cx_value, cz_value))
 }
 
 /// Coverage of `manifest`'s FULL chunks against the corpus (threat 4: coverage
@@ -1514,25 +1742,58 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// A duplicate FULL coordinate in a built manifest must be a hard error, not
-    /// a silent dedup: the comparator resolves a FULL chunk by first-match, so a
-    /// duplicate would drop one and possibly turn a malformed tree green.
+    /// A duplicate coordinate in a built manifest must be a hard error, not
+    /// a silent dedup. This applies to every status, because a malformed
+    /// non-FULL duplicate must not be able to become FULL through metadata edits.
     #[test]
-    fn duplicate_full_coordinate_is_rejected() {
+    fn duplicate_coordinate_is_rejected_for_every_status() {
         let a = full_entry("the_nether", 0, 0);
         let mut b = full_entry("the_nether", 0, 0);
         b.xxh3_64 = "1".repeat(16); // a genuinely different payload at the same coord
         let err = reject_duplicate_full(&[a, b]).expect_err("duplicate FULL must be rejected");
         assert!(
-            err.contains("duplicate FULL chunk"),
+            err.contains("duplicate chunk coordinate"),
             "error names the duplicate: {err}"
         );
-        // Non-FULL duplicates at the same coordinate are fine (multiple
-        // intermediate statuses are not FULL and are never compared).
+        // Non-FULL duplicates at the same coordinate are malformed too.
         let mut c = full_entry("overworld", 5, 5);
         c.status = "minecraft:biomes".to_string();
         let mut d = full_entry("overworld", 5, 5);
         d.status = "minecraft:carvers".to_string();
-        reject_duplicate_full(&[c, d]).expect("non-FULL duplicates are not FULL entries");
+        let err = reject_duplicate_full(&[c, d]).expect_err("all statuses share coordinates");
+        assert!(err.contains("duplicate chunk coordinate"));
+    }
+
+    #[test]
+    fn payload_bytes_bind_region_and_nbt_coordinates() {
+        let provenance = CaptureProvenance::default();
+        let bytes = crate::mutate::fixture_full_payload(0, 0);
+        let wrong_region = [PayloadBytes {
+            dim: "the_nether".to_string(),
+            region: "1.0".to_string(),
+            cx: 0,
+            cz: 0,
+            bytes: bytes.clone(),
+        }];
+        let error =
+            build_from_payload_bytes_with(&wrong_region, "42", "minecraft\\:normal", &provenance)
+                .expect_err("a payload in the wrong Anvil region must fail");
+        assert!(error.contains("expected 0.0"), "{error}");
+
+        let wrong_coordinates = [PayloadBytes {
+            dim: "the_nether".to_string(),
+            region: "0.0".to_string(),
+            cx: 1,
+            cz: 0,
+            bytes,
+        }];
+        let error = build_from_payload_bytes_with(
+            &wrong_coordinates,
+            "42",
+            "minecraft\\:normal",
+            &provenance,
+        )
+        .expect_err("payload NBT coordinates must bind to the filename");
+        assert!(error.contains("stores xPos/zPos"), "{error}");
     }
 }

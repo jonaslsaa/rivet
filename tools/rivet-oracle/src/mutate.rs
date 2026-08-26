@@ -255,10 +255,18 @@ fn seed_block_data(seed: i64, cx: i32, cz: i32) -> Vec<i64> {
     state ^= cz as u32 as u64;
     (0..256)
         .map(|_| {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state as i64
+            // A two-entry block palette is stored at four bits per entry by
+            // Paper's block Strategy.  Keep every nibble in {0,1}; arbitrary
+            // random longs used by the old fixture made the fixture invalid
+            // because most decoded indexes were outside the palette.
+            let mut word = 0u64;
+            for slot in 0..16 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                word |= (state & 1) << (slot * 4);
+            }
+            word as i64
         })
         .collect()
 }

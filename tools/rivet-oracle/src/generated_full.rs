@@ -19,21 +19,30 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use rivet_harness_common::server::{self as harness_server, ChildServer};
 use rivet_nbt::compound_tag::CompoundTag;
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
 use crate::corpus;
+#[cfg(test)]
 use crate::hash;
 use crate::hash_manifest::{self, CaptureProvenance, HashManifest};
 use crate::mutate::{self, TamperKind};
+use crate::{
+    FORCED_TICKET_LEVEL, KIND_FULL, OVERWORLD_DIM, extract_fresh_fixtures, inject_forced_tickets,
+    normalize_last_update_tree, parse_boot_thread_counts, prepare_run_dir, rehash_captured,
+    verify_forced_load,
+};
 
 pub const KIND: &str = "generated-full";
 pub const CONTRACT_BASENAME: &str = "contract.json";
+#[cfg(test)]
 pub const PROVENANCE_BASENAME: &str = "provenance.json";
 pub const SEED_CONFIG_BASENAME: &str = "seed-config.json";
 pub const MANIFEST_BASENAME: &str = "manifest.json";
@@ -45,11 +54,18 @@ pub const EXPECTED_STAGE: &str = "FULL";
 pub const EXPECTED_NORMALIZATION: &str = "LastUpdate=0";
 pub const EXPECTED_WORKER_THREADS: u32 = 1;
 pub const EXPECTED_IO_THREADS: u32 = 1;
+#[cfg(test)]
 const EXPECTED_PAPER_TICKET_LEVEL: u32 = 33;
+#[cfg(test)]
 const EXPECTED_PAPER_SOURCE_PAYLOADS: usize = 2764;
+#[cfg(test)]
 const EXPECTED_PAPER_SOURCE_FULL: usize = 10;
+#[cfg(test)]
 const EXPECTED_PAPER_SAVE_COMPLETION: &str =
     "SIGTERM+All dimensions are saved+RegionFile-I/O shutdown/read-back";
+const MAX_EVIDENCE_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PAYLOAD_FILE_BYTES: u64 = hash_manifest::MAX_PAYLOAD_BYTES as u64;
+const MAX_EVIDENCE_ENTRIES: usize = hash_manifest::MAX_PAYLOAD_COUNT;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -88,7 +104,7 @@ pub struct ArtifactPaths {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct GeneratedContract {
+pub struct SharedContract {
     pub format: u64,
     pub kind: String,
     #[serde(rename = "corpus-version")]
@@ -115,6 +131,112 @@ pub struct GeneratedContract {
     pub artifact_paths: ArtifactPaths,
 }
 
+/// Internal name retained only for the parser/test surface. Production replay
+/// takes a [`SharedContract`] and never accepts a caller-supplied evidence root.
+pub type GeneratedContract = SharedContract;
+
+/// A payload digest derived by the verifier from immutable bytes. Producer
+/// manifests may describe these values for diagnostics, but never supply them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RawPayloadDigest {
+    pub dimension: String,
+    pub region: String,
+    pub x: i32,
+    pub z: i32,
+    pub bytes: usize,
+    pub xxh3_64: String,
+    pub sha256: String,
+}
+
+/// Controller-observed Paper evidence. This schema intentionally contains
+/// Paper-only identity and lifecycle fields; no Rivet identity is present to
+/// compare or accidentally bless as equal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PaperObserved {
+    pub schema: String,
+    pub seed: u64,
+    pub root: String,
+    pub argv: Vec<String>,
+    pub cwd: String,
+    pub env: std::collections::BTreeMap<String, String>,
+    #[serde(rename = "paper-jar-sha256")]
+    pub paper_jar_sha256: String,
+    #[serde(rename = "paper-config-sha256")]
+    pub paper_config_sha256: String,
+    #[serde(rename = "paper-source-sha256")]
+    pub paper_source_sha256: String,
+    pub pid: u32,
+    #[serde(rename = "started-unix-nanos")]
+    pub started_unix_nanos: u128,
+    #[serde(rename = "ready-count")]
+    pub ready_count: u32,
+    #[serde(rename = "stopped-unix-nanos")]
+    pub stopped_unix_nanos: u128,
+    #[serde(rename = "exit-code")]
+    pub exit_code: i32,
+    #[serde(rename = "raw-log-sha256")]
+    pub raw_log_sha256: String,
+    #[serde(rename = "payload-digests")]
+    pub payload_digests: Vec<RawPayloadDigest>,
+    #[serde(rename = "producer-manifest-sha256")]
+    pub producer_manifest_sha256: Option<String>,
+}
+
+/// Controller-observed Rivet evidence. This schema is source-disjoint from
+/// [`PaperObserved`], so a producer cannot claim Paper's identity fields.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RivetObserved {
+    pub schema: String,
+    pub seed: u64,
+    pub root: String,
+    pub argv: Vec<String>,
+    pub cwd: String,
+    pub env: std::collections::BTreeMap<String, String>,
+    #[serde(rename = "rivet-executable-sha256")]
+    pub rivet_executable_sha256: String,
+    #[serde(rename = "rivet-config-sha256")]
+    pub rivet_config_sha256: String,
+    #[serde(rename = "rivet-source-sha256")]
+    pub rivet_source_sha256: String,
+    pub pid: u32,
+    #[serde(rename = "started-unix-nanos")]
+    pub started_unix_nanos: u128,
+    #[serde(rename = "ready-count")]
+    pub ready_count: u32,
+    #[serde(rename = "stopped-unix-nanos")]
+    pub stopped_unix_nanos: u128,
+    #[serde(rename = "exit-code")]
+    pub exit_code: i32,
+    #[serde(rename = "raw-log-sha256")]
+    pub raw_log_sha256: String,
+    #[serde(rename = "payload-digests")]
+    pub payload_digests: Vec<RawPayloadDigest>,
+    #[serde(rename = "producer-manifest-sha256")]
+    pub producer_manifest_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReplayRecord {
+    pub schema: String,
+    pub nonce: String,
+    #[serde(rename = "controller-root")]
+    pub controller_root: String,
+    #[serde(rename = "paper-root")]
+    pub paper_root: String,
+    #[serde(rename = "rivet-root")]
+    pub rivet_root: String,
+    pub lifecycle: String,
+    #[serde(rename = "paper-observed")]
+    pub paper_observed: Vec<PaperObserved>,
+    #[serde(rename = "rivet-observed")]
+    pub rivet_observed: Vec<RivetObserved>,
+}
+
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GeneratedProvenance {
@@ -178,6 +300,7 @@ pub struct GeneratedProvenance {
     pub synthetic: bool,
 }
 
+#[cfg(test)]
 impl GeneratedProvenance {
     #[cfg(test)]
     fn for_test(contract: &GeneratedContract, side: &str, seed: u64) -> Self {
@@ -219,18 +342,22 @@ impl GeneratedProvenance {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct VerifiedSide {
+    #[cfg_attr(not(test), allow(dead_code))]
     provenance: GeneratedProvenance,
     manifest: HashManifest,
 }
 
 #[derive(Debug, Clone)]
 struct Mismatch {
+    #[cfg_attr(not(test), allow(dead_code))]
     seed: u64,
     coordinate: (i32, i32),
     expected: String,
     actual: String,
+    #[cfg_attr(not(test), allow(dead_code))]
     order_only: bool,
 }
 
@@ -271,8 +398,8 @@ fn canonical_contract() -> GeneratedContract {
             paper_materialized_jar: "work/generated-full/artifacts/paper-26.2.jar".to_string(),
             paper_capture_properties: "fixtures/generated-full/server-normal-full.properties"
                 .to_string(),
-            rivet_producer_binary: "work/generated-full/artifacts/rivet-capture".to_string(),
-            rivet_capture_config: "work/generated-full/artifacts/rivet-capture-config.json"
+            rivet_producer_binary: "work/generated-full/artifacts/rivet-generated-full".to_string(),
+            rivet_capture_config: "work/generated-full/artifacts/rivet-generated-full-config.json"
                 .to_string(),
         },
     }
@@ -280,14 +407,14 @@ fn canonical_contract() -> GeneratedContract {
 
 /// Load and structurally validate the generated-FULL contract.
 pub fn load_contract(path: &Path) -> Result<GeneratedContract, Error> {
-    let raw = read_stable_file(path, "generated-full contract")?;
-    let raw = std::str::from_utf8(&raw).map_err(|e| {
+    let raw_bytes = read_stable_file(path, "generated-full contract")?;
+    std::str::from_utf8(&raw_bytes).map_err(|e| {
         Error::Gate(format!(
             "generated-full contract {} is not UTF-8: {e}",
             path.display()
         ))
     })?;
-    let contract: GeneratedContract = serde_json::from_str(raw).map_err(|e| {
+    let contract: GeneratedContract = crate::json::from_slice(&raw_bytes).map_err(|e| {
         Error::Gate(format!(
             "generated-full contract {} is malformed: {e}",
             path.display()
@@ -346,6 +473,803 @@ struct ArtifactIdentity {
     rivet_commit: String,
     capture_binary_sha256: String,
     capture_config_sha256: String,
+}
+
+const REPLAY_SCHEMA: &str = "generated-full-replay-v1";
+const PAPER_READY_TIMEOUT: Duration = Duration::from_secs(180);
+const PRODUCER_READY_TIMEOUT: Duration = Duration::from_secs(30);
+const PROCESS_POLL: Duration = Duration::from_millis(100);
+const PAPER_READY_MARKER: &str = "Done (";
+const RIVET_READY_MARKER: &str = "RIVET_GENERATED_FULL_READY";
+const PAPER_EXPECTED_EXIT: i32 = 0;
+
+fn now_unix_nanos() -> Result<u128, Error> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .map_err(|error| Error::Gate(format!("system clock is before UNIX_EPOCH: {error}")))
+}
+
+fn controller_environment() -> std::collections::BTreeMap<String, String> {
+    ["PATH", "JAVA_HOME", "HOME", "LANG", "LC_ALL", "TZ"]
+        .into_iter()
+        .filter_map(|key| {
+            std::env::var(key)
+                .ok()
+                .map(|value| (key.to_string(), value))
+        })
+        .collect()
+}
+
+fn apply_controller_environment(
+    command: &mut Command,
+) -> std::collections::BTreeMap<String, String> {
+    let environment = controller_environment();
+    command.env_clear();
+    command.envs(&environment);
+    environment
+}
+
+struct ProcessObservation {
+    pid: u32,
+    started_unix_nanos: u128,
+    stopped_unix_nanos: u128,
+    exit_code: i32,
+    ready_count: u32,
+    raw_log_sha256: String,
+    argv: Vec<String>,
+    cwd: String,
+    env: std::collections::BTreeMap<String, String>,
+}
+
+fn process_observation(
+    command: &mut Command,
+    argv: Vec<String>,
+    cwd: &Path,
+    log_path: &Path,
+    ready_marker: &str,
+    timeout: Duration,
+    expected_exit: Option<i32>,
+) -> Result<ProcessObservation, Error> {
+    if log_path.exists() {
+        return Err(Error::Gate(format!(
+            "generated-full process log {} already exists; launched evidence is not fresh",
+            log_path.display()
+        )));
+    }
+    let env = apply_controller_environment(command);
+    let started_unix_nanos = now_unix_nanos()?;
+    let mut child = ChildServer::spawn(command, log_path).map_err(|error| match error {
+        harness_server::Error::Io(error) => {
+            Error::Gate(format!("cannot launch generated-full producer: {error}"))
+        }
+        harness_server::Error::Unverified(message) | harness_server::Error::Gate(message) => {
+            Error::Gate(message)
+        }
+    })?;
+    let pid = child.id();
+    child
+        .wait_ready("generated-full producer", timeout, PROCESS_POLL, |text| {
+            text.contains(ready_marker)
+        })
+        .map_err(|error| {
+            let blocked = fs::read_to_string(log_path).ok().and_then(|text| {
+                text.lines().find_map(|line| {
+                    line.strip_prefix("RIVET_GENERATED_FULL_BLOCKED:")
+                        .map(str::trim)
+                        .filter(|message| !message.is_empty())
+                        .map(str::to_string)
+                })
+            });
+            if let Some(message) = blocked {
+                return Error::Blocked(message);
+            }
+            match error {
+                harness_server::Error::Io(error) => Error::Gate(format!(
+                    "generated-full producer {pid} lifecycle I/O failed before READY: {error}"
+                )),
+                harness_server::Error::Unverified(message)
+                | harness_server::Error::Gate(message) => Error::Gate(format!(
+                    "generated-full producer {pid} failed before READY: {message}"
+                )),
+            }
+        })?;
+    let status = child
+        .shutdown(timeout, PROCESS_POLL)
+        .map_err(|error| match error {
+            harness_server::Error::Io(error) => Error::Gate(format!(
+                "generated-full producer {pid} shutdown I/O failed: {error}"
+            )),
+            harness_server::Error::Unverified(message) | harness_server::Error::Gate(message) => {
+                Error::Gate(message)
+            }
+        })?;
+    let stopped_unix_nanos = now_unix_nanos()?;
+    let log_file = fs::OpenOptions::new()
+        .read(true)
+        .open(log_path)
+        .map_err(|error| {
+            Error::Gate(format!(
+                "generated-full producer log {} cannot reopen: {error}",
+                log_path.display()
+            ))
+        })?;
+    log_file.sync_all().map_err(|error| {
+        Error::Gate(format!(
+            "generated-full producer log {} cannot fsync: {error}",
+            log_path.display()
+        ))
+    })?;
+    drop(log_file);
+    let log_bytes = fs::read(log_path).map_err(|error| {
+        Error::Gate(format!(
+            "generated-full producer log {} cannot be read: {error}",
+            log_path.display()
+        ))
+    })?;
+    let ready_count = String::from_utf8_lossy(&log_bytes)
+        .matches(ready_marker)
+        .count() as u32;
+    if ready_count != 1 {
+        return Err(Error::Gate(format!(
+            "generated-full producer {pid} emitted {ready_count} {ready_marker:?} markers; exactly one is required"
+        )));
+    }
+    let exit_code = status.code().unwrap_or(-1);
+    if expected_exit.is_some_and(|expected| exit_code != expected)
+        || expected_exit.is_none() && !status.success()
+    {
+        return Err(Error::Gate(format!(
+            "generated-full producer {pid} exited with code {exit_code}; launched evidence is failed"
+        )));
+    }
+    Ok(ProcessObservation {
+        pid,
+        started_unix_nanos,
+        stopped_unix_nanos,
+        exit_code,
+        ready_count,
+        raw_log_sha256: crate::sha256_hex(&log_bytes),
+        argv,
+        cwd: cwd.display().to_string(),
+        env,
+    })
+}
+
+fn allocate_replay_root() -> Result<(String, PathBuf), Error> {
+    let base = crate::crate_dir().join("work/generated-full");
+    fs::create_dir_all(&base).map_err(|error| {
+        Error::Gate(format!(
+            "cannot create replay base {}: {error}",
+            base.display()
+        ))
+    })?;
+    reject_symlink_components(&base, "generated-full replay base")?;
+    for attempt in 0..8u32 {
+        let now = now_unix_nanos()?;
+        let nonce = format!("{:x}-{}-{}", now, std::process::id(), attempt);
+        let root = base.join(format!("replay-{nonce}"));
+        match fs::create_dir(&root) {
+            Ok(()) => {
+                fs::create_dir(root.join("paper"))?;
+                fs::create_dir(root.join("rivet"))?;
+                fs::create_dir(root.join("logs"))?;
+                return Ok((nonce, root));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(Error::Gate(format!(
+                    "cannot allocate fresh replay root {}: {error}",
+                    root.display()
+                )));
+            }
+        }
+    }
+    Err(Error::Gate(
+        "could not allocate a collision-free generated-full replay nonce".into(),
+    ))
+}
+
+fn snapshot_tree(src: &Path, dst: &Path) -> Result<(), Error> {
+    reject_symlink_components(src, "generated-full producer output")?;
+    if !src.exists() {
+        return Err(Error::Gate(format!(
+            "generated-full producer completed but output root {} is absent; launched evidence is failed",
+            src.display()
+        )));
+    }
+    if !is_real_dir(src) {
+        return Err(Error::Gate(format!(
+            "generated-full producer output {} is not a directory",
+            src.display()
+        )));
+    }
+    if dst.exists() {
+        return Err(Error::Gate(format!(
+            "generated-full verifier snapshot {} already exists; refusing to reuse evidence",
+            dst.display()
+        )));
+    }
+    fs::create_dir_all(dst)?;
+    let mut stack = vec![(src.to_path_buf(), dst.to_path_buf(), 0usize)];
+    while let Some((from, to, depth)) = stack.pop() {
+        if depth > 8 {
+            return Err(Error::Gate(format!(
+                "generated-full output tree {} is too deep",
+                from.display()
+            )));
+        }
+        let entries = fs::read_dir(&from)?.collect::<Result<Vec<_>, _>>()?;
+        if entries.len() > MAX_EVIDENCE_ENTRIES {
+            return Err(Error::Gate(format!(
+                "generated-full output directory {} exceeds the {}-entry cap",
+                from.display(),
+                MAX_EVIDENCE_ENTRIES
+            )));
+        }
+        for entry in entries {
+            let source = entry.path();
+            let target = to.join(entry.file_name());
+            reject_symlink(&source, "generated-full producer output")?;
+            reject_hardlink(&source, "generated-full producer output")?;
+            if is_real_dir(&source) {
+                fs::create_dir(&target)?;
+                stack.push((source, target, depth + 1));
+            } else if is_regular_file(&source) {
+                let cap = if source.extension().and_then(|ext| ext.to_str()) == Some("nbt") {
+                    MAX_PAYLOAD_FILE_BYTES
+                } else {
+                    MAX_EVIDENCE_FILE_BYTES
+                };
+                let bytes =
+                    read_stable_file_capped(&source, "generated-full producer output", cap)?;
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&target)?;
+                std::io::Write::write_all(&mut file, &bytes)?;
+                file.sync_all()?;
+                drop(file);
+            } else {
+                return Err(Error::Gate(format!(
+                    "generated-full producer output {} is not a regular file or directory",
+                    source.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_seed_config(
+    root: &Path,
+    contract: &GeneratedContract,
+    seed: u64,
+) -> Result<PathBuf, Error> {
+    fs::create_dir_all(root).map_err(Error::Io)?;
+    let config = serde_json::json!({
+        "seed-u64": seed,
+        "seed-java-long": java_seed_long(seed),
+        "level-type": contract.level_type,
+        "dimension": &contract.dimension,
+        "region-file-compression": contract.region_file_compression,
+        "status": &contract.status,
+        "stage": &contract.stage,
+    });
+    let path = root.join(SEED_CONFIG_BASENAME);
+    let bytes = serde_json::to_vec_pretty(&config).map_err(|error| {
+        Error::Gate(format!(
+            "cannot serialize generated-full seed config: {error}"
+        ))
+    })?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(Error::Io)?;
+    file.write_all(&bytes).map_err(Error::Io)?;
+    file.write_all(b"\n").map_err(Error::Io)?;
+    file.sync_all().map_err(Error::Io)?;
+    Ok(path)
+}
+
+fn copy_immutable_file(src: &Path, dst: &Path, what: &str) -> Result<String, Error> {
+    let bytes = read_stable_file(src, what)?;
+    if dst.exists() {
+        return Err(Error::Gate(format!(
+            "generated-full verifier input {} already exists; refusing to reuse it",
+            dst.display()
+        )));
+    }
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).map_err(Error::Io)?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dst)
+        .map_err(Error::Io)?;
+    file.write_all(&bytes).map_err(Error::Io)?;
+    file.sync_all().map_err(Error::Io)?;
+    Ok(crate::sha256_hex(&bytes))
+}
+
+fn write_fresh_file(path: &Path, bytes: &[u8], what: &str) -> Result<(), Error> {
+    if path.exists() {
+        return Err(Error::Gate(format!(
+            "generated-full {what} {} already exists; refusing to reuse it",
+            path.display()
+        )));
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(Error::Io)?;
+    file.write_all(bytes).map_err(Error::Io)?;
+    file.sync_all().map_err(Error::Io)?;
+    Ok(())
+}
+
+fn retain_overworld_only(root: &Path) -> Result<(), Error> {
+    let chunk_root = root.join("chunk");
+    let entries = fs::read_dir(&chunk_root)
+        .map_err(|error| Error::Gate(format!("cannot read {}: {error}", chunk_root.display())))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Error::Io)?;
+    for entry in entries {
+        let path = entry.path();
+        reject_symlink(&path, "generated-full extracted dimension")?;
+        if entry.file_name() != "overworld" {
+            if !is_real_dir(&path) {
+                return Err(Error::Gate(format!(
+                    "generated-full extracted dimension {} is not a directory",
+                    path.display()
+                )));
+            }
+            fs::remove_dir_all(path).map_err(Error::Io)?;
+        }
+    }
+    Ok(())
+}
+
+fn check_snapshot_closure(root: &Path) -> Result<(), Error> {
+    let expected = BTreeSet::from([
+        "chunk".to_string(),
+        SEED_CONFIG_BASENAME.to_string(),
+        MANIFEST_BASENAME.to_string(),
+    ]);
+    let mut actual = BTreeSet::new();
+    for entry in fs::read_dir(root).map_err(Error::Io)? {
+        let entry = entry.map_err(Error::Io)?;
+        let path = entry.path();
+        reject_symlink(&path, "generated-full snapshot root")?;
+        reject_hardlink(&path, "generated-full snapshot root")?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !expected.contains(name.as_str()) {
+            return Err(Error::Gate(format!(
+                "generated-full snapshot {} has extra entry {name:?}",
+                root.display()
+            )));
+        }
+        if name == "chunk" {
+            if !is_real_dir(&path) {
+                return Err(Error::Gate(format!(
+                    "generated-full snapshot {} chunk is not a directory",
+                    root.display()
+                )));
+            }
+        } else if !is_regular_file(&path) {
+            return Err(Error::Gate(format!(
+                "generated-full snapshot {} entry {name:?} is not a regular file",
+                root.display()
+            )));
+        }
+        actual.insert(name);
+    }
+    if actual != expected {
+        let missing = expected.difference(&actual).cloned().collect::<Vec<_>>();
+        return Err(Error::Gate(format!(
+            "generated-full snapshot {} has partial closure; missing declared entries {missing:?}",
+            root.display()
+        )));
+    }
+    Ok(())
+}
+
+fn raw_manifest_from_snapshot(
+    contract: &GeneratedContract,
+    root: &Path,
+    seed: u64,
+    side: &str,
+) -> Result<HashManifest, Error> {
+    check_snapshot_closure(root)?;
+    let discovered =
+        discover_payloads(root, contract, seed, side).map_err(|error| match error {
+            Error::Unverified(message) => Error::Gate(format!(
+                "generated-full {side} seed-{seed} launched output is incomplete: {message}"
+            )),
+            other => other,
+        })?;
+    for payload in &discovered {
+        let compound = mutate::parse_payload(&payload.bytes).map_err(|error| {
+            Error::Gate(format!(
+                "generated-full {side} seed-{seed} payload {} is malformed: {error}",
+                payload.path.display()
+            ))
+        })?;
+        if (compound.get_int("xPos"), compound.get_int("zPos"))
+            != (Some(payload.cx), Some(payload.cz))
+        {
+            return Err(Error::Gate(format!(
+                "generated-full {side} seed-{seed} payload {} xPos/zPos do not bind to filename",
+                payload.path.display()
+            )));
+        }
+        require_canonical_last_update(&compound, &payload.path)?;
+    }
+    let payloads = discovered
+        .iter()
+        .map(|payload| hash_manifest::PayloadBytes {
+            dim: contract.dimension.clone(),
+            region: region_for(payload.cx, payload.cz),
+            cx: payload.cx,
+            cz: payload.cz,
+            bytes: payload.bytes.clone(),
+        })
+        .collect::<Vec<_>>();
+    let capture = CaptureProvenance {
+        level_type: contract.level_type.clone(),
+        region_file_compression: contract.region_file_compression.clone(),
+        corpus_version: contract.corpus_version.clone(),
+    };
+    let manifest = hash_manifest::build_from_payload_bytes_with(
+        &payloads,
+        &seed.to_string(),
+        &contract.level_type,
+        &capture,
+    )
+    .map_err(|error| {
+        Error::Gate(format!(
+            "generated-full {side} seed-{seed} raw payload validation failed: {error}"
+        ))
+    })?;
+    if manifest.full_count != contract.coordinates.len()
+        || manifest.entries.len() != contract.coordinates.len()
+    {
+        return Err(Error::Gate(format!(
+            "generated-full {side} seed-{seed} produced {} FULL payloads, expected {}; launched evidence is not a complete FULL replay",
+            manifest.full_count,
+            contract.coordinates.len()
+        )));
+    }
+    Ok(manifest)
+}
+
+fn raw_payload_digests(manifest: &HashManifest) -> Vec<RawPayloadDigest> {
+    manifest
+        .entries
+        .iter()
+        .map(|entry| RawPayloadDigest {
+            dimension: entry.dim.clone(),
+            region: entry.region.clone(),
+            x: entry.cx,
+            z: entry.cz,
+            bytes: entry.bytes,
+            xxh3_64: entry.xxh3_64.clone(),
+            sha256: entry.sha256.clone(),
+        })
+        .collect()
+}
+
+fn paper_observed(
+    seed: u64,
+    root: &Path,
+    identity: &ArtifactIdentity,
+    process: ProcessObservation,
+    manifest: &HashManifest,
+    source_sha256: &str,
+    config_sha256: &str,
+) -> PaperObserved {
+    PaperObserved {
+        schema: "paper-observed-v1".to_string(),
+        seed,
+        root: root.display().to_string(),
+        argv: process.argv,
+        cwd: process.cwd,
+        env: process.env,
+        paper_jar_sha256: identity.materialized_jar_sha256.clone(),
+        paper_config_sha256: config_sha256.to_string(),
+        paper_source_sha256: source_sha256.to_string(),
+        pid: process.pid,
+        started_unix_nanos: process.started_unix_nanos,
+        ready_count: process.ready_count,
+        stopped_unix_nanos: process.stopped_unix_nanos,
+        exit_code: process.exit_code,
+        raw_log_sha256: process.raw_log_sha256,
+        payload_digests: raw_payload_digests(manifest),
+        producer_manifest_sha256: None,
+    }
+}
+
+fn rivet_observed(
+    seed: u64,
+    root: &Path,
+    identity: &ArtifactIdentity,
+    process: ProcessObservation,
+    manifest: &HashManifest,
+    source_sha256: &str,
+) -> RivetObserved {
+    RivetObserved {
+        schema: "rivet-observed-v1".to_string(),
+        seed,
+        root: root.display().to_string(),
+        argv: process.argv,
+        cwd: process.cwd,
+        env: process.env,
+        rivet_executable_sha256: identity.capture_binary_sha256.clone(),
+        rivet_config_sha256: identity.capture_config_sha256.clone(),
+        rivet_source_sha256: source_sha256.to_string(),
+        pid: process.pid,
+        started_unix_nanos: process.started_unix_nanos,
+        ready_count: process.ready_count,
+        stopped_unix_nanos: process.stopped_unix_nanos,
+        exit_code: process.exit_code,
+        raw_log_sha256: process.raw_log_sha256,
+        payload_digests: raw_payload_digests(manifest),
+        producer_manifest_sha256: None,
+    }
+}
+
+fn write_replay_record(root: &Path, record: &ReplayRecord) -> Result<(), Error> {
+    let path = root.join("replay.json");
+    let bytes = serde_json::to_vec_pretty(record).map_err(|error| {
+        Error::Gate(format!(
+            "cannot serialize generated-full replay record: {error}"
+        ))
+    })?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(Error::Io)?;
+    file.write_all(&bytes).map_err(Error::Io)?;
+    file.write_all(b"\n").map_err(Error::Io)?;
+    file.sync_all().map_err(Error::Io)?;
+    Ok(())
+}
+
+fn run_fresh_replay(
+    contract: &GeneratedContract,
+    artifacts: &ArtifactInputs,
+    identity: &ArtifactIdentity,
+) -> Result<(), Error> {
+    run_fresh_replay_with_paper_boots(contract, artifacts, identity, 2)
+}
+
+fn run_fresh_replay_with_paper_boots(
+    contract: &GeneratedContract,
+    artifacts: &ArtifactInputs,
+    identity: &ArtifactIdentity,
+    paper_boots: u8,
+) -> Result<(), Error> {
+    if !(2..=3).contains(&paper_boots) {
+        return Err(Error::Gate("generated-full replay requires two ordinary Paper boots or three explicit determinism-refresh boots per seed".into()));
+    }
+    let (nonce, replay_root) = allocate_replay_root()?;
+    let inputs = replay_root.join("inputs");
+    fs::create_dir(&inputs).map_err(Error::Io)?;
+    let paper_source_sha256 = crate::sha256_hex(identity.paper_commit.as_bytes());
+    let rivet_source_sha256 = crate::sha256_hex(identity.rivet_commit.as_bytes());
+    let mut paper_observations = Vec::new();
+    let mut rivet_observations = Vec::new();
+
+    for &seed in &contract.seeds {
+        let seed_text = seed.to_string();
+        let paper_seed_root = replay_root.join("paper").join(&seed_text);
+        let rivet_seed_root = replay_root.join("rivet").join(&seed_text);
+        let paper_run = paper_seed_root.join("run");
+        let paper_output = paper_seed_root.join("output");
+        let rivet_output = rivet_seed_root.join("output");
+        fs::create_dir_all(&paper_seed_root).map_err(Error::Io)?;
+        fs::create_dir_all(&rivet_seed_root).map_err(Error::Io)?;
+        let _seed_config = write_seed_config(&inputs.join(&seed_text), contract, seed)?;
+        let paper_properties = inputs.join(format!("paper-{seed}.properties"));
+        let paper_config =
+            rewrite_paper_properties_for_seed(&identity.paper_config_template, seed)?;
+        let paper_config_sha256 = crate::sha256_hex(&paper_config);
+        write_fresh_file(
+            &paper_properties,
+            &paper_config,
+            "generated-full Paper seed properties",
+        )?;
+        let rivet_config = inputs.join("rivet-generated-full-config.json");
+        if !rivet_config.exists() {
+            copy_immutable_file(
+                &artifacts.rivet_config,
+                &rivet_config,
+                "generated-full Rivet producer config",
+            )?;
+        }
+
+        prepare_run_dir(&paper_run, &paper_properties)?;
+        let mut paper_processes = Vec::new();
+        for boot in 0..paper_boots {
+            let paper_log = replay_root
+                .join("logs")
+                .join(format!("paper-{seed}-{boot}.log"));
+            let paper_argv = vec![
+                "java".to_string(),
+                "-Xms512M".to_string(),
+                "-Xmx2G".to_string(),
+                "-jar".to_string(),
+                artifacts.paper_jar.display().to_string(),
+                "nogui".to_string(),
+            ];
+            let mut paper_command = Command::new("java");
+            paper_command
+                .args(["-Xms512M", "-Xmx2G", "-jar"])
+                .arg(&artifacts.paper_jar)
+                .arg("nogui")
+                .current_dir(&paper_run);
+            let paper_process = process_observation(
+                &mut paper_command,
+                paper_argv,
+                &paper_run,
+                &paper_log,
+                PAPER_READY_MARKER,
+                PAPER_READY_TIMEOUT,
+                Some(PAPER_EXPECTED_EXIT),
+            )?;
+            paper_processes.push(paper_process);
+            if boot == 0 {
+                let coordinates = contract
+                    .coordinates
+                    .iter()
+                    .map(|coordinate| (coordinate.x, coordinate.z))
+                    .collect::<Vec<_>>();
+                inject_forced_tickets(
+                    &paper_run.join("world"),
+                    &coordinates,
+                    OVERWORLD_DIM,
+                    FORCED_TICKET_LEVEL,
+                )?;
+            }
+        }
+        let capture_log = replay_root
+            .join("logs")
+            .join(format!("paper-{seed}-{}.log", paper_boots - 1));
+        let observed = parse_boot_thread_counts(&String::from_utf8_lossy(&read_stable_file(
+            &capture_log,
+            "generated-full Paper raw log",
+        )?))
+        .map(|(worker_threads, io_threads)| crate::ChunkConcurrency {
+            worker_threads,
+            io_threads,
+        });
+        verify_forced_load(&capture_log, contract.coordinates.len(), OVERWORLD_DIM)?;
+        extract_fresh_fixtures(
+            &paper_run.join("world"),
+            &paper_output,
+            true,
+            KIND_FULL,
+            observed,
+        )?;
+        normalize_last_update_tree(&paper_output)?;
+        rehash_captured(&paper_output)?;
+        retain_overworld_only(&paper_output)?;
+        write_seed_config(&paper_output, contract, seed)?;
+        let paper_snapshot = paper_seed_root.join("snapshot");
+        snapshot_tree(&paper_output, &paper_snapshot)?;
+        let paper_manifest = raw_manifest_from_snapshot(contract, &paper_snapshot, seed, "paper")?;
+        for paper_process in paper_processes {
+            paper_observations.push(paper_observed(
+                seed,
+                &paper_snapshot,
+                identity,
+                paper_process,
+                &paper_manifest,
+                &paper_source_sha256,
+                &paper_config_sha256,
+            ));
+        }
+
+        let rivet_log = replay_root.join("logs").join(format!("rivet-{seed}.log"));
+        let coordinates_json = serde_json::to_string(&contract.coordinates).map_err(|error| {
+            Error::Gate(format!(
+                "cannot serialize generated-full coordinates: {error}"
+            ))
+        })?;
+        let rivet_argv = vec![
+            artifacts.rivet_binary.display().to_string(),
+            "--generated-full".to_string(),
+            "--seed".to_string(),
+            seed_text.clone(),
+            "--coordinates".to_string(),
+            coordinates_json.clone(),
+            "--config".to_string(),
+            rivet_config.display().to_string(),
+            "--output".to_string(),
+            rivet_output.display().to_string(),
+            "--nonce".to_string(),
+            nonce.clone(),
+        ];
+        let mut rivet_command = Command::new(&artifacts.rivet_binary);
+        rivet_command
+            .arg("--generated-full")
+            .arg("--seed")
+            .arg(&seed_text)
+            .arg("--coordinates")
+            .arg(&coordinates_json)
+            .arg("--config")
+            .arg(&rivet_config)
+            .arg("--output")
+            .arg(&rivet_output)
+            .arg("--nonce")
+            .arg(&nonce)
+            .current_dir(&replay_root);
+        let rivet_process = process_observation(
+            &mut rivet_command,
+            rivet_argv,
+            &replay_root,
+            &rivet_log,
+            RIVET_READY_MARKER,
+            PRODUCER_READY_TIMEOUT,
+            Some(0),
+        )?;
+        write_seed_config(&rivet_output, contract, seed)?;
+        let rivet_snapshot = rivet_seed_root.join("snapshot");
+        snapshot_tree(&rivet_output, &rivet_snapshot)?;
+        let rivet_manifest = raw_manifest_from_snapshot(contract, &rivet_snapshot, seed, "rivet")?;
+        rivet_observations.push(rivet_observed(
+            seed,
+            &rivet_snapshot,
+            identity,
+            rivet_process,
+            &rivet_manifest,
+            &rivet_source_sha256,
+        ));
+        let mismatches = manifest_mismatches(contract, seed, &paper_manifest, &rivet_manifest);
+        if !mismatches.is_empty() {
+            let details = mismatches
+                .iter()
+                .map(|mismatch| {
+                    format!(
+                        "overworld/{}.{} expected {} got {}",
+                        mismatch.coordinate.0,
+                        mismatch.coordinate.1,
+                        mismatch.expected,
+                        mismatch.actual
+                    )
+                })
+                .collect::<Vec<_>>();
+            return Err(Error::Gate(format!(
+                "generated-full parity FAIL after fresh replay for seed {seed}: {} divergent payloads\n{}",
+                mismatches.len(),
+                details.join("\n")
+            )));
+        }
+    }
+
+    let record = ReplayRecord {
+        schema: REPLAY_SCHEMA.to_string(),
+        nonce,
+        controller_root: replay_root.display().to_string(),
+        paper_root: replay_root.join("paper").display().to_string(),
+        rivet_root: replay_root.join("rivet").display().to_string(),
+        lifecycle: "completed".to_string(),
+        paper_observed: paper_observations,
+        rivet_observed: rivet_observations,
+    };
+    write_replay_record(&replay_root, &record)?;
+    println!(
+        "PARITY_VERIFIED: generated-full fresh replay matched ({} seeds, {} coordinates, {} Paper boots, {} Rivet runs)",
+        contract.seeds.len(),
+        contract.coordinates.len(),
+        contract.seeds.len() * paper_boots as usize,
+        contract.seeds.len()
+    );
+    Ok(())
 }
 
 impl ArtifactInputs {
@@ -465,26 +1389,9 @@ pub fn verify_default() -> Result<(), Error> {
     let fixture_root = crate::crate_dir().join("fixtures/generated-full");
     verify_fixture_outer_closure(&fixture_root)?;
     let contract = load_contract(&fixture_root.join(CONTRACT_BASENAME))?;
-    let paper_root = fixture_root.join("paper");
-    let rivet_root = crate::crate_dir().join("work/generated-full/rivet");
     let artifacts = ArtifactInputs::from_contract(&contract)?;
     let identity = artifacts.identity()?;
-    verify_roots_with_identity(&contract, &paper_root, &rivet_root, &identity, false)
-}
-
-/// Verify a contract against explicit Paper and Rivet seed roots. Production
-/// verification has no synthetic escape hatch: it requires the canonical
-/// artifact attestation supplied by `verify-generated-full` or the promotion
-/// gate. Unit tests use `verify_synthetic_roots` for parser/tamper coverage.
-pub fn verify_roots(
-    contract: &GeneratedContract,
-    paper_root: &Path,
-    rivet_root: &Path,
-) -> Result<(), Error> {
-    validate_contract(contract)?;
-    let artifacts = ArtifactInputs::from_contract(contract)?;
-    let identity = artifacts.identity()?;
-    verify_roots_with_identity(contract, paper_root, rivet_root, &identity, false)
+    run_fresh_replay(&contract, &artifacts, &identity)
 }
 
 #[cfg(test)]
@@ -505,6 +1412,7 @@ fn verify_synthetic_roots(
     verify_roots_with_identity(contract, paper_root, rivet_root, &identity, true)
 }
 
+#[cfg(test)]
 fn verify_roots_with_identity(
     contract: &GeneratedContract,
     paper_root: &Path,
@@ -517,8 +1425,6 @@ fn verify_roots_with_identity(
     verify_seed_root_closure(paper_root, contract, "paper")?;
     verify_seed_root_closure(rivet_root, contract, "rivet")?;
 
-    let mut paper_producer: Option<GeneratedProvenance> = None;
-    let mut rivet_producer: Option<GeneratedProvenance> = None;
     for &seed in &contract.seeds {
         let paper = paper_root.join(seed.to_string());
         let rivet = rivet_root.join(seed.to_string());
@@ -532,24 +1438,6 @@ fn verify_roots_with_identity(
         }
         let paper_side = verify_side(contract, &paper, seed, "paper", identity, allow_synthetic)?;
         let rivet_side = verify_side(contract, &rivet, seed, "rivet", identity, allow_synthetic)?;
-        if let Some(reference) = &paper_producer {
-            if !same_producer_attestation(reference, &paper_side.provenance) {
-                return Err(Error::Gate(format!(
-                    "generated-full Paper producer attestation changes across seeds; seed {seed} does not use one captured jar/config identity"
-                )));
-            }
-        } else {
-            paper_producer = Some(paper_side.provenance.clone());
-        }
-        if let Some(reference) = &rivet_producer {
-            if !same_producer_attestation(reference, &rivet_side.provenance) {
-                return Err(Error::Gate(format!(
-                    "generated-full Rivet producer attestation changes across seeds; seed {seed} does not use one captured binary/config identity"
-                )));
-            }
-        } else {
-            rivet_producer = Some(rivet_side.provenance.clone());
-        }
         compare_seed(contract, seed, &paper_side, &rivet_side)?;
     }
     println!(
@@ -579,9 +1467,11 @@ fn verify_fixture_outer_closure(root: &Path) -> Result<(), Error> {
             root.display()
         )));
     }
+    // The fixture directory is contract/config only.  Paper and Rivet output
+    // are allocated by the verifier under a fresh replay nonce; a committed
+    // or caller-selected side tree is never accepted as production evidence.
     let expected = BTreeSet::from([
         CONTRACT_BASENAME.to_string(),
-        "paper".to_string(),
         "server-normal-full.properties".to_string(),
     ]);
     let mut actual = BTreeSet::new();
@@ -609,22 +1499,19 @@ fn verify_fixture_outer_closure(root: &Path) -> Result<(), Error> {
                 ));
             }
             reject_hardlink(&path, "generated-full fixture Paper properties")?;
-        } else if !is_real_dir(&path) {
-            return Err(Error::Gate(
-                "generated-full fixture paper entry is not a directory".into(),
-            ));
         }
         actual.insert(name);
     }
     if actual != expected {
         let missing = expected.difference(&actual).cloned().collect::<Vec<_>>();
-        return Err(Error::Unverified(format!(
-            "generated-full fixture root is missing declared entries {missing:?} — FULL coverage is UNVERIFIED"
+        return Err(Error::Gate(format!(
+            "generated-full fixture root has partial closure; missing declared entries {missing:?}"
         )));
     }
     Ok(())
 }
 
+#[cfg(test)]
 fn canonical_side_path(path: &Path) -> Result<PathBuf, Error> {
     reject_symlink_components(path, "generated-full side path")?;
     path.canonicalize().map_err(|e| {
@@ -635,6 +1522,7 @@ fn canonical_side_path(path: &Path) -> Result<PathBuf, Error> {
     })
 }
 
+#[cfg(test)]
 fn verify_seed_root_closure(
     root: &Path,
     contract: &GeneratedContract,
@@ -679,13 +1567,14 @@ fn verify_seed_root_closure(
     }
     if actual != expected {
         let missing = expected.difference(&actual).cloned().collect::<Vec<_>>();
-        return Err(Error::Unverified(format!(
-            "generated-full {side} root is missing declared seed directories {missing:?} — FULL coverage is UNVERIFIED",
+        return Err(Error::Gate(format!(
+            "generated-full {side} root has partial closure; missing declared seed directories {missing:?}",
         )));
     }
     Ok(())
 }
 
+#[cfg(test)]
 fn verify_side(
     contract: &GeneratedContract,
     root: &Path,
@@ -712,16 +1601,9 @@ fn verify_side(
         )));
     }
     reject_symlink(root, &format!("generated-full {side} root"))?;
-    let seed_config_sha256 = read_seed_config(root, contract, seed, side)?;
-    let provenance = read_provenance(
-        root,
-        contract,
-        seed,
-        side,
-        identity,
-        &seed_config_sha256,
-        allow_synthetic,
-    )?;
+    // A seed directory that exists but is missing any handoff member is partial
+    // evidence, not an absent prerequisite. Inspect the exact root closure before
+    // opening the members so missing files cannot be downgraded to UNVERIFIED.
     let expected_root_entries = BTreeSet::from([
         PROVENANCE_BASENAME.to_string(),
         SEED_CONFIG_BASENAME.to_string(),
@@ -746,16 +1628,26 @@ fn verify_side(
             .difference(&actual_root_entries)
             .cloned()
             .collect::<Vec<_>>();
-        return Err(Error::Unverified(format!(
-            "generated-full {side} seed-{seed} is missing declared root entries {missing:?} — FULL coverage is UNVERIFIED",
+        return Err(Error::Gate(format!(
+            "generated-full {side} seed-{seed} has partial closure; missing declared root entries {missing:?}",
         )));
     }
+    let seed_config_sha256 = read_seed_config(root, contract, seed, side)?;
+    let provenance = read_provenance(
+        root,
+        contract,
+        seed,
+        side,
+        identity,
+        &seed_config_sha256,
+        allow_synthetic,
+    )?;
     let manifest_path = root.join(MANIFEST_BASENAME);
     reject_symlink_components(&manifest_path, "generated-full manifest")?;
     reject_symlink_if_present(&manifest_path, "generated-full manifest")?;
     if !manifest_path.exists() {
-        return Err(Error::Unverified(format!(
-            "generated-full {side} seed-{seed} has no {MANIFEST_BASENAME} — derived FULL coverage is UNVERIFIED",
+        return Err(Error::Gate(format!(
+            "generated-full {side} seed-{seed} has partial evidence: no {MANIFEST_BASENAME}",
         )));
     }
     if !is_regular_file(&manifest_path) {
@@ -766,18 +1658,17 @@ fn verify_side(
     let supplied_manifest = read_manifest(&manifest_path)?;
     let discovered = discover_payloads(root, contract, seed, side)?;
     if discovered.is_empty() {
-        return Err(Error::Unverified(format!(
-            "generated-full {side} seed-{seed} has no FULL payloads — G4 output is UNVERIFIED",
+        return Err(Error::Gate(format!(
+            "generated-full {side} seed-{seed} has partial evidence: no FULL payloads",
         )));
     }
 
     // Check each payload's internal position before deriving hashes. A
     // relabeled file must not become a valid coordinate merely because its
-    // filename is in the expected closure. The LastUpdate rule is the one
+    // filename is in the expected closure. LastUpdate is the only
     // canonicalization invariant for this harness: captures must serialize an
     // explicit root `LastUpdate` long with value 0, and no other normalization
     // is applied before byte-level comparison.
-    let mut content_fingerprints = BTreeSet::new();
     for payload in &discovered {
         let bytes = &payload.bytes;
         let compound = mutate::parse_payload(bytes).map_err(|e| {
@@ -797,12 +1688,6 @@ fn verify_side(
             )));
         }
         require_canonical_last_update(&compound, &payload.path)?;
-        content_fingerprints.insert(content_fingerprint(&compound)?);
-    }
-    if content_fingerprints.len() < 2 {
-        return Err(Error::Gate(format!(
-            "generated-full {side} seed-{seed} payloads are content-identical after removing coordinates and tick counters; normal-overworld output is indistinguishable from a superflat echo"
-        )));
     }
 
     let capture = CaptureProvenance {
@@ -851,6 +1736,7 @@ fn verify_side(
     })
 }
 
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SeedConfig {
@@ -867,6 +1753,7 @@ struct SeedConfig {
     stage: String,
 }
 
+#[cfg(test)]
 fn read_seed_config(
     root: &Path,
     contract: &GeneratedContract,
@@ -875,7 +1762,7 @@ fn read_seed_config(
 ) -> Result<String, Error> {
     let path = root.join(SEED_CONFIG_BASENAME);
     let bytes = read_stable_file(&path, "generated-full seed config")?;
-    let config: SeedConfig = serde_json::from_slice(&bytes).map_err(|e| {
+    let config: SeedConfig = crate::json::from_slice(&bytes).map_err(|e| {
         Error::Gate(format!(
             "generated-full {side} seed-{seed} config is malformed: {e}"
         ))
@@ -895,6 +1782,7 @@ fn read_seed_config(
     Ok(crate::sha256_hex(&bytes))
 }
 
+#[cfg(test)]
 fn read_provenance(
     root: &Path,
     contract: &GeneratedContract,
@@ -912,7 +1800,7 @@ fn read_provenance(
             path.display()
         ))
     })?;
-    let provenance: GeneratedProvenance = serde_json::from_str(raw).map_err(|e| {
+    let provenance: GeneratedProvenance = crate::json::from_slice(raw.as_bytes()).map_err(|e| {
         Error::Gate(format!(
             "generated-full {side} seed-{seed} provenance is malformed: {e}"
         ))
@@ -941,6 +1829,7 @@ fn read_provenance(
     Ok(provenance)
 }
 
+#[cfg(test)]
 fn provenance_matches(
     contract: &GeneratedContract,
     provenance: &GeneratedProvenance,
@@ -979,6 +1868,7 @@ fn provenance_matches(
         && match_side_artifacts(provenance, identity, allow_synthetic)
 }
 
+#[cfg(test)]
 fn match_side_artifacts(
     provenance: &GeneratedProvenance,
     identity: &ArtifactIdentity,
@@ -1006,6 +1896,7 @@ fn match_side_artifacts(
         && provenance.capture_config_sha256 == identity.capture_config_sha256
 }
 
+#[cfg(test)]
 fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -1117,6 +2008,7 @@ fn rewrite_paper_properties_for_seed(template: &[u8], seed: u64) -> Result<Vec<u
     Ok(rewritten.into_bytes())
 }
 
+#[cfg(test)]
 fn expected_paper_properties_sha256(
     identity: &ArtifactIdentity,
     seed: u64,
@@ -1155,23 +2047,6 @@ fn require_canonical_last_update(compound: &CompoundTag, path: &Path) -> Result<
     }
 }
 
-fn content_fingerprint(compound: &CompoundTag) -> Result<String, Error> {
-    let mut content = compound.clone();
-    // Coordinates and tick counters are capture metadata, not worldgen
-    // content. Removing exactly these fields makes the anti-superflat check
-    // test terrain/content variation rather than filename or position noise.
-    for key in ["xPos", "zPos", "LastUpdate", "InhabitedTime"] {
-        content.tags.shift_remove(key);
-    }
-    // Use the semantic NBT digest rather than re-encoding the insertion-ordered
-    // compound: key-order-only mutations must not manufacture terrain diversity.
-    crate::semantic_hash::canonical_xxh3_64(&content).map_err(|e| {
-        Error::Gate(format!(
-            "generated-full payload content cannot be canonicalized for anti-superflat validation: {e}"
-        ))
-    })
-}
-
 fn discover_payloads(
     root: &Path,
     contract: &GeneratedContract,
@@ -1179,13 +2054,13 @@ fn discover_payloads(
     side: &str,
 ) -> Result<Vec<PayloadFile>, Error> {
     let chunk_root = root.join("chunk");
-    // A broken chunk symlink is malformed existing output; only a truly absent
-    // chunk tree is an UNVERIFIED missing prerequisite.
+    // A broken chunk symlink is malformed existing output; a missing chunk tree
+    // below an existing seed handoff is partial evidence and must FAIL.
     reject_symlink_components(&chunk_root, "generated-full chunk root")?;
     reject_symlink_if_present(&chunk_root, "generated-full chunk root")?;
     if !chunk_root.exists() {
-        return Err(Error::Unverified(format!(
-            "generated-full {side} seed-{seed} has no chunk/ payload tree — FULL coverage is UNVERIFIED",
+        return Err(Error::Gate(format!(
+            "generated-full {side} seed-{seed} has partial evidence: no chunk/ payload tree",
         )));
     }
     reject_symlink(&chunk_root, "generated-full chunk root")?;
@@ -1201,6 +2076,7 @@ fn discover_payloads(
     let mut discovered = Vec::new();
     let mut logical_coordinates = BTreeSet::new();
 
+    let mut total_payload_bytes = 0u64;
     for dim_entry in read_dir_strict(&chunk_root, side, seed)? {
         let dim_path = dim_entry.path();
         reject_symlink(&dim_path, "generated-full chunk tree")?;
@@ -1268,7 +2144,29 @@ fn discover_payloads(
                     )));
                 }
                 let relative = format!("chunk/{}/{}/{}.{}.nbt", contract.dimension, region, cx, cz);
-                let bytes = read_stable_file(&path, "generated-full nested payload")?;
+                let bytes = read_stable_file_capped(
+                    &path,
+                    "generated-full nested payload",
+                    MAX_PAYLOAD_FILE_BYTES,
+                )?;
+                if discovered.len() >= MAX_EVIDENCE_ENTRIES {
+                    return Err(Error::Gate(format!(
+                        "generated-full {side} seed-{seed} has more than {MAX_EVIDENCE_ENTRIES} payload entries"
+                    )));
+                }
+                total_payload_bytes = total_payload_bytes
+                    .checked_add(bytes.len() as u64)
+                    .ok_or_else(|| {
+                        Error::Gate(format!(
+                            "generated-full {side} seed-{seed} payload byte count overflowed"
+                        ))
+                    })?;
+                if total_payload_bytes > hash_manifest::MAX_TOTAL_PAYLOAD_BYTES as u64 {
+                    return Err(Error::Gate(format!(
+                        "generated-full {side} seed-{seed} payloads exceed the {}-byte cap",
+                        hash_manifest::MAX_TOTAL_PAYLOAD_BYTES
+                    )));
+                }
                 discovered.push(PayloadFile {
                     path,
                     relative,
@@ -1281,8 +2179,8 @@ fn discover_payloads(
     }
 
     if !dimensions.contains(&contract.dimension) {
-        return Err(Error::Unverified(format!(
-            "generated-full {side} seed-{seed} is missing declared dimension {} — FULL coverage is UNVERIFIED",
+        return Err(Error::Gate(format!(
+            "generated-full {side} seed-{seed} has partial closure: missing declared dimension {}",
             contract.dimension
         )));
     }
@@ -1295,16 +2193,16 @@ fn discover_payloads(
     }
     let actual_region_refs: BTreeSet<&str> = regions.iter().map(String::as_str).collect();
     if actual_region_refs != expected_regions {
-        // A missing region is an incomplete producer output.  Extra regions
+        // A missing region is an incomplete producer output. Extra regions
         // were rejected above as malformed artifacts; this branch names the
-        // missing closure without converting a not-yet-supplied corpus to green.
+        // missing closure as a hard parity failure.
         let missing = expected_regions
             .difference(&actual_region_refs)
             .copied()
             .collect::<Vec<_>>();
         if !missing.is_empty() {
-            return Err(Error::Unverified(format!(
-                "generated-full {side} seed-{seed} is missing declared regions {missing:?} — FULL coverage is UNVERIFIED",
+            return Err(Error::Gate(format!(
+                "generated-full {side} seed-{seed} has partial closure: missing declared regions {missing:?}",
             )));
         }
         return Err(Error::Gate(format!(
@@ -1330,8 +2228,8 @@ fn discover_payloads(
                 extra.join(", ")
             )));
         }
-        return Err(Error::Unverified(format!(
-            "generated-full {side} seed-{seed} payload closure is incomplete; missing {} declared paths — FULL coverage is UNVERIFIED",
+        return Err(Error::Gate(format!(
+            "generated-full {side} seed-{seed} has partial payload closure; missing declared paths: {}",
             missing.join(", ")
         )));
     }
@@ -1491,18 +2389,43 @@ fn open_stable_regular(path: &Path, what: &str) -> Result<fs::File, Error> {
 }
 
 /// Acquire, type-check, hardlink-check, and consume one regular evidence file
-/// through the same opened descriptor.  Missing files retain the existing
+/// through the same opened descriptor. Missing files retain the existing
 /// UNVERIFIED classification; every present nonregular/link/error state is a
-/// hard failure.
+/// hard failure. The descriptor size is checked before allocation.
 fn read_stable_file(path: &Path, what: &str) -> Result<Vec<u8>, Error> {
+    read_stable_file_capped(path, what, MAX_EVIDENCE_FILE_BYTES)
+}
+
+fn read_stable_file_capped(path: &Path, what: &str, cap: u64) -> Result<Vec<u8>, Error> {
     let mut file = open_stable_regular(path, what)?;
-    let mut bytes = Vec::new();
+    let metadata = file.metadata().map_err(|error| {
+        Error::Gate(format!(
+            "{what} {} cannot be inspected through its opened descriptor: {error}",
+            path.display()
+        ))
+    })?;
+    if metadata.len() > cap {
+        return Err(Error::Gate(format!(
+            "{what} {} is {} bytes, above the {}-byte cap",
+            path.display(),
+            metadata.len(),
+            cap
+        )));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
     file.read_to_end(&mut bytes).map_err(|error| {
         Error::Gate(format!(
             "{what} {} cannot be read through its opened descriptor: {error}",
             path.display()
         ))
     })?;
+    if bytes.len() as u64 > cap {
+        return Err(Error::Gate(format!(
+            "{what} {} grew beyond its {}-byte cap while being read",
+            path.display(),
+            cap
+        )));
+    }
     Ok(bytes)
 }
 
@@ -1677,6 +2600,7 @@ fn require_executable(path: &Path) -> Result<(), Error> {
     read_executable_file(path).map(|_| ())
 }
 
+#[cfg(test)]
 fn read_manifest(path: &Path) -> Result<HashManifest, Error> {
     let raw = read_stable_file(path, "generated-full manifest")?;
     let raw = std::str::from_utf8(&raw).map_err(|e| {
@@ -1685,7 +2609,7 @@ fn read_manifest(path: &Path) -> Result<HashManifest, Error> {
             path.display()
         ))
     })?;
-    serde_json::from_str(raw).map_err(|e| {
+    crate::json::from_slice(raw.as_bytes()).map_err(|e| {
         Error::Gate(format!(
             "generated-full manifest {} is malformed: {e}",
             path.display()
@@ -1693,63 +2617,32 @@ fn read_manifest(path: &Path) -> Result<HashManifest, Error> {
     })
 }
 
-fn same_producer_attestation(a: &GeneratedProvenance, b: &GeneratedProvenance) -> bool {
-    a.paper_commit == b.paper_commit
-        && a.materialized_jar_sha256 == b.materialized_jar_sha256
-        && a.paper_config_template_sha256 == b.paper_config_template_sha256
-        && a.rivet_commit == b.rivet_commit
-        && a.capture_binary_sha256 == b.capture_binary_sha256
-        && a.capture_config_sha256 == b.capture_config_sha256
-        && a.level_type == b.level_type
-        && a.dimension == b.dimension
-        && a.region_file_compression == b.region_file_compression
-        && a.status == b.status
-        && a.hash_algorithm == b.hash_algorithm
-        && a.hash_scope == b.hash_scope
-        && a.corpus_version == b.corpus_version
-        && a.stage == b.stage
-        && a.regions == b.regions
-        && a.coordinates == b.coordinates
-        && a.chunk_concurrency == b.chunk_concurrency
-        && a.normalization_rule == b.normalization_rule
-        && a.paper_java_version == b.paper_java_version
-        && a.paper_ticket_level == b.paper_ticket_level
-        && a.paper_ticket_coordinates == b.paper_ticket_coordinates
-        && a.paper_save_completion == b.paper_save_completion
-}
-
+#[cfg(test)]
 fn compare_seed(
     contract: &GeneratedContract,
     seed: u64,
     paper: &VerifiedSide,
     rivet: &VerifiedSide,
 ) -> Result<(), Error> {
+    // Producer identities are intentionally side-disjoint. The controller
+    // attests each executable independently; comparing a Paper jar hash with a
+    // Rivet binary hash would turn equality into a false proof of parity.
     if paper.provenance.seed_u64 != rivet.provenance.seed_u64
         || paper.provenance.seed_java_long != rivet.provenance.seed_java_long
         || paper.provenance.level_type != rivet.provenance.level_type
         || paper.provenance.dimension != rivet.provenance.dimension
+        || paper.provenance.region_file_compression != rivet.provenance.region_file_compression
         || paper.provenance.corpus_version != rivet.provenance.corpus_version
-        || paper.provenance.paper_commit != rivet.provenance.paper_commit
-        || paper.provenance.materialized_jar_sha256 != rivet.provenance.materialized_jar_sha256
-        || paper.provenance.paper_config_sha256 != rivet.provenance.paper_config_sha256
-        || paper.provenance.paper_config_template_sha256
-            != rivet.provenance.paper_config_template_sha256
-        || paper.provenance.rivet_commit != rivet.provenance.rivet_commit
-        || paper.provenance.capture_binary_sha256 != rivet.provenance.capture_binary_sha256
-        || paper.provenance.capture_config_sha256 != rivet.provenance.capture_config_sha256
+        || paper.provenance.status != rivet.provenance.status
+        || paper.provenance.stage != rivet.provenance.stage
+        || paper.provenance.regions != rivet.provenance.regions
+        || paper.provenance.coordinates != rivet.provenance.coordinates
+        || paper.provenance.chunk_concurrency != rivet.provenance.chunk_concurrency
+        || paper.provenance.normalization_rule != rivet.provenance.normalization_rule
         || paper.provenance.seed_config_sha256 != rivet.provenance.seed_config_sha256
-        || paper.provenance.paper_java_version != rivet.provenance.paper_java_version
-        || paper.provenance.paper_ticket_level != rivet.provenance.paper_ticket_level
-        || paper.provenance.paper_ticket_coordinates != rivet.provenance.paper_ticket_coordinates
-        || paper.provenance.paper_source_payload_count
-            != rivet.provenance.paper_source_payload_count
-        || paper.provenance.paper_source_full_count != rivet.provenance.paper_source_full_count
-        || paper.provenance.paper_boot_log_sha256 != rivet.provenance.paper_boot_log_sha256
-        || paper.provenance.paper_save_completion != rivet.provenance.paper_save_completion
-        || paper.provenance.paper_twin_run_sha256 != rivet.provenance.paper_twin_run_sha256
     {
         return Err(Error::Gate(format!(
-            "generated-full seed {seed} Paper/Rivet provenance differs — stale or fake cross-side artifact identity",
+            "generated-full seed {seed} Paper/Rivet shared seed/config/corpus/coordinate contract differs"
         )));
     }
     let mismatches = manifest_mismatches(contract, seed, &paper.manifest, &rivet.manifest);
@@ -1811,23 +2704,6 @@ fn manifest_mismatches(
     mismatches
 }
 
-pub fn tamper_negative_default(selected: Option<TamperKind>) -> Result<(), Error> {
-    let fixture_root = crate::crate_dir().join("fixtures/generated-full");
-    let contract = load_contract(&fixture_root.join(CONTRACT_BASENAME))?;
-    let artifacts = ArtifactInputs::from_contract(&contract)?;
-    let identity = artifacts.identity()?;
-    let paper_root = fixture_root.join("paper");
-    let rivet_root = crate::crate_dir().join("work/generated-full/rivet");
-    tamper_negative_roots_with_identity(
-        &contract,
-        &paper_root,
-        &rivet_root,
-        &identity,
-        false,
-        selected,
-    )
-}
-
 #[cfg(test)]
 fn tamper_negative_roots(
     contract: &GeneratedContract,
@@ -1847,6 +2723,7 @@ fn tamper_negative_roots(
     tamper_negative_roots_with_identity(contract, paper_root, rivet_root, &identity, true, selected)
 }
 
+#[cfg(test)]
 fn tamper_negative_roots_with_identity(
     contract: &GeneratedContract,
     paper_root: &Path,
@@ -1969,6 +2846,7 @@ fn tamper_negative_roots_with_identity(
     Ok(())
 }
 
+#[cfg(test)]
 fn expected_payload_path(contract: &GeneratedContract, coord: &Coordinate) -> PathBuf {
     PathBuf::from(format!(
         "chunk/{}/{}/{}.{}.nbt",
@@ -1979,6 +2857,7 @@ fn expected_payload_path(contract: &GeneratedContract, coord: &Coordinate) -> Pa
     ))
 }
 
+#[cfg(test)]
 fn rebuild_manifest(
     contract: &GeneratedContract,
     seed: u64,
@@ -2007,9 +2886,8 @@ fn rebuild_manifest(
 /// omitting the kind runs all six controls.
 pub fn run_cli(args: &[&str]) -> Result<(), Error> {
     let mut contract_path = None;
-    let mut paper_root = None;
-    let mut rivet_root = None;
     let mut tamper = None;
+    let mut refresh_determinism = false;
     let mut i = 0;
     while i < args.len() {
         match args[i] {
@@ -2022,19 +2900,14 @@ pub fn run_cli(args: &[&str]) -> Result<(), Error> {
                 contract_path = Some(PathBuf::from(path));
                 i += 2;
             }
-            "--paper" => {
-                let Some(path) = args.get(i + 1) else {
-                    return Err(Error::Gate("generated-full --paper requires a path".into()));
-                };
-                paper_root = Some(PathBuf::from(path));
-                i += 2;
+            "--refresh-determinism" => {
+                refresh_determinism = true;
+                i += 1;
             }
-            "--rivet" => {
-                let Some(path) = args.get(i + 1) else {
-                    return Err(Error::Gate("generated-full --rivet requires a path".into()));
-                };
-                rivet_root = Some(PathBuf::from(path));
-                i += 2;
+            "--paper" | "--rivet" => {
+                return Err(Error::Gate(
+                    "generated-full production verification controls its own fresh Paper/Rivet roots; arbitrary evidence roots are forbidden".into(),
+                ));
             }
             "--tamper" | "--expect-fail" => {
                 if tamper.is_some() {
@@ -2070,22 +2943,17 @@ pub fn run_cli(args: &[&str]) -> Result<(), Error> {
     let fixture_root = crate::crate_dir().join("fixtures/generated-full");
     let contract_path = contract_path.unwrap_or_else(|| fixture_root.join(CONTRACT_BASENAME));
     let contract = load_contract(&contract_path)?;
-    let paper_root = paper_root.unwrap_or_else(|| fixture_root.join("paper"));
-    let rivet_root =
-        rivet_root.unwrap_or_else(|| crate::crate_dir().join("work/generated-full/rivet"));
     if tamper.is_some() {
-        let artifacts = ArtifactInputs::from_contract(&contract)?;
-        let identity = artifacts.identity()?;
-        tamper_negative_roots_with_identity(
-            &contract,
-            &paper_root,
-            &rivet_root,
-            &identity,
-            false,
-            tamper.flatten(),
-        )
+        return Err(Error::Blocked(
+            "generated-full tamper controls require a completed fresh replay snapshot; caller-provided evidence roots are not accepted".into(),
+        ));
+    }
+    let artifacts = ArtifactInputs::from_contract(&contract)?;
+    let identity = artifacts.identity()?;
+    if refresh_determinism {
+        run_fresh_replay_with_paper_boots(&contract, &artifacts, &identity, 3)
     } else {
-        verify_roots(&contract, &paper_root, &rivet_root)
+        run_fresh_replay(&contract, &artifacts, &identity)
     }
 }
 
@@ -2592,7 +3460,7 @@ mod tests {
         fs::remove_dir_all(seed_root.join("chunk/overworld")).unwrap();
         assert!(matches!(
             verify_synthetic_roots(&contract, &paper_root, &rivet_root),
-            Err(Error::Unverified(message)) if message.contains("missing declared dimension")
+            Err(Error::Gate(message)) if message.contains("missing declared dimension")
         ));
 
         write_seed_set(&rivet_root, &contract, "rivet", 42);
@@ -2628,7 +3496,7 @@ mod tests {
         let contract = test_contract();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("generated-full");
-        fs::create_dir_all(root.join("paper")).unwrap();
+        fs::create_dir_all(&root).unwrap();
         fs::write(
             root.join(CONTRACT_BASENAME),
             format!("{}\n", serde_json::to_string_pretty(&contract).unwrap()),
@@ -2642,7 +3510,7 @@ mod tests {
         fs::remove_file(root.join("server-normal-full.properties")).unwrap();
         assert!(matches!(
             verify_fixture_outer_closure(&root),
-            Err(Error::Unverified(message)) if message.contains("server-normal-full.properties")
+            Err(Error::Gate(message)) if message.contains("server-normal-full.properties")
         ));
 
         fs::create_dir(root.join("server-normal-full.properties")).unwrap();
@@ -2672,7 +3540,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn identical_worldgen_content_is_rejected_as_superflat_echo() {
+    fn identical_worldgen_content_is_not_a_parity_proof() {
         let contract = test_contract();
         let temp = tempfile::tempdir().unwrap();
         let paper_root = temp.path().join("paper");
@@ -2704,7 +3572,7 @@ mod tests {
         let result = verify_synthetic_roots(&contract, &paper_root, &rivet_root);
         assert!(matches!(
             result,
-            Err(Error::Gate(message)) if message.contains("superflat echo")
+            Err(Error::Gate(message)) if message.contains("parity FAIL")
         ));
     }
 

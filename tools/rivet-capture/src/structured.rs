@@ -233,14 +233,12 @@ pub fn canon_update_tags(body: &[u8]) -> Option<Vec<u8>> {
 const BLOCK_ENTRY_COUNT: usize = 4096;
 /// Number of biome entries in a 4×4×4 section (biome container).
 const BIOME_ENTRY_COUNT: usize = 64;
-/// The wire threshold above which a `PalettedContainer` is the global palette
-/// (no palette on the wire; the packed indices are already global state ids).
-/// This must equal the generated `GLOBAL_PALETTE_BITS` (`ceillog2(BLOCK_STATE_COUNT)`
-/// = 15) — a local palette can hold up to 2^bits local ids, so a section whose
-/// live state count exceeds 2^8 = 256 distinct states (e.g. any real world with
-/// more than one biome's blocks in a section) would otherwise be misread as a
-/// global palette by a threshold of 9.
-const GLOBAL_BITS: usize = rivet_registry::generated::block_states::GLOBAL_PALETTE_BITS as usize;
+/// Paper's per-container network palette thresholds.  The block strategy uses
+/// local palettes through eight bits and writes a global palette at nine; the
+/// biome strategy writes a global palette at four.  These are container-local
+/// thresholds, not the registry's total global-state width.
+const BLOCK_GLOBAL_BITS: usize = 9;
+const BIOME_GLOBAL_BITS: usize = 4;
 
 /// Canonicalize one `PalettedContainer` (block states or biomes) starting at
 /// `off`: sort the local palette by state id ascending and re-pack the data so
@@ -259,25 +257,45 @@ const GLOBAL_BITS: usize = rivet_registry::generated::block_states::GLOBAL_PALET
 ///   per-boot iteration order is order-insensitive; sort + remap.
 /// - `bits >= GLOBAL_BITS` — `GlobalPalette`, no palette; indices are already
 ///   canonical, leave the data untouched.
-fn canon_paletted(body: &[u8], off: usize, entry_count: usize) -> Option<(Vec<u8>, usize)> {
+fn canon_paletted(
+    body: &[u8],
+    off: usize,
+    entry_count: usize,
+    global_bits: usize,
+) -> Option<(Vec<u8>, usize)> {
     let bits = *body.get(off)? as usize;
+    if bits > 64 {
+        return None;
+    }
     let mut o = off + 1;
     let mut palette = Vec::new();
     if bits == 0 {
         // SingleValuePalette: exactly one id VarInt, no count prefix (Paper's
         // `SingleValuePalette.write` = `writeVarInt(globalMap.getId(value))`).
         palette.push(frame::read_varint(body, &mut o)?);
-    } else if bits < GLOBAL_BITS {
+    } else if bits < global_bits {
         // LinearPalette/HashMapPalette: `[VarInt count][count × VarInt id]`.
-        let count = frame::read_varint(body, &mut o)?;
-        for _ in 0..count.max(0) {
+        let count = usize::try_from(frame::read_varint(body, &mut o)?).ok()?;
+        if count == 0 || count > entry_count {
+            return None;
+        }
+        for _ in 0..count {
             palette.push(frame::read_varint(body, &mut o)?);
         }
     }
-    let long_count = (entry_count * bits).div_ceil(64);
+    let values_per_long = if bits == 0 {
+        1
+    } else {
+        64usize.checked_div(bits)?
+    };
+    let long_count = if bits == 0 {
+        0
+    } else {
+        entry_count.div_ceil(values_per_long)
+    };
     let data = frame::read_bytes(body, &mut o, long_count * 8)?;
 
-    if bits == 0 || palette.len() <= 1 || bits >= GLOBAL_BITS {
+    if bits == 0 || palette.len() <= 1 || bits >= global_bits {
         // Single-value or empty or global: nothing order-dependent to fix.
         return Some((body[off..o].to_vec(), o));
     }
@@ -308,14 +326,18 @@ fn canon_paletted(body: &[u8], off: usize, entry_count: usize) -> Option<(Vec<u8
         (1u64 << bits) - 1
     };
     let mut repacked = vec![0u64; long_count];
+    let values_per_long = 64 / bits;
     for i in 0..entry_count {
-        let bit = i * bits;
-        let word = bit / 64;
-        let shift = bit % 64;
+        let word = i / values_per_long;
+        let shift = (i % values_per_long) * bits;
         let old = ((data_words[word] >> shift) & mask) as usize;
-        if let Some(&new) = old_to_new.get(old) {
-            repacked[word] |= (new as u64) << shift;
-        }
+        let Some(&new) = old_to_new.get(old) else {
+            // A local palette index outside the palette is malformed evidence;
+            // silently replacing it with zero would turn corruption into a
+            // different, apparently valid canonical chunk.
+            return None;
+        };
+        repacked[word] |= (new as u64) << shift;
     }
 
     let mut out = Vec::with_capacity((long_count * 8) + 16);
@@ -363,8 +385,9 @@ pub fn canon_chunk(body: &[u8]) -> Option<Vec<u8>> {
     let mut sp = 0usize;
     while sp < buffer.len() {
         let header = frame::read_bytes(buffer, &mut sp, 4)?;
-        let (states, sp_after) = canon_paletted(buffer, sp, BLOCK_ENTRY_COUNT)?;
-        let (biomes, sp_after2) = canon_paletted(buffer, sp_after, BIOME_ENTRY_COUNT)?;
+        let (states, sp_after) = canon_paletted(buffer, sp, BLOCK_ENTRY_COUNT, BLOCK_GLOBAL_BITS)?;
+        let (biomes, sp_after2) =
+            canon_paletted(buffer, sp_after, BIOME_ENTRY_COUNT, BIOME_GLOBAL_BITS)?;
         sp = sp_after2;
         sections.extend_from_slice(header);
         sections.extend_from_slice(&states);

@@ -54,7 +54,7 @@ diffs vs Rivet, packet round-trips) builds on top of these fixtures later.
 - **Generated normal-overworld FULL parity** (`verify-generated-full`, Stage-B/G4,
   issue #175): a source-disjoint four-seed/four-region contract verifies Paper
   and Rivet overworld FULL payloads byte-for-byte, with strict provenance,
-  closure, anti-superflat, and named block/light/heightmap/NBT-order/key/
+  closure, and named block/light/heightmap/NBT-order/key/
   LastUpdate tamper controls. The promotion row is opt-in via
   `RIVET_GENERATED_FULL=1` until the genuine Paper/Rivet capture is present;
   wholly absent evidence is UNVERIFIED, while malformed or linked evidence is
@@ -122,12 +122,11 @@ rivet-oracle/
       manifest.json     # hashes of light.json + all 25 forced chunk NBTs (kind: light)
       light.json        # 9 committed chunks' sky nibbles + emptiness map + light_correct
       chunks/<x>.<z>.nbt # 25 forced chunk NBTs the rivet-server differential rebuilds
-    generated-full/     # Stage-B/G4 normal-overworld FULL contract and evidence
+    generated-full/     # Stage-B/G4 normal-overworld FULL contract inputs
       contract.json     # strict four-seed/four-region schema and artifact paths
       server-normal-full.properties # canonical Paper producer template
-      paper/<seed>/      # Paper-side provenance/config/manifest/payload trees (when captured)
   work/                 # scratch space — gitignored, never commit
-    generated-full/rivet/<seed>/ # Rivet-side generated FULL evidence (when captured)
+    generated-full/replay-<nonce>/ # verifier-owned Paper/Rivet roots and lifecycle record
     run/                # a completed server run (materialized runtime)
     jars/               # copies of the built Paper jars
     logs/               # server stdout logs
@@ -605,24 +604,37 @@ ground truth. A missing runtime or a missing fixture tree is typed UNVERIFIED
 The Stage-B/G4 row is deliberately source-disjoint from the loaded-world,
 superflat-FULL, and generated-expected fixtures. It compares four pinned seeds
 across the eight origin-adjacent/seam coordinates in the overworld only. The
-contract, Paper producer template, and eventual Paper evidence live under
-`fixtures/generated-full/`; Rivet evidence is kept under the gitignored
-`work/generated-full/rivet/` tree.
+contract and canonical Paper producer template live under
+`fixtures/generated-full/`; the verifier allocates a fresh nonce-scoped replay
+root under `work/generated-full/` for every run. It does not accept committed,
+caller-selected, or producer-selected Paper/Rivet evidence roots.
 
 ```bash
 cargo run -p rivet-oracle -- verify-generated-full
-cargo run -p rivet-oracle -- verify-generated-full --tamper all
+cargo run -p rivet-oracle -- verify-generated-full --refresh-determinism
 RIVET_GENERATED_FULL=1 scripts/gate.sh --full
 ```
 
 The verifier derives every digest from payload bytes read through stable opened
 file descriptors. Contract, producer executable/config, and nested payload
 metadata are checked on those same descriptors; symlink and hardlink aliases,
-nonregular files, and malformed metadata are hard failures. A wholly absent
-capture remains **3 UNVERIFIED**, while partial closure, stale provenance, and
-any parity or tamper mismatch are **1 FAIL**. Until both genuine sides are
-captured, the ordinary full gate prints an explicit pre-G4 NOTICE unless
-`RIVET_GENERATED_FULL=1` activates this strict row.
+nonregular files, malformed metadata, and self-diff aliases are hard failures.
+A wholly absent prerequisite remains **3 UNVERIFIED**, while any partial
+launched handoff, stale provenance, and parity mismatch are **1 FAIL**. Stable
+evidence opening is deliberately Linux-only (`openat2` with
+`RESOLVE_NO_SYMLINKS` and `/proc/self/fd`); non-Linux platforms fail explicitly
+instead of taking an insecure pathname-reopen fallback. Linux x86_64 is the
+primary tested target.
+
+The dedicated `rivet-generated-full` producer is wired as the only Rivet side
+of this lifecycle. In the current checkout the real
+`OverworldGenerator -> FULL/light -> SerializableChunkData` production API is
+not exposed as one callable path: Level/registry bootstrap, chunk-source
+closure, light-engine completion, and the FULL `SerializableChunkData` snapshot
+writer still need to be connected. It therefore exits with an explicit
+`BLOCKED` result and never creates output; no synthetic payload is accepted as
+parity evidence. Until that API exists and fresh evidence is produced, the
+promotion row remains blocked rather than claiming green.
 
 ## Seed-42 FEATURES checkpoint: `features`
 

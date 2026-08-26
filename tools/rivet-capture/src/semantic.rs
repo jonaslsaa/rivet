@@ -43,18 +43,27 @@ fn read_string(body: &[u8], off: &mut usize) -> Option<String> {
 
 const BLOCK_ENTRY_COUNT: usize = 4096;
 const BIOME_ENTRY_COUNT: usize = 64;
-/// Same wire threshold as `structured.rs`: must equal the generated
-/// `GLOBAL_PALETTE_BITS` so a live-state count that needs more than 8 bits is
-/// read as the global palette in both the normalizer and this read-only reader.
-const GLOBAL_BITS: usize = rivet_registry::generated::block_states::GLOBAL_PALETTE_BITS as usize;
+/// Per-container wire thresholds matching Paper's `Strategy` table.  Block
+/// containers switch to the global palette at nine bits; biome containers do
+/// so at four bits.  Registry size is not the network threshold.
+const BLOCK_GLOBAL_BITS: usize = 9;
+const BIOME_GLOBAL_BITS: usize = 4;
+
+/// The decoded shape of one chunk section.
+pub struct SectionShape {
+    pub block_count: i32,
+    pub block_states: BTreeMap<i32, u64>,
+    pub biome_states: BTreeMap<i32, u64>,
+}
 
 /// The decoded shape of one `level_chunk_with_light` body: per-section block
 /// state-id histogram and biome state-id, plus the coordinate grid.
 pub struct ChunkShape {
     pub x: i32,
     pub z: i32,
-    /// Per section index: `(block_count, block_state_histogram, biome_state)`.
-    pub sections: Vec<(i32, BTreeMap<i32, u64>, i32)>,
+    /// Keeping the complete biome histogram prevents a canonicalizer from dropping
+    /// a non-first biome entry while still appearing structurally valid.
+    pub sections: Vec<SectionShape>,
 }
 
 /// Decode a chunk body into its logical shape (read-only). `None` on a parse
@@ -80,19 +89,20 @@ pub fn decode_chunk(body: &[u8]) -> Option<ChunkShape> {
     while sp < buffer.len() {
         let header = frame::read_bytes(buffer, &mut sp, 4)?;
         let block_count = i16::from_be_bytes([header[0], header[1]]) as i32;
-        let (states, sp_after) = decode_paletted(buffer, sp, BLOCK_ENTRY_COUNT)?;
-        let (biomes, sp_after2) = decode_paletted(buffer, sp_after, BIOME_ENTRY_COUNT)?;
+        let (states, sp_after) = decode_paletted(buffer, sp, BLOCK_ENTRY_COUNT, BLOCK_GLOBAL_BITS)?;
+        let (biomes, sp_after2) =
+            decode_paletted(buffer, sp_after, BIOME_ENTRY_COUNT, BIOME_GLOBAL_BITS)?;
         sp = sp_after2;
-        // A single-value biome container's sole state is the whole section's
-        // biome; a multi-entry biome palette is decoded but only its histogram
-        // is kept.
-        let biome = *biomes.first_key_value().map(|(k, _)| k).unwrap_or(&-1);
-        sections.push((block_count, states, biome));
+        sections.push(SectionShape {
+            block_count,
+            block_states: states,
+            biome_states: biomes,
+        });
     }
-    // The buffer may legally end with a partially-initialized section if Paper
-    // omits trailing all-air sections — but on this fixture every chunk is a
-    // full 24-section buffer, so a short buffer is a malformation.
-    if sp != buffer.len() {
+    // This semantic detector is for the captured full-height join fixture, not
+    // an arbitrary partial chunk. A missing section must remain visible rather
+    // than being silently accepted as a valid all-air world.
+    if sp != buffer.len() || sections.len() != 24 {
         return None;
     }
     Some(ChunkShape { x, z, sections })
@@ -104,20 +114,36 @@ fn decode_paletted(
     body: &[u8],
     off: usize,
     entry_count: usize,
+    global_bits: usize,
 ) -> Option<(BTreeMap<i32, u64>, usize)> {
     let bits = *body.get(off)? as usize;
+    if bits > 64 {
+        return None;
+    }
     let mut o = off + 1;
     let mut palette = Vec::new();
     if bits == 0 {
         // SingleValuePalette: exactly one id VarInt, no count prefix.
         palette.push(frame::read_varint(body, &mut o)?);
-    } else if bits < GLOBAL_BITS {
-        let count = frame::read_varint(body, &mut o)?;
-        for _ in 0..count.max(0) {
+    } else if bits < global_bits {
+        let count = usize::try_from(frame::read_varint(body, &mut o)?).ok()?;
+        if count == 0 || count > entry_count {
+            return None;
+        }
+        for _ in 0..count {
             palette.push(frame::read_varint(body, &mut o)?);
         }
     }
-    let long_count = (entry_count * bits).div_ceil(64);
+    let values_per_long = if bits == 0 {
+        1
+    } else {
+        64usize.checked_div(bits)?
+    };
+    let long_count = if bits == 0 {
+        0
+    } else {
+        entry_count.div_ceil(values_per_long)
+    };
     let data = frame::read_bytes(body, &mut o, long_count * 8)?;
 
     let mut histogram: BTreeMap<i32, u64> = BTreeMap::new();
@@ -134,12 +160,12 @@ fn decode_paletted(
     } else {
         (1u64 << bits) - 1
     };
+    let values_per_long = 64 / bits;
     for i in 0..entry_count {
-        let bit = i * bits;
-        let word = bit / 64;
-        let shift = bit % 64;
+        let word = i / values_per_long;
+        let shift = (i % values_per_long) * bits;
         let idx = ((words[word] >> shift) & mask) as usize;
-        let state = if bits >= GLOBAL_BITS {
+        let state = if bits >= global_bits {
             idx as i32
         } else {
             *palette.get(idx)? // an out-of-range local index is malformed
@@ -340,8 +366,11 @@ pub fn check_chunk_semantics(packets: &[CapturedPacket]) -> Vec<Failure> {
         };
         coords.push((shape.x, shape.z));
         // Section 0 is the y=0 ground layer in a 24-section buffer.
-        if let Some((bc, hist, biome)) = shape.sections.first() {
-            if *bc != 256 {
+        if let Some(section) = shape.sections.first() {
+            let bc = section.block_count;
+            let hist = &section.block_states;
+            let biomes = &section.biome_states;
+            if bc != 256 {
                 f.push(Failure::new(
                     "chunk",
                     format!(
@@ -351,8 +380,8 @@ pub fn check_chunk_semantics(packets: &[CapturedPacket]) -> Vec<Failure> {
                     format!("ground section blockCount is {bc}, expected 256"),
                 ));
             }
-            let stone = hist.get(&1).copied().unwrap_or(0);
-            if stone != 256 {
+            let expected_blocks = BTreeMap::from([(0, 3840), (1, 256)]);
+            if *hist != expected_blocks {
                 f.push(Failure::new(
                     "chunk",
                     format!(
@@ -362,20 +391,24 @@ pub fn check_chunk_semantics(packets: &[CapturedPacket]) -> Vec<Failure> {
                     format!("ground section is not 256 stone blocks (got {hist:?})"),
                 ));
             }
-            if *biome != 40 {
+            let expected_biomes = BTreeMap::from([(40, BIOME_ENTRY_COUNT as u64)]);
+            if *biomes != expected_biomes {
                 f.push(Failure::new(
                     "chunk",
                     format!(
                         "play/clientbound level_chunk_with_light [{},{}]",
                         shape.x, shape.z
                     ),
-                    format!("ground section biome is {biome}, expected 40 (plains)"),
+                    format!("ground section biome histogram is {biomes:?}, expected plains"),
                 ));
             }
         }
-        // Every other section must be all-air.
-        for (si, (bc, hist, _)) in shape.sections.iter().enumerate().skip(1) {
-            if *bc != 0 {
+        // Every other section must be all-air with plains biomes.
+        for (si, section) in shape.sections.iter().enumerate().skip(1) {
+            let bc = section.block_count;
+            let hist = &section.block_states;
+            let biomes = &section.biome_states;
+            if bc != 0 {
                 f.push(Failure::new(
                     "chunk",
                     format!(
@@ -385,7 +418,7 @@ pub fn check_chunk_semantics(packets: &[CapturedPacket]) -> Vec<Failure> {
                     format!("section {si} has blockCount {bc}, expected all-air"),
                 ));
             }
-            if hist.keys().any(|k| *k != 0) {
+            if *hist != BTreeMap::from([(0, BLOCK_ENTRY_COUNT as u64)]) {
                 f.push(Failure::new(
                     "chunk",
                     format!(
@@ -395,10 +428,21 @@ pub fn check_chunk_semantics(packets: &[CapturedPacket]) -> Vec<Failure> {
                     format!("section {si} is not all-air: {hist:?}"),
                 ));
             }
+            if *biomes != BTreeMap::from([(40, BIOME_ENTRY_COUNT as u64)]) {
+                f.push(Failure::new(
+                    "chunk",
+                    format!(
+                        "play/clientbound level_chunk_with_light [{},{}]",
+                        shape.x, shape.z
+                    ),
+                    format!("section {si} does not have all plains biomes: {biomes:?}"),
+                ));
+            }
         }
-        // State-id validity: every block state id in range; biome id < 66
-        // (worldgen/biome entry count).
-        for (si, (_, hist, biome)) in shape.sections.iter().enumerate() {
+        // State-id validity: every block and biome state id is in range.
+        for (si, section) in shape.sections.iter().enumerate() {
+            let hist = &section.block_states;
+            let biomes = &section.biome_states;
             for &state in hist.keys() {
                 if !rivet_registry::generated::block_states::is_valid(
                     rivet_registry::generated::block_states::StateId(state as u16),
@@ -413,15 +457,17 @@ pub fn check_chunk_semantics(packets: &[CapturedPacket]) -> Vec<Failure> {
                     ));
                 }
             }
-            if !(0..66).contains(biome) {
-                f.push(Failure::new(
-                    "chunk-state",
-                    format!(
-                        "play/clientbound level_chunk_with_light [{},{}]",
-                        shape.x, shape.z
-                    ),
-                    format!("section {si} has out-of-range biome state id {biome}"),
-                ));
+            for &biome in biomes.keys() {
+                if !(0..66).contains(&biome) {
+                    f.push(Failure::new(
+                        "chunk-state",
+                        format!(
+                            "play/clientbound level_chunk_with_light [{},{}]",
+                            shape.x, shape.z
+                        ),
+                        format!("section {si} has out-of-range biome state id {biome}"),
+                    ));
+                }
             }
         }
     }
@@ -658,33 +704,33 @@ fn check_chunk_histograms(
         for (i, (rb, cb)) in r.sections.iter().zip(c.sections.iter()).enumerate() {
             // blockCount and biome must be identical; the block-state histogram
             // must be identical (content), independent of palette order.
-            if rb.0 != cb.0 {
+            if rb.block_count != cb.block_count {
                 f.push(Failure::new(
                     "preserve",
                     format!("play/clientbound level_chunk_with_light [{},{}]", r.x, r.z),
                     format!(
                         "section {i} blockCount changed from {} (raw) to {} (canonical)",
-                        rb.0, cb.0
+                        rb.block_count, cb.block_count
                     ),
                 ));
             }
-            if rb.1 != cb.1 {
+            if rb.block_states != cb.block_states {
                 f.push(Failure::new(
                     "preserve",
                     format!("play/clientbound level_chunk_with_light [{},{}]", r.x, r.z),
                     format!(
                         "section {i} block-state histogram changed from {:?} (raw) to {:?} (canonical) — the palette sort corrupted content",
-                        rb.1, cb.1
+                        rb.block_states, cb.block_states
                     ),
                 ));
             }
-            if rb.2 != cb.2 {
+            if rb.biome_states != cb.biome_states {
                 f.push(Failure::new(
                     "preserve",
                     format!("play/clientbound level_chunk_with_light [{},{}]", r.x, r.z),
                     format!(
-                        "section {i} biome changed from {} (raw) to {} (canonical)",
-                        rb.2, cb.2
+                        "section {i} biome histogram changed from {:?} (raw) to {:?} (canonical)",
+                        rb.biome_states, cb.biome_states
                     ),
                 ));
             }
@@ -883,13 +929,23 @@ mod tests {
     fn decode_chunk_superflat_shape() {
         let shape = decode_chunk(&build_chunk(0, 0)).expect("chunk");
         assert_eq!(shape.sections.len(), 24);
-        let (bc, hist, biome) = &shape.sections[0];
-        assert_eq!(*bc, 256);
-        assert_eq!(hist.get(&1), Some(&256));
-        assert_eq!(*biome, 40);
-        for (bc, hist, _) in &shape.sections[1..] {
-            assert_eq!(*bc, 0);
-            assert!(hist.keys().all(|k| *k == 0), "{hist:?}");
+        let section = &shape.sections[0];
+        assert_eq!(section.block_count, 256);
+        assert_eq!(section.block_states.get(&1), Some(&256));
+        assert_eq!(
+            section.biome_states,
+            BTreeMap::from([(40, BIOME_ENTRY_COUNT as u64)])
+        );
+        for section in &shape.sections[1..] {
+            assert_eq!(section.block_count, 0);
+            assert_eq!(
+                section.block_states,
+                BTreeMap::from([(0, BLOCK_ENTRY_COUNT as u64)])
+            );
+            assert_eq!(
+                section.biome_states,
+                BTreeMap::from([(40, BIOME_ENTRY_COUNT as u64)])
+            );
         }
     }
 
