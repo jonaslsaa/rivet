@@ -1871,8 +1871,9 @@ fn generated_feature_array<'a>(
 
 /// Follow exactly the generated configuration shapes whose Paper value types
 /// expose configured-feature sub-features (the selector families), plus the
-/// vegetation-patch holder used by the generated corpus. All other config data
-/// is feature-local and must not be recursively interpreted as holders.
+/// vegetation-patch and root-system holders used by the generated corpus. All
+/// other config data is feature-local and must not be recursively interpreted
+/// as holders.
 ///
 /// This entry point receives the complete configured-feature object, including
 /// its root `type` and `config` fields. Keeping that boundary explicit prevents
@@ -1968,6 +1969,14 @@ fn generated_holder_refs(
                     .get("vegetation_feature")
                     .ok_or_else(|| format!("{context} has no vegetation_feature"))?,
                 "vegetation_feature",
+            )?;
+        }
+        "minecraft:root_system" => {
+            holder(
+                config
+                    .get("feature")
+                    .ok_or_else(|| format!("{context} has no feature"))?,
+                "feature",
             )?;
         }
         _ => {}
@@ -2874,20 +2883,23 @@ fn placement_selects(
     Ok(placed.has_placement_positions(region, &selection_generator, random, origin))
 }
 
+/// The single panic-payload classifier for generated-feature boundary panics.
+/// Both `String` and `&'static str` payloads classify identically so the two
+/// `panic!` payload shapes can never diverge in accepted messages.
+fn generated_boundary_panic_message(payload: &(dyn std::any::Any + Send)) -> Option<&str> {
+    payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&'static str>().copied())
+}
+
 fn generated_boundary_feature_key(
     payload: &(dyn std::any::Any + Send),
     fallback: &'static str,
 ) -> &'static str {
-    let message = if let Some(message) = payload.downcast_ref::<String>() {
-        message.as_str()
-    } else if let Some(message) = payload.downcast_ref::<&'static str>() {
-        message
-    } else {
-        return fallback;
-    };
     let prefix = "generated feature ";
-    let Some(name) = message
-        .strip_prefix(prefix)
+    let Some(name) = generated_boundary_panic_message(payload)
+        .and_then(|message| message.strip_prefix(prefix))
         .and_then(|rest| rest.split(' ').next())
     else {
         return fallback;
@@ -3050,15 +3062,8 @@ fn run_biome_decoration_through(
                     );
                 }));
                 if let Err(payload) = placement {
-                    if payload.downcast_ref::<String>().is_some_and(|message| {
-                        message.starts_with("generated feature ")
-                            || (message.contains("BlockStateBase.canSurvive is not implemented")
-                                || message.contains("WorldGenRegion.canSurvive is not implemented")
-                                || message.contains("Biome.shouldFreeze is not implemented")
-                                || message.contains("Biome.shouldSnow is not implemented"))
-                    }) || payload
-                        .downcast_ref::<&'static str>()
-                        .is_some_and(|message| {
+                    let boundary =
+                        generated_boundary_panic_message(payload.as_ref()).is_some_and(|message| {
                             message.starts_with("generated feature ")
                                 || (message
                                     .contains("BlockStateBase.canSurvive is not implemented")
@@ -3066,8 +3071,8 @@ fn run_biome_decoration_through(
                                         .contains("WorldGenRegion.canSurvive is not implemented")
                                     || message.contains("Biome.shouldFreeze is not implemented")
                                     || message.contains("Biome.shouldSnow is not implemented"))
-                        })
-                    {
+                        });
+                    if boundary {
                         return Err(GenError::FeaturePlacementDecode {
                             chunk_pos: center_pos,
                             step_index,
@@ -6073,6 +6078,52 @@ mod tests {
                 "minecraft:moss_vegetation"
             )]
         );
+    }
+
+    #[test]
+    fn generated_closure_follows_real_root_system_tree_holder() {
+        // The two real root-system corpus entries (ids 167/168) hold an inline
+        // placed feature under `config.feature`; the closure must follow it.
+        for name in [
+            "minecraft:rooted_azalea_tree",
+            "minecraft:rooted_sulfur_spring",
+        ] {
+            let edges = generated_feature_edges(GeneratedFeatureNode::Configured(name))
+                .unwrap_or_else(|error| panic!("{name} root-system closure edges: {error}"));
+            let expected = if name == "minecraft:rooted_azalea_tree" {
+                GeneratedFeatureNode::Configured("minecraft:azalea_tree")
+            } else {
+                GeneratedFeatureNode::Configured("minecraft:sulfur_spring")
+            };
+            assert_eq!(edges, vec![expected], "{name} must follow config.feature");
+        }
+
+        // Counterfactual: a walker that skips `minecraft:root_system` configs
+        // would return no edges here and silently accept a dangling tree holder.
+        let entry = CONFIGURED_FEATURE_BY_NAME
+            .get("minecraft:rooted_azalea_tree")
+            .expect("real root-system fixture");
+        let mut json: Value = serde_json::from_str(entry.json).expect("fixture JSON");
+        json["config"]["feature"]["feature"] =
+            serde_json::json!("minecraft:missing_nested_feature");
+        let error = generated_configured_object(
+            json.as_object().expect("configured object"),
+            &mut Vec::new(),
+            "minecraft:rooted_azalea_tree",
+        )
+        .expect_err("missing root-system tree holder must fail closure validation");
+        assert!(error.contains("missing configured feature minecraft:missing_nested_feature"));
+
+        // Non-holder strings in the same config stay opaque metadata.
+        let mut metadata_only: Value = serde_json::from_str(entry.json).expect("fixture JSON");
+        metadata_only["config"]["root_state_provider"]["type"] =
+            serde_json::json!("minecraft:missing_but_not_a_feature_provider");
+        generated_configured_object(
+            metadata_only.as_object().expect("configured object"),
+            &mut Vec::new(),
+            "minecraft:rooted_azalea_tree",
+        )
+        .expect("provider type strings are intentionally opaque");
     }
 
     #[test]
