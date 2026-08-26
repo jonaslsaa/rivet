@@ -29,8 +29,9 @@
 //!   `!blockEntities.containsKey` guard, and the `blendingData` field — with
 //!   their lighting/blending units; the merged #184 nibble value surface and
 //!   #337 persistence slice now back `blockNibbles`/`skyNibbles` here;
-//! - the `tick`/`getBlockTicks`/`getFluidTicks`/`getTicksForSerialization`
-//!   surface and the `PackedTicks` record (the `world.ticks` unit);
+//! - `tick`/`getTicksForSerialization` and runtime tick execution/registration
+//!   (the `world.ticks` unit); both owner-directed block/fluid tick containers
+//!   are carried by the value-layer base.
 //! - `getBlockState`/`setBlockState` — overridden per concrete type;
 //!   `setBlockState`'s mutators defer with #216.
 //!
@@ -71,6 +72,7 @@ use crate::ticks::{ProtoChunkTicks, ScheduledTick};
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::core::{BlockPos, ChunkPos, QuartPos, SectionPos};
+use rivet_registry::fluid_id::FluidId;
 use rivet_registry::holder::Holder;
 
 /// `ChunkAccess.NO_FILLED_SECTION` — `getHighestFilledSectionIndex()` for a
@@ -110,6 +112,10 @@ where
     /// `ChunkAccess` surface in Paper; keeping the value here preserves it
     /// through the port's value-composition wrappers.
     block_ticks: ProtoChunkTicks<Block>,
+    /// `getFluidTicks()` — the owning chunk's worldgen fluid-tick container.
+    /// It travels with the base so generated FULL promotion cannot drop a
+    /// represented fluid schedule before the runtime tick hook exists.
+    fluid_ticks: ProtoChunkTicks<FluidId>,
     /// `unsaved`.
     unsaved: bool,
     /// `isLightCorrect`.
@@ -211,6 +217,7 @@ where
             sections: sections_vec,
             post_processing: vec![Vec::new(); count],
             block_ticks: ProtoChunkTicks::new(),
+            fluid_ticks: ProtoChunkTicks::new(),
             unsaved: false,
             light_correct: false,
             inhabited_time,
@@ -724,6 +731,21 @@ where
         self.block_ticks.schedule(tick);
     }
 
+    /// `ChunkAccess.getFluidTicks()` — the owning chunk's fluid-tick container.
+    pub fn get_fluid_ticks(&self) -> &ProtoChunkTicks<FluidId> {
+        &self.fluid_ticks
+    }
+
+    /// Mutable half of [`get_fluid_ticks`](Self::get_fluid_ticks).
+    pub fn get_fluid_ticks_mut(&mut self) -> &mut ProtoChunkTicks<FluidId> {
+        &mut self.fluid_ticks
+    }
+
+    /// Schedule an owning fluid tick through the canonical runtime value.
+    pub fn schedule_fluid_tick(&mut self, tick: ScheduledTick<FluidId>) {
+        self.fluid_ticks.schedule(tick);
+    }
+
     /// `ChunkAccess.getPostProcessing()` — the per-section packed-offset lists.
     pub fn get_post_processing(&self) -> &[Vec<i16>] {
         &self.post_processing
@@ -910,14 +932,16 @@ where
 
     /// Value-transform the block-state and biome value types while preserving
     /// every other field (sections, heightmaps, light nibbles, pending block
-    /// entities, post-processing, flags, structure access). The #516 server
+    /// entities, post-processing, block/fluid ticks, flags, structure access).
+    /// The #516 server
     /// bridge converts a reconstructed `ChunkAccess<BlockState, BiomeId, ()>`
     /// into the server's `ChunkAccess<StateId, BiomeId, ()>`.
     ///
     /// The base is rebuilt through [`Self::new`] (the section-Y layout and the
     /// FULL heightmap priming), then every owned field `Self::new` reset —
-    /// unsaved, light-correct, post-processing, pending block entities, light
-    /// nibbles, heightmaps, structure access — is reinstalled from the source,
+    /// unsaved, light-correct, post-processing, block/fluid ticks, pending
+    /// block entities, light nibbles, heightmaps, structure access — is
+    /// reinstalled from the source,
     /// so the conversion is a pure re-type with no semantic change.
     #[allow(clippy::too_many_arguments)] // the two strategies + the re-encoded
     // air/default-biome defaults + the two mappers + the resolve closure — the
@@ -943,6 +967,7 @@ where
             sections,
             post_processing,
             block_ticks,
+            fluid_ticks,
             unsaved,
             light_correct,
             inhabited_time,
@@ -979,6 +1004,7 @@ where
         base.light_correct = light_correct;
         base.post_processing = post_processing;
         base.block_ticks = block_ticks;
+        base.fluid_ticks = fluid_ticks;
         base.pending_block_entities = pending_block_entities;
         base.block_nibbles = block_nibbles;
         base.sky_nibbles = sky_nibbles;
@@ -1008,6 +1034,7 @@ where
         resolve: &'static (dyn Fn(&T2) -> StateFlags + Sync),
     ) -> Result<ChunkAccess<T2, B2, S>, String>
     where
+        T: Eq + std::hash::Hash,
         T2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         B2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         S: Clone,
@@ -1037,6 +1064,8 @@ where
         base.unsaved = self.unsaved;
         base.light_correct = self.light_correct;
         base.post_processing = self.post_processing.clone();
+        base.block_ticks = self.block_ticks.clone();
+        base.fluid_ticks = self.fluid_ticks.clone();
         base.pending_block_entities = self.pending_block_entities.clone();
         base.block_nibbles = self.block_nibbles.clone();
         base.sky_nibbles = self.sky_nibbles.clone();

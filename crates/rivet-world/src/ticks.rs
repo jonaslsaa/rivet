@@ -798,6 +798,15 @@ pub struct ProtoChunkTicks<T> {
     ticks_per_position: HashSet<UniqueTickKey<T>>,
 }
 
+impl<T: Clone + Eq + Hash> Clone for ProtoChunkTicks<T> {
+    fn clone(&self) -> Self {
+        ProtoChunkTicks {
+            ticks: self.ticks.clone(),
+            ticks_per_position: self.ticks_per_position.clone(),
+        }
+    }
+}
+
 impl<T> ProtoChunkTicks<T> {
     /// `new ProtoChunkTicks<>()`.
     pub fn new() -> Self {
