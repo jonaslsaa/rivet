@@ -2194,7 +2194,7 @@ fn run_spawn_in_region(
                     let fx = (x as f64).clamp(xo as f64 + width, xo as f64 + 16.0 - width);
                     let fz = (z as f64).clamp(zo as f64 + width, zo as f64 + 16.0 - width);
                     let entity_pos = BlockPos::containing(fx, y as f64, fz);
-                    if no_collision(region, spawner.ty, fx, y, fz, width, height)
+                    if no_collision(region, fx, y, fz, width, height)
                         && check_spawn_rules(
                             region,
                             spawner.ty,
@@ -2292,10 +2292,15 @@ fn adjust_spawn_y(
 /// otherwise unavailable shapes fail closed and leave the height candidate
 /// unchanged rather than treating a non-pathfindable block as air.
 fn is_pathfindable_land(state: BlockState) -> bool {
+    let name = state.block().name();
+    // PowderSnowBlock explicitly overrides LAND pathfinding to true even
+    // though its collision shape is context-sensitive.
+    if name == "minecraft:powder_snow" {
+        return true;
+    }
     if state.has_dynamic_shape() {
         return false;
     }
-    let name = state.block().name();
     match name {
         // These block classes override the default LAND predicate to false.
         "minecraft:soul_sand"
@@ -2305,8 +2310,68 @@ fn is_pathfindable_land(state: BlockState) -> bool {
         | "minecraft:cactus"
         | "minecraft:scaffolding"
         | "minecraft:iron_bars"
-        | "minecraft:glass_pane"
-        | "minecraft:chain" => false,
+        | "minecraft:chain"
+        | "minecraft:anvil"
+        | "minecraft:chipped_anvil"
+        | "minecraft:damaged_anvil"
+        | "minecraft:azalea"
+        | "minecraft:flowering_azalea"
+        | "minecraft:bell"
+        | "minecraft:brewing_stand"
+        | "minecraft:cake"
+        | "minecraft:campfire"
+        | "minecraft:soul_campfire"
+        | "minecraft:chest"
+        | "minecraft:trapped_chest"
+        | "minecraft:copper_chest"
+        | "minecraft:chorus_plant"
+        | "minecraft:cocoa"
+        | "minecraft:composter"
+        | "minecraft:conduit"
+        | "minecraft:decorated_pot"
+        | "minecraft:dragon_egg"
+        | "minecraft:dried_ghast"
+        | "minecraft:enchanting_table"
+        | "minecraft:end_portal_frame"
+        | "minecraft:grindstone"
+        | "minecraft:heavy_core"
+        | "minecraft:hopper"
+        | "minecraft:lantern"
+        | "minecraft:soul_lantern"
+        | "minecraft:copper_lantern"
+        | "minecraft:lectern"
+        | "minecraft:respawn_anchor"
+        | "minecraft:end_rod"
+        | "minecraft:lightning_rod"
+        | "minecraft:sculk_sensor"
+        | "minecraft:calibrated_sculk_sensor"
+        | "minecraft:sea_pickle"
+        | "minecraft:sniffer_egg"
+        | "minecraft:stonecutter"
+        | "minecraft:copper_golem_statue"
+        | "minecraft:piston"
+        | "minecraft:sticky_piston"
+        | "minecraft:piston_head"
+        | "minecraft:flower_pot"
+        | "minecraft:water_cauldron"
+        | "minecraft:lava_cauldron"
+        | "minecraft:powder_snow_cauldron"
+        | "minecraft:cauldron" => false,
+        // The generated names for the remaining registered classes are
+        // regular families: beds, candle cakes, skulls/heads, potted plants,
+        // shelves, panes/bars, and wall-mounted hanging signs.
+        name if name.ends_with("_bed")
+            || name.ends_with("_candle_cake")
+            || name.ends_with("_skull")
+            || name.ends_with("_head")
+            || name.starts_with("potted_")
+            || name.ends_with("_shelf")
+            || name.ends_with("_pane")
+            || name.ends_with("_bars")
+            || name.ends_with("_wall_hanging_sign") =>
+        {
+            false
+        }
         name if name.ends_with("_fence") || name.ends_with("_wall") => false,
         name if name.ends_with("_slab") || name.ends_with("_stairs") => false,
         name if name.ends_with("_door") || name.ends_with("_trapdoor") => state
@@ -2343,8 +2408,12 @@ fn is_spawn_position_ok(
     let below = pos.below();
     let below_state = region.get_block_state(&below);
     is_valid_spawn_floor(below_state, entity_type)
-        && is_valid_empty_spawn_block(region.get_block_state(pos), entity_type)
-        && is_valid_empty_spawn_block(region.get_block_state(&pos.above()), entity_type)
+        && is_valid_empty_spawn_block(region.get_block_state(pos), entity_type, pos)
+        && is_valid_empty_spawn_block(
+            region.get_block_state(&pos.above()),
+            entity_type,
+            &pos.above(),
+        )
 }
 
 /// `BlockState.isValidSpawn(level, pos, entityType)`, including the handful of
@@ -2353,11 +2422,17 @@ fn is_spawn_position_ok(
 /// entity's `checkSpawnRules`, not by the placement type.
 fn is_valid_spawn_floor(state: BlockState, entity_type: &str) -> bool {
     let name = state.block().name();
-    // PowderSnowBlock's dynamic collision does not make its support shape
-    // dynamic: the default block-support shape is full, and its spawn floor is
-    // explicitly valid for polar bears through their alternate rule.
-    if entity_type == "minecraft:polar_bear" && name == "minecraft:powder_snow" {
+    // IceBlock and FrostedIceBlock replace the default sturdy-up predicate
+    // with the entity-specific polar-bear check. Powder snow has no such
+    // floor override: its dynamic collision affects obstruction only, while
+    // isValidSpawn still uses the block's registered predicate.
+    if entity_type == "minecraft:polar_bear"
+        && matches!(name, "minecraft:ice" | "minecraft:frosted_ice")
+    {
         return true;
+    }
+    if matches!(name, "minecraft:ice" | "minecraft:frosted_ice") {
+        return false;
     }
     if state.has_dynamic_shape() {
         return false;
@@ -2381,7 +2456,6 @@ fn is_valid_spawn_floor(state: BlockState, entity_type: &str) -> bool {
         "minecraft:bedrock"
             | "minecraft:glass"
             | "minecraft:barrier"
-            | "minecraft:frosted_ice"
             | "minecraft:moving_piston"
             | "minecraft:repeater"
             | "minecraft:chorus_flower"
@@ -2391,19 +2465,14 @@ fn is_valid_spawn_floor(state: BlockState, entity_type: &str) -> bool {
         || name.ends_with("_grate")
         || name.ends_with("_stained_glass")
     {
-        // These are BlockBehaviour's explicit `never` predicates. Frosted ice
-        // is the one exception below: its predicate is entity-specific and is
-        // admitted only for polar bears.
-        if name == "minecraft:frosted_ice" && entity_type == "minecraft:polar_bear" {
-            return true;
-        }
+        // These are BlockBehaviour's explicit `never` predicates.
         return false;
     }
     // Blocks.java's `ocelotOrParrot` predicate is used by every leaves
     // property set and by firefly bush. It is entity-specific rather than a
     // general leaves rule.
     if matches!(entity_type, "minecraft:ocelot" | "minecraft:parrot")
-        && (state.is_in_tag("minecraft:leaves") || name == "minecraft:firefly_bush")
+        && state.is_in_tag("minecraft:leaves")
     {
         return true;
     }
@@ -2415,11 +2484,11 @@ fn is_valid_spawn_floor(state: BlockState, entity_type: &str) -> bool {
     state.is_face_sturdy(rivet_registry::core::Direction::Up) && state.light_emission() < 14
 }
 
-fn is_valid_empty_spawn_block(state: BlockState, entity_type: &str) -> bool {
+fn is_valid_empty_spawn_block(state: BlockState, entity_type: &str, pos: &BlockPos) -> bool {
     // `NaturalSpawner.isValidEmptySpawnBlock` uses the complete collision shape,
     // not the render/occlusion bit. An unavailable shape fails closed so the
     // entity boundary is never reached on an unverified candidate.
-    let Some(shape) = spawn_collision_shape(state, None) else {
+    let Some(shape) = spawn_collision_shape(state, pos, SpawnCollisionContext::Empty) else {
         return false;
     };
     !shape.is_full()
@@ -2430,74 +2499,103 @@ fn is_valid_empty_spawn_block(state: BlockState, entity_type: &str) -> bool {
 }
 
 /// A compact VoxelShape slice for generation-time collision checks. The
-/// generated registry does not yet expose every block's context-sensitive
-/// shape, so only exact empty/full/common worldgen shapes are admitted; an
-/// unknown shape returns `None` and the caller rejects the candidate.
+/// generated registry does not yet expose arbitrary VoxelShape boxes, so this
+/// keeps the exact empty/full/known worldgen shapes that occur in the dynamic
+/// block families. Unknown static shapes still fail closed rather than turning
+/// an unverified candidate into a spawn.
+#[derive(Clone, Copy)]
+struct SpawnShapeBox {
+    min_x: f64,
+    min_y: f64,
+    min_z: f64,
+    max_x: f64,
+    max_y: f64,
+    max_z: f64,
+}
+
+impl SpawnShapeBox {
+    const fn new(min_x: f64, min_y: f64, min_z: f64, max_x: f64, max_y: f64, max_z: f64) -> Self {
+        Self {
+            min_x,
+            min_y,
+            min_z,
+            max_x,
+            max_y,
+            max_z,
+        }
+    }
+
+    fn translated(self, x: f64, y: f64, z: f64) -> Self {
+        Self::new(
+            self.min_x + x,
+            self.min_y + y,
+            self.min_z + z,
+            self.max_x + x,
+            self.max_y + y,
+            self.max_z + z,
+        )
+    }
+
+    fn intersects(self, block_x: i32, block_y: i32, block_z: i32, entity: &SpawnAabb) -> bool {
+        SpawnAabb::new(
+            block_x as f64 + self.min_x,
+            block_y as f64 + self.min_y,
+            block_z as f64 + self.min_z,
+            block_x as f64 + self.max_x,
+            block_y as f64 + self.max_y,
+            block_z as f64 + self.max_z,
+        )
+        .intersects(entity)
+    }
+
+    fn is_full(self) -> bool {
+        self.min_x == 0.0
+            && self.min_y == 0.0
+            && self.min_z == 0.0
+            && self.max_x == 1.0
+            && self.max_y == 1.0
+            && self.max_z == 1.0
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SpawnCollisionContext<'a> {
+    Empty,
+    Entity {
+        entity_type: &'a str,
+        entity_min_y: f64,
+    },
+}
+
 #[derive(Clone, Copy)]
 enum SpawnCollisionShape {
     Empty,
     Full,
-    Box {
-        min_x: f64,
-        min_y: f64,
-        min_z: f64,
-        max_x: f64,
-        max_y: f64,
-        max_z: f64,
-    },
+    Box(SpawnShapeBox),
+    /// Paper's empty-context scaffolding shape: a full top plate and four
+    /// corner posts. The empty collision context reports `isAbove(..., true)`
+    /// as true, selecting `SHAPE_STABLE` for every scaffolding state.
+    Multi([SpawnShapeBox; 5]),
 }
 
 impl SpawnCollisionShape {
     fn is_full(self) -> bool {
         match self {
             Self::Full => true,
-            Self::Empty => false,
-            Self::Box {
-                min_x,
-                min_y,
-                min_z,
-                max_x,
-                max_y,
-                max_z,
-            } => {
-                min_x == 0.0
-                    && min_y == 0.0
-                    && min_z == 0.0
-                    && max_x == 1.0
-                    && max_y == 1.0
-                    && max_z == 1.0
-            }
+            Self::Empty | Self::Multi(_) => false,
+            Self::Box(shape) => shape.is_full(),
         }
     }
 
     fn intersects(self, block_x: i32, block_y: i32, block_z: i32, entity: &SpawnAabb) -> bool {
         match self {
             Self::Empty => false,
-            Self::Full => SpawnAabb::new(
-                block_x as f64,
-                block_y as f64,
-                block_z as f64,
-                block_x as f64 + 1.0,
-                block_y as f64 + 1.0,
-                block_z as f64 + 1.0,
-            )
-            .intersects(entity),
-            Self::Box {
-                min_x,
-                min_y,
-                min_z,
-                max_x,
-                max_y,
-                max_z,
-            } => SpawnAabb::new(
-                block_x as f64 + min_x,
-                block_y as f64 + min_y,
-                block_z as f64 + min_z,
-                block_x as f64 + max_x,
-                block_y as f64 + max_y,
-                block_z as f64 + max_z,
-            )
-            .intersects(entity),
+            Self::Full => SpawnShapeBox::new(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)
+                .intersects(block_x, block_y, block_z, entity),
+            Self::Box(shape) => shape.intersects(block_x, block_y, block_z, entity),
+            Self::Multi(shapes) => shapes
+                .into_iter()
+                .any(|shape| shape.intersects(block_x, block_y, block_z, entity)),
         }
     }
 }
@@ -2508,24 +2606,84 @@ impl SpawnCollisionShape {
 /// partial snow/cactus shapes retain their VoxelShape bounds.
 fn spawn_collision_shape(
     state: BlockState,
-    entity_type: Option<&str>,
+    pos: &BlockPos,
+    context: SpawnCollisionContext<'_>,
 ) -> Option<SpawnCollisionShape> {
     let name = state.block().name();
-    // PowderSnowBlock is dynamic: NaturalSpawner's empty-block predicate uses
-    // an empty collision context (therefore the shape is empty), while
-    // Level.noCollision uses the candidate entity context. Paper's
-    // POWDER_SNOW_WALKABLE_MOBS tag contains rabbit, endermite, silverfish, and
-    // fox; only rabbit and fox occur in this CREATURE table.
-    if name == "minecraft:powder_snow" {
-        return Some(if matches!(entity_type, Some("minecraft:rabbit" | "minecraft:fox")) {
-            SpawnCollisionShape::Full
-        } else {
-            SpawnCollisionShape::Empty
-        });
+
+    // Block-entity-backed moving pistons have no entity in this worldgen
+    // region, and a missing shulker block entity uses ShulkerBoxBlock's
+    // full-cube fallback. Powder snow is empty for CollisionContext.empty(),
+    // but a walkable mob standing above it sees the full collision cube in
+    // Mob.checkSpawnObstruction's entity context.
+    let dynamic_shape =
+        match name {
+            "minecraft:powder_snow" => Some(match context {
+                SpawnCollisionContext::Entity {
+                    entity_type,
+                    entity_min_y,
+                } if matches!(entity_type, "minecraft:rabbit" | "minecraft:fox")
+                    && entity_min_y > pos.get_y() as f64 + 1.0 - 1.0e-5 =>
+                {
+                    SpawnCollisionShape::Full
+                }
+                _ => SpawnCollisionShape::Empty,
+            }),
+            "minecraft:moving_piston" => Some(SpawnCollisionShape::Empty),
+            name if name.ends_with("shulker_box") => Some(SpawnCollisionShape::Full),
+            "minecraft:bamboo" => Some(SpawnCollisionShape::Box(
+                SpawnShapeBox::new(6.5 / 16.0, 0.0, 6.5 / 16.0, 9.5 / 16.0, 1.0, 9.5 / 16.0)
+                    .translated(block_offset(pos).0, 0.0, block_offset(pos).1),
+            )),
+            "minecraft:scaffolding" => {
+                let stable = [
+                    SpawnShapeBox::new(0.0, 14.0 / 16.0, 0.0, 1.0, 1.0, 1.0),
+                    SpawnShapeBox::new(0.0, 0.0, 0.0, 2.0 / 16.0, 1.0, 2.0 / 16.0),
+                    SpawnShapeBox::new(14.0 / 16.0, 0.0, 0.0, 1.0, 1.0, 2.0 / 16.0),
+                    SpawnShapeBox::new(0.0, 0.0, 14.0 / 16.0, 2.0 / 16.0, 1.0, 1.0),
+                    SpawnShapeBox::new(14.0 / 16.0, 0.0, 14.0 / 16.0, 1.0, 1.0, 1.0),
+                ];
+                let entity_shape = match context {
+                SpawnCollisionContext::Empty => SpawnCollisionShape::Multi(stable),
+                SpawnCollisionContext::Entity { entity_min_y, .. }
+                    if entity_min_y > pos.get_y() as f64 + 1.0 - 1.0e-5 =>
+                {
+                    SpawnCollisionShape::Multi(stable)
+                }
+                SpawnCollisionContext::Entity { entity_min_y, .. }
+                    if state.get_value(BlockStateProperties::STABILITY_DISTANCE).is_some_and(
+                        |value| matches!(value, PropertyValue::Int(distance) if distance != 0),
+                    ) && state
+                        .get_value(BlockStateProperties::BOTTOM)
+                        .is_some_and(|value| matches!(value, PropertyValue::Bool(true)))
+                        && entity_min_y > pos.get_y() as f64 - 1.0e-5 =>
+                {
+                    SpawnCollisionShape::Box(SpawnShapeBox::new(
+                        0.0,
+                        0.0,
+                        0.0,
+                        1.0,
+                        2.0 / 16.0,
+                        1.0,
+                    ))
+                }
+                SpawnCollisionContext::Entity { .. } => SpawnCollisionShape::Empty,
+            };
+                Some(entity_shape)
+            }
+            "minecraft:pointed_dripstone" | "minecraft:sulfur_spike" => {
+                Some(speleothem_collision_shape(state, pos)?)
+            }
+            _ if state.has_dynamic_shape() => None,
+            _ => None,
+        };
+    if dynamic_shape.is_some() {
+        return dynamic_shape;
     }
     if state.has_dynamic_shape() {
         return None;
     }
+
     if state.is_air()
         || matches!(
             name,
@@ -2572,30 +2730,57 @@ fn spawn_collision_shape(
             return None;
         };
         let height = f64::from(layers.clamp(1, 8)) / 8.0;
-        return Some(SpawnCollisionShape::Box {
-            min_x: 0.0,
-            min_y: 0.0,
-            min_z: 0.0,
-            max_x: 1.0,
-            max_y: height,
-            max_z: 1.0,
-        });
+        return Some(SpawnCollisionShape::Box(SpawnShapeBox::new(
+            0.0, 0.0, 0.0, 1.0, height, 1.0,
+        )));
     }
     if name == "minecraft:cactus" {
-        return Some(SpawnCollisionShape::Box {
-            min_x: 1.0 / 16.0,
-            min_y: 0.0,
-            min_z: 1.0 / 16.0,
-            max_x: 15.0 / 16.0,
-            max_y: 1.0,
-            max_z: 15.0 / 16.0,
-        });
+        return Some(SpawnCollisionShape::Box(SpawnShapeBox::new(
+            1.0 / 16.0,
+            0.0,
+            1.0 / 16.0,
+            15.0 / 16.0,
+            1.0,
+            15.0 / 16.0,
+        )));
     }
     // A non-full colliding shape (fence, stair, button, etc.) is not safe to
     // collapse into a cube. Refuse it until the shared VoxelShape registry
-    // surface can provide its exact boxes; dynamic states are handled by the
-    // #646 context seam rather than by a blocksMotion approximation.
+    // surface can provide its exact boxes.
     None
+}
+
+fn block_offset(pos: &BlockPos) -> (f64, f64) {
+    let seed = rivet_util::mth::get_seed(pos.get_x(), 0, pos.get_z());
+    let x = (((seed & 15) as f32 / 15.0_f32) as f64 - 0.5) * 0.5;
+    let z = ((((seed >> 8) & 15) as f32 / 15.0_f32) as f64 - 0.5) * 0.5;
+    (x.clamp(-0.25, 0.25), z.clamp(-0.25, 0.25))
+}
+
+fn speleothem_collision_shape(state: BlockState, pos: &BlockPos) -> Option<SpawnCollisionShape> {
+    let min_max = match state.get_value(BlockStateProperties::SPELEOTHEM_THICKNESS) {
+        Some(PropertyValue::Enum("tip_merge")) => (5.0 / 16.0, 11.0 / 16.0, 0.0, 1.0),
+        Some(PropertyValue::Enum("tip")) => {
+            match state.get_value(BlockStateProperties::VERTICAL_DIRECTION) {
+                Some(PropertyValue::Enum("up")) => (5.0 / 16.0, 11.0 / 16.0, 0.0, 11.0 / 16.0),
+                Some(PropertyValue::Enum("down")) => (5.0 / 16.0, 11.0 / 16.0, 5.0 / 16.0, 1.0),
+                _ => return None,
+            }
+        }
+        Some(PropertyValue::Enum("frustum")) => (4.0 / 16.0, 12.0 / 16.0, 0.0, 1.0),
+        Some(PropertyValue::Enum("middle")) => (3.0 / 16.0, 13.0 / 16.0, 0.0, 1.0),
+        Some(PropertyValue::Enum("base")) => (2.0 / 16.0, 14.0 / 16.0, 0.0, 1.0),
+        _ => return None,
+    };
+    let (offset_x, offset_z) = block_offset(pos);
+    Some(SpawnCollisionShape::Box(SpawnShapeBox::new(
+        min_max.0 + offset_x,
+        min_max.2,
+        min_max.0 + offset_z,
+        min_max.1 + offset_x,
+        min_max.3,
+        min_max.1 + offset_z,
+    )))
 }
 
 #[derive(Clone, Copy)]
@@ -2645,19 +2830,23 @@ fn spawn_aabb(x: f64, y: i32, z: f64, width: f64, height: f64) -> SpawnAabb {
 fn collision_free(
     region: &WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey>,
     entity: SpawnAabb,
-    entity_type: &str,
+    context: SpawnCollisionContext<'_>,
 ) -> Option<bool> {
-    let min_x = rivet_util::mth::floor_d(entity.min_x);
-    let max_x = rivet_util::mth::floor_d(entity.max_x - f64::EPSILON);
-    let min_y = rivet_util::mth::floor_d(entity.min_y);
-    let max_y = rivet_util::mth::floor_d(entity.max_y - f64::EPSILON);
-    let min_z = rivet_util::mth::floor_d(entity.min_z);
-    let max_z = rivet_util::mth::floor_d(entity.max_z - f64::EPSILON);
+    // BlockCollisions scans one block beyond each AABB face. That extra ring is
+    // observable for offset shapes such as bamboo and pointed dripstone, whose
+    // VoxelShape may protrude into a neighbouring block.
+    let min_x = rivet_util::mth::floor_d(entity.min_x - 1.0e-7).wrapping_sub(1);
+    let max_x = rivet_util::mth::floor_d(entity.max_x + 1.0e-7).wrapping_add(1);
+    let min_y = rivet_util::mth::floor_d(entity.min_y - 1.0e-7).wrapping_sub(1);
+    let max_y = rivet_util::mth::floor_d(entity.max_y + 1.0e-7).wrapping_add(1);
+    let min_z = rivet_util::mth::floor_d(entity.min_z - 1.0e-7).wrapping_sub(1);
+    let max_z = rivet_util::mth::floor_d(entity.max_z + 1.0e-7).wrapping_add(1);
     for block_x in min_x..=max_x {
         for block_z in min_z..=max_z {
             for block_y in min_y..=max_y {
-                let state = region.get_block_state(&BlockPos::new(block_x, block_y, block_z));
-                let shape = spawn_collision_shape(state, Some(entity_type))?;
+                let block_pos = BlockPos::new(block_x, block_y, block_z);
+                let state = region.get_block_state(&block_pos);
+                let shape = spawn_collision_shape(state, &block_pos, context)?;
                 if shape.intersects(block_x, block_y, block_z, &entity) {
                     return Some(false);
                 }
@@ -2713,7 +2902,6 @@ fn is_signal_source(state: BlockState) -> bool {
             | "minecraft:observer"
             | "minecraft:comparator"
             | "minecraft:repeater"
-            | "minecraft:powered_rail"
             | "minecraft:redstone_wire"
             | "minecraft:redstone_torch"
             | "minecraft:redstone_wall_torch"
@@ -2798,6 +2986,7 @@ fn spawn_dimensions(entity_type: &str) -> (f32, f32) {
         "minecraft:camel" => (1.7, 2.375),
         "minecraft:chicken" => (0.4, 0.7),
         "minecraft:cow" | "minecraft:mooshroom" => (0.9, 1.4),
+        "minecraft:ocelot" => (0.6, 0.7),
         "minecraft:sheep" => (0.9, 1.3),
         "minecraft:donkey" => (1.3964844, 1.5),
         "minecraft:fox" => (0.6, 0.7),
@@ -2822,20 +3011,26 @@ fn spawn_dimensions(entity_type: &str) -> (f32, f32) {
 
 fn no_collision(
     region: &WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey>,
-    entity_type: &str,
     x: f64,
     y: i32,
     z: f64,
     width: f64,
     height: f64,
 ) -> bool {
-    collision_free(region, spawn_aabb(x, y, z, width, height), entity_type).unwrap_or(false)
+    // NaturalSpawner calls the AABB-only overload, which uses
+    // CollisionContext.empty(), not the candidate entity's context.
+    collision_free(
+        region,
+        spawn_aabb(x, y, z, width, height),
+        SpawnCollisionContext::Empty,
+    )
+    .unwrap_or(false)
 }
 
 /// The post-construction `Mob.checkSpawnObstruction` gate available without an
-/// entity instance. Paper requires an unobstructed entity AABB and no fluids;
-/// use the same exact shape intersection as `Level.noCollision`, then apply
-/// the fluid scan over the AABB's covered block coordinates.
+/// entity instance. Paper re-runs the AABB through `isUnobstructed(entity)`
+/// using the entity collision context before scanning liquids; this matters for
+/// context-sensitive blocks such as powder snow and scaffolding.
 fn spawn_obstruction_ok(
     region: &WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey>,
     entity_type: &str,
@@ -2846,7 +3041,20 @@ fn spawn_obstruction_ok(
     height: f64,
 ) -> bool {
     let entity = spawn_aabb(x, y, z, width, height);
-    if !collision_free(region, entity, entity_type).unwrap_or(false) {
+    // NaturalSpawner's first collision query uses CollisionContext.empty(),
+    // while Mob.checkSpawnObstruction calls isUnobstructed(this) with the
+    // candidate entity context. Dynamic blocks such as powder snow and
+    // scaffolding can therefore disagree between the two queries.
+    if !collision_free(
+        region,
+        entity,
+        SpawnCollisionContext::Entity {
+            entity_type,
+            entity_min_y: entity.min_y,
+        },
+    )
+    .unwrap_or(false)
+    {
         return false;
     }
     let min_x = rivet_util::mth::floor_d(entity.min_x);
@@ -2876,9 +3084,7 @@ fn spawn_obstruction_ok(
             return false;
         }
         let below = region.get_block_state(&BlockPos::containing(x, y as f64, z).below());
-        if below.block().name() != "minecraft:grass_block"
-            && !below.is_in_tag("minecraft:leaves")
-        {
+        if below.block().name() != "minecraft:grass_block" && !below.is_in_tag("minecraft:leaves") {
             return false;
         }
     }
@@ -5421,6 +5627,7 @@ mod tests {
     #[test]
     fn spawn_dimensions_match_paper_entity_type_sizes() {
         assert_eq!(spawn_dimensions("minecraft:cow"), (0.9, 1.4));
+        assert_eq!(spawn_dimensions("minecraft:ocelot"), (0.6, 0.7));
         assert_eq!(spawn_dimensions("minecraft:sheep"), (0.9, 1.3));
         assert_eq!(spawn_dimensions("minecraft:turtle"), (1.2, 0.4));
         assert_eq!(spawn_dimensions("minecraft:camel"), (1.7, 2.375));
@@ -5441,23 +5648,127 @@ mod tests {
         let stone = BlockState::of(BlockId::from_name("minecraft:stone").unwrap());
         let powder_snow = BlockState::of(BlockId::from_name("minecraft:powder_snow").unwrap());
         let frosted_ice = BlockState::of(BlockId::from_name("minecraft:frosted_ice").unwrap());
+        let bamboo = BlockState::of(BlockId::from_name("minecraft:bamboo").unwrap());
+        let scaffolding = BlockState::of(BlockId::from_name("minecraft:scaffolding").unwrap());
+        let pointed_dripstone =
+            BlockState::of(BlockId::from_name("minecraft:pointed_dripstone").unwrap());
+        let moving_piston = BlockState::of(BlockId::from_name("minecraft:moving_piston").unwrap());
         let rail = BlockState::of(BlockId::from_name("minecraft:rail").unwrap());
+        let powered_rail = BlockState::of(BlockId::from_name("minecraft:powered_rail").unwrap());
+        let activator_rail =
+            BlockState::of(BlockId::from_name("minecraft:activator_rail").unwrap());
+        let pos = BlockPos::new(0, 0, 0);
 
-        assert!(spawn_collision_shape(leaves, None).is_some_and(|shape| shape.is_full()));
-        assert!(spawn_collision_shape(glass, None).is_some_and(|shape| shape.is_full()));
-        assert!(spawn_collision_shape(stone, None).is_some_and(|shape| shape.is_full()));
-        assert!(spawn_collision_shape(powder_snow, None).is_some_and(|shape| !shape.is_full()));
-        assert!(spawn_collision_shape(powder_snow, Some("minecraft:rabbit"))
-            .is_some_and(|shape| shape.is_full()));
-        assert!(spawn_collision_shape(powder_snow, Some("minecraft:polar_bear"))
-            .is_some_and(|shape| !shape.is_full()));
-        assert!(!is_valid_empty_spawn_block(leaves, "minecraft:parrot"));
-        assert!(!is_valid_empty_spawn_block(glass, "minecraft:cow"));
+        assert!(
+            spawn_collision_shape(leaves, &pos, SpawnCollisionContext::Empty)
+                .is_some_and(|shape| shape.is_full())
+        );
+        assert!(
+            spawn_collision_shape(glass, &pos, SpawnCollisionContext::Empty)
+                .is_some_and(|shape| shape.is_full())
+        );
+        assert!(
+            spawn_collision_shape(stone, &pos, SpawnCollisionContext::Empty)
+                .is_some_and(|shape| shape.is_full())
+        );
+        assert!(
+            spawn_collision_shape(powder_snow, &pos, SpawnCollisionContext::Empty)
+                .is_some_and(|shape| !shape.is_full())
+        );
+        assert!(
+            spawn_collision_shape(
+                powder_snow,
+                &pos,
+                SpawnCollisionContext::Entity {
+                    entity_type: "minecraft:rabbit",
+                    entity_min_y: 1.0,
+                },
+            )
+            .is_some_and(|shape| shape.is_full())
+        );
+        assert!(
+            spawn_collision_shape(
+                powder_snow,
+                &pos,
+                SpawnCollisionContext::Entity {
+                    entity_type: "minecraft:polar_bear",
+                    entity_min_y: 1.0,
+                },
+            )
+            .is_some_and(|shape| !shape.is_full())
+        );
+        let unstable_scaffolding = scaffolding
+            .set_value(
+                BlockStateProperties::STABILITY_DISTANCE,
+                PropertyValue::Int(1),
+            )
+            .unwrap()
+            .set_value(BlockStateProperties::BOTTOM, PropertyValue::Bool(true))
+            .unwrap();
+        let inside_scaffolding = SpawnAabb::new(0.4, 0.05, 0.4, 0.6, 0.1, 0.6);
+        assert!(
+            !spawn_collision_shape(unstable_scaffolding, &pos, SpawnCollisionContext::Empty)
+                .is_some_and(|shape| shape.intersects(0, 0, 0, &inside_scaffolding))
+        );
+        assert!(
+            spawn_collision_shape(
+                unstable_scaffolding,
+                &pos,
+                SpawnCollisionContext::Entity {
+                    entity_type: "minecraft:cow",
+                    entity_min_y: 0.0,
+                }
+            )
+            .is_some_and(|shape| shape.intersects(0, 0, 0, &inside_scaffolding))
+        );
+        assert!(
+            spawn_collision_shape(bamboo, &pos, SpawnCollisionContext::Empty)
+                .is_some_and(|shape| !shape.is_full())
+        );
+        assert!(
+            spawn_collision_shape(scaffolding, &pos, SpawnCollisionContext::Empty)
+                .is_some_and(|shape| !shape.is_full())
+        );
+        assert!(
+            spawn_collision_shape(pointed_dripstone, &pos, SpawnCollisionContext::Empty)
+                .is_some_and(|shape| !shape.is_full())
+        );
+        assert!(
+            spawn_collision_shape(moving_piston, &pos, SpawnCollisionContext::Empty)
+                .is_some_and(|shape| !shape.is_full())
+        );
+        assert!(!is_valid_empty_spawn_block(
+            leaves,
+            "minecraft:parrot",
+            &pos
+        ));
+        assert!(!is_valid_empty_spawn_block(glass, "minecraft:cow", &pos));
+        assert!(is_valid_empty_spawn_block(bamboo, "minecraft:cow", &pos));
+        assert!(is_valid_empty_spawn_block(
+            scaffolding,
+            "minecraft:cow",
+            &pos
+        ));
+        assert!(is_valid_empty_spawn_block(
+            pointed_dripstone,
+            "minecraft:cow",
+            &pos
+        ));
         assert!(!is_valid_spawn_floor(glass, "minecraft:cow"));
-        assert!(is_valid_spawn_floor(powder_snow, "minecraft:polar_bear"));
+        assert!(!is_valid_spawn_floor(powder_snow, "minecraft:polar_bear"));
+        assert!(is_valid_spawn_floor(
+            Blocks::ICE.default_block_state(),
+            "minecraft:polar_bear"
+        ));
+        assert!(!is_valid_spawn_floor(
+            Blocks::ICE.default_block_state(),
+            "minecraft:cow"
+        ));
         assert!(is_valid_spawn_floor(frosted_ice, "minecraft:polar_bear"));
         assert!(!is_valid_spawn_floor(frosted_ice, "minecraft:cow"));
         assert!(!is_signal_source(rail));
+        assert!(!is_signal_source(powered_rail));
+        assert!(!is_signal_source(activator_rail));
     }
 
     #[test]
@@ -5467,12 +5778,30 @@ mod tests {
         let fence = BlockState::of(BlockId::from_name("minecraft:oak_fence").unwrap());
         let slab = BlockState::of(BlockId::from_name("minecraft:oak_slab").unwrap());
         let ladder = BlockState::of(BlockId::from_name("minecraft:ladder").unwrap());
+        let powder_snow = BlockState::of(BlockId::from_name("minecraft:powder_snow").unwrap());
+        let cake = BlockState::of(BlockId::from_name("minecraft:cake").unwrap());
+        let flower_pot = BlockState::of(BlockId::from_name("minecraft:flower_pot").unwrap());
+        let lantern = BlockState::of(BlockId::from_name("minecraft:lantern").unwrap());
+        let water = BlockState::of(BlockId::from_name("minecraft:water").unwrap());
+        let lava = BlockState::of(BlockId::from_name("minecraft:lava").unwrap());
+        let closed_door = BlockState::of(BlockId::from_name("minecraft:oak_door").unwrap());
+        let open_door = closed_door
+            .set_value(BlockStateProperties::OPEN, PropertyValue::Bool(true))
+            .unwrap();
 
         assert!(!is_pathfindable_land(stone));
         assert!(!is_pathfindable_land(stairs));
         assert!(!is_pathfindable_land(fence));
         assert!(!is_pathfindable_land(slab));
+        assert!(!is_pathfindable_land(cake));
+        assert!(!is_pathfindable_land(flower_pot));
+        assert!(!is_pathfindable_land(lantern));
+        assert!(!is_pathfindable_land(closed_door));
+        assert!(is_pathfindable_land(open_door));
         assert!(is_pathfindable_land(ladder));
+        assert!(is_pathfindable_land(powder_snow));
+        assert!(is_pathfindable_land(water));
+        assert!(!is_pathfindable_land(lava));
     }
 
     #[test]
