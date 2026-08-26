@@ -727,6 +727,13 @@ impl GenerationChunkHolder {
     /// reached through this path. FULL is deliberately a separate consuming
     /// promotion after an exact SPAWN parent, not a borrowed executor rung.
     pub fn generate_through(&mut self, target: ChunkStatus) -> Result<(), GeneratedChunkError> {
+        // FULL is always the consuming ProtoChunk → LevelChunk boundary. It
+        // must win even after a cached FEATURES failure: callers must never
+        // observe a historical generation error in place of the boundary's
+        // stable UnsupportedStatus response.
+        if target == ChunkStatus::Full {
+            return Err(GeneratedChunkError::UnsupportedStatus(target));
+        }
         if target.index() >= ChunkStatus::Features.index()
             && let Some(error) = self.features_failure
         {
@@ -2636,6 +2643,33 @@ mod tests {
                 .all(|section| section.has_only_air()),
             "cached retry must not replay partial feature block writes"
         );
+    }
+
+    /// FULL remains the consuming ProtoChunk → LevelChunk boundary even after
+    /// FEATURES has reached its cached typed failure. The historical FEATURES
+    /// error must never shadow the stable FULL UnsupportedStatus response.
+    #[test]
+    fn full_rejection_precedes_cached_features_failure() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        let features_error = holder
+            .generate_through(ChunkStatus::Features)
+            .expect_err("FEATURES must stop at its typed boundary");
+        assert!(matches!(
+            features_error,
+            GeneratedChunkError::Generation(GenError::FeaturePlacementDecode { .. })
+                | GeneratedChunkError::Generation(GenError::SettingsNotGenerated { .. })
+                | GeneratedChunkError::Generation(
+                    GenError::StructureDecorationIndexUnavailable { .. }
+                )
+        ));
+        assert_eq!(holder.status(), ChunkStatus::Empty);
+
+        assert!(matches!(
+            holder.generate_through(ChunkStatus::Full),
+            Err(GeneratedChunkError::UnsupportedStatus(ChunkStatus::Full))
+        ));
+        assert_eq!(holder.status(), ChunkStatus::Empty);
     }
 
     /// The generated placed/configured pair is decoded through registry-backed
