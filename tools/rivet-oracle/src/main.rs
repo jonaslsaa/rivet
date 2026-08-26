@@ -206,9 +206,9 @@ enum Error {
     PinUnavailable {
         reason: String,
     },
-    /// The #54 hash stage could not complete honestly (missing/empty payload
-    /// input, or a malformed capture tree) — maps to exit 3 UNVERIFIED, never a
-    /// fabricated green.
+    /// A required prerequisite is unavailable (for example, missing/empty
+    /// payload input or incomplete FULL coverage) — maps to exit 3 UNVERIFIED,
+    /// never a fabricated green. Present malformed evidence is a hard failure.
     Unverified(String),
     /// A launched dedicated producer reached an explicit, truthful capability
     /// boundary. This is distinct from an absent prerequisite and from a
@@ -3082,13 +3082,123 @@ fn run_hash_paper(dir: Option<&Path>) -> Result<(), Error> {
     Ok(())
 }
 
+fn validate_hash_manifest_shape(
+    manifest: &hash_manifest::HashManifest,
+    path: &Path,
+) -> Result<(), Error> {
+    if manifest.entries.len() > hash_manifest::MAX_PAYLOAD_COUNT {
+        return Err(Error::Gate(format!(
+            "invalid hash manifest {}: {} entries exceed the {}-entry cap",
+            path.display(),
+            manifest.entries.len(),
+            hash_manifest::MAX_PAYLOAD_COUNT
+        )));
+    }
+    if manifest.format != 1
+        || manifest.hash_algorithm != hash_manifest::HASH_ALGORITHM
+        || manifest.hash_scope != hash_manifest::HASH_SCOPE
+        || manifest.corpus_version != hash_manifest::CORPUS_VERSION
+        || manifest.level_type.is_empty()
+        || manifest.region_file_compression.is_empty()
+        || manifest.paper.is_empty()
+    {
+        return Err(Error::Gate(format!(
+            "invalid hash manifest {}: unsupported or missing manifest identity fields",
+            path.display()
+        )));
+    }
+    if manifest.entries.len() != manifest.chunk_count {
+        return Err(Error::Gate(format!(
+            "invalid hash manifest {}: chunk-count {} does not equal {} entries",
+            path.display(),
+            manifest.chunk_count,
+            manifest.entries.len()
+        )));
+    }
+    let full_count = manifest
+        .entries
+        .iter()
+        .filter(|entry| entry.is_full())
+        .count();
+    if full_count != manifest.full_count {
+        return Err(Error::Gate(format!(
+            "invalid hash manifest {}: full-count {} does not equal {} FULL entries",
+            path.display(),
+            manifest.full_count,
+            full_count
+        )));
+    }
+    hash_manifest::reject_duplicate_coordinates(&manifest.entries).map_err(|message| {
+        Error::Gate(format!(
+            "invalid hash manifest {}: {message}",
+            path.display()
+        ))
+    })?;
+    let total_bytes = manifest.entries.iter().try_fold(0usize, |total, entry| {
+        if entry.bytes > hash_manifest::MAX_PAYLOAD_BYTES {
+            return Err(format!(
+                "entry {}/{}.{} exceeds the {}-byte payload cap",
+                entry.dim,
+                entry.cx,
+                entry.cz,
+                hash_manifest::MAX_PAYLOAD_BYTES
+            ));
+        }
+        if entry.dim.is_empty()
+            || entry.region != format!("{}.{}", entry.cx.div_euclid(32), entry.cz.div_euclid(32))
+            || entry.status.is_empty()
+            || entry.status == "full"
+            || entry.xxh3_64.len() != 16
+            || !entry.xxh3_64.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || entry.sha256.len() != 64
+            || !entry.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || entry.xxh3_64_canonical.len() != 16
+            || !entry
+                .xxh3_64_canonical
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(format!(
+                "entry {}/{}.{} has malformed coordinate, region, status, or digest fields",
+                entry.dim, entry.cx, entry.cz
+            ));
+        }
+        total
+            .checked_add(entry.bytes)
+            .ok_or_else(|| "total payload byte count overflowed the verifier cap".to_string())
+    });
+    let total_bytes = total_bytes.map_err(|message| {
+        Error::Gate(format!(
+            "invalid hash manifest {}: {message}",
+            path.display()
+        ))
+    })?;
+    if total_bytes > hash_manifest::MAX_TOTAL_PAYLOAD_BYTES {
+        return Err(Error::Gate(format!(
+            "invalid hash manifest {}: total payload bytes {} exceed {}",
+            path.display(),
+            total_bytes,
+            hash_manifest::MAX_TOTAL_PAYLOAD_BYTES
+        )));
+    }
+    Ok(())
+}
+
+fn read_hash_manifest_bytes(path: &Path) -> Result<Vec<u8>, Error> {
+    generated_full::read_stable_file_capped(
+        path,
+        "hash manifest",
+        crate::json::MAX_JSON_BYTES as u64,
+    )
+}
+
 /// Load a `HashManifest` from a `manifest.json`.
 fn load_hash_manifest(dir: &Path) -> Result<hash_manifest::HashManifest, Error> {
     let path = dir.join("manifest.json");
-    let raw =
-        fs::read(&path).map_err(|e| Error::Gate(format!("cannot read {}: {e}", path.display())))?;
+    let raw = read_hash_manifest_bytes(&path)?;
     let supplied: hash_manifest::HashManifest = crate::json::from_slice(&raw)
         .map_err(|e| Error::Gate(format!("invalid hash manifest {}: {e}", path.display())))?;
+    validate_hash_manifest_shape(&supplied, &path)?;
     // When a raw payload tree is present, manifests are diagnostic metadata
     // only: rebuild the digest table from those immutable payload bytes and
     // reject a supplied table that is stale, relabeled, or hashes a different
@@ -3139,25 +3249,107 @@ fn load_hash_manifest(dir: &Path) -> Result<hash_manifest::HashManifest, Error> 
 }
 
 /// `hash-rivet`: read a Rivet chunk tree. There is no Rivet chunk
-/// serialization yet (RivetTodo #231/#15), so this reports UNVERIFIED (3)
-/// rather than fabricating green.
+/// serialization yet (RivetTodo #231/#15), so wholly absent/not-yet-FULL
+/// prerequisites report UNVERIFIED (3), while any present malformed evidence
+/// is a hard FAIL.
 fn run_hash_rivet(dir: &Path) -> Result<(), Error> {
     hash::self_check().map_err(Error::Gate)?;
-    if !dir.is_dir() {
+    let metadata = match fs::symlink_metadata(dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(Error::Unverified(format!(
+                "Rivet chunk dir {} is absent — no Rivet chunk serialization yet (#231/#15)",
+                dir.display()
+            )));
+        }
+        Err(error) => {
+            return Err(Error::Gate(format!(
+                "cannot inspect Rivet chunk dir {}: {error}",
+                dir.display()
+            )));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
         return Err(Error::Gate(format!(
-            "Rivet chunk dir {} does not exist — no Rivet chunk serialization yet (#231/#15)",
+            "Rivet chunk dir {} is not a regular directory",
             dir.display()
         )));
     }
-    let seed = source_region_seed(dir).unwrap_or_else(|| hash_manifest::CAPTURE_SEED.to_string());
-    let prov = source_region_provenance(dir).unwrap_or_default();
-    let manifest = hash_manifest::build_from_payloads_with(dir, &seed, &prov.level_type, &prov)
-        .map_err(Error::Gate)?;
+    let chunk = dir.join("chunk");
+    match fs::symlink_metadata(&chunk) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() => {
+            return Err(Error::Gate(format!(
+                "Rivet raw chunk tree {} is not a regular directory",
+                chunk.display()
+            )));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(Error::Unverified(format!(
+                "Rivet chunk tree {} has not reached FULL yet — no chunk serialization exists",
+                dir.display()
+            )));
+        }
+        Err(error) => {
+            return Err(Error::Gate(format!(
+                "cannot inspect Rivet raw chunk tree {}: {error}",
+                chunk.display()
+            )));
+        }
+        Ok(_) => {}
+    }
+    let source_manifest_path = dir.join("manifest.json");
+    let source_manifest = match fs::symlink_metadata(&source_manifest_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_file() => {
+            return Err(Error::Gate(format!(
+                "Rivet source manifest {} is not a regular file",
+                source_manifest_path.display()
+            )));
+        }
+        Ok(_) => Some(load_manifest(dir).map_err(|error| {
+            Error::Gate(format!(
+                "Rivet source manifest {} is malformed: {error}",
+                source_manifest_path.display()
+            ))
+        })?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(Error::Gate(format!(
+                "cannot inspect Rivet source manifest {}: {error}",
+                source_manifest_path.display()
+            )));
+        }
+    };
+    let seed = source_manifest
+        .as_ref()
+        .and_then(|manifest| manifest.seed.clone())
+        .unwrap_or_else(|| hash_manifest::CAPTURE_SEED.to_string());
+    let prov = source_manifest
+        .as_ref()
+        .map(|manifest| {
+            hash_manifest::CaptureProvenance::from_region_manifest(
+                manifest.level_type.as_deref(),
+                manifest.region_file_compression.as_deref(),
+            )
+        })
+        .unwrap_or_default();
+    let manifest = match hash_manifest::build_from_raw_tree_with(
+        dir,
+        &seed,
+        &prov.level_type,
+        &prov,
+    ) {
+        Ok(manifest) => manifest,
+        Err(error) if error.contains("contains no .nbt payloads") => {
+            return Err(Error::Unverified(format!(
+                "Rivet chunk tree {} has not reached FULL yet — no serialized chunk payloads exist",
+                dir.display()
+            )));
+        }
+        Err(error) => return Err(Error::Gate(error)),
+    };
     if manifest.full_count == 0 {
-        return Err(Error::Gate(format!(
-            "Rivet chunk tree {} has 0 FULL chunks — Rivet worldgen has not reached FULL \
-             (blocked on #51 capturing status-FULL regions + #231/#15 serialization); \
-             the Paper-vs-Rivet hash-diff is UNVERIFIED, never green",
+        return Err(Error::Unverified(format!(
+            "Rivet chunk tree {} has 0 FULL chunks — Rivet worldgen has not reached FULL; the Paper-vs-Rivet hash-diff is UNVERIFIED, never green",
             dir.display()
         )));
     }
@@ -3183,9 +3375,11 @@ struct ChunkHashMismatch {
 /// differing provenance; only FULL entries are compared (non-FULL is recorded
 /// and reported, never silently included); a missing Rivet manifest, a
 /// Paper-vs-Paper self-diff, or a required corpus coordinate with no FULL data
-/// on either side, is UNVERIFIED.
+/// on either side, is UNVERIFIED. Malformed existing manifests and raw trees
+/// are hard FAIL outcomes.
 ///
-/// Returns: Ok(true) = PASS, Ok(false) = FAIL, Err = UNVERIFIED (3).
+/// Returns: Ok(true) = PASS, Ok(false) = FAIL, Err(Unverified) = 3, and every
+/// other error is FAIL.
 fn run_hash_diff(paper_dir: &Path, rivet_dir: &Path) -> Result<bool, Error> {
     hash::self_check().map_err(Error::Gate)?;
     // A self-comparison (both args the same committed Paper manifest) compares
@@ -3193,34 +3387,90 @@ fn run_hash_diff(paper_dir: &Path, rivet_dir: &Path) -> Result<bool, Error> {
     // produce a Paper-vs-Rivet PASS. Canonicalize so an aliased path to the
     // same tree is still refused; a nonexistent Rivet dir is caught by the
     // manifest check below with a clearer message.
-    if rivet_dir.is_dir() {
-        let paper_canon = paper_dir
-            .canonicalize()
-            .map_err(|e| Error::Gate(format!("cannot resolve {}: {e}", paper_dir.display())))?;
-        let rivet_canon = rivet_dir
-            .canonicalize()
-            .map_err(|e| Error::Gate(format!("cannot resolve {}: {e}", rivet_dir.display())))?;
-        if paper_canon == rivet_canon {
+    let paper_metadata = match fs::symlink_metadata(paper_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(Error::Unverified(format!(
+                "Paper hash evidence {} is absent — hash-diff is UNVERIFIED",
+                paper_dir.display()
+            )));
+        }
+        Err(error) => {
             return Err(Error::Gate(format!(
-                "paper and rivet dirs are the same tree ({}): a Paper-vs-Paper self-diff \
-                 proves nothing about Rivet — pass a distinct Rivet chunk dir; UNVERIFIED, \
-                 never green",
-                paper_canon.display()
+                "cannot inspect Paper hash evidence {}: {error}",
+                paper_dir.display()
+            )));
+        }
+    };
+    let rivet_metadata = match fs::symlink_metadata(rivet_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(Error::Unverified(format!(
+                "Rivet hash evidence {} is absent — pre-worldgen the Paper-vs-Rivet diff is UNVERIFIED",
+                rivet_dir.display()
+            )));
+        }
+        Err(error) => {
+            return Err(Error::Gate(format!(
+                "cannot inspect Rivet hash evidence {}: {error}",
+                rivet_dir.display()
+            )));
+        }
+    };
+    for (label, path, metadata) in [
+        ("Paper", paper_dir, &paper_metadata),
+        ("Rivet", rivet_dir, &rivet_metadata),
+    ] {
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+            return Err(Error::Gate(format!(
+                "{label} hash evidence {} is not a regular directory",
+                path.display()
             )));
         }
     }
-    if !rivet_dir.join("manifest.json").is_file() {
-        return Err(Error::Gate(format!(
-            "no Rivet hash manifest at {} — pre-worldgen the Paper-vs-Rivet diff is \
-             UNVERIFIED (3), never green (Rivet chunk serialization is #231/#15)",
-            rivet_dir.display()
+    let paper_canon = paper_dir
+        .canonicalize()
+        .map_err(|e| Error::Gate(format!("cannot resolve {}: {e}", paper_dir.display())))?;
+    let rivet_canon = rivet_dir
+        .canonicalize()
+        .map_err(|e| Error::Gate(format!("cannot resolve {}: {e}", rivet_dir.display())))?;
+    if paper_canon == rivet_canon {
+        return Err(Error::Unverified(format!(
+            "paper and rivet dirs are the same tree ({}): a Paper-vs-Paper self-diff proves nothing about Rivet",
+            paper_canon.display()
         )));
+    }
+    for (label, dir) in [("Paper", paper_dir), ("Rivet", rivet_dir)] {
+        let manifest_path = dir.join("manifest.json");
+        match fs::symlink_metadata(&manifest_path) {
+            Ok(metadata)
+                if metadata.file_type().is_symlink() || !metadata.file_type().is_file() =>
+            {
+                return Err(Error::Gate(format!(
+                    "{label} hash manifest {} is not a regular file",
+                    manifest_path.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(Error::Unverified(format!(
+                    "no {label} hash manifest at {} — hash-diff is UNVERIFIED",
+                    manifest_path.display()
+                )));
+            }
+            Err(error) => {
+                return Err(Error::Gate(format!(
+                    "cannot inspect {label} hash manifest {}: {error}",
+                    manifest_path.display()
+                )));
+            }
+        }
     }
     let paper = load_hash_manifest(paper_dir)?;
     let rivet = load_hash_manifest(rivet_dir)?;
 
     if paper.provenance() != rivet.provenance() {
-        return Err(Error::Gate(format!(
+        return Err(Error::Unverified(format!(
             "provenance mismatch — refusing to compare manifests of different seed/algorithm/\
              paper/concurrency:\n  paper: {}\n  rivet: {}",
             paper.provenance().describe(),
@@ -3572,9 +3822,13 @@ fn hash_cli_exit(args: &[String]) -> Option<i32> {
             };
             match run_hash_rivet(Path::new(dir)) {
                 Ok(()) => 0,
-                Err(e) => {
-                    eprintln!("rivet-oracle: {e}");
+                Err(Error::Unverified(message)) => {
+                    eprintln!("rivet-oracle: {message}");
                     EXIT_UNVERIFIED
+                }
+                Err(error) => {
+                    eprintln!("rivet-oracle: {error}");
+                    EXIT_FAIL
                 }
             }
         }
@@ -3601,9 +3855,13 @@ fn hash_diff_exit(args: &[String]) -> i32 {
     match run_hash_diff(Path::new(paper), Path::new(rivet)) {
         Ok(true) => 0,
         Ok(false) => EXIT_FAIL,
-        Err(e) => {
-            eprintln!("rivet-oracle: {e}");
+        Err(Error::Unverified(message)) => {
+            eprintln!("rivet-oracle: {message}");
             EXIT_UNVERIFIED
+        }
+        Err(error) => {
+            eprintln!("rivet-oracle: {error}");
+            EXIT_FAIL
         }
     }
 }
@@ -5792,9 +6050,10 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
     }
 
-    /// A different seed in the Rivet manifest is provenance drift: the diff
-    /// refuses to compare (UNVERIFIED, exit 3) rather than comparing digests
-    /// that mean different worlds.
+    /// A different seed in the Rivet manifest is incomplete provenance: the diff
+    /// refuses to compare with UNVERIFIED (exit 3) rather than comparing digests
+    /// that mean different worlds. Structural or byte-corrupt evidence is a
+    /// separate hard-failure path.
     #[test]
     fn hash_diff_refuses_provenance_mismatch() {
         let tmp = hash_tmp("hash-seed");
@@ -5812,6 +6071,83 @@ mod tests {
         assert_eq!(
             hash_diff_exit(&hash_diff_args(&paper, &rivet)),
             EXIT_UNVERIFIED
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn hash_diff_malformed_existing_manifest_is_fail() {
+        let tmp = hash_tmp("hash-malformed-manifest");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let (paper, rivet) = paper_rivet_dirs(&tmp, &[], &[]);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(rivet.join("manifest.json")).unwrap()).unwrap();
+        value["chunk-count"] = serde_json::json!(0);
+        fs::write(
+            rivet.join("manifest.json"),
+            serde_json::to_string_pretty(&value).unwrap() + "\n",
+        )
+        .unwrap();
+        assert_eq!(
+            hash_diff_exit(&hash_diff_args(&paper, &rivet)),
+            EXIT_FAIL,
+            "present malformed manifest evidence is FAIL"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn hash_manifest_entry_count_cap_rejects_exactly_8193_entries() {
+        let tmp = hash_tmp("hash-entry-count-cap");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let (_paper, rivet) = paper_rivet_dirs(&tmp, &[], &[]);
+        let mut manifest = load_hash_manifest(&rivet).unwrap();
+        let entry = manifest.entries[0].clone();
+        manifest
+            .entries
+            .resize(hash_manifest::MAX_PAYLOAD_COUNT + 1, entry);
+        manifest.chunk_count = hash_manifest::MAX_PAYLOAD_COUNT + 1;
+        let error = validate_hash_manifest_shape(&manifest, &rivet.join("manifest.json"))
+            .expect_err("8193 entries must exceed the controller cap");
+        assert!(
+            matches!(error, Error::Gate(message) if message.contains("8193") && message.contains("8192-entry cap"))
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn hash_diff_oversized_existing_manifest_fails_before_parse() {
+        let tmp = hash_tmp("hash-oversized-manifest");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let (paper, rivet) = paper_rivet_dirs(&tmp, &[], &[]);
+        fs::write(
+            rivet.join("manifest.json"),
+            vec![b' '; crate::json::MAX_JSON_BYTES + 1],
+        )
+        .unwrap();
+        assert_eq!(
+            hash_diff_exit(&hash_diff_args(&paper, &rivet)),
+            EXIT_FAIL,
+            "an existing oversized manifest is malformed evidence, not UNVERIFIED"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn hash_diff_corrupt_existing_raw_tree_is_fail() {
+        let tmp = hash_tmp("hash-corrupt-raw-tree");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let (paper, rivet) = paper_rivet_dirs(&tmp, &[], &[]);
+        let target = rivet.join("chunk/the_nether/0.0/0.0.nbt");
+        fs::write(&target, b"malformed nbt").unwrap();
+        assert_eq!(
+            hash_diff_exit(&hash_diff_args(&paper, &rivet)),
+            EXIT_FAIL,
+            "present corrupt raw payload evidence is FAIL"
         );
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -5838,6 +6174,51 @@ mod tests {
             ]),
             Some(EXIT_UNVERIFIED)
         );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn hash_rivet_present_malformed_evidence_is_fail_but_absent_is_unverified() {
+        let tmp = hash_tmp("hash-rivet-outcomes");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let absent = tmp.join("absent");
+        assert_eq!(
+            hash_cli_exit(&["hash-rivet".into(), absent.to_string_lossy().into_owned()]),
+            Some(EXIT_UNVERIFIED)
+        );
+        let non_dir = tmp.join("non-dir");
+        fs::write(&non_dir, b"not a directory").unwrap();
+        assert_eq!(
+            hash_cli_exit(&["hash-rivet".into(), non_dir.to_string_lossy().into_owned()]),
+            Some(EXIT_FAIL)
+        );
+        let malformed = tmp.join("malformed");
+        fs::create_dir_all(malformed.join("chunk/overworld/0.0")).unwrap();
+        fs::write(malformed.join("chunk/overworld/0.0/0.0.nbt"), b"not NBT").unwrap();
+        assert_eq!(
+            hash_cli_exit(&[
+                "hash-rivet".into(),
+                malformed.to_string_lossy().into_owned()
+            ]),
+            Some(EXIT_FAIL)
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn hash_diff_present_manifest_or_raw_tree_corruption_is_fail() {
+        let tmp = hash_tmp("hash-diff-malformed");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let (paper, rivet) = paper_rivet_dirs(&tmp, &[], &[]);
+        fs::write(rivet.join("manifest.json"), b"{").unwrap();
+        assert_eq!(hash_diff_exit(&hash_diff_args(&paper, &rivet)), EXIT_FAIL);
+
+        let (paper, rivet) = paper_rivet_dirs(&tmp, &[], &[]);
+        let payload = rivet.join("chunk/the_nether/0.0/0.0.nbt");
+        fs::write(payload, b"corrupt").unwrap();
+        assert_eq!(hash_diff_exit(&hash_diff_args(&paper, &rivet)), EXIT_FAIL);
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -6322,10 +6703,9 @@ mod tests {
         let rivet =
             write_hash_fixture_tree_seeded(&tmp.join("rivet"), &all_corpus_coordinates(), 999);
         // The two trees carry different seeds — provenance drift, so the diff
-        // refuses to compare (UNVERIFIED, 3): a different-seed capture is a
-        // different world, and comparing its digests would be meaningless. The
-        // error is asserted to be the provenance refusal itself, not just any
-        // failure — an unrelated Err would not satisfy the stated intent.
+        // refuses to compare (UNVERIFIED, 3), not a vacuous green or a digest
+        // comparison of different worlds. The error is asserted to be the
+        // provenance refusal itself, not just any failure.
         let err = run_hash_diff(&paper, &rivet).unwrap_err();
         assert!(
             err.to_string().contains("provenance"),

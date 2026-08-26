@@ -334,6 +334,7 @@ pub fn build_from_raw_tree_with(
         ));
     }
     let mut payloads = Vec::new();
+    let mut total_payload_bytes = 0usize;
     for dim_entry in sorted_entries(&chunk_dir)? {
         reject_tree_entry(&dim_entry, "dimension")?;
         let dim_path = dim_entry.path();
@@ -385,8 +386,39 @@ pub fn build_from_raw_tree_with(
                         expected_region
                     ));
                 }
+                if payloads.len() >= MAX_PAYLOAD_COUNT {
+                    return Err(format!(
+                        "raw payload tree {} exceeds the {}-entry cap",
+                        chunk_dir.display(),
+                        MAX_PAYLOAD_COUNT
+                    ));
+                }
+                let metadata = std::fs::symlink_metadata(&path)
+                    .map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
+                if metadata.len() > MAX_PAYLOAD_BYTES as u64 {
+                    return Err(format!(
+                        "payload {} is {} bytes, above the {}-byte cap",
+                        path.display(),
+                        metadata.len(),
+                        MAX_PAYLOAD_BYTES
+                    ));
+                }
                 let bytes = std::fs::read(&path)
                     .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+                total_payload_bytes =
+                    total_payload_bytes
+                        .checked_add(bytes.len())
+                        .ok_or_else(|| {
+                            "total payload byte count overflowed the verifier cap".to_string()
+                        })?;
+                if total_payload_bytes > MAX_TOTAL_PAYLOAD_BYTES {
+                    return Err(format!(
+                        "raw payload tree {} is {} bytes, above the {}-byte cap",
+                        chunk_dir.display(),
+                        total_payload_bytes,
+                        MAX_TOTAL_PAYLOAD_BYTES
+                    ));
+                }
                 payloads.push(PayloadBytes {
                     dim: dim.clone(),
                     region: region.clone(),
@@ -453,6 +485,7 @@ pub fn build_from_payloads_with(
 ) -> Result<HashManifest, String> {
     let chunk_dir = dir.join("chunk");
     let mut payloads = Vec::new();
+    let mut total_payload_bytes = 0usize;
 
     if chunk_dir.is_dir() {
         let mut dims: Vec<PathBuf> = std::fs::read_dir(&chunk_dir)
@@ -484,9 +517,40 @@ pub fn build_from_payloads_with(
                     .collect();
                 files.sort();
                 for file in files {
+                    if payloads.len() >= MAX_PAYLOAD_COUNT {
+                        return Err(format!(
+                            "raw payload tree {} exceeds the {}-entry cap",
+                            chunk_dir.display(),
+                            MAX_PAYLOAD_COUNT
+                        ));
+                    }
                     let (cx, cz) = parse_chunk_filename(&file)?;
+                    let metadata = std::fs::symlink_metadata(&file)
+                        .map_err(|e| format!("cannot inspect {}: {e}", file.display()))?;
+                    if metadata.len() > MAX_PAYLOAD_BYTES as u64 {
+                        return Err(format!(
+                            "payload {} is {} bytes, above the {}-byte cap",
+                            file.display(),
+                            metadata.len(),
+                            MAX_PAYLOAD_BYTES
+                        ));
+                    }
                     let bytes = std::fs::read(&file)
                         .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+                    total_payload_bytes =
+                        total_payload_bytes
+                            .checked_add(bytes.len())
+                            .ok_or_else(|| {
+                                "total payload byte count overflowed the verifier cap".to_string()
+                            })?;
+                    if total_payload_bytes > MAX_TOTAL_PAYLOAD_BYTES {
+                        return Err(format!(
+                            "raw payload tree {} is {} bytes, above the {}-byte cap",
+                            chunk_dir.display(),
+                            total_payload_bytes,
+                            MAX_TOTAL_PAYLOAD_BYTES
+                        ));
+                    }
                     payloads.push(PayloadBytes {
                         dim: dim.clone(),
                         region: region.clone(),
