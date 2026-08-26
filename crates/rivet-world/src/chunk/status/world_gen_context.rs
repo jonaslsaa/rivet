@@ -70,10 +70,13 @@
 //!    concrete runtime storage and keeps the `GenerationChunkHolder`/`ChunkMap`
 //!    boundary with #185.
 //!
-//! A target already at/after the chunk's status is handled before any work:
-//! `target == current` is an idempotent no-op at *any* status (so a loaded
-//! chunk persisted past `LIGHT` can be confirmed through the LOADING pyramid),
-//! and a lower target is a demotion error rather than an unwired-status error.
+//! A non-`FULL` target already at/after the chunk's status is handled before
+//! any work: `target == current` is an idempotent no-op (so a loaded chunk
+//! persisted at `LIGHT` can be confirmed through the LOADING pyramid), and a
+//! lower target is a demotion error rather than an unwired-status error. A
+//! borrowed request targeting `FULL` is always refused, including a proto
+//! already persisted at `FULL`, because `FULL` is the consuming
+//! `ProtoChunk`→`LevelChunk` representation boundary.
 //!
 //! The SURFACE task body is wired (Java's `ChunkStatusTasks.generateSurface` →
 //! `NoiseBasedChunkGenerator.buildSurface`), so the executor runs it at the
@@ -832,21 +835,21 @@ where
         target: ChunkStatus,
     ) -> Result<(), GenError> {
         let current = chunk.get_persisted_status();
-        // Idempotent no-op at any status: a chunk already at the target (even an
-        // unwired one, e.g. a loaded FULL chunk) needs no work — this is what
-        // lets the LOADING pyramid confirm persisted chunks past LIGHT.
+        // FULL is a consuming representation change, not a borrowed proto
+        // status stamp. Refuse every borrowed FULL request, including one for
+        // a proto already persisted at FULL; the holder owns the dedicated
+        // promotion transaction and must produce a LevelChunk value.
+        if target == ChunkStatus::Full {
+            return Err(GenError::UnsupportedStatus(target));
+        }
+        // Idempotent no-op for every other status: a chunk already at the
+        // target needs no work — this is what lets the LOADING pyramid confirm
+        // persisted chunks at or past LIGHT.
         if target == current {
             return Ok(());
         }
         if target.index() < current.index() {
             return Err(GenError::Demotion { target, current });
-        }
-        // FULL is a consuming representation change, not a borrowed proto
-        // status stamp. The holder owns the dedicated promotion transaction;
-        // refusing here keeps the generic executor from losing or fabricating
-        // the LevelChunk value.
-        if target == ChunkStatus::Full {
-            return Err(GenError::UnsupportedStatus(target));
         }
         if target == ChunkStatus::Spawn && self.spawn.is_none() {
             return Err(GenError::UnsupportedStatus(target));
@@ -2268,5 +2271,27 @@ mod tests {
             .expect_err("FULL requires consuming promotion");
         assert_eq!(err, GenError::UnsupportedStatus(ChunkStatus::Full));
         assert_eq!(chunk.get_persisted_status(), ChunkStatus::Spawn);
+    }
+
+    /// A persisted FULL proto is a loaded representation, not a borrowed
+    /// executor input. The direct persisted-FULL case must still refuse the
+    /// borrowed request instead of taking the target==current no-op path.
+    #[test]
+    fn generate_through_persisted_full_proto_refuses_borrowed_full() {
+        let (mut ctx, biomes_calls, noise_calls, surface_calls, carvers_calls, features_calls) =
+            recording_context();
+        let mut chunk = proto();
+        chunk.set_persisted_status(ChunkStatus::Full);
+
+        let err = ctx
+            .generate_through(&GENERATION_PYRAMID, &mut chunk, ChunkStatus::Full)
+            .expect_err("a borrowed FULL request must use consuming promotion");
+        assert_eq!(err, GenError::UnsupportedStatus(ChunkStatus::Full));
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Full);
+        assert!(biomes_calls.borrow().is_empty());
+        assert!(noise_calls.borrow().is_empty());
+        assert!(surface_calls.borrow().is_empty());
+        assert!(carvers_calls.borrow().is_empty());
+        assert!(features_calls.borrow().is_empty());
     }
 }
