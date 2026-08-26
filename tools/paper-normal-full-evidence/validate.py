@@ -209,7 +209,7 @@ def _status(root: Tag) -> str:
     return tag.value
 
 
-def _heightmaps(root: Tag, coordinate: tuple[int, int]) -> tuple[dict[str, list[int]], list[str]]:
+def _heightmaps(root: Tag, coordinate: tuple[int, int], *, target: bool) -> tuple[dict[str, list[int]], list[str]]:
     tag = get_any(root, "Heightmaps")
     if tag is None or tag.kind != 10:
         raise Failed(f"{coordinate} has no Heightmaps compound")
@@ -227,12 +227,12 @@ def _heightmaps(root: Tag, coordinate: tuple[int, int]) -> tuple[dict[str, list[
         if len(values) != 256 or any(value > 384 for value in values):
             raise Failed(f"{coordinate} has out-of-range {name} heightmap")
         decoded[name] = values
-    if len({tuple(values) for values in decoded.values()}) < 2:
+    if target and len({tuple(values) for values in decoded.values()}) < 2:
         raise Failed(f"{coordinate} has identical required heightmaps")
     return decoded, list(required)
 
 
-def _block_palette_names(root: Tag, coordinate: tuple[int, int]) -> set[str]:
+def _block_palette_names(root: Tag, coordinate: tuple[int, int], *, target: bool) -> set[str]:
     names: set[str] = set()
     sections = get_any(root, "sections")
     if sections is None or sections.kind != 9:
@@ -251,7 +251,7 @@ def _block_palette_names(root: Tag, coordinate: tuple[int, int]) -> set[str]:
                 name = entry.value.get("Name")
                 if name is not None and name.kind == 8:
                     names.add(name.value)
-    if len(names) < 6:
+    if target and len(names) < 6:
         raise Failed(f"{coordinate} has a flat/under-varied block palette")
     return names
 
@@ -272,8 +272,8 @@ def validate_chunk(raw: bytes, coordinate: tuple[int, int], *, target: bool) -> 
     light_correct = bool(light.value)
     if target and not light_correct:
         raise Failed(f"{coordinate} is not light-correct")
-    heightmaps, heightmap_names = _heightmaps(root, coordinate)
-    names = _block_palette_names(root, coordinate)
+    heightmaps, heightmap_names = _heightmaps(root, coordinate, target=target)
+    names = _block_palette_names(root, coordinate, target=target)
     if target and len(names) < 6:
         raise Failed(f"{coordinate} looks flat")
     semantic = sha256(canonical_without_dynamic(root))

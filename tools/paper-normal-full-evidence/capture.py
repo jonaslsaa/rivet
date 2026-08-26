@@ -680,7 +680,7 @@ def chunk_details(raw: bytes, coordinate: tuple[int, int], *, target: bool) -> d
         if len(values) != 256 or any(value > 384 for value in values):
             raise Failed(f"{coordinate} has out-of-range {name} heightmap")
         decoded[name] = values
-    if len({tuple(values) for values in decoded.values()}) < 2:
+    if target and len({tuple(values) for values in decoded.values()}) < 2:
         raise Failed(f"{coordinate} has no heightmap variation")
     sections = get_any(root, "sections")
     if sections is None or sections.kind != 9:
@@ -700,7 +700,7 @@ def chunk_details(raw: bytes, coordinate: tuple[int, int], *, target: bool) -> d
                 name = entry.value.get("Name")
                 if name is not None and name.kind == 8:
                     palette_names.add(name.value)
-    if len(palette_names) < 6:
+    if target and len(palette_names) < 6:
         raise Failed(f"{coordinate} has a flat/under-varied block palette")
     return {
         "status": status.value,

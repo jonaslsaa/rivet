@@ -101,6 +101,8 @@ class EvidenceTests(unittest.TestCase):
         _, _, support_details = validate.validate_chunk(valid_chunk(light=False), (0, 0), target=False)
         self.assertFalse(support_details["light_correct"])
         self.assertFalse(capture.chunk_details(valid_chunk(light=False), (0, 0), target=False)["light_correct"])
+        self.assertEqual(validate.validate_chunk(valid_chunk(), (0, 0), target=False)[0], "minecraft:full")
+        self.assertEqual(capture.chunk_details(valid_chunk(), (0, 0), target=False)["status"], "minecraft:full")
 
     def test_negative_chunk_evidence_cases(self):
         with self.assertRaises(validate.Failed):
