@@ -165,7 +165,7 @@ type LightSeam<T, B, S> = dyn FnMut(&mut ProtoChunk<T, B, S>) -> Result<(), GenE
 /// separate from the LIGHT callback so the executor still refuses
 /// `INITIALIZE_LIGHT` before mutating the proto when the provider/storage
 /// dependency is absent.
-pub trait GeneratedLightTask<T, B, S, R = ()>: 'static
+pub trait GeneratedLightTask<T, B, S, R = ()>
 where
     T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
@@ -523,7 +523,7 @@ impl<T, B, S, R> WorldGenContext<T, B, S, R>
 where
     T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
-    S: Eq + std::hash::Hash + 'static,
+    S: Eq + std::hash::Hash,
     R: Send + 'static,
 {
     /// Wraps the five worldgen seam closures (owned, mirroring the record).
@@ -579,7 +579,7 @@ where
     /// storage and returns it to the caller.
     pub fn attach_generated_light_task(
         &mut self,
-        task: impl GeneratedLightTask<T, B, S, R>,
+        task: impl GeneratedLightTask<T, B, S, R> + 'static,
     ) -> Option<R> {
         // Allocate the replacement wrapper before extracting the old task. If
         // allocation panics, the current task and its runtime owner stay in the
@@ -633,7 +633,7 @@ where
     /// owner or explicitly discard it under their own ownership boundary.
     pub fn with_generated_light_task(
         mut self,
-        task: impl GeneratedLightTask<T, B, S, R>,
+        task: impl GeneratedLightTask<T, B, S, R> + 'static,
     ) -> (Self, Option<R>) {
         let detached = self.attach_generated_light_task(task);
         (self, detached)
@@ -1209,6 +1209,46 @@ mod tests {
                 is_leaves: false,
             },
         )
+    }
+
+    fn borrowed_key_context<'a>(_key: &'a str) -> WorldGenContext<u8, u8, &'a str> {
+        WorldGenContext::new(
+            |_c: &mut ProtoChunk<u8, u8, &'a str>| {},
+            |_c: &mut ProtoChunk<u8, u8, &'a str>| {},
+            |_c: &mut ProtoChunk<u8, u8, &'a str>| {},
+            |_c: &mut ProtoChunk<u8, u8, &'a str>| {},
+            |_c: &mut ProtoChunk<u8, u8, &'a str>| Ok(()),
+        )
+    }
+
+    fn borrowed_key_proto(key: &str) -> ProtoChunk<u8, u8, &str> {
+        let _ = key;
+        ProtoChunk::new(
+            ChunkPos::ZERO,
+            UpgradeData::empty(24),
+            create_accessor(-64, 384),
+            &factory(),
+            None,
+            0,
+            255,
+            &|s: &u8| StateFlags {
+                is_air: *s == 0,
+                blocks_motion: *s != 0,
+                has_fluid: false,
+                is_leaves: false,
+            },
+        )
+    }
+
+    #[test]
+    fn world_gen_context_accepts_borrowed_structure_keys() {
+        let key = String::from("structure");
+        let mut context = borrowed_key_context(key.as_str());
+        let mut chunk = borrowed_key_proto(key.as_str());
+        context
+            .generate_through(&GENERATION_PYRAMID, &mut chunk, ChunkStatus::Biomes)
+            .expect("a borrowed structure-key context remains usable");
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Biomes);
     }
 
     /// A `WorldGenContext` whose closures record their invocation into shared
