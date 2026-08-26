@@ -215,12 +215,12 @@ impl SectionPos {
 
     /// `SectionPos.sectionToBlockCoord(int)`.
     pub fn section_to_block_coord(section_coord: i32) -> i32 {
-        section_coord << 4
+        section_coord.wrapping_shl(Self::SECTION_BITS as u32)
     }
 
     /// `SectionPos.sectionToBlockCoord(int, int)`.
     pub fn section_to_block_coord_offset(section_coord: i32, offset: i32) -> i32 {
-        Self::section_to_block_coord(section_coord) + offset
+        Self::section_to_block_coord(section_coord).wrapping_add(offset)
     }
 
     /// `SectionPos.x(long)` — `(int)(sectionNode >> 42)` (Java writes

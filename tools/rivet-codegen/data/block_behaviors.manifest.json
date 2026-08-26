@@ -2,14 +2,14 @@
   "generator": "BlockBehaviourProbe (Bootstrap + Block.BLOCK_STATE_REGISTRY)",
   "source": {
     "jar": "tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar",
-    "jar_sha256": "e1a027e9481a16ec1da0f0e139d370280050d123a14c022a476c2dc8a697ebda",
+    "jar_sha256": "88ccec843a9c94b938d71105294e3d064786dbc29bcd1e0da6417fb8c2c93446",
     "paper_git": "0a993450f129c4942c2a9ed45ba047412b4667cf",
     "minecraft_version": "26.2",
     "protocol_version": 776,
     "world_version": 4903
   },
   "file": {
-    "bytes": 3062494,
-    "sha256": "46788bc9ef4c4df60bf14d366379b597debfbb7d31759ce49fb60244671335f9"
+    "bytes": 3446480,
+    "sha256": "dd9007c487cbb67b913fce6ac09733b6c87f01f64cacfa672673cc8a3d0234db"
   }
 }

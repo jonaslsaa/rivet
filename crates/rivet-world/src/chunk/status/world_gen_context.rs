@@ -771,16 +771,26 @@ where
                 // `isSpawnPositionOk`, so an unlit chunk is refused before any
                 // write. With no spawn seam attached the step refuses exactly as
                 // before the seam existed.
-                let Some(spawn) = self.spawn.as_mut() else {
-                    return Err(GenError::UnsupportedTask {
-                        status: step.target_status(),
-                        task: step.task(),
-                    });
-                };
-                if !chunk.get_persisted_status().is_or_after(ChunkStatus::Light) {
-                    return Err(GenError::SpawnNotGenerated);
+                // `ChunkStatusTasks.generateSpawn` skips the generator body for
+                // a chunk carrying BelowZeroRetrogen. The status still advances:
+                // retrogen owns the later upgrade path, so spawning here would
+                // duplicate entities against the Java pipeline.
+                if chunk.is_upgrading() {
+                    if !chunk.get_persisted_status().is_or_after(ChunkStatus::Light) {
+                        return Err(GenError::SpawnNotGenerated);
+                    }
+                } else {
+                    let Some(spawn) = self.spawn.as_mut() else {
+                        return Err(GenError::UnsupportedTask {
+                            status: step.target_status(),
+                            task: step.task(),
+                        });
+                    };
+                    if !chunk.get_persisted_status().is_or_after(ChunkStatus::Light) {
+                        return Err(GenError::SpawnNotGenerated);
+                    }
+                    spawn(chunk)?;
                 }
-                spawn(chunk)?;
             }
             ChunkStatusTask::Full => {
                 ensure_canonical_rung(step.task(), step.target_status())?;
@@ -851,7 +861,21 @@ where
         if target.index() < current.index() {
             return Err(GenError::Demotion { target, current });
         }
-        if target == ChunkStatus::Spawn && self.spawn.is_none() {
+        // A target at SPAWN/FULL is reachable only when the caller attached the
+        // matching seam; a caller that wires neither (the `rivet-server` holder)
+        // keeps the past-LIGHT refusals exactly as before the seams existed. The
+        // seam absence is decided here (the final target), while the precheck
+        // below refuses a path that merely passes through a seam-less rung.
+        if target == ChunkStatus::Spawn
+            && chunk.is_upgrading()
+            && !current.is_or_after(ChunkStatus::Light)
+        {
+            // A retrogen skip is still a SPAWN dependency, not an override for
+            // malformed status input. Paper reaches generateSpawn only after
+            // LIGHT has completed for the center.
+            return Err(GenError::SpawnNotGenerated);
+        }
+        if target == ChunkStatus::Spawn && self.spawn.is_none() && !chunk.is_upgrading() {
             return Err(GenError::UnsupportedStatus(target));
         }
         // Validate the whole path before running any step, tracking the
@@ -920,7 +944,7 @@ where
                     // Mirrors the run_step arm: with no spawn seam the path is
                     // refused before any work runs (the chunk keeps its status);
                     // with one, the LIGHT-produced light must be present.
-                    if self.spawn.is_none() {
+                    if self.spawn.is_none() && !chunk.is_upgrading() {
                         return Err(GenError::UnsupportedTask {
                             status: step.target_status(),
                             task: step.task(),
@@ -2196,6 +2220,23 @@ mod tests {
             }
         );
         assert_eq!(chunk.get_persisted_status(), ChunkStatus::Spawn);
+    }
+
+    /// `ChunkStatusTasks.generateSpawn` skips the generator body for a chunk
+    /// carrying BelowZeroRetrogen. The status still completes, and this path
+    /// does not require a spawn closure because Java never calls it.
+    #[test]
+    fn upgrading_spawn_skips_population_and_advances_without_a_seam() {
+        let (mut ctx, _biomes_calls, _noise_calls, _surface_calls, _carvers_calls, _features_calls) =
+            recording_context();
+        let mut chunk = features_chunk();
+        chunk.set_persisted_status(ChunkStatus::Light);
+        chunk.set_upgrading(ChunkStatus::Spawn);
+
+        ctx.generate_through(&GENERATION_PYRAMID, &mut chunk, ChunkStatus::Spawn)
+            .expect("retrogen spawn is skipped");
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Spawn);
+        assert!(!chunk.is_upgrading());
     }
 
     /// Dispatching the SPAWN step on a context with no spawn seam keeps the

@@ -70,6 +70,9 @@ pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> 
         collision_face_runs,
         occlusion_face_runs,
         dynamic_shape_runs,
+        collision_boxes,
+        collision_shapes,
+        collision_shape_ids,
         dynamic_fixtures,
     ) = validate(root)?;
     // The behavior table must span exactly the same state space as the
@@ -93,6 +96,9 @@ pub fn run(input_flag: Option<&Path>, output_flag: Option<&Path>) -> Result<()> 
             collision_face_runs: &collision_face_runs,
             occlusion_face_runs: &occlusion_face_runs,
             dynamic_shape_runs: &dynamic_shape_runs,
+            collision_boxes: &collision_boxes,
+            collision_shapes: &collision_shapes,
+            collision_shape_ids: &collision_shape_ids,
             dynamic_fixtures: &dynamic_fixtures,
             source: &source,
         }),
@@ -139,6 +145,22 @@ pub(crate) struct DynamicShapeRun {
     dynamic: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CollisionBox {
+    min_x: i8,
+    min_y: i8,
+    min_z: i8,
+    max_x: i8,
+    max_y: i8,
+    max_z: i8,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CollisionShape {
+    start: u16,
+    length: u8,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct DynamicFixture {
     name: String,
@@ -160,6 +182,9 @@ type ValidatedTables = (
     Vec<CollisionFaceRun>,
     Vec<FaceSturdyRun>,
     Vec<DynamicShapeRun>,
+    Vec<CollisionBox>,
+    Vec<CollisionShape>,
+    Vec<u16>,
     Vec<DynamicFixture>,
 );
 
@@ -344,6 +369,14 @@ fn validate(root: Value) -> Result<ValidatedTables> {
             .context("`dynamic_shape_runs` missing from block_behaviors.json")?,
         state_count,
     )?;
+    let (collision_boxes, collision_shapes, collision_shape_ids) = validate_collision_shapes(
+        obj.get("collision_shapes")
+            .context("`collision_shapes` missing from block_behaviors.json")?,
+        obj.get("collision_shape_ids")
+            .context("`collision_shape_ids` missing from block_behaviors.json")?,
+        state_count,
+        &dynamic_shape_runs,
+    )?;
     let dynamic_fixtures = validate_dynamic_fixtures(
         obj.get("dynamic_fixtures")
             .context("`dynamic_fixtures` missing from block_behaviors.json")?,
@@ -358,6 +391,9 @@ fn validate(root: Value) -> Result<ValidatedTables> {
         collision_face_runs,
         occlusion_face_runs,
         dynamic_shape_runs,
+        collision_boxes,
+        collision_shapes,
+        collision_shape_ids,
         dynamic_fixtures,
     ))
 }
@@ -512,6 +548,141 @@ fn validate_collision_face_runs(value: &Value, state_count: u64) -> Result<Vec<C
     }
 
     Ok(runs)
+}
+
+fn validate_collision_shapes(
+    shapes_value: &Value,
+    ids_value: &Value,
+    state_count: u64,
+    dynamic_shape_runs: &[DynamicShapeRun],
+) -> Result<(Vec<CollisionBox>, Vec<CollisionShape>, Vec<u16>)> {
+    let shapes = shapes_value
+        .as_array()
+        .context("`collision_shapes` must be an array")?;
+    if shapes.is_empty() {
+        bail!("`collision_shapes` is empty; shape 0 must be the empty shape");
+    }
+    if shapes.len() > u16::MAX as usize {
+        bail!("`collision_shapes` has too many geometries for u16 shape ids");
+    }
+
+    let mut boxes = Vec::new();
+    let mut shape_records = Vec::with_capacity(shapes.len());
+    for (shape_id, value) in shapes.iter().enumerate() {
+        let object = value
+            .as_object()
+            .with_context(|| format!("collision_shapes shape {shape_id} must be an object"))?;
+        for field in object.keys() {
+            if field != "boxes" {
+                bail!("collision_shapes shape {shape_id} has unexpected field `{field}`");
+            }
+        }
+        let shape_boxes = object
+            .get("boxes")
+            .and_then(Value::as_array)
+            .with_context(|| {
+                format!("collision_shapes shape {shape_id} `boxes` must be an array")
+            })?;
+        if shape_boxes.len() > u8::MAX as usize {
+            bail!("collision_shapes shape {shape_id} has too many boxes");
+        }
+        if shape_id == 0 && !shape_boxes.is_empty() {
+            bail!("collision_shapes shape 0 must be the empty shape");
+        }
+        let start = u16::try_from(boxes.len()).with_context(|| {
+            format!("collision_shapes shape {shape_id} starts past the u16 box table")
+        })?;
+        for (box_id, value) in shape_boxes.iter().enumerate() {
+            let object = value.as_object().with_context(|| {
+                format!("collision_shapes shape {shape_id} box {box_id} must be an object")
+            })?;
+            for field in object.keys() {
+                if !matches!(
+                    field.as_str(),
+                    "min_x" | "min_y" | "min_z" | "max_x" | "max_y" | "max_z"
+                ) {
+                    bail!(
+                        "collision_shapes shape {shape_id} box {box_id} has unexpected field `{field}`"
+                    );
+                }
+            }
+            let coordinate = |field: &str| -> Result<i8> {
+                let value = object.get(field).and_then(Value::as_i64).with_context(|| {
+                    format!("collision_shapes shape {shape_id} box {box_id} `{field}` must be an integer")
+                })?;
+                if !(-8..=48).contains(&value) {
+                    bail!(
+                        "collision_shapes shape {shape_id} box {box_id} `{field}` {value} is outside [-8, 48]"
+                    );
+                }
+                Ok(value as i8)
+            };
+            let min_x = coordinate("min_x")?;
+            let min_y = coordinate("min_y")?;
+            let min_z = coordinate("min_z")?;
+            let max_x = coordinate("max_x")?;
+            let max_y = coordinate("max_y")?;
+            let max_z = coordinate("max_z")?;
+            if min_x >= max_x || min_y >= max_y || min_z >= max_z {
+                bail!("collision_shapes shape {shape_id} box {box_id} is empty or inverted");
+            }
+            boxes.push(CollisionBox {
+                min_x,
+                min_y,
+                min_z,
+                max_x,
+                max_y,
+                max_z,
+            });
+        }
+        shape_records.push(CollisionShape {
+            start,
+            length: shape_boxes.len() as u8,
+        });
+    }
+
+    let ids = ids_value
+        .as_array()
+        .context("`collision_shape_ids` must be an array")?;
+    if ids.len() != state_count as usize {
+        bail!(
+            "collision_shape_ids has {} entries but state_count is {state_count}",
+            ids.len()
+        );
+    }
+    let mut shape_ids = Vec::with_capacity(ids.len());
+    for (state_id, value) in ids.iter().enumerate() {
+        let id = value
+            .as_i64()
+            .with_context(|| format!("collision_shape_ids state {state_id} must be an integer"))?;
+        let dynamic = dynamic_shape_at(dynamic_shape_runs, state_id as u32);
+        if dynamic {
+            if id != -1 {
+                bail!(
+                    "collision_shape_ids state {state_id} is dynamic but has shape id {id}; dynamic states must use -1"
+                );
+            }
+            shape_ids.push(u16::MAX);
+        } else {
+            let id = usize::try_from(id).with_context(|| {
+                format!("collision_shape_ids state {state_id} has negative static shape id {id}")
+            })?;
+            if id >= shape_records.len() {
+                bail!(
+                    "collision_shape_ids state {state_id} shape id {id} is outside {} geometries",
+                    shape_records.len()
+                );
+            }
+            shape_ids.push(id as u16);
+        }
+    }
+    Ok((boxes, shape_records, shape_ids))
+}
+
+fn dynamic_shape_at(runs: &[DynamicShapeRun], state_id: u32) -> bool {
+    runs.iter().find_map(|run| {
+        (state_id >= run.start && state_id < run.start + run.length).then_some(run.dynamic)
+    }) == Some(true)
 }
 
 /// Link the fixture to its pinned provenance: the fixture must match the sha256
@@ -708,6 +879,9 @@ struct RenderInput<'a> {
     collision_face_runs: &'a [CollisionFaceRun],
     occlusion_face_runs: &'a [FaceSturdyRun],
     dynamic_shape_runs: &'a [DynamicShapeRun],
+    collision_boxes: &'a [CollisionBox],
+    collision_shapes: &'a [CollisionShape],
+    collision_shape_ids: &'a [u16],
     dynamic_fixtures: &'a [DynamicFixture],
     source: &'a SourceProvenance,
 }
@@ -722,6 +896,9 @@ fn render(input: RenderInput<'_>) -> String {
         collision_face_runs,
         occlusion_face_runs,
         dynamic_shape_runs,
+        collision_boxes,
+        collision_shapes,
+        collision_shape_ids,
         dynamic_fixtures,
         source,
     } = input;
@@ -974,6 +1151,73 @@ fn render(input: RenderInput<'_>) -> String {
          }\n\n",
     );
 
+    out.push_str(
+        "/// Primitive coordinates for exact static `getCollisionShape` boxes.\n\
+         /// Values are signed 1/32 block units; this table has no world-geometry dependency.\n\
+         #[derive(Clone, Copy, Debug, PartialEq, Eq)]\n\
+         pub struct StaticCollisionBox {\n\
+             pub min_x: i8,\n\
+             pub min_y: i8,\n\
+             pub min_z: i8,\n\
+             pub max_x: i8,\n\
+             pub max_y: i8,\n\
+             pub max_z: i8,\n\
+         }\n\
+\
+         #[rustfmt::skip]\n\
+         pub static STATIC_COLLISION_BOXES: &[StaticCollisionBox] = &[\n",
+    );
+    for shape in collision_boxes {
+        out.push_str(&format!(
+            "    StaticCollisionBox {{ min_x: {}, min_y: {}, min_z: {}, max_x: {}, max_y: {}, max_z: {} }},\n",
+            shape.min_x, shape.min_y, shape.min_z, shape.max_x, shape.max_y, shape.max_z
+        ));
+    }
+    out.push_str("];\n\n");
+    out.push_str(
+        "/// A geometry is a contiguous range in `STATIC_COLLISION_BOXES`.\n\
+         #[rustfmt::skip]\n\
+         pub static STATIC_COLLISION_SHAPES: &[(u16, u8)] = &[\n",
+    );
+    for shape in collision_shapes {
+        out.push_str(&format!("    ({}, {}),\n", shape.start, shape.length));
+    }
+    out.push_str("];\n\n");
+    out.push_str(
+        "/// Per-StateId static collision geometry. `u16::MAX` marks a dynamic\n\
+         /// state; callers must reject `has_dynamic_shape` before using this table.\n\
+         #[rustfmt::skip]\n\
+         pub static STATIC_COLLISION_SHAPE_IDS: &[u16] = &[\n",
+    );
+    for ids in collision_shape_ids.chunks(16) {
+        out.push_str("    ");
+        for (index, id) in ids.iter().enumerate() {
+            if index != 0 {
+                out.push_str(", ");
+            }
+            if *id == u16::MAX {
+                out.push_str("u16::MAX");
+            } else {
+                out.push_str(&id.to_string());
+            }
+        }
+        out.push_str(",\n");
+    }
+    out.push_str("];\n\n");
+    out.push_str(
+        "/// Resolve exact static collision boxes for a non-dynamic state.\n\
+         pub fn static_collision_shape_of(id: StateId) -> Option<&'static [StaticCollisionBox]> {\n\
+             if has_dynamic_shape(id) {\n\
+                 return None;\n\
+             }\n\
+             let shape_id = *STATIC_COLLISION_SHAPE_IDS.get(id.0 as usize)? as usize;\n\
+             let (start, length) = *STATIC_COLLISION_SHAPES.get(shape_id)?;\n\
+             Some(&STATIC_COLLISION_BOXES[start as usize..start as usize + length as usize])\n\
+         }\n\
+\
+",
+    );
+
     out.push_str("/// Pinned dynamic-shape fixtures emitted by the Paper probe.\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub struct DynamicShapeFixture {\n    pub name: &'static str,\n    pub block: &'static str,\n    pub state_id: StateId,\n    pub dynamic: bool,\n    pub support_full: u8,\n    pub support_center: u8,\n    pub support_rigid: u8,\n    pub collision_full: u8,\n    pub occlusion_full: u8,\n}\n\npub static DYNAMIC_SHAPE_FIXTURES: &[DynamicShapeFixture] = &[\n");
     for fixture in dynamic_fixtures {
         out.push_str(&format!(
@@ -1017,10 +1261,10 @@ fn render(input: RenderInput<'_>) -> String {
              }\n\
              let (start, len, dynamic) = DYNAMIC_SHAPE_RUNS[idx - 1];\n\
              if id < start as u32 + len as u32 { dynamic } else { DYNAMIC_SHAPE_RUNS[0].2 }\n\
-         }\n\n",
+         }\n",
     );
 
-    out
+    out.trim_end_matches('\n').to_owned() + "\n"
 }
 
 #[cfg(test)]
@@ -1060,6 +1304,12 @@ mod tests {
                 {"start": 0, "length": 2, "dynamic": false},
                 {"start": 2, "length": 3, "dynamic": true},
             ],
+            "collision_shapes": [
+                {"boxes": []},
+                {"boxes": [{"min_x": 0, "min_y": 0, "min_z": 0,
+                            "max_x": 32, "max_y": 32, "max_z": 32}]}
+            ],
+            "collision_shape_ids": [0, 0, -1, -1, -1],
             "dynamic_fixtures": [
                 {"name": "test_dynamic", "block": "minecraft:test", "state_id": 2, "dynamic": true,
                  "support_full": 63, "support_center": 63, "support_rigid": 63,
@@ -1078,6 +1328,9 @@ mod tests {
             collision_face_runs,
             occlusion_face_runs,
             dynamic_shape_runs,
+            _collision_boxes,
+            _collision_shapes,
+            _collision_shape_ids,
             dynamic_fixtures,
         ) = validate(valid_root()).unwrap();
         assert_eq!(runs.len(), 2);
@@ -1089,6 +1342,35 @@ mod tests {
         assert_eq!(occlusion_face_runs[1].mask, 63);
         assert!(dynamic_shape_runs[1].dynamic);
         assert_eq!(dynamic_fixtures[0].support_full, 63);
+    }
+
+    #[test]
+    fn dynamic_state_must_not_have_static_geometry() {
+        let mut v = valid_root();
+        v["collision_shape_ids"][2] = serde_json::json!(0);
+        let err = validate(v).unwrap_err();
+        assert!(
+            err.to_string().contains("dynamic but has shape id"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn collision_shape_zero_must_be_empty() {
+        let mut v = valid_root();
+        v["collision_shapes"][0]["boxes"] = serde_json::json!([{
+            "min_x": 0,
+            "min_y": 0,
+            "min_z": 0,
+            "max_x": 1,
+            "max_y": 1,
+            "max_z": 1
+        }]);
+        let err = validate(v).unwrap_err();
+        assert!(
+            err.to_string().contains("shape 0 must be the empty shape"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -1318,13 +1600,17 @@ mod tests {
             "dynamic_shape_runs": [
                 {"start": 0, "length": 5, "dynamic": false},
             ],
+            "collision_shapes": [
+                {"boxes": []}
+            ],
+            "collision_shape_ids": [0, 0, 0, 0, 0],
             "dynamic_fixtures": [
                 {"name": "test_dynamic", "block": "minecraft:test", "state_id": 0, "dynamic": true,
                  "support_full": 0, "support_center": 0, "support_rigid": 0,
                  "collision_full": 0, "occlusion_full": 0}
             ],
         });
-        let (runs, _, _, _, _, _, _, _) = validate(v).unwrap();
+        let (runs, _, _, _, _, _, _, _, _, _, _) = validate(v).unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].length, 5);
     }
@@ -1464,6 +1750,19 @@ mod tests {
             length: 3,
             dynamic: false,
         }];
+        let collision_boxes = vec![CollisionBox {
+            min_x: 0,
+            min_y: 0,
+            min_z: 0,
+            max_x: 32,
+            max_y: 32,
+            max_z: 32,
+        }];
+        let collision_shapes = vec![CollisionShape {
+            start: 0,
+            length: 1,
+        }];
+        let collision_shape_ids = vec![0, 0, 0];
         let dynamic_fixtures = vec![DynamicFixture {
             name: "test".to_string(),
             block: "minecraft:test".to_string(),
@@ -1483,6 +1782,9 @@ mod tests {
             collision_face_runs: &collision_face_runs,
             occlusion_face_runs: &occlusion_face_runs,
             dynamic_shape_runs: &dynamic_shape_runs,
+            collision_boxes: &collision_boxes,
+            collision_shapes: &collision_shapes,
+            collision_shape_ids: &collision_shape_ids,
             dynamic_fixtures: &dynamic_fixtures,
             source: &source,
         };
@@ -1505,7 +1807,7 @@ mod tests {
         let repo_root = crate::extract::find_repo_root().unwrap();
         let json = fs::read_to_string(default_input(&repo_root)).unwrap();
         let root = crate::registries::parse_strict(&json).unwrap();
-        let (runs, _, _, _, _, _, _, _) = validate(root).unwrap();
+        let (runs, _, _, _, _, _, _, _, _, _, _) = validate(root).unwrap();
         let state_count: u64 = runs.iter().map(|r| r.length as u64).sum();
         assert_eq!(state_count, 32366, "registry state count drifted");
 
@@ -1549,7 +1851,7 @@ mod tests {
         let repo_root = crate::extract::find_repo_root().unwrap();
         let json = fs::read_to_string(default_input(&repo_root)).unwrap();
         let root = crate::registries::parse_strict(&json).unwrap();
-        let (_, runs, _, _, _, _, _, _) = validate(root).unwrap();
+        let (_, runs, _, _, _, _, _, _, _, _, _) = validate(root).unwrap();
         let state_count: u64 = runs.iter().map(|r| r.length as u64).sum();
         assert_eq!(state_count, 32366, "registry state count drifted");
 
@@ -1586,7 +1888,7 @@ mod tests {
         let repo_root = crate::extract::find_repo_root().unwrap();
         let json = fs::read_to_string(default_input(&repo_root)).unwrap();
         let root = crate::registries::parse_strict(&json).unwrap();
-        let (_, _, runs, _, _, _, _, _) = validate(root).unwrap();
+        let (_, _, runs, _, _, _, _, _, _, _, _) = validate(root).unwrap();
         let state_count: u64 = runs.iter().map(|r| r.length as u64).sum();
         assert_eq!(state_count, 32366, "registry state count drifted");
 
@@ -1620,12 +1922,53 @@ mod tests {
     /// count (`BLOCK_STATE_COUNT`), so a behavior dump from a differently-sized
     /// registry fails `generate` even when it is internally self-consistent.
     #[test]
+    fn static_collision_fixture_has_pinned_non_vacuous_coverage() {
+        let repo_root = crate::extract::find_repo_root().unwrap();
+        let json = fs::read_to_string(default_input(&repo_root)).unwrap();
+        let root = crate::registries::parse_strict(&json).unwrap();
+        let (_, _, _, _, _, _, dynamic_runs, boxes, shapes, shape_ids, _) = validate(root).unwrap();
+        assert_eq!(shapes.len(), 318, "Paper static geometry dedup drifted");
+        assert!(
+            shapes[0].length == 0,
+            "geometry zero must be the empty shape"
+        );
+        assert_eq!(
+            shapes.iter().filter(|shape| shape.length != 0).count(),
+            317,
+            "static geometry table must retain all non-empty signatures"
+        );
+        assert_eq!(shape_ids.len(), 32366);
+        assert_eq!(
+            shape_ids.iter().filter(|id| **id == u16::MAX).count(),
+            199,
+            "all dynamic states must be excluded from static lookup"
+        );
+        assert_eq!(
+            shape_ids.iter().filter(|id| **id != u16::MAX).count(),
+            32167
+        );
+        assert_eq!(
+            dynamic_runs
+                .iter()
+                .filter(|run| run.dynamic)
+                .map(|run| run.length)
+                .sum::<u32>(),
+            199
+        );
+        assert!(
+            boxes.len() > 317,
+            "non-empty geometries must carry their boxes"
+        );
+        assert!(shapes.iter().all(|shape| shape.length <= 15));
+    }
+
+    #[test]
     fn real_fixture_state_count_matches_registry() {
         let repo_root = crate::extract::find_repo_root().unwrap();
         assert_eq!(registry_state_count(&repo_root).unwrap(), 32366);
         let json = fs::read_to_string(default_input(&repo_root)).unwrap();
         let root = crate::registries::parse_strict(&json).unwrap();
-        let (runs, _, _, _, _, _, _, _) = validate(root).unwrap();
+        let (runs, _, _, _, _, _, _, _, _, _, _) = validate(root).unwrap();
         check_state_count_matches(&runs, 32366).unwrap();
     }
 }
