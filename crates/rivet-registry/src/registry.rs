@@ -41,7 +41,7 @@ use rivet_serialization::functions::{DecoderFn, Fn1};
 use rivet_serialization::lifecycle::Lifecycle;
 use rivet_util::random::RandomSource;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -83,7 +83,7 @@ pub(crate) struct RegistryParts<T> {
     /// Mutable-phase state not retained by a frozen registry. Keeping it in
     /// the transfer bundle keeps ownership recovery lossless.
     pub(crate) intrusive: Option<HashMap<usize, Arc<T>>>,
-    pub(crate) pending_unbound: HashMap<ResourceKey<T>, HolderId>,
+    pub(crate) pending_unbound: HashSet<ResourceKey<T>>,
 }
 
 /// `net.minecraft.core.Registry<T>` — the frozen registry surface.
@@ -128,6 +128,10 @@ pub struct Registry<T> {
     /// Frozen named tag sets (`HolderSet.Named<T>` members; #126 widens the
     /// surface, the id space is already the contract).
     tags: HashMap<TagKey<T>, Vec<HolderId>>,
+    /// Whether this registry was created with intrusive-holder support. The
+    /// frozen phase has no pending map, but the mode must survive a round trip
+    /// through `into_builder`.
+    intrusive_holders: bool,
 }
 
 impl<T> Registry<T> {
@@ -147,7 +151,7 @@ impl<T> Registry<T> {
             default_id,
             default_key,
             tags,
-            intrusive: _,
+            intrusive,
             pending_unbound: _,
         }: RegistryParts<T>,
     ) -> Self {
@@ -164,6 +168,7 @@ impl<T> Registry<T> {
             default_id,
             default_key,
             tags,
+            intrusive_holders: intrusive.is_some(),
         }
     }
 
@@ -185,6 +190,7 @@ impl<T> Registry<T> {
             default_id,
             default_key,
             tags,
+            intrusive_holders,
         } = self;
         crate::builder::RegistryBuilder::from_frozen_parts(RegistryParts {
             key,
@@ -199,8 +205,8 @@ impl<T> Registry<T> {
             default_id,
             default_key,
             tags,
-            intrusive: None,
-            pending_unbound: HashMap::new(),
+            intrusive: intrusive_holders.then(HashMap::new),
+            pending_unbound: HashSet::new(),
         })
     }
 
