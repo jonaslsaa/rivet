@@ -56,6 +56,8 @@
 //! still read as dead code to the compiler, so the allow stays.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
+
 use crate::server::level::level_chunk::{BiomeId as ServerBiomeId, StateId, StructureKey};
 use rivet_registry::block_state::BlockState;
 use rivet_world::chunk::chunk_access::ChunkAccess;
@@ -290,6 +292,21 @@ impl SectionSnapshot {
     }
 }
 
+/// The post-run light state for one cached neighbour. Java's cache entries
+/// alias the neighbour's live nibbles, so `updateVisible` publishes mutations
+/// to that chunk even though `light()` calls `setNibbles` only for the center.
+/// Rust snapshots must carry those visible nibbles back explicitly before the
+/// provider restores the owned runtime chunk.
+#[derive(Default)]
+pub(crate) struct NeighborLightUpdate {
+    /// Only source-owned sections that still have a cache entry are returned.
+    /// Skylight's rewrite intentionally removes null sections and null-section
+    /// propagation can create scratch entries; neither should replace the
+    /// neighbour's original nibble array.
+    pub(crate) nibbles: Vec<(usize, SwmrNibbleArray)>,
+    pub(crate) emptiness_map: Option<Vec<bool>>,
+}
+
 /// The sky light engine — `SkyStarLightEngine` on the light-chunk path. Owns
 /// the per-run scratch caches (chunk/section/nibble/emptiness arrays, the two
 /// FIFO queues, the null-propagation check) exactly as the Java instance does;
@@ -315,6 +332,16 @@ pub(crate) struct SkyStarLightEngine {
     section_cache: Vec<Option<SectionSnapshot>>,
     /// `nibbleCache`, indexed like `sectionCache`.
     nibble_cache: Vec<Option<SwmrNibbleArray>>,
+    /// Whether each cached nibble originated from an array supplied by its
+    /// source chunk. `initNibble(..., initRemovedNibbles=true)` creates a
+    /// scratch array when a null entry is needed for propagation; Java never
+    /// writes that replacement back to a neighbour, so those entries must not
+    /// be published during the provider's explicit write-back.
+    nibble_cache_writeback: Vec<bool>,
+    /// A source nibble removed by `rewriteNibbleCacheForSkylight`. Java calls
+    /// `updateVisible` on the source object before dropping its cache entry, so
+    /// retain that post-publication value for the provider's neighbour write-back.
+    dropped_nibble_writeback: Vec<Option<SwmrNibbleArray>>,
     /// `chunkCache`, indexed `x + 5*z + chunkIndexOffset`. Java holds the
     /// chunk reference; the only engine read is the presence check in
     /// `initNibble`, so the cache is a membership flag.
@@ -363,6 +390,10 @@ pub(crate) struct SkyStarLightEngine {
     /// `setEmptinessMap(chunk, to)` write-back — the recomputed sky-emptiness
     /// map, surfaced for the provider to publish onto the chunk.
     pending_emptiness_map: Option<Vec<bool>>,
+    /// Cache mutations for owned neighbours. Java's nibble cache aliases the
+    /// live neighbour arrays; the Rust cache owns clones, so the provider must
+    /// publish these states before it restores the taken chunks.
+    pending_neighbor_updates: HashMap<(i32, i32), NeighborLightUpdate>,
 }
 
 impl SkyStarLightEngine {
@@ -385,6 +416,8 @@ impl SkyStarLightEngine {
             max_section,
             section_cache: (0..min_array_size).map(|_| None).collect(),
             nibble_cache: (0..min_array_size).map(|_| None).collect(),
+            nibble_cache_writeback: vec![false; min_array_size],
+            dropped_nibble_writeback: (0..min_array_size).map(|_| None).collect(),
             chunk_cache: vec![false; 25],
             emptiness_map_cache: (0..25).map(|_| None).collect(),
             null_propagation_check_cache: vec![false; light_section_count],
@@ -406,6 +439,7 @@ impl SkyStarLightEngine {
             is_client_side: false,
             pending_nibbles: None,
             pending_emptiness_map: None,
+            pending_neighbor_updates: HashMap::new(),
         }
     }
 
@@ -577,6 +611,11 @@ impl SkyStarLightEngine {
     ) {
         let idx = cache_index(chunk_x, chunk_y, chunk_z, self.chunk_section_index_offset);
         self.nibble_cache[idx] = nibble;
+        // This setter is also used for scratch arrays created by
+        // `initNibble`. Those arrays do not belong to the source chunk and
+        // therefore are not eligible for neighbour write-back. The initial
+        // source population below marks its aliases explicitly.
+        self.nibble_cache_writeback[idx] = false;
     }
 
     fn set_nibbles_for_chunk_in_cache(
@@ -586,8 +625,13 @@ impl SkyStarLightEngine {
         nibbles: &[SwmrNibbleArray],
     ) {
         for (index, cy) in (self.min_light_section..=self.max_light_section).enumerate() {
-            let nibble = nibbles.get(index).cloned();
-            self.set_nibble_in_cache(chunk_x, cy, chunk_z, nibble);
+            let idx = cache_index(chunk_x, cy, chunk_z, self.chunk_section_index_offset);
+            self.nibble_cache[idx] = nibbles.get(index).cloned();
+            self.dropped_nibble_writeback[idx] = None;
+            // A cached source nibble can be published back to that chunk. A
+            // missing source section is represented by no alias, even when a
+            // later null-propagation pass creates a scratch nibble.
+            self.nibble_cache_writeback[idx] = self.nibble_cache[idx].is_some();
         }
     }
 
@@ -746,6 +790,15 @@ impl SkyStarLightEngine {
         self.pending_emptiness_map.take()
     }
 
+    /// Take the visible light mutations for cached neighbours. The provider
+    /// applies these while the neighbours are still in its transactional take
+    /// set, before returning ownership to the caller's storage.
+    pub(crate) fn take_pending_neighbor_updates(
+        &mut self,
+    ) -> HashMap<(i32, i32), NeighborLightUpdate> {
+        std::mem::take(&mut self.pending_neighbor_updates)
+    }
+
     /// `initNibble(chunkX, chunkY, chunkZ, extrude, initRemovedNibbles)` —
     /// `SkyStarLightEngine.initNibble`.
     fn init_nibble(
@@ -864,27 +917,33 @@ impl SkyStarLightEngine {
     }
 
     /// `rewriteNibbleCacheForSkylight(chunk)` — stop propagation through null
-    /// sections by dropping them from the cache. The dropped nibbles are null
-    /// (updating state), so `updateVisible` would publish a null visible state;
-    /// dropping the cache entry has the same effect for this run. The center
-    /// chunk's dropped light sections are recorded in `nulled_sections` — the
-    /// write-back in `light` substitutes the original null nibble for them
-    /// (Java's `setNibbles` writes the original array, so a section the rewrite
-    /// nulled and `checkNullSection` re-created never reaches the chunk).
+    /// sections by dropping them from the cache. Java first calls
+    /// `updateVisible` on every dropped source object, so retain that published
+    /// value for neighbour write-back; a scratch nibble created later by
+    /// `initNibble(..., initRemovedNibbles=true)` still has no source owner and
+    /// is never published. The center chunk's dropped light sections are
+    /// recorded in `nulled_sections` — the write-back in `light` substitutes
+    /// the original null nibble for them (Java's `setNibbles` writes the
+    /// original array, so a section the rewrite nulled and `checkNullSection`
+    /// re-created never reaches the chunk).
     fn rewrite_nibble_cache_for_skylight(&mut self, chunk_x: i32, chunk_z: i32) {
         let y_divisor = self.light_section_count + 2;
         for index in 0..self.nibble_cache.len() {
-            let is_null = match self.nibble_cache[index].as_ref() {
-                Some(nibble) => nibble.is_null_nibble_updating(),
-                None => false,
+            let Some(mut nibble) = self.nibble_cache[index].take() else {
+                continue;
             };
-            if !is_null {
+            if !nibble.is_null_nibble_updating() {
+                self.nibble_cache[index] = Some(nibble);
                 continue;
             }
+            nibble.update_visible();
+            if self.nibble_cache_writeback[index] {
+                self.dropped_nibble_writeback[index] = Some(nibble.clone());
+            }
+            self.nibble_cache_writeback[index] = false;
             let cx = ((index % 5) as i32).wrapping_sub(self.chunk_offset_x);
             let cz = (((index / 5) % 5) as i32).wrapping_sub(self.chunk_offset_z);
             let cy = (((index / 25) % y_divisor) as i32).wrapping_sub(self.chunk_offset_y);
-            self.nibble_cache[index] = None;
             if cx == chunk_x && cz == chunk_z {
                 let rel = (cy.wrapping_sub(self.min_light_section)) as usize;
                 if rel < self.nulled_sections.len() {
@@ -1703,22 +1762,28 @@ impl SkyStarLightEngine {
     ) {
         let chunk_x = chunk.get_pos().x();
         let chunk_z = chunk.get_pos().z();
-        self.nulled_sections.iter_mut().for_each(|b| *b = false);
-        self.setup_caches(
-            provider,
-            chunk_x.wrapping_mul(16).wrapping_add(7),
-            128,
-            chunk_z.wrapping_mul(16).wrapping_add(7),
-            true,
-            true,
-        );
+        // A previous successful call normally has already handed these values
+        // to the provider. Clear them defensively so a setup panic or a caller
+        // retry can never publish an older run's result.
+        self.pending_nibbles = None;
+        self.pending_emptiness_map = None;
+        self.pending_neighbor_updates.clear();
 
-        // Java's `try { ... } finally { destroyCaches(); }`: the body publishes
-        // and writes back the computed nibbles, and the caches are always
-        // cleared afterwards — even when the body panics (a `catch_unwind` +
-        // `resume_unwind` is the finally-equivalent). `setup_caches` above is
-        // outside the finally exactly as in Java.
+        // Java's `try { ... } finally { destroyCaches(); }` covers the entire
+        // light operation. In particular, a storage callback can panic while
+        // `setupCaches` is resolving a neighbour; that path must not leave the
+        // old run's cache membership visible to the next attempt.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.nulled_sections.fill(false);
+            self.setup_caches(
+                provider,
+                chunk_x.wrapping_mul(16).wrapping_add(7),
+                128,
+                chunk_z.wrapping_mul(16).wrapping_add(7),
+                true,
+                true,
+            );
+
             let nibbles = get_filled_empty_light(
                 (self
                     .max_light_section
@@ -1741,10 +1806,11 @@ impl SkyStarLightEngine {
             }
             self.light_chunk_impl(chunk, needs_edge_checks);
             // `setNibbles(chunk, nibbles)` then `updateVisible(lightAccess)`:
-            // see the doc above — publish the cache clones, then hand the
-            // mutated ones out, substituting the original null for the
-            // nulled-out sections.
+            // publish every cache clone first. Center nibbles are returned to
+            // the caller, while neighbour clones are returned separately so
+            // the provider can write them back before restoration.
             self.update_visible();
+            self.pending_neighbor_updates = self.collect_neighbor_updates(chunk_x, chunk_z);
             let mut computed = Vec::with_capacity(nibbles.len());
             for (index, cy) in (self.min_light_section..=self.max_light_section).enumerate() {
                 if self.nulled_sections[index] {
@@ -1759,6 +1825,13 @@ impl SkyStarLightEngine {
             }
             self.set_nibbles_on_surface(computed);
         }));
+        if result.is_err() {
+            // A failed run has no publishable output. The cache cleanup below
+            // is still performed before the original panic resumes.
+            self.pending_nibbles = None;
+            self.pending_emptiness_map = None;
+            self.pending_neighbor_updates.clear();
+        }
         self.destroy_caches();
         if let Err(payload) = result {
             std::panic::resume_unwind(payload);
@@ -1893,12 +1966,73 @@ impl SkyStarLightEngine {
         }
     }
 
+    /// Snapshot the post-`updateVisible` state of every cached neighbour. A
+    /// radius-two cache has only an emptiness map; a radius-one cache has the
+    /// complete nibble array as well. Missing cache sections are deliberately
+    /// not published, preserving the malformed-input panic/retry boundary.
+    fn collect_neighbor_updates(
+        &self,
+        center_x: i32,
+        center_z: i32,
+    ) -> HashMap<(i32, i32), NeighborLightUpdate> {
+        let mut updates = HashMap::new();
+        for dz in -2i32..=2 {
+            for dx in -2i32..=2 {
+                if dx == 0 && dz == 0 {
+                    continue;
+                }
+                let chunk_x = center_x.wrapping_add(dx);
+                let chunk_z = center_z.wrapping_add(dz);
+                if !self.is_chunk_in_cache(chunk_x, chunk_z) {
+                    continue;
+                }
+
+                let nibbles = (self.min_light_section..=self.max_light_section)
+                    .enumerate()
+                    .filter_map(|(index, chunk_y)| {
+                        let cache_slot =
+                            cache_index(chunk_x, chunk_y, chunk_z, self.chunk_section_index_offset);
+                        if !self.nibble_cache_writeback[cache_slot] {
+                            return self.dropped_nibble_writeback[cache_slot]
+                                .as_ref()
+                                .cloned()
+                                .map(|nibble| (index, nibble));
+                        }
+                        self.get_nibble_from_cache(chunk_x, chunk_y, chunk_z)
+                            .or(self.dropped_nibble_writeback[cache_slot].as_ref())
+                            .cloned()
+                            .map(|nibble| (index, nibble))
+                    })
+                    .collect::<Vec<_>>();
+                let emptiness_map = self.get_emptiness_map(chunk_x, chunk_z).cloned();
+                if !nibbles.is_empty() || emptiness_map.is_some() {
+                    updates.insert(
+                        (chunk_x, chunk_z),
+                        NeighborLightUpdate {
+                            nibbles,
+                            emptiness_map,
+                        },
+                    );
+                }
+            }
+        }
+        updates
+    }
+
     /// `destroyCaches()` — Java's finally-clear of every cache between runs.
     fn destroy_caches(&mut self) {
         self.section_cache.iter_mut().for_each(|s| *s = None);
         self.nibble_cache.iter_mut().for_each(|s| *s = None);
+        self.nibble_cache_writeback.fill(false);
+        self.dropped_nibble_writeback
+            .iter_mut()
+            .for_each(|s| *s = None);
         self.chunk_cache.iter_mut().for_each(|c| *c = false);
         self.emptiness_map_cache.iter_mut().for_each(|s| *s = None);
+        self.null_propagation_check_cache.fill(false);
+        self.nulled_sections.fill(false);
+        self.increase_queue_initial_length = 0;
+        self.decrease_queue_initial_length = 0;
     }
 
     /// `#[cfg(test)]` probe for the provider's panic-path tests: whether the
@@ -1909,8 +2043,20 @@ impl SkyStarLightEngine {
     pub(crate) fn per_run_caches_are_clear(&self) -> bool {
         self.section_cache.iter().all(Option::is_none)
             && self.nibble_cache.iter().all(Option::is_none)
+            && self
+                .nibble_cache_writeback
+                .iter()
+                .all(|&writeback| !writeback)
+            && self.dropped_nibble_writeback.iter().all(Option::is_none)
             && self.chunk_cache.iter().all(|&present| !present)
             && self.emptiness_map_cache.iter().all(Option::is_none)
+            && self
+                .null_propagation_check_cache
+                .iter()
+                .all(|&checked| !checked)
+            && self.nulled_sections.iter().all(|&nulled| !nulled)
+            && self.increase_queue_initial_length == 0
+            && self.decrease_queue_initial_length == 0
     }
 }
 

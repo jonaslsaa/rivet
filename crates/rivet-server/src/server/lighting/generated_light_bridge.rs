@@ -1150,14 +1150,19 @@ mod tests {
     fn workspace_context(
         workspace: GeneratedLightWorkspace,
     ) -> WorldGenContext<BlockState, WorldgenBiomeId, StructureKey, GeneratedLightStorage> {
-        WorldGenContext::new(
+        let (context, detached) = WorldGenContext::new(
             |_c: &mut GeneratedProto| {},
             |_c: &mut GeneratedProto| {},
             |_c: &mut GeneratedProto| {},
             |_c: &mut GeneratedProto| {},
             |_c: &mut GeneratedProto| Ok(()),
         )
-        .with_generated_light_task(workspace)
+        .with_generated_light_task(workspace);
+        assert!(
+            detached.is_none(),
+            "a fresh context cannot detach an existing generated-light workspace"
+        );
+        context
     }
 
     fn all_neighbor_storage(center: ChunkPos) -> GeneratedLightStorage {
@@ -1309,6 +1314,33 @@ mod tests {
     }
 
     #[test]
+    fn builder_workspace_replacement_returns_previous_owned_storage() {
+        let (mut ctx, detached) = WorldGenContext::new(
+            |_c: &mut GeneratedProto| {},
+            |_c: &mut GeneratedProto| {},
+            |_c: &mut GeneratedProto| {},
+            |_c: &mut GeneratedProto| {},
+            |_c: &mut GeneratedProto| Ok(()),
+        )
+        .with_generated_light_task(workspace_with_all_neighbors(ChunkPos::ZERO));
+        assert!(detached.is_none());
+
+        let (ctx_after_replacement, detached) =
+            ctx.with_generated_light_task(workspace_with_all_neighbors(ChunkPos::ZERO));
+        ctx = ctx_after_replacement;
+        assert_eq!(
+            detached.expect("builder replacement returns storage").len(),
+            24
+        );
+        assert_eq!(
+            ctx.take_generated_light_storage()
+                .expect("replacement task remains owned")
+                .len(),
+            24
+        );
+    }
+
+    #[test]
     fn generated_workspace_teardown_returns_owned_storage() {
         let ctx = workspace_context(workspace_with_all_neighbors(ChunkPos::ZERO));
         let storage = ctx
@@ -1321,12 +1353,10 @@ mod tests {
     fn generated_light_task_panic_still_returns_owned_storage() {
         use rivet_world::chunk::status::GENERATION_PYRAMID;
 
-        let mut ctx: WorldGenContext<
-            BlockState,
-            WorldgenBiomeId,
-            StructureKey,
-            GeneratedLightStorage,
-        > = WorldGenContext::new(
+        let (mut ctx, detached): (
+            WorldGenContext<BlockState, WorldgenBiomeId, StructureKey, GeneratedLightStorage>,
+            Option<GeneratedLightStorage>,
+        ) = WorldGenContext::new(
             |_c: &mut GeneratedProto| {},
             |_c: &mut GeneratedProto| {},
             |_c: &mut GeneratedProto| {},
@@ -1336,6 +1366,7 @@ mod tests {
         .with_generated_light_task(PanickingGeneratedLightTask {
             storage: Some(all_neighbor_storage(ChunkPos::ZERO)),
         });
+        assert!(detached.is_none());
         let mut chunk = generated_chunk();
         chunk.set_persisted_status(ChunkStatus::InitializeLight);
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

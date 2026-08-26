@@ -581,6 +581,11 @@ where
         &mut self,
         task: impl GeneratedLightTask<T, B, S, R>,
     ) -> Option<R> {
+        // Allocate the replacement wrapper before extracting the old task. If
+        // allocation panics, the current task and its runtime owner stay in the
+        // context. Once extraction succeeds, installing the already-allocated
+        // wrapper is infallible, so the detached storage has a live return path.
+        let replacement = Box::new(task);
         // Extract while the old task is still in the context. If a custom task
         // panics during extraction, the context retains it for a later recovery
         // attempt instead of dropping its runtime owner during unwinding.
@@ -588,7 +593,7 @@ where
             .generated_light
             .as_mut()
             .map(|task| task.take_owned_runtime_storage());
-        self.generated_light = Some(Box::new(task));
+        self.generated_light = Some(replacement);
         detached.flatten()
     }
 
@@ -621,9 +626,17 @@ where
     /// LIGHT implementation in one tick-thread-owned value. The generation
     /// preflight still requires [`GeneratedLightTask::has_usable_engine`]
     /// before it will run `INITIALIZE_LIGHT`.
-    pub fn with_generated_light_task(mut self, task: impl GeneratedLightTask<T, B, S, R>) -> Self {
-        let _ = self.attach_generated_light_task(task);
-        self
+    ///
+    /// The returned storage is from a task that was already attached, if any.
+    /// A builder-style replacement cannot silently drop a finite runtime
+    /// workspace: callers must either hand the returned storage to its next
+    /// owner or explicitly discard it under their own ownership boundary.
+    pub fn with_generated_light_task(
+        mut self,
+        task: impl GeneratedLightTask<T, B, S, R>,
+    ) -> (Self, Option<R>) {
+        let detached = self.attach_generated_light_task(task);
+        (self, detached)
     }
 
     /// Attaches the `generateSpawn` seam (Java's `context.generator().
