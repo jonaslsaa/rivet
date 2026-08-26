@@ -16,6 +16,7 @@
 pub mod chunk_level;
 pub mod chunk_map;
 pub mod chunk_result;
+pub mod chunk_storage_worker;
 pub mod chunk_tracking_view;
 pub mod entity_id_allocator;
 pub mod full_chunk_status;
