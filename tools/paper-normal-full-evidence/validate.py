@@ -60,6 +60,15 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def probe_inputs_sha256(source_bytes: bytes, plugin_bytes: bytes) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"PaperNormalFullProbe.java\0")
+    digest.update(source_bytes)
+    digest.update(b"\0plugin.yml\0")
+    digest.update(plugin_bytes)
+    return digest.hexdigest()
+
+
 def jar_manifest(path: Path) -> dict[str, str]:
     try:
         with zipfile.ZipFile(path) as archive:
@@ -82,8 +91,21 @@ def java_seed(seed: str) -> int:
 
 
 def validate_paper_source(source_root: Path) -> None:
-    if source_root.name != "Paper" or not source_root.is_dir() or source_root.is_symlink():
-        raise Failed("Paper source provenance does not identify a real Paper tree")
+    if (
+        not source_root.is_absolute()
+        or source_root != source_root.resolve()
+        or not source_root.is_dir()
+        or source_root.is_symlink()
+    ):
+        raise Failed("Paper source provenance does not identify a canonical Paper tree")
+    top_level = subprocess.run(
+        ["git", "-C", str(source_root), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if top_level.returncode != 0 or Path(top_level.stdout.strip()).resolve() != source_root:
+        raise Failed("Paper source provenance does not identify the pinned checkout root")
     revision = subprocess.run(["git", "-C", str(source_root), "rev-parse", "HEAD"], capture_output=True, text=True, check=False)
     if revision.returncode != 0 or revision.stdout.strip() != EXPECTED_PAPER:
         raise Failed("Paper source tree is not at the pinned 26.2 revision")
@@ -297,25 +319,63 @@ def _heightmaps(root: Tag, coordinate: tuple[int, int], *, target: bool) -> tupl
     return decoded, list(required)
 
 
+def _block_state_data_words(palette_size: int) -> int:
+    """Return the exact on-disk long-array length for a block-state palette.
+
+    Paper's block-state PalettedContainer uses zero-bit storage for a palette
+    with at most one entry, four bits through sixteen entries, eight bits
+    through 256 entries, and the global ceil(log2(size)) configuration above
+    that.  The storage has 4096 entries and is packed into 64-bit words.
+    """
+    if palette_size <= 1:
+        bits = 0
+    elif palette_size <= 16:
+        bits = 4
+    elif palette_size <= 256:
+        bits = 8
+    else:
+        bits = (palette_size - 1).bit_length()
+    return (4096 * bits + 63) // 64
+
+
 def _block_palette_names(root: Tag, coordinate: tuple[int, int], *, target: bool) -> set[str]:
     names: set[str] = set()
     sections = get_any(root, "sections")
-    if sections is None or sections.kind != 9:
+    if sections is None or sections.kind != 9 or not isinstance(sections.value, tuple) or len(sections.value) != 2:
         raise Failed(f"{coordinate} has no sections list")
-    for section in sections.value[1]:
+    section_kind, section_items = sections.value
+    if section_kind != 10 or not isinstance(section_items, list):
+        raise Failed(f"{coordinate} sections list is not a compound list")
+    for section in section_items:
         if section.kind != 10:
             raise Failed(f"{coordinate} section list contains non-compounds")
         states = section.value.get("block_states")
-        if states is None or states.kind != 10:
+        if states is None:
+            # Paper creates the default AIR container when block_states is
+            # absent.  Absence is valid; a present malformed codec payload is
+            # not.
             continue
+        if states.kind != 10:
+            raise Failed(f"{coordinate} block_states is not a compound")
         palette = states.value.get("palette")
-        if palette is None or palette.kind != 9:
-            continue
-        for entry in palette.value[1]:
-            if entry.kind == 10:
-                name = entry.value.get("Name")
-                if name is not None and name.kind == 8:
-                    names.add(name.value)
+        if palette is None or palette.kind != 9 or not isinstance(palette.value, tuple) or len(palette.value) != 2:
+            raise Failed(f"{coordinate} block_states palette is absent or malformed")
+        palette_kind, palette_items = palette.value
+        if palette_kind != 10 or not isinstance(palette_items, list):
+            raise Failed(f"{coordinate} block_states palette is not a compound list")
+        data = states.value.get("data")
+        if data is not None and data.kind != 12:
+            raise Failed(f"{coordinate} block_states data is not a long array")
+        expected_words = _block_state_data_words(len(palette_items))
+        if expected_words and (data is None or len(data.value) != expected_words):
+            raise Failed(f"{coordinate} block_states data is missing or has the wrong packed length")
+        for entry in palette_items:
+            if entry.kind != 10:
+                raise Failed(f"{coordinate} block_states palette contains a non-compound")
+            name = entry.value.get("Name")
+            if name is None or name.kind != 8:
+                raise Failed(f"{coordinate} block_states palette entry has no string Name")
+            names.add(name.value)
     if target and len(names) < 6:
         raise Failed(f"{coordinate} has a flat/under-varied block palette")
     return names
@@ -705,12 +765,34 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
         or jar_manifest(server_path).get("Git-Commit") != EXPECTED_PAPER_SHORT
     ):
         raise Failed("built Paper server jar does not prove the pinned source")
+    boot_artifact = paper_jar.get("boot_artifact", {})
+    if (
+        boot_artifact.get("path") != ".paper-paperclip.jar"
+        or not isinstance(boot_artifact.get("sha256"), str)
+        or not isinstance(boot_artifact.get("bytes"), int)
+    ):
+        raise Failed("stable Paperclip boot artifact provenance is absent")
+    boot_artifact_path = run / boot_artifact["path"]
+    if (
+        boot_artifact_path.is_symlink()
+        or not boot_artifact_path.is_file()
+        or boot_artifact.get("sha256") != sha256(boot_artifact_path.read_bytes())
+        or boot_artifact.get("bytes") != boot_artifact_path.stat().st_size
+    ):
+        raise Failed("stable Paperclip boot artifact is absent, stale, or tampered")
     runtime = paper_jar.get("materialized_runtime", {})
     runtime_relative = runtime.get("path")
     if runtime_relative != "versions/26.2/paper-26.2.jar":
         raise Failed("fresh materialized Paper runtime path is not pinned")
     runtime_path = run / runtime_relative
-    if runtime_path.is_symlink() or not runtime_path.is_file() or runtime.get("git_commit") != EXPECTED_PAPER_SHORT or runtime.get("sha256") != sha256(runtime_path.read_bytes()) or runtime.get("bytes") != runtime_path.stat().st_size:
+    if (
+        runtime_path.is_symlink()
+        or not runtime_path.is_file()
+        or runtime.get("git_commit") != EXPECTED_PAPER_SHORT
+        or runtime.get("paperclip_sha256") != boot_artifact["sha256"]
+        or runtime.get("sha256") != sha256(runtime_path.read_bytes())
+        or runtime.get("bytes") != runtime_path.stat().st_size
+    ):
         raise Failed("fresh materialized Paper runtime provenance is absent, stale, or tampered")
     if jar_manifest(runtime_path).get("Git-Commit") != EXPECTED_PAPER_SHORT:
         raise Failed("fresh materialized Paper runtime does not prove the pinned source")
@@ -723,13 +805,35 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
     probe_path = run / probe_relative
     probe_source = HERE / "src/PaperNormalFullProbe.java"
     plugin_yml = HERE / "src/plugin.yml"
-    if probe_path.is_symlink() or not probe_path.is_file() or probe_artifact.get("sha256") != sha256(probe_path.read_bytes()) or probe_artifact.get("bytes") != probe_path.stat().st_size or paper_jar.get("probe_source_sha256") != sha256(probe_source.read_bytes()) or paper_jar.get("probe_plugin_yml_sha256") != sha256(plugin_yml.read_bytes()):
+    if (
+        probe_source.is_symlink()
+        or plugin_yml.is_symlink()
+        or not probe_source.is_file()
+        or not plugin_yml.is_file()
+    ):
+        raise Failed("Paper probe source/plugin inputs are absent or symlinked")
+    source_bytes = probe_source.read_bytes()
+    plugin_bytes = plugin_yml.read_bytes()
+    input_digest = probe_inputs_sha256(source_bytes, plugin_bytes)
+    if (
+        probe_path.is_symlink()
+        or not probe_path.is_file()
+        or probe_artifact.get("sha256") != sha256(probe_path.read_bytes())
+        or probe_artifact.get("bytes") != probe_path.stat().st_size
+        or paper_jar.get("probe_source_sha256") != sha256(source_bytes)
+        or paper_jar.get("probe_plugin_yml_sha256") != sha256(plugin_bytes)
+        or paper_jar.get("probe_inputs_sha256") != input_digest
+        or probe_artifact.get("inputs_sha256") != input_digest
+        or not isinstance(probe_artifact.get("class_sha256"), str)
+    ):
         raise Failed("compiled main-thread probe provenance is absent or tampered")
+    class_relative = "org/rivet/paper_normal_full/PaperNormalFullProbe.class"
     try:
         with zipfile.ZipFile(probe_path) as archive:
-            if archive.read("plugin.yml") != plugin_yml.read_bytes() or "org/rivet/paper_normal_full/PaperNormalFullProbe.class" not in archive.namelist():
-                raise Failed("compiled main-thread probe jar does not contain the pinned source and entrypoint")
-    except (KeyError, zipfile.BadZipFile) as exc:
+            class_bytes = archive.read(class_relative)
+            if archive.read("plugin.yml") != plugin_bytes or probe_artifact["class_sha256"] != sha256(class_bytes):
+                raise Failed("compiled main-thread probe jar does not match the pinned source/plugin inputs")
+    except (KeyError, OSError, zipfile.BadZipFile) as exc:
         raise Failed("compiled main-thread probe jar is malformed") from exc
     if manifest.get("run_root") != str(run.resolve()) or manifest.get("run_id") != run.name:
         raise Failed("run was copied or its self-identifying root was rewritten")
@@ -767,6 +871,8 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
     boot1, capture = process.get("boot1", {}), process.get("capture", {})
     if boot1.get("exit_code") != 0 or capture.get("exit_code") != 0 or boot1.get("clean_stop") is not True or capture.get("clean_stop") is not True:
         raise Failed("one of the Paper boots was not a clean zero exit")
+    if boot1.get("paperclip") != boot_artifact or capture.get("paperclip") != boot_artifact:
+        raise Failed("Paper boots are not bound to the stable Paperclip artifact")
     if process.get("log") != "server.log" or boot1.get("log") != "server-create.log" or capture.get("log") != "server.log":
         raise Failed("Paper boot log route is wrong")
     _validate_process_timing(manifest)

@@ -57,9 +57,11 @@ The driver refuses a missing or dirty Paper source, a source revision other than
 from source with Gradle and uses only the freshly built Paperclip jar; it never
 falls back to a stale jar, global Paper runtime, or shared world/cache.
 
-The source must be available read-only at `working/Paper` in this worktree (or
-pass `--paper-source`). The source build may write only its ignored Gradle build
-outputs. Capture/runtime output is restricted to
+The source must be available as a canonical, read-only clean checkout at
+`working/Paper` in this worktree (or pass `--paper-source` with any checkout
+path; the basename does not need to be `Paper`). The checkout must resolve to
+the pinned revision above. The source build may write only its ignored Gradle
+build outputs. Capture/runtime output is restricted to
 `/home/jonas/Rivet/working/output/paper-normal-full/`.
 
 ## Exact command

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 import json
+import os
 import struct
 import subprocess
 import sys
 import tempfile
 import unittest
 import zlib
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
@@ -28,10 +30,19 @@ def packed_heightmap(offset: int) -> list[int]:
     return words
 
 
-def valid_chunk(status: str = "minecraft:full", light: bool = True, height_len: int = 37, flat_heightmaps: bool = False) -> bytes:
+def valid_chunk(
+    status: str = "minecraft:full",
+    light: bool = True,
+    height_len: int = 37,
+    flat_heightmaps: bool = False,
+    block_data: bool = True,
+) -> bytes:
     names = ["minecraft:air", "minecraft:stone", "minecraft:dirt", "minecraft:grass_block", "minecraft:water", "minecraft:sand"]
     palette = Tag(9, (10, [Tag(10, {"Name": Tag(8, name)}) for name in names]))
-    section = Tag(10, {"block_states": Tag(10, {"palette": palette})})
+    states = {"palette": palette}
+    if block_data:
+        states["data"] = Tag(12, [0] * 256)
+    section = Tag(10, {"block_states": Tag(10, states)})
     offsets = (0, 0, 0) if flat_heightmaps else (0, 1, 2)
     heightmaps = {
         "WORLD_SURFACE": Tag(12, packed_heightmap(offsets[0])[:height_len]),
@@ -140,6 +151,32 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaises(validate.Failed):
             validate.validate_chunk(valid_chunk() + b"\x00", (0, 0), target=True)
 
+    def test_chunk_codec_shape_rejects_bad_sections_and_missing_storage(self):
+        root = parse(valid_chunk())
+        root.value["sections"] = Tag(9, (3, []))
+        with self.assertRaises(validate.Failed):
+            validate.validate_chunk(encode(root), (0, 0), target=False)
+        with self.assertRaises(capture.Failed):
+            capture.chunk_details(encode(root), (0, 0), target=False)
+
+        missing_data = parse(valid_chunk(block_data=False))
+        with self.assertRaises(validate.Failed):
+            validate.validate_chunk(encode(missing_data), (0, 0), target=False)
+        with self.assertRaises(capture.Failed):
+            capture.chunk_details(encode(missing_data), (0, 0), target=False)
+
+        wrong_data_length = parse(valid_chunk())
+        states = wrong_data_length.value["sections"].value[1][0].value["block_states"]
+        states.value["data"] = Tag(12, [0] * 255)
+        with self.assertRaises(validate.Failed):
+            validate.validate_chunk(encode(wrong_data_length), (0, 0), target=False)
+
+        zero_bit = parse(valid_chunk())
+        zero_states = zero_bit.value["sections"].value[1][0].value["block_states"]
+        zero_states.value["palette"].value = (10, [Tag(10, {"Name": Tag(8, "minecraft:air")})])
+        zero_states.value.pop("data")
+        validate.validate_chunk(encode(zero_bit), (0, 0), target=False)
+
     def test_missing_bundle_is_unverified(self):
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run(
@@ -160,6 +197,45 @@ class EvidenceTests(unittest.TestCase):
             (root / "runs").symlink_to(outside, target_is_directory=True)
             with self.assertRaises(validate.Failed):
                 validate._reject_symlinks_under(root, "evidence bundle")
+
+    def test_world_signature_binds_same_size_restored_mtime_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            world = Path(directory)
+            path = world / "region/r.0.0.mca"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"original")
+            before = capture.world_tree_signature(world)
+            original_stat = path.stat()
+            path.write_bytes(b"mutated!")
+            os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+            self.assertNotEqual(before, capture.world_tree_signature(world))
+
+    def test_stable_paperclip_artifact_rejects_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run = root / "run"
+            run.mkdir()
+            source = root / "paperclip.jar"
+            source.write_bytes(b"paperclip-v1")
+            info = {"sha256": capture.sha256(source.read_bytes()), "bytes": source.stat().st_size}
+            stable, stable_info = capture.materialize_paperclip(run, source, info)
+            self.assertEqual(capture._verify_boot_artifact(run, stable, stable_info), stable_info)
+            stable.write_bytes(b"paperclip-v2")
+            with self.assertRaises(capture.Failed):
+                capture._verify_boot_artifact(run, stable, stable_info)
+
+    def test_probe_input_snapshot_detects_source_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "PaperNormalFullProbe.java"
+            plugin = root / "plugin.yml"
+            source.write_bytes(b"source-v1")
+            plugin.write_bytes(b"plugin-v1")
+            source_bytes = source.read_bytes()
+            plugin_bytes = plugin.read_bytes()
+            source.write_bytes(b"source-v2")
+            with self.assertRaises(capture.Failed):
+                capture._verify_probe_inputs(source, plugin, source_bytes, plugin_bytes)
 
     def test_bundle_rejects_malformed_run_entry_and_symlink_root(self):
         contract = json.loads((HERE / "fixtures/contract.json").read_text())
@@ -252,6 +328,23 @@ class EvidenceTests(unittest.TestCase):
             log.write_text(log.read_text().replace(f"RIVET_CAPTURE_TOKEN={token}", "RIVET_CAPTURE_TOKEN=" + token + "\\nRIVET_PROBE_READY"))
             with self.assertRaises(validate.Failed):
                 validate._validate_log(log, token, capture=True)
+
+    def test_pinned_paper_source_override_does_not_require_paper_basename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "paper-checkout"
+            source.mkdir()
+
+            def fake_run(args, **kwargs):
+                if args[-2:] == ["rev-parse", "--show-toplevel"]:
+                    return subprocess.CompletedProcess(args, 0, stdout=str(source) + "\n", stderr="")
+                if args[-2:] == ["rev-parse", "HEAD"]:
+                    return subprocess.CompletedProcess(args, 0, stdout=validate.EXPECTED_PAPER + "\n", stderr="")
+                if args[-2:] == ["status", "--porcelain"]:
+                    return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+                raise AssertionError(args)
+
+            with mock.patch.object(validate.subprocess, "run", side_effect=fake_run):
+                validate.validate_paper_source(source)
 
     def test_copied_run_root_is_failed(self):
         with tempfile.TemporaryDirectory() as directory:

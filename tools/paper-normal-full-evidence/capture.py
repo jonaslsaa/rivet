@@ -26,6 +26,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import zlib
 from pathlib import Path
@@ -402,7 +403,7 @@ def toolchain(source: Path) -> tuple[Path, dict[str, str]]:
     return java_home, {"vendor": "Eclipse Adoptium / Temurin", "version": release_match.group(1), "major": str(JAVA_MAJOR), "home": str(java_home)}
 
 
-def build_paper(source: Path, java_home: Path) -> tuple[Path, dict[str, str]]:
+def build_paper(source: Path, java_home: Path) -> tuple[Path, dict[str, Any]]:
     gradle = source / "gradlew"
     if not gradle.is_file():
         raise Unverified(f"Paper Gradle wrapper is absent: {gradle}")
@@ -492,12 +493,48 @@ def _wait_for(log: Path, *, ready: str, failed: str | None, timeout: float) -> s
     raise Failed(f"timed out waiting for {ready} in {log}")
 
 
+def materialize_paperclip(run: Path, paperclip: Path, paper_info: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
+    if paperclip.is_symlink() or not paperclip.is_file():
+        raise Failed(f"built Paperclip jar is absent or symlinked: {paperclip}")
+    source_bytes = paperclip.read_bytes()
+    expected_sha = paper_info.get("sha256")
+    expected_bytes = paper_info.get("bytes")
+    if not isinstance(expected_sha, str) or sha256(source_bytes) != expected_sha or expected_bytes != len(source_bytes):
+        raise Failed("built Paperclip jar changed before stable materialization")
+    stable = run / ".paper-paperclip.jar"
+    stable.write_bytes(source_bytes)
+    stable_bytes = stable.read_bytes()
+    stable_info = {
+        "path": str(stable.relative_to(run)),
+        "sha256": sha256(stable_bytes),
+        "bytes": len(stable_bytes),
+    }
+    if stable_info["sha256"] != expected_sha or stable_info["bytes"] != expected_bytes:
+        raise Failed("stable Paperclip materialization does not match the built artifact")
+    return stable, stable_info
+
+
+def _verify_boot_artifact(run: Path, paperclip: Path, expected: dict[str, Any]) -> dict[str, Any]:
+    if paperclip.is_symlink() or not paperclip.is_file():
+        raise Failed(f"stable Paperclip boot artifact is absent or symlinked: {paperclip}")
+    try:
+        relative = str(paperclip.relative_to(run))
+    except ValueError as exc:
+        raise Failed("Paper boot artifact escaped the isolated run root") from exc
+    data = paperclip.read_bytes()
+    actual = {"path": relative, "sha256": sha256(data), "bytes": len(data)}
+    if actual != {key: expected.get(key) for key in ("path", "sha256", "bytes")}:
+        raise Failed("stable Paperclip boot artifact was replaced or tampered")
+    return actual
+
+
 def boot_and_stop(
     run: Path,
     paperclip: Path,
     java_home: Path,
     log_name: str,
     *,
+    paperclip_artifact: dict[str, Any],
     plugin_args: list[str] | None = None,
     timeout: float = 600.0,
 ) -> dict[str, Any]:
@@ -510,6 +547,7 @@ def boot_and_stop(
     command.extend(["-jar", str(paperclip), "nogui"])
     started_ns = time.time_ns()
     with log_path.open("wb") as log:
+        artifact = _verify_boot_artifact(run, paperclip, paperclip_artifact)
         process = subprocess.Popen(command, cwd=run, env=env, stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT)
         try:
             _wait_for(log_path, ready="Done (", failed="RIVET_PROBE_FAILED" if plugin_args else None, timeout=timeout)
@@ -554,7 +592,28 @@ def boot_and_stop(
         "exit_code": process.returncode,
         "clean_stop": True,
         "ports": observed_ports(text),
+        "paperclip": artifact,
     }
+
+
+def _read_probe_input(path: Path, label: str) -> bytes:
+    if path.is_symlink() or not path.is_file():
+        raise Failed(f"Paper probe {label} is absent or symlinked")
+    return path.read_bytes()
+
+
+def probe_inputs_sha256(source_bytes: bytes, plugin_bytes: bytes) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"PaperNormalFullProbe.java\0")
+    digest.update(source_bytes)
+    digest.update(b"\0plugin.yml\0")
+    digest.update(plugin_bytes)
+    return digest.hexdigest()
+
+
+def _verify_probe_inputs(source: Path, plugin: Path, source_bytes: bytes, plugin_bytes: bytes) -> None:
+    if _read_probe_input(source, "source") != source_bytes or _read_probe_input(plugin, "plugin.yml") != plugin_bytes:
+        raise Failed("Paper probe source/plugin inputs changed during compilation")
 
 
 def compile_probe(run: Path, java_home: Path) -> tuple[Path, dict[str, Any]]:
@@ -565,6 +624,13 @@ def compile_probe(run: Path, java_home: Path) -> tuple[Path, dict[str, Any]]:
     runtime_manifest = _jar_manifest(runtime)
     if runtime_manifest.get("Git-Commit") != PAPER_SHORT:
         raise Failed("fresh materialized Paper runtime is not the pinned Paper revision")
+    probe_source = HERE / "src/PaperNormalFullProbe.java"
+    probe_plugin = HERE / "src/plugin.yml"
+    source_bytes = _read_probe_input(probe_source, "source")
+    plugin_bytes = _read_probe_input(probe_plugin, "plugin.yml")
+    source_digest = sha256(source_bytes)
+    plugin_digest = sha256(plugin_bytes)
+    inputs_digest = probe_inputs_sha256(source_bytes, plugin_bytes)
     classes = run / ".probe-classes"
     if classes.exists():
         shutil.rmtree(classes)
@@ -575,23 +641,43 @@ def compile_probe(run: Path, java_home: Path) -> tuple[Path, dict[str, Any]]:
     env = os.environ.copy()
     env["JAVA_HOME"] = str(java_home)
     env["PATH"] = f"{java_home / 'bin'}:{env.get('PATH', '')}"
-    result = subprocess.run(
-        [str(java_home / "bin/javac"), "-cp", cp, "-d", str(classes), str(HERE / "src/PaperNormalFullProbe.java")],
-        cwd=HERE,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise Failed(f"Paper probe compilation failed:\n{result.stdout}\n{result.stderr}")
-    shutil.copy2(HERE / "src/plugin.yml", classes / "plugin.yml")
-    jar = plugin_dir / "RivetPaperNormalFullProbe.jar"
-    result = subprocess.run([str(java_home / "bin/jar"), "cf", str(jar), "-C", str(classes), "."], cwd=HERE, text=True, capture_output=True, check=False, env=env)
-    if result.returncode != 0:
-        raise Failed(f"Paper probe jar creation failed: {result.stderr}")
-    probe_source = HERE / "src/PaperNormalFullProbe.java"
-    probe_plugin = HERE / "src/plugin.yml"
+    with tempfile.TemporaryDirectory(prefix=".probe-inputs-", dir=run) as snapshot_dir:
+        snapshot = Path(snapshot_dir)
+        source_snapshot = snapshot / "PaperNormalFullProbe.java"
+        plugin_snapshot = snapshot / "plugin.yml"
+        source_snapshot.write_bytes(source_bytes)
+        plugin_snapshot.write_bytes(plugin_bytes)
+        result = subprocess.run(
+            [str(java_home / "bin/javac"), "-cp", cp, "-d", str(classes), str(source_snapshot)],
+            cwd=HERE,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise Failed(f"Paper probe compilation failed:\n{result.stdout}\n{result.stderr}")
+        _verify_probe_inputs(probe_source, probe_plugin, source_bytes, plugin_bytes)
+        shutil.copy2(plugin_snapshot, classes / "plugin.yml")
+        jar = plugin_dir / "RivetPaperNormalFullProbe.jar"
+        result = subprocess.run([str(java_home / "bin/jar"), "cf", str(jar), "-C", str(classes), "."], cwd=HERE, text=True, capture_output=True, check=False, env=env)
+        if result.returncode != 0:
+            raise Failed(f"Paper probe jar creation failed: {result.stderr}")
+        _verify_probe_inputs(probe_source, probe_plugin, source_bytes, plugin_bytes)
+
+    class_relative = "org/rivet/paper_normal_full/PaperNormalFullProbe.class"
+    class_path = classes / class_relative
+    if not class_path.is_file() or class_path.is_symlink():
+        raise Failed("Paper probe compilation did not produce the pinned entrypoint class")
+    class_digest = sha256(class_path.read_bytes())
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(jar) as archive:
+            if archive.read("plugin.yml") != plugin_bytes or archive.read(class_relative) != class_path.read_bytes():
+                raise Failed("Paper probe jar does not match the snapshotted source/plugin inputs")
+    except (OSError, KeyError, zipfile.BadZipFile) as exc:
+        raise Failed(f"Paper probe jar is unreadable: {jar}: {exc}") from exc
     return jar, {
         "runtime": {
             "path": str(runtime.relative_to(run)),
@@ -605,9 +691,12 @@ def compile_probe(run: Path, java_home: Path) -> tuple[Path, dict[str, Any]]:
             "path": str(jar.relative_to(run)),
             "sha256": sha256(jar.read_bytes()),
             "bytes": jar.stat().st_size,
+            "class_sha256": class_digest,
+            "inputs_sha256": inputs_digest,
         },
-        "source_sha256": sha256(probe_source.read_bytes()),
-        "plugin_yml_sha256": sha256(probe_plugin.read_bytes()),
+        "source_sha256": source_digest,
+        "plugin_yml_sha256": plugin_digest,
+        "inputs_sha256": inputs_digest,
     }
 
 
@@ -622,8 +711,25 @@ def world_tree_signature(world: Path) -> str:
         if path.is_symlink():
             raise Failed(f"world tree contains a symlink: {path}")
         if path.is_file():
-            stat = path.stat()
-            rows.append(f"{path.relative_to(world)}\0{stat.st_size}\0{stat.st_mtime_ns}")
+            before = path.stat()
+            data = path.read_bytes()
+            after = path.stat()
+            if (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+            ) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+            ):
+                raise Failed(f"world file changed while hashing: {path}")
+            rows.append(
+                f"{path.relative_to(world)}\0{before.st_dev}\0{before.st_ino}\0{before.st_size}"
+                f"\0{before.st_mtime_ns}\0{sha256(data)}"
+            )
     return sha256("\n".join(rows).encode())
 
 
@@ -690,26 +796,10 @@ def chunk_details(raw: bytes, coordinate: tuple[int, int], *, target: bool) -> d
         if len(values) != 256 or any(value > 384 for value in values):
             raise Failed(f"{coordinate} has out-of-range {name} heightmap")
         decoded[name] = values
-    sections = get_any(root, "sections")
-    if sections is None or sections.kind != 9:
-        raise Failed(f"{coordinate} has no sections list")
-    palette_names: set[str] = set()
-    for section in sections.value[1]:
-        if section.kind != 10:
-            raise Failed(f"{coordinate} section is not a compound")
-        states = section.value.get("block_states")
-        if states is None or states.kind != 10:
-            continue
-        palette = states.value.get("palette")
-        if palette is None or palette.kind != 9:
-            continue
-        for entry in palette.value[1]:
-            if entry.kind == 10:
-                name = entry.value.get("Name")
-                if name is not None and name.kind == 8:
-                    palette_names.add(name.value)
-    if target and len(palette_names) < 6:
-        raise Failed(f"{coordinate} has a flat/under-varied block palette")
+    try:
+        palette_names = evidence_validate._block_palette_names(root, coordinate, target=target)
+    except evidence_validate.Failed as exc:
+        raise Failed(str(exc)) from exc
     return {
         "status": status.value,
         "light_correct": light_correct,
@@ -856,9 +946,17 @@ def run_one(
     configured_ports = allocate_dynamic_ports()
     write_configs(run, seed, *configured_ports)
     copy_fixture_provenance(run)
+    stable_paperclip, stable_paperclip_info = materialize_paperclip(run, paperclip, paper_info)
     token = secrets.token_hex(32)
     (run / "capture.token").write_text(token + "\n")
-    boot1 = boot_and_stop(run, paperclip, java_home, "server-create.log", timeout=timeout)
+    boot1 = boot_and_stop(
+        run,
+        stable_paperclip,
+        java_home,
+        "server-create.log",
+        paperclip_artifact=stable_paperclip_info,
+        timeout=timeout,
+    )
     require_dynamic_server_port(boot1["ports"], configured_ports[0], "Paper world-creation boot")
     world = run / "world"
     settings = capture_settings(world, seed, run)
@@ -878,11 +976,14 @@ def run_one(
         "reset_before_ticket_injection": True,
     }
     _, probe_info = compile_probe(run, java_home)
+    probe_info["runtime"]["paperclip_sha256"] = stable_paperclip_info["sha256"]
     run_paper_info = dict(paper_info)
+    run_paper_info["boot_artifact"] = stable_paperclip_info
     run_paper_info["materialized_runtime"] = probe_info["runtime"]
     run_paper_info["probe_artifact"] = probe_info["artifact"]
     run_paper_info["probe_source_sha256"] = probe_info["source_sha256"]
     run_paper_info["probe_plugin_yml_sha256"] = probe_info["plugin_yml_sha256"]
+    run_paper_info["probe_inputs_sha256"] = probe_info["inputs_sha256"]
     ticket_path, injected_sha = write_tickets(world, closure)
     injected_ticket_path = run / "provenance/chunk_tickets.dat"
     injected_ticket_path.write_bytes(ticket_path.read_bytes())
@@ -894,7 +995,15 @@ def run_one(
         f"-Drivet.probe.closure={encoded_closure}",
         f"-Drivet.probe.targets={encoded_targets}",
     ]
-    capture = boot_and_stop(run, paperclip, java_home, "server.log", plugin_args=plugin_args, timeout=timeout)
+    capture = boot_and_stop(
+        run,
+        stable_paperclip,
+        java_home,
+        "server.log",
+        paperclip_artifact=stable_paperclip_info,
+        plugin_args=plugin_args,
+        timeout=timeout,
+    )
     require_dynamic_server_port(capture["ports"], configured_ports[0], "Paper FULL capture boot")
     extract_run(run, seed, attempt, token, boot1, capture, run_paper_info, java_info, closure, settings, preflight, ticket_path, injected_ticket_path, injected_sha, configured_ports)
     (run / "driver.log").write_text(f"RIVET_TICKETS_INJECTED={injected_sha}\nRIVET_CAPTURE_STOP_EXIT=0\n")
