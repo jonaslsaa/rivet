@@ -2194,7 +2194,7 @@ fn run_spawn_in_region(
                     let fx = (x as f64).clamp(xo as f64 + width, xo as f64 + 16.0 - width);
                     let fz = (z as f64).clamp(zo as f64 + width, zo as f64 + 16.0 - width);
                     let entity_pos = BlockPos::containing(fx, y as f64, fz);
-                    if no_collision(region, fx, y, fz, width, height)
+                    if no_collision(region, spawner.ty, fx, y, fz, width, height)
                         && check_spawn_rules(
                             region,
                             spawner.ty,
@@ -2202,7 +2202,7 @@ fn run_spawn_in_region(
                             &entity_pos,
                             &mut level_random,
                         )
-                        && spawn_obstruction_ok(region, fx, y, fz, width, height)
+                        && spawn_obstruction_ok(region, spawner.ty, fx, y, fz, width, height)
                     {
                         // The current entity registry has no constructor or
                         // insertion surface for these mob types. The candidate
@@ -2381,6 +2381,7 @@ fn is_valid_spawn_floor(state: BlockState, entity_type: &str) -> bool {
         "minecraft:bedrock"
             | "minecraft:glass"
             | "minecraft:barrier"
+            | "minecraft:frosted_ice"
             | "minecraft:moving_piston"
             | "minecraft:repeater"
             | "minecraft:chorus_flower"
@@ -2390,6 +2391,12 @@ fn is_valid_spawn_floor(state: BlockState, entity_type: &str) -> bool {
         || name.ends_with("_grate")
         || name.ends_with("_stained_glass")
     {
+        // These are BlockBehaviour's explicit `never` predicates. Frosted ice
+        // is the one exception below: its predicate is entity-specific and is
+        // admitted only for polar bears.
+        if name == "minecraft:frosted_ice" && entity_type == "minecraft:polar_bear" {
+            return true;
+        }
         return false;
     }
     // Blocks.java's `ocelotOrParrot` predicate is used by every leaves
@@ -2412,7 +2419,7 @@ fn is_valid_empty_spawn_block(state: BlockState, entity_type: &str) -> bool {
     // `NaturalSpawner.isValidEmptySpawnBlock` uses the complete collision shape,
     // not the render/occlusion bit. An unavailable shape fails closed so the
     // entity boundary is never reached on an unverified candidate.
-    let Some(shape) = spawn_collision_shape(state) else {
+    let Some(shape) = spawn_collision_shape(state, None) else {
         return false;
     };
     !shape.is_full()
@@ -2499,17 +2506,22 @@ impl SpawnCollisionShape {
 /// worldgen states that can occur in the generated spawn workspace. Full cubes
 /// use Paper's six-face collision sample; leaves/vegetation/fluids are empty;
 /// partial snow/cactus shapes retain their VoxelShape bounds.
-fn spawn_collision_shape(state: BlockState) -> Option<SpawnCollisionShape> {
+fn spawn_collision_shape(
+    state: BlockState,
+    entity_type: Option<&str>,
+) -> Option<SpawnCollisionShape> {
     let name = state.block().name();
-    // PowderSnowBlock is marked dynamic because its entity collision context
-    // changes the shape. Every generated CREATURE candidate that can legally
-    // occupy powder snow in this slice is a polar bear (the other creature
-    // rules reject the dangerous block), and PolarBear is not in the
-    // powder-snow-walkable tag, so Paper's entity-context collision is empty.
-    // Keep this explicit dynamic fallback local to the spawn query rather than
-    // consulting the zero-context registry sample.
+    // PowderSnowBlock is dynamic: NaturalSpawner's empty-block predicate uses
+    // an empty collision context (therefore the shape is empty), while
+    // Level.noCollision uses the candidate entity context. Paper's
+    // POWDER_SNOW_WALKABLE_MOBS tag contains rabbit, endermite, silverfish, and
+    // fox; only rabbit and fox occur in this CREATURE table.
     if name == "minecraft:powder_snow" {
-        return Some(SpawnCollisionShape::Empty);
+        return Some(if matches!(entity_type, Some("minecraft:rabbit" | "minecraft:fox")) {
+            SpawnCollisionShape::Full
+        } else {
+            SpawnCollisionShape::Empty
+        });
     }
     if state.has_dynamic_shape() {
         return None;
@@ -2633,6 +2645,7 @@ fn spawn_aabb(x: f64, y: i32, z: f64, width: f64, height: f64) -> SpawnAabb {
 fn collision_free(
     region: &WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey>,
     entity: SpawnAabb,
+    entity_type: &str,
 ) -> Option<bool> {
     let min_x = rivet_util::mth::floor_d(entity.min_x);
     let max_x = rivet_util::mth::floor_d(entity.max_x - f64::EPSILON);
@@ -2644,7 +2657,7 @@ fn collision_free(
         for block_z in min_z..=max_z {
             for block_y in min_y..=max_y {
                 let state = region.get_block_state(&BlockPos::new(block_x, block_y, block_z));
-                let shape = spawn_collision_shape(state)?;
+                let shape = spawn_collision_shape(state, Some(entity_type))?;
                 if shape.intersects(block_x, block_y, block_z, &entity) {
                     return Some(false);
                 }
@@ -2709,8 +2722,6 @@ fn is_signal_source(state: BlockState) -> bool {
             | "minecraft:target"
             | "minecraft:trapped_chest"
             | "minecraft:tripwire_hook"
-            | "minecraft:rail"
-            | "minecraft:activator_rail"
     )
 }
 
@@ -2811,13 +2822,14 @@ fn spawn_dimensions(entity_type: &str) -> (f32, f32) {
 
 fn no_collision(
     region: &WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey>,
+    entity_type: &str,
     x: f64,
     y: i32,
     z: f64,
     width: f64,
     height: f64,
 ) -> bool {
-    collision_free(region, spawn_aabb(x, y, z, width, height)).unwrap_or(false)
+    collision_free(region, spawn_aabb(x, y, z, width, height), entity_type).unwrap_or(false)
 }
 
 /// The post-construction `Mob.checkSpawnObstruction` gate available without an
@@ -2826,6 +2838,7 @@ fn no_collision(
 /// the fluid scan over the AABB's covered block coordinates.
 fn spawn_obstruction_ok(
     region: &WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey>,
+    entity_type: &str,
     x: f64,
     y: i32,
     z: f64,
@@ -2833,7 +2846,7 @@ fn spawn_obstruction_ok(
     height: f64,
 ) -> bool {
     let entity = spawn_aabb(x, y, z, width, height);
-    if !collision_free(region, entity).unwrap_or(false) {
+    if !collision_free(region, entity, entity_type).unwrap_or(false) {
         return false;
     }
     let min_x = rivet_util::mth::floor_d(entity.min_x);
@@ -2852,6 +2865,21 @@ fn spawn_obstruction_ok(
                     return false;
                 }
             }
+        }
+    }
+    if entity_type == "minecraft:ocelot" {
+        // Ocelot overrides Mob.checkSpawnObstruction: after the generic
+        // no-liquid/unobstructed test it requires sea-level height and a grass
+        // or leaves support block. This is deliberately post-construction,
+        // after its placement predicate's 2/3 random roll.
+        if y < region.get_sea_level() {
+            return false;
+        }
+        let below = region.get_block_state(&BlockPos::containing(x, y as f64, z).below());
+        if below.block().name() != "minecraft:grass_block"
+            && !below.is_in_tag("minecraft:leaves")
+        {
+            return false;
         }
     }
     true
@@ -2892,10 +2920,23 @@ fn check_spawn_rules(
     if entity_type == "minecraft:turtle" && pos.get_y() >= region.get_sea_level().wrapping_add(4) {
         return false;
     }
+    // PolarBear::checkPolarBearSpawnRules reads the biome at the candidate,
+    // not the max-height biome used to select the chunk's CREATURE table.
+    // Resolve that live cached biome for the special alternate floor rule;
+    // other creature predicates are independent of biome here.
+    let candidate_biome_name = if entity_type == "minecraft:polar_bear" {
+        let candidate_biome = WorldGenLevel::get_biome(region, pos);
+        BIOME_BY_ID
+            .get(dense_biome_id(&candidate_biome) as usize)
+            .copied()
+            .unwrap_or(biome_name)
+    } else {
+        biome_name
+    };
     entity_spawn_floor(
         region.get_block_state(&pos.below()),
         entity_type,
-        biome_name,
+        candidate_biome_name,
     )
 }
 
@@ -5399,15 +5440,24 @@ mod tests {
         let glass = BlockState::of(BlockId::from_name("minecraft:glass").unwrap());
         let stone = BlockState::of(BlockId::from_name("minecraft:stone").unwrap());
         let powder_snow = BlockState::of(BlockId::from_name("minecraft:powder_snow").unwrap());
+        let frosted_ice = BlockState::of(BlockId::from_name("minecraft:frosted_ice").unwrap());
+        let rail = BlockState::of(BlockId::from_name("minecraft:rail").unwrap());
 
-        assert!(spawn_collision_shape(leaves).is_some_and(|shape| shape.is_full()));
-        assert!(spawn_collision_shape(glass).is_some_and(|shape| shape.is_full()));
-        assert!(spawn_collision_shape(stone).is_some_and(|shape| shape.is_full()));
-        assert!(spawn_collision_shape(powder_snow).is_some_and(|shape| !shape.is_full()));
+        assert!(spawn_collision_shape(leaves, None).is_some_and(|shape| shape.is_full()));
+        assert!(spawn_collision_shape(glass, None).is_some_and(|shape| shape.is_full()));
+        assert!(spawn_collision_shape(stone, None).is_some_and(|shape| shape.is_full()));
+        assert!(spawn_collision_shape(powder_snow, None).is_some_and(|shape| !shape.is_full()));
+        assert!(spawn_collision_shape(powder_snow, Some("minecraft:rabbit"))
+            .is_some_and(|shape| shape.is_full()));
+        assert!(spawn_collision_shape(powder_snow, Some("minecraft:polar_bear"))
+            .is_some_and(|shape| !shape.is_full()));
         assert!(!is_valid_empty_spawn_block(leaves, "minecraft:parrot"));
         assert!(!is_valid_empty_spawn_block(glass, "minecraft:cow"));
         assert!(!is_valid_spawn_floor(glass, "minecraft:cow"));
         assert!(is_valid_spawn_floor(powder_snow, "minecraft:polar_bear"));
+        assert!(is_valid_spawn_floor(frosted_ice, "minecraft:polar_bear"));
+        assert!(!is_valid_spawn_floor(frosted_ice, "minecraft:cow"));
+        assert!(!is_signal_source(rail));
     }
 
     #[test]
