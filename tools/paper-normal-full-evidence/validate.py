@@ -41,6 +41,12 @@ EXPECTED_RADIUS = 11
 EXPECTED_TICKET_LEVEL = 33
 EXPECTED_TICKS_LEFT = -(1 << 63)
 EXPECTED_DATA_VERSION = 4903
+# Paper's normal overworld spans Y=-64..319, so its block sections are -4..19.
+# SerializableChunkData also serializes one light boundary section on either side.
+MIN_BLOCK_SECTION_Y = -4
+MAX_BLOCK_SECTION_Y = 19
+MIN_LIGHT_SECTION_Y = MIN_BLOCK_SECTION_Y - 1
+MAX_LIGHT_SECTION_Y = MAX_BLOCK_SECTION_Y + 1
 STARLIGHT_VERSION_TAG = "starlight.light_version"
 STARLIGHT_LIGHT_VERSION = 10
 REGION_RE = re.compile(r"^r\.(-?\d+)\.(-?\d+)\.mca$")
@@ -329,7 +335,10 @@ def _packed_bits(palette_size: int, *, biome: bool) -> int:
 
 
 def _packed_words(entry_count: int, bits: int) -> int:
-    return (entry_count * bits + 63) // 64
+    if bits == 0:
+        return 0
+    values_per_long = 64 // bits
+    return (entry_count + values_per_long - 1) // values_per_long
 
 
 def _decode_packed_values(
@@ -349,15 +358,12 @@ def _decode_packed_values(
     if data is None or data.kind != 12 or len(data.value) != expected_words:
         raise Failed(f"{label} has the wrong packed data shape")
     mask = (1 << bits) - 1
+    values_per_long = 64 // bits
     words = [value & ((1 << 64) - 1) for value in data.value]
     for index in range(entry_count):
-        bit = index * bits
-        word = bit // 64
-        shift = bit % 64
+        word = index // values_per_long
+        shift = (index % values_per_long) * bits
         value = (words[word] >> shift) & mask
-        spill = shift + bits - 64
-        if spill > 0:
-            value |= (words[word + 1] & ((1 << spill) - 1)) << (bits - spill)
         if value >= palette_size:
             raise Failed(f"{label} packed index {value} at {index} exceeds palette size {palette_size}")
 
@@ -373,6 +379,28 @@ def _block_palette_names(root: Tag, coordinate: tuple[int, int], *, target: bool
     for section in section_items:
         if section.kind != 10:
             raise Failed(f"{coordinate} section list contains non-compounds")
+
+        y_tag = section.value.get("Y")
+        if y_tag is None:
+            section_y = 0
+        elif y_tag.kind == 1:
+            section_y = y_tag.value
+        else:
+            raise Failed(f"{coordinate} section Y is not a byte")
+        if not MIN_LIGHT_SECTION_Y <= section_y <= MAX_LIGHT_SECTION_Y:
+            raise Failed(f"{coordinate} section Y {section_y} is outside the light-section bounds")
+
+        for light_name in ("BlockLight", "SkyLight"):
+            light = section.value.get(light_name)
+            if light is not None and (light.kind != 7 or len(light.value) != 2048):
+                raise Failed(f"{coordinate} {light_name} is not a 2048-byte light layer")
+
+        # Paper's SerializableChunkData drops the block/biome container for the
+        # two light-only boundary sections. It only parses those codecs for the
+        # normal in-bounds block sections.
+        if not MIN_BLOCK_SECTION_Y <= section_y <= MAX_BLOCK_SECTION_Y:
+            continue
+
         states = section.value.get("block_states")
         if states is None:
             raise Failed(f"{coordinate} section has no block_states codec")
