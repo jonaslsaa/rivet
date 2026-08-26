@@ -337,6 +337,8 @@ def capture_settings(world: Path, seed: str, run: Path) -> dict[str, Any]:
     # SavedData source dimension-locally as world_gen_settings.dat; preserve an
     # exact read-only copy at the contract path and record both paths/hashes.
     contract_path = world / "data/minecraft/worldgen_settings.dat"
+    if contract_path.is_symlink():
+        raise Failed("worldgen settings contract path is symlinked")
     contract_path.parent.mkdir(parents=True, exist_ok=True)
     contract_path.write_bytes(source_bytes)
     if contract_path.read_bytes() != source_bytes:
@@ -734,6 +736,8 @@ def extract_run(
     if capture["ended_ns"] > extraction_started_ns:
         raise Failed("post-exit extraction clock ordering is invalid")
     world = run / "world"
+    if world.is_symlink() or not world.is_dir():
+        raise Failed("Paper world root is absent or symlinked")
     signature_before = world_tree_signature(world)
     coordinates = world_chunks(world)
     if set(coordinates) < set(closure):

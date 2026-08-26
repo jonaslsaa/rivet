@@ -537,6 +537,9 @@ def _validate_probe(run: Path, token: str, expected_closure: list[tuple[int, int
 def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract: dict[str, Any]) -> dict[tuple[int, int], str]:
     if not run.is_dir() or run.is_symlink():
         raise Failed(f"run root is not a real isolated directory: {run}")
+    world = run / "world"
+    if world.is_symlink() or not world.is_dir():
+        raise Failed("Paper world root is absent or symlinked")
     manifest = _read_json(run / "capture.json", "capture manifest")
     if manifest.get("format") != 1 or manifest.get("kind") != contract["kind"] or manifest.get("producer") != PRODUCER:
         raise Failed("wrong producer, kind, or manifest format")
