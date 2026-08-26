@@ -749,7 +749,8 @@ impl GenerationChunkHolder {
                 // cache that terminal boundary and make later attempts return
                 // the same error without repeating placement against the
                 // partially realized proto.
-                if self.chunk.get_persisted_status() == ChunkStatus::Carvers
+                if is_features_failure(error)
+                    && self.chunk.get_persisted_status() == ChunkStatus::Carvers
                     && target.index() >= ChunkStatus::Features.index()
                 {
                     if let Some(snapshot) = features_snapshot {
@@ -784,6 +785,21 @@ impl GenerationChunkHolder {
     pub fn into_level_chunk(self) -> Result<LevelChunk, GeneratedChunkError> {
         LevelChunk::from_generated_spawn_proto(self.chunk).map_err(GeneratedChunkError::Convert)
     }
+}
+
+/// Whether an error came from an actually-entered FEATURES body.
+///
+/// `generate_through` validates the entire requested path before running any
+/// task. A later LIGHT/SPAWN refusal can therefore leave the holder at CARVERS
+/// without ever entering FEATURES; only errors the FEATURES body itself can
+/// produce are terminal for the holder's retry cache.
+fn is_features_failure(error: GenError) -> bool {
+    matches!(
+        error,
+        GenError::FeaturePlacementDecode { .. }
+            | GenError::SettingsNotGenerated { .. }
+            | GenError::StructureDecorationIndexUnavailable { .. }
+    )
 }
 
 /// Clone a generated proto's owned representation before the FEATURES task.
@@ -2401,6 +2417,41 @@ mod tests {
             GeneratedChunkError::UnsupportedStatus(ChunkStatus::Full)
         ));
         assert_eq!(holder.status(), ChunkStatus::Noise);
+    }
+
+    /// A whole-path LIGHT refusal happens during prevalidation, before the
+    /// FEATURES task is entered. It must not poison the holder's terminal
+    /// FEATURES-failure cache: a later direct FEATURES request still runs the
+    /// decoration body and reports its own typed boundary.
+    #[test]
+    fn light_refusal_does_not_cache_features_failure() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+
+        let light_error = holder
+            .generate_through(ChunkStatus::Spawn)
+            .expect_err("the holder has no usable light engine");
+        assert!(matches!(
+            light_error,
+            GeneratedChunkError::Generation(GenError::LightEngineMissing { .. })
+        ));
+        assert_eq!(holder.status(), ChunkStatus::Carvers);
+
+        let features_error = holder
+            .generate_through(ChunkStatus::Features)
+            .expect_err("FEATURES must run after the earlier LIGHT refusal");
+        assert!(matches!(
+            features_error,
+            GeneratedChunkError::Generation(
+                GenError::FeaturePlacementDecode { .. }
+                    | GenError::SettingsNotGenerated { .. }
+                    | GenError::StructureDecorationIndexUnavailable { .. }
+            )
+        ));
+        assert_eq!(holder.status(), ChunkStatus::Carvers);
     }
 
     /// The FEATURES rung runs `addVanillaDecorations`'s full prologue and

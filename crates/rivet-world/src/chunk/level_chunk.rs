@@ -131,7 +131,8 @@ where
 
     /// Value-transform every block state and biome, preserving all other chunk
     /// state (sections, heightmaps, light nibbles, pending block entities,
-    /// post-processing, flags). The #516 server bridge uses this to convert the
+    /// post-processing, block/fluid ticks, flags). The #516 server bridge uses
+    /// this to convert the
     /// reconstructed `LevelChunk<BlockState, BiomeId, ()>` into the server's
     /// `LevelChunk<StateId, BiomeId, ()>` — both value pairs are dense
     /// `u16`-backed ids in the same generated registry, so the
