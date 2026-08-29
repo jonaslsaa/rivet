@@ -625,12 +625,18 @@ The verifier derives every digest from payload bytes read through stable opened
 file descriptors. Contract, producer executable/config, and nested payload
 metadata are checked on those same descriptors; symlink and hardlink aliases,
 nonregular files, malformed metadata, and self-diff aliases are hard failures.
-A wholly absent prerequisite remains **3 UNVERIFIED**, while any partial
-launched handoff, stale provenance, and parity mismatch are **1 FAIL**. Stable
-evidence opening is deliberately Linux-only (`openat2` with
-`RESOLVE_NO_SYMLINKS` and `/proc/self/fd`); non-Linux platforms fail explicitly
-instead of taking an insecure pathname-reopen fallback. Linux x86_64 is the
-primary tested target.
+Every artifact is staged as a fresh verifier-owned copy inside the nonce-scoped
+replay root and byte-bound to its attestation digest at staging time; the
+config/properties consumers then read only those captured bytes. The exact
+identity boundary: exec cannot inherit a descriptor, so `java -jar` and the
+producer binary launch reopen the staged *pathname* of that private copy — the
+binding holds because the replay root is verifier-owned with no other writer,
+not because the pathname itself is tamper-proof. A wholly absent prerequisite
+remains **3 UNVERIFIED**, while any partial launched handoff, stale provenance,
+and parity mismatch are **1 FAIL**. Stable evidence opening is deliberately
+Linux-only (`openat2` with `RESOLVE_NO_SYMLINKS` and `/proc/self/fd`);
+non-Linux platforms fail explicitly instead of taking an insecure
+pathname-reopen fallback. Linux x86_64 is the primary tested target.
 
 The dedicated `rivet-generated-full` producer is wired as the only Rivet side
 of this lifecycle. In the current checkout the real

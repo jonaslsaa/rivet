@@ -238,16 +238,31 @@ mod tests {
     }
 
     #[test]
-    fn accepts_escaped_keys_and_rejects_their_decoded_duplicate() {
-        // The scanner dedups on decoded key text: `"a"` decodes to "a",
-        // so it must collide with a plain `"a"` in the same object.
+    fn accepts_distinct_keys_and_rejects_their_decoded_collision() {
+        // Distinct keys that merely share escape encodings stay accepted.
+        from_slice::<serde_json::Value>(br#"{"a":1,"b":2}"#).expect("distinct keys are accepted");
+
+        // The scanner dedups on decoded key text: `"a"` decodes to "a", so a
+        // raw spelling collision must be rejected exactly like a literal
+        // duplicate even though the raw bytes differ.
         let error = from_slice::<serde_json::Value>(br#"{"a":1,"a":2}"#)
-            .expect_err("decoded duplicate key");
+            .expect_err("literal duplicate key");
         assert!(error.contains("duplicate JSON object key"));
 
-        // Distinct keys that merely share escape encodings stay accepted.
-        from_slice::<serde_json::Value>(br#"{"a":1,"b":2}"#)
-            .expect("escaped and plain distinct keys are accepted");
+        // Genuine decoded-key collision: a literal key and its
+        // Unicode-escape equivalent ("a" also decodes to "a") use
+        // different raw spellings yet must collide after decoding. A scanner
+        // that deduplicated on raw spelling would accept this and let
+        // serde_json's last-wins policy pick the second value.
+        let error = from_slice::<serde_json::Value>(br#"{"a":1,"\u0061":2}"#)
+            .expect_err("decoded collision between literal and unicode-escaped key");
+        assert!(error.contains("duplicate JSON object key"));
+
+        // Same collision at nesting depth, where a per-top-level-object scan
+        // would miss it.
+        let error = from_slice::<serde_json::Value>(br#"{"outer":{"a":1,"\u0061":2}}"#)
+            .expect_err("decoded collision nested one level deep");
+        assert!(error.contains("duplicate JSON object key"));
     }
 
     #[test]

@@ -496,13 +496,23 @@ struct ArtifactIdentity {
 
 #[derive(Debug)]
 struct StagedFile {
+    /// Verifier-owned fresh-root copy of the artifact.  In-process consumers
+    /// read `bytes` captured through the stable descriptor; the external
+    /// exec sites (java -jar, Command::new on the producer binary) reopen
+    /// this pathname, which is exactly why the file is a private verifier
+    /// copy inside the nonce-scoped replay root rather than a caller- or
+    /// producer-controlled path.  Within this local trust model the replay
+    /// root is not attacker-writable; a hostile local root would also defeat
+    /// the open descriptors themselves.
     path: PathBuf,
-    /// Descriptor held open on the staged file for the whole replay: a later
-    /// path swap cannot redirect any consumer away from attested contents.
+    /// Descriptor held open on the staged file for the whole replay.
     #[allow(dead_code)]
     file: fs::File,
     /// Contents read exactly once through the stable descriptor at staging
-    /// time; later consumers never reopen anything by pathname.
+    /// time and bound to the attestation digest there.  Config and
+    /// properties are consumed from these captured bytes only; jar and
+    /// binary bytes additionally bind what the exec-site reopen must find
+    /// (same verifier-owned copy, no other writer).
     #[allow(dead_code)]
     bytes: Vec<u8>,
 }
@@ -1724,6 +1734,10 @@ fn run_fresh_replay_with_paper_boots(
             let paper_log = replay_root
                 .join("logs")
                 .join(format!("paper-{seed}-{boot}.log"));
+            // Identity boundary: exec cannot inherit the staged descriptor, so
+            // java reopens the staged pathname.  That copy lives inside the
+            // verifier-owned nonce-scoped replay root and was byte-bound to
+            // `identity.materialized_jar_sha256` at staging; see StagedFile.
             let paper_argv = vec![
                 "java".to_string(),
                 "-Xms512M".to_string(),
@@ -1824,6 +1838,10 @@ fn run_fresh_replay_with_paper_boots(
                 "cannot serialize generated-full coordinates: {error}"
             ))
         })?;
+        // Identity boundary: exec reopens the staged binary pathname (it
+        // cannot inherit the staged descriptor).  The copy lives inside the
+        // verifier-owned nonce-scoped replay root and was byte-bound to
+        // `identity.capture_binary_sha256` at staging; see StagedFile.
         let rivet_argv = vec![
             staged.rivet_binary.path.display().to_string(),
             "--generated-full".to_string(),

@@ -6,6 +6,10 @@
 //! connected.  The current checkout has the codec and chunk-status pieces but
 //! not the production Level/registry/lighting orchestration needed to execute
 //! that pipeline.  Returning BLOCKED is therefore the only honest result.
+//!
+//! RivetTodo(#54): connecting this producer to the real production pipeline is
+//! the producer-bound normal-FULL parity lane owned by issue #54; until then
+//! every run exits BLOCKED and no evidence is fabricated.
 
 use std::env;
 use std::fs;
