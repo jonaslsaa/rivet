@@ -535,7 +535,7 @@ impl WorkerSession {
     fn flush_pending_and_storage(&mut self) -> io::Result<()> {
         let pending_result = self.flush_pending();
         let storage_result = self.storage.flush();
-        combine_flush_results(&self.shared, pending_result, storage_result)
+        Self::combine_flush_results(&self.shared, pending_result, storage_result)
     }
 
     /// Snapshot a storage flush failure even when a pending write failed first.
@@ -1099,12 +1099,9 @@ mod tests {
 
         let shared = Shared::new();
         shared.record_first_err(&pending_error);
-        let returned = WorkerSession::combine_flush_results(
-            &shared,
-            Err(pending_error),
-            Err(storage_error),
-        )
-        .expect_err("the pending operation still fails");
+        let returned =
+            WorkerSession::combine_flush_results(&shared, Err(pending_error), Err(storage_error))
+                .expect_err("the pending operation still fails");
         assert_eq!(returned.raw_os_error(), Some(11));
         assert_eq!(
             shared.err.lock().unwrap().as_ref().unwrap().raw_os_error,
