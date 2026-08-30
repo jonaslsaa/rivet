@@ -535,13 +535,24 @@ impl WorkerSession {
     fn flush_pending_and_storage(&mut self) -> io::Result<()> {
         let pending_result = self.flush_pending();
         let storage_result = self.storage.flush();
+        combine_flush_results(&self.shared, pending_result, storage_result)
+    }
+
+    /// Snapshot a storage flush failure even when a pending write failed first.
+    /// The pending operation remains the explicit caller-visible error, while
+    /// `Shared` retains whichever operation produced the first failure.
+    fn combine_flush_results(
+        shared: &Shared,
+        pending_result: io::Result<()>,
+        storage_result: io::Result<()>,
+    ) -> io::Result<()> {
+        if let Err(error) = &storage_result {
+            shared.record_first_err(error);
+        }
         match (pending_result, storage_result) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), _) => Err(error),
-            (Ok(()), Err(error)) => {
-                self.shared.record_first_err(&error);
-                Err(error)
-            }
+            (Ok(()), Err(error)) => Err(error),
         }
     }
 
@@ -1063,6 +1074,43 @@ mod tests {
         assert_read_marker(&mut disk, pos, 5);
         disk.close().unwrap();
         worker.shutdown();
+    }
+
+    #[test]
+    fn storage_flush_error_is_snapshotted_after_pending_failure_and_first_error_wins() {
+        let pending_error = io::Error::from_raw_os_error(11);
+        let storage_error = io::Error::from_raw_os_error(22);
+        let shared = Shared::new();
+
+        let returned = WorkerSession::combine_flush_results(
+            &shared,
+            Err(io::Error::from_raw_os_error(11)),
+            Err(io::Error::from_raw_os_error(22)),
+        )
+        .expect_err("the pending operation error remains caller-visible");
+        assert_eq!(returned.raw_os_error(), pending_error.raw_os_error());
+        let snapshot = shared
+            .err
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("storage flush failure must be snapshotted");
+        assert_eq!(snapshot.raw_os_error, storage_error.raw_os_error());
+
+        let shared = Shared::new();
+        shared.record_first_err(&pending_error);
+        let returned = WorkerSession::combine_flush_results(
+            &shared,
+            Err(pending_error),
+            Err(storage_error),
+        )
+        .expect_err("the pending operation still fails");
+        assert_eq!(returned.raw_os_error(), Some(11));
+        assert_eq!(
+            shared.err.lock().unwrap().as_ref().unwrap().raw_os_error,
+            Some(11),
+            "a prior pending-write error remains first-error-wins"
+        );
     }
 
     #[test]
