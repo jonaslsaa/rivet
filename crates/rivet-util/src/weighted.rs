@@ -118,7 +118,7 @@ impl<T> Weighted<T> {
 }
 
 /// `Weighted.codec(Codec<E>)` — a record codec over `"data"` (via
-/// `elementCodec.fieldOf("data")`) and `"weight"` (`NON_NEGATIVE_INT`).
+/// `elementCodec.fieldOf("data")`) and `"weight"` (`POSITIVE_INT`).
 pub fn weighted_codec<E, Ops>(
     element_codec: Arc<dyn Codec<E, Ops>>,
 ) -> Arc<dyn Codec<Weighted<E>, Ops>>
@@ -913,16 +913,21 @@ mod tests {
     }
 
     #[test]
-    fn weighted_codec_rejects_negative_weight_with_exact_message() {
+    fn weighted_codec_rejects_non_positive_weight_with_exact_message() {
         let codec = weighted_codec::<String, JsonOps>(rivet_serialization::codec::string_codec::<
             JsonOps,
         >());
-        let input = json!({"data": "q", "weight": -1});
-        let error = codec
-            .parse(&JsonOps::INSTANCE, &input)
-            .error_ref()
-            .map(|e| e.message().to_string());
-        assert_eq!(error.as_deref(), Some("Value must be non-negative: -1"));
+        for weight in [-1, 0] {
+            let input = json!({"data": "q", "weight": weight});
+            let error = codec
+                .parse(&JsonOps::INSTANCE, &input)
+                .error_ref()
+                .map(|e| e.message().to_string());
+            assert_eq!(
+                error.as_deref(),
+                Some(format!("Value must be positive: {weight}").as_str())
+            );
+        }
     }
 
     #[test]
@@ -953,17 +958,22 @@ mod tests {
     }
 
     #[test]
-    fn weighted_list_codec_rejects_negative_weight_in_array() {
+    fn weighted_list_codec_rejects_non_positive_weight_in_array() {
         let codec =
             weighted_list_codec::<String, JsonOps>(rivet_serialization::codec::string_codec::<
                 JsonOps,
             >());
-        let input = json!([{"data": "a", "weight": -1}]);
-        let error = codec
-            .parse(&JsonOps::INSTANCE, &input)
-            .error_ref()
-            .map(|e| e.message().to_string());
-        assert_eq!(error.as_deref(), Some("Value must be non-negative: -1"));
+        for weight in [-1, 0] {
+            let input = json!([{"data": "a", "weight": weight}]);
+            let error = codec
+                .parse(&JsonOps::INSTANCE, &input)
+                .error_ref()
+                .map(|e| e.message().to_string());
+            assert_eq!(
+                error.as_deref(),
+                Some(format!("Value must be positive: {weight}").as_str())
+            );
+        }
     }
 
     #[test]

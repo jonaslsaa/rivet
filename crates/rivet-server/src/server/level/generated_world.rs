@@ -130,7 +130,7 @@ use rivet_registry::holder_lookup::HolderGetter;
 use rivet_registry::holder_set::HolderSet;
 use rivet_registry::registry_ops::RegistryOps;
 use rivet_registry::{Identifier, RegistrationInfo, ResourceKey};
-use rivet_serialization::codec::Codec;
+use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::json_ops::JsonOps;
 use rivet_util::StaticCache2D;
 use rivet_util::WorldgenRandom;
@@ -1509,9 +1509,7 @@ fn compose_feature_region_with_workspace<'a>(
             let existing = workspace.and_then(|workspace| {
                 workspace.with_chunk(pos, |chunk| {
                     chunk
-                        .filter(|chunk| {
-                            chunk.get_persisted_status().is_or_after(status)
-                        })
+                        .filter(|chunk| chunk.get_persisted_status().is_or_after(status))
                         .map(snapshot_generated_chunk)
                 })
             });
@@ -2590,15 +2588,15 @@ fn decode_configured_feature_value(
                 .iter()
                 .enumerate()
                 .map(|(index, item)| {
-                    let chance = item.get("chance").and_then(Value::as_f64).ok_or_else(|| {
+                    let chance = item.get("chance").ok_or_else(|| {
                         format!("{configured_key} features[{index}] has no chance")
                     })?;
-                    if !chance.is_finite() || !(0.0..=1.0).contains(&chance) {
-                        return Err(format!(
-                            "{configured_key} features[{index}] chance must be in [0, 1]"
-                        ));
-                    }
-                    let chance = chance as f32;
+                    let chance = decode_value(
+                        codec::float_range::<FeatureOps>(0.0, 1.0),
+                        ops,
+                        chance,
+                        &format!("{configured_key} features[{index}] chance"),
+                    )?;
                     let feature = item.get("feature").ok_or_else(|| {
                         format!("{configured_key} features[{index}] has no feature")
                     })?;
@@ -4631,22 +4629,13 @@ mod tests {
                     &generator_for_context,
                     Some(&workspace_for_context),
                 );
-                let east_block = BlockPos::new(
-                    center_pos.x().wrapping_add(1) * 16,
-                    64,
-                    center_pos.z() * 16,
+                let east_block =
+                    BlockPos::new(center_pos.x().wrapping_add(1) * 16, 64, center_pos.z() * 16);
+                assert!(
+                    region.set_block(&east_block, Blocks::STONE.default_block_state(), 2, 512,)
                 );
-                assert!(region.set_block(
-                    &east_block,
-                    Blocks::STONE.default_block_state(),
-                    2,
-                    512,
-                ));
-                let far_block = BlockPos::new(
-                    center_pos.x().wrapping_add(8) * 16,
-                    64,
-                    center_pos.z() * 16,
-                );
+                let far_block =
+                    BlockPos::new(center_pos.x().wrapping_add(8) * 16, 64, center_pos.z() * 16);
                 <WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> as WorldGenLevel>::schedule_tick(
                     &mut region,
                     &far_block,
@@ -5647,15 +5636,13 @@ mod tests {
         let workspace = FeatureWorkspace::new();
         // Simulate C1's retained distance-two StructureStarts placeholder at
         // (2, 0): primed heightmaps only, never advanced through CARVERS.
-        let mut stale =
-            fresh_worldgen_chunk(ChunkPos::new(2, 0), &generator);
+        let mut stale = fresh_worldgen_chunk(ChunkPos::new(2, 0), &generator);
         stale.prime_heightmaps(&FINAL_HEIGHTMAPS);
         stale.set_persisted_status(ChunkStatus::StructureStarts);
         workspace.insert(stale);
         // An up-to-date entry at the same position must still be reused.
         let fresh_entry = {
-            let mut chunk =
-                generate_ring_chunk(ChunkPos::new(0, 1), &generator);
+            let mut chunk = generate_ring_chunk(ChunkPos::new(0, 1), &generator);
             chunk.set_persisted_status(ChunkStatus::Carvers);
             chunk
         };
@@ -5667,11 +5654,8 @@ mod tests {
         // dependency, then returns Ok) so the stale (2, 0) entry is a
         // distance-one Carvers dependency and the workspace transaction
         // commits.
-        let mut holder = workspace_writeback_probe_holder_at(
-            &generator,
-            &workspace,
-            ChunkPos::new(1, 0),
-        );
+        let mut holder =
+            workspace_writeback_probe_holder_at(&generator, &workspace, ChunkPos::new(1, 0));
         holder
             .generate_through(ChunkStatus::Features)
             .expect("the probe FEATURES seam must compose and commit");
@@ -5680,11 +5664,13 @@ mod tests {
         // ring chunk; the adequate Carvers entry survives untouched.
         workspace.with_chunk(ChunkPos::new(2, 0), |chunk| {
             let chunk = chunk.expect("regenerated entry must be retained");
-            assert!(chunk
-                .get_persisted_status()
-                .is_or_after(ChunkStatus::Carvers));
+            assert!(
+                chunk
+                    .get_persisted_status()
+                    .is_or_after(ChunkStatus::Carvers)
+            );
         });
-        workspace.with_chunk(ChunkPos::new(1, 0), |chunk| {
+        workspace.with_chunk(ChunkPos::new(0, 1), |chunk| {
             let chunk = chunk.expect("adequate entry must be retained");
             assert_eq!(
                 chunk.get_block_state(0, 64, 0),
@@ -6252,6 +6238,51 @@ mod tests {
         )
         .expect_err("missing nested weighted data holder must fail");
         assert!(error.contains("missing configured feature minecraft:missing_nested_feature"));
+    }
+
+    #[test]
+    fn generated_selector_decoders_reject_malformed_real_json_counterfactuals() {
+        let generator = test_generator();
+        let ops =
+            RegistryOps::create_from_access(&JsonOps::INSTANCE, generator.feature_access().clone());
+
+        let random_entry = CONFIGURED_FEATURE_BY_NAME
+            .get("minecraft:dark_forest_vegetation")
+            .expect("random-selector generated fixture");
+        for chance in [-0.1_f64, 1.1] {
+            let mut json: Value = serde_json::from_str(random_entry.json).expect("fixture JSON");
+            json["config"]["features"][0]["chance"] = serde_json::json!(chance);
+            let error = decode_configured_feature_value(
+                "minecraft:dark_forest_vegetation",
+                &json,
+                &ops,
+                generator.feature_access(),
+            )
+            .expect_err("random-selector chance outside [0, 1] must fail");
+            assert!(
+                error.contains("outside of range"),
+                "unexpected chance validation error: {error}"
+            );
+        }
+
+        let weighted_entry = CONFIGURED_FEATURE_BY_NAME
+            .get("minecraft:sulfur_spring")
+            .expect("weighted-selector generated fixture");
+        for weight in [-1_i64, 0] {
+            let mut json: Value = serde_json::from_str(weighted_entry.json).expect("fixture JSON");
+            json["config"]["features"][0]["weight"] = serde_json::json!(weight);
+            let error = decode_configured_feature_value(
+                "minecraft:sulfur_spring",
+                &json,
+                &ops,
+                generator.feature_access(),
+            )
+            .expect_err("weighted-selector weight below one must fail");
+            assert!(
+                error.contains("weight must be at least 1"),
+                "unexpected weight validation error: {error}"
+            );
+        }
     }
 
     #[test]
