@@ -45,9 +45,9 @@
 //!   the first slot whose `prefix > selection`.
 //! - Codecs: `Weighted.codec` is a record codec over `"data"` (the element
 //!   codec, either a `Codec<E>` via `.fieldOf("data")` or an element
-//!   `MapCodec`) and `"weight"` via `ExtraCodecs.NON_NEGATIVE_INT` — a
-//!   negative `weight` fails decode with exactly
-//!   `"Value must be non-negative: N"`. `WeightedList.codec`/
+//!   `MapCodec`) and `"weight"` via `ExtraCodecs.POSITIVE_INT` — a
+//!   non-positive `weight` fails decode with exactly
+//!   `"Value must be positive: N"`. `WeightedList.codec`/
 //!   `nonEmptyCodec` map over a list; the `nonEmpty` variant validates
 //!   `isEmpty()` with `"Weighted list must contain at least one entry with
 //!   non-zero weight"`. `Weighted.map`/`WeightedList.map` preserve weights
@@ -62,12 +62,12 @@
 //! `WeightedList.streamCodec`) are omitted — the protocol crate owns that
 //! surface and no consumer in this value layer needs it.
 
+use crate::extra_codecs as util_extra_codecs;
 use crate::random::RandomSource;
 use crate::util::log_and_pause_if_in_ide;
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::data_result::DataResult;
 use rivet_serialization::dynamic_ops::DynamicOps;
-use rivet_serialization::extra_codecs;
 use rivet_serialization::map_codec::MapCodec;
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
 use std::fmt;
@@ -147,7 +147,7 @@ where
             .and(RecordCodecBuilder::of_named(
                 Arc::new(|w: &Weighted<E>| w.weight),
                 "weight".to_string(),
-                extra_codecs::non_negative_int_codec::<Ops>(),
+                util_extra_codecs::positive_int::<Ops>(),
             ))
             .apply(
                 instance,

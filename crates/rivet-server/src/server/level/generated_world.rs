@@ -1500,8 +1500,20 @@ fn compose_feature_region_with_workspace<'a>(
             // A workspace entry is copied before the region can mutate it. The
             // copy preserves every represented ProtoChunk field, including
             // heightmaps, post-processing, block entities, and scheduled ticks.
+            // Entries retained by a neighboring center may sit below this
+            // slot's required status (a distance-two StructureStarts
+            // placeholder can land in a distance-one Carvers slot); Paper's
+            // scheduler never hands a decoration pass an under-generated
+            // dependency, so stale lower-status entries are regenerated
+            // exactly like absent ones instead of being silently reused.
             let existing = workspace.and_then(|workspace| {
-                workspace.with_chunk(pos, |chunk| chunk.map(snapshot_generated_chunk))
+                workspace.with_chunk(pos, |chunk| {
+                    chunk
+                        .filter(|chunk| {
+                            chunk.get_persisted_status().is_or_after(status)
+                        })
+                        .map(snapshot_generated_chunk)
+                })
             });
             match status {
                 ChunkStatus::Carvers => {
@@ -2580,7 +2592,13 @@ fn decode_configured_feature_value(
                 .map(|(index, item)| {
                     let chance = item.get("chance").and_then(Value::as_f64).ok_or_else(|| {
                         format!("{configured_key} features[{index}] has no chance")
-                    })? as f32;
+                    })?;
+                    if !chance.is_finite() || !(0.0..=1.0).contains(&chance) {
+                        return Err(format!(
+                            "{configured_key} features[{index}] chance must be in [0, 1]"
+                        ));
+                    }
+                    let chance = chance as f32;
                     let feature = item.get("feature").ok_or_else(|| {
                         format!("{configured_key} features[{index}] has no feature")
                     })?;
@@ -2646,6 +2664,11 @@ fn decode_configured_feature_value(
                     let weight = i32::try_from(weight).map_err(|_| {
                         format!("{configured_key} features[{index}] weight is out of range")
                     })?;
+                    if weight < 1 {
+                        return Err(format!(
+                            "{configured_key} features[{index}] weight must be at least 1"
+                        ));
+                    }
                     let data = item
                         .get("data")
                         .ok_or_else(|| format!("{configured_key} features[{index}] has no data"))?;
@@ -2904,7 +2927,12 @@ fn generated_boundary_feature_key(
     else {
         return fallback;
     };
-    PLACED_FEATURE_BY_NAME
+    // The panic payloads originate from `unavailable_feature`, whose values
+    // are configured-feature keys (`DeferredGeneratedFeatureConfiguration`).
+    // Validate against the configured table; 97 of the 170 generated
+    // configured names also exist as unrelated placed entries, so a
+    // placed-table search would misattribute instead of falling back.
+    CONFIGURED_FEATURE_BY_NAME
         .entries()
         .find(|(candidate, _)| **candidate == name)
         .map(|(candidate, _)| *candidate)
@@ -4578,7 +4606,15 @@ mod tests {
         generator: &Arc<OverworldGenerator>,
         workspace: &FeatureWorkspace,
     ) -> GenerationChunkHolder {
-        let mut chunk = fresh_worldgen_chunk(ChunkPos::ZERO, generator);
+        workspace_writeback_probe_holder_at(generator, workspace, ChunkPos::ZERO)
+    }
+
+    fn workspace_writeback_probe_holder_at(
+        generator: &Arc<OverworldGenerator>,
+        workspace: &FeatureWorkspace,
+        center_pos: ChunkPos,
+    ) -> GenerationChunkHolder {
+        let mut chunk = fresh_worldgen_chunk(center_pos, generator);
         chunk.set_persisted_status(ChunkStatus::Carvers);
         let pending_feature_writebacks = Rc::new(RefCell::new(None));
         let generator_for_context = Arc::clone(generator);
@@ -4589,28 +4625,39 @@ mod tests {
             |_| {},
             |_| {},
             move |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
+                let center_pos = chunk.get_pos();
                 let mut region = compose_feature_region_with_workspace(
                     chunk,
                     &generator_for_context,
                     Some(&workspace_for_context),
                 );
+                let east_block = BlockPos::new(
+                    center_pos.x().wrapping_add(1) * 16,
+                    64,
+                    center_pos.z() * 16,
+                );
                 assert!(region.set_block(
-                    &BlockPos::new(16, 64, 0),
+                    &east_block,
                     Blocks::STONE.default_block_state(),
                     2,
                     512,
                 ));
+                let far_block = BlockPos::new(
+                    center_pos.x().wrapping_add(8) * 16,
+                    64,
+                    center_pos.z() * 16,
+                );
                 <WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> as WorldGenLevel>::schedule_tick(
                     &mut region,
-                    &BlockPos::new(128, 64, 0),
+                    &far_block,
                     FluidId(4),
                     0,
                 );
-                region.mark_pos_for_post_processing(&BlockPos::new(128, 64, 0));
+                region.mark_pos_for_post_processing(&far_block);
                 for (pos, dependency) in region.into_owned_proto_entries() {
                     workspace_for_context.insert(dependency);
                     assert!(
-                        pos != ChunkPos::ZERO,
+                        pos != center_pos,
                         "the center must remain owned by the generation holder"
                     );
                 }
@@ -5585,6 +5632,65 @@ mod tests {
             assert_eq!(ticks.len(), 1);
             assert_eq!(ticks[0].r#type, FluidId(4));
             assert_eq!(ticks[0].pos, BlockPos::new(128, 64, 0));
+        });
+    }
+
+    /// A workspace entry retained by a neighboring center can sit below the
+    /// slot status this center's FEATURES cache requires: the StructureStarts
+    /// placeholder at distance two from C1 is a Carvers dependency of adjacent
+    /// C2. Paper's scheduler never hands a decoration pass an
+    /// under-generated dependency, so composition must regenerate stale
+    /// lower-status entries rather than silently reusing void terrain.
+    #[test]
+    fn feature_region_regenerates_workspace_entries_below_required_status() {
+        let generator = Arc::new(OverworldGenerator::new(42));
+        let workspace = FeatureWorkspace::new();
+        // Simulate C1's retained distance-two StructureStarts placeholder at
+        // (2, 0): primed heightmaps only, never advanced through CARVERS.
+        let mut stale =
+            fresh_worldgen_chunk(ChunkPos::new(2, 0), &generator);
+        stale.prime_heightmaps(&FINAL_HEIGHTMAPS);
+        stale.set_persisted_status(ChunkStatus::StructureStarts);
+        workspace.insert(stale);
+        // An up-to-date entry at the same position must still be reused.
+        let fresh_entry = {
+            let mut chunk =
+                generate_ring_chunk(ChunkPos::new(0, 1), &generator);
+            chunk.set_persisted_status(ChunkStatus::Carvers);
+            chunk
+        };
+        let fresh_marker = fresh_entry.get_block_state(0, 64, 0);
+        workspace.insert(fresh_entry);
+
+        // Drive a successful composition-only FEATURES pass from (1, 0) (the
+        // probe body composes the region and republishes every owned
+        // dependency, then returns Ok) so the stale (2, 0) entry is a
+        // distance-one Carvers dependency and the workspace transaction
+        // commits.
+        let mut holder = workspace_writeback_probe_holder_at(
+            &generator,
+            &workspace,
+            ChunkPos::new(1, 0),
+        );
+        holder
+            .generate_through(ChunkStatus::Features)
+            .expect("the probe FEATURES seam must compose and commit");
+
+        // The stale StructureStarts entry was replaced by a CARVERS-status
+        // ring chunk; the adequate Carvers entry survives untouched.
+        workspace.with_chunk(ChunkPos::new(2, 0), |chunk| {
+            let chunk = chunk.expect("regenerated entry must be retained");
+            assert!(chunk
+                .get_persisted_status()
+                .is_or_after(ChunkStatus::Carvers));
+        });
+        workspace.with_chunk(ChunkPos::new(1, 0), |chunk| {
+            let chunk = chunk.expect("adequate entry must be retained");
+            assert_eq!(
+                chunk.get_block_state(0, 64, 0),
+                fresh_marker,
+                "an entry meeting its slot status must not be regenerated"
+            );
         });
     }
 
