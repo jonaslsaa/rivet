@@ -115,12 +115,15 @@ pub enum GeneratedLightBridgeError {
 ///
 /// The production surface is status-scoped: callers run [`Self::light`] and
 /// cannot reach the provider's deferred dynamic-relighting implementation. The
-/// counterfactual below is intentionally rejected by rustdoc because the
-/// no-edge-checks helper exists only in unit-test builds.
+/// counterfactual below is intentionally rejected by rustdoc because
+/// `provider_mut` is crate-private; `todo!` supplies the bridge so no
+/// constructor or other private API participates in the visibility check.
 ///
 /// ```compile_fail
-/// use rivet_server::server::lighting::SkyLightProvider;
-/// let _ = SkyLightProvider::relight_chunk_with;
+/// use rivet_server::server::lighting::GeneratedLightBridge;
+///
+/// let bridge: &mut GeneratedLightBridge = todo!();
+/// let _provider = bridge.provider_mut();
 /// ```
 pub struct GeneratedLightBridge {
     provider: SkyLightProvider,
@@ -136,10 +139,10 @@ impl GeneratedLightBridge {
         Self { provider }
     }
 
-    /// Mutably expose the provider to this module's ownership tests only.
+    /// Crate-local mutable access used by ownership tests.
     /// Production callers must use the status-scoped [`Self::light`] operation;
     /// the bridge never exposes the provider's implementation seams.
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn provider_mut(&mut self) -> &mut SkyLightProvider {
         &mut self.provider
     }
