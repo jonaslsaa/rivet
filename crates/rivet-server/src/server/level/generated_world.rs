@@ -587,9 +587,9 @@ impl StructureFeatureIndex {
         Self::from_registry(VANILLA_STRUCTURE_REGISTRY)
     }
 
-    /// Adapt the focused legacy count seam into the index shape. This is kept
-    /// only for existing counterfactual tests; production uses the registry
-    /// derived index above.
+    /// Adapt the focused omitted-structure-loop fixture into the index shape.
+    /// Production uses the registry-derived index above.
+    #[cfg(test)]
     fn explicit_count(count: usize) -> Self {
         Self {
             counts_by_step: [count; Decoration::VALUES.len()],
@@ -857,23 +857,6 @@ impl OverworldGenerator {
         GenerationChunkHolder::new(pos, Arc::clone(self))
     }
 
-    /// Create a holder with an explicitly proven number of structure decoration
-    /// entries consumed before placed-feature work in every decoration step.
-    /// `Some(0)` is valid only for a caller that has established that no
-    /// structures run for this chunk; `None` preserves the typed unavailable
-    /// boundary and performs no feature RNG or placement.
-    pub fn create_holder_with_structure_feature_count(
-        self: &Arc<Self>,
-        pos: ChunkPos,
-        structure_feature_count: Option<usize>,
-    ) -> GenerationChunkHolder {
-        GenerationChunkHolder::new_with_structure_feature_count(
-            pos,
-            Arc::clone(self),
-            structure_feature_count,
-        )
-    }
-
     /// Create a holder attached to caller-owned dependency chunks. Holders
     /// sharing one workspace observe successful FEATURES writes exactly as the
     /// scheduler's shared `GenerationChunkHolder`s would.
@@ -883,24 +866,6 @@ impl OverworldGenerator {
         feature_workspace: FeatureWorkspace,
     ) -> GenerationChunkHolder {
         GenerationChunkHolder::new_with_workspace(pos, Arc::clone(self), feature_workspace)
-    }
-
-    /// Create a workspace-backed holder with an explicitly proven structure
-    /// decoration capability. The supplied count is a capability proof for the
-    /// unported structure loop; it does not alter Paper's independent placed-
-    /// feature `globalIndexOfFeature` seed.
-    pub fn create_holder_with_workspace_and_structure_feature_count(
-        self: &Arc<Self>,
-        pos: ChunkPos,
-        feature_workspace: FeatureWorkspace,
-        structure_feature_count: Option<usize>,
-    ) -> GenerationChunkHolder {
-        GenerationChunkHolder::new_with_workspace_and_structure_feature_count(
-            pos,
-            Arc::clone(self),
-            feature_workspace,
-            structure_feature_count,
-        )
     }
 
     /// Create a workspace-backed holder with the registry-derived structure
@@ -1083,28 +1048,11 @@ impl GenerationChunkHolder {
     /// `minecraft:freeze_top_layer` at step 10/global 0); the chunk stays
     /// CARVERS.
     pub fn new(pos: ChunkPos, generator: Arc<OverworldGenerator>) -> Self {
-        Self::new_with_workspace_and_structure_feature_count(
+        Self::new_with_workspace_and_structure_feature_index(
             pos,
             generator,
             FeatureWorkspace::new(),
             None,
-        )
-    }
-
-    /// Create a holder with an explicitly proven structure decoration
-    /// capability. `None` is the normal production value and is a typed
-    /// FEATURES boundary; `Some(_)` is reserved for a caller that has
-    /// established the structure loop's availability for this chunk.
-    pub fn new_with_structure_feature_count(
-        pos: ChunkPos,
-        generator: Arc<OverworldGenerator>,
-        structure_feature_count: Option<usize>,
-    ) -> Self {
-        Self::new_with_workspace_and_structure_feature_count(
-            pos,
-            generator,
-            FeatureWorkspace::new(),
-            structure_feature_count,
         )
     }
 
@@ -1115,27 +1063,11 @@ impl GenerationChunkHolder {
         generator: Arc<OverworldGenerator>,
         feature_workspace: FeatureWorkspace,
     ) -> Self {
-        Self::new_with_workspace_and_structure_feature_count(
-            pos,
-            generator,
-            feature_workspace,
-            None,
-        )
-    }
-
-    /// Create a workspace-backed holder with an explicitly proven structure
-    /// decoration capability.
-    pub fn new_with_workspace_and_structure_feature_count(
-        pos: ChunkPos,
-        generator: Arc<OverworldGenerator>,
-        feature_workspace: FeatureWorkspace,
-        structure_feature_count: Option<usize>,
-    ) -> Self {
         Self::new_with_workspace_and_structure_feature_index(
             pos,
             generator,
             feature_workspace,
-            structure_feature_count.map(StructureFeatureIndex::explicit_count),
+            None,
         )
     }
 
@@ -4869,7 +4801,11 @@ mod tests {
     }
 
     fn feature_holder(generator: &Arc<OverworldGenerator>, pos: ChunkPos) -> GenerationChunkHolder {
-        generator.create_holder_with_structure_feature_count(pos, Some(0))
+        generator.create_holder_with_workspace_and_structure_feature_index(
+            pos,
+            FeatureWorkspace::new(),
+            Some(StructureFeatureIndex::explicit_count(0)),
+        )
     }
 
     fn transaction_probe_holder(
