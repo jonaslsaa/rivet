@@ -48,6 +48,40 @@ tools/rivet-client/run-scenario.sh generated-world                # seed-42 gene
 tools/rivet-client/run-scenario.sh capture        # one boot; print the normalized transcript
 ```
 
+Every client run is parent-deadline bounded, reaped after TERM/KILL, and must
+exit zero. `RIVET_CLIENT_BIN` is authoritative only for selecting the source
+path; neither that path, an environment-provided digest, nor the client's
+self-reported `starting` record establishes trust. The independently committed
+contract in `fixtures/trusted-client-26.2-x86_64-linux.json` pins the exact
+preserved `rivet-client-26.2-f96e8c45` bytes, size, Minecraft/Azalea versions,
+Rust toolchain, target, and ELF build ID. Unknown bytes fail closed before spawn.
+The verifier copies the selected bytes through one open source descriptor into a
+private no-write staging inode, validates the committed digest, unlinks it, and
+executes that retained inode through `/proc/self/fd`; swapping the selected path
+after validation cannot change what runs. Raw and normalized evidence records
+both the selected source path and the executed trusted digest. Without an
+override, both the scenario runner and merge gate select the contract-named
+artifact from `tools/rivet-oracle/work/bin` in the main checkout; linked
+worktrees deliberately share that preserved artifact and never fall back to
+their own `target/debug/rivet-client`.
+
+This trusted artifact is currently scoped to x86_64 GNU/Linux; unsupported
+platforms remain UNVERIFIED rather than running unpinned bytes. Refreshing it is
+an explicit review operation: on x86_64 GNU/Linux, build `tools/rivet-client`
+with the committed `nightly-2026-08-05` toolchain and `cargo build --locked`
+(dev profile), verify the pinned Azalea revision and `file`/`readelf` target and
+build ID, copy the reviewed binary into preserved oracle storage using the first
+eight SHA-256 characters in its name, then update every field of the committed
+contract in the same reviewed change and rerun the provenance counterfactuals
+and live acceptance. There is intentionally no environment override for this
+trust root.
+
+Every standalone Paper boot must shut down with exit zero, emit the clean-save
+marker, and materialize the pinned Paper commit. Every live client transcript
+must carry exactly one `starting` record with the pinned Azalea revision as a
+second, behavioral consistency check. `capture` also requires server-side
+connection evidence plus login/spawn completion.
+
 `generated-world` is the seed-42 generated-world acceptance contract, defined
 ahead of the generator. The launch seam is the rivet-server `--seed <n>` option
 (`GENERATED_SEED_ARG`), which the server now accepts but still serves the
@@ -128,7 +162,7 @@ Modes (`--server` selects which servers boot, `--pairs` selects the comparison):
 
 | `--server` | `--pairs` | What runs |
 |---|---|---|
-| `paper` (default) | `paper:paper` (default) | `join` Paper-vs-Paper self-check: `--runs` Paper boots must produce identical transcripts, plus the tamper negative case. Paper-vs-Paper modes compare a build against itself, so they boot whatever Paper build the paperclip produces and do not require the oracle pin. |
+| `paper` (default) | `paper:paper` (default) | `join` Paper-vs-Paper self-check: `--runs` Paper boots must produce identical transcripts, plus the tamper negative case. Every Paper boot must materialize the pinned oracle commit, including standalone self-checks. |
 | `paper` | `paper:paper` | `move` Paper-vs-Paper movement self-check (issue #53): each boot drives the client's bounded forward walk (`move` mode) and `--runs` Paper boots must produce identical normalized movement transcripts (per-tick spawn-relative deltas, velocity, on-ground, teleport/keepalive echo relationships), plus the tamper negative case. This validates the movement harness against Paper. |
 | `rivet` | `paper:rivet` | `join` Rivet headless boot (issue #192): `--runs` rivet-servers, each must reach `RIVET_READY`, take the pinned Azalea client through offline login, configuration (registry sync), the play handoff, and spawn, receiving exactly the deterministic 117-chunk send-set, and shut down cleanly on SIGTERM. |
 | `rivet` | (rejected) | `dwell` wall-clock keepalive-survival gate (issues #157/#160: keepalive survival + terminal M1 gate): one Rivet boot, the pinned Azalea client spawns into PLAY and stays connected for `--dwell-seconds` (default 41) of wall-clock time while azalea auto-echoes every live keepalive challenge. The run passes only if the client survived past the server's 30 s keepalive kick limit, proven four ways: the rivet log's `connection established` line (only the real rivet-server emits it), the rivet log containing no `read timeout` kick (the server never disconnected the client for failing its keepalive), the client transcript passing `rivet_dwell_verdict` (outcome `dwelled`, lifecycle containing login and spawn, the pinned Azalea revision, `connected_wall_seconds` beyond the kick limit, >= 30 challenges, a 1:1 challenge->echo pairing, and a challenge span across the window), and a controlled negative that tampers `connected_wall_seconds` to 0 and requires the real verdict path to refuse PASS — so wall-clock survival cannot pass vacuously. `dwell` has no comparison concept, so `--runs` and `--pairs` are both rejected (exit 64) rather than silently ignored — any explicit `--runs`, even `--runs 1` (equal to the implicit default), is rejected just like `--pairs`, because the one Rivet boot is the whole run and a caller-supplied value that changes nothing must not pass silently. `--dwell-seconds` is likewise dwell-only: an explicit value on `join`/`move`/`capture` is a silent no-op and is rejected (exit 64). The window must be at least 35 s (the 30 s kick limit plus the ~1.2 s first-challenge offset and margin — a 31 s window would span only ~29.8 s of challenges and fail the verdict), and `--timeout-seconds` must exceed it by more than 6 s (the client's 1 s keepalive settle loop plus pre-spawn login/configuration time), so a too-tight timeout cannot cut the client off before it emits the `dwell` record. |

@@ -59,6 +59,7 @@ mkdir -p "$FAKE_EMPTY/tools/rivet-oracle" "$FAKE_EMPTY/working/Paper/paper-serve
 # FAKE_FULL: a repo-shaped tree with every artifact present.
 FAKE_FULL="$TMP/full"
 mkdir -p "$FAKE_FULL/tools/rivet-oracle/work/jars"
+mkdir -p "$FAKE_FULL/tools/rivet-oracle/work/bin"
 mkdir -p "$FAKE_FULL/working/Paper/paper-server/build/libs"
 mkdir -p "$FAKE_FULL/tools/rivet-oracle/work/run/libraries"
 mkdir -p "$FAKE_FULL/tools/rivet-oracle/work/run/versions/26.2"
@@ -66,6 +67,7 @@ mkdir -p "$FAKE_FULL/target/debug"
 touch "$FAKE_FULL/tools/rivet-oracle/work/jars/paper-paperclip-26.2.local-SNAPSHOT.jar"
 touch "$FAKE_FULL/working/Paper/paper-server/build/libs/paper-server-26.2.local-SNAPSHOT.jar"
 touch "$FAKE_FULL/tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar"
+touch "$FAKE_FULL/tools/rivet-oracle/work/bin/rivet-client-26.2-f96e8c45"
 touch "$FAKE_FULL/target/debug/rivet-client"
 
 # Neutralise host JDK discovery via absolute paths (SDKMAN / JAVA_HOME) so the
@@ -128,21 +130,66 @@ REQUIRE_ORACLE=0
 grep -q "gate stops here" "$TMP/out2" || fail "require-oracle message missing"
 pass "--require-oracle with missing prereqs exits 1"
 
-# --- test 3: all prereqs present ---------------------------------------------------
+# --- test 3: only arbitrary target/debug client is present -------------------------
 add_stub java 'openjdk version "25.0.2" 2026-01-20 LTS'
 add_stub javac 'javac 25.0.2'
 add_stub python3 'Python 3.14.6'
+FAKE_NO_CLIENT="$TMP/no-client"
+cp -a "$FAKE_FULL/." "$FAKE_NO_CLIENT/"
+rm -f "$FAKE_NO_CLIENT/tools/rivet-oracle/work/bin/rivet-client-26.2-f96e8c45"
+unset RIVET_CLIENT_BIN
+run_check "$FAKE_NO_CLIENT" > "$TMP/out3-missing" 2>&1
+[ "$VERIFY_RUNNABLE" = 1 ] || fail "verify should remain runnable when only client is missing"
+[ "$PARITY_RUNNABLE" = 1 ] || fail "parity should remain runnable when only client is missing"
+[ "$CAPTURE_RUNNABLE" = 0 ] || fail "capture runnable without canonical trusted client"
+[ "$SCENARIO_RUNNABLE" = 0 ] || fail "scenario runnable without canonical trusted client"
+grep -F "[MISSING] trusted rivet-client artifact" "$TMP/out3-missing" >/dev/null \
+  || fail "missing canonical client was not typed MISSING"
+grep -F "will report UNVERIFIED" "$TMP/out3-missing" >/dev/null \
+  || fail "non-required missing canonical client did not report UNVERIFIED"
+grep -F "$FAKE_NO_CLIENT/target/debug/rivet-client" "$TMP/out3-missing" >/dev/null \
+  && fail "arbitrary target/debug client was selected"
+pass "arbitrary target/debug client is ignored and missing canonical is UNVERIFIED"
+
+REQUIRE_ORACLE=1
+rc=0
+run_check "$FAKE_NO_CLIENT" > "$TMP/out3-required" 2>&1 || rc=$?
+REQUIRE_ORACLE=0
+[ "$rc" = 1 ] || fail "--require-oracle should hard-fail when canonical client is missing (got $rc)"
+grep -q "gate stops here" "$TMP/out3-required" || fail "missing canonical require-oracle message missing"
+pass "missing canonical client hard-fails under --require-oracle"
+
+# --- test 4: all prereqs present ---------------------------------------------------
+unset RIVET_CLIENT_BIN
 run_check "$FAKE_FULL" > "$TMP/out3" 2>&1
 [ "$VERIFY_RUNNABLE" = 1 ] || fail "verify not runnable with all prereqs present"
 [ "$PARITY_RUNNABLE" = 1 ] || fail "parity not runnable with all prereqs present"
 [ "$SCENARIO_RUNNABLE" = 1 ] || { cat "$TMP/out3"; fail "scenario not runnable with all prereqs present"; }
-[ "$RIVET_CLIENT_BIN" = "$FAKE_FULL/target/debug/rivet-client" ] \
-  || fail "resolved client binary was not exported to downstream capture/scenario tools"
+[ "$RIVET_CLIENT_BIN" = "$FAKE_FULL/tools/rivet-oracle/work/bin/rivet-client-26.2-f96e8c45" ] \
+  || fail "canonical trusted client was not exported to downstream capture/scenario tools"
+grep -F "$FAKE_FULL/target/debug/rivet-client" "$TMP/out3" >/dev/null \
+  && fail "arbitrary target/debug client was selected or reported"
 grep -q "all oracle prerequisites present" "$TMP/out3" || fail "present-report missing"
 grep -q "MISSING" "$TMP/out3" && fail "MISSING reported despite all prereqs present"
 pass "all prereqs present: all steps runnable, no MISSING reported"
 
-# --- test 4: run_rivet_parity must not report VERIFIED when the oracle cannot boot --
+# --- test 5: isolated worktree resolves the main shared canonical client ------------
+FAKE_SHARED="$TMP/shared"
+FAKE_WORKTREE="$FAKE_SHARED/.claude/worktrees/probe"
+mkdir -p "$FAKE_SHARED/.git/worktrees/probe" "$FAKE_WORKTREE"
+cp -a "$FAKE_FULL/." "$FAKE_WORKTREE/"
+rm -rf "$FAKE_WORKTREE/tools/rivet-oracle/work/bin"
+mkdir -p "$FAKE_SHARED/tools/rivet-oracle/work/bin"
+touch "$FAKE_SHARED/tools/rivet-oracle/work/bin/rivet-client-26.2-f96e8c45"
+printf 'gitdir: %s\n' "$FAKE_SHARED/.git/worktrees/probe" > "$FAKE_WORKTREE/.git"
+unset RIVET_CLIENT_BIN
+run_check "$FAKE_WORKTREE" > "$TMP/out-worktree" 2>&1
+[ "$SCENARIO_RUNNABLE" = 1 ] || fail "scenario not runnable from worktree with shared canonical client"
+[ "$RIVET_CLIENT_BIN" = "$FAKE_SHARED/tools/rivet-oracle/work/bin/rivet-client-26.2-f96e8c45" ] \
+  || fail "worktree did not resolve main shared canonical client"
+pass "isolated worktree resolves the main shared canonical client"
+
+# --- test 6: run_rivet_parity must not report VERIFIED when the oracle cannot boot --
 # run_rivet_parity invokes `cargo run -q -p rivet-parity -- --require-oracle`; shim only
 # `cargo` (mktemp/cat/grep stay real via the prepended PATH). The shims emit the tool's
 # machine-stable exit codes: 0 = oracle ran clean (VERIFIED), 1 = oracle ran but parity

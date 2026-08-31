@@ -1,14 +1,15 @@
 //! Server boot/shutdown for the scenario runner (issue #155).
 //!
 //! `ServerKind::Paper` boots the paperclip bundler jar headlessly (the `verify`
-//! pattern from `tools/rivet-oracle`), waits for `Done (...)!`, then SIGTERM and
-//! waits for the clean save. `ServerKind::Rivet` boots the `rivet-server`
-//! binary headlessly, waits for the machine-readable `RIVET_READY` marker on
-//! stdout (rivet-server/src/main.rs), then SIGTERM and waits for a clean exit
-//! (code 0).
+//! pattern from `tools/rivet-oracle`), waits for `Done (...)!`, then sends the
+//! canonical `stop` command through owned stdin and waits for exit 0 plus the
+//! clean save. `ServerKind::Rivet` boots the `rivet-server` binary headlessly,
+//! waits for the machine-readable `RIVET_READY` marker on stdout
+//! (rivet-server/src/main.rs), then SIGTERM and waits for a clean exit (code 0).
 //!
-//! The child-process lifecycle (spawn with log tee, READY poll, kill-on-drop,
-//! SIGTERM + reap) is the shared `rivet-harness-common::server` module; this
+//! The child-process lifecycle (spawn with log tee, READY poll, piped Paper
+//! stdin, bounded graceful wait, failure-only TERM/KILL cleanup, kill-on-drop,
+//! and reap) is the shared `rivet-harness-common::server` module; this
 //! module owns what is scenario-specific: which command to spawn per kind, the
 //! READY marker test, the per-kind boot timeout, the run-dir preparation, the
 //! Paper clean-save / Rivet clean-exit assertions, and the load-bearing Paper
@@ -18,12 +19,11 @@
 //! slow ~160MB downloads) and wipe everything else, so each run is a fresh world
 //! at a fixed seed while staying fast on re-runs. `versions/` is deliberately
 //! NOT preserved: the paperclip re-materializes the server jar on every boot, so
-//! `verify_paper_provenance` (called only by the Rivet-vs-Paper differential
-//! path in main.rs, where the Paper reference must be the pinned oracle commit)
-//! can only ever see the jar the artifact actually being booted produced — a
-//! swapped, stale, or non-bundler artifact cannot silently stand in for the
-//! pinned reference. Paper-vs-Paper self-checks and capture do not require the
-//! pin: they compare a build against itself. Concurrent servers get distinct
+//! `verify_paper_provenance` runs for every successful Paper shutdown and can
+//! only ever see the jar the artifact actually being booted produced — a swapped,
+//! stale, or non-bundler artifact cannot silently stand in for the pinned
+//! reference, including standalone self-check and capture commands. Concurrent
+//! servers get distinct
 //! ports (held `rivet-harness-common::port` reservations from main.rs): the
 //! Paper run dir's `server.properties` is patched to the allocated port and
 //! `rivet-server` is passed `--host`/`--port`, so no two servers in a scenario
@@ -90,8 +90,12 @@ pub const GENERATED_SEED: u64 = 42;
 pub const BOOT_TIMEOUT: Duration = Duration::from_secs(180);
 /// How long to wait for rivet-server to reach `RIVET_READY`.
 pub const RIVET_BOOT_TIMEOUT: Duration = Duration::from_secs(60);
-/// How long to wait for a clean shutdown after SIGTERM.
+/// How long to wait for a normal Paper `stop` or Rivet SIGTERM shutdown.
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(90);
+/// Bounded TERM grace used only to clean up a failed Paper `stop` lifecycle
+/// before the child is KILLed and reaped.
+const PAPER_FAILURE_CLEANUP_GRACE: Duration = Duration::from_secs(5);
+const PAPER_STOP_COMMAND: &[u8] = b"stop\n";
 /// Poll interval while watching the boot log / process exit.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -169,16 +173,6 @@ pub struct Server {
     /// materialized the compiled server jar, so `shutdown` can verify the
     /// booted jar's provenance.
     run_dir: PathBuf,
-}
-
-impl Server {
-    /// The run dir the server booted in. For Paper this is where the paperclip
-    /// materialized the compiled server jar, so a caller that needs the
-    /// load-bearing provenance check (the Rivet-vs-Paper differential) can
-    /// verify the booted jar after shutdown.
-    pub fn run_dir(&self) -> &Path {
-        &self.run_dir
-    }
 }
 
 /// Locate the paperclip jar: `RIVET_ORACLE_JAR` env wins, then a copy in
@@ -671,7 +665,11 @@ pub fn boot(
     if let Some(reservation) = port_reservation {
         reservation.release();
     }
-    let mut child = ChildServer::spawn(&mut command, log_path).map_err(|e| match kind {
+    let spawned = match kind {
+        ServerKind::Paper => ChildServer::spawn_piped(&mut command, log_path),
+        ServerKind::Rivet => ChildServer::spawn(&mut command, log_path),
+    };
+    let mut child = spawned.map_err(|e| match kind {
         ServerKind::Paper => Error::Gate(format!(
             "failed to spawn java: {e} (is a Java 25+ JRE on PATH?)"
         )),
@@ -694,54 +692,74 @@ pub fn boot(
     })
 }
 
-/// SIGTERM the server and wait for its clean shutdown.
+/// Request the server's canonical clean shutdown and wait for bounded exit.
 ///
-/// Paper's clean shutdown is the `All dimensions are saved` marker in the
-/// post-`Done` log tail. Rivet's clean shutdown is the SIGTERM handler draining
-/// and exiting with code 0 (rivet-server/src/main.rs); Rivet persists no world
-/// state yet, so the exit status is the load-bearing assertion.
+/// Paper receives `stop` through owned piped stdin and must exit 0 with the `All
+/// dimensions are saved` marker in the post-`Done` log tail; TERM/KILL are only
+/// failure cleanup and never turn that path into success. Rivet keeps its native
+/// SIGTERM handler contract and must drain and exit 0.
 pub fn shutdown(server: &mut Server) -> Result<(), Error> {
-    println!("    server ready; shutting down cleanly (SIGTERM)...");
+    match server.kind {
+        ServerKind::Paper => println!("    server ready; shutting down cleanly (stop command)..."),
+        ServerKind::Rivet => println!("    server ready; shutting down cleanly (SIGTERM)..."),
+    }
     // Let trailing delayed-init / chunk I/O settle before stopping.
     thread::sleep(Duration::from_millis(1500));
-    let status = server.child.shutdown(SHUTDOWN_TIMEOUT, POLL_INTERVAL)?;
+    let status = match server.kind {
+        ServerKind::Paper => server.child.shutdown_with_command(
+            PAPER_STOP_COMMAND,
+            SHUTDOWN_TIMEOUT,
+            PAPER_FAILURE_CLEANUP_GRACE,
+            POLL_INTERVAL,
+        )?,
+        ServerKind::Rivet => server.child.shutdown(SHUTDOWN_TIMEOUT, POLL_INTERVAL)?,
+    };
 
-    match server.kind {
-        ServerKind::Paper => {
-            let bytes = fs::read(server.child.log_path())?;
-            let done_offset = server.child.ready_offset();
-            let tail = if bytes.len() > done_offset {
-                String::from_utf8_lossy(&bytes[done_offset..]).into_owned()
-            } else {
-                String::new()
-            };
-            if !tail.contains("All dimensions are saved") {
-                return Err(Error::Gate(
-                    "server shut down without a clean save ('All dimensions are saved' missing \
-                     from post-Done log tail)"
-                        .into(),
-                ));
-            }
-            // Provenance is verified only where it is load-bearing: the
-            // Rivet-vs-Paper differential (run_paper_vs_rivet) requires the
-            // Paper reference to be the pinned oracle commit. Paper-vs-Paper
-            // self-checks (paper:paper join, move) and capture compare a build
-            // against itself, so the pin is not a correctness requirement
-            // there. The differential path calls verify_paper_provenance
-            // explicitly after this shutdown.
-        }
-        ServerKind::Rivet => {
-            // Clean shutdown is the SIGTERM handler draining and exiting 0
-            // (rivet-server/src/main.rs). A nonzero exit after SIGTERM means the
-            // server crashed or refused the orderly shutdown.
-            if !status.success() {
-                return Err(Error::Gate(format!(
-                    "rivet-server exited with {status} after SIGTERM (expected a clean exit 0) — \
-                     see {}",
-                    server.child.log_path().display()
-                )));
-            }
-        }
+    let paper_tail = if server.kind == ServerKind::Paper {
+        let bytes = fs::read(server.child.log_path())?;
+        let done_offset = server.child.ready_offset();
+        Some(if bytes.len() > done_offset {
+            String::from_utf8_lossy(&bytes[done_offset..]).into_owned()
+        } else {
+            String::new()
+        })
+    } else {
+        None
+    };
+    verify_shutdown_result(
+        server.kind,
+        status,
+        server.child.log_path(),
+        paper_tail.as_deref(),
+    )?;
+    if server.kind == ServerKind::Paper {
+        verify_paper_provenance(&server.run_dir)?;
+    }
+    Ok(())
+}
+
+fn verify_shutdown_result(
+    kind: ServerKind,
+    status: std::process::ExitStatus,
+    log_path: &Path,
+    paper_tail: Option<&str>,
+) -> Result<(), Error> {
+    if !status.success() {
+        return Err(Error::Gate(format!(
+            "{kind} exited with {status} during clean shutdown (expected exit 0) — see {}",
+            log_path.display()
+        )));
+    }
+    if kind == ServerKind::Paper
+        && !paper_tail
+            .unwrap_or_default()
+            .contains("All dimensions are saved")
+    {
+        return Err(Error::Gate(
+            "server shut down without a clean save ('All dimensions are saved' missing from \
+             post-Done log tail)"
+                .into(),
+        ));
     }
     Ok(())
 }
@@ -755,6 +773,176 @@ mod tests {
 
     fn test_socket() -> SocketAddr {
         "127.0.0.1:25599".parse().unwrap()
+    }
+
+    #[test]
+    fn paper_clean_save_marker_cannot_mask_nonzero_exit() {
+        let status = Command::new("sh").args(["-c", "exit 7"]).status().unwrap();
+        let error = verify_shutdown_result(
+            ServerKind::Paper,
+            status,
+            Path::new("paper.log"),
+            Some("All dimensions are saved"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("exit status: 7"));
+    }
+
+    #[cfg(unix)]
+    fn shutdown_test_child(label: &str, script: &str, piped: bool) -> ChildServer {
+        let log = std::env::temp_dir().join(format!(
+            "rivet-paper-shutdown-{label}-{}.log",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&log);
+        let mut command = Command::new("sh");
+        command.args(["-c", script]);
+        if piped {
+            ChildServer::spawn_piped(&mut command, &log).unwrap()
+        } else {
+            ChildServer::spawn(&mut command, &log).unwrap()
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paper_stop_command_exits_zero_and_reaps() {
+        let mut child = shutdown_test_child(
+            "graceful",
+            "IFS= read -r command; [ \"$command\" = stop ] || exit 9; echo 'All dimensions are saved'; exit 0",
+            true,
+        );
+        let status = child
+            .shutdown_with_command(
+                PAPER_STOP_COMMAND,
+                Duration::from_secs(1),
+                Duration::from_millis(100),
+                Duration::from_millis(5),
+            )
+            .unwrap();
+        assert!(status.success());
+        assert!(child.is_stopped());
+        let log = fs::read_to_string(child.log_path()).unwrap();
+        assert!(log.contains("All dimensions are saved"));
+        verify_shutdown_result(ServerKind::Paper, status, child.log_path(), Some(&log)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paper_process_that_exits_early_cannot_deadlock_or_pass_and_is_reaped() {
+        let mut child = shutdown_test_child("early-exit", "exit 7", true);
+        thread::sleep(Duration::from_millis(50));
+        let result = child.shutdown_with_command(
+            PAPER_STOP_COMMAND,
+            Duration::from_millis(100),
+            Duration::from_millis(100),
+            Duration::from_millis(5),
+        );
+        let failed = match result {
+            Ok(status) => verify_shutdown_result(
+                ServerKind::Paper,
+                status,
+                child.log_path(),
+                Some("All dimensions are saved"),
+            )
+            .is_err(),
+            Err(rivet_harness_common::server::Error::Gate(_)) => true,
+            Err(error) => panic!("early exit had wrong classification: {error}"),
+        };
+        assert!(failed);
+        assert!(child.is_stopped());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sigterm_only_paper_exit_143_remains_a_failure_and_is_reaped() {
+        let mut child = shutdown_test_child(
+            "term-143",
+            "trap 'exit 143' TERM; echo ready; while :; do sleep 1; done",
+            false,
+        );
+        thread::sleep(Duration::from_millis(50));
+        let status = child
+            .shutdown(Duration::from_secs(1), Duration::from_millis(5))
+            .unwrap();
+        assert_eq!(status.code(), Some(143));
+        assert!(child.is_stopped());
+        let error = verify_shutdown_result(
+            ServerKind::Paper,
+            status,
+            child.log_path(),
+            Some("All dimensions are saved"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("exit status: 143"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_paper_stdin_is_a_failure_with_bounded_cleanup_and_reap() {
+        let mut child = shutdown_test_child(
+            "broken-stdin",
+            "exec 0<&-; echo closed; trap 'exit 143' TERM; while :; do sleep 1; done",
+            true,
+        );
+        thread::sleep(Duration::from_millis(50));
+        let error = child
+            .shutdown_with_command(
+                PAPER_STOP_COMMAND,
+                Duration::from_millis(100),
+                Duration::from_millis(100),
+                Duration::from_millis(5),
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("failed to write graceful shutdown command")
+        );
+        assert!(child.is_stopped());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unavailable_paper_stdin_is_a_failure_with_bounded_cleanup_and_reap() {
+        let mut child = shutdown_test_child(
+            "unavailable-stdin",
+            "trap 'exit 143' TERM; while :; do sleep 1; done",
+            false,
+        );
+        thread::sleep(Duration::from_millis(50));
+        let error = child
+            .shutdown_with_command(
+                PAPER_STOP_COMMAND,
+                Duration::from_millis(100),
+                Duration::from_millis(100),
+                Duration::from_millis(5),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("stdin is unavailable"));
+        assert!(child.is_stopped());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hung_paper_stop_uses_failure_only_term_kill_cleanup_and_reaps() {
+        let mut child = shutdown_test_child(
+            "hung-stop",
+            "trap '' TERM; IFS= read -r command; [ \"$command\" = stop ] || exit 9; while :; do :; done",
+            true,
+        );
+        let error = child
+            .shutdown_with_command(
+                PAPER_STOP_COMMAND,
+                Duration::from_millis(50),
+                Duration::from_millis(50),
+                Duration::from_millis(5),
+            )
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("did not exit after graceful shutdown command"));
+        assert!(message.contains("KILL cleanup reaped"));
+        assert!(child.is_stopped());
     }
 
     #[cfg(unix)]

@@ -18,7 +18,7 @@ export CARGO_TARGET_DIR="$resolved_target_dir"
 
 tool_target_dir="$CARGO_TARGET_DIR"
 cd "$tool_dir"
-cargo build --locked
+cargo build --locked --bin run-scenario
 cargo test --locked --bin run-scenario
 
 desired_server=0
