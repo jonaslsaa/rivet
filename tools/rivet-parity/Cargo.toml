@@ -16,3 +16,4 @@ rivet-util = { path = "../../crates/rivet-util" }
 # preserved — required for byte-identical component-JSON canonical compare
 # against Paper's Gson output (issue #98).
 serde_json = { workspace = true }
+sha2 = { workspace = true }

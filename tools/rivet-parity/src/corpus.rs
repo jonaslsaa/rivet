@@ -267,51 +267,555 @@ pub fn encode_corpus() -> Vec<(String, String)> {
     out
 }
 
-/// Locate the committed M0 chunk fixtures relative to the workspace root.
-///
-/// This crate lives at `<ws>/tools/rivet-parity`, two levels under the
-/// workspace root (unlike the `crates/*` packages, which are three deep).
-pub fn fixtures_dir() -> Option<std::path::PathBuf> {
-    let ws = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()?
-        .parent()?;
-    let dir = ws.join("tools/rivet-oracle/fixtures/chunk");
-    dir.is_dir().then_some(dir)
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::path::{Component, Path, PathBuf};
+
+use sha2::{Digest, Sha256};
+
+const MANIFEST_BYTES: &[u8] = include_bytes!("../fixtures/corpus-manifest.json");
+
+#[derive(Debug, Clone)]
+pub struct FixtureFile {
+    pub label: String,
+    pub bytes: Vec<u8>,
 }
 
-/// Locate + load the committed `fixtures/text/` component-JSON corpus + golden
-/// (issue #98). Shared with the offline corpus tests: the single loader lives
-/// in `rivet-text` (the crate whose codec the corpus exercises), and this tool
-/// reuses it so the schema parsing can never drift between the two. The entry
-/// type is `rivet_text::corpus::TextFixtureEntry` (visible through the returned
-/// `text_corpus()` signature; callers never name it). A malformed committed
-/// corpus is a hard `CorpusError::Malformed` — only genuine absence
-/// (`CorpusError::Absent`) lets the caller skip the section.
-pub use rivet_text::corpus::{CorpusError, text_corpus, text_fixtures_dir};
+#[derive(Debug, Clone)]
+pub struct CorpusClosure {
+    pub chunk_root: PathBuf,
+    pub files: Vec<FixtureFile>,
+    pub manifest_sha256: String,
+    pub declared: usize,
+    pub discovered: usize,
+    pub text_entries: usize,
+}
 
-/// Walk the fixtures tree collecting `*.nbt` files in deterministic order.
-pub fn collect_fixtures(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut out = Vec::new();
-    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        for entry in std::fs::read_dir(dir).expect("fixtures dir readable") {
-            let path = entry.expect("entry").path();
-            if path.is_dir() {
-                walk(&path, out);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("nbt") {
-                out.push(path);
-            }
+#[derive(Debug)]
+pub enum ClosureError {
+    Absent(String),
+    Invalid(String),
+}
+
+impl fmt::Display for ClosureError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Absent(message) => write!(f, "parity corpus absent: {message}"),
+            Self::Invalid(message) => write!(f, "parity corpus invalid: {message}"),
         }
     }
-    walk(dir, &mut out);
-    out.sort();
-    out
 }
 
-/// Label for a fixture path relative to the fixtures `chunk` root, e.g.
-/// `overworld/0.0/0.0.nbt`.
-pub fn fixture_label(chunk_root: &std::path::Path, path: &std::path::Path) -> String {
-    path.strip_prefix(chunk_root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .into_owned()
+fn workspace_root() -> Option<PathBuf> {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()?
+        .parent()
+        .map(Path::to_path_buf)
+}
+
+fn safe_relative_path(raw: &str) -> Result<PathBuf, ClosureError> {
+    let path = Path::new(raw);
+    if raw.is_empty()
+        || raw.contains('\\')
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(ClosureError::Invalid(format!(
+            "manifest path is not a safe normalized relative path: {raw:?}"
+        )));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn regular_file_bytes(path: &Path) -> Result<Vec<u8>, ClosureError> {
+    let meta = std::fs::symlink_metadata(path).map_err(|error| {
+        ClosureError::Invalid(format!(
+            "{} is missing or unreadable: {error}",
+            path.display()
+        ))
+    })?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err(ClosureError::Invalid(format!(
+            "{} is not a regular non-symlink file",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() != 1 {
+            return Err(ClosureError::Invalid(format!(
+                "{} has {} hard links",
+                path.display(),
+                meta.nlink()
+            )));
+        }
+    }
+    std::fs::read(path)
+        .map_err(|error| ClosureError::Invalid(format!("{} unreadable: {error}", path.display())))
+}
+
+/// Load the committed chunk corpus only after proving exact manifest closure.
+/// Missing roots are distinct from present-but-invalid trees so strict callers
+/// can report UNVERIFIED vs FAILED without silently skipping either case.
+pub fn load_fixture_closure() -> Result<CorpusClosure, ClosureError> {
+    let workspace = workspace_root()
+        .ok_or_else(|| ClosureError::Absent("workspace root cannot be resolved".to_string()))?;
+    let chunk_root = workspace.join("tools/rivet-oracle/fixtures/chunk");
+    load_fixture_closure_from(chunk_root, MANIFEST_BYTES)
+}
+
+fn load_fixture_closure_from(
+    chunk_root: PathBuf,
+    manifest_bytes: &[u8],
+) -> Result<CorpusClosure, ClosureError> {
+    let root_meta = match std::fs::symlink_metadata(&chunk_root) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ClosureError::Absent(format!(
+                "{} does not exist",
+                chunk_root.display()
+            )));
+        }
+        Err(error) => {
+            return Err(ClosureError::Invalid(format!(
+                "{} cannot be inspected: {error}",
+                chunk_root.display()
+            )));
+        }
+    };
+    if root_meta.file_type().is_symlink() || !root_meta.is_dir() {
+        return Err(ClosureError::Invalid(format!(
+            "{} is not a regular directory",
+            chunk_root.display()
+        )));
+    }
+
+    let manifest: serde_json::Value = serde_json::from_slice(manifest_bytes).map_err(|error| {
+        ClosureError::Invalid(format!("embedded manifest is malformed: {error}"))
+    })?;
+    if manifest["format"].as_u64() != Some(1)
+        || manifest["kind"].as_str() != Some("rivet-parity-corpus")
+        || manifest["paper"].as_str() != Some("26.2-DEV-main@0a99345")
+    {
+        return Err(ClosureError::Invalid(
+            "embedded manifest has the wrong format/kind".to_string(),
+        ));
+    }
+    let expected = manifest["expected"]
+        .as_object()
+        .ok_or_else(|| ClosureError::Invalid("manifest lacks expected counts".to_string()))?;
+    let expected_chunks = expected["chunk_nbt"]
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| ClosureError::Invalid("manifest chunk_nbt count is invalid".to_string()))?;
+    let text_entries = expected["text_entries"]
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| {
+            ClosureError::Invalid("manifest text_entries count is invalid".to_string())
+        })?;
+    let mut handbuilt_ids = BTreeSet::new();
+    for (kind, label) in parse_corpus()
+        .into_iter()
+        .map(|(label, _)| ("snbt-valid", label.to_string()))
+        .chain(
+            invalid_corpus()
+                .into_iter()
+                .map(|(label, _)| ("snbt-invalid", label.to_string())),
+        )
+        .chain(
+            encode_corpus()
+                .into_iter()
+                .map(|(label, _)| ("nbt-encode", label)),
+        )
+    {
+        if !handbuilt_ids.insert((kind, label.clone())) {
+            return Err(ClosureError::Invalid(format!(
+                "duplicate hand-built fixture id {kind}:{label}"
+            )));
+        }
+    }
+    if expected["snbt_valid"].as_u64() != Some(parse_corpus().len() as u64)
+        || expected["snbt_invalid"].as_u64() != Some(invalid_corpus().len() as u64)
+        || expected["nbt_encode"].as_u64() != Some(encode_corpus().len() as u64)
+    {
+        return Err(ClosureError::Invalid(
+            "manifest hand-built corpus counts do not match executable declarations".to_string(),
+        ));
+    }
+
+    let entries = manifest["chunk_files"]
+        .as_array()
+        .ok_or_else(|| ClosureError::Invalid("manifest lacks chunk_files".to_string()))?;
+    if entries.len() != expected_chunks {
+        return Err(ClosureError::Invalid(format!(
+            "manifest declares {expected_chunks} chunks but lists {}",
+            entries.len()
+        )));
+    }
+    let mut declared = BTreeMap::new();
+    for entry in entries {
+        let raw = entry["path"]
+            .as_str()
+            .ok_or_else(|| ClosureError::Invalid("chunk entry lacks path".to_string()))?;
+        let relative = safe_relative_path(raw)?;
+        if relative.extension().and_then(|value| value.to_str()) != Some("nbt") {
+            return Err(ClosureError::Invalid(format!(
+                "manifest chunk path is not .nbt: {raw}"
+            )));
+        }
+        let digest = entry["sha256"]
+            .as_str()
+            .filter(|value| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()))
+            .ok_or_else(|| ClosureError::Invalid(format!("{raw}: invalid sha256")))?;
+        let size = entry["bytes"]
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| ClosureError::Invalid(format!("{raw}: invalid byte count")))?;
+        if declared
+            .insert(relative, (digest.to_ascii_lowercase(), size))
+            .is_some()
+        {
+            return Err(ClosureError::Invalid(format!(
+                "duplicate/aliased manifest path: {raw}"
+            )));
+        }
+    }
+
+    let mut discovered = BTreeSet::new();
+    fn walk(root: &Path, dir: &Path, out: &mut BTreeSet<PathBuf>) -> Result<(), ClosureError> {
+        let entries = std::fs::read_dir(dir).map_err(|error| {
+            ClosureError::Invalid(format!("{} unreadable: {error}", dir.display()))
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                ClosureError::Invalid(format!("{} entry unreadable: {error}", dir.display()))
+            })?;
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path).map_err(|error| {
+                ClosureError::Invalid(format!("{} cannot be inspected: {error}", path.display()))
+            })?;
+            if meta.file_type().is_symlink() {
+                return Err(ClosureError::Invalid(format!(
+                    "fixture tree contains symlink {}",
+                    path.display()
+                )));
+            }
+            if meta.is_dir() {
+                walk(root, &path, out)?;
+            } else if meta.is_file() {
+                let relative = path.strip_prefix(root).map_err(|_| {
+                    ClosureError::Invalid(format!("{} escaped fixture root", path.display()))
+                })?;
+                if relative.extension().and_then(|value| value.to_str()) != Some("nbt") {
+                    return Err(ClosureError::Invalid(format!(
+                        "unlisted non-NBT fixture file {}",
+                        relative.display()
+                    )));
+                }
+                out.insert(relative.to_path_buf());
+            } else {
+                return Err(ClosureError::Invalid(format!(
+                    "fixture tree contains non-regular entry {}",
+                    path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+    walk(&chunk_root, &chunk_root, &mut discovered)?;
+    let declared_set: BTreeSet<_> = declared.keys().cloned().collect();
+    if discovered != declared_set {
+        let missing: Vec<_> = declared_set.difference(&discovered).collect();
+        let unlisted: Vec<_> = discovered.difference(&declared_set).collect();
+        return Err(ClosureError::Invalid(format!(
+            "chunk fixture set differs from manifest: missing={missing:?} unlisted={unlisted:?}"
+        )));
+    }
+
+    let mut files = Vec::with_capacity(declared.len());
+    for (relative, (expected_digest, expected_size)) in declared {
+        let path = chunk_root.join(&relative);
+        let bytes = regular_file_bytes(&path)?;
+        if bytes.len() != expected_size || sha256(&bytes) != expected_digest {
+            return Err(ClosureError::Invalid(format!(
+                "{} content differs from manifest",
+                relative.display()
+            )));
+        }
+        files.push(FixtureFile {
+            label: relative.to_string_lossy().into_owned(),
+            bytes,
+        });
+    }
+
+    Ok(CorpusClosure {
+        chunk_root,
+        declared: files.len(),
+        discovered: discovered.len(),
+        files,
+        manifest_sha256: sha256(manifest_bytes),
+        text_entries,
+    })
+}
+
+/// Validate the text fixture directory's exact three-file closure and the
+/// committed capture manifest before delegating schema merging to rivet-text.
+pub fn validate_text_fixture_closure() -> Result<(), ClosureError> {
+    let workspace = workspace_root()
+        .ok_or_else(|| ClosureError::Absent("workspace root cannot be resolved".to_string()))?;
+    let dir = workspace.join("tools/rivet-oracle/fixtures/text");
+    let root_meta = match std::fs::symlink_metadata(&dir) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ClosureError::Absent(
+                "tools/rivet-oracle/fixtures/text is absent".to_string(),
+            ));
+        }
+        Err(error) => {
+            return Err(ClosureError::Invalid(format!(
+                "{} cannot be inspected: {error}",
+                dir.display()
+            )));
+        }
+    };
+    if root_meta.file_type().is_symlink() || !root_meta.is_dir() {
+        return Err(ClosureError::Invalid(format!(
+            "{} is not a regular directory",
+            dir.display()
+        )));
+    }
+    let expected: BTreeSet<_> = ["corpus.json", "golden.json", "manifest.json"]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    let mut discovered = BTreeSet::new();
+    for entry in std::fs::read_dir(&dir)
+        .map_err(|error| ClosureError::Invalid(format!("{} unreadable: {error}", dir.display())))?
+    {
+        let entry = entry.map_err(|error| ClosureError::Invalid(error.to_string()))?;
+        let path = entry.path();
+        let meta = std::fs::symlink_metadata(&path)
+            .map_err(|error| ClosureError::Invalid(format!("{}: {error}", path.display())))?;
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return Err(ClosureError::Invalid(format!(
+                "text fixture entry is not a regular file: {}",
+                path.display()
+            )));
+        }
+        discovered.insert(PathBuf::from(entry.file_name()));
+    }
+    if discovered != expected {
+        return Err(ClosureError::Invalid(format!(
+            "text fixture file set differs: expected={expected:?} discovered={discovered:?}"
+        )));
+    }
+    let manifest_bytes = regular_file_bytes(&dir.join("manifest.json"))?;
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| ClosureError::Invalid(format!("text manifest malformed: {error}")))?;
+    if manifest["format"].as_u64() != Some(1)
+        || manifest["kind"].as_str() != Some("text")
+        || manifest["paper"].as_str() != Some("26.2-DEV-main@0a99345")
+    {
+        return Err(ClosureError::Invalid(
+            "text manifest has the wrong format/kind/Paper pin".to_string(),
+        ));
+    }
+    let captured = manifest["captured"]
+        .as_array()
+        .ok_or_else(|| ClosureError::Invalid("text manifest lacks captured files".to_string()))?;
+    if captured.len() != 2 {
+        return Err(ClosureError::Invalid(
+            "text manifest must capture exactly corpus.json and golden.json".to_string(),
+        ));
+    }
+    let mut captured_names = BTreeSet::new();
+    for entry in captured {
+        let raw = entry["path"]
+            .as_str()
+            .ok_or_else(|| ClosureError::Invalid("text capture lacks path".to_string()))?;
+        let relative = safe_relative_path(raw)?;
+        if !captured_names.insert(relative.clone()) {
+            return Err(ClosureError::Invalid(format!(
+                "duplicate text capture {raw}"
+            )));
+        }
+        let bytes = regular_file_bytes(&dir.join(&relative))?;
+        let expected_size = entry["bytes"]
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| ClosureError::Invalid(format!("{raw}: invalid byte count")))?;
+        let expected_digest = entry["sha256"]
+            .as_str()
+            .ok_or_else(|| ClosureError::Invalid(format!("{raw}: missing sha256")))?;
+        if bytes.len() != expected_size || sha256(&bytes) != expected_digest {
+            return Err(ClosureError::Invalid(format!(
+                "text fixture {raw} differs from manifest"
+            )));
+        }
+    }
+    let expected_captures: BTreeSet<_> =
+        [PathBuf::from("corpus.json"), PathBuf::from("golden.json")]
+            .into_iter()
+            .collect();
+    if captured_names != expected_captures {
+        return Err(ClosureError::Invalid(format!(
+            "text manifest captures wrong files: {captured_names:?}"
+        )));
+    }
+    Ok(())
+}
+
+pub use rivet_text::corpus::{CorpusError, text_corpus, text_fixtures_dir};
+
+#[cfg(test)]
+mod closure_tests {
+    use super::*;
+
+    #[test]
+    fn committed_corpus_has_exact_manifest_closure() {
+        let closure = load_fixture_closure().expect("committed chunk closure");
+        assert_eq!(closure.declared, 432);
+        assert_eq!(closure.discovered, 432);
+        assert_eq!(closure.files.len(), 432);
+        assert_eq!(closure.text_entries, 62);
+        validate_text_fixture_closure().expect("committed text closure");
+    }
+
+    #[test]
+    fn executable_corpus_counts_match_manifest() {
+        let manifest: serde_json::Value = serde_json::from_slice(MANIFEST_BYTES).unwrap();
+        assert_eq!(manifest["expected"]["snbt_valid"], parse_corpus().len());
+        assert_eq!(manifest["expected"]["snbt_invalid"], invalid_corpus().len());
+        assert_eq!(manifest["expected"]["nbt_encode"], encode_corpus().len());
+    }
+
+    fn temp_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "rivet-parity-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn one_file_manifest(path: &str, bytes: &[u8]) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "format": 1,
+            "kind": "rivet-parity-corpus",
+            "paper": "26.2-DEV-main@0a99345",
+            "expected": {
+                "chunk_nbt": 1,
+                "text_entries": 0,
+                "snbt_valid": parse_corpus().len(),
+                "snbt_invalid": invalid_corpus().len(),
+                "nbt_encode": encode_corpus().len(),
+            },
+            "chunk_files": [{
+                "path": path,
+                "sha256": sha256(bytes),
+                "bytes": bytes.len(),
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn closure_rejects_missing_extra_and_changed_files() {
+        let root = temp_root("set");
+        let bytes = b"fixture";
+        let manifest = one_file_manifest("a.nbt", bytes);
+        assert!(matches!(
+            load_fixture_closure_from(root.clone(), &manifest),
+            Err(ClosureError::Invalid(_))
+        ));
+        std::fs::write(root.join("a.nbt"), bytes).unwrap();
+        load_fixture_closure_from(root.clone(), &manifest).unwrap();
+        std::fs::write(root.join("extra.nbt"), bytes).unwrap();
+        assert!(matches!(
+            load_fixture_closure_from(root.clone(), &manifest),
+            Err(ClosureError::Invalid(_))
+        ));
+        std::fs::remove_file(root.join("extra.nbt")).unwrap();
+        std::fs::write(root.join("a.nbt"), b"changed").unwrap();
+        assert!(matches!(
+            load_fixture_closure_from(root.clone(), &manifest),
+            Err(ClosureError::Invalid(_))
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn closure_rejects_aliases_and_unsafe_entries() {
+        for bad in ["../a.nbt", "/a.nbt", "a\\b.nbt", "a/./b.nbt", ""] {
+            let root = temp_root("path");
+            let manifest = one_file_manifest(bad, b"fixture");
+            assert!(matches!(
+                load_fixture_closure_from(root.clone(), &manifest),
+                Err(ClosureError::Invalid(_))
+            ));
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn closure_rejects_duplicate_manifest_paths() {
+        let root = temp_root("duplicates");
+        let bytes = b"fixture";
+        std::fs::write(root.join("a.nbt"), bytes).unwrap();
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&one_file_manifest("a.nbt", bytes)).unwrap();
+        manifest["expected"]["chunk_nbt"] = 2.into();
+        let duplicate = manifest["chunk_files"][0].clone();
+        manifest["chunk_files"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate);
+        assert!(matches!(
+            load_fixture_closure_from(root.clone(), &serde_json::to_vec(&manifest).unwrap()),
+            Err(ClosureError::Invalid(_))
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn closure_rejects_symlinks_and_hardlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("links");
+        let outside = root.with_extension("outside");
+        std::fs::write(&outside, b"fixture").unwrap();
+        symlink(&outside, root.join("a.nbt")).unwrap();
+        let manifest = one_file_manifest("a.nbt", b"fixture");
+        assert!(matches!(
+            load_fixture_closure_from(root.clone(), &manifest),
+            Err(ClosureError::Invalid(_))
+        ));
+        std::fs::remove_file(root.join("a.nbt")).unwrap();
+        std::fs::hard_link(&outside, root.join("a.nbt")).unwrap();
+        assert!(matches!(
+            load_fixture_closure_from(root.clone(), &manifest),
+            Err(ClosureError::Invalid(_))
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&outside);
+        symlink(&outside, &root).unwrap();
+        assert!(matches!(
+            load_fixture_closure_from(root.clone(), &manifest),
+            Err(ClosureError::Invalid(_))
+        ));
+        let _ = std::fs::remove_file(root);
+    }
 }
