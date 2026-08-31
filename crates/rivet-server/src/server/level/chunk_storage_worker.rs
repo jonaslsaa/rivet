@@ -1,52 +1,58 @@
-//! G5 persistence foundation — a detached single-owner chunk storage worker.
+//! Persistence 83-B: a detached single-owner chunk storage controller.
 //!
-//! This is the first slice of generated-FULL-save persistence: a storage worker
-//! that takes **owned** `(ChunkPos, CompoundTag)` save values off the tick thread
-//! over a **bounded** channel and writes them through exactly one writable
-//! `RegionFileStorage`, whose handles it alone owns. It is deliberately *not*
-//! coupled to the unfinished G3/G4 serving pipeline — the tick thread's chunk
-//! serialization and the actual generated-`LevelChunk` hookup are explicitly
-//! deferred to the G3/G4 integration layer (see `OWNERSHIP.md` "Chunk storage
-//! workers" and `docs/chunk-pipeline-spec.md` §8/§5).
+//! The controller takes **owned** `(ChunkPos, CompoundTag)` store values off the
+//! tick thread over a **bounded** FIFO command mailbox.
+//! [`StorageCommand::Store`] crosses the channel as an owned [`ChunkSave`];
+//! when the channel is full, `SyncSender::send` blocks rather than rejecting,
+//! which is the only backpressure the controller needs. The worker owns a
+//! latest-write pending map (`IndexMap<ChunkPos, CompoundTag>`): a store
+//! replaces any earlier un-flushed value for the same position, so repeated
+//! saves of one chunk coalesce to the newest tag before any write. Reads check
+//! that pending map before disk; an explicit flush writes every latest pending
+//! tag through the worker's sole [`RegionFileStorage`] owner and then forces
+//! the region files. Memory stays bounded by the channel capacity plus the set
+//! of not-yet-written positions.
+//!
+//! This is deliberately *not* coupled to ServerLevel, ChunkMap, G4 scheduling,
+//! autosave, restart/loading, client wiring, or any chunk generation/promotion
+//! path.
 //!
 //! ## Ownership model (OWNERSHIP "Chunk storage workers" amendment)
 //!
-//! - The channel is `std::sync::mpsc::sync_channel` — a **bounded**,
-//!   notify-blocking channel. Backpressure is the channel: a full channel blocks
-//!   the sender (the tick thread) until the worker drains.
+//! - The command mailbox is `std::sync::mpsc::sync_channel` — a **bounded**,
+//!   notify-blocking FIFO channel. Backpressure blocks senders (including
+//!   same-position replacements and synchronous read/flush requests) until the
+//!   worker drains; nothing is rejected for being full.
+//! - The pending map lives on the worker thread only; no caller-side lock ever
+//!   touches it. A read or flush issued after an `enqueue` is FIFO-ordered
+//!   behind it on the channel, so it observes (or flushes) every prior accepted
+//!   store.
 //! - Exactly **one** storage worker thread owns the writable `RegionFileStorage`
-//!   (all its `RegionFile` handles). The tick thread never touches a
-//!   `RegionFileStorage`; it only hands owned `CompoundTag` values across the
-//!   channel. No game-state `Arc<RwLock>`, no `RegionFileStorage` shared across
-//!   threads, no unbounded queue.
+//!   (all its `RegionFile` handles). Callers never touch it; they hand owned
+//!   values across the channel and receive owned read results back. No
+//!   game-state `Arc<RwLock>`, no shared storage, no unbounded queue.
 //! - The worker thread is **joined on shutdown** ([`ChunkStorageWorker::shutdown`]
 //!   and `Drop`) — never a detached unjoined thread.
 //!
-//! ## Shutdown semantics (first slice: save-on-shutdown)
+//! ## Shutdown semantics
 //!
-//! Saves are written in FIFO order by the singleton worker (hence FIFO per
-//! region too). On shutdown the worker drains every accepted save remaining in
-//! the channel, writes each, then `flush`es and `close`s the storage. **Once
-//! shutdown begins no new save is accepted**: [`ChunkStorageWorker::shutdown`]
-//! drops the send half, so a subsequent [`ChunkStorageWorker::enqueue`] refuses
-//! and returns the owned save request to the caller.
+//! Shutdown closes acceptance **before** draining: later `enqueue` calls are
+//! refused with the owned save returned, and later `read`/`flush` calls fail
+//! with a typed broken-pipe error. After in-flight senders finish, the send
+//! half drops and the worker drains every accepted command (writing each latest
+//! pending tag through the region storage), then flushes and closes before it
+//! is joined.
 //!
 //! ## Error semantics
 //!
-//! First-error reporting is preserved end to end. An accepted write that fails
-//! is never silently dropped — the first error on any write/flush/close is
-//! recorded and surfaced on [`StorageWorkerOutcome`]. A failed enqueue (channel
-//! already shut down) returns the owned save request instead of discarding it.
-//! If the worker thread panics, the panic is surfaced (`outcome.panicked`) and
-//! reported as an error.
-//!
-//! ## Scope guardrails
-//!
-//! This slice is **save-on-shutdown only**. Autosave, unload-driven saves,
-//! per-chunk store coalescing, and configuration breadth are explicitly deferred
-//! to the G3/G4 integration layer. The established channel/thread/error
-//! libraries are reused (`std` sync channel + `std` thread + `io::Result`); no
-//! new dependencies are added.
+//! First-error reporting preserves the raw OS error: every write, flush, and
+//! close attempt is snapshotted into a [`StorageWorkerErrorSnapshot`] at the
+//! source, and the first snapshot wins; explicit flushes additionally return
+//! their operation error to the caller. A failed enqueue (channel already shut
+//! down) returns the owned save request instead of discarding it. If the worker
+//! thread panics, the panic is surfaced (`outcome.panicked`) and every accepted
+//! store value — the pending map and the queued commands — is recovered exactly
+//! once.
 
 #[cfg(test)]
 use std::cell::RefCell;
@@ -62,6 +68,7 @@ use std::sync::mpsc::{Receiver, SendError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 
+use indexmap::IndexMap;
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_registry::core::ChunkPos;
 use rivet_world::chunk::storage::{RegionFileStorage, RegionFileVersion, RegionStorageInfo};
@@ -81,6 +88,20 @@ impl ChunkSave {
     pub fn new(pos: ChunkPos, tag: CompoundTag) -> Self {
         Self { pos, tag }
     }
+}
+
+/// Synchronous replies for commands that need a result from the worker.
+type ReadReply = SyncSender<io::Result<Option<CompoundTag>>>;
+type FlushReply = SyncSender<io::Result<()>>;
+
+/// Commands crossing the bounded worker mailbox.
+///
+/// Every variant carries its payload across the channel as owned data. Reply
+/// channels are one-shot and bounded to one result.
+enum StorageCommand {
+    Store(ChunkSave),
+    Read { pos: ChunkPos, reply: ReadReply },
+    Flush { reply: FlushReply },
 }
 
 /// How a [`ChunkStorageWorker`] call failed.
@@ -254,20 +275,20 @@ impl Drop for StorageFolderOwner {
 
 struct AcceptanceState {
     accepting: bool,
+    /// Senders whose command has not returned from `SyncSender::send` yet.
+    /// Shutdown/recovery waits for these sends before taking the final drain.
     active_senders: usize,
 }
 
 /// Shared coordination between the owner (tick-thread side) and the worker.
 ///
-/// In production this carries the recorded first error plus the acceptance
-/// barrier used to close the send side before recovery/finalization. The
-/// pause/panic fields exist solely for deterministic tests and compile out of
-/// production.
+/// The command channel is the only cross-thread queue; it is bounded and holds
+/// owned values. The pause/panic fields exist solely for deterministic tests
+/// and compile out of production.
 struct Shared {
-    /// First I/O error from any worker write/flush/close, once.
-    err: Mutex<Option<io::Error>>,
-    /// Acceptance barrier: no new enqueue may start after shutdown or panic
-    /// recovery closes the gate; in-flight senders finish before recovery drains.
+    /// Snapshot of the first I/O error from any worker write/flush/close.
+    err: Mutex<Option<StorageWorkerErrorSnapshot>>,
+    /// Acceptance barrier used to close stores before recovery/finalization.
     acceptance: Mutex<AcceptanceState>,
     acceptance_cv: Condvar,
     #[cfg(test)]
@@ -300,14 +321,15 @@ impl Shared {
         })
     }
 
-    /// Record `err` if it is the first error seen.
-    fn record_first_err(&self, err: io::Error) {
+    /// Record the first I/O error seen, as a stable snapshot taken at the
+    /// source so `raw_os_error` and other identity survive.
+    fn record_first_err(&self, err: &io::Error) {
         let mut guard = self
             .err
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if guard.is_none() {
-            *guard = Some(err);
+            *guard = Some(StorageWorkerErrorSnapshot::from_error(err));
         }
     }
 
@@ -332,13 +354,10 @@ impl Shared {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.active_senders -= 1;
-        // Wake recovery after every accepted sender completes so it can drain
-        // the newly queued value before another blocked sender fills the
-        // bounded channel.
         self.acceptance_cv.notify_all();
     }
 
-    /// Close public enqueue acceptance. Existing reservations remain valid and
+    /// Close public store acceptance. Existing reservations remain valid and
     /// are accounted for before a recovery drain proceeds.
     fn stop_accepting(&self) {
         let mut state = self
@@ -346,9 +365,7 @@ impl Shared {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.accepting = false;
-        if state.active_senders == 0 {
-            self.acceptance_cv.notify_all();
-        }
+        self.acceptance_cv.notify_all();
     }
 
     fn wait_for_senders(&self) {
@@ -397,27 +414,27 @@ impl Shared {
 }
 
 /// Owned data returned by the worker thread so shutdown can recover accepted
-/// saves even when processing or finalization panics.
+/// stores even when command processing or finalization panics.
 #[derive(Debug, Default)]
 struct WorkerThreadOutcome {
     panicked: bool,
     recovered_saves: Vec<ChunkSave>,
 }
 
-/// The worker's owned state. Keeping the current save in this struct, rather
-/// than in a local that is moved into `RegionFileStorage::write`, lets the
-/// unwind boundary recover it together with the channel queue.
+/// The worker's owned state. Both the storage handle and latest pending values
+/// remain on this thread; no caller-side lock can mutate either one.
 struct WorkerSession {
-    rx: Receiver<ChunkSave>,
+    rx: Receiver<StorageCommand>,
     storage: RegionFileStorage,
     shared: Arc<Shared>,
-    current: Option<ChunkSave>,
+    current: Option<StorageCommand>,
+    pending: IndexMap<ChunkPos, CompoundTag>,
     recovered_saves: Vec<ChunkSave>,
 }
 
 impl WorkerSession {
     fn new(
-        rx: Receiver<ChunkSave>,
+        rx: Receiver<StorageCommand>,
         info: RegionStorageInfo,
         folder: PathBuf,
         version: RegionFileVersion,
@@ -430,58 +447,139 @@ impl WorkerSession {
             ),
             shared,
             current: None,
+            pending: IndexMap::new(),
             recovered_saves: Vec::new(),
         }
     }
 
-    /// Process accepted saves in FIFO order until the sender disconnects.
-    /// `current` remains owned by the session through the borrowed storage call
-    /// so an unwind leaves it recoverable.
+    /// Process commands in mailbox order until the sender disconnects. Store
+    /// commands only replace the worker-owned pending value; the latest value
+    /// for each position is written by an explicit or shutdown flush.
     fn run(&mut self) {
         loop {
             #[cfg(test)]
-            {
-                self.shared.wait_while_paused();
-            }
+            self.shared.wait_while_paused();
+
             self.current = match self.rx.recv() {
-                Ok(save) => Some(save),
+                Ok(command) => Some(command),
                 Err(_) => break,
             };
 
             #[cfg(test)]
             if self.shared.panic_flag.load(Ordering::SeqCst) {
-                panic!("chunk storage worker test panic before write");
+                panic!("chunk storage worker test panic before command");
             }
 
-            let save = self
+            let command = self
                 .current
-                .as_ref()
-                .expect("received save must become current");
-            if let Err(error) = self.storage.write_ref(&save.pos, Some(&save.tag)) {
-                self.shared.record_first_err(error);
+                .take()
+                .expect("received command must become current");
+            match command {
+                StorageCommand::Store(save) => {
+                    self.pending.insert(save.pos, save.tag);
+                }
+                StorageCommand::Read { pos, reply } => {
+                    let result = match self.pending.get(&pos) {
+                        Some(tag) => Ok(Some(tag.clone())),
+                        None => self.storage.read(&pos),
+                    };
+                    let _ = reply.send(result);
+                }
+                StorageCommand::Flush { reply } => {
+                    let result = self.flush_pending_and_storage();
+                    let _ = reply.send(result);
+                }
             }
-            // A normal return, including an I/O error, accounts for the
-            // current save. Only an unwind before this point recovers it.
-            self.current = None;
+        }
 
-            #[cfg(test)]
-            if self.shared.panic_after_write.load(Ordering::SeqCst) {
-                panic!("chunk storage worker test panic after write");
+        // Disconnect is the graceful shutdown command. The owner closes
+        // acceptance before dropping its send half, so every store received
+        // here was accepted before the shutdown transition.
+        let _ = self.flush_pending();
+    }
+
+    /// Write each latest pending value, retaining values whose write failed.
+    /// Every attempted write is followed by the caller's storage flush even if
+    /// one write fails; the first error is returned and recorded once.
+    fn flush_pending(&mut self) -> io::Result<()> {
+        let positions: Vec<ChunkPos> = self.pending.keys().copied().collect();
+        let mut first_error = None;
+        for pos in positions {
+            let Some(tag) = self.pending.get(&pos) else {
+                continue;
+            };
+            match self.storage.write_ref(&pos, Some(tag)) {
+                Ok(()) => {
+                    self.pending.shift_remove(&pos);
+                    #[cfg(test)]
+                    if self.shared.panic_after_write.swap(false, Ordering::SeqCst) {
+                        panic!("chunk storage worker test panic after write");
+                    }
+                }
+                Err(error) => {
+                    self.shared.record_first_err(&error);
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
             }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
 
-    /// Close public acceptance, retain the current save first, then drain the
-    /// accepted channel values in FIFO order. In-flight enqueue reservations may
+    /// Flush pending stores and then force every cached region. Both stages are
+    /// attempted so the first-error contract remains identical to shutdown.
+    fn flush_pending_and_storage(&mut self) -> io::Result<()> {
+        let pending_result = self.flush_pending();
+        let storage_result = self.storage.flush();
+        Self::combine_flush_results(&self.shared, pending_result, storage_result)
+    }
+
+    /// Snapshot a storage flush failure even when a pending write failed first.
+    /// The pending operation remains the explicit caller-visible error, while
+    /// `Shared` retains whichever operation produced the first failure.
+    fn combine_flush_results(
+        shared: &Shared,
+        pending_result: io::Result<()>,
+        storage_result: io::Result<()>,
+    ) -> io::Result<()> {
+        if let Err(error) = &storage_result {
+            shared.record_first_err(error);
+        }
+        match (pending_result, storage_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), _) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
+        }
+    }
+
+    /// Close public acceptance, retain processed pending stores, then drain
+    /// accepted command values in FIFO order. In-flight send reservations may
     /// still complete after the first drain, so keep draining around the sender
-    /// barrier until every accepted send has returned.
+    /// barrier until every accepted sender has returned.
     fn recover_saves(&mut self) {
         self.shared.stop_accepting();
+
+        // Commands already processed into `pending` precede the current command
+        // and all queued commands. IndexMap preserves that FIFO insertion order.
+        let pending = std::mem::take(&mut self.pending);
+        self.recovered_saves.extend(
+            pending
+                .into_iter()
+                .map(|(pos, tag)| ChunkSave::new(pos, tag)),
+        );
         if let Some(current) = self.current.take() {
-            self.recovered_saves.push(current);
+            self.recover_command(current);
         }
+
         loop {
-            self.recovered_saves.extend(self.rx.try_iter());
+            let commands: Vec<_> = self.rx.try_iter().collect();
+            for command in commands {
+                self.recover_command(command);
+            }
             let state = self
                 .shared
                 .acceptance
@@ -500,7 +598,16 @@ impl WorkerSession {
                     .unwrap_or_else(|poisoned| poisoned.into_inner()),
             );
         }
-        self.recovered_saves.extend(self.rx.try_iter());
+        let commands: Vec<_> = self.rx.try_iter().collect();
+        for command in commands {
+            self.recover_command(command);
+        }
+    }
+
+    fn recover_command(&mut self, command: StorageCommand) {
+        if let StorageCommand::Store(save) = command {
+            self.recovered_saves.push(save);
+        }
     }
 
     /// Always attempt both storage finalization operations. A panic from either
@@ -510,27 +617,36 @@ impl WorkerSession {
         let mut panicked = false;
         match catch_unwind(AssertUnwindSafe(|| self.storage.flush())) {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => self.shared.record_first_err(error),
+            Ok(Err(error)) => self.shared.record_first_err(&error),
             Err(_) => panicked = true,
         }
         match catch_unwind(AssertUnwindSafe(|| self.storage.close())) {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => self.shared.record_first_err(error),
+            Ok(Err(error)) => self.shared.record_first_err(&error),
             Err(_) => panicked = true,
         }
         panicked
     }
 }
 
+fn command_closed_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        "chunk storage worker command channel closed",
+    )
+}
+
 /// A detached, single-owner chunk storage worker.
 ///
 /// The tick thread holds `ChunkStorageWorker` and calls
-/// [`ChunkStorageWorker::enqueue`] (blocking under backpressure). The worker
-/// thread exclusively owns a writable `RegionFileStorage`; no other thread ever
-/// touches it. Shutdown via [`ChunkStorageWorker::shutdown`] (or `Drop`) drains,
-/// flushes, closes, and **joins** the worker.
+/// [`ChunkStorageWorker::enqueue`] (blocking under backpressure). `read` and
+/// `flush` are synchronous request/reply commands on the same bounded mailbox.
+/// The worker thread exclusively owns a writable `RegionFileStorage` and the
+/// pending map; no other thread ever touches them. Shutdown via
+/// [`ChunkStorageWorker::shutdown`] (or `Drop`) drains, flushes, closes, and
+/// **joins** the worker.
 pub struct ChunkStorageWorker {
-    tx: Option<SyncSender<ChunkSave>>,
+    tx: Option<SyncSender<StorageCommand>>,
     shared: Arc<Shared>,
     handle: Option<JoinHandle<WorkerThreadOutcome>>,
     owner: Option<StorageFolderOwner>,
@@ -540,8 +656,8 @@ pub struct ChunkStorageWorker {
 impl ChunkStorageWorker {
     /// Start a storage worker writing chunk saves to `folder` via `info`.
     ///
-    /// `channel_capacity` is the bound on in-flight (queued, not-yet-written)
-    /// save values; it must be `> 0` (an unbounded queue is never created).
+    /// `channel_capacity` is the bound on in-flight (queued, not-yet-processed)
+    /// commands; it must be `> 0` (an unbounded queue is never created).
     /// `version` is snapshotted explicitly for this worker and must have a
     /// writable wrapper; unsupported selections fail before the worker or its
     /// folder starts. A valid start resolves the requested folder to one
@@ -576,9 +692,10 @@ impl ChunkStorageWorker {
         let owner = StorageFolderOwner::acquire(&folder)?;
         let worker_folder = owner.canonical_folder.clone();
 
-        let (tx, rx): (SyncSender<ChunkSave>, Receiver<ChunkSave>) = sync_channel(channel_capacity);
-        // `sync_channel(n)` holds up to n save values in flight; the (n+1)th
-        // `send` blocks until the worker receives one.
+        let (tx, rx): (SyncSender<StorageCommand>, Receiver<StorageCommand>) =
+            sync_channel(channel_capacity);
+        // `sync_channel(n)` holds up to n commands in flight; the (n+1)th
+        // send blocks until the worker receives one.
 
         let shared = Shared::new();
         let worker_shared = Arc::clone(&shared);
@@ -608,9 +725,70 @@ impl ChunkStorageWorker {
         if !self.shared.begin_enqueue() {
             return Err(StorageWorkerError::SendClosed(save));
         }
-        let result = match tx.send(save) {
+        let result = match tx.send(StorageCommand::Store(save)) {
             Ok(()) => Ok(()),
-            Err(SendError(returned)) => Err(StorageWorkerError::SendClosed(returned)),
+            Err(SendError(StorageCommand::Store(returned))) => {
+                Err(StorageWorkerError::SendClosed(returned))
+            }
+            Err(SendError(StorageCommand::Read { .. } | StorageCommand::Flush { .. })) => {
+                unreachable!("enqueue sends only store commands")
+            }
+        };
+        self.shared.finish_enqueue();
+        result
+    }
+
+    /// Read one chunk through the worker-owned storage.
+    ///
+    /// A pending store is returned first, even if disk contains an older value.
+    /// The returned tag is owned by the caller and remains independent of the
+    /// worker's pending value.
+    pub fn read(&self, pos: ChunkPos) -> io::Result<Option<CompoundTag>> {
+        let Some(tx) = self.tx.as_ref() else {
+            return Err(command_closed_error());
+        };
+        if !self.shared.begin_enqueue() {
+            return Err(command_closed_error());
+        }
+        let (reply, response) = sync_channel(1);
+        let result = match tx.send(StorageCommand::Read { pos, reply }) {
+            Ok(()) => response
+                .recv()
+                .unwrap_or_else(|_| Err(command_closed_error())),
+            Err(SendError(StorageCommand::Read { reply, .. })) => {
+                drop(reply);
+                Err(command_closed_error())
+            }
+            Err(SendError(StorageCommand::Store(_) | StorageCommand::Flush { .. })) => {
+                unreachable!("read sends only read commands")
+            }
+        };
+        self.shared.finish_enqueue();
+        result
+    }
+
+    /// Write all latest pending values and flush the worker-owned region
+    /// storage. This request is FIFO with stores submitted before it and blocks
+    /// under the same bounded mailbox backpressure.
+    pub fn flush(&self) -> io::Result<()> {
+        let Some(tx) = self.tx.as_ref() else {
+            return Err(command_closed_error());
+        };
+        if !self.shared.begin_enqueue() {
+            return Err(command_closed_error());
+        }
+        let (reply, response) = sync_channel(1);
+        let result = match tx.send(StorageCommand::Flush { reply }) {
+            Ok(()) => response
+                .recv()
+                .unwrap_or_else(|_| Err(command_closed_error())),
+            Err(SendError(StorageCommand::Flush { reply })) => {
+                drop(reply);
+                Err(command_closed_error())
+            }
+            Err(SendError(StorageCommand::Store(_) | StorageCommand::Read { .. })) => {
+                unreachable!("flush sends only flush commands")
+            }
         };
         self.shared.finish_enqueue();
         result
@@ -657,8 +835,7 @@ impl ChunkStorageWorker {
             .err
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-            .map(|error| StorageWorkerErrorSnapshot::from_error(&error));
+            .take();
         // Release the process-local reservation only after the worker has
         // stopped and RegionFileStorage has either closed or unwound.
         self.owner.take();
@@ -728,12 +905,12 @@ impl Drop for ChunkStorageWorker {
     }
 }
 
-/// The worker-thread body: owns the writable storage exclusively, drains the
-/// bounded channel in FIFO order, then flushes and closes on disconnect. The
-/// unwind boundary retains the current save and drains every queued save before
-/// attempting both finalization operations.
+/// The worker-thread body: owns the writable storage and pending map
+/// exclusively, drains the bounded command channel in FIFO order, then flushes
+/// and closes on disconnect. The unwind boundary recovers pending and queued
+/// stores before attempting both finalization operations.
 fn worker_loop(
-    rx: Receiver<ChunkSave>,
+    rx: Receiver<StorageCommand>,
     info: RegionStorageInfo,
     folder: PathBuf,
     version: RegionFileVersion,
@@ -848,6 +1025,118 @@ mod tests {
         let mut reader = open_reader(temp.path());
         assert_read_marker(&mut reader, a, 7);
         assert_read_marker(&mut reader, b, 9);
+    }
+
+    #[test]
+    fn latest_same_position_store_wins() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut worker = start_worker(temp.path(), 16);
+
+        let pos = ChunkPos::new(-1, 4);
+        worker.enqueue(save_at(pos, 1)).unwrap();
+        worker.enqueue(save_at(pos, 2)).unwrap();
+        worker.enqueue(save_at(pos, 3)).unwrap();
+
+        let outcome = worker.shutdown();
+        assert!(outcome.first_error.is_none());
+        let mut reader = open_reader(temp.path());
+        assert_read_marker(&mut reader, pos, 3);
+        reader.close().unwrap();
+    }
+
+    #[test]
+    fn read_returns_the_pending_tag_before_disk_has_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut worker = start_worker(temp.path(), 16);
+
+        let pos = ChunkPos::new(10, -2);
+        worker.enqueue(save_at(pos, 5)).unwrap();
+        // FIFO order guarantees the store above was applied to the worker's
+        // pending map before this read is served.
+        let tag = worker.read(pos).unwrap().expect("pending tag visible");
+        let marker = match tag.get("marker") {
+            Some(Tag::Int(v)) => v.value,
+            other => panic!("expected int marker, got {other:?}"),
+        };
+        assert_eq!(marker, 5);
+        drop(tag);
+
+        {
+            let mut disk = open_reader(temp.path());
+            assert!(
+                disk.read(&pos).unwrap().is_none(),
+                "a pending store must not be on disk before any flush"
+            );
+        }
+
+        worker.flush().unwrap();
+        let mut disk = open_reader(temp.path());
+        assert_read_marker(&mut disk, pos, 5);
+        disk.close().unwrap();
+        worker.shutdown();
+    }
+
+    #[test]
+    fn storage_flush_error_is_snapshotted_after_pending_failure_and_first_error_wins() {
+        let pending_error = io::Error::from_raw_os_error(11);
+        let storage_error = io::Error::from_raw_os_error(22);
+        let shared = Shared::new();
+
+        let returned = WorkerSession::combine_flush_results(
+            &shared,
+            Err(io::Error::from_raw_os_error(11)),
+            Err(io::Error::from_raw_os_error(22)),
+        )
+        .expect_err("the pending operation error remains caller-visible");
+        assert_eq!(returned.raw_os_error(), pending_error.raw_os_error());
+        let snapshot = shared
+            .err
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("storage flush failure must be snapshotted");
+        assert_eq!(snapshot.raw_os_error, storage_error.raw_os_error());
+
+        let shared = Shared::new();
+        shared.record_first_err(&pending_error);
+        let returned =
+            WorkerSession::combine_flush_results(&shared, Err(pending_error), Err(storage_error))
+                .expect_err("the pending operation still fails");
+        assert_eq!(returned.raw_os_error(), Some(11));
+        assert_eq!(
+            shared.err.lock().unwrap().as_ref().unwrap().raw_os_error,
+            Some(11),
+            "a prior pending-write error remains first-error-wins"
+        );
+    }
+
+    #[test]
+    fn explicit_flush_durably_writes_latest_values_for_independent_positions() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut worker = start_worker(temp.path(), 16);
+
+        let a = ChunkPos::new(1, 1);
+        let b = ChunkPos::new(-6, 8);
+        worker.enqueue(save_at(a, 11)).unwrap();
+        worker.enqueue(save_at(b, 12)).unwrap();
+        worker.enqueue(save_at(a, 13)).unwrap();
+
+        worker.flush().unwrap();
+
+        // The worker is still alive; durability is observable immediately.
+        let mut reader = open_reader(temp.path());
+        assert_read_marker(&mut reader, a, 13);
+        assert_read_marker(&mut reader, b, 12);
+        reader.close().unwrap();
+
+        // A later store for one position must not disturb the other.
+        worker.enqueue(save_at(a, 14)).unwrap();
+        worker.flush().unwrap();
+        let mut reader = open_reader(temp.path());
+        assert_read_marker(&mut reader, a, 14);
+        assert_read_marker(&mut reader, b, 12);
+        reader.close().unwrap();
+        assert!(worker.shutdown().first_error.is_none());
     }
 
     fn start_paused_worker(folder: &std::path::Path, capacity: usize) -> ChunkStorageWorker {
@@ -1108,7 +1397,7 @@ mod tests {
         worker.enqueue(save_at(ChunkPos::new(0, 1), 2)).unwrap();
         let tx = worker.tx.as_ref().unwrap().clone();
         assert!(matches!(
-            tx.try_send(save_at(ChunkPos::new(0, 2), 3)),
+            tx.try_send(StorageCommand::Store(save_at(ChunkPos::new(0, 2), 3))),
             Err(std::sync::mpsc::TrySendError::Full(_))
         ));
 
@@ -1122,7 +1411,7 @@ mod tests {
             let (entered, entered_cv) = &*entered_send_thread;
             *entered.lock().unwrap() = true;
             entered_cv.notify_one();
-            let result = tx.send(save_at(ChunkPos::new(0, 2), 3));
+            let result = tx.send(StorageCommand::Store(save_at(ChunkPos::new(0, 2), 3)));
             done_tx.send(result).unwrap();
         });
         let (entered, entered_cv) = &*entered_send;
@@ -1161,7 +1450,7 @@ mod tests {
         let shared = Arc::clone(&worker.shared);
         assert!(shared.begin_enqueue());
         let sender = thread::spawn(move || {
-            let result = tx.send(save_at(pos, 2));
+            let result = tx.send(StorageCommand::Store(save_at(pos, 2)));
             drop(tx);
             shared.finish_enqueue();
             result
