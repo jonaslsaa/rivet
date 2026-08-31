@@ -328,20 +328,29 @@ fn safe_relative_path(raw: &str) -> Result<PathBuf, ClosureError> {
     }
 
     let mut normalized = PathBuf::new();
+    let mut canonical = String::new();
     for component in path.components() {
         if !matches!(component, Component::Normal(_)) {
             return Err(ClosureError::Invalid(format!(
                 "manifest path is not a safe normalized relative path: {raw:?}"
             )));
         }
+        if !canonical.is_empty() {
+            canonical.push('/');
+        }
+        canonical.push_str(component.as_os_str().to_str().ok_or_else(|| {
+            ClosureError::Invalid(format!(
+                "manifest path is not a safe normalized relative path: {raw:?}"
+            ))
+        })?);
         normalized.push(component.as_os_str());
     }
-    if normalized != path {
+    if canonical != raw {
         return Err(ClosureError::Invalid(format!(
             "manifest path is not a safe normalized relative path: {raw:?}"
         )));
     }
-    Ok(path.to_path_buf())
+    Ok(normalized)
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -1085,6 +1094,21 @@ mod closure_tests {
             ));
             let _ = std::fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn closure_rejects_repeated_separator_alias_of_canonical_target() {
+        let root = temp_root("path-alias");
+        let bytes = b"fixture";
+        std::fs::create_dir(root.join("a")).unwrap();
+        std::fs::write(root.join("a/b.nbt"), bytes).unwrap();
+        let manifest = one_file_manifest("a//b.nbt", bytes);
+
+        assert!(matches!(
+            load_fixture_closure_from(root.clone(), &manifest),
+            Err(ClosureError::Invalid(_))
+        ));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
