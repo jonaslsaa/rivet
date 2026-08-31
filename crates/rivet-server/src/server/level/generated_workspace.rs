@@ -245,16 +245,18 @@ impl GeneratedWorkspace {
                     .map(GenerationChunkHolder::status),
             });
         }
-        if let Some((position, _)) = self.required_status.iter().find(|(position, required)| {
-            self.holders
-                .get(position)
-                .is_none_or(|holder| !holder.status().is_or_after(**required))
+        if let Some(position) = self.support_positions.iter().copied().find(|position| {
+            self.required_status.get(position).is_some_and(|required| {
+                self.holders
+                    .get(position)
+                    .is_none_or(|holder| !holder.status().is_or_after(*required))
+            })
         }) {
             return Err(GeneratedWorkspaceError::PacketBeforeReady {
-                position: *position,
+                position,
                 status: self
                     .holders
-                    .get(position)
+                    .get(&position)
                     .map(GenerationChunkHolder::status),
             });
         }

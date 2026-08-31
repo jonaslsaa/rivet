@@ -649,6 +649,21 @@ mod tests {
     }
 
     #[test]
+    fn generated_constructor_rejects_the_legacy_superflat_fixture() {
+        let error = match ServerLevel::new_generated(ServerLevelConfig::default()) {
+            Err(error) => error,
+            Ok(_) => panic!("the generated constructor must not fall back to superflat"),
+        };
+        assert!(matches!(
+            error,
+            GeneratedWorkspaceError::InvalidConfiguration {
+                field: "missing_chunk_policy",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn world_owns_chunk_map_by_value_no_arc_rwlock() {
         // OWNERSHIP §Chunks & blocks: `ServerLevel` owns its `ChunkMap` by
         // value — there is no `Arc`/`RwLock` in the world. The spawn chunk is
