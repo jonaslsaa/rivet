@@ -151,6 +151,8 @@ use rivet_world::biome::multi_noise_biome_source::MultiNoiseBiomeSource;
 use rivet_world::block::blocks::Blocks;
 use rivet_world::chunk::chunk_generator::ChunkGenerator;
 use rivet_world::chunk::proto_chunk::ProtoChunk;
+#[cfg(test)]
+use rivet_world::chunk::status::GeneratedLightTask;
 use rivet_world::chunk::status::{ChunkStatus, GENERATION_PYRAMID, GenError, WorldGenContext};
 use rivet_world::chunk::storage::chunk_reconstruction::resolve_state_flags;
 use rivet_world::chunk::storage::section_reconstruction::{
@@ -1245,6 +1247,16 @@ impl GenerationChunkHolder {
         workspace: GeneratedLightWorkspace,
     ) -> Option<GeneratedLightStorage> {
         self.context.attach_generated_light_task(workspace)
+    }
+
+    /// Attach a custom generated-light task for scheduler ownership tests.
+    #[cfg(test)]
+    pub(crate) fn attach_generated_light_task_for_test(
+        &mut self,
+        task: impl GeneratedLightTask<BlockState, WorldgenBiomeId, StructureKey, GeneratedLightStorage>
+        + 'static,
+    ) -> Option<GeneratedLightStorage> {
+        self.context.attach_generated_light_task(task)
     }
 
     /// Detach the current generated-light workspace without consuming the
