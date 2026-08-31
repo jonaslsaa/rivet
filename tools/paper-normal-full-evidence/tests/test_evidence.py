@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 import zlib
 from unittest import mock
 from pathlib import Path
@@ -116,6 +117,23 @@ class EvidenceTests(unittest.TestCase):
             (region_dir / "c.35.-60.mcc").write_bytes(zlib.compress(b"external-nbt"))
             self.assertEqual(capture.read_region(path, (1, -2))[(3, 4)], b"external-nbt")
             self.assertEqual(validate.read_region(path, (1, -2))[(3, 4)], b"external-nbt")
+
+    def test_region_cap_accepts_representative_large_file_and_rejects_oversized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            representative = root / "r.0.0.mca"
+            with representative.open("wb") as handle:
+                handle.truncate(9 * 1024 * 1024)
+            self.assertEqual(validate.read_region(representative, (0, 0)), {})
+            self.assertEqual(capture.read_region(representative, (0, 0)), {})
+
+            oversized = root / "r.1.0.mca"
+            with oversized.open("wb") as handle:
+                handle.truncate(validate.MAX_REGION_BYTES + 4096)
+            with self.assertRaises(validate.Failed):
+                validate.read_region(oversized, (1, 0))
+            with self.assertRaises(capture.Failed):
+                capture.read_region(oversized, (1, 0))
 
     def test_persisted_ticket_map_order_is_validated_as_a_set(self):
         closure = [(0, 0), (0, 1), (1, 0)]
@@ -420,6 +438,32 @@ class EvidenceTests(unittest.TestCase):
             with self.assertRaises(capture.Failed):
                 capture._verify_probe_inputs(source, plugin, source_bytes, plugin_bytes)
 
+    def test_compiled_probe_archive_is_bound_to_independent_class_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            probe = Path(directory) / "probe.jar"
+            plugin = b"name: probe\n"
+            expected_class = b"independently-compiled-class"
+            with zipfile.ZipFile(probe, "w") as archive:
+                archive.writestr("plugin.yml", plugin)
+                archive.writestr("org/rivet/paper_normal_full/PaperNormalFullProbe.class", expected_class)
+            validate._validate_compiled_probe_archive(
+                probe,
+                plugin,
+                expected_class,
+                validate.sha256(expected_class),
+            )
+
+            with zipfile.ZipFile(probe, "w") as archive:
+                archive.writestr("plugin.yml", plugin)
+                archive.writestr("org/rivet/paper_normal_full/PaperNormalFullProbe.class", b"weakened-class")
+            with self.assertRaisesRegex(validate.Failed, "independent pinned-source compilation"):
+                validate._validate_compiled_probe_archive(
+                    probe,
+                    plugin,
+                    expected_class,
+                    validate.sha256(b"weakened-class"),
+                )
+
     def test_bundle_rejects_malformed_run_entry_and_symlink_root(self):
         contract = json.loads((HERE / "fixtures/contract.json").read_text())
         with tempfile.TemporaryDirectory() as directory:
@@ -450,8 +494,22 @@ class EvidenceTests(unittest.TestCase):
                 capture_output=True,
                 check=False,
             )
-            self.assertEqual(result.returncode, 3)
-            self.assertIn("UNVERIFIED", result.stdout)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("FAILED", result.stdout)
+
+            present_file = root / "bundle-file"
+            present_file.write_text("not a directory")
+            broken_link = root / "broken-bundle-link"
+            broken_link.symlink_to(root / "absent", target_is_directory=True)
+            for unsafe in (present_file, broken_link):
+                result = subprocess.run(
+                    [sys.executable, str(HERE / "validate.py"), str(unsafe)],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("FAILED", result.stdout)
 
     def test_error_log_is_failed(self):
         with tempfile.TemporaryDirectory() as directory:

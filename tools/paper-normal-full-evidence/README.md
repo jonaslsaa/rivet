@@ -51,9 +51,10 @@ Paper server; it is not a parity result.
 - Paper rewrites `server.properties` and expands both YAML files with defaults
   on first boot. The validator binds the source properties, both Paper YAML
   fixtures, and the probe source/plugin descriptor to immutable digests, then
-  checks the runtime property values and effective YAML paths while preserving
-  exact fixture copies as provenance. It does not mistake Paper's generated
-  defaults for a configuration mismatch.
+  independently recompiles the pinned probe with Temurin 25 and compares the
+  archived class bytes. It checks runtime property values and effective YAML
+  paths while preserving exact fixture copies as provenance, without mistaking
+  Paper's generated defaults for a configuration mismatch.
 
 ## Runtime prerequisites
 

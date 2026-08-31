@@ -18,6 +18,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import zlib
 import zipfile
 from pathlib import Path
@@ -69,7 +70,10 @@ TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
 THREAD_MARKER = "[MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads"
 MAX_JSON_BYTES = 32 * 1024 * 1024
 MAX_TEXT_BYTES = 32 * 1024 * 1024
-MAX_REGION_BYTES = 4 * 1024 * 1024
+# Real closure captures contain region files above 8 MiB. Bound a maximally
+# populated closure-covered region to 16 sectors (64 KiB) per one of its 1,024
+# slots, plus the two-sector header, rather than rejecting valid Paper output.
+MAX_REGION_BYTES = 2 * 4096 + min(1024, EXPECTED_CLOSURE_COUNT) * 16 * 4096
 MAX_CHUNK_COMPRESSED_BYTES = 16 * 1024 * 1024
 MAX_CHUNK_RAW_BYTES = 64 * 1024 * 1024
 MAX_FILE_BYTES = 256 * 1024 * 1024
@@ -158,6 +162,87 @@ def _pinned_input_text(relative: str) -> str:
         return _pinned_input_bytes(relative).decode("utf-8")
     except UnicodeError as exc:
         raise Failed(f"pinned producer input is not valid UTF-8: {relative}") from exc
+
+
+def _validator_java_home(manifest: dict[str, Any]) -> Path:
+    value = os.environ.get("JAVA_HOME")
+    if not value:
+        raise Unverified("JAVA_HOME is required to independently compile the pinned probe")
+    home = Path(value).expanduser()
+    if not home.is_absolute() or home.is_symlink() or home.resolve() != home or not home.is_dir():
+        raise Unverified("JAVA_HOME is not a canonical JDK root")
+    javac = home / "bin/javac"
+    _require_regular_file(javac, "validator javac")
+    if not os.access(javac, os.X_OK):
+        raise Unverified("JAVA_HOME does not contain an executable javac")
+    release = _read_text(home / "release", "validator JDK release", max_bytes=64 * 1024)
+    if 'IMPLEMENTOR="Eclipse Adoptium"' not in release or 'JAVA_VERSION="25' not in release:
+        raise Unverified("validator JDK is not Temurin 25")
+    result = subprocess.run([str(javac), "-version"], capture_output=True, text=True, check=False)
+    version = (result.stdout + result.stderr).strip()
+    if result.returncode != 0 or not version.startswith("javac 25"):
+        raise Unverified("validator javac is not Java 25")
+    if manifest.get("java", {}).get("home") != str(home):
+        raise Failed("capture and validator JDK roots differ")
+    return home
+
+
+def _compile_expected_probe_class(run: Path, runtime: Path, manifest: dict[str, Any]) -> bytes:
+    java_home = _validator_java_home(manifest)
+    libraries_root = run / "libraries"
+    if libraries_root.is_symlink() or not libraries_root.is_dir():
+        raise Failed("materialized Paper libraries root is absent or symlinked")
+    libraries = sorted(libraries_root.rglob("*.jar"))
+    if not libraries:
+        raise Failed("materialized Paper libraries are absent")
+    for library in libraries:
+        metadata = _require_regular_file(library, "materialized Paper library")
+        if metadata.st_size > MAX_FILE_BYTES:
+            raise Failed(f"materialized Paper library exceeds size cap: {library}")
+    classpath = os.pathsep.join([str(runtime), *(str(path) for path in libraries)])
+    source_bytes = _pinned_input_bytes("src/PaperNormalFullProbe.java")
+    class_relative = Path("org/rivet/paper_normal_full/PaperNormalFullProbe.class")
+    with tempfile.TemporaryDirectory(prefix="rivet-probe-validation-") as directory:
+        root = Path(directory)
+        source = root / "PaperNormalFullProbe.java"
+        classes = root / "classes"
+        source.write_bytes(source_bytes)
+        classes.mkdir()
+        env = os.environ.copy()
+        env["JAVA_HOME"] = str(java_home)
+        env["PATH"] = f"{java_home / 'bin'}:{env.get('PATH', '')}"
+        result = subprocess.run(
+            [str(java_home / "bin/javac"), "-proc:none", "-cp", classpath, "-d", str(classes), str(source)],
+            cwd=HERE,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise Failed(f"independent pinned probe compilation failed:\n{result.stdout}\n{result.stderr}")
+        return _read_bytes(classes / class_relative, "independently compiled probe class", max_bytes=MAX_ARCHIVE_ENTRY_BYTES)
+
+
+def _validate_compiled_probe_archive(
+    probe_path: Path,
+    plugin_bytes: bytes,
+    expected_class_bytes: bytes,
+    recorded_class_sha256: Any,
+) -> None:
+    class_relative = "org/rivet/paper_normal_full/PaperNormalFullProbe.class"
+    try:
+        with zipfile.ZipFile(probe_path) as archive:
+            class_bytes = _read_archive_entry(archive, class_relative, "compiled probe class")
+            archived_plugin = _read_archive_entry(archive, "plugin.yml", "compiled probe plugin.yml")
+    except (KeyError, OSError, zipfile.BadZipFile) as exc:
+        raise Failed("compiled main-thread probe jar is malformed") from exc
+    if (
+        archived_plugin != plugin_bytes
+        or class_bytes != expected_class_bytes
+        or recorded_class_sha256 != sha256(expected_class_bytes)
+    ):
+        raise Failed("compiled main-thread probe jar does not match independent pinned-source compilation")
 
 
 def _validate_tree(root: Path, label: str, *, max_bytes: int = MAX_BUNDLE_BYTES) -> tuple[int, int]:
@@ -1094,15 +1179,13 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
         or not isinstance(probe_artifact.get("class_sha256"), str)
     ):
         raise Failed("compiled main-thread probe provenance is absent or tampered")
-    class_relative = "org/rivet/paper_normal_full/PaperNormalFullProbe.class"
-    try:
-        with zipfile.ZipFile(probe_path) as archive:
-            class_bytes = _read_archive_entry(archive, class_relative, "compiled probe class")
-            archived_plugin = _read_archive_entry(archive, "plugin.yml", "compiled probe plugin.yml")
-            if archived_plugin != plugin_bytes or probe_artifact["class_sha256"] != sha256(class_bytes):
-                raise Failed("compiled main-thread probe jar does not match the pinned source/plugin inputs")
-    except (KeyError, OSError, zipfile.BadZipFile) as exc:
-        raise Failed("compiled main-thread probe jar is malformed") from exc
+    expected_class_bytes = _compile_expected_probe_class(run, runtime_path, manifest)
+    _validate_compiled_probe_archive(
+        probe_path,
+        plugin_bytes,
+        expected_class_bytes,
+        probe_artifact.get("class_sha256"),
+    )
     if manifest.get("run_root") != str(run.resolve()) or manifest.get("run_id") != run.name:
         raise Failed("run was copied or its self-identifying root was rewritten")
     token = manifest.get("capture_token", "")
@@ -1221,10 +1304,14 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
 
 
 def validate_bundle(bundle_dir: Path) -> None:
-    if not bundle_dir.exists():
-        raise Unverified(f"bundle directory is absent: {bundle_dir}")
-    if bundle_dir.is_symlink():
-        raise Unverified(f"bundle directory is symlinked: {bundle_dir}")
+    try:
+        metadata = bundle_dir.lstat()
+    except FileNotFoundError as exc:
+        raise Unverified(f"bundle directory is absent: {bundle_dir}") from exc
+    except OSError as exc:
+        raise Failed(f"bundle root is unreadable: {bundle_dir}") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise Failed(f"bundle root is present but unsafe: {bundle_dir}")
     _validate_tree(bundle_dir, "evidence bundle")
     contract_bytes = _read_bytes(CONTRACT_PATH, "pinned contract", max_bytes=MAX_JSON_BYTES)
     if sha256(contract_bytes) != EXPECTED_CONTRACT_SHA256:
