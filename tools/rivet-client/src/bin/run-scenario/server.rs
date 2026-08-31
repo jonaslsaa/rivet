@@ -18,12 +18,11 @@
 //! slow ~160MB downloads) and wipe everything else, so each run is a fresh world
 //! at a fixed seed while staying fast on re-runs. `versions/` is deliberately
 //! NOT preserved: the paperclip re-materializes the server jar on every boot, so
-//! `verify_paper_provenance` (called only by the Rivet-vs-Paper differential
-//! path in main.rs, where the Paper reference must be the pinned oracle commit)
-//! can only ever see the jar the artifact actually being booted produced — a
-//! swapped, stale, or non-bundler artifact cannot silently stand in for the
-//! pinned reference. Paper-vs-Paper self-checks and capture do not require the
-//! pin: they compare a build against itself. Concurrent servers get distinct
+//! `verify_paper_provenance` runs for every successful Paper shutdown and can
+//! only ever see the jar the artifact actually being booted produced — a swapped,
+//! stale, or non-bundler artifact cannot silently stand in for the pinned
+//! reference, including standalone self-check and capture commands. Concurrent
+//! servers get distinct
 //! ports (held `rivet-harness-common::port` reservations from main.rs): the
 //! Paper run dir's `server.properties` is patched to the allocated port and
 //! `rivet-server` is passed `--host`/`--port`, so no two servers in a scenario
@@ -169,16 +168,6 @@ pub struct Server {
     /// materialized the compiled server jar, so `shutdown` can verify the
     /// booted jar's provenance.
     run_dir: PathBuf,
-}
-
-impl Server {
-    /// The run dir the server booted in. For Paper this is where the paperclip
-    /// materialized the compiled server jar, so a caller that needs the
-    /// load-bearing provenance check (the Rivet-vs-Paper differential) can
-    /// verify the booted jar after shutdown.
-    pub fn run_dir(&self) -> &Path {
-        &self.run_dir
-    }
 }
 
 /// Locate the paperclip jar: `RIVET_ORACLE_JAR` env wins, then a copy in
@@ -696,52 +685,61 @@ pub fn boot(
 
 /// SIGTERM the server and wait for its clean shutdown.
 ///
-/// Paper's clean shutdown is the `All dimensions are saved` marker in the
-/// post-`Done` log tail. Rivet's clean shutdown is the SIGTERM handler draining
-/// and exiting with code 0 (rivet-server/src/main.rs); Rivet persists no world
-/// state yet, so the exit status is the load-bearing assertion.
+/// Paper's clean shutdown requires both exit code 0 and the `All dimensions are
+/// saved` marker in the post-`Done` log tail, then verifies the materialized jar's
+/// pinned commit. Rivet's clean shutdown is the SIGTERM handler draining and
+/// exiting with code 0 (rivet-server/src/main.rs).
 pub fn shutdown(server: &mut Server) -> Result<(), Error> {
     println!("    server ready; shutting down cleanly (SIGTERM)...");
     // Let trailing delayed-init / chunk I/O settle before stopping.
     thread::sleep(Duration::from_millis(1500));
     let status = server.child.shutdown(SHUTDOWN_TIMEOUT, POLL_INTERVAL)?;
 
-    match server.kind {
-        ServerKind::Paper => {
-            let bytes = fs::read(server.child.log_path())?;
-            let done_offset = server.child.ready_offset();
-            let tail = if bytes.len() > done_offset {
-                String::from_utf8_lossy(&bytes[done_offset..]).into_owned()
-            } else {
-                String::new()
-            };
-            if !tail.contains("All dimensions are saved") {
-                return Err(Error::Gate(
-                    "server shut down without a clean save ('All dimensions are saved' missing \
-                     from post-Done log tail)"
-                        .into(),
-                ));
-            }
-            // Provenance is verified only where it is load-bearing: the
-            // Rivet-vs-Paper differential (run_paper_vs_rivet) requires the
-            // Paper reference to be the pinned oracle commit. Paper-vs-Paper
-            // self-checks (paper:paper join, move) and capture compare a build
-            // against itself, so the pin is not a correctness requirement
-            // there. The differential path calls verify_paper_provenance
-            // explicitly after this shutdown.
-        }
-        ServerKind::Rivet => {
-            // Clean shutdown is the SIGTERM handler draining and exiting 0
-            // (rivet-server/src/main.rs). A nonzero exit after SIGTERM means the
-            // server crashed or refused the orderly shutdown.
-            if !status.success() {
-                return Err(Error::Gate(format!(
-                    "rivet-server exited with {status} after SIGTERM (expected a clean exit 0) — \
-                     see {}",
-                    server.child.log_path().display()
-                )));
-            }
-        }
+    let paper_tail = if server.kind == ServerKind::Paper {
+        let bytes = fs::read(server.child.log_path())?;
+        let done_offset = server.child.ready_offset();
+        Some(if bytes.len() > done_offset {
+            String::from_utf8_lossy(&bytes[done_offset..]).into_owned()
+        } else {
+            String::new()
+        })
+    } else {
+        None
+    };
+    verify_shutdown_result(
+        server.kind,
+        status,
+        server.child.log_path(),
+        paper_tail.as_deref(),
+    )?;
+    if server.kind == ServerKind::Paper {
+        verify_paper_provenance(&server.run_dir)?;
+    }
+    Ok(())
+}
+
+fn verify_shutdown_result(
+    kind: ServerKind,
+    status: std::process::ExitStatus,
+    log_path: &Path,
+    paper_tail: Option<&str>,
+) -> Result<(), Error> {
+    if !status.success() {
+        return Err(Error::Gate(format!(
+            "{kind} exited with {status} after SIGTERM (expected a clean exit 0) — see {}",
+            log_path.display()
+        )));
+    }
+    if kind == ServerKind::Paper
+        && !paper_tail
+            .unwrap_or_default()
+            .contains("All dimensions are saved")
+    {
+        return Err(Error::Gate(
+            "server shut down without a clean save ('All dimensions are saved' missing from \
+             post-Done log tail)"
+                .into(),
+        ));
     }
     Ok(())
 }
@@ -755,6 +753,19 @@ mod tests {
 
     fn test_socket() -> SocketAddr {
         "127.0.0.1:25599".parse().unwrap()
+    }
+
+    #[test]
+    fn paper_clean_save_marker_cannot_mask_nonzero_exit() {
+        let status = Command::new("sh").args(["-c", "exit 7"]).status().unwrap();
+        let error = verify_shutdown_result(
+            ServerKind::Paper,
+            status,
+            Path::new("paper.log"),
+            Some("All dimensions are saved"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("exit status: 7"));
     }
 
     #[cfg(unix)]

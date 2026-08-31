@@ -141,17 +141,26 @@ mod transcript;
 use std::env;
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 const DEFAULT_ADDRESS: &str = "127.0.0.1:25599";
 const DEFAULT_USERNAME: &str = "RivetProbe";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
 const DEFAULT_RUNS: usize = 2;
+/// Parent-side headroom beyond the client's own timeout. The child must emit its
+/// terminal record and exit inside this bounded grace; a hung or locally modified
+/// client cannot hold the scenario runner forever.
+const CLIENT_PARENT_HEADROOM: Duration = Duration::from_secs(5);
+const CLIENT_TERMINATE_GRACE: Duration = Duration::from_secs(2);
+const CLIENT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// Default dwell window for the `dwell` scenario. The wall-clock seconds the
 /// client stays connected after spawn while echoing every live keepalive. Must
 /// exceed the server's 30 s keepalive kick limit (keepalive.rs
@@ -877,17 +886,69 @@ pub(crate) fn cargo_target_dir() -> PathBuf {
     crate_root().join("../../target")
 }
 
-/// Path to the `rivet-client` binary, resolved from Cargo's target directory.
+/// Path to the exact `rivet-client` binary. An explicit override is
+/// authoritative: it is never silently replaced by a sibling/default binary.
 fn client_binary() -> PathBuf {
-    let sibling = env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|p| p.join("rivet-client")));
-    if let Some(p) = sibling
-        && p.is_file()
-    {
-        return p;
+    select_client_binary(
+        env::var_os("RIVET_CLIENT_BIN").map(PathBuf::from),
+        env::current_exe().ok().as_deref(),
+        &cargo_target_dir(),
+    )
+}
+
+fn select_client_binary(
+    override_path: Option<PathBuf>,
+    current_exe: Option<&Path>,
+    target_dir: &Path,
+) -> PathBuf {
+    if let Some(path) = override_path {
+        return path;
     }
-    cargo_target_dir().join("debug/rivet-client")
+    if let Some(sibling) = current_exe.and_then(|exe| exe.parent().map(|p| p.join("rivet-client")))
+        && sibling.is_file()
+    {
+        return sibling;
+    }
+    target_dir.join("debug/rivet-client")
+}
+
+#[derive(Debug, Clone)]
+struct ClientBinary {
+    path: PathBuf,
+    sha256: String,
+}
+
+impl ClientBinary {
+    fn verify_unchanged(&self) -> Result<(), RunnerError> {
+        let current = sha256_file(&self.path)?;
+        if current != self.sha256 {
+            return Err(RunnerError::Gate(format!(
+                "rivet-client binary {} changed after selection (expected sha256 {}, found {})",
+                self.path.display(),
+                self.sha256,
+                current
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn sha256_file(path: &Path) -> Result<String, RunnerError> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 /// Resolve `--address` into the first socket address. The port is the
@@ -928,6 +989,21 @@ struct ClientRun {
     stdout_text: String,
     stdout_path: PathBuf,
     stderr_path: PathBuf,
+    binary: ClientBinary,
+}
+
+impl ClientRun {
+    fn normalize(
+        &self,
+        normalizer: fn(&str) -> Result<Value, String>,
+    ) -> Result<Value, RunnerError> {
+        let mut normalized = normalizer(&self.stdout_text).map_err(RunnerError::Transcript)?;
+        normalized["client_binary"] = json!({
+            "path": self.binary.path.to_string_lossy(),
+            "sha256": self.binary.sha256,
+        });
+        Ok(normalized)
+    }
 }
 
 /// Client-launch parameters forwarded to the headless `rivet-client` binary for
@@ -965,40 +1041,166 @@ fn client_argv(spec: &ClientSpec) -> Vec<String> {
     argv
 }
 
-/// Run the headless client once and preserve its raw stdout/stderr.
+/// Run the headless client once and preserve its raw stdout/stderr. The parent
+/// owns a deadline independent of the child's `--timeout-seconds`; timeout and
+/// every nonzero exit are hard failures after diagnostics have been retained.
 fn run_client(
-    binary: &Path,
+    binary: &ClientBinary,
     spec: &ClientSpec,
     work: &Path,
     prefix: &str,
 ) -> Result<ClientRun, RunnerError> {
+    binary.verify_unchanged()?;
     let stdout_path = work.join(format!("{prefix}.stdout.jsonl"));
     let stderr_path = work.join(format!("{prefix}.stderr.log"));
-    let output = Command::new(binary)
+    let stdout_file = fs::File::create(&stdout_path)?;
+    let stderr_file = fs::File::create(&stderr_path)?;
+    let mut child = Command::new(&binary.path)
         .args(client_argv(spec))
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file))
+        .spawn()
         .map_err(|e| {
             RunnerError::Gate(format!(
                 "failed to run rivet-client ({}): {e} — build it first with: cargo build --locked",
-                binary.display()
+                binary.path.display()
             ))
         })?;
-    fs::write(&stdout_path, &output.stdout)?;
-    fs::write(&stderr_path, &output.stderr)?;
-    let code = output.status.code().unwrap_or(-1);
-    if code != 0 {
-        println!(
-            "    rivet-client exited with code {code} (raw transcript in {}, stderr in {})",
+    let deadline = Duration::from_secs(spec.timeout_seconds)
+        .checked_add(CLIENT_PARENT_HEADROOM)
+        .ok_or_else(|| {
+            kill_and_reap_client(&mut child);
+            RunnerError::Gate(format!(
+                "rivet-client timeout {}s cannot include parent headroom; killed and reaped",
+                spec.timeout_seconds
+            ))
+        })?;
+    let status = wait_client(&mut child, deadline, CLIENT_TERMINATE_GRACE).map_err(|e| {
+        RunnerError::Gate(format!(
+            "{e}; raw transcript: {}, stderr: {}",
             stdout_path.display(),
             stderr_path.display()
-        );
+        ))
+    })?;
+    let raw_stdout = fs::read_to_string(&stdout_path)?;
+    let stderr = fs::read_to_string(&stderr_path).unwrap_or_else(|e| format!("<unreadable: {e}>"));
+    if !status.success() {
+        return Err(RunnerError::Gate(format!(
+            "rivet-client {} exited with {status}; raw transcript: {}, stderr: {}{}",
+            binary.path.display(),
+            stdout_path.display(),
+            stderr_path.display(),
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", stderr.trim())
+            }
+        )));
     }
+    binary.verify_unchanged()?;
+    let stdout_text = bind_raw_client_provenance(&raw_stdout, binary)?;
+    fs::write(&stdout_path, &stdout_text)?;
     Ok(ClientRun {
-        stdout_text: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stdout_text,
         stdout_path,
         stderr_path,
+        binary: binary.clone(),
     })
+}
+
+fn wait_client(
+    child: &mut Child,
+    timeout: Duration,
+    terminate_grace: Duration,
+) -> Result<ExitStatus, RunnerError> {
+    let Some(deadline) = Instant::now().checked_add(timeout) else {
+        kill_and_reap_client(child);
+        return Err(RunnerError::Gate(format!(
+            "rivet-client parent deadline {timeout:?} is outside the supported monotonic-clock range; killed and reaped"
+        )));
+    };
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {}
+            Err(error) => {
+                kill_and_reap_client(child);
+                return Err(RunnerError::Io(error));
+            }
+        }
+        if Instant::now() >= deadline {
+            terminate_client(child);
+            let grace_deadline = Instant::now()
+                .checked_add(terminate_grace)
+                .unwrap_or_else(Instant::now);
+            while Instant::now() < grace_deadline {
+                match child.try_wait() {
+                    Ok(Some(_)) => {
+                        return Err(RunnerError::Gate(format!(
+                            "rivet-client exceeded parent deadline {timeout:?}; terminated and reaped"
+                        )));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        kill_and_reap_client(child);
+                        return Err(RunnerError::Io(error));
+                    }
+                }
+                thread::sleep(CLIENT_POLL_INTERVAL);
+            }
+            kill_and_reap_client(child);
+            return Err(RunnerError::Gate(format!(
+                "rivet-client exceeded parent deadline {timeout:?}; killed and reaped after ignoring termination"
+            )));
+        }
+        thread::sleep(CLIENT_POLL_INTERVAL);
+    }
+}
+
+fn kill_and_reap_client(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn terminate_client(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let _ = rivet_harness_common::server::signal(child.id(), "TERM");
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+}
+
+fn bind_raw_client_provenance(raw: &str, binary: &ClientBinary) -> Result<String, RunnerError> {
+    let mut lines = Vec::new();
+    let mut starting = 0;
+    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+        let mut record: Value = serde_json::from_str(line).map_err(|e| {
+            RunnerError::Transcript(format!("invalid client JSON line: {e}: {line}"))
+        })?;
+        if record.get("event").and_then(Value::as_str) == Some("starting") {
+            starting += 1;
+            let revision = record.get("azalea_revision").and_then(Value::as_str);
+            if revision != Some(transcript::PINNED_AZALEA_REVISION) {
+                return Err(RunnerError::Gate(format!(
+                    "rivet-client starting record has azalea_revision {revision:?}, expected {}",
+                    transcript::PINNED_AZALEA_REVISION
+                )));
+            }
+            record["client_binary_path"] = json!(binary.path.to_string_lossy());
+            record["client_binary_sha256"] = json!(binary.sha256);
+        }
+        lines.push(serde_json::to_string(&record)?);
+    }
+    if starting != 1 {
+        return Err(RunnerError::Gate(format!(
+            "rivet-client transcript must contain exactly one pinned starting record, found {starting}"
+        )));
+    }
+    Ok(format!("{}\n", lines.join("\n")))
 }
 
 /// Verify the rivet-server log shows the client was actually accepted: the
@@ -1019,6 +1221,52 @@ fn verify_rivet_connection(log_path: &Path) -> Result<(), RunnerError> {
         return Err(RunnerError::Gate(format!(
             "rivet log {} shows no accepted connection — the client did not reach the Rivet port",
             log_path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn verify_capture_connection(kind: server::ServerKind, log_path: &Path) -> Result<(), RunnerError> {
+    if kind == server::ServerKind::Rivet {
+        return verify_rivet_connection(log_path);
+    }
+    let text = fs::read_to_string(log_path)?;
+    if !text.contains("logged in with entity id") && !text.contains("joined the game") {
+        return Err(RunnerError::Gate(format!(
+            "Paper log {} shows no accepted player connection",
+            log_path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn verify_capture_play_boundary(normalized: &Value) -> Result<(), RunnerError> {
+    if normalized.get("outcome").and_then(Value::as_str) != Some("spawned") {
+        return Err(RunnerError::Gate(format!(
+            "capture client did not reach spawn (outcome={:?})",
+            normalized.get("outcome")
+        )));
+    }
+    let lifecycle = normalized
+        .get("lifecycle")
+        .and_then(Value::as_array)
+        .ok_or_else(|| RunnerError::Gate("capture transcript has no lifecycle".to_owned()))?;
+    for required in ["login", "spawn"] {
+        if !lifecycle
+            .iter()
+            .any(|event| event.as_str() == Some(required))
+        {
+            return Err(RunnerError::Gate(format!(
+                "capture transcript lifecycle is missing {required}"
+            )));
+        }
+    }
+    if normalized.get("azalea_revision").and_then(Value::as_str)
+        != Some(transcript::PINNED_AZALEA_REVISION)
+    {
+        return Err(RunnerError::Gate(format!(
+            "capture transcript does not carry pinned azalea revision {}",
+            transcript::PINNED_AZALEA_REVISION
         )));
     }
     Ok(())
@@ -1073,16 +1321,27 @@ fn world_defaults(crate_root: &Path) -> Result<PathBuf, RunnerError> {
     fixture_server_properties(crate_root, "paper-world-defaults.yml")
 }
 
-fn ensure_client_binary() -> Result<PathBuf, RunnerError> {
-    let bin = client_binary();
-    if bin.is_file() {
-        Ok(bin)
-    } else {
-        Err(RunnerError::Unverified(format!(
-            "rivet-client binary not found at {} — build it first: cargo build --locked",
-            bin.display()
-        )))
+fn ensure_client_binary() -> Result<ClientBinary, RunnerError> {
+    let requested = client_binary();
+    if !requested.is_file() {
+        return Err(RunnerError::Unverified(format!(
+            "rivet-client binary not found at {}{}",
+            requested.display(),
+            if env::var_os("RIVET_CLIENT_BIN").is_some() {
+                " (authoritative RIVET_CLIENT_BIN override)"
+            } else {
+                " — build it first: cargo build --locked"
+            }
+        )));
     }
+    let path = requested.canonicalize().map_err(|e| {
+        RunnerError::Gate(format!(
+            "failed to canonicalize rivet-client binary {}: {e}",
+            requested.display()
+        ))
+    })?;
+    let sha256 = sha256_file(&path)?;
+    Ok(ClientBinary { path, sha256 })
 }
 
 /// Boot one Paper server, join via the client, shut the server down, and return
@@ -1099,7 +1358,7 @@ fn one_join(
     jar: &Path,
     server_properties: &Path,
     world_defaults: &Path,
-    client_bin: &Path,
+    client_bin: &ClientBinary,
     args: &Args,
     idx: usize,
     address: SocketAddr,
@@ -1135,8 +1394,7 @@ fn one_join(
     )?;
     server::shutdown(&mut srv)?;
 
-    let normalized =
-        transcript::normalize_join(&client_run.stdout_text).map_err(RunnerError::Transcript)?;
+    let normalized = client_run.normalize(transcript::normalize_join)?;
     let transcript_path = work.join(format!("transcript{idx}.json"));
     fs::write(&transcript_path, serde_json::to_string_pretty(&normalized)?)?;
     println!(
@@ -1168,7 +1426,7 @@ fn run_paper_self_check(args: &Args) -> Result<(), RunnerError> {
 
     println!("rivet scenario runner: join (Paper-vs-Paper self-check)");
     println!("    paperclip jar     : {}", jar.display());
-    println!("    rivet-client bin  : {}", client_bin.display());
+    println!("    rivet-client bin  : {}", client_bin.path.display());
     println!("    server.properties : {}", server_properties.display());
     println!("    world defaults    : {}", world_defaults.display());
     println!("    address           : {}", args.address);
@@ -1299,7 +1557,7 @@ fn one_move(
     jar: &Path,
     server_properties: &Path,
     world_defaults: &Path,
-    client_bin: &Path,
+    client_bin: &ClientBinary,
     args: &Args,
     idx: usize,
     address: SocketAddr,
@@ -1335,8 +1593,7 @@ fn one_move(
     )?;
     server::shutdown(&mut srv)?;
 
-    let normalized =
-        transcript::normalize_move(&client_run.stdout_text).map_err(RunnerError::Transcript)?;
+    let normalized = client_run.normalize(transcript::normalize_move)?;
     let transcript_path = work.join(format!("transcript{idx}.json"));
     fs::write(&transcript_path, serde_json::to_string_pretty(&normalized)?)?;
     println!(
@@ -1374,7 +1631,7 @@ fn run_move_self_check(args: &Args) -> Result<(), RunnerError> {
 
     println!("rivet scenario runner: move (Paper-vs-Paper movement self-check)");
     println!("    paperclip jar     : {}", jar.display());
-    println!("    rivet-client bin  : {}", client_bin.display());
+    println!("    rivet-client bin  : {}", client_bin.path.display());
     println!("    server.properties : {}", server_properties.display());
     println!("    world defaults    : {}", world_defaults.display());
     println!("    address           : {}", args.address);
@@ -1507,7 +1764,7 @@ fn run_rivet_play(args: &Args) -> Result<(), RunnerError> {
 
     println!("rivet scenario runner: rivet (headless boot + play transcript)");
     println!("    rivet-server bin  : {}", rivet_bin.display());
-    println!("    rivet-client bin  : {}", client_bin.display());
+    println!("    rivet-client bin  : {}", client_bin.path.display());
     println!("    address           : {}", args.address);
     println!("    rivet boots       : {}", args.runs);
     println!();
@@ -1553,8 +1810,7 @@ fn run_rivet_play(args: &Args) -> Result<(), RunnerError> {
         // connection (connection established on TCP accept).
         verify_rivet_connection(&log_path)?;
 
-        let normalized =
-            transcript::normalize_join(&client_run.stdout_text).map_err(RunnerError::Transcript)?;
+        let normalized = client_run.normalize(transcript::normalize_join)?;
         let transcript_path = work.join(format!("{prefix}.transcript.json"));
         fs::write(&transcript_path, serde_json::to_string_pretty(&normalized)?)?;
         let boundary = transcript::rivet_play_verdict(&normalized)?;
@@ -2040,7 +2296,7 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
     println!("rivet scenario runner: join (Paper-vs-Rivet play)");
     println!("    paperclip jar     : {}", jar.display());
     println!("    rivet-server bin  : {}", rivet_bin.display());
-    println!("    rivet-client bin  : {}", client_bin.display());
+    println!("    rivet-client bin  : {}", client_bin.path.display());
     println!(
         "    server.properties : {} (single-stone superflat)",
         server_properties.display()
@@ -2080,17 +2336,10 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         &work,
         "paper",
     )?;
+    // Shutdown centrally requires exit 0, a post-READY clean-save marker, and
+    // the pinned commit in the materialized server jar.
     server::shutdown(&mut paper_srv)?;
-    // Load-bearing provenance: the Paper reference this differential compares
-    // Rivet against must be the pinned oracle commit. This is scoped to the
-    // differential path only — Paper-vs-Paper self-checks (paper:paper join,
-    // move) and capture compare a build against itself, where the pin is not a
-    // correctness requirement. The check reads the jar that actually booted in
-    // the run dir, so a stale, swapped, or unverifiable Paper cannot silently
-    // stand in for the reference.
-    server::verify_paper_provenance(paper_srv.run_dir())?;
-    let paper_t =
-        transcript::normalize_join(&paper_client.stdout_text).map_err(RunnerError::Transcript)?;
+    let paper_t = paper_client.normalize(transcript::normalize_join)?;
     let paper_tp = work.join("paper.transcript.json");
     fs::write(&paper_tp, serde_json::to_string_pretty(&paper_t)?)?;
     println!(
@@ -2136,8 +2385,7 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
     // real rivet-server accepted the client (connection established on TCP
     // accept).
     verify_rivet_connection(&work.join("rivet.log"))?;
-    let rivet_t =
-        transcript::normalize_join(&rivet_client.stdout_text).map_err(RunnerError::Transcript)?;
+    let rivet_t = rivet_client.normalize(transcript::normalize_join)?;
     let rivet_tp = work.join("rivet.transcript.json");
     fs::write(&rivet_tp, serde_json::to_string_pretty(&rivet_t)?)?;
     let boundary = transcript::rivet_play_verdict(&rivet_t)?;
@@ -2254,7 +2502,7 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
     println!("rivet scenario runner: move (Paper-vs-Rivet movement differential)");
     println!("    paperclip jar     : {}", jar.display());
     println!("    rivet-server bin  : {}", rivet_bin.display());
-    println!("    rivet-client bin  : {}", client_bin.display());
+    println!("    rivet-client bin  : {}", client_bin.path.display());
     println!(
         "    server.properties : {} (single-stone superflat)",
         server_properties.display()
@@ -2298,13 +2546,10 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
         &work,
         "paper",
     )?;
+    // Shutdown centrally requires exit 0, a post-READY clean-save marker, and
+    // the pinned commit in the materialized server jar.
     server::shutdown(&mut paper_srv)?;
-    // Load-bearing provenance (same as the join differential): the Paper
-    // reference this differential compares Rivet against must be the pinned
-    // oracle commit.
-    server::verify_paper_provenance(paper_srv.run_dir())?;
-    let paper_t =
-        transcript::normalize_move(&paper_client.stdout_text).map_err(RunnerError::Transcript)?;
+    let paper_t = paper_client.normalize(transcript::normalize_move)?;
     let paper_tp = work.join("paper.transcript.json");
     fs::write(&paper_tp, serde_json::to_string_pretty(&paper_t)?)?;
     println!(
@@ -2351,8 +2596,7 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
     // Server-side half of the connection proof: the rivet log must show the
     // real rivet-server accepted the client.
     verify_rivet_connection(&work.join("rivet.log"))?;
-    let rivet_t =
-        transcript::normalize_move(&rivet_client.stdout_text).map_err(RunnerError::Transcript)?;
+    let rivet_t = rivet_client.normalize(transcript::normalize_move)?;
     let rivet_tp = work.join("rivet.transcript.json");
     fs::write(&rivet_tp, serde_json::to_string_pretty(&rivet_t)?)?;
     println!(
@@ -2518,7 +2762,7 @@ fn run_dwell(args: &Args) -> Result<(), RunnerError> {
 
     println!("rivet scenario runner: dwell (wall-clock keepalive survival)");
     println!("    rivet-server bin  : {}", rivet_bin.display());
-    println!("    rivet-client bin  : {}", client_bin.display());
+    println!("    rivet-client bin  : {}", client_bin.path.display());
     println!("    address           : {}", args.address);
     println!(
         "    dwell window      : {}s (server keepalive kick limit: {}s)",
@@ -2575,8 +2819,7 @@ fn run_dwell(args: &Args) -> Result<(), RunnerError> {
         )));
     }
 
-    let normalized =
-        transcript::normalize_dwell(&client_run.stdout_text).map_err(RunnerError::Transcript)?;
+    let normalized = client_run.normalize(transcript::normalize_dwell)?;
     let transcript_path = work.join("dwell1.transcript.json");
     fs::write(&transcript_path, serde_json::to_string_pretty(&normalized)?)?;
     let boundary = transcript::rivet_dwell_verdict(&normalized)?;
@@ -2664,7 +2907,7 @@ fn run_kick(args: &Args) -> Result<(), RunnerError> {
 
     println!("rivet scenario runner: kick (decoded disconnect reason)");
     println!("    rivet-server bin  : {}", rivet_bin.display());
-    println!("    rivet-client bin  : {}", client_bin.display());
+    println!("    rivet-client bin  : {}", client_bin.path.display());
     println!("    address           : {}", args.address);
     println!();
     println!(
@@ -2710,8 +2953,7 @@ fn run_kick(args: &Args) -> Result<(), RunnerError> {
     // accepted the client (connection established on TCP accept).
     verify_rivet_connection(&log_path)?;
 
-    let normalized =
-        transcript::normalize_kick(&client_run.stdout_text).map_err(RunnerError::Transcript)?;
+    let normalized = client_run.normalize(transcript::normalize_kick)?;
     let transcript_path = work.join("kick1.transcript.json");
     fs::write(&transcript_path, serde_json::to_string_pretty(&normalized)?)?;
     let boundary = transcript::rivet_kick_verdict(&normalized)?;
@@ -2822,10 +3064,11 @@ fn run_capture(args: &Args) -> Result<(), RunnerError> {
         .transpose()?;
 
     let prefix = kind.as_str().to_owned();
+    let log_path = work.join(format!("{prefix}1.log"));
     let mut srv = server::boot(
         kind,
         &work.join(format!("{prefix}1")),
-        &work.join(format!("{prefix}1.log")),
+        &log_path,
         &artifact,
         server_properties.as_deref(),
         world_defaults.as_deref(),
@@ -2847,10 +3090,11 @@ fn run_capture(args: &Args) -> Result<(), RunnerError> {
         &work,
         "client1",
     )?;
+    verify_capture_connection(kind, &log_path)?;
     server::shutdown(&mut srv)?;
 
-    let normalized =
-        transcript::normalize_join(&client_run.stdout_text).map_err(RunnerError::Transcript)?;
+    let normalized = client_run.normalize(transcript::normalize_join)?;
+    verify_capture_play_boundary(&normalized)?;
     println!();
     println!("Normalized transcript:");
     println!("{}", serde_json::to_string_pretty(&normalized)?);
@@ -3068,8 +3312,7 @@ fn run_loaded_world(args: &Args) -> Result<(), RunnerError> {
 
             // The client transcript must prove it joined, spawned, and sampled
             // genuine per-coordinate content.
-            let transcript = transcript::normalize_loaded(&client_run.stdout_text)
-                .map_err(RunnerError::Transcript)?;
+            let transcript = client_run.normalize(transcript::normalize_loaded)?;
             let boundary =
                 transcript::rivet_loaded_verdict(&transcript).map_err(RunnerError::Transcript)?;
 
@@ -3235,8 +3478,7 @@ fn run_generated_world(args: &Args) -> Result<(), RunnerError> {
 
             // The client transcript must prove it joined, spawned, dwelled,
             // walked, and sampled genuine per-coordinate content.
-            let transcript = transcript::normalize_generated(&client_run.stdout_text)
-                .map_err(RunnerError::Transcript)?;
+            let transcript = client_run.normalize(transcript::normalize_generated)?;
             let boundary = transcript::rivet_generated_verdict(&transcript)
                 .map_err(RunnerError::Transcript)?;
 
@@ -3626,8 +3868,7 @@ fn run_recenter(args: &Args) -> Result<(), RunnerError> {
 
             // The client transcript must prove the spawn + the full sustained
             // route + the positive `walked` terminal with the received chunk list.
-            let transcript = transcript::normalize_recenter(&client_run.stdout_text)
-                .map_err(RunnerError::Transcript)?;
+            let transcript = client_run.normalize(transcript::normalize_recenter)?;
             let transcript_path = work.join("recenter.transcript.json");
             fs::write(&transcript_path, serde_json::to_string_pretty(&transcript)?)?;
             let boundary =
@@ -3850,8 +4091,7 @@ fn run_recenter(args: &Args) -> Result<(), RunnerError> {
 
             // The transcript must surface `disconnected` (the client was closed
             // by the server mid-route — it never emitted `walked`).
-            let negative_transcript = transcript::normalize_recenter(&negative_run.stdout_text)
-                .map_err(RunnerError::Transcript)?;
+            let negative_transcript = negative_run.normalize(transcript::normalize_recenter)?;
             let negative_transcript_path = work.join("recenter-negative.transcript.json");
             fs::write(
                 &negative_transcript_path,
@@ -4362,9 +4602,173 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn parse(v: &[&str]) -> Result<Args, String> {
         Args::parse_from(v.iter().map(|s| s.to_string()))
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let path = env::temp_dir().join(format!(
+            "rivet-client-{label}-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn explicit_client_override_is_authoritative() {
+        let override_path = PathBuf::from("/explicit/rivet-client");
+        let selected = select_client_binary(
+            Some(override_path.clone()),
+            Some(Path::new("/other/debug/run-scenario")),
+            Path::new("/target"),
+        );
+        assert_eq!(selected, override_path);
+    }
+
+    #[test]
+    fn raw_provenance_requires_the_pinned_revision_and_records_binary_identity() {
+        let binary = ClientBinary {
+            path: PathBuf::from("/canonical/rivet-client"),
+            sha256: "abc123".to_owned(),
+        };
+        let raw = format!(
+            "{{\"event\":\"starting\",\"protocol\":1,\"azalea_revision\":\"{}\"}}\n",
+            transcript::PINNED_AZALEA_REVISION
+        );
+        let bound = bind_raw_client_provenance(&raw, &binary).unwrap();
+        assert!(bound.contains("client_binary_path"));
+        assert!(bound.contains("/canonical/rivet-client"));
+        assert!(bound.contains("client_binary_sha256"));
+        assert!(bound.contains("abc123"));
+
+        let wrong = raw.replace(transcript::PINNED_AZALEA_REVISION, "deadbeef");
+        assert!(bind_raw_client_provenance(&wrong, &binary).is_err());
+        assert!(
+            bind_raw_client_provenance("{\"event\":\"joined\",\"protocol\":1}\n", &binary).is_err()
+        );
+    }
+
+    #[test]
+    fn normalized_evidence_carries_exact_client_identity() {
+        let run = ClientRun {
+            stdout_text: "ignored".to_owned(),
+            stdout_path: PathBuf::from("stdout"),
+            stderr_path: PathBuf::from("stderr"),
+            binary: ClientBinary {
+                path: PathBuf::from("/canonical/rivet-client"),
+                sha256: "abc123".to_owned(),
+            },
+        };
+        let normalized = run
+            .normalize(|_| Ok(json!({"outcome": "spawned"})))
+            .unwrap();
+        assert_eq!(
+            normalized["client_binary"]["path"],
+            "/canonical/rivet-client"
+        );
+        assert_eq!(normalized["client_binary"]["sha256"], "abc123");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_deadline_terminates_kills_and_reaps_a_hung_client() {
+        let mut child = Command::new("sh")
+            .args(["-c", "trap '' TERM; while :; do :; done"])
+            .spawn()
+            .unwrap();
+        let error = wait_client(
+            &mut child,
+            Duration::from_millis(50),
+            Duration::from_millis(50),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("killed and reaped"));
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nonzero_client_exit_fails_after_preserving_diagnostics() {
+        let work = temp_dir("nonzero");
+        let script = work.join("client.sh");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{{\"event\":\"starting\",\"protocol\":1,\"azalea_revision\":\"{}\"}}'\necho boom >&2\nexit 7\n",
+                transcript::PINNED_AZALEA_REVISION
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = script.canonicalize().unwrap();
+        let binary = ClientBinary {
+            sha256: sha256_file(&path).unwrap(),
+            path,
+        };
+        let result = run_client(
+            &binary,
+            &ClientSpec {
+                address: DEFAULT_ADDRESS.to_owned(),
+                username: DEFAULT_USERNAME.to_owned(),
+                timeout_seconds: 1,
+                dwell_seconds: 0,
+                mode: "join".to_owned(),
+            },
+            &work,
+            "probe",
+        );
+        let error = result.err().expect("nonzero client must fail").to_string();
+        assert!(
+            error.contains("exit status: 7"),
+            "unexpected nonzero-exit error: {error}"
+        );
+        assert!(work.join("probe.stdout.jsonl").is_file());
+        assert_eq!(
+            fs::read_to_string(work.join("probe.stderr.log"))
+                .unwrap()
+                .trim(),
+            "boom"
+        );
+        fs::remove_dir_all(work).unwrap();
+    }
+
+    #[test]
+    fn mutated_client_binary_is_rejected() {
+        let work = temp_dir("mutated");
+        let path = work.join("rivet-client");
+        fs::write(&path, b"original").unwrap();
+        let binary = ClientBinary {
+            path: path.clone(),
+            sha256: sha256_file(&path).unwrap(),
+        };
+        fs::write(&path, b"changed").unwrap();
+        assert!(binary.verify_unchanged().is_err());
+        fs::remove_dir_all(work).unwrap();
+    }
+
+    #[test]
+    fn capture_boundary_requires_spawn_lifecycle_and_pinned_revision() {
+        let valid = json!({
+            "outcome": "spawned",
+            "lifecycle": ["init", "login", "spawn"],
+            "azalea_revision": transcript::PINNED_AZALEA_REVISION,
+        });
+        verify_capture_play_boundary(&valid).unwrap();
+
+        let mut missing_spawn = valid.clone();
+        missing_spawn["lifecycle"] = json!(["init", "login"]);
+        assert!(verify_capture_play_boundary(&missing_spawn).is_err());
+        let mut wrong_revision = valid.clone();
+        wrong_revision["azalea_revision"] = json!("deadbeef");
+        assert!(verify_capture_play_boundary(&wrong_revision).is_err());
+        let mut failed = valid;
+        failed["outcome"] = json!("connection_failed");
+        assert!(verify_capture_play_boundary(&failed).is_err());
     }
 
     #[test]
