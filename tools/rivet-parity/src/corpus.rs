@@ -269,6 +269,7 @@ pub fn encode_corpus() -> Vec<(String, String)> {
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -288,7 +289,12 @@ pub struct CorpusClosure {
     pub manifest_sha256: String,
     pub declared: usize,
     pub discovered: usize,
-    pub text_entries: usize,
+    pub text_entries: Vec<rivet_text::corpus::TextFixtureEntry>,
+}
+
+struct ValidatedTextCorpus {
+    entries: Vec<rivet_text::corpus::TextFixtureEntry>,
+    files: BTreeMap<PathBuf, Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -333,7 +339,7 @@ fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn regular_file_bytes(path: &Path) -> Result<Vec<u8>, ClosureError> {
+fn trusted_regular_file_bytes(path: &Path, expected_size: usize) -> Result<Vec<u8>, ClosureError> {
     let meta = std::fs::symlink_metadata(path).map_err(|error| {
         ClosureError::Invalid(format!(
             "{} is missing or unreadable: {error}",
@@ -357,8 +363,32 @@ fn regular_file_bytes(path: &Path) -> Result<Vec<u8>, ClosureError> {
             )));
         }
     }
-    std::fs::read(path)
-        .map_err(|error| ClosureError::Invalid(format!("{} unreadable: {error}", path.display())))
+    if meta.len() != expected_size as u64 {
+        return Err(ClosureError::Invalid(format!(
+            "{} has {} bytes, expected {expected_size}",
+            path.display(),
+            meta.len()
+        )));
+    }
+
+    let file = std::fs::File::open(path).map_err(|error| {
+        ClosureError::Invalid(format!("{} unreadable: {error}", path.display()))
+    })?;
+    let limit = u64::try_from(expected_size)
+        .ok()
+        .and_then(|size| size.checked_add(1))
+        .ok_or_else(|| ClosureError::Invalid(format!("{} size overflows", path.display())))?;
+    let mut bytes = Vec::with_capacity(expected_size);
+    file.take(limit).read_to_end(&mut bytes).map_err(|error| {
+        ClosureError::Invalid(format!("{} unreadable: {error}", path.display()))
+    })?;
+    if bytes.len() != expected_size {
+        return Err(ClosureError::Invalid(format!(
+            "{} changed size while being read",
+            path.display()
+        )));
+    }
+    Ok(bytes)
 }
 
 /// Load the committed chunk corpus only after proving exact manifest closure.
@@ -368,7 +398,67 @@ pub fn load_fixture_closure() -> Result<CorpusClosure, ClosureError> {
     let workspace = workspace_root()
         .ok_or_else(|| ClosureError::Absent("workspace root cannot be resolved".to_string()))?;
     let chunk_root = workspace.join("tools/rivet-oracle/fixtures/chunk");
-    load_fixture_closure_from(chunk_root, MANIFEST_BYTES)
+    let mut closure = load_fixture_closure_from(chunk_root, MANIFEST_BYTES)?;
+    let text = load_text_fixture_closure_from(
+        workspace.join("tools/rivet-oracle/fixtures/text"),
+        MANIFEST_BYTES,
+    )?;
+
+    let mut contract = Sha256::new();
+    contract.update(b"rivet-parity-corpus-closure-v2\0");
+    hash_contract_field(&mut contract, MANIFEST_BYTES);
+    for (path, bytes) in &text.files {
+        hash_contract_field(&mut contract, path.to_string_lossy().as_bytes());
+        hash_contract_field(&mut contract, bytes);
+    }
+    closure.manifest_sha256 = format!("{:x}", contract.finalize());
+    closure.text_entries = text.entries;
+    Ok(closure)
+}
+
+fn hash_contract_field(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
+}
+
+fn handbuilt_contract_sha256_from(
+    valid: &[(String, String)],
+    invalid: &[(String, String)],
+    encode: &[(String, String)],
+) -> String {
+    let mut contract = Sha256::new();
+    contract.update(b"rivet-parity-handbuilt-v1\0");
+    for (kind, entries) in [
+        ("snbt-valid", valid),
+        ("snbt-invalid", invalid),
+        ("nbt-encode", encode),
+    ] {
+        for (label, input) in entries {
+            hash_contract_field(&mut contract, kind.as_bytes());
+            hash_contract_field(&mut contract, label.as_bytes());
+            hash_contract_field(&mut contract, input.as_bytes());
+        }
+    }
+    format!("{:x}", contract.finalize())
+}
+
+fn validate_handbuilt_contract(
+    expected: &serde_json::Map<String, serde_json::Value>,
+    valid: &[(String, String)],
+    invalid: &[(String, String)],
+    encode: &[(String, String)],
+) -> Result<(), ClosureError> {
+    let actual_hash = handbuilt_contract_sha256_from(valid, invalid, encode);
+    if expected["snbt_valid"].as_u64() != Some(valid.len() as u64)
+        || expected["snbt_invalid"].as_u64() != Some(invalid.len() as u64)
+        || expected["nbt_encode"].as_u64() != Some(encode.len() as u64)
+        || expected["handbuilt_sha256"].as_str() != Some(actual_hash.as_str())
+    {
+        return Err(ClosureError::Invalid(format!(
+            "manifest hand-built corpus contract does not match executable declarations: {actual_hash}"
+        )));
+    }
+    Ok(())
 }
 
 fn load_fixture_closure_from(
@@ -415,41 +505,30 @@ fn load_fixture_closure_from(
         .as_u64()
         .and_then(|value| usize::try_from(value).ok())
         .ok_or_else(|| ClosureError::Invalid("manifest chunk_nbt count is invalid".to_string()))?;
-    let text_entries = expected["text_entries"]
-        .as_u64()
-        .and_then(|value| usize::try_from(value).ok())
-        .ok_or_else(|| {
-            ClosureError::Invalid("manifest text_entries count is invalid".to_string())
-        })?;
-    let mut handbuilt_ids = BTreeSet::new();
-    for (kind, label) in parse_corpus()
+    let valid: Vec<_> = parse_corpus()
         .into_iter()
-        .map(|(label, _)| ("snbt-valid", label.to_string()))
-        .chain(
-            invalid_corpus()
-                .into_iter()
-                .map(|(label, _)| ("snbt-invalid", label.to_string())),
-        )
-        .chain(
-            encode_corpus()
-                .into_iter()
-                .map(|(label, _)| ("nbt-encode", label)),
-        )
-    {
-        if !handbuilt_ids.insert((kind, label.clone())) {
-            return Err(ClosureError::Invalid(format!(
-                "duplicate hand-built fixture id {kind}:{label}"
-            )));
+        .map(|(label, input)| (label.to_string(), input.to_string()))
+        .collect();
+    let invalid: Vec<_> = invalid_corpus()
+        .into_iter()
+        .map(|(label, input)| (label.to_string(), input.to_string()))
+        .collect();
+    let encode = encode_corpus();
+    let mut handbuilt_ids = BTreeSet::new();
+    for (kind, entries) in [
+        ("snbt-valid", &valid),
+        ("snbt-invalid", &invalid),
+        ("nbt-encode", &encode),
+    ] {
+        for (label, _) in entries {
+            if !handbuilt_ids.insert((kind, label.clone())) {
+                return Err(ClosureError::Invalid(format!(
+                    "duplicate hand-built fixture id {kind}:{label}"
+                )));
+            }
         }
     }
-    if expected["snbt_valid"].as_u64() != Some(parse_corpus().len() as u64)
-        || expected["snbt_invalid"].as_u64() != Some(invalid_corpus().len() as u64)
-        || expected["nbt_encode"].as_u64() != Some(encode_corpus().len() as u64)
-    {
-        return Err(ClosureError::Invalid(
-            "manifest hand-built corpus counts do not match executable declarations".to_string(),
-        ));
-    }
+    validate_handbuilt_contract(expected, &valid, &invalid, &encode)?;
 
     let entries = manifest["chunk_files"]
         .as_array()
@@ -543,8 +622,8 @@ fn load_fixture_closure_from(
     let mut files = Vec::with_capacity(declared.len());
     for (relative, (expected_digest, expected_size)) in declared {
         let path = chunk_root.join(&relative);
-        let bytes = regular_file_bytes(&path)?;
-        if bytes.len() != expected_size || sha256(&bytes) != expected_digest {
+        let bytes = trusted_regular_file_bytes(&path, expected_size)?;
+        if sha256(&bytes) != expected_digest {
             return Err(ClosureError::Invalid(format!(
                 "{} content differs from manifest",
                 relative.display()
@@ -562,16 +641,16 @@ fn load_fixture_closure_from(
         discovered: discovered.len(),
         files,
         manifest_sha256: sha256(manifest_bytes),
-        text_entries,
+        text_entries: Vec::new(),
     })
 }
 
-/// Validate the text fixture directory's exact three-file closure and the
-/// committed capture manifest before delegating schema merging to rivet-text.
-pub fn validate_text_fixture_closure() -> Result<(), ClosureError> {
-    let workspace = workspace_root()
-        .ok_or_else(|| ClosureError::Absent("workspace root cannot be resolved".to_string()))?;
-    let dir = workspace.join("tools/rivet-oracle/fixtures/text");
+/// Validate the text fixture directory against the independently embedded
+/// contract, then parse the exact validated bytes without reopening paths.
+fn load_text_fixture_closure_from(
+    dir: PathBuf,
+    trusted_manifest_bytes: &[u8],
+) -> Result<ValidatedTextCorpus, ClosureError> {
     let root_meta = match std::fs::symlink_metadata(&dir) {
         Ok(meta) => meta,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -592,10 +671,49 @@ pub fn validate_text_fixture_closure() -> Result<(), ClosureError> {
             dir.display()
         )));
     }
+    let trusted: serde_json::Value = serde_json::from_slice(trusted_manifest_bytes)
+        .map_err(|error| ClosureError::Invalid(format!("trusted manifest malformed: {error}")))?;
+    let trusted_entries = trusted["text_files"]
+        .as_array()
+        .ok_or_else(|| ClosureError::Invalid("trusted manifest lacks text_files".to_string()))?;
+    if trusted_entries.len() != 3 {
+        return Err(ClosureError::Invalid(
+            "trusted manifest must pin exactly three text files".to_string(),
+        ));
+    }
+    let mut trusted_files = BTreeMap::new();
+    for entry in trusted_entries {
+        let raw = entry["path"]
+            .as_str()
+            .ok_or_else(|| ClosureError::Invalid("trusted text file lacks path".to_string()))?;
+        let relative = safe_relative_path(raw)?;
+        let digest = entry["sha256"]
+            .as_str()
+            .filter(|value| value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()))
+            .ok_or_else(|| ClosureError::Invalid(format!("{raw}: invalid trusted sha256")))?;
+        let size = entry["bytes"]
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| ClosureError::Invalid(format!("{raw}: invalid trusted byte count")))?;
+        if trusted_files
+            .insert(relative, (digest.to_ascii_lowercase(), size))
+            .is_some()
+        {
+            return Err(ClosureError::Invalid(format!(
+                "duplicate trusted text path {raw}"
+            )));
+        }
+    }
     let expected: BTreeSet<_> = ["corpus.json", "golden.json", "manifest.json"]
         .into_iter()
         .map(PathBuf::from)
         .collect();
+    if trusted_files.keys().cloned().collect::<BTreeSet<_>>() != expected {
+        return Err(ClosureError::Invalid(
+            "trusted manifest pins the wrong text files".to_string(),
+        ));
+    }
+
     let mut discovered = BTreeSet::new();
     for entry in std::fs::read_dir(&dir)
         .map_err(|error| ClosureError::Invalid(format!("{} unreadable: {error}", dir.display())))?
@@ -617,17 +735,23 @@ pub fn validate_text_fixture_closure() -> Result<(), ClosureError> {
             "text fixture file set differs: expected={expected:?} discovered={discovered:?}"
         )));
     }
-    let manifest_bytes = regular_file_bytes(&dir.join("manifest.json"))?;
-    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
-        .map_err(|error| ClosureError::Invalid(format!("text manifest malformed: {error}")))?;
-    if manifest["format"].as_u64() != Some(1)
-        || manifest["kind"].as_str() != Some("text")
-        || manifest["paper"].as_str() != Some("26.2-DEV-main@0a99345")
-    {
-        return Err(ClosureError::Invalid(
-            "text manifest has the wrong format/kind/Paper pin".to_string(),
-        ));
+
+    let mut files = BTreeMap::new();
+    for (relative, (expected_digest, expected_size)) in trusted_files {
+        let bytes = trusted_regular_file_bytes(&dir.join(&relative), expected_size)?;
+        if sha256(&bytes) != expected_digest {
+            return Err(ClosureError::Invalid(format!(
+                "text fixture {} differs from trusted manifest",
+                relative.display()
+            )));
+        }
+        files.insert(relative, bytes);
     }
+
+    let manifest_bytes = &files[Path::new("manifest.json")];
+    let manifest: serde_json::Value = serde_json::from_slice(manifest_bytes)
+        .map_err(|error| ClosureError::Invalid(format!("text manifest malformed: {error}")))?;
+    validate_text_header(&manifest, "manifest.json")?;
     let captured = manifest["captured"]
         .as_array()
         .ok_or_else(|| ClosureError::Invalid("text manifest lacks captured files".to_string()))?;
@@ -647,7 +771,9 @@ pub fn validate_text_fixture_closure() -> Result<(), ClosureError> {
                 "duplicate text capture {raw}"
             )));
         }
-        let bytes = regular_file_bytes(&dir.join(&relative))?;
+        let bytes = files.get(&relative).ok_or_else(|| {
+            ClosureError::Invalid(format!("text manifest captures untrusted file {raw}"))
+        })?;
         let expected_size = entry["bytes"]
             .as_u64()
             .and_then(|value| usize::try_from(value).ok())
@@ -655,9 +781,9 @@ pub fn validate_text_fixture_closure() -> Result<(), ClosureError> {
         let expected_digest = entry["sha256"]
             .as_str()
             .ok_or_else(|| ClosureError::Invalid(format!("{raw}: missing sha256")))?;
-        if bytes.len() != expected_size || sha256(&bytes) != expected_digest {
+        if bytes.len() != expected_size || sha256(bytes) != expected_digest {
             return Err(ClosureError::Invalid(format!(
-                "text fixture {raw} differs from manifest"
+                "text fixture {raw} differs from capture manifest"
             )));
         }
     }
@@ -670,10 +796,117 @@ pub fn validate_text_fixture_closure() -> Result<(), ClosureError> {
             "text manifest captures wrong files: {captured_names:?}"
         )));
     }
+
+    let corpus_bytes = &files[Path::new("corpus.json")];
+    let golden_bytes = &files[Path::new("golden.json")];
+    let corpus_json: serde_json::Value = serde_json::from_slice(corpus_bytes)
+        .map_err(|error| ClosureError::Invalid(format!("corpus.json malformed: {error}")))?;
+    let golden_json: serde_json::Value = serde_json::from_slice(golden_bytes)
+        .map_err(|error| ClosureError::Invalid(format!("golden.json malformed: {error}")))?;
+    validate_text_header(&corpus_json, "corpus.json")?;
+    validate_text_header(&golden_json, "golden.json")?;
+    validate_text_entry_sets(&corpus_json, &golden_json)?;
+
+    let entries = rivet_text::corpus::parse_text_corpus_bytes(corpus_bytes, golden_bytes)
+        .map_err(|error| ClosureError::Invalid(error.to_string()))?;
+    validate_text_counts(&trusted, &entries)?;
+    Ok(ValidatedTextCorpus { entries, files })
+}
+
+fn validate_text_header(value: &serde_json::Value, name: &str) -> Result<(), ClosureError> {
+    if value["format"].as_u64() != Some(1)
+        || value["kind"].as_str() != Some("text")
+        || value["paper"].as_str() != Some("26.2-DEV-main@0a99345")
+    {
+        return Err(ClosureError::Invalid(format!(
+            "{name} has the wrong format/kind/Paper pin"
+        )));
+    }
     Ok(())
 }
 
-pub use rivet_text::corpus::{CorpusError, text_corpus, text_fixtures_dir};
+fn text_entry_ids(value: &serde_json::Value, name: &str) -> Result<BTreeSet<String>, ClosureError> {
+    let entries = value["entries"]
+        .as_array()
+        .ok_or_else(|| ClosureError::Invalid(format!("{name} lacks entries")))?;
+    let mut ids = BTreeSet::new();
+    for entry in entries {
+        let id = entry["id"]
+            .as_str()
+            .ok_or_else(|| ClosureError::Invalid(format!("{name} entry lacks string id")))?;
+        if !ids.insert(id.to_string()) {
+            return Err(ClosureError::Invalid(format!(
+                "{name} contains duplicate id {id}"
+            )));
+        }
+    }
+    Ok(ids)
+}
+
+fn validate_text_entry_sets(
+    corpus: &serde_json::Value,
+    golden: &serde_json::Value,
+) -> Result<(), ClosureError> {
+    let corpus_ids = text_entry_ids(corpus, "corpus.json")?;
+    let golden_ids = text_entry_ids(golden, "golden.json")?;
+    if corpus_ids != golden_ids {
+        return Err(ClosureError::Invalid(
+            "corpus.json and golden.json contain different id sets".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_text_counts(
+    trusted: &serde_json::Value,
+    entries: &[rivet_text::corpus::TextFixtureEntry],
+) -> Result<(), ClosureError> {
+    let expected = trusted["expected"]
+        .as_object()
+        .ok_or_else(|| ClosureError::Invalid("trusted manifest lacks expected".to_string()))?;
+    let accepted = entries.iter().filter(|entry| entry.accept).count();
+    let invalid = entries.len() - accepted;
+    if expected["text_entries"].as_u64() != Some(entries.len() as u64)
+        || expected["text_accepted"].as_u64() != Some(accepted as u64)
+        || expected["text_invalid"].as_u64() != Some(invalid as u64)
+    {
+        return Err(ClosureError::Invalid(format!(
+            "text accept/invalid counts differ: total={} accepted={accepted} invalid={invalid}",
+            entries.len()
+        )));
+    }
+
+    let mut actual_kinds = BTreeMap::<String, u64>::new();
+    for entry in entries {
+        let kind = entry
+            .id
+            .split_once('-')
+            .map_or(entry.id.as_str(), |pair| pair.0);
+        *actual_kinds.entry(kind.to_string()).or_default() += 1;
+    }
+    let expected_kinds = expected["text_kinds"]
+        .as_object()
+        .ok_or_else(|| ClosureError::Invalid("trusted manifest lacks text_kinds".to_string()))?;
+    let parsed_expected: BTreeMap<_, _> = expected_kinds
+        .iter()
+        .map(|(kind, count)| {
+            count
+                .as_u64()
+                .map(|count| (kind.clone(), count))
+                .ok_or_else(|| {
+                    ClosureError::Invalid(format!("trusted text kind {kind} count is invalid"))
+                })
+        })
+        .collect::<Result<_, _>>()?;
+    if parsed_expected != actual_kinds {
+        return Err(ClosureError::Invalid(format!(
+            "text kind counts differ: expected={parsed_expected:?} actual={actual_kinds:?}"
+        )));
+    }
+    Ok(())
+}
+
+pub use rivet_text::corpus::text_fixtures_dir;
 
 #[cfg(test)]
 mod closure_tests {
@@ -685,8 +918,15 @@ mod closure_tests {
         assert_eq!(closure.declared, 432);
         assert_eq!(closure.discovered, 432);
         assert_eq!(closure.files.len(), 432);
-        assert_eq!(closure.text_entries, 62);
-        validate_text_fixture_closure().expect("committed text closure");
+        assert_eq!(closure.text_entries.len(), 62);
+        assert_eq!(
+            closure
+                .text_entries
+                .iter()
+                .filter(|entry| entry.accept)
+                .count(),
+            46
+        );
     }
 
     #[test]
@@ -695,6 +935,18 @@ mod closure_tests {
         assert_eq!(manifest["expected"]["snbt_valid"], parse_corpus().len());
         assert_eq!(manifest["expected"]["snbt_invalid"], invalid_corpus().len());
         assert_eq!(manifest["expected"]["nbt_encode"], encode_corpus().len());
+        let valid: Vec<_> = parse_corpus()
+            .into_iter()
+            .map(|(label, input)| (label.to_string(), input.to_string()))
+            .collect();
+        let invalid: Vec<_> = invalid_corpus()
+            .into_iter()
+            .map(|(label, input)| (label.to_string(), input.to_string()))
+            .collect();
+        assert_eq!(
+            manifest["expected"]["handbuilt_sha256"],
+            handbuilt_contract_sha256_from(&valid, &invalid, &encode_corpus())
+        );
     }
 
     fn temp_root(name: &str) -> PathBuf {
@@ -710,7 +962,56 @@ mod closure_tests {
         root
     }
 
+    fn copy_text_root(name: &str) -> PathBuf {
+        let root = temp_root(name);
+        let source = text_fixtures_dir().expect("committed text fixtures");
+        for file in ["manifest.json", "corpus.json", "golden.json"] {
+            std::fs::copy(source.join(file), root.join(file)).unwrap();
+        }
+        root
+    }
+
+    fn write_json(path: &Path, value: &serde_json::Value) {
+        let mut bytes = serde_json::to_vec_pretty(value).unwrap();
+        bytes.push(b'\n');
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn refresh_capture_manifest(root: &Path) {
+        let path = root.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for entry in manifest["captured"].as_array_mut().unwrap() {
+            let name = entry["path"].as_str().unwrap();
+            let bytes = std::fs::read(root.join(name)).unwrap();
+            entry["bytes"] = bytes.len().into();
+            entry["sha256"] = sha256(&bytes).into();
+        }
+        write_json(&path, &manifest);
+    }
+
+    fn trusted_manifest_for_text_root(root: &Path) -> Vec<u8> {
+        let mut trusted: serde_json::Value = serde_json::from_slice(MANIFEST_BYTES).unwrap();
+        for entry in trusted["text_files"].as_array_mut().unwrap() {
+            let name = entry["path"].as_str().unwrap();
+            let bytes = std::fs::read(root.join(name)).unwrap();
+            entry["bytes"] = bytes.len().into();
+            entry["sha256"] = sha256(&bytes).into();
+        }
+        serde_json::to_vec(&trusted).unwrap()
+    }
+
     fn one_file_manifest(path: &str, bytes: &[u8]) -> Vec<u8> {
+        let valid: Vec<_> = parse_corpus()
+            .into_iter()
+            .map(|(label, input)| (label.to_string(), input.to_string()))
+            .collect();
+        let invalid: Vec<_> = invalid_corpus()
+            .into_iter()
+            .map(|(label, input)| (label.to_string(), input.to_string()))
+            .collect();
+        let encode = encode_corpus();
+        let handbuilt_sha256 = handbuilt_contract_sha256_from(&valid, &invalid, &encode);
         serde_json::to_vec(&serde_json::json!({
             "format": 1,
             "kind": "rivet-parity-corpus",
@@ -721,6 +1022,7 @@ mod closure_tests {
                 "snbt_valid": parse_corpus().len(),
                 "snbt_invalid": invalid_corpus().len(),
                 "nbt_encode": encode_corpus().len(),
+                "handbuilt_sha256": handbuilt_sha256,
             },
             "chunk_files": [{
                 "path": path,
@@ -784,6 +1086,120 @@ mod closure_tests {
             .push(duplicate);
         assert!(matches!(
             load_fixture_closure_from(root.clone(), &serde_json::to_vec(&manifest).unwrap()),
+            Err(ClosureError::Invalid(_))
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn text_closure_rejects_self_authored_replacement_corpus() {
+        let root = copy_text_root("text-replacement");
+        let mut corpus: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("corpus.json")).unwrap()).unwrap();
+        corpus["entries"][0]["input"] = "\"replacement\"".into();
+        write_json(&root.join("corpus.json"), &corpus);
+        let mut golden: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("golden.json")).unwrap()).unwrap();
+        golden["entries"][0]["canonical"] = "\"replacement\"".into();
+        write_json(&root.join("golden.json"), &golden);
+        refresh_capture_manifest(&root);
+
+        assert!(matches!(
+            load_text_fixture_closure_from(root.clone(), MANIFEST_BYTES),
+            Err(ClosureError::Invalid(_))
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn text_closure_rejects_changed_invalid_contract_with_updated_hashes() {
+        let root = copy_text_root("text-invalid-count");
+        let mut corpus: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("corpus.json")).unwrap()).unwrap();
+        corpus["entries"][0]["accept"] = false.into();
+        write_json(&root.join("corpus.json"), &corpus);
+        let mut golden: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("golden.json")).unwrap()).unwrap();
+        golden["entries"][0]["accept"] = false.into();
+        golden["entries"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("canonical");
+        write_json(&root.join("golden.json"), &golden);
+        refresh_capture_manifest(&root);
+        let trusted = trusted_manifest_for_text_root(&root);
+
+        assert!(matches!(
+            load_text_fixture_closure_from(root.clone(), &trusted),
+            Err(ClosureError::Invalid(_))
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn text_closure_rejects_changed_kind_counts_with_updated_hashes() {
+        let root = copy_text_root("text-kind-count");
+        let mut corpus: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("corpus.json")).unwrap()).unwrap();
+        corpus["entries"][0]["id"] = "styled-reclassified".into();
+        write_json(&root.join("corpus.json"), &corpus);
+        let mut golden: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("golden.json")).unwrap()).unwrap();
+        golden["entries"][0]["id"] = "styled-reclassified".into();
+        write_json(&root.join("golden.json"), &golden);
+        refresh_capture_manifest(&root);
+        let trusted = trusted_manifest_for_text_root(&root);
+
+        assert!(matches!(
+            load_text_fixture_closure_from(root.clone(), &trusted),
+            Err(ClosureError::Invalid(_))
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn handbuilt_contract_rejects_changed_snbt_with_same_counts() {
+        let trusted: serde_json::Value = serde_json::from_slice(MANIFEST_BYTES).unwrap();
+        let expected = trusted["expected"].as_object().unwrap();
+        let mut valid: Vec<_> = parse_corpus()
+            .into_iter()
+            .map(|(label, input)| (label.to_string(), input.to_string()))
+            .collect();
+        valid[0].1 = "0b".to_string();
+        let invalid: Vec<_> = invalid_corpus()
+            .into_iter()
+            .map(|(label, input)| (label.to_string(), input.to_string()))
+            .collect();
+        assert!(matches!(
+            validate_handbuilt_contract(expected, &valid, &invalid, &encode_corpus()),
+            Err(ClosureError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn validated_text_entries_survive_path_swap_without_reopen() {
+        let root = copy_text_root("text-swap");
+        let validated = load_text_fixture_closure_from(root.clone(), MANIFEST_BYTES).unwrap();
+        let first = validated.entries[0].input.clone();
+        for file in ["manifest.json", "corpus.json", "golden.json"] {
+            std::fs::write(root.join(file), b"replaced after validation").unwrap();
+        }
+        assert_eq!(validated.entries.len(), 62);
+        assert_eq!(validated.entries[0].input, first);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn text_closure_rejects_huge_sparse_file_before_reading() {
+        let root = copy_text_root("text-sparse");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(root.join("corpus.json"))
+            .unwrap();
+        file.set_len(16 * 1024 * 1024 * 1024).unwrap();
+        assert!(matches!(
+            load_text_fixture_closure_from(root.clone(), MANIFEST_BYTES),
             Err(ClosureError::Invalid(_))
         ));
         let _ = std::fs::remove_dir_all(root);
