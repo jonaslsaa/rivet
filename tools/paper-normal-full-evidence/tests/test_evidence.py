@@ -425,6 +425,52 @@ class EvidenceTests(unittest.TestCase):
             with self.assertRaises(capture.Failed):
                 capture._verify_boot_artifact(run, stable, stable_info)
 
+    def test_materialization_rejects_substitution_despite_updated_capture_hashes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source-paperclip.jar"
+            boot = root / "stable-paperclip.jar"
+            runtime = root / "paper-26.2.jar"
+            libraries = root / "libraries"
+            library_relative = "example/group/example/1.0/example-1.0.jar"
+            library = libraries / library_relative
+            runtime_bytes = b"trusted-runtime"
+            library_bytes = b"trusted-library"
+            library.parent.mkdir(parents=True)
+            runtime.write_bytes(runtime_bytes)
+            library.write_bytes(library_bytes)
+            with zipfile.ZipFile(source, "w") as archive:
+                archive.writestr(
+                    "META-INF/versions.list",
+                    f"{validate.sha256(runtime_bytes)}\t26.2\t26.2/paper-26.2.jar\n",
+                )
+                archive.writestr(
+                    "META-INF/libraries.list",
+                    f"{validate.sha256(library_bytes)}\texample:example:1.0\t{library_relative}\n",
+                )
+            boot.write_bytes(source.read_bytes())
+            validate.validate_paperclip_materialization(source, boot, runtime, libraries)
+
+            boot.write_bytes(b"substituted-launcher")
+            self_authored_capture = {"sha256": validate.sha256(boot.read_bytes()), "bytes": boot.stat().st_size}
+            self.assertRegex(self_authored_capture["sha256"], r"^[0-9a-f]{64}$")
+            with self.assertRaisesRegex(validate.Failed, "stable boot Paperclip differs"):
+                validate.validate_paperclip_materialization(source, boot, runtime, libraries)
+
+            boot.write_bytes(source.read_bytes())
+            runtime.write_bytes(b"substituted-runtime")
+            self_authored_capture = {"sha256": validate.sha256(runtime.read_bytes()), "bytes": runtime.stat().st_size}
+            self.assertRegex(self_authored_capture["sha256"], r"^[0-9a-f]{64}$")
+            with self.assertRaisesRegex(validate.Failed, "runtime differs"):
+                validate.validate_paperclip_materialization(source, boot, runtime, libraries)
+
+            runtime.write_bytes(runtime_bytes)
+            library.write_bytes(b"substituted-library")
+            self_authored_capture = {"sha256": validate.sha256(library.read_bytes()), "bytes": library.stat().st_size}
+            self.assertRegex(self_authored_capture["sha256"], r"^[0-9a-f]{64}$")
+            with self.assertRaisesRegex(validate.Failed, "library differs"):
+                validate.validate_paperclip_materialization(source, boot, runtime, libraries)
+
     def test_probe_input_snapshot_detects_source_mutation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

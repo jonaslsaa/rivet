@@ -61,7 +61,10 @@ Paper server; it is not a parity result.
 The driver refuses a missing or dirty Paper source, a source revision other than
  the pin, a non-Temurin JDK, and any pre-existing output bundle. It builds Paper
 from source with Gradle and uses only the freshly built Paperclip jar; it never
-falls back to a stale jar, global Paper runtime, or shared world/cache.
+falls back to a stale jar, global Paper runtime, or shared world/cache. The
+validator pins the reproducible source-built Paperclip digest, requires the
+stable boot launcher to be byte-identical to it, and checks the runtime plus exact library set against
+Paperclip's own source-built `versions.list` and `libraries.list` digests.
 
 The source must be available as a canonical, read-only clean checkout at
 `working/Paper` in this worktree (or pass `--paper-source` with any checkout

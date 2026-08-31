@@ -32,6 +32,7 @@ PRODUCER = "paper-normal-full-capture/1"
 PROBE = "PaperNormalFullProbe"
 EXPECTED_PAPER = "0a993450f129c4942c2a9ed45ba047412b4667cf"
 EXPECTED_PAPER_SHORT = EXPECTED_PAPER[:7]
+EXPECTED_PAPERCLIP_SHA256 = "6c81f7892804f595100b2b9129018f817e4113dc89f9cfa0ec895ef079d33d6e"
 EXPECTED_CONTRACT_SHA256 = "49933b73813b628a36205420b071d790974036b6f1d649cfbc803f89b9d794f1"
 EXPECTED_INPUT_SHA256 = {
     "fixtures/server.properties": "468cdeaf43cde78f599a43fd55862d894a4470038f8df87931144131dd2e6d70",
@@ -293,6 +294,84 @@ def _read_archive_entry(archive: zipfile.ZipFile, name: str, label: str) -> byte
     if len(data) != info.file_size:
         raise Failed(f"{label} archive entry size changed while reading")
     return data
+
+
+def _materialized_relative_path(value: str, label: str) -> str:
+    if not value or value.startswith("/") or "\\" in value:
+        raise Failed(f"{label} path is not a safe relative path")
+    parts = value.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise Failed(f"{label} path is not a safe relative path")
+    return value
+
+
+def paperclip_materialization_contract(path: Path) -> tuple[str, str, dict[str, str]]:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            versions_text = _read_archive_entry(
+                archive,
+                "META-INF/versions.list",
+                "Paperclip versions contract",
+            ).decode("utf-8")
+            libraries_text = _read_archive_entry(
+                archive,
+                "META-INF/libraries.list",
+                "Paperclip libraries contract",
+            ).decode("utf-8")
+    except (OSError, UnicodeError, zipfile.BadZipFile) as exc:
+        raise Failed("source-built Paperclip materialization contract is malformed") from exc
+
+    versions: list[tuple[str, str]] = []
+    for line in versions_text.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 3 or not HEX64.fullmatch(fields[0]):
+            raise Failed("Paperclip versions contract contains a malformed entry")
+        version, relative = fields[1], _materialized_relative_path(fields[2], "Paperclip runtime")
+        if version == "26.2":
+            versions.append((fields[0], f"versions/{relative}"))
+    if len(versions) != 1 or versions[0][1] != "versions/26.2/paper-26.2.jar":
+        raise Failed("Paperclip versions contract does not uniquely pin the 26.2 runtime")
+
+    libraries: dict[str, str] = {}
+    for line in libraries_text.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 3 or not HEX64.fullmatch(fields[0]) or not fields[1]:
+            raise Failed("Paperclip libraries contract contains a malformed entry")
+        relative = _materialized_relative_path(fields[2], "Paperclip library")
+        if relative in libraries:
+            raise Failed(f"Paperclip libraries contract duplicates {relative}")
+        libraries[relative] = fields[0]
+    if not libraries:
+        raise Failed("Paperclip libraries contract is empty")
+    return versions[0][1], versions[0][0], libraries
+
+
+def validate_paperclip_materialization(
+    source_paperclip: Path,
+    stable_boot: Path,
+    runtime: Path,
+    libraries_root: Path,
+) -> tuple[str, int]:
+    source_bytes = _read_bytes(source_paperclip, "source-built Paperclip jar")
+    boot_bytes = _read_bytes(stable_boot, "stable Paperclip boot artifact")
+    if boot_bytes != source_bytes:
+        raise Failed("stable boot Paperclip differs from the independently verified source-built Paperclip")
+    runtime_relative, runtime_sha256, expected_libraries = paperclip_materialization_contract(source_paperclip)
+    if runtime.name != Path(runtime_relative).name or sha256(_read_bytes(runtime, "materialized Paper runtime")) != runtime_sha256:
+        raise Failed("materialized Paper runtime differs from the source-built Paperclip contract")
+    if libraries_root.is_symlink() or not libraries_root.is_dir():
+        raise Failed("materialized Paper libraries root is absent or symlinked")
+    actual_paths = {
+        str(path.relative_to(libraries_root)): path
+        for path in libraries_root.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    }
+    if set(actual_paths) != set(expected_libraries):
+        raise Failed("materialized Paper library set differs from the source-built Paperclip contract")
+    for relative, expected_sha256 in expected_libraries.items():
+        if sha256(_read_bytes(actual_paths[relative], f"materialized Paper library {relative}")) != expected_sha256:
+            raise Failed(f"materialized Paper library differs from the source-built Paperclip contract: {relative}")
+    return runtime_sha256, len(expected_libraries)
 
 
 def jar_manifest(path: Path) -> dict[str, str]:
@@ -1093,61 +1172,65 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
         raise Failed("Java provenance is not explicit Temurin 25")
     paper_jar = manifest.get("paper_jar", {})
     source_root = Path(paper_jar.get("source_root", ""))
-    source_jar = Path(paper_jar.get("path", ""))
     if paper_jar.get("source_revision") != EXPECTED_PAPER or not isinstance(paper_jar.get("built_after_ns"), int) or paper_jar.get("built_after_ns") <= 0:
         raise Failed("Paper source/build provenance is not the pinned fresh source")
     validate_paper_source(source_root)
-    if source_jar.name != "paper-paperclip-26.2.local-SNAPSHOT.jar" or not source_jar.resolve().is_relative_to(source_root.resolve()):
-        raise Failed("built Paperclip jar is outside the pinned Paper source tree")
-    _require_regular_file(source_jar, "built Paperclip jar")
-    if source_jar.stat().st_mtime_ns < int(paper_jar["built_after_ns"]) or paper_jar.get("sha256") != sha256(_read_bytes(source_jar, "built Paperclip jar")) or paper_jar.get("bytes") != source_jar.stat().st_size:
+    source_jar = source_root / "paper-server/build/libs/paper-paperclip-26.2.local-SNAPSHOT.jar"
+    if Path(paper_jar.get("path", "")) != source_jar:
+        raise Failed("built Paperclip path is not the pinned source-tree output")
+    source_jar_bytes = _read_bytes(source_jar, "built Paperclip jar")
+    source_jar_sha256 = sha256(source_jar_bytes)
+    if (
+        source_jar.stat().st_mtime_ns < int(paper_jar["built_after_ns"])
+        or source_jar_sha256 != EXPECTED_PAPERCLIP_SHA256
+        or paper_jar.get("sha256") != source_jar_sha256
+        or paper_jar.get("bytes") != len(source_jar_bytes)
+        or jar_manifest(source_jar).get("Main-Class") != "io.papermc.paperclip.Main"
+    ):
         raise Failed("built Paperclip jar provenance is absent, stale, or tampered")
-    if jar_manifest(source_jar).get("Main-Class") != "io.papermc.paperclip.Main":
-        raise Failed("built Paperclip jar is not the pinned Paperclip launcher")
+
+    trusted_runtime_relative, trusted_runtime_sha256, _ = paperclip_materialization_contract(source_jar)
     source_server = paper_jar.get("source_server_jar", {})
-    server_path = Path(source_server.get("path", ""))
-    if server_path.name != "paper-server-26.2.local-SNAPSHOT.jar" or not server_path.resolve().is_relative_to(source_root.resolve()):
-        raise Failed("built Paper server jar is outside the pinned Paper source tree")
-    _require_regular_file(server_path, "built Paper server jar")
+    server_path = source_root / "paper-server/build/libs/paper-server-26.2.local-SNAPSHOT.jar"
+    if Path(source_server.get("path", "")) != server_path:
+        raise Failed("built Paper server path is not the pinned source-tree output")
+    server_bytes = _read_bytes(server_path, "built Paper server jar")
     if (
         server_path.stat().st_mtime_ns < int(paper_jar["built_after_ns"])
         or source_server.get("git_commit") != EXPECTED_PAPER_SHORT
-        or source_server.get("sha256") != sha256(_read_bytes(server_path, "built Paper server jar"))
-        or source_server.get("bytes") != server_path.stat().st_size
+        or source_server.get("sha256") != trusted_runtime_sha256
+        or source_server.get("bytes") != len(server_bytes)
+        or sha256(server_bytes) != trusted_runtime_sha256
         or jar_manifest(server_path).get("Git-Commit") != EXPECTED_PAPER_SHORT
     ):
-        raise Failed("built Paper server jar does not prove the pinned source")
+        raise Failed("built Paper server jar does not match the source-built Paperclip contract")
+
     boot_artifact = paper_jar.get("boot_artifact", {})
-    if (
-        boot_artifact.get("path") != ".paper-paperclip.jar"
-        or not isinstance(boot_artifact.get("sha256"), str)
-        or not isinstance(boot_artifact.get("bytes"), int)
-    ):
+    if boot_artifact.get("path") != ".paper-paperclip.jar":
         raise Failed("stable Paperclip boot artifact provenance is absent")
-    boot_artifact_path = run / boot_artifact["path"]
-    if (
-        boot_artifact_path.is_symlink()
-        or not boot_artifact_path.is_file()
-        or boot_artifact.get("sha256") != sha256(_read_bytes(boot_artifact_path, "stable Paperclip boot artifact"))
-        or boot_artifact.get("bytes") != boot_artifact_path.stat().st_size
-    ):
-        raise Failed("stable Paperclip boot artifact is absent, stale, or tampered")
+    boot_artifact_path = run / ".paper-paperclip.jar"
     runtime = paper_jar.get("materialized_runtime", {})
     runtime_relative = runtime.get("path")
-    if runtime_relative != "versions/26.2/paper-26.2.jar":
-        raise Failed("fresh materialized Paper runtime path is not pinned")
-    runtime_path = run / runtime_relative
+    if runtime_relative != trusted_runtime_relative:
+        raise Failed("fresh materialized Paper runtime path differs from the source-built Paperclip contract")
+    runtime_path = run / trusted_runtime_relative
+    trusted_runtime_sha256, trusted_libraries_count = validate_paperclip_materialization(
+        source_jar,
+        boot_artifact_path,
+        runtime_path,
+        run / "libraries",
+    )
     if (
-        runtime_path.is_symlink()
-        or not runtime_path.is_file()
+        boot_artifact.get("sha256") != source_jar_sha256
+        or boot_artifact.get("bytes") != len(source_jar_bytes)
         or runtime.get("git_commit") != EXPECTED_PAPER_SHORT
-        or runtime.get("paperclip_sha256") != boot_artifact["sha256"]
-        or runtime.get("sha256") != sha256(_read_bytes(runtime_path, "materialized Paper runtime"))
+        or runtime.get("paperclip_sha256") != source_jar_sha256
+        or runtime.get("sha256") != trusted_runtime_sha256
         or runtime.get("bytes") != runtime_path.stat().st_size
+        or runtime.get("libraries_count") != trusted_libraries_count
+        or jar_manifest(runtime_path).get("Git-Commit") != EXPECTED_PAPER_SHORT
     ):
-        raise Failed("fresh materialized Paper runtime provenance is absent, stale, or tampered")
-    if jar_manifest(runtime_path).get("Git-Commit") != EXPECTED_PAPER_SHORT:
-        raise Failed("fresh materialized Paper runtime does not prove the pinned source")
+        raise Failed("executed Paperclip/materialized runtime provenance is absent, stale, or tampered")
     probe_artifact = manifest.get("probe_artifact", {})
     if paper_jar.get("probe_artifact") != probe_artifact:
         raise Failed("compiled probe provenance is duplicated inconsistently")
