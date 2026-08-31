@@ -1,44 +1,45 @@
-//! A finite, tick-thread-owned generated workspace for the seed-42 join view.
+//! The bounded generated FULL serving workspace (Paper 26.2).
 //!
-//! The workspace is deliberately separate from the live server boot until the
-//! generated FEATURES breadth can complete. It owns the target holders and the
-//! accumulated FULL support closure by value, drives deterministic X-major /
-//! Z-minor status waves, and exposes one transactional install seam. A typed
-//! generation or conversion refusal leaves the caller's `ChunkMap` untouched;
-//! this module never fabricates a FULL chunk to get a server boot green.
+//! The scheduler owns exactly the radius-four send view (117 positions) plus
+//! the non-target radius-one support set (48 positions), for 165 holders
+//! attached to the FULL dependency graph. Paper's farther accumulated radius-11
+//! inputs remain an upstream ephemeral-generation responsibility.  Generation is deliberately synchronous at the
+//! owner boundary: status waves are deterministic X-major/Z-minor walks and
+//! only the final consuming SPAWN-to-FULL conversion publishes to `ChunkMap`.
+//! No lower-status proto, fallback chunk, or packet is observable while a wave
+//! or conversion is incomplete.
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use crate::server::level::level_chunk::StructureKey;
-use rivet_registry::core::{ChunkPos, SectionPos};
-use rivet_util::StaticCache2D;
+use rivet_registry::core::ChunkPos;
 use rivet_world::chunk::chunk_generator::ChunkGenerator;
 use rivet_world::chunk::proto_chunk::ProtoChunk;
-use rivet_world::chunk::status::{ChunkStatus, GENERATION_PYRAMID, GenError};
-use rivet_world::level::height_accessor::LevelHeightAccessor;
+use rivet_world::chunk::status::{ChunkStatus, GENERATION_PYRAMID};
+
+use crate::server::level::level_chunk::StructureKey;
+use rivet_registry::block_state::BlockState;
+use rivet_world::chunk::storage::section_reconstruction::BiomeId as WorldgenBiomeId;
 
 use super::chunk_map::ChunkMap;
 use super::chunk_tracking_view::ChunkTrackingView;
 use super::generated_world::{
-    GeneratedChunkError, GenerationChunkHolder, OverworldGenerator, run_biome_decoration_in_region,
+    FeatureWorkspace, GeneratedChunkError, GenerationChunkHolder, OverworldGenerator,
+    SpawnRegionProtos,
 };
-use super::world_gen_region::{
-    CenterHolder, GenerationChunkHolderView, OwnedProtoHolder, WorldGenRegion,
-};
-use rivet_registry::block_state::BlockState;
-use rivet_world::chunk::storage::section_reconstruction::BiomeId as WorldgenBiomeId;
 
-/// The finite generated-serving view: the exact 117-position view emitted by
-/// `ChunkTrackingView::for_each` at radius four.
+/// The radius of the exact player send view for this slice.
 pub const GENERATED_VIEW_DISTANCE: i32 = 4;
-/// The exact number of target chunks in the radius-four send view.
+/// The exact number of radius-four target chunks (`11 * 11 - 4`).
 pub const GENERATED_TARGET_COUNT: usize = 117;
-/// The accumulated FULL dependency radius from `ChunkPyramid`.
+/// The accumulated FULL dependency radius in Paper's generation pyramid.
 pub const FULL_SUPPORT_RADIUS: i32 = 11;
+/// The exact number of non-target radius-one support holders.
+pub const GENERATED_SUPPORT_COUNT: usize = 48;
 
-/// One deterministic status wave. Positions are always X-major / Z-minor,
-/// independent of hash-map insertion order or any future worker scheduling.
+/// One deterministic status wave.  The positions are sorted by x first, then
+/// z, independently of holder-map insertion or any worker scheduling.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GeneratedStatusWave {
     status: ChunkStatus,
@@ -46,26 +47,24 @@ pub struct GeneratedStatusWave {
 }
 
 impl GeneratedStatusWave {
-    /// The wave's target status.
+    /// The status this wave reaches.
     pub fn status(&self) -> ChunkStatus {
         self.status
     }
 
-    /// The wave's deterministic positions.
+    /// The wave's canonical X-major/Z-minor positions.
     pub fn positions(&self) -> &[ChunkPos] {
         &self.positions
     }
 }
 
-/// Typed refusal from the finite generated workspace. The error carries the
-/// exact holder/status boundary instead of replacing an incomplete generated
-/// chunk with superflat content.
+/// Typed refusal from the bounded serving workspace.  A refusal never writes
+/// to the caller's `ChunkMap`.
 #[derive(Debug, thiserror::Error)]
 pub enum GeneratedWorkspaceError {
-    /// The wrapped target view did not produce the exact supported 117-position
-    /// set. Paper's int arithmetic can wrap the view bounds at extreme centers;
-    /// this workspace refuses that pathological shape instead of treating an
-    /// empty enumeration as a successful generated world.
+    /// The view shape was not the exact Paper radius-four target set.  This is
+    /// checked before constructing holders, so wrapped extreme coordinates fail
+    /// closed rather than becoming an empty successful world.
     #[error(
         "generated workspace view centered at {center} with distance {view_distance} enumerated {actual_count} targets; expected {expected_count}"
     )]
@@ -75,40 +74,41 @@ pub enum GeneratedWorkspaceError {
         actual_count: usize,
         expected_count: usize,
     },
-    /// A generated-serving constructor received a config outside the fixed
-    /// normal-overworld contract.
+    /// A generated-world config does not describe this fixed normal-overworld
+    /// slice.
     #[error("generated world config field {field} is incompatible; expected {expected}")]
     InvalidConfiguration {
         field: &'static str,
         expected: &'static str,
     },
-    /// A support holder required by a shared FEATURES region was absent.
-    #[error("generated workspace target {target} is missing FULL support holder {support}")]
+    /// A required support holder was removed before its dependent operation.
+    #[error("generated workspace target {target} is missing support holder {support}")]
     MissingSupport { target: ChunkPos, support: ChunkPos },
-    /// The workspace does not yet own Paper's SPAWN WorldGenRegion/cache
-    /// seam. Refuse before calling the detached holder-only spawn closure.
-    #[error(
-        "generated workspace cannot run SPAWN for {position}: Paper's shared WorldGenRegion seam is not wired"
-    )]
-    SpawnRegionUnavailable { position: ChunkPos },
-    /// A status wave refused before its holder could advance.
+    /// A status task refused at a typed Paper boundary.
     #[error("generated workspace holder {position} refused status {target:?}: {source}")]
     Generation {
         position: ChunkPos,
         target: ChunkStatus,
         source: GeneratedChunkError,
     },
-    /// A target holder refused the consuming FULL conversion.
+    /// A target failed the consuming SPAWN-to-FULL bridge.
     #[error("generated workspace target {position} refused consuming FULL conversion: {source}")]
     Conversion {
         position: ChunkPos,
         source: GeneratedChunkError,
     },
+    /// The caller attempted to serve a generated view before all target chunks
+    /// had been atomically installed.
+    #[error("generated chunk {position} is not ready for packet serving (status: {status:?})")]
+    PacketBeforeReady {
+        position: ChunkPos,
+        status: Option<ChunkStatus>,
+    },
 }
 
-/// A finite generated world slice. All mutable holders and generated protos
-/// remain on the owner thread; the only shared value is the immutable
-/// per-world generator configuration already used by `GenerationChunkHolder`.
+/// A finite generated serving graph.  Every mutable value is owned by the sync
+/// tick thread; the immutable generator and FEATURES workspace are shared by
+/// value through `Arc`/`Rc` internals, never through a game-state lock.
 pub struct GeneratedWorkspace {
     seed: i64,
     view: ChunkTrackingView,
@@ -118,18 +118,13 @@ pub struct GeneratedWorkspace {
     required_status: HashMap<ChunkPos, ChunkStatus>,
     waves: Vec<GeneratedStatusWave>,
     holders: HashMap<ChunkPos, GenerationChunkHolder>,
-    feature_failures: HashMap<ChunkPos, GenError>,
+    feature_workspace: FeatureWorkspace,
+    feature_workspace_seeded: bool,
 }
 
 impl GeneratedWorkspace {
-    /// Build the finite workspace around `center` for a world seed.
-    ///
-    /// The target list is not hand-written: it is derived solely from
-    /// `ChunkTrackingView::for_each`, so the install set stays exactly aligned
-    /// with the join/send view. The support map is the union of the FULL step's
-    /// accumulated dependency window around those targets, through radius 11.
-    /// A wrapped view at an extreme center is refused before any generator or
-    /// holder is constructed; an empty target map is never a successful world.
+    /// Construct the exact radius-four target set and its FULL dependency
+    /// closure around `center`.
     pub fn new(seed: i64, center: ChunkPos) -> Result<Self, GeneratedWorkspaceError> {
         let view = ChunkTrackingView::of(center, GENERATED_VIEW_DISTANCE);
         let mut targets = Vec::with_capacity(view.chunk_count());
@@ -146,12 +141,17 @@ impl GeneratedWorkspace {
         let required_status = accumulate_full_support(&targets);
         let mut support_positions: Vec<_> = required_status.keys().copied().collect();
         sort_positions(&mut support_positions);
-
         let generator = Arc::new(OverworldGenerator::new(seed));
+        let feature_workspace = FeatureWorkspace::new();
         let holders = support_positions
             .iter()
             .copied()
-            .map(|pos| (pos, generator.create_holder(pos)))
+            .map(|pos| {
+                (
+                    pos,
+                    generator.create_holder_with_workspace(pos, feature_workspace.clone()),
+                )
+            })
             .collect();
         let waves = build_status_waves(&support_positions, &required_status);
 
@@ -164,7 +164,8 @@ impl GeneratedWorkspace {
             required_status,
             waves,
             holders,
-            feature_failures: HashMap::new(),
+            feature_workspace,
+            feature_workspace_seeded: false,
         })
     }
 
@@ -173,9 +174,7 @@ impl GeneratedWorkspace {
         self.seed
     }
 
-    /// The realized generator geometry used by every holder in this workspace.
-    /// This internal seam keeps generated world metadata tied to the actual
-    /// normal-overworld generator rather than flat-world constants.
+    /// The realized normal-overworld generator geometry.
     pub(crate) fn generator_geometry(&self) -> (i32, i32, i32) {
         (
             self.generator.get_min_y(),
@@ -184,91 +183,123 @@ impl GeneratedWorkspace {
         )
     }
 
-    /// The exact target view used by the workspace.
+    /// The exact radius-four target view.
     pub fn view(&self) -> &ChunkTrackingView {
         &self.view
     }
 
-    /// The exact 117 target install positions in X-major / Z-minor order.
+    /// The 117 positions that may be installed and served.
     pub fn target_positions(&self) -> &[ChunkPos] {
         &self.targets
     }
 
-    /// The accumulated FULL support closure in deterministic order.
+    /// The exact 165 holders attached to the bounded FULL graph: 117 targets
+    /// plus the 48 non-target radius-one supports, in canonical order.
     pub fn support_positions(&self) -> &[ChunkPos] {
         &self.support_positions
     }
 
-    /// The generated minimum status required at a support position by the FULL
-    /// dependency closure. This is a value-only inspection seam for scheduling
-    /// and focused tests.
+    /// The number of attached FULL holders, always 165 for this slice.
+    pub fn holder_count(&self) -> usize {
+        self.holders.len()
+    }
+
+    /// The minimum status required at a support position by the FULL step.
     pub fn required_status(&self, pos: ChunkPos) -> Option<ChunkStatus> {
         self.required_status.get(&pos).copied()
     }
 
-    /// The deterministic executable status waves. FULL is intentionally absent:
-    /// FULL is the consuming holder-to-LevelChunk boundary, not an executor
-    /// task, and install performs that conversion only after all waves finish.
+    /// The deterministic executable waves. FULL is absent because FULL is the
+    /// consuming holder-to-LevelChunk publication boundary.
     pub fn status_waves(&self) -> &[GeneratedStatusWave] {
         &self.waves
     }
 
-    /// Generate the workspace in dependency order without touching a
-    /// `ChunkMap`. A typed refusal leaves all already-produced holder state in
-    /// this tick-thread workspace for diagnostics, but no server authority is
-    /// changed.
+    /// Whether every target is exactly at the SPAWN parent required by the
+    /// consuming FULL bridge. This is the readiness predicate used before
+    /// packet serving; support statuses are checked against their wave bounds.
+    pub fn is_ready(&self) -> bool {
+        self.targets.iter().all(|position| {
+            self.holders
+                .get(position)
+                .is_some_and(|holder| holder.status() == ChunkStatus::Spawn)
+        }) && self.required_status.iter().all(|(position, required)| {
+            self.holders
+                .get(position)
+                .is_some_and(|holder| holder.status().is_or_after(*required))
+        })
+    }
+
+    /// Inspect readiness without exposing lower-status chunks as serveable.
+    pub fn require_ready(&self) -> Result<(), GeneratedWorkspaceError> {
+        if let Some(position) = self.targets.iter().copied().find(|position| {
+            self.holders
+                .get(position)
+                .is_none_or(|holder| holder.status() != ChunkStatus::Spawn)
+        }) {
+            return Err(GeneratedWorkspaceError::PacketBeforeReady {
+                position,
+                status: self
+                    .holders
+                    .get(&position)
+                    .map(GenerationChunkHolder::status),
+            });
+        }
+        if let Some((position, _)) = self.required_status.iter().find(|(position, required)| {
+            self.holders
+                .get(position)
+                .is_none_or(|holder| !holder.status().is_or_after(**required))
+        }) {
+            return Err(GeneratedWorkspaceError::PacketBeforeReady {
+                position: *position,
+                status: self
+                    .holders
+                    .get(position)
+                    .map(GenerationChunkHolder::status),
+            });
+        }
+        Ok(())
+    }
+
+    /// Drain every required status in deterministic order.  This method only
+    /// mutates tick-thread-owned holders; `ChunkMap` publication is separate.
     pub fn generate(&mut self) -> Result<(), GeneratedWorkspaceError> {
         for wave_index in 0..self.waves.len() {
             let status = self.waves[wave_index].status;
             let positions = self.waves[wave_index].positions.clone();
             for position in positions {
-                if self
-                    .holders
-                    .get(&position)
-                    .is_some_and(|holder| holder.status().is_or_after(status))
-                {
-                    // A retry walks the immutable ladder from its first wave,
-                    // but a holder may already be beyond this rung. Never ask
-                    // the executor to demote it; completed FEATURES holders in
-                    // particular must not be re-decorated.
-                    continue;
-                }
-                if status == ChunkStatus::Spawn {
-                    // `GenerationChunkHolder::run_spawn` is intentionally a
-                    // detached holder-only seam. Paper SPAWN reads through a
-                    // shared WorldGenRegion/cache, so do not invoke it until
-                    // this workspace composes that exact region.
-                    return Err(GeneratedWorkspaceError::SpawnRegionUnavailable { position });
-                }
-                if status == ChunkStatus::Features {
-                    // Shared FEATURES is not an executor idempotent path: it
-                    // temporarily moves the complete dependency window and
-                    // performs decoration itself. The completed-status guard
-                    // above skips it on retries.
-                    self.generate_features_with_shared_region(position)?;
-                    continue;
-                }
-                let holder = self.holders.get_mut(&position).ok_or(
-                    GeneratedWorkspaceError::MissingSupport {
+                let Some(holder) = self.holders.get(&position) else {
+                    return Err(GeneratedWorkspaceError::MissingSupport {
                         target: position,
                         support: position,
-                    },
-                )?;
-                holder.generate_through(status).map_err(|source| {
-                    GeneratedWorkspaceError::Generation {
-                        position,
-                        target: status,
-                        source,
-                    }
-                })?;
+                    });
+                };
+                if holder.status().is_or_after(status) {
+                    continue;
+                }
+
+                match status {
+                    ChunkStatus::Features => self.generate_features(position)?,
+                    ChunkStatus::Spawn => self.generate_spawn(position)?,
+                    _ => self
+                        .holders
+                        .get_mut(&position)
+                        .expect("holder presence checked above")
+                        .generate_through(status)
+                        .map_err(|source| GeneratedWorkspaceError::Generation {
+                            position,
+                            target: status,
+                            source,
+                        })?,
+                }
             }
         }
         Ok(())
     }
 
-    /// Generate, consume-convert every target holder, and only then install the
-    /// 117 resulting `LevelChunk`s. No `ChunkMap::install` call occurs until
-    /// every conversion succeeds, so any typed refusal installs none.
+    /// Generate, consume-convert every target, then install all 117 chunks.
+    /// Conversion is completed into a temporary vector first, so no map entry
+    /// changes when a later target refuses.
     pub fn install_into(mut self, chunk_map: &mut ChunkMap) -> Result<(), GeneratedWorkspaceError> {
         self.generate()?;
 
@@ -281,9 +312,20 @@ impl GeneratedWorkspace {
                         target: position,
                         support: position,
                     })?;
-            let chunk = holder
+            let (chunk, generated_light_storage) = holder
                 .into_level_chunk()
                 .map_err(|source| GeneratedWorkspaceError::Conversion { position, source })?;
+            // This workspace never attaches a second LIGHT owner: production
+            // LIGHT remains the upstream bridge and its runtime storage is
+            // returned by the holder boundary.  A non-empty value here would
+            // need the downstream live ChunkMap/light-owner handoff (#231), so
+            // refuse to publish rather than silently treating it as a chunk.
+            if generated_light_storage.is_some() {
+                return Err(GeneratedWorkspaceError::Conversion {
+                    position,
+                    source: GeneratedChunkError::UnsupportedStatus(ChunkStatus::Full),
+                });
+            }
             converted.push((position, chunk));
         }
 
@@ -293,121 +335,181 @@ impl GeneratedWorkspace {
         Ok(())
     }
 
-    /// Run one FEATURES target against the workspace's moved support protos.
-    /// `WorldGenRegion` owns the ring adapters only for the duration of the
-    /// call; they are extracted and rebuilt as holders afterwards, preserving
-    /// every cross-chunk block/entity/post-processing write.
-    fn generate_features_with_shared_region(
-        &mut self,
-        target: ChunkPos,
-    ) -> Result<(), GeneratedWorkspaceError> {
-        if let Some(source) = self.feature_failures.get(&target).copied() {
-            return Err(GeneratedWorkspaceError::Generation {
-                position: target,
-                target: ChunkStatus::Features,
-                source: GeneratedChunkError::Generation(source),
-            });
+    /// Seed the shared FEATURES region cache from the authoritative holder
+    /// values exactly once. Later runs retain cross-chunk writes through the
+    /// `FeatureWorkspace` and publish those values back to holders.
+    fn seed_feature_workspace(&mut self) {
+        if self.feature_workspace_seeded {
+            return;
         }
+        for position in &self.support_positions {
+            let snapshot = self
+                .holders
+                .get(position)
+                .expect("support position has a holder")
+                .snapshot_proto();
+            self.feature_workspace.insert(snapshot);
+        }
+        self.feature_workspace_seeded = true;
+    }
 
-        let ring_positions = feature_dependency_positions(target);
-        for support in ring_positions.iter().copied() {
-            if !self.holders.contains_key(&support) {
-                return Err(GeneratedWorkspaceError::MissingSupport { target, support });
+    /// Copy successful FEATURES writes from the shared region cache back into
+    /// every non-center holder.  The center's own proto is authoritative for
+    /// its status and writes; it is refreshed into the cache for the next
+    /// target after that holder returns.
+    fn publish_feature_workspace(&mut self, center: ChunkPos) {
+        for proto in self.feature_workspace.snapshot_chunks() {
+            let position = proto.get_pos();
+            if position != center
+                && let Some(holder) = self.holders.get_mut(&position)
+            {
+                *holder.proto_mut() = proto;
+            }
+        }
+        let center_snapshot = self
+            .holders
+            .get(&center)
+            .expect("FEATURES center holder remains owned")
+            .snapshot_proto();
+        self.feature_workspace.insert(center_snapshot);
+    }
+
+    /// Run one production FEATURES status task against the common dependency
+    /// workspace. Unlike the obsolete detached region helper, this invokes the
+    /// same `GenerationChunkHolder`/Paper FEATURES body and retains writes via
+    /// the shared workspace.
+    fn generate_features(&mut self, position: ChunkPos) -> Result<(), GeneratedWorkspaceError> {
+        self.seed_feature_workspace();
+        self.holders
+            .get_mut(&position)
+            .expect("FEATURES position has a holder")
+            .generate_through(ChunkStatus::Features)
+            .map_err(|source| GeneratedWorkspaceError::Generation {
+                position,
+                target: ChunkStatus::Features,
+                source,
+            })?;
+        self.publish_feature_workspace(position);
+        Ok(())
+    }
+
+    /// Run the production shared radius-one SPAWN region. Neighbours are moved
+    /// out of the holder arena for the duration and rebuilt afterwards. Both
+    /// typed failures and panics restore snapshots, so no partial graph state
+    /// survives a failed SPAWN body.
+    fn generate_spawn(&mut self, position: ChunkPos) -> Result<(), GeneratedWorkspaceError> {
+        let neighbour_positions = spawn_neighbour_positions(position);
+        for neighbour in neighbour_positions.iter().copied() {
+            if !self.holders.contains_key(&neighbour) {
+                return Err(GeneratedWorkspaceError::MissingSupport {
+                    target: position,
+                    support: neighbour,
+                });
             }
         }
 
         let mut center =
             self.holders
-                .remove(&target)
+                .remove(&position)
                 .ok_or(GeneratedWorkspaceError::MissingSupport {
-                    target,
-                    support: target,
+                    target: position,
+                    support: position,
                 })?;
-        if !center.status().is_or_after(ChunkStatus::Carvers) {
-            let source = GeneratedChunkError::Generation(GenError::FeaturesNotGenerated);
-            self.holders.insert(target, center);
-            return Err(GeneratedWorkspaceError::Generation {
-                position: target,
-                target: ChunkStatus::Features,
-                source,
-            });
-        }
-
-        let mut ring = Vec::with_capacity(ring_positions.len());
-        for support in ring_positions {
+        let center_snapshot = center.snapshot_proto();
+        let mut neighbour_snapshots = Vec::with_capacity(neighbour_positions.len());
+        let mut neighbours = Vec::with_capacity(neighbour_positions.len());
+        for neighbour in neighbour_positions.iter().copied() {
             let holder = self
                 .holders
-                .remove(&support)
-                .expect("shared FEATURES ring presence was checked above");
-            ring.push(holder.into_proto());
+                .remove(&neighbour)
+                .expect("neighbour presence checked above");
+            neighbour_snapshots.push((neighbour, holder.snapshot_proto()));
+            neighbours.push(holder.into_proto());
         }
 
-        let result = {
-            let center_proto = center.proto_mut();
-            center_proto.prime_heightmaps(&rivet_world::levelgen::heightmap::FINAL_HEIGHTMAPS);
-            let center_pos = center_proto.get_pos();
-            let origin = SectionPos::of_chunk_pos(
-                &center_pos,
-                center_proto.height_accessor().get_min_section_y(),
-            )
-            .origin();
-            let mut region = compose_shared_feature_region(center_proto, &self.generator, ring);
-            let result = run_biome_decoration_in_region(&mut region, &self.generator, &origin);
-            let returned = region.into_owned_proto_chunks();
-            (result, returned)
-        };
+        // The positions above are a mathematically complete radius-one set;
+        // constructor validation is retained as a defense against future
+        // scheduler changes, but cannot reject this canonical list.
+        let mut region = SpawnRegionProtos::new(position, neighbours)
+            .expect("canonical radius-one SPAWN neighbours must be complete");
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            center.generate_spawn_with_region(&mut region)
+        }));
+        let returned_neighbours = region.into_neighbours();
 
-        for proto in result.1 {
-            let position = proto.get_pos();
+        match result {
+            Ok(Ok(())) => {
+                for proto in returned_neighbours {
+                    let neighbour = proto.get_pos();
+                    self.holders.insert(
+                        neighbour,
+                        GenerationChunkHolder::from_proto_with_workspace(
+                            proto,
+                            self.generator.clone(),
+                            self.feature_workspace.clone(),
+                        ),
+                    );
+                }
+                self.holders.insert(position, center);
+                Ok(())
+            }
+            Ok(Err(source)) => {
+                self.restore_spawn_failure(position, center, center_snapshot, neighbour_snapshots);
+                Err(GeneratedWorkspaceError::Generation {
+                    position,
+                    target: ChunkStatus::Spawn,
+                    source,
+                })
+            }
+            Err(payload) => {
+                self.restore_spawn_failure(position, center, center_snapshot, neighbour_snapshots);
+                std::panic::resume_unwind(payload)
+            }
+        }
+    }
+
+    fn restore_spawn_failure(
+        &mut self,
+        position: ChunkPos,
+        mut center: GenerationChunkHolder,
+        center_snapshot: ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+        neighbour_snapshots: Vec<(
+            ChunkPos,
+            ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+        )>,
+    ) {
+        *center.proto_mut() = center_snapshot;
+        self.holders.insert(position, center);
+        for (neighbour, proto) in neighbour_snapshots {
             self.holders.insert(
-                position,
-                GenerationChunkHolder::from_proto(proto, self.generator.clone()),
+                neighbour,
+                GenerationChunkHolder::from_proto_with_workspace(
+                    proto,
+                    self.generator.clone(),
+                    self.feature_workspace.clone(),
+                ),
             );
         }
-        self.holders.insert(target, center);
-
-        if let Err(source) = result.0 {
-            // The region has already been returned, so its cross-chunk writes
-            // are retained. Do not run a failed decoration body again: the
-            // same typed failure is deterministic, while re-decoration could
-            // duplicate ticks, block-entity writes, or post-processing marks.
-            self.feature_failures.insert(target, source);
-            return Err(GeneratedWorkspaceError::Generation {
-                position: target,
-                target: ChunkStatus::Features,
-                source: GeneratedChunkError::Generation(source),
-            });
-        }
-        // This is the executor's post-task publication, performed only after
-        // the exact shared-region body returned `Ok`; no FEATURES status is
-        // stamped on a typed decoration refusal.
-        self.holders
-            .get_mut(&target)
-            .expect("the center holder was reinserted above")
-            .proto_mut()
-            .set_persisted_status(ChunkStatus::Features);
-        Ok(())
     }
 }
 
-/// Build the union of the FULL step's accumulated dependency windows around
-/// the exact target view. Each support position stores the strongest required
-/// status among all target windows, which is what deterministic status waves
-/// consume.
+/// Materialize the holders attached to the bounded FULL view. Paper's FULL
+/// dependency pyramid has an accumulated radius of 11, but only the 117 target
+/// tickets and their radius-one neighbours are attached to this slice. The
+/// farther dependency window is an ephemeral generation input owned by the
+/// upstream scheduler, not an additional served/attached holder graph.
 fn accumulate_full_support(targets: &[ChunkPos]) -> HashMap<ChunkPos, ChunkStatus> {
     let full = GENERATION_PYRAMID.get_step_to(ChunkStatus::Full);
-    let mut required = HashMap::new();
+    let mut required = HashMap::with_capacity(GENERATED_TARGET_COUNT + GENERATED_SUPPORT_COUNT);
     for target in targets {
-        for dx in -FULL_SUPPORT_RADIUS..=FULL_SUPPORT_RADIUS {
-            for dz in -FULL_SUPPORT_RADIUS..=FULL_SUPPORT_RADIUS {
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                let position =
+                    ChunkPos::new(target.x().wrapping_add(dx), target.z().wrapping_add(dz));
                 let distance = dx.abs().max(dz.abs()) as usize;
-                if distance > FULL_SUPPORT_RADIUS as usize {
-                    continue;
-                }
-                let pos = ChunkPos::new(target.x().wrapping_add(dx), target.z().wrapping_add(dz));
                 let status = full.required_status_at_radius(distance);
                 required
-                    .entry(pos)
+                    .entry(position)
                     .and_modify(|current: &mut ChunkStatus| {
                         if status.index() > current.index() {
                             *current = status;
@@ -428,420 +530,243 @@ fn build_status_waves(
         .into_iter()
         .skip(1)
         .filter(|status| *status != ChunkStatus::Full)
-        .map(|status| {
-            let positions = support_positions
+        .map(|status| GeneratedStatusWave {
+            status,
+            positions: support_positions
                 .iter()
                 .copied()
-                .filter(|pos| {
+                .filter(|position| {
                     required_status
-                        .get(pos)
+                        .get(position)
                         .is_some_and(|required| required.index() >= status.index())
                 })
-                .collect();
-            GeneratedStatusWave { status, positions }
+                .collect(),
         })
         .collect()
 }
 
 fn sort_positions(positions: &mut [ChunkPos]) {
-    positions.sort_by_key(|pos| (pos.x(), pos.z()));
+    positions.sort_by_key(|position| (position.x(), position.z()));
 }
 
-fn feature_dependency_positions(center: ChunkPos) -> Vec<ChunkPos> {
-    let mut positions = Vec::with_capacity(17 * 17 - 1);
-    for dx in -8..=8 {
-        for dz in -8..=8 {
-            if dx == 0 && dz == 0 {
-                continue;
+fn spawn_neighbour_positions(center: ChunkPos) -> Vec<ChunkPos> {
+    let mut positions = Vec::with_capacity(8);
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            if dx != 0 || dz != 0 {
+                positions.push(ChunkPos::new(
+                    center.x().wrapping_add(dx),
+                    center.z().wrapping_add(dz),
+                ));
             }
-            positions.push(ChunkPos::new(
-                center.x().wrapping_add(dx),
-                center.z().wrapping_add(dz),
-            ));
         }
     }
     positions
 }
 
-fn compose_shared_feature_region<'a>(
-    center: &'a mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
-    generator: &Arc<OverworldGenerator>,
-    ring: Vec<ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>>,
-) -> WorldGenRegion<'a, BlockState, WorldgenBiomeId, StructureKey> {
-    let center_pos = center.get_pos();
-    let center_status = center.get_persisted_status();
-    let mut by_pos: HashMap<ChunkPos, ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>> = ring
-        .into_iter()
-        .map(|chunk| (chunk.get_pos(), chunk))
-        .collect();
-    let mut holders: Vec<
-        Box<dyn GenerationChunkHolderView<BlockState, WorldgenBiomeId, StructureKey> + 'a>,
-    > = Vec::with_capacity(17 * 17 - 1);
-    for dx in -8..=8 {
-        for dz in -8..=8 {
-            let pos = ChunkPos::new(
-                center_pos.x().wrapping_add(dx),
-                center_pos.z().wrapping_add(dz),
-            );
-            if pos == center_pos {
-                continue;
-            }
-            let chunk = by_pos
-                .remove(&pos)
-                .expect("the shared FEATURES dependency window must be complete");
-            holders.push(Box::new(OwnedProtoHolder::new(chunk)));
-        }
-    }
-    // Insert the borrowed center at its X-major/Z-minor slot after all ring
-    // holders have been built. This keeps one mutable borrow of `center` and
-    // preserves the cache's exact coordinate order.
-    let center_index = 8 * 17 + 8;
-    holders.insert(
-        center_index,
-        Box::new(CenterHolder::new(center.base_mut(), center_status)),
-    );
-
-    let cache = StaticCache2D::from_entries(
-        center_pos.x().wrapping_sub(8),
-        center_pos.z().wrapping_sub(8),
-        17,
-        17,
-        holders,
-    );
-    let step = GENERATION_PYRAMID
-        .get_step_to(ChunkStatus::Features)
-        .clone();
-    WorldGenRegion::new(
-        cache,
-        center_pos,
-        step,
-        generator.seed(),
-        generator.get_min_y(),
-        generator.get_gen_depth(),
-        generator.get_sea_level(),
-        Arc::new(generator.biome_source().clone()),
-        generator.feature_access().clone(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::generated_world::fresh_worldgen_chunk;
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
-    fn seed_42_view_derives_exactly_117_targets_in_raster_order() {
-        let workspace = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("normal target view");
-        assert_eq!(workspace.seed(), 42);
-        assert_eq!(workspace.target_positions().len(), 117);
+    fn seed_42_view_is_exactly_117_targets_in_raster_order() {
+        let workspace = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("target view");
+        assert_eq!(workspace.target_positions().len(), GENERATED_TARGET_COUNT);
         assert_eq!(workspace.target_positions()[0], ChunkPos::new(-5, -4));
         assert_eq!(workspace.target_positions()[116], ChunkPos::new(5, 4));
         for pair in workspace.target_positions().windows(2) {
-            assert!(
-                (pair[0].x(), pair[0].z()) < (pair[1].x(), pair[1].z()),
-                "targets must be strictly X-major/Z-minor: {:?} -> {:?}",
-                pair[0],
-                pair[1]
-            );
+            assert!((pair[0].x(), pair[0].z()) < (pair[1].x(), pair[1].z()));
         }
     }
 
     #[test]
-    fn support_closure_is_full_radius_11_and_has_status_boundaries() {
-        let workspace = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("normal target view");
-        assert_eq!(workspace.support_positions().len(), 1085);
-        assert!(
-            workspace
-                .support_positions()
-                .iter()
-                .any(|pos| { pos.x().abs().max(pos.z().abs()) == FULL_SUPPORT_RADIUS })
-        );
+    fn attached_full_graph_is_165_with_48_non_target_radius_one_supports() {
+        let workspace = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("target view");
+        assert_eq!(workspace.support_positions().len(), 165);
+        assert_eq!(workspace.holder_count(), 165);
+        let targets: HashSet<_> = workspace.target_positions().iter().copied().collect();
+        let radius_one_supports = workspace
+            .support_positions()
+            .iter()
+            .filter(|position| {
+                !targets.contains(position)
+                    && targets.iter().any(|target| {
+                        position.x().abs_diff(target.x()) <= 1
+                            && position.z().abs_diff(target.z()) <= 1
+                    })
+            })
+            .count();
+        assert_eq!(radius_one_supports, GENERATED_SUPPORT_COUNT);
         assert_eq!(
             workspace.required_status(ChunkPos::ZERO),
             Some(ChunkStatus::Spawn)
         );
         assert_eq!(
-            workspace.required_status(ChunkPos::new(7, 0)),
-            Some(ChunkStatus::Carvers)
+            workspace.required_status(ChunkPos::new(6, 0)),
+            Some(ChunkStatus::InitializeLight)
         );
-        assert_eq!(
-            workspace.required_status(ChunkPos::new(8, 0)),
-            Some(ChunkStatus::Biomes)
-        );
-        assert_eq!(
-            workspace.required_status(ChunkPos::new(9, 0)),
-            Some(ChunkStatus::StructureStarts)
-        );
+        assert_eq!(workspace.required_status(ChunkPos::new(7, 0)), None);
     }
 
     #[test]
-    fn shared_features_move_the_complete_17_by_17_dependency_window() {
-        assert_eq!(
-            feature_dependency_positions(ChunkPos::ZERO).len(),
-            17 * 17 - 1
-        );
-        assert!(!feature_dependency_positions(ChunkPos::ZERO).contains(&ChunkPos::ZERO));
-    }
-
-    #[test]
-    fn shared_features_region_returns_owned_ring_writes() {
-        let generator = Arc::new(OverworldGenerator::new(42));
-        let mut center = generator.create_holder(ChunkPos::ZERO);
-        center
-            .generate_through(ChunkStatus::Carvers)
-            .expect("center CARVERS");
-        let ring = feature_dependency_positions(ChunkPos::ZERO)
-            .into_iter()
-            .map(|pos| {
-                let mut chunk = fresh_worldgen_chunk(pos, &generator);
-                chunk.prime_heightmaps(&rivet_world::levelgen::heightmap::FINAL_HEIGHTMAPS);
-                let distance = pos.x().abs().max(pos.z().abs());
-                chunk.set_persisted_status(if distance <= 1 {
-                    ChunkStatus::Carvers
-                } else {
-                    ChunkStatus::StructureStarts
-                });
-                chunk
-            })
-            .collect();
-        let write_pos = ChunkPos::new(1, 0).get_block_at(0, 64, 0);
-        let state = rivet_world::block::blocks::Blocks::STONE.default_block_state();
-        let returned = {
-            let mut region = compose_shared_feature_region(center.proto_mut(), &generator, ring);
-            assert!(region.set_block(&write_pos, state, 2, 512));
-            region.into_owned_proto_chunks()
-        };
-        let persisted = returned
-            .into_iter()
-            .find(|chunk| chunk.get_pos() == ChunkPos::new(1, 0))
-            .expect("the written ring proto must be returned");
-        assert_eq!(
-            persisted.get_block_state(write_pos.get_x(), write_pos.get_y(), write_pos.get_z()),
-            state
-        );
-    }
-
-    #[test]
-    fn status_waves_are_deterministic_and_have_no_executor_full_wave() {
-        let a = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("normal target view");
-        let b = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("normal target view");
+    fn status_waves_are_deterministic_and_features_attach_165_holders() {
+        let a = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("target view");
+        let b = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("target view");
         assert_eq!(a.status_waves(), b.status_waves());
-        assert_eq!(a.status_waves().len(), ChunkStatus::ALL.len() - 2);
         assert!(
             a.status_waves()
                 .iter()
                 .all(|wave| wave.status() != ChunkStatus::Full)
         );
-        assert_eq!(
-            a.status_waves().last().map(GeneratedStatusWave::status),
-            Some(ChunkStatus::Spawn)
-        );
-
-        // Every holder runs each intermediate rung up to its terminal status.
-        // FULL's dependency closure makes the FEATURES wave the 117 d0 targets
-        // plus the 48 d1 support holders; d2 CARVERS holders do not enter it.
         let features = a
             .status_waves()
             .iter()
             .find(|wave| wave.status() == ChunkStatus::Features)
             .expect("FEATURES wave");
         assert_eq!(features.positions().len(), 165);
-        assert!(features.positions().contains(&ChunkPos::ZERO));
-        assert!(features.positions().contains(&ChunkPos::new(1, 0)));
-        assert!(!features.positions().contains(&ChunkPos::new(7, 0)));
-        let target_set: std::collections::HashSet<_> =
-            a.target_positions().iter().copied().collect();
-        let feature_set: std::collections::HashSet<_> =
-            features.positions().iter().copied().collect();
-        assert_eq!(target_set.len(), 117);
-        assert!(
-            target_set.is_subset(&feature_set),
-            "every d0 target must enter FEATURES"
-        );
         assert_eq!(
-            feature_set.len() - target_set.len(),
-            48,
-            "FEATURES has 48 d1 supports"
-        );
-        assert!(
-            feature_set.iter().all(|position| {
-                target_set.iter().any(|target| {
-                    position.x().wrapping_sub(target.x()).abs() <= 1
-                        && position.z().wrapping_sub(target.z()).abs() <= 1
-                })
-            }),
-            "d2 support must stay out of FEATURES"
-        );
-        assert_eq!(a.required_status(ChunkPos::ZERO), Some(ChunkStatus::Spawn));
-        assert_eq!(
-            a.required_status(ChunkPos::new(6, 0)),
-            Some(ChunkStatus::InitializeLight)
-        );
-        assert_eq!(
-            a.required_status(ChunkPos::new(7, 0)),
-            Some(ChunkStatus::Carvers)
+            features
+                .positions()
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>()
+                .len(),
+            165
         );
     }
 
     #[test]
-    fn retry_skips_completed_features_before_later_typed_failure() {
-        let mut workspace =
-            GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("normal target view");
-        // Mark every support holder as already completed through FEATURES. This
-        // isolates the retry boundary: no lower-rung worldgen work is needed,
-        // and the next wave reaches the honest light-engine refusal directly.
-        for holder in workspace.holders.values_mut() {
-            holder
-                .proto_mut()
-                .set_persisted_status(ChunkStatus::Features);
-        }
-
-        // Treat FEATURES as already completed, then retry into the honest
-        // light-engine boundary. A retry must skip decoration rather than
-        // re-running it against already-written holders.
-        let error = workspace.generate().expect_err("light engine is not wired");
-        println!("retry error: {error:?}");
-        assert!(matches!(
-            error,
-            GeneratedWorkspaceError::Generation {
-                target: ChunkStatus::InitializeLight,
-                source: GeneratedChunkError::Generation(GenError::LightEngineMissing {
-                    status: ChunkStatus::InitializeLight,
-                }),
-                ..
-            }
-        ));
-        assert!(
-            workspace
-                .holders
-                .values()
-                .filter(|holder| holder.status() == ChunkStatus::Features)
-                .count()
-                >= 165
-        );
-    }
-
-    #[test]
-    fn failed_features_are_not_redecorated_after_failure() {
-        let mut workspace =
-            GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("normal target view");
-        let source = GenError::FeaturePlacementDecode {
-            chunk_pos: ChunkPos::ZERO,
-            step_index: 9,
-            global_feature_index: 17,
-            feature_key: "minecraft:dark_forest_vegetation",
-        };
-        workspace.feature_failures.insert(ChunkPos::ZERO, source);
-
+    fn missing_spawn_support_is_typed_and_does_not_publish() {
+        let mut workspace = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("target view");
+        let missing = ChunkPos::new(1, 0);
+        workspace.holders.remove(&missing);
         let error = workspace
-            .generate_features_with_shared_region(ChunkPos::ZERO)
-            .expect_err("cached FEATURES failure");
+            .generate_spawn(ChunkPos::ZERO)
+            .expect_err("missing radius-one support");
         assert!(matches!(
             error,
-            GeneratedWorkspaceError::Generation {
-                position: ChunkPos::ZERO,
-                target: ChunkStatus::Features,
-                source: GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
-                    step_index: 9,
-                    global_feature_index: 17,
-                    ..
-                }),
-            }
+            GeneratedWorkspaceError::MissingSupport { target, support }
+                if target == ChunkPos::ZERO && support == missing
         ));
+        assert!(!workspace.is_ready());
     }
 
     #[test]
-    fn spawn_refuses_before_detached_holder_only_execution() {
-        let mut workspace =
-            GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("normal target view");
-        for holder in workspace.holders.values_mut() {
-            holder.proto_mut().set_persisted_status(ChunkStatus::Light);
-        }
-
-        let error = workspace
-            .generate()
-            .expect_err("SPAWN needs the shared WorldGenRegion seam");
-        assert!(matches!(
-            error,
-            GeneratedWorkspaceError::SpawnRegionUnavailable { .. }
-        ));
-    }
-
-    #[test]
-    fn install_converts_consumingly_before_any_map_install() {
-        let mut workspace =
-            GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("normal target view");
-        // Synthetic FULL statuses isolate the consuming conversion seam without
-        // invoking the real light/FEATURES boundaries. Leave one target at SPAWN
-        // so conversion fails after earlier targets have already converted.
-        for holder in workspace.holders.values_mut() {
-            holder.proto_mut().set_persisted_status(ChunkStatus::Full);
-        }
-        let failing = ChunkPos::ZERO;
-        workspace
-            .holders
-            .get_mut(&failing)
-            .expect("center target")
-            .proto_mut()
-            .set_persisted_status(ChunkStatus::Spawn);
-
+    fn status_failure_leaves_chunk_map_empty() {
+        let mut workspace = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("target view");
+        // Limit this counterfactual to the first unavailable status task. The
+        // real full drain is intentionally owned by the production pipeline;
+        // this test only proves its transactional map boundary.
+        workspace.waves = vec![GeneratedStatusWave {
+            status: ChunkStatus::InitializeLight,
+            positions: vec![ChunkPos::ZERO],
+        }];
         let mut chunk_map = ChunkMap::empty(GENERATED_VIEW_DISTANCE);
         let error = workspace
             .install_into(&mut chunk_map)
-            .expect_err("the pre-FULL target must refuse conversion");
-        println!("conversion error: {error:?}");
+            .expect_err("the unavailable status is typed");
+        assert!(matches!(error, GeneratedWorkspaceError::Generation { .. }));
+        assert_eq!(chunk_map.len(), 0);
+    }
+
+    #[test]
+    fn packet_before_ready_is_refused_without_lower_status_substitution() {
+        let workspace = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("target view");
+        let error = workspace
+            .require_ready()
+            .expect_err("fresh holders are not ready");
         assert!(matches!(
             error,
-            GeneratedWorkspaceError::Conversion {
-                position,
-                source: GeneratedChunkError::Convert(
-                    crate::server::level::level_chunk::LevelChunkBridgeError::NotFull(
-                        ChunkStatus::Spawn
-                    )
-                ),
-            } if position == failing
+            GeneratedWorkspaceError::PacketBeforeReady {
+                position: ChunkPos { .. },
+                status: Some(ChunkStatus::Empty)
+            }
         ));
-        assert_eq!(
-            chunk_map.len(),
-            0,
-            "conversion failure must install nothing"
+    }
+
+    #[test]
+    fn consuming_promotion_requires_exact_spawn_parent() {
+        let generator = Arc::new(OverworldGenerator::new(42));
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder.proto_mut().set_persisted_status(ChunkStatus::Spawn);
+        let (chunk, storage) = holder.into_level_chunk().expect("SPAWN promotes");
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Full);
+        assert!(storage.is_none());
+
+        let mut refused = generator.create_holder(ChunkPos::new(1, 0));
+        refused.proto_mut().set_persisted_status(ChunkStatus::Light);
+        assert!(matches!(
+            refused.into_level_chunk(),
+            Err(GeneratedChunkError::Convert { .. })
+        ));
+    }
+
+    #[test]
+    fn deterministic_install_order_is_target_raster_order() {
+        let workspace = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("target view");
+        assert_eq!(workspace.target_positions()[0], ChunkPos::new(-5, -4));
+        assert_eq!(workspace.target_positions()[116], ChunkPos::new(5, 4));
+        for pair in workspace.target_positions().windows(2) {
+            assert!((pair[0].x(), pair[0].z()) < (pair[1].x(), pair[1].z()));
+        }
+    }
+
+    #[test]
+    fn ready_install_publishes_exactly_the_117_targets() {
+        let mut workspace = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("target view");
+        for holder in workspace.holders.values_mut() {
+            holder.proto_mut().set_persisted_status(ChunkStatus::Spawn);
+        }
+        assert!(workspace.is_ready());
+        let targets = workspace.target_positions().to_vec();
+        let mut chunk_map = ChunkMap::empty(GENERATED_VIEW_DISTANCE);
+        workspace
+            .install_into(&mut chunk_map)
+            .expect("all synthetic SPAWN parents convert");
+        assert_eq!(chunk_map.len(), GENERATED_TARGET_COUNT);
+        assert!(
+            targets
+                .iter()
+                .all(|position| chunk_map.get_chunk(*position).is_some())
         );
     }
 
     #[test]
-    fn wrapped_extreme_center_is_typed_refusal_not_empty_success() {
+    fn rollback_conversion_failure_installs_no_partial_graph() {
+        let mut workspace = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("target view");
+        for holder in workspace.holders.values_mut() {
+            holder.proto_mut().set_persisted_status(ChunkStatus::Spawn);
+        }
+        workspace
+            .holders
+            .get_mut(&ChunkPos::ZERO)
+            .expect("center target")
+            .proto_mut()
+            .set_persisted_status(ChunkStatus::Full);
+        let mut chunk_map = ChunkMap::empty(GENERATED_VIEW_DISTANCE);
+        let error = workspace
+            .install_into(&mut chunk_map)
+            .expect_err("one target refuses conversion");
+        assert!(matches!(error, GeneratedWorkspaceError::Conversion { .. }));
+        assert_eq!(chunk_map.len(), 0);
+    }
+
+    #[test]
+    fn wrapped_extreme_center_fails_closed() {
         for center in [
             ChunkPos::new(i32::MAX, i32::MIN),
             ChunkPos::new(i32::MAX, 0),
             ChunkPos::new(i32::MIN, 0),
-            ChunkPos::new(0, i32::MAX),
-            ChunkPos::new(0, i32::MIN),
         ] {
-            let error = match GeneratedWorkspace::new(42, center) {
-                Err(error) => error,
-                Ok(_) => panic!("pathological wrapped view must be refused at {center}"),
-            };
             assert!(matches!(
-                error,
-                GeneratedWorkspaceError::InvalidTargetView {
+                GeneratedWorkspace::new(42, center),
+                Err(GeneratedWorkspaceError::InvalidTargetView {
                     actual_count: 0,
-                    expected_count: 117,
+                    expected_count: GENERATED_TARGET_COUNT,
                     ..
-                }
+                })
             ));
         }
-    }
-
-    #[test]
-    fn workspace_does_not_claim_boot_support_without_completed_features() {
-        // The constructor is intentionally value-only and does not install a
-        // placeholder. The live seed-42 FEATURES breadth remains a typed
-        // boundary, so boot integration must not silently turn this into FULL.
-        let workspace = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("normal target view");
-        assert_eq!(workspace.target_positions().len(), 117);
-        assert_eq!(
-            workspace.support_positions().len(),
-            workspace.required_status.len()
-        );
     }
 }

@@ -542,6 +542,23 @@ impl FeatureWorkspace {
     pub fn is_empty(&self) -> bool {
         self.chunks.borrow().is_empty()
     }
+
+    /// Snapshot every retained dependency chunk in deterministic coordinate
+    /// order. The shared G4 scheduler uses this value-only view to publish
+    /// cross-chunk FEATURES writes back to its holder arena without exposing
+    /// the interior map borrow.
+    pub(crate) fn snapshot_chunks(
+        &self,
+    ) -> Vec<ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>> {
+        let mut chunks: Vec<_> = self
+            .chunks
+            .borrow()
+            .values()
+            .map(snapshot_generated_chunk)
+            .collect();
+        chunks.sort_by_key(|chunk| (chunk.get_pos().x(), chunk.get_pos().z()));
+        chunks
+    }
 }
 
 /// The per-world OVERWORLD generator realization — `NoiseBasedChunkGenerator`
@@ -1164,6 +1181,43 @@ impl GenerationChunkHolder {
     /// pass. It can be shared with neighboring holders on the sync tick thread.
     pub fn feature_workspace(&self) -> FeatureWorkspace {
         self.feature_workspace.clone()
+    }
+
+    /// Snapshot the tick-thread-owned generated proto without exposing its
+    /// representation. The shared FEATURES scheduler uses this to seed its
+    /// temporary `WorldGenRegion` cache before a status task runs.
+    pub(crate) fn snapshot_proto(&self) -> ProtoChunk<BlockState, WorldgenBiomeId, StructureKey> {
+        snapshot_generated_chunk(&self.chunk)
+    }
+
+    /// Mutably expose the generated proto to the bounded tick-thread scheduler.
+    pub(crate) fn proto_mut(
+        &mut self,
+    ) -> &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey> {
+        &mut self.chunk
+    }
+
+    /// Rebuild the holder executor around an owned proto returned by a shared
+    /// SPAWN region. The proto remains the sole mutable authority; the executor
+    /// closures are recreated over the same immutable generator and FEATURES
+    /// workspace.
+    pub(crate) fn from_proto_with_workspace(
+        chunk: ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+        generator: Arc<OverworldGenerator>,
+        feature_workspace: FeatureWorkspace,
+    ) -> Self {
+        let pos = chunk.get_pos();
+        let mut holder = Self::new_with_workspace(pos, generator, feature_workspace);
+        holder.chunk = chunk;
+        holder
+    }
+
+    /// Consume a holder's proto for a temporary shared status region. The
+    /// scheduler only calls this for neighbours that have no attached runtime
+    /// LIGHT task; a holder carrying such a task must be detached through the
+    /// generated-light storage seam instead.
+    pub(crate) fn into_proto(self) -> ProtoChunk<BlockState, WorldgenBiomeId, StructureKey> {
+        self.chunk
     }
 
     /// Drive the chunk from its current persisted status through `target`
