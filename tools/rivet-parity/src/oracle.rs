@@ -114,7 +114,7 @@ impl Oracle {
                 OracleCallError::Unavailable("oracle success without result".to_string())
             }),
             Some(false) => {
-                let Some(error) = response.get("error").filter(Value::is_object) else {
+                let Some(error) = response.get("error").filter(|value| value.is_object()) else {
                     return Err(OracleCallError::Unavailable(
                         "oracle rejection without structured error".to_string(),
                     ));
