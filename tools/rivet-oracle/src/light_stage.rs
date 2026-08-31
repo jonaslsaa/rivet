@@ -52,11 +52,12 @@
 //! Paper lit in: every chunk's sections are reconstructed into the server's
 //! `StateId` space, every chunk gets its persisted light installed
 //! (`reconstruct_lights(...).install(...)` → light_correct), and the committed
-//! 3×3 is re-lit with `SkyLightProvider::relight_chunk_with` — the per-neighbour
+//! 3×3 is re-lit by the server's test-only parity helper — the per-neighbour
 //! no-edge-checks path from Paper's `relightChunks`, whose neighbour-light pull
 //! (`propagateNeighbourLevels`) reproduces the fixture's east-neighbour water
 //! dampening at the boundary columns. The published sky nibbles and emptiness
-//! map must then match the fixture truth byte-exact.
+//! map must then match the fixture truth byte-exact. The helper is absent from
+//! production, so this oracle does not imply a served dynamic-relighting API.
 //!
 //! Honesty rules (mirror features/generated-expected, D8):
 //!

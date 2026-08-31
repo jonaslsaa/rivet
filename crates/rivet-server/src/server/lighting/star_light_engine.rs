@@ -56,12 +56,32 @@
 //! still read as dead code to the compiler, so the allow stays.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
+
 use crate::server::level::level_chunk::{BiomeId as ServerBiomeId, StateId, StructureKey};
 use rivet_registry::block_state::BlockState;
 use rivet_world::chunk::chunk_access::ChunkAccess;
 use rivet_world::chunk::level_chunk_section::LevelChunkSection;
 use rivet_world::level::height_accessor::LevelHeightAccessor;
 use rivet_world::lighting::swmr_nibble_array::SwmrNibbleArray;
+
+const QUEUE_COORDINATE_MASK: u64 = (1u64 << (6 + 6 + 16)) - 1;
+
+#[inline]
+fn cache_index(chunk_x: i32, chunk_y: i32, chunk_z: i32, offset: i32) -> usize {
+    chunk_x
+        .wrapping_add(chunk_z.wrapping_mul(5))
+        .wrapping_add(chunk_y.wrapping_mul(25))
+        .wrapping_add(offset) as usize
+}
+
+#[inline]
+fn encode_queue_position(x: i32, y: i32, z: i32, offset: i32) -> u64 {
+    x.wrapping_add(z.wrapping_shl(6))
+        .wrapping_add(y.wrapping_shl(12))
+        .wrapping_add(offset) as u64
+        & QUEUE_COORDINATE_MASK
+}
 
 /// The six propagation directions, in Java declaration order (the ordinal is
 /// the bit position in the propagation bitset). The opposite pairs differ only
@@ -272,6 +292,21 @@ impl SectionSnapshot {
     }
 }
 
+/// The post-run light state for one cached neighbour. Java's cache entries
+/// alias the neighbour's live nibbles, so `updateVisible` publishes mutations
+/// to that chunk even though `light()` calls `setNibbles` only for the center.
+/// Rust snapshots must carry those visible nibbles back explicitly before the
+/// provider restores the owned runtime chunk.
+#[derive(Default)]
+pub(crate) struct NeighborLightUpdate {
+    /// Only source-owned sections that still have a cache entry are returned.
+    /// Skylight's rewrite intentionally removes null sections and null-section
+    /// propagation can create scratch entries; neither should replace the
+    /// neighbour's original nibble array.
+    pub(crate) nibbles: Vec<(usize, SwmrNibbleArray)>,
+    pub(crate) emptiness_map: Option<Vec<bool>>,
+}
+
 /// The sky light engine — `SkyStarLightEngine` on the light-chunk path. Owns
 /// the per-run scratch caches (chunk/section/nibble/emptiness arrays, the two
 /// FIFO queues, the null-propagation check) exactly as the Java instance does;
@@ -297,6 +332,16 @@ pub(crate) struct SkyStarLightEngine {
     section_cache: Vec<Option<SectionSnapshot>>,
     /// `nibbleCache`, indexed like `sectionCache`.
     nibble_cache: Vec<Option<SwmrNibbleArray>>,
+    /// Whether each cached nibble originated from an array supplied by its
+    /// source chunk. `initNibble(..., initRemovedNibbles=true)` creates a
+    /// scratch array when a null entry is needed for propagation; Java never
+    /// writes that replacement back to a neighbour, so those entries must not
+    /// be published during the provider's explicit write-back.
+    nibble_cache_writeback: Vec<bool>,
+    /// A source nibble removed by `rewriteNibbleCacheForSkylight`. Java calls
+    /// `updateVisible` on the source object before dropping its cache entry, so
+    /// retain that post-publication value for the provider's neighbour write-back.
+    dropped_nibble_writeback: Vec<Option<SwmrNibbleArray>>,
     /// `chunkCache`, indexed `x + 5*z + chunkIndexOffset`. Java holds the
     /// chunk reference; the only engine read is the presence check in
     /// `initNibble`, so the cache is a membership flag.
@@ -345,6 +390,10 @@ pub(crate) struct SkyStarLightEngine {
     /// `setEmptinessMap(chunk, to)` write-back — the recomputed sky-emptiness
     /// map, surfaced for the provider to publish onto the chunk.
     pending_emptiness_map: Option<Vec<bool>>,
+    /// Cache mutations for owned neighbours. Java's nibble cache aliases the
+    /// live neighbour arrays; the Rust cache owns clones, so the provider must
+    /// publish these states before it restores the taken chunks.
+    pending_neighbor_updates: HashMap<(i32, i32), NeighborLightUpdate>,
 }
 
 impl SkyStarLightEngine {
@@ -354,9 +403,11 @@ impl SkyStarLightEngine {
     pub(crate) fn new(accessor: &dyn LevelHeightAccessor) -> Self {
         let min_section = accessor.get_min_section_y();
         let max_section = accessor.get_max_section_y();
-        let min_light_section = min_section - 1;
-        let max_light_section = max_section + 1;
-        let light_section_count = (max_light_section - min_light_section + 1) as usize;
+        let min_light_section = min_section.wrapping_sub(1);
+        let max_light_section = max_section.wrapping_add(1);
+        let light_section_count = (max_light_section
+            .wrapping_sub(min_light_section)
+            .wrapping_add(1)) as usize;
         let min_array_size = 5 * 5 * (light_section_count + 2);
         SkyStarLightEngine {
             min_light_section,
@@ -365,6 +416,8 @@ impl SkyStarLightEngine {
             max_section,
             section_cache: (0..min_array_size).map(|_| None).collect(),
             nibble_cache: (0..min_array_size).map(|_| None).collect(),
+            nibble_cache_writeback: vec![false; min_array_size],
+            dropped_nibble_writeback: (0..min_array_size).map(|_| None).collect(),
             chunk_cache: vec![false; 25],
             emptiness_map_cache: (0..25).map(|_| None).collect(),
             null_propagation_check_cache: vec![false; light_section_count],
@@ -386,6 +439,7 @@ impl SkyStarLightEngine {
             is_client_side: false,
             pending_nibbles: None,
             pending_emptiness_map: None,
+            pending_neighbor_updates: HashMap::new(),
         }
     }
 
@@ -393,16 +447,26 @@ impl SkyStarLightEngine {
     /// encoding; the offsets make the center chunk's blocks encode into the
     /// queue's 28-bit coordinate space.
     fn setup_encode_offset(&mut self, center_x: i32, _center_y: i32, center_z: i32) {
-        self.encode_offset_x = 31 - center_x;
-        self.encode_offset_y = -(self.min_light_section - 1) << 4;
-        self.encode_offset_z = 31 - center_z;
-        self.coordinate_offset =
-            self.encode_offset_x + (self.encode_offset_z << 6) + (self.encode_offset_y << 12);
-        self.chunk_offset_x = 2 - (center_x >> 4);
-        self.chunk_offset_y = -(self.min_light_section - 1);
-        self.chunk_offset_z = 2 - (center_z >> 4);
-        self.chunk_index_offset = self.chunk_offset_x + 5 * self.chunk_offset_z;
-        self.chunk_section_index_offset = self.chunk_index_offset + 25 * self.chunk_offset_y;
+        self.encode_offset_x = 31i32.wrapping_sub(center_x);
+        self.encode_offset_y = self
+            .min_light_section
+            .wrapping_sub(1)
+            .wrapping_neg()
+            .wrapping_shl(4);
+        self.encode_offset_z = 31i32.wrapping_sub(center_z);
+        self.coordinate_offset = self
+            .encode_offset_x
+            .wrapping_add(self.encode_offset_z.wrapping_shl(6))
+            .wrapping_add(self.encode_offset_y.wrapping_shl(12));
+        self.chunk_offset_x = 2i32.wrapping_sub(center_x >> 4);
+        self.chunk_offset_y = self.min_light_section.wrapping_sub(1).wrapping_neg();
+        self.chunk_offset_z = 2i32.wrapping_sub(center_z >> 4);
+        self.chunk_index_offset = self
+            .chunk_offset_x
+            .wrapping_add(self.chunk_offset_z.wrapping_mul(5));
+        self.chunk_section_index_offset = self
+            .chunk_index_offset
+            .wrapping_add(self.chunk_offset_y.wrapping_mul(25));
     }
 
     /// `setupCaches(lightAccess, centerX, centerY, centerZ, relaxed,
@@ -420,9 +484,9 @@ impl SkyStarLightEngine {
         try_to_load_chunks_for_2_radius: bool,
     ) {
         self.setup_encode_offset(
-            (center_x >> 4) * 16 + 7,
-            (center_y >> 4) * 16 + 7,
-            (center_z >> 4) * 16 + 7,
+            (center_x >> 4).wrapping_mul(16).wrapping_add(7),
+            (center_y >> 4).wrapping_mul(16).wrapping_add(7),
+            (center_z >> 4).wrapping_mul(16).wrapping_add(7),
         );
         let radius = if try_to_load_chunks_for_2_radius {
             2
@@ -431,8 +495,8 @@ impl SkyStarLightEngine {
         };
         for dz in -radius..=radius {
             for dx in -radius..=radius {
-                let cx = (center_x >> 4) + dx;
-                let cz = (center_z >> 4) + dz;
+                let cx = (center_x >> 4).wrapping_add(dx);
+                let cz = (center_z >> 4).wrapping_add(dz);
                 let is_two_radius = dx.abs().max(dz.abs()) == 2;
                 let Some(chunk) = provider.get_chunk_for_lighting(cx, cz) else {
                     if relaxed | is_two_radius {
@@ -471,22 +535,21 @@ impl SkyStarLightEngine {
     // --- chunk / section / nibble cache accessors (indexed like Java) ---
 
     fn is_chunk_in_cache(&self, chunk_x: i32, chunk_z: i32) -> bool {
-        self.chunk_cache[(chunk_x + 5 * chunk_z + self.chunk_index_offset) as usize]
+        self.chunk_cache[cache_index(chunk_x, 0, chunk_z, self.chunk_index_offset)]
     }
 
     fn set_chunk_in_cache(&mut self, chunk_x: i32, chunk_z: i32) {
-        let idx = (chunk_x + 5 * chunk_z + self.chunk_index_offset) as usize;
+        let idx = cache_index(chunk_x, 0, chunk_z, self.chunk_index_offset);
         self.chunk_cache[idx] = true;
     }
 
     fn set_emptiness_map_cache(&mut self, chunk_x: i32, chunk_z: i32, map: Option<Vec<bool>>) {
-        let idx = (chunk_x + 5 * chunk_z + self.chunk_index_offset) as usize;
+        let idx = cache_index(chunk_x, 0, chunk_z, self.chunk_index_offset);
         self.emptiness_map_cache[idx] = map;
     }
 
     fn get_emptiness_map(&self, chunk_x: i32, chunk_z: i32) -> Option<&Vec<bool>> {
-        self.emptiness_map_cache[(chunk_x + 5 * chunk_z + self.chunk_index_offset) as usize]
-            .as_ref()
+        self.emptiness_map_cache[cache_index(chunk_x, 0, chunk_z, self.chunk_index_offset)].as_ref()
     }
 
     fn get_chunk_section(
@@ -495,7 +558,7 @@ impl SkyStarLightEngine {
         chunk_y: i32,
         chunk_z: i32,
     ) -> Option<&SectionSnapshot> {
-        let idx = (chunk_x + 5 * chunk_z + 25 * chunk_y + self.chunk_section_index_offset) as usize;
+        let idx = cache_index(chunk_x, chunk_y, chunk_z, self.chunk_section_index_offset);
         self.section_cache[idx].as_ref()
     }
 
@@ -509,12 +572,12 @@ impl SkyStarLightEngine {
             let section = if cy >= self.min_section && cy <= self.max_section {
                 chunk
                     .get_sections()
-                    .get((cy - self.min_section) as usize)
+                    .get((cy.wrapping_sub(self.min_section)) as usize)
                     .map(SectionSnapshot::of)
             } else {
                 None
             };
-            let idx = (chunk_x + 5 * chunk_z + 25 * cy + self.chunk_section_index_offset) as usize;
+            let idx = cache_index(chunk_x, cy, chunk_z, self.chunk_section_index_offset);
             self.section_cache[idx] = section;
         }
     }
@@ -525,7 +588,7 @@ impl SkyStarLightEngine {
         chunk_y: i32,
         chunk_z: i32,
     ) -> Option<&SwmrNibbleArray> {
-        let idx = (chunk_x + 5 * chunk_z + 25 * chunk_y + self.chunk_section_index_offset) as usize;
+        let idx = cache_index(chunk_x, chunk_y, chunk_z, self.chunk_section_index_offset);
         self.nibble_cache[idx].as_ref()
     }
 
@@ -535,7 +598,7 @@ impl SkyStarLightEngine {
         chunk_y: i32,
         chunk_z: i32,
     ) -> Option<&mut SwmrNibbleArray> {
-        let idx = (chunk_x + 5 * chunk_z + 25 * chunk_y + self.chunk_section_index_offset) as usize;
+        let idx = cache_index(chunk_x, chunk_y, chunk_z, self.chunk_section_index_offset);
         self.nibble_cache[idx].as_mut()
     }
 
@@ -546,8 +609,13 @@ impl SkyStarLightEngine {
         chunk_z: i32,
         nibble: Option<SwmrNibbleArray>,
     ) {
-        let idx = (chunk_x + 5 * chunk_z + 25 * chunk_y + self.chunk_section_index_offset) as usize;
+        let idx = cache_index(chunk_x, chunk_y, chunk_z, self.chunk_section_index_offset);
         self.nibble_cache[idx] = nibble;
+        // This setter is also used for scratch arrays created by
+        // `initNibble`. Those arrays do not belong to the source chunk and
+        // therefore are not eligible for neighbour write-back. The initial
+        // source population below marks its aliases explicitly.
+        self.nibble_cache_writeback[idx] = false;
     }
 
     fn set_nibbles_for_chunk_in_cache(
@@ -557,8 +625,13 @@ impl SkyStarLightEngine {
         nibbles: &[SwmrNibbleArray],
     ) {
         for (index, cy) in (self.min_light_section..=self.max_light_section).enumerate() {
-            let nibble = nibbles.get(index).cloned();
-            self.set_nibble_in_cache(chunk_x, cy, chunk_z, nibble);
+            let idx = cache_index(chunk_x, cy, chunk_z, self.chunk_section_index_offset);
+            self.nibble_cache[idx] = nibbles.get(index).cloned();
+            self.dropped_nibble_writeback[idx] = None;
+            // A cached source nibble can be published back to that chunk. A
+            // missing source section is represented by no alias, even when a
+            // later null-propagation pass creates a scratch nibble.
+            self.nibble_cache_writeback[idx] = self.nibble_cache[idx].is_some();
         }
     }
 
@@ -576,10 +649,12 @@ impl SkyStarLightEngine {
 
     /// `getBlockState(worldX, worldY, worldZ)`.
     fn get_block_state_at(&self, world_x: i32, world_y: i32, world_z: i32) -> StateId {
-        let index = ((world_x >> 4)
-            + 5 * (world_z >> 4)
-            + 25 * (world_y >> 4)
-            + self.chunk_section_index_offset) as usize;
+        let index = cache_index(
+            world_x >> 4,
+            world_y >> 4,
+            world_z >> 4,
+            self.chunk_section_index_offset,
+        );
         self.get_block_state(
             index,
             ((world_x & 15) | ((world_z & 15) << 4) | ((world_y & 15) << 8)) as usize,
@@ -589,10 +664,12 @@ impl SkyStarLightEngine {
     /// `getLightLevel(worldX, worldY, worldZ)` — the updating (writer-side)
     /// light at the position, 0 when the section nibble is null.
     fn get_light_level(&self, world_x: i32, world_y: i32, world_z: i32) -> i32 {
-        let index = ((world_x >> 4)
-            + 5 * (world_z >> 4)
-            + 25 * (world_y >> 4)
-            + self.chunk_section_index_offset) as usize;
+        let index = cache_index(
+            world_x >> 4,
+            world_y >> 4,
+            world_z >> 4,
+            self.chunk_section_index_offset,
+        );
         self.get_light_level_index(
             index,
             ((world_x & 15) | ((world_z & 15) << 4) | ((world_y & 15) << 8)) as usize,
@@ -609,10 +686,12 @@ impl SkyStarLightEngine {
     /// `setLightLevel(worldX, worldY, worldZ, level)` — CoW-write the updating
     /// nibble. The server has no client notify path.
     fn set_light_level(&mut self, world_x: i32, world_y: i32, world_z: i32, level: i32) {
-        let index = ((world_x >> 4)
-            + 5 * (world_z >> 4)
-            + 25 * (world_y >> 4)
-            + self.chunk_section_index_offset) as usize;
+        let index = cache_index(
+            world_x >> 4,
+            world_y >> 4,
+            world_z >> 4,
+            self.chunk_section_index_offset,
+        );
         if let Some(nibble) = self.nibble_cache[index].as_mut() {
             nibble.set(world_x, world_y, world_z, level);
         }
@@ -711,6 +790,15 @@ impl SkyStarLightEngine {
         self.pending_emptiness_map.take()
     }
 
+    /// Take the visible light mutations for cached neighbours. The provider
+    /// applies these while the neighbours are still in its transactional take
+    /// set, before returning ownership to the caller's storage.
+    pub(crate) fn take_pending_neighbor_updates(
+        &mut self,
+    ) -> HashMap<(i32, i32), NeighborLightUpdate> {
+        std::mem::take(&mut self.pending_neighbor_updates)
+    }
+
     /// `initNibble(chunkX, chunkY, chunkZ, extrude, initRemovedNibbles)` —
     /// `SkyStarLightEngine.initNibble`.
     fn init_nibble(
@@ -768,11 +856,11 @@ impl SkyStarLightEngine {
         // emptiness map decides when it is populated; otherwise (a neighbour
         // chunk that has not run the light stage) fall back to the section
         // content.
-        let mut lowest_y = self.min_light_section - 1;
+        let mut lowest_y = self.min_light_section.wrapping_sub(1);
         let emptiness_map = self.get_emptiness_map(chunk_x, chunk_z);
         for curr_y in (self.min_section..=self.max_section).rev() {
             let empty = match emptiness_map {
-                Some(map) => map[(curr_y - self.min_section) as usize],
+                Some(map) => map[(curr_y.wrapping_sub(self.min_section)) as usize],
                 None => self
                     .get_chunk_section(chunk_x, curr_y, chunk_z)
                     .is_none_or(|s| s.has_only_air),
@@ -794,7 +882,7 @@ impl SkyStarLightEngine {
         }
         if extrude {
             // copy the first non-null section's y=0 layer down into this one
-            for curr_y in (chunk_y + 1)..=self.max_light_section {
+            for curr_y in (chunk_y.wrapping_add(1))..=self.max_light_section {
                 let above_is_null = match self.get_nibble_from_cache(chunk_x, curr_y, chunk_z) {
                     Some(above) => above.is_null_nibble_updating(),
                     None => true,
@@ -829,29 +917,35 @@ impl SkyStarLightEngine {
     }
 
     /// `rewriteNibbleCacheForSkylight(chunk)` — stop propagation through null
-    /// sections by dropping them from the cache. The dropped nibbles are null
-    /// (updating state), so `updateVisible` would publish a null visible state;
-    /// dropping the cache entry has the same effect for this run. The center
-    /// chunk's dropped light sections are recorded in `nulled_sections` — the
-    /// write-back in `light` substitutes the original null nibble for them
-    /// (Java's `setNibbles` writes the original array, so a section the rewrite
-    /// nulled and `checkNullSection` re-created never reaches the chunk).
+    /// sections by dropping them from the cache. Java first calls
+    /// `updateVisible` on every dropped source object, so retain that published
+    /// value for neighbour write-back; a scratch nibble created later by
+    /// `initNibble(..., initRemovedNibbles=true)` still has no source owner and
+    /// is never published. The center chunk's dropped light sections are
+    /// recorded in `nulled_sections` — the write-back in `light` substitutes
+    /// the original null nibble for them (Java's `setNibbles` writes the
+    /// original array, so a section the rewrite nulled and `checkNullSection`
+    /// re-created never reaches the chunk).
     fn rewrite_nibble_cache_for_skylight(&mut self, chunk_x: i32, chunk_z: i32) {
         let y_divisor = self.light_section_count + 2;
         for index in 0..self.nibble_cache.len() {
-            let is_null = match self.nibble_cache[index].as_ref() {
-                Some(nibble) => nibble.is_null_nibble_updating(),
-                None => false,
+            let Some(mut nibble) = self.nibble_cache[index].take() else {
+                continue;
             };
-            if !is_null {
+            if !nibble.is_null_nibble_updating() {
+                self.nibble_cache[index] = Some(nibble);
                 continue;
             }
-            let cx = (index % 5) as i32 - self.chunk_offset_x;
-            let cz = ((index / 5) % 5) as i32 - self.chunk_offset_z;
-            let cy = ((index / 25) % y_divisor) as i32 - self.chunk_offset_y;
-            self.nibble_cache[index] = None;
+            nibble.update_visible();
+            if self.nibble_cache_writeback[index] {
+                self.dropped_nibble_writeback[index] = Some(nibble.clone());
+            }
+            self.nibble_cache_writeback[index] = false;
+            let cx = ((index % 5) as i32).wrapping_sub(self.chunk_offset_x);
+            let cz = (((index / 5) % 5) as i32).wrapping_sub(self.chunk_offset_z);
+            let cy = (((index / 25) % y_divisor) as i32).wrapping_sub(self.chunk_offset_y);
             if cx == chunk_x && cz == chunk_z {
-                let rel = (cy - self.min_light_section) as usize;
+                let rel = (cy.wrapping_sub(self.min_light_section)) as usize;
                 if rel < self.nulled_sections.len() {
                     self.nulled_sections[rel] = true;
                 }
@@ -872,17 +966,21 @@ impl SkyStarLightEngine {
     ) -> bool {
         if chunk_y < self.min_light_section
             || chunk_y > self.max_light_section
-            || self.null_propagation_check_cache[(chunk_y - self.min_light_section) as usize]
+            || self.null_propagation_check_cache
+                [(chunk_y.wrapping_sub(self.min_light_section)) as usize]
         {
             return false;
         }
-        self.null_propagation_check_cache[(chunk_y - self.min_light_section) as usize] = true;
+        self.null_propagation_check_cache
+            [(chunk_y.wrapping_sub(self.min_light_section)) as usize] = true;
         let mut need_init_neighbours = false;
-        'search: for dz in -1..=1 {
-            for dx in -1..=1 {
-                if let Some(nibble) =
-                    self.get_nibble_from_cache(dx + chunk_x, chunk_y, dz + chunk_z)
-                    && !nibble.is_null_nibble_updating()
+        'search: for dz in -1i32..=1 {
+            for dx in -1i32..=1 {
+                if let Some(nibble) = self.get_nibble_from_cache(
+                    dx.wrapping_add(chunk_x),
+                    chunk_y,
+                    dz.wrapping_add(chunk_z),
+                ) && !nibble.is_null_nibble_updating()
                 {
                     need_init_neighbours = true;
                     break 'search;
@@ -890,8 +988,8 @@ impl SkyStarLightEngine {
             }
         }
         if need_init_neighbours {
-            for dz in -1..=1 {
-                for dx in -1..=1 {
+            for dz in -1i32..=1 {
+                for dx in -1i32..=1 {
                     // the centre gets the caller's extrude flag, the edges always
                     // extrude (they're guaranteed to have light above)
                     let extrude = if (dx | dz) == 0 {
@@ -899,7 +997,13 @@ impl SkyStarLightEngine {
                     } else {
                         true
                     };
-                    self.init_nibble(dx + chunk_x, chunk_y, dz + chunk_z, extrude, true);
+                    self.init_nibble(
+                        dx.wrapping_add(chunk_x),
+                        chunk_y,
+                        dz.wrapping_add(chunk_z),
+                        extrude,
+                        true,
+                    );
                 }
             }
         }
@@ -917,7 +1021,7 @@ impl SkyStarLightEngine {
             return nibble.get_updating(world_x, world_y, world_z);
         }
         loop {
-            chunk_y += 1;
+            chunk_y = chunk_y.wrapping_add(1);
             if chunk_y > self.max_light_section {
                 return 15;
             }
@@ -941,7 +1045,7 @@ impl SkyStarLightEngine {
     ) -> i32 {
         let encode_offset = self.coordinate_offset;
         let propagate_direction = AxisDirection::PositiveY.everything_but_this_direction();
-        if self.get_light_level_extruded(world_x, start_y + 1, world_z) != 15 {
+        if self.get_light_level_extruded(world_x, start_y.wrapping_add(1), world_z) != 15 {
             return start_y;
         }
         self.check_null_section(
@@ -950,8 +1054,8 @@ impl SkyStarLightEngine {
             world_z >> 4,
             extrude_initialised,
         );
-        let mut above = self.get_block_state_at(world_x, start_y + 1, world_z);
-        while start_y >= (self.min_light_section << 4) {
+        let mut above = self.get_block_state_at(world_x, start_y.wrapping_add(1), world_z);
+        while start_y >= self.min_light_section.wrapping_shl(4) {
             if (start_y & 15) == 15 {
                 self.check_null_section(
                     world_x >> 4,
@@ -979,8 +1083,7 @@ impl SkyStarLightEngine {
                 break;
             }
             self.append_to_increase_queue(
-                ((world_x + (world_z << 6) + (start_y << 12) + encode_offset) as u64
-                    & ((1u64 << (6 + 6 + 16)) - 1))
+                encode_queue_position(world_x, start_y, world_z, encode_offset)
                     | (15u64 << (6 + 6 + 16))
                     | (propagate_direction << (6 + 6 + 16 + 4))
                     | flags,
@@ -997,7 +1100,7 @@ impl SkyStarLightEngine {
             } else if !delay_light_set {
                 self.set_light_level(world_x, start_y, world_z, 15);
             }
-            start_y -= 1;
+            start_y = start_y.wrapping_sub(1);
         }
         start_y
     }
@@ -1005,15 +1108,15 @@ impl SkyStarLightEngine {
     /// `processDelayedIncreases` — write the queued increase levels (the light
     /// set deferred by tryPropagateSkylight's delayLightSet).
     fn process_delayed_increases(&mut self) {
-        let decode_offset_x = -self.encode_offset_x;
-        let decode_offset_y = -self.encode_offset_y;
-        let decode_offset_z = -self.encode_offset_z;
+        let decode_offset_x = self.encode_offset_x.wrapping_neg();
+        let decode_offset_y = self.encode_offset_y.wrapping_neg();
+        let decode_offset_z = self.encode_offset_z.wrapping_neg();
         let queue = self.increase_queue.clone();
         let len = self.increase_queue_initial_length;
         for &value in &queue[..len] {
-            let pos_x = ((value as i32) & 63) + decode_offset_x;
-            let pos_z = (((value >> 6) as i32) & 63) + decode_offset_z;
-            let pos_y = (((value >> 12) as i32) & ((1 << 16) - 1)) + decode_offset_y;
+            let pos_x = ((value as i32) & 63).wrapping_add(decode_offset_x);
+            let pos_z = (((value >> 6) as i32) & 63).wrapping_add(decode_offset_z);
+            let pos_y = (((value >> 12) as i32) & ((1 << 16) - 1)).wrapping_add(decode_offset_y);
             let level = ((value >> (6 + 6 + 16)) & 0xF) as i32;
             self.set_light_level(pos_x, pos_y, pos_z, level);
         }
@@ -1021,15 +1124,15 @@ impl SkyStarLightEngine {
 
     /// `processDelayedDecreases` — write 0 to the queued decrease positions.
     fn process_delayed_decreases(&mut self) {
-        let decode_offset_x = -self.encode_offset_x;
-        let decode_offset_y = -self.encode_offset_y;
-        let decode_offset_z = -self.encode_offset_z;
+        let decode_offset_x = self.encode_offset_x.wrapping_neg();
+        let decode_offset_y = self.encode_offset_y.wrapping_neg();
+        let decode_offset_z = self.encode_offset_z.wrapping_neg();
         let queue = self.decrease_queue.clone();
         let len = self.decrease_queue_initial_length;
         for &value in &queue[..len] {
-            let pos_x = ((value as i32) & 63) + decode_offset_x;
-            let pos_z = (((value >> 6) as i32) & 63) + decode_offset_z;
-            let pos_y = (((value >> 12) as i32) & ((1 << 16) - 1)) + decode_offset_y;
+            let pos_x = ((value as i32) & 63).wrapping_add(decode_offset_x);
+            let pos_z = (((value >> 6) as i32) & 63).wrapping_add(decode_offset_z);
+            let pos_y = (((value >> 12) as i32) & ((1 << 16) - 1)).wrapping_add(decode_offset_y);
             self.set_light_level(pos_x, pos_y, pos_z, 0);
         }
     }
@@ -1055,9 +1158,9 @@ impl SkyStarLightEngine {
                 let neighbour_off_z = direction.z();
                 let neighbour_nibble = self
                     .get_nibble_from_cache(
-                        chunk_x + neighbour_off_x,
+                        chunk_x.wrapping_add(neighbour_off_x),
                         curr_section_y,
-                        chunk_z + neighbour_off_z,
+                        chunk_z.wrapping_add(neighbour_off_z),
                     )
                     .cloned();
                 let Some(neighbour_nibble) = neighbour_nibble else {
@@ -1072,27 +1175,29 @@ impl SkyStarLightEngine {
                         0,
                         1,
                         if direction.x() < 0 {
-                            (chunk_x << 4) - 1
+                            (chunk_x.wrapping_shl(4)).wrapping_sub(1)
                         } else {
-                            (chunk_x << 4) + 16
+                            (chunk_x.wrapping_shl(4)).wrapping_add(16)
                         },
-                        chunk_z << 4,
+                        chunk_z.wrapping_shl(4),
                     )
                 } else {
                     (
                         1,
                         0,
-                        chunk_x << 4,
+                        chunk_x.wrapping_shl(4),
                         if direction.z() < 0 {
-                            (chunk_z << 4) - 1
+                            (chunk_z.wrapping_shl(4)).wrapping_sub(1)
                         } else {
-                            (chunk_z << 4) + 16
+                            (chunk_z.wrapping_shl(4)).wrapping_add(16)
                         },
                     )
                 };
                 let propagate_direction = 1u64 << direction.opposite();
                 let encode_offset = self.coordinate_offset;
-                for curr_y in (curr_section_y << 4)..=((curr_section_y << 4) | 15) {
+                for curr_y in
+                    (curr_section_y.wrapping_shl(4))..=((curr_section_y.wrapping_shl(4)) | 15)
+                {
                     let (mut curr_x, mut curr_z) = (start_x, start_z);
                     for _ in 0..16 {
                         let index =
@@ -1102,15 +1207,14 @@ impl SkyStarLightEngine {
                             // nothing to propagate
                         } else {
                             self.append_to_increase_queue(
-                                ((curr_x + (curr_z << 6) + (curr_y << 12) + encode_offset) as u64
-                                    & ((1u64 << (6 + 6 + 16)) - 1))
+                                encode_queue_position(curr_x, curr_y, curr_z, encode_offset)
                                     | ((level as u64 & 0xF) << (6 + 6 + 16))
                                     | (propagate_direction << (6 + 6 + 16 + 4))
                                     | FLAG_HAS_SIDED_TRANSPARENT_BLOCKS,
                             );
                         }
-                        curr_x += inc_x;
-                        curr_z += inc_z;
+                        curr_x = curr_x.wrapping_add(inc_x);
+                        curr_z = curr_z.wrapping_add(inc_z);
                     }
                 }
             }
@@ -1123,18 +1227,19 @@ impl SkyStarLightEngine {
         let mut queue_read_index = 0usize;
         let mut queue_length = self.increase_queue_initial_length;
         self.increase_queue_initial_length = 0;
-        let decode_offset_x = -self.encode_offset_x;
-        let decode_offset_y = -self.encode_offset_y;
-        let decode_offset_z = -self.encode_offset_z;
+        let decode_offset_x = self.encode_offset_x.wrapping_neg();
+        let decode_offset_y = self.encode_offset_y.wrapping_neg();
+        let decode_offset_z = self.encode_offset_z.wrapping_neg();
         let encode_offset = self.coordinate_offset;
         let section_offset = self.chunk_section_index_offset;
 
         while queue_read_index < queue_length {
             let queue_value = self.increase_queue[queue_read_index];
             queue_read_index += 1;
-            let pos_x = ((queue_value as i32) & 63) + decode_offset_x;
-            let pos_z = (((queue_value >> 6) as i32) & 63) + decode_offset_z;
-            let pos_y = (((queue_value >> 12) as i32) & ((1 << 16) - 1)) + decode_offset_y;
+            let pos_x = ((queue_value as i32) & 63).wrapping_add(decode_offset_x);
+            let pos_z = (((queue_value >> 6) as i32) & 63).wrapping_add(decode_offset_z);
+            let pos_y =
+                (((queue_value >> 12) as i32) & ((1 << 16) - 1)).wrapping_add(decode_offset_y);
             let propagated_light_level = ((queue_value >> (6 + 6 + 16)) & 0xF) as i32;
             let check_directions =
                 old_check_directions(((queue_value >> (6 + 6 + 16 + 4)) & 63) as usize);
@@ -1152,12 +1257,11 @@ impl SkyStarLightEngine {
             if queue_value & FLAG_HAS_SIDED_TRANSPARENT_BLOCKS == 0 {
                 // we don't need to worry about our state here
                 for &propagate in check_directions {
-                    let off_x = pos_x + propagate.x();
-                    let off_y = pos_y + propagate.y();
-                    let off_z = pos_z + propagate.z();
+                    let off_x = pos_x.wrapping_add(propagate.x());
+                    let off_y = pos_y.wrapping_add(propagate.y());
+                    let off_z = pos_z.wrapping_add(propagate.z());
                     let section_index =
-                        ((off_x >> 4) + 5 * (off_z >> 4) + 25 * (off_y >> 4) + section_offset)
-                            as usize;
+                        cache_index(off_x >> 4, off_y >> 4, off_z >> 4, section_offset);
                     let local_index =
                         ((off_x & 15) | ((off_z & 15) << 4) | ((off_y & 15) << 8)) as usize;
 
@@ -1187,8 +1291,7 @@ impl SkyStarLightEngine {
                             self.resize_increase_queue();
                         }
                         self.increase_queue[queue_length] =
-                            ((off_x + (off_z << 6) + (off_y << 12) + encode_offset) as u64
-                                & ((1u64 << (6 + 6 + 16)) - 1))
+                            encode_queue_position(off_x, off_y, off_z, encode_offset)
                                 | (((target_level as u64) & 0xF) << (6 + 6 + 16))
                                 | (propagate.everything_but_the_opposite_direction()
                                     << (6 + 6 + 16 + 4))
@@ -1201,17 +1304,16 @@ impl SkyStarLightEngine {
                 let from_block = self.get_block_state_at(pos_x, pos_y, pos_z);
                 let from_shape_blocked = from_block.conditionally_full_opaque();
                 for &propagate in check_directions {
-                    let off_x = pos_x + propagate.x();
-                    let off_y = pos_y + propagate.y();
-                    let off_z = pos_z + propagate.z();
+                    let off_x = pos_x.wrapping_add(propagate.x());
+                    let off_y = pos_y.wrapping_add(propagate.y());
+                    let off_z = pos_z.wrapping_add(propagate.z());
                     if from_shape_blocked {
                         // the seam treats a conditionally full-opaque source as
                         // occluding in this direction
                         continue;
                     }
                     let section_index =
-                        ((off_x >> 4) + 5 * (off_z >> 4) + 25 * (off_y >> 4) + section_offset)
-                            as usize;
+                        cache_index(off_x >> 4, off_y >> 4, off_z >> 4, section_offset);
                     let local_index =
                         ((off_x & 15) | ((off_z & 15) << 4) | ((off_y & 15) << 8)) as usize;
 
@@ -1241,8 +1343,7 @@ impl SkyStarLightEngine {
                             self.resize_increase_queue();
                         }
                         self.increase_queue[queue_length] =
-                            ((off_x + (off_z << 6) + (off_y << 12) + encode_offset) as u64
-                                & ((1u64 << (6 + 6 + 16)) - 1))
+                            encode_queue_position(off_x, off_y, off_z, encode_offset)
                                 | (((target_level as u64) & 0xF) << (6 + 6 + 16))
                                 | (propagate.everything_but_the_opposite_direction()
                                     << (6 + 6 + 16 + 4))
@@ -1261,9 +1362,9 @@ impl SkyStarLightEngine {
         let mut queue_length = self.decrease_queue_initial_length;
         self.decrease_queue_initial_length = 0;
         let mut increase_queue_length = self.increase_queue_initial_length;
-        let decode_offset_x = -self.encode_offset_x;
-        let decode_offset_y = -self.encode_offset_y;
-        let decode_offset_z = -self.encode_offset_z;
+        let decode_offset_x = self.encode_offset_x.wrapping_neg();
+        let decode_offset_y = self.encode_offset_y.wrapping_neg();
+        let decode_offset_z = self.encode_offset_z.wrapping_neg();
         let encode_offset = self.coordinate_offset;
         let section_offset = self.chunk_section_index_offset;
         // `emittedLightMask = skylightPropagator ? 0 : 0xF` — the sky engine
@@ -1273,9 +1374,10 @@ impl SkyStarLightEngine {
         while queue_read_index < queue_length {
             let queue_value = self.decrease_queue[queue_read_index];
             queue_read_index += 1;
-            let pos_x = ((queue_value as i32) & 63) + decode_offset_x;
-            let pos_z = (((queue_value >> 6) as i32) & 63) + decode_offset_z;
-            let pos_y = (((queue_value >> 12) as i32) & ((1 << 16) - 1)) + decode_offset_y;
+            let pos_x = ((queue_value as i32) & 63).wrapping_add(decode_offset_x);
+            let pos_z = (((queue_value >> 6) as i32) & 63).wrapping_add(decode_offset_z);
+            let pos_y =
+                (((queue_value >> 12) as i32) & ((1 << 16) - 1)).wrapping_add(decode_offset_y);
             let propagated_light_level = ((queue_value >> (6 + 6 + 16)) & 0xF) as i32;
             let check_directions =
                 old_check_directions(((queue_value >> (6 + 6 + 16 + 4)) & 63) as usize);
@@ -1283,12 +1385,11 @@ impl SkyStarLightEngine {
             if queue_value & FLAG_HAS_SIDED_TRANSPARENT_BLOCKS == 0 {
                 // we don't need to worry about our state here
                 for &propagate in check_directions {
-                    let off_x = pos_x + propagate.x();
-                    let off_y = pos_y + propagate.y();
-                    let off_z = pos_z + propagate.z();
+                    let off_x = pos_x.wrapping_add(propagate.x());
+                    let off_y = pos_y.wrapping_add(propagate.y());
+                    let off_z = pos_z.wrapping_add(propagate.z());
                     let section_index =
-                        ((off_x >> 4) + 5 * (off_z >> 4) + 25 * (off_y >> 4) + section_offset)
-                            as usize;
+                        cache_index(off_x >> 4, off_y >> 4, off_z >> 4, section_offset);
                     let local_index =
                         ((off_x & 15) | ((off_z & 15) << 4) | ((off_y & 15) << 8)) as usize;
 
@@ -1313,8 +1414,7 @@ impl SkyStarLightEngine {
                             self.resize_increase_queue();
                         }
                         self.increase_queue[increase_queue_length] =
-                            ((off_x + (off_z << 6) + (off_y << 12) + encode_offset) as u64
-                                & ((1u64 << (6 + 6 + 16)) - 1))
+                            encode_queue_position(off_x, off_y, off_z, encode_offset)
                                 | (((light_level as u64) & 0xF) << (6 + 6 + 16))
                                 | ((ALL_DIRECTIONS_BITSET as u64) << (6 + 6 + 16 + 4))
                                 | (FLAG_RECHECK_LEVEL | flags);
@@ -1328,8 +1428,7 @@ impl SkyStarLightEngine {
                             self.resize_increase_queue();
                         }
                         self.increase_queue[increase_queue_length] =
-                            ((off_x + (off_z << 6) + (off_y << 12) + encode_offset) as u64
-                                & ((1u64 << (6 + 6 + 16)) - 1))
+                            encode_queue_position(off_x, off_y, off_z, encode_offset)
                                 | (((emitted_light as u64) & 0xF) << (6 + 6 + 16))
                                 | ((ALL_DIRECTIONS_BITSET as u64) << (6 + 6 + 16 + 4))
                                 | (flags | FLAG_WRITE_LEVEL);
@@ -1343,8 +1442,7 @@ impl SkyStarLightEngine {
                             self.resize_decrease_queue();
                         }
                         self.decrease_queue[queue_length] =
-                            ((off_x + (off_z << 6) + (off_y << 12) + encode_offset) as u64
-                                & ((1u64 << (6 + 6 + 16)) - 1))
+                            encode_queue_position(off_x, off_y, off_z, encode_offset)
                                 | (((target_level as u64) & 0xF) << (6 + 6 + 16))
                                 | (propagate.everything_but_the_opposite_direction()
                                     << (6 + 6 + 16 + 4))
@@ -1357,17 +1455,16 @@ impl SkyStarLightEngine {
                 let from_block = self.get_block_state_at(pos_x, pos_y, pos_z);
                 let from_shape_blocked = from_block.conditionally_full_opaque();
                 for &propagate in check_directions {
-                    let off_x = pos_x + propagate.x();
-                    let off_y = pos_y + propagate.y();
-                    let off_z = pos_z + propagate.z();
+                    let off_x = pos_x.wrapping_add(propagate.x());
+                    let off_y = pos_y.wrapping_add(propagate.y());
+                    let off_z = pos_z.wrapping_add(propagate.z());
                     if from_shape_blocked {
                         // the seam treats a conditionally full-opaque source as
                         // occluding in this direction
                         continue;
                     }
                     let section_index =
-                        ((off_x >> 4) + 5 * (off_z >> 4) + 25 * (off_y >> 4) + section_offset)
-                            as usize;
+                        cache_index(off_x >> 4, off_y >> 4, off_z >> 4, section_offset);
                     let local_index =
                         ((off_x & 15) | ((off_z & 15) << 4) | ((off_y & 15) << 8)) as usize;
 
@@ -1392,8 +1489,7 @@ impl SkyStarLightEngine {
                             self.resize_increase_queue();
                         }
                         self.increase_queue[increase_queue_length] =
-                            ((off_x + (off_z << 6) + (off_y << 12) + encode_offset) as u64
-                                & ((1u64 << (6 + 6 + 16)) - 1))
+                            encode_queue_position(off_x, off_y, off_z, encode_offset)
                                 | (((light_level as u64) & 0xF) << (6 + 6 + 16))
                                 | ((ALL_DIRECTIONS_BITSET as u64) << (6 + 6 + 16 + 4))
                                 | (FLAG_RECHECK_LEVEL | flags);
@@ -1407,8 +1503,7 @@ impl SkyStarLightEngine {
                             self.resize_increase_queue();
                         }
                         self.increase_queue[increase_queue_length] =
-                            ((off_x + (off_z << 6) + (off_y << 12) + encode_offset) as u64
-                                & ((1u64 << (6 + 6 + 16)) - 1))
+                            encode_queue_position(off_x, off_y, off_z, encode_offset)
                                 | (((emitted_light as u64) & 0xF) << (6 + 6 + 16))
                                 | ((ALL_DIRECTIONS_BITSET as u64) << (6 + 6 + 16 + 4))
                                 | (flags | FLAG_WRITE_LEVEL);
@@ -1422,8 +1517,7 @@ impl SkyStarLightEngine {
                             self.resize_decrease_queue();
                         }
                         self.decrease_queue[queue_length] =
-                            ((off_x + (off_z << 6) + (off_y << 12) + encode_offset) as u64
-                                & ((1u64 << (6 + 6 + 16)) - 1))
+                            encode_queue_position(off_x, off_y, off_z, encode_offset)
                                 | (((target_level as u64) & 0xF) << (6 + 6 + 16))
                                 | (propagate.everything_but_the_opposite_direction()
                                     << (6 + 6 + 16 + 4))
@@ -1450,7 +1544,10 @@ impl SkyStarLightEngine {
     ) -> Option<Vec<bool>> {
         let chunk_x = chunk.get_pos().x();
         let chunk_z = chunk.get_pos().z();
-        let total_sections = (self.max_section - self.min_section + 1) as usize;
+        let total_sections = self
+            .max_section
+            .wrapping_sub(self.min_section)
+            .wrapping_add(1) as usize;
 
         // Java's `getEmptinessMap(chunkX, chunkZ)` returns the live array from
         // the cache; the port's cache owns a value copy, so the entry is cloned
@@ -1478,7 +1575,7 @@ impl SkyStarLightEngine {
                     }
                     let section = self.get_chunk_section(
                         chunk_x,
-                        section_index as i32 + self.min_section,
+                        (section_index as i32).wrapping_add(self.min_section),
                         chunk_z,
                     );
                     value_boxed = Some(match section {
@@ -1506,22 +1603,22 @@ impl SkyStarLightEngine {
         // now init neighbour nibbles
         for section_index in (0..changes.len()).rev() {
             let value_boxed = changes[section_index];
-            let section_y = section_index as i32 + self.min_section;
+            let section_y = (section_index as i32).wrapping_add(self.min_section);
             let Some(empty) = value_boxed else { continue };
             if empty {
                 continue;
             }
-            for dz in -1..=1 {
-                for dx in -1..=1 {
+            for dz in -1i32..=1 {
+                for dx in -1i32..=1 {
                     // if we're not empty, we also need to initialise nibbles
                     // note: if we're unlit, we absolutely do not want to
                     // extrude, as light data isn't set up
                     let extrude = (dx | dz) != 0 || !unlit;
-                    for dy in (-1..=1).rev() {
+                    for dy in (-1i32..=1).rev() {
                         self.init_nibble(
-                            dx + chunk_x,
-                            dy + section_y,
-                            dz + chunk_z,
+                            dx.wrapping_add(chunk_x),
+                            dy.wrapping_add(section_y),
+                            dz.wrapping_add(chunk_z),
                             extrude,
                             false,
                         );
@@ -1533,14 +1630,17 @@ impl SkyStarLightEngine {
         // check for de-init and lazy-init
         // lazy init is when chunks are being lit, so at the time they weren't
         // loaded when their neighbours were running init checks.
-        for dz in -1..=1 {
-            for dx in -1..=1 {
+        for dz in -1i32..=1 {
+            for dx in -1i32..=1 {
                 // does this neighbour have 1 radius loaded?
                 let mut neighbours_loaded = true;
-                'neighbour_loaded_search: for dz2 in -1..=1 {
-                    for dx2 in -1..=1 {
+                'neighbour_loaded_search: for dz2 in -1i32..=1 {
+                    for dx2 in -1i32..=1 {
                         if self
-                            .get_emptiness_map(dx + dx2 + chunk_x, dz + dz2 + chunk_z)
+                            .get_emptiness_map(
+                                dx.wrapping_add(dx2).wrapping_add(chunk_x),
+                                dz.wrapping_add(dz2).wrapping_add(chunk_z),
+                            )
                             .is_none()
                         {
                             neighbours_loaded = false;
@@ -1552,26 +1652,27 @@ impl SkyStarLightEngine {
                 for section_y in (self.min_light_section..=self.max_light_section).rev() {
                     // check neighbours to see if we need to de-init this one
                     let mut all_empty = true;
-                    'neighbour_search: for dy2 in -1..=1 {
-                        for dz2 in -1..=1 {
-                            for dx2 in -1..=1 {
-                                let y = section_y + dy2;
+                    'neighbour_search: for dy2 in -1i32..=1 {
+                        for dz2 in -1i32..=1 {
+                            for dx2 in -1i32..=1 {
+                                let y = section_y.wrapping_add(dy2);
                                 if y < self.min_section || y > self.max_section {
                                     // empty
                                     continue;
                                 }
-                                if let Some(emptiness_map) =
-                                    self.get_emptiness_map(dx + dx2 + chunk_x, dz + dz2 + chunk_z)
-                                {
-                                    if !emptiness_map[(y - self.min_section) as usize] {
+                                if let Some(emptiness_map) = self.get_emptiness_map(
+                                    dx.wrapping_add(dx2).wrapping_add(chunk_x),
+                                    dz.wrapping_add(dz2).wrapping_add(chunk_z),
+                                ) {
+                                    if !emptiness_map[(y.wrapping_sub(self.min_section)) as usize] {
                                         all_empty = false;
                                         break 'neighbour_search;
                                     }
                                 } else {
                                     let section = self.get_chunk_section(
-                                        dx + dx2 + chunk_x,
+                                        dx.wrapping_add(dx2).wrapping_add(chunk_x),
                                         y,
-                                        dz + dz2 + chunk_z,
+                                        dz.wrapping_add(dz2).wrapping_add(chunk_z),
                                     );
                                     if section.is_some() && !section.unwrap().has_only_air {
                                         all_empty = false;
@@ -1587,11 +1688,21 @@ impl SkyStarLightEngine {
                         // de-init is fine to delay, as de-init is just an
                         // optimisation - it's not required for lighting to be
                         // correct
-                        self.set_nibble_null(dx + chunk_x, section_y, dz + chunk_z);
+                        self.set_nibble_null(
+                            dx.wrapping_add(chunk_x),
+                            section_y,
+                            dz.wrapping_add(chunk_z),
+                        );
                     } else if !all_empty {
                         // must init
                         let extrude = (dx | dz) != 0 || !unlit;
-                        self.init_nibble(dx + chunk_x, section_y, dz + chunk_z, extrude, false);
+                        self.init_nibble(
+                            dx.wrapping_add(chunk_x),
+                            section_y,
+                            dz.wrapping_add(chunk_z),
+                            extrude,
+                            false,
+                        );
                     }
                 }
             }
@@ -1633,6 +1744,7 @@ impl SkyStarLightEngine {
     /// pull (`propagateNeighbourLevels`) runs instead of the edge-decrease
     /// pass. The differential test lights committed chunks against committed
     /// neighbours through this path.
+    #[cfg(test)]
     pub(crate) fn relight(
         &mut self,
         provider: &mut dyn ChunkAccessor,
@@ -1651,24 +1763,33 @@ impl SkyStarLightEngine {
     ) {
         let chunk_x = chunk.get_pos().x();
         let chunk_z = chunk.get_pos().z();
-        self.nulled_sections.iter_mut().for_each(|b| *b = false);
-        self.setup_caches(
-            provider,
-            chunk_x * 16 + 7,
-            128,
-            chunk_z * 16 + 7,
-            true,
-            true,
-        );
+        // A previous successful call normally has already handed these values
+        // to the provider. Clear them defensively so a setup panic or a caller
+        // retry can never publish an older run's result.
+        self.pending_nibbles = None;
+        self.pending_emptiness_map = None;
+        self.pending_neighbor_updates.clear();
 
-        // Java's `try { ... } finally { destroyCaches(); }`: the body publishes
-        // and writes back the computed nibbles, and the caches are always
-        // cleared afterwards — even when the body panics (a `catch_unwind` +
-        // `resume_unwind` is the finally-equivalent). `setup_caches` above is
-        // outside the finally exactly as in Java.
+        // Java's `try { ... } finally { destroyCaches(); }` covers the entire
+        // light operation. In particular, a storage callback can panic while
+        // `setupCaches` is resolving a neighbour; that path must not leave the
+        // old run's cache membership visible to the next attempt.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.nulled_sections.fill(false);
+            self.setup_caches(
+                provider,
+                chunk_x.wrapping_mul(16).wrapping_add(7),
+                128,
+                chunk_z.wrapping_mul(16).wrapping_add(7),
+                true,
+                true,
+            );
+
             let nibbles = get_filled_empty_light(
-                (self.max_light_section - self.min_light_section + 1) as usize,
+                (self
+                    .max_light_section
+                    .wrapping_sub(self.min_light_section)
+                    .wrapping_add(1)) as usize,
             );
             // force current chunk into cache
             self.set_chunk_in_cache(chunk_x, chunk_z);
@@ -1686,10 +1807,11 @@ impl SkyStarLightEngine {
             }
             self.light_chunk_impl(chunk, needs_edge_checks);
             // `setNibbles(chunk, nibbles)` then `updateVisible(lightAccess)`:
-            // see the doc above — publish the cache clones, then hand the
-            // mutated ones out, substituting the original null for the
-            // nulled-out sections.
+            // publish every cache clone first. Center nibbles are returned to
+            // the caller, while neighbour clones are returned separately so
+            // the provider can write them back before restoration.
             self.update_visible();
+            self.pending_neighbor_updates = self.collect_neighbor_updates(chunk_x, chunk_z);
             let mut computed = Vec::with_capacity(nibbles.len());
             for (index, cy) in (self.min_light_section..=self.max_light_section).enumerate() {
                 if self.nulled_sections[index] {
@@ -1704,6 +1826,13 @@ impl SkyStarLightEngine {
             }
             self.set_nibbles_on_surface(computed);
         }));
+        if result.is_err() {
+            // A failed run has no publishable output. The cache cleanup below
+            // is still performed before the original panic resumes.
+            self.pending_nibbles = None;
+            self.pending_emptiness_map = None;
+            self.pending_neighbor_updates.clear();
+        }
         self.destroy_caches();
         if let Err(payload) = result {
             std::panic::resume_unwind(payload);
@@ -1728,15 +1857,15 @@ impl SkyStarLightEngine {
         let mut highest_non_empty_section = self.max_section;
         // Walk empty sections from the top down, propagating FULL to horizontal
         // neighbours.
-        while highest_non_empty_section == (self.min_section - 1)
+        while highest_non_empty_section == (self.min_section.wrapping_sub(1))
             || sections
-                .get((highest_non_empty_section - self.min_section) as usize)
+                .get(highest_non_empty_section.wrapping_sub(self.min_section) as usize)
                 .is_none_or(|s| s.has_only_air())
         {
             self.check_null_section(chunk_x, highest_non_empty_section, chunk_z, false);
             for direction in AxisDirection::ONLY_HORIZONTAL {
-                let neighbour_x = chunk_x + direction.x();
-                let neighbour_z = chunk_z + direction.z();
+                let neighbour_x = chunk_x.wrapping_add(direction.x());
+                let neighbour_z = chunk_z.wrapping_add(direction.z());
                 let Some(_neighbour_nibble) =
                     self.get_nibble_from_cache(neighbour_x, highest_non_empty_section, neighbour_z)
                 else {
@@ -1748,57 +1877,62 @@ impl SkyStarLightEngine {
                         0,
                         1,
                         if direction.x() < 0 {
-                            chunk_x << 4
+                            chunk_x.wrapping_shl(4)
                         } else {
-                            chunk_x << 4 | 15
+                            chunk_x.wrapping_shl(4) | 15
                         },
-                        chunk_z << 4,
+                        chunk_z.wrapping_shl(4),
                     )
                 } else {
                     (
                         1,
                         0,
-                        chunk_x << 4,
+                        chunk_x.wrapping_shl(4),
                         if direction.z() < 0 {
-                            chunk_z << 4
+                            chunk_z.wrapping_shl(4)
                         } else {
-                            chunk_z << 4 | 15
+                            chunk_z.wrapping_shl(4) | 15
                         },
                     )
                 };
                 let encode_offset = self.coordinate_offset;
                 let propagate_direction = direction.as_single_bit();
-                for curr_y in
-                    (highest_non_empty_section << 4)..=((highest_non_empty_section << 4) | 15)
+                for curr_y in (highest_non_empty_section.wrapping_shl(4))
+                    ..=((highest_non_empty_section.wrapping_shl(4)) | 15)
                 {
                     let (mut curr_x, mut curr_z) = (start_x, start_z);
                     for _ in 0..16 {
                         self.append_to_increase_queue(
-                            ((curr_x + (curr_z << 6) + (curr_y << 12) + encode_offset) as u64
-                                & ((1u64 << (6 + 6 + 16)) - 1))
+                            encode_queue_position(curr_x, curr_y, curr_z, encode_offset)
                                 | (15u64 << (6 + 6 + 16))
                                 | (propagate_direction << (6 + 6 + 16 + 4)),
                         );
-                        curr_x += inc_x;
-                        curr_z += inc_z;
+                        curr_x = curr_x.wrapping_add(inc_x);
+                        curr_z = curr_z.wrapping_add(inc_z);
                     }
                 }
             }
-            if highest_non_empty_section == (self.min_section - 1) {
+            if highest_non_empty_section == (self.min_section.wrapping_sub(1)) {
                 break;
             }
-            highest_non_empty_section -= 1;
+            highest_non_empty_section = highest_non_empty_section.wrapping_sub(1);
         }
 
         if highest_non_empty_section >= self.min_section {
-            let min_x = chunk_x << 4;
-            let max_x = chunk_x << 4 | 15;
-            let min_z = chunk_z << 4;
-            let max_z = chunk_z << 4 | 15;
-            let start_y = highest_non_empty_section << 4 | 15;
+            let min_x = chunk_x.wrapping_shl(4);
+            let max_x = chunk_x.wrapping_shl(4) | 15;
+            let min_z = chunk_z.wrapping_shl(4);
+            let max_z = chunk_z.wrapping_shl(4) | 15;
+            let start_y = highest_non_empty_section.wrapping_shl(4) | 15;
             for curr_z in min_z..=max_z {
                 for curr_x in min_x..=max_x {
-                    self.try_propagate_skylight(curr_x, start_y + 1, curr_z, false, false);
+                    self.try_propagate_skylight(
+                        curr_x,
+                        start_y.wrapping_add(1),
+                        curr_z,
+                        false,
+                        false,
+                    );
                 }
             }
         }
@@ -1833,12 +1967,73 @@ impl SkyStarLightEngine {
         }
     }
 
+    /// Snapshot the post-`updateVisible` state of every cached neighbour. A
+    /// radius-two cache has only an emptiness map; a radius-one cache has the
+    /// complete nibble array as well. Missing cache sections are deliberately
+    /// not published, preserving the malformed-input panic/retry boundary.
+    fn collect_neighbor_updates(
+        &self,
+        center_x: i32,
+        center_z: i32,
+    ) -> HashMap<(i32, i32), NeighborLightUpdate> {
+        let mut updates = HashMap::new();
+        for dz in -2i32..=2 {
+            for dx in -2i32..=2 {
+                if dx == 0 && dz == 0 {
+                    continue;
+                }
+                let chunk_x = center_x.wrapping_add(dx);
+                let chunk_z = center_z.wrapping_add(dz);
+                if !self.is_chunk_in_cache(chunk_x, chunk_z) {
+                    continue;
+                }
+
+                let nibbles = (self.min_light_section..=self.max_light_section)
+                    .enumerate()
+                    .filter_map(|(index, chunk_y)| {
+                        let cache_slot =
+                            cache_index(chunk_x, chunk_y, chunk_z, self.chunk_section_index_offset);
+                        if !self.nibble_cache_writeback[cache_slot] {
+                            return self.dropped_nibble_writeback[cache_slot]
+                                .as_ref()
+                                .cloned()
+                                .map(|nibble| (index, nibble));
+                        }
+                        self.get_nibble_from_cache(chunk_x, chunk_y, chunk_z)
+                            .or(self.dropped_nibble_writeback[cache_slot].as_ref())
+                            .cloned()
+                            .map(|nibble| (index, nibble))
+                    })
+                    .collect::<Vec<_>>();
+                let emptiness_map = self.get_emptiness_map(chunk_x, chunk_z).cloned();
+                if !nibbles.is_empty() || emptiness_map.is_some() {
+                    updates.insert(
+                        (chunk_x, chunk_z),
+                        NeighborLightUpdate {
+                            nibbles,
+                            emptiness_map,
+                        },
+                    );
+                }
+            }
+        }
+        updates
+    }
+
     /// `destroyCaches()` — Java's finally-clear of every cache between runs.
     fn destroy_caches(&mut self) {
         self.section_cache.iter_mut().for_each(|s| *s = None);
         self.nibble_cache.iter_mut().for_each(|s| *s = None);
+        self.nibble_cache_writeback.fill(false);
+        self.dropped_nibble_writeback
+            .iter_mut()
+            .for_each(|s| *s = None);
         self.chunk_cache.iter_mut().for_each(|c| *c = false);
         self.emptiness_map_cache.iter_mut().for_each(|s| *s = None);
+        self.null_propagation_check_cache.fill(false);
+        self.nulled_sections.fill(false);
+        self.increase_queue_initial_length = 0;
+        self.decrease_queue_initial_length = 0;
     }
 
     /// `#[cfg(test)]` probe for the provider's panic-path tests: whether the
@@ -1849,8 +2044,20 @@ impl SkyStarLightEngine {
     pub(crate) fn per_run_caches_are_clear(&self) -> bool {
         self.section_cache.iter().all(Option::is_none)
             && self.nibble_cache.iter().all(Option::is_none)
+            && self
+                .nibble_cache_writeback
+                .iter()
+                .all(|&writeback| !writeback)
+            && self.dropped_nibble_writeback.iter().all(Option::is_none)
             && self.chunk_cache.iter().all(|&present| !present)
             && self.emptiness_map_cache.iter().all(Option::is_none)
+            && self
+                .null_propagation_check_cache
+                .iter()
+                .all(|&checked| !checked)
+            && self.nulled_sections.iter().all(|&nulled| !nulled)
+            && self.increase_queue_initial_length == 0
+            && self.decrease_queue_initial_length == 0
     }
 }
 
@@ -1973,7 +2180,10 @@ mod tests {
         dirs: usize,
     ) -> u64 {
         let eo = engine.coordinate_offset;
-        (((x + (z << 6) + (y << 12) + eo) as u64) & ((1u64 << (6 + 6 + 16)) - 1))
+        (x.wrapping_add(z.wrapping_shl(6))
+            .wrapping_add(y.wrapping_shl(12))
+            .wrapping_add(eo) as u64)
+            & ((1u64 << (6 + 6 + 16)) - 1)
             | (((level as u64) & 0xF) << (6 + 6 + 16))
             | (((dirs as u64) & 63) << (6 + 6 + 16 + 4))
     }
@@ -2346,7 +2556,7 @@ mod tests {
         let mut above = SwmrNibbleArray::new_with_bytes(vec![0u8; 2048]);
         for x in 0..16 {
             for z in 0..16 {
-                above.set(x, 0, z, (x + z) % 16);
+                above.set(x, 0, z, x.wrapping_add(z) % 16);
             }
         }
         engine.set_nibble_in_cache(0, -4, 0, Some(above));
@@ -2374,7 +2584,7 @@ mod tests {
                 for z in 0..16 {
                     assert_eq!(
                         below.get_updating(x, y, z),
-                        (x + z) % 16,
+                        x.wrapping_add(z) % 16,
                         "y-layer {y} at ({x}, {z}) must carry the above section's y=0 plane"
                     );
                 }

@@ -25,4 +25,4 @@ pub use chunk_pyramid::{ChunkPyramid, GENERATION_PYRAMID, LOADING_PYRAMID};
 pub use chunk_status::{ChunkStatus, ChunkType};
 pub use chunk_status_task::ChunkStatusTask;
 pub use chunk_step::ChunkStep;
-pub use world_gen_context::{GenError, WorldGenContext};
+pub use world_gen_context::{GenError, GeneratedLightTask, WorldGenContext};

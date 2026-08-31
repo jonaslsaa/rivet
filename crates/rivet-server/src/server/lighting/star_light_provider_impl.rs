@@ -68,6 +68,15 @@ pub type ChunkAccessFn = Box<
     dyn for<'a> FnMut(i32, i32, Option<&'a mut Option<LightChunk>>) -> Option<LightChunk> + Send,
 >;
 
+/// Tick-thread-owned runtime light storage. The callback form remains the
+/// narrow bridge used by existing callers; generated-light workspaces use the
+/// owned form so mutable storage never hides behind `Arc<Mutex>` or global
+/// state.
+enum ChunkStorage {
+    Callback(ChunkAccessFn),
+    Owned(HashMap<(i32, i32), LightChunk>),
+}
+
 /// The `SkyStarLightEngine`-backed synchronous light provider — the concrete
 /// impl `rivet-server` hands `LevelLightEngine::with_provider`.
 pub struct SkyLightProvider {
@@ -85,8 +94,9 @@ pub struct SkyLightProvider {
     has_sky_light: bool,
     /// `hasBlockLight` — whether the block reader is active.
     has_block_light: bool,
-    /// The narrow take/put chunk access (see [`ChunkAccessFn`]).
-    chunks: ChunkAccessFn,
+    /// The narrow take/put chunk access (or finite owned storage) used by the
+    /// provider. Owned storage is confined to the tick-thread provider value.
+    chunks: ChunkStorage,
     /// Chunks whose storage callback panicked before accepting ownership.
     pending_restores: Vec<(i32, i32, LightChunk)>,
 }
@@ -107,25 +117,54 @@ impl SkyLightProvider {
             engine: SkyStarLightEngine::new(&height_accessor),
             min_section,
             max_section,
-            min_light_section: min_section - 1,
-            max_light_section: max_section + 1,
+            min_light_section: min_section.wrapping_sub(1),
+            max_light_section: max_section.wrapping_add(1),
             has_sky_light,
             has_block_light,
-            chunks,
+            chunks: ChunkStorage::Callback(chunks),
             pending_restores: Vec::new(),
         }
     }
 
-    /// Take the chunk at `pos` as owned from the caller's storage (`None` when
+    /// Build a provider over finite, tick-thread-owned runtime chunks. The
+    /// caller must supply real section/block data; the provider never creates
+    /// missing neighbours or placeholder light arrays.
+    pub fn with_owned_storage(
+        height_accessor: SimpleLevelHeightAccessor,
+        has_sky_light: bool,
+        has_block_light: bool,
+        chunks: HashMap<(i32, i32), LightChunk>,
+    ) -> Self {
+        let min_section = height_accessor.get_min_section_y();
+        let max_section = height_accessor.get_max_section_y();
+        SkyLightProvider {
+            engine: SkyStarLightEngine::new(&height_accessor),
+            min_section,
+            max_section,
+            min_light_section: min_section.wrapping_sub(1),
+            max_light_section: max_section.wrapping_add(1),
+            has_sky_light,
+            has_block_light,
+            chunks: ChunkStorage::Owned(chunks),
+            pending_restores: Vec::new(),
+        }
+    }
+
+    /// Take the chunk at `pos` as owned from the provider storage (`None` when
     /// it is not present).
     fn take_chunk(
         &mut self,
         pos: ChunkPos,
     ) -> Result<Option<ChunkAccess<StateId, ServerBiomeId, StructureKey>>, LightProviderError> {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            (self.chunks)(pos.x(), pos.z(), None)
-        }))
-        .map_err(|_| LightProviderError::CallbackPanicked)
+        match &mut self.chunks {
+            ChunkStorage::Owned(chunks) => Ok(chunks.remove(&(pos.x(), pos.z()))),
+            ChunkStorage::Callback(chunks) => {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    (chunks)(pos.x(), pos.z(), None)
+                }))
+                .map_err(|_| LightProviderError::CallbackPanicked)
+            }
+        }
     }
 
     /// Put an owned chunk back at `pos`.
@@ -134,10 +173,19 @@ impl SkyLightProvider {
         pos: ChunkPos,
         chunk: ChunkAccess<StateId, ServerBiomeId, StructureKey>,
     ) -> Result<(), LightProviderError> {
+        if let ChunkStorage::Owned(chunks) = &mut self.chunks {
+            chunks.insert((pos.x(), pos.z()), chunk);
+            return Ok(());
+        }
         let mut slot = Some(chunk);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            (self.chunks)(pos.x(), pos.z(), Some(&mut slot));
-        }));
+        let result = match &mut self.chunks {
+            ChunkStorage::Owned(_) => unreachable!("owned storage returned above"),
+            ChunkStorage::Callback(chunks) => {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    (chunks)(pos.x(), pos.z(), Some(&mut slot))
+                }))
+            }
+        };
         if result.is_err() || slot.is_some() {
             if let Some(chunk) = slot {
                 self.pending_restores.push((pos.x(), pos.z(), chunk));
@@ -145,6 +193,88 @@ impl SkyLightProvider {
             return Err(LightProviderError::CallbackPanicked);
         }
         Ok(())
+    }
+
+    /// Whether this provider owns finite runtime storage rather than a
+    /// caller-owned callback. Generated-light workspaces use this to expose a
+    /// real engine dependency without pretending a callback/global map exists.
+    pub fn has_owned_runtime_storage(&self) -> bool {
+        matches!(&self.chunks, ChunkStorage::Owned(chunks) if !chunks.is_empty())
+    }
+
+    /// Whether owned runtime storage contains `pos`. Callback-backed providers
+    /// cannot prove coverage without taking ownership, so they report false.
+    pub fn has_owned_runtime_chunk(&self, pos: ChunkPos) -> bool {
+        matches!(&self.chunks, ChunkStorage::Owned(chunks) if chunks.contains_key(&(pos.x(), pos.z())))
+    }
+
+    /// Whether the owned chunk is usable as an already-lit LIGHT neighbour.
+    /// Paper's `SkyStarLightEngine.canUseChunk` rejects a neighbour that is not
+    /// light-correct; merely having a value in the workspace is not enough.
+    pub fn has_owned_usable_runtime_chunk(&self, pos: ChunkPos) -> bool {
+        matches!(
+            &self.chunks,
+            ChunkStorage::Owned(chunks)
+                if chunks
+                    .get(&(pos.x(), pos.z()))
+                    .is_some_and(|chunk| chunk.is_light_correct())
+        )
+    }
+
+    /// Whether this concrete provider has a supported generated-light channel.
+    /// The current engine computes sky light only; block-light queue wiring is
+    /// still deferred, so a normal overworld request (both channels enabled)
+    /// must refuse rather than stamp LIGHT as if block light were complete.
+    /// Sky-only is supported only when the dimension genuinely disables block
+    /// light.
+    pub fn supports_generated_light(&self) -> bool {
+        self.has_sky_light && !self.has_block_light
+    }
+
+    /// Force-load a runtime center supplied by the generated-light bridge.
+    ///
+    /// The compute path receives the center by mutable reference rather than
+    /// inserting it into provider storage. For finite owned storage this is a
+    /// complete load association: the center is already the value being
+    /// processed, while neighbours remain in the provider workspace. The
+    /// callback path still validates that its center slot exists and restores
+    /// the value, preserving the G1 callback contract.
+    pub(crate) fn try_force_load_in_chunk_with(
+        &mut self,
+        pos: ChunkPos,
+        _empty_sections: &[Option<bool>],
+    ) -> Result<(), LightProviderError> {
+        self.flush_pending_restores()?;
+        if matches!(&self.chunks, ChunkStorage::Owned(_)) {
+            return Ok(());
+        }
+        let Some(existing) = self.take_chunk(pos)? else {
+            return Err(LightProviderError::MissingChunk(pos));
+        };
+        self.put_chunk(pos, existing)
+    }
+
+    /// Consume the provider's owned runtime storage for workspace write-back.
+    /// Callback-backed providers return `None` when no chunk was stranded. If a
+    /// callback put panic left chunks in `pending_restores`, those chunks are
+    /// returned in an owned map instead of being dropped with the provider.
+    pub fn into_owned_storage(self) -> Option<HashMap<(i32, i32), LightChunk>> {
+        let pending_restores = self.pending_restores;
+        match self.chunks {
+            ChunkStorage::Owned(mut chunks) => {
+                for (x, z, chunk) in pending_restores {
+                    chunks.insert((x, z), chunk);
+                }
+                Some(chunks)
+            }
+            ChunkStorage::Callback(_) if pending_restores.is_empty() => None,
+            ChunkStorage::Callback(_) => Some(
+                pending_restores
+                    .into_iter()
+                    .map(|(x, z, chunk)| ((x, z), chunk))
+                    .collect(),
+            ),
+        }
     }
 
     fn flush_pending_restores(&mut self) -> Result<(), LightProviderError> {
@@ -173,6 +303,34 @@ impl SkyLightProvider {
         callback_panicked
     }
 
+    /// Publish the cache clones that belong to neighbours before those chunks
+    /// leave the accessor's transactional take set. In Java the cache aliases
+    /// each neighbour's live `SWMRNibbleArray`, so the engine's `updateVisible`
+    /// is already visible on the neighbour. Rust snapshots need this explicit
+    /// value write-back.
+    fn publish_neighbor_updates(
+        accessor: &mut CallbackAccessor<'_>,
+        updates: HashMap<(i32, i32), super::star_light_engine::NeighborLightUpdate>,
+    ) {
+        for ((chunk_x, chunk_z), update) in updates {
+            let Some(chunk) = accessor.taken.get_mut(&(chunk_x, chunk_z)) else {
+                continue;
+            };
+            if !update.nibbles.is_empty() {
+                let mut nibbles = chunk.sky_nibbles().to_vec();
+                for (index, nibble) in update.nibbles {
+                    if let Some(existing) = nibbles.get_mut(index) {
+                        *existing = nibble;
+                    }
+                }
+                chunk.set_sky_nibbles(nibbles);
+            }
+            if let Some(emptiness_map) = update.emptiness_map {
+                chunk.set_sky_emptiness_map(Some(emptiness_map));
+            }
+        }
+    }
+
     /// `SkyStarLightEngine.lightChunk(chunk, emptySections)` on an explicitly
     /// supplied in-progress chunk — the primary path. Drives the engine with
     /// the chunk and the per-section emptiness mask, then publishes the
@@ -183,7 +341,7 @@ impl SkyLightProvider {
     /// and put back); the engine tolerates missing neighbours (`relaxed`
     /// cache setup), so a chunk lit in isolation still computes the correct
     /// center light.
-    pub fn light_chunk_with(
+    pub(crate) fn light_chunk_with(
         &mut self,
         chunk: &mut ChunkAccess<StateId, ServerBiomeId, StructureKey>,
         empty_sections: &[Option<bool>],
@@ -206,6 +364,8 @@ impl SkyLightProvider {
         // re-throws it — no neighbour dropped, no second panic mid-unwind.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.engine.light(&mut accessor, chunk, empty_sections);
+            let updates = self.engine.take_pending_neighbor_updates();
+            Self::publish_neighbor_updates(&mut accessor, updates);
             if let Some(nibbles) = self.engine.take_pending_nibbles() {
                 chunk.set_sky_nibbles(nibbles);
             }
@@ -285,15 +445,14 @@ impl SkyLightProvider {
         }
     }
 
-    /// The idempotent re-light of a chunk whose neighbours already carry their
-    /// final light — `relightChunks`' per-neighbour
-    /// `lightChunk(lightAccess, chunk, false)`. The no-edge-checks path pulls
-    /// the neighbours' lateral light into the increase queue
-    /// (`propagate_neighbour_levels`), so a committed interior chunk lit
-    /// against committed neighbours reproduces Paper's byte-identical fixed
-    /// point. The differential test drives the committed seed-42 interior
-    /// through here.
-    pub fn relight_chunk_with(
+    /// Test-only parity helper for Paper's `relightChunks` per-neighbour
+    /// `lightChunk(lightAccess, chunk, false)` path. This no-edge-checks
+    /// operation is intentionally absent from production: dynamic relighting
+    /// remains deferred until the live light queue is ported. The seed-42
+    /// differential uses this private helper to validate the engine algorithm
+    /// without exposing a served/runtime relight API.
+    #[cfg(test)]
+    fn relight_chunk_with(
         &mut self,
         chunk: &mut ChunkAccess<StateId, ServerBiomeId, StructureKey>,
         empty_sections: &[Option<bool>],
@@ -307,6 +466,8 @@ impl SkyLightProvider {
         };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.engine.relight(&mut accessor, chunk, empty_sections);
+            let updates = self.engine.take_pending_neighbor_updates();
+            Self::publish_neighbor_updates(&mut accessor, updates);
             if let Some(nibbles) = self.engine.take_pending_nibbles() {
                 chunk.set_sky_nibbles(nibbles);
             }
@@ -359,11 +520,11 @@ impl SkyLightProvider {
         }
         if section_y < min_light_section {
             section_y = min_light_section;
-            y = section_y << 4;
+            y = section_y.wrapping_shl(4);
         }
 
         let nibbles = chunk.sky_nibbles();
-        let immediate = &nibbles[(section_y - min_light_section) as usize];
+        let immediate = &nibbles[(section_y.wrapping_sub(min_light_section)) as usize];
         if !immediate.is_null_nibble_visible() {
             return immediate.get_visible(x, y, z);
         }
@@ -374,9 +535,9 @@ impl SkyLightProvider {
 
         // Are we above this chunk's lowest empty section? Walk the world
         // sections from the top down for the lowest non-empty one.
-        let mut lowest_y = min_light_section - 1;
+        let mut lowest_y = min_light_section.wrapping_sub(1);
         for curr_y in (min_section..=max_section).rev() {
-            if emptiness_map[(curr_y - min_section) as usize] {
+            if emptiness_map[(curr_y.wrapping_sub(min_section)) as usize] {
                 continue;
             }
             lowest_y = curr_y;
@@ -389,8 +550,8 @@ impl SkyLightProvider {
 
         // This nibble depends solely on the skylight data above it: find the
         // first non-null data above (one exists, as the walk just found it).
-        for curr_y in (section_y + 1)..=max_light_section {
-            let nibble = &nibbles[(curr_y - min_light_section) as usize];
+        for curr_y in section_y.wrapping_add(1)..=max_light_section {
+            let nibble = &nibbles[(curr_y.wrapping_sub(min_light_section)) as usize];
             if !nibble.is_null_nibble_visible() {
                 return nibble.get_visible(x, 0, z);
             }
@@ -415,7 +576,7 @@ impl SkyLightProvider {
         if cy < self.min_light_section || cy > self.max_light_section {
             return 0;
         }
-        let nibble = &chunk.block_nibbles()[(cy - self.min_light_section) as usize];
+        let nibble = &chunk.block_nibbles()[(cy.wrapping_sub(self.min_light_section)) as usize];
         nibble.get_visible(pos.get_x(), y, pos.get_z())
     }
 
@@ -428,7 +589,7 @@ impl SkyLightProvider {
         chunk: &ChunkAccess<StateId, ServerBiomeId, StructureKey>,
         pos: SectionPos,
     ) -> Option<DataLayer> {
-        if !chunk.is_light_correct() {
+        if !self.has_sky_light || !chunk.is_light_correct() {
             return None;
         }
         let section_y = pos.y();
@@ -436,7 +597,8 @@ impl SkyLightProvider {
             return None;
         }
         chunk.sky_emptiness_map()?;
-        chunk.sky_nibbles()[(section_y - self.min_light_section) as usize].to_vanilla_nibble()
+        chunk.sky_nibbles()[(section_y.wrapping_sub(self.min_light_section)) as usize]
+            .to_vanilla_nibble()
     }
 }
 
@@ -446,7 +608,7 @@ impl SkyLightProvider {
 /// the buffered chunks back once the run completes — on the panic path too, so
 /// the caller's storage always gets every chunk it handed out back.
 struct CallbackAccessor<'a> {
-    chunks: &'a mut ChunkAccessFn,
+    chunks: &'a mut ChunkStorage,
     taken: HashMap<(i32, i32), ChunkAccess<StateId, ServerBiomeId, StructureKey>>,
 }
 
@@ -457,7 +619,15 @@ impl ChunkAccessor for CallbackAccessor<'_> {
         chunk_z: i32,
     ) -> Option<&ChunkAccess<StateId, ServerBiomeId, StructureKey>> {
         if !self.taken.contains_key(&(chunk_x, chunk_z)) {
-            let chunk = (self.chunks)(chunk_x, chunk_z, None)?;
+            let chunk = match self.chunks {
+                ChunkStorage::Owned(chunks) => chunks.remove(&(chunk_x, chunk_z)),
+                ChunkStorage::Callback(chunks) => {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        (chunks)(chunk_x, chunk_z, None)
+                    }))
+                    .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+                }
+            }?;
             self.taken.insert((chunk_x, chunk_z), chunk);
         }
         self.taken.get(&(chunk_x, chunk_z))
@@ -519,6 +689,14 @@ impl StarLightProvider for SkyLightProvider {
     fn check_chunk_edges(&mut self, _pos: ChunkPos) {
         // `StarLightInterface.checkChunkEdges` re-checks a chunk's edge light;
         // the edge-check unit defers (#184).
+    }
+
+    fn supports_persisted_light_load(&self) -> bool {
+        // `checkChunkEdges` is still deferred with the edge-check unit (#184),
+        // so neither storage form may claim that a persisted load was fully
+        // reconciled. The LIGHT task refuses this branch typed after invoking
+        // force-load and edge-check in Paper order.
+        false
     }
 
     fn get_sky_light_value(&self, _pos: BlockPos) -> i32 {
@@ -898,6 +1076,113 @@ mod tests {
         assert_eq!(&floor_data[128..], &[0xFFu8; 1920][..]);
     }
 
+    /// The center flood-fill mutates the cached neighbour at the edge. Java's
+    /// cache aliases that neighbour's live nibble, so `updateVisible` publishes
+    /// the new level before the chunk is handed back to storage. The Rust
+    /// provider must explicitly write the clone back before restoration.
+    #[test]
+    fn neighbour_cache_mutations_publish_before_restoration() {
+        let center = ChunkPos::ZERO;
+        let mut neighbour = all_air_chunk(ChunkPos::new(1, 0));
+        let mut nibbles = neighbour.sky_nibbles().to_vec();
+        nibbles[1] = SwmrNibbleArray::new_with_bytes(vec![0; 2048]);
+        neighbour.set_sky_nibbles(nibbles);
+        neighbour.set_light_correct(true);
+        let mut storage = HashMap::new();
+        storage.insert((1, 0), neighbour);
+        let (chunks, shared) = storage_closure(&mut storage);
+        let mut provider = SkyLightProvider::new(overworld(), true, false, chunks);
+        let mut center_chunk = superflat_chunk(center);
+
+        provider
+            .light_chunk_with(&mut center_chunk, &superflat_empty_sections())
+            .expect("lighting with a loaded neighbour succeeds");
+
+        let map = shared.lock().unwrap();
+        let restored = map.get(&(1, 0)).expect("neighbour restored");
+        assert_eq!(
+            restored.sky_nibbles()[1].get_visible(0, 1, 0),
+            14,
+            "the centre's level-15 edge source propagates level 14 into the neighbour"
+        );
+    }
+
+    /// `initNibble(..., initRemovedNibbles=true)` can create scratch arrays in
+    /// a neighbour after the original null array was removed from the cache.
+    /// Paper only publishes the source arrays that belong to that neighbour;
+    /// the scratch arrays are propagation-local and must not materialize in the
+    /// restored chunk.
+    /// `rewriteNibbleCacheForSkylight` publishes a dirty source nibble before
+    /// dropping it from the cache. The Rust cache clone must carry that visible
+    /// state back to the owned neighbour, even though no scratch replacement is
+    /// allowed to escape.
+    #[test]
+    fn dropped_dirty_neighbour_nibble_publishes_its_visible_state() {
+        let center = ChunkPos::ZERO;
+        let mut neighbour = all_air_chunk(ChunkPos::new(1, 0));
+        let mut nibbles = neighbour.sky_nibbles().to_vec();
+        let mut dirty_null = SwmrNibbleArray::new_with_bytes(vec![0xAB; 2048]);
+        dirty_null.set_null();
+        nibbles[10] = dirty_null;
+        neighbour.set_sky_nibbles(nibbles);
+        neighbour.set_light_correct(true);
+        let mut storage = HashMap::new();
+        storage.insert((1, 0), neighbour);
+        let (chunks, shared) = storage_closure(&mut storage);
+        let mut provider = SkyLightProvider::new(overworld(), true, false, chunks);
+        let mut center_chunk = superflat_chunk(center);
+
+        provider
+            .light_chunk_with(&mut center_chunk, &superflat_empty_sections())
+            .expect("lighting with a dirty null neighbour succeeds");
+
+        let map = shared.lock().unwrap();
+        let restored = map.get(&(1, 0)).expect("neighbour restored");
+        assert!(
+            restored.sky_nibbles()[10].is_null_nibble_visible(),
+            "Paper publishes a source nibble's dirty null state before dropping it"
+        );
+    }
+
+    #[test]
+    fn scratch_neighbour_nibbles_are_not_published() {
+        let center = ChunkPos::ZERO;
+        let mut storage = HashMap::new();
+        for dz in -2i32..=2 {
+            for dx in -2i32..=2 {
+                if dx == 0 && dz == 0 {
+                    continue;
+                }
+                let pos = ChunkPos::new(dx, dz);
+                let mut chunk = all_air_chunk(pos);
+                chunk.set_light_correct(true);
+                chunk.set_sky_emptiness_map(Some(vec![true; SECTION_COUNT]));
+                storage.insert((dx, dz), chunk);
+            }
+        }
+        let source = storage.get_mut(&(1, 0)).expect("source neighbour");
+        let mut source_nibbles = source.sky_nibbles().to_vec();
+        source_nibbles[0] = SwmrNibbleArray::new_with_bytes(vec![0x0F; 2048]);
+        source.set_sky_nibbles(source_nibbles);
+
+        let (chunks, shared) = storage_closure(&mut storage);
+        let mut provider = SkyLightProvider::new(overworld(), true, false, chunks);
+        let mut center_chunk = all_air_chunk(center);
+        provider
+            .light_chunk_with(&mut center_chunk, &all_air_empty_sections())
+            .expect("lighting with the complete neighbour window succeeds");
+
+        let map = shared.lock().unwrap();
+        let scratch_target = map.get(&(0, 1)).expect("scratch target restored");
+        assert!(
+            scratch_target
+                .sky_nibbles()
+                .iter()
+                .all(SwmrNibbleArray::is_null_nibble_visible),
+            "propagation scratch arrays must not be published into neighbours"
+        );
+    }
+
     /// A panicking engine run must not leak caller-storage chunks: the engine's
     /// finally-equivalent clears its caches, `light_chunk_with` returns every
     /// taken neighbour, `light_chunk` returns the taken centre, and the
@@ -969,6 +1254,69 @@ mod tests {
         );
     }
 
+    /// A storage callback can panic while `setupCaches` is resolving a
+    /// neighbour, before the light body enters its ordinary work. The retry
+    /// disables all neighbours; it must therefore run in a clean cache rather
+    /// than seeing the first run's taken chunk as a stale neighbour.
+    #[test]
+    fn setup_panic_clears_caches_before_retry() {
+        let panic_once = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let allow_neighbours = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut cached_neighbour = all_air_chunk(ChunkPos::new(0, -1));
+        cached_neighbour.set_light_correct(true);
+        cached_neighbour.set_sky_emptiness_map(Some(vec![true; SECTION_COUNT]));
+        let mut cached_nibbles = cached_neighbour.sky_nibbles().to_vec();
+        cached_nibbles[1] = SwmrNibbleArray::new_with_bytes(vec![0xFF; 2048]);
+        cached_neighbour.set_sky_nibbles(cached_nibbles);
+        let shared = Arc::new(Mutex::new(HashMap::from([((0, -1), cached_neighbour)])));
+        let callback_shared = Arc::clone(&shared);
+        let callback_panic_once = Arc::clone(&panic_once);
+        let callback_allow_neighbours = Arc::clone(&allow_neighbours);
+        let chunks: ChunkAccessFn = Box::new(move |x, z, put| {
+            if put.is_none() {
+                if !callback_allow_neighbours.load(Ordering::SeqCst) {
+                    return None;
+                }
+                if (x, z) == (1, 0) && callback_panic_once.swap(false, Ordering::SeqCst) {
+                    panic!("setup callback failed once");
+                }
+            }
+            let mut storage = callback_shared.lock().unwrap();
+            match put {
+                Some(slot) => {
+                    if let Some(chunk) = slot.take() {
+                        storage.insert((x, z), chunk);
+                    }
+                    None
+                }
+                None => storage.remove(&(x, z)),
+            }
+        });
+        let mut provider = SkyLightProvider::new(overworld(), true, false, chunks);
+        let mut center = superflat_chunk(ChunkPos::ZERO);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            provider
+                .light_chunk_with(&mut center, &superflat_empty_sections())
+                .expect("the setup callback panic must escape the provider");
+        }));
+        assert!(panic.is_err());
+        assert!(
+            provider.engine.per_run_caches_are_clear(),
+            "setup panic runs the same cache cleanup as a body panic"
+        );
+
+        allow_neighbours.store(false, Ordering::SeqCst);
+        provider
+            .light_chunk_with(&mut center, &superflat_empty_sections())
+            .expect("retry with no neighbours succeeds without stale cache state");
+        assert!(provider.engine.per_run_caches_are_clear());
+        assert!(
+            shared.lock().unwrap().contains_key(&(0, -1)),
+            "the neighbour taken before setup panic was restored"
+        );
+    }
+
     /// The readers' pos-only variants faithfully report Java's null-chunk
     /// branches (the `&self` readers cannot resolve a chunk through the
     /// exclusive take/put callback).
@@ -991,6 +1339,20 @@ mod tests {
         let block_only = SkyLightProvider::new(overworld(), false, true, no_chunks());
         assert_eq!(block_only.get_sky_light_value(pos), 0);
         assert_eq!(block_only.get_block_light_value(pos), 0);
+        let mut resolved_block_only = all_air_chunk(ChunkPos::ZERO);
+        resolved_block_only.set_light_correct(true);
+        resolved_block_only.set_sky_emptiness_map(Some(vec![true; SECTION_COUNT]));
+        assert_eq!(
+            block_only.get_sky_light_value_in(&resolved_block_only, pos),
+            0,
+            "block-only dimensions use the dummy sky value reader"
+        );
+        assert!(
+            block_only
+                .get_data_layer_data_in(&resolved_block_only, SectionPos::of(0, 0, 0))
+                .is_none(),
+            "block-only dimensions expose the dummy sky reader"
+        );
     }
 
     /// The resolved-chunk readers read the computed nibbles: the sky reader
@@ -1223,8 +1585,8 @@ mod tests {
         assert_eq!(golden.format, 1);
 
         let height_accessor = overworld();
-        let min_light = height_accessor.get_min_section_y() - 1;
-        let max_light = height_accessor.get_max_section_y() + 1;
+        let min_light = height_accessor.get_min_section_y().wrapping_sub(1);
+        let max_light = height_accessor.get_max_section_y().wrapping_add(1);
 
         let mut storage = HashMap::new();
         for (cx, cz) in forced_coordinates() {
