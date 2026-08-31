@@ -136,6 +136,12 @@ impl<T> StaticCache2D<T> {
         }
     }
 
+    /// Consume the cache and return its entries in the canonical x-major,
+    /// z-inner order used by `create` and `from_entries`.
+    pub fn into_entries(self) -> Vec<T> {
+        self.cache
+    }
+
     /// `getIndex(int x, int z)` — the row-major index `(x - minX) * sizeZ +
     /// (z - minZ)` (Java's `deltaX * this.sizeZ + deltaZ`; the port iterates
     /// x-major so the index formula matches Java's column-major storage).

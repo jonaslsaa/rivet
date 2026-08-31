@@ -28,12 +28,80 @@ use crate::ResourceKey;
 use crate::registry::{Registry, RegistryKey};
 use crate::root::{AnyBox, AnyRegistry};
 
+use std::collections::HashSet;
+use std::fmt;
 use std::sync::Arc;
 
-/// An erased (registry-key, registry-value) entry, shared across accesses so
-/// every access sees the same frozen registry instance (registry-instance
-/// identity). The `Arc` wraps the pair, never the erased registry value.
-pub(crate) type ErasedEntry = Arc<(RegistryKey<()>, AnyBox)>;
+/// An erased registry entry shared across accesses.
+///
+/// The value normally remains in the entry until the last access drops it. A
+/// transaction handoff may attach a one-shot recovery callback; if a cloned
+/// access keeps the entry alive past the handoff, the callback receives the
+/// value when that last clone is dropped. This keeps ownership explicit without
+/// cloning a live registry or putting it behind a lock.
+pub(crate) type ErasedEntry = Arc<ErasedEntryData>;
+
+pub(crate) type ErasedRecovery = Box<dyn FnOnce(AnyBox) + Send + Sync + 'static>;
+
+pub(crate) struct ErasedEntryData {
+    pub(crate) key: RegistryKey<()>,
+    value: Option<AnyBox>,
+    recovery: Option<ErasedRecovery>,
+}
+
+impl ErasedEntryData {
+    pub(crate) fn new(key: RegistryKey<()>, value: AnyBox) -> Self {
+        Self {
+            key,
+            value: Some(value),
+            recovery: None,
+        }
+    }
+
+    pub(crate) fn with_recovery(
+        key: RegistryKey<()>,
+        value: AnyBox,
+        recovery: ErasedRecovery,
+    ) -> Self {
+        Self {
+            key,
+            value: Some(value),
+            recovery: Some(recovery),
+        }
+    }
+
+    /// Move the value out after an ownership transfer. A successful transfer
+    /// cancels the deferred callback because the transaction has recovered the
+    /// registry synchronously.
+    pub(crate) fn into_value(mut self) -> AnyBox {
+        self.recovery.take();
+        self.value
+            .take()
+            .expect("erased registry entry has already been taken")
+    }
+}
+
+impl fmt::Debug for ErasedEntryData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ErasedEntryData")
+            .field("key", &self.key)
+            .field("value", &self.value)
+            .finish()
+    }
+}
+
+impl Drop for ErasedEntryData {
+    fn drop(&mut self) {
+        let Some(recovery) = self.recovery.take() else {
+            return;
+        };
+        let value = self
+            .value
+            .take()
+            .expect("recoverable erased registry entry has no value");
+        recovery(value);
+    }
+}
 
 /// `net.minecraft.core.RegistryAccess` — a heterogeneous set of frozen
 /// registries, ordered per layer.
@@ -46,12 +114,17 @@ pub(crate) type ErasedEntry = Arc<(RegistryKey<()>, AnyBox)>;
 pub struct RegistryAccess {
     /// The ordered erased registry map (`RegistryAccess.Frozen`).
     pub(crate) registries: Vec<ErasedEntry>,
+    /// Whether this access may destructively take a recoverable entry. Cloning
+    /// an access creates a non-owner view; only the original handoff access may
+    /// consume its recovery callback.
+    recoverable_owner: bool,
 }
 
 impl Clone for RegistryAccess {
     fn clone(&self) -> Self {
         RegistryAccess {
             registries: self.registries.clone(),
+            recoverable_owner: false,
         }
     }
 }
@@ -67,6 +140,7 @@ impl RegistryAccess {
     pub fn empty() -> Self {
         RegistryAccess {
             registries: Vec::new(),
+            recoverable_owner: true,
         }
     }
 
@@ -77,15 +151,95 @@ impl RegistryAccess {
     /// value layer) to build a populated provider for a serialization context.
     /// Typed entry points go through `lookup`.
     pub fn from_pairs(pairs: Vec<(RegistryKey<()>, AnyBox)>) -> Self {
-        RegistryAccess {
-            registries: pairs.into_iter().map(Arc::new).collect(),
+        let mut seen = HashSet::with_capacity(pairs.len());
+        let mut registries = Vec::with_capacity(pairs.len());
+        for (key, value) in pairs {
+            assert!(seen.insert(key.clone()), "Duplicated registry {key}");
+            registries.push(Arc::new(ErasedEntryData::new(key, value)));
         }
+        RegistryAccess {
+            registries,
+            recoverable_owner: true,
+        }
+    }
+
+    /// Build a one-entry access whose final drop can recover the registry.
+    pub(crate) fn from_pair_with_recovery(
+        key: RegistryKey<()>,
+        value: AnyBox,
+        recovery: ErasedRecovery,
+    ) -> Self {
+        RegistryAccess {
+            registries: vec![Arc::new(ErasedEntryData::with_recovery(
+                key, value, recovery,
+            ))],
+            recoverable_owner: true,
+        }
+    }
+
+    /// Remove a uniquely-owned typed registry from this access. Layered and
+    /// cloned accesses must be dropped first; refusing while an `Arc` remains
+    /// is what prevents an ownership transfer from silently cloning a live
+    /// registry identity. A cloned view also cannot consume a recoverable
+    /// handoff entry after the original owner drops, because that would cancel
+    /// the transaction's deferred recovery callback.
+    pub fn take_registry<E>(&mut self, key: &RegistryKey<E>) -> Result<Registry<E>, String>
+    where
+        E: Send + Sync + 'static,
+    {
+        let erased = ResourceKey::create_registry_key(key.identifier().clone());
+        let index = self
+            .registries
+            .iter()
+            .position(|entry| entry.key == erased)
+            .ok_or_else(|| format!("Missing registry: {key}"))?;
+        // A cloned access is a read-only view of a recoverable handoff. Letting
+        // it take the entry would cancel the callback while the transaction is
+        // still empty, leaving no owner to recover later.
+        if self.registries[index].recovery.is_some() && !self.recoverable_owner {
+            return Err(format!(
+                "Cannot take recoverable registry {key} through a non-owner access"
+            ));
+        }
+
+        // Check the erased type before removing anything. A failed typed take
+        // must leave the access unchanged just like a failed ownership take.
+        if self.registries[index]
+            .value
+            .as_ref()
+            .expect("erased registry entry has no value")
+            .as_any()
+            .downcast_ref::<Registry<E>>()
+            .is_none()
+        {
+            return Err(format!("Registry {key} has an unexpected element type"));
+        }
+
+        // Remove only tentatively. `try_unwrap` can still observe another
+        // owner between any preliminary count check and the unwrap; put the
+        // exact entry back at its original position when that happens.
+        let entry = self.registries.remove(index);
+        let entry = match Arc::try_unwrap(entry) {
+            Ok(entry) => entry,
+            Err(entry) => {
+                self.registries.insert(index, entry);
+                return Err(format!(
+                    "Cannot take registry {key} while another access still owns it"
+                ));
+            }
+        };
+        let boxed = entry.into_value();
+        Ok(*boxed
+            .into_any()
+            .downcast::<Registry<E>>()
+            .expect("registry type was checked before ownership transfer"))
     }
 
     /// Wrap already-shared entries (the layered composite).
     fn from_entries(entries: Vec<ErasedEntry>) -> Self {
         RegistryAccess {
             registries: entries,
+            recoverable_owner: false,
         }
     }
 
@@ -96,8 +250,14 @@ impl RegistryAccess {
     pub(crate) fn lookup_erased(&self, key: &RegistryKey<()>) -> Option<&dyn AnyRegistry> {
         self.registries
             .iter()
-            .find(|entry| entry.0 == *key)
-            .map(|entry| entry.1.as_ref())
+            .find(|entry| entry.key == *key)
+            .map(|entry| {
+                entry
+                    .value
+                    .as_ref()
+                    .expect("erased registry entry has no value")
+                    .as_ref()
+            })
     }
 
     /// `RegistryAccess.lookup(ResourceKey)` — `Optional<Registry<E>>`.
@@ -132,8 +292,12 @@ impl RegistryAccess {
         self.registries
             .iter()
             .map(|entry| RegistryEntry {
-                key: entry.0.clone(),
-                value: entry.1.as_ref(),
+                key: entry.key.clone(),
+                value: entry
+                    .value
+                    .as_ref()
+                    .expect("erased registry entry has no value")
+                    .as_ref(),
             })
             .collect()
     }
@@ -142,7 +306,7 @@ impl RegistryAccess {
     pub fn list_registry_keys(&self) -> Vec<RegistryKey<()>> {
         self.registries
             .iter()
-            .map(|entry| entry.0.clone())
+            .map(|entry| entry.key.clone())
             .collect()
     }
 
@@ -316,8 +480,8 @@ pub(crate) fn collect_registries(layers: &[RegistryAccess]) -> Vec<ErasedEntry> 
     let mut merged: Vec<ErasedEntry> = Vec::new();
     for layer in layers {
         for entry in &layer.registries {
-            if let Some(existing) = merged.iter().find(|candidate| candidate.0 == entry.0) {
-                panic!("Duplicated registry {}", existing.0);
+            if let Some(existing) = merged.iter().find(|candidate| candidate.key == entry.key) {
+                panic!("Duplicated registry {}", existing.key);
             }
             merged.push(entry.clone());
         }
@@ -336,6 +500,9 @@ mod tests {
 
     #[derive(Debug)]
     struct TestElement;
+
+    #[derive(Debug)]
+    struct OtherElement;
 
     fn element_key() -> RegistryKey<TestElement> {
         ResourceKey::create_registry_key(Identifier::with_default_namespace("test"))
@@ -357,6 +524,17 @@ mod tests {
         assert!(access.lookup_erased(&erased_key()).is_none());
         assert!(access.list_registry_keys().is_empty());
         assert!(access.registries().is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "Duplicated registry")]
+    fn from_pairs_rejects_duplicate_logical_keys() {
+        let registry = RegistryBuilder::new(&element_key()).freeze();
+        let duplicate = RegistryBuilder::new(&element_key()).freeze();
+        let _ = RegistryAccess::from_pairs(vec![
+            (erased_key(), Box::new(registry) as AnyBox),
+            (erased_key(), Box::new(duplicate) as AnyBox),
+        ]);
     }
 
     #[test]
@@ -414,6 +592,36 @@ mod tests {
             a.as_any().downcast_ref::<Registry<TestElement>>().unwrap(),
             b.as_any().downcast_ref::<Registry<TestElement>>().unwrap(),
         ));
+    }
+
+    #[test]
+    fn failed_take_from_shared_access_preserves_registry_entry() {
+        let mut access = access_with_one_registry();
+        let copy = access.clone();
+        let error = access
+            .take_registry(&element_key())
+            .expect_err("shared access must reject ownership transfer");
+        assert!(error.contains("another access still owns it"));
+        assert!(access.lookup(&element_key()).is_some());
+
+        drop(copy);
+        let registry = access
+            .take_registry(&element_key())
+            .expect("the entry remains available after the failed take");
+        assert_eq!(registry.size(), 0);
+        assert!(access.lookup(&element_key()).is_none());
+    }
+
+    #[test]
+    fn failed_take_with_wrong_type_preserves_registry_entry() {
+        let mut access = access_with_one_registry();
+        let wrong_key: RegistryKey<OtherElement> =
+            ResourceKey::create_registry_key(Identifier::with_default_namespace("test"));
+        let error = access
+            .take_registry(&wrong_key)
+            .expect_err("typed take must reject an unexpected registry type");
+        assert!(error.contains("unexpected element type"));
+        assert!(access.lookup(&element_key()).is_some());
     }
 
     #[test]

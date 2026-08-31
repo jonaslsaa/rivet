@@ -41,7 +41,7 @@ use rivet_serialization::functions::{DecoderFn, Fn1};
 use rivet_serialization::lifecycle::Lifecycle;
 use rivet_util::random::RandomSource;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -60,6 +60,31 @@ pub type RegistryKey<T> = ResourceKey<Registry<T>>;
 /// id space (element id == holder id == network id == insertion index) is
 /// already the contract, so this alias is the registry-side handle.
 pub type HolderReference = HolderId;
+
+/// The movable storage shared by the mutable and frozen registry phases.
+///
+/// Keeping the phase state in one bundle makes ownership transfers explicit and
+/// avoids reconstructing a registry by passing each field independently. A
+/// transfer consumes the old phase before the next phase can be frozen, so a
+/// `RegistryId` never names two live registries.
+pub(crate) struct RegistryParts<T> {
+    pub(crate) key: RegistryKey<T>,
+    pub(crate) registry_id: RegistryId,
+    pub(crate) values: Vec<Arc<T>>,
+    pub(crate) keys: Vec<ResourceKey<T>>,
+    pub(crate) by_location: HashMap<Identifier, u32>,
+    pub(crate) by_key: HashMap<ResourceKey<T>, u32>,
+    pub(crate) by_value: HashMap<usize, u32>,
+    pub(crate) registration_infos: HashMap<ResourceKey<T>, RegistrationInfo>,
+    pub(crate) lifecycle: Lifecycle,
+    pub(crate) default_id: Option<u32>,
+    pub(crate) default_key: Option<Identifier>,
+    pub(crate) tags: HashMap<TagKey<T>, Vec<HolderId>>,
+    /// Mutable-phase state not retained by a frozen registry. Keeping it in
+    /// the transfer bundle keeps ownership recovery lossless.
+    pub(crate) intrusive: Option<HashMap<usize, Arc<T>>>,
+    pub(crate) pending_unbound: HashSet<ResourceKey<T>>,
+}
 
 /// `net.minecraft.core.Registry<T>` — the frozen registry surface.
 ///
@@ -103,25 +128,32 @@ pub struct Registry<T> {
     /// Frozen named tag sets (`HolderSet.Named<T>` members; #126 widens the
     /// surface, the id space is already the contract).
     tags: HashMap<TagKey<T>, Vec<HolderId>>,
+    /// Whether this registry was created with intrusive-holder support. The
+    /// frozen phase has no pending map, but the mode must survive a round trip
+    /// through `into_builder`.
+    intrusive_holders: bool,
 }
 
 impl<T> Registry<T> {
     /// Construct a frozen registry from a consumed builder (`freeze()`). The
     /// builder is the only construction path.
-    #[allow(clippy::too_many_arguments)] // mirrors the struct's 12 fields 1:1
     pub(crate) fn from_builder(
-        key: RegistryKey<T>,
-        registry_id: RegistryId,
-        values: Vec<Arc<T>>,
-        keys: Vec<ResourceKey<T>>,
-        by_location: HashMap<Identifier, u32>,
-        by_key: HashMap<ResourceKey<T>, u32>,
-        by_value: HashMap<usize, u32>,
-        registration_infos: HashMap<ResourceKey<T>, RegistrationInfo>,
-        lifecycle: Lifecycle,
-        default_id: Option<u32>,
-        default_key: Option<Identifier>,
-        tags: HashMap<TagKey<T>, Vec<HolderId>>,
+        RegistryParts {
+            key,
+            registry_id,
+            values,
+            keys,
+            by_location,
+            by_key,
+            by_value,
+            registration_infos,
+            lifecycle,
+            default_id,
+            default_key,
+            tags,
+            intrusive,
+            pending_unbound: _,
+        }: RegistryParts<T>,
     ) -> Self {
         Registry {
             key,
@@ -136,7 +168,46 @@ impl<T> Registry<T> {
             default_id,
             default_key,
             tags,
+            intrusive_holders: intrusive.is_some(),
         }
+    }
+
+    /// Consume this frozen table and transfer its identity back to a mutable
+    /// builder. The registry is gone before the builder can freeze again, so
+    /// recursive decoding can preserve holder ids without cloning a live
+    /// registry identity.
+    pub fn into_builder(self) -> crate::builder::RegistryBuilder<T> {
+        let Registry {
+            key,
+            registry_id,
+            values,
+            keys,
+            by_location,
+            by_key,
+            by_value,
+            registration_infos,
+            lifecycle,
+            default_id,
+            default_key,
+            tags,
+            intrusive_holders,
+        } = self;
+        crate::builder::RegistryBuilder::from_frozen_parts(RegistryParts {
+            key,
+            registry_id,
+            values,
+            keys,
+            by_location,
+            by_key,
+            by_value,
+            registration_infos,
+            lifecycle,
+            default_id,
+            default_key,
+            tags,
+            intrusive: intrusive_holders.then(HashMap::new),
+            pending_unbound: HashSet::new(),
+        })
     }
 
     /// `Registry.key()`.

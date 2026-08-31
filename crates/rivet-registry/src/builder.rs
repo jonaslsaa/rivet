@@ -43,23 +43,23 @@
 use crate::Identifier;
 use crate::ResourceKey;
 use crate::TagKey;
+use crate::access::{ErasedRecovery, RegistryAccess};
 use crate::holder::{HolderId, RegistryId};
 use crate::registration_info::RegistrationInfo;
-use crate::registry::{Registry, RegistryKey};
+use crate::registry::{Registry, RegistryKey, RegistryParts};
+use crate::root::AnyBox;
 
 use rivet_serialization::lifecycle::Lifecycle;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Monotonic per-instance registry identity source (OWNERSHIP.md §Registries:
 /// `RegistryId` is a per-instance u32, distinct from the registry key). A
 /// builder assigns one at construction.
 static NEXT_REGISTRY_ID: AtomicU32 = AtomicU32::new(0);
-
-/// A pre-freeze holder placeholder (see `registry.rs`'s `HolderReference`).
-pub type BuilderHolder = HolderId;
 
 /// The `RegistryBuilder<T>` — the mutable pre-freeze phase of `MappedRegistry`.
 ///
@@ -100,10 +100,312 @@ pub struct RegistryBuilder<T> {
     /// (`byId.size()`), so `register` — never this map — decides the id.
     intrusive: Option<HashMap<usize, Arc<T>>>,
     /// Stand-alone holders created via `get_or_create_holder` but not yet
-    /// registered — key -> provisional holder id. `computeIfAbsent` semantics:
-    /// a repeat call returns the same provisional id, and `freeze()` reports
-    /// each unbound key exactly once.
-    pending_unbound: HashMap<ResourceKey<T>, HolderId>,
+    /// registered. The key set is all that survives until registration; no
+    /// provisional holder id exists because registration order decides the id.
+    pending_unbound: HashSet<ResourceKey<T>>,
+}
+
+/// An ownership transaction for mutually recursive registry decoding.
+///
+/// Construction consumes the one authoritative builder. While the transaction
+/// is building, it is the only mutable owner; after `freeze`, it is the only
+/// owner of the frozen table. `access_transaction` is the scoped hand-off around
+/// a temporary `RegistryAccess`; its drop path adopts the table before callers
+/// can mutate the builder again. There is no replacement builder, so one
+/// `RegistryId` cannot name two live phases.
+pub struct RegistryBuilderTransaction<T> {
+    state: TransactionState<T>,
+    /// A cloned temporary access may keep the frozen registry alive after the
+    /// handoff guard drops. The last clone stores it here through its one-shot
+    /// callback; until then this transaction intentionally has no mutable
+    /// owner.
+    deferred: Option<DeferredRegistry<T>>,
+}
+
+type DeferredRegistry<T> = Arc<OnceLock<Registry<T>>>;
+
+enum TransactionState<T> {
+    Building(RegistryBuilder<T>),
+    Frozen(Registry<T>),
+    Empty,
+}
+
+/// An ownership-safe erased access containing one or more frozen transaction
+/// registries. During the handoff, each transaction is temporarily empty and
+/// its frozen registry is owned by this access; dropping the handoff takes each
+/// registry back and adopts it into the still-borrowed transaction whenever the
+/// access is uniquely owned. This preserves the exact owner on decode errors
+/// and panics without a replacement builder or a second live registry.
+pub struct RegistryAccessTransaction<'a> {
+    access: RegistryAccess,
+    recoveries: Vec<Box<dyn RegistryRecovery + 'a>>,
+}
+
+trait RegistryRecovery {
+    fn matches(&self, key: &Identifier) -> bool;
+    fn recover(&mut self, access: &mut RegistryAccess);
+}
+
+struct TypedRegistryRecovery<'a, T> {
+    key: RegistryKey<T>,
+    transaction: &'a mut RegistryBuilderTransaction<T>,
+    deferred: DeferredRegistry<T>,
+}
+
+fn deferred_recovery<T: Send + Sync + 'static>(slot: DeferredRegistry<T>) -> ErasedRecovery {
+    Box::new(move |boxed| {
+        let registry = *boxed
+            .into_any()
+            .downcast::<Registry<T>>()
+            .expect("deferred registry recovery received the wrong registry type");
+        assert!(
+            slot.set(registry).is_ok(),
+            "deferred registry recovery ran more than once"
+        );
+    })
+}
+
+impl<T: Send + Sync + 'static> RegistryRecovery for TypedRegistryRecovery<'_, T> {
+    fn matches(&self, key: &Identifier) -> bool {
+        self.key.identifier() == key
+    }
+
+    fn recover(&mut self, access: &mut RegistryAccess) {
+        if let Ok(registry) = access.take_registry(&self.key) {
+            self.transaction.adopt_frozen(registry);
+        } else {
+            // A cloned access still owns an Arc to the entry. Its final drop
+            // runs the entry's callback, which fills this slot without
+            // cloning or dropping the frozen registry. The transaction adopts
+            // it lazily on the next mutable operation.
+            self.transaction.defer_recovery(Arc::clone(&self.deferred));
+        }
+    }
+}
+
+impl<'a> RegistryAccessTransaction<'a> {
+    /// Borrow the temporary access used by recursive codecs.
+    pub fn access(&self) -> &RegistryAccess {
+        &self.access
+    }
+
+    /// Add another frozen transaction registry to this single ownership handoff.
+    /// The transaction must be frozen; no second live owner is created.
+    pub fn add_transaction<T: Send + Sync + 'static>(
+        &mut self,
+        transaction: &'a mut RegistryBuilderTransaction<T>,
+    ) {
+        // Inspect the secondary transaction while it is still building. A
+        // duplicate must not freeze it before the handoff is rejected; callers
+        // must be able to keep mutating and recover that transaction.
+        let key = transaction.registry_key().clone();
+        assert!(
+            !self
+                .access
+                .list_registry_keys()
+                .iter()
+                .any(|existing| existing.identifier() == key.identifier()),
+            "duplicate registry key in transaction access: {key}"
+        );
+
+        transaction.freeze();
+        let registry = transaction.take_frozen();
+        let deferred = Arc::new(OnceLock::new());
+        let erased = ResourceKey::create_registry_key(key.identifier().clone());
+        let entry = RegistryAccess::from_pair_with_recovery(
+            erased,
+            Box::new(registry) as AnyBox,
+            deferred_recovery(Arc::clone(&deferred)),
+        );
+        self.access.registries.extend(entry.registries);
+        self.recoveries.push(Box::new(TypedRegistryRecovery {
+            key,
+            transaction,
+            deferred,
+        }));
+    }
+
+    /// Remove a uniquely-owned frozen registry from the temporary access.
+    /// Successful removal retires its recovery slot; failures leave the access
+    /// and recovery slot unchanged so its borrowed transaction can recover it.
+    pub fn take_registry<T: Send + Sync + 'static>(
+        &mut self,
+        key: &RegistryKey<T>,
+    ) -> Result<Registry<T>, String> {
+        let registry = self.access.take_registry(key)?;
+        self.recoveries
+            .retain(|recovery| !recovery.matches(key.identifier()));
+        Ok(registry)
+    }
+}
+
+impl Drop for RegistryAccessTransaction<'_> {
+    fn drop(&mut self) {
+        for recovery in &mut self.recoveries {
+            recovery.recover(&mut self.access);
+        }
+    }
+}
+
+impl<T> RegistryBuilderTransaction<T> {
+    /// The transaction's single logical registry identity.
+    pub fn registry_id(&self) -> RegistryId {
+        match &self.state {
+            TransactionState::Building(builder) => builder.registry_id(),
+            TransactionState::Frozen(registry) => registry.registry_id(),
+            TransactionState::Empty => self
+                .deferred
+                .as_ref()
+                .and_then(|slot| slot.get().map(Registry::registry_id))
+                .unwrap_or_else(|| panic!("registry transaction has no owner")),
+        }
+    }
+
+    /// The transaction's registry key, used to validate a multi-registry
+    /// handoff before freezing a secondary transaction.
+    fn registry_key(&self) -> &RegistryKey<T> {
+        match &self.state {
+            TransactionState::Building(builder) => &builder.key,
+            TransactionState::Frozen(registry) => registry.key(),
+            TransactionState::Empty => self
+                .deferred
+                .as_ref()
+                .and_then(|slot| slot.get().map(Registry::key))
+                .unwrap_or_else(|| panic!("registry transaction has no owner")),
+        }
+    }
+
+    /// Adopt a registry delivered by a cloned temporary access, if its final
+    /// clone has already dropped. Keeping this lazy avoids locks and makes the
+    /// handoff's ownership boundary explicit.
+    fn adopt_deferred_if_ready(&mut self) {
+        let registry = self
+            .deferred
+            .as_mut()
+            .and_then(|slot| Arc::get_mut(slot).and_then(OnceLock::take));
+        if let Some(registry) = registry {
+            self.deferred = None;
+            self.adopt_frozen(registry);
+        }
+    }
+
+    fn defer_recovery(&mut self, deferred: DeferredRegistry<T>) {
+        assert!(
+            matches!(self.state, TransactionState::Empty) && self.deferred.is_none(),
+            "registry transaction already owns a phase"
+        );
+        self.deferred = Some(deferred);
+    }
+
+    /// Borrow the authoritative mutable builder while it is in the building
+    /// phase. A frozen transaction has no mutable owner until it is adopted.
+    pub fn builder_mut(&mut self) -> &mut RegistryBuilder<T> {
+        self.adopt_deferred_if_ready();
+        match &mut self.state {
+            TransactionState::Building(builder) => builder,
+            TransactionState::Frozen(_) => panic!("registry transaction is frozen"),
+            TransactionState::Empty => panic!("registry transaction has no owner"),
+        }
+    }
+
+    /// Freeze the authoritative builder in place and return the sole frozen
+    /// registry view. Validation occurs before the state is moved, so a panic
+    /// leaves the builder (including intrusive and pending-unbound holders)
+    /// available for recovery.
+    pub fn freeze(&mut self) -> &Registry<T> {
+        self.adopt_deferred_if_ready();
+        match &self.state {
+            TransactionState::Building(builder) => builder.validate_freeze(),
+            TransactionState::Frozen(_) => return self.frozen_ref(),
+            TransactionState::Empty => panic!("registry transaction has no owner"),
+        }
+        self.transition_to_frozen();
+        self.frozen_ref()
+    }
+
+    fn transition_to_frozen(&mut self) {
+        let state = std::mem::replace(&mut self.state, TransactionState::Empty);
+        self.state = match state {
+            TransactionState::Building(builder) => {
+                TransactionState::Frozen(builder.freeze_validated())
+            }
+            TransactionState::Frozen(_) | TransactionState::Empty => {
+                unreachable!("validated building transaction was replaced")
+            }
+        };
+    }
+
+    fn frozen_ref(&self) -> &Registry<T> {
+        match &self.state {
+            TransactionState::Frozen(registry) => registry,
+            TransactionState::Building(_) | TransactionState::Empty => {
+                unreachable!("transaction is not frozen")
+            }
+        }
+    }
+
+    /// Move the temporary frozen registry into an erased access. The
+    /// transaction becomes empty until [`Self::adopt_frozen`] receives it back.
+    fn take_frozen(&mut self) -> Registry<T> {
+        self.adopt_deferred_if_ready();
+        match std::mem::replace(&mut self.state, TransactionState::Empty) {
+            TransactionState::Frozen(registry) => registry,
+            TransactionState::Building(builder) => {
+                self.state = TransactionState::Building(builder);
+                panic!("registry transaction must be frozen before take_frozen")
+            }
+            TransactionState::Empty => panic!("registry transaction has no owner"),
+        }
+    }
+
+    /// Adopt a uniquely-owned frozen registry back as the authoritative
+    /// mutable builder, preserving its `RegistryId` and every registered
+    /// holder id. This is the commit half of a recursive decode transaction.
+    fn adopt_frozen(&mut self, registry: Registry<T>) {
+        assert!(
+            matches!(self.state, TransactionState::Empty) && self.deferred.is_none(),
+            "registry transaction already owns a phase"
+        );
+        self.state = TransactionState::Building(registry.into_builder());
+    }
+
+    /// Recover the transaction's owner after decoding, whether the caller
+    /// adopted a temporary frozen registry or never froze the builder.
+    pub fn into_builder(mut self) -> RegistryBuilder<T> {
+        self.adopt_deferred_if_ready();
+        match self.state {
+            TransactionState::Building(builder) => builder,
+            TransactionState::Frozen(registry) => registry.into_builder(),
+            TransactionState::Empty => panic!("registry transaction has no owner"),
+        }
+    }
+
+    /// Borrow this transaction while moving its frozen registry into an access
+    /// handoff. The transaction is empty only while the returned guard lives;
+    /// its drop path adopts the registry back after an early return or panic.
+    pub fn access_transaction(&mut self) -> RegistryAccessTransaction<'_>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.freeze();
+        let registry = self.take_frozen();
+        let key = registry.key().clone();
+        let deferred = Arc::new(OnceLock::new());
+        let erased = ResourceKey::create_registry_key(key.identifier().clone());
+        let access = RegistryAccess::from_pair_with_recovery(
+            erased,
+            Box::new(registry) as AnyBox,
+            deferred_recovery(Arc::clone(&deferred)),
+        );
+        RegistryAccessTransaction {
+            access,
+            recoveries: vec![Box::new(TypedRegistryRecovery {
+                key,
+                transaction: self,
+                deferred,
+            })],
+        }
+    }
 }
 
 impl<T> RegistryBuilder<T> {
@@ -116,6 +418,16 @@ impl<T> RegistryBuilder<T> {
         Self::with_intrusive(key, false)
     }
 
+    /// Consume this builder into the sole owner of a recursive decode
+    /// transaction. The transaction owns this builder directly; it does not
+    /// borrow or replace another builder.
+    pub fn into_transaction(self) -> RegistryBuilderTransaction<T> {
+        RegistryBuilderTransaction {
+            state: TransactionState::Building(self),
+            deferred: None,
+        }
+    }
+
     /// `MappedRegistry(ResourceKey, Lifecycle, boolean intrusiveHolders)`.
     ///
     /// The initial `Lifecycle` param is likewise Stable-only for #124 (see
@@ -125,9 +437,18 @@ impl<T> RegistryBuilder<T> {
     }
 
     fn with_intrusive(key: &ResourceKey<Registry<T>>, intrusive_holders: bool) -> Self {
+        let registry_id = RegistryId(NEXT_REGISTRY_ID.fetch_add(1, Ordering::Relaxed));
+        Self::with_intrusive_and_id(key, intrusive_holders, registry_id)
+    }
+
+    fn with_intrusive_and_id(
+        key: &ResourceKey<Registry<T>>,
+        intrusive_holders: bool,
+        registry_id: RegistryId,
+    ) -> Self {
         RegistryBuilder {
             key: key.clone(),
-            registry_id: RegistryId(NEXT_REGISTRY_ID.fetch_add(1, Ordering::Relaxed)),
+            registry_id,
             values: Vec::new(),
             keys: Vec::new(),
             by_location: HashMap::new(),
@@ -139,7 +460,47 @@ impl<T> RegistryBuilder<T> {
             default_key: None,
             tags: HashMap::new(),
             intrusive: intrusive_holders.then(HashMap::new),
-            pending_unbound: HashMap::new(),
+            pending_unbound: HashSet::new(),
+        }
+    }
+
+    /// Reconstitute a mutable builder after consuming a frozen registry. This
+    /// is the ownership-safe identity handoff used by mutually recursive
+    /// decoding: the temporary registry is consumed before its builder can be
+    /// frozen again, so one `RegistryId` never names two live registries.
+    pub(crate) fn from_frozen_parts(
+        RegistryParts {
+            key,
+            registry_id,
+            values,
+            keys,
+            by_location,
+            by_key,
+            by_value,
+            registration_infos,
+            lifecycle,
+            default_id,
+            default_key,
+            tags,
+            intrusive,
+            pending_unbound,
+        }: RegistryParts<T>,
+    ) -> Self {
+        RegistryBuilder {
+            key,
+            registry_id,
+            values,
+            keys,
+            by_location,
+            by_key,
+            by_value,
+            registration_infos,
+            lifecycle,
+            default_id,
+            default_key,
+            tags,
+            intrusive,
+            pending_unbound,
         }
     }
 
@@ -189,7 +550,7 @@ impl<T> RegistryBuilder<T> {
         key: &ResourceKey<T>,
         value: Arc<T>,
         info: RegistrationInfo,
-    ) -> BuilderHolder {
+    ) -> HolderId {
         if self.by_location.contains_key(key.identifier()) {
             panic!("Adding duplicate key '{}' to registry", key);
         }
@@ -223,48 +584,58 @@ impl<T> RegistryBuilder<T> {
         HolderId(id)
     }
 
-    /// `WritableRegistry.getOrCreateHolder(ResourceKey<T>)` — the builder-side
-    /// of `getOrCreateHolderOrThrow`. A key not yet registered gets a
-    /// stand-alone holder placeholder; if never registered, `freeze()` panics
-    /// with it as an unbound value. The returned `HolderId` is provisional
-    /// (`values.len()` at creation) and stable across repeat calls
-    /// (`computeIfAbsent`). The #126 `Holder::Reference` is built on demand by
-    /// `RegistryLookup::get` once the key registers — the builder's placeholder
-    /// is a bare key, not a `Holder`.
+    /// Replace the value at an already-registered key without changing its id.
+    ///
+    /// This is the commit half of a recursive decode. The placeholder
+    /// table has already reserved every key and insertion slot; replacing the
+    /// stored `Arc` updates the identity index atomically while preserving the
+    /// holder id and all key/registration metadata.
+    pub fn replace_registered(&mut self, key: &ResourceKey<T>, value: Arc<T>) -> HolderId {
+        let id = *self
+            .by_key
+            .get(key)
+            .unwrap_or_else(|| panic!("Cannot replace missing key '{}' in registry", key));
+        let new_identity = Self::identity(&value);
+        if let Some(&existing_id) = self.by_value.get(&new_identity)
+            && existing_id != id
+        {
+            panic!("Adding duplicate value to registry");
+        }
+        let old = std::mem::replace(&mut self.values[id as usize], value);
+        self.by_value.remove(&Self::identity(&old));
+        self.by_value.insert(new_identity, id);
+        HolderId(id)
+    }
+
+    /// `WritableRegistry.getOrCreateHolder(ResourceKey<T>)` — record a
+    /// stand-alone holder key until it is registered. The numeric holder id is
+    /// assigned by `register`, so this pre-registration API intentionally does
+    /// not return a `HolderId` snapshot that could become stale when another
+    /// value is inserted first.
     ///
     /// Java's `getOrCreateHolderOrThrow` (MappedRegistry.java:198-207) throws
     /// `"This registry can't create new holders without value"` on an intrusive
     /// builder — an intrusive registry only ever creates holders from values,
     /// never from bare keys. Preserved here exactly.
-    pub fn get_or_create_holder(&mut self, key: &ResourceKey<T>) -> BuilderHolder {
-        if let Some(&id) = self.by_key.get(key) {
-            return HolderId(id);
+    pub fn get_or_create_holder(&mut self, key: &ResourceKey<T>) {
+        if self.by_key.contains_key(key) {
+            return;
         }
         if self.intrusive.is_some() {
             panic!("This registry can't create new holders without value");
         }
-        if let Some(&id) = self.pending_unbound.get(key) {
-            return id;
-        }
-        let provisional = HolderId(self.values.len() as u32);
-        self.pending_unbound.insert(key.clone(), provisional);
-        provisional
+        self.pending_unbound.insert(key.clone());
     }
 
-    /// `WritableRegistry.createIntrusiveHolder(Arc<T>)` — pre-registers a value
+    /// `WritableRegistry.createIntrusiveHolder(Arc<T>)` — pre-register a value
     /// as an intrusive holder; the value must later be `register`ed with the
     /// same allocation (Java panics "Missing intrusive holder" otherwise).
     ///
-    /// **No id is assigned here.** Java's `createIntrusiveHolder`
-    /// (MappedRegistry.java:347-354) builds a `Holder.Reference` via
-    /// `computeIfAbsent` and returns it WITHOUT binding an id — the numeric id
-    /// does not exist until `register` adds the holder to `byId`. Returning a
-    /// `HolderId(self.values.len())` snapshot here would alias later holders
-    /// (interleaved create/register), so the returned placeholder id is always
-    /// `0` and the real id is decided by `register` (`values.len()`). Callers
-    /// of `create_intrusive_holder` must not treat the return as a final id —
-    /// match `register`'s return, as Java callers match `register`'s.
-    pub fn create_intrusive_holder(&mut self, value: Arc<T>) -> BuilderHolder {
+    /// Java binds the numeric id only when `register` adds the holder to
+    /// `byId`. This API therefore records the value for the identity check and
+    /// returns nothing; the `HolderId` returned by `register` is the only valid
+    /// id.
+    pub fn create_intrusive_holder(&mut self, value: Arc<T>) {
         let intrusive = self
             .intrusive
             .as_mut()
@@ -272,8 +643,7 @@ impl<T> RegistryBuilder<T> {
         let identity = Self::identity(&value);
         // Java keeps the value itself (by identity) in the map, so the object
         // stays alive until registered; we hold the Arc for the same reason.
-        intrusive.insert(identity, value);
-        HolderId(0)
+        intrusive.entry(identity).or_insert(value);
     }
 
     /// `WritableRegistry.createRegistrationLookup()`.
@@ -285,7 +655,7 @@ impl<T> RegistryBuilder<T> {
     /// pre-freeze registration-lookup (a live builder getter) is not ported —
     /// a placeholder would be a plausible-but-wrong holder, so this fails
     /// loudly.
-    pub fn create_registration_lookup(&self) -> BuilderHolder {
+    pub fn create_registration_lookup(&self) -> HolderId {
         panic!(
             "createRegistrationLookup's pre-freeze HolderGetter is #126 (holder \
              codecs); not implemented"
@@ -295,7 +665,7 @@ impl<T> RegistryBuilder<T> {
     /// `WritableRegistry.bindTags(Map<TagKey<T>, List<Holder<T>>>)` — stores the
     /// tag member ids (pre-freeze). Member holders must reference registered
     /// elements in this minimal shape; `HolderSet.Named` binding is #126.
-    pub fn bind_tags(&mut self, pending: Vec<(TagKey<T>, Vec<BuilderHolder>)>) {
+    pub fn bind_tags(&mut self, pending: Vec<(TagKey<T>, Vec<HolderId>)>) {
         for (tag, holders) in pending {
             self.tags.insert(tag, holders);
         }
@@ -321,9 +691,18 @@ impl<T> RegistryBuilder<T> {
     /// impossible here: tags only exist after `bind_tags` in this minimal
     /// shape, and a consumed builder cannot be frozen twice.)
     pub fn freeze(self) -> Registry<T> {
+        self.validate_freeze();
+        self.freeze_validated()
+    }
+
+    /// Validate the Java `MappedRegistry.freeze()` preconditions without
+    /// consuming the builder. Transactions call this before moving the
+    /// authoritative builder into the frozen phase, so a validation panic
+    /// leaves intrusive and pending-unbound holder state recoverable.
+    fn validate_freeze(&self) {
         let mut unbound: Vec<Identifier> = self
             .pending_unbound
-            .keys()
+            .iter()
             .filter(|key| !self.by_key.contains_key(*key))
             .map(|key| key.identifier().clone())
             .collect();
@@ -350,21 +729,25 @@ impl<T> RegistryBuilder<T> {
                 leftover
             );
         }
+    }
 
-        Registry::from_builder(
-            self.key,
-            self.registry_id,
-            self.values,
-            self.keys,
-            self.by_location,
-            self.by_key,
-            self.by_value,
-            self.registration_infos,
-            self.lifecycle,
-            self.default_id,
-            self.default_key,
-            self.tags,
-        )
+    fn freeze_validated(self) -> Registry<T> {
+        Registry::from_builder(RegistryParts {
+            key: self.key,
+            registry_id: self.registry_id,
+            values: self.values,
+            keys: self.keys,
+            by_location: self.by_location,
+            by_key: self.by_key,
+            by_value: self.by_value,
+            registration_infos: self.registration_infos,
+            lifecycle: self.lifecycle,
+            default_id: self.default_id,
+            default_key: self.default_key,
+            tags: self.tags,
+            intrusive: self.intrusive,
+            pending_unbound: self.pending_unbound,
+        })
     }
 
     /// `DefaultedRegistry.getDefaultKey()`.
@@ -385,13 +768,34 @@ mod tests {
         ResourceKey::create_registry_key(Identifier::with_default_namespace("test"))
     }
 
+    fn other_key() -> RegistryKey<TestElement> {
+        ResourceKey::create_registry_key(Identifier::with_default_namespace("other"))
+    }
+
+    fn element_key_for(registry: &RegistryKey<TestElement>, id: &str) -> ResourceKey<TestElement> {
+        ResourceKey::create(registry, Identifier::with_default_namespace(id))
+    }
+
     fn element_key(id: &str) -> ResourceKey<TestElement> {
-        ResourceKey::create(&key(), Identifier::with_default_namespace(id))
+        element_key_for(&key(), id)
     }
 
     fn register(builder: &mut RegistryBuilder<TestElement>, id: &str, value: u8) {
         builder.register(
             &element_key(id),
+            Arc::new(TestElement(value)),
+            RegistrationInfo::BUILT_IN,
+        );
+    }
+
+    fn register_at(
+        builder: &mut RegistryBuilder<TestElement>,
+        registry: &RegistryKey<TestElement>,
+        id: &str,
+        value: u8,
+    ) {
+        builder.register(
+            &element_key_for(registry, id),
             Arc::new(TestElement(value)),
             RegistrationInfo::BUILT_IN,
         );
@@ -412,6 +816,260 @@ mod tests {
         let b = RegistryBuilder::<TestElement>::new(&key());
         assert_ne!(a.registry_id(), b.registry_id());
         assert_ne!(a.registry_id(), RegistryId(u32::MAX));
+    }
+
+    #[test]
+    fn transaction_transfers_identity_without_a_replacement_builder() {
+        let mut transaction = RegistryBuilder::<TestElement>::new(&key()).into_transaction();
+        register(transaction.builder_mut(), "existing", 7);
+        let registry_id = transaction.registry_id();
+        assert_eq!(transaction.freeze().registry_id(), registry_id);
+        let frozen = transaction.take_frozen();
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                transaction.builder_mut();
+            }))
+            .is_err()
+        );
+        transaction.adopt_frozen(frozen);
+        register(transaction.builder_mut(), "new", 8);
+        let final_registry = transaction.into_builder().freeze();
+        assert_eq!(final_registry.registry_id(), registry_id);
+        assert_eq!(final_registry.size(), 2);
+    }
+
+    #[test]
+    fn frozen_into_builder_preserves_intrusive_mode() {
+        let mut builder = RegistryBuilder::<TestElement>::new_with_intrusive(&key());
+        let first = Arc::new(TestElement(1));
+        builder.create_intrusive_holder(Arc::clone(&first));
+        builder.register(&element_key("first"), first, RegistrationInfo::BUILT_IN);
+
+        let mut builder = builder.freeze().into_builder();
+        let second = Arc::new(TestElement(2));
+        builder.create_intrusive_holder(Arc::clone(&second));
+        let second_id =
+            builder.register(&element_key("second"), second, RegistrationInfo::BUILT_IN);
+        assert_eq!(second_id, HolderId(1));
+        assert_eq!(builder.freeze().size(), 2);
+    }
+
+    #[test]
+    fn access_handoff_recovers_owner_after_early_return_and_panic() {
+        let mut transaction = RegistryBuilder::<TestElement>::new(&key()).into_transaction();
+        register(transaction.builder_mut(), "existing", 7);
+        let registry_id = transaction.registry_id();
+        {
+            let handoff = transaction.access_transaction();
+            assert_eq!(
+                handoff.access().lookup(&key()).unwrap().registry_id(),
+                registry_id
+            );
+            // An early return drops the handoff. Its borrowed transaction must
+            // regain the same frozen owner, not a replacement identity.
+        }
+        register(transaction.builder_mut(), "after_return", 8);
+
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _handoff = transaction.access_transaction();
+            panic!("decode failed");
+        }));
+        assert!(panic_result.is_err());
+        register(transaction.builder_mut(), "after_panic", 9);
+
+        let registry = transaction.into_builder().freeze();
+        assert_eq!(registry.registry_id(), registry_id);
+        assert_eq!(registry.size(), 3);
+    }
+
+    #[test]
+    fn cloned_temporary_access_does_not_strand_transaction_recovery() {
+        let mut transaction = RegistryBuilder::<TestElement>::new(&key()).into_transaction();
+        register(transaction.builder_mut(), "existing", 7);
+
+        let cloned_access = {
+            let handoff = transaction.access_transaction();
+            let cloned_access = handoff.access().clone();
+            drop(handoff);
+            cloned_access
+        };
+        // The clone deliberately outlives the handoff, so recovery is deferred
+        // rather than silently abandoning the transaction's owner.
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                transaction.builder_mut();
+            }))
+            .is_err()
+        );
+        drop(cloned_access);
+        register(transaction.builder_mut(), "after_clone", 8);
+        assert_eq!(transaction.into_builder().freeze().size(), 2);
+    }
+
+    #[test]
+    fn owner_handoff_can_take_registry_and_transfer_builder() {
+        let mut transaction = RegistryBuilder::<TestElement>::new(&key()).into_transaction();
+        register(transaction.builder_mut(), "existing", 7);
+        let registry_id = transaction.registry_id();
+
+        let mut handoff = transaction.access_transaction();
+        let registry = handoff
+            .take_registry(&key())
+            .expect("the owner handoff can take its registry");
+        assert_eq!(registry.registry_id(), registry_id);
+        drop(handoff);
+
+        let mut builder = registry.into_builder();
+        register(&mut builder, "after_owner_take", 8);
+        let registry = builder.freeze();
+        assert_eq!(registry.registry_id(), registry_id);
+        assert_eq!(registry.size(), 2);
+    }
+
+    #[test]
+    fn cloned_temporary_access_cannot_take_recoverable_registry() {
+        let mut transaction = RegistryBuilder::<TestElement>::new(&key()).into_transaction();
+        register(transaction.builder_mut(), "existing", 7);
+
+        let mut cloned_access = {
+            let handoff = transaction.access_transaction();
+            let cloned_access = handoff.access().clone();
+            drop(handoff);
+            cloned_access
+        };
+
+        // The clone is a non-owner view. It must not consume the entry and its
+        // deferred callback, because the transaction is still empty until the
+        // final view is dropped.
+        let error = cloned_access
+            .take_registry(&key())
+            .expect_err("a cloned handoff access cannot take its registry");
+        assert!(
+            error.contains("non-owner access"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                transaction.builder_mut();
+            }))
+            .is_err(),
+            "the transaction remains empty while the clone owns the entry"
+        );
+
+        drop(cloned_access);
+        register(transaction.builder_mut(), "after_clone_take_rejected", 8);
+        assert_eq!(transaction.into_builder().freeze().size(), 2);
+    }
+
+    #[test]
+    fn access_handoff_recovers_all_transaction_owners_after_panic() {
+        let mut first = RegistryBuilder::<TestElement>::new(&key()).into_transaction();
+        let mut second = RegistryBuilder::<TestElement>::new(&other_key()).into_transaction();
+        register(first.builder_mut(), "first", 7);
+        register_at(second.builder_mut(), &other_key(), "second", 8);
+        let first_id = first.registry_id();
+        let second_id = second.registry_id();
+
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut handoff = first.access_transaction();
+            handoff.add_transaction(&mut second);
+            assert_eq!(
+                handoff.access().lookup(&key()).unwrap().registry_id(),
+                first_id
+            );
+            assert_eq!(
+                handoff.access().lookup(&other_key()).unwrap().registry_id(),
+                second_id
+            );
+            panic!("decode failed");
+        }));
+        assert!(panic_result.is_err());
+
+        register(first.builder_mut(), "after_first", 9);
+        register_at(second.builder_mut(), &other_key(), "after_second", 10);
+        let first_registry = first.into_builder().freeze();
+        let second_registry = second.into_builder().freeze();
+        assert_eq!(first_registry.registry_id(), first_id);
+        assert_eq!(second_registry.registry_id(), second_id);
+        assert_eq!(first_registry.size(), 2);
+        assert_eq!(second_registry.size(), 2);
+    }
+
+    #[test]
+    fn duplicate_transaction_key_is_rejected_before_secondary_freeze() {
+        let mut first = RegistryBuilder::<TestElement>::new(&key()).into_transaction();
+        let mut second = RegistryBuilder::<TestElement>::new(&key()).into_transaction();
+        register(first.builder_mut(), "first", 7);
+        register(second.builder_mut(), "second", 8);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut handoff = first.access_transaction();
+            handoff.add_transaction(&mut second);
+        }));
+        assert!(result.is_err());
+
+        // The duplicate rejection was atomic: the secondary transaction is
+        // still mutable and can be completed independently.
+        register(second.builder_mut(), "after_reject", 9);
+        let second_registry = second.into_builder().freeze();
+        assert_eq!(second_registry.size(), 2);
+        assert_eq!(first.into_builder().freeze().size(), 1);
+    }
+
+    #[test]
+    fn transaction_freeze_validation_failure_preserves_pending_holders() {
+        let mut transaction = RegistryBuilder::<TestElement>::new(&key()).into_transaction();
+        let pending = element_key("never_registered");
+        transaction.builder_mut().get_or_create_holder(&pending);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            transaction.freeze();
+        }));
+        assert!(result.is_err());
+        // The same pending holder remains owned by the transaction and can be
+        // completed after the failed validation.
+        register(transaction.builder_mut(), "never_registered", 7);
+        let registry = transaction.into_builder().freeze();
+        assert_eq!(registry.get_value(&pending), Some(&TestElement(7)));
+    }
+
+    #[test]
+    fn transaction_freeze_validation_failure_preserves_intrusive_holders() {
+        let mut transaction =
+            RegistryBuilder::<TestElement>::new_with_intrusive(&key()).into_transaction();
+        let value = Arc::new(TestElement(7));
+        transaction
+            .builder_mut()
+            .create_intrusive_holder(Arc::clone(&value));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            transaction.freeze();
+        }));
+        assert!(result.is_err());
+        transaction.builder_mut().register(
+            &element_key("intrusive"),
+            value,
+            RegistrationInfo::BUILT_IN,
+        );
+        let registry = transaction.into_builder().freeze();
+        assert_eq!(
+            registry.get_value(&element_key("intrusive")),
+            Some(&TestElement(7))
+        );
+    }
+
+    #[test]
+    fn transaction_registration_failure_does_not_corrupt_owner() {
+        let mut transaction = RegistryBuilder::<TestElement>::new(&key()).into_transaction();
+        register(transaction.builder_mut(), "existing", 7);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            register(transaction.builder_mut(), "existing", 8);
+        }));
+        assert!(result.is_err());
+        let registry = transaction.into_builder().freeze();
+        assert_eq!(registry.size(), 1);
+        assert_eq!(
+            registry.get_value(&element_key("existing")),
+            Some(&TestElement(7))
+        );
     }
 
     #[test]
@@ -467,11 +1125,10 @@ mod tests {
     fn get_or_create_holder_registers_unbound_then_resolves() {
         let mut builder = RegistryBuilder::new(&key());
         let k = element_key("one");
-        let holder = builder.get_or_create_holder(&k);
-        assert_eq!(holder, HolderId(0));
+        let () = builder.get_or_create_holder(&k);
         // After registration the holder resolves to the element's id.
         register(&mut builder, "one", 1);
-        assert_eq!(builder.get_or_create_holder(&k), HolderId(0));
+        let () = builder.get_or_create_holder(&k);
         // A key that is registered never joins the unbound list.
         let frozen = builder.freeze();
         assert_eq!(frozen.get_value(&k), Some(&TestElement(1)));
@@ -484,7 +1141,7 @@ mod tests {
         // intrusive registry only creates holders from values, never from bare
         // keys — the unregistered-intrusive-holders guard throws.
         let mut builder = RegistryBuilder::new_with_intrusive(&key());
-        let _ = builder.get_or_create_holder(&element_key("one"));
+        builder.get_or_create_holder(&element_key("one"));
     }
 
     #[test]
@@ -508,9 +1165,8 @@ mod tests {
         // by `register` (`values.len()`), not by `create_intrusive_holder`.
         let mut builder = RegistryBuilder::new_with_intrusive(&key());
         let value = Arc::new(TestElement(7));
-        let placeholder = builder.create_intrusive_holder(value.clone());
-        // The placeholder carries no final id — only register's return matters.
-        assert_eq!(placeholder, HolderId(0));
+        builder.create_intrusive_holder(value.clone());
+        // Only register returns the final id.
         let registered = builder.register(
             &element_key("seven"),
             value.clone(),
@@ -533,12 +1189,8 @@ mod tests {
         let mut builder = RegistryBuilder::new_with_intrusive(&key());
         let a = Arc::new(TestElement(1));
         let b = Arc::new(TestElement(2));
-        let placeholder_a = builder.create_intrusive_holder(a.clone());
-        let placeholder_b = builder.create_intrusive_holder(b.clone());
-        // Both placeholders are equal (no id yet) — Java's `createIntrusiveHolder`
-        // returns an id-less `Holder.Reference`.
-        assert_eq!(placeholder_a, placeholder_b);
-        assert_eq!(placeholder_a, HolderId(0));
+        builder.create_intrusive_holder(a.clone());
+        builder.create_intrusive_holder(b.clone());
 
         let registered_a =
             builder.register(&element_key("a"), a.clone(), RegistrationInfo::BUILT_IN);
@@ -626,10 +1278,7 @@ mod tests {
         // the insertion index at register time. create(x); register(a);
         // register(x) => x -> 1, not 0.
         let mut builder = RegistryBuilder::new(&key());
-        let x = builder.get_or_create_holder(&element_key("x"));
-        // Placeholder equals 0 (values.len() at creation), but that is NOT the
-        // final id.
-        assert_eq!(x, HolderId(0));
+        let () = builder.get_or_create_holder(&element_key("x"));
         register(&mut builder, "a", 1);
         let registered_x = builder.register(
             &element_key("x"),
@@ -637,8 +1286,8 @@ mod tests {
             RegistrationInfo::BUILT_IN,
         );
         assert_eq!(registered_x, HolderId(1));
-        // get_or_create_holder now resolves to the registered id.
-        assert_eq!(builder.get_or_create_holder(&element_key("x")), HolderId(1));
+        // A registered key is no longer pending.
+        let () = builder.get_or_create_holder(&element_key("x"));
         let frozen = builder.freeze();
         assert_eq!(frozen.get_any(), Some(HolderId(0)));
         assert_eq!(frozen.by_id(1), Some(&TestElement(2)));
@@ -666,7 +1315,7 @@ mod tests {
     #[should_panic(expected = "This registry can't create intrusive holders")]
     fn non_intrusive_registry_rejects_intrusive_holders() {
         let mut builder = RegistryBuilder::<TestElement>::new(&key());
-        let _ = builder.create_intrusive_holder(Arc::new(TestElement(1)));
+        builder.create_intrusive_holder(Arc::new(TestElement(1)));
     }
 
     #[test]
@@ -693,16 +1342,26 @@ mod tests {
     }
 
     #[test]
-    fn get_or_create_holder_is_stable_for_an_unbound_key() {
+    fn pre_registration_holder_apis_do_not_return_stale_ids() {
         let mut builder = RegistryBuilder::new(&key());
         let k = element_key("one");
-        let first = builder.get_or_create_holder(&k);
-        // A repeat call returns the same provisional holder (computeIfAbsent),
-        // even if a new element was registered in between.
+        let () = builder.get_or_create_holder(&k);
+        // Registering another value first changes the eventual id of `one`,
+        // and no pre-registration snapshot can alias that id.
         register(&mut builder, "two", 2);
-        assert_eq!(builder.get_or_create_holder(&k), first);
-        // The key's provisional id stays its original value.len().
-        assert_eq!(first, HolderId(0));
+        let one_id = builder.register(&k, Arc::new(TestElement(1)), RegistrationInfo::BUILT_IN);
+        assert_eq!(one_id, HolderId(1));
+        let () = builder.get_or_create_holder(&k);
+
+        let mut intrusive = RegistryBuilder::new_with_intrusive(&key());
+        let a = Arc::new(TestElement(3));
+        let b = Arc::new(TestElement(4));
+        let () = intrusive.create_intrusive_holder(a.clone());
+        let () = intrusive.create_intrusive_holder(b.clone());
+        let b_id = intrusive.register(&element_key("b"), b, RegistrationInfo::BUILT_IN);
+        let a_id = intrusive.register(&element_key("a"), a, RegistrationInfo::BUILT_IN);
+        assert_eq!(b_id, HolderId(0));
+        assert_eq!(a_id, HolderId(1));
     }
 
     #[test]

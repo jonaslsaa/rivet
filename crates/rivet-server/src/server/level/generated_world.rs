@@ -40,13 +40,19 @@
 //! `ChunkGenerator.java` 97-100 — the 3x3 union only picks which feature
 //! indices execute per step). The generated feature tables cover EVERY
 //! overworld possible biome (55 — the full list, not the reachable subset),
-//! so the full list resolves and the run proceeds to the per-step loop. The
-//! lake, amethyst-geode, monster-room, and the Batch 2/3/4 dispatch leaves (ore,
+//! so the full list resolves. FEATURES only proceeds when the caller has
+//! supplied a proven structure-decoration capability; otherwise it returns
+//! `GenError::StructureDecorationIndexUnavailable` before feature RNG or
+//! placement. With that capability, the lake, amethyst-geode, monster-room,
+//! and the Batch 2/3/4 dispatch leaves (ore,
 //! disk, spring, simple_block, block_column, vines, seagrass, freeze_top_layer,
 //! underwater_magma, multiface_growth) are decoded from the generated JSON and
-//! run with their exact feature seeds; seed-42 `minecraft:glow_lichen` now
-//! executes, then the chunk stops at the next selected typed-unavailable path:
-//! `minecraft:dark_forest_vegetation` at step 9/global index 17.
+//! run with their exact feature seeds. The generated placed/configured closure
+//! resolves the random-selector root through the shared registries; Paper's
+//! seed-42 draw misses the 0.025 and 0.05 branches, then selects
+//! `minecraft:dark_oak_leaf_litter` at the 0.6666667 branch. Its supported
+//! placement chain then reaches the next honest boundary, the
+//! `minecraft:freeze_top_layer` world-state seam at step 10/global index 0.
 //! The chunk stays CARVERS. The INITIALIZE_LIGHT/
 //! LIGHT steps are executor-wired but engine-gated (the holder wires no light
 //! engine, so it cannot reach LIGHT). The public
@@ -92,8 +98,10 @@
 //! interior mutability is `RandomState`'s own uncontended noise cache), the
 //! holder and its `ProtoChunk` live on the sync tick thread by value.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use serde_json::Value;
@@ -113,22 +121,23 @@ use rivet_registry::generated::biomes::BIOME_BY_ID;
 use rivet_registry::generated::block_behaviors::{StaticCollisionBox, static_collision_shape_of};
 use rivet_registry::generated::blocks::BlockId;
 use rivet_registry::generated::feature_data::{
-    BIOME_GENERATION_SETTINGS_BY_NAME, CONFIGURED_FEATURE_BY_NAME, MOB_SPAWN_SETTINGS_BY_NAME,
-    PLACED_FEATURE_BY_NAME,
+    BIOME_GENERATION_SETTINGS_BY_NAME, CONFIGURED_FEATURE_BY_NAME, ConfiguredFeatureEntry,
+    MOB_SPAWN_SETTINGS_BY_NAME, PLACED_FEATURE_BY_NAME, PlacedFeatureEntry,
 };
 use rivet_registry::holder::Holder;
 use rivet_registry::holder::RegistryId;
 use rivet_registry::holder_lookup::HolderGetter;
+use rivet_registry::holder_set::HolderSet;
 use rivet_registry::registry_ops::RegistryOps;
 use rivet_registry::{Identifier, RegistrationInfo, ResourceKey};
-use rivet_serialization::codec::Codec;
+use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::json_ops::JsonOps;
 use rivet_util::StaticCache2D;
 use rivet_util::WorldgenRandom;
 use rivet_util::random::LegacyRandomSource;
 use rivet_util::random_source::XoroshiroRandomSource;
 use rivet_util::random_source::random_support;
-use rivet_util::weighted::WeightedRandom;
+use rivet_util::weighted::{Weighted, WeightedList, WeightedRandom};
 use rivet_util::{PositionalRandomFactory, RandomSource};
 use rivet_world::biome::BiomeManager;
 use rivet_world::biome::BiomeResolver;
@@ -154,22 +163,23 @@ use rivet_world::level::height_accessor::create as create_height_accessor;
 use rivet_world::level::{WorldBorderSettings, WorldGenLevel};
 use rivet_world::levelgen::blending::blender::Blender;
 use rivet_world::levelgen::feature::configurations::block_column_configuration::block_column_configuration_codec;
-use rivet_world::levelgen::feature::configurations::composite_feature_configuration::composite_feature_configuration_codec;
 use rivet_world::levelgen::feature::configurations::disk_configuration::disk_configuration_codec;
 use rivet_world::levelgen::feature::configurations::geode_configuration::geode_configuration_codec;
+use rivet_world::levelgen::feature::configurations::huge_mushroom_feature_configuration::huge_mushroom_feature_configuration_codec;
 use rivet_world::levelgen::feature::configurations::multiface_growth_configuration::multiface_growth_configuration_codec;
 use rivet_world::levelgen::feature::configurations::ore_configuration::ore_configuration_codec;
 use rivet_world::levelgen::feature::configurations::probability_feature_configuration::probability_feature_configuration_codec;
-use rivet_world::levelgen::feature::configurations::random_boolean_feature_configuration::random_boolean_feature_configuration_codec;
-use rivet_world::levelgen::feature::configurations::random_feature_configuration::random_feature_configuration_codec;
 use rivet_world::levelgen::feature::configurations::simple_block_configuration::simple_block_configuration_codec;
 use rivet_world::levelgen::feature::configurations::spring_configuration::spring_configuration_codec;
 use rivet_world::levelgen::feature::configurations::underwater_magma_configuration::underwater_magma_configuration_codec;
+use rivet_world::levelgen::feature::configurations::weighted_random_feature_configuration::WeightedRandomFeatureConfiguration;
 use rivet_world::levelgen::feature::configurations::{
-    FeatureConfiguration, NoneFeatureConfiguration,
+    CompositeFeatureConfiguration, FeatureConfiguration, NoneFeatureConfiguration,
+    RandomBooleanFeatureConfiguration, RandomFeatureConfiguration,
 };
 use rivet_world::levelgen::feature::lake_feature::lake_configuration_codec;
 use rivet_world::levelgen::feature::registry_keys::{CONFIGURED_FEATURE, PLACED_FEATURE};
+use rivet_world::levelgen::feature::weighted_placed_feature::WeightedPlacedFeature;
 use rivet_world::levelgen::feature::{
     ConfiguredFeatureErased, FeatureId, feature_id_from_registry_name,
 };
@@ -206,8 +216,7 @@ pub enum GeneratedChunkError {
     /// work. Naming the requested status makes the downstream boundary explicit.
     /// (A target through a light step with no engine is instead refused as
     /// `GenError::LightEngineMissing`, and the wired FEATURES rung stops at
-    /// the first selected path outside the decoded lake slice — see
-    /// [`GenerationChunkHolder::new`].)
+    /// its first typed generation boundary — see [`GenerationChunkHolder::new`].)
     UnsupportedStatus(ChunkStatus),
     /// The FULL conversion refused: the `LevelChunk` bridge rejected the proto.
     /// [`LevelChunkBridgeError::GeneratedStatusNotSpawn`] fires before the proto is consumed
@@ -452,6 +461,62 @@ impl SpawnRegionProtos {
     }
 }
 
+pub type FeatureWritebacks = Vec<(
+    ChunkPos,
+    ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+)>;
+
+/// The caller-owned FEATURES dependency workspace.
+///
+/// Paper's `WorldGenRegion` borrows scheduler-owned `GenerationChunkHolder`s;
+/// this standalone value layer has no live scheduler yet, so the caller can
+/// provide that ownership explicitly through this sync-thread workspace. A
+/// decoration pass reads snapshots of its ring chunks, then replaces every
+/// owned dependency entry atomically after the region completes. This preserves
+/// heightmap, post-processing, block-entity, and tick mutations even when they
+/// occur outside the block-state write radius. Failed passes never mutate this
+/// map.
+type OwnedDependencyChunks =
+    Rc<RefCell<HashMap<ChunkPos, ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>>>>;
+
+#[derive(Clone, Default)]
+pub struct FeatureWorkspace {
+    chunks: OwnedDependencyChunks,
+}
+
+impl FeatureWorkspace {
+    /// Create an empty scheduler-owned dependency workspace.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert or replace an authoritative generated dependency chunk.
+    pub fn insert(&self, chunk: ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>) {
+        let pos = chunk.get_pos();
+        self.chunks.borrow_mut().insert(pos, chunk);
+    }
+
+    /// Inspect one authoritative dependency chunk without exposing its map
+    /// borrow beyond the synchronous callback.
+    pub fn with_chunk<R>(
+        &self,
+        pos: ChunkPos,
+        f: impl FnOnce(Option<&ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>>) -> R,
+    ) -> R {
+        f(self.chunks.borrow().get(&pos))
+    }
+
+    /// Number of authoritative dependency chunks currently retained.
+    pub fn len(&self) -> usize {
+        self.chunks.borrow().len()
+    }
+
+    /// Whether this workspace has no authoritative dependency chunks.
+    pub fn is_empty(&self) -> bool {
+        self.chunks.borrow().is_empty()
+    }
+}
+
 /// The per-world OVERWORLD generator realization — `NoiseBasedChunkGenerator`
 /// resolved from the merged worldgen registries for a seed, plus the realized
 /// `RandomState` and overworld biome source.
@@ -472,6 +537,10 @@ pub struct OverworldGenerator {
     /// lookups Java's `addVanillaDecorations` performs. Stored alongside the
     /// random state it already shares the leak of (see [`OverworldGenerator::new`]).
     access: &'static RegistryAccess,
+    /// Paper's per-world `paperConfig().featureSeeds.features` overrides,
+    /// keyed by the configured feature resource key (`PlacedFeature.feature()`),
+    /// not by the surrounding placed-feature key.
+    feature_seeds: HashMap<String, i64>,
     /// The leaked feature `RegistryAccess` — the worldgen access composed with
     /// the frozen placed/configured-feature registries the seed-42 decoder and
     /// the selector/composite features resolve their recursive `Holder`
@@ -495,6 +564,13 @@ impl OverworldGenerator {
     /// router/sampler/surface system. The generator's settings holder is the
     /// resolved `overworld` value (Direct), matching the shell's value model.
     pub fn new(seed: i64) -> Self {
+        Self::new_with_feature_seeds(seed, HashMap::new())
+    }
+
+    /// Realize the OVERWORLD generator with Paper's per-configured-feature
+    /// population-seed overrides. A value of `-1` has Paper's sentinel meaning:
+    /// retain the ordinary decoration seed and consume no extra draws.
+    pub fn new_with_feature_seeds(seed: i64, feature_seeds: HashMap<String, i64>) -> Self {
         let access: &'static RegistryAccess = Box::leak(Box::new(build_worldgen_registries()));
         let random_state: &'static RandomState<'static> = Box::leak(Box::new(
             RandomState::create_from_provider(access, &OVERWORLD, seed),
@@ -514,6 +590,7 @@ impl OverworldGenerator {
             random_state,
             biome_source: OverworldNoiseBiomeSource::new(random_state),
             access,
+            feature_seeds,
             feature_access,
             seed,
             feature_plan: OnceLock::new(),
@@ -587,9 +664,57 @@ impl OverworldGenerator {
 
     /// Create a generation holder for `pos`, wiring the BIOMES→NOISE executor
     /// closures over the shared worldgen objects (`self` is `Arc`-shared so the
-    /// `'static` closures capture a cheap clone).
+    /// `'static` closures capture a cheap clone). Structure decoration is not
+    /// available in this value layer, so FEATURES refuses before feature RNG
+    /// unless the caller supplies the consumed per-step index explicitly.
     pub fn create_holder(self: &Arc<Self>, pos: ChunkPos) -> GenerationChunkHolder {
         GenerationChunkHolder::new(pos, Arc::clone(self))
+    }
+
+    /// Create a holder with an explicitly proven number of structure decoration
+    /// entries consumed before placed-feature work in every decoration step.
+    /// `Some(0)` is valid only for a caller that has established that no
+    /// structures run for this chunk; `None` preserves the typed unavailable
+    /// boundary and performs no feature RNG or placement.
+    pub fn create_holder_with_structure_feature_count(
+        self: &Arc<Self>,
+        pos: ChunkPos,
+        structure_feature_count: Option<usize>,
+    ) -> GenerationChunkHolder {
+        GenerationChunkHolder::new_with_structure_feature_count(
+            pos,
+            Arc::clone(self),
+            structure_feature_count,
+        )
+    }
+
+    /// Create a holder attached to caller-owned dependency chunks. Holders
+    /// sharing one workspace observe successful FEATURES writes exactly as the
+    /// scheduler's shared `GenerationChunkHolder`s would.
+    pub fn create_holder_with_workspace(
+        self: &Arc<Self>,
+        pos: ChunkPos,
+        feature_workspace: FeatureWorkspace,
+    ) -> GenerationChunkHolder {
+        GenerationChunkHolder::new_with_workspace(pos, Arc::clone(self), feature_workspace)
+    }
+
+    /// Create a workspace-backed holder with an explicitly proven structure
+    /// decoration capability. The supplied count is a capability proof for the
+    /// unported structure loop; it does not alter Paper's independent placed-
+    /// feature `globalIndexOfFeature` seed.
+    pub fn create_holder_with_workspace_and_structure_feature_count(
+        self: &Arc<Self>,
+        pos: ChunkPos,
+        feature_workspace: FeatureWorkspace,
+        structure_feature_count: Option<usize>,
+    ) -> GenerationChunkHolder {
+        GenerationChunkHolder::new_with_workspace_and_structure_feature_count(
+            pos,
+            Arc::clone(self),
+            feature_workspace,
+            structure_feature_count,
+        )
     }
 }
 
@@ -720,6 +845,12 @@ pub struct GenerationChunkHolder {
     /// the same source of truth as the executor closure, without reaching into
     /// the closure or introducing shared game-state locks.
     generator: Arc<OverworldGenerator>,
+    /// Successful FEATURES decoration retains a diagnostic copy of the
+    /// concrete distance-1 writebacks. The authoritative copies live in
+    /// `feature_workspace` and therefore outlive the temporary region.
+    feature_writebacks: FeatureWritebacks,
+    pending_feature_writebacks: Rc<RefCell<Option<FeatureWritebacks>>>,
+    feature_workspace: FeatureWorkspace,
 }
 
 impl GenerationChunkHolder {
@@ -735,7 +866,10 @@ impl GenerationChunkHolder {
     /// center-chunk loop — see the noisegen driver's doc for the deferred
     /// `WorldGenRegion`/`StructureManager` seams); the FEATURES body starts
     /// Java's `ChunkStatusTasks.generateFeatures` — `run_biome_decoration`
-    /// runs `addVanillaDecorations` faithfully: the `FINAL_HEIGHTMAPS`
+    /// first requires the caller-proven structure-decoration capability and
+    /// otherwise refuses before mutating the center or feature RNG. With that
+    /// capability, it runs `addVanillaDecorations` faithfully: the
+    /// `FINAL_HEIGHTMAPS`
     /// priming, the decoration-seed derivation, a dependency-window composition (`compose_feature_region`: a
     /// `WorldGenRegion` that borrows the center chunk and owns the 17x17
     /// FEATURES cache (288 ring holders, with CARVERS at distances 0/1 and
@@ -743,10 +877,58 @@ impl GenerationChunkHolder {
     /// gather + `retainAll` — and then decodes and runs the registry-backed
     /// lake, amethyst-geode, monster-room, underwater_magma, and glow_lichen
     /// paths at their exact feature seeds before stopping at the first selected
-    /// unsupported path (seed-42 chunk (0,0):
-    /// `minecraft:dark_forest_vegetation` at step 9/global 17); the chunk stays
+    /// unsupported path (seed-42 chunk (0,0): the selector chooses
+    /// `minecraft:freeze_top_layer` at step 10/global 0); the chunk stays
     /// CARVERS.
     pub fn new(pos: ChunkPos, generator: Arc<OverworldGenerator>) -> Self {
+        Self::new_with_workspace_and_structure_feature_count(
+            pos,
+            generator,
+            FeatureWorkspace::new(),
+            None,
+        )
+    }
+
+    /// Create a holder with an explicitly proven structure decoration
+    /// capability. `None` is the normal production value and is a typed
+    /// FEATURES boundary; `Some(_)` is reserved for a caller that has
+    /// established the structure loop's availability for this chunk.
+    pub fn new_with_structure_feature_count(
+        pos: ChunkPos,
+        generator: Arc<OverworldGenerator>,
+        structure_feature_count: Option<usize>,
+    ) -> Self {
+        Self::new_with_workspace_and_structure_feature_count(
+            pos,
+            generator,
+            FeatureWorkspace::new(),
+            structure_feature_count,
+        )
+    }
+
+    /// Create a holder whose FEATURES dependency chunks are persisted in the
+    /// caller-owned workspace after successful decoration.
+    pub fn new_with_workspace(
+        pos: ChunkPos,
+        generator: Arc<OverworldGenerator>,
+        feature_workspace: FeatureWorkspace,
+    ) -> Self {
+        Self::new_with_workspace_and_structure_feature_count(
+            pos,
+            generator,
+            feature_workspace,
+            None,
+        )
+    }
+
+    /// Create a workspace-backed holder with an explicitly proven structure
+    /// decoration capability.
+    pub fn new_with_workspace_and_structure_feature_count(
+        pos: ChunkPos,
+        generator: Arc<OverworldGenerator>,
+        feature_workspace: FeatureWorkspace,
+        structure_feature_count: Option<usize>,
+    ) -> Self {
         let height_accessor = create_height_accessor(
             generator.generator().get_min_y(),
             generator.generator().get_gen_depth(),
@@ -768,6 +950,7 @@ impl GenerationChunkHolder {
             BlockState::of(BlockId(794)),
             &resolve_state_flags,
         );
+        let pending_feature_writebacks = Rc::new(RefCell::new(None));
         let context = WorldGenContext::new(
             {
                 let generator = Arc::clone(&generator);
@@ -856,14 +1039,27 @@ impl GenerationChunkHolder {
                 // registry-backed lake, amethyst-geode, monster-room,
                 // underwater_magma, and glow_lichen entries before failing
                 // typed at the first selected unsupported path
-                // (`minecraft:dark_forest_vegetation`, step 9/global 17).
+                // (`minecraft:freeze_top_layer`, step 10/global 0 after selector dispatch).
                 // It must never be "improved" into a silent skip or a blanket
                 // UnsupportedTask.
                 // The closure captures one generator clone; the holder keeps
                 // one additional handle for the shared SPAWN-region API.
                 let generator = Arc::clone(&generator);
+                let writeback_sink = Rc::clone(&pending_feature_writebacks);
+                let feature_workspace = feature_workspace.clone();
                 move |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
-                    run_biome_decoration(chunk, &generator)
+                    match run_biome_decoration(
+                        chunk,
+                        &generator,
+                        &feature_workspace,
+                        structure_feature_count,
+                    ) {
+                        Ok(writebacks) => {
+                            *writeback_sink.borrow_mut() = Some(writebacks);
+                            Ok(())
+                        }
+                        Err(error) => Err(error),
+                    }
                 }
             },
         );
@@ -879,6 +1075,9 @@ impl GenerationChunkHolder {
             context,
             features_failure: None,
             generator,
+            feature_writebacks: Vec::new(),
+            pending_feature_writebacks,
+            feature_workspace,
         }
     }
 
@@ -890,10 +1089,23 @@ impl GenerationChunkHolder {
     /// the FeatureSorter, decodes and runs the registry-backed lake, geode,
     /// monster-room, underwater_magma, and glow_lichen paths, and then fails
     /// typed at the first selected unsupported path (`FeaturePlacementDecode`,
-    /// seed-42: `minecraft:dark_forest_vegetation` at step 9/global 17), so the
+    /// seed-42: `minecraft:freeze_top_layer` at step 10/global 0 after selector dispatch), so the
     /// chunk is never stamped FEATURES.
     pub fn status(&self) -> ChunkStatus {
         self.chunk.get_persisted_status()
+    }
+
+    /// Consume the successful FEATURES dependency writebacks in canonical
+    /// distance-1 order. Failed or not-yet-run FEATURES passes return an empty
+    /// vector; the center chunk remains owned by this holder.
+    pub fn take_feature_writebacks(&mut self) -> FeatureWritebacks {
+        std::mem::take(&mut self.feature_writebacks)
+    }
+
+    /// The caller-owned dependency workspace used by this holder's FEATURES
+    /// pass. It can be shared with neighboring holders on the sync tick thread.
+    pub fn feature_workspace(&self) -> FeatureWorkspace {
+        self.feature_workspace.clone()
     }
 
     /// Drive the chunk from its current persisted status through `target`
@@ -946,24 +1158,34 @@ impl GenerationChunkHolder {
             .context
             .generate_through(&GENERATION_PYRAMID, &mut self.chunk, target);
         match result {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                if features_snapshot.is_some() {
+                    self.feature_writebacks = self
+                        .pending_feature_writebacks
+                        .borrow_mut()
+                        .take()
+                        .unwrap_or_default();
+                }
+                Ok(())
+            }
             Err(GenError::UnsupportedStatus(status)) => {
+                self.pending_feature_writebacks.borrow_mut().take();
                 Err(GeneratedChunkError::UnsupportedStatus(status))
             }
             Err(error) => {
-                // A FEATURES body can place real data before it reaches its
-                // typed boundary. The status deliberately remains CARVERS, so
-                // cache that terminal boundary and make later attempts return
-                // the same error without repeating placement against the
-                // partially realized proto.
-                if is_features_failure(error)
-                    && self.chunk.get_persisted_status() == ChunkStatus::Carvers
-                    && target.index() >= ChunkStatus::Features.index()
-                {
-                    if let Some(snapshot) = features_snapshot {
-                        self.chunk = snapshot;
+                self.pending_feature_writebacks.borrow_mut().take();
+                // A direct FEATURES request is transactional from the
+                // caller's starting status through the entire path. Restore
+                // whenever that path had a snapshot, even for a non-cacheable
+                // error: lower-rung work must not leak merely because the
+                // FEATURES body returned a different typed failure. Cache only
+                // the stable FEATURES boundary errors, so retries do not replay
+                // a partially mutated decoration attempt.
+                if let Some(snapshot) = features_snapshot {
+                    self.chunk = snapshot;
+                    if is_features_failure(error) {
+                        self.features_failure = Some(error);
                     }
-                    self.features_failure = Some(error);
                 }
                 Err(GeneratedChunkError::Generation(error))
             }
@@ -1213,13 +1435,18 @@ fn generate_ring_chunk(
 ///
 /// The per-step loop runs the union's placed features in global-index order,
 /// executing decoded lake, amethyst-geode, monster-room, underwater_magma, and
-/// glow_lichen leaves with their exact feature seeds. It fails typed
-/// (`GenError::FeaturePlacementDecode`) at the first unsupported selected
-/// feature — seed-42 chunk (0,0), step 9/global index 17:
-/// `minecraft:dark_forest_vegetation`. The generated settings tables are the
-/// full 55-biome surface (no `SettingsNotGenerated`), so this boundary is
-/// reached deterministically every run. No biome is fabricated or silently
-/// skipped.
+/// glow_lichen leaves with their exact feature seeds. On seed-42 chunk (0,0),
+/// step 9/global index 17's `dark_forest_vegetation` parent selects no position:
+/// all 16 count/in-square candidates fail its max-depth-zero water filter, so
+/// the run reaches `minecraft:freeze_top_layer` at step 10/global index 0, whose
+/// biome `shouldFreeze` world-state seam is not yet implemented. A separate
+/// tree-bearing seed-42 chunk (4,4) does reach the same outer step-9/global-17
+/// parent; its selector falls through to `oak_leaf_litter`, whose
+/// `would_survive` state is the current unsupported `oak_sapling` seam. The
+/// typed error names the outer placed feature in both cases. The generated
+/// settings tables are the full 55-biome surface (no `SettingsNotGenerated`),
+/// so these boundaries are reached without fabricated or silently skipped
+/// features.
 ///
 /// Compose the FEATURES `WorldGenRegion` over the complete accumulated
 /// dependency window of the FEATURES step. Paper's direct dependencies are
@@ -1227,9 +1454,22 @@ fn generate_ring_chunk(
 /// distance 8, so the cache is 17x17. The decoration biome union reads only
 /// the center 3x3, but placement and worldgen reads are bounded by the full
 /// status contract and must not be backed by an undersized cache.
+#[cfg_attr(not(test), allow(dead_code))]
 fn compose_feature_region<'a>(
     chunk: &'a mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
     generator: &Arc<OverworldGenerator>,
+) -> WorldGenRegion<'a, BlockState, WorldgenBiomeId, StructureKey> {
+    compose_feature_region_with_workspace(chunk, generator, None)
+}
+
+/// Compose a FEATURES region over snapshots of the caller-owned dependency
+/// workspace. The snapshots make the region transactional: no workspace entry
+/// is changed until the decoration pass succeeds, while successful owned proto
+/// values can be moved back into the authoritative workspace.
+fn compose_feature_region_with_workspace<'a>(
+    chunk: &'a mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+    generator: &Arc<OverworldGenerator>,
+    workspace: Option<&FeatureWorkspace>,
 ) -> WorldGenRegion<'a, BlockState, WorldgenBiomeId, StructureKey> {
     let center_pos = chunk.get_pos();
     let center_status = chunk.get_persisted_status();
@@ -1257,19 +1497,38 @@ fn compose_feature_region<'a>(
             }
             let distance = dx.abs().max(dz.abs()) as usize;
             let status = dependencies.get(distance);
+            // A workspace entry is copied before the region can mutate it. The
+            // copy preserves every represented ProtoChunk field, including
+            // heightmaps, post-processing, block entities, and scheduled ticks.
+            // Entries retained by a neighboring center may sit below this
+            // slot's required status (a distance-two StructureStarts
+            // placeholder can land in a distance-one Carvers slot); Paper's
+            // scheduler never hands a decoration pass an under-generated
+            // dependency, so stale lower-status entries are regenerated
+            // exactly like absent ones instead of being silently reused.
+            let existing = workspace.and_then(|workspace| {
+                workspace.with_chunk(pos, |chunk| {
+                    chunk
+                        .filter(|chunk| chunk.get_persisted_status().is_or_after(status))
+                        .map(snapshot_generated_chunk)
+                })
+            });
             match status {
                 ChunkStatus::Carvers => {
-                    holders.push(Box::new(OwnedProtoHolder::new(generate_ring_chunk(
-                        pos, generator,
-                    ))));
+                    holders.push(Box::new(OwnedProtoHolder::new(
+                        existing.unwrap_or_else(|| generate_ring_chunk(pos, generator)),
+                    )));
                 }
                 ChunkStatus::StructureStarts => {
-                    let mut structure_chunk = fresh_worldgen_chunk(pos, generator);
-                    // `ChunkStatusTasks.generateFeatures` primes the final
-                    // maps before decoration, and every dependency chunk must
-                    // carry those persisted maps when the region reads it.
-                    structure_chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
-                    structure_chunk.set_persisted_status(ChunkStatus::StructureStarts);
+                    let structure_chunk = existing.unwrap_or_else(|| {
+                        let mut chunk = fresh_worldgen_chunk(pos, generator);
+                        // `ChunkStatusTasks.generateFeatures` primes the final
+                        // maps before decoration, and every dependency chunk
+                        // must carry those persisted maps when the region reads it.
+                        chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
+                        chunk.set_persisted_status(ChunkStatus::StructureStarts);
+                        chunk
+                    });
                     holders.push(Box::new(OwnedProtoHolder::new(structure_chunk)));
                 }
                 other => {
@@ -1285,8 +1544,8 @@ fn compose_feature_region<'a>(
         Box::new(CenterHolder::new(chunk.base_mut(), center_status)),
     );
     let cache = StaticCache2D::from_entries(
-        center_pos.x() - radius,
-        center_pos.z() - radius,
+        center_pos.x().wrapping_sub(radius),
+        center_pos.z().wrapping_sub(radius),
         width,
         width,
         holders,
@@ -1300,7 +1559,7 @@ fn compose_feature_region<'a>(
         generator.generator().get_gen_depth(),
         generator.generator().get_sea_level(),
         Arc::new(generator.biome_source.clone()),
-        generator.registry_access().clone(),
+        generator.feature_access().clone(),
     )
 }
 
@@ -1402,23 +1661,37 @@ fn resolve_feature_settings(
 
 type FeatureOps = RegistryOps<Value, JsonOps>;
 
+/// A generated configured feature whose registered feature type is known but
+/// whose concrete configuration unit has not landed yet. It is a real registry
+/// value, not a selector fallback: named and inline holders resolve normally,
+/// and selecting this value refuses at the feature dispatch boundary.
+#[derive(Debug)]
+struct DeferredGeneratedFeatureConfiguration {
+    configured_key: String,
+}
+
+impl FeatureConfiguration for DeferredGeneratedFeatureConfiguration {
+    fn unavailable_feature(&self) -> Option<&str> {
+        Some(&self.configured_key)
+    }
+}
+
 /// The shared seed-42 feature `RegistryAccess` — the worldgen access composed
 /// with the frozen placed/configured-feature registries the decoder and the
 /// selector/composite features resolve their recursive `Holder` references
 /// through.
 ///
-/// The two feature registries are frozen up front (empty, present): the
-/// `RegistryFileCodec` holder codecs the Batch 2 selectors and the biome
-/// generation settings route through require the registry to *exist* in the
-/// decode ops to resolve even an inline `Direct` placed/configured holder, and
-/// the runtime `place_with_biome_check` path resolves `Holder::Reference` ids
-/// against the owning registry. The shared freeze means both the decode ops
-/// (`RegistryOps::create_from_access`) and the `WorldGenLevel::registry_access`
-/// back-reference observe the same registry ids — the `#181` back-reference
-/// rule that keeps a decoded `Reference` resolvable at placement time.
+/// The two feature registries are built as one generated closure, not as
+/// empty placeholders. The generated ids are full registry ids (not PHF map
+/// iteration order); synthetic gap values preserve those ids, and the final
+/// values keep the same registry identities the temporary `RegistryOps` decode
+/// used. One-owner transactions are necessary because placed and configured
+/// features are mutually recursive; they are adopted only after the temporary
+/// access is fully dropped, so a decode failure cannot publish a partially
+/// populated access into the world.
 fn build_feature_access(worldgen: &RegistryAccess) -> RegistryAccess {
-    let placed = RegistryBuilder::new(&*PLACED_FEATURE).freeze();
-    let configured = RegistryBuilder::new(&*CONFIGURED_FEATURE).freeze();
+    let (placed, configured) = build_generated_feature_closure(worldgen)
+        .unwrap_or_else(|error| panic!("generated feature closure refused atomically: {error}"));
     let feature_layer = RegistryAccess::from_pairs(vec![
         (
             ResourceKey::create_registry_key(Identifier::with_default_namespace(
@@ -1442,6 +1715,531 @@ fn build_feature_access(worldgen: &RegistryAccess) -> RegistryAccess {
         .replace_from(RegistryLayer::Static, &[feature_layer])
         .replace_from(RegistryLayer::Worldgen, std::slice::from_ref(worldgen))
         .composite_access()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum GeneratedFeatureNode {
+    Placed(&'static str),
+    Configured(&'static str),
+}
+
+fn sorted_placed_feature_entries()
+-> Result<Vec<(&'static str, &'static PlacedFeatureEntry)>, String> {
+    let mut entries: Vec<_> = PLACED_FEATURE_BY_NAME
+        .entries()
+        .map(|(name, entry)| (*name, entry))
+        .collect();
+    entries.sort_unstable_by_key(|(_, entry)| entry.id);
+    for ((previous_name, previous), (name, entry)) in entries.iter().zip(entries.iter().skip(1)) {
+        if previous.id == entry.id {
+            return Err(format!(
+                "placed features {previous_name} and {name} share generated id {}",
+                entry.id
+            ));
+        }
+    }
+    Ok(entries)
+}
+
+fn sorted_configured_feature_entries()
+-> Result<Vec<(&'static str, &'static ConfiguredFeatureEntry)>, String> {
+    let mut entries: Vec<_> = CONFIGURED_FEATURE_BY_NAME
+        .entries()
+        .map(|(name, entry)| (*name, entry))
+        .collect();
+    entries.sort_unstable_by_key(|(_, entry)| entry.id);
+    for ((previous_name, previous), (name, entry)) in entries.iter().zip(entries.iter().skip(1)) {
+        if previous.id == entry.id {
+            return Err(format!(
+                "configured features {previous_name} and {name} share generated id {}",
+                entry.id
+            ));
+        }
+    }
+    Ok(entries)
+}
+
+fn placed_name_slots(
+    entries: &[(&'static str, &'static PlacedFeatureEntry)],
+) -> Vec<Option<&'static str>> {
+    let mut slots = vec![None; entries.last().map_or(0, |(_, entry)| entry.id as usize + 1)];
+    for &(name, entry) in entries {
+        slots[entry.id as usize] = Some(name);
+    }
+    slots
+}
+
+fn configured_name_slots(
+    entries: &[(&'static str, &'static ConfiguredFeatureEntry)],
+) -> Vec<Option<&'static str>> {
+    let mut slots = vec![None; entries.last().map_or(0, |(_, entry)| entry.id as usize + 1)];
+    for &(name, entry) in entries {
+        slots[entry.id as usize] = Some(name);
+    }
+    slots
+}
+
+#[derive(Clone, Copy, Debug)]
+enum GeneratedHolderKind {
+    Placed,
+    Configured,
+}
+
+fn generated_placed_node(name: &str) -> Option<GeneratedFeatureNode> {
+    PLACED_FEATURE_BY_NAME
+        .entries()
+        .find(|(candidate, _)| **candidate == name)
+        .map(|(candidate, _)| GeneratedFeatureNode::Placed(candidate))
+}
+
+fn generated_configured_node(name: &str) -> Option<GeneratedFeatureNode> {
+    CONFIGURED_FEATURE_BY_NAME
+        .entries()
+        .find(|(candidate, _)| **candidate == name)
+        .map(|(candidate, _)| GeneratedFeatureNode::Configured(candidate))
+}
+
+/// Add a named holder edge, preserving the registry type encoded by the holder
+/// position. Inline values are walked recursively instead of being treated as
+/// registry names. This is deliberately not a generic JSON string walk: block
+/// names, provider types, tags, placement metadata, and other resource strings
+/// are not feature-holder references.
+fn generated_named_holder(
+    value: &Value,
+    kind: GeneratedHolderKind,
+    out: &mut Vec<GeneratedFeatureNode>,
+    context: &str,
+) -> Result<(), String> {
+    let name = value
+        .as_str()
+        .ok_or_else(|| format!("{context} holder must be a name or inline object"))?;
+    let node = match kind {
+        GeneratedHolderKind::Placed => generated_placed_node(name),
+        GeneratedHolderKind::Configured => generated_configured_node(name),
+    };
+    out.push(node.ok_or_else(|| {
+        let registry = match kind {
+            GeneratedHolderKind::Placed => "placed",
+            GeneratedHolderKind::Configured => "configured",
+        };
+        format!("{context} references missing {registry} feature {name}")
+    })?);
+    Ok(())
+}
+
+/// Walk a `Holder<PlacedFeature>` encoded by `PlacedFeature.CODEC`. Its inline
+/// form is `{feature: <Holder<ConfiguredFeature>>, placement: [...]}`. The
+/// placement list is intentionally opaque; Paper's `ConfiguredFeature` closure
+/// only follows the placed feature's configured-feature holder.
+fn generated_placed_holder(
+    value: &Value,
+    out: &mut Vec<GeneratedFeatureNode>,
+    context: &str,
+) -> Result<(), String> {
+    if value.is_string() {
+        return generated_named_holder(value, GeneratedHolderKind::Placed, out, context);
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{context} placed holder must be a name or object"))?;
+    let feature = object
+        .get("feature")
+        .ok_or_else(|| format!("{context} inline placed holder has no feature"))?;
+    if !object.contains_key("placement") {
+        return Err(format!("{context} inline placed holder has no placement"));
+    }
+    generated_configured_holder(feature, out, &format!("{context}.feature"))
+}
+
+/// Walk a `Holder<ConfiguredFeature>` encoded by `ConfiguredFeature.CODEC`.
+/// Named holders become graph nodes; inline configured values are traversed by
+/// their concrete configuration shape without inventing a registry node.
+fn generated_configured_holder(
+    value: &Value,
+    out: &mut Vec<GeneratedFeatureNode>,
+    context: &str,
+) -> Result<(), String> {
+    if value.is_string() {
+        return generated_named_holder(value, GeneratedHolderKind::Configured, out, context);
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{context} configured holder must be a name or object"))?;
+    generated_configured_object(object, out, context)
+}
+
+fn generated_feature_array<'a>(
+    value: &'a Value,
+    context: &str,
+    field: &str,
+) -> Result<&'a [Value], String> {
+    value
+        .as_array()
+        .map(Vec::as_slice)
+        .ok_or_else(|| format!("{context} {field} must be an array"))
+}
+
+/// Follow exactly the generated configuration shapes whose Paper value types
+/// expose configured-feature sub-features (the selector families), plus the
+/// vegetation-patch and root-system holders used by the generated corpus. All
+/// other config data is feature-local and must not be recursively interpreted
+/// as holders.
+///
+/// This entry point receives the complete configured-feature object, including
+/// its root `type` and `config` fields. Keeping that boundary explicit prevents
+/// callers from accidentally walking an object while skipping its configuration.
+fn generated_holder_refs(
+    object: &serde_json::Map<String, Value>,
+    out: &mut Vec<GeneratedFeatureNode>,
+    context: &str,
+) -> Result<(), String> {
+    let feature_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{context} inline configured feature has no type"))?;
+    let config = object
+        .get("config")
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("{context} inline configured feature has no object config"))?;
+    let mut holder = |value: &Value, field: &str| {
+        generated_placed_holder(value, out, &format!("{context} {field}"))
+    };
+    match feature_type {
+        "minecraft:random_selector" => {
+            for (index, entry) in generated_feature_array(
+                config
+                    .get("features")
+                    .ok_or_else(|| format!("{context} has no features list"))?,
+                context,
+                "features",
+            )?
+            .iter()
+            .enumerate()
+            {
+                let feature = entry
+                    .get("feature")
+                    .ok_or_else(|| format!("{context} features[{index}] has no feature"))?;
+                holder(feature, &format!("features[{index}].feature"))?;
+            }
+            holder(
+                config
+                    .get("default")
+                    .ok_or_else(|| format!("{context} has no default"))?,
+                "default",
+            )?;
+        }
+        "minecraft:random_boolean_selector" => {
+            holder(
+                config
+                    .get("feature_true")
+                    .ok_or_else(|| format!("{context} has no feature_true"))?,
+                "feature_true",
+            )?;
+            holder(
+                config
+                    .get("feature_false")
+                    .ok_or_else(|| format!("{context} has no feature_false"))?,
+                "feature_false",
+            )?;
+        }
+        "minecraft:simple_random_selector" | "minecraft:sequence" => {
+            for (index, feature) in generated_feature_array(
+                config
+                    .get("features")
+                    .ok_or_else(|| format!("{context} has no features list"))?,
+                context,
+                "features",
+            )?
+            .iter()
+            .enumerate()
+            {
+                holder(feature, &format!("features[{index}]"))?;
+            }
+        }
+        "minecraft:weighted_random_selector" => {
+            for (index, entry) in generated_feature_array(
+                config
+                    .get("features")
+                    .ok_or_else(|| format!("{context} has no features list"))?,
+                context,
+                "features",
+            )?
+            .iter()
+            .enumerate()
+            {
+                let data = entry
+                    .get("data")
+                    .ok_or_else(|| format!("{context} features[{index}] has no data"))?;
+                holder(data, &format!("features[{index}].data"))?;
+            }
+        }
+        "minecraft:vegetation_patch" | "minecraft:waterlogged_vegetation_patch" => {
+            holder(
+                config
+                    .get("vegetation_feature")
+                    .ok_or_else(|| format!("{context} has no vegetation_feature"))?,
+                "vegetation_feature",
+            )?;
+        }
+        "minecraft:root_system" => {
+            holder(
+                config
+                    .get("feature")
+                    .ok_or_else(|| format!("{context} has no feature"))?,
+                "feature",
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Compatibility-named wrapper for inline configured holders. Both inline and
+/// named registry entries use the same complete `{type, config}` traversal.
+fn generated_configured_object(
+    object: &serde_json::Map<String, Value>,
+    out: &mut Vec<GeneratedFeatureNode>,
+    context: &str,
+) -> Result<(), String> {
+    generated_holder_refs(object, out, context)
+}
+
+fn generated_feature_edges(
+    node: GeneratedFeatureNode,
+) -> Result<Vec<GeneratedFeatureNode>, String> {
+    match node {
+        GeneratedFeatureNode::Placed(name) => {
+            let entry = PLACED_FEATURE_BY_NAME
+                .get(name)
+                .ok_or_else(|| format!("missing generated placed feature {name}"))?;
+            let json: Value = serde_json::from_str(entry.json)
+                .map_err(|error| format!("decode {name} JSON: {error}"))?;
+            let object = json
+                .as_object()
+                .ok_or_else(|| format!("{name} JSON must be an object"))?;
+            let configured = object
+                .get("feature")
+                .ok_or_else(|| format!("{name} JSON has no configured feature"))?;
+            let mut refs = Vec::new();
+            generated_configured_holder(configured, &mut refs, name)?;
+            Ok(refs)
+        }
+        GeneratedFeatureNode::Configured(name) => {
+            let entry = CONFIGURED_FEATURE_BY_NAME
+                .get(name)
+                .ok_or_else(|| format!("missing generated configured feature {name}"))?;
+            let json: Value = serde_json::from_str(entry.json)
+                .map_err(|error| format!("decode {name} JSON: {error}"))?;
+            let object = json
+                .as_object()
+                .ok_or_else(|| format!("{name} JSON must be an object"))?;
+            let mut refs = Vec::new();
+            generated_holder_refs(object, &mut refs, name)?;
+            Ok(refs)
+        }
+    }
+}
+
+fn validate_generated_feature_graph(
+    roots: impl IntoIterator<Item = GeneratedFeatureNode>,
+    edges: &mut dyn FnMut(GeneratedFeatureNode) -> Result<Vec<GeneratedFeatureNode>, String>,
+) -> Result<(), String> {
+    fn walk(
+        node: GeneratedFeatureNode,
+        state: &mut HashMap<GeneratedFeatureNode, u8>,
+        path: &mut Vec<GeneratedFeatureNode>,
+        edges: &mut dyn FnMut(GeneratedFeatureNode) -> Result<Vec<GeneratedFeatureNode>, String>,
+    ) -> Result<(), String> {
+        match state.get(&node).copied() {
+            Some(2) => return Ok(()),
+            Some(1) => {
+                return Err(format!(
+                    "generated feature closure cycle at {node:?} via {path:?}"
+                ));
+            }
+            _ => {}
+        }
+        state.insert(node, 1);
+        path.push(node);
+        for edge in edges(node)? {
+            walk(edge, state, path, edges)?;
+        }
+        path.pop();
+        state.insert(node, 2);
+        Ok(())
+    }
+
+    let mut state = HashMap::new();
+    let mut path = Vec::new();
+    for root in roots {
+        walk(root, &mut state, &mut path, edges)?;
+    }
+    Ok(())
+}
+
+fn validate_generated_feature_closure(
+    placed_entries: &[(&'static str, &'static PlacedFeatureEntry)],
+    configured_entries: &[(&'static str, &'static ConfiguredFeatureEntry)],
+) -> Result<(), String> {
+    let roots = placed_entries
+        .iter()
+        .map(|&(name, _)| GeneratedFeatureNode::Placed(name))
+        .chain(
+            configured_entries
+                .iter()
+                .map(|&(name, _)| GeneratedFeatureNode::Configured(name)),
+        );
+    validate_generated_feature_graph(roots, &mut generated_feature_edges)
+}
+
+fn build_generated_feature_closure(
+    worldgen: &RegistryAccess,
+) -> Result<(Registry<PlacedFeature>, Registry<ConfiguredFeatureErased>), String> {
+    let placed_entries = sorted_placed_feature_entries()?;
+    let configured_entries = sorted_configured_feature_entries()?;
+    validate_generated_feature_closure(&placed_entries, &configured_entries)?;
+
+    // Build temporary lookup tables through one-owner transactions. Each
+    // transaction owns the only builder for its identity; the access handoff
+    // borrows those transactions while moving their frozen registries into the
+    // temporary access, and its drop path adopts them back on every early exit.
+    let mut placed_transaction = RegistryBuilder::new(&*PLACED_FEATURE).into_transaction();
+    let mut configured_transaction = RegistryBuilder::new(&*CONFIGURED_FEATURE).into_transaction();
+    let configured_registry_id = configured_transaction.registry_id();
+    let placed_slots = placed_name_slots(&placed_entries);
+    let configured_slots = configured_name_slots(&configured_entries);
+    let configured_gap_id = configured_slots
+        .iter()
+        .position(Option::is_none)
+        .ok_or_else(|| "generated closure has no configured gap sentinel".to_string())?
+        as u32;
+    for (id, &name) in configured_slots.iter().enumerate() {
+        let identifier = name
+            .map(Identifier::parse)
+            .unwrap_or_else(|| Identifier::parse(&format!("rivet:generated_configured_gap_{id}")));
+        let value = Arc::new(ConfiguredFeatureErased {
+            feature: FeatureId::new(u32::MAX),
+            config: Arc::new(DeferredGeneratedFeatureConfiguration {
+                configured_key: format!("rivet:generated_configured_gap_{id}"),
+            }),
+        });
+        configured_transaction.builder_mut().register(
+            &ResourceKey::create(&*CONFIGURED_FEATURE, identifier),
+            value,
+            RegistrationInfo::BUILT_IN,
+        );
+    }
+    for (id, &name) in placed_slots.iter().enumerate() {
+        let identifier = name
+            .map(Identifier::parse)
+            .unwrap_or_else(|| Identifier::parse(&format!("rivet:generated_placed_gap_{id}")));
+        let value = Arc::new(PlacedFeature::new(
+            Holder::reference(configured_registry_id, configured_gap_id),
+            Vec::new(),
+        ));
+        placed_transaction.builder_mut().register(
+            &ResourceKey::create(&*PLACED_FEATURE, identifier),
+            value,
+            RegistrationInfo::BUILT_IN,
+        );
+    }
+    let mut feature_handoff = placed_transaction.access_transaction();
+    feature_handoff.add_transaction(&mut configured_transaction);
+    let decode_access =
+        LayeredRegistryAccess::new(vec![RegistryLayer::Static, RegistryLayer::Worldgen])
+            .replace_from(
+                RegistryLayer::Static,
+                std::slice::from_ref(feature_handoff.access()),
+            )
+            .replace_from(RegistryLayer::Worldgen, std::slice::from_ref(worldgen))
+            .composite_access();
+    let ops = RegistryOps::create_from_access(&JsonOps::INSTANCE, decode_access.clone());
+
+    let mut decoded_configured = HashMap::with_capacity(configured_entries.len());
+    for &(name, _) in &configured_entries {
+        let decoded = decode_configured_feature(name, &ops, &decode_access)?;
+        decoded_configured.insert(name, Arc::new(decoded));
+    }
+    let mut decoded_placed = HashMap::with_capacity(placed_entries.len());
+    for &(name, _) in &placed_entries {
+        let entry = PLACED_FEATURE_BY_NAME
+            .get(name)
+            .ok_or_else(|| format!("missing generated {name} entry"))?;
+        let json: Value = serde_json::from_str(entry.json)
+            .map_err(|error| format!("decode {name} JSON: {error}"))?;
+        let placed =
+            decode_placed_feature_value(&json, &ops, &decode_access, &format!("decode {name}"))?;
+        decoded_placed.insert(name, Arc::new(placed));
+    }
+    // Resolve every decoded value before taking either registry out of the
+    // handoff. Thus every fallible path still drops the handoff with both
+    // frozen registries present, and both borrowed transactions recover them.
+    let configured_values: Vec<(Identifier, Arc<ConfiguredFeatureErased>)> = configured_slots
+        .iter()
+        .enumerate()
+        .map(|(id, &name)| {
+            let identifier = name.map(Identifier::parse).unwrap_or_else(|| {
+                Identifier::parse(&format!("rivet:generated_configured_gap_{id}"))
+            });
+            let value = match name {
+                Some(name) => Arc::clone(
+                    decoded_configured
+                        .get(name)
+                        .ok_or_else(|| format!("decoded configured feature {name} is missing"))?,
+                ),
+                None => Arc::new(ConfiguredFeatureErased {
+                    feature: FeatureId::new(u32::MAX),
+                    config: Arc::new(DeferredGeneratedFeatureConfiguration {
+                        configured_key: format!("rivet:generated_configured_gap_{id}"),
+                    }),
+                }),
+            };
+            Ok((identifier, value))
+        })
+        .collect::<Result<_, String>>()?;
+    let placed_values: Vec<(Identifier, Arc<PlacedFeature>)> = placed_slots
+        .iter()
+        .enumerate()
+        .map(|(id, &name)| {
+            let identifier = name
+                .map(Identifier::parse)
+                .unwrap_or_else(|| Identifier::parse(&format!("rivet:generated_placed_gap_{id}")));
+            let value = match name {
+                Some(name) => Arc::clone(
+                    decoded_placed
+                        .get(name)
+                        .ok_or_else(|| format!("decoded placed feature {name} is missing"))?,
+                ),
+                None => Arc::new(PlacedFeature::new(
+                    Holder::reference(configured_registry_id, configured_gap_id),
+                    Vec::new(),
+                )),
+            };
+            Ok((identifier, value))
+        })
+        .collect::<Result<_, String>>()?;
+
+    drop(ops);
+    drop(decode_access);
+    let mut placed_builder = feature_handoff
+        .take_registry(&*PLACED_FEATURE)?
+        .into_builder();
+    let mut configured_builder = feature_handoff
+        .take_registry(&*CONFIGURED_FEATURE)?
+        .into_builder();
+    drop(feature_handoff);
+
+    for (identifier, value) in configured_values {
+        configured_builder.replace_registered(
+            &ResourceKey::create(&*CONFIGURED_FEATURE, identifier),
+            value,
+        );
+    }
+    for (identifier, value) in placed_values {
+        placed_builder
+            .replace_registered(&ResourceKey::create(&*PLACED_FEATURE, identifier), value);
+    }
+    Ok((placed_builder.freeze(), configured_builder.freeze()))
 }
 
 fn decode_value<T: Clone>(
@@ -1583,15 +2381,127 @@ fn decode_placement_modifier(
     Ok(modifier)
 }
 
-fn decode_configured_feature(
-    configured_key: &str,
+fn decode_placement_list(
+    placement: &Value,
     ops: &FeatureOps,
+    label: &str,
+) -> Result<Vec<Arc<dyn ErasedPlacementModifier>>, String> {
+    placement
+        .as_array()
+        .ok_or_else(|| format!("{label} placement must be an array"))?
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            decode_placement_modifier(value, ops, &format!("{label} placement {index}"))
+        })
+        .collect()
+}
+
+fn configured_holder_from_value(
+    value: &Value,
+    ops: &FeatureOps,
+    access: &RegistryAccess,
+    label: &str,
+) -> Result<Holder<ConfiguredFeatureErased>, String> {
+    match value {
+        Value::String(name) => {
+            let registry = access
+                .lookup(&*CONFIGURED_FEATURE)
+                .ok_or_else(|| format!("{label} configured-feature registry is missing"))?;
+            let key = ResourceKey::create(&*CONFIGURED_FEATURE, Identifier::parse(name));
+            registry
+                .get(&key)
+                .ok_or_else(|| format!("{label} references missing configured feature {name}"))
+        }
+        Value::Object(_) => Ok(Holder::direct(decode_configured_feature_value(
+            label, value, ops, access,
+        )?)),
+        _ => Err(format!(
+            "{label} configured feature must be a name or object"
+        )),
+    }
+}
+
+fn placed_holder_from_value(
+    value: &Value,
+    ops: &FeatureOps,
+    access: &RegistryAccess,
+    label: &str,
+) -> Result<Holder<PlacedFeature>, String> {
+    match value {
+        Value::String(name) => {
+            let registry = access
+                .lookup(&*PLACED_FEATURE)
+                .ok_or_else(|| format!("{label} placed-feature registry is missing"))?;
+            let key = ResourceKey::create(&*PLACED_FEATURE, Identifier::parse(name));
+            registry
+                .get(&key)
+                .ok_or_else(|| format!("{label} references missing placed feature {name}"))
+        }
+        Value::Object(object) => {
+            let feature = object
+                .get("feature")
+                .ok_or_else(|| format!("{label} inline placed feature has no feature"))?;
+            let configured = configured_holder_from_value(feature, ops, access, label)?;
+            let placement = object
+                .get("placement")
+                .ok_or_else(|| format!("{label} inline placed feature has no placement"))?;
+            Ok(Holder::direct(PlacedFeature::new(
+                configured,
+                decode_placement_list(placement, ops, label)?,
+            )))
+        }
+        _ => Err(format!("{label} placed feature must be a name or object")),
+    }
+}
+
+fn decode_placed_feature_value(
+    value: &Value,
+    ops: &FeatureOps,
+    access: &RegistryAccess,
+    label: &str,
+) -> Result<PlacedFeature, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{label} placed feature must be an object"))?;
+    let feature = object
+        .get("feature")
+        .ok_or_else(|| format!("{label} placed feature has no feature"))?;
+    let configured = configured_holder_from_value(feature, ops, access, label)?;
+    let placement = object
+        .get("placement")
+        .ok_or_else(|| format!("{label} placed feature has no placement"))?;
+    Ok(PlacedFeature::new(
+        configured,
+        decode_placement_list(placement, ops, label)?,
+    ))
+}
+
+fn decode_selector_placed_list(
+    config: &Value,
+    field: &str,
+    ops: &FeatureOps,
+    access: &RegistryAccess,
+    label: &str,
+) -> Result<Vec<Holder<PlacedFeature>>, String> {
+    config
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{label} config has no {field} list"))?
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            placed_holder_from_value(value, ops, access, &format!("{label} {field}[{index}]"))
+        })
+        .collect()
+}
+
+fn decode_configured_feature_value(
+    configured_key: &str,
+    json: &Value,
+    ops: &FeatureOps,
+    access: &RegistryAccess,
 ) -> Result<ConfiguredFeatureErased, String> {
-    let entry = CONFIGURED_FEATURE_BY_NAME
-        .get(configured_key)
-        .ok_or_else(|| format!("missing generated {configured_key} entry"))?;
-    let json: Value = serde_json::from_str(entry.json)
-        .map_err(|error| format!("decode {configured_key} JSON: {error}"))?;
     let feature_type = json
         .get("type")
         .and_then(Value::as_str)
@@ -1615,9 +2525,6 @@ fn decode_configured_feature(
             config_value,
             &format!("decode {configured_key} config"),
         )?),
-        // Batch 2 dispatch leaves (issue #600 config-decode wave) — each
-        // downcast to its own config codec. The config value shapes are the
-        // generated `RegistryOps` JSON verbatim, decoded faithfully.
         "minecraft:ore" => Arc::new(decode_value(
             ore_configuration_codec::<FeatureOps>(),
             ops,
@@ -1648,14 +2555,13 @@ fn decode_configured_feature(
             config_value,
             &format!("decode {configured_key} config"),
         )?),
-        "minecraft:vines" => Arc::new(NoneFeatureConfiguration),
+        "minecraft:vines" | "minecraft:freeze_top_layer" => Arc::new(NoneFeatureConfiguration),
         "minecraft:seagrass" => Arc::new(decode_value(
             probability_feature_configuration_codec::<FeatureOps>(),
             ops,
             config_value,
             &format!("decode {configured_key} config"),
         )?),
-        "minecraft:freeze_top_layer" => Arc::new(NoneFeatureConfiguration),
         "minecraft:underwater_magma" => Arc::new(decode_value(
             underwater_magma_configuration_codec::<FeatureOps>(),
             ops,
@@ -1668,31 +2574,135 @@ fn decode_configured_feature(
             config_value,
             &format!("decode {configured_key} config"),
         )?),
-        "minecraft:random_selector" => Arc::new(decode_value(
-            random_feature_configuration_codec::<FeatureOps>(),
+        "minecraft:huge_red_mushroom" | "minecraft:huge_brown_mushroom" => Arc::new(decode_value(
+            huge_mushroom_feature_configuration_codec::<FeatureOps>(),
             ops,
             config_value,
             &format!("decode {configured_key} config"),
         )?),
-        "minecraft:simple_random_selector" => Arc::new(decode_value(
-            composite_feature_configuration_codec::<FeatureOps>(),
-            ops,
-            config_value,
-            &format!("decode {configured_key} config"),
-        )?),
-        "minecraft:random_boolean_selector" => Arc::new(decode_value(
-            random_boolean_feature_configuration_codec::<FeatureOps>(),
-            ops,
-            config_value,
-            &format!("decode {configured_key} config"),
-        )?),
-        other => {
-            return Err(format!(
-                "{configured_key} has unsupported feature type {other}"
-            ));
+        "minecraft:random_selector" => {
+            let features = config_value
+                .get("features")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("{configured_key} config has no features list"))?
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let chance = item.get("chance").ok_or_else(|| {
+                        format!("{configured_key} features[{index}] has no chance")
+                    })?;
+                    let chance = decode_value(
+                        codec::float_range::<FeatureOps>(0.0, 1.0),
+                        ops,
+                        chance,
+                        &format!("{configured_key} features[{index}] chance"),
+                    )?;
+                    let feature = item.get("feature").ok_or_else(|| {
+                        format!("{configured_key} features[{index}] has no feature")
+                    })?;
+                    Ok(WeightedPlacedFeature::new(
+                        placed_holder_from_value(
+                            feature,
+                            ops,
+                            access,
+                            &format!("{configured_key} features[{index}]"),
+                        )?,
+                        chance,
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let default = config_value
+                .get("default")
+                .ok_or_else(|| format!("{configured_key} config has no default"))?;
+            Arc::new(RandomFeatureConfiguration::new(
+                features,
+                placed_holder_from_value(
+                    default,
+                    ops,
+                    access,
+                    &format!("{configured_key} default"),
+                )?,
+            ))
         }
+        "minecraft:random_boolean_selector" => Arc::new(RandomBooleanFeatureConfiguration::new(
+            placed_holder_from_value(
+                config_value
+                    .get("feature_true")
+                    .ok_or_else(|| format!("{configured_key} config has no feature_true"))?,
+                ops,
+                access,
+                &format!("{configured_key} feature_true"),
+            )?,
+            placed_holder_from_value(
+                config_value
+                    .get("feature_false")
+                    .ok_or_else(|| format!("{configured_key} config has no feature_false"))?,
+                ops,
+                access,
+                &format!("{configured_key} feature_false"),
+            )?,
+        )),
+        "minecraft:simple_random_selector" | "minecraft:sequence" => {
+            Arc::new(CompositeFeatureConfiguration::new(HolderSet::direct(
+                decode_selector_placed_list(config_value, "features", ops, access, configured_key)?,
+            )))
+        }
+        "minecraft:weighted_random_selector" => {
+            let entries = config_value
+                .get("features")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("{configured_key} config has no features list"))?;
+            let weighted = entries
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let weight = item.get("weight").and_then(Value::as_i64).ok_or_else(|| {
+                        format!("{configured_key} features[{index}] has no weight")
+                    })?;
+                    let weight = i32::try_from(weight).map_err(|_| {
+                        format!("{configured_key} features[{index}] weight is out of range")
+                    })?;
+                    if weight < 1 {
+                        return Err(format!(
+                            "{configured_key} features[{index}] weight must be at least 1"
+                        ));
+                    }
+                    let data = item
+                        .get("data")
+                        .ok_or_else(|| format!("{configured_key} features[{index}] has no data"))?;
+                    Ok(Weighted::new(
+                        placed_holder_from_value(
+                            data,
+                            ops,
+                            access,
+                            &format!("{configured_key} features[{index}]"),
+                        )?,
+                        weight,
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Arc::new(WeightedRandomFeatureConfiguration::new(
+                WeightedList::of_weighted_list(&weighted),
+            ))
+        }
+        _ => Arc::new(DeferredGeneratedFeatureConfiguration {
+            configured_key: configured_key.to_string(),
+        }),
     };
     Ok(ConfiguredFeatureErased { feature, config })
+}
+
+fn decode_configured_feature(
+    configured_key: &str,
+    ops: &FeatureOps,
+    access: &RegistryAccess,
+) -> Result<ConfiguredFeatureErased, String> {
+    let entry = CONFIGURED_FEATURE_BY_NAME
+        .get(configured_key)
+        .ok_or_else(|| format!("missing generated {configured_key} entry"))?;
+    let json: Value = serde_json::from_str(entry.json)
+        .map_err(|error| format!("decode {configured_key} JSON: {error}"))?;
+    decode_configured_feature_value(configured_key, &json, ops, access)
 }
 
 fn decode_placement_modifiers(
@@ -1717,8 +2727,8 @@ fn decode_placement_modifiers(
 }
 
 struct DecodedPlacedFeature {
-    placed_registry: Registry<PlacedFeature>,
-    configured_registry: Registry<ConfiguredFeatureErased>,
+    placed_registry: &'static Registry<PlacedFeature>,
+    configured_registry: &'static Registry<ConfiguredFeatureErased>,
     placed_holder: Holder<PlacedFeature>,
 }
 
@@ -1730,8 +2740,8 @@ impl DecodedPlacedFeature {
         random: &mut WorldgenRandom<XoroshiroRandomSource>,
         origin: &BlockPos,
     ) {
-        let placed = self.placed_holder.value(&self.placed_registry);
-        placed.place_with_biome_check(&self.configured_registry, level, generator, random, origin);
+        let placed = self.placed_holder.value(self.placed_registry);
+        placed.place_with_biome_check(self.configured_registry, level, generator, random, origin);
     }
 }
 
@@ -1739,48 +2749,61 @@ fn decode_placed_feature(
     placed_key: &str,
     generator: &OverworldGenerator,
 ) -> Result<DecodedPlacedFeature, String> {
-    let entry = PLACED_FEATURE_BY_NAME
-        .get(placed_key)
-        .ok_or_else(|| format!("missing generated {placed_key} entry"))?;
-    let json: Value = serde_json::from_str(entry.json)
-        .map_err(|error| format!("decode {placed_key} JSON: {error}"))?;
-    let configured_key = json
-        .get("feature")
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("{placed_key} JSON has no configured feature"))?;
-    let ops =
-        RegistryOps::create_from_access(&JsonOps::INSTANCE, generator.feature_access().clone());
-    let configured = Arc::new(decode_configured_feature(configured_key, &ops)?);
-    let mut configured_builder = RegistryBuilder::new(&*CONFIGURED_FEATURE);
-    let configured_registry_id = configured_builder.registry_id();
-    let configured_resource_key =
-        ResourceKey::create(&*CONFIGURED_FEATURE, Identifier::parse(configured_key));
-    let configured_id = configured_builder.register(
-        &configured_resource_key,
-        configured,
-        RegistrationInfo::BUILT_IN,
-    );
-    let configured_registry = configured_builder.freeze();
-
-    let modifiers = decode_placement_modifiers(placed_key, generator.feature_access())?;
-    let placed_value = Arc::new(PlacedFeature::new(
-        Holder::reference(configured_registry_id, configured_id.0),
-        modifiers,
-    ));
-    let mut placed_builder = RegistryBuilder::new(&*PLACED_FEATURE);
-    let placed_registry_id = placed_builder.registry_id();
-    let placed_resource_key = ResourceKey::create(&*PLACED_FEATURE, Identifier::parse(placed_key));
-    let placed_id = placed_builder.register(
-        &placed_resource_key,
-        placed_value,
-        RegistrationInfo::BUILT_IN,
-    );
-    let placed_registry = placed_builder.freeze();
+    if !PLACED_FEATURE_BY_NAME.contains_key(placed_key) {
+        return Err(format!("missing generated {placed_key} entry"));
+    }
+    let placed_registry = generator
+        .feature_access()
+        .lookup(&*PLACED_FEATURE)
+        .ok_or_else(|| "generated placed-feature registry is missing".to_string())?;
+    let configured_registry = generator
+        .feature_access()
+        .lookup(&*CONFIGURED_FEATURE)
+        .ok_or_else(|| "generated configured-feature registry is missing".to_string())?;
+    let key = ResourceKey::create(&*PLACED_FEATURE, Identifier::parse(placed_key));
+    let placed_holder = placed_registry
+        .get(&key)
+        .ok_or_else(|| format!("generated placed-feature holder {placed_key} is missing"))?;
     Ok(DecodedPlacedFeature {
         placed_registry,
         configured_registry,
-        placed_holder: Holder::reference(placed_registry_id, placed_id.0),
+        placed_holder,
     })
+}
+
+fn configured_feature_key_for_placed(placed_key: &str) -> Result<String, String> {
+    let placed_entry = PLACED_FEATURE_BY_NAME
+        .get(placed_key)
+        .ok_or_else(|| format!("missing generated {placed_key} entry"))?;
+    let placed_json: Value = serde_json::from_str(placed_entry.json)
+        .map_err(|error| format!("decode {placed_key} JSON: {error}"))?;
+    placed_json
+        .get("feature")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{placed_key} JSON has no configured feature"))
+}
+
+fn set_paper_feature_seed(
+    random: &mut WorldgenRandom<XoroshiroRandomSource>,
+    generator: &OverworldGenerator,
+    decoration_seed: i64,
+    origin: &BlockPos,
+    placed_key: &str,
+    global_feature_index: usize,
+    step_index: usize,
+) {
+    let feature_population_seed = configured_feature_key_for_placed(placed_key)
+        .ok()
+        .and_then(|configured_key| generator.feature_seeds.get(&configured_key).copied())
+        .filter(|seed| *seed != -1)
+        .map(|seed| random.set_decoration_seed(seed, origin.get_x(), origin.get_z()))
+        .unwrap_or(decoration_seed);
+    random.set_feature_seed(
+        feature_population_seed,
+        global_feature_index as i32,
+        step_index as i32,
+    );
 }
 
 fn configured_feature_is_executable(placed_key: &str) -> Result<bool, String> {
@@ -1813,9 +2836,13 @@ fn configured_feature_is_executable(placed_key: &str) -> Result<bool, String> {
             | Some("minecraft:freeze_top_layer")
             | Some("minecraft:underwater_magma")
             | Some("minecraft:multiface_growth")
+            | Some("minecraft:huge_brown_mushroom")
+            | Some("minecraft:huge_red_mushroom")
             | Some("minecraft:random_selector")
+            | Some("minecraft:weighted_random_selector")
             | Some("minecraft:simple_random_selector")
             | Some("minecraft:random_boolean_selector")
+            | Some("minecraft:sequence")
     ))
 }
 
@@ -1868,17 +2895,83 @@ fn placement_selects(
         feature_key,
     };
     let dummy_feature = ConfiguredFeatureErased {
-        feature: FeatureId::new(0),
-        config: Arc::new(NoneFeatureConfiguration),
+        feature: FeatureId::new(u32::MAX),
+        config: Arc::new(DeferredGeneratedFeatureConfiguration {
+            configured_key: format!("{feature_key} placement selection"),
+        }),
     };
     let placed = PlacedFeature::new(Holder::Direct(dummy_feature), modifiers);
     Ok(placed.has_placement_positions(region, &selection_generator, random, origin))
 }
 
+/// The single panic-payload classifier for generated-feature boundary panics.
+/// Both `String` and `&'static str` payloads classify identically so the two
+/// `panic!` payload shapes can never diverge in accepted messages.
+fn generated_boundary_panic_message(payload: &(dyn std::any::Any + Send)) -> Option<&str> {
+    payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&'static str>().copied())
+}
+
+fn generated_boundary_feature_key(
+    payload: &(dyn std::any::Any + Send),
+    fallback: &'static str,
+) -> &'static str {
+    let prefix = "generated feature ";
+    let Some(name) = generated_boundary_panic_message(payload)
+        .and_then(|message| message.strip_prefix(prefix))
+        .and_then(|rest| rest.split(' ').next())
+    else {
+        return fallback;
+    };
+    // The panic payloads originate from `unavailable_feature`, whose values
+    // are configured-feature keys (`DeferredGeneratedFeatureConfiguration`).
+    // Validate against the configured table; 97 of the 170 generated
+    // configured names also exist as unrelated placed entries, so a
+    // placed-table search would misattribute instead of falling back.
+    CONFIGURED_FEATURE_BY_NAME
+        .entries()
+        .find(|(candidate, _)| **candidate == name)
+        .map(|(candidate, _)| *candidate)
+        .unwrap_or(fallback)
+}
+
 fn run_biome_decoration(
     chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
     generator: &Arc<OverworldGenerator>,
-) -> Result<(), GenError> {
+    workspace: &FeatureWorkspace,
+    structure_feature_count: Option<usize>,
+) -> Result<FeatureWritebacks, GenError> {
+    // Paper executes the structure loop before placed features whenever the
+    // structure manager enables it. This value layer has no structure manager,
+    // so only a caller-proven capability may cross the boundary. The count is
+    // deliberately not added to placed-feature seeds: pinned Paper 26.2 uses
+    // `globalIndexOfFeature` independently for the placed-feature loop.
+    let _structure_feature_count =
+        structure_feature_count.ok_or(GenError::StructureDecorationIndexUnavailable {
+            chunk_pos: chunk.get_pos(),
+        })?;
+    run_biome_decoration_through(
+        chunk,
+        generator,
+        workspace,
+        Decoration::VALUES
+            .len()
+            .max(generator.feature_plan()?.feature_list.len()),
+    )
+}
+
+/// The decoration body with a caller-chosen exclusive step bound. Production
+/// runs every step; the seed-1 spring regression bounds execution at the
+/// FLUID_SPRINGS step so the pass ends on a real spring placement instead of a
+/// later unsupported seam.
+fn run_biome_decoration_through(
+    chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+    generator: &Arc<OverworldGenerator>,
+    workspace: &FeatureWorkspace,
+    max_steps: usize,
+) -> Result<FeatureWritebacks, GenError> {
     chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
     let center_pos = chunk.get_pos();
     let origin =
@@ -1889,7 +2982,7 @@ fn run_biome_decoration(
     let decoration_seed =
         random.set_decoration_seed(generator.seed(), origin.get_x(), origin.get_z());
 
-    let mut region = compose_feature_region(chunk, generator);
+    let mut region = compose_feature_region_with_workspace(chunk, generator, Some(workspace));
     let union_biomes = gather_possible_biomes(&region, generator);
 
     // Resolve the FULL `biomeSource.possibleBiomes()` list in source order and
@@ -1908,18 +3001,18 @@ fn run_biome_decoration(
     let settings_sources = &plan.settings_sources;
     let feature_list = &plan.feature_list;
 
-    // The per-step loop — Paper's `addVanillaDecorations`. The structure loop
-    // is skipped (the port has no structure manager; Java's
-    // `structureManager.shouldGenerateStructures()` gate is a faithful no-op,
-    // the #185 structures deferral).
+    // The per-step loop — Paper's `addVanillaDecorations`. The structure body
+    // remains deferred with the unported structure manager, but the capability
+    // check above prevents this path from pretending that the structure loop
+    // consumed no work. Once a caller proves the capability, placed-feature
+    // seeds still use Paper's independent `globalIndexOfFeature`.
     let generation_steps = Decoration::VALUES.len().max(feature_list.len());
     // Paper walks steps in ascending order and, within a step, the sorted
     // global feature indices of the union biomes mapped through the full-list
     // sorter's `indexMapping`. Registry-backed configured features execute
     // through their exact placed-feature chains; unsupported selected leaves
     // stop the run with a typed boundary.
-    let mut saw_feature = false;
-    for step_index in 0..generation_steps {
+    for step_index in 0..max_steps.min(generation_steps) {
         if step_index >= feature_list.len() {
             continue;
         }
@@ -1944,7 +3037,6 @@ fn run_biome_decoration(
         possible_features_this_step.sort_unstable();
         possible_features_this_step.dedup();
         for global_feature_index in possible_features_this_step {
-            saw_feature = true;
             let feature = &feature_list[step_index].features[global_feature_index];
             let feature_key = match feature {
                 Holder::Reference { id, .. } => {
@@ -1952,11 +3044,19 @@ fn run_biome_decoration(
                 }
                 Holder::Direct(_) => "minecraft:unknown",
             };
-            // `setFeatureSeed(decorationSeed, globalIndexOfFeature, stepIndex)`.
-            random.set_feature_seed(
+            // Paper's configurable population seed path uses the configured
+            // feature holder (`PlacedFeature.feature()`), not the surrounding
+            // placed-feature key. A configured seed other than `-1` reseeds via
+            // `setDecorationSeed` first, consuming its two scale draws, then
+            // `setFeatureSeed` receives that derived population seed.
+            set_paper_feature_seed(
+                &mut random,
+                generator,
                 decoration_seed,
-                global_feature_index as i32,
-                step_index as i32,
+                &origin,
+                feature_key,
+                global_feature_index,
+                step_index,
             );
             let executable = configured_feature_is_executable(feature_key).map_err(|_| {
                 GenError::FeaturePlacementDecode {
@@ -1979,12 +3079,38 @@ fn run_biome_decoration(
                     generator: Arc::clone(generator),
                     feature_key,
                 };
-                placed.place_with_biome_check(
-                    &mut region,
-                    &dispatch_generator,
-                    &mut random,
-                    &origin,
-                );
+                let placement = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    placed.place_with_biome_check(
+                        &mut region,
+                        &dispatch_generator,
+                        &mut random,
+                        &origin,
+                    );
+                }));
+                if let Err(payload) = placement {
+                    let boundary =
+                        generated_boundary_panic_message(payload.as_ref()).is_some_and(|message| {
+                            message.starts_with("generated feature ")
+                                || (message
+                                    .contains("BlockStateBase.canSurvive is not implemented")
+                                    || message
+                                        .contains("WorldGenRegion.canSurvive is not implemented")
+                                    || message.contains("Biome.shouldFreeze is not implemented")
+                                    || message.contains("Biome.shouldSnow is not implemented"))
+                        });
+                    if boundary {
+                        return Err(GenError::FeaturePlacementDecode {
+                            chunk_pos: center_pos,
+                            step_index,
+                            global_feature_index,
+                            feature_key: generated_boundary_feature_key(
+                                payload.as_ref(),
+                                feature_key,
+                            ),
+                        });
+                    }
+                    std::panic::resume_unwind(payload);
+                }
                 continue;
             }
             let selected =
@@ -2005,15 +3131,23 @@ fn run_biome_decoration(
             }
         }
     }
-    if !saw_feature {
-        return Err(GenError::FeaturePlacementDecode {
-            chunk_pos: center_pos,
-            step_index: 0,
-            global_feature_index: 0,
-            feature_key: "minecraft:unknown",
-        });
+    let owned_entries = region.into_owned_proto_entries();
+    let mut retained_writebacks = Vec::with_capacity(8);
+    for (pos, chunk) in owned_entries {
+        // Move every owned proto into the authoritative workspace. Paper's
+        // region borrows these scheduler-owned chunks, so heightmaps,
+        // post-processing, block entities, and scheduled ticks must survive
+        // even outside the block-state write radius. Keep the public holder
+        // diagnostic limited to the eight distance-one entries for the
+        // FEATURES write zone.
+        let distance_one = center_pos.get_chessboard_distance_coords(pos.x(), pos.z()) == 1;
+        let diagnostic = distance_one.then(|| snapshot_generated_chunk(&chunk));
+        workspace.insert(chunk);
+        if let Some(diagnostic) = diagnostic {
+            retained_writebacks.push((pos, diagnostic));
+        }
     }
-    Ok(())
+    Ok(retained_writebacks)
 }
 
 /// Compose the SPAWN step's exact radius-one `WorldGenRegion` cache. The
@@ -3350,6 +4484,7 @@ mod tests {
     use rivet_util::RandomSource;
     use rivet_world::level::WorldGenLevel;
     use rivet_world::levelgen::feature::FeatureBehavior;
+    use rivet_world::levelgen::feature::configurations::HugeMushroomFeatureConfiguration;
     use rivet_world::levelgen::feature::configurations::MultifaceGrowthConfiguration;
     use rivet_world::levelgen::feature::configurations::ProbabilityFeatureConfiguration;
     use rivet_world::levelgen::feature::configurations::UnderwaterMagmaConfiguration;
@@ -3368,6 +4503,238 @@ mod tests {
         static GENERATOR: std::sync::LazyLock<Arc<OverworldGenerator>> =
             std::sync::LazyLock::new(|| Arc::new(OverworldGenerator::new(42)));
         GENERATOR.clone()
+    }
+
+    fn feature_holder(generator: &Arc<OverworldGenerator>, pos: ChunkPos) -> GenerationChunkHolder {
+        generator.create_holder_with_structure_feature_count(pos, Some(0))
+    }
+
+    fn transaction_probe_holder(
+        generator: &Arc<OverworldGenerator>,
+        starting_status: ChunkStatus,
+    ) -> GenerationChunkHolder {
+        let mut chunk = fresh_worldgen_chunk(ChunkPos::ZERO, generator);
+        chunk.set_persisted_status(starting_status);
+        let context = WorldGenContext::new(
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
+                chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
+                Err(GenError::FeaturePlacementDecode {
+                    chunk_pos: ChunkPos::ZERO,
+                    step_index: 9,
+                    global_feature_index: 17,
+                    feature_key: "minecraft:dark_forest_vegetation",
+                })
+            },
+        );
+        GenerationChunkHolder {
+            chunk,
+            context,
+            features_failure: None,
+            generator: Arc::clone(generator),
+            feature_writebacks: Vec::new(),
+            pending_feature_writebacks: Rc::new(RefCell::new(None)),
+            feature_workspace: FeatureWorkspace::new(),
+        }
+    }
+
+    /// A direct FEATURES seam probe that writes the east distance-1 dependency
+    /// chunk, then either succeeds (publishing the writeback) or fails after
+    /// priming the center and staging the writeback. This keeps ownership and
+    /// rollback coverage independent of the seed-42 feature boundary.
+    fn writeback_probe_holder(
+        generator: &Arc<OverworldGenerator>,
+        fail: bool,
+    ) -> GenerationChunkHolder {
+        let mut chunk = fresh_worldgen_chunk(ChunkPos::ZERO, generator);
+        chunk.set_persisted_status(ChunkStatus::Carvers);
+        let pending_feature_writebacks = Rc::new(RefCell::new(None));
+        let writeback_sink = Rc::clone(&pending_feature_writebacks);
+        let generator = Arc::clone(generator);
+        let context_generator = Arc::clone(&generator);
+        let context = WorldGenContext::new(
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            move |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
+                if fail {
+                    chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
+                }
+                let mut region = compose_feature_region(chunk, &context_generator);
+                assert!(region.set_block(
+                    &BlockPos::new(16, 64, 0),
+                    Blocks::STONE.default_block_state(),
+                    2,
+                    512,
+                ));
+                *writeback_sink.borrow_mut() = Some(region.into_distance_one_proto_writebacks());
+                if fail {
+                    Err(GenError::FeaturePlacementDecode {
+                        chunk_pos: ChunkPos::ZERO,
+                        step_index: 9,
+                        global_feature_index: 17,
+                        feature_key: "minecraft:dark_forest_vegetation",
+                    })
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        GenerationChunkHolder {
+            chunk,
+            context,
+            features_failure: None,
+            generator,
+            feature_writebacks: Vec::new(),
+            pending_feature_writebacks,
+            feature_workspace: FeatureWorkspace::new(),
+        }
+    }
+
+    /// Build a successful FEATURES seam that mutates both the distance-one
+    /// write zone and a farther cached dependency. The latter covers the
+    /// owner-directed heightmap/post-processing/tick state that a temporary
+    /// region must return to its workspace even though `setBlock` itself is
+    /// gated to distance one.
+    fn workspace_writeback_probe_holder(
+        generator: &Arc<OverworldGenerator>,
+        workspace: &FeatureWorkspace,
+    ) -> GenerationChunkHolder {
+        workspace_writeback_probe_holder_at(generator, workspace, ChunkPos::ZERO)
+    }
+
+    fn workspace_writeback_probe_holder_at(
+        generator: &Arc<OverworldGenerator>,
+        workspace: &FeatureWorkspace,
+        center_pos: ChunkPos,
+    ) -> GenerationChunkHolder {
+        let mut chunk = fresh_worldgen_chunk(center_pos, generator);
+        chunk.set_persisted_status(ChunkStatus::Carvers);
+        let pending_feature_writebacks = Rc::new(RefCell::new(None));
+        let generator_for_context = Arc::clone(generator);
+        let workspace_for_context = workspace.clone();
+        let context = WorldGenContext::new(
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            move |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
+                let center_pos = chunk.get_pos();
+                let mut region = compose_feature_region_with_workspace(
+                    chunk,
+                    &generator_for_context,
+                    Some(&workspace_for_context),
+                );
+                let east_block =
+                    BlockPos::new(center_pos.x().wrapping_add(1) * 16, 64, center_pos.z() * 16);
+                assert!(
+                    region.set_block(&east_block, Blocks::STONE.default_block_state(), 2, 512,)
+                );
+                let far_block =
+                    BlockPos::new(center_pos.x().wrapping_add(8) * 16, 64, center_pos.z() * 16);
+                <WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> as WorldGenLevel>::schedule_tick(
+                    &mut region,
+                    &far_block,
+                    FluidId(4),
+                    0,
+                );
+                region.mark_pos_for_post_processing(&far_block);
+                for (pos, dependency) in region.into_owned_proto_entries() {
+                    workspace_for_context.insert(dependency);
+                    assert!(
+                        pos != center_pos,
+                        "the center must remain owned by the generation holder"
+                    );
+                }
+                Ok(())
+            },
+        );
+        GenerationChunkHolder {
+            chunk,
+            context,
+            features_failure: None,
+            generator: Arc::clone(generator),
+            feature_writebacks: Vec::new(),
+            pending_feature_writebacks,
+            feature_workspace: workspace.clone(),
+        }
+    }
+
+    fn assert_generated_proto_equal(
+        actual: &ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+        expected: &ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+    ) {
+        assert_eq!(actual.get_pos(), expected.get_pos());
+        assert_eq!(
+            actual.get_persisted_status(),
+            expected.get_persisted_status()
+        );
+        let actual_heightmaps: Vec<Option<Vec<i64>>> = actual
+            .heightmaps()
+            .iter()
+            .map(|heightmap| heightmap.as_ref().map(|map| map.get_raw_data().to_vec()))
+            .collect();
+        let expected_heightmaps: Vec<Option<Vec<i64>>> = expected
+            .heightmaps()
+            .iter()
+            .map(|heightmap| heightmap.as_ref().map(|map| map.get_raw_data().to_vec()))
+            .collect();
+        assert_eq!(actual_heightmaps, expected_heightmaps);
+        for y in actual.get_min_y()..actual.get_min_y() + actual.get_height() {
+            for z in 0..16 {
+                for x in 0..16 {
+                    assert_eq!(
+                        actual.get_block_state(x, y, z),
+                        expected.get_block_state(x, y, z),
+                        "block mismatch at ({x}, {y}, {z})"
+                    );
+                }
+            }
+        }
+        for (actual_section, expected_section) in
+            actual.get_sections().iter().zip(expected.get_sections())
+        {
+            assert_eq!(
+                actual_section.non_empty_block_count(),
+                expected_section.non_empty_block_count()
+            );
+            for y in 0..4 {
+                for z in 0..4 {
+                    for x in 0..4 {
+                        assert_eq!(
+                            actual_section.biomes().get(x, y, z),
+                            expected_section.biomes().get(x, y, z),
+                            "biome mismatch at section cell ({x}, {y}, {z})"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(actual.get_entities(), expected.get_entities());
+        assert_eq!(
+            actual.get_block_entity_nbts(),
+            expected.get_block_entity_nbts()
+        );
+        assert_eq!(actual.get_post_processing(), expected.get_post_processing());
+        assert_eq!(
+            actual.get_block_ticks().scheduled_ticks(),
+            expected.get_block_ticks().scheduled_ticks()
+        );
+        assert_eq!(
+            actual.get_fluid_ticks().scheduled_ticks(),
+            expected.get_fluid_ticks().scheduled_ticks()
+        );
+        assert_eq!(actual.get_all_starts(), expected.get_all_starts());
+        assert_eq!(actual.get_all_references(), expected.get_all_references());
+        assert_eq!(actual.base().is_unsaved(), expected.base().is_unsaved());
+        assert_eq!(
+            actual.get_carving_mask().map(|mask| mask.to_array()),
+            expected.get_carving_mask().map(|mask| mask.to_array())
+        );
     }
 
     /// The `ChunkGenerator` realization delegates to the noisegen shell's real
@@ -3888,7 +5255,7 @@ mod tests {
     #[test]
     fn light_refusal_does_not_cache_features_failure() {
         let generator = test_generator();
-        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        let mut holder = feature_holder(&generator, ChunkPos::ZERO);
         holder
             .generate_through(ChunkStatus::Carvers)
             .expect("CARVERS");
@@ -3916,6 +5283,39 @@ mod tests {
         assert_eq!(holder.status(), ChunkStatus::Carvers);
     }
 
+    /// Without a structure-decoration authority, FEATURES refuses before
+    /// heightmap priming, feature RNG, placement, or dependency writeback. A
+    /// caller that has proved the capability must opt into the separate holder
+    /// constructor used by the seed-42 execution fixtures.
+    #[test]
+    fn unavailable_structure_decoration_refuses_without_mutation() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        let expected = generator.create_holder(ChunkPos::ZERO);
+
+        let error = holder
+            .generate_through(ChunkStatus::Features)
+            .expect_err("missing structure decoration authority must refuse");
+        assert!(matches!(
+            error,
+            GeneratedChunkError::Generation(
+                GenError::StructureDecorationIndexUnavailable { chunk_pos }
+            ) if chunk_pos == ChunkPos::ZERO
+        ));
+        assert_generated_proto_equal(&holder.chunk, &expected.chunk);
+        assert_eq!(holder.status(), ChunkStatus::Empty);
+        assert!(holder.take_feature_writebacks().is_empty());
+
+        let retry = holder
+            .generate_through(ChunkStatus::Features)
+            .expect_err("the unavailable structure boundary must cache");
+        assert!(matches!(
+            retry,
+            GeneratedChunkError::Generation(GenError::StructureDecorationIndexUnavailable { .. })
+        ));
+        assert_generated_proto_equal(&holder.chunk, &expected.chunk);
+    }
+
     /// The FEATURES rung runs `addVanillaDecorations`'s full prologue and
     /// dependency-window cache — `Heightmap.primeHeightmaps(chunk,
     /// FINAL_HEIGHTMAPS)` (the `ChunkStatusTasks.generateFeatures` priming),
@@ -3938,13 +5338,15 @@ mod tests {
     /// UNDERGROUND_ORES step — underwater_magma (global 26) now executes but
     /// places no magma in this dry origin union, so it consumes no placement
     /// RNG past its scan. Batch 4 then decodes and executes `glow_lichen` through
-    /// `minecraft:multiface_growth`. The next unsupported *selected* path is
-    /// `minecraft:dark_forest_vegetation` at step 9/global index 17. The chunk is
-    /// never stamped FEATURES; the holder restores its pre-call status and data.
+    /// `minecraft:multiface_growth`. The random-selector branch at global 17
+    /// selects `minecraft:dark_oak_leaf_litter`; the next typed boundary is
+    /// `minecraft:freeze_top_layer` at step 10/global index 0 when its
+    /// biome freeze query reaches the unimplemented `shouldFreeze` seam. The chunk
+    /// is never stamped FEATURES (it stays CARVERS).
     #[test]
     fn generate_through_features_rolls_back_fresh_holder_and_caches_failure() {
         let generator = test_generator();
-        let mut holder = generator.create_holder(ChunkPos::new(0, 0));
+        let mut holder = feature_holder(&generator, ChunkPos::new(0, 0));
         let fresh = generator.create_holder(ChunkPos::new(0, 0));
         assert_eq!(holder.status(), ChunkStatus::Empty);
 
@@ -3959,13 +5361,13 @@ mod tests {
                 feature_key,
             }) => {
                 assert_eq!(chunk_pos, ChunkPos::new(0, 0));
-                assert_eq!(step_index, 9);
-                assert_eq!(global_feature_index, 17);
-                assert_eq!(feature_key, "minecraft:dark_forest_vegetation");
+                assert_eq!(step_index, 10);
+                assert_eq!(global_feature_index, 0);
+                assert_eq!(feature_key, "minecraft:freeze_top_layer");
             }
             other => {
                 panic!(
-                    "FEATURES must stop at the selected dark_forest_vegetation mismatch; got {other:?}"
+                    "FEATURES must stop at the selected freeze_top_layer boundary; got {other:?}"
                 )
             }
         }
@@ -3976,6 +5378,10 @@ mod tests {
         // merely leave the status below FEATURES.
         assert_eq!(holder.status(), fresh.status());
         assert_eq!(holder.status(), ChunkStatus::Empty);
+        assert!(
+            holder.take_feature_writebacks().is_empty(),
+            "a failed FEATURES transaction must discard dependency writebacks"
+        );
         let holder_heightmaps: Vec<Option<Vec<i64>>> = holder
             .chunk
             .heightmaps()
@@ -4072,9 +5478,9 @@ mod tests {
             retry,
             GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
                 chunk_pos,
-                step_index: 9,
-                global_feature_index: 17,
-                feature_key: "minecraft:dark_forest_vegetation",
+                step_index: 10,
+                global_feature_index: 0,
+                feature_key: "minecraft:freeze_top_layer",
             }) if chunk_pos == ChunkPos::ZERO
         ));
         assert_eq!(holder.status(), ChunkStatus::Empty);
@@ -4093,13 +5499,240 @@ mod tests {
         );
     }
 
+    #[test]
+    fn features_transaction_restores_every_lower_start_status_and_retry() {
+        let generator = test_generator();
+        for starting_status in [
+            ChunkStatus::Empty,
+            ChunkStatus::Biomes,
+            ChunkStatus::Noise,
+            ChunkStatus::Surface,
+            ChunkStatus::Carvers,
+            ChunkStatus::StructureStarts,
+            ChunkStatus::StructureReferences,
+        ] {
+            let expected = transaction_probe_holder(&generator, starting_status);
+            let mut holder = transaction_probe_holder(&generator, starting_status);
+
+            let error = holder
+                .generate_through(ChunkStatus::Features)
+                .expect_err("FEATURES must hit the pinned typed boundary");
+            assert!(matches!(
+                error,
+                GeneratedChunkError::Generation(GenError::FeaturePlacementDecode { .. })
+                    | GeneratedChunkError::Generation(GenError::SettingsNotGenerated { .. })
+                    | GeneratedChunkError::Generation(
+                        GenError::StructureDecorationIndexUnavailable { .. }
+                    )
+            ));
+            assert_eq!(holder.status(), starting_status);
+            assert_generated_proto_equal(&holder.chunk, &expected.chunk);
+            assert!(
+                holder.take_feature_writebacks().is_empty(),
+                "failed FEATURES from {starting_status:?} must not publish writebacks"
+            );
+
+            let retry = holder
+                .generate_through(ChunkStatus::Features)
+                .expect_err("the failure must be cached for retry");
+            assert!(matches!(
+                retry,
+                GeneratedChunkError::Generation(GenError::FeaturePlacementDecode { .. })
+                    | GeneratedChunkError::Generation(GenError::SettingsNotGenerated { .. })
+                    | GeneratedChunkError::Generation(
+                        GenError::StructureDecorationIndexUnavailable { .. }
+                    )
+            ));
+            assert_eq!(holder.status(), starting_status);
+            assert_generated_proto_equal(&holder.chunk, &expected.chunk);
+        }
+    }
+
+    #[test]
+    fn successful_features_publish_distance_one_writebacks() {
+        let generator = Arc::new(OverworldGenerator::new(42));
+        let mut holder = writeback_probe_holder(&generator, false);
+
+        holder
+            .generate_through(ChunkStatus::Features)
+            .expect("the successful FEATURES seam must publish its writeback");
+        assert_eq!(holder.status(), ChunkStatus::Features);
+        let writebacks = holder.take_feature_writebacks();
+        let positions: Vec<_> = writebacks.iter().map(|(pos, _)| *pos).collect();
+        assert_eq!(
+            positions,
+            vec![
+                ChunkPos::new(-1, -1),
+                ChunkPos::new(-1, 0),
+                ChunkPos::new(-1, 1),
+                ChunkPos::new(0, -1),
+                ChunkPos::new(0, 1),
+                ChunkPos::new(1, -1),
+                ChunkPos::new(1, 0),
+                ChunkPos::new(1, 1),
+            ],
+            "successful FEATURES writebacks must preserve cache order"
+        );
+        let east = writebacks
+            .into_iter()
+            .find(|(pos, _)| *pos == ChunkPos::new(1, 0))
+            .map(|(_, chunk)| chunk)
+            .expect("east distance-1 writeback");
+        assert_eq!(
+            east.get_block_state(0, 64, 0),
+            Blocks::STONE.default_block_state(),
+            "the owner must receive the cross-chunk feature write"
+        );
+        assert!(
+            holder.take_feature_writebacks().is_empty(),
+            "writebacks are consumed exactly once"
+        );
+    }
+
+    #[test]
+    fn successful_features_persist_all_owned_dependency_mutations() {
+        let generator = Arc::new(OverworldGenerator::new(42));
+        let workspace = FeatureWorkspace::new();
+        let mut holder = workspace_writeback_probe_holder(&generator, &workspace);
+
+        holder
+            .generate_through(ChunkStatus::Features)
+            .expect("the successful FEATURES seam must publish all owned dependencies");
+        assert_eq!(holder.status(), ChunkStatus::Features);
+        assert_eq!(workspace.len(), 17 * 17 - 1);
+
+        workspace.with_chunk(ChunkPos::new(1, 0), |chunk| {
+            let chunk = chunk.expect("the distance-one owner must be retained");
+            assert_eq!(
+                chunk.get_block_state(0, 64, 0),
+                Blocks::STONE.default_block_state(),
+                "distance-one block writes must reach the authoritative workspace"
+            );
+        });
+        workspace.with_chunk(ChunkPos::new(8, 0), |chunk| {
+            let chunk = chunk.expect("the far dependency owner must be retained");
+            let section_index = chunk.get_section_index(64) as usize;
+            assert_eq!(
+                chunk.get_post_processing()[section_index],
+                vec![0],
+                "far dependency post-processing must survive region teardown"
+            );
+            let ticks = chunk.get_fluid_ticks().scheduled_ticks();
+            assert_eq!(ticks.len(), 1);
+            assert_eq!(ticks[0].r#type, FluidId(4));
+            assert_eq!(ticks[0].pos, BlockPos::new(128, 64, 0));
+        });
+    }
+
+    /// A workspace entry retained by a neighboring center can sit below the
+    /// slot status this center's FEATURES cache requires: the StructureStarts
+    /// placeholder at distance two from C1 is a Carvers dependency of adjacent
+    /// C2. Paper's scheduler never hands a decoration pass an
+    /// under-generated dependency, so composition must regenerate stale
+    /// lower-status entries rather than silently reusing void terrain.
+    #[test]
+    fn feature_region_regenerates_workspace_entries_below_required_status() {
+        let generator = Arc::new(OverworldGenerator::new(42));
+        let workspace = FeatureWorkspace::new();
+        // Simulate C1's retained distance-two StructureStarts placeholder at
+        // (2, 0): primed heightmaps only, never advanced through CARVERS.
+        let mut stale = fresh_worldgen_chunk(ChunkPos::new(2, 0), &generator);
+        stale.prime_heightmaps(&FINAL_HEIGHTMAPS);
+        stale.set_persisted_status(ChunkStatus::StructureStarts);
+        workspace.insert(stale);
+        // An up-to-date entry at the same position must still be reused.
+        let fresh_entry = {
+            let mut chunk = generate_ring_chunk(ChunkPos::new(0, 1), &generator);
+            chunk.set_persisted_status(ChunkStatus::Carvers);
+            chunk
+        };
+        let fresh_marker = fresh_entry.get_block_state(0, 64, 0);
+        workspace.insert(fresh_entry);
+
+        // Drive a successful composition-only FEATURES pass from (1, 0) (the
+        // probe body composes the region and republishes every owned
+        // dependency, then returns Ok) so the stale (2, 0) entry is a
+        // distance-one Carvers dependency and the workspace transaction
+        // commits.
+        let mut holder =
+            workspace_writeback_probe_holder_at(&generator, &workspace, ChunkPos::new(1, 0));
+        holder
+            .generate_through(ChunkStatus::Features)
+            .expect("the probe FEATURES seam must compose and commit");
+
+        // The stale StructureStarts entry was replaced by a CARVERS-status
+        // ring chunk; the adequate Carvers entry survives untouched.
+        workspace.with_chunk(ChunkPos::new(2, 0), |chunk| {
+            let chunk = chunk.expect("regenerated entry must be retained");
+            assert!(
+                chunk
+                    .get_persisted_status()
+                    .is_or_after(ChunkStatus::Carvers)
+            );
+        });
+        workspace.with_chunk(ChunkPos::new(0, 1), |chunk| {
+            let chunk = chunk.expect("adequate entry must be retained");
+            assert_eq!(
+                chunk.get_block_state(0, 64, 0),
+                fresh_marker,
+                "an entry meeting its slot status must not be regenerated"
+            );
+        });
+    }
+
+    #[test]
+    fn failed_features_drop_staged_writebacks_and_restore_before_retry() {
+        let generator = Arc::new(OverworldGenerator::new(42));
+        let expected = {
+            let mut expected = fresh_worldgen_chunk(ChunkPos::ZERO, &generator);
+            expected.set_persisted_status(ChunkStatus::Carvers);
+            expected
+        };
+        let mut holder = writeback_probe_holder(&generator, true);
+
+        let error = holder
+            .generate_through(ChunkStatus::Features)
+            .expect_err("the failing FEATURES seam must roll back");
+        assert!(matches!(
+            error,
+            GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
+                step_index: 9,
+                global_feature_index: 17,
+                feature_key: "minecraft:dark_forest_vegetation",
+                ..
+            })
+        ));
+        assert_eq!(holder.status(), ChunkStatus::Carvers);
+        assert_generated_proto_equal(&holder.chunk, &expected);
+        assert!(
+            holder.take_feature_writebacks().is_empty(),
+            "failed FEATURES must never publish staged dependency mutations"
+        );
+
+        let retry = holder
+            .generate_through(ChunkStatus::Features)
+            .expect_err("the failed FEATURES attempt must be cached");
+        assert!(matches!(
+            retry,
+            GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
+                step_index: 9,
+                global_feature_index: 17,
+                feature_key: "minecraft:dark_forest_vegetation",
+                ..
+            })
+        ));
+        assert_eq!(holder.status(), ChunkStatus::Carvers);
+        assert_generated_proto_equal(&holder.chunk, &expected);
+        assert!(holder.take_feature_writebacks().is_empty());
+    }
+
     /// FULL remains the consuming ProtoChunk → LevelChunk boundary even after
     /// FEATURES has reached its cached typed failure. The historical FEATURES
     /// error must never shadow the stable FULL UnsupportedStatus response.
     #[test]
     fn full_rejection_precedes_cached_features_failure() {
         let generator = test_generator();
-        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        let mut holder = feature_holder(&generator, ChunkPos::ZERO);
         let features_error = holder
             .generate_through(ChunkStatus::Features)
             .expect_err("FEATURES must stop at its typed boundary");
@@ -4138,13 +5771,13 @@ mod tests {
         let generator = test_generator();
         let decoded = decode_placed_feature("minecraft:lake_lava_underground", &generator)
             .expect("the seed-42 lake entry must decode");
-        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        let placed = decoded.placed_holder.value(decoded.placed_registry);
         assert_eq!(placed.placement().len(), 6);
         assert!(matches!(
             placed.feature(),
             Holder::Reference { registry, .. } if *registry == decoded.configured_registry.registry_id()
         ));
-        let configured = placed.feature().value(&decoded.configured_registry);
+        let configured = placed.feature().value(decoded.configured_registry);
         assert_eq!(
             configured.feature,
             feature_id_from_registry_name("minecraft:lake")
@@ -4157,12 +5790,12 @@ mod tests {
         let generator = test_generator();
         let decoded = decode_placed_feature("minecraft:amethyst_geode", &generator)
             .expect("the amethyst geode entry must decode");
-        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        let placed = decoded.placed_holder.value(decoded.placed_registry);
         assert!(matches!(
             placed.feature(),
             Holder::Reference { registry, .. } if *registry == decoded.configured_registry.registry_id()
         ));
-        let configured = placed.feature().value(&decoded.configured_registry);
+        let configured = placed.feature().value(decoded.configured_registry);
         assert_eq!(
             configured.feature,
             feature_id_from_registry_name("minecraft:geode")
@@ -4229,19 +5862,20 @@ mod tests {
 
     /// The Batch 2/3 decoder arms decode the generated configured/placed JSON of
     /// each dispatch leaf seated in the seed-42 closure. These focused tests
-    /// cover the decoder arms directly — the runtime stops at the step-9
-    /// dark_forest_vegetation boundary, so the later-step leaves (springs,
-    /// seagrass, freeze_top_layer) cannot be reached end-to-end and get their own
-    /// independent decode coverage here. The simple_block, block_column, and
-    /// vines arms are not separately exercised by these tests.
+    /// cover the decoder arms directly — the seed-42 dark-forest parent is
+    /// rejected by its surface-water filter before the nested selector executes,
+    /// and the runtime then stops at the step-10 `freeze_top_layer` boundary.
+    /// The later-step leaves therefore get their own independent decode coverage
+    /// here. The simple_block, block_column, and vines arms are not separately
+    /// exercised by these tests.
     #[test]
     fn ore_dirt_decodes_through_the_batch2_ore_arm() {
         let generator = test_generator();
         let decoded = decode_placed_feature("minecraft:ore_dirt", &generator)
             .expect("the seed-42 ore_dirt entry must decode");
-        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        let placed = decoded.placed_holder.value(decoded.placed_registry);
         assert_eq!(placed.placement().len(), 4);
-        let configured = placed.feature().value(&decoded.configured_registry);
+        let configured = placed.feature().value(decoded.configured_registry);
         assert_eq!(
             configured.feature,
             feature_id_from_registry_name("minecraft:ore")
@@ -4259,9 +5893,9 @@ mod tests {
         let generator = test_generator();
         let decoded = decode_placed_feature("minecraft:disk_sand", &generator)
             .expect("the seed-42 disk_sand entry must decode");
-        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        let placed = decoded.placed_holder.value(decoded.placed_registry);
         assert_eq!(placed.placement().len(), 5);
-        let configured = placed.feature().value(&decoded.configured_registry);
+        let configured = placed.feature().value(decoded.configured_registry);
         assert_eq!(
             configured.feature,
             feature_id_from_registry_name("minecraft:disk")
@@ -4280,9 +5914,9 @@ mod tests {
             .expect("the seed-42 spring_water entry must decode");
         let configured = decoded
             .placed_holder
-            .value(&decoded.placed_registry)
+            .value(decoded.placed_registry)
             .feature()
-            .value(&decoded.configured_registry);
+            .value(decoded.configured_registry);
         assert_eq!(
             configured.feature,
             feature_id_from_registry_name("minecraft:spring_feature")
@@ -4301,9 +5935,9 @@ mod tests {
             .expect("the seed-42 seagrass_cold entry must decode");
         let configured = decoded
             .placed_holder
-            .value(&decoded.placed_registry)
+            .value(decoded.placed_registry)
             .feature()
-            .value(&decoded.configured_registry);
+            .value(decoded.configured_registry);
         assert_eq!(
             configured.feature,
             feature_id_from_registry_name("minecraft:seagrass")
@@ -4322,9 +5956,9 @@ mod tests {
             .expect("the freeze_top_layer entry must decode");
         let configured = decoded
             .placed_holder
-            .value(&decoded.placed_registry)
+            .value(decoded.placed_registry)
             .feature()
-            .value(&decoded.configured_registry);
+            .value(decoded.configured_registry);
         assert_eq!(
             configured.feature,
             feature_id_from_registry_name("minecraft:freeze_top_layer")
@@ -4357,9 +5991,9 @@ mod tests {
         );
         let decoded = decode_placed_feature("minecraft:underwater_magma", &generator)
             .expect("the seed-42 underwater_magma entry must decode");
-        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        let placed = decoded.placed_holder.value(decoded.placed_registry);
         assert_eq!(placed.placement().len(), 5);
-        let configured = placed.feature().value(&decoded.configured_registry);
+        let configured = placed.feature().value(decoded.configured_registry);
         assert_eq!(
             configured.feature,
             FeatureId::new(21),
@@ -4386,9 +6020,9 @@ mod tests {
         );
         let decoded = decode_placed_feature("minecraft:glow_lichen", &generator)
             .expect("the seed-42 glow_lichen entry must decode");
-        let placed = decoded.placed_holder.value(&decoded.placed_registry);
+        let placed = decoded.placed_holder.value(decoded.placed_registry);
         assert_eq!(placed.placement().len(), 5);
-        let configured = placed.feature().value(&decoded.configured_registry);
+        let configured = placed.feature().value(decoded.configured_registry);
         assert_eq!(configured.feature, FeatureId::new(20));
         let cfg = (configured.config.as_ref() as &dyn std::any::Any)
             .downcast_ref::<MultifaceGrowthConfiguration>()
@@ -4410,16 +6044,69 @@ mod tests {
     /// so the feature returns false having consumed no placement-box RNG. The
     /// run then continues into VEGETAL_DECORATION, where Batch 4 decodes and
     /// executes `minecraft:glow_lichen` through `minecraft:multiface_growth`.
-    /// It refuses at the next unsupported *selected* leaf WITHOUT mutating the
+    /// It refuses at the next unsupported *selected* path WITHOUT mutating the
     /// RNG past that refusal: the run returns typed immediately at
-    /// `minecraft:dark_forest_vegetation` (step 9/global 17), so the chunk stays
-    /// CARVERS and FEATURES is never stamped. The typed-unavailable dispatches
+    /// `minecraft:freeze_top_layer` (step 10/global 0), when its biome freeze
+    /// query reaches the unimplemented `shouldFreeze` seam. The chunk stays CARVERS
+    /// and FEATURES is never stamped. The typed-unavailable dispatches
     /// for underwater magma (id 21) and multiface growth (id 20) no longer
     /// refuse; both concrete features are reached.
+    ///
+    /// Seed-1 chunk (0,0) reaches a real `minecraft:spring_water` placement:
+    /// the spring leaf previously panicked in the unimplemented
+    /// `LevelAccessor.scheduleTick` seam. With the fluid routing implemented,
+    /// the pass must retain the scheduled fluid tick in the owning chunk. The
+    /// run is bounded at the FLUID_SPRINGS step so the pass ends on the spring
+    /// itself rather than the later unsupported seagrass seam.
+    #[test]
+    fn seed1_spring_water_places_and_schedules_fluid_tick() {
+        let generator = Arc::new(OverworldGenerator::new(1));
+        let mut holder = feature_holder(&generator, ChunkPos::ZERO);
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let workspace = FeatureWorkspace::new();
+        let writebacks = run_biome_decoration_through(
+            &mut holder.chunk,
+            &generator,
+            &workspace,
+            Decoration::FluidSprings as usize + 1,
+        )
+        .expect("the seed-1 FLUID_SPRINGS-bounded pass must not panic");
+        assert!(
+            !writebacks.is_empty(),
+            "a real spring write must reach a distance-one owner or the center"
+        );
+        // The spring schedules in its owning chunk; collect the retained
+        // ticks across the workspace owners and the center.
+        let center_ticks = holder.chunk.get_fluid_ticks().scheduled_ticks().to_vec();
+        let mut total_ticks = center_ticks.len();
+        let mut ticks_seen = center_ticks;
+        for (pos, _) in &writebacks {
+            workspace.with_chunk(*pos, |chunk| {
+                if let Some(chunk) = chunk {
+                    let ticks = chunk.get_fluid_ticks().scheduled_ticks();
+                    total_ticks += ticks.len();
+                    ticks_seen.extend(ticks.iter().cloned());
+                }
+            });
+        }
+        assert!(
+            total_ticks >= 1,
+            "seed-1 spring_water must schedule a fluid tick somewhere"
+        );
+        assert_eq!(ticks_seen.len(), total_ticks);
+        // Zero delay against the region's default game time: every spring's
+        // flow is due immediately (`gameTime + 0`).
+        for tick in &ticks_seen {
+            assert_eq!(tick.delay, 0);
+        }
+    }
+
     #[test]
     fn seed42_does_not_mutate_rng_past_the_next_selected_unsupported_leaf() {
         let generator = test_generator();
-        let mut holder = generator.create_holder(ChunkPos::new(0, 0));
+        let mut holder = feature_holder(&generator, ChunkPos::new(0, 0));
         holder
             .generate_through(ChunkStatus::Carvers)
             .expect("CARVERS");
@@ -4430,9 +6117,9 @@ mod tests {
             matches!(
                 &err,
                 GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
-                    step_index: 9,
-                    global_feature_index: 17,
-                    feature_key: "minecraft:dark_forest_vegetation",
+                    step_index: 10,
+                    global_feature_index: 0,
+                    feature_key: "minecraft:freeze_top_layer",
                     ..
                 })
             ),
@@ -4442,14 +6129,10 @@ mod tests {
     }
 
     /// The three Batch 2 selector leaves are wired in the decoder, and the
-    /// runtime stops at the step-9 dark_forest_vegetation boundary so these
-    /// later-step arms are exercised independently here. Full recursive decode
-    /// of a selector's inline placed/configured sub-features defers with the
-    /// `#126` codec stubs (`configured_feature_direct_codec` and the inline
-    /// `placement_modifier_codec` — issue #126, not yet ported), so the wire
-    /// surface is pinned: each selector dispatch type routes to its config
-    /// codec arm and the recursive sub-feature decode fails typed naming the
-    /// `#126` deferral, never fabricating a holder.
+    /// generated closure now gives their named and inline placed holders one
+    /// shared registry identity. A concrete configuration unit that is not yet
+    /// ported remains an explicit deferred value and refuses only if selected;
+    /// it is never replaced by a selector-specific branch or a no-op.
     #[test]
     fn selector_dispatch_types_are_registered() {
         for (type_name, id) in [
@@ -4465,21 +6148,756 @@ mod tests {
         }
     }
 
-    /// A selector's recursive inline sub-feature decode fails typed with the
-    /// `#126` codec deferral (the inline `ConfiguredFeature`/placement-modifier
-    /// codecs are not yet ported), rather than fabricating a placeholder holder
-    /// or silently dropping the reference. This is the honest boundary for the
-    /// Batch 2 selector arms given the runtime stops at step 6.
     #[test]
-    fn selector_recursive_inline_decode_defers_with_126() {
-        let generator = test_generator();
-        let err = match decode_placed_feature("minecraft:forest_flowers", &generator) {
-            Ok(_) => panic!("the inline-sub-feature decode must fail typed"),
-            Err(e) => e,
-        };
+    fn generated_closure_follows_selector_and_vegetation_holders() {
+        let selector_edges = generated_feature_edges(GeneratedFeatureNode::Configured(
+            "minecraft:dark_forest_vegetation",
+        ))
+        .expect("selector closure edges");
+        assert!(selector_edges.contains(&GeneratedFeatureNode::Placed(
+            "minecraft:dark_oak_leaf_litter",
+        )));
         assert!(
-            err.contains("#126") || err.contains("issue #126") || err.contains("STUB"),
-            "the selector decode must name the #126 deferral, got: {err}"
+            selector_edges.contains(&GeneratedFeatureNode::Placed("minecraft:oak_leaf_litter",))
+        );
+
+        let vegetation_edges =
+            generated_feature_edges(GeneratedFeatureNode::Configured("minecraft:moss_patch"))
+                .expect("vegetation-patch closure edge");
+        assert_eq!(
+            vegetation_edges,
+            vec![GeneratedFeatureNode::Configured(
+                "minecraft:moss_vegetation"
+            )]
+        );
+    }
+
+    #[test]
+    fn generated_closure_follows_real_root_system_tree_holder() {
+        // The two real root-system corpus entries (ids 167/168) hold an inline
+        // placed feature under `config.feature`; the closure must follow it.
+        for name in [
+            "minecraft:rooted_azalea_tree",
+            "minecraft:rooted_sulfur_spring",
+        ] {
+            let edges = generated_feature_edges(GeneratedFeatureNode::Configured(name))
+                .unwrap_or_else(|error| panic!("{name} root-system closure edges: {error}"));
+            let expected = if name == "minecraft:rooted_azalea_tree" {
+                GeneratedFeatureNode::Configured("minecraft:azalea_tree")
+            } else {
+                GeneratedFeatureNode::Configured("minecraft:sulfur_spring")
+            };
+            assert_eq!(edges, vec![expected], "{name} must follow config.feature");
+        }
+
+        // Counterfactual: a walker that skips `minecraft:root_system` configs
+        // would return no edges here and silently accept a dangling tree holder.
+        let entry = CONFIGURED_FEATURE_BY_NAME
+            .get("minecraft:rooted_azalea_tree")
+            .expect("real root-system fixture");
+        let mut json: Value = serde_json::from_str(entry.json).expect("fixture JSON");
+        json["config"]["feature"]["feature"] =
+            serde_json::json!("minecraft:missing_nested_feature");
+        let error = generated_configured_object(
+            json.as_object().expect("configured object"),
+            &mut Vec::new(),
+            "minecraft:rooted_azalea_tree",
+        )
+        .expect_err("missing root-system tree holder must fail closure validation");
+        assert!(error.contains("missing configured feature minecraft:missing_nested_feature"));
+
+        // Non-holder strings in the same config stay opaque metadata.
+        let mut metadata_only: Value = serde_json::from_str(entry.json).expect("fixture JSON");
+        metadata_only["config"]["root_state_provider"]["type"] =
+            serde_json::json!("minecraft:missing_but_not_a_feature_provider");
+        generated_configured_object(
+            metadata_only.as_object().expect("configured object"),
+            &mut Vec::new(),
+            "minecraft:rooted_azalea_tree",
+        )
+        .expect("provider type strings are intentionally opaque");
+    }
+
+    #[test]
+    fn generated_closure_follows_weighted_data_inside_real_nested_json() {
+        let entry = CONFIGURED_FEATURE_BY_NAME
+            .get("minecraft:sulfur_spring")
+            .expect("weighted generated fixture");
+        let mut json: Value = serde_json::from_str(entry.json).expect("fixture JSON");
+        // Keep the real weighted-random-selector / data / inline sequence shape,
+        // but replace one nested configured holder with a missing named holder.
+        json["config"]["features"][0]["data"]["feature"]["config"]["features"][0] = serde_json::json!({
+            "feature": "minecraft:missing_nested_feature",
+            "placement": [],
+        });
+        let mut edges = Vec::new();
+        let error = generated_configured_object(
+            json.as_object().expect("configured object"),
+            &mut edges,
+            "minecraft:sulfur_spring",
+        )
+        .expect_err("missing nested weighted data holder must fail");
+        assert!(error.contains("missing configured feature minecraft:missing_nested_feature"));
+    }
+
+    #[test]
+    fn generated_selector_decoders_reject_malformed_real_json_counterfactuals() {
+        let generator = test_generator();
+        let ops =
+            RegistryOps::create_from_access(&JsonOps::INSTANCE, generator.feature_access().clone());
+
+        let random_entry = CONFIGURED_FEATURE_BY_NAME
+            .get("minecraft:dark_forest_vegetation")
+            .expect("random-selector generated fixture");
+        for chance in [-0.1_f64, 1.1] {
+            let mut json: Value = serde_json::from_str(random_entry.json).expect("fixture JSON");
+            json["config"]["features"][0]["chance"] = serde_json::json!(chance);
+            let error = decode_configured_feature_value(
+                "minecraft:dark_forest_vegetation",
+                &json,
+                &ops,
+                generator.feature_access(),
+            )
+            .expect_err("random-selector chance outside [0, 1] must fail");
+            assert!(
+                error.contains("outside of range"),
+                "unexpected chance validation error: {error}"
+            );
+        }
+
+        let weighted_entry = CONFIGURED_FEATURE_BY_NAME
+            .get("minecraft:sulfur_spring")
+            .expect("weighted-selector generated fixture");
+        for weight in [-1_i64, 0] {
+            let mut json: Value = serde_json::from_str(weighted_entry.json).expect("fixture JSON");
+            json["config"]["features"][0]["weight"] = serde_json::json!(weight);
+            let error = decode_configured_feature_value(
+                "minecraft:sulfur_spring",
+                &json,
+                &ops,
+                generator.feature_access(),
+            )
+            .expect_err("weighted-selector weight below one must fail");
+            assert!(
+                error.contains("weight must be at least 1"),
+                "unexpected weight validation error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_closure_reads_root_config_for_real_selector_cycles() {
+        let entry = CONFIGURED_FEATURE_BY_NAME
+            .get("minecraft:dark_forest_vegetation")
+            .expect("real selector fixture");
+        let mut json: Value = serde_json::from_str(entry.json).expect("fixture JSON");
+        // `default` is a PlacedFeature holder. Point it at the real placed entry
+        // whose configured holder points back to this configured root. A walker
+        // that ignores the root `config` object cannot observe this cycle.
+        json["config"]["default"] = serde_json::json!("minecraft:dark_forest_vegetation");
+        let error = validate_generated_feature_graph(
+            [GeneratedFeatureNode::Configured(
+                "minecraft:dark_forest_vegetation",
+            )],
+            &mut |node| {
+                if node == GeneratedFeatureNode::Configured("minecraft:dark_forest_vegetation") {
+                    let mut refs = Vec::new();
+                    generated_configured_object(
+                        json.as_object().expect("configured object"),
+                        &mut refs,
+                        "minecraft:dark_forest_vegetation",
+                    )?;
+                    Ok(refs)
+                } else {
+                    generated_feature_edges(node)
+                }
+            },
+        )
+        .expect_err("root configured-feature config must participate in cycle checks");
+        assert!(error.contains("generated feature closure cycle"));
+    }
+
+    #[test]
+    fn generated_closure_reads_real_vegetation_patch_holder_without_scanning_metadata() {
+        let entry = CONFIGURED_FEATURE_BY_NAME
+            .get("minecraft:moss_patch")
+            .expect("real vegetation-patch fixture");
+        let mut json: Value = serde_json::from_str(entry.json).expect("fixture JSON");
+        // This is a real Holder<PlacedFeature> shape under `vegetation_feature`.
+        json["config"]["vegetation_feature"]["feature"] =
+            serde_json::json!("minecraft:missing_nested_feature");
+        let error = generated_configured_object(
+            json.as_object().expect("configured object"),
+            &mut Vec::new(),
+            "minecraft:moss_patch",
+        )
+        .expect_err("missing vegetation holder must fail closure validation");
+        assert!(error.contains("missing configured feature minecraft:missing_nested_feature"));
+
+        // Other resource strings in the same config are metadata, not holder
+        // edges; they must not be looked up as configured or placed features.
+        let mut metadata_only: Value = serde_json::from_str(entry.json).expect("fixture JSON");
+        metadata_only["config"]["replaceable"] =
+            serde_json::json!("#minecraft:missing_but_not_a_feature_holder");
+        generated_configured_object(
+            metadata_only.as_object().expect("configured object"),
+            &mut Vec::new(),
+            "minecraft:moss_patch",
+        )
+        .expect("metadata resource strings are intentionally opaque");
+    }
+
+    #[test]
+    fn generated_graph_rejects_missing_references_and_cycles() {
+        let missing =
+            validate_generated_feature_graph([GeneratedFeatureNode::Placed("root")], &mut |node| {
+                match node {
+                    GeneratedFeatureNode::Placed("root") => {
+                        Ok(vec![GeneratedFeatureNode::Configured("missing")])
+                    }
+                    GeneratedFeatureNode::Configured("missing") => {
+                        Err("missing generated configured feature missing".to_string())
+                    }
+                    other => Err(format!("unexpected node {other:?}")),
+                }
+            })
+            .expect_err("missing graph edge must fail before publication");
+        assert!(missing.contains("missing generated configured feature missing"));
+
+        let cycle =
+            validate_generated_feature_graph([GeneratedFeatureNode::Placed("root")], &mut |node| {
+                match node {
+                    GeneratedFeatureNode::Placed("root") => {
+                        Ok(vec![GeneratedFeatureNode::Configured("branch")])
+                    }
+                    GeneratedFeatureNode::Configured("branch") => {
+                        Ok(vec![GeneratedFeatureNode::Placed("root")])
+                    }
+                    other => Err(format!("unexpected node {other:?}")),
+                }
+            })
+            .expect_err("cyclic graph must fail before publication");
+        assert!(cycle.contains("generated feature closure cycle"));
+    }
+
+    /// The generated closure preserves full generated ids and one registry
+    /// identity for every placed/configured entry. Synthetic gap values retain
+    /// insertion positions that are absent from the generated name tables. The
+    /// dark-forest selector's inline placed
+    /// mushroom holders and named branches therefore resolve through the same
+    /// `RegistryOps` access as the root feature.
+    #[test]
+    fn generated_selector_closure_preserves_full_registry_identity() {
+        let generator = test_generator();
+        let placed = generator
+            .feature_access()
+            .lookup(&*PLACED_FEATURE)
+            .expect("generated placed registry");
+        let configured = generator
+            .feature_access()
+            .lookup(&*CONFIGURED_FEATURE)
+            .expect("generated configured registry");
+        let placed_entries = sorted_placed_feature_entries().expect("generated placed ids");
+        let configured_entries =
+            sorted_configured_feature_entries().expect("generated configured ids");
+        assert_eq!(
+            placed.size(),
+            placed_name_slots(&placed_entries).len() as i32
+        );
+        assert_eq!(
+            configured.size(),
+            configured_name_slots(&configured_entries).len() as i32
+        );
+        for (name, entry) in placed_entries {
+            let key = ResourceKey::create(&*PLACED_FEATURE, Identifier::parse(name));
+            assert!(matches!(
+                placed.get(&key),
+                Some(Holder::Reference { registry, id })
+                    if registry == placed.registry_id() && id == entry.id as u32
+            ));
+        }
+        for (name, entry) in configured_entries {
+            let key = ResourceKey::create(&*CONFIGURED_FEATURE, Identifier::parse(name));
+            assert!(matches!(
+                configured.get(&key),
+                Some(Holder::Reference { registry, id })
+                    if registry == configured.registry_id() && id == entry.id as u32
+            ));
+        }
+        decode_placed_feature("minecraft:dark_forest_vegetation", &generator)
+            .expect("the random-selector root must decode through the generated closure");
+    }
+
+    /// Inline selector branches retain their concrete configured holders. The
+    /// two mushroom branches are executable registered features (ids 11 and 10),
+    /// while the named dark-oak branch remains a registry reference to the
+    /// deferred tree leaf; no branch is flattened into a no-op.
+    #[test]
+    fn generated_selector_keeps_inline_mushroom_branches_typed() {
+        let generator = test_generator();
+        let configured = generator
+            .feature_access()
+            .lookup(&*CONFIGURED_FEATURE)
+            .expect("generated configured registry");
+        let key = ResourceKey::create(
+            &*CONFIGURED_FEATURE,
+            Identifier::parse("minecraft:dark_forest_vegetation"),
+        );
+        let root = configured.get(&key).expect("dark forest configured holder");
+        let root = root.value(configured);
+        let selector = (root.config.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<RandomFeatureConfiguration>()
+            .expect("dark forest must retain random selector configuration");
+        assert_eq!(selector.features.len(), 7);
+        for (branch, expected_id) in selector.features[..2].iter().zip([11_u32, 10_u32]) {
+            let Holder::Direct(placed) = branch.feature() else {
+                panic!("mushroom selector branch must remain inline");
+            };
+            let configured_branch = placed.feature().value(configured);
+            assert_eq!(configured_branch.feature, FeatureId::new(expected_id));
+            assert!(
+                (configured_branch.config.as_ref() as &dyn std::any::Any)
+                    .downcast_ref::<HugeMushroomFeatureConfiguration>()
+                    .is_some(),
+                "mushroom branch must decode its concrete configuration"
+            );
+        }
+        assert!(matches!(
+            selector.features[2].feature(),
+            Holder::Reference { registry, id }
+                if *registry == generator
+                    .feature_access()
+                    .lookup(&*PLACED_FEATURE)
+                    .expect("generated placed registry")
+                    .registry_id()
+                    && *id == PLACED_FEATURE_BY_NAME
+                        .get("minecraft:dark_oak_leaf_litter")
+                        .expect("dark oak placed entry")
+                        .id as u32
+        ));
+    }
+
+    /// Gap slots are real registry positions but fail closed with a sentinel
+    /// feature id rather than accidentally dispatching Feature.NO_OP (id 0).
+    #[test]
+    fn generated_registry_gaps_never_use_no_op_id() {
+        let generator = test_generator();
+        let configured = generator
+            .feature_access()
+            .lookup(&*CONFIGURED_FEATURE)
+            .expect("generated configured registry");
+        let entries = sorted_configured_feature_entries().expect("generated configured ids");
+        let gap_id = configured_name_slots(&entries)
+            .iter()
+            .position(Option::is_none)
+            .expect("generated configured gap");
+        let gap = configured
+            .by_id(gap_id as i32)
+            .expect("configured gap value");
+        assert_eq!(gap.feature, FeatureId::new(u32::MAX));
+        assert!(gap.config.unavailable_feature().is_some());
+    }
+
+    /// Every synthetic placed-feature slot points at the configured sentinel,
+    /// never at configured id 0. This keeps a missing generated entry from
+    /// silently dispatching whatever real feature occupies the first slot.
+    #[test]
+    fn generated_placed_gaps_point_at_the_fail_closed_sentinel() {
+        let generator = test_generator();
+        let placed = generator
+            .feature_access()
+            .lookup(&*PLACED_FEATURE)
+            .expect("generated placed registry");
+        let configured = generator
+            .feature_access()
+            .lookup(&*CONFIGURED_FEATURE)
+            .expect("generated configured registry");
+        let configured_entries =
+            sorted_configured_feature_entries().expect("generated configured ids");
+        let configured_gap_id = configured_name_slots(&configured_entries)
+            .iter()
+            .position(Option::is_none)
+            .expect("generated configured gap") as u32;
+        let placed_entries = sorted_placed_feature_entries().expect("generated placed ids");
+        let placed_gap_id = placed_name_slots(&placed_entries)
+            .iter()
+            .position(Option::is_none)
+            .expect("generated placed gap") as i32;
+        let gap = placed.by_id(placed_gap_id).expect("placed gap value");
+        assert!(matches!(
+            gap.feature(),
+            Holder::Reference { registry, id }
+                if *registry == configured.registry_id() && *id == configured_gap_id
+        ));
+    }
+
+    /// Paper's `RandomSelectorFeature.place` draws one float per weighted entry
+    /// in list order and stops at the first hit. The selector is reached only
+    /// after its parent `dark_forest_vegetation` placed feature consumes the two
+    /// `InSquarePlacement` `nextInt(16)` draws. At seed 42, step 9/global 17,
+    /// those placement draws are followed by two misses and a third draw that
+    /// selects `minecraft:dark_oak_leaf_litter`; the next failure is therefore
+    /// the selected tree configuration, not the selector or an alternate branch.
+    #[test]
+    fn seed42_dark_forest_selector_selects_dark_oak_leaf_litter() {
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        random.set_feature_seed(42, 17, 9);
+        assert_eq!(random.next_int_bound(16), 15);
+        assert_eq!(random.next_int_bound(16), 7);
+        let first = random.next_float();
+        let second = random.next_float();
+        let third = random.next_float();
+        assert!(first >= 0.025);
+        assert!(second >= 0.05);
+        assert!(third < 0.6666667);
+    }
+
+    #[test]
+    fn paper_feature_seed_override_reseeds_from_configured_feature_and_preserves_draw_order() {
+        let configured_seed = 987_654_321_i64;
+        let mut feature_seeds = HashMap::new();
+        feature_seeds.insert("minecraft:lake_lava".to_string(), configured_seed);
+        let generator = OverworldGenerator::new_with_feature_seeds(42, feature_seeds);
+        let origin = BlockPos::new(16, -64, 0);
+
+        let mut actual = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let decoration_seed = actual.set_decoration_seed(42, origin.get_x(), origin.get_z());
+        set_paper_feature_seed(
+            &mut actual,
+            &generator,
+            decoration_seed,
+            &origin,
+            "minecraft:lake_lava_underground",
+            2,
+            1,
+        );
+
+        let mut expected = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let expected_decoration_seed =
+            expected.set_decoration_seed(42, origin.get_x(), origin.get_z());
+        let expected_population_seed =
+            expected.set_decoration_seed(configured_seed, origin.get_x(), origin.get_z());
+        assert_eq!(expected_decoration_seed, decoration_seed);
+        expected.set_feature_seed(expected_population_seed, 2, 1);
+        assert_eq!(actual.next_long(), expected.next_long());
+        assert_eq!(actual.next_long(), expected.next_long());
+    }
+
+    /// Paper's structure loop owns a separate RNG index. Even when a caller
+    /// proves that structure decoration is available, placed-feature seeding
+    /// remains `globalIndexOfFeature`, not `structure_count + globalIndex`.
+    #[test]
+    fn paper_feature_seed_does_not_invent_a_structure_offset() {
+        let generator = OverworldGenerator::new(42);
+        let origin = BlockPos::new(0, -64, 0);
+        let mut actual = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let decoration_seed = actual.set_decoration_seed(42, origin.get_x(), origin.get_z());
+        set_paper_feature_seed(
+            &mut actual,
+            &generator,
+            decoration_seed,
+            &origin,
+            "minecraft:lake_lava_underground",
+            17,
+            9,
+        );
+
+        let mut expected = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        expected.set_decoration_seed(42, origin.get_x(), origin.get_z());
+        expected.set_feature_seed(decoration_seed, 17, 9);
+        let mut invented_offset = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        invented_offset.set_decoration_seed(42, origin.get_x(), origin.get_z());
+        invented_offset.set_feature_seed(decoration_seed, 20, 9);
+
+        assert_eq!(actual.next_long(), expected.next_long());
+        assert_ne!(actual.next_long(), invented_offset.next_long());
+    }
+
+    #[test]
+    fn paper_feature_seed_minus_one_skips_override_draws() {
+        let mut feature_seeds = HashMap::new();
+        feature_seeds.insert("minecraft:lake_lava".to_string(), -1);
+        let generator = OverworldGenerator::new_with_feature_seeds(42, feature_seeds);
+        let origin = BlockPos::new(16, -64, 0);
+
+        let mut actual = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let decoration_seed = actual.set_decoration_seed(42, origin.get_x(), origin.get_z());
+        set_paper_feature_seed(
+            &mut actual,
+            &generator,
+            decoration_seed,
+            &origin,
+            "minecraft:lake_lava_underground",
+            2,
+            1,
+        );
+
+        let mut expected = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        expected.set_decoration_seed(42, origin.get_x(), origin.get_z());
+        expected.set_feature_seed(decoration_seed, 2, 1);
+        assert_eq!(actual.next_long(), expected.next_long());
+        assert_eq!(actual.next_long(), expected.next_long());
+    }
+
+    /// The seed-42 dark-forest parent consumes its count and square-placement
+    /// draws, but Paper's `SurfaceWaterDepthFilter.forMaxDepth(0)` rejects all
+    /// 16 candidates before the heightmap, biome, or nested random-selector
+    /// feature runs. Keep this separate from the direct dark-oak survival check:
+    /// an empty parent placement is not a dark-oak execution boundary.
+    #[test]
+    fn seed42_dark_forest_surface_filter_rejects_before_dark_oak_would_survive() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let mut region = compose_feature_region(&mut holder.chunk, &generator);
+        let origin = BlockPos::new(0, -64, 0);
+        let decoded = decode_placed_feature("minecraft:dark_forest_vegetation", &generator)
+            .expect("dark forest placement modifiers");
+        let placed = decoded.placed_holder.value(decoded.placed_registry);
+        let selection_generator = FeatureSelectionGenerator {
+            generator: Arc::clone(&generator),
+            feature_key: "minecraft:dark_forest_vegetation",
+        };
+
+        // CountPlacement and InSquarePlacement select the exact first candidate
+        // Paper uses for step 9/global 17. The next modifier is the water-depth
+        // filter, so the candidate's complete parent prefix must be rejected.
+        let dummy_feature = ConfiguredFeatureErased {
+            feature: FeatureId::new(u32::MAX),
+            config: Arc::new(DeferredGeneratedFeatureConfiguration {
+                configured_key: "dark forest placement probe".to_string(),
+            }),
+        };
+        let prefix = PlacedFeature::new(
+            Holder::Direct(dummy_feature),
+            placed.placement()[..2].to_vec(),
+        );
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        random.set_feature_seed(42, 17, 9);
+        let candidate = prefix
+            .first_placement_position(&mut region, &selection_generator, &mut random, &origin)
+            .expect("the first two placement modifiers must select a candidate");
+        assert_eq!(candidate, BlockPos::new(15, -64, 7));
+
+        let ocean_floor = region.get_height_at(Types::OceanFloor, 15, 7);
+        let world_surface = region.get_height_at(Types::WorldSurface, 15, 7);
+        assert!(
+            world_surface - ocean_floor > 0,
+            "the pinned candidate must be submerged for max-depth-zero filtering"
+        );
+
+        let filtered_prefix = PlacedFeature::new(
+            Holder::Direct(ConfiguredFeatureErased {
+                feature: FeatureId::new(u32::MAX),
+                config: Arc::new(DeferredGeneratedFeatureConfiguration {
+                    configured_key: "dark forest filter probe".to_string(),
+                }),
+            }),
+            placed.placement()[..3].to_vec(),
+        );
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        random.set_feature_seed(42, 17, 9);
+        assert_eq!(
+            filtered_prefix.first_placement_position(
+                &mut region,
+                &selection_generator,
+                &mut random,
+                &origin,
+            ),
+            None,
+            "all 16 count/in-square candidates must fail the max-depth-zero filter"
+        );
+
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        random.set_feature_seed(42, 17, 9);
+        let parent_selection = placed.first_placement_position(
+            &mut region,
+            &selection_generator,
+            &mut random,
+            &origin,
+        );
+        assert_eq!(parent_selection, None);
+
+        // The same WorldGenRegion implements the Paper VegetationBlock rule for
+        // dark-oak saplings: only the block below and the supports_vegetation
+        // tag decide survival. This direct counterfactual proves the nested
+        // `would_survive` seam independently of the rejected parent path.
+        let support_pos = BlockPos::new(0, 0, 0);
+        let sapling_pos = support_pos.above();
+        let dark_oak_sapling = BlockState::of(
+            BlockId::from_name("minecraft:dark_oak_sapling")
+                .expect("dark oak sapling block must be generated"),
+        );
+        assert!(region.set_block(
+            &support_pos,
+            BlockState::of(BlockId::from_name("minecraft:stone").expect("stone")),
+            0,
+            512,
+        ));
+        assert!(
+            !region.can_survive(&dark_oak_sapling, &sapling_pos),
+            "dark-oak saplings must reject blocks outside supports_vegetation"
+        );
+        assert!(region.set_block(
+            &support_pos,
+            BlockState::of(BlockId::from_name("minecraft:dirt").expect("dirt")),
+            0,
+            512,
+        ));
+        assert!(
+            region.can_survive(&dark_oak_sapling, &sapling_pos),
+            "dark-oak saplings must survive on supports_vegetation blocks"
+        );
+
+        // Exercise the actual `dark_oak_leaf_litter` `would_survive` placement
+        // modifier over the dry counterfactual, not only the direct world-level
+        // predicate. This is the exact nested boundary the seed-42 selector
+        // would reach on a candidate that survives the parent placement chain.
+        let mut survival_random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        assert!(
+            placement_selects(
+                &mut region,
+                &generator,
+                &mut survival_random,
+                &sapling_pos,
+                "minecraft:dark_oak_leaf_litter",
+            )
+            .expect("dark-oak would-survive placement must decode")
+        );
+        assert!(region.set_block(
+            &support_pos,
+            BlockState::of(BlockId::from_name("minecraft:stone").expect("stone")),
+            0,
+            512,
+        ));
+        let mut survival_random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        assert!(
+            !placement_selects(
+                &mut region,
+                &generator,
+                &mut survival_random,
+                &sapling_pos,
+                "minecraft:dark_oak_leaf_litter",
+            )
+            .expect("dark-oak would-survive placement must decode")
+        );
+    }
+
+    /// The tree-bearing seed-42 fixture follows a different path from the
+    /// all-water origin: its outer typed boundary is still the parent placed
+    /// feature at step 9/global 17, while the nested selector falls through to
+    /// `oak_leaf_litter`, whose `would_survive` state is `oak_sapling`.
+    #[test]
+    fn seed42_chunk44_reports_outer_dark_forest_and_nested_oak_boundary() {
+        let generator = test_generator();
+        let mut holder = feature_holder(&generator, ChunkPos::new(4, 4));
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let error = holder
+            .generate_through(ChunkStatus::Features)
+            .expect_err("the nested oak survival seam must refuse FEATURES");
+        assert!(matches!(
+            error,
+            GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
+                chunk_pos,
+                step_index: 9,
+                global_feature_index: 17,
+                feature_key: "minecraft:dark_forest_vegetation",
+            }) if chunk_pos == ChunkPos::new(4, 4)
+        ));
+
+        // The typed error deliberately names the outer decoration dispatch. Pin
+        // the nested path separately so a future diagnostic cannot confuse the
+        // parent boundary with the configured/placed tree leaf that panicked.
+        assert_eq!(
+            configured_feature_key_for_placed("minecraft:oak_leaf_litter")
+                .expect("oak leaf litter placed feature must resolve"),
+            "minecraft:oak_leaf_litter"
+        );
+        let mut nested_holder = generator.create_holder(ChunkPos::new(4, 4));
+        nested_holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let mut region = compose_feature_region(&mut nested_holder.chunk, &generator);
+        let decoded = decode_placed_feature("minecraft:oak_leaf_litter", &generator)
+            .expect("oak leaf litter placement must decode");
+        let nested = decoded.placed_holder.value(decoded.placed_registry);
+        let selection_generator = FeatureSelectionGenerator {
+            generator: Arc::clone(&generator),
+            feature_key: "minecraft:oak_leaf_litter",
+        };
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            nested.first_placement_position(
+                &mut region,
+                &selection_generator,
+                &mut random,
+                &BlockPos::new(79, 67, 67),
+            )
+        }))
+        .expect_err("oak_leaf_litter must reach its oak_sapling would_survive seam");
+        let message = if let Some(message) = panic.downcast_ref::<String>() {
+            message.as_str()
+        } else if let Some(message) = panic.downcast_ref::<&'static str>() {
+            message
+        } else {
+            "<non-string panic>"
+        };
+        assert_eq!(
+            message,
+            "WorldGenRegion.canSurvive is not implemented for minecraft:oak_sapling (RivetTodo #232)"
+        );
+    }
+
+    /// A valid FEATURES pass may have no selected feature positions. Exercise
+    /// the real decoration loop with an empty per-step plan to ensure the pass
+    /// returns success instead of inventing a `FeaturePlacementDecode` error.
+    #[test]
+    fn empty_feature_steps_are_a_valid_decoration_pass() {
+        let generator = Arc::new(OverworldGenerator::new(42));
+        let placed_registry_id = RegistryBuilder::new(&*PLACED_FEATURE).registry_id();
+        let mut placed_by_id = HashMap::new();
+        let settings_sources = resolve_feature_settings(
+            &generator.biome_source.possible_biomes(),
+            placed_registry_id,
+            &mut placed_by_id,
+        )
+        .expect("the generated overworld settings must resolve");
+        let mut feature_list = build_features_per_step(
+            &settings_sources,
+            |(settings, _)| settings.features(),
+            false,
+        );
+        assert!(
+            !feature_list.is_empty(),
+            "the real overworld plan must contain decoration steps"
+        );
+        for step in &mut feature_list {
+            step.features.clear();
+        }
+        assert!(
+            generator
+                .feature_plan
+                .set(Ok(FeaturePlan {
+                    placed_by_id,
+                    settings_sources: Vec::new(),
+                    feature_list,
+                }))
+                .is_ok()
+        );
+
+        let mut chunk = fresh_worldgen_chunk(ChunkPos::ZERO, &generator);
+        chunk.set_persisted_status(ChunkStatus::Carvers);
+        let workspace = FeatureWorkspace::new();
+        let writebacks = run_biome_decoration(&mut chunk, &generator, &workspace, Some(0))
+            .expect("an empty selected-feature pass must succeed");
+        assert_eq!(
+            writebacks.len(),
+            8,
+            "the successful pass still returns its eight owned distance-one dependency holders"
         );
     }
 
@@ -4883,6 +7301,56 @@ mod tests {
                 .try_get_chunk(9, 0, ChunkStatus::Empty, true)
                 .is_err(),
             "the FEATURES cache must stop at the direct dependency radius"
+        );
+    }
+
+    #[test]
+    fn features_region_retains_distance_one_proto_writebacks_in_cache_order() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let mut region = compose_feature_region(&mut holder.chunk, &generator);
+        let east_pos = BlockPos::new(16, 64, 0);
+        assert!(<WorldGenRegion<
+            '_,
+            BlockState,
+            WorldgenBiomeId,
+            StructureKey,
+        > as WorldGenLevel>::set_block(
+            &mut region,
+            &east_pos,
+            Blocks::STONE.default_block_state(),
+            2,
+        ));
+
+        let writebacks = region.into_distance_one_proto_writebacks();
+        let positions: Vec<_> = writebacks.iter().map(|(pos, _)| *pos).collect();
+        assert_eq!(positions.len(), 8, "all eight distance-1 protos stay owned");
+        assert_eq!(
+            positions,
+            vec![
+                ChunkPos::new(-1, -1),
+                ChunkPos::new(-1, 0),
+                ChunkPos::new(-1, 1),
+                ChunkPos::new(0, -1),
+                ChunkPos::new(0, 1),
+                ChunkPos::new(1, -1),
+                ChunkPos::new(1, 0),
+                ChunkPos::new(1, 1),
+            ],
+            "writebacks preserve StaticCache2D's x-major/z-inner order"
+        );
+        let east = writebacks
+            .into_iter()
+            .find(|(pos, _)| *pos == ChunkPos::new(1, 0))
+            .map(|(_, chunk)| chunk)
+            .expect("east distance-1 proto writeback");
+        assert_eq!(
+            east.get_block_state(0, 64, 0),
+            Blocks::STONE.default_block_state(),
+            "a successful feature-region write must survive region consumption"
         );
     }
 

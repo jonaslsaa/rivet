@@ -57,6 +57,13 @@ pub trait FeatureConfiguration: Debug + Send + Sync + Any + 'static {
     {
         Box::new(std::iter::empty())
     }
+
+    /// A generated value may be registered before its feature implementation
+    /// is ported so named holders remain resolvable. Such a value must refuse
+    /// when selected, never behave like a fabricated leaf.
+    fn unavailable_feature(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// `FeatureConfiguration.NONE` — `NoneFeatureConfiguration.INSTANCE`.

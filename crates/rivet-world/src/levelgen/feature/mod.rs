@@ -541,6 +541,56 @@ pub fn feature_id_from_registry_name(name: &str) -> Option<FeatureId> {
         "minecraft:random_boolean_selector" => Some(FeatureId::new(55)),
         "minecraft:underwater_magma" => Some(FeatureId::new(21)),
         "minecraft:multiface_growth" => Some(FeatureId::new(20)),
+        // The selector's inline mushroom branches are concrete generated
+        // values, not deferred leaves.
+        "minecraft:huge_brown_mushroom" => Some(FeatureId::new(11)),
+        "minecraft:huge_red_mushroom" => Some(FeatureId::new(10)),
+        // Registered but not yet decoded by the generated FEATURES value
+        // layer. Keeping the real registry ids lets a holder closure defer
+        // their typed placement boundary without fabricating a feature id.
+        "minecraft:tree" => Some(FeatureId::new(1)),
+        "minecraft:fallen_tree" => Some(FeatureId::new(2)),
+        "minecraft:block_pile" => Some(FeatureId::new(3)),
+        "minecraft:bamboo" => Some(FeatureId::new(40)),
+        "minecraft:vegetation_patch" => Some(FeatureId::new(17)),
+        "minecraft:waterlogged_vegetation_patch" => Some(FeatureId::new(18)),
+        "minecraft:root_system" => Some(FeatureId::new(19)),
+        "minecraft:iceberg" => Some(FeatureId::new(24)),
+        "minecraft:blue_ice" => Some(FeatureId::new(23)),
+        "minecraft:kelp" => Some(FeatureId::new(34)),
+        "minecraft:spike" => Some(FeatureId::new(12)),
+        "minecraft:sea_pickle" => Some(FeatureId::new(38)),
+        "minecraft:speleothem_cluster" => Some(FeatureId::new(59)),
+        "minecraft:fossil" => Some(FeatureId::new(9)),
+        "minecraft:desert_well" => Some(FeatureId::new(8)),
+        "minecraft:block_blob" => Some(FeatureId::new(25)),
+        "minecraft:large_dripstone" => Some(FeatureId::new(60)),
+        "minecraft:speleothem" => Some(FeatureId::new(61)),
+        "minecraft:sculk_patch" => Some(FeatureId::new(62)),
+        "minecraft:sequence" => Some(FeatureId::new(56)),
+        "minecraft:weighted_random_selector" => Some(FeatureId::new(53)),
+        "minecraft:fill_layer" => Some(FeatureId::new(48)),
+        "minecraft:template" => Some(FeatureId::new(57)),
+        "minecraft:replace_single_block" => Some(FeatureId::new(6)),
+        "minecraft:end_gateway" => Some(FeatureId::new(32)),
+        "minecraft:end_spike" => Some(FeatureId::new(30)),
+        "minecraft:nether_forest_vegetation" => Some(FeatureId::new(42)),
+        "minecraft:huge_fungus" => Some(FeatureId::new(41)),
+        "minecraft:twisting_vines" => Some(FeatureId::new(44)),
+        "minecraft:weeping_vines" => Some(FeatureId::new(43)),
+        "minecraft:basalt_columns" => Some(FeatureId::new(45)),
+        "minecraft:basalt_pillar" => Some(FeatureId::new(50)),
+        "minecraft:delta_feature" => Some(FeatureId::new(46)),
+        "minecraft:netherrack_replace_blobs" => Some(FeatureId::new(47)),
+        "minecraft:bonus_chest" => Some(FeatureId::new(49)),
+        "minecraft:coral_claw" => Some(FeatureId::new(37)),
+        "minecraft:coral_mushroom" => Some(FeatureId::new(36)),
+        "minecraft:coral_tree" => Some(FeatureId::new(35)),
+        "minecraft:chorus_plant" => Some(FeatureId::new(5)),
+        "minecraft:end_platform" => Some(FeatureId::new(29)),
+        "minecraft:end_island" => Some(FeatureId::new(31)),
+        "minecraft:void_start_platform" => Some(FeatureId::new(7)),
+        "minecraft:glowstone_blob" => Some(FeatureId::new(13)),
         _ => None,
     }
 }
@@ -597,6 +647,16 @@ pub fn feature_place<R: RandomSource>(
     random: &mut R,
     origin: &BlockPos,
 ) -> bool {
+    // `Feature.place(FC, ...)` checks `ensureCanWrite(origin)` before invoking
+    // the feature body. Keep that ordering even for generated values whose
+    // behavior is intentionally unavailable: an out-of-write-zone position is
+    // a normal `false`, not a capability panic or an RNG-consuming branch.
+    if !level.ensure_can_write(origin) {
+        return false;
+    }
+    if let Some(name) = config.unavailable_feature() {
+        panic!("generated feature {name} is not implemented");
+    }
     match feature.id {
         // `Feature.NO_OP` — the no-op feature returns `true` unconditionally.
         0 => {
