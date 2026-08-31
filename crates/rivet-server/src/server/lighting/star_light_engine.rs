@@ -1744,6 +1744,7 @@ impl SkyStarLightEngine {
     /// pull (`propagateNeighbourLevels`) runs instead of the edge-decrease
     /// pass. The differential test lights committed chunks against committed
     /// neighbours through this path.
+    #[cfg(test)]
     pub(crate) fn relight(
         &mut self,
         provider: &mut dyn ChunkAccessor,

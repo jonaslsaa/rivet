@@ -239,7 +239,7 @@ impl SkyLightProvider {
     /// processed, while neighbours remain in the provider workspace. The
     /// callback path still validates that its center slot exists and restores
     /// the value, preserving the G1 callback contract.
-    pub fn try_force_load_in_chunk_with(
+    pub(crate) fn try_force_load_in_chunk_with(
         &mut self,
         pos: ChunkPos,
         _empty_sections: &[Option<bool>],
@@ -341,7 +341,7 @@ impl SkyLightProvider {
     /// and put back); the engine tolerates missing neighbours (`relaxed`
     /// cache setup), so a chunk lit in isolation still computes the correct
     /// center light.
-    pub fn light_chunk_with(
+    pub(crate) fn light_chunk_with(
         &mut self,
         chunk: &mut ChunkAccess<StateId, ServerBiomeId, StructureKey>,
         empty_sections: &[Option<bool>],
@@ -445,15 +445,14 @@ impl SkyLightProvider {
         }
     }
 
-    /// The idempotent re-light of a chunk whose neighbours already carry their
-    /// final light — `relightChunks`' per-neighbour
-    /// `lightChunk(lightAccess, chunk, false)`. The no-edge-checks path pulls
-    /// the neighbours' lateral light into the increase queue
-    /// (`propagate_neighbour_levels`), so a committed interior chunk lit
-    /// against committed neighbours reproduces Paper's byte-identical fixed
-    /// point. The differential test drives the committed seed-42 interior
-    /// through here.
-    pub fn relight_chunk_with(
+    /// Test-only parity helper for Paper's `relightChunks` per-neighbour
+    /// `lightChunk(lightAccess, chunk, false)` path. This no-edge-checks
+    /// operation is intentionally absent from production: dynamic relighting
+    /// remains deferred until the live light queue is ported. The seed-42
+    /// differential uses this private helper to validate the engine algorithm
+    /// without exposing a served/runtime relight API.
+    #[cfg(test)]
+    fn relight_chunk_with(
         &mut self,
         chunk: &mut ChunkAccess<StateId, ServerBiomeId, StructureKey>,
         empty_sections: &[Option<bool>],

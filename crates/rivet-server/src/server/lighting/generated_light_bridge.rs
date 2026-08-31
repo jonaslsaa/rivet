@@ -112,6 +112,16 @@ pub enum GeneratedLightBridgeError {
 /// A synchronous value bridge that owns one Starlight provider on the tick
 /// thread. Runtime neighbour ownership remains with the provider's callback;
 /// the generated center is borrowed only while its mapped runtime value is lit.
+///
+/// The production surface is status-scoped: callers run [`Self::light`] and
+/// cannot reach the provider's deferred dynamic-relighting implementation. The
+/// counterfactual below is intentionally rejected by rustdoc because the
+/// no-edge-checks helper exists only in unit-test builds.
+///
+/// ```compile_fail
+/// use rivet_server::server::lighting::SkyLightProvider;
+/// let _ = SkyLightProvider::relight_chunk_with;
+/// ```
 pub struct GeneratedLightBridge {
     provider: SkyLightProvider,
 }
@@ -126,8 +136,11 @@ impl GeneratedLightBridge {
         Self { provider }
     }
 
-    /// Mutably expose the provider for the owning tick-thread integration.
-    pub fn provider_mut(&mut self) -> &mut SkyLightProvider {
+    /// Mutably expose the provider to this module's ownership tests only.
+    /// Production callers must use the status-scoped [`Self::light`] operation;
+    /// the bridge never exposes the provider's implementation seams.
+    #[cfg(test)]
+    pub(crate) fn provider_mut(&mut self) -> &mut SkyLightProvider {
         &mut self.provider
     }
 
