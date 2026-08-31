@@ -730,25 +730,25 @@ fn parse_manifest_commit(manifest_text: &str) -> Option<String> {
 ///
 /// Paper logs exactly one line, from `MoonriseCommon.adjustWorkerThreads`:
 /// `[MoonriseCommon] Paper is using N worker threads, M I/O threads`. Returns
-/// `(worker, io)` when exactly one such line is present; `None` when the line
-/// is absent or the log is ambiguous (two pin lines = something is wrong).
+/// `(worker, io)` when exactly one well-formed Moonrise line is present; `None`
+/// when the line is absent, malformed, or ambiguous. Requiring the component
+/// marker matters: an arbitrary log line must never become false concurrency
+/// provenance.
 pub(crate) fn parse_boot_thread_counts(log_text: &str) -> Option<(u32, u32)> {
+    const MOONRISE_LINE: &str = "[MoonriseCommon] Paper is using ";
+    const IO_SUFFIX: &str = " I/O threads";
     let mut counts = None;
     for line in log_text.lines() {
-        let Some((_, rest)) = line.split_once(" is using ") else {
+        let Some((_, rest)) = line.split_once(MOONRISE_LINE) else {
             continue;
         };
-        let Some((worker, io)) = rest.split_once(" worker threads, ") else {
-            continue;
-        };
-        let Some(io) = io.split_once(" I/O threads") else {
-            continue;
-        };
+        let (worker, io) = rest.split_once(" worker threads, ")?;
+        let io = io.strip_suffix(IO_SUFFIX)?;
         let Ok(worker) = worker.trim().parse::<u32>() else {
-            continue;
+            return None;
         };
-        let Ok(io) = io.0.trim().parse::<u32>() else {
-            continue;
+        let Ok(io) = io.trim().parse::<u32>() else {
+            return None;
         };
         if counts.is_some() {
             return None; // more than one pin line — ambiguous, refuse.
@@ -4197,7 +4197,7 @@ fn run() -> Result<(), Error> {
             // The controller validates the committed contract and owns fresh
             // Paper/Rivet roots under work/generated-full; caller-supplied
             // evidence roots are rejected. --refresh-determinism requests a
-            // third Paper boot before the dedicated producer is run.
+            // fourth Paper boot (a third independent capture) before the dedicated producer is run.
             let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
             match rest.as_slice() {
                 [] => generated_full::verify_default(),
@@ -5040,10 +5040,26 @@ mod tests {
     #[test]
     fn parse_boot_thread_counts_ambiguous_is_none() {
         let log = "\
-[1] Paper is using 1 worker threads, 1 I/O threads
-[2] Paper is using 1 worker threads, 1 I/O threads
+[1] [MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads
+[2] [MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads
 ";
         assert_eq!(parse_boot_thread_counts(log), None);
+    }
+
+    #[test]
+    fn parse_boot_thread_counts_rejects_unattributed_or_malformed_lines() {
+        assert_eq!(
+            parse_boot_thread_counts(
+                "[02:08:08 INFO]: Paper is using 1 worker threads, 1 I/O threads\n"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_boot_thread_counts(
+                "[02:08:08 INFO]: [MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads extra\n"
+            ),
+            None
+        );
     }
 
     /// `check_boot_thread_pin` accepts exactly 1 worker / 1 I/O thread.
@@ -5164,7 +5180,7 @@ mod tests {
             std::env::temp_dir().join(format!("rivet-oracle-drift-{}.log", std::process::id()));
         fs::write(
             &log,
-            "[01:05:38 INFO]: Paper is using 3 worker threads, 1 I/O threads\n",
+            "[01:05:38 INFO]: [MoonriseCommon] Paper is using 3 worker threads, 1 I/O threads\n",
         )
         .unwrap();
         match check_concurrency_provenance(&dir, &log) {
@@ -5190,7 +5206,7 @@ mod tests {
             std::env::temp_dir().join(format!("rivet-oracle-match-{}.log", std::process::id()));
         fs::write(
             &log,
-            "[02:08:08 INFO]: Paper is using 1 worker threads, 1 I/O threads\n",
+            "[02:08:08 INFO]: [MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads\n",
         )
         .unwrap();
         check_concurrency_provenance(&dir, &log).expect("matching provenance must pass");

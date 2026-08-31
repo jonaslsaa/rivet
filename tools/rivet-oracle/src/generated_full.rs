@@ -700,6 +700,18 @@ fn process_observation(
                 )),
             }
         })?;
+    // A Paper boot is not accepted merely because it reached READY.  Check the
+    // startup provenance while the child is still running, before shutdown can
+    // complete or any world output can be extracted.  The final-log check in
+    // the caller remains authoritative for the captured evidence as well.
+    if matches!(expected_lifecycle, ExpectedLifecycle::PaperClean) {
+        let boot_log = fs::read(log_path).map_err(|error| {
+            Error::Gate(format!(
+                "generated-full Paper process {pid} boot log cannot be read before shutdown: {error}"
+            ))
+        })?;
+        crate::check_boot_thread_pin(&String::from_utf8_lossy(&boot_log))?;
+    }
     let status = child
         .shutdown(timeout, PROCESS_POLL)
         .map_err(|error| match error {
@@ -784,6 +796,11 @@ fn clear_latest_replay(base: &Path) -> Result<(), Error> {
 }
 
 fn publish_latest_replay(base: &Path, nonce: &str, replay_root: &Path) -> Result<(), Error> {
+    // Keep the writer and reader on one nonce grammar.  The pointer is written
+    // only after a fresh verifier-owned replay has completed, but validating at
+    // publication too prevents a future allocator change from emitting a path
+    // the reader would interpret unsafely.
+    validate_replay_nonce(nonce)?;
     let path = base.join(LATEST_REPLAY_BASENAME);
     let record = LatestReplay {
         schema: LATEST_REPLAY_SCHEMA.to_string(),
@@ -796,6 +813,51 @@ fn publish_latest_replay(base: &Path, nonce: &str, replay_root: &Path) -> Result
         ))
     })?;
     write_fresh_file(&path, &bytes, "latest replay pointer")?;
+    Ok(())
+}
+
+fn validate_replay_nonce(nonce: &str) -> Result<(), Error> {
+    let path = Path::new(nonce);
+    if nonce.is_empty() {
+        return Err(Error::Gate(
+            "generated-full latest replay pointer has an empty nonce".into(),
+        ));
+    }
+    if path.is_absolute()
+        || nonce.contains('/')
+        || nonce.contains('\\')
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::RootDir
+                    | std::path::Component::ParentDir
+                    | std::path::Component::CurDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(Error::Gate(format!(
+            "generated-full latest replay pointer nonce {nonce:?} contains a separator, absolute/root, or parent component"
+        )));
+    }
+    let mut parts = nonce.split('-');
+    let timestamp = parts.next().unwrap_or_default();
+    let pid = parts.next().unwrap_or_default();
+    let attempt = parts.next().unwrap_or_default();
+    if parts.next().is_some()
+        || timestamp.is_empty()
+        || pid.is_empty()
+        || attempt.is_empty()
+        || !timestamp
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || !pid.bytes().all(|byte| byte.is_ascii_digit())
+        || !attempt.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(Error::Gate(format!(
+            "generated-full latest replay pointer nonce {nonce:?} does not match the verifier nonce grammar <lowercase-hex>-<pid>-<attempt>"
+        )));
+    }
     Ok(())
 }
 
@@ -812,12 +874,13 @@ fn load_latest_replay(base: &Path) -> Result<ReplayRecord, Error> {
             pointer_path.display()
         ))
     })?;
-    if pointer.schema != LATEST_REPLAY_SCHEMA || pointer.nonce.is_empty() {
+    if pointer.schema != LATEST_REPLAY_SCHEMA {
         return Err(Error::Gate(format!(
-            "generated-full latest replay pointer {} has an invalid schema or nonce",
+            "generated-full latest replay pointer {} has an invalid schema",
             pointer_path.display()
         )));
     }
+    validate_replay_nonce(&pointer.nonce)?;
     let expected_root = base.join(format!("replay-{}", pointer.nonce));
     if Path::new(&pointer.replay_root) != expected_root {
         return Err(Error::Gate(format!(
@@ -830,6 +893,25 @@ fn load_latest_replay(base: &Path) -> Result<ReplayRecord, Error> {
         return Err(Error::Gate(format!(
             "generated-full retained replay root {} is absent or not a directory",
             expected_root.display()
+        )));
+    }
+    let canonical_base = base.canonicalize().map_err(|error| {
+        Error::Gate(format!(
+            "generated-full replay base {} cannot be resolved for containment proof: {error}",
+            base.display()
+        ))
+    })?;
+    let canonical_root = expected_root.canonicalize().map_err(|error| {
+        Error::Gate(format!(
+            "generated-full retained replay root {} cannot be resolved for containment proof: {error}",
+            expected_root.display()
+        ))
+    })?;
+    if canonical_root == canonical_base || !canonical_root.starts_with(&canonical_base) {
+        return Err(Error::Gate(format!(
+            "generated-full retained replay root {} escapes verifier-owned base {}",
+            expected_root.display(),
+            base.display()
         )));
     }
     for side in ["paper", "rivet"] {
@@ -932,7 +1014,7 @@ fn bind_replay_snapshot_root(
             })?;
             let suffix = name.strip_prefix("snapshot-").ok_or_else(|| {
                 Error::Gate(format!(
-                    "generated-full retained Paper seed-{seed} snapshot {name:?} has an unexpected name; expected snapshot-1 or snapshot-2"
+                    "generated-full retained Paper seed-{seed} snapshot {name:?} has an unexpected name; expected snapshot-1 through snapshot-3"
                 ))
             })?;
             let boot = suffix.parse::<u8>().map_err(|_| {
@@ -940,9 +1022,9 @@ fn bind_replay_snapshot_root(
                     "generated-full retained Paper seed-{seed} snapshot {name:?} has a non-numeric boot name"
                 ))
             })?;
-            if !(1..=2).contains(&boot) || name != format!("snapshot-{boot}") {
+            if !(1..=3).contains(&boot) || name != format!("snapshot-{boot}") {
                 return Err(Error::Gate(format!(
-                    "generated-full retained Paper seed-{seed} snapshot {name:?} has an unexpected boot name; expected snapshot-1 or snapshot-2"
+                    "generated-full retained Paper seed-{seed} snapshot {name:?} has an unexpected boot name; expected snapshot-1 through snapshot-3"
                 )));
             }
             (seed_root.join(name), Some(boot))
@@ -974,7 +1056,7 @@ fn validate_replay_observation_layout(
             "generated-full retained replay cannot validate an empty seed contract".into(),
         ));
     }
-    let max_paper_observations = expected_seeds.len().checked_mul(2).ok_or_else(|| {
+    let max_paper_observations = expected_seeds.len().checked_mul(3).ok_or_else(|| {
         Error::Gate("generated-full retained Paper observation cap overflowed".into())
     })?;
     if record.paper_observed.len() > max_paper_observations {
@@ -1059,9 +1141,9 @@ fn validate_replay_observation_layout(
                 "generated-full retained Paper seed-{seed} capture boots {boots:?} are not a contiguous sequence starting at snapshot-1"
             )));
         }
-        if !matches!(boots.len(), 1 | 2) {
+        if !matches!(boots.len(), 2 | 3) {
             return Err(Error::Gate(format!(
-                "generated-full retained Paper seed-{seed} has {} capture boots; expected one ordinary or two refresh captures",
+                "generated-full retained Paper seed-{seed} has {} post-injection capture boots; expected two ordinary or three refresh captures",
                 boots.len()
             )));
         }
@@ -1671,7 +1753,10 @@ fn write_replay_record(root: &Path, record: &ReplayRecord) -> Result<(), Error> 
 }
 
 fn run_fresh_replay(contract: &GeneratedContract, artifacts: &ArtifactInputs) -> Result<(), Error> {
-    run_fresh_replay_with_paper_boots(contract, artifacts, 2)
+    // One boot creates the world and injects forced tickets; two independent
+    // boots must then capture the post-injection FULL output.  A single capture
+    // can never establish replay determinism.
+    run_fresh_replay_with_paper_boots(contract, artifacts, 3)
 }
 
 fn run_fresh_replay_with_paper_boots(
@@ -1679,8 +1764,8 @@ fn run_fresh_replay_with_paper_boots(
     artifacts: &ArtifactInputs,
     paper_boots: u8,
 ) -> Result<(), Error> {
-    if !(2..=3).contains(&paper_boots) {
-        return Err(Error::Gate("generated-full replay requires two ordinary Paper boots or three explicit determinism-refresh boots per seed".into()));
+    if !(3..=4).contains(&paper_boots) {
+        return Err(Error::Gate("generated-full replay requires three total Paper boots (one injection boot plus two independent captures), or four for an explicit determinism refresh".into()));
     }
     let (nonce, replay_root) = allocate_replay_root()?;
     let inputs = replay_root.join("inputs");
@@ -1761,6 +1846,17 @@ fn run_fresh_replay_with_paper_boots(
                 PAPER_READY_TIMEOUT,
                 ExpectedLifecycle::PaperClean,
             )?;
+            // Unlike the generic M0/M2 boot helper, this replay launches Paper
+            // through `process_observation`; enforce the exact pin here before
+            // accepting this boot or extracting any evidence.  The observed
+            // value is then passed through to the extractor, never synthesized.
+            let paper_log_bytes = read_stable_file(&paper_log, "generated-full Paper raw log")?;
+            crate::check_boot_thread_pin(&String::from_utf8_lossy(&paper_log_bytes))?;
+            let observed = parse_boot_thread_counts(&String::from_utf8_lossy(&paper_log_bytes))
+                .map(|(worker_threads, io_threads)| crate::ChunkConcurrency {
+                    worker_threads,
+                    io_threads,
+                });
             if boot == 0 {
                 let coordinates = contract
                     .coordinates
@@ -1781,14 +1877,6 @@ fn run_fresh_replay_with_paper_boots(
             // prove that no earlier Paper capture diverged before Rivet is
             // allowed into the parity comparison.
             let paper_output = paper_seed_root.join(format!("output-{boot}"));
-            let observed = parse_boot_thread_counts(&String::from_utf8_lossy(&read_stable_file(
-                &paper_log,
-                "generated-full Paper raw log",
-            )?))
-            .map(|(worker_threads, io_threads)| crate::ChunkConcurrency {
-                worker_threads,
-                io_threads,
-            });
             verify_forced_load(&paper_log, contract.coordinates.len(), OVERWORLD_DIM)?;
             require_fresh_output_root(&paper_output, "generated-full Paper output root")?;
             extract_fresh_fixtures(
@@ -1943,12 +2031,26 @@ fn verify_capture_determinism(
     seed: u64,
     captures: &[(u8, HashManifest)],
 ) -> Result<HashManifest, Error> {
-    let Some((first_boot, first_manifest)) = captures.first() else {
+    if captures.len() < 2 {
         return Err(Error::Gate(format!(
-            "generated-full Paper seed {seed} produced no capture-boot evidence"
+            "generated-full Paper seed {seed} produced {} post-injection capture; at least two independent captures are required",
+            captures.len()
         )));
+    }
+    let Some((first_boot, first_manifest)) = captures.first() else {
+        unreachable!("capture count was checked above");
     };
-    for (boot, manifest) in captures.iter().skip(1) {
+    if *first_boot != 1 {
+        return Err(Error::Gate(format!(
+            "generated-full Paper seed {seed} capture sequence starts at boot {first_boot}; post-injection captures must start at boot 1"
+        )));
+    }
+    for ((previous_boot, _), (boot, manifest)) in captures.iter().zip(captures.iter().skip(1)) {
+        if *boot != previous_boot.saturating_add(1) {
+            return Err(Error::Gate(format!(
+                "generated-full Paper seed {seed} capture sequence is not independent and contiguous: boots {previous_boot} and {boot}"
+            )));
+        }
         if manifest != first_manifest {
             return Err(Error::Gate(format!(
                 "generated-full Paper determinism FAIL for seed {seed}: capture boots {first_boot} and {boot} differ in verifier-derived byte/manifest observations"
@@ -2054,10 +2156,18 @@ fn run_tamper_from_latest(
     selected: Option<TamperKind>,
 ) -> Result<(), Error> {
     let base = crate::crate_dir().join("work/generated-full");
-    let record = load_latest_replay(&base).map_err(|error| match error {
-        Error::Unverified(message) => Error::Blocked(message),
-        other => other,
-    })?;
+    run_tamper_from_latest_at(contract, &base, selected)
+}
+
+fn run_tamper_from_latest_at(
+    contract: &GeneratedContract,
+    base: &Path,
+    selected: Option<TamperKind>,
+) -> Result<(), Error> {
+    // A clean checkout has no retained replay at all.  That is an absent
+    // verifier prerequisite (UNVERIFIED/3), not the dedicated producer's
+    // capability boundary (BLOCKED/4).
+    let record = load_latest_replay(base)?;
     let expected_paper_root = Path::new(&record.controller_root).join("paper");
     let expected_rivet_root = Path::new(&record.controller_root).join("rivet");
     if record.paper_root != expected_paper_root.display().to_string()
@@ -2098,12 +2208,12 @@ fn run_tamper_from_latest(
     }
     for &seed in &contract.seeds {
         let papers = paper_by_seed.get(&seed).ok_or_else(|| {
-            Error::Blocked(format!(
+            Error::Gate(format!(
                 "generated-full retained replay has no Paper capture prerequisite for seed {seed}"
             ))
         })?;
         let rivet = rivet_by_seed.get(&seed).ok_or_else(|| {
-            Error::Blocked(format!(
+            Error::Gate(format!(
                 "generated-full retained replay has no Rivet capture prerequisite for seed {seed}"
             ))
         })?;
@@ -4072,7 +4182,7 @@ pub fn run_cli(args: &[&str]) -> Result<(), Error> {
     }
     let artifacts = ArtifactInputs::from_contract(&contract)?;
     if refresh_determinism {
-        run_fresh_replay_with_paper_boots(&contract, &artifacts, 3)
+        run_fresh_replay_with_paper_boots(&contract, &artifacts, 4)
     } else {
         run_fresh_replay(&contract, &artifacts)
     }
@@ -4325,6 +4435,18 @@ mod tests {
     }
 
     #[test]
+    fn every_fresh_paper_replay_boot_requires_an_explicit_pinned_thread_log() {
+        let absent = crate::check_boot_thread_pin("Done (0s)!\n").unwrap_err();
+        assert!(matches!(absent, Error::Gate(message) if message.contains("no Moonrise")));
+
+        let off_pin = crate::check_boot_thread_pin(
+            "[MoonriseCommon] Paper is using 2 worker threads, 1 I/O threads\n",
+        )
+        .unwrap_err();
+        assert!(matches!(off_pin, Error::Gate(message) if message.contains("2 worker threads")));
+    }
+
+    #[test]
     fn replay_schema_names_revision_identity_digests_without_source_aliases() {
         let observation = PaperObserved {
             schema: "paper-observed-v1".into(),
@@ -4364,6 +4486,113 @@ mod tests {
         let result =
             verify_capture_determinism(42, &[(1, manifest.clone()), (2, manifest.clone())]);
         assert_eq!(result.unwrap(), manifest);
+    }
+
+    #[test]
+    fn missing_retained_replay_is_unverified_not_producer_blocked() {
+        let contract = test_contract();
+        let temp = tempfile::tempdir().unwrap();
+        let error = run_tamper_from_latest_at(&contract, temp.path(), None).unwrap_err();
+        assert!(
+            matches!(error, Error::Unverified(message) if message.contains("latest replay pointer") && message.contains("absent"))
+        );
+    }
+
+    #[test]
+    fn latest_replay_pointer_rejects_nonce_path_escape_forms() {
+        let temp = tempfile::tempdir().unwrap();
+        for nonce in [
+            "/",
+            "..",
+            "/tmp/replay",
+            "valid/../../outside",
+            r"valid\..\outside",
+        ] {
+            let pointer = LatestReplay {
+                schema: LATEST_REPLAY_SCHEMA.to_string(),
+                nonce: nonce.to_string(),
+                replay_root: temp
+                    .path()
+                    .join(format!("replay-{nonce}"))
+                    .display()
+                    .to_string(),
+            };
+            fs::write(
+                temp.path().join(LATEST_REPLAY_BASENAME),
+                format!("{}\n", serde_json::to_string(&pointer).unwrap()),
+            )
+            .unwrap();
+            let error = load_latest_replay(temp.path()).unwrap_err();
+            assert!(
+                matches!(error, Error::Gate(ref message) if message.contains("nonce") && (message.contains("separator") || message.contains("grammar"))),
+                "nonce {nonce:?} produced unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn latest_replay_pointer_rejects_missing_intermediate_escape_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let nonce = "deadbeef-1-0";
+        let pointer = LatestReplay {
+            schema: LATEST_REPLAY_SCHEMA.to_string(),
+            nonce: nonce.to_string(),
+            replay_root: temp
+                .path()
+                .join("replay-deadbeef-1-0")
+                .join("missing")
+                .join("..")
+                .join("replay-deadbeef-1-0")
+                .display()
+                .to_string(),
+        };
+        fs::write(
+            temp.path().join(LATEST_REPLAY_BASENAME),
+            format!("{}\n", serde_json::to_string(&pointer).unwrap()),
+        )
+        .unwrap();
+        let error = load_latest_replay(temp.path()).unwrap_err();
+        assert!(
+            matches!(error, Error::Gate(message) if message.contains("unexpected replay root"))
+        );
+    }
+
+    #[test]
+    fn one_capture_is_rejected_as_nondeterministic_evidence() {
+        let contract = test_contract();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp
+            .path()
+            .join("rivet")
+            .join(contract.seeds[0].to_string());
+        write_tree(&root, &contract, "rivet", contract.seeds[0], 42);
+        let manifest = read_manifest(&root.join(MANIFEST_BASENAME)).unwrap();
+        let error = verify_capture_determinism(42, &[(1, manifest)]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("at least two independent captures")
+        );
+    }
+
+    #[test]
+    fn capture_determinism_rejects_reused_or_skipped_boot_numbers() {
+        let contract = test_contract();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp
+            .path()
+            .join("rivet")
+            .join(contract.seeds[0].to_string());
+        write_tree(&root, &contract, "rivet", contract.seeds[0], 42);
+        let manifest = read_manifest(&root.join(MANIFEST_BASENAME)).unwrap();
+        for boots in [[1, 1], [1, 3], [0, 1]] {
+            let error = verify_capture_determinism(
+                42,
+                &[(boots[0], manifest.clone()), (boots[1], manifest.clone())],
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("capture"));
+        }
     }
 
     #[test]
@@ -4517,7 +4746,7 @@ mod tests {
         let log = temp.path().join("paper.log");
         let mut command = Command::new("sh");
         command.arg("-c").arg(
-            "trap 'echo All dimensions are saved; exit 143' TERM; echo 'Done (0s)!'; while :; do sleep 0.01; done",
+            "trap 'echo All dimensions are saved; exit 143' TERM; echo '[MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads'; echo 'Done (0s)!'; while :; do sleep 0.01; done",
         );
         let observation = process_observation(
             &mut command,

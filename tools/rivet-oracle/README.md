@@ -625,6 +625,9 @@ The verifier derives every digest from payload bytes read through stable opened
 file descriptors. Contract, producer executable/config, and nested payload
 metadata are checked on those same descriptors; symlink and hardlink aliases,
 nonregular files, malformed metadata, and self-diff aliases are hard failures.
+An ordinary replay performs three total Paper boots (one world-creation/injection
+boot followed by two independent post-injection captures); the optional
+`--refresh-determinism` mode performs a fourth boot for a third capture.
 Every artifact is staged as a fresh verifier-owned copy inside the nonce-scoped
 replay root and byte-bound to its attestation digest at staging time; the
 config/properties consumers then read only those captured bytes. The exact
