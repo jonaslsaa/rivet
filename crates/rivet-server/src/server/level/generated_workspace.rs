@@ -9,7 +9,7 @@
 //! No lower-status proto, fallback chunk, or packet is observable while a wave
 //! or conversion is incomplete.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
@@ -31,7 +31,7 @@ use super::generated_world::{
 };
 use crate::server::lighting::{
     GENERATED_LIGHT_REQUIRED_RADIUS, GeneratedLightBridge, GeneratedLightStorage,
-    GeneratedLightWorkspace, GeneratedLightWorkspaceError,
+    GeneratedLightWorkspace, GeneratedLightWorkspaceError, LightChunk,
 };
 
 /// The radius of the exact player send view for this slice.
@@ -137,6 +137,10 @@ pub struct GeneratedWorkspace {
     holders: HashMap<ChunkPos, GenerationChunkHolder>,
     feature_workspace: FeatureWorkspace,
     feature_workspace_seeded: bool,
+    /// Runtime values that could not be reattached to a holder after a typed
+    /// write-back refusal. Keeping these values on the tick-thread owner avoids
+    /// dropping them while still reporting the original validation boundary.
+    orphaned_light_storage: Vec<((i32, i32), LightChunk)>,
 }
 
 impl GeneratedWorkspace {
@@ -187,6 +191,7 @@ impl GeneratedWorkspace {
             holders,
             feature_workspace,
             feature_workspace_seeded: false,
+            orphaned_light_storage: Vec::new(),
         })
     }
 
@@ -492,11 +497,7 @@ impl GeneratedWorkspace {
             holder.attach_generated_light_workspace(light_workspace);
             detached
         };
-        if let Some(storage) = detached
-            && !storage.is_empty()
-        {
-            self.publish_light_storage(position, storage)?;
-        }
+        self.recover_light_storage(position, detached)?;
 
         let attempt = {
             let holder = self
@@ -540,26 +541,62 @@ impl GeneratedWorkspace {
                 })
             }
             Err(payload) => {
-                if let Err(error) = self.recover_light_storage(position, storage) {
-                    panic!("generated LIGHT storage recovery failed while unwinding: {error}");
-                }
+                // A recovery refusal is retained in the workspace's orphan
+                // store, but must never replace the task's original panic.
+                let _ = self.recover_light_storage(position, storage);
                 std::panic::resume_unwind(payload)
             }
         }
     }
 
     /// Return detached provider values to their owning generated holder protos.
+    /// If validation refuses the publication, reconstruct every value that has
+    /// an owner and retain unowned values on this tick-thread workspace rather
+    /// than dropping the detached provider state.
     fn recover_light_storage(
         &mut self,
         position: ChunkPos,
         storage: Option<GeneratedLightStorage>,
     ) -> Result<(), GeneratedWorkspaceError> {
-        if let Some(storage) = storage
-            && !storage.is_empty()
-        {
-            self.publish_light_storage(position, storage)?;
+        let Some(storage) = storage.filter(|storage| !storage.is_empty()) else {
+            return Ok(());
+        };
+        if let Err(error) = self.publish_light_storage(position, &storage) {
+            self.restore_light_storage_after_refusal(storage);
+            return Err(error);
         }
         Ok(())
+    }
+
+    /// Reconstruct runtime light state after publication validation fails. The
+    /// runtime position is authoritative for finding a holder; a mismatched
+    /// storage key remains a reported error but does not make the value
+    /// disposable. Duplicate runtime positions and truly unowned values stay
+    /// in the workspace-owned recovery vector so every detached value remains
+    /// live for diagnosis or a later owner handoff.
+    fn restore_light_storage_after_refusal(&mut self, storage: GeneratedLightStorage) {
+        let mut restored_positions = HashSet::new();
+        for (key, runtime) in storage {
+            let position = runtime.get_pos();
+            if self.holders.contains_key(&position) && restored_positions.insert(position) {
+                let proto = self
+                    .holders
+                    .get_mut(&position)
+                    .expect("holder presence checked during LIGHT recovery")
+                    .proto_mut();
+                proto.set_block_nibbles(runtime.block_nibbles().to_vec());
+                proto.set_sky_nibbles(runtime.sky_nibbles().to_vec());
+                proto.set_sky_emptiness_map(runtime.sky_emptiness_map().map(<[bool]>::to_vec));
+                proto.set_light_correct(runtime.is_light_correct());
+            } else {
+                self.orphaned_light_storage.push((key, runtime));
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn orphaned_light_storage_len(&self) -> usize {
+        self.orphaned_light_storage.len()
     }
 
     /// Run an already-attached generated-light task through the same scheduler
@@ -594,9 +631,9 @@ impl GeneratedWorkspace {
     fn publish_light_storage(
         &mut self,
         center: ChunkPos,
-        storage: GeneratedLightStorage,
+        storage: &GeneratedLightStorage,
     ) -> Result<(), GeneratedWorkspaceError> {
-        for ((key_x, key_z), runtime) in &storage {
+        for ((key_x, key_z), runtime) in storage {
             let key_position = ChunkPos::new(*key_x, *key_z);
             let position = runtime.get_pos();
             if position != key_position {
@@ -621,7 +658,7 @@ impl GeneratedWorkspace {
             }
         }
 
-        for (_, runtime) in storage {
+        for runtime in storage.values() {
             let position = runtime.get_pos();
             let proto = self
                 .holders
@@ -834,6 +871,7 @@ mod tests {
 
     struct CounterfactualLightTask {
         storage: Option<GeneratedLightStorage>,
+        succeed: bool,
         panic: bool,
     }
 
@@ -865,9 +903,13 @@ mod tests {
             if self.panic {
                 panic!("counterfactual generated LIGHT panic");
             }
-            Err(GenError::LightTaskFailed {
-                status: ChunkStatus::Light,
-            })
+            if self.succeed {
+                Ok(())
+            } else {
+                Err(GenError::LightTaskFailed {
+                    status: ChunkStatus::Light,
+                })
+            }
         }
 
         fn take_owned_runtime_storage(&mut self) -> Option<GeneratedLightStorage> {
@@ -909,6 +951,36 @@ mod tests {
         .expect("counterfactual light workspace")
         .into_owned_runtime_storage()
         .expect("counterfactual storage")
+    }
+
+    fn single_runtime_storage(
+        workspace: &GeneratedWorkspace,
+        position: ChunkPos,
+        mark_light_correct: bool,
+    ) -> GeneratedLightStorage {
+        let generated = workspace
+            .holders
+            .get(&position)
+            .map(GenerationChunkHolder::snapshot_proto)
+            .unwrap_or_else(|| {
+                workspace
+                    .generator
+                    .create_holder_with_workspace_and_structure_feature_index(
+                        position,
+                        workspace.feature_workspace.clone(),
+                        Some(workspace.generator.structure_feature_index()),
+                    )
+                    .snapshot_proto()
+            });
+        let runtime = GeneratedLightBridge::runtime_from_generated(&generated)
+            .expect("single counterfactual runtime conversion");
+        let (mut runtime, _) = runtime.into_base_and_entities();
+        if mark_light_correct {
+            runtime.set_light_correct(true);
+        }
+        [((position.x(), position.z()), runtime)]
+            .into_iter()
+            .collect()
     }
 
     #[test]
@@ -1016,6 +1088,63 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_success_finishes_light_and_publishes_retryable_holders() {
+        let mut workspace = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("target view");
+        for holder in workspace.holders.values_mut() {
+            holder
+                .proto_mut()
+                .set_persisted_status(ChunkStatus::Features);
+        }
+        workspace
+            .holders
+            .get_mut(&ChunkPos::ZERO)
+            .expect("center holder")
+            .proto_mut()
+            .set_persisted_status(ChunkStatus::InitializeLight);
+
+        let storage = counterfactual_storage(&workspace, ChunkPos::ZERO, true);
+        workspace
+            .holders
+            .get_mut(&ChunkPos::ZERO)
+            .expect("center holder")
+            .attach_generated_light_task_for_test(CounterfactualLightTask {
+                storage: Some(storage),
+                succeed: true,
+                panic: false,
+            });
+
+        workspace
+            .run_attached_light_attempt_for_test(ChunkPos::ZERO)
+            .expect("successful LIGHT attempt");
+        assert_eq!(
+            workspace
+                .holders
+                .get(&ChunkPos::ZERO)
+                .expect("center holder")
+                .status(),
+            ChunkStatus::Light
+        );
+        assert!(
+            workspace
+                .holders
+                .iter()
+                .filter(|(position, _)| {
+                    **position != ChunkPos::ZERO
+                        && (**position).get_chessboard_distance(&ChunkPos::ZERO)
+                            <= GENERATED_LIGHT_REQUIRED_RADIUS
+                })
+                .all(|(_, holder)| holder.snapshot_proto().is_light_correct()),
+            "successful LIGHT must publish every runtime neighbour"
+        );
+        let retry_storage = counterfactual_storage(&workspace, ChunkPos::ZERO, false);
+        assert!(
+            retry_storage.values().all(|chunk| chunk.is_light_correct()),
+            "successful LIGHT must leave retryable light state in holder owners"
+        );
+        assert_eq!(workspace.orphaned_light_storage_len(), 0);
+    }
+
+    #[test]
     fn scheduler_recovers_light_storage_before_typed_error() {
         let mut workspace = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("target view");
         for holder in workspace.holders.values_mut() {
@@ -1037,6 +1166,7 @@ mod tests {
             .expect("center holder")
             .attach_generated_light_task_for_test(CounterfactualLightTask {
                 storage: Some(storage),
+                succeed: false,
                 panic: false,
             });
 
@@ -1081,6 +1211,73 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_reconstructs_all_detached_values_after_publish_refusal() {
+        let mut workspace = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("target view");
+        for holder in workspace.holders.values_mut() {
+            holder
+                .proto_mut()
+                .set_persisted_status(ChunkStatus::Features);
+        }
+        workspace
+            .holders
+            .get_mut(&ChunkPos::ZERO)
+            .expect("center holder")
+            .proto_mut()
+            .set_persisted_status(ChunkStatus::InitializeLight);
+
+        let mut storage = counterfactual_storage(&workspace, ChunkPos::ZERO, true);
+        storage.extend(single_runtime_storage(&workspace, ChunkPos::ZERO, true));
+        storage.extend(single_runtime_storage(
+            &workspace,
+            ChunkPos::new(99, 99),
+            true,
+        ));
+        let miskeyed = storage.remove(&(1, 0)).expect("radius-one runtime value");
+        storage.insert((99, 98), miskeyed);
+        workspace
+            .holders
+            .get_mut(&ChunkPos::ZERO)
+            .expect("center holder")
+            .attach_generated_light_task_for_test(CounterfactualLightTask {
+                storage: Some(storage),
+                succeed: false,
+                panic: false,
+            });
+
+        let error = workspace
+            .run_attached_light_attempt_for_test(ChunkPos::ZERO)
+            .expect_err("invalid runtime storage must refuse write-back");
+        assert!(matches!(
+            error,
+            GeneratedWorkspaceError::LightWriteback {
+                position: ChunkPos::ZERO,
+                ..
+            }
+        ));
+        assert!(
+            workspace
+                .holders
+                .iter()
+                .filter(|(position, _)| {
+                    (**position).get_chessboard_distance(&ChunkPos::ZERO)
+                        <= GENERATED_LIGHT_REQUIRED_RADIUS
+                })
+                .all(|(_, holder)| holder.snapshot_proto().is_light_correct()),
+            "write-back refusal must reconstruct every owned runtime value"
+        );
+        assert_eq!(
+            workspace.orphaned_light_storage_len(),
+            1,
+            "only the genuinely unowned runtime value remains detached"
+        );
+        let retry_storage = counterfactual_storage(&workspace, ChunkPos::ZERO, false);
+        assert!(
+            retry_storage.values().all(|chunk| chunk.is_light_correct()),
+            "reconstructed holders must remain usable for retry"
+        );
+    }
+
+    #[test]
     fn scheduler_recovers_light_storage_before_resuming_panic() {
         let mut workspace = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("target view");
         for holder in workspace.holders.values_mut() {
@@ -1095,13 +1292,16 @@ mod tests {
             .proto_mut()
             .set_persisted_status(ChunkStatus::InitializeLight);
 
-        let storage = counterfactual_storage(&workspace, ChunkPos::ZERO, true);
+        let mut storage = counterfactual_storage(&workspace, ChunkPos::ZERO, true);
+        let miskeyed = storage.remove(&(1, 0)).expect("radius-one runtime value");
+        storage.insert((99, 98), miskeyed);
         workspace
             .holders
             .get_mut(&ChunkPos::ZERO)
             .expect("center holder")
             .attach_generated_light_task_for_test(CounterfactualLightTask {
                 storage: Some(storage),
+                succeed: false,
                 panic: true,
             });
 
@@ -1110,7 +1310,11 @@ mod tests {
                 .run_attached_light_attempt_for_test(ChunkPos::ZERO)
                 .expect("counterfactual LIGHT task must resume its panic");
         }));
-        assert!(panic.is_err());
+        let payload = panic.expect_err("counterfactual LIGHT task must panic");
+        assert_eq!(
+            payload.downcast_ref::<&str>().copied(),
+            Some("counterfactual generated LIGHT panic")
+        );
         assert!(
             workspace
                 .holders
@@ -1128,6 +1332,7 @@ mod tests {
             retry_storage.values().all(|chunk| chunk.is_light_correct()),
             "panic must leave retryable light state in holder owners"
         );
+        assert_eq!(workspace.orphaned_light_storage_len(), 0);
         assert_eq!(
             workspace
                 .holders
