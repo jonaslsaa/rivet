@@ -148,14 +148,24 @@ pub fn parse_text_corpus_bytes(
         let gid = g["id"].as_str().ok_or_else(|| {
             CorpusError::Malformed("golden entry missing a string `id`".to_string())
         })?;
-        golden_by_id.insert(gid, g);
+        if golden_by_id.insert(gid, g).is_some() {
+            return Err(CorpusError::Malformed(format!(
+                "golden.json contains duplicate id {gid}"
+            )));
+        }
     }
 
+    let mut corpus_ids = std::collections::HashSet::new();
     let mut out = Vec::new();
     for entry in corpus_entries {
         let id = entry["id"]
             .as_str()
             .ok_or_else(|| CorpusError::Malformed("corpus entry missing `id`".to_string()))?;
+        if !corpus_ids.insert(id) {
+            return Err(CorpusError::Malformed(format!(
+                "corpus.json contains duplicate id {id}"
+            )));
+        }
         let input = entry["input"]
             .as_str()
             .ok_or_else(|| CorpusError::Malformed(format!("{id}: missing `input`")))?;
@@ -197,6 +207,11 @@ pub fn parse_text_corpus_bytes(
             accept,
             canonical,
         });
+    }
+    if golden_by_id.len() != corpus_ids.len() {
+        return Err(CorpusError::Malformed(
+            "golden.json contains entries not present in corpus.json".to_string(),
+        ));
     }
     Ok(out)
 }

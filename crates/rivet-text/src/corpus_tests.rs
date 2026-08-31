@@ -150,6 +150,41 @@ fn loader_hard_errors_on_malformed_and_absent_distinguish() {
     assert!(loaded[0].accept);
     assert_eq!(loaded[0].canonical.as_deref(), Some("\"x\""));
 
+    // Duplicate corpus ids, duplicate golden ids, and unpaired golden ids are
+    // malformed provenance, not alternate representations to silently merge.
+    std::fs::write(
+        &corpus,
+        r#"{"entries":[{"id":"a","input":"\"x\"","accept":true},{"id":"a","input":"\"y\"","accept":true}]}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        crate::corpus::parse_text_corpus(&corpus, &golden),
+        Err(CorpusError::Malformed(m)) if m.contains("duplicate id")
+    ));
+    std::fs::write(
+        &corpus,
+        r#"{"entries":[{"id":"a","input":"\"x\"","accept":true}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &golden,
+        r#"{"entries":[{"id":"a","accept":true,"canonical":"\"x\""},{"id":"a","accept":true,"canonical":"\"y\""}]}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        crate::corpus::parse_text_corpus(&corpus, &golden),
+        Err(CorpusError::Malformed(m)) if m.contains("duplicate id")
+    ));
+    std::fs::write(
+        &golden,
+        r#"{"entries":[{"id":"a","accept":true,"canonical":"\"x\""},{"id":"b","accept":true,"canonical":"\"y\""}]}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        crate::corpus::parse_text_corpus(&corpus, &golden),
+        Err(CorpusError::Malformed(m)) if m.contains("not present")
+    ));
+
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
