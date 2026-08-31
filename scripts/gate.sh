@@ -129,6 +129,39 @@ resolved_target_dir_for() {
   cargo_target_dir_for "$REPO_DIR"
 }
 
+shared_repo_dir_for() {
+  # A linked worktree's .git file points into the main checkout's
+  # .git/worktrees/<name> directory. Oracle work artifacts are intentionally
+  # shared from that authoritative main checkout rather than rebuilt per
+  # worktree. Use bash builtins so prerequisite tests can fully shim PATH.
+  if [ -d "$REPO_DIR/.git" ]; then
+    printf '%s\n' "$REPO_DIR"
+    return
+  fi
+  if [ -f "$REPO_DIR/.git" ]; then
+    local line="" git_dir="" shared=""
+    IFS= read -r line < "$REPO_DIR/.git" || true
+    case "$line" in
+      "gitdir: "*) git_dir="${line#gitdir: }" ;;
+    esac
+    case "$git_dir" in
+      /*) ;;
+      "") ;;
+      *) git_dir="$REPO_DIR/$git_dir" ;;
+    esac
+    case "$git_dir" in
+      */.git/worktrees/*)
+        shared="${git_dir%%/.git/worktrees/*}"
+        if [ -d "$shared" ]; then
+          printf '%s\n' "$shared"
+          return
+        fi
+        ;;
+    esac
+  fi
+  printf '%s\n' "$REPO_DIR"
+}
+
 # ---- oracle prereq pre-check (full gate only) --------------------------------
 #
 # Validates the prerequisites the two oracle steps need and prints an actionable
@@ -138,7 +171,7 @@ resolved_target_dir_for() {
 # RIVET_PAPER_RUNTIME_JAR; RIVET_JAVA_HOME / JAVA_HOME / SDKMAN. With
 # REQUIRE_ORACLE=1 any missing prereq is a hard failure (exit 1).
 oracle_prereq_check() {
-  local missing=0 client_target_dir client_candidate
+  local missing=0 shared_repo_dir canonical_client
   JAVA_BARE_OK=0; PYTHON3_OK=0; DISK_OK=0; JAVAC25_OK=0
   PAPERCLIP_JAR=""; COMPILE_JAR=""; LIBRARIES_DIR=""; RUNTIME_JAR=""
   # VERIFY_RUNNABLE / PARITY_RUNNABLE / CAPTURE_RUNNABLE / SCENARIO_RUNNABLE are
@@ -213,24 +246,30 @@ oracle_prereq_check() {
   fi
 
   # rivet-client (the offline Azalea bot the join-capture harness drives). The
-  # scenario runner and rivet-capture both need it; the gate never runs the
-  # capture step against a missing client binary.
+  # independently committed scenario trust contract pins one preserved artifact;
+  # arbitrary target/debug bytes are never a default. Linked worktrees consume
+  # the main checkout's shared oracle artifact. An explicit RIVET_CLIENT_BIN is
+  # authoritative selection, but the scenario runner still rejects bytes that do
+  # not match the committed contract.
   CLIENT_BIN=""
-  if [ -n "${RIVET_CLIENT_BIN:-}" ] && [ -f "${RIVET_CLIENT_BIN}" ]; then
-    CLIENT_BIN="$RIVET_CLIENT_BIN"
-  else
-    client_target_dir="$(resolved_target_dir_for)"
-    client_candidate="$client_target_dir/debug/rivet-client"
-    if [ -f "$client_candidate" ]; then
-      CLIENT_BIN="$client_candidate"
+  shared_repo_dir="$(shared_repo_dir_for)"
+  canonical_client="$shared_repo_dir/tools/rivet-oracle/work/bin/rivet-client-26.2-f96e8c45"
+  if [ -n "${RIVET_CLIENT_BIN:-}" ]; then
+    if [ -f "$RIVET_CLIENT_BIN" ]; then
+      CLIENT_BIN="$RIVET_CLIENT_BIN"
+    else
+      echo "  [MISSING] authoritative RIVET_CLIENT_BIN ($RIVET_CLIENT_BIN) — the selected file does not exist; no fallback is permitted"
+      missing=$((missing + 1))
     fi
+  elif [ -f "$canonical_client" ]; then
+    CLIENT_BIN="$canonical_client"
+  else
+    echo "  [MISSING] trusted rivet-client artifact ($canonical_client) — restore the contract-named preserved oracle artifact; arbitrary target/debug builds are not accepted"
+    missing=$((missing + 1))
   fi
   if [ -n "$CLIENT_BIN" ]; then
     export RIVET_CLIENT_BIN="$CLIENT_BIN"
-    echo "  [ok]      rivet-client binary ($CLIENT_BIN)"
-  else
-    echo "  [MISSING] rivet-client binary — build it first (cd tools/rivet-client && cargo build --locked) or set RIVET_CLIENT_BIN"
-    missing=$((missing + 1))
+    echo "  [ok]      rivet-client source selection ($CLIENT_BIN; committed scenario trust verification still required)"
   fi
 
   # paperclip jar for the scenario runner's Paper rows (join/move Paper-vs-Rivet

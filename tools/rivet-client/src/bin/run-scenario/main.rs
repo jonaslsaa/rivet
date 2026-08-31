@@ -897,30 +897,58 @@ pub(crate) fn cargo_target_dir() -> PathBuf {
     crate_root().join("../../target")
 }
 
+const TRUSTED_CLIENT_ARTIFACT: &str = "rivet-client-26.2-f96e8c45";
+
 /// Path to the exact `rivet-client` binary. An explicit override is
-/// authoritative: it is never silently replaced by a sibling/default binary.
+/// authoritative selection, but its bytes still must match the committed trust
+/// contract. The default is the preserved oracle artifact, never a sibling or
+/// target/debug build.
 fn client_binary() -> PathBuf {
+    let repo_root = crate_root().join("../..");
     select_client_binary(
         env::var_os("RIVET_CLIENT_BIN").map(PathBuf::from),
-        env::current_exe().ok().as_deref(),
-        &cargo_target_dir(),
+        &repo_root,
     )
 }
 
-fn select_client_binary(
-    override_path: Option<PathBuf>,
-    current_exe: Option<&Path>,
-    target_dir: &Path,
-) -> PathBuf {
-    if let Some(path) = override_path {
-        return path;
+fn select_client_binary(override_path: Option<PathBuf>, repo_root: &Path) -> PathBuf {
+    override_path.unwrap_or_else(|| {
+        shared_repo_root(repo_root)
+            .join("tools/rivet-oracle/work/bin")
+            .join(TRUSTED_CLIENT_ARTIFACT)
+    })
+}
+
+fn shared_repo_root(repo_root: &Path) -> PathBuf {
+    let dot_git = repo_root.join(".git");
+    if dot_git.is_dir() {
+        return repo_root.to_path_buf();
     }
-    if let Some(sibling) = current_exe.and_then(|exe| exe.parent().map(|p| p.join("rivet-client")))
-        && sibling.is_file()
-    {
-        return sibling;
+    let Some(git_dir) = fs::read_to_string(&dot_git).ok().and_then(|contents| {
+        contents
+            .strip_prefix("gitdir: ")
+            .map(str::trim)
+            .map(PathBuf::from)
+    }) else {
+        return repo_root.to_path_buf();
+    };
+    let git_dir = if git_dir.is_absolute() {
+        git_dir
+    } else {
+        repo_root.join(git_dir)
+    };
+    let git_dir = git_dir.canonicalize().unwrap_or(git_dir);
+    let Some(common_git) = git_dir.parent().and_then(Path::parent) else {
+        return repo_root.to_path_buf();
+    };
+    if common_git.file_name().is_some_and(|name| name == ".git") {
+        common_git
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| repo_root.to_path_buf())
+    } else {
+        repo_root.to_path_buf()
     }
-    target_dir.join("debug/rivet-client")
 }
 
 const TRUSTED_CLIENT_CONTRACT_JSON: &str =
@@ -988,6 +1016,12 @@ impl TrustedClientContract {
     }
 
     fn validate(&self) -> Result<(), RunnerError> {
+        if self.artifact != TRUSTED_CLIENT_ARTIFACT {
+            return Err(RunnerError::Gate(format!(
+                "trusted client contract artifact is {}, expected {TRUSTED_CLIENT_ARTIFACT}",
+                self.artifact
+            )));
+        }
         if self.minecraft_version != "26.2" {
             return Err(RunnerError::Gate(format!(
                 "trusted client contract pins Minecraft {}, expected 26.2",
@@ -1673,9 +1707,9 @@ fn ensure_client_binary() -> Result<ClientBinary, RunnerError> {
             "rivet-client binary not found at {}{}",
             requested.display(),
             if env::var_os("RIVET_CLIENT_BIN").is_some() {
-                " (authoritative RIVET_CLIENT_BIN override)"
+                " (authoritative RIVET_CLIENT_BIN override; no fallback is permitted)"
             } else {
-                " — build it first: cargo build --locked"
+                " — restore the contract-named preserved artifact under tools/rivet-oracle/work/bin; arbitrary local builds are not trusted"
             }
         )));
     }
@@ -4997,7 +5031,6 @@ mod tests {
         let mut file = fs::File::open(path).unwrap();
         let (sha256, size) = sha256_reader(&mut file).unwrap();
         let mut contract = TrustedClientContract::committed().unwrap();
-        contract.artifact = "test-client".to_owned();
         contract.sha256 = sha256;
         contract.size = size;
         contract
@@ -5018,17 +5051,47 @@ mod tests {
         let work = temp_dir("override");
         let override_path = work.join("client.sh");
         write_client_script(&override_path, "trusted", 0);
-        let selected = select_client_binary(
-            Some(override_path.clone()),
-            Some(Path::new("/other/debug/run-scenario")),
-            Path::new("/target"),
-        );
+        let selected = select_client_binary(Some(override_path.clone()), &work);
         assert_eq!(selected, override_path);
         let binary = prepare_client_binary(&selected, test_contract(&selected)).unwrap();
         assert_eq!(
             binary.identity.selected_source,
             selected.canonicalize().unwrap()
         );
+        fs::remove_dir_all(work).unwrap();
+    }
+
+    #[test]
+    fn default_client_selection_uses_shared_worktree_artifact_not_target_debug() {
+        let shared = temp_dir("shared-client-root");
+        let worktree = shared.join(".claude/worktrees/probe");
+        fs::create_dir_all(shared.join(".git/worktrees/probe")).unwrap();
+        fs::create_dir_all(worktree.join("target/debug")).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}/.git/worktrees/probe\n", shared.display()),
+        )
+        .unwrap();
+        fs::write(worktree.join("target/debug/rivet-client"), b"arbitrary").unwrap();
+        let expected = shared
+            .join("tools/rivet-oracle/work/bin")
+            .join(TRUSTED_CLIENT_ARTIFACT);
+        assert_eq!(select_client_binary(None, &worktree), expected);
+        fs::remove_dir_all(shared).unwrap();
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn wrong_client_override_is_rejected_by_committed_trust_contract() {
+        let work = temp_dir("wrong-override");
+        let override_path = work.join("rivet-client");
+        write_client_script(&override_path, "self-reported-pinned", 0);
+        let selected = select_client_binary(Some(override_path.clone()), &work);
+        assert_eq!(selected, override_path);
+        let error = prepare_client_binary(&selected, TrustedClientContract::committed().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("is not trusted"));
         fs::remove_dir_all(work).unwrap();
     }
 

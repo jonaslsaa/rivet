@@ -59,7 +59,11 @@ The verifier copies the selected bytes through one open source descriptor into a
 private no-write staging inode, validates the committed digest, unlinks it, and
 executes that retained inode through `/proc/self/fd`; swapping the selected path
 after validation cannot change what runs. Raw and normalized evidence records
-both the selected source path and the executed trusted digest.
+both the selected source path and the executed trusted digest. Without an
+override, both the scenario runner and merge gate select the contract-named
+artifact from `tools/rivet-oracle/work/bin` in the main checkout; linked
+worktrees deliberately share that preserved artifact and never fall back to
+their own `target/debug/rivet-client`.
 
 This trusted artifact is currently scoped to x86_64 GNU/Linux; unsupported
 platforms remain UNVERIFIED rather than running unpinned bytes. Refreshing it is
