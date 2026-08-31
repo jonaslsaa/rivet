@@ -114,12 +114,17 @@ impl Drop for ErasedEntryData {
 pub struct RegistryAccess {
     /// The ordered erased registry map (`RegistryAccess.Frozen`).
     pub(crate) registries: Vec<ErasedEntry>,
+    /// Whether this access may destructively take a recoverable entry. Cloning
+    /// an access creates a non-owner view; only the original handoff access may
+    /// consume its recovery callback.
+    recoverable_owner: bool,
 }
 
 impl Clone for RegistryAccess {
     fn clone(&self) -> Self {
         RegistryAccess {
             registries: self.registries.clone(),
+            recoverable_owner: false,
         }
     }
 }
@@ -135,6 +140,7 @@ impl RegistryAccess {
     pub fn empty() -> Self {
         RegistryAccess {
             registries: Vec::new(),
+            recoverable_owner: true,
         }
     }
 
@@ -151,7 +157,10 @@ impl RegistryAccess {
             assert!(seen.insert(key.clone()), "Duplicated registry {key}");
             registries.push(Arc::new(ErasedEntryData::new(key, value)));
         }
-        RegistryAccess { registries }
+        RegistryAccess {
+            registries,
+            recoverable_owner: true,
+        }
     }
 
     /// Build a one-entry access whose final drop can recover the registry.
@@ -164,13 +173,16 @@ impl RegistryAccess {
             registries: vec![Arc::new(ErasedEntryData::with_recovery(
                 key, value, recovery,
             ))],
+            recoverable_owner: true,
         }
     }
 
     /// Remove a uniquely-owned typed registry from this access. Layered and
     /// cloned accesses must be dropped first; refusing while an `Arc` remains
     /// is what prevents an ownership transfer from silently cloning a live
-    /// registry identity.
+    /// registry identity. A cloned view also cannot consume a recoverable
+    /// handoff entry after the original owner drops, because that would cancel
+    /// the transaction's deferred recovery callback.
     pub fn take_registry<E>(&mut self, key: &RegistryKey<E>) -> Result<Registry<E>, String>
     where
         E: Send + Sync + 'static,
@@ -181,6 +193,15 @@ impl RegistryAccess {
             .iter()
             .position(|entry| entry.key == erased)
             .ok_or_else(|| format!("Missing registry: {key}"))?;
+        // A cloned access is a read-only view of a recoverable handoff. Letting
+        // it take the entry would cancel the callback while the transaction is
+        // still empty, leaving no owner to recover later.
+        if self.registries[index].recovery.is_some() && !self.recoverable_owner {
+            return Err(format!(
+                "Cannot take recoverable registry {key} through a non-owner access"
+            ));
+        }
+
         // Check the erased type before removing anything. A failed typed take
         // must leave the access unchanged just like a failed ownership take.
         if self.registries[index]
@@ -218,6 +239,7 @@ impl RegistryAccess {
     fn from_entries(entries: Vec<ErasedEntry>) -> Self {
         RegistryAccess {
             registries: entries,
+            recoverable_owner: false,
         }
     }
 

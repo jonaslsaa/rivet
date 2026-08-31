@@ -907,6 +907,61 @@ mod tests {
     }
 
     #[test]
+    fn owner_handoff_can_take_registry_and_transfer_builder() {
+        let mut transaction = RegistryBuilder::<TestElement>::new(&key()).into_transaction();
+        register(transaction.builder_mut(), "existing", 7);
+        let registry_id = transaction.registry_id();
+
+        let mut handoff = transaction.access_transaction();
+        let registry = handoff
+            .take_registry(&key())
+            .expect("the owner handoff can take its registry");
+        assert_eq!(registry.registry_id(), registry_id);
+        drop(handoff);
+
+        let mut builder = registry.into_builder();
+        register(&mut builder, "after_owner_take", 8);
+        let registry = builder.freeze();
+        assert_eq!(registry.registry_id(), registry_id);
+        assert_eq!(registry.size(), 2);
+    }
+
+    #[test]
+    fn cloned_temporary_access_cannot_take_recoverable_registry() {
+        let mut transaction = RegistryBuilder::<TestElement>::new(&key()).into_transaction();
+        register(transaction.builder_mut(), "existing", 7);
+
+        let mut cloned_access = {
+            let handoff = transaction.access_transaction();
+            let cloned_access = handoff.access().clone();
+            drop(handoff);
+            cloned_access
+        };
+
+        // The clone is a non-owner view. It must not consume the entry and its
+        // deferred callback, because the transaction is still empty until the
+        // final view is dropped.
+        let error = cloned_access
+            .take_registry(&key())
+            .expect_err("a cloned handoff access cannot take its registry");
+        assert!(
+            error.contains("non-owner access"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                transaction.builder_mut();
+            }))
+            .is_err(),
+            "the transaction remains empty while the clone owns the entry"
+        );
+
+        drop(cloned_access);
+        register(transaction.builder_mut(), "after_clone_take_rejected", 8);
+        assert_eq!(transaction.into_builder().freeze().size(), 2);
+    }
+
+    #[test]
     fn access_handoff_recovers_all_transaction_owners_after_panic() {
         let mut first = RegistryBuilder::<TestElement>::new(&key()).into_transaction();
         let mut second = RegistryBuilder::<TestElement>::new(&other_key()).into_transaction();

@@ -45,9 +45,9 @@
 //!   the first slot whose `prefix > selection`.
 //! - Codecs: `Weighted.codec` is a record codec over `"data"` (the element
 //!   codec, either a `Codec<E>` via `.fieldOf("data")` or an element
-//!   `MapCodec`) and `"weight"` via `ExtraCodecs.POSITIVE_INT` — a
-//!   non-positive `weight` fails decode with exactly
-//!   `"Value must be positive: N"`. `WeightedList.codec`/
+//!   `MapCodec`) and `"weight"` via `ExtraCodecs.NON_NEGATIVE_INT` — a
+//!   negative `weight` fails decode with exactly
+//!   `"Value must be non-negative: N"`; zero is accepted. `WeightedList.codec`/
 //!   `nonEmptyCodec` map over a list; the `nonEmpty` variant validates
 //!   `isEmpty()` with `"Weighted list must contain at least one entry with
 //!   non-zero weight"`. `Weighted.map`/`WeightedList.map` preserve weights
@@ -62,12 +62,12 @@
 //! `WeightedList.streamCodec`) are omitted — the protocol crate owns that
 //! surface and no consumer in this value layer needs it.
 
-use crate::extra_codecs as util_extra_codecs;
 use crate::random::RandomSource;
 use crate::util::log_and_pause_if_in_ide;
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::data_result::DataResult;
 use rivet_serialization::dynamic_ops::DynamicOps;
+use rivet_serialization::extra_codecs::non_negative_int_codec;
 use rivet_serialization::map_codec::MapCodec;
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
 use std::fmt;
@@ -118,7 +118,7 @@ impl<T> Weighted<T> {
 }
 
 /// `Weighted.codec(Codec<E>)` — a record codec over `"data"` (via
-/// `elementCodec.fieldOf("data")`) and `"weight"` (`POSITIVE_INT`).
+/// `elementCodec.fieldOf("data")`) and `"weight"` (`NON_NEGATIVE_INT`).
 pub fn weighted_codec<E, Ops>(
     element_codec: Arc<dyn Codec<E, Ops>>,
 ) -> Arc<dyn Codec<Weighted<E>, Ops>>
@@ -147,7 +147,7 @@ where
             .and(RecordCodecBuilder::of_named(
                 Arc::new(|w: &Weighted<E>| w.weight),
                 "weight".to_string(),
-                util_extra_codecs::positive_int::<Ops>(),
+                non_negative_int_codec::<Ops>(),
             ))
             .apply(
                 instance,
@@ -913,21 +913,36 @@ mod tests {
     }
 
     #[test]
-    fn weighted_codec_rejects_non_positive_weight_with_exact_message() {
+    fn weighted_codec_rejects_negative_weight_with_exact_message() {
         let codec = weighted_codec::<String, JsonOps>(rivet_serialization::codec::string_codec::<
             JsonOps,
         >());
-        for weight in [-1, 0] {
-            let input = json!({"data": "q", "weight": weight});
-            let error = codec
-                .parse(&JsonOps::INSTANCE, &input)
-                .error_ref()
-                .map(|e| e.message().to_string());
-            assert_eq!(
-                error.as_deref(),
-                Some(format!("Value must be positive: {weight}").as_str())
-            );
-        }
+        let input = json!({"data": "q", "weight": -1});
+        let error = codec
+            .parse(&JsonOps::INSTANCE, &input)
+            .error_ref()
+            .map(|e| e.message().to_string());
+        assert_eq!(error.as_deref(), Some("Value must be non-negative: -1"));
+    }
+
+    #[test]
+    fn weighted_codec_accepts_zero_weight_from_json() {
+        let codec = weighted_codec::<String, JsonOps>(rivet_serialization::codec::string_codec::<
+            JsonOps,
+        >());
+        let input = json!({"data": "q", "weight": 0});
+        let decoded = codec
+            .parse(&JsonOps::INSTANCE, &input)
+            .result()
+            .cloned()
+            .expect("zero-weight decode");
+        assert_eq!(decoded, Weighted::new("q".to_string(), 0));
+        let encoded = codec
+            .encode_start(&JsonOps::INSTANCE, &decoded)
+            .result()
+            .cloned()
+            .expect("zero-weight encode");
+        assert_eq!(encoded, input);
     }
 
     #[test]
@@ -958,22 +973,32 @@ mod tests {
     }
 
     #[test]
-    fn weighted_list_codec_rejects_non_positive_weight_in_array() {
+    fn weighted_list_codec_rejects_negative_weight_in_array() {
         let codec =
             weighted_list_codec::<String, JsonOps>(rivet_serialization::codec::string_codec::<
                 JsonOps,
             >());
-        for weight in [-1, 0] {
-            let input = json!([{"data": "a", "weight": weight}]);
-            let error = codec
-                .parse(&JsonOps::INSTANCE, &input)
-                .error_ref()
-                .map(|e| e.message().to_string());
-            assert_eq!(
-                error.as_deref(),
-                Some(format!("Value must be positive: {weight}").as_str())
-            );
-        }
+        let input = json!([{"data": "a", "weight": -1}]);
+        let error = codec
+            .parse(&JsonOps::INSTANCE, &input)
+            .error_ref()
+            .map(|e| e.message().to_string());
+        assert_eq!(error.as_deref(), Some("Value must be non-negative: -1"));
+    }
+
+    #[test]
+    fn weighted_list_codec_accepts_zero_weight_in_array() {
+        let codec =
+            weighted_list_codec::<String, JsonOps>(rivet_serialization::codec::string_codec::<
+                JsonOps,
+            >());
+        let input = json!([{"data": "a", "weight": 0}]);
+        let decoded = codec
+            .parse(&JsonOps::INSTANCE, &input)
+            .result()
+            .cloned()
+            .expect("zero-weight list decode");
+        assert_eq!(decoded.unwrap(), vec![Weighted::new("a".to_string(), 0)]);
     }
 
     #[test]
