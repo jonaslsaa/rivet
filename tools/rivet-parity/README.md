@@ -10,7 +10,10 @@ corpus.
 ## What it checks
 
 Every check is one JSON-Lines object on stdout (`{"kind": ..., "id": ...,
-"ok": ..., "fields": [...]}`), followed by a `{"kind":"stats"}` line. A
+"ok": ..., "fields": [...]}`), followed by a `{"kind":"stats"}` line. The
+stats include a deterministic closure block with the manifest hash and
+`declared`, `discovered`, `executed`, `matched`, `diverged`, `mismatched`,
+`invalid_accepted`, `invalid_rejected`, `unreadable`, and `unlisted` counts. A
 human-readable summary goes to stderr.
 
 | kind | input | compares |
@@ -20,7 +23,11 @@ human-readable summary goes to stderr.
 | `nbt.decode` | binary NBT bytes (fixtures) | canonical + pretty SNBT after Rust `NbtIo.read` vs oracle `nbt.decode` |
 | `nbt.encode` | compound SNBT | binary NBT bytes — **byte-for-byte** for single-key-deep compounds; for multi-key compounds the binary field order is the documented HashMap-iteration-order divergence, so the binding comparison is a *semantic* one (both binaries must re-read to the same canonical SNBT) |
 | `idem` | binary NBT bytes | Rust-internal read->write->read structural equality (always runs, even without the oracle) |
-| `component.json` | component JSON (fixtures) | Paper `ComponentSerialization.CODEC` decode->re-encode under non-compressed `JsonOps` vs the Rust port's re-encode, byte-for-byte; accept/reject parity over the committed issue-#98 text corpus (46 accepted + 16 strict malformed) |
+| `component.json` | component JSON (fixtures) | Paper `ComponentSerialization.CODEC` decode->re-encode under non-compressed `JsonOps` vs the Rust port's re-encode, byte-for-byte; accept/reject parity over the committed issue-#98 text corpus (46 accepted + 16 manifest-declared invalid) |
+
+Before any comparison, `fixtures/corpus-manifest.json` proves exact corpus closure. The 432 chunk files and all three text files (`corpus.json`, `golden.json`, and `manifest.json`) must match independently trusted normalized paths, byte counts, and SHA-256 values. File length is checked before a bounded read, and execution consumes the validated immutable text structures instead of reopening paths. The trusted contract also pins hand-built SNBT content plus the text corpus's 46 accepted, 16 invalid, and per-kind counts. The emitted closure hash binds the trusted manifest and all validated text bytes. Missing, extra, renamed, unreadable, oversized, symlinked, hardlinked, nonregular, or content-modified files fail closed. A missing required root is UNVERIFIED (exit 3); a present but unsafe or inconsistent corpus is FAILED (exit 1).
+
+Valid inputs must succeed on both Paper and Rust. If both implementations reject a valid SNBT/NBT/component fixture, that is a hard mismatch rather than an accept/reject match. Accept/reject parity is reserved for entries explicitly declared invalid (`parse-invalid.*` and text entries with `accept: false`).
 
 ### Known divergences
 

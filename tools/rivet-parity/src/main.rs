@@ -64,6 +64,7 @@ struct Check {
     divergences: Vec<String>,
     fields: Vec<Value>,
     note: Option<String>,
+    invalid_declared: bool,
 }
 
 impl Check {
@@ -77,6 +78,7 @@ impl Check {
             divergences: Vec::new(),
             fields: Vec::new(),
             note: None,
+            invalid_declared: false,
         }
     }
 
@@ -107,6 +109,10 @@ impl Check {
         self.divergences.push(name.to_string());
     }
 
+    fn declared_invalid(&mut self) {
+        self.invalid_declared = true;
+    }
+
     fn note(&mut self, text: &str) {
         self.note = Some(text.to_string());
     }
@@ -122,6 +128,7 @@ impl Check {
             "id": self.id,
             "ok": self.ok,
             "skipped": self.skipped,
+            "invalid_declared": self.invalid_declared,
             "divergences": self.divergences,
             "fields": self.fields,
         });
@@ -144,6 +151,8 @@ struct Summary {
     mismatched: BTreeMap<String, usize>,
     skipped: BTreeMap<String, usize>,
     hard_ids: Vec<String>,
+    invalid_accepted: usize,
+    invalid_rejected: usize,
 }
 
 impl Summary {
@@ -156,6 +165,13 @@ impl Summary {
             .map(|a| a.len())
             .unwrap_or(0);
         let id = check["id"].as_str().unwrap_or("?").to_string();
+        if check["invalid_declared"].as_bool().unwrap_or(false) && !skipped {
+            if ok {
+                self.invalid_rejected += 1;
+            } else {
+                self.invalid_accepted += 1;
+            }
+        }
 
         *self.totals.entry(kind.clone()).or_insert(0) += 1;
         if skipped {
@@ -233,13 +249,16 @@ fn is_single_key_deep(tag: &Tag) -> bool {
 
 // ---- section runners ----
 
-fn check_snbt_parse(
-    oracle: Option<&mut oracle::Oracle>,
+fn check_snbt_parse<O: oracle::OracleCall>(
+    oracle: Option<&mut O>,
     id: &str,
     input: &str,
     expected_accept: bool,
 ) -> Value {
     let mut check = Check::new("snbt.parse", id.to_string(), Some(input.to_string()));
+    if !expected_accept {
+        check.declared_invalid();
+    }
     let rust = rust_parse_snbt(input);
 
     let Some(handle) = oracle else {
@@ -271,24 +290,45 @@ fn check_snbt_parse(
                 }
             }
         }
-        Err(oracle_err) => match &rust {
+        Err(oracle::OracleCallError::Rejected(oracle_err)) => match &rust {
             Ok(_) => {
                 check.field("accept", "true", "false");
                 check.note(&format!("oracle error: {oracle_err}"));
             }
             Err(rust_err) => {
-                // Both rejected. Accept/reject parity holds; error text is soft.
-                check.field_soft("error_text", "rejected", "rejected");
-                let _ = rust_err;
-                check.note(&format!("both rejected; oracle error: {oracle_err}"));
+                if expected_accept {
+                    check.field("valid_fixture", "accepted", "both rejected");
+                    check.note(&format!(
+                        "valid SNBT failed on both implementations; oracle: {oracle_err}; rust: {rust_err}"
+                    ));
+                } else {
+                    // Only manifest-declared invalid inputs use accept/reject parity.
+                    check.field_soft("error_text", "rejected", "rejected");
+                    check.note(&format!(
+                        "both rejected as declared invalid; oracle: {oracle_err}"
+                    ));
+                }
             }
         },
+        Err(oracle::OracleCallError::Unavailable(oracle_err)) => {
+            // A transport/protocol/process failure is not a Paper rejection,
+            // including for an explicitly invalid fixture. Keep the check hard
+            // so the run cannot report VERIFIED on an unverified comparison.
+            check.field("oracle", "reachable", "error");
+            if let Err(rust_err) = &rust {
+                check.note(&format!(
+                    "oracle unavailable (Rust also rejected): {oracle_err}; rust: {rust_err}"
+                ));
+            } else {
+                check.note(&format!("oracle unavailable: {oracle_err}"));
+            }
+        }
     }
     check.finish()
 }
 
-fn check_nbt_decode(
-    oracle: Option<&mut oracle::Oracle>,
+fn check_nbt_decode<O: oracle::OracleCall>(
+    oracle: Option<&mut O>,
     id: &str,
     label: &str,
     bytes: &[u8],
@@ -331,14 +371,19 @@ fn check_nbt_decode(
                 check.field("oracle_read", "ok", "err");
                 check.note(&format!("oracle error: {oracle_err}"));
             }
-            Err(_) => check.note(&format!("both rejected; oracle error: {oracle_err}")),
+            Err(rust_err) => {
+                check.field("valid_fixture", "decoded", "both rejected");
+                check.note(&format!(
+                    "valid NBT failed on both implementations; oracle: {oracle_err}; rust: {rust_err}"
+                ));
+            }
         },
     }
     check.finish()
 }
 
-fn check_nbt_encode(
-    oracle: Option<&mut oracle::Oracle>,
+fn check_nbt_encode<O: oracle::OracleCall>(
+    oracle: Option<&mut O>,
     id: &str,
     input: &str,
     single_key: bool,
@@ -459,7 +504,12 @@ fn check_nbt_encode(
                 check.field("oracle_encode", "ok", "err");
                 check.note(&format!("oracle error: {oracle_err}"));
             }
-            Err(_) => check.note(&format!("both rejected; oracle error: {oracle_err}")),
+            Err(rust_err) => {
+                check.field("valid_fixture", "encoded", "both rejected");
+                check.note(&format!(
+                    "valid encode fixture failed on both implementations; oracle: {oracle_err}; rust: {rust_err}"
+                ));
+            }
         },
     }
     check.finish()
@@ -527,6 +577,9 @@ fn check_component_json<O: oracle::OracleCall>(
     codec: &std::sync::Arc<dyn rivet_serialization::codec::Codec<Component, JsonOps>>,
 ) -> Value {
     let mut check = Check::new("component.json", id.to_string(), Some(input.to_string()));
+    if !golden_accept {
+        check.declared_invalid();
+    }
 
     let rust = rust_component_json(input, codec);
 
@@ -724,17 +777,36 @@ fn write_scoreboard(summary: &Summary, fixture_cap: Option<usize>) {
     }
 }
 
+fn parse_fixture_limit(value: &str) -> usize {
+    match value.parse() {
+        Ok(limit) => limit,
+        Err(_) => {
+            eprintln!("invalid fixture limit {value:?}; expected a non-negative integer");
+            std::process::exit(2);
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut limit_fixtures: Option<usize> = None;
     let mut no_oracle = false;
     let mut require_oracle = false;
     let mut write_scoreboard_flag = false;
-    for arg in &args[1..] {
-        match arg.as_str() {
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
             "--no-oracle" => no_oracle = true,
             "--require-oracle" => require_oracle = true,
             "--scoreboard" => write_scoreboard_flag = true,
+            "--limit-fixtures" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("--limit-fixtures requires a value");
+                    std::process::exit(2);
+                };
+                limit_fixtures = Some(parse_fixture_limit(value));
+                index += 1;
+            }
             "--help" | "-h" => {
                 eprintln!(
                     "rivet-parity: byte-for-byte NBT/SNBT parity diff vs the Paper Java oracle\n\
@@ -757,19 +829,36 @@ fn main() {
                 return;
             }
             other => {
-                if let Some(n) = other.strip_prefix("--limit-fixtures=") {
-                    limit_fixtures = n.parse().ok();
+                if let Some(value) = other.strip_prefix("--limit-fixtures=") {
+                    if value.is_empty() {
+                        eprintln!("--limit-fixtures requires a value");
+                        std::process::exit(2);
+                    }
+                    limit_fixtures = Some(parse_fixture_limit(value));
                 } else {
                     eprintln!("unknown argument: {other}");
                     std::process::exit(2);
                 }
             }
         }
+        index += 1;
     }
     if no_oracle && require_oracle {
         eprintln!("--no-oracle and --require-oracle are mutually exclusive");
         std::process::exit(2);
     }
+
+    let closure = match corpus::load_fixture_closure() {
+        Ok(closure) => closure,
+        Err(corpus::ClosureError::Absent(error)) => {
+            eprintln!("[rivet-parity] CORPUS BLOCKER: {error}");
+            std::process::exit(EXIT_UNVERIFIED);
+        }
+        Err(corpus::ClosureError::Invalid(error)) => {
+            eprintln!("[rivet-parity] FATAL: {error}");
+            std::process::exit(1);
+        }
+    };
 
     let mut summary = Summary::default();
     let mut transcript: Vec<Value> = Vec::new();
@@ -839,89 +928,78 @@ fn main() {
         transcript.push(check);
     }
 
-    // ---- fixtures ----
-    let fixtures = match corpus::fixtures_dir() {
-        Some(dir) => {
-            let chunk_root = dir.clone();
-            let mut all = corpus::collect_fixtures(&dir);
-            if let Some(n) = limit_fixtures {
-                all.truncate(n);
-            }
-            eprintln!(
-                "[rivet-parity] fixtures: {} chunk-NBT files under {}",
-                all.len(),
-                dir.display()
-            );
-            Some((chunk_root, all))
-        }
-        None => {
-            eprintln!("[rivet-parity] M0 fixtures not present; skipping fixture sections");
-            None
-        }
-    };
+    // ---- exact-manifest chunk fixtures ----
+    let mut fixture_files = closure.files.iter().collect::<Vec<_>>();
+    if let Some(n) = limit_fixtures {
+        fixture_files.truncate(n);
+    }
+    eprintln!(
+        "[rivet-parity] fixtures: executing {} of {} manifest-closed chunk-NBT files under {}",
+        fixture_files.len(),
+        closure.declared,
+        closure.chunk_root.display()
+    );
 
-    if let Some((chunk_root, all)) = &fixtures {
-        for path in all {
-            let label = corpus::fixture_label(chunk_root, path);
-            let bytes = match std::fs::read(path) {
-                Ok(b) => b,
-                Err(e) => {
-                    eprintln!("[rivet-parity] cannot read fixture {}: {e}", path.display());
-                    continue;
-                }
-            };
+    for fixture in &fixture_files {
+        let label = &fixture.label;
+        let bytes = &fixture.bytes;
 
-            // Binary -> canonical (oracle nbt.decode vs rust read+print).
-            let check = check_nbt_decode(
-                oracle.as_deref_mut(),
-                &format!("decode.{label}"),
-                &label,
-                &bytes,
-            );
-            summary.record(&check);
-            transcript.push(check);
+        let check = check_nbt_decode(
+            oracle.as_deref_mut(),
+            &format!("decode.{label}"),
+            label,
+            bytes,
+        );
+        summary.record(&check);
+        transcript.push(check);
 
-            // Rust internal idempotence (always runs).
-            let check = check_idem(&format!("idem.{label}"), &label, &bytes);
-            summary.record(&check);
-            transcript.push(check);
-        }
+        let check = check_idem(&format!("idem.{label}"), label, bytes);
+        summary.record(&check);
+        transcript.push(check);
     }
 
     // ---- snbt.parse of fixture canonical SNBT + nbt.encode of it ----
-    // (run after decode so the corpus is the decoded canonical; needs the
-    // canonical which we compute in Rust and feed to both sides).
-    if let Some((chunk_root, all)) = &fixtures {
-        for path in all {
-            let label = corpus::fixture_label(chunk_root, path);
-            let bytes = match std::fs::read(path) {
-                Ok(b) => b,
-                Err(_) => continue,
-            };
-            let Ok(compound) = rust_read_compound(&bytes) else {
+    for fixture in &fixture_files {
+        let label = &fixture.label;
+        let bytes = &fixture.bytes;
+        let compound = match rust_read_compound(bytes) {
+            Ok(compound) => compound,
+            Err(error) => {
+                let mut check = Check::new(
+                    "fixture.prepare",
+                    format!("prepare.{label}"),
+                    Some(label.clone()),
+                );
+                check.field("valid_fixture", "decoded", "rust rejected");
+                check.note(&format!(
+                    "manifest-declared valid NBT is unreadable: {error}"
+                ));
+                let check = check.finish();
+                summary.record(&check);
+                transcript.push(check);
                 continue;
-            };
-            let canonical = describe_compound(&compound).canonical;
+            }
+        };
+        let canonical = describe_compound(&compound).canonical;
 
-            let check = check_snbt_parse(
-                oracle.as_deref_mut(),
-                &format!("parse-fixture.{label}"),
-                &canonical,
-                true,
-            );
-            summary.record(&check);
-            transcript.push(check);
+        let check = check_snbt_parse(
+            oracle.as_deref_mut(),
+            &format!("parse-fixture.{label}"),
+            &canonical,
+            true,
+        );
+        summary.record(&check);
+        transcript.push(check);
 
-            let single_key = is_single_key_deep(&Tag::Compound(compound.clone()));
-            let check = check_nbt_encode(
-                oracle.as_deref_mut(),
-                &format!("encode-fixture.{label}"),
-                &canonical,
-                single_key,
-            );
-            summary.record(&check);
-            transcript.push(check);
-        }
+        let single_key = is_single_key_deep(&Tag::Compound(compound.clone()));
+        let check = check_nbt_encode(
+            oracle.as_deref_mut(),
+            &format!("encode-fixture.{label}"),
+            &canonical,
+            single_key,
+        );
+        summary.record(&check);
+        transcript.push(check);
     }
 
     // ---- nbt.encode: hand-built corpus ----
@@ -939,43 +1017,27 @@ fn main() {
         transcript.push(check);
     }
 
-    // ---- component.json: the committed text corpus vs Paper (issue #98) ----
-    match corpus::text_corpus() {
-        Ok(entries) => {
-            let codec = rivet_text::component_serialization::codec();
-            // The Rust-side decode->re-encode byte-identity against the committed
-            // golden is covered by the offline corpus tests in rivet-text; here the
-            // oracle comparison is the point.
-            for entry in &entries {
-                let check = check_component_json(
-                    oracle.as_deref_mut(),
-                    &format!("component.{id}", id = entry.id),
-                    &entry.input,
-                    entry.accept,
-                    entry.canonical.as_deref(),
-                    &codec,
-                );
-                summary.record(&check);
-                transcript.push(check);
-            }
-            eprintln!(
-                "[rivet-parity] text corpus: {} component.json entries under {}",
-                entries.len(),
-                corpus::text_fixtures_dir()
-                    .map(|d| d.display().to_string())
-                    .unwrap_or_else(|| "?".into())
-            );
-        }
-        Err(corpus::CorpusError::Absent) => {
-            eprintln!("[rivet-parity] text fixtures not present; skipping component.json section");
-        }
-        Err(e @ corpus::CorpusError::Malformed(_)) => {
-            // A present-but-broken committed corpus must never silently stop
-            // being exercised — hard-fail like a parity divergence.
-            eprintln!("[rivet-parity] FATAL: {e}");
-            std::process::exit(1);
-        }
+    // ---- component.json: exact bytes validated during closure preflight ----
+    let codec = rivet_text::component_serialization::codec();
+    for entry in &closure.text_entries {
+        let check = check_component_json(
+            oracle.as_deref_mut(),
+            &format!("component.{id}", id = entry.id),
+            &entry.input,
+            entry.accept,
+            entry.canonical.as_deref(),
+            &codec,
+        );
+        summary.record(&check);
+        transcript.push(check);
     }
+    eprintln!(
+        "[rivet-parity] text corpus: {} component.json entries under {}",
+        closure.text_entries.len(),
+        corpus::text_fixtures_dir()
+            .map(|d| d.display().to_string())
+            .unwrap_or_else(|| "?".into())
+    );
 
     // ---- emit transcript + summary ----
     let stdout = std::io::stdout();
@@ -985,12 +1047,37 @@ fn main() {
         let _ = writeln!(out, "{line}");
     }
 
+    let skipped = summary.skipped.values().sum::<usize>();
+    let full_declared_checks = corpus::parse_corpus().len()
+        + corpus::invalid_corpus().len()
+        + corpus::encode_corpus().len()
+        + closure.declared * 4
+        + closure.text_entries.len();
+    let closure_stats = json!({
+        "manifest_sha256": closure.manifest_sha256,
+        "declared": full_declared_checks,
+        "discovered": corpus::parse_corpus().len()
+            + corpus::invalid_corpus().len()
+            + corpus::encode_corpus().len()
+            + closure.discovered * 4
+            + closure.text_entries.len(),
+        "executed": transcript.len() - skipped,
+        "matched": summary.matched.values().sum::<usize>(),
+        "diverged": summary.diverged.values().sum::<usize>(),
+        "mismatched": summary.mismatched.values().sum::<usize>(),
+        "invalid_accepted": summary.invalid_accepted,
+        "invalid_rejected": summary.invalid_rejected,
+        "unreadable": 0,
+        "unlisted": 0,
+        "fixture_limit": limit_fixtures,
+    });
     let stats = json!({
         "total": transcript.len(),
         "matched": summary.matched.values().sum::<usize>(),
         "diverged": summary.diverged.values().sum::<usize>(),
         "mismatched": summary.mismatched.values().sum::<usize>(),
-        "skipped": summary.skipped.values().sum::<usize>(),
+        "skipped": skipped,
+        "closure": closure_stats,
     });
     let _ = writeln!(
         out,
@@ -1035,6 +1122,15 @@ fn main() {
     eprintln!(
         "  TOTAL matched={} diverged={} mismatched={} skipped={}",
         stats["matched"], stats["diverged"], stats["mismatched"], stats["skipped"]
+    );
+    eprintln!(
+        "  CLOSURE declared={} discovered={} executed={} invalid_rejected={} invalid_accepted={} unreadable=0 unlisted=0 manifest={}",
+        stats["closure"]["declared"],
+        stats["closure"]["discovered"],
+        stats["closure"]["executed"],
+        stats["closure"]["invalid_rejected"],
+        stats["closure"]["invalid_accepted"],
+        stats["closure"]["manifest_sha256"].as_str().unwrap_or("?")
     );
     if !summary.hard_ids.is_empty() {
         eprintln!();
@@ -1083,11 +1179,15 @@ mod tests {
     /// outcome — the JVM never boots. Lets the accept/canonical decision logic
     /// in `check_component_json` be exercised directly (issue #98).
     struct StubOracle {
-        response: Result<serde_json::Value, String>,
+        response: Result<serde_json::Value, oracle::OracleCallError>,
     }
 
     impl oracle::OracleCall for StubOracle {
-        fn call(&mut self, _op: &str, _fields: &[(&str, &str)]) -> Result<Value, String> {
+        fn call(
+            &mut self,
+            _op: &str,
+            _fields: &[(&str, &str)],
+        ) -> Result<Value, oracle::OracleCallError> {
             self.response.clone()
         }
     }
@@ -1103,7 +1203,9 @@ mod tests {
     #[test]
     fn component_json_oracle_error_hard_fails_even_when_rust_rejects() {
         let mut oracle = StubOracle {
-            response: Err("oracle closed stdout (did it crash?)".to_string()),
+            response: Err(oracle::OracleCallError::Unavailable(
+                "oracle closed stdout (did it crash?)".to_string(),
+            )),
         };
         // Not valid JSON, so Rust rejects it too — both sides are "down".
         let check = check_component_json(
@@ -1234,5 +1336,64 @@ mod tests {
             check["ok"].as_bool().unwrap(),
             "both-reject accept parity should pass: {check}"
         );
+    }
+
+    #[test]
+    fn valid_snbt_both_fail_is_a_hard_mismatch() {
+        let mut oracle = StubOracle {
+            response: Err(oracle::OracleCallError::Rejected(
+                "Paper rejected".to_string(),
+            )),
+        };
+        let check = check_snbt_parse(Some(&mut oracle), "valid.broken", "{broken", true);
+        assert!(!check["ok"].as_bool().unwrap(), "{check}");
+    }
+
+    #[test]
+    fn declared_invalid_snbt_both_reject_is_a_match() {
+        let mut oracle = StubOracle {
+            response: Err(oracle::OracleCallError::Rejected(
+                "Paper rejected".to_string(),
+            )),
+        };
+        let check = check_snbt_parse(Some(&mut oracle), "parse-invalid.broken", "{broken", false);
+        assert!(check["ok"].as_bool().unwrap(), "{check}");
+    }
+
+    #[test]
+    fn declared_invalid_snbt_oracle_unavailable_is_a_hard_mismatch() {
+        let mut oracle = StubOracle {
+            response: Err(oracle::OracleCallError::Unavailable(
+                "oracle closed stdout".to_string(),
+            )),
+        };
+        let check = check_snbt_parse(Some(&mut oracle), "parse-invalid.broken", "{broken", false);
+        assert!(!check["ok"].as_bool().unwrap(), "{check}");
+        let mut summary = Summary::default();
+        summary.record(&check);
+        assert_eq!(summary.mismatched.get("snbt.parse"), Some(&1));
+        assert!(!summary.matched.contains_key("snbt.parse"));
+    }
+
+    #[test]
+    fn valid_nbt_both_fail_is_a_hard_mismatch() {
+        let mut oracle = StubOracle {
+            response: Err(oracle::OracleCallError::Rejected(
+                "Paper rejected".to_string(),
+            )),
+        };
+        let check = check_nbt_decode(Some(&mut oracle), "decode.broken", "broken.nbt", b"bad");
+        assert!(!check["ok"].as_bool().unwrap(), "{check}");
+    }
+
+    #[test]
+    fn valid_encode_both_fail_is_a_hard_mismatch() {
+        let mut oracle = StubOracle {
+            response: Err(oracle::OracleCallError::Rejected(
+                "Paper rejected".to_string(),
+            )),
+        };
+        let check = check_nbt_encode(Some(&mut oracle), "encode.broken", "{broken", true);
+        assert!(!check["ok"].as_bool().unwrap(), "{check}");
     }
 }
