@@ -1226,8 +1226,10 @@ impl GenerationChunkHolder {
             Err(payload) => {
                 // A FEATURES closure is caller-owned and may panic after it
                 // has written blocks, heightmaps, or other ChunkAccess state.
-                // Restore before resuming the original panic so the holder is
-                // retryable and its failure state is unchanged.
+                // Discard staged dependency writebacks and restore before
+                // resuming the original panic so the holder is retryable and
+                // its failure state is unchanged.
+                self.pending_feature_writebacks.borrow_mut().take();
                 if let Some(snapshot) = features_snapshot {
                     self.chunk = snapshot;
                     self.features_failure = prior_features_failure;
@@ -1261,14 +1263,6 @@ impl GenerationChunkHolder {
                 }
                 if entered_features && is_features_failure(error) {
                     self.features_failure = Some(error);
-                }
-                match error {
-                    GenError::UnsupportedStatus(status) => {
-                        Err(GeneratedChunkError::UnsupportedStatus(status))
-                    }
-                    error => Err(GeneratedChunkError::Generation(error)),
-                }
-            }
                 }
                 match error {
                     GenError::UnsupportedStatus(status) => {
@@ -1382,12 +1376,7 @@ impl GenerationChunkHolder {
     pub fn into_level_chunk(
         self,
     ) -> Result<(LevelChunk, Option<GeneratedLightStorage>), GeneratedChunkError> {
-        let GenerationChunkHolder {
-            chunk,
-            context,
-            features_failure: _,
-            generator: _,
-        } = self;
+        let GenerationChunkHolder { chunk, context, .. } = self;
         let generated_light_storage = context.into_generated_light_storage();
         match LevelChunk::from_generated_spawn_proto(chunk) {
             Ok(level_chunk) => Ok((level_chunk, generated_light_storage)),
@@ -5566,6 +5555,9 @@ mod tests {
             context,
             features_failure: None,
             generator,
+            feature_writebacks: Vec::new(),
+            pending_feature_writebacks: Rc::new(RefCell::new(None)),
+            feature_workspace: FeatureWorkspace::new(),
         };
 
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
