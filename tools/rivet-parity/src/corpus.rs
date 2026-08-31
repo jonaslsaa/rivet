@@ -31,7 +31,6 @@ pub fn parse_corpus() -> Vec<(&'static str, &'static str)> {
         // ---- integer bases and underscores ----
         ("hex", "0x10"),
         ("hex-upper-X", "0X1F"),
-        ("hex-negative", "-0x10"),
         ("hex-unsigned-int-max", "0xFFFFFFFF"),
         ("hex-unsigned-long-max", "0xFFFFFFFFFFFFFFFFL"),
         ("hex-b-is-digit", "0xFFb"),
@@ -190,6 +189,7 @@ pub fn parse_corpus() -> Vec<(&'static str, &'static str)> {
 pub fn invalid_corpus() -> Vec<(&'static str, &'static str)> {
     vec![
         ("trailing-data", "1 2"),
+        ("hex-negative", "-0x10"),
         ("leading-zero", "0123"),
         ("trailing-underscore", "1_"),
         ("overflow-byte", "128b"),
@@ -321,13 +321,22 @@ fn workspace_root() -> Option<PathBuf> {
 
 fn safe_relative_path(raw: &str) -> Result<PathBuf, ClosureError> {
     let path = Path::new(raw);
-    if raw.is_empty()
-        || raw.contains('\\')
-        || path.is_absolute()
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
+    if raw.is_empty() || raw.contains('\\') || path.is_absolute() {
+        return Err(ClosureError::Invalid(format!(
+            "manifest path is not a safe normalized relative path: {raw:?}"
+        )));
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        if !matches!(component, Component::Normal(_)) {
+            return Err(ClosureError::Invalid(format!(
+                "manifest path is not a safe normalized relative path: {raw:?}"
+            )));
+        }
+        normalized.push(component.as_os_str());
+    }
+    if normalized != path {
         return Err(ClosureError::Invalid(format!(
             "manifest path is not a safe normalized relative path: {raw:?}"
         )));
@@ -1060,7 +1069,14 @@ mod closure_tests {
 
     #[test]
     fn closure_rejects_aliases_and_unsafe_entries() {
-        for bad in ["../a.nbt", "/a.nbt", "a\\b.nbt", "a/./b.nbt", ""] {
+        for bad in [
+            "../a.nbt",
+            "/a.nbt",
+            "a\\b.nbt",
+            "a/./b.nbt",
+            "a//b.nbt",
+            "",
+        ] {
             let root = temp_root("path");
             let manifest = one_file_manifest(bad, b"fixture");
             assert!(matches!(

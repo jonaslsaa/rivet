@@ -290,7 +290,7 @@ fn check_snbt_parse<O: oracle::OracleCall>(
                 }
             }
         }
-        Err(oracle_err) => match &rust {
+        Err(oracle::OracleCallError::Rejected(oracle_err)) => match &rust {
             Ok(_) => {
                 check.field("accept", "true", "false");
                 check.note(&format!("oracle error: {oracle_err}"));
@@ -310,6 +310,19 @@ fn check_snbt_parse<O: oracle::OracleCall>(
                 }
             }
         },
+        Err(oracle::OracleCallError::Unavailable(oracle_err)) => {
+            // A transport/protocol/process failure is not a Paper rejection,
+            // including for an explicitly invalid fixture. Keep the check hard
+            // so the run cannot report VERIFIED on an unverified comparison.
+            check.field("oracle", "reachable", "error");
+            if let Err(rust_err) = &rust {
+                check.note(&format!(
+                    "oracle unavailable (Rust also rejected): {oracle_err}; rust: {rust_err}"
+                ));
+            } else {
+                check.note(&format!("oracle unavailable: {oracle_err}"));
+            }
+        }
     }
     check.finish()
 }
@@ -764,17 +777,36 @@ fn write_scoreboard(summary: &Summary, fixture_cap: Option<usize>) {
     }
 }
 
+fn parse_fixture_limit(value: &str) -> usize {
+    match value.parse() {
+        Ok(limit) => limit,
+        Err(_) => {
+            eprintln!("invalid fixture limit {value:?}; expected a non-negative integer");
+            std::process::exit(2);
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut limit_fixtures: Option<usize> = None;
     let mut no_oracle = false;
     let mut require_oracle = false;
     let mut write_scoreboard_flag = false;
-    for arg in &args[1..] {
-        match arg.as_str() {
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
             "--no-oracle" => no_oracle = true,
             "--require-oracle" => require_oracle = true,
             "--scoreboard" => write_scoreboard_flag = true,
+            "--limit-fixtures" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("--limit-fixtures requires a value");
+                    std::process::exit(2);
+                };
+                limit_fixtures = Some(parse_fixture_limit(value));
+                index += 1;
+            }
             "--help" | "-h" => {
                 eprintln!(
                     "rivet-parity: byte-for-byte NBT/SNBT parity diff vs the Paper Java oracle\n\
@@ -797,14 +829,19 @@ fn main() {
                 return;
             }
             other => {
-                if let Some(n) = other.strip_prefix("--limit-fixtures=") {
-                    limit_fixtures = n.parse().ok();
+                if let Some(value) = other.strip_prefix("--limit-fixtures=") {
+                    if value.is_empty() {
+                        eprintln!("--limit-fixtures requires a value");
+                        std::process::exit(2);
+                    }
+                    limit_fixtures = Some(parse_fixture_limit(value));
                 } else {
                     eprintln!("unknown argument: {other}");
                     std::process::exit(2);
                 }
             }
         }
+        index += 1;
     }
     if no_oracle && require_oracle {
         eprintln!("--no-oracle and --require-oracle are mutually exclusive");
@@ -1142,11 +1179,15 @@ mod tests {
     /// outcome — the JVM never boots. Lets the accept/canonical decision logic
     /// in `check_component_json` be exercised directly (issue #98).
     struct StubOracle {
-        response: Result<serde_json::Value, String>,
+        response: Result<serde_json::Value, oracle::OracleCallError>,
     }
 
     impl oracle::OracleCall for StubOracle {
-        fn call(&mut self, _op: &str, _fields: &[(&str, &str)]) -> Result<Value, String> {
+        fn call(
+            &mut self,
+            _op: &str,
+            _fields: &[(&str, &str)],
+        ) -> Result<Value, oracle::OracleCallError> {
             self.response.clone()
         }
     }
@@ -1162,7 +1203,9 @@ mod tests {
     #[test]
     fn component_json_oracle_error_hard_fails_even_when_rust_rejects() {
         let mut oracle = StubOracle {
-            response: Err("oracle closed stdout (did it crash?)".to_string()),
+            response: Err(oracle::OracleCallError::Unavailable(
+                "oracle closed stdout (did it crash?)".to_string(),
+            )),
         };
         // Not valid JSON, so Rust rejects it too — both sides are "down".
         let check = check_component_json(
@@ -1298,7 +1341,9 @@ mod tests {
     #[test]
     fn valid_snbt_both_fail_is_a_hard_mismatch() {
         let mut oracle = StubOracle {
-            response: Err("Paper rejected".to_string()),
+            response: Err(oracle::OracleCallError::Rejected(
+                "Paper rejected".to_string(),
+            )),
         };
         let check = check_snbt_parse(Some(&mut oracle), "valid.broken", "{broken", true);
         assert!(!check["ok"].as_bool().unwrap(), "{check}");
@@ -1307,16 +1352,35 @@ mod tests {
     #[test]
     fn declared_invalid_snbt_both_reject_is_a_match() {
         let mut oracle = StubOracle {
-            response: Err("Paper rejected".to_string()),
+            response: Err(oracle::OracleCallError::Rejected(
+                "Paper rejected".to_string(),
+            )),
         };
         let check = check_snbt_parse(Some(&mut oracle), "parse-invalid.broken", "{broken", false);
         assert!(check["ok"].as_bool().unwrap(), "{check}");
     }
 
     #[test]
+    fn declared_invalid_snbt_oracle_unavailable_is_a_hard_mismatch() {
+        let mut oracle = StubOracle {
+            response: Err(oracle::OracleCallError::Unavailable(
+                "oracle closed stdout".to_string(),
+            )),
+        };
+        let check = check_snbt_parse(Some(&mut oracle), "parse-invalid.broken", "{broken", false);
+        assert!(!check["ok"].as_bool().unwrap(), "{check}");
+        let mut summary = Summary::default();
+        summary.record(&check);
+        assert_eq!(summary.mismatched.get("snbt.parse"), Some(&1));
+        assert!(!summary.matched.contains_key("snbt.parse"));
+    }
+
+    #[test]
     fn valid_nbt_both_fail_is_a_hard_mismatch() {
         let mut oracle = StubOracle {
-            response: Err("Paper rejected".to_string()),
+            response: Err(oracle::OracleCallError::Rejected(
+                "Paper rejected".to_string(),
+            )),
         };
         let check = check_nbt_decode(Some(&mut oracle), "decode.broken", "broken.nbt", b"bad");
         assert!(!check["ok"].as_bool().unwrap(), "{check}");
@@ -1325,7 +1389,9 @@ mod tests {
     #[test]
     fn valid_encode_both_fail_is_a_hard_mismatch() {
         let mut oracle = StubOracle {
-            response: Err("Paper rejected".to_string()),
+            response: Err(oracle::OracleCallError::Rejected(
+                "Paper rejected".to_string(),
+            )),
         };
         let check = check_nbt_encode(Some(&mut oracle), "encode.broken", "{broken", true);
         assert!(!check["ok"].as_bool().unwrap(), "{check}");

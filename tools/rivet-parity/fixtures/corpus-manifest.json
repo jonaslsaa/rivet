@@ -5,8 +5,8 @@
   "expected": {
     "chunk_nbt": 432,
     "text_entries": 62,
-    "snbt_valid": 150,
-    "snbt_invalid": 20,
+    "snbt_valid": 149,
+    "snbt_invalid": 21,
     "nbt_encode": 35,
     "text_accepted": 46,
     "text_invalid": 16,
@@ -23,7 +23,7 @@
       "translatable": 10,
       "typed": 2
     },
-    "handbuilt_sha256": "bc308f8b61fd9afcb5c5f0637e47a0c6f7d3aa3bfb3f724ffa96b9db973f95ae"
+    "handbuilt_sha256": "241f85dd5820d63f9e8cbc4d6fa0d99adc2097987ba3e72a1309a1266a580b98"
   },
   "chunk_files": [
     {
