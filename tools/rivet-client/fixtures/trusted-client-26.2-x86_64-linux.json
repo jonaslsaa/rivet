@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "artifact": "rivet-client-26.2-f96e8c45",
+  "minecraft_version": "26.2",
+  "azalea_revision": "6249c295d353b9b3ef68f665b311cba39211fd19",
+  "target": "x86_64-unknown-linux-gnu",
+  "profile": "dev",
+  "rust_toolchain": "nightly-2026-08-05",
+  "rustc_commit": "1ed2df61a19042f231709eb05d032ae9e2cb2084",
+  "elf_build_id": "2d69ef319f9d0560123717dc46d4c5505a3a9c63",
+  "size": 573872568,
+  "sha256": "f96e8c455fd3a67c4c84d22c94fb3205e0d2658176a65de992fd90a024d15b38"
+}

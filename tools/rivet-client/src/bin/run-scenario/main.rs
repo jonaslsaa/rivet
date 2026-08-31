@@ -141,14 +141,25 @@ mod transcript;
 use std::env;
 use std::fmt;
 use std::fs;
-use std::io::{self, Read};
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use std::fs::OpenOptions;
+use std::io;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use std::io::Read;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use std::io::Write;
 use std::net::{SocketAddr, ToSocketAddrs};
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use std::os::fd::AsRawFd;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use sha2::{Digest, Sha256};
 
 const DEFAULT_ADDRESS: &str = "127.0.0.1:25599";
@@ -912,43 +923,359 @@ fn select_client_binary(
     target_dir.join("debug/rivet-client")
 }
 
+const TRUSTED_CLIENT_CONTRACT_JSON: &str =
+    include_str!("../../../fixtures/trusted-client-26.2-x86_64-linux.json");
+
 #[derive(Debug, Clone)]
-struct ClientBinary {
-    path: PathBuf,
+struct TrustedClientContract {
+    artifact: String,
+    minecraft_version: String,
+    azalea_revision: String,
+    target: String,
+    profile: String,
+    rust_toolchain: String,
+    rustc_commit: String,
+    elf_build_id: String,
+    size: u64,
     sha256: String,
 }
 
-impl ClientBinary {
-    fn verify_unchanged(&self) -> Result<(), RunnerError> {
-        let current = sha256_file(&self.path)?;
-        if current != self.sha256 {
+impl TrustedClientContract {
+    fn committed() -> Result<Self, RunnerError> {
+        Self::parse(TRUSTED_CLIENT_CONTRACT_JSON)
+    }
+
+    fn parse(raw: &str) -> Result<Self, RunnerError> {
+        let value: Value = serde_json::from_str(raw)?;
+        let object = value.as_object().ok_or_else(|| {
+            RunnerError::Gate("trusted client contract must be a JSON object".to_owned())
+        })?;
+        if object.get("schema").and_then(Value::as_u64) != Some(1) {
+            return Err(RunnerError::Gate(
+                "trusted client contract has unsupported schema".to_owned(),
+            ));
+        }
+        let string = |key: &str| -> Result<String, RunnerError> {
+            object
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    RunnerError::Gate(format!(
+                        "trusted client contract field {key:?} must be a nonempty string"
+                    ))
+                })
+        };
+        let contract = Self {
+            artifact: string("artifact")?,
+            minecraft_version: string("minecraft_version")?,
+            azalea_revision: string("azalea_revision")?,
+            target: string("target")?,
+            profile: string("profile")?,
+            rust_toolchain: string("rust_toolchain")?,
+            rustc_commit: string("rustc_commit")?,
+            elf_build_id: string("elf_build_id")?,
+            size: object.get("size").and_then(Value::as_u64).ok_or_else(|| {
+                RunnerError::Gate(
+                    "trusted client contract field \"size\" must be an unsigned integer".to_owned(),
+                )
+            })?,
+            sha256: string("sha256")?,
+        };
+        contract.validate()?;
+        Ok(contract)
+    }
+
+    fn validate(&self) -> Result<(), RunnerError> {
+        if self.minecraft_version != "26.2" {
             return Err(RunnerError::Gate(format!(
-                "rivet-client binary {} changed after selection (expected sha256 {}, found {})",
-                self.path.display(),
-                self.sha256,
-                current
+                "trusted client contract pins Minecraft {}, expected 26.2",
+                self.minecraft_version
             )));
+        }
+        if self.azalea_revision != transcript::PINNED_AZALEA_REVISION {
+            return Err(RunnerError::Gate(format!(
+                "trusted client contract pins Azalea {}, expected {}",
+                self.azalea_revision,
+                transcript::PINNED_AZALEA_REVISION
+            )));
+        }
+        if self.target != "x86_64-unknown-linux-gnu" {
+            return Err(RunnerError::Gate(format!(
+                "trusted client contract target is {}, expected x86_64-unknown-linux-gnu",
+                self.target
+            )));
+        }
+        if self.sha256.len() != 64
+            || !self
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(RunnerError::Gate(
+                "trusted client contract sha256 must be 64 lowercase hexadecimal characters"
+                    .to_owned(),
+            ));
+        }
+        if self.size == 0 {
+            return Err(RunnerError::Gate(
+                "trusted client contract size must be nonzero".to_owned(),
+            ));
         }
         Ok(())
     }
 }
 
-fn sha256_file(path: &Path) -> Result<String, RunnerError> {
-    let mut file = fs::File::open(path)?;
+#[derive(Debug, Clone)]
+struct ClientIdentity {
+    selected_source: PathBuf,
+    executed_sha256: String,
+    contract: TrustedClientContract,
+}
+
+impl ClientIdentity {
+    fn evidence(&self) -> Value {
+        json!({
+            "selected_source_path": self.selected_source.to_string_lossy(),
+            "executed_sha256": self.executed_sha256,
+            "trusted_artifact": self.contract.artifact,
+            "minecraft_version": self.contract.minecraft_version,
+            "azalea_revision": self.contract.azalea_revision,
+            "target": self.contract.target,
+            "profile": self.contract.profile,
+            "rust_toolchain": self.contract.rust_toolchain,
+            "rustc_commit": self.contract.rustc_commit,
+            "elf_build_id": self.contract.elf_build_id,
+            "execution": "verifier-owned-unlinked-fd",
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ClientBinary {
+    identity: ClientIdentity,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    executable: fs::File,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    device: u64,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    inode: u64,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    size: u64,
+}
+
+impl ClientBinary {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn verify_execution_identity(&self) -> Result<(), RunnerError> {
+        let metadata = self.executable.metadata()?;
+        if metadata.dev() != self.device
+            || metadata.ino() != self.inode
+            || metadata.len() != self.size
+        {
+            return Err(RunnerError::Gate(
+                "verifier-owned client execution descriptor changed identity".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    fn verify_execution_identity(&self) -> Result<(), RunnerError> {
+        Err(RunnerError::Unverified(
+            "the committed trusted rivet-client artifact is currently scoped to x86_64 Linux"
+                .to_owned(),
+        ))
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn execution_path(&self) -> PathBuf {
+        PathBuf::from(format!("/proc/self/fd/{}", self.executable.as_raw_fd()))
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn set_inheritable(&self, inheritable: bool) -> Result<(), RunnerError> {
+        let mut flags = rustix::io::fcntl_getfd(&self.executable)
+            .map_err(|error| RunnerError::Io(io::Error::from_raw_os_error(error.raw_os_error())))?;
+        flags.set(rustix::io::FdFlags::CLOEXEC, !inheritable);
+        rustix::io::fcntl_setfd(&self.executable, flags)
+            .map_err(|error| RunnerError::Io(io::Error::from_raw_os_error(error.raw_os_error())))?;
+        Ok(())
+    }
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    fn execution_path(&self) -> PathBuf {
+        unreachable!("trusted client preparation rejects unsupported platforms")
+    }
+
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    fn set_inheritable(&self, _inheritable: bool) -> Result<(), RunnerError> {
+        unreachable!("trusted client preparation rejects unsupported platforms")
+    }
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+fn sha256_reader(reader: &mut impl Read) -> Result<(String, u64), RunnerError> {
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
+    let mut size = 0_u64;
     loop {
-        let read = file.read(&mut buffer)?;
+        let read = reader.read(&mut buffer)?;
         if read == 0 {
             break;
         }
+        size = size
+            .checked_add(read as u64)
+            .ok_or_else(|| RunnerError::Gate("client binary size overflow".to_owned()))?;
         hasher.update(&buffer[..read]);
     }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
+    Ok((
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+        size,
+    ))
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn prepare_client_binary(
+    requested: &Path,
+    contract: TrustedClientContract,
+) -> Result<ClientBinary, RunnerError> {
+    contract.validate()?;
+    let selected_source = requested.canonicalize().map_err(|error| {
+        RunnerError::Gate(format!(
+            "failed to canonicalize selected rivet-client source {}: {error}",
+            requested.display()
+        ))
+    })?;
+    let mut source = fs::File::open(&selected_source)?;
+    let source_before = source.metadata()?;
+    if !source_before.is_file() {
+        return Err(RunnerError::Gate(format!(
+            "selected rivet-client source {} is not a regular file",
+            selected_source.display()
+        )));
+    }
+    if source_before.len() != contract.size {
+        return Err(RunnerError::Gate(format!(
+            "selected rivet-client source {} is not trusted: expected {} bytes, found {} bytes",
+            selected_source.display(),
+            contract.size,
+            source_before.len()
+        )));
+    }
+
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random)
+        .map_err(|error| RunnerError::Gate(format!("secure staging name failed: {error}")))?;
+    let nonce: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    let stage_dir = env::temp_dir().join(format!("rivet-client-stage-{nonce}"));
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&stage_dir)
+        .map_err(|error| {
+            RunnerError::Gate(format!(
+                "failed to create private client staging directory {}: {error}",
+                stage_dir.display()
+            ))
+        })?;
+    let stage_path = stage_dir.join("client");
+    let stage_result = (|| -> Result<ClientBinary, RunnerError> {
+        let mut staged = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&stage_path)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut size = 0_u64;
+        loop {
+            let read = source.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            staged.write_all(&buffer[..read])?;
+            hasher.update(&buffer[..read]);
+            size = size
+                .checked_add(read as u64)
+                .ok_or_else(|| RunnerError::Gate("client binary size overflow".to_owned()))?;
+        }
+        staged.sync_all()?;
+        let digest: String = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let source_after = source.metadata()?;
+        if source_before.dev() != source_after.dev()
+            || source_before.ino() != source_after.ino()
+            || source_before.len() != source_after.len()
+        {
+            return Err(RunnerError::Gate(format!(
+                "selected rivet-client source {} changed identity while being staged",
+                selected_source.display()
+            )));
+        }
+        if size != contract.size || digest != contract.sha256 {
+            return Err(RunnerError::Gate(format!(
+                "selected rivet-client source {} is not trusted: expected {} bytes with sha256 {}, found {} bytes with sha256 {}",
+                selected_source.display(),
+                contract.size,
+                contract.sha256,
+                size,
+                digest
+            )));
+        }
+        staged.set_permissions(fs::Permissions::from_mode(0o500))?;
+        drop(staged);
+
+        let executable = fs::File::open(&stage_path)?;
+        let metadata = executable.metadata()?;
+        if !metadata.is_file()
+            || metadata.len() != contract.size
+            || metadata.mode() & 0o222 != 0
+            || metadata.nlink() != 1
+        {
+            return Err(RunnerError::Gate(
+                "staged trusted client failed its final regular-file/no-write identity check"
+                    .to_owned(),
+            ));
+        }
+        fs::remove_file(&stage_path)?;
+        fs::remove_dir(&stage_dir)?;
+
+        Ok(ClientBinary {
+            identity: ClientIdentity {
+                selected_source,
+                executed_sha256: digest,
+                contract,
+            },
+            executable,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.len(),
+        })
+    })();
+    if stage_result.is_err() {
+        let _ = fs::remove_file(&stage_path);
+        let _ = fs::remove_dir(&stage_dir);
+    }
+    stage_result
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+fn prepare_client_binary(
+    requested: &Path,
+    contract: TrustedClientContract,
+) -> Result<ClientBinary, RunnerError> {
+    let _ = (requested, contract);
+    Err(RunnerError::Unverified(
+        "the committed trusted rivet-client artifact is currently scoped to x86_64 Linux"
+            .to_owned(),
+    ))
 }
 
 /// Resolve `--address` into the first socket address. The port is the
@@ -989,7 +1316,7 @@ struct ClientRun {
     stdout_text: String,
     stdout_path: PathBuf,
     stderr_path: PathBuf,
-    binary: ClientBinary,
+    identity: ClientIdentity,
 }
 
 impl ClientRun {
@@ -998,10 +1325,7 @@ impl ClientRun {
         normalizer: fn(&str) -> Result<Value, String>,
     ) -> Result<Value, RunnerError> {
         let mut normalized = normalizer(&self.stdout_text).map_err(RunnerError::Transcript)?;
-        normalized["client_binary"] = json!({
-            "path": self.binary.path.to_string_lossy(),
-            "sha256": self.binary.sha256,
-        });
+        normalized["client_binary"] = self.identity.evidence();
         Ok(normalized)
     }
 }
@@ -1050,23 +1374,42 @@ fn run_client(
     work: &Path,
     prefix: &str,
 ) -> Result<ClientRun, RunnerError> {
-    binary.verify_unchanged()?;
+    binary.verify_execution_identity()?;
     let stdout_path = work.join(format!("{prefix}.stdout.jsonl"));
     let stderr_path = work.join(format!("{prefix}.stderr.log"));
     let stdout_file = fs::File::create(&stdout_path)?;
     let stderr_file = fs::File::create(&stderr_path)?;
-    let mut child = Command::new(&binary.path)
+    binary.set_inheritable(true)?;
+    let spawn_result = Command::new(binary.execution_path())
         .args(client_argv(spec))
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file))
-        .spawn()
-        .map_err(|e| {
-            RunnerError::Gate(format!(
-                "failed to run rivet-client ({}): {e} — build it first with: cargo build --locked",
-                binary.path.display()
-            ))
-        })?;
+        .spawn();
+    let restore_result = binary.set_inheritable(false);
+    let mut child = match (spawn_result, restore_result) {
+        (Ok(child), Ok(())) => child,
+        (Ok(mut child), Err(error)) => {
+            kill_and_reap_client(&mut child);
+            return Err(RunnerError::Gate(format!(
+                "failed to restore close-on-exec on trusted client descriptor after spawn; child killed and reaped: {error}"
+            )));
+        }
+        (Err(spawn_error), Ok(())) => {
+            return Err(RunnerError::Gate(format!(
+                "failed to execute trusted rivet-client bytes selected from {} (sha256 {}): {spawn_error}",
+                binary.identity.selected_source.display(),
+                binary.identity.executed_sha256
+            )));
+        }
+        (Err(spawn_error), Err(restore_error)) => {
+            return Err(RunnerError::Gate(format!(
+                "failed to execute trusted rivet-client bytes selected from {} (sha256 {}): {spawn_error}; also failed to restore close-on-exec: {restore_error}",
+                binary.identity.selected_source.display(),
+                binary.identity.executed_sha256
+            )));
+        }
+    };
     let deadline = Duration::from_secs(spec.timeout_seconds)
         .checked_add(CLIENT_PARENT_HEADROOM)
         .ok_or_else(|| {
@@ -1078,7 +1421,9 @@ fn run_client(
         })?;
     let status = wait_client(&mut child, deadline, CLIENT_TERMINATE_GRACE).map_err(|e| {
         RunnerError::Gate(format!(
-            "{e}; raw transcript: {}, stderr: {}",
+            "{e}; selected source: {}; executed trusted sha256: {}; raw transcript: {}, stderr: {}",
+            binary.identity.selected_source.display(),
+            binary.identity.executed_sha256,
             stdout_path.display(),
             stderr_path.display()
         ))
@@ -1087,8 +1432,9 @@ fn run_client(
     let stderr = fs::read_to_string(&stderr_path).unwrap_or_else(|e| format!("<unreadable: {e}>"));
     if !status.success() {
         return Err(RunnerError::Gate(format!(
-            "rivet-client {} exited with {status}; raw transcript: {}, stderr: {}{}",
-            binary.path.display(),
+            "rivet-client selected from {} (executed trusted sha256 {}) exited with {status}; raw transcript: {}, stderr: {}{}",
+            binary.identity.selected_source.display(),
+            binary.identity.executed_sha256,
             stdout_path.display(),
             stderr_path.display(),
             if stderr.is_empty() {
@@ -1098,14 +1444,14 @@ fn run_client(
             }
         )));
     }
-    binary.verify_unchanged()?;
-    let stdout_text = bind_raw_client_provenance(&raw_stdout, binary)?;
+    binary.verify_execution_identity()?;
+    let stdout_text = bind_raw_client_provenance(&raw_stdout, &binary.identity)?;
     fs::write(&stdout_path, &stdout_text)?;
     Ok(ClientRun {
         stdout_text,
         stdout_path,
         stderr_path,
-        binary: binary.clone(),
+        identity: binary.identity.clone(),
     })
 }
 
@@ -1174,7 +1520,7 @@ fn terminate_client(child: &mut Child) {
     }
 }
 
-fn bind_raw_client_provenance(raw: &str, binary: &ClientBinary) -> Result<String, RunnerError> {
+fn bind_raw_client_provenance(raw: &str, identity: &ClientIdentity) -> Result<String, RunnerError> {
     let mut lines = Vec::new();
     let mut starting = 0;
     for line in raw.lines().filter(|line| !line.trim().is_empty()) {
@@ -1190,8 +1536,7 @@ fn bind_raw_client_provenance(raw: &str, binary: &ClientBinary) -> Result<String
                     transcript::PINNED_AZALEA_REVISION
                 )));
             }
-            record["client_binary_path"] = json!(binary.path.to_string_lossy());
-            record["client_binary_sha256"] = json!(binary.sha256);
+            record["client_binary"] = identity.evidence();
         }
         lines.push(serde_json::to_string(&record)?);
     }
@@ -1334,14 +1679,7 @@ fn ensure_client_binary() -> Result<ClientBinary, RunnerError> {
             }
         )));
     }
-    let path = requested.canonicalize().map_err(|e| {
-        RunnerError::Gate(format!(
-            "failed to canonicalize rivet-client binary {}: {e}",
-            requested.display()
-        ))
-    })?;
-    let sha256 = sha256_file(&path)?;
-    Ok(ClientBinary { path, sha256 })
+    prepare_client_binary(&requested, TrustedClientContract::committed()?)
 }
 
 /// Boot one Paper server, join via the client, shut the server down, and return
@@ -1426,7 +1764,10 @@ fn run_paper_self_check(args: &Args) -> Result<(), RunnerError> {
 
     println!("rivet scenario runner: join (Paper-vs-Paper self-check)");
     println!("    paperclip jar     : {}", jar.display());
-    println!("    rivet-client bin  : {}", client_bin.path.display());
+    println!(
+        "    rivet-client bin  : {}",
+        client_bin.identity.selected_source.display()
+    );
     println!("    server.properties : {}", server_properties.display());
     println!("    world defaults    : {}", world_defaults.display());
     println!("    address           : {}", args.address);
@@ -1631,7 +1972,10 @@ fn run_move_self_check(args: &Args) -> Result<(), RunnerError> {
 
     println!("rivet scenario runner: move (Paper-vs-Paper movement self-check)");
     println!("    paperclip jar     : {}", jar.display());
-    println!("    rivet-client bin  : {}", client_bin.path.display());
+    println!(
+        "    rivet-client bin  : {}",
+        client_bin.identity.selected_source.display()
+    );
     println!("    server.properties : {}", server_properties.display());
     println!("    world defaults    : {}", world_defaults.display());
     println!("    address           : {}", args.address);
@@ -1764,7 +2108,10 @@ fn run_rivet_play(args: &Args) -> Result<(), RunnerError> {
 
     println!("rivet scenario runner: rivet (headless boot + play transcript)");
     println!("    rivet-server bin  : {}", rivet_bin.display());
-    println!("    rivet-client bin  : {}", client_bin.path.display());
+    println!(
+        "    rivet-client bin  : {}",
+        client_bin.identity.selected_source.display()
+    );
     println!("    address           : {}", args.address);
     println!("    rivet boots       : {}", args.runs);
     println!();
@@ -2296,7 +2643,10 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
     println!("rivet scenario runner: join (Paper-vs-Rivet play)");
     println!("    paperclip jar     : {}", jar.display());
     println!("    rivet-server bin  : {}", rivet_bin.display());
-    println!("    rivet-client bin  : {}", client_bin.path.display());
+    println!(
+        "    rivet-client bin  : {}",
+        client_bin.identity.selected_source.display()
+    );
     println!(
         "    server.properties : {} (single-stone superflat)",
         server_properties.display()
@@ -2502,7 +2852,10 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
     println!("rivet scenario runner: move (Paper-vs-Rivet movement differential)");
     println!("    paperclip jar     : {}", jar.display());
     println!("    rivet-server bin  : {}", rivet_bin.display());
-    println!("    rivet-client bin  : {}", client_bin.path.display());
+    println!(
+        "    rivet-client bin  : {}",
+        client_bin.identity.selected_source.display()
+    );
     println!(
         "    server.properties : {} (single-stone superflat)",
         server_properties.display()
@@ -2762,7 +3115,10 @@ fn run_dwell(args: &Args) -> Result<(), RunnerError> {
 
     println!("rivet scenario runner: dwell (wall-clock keepalive survival)");
     println!("    rivet-server bin  : {}", rivet_bin.display());
-    println!("    rivet-client bin  : {}", client_bin.path.display());
+    println!(
+        "    rivet-client bin  : {}",
+        client_bin.identity.selected_source.display()
+    );
     println!("    address           : {}", args.address);
     println!(
         "    dwell window      : {}s (server keepalive kick limit: {}s)",
@@ -2907,7 +3263,10 @@ fn run_kick(args: &Args) -> Result<(), RunnerError> {
 
     println!("rivet scenario runner: kick (decoded disconnect reason)");
     println!("    rivet-server bin  : {}", rivet_bin.display());
-    println!("    rivet-client bin  : {}", client_bin.path.display());
+    println!(
+        "    rivet-client bin  : {}",
+        client_bin.identity.selected_source.display()
+    );
     println!("    address           : {}", args.address);
     println!();
     println!(
@@ -4602,76 +4961,122 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn parse(v: &[&str]) -> Result<Args, String> {
         Args::parse_from(v.iter().map(|s| s.to_string()))
     }
 
     fn temp_dir(label: &str) -> PathBuf {
+        let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = env::temp_dir().join(format!(
-            "rivet-client-{label}-{}-{}",
-            std::process::id(),
-            Instant::now().elapsed().as_nanos()
+            "rivet-client-{label}-{}-{sequence}",
+            std::process::id()
         ));
         fs::create_dir_all(&path).unwrap();
         path
     }
 
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn write_client_script(path: &Path, marker: &str, exit: i32) {
+        fs::write(
+            path,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{{\"event\":\"starting\",\"protocol\":1,\"azalea_revision\":\"{}\"}}'\nprintf '%s\\n' '{{\"event\":\"{marker}\",\"protocol\":1}}'\necho boom >&2\nexit {exit}\n",
+                transcript::PINNED_AZALEA_REVISION
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn test_contract(path: &Path) -> TrustedClientContract {
+        let mut file = fs::File::open(path).unwrap();
+        let (sha256, size) = sha256_reader(&mut file).unwrap();
+        let mut contract = TrustedClientContract::committed().unwrap();
+        contract.artifact = "test-client".to_owned();
+        contract.sha256 = sha256;
+        contract.size = size;
+        contract
+    }
+
+    fn test_identity() -> ClientIdentity {
+        let contract = TrustedClientContract::committed().unwrap();
+        ClientIdentity {
+            selected_source: PathBuf::from("/canonical/rivet-client"),
+            executed_sha256: contract.sha256.clone(),
+            contract,
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
-    fn explicit_client_override_is_authoritative() {
-        let override_path = PathBuf::from("/explicit/rivet-client");
+    fn correct_client_override_is_authoritative_and_trusted() {
+        let work = temp_dir("override");
+        let override_path = work.join("client.sh");
+        write_client_script(&override_path, "trusted", 0);
         let selected = select_client_binary(
             Some(override_path.clone()),
             Some(Path::new("/other/debug/run-scenario")),
             Path::new("/target"),
         );
         assert_eq!(selected, override_path);
+        let binary = prepare_client_binary(&selected, test_contract(&selected)).unwrap();
+        assert_eq!(
+            binary.identity.selected_source,
+            selected.canonicalize().unwrap()
+        );
+        fs::remove_dir_all(work).unwrap();
     }
 
     #[test]
     fn raw_provenance_requires_the_pinned_revision_and_records_binary_identity() {
-        let binary = ClientBinary {
-            path: PathBuf::from("/canonical/rivet-client"),
-            sha256: "abc123".to_owned(),
-        };
+        let identity = test_identity();
         let raw = format!(
             "{{\"event\":\"starting\",\"protocol\":1,\"azalea_revision\":\"{}\"}}\n",
             transcript::PINNED_AZALEA_REVISION
         );
-        let bound = bind_raw_client_provenance(&raw, &binary).unwrap();
-        assert!(bound.contains("client_binary_path"));
+        let bound = bind_raw_client_provenance(&raw, &identity).unwrap();
+        assert!(bound.contains("selected_source_path"));
         assert!(bound.contains("/canonical/rivet-client"));
-        assert!(bound.contains("client_binary_sha256"));
-        assert!(bound.contains("abc123"));
+        assert!(bound.contains("executed_sha256"));
+        assert!(bound.contains(&identity.executed_sha256));
 
         let wrong = raw.replace(transcript::PINNED_AZALEA_REVISION, "deadbeef");
-        assert!(bind_raw_client_provenance(&wrong, &binary).is_err());
+        assert!(bind_raw_client_provenance(&wrong, &identity).is_err());
         assert!(
-            bind_raw_client_provenance("{\"event\":\"joined\",\"protocol\":1}\n", &binary).is_err()
+            bind_raw_client_provenance("{\"event\":\"joined\",\"protocol\":1}\n", &identity)
+                .is_err()
         );
     }
 
     #[test]
     fn normalized_evidence_carries_exact_client_identity() {
+        let identity = test_identity();
         let run = ClientRun {
             stdout_text: "ignored".to_owned(),
             stdout_path: PathBuf::from("stdout"),
             stderr_path: PathBuf::from("stderr"),
-            binary: ClientBinary {
-                path: PathBuf::from("/canonical/rivet-client"),
-                sha256: "abc123".to_owned(),
-            },
+            identity: identity.clone(),
         };
         let normalized = run
             .normalize(|_| Ok(json!({"outcome": "spawned"})))
             .unwrap();
         assert_eq!(
-            normalized["client_binary"]["path"],
+            normalized["client_binary"]["selected_source_path"],
             "/canonical/rivet-client"
         );
-        assert_eq!(normalized["client_binary"]["sha256"], "abc123");
+        assert_eq!(
+            normalized["client_binary"]["executed_sha256"],
+            identity.executed_sha256
+        );
+        assert_eq!(
+            normalized["client_binary"]["execution"],
+            "verifier-owned-unlinked-fd"
+        );
     }
 
     #[cfg(unix)]
@@ -4691,25 +5096,13 @@ mod tests {
         assert!(child.try_wait().unwrap().is_some());
     }
 
-    #[cfg(unix)]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
     fn nonzero_client_exit_fails_after_preserving_diagnostics() {
         let work = temp_dir("nonzero");
         let script = work.join("client.sh");
-        fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' '{{\"event\":\"starting\",\"protocol\":1,\"azalea_revision\":\"{}\"}}'\necho boom >&2\nexit 7\n",
-                transcript::PINNED_AZALEA_REVISION
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        let path = script.canonicalize().unwrap();
-        let binary = ClientBinary {
-            sha256: sha256_file(&path).unwrap(),
-            path,
-        };
+        write_client_script(&script, "trusted", 7);
+        let binary = prepare_client_binary(&script, test_contract(&script)).unwrap();
         let result = run_client(
             &binary,
             &ClientSpec {
@@ -4724,7 +5117,7 @@ mod tests {
         );
         let error = result.err().expect("nonzero client must fail").to_string();
         assert!(
-            error.contains("exit status: 7"),
+            error.contains("exit status: 7") && error.contains(&binary.identity.executed_sha256),
             "unexpected nonzero-exit error: {error}"
         );
         assert!(work.join("probe.stdout.jsonl").is_file());
@@ -4737,17 +5130,66 @@ mod tests {
         fs::remove_dir_all(work).unwrap();
     }
 
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
-    fn mutated_client_binary_is_rejected() {
-        let work = temp_dir("mutated");
-        let path = work.join("rivet-client");
-        fs::write(&path, b"original").unwrap();
-        let binary = ClientBinary {
-            path: path.clone(),
-            sha256: sha256_file(&path).unwrap(),
-        };
-        fs::write(&path, b"changed").unwrap();
-        assert!(binary.verify_unchanged().is_err());
+    fn modified_self_reporting_client_is_rejected_by_trusted_digest() {
+        let work = temp_dir("modified-self-report");
+        let path = work.join("client.sh");
+        write_client_script(&path, "trusted", 0);
+        let contract = test_contract(&path);
+        let modified = fs::read_to_string(&path)
+            .unwrap()
+            .replace("trusted", "altered");
+        assert_eq!(modified.len(), fs::metadata(&path).unwrap().len() as usize);
+        fs::write(&path, modified).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = prepare_client_binary(&path, contract)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("is not trusted"));
+        fs::remove_dir_all(work).unwrap();
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn wrong_trusted_digest_is_rejected() {
+        let work = temp_dir("wrong-digest");
+        let path = work.join("client.sh");
+        write_client_script(&path, "trusted", 0);
+        let mut contract = test_contract(&path);
+        contract.sha256 = "0".repeat(64);
+        let error = prepare_client_binary(&path, contract)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("is not trusted") && error.contains(&"0".repeat(64)));
+        fs::remove_dir_all(work).unwrap();
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn selected_path_swap_after_validation_cannot_change_executed_bytes() {
+        let work = temp_dir("path-swap");
+        let path = work.join("client.sh");
+        write_client_script(&path, "trusted", 0);
+        let binary = prepare_client_binary(&path, test_contract(&path)).unwrap();
+        let replacement = work.join("replacement.sh");
+        write_client_script(&replacement, "swapped", 0);
+        fs::rename(&replacement, &path).unwrap();
+        let run = run_client(
+            &binary,
+            &ClientSpec {
+                address: DEFAULT_ADDRESS.to_owned(),
+                username: DEFAULT_USERNAME.to_owned(),
+                timeout_seconds: 1,
+                dwell_seconds: 0,
+                mode: "join".to_owned(),
+            },
+            &work,
+            "probe",
+        )
+        .unwrap();
+        assert!(run.stdout_text.contains("trusted"));
+        assert!(!run.stdout_text.contains("swapped"));
         fs::remove_dir_all(work).unwrap();
     }
 

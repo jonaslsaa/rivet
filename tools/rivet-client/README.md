@@ -49,13 +49,34 @@ tools/rivet-client/run-scenario.sh capture        # one boot; print the normaliz
 ```
 
 Every client run is parent-deadline bounded, reaped after TERM/KILL, and must
-exit zero. `RIVET_CLIENT_BIN` is authoritative when set; the runner canonicalizes
-and SHA-256 fingerprints that exact binary before launch, verifies it did not
-change, and records its path/digest in both raw and normalized evidence. Every
-standalone Paper boot must shut down with exit zero, emit the clean-save marker,
-and materialize the pinned Paper commit. Every live client transcript must carry
-exactly one `starting` record with the pinned Azalea revision. `capture` also
-requires server-side connection evidence plus login/spawn completion.
+exit zero. `RIVET_CLIENT_BIN` is authoritative only for selecting the source
+path; neither that path, an environment-provided digest, nor the client's
+self-reported `starting` record establishes trust. The independently committed
+contract in `fixtures/trusted-client-26.2-x86_64-linux.json` pins the exact
+preserved `rivet-client-26.2-f96e8c45` bytes, size, Minecraft/Azalea versions,
+Rust toolchain, target, and ELF build ID. Unknown bytes fail closed before spawn.
+The verifier copies the selected bytes through one open source descriptor into a
+private no-write staging inode, validates the committed digest, unlinks it, and
+executes that retained inode through `/proc/self/fd`; swapping the selected path
+after validation cannot change what runs. Raw and normalized evidence records
+both the selected source path and the executed trusted digest.
+
+This trusted artifact is currently scoped to x86_64 GNU/Linux; unsupported
+platforms remain UNVERIFIED rather than running unpinned bytes. Refreshing it is
+an explicit review operation: on x86_64 GNU/Linux, build `tools/rivet-client`
+with the committed `nightly-2026-08-05` toolchain and `cargo build --locked`
+(dev profile), verify the pinned Azalea revision and `file`/`readelf` target and
+build ID, copy the reviewed binary into preserved oracle storage using the first
+eight SHA-256 characters in its name, then update every field of the committed
+contract in the same reviewed change and rerun the provenance counterfactuals
+and live acceptance. There is intentionally no environment override for this
+trust root.
+
+Every standalone Paper boot must shut down with exit zero, emit the clean-save
+marker, and materialize the pinned Paper commit. Every live client transcript
+must carry exactly one `starting` record with the pinned Azalea revision as a
+second, behavioral consistency check. `capture` also requires server-side
+connection evidence plus login/spawn completion.
 
 `generated-world` is the seed-42 generated-world acceptance contract, defined
 ahead of the generator. The launch seam is the rivet-server `--seed <n>` option
