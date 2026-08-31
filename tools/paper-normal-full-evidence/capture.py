@@ -24,6 +24,7 @@ import secrets
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -70,6 +71,21 @@ class Unverified(RuntimeError):
     pass
 
 
+MAX_REGION_BYTES = evidence_validate.MAX_REGION_BYTES
+MAX_CHUNK_COMPRESSED_BYTES = evidence_validate.MAX_CHUNK_COMPRESSED_BYTES
+MAX_CHUNK_RAW_BYTES = evidence_validate.MAX_CHUNK_RAW_BYTES
+
+
+def _require_regular_file(path: Path, label: str) -> os.stat_result:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise Failed(f"{label} is absent or unreadable: {path}") from exc
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise Failed(f"{label} is not a unique regular file: {path}")
+    return metadata
+
+
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -101,11 +117,17 @@ def scheduler_closure(targets: Iterable[tuple[int, int]], radius: int) -> list[t
 
 
 def _strict_decompress(data: bytes, *, gzip_stream: bool = False) -> bytes:
+    if len(data) > MAX_CHUNK_COMPRESSED_BYTES:
+        raise Failed("compressed payload exceeds chunk size cap")
     obj = zlib.decompressobj(31 if gzip_stream else 15)
     try:
-        raw = obj.decompress(data) + obj.flush()
+        raw = obj.decompress(data, MAX_CHUNK_RAW_BYTES + 1)
+        if len(raw) <= MAX_CHUNK_RAW_BYTES:
+            raw += obj.flush()
     except zlib.error as exc:
         raise Failed(f"compressed payload is malformed: {exc}") from exc
+    if len(raw) > MAX_CHUNK_RAW_BYTES:
+        raise Failed("decompressed payload exceeds chunk size cap")
     if not obj.eof:
         raise Failed("compressed payload ended before end-of-stream")
     if obj.unused_data or obj.unconsumed_tail:
@@ -114,6 +136,9 @@ def _strict_decompress(data: bytes, *, gzip_stream: bool = False) -> bytes:
 
 
 def read_region(path: Path, region_coordinates: tuple[int, int]) -> dict[tuple[int, int], bytes]:
+    metadata = _require_regular_file(path, "region file")
+    if metadata.st_size > MAX_REGION_BYTES:
+        raise Failed(f"region file exceeds size cap: {path}")
     data = path.read_bytes()
     if len(data) < 8192 or len(data) % 4096:
         raise Failed(f"malformed region framing: {path}")
@@ -145,8 +170,9 @@ def read_region(path: Path, region_coordinates: tuple[int, int]) -> dict[tuple[i
             if length != 1:
                 raise Failed(f"external region stub has unexpected length in {path}")
             external_path = path.parent / f"c.{global_coordinate[0]}.{global_coordinate[1]}.mcc"
-            if not external_path.is_file() or external_path.is_symlink():
-                raise Failed(f"external chunk payload is absent: {external_path}")
+            external_metadata = _require_regular_file(external_path, "external chunk payload")
+            if external_metadata.st_size > MAX_CHUNK_COMPRESSED_BYTES:
+                raise Failed(f"external chunk payload exceeds size cap: {external_path}")
             payload = external_path.read_bytes()
         if codec == 1:
             raw = _strict_decompress(payload, gzip_stream=True)
@@ -168,6 +194,7 @@ def world_chunks(world: Path) -> dict[tuple[int, int], bytes]:
     for path in sorted(region_dir.iterdir()):
         if path.name.endswith(".mcc"):
             continue
+        _require_regular_file(path, "region file")
         match = REGION_RE.fullmatch(path.name)
         if not match:
             raise Failed(f"unexpected file in region directory: {path.name}")
@@ -193,10 +220,10 @@ def inventory_paths(world: Path) -> list[Path]:
                 if path.is_symlink():
                     raise Failed(f"world inventory contains a symlink: {path}")
                 if path.is_file():
+                    _require_regular_file(path, "world inventory path")
                     result.add(path)
     for path in world.rglob("*.mcc"):
-        if path.is_symlink() or not path.is_file():
-            raise Failed(f"world inventory contains a non-regular .mcc: {path}")
+        _require_regular_file(path, "world inventory .mcc")
         result.add(path)
     return sorted(result)
 
@@ -275,6 +302,8 @@ def _gzip_deterministic(data: bytes) -> bytes:
 
 def write_tickets(world: Path, coordinates: list[tuple[int, int]]) -> tuple[Path, str]:
     path = world / "dimensions/minecraft/overworld/data/minecraft/chunk_tickets.dat"
+    if os.path.lexists(path):
+        _require_regular_file(path, "chunk ticket output")
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = ticket_nbt(coordinates)
     path.write_bytes(encoded)
@@ -293,6 +322,8 @@ def read_ticket_coordinates(path: Path) -> list[tuple[int, int]]:
     tickets = data.value.get("tickets") if data is not None and data.kind == 10 else None
     if tickets is None or tickets.kind != 9 or tickets.value[0] != 10:
         raise Failed("ticket list is malformed")
+    if len(tickets.value[1]) > evidence_validate.EXPECTED_CLOSURE_COUNT:
+        raise Failed("ticket list exceeds the scheduler closure cap")
     coordinates: list[tuple[int, int]] = []
     for ticket in tickets.value[1]:
         if ticket.kind != 10:
@@ -317,8 +348,7 @@ def nbt_field(root: Tag, *path: str) -> Tag | None:
 
 def capture_settings(world: Path, seed: str, run: Path) -> dict[str, Any]:
     source = world / "dimensions/minecraft/overworld/data/minecraft/world_gen_settings.dat"
-    if not source.is_file() or source.is_symlink():
-        raise Failed(f"Paper worldgen settings source is absent: {source}")
+    _require_regular_file(source, "Paper worldgen settings source")
     source_bytes = source.read_bytes()
     settings_root = parse(_strict_decompress(source_bytes, gzip_stream=True))
     data = settings_root.value.get("data") if settings_root.kind == 10 else None
@@ -341,8 +371,8 @@ def capture_settings(world: Path, seed: str, run: Path) -> dict[str, Any]:
     # SavedData source dimension-locally as world_gen_settings.dat; preserve an
     # exact read-only copy at the contract path and record both paths/hashes.
     contract_path = world / "data/minecraft/worldgen_settings.dat"
-    if contract_path.is_symlink():
-        raise Failed("worldgen settings contract path is symlinked")
+    if os.path.lexists(contract_path):
+        _require_regular_file(contract_path, "worldgen settings contract copy")
     contract_path.parent.mkdir(parents=True, exist_ok=True)
     contract_path.write_bytes(source_bytes)
     if contract_path.read_bytes() != source_bytes:
@@ -720,26 +750,27 @@ def world_tree_signature(world: Path) -> str:
     for path in sorted(world.rglob("*")):
         if path.is_symlink():
             raise Failed(f"world tree contains a symlink: {path}")
-        if path.is_file():
-            before = path.stat()
-            data = path.read_bytes()
-            after = path.stat()
-            if (
-                before.st_dev,
-                before.st_ino,
-                before.st_size,
-                before.st_mtime_ns,
-            ) != (
-                after.st_dev,
-                after.st_ino,
-                after.st_size,
-                after.st_mtime_ns,
-            ):
-                raise Failed(f"world file changed while hashing: {path}")
-            rows.append(
-                f"{path.relative_to(world)}\0{before.st_dev}\0{before.st_ino}\0{before.st_size}"
-                f"\0{before.st_mtime_ns}\0{sha256(data)}"
-            )
+        if path.is_dir():
+            continue
+        before = _require_regular_file(path, "world tree file")
+        data = path.read_bytes()
+        after = path.stat()
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            raise Failed(f"world file changed while hashing: {path}")
+        rows.append(
+            f"{path.relative_to(world)}\0{before.st_dev}\0{before.st_ino}\0{before.st_size}"
+            f"\0{before.st_mtime_ns}\0{sha256(data)}"
+        )
     return sha256("\n".join(rows).encode())
 
 
@@ -771,6 +802,8 @@ def persisted_light_correct(root: Tag) -> bool:
 
 
 def chunk_details(raw: bytes, coordinate: tuple[int, int], *, target: bool) -> dict[str, Any]:
+    if len(raw) > MAX_CHUNK_RAW_BYTES:
+        raise Failed(f"{coordinate} raw NBT exceeds chunk size cap")
     try:
         root = parse(raw)
     except NbtError as exc:
@@ -845,10 +878,13 @@ def extract_run(
     world = run / "world"
     if world.is_symlink() or not world.is_dir():
         raise Failed("Paper world root is absent or symlinked")
+    evidence_validate._validate_tree(world, "Paper world tree", max_bytes=evidence_validate.MAX_RUN_BYTES)
     signature_before = world_tree_signature(world)
     coordinates = world_chunks(world)
-    if set(coordinates) < set(closure):
-        raise Failed(f"Paper saved only {len(coordinates)} chunks; closure has {len(closure)}")
+    if set(coordinates) != set(closure):
+        missing = len(set(closure) - set(coordinates))
+        extra = len(set(coordinates) - set(closure))
+        raise Failed(f"Paper saved chunks outside exact closure (missing={missing}, extra={extra})")
     chunks_dir = run / "chunks"
     chunks_dir.mkdir(parents=True, exist_ok=True)
     chunks: list[dict[str, Any]] = []
@@ -878,14 +914,21 @@ def extract_run(
     if signature_before != signature_after:
         raise Failed("world changed during post-exit read-only extraction")
     probe_path = run / "probe.json"
-    if probe_path.is_symlink() or not probe_path.is_file():
-        raise Failed("Paper probe did not leave a regular probe.json")
+    probe_metadata = _require_regular_file(probe_path, "Paper probe output")
+    if probe_metadata.st_size > evidence_validate.MAX_JSON_BYTES:
+        raise Failed("Paper probe output exceeds size cap")
     try:
         probe = json.loads(probe_path.read_text())
-    except json.JSONDecodeError as exc:
+    except (UnicodeError, json.JSONDecodeError) as exc:
         raise Failed(f"probe.json is malformed: {exc}") from exc
-    if probe.get("token") != token or probe.get("main_thread") is not True or probe.get("closure_count") != len(closure):
-        raise Failed("probe provenance/count is incomplete")
+    if (
+        probe.get("token") != token
+        or probe.get("side") != "server"
+        or probe.get("thread") != "main"
+        or probe.get("main_thread") is not True
+        or probe.get("closure_count") != len(closure)
+    ):
+        raise Failed("probe server-side/main-thread provenance or count is incomplete")
     process_log = run / "server.log"
     if not process_log.is_file():
         raise Failed("capture log is absent")
@@ -930,7 +973,7 @@ def extract_run(
         "worldgen_settings": settings,
         "preflight": preflight,
         "process": {"boot1": boot1, "capture": capture, "log": "server.log", "exit_code": capture["exit_code"], "clean_stop": capture["clean_stop"], "probe_ready_before_stop": True},
-        "probe": {"path": "probe.json", "producer": probe.get("producer"), "main_thread": probe.get("main_thread"), "closure_count": probe.get("closure_count"), "targets": probe.get("targets"), "simulation_frozen": probe.get("simulation_frozen"), "token": probe.get("token")},
+        "probe": {"path": "probe.json", "producer": probe.get("producer"), "side": probe.get("side"), "thread": probe.get("thread"), "main_thread": probe.get("main_thread"), "closure_count": probe.get("closure_count"), "targets": probe.get("targets"), "simulation_frozen": probe.get("simulation_frozen"), "token": probe.get("token")},
         "chunks": chunks,
         "inventory": inventory,
         "extraction": {"post_exit_read_only": True, "started_ns": extraction_started_ns, "world_signature_before": signature_before, "world_signature_after": signature_after},
@@ -996,6 +1039,8 @@ def run_one(
     run_paper_info["probe_inputs_sha256"] = probe_info["inputs_sha256"]
     ticket_path, injected_sha = write_tickets(world, closure)
     injected_ticket_path = run / "provenance/chunk_tickets.dat"
+    if os.path.lexists(injected_ticket_path):
+        _require_regular_file(injected_ticket_path, "injected ticket provenance")
     injected_ticket_path.write_bytes(ticket_path.read_bytes())
     encoded_closure = ";".join(f"{x},{z}" for x, z in closure)
     encoded_targets = ";".join(f"{x},{z}" for x, z in TARGETS)

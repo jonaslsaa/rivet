@@ -14,6 +14,7 @@ HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE))
 
 import capture  # noqa: E402
+import nbt  # noqa: E402
 import validate  # noqa: E402
 from nbt import NbtError, Tag, encode, parse  # noqa: E402
 
@@ -88,6 +89,11 @@ class EvidenceTests(unittest.TestCase):
         )
         with self.assertRaises(NbtError):
             parse(duplicate)
+
+    def test_nbt_container_cap_rejects_unbounded_list(self):
+        payload = b"\x0a\x00\x00\x09\x00\x01l\x01" + struct.pack(">i", nbt.MAX_CONTAINER + 1) + b"\x00"
+        with self.assertRaises(NbtError):
+            parse(payload)
 
     def test_compressed_stream_requires_exact_end_marker(self):
         compressed = zlib.compress(b"abc")
@@ -267,6 +273,13 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaises(validate.Failed):
             validate.validate_chunk(encode(in_bounds_without_codecs), (0, 0), target=False)
 
+    def test_duplicate_chunk_sections_are_rejected(self):
+        root = parse(valid_chunk())
+        section = root.value["sections"].value[1][0]
+        root.value["sections"].value[1].append(section)
+        with self.assertRaises(validate.Failed):
+            validate.validate_chunk(encode(root), (0, 0), target=False)
+
     def test_chunk_codec_shape_rejects_bad_sections_and_missing_storage(self):
         root = parse(valid_chunk())
         root.value["sections"] = Tag(9, (3, []))
@@ -292,6 +305,59 @@ class EvidenceTests(unittest.TestCase):
         zero_states.value["palette"].value = (10, [Tag(10, {"Name": Tag(8, "minecraft:air")})])
         zero_states.value.pop("data")
         validate.validate_chunk(encode(zero_bit), (0, 0), target=False)
+
+    def test_raw_and_semantic_hashes_have_distinct_contracts(self):
+        root = parse(valid_chunk())
+        root.value["InhabitedTime"] = Tag(4, 1)
+        root.value["LastUpdate"] = Tag(4, 2)
+        dynamic = encode(root)
+        self.assertNotEqual(validate.sha256(dynamic), validate.sha256(valid_chunk()))
+        self.assertEqual(
+            validate.sha256(validate.canonical_without_dynamic(parse(dynamic))),
+            validate.sha256(validate.canonical_without_dynamic(parse(valid_chunk()))),
+        )
+        root.value["xPos"] = Tag(3, 1)
+        changed = encode(root)
+        self.assertNotEqual(
+            validate.sha256(validate.canonical_without_dynamic(parse(changed))),
+            validate.sha256(validate.canonical_without_dynamic(parse(valid_chunk()))),
+        )
+
+    def test_hardlinks_and_nonregular_evidence_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "bundle"
+            root.mkdir()
+            original = root / "original"
+            original.write_bytes(b"evidence")
+            (root / "hardlink").hardlink_to(original)
+            with self.assertRaises(validate.Failed):
+                validate._validate_tree(root, "evidence bundle")
+            (root / "hardlink").unlink()
+            fifo = root / "fifo"
+            os.mkfifo(fifo)
+            with self.assertRaises(validate.Failed):
+                validate._validate_tree(root, "evidence bundle")
+
+    def test_compressed_and_raw_chunk_caps_fail_closed(self):
+        payload = zlib.compress(b"x" * (validate.MAX_CHUNK_RAW_BYTES + 1))
+        with self.assertRaises(validate.Failed):
+            validate.strict_decompress(payload)
+        with self.assertRaises(validate.Failed):
+            validate.validate_chunk(b"x" * (validate.MAX_CHUNK_RAW_BYTES + 1), (0, 0), target=False)
+
+    def test_malformed_bundle_is_failed_but_absent_bundle_is_unverified(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory) / "bundle"
+            bundle.mkdir()
+            (bundle / "bundle.json").write_text("{not-json")
+            result = subprocess.run(
+                [sys.executable, str(HERE / "validate.py"), str(bundle)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("FAILED", result.stdout)
 
     def test_missing_bundle_is_unverified(self):
         with tempfile.TemporaryDirectory() as directory:

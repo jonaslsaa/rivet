@@ -25,7 +25,9 @@ class Tag:
     value: Any
 
 
-MAX_CONTAINER = 16_000_000
+# Evidence payloads only contain chunk/world metadata; a million entries is
+# already far beyond any valid section, palette, ticket, or settings shape.
+MAX_CONTAINER = 1_000_000
 MAX_DEPTH = 512
 
 

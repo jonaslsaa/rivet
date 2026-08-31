@@ -12,7 +12,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import stat
 import struct
 import subprocess
 import sys
@@ -29,6 +31,7 @@ PRODUCER = "paper-normal-full-capture/1"
 PROBE = "PaperNormalFullProbe"
 EXPECTED_PAPER = "0a993450f129c4942c2a9ed45ba047412b4667cf"
 EXPECTED_PAPER_SHORT = EXPECTED_PAPER[:7]
+EXPECTED_CONTRACT_SHA256 = "49933b73813b628a36205420b071d790974036b6f1d649cfbc803f89b9d794f1"
 EXPECTED_JAVA_MAJOR = 25
 EXPECTED_SEEDS = [
     "5207638315753790570",
@@ -41,6 +44,10 @@ EXPECTED_RADIUS = 11
 EXPECTED_TICKET_LEVEL = 33
 EXPECTED_TICKS_LEFT = -(1 << 63)
 EXPECTED_DATA_VERSION = 4903
+EXPECTED_CLOSURE_COUNT = 2451
+MAX_SECTION_COUNT = 26
+MAX_PALETTE_ENTRIES = 4096
+MAX_BIOME_PALETTE_ENTRIES = 64
 # Paper's normal overworld spans Y=-64..319, so its block sections are -4..19.
 # SerializableChunkData also serializes one light boundary section on either side.
 MIN_BLOCK_SECTION_Y = -4
@@ -52,6 +59,14 @@ STARLIGHT_LIGHT_VERSION = 10
 REGION_RE = re.compile(r"^r\.(-?\d+)\.(-?\d+)\.mca$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
+THREAD_MARKER = "[MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads"
+MAX_JSON_BYTES = 32 * 1024 * 1024
+MAX_REGION_BYTES = 4 * 1024 * 1024
+MAX_CHUNK_COMPRESSED_BYTES = 16 * 1024 * 1024
+MAX_CHUNK_RAW_BYTES = 64 * 1024 * 1024
+MAX_BUNDLE_FILES = 100_000
+MAX_RUN_BYTES = 8 * (1 << 30)
+MAX_BUNDLE_BYTES = 64 * (1 << 30)
 
 
 class Failed(ValueError):
@@ -64,6 +79,44 @@ class Unverified(ValueError):
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _require_regular_file(path: Path, label: str) -> os.stat_result:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise Failed(f"{label} is absent or unreadable: {path}") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise Failed(f"{label} is not a regular file: {path}")
+    if metadata.st_nlink != 1:
+        raise Failed(f"{label} is hardlinked: {path}")
+    return metadata
+
+
+def _validate_tree(root: Path, label: str, *, max_bytes: int = MAX_BUNDLE_BYTES) -> tuple[int, int]:
+    """Reject links/non-regular nodes and bound aggregate evidence size."""
+    try:
+        root_metadata = root.lstat()
+    except OSError as exc:
+        raise Failed(f"{label} is absent: {root}") from exc
+    if not stat.S_ISDIR(root_metadata.st_mode) or stat.S_ISLNK(root_metadata.st_mode):
+        raise Failed(f"{label} is not a real directory: {root}")
+    files = 0
+    total_bytes = 0
+    for directory, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        for name in dirnames:
+            path = Path(directory) / name
+            metadata = path.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise Failed(f"{label} contains an unsafe directory: {path}")
+        for name in filenames:
+            path = Path(directory) / name
+            metadata = _require_regular_file(path, label)
+            files += 1
+            total_bytes += metadata.st_size
+            if files > MAX_BUNDLE_FILES or total_bytes > max_bytes:
+                raise Failed(f"{label} exceeds aggregate file/byte caps")
+    return files, total_bytes
 
 
 def probe_inputs_sha256(source_bytes: bytes, plugin_bytes: bytes) -> str:
@@ -129,11 +182,17 @@ def closure(targets: list[tuple[int, int]], radius: int) -> list[tuple[int, int]
 
 
 def strict_decompress(data: bytes, *, gzip_stream: bool = False) -> bytes:
+    if len(data) > MAX_CHUNK_COMPRESSED_BYTES:
+        raise Failed("compressed payload exceeds chunk size cap")
     obj = zlib.decompressobj(31 if gzip_stream else 15)
     try:
-        raw = obj.decompress(data) + obj.flush()
+        raw = obj.decompress(data, MAX_CHUNK_RAW_BYTES + 1)
+        if len(raw) <= MAX_CHUNK_RAW_BYTES:
+            raw += obj.flush()
     except zlib.error as exc:
         raise Failed(f"compressed payload is malformed: {exc}") from exc
+    if len(raw) > MAX_CHUNK_RAW_BYTES:
+        raise Failed("decompressed payload exceeds chunk size cap")
     if not obj.eof:
         raise Failed("compressed payload ended before end-of-stream")
     if obj.unused_data or obj.unconsumed_tail:
@@ -229,6 +288,9 @@ def _validate_paper_yaml(run: Path) -> None:
 
 
 def read_region(path: Path, region_coordinates: tuple[int, int]) -> dict[tuple[int, int], bytes]:
+    metadata = _require_regular_file(path, "region file")
+    if metadata.st_size > MAX_REGION_BYTES:
+        raise Failed(f"region file exceeds size cap: {path}")
     data = path.read_bytes()
     if len(data) < 8192 or len(data) % 4096:
         raise Failed(f"malformed region framing: {path}")
@@ -260,8 +322,9 @@ def read_region(path: Path, region_coordinates: tuple[int, int]) -> dict[tuple[i
             if length != 1:
                 raise Failed(f"external region stub has unexpected length in {path}")
             external_path = path.parent / f"c.{global_coordinate[0]}.{global_coordinate[1]}.mcc"
-            if not external_path.is_file() or external_path.is_symlink():
-                raise Failed(f"external chunk payload is absent: {external_path}")
+            external_metadata = _require_regular_file(external_path, "external chunk payload")
+            if external_metadata.st_size > MAX_CHUNK_COMPRESSED_BYTES:
+                raise Failed(f"external chunk payload exceeds size cap: {external_path}")
             payload = external_path.read_bytes()
         if codec == 1:
             raw = strict_decompress(payload, gzip_stream=True)
@@ -283,8 +346,7 @@ def chunks_from_world(world: Path) -> dict[tuple[int, int], bytes]:
     for path in sorted(region_dir.iterdir()):
         if path.name.endswith(".mcc"):
             continue
-        if path.is_symlink():
-            raise Failed(f"region file is a symlink: {path}")
+        _require_regular_file(path, "region file")
         match = REGION_RE.fullmatch(path.name)
         if not match:
             raise Failed(f"unexpected file in region directory: {path.name}")
@@ -376,6 +438,9 @@ def _block_palette_names(root: Tag, coordinate: tuple[int, int], *, target: bool
     section_kind, section_items = sections.value
     if section_kind != 10 or not isinstance(section_items, list):
         raise Failed(f"{coordinate} sections list is not a compound list")
+    if len(section_items) > MAX_SECTION_COUNT:
+        raise Failed(f"{coordinate} has too many sections")
+    seen_sections: set[int] = set()
     for section in section_items:
         if section.kind != 10:
             raise Failed(f"{coordinate} section list contains non-compounds")
@@ -387,6 +452,9 @@ def _block_palette_names(root: Tag, coordinate: tuple[int, int], *, target: bool
             section_y = y_tag.value
         else:
             raise Failed(f"{coordinate} section Y is not a byte")
+        if section_y in seen_sections:
+            raise Failed(f"{coordinate} contains duplicate section Y {section_y}")
+        seen_sections.add(section_y)
         if not MIN_LIGHT_SECTION_Y <= section_y <= MAX_LIGHT_SECTION_Y:
             raise Failed(f"{coordinate} section Y {section_y} is outside the light-section bounds")
 
@@ -412,6 +480,8 @@ def _block_palette_names(root: Tag, coordinate: tuple[int, int], *, target: bool
         palette_kind, palette_items = palette.value
         if palette_kind != 10 or not isinstance(palette_items, list):
             raise Failed(f"{coordinate} block_states palette is not a compound list")
+        if len(palette_items) > MAX_PALETTE_ENTRIES:
+            raise Failed(f"{coordinate} block_states palette is too large")
         data = states.value.get("data")
         _decode_packed_values(
             data,
@@ -442,6 +512,8 @@ def _block_palette_names(root: Tag, coordinate: tuple[int, int], *, target: bool
         biome_kind, biome_items = biome_palette.value
         if biome_kind != 8 or not isinstance(biome_items, list):
             raise Failed(f"{coordinate} biomes palette is not a string list")
+        if len(biome_items) > MAX_BIOME_PALETTE_ENTRIES:
+            raise Failed(f"{coordinate} biomes palette is too large")
         _decode_packed_values(
             biomes.value.get("data"),
             palette_size=len(biome_items),
@@ -462,6 +534,8 @@ def persisted_light_correct(root: Tag) -> bool:
 
 
 def validate_chunk(raw: bytes, coordinate: tuple[int, int], *, target: bool) -> tuple[str, str, dict[str, Any]]:
+    if len(raw) > MAX_CHUNK_RAW_BYTES:
+        raise Failed(f"{coordinate} raw NBT exceeds chunk size cap")
     try:
         root = parse(raw)
     except NbtError as exc:
@@ -500,18 +574,19 @@ def world_tree_signature(world: Path) -> str:
     for path in sorted(world.rglob("*")):
         if path.is_symlink():
             raise Failed(f"Paper world tree contains a symlink: {path}")
-        if path.is_file():
-            before = path.stat()
-            data = path.read_bytes()
-            after = path.stat()
-            before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-            after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-            if before_identity != after_identity:
-                raise Failed(f"Paper world file changed while validating: {path}")
-            rows.append(
-                f"{path.relative_to(world)}\\0{before.st_dev}\\0{before.st_ino}\\0{before.st_size}"
-                f"\\0{before.st_mtime_ns}\\0{sha256(data)}"
-            )
+        if path.is_dir():
+            continue
+        before = _require_regular_file(path, "Paper world tree file")
+        data = path.read_bytes()
+        after = path.stat()
+        before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        if before_identity != after_identity:
+            raise Failed(f"Paper world file changed while validating: {path}")
+        rows.append(
+            f"{path.relative_to(world)}\\0{before.st_dev}\\0{before.st_ino}\\0{before.st_size}"
+            f"\\0{before.st_mtime_ns}\\0{sha256(data)}"
+        )
     return sha256("\\n".join(rows).encode())
 
 
@@ -530,10 +605,10 @@ def inventory_paths(world: Path) -> set[str]:
                 if path.is_symlink() or (path.exists() and not path.is_file()):
                     raise Failed(f"inventory path is not a regular file: {path}")
                 if path.is_file():
+                    _require_regular_file(path, "inventory path")
                     result.add(str(path.relative_to(world)))
     for path in world.rglob("*.mcc"):
-        if path.is_symlink() or not path.is_file():
-            raise Failed(f"inventory .mcc is not a regular file: {path}")
+        _require_regular_file(path, "inventory .mcc")
         result.add(str(path.relative_to(world)))
     return result
 
@@ -564,11 +639,12 @@ def validate_inventory(run: Path, manifest: dict[str, Any]) -> None:
 
 
 def _read_json(path: Path, label: str) -> dict[str, Any]:
-    if path.is_symlink() or not path.is_file():
-        raise Failed(f"{label} is absent or symlinked")
+    metadata = _require_regular_file(path, label)
+    if metadata.st_size > MAX_JSON_BYTES:
+        raise Failed(f"{label} exceeds size cap")
     try:
         value = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise Failed(f"{label} is malformed: {exc}") from exc
     if not isinstance(value, dict):
         raise Failed(f"{label} is not an object")
@@ -628,7 +704,7 @@ def _validate_log(path: Path, token: str, *, capture: bool) -> None:
     bad = [line for line in text.splitlines() if re.search(r"\[(ERROR|FATAL)\]|Exception|StackTrace|fallback|recovery|RIVET_PROBE_FAILED", line, re.I)]
     if bad:
         raise Failed(f"Paper log contains an error/fallback/recovery line: {bad[0]}")
-    required = ["Done (", "All dimensions are saved", "Stopping server", "[MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads"]
+    required = ["Done (", "All dimensions are saved", "Stopping server", THREAD_MARKER]
     if capture:
         required += ["RIVET_PROBE_READY", "RIVET_CAPTURE_TOKEN=" + token, "RIVET_SIMULATION_FROZEN"]
     if any(marker not in text for marker in required):
@@ -640,6 +716,7 @@ def _validate_log(path: Path, token: str, *, capture: bool) -> None:
             raise Failed(f"Paper log marker is missing or duplicated: {marker}")
         return positions[0]
 
+    unique_marker(THREAD_MARKER)
     done_at = unique_marker("Done (")
     stopping_at = unique_marker("Stopping server")
     saved_positions = [match.start() for match in re.finditer(re.escape("All dimensions are saved"), text)]
@@ -744,6 +821,8 @@ def _validate_tickets(run: Path, expected_closure: list[tuple[int, int]], manife
         tickets = data.value.get("tickets") if data is not None and data.kind == 10 else None
         if tickets is None or tickets.kind != 9 or tickets.value[0] != 10:
             raise Failed(f"chunk_tickets.dat has no compound data.tickets list: {path}")
+        if len(tickets.value[1]) > EXPECTED_CLOSURE_COUNT:
+            raise Failed(f"chunk_tickets.dat contains too many tickets: {path}")
         coordinates: list[tuple[int, int]] = []
         for ticket in tickets.value[1]:
             if ticket.kind != 10:
@@ -799,8 +878,15 @@ def _validate_process_timing(manifest: dict[str, Any]) -> None:
 
 def _validate_probe(run: Path, token: str, expected_closure: list[tuple[int, int]]) -> None:
     probe = _read_json(run / "probe.json", "probe.json")
-    if probe.get("format") != 1 or probe.get("producer") != PROBE or probe.get("main_thread") is not True or probe.get("world") != "minecraft:overworld":
-        raise Failed("main-thread Paper probe provenance is missing")
+    if (
+        probe.get("format") != 1
+        or probe.get("producer") != PROBE
+        or probe.get("side") != "server"
+        or probe.get("thread") != "main"
+        or probe.get("main_thread") is not True
+        or probe.get("world") != "minecraft:overworld"
+    ):
+        raise Failed("server-side main-thread Paper probe provenance is missing")
     if probe.get("token") != token or probe.get("closure_count") != len(expected_closure) or probe.get("simulation_frozen") is not True:
         raise Failed("probe closure/token/simulation evidence is incomplete")
     targets = [(item.get("x"), item.get("z")) for item in probe.get("targets", [])]
@@ -812,8 +898,7 @@ def _validate_probe(run: Path, token: str, expected_closure: list[tuple[int, int
 
 
 def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract: dict[str, Any]) -> dict[tuple[int, int], str]:
-    if not run.is_dir() or run.is_symlink():
-        raise Failed(f"run root is not a real isolated directory: {run}")
+    _validate_tree(run, "Paper run root", max_bytes=MAX_RUN_BYTES)
     world = run / "world"
     if world.is_symlink() or not world.is_dir():
         raise Failed("Paper world root is absent or symlinked")
@@ -842,16 +927,18 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
     if paper_jar.get("source_revision") != EXPECTED_PAPER or not isinstance(paper_jar.get("built_after_ns"), int) or paper_jar.get("built_after_ns") <= 0:
         raise Failed("Paper source/build provenance is not the pinned fresh source")
     validate_paper_source(source_root)
-    if source_jar.name != "paper-paperclip-26.2.local-SNAPSHOT.jar" or not source_jar.is_file() or source_jar.is_symlink() or not source_jar.resolve().is_relative_to(source_root.resolve()):
+    if source_jar.name != "paper-paperclip-26.2.local-SNAPSHOT.jar" or not source_jar.resolve().is_relative_to(source_root.resolve()):
         raise Failed("built Paperclip jar is outside the pinned Paper source tree")
+    _require_regular_file(source_jar, "built Paperclip jar")
     if source_jar.stat().st_mtime_ns < int(paper_jar["built_after_ns"]) or paper_jar.get("sha256") != sha256(source_jar.read_bytes()) or paper_jar.get("bytes") != source_jar.stat().st_size:
         raise Failed("built Paperclip jar provenance is absent, stale, or tampered")
     if jar_manifest(source_jar).get("Main-Class") != "io.papermc.paperclip.Main":
         raise Failed("built Paperclip jar is not the pinned Paperclip launcher")
     source_server = paper_jar.get("source_server_jar", {})
     server_path = Path(source_server.get("path", ""))
-    if server_path.name != "paper-server-26.2.local-SNAPSHOT.jar" or not server_path.is_file() or server_path.is_symlink() or not server_path.resolve().is_relative_to(source_root.resolve()):
+    if server_path.name != "paper-server-26.2.local-SNAPSHOT.jar" or not server_path.resolve().is_relative_to(source_root.resolve()):
         raise Failed("built Paper server jar is outside the pinned Paper source tree")
+    _require_regular_file(server_path, "built Paper server jar")
     if (
         server_path.stat().st_mtime_ns < int(paper_jar["built_after_ns"])
         or source_server.get("git_commit") != EXPECTED_PAPER_SHORT
@@ -1019,8 +1106,10 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
     if not isinstance(chunks, list) or [(item.get("x"), item.get("z")) for item in chunks] != expected_closure:
         raise Failed("chunk evidence does not cover exact closure in order")
     actual_chunks = chunks_from_world(run / "world")
-    if set(actual_chunks) < set(expected_closure):
-        raise Failed("world is missing closure chunk data")
+    if set(actual_chunks) != set(expected_closure):
+        missing = len(set(expected_closure) - set(actual_chunks))
+        extra = len(set(actual_chunks) - set(expected_closure))
+        raise Failed(f"world chunk data is not the exact closure (missing={missing}, extra={extra})")
     semantic: dict[tuple[int, int], str] = {}
     for entry, coordinate in zip(chunks, expected_closure):
         raw = actual_chunks[coordinate]
@@ -1046,10 +1135,14 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
 
 
 def validate_bundle(bundle_dir: Path) -> None:
-    if not bundle_dir.is_dir() or bundle_dir.is_symlink():
-        raise Unverified(f"bundle directory is absent or symlinked: {bundle_dir}")
-    _reject_symlinks_under(bundle_dir, "evidence bundle")
+    if not bundle_dir.exists():
+        raise Unverified(f"bundle directory is absent: {bundle_dir}")
+    if bundle_dir.is_symlink():
+        raise Unverified(f"bundle directory is symlinked: {bundle_dir}")
+    _validate_tree(bundle_dir, "evidence bundle")
     contract = _read_json(CONTRACT_PATH, "pinned contract")
+    if sha256(CONTRACT_PATH.read_bytes()) != EXPECTED_CONTRACT_SHA256:
+        raise Failed("pinned contract fixture was modified")
     bundle_path = bundle_dir / "bundle.json"
     if not bundle_path.is_file() or bundle_path.is_symlink():
         raise Unverified("bundle.json is absent; no evidence is available")

@@ -146,6 +146,7 @@ public final class PaperNormalFullProbe extends JavaPlugin {
                     + ",\"world_surface\":" + worldSurface + ",\"motion_blocking\":" + motionBlocking + "}");
             }
             String json = "{\"format\":1,\"producer\":\"PaperNormalFullProbe\","
+                + "\"side\":\"server\",\"thread\":\"main\","
                 + "\"main_thread\":true,\"world\":\"minecraft:overworld\","
                 + "\"closure_count\":" + closure.size() + ",\"polls\":" + polls
                 + ",\"simulation_frozen\":true,\"token\":\"" + token + "\",\"targets\":["
