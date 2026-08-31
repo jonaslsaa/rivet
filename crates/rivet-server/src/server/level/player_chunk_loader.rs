@@ -263,6 +263,11 @@ impl PlayerChunkLoader {
         world: &mut ServerLevel,
         requested_view_distance: Option<i32>,
     ) -> Result<Vec<PlayPacket>, String> {
+        // Generated worlds publish a packet-visible graph only after all 117
+        // targets have crossed the consuming FULL boundary. Check before even
+        // preparing cache packets, so no lower-status chunk can leak to a
+        // client during a failed or partial install.
+        world.require_chunk_serving_ready()?;
         // `add()`: derive the per-player distances from the world's Moonrise
         // distances (no per-player overrides — the M1 player holds the world
         // defaults).
@@ -395,6 +400,9 @@ impl PlayerChunkLoader {
         player_chunk: ChunkPos,
         requested_view_distance: Option<i32>,
     ) -> Result<Vec<PlayPacket>, String> {
+        // The generated graph guard applies to recenter too: cache and chunk
+        // packets must never be prepared while a generated install is partial.
+        world.require_chunk_serving_ready()?;
         // Java: no per-player distance overrides on the M1 world, so the ladder
         // resolves the world defaults — tick 4 / load 5, send `min(4, client + 1)`
         // (4 unless the client requests < 3).

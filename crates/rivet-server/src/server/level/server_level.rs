@@ -42,6 +42,9 @@ use super::chunk_storage_worker::{
     ChunkSave, ChunkStorageWorker, StorageWorkerError, StorageWorkerOutcome,
 };
 use super::chunk_tracking_view::ChunkTrackingView;
+use super::generated_workspace::{
+    GENERATED_TARGET_COUNT, GENERATED_VIEW_DISTANCE, GeneratedWorkspace, GeneratedWorkspaceError,
+};
 use super::level_chunk::LevelChunkSaveError;
 use super::region_backed::{RegionBackedBootError, RegionChunkSource};
 
@@ -191,10 +194,92 @@ pub struct ServerLevel {
     /// (the region `fs::File` handles are owned, not shared), so the world
     /// stays `Send + !Sync` under the confinement marker.
     region_source: Option<RegionChunkSource>,
+    /// Whether this world is the bounded generated-serving mode. This marker
+    /// makes the player send path reject packet preparation until the exact
+    /// 117-target graph has been installed.
+    generated_serving: bool,
     /// Tick-thread confinement marker (OWNERSHIP §Ownership tree): `Cell` is
     /// `Send + !Sync`, so a `&ServerLevel` is rejected at compile time when it
     /// would cross threads.
     _confinement: std::marker::PhantomData<std::cell::Cell<()>>,
+}
+
+const GENERATED_SIMULATION_DISTANCE: i32 = 4;
+
+fn validate_generated_config(
+    config: &ServerLevelConfig,
+    generator_geometry: (i32, i32, i32),
+) -> Result<(), GeneratedWorkspaceError> {
+    let (generator_min_y, generator_height, generator_sea_level) = generator_geometry;
+    if config.missing_chunk_policy != MissingChunkPolicy::RequireLoaded {
+        return Err(GeneratedWorkspaceError::InvalidConfiguration {
+            field: "missing_chunk_policy",
+            expected: "RequireLoaded",
+        });
+    }
+    if config.dimension != overworld_dimension() {
+        return Err(GeneratedWorkspaceError::InvalidConfiguration {
+            field: "dimension",
+            expected: "minecraft:overworld",
+        });
+    }
+    if config.min_y != generator_min_y {
+        return Err(GeneratedWorkspaceError::InvalidConfiguration {
+            field: "min_y",
+            expected: "normal OverworldGenerator geometry",
+        });
+    }
+    if config.height != generator_height {
+        return Err(GeneratedWorkspaceError::InvalidConfiguration {
+            field: "height",
+            expected: "normal OverworldGenerator geometry",
+        });
+    }
+    if config.sea_level != generator_sea_level {
+        return Err(GeneratedWorkspaceError::InvalidConfiguration {
+            field: "sea_level",
+            expected: "normal OverworldGenerator geometry",
+        });
+    }
+    if config.view_distance != GENERATED_VIEW_DISTANCE {
+        return Err(GeneratedWorkspaceError::InvalidConfiguration {
+            field: "view_distance",
+            expected: "4",
+        });
+    }
+    if config.simulation_distance != GENERATED_SIMULATION_DISTANCE {
+        return Err(GeneratedWorkspaceError::InvalidConfiguration {
+            field: "simulation_distance",
+            expected: "4",
+        });
+    }
+    if config.is_flat {
+        return Err(GeneratedWorkspaceError::InvalidConfiguration {
+            field: "is_flat",
+            expected: "false",
+        });
+    }
+    if config.respawn_data.dimension() != &config.dimension {
+        return Err(GeneratedWorkspaceError::InvalidConfiguration {
+            field: "respawn_data.dimension",
+            expected: "the configured normal-overworld dimension",
+        });
+    }
+    if ChunkPos::containing(&config.respawn_data.pos()) != config.spawn_chunk {
+        return Err(GeneratedWorkspaceError::InvalidConfiguration {
+            field: "respawn_data.position",
+            expected: "a Paper-finalized spawn inside spawn_chunk",
+        });
+    }
+    if !(generator_min_y..generator_min_y.wrapping_add(generator_height))
+        .contains(&config.respawn_data.pos().get_y())
+    {
+        return Err(GeneratedWorkspaceError::InvalidConfiguration {
+            field: "respawn_data.position",
+            expected: "inside normal OverworldGenerator build height",
+        });
+    }
+    Ok(())
 }
 
 impl ServerLevel {
@@ -215,6 +300,20 @@ impl ServerLevel {
     pub fn new_region_backed(config: ServerLevelConfig) -> Self {
         let chunk_map = ChunkMap::empty(config.view_distance);
         Self::with_chunk_map(config, chunk_map)
+    }
+
+    /// Build the finite normal-overworld generated serving slice synchronously
+    /// on the tick thread. Generation and promotion are transactional: the
+    /// empty map remains untouched until every target is a ready FULL chunk.
+    pub fn new_generated(config: ServerLevelConfig) -> Result<Self, GeneratedWorkspaceError> {
+        let seed = config.seed;
+        let spawn_chunk = config.spawn_chunk;
+        let workspace = GeneratedWorkspace::new(seed, spawn_chunk)?;
+        validate_generated_config(&config, workspace.generator_geometry())?;
+        let mut world = Self::new_region_backed(config);
+        workspace.install_into(world.chunk_map_mut())?;
+        world.generated_serving = true;
+        Ok(world)
     }
 
     /// The shared construction: a `ChunkMap` (seeded or empty) plus the world
@@ -240,6 +339,7 @@ impl ServerLevel {
             is_flat: config.is_flat,
             game_time: 0,
             region_source: None,
+            generated_serving: false,
             _confinement: std::marker::PhantomData,
         }
     }
@@ -301,6 +401,32 @@ impl ServerLevel {
     /// `ServerLevel.getChunkMap()` — the mutable owner (tick-thread).
     pub fn chunk_map_mut(&mut self) -> &mut ChunkMap {
         &mut self.chunk_map
+    }
+
+    /// Refuse packet preparation until a generated world owns every target.
+    /// Legacy superflat and loaded-world paths retain their existing policy.
+    pub(crate) fn require_chunk_serving_ready(&self) -> Result<(), String> {
+        if !self.generated_serving {
+            return Ok(());
+        }
+        if self.chunk_map.len() != GENERATED_TARGET_COUNT {
+            return Err(format!(
+                "generated chunk graph is not ready for serving: expected {GENERATED_TARGET_COUNT} installed targets, found {}",
+                self.chunk_map.len()
+            ));
+        }
+        let mut missing = None;
+        self.view.for_each(|position| {
+            if missing.is_none() && self.chunk_map.get_chunk(position).is_none() {
+                missing = Some(position);
+            }
+        });
+        if let Some(position) = missing {
+            return Err(format!(
+                "generated chunk graph is not ready for serving: target {position:?} is not installed"
+            ));
+        }
+        Ok(())
     }
 
     /// The world's view-distance square (the M1 117-chunk shape).
@@ -510,6 +636,16 @@ mod tests {
         // Center is the spawn chunk (0,0).
         assert_eq!(world.view().center(), ChunkPos::ZERO);
         assert_eq!(world.view().view_distance(), 4);
+    }
+
+    #[test]
+    fn generated_packet_gate_refuses_partial_map_before_cache_packets() {
+        let mut world = ServerLevel::new_region_backed(ServerLevelConfig::default());
+        world.generated_serving = true;
+        let error = world
+            .require_chunk_serving_ready()
+            .expect_err("an empty generated map is not packet-ready");
+        assert!(error.contains("not ready for serving"));
     }
 
     #[test]
