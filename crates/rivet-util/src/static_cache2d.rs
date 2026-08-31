@@ -121,6 +121,14 @@ impl<T> StaticCache2D<T> {
         &mut self.cache[index]
     }
 
+    /// Consume the cache and return its entries in deterministic X-major,
+    /// Z-minor storage order. Rust-only ownership seam for callers that move
+    /// borrow-carrying cache entries back into their owner after a bounded
+    /// operation (for example, the generated FEATURES workspace).
+    pub fn into_entries(self) -> Vec<T> {
+        self.cache
+    }
+
     /// `StaticCache2D.contains(int x, int z)` — whether the coordinate is
     /// inside the window.
     pub fn contains(&self, x: i32, z: i32) -> bool {
@@ -134,12 +142,6 @@ impl<T> StaticCache2D<T> {
         for entry in &self.cache {
             consumer(entry);
         }
-    }
-
-    /// Consume the cache and return its entries in the canonical x-major,
-    /// z-inner order used by `create` and `from_entries`.
-    pub fn into_entries(self) -> Vec<T> {
-        self.cache
     }
 
     /// `getIndex(int x, int z)` — the row-major index `(x - minX) * sizeZ +

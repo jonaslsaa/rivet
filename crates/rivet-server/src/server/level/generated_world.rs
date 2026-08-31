@@ -151,6 +151,8 @@ use rivet_world::biome::multi_noise_biome_source::MultiNoiseBiomeSource;
 use rivet_world::block::blocks::Blocks;
 use rivet_world::chunk::chunk_generator::ChunkGenerator;
 use rivet_world::chunk::proto_chunk::ProtoChunk;
+#[cfg(test)]
+use rivet_world::chunk::status::GeneratedLightTask;
 use rivet_world::chunk::status::{ChunkStatus, GENERATION_PYRAMID, GenError, WorldGenContext};
 use rivet_world::chunk::storage::chunk_reconstruction::resolve_state_flags;
 use rivet_world::chunk::storage::section_reconstruction::{
@@ -542,7 +544,156 @@ impl FeatureWorkspace {
     pub fn is_empty(&self) -> bool {
         self.chunks.borrow().is_empty()
     }
+
+    /// Snapshot every retained dependency chunk in deterministic coordinate
+    /// order. The shared G4 scheduler uses this value-only view to publish
+    /// cross-chunk FEATURES writes back to its holder arena without exposing
+    /// the interior map borrow.
+    pub(crate) fn snapshot_chunks(
+        &self,
+    ) -> Vec<ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>> {
+        let mut chunks: Vec<_> = self
+            .chunks
+            .borrow()
+            .values()
+            .map(snapshot_generated_chunk)
+            .collect();
+        chunks.sort_by_key(|chunk| (chunk.get_pos().x(), chunk.get_pos().z()));
+        chunks
+    }
 }
+
+/// The registry-derived structure decoration index consumed by Paper's
+/// `ChunkGenerator.addVanillaDecorations` prelude. The structure manager and
+/// placement bodies are still outside this value slice, but the registry's
+/// per-step cardinalities are real inputs to the decoration boundary rather
+/// than a fixture `Some(0)` or an invented seed offset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StructureFeatureIndex {
+    counts_by_step: [usize; Decoration::VALUES.len()],
+}
+
+impl StructureFeatureIndex {
+    /// Derive the index from the exact 26.2 vanilla `Registries.STRUCTURE`
+    /// entries registered by `net.minecraft.data.worldgen.Structures`.
+    fn from_registry(entries: &[(&str, Decoration)]) -> Self {
+        let mut counts_by_step = [0; Decoration::VALUES.len()];
+        for &(_, step) in entries {
+            counts_by_step[decoration_index(step)] += 1;
+        }
+        Self { counts_by_step }
+    }
+
+    /// The normal overworld registry-derived structure index.
+    pub(crate) fn vanilla_registry() -> Self {
+        Self::from_registry(VANILLA_STRUCTURE_REGISTRY)
+    }
+
+    /// Adapt the focused omitted-structure-loop fixture into the index shape.
+    /// Production uses the registry-derived index above.
+    #[cfg(test)]
+    fn explicit_count(count: usize) -> Self {
+        Self {
+            counts_by_step: [count; Decoration::VALUES.len()],
+        }
+    }
+
+    /// The number of registry structures at a Paper decoration step.
+    pub(crate) fn count_for_step(&self, step: Decoration) -> usize {
+        self.counts_by_step[decoration_index(step)]
+    }
+
+    /// The number of registry structures at a decoration ordinal. Steps past
+    /// the vanilla enum are valid for a larger generated feature list and carry
+    /// no vanilla structure entries.
+    pub(crate) fn count_for_step_index(&self, step_index: usize) -> usize {
+        Decoration::VALUES
+            .get(step_index)
+            .map_or(0, |step| self.count_for_step(*step))
+    }
+
+    /// The total number of structure registry entries.
+    #[cfg(test)]
+    fn total(&self) -> usize {
+        self.counts_by_step.iter().sum()
+    }
+}
+
+fn decoration_index(step: Decoration) -> usize {
+    Decoration::VALUES
+        .iter()
+        .position(|candidate| *candidate == step)
+        .expect("every decoration step is in Decoration::VALUES")
+}
+
+/// Paper's vanilla structure registry in bootstrap registration order. The
+/// default `StructureSettings` step is `SURFACE_STRUCTURES`; only entries with
+/// an explicit `.generationStep(...)` use another step. Keeping the registry
+/// entries as data and deriving the counts above mirrors Java's
+/// `structuresRegistry.stream().collect(groupingBy(structure -> structure.step().ordinal()))`.
+const VANILLA_STRUCTURE_REGISTRY: &[(&str, Decoration)] = &[
+    ("minecraft:pillager_outpost", Decoration::SurfaceStructures),
+    ("minecraft:mineshaft", Decoration::UndergroundStructures),
+    (
+        "minecraft:mineshaft_mesa",
+        Decoration::UndergroundStructures,
+    ),
+    ("minecraft:mansion", Decoration::SurfaceStructures),
+    ("minecraft:jungle_pyramid", Decoration::SurfaceStructures),
+    ("minecraft:desert_pyramid", Decoration::SurfaceStructures),
+    ("minecraft:igloo", Decoration::SurfaceStructures),
+    ("minecraft:shipwreck", Decoration::SurfaceStructures),
+    ("minecraft:shipwreck_beached", Decoration::SurfaceStructures),
+    ("minecraft:swamp_hut", Decoration::SurfaceStructures),
+    ("minecraft:stronghold", Decoration::SurfaceStructures),
+    ("minecraft:monument", Decoration::SurfaceStructures),
+    ("minecraft:ocean_ruin_cold", Decoration::SurfaceStructures),
+    ("minecraft:ocean_ruin_warm", Decoration::SurfaceStructures),
+    ("minecraft:fortress", Decoration::UndergroundDecoration),
+    ("minecraft:nether_fossil", Decoration::UndergroundDecoration),
+    ("minecraft:end_city", Decoration::SurfaceStructures),
+    (
+        "minecraft:buried_treasure",
+        Decoration::UndergroundStructures,
+    ),
+    ("minecraft:bastion_remnant", Decoration::SurfaceStructures),
+    ("minecraft:village_plains", Decoration::SurfaceStructures),
+    ("minecraft:village_desert", Decoration::SurfaceStructures),
+    ("minecraft:village_savanna", Decoration::SurfaceStructures),
+    ("minecraft:village_snowy", Decoration::SurfaceStructures),
+    ("minecraft:village_taiga", Decoration::SurfaceStructures),
+    ("minecraft:ruined_portal", Decoration::SurfaceStructures),
+    (
+        "minecraft:ruined_portal_desert",
+        Decoration::SurfaceStructures,
+    ),
+    (
+        "minecraft:ruined_portal_jungle",
+        Decoration::SurfaceStructures,
+    ),
+    (
+        "minecraft:ruined_portal_swamp",
+        Decoration::SurfaceStructures,
+    ),
+    (
+        "minecraft:ruined_portal_mountain",
+        Decoration::SurfaceStructures,
+    ),
+    (
+        "minecraft:ruined_portal_ocean",
+        Decoration::SurfaceStructures,
+    ),
+    (
+        "minecraft:ruined_portal_nether",
+        Decoration::SurfaceStructures,
+    ),
+    ("minecraft:ancient_city", Decoration::UndergroundDecoration),
+    ("minecraft:trail_ruins", Decoration::UndergroundStructures),
+    (
+        "minecraft:trial_chambers",
+        Decoration::UndergroundStructures,
+    ),
+];
 
 /// The per-world OVERWORLD generator realization — `NoiseBasedChunkGenerator`
 /// resolved from the merged worldgen registries for a seed, plus the realized
@@ -575,6 +726,10 @@ pub struct OverworldGenerator {
     /// `worldgen/configured_feature` back-reference the `#181` dispatch and the
     /// Batch 2 selector arms require). See [`build_feature_access`].
     feature_access: &'static RegistryAccess,
+    /// The immutable structure-registry step index used by every production
+    /// FEATURES holder. It is derived once from the exact vanilla structure
+    /// registry metadata and shared by value with the tick-thread holders.
+    structure_feature_index: StructureFeatureIndex,
     seed: i64,
     /// Lazily built once per immutable world/seed, matching Paper's memoized
     /// `featuresPerStep`; the typed error is cached too so retries do not repeat
@@ -619,6 +774,7 @@ impl OverworldGenerator {
             access,
             feature_seeds,
             feature_access,
+            structure_feature_index: StructureFeatureIndex::vanilla_registry(),
             seed,
             feature_plan: OnceLock::new(),
         }
@@ -666,6 +822,11 @@ impl OverworldGenerator {
         self.access
     }
 
+    /// Paper's registry-derived per-step structure decoration index.
+    pub(crate) fn structure_feature_index(&self) -> StructureFeatureIndex {
+        self.structure_feature_index
+    }
+
     /// The leaked feature `RegistryAccess` — the worldgen access composed with
     /// the frozen placed/configured-feature registries (see the struct field).
     pub fn feature_access(&self) -> &'static RegistryAccess {
@@ -698,23 +859,6 @@ impl OverworldGenerator {
         GenerationChunkHolder::new(pos, Arc::clone(self))
     }
 
-    /// Create a holder with an explicitly proven number of structure decoration
-    /// entries consumed before placed-feature work in every decoration step.
-    /// `Some(0)` is valid only for a caller that has established that no
-    /// structures run for this chunk; `None` preserves the typed unavailable
-    /// boundary and performs no feature RNG or placement.
-    pub fn create_holder_with_structure_feature_count(
-        self: &Arc<Self>,
-        pos: ChunkPos,
-        structure_feature_count: Option<usize>,
-    ) -> GenerationChunkHolder {
-        GenerationChunkHolder::new_with_structure_feature_count(
-            pos,
-            Arc::clone(self),
-            structure_feature_count,
-        )
-    }
-
     /// Create a holder attached to caller-owned dependency chunks. Holders
     /// sharing one workspace observe successful FEATURES writes exactly as the
     /// scheduler's shared `GenerationChunkHolder`s would.
@@ -726,21 +870,19 @@ impl OverworldGenerator {
         GenerationChunkHolder::new_with_workspace(pos, Arc::clone(self), feature_workspace)
     }
 
-    /// Create a workspace-backed holder with an explicitly proven structure
-    /// decoration capability. The supplied count is a capability proof for the
-    /// unported structure loop; it does not alter Paper's independent placed-
-    /// feature `globalIndexOfFeature` seed.
-    pub fn create_holder_with_workspace_and_structure_feature_count(
+    /// Create a workspace-backed holder with the registry-derived structure
+    /// decoration index used by the production generated-world scheduler.
+    pub(crate) fn create_holder_with_workspace_and_structure_feature_index(
         self: &Arc<Self>,
         pos: ChunkPos,
         feature_workspace: FeatureWorkspace,
-        structure_feature_count: Option<usize>,
+        structure_feature_index: Option<StructureFeatureIndex>,
     ) -> GenerationChunkHolder {
-        GenerationChunkHolder::new_with_workspace_and_structure_feature_count(
+        GenerationChunkHolder::new_with_workspace_and_structure_feature_index(
             pos,
             Arc::clone(self),
             feature_workspace,
-            structure_feature_count,
+            structure_feature_index,
         )
     }
 }
@@ -908,28 +1050,11 @@ impl GenerationChunkHolder {
     /// `minecraft:freeze_top_layer` at step 10/global 0); the chunk stays
     /// CARVERS.
     pub fn new(pos: ChunkPos, generator: Arc<OverworldGenerator>) -> Self {
-        Self::new_with_workspace_and_structure_feature_count(
+        Self::new_with_workspace_and_structure_feature_index(
             pos,
             generator,
             FeatureWorkspace::new(),
             None,
-        )
-    }
-
-    /// Create a holder with an explicitly proven structure decoration
-    /// capability. `None` is the normal production value and is a typed
-    /// FEATURES boundary; `Some(_)` is reserved for a caller that has
-    /// established the structure loop's availability for this chunk.
-    pub fn new_with_structure_feature_count(
-        pos: ChunkPos,
-        generator: Arc<OverworldGenerator>,
-        structure_feature_count: Option<usize>,
-    ) -> Self {
-        Self::new_with_workspace_and_structure_feature_count(
-            pos,
-            generator,
-            FeatureWorkspace::new(),
-            structure_feature_count,
         )
     }
 
@@ -940,7 +1065,7 @@ impl GenerationChunkHolder {
         generator: Arc<OverworldGenerator>,
         feature_workspace: FeatureWorkspace,
     ) -> Self {
-        Self::new_with_workspace_and_structure_feature_count(
+        Self::new_with_workspace_and_structure_feature_index(
             pos,
             generator,
             feature_workspace,
@@ -948,13 +1073,14 @@ impl GenerationChunkHolder {
         )
     }
 
-    /// Create a workspace-backed holder with an explicitly proven structure
-    /// decoration capability.
-    pub fn new_with_workspace_and_structure_feature_count(
+    /// Create a workspace-backed holder with a registry-derived structure
+    /// decoration index. `None` intentionally retains the typed missing-index
+    /// boundary used by direct holder tests and non-scheduler callers.
+    pub(crate) fn new_with_workspace_and_structure_feature_index(
         pos: ChunkPos,
         generator: Arc<OverworldGenerator>,
         feature_workspace: FeatureWorkspace,
-        structure_feature_count: Option<usize>,
+        structure_feature_index: Option<StructureFeatureIndex>,
     ) -> Self {
         let height_accessor = create_height_accessor(
             generator.generator().get_min_y(),
@@ -1079,7 +1205,7 @@ impl GenerationChunkHolder {
                         chunk,
                         &generator,
                         &feature_workspace,
-                        structure_feature_count,
+                        structure_feature_index,
                     ) {
                         Ok(writebacks) => {
                             *writeback_sink.borrow_mut() = Some(writebacks);
@@ -1123,6 +1249,16 @@ impl GenerationChunkHolder {
         self.context.attach_generated_light_task(workspace)
     }
 
+    /// Attach a custom generated-light task for scheduler ownership tests.
+    #[cfg(test)]
+    pub(crate) fn attach_generated_light_task_for_test(
+        &mut self,
+        task: impl GeneratedLightTask<BlockState, WorldgenBiomeId, StructureKey, GeneratedLightStorage>
+        + 'static,
+    ) -> Option<GeneratedLightStorage> {
+        self.context.attach_generated_light_task(task)
+    }
+
     /// Detach the current generated-light workspace without consuming the
     /// holder. This is the G4 recovery path after success, a typed generation
     /// error, or a caught panic.
@@ -1164,6 +1300,43 @@ impl GenerationChunkHolder {
     /// pass. It can be shared with neighboring holders on the sync tick thread.
     pub fn feature_workspace(&self) -> FeatureWorkspace {
         self.feature_workspace.clone()
+    }
+
+    /// Snapshot the tick-thread-owned generated proto without exposing its
+    /// representation. The shared FEATURES scheduler uses this to seed its
+    /// temporary `WorldGenRegion` cache before a status task runs.
+    pub(crate) fn snapshot_proto(&self) -> ProtoChunk<BlockState, WorldgenBiomeId, StructureKey> {
+        snapshot_generated_chunk(&self.chunk)
+    }
+
+    /// Mutably expose the generated proto to the bounded tick-thread scheduler.
+    pub(crate) fn proto_mut(
+        &mut self,
+    ) -> &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey> {
+        &mut self.chunk
+    }
+
+    /// Rebuild the holder executor around an owned proto returned by a shared
+    /// SPAWN region. The proto remains the sole mutable authority; the executor
+    /// closures are recreated over the same immutable generator and FEATURES
+    /// workspace.
+    pub(crate) fn from_proto_with_workspace(
+        chunk: ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+        generator: Arc<OverworldGenerator>,
+        feature_workspace: FeatureWorkspace,
+    ) -> Self {
+        let pos = chunk.get_pos();
+        let mut holder = Self::new_with_workspace(pos, generator, feature_workspace);
+        holder.chunk = chunk;
+        holder
+    }
+
+    /// Consume a holder's proto for a temporary shared status region. The
+    /// scheduler only calls this for neighbours that have no attached runtime
+    /// LIGHT task; a holder carrying such a task must be detached through the
+    /// generated-light storage seam instead.
+    pub(crate) fn into_proto(self) -> ProtoChunk<BlockState, WorldgenBiomeId, StructureKey> {
+        self.chunk
     }
 
     /// Drive the chunk from its current persisted status through `target`
@@ -3010,6 +3183,16 @@ fn generated_boundary_panic_message(payload: &(dyn std::any::Any + Send)) -> Opt
         .or_else(|| payload.downcast_ref::<&'static str>().copied())
 }
 
+fn is_generated_feature_boundary_panic(payload: &(dyn std::any::Any + Send)) -> bool {
+    generated_boundary_panic_message(payload).is_some_and(|message| {
+        message.starts_with("generated feature ")
+            || message.contains("BlockStateBase.canSurvive is not implemented")
+            || message.contains("WorldGenRegion.canSurvive is not implemented")
+            || message.contains("Biome.shouldFreeze is not implemented")
+            || message.contains("Biome.shouldSnow is not implemented")
+    })
+}
+
 fn generated_boundary_feature_key(
     payload: &(dyn std::any::Any + Send),
     fallback: &'static str,
@@ -3037,21 +3220,22 @@ fn run_biome_decoration(
     chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
     generator: &Arc<OverworldGenerator>,
     workspace: &FeatureWorkspace,
-    structure_feature_count: Option<usize>,
+    structure_feature_index: Option<StructureFeatureIndex>,
 ) -> Result<FeatureWritebacks, GenError> {
     // Paper executes the structure loop before placed features whenever the
     // structure manager enables it. This value layer has no structure manager,
-    // so only a caller-proven capability may cross the boundary. The count is
-    // deliberately not added to placed-feature seeds: pinned Paper 26.2 uses
-    // `globalIndexOfFeature` independently for the placed-feature loop.
-    let _structure_feature_count =
-        structure_feature_count.ok_or(GenError::StructureDecorationIndexUnavailable {
+    // so only the registry-derived per-step index may cross the boundary. Its
+    // counts are deliberately not added to placed-feature seeds: pinned Paper
+    // 26.2 uses `globalIndexOfFeature` independently for that loop.
+    let structure_feature_index =
+        structure_feature_index.ok_or(GenError::StructureDecorationIndexUnavailable {
             chunk_pos: chunk.get_pos(),
         })?;
     run_biome_decoration_through(
         chunk,
         generator,
         workspace,
+        structure_feature_index,
         Decoration::VALUES
             .len()
             .max(generator.feature_plan()?.feature_list.len()),
@@ -3066,6 +3250,7 @@ fn run_biome_decoration_through(
     chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
     generator: &Arc<OverworldGenerator>,
     workspace: &FeatureWorkspace,
+    structure_feature_index: StructureFeatureIndex,
     max_steps: usize,
 ) -> Result<FeatureWritebacks, GenError> {
     chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
@@ -3109,6 +3294,14 @@ fn run_biome_decoration_through(
     // through their exact placed-feature chains; unsupported selected leaves
     // stop the run with a typed boundary.
     for step_index in 0..max_steps.min(generation_steps) {
+        // Paper gives structures their own zero-based index within each
+        // decoration step. The structure manager/start lookup is outside this
+        // value slice, but consuming the real registry cardinality preserves
+        // the exact structure-loop seed calls without inventing an offset for
+        // the independent placed-feature index below.
+        for structure_index in 0..structure_feature_index.count_for_step_index(step_index) {
+            random.set_feature_seed(decoration_seed, structure_index as i32, step_index as i32);
+        }
         if step_index >= feature_list.len() {
             continue;
         }
@@ -3184,17 +3377,7 @@ fn run_biome_decoration_through(
                     );
                 }));
                 if let Err(payload) = placement {
-                    let boundary =
-                        generated_boundary_panic_message(payload.as_ref()).is_some_and(|message| {
-                            message.starts_with("generated feature ")
-                                || (message
-                                    .contains("BlockStateBase.canSurvive is not implemented")
-                                    || message
-                                        .contains("WorldGenRegion.canSurvive is not implemented")
-                                    || message.contains("Biome.shouldFreeze is not implemented")
-                                    || message.contains("Biome.shouldSnow is not implemented"))
-                        });
-                    if boundary {
+                    if is_generated_feature_boundary_panic(payload.as_ref()) {
                         return Err(GenError::FeaturePlacementDecode {
                             chunk_pos: center_pos,
                             step_index,
@@ -3209,14 +3392,28 @@ fn run_biome_decoration_through(
                 }
                 continue;
             }
-            let selected =
+            let selected = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 placement_selects(&mut region, generator, &mut random, &origin, feature_key)
-                    .map_err(|_| GenError::FeaturePlacementDecode {
+            })) {
+                Ok(Ok(selected)) => selected,
+                Ok(Err(_)) => {
+                    return Err(GenError::FeaturePlacementDecode {
                         chunk_pos: center_pos,
                         step_index,
                         global_feature_index,
                         feature_key,
-                    })?;
+                    });
+                }
+                Err(payload) if is_generated_feature_boundary_panic(payload.as_ref()) => {
+                    return Err(GenError::FeaturePlacementDecode {
+                        chunk_pos: center_pos,
+                        step_index,
+                        global_feature_index,
+                        feature_key: generated_boundary_feature_key(payload.as_ref(), feature_key),
+                    });
+                }
+                Err(payload) => std::panic::resume_unwind(payload),
+            };
             if selected {
                 return Err(GenError::FeaturePlacementDecode {
                     chunk_pos: center_pos,
@@ -4605,8 +4802,22 @@ mod tests {
         GENERATOR.clone()
     }
 
+    #[test]
+    fn vanilla_structure_feature_index_matches_paper_registry_steps() {
+        let index = StructureFeatureIndex::vanilla_registry();
+        assert_eq!(index.total(), 34);
+        assert_eq!(index.count_for_step(Decoration::UndergroundStructures), 5);
+        assert_eq!(index.count_for_step(Decoration::SurfaceStructures), 26);
+        assert_eq!(index.count_for_step(Decoration::UndergroundDecoration), 3);
+        assert_eq!(index.count_for_step_index(11), 0);
+    }
+
     fn feature_holder(generator: &Arc<OverworldGenerator>, pos: ChunkPos) -> GenerationChunkHolder {
-        generator.create_holder_with_structure_feature_count(pos, Some(0))
+        generator.create_holder_with_workspace_and_structure_feature_index(
+            pos,
+            FeatureWorkspace::new(),
+            Some(StructureFeatureIndex::explicit_count(0)),
+        )
     }
 
     fn transaction_probe_holder(
@@ -6330,6 +6541,7 @@ mod tests {
             &mut holder.chunk,
             &generator,
             &workspace,
+            StructureFeatureIndex::explicit_count(0),
             Decoration::FluidSprings as usize + 1,
         )
         .expect("the seed-1 FLUID_SPRINGS-bounded pass must not panic");
@@ -7152,8 +7364,13 @@ mod tests {
         let mut chunk = fresh_worldgen_chunk(ChunkPos::ZERO, &generator);
         chunk.set_persisted_status(ChunkStatus::Carvers);
         let workspace = FeatureWorkspace::new();
-        let writebacks = run_biome_decoration(&mut chunk, &generator, &workspace, Some(0))
-            .expect("an empty selected-feature pass must succeed");
+        let writebacks = run_biome_decoration(
+            &mut chunk,
+            &generator,
+            &workspace,
+            Some(StructureFeatureIndex::explicit_count(0)),
+        )
+        .expect("an empty selected-feature pass must succeed");
         assert_eq!(
             writebacks.len(),
             8,

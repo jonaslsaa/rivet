@@ -158,7 +158,7 @@ impl GeneratedLightBridge {
 
     /// Convert a runtime proto back to the generated value pair used by the
     /// holder. This is the inverse of [`Self::runtime_from_generated`].
-    fn generated_from_runtime(
+    pub(crate) fn generated_from_runtime(
         chunk: RuntimeProto,
     ) -> Result<GeneratedProto, GeneratedLightBridgeError> {
         to_generated(chunk)
@@ -428,6 +428,16 @@ pub struct GeneratedLightWorkspace {
     bridge: Option<GeneratedLightBridge>,
     center: ChunkPos,
     required_neighbors: Vec<ChunkPos>,
+    /// G4 starts a bounded generated LIGHT wave with `INITIALIZE_LIGHT`
+    /// neighbours. Starlight itself filters those not yet LIGHT-correct from
+    /// its read cache; ownership still requires every radius-one value to be
+    /// present. The normal production constructor remains strict for callers
+    /// attaching an already-lighted workspace.
+    require_light_correct_neighbors: bool,
+    /// Initialization-only workspaces intentionally have no runtime chunks;
+    /// their provider is still a valid engine because `INITIALIZE_LIGHT` does
+    /// not read or compute neighbor data.
+    allow_empty_storage: bool,
 }
 
 impl GeneratedLightWorkspace {
@@ -445,6 +455,81 @@ impl GeneratedLightWorkspace {
         center: ChunkPos,
         chunks: &mut HashMap<(i32, i32), LightChunk>,
     ) -> Result<Self, GeneratedLightWorkspaceError> {
+        Self::new_with_neighbor_policy(
+            height_accessor,
+            has_sky_light,
+            has_block_light,
+            center,
+            chunks,
+            true,
+            false,
+        )
+    }
+
+    /// Build the bounded workspace used by a generated LIGHT wave. The
+    /// scheduler owns the complete radius-one provider/write neighbourhood,
+    /// but those neighbours are only at `INITIALIZE_LIGHT` when the first
+    /// target is lit. Paper's `SkyStarLightEngine.canUseChunk` naturally skips
+    /// such unlit neighbours while still requiring their values to be present;
+    /// the strict [`Self::new`] constructor remains the API for an already-lit
+    /// workspace.
+    pub(crate) fn new_for_generated(
+        height_accessor: SimpleLevelHeightAccessor,
+        has_sky_light: bool,
+        has_block_light: bool,
+        center: ChunkPos,
+        chunks: &mut HashMap<(i32, i32), LightChunk>,
+    ) -> Result<Self, GeneratedLightWorkspaceError> {
+        Self::new_with_neighbor_policy(
+            height_accessor,
+            has_sky_light,
+            has_block_light,
+            center,
+            chunks,
+            false,
+            false,
+        )
+    }
+
+    /// Build an engine-capable workspace for the `INITIALIZE_LIGHT` rung.
+    /// Initialization associates the provider but reads no neighbours, so a
+    /// finite empty storage is valid until the target's later LIGHT wave
+    /// replaces this task with [`Self::new_for_generated`].
+    pub(crate) fn new_for_initialize(
+        height_accessor: SimpleLevelHeightAccessor,
+        has_sky_light: bool,
+        has_block_light: bool,
+        center: ChunkPos,
+    ) -> Result<Self, GeneratedLightWorkspaceError> {
+        if !has_sky_light || has_block_light {
+            return Err(GeneratedLightWorkspaceError::UnsupportedLightChannels {
+                has_sky_light,
+                has_block_light,
+            });
+        }
+        Ok(Self {
+            bridge: Some(provider_for_owned_storage(
+                height_accessor,
+                has_sky_light,
+                has_block_light,
+                HashMap::new(),
+            )),
+            center,
+            required_neighbors: required_light_neighbors(center),
+            require_light_correct_neighbors: false,
+            allow_empty_storage: true,
+        })
+    }
+
+    fn new_with_neighbor_policy(
+        height_accessor: SimpleLevelHeightAccessor,
+        has_sky_light: bool,
+        has_block_light: bool,
+        center: ChunkPos,
+        chunks: &mut HashMap<(i32, i32), LightChunk>,
+        require_light_correct_neighbors: bool,
+        allow_empty_storage: bool,
+    ) -> Result<Self, GeneratedLightWorkspaceError> {
         // This slice computes sky light only. Reject unsupported channel
         // combinations before touching the caller's map; in particular, the
         // later `mem::take` must never strand block-light workspaces on error.
@@ -459,7 +544,7 @@ impl GeneratedLightWorkspace {
         let expected = light_window_neighbors(center)
             .into_iter()
             .collect::<HashSet<_>>();
-        if chunks.is_empty() {
+        if chunks.is_empty() && !allow_empty_storage {
             return Err(GeneratedLightWorkspaceError::EmptyStorage { center });
         }
         for (&(key_x, key_z), chunk) in chunks.iter() {
@@ -477,11 +562,14 @@ impl GeneratedLightWorkspace {
                     pos: actual,
                 });
             }
-            // The first generated LIGHT task needs a usable inner ring. The
-            // radius-two cache/write window is optional; Starlight's
-            // `canUseChunk` filter legitimately excludes an absent or unlit
-            // outer-ring chunk during initial construction.
-            if required.contains(&actual) && !chunk.is_light_correct() {
+            // The strict API requires a usable inner ring. Generated status
+            // scheduling only guarantees that those values have reached
+            // INITIALIZE_LIGHT, so the production G4 constructor checks
+            // presence while Starlight applies its own `canUseChunk` filter.
+            if require_light_correct_neighbors
+                && required.contains(&actual)
+                && !chunk.is_light_correct()
+            {
                 return Err(GeneratedLightWorkspaceError::NeighbourNotLightCorrect {
                     center,
                     pos: actual,
@@ -506,6 +594,8 @@ impl GeneratedLightWorkspace {
             )),
             center,
             required_neighbors,
+            require_light_correct_neighbors,
+            allow_empty_storage,
         })
     }
 
@@ -519,7 +609,8 @@ impl GeneratedLightWorkspace {
     /// runtime capability check for the executor's preflight contract.
     pub fn has_usable_engine(&self) -> bool {
         self.bridge.as_ref().is_some_and(|bridge| {
-            bridge.has_owned_runtime_storage() && bridge.supports_generated_light()
+            bridge.supports_generated_light()
+                && (self.allow_empty_storage || bridge.has_owned_runtime_storage())
         })
     }
 
@@ -546,9 +637,13 @@ impl GeneratedLightWorkspace {
 
     fn missing_neighbor(&self) -> Option<ChunkPos> {
         self.required_neighbors.iter().copied().find(|pos| {
-            self.bridge
-                .as_ref()
-                .is_none_or(|bridge| !bridge.has_owned_usable_runtime_chunk(*pos))
+            self.bridge.as_ref().is_none_or(|bridge| {
+                if self.require_light_correct_neighbors {
+                    !bridge.has_owned_usable_runtime_chunk(*pos)
+                } else {
+                    !bridge.has_owned_runtime_chunk(*pos)
+                }
+            })
         })
     }
 

@@ -20,6 +20,7 @@ pub mod chunk_storage_worker;
 pub mod chunk_tracking_view;
 pub mod entity_id_allocator;
 pub mod full_chunk_status;
+pub mod generated_workspace;
 pub mod generated_world;
 pub mod level_chunk;
 pub mod player_chunk_loader;
@@ -41,6 +42,10 @@ pub use chunk_result::ChunkResult;
 pub use chunk_tracking_view::ChunkTrackingView;
 pub use entity_id_allocator::EntityIdAllocator;
 pub use full_chunk_status::FullChunkStatus;
+pub use generated_workspace::{
+    FULL_SUPPORT_RADIUS, GENERATED_SUPPORT_COUNT, GENERATED_TARGET_COUNT, GENERATED_VIEW_DISTANCE,
+    GeneratedStatusWave, GeneratedWorkspace, GeneratedWorkspaceError,
+};
 pub use generated_world::{
     GeneratedChunkError, GenerationChunkHolder, OverworldGenerator, SpawnRegionError,
     SpawnRegionProtos,

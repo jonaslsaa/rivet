@@ -263,6 +263,11 @@ impl PlayerChunkLoader {
         world: &mut ServerLevel,
         requested_view_distance: Option<i32>,
     ) -> Result<Vec<PlayPacket>, String> {
+        // Generated worlds publish a packet-visible graph only after all 117
+        // targets have crossed the consuming FULL boundary. Check before even
+        // preparing cache packets, so no lower-status chunk can leak to a
+        // client during a failed or partial install.
+        world.require_chunk_serving_ready()?;
         // `add()`: derive the per-player distances from the world's Moonrise
         // distances (no per-player overrides — the M1 player holds the world
         // defaults).
@@ -395,6 +400,9 @@ impl PlayerChunkLoader {
         player_chunk: ChunkPos,
         requested_view_distance: Option<i32>,
     ) -> Result<Vec<PlayPacket>, String> {
+        // The generated graph guard applies to recenter too: cache and chunk
+        // packets must never be prepared while a generated install is partial.
+        world.require_chunk_serving_ready()?;
         // Java: no per-player distance overrides on the M1 world, so the ladder
         // resolves the world defaults — tick 4 / load 5, send `min(4, client + 1)`
         // (4 unless the client requests < 3).
@@ -426,11 +434,11 @@ impl PlayerChunkLoader {
         // after the distance-map updates (which send unload packets
         // synchronously — deferred with #185). Java compares against the
         // *sent* values (`lastSentChunkRadius`/`lastSentSimulationDistance`),
-        // which are committed wherever the corresponding packet is emitted —
-        // in `add` and here — so they fold into `lastSendDistance`/
-        // `lastTickDistance`. The radius/simulation packets precede the center
-        // packet, so the client's cache is sized and located before any chunk
-        // arrives.
+        // which fold into `lastSendDistance`/`lastTickDistance`. Build those
+        // packets first; this synchronous port commits the tuple only after
+        // the center and entered chunks also encode successfully. The
+        // radius/simulation packets still precede the center packet, so the
+        // client's cache is sized and located before any chunk arrives.
         let mut packets = Vec::new();
         if self.last_send_distance != send {
             packets.push(PlayPacket::new(
@@ -451,30 +459,22 @@ impl PlayerChunkLoader {
             ));
         }
 
-        // Java `update()` commits the new center + distances before the center
-        // packet (`this.lastChunkX = currentChunkX` etc. precede the send) and
-        // before the chunk walk, so the enter-set diff is against the committed
-        // center.
-        self.last_chunk_x = current_x;
-        self.last_chunk_z = current_z;
-        self.last_send_distance = send;
-        self.last_tick_distance = tick;
-
-        // Java sends the center packet last in `update()` "so that the client
-        // does not ignore any of our unload chunk packets above", gated on the
-        // center actually changing (`lastSentChunkCenter`); the actual chunk
-        // sends happen in the later `updateQueues` phase. This slice has no
-        // unloads, so the observable order is radius → simulation → center →
-        // chunks — the same prepare-the-cache order the join burst uses.
-        if center_changed {
-            packets.push(PlayPacket::new(
+        // Encode the center packet and every entered chunk before committing
+        // loader state. Unlike Java's asynchronous queue, this slice performs
+        // the chunk encode synchronously; an encode error must therefore leave
+        // the old center/radius/simulation tuple intact so the caller can retry
+        // the same recenter rather than hitting the no-op guard.
+        let center_packet = if center_changed {
+            Some(PlayPacket::new(
                 PlayClientbound::SetChunkCacheCenter.id(),
                 encode_body(
                     ClientboundSetChunkCacheCenterPacket::stream_codec(),
                     &ClientboundSetChunkCacheCenterPacket::new(current_x, current_z),
                 )?,
-            ));
-        }
+            ))
+        } else {
+            None
+        };
 
         // Java: `sendChunk = (squareDistance <= send + 1) && wantChunkLoaded(...)`
         // over the radius iteration — the same containment the join burst
@@ -491,7 +491,24 @@ impl PlayerChunkLoader {
             },
             |_| {},
         );
+        #[cfg(test)]
+        if self.fail_chunk_encoding {
+            bodies.push(Err(
+                "forced recenter view-chunk encode failure (test seam)".to_string()
+            ));
+        }
         let bodies: Vec<Vec<u8>> = bodies.into_iter().collect::<Result<_, _>>()?;
+
+        // Commit only after all synchronous output encoding succeeds. The
+        // already-encoded radius/simulation packets are then followed by the
+        // center packet and entered chunks in the same observable order.
+        self.last_chunk_x = current_x;
+        self.last_chunk_z = current_z;
+        self.last_send_distance = send;
+        self.last_tick_distance = tick;
+        if let Some(center_packet) = center_packet {
+            packets.push(center_packet);
+        }
         for body in bodies {
             packets.push(PlayPacket::new(
                 PlayClientbound::LevelChunkWithLight.id(),
@@ -522,7 +539,7 @@ impl PlayerChunkLoader {
     }
 
     /// Test seam (issue #100): force the view-chunk encode step of the next
-    /// `add_and_send_chunks` call to fail. Compiles out of non-test builds.
+    /// add or recenter call to fail. Compiles out of non-test builds.
     #[cfg(test)]
     fn set_fail_chunk_encoding(&mut self, fail: bool) {
         self.fail_chunk_encoding = fail;
@@ -923,6 +940,31 @@ mod tests {
         let x = i32::from_be_bytes([body[0], body[1], body[2], body[3]]);
         let z = i32::from_be_bytes([body[4], body[5], body[6], body[7]]);
         ChunkPos::new(x, z)
+    }
+
+    #[test]
+    fn recenter_encode_error_preserves_state_for_retry() {
+        let mut world = overworld();
+        let mut loader = PlayerChunkLoader::new(world.view().center());
+        loader.add_and_send_chunks(&mut world, None).unwrap();
+        let original = loader.last_chunk_pos();
+
+        loader.set_fail_chunk_encoding(true);
+        let error = loader
+            .update(&mut world, ChunkPos::new(1, 0), None)
+            .expect_err("the recenter encode seam must fail");
+        assert!(error.contains("recenter"), "error names the recenter step");
+        assert_eq!(loader.last_chunk_pos(), original);
+        assert_eq!(loader.last_send_distance(), 4);
+        assert_eq!(loader.last_tick_distance(), 4);
+
+        loader.set_fail_chunk_encoding(false);
+        let packets = loader
+            .update(&mut world, ChunkPos::new(1, 0), None)
+            .expect("the same recenter must remain retryable");
+        assert_eq!(packets[0].id, PlayClientbound::SetChunkCacheCenter.id());
+        assert_eq!(packets[0].body, vec![0x01, 0x00]);
+        assert_eq!(loader.last_chunk_pos(), ChunkPos::new(1, 0));
     }
 
     /// The M1 `update` path on the default (RepeatSpawnFixture) world: the
