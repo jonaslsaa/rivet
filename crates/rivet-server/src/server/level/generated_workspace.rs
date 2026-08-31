@@ -21,12 +21,17 @@ use rivet_world::chunk::status::{ChunkStatus, GENERATION_PYRAMID};
 use crate::server::level::level_chunk::StructureKey;
 use rivet_registry::block_state::BlockState;
 use rivet_world::chunk::storage::section_reconstruction::BiomeId as WorldgenBiomeId;
+use rivet_world::level::height_accessor::create as create_height_accessor;
 
 use super::chunk_map::ChunkMap;
 use super::chunk_tracking_view::ChunkTrackingView;
 use super::generated_world::{
     FeatureWorkspace, GeneratedChunkError, GenerationChunkHolder, OverworldGenerator,
     SpawnRegionProtos,
+};
+use crate::server::lighting::{
+    GENERATED_LIGHT_REQUIRED_RADIUS, GeneratedLightBridge, GeneratedLightStorage,
+    GeneratedLightWorkspace, GeneratedLightWorkspaceError,
 };
 
 /// The radius of the exact player send view for this slice.
@@ -97,6 +102,18 @@ pub enum GeneratedWorkspaceError {
         position: ChunkPos,
         source: GeneratedChunkError,
     },
+    /// The generated LIGHT task could not take ownership of its bounded
+    /// runtime neighbour workspace. No holder is attached when this fails.
+    #[error("generated workspace target {position} refused LIGHT workspace: {source}")]
+    LightWorkspace {
+        position: ChunkPos,
+        #[source]
+        source: GeneratedLightWorkspaceError,
+    },
+    /// A generated worldgen proto could not cross the temporary runtime LIGHT
+    /// value boundary while recovering provider-owned neighbour writes.
+    #[error("generated workspace LIGHT write-back at {position} refused: {message}")]
+    LightWriteback { position: ChunkPos, message: String },
     /// The caller attempted to serve a generated view before all target chunks
     /// had been atomically installed.
     #[error("generated chunk {position} is not ready for packet serving (status: {status:?})")]
@@ -282,6 +299,8 @@ impl GeneratedWorkspace {
 
                 match status {
                     ChunkStatus::Features => self.generate_features(position)?,
+                    ChunkStatus::InitializeLight => self.generate_initialize_light(position)?,
+                    ChunkStatus::Light => self.generate_light(position)?,
                     ChunkStatus::Spawn => self.generate_spawn(position)?,
                     _ => self
                         .holders
@@ -374,6 +393,193 @@ impl GeneratedWorkspace {
             .expect("FEATURES center holder remains owned")
             .snapshot_proto();
         self.feature_workspace.insert(center_snapshot);
+    }
+
+    /// Attach an engine-capable generated LIGHT task and run Paper's
+    /// `INITIALIZE_LIGHT` rung. The rung computes nothing, so its provider owns
+    /// an intentionally empty finite store until the target's later LIGHT
+    /// promotion replaces it with the bounded runtime-neighbour window.
+    fn generate_initialize_light(
+        &mut self,
+        position: ChunkPos,
+    ) -> Result<(), GeneratedWorkspaceError> {
+        let height_accessor =
+            create_height_accessor(self.generator.get_min_y(), self.generator.get_gen_depth());
+        let light_workspace =
+            GeneratedLightWorkspace::new_for_initialize(height_accessor, true, false, position)
+                .map_err(|source| GeneratedWorkspaceError::LightWorkspace { position, source })?;
+        let detached = {
+            let holder = self
+                .holders
+                .get_mut(&position)
+                .expect("INITIALIZE_LIGHT position has a holder");
+            let detached = holder.take_generated_light_storage();
+            holder.attach_generated_light_workspace(light_workspace);
+            detached
+        };
+        if let Some(storage) = detached
+            && !storage.is_empty()
+        {
+            self.publish_light_storage(position, storage)?;
+        }
+        let attempt = {
+            let holder = self
+                .holders
+                .get_mut(&position)
+                .expect("INITIALIZE_LIGHT position has a holder");
+            std::panic::catch_unwind(AssertUnwindSafe(|| {
+                holder.generate_through(ChunkStatus::InitializeLight)
+            }))
+        };
+        let storage = self
+            .holders
+            .get_mut(&position)
+            .expect("INITIALIZE_LIGHT position has a holder")
+            .take_generated_light_storage();
+        match attempt {
+            Ok(Ok(())) => {
+                if let Some(storage) = storage
+                    && !storage.is_empty()
+                {
+                    self.publish_light_storage(position, storage)?;
+                }
+                Ok(())
+            }
+            Ok(Err(source)) => Err(GeneratedWorkspaceError::Generation {
+                position,
+                target: ChunkStatus::InitializeLight,
+                source,
+            }),
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    /// Build the bounded required-neighbour LIGHT window from current holder
+    /// snapshots, replace the initialization-only task, run the consuming
+    /// generated LIGHT write-back, and return every provider-owned neighbour to
+    /// its holder.
+    fn generate_light(&mut self, position: ChunkPos) -> Result<(), GeneratedWorkspaceError> {
+        let mut runtime_chunks = HashMap::new();
+        for (&candidate, holder) in &self.holders {
+            if candidate != position
+                && position.get_chessboard_distance(&candidate) <= GENERATED_LIGHT_REQUIRED_RADIUS
+            {
+                let generated = holder.snapshot_proto();
+                let runtime =
+                    GeneratedLightBridge::runtime_from_generated(&generated).map_err(|error| {
+                        GeneratedWorkspaceError::LightWriteback {
+                            position,
+                            message: error.to_string(),
+                        }
+                    })?;
+                let (runtime, _) = runtime.into_base_and_entities();
+                runtime_chunks.insert((candidate.x(), candidate.z()), runtime);
+            }
+        }
+
+        let height_accessor =
+            create_height_accessor(self.generator.get_min_y(), self.generator.get_gen_depth());
+        let light_workspace = GeneratedLightWorkspace::new_for_generated(
+            height_accessor,
+            true,
+            false,
+            position,
+            &mut runtime_chunks,
+        )
+        .map_err(|source| GeneratedWorkspaceError::LightWorkspace { position, source })?;
+
+        let detached = {
+            let holder = self
+                .holders
+                .get_mut(&position)
+                .expect("LIGHT position has a holder");
+            let detached = holder.take_generated_light_storage();
+            holder.attach_generated_light_workspace(light_workspace);
+            detached
+        };
+        if let Some(storage) = detached
+            && !storage.is_empty()
+        {
+            self.publish_light_storage(position, storage)?;
+        }
+
+        let attempt = {
+            let holder = self
+                .holders
+                .get_mut(&position)
+                .expect("LIGHT position has a holder");
+            std::panic::catch_unwind(AssertUnwindSafe(|| {
+                holder.generate_through(ChunkStatus::Light)
+            }))
+        };
+        let storage = self
+            .holders
+            .get_mut(&position)
+            .expect("LIGHT position has a holder")
+            .take_generated_light_storage();
+        match attempt {
+            Ok(Ok(())) => {
+                if let Some(storage) = storage {
+                    self.publish_light_storage(position, storage)?;
+                }
+                Ok(())
+            }
+            Ok(Err(source)) => Err(GeneratedWorkspaceError::Generation {
+                position,
+                target: ChunkStatus::Light,
+                source,
+            }),
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    /// Publish the runtime provider's bounded neighbour light state only after
+    /// every returned value has been validated. The generated proto remains the
+    /// authority for worldgen metadata; LIGHT changes only the Starlight fields
+    /// that the runtime provider owns.
+    fn publish_light_storage(
+        &mut self,
+        center: ChunkPos,
+        storage: GeneratedLightStorage,
+    ) -> Result<(), GeneratedWorkspaceError> {
+        for ((key_x, key_z), runtime) in &storage {
+            let key_position = ChunkPos::new(*key_x, *key_z);
+            let position = runtime.get_pos();
+            if position != key_position {
+                return Err(GeneratedWorkspaceError::LightWriteback {
+                    position: center,
+                    message: format!(
+                        "runtime storage key {key_position:?} contains chunk at {position:?}"
+                    ),
+                });
+            }
+            if position == center {
+                return Err(GeneratedWorkspaceError::LightWriteback {
+                    position: center,
+                    message: "runtime LIGHT storage returned its center chunk".to_string(),
+                });
+            }
+            if !self.holders.contains_key(&position) {
+                return Err(GeneratedWorkspaceError::LightWriteback {
+                    position: center,
+                    message: format!("runtime storage returned unowned chunk {position:?}"),
+                });
+            }
+        }
+
+        for (_, runtime) in storage {
+            let position = runtime.get_pos();
+            let proto = self
+                .holders
+                .get_mut(&position)
+                .expect("owner checked during LIGHT writeback")
+                .proto_mut();
+            proto.set_block_nibbles(runtime.block_nibbles().to_vec());
+            proto.set_sky_nibbles(runtime.sky_nibbles().to_vec());
+            proto.set_sky_emptiness_map(runtime.sky_emptiness_map().map(<[bool]>::to_vec));
+            proto.set_light_correct(runtime.is_light_correct());
+        }
+        Ok(())
     }
 
     /// Run one production FEATURES status task against the common dependency
@@ -770,5 +976,142 @@ mod tests {
                 })
             ));
         }
+    }
+
+    #[test]
+    fn generated_light_wave_uses_production_provider_and_persists_results() {
+        let mut workspace = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("target view");
+        // FEATURES and SPAWN are intentionally outside this focused end-to-end
+        // slice: FEATURES retains its typed decoration boundary. Seed the
+        // holders at FEATURES and drive one target through both production
+        // light rungs, avoiding minutes of unrelated worldgen while still
+        // exercising the real initialization and bounded required-neighbour
+        // LIGHT attachment. The FEATURES status is a precondition fixture only; the
+        // decoration body is covered by its own typed-boundary tests.
+        for holder in workspace.holders.values_mut() {
+            holder
+                .proto_mut()
+                .set_persisted_status(ChunkStatus::Features);
+        }
+        workspace.waves = vec![
+            GeneratedStatusWave {
+                status: ChunkStatus::InitializeLight,
+                positions: vec![ChunkPos::ZERO],
+            },
+            GeneratedStatusWave {
+                status: ChunkStatus::Light,
+                positions: vec![ChunkPos::ZERO],
+            },
+        ];
+
+        workspace.generate().expect("generated LIGHT wave");
+
+        let center = workspace
+            .holders
+            .get(&ChunkPos::ZERO)
+            .expect("target holder remains attached");
+        assert_eq!(center.status(), ChunkStatus::Light);
+        let center_proto = center.snapshot_proto();
+        assert!(
+            center_proto.is_light_correct(),
+            "production LIGHT must persist the center result"
+        );
+        assert!(
+            center_proto.sky_emptiness_map().is_some(),
+            "production LIGHT must persist sky emptiness"
+        );
+        assert!(
+            center_proto.has_light_engine(),
+            "INITIALIZE_LIGHT must associate the production light engine"
+        );
+        let untouched_target = workspace
+            .targets
+            .iter()
+            .copied()
+            .find(|position| *position != ChunkPos::ZERO)
+            .expect("a second target exists");
+        assert_eq!(
+            workspace
+                .holders
+                .get(&untouched_target)
+                .expect("untouched target remains attached")
+                .status(),
+            ChunkStatus::Features
+        );
+        assert!(
+            workspace
+                .holders
+                .values_mut()
+                .all(|holder| holder.take_generated_light_storage().is_none()),
+            "bounded provider storage must be detached after LIGHT"
+        );
+
+        // The non-target radius-one support ring remains at FEATURES and is
+        // never promoted or served. Its runtime light values were returned to
+        // the generated holder arena after the target's bounded task.
+        let target_set: HashSet<_> = workspace.targets.iter().copied().collect();
+        for position in &workspace.support_positions {
+            if !target_set.contains(position) {
+                assert_eq!(
+                    workspace
+                        .holders
+                        .get(position)
+                        .expect("support holder remains attached")
+                        .status(),
+                    ChunkStatus::Features
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn generated_light_wave_rejects_missing_required_neighbor_without_attachment() {
+        let mut workspace = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("target view");
+        for holder in workspace.holders.values_mut() {
+            holder
+                .proto_mut()
+                .set_persisted_status(ChunkStatus::Features);
+        }
+        workspace.waves = vec![
+            GeneratedStatusWave {
+                status: ChunkStatus::InitializeLight,
+                positions: vec![ChunkPos::ZERO],
+            },
+            GeneratedStatusWave {
+                status: ChunkStatus::Light,
+                positions: vec![ChunkPos::ZERO],
+            },
+        ];
+        let missing = ChunkPos::new(1, 0);
+        workspace.holders.remove(&missing);
+
+        let error = workspace
+            .generate()
+            .expect_err("LIGHT must reject a missing inner-ring holder");
+        assert!(matches!(
+            error,
+            GeneratedWorkspaceError::LightWorkspace { position, source }
+                if position == ChunkPos::ZERO
+                    && matches!(
+                        source,
+                        GeneratedLightWorkspaceError::MissingNeighbour { center, pos }
+                            if center == ChunkPos::ZERO && pos == missing
+                    )
+        ));
+        assert_eq!(
+            workspace
+                .holders
+                .get(&ChunkPos::ZERO)
+                .expect("center remains attached")
+                .status(),
+            ChunkStatus::InitializeLight
+        );
+        assert!(
+            workspace
+                .holders
+                .values_mut()
+                .all(|holder| holder.take_generated_light_storage().is_none()),
+            "a rejected bounded workspace must not leave a provider attached"
+        );
     }
 }
