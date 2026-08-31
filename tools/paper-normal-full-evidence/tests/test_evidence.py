@@ -512,6 +512,42 @@ class EvidenceTests(unittest.TestCase):
             with self.assertRaises(validate.Failed):
                 validate._validate_log(log, token, capture=True)
 
+    def test_individual_file_caps_fail_before_whole_file_reads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            oversized = root / "arbitrary-world-payload.bin"
+            with oversized.open("wb") as handle:
+                handle.truncate(validate.MAX_FILE_BYTES + 1)
+            with self.assertRaisesRegex(validate.Failed, "individual size cap"):
+                validate._validate_tree(root, "test run")
+
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "server.log"
+            with log.open("wb") as handle:
+                handle.truncate(validate.MAX_TEXT_BYTES + 1)
+            with self.assertRaisesRegex(validate.Failed, "size cap"):
+                validate._validate_log(log, "a" * 64, capture=True)
+
+    def test_all_frozen_config_and_probe_inputs_are_digest_pinned(self):
+        originals = {
+            relative: (HERE / relative).read_bytes()
+            for relative in validate.EXPECTED_INPUT_SHA256
+        }
+        for mutated_relative in validate.EXPECTED_INPUT_SHA256:
+            with self.subTest(relative=mutated_relative), tempfile.TemporaryDirectory() as directory:
+                isolated = Path(directory)
+                for relative, data in originals.items():
+                    path = isolated / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+                with mock.patch.object(validate, "HERE", isolated):
+                    for relative, data in originals.items():
+                        self.assertEqual(validate._pinned_input_bytes(relative), data)
+                    path = isolated / mutated_relative
+                    path.write_bytes(path.read_bytes() + b"\n# mutation\n")
+                    with self.assertRaisesRegex(validate.Failed, "pinned producer input was modified"):
+                        validate._pinned_input_bytes(mutated_relative)
+
     def test_pinned_paper_source_override_does_not_require_paper_basename(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "paper-checkout"

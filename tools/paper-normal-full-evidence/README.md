@@ -49,9 +49,11 @@ Paper server; it is not a parity result.
   hashes. The validator checks that the route is normal noise, not flat, and
   that the seed/structures/DataVersion are exact.
 - Paper rewrites `server.properties` and expands both YAML files with defaults
-  on first boot. The validator checks the pinned property values and effective
-  Paper YAML paths while preserving exact fixture copies as provenance; it does
-  not mistake Paper's generated defaults for a configuration mismatch.
+  on first boot. The validator binds the source properties, both Paper YAML
+  fixtures, and the probe source/plugin descriptor to immutable digests, then
+  checks the runtime property values and effective YAML paths while preserving
+  exact fixture copies as provenance. It does not mistake Paper's generated
+  defaults for a configuration mismatch.
 
 ## Runtime prerequisites
 

@@ -32,6 +32,13 @@ PROBE = "PaperNormalFullProbe"
 EXPECTED_PAPER = "0a993450f129c4942c2a9ed45ba047412b4667cf"
 EXPECTED_PAPER_SHORT = EXPECTED_PAPER[:7]
 EXPECTED_CONTRACT_SHA256 = "49933b73813b628a36205420b071d790974036b6f1d649cfbc803f89b9d794f1"
+EXPECTED_INPUT_SHA256 = {
+    "fixtures/server.properties": "468cdeaf43cde78f599a43fd55862d894a4470038f8df87931144131dd2e6d70",
+    "fixtures/paper-global.yml": "06672c425d2a0e47b13a9f0a6e651d06ffbf2987a81a31978b673187cb8f0208",
+    "fixtures/paper-world-defaults.yml": "86e97ba91308085c63a48ec7e9520031d93e2d826d827854251ad846caa7d5bc",
+    "src/PaperNormalFullProbe.java": "f2c862a064d48e772874a50fd3a9caa6e7568047220cbdbce5fc4a7ffdb30af8",
+    "src/plugin.yml": "150ea08d2aa8ac7f80442ccea9aedb93f20515948c4685b1dd7dd71d3cd9a784",
+}
 EXPECTED_JAVA_MAJOR = 25
 EXPECTED_SEEDS = [
     "5207638315753790570",
@@ -61,9 +68,12 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
 THREAD_MARKER = "[MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads"
 MAX_JSON_BYTES = 32 * 1024 * 1024
+MAX_TEXT_BYTES = 32 * 1024 * 1024
 MAX_REGION_BYTES = 4 * 1024 * 1024
 MAX_CHUNK_COMPRESSED_BYTES = 16 * 1024 * 1024
 MAX_CHUNK_RAW_BYTES = 64 * 1024 * 1024
+MAX_FILE_BYTES = 256 * 1024 * 1024
+MAX_ARCHIVE_ENTRY_BYTES = 4 * 1024 * 1024
 MAX_BUNDLE_FILES = 100_000
 MAX_RUN_BYTES = 8 * (1 << 30)
 MAX_BUNDLE_BYTES = 64 * (1 << 30)
@@ -93,8 +103,65 @@ def _require_regular_file(path: Path, label: str) -> os.stat_result:
     return metadata
 
 
+def _read_bytes(path: Path, label: str, *, max_bytes: int = MAX_FILE_BYTES) -> bytes:
+    before = _require_regular_file(path, label)
+    if before.st_size > max_bytes:
+        raise Failed(f"{label} exceeds size cap: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                or opened.st_size > max_bytes
+            ):
+                raise Failed(f"{label} changed or exceeds size cap: {path}")
+            data = handle.read(max_bytes + 1)
+            after = os.fstat(handle.fileno())
+    except OSError as exc:
+        raise Failed(f"{label} is unreadable: {path}") from exc
+    if len(data) > max_bytes:
+        raise Failed(f"{label} exceeds size cap: {path}")
+    if (
+        len(data) != opened.st_size
+        or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+    ):
+        raise Failed(f"{label} changed while being read: {path}")
+    return data
+
+
+def _read_text(path: Path, label: str, *, max_bytes: int = MAX_TEXT_BYTES, errors: str = "strict") -> str:
+    data = _read_bytes(path, label, max_bytes=max_bytes)
+    try:
+        return data.decode("utf-8", errors=errors)
+    except UnicodeError as exc:
+        raise Failed(f"{label} is not valid UTF-8: {path}") from exc
+
+
+def _pinned_input_bytes(relative: str) -> bytes:
+    expected = EXPECTED_INPUT_SHA256.get(relative)
+    if expected is None:
+        raise Failed(f"unrecognized pinned producer input: {relative}")
+    path = HERE / relative
+    data = _read_bytes(path, f"pinned producer input {relative}", max_bytes=MAX_TEXT_BYTES)
+    if sha256(data) != expected:
+        raise Failed(f"pinned producer input was modified: {relative}")
+    return data
+
+
+def _pinned_input_text(relative: str) -> str:
+    try:
+        return _pinned_input_bytes(relative).decode("utf-8")
+    except UnicodeError as exc:
+        raise Failed(f"pinned producer input is not valid UTF-8: {relative}") from exc
+
+
 def _validate_tree(root: Path, label: str, *, max_bytes: int = MAX_BUNDLE_BYTES) -> tuple[int, int]:
-    """Reject links/non-regular nodes and bound aggregate evidence size."""
+    """Reject links/non-regular nodes and bound individual and aggregate evidence size."""
     try:
         root_metadata = root.lstat()
     except OSError as exc:
@@ -113,6 +180,8 @@ def _validate_tree(root: Path, label: str, *, max_bytes: int = MAX_BUNDLE_BYTES)
             path = Path(directory) / name
             metadata = _require_regular_file(path, label)
             files += 1
+            if metadata.st_size > MAX_FILE_BYTES:
+                raise Failed(f"{label} contains a file exceeding the individual size cap: {path}")
             total_bytes += metadata.st_size
             if files > MAX_BUNDLE_FILES or total_bytes > max_bytes:
                 raise Failed(f"{label} exceeds aggregate file/byte caps")
@@ -128,10 +197,26 @@ def probe_inputs_sha256(source_bytes: bytes, plugin_bytes: bytes) -> str:
     return digest.hexdigest()
 
 
+def _read_archive_entry(archive: zipfile.ZipFile, name: str, label: str) -> bytes:
+    try:
+        info = archive.getinfo(name)
+    except KeyError as exc:
+        raise Failed(f"{label} is absent from archive") from exc
+    if info.file_size > MAX_ARCHIVE_ENTRY_BYTES:
+        raise Failed(f"{label} exceeds archive entry size cap")
+    data = archive.read(info)
+    if len(data) != info.file_size:
+        raise Failed(f"{label} archive entry size changed while reading")
+    return data
+
+
 def jar_manifest(path: Path) -> dict[str, str]:
+    _require_regular_file(path, "jar manifest container")
+    if path.stat().st_size > MAX_FILE_BYTES:
+        raise Failed(f"jar manifest container exceeds size cap: {path}")
     try:
         with zipfile.ZipFile(path) as archive:
-            text = archive.read("META-INF/MANIFEST.MF").decode("utf-8", "replace")
+            text = _read_archive_entry(archive, "META-INF/MANIFEST.MF", "jar manifest").decode("utf-8", "replace")
     except (OSError, KeyError, zipfile.BadZipFile) as exc:
         raise Failed(f"Paper jar manifest is unreadable: {path}: {exc}") from exc
     result: dict[str, str] = {}
@@ -231,11 +316,11 @@ def parse_properties(text: str) -> dict[str, str]:
 
 
 def properties_text(seed: str) -> str:
-    return (HERE / "fixtures" / "server.properties").read_text().replace("<seed>", str(java_seed(seed)))
+    return _pinned_input_text("fixtures/server.properties").replace("<seed>", str(java_seed(seed)))
 
 
 def expected_properties(seed: str) -> dict[str, str]:
-    fixture = parse_properties((HERE / "fixtures" / "server.properties").read_text())
+    fixture = parse_properties(_pinned_input_text("fixtures/server.properties"))
     return {key: (str(java_seed(seed)) if value == "<seed>" else value) for key, value in fixture.items()}
 
 
@@ -276,10 +361,10 @@ def _validate_paper_yaml(run: Path) -> None:
         ("paper_global", "provenance/config/paper-global.yml", "paper-global.yml"),
         ("paper_world_defaults", "provenance/config/paper-world-defaults.yml", "paper-world-defaults.yml"),
     ):
-        fixture = (HERE / "fixtures" / fixture_name).read_text()
+        fixture = _pinned_input_text(f"fixtures/{fixture_name}")
         runtime_relative = relative.removeprefix("provenance/")
         runtime = run / runtime_relative
-        runtime_values = _yaml_values(runtime.read_text())
+        runtime_values = _yaml_values(_read_text(runtime, f"runtime Paper YAML {key}"))
         fixture_values = _yaml_values(fixture)
         for path, expected in fixture_values.items():
             actual = runtime_values.get(path)
@@ -291,7 +376,7 @@ def read_region(path: Path, region_coordinates: tuple[int, int]) -> dict[tuple[i
     metadata = _require_regular_file(path, "region file")
     if metadata.st_size > MAX_REGION_BYTES:
         raise Failed(f"region file exceeds size cap: {path}")
-    data = path.read_bytes()
+    data = _read_bytes(path, "region file", max_bytes=MAX_REGION_BYTES)
     if len(data) < 8192 or len(data) % 4096:
         raise Failed(f"malformed region framing: {path}")
     result: dict[tuple[int, int], bytes] = {}
@@ -325,7 +410,7 @@ def read_region(path: Path, region_coordinates: tuple[int, int]) -> dict[tuple[i
             external_metadata = _require_regular_file(external_path, "external chunk payload")
             if external_metadata.st_size > MAX_CHUNK_COMPRESSED_BYTES:
                 raise Failed(f"external chunk payload exceeds size cap: {external_path}")
-            payload = external_path.read_bytes()
+            payload = _read_bytes(external_path, "external chunk payload", max_bytes=MAX_CHUNK_COMPRESSED_BYTES)
         if codec == 1:
             raw = strict_decompress(payload, gzip_stream=True)
         elif codec == 2:
@@ -577,7 +662,7 @@ def world_tree_signature(world: Path) -> str:
         if path.is_dir():
             continue
         before = _require_regular_file(path, "Paper world tree file")
-        data = path.read_bytes()
+        data = _read_bytes(path, "Paper world tree file")
         after = path.stat()
         before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
         after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
@@ -630,7 +715,7 @@ def validate_inventory(run: Path, manifest: dict[str, Any]) -> None:
         path = world / rel
         if path.is_symlink() or not path.is_file():
             raise Failed(f"inventory path is not a regular file: {rel}")
-        digest = sha256(path.read_bytes())
+        digest = sha256(_read_bytes(path, f"inventory path {rel}"))
         entry = _manifest_entry(manifest, rel)
         if entry.get("sha256") != digest or entry.get("bytes") != path.stat().st_size:
             raise Failed(f"inventory hash mismatch: {rel}")
@@ -643,7 +728,7 @@ def _read_json(path: Path, label: str) -> dict[str, Any]:
     if metadata.st_size > MAX_JSON_BYTES:
         raise Failed(f"{label} exceeds size cap")
     try:
-        value = json.loads(path.read_text())
+        value = json.loads(_read_text(path, label, max_bytes=MAX_JSON_BYTES))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise Failed(f"{label} is malformed: {exc}") from exc
     if not isinstance(value, dict):
@@ -662,8 +747,8 @@ def _validate_worldgen_settings(run: Path, expected_seed: str, manifest: dict[st
     contract_copy = run / "world/data/minecraft/worldgen_settings.dat"
     if source.is_symlink() or contract_copy.is_symlink() or not source.is_file() or not contract_copy.is_file():
         raise Failed("exact Paper worldgen_settings.dat capture is absent or symlinked")
-    source_bytes = source.read_bytes()
-    if contract_copy.read_bytes() != source_bytes:
+    source_bytes = _read_bytes(source, "Paper worldgen settings", max_bytes=MAX_CHUNK_COMPRESSED_BYTES)
+    if _read_bytes(contract_copy, "worldgen settings contract copy", max_bytes=MAX_CHUNK_COMPRESSED_BYTES) != source_bytes:
         raise Failed("worldgen settings contract copy differs from Paper source")
     recorded = manifest.get("worldgen_settings", {})
     if recorded.get("path") != "world/data/minecraft/worldgen_settings.dat" or recorded.get("source_path") != "world/dimensions/minecraft/overworld/data/minecraft/world_gen_settings.dat":
@@ -700,7 +785,7 @@ def _validate_worldgen_settings(run: Path, expected_seed: str, manifest: dict[st
 def _validate_log(path: Path, token: str, *, capture: bool) -> None:
     if not path.is_file() or path.is_symlink():
         raise Failed(f"Paper log is absent or symlinked: {path}")
-    text = path.read_text(errors="replace")
+    text = _read_text(path, "Paper log", errors="replace")
     bad = [line for line in text.splitlines() if re.search(r"\[(ERROR|FATAL)\]|Exception|StackTrace|fallback|recovery|RIVET_PROBE_FAILED", line, re.I)]
     if bad:
         raise Failed(f"Paper log contains an error/fallback/recovery line: {bad[0]}")
@@ -739,9 +824,9 @@ def _validate_config(run: Path, seed: str, manifest: dict[str, Any]) -> None:
     actual = run / "server.properties"
     if provenance.is_symlink() or actual.is_symlink() or not provenance.is_file() or not actual.is_file():
         raise Failed("server.properties provenance is absent or symlinked")
-    if provenance.read_text() != properties_text(seed):
+    if _read_text(provenance, "server.properties provenance") != properties_text(seed):
         raise Failed("server.properties provenance differs from pinned fixture")
-    actual_properties = parse_properties(actual.read_text())
+    actual_properties = parse_properties(_read_text(actual, "runtime server.properties"))
     if not set(expected).issubset(actual_properties):
         raise Failed("runtime server.properties is missing a pinned normal-overworld key")
     ports = manifest.get("ports", {})
@@ -769,9 +854,9 @@ def _validate_config(run: Path, seed: str, manifest: dict[str, Any]) -> None:
     }
     for key, (path, relative) in records.items():
         record = config.get(key, {})
-        if path.is_symlink() or not path.is_file() or record.get("path") != relative or record.get("sha256") != sha256(path.read_bytes()) or record.get("bytes") != path.stat().st_size:
+        if path.is_symlink() or not path.is_file() or record.get("path") != relative or record.get("sha256") != sha256(_read_bytes(path, f"config provenance {relative}")) or record.get("bytes") != path.stat().st_size:
             raise Failed(f"config provenance is absent or tampered: {relative}")
-    if (run / "provenance/eula.txt").read_bytes() != b"eula=true\n" or (run / "eula.txt").read_bytes() != b"eula=true\n":
+    if _read_bytes(run / "provenance/eula.txt", "provenance eula", max_bytes=1024) != b"eula=true\n" or _read_bytes(run / "eula.txt", "runtime eula", max_bytes=1024) != b"eula=true\n":
         raise Failed("runtime or provenance eula is not pinned")
     for key, relative, fixture in (
         ("paper_global", "provenance/config/paper-global.yml", "paper-global.yml"),
@@ -779,8 +864,8 @@ def _validate_config(run: Path, seed: str, manifest: dict[str, Any]) -> None:
     ):
         path = run / relative
         record = config.get(key, {})
-        fixture_bytes = (HERE / "fixtures" / fixture).read_bytes()
-        if path.is_symlink() or not path.is_file() or path.read_bytes() != fixture_bytes:
+        fixture_bytes = _pinned_input_bytes(f"fixtures/{fixture}")
+        if path.is_symlink() or not path.is_file() or _read_bytes(path, f"provenance config {relative}") != fixture_bytes:
             raise Failed(f"pinned provenance config differs: {relative}")
         if record.get("path") != relative or record.get("sha256") != sha256(fixture_bytes) or record.get("bytes") != len(fixture_bytes):
             raise Failed(f"config manifest provenance is absent or tampered: {relative}")
@@ -790,7 +875,7 @@ def _validate_config(run: Path, seed: str, manifest: dict[str, Any]) -> None:
     ):
         path = run / relative
         record = config.get(key, {})
-        if path.is_symlink() or not path.is_file() or record.get("path") != relative or record.get("sha256") != sha256(path.read_bytes()) or record.get("bytes") != path.stat().st_size:
+        if path.is_symlink() or not path.is_file() or record.get("path") != relative or record.get("sha256") != sha256(_read_bytes(path, f"runtime Paper config {relative}")) or record.get("bytes") != path.stat().st_size:
             raise Failed(f"runtime Paper config provenance is absent or tampered: {relative}")
     _validate_paper_yaml(run)
     simulation = manifest.get("simulation")
@@ -812,7 +897,7 @@ def _validate_tickets(run: Path, expected_closure: list[tuple[int, int]], manife
 
     def coordinates_from(path: Path) -> list[tuple[int, int]]:
         try:
-            root = parse(strict_decompress(path.read_bytes(), gzip_stream=True))
+            root = parse(strict_decompress(_read_bytes(path, "forced ticket data", max_bytes=MAX_CHUNK_COMPRESSED_BYTES), gzip_stream=True))
         except NbtError as exc:
             raise Failed(f"chunk_tickets.dat is malformed/trailing: {path}: {exc}") from exc
         if root.kind != 10 or root.value.get("DataVersion") != Tag(3, EXPECTED_DATA_VERSION):
@@ -845,8 +930,8 @@ def _validate_tickets(run: Path, expected_closure: list[tuple[int, int]], manife
     if ticket_manifest.get("coordinates") != [list(item) for item in expected_closure]:
         raise Failed("forced ticket manifest coordinates differ from scheduler closure")
     if (
-        ticket_manifest.get("injected_sha256") != sha256(injected_path.read_bytes())
-        or ticket_manifest.get("post_exit_sha256") != sha256(post_path.read_bytes())
+        ticket_manifest.get("injected_sha256") != sha256(_read_bytes(injected_path, "injected forced ticket data", max_bytes=MAX_CHUNK_COMPRESSED_BYTES))
+        or ticket_manifest.get("post_exit_sha256") != sha256(_read_bytes(post_path, "post-stop forced ticket data", max_bytes=MAX_CHUNK_COMPRESSED_BYTES))
         or ticket_manifest.get("held_through_stop") is not True
     ):
         raise Failed("ticket lifecycle/hash provenance is incomplete")
@@ -930,7 +1015,7 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
     if source_jar.name != "paper-paperclip-26.2.local-SNAPSHOT.jar" or not source_jar.resolve().is_relative_to(source_root.resolve()):
         raise Failed("built Paperclip jar is outside the pinned Paper source tree")
     _require_regular_file(source_jar, "built Paperclip jar")
-    if source_jar.stat().st_mtime_ns < int(paper_jar["built_after_ns"]) or paper_jar.get("sha256") != sha256(source_jar.read_bytes()) or paper_jar.get("bytes") != source_jar.stat().st_size:
+    if source_jar.stat().st_mtime_ns < int(paper_jar["built_after_ns"]) or paper_jar.get("sha256") != sha256(_read_bytes(source_jar, "built Paperclip jar")) or paper_jar.get("bytes") != source_jar.stat().st_size:
         raise Failed("built Paperclip jar provenance is absent, stale, or tampered")
     if jar_manifest(source_jar).get("Main-Class") != "io.papermc.paperclip.Main":
         raise Failed("built Paperclip jar is not the pinned Paperclip launcher")
@@ -942,7 +1027,7 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
     if (
         server_path.stat().st_mtime_ns < int(paper_jar["built_after_ns"])
         or source_server.get("git_commit") != EXPECTED_PAPER_SHORT
-        or source_server.get("sha256") != sha256(server_path.read_bytes())
+        or source_server.get("sha256") != sha256(_read_bytes(server_path, "built Paper server jar"))
         or source_server.get("bytes") != server_path.stat().st_size
         or jar_manifest(server_path).get("Git-Commit") != EXPECTED_PAPER_SHORT
     ):
@@ -958,7 +1043,7 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
     if (
         boot_artifact_path.is_symlink()
         or not boot_artifact_path.is_file()
-        or boot_artifact.get("sha256") != sha256(boot_artifact_path.read_bytes())
+        or boot_artifact.get("sha256") != sha256(_read_bytes(boot_artifact_path, "stable Paperclip boot artifact"))
         or boot_artifact.get("bytes") != boot_artifact_path.stat().st_size
     ):
         raise Failed("stable Paperclip boot artifact is absent, stale, or tampered")
@@ -972,7 +1057,7 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
         or not runtime_path.is_file()
         or runtime.get("git_commit") != EXPECTED_PAPER_SHORT
         or runtime.get("paperclip_sha256") != boot_artifact["sha256"]
-        or runtime.get("sha256") != sha256(runtime_path.read_bytes())
+        or runtime.get("sha256") != sha256(_read_bytes(runtime_path, "materialized Paper runtime"))
         or runtime.get("bytes") != runtime_path.stat().st_size
     ):
         raise Failed("fresh materialized Paper runtime provenance is absent, stale, or tampered")
@@ -994,13 +1079,13 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
         or not plugin_yml.is_file()
     ):
         raise Failed("Paper probe source/plugin inputs are absent or symlinked")
-    source_bytes = probe_source.read_bytes()
-    plugin_bytes = plugin_yml.read_bytes()
+    source_bytes = _pinned_input_bytes("src/PaperNormalFullProbe.java")
+    plugin_bytes = _pinned_input_bytes("src/plugin.yml")
     input_digest = probe_inputs_sha256(source_bytes, plugin_bytes)
     if (
         probe_path.is_symlink()
         or not probe_path.is_file()
-        or probe_artifact.get("sha256") != sha256(probe_path.read_bytes())
+        or probe_artifact.get("sha256") != sha256(_read_bytes(probe_path, "compiled main-thread probe jar"))
         or probe_artifact.get("bytes") != probe_path.stat().st_size
         or paper_jar.get("probe_source_sha256") != sha256(source_bytes)
         or paper_jar.get("probe_plugin_yml_sha256") != sha256(plugin_bytes)
@@ -1012,8 +1097,9 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
     class_relative = "org/rivet/paper_normal_full/PaperNormalFullProbe.class"
     try:
         with zipfile.ZipFile(probe_path) as archive:
-            class_bytes = archive.read(class_relative)
-            if archive.read("plugin.yml") != plugin_bytes or probe_artifact["class_sha256"] != sha256(class_bytes):
+            class_bytes = _read_archive_entry(archive, class_relative, "compiled probe class")
+            archived_plugin = _read_archive_entry(archive, "plugin.yml", "compiled probe plugin.yml")
+            if archived_plugin != plugin_bytes or probe_artifact["class_sha256"] != sha256(class_bytes):
                 raise Failed("compiled main-thread probe jar does not match the pinned source/plugin inputs")
     except (KeyError, OSError, zipfile.BadZipFile) as exc:
         raise Failed("compiled main-thread probe jar is malformed") from exc
@@ -1021,7 +1107,7 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
         raise Failed("run was copied or its self-identifying root was rewritten")
     token = manifest.get("capture_token", "")
     token_path = run / "capture.token"
-    if not TOKEN_RE.fullmatch(token) or token_path.is_symlink() or not token_path.is_file() or token_path.read_text().strip() != token:
+    if not TOKEN_RE.fullmatch(token) or token_path.is_symlink() or not token_path.is_file() or _read_text(token_path, "capture token", max_bytes=1024).strip() != token:
         raise Failed("capture token is absent/malformed/mismatched")
     _validate_log(run / "server-create.log", token, capture=False)
     _validate_log(run / "server.log", token, capture=True)
@@ -1032,17 +1118,17 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
             path.is_symlink()
             or not path.is_file()
             or record.get("path") != relative
-            or record.get("sha256") != sha256(path.read_bytes())
+            or record.get("sha256") != sha256(_read_bytes(path, f"Paper log {relative}", max_bytes=MAX_TEXT_BYTES))
             or record.get("bytes") != path.stat().st_size
         ):
             raise Failed(f"Paper log provenance is absent or tampered: {relative}")
     driver_log = run / "driver.log"
-    driver_text = driver_log.read_text() if driver_log.is_file() and not driver_log.is_symlink() else ""
+    driver_text = _read_text(driver_log, "capture driver log") if driver_log.is_file() and not driver_log.is_symlink() else ""
     injected_sha = manifest.get("ticket", {}).get("injected_sha256")
     if (
         driver_log.is_symlink()
         or not driver_log.is_file()
-        or manifest.get("driver_log", {}).get("sha256") != sha256(driver_log.read_bytes())
+        or manifest.get("driver_log", {}).get("sha256") != sha256(_read_bytes(driver_log, "capture driver log", max_bytes=MAX_TEXT_BYTES))
         or f"RIVET_TICKETS_INJECTED={injected_sha}" not in driver_text
         or "RIVET_CAPTURE_STOP_EXIT=0" not in driver_text
     ):
@@ -1117,7 +1203,7 @@ def validate_run(run: Path, expected_seed: str, expected_attempt: int, contract:
         if entry.get("raw_path") != expected_raw_path:
             raise Failed(f"chunk raw path is not the pinned closure path: {coordinate}")
         raw_path = run / expected_raw_path
-        if raw_path.is_symlink() or not raw_path.is_file() or raw_path.read_bytes() != raw:
+        if raw_path.is_symlink() or not raw_path.is_file() or _read_bytes(raw_path, f"raw decompressed chunk payload {coordinate}", max_bytes=MAX_CHUNK_RAW_BYTES) != raw:
             raise Failed(f"post-exit raw decompressed payload mismatch: {coordinate}")
         if entry.get("raw_sha256") != sha256(raw) or entry.get("raw_bytes") != len(raw):
             raise Failed(f"raw NBT hash mismatch: {coordinate}")
@@ -1140,9 +1226,10 @@ def validate_bundle(bundle_dir: Path) -> None:
     if bundle_dir.is_symlink():
         raise Unverified(f"bundle directory is symlinked: {bundle_dir}")
     _validate_tree(bundle_dir, "evidence bundle")
-    contract = _read_json(CONTRACT_PATH, "pinned contract")
-    if sha256(CONTRACT_PATH.read_bytes()) != EXPECTED_CONTRACT_SHA256:
+    contract_bytes = _read_bytes(CONTRACT_PATH, "pinned contract", max_bytes=MAX_JSON_BYTES)
+    if sha256(contract_bytes) != EXPECTED_CONTRACT_SHA256:
         raise Failed("pinned contract fixture was modified")
+    contract = _read_json(CONTRACT_PATH, "pinned contract")
     bundle_path = bundle_dir / "bundle.json"
     if not bundle_path.is_file() or bundle_path.is_symlink():
         raise Unverified("bundle.json is absent; no evidence is available")
@@ -1151,7 +1238,7 @@ def validate_bundle(bundle_dir: Path) -> None:
         raise Failed("bundle provenance is wrong")
     if bundle.get("parity_claim") is not None or bundle.get("rivet_commit") is not None:
         raise Failed("bundle claims Rivet parity or stamps a Rivet commit")
-    if bundle.get("contract_sha256") != sha256(CONTRACT_PATH.read_bytes()):
+    if bundle.get("contract_sha256") != sha256(contract_bytes):
         raise Failed("bundle contract is stale or self-authored")
     attempts_per_seed = bundle.get("attempts_per_seed")
     if (
