@@ -27,13 +27,16 @@ Paper server; it is not a parity result.
   normal world. The driver removes all target/support region, POI, entity,
   `.mcc`, and ticket data before injecting tickets and starting boot two.
 - The probe freezes random ticks, daylight, weather, and mob spawning on the
-  Paper main thread. Paper is stopped with the console `stop` command only
+  Paper server's main thread. Its output records the server side and main
+  thread explicitly. Paper is stopped with the console `stop` command only
   after the probe proves the full closure is loaded and every target is
   `FULL` plus lit. Extraction reads the world only after process exit and zero
-  exit status.
+  exit status, and rejects chunk data outside the exact closure.
 - Raw decompressed chunk NBT is saved and hashed without rewriting. The capture
-  command runs the same fail-closed validator before returning success. A
-  separate canonical semantic hash sorts compound keys and removes only the root
+  command runs the same fail-closed validator before returning success. The
+  validator rejects symlinks, hardlinks, non-regular files, path escapes, and
+  oversized individual or aggregate evidence payloads. A separate canonical
+  semantic hash sorts compound keys and removes only the root
   `InhabitedTime` and `LastUpdate` fields, which are documented save-clock
   fields. The raw bytes remain authoritative. Paper's Starlight save hook
   intentionally writes `isLightOn=false`; persisted lit evidence is the exact
@@ -46,16 +49,22 @@ Paper server; it is not a parity result.
   hashes. The validator checks that the route is normal noise, not flat, and
   that the seed/structures/DataVersion are exact.
 - Paper rewrites `server.properties` and expands both YAML files with defaults
-  on first boot. The validator checks the pinned property values and effective
-  Paper YAML paths while preserving exact fixture copies as provenance; it does
-  not mistake Paper's generated defaults for a configuration mismatch.
+  on first boot. The validator binds the source properties, both Paper YAML
+  fixtures, and the probe source/plugin descriptor to immutable digests, then
+  independently recompiles the pinned probe with Temurin 25 and compares the
+  archived class bytes. It checks runtime property values and effective YAML
+  paths while preserving exact fixture copies as provenance, without mistaking
+  Paper's generated defaults for a configuration mismatch.
 
 ## Runtime prerequisites
 
 The driver refuses a missing or dirty Paper source, a source revision other than
  the pin, a non-Temurin JDK, and any pre-existing output bundle. It builds Paper
 from source with Gradle and uses only the freshly built Paperclip jar; it never
-falls back to a stale jar, global Paper runtime, or shared world/cache.
+falls back to a stale jar, global Paper runtime, or shared world/cache. The
+validator pins the reproducible source-built Paperclip digest, requires the
+stable boot launcher to be byte-identical to it, and checks the runtime plus exact library set against
+Paperclip's own source-built `versions.list` and `libraries.list` digests.
 
 The source must be available as a canonical, read-only clean checkout at
 `working/Paper` in this worktree (or pass `--paper-source` with any checkout
@@ -105,6 +114,8 @@ python3 tools/paper-normal-full-evidence/tests/test_evidence.py
 ```
 
 The tests exercise strict NBT full-consumption parsing, signed seed handling,
-closure order, tri-state validation, copied-root rejection, malformed/trailing
-payloads, and non-FULL/light/heightmap rejection. They do not create a Paper
-world and do not touch the production output directory.
+closure order, exact-closure enforcement, tri-state validation, copied-root
+rejection, malformed/trailing payloads, provenance tamper discrimination,
+link/non-regular rejection, bounded payloads, and non-FULL/light/heightmap
+rejection. They do not create a Paper world and do not touch the production
+output directory.

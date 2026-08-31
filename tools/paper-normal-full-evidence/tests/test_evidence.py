@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 import zlib
 from unittest import mock
 from pathlib import Path
@@ -14,6 +15,7 @@ HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE))
 
 import capture  # noqa: E402
+import nbt  # noqa: E402
 import validate  # noqa: E402
 from nbt import NbtError, Tag, encode, parse  # noqa: E402
 
@@ -89,6 +91,11 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaises(NbtError):
             parse(duplicate)
 
+    def test_nbt_container_cap_rejects_unbounded_list(self):
+        payload = b"\x0a\x00\x00\x09\x00\x01l\x01" + struct.pack(">i", nbt.MAX_CONTAINER + 1) + b"\x00"
+        with self.assertRaises(NbtError):
+            parse(payload)
+
     def test_compressed_stream_requires_exact_end_marker(self):
         compressed = zlib.compress(b"abc")
         for malformed in (compressed[:-1], compressed + b"trailing"):
@@ -110,6 +117,23 @@ class EvidenceTests(unittest.TestCase):
             (region_dir / "c.35.-60.mcc").write_bytes(zlib.compress(b"external-nbt"))
             self.assertEqual(capture.read_region(path, (1, -2))[(3, 4)], b"external-nbt")
             self.assertEqual(validate.read_region(path, (1, -2))[(3, 4)], b"external-nbt")
+
+    def test_region_cap_accepts_representative_large_file_and_rejects_oversized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            representative = root / "r.0.0.mca"
+            with representative.open("wb") as handle:
+                handle.truncate(9 * 1024 * 1024)
+            self.assertEqual(validate.read_region(representative, (0, 0)), {})
+            self.assertEqual(capture.read_region(representative, (0, 0)), {})
+
+            oversized = root / "r.1.0.mca"
+            with oversized.open("wb") as handle:
+                handle.truncate(validate.MAX_REGION_BYTES + 4096)
+            with self.assertRaises(validate.Failed):
+                validate.read_region(oversized, (1, 0))
+            with self.assertRaises(capture.Failed):
+                capture.read_region(oversized, (1, 0))
 
     def test_persisted_ticket_map_order_is_validated_as_a_set(self):
         closure = [(0, 0), (0, 1), (1, 0)]
@@ -267,6 +291,13 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaises(validate.Failed):
             validate.validate_chunk(encode(in_bounds_without_codecs), (0, 0), target=False)
 
+    def test_duplicate_chunk_sections_are_rejected(self):
+        root = parse(valid_chunk())
+        section = root.value["sections"].value[1][0]
+        root.value["sections"].value[1].append(section)
+        with self.assertRaises(validate.Failed):
+            validate.validate_chunk(encode(root), (0, 0), target=False)
+
     def test_chunk_codec_shape_rejects_bad_sections_and_missing_storage(self):
         root = parse(valid_chunk())
         root.value["sections"] = Tag(9, (3, []))
@@ -292,6 +323,59 @@ class EvidenceTests(unittest.TestCase):
         zero_states.value["palette"].value = (10, [Tag(10, {"Name": Tag(8, "minecraft:air")})])
         zero_states.value.pop("data")
         validate.validate_chunk(encode(zero_bit), (0, 0), target=False)
+
+    def test_raw_and_semantic_hashes_have_distinct_contracts(self):
+        root = parse(valid_chunk())
+        root.value["InhabitedTime"] = Tag(4, 1)
+        root.value["LastUpdate"] = Tag(4, 2)
+        dynamic = encode(root)
+        self.assertNotEqual(validate.sha256(dynamic), validate.sha256(valid_chunk()))
+        self.assertEqual(
+            validate.sha256(validate.canonical_without_dynamic(parse(dynamic))),
+            validate.sha256(validate.canonical_without_dynamic(parse(valid_chunk()))),
+        )
+        root.value["xPos"] = Tag(3, 1)
+        changed = encode(root)
+        self.assertNotEqual(
+            validate.sha256(validate.canonical_without_dynamic(parse(changed))),
+            validate.sha256(validate.canonical_without_dynamic(parse(valid_chunk()))),
+        )
+
+    def test_hardlinks_and_nonregular_evidence_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "bundle"
+            root.mkdir()
+            original = root / "original"
+            original.write_bytes(b"evidence")
+            (root / "hardlink").hardlink_to(original)
+            with self.assertRaises(validate.Failed):
+                validate._validate_tree(root, "evidence bundle")
+            (root / "hardlink").unlink()
+            fifo = root / "fifo"
+            os.mkfifo(fifo)
+            with self.assertRaises(validate.Failed):
+                validate._validate_tree(root, "evidence bundle")
+
+    def test_compressed_and_raw_chunk_caps_fail_closed(self):
+        payload = zlib.compress(b"x" * (validate.MAX_CHUNK_RAW_BYTES + 1))
+        with self.assertRaises(validate.Failed):
+            validate.strict_decompress(payload)
+        with self.assertRaises(validate.Failed):
+            validate.validate_chunk(b"x" * (validate.MAX_CHUNK_RAW_BYTES + 1), (0, 0), target=False)
+
+    def test_malformed_bundle_is_failed_but_absent_bundle_is_unverified(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory) / "bundle"
+            bundle.mkdir()
+            (bundle / "bundle.json").write_text("{not-json")
+            result = subprocess.run(
+                [sys.executable, str(HERE / "validate.py"), str(bundle)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("FAILED", result.stdout)
 
     def test_missing_bundle_is_unverified(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -341,6 +425,52 @@ class EvidenceTests(unittest.TestCase):
             with self.assertRaises(capture.Failed):
                 capture._verify_boot_artifact(run, stable, stable_info)
 
+    def test_materialization_rejects_substitution_despite_updated_capture_hashes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source-paperclip.jar"
+            boot = root / "stable-paperclip.jar"
+            runtime = root / "paper-26.2.jar"
+            libraries = root / "libraries"
+            library_relative = "example/group/example/1.0/example-1.0.jar"
+            library = libraries / library_relative
+            runtime_bytes = b"trusted-runtime"
+            library_bytes = b"trusted-library"
+            library.parent.mkdir(parents=True)
+            runtime.write_bytes(runtime_bytes)
+            library.write_bytes(library_bytes)
+            with zipfile.ZipFile(source, "w") as archive:
+                archive.writestr(
+                    "META-INF/versions.list",
+                    f"{validate.sha256(runtime_bytes)}\t26.2\t26.2/paper-26.2.jar\n",
+                )
+                archive.writestr(
+                    "META-INF/libraries.list",
+                    f"{validate.sha256(library_bytes)}\texample:example:1.0\t{library_relative}\n",
+                )
+            boot.write_bytes(source.read_bytes())
+            validate.validate_paperclip_materialization(source, boot, runtime, libraries)
+
+            boot.write_bytes(b"substituted-launcher")
+            self_authored_capture = {"sha256": validate.sha256(boot.read_bytes()), "bytes": boot.stat().st_size}
+            self.assertRegex(self_authored_capture["sha256"], r"^[0-9a-f]{64}$")
+            with self.assertRaisesRegex(validate.Failed, "stable boot Paperclip differs"):
+                validate.validate_paperclip_materialization(source, boot, runtime, libraries)
+
+            boot.write_bytes(source.read_bytes())
+            runtime.write_bytes(b"substituted-runtime")
+            self_authored_capture = {"sha256": validate.sha256(runtime.read_bytes()), "bytes": runtime.stat().st_size}
+            self.assertRegex(self_authored_capture["sha256"], r"^[0-9a-f]{64}$")
+            with self.assertRaisesRegex(validate.Failed, "runtime differs"):
+                validate.validate_paperclip_materialization(source, boot, runtime, libraries)
+
+            runtime.write_bytes(runtime_bytes)
+            library.write_bytes(b"substituted-library")
+            self_authored_capture = {"sha256": validate.sha256(library.read_bytes()), "bytes": library.stat().st_size}
+            self.assertRegex(self_authored_capture["sha256"], r"^[0-9a-f]{64}$")
+            with self.assertRaisesRegex(validate.Failed, "library differs"):
+                validate.validate_paperclip_materialization(source, boot, runtime, libraries)
+
     def test_probe_input_snapshot_detects_source_mutation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -353,6 +483,32 @@ class EvidenceTests(unittest.TestCase):
             source.write_bytes(b"source-v2")
             with self.assertRaises(capture.Failed):
                 capture._verify_probe_inputs(source, plugin, source_bytes, plugin_bytes)
+
+    def test_compiled_probe_archive_is_bound_to_independent_class_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            probe = Path(directory) / "probe.jar"
+            plugin = b"name: probe\n"
+            expected_class = b"independently-compiled-class"
+            with zipfile.ZipFile(probe, "w") as archive:
+                archive.writestr("plugin.yml", plugin)
+                archive.writestr("org/rivet/paper_normal_full/PaperNormalFullProbe.class", expected_class)
+            validate._validate_compiled_probe_archive(
+                probe,
+                plugin,
+                expected_class,
+                validate.sha256(expected_class),
+            )
+
+            with zipfile.ZipFile(probe, "w") as archive:
+                archive.writestr("plugin.yml", plugin)
+                archive.writestr("org/rivet/paper_normal_full/PaperNormalFullProbe.class", b"weakened-class")
+            with self.assertRaisesRegex(validate.Failed, "independent pinned-source compilation"):
+                validate._validate_compiled_probe_archive(
+                    probe,
+                    plugin,
+                    expected_class,
+                    validate.sha256(b"weakened-class"),
+                )
 
     def test_bundle_rejects_malformed_run_entry_and_symlink_root(self):
         contract = json.loads((HERE / "fixtures/contract.json").read_text())
@@ -384,8 +540,22 @@ class EvidenceTests(unittest.TestCase):
                 capture_output=True,
                 check=False,
             )
-            self.assertEqual(result.returncode, 3)
-            self.assertIn("UNVERIFIED", result.stdout)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("FAILED", result.stdout)
+
+            present_file = root / "bundle-file"
+            present_file.write_text("not a directory")
+            broken_link = root / "broken-bundle-link"
+            broken_link.symlink_to(root / "absent", target_is_directory=True)
+            for unsafe in (present_file, broken_link):
+                result = subprocess.run(
+                    [sys.executable, str(HERE / "validate.py"), str(unsafe)],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("FAILED", result.stdout)
 
     def test_error_log_is_failed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -445,6 +615,42 @@ class EvidenceTests(unittest.TestCase):
             log.write_text(log.read_text().replace(f"RIVET_CAPTURE_TOKEN={token}", "RIVET_CAPTURE_TOKEN=" + token + "\\nRIVET_PROBE_READY"))
             with self.assertRaises(validate.Failed):
                 validate._validate_log(log, token, capture=True)
+
+    def test_individual_file_caps_fail_before_whole_file_reads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            oversized = root / "arbitrary-world-payload.bin"
+            with oversized.open("wb") as handle:
+                handle.truncate(validate.MAX_FILE_BYTES + 1)
+            with self.assertRaisesRegex(validate.Failed, "individual size cap"):
+                validate._validate_tree(root, "test run")
+
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "server.log"
+            with log.open("wb") as handle:
+                handle.truncate(validate.MAX_TEXT_BYTES + 1)
+            with self.assertRaisesRegex(validate.Failed, "size cap"):
+                validate._validate_log(log, "a" * 64, capture=True)
+
+    def test_all_frozen_config_and_probe_inputs_are_digest_pinned(self):
+        originals = {
+            relative: (HERE / relative).read_bytes()
+            for relative in validate.EXPECTED_INPUT_SHA256
+        }
+        for mutated_relative in validate.EXPECTED_INPUT_SHA256:
+            with self.subTest(relative=mutated_relative), tempfile.TemporaryDirectory() as directory:
+                isolated = Path(directory)
+                for relative, data in originals.items():
+                    path = isolated / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+                with mock.patch.object(validate, "HERE", isolated):
+                    for relative, data in originals.items():
+                        self.assertEqual(validate._pinned_input_bytes(relative), data)
+                    path = isolated / mutated_relative
+                    path.write_bytes(path.read_bytes() + b"\n# mutation\n")
+                    with self.assertRaisesRegex(validate.Failed, "pinned producer input was modified"):
+                        validate._pinned_input_bytes(mutated_relative)
 
     def test_pinned_paper_source_override_does_not_require_paper_basename(self):
         with tempfile.TemporaryDirectory() as directory:
