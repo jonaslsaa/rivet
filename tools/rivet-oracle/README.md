@@ -4,9 +4,10 @@ Runs the real Java Paper server (the oracle), captures golden fixtures, and
 verifies them. M0 is the harness's foundation: a fixed-seed superflat world
 with a deterministic chunk-NBT fixture slice. M2 extends the same harness to
 the normal-overworld generator: semantic worldgen samples (density / biome /
-surface) plus a none-compression region chunk capture, per issue #51. The full
-differential logic (worldgen chunk-hash diffs vs Rivet, packet round-trips)
-builds on top of these fixtures later.
+surface) plus a none-compression region chunk capture, per issue #51. The
+source-disjoint generated normal-overworld FULL parity harness is also wired as
+the Stage-B/G4 promotion row; the broader differential logic (worldgen chunk-hash
+diffs vs Rivet, packet round-trips) builds on top of these fixtures later.
 
 ## Status: what works
 
@@ -50,6 +51,23 @@ builds on top of these fixtures later.
   the LIGHT-stage output; the rivet-server engine differential re-lights the
   interior through the real engine and matches it byte-exact. Twin-boot
   byte-identity verified.
+- **Generated normal-overworld FULL parity** (`verify-generated-full`, Stage-B/G4,
+  issue #175): a source-disjoint four-seed/four-region contract verifies Paper
+  and Rivet overworld FULL payloads byte-for-byte, with strict provenance,
+  closure, and named block/light/heightmap/NBT-order/key/
+  LastUpdate tamper controls. The promotion row is opt-in via
+  `RIVET_GENERATED_FULL=1` until the genuine Paper/Rivet capture is present;
+  wholly absent evidence is UNVERIFIED, while malformed or linked evidence is
+  FAIL. Stable evidence opening is deliberately Linux-only (`openat2` with
+  `RESOLVE_NO_SYMLINKS` and `/proc/self/fd`); non-Linux platforms fail
+  explicitly instead of taking an insecure pathname-reopen fallback. Linux
+  x86_64 is the primary tested target. Replay records label commit-derived
+  hashes as `paper-revision-identity-sha256` and
+  `rivet-revision-identity-sha256`; these are revision identities, not
+  source-content snapshots. Paper clean shutdown requires the post-READY
+  `All dimensions are saved` marker and exit 0 or conventional SIGTERM exit
+  143. The dedicated Rivet producer's exit 4 is BLOCKED/UNVERIFIED until its
+  real FULL pipeline exists.
 - The Rust runner `cargo run -p rivet-oracle` verifies every committed
   fixture kind against its manifest's SHA-256s and prints a summary.
 - **Storage-only #231 V1a is green**: `anvil-roundtrip-v1a` writes all 432
@@ -110,7 +128,11 @@ rivet-oracle/
       manifest.json     # hashes of light.json + all 25 forced chunk NBTs (kind: light)
       light.json        # 9 committed chunks' sky nibbles + emptiness map + light_correct
       chunks/<x>.<z>.nbt # 25 forced chunk NBTs the rivet-server differential rebuilds
+    generated-full/     # Stage-B/G4 normal-overworld FULL contract inputs
+      contract.json     # strict four-seed/four-region schema and artifact paths
+      server-normal-full.properties # canonical Paper producer template
   work/                 # scratch space — gitignored, never commit
+    generated-full/replay-<nonce>/ # verifier-owned Paper/Rivet roots and lifecycle record
     run/                # a completed server run (materialized runtime)
     jars/               # copies of the built Paper jars
     logs/               # server stdout logs
@@ -583,6 +605,52 @@ pattern, a tiny distinct-block set) is refused loudly, never handed off as
 ground truth. A missing runtime or a missing fixture tree is typed UNVERIFIED
 (exit 3), never a fabricated green.
 
+## Generated normal-overworld FULL parity: `verify-generated-full`
+
+The Stage-B/G4 row is deliberately source-disjoint from the loaded-world,
+superflat-FULL, and generated-expected fixtures. It compares four pinned seeds
+across the eight origin-adjacent/seam coordinates in the overworld only. The
+contract and canonical Paper producer template live under
+`fixtures/generated-full/`; the verifier allocates a fresh nonce-scoped replay
+root under `work/generated-full/` for every run. It does not accept committed,
+caller-selected, or producer-selected Paper/Rivet evidence roots.
+
+```bash
+cargo run -p rivet-oracle -- verify-generated-full
+cargo run -p rivet-oracle -- verify-generated-full --refresh-determinism
+RIVET_GENERATED_FULL=1 scripts/gate.sh --full
+```
+
+The verifier derives every digest from payload bytes read through stable opened
+file descriptors. Contract, producer executable/config, and nested payload
+metadata are checked on those same descriptors; symlink and hardlink aliases,
+nonregular files, malformed metadata, and self-diff aliases are hard failures.
+An ordinary replay performs three total Paper boots (one world-creation/injection
+boot followed by two independent post-injection captures); the optional
+`--refresh-determinism` mode performs a fourth boot for a third capture.
+Every artifact is staged as a fresh verifier-owned copy inside the nonce-scoped
+replay root and byte-bound to its attestation digest at staging time; the
+config/properties consumers then read only those captured bytes. The exact
+identity boundary: exec cannot inherit a descriptor, so `java -jar` and the
+producer binary launch reopen the staged *pathname* of that private copy — the
+binding holds because the replay root is verifier-owned with no other writer,
+not because the pathname itself is tamper-proof. A wholly absent prerequisite
+remains **3 UNVERIFIED**, while any partial launched handoff, stale provenance,
+and parity mismatch are **1 FAIL**. Stable evidence opening is deliberately
+Linux-only (`openat2` with `RESOLVE_NO_SYMLINKS` and `/proc/self/fd`);
+non-Linux platforms fail explicitly instead of taking an insecure
+pathname-reopen fallback. Linux x86_64 is the primary tested target.
+
+The dedicated `rivet-generated-full` producer is wired as the only Rivet side
+of this lifecycle. In the current checkout the real
+`OverworldGenerator -> FULL/light -> SerializableChunkData` production API is
+not exposed as one callable path: Level/registry bootstrap, chunk-source
+closure, light-engine completion, and the FULL `SerializableChunkData` snapshot
+writer still need to be connected. It therefore exits with an explicit
+`BLOCKED` result and never creates output; no synthetic payload is accepted as
+parity evidence. Until that API exists and fresh evidence is produced, the
+promotion row remains blocked rather than claiming green.
+
 ## Seed-42 FEATURES checkpoint: `features`
 
 The seed-42 FEATURES oracle checkpoint (PR #631) is the oracle ground-truth
@@ -799,17 +867,20 @@ come from the committed M2 region payloads via the rivet-nbt codec.
   a missing/empty payload source is **UNVERIFIED (3)** — never a fabricated
   zero-chunk manifest that could make a later diff vacuously green.
 - `hash-rivet <dir>` — reads a Rivet region tree (`chunk/<dim>/<region>/<cx>.<cz>.nbt`).
-  There is no Rivet FULL serialization yet, so it exits **3 UNVERIFIED**, never
-  green (Rivet chunk serialization is #231/#15; the Paper FULL side is now
-  covered by #51's corpus-forced superflat capture).
+  A wholly absent tree, missing `chunk/`, or a present tree that has not yet
+  reached FULL is **3 UNVERIFIED**. Present non-directories, nonregular entries,
+  malformed manifests/payloads, partial trees, and invalid NBT are **1 FAIL**;
+  no malformed existing evidence is downgraded to a missing prerequisite.
 - `hash-diff <paper> <rivet>` — compares Paper vs Rivet manifests. Refuses
   differing provenance (seed/algorithm/paper/concurrency) AND refuses a
   Paper-vs-Paper self-diff (both args the same tree — canonicalized, so a
   symlink alias is caught too): a self-comparison can never imply Paper ==
-  Rivet parity, so it is UNVERIFIED (3), never a PASS. Only FULL entries are
-  compared; a Paper-only or Rivet-only FULL chunk, a raw-digest difference, or a
-  missing required corpus coordinate are each real divergence — never a vacuous
-  green. Exit 0 = PASS, 1 = FAIL (names each chunk), 3 = UNVERIFIED, 64 = usage.
+  Rivet parity, so it is UNVERIFIED (3), never a PASS. Missing Rivet evidence,
+  self-diff/provenance/coverage prerequisites remain UNVERIFIED; existing
+  malformed manifests or corrupted raw trees are FAIL (1). Only FULL entries
+  are compared; a Paper-only or Rivet-only FULL chunk or a raw-digest
+  difference is real divergence — never a vacuous green. Exit 0 = PASS,
+  1 = FAIL (names each chunk), 3 = UNVERIFIED, 64 = usage.
 - `hash-diff --expect-fail <paper> <rivet> [kind]` — negative control: corrupt a
   copy of the **Rivet** baseline and require the tampered chunk named **and only
   it** — a FAIL for any other reason (a different chunk, a provenance mismatch,

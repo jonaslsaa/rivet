@@ -137,8 +137,10 @@ mod composed_noise;
 mod corpus;
 mod features;
 mod generated_expected;
+mod generated_full;
 mod hash;
 mod hash_manifest;
+mod json;
 mod light_stage;
 mod loaded_world;
 mod mutate;
@@ -204,10 +206,15 @@ enum Error {
     PinUnavailable {
         reason: String,
     },
-    /// The #54 hash stage could not complete honestly (missing/empty payload
-    /// input, or a malformed capture tree) — maps to exit 3 UNVERIFIED, never a
-    /// fabricated green.
+    /// A required prerequisite is unavailable (for example, missing/empty
+    /// payload input or incomplete FULL coverage) — maps to exit 3 UNVERIFIED,
+    /// never a fabricated green. Present malformed evidence is a hard failure.
     Unverified(String),
+    /// A launched dedicated producer reached an explicit, truthful capability
+    /// boundary. This is distinct from an absent prerequisite and from a
+    /// failed/malformed replay; callers must report BLOCKED with the missing
+    /// production API rather than fabricating evidence.
+    Blocked(String),
     /// The `verify --expect-fail` negative control failed: the boot -> extract
     /// -> pin-check -> diff pipeline did not detect (and name) the deliberately
     /// corrupted baseline chunk.
@@ -254,6 +261,7 @@ impl fmt::Display for Error {
                  tools/rivet-oracle/work/jars/)."
             ),
             Error::Unverified(m) => write!(f, "{m}"),
+            Error::Blocked(m) => write!(f, "BLOCKED: {m}"),
             Error::NegativeControl { message } => write!(f, "{message}"),
         }
     }
@@ -318,7 +326,7 @@ impl ChunkConcurrency {
 /// the level-type/compression strings.
 const KIND_M0: &str = "m0";
 const KIND_M2: &str = "m2";
-const KIND_FULL: &str = "full";
+pub(crate) const KIND_FULL: &str = "full";
 
 /// The fixture manifest (subset of fields; unknown fields are ignored).
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -722,25 +730,25 @@ fn parse_manifest_commit(manifest_text: &str) -> Option<String> {
 ///
 /// Paper logs exactly one line, from `MoonriseCommon.adjustWorkerThreads`:
 /// `[MoonriseCommon] Paper is using N worker threads, M I/O threads`. Returns
-/// `(worker, io)` when exactly one such line is present; `None` when the line
-/// is absent or the log is ambiguous (two pin lines = something is wrong).
-fn parse_boot_thread_counts(log_text: &str) -> Option<(u32, u32)> {
+/// `(worker, io)` when exactly one well-formed Moonrise line is present; `None`
+/// when the line is absent, malformed, or ambiguous. Requiring the component
+/// marker matters: an arbitrary log line must never become false concurrency
+/// provenance.
+pub(crate) fn parse_boot_thread_counts(log_text: &str) -> Option<(u32, u32)> {
+    const MOONRISE_LINE: &str = "[MoonriseCommon] Paper is using ";
+    const IO_SUFFIX: &str = " I/O threads";
     let mut counts = None;
     for line in log_text.lines() {
-        let Some((_, rest)) = line.split_once(" is using ") else {
+        let Some((_, rest)) = line.split_once(MOONRISE_LINE) else {
             continue;
         };
-        let Some((worker, io)) = rest.split_once(" worker threads, ") else {
-            continue;
-        };
-        let Some(io) = io.split_once(" I/O threads") else {
-            continue;
-        };
+        let (worker, io) = rest.split_once(" worker threads, ")?;
+        let io = io.strip_suffix(IO_SUFFIX)?;
         let Ok(worker) = worker.trim().parse::<u32>() else {
-            continue;
+            return None;
         };
-        let Ok(io) = io.0.trim().parse::<u32>() else {
-            continue;
+        let Ok(io) = io.trim().parse::<u32>() else {
+            return None;
         };
         if counts.is_some() {
             return None; // more than one pin line — ambiguous, refuse.
@@ -1016,13 +1024,14 @@ fn verify_fixtures_dir(dir: &Path) -> Result<(), Error> {
 /// (recursive — `fixtures/worldgen/` and `fixtures/regions/overworld-normal/`
 /// both qualify today, and kinds may nest arbitrarily). Kinds verify
 /// independently and can grow without a format migration. The
-/// `<root>/composed-noise`, `<root>/generated-expected`, `<root>/features`,
-/// and `<root>/light` dirs are excluded: each golden has a strict
+/// `<root>/composed-noise`, `<root>/generated-expected`, `<root>/generated-full`,
+/// `<root>/features`, and `<root>/light` dirs are excluded: each golden has a strict
 /// missing-prerequisite contract of its own, handled by dedicated steps after
 /// the generic kinds.
 fn all_fixture_manifests_from(root: &Path) -> Vec<PathBuf> {
     let composed_noise = root.join("composed-noise");
     let generated_expected = root.join("generated-expected");
+    let generated_full = root.join("generated-full");
     let features = root.join("features");
     let light = root.join("light");
     let mut out = Vec::new();
@@ -1039,6 +1048,7 @@ fn all_fixture_manifests_from(root: &Path) -> Vec<PathBuf> {
                 }
                 if path == composed_noise
                     || path == generated_expected
+                    || path == generated_full
                     || path == features
                     || path == light
                 {
@@ -1116,6 +1126,9 @@ fn verify_all_fixture_kinds_from(root: &Path) -> Result<(), Error> {
             kinds.len()
         );
     }
+    // generated-full is intentionally excluded from this generic/no-argument
+    // fixture walk: it is uncommitted G4 promotion evidence and gate.sh owns its
+    // sole explicit tri-state row plus tamper controls.
     verify_composed_noise_step(&composed_noise_dir)?;
     // The post-surface column oracle (issue #179): beyond the manifest hashes,
     // assert the SURFACE-checkpoint goldens (pinned provenance, the #175 matrix,
@@ -1365,7 +1378,7 @@ fn ensure_jar() -> Result<PathBuf, Error> {
 /// (M0 superflat: `fixtures/server.properties`; M2 normal overworld:
 /// `fixtures/server-normal.properties`), guaranteeing config parity by
 /// construction.
-fn prepare_run_dir(run_dir: &Path, server_properties_src: &Path) -> Result<(), Error> {
+pub(crate) fn prepare_run_dir(run_dir: &Path, server_properties_src: &Path) -> Result<(), Error> {
     let libs = run_dir.join("libraries");
     let reuse_libs = libs.is_dir()
         && fs::read_dir(&libs)
@@ -1565,7 +1578,7 @@ fn boot_and_shutdown(run_dir: &Path, log_path: &Path, jar: &Path) -> Result<(), 
 /// region capture, issue #266). `observed` is the chunk concurrency the boot
 /// actually ran with (parsed from the boot log): for M2 region captures it is
 /// recorded as `chunk-concurrency` provenance; M0 never records it.
-fn extract_fresh_fixtures(
+pub(crate) fn extract_fresh_fixtures(
     world_dir: &Path,
     out_dir: &Path,
     chunks_only: bool,
@@ -1683,7 +1696,8 @@ const TICKET_DIMS: &[(&str, &str)] = &[
 /// forcing or verifying the nether/end is dead work and a spurious failure
 /// mode (a nether/end that fails to load its grid must not refuse a valid
 /// overworld ground-truth capture). The corpus path keeps all of `TICKET_DIMS`.
-const OVERWORLD_DIM: &[(&str, &str)] = &[("overworld", "dimensions/minecraft/overworld")];
+pub(crate) const OVERWORLD_DIM: &[(&str, &str)] =
+    &[("overworld", "dimensions/minecraft/overworld")];
 
 /// Write a `minecraft:forced` ticket for every coordinate in `coords` into each
 /// dimension's `chunk_tickets.dat` (gzip NBT), mirroring the Moonrise
@@ -1701,7 +1715,7 @@ const OVERWORLD_DIM: &[(&str, &str)] = &[("overworld", "dimensions/minecraft/ove
 /// `FORCED_TICKET_LEVEL` 33 → `minecraft:full`, the serialization ceiling of the
 /// forced path; a higher ticket level is `INACCESSIBLE` to `fullStatus` and
 /// loads nothing).
-fn inject_forced_tickets(
+pub(crate) fn inject_forced_tickets(
     world_dir: &Path,
     coords: &[(i32, i32)],
     dims: &[(&str, &str)],
@@ -1759,16 +1773,32 @@ fn inject_forced_tickets(
 /// parity is rivet-parity's job. The re-encode is identical on both sides, so a
 /// serializer divergence could not produce a false green here; it would only
 /// make the gate's bytes differ from a hypothetical Paper-native extraction.
-fn normalize_last_update(bytes: &[u8]) -> Option<Vec<u8>> {
+fn normalize_last_update(bytes: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    let mut input = DataInputStream::new(Cursor::new(bytes));
     let mut compound =
-        nbt_io::read_unlimited(&mut DataInputStream::new(Cursor::new(bytes))).ok()?;
-    if !compound.tags.contains_key("LastUpdate") {
-        return None;
+        nbt_io::read_unlimited(&mut input).map_err(|error| format!("NBT read failed: {error}"))?;
+    let cursor = input.into_inner();
+    if cursor.position() != bytes.len() as u64 {
+        return Err(format!(
+            "NBT payload has {} trailing bytes",
+            bytes.len() as u64 - cursor.position()
+        ));
+    }
+    match compound.tags.get("LastUpdate") {
+        None => return Ok(None),
+        Some(Tag::Long(_)) => {}
+        Some(tag) => {
+            return Err(format!(
+                "LastUpdate has tag id {}; expected TAG_Long",
+                tag.id()
+            ));
+        }
     }
     compound.put_long("LastUpdate", 0);
     let mut out = Vec::new();
-    nbt_io::write(&compound, &mut DataOutputStream::new(Cursor::new(&mut out))).ok()?;
-    Some(out)
+    nbt_io::write(&compound, &mut DataOutputStream::new(Cursor::new(&mut out)))
+        .map_err(|error| format!("NBT write failed: {error}"))?;
+    Ok(Some(out))
 }
 
 /// Normalize every chunk payload in an extraction tree (`normalize_last_update`
@@ -1776,7 +1806,7 @@ fn normalize_last_update(bytes: &[u8]) -> Option<Vec<u8>> {
 /// byte-identity check and to the committed baseline, so the FULL gate compares
 /// worldgen content, not the save-clock artifact. Returns how many payloads
 /// changed.
-fn normalize_last_update_tree(dir: &Path) -> Result<usize, Error> {
+pub(crate) fn normalize_last_update_tree(dir: &Path) -> Result<usize, Error> {
     let mut count = 0usize;
     let mut walk = vec![dir.to_path_buf()];
     while let Some(d) = walk.pop() {
@@ -1786,8 +1816,12 @@ fn normalize_last_update_tree(dir: &Path) -> Result<usize, Error> {
                 walk.push(p);
             } else if p.extension().map(|x| x == "nbt").unwrap_or(false) {
                 let bytes = fs::read(&p)?;
-                if let Some(normalized) = normalize_last_update(&bytes)
-                    && normalized != bytes
+                if let Some(normalized) = normalize_last_update(&bytes).map_err(|error| {
+                    Error::Gate(format!(
+                        "cannot normalize LastUpdate in {}: {error}",
+                        p.display()
+                    ))
+                })? && normalized != bytes
                 {
                     fs::write(&p, normalized)?;
                     count += 1;
@@ -1806,7 +1840,7 @@ fn normalize_last_update_tree(dir: &Path) -> Result<usize, Error> {
 /// The manifest is rewritten with the same `serde_json::to_string_pretty` +
 /// trailing-newline formatting as `inject_manifest_metadata`, so regeneration
 /// stays byte-stable.
-fn rehash_captured(dir: &Path) -> Result<(), Error> {
+pub(crate) fn rehash_captured(dir: &Path) -> Result<(), Error> {
     let manifest_path = dir.join("manifest.json");
     let mut root: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&manifest_path).map_err(|e| {
@@ -1854,7 +1888,7 @@ fn rehash_captured(dir: &Path) -> Result<(), Error> {
 /// dimension to have loaded at least `expected` chunks. The check is
 /// dimension-aware, so a partially-succeeded injection (some dimensions loaded,
 /// others 0) is refused too.
-fn verify_forced_load(
+pub(crate) fn verify_forced_load(
     log_path: &Path,
     expected: usize,
     dims: &[(&str, &str)],
@@ -3068,35 +3102,274 @@ fn run_hash_paper(dir: Option<&Path>) -> Result<(), Error> {
     Ok(())
 }
 
+fn validate_hash_manifest_shape(
+    manifest: &hash_manifest::HashManifest,
+    path: &Path,
+) -> Result<(), Error> {
+    if manifest.entries.len() > hash_manifest::MAX_PAYLOAD_COUNT {
+        return Err(Error::Gate(format!(
+            "invalid hash manifest {}: {} entries exceed the {}-entry cap",
+            path.display(),
+            manifest.entries.len(),
+            hash_manifest::MAX_PAYLOAD_COUNT
+        )));
+    }
+    if manifest.format != 1
+        || manifest.hash_algorithm != hash_manifest::HASH_ALGORITHM
+        || manifest.hash_scope != hash_manifest::HASH_SCOPE
+        || manifest.corpus_version != hash_manifest::CORPUS_VERSION
+        || manifest.level_type.is_empty()
+        || manifest.region_file_compression.is_empty()
+        || manifest.paper.is_empty()
+    {
+        return Err(Error::Gate(format!(
+            "invalid hash manifest {}: unsupported or missing manifest identity fields",
+            path.display()
+        )));
+    }
+    if manifest.entries.len() != manifest.chunk_count {
+        return Err(Error::Gate(format!(
+            "invalid hash manifest {}: chunk-count {} does not equal {} entries",
+            path.display(),
+            manifest.chunk_count,
+            manifest.entries.len()
+        )));
+    }
+    let full_count = manifest
+        .entries
+        .iter()
+        .filter(|entry| entry.is_full())
+        .count();
+    if full_count != manifest.full_count {
+        return Err(Error::Gate(format!(
+            "invalid hash manifest {}: full-count {} does not equal {} FULL entries",
+            path.display(),
+            manifest.full_count,
+            full_count
+        )));
+    }
+    hash_manifest::reject_duplicate_coordinates(&manifest.entries).map_err(|message| {
+        Error::Gate(format!(
+            "invalid hash manifest {}: {message}",
+            path.display()
+        ))
+    })?;
+    let total_bytes = manifest.entries.iter().try_fold(0usize, |total, entry| {
+        if entry.bytes > hash_manifest::MAX_PAYLOAD_BYTES {
+            return Err(format!(
+                "entry {}/{}.{} exceeds the {}-byte payload cap",
+                entry.dim,
+                entry.cx,
+                entry.cz,
+                hash_manifest::MAX_PAYLOAD_BYTES
+            ));
+        }
+        if entry.dim.is_empty()
+            || entry.region != format!("{}.{}", entry.cx.div_euclid(32), entry.cz.div_euclid(32))
+            || entry.status.is_empty()
+            || entry.status == "full"
+            || entry.xxh3_64.len() != 16
+            || !entry.xxh3_64.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || entry.sha256.len() != 64
+            || !entry.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || entry.xxh3_64_canonical.len() != 16
+            || !entry
+                .xxh3_64_canonical
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(format!(
+                "entry {}/{}.{} has malformed coordinate, region, status, or digest fields",
+                entry.dim, entry.cx, entry.cz
+            ));
+        }
+        total
+            .checked_add(entry.bytes)
+            .ok_or_else(|| "total payload byte count overflowed the verifier cap".to_string())
+    });
+    let total_bytes = total_bytes.map_err(|message| {
+        Error::Gate(format!(
+            "invalid hash manifest {}: {message}",
+            path.display()
+        ))
+    })?;
+    if total_bytes > hash_manifest::MAX_TOTAL_PAYLOAD_BYTES {
+        return Err(Error::Gate(format!(
+            "invalid hash manifest {}: total payload bytes {} exceed {}",
+            path.display(),
+            total_bytes,
+            hash_manifest::MAX_TOTAL_PAYLOAD_BYTES
+        )));
+    }
+    Ok(())
+}
+
+fn read_hash_manifest_bytes(path: &Path) -> Result<Vec<u8>, Error> {
+    generated_full::read_stable_file_capped(
+        path,
+        "hash manifest",
+        crate::json::MAX_JSON_BYTES as u64,
+    )
+}
+
 /// Load a `HashManifest` from a `manifest.json`.
 fn load_hash_manifest(dir: &Path) -> Result<hash_manifest::HashManifest, Error> {
     let path = dir.join("manifest.json");
-    let raw = fs::read_to_string(&path)
-        .map_err(|e| Error::Gate(format!("cannot read {}: {e}", path.display())))?;
-    serde_json::from_str(&raw)
-        .map_err(|e| Error::Gate(format!("invalid hash manifest {}: {e}", path.display())))
+    let raw = read_hash_manifest_bytes(&path)?;
+    let supplied: hash_manifest::HashManifest = crate::json::from_slice(&raw)
+        .map_err(|e| Error::Gate(format!("invalid hash manifest {}: {e}", path.display())))?;
+    validate_hash_manifest_shape(&supplied, &path)?;
+    // When a raw payload tree is present, manifests are diagnostic metadata
+    // only: rebuild the digest table from those immutable payload bytes and
+    // reject a supplied table that is stale, relabeled, or hashes a different
+    // tree. The committed #54 Paper manifest is intentionally manifest-only;
+    // its payload source is the separately committed M2 region tree and the
+    // hash-paper command is the producer for that table. Keep that established
+    // source layout explicit rather than pretending an absent tree was read.
+    let chunk = dir.join("chunk");
+    let raw_tree_present = match fs::symlink_metadata(&chunk) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(Error::Gate(format!(
+                "hash manifest {} has a symlinked raw payload tree {}; refusing aliased evidence",
+                path.display(),
+                chunk.display()
+            )));
+        }
+        Ok(_) => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(Error::Gate(format!(
+                "cannot inspect raw payload tree {}: {error}",
+                chunk.display()
+            )));
+        }
+    };
+    if raw_tree_present {
+        let provenance = hash_manifest::CaptureProvenance {
+            level_type: supplied.level_type.clone(),
+            region_file_compression: supplied.region_file_compression.clone(),
+            corpus_version: supplied.corpus_version.clone(),
+        };
+        let derived = hash_manifest::build_from_raw_tree_with(
+            dir,
+            &supplied.seed,
+            &supplied.level_type,
+            &provenance,
+        )
+        .map_err(Error::Gate)?;
+        if supplied != derived {
+            return Err(Error::Gate(format!(
+                "hash manifest {} is not the payload-derived manifest; producer-supplied digests are diagnostic only",
+                path.display()
+            )));
+        }
+        return Ok(derived);
+    }
+    Ok(supplied)
 }
 
 /// `hash-rivet`: read a Rivet chunk tree. There is no Rivet chunk
-/// serialization yet (RivetTodo #231/#15), so this reports UNVERIFIED (3)
-/// rather than fabricating green.
+/// serialization yet (RivetTodo #231/#15), so wholly absent/not-yet-FULL
+/// prerequisites report UNVERIFIED (3), while any present malformed evidence
+/// is a hard FAIL.
 fn run_hash_rivet(dir: &Path) -> Result<(), Error> {
     hash::self_check().map_err(Error::Gate)?;
-    if !dir.is_dir() {
+    let metadata = match fs::symlink_metadata(dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(Error::Unverified(format!(
+                "Rivet chunk dir {} is absent — no Rivet chunk serialization yet (#231/#15)",
+                dir.display()
+            )));
+        }
+        Err(error) => {
+            return Err(Error::Gate(format!(
+                "cannot inspect Rivet chunk dir {}: {error}",
+                dir.display()
+            )));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
         return Err(Error::Gate(format!(
-            "Rivet chunk dir {} does not exist — no Rivet chunk serialization yet (#231/#15)",
+            "Rivet chunk dir {} is not a regular directory",
             dir.display()
         )));
     }
-    let seed = source_region_seed(dir).unwrap_or_else(|| hash_manifest::CAPTURE_SEED.to_string());
-    let prov = source_region_provenance(dir).unwrap_or_default();
-    let manifest = hash_manifest::build_from_payloads_with(dir, &seed, &prov.level_type, &prov)
-        .map_err(Error::Gate)?;
+    let chunk = dir.join("chunk");
+    match fs::symlink_metadata(&chunk) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() => {
+            return Err(Error::Gate(format!(
+                "Rivet raw chunk tree {} is not a regular directory",
+                chunk.display()
+            )));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(Error::Unverified(format!(
+                "Rivet chunk tree {} has not reached FULL yet — no chunk serialization exists",
+                dir.display()
+            )));
+        }
+        Err(error) => {
+            return Err(Error::Gate(format!(
+                "cannot inspect Rivet raw chunk tree {}: {error}",
+                chunk.display()
+            )));
+        }
+        Ok(_) => {}
+    }
+    let source_manifest_path = dir.join("manifest.json");
+    let source_manifest = match fs::symlink_metadata(&source_manifest_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_file() => {
+            return Err(Error::Gate(format!(
+                "Rivet source manifest {} is not a regular file",
+                source_manifest_path.display()
+            )));
+        }
+        Ok(_) => Some(load_manifest(dir).map_err(|error| {
+            Error::Gate(format!(
+                "Rivet source manifest {} is malformed: {error}",
+                source_manifest_path.display()
+            ))
+        })?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(Error::Gate(format!(
+                "cannot inspect Rivet source manifest {}: {error}",
+                source_manifest_path.display()
+            )));
+        }
+    };
+    let seed = source_manifest
+        .as_ref()
+        .and_then(|manifest| manifest.seed.clone())
+        .unwrap_or_else(|| hash_manifest::CAPTURE_SEED.to_string());
+    let prov = source_manifest
+        .as_ref()
+        .map(|manifest| {
+            hash_manifest::CaptureProvenance::from_region_manifest(
+                manifest.level_type.as_deref(),
+                manifest.region_file_compression.as_deref(),
+            )
+        })
+        .unwrap_or_default();
+    let manifest = match hash_manifest::build_from_raw_tree_with(
+        dir,
+        &seed,
+        &prov.level_type,
+        &prov,
+    ) {
+        Ok(manifest) => manifest,
+        Err(error) if error.contains("contains no .nbt payloads") => {
+            return Err(Error::Unverified(format!(
+                "Rivet chunk tree {} has not reached FULL yet — no serialized chunk payloads exist",
+                dir.display()
+            )));
+        }
+        Err(error) => return Err(Error::Gate(error)),
+    };
     if manifest.full_count == 0 {
-        return Err(Error::Gate(format!(
-            "Rivet chunk tree {} has 0 FULL chunks — Rivet worldgen has not reached FULL \
-             (blocked on #51 capturing status-FULL regions + #231/#15 serialization); \
-             the Paper-vs-Rivet hash-diff is UNVERIFIED, never green",
+        return Err(Error::Unverified(format!(
+            "Rivet chunk tree {} has 0 FULL chunks — Rivet worldgen has not reached FULL; the Paper-vs-Rivet hash-diff is UNVERIFIED, never green",
             dir.display()
         )));
     }
@@ -3122,9 +3395,11 @@ struct ChunkHashMismatch {
 /// differing provenance; only FULL entries are compared (non-FULL is recorded
 /// and reported, never silently included); a missing Rivet manifest, a
 /// Paper-vs-Paper self-diff, or a required corpus coordinate with no FULL data
-/// on either side, is UNVERIFIED.
+/// on either side, is UNVERIFIED. Malformed existing manifests and raw trees
+/// are hard FAIL outcomes.
 ///
-/// Returns: Ok(true) = PASS, Ok(false) = FAIL, Err = UNVERIFIED (3).
+/// Returns: Ok(true) = PASS, Ok(false) = FAIL, Err(Unverified) = 3, and every
+/// other error is FAIL.
 fn run_hash_diff(paper_dir: &Path, rivet_dir: &Path) -> Result<bool, Error> {
     hash::self_check().map_err(Error::Gate)?;
     // A self-comparison (both args the same committed Paper manifest) compares
@@ -3132,34 +3407,90 @@ fn run_hash_diff(paper_dir: &Path, rivet_dir: &Path) -> Result<bool, Error> {
     // produce a Paper-vs-Rivet PASS. Canonicalize so an aliased path to the
     // same tree is still refused; a nonexistent Rivet dir is caught by the
     // manifest check below with a clearer message.
-    if rivet_dir.is_dir() {
-        let paper_canon = paper_dir
-            .canonicalize()
-            .map_err(|e| Error::Gate(format!("cannot resolve {}: {e}", paper_dir.display())))?;
-        let rivet_canon = rivet_dir
-            .canonicalize()
-            .map_err(|e| Error::Gate(format!("cannot resolve {}: {e}", rivet_dir.display())))?;
-        if paper_canon == rivet_canon {
+    let paper_metadata = match fs::symlink_metadata(paper_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(Error::Unverified(format!(
+                "Paper hash evidence {} is absent — hash-diff is UNVERIFIED",
+                paper_dir.display()
+            )));
+        }
+        Err(error) => {
             return Err(Error::Gate(format!(
-                "paper and rivet dirs are the same tree ({}): a Paper-vs-Paper self-diff \
-                 proves nothing about Rivet — pass a distinct Rivet chunk dir; UNVERIFIED, \
-                 never green",
-                paper_canon.display()
+                "cannot inspect Paper hash evidence {}: {error}",
+                paper_dir.display()
+            )));
+        }
+    };
+    let rivet_metadata = match fs::symlink_metadata(rivet_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(Error::Unverified(format!(
+                "Rivet hash evidence {} is absent — pre-worldgen the Paper-vs-Rivet diff is UNVERIFIED",
+                rivet_dir.display()
+            )));
+        }
+        Err(error) => {
+            return Err(Error::Gate(format!(
+                "cannot inspect Rivet hash evidence {}: {error}",
+                rivet_dir.display()
+            )));
+        }
+    };
+    for (label, path, metadata) in [
+        ("Paper", paper_dir, &paper_metadata),
+        ("Rivet", rivet_dir, &rivet_metadata),
+    ] {
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+            return Err(Error::Gate(format!(
+                "{label} hash evidence {} is not a regular directory",
+                path.display()
             )));
         }
     }
-    if !rivet_dir.join("manifest.json").is_file() {
-        return Err(Error::Gate(format!(
-            "no Rivet hash manifest at {} — pre-worldgen the Paper-vs-Rivet diff is \
-             UNVERIFIED (3), never green (Rivet chunk serialization is #231/#15)",
-            rivet_dir.display()
+    let paper_canon = paper_dir
+        .canonicalize()
+        .map_err(|e| Error::Gate(format!("cannot resolve {}: {e}", paper_dir.display())))?;
+    let rivet_canon = rivet_dir
+        .canonicalize()
+        .map_err(|e| Error::Gate(format!("cannot resolve {}: {e}", rivet_dir.display())))?;
+    if paper_canon == rivet_canon {
+        return Err(Error::Unverified(format!(
+            "paper and rivet dirs are the same tree ({}): a Paper-vs-Paper self-diff proves nothing about Rivet",
+            paper_canon.display()
         )));
+    }
+    for (label, dir) in [("Paper", paper_dir), ("Rivet", rivet_dir)] {
+        let manifest_path = dir.join("manifest.json");
+        match fs::symlink_metadata(&manifest_path) {
+            Ok(metadata)
+                if metadata.file_type().is_symlink() || !metadata.file_type().is_file() =>
+            {
+                return Err(Error::Gate(format!(
+                    "{label} hash manifest {} is not a regular file",
+                    manifest_path.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(Error::Unverified(format!(
+                    "no {label} hash manifest at {} — hash-diff is UNVERIFIED",
+                    manifest_path.display()
+                )));
+            }
+            Err(error) => {
+                return Err(Error::Gate(format!(
+                    "cannot inspect {label} hash manifest {}: {error}",
+                    manifest_path.display()
+                )));
+            }
+        }
     }
     let paper = load_hash_manifest(paper_dir)?;
     let rivet = load_hash_manifest(rivet_dir)?;
 
     if paper.provenance() != rivet.provenance() {
-        return Err(Error::Gate(format!(
+        return Err(Error::Unverified(format!(
             "provenance mismatch — refusing to compare manifests of different seed/algorithm/\
              paper/concurrency:\n  paper: {}\n  rivet: {}",
             paper.provenance().describe(),
@@ -3167,8 +3498,10 @@ fn run_hash_diff(paper_dir: &Path, rivet_dir: &Path) -> Result<bool, Error> {
         )));
     }
 
-    // Required corpus coordinates: a required coordinate with no FULL entry on
-    // either side means the sweep cannot claim coverage — UNVERIFIED.
+    // The generic hash engine remains dimension-agnostic: a required coordinate
+    // is covered when either Paper-side dimension has a FULL payload. The
+    // source-disjoint generated-full verifier owns the stricter overworld-only
+    // target closure separately.
     let mut required_missing = Vec::new();
     for (x, z) in corpus::COORDINATES {
         let paper_has = paper.full_entry("the_nether", *x, *z).is_some()
@@ -3182,10 +3515,8 @@ fn run_hash_diff(paper_dir: &Path, rivet_dir: &Path) -> Result<bool, Error> {
         }
     }
     if !required_missing.is_empty() {
-        return Err(Error::Gate(format!(
-            "required corpus coordinates with no FULL data on both sides: {} — a green \
-             sweep over the #175 matrix is not yet achievable (needs #51 to capture \
-             status-FULL regions and Rivet worldgen to reach FULL); UNVERIFIED, never green",
+        return Err(Error::Unverified(format!(
+            "required corpus coordinates with no FULL data on both sides: {} — a green sweep over the #175 matrix is not yet achievable",
             required_missing.join(", ")
         )));
     }
@@ -3458,6 +3789,7 @@ fn fmt_hash_coord(cx: i32, cz: i32) -> String {
 /// world with no region layout) exits 3, never a bare FAIL.
 const EXIT_FAIL: i32 = 1;
 const EXIT_UNVERIFIED: i32 = 3;
+const EXIT_BLOCKED: i32 = 4;
 const EXIT_USAGE: i32 = 64;
 
 /// Map a [`run()`] error onto the shared exit-code contract. An
@@ -3468,6 +3800,7 @@ const EXIT_USAGE: i32 = 64;
 fn exit_code_for_run_error(e: &Error) -> i32 {
     match e {
         Error::Unverified(_) => EXIT_UNVERIFIED,
+        Error::Blocked(_) => EXIT_BLOCKED,
         _ => EXIT_FAIL,
     }
 }
@@ -3509,9 +3842,13 @@ fn hash_cli_exit(args: &[String]) -> Option<i32> {
             };
             match run_hash_rivet(Path::new(dir)) {
                 Ok(()) => 0,
-                Err(e) => {
-                    eprintln!("rivet-oracle: {e}");
+                Err(Error::Unverified(message)) => {
+                    eprintln!("rivet-oracle: {message}");
                     EXIT_UNVERIFIED
+                }
+                Err(error) => {
+                    eprintln!("rivet-oracle: {error}");
+                    EXIT_FAIL
                 }
             }
         }
@@ -3538,9 +3875,13 @@ fn hash_diff_exit(args: &[String]) -> i32 {
     match run_hash_diff(Path::new(paper), Path::new(rivet)) {
         Ok(true) => 0,
         Ok(false) => EXIT_FAIL,
-        Err(e) => {
-            eprintln!("rivet-oracle: {e}");
+        Err(Error::Unverified(message)) => {
+            eprintln!("rivet-oracle: {message}");
             EXIT_UNVERIFIED
+        }
+        Err(error) => {
+            eprintln!("rivet-oracle: {error}");
+            EXIT_FAIL
         }
     }
 }
@@ -3681,6 +4022,18 @@ fn print_usage() {
     );
     println!(
         "                                             runtime; --tamper is the negative control"
+    );
+    println!("  cargo run -p rivet-oracle -- verify-generated-full [--contract <path>]");
+    println!("                                             [--refresh-determinism]");
+    println!("                                             normal-overworld FULL parity over the");
+    println!(
+        "                                             four-seed, four-region Stage-B contract;"
+    );
+    println!(
+        "                                             the verifier owns fresh Paper/Rivet roots"
+    );
+    println!(
+        "                                             and rejects caller-supplied evidence trees"
     );
     println!("  cargo run -p rivet-oracle -- features <seed> [--to <out> | --tamper]");
     println!("                                             seed-42 FEATURES oracle checkpoint:");
@@ -3859,6 +4212,18 @@ fn run() -> Result<(), Error> {
             let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
             generated_expected::run_cli(&rest)
         }
+        Some("verify-generated-full") => {
+            // Source-disjoint Stage-B/G4 normal-overworld FULL parity verifier.
+            // The controller validates the committed contract and owns fresh
+            // Paper/Rivet roots under work/generated-full; caller-supplied
+            // evidence roots are rejected. --refresh-determinism requests a
+            // fourth Paper boot (a third independent capture) before the dedicated producer is run.
+            let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+            match rest.as_slice() {
+                [] => generated_full::verify_default(),
+                _ => generated_full::run_cli(&rest),
+            }
+        }
         Some("features") => {
             // The seed-42 FEATURES oracle checkpoint (PR #175/#232): the
             // level-33 forced-ticket capture whose chunks serialize at
@@ -3942,6 +4307,55 @@ mod tests {
 
     fn fixtures_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures")
+    }
+
+    fn encode_test_payload(compound: &CompoundTag) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        nbt_io::write(
+            compound,
+            &mut DataOutputStream::new(Cursor::new(&mut bytes)),
+        )
+        .expect("test NBT should encode");
+        bytes
+    }
+
+    #[test]
+    fn last_update_normalization_requires_exact_long_payload() {
+        let mut valid = CompoundTag::new();
+        valid.put_long("LastUpdate", 42);
+        let valid_bytes = encode_test_payload(&valid);
+        let normalized = normalize_last_update(&valid_bytes)
+            .expect("valid payload should parse")
+            .expect("LastUpdate should be normalized");
+        let mut normalized_input = DataInputStream::new(Cursor::new(normalized.as_slice()));
+        let normalized_tag = nbt_io::read_unlimited(&mut normalized_input).unwrap();
+        assert_eq!(normalized_tag.get_long("LastUpdate"), Some(0));
+        assert_eq!(
+            normalized_input.into_inner().position(),
+            normalized.len() as u64
+        );
+
+        let mut wrong_type = CompoundTag::new();
+        wrong_type.put_int("LastUpdate", 42);
+        let error = normalize_last_update(&encode_test_payload(&wrong_type))
+            .expect_err("non-long LastUpdate must fail closed");
+        assert!(error.contains("expected TAG_Long"), "{error}");
+
+        let mut trailing = valid_bytes;
+        trailing.extend_from_slice(&[0xde, 0xad]);
+        let error =
+            normalize_last_update(&trailing).expect_err("trailing NBT bytes must fail closed");
+        assert!(error.contains("2 trailing bytes"), "{error}");
+    }
+
+    #[test]
+    fn last_update_normalization_leaves_valid_absent_key_untouched() {
+        let mut compound = CompoundTag::new();
+        compound.put_int("DataVersion", 1);
+        assert_eq!(
+            normalize_last_update(&encode_test_payload(&compound)).unwrap(),
+            None
+        );
     }
 
     /// The committed M0 fixtures must verify clean against their manifest.
@@ -4695,10 +5109,26 @@ mod tests {
     #[test]
     fn parse_boot_thread_counts_ambiguous_is_none() {
         let log = "\
-[1] Paper is using 1 worker threads, 1 I/O threads
-[2] Paper is using 1 worker threads, 1 I/O threads
+[1] [MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads
+[2] [MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads
 ";
         assert_eq!(parse_boot_thread_counts(log), None);
+    }
+
+    #[test]
+    fn parse_boot_thread_counts_rejects_unattributed_or_malformed_lines() {
+        assert_eq!(
+            parse_boot_thread_counts(
+                "[02:08:08 INFO]: Paper is using 1 worker threads, 1 I/O threads\n"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_boot_thread_counts(
+                "[02:08:08 INFO]: [MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads extra\n"
+            ),
+            None
+        );
     }
 
     /// `check_boot_thread_pin` accepts exactly 1 worker / 1 I/O thread.
@@ -4819,7 +5249,7 @@ mod tests {
             std::env::temp_dir().join(format!("rivet-oracle-drift-{}.log", std::process::id()));
         fs::write(
             &log,
-            "[01:05:38 INFO]: Paper is using 3 worker threads, 1 I/O threads\n",
+            "[01:05:38 INFO]: [MoonriseCommon] Paper is using 3 worker threads, 1 I/O threads\n",
         )
         .unwrap();
         match check_concurrency_provenance(&dir, &log) {
@@ -4845,7 +5275,7 @@ mod tests {
             std::env::temp_dir().join(format!("rivet-oracle-match-{}.log", std::process::id()));
         fs::write(
             &log,
-            "[02:08:08 INFO]: Paper is using 1 worker threads, 1 I/O threads\n",
+            "[02:08:08 INFO]: [MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads\n",
         )
         .unwrap();
         check_concurrency_provenance(&dir, &log).expect("matching provenance must pass");
@@ -5452,7 +5882,7 @@ mod tests {
     // committed live capture (only (0,0) FULL) cannot do, pre-worldgen.
 
     /// Write a chunk-hash fixture tree: FULL payloads for the given coordinates
-    /// under `chunk/the_nether/0.0/`, plus the serialized `HashManifest`. The
+    /// under `chunk/overworld/0.0/`, plus the serialized `HashManifest`. The
     /// tree is exactly what `run_hash_paper`/`hash-rivet` produce from a real
     /// region capture, so `run_hash_diff` treats it identically.
     fn write_hash_fixture_tree(root: &Path, coords: &[(i32, i32)]) -> PathBuf {
@@ -5464,10 +5894,15 @@ mod tests {
     /// manifest records that seed — so a tree under a different seed is a
     /// genuinely different world, which is the #175 7(e) bogus-seed mechanism.
     fn write_hash_fixture_tree_seeded(root: &Path, coords: &[(i32, i32)], seed: i64) -> PathBuf {
-        let chunk_dir = root.join("chunk").join("the_nether").join("0.0");
-        fs::create_dir_all(&chunk_dir).unwrap();
         for (cx, cz) in coords {
-            let bytes = crate::mutate::fixture_full_payload_with_seed(*cx, *cz, seed);
+            // The generic hash-engine tests intentionally exercise a Nether
+            // region tree, so use the Nether's exact FULL section closure and
+            // the Anvil region selected by floor-division (including negatives).
+            let region = format!("{}.{}", cx.div_euclid(32), cz.div_euclid(32));
+            let chunk_dir = root.join("chunk").join("the_nether").join(region);
+            fs::create_dir_all(&chunk_dir).unwrap();
+            let bytes =
+                crate::mutate::fixture_full_payload_for_dimension(*cx, *cz, seed, "the_nether");
             fs::write(chunk_dir.join(format!("{cx}.{cz}.nbt")), bytes).unwrap();
         }
         let manifest =
@@ -5700,9 +6135,10 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
     }
 
-    /// A different seed in the Rivet manifest is provenance drift: the diff
-    /// refuses to compare (UNVERIFIED, exit 3) rather than comparing digests
-    /// that mean different worlds.
+    /// A different seed in the Rivet manifest is incomplete provenance: the diff
+    /// refuses to compare with UNVERIFIED (exit 3) rather than comparing digests
+    /// that mean different worlds. Structural or byte-corrupt evidence is a
+    /// separate hard-failure path.
     #[test]
     fn hash_diff_refuses_provenance_mismatch() {
         let tmp = hash_tmp("hash-seed");
@@ -5720,6 +6156,83 @@ mod tests {
         assert_eq!(
             hash_diff_exit(&hash_diff_args(&paper, &rivet)),
             EXIT_UNVERIFIED
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn hash_diff_malformed_existing_manifest_is_fail() {
+        let tmp = hash_tmp("hash-malformed-manifest");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let (paper, rivet) = paper_rivet_dirs(&tmp, &[], &[]);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(rivet.join("manifest.json")).unwrap()).unwrap();
+        value["chunk-count"] = serde_json::json!(0);
+        fs::write(
+            rivet.join("manifest.json"),
+            serde_json::to_string_pretty(&value).unwrap() + "\n",
+        )
+        .unwrap();
+        assert_eq!(
+            hash_diff_exit(&hash_diff_args(&paper, &rivet)),
+            EXIT_FAIL,
+            "present malformed manifest evidence is FAIL"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn hash_manifest_entry_count_cap_rejects_exactly_8193_entries() {
+        let tmp = hash_tmp("hash-entry-count-cap");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let (_paper, rivet) = paper_rivet_dirs(&tmp, &[], &[]);
+        let mut manifest = load_hash_manifest(&rivet).unwrap();
+        let entry = manifest.entries[0].clone();
+        manifest
+            .entries
+            .resize(hash_manifest::MAX_PAYLOAD_COUNT + 1, entry);
+        manifest.chunk_count = hash_manifest::MAX_PAYLOAD_COUNT + 1;
+        let error = validate_hash_manifest_shape(&manifest, &rivet.join("manifest.json"))
+            .expect_err("8193 entries must exceed the controller cap");
+        assert!(
+            matches!(error, Error::Gate(message) if message.contains("8193") && message.contains("8192-entry cap"))
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn hash_diff_oversized_existing_manifest_fails_before_parse() {
+        let tmp = hash_tmp("hash-oversized-manifest");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let (paper, rivet) = paper_rivet_dirs(&tmp, &[], &[]);
+        fs::write(
+            rivet.join("manifest.json"),
+            vec![b' '; crate::json::MAX_JSON_BYTES + 1],
+        )
+        .unwrap();
+        assert_eq!(
+            hash_diff_exit(&hash_diff_args(&paper, &rivet)),
+            EXIT_FAIL,
+            "an existing oversized manifest is malformed evidence, not UNVERIFIED"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn hash_diff_corrupt_existing_raw_tree_is_fail() {
+        let tmp = hash_tmp("hash-corrupt-raw-tree");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let (paper, rivet) = paper_rivet_dirs(&tmp, &[], &[]);
+        let target = rivet.join("chunk/the_nether/0.0/0.0.nbt");
+        fs::write(&target, b"malformed nbt").unwrap();
+        assert_eq!(
+            hash_diff_exit(&hash_diff_args(&paper, &rivet)),
+            EXIT_FAIL,
+            "present corrupt raw payload evidence is FAIL"
         );
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -5746,6 +6259,51 @@ mod tests {
             ]),
             Some(EXIT_UNVERIFIED)
         );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn hash_rivet_present_malformed_evidence_is_fail_but_absent_is_unverified() {
+        let tmp = hash_tmp("hash-rivet-outcomes");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let absent = tmp.join("absent");
+        assert_eq!(
+            hash_cli_exit(&["hash-rivet".into(), absent.to_string_lossy().into_owned()]),
+            Some(EXIT_UNVERIFIED)
+        );
+        let non_dir = tmp.join("non-dir");
+        fs::write(&non_dir, b"not a directory").unwrap();
+        assert_eq!(
+            hash_cli_exit(&["hash-rivet".into(), non_dir.to_string_lossy().into_owned()]),
+            Some(EXIT_FAIL)
+        );
+        let malformed = tmp.join("malformed");
+        fs::create_dir_all(malformed.join("chunk/overworld/0.0")).unwrap();
+        fs::write(malformed.join("chunk/overworld/0.0/0.0.nbt"), b"not NBT").unwrap();
+        assert_eq!(
+            hash_cli_exit(&[
+                "hash-rivet".into(),
+                malformed.to_string_lossy().into_owned()
+            ]),
+            Some(EXIT_FAIL)
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn hash_diff_present_manifest_or_raw_tree_corruption_is_fail() {
+        let tmp = hash_tmp("hash-diff-malformed");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let (paper, rivet) = paper_rivet_dirs(&tmp, &[], &[]);
+        fs::write(rivet.join("manifest.json"), b"{").unwrap();
+        assert_eq!(hash_diff_exit(&hash_diff_args(&paper, &rivet)), EXIT_FAIL);
+
+        let (paper, rivet) = paper_rivet_dirs(&tmp, &[], &[]);
+        let payload = rivet.join("chunk/the_nether/0.0/0.0.nbt");
+        fs::write(payload, b"corrupt").unwrap();
+        assert_eq!(hash_diff_exit(&hash_diff_args(&paper, &rivet)), EXIT_FAIL);
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -5811,8 +6369,10 @@ mod tests {
         // Structures removal: restore Status to full but drop the `structures`
         // compound — the FULL validator refuses the payload at manifest build, so
         // the comparator can never compare a chunk Paper did not actually finish.
-        let mut root =
-            crate::mutate::parse_payload(&crate::mutate::fixture_full_payload(cx, cz)).unwrap();
+        let mut root = crate::mutate::parse_payload(
+            &crate::mutate::fixture_full_payload_for_dimension(cx, cz, 42, "the_nether"),
+        )
+        .unwrap();
         root.tags.swap_remove("structures");
         fs::write(&target, crate::mutate::encode_payload(&root).unwrap()).unwrap();
         assert!(
@@ -5824,8 +6384,10 @@ mod tests {
         // section's `SkyLight` array below its 2048-byte packed size. The FULL
         // validator refuses malformed light data at manifest build (spec §5), so
         // the comparator never compares a chunk whose light was not finalized.
-        let mut root =
-            crate::mutate::parse_payload(&crate::mutate::fixture_full_payload(cx, cz)).unwrap();
+        let mut root = crate::mutate::parse_payload(
+            &crate::mutate::fixture_full_payload_for_dimension(cx, cz, 42, "the_nether"),
+        )
+        .unwrap();
         let sections = root.get_list_or_empty_mut("sections");
         if let rivet_nbt::tag::Tag::Compound(sec) = &mut sections.list[0] {
             sec.tags.insert(
@@ -6226,10 +6788,9 @@ mod tests {
         let rivet =
             write_hash_fixture_tree_seeded(&tmp.join("rivet"), &all_corpus_coordinates(), 999);
         // The two trees carry different seeds — provenance drift, so the diff
-        // refuses to compare (UNVERIFIED, 3): a different-seed capture is a
-        // different world, and comparing its digests would be meaningless. The
-        // error is asserted to be the provenance refusal itself, not just any
-        // failure — an unrelated Err would not satisfy the stated intent.
+        // refuses to compare (UNVERIFIED, 3), not a vacuous green or a digest
+        // comparison of different worlds. The error is asserted to be the
+        // provenance refusal itself, not just any failure.
         let err = run_hash_diff(&paper, &rivet).unwrap_err();
         assert!(
             err.to_string().contains("provenance"),

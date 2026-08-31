@@ -639,10 +639,12 @@ dependencies = [
 name = "rivet-oracle"
 version = "0.1.0"
 dependencies = [
+ "rivet-harness-common",
  "rivet-nbt",
  "rivet-registry",
  "rivet-util",
  "rivet-world",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

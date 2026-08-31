@@ -39,6 +39,8 @@ The `regex` crate and its `regex-automata` engines deliberately omit lookaround 
 
 **Crypto (protocol):** RustCrypto stable releases only — `aes`, `cfb8`, `rsa`, `sha1`, `sha2`; `rand` for non-gameplay randomness only (gameplay RNG is `rivet-util`).
 
+**Evidence path safety (oracle):** `rustix`'s Linux `openat2(2)` wrapper is approved for the generated-FULL verifier's stable no-symlink evidence acquisition (`RESOLVE_NO_SYMLINKS`). The verifier intentionally has no insecure pathname-reopen fallback; non-Linux callers receive an explicit unsupported-platform result until an equivalent atomic primitive is established.
+
 **Errors/logging:** `thiserror` (per-crate error enums), `anyhow` (tools only), `tracing` + `tracing-subscriber`.
 
 **Testing/tooling:** `cargo-nextest`, `criterion`, cargo-fuzz on all parsers, `azalea` (dev-dep of `tools/rivet-oracle` — bot driver, current with 26.2), `tempfile`, `chrono` (date stamps in `tools/rivet-parity`'s `--scoreboard`).

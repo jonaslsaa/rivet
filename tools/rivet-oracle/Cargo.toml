@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 license.workspace = true
 description = "Differential-test harness: runs the Java Paper server, extracts golden fixtures"
+default-run = "rivet-oracle"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -23,9 +24,19 @@ rivet-util = { path = "../../crates/rivet-util" }
 # table. It is a pure read of the disposable world copy — never a write.
 rivet-world = { path = "../../crates/rivet-world" }
 rivet-registry = { path = "../../crates/rivet-registry", features = ["blocks"] }
+rivet-harness-common = { path = "../rivet-harness-common" }
 # The composed-noise tamper negative control tampers a scratch copy so the
 # committed golden is never mutated; TempDir guarantees the scratch dir is
 # removed on every path.
 tempfile = { workspace = true }
+# Stable generated-FULL evidence acquisition is intentionally Linux-only:
+# `openat2(2)` with RESOLVE_NO_SYMLINKS makes it atomic with respect to symlink
+# substitution in every path component, and `/proc/self/fd` hands the opened
+# Paper jar descriptor to unzip without reopening a mutable pathname.
+rustix = { version = "1.1", features = ["fs"] }
+
+[[bin]]
+name = "rivet-generated-full"
+path = "src/bin/rivet_generated_full.rs"
 
 [dev-dependencies]
