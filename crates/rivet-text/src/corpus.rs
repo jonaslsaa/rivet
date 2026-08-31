@@ -29,6 +29,7 @@ use std::path::PathBuf;
 /// `golden.json`), and — for accepted entries — Paper's canonical
 /// decode->re-encode JSON under non-compressed `JsonOps` (`canonical`, copied
 /// verbatim so the byte identity is preserved).
+#[derive(Debug, Clone)]
 pub struct TextFixtureEntry {
     pub id: String,
     pub input: String,
@@ -114,20 +115,26 @@ pub(crate) fn parse_text_corpus(
         }
         _ => {}
     }
-    let corpus: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(corpus_path).map_err(|e| {
-            CorpusError::Malformed(format!("{} unreadable: {e}", corpus_path.display()))
-        })?)
-        .map_err(|e| {
-            CorpusError::Malformed(format!("{} unparsable: {e}", corpus_path.display()))
-        })?;
-    let golden: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(golden_path).map_err(|e| {
-            CorpusError::Malformed(format!("{} unreadable: {e}", golden_path.display()))
-        })?)
-        .map_err(|e| {
-            CorpusError::Malformed(format!("{} unparsable: {e}", golden_path.display()))
-        })?;
+    let corpus_bytes = std::fs::read(corpus_path).map_err(|e| {
+        CorpusError::Malformed(format!("{} unreadable: {e}", corpus_path.display()))
+    })?;
+    let golden_bytes = std::fs::read(golden_path).map_err(|e| {
+        CorpusError::Malformed(format!("{} unreadable: {e}", golden_path.display()))
+    })?;
+    parse_text_corpus_bytes(&corpus_bytes, &golden_bytes)
+}
+
+/// Parse an already-validated immutable corpus + golden pair without reopening
+/// either path. Strict callers can use this to keep validation and execution on
+/// the same bytes.
+pub fn parse_text_corpus_bytes(
+    corpus_bytes: &[u8],
+    golden_bytes: &[u8],
+) -> Result<Vec<TextFixtureEntry>, CorpusError> {
+    let corpus: serde_json::Value = serde_json::from_slice(corpus_bytes)
+        .map_err(|e| CorpusError::Malformed(format!("corpus.json unparsable: {e}")))?;
+    let golden: serde_json::Value = serde_json::from_slice(golden_bytes)
+        .map_err(|e| CorpusError::Malformed(format!("golden.json unparsable: {e}")))?;
 
     let corpus_entries = corpus["entries"]
         .as_array()

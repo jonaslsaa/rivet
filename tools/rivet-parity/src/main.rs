@@ -822,18 +822,6 @@ fn main() {
             std::process::exit(1);
         }
     };
-    if let Err(error) = corpus::validate_text_fixture_closure() {
-        match error {
-            corpus::ClosureError::Absent(error) => {
-                eprintln!("[rivet-parity] CORPUS BLOCKER: {error}");
-                std::process::exit(EXIT_UNVERIFIED);
-            }
-            corpus::ClosureError::Invalid(error) => {
-                eprintln!("[rivet-parity] FATAL: {error}");
-                std::process::exit(1);
-            }
-        }
-    }
 
     let mut summary = Summary::default();
     let mut transcript: Vec<Value> = Vec::new();
@@ -992,52 +980,27 @@ fn main() {
         transcript.push(check);
     }
 
-    // ---- component.json: the committed text corpus vs Paper (issue #98) ----
-    match corpus::text_corpus() {
-        Ok(entries) => {
-            if entries.len() != closure.text_entries {
-                eprintln!(
-                    "[rivet-parity] FATAL: text corpus declares {} entries but loaded {}",
-                    closure.text_entries,
-                    entries.len()
-                );
-                std::process::exit(1);
-            }
-            let codec = rivet_text::component_serialization::codec();
-            // The Rust-side decode->re-encode byte-identity against the committed
-            // golden is covered by the offline corpus tests in rivet-text; here the
-            // oracle comparison is the point.
-            for entry in &entries {
-                let check = check_component_json(
-                    oracle.as_deref_mut(),
-                    &format!("component.{id}", id = entry.id),
-                    &entry.input,
-                    entry.accept,
-                    entry.canonical.as_deref(),
-                    &codec,
-                );
-                summary.record(&check);
-                transcript.push(check);
-            }
-            eprintln!(
-                "[rivet-parity] text corpus: {} component.json entries under {}",
-                entries.len(),
-                corpus::text_fixtures_dir()
-                    .map(|d| d.display().to_string())
-                    .unwrap_or_else(|| "?".into())
-            );
-        }
-        Err(corpus::CorpusError::Absent) => {
-            eprintln!("[rivet-parity] CORPUS BLOCKER: text fixtures are absent");
-            std::process::exit(EXIT_UNVERIFIED);
-        }
-        Err(e @ corpus::CorpusError::Malformed(_)) => {
-            // A present-but-broken committed corpus must never silently stop
-            // being exercised — hard-fail like a parity divergence.
-            eprintln!("[rivet-parity] FATAL: {e}");
-            std::process::exit(1);
-        }
+    // ---- component.json: exact bytes validated during closure preflight ----
+    let codec = rivet_text::component_serialization::codec();
+    for entry in &closure.text_entries {
+        let check = check_component_json(
+            oracle.as_deref_mut(),
+            &format!("component.{id}", id = entry.id),
+            &entry.input,
+            entry.accept,
+            entry.canonical.as_deref(),
+            &codec,
+        );
+        summary.record(&check);
+        transcript.push(check);
     }
+    eprintln!(
+        "[rivet-parity] text corpus: {} component.json entries under {}",
+        closure.text_entries.len(),
+        corpus::text_fixtures_dir()
+            .map(|d| d.display().to_string())
+            .unwrap_or_else(|| "?".into())
+    );
 
     // ---- emit transcript + summary ----
     let stdout = std::io::stdout();
@@ -1052,7 +1015,7 @@ fn main() {
         + corpus::invalid_corpus().len()
         + corpus::encode_corpus().len()
         + closure.declared * 4
-        + closure.text_entries;
+        + closure.text_entries.len();
     let closure_stats = json!({
         "manifest_sha256": closure.manifest_sha256,
         "declared": full_declared_checks,
@@ -1060,7 +1023,7 @@ fn main() {
             + corpus::invalid_corpus().len()
             + corpus::encode_corpus().len()
             + closure.discovered * 4
-            + closure.text_entries,
+            + closure.text_entries.len(),
         "executed": transcript.len() - skipped,
         "matched": summary.matched.values().sum::<usize>(),
         "diverged": summary.diverged.values().sum::<usize>(),

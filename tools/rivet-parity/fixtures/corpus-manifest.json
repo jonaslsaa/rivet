@@ -7,7 +7,23 @@
     "text_entries": 62,
     "snbt_valid": 150,
     "snbt_invalid": 20,
-    "nbt_encode": 35
+    "nbt_encode": 35,
+    "text_accepted": 46,
+    "text_invalid": 16,
+    "text_kinds": {
+      "click": 3,
+      "hover": 1,
+      "keybind": 2,
+      "literal": 8,
+      "malformed": 16,
+      "nested": 5,
+      "score": 2,
+      "selector": 4,
+      "styled": 9,
+      "translatable": 10,
+      "typed": 2
+    },
+    "handbuilt_sha256": "bc308f8b61fd9afcb5c5f0637e47a0c6f7d3aa3bfb3f724ffa96b9db973f95ae"
   },
   "chunk_files": [
     {
@@ -2169,6 +2185,23 @@
       "path": "the_nether/0.0/9.9.nbt",
       "sha256": "a0a8e05d91b93c21e992efbe4918d277c0ee5ff1cdeeff32bb7512569331320f",
       "bytes": 2031
+    }
+  ],
+  "text_files": [
+    {
+      "path": "manifest.json",
+      "sha256": "5aebfca23d57f7fbfc28065859224abdda81e949a5348ce9aa370db0b60719a4",
+      "bytes": 982
+    },
+    {
+      "path": "corpus.json",
+      "sha256": "b2d58d0b4406be4a9e95045ff41794b174f4b31bd67d0db4c72f87ac91ee5d2a",
+      "bytes": 9892
+    },
+    {
+      "path": "golden.json",
+      "sha256": "fee84b6798f0aae2ab1606d9f88f4addc7c740fa8d830d976fc91c3154aff636",
+      "bytes": 7622
     }
   ]
 }
