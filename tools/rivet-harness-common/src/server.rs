@@ -2,11 +2,11 @@
 //!
 //! The harness tools boot a real server (the Paper paperclip jar via `java`,
 //! or the `rivet-server` binary), tee stdout+stderr to a log file, poll the
-//! log for a machine-readable READY marker, then SIGTERM and wait for a clean
-//! exit. [`ChildServer`] owns that lifecycle: it spawns the child with the log
-//! tee installed, waits for READY, shuts it down, and — if dropped without a
-//! clean shutdown (an error or panic anywhere in the join path) — SIGKILLs the
-//! child so it cannot keep its port hostage for the next run.
+//! log for a machine-readable READY marker, then request a bounded clean exit
+//! (Paper command over owned stdin or Rivet SIGTERM). [`ChildServer`] owns that
+//! lifecycle: it spawns the child with the log tee installed, waits for READY,
+//! shuts it down, and — if graceful shutdown fails or it is dropped early —
+//! TERM/KILLs and reaps the child so it cannot keep its port hostage.
 //!
 //! What stays in the calling tool: *which* command to spawn, the READY marker
 //! test (Paper: `Done (...)!` + `For help`; rivet-server: the `RIVET_READY`
@@ -15,7 +15,7 @@
 
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
@@ -65,10 +65,17 @@ pub fn signal(pid: u32, signal: &str) -> io::Result<()> {
     }
 }
 
-/// Spawn `command` with stdout+stderr teed to a fresh (truncated) `log_path`.
-/// The caller sets the child's args/current_dir/stdin; this installs the log
-/// file as both stdout and stderr.
+/// Spawn `command` with null stdin and stdout+stderr teed to a fresh
+/// (truncated) `log_path`.
 pub fn spawn_logged(command: &mut Command, log_path: &Path) -> io::Result<Child> {
+    spawn_logged_with_stdin(command, log_path, Stdio::null())
+}
+
+fn spawn_logged_with_stdin(
+    command: &mut Command,
+    log_path: &Path,
+    stdin: Stdio,
+) -> io::Result<Child> {
     let log_file = fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -76,7 +83,7 @@ pub fn spawn_logged(command: &mut Command, log_path: &Path) -> io::Result<Child>
         .open(log_path)?;
     let log_err = log_file.try_clone()?;
     command
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(Stdio::from(log_file))
         .stderr(Stdio::from(log_err))
         .spawn()
@@ -122,30 +129,39 @@ pub fn wait_for_ready(
     }
 }
 
-/// Wait for `child` to exit, SIGKILLing after `timeout`, and return its exit
-/// status. The status is load-bearing for rivet-server's clean-shutdown
-/// contract (the SIGTERM handler must exit 0).
+/// Poll for a bounded exit without sending a signal.
+fn poll_for_exit(
+    child: &mut Child,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> io::Result<Option<ExitStatus>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        thread::sleep(poll_interval);
+    }
+}
+
+/// Wait for `child` to exit, SIGKILLing and reaping after `timeout`. The exit
+/// status is load-bearing for rivet-server's SIGTERM shutdown contract.
 pub fn wait_for_exit(
     child: &mut Child,
     timeout: Duration,
     poll_interval: Duration,
 ) -> Result<ExitStatus, Error> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait()? {
-            Some(status) => return Ok(status),
-            None => {
-                if Instant::now() >= deadline {
-                    let _ = signal(child.id(), "KILL");
-                    child.wait()?;
-                    return Err(Error::Gate(format!(
-                        "server did not exit after SIGTERM within {timeout:?}; killed with SIGKILL"
-                    )));
-                }
-                thread::sleep(poll_interval);
-            }
-        }
+    if let Some(status) = poll_for_exit(child, timeout, poll_interval)? {
+        return Ok(status);
     }
+    let _ = signal(child.id(), "KILL");
+    child.wait()?;
+    Err(Error::Gate(format!(
+        "server did not exit after SIGTERM within {timeout:?}; killed with SIGKILL"
+    )))
 }
 
 /// Whether a [`wait_for_exit`] result implies the child was reaped, so `Drop`
@@ -165,16 +181,28 @@ pub struct ChildServer {
 }
 
 impl ChildServer {
-    /// Spawn the command (which already has its args/current_dir/stdin set)
-    /// with the log tee installed.
+    /// Spawn the command (which already has its args/current_dir set) with null
+    /// stdin and the log tee installed.
     pub fn spawn(command: &mut Command, log_path: &Path) -> Result<Self, Error> {
         let child = spawn_logged(command, log_path)?;
-        Ok(Self {
+        Ok(Self::new(child, log_path))
+    }
+
+    /// Spawn with owned piped stdin so the caller can request a protocol-level
+    /// graceful shutdown (Paper's canonical `stop` command) instead of signaling
+    /// a normally running process.
+    pub fn spawn_piped(command: &mut Command, log_path: &Path) -> Result<Self, Error> {
+        let child = spawn_logged_with_stdin(command, log_path, Stdio::piped())?;
+        Ok(Self::new(child, log_path))
+    }
+
+    fn new(child: Child, log_path: &Path) -> Self {
+        Self {
             child,
             log_path: log_path.to_path_buf(),
             ready_offset: 0,
             stopped: false,
-        })
+        }
     }
 
     /// Poll the log until `ready` tests true (see [`wait_for_ready`]).
@@ -212,6 +240,96 @@ impl ChildServer {
         let result = wait_for_exit(&mut self.child, timeout, poll_interval);
         self.stopped = wait_for_exit_reaped(&result);
         result
+    }
+
+    /// Write a protocol-level shutdown command to owned stdin, close stdin, and
+    /// wait for a bounded graceful exit. TERM/KILL are used only after a broken
+    /// or unavailable pipe, an early wait error, or a graceful timeout. Every
+    /// fallback returns `Gate` even if TERM subsequently exits cleanly.
+    pub fn shutdown_with_command(
+        &mut self,
+        command: &[u8],
+        timeout: Duration,
+        cleanup_grace: Duration,
+        poll_interval: Duration,
+    ) -> Result<ExitStatus, Error> {
+        let Some(mut stdin) = self.child.stdin.take() else {
+            return Err(self.failure_cleanup(
+                "server graceful shutdown stdin is unavailable".to_owned(),
+                cleanup_grace,
+                poll_interval,
+            ));
+        };
+        if let Err(error) = stdin.write_all(command).and_then(|()| stdin.flush()) {
+            drop(stdin);
+            return Err(self.failure_cleanup(
+                format!("failed to write graceful shutdown command: {error}"),
+                cleanup_grace,
+                poll_interval,
+            ));
+        }
+        drop(stdin);
+
+        match poll_for_exit(&mut self.child, timeout, poll_interval) {
+            Ok(Some(status)) => {
+                self.stopped = true;
+                Ok(status)
+            }
+            Ok(None) => Err(self.failure_cleanup(
+                format!("server did not exit after graceful shutdown command within {timeout:?}"),
+                cleanup_grace,
+                poll_interval,
+            )),
+            Err(error) => Err(self.failure_cleanup(
+                format!("failed while waiting for graceful shutdown: {error}"),
+                cleanup_grace,
+                poll_interval,
+            )),
+        }
+    }
+
+    fn failure_cleanup(
+        &mut self,
+        reason: String,
+        cleanup_grace: Duration,
+        poll_interval: Duration,
+    ) -> Error {
+        let term = signal(self.child.id(), "TERM");
+        let cleanup = match poll_for_exit(&mut self.child, cleanup_grace, poll_interval) {
+            Ok(Some(status)) => {
+                self.stopped = true;
+                format!("TERM cleanup reaped process with {status}")
+            }
+            Ok(None) | Err(_) => {
+                let kill = self.child.kill();
+                let wait = self.child.wait();
+                if wait.is_ok() {
+                    self.stopped = true;
+                }
+                match (kill, wait) {
+                    (_, Ok(status)) => format!("KILL cleanup reaped process with {status}"),
+                    (Err(kill_error), Err(wait_error)) => {
+                        format!("KILL cleanup failed ({kill_error}) and reap failed ({wait_error})")
+                    }
+                    (Ok(()), Err(wait_error)) => {
+                        format!("KILL cleanup sent but reap failed ({wait_error})")
+                    }
+                }
+            }
+        };
+        let term = term
+            .err()
+            .map(|error| format!("; TERM send failed: {error}"))
+            .unwrap_or_default();
+        Error::Gate(format!(
+            "{reason}; {cleanup}{term} — see {}",
+            self.log_path.display()
+        ))
+    }
+
+    /// Whether this child has been reaped and will not be touched by `Drop`.
+    pub fn is_stopped(&self) -> bool {
+        self.stopped
     }
 
     /// Byte offset in the log at the moment READY was seen.
