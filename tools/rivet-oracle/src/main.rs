@@ -1773,16 +1773,32 @@ pub(crate) fn inject_forced_tickets(
 /// parity is rivet-parity's job. The re-encode is identical on both sides, so a
 /// serializer divergence could not produce a false green here; it would only
 /// make the gate's bytes differ from a hypothetical Paper-native extraction.
-fn normalize_last_update(bytes: &[u8]) -> Option<Vec<u8>> {
+fn normalize_last_update(bytes: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    let mut input = DataInputStream::new(Cursor::new(bytes));
     let mut compound =
-        nbt_io::read_unlimited(&mut DataInputStream::new(Cursor::new(bytes))).ok()?;
-    if !compound.tags.contains_key("LastUpdate") {
-        return None;
+        nbt_io::read_unlimited(&mut input).map_err(|error| format!("NBT read failed: {error}"))?;
+    let cursor = input.into_inner();
+    if cursor.position() != bytes.len() as u64 {
+        return Err(format!(
+            "NBT payload has {} trailing bytes",
+            bytes.len() as u64 - cursor.position()
+        ));
+    }
+    match compound.tags.get("LastUpdate") {
+        None => return Ok(None),
+        Some(Tag::Long(_)) => {}
+        Some(tag) => {
+            return Err(format!(
+                "LastUpdate has tag id {}; expected TAG_Long",
+                tag.id()
+            ));
+        }
     }
     compound.put_long("LastUpdate", 0);
     let mut out = Vec::new();
-    nbt_io::write(&compound, &mut DataOutputStream::new(Cursor::new(&mut out))).ok()?;
-    Some(out)
+    nbt_io::write(&compound, &mut DataOutputStream::new(Cursor::new(&mut out)))
+        .map_err(|error| format!("NBT write failed: {error}"))?;
+    Ok(Some(out))
 }
 
 /// Normalize every chunk payload in an extraction tree (`normalize_last_update`
@@ -1800,8 +1816,12 @@ pub(crate) fn normalize_last_update_tree(dir: &Path) -> Result<usize, Error> {
                 walk.push(p);
             } else if p.extension().map(|x| x == "nbt").unwrap_or(false) {
                 let bytes = fs::read(&p)?;
-                if let Some(normalized) = normalize_last_update(&bytes)
-                    && normalized != bytes
+                if let Some(normalized) = normalize_last_update(&bytes).map_err(|error| {
+                    Error::Gate(format!(
+                        "cannot normalize LastUpdate in {}: {error}",
+                        p.display()
+                    ))
+                })? && normalized != bytes
                 {
                     fs::write(&p, normalized)?;
                     count += 1;
@@ -4287,6 +4307,55 @@ mod tests {
 
     fn fixtures_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures")
+    }
+
+    fn encode_test_payload(compound: &CompoundTag) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        nbt_io::write(
+            compound,
+            &mut DataOutputStream::new(Cursor::new(&mut bytes)),
+        )
+        .expect("test NBT should encode");
+        bytes
+    }
+
+    #[test]
+    fn last_update_normalization_requires_exact_long_payload() {
+        let mut valid = CompoundTag::new();
+        valid.put_long("LastUpdate", 42);
+        let valid_bytes = encode_test_payload(&valid);
+        let normalized = normalize_last_update(&valid_bytes)
+            .expect("valid payload should parse")
+            .expect("LastUpdate should be normalized");
+        let mut normalized_input = DataInputStream::new(Cursor::new(normalized.as_slice()));
+        let normalized_tag = nbt_io::read_unlimited(&mut normalized_input).unwrap();
+        assert_eq!(normalized_tag.get_long("LastUpdate"), Some(0));
+        assert_eq!(
+            normalized_input.into_inner().position(),
+            normalized.len() as u64
+        );
+
+        let mut wrong_type = CompoundTag::new();
+        wrong_type.put_int("LastUpdate", 42);
+        let error = normalize_last_update(&encode_test_payload(&wrong_type))
+            .expect_err("non-long LastUpdate must fail closed");
+        assert!(error.contains("expected TAG_Long"), "{error}");
+
+        let mut trailing = valid_bytes;
+        trailing.extend_from_slice(&[0xde, 0xad]);
+        let error =
+            normalize_last_update(&trailing).expect_err("trailing NBT bytes must fail closed");
+        assert!(error.contains("2 trailing bytes"), "{error}");
+    }
+
+    #[test]
+    fn last_update_normalization_leaves_valid_absent_key_untouched() {
+        let mut compound = CompoundTag::new();
+        compound.put_int("DataVersion", 1);
+        assert_eq!(
+            normalize_last_update(&encode_test_payload(&compound)).unwrap(),
+            None
+        );
     }
 
     /// The committed M0 fixtures must verify clean against their manifest.
