@@ -166,7 +166,11 @@ impl GeneratedWorkspace {
             .map(|pos| {
                 (
                     pos,
-                    generator.create_holder_with_workspace(pos, feature_workspace.clone()),
+                    generator.create_holder_with_workspace_and_structure_feature_index(
+                        pos,
+                        feature_workspace.clone(),
+                        Some(generator.structure_feature_index()),
+                    ),
                 )
             })
             .collect();
@@ -775,6 +779,7 @@ fn spawn_neighbour_positions(center: ChunkPos) -> Vec<ChunkPos> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rivet_world::chunk::status::GenError;
     use std::collections::HashSet;
 
     #[test]
@@ -876,6 +881,47 @@ mod tests {
             .expect_err("the unavailable status is typed");
         assert!(matches!(error, GeneratedWorkspaceError::Generation { .. }));
         assert_eq!(chunk_map.len(), 0);
+    }
+
+    #[test]
+    fn production_workspace_enters_features_with_registry_index() {
+        let mut workspace = GeneratedWorkspace::new(42, ChunkPos::ZERO).expect("target view");
+        workspace.waves = [
+            ChunkStatus::Biomes,
+            ChunkStatus::Noise,
+            ChunkStatus::Surface,
+            ChunkStatus::Carvers,
+            ChunkStatus::Features,
+        ]
+        .into_iter()
+        .map(|status| GeneratedStatusWave {
+            status,
+            positions: vec![ChunkPos::ZERO],
+        })
+        .collect();
+
+        let error = workspace
+            .generate()
+            .expect_err("the next typed feature boundary should be reached");
+        match error {
+            GeneratedWorkspaceError::Generation {
+                position: ChunkPos::ZERO,
+                target: ChunkStatus::Features,
+                source: GeneratedChunkError::Generation(source),
+            } => assert!(
+                !matches!(source, GenError::StructureDecorationIndexUnavailable { .. }),
+                "production holders must carry the registry-derived structure index"
+            ),
+            other => panic!("unexpected production FEATURES result: {other}"),
+        }
+        assert_eq!(
+            workspace
+                .holders
+                .get(&ChunkPos::ZERO)
+                .expect("center holder remains attached")
+                .status(),
+            ChunkStatus::Carvers
+        );
     }
 
     #[test]
