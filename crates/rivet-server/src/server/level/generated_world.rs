@@ -951,6 +951,9 @@ pub struct GenerationChunkState {
     feature_writebacks: FeatureWritebacks,
     feature_dependencies: FeatureWritebacks,
     generated_light_storage: Option<GeneratedLightStorage>,
+    /// Paper's first NoiseChunk captures terrain input at BIOMES. Retain that
+    /// exact Arc across jobs/loans rather than re-querying mutable references.
+    cached_structure_terrain: Option<Arc<rivet_world::levelgen::noise::beardifier::Beardifier>>,
 }
 
 /// A resume collision transfers neither proto map. Both owners are returned
@@ -985,7 +988,12 @@ impl GenerationChunkState {
         !self.feature_dependencies.is_empty()
     }
     pub(super) fn has_structure_capability(&self) -> bool {
-        self.structure_feature_count.is_some()
+        self.structure_feature_count.is_some() || self.cached_structure_terrain.is_some()
+    }
+    pub(super) fn cached_structure_terrain(
+        &self,
+    ) -> Option<&Arc<rivet_world::levelgen::noise::beardifier::Beardifier>> {
+        self.cached_structure_terrain.as_ref()
     }
     pub(super) fn restore_generated_light_storage(&mut self, storage: GeneratedLightStorage) {
         assert!(
@@ -1011,6 +1019,7 @@ impl GenerationChunkState {
             feature_writebacks,
             feature_dependencies,
             generated_light_storage,
+            cached_structure_terrain,
         } = self;
         let loan = GenerationChunkLoan {
             pos: chunk.get_pos(),
@@ -1020,6 +1029,7 @@ impl GenerationChunkState {
             feature_writebacks,
             feature_dependencies,
             generated_light_storage,
+            cached_structure_terrain,
         };
         (chunk, loan)
     }
@@ -1057,6 +1067,7 @@ pub struct GenerationChunkLoan {
     feature_writebacks: FeatureWritebacks,
     feature_dependencies: FeatureWritebacks,
     generated_light_storage: Option<GeneratedLightStorage>,
+    cached_structure_terrain: Option<Arc<rivet_world::levelgen::noise::beardifier::Beardifier>>,
 }
 
 pub struct GenerationChunkLoanError {
@@ -1080,11 +1091,14 @@ impl GenerationChunkLoan {
             feature_writebacks: self.feature_writebacks,
             feature_dependencies: self.feature_dependencies,
             generated_light_storage: self.generated_light_storage,
+            cached_structure_terrain: self.cached_structure_terrain,
         })
     }
 }
 
 pub struct GenerationChunkHolder {
+    structure_terrain:
+        Rc<RefCell<Option<Arc<rivet_world::levelgen::noise::beardifier::Beardifier>>>>,
     structure_feature_count: Option<usize>,
     chunk: ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
     context: WorldGenContext<BlockState, WorldgenBiomeId, StructureKey, GeneratedLightStorage>,
@@ -1212,6 +1226,9 @@ impl GenerationChunkHolder {
         structure_feature_count: Option<usize>,
     ) -> Self {
         let pending_feature_writebacks = Rc::new(RefCell::new(None));
+        let structure_terrain = Rc::new(RefCell::new(
+            None::<Arc<rivet_world::levelgen::noise::beardifier::Beardifier>>,
+        ));
         let context = WorldGenContext::new(
             {
                 let generator = Arc::clone(&generator);
@@ -1224,12 +1241,26 @@ impl GenerationChunkHolder {
             },
             {
                 let generator = Arc::clone(&generator);
+                let terrain = Rc::clone(&structure_terrain);
                 move |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
-                    generator.generator().fill_from_noise(
-                        Blender::empty(),
-                        generator.random_state(),
-                        chunk,
-                    );
+                    if let Some(beardifier) = terrain.borrow().clone() {
+                        generator
+                            .generator()
+                            .fill_from_noise_with_structure_terrain(
+                                Blender::empty(),
+                                generator.random_state(),
+                                chunk,
+                                beardifier,
+                            );
+                    } else {
+                        // Explicit standalone value-layer path; live owner
+                        // jobs install a resolved terrain input before entry.
+                        generator.generator().fill_from_noise(
+                            Blender::empty(),
+                            generator.random_state(),
+                            chunk,
+                        );
+                    }
                 }
             },
             {
@@ -1240,6 +1271,7 @@ impl GenerationChunkHolder {
                 // over the generator + height accessor — the same arguments
                 // Java's `NoiseBasedChunkGenerator.buildSurface` receives.
                 let generator = Arc::clone(&generator);
+                let terrain = Rc::clone(&structure_terrain);
                 move |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
                     let height_accessor = chunk.height_accessor();
                     let biome_manager = Arc::new(BiomeManager::new(
@@ -1248,13 +1280,24 @@ impl GenerationChunkHolder {
                     ));
                     let generation_context =
                         Arc::new(WorldGenerationContext::new(&*generator, &height_accessor));
-                    generator.generator().build_surface(
-                        generator.random_state(),
-                        biome_manager,
-                        generation_context,
-                        chunk,
-                        None,
-                    );
+                    if let Some(beardifier) = terrain.borrow().clone() {
+                        generator.generator().build_surface_with_structure_terrain(
+                            generator.random_state(),
+                            biome_manager,
+                            generation_context,
+                            chunk,
+                            None,
+                            beardifier,
+                        );
+                    } else {
+                        generator.generator().build_surface(
+                            generator.random_state(),
+                            biome_manager,
+                            generation_context,
+                            chunk,
+                            None,
+                        );
+                    }
                 }
             },
             {
@@ -1267,19 +1310,32 @@ impl GenerationChunkHolder {
                 // overworld biome source — the `biomeSource` field the Java
                 // driver wraps.
                 let generator = Arc::clone(&generator);
+                let terrain = Rc::clone(&structure_terrain);
                 move |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
                     let biome_manager = Arc::new(BiomeManager::new(
                         Arc::new(generator.biome_source.clone()),
                         BiomeManager::obfuscate_seed(generator.seed()),
                     ));
-                    generator.generator().apply_carvers(
-                        &*generator,
-                        generator.seed(),
-                        generator.random_state(),
-                        &biome_manager,
-                        Arc::new(generator.biome_source.clone()),
-                        chunk,
-                    );
+                    if let Some(beardifier) = terrain.borrow().clone() {
+                        generator.generator().apply_carvers_with_structure_terrain(
+                            &*generator,
+                            generator.seed(),
+                            generator.random_state(),
+                            &biome_manager,
+                            Arc::new(generator.biome_source.clone()),
+                            chunk,
+                            beardifier,
+                        );
+                    } else {
+                        generator.generator().apply_carvers(
+                            &*generator,
+                            generator.seed(),
+                            generator.random_state(),
+                            &biome_manager,
+                            Arc::new(generator.biome_source.clone()),
+                            chunk,
+                        );
+                    }
                 }
             },
             {
@@ -1332,6 +1388,7 @@ impl GenerationChunkHolder {
         // `generate_through(ChunkStatus::Spawn)` remains a typed refusal rather
         // than silently reverting to a detached center-only spawn.
         GenerationChunkHolder {
+            structure_terrain,
             structure_feature_count,
             chunk,
             context,
@@ -1356,7 +1413,7 @@ impl GenerationChunkHolder {
             feature_writebacks,
             pending_feature_writebacks,
             feature_workspace,
-            ..
+            structure_terrain,
         } = self;
         // Public generation calls publish or discard staging before returning.
         // A staged value here would indicate an internal ownership violation.
@@ -1364,6 +1421,7 @@ impl GenerationChunkHolder {
             pending_feature_writebacks.borrow().is_none(),
             "unfinished FEATURES writeback transaction"
         );
+        let cached_structure_terrain = structure_terrain.borrow().clone();
         GenerationChunkState {
             generator,
             structure_feature_count,
@@ -1372,6 +1430,7 @@ impl GenerationChunkHolder {
             feature_writebacks,
             feature_dependencies: feature_workspace.take_all(),
             generated_light_storage: context.into_generated_light_storage(),
+            cached_structure_terrain,
         }
     }
 
@@ -1418,6 +1477,7 @@ impl GenerationChunkHolder {
             feature_writebacks,
             feature_dependencies,
             generated_light_storage,
+            cached_structure_terrain,
             generator: _,
             structure_feature_count: _,
         } = state;
@@ -1429,6 +1489,7 @@ impl GenerationChunkHolder {
             Self::with_owned_chunk(chunk, generator, feature_workspace, structure_feature_count);
         holder.features_failure = features_failure;
         holder.feature_writebacks = feature_writebacks;
+        holder.structure_terrain.replace(cached_structure_terrain);
         Ok((holder, generated_light_storage))
     }
 
@@ -1595,6 +1656,22 @@ impl GenerationChunkHolder {
                 }
             }
         }
+    }
+
+    /// Production terrain entry. The owner must resolve this input from the
+    /// actual canonical reference graph before calling; missing authority is
+    /// not an empty Beardifier. The first resolved input is retained, matching
+    /// Paper's cached NoiseChunk; later calls cannot replace it or lose it when
+    /// returning an error/panic or handing the chunk back to its owner.
+    pub fn generate_through_with_structure_terrain(
+        &mut self,
+        target: ChunkStatus,
+        beardifier: Arc<rivet_world::levelgen::noise::beardifier::Beardifier>,
+    ) -> Result<(), GeneratedChunkError> {
+        if self.structure_terrain.borrow().is_none() {
+            self.structure_terrain.replace(Some(beardifier));
+        }
+        self.generate_through(target)
     }
 
     /// Run the Paper SPAWN body over a caller-owned radius-one cache. The
@@ -5074,6 +5151,74 @@ mod tests {
     }
 
     #[test]
+    fn resolved_terrain_is_captured_at_biomes_and_survives_owner_and_region_handoffs() {
+        use rivet_world::levelgen::noise::beardifier::{
+            Beardifier, BeardifierPiece, BeardifierStart,
+        };
+        use rivet_world::levelgen::structure::{BoundingBox, TerrainAdjustment};
+        let generator = test_generator();
+        let pos = ChunkPos::new(1, -2);
+        let x = pos.get_min_block_x();
+        let z = pos.get_min_block_z();
+        let terrain = Arc::new(Beardifier::from_ordered_starts(
+            &[BeardifierStart {
+                terrain_adjustment: TerrainAdjustment::Bury,
+                pieces: vec![BeardifierPiece::Ordinary {
+                    bounds: BoundingBox::new([x, 200, z, x + 15, 208, z + 15]),
+                }],
+            }],
+            pos,
+        ));
+        let mut holder = generator.create_holder(pos);
+        holder
+            .generate_through_with_structure_terrain(ChunkStatus::Biomes, Arc::clone(&terrain))
+            .unwrap();
+        let state = holder.into_state();
+        assert!(Arc::ptr_eq(
+            state.cached_structure_terrain().unwrap(),
+            &terrain
+        ));
+        let (chunk, loan) = state.into_loan();
+        let state = loan
+            .rejoin(chunk)
+            .unwrap_or_else(|_| panic!("same canonical coordinate"));
+        assert!(Arc::ptr_eq(
+            state.cached_structure_terrain().unwrap(),
+            &terrain
+        ));
+        let (mut holder, _) = GenerationChunkHolder::from_state(
+            state,
+            Arc::clone(&generator),
+            FeatureWorkspace::new(),
+            None,
+        )
+        .unwrap();
+        // Paper caches the first NoiseChunk input. A later supplied empty
+        // value must not replace the real influence captured at BIOMES.
+        holder
+            .generate_through_with_structure_terrain(
+                ChunkStatus::Noise,
+                Arc::new(Beardifier::empty()),
+            )
+            .unwrap();
+        assert_eq!(
+            holder.chunk.get_block_state(x + 8, 200, z + 8),
+            Blocks::STONE.default_block_state()
+        );
+        let mut standalone = generator.create_holder(pos);
+        standalone.generate_through(ChunkStatus::Noise).unwrap();
+        assert!(standalone.chunk.get_block_state(x + 8, 200, z + 8).is_air());
+        assert_eq!(
+            holder.chunk.get_block_state(x + 8, 10, z + 8),
+            standalone.chunk.get_block_state(x + 8, 10, z + 8)
+        );
+        assert!(Arc::ptr_eq(
+            holder.into_state().cached_structure_terrain().unwrap(),
+            &terrain
+        ));
+    }
+
+    #[test]
     fn movable_holder_state_keeps_failure_proto_writebacks_and_light_storage() {
         fn assert_send<T: Send>() {}
         assert_send::<GenerationChunkState>();
@@ -5354,6 +5499,7 @@ mod tests {
             context,
             features_failure: None,
             generator: Arc::clone(generator),
+            structure_terrain: Rc::new(RefCell::new(None)),
             structure_feature_count: None,
             feature_writebacks: Vec::new(),
             pending_feature_writebacks: Rc::new(RefCell::new(None)),
@@ -5409,6 +5555,7 @@ mod tests {
             context,
             features_failure: None,
             generator,
+            structure_terrain: Rc::new(RefCell::new(None)),
             structure_feature_count: None,
             feature_writebacks: Vec::new(),
             pending_feature_writebacks,
@@ -5479,6 +5626,7 @@ mod tests {
             context,
             features_failure: None,
             generator: Arc::clone(generator),
+            structure_terrain: Rc::new(RefCell::new(None)),
             structure_feature_count: None,
             feature_writebacks: Vec::new(),
             pending_feature_writebacks,
@@ -6314,6 +6462,7 @@ mod tests {
             context,
             features_failure: None,
             generator,
+            structure_terrain: Rc::new(RefCell::new(None)),
             structure_feature_count: None,
             feature_writebacks: Vec::new(),
             pending_feature_writebacks: Rc::new(RefCell::new(None)),
@@ -6387,6 +6536,7 @@ mod tests {
             context,
             features_failure: None,
             generator,
+            structure_terrain: Rc::new(RefCell::new(None)),
             structure_feature_count: None,
             feature_writebacks: Vec::new(),
             pending_feature_writebacks: Rc::new(RefCell::new(None)),

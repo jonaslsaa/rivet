@@ -29,6 +29,7 @@ pub mod level_chunk;
 pub mod player_chunk_loader;
 pub mod region_backed;
 pub mod server_level;
+pub mod structure_manager;
 pub mod world_gen_region;
 
 #[cfg(test)]

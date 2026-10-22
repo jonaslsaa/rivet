@@ -657,6 +657,29 @@ impl LevelChunk {
         self.chunk.get_all_starts()
     }
 
+    pub fn get_start_for_structure(
+        &self,
+        key: &StructureKey,
+    ) -> Option<&rivet_world::chunk::structure_access::StructureStartEntry> {
+        self.chunk.get_start_for_structure(key)
+    }
+
+    pub fn has_unkeyed_starts(&self) -> bool {
+        self.chunk.get_base().has_unkeyed_starts()
+    }
+
+    pub fn set_start_for_structure(
+        &mut self,
+        key: StructureKey,
+        start: impl Into<rivet_world::chunk::structure_access::StructureStartEntry>,
+    ) {
+        self.chunk.set_start_for_structure(key, start);
+    }
+
+    pub fn add_reference_for_structure(&mut self, key: StructureKey, reference: u64) {
+        self.chunk.add_reference_for_structure(key, reference);
+    }
+
     /// `ChunkAccess.setAllStarts(Map)` — the typed structure-starts runtime
     /// mutator (#537): clear + putAll into the chunk's `StructureAccess`
     /// authority.
