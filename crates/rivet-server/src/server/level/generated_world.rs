@@ -1002,6 +1002,9 @@ impl GenerationChunkState {
     pub(super) fn has_retained_dependencies(&self) -> bool {
         !self.feature_dependencies.is_empty()
     }
+    pub(super) fn has_retained_light_storage(&self) -> bool {
+        self.generated_light_storage.is_some()
+    }
     pub(super) fn has_structure_capability(&self) -> bool {
         self.structure_feature_count.is_some()
             || self.cached_structure_terrain.is_some()
@@ -1012,6 +1015,7 @@ impl GenerationChunkState {
     ) -> Option<&Arc<rivet_world::levelgen::noise::beardifier::Beardifier>> {
         self.cached_structure_terrain.as_ref()
     }
+    #[cfg(test)]
     pub(super) fn restore_generated_light_storage(&mut self, storage: GeneratedLightStorage) {
         assert!(
             self.generated_light_storage.is_none(),

@@ -234,10 +234,11 @@ impl ServerLoginPacketListener {
         // `conn.monotonic_nanos()` and the tick drive (`PacketListener::tick`)
         // share the same per-connection epoch, so the 1s transmit throttle and
         // the 30s timeout count from construction exactly like Java.
-        let mut config_listener = ServerConfigurationPacketListener::new(
+        let mut config_listener = ServerConfigurationPacketListener::new_with_enabled_features(
             profile,
             conn.monotonic_nanos(),
             config.keepalive_timeout.as_nanos() as i64,
+            config.enabled_features.clone(),
         );
         config_listener
             .start_configuration(conn)

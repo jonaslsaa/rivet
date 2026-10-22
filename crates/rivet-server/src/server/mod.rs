@@ -85,6 +85,10 @@ pub struct ServerConfig {
     /// reads the real seed from `world_gen_settings.dat` instead (loaded-world
     /// behavior is untouched). Defaults to the M1 superflat fixture seed.
     pub seed: i64,
+    /// Resolved world feature snapshot shared with configuration listeners.
+    /// try_new replaces this from actual boot settings; the no-level M1
+    /// fixture explicitly uses WorldDataConfiguration.DEFAULT.
+    pub enabled_features: rivet_world::flag::FeatureFlagSet,
 }
 
 impl Default for ServerConfig {
@@ -104,6 +108,7 @@ impl Default for ServerConfig {
             keepalive_timeout: Duration::from_secs(30),
             level_path: None,
             seed: level::ServerLevelConfig::M1_FIXTURE_SEED,
+            enabled_features: rivet_world::level::world_data_configuration::WorldDataConfiguration::default_config().enabled_features().clone(),
         }
     }
 }
@@ -145,7 +150,7 @@ impl Server {
 
     /// Build the server, surfacing typed region-backed capability boundaries
     /// before the binary announces readiness.
-    pub fn try_new(config: ServerConfig) -> Result<Self, level::RegionBackedBootError> {
+    pub fn try_new(mut config: ServerConfig) -> Result<Self, level::RegionBackedBootError> {
         // World selection is independent of whether the live join manager is
         // installed. A requested disk level must never be silently ignored and
         // replaced by superflat for a library caller with `enable_join=false`.
@@ -154,6 +159,10 @@ impl Server {
             .as_deref()
             .map(level::region_backed::boot_level)
             .transpose()?;
+        config.enabled_features = region_level.as_ref().map_or_else(
+            || rivet_world::level::world_data_configuration::WorldDataConfiguration::default_config().enabled_features().clone(),
+            |level| level.boot_settings().expect("region boot finalizes pack settings").enabled_features().clone(),
+        );
         let config = Arc::new(config);
         let shutdown = Arc::new(Shutdown::new());
         let (lifecycle_tx, lifecycle_rx) = mpsc::channel(config.lifecycle_capacity);

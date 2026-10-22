@@ -1,0 +1,14 @@
+{"case":"absent","input":"{}","enabled_features":["minecraft:vanilla"],"enabled_packs":["vanilla"],"disabled_packs":[]}
+{"case":"explicit_empty","input":"{enabled_features:[]}","enabled_features":[],"enabled_packs":["vanilla"],"disabled_packs":[]}
+{"case":"experimental_without_vanilla","input":"{enabled_features:[\"minecraft:minecart_improvements\"]}","enabled_features":["minecraft:minecart_improvements"],"enabled_packs":["vanilla"],"disabled_packs":[]}
+{"case":"unqualified_names","input":"{enabled_features:[\"vanilla\",\"minecart_improvements\"]}","enabled_features":["minecraft:minecart_improvements","minecraft:vanilla"],"enabled_packs":["vanilla"],"disabled_packs":[]}
+{"case":"unknown_flag","input":"{enabled_features:[\"minecraft:not_real\"]}","enabled_features":["minecraft:vanilla"],"enabled_packs":["vanilla"],"disabled_packs":[]}
+{"case":"partial_known_and_unknown","input":"{enabled_features:[\"minecraft:minecart_improvements\",\"minecraft:not_real\"]}","enabled_features":["minecraft:vanilla"],"enabled_packs":["vanilla"],"disabled_packs":[]}
+{"case":"wrong_feature_container","input":"{enabled_features:\"minecraft:minecart_improvements\"}","enabled_features":["minecraft:vanilla"],"enabled_packs":["vanilla"],"disabled_packs":[]}
+{"case":"wrong_feature_element","input":"{enabled_features:[1]}","enabled_features":["minecraft:vanilla"],"enabled_packs":["vanilla"],"disabled_packs":[]}
+{"case":"custom_pack_retained_not_resolved","input":"{DataPacks:{Disabled:[\"paper\"],Enabled:[\"vanilla\",\"file/custom.zip\"]},enabled_features:[]}","enabled_features":[],"enabled_packs":["vanilla","file/custom.zip"],"disabled_packs":["paper"]}
+{"case":"empty_enabled_packs","input":"{DataPacks:{Disabled:[\"vanilla\"],Enabled:[]}}","enabled_features":["minecraft:vanilla"],"enabled_packs":[],"disabled_packs":["vanilla"]}
+{"case":"missing_required_pack_field","input":"{DataPacks:{Enabled:[\"file/custom.zip\"]}}","enabled_features":["minecraft:vanilla"],"enabled_packs":["vanilla"],"disabled_packs":[]}
+{"case":"wrong_pack_field_type","input":"{DataPacks:{Disabled:[],Enabled:[1]}}","enabled_features":["minecraft:vanilla"],"enabled_packs":["vanilla"],"disabled_packs":[]}
+{"case":"pack_order_duplicates","input":"{DataPacks:{Disabled:[\"paper\",\"file/a.zip\"],Enabled:[\"file/z.zip\",\"vanilla\",\"file/z.zip\"]},enabled_features:[\"trade_rebalance\",\"vanilla\"]}","enabled_features":["minecraft:trade_rebalance","minecraft:vanilla"],"enabled_packs":["file/z.zip","vanilla","file/z.zip"],"disabled_packs":["paper","file/a.zip"]}
+{"case":"wrong_pack_container","input":"{DataPacks:7,enabled_features:[\"redstone_experiments\"]}","enabled_features":["minecraft:redstone_experiments"],"enabled_packs":["vanilla"],"disabled_packs":[]}

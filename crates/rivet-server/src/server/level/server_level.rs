@@ -170,6 +170,7 @@ impl Default for ServerLevelConfig {
 pub struct ServerLevel {
     dimension: ResourceKey<Level>,
     world_uuid: Option<rivet_util::mth::Uuid>,
+    boot_settings: Option<super::generated_boot::GeneratedBootSettings>,
     seed: i64,
     min_y: i32,
     height: i32,
@@ -200,6 +201,7 @@ pub struct ServerLevel {
     /// Canonical in-progress generation state, confined to the world tick
     /// thread. Saved-world loading never implicitly enables generation.
     generated_chunk_owner: Option<GeneratedChunkOwner>,
+    generation_environment: Option<super::generation_environment::GenerationEnvironment>,
     /// Tick-thread confinement marker (OWNERSHIP §Ownership tree): `Cell` is
     /// `Send + !Sync`, so a `&ServerLevel` is rejected at compile time when it
     /// would cross threads.
@@ -264,6 +266,7 @@ impl ServerLevel {
         ServerLevel {
             dimension: config.dimension,
             world_uuid: None,
+            boot_settings: None,
             seed: config.seed,
             min_y: config.min_y,
             height: config.height,
@@ -277,6 +280,7 @@ impl ServerLevel {
             game_time: 0,
             region_source: None,
             generated_chunk_owner: None,
+            generation_environment: None,
             _confinement: std::marker::PhantomData,
         }
     }
@@ -290,6 +294,23 @@ impl ServerLevel {
     /// not acquire a synthetic UUID and cannot supply entity construction.
     pub fn world_uuid(&self) -> Option<rivet_util::mth::Uuid> {
         self.world_uuid
+    }
+
+    /// Actual finalized pack settings; None is an unavailable authority, not
+    /// permission to substitute vanilla flags for a generated/loaded world.
+    pub fn boot_settings(&self) -> Option<&super::generated_boot::GeneratedBootSettings> {
+        self.boot_settings.as_ref()
+    }
+
+    pub fn install_boot_settings(
+        &mut self,
+        settings: super::generated_boot::GeneratedBootSettings,
+    ) {
+        assert!(
+            self.boot_settings.is_none(),
+            "world boot settings already installed"
+        );
+        self.boot_settings = Some(settings);
     }
 
     pub(crate) fn install_world_uuid(&mut self, uuid: rivet_util::mth::Uuid) {
@@ -414,6 +435,70 @@ impl ServerLevel {
 
     pub fn generated_chunk_owner_mut(&mut self) -> Option<&mut GeneratedChunkOwner> {
         self.generated_chunk_owner.as_mut()
+    }
+
+    /// Install actual dimension/SavedData generation settings. Refusal returns
+    /// the entire environment, including a moving border, to its caller.
+    pub fn install_generation_environment(
+        &mut self,
+        environment: super::generation_environment::GenerationEnvironment,
+    ) -> Result<(), Box<super::generation_environment::GenerationEnvironmentInstallError>> {
+        use super::generation_environment::{
+            GenerationEnvironmentError, GenerationEnvironmentInstallError,
+        };
+        if self.generation_environment.is_some() {
+            return Err(Box::new(GenerationEnvironmentInstallError {
+                error: GenerationEnvironmentError::AlreadyInstalled,
+                environment,
+            }));
+        }
+        if environment.height_range() != (self.min_y, self.height) {
+            return Err(Box::new(GenerationEnvironmentInstallError {
+                error: GenerationEnvironmentError::DimensionHeightMismatch,
+                environment,
+            }));
+        }
+        if let Some(owner) = self.generated_chunk_owner.as_mut()
+            && let Err(error) = environment.bind_owner(owner)
+        {
+            return Err(Box::new(GenerationEnvironmentInstallError {
+                error,
+                environment,
+            }));
+        }
+        self.generation_environment = Some(environment);
+        Ok(())
+    }
+
+    pub fn generation_environment(
+        &self,
+    ) -> Option<&super::generation_environment::GenerationEnvironment> {
+        self.generation_environment.as_ref()
+    }
+
+    pub fn generation_environment_mut(
+        &mut self,
+    ) -> Option<&mut super::generation_environment::GenerationEnvironment> {
+        self.generation_environment.as_mut()
+    }
+
+    /// Called once by the world's tick owner. Border interpolation advances
+    /// once, then SPAWN sees the current bounds and actual mob rule.
+    pub fn tick_generation(
+        &mut self,
+        max_jobs: usize,
+    ) -> super::generated_chunk_owner::GenerationJobReport {
+        if let Some(environment) = self.generation_environment.as_mut() {
+            environment.tick();
+            if let Some(owner) = self.generated_chunk_owner.as_mut() {
+                environment
+                    .bind_owner(owner)
+                    .expect("installed world environment matches its canonical generator");
+            }
+        }
+        self.generated_chunk_owner
+            .as_mut()
+            .map_or_else(Default::default, |owner| owner.run_jobs(max_jobs))
     }
 
     /// Resolve readiness before encoding. A completed proto is not a sendable

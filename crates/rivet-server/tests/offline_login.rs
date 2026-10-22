@@ -100,6 +100,7 @@ fn config_with_threshold(compression_threshold: i32) -> ServerConfig {
         keepalive_timeout: Duration::from_secs(30),
         level_path: None,
         seed: ServerLevelConfig::M1_FIXTURE_SEED,
+        enabled_features: rivet_world::flag::feature_flags::vanilla_set(),
     }
 }
 
@@ -1183,6 +1184,7 @@ fn config_with_join() -> ServerConfig {
         keepalive_timeout: Duration::from_secs(30),
         level_path: None,
         seed: ServerLevelConfig::M1_FIXTURE_SEED,
+        enabled_features: rivet_world::flag::feature_flags::vanilla_set(),
     }
 }
 
