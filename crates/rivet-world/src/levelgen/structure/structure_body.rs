@@ -356,18 +356,22 @@ fn weighted<T>(
     values: &[Value],
     parse: impl Fn(&Value) -> Result<T, StructureDataError>,
 ) -> Result<Vec<Weighted<T>>, StructureDataError> {
-    if values.is_empty() {
-        return error("weighted alias list must not be empty");
-    }
-    values
+    let mut total = 0i32;
+    let entries = values
         .iter()
         .map(|entry| {
-            Ok(Weighted::new(
-                parse(&entry["data"])?,
-                integer(entry, "weight", 0, i32::MAX)?,
-            ))
+            let data = parse(&entry["data"])?;
+            let weight = integer(entry, "weight", 0, i32::MAX)?;
+            total = total
+                .checked_add(weight)
+                .ok_or_else(|| StructureDataError("Sum of weights must be <= 2147483647".into()))?;
+            Ok(Weighted::new(data, weight))
         })
-        .collect()
+        .collect::<Result<Vec<_>, StructureDataError>>()?;
+    if total == 0 {
+        return error("weighted alias list must have a positive total weight");
+    }
+    Ok(entries)
 }
 fn error<T>(message: impl Into<String>) -> Result<T, StructureDataError> {
     Err(StructureDataError(message.into()))

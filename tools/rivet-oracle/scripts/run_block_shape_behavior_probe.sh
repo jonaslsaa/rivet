@@ -11,5 +11,5 @@ mkdir -p "$classes"
 classpath="$runtime"
 while IFS= read -r -d '' library; do classpath="$classpath:$library"; done < <(find "$libraries" -name '*.jar' -print0)
 "${java_home:+$java_home/bin/}javac" -cp "$classpath" -d "$classes" "$root/src/java/BlockShapeBehaviorProbe.java"
-"${java_home:+$java_home/bin/}java" --enable-native-access=ALL-UNNAMED -cp "$classes:$classpath" BlockShapeBehaviorProbe |
+"${java_home:+$java_home/bin/}java" --enable-native-access=ALL-UNNAMED -cp "$classes:$classpath" BlockShapeBehaviorProbe "$@" |
     sed -n 's/^BLOCK_SHAPE\t//p'

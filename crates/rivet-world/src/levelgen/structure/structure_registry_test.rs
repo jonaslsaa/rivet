@@ -169,3 +169,34 @@ fn malformed_settings_jigsaw_range_and_unknown_structure_refs_refuse() {
     set["structures"][0]["weight"] = serde_json::json!(0);
     assert!(StructureSet::parse(&set, &access).is_err());
 }
+
+#[test]
+fn random_pool_aliases_require_nonempty_positive_nonoverflowing_weight_totals() {
+    let access = access();
+    let records = pinned_records().unwrap();
+    let mut trial = records
+        .iter()
+        .find(|v| v["key"] == "minecraft:trial_chambers")
+        .unwrap()["data"]
+        .clone();
+    for weights in [vec![], vec![0], vec![0, 0], vec![i32::MAX, 1]] {
+        trial["pool_aliases"] = serde_json::json!([{
+            "type":"minecraft:random", "alias":"minecraft:probe",
+            "targets":weights.iter().map(|weight| serde_json::json!({
+                "data":"minecraft:target", "weight":weight
+            })).collect::<Vec<_>>()
+        }]);
+        assert!(
+            Structure::parse(&trial, &access).is_err(),
+            "weights {weights:?}"
+        );
+    }
+    trial["pool_aliases"][0]["targets"] = serde_json::json!([
+        {"data":"minecraft:zero", "weight":0},
+        {"data":"minecraft:positive", "weight":i32::MAX}
+    ]);
+    assert!(
+        Structure::parse(&trial, &access).is_ok(),
+        "zero-weight entries are valid when total is positive"
+    );
+}
