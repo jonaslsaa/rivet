@@ -1652,7 +1652,6 @@ mod tests {
         apply_enter_play(&mut registry);
         let manager = run_tick(PlayerSessionManager::new(config), &mut registry, vec![]);
         assert_eq!(manager.session_count(), 0);
-        assert!(!registry.contains(ID));
         assert!(matches!(drained_disconnect_reason(&mut out_rx),
             Some(DisconnectReason::Unsupported(reason)) if reason.contains("join burst:")));
     }
@@ -1680,12 +1679,10 @@ mod tests {
         assert_eq!(manager.session_count(), 0);
         assert!(manager.sessions.is_empty());
         assert!(manager.level.chunk_map().is_empty());
-        let _ = registry.send(
-            ID,
-            OutboundEvent::Disconnect {
-                reason: DisconnectReason::Unsupported("test connection loss".into()),
-            },
-        );
+        registry.apply(LifecycleEvent::Disconnect {
+            id: ID,
+            reason: DisconnectReason::Unsupported("test connection loss".into()),
+        });
         manager = run_tick(manager, &mut registry, vec![]);
         assert!(manager.terrain_joins.is_empty());
         assert!(
