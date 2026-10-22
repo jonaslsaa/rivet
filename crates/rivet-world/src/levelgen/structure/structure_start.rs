@@ -21,6 +21,8 @@ pub enum StructureError {
     UnsupportedPiece(String),
     #[error("structure registry has no executable authority for {0}")]
     UnsupportedStructure(String),
+    #[error("structure start registry/decoder authority is unavailable")]
+    RegistryUnavailable,
     #[error("cannot calculate bounds of an empty structure")]
     EmptyPieces,
     #[error("structure placement authority is unavailable: {0}")]
@@ -78,7 +80,7 @@ impl StructureDefinition {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct StructureStart {
     structure: Option<StructureDefinition>,
     piece_container: PiecesContainer,

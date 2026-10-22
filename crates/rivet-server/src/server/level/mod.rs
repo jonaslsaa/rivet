@@ -23,6 +23,7 @@ pub mod chunk_storage_worker;
 pub mod chunk_tracking_view;
 pub mod entity_id_allocator;
 pub mod full_chunk_status;
+pub mod generated_chunk_owner;
 pub mod generated_world;
 pub mod level_chunk;
 pub mod player_chunk_loader;

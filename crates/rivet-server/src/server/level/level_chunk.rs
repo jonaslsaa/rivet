@@ -138,14 +138,6 @@ pub struct LevelChunk {
     /// [`Self::stored_block_ticks`], copied from the generated proto's owning
     /// `ProtoChunkTicks` container.
     stored_fluid_ticks: Vec<SavedTick<FluidId>>,
-    /// The raw `structures.starts` compound off the #519/#185 reconstruction,
-    /// when the region-backed chunk carries non-empty structure starts. Owned
-    /// tick-thread carry state — the `StructureStart` load path is not ported
-    /// (#369), so nothing is parsed, fabricated, scheduled, or written. `None`
-    /// for a chunk with no starts (the superflat M1 world, and any region
-    /// chunk without starts). The client encoding path does not consume it; the
-    /// future #369 installer does.
-    structure_starts: Option<CompoundTag>,
     /// Serialized entities carried by a generated/persisted proto until the
     /// ServerLevel post-load hook can consume them. Paper's FULL task passes
     /// these to `postLoadProtoChunk`; this value layer has no entity registry or
@@ -191,59 +183,21 @@ impl LevelChunk {
             light_data,
             stored_block_ticks: Vec::new(),
             stored_fluid_ticks: Vec::new(),
-            structure_starts: None,
             post_load_entities: Vec::new(),
         }
     }
 
-    /// Reconstructed chunk → server `LevelChunk` — the #516 boot bridge.
-    ///
-    /// `reconstruct_runtime_chunk` (#383) produces a generic
-    /// `LevelChunk<BlockState, BiomeId, Identifier>` whose sections carry the
-    /// generated `BlockState`/`section_reconstruction::BiomeId` values; the
-    /// server chunk stores the same dense global `StateId` (air = 0, stone = 1,
-    /// ... — `BlockState::id()` IS the
-    /// `rivet_registry::generated::block_states::StateId`) and a `u16`-backed
-    /// `BiomeId`, so each section's containers are re-encoded against the
-    /// server strategies with `map_values` — the byte-identical-on-wire
-    /// conversion the packet path needs. The stored heightmaps/light nibbles/
-    /// pending block entities are preserved by the value transform; the packet
-    /// light payload is derived once through `to_vanilla_nibble` +
-    /// `build_light_update_data` (the #184 send seam).
-    ///
-    /// The #519 auxiliary payloads are carried onto the server chunk as owned
-    /// tick-thread state — [`ChunkReconstruction::stored_block_ticks`] /
-    /// [`ChunkReconstruction::stored_fluid_ticks`] — without scheduling,
-    /// spawning, materializing, or writing anything. Block entities and
-    /// structure references are NOT duplicated here: the reconstruction installs
-    /// them into the chunk's pending-map / `StructureAccess` runtime authority
-    /// (#537), so the server chunk reads them straight off the base.
-    ///
-    /// The `ChunkReconstruction` diagnostics are consumed by the caller before
-    /// this bridge: the boot rejects a non-empty set rather than silently
-    /// installing a chunk whose content differs from what was stored.
-    ///
-    /// The conversion is fallible with a typed [`LevelChunkBridgeError`]: the
-    /// #184 send seam panics on an unsupported persisted Starlight state, so
-    /// that mismatch is rejected here first, and the `map_values` re-encode
-    /// surfaces its error instead of the `.expect` that used to abort the
-    /// process (defense-in-depth: the reconstructed and server strategies share
-    /// the same dense global-id ladder, so a failure is hostile input).
-    /// The carried raw `structures.starts` compound, when the chunk was
-    /// reconstructed from region data that carried non-empty structure starts
-    /// (see the field docs). `None` for a chunk with no starts. The future
-    /// #369 installer consumes this.
-    pub fn structure_starts(&self) -> Option<&CompoundTag> {
-        self.structure_starts.as_ref()
+    /// Snapshot native CURRENT state and unresolved persisted tags from the
+    /// canonical structure owner. No registry resolution occurs here.
+    pub fn structure_starts(&self) -> Option<CompoundTag> {
+        let starts = self.chunk.serialized_starts(ToString::to_string);
+        (!starts.is_empty()).then_some(starts)
     }
 
     /// Snapshot this already-canonical server chunk into Paper's current-version
     /// FULL chunk NBT. This is tick-thread-only by ownership: the canonical
     /// value is copied and transformed before the returned tag leaves the world.
     pub fn snapshot_for_save(&self, game_time: i64) -> Result<CompoundTag, LevelChunkSaveError> {
-        if !self.get_all_starts().is_empty() && self.structure_starts.is_none() {
-            return Err(LevelChunkSaveError::UnserializableStructureStarts);
-        }
         let factory = current_version_container_factory();
         let world_chunk = self
             .chunk
@@ -261,14 +215,12 @@ impl LevelChunk {
 
         // Paper's `packStructureData` always emits both child compounds, even
         // when both maps are empty; this is an Option/field-presence contract,
-        // not an optimization. The typed `i64` StructureStart stand-in is not
-        // a wire StructureStart and is therefore not fabricated into `starts`;
-        // only an existing raw starts compound is carried verbatim. A typed
-        // stand-in without that raw payload was rejected before conversion.
+        // not an optimization. Native entries serialize their CURRENT state;
+        // deferred entries preserve source tags without registry fabrication.
         let mut structures = CompoundTag::new();
         structures.put(
             "starts".to_string(),
-            Tag::Compound(self.structure_starts.clone().unwrap_or_default()),
+            Tag::Compound(self.chunk.serialized_starts(ToString::to_string)),
         );
         let mut reference_map = CompoundTag::new();
         for reference in self.structures_references() {
@@ -330,7 +282,6 @@ impl LevelChunk {
             chunk: world_chunk,
             stored_block_ticks,
             stored_fluid_ticks,
-            structure_starts,
             ..
         } = reconstruction;
         // Reject an unsupported persisted Starlight state before the #184 send
@@ -371,7 +322,6 @@ impl LevelChunk {
             light_data,
             stored_block_ticks,
             stored_fluid_ticks,
-            structure_starts,
             post_load_entities: Vec::new(),
         })
     }
@@ -461,7 +411,6 @@ impl LevelChunk {
             light_data,
             stored_block_ticks: block_ticks,
             stored_fluid_ticks: fluid_ticks,
-            structure_starts: None,
             post_load_entities,
         })
     }
@@ -700,20 +649,29 @@ impl LevelChunk {
     }
 
     /// `ChunkAccess.getAllStarts()` — the typed structure-starts authority on
-    /// the base (`StructureAccess`, #537). `StructureStart` is unported
-    /// (#369), so each value is the `i64` stand-in; a generated proto's starts
-    /// carry through the FULL promotion untouched, and the region
-    /// reconstruction installs none (the raw `structures.starts` compound is
-    /// carried separately as [`Self::structure_starts`]).
-    pub fn get_all_starts(&self) -> &HashMap<StructureKey, i64> {
+    /// the base. Entries distinguish native executable starts from deferred
+    /// persisted tags; neither is duplicated in a server-side shadow map.
+    pub fn get_all_starts(
+        &self,
+    ) -> &HashMap<StructureKey, rivet_world::chunk::structure_access::StructureStartEntry> {
         self.chunk.get_all_starts()
     }
 
     /// `ChunkAccess.setAllStarts(Map)` — the typed structure-starts runtime
     /// mutator (#537): clear + putAll into the chunk's `StructureAccess`
     /// authority.
-    pub fn set_all_starts(&mut self, starts: HashMap<StructureKey, i64>) {
+    pub fn set_all_starts(
+        &mut self,
+        starts: HashMap<StructureKey, rivet_world::chunk::structure_access::StructureStartEntry>,
+    ) {
         self.chunk.set_all_starts(starts);
+    }
+
+    pub fn get_start_for_structure_mut(
+        &mut self,
+        key: &StructureKey,
+    ) -> Option<&mut rivet_world::chunk::structure_access::StructureStartEntry> {
+        self.chunk.get_start_for_structure_mut(key)
     }
 
     /// The decoded `structures.References` after the >8-chunk distance filter
@@ -871,10 +829,6 @@ pub enum LevelChunkSaveError {
     /// The owned value transform rejected a hostile palette mapping.
     #[error("failed to snapshot canonical chunk for save: {0}")]
     PaletteMap(String),
-    /// The live structure map contains typed stand-ins but no retained raw
-    /// `StructureStart` payload that can be emitted faithfully.
-    #[error("cannot serialize live structure starts without a retained raw StructureStart payload")]
-    UnserializableStructureStarts,
 }
 
 /// A reconstructed chunk carries a persisted Starlight initialisation state
@@ -996,8 +950,8 @@ pub(crate) fn superflat_content() -> rivet_world::superflat::SuperflatChunkConte
 #[cfg(test)]
 mod tests {
     use super::{
-        BiomeId, LevelChunk, LevelChunkBridgeError, LevelChunkSaveError, StateId, StructureKey,
-        WorldgenBiomeId, strategies,
+        BiomeId, LevelChunk, LevelChunkBridgeError, StateId, StructureKey, WorldgenBiomeId,
+        strategies,
     };
     use bytes::BytesMut;
     use rivet_nbt::compound_tag::CompoundTag;
@@ -1681,7 +1635,19 @@ mod tests {
     #[test]
     fn structure_starts_and_references_carry_through_the_conversion() {
         let mut proto = build_persisted_full_proto(ChunkPos::new(2, -1));
-        proto.set_start_for_structure(Identifier::parse("minecraft:village"), 42);
+        use rivet_world::levelgen::structure::{
+            StructureDefinition, StructureStart, TerrainAdjustment,
+        };
+        let start = StructureStart::new(
+            StructureDefinition::BuriedTreasure {
+                registry_id: "minecraft:buried_treasure".into(),
+                terrain_adjustment: TerrainAdjustment::None,
+            },
+            proto.get_pos(),
+            42,
+            StructureDefinition::buried_treasure_pieces(proto.get_pos()),
+        );
+        proto.set_start_for_structure(Identifier::parse("minecraft:village"), start);
         proto.add_reference_for_structure(Identifier::parse("minecraft:village"), 7);
 
         let chunk = LevelChunk::from_persisted_full_proto(proto).expect("a FULL proto promotes");
@@ -1690,8 +1656,13 @@ mod tests {
         let starts = chunk.get_all_starts();
         assert_eq!(starts.len(), 1);
         assert_eq!(
-            starts.get(&Identifier::parse("minecraft:village")),
-            Some(&42)
+            starts
+                .get(&Identifier::parse("minecraft:village"))
+                .unwrap()
+                .native()
+                .unwrap()
+                .references(),
+            42
         );
 
         // The references authority carries too, observable through the derived
@@ -1701,14 +1672,114 @@ mod tests {
         assert_eq!(references[0].identifier.to_string(), "minecraft:village");
         assert_eq!(references[0].references, vec![7]);
 
-        // The raw `structures.starts` compound stays `None` — that verbatim
-        // carry belongs to the region-reconstruction path only, and is never
-        // fabricated for the generated path.
-        assert!(chunk.structure_starts().is_none());
+        // Native starts serialize directly from the promoted canonical owner.
+        let saved = chunk.snapshot_for_save(0).expect("native starts serialize");
+        let starts = saved
+            .get_compound("structures")
+            .unwrap()
+            .get_compound("starts")
+            .unwrap();
+        let native = starts.get_compound("minecraft:village").unwrap();
+        assert_eq!(native.get_int_or("references", -1), 42);
+        assert_eq!(native.get_list_or_empty("Children").size(), 1);
+        assert_eq!(native.get_int_or("ChunkX", 0), 2);
+        assert_eq!(native.get_int_or("ChunkZ", 0), -1);
+    }
+
+    #[test]
+    fn native_start_mutation_replaces_deferred_payload_without_a_shadow_copy() {
+        use rivet_nbt::tag::Tag;
+        use rivet_world::levelgen::structure::{
+            StructureDefinition, StructureError, StructureStart, TerrainAdjustment,
+        };
+        let pos = ChunkPos::new(2, -1);
+        let key = Identifier::parse("minecraft:buried_treasure");
+        let mut raw = CompoundTag::new();
+        let mut old = CompoundTag::new();
+        old.put_string("id", "minecraft:buried_treasure");
+        old.put_int("references", 77);
+        old.put_string("unresolved_payload", "retain until actual registry decode");
+        raw.put(key.to_string(), Tag::Compound(old));
+        raw.put_string("minecraft:village", "pending unsupported source payload");
+        raw.put_string(
+            "BAD KEY!",
+            "preserved, not accepted as a native registry key",
+        );
+        let mut proto = build_persisted_full_proto(pos);
+        proto.base_mut().defer_serialized_starts(&raw, |key| {
+            Identifier::try_parse(key).filter(|id| id.to_string() == key)
+        });
+        let mut chunk = LevelChunk::from_persisted_full_proto(proto).unwrap();
+        assert_eq!(chunk.structure_starts(), Some(raw.clone()));
         assert!(matches!(
-            chunk.snapshot_for_save(0),
-            Err(LevelChunkSaveError::UnserializableStructureStarts)
+            chunk.get_all_starts()[&key].native(),
+            Err(StructureError::RegistryUnavailable)
         ));
+
+        let native = StructureStart::new(
+            StructureDefinition::BuriedTreasure {
+                registry_id: key.to_string(),
+                terrain_adjustment: TerrainAdjustment::None,
+            },
+            pos,
+            0,
+            StructureDefinition::buried_treasure_pieces(pos),
+        );
+        *chunk.get_start_for_structure_mut(&key).unwrap() = native.into();
+        let start = chunk
+            .get_start_for_structure_mut(&key)
+            .unwrap()
+            .native_mut()
+            .unwrap();
+        start.add_reference();
+        start
+            .persistent_data
+            .put_string("test:owner", "native current data");
+        let saved = chunk.snapshot_for_save(0).unwrap();
+        let starts = saved
+            .get_compound("structures")
+            .unwrap()
+            .get_compound("starts")
+            .unwrap();
+        let start = starts.get_compound("minecraft:buried_treasure").unwrap();
+        assert_eq!(start.get_int_or("references", -1), 1);
+        assert!(
+            start.get("unresolved_payload").is_none(),
+            "old raw copy must not shadow native writes"
+        );
+        assert_eq!(
+            start
+                .get_compound("StructureBukkitValues")
+                .unwrap()
+                .get_string_or("test:owner", ""),
+            "native current data"
+        );
+        assert_eq!(start.get_list_or_empty("Children").size(), 1);
+        assert_eq!(
+            starts.get("minecraft:village"),
+            raw.get("minecraft:village")
+        );
+        assert_eq!(starts.get("BAD KEY!"), raw.get("BAD KEY!"));
+
+        // Save reads current references again, not the prior saved snapshot.
+        chunk
+            .get_start_for_structure_mut(&key)
+            .unwrap()
+            .native_mut()
+            .unwrap()
+            .add_reference();
+        let saved = chunk.snapshot_for_save(0).unwrap();
+        assert_eq!(
+            saved
+                .get_compound("structures")
+                .unwrap()
+                .get_compound("starts")
+                .unwrap()
+                .get_compound("minecraft:buried_treasure")
+                .unwrap()
+                .get_int_or("references", -1),
+            2
+        );
     }
 
     /// Every persisted status short of genuine `FULL` is refused atomically

@@ -1248,6 +1248,44 @@ mod tests {
         );
     }
 
+    fn assert_spawn_east_unload_packets(packets: &[crate::server::level::PlayPacket]) {
+        use rivet_protocol::generated::packets::play::clientbound::PacketType;
+        let old = ChunkTrackingView::of(ChunkPos::new(-1, -3), 4);
+        let next = ChunkTrackingView::of(ChunkPos::new(0, -3), 4);
+        let mut departed = Vec::new();
+        old.for_each(|pos| {
+            if !next.contains_pos(&pos) {
+                departed.push(pos)
+            }
+        });
+        let actual: Vec<_> = packets[..departed.len()]
+            .iter()
+            .map(|packet| {
+                assert_eq!(packet.id, PacketType::ForgetLevelChunk.id());
+                ChunkPos::unpack(i64::from_be_bytes(
+                    packet
+                        .body
+                        .as_slice()
+                        .try_into()
+                        .expect("one packed chunk long"),
+                ))
+            })
+            .collect();
+        assert_eq!(
+            actual, departed,
+            "real negative-coordinate unloads precede the cache-center packet"
+        );
+        assert_eq!(
+            packets[departed.len()].id,
+            PacketType::SetChunkCacheCenter.id()
+        );
+        assert!(
+            packets[departed.len() + 1..]
+                .iter()
+                .all(|p| p.id == PacketType::LevelChunkWithLight.id())
+        );
+    }
+
     /// A movement-driven recenter (issue #521) east from the spawn chunk
     /// resolves every entered cell from the read-only region on demand (issue
     /// #185) and installs it into the `ChunkMap` — no disconnect, no generation,
@@ -1276,6 +1314,7 @@ mod tests {
         let packets = loader
             .update(&mut world, ChunkPos::new(0, -3), None)
             .expect("the recenter loads the entered cells on demand");
+        assert_spawn_east_unload_packets(&packets);
 
         // The cache-center packet then exactly the 11 entered chunks.
         let chunk_packets: Vec<&crate::server::level::PlayPacket> = packets
@@ -1424,6 +1463,7 @@ mod tests {
         let packets = loader
             .update(&mut world, ChunkPos::new(0, -3), None)
             .expect("the recenter loads starts-bearing entered cells on demand");
+        assert_spawn_east_unload_packets(&packets);
         let chunk_packets: Vec<&crate::server::level::PlayPacket> = packets
             .iter()
             .filter(|p| {

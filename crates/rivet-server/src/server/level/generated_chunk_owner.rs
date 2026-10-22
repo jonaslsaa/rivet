@@ -1,0 +1,565 @@
+//! Canonical tick-thread generation ownership. Dependencies come exclusively
+//! from the actual status pyramid; unavailable bodies are never pass-throughs.
+use super::generated_world::{
+    FeatureWorkspace, FeatureWritebacks, GeneratedChunkError, GenerationChunkHolder,
+    GenerationChunkLoan, GenerationChunkState, OverworldGenerator,
+};
+use rivet_registry::core::ChunkPos;
+use rivet_world::chunk::status::{ChunkStatus, chunk_pyramid::GENERATION_PYRAMID};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct GenerationConsumerId(u64);
+
+#[derive(Debug)]
+pub enum GenerationOwnerError {
+    StructureGenerationUnavailable { status: ChunkStatus },
+    Generation(GeneratedChunkError),
+}
+impl std::fmt::Display for GenerationOwnerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StructureGenerationUnavailable { status } => write!(
+                f,
+                "actual structure generation is unavailable for {status:?}"
+            ),
+            Self::Generation(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum GenerationReadiness<'a> {
+    Ready,
+    Pending,
+    Failed {
+        pos: ChunkPos,
+        status: ChunkStatus,
+        error: &'a GenerationOwnerError,
+    },
+}
+
+#[derive(Default, Debug, PartialEq, Eq)]
+pub struct GenerationJobReport {
+    pub attempted: usize,
+    pub advanced: usize,
+    pub failed: usize,
+}
+
+pub struct GenerationAdmissionError {
+    pub state: GenerationChunkState,
+}
+
+struct Entry {
+    state: GenerationChunkState,
+    failure: Option<(ChunkStatus, GenerationOwnerError)>,
+}
+
+/// The owner retains values after cancellation. Eviction/save acknowledgement
+/// is intentionally not conflated with removing a consumer's demand.
+pub struct GeneratedChunkOwner {
+    generator: Arc<OverworldGenerator>,
+    next_consumer: u64,
+    consumers: HashMap<GenerationConsumerId, HashMap<ChunkPos, ChunkStatus>>,
+    required: HashMap<ChunkPos, ChunkStatus>,
+    chunks: HashMap<ChunkPos, Entry>,
+}
+
+impl GeneratedChunkOwner {
+    pub fn new(generator: Arc<OverworldGenerator>) -> Self {
+        Self {
+            generator,
+            next_consumer: 0,
+            consumers: HashMap::new(),
+            required: HashMap::new(),
+            chunks: HashMap::new(),
+        }
+    }
+    pub fn generator(&self) -> &Arc<OverworldGenerator> {
+        &self.generator
+    }
+    pub fn new_consumer(&mut self) -> GenerationConsumerId {
+        let id = GenerationConsumerId(self.next_consumer);
+        self.next_consumer = self
+            .next_consumer
+            .checked_add(1)
+            .expect("generation consumer ID exhaustion");
+        self.consumers.insert(id, HashMap::new());
+        id
+    }
+    pub fn replace_requests(
+        &mut self,
+        id: GenerationConsumerId,
+        requests: impl IntoIterator<Item = (ChunkPos, ChunkStatus)>,
+    ) -> bool {
+        let Some(consumer) = self.consumers.get_mut(&id) else {
+            return false;
+        };
+        consumer.clear();
+        for (pos, target) in requests {
+            consumer
+                .entry(pos)
+                .and_modify(|old| *old = ChunkStatus::max(*old, target))
+                .or_insert(target);
+        }
+        self.rebuild_requirements();
+        true
+    }
+    pub fn release_consumer(&mut self, id: GenerationConsumerId) -> bool {
+        let removed = self.consumers.remove(&id).is_some();
+        if removed {
+            self.rebuild_requirements();
+        }
+        removed
+    }
+    fn rebuild_requirements(&mut self) {
+        self.required.clear();
+        for consumer in self.consumers.values() {
+            for (&pos, &target) in consumer {
+                for (dependency, status) in dependencies(pos, target, true) {
+                    self.required
+                        .entry(dependency)
+                        .and_modify(|old| *old = ChunkStatus::max(*old, status))
+                        .or_insert(status);
+                }
+                self.required
+                    .entry(pos)
+                    .and_modify(|old| *old = ChunkStatus::max(*old, target))
+                    .or_insert(target);
+            }
+        }
+    }
+    pub fn requested_status(&self, pos: ChunkPos) -> Option<ChunkStatus> {
+        self.required.get(&pos).copied()
+    }
+    pub fn state(&self, pos: ChunkPos) -> Option<&GenerationChunkState> {
+        self.chunks.get(&pos).map(|entry| &entry.state)
+    }
+    pub fn len(&self) -> usize {
+        self.chunks.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
+    fn status(&self, pos: ChunkPos) -> ChunkStatus {
+        self.state(pos)
+            .map_or(ChunkStatus::Empty, GenerationChunkState::status)
+    }
+
+    /// Adopt an ungenerated same-world holder state. Older standalone holders
+    /// can carry provisional structure statuses, so advanced-state admission
+    /// stays closed until a genuine completed-structure producer is attached.
+    pub fn admit(
+        &mut self,
+        state: GenerationChunkState,
+    ) -> Result<(), Box<GenerationAdmissionError>> {
+        if !state.belongs_to(&self.generator)
+            || self.chunks.contains_key(&state.pos())
+            || state.has_retained_dependencies()
+            || state.has_structure_capability()
+            || state.status() != ChunkStatus::Empty
+        {
+            return Err(Box::new(GenerationAdmissionError { state }));
+        }
+        self.chunks.insert(
+            state.pos(),
+            Entry {
+                state,
+                failure: None,
+            },
+        );
+        Ok(())
+    }
+    pub fn readiness(&self, pos: ChunkPos, target: ChunkStatus) -> GenerationReadiness<'_> {
+        if self
+            .state(pos)
+            .is_some_and(|state| state.status().is_or_after(target))
+        {
+            return GenerationReadiness::Ready;
+        }
+        let mut required = dependencies(pos, target, true);
+        required.push((pos, target));
+        for (dependency, status) in required {
+            if let Some(entry) = self.chunks.get(&dependency)
+                && let Some((failed_status, error)) = &entry.failure
+                && status.is_or_after(*failed_status)
+            {
+                return GenerationReadiness::Failed {
+                    pos: dependency,
+                    status: *failed_status,
+                    error,
+                };
+            }
+        }
+        GenerationReadiness::Pending
+    }
+    /// Explicit retry after an external capability change; canonical data and
+    /// the holder's own terminal FEATURES failure cache remain intact.
+    pub fn retry(&mut self, pos: ChunkPos) -> bool {
+        self.chunks
+            .get_mut(&pos)
+            .is_some_and(|entry| entry.failure.take().is_some())
+    }
+    pub fn run_jobs(&mut self, max_jobs: usize) -> GenerationJobReport {
+        let mut report = GenerationJobReport::default();
+        while report.attempted < max_jobs {
+            let mut ready: Vec<_> = self
+                .required
+                .iter()
+                .filter_map(|(&pos, &target)| {
+                    let current = self.status(pos);
+                    if (current.is_or_after(target)
+                        && (self.chunks.contains_key(&pos) || target != ChunkStatus::Empty))
+                        || self
+                            .chunks
+                            .get(&pos)
+                            .is_some_and(|entry| entry.failure.is_some())
+                    {
+                        return None;
+                    }
+                    let next = if target == ChunkStatus::Empty {
+                        ChunkStatus::Empty
+                    } else {
+                        ChunkStatus::ALL[current.index() + 1]
+                    };
+                    dependencies(pos, next, false)
+                        .iter()
+                        .all(|&(neighbor, status)| self.status(neighbor).is_or_after(status))
+                        .then_some((next, pos))
+                })
+                .collect();
+            ready.sort_by_key(|(status, pos)| (status.index(), pos.x(), pos.z()));
+            let Some((next, pos)) = ready.first().copied() else {
+                break;
+            };
+            report.attempted += 1;
+            let entry = self.chunks.entry(pos).or_insert_with(|| Entry {
+                state: self.generator.create_holder(pos).into_state(),
+                failure: None,
+            });
+            // Existing executor structure stubs are not generation capability.
+            if matches!(
+                next,
+                ChunkStatus::StructureStarts | ChunkStatus::StructureReferences
+            ) {
+                entry.failure = Some((
+                    next,
+                    GenerationOwnerError::StructureGenerationUnavailable { status: next },
+                ));
+                report.failed += 1;
+                continue;
+            }
+            let entry = self.chunks.remove(&pos).expect("selected canonical chunk");
+            let workspace = FeatureWorkspace::new();
+            let mut loans = HashMap::new();
+            if next == ChunkStatus::Features {
+                for (neighbor, _) in dependencies(pos, next, true) {
+                    let entry = self
+                        .chunks
+                        .remove(&neighbor)
+                        .expect("ready canonical FEATURES dependency");
+                    let (chunk, metadata) = entry.state.into_loan();
+                    workspace.insert(chunk);
+                    loans.insert(neighbor, (metadata, entry.failure));
+                }
+            }
+            let (mut holder, light) = match GenerationChunkHolder::from_state(
+                entry.state,
+                Arc::clone(&self.generator),
+                workspace,
+                None,
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    self.return_loans(error.workspace.take_all(), loans);
+                    self.chunks.insert(
+                        pos,
+                        Entry {
+                            state: error.state,
+                            failure: entry.failure,
+                        },
+                    );
+                    panic!(
+                        "canonical generation owner produced inconsistent resume state: {:?}",
+                        error.reason
+                    );
+                }
+            };
+            // LIGHT attachment is an explicit later job seam, not a fabricated
+            // engine. Keep detached storage even if this rung refuses.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                holder.generate_through(next)
+            }));
+            let mut state = holder.into_state();
+            self.return_loans(state.take_feature_dependencies(), loans);
+            if let Some(light) = light {
+                state.restore_generated_light_storage(light);
+            }
+            match result {
+                Ok(Ok(())) => {
+                    self.chunks.insert(
+                        pos,
+                        Entry {
+                            state,
+                            failure: None,
+                        },
+                    );
+                    report.advanced += 1;
+                }
+                Ok(Err(error)) => {
+                    self.chunks.insert(
+                        pos,
+                        Entry {
+                            state,
+                            failure: Some((next, GenerationOwnerError::Generation(error))),
+                        },
+                    );
+                    report.failed += 1;
+                }
+                Err(payload) => {
+                    self.chunks.insert(
+                        pos,
+                        Entry {
+                            state,
+                            failure: entry.failure,
+                        },
+                    );
+                    std::panic::resume_unwind(payload);
+                }
+            }
+        }
+        report
+    }
+
+    fn return_loans(
+        &mut self,
+        chunks: FeatureWritebacks,
+        mut loans: HashMap<
+            ChunkPos,
+            (
+                GenerationChunkLoan,
+                Option<(ChunkStatus, GenerationOwnerError)>,
+            ),
+        >,
+    ) {
+        for (pos, chunk) in chunks {
+            let (metadata, failure) = loans
+                .remove(&pos)
+                .expect("returned dependency belongs to canonical loan");
+            let state = match metadata.rejoin(chunk) {
+                Ok(state) => state,
+                Err(_) => unreachable!("region cannot change a chunk coordinate"),
+            };
+            assert!(
+                self.chunks.insert(pos, Entry { state, failure }).is_none(),
+                "loaned chunk cannot have another canonical owner"
+            );
+        }
+        assert!(
+            loans.is_empty(),
+            "region must return every canonical dependency"
+        );
+    }
+}
+
+fn dependencies(
+    pos: ChunkPos,
+    target: ChunkStatus,
+    accumulated: bool,
+) -> Vec<(ChunkPos, ChunkStatus)> {
+    let step = GENERATION_PYRAMID.get_step_to(target);
+    let deps = if accumulated {
+        step.accumulated_dependencies()
+    } else {
+        step.direct_dependencies()
+    };
+    let radius = deps.size() as i32 - 1;
+    let mut result = Vec::new();
+    for dx in -radius..=radius {
+        for dz in -radius..=radius {
+            if dx == 0 && dz == 0 {
+                continue;
+            }
+            result.push((
+                ChunkPos::new(pos.x().wrapping_add(dx), pos.z().wrapping_add(dz)),
+                deps.get(dx.abs().max(dz.abs()) as usize),
+            ));
+        }
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn generator() -> Arc<OverworldGenerator> {
+        static GENERATOR: std::sync::LazyLock<Arc<OverworldGenerator>> =
+            std::sync::LazyLock::new(|| Arc::new(OverworldGenerator::new(42)));
+        Arc::clone(&GENERATOR)
+    }
+    #[test]
+    fn empty_job_is_real_owned_progress_and_structure_refusal_keeps_actual_status() {
+        fn assert_send<T: Send>() {}
+        assert_send::<GeneratedChunkOwner>();
+        let mut owner = GeneratedChunkOwner::new(generator());
+        let consumer = owner.new_consumer();
+        owner.replace_requests(consumer, [(ChunkPos::ZERO, ChunkStatus::Empty)]);
+        assert!(matches!(
+            owner.readiness(ChunkPos::ZERO, ChunkStatus::Empty),
+            GenerationReadiness::Pending
+        ));
+        assert_eq!(owner.run_jobs(0).attempted, 0);
+        assert!(owner.is_empty());
+        assert_eq!(
+            owner.run_jobs(1),
+            GenerationJobReport {
+                attempted: 1,
+                advanced: 1,
+                failed: 0
+            }
+        );
+        assert!(matches!(
+            owner.readiness(ChunkPos::ZERO, ChunkStatus::Empty),
+            GenerationReadiness::Ready
+        ));
+        owner.replace_requests(consumer, [(ChunkPos::ZERO, ChunkStatus::StructureStarts)]);
+        assert_eq!(
+            owner.run_jobs(1),
+            GenerationJobReport {
+                attempted: 1,
+                advanced: 0,
+                failed: 1
+            }
+        );
+        assert_eq!(
+            owner.state(ChunkPos::ZERO).unwrap().status(),
+            ChunkStatus::Empty
+        );
+        assert!(matches!(
+            owner.readiness(ChunkPos::ZERO, ChunkStatus::StructureStarts),
+            GenerationReadiness::Failed {
+                status: ChunkStatus::StructureStarts,
+                error: GenerationOwnerError::StructureGenerationUnavailable { .. },
+                ..
+            }
+        ));
+        assert_eq!(owner.run_jobs(5).attempted, 0, "failure must not hot-loop");
+        assert!(owner.retry(ChunkPos::ZERO));
+        assert_eq!(
+            owner.run_jobs(1).failed,
+            1,
+            "retry cannot fabricate new capability"
+        );
+    }
+    #[test]
+    fn overlapping_consumers_merge_exact_pyramid_requirements_and_cancel_independently() {
+        let mut owner = GeneratedChunkOwner::new(generator());
+        let first = owner.new_consumer();
+        let second = owner.new_consumer();
+        owner.replace_requests(first, [(ChunkPos::ZERO, ChunkStatus::Features)]);
+        owner.replace_requests(second, [(ChunkPos::ZERO, ChunkStatus::Carvers)]);
+        assert_eq!(
+            owner.requested_status(ChunkPos::ZERO),
+            Some(ChunkStatus::Features)
+        );
+        assert_eq!(
+            owner.requested_status(ChunkPos::new(1, 0)),
+            Some(ChunkStatus::Carvers)
+        );
+        assert_eq!(
+            owner.requested_status(ChunkPos::new(8, 0)),
+            Some(ChunkStatus::StructureStarts)
+        );
+        let report = owner.run_jobs(2);
+        assert_eq!(report.attempted, 2);
+        assert_eq!(report.failed, 2);
+        let retained = owner.len();
+        assert!(owner.release_consumer(first));
+        assert_eq!(
+            owner.requested_status(ChunkPos::ZERO),
+            Some(ChunkStatus::Carvers)
+        );
+        assert!(owner.release_consumer(second));
+        assert_eq!(owner.requested_status(ChunkPos::ZERO), None);
+        assert_eq!(owner.run_jobs(10).attempted, 0);
+        assert_eq!(
+            owner.len(),
+            retained,
+            "cancellation is not unsaved eviction"
+        );
+        assert!(!owner.replace_requests(first, [(ChunkPos::ZERO, ChunkStatus::Full)]));
+    }
+    #[test]
+    fn admission_refuses_provisional_advanced_status_without_losing_state() {
+        let generator = generator();
+        let mut state = generator.create_holder(ChunkPos::ZERO).into_state();
+        // A hostile caller cannot turn a status label into verified structure
+        // generation authority through the owner admission API.
+        state.chunk_mut().set_persisted_status(ChunkStatus::Carvers);
+        let mut owner = GeneratedChunkOwner::new(generator);
+        let error = owner.admit(state).expect_err("unverified advanced state");
+        assert_eq!(error.state.status(), ChunkStatus::Carvers);
+        assert!(owner.is_empty());
+    }
+
+    #[test]
+    fn admission_refuses_structure_capability_and_returns_original_payload() {
+        use rivet_world::block::blocks::Blocks;
+        let generator = generator();
+        let mut state = generator
+            .create_holder_with_structure_feature_count(ChunkPos::ZERO, Some(0))
+            .into_state();
+        state
+            .chunk_mut()
+            .set_block_state(0, 64, 0, Blocks::STONE.default_block_state());
+        let neighbor = generator.create_holder(ChunkPos::new(1, 0)).into_state();
+        let runtime =
+            crate::server::lighting::GeneratedLightBridge::runtime_from_generated(neighbor.chunk())
+                .expect("real neighbour value conversion");
+        let (runtime, _) = runtime.into_base_and_entities();
+        state.restore_generated_light_storage(HashMap::from([((1, 0), runtime)]));
+        let mut owner = GeneratedChunkOwner::new(Arc::clone(&generator));
+        let error = owner
+            .admit(state)
+            .expect_err("owner cannot resume caller-supplied structure capability");
+        assert!(owner.is_empty());
+        assert_eq!(
+            error.state.chunk().get_block_state(0, 64, 0),
+            Blocks::STONE.default_block_state()
+        );
+        let (holder, light) = GenerationChunkHolder::from_state(
+            error.state,
+            generator,
+            FeatureWorkspace::new(),
+            Some(0),
+        )
+        .expect("original capability remains recoverable");
+        assert_eq!(holder.into_state().status(), ChunkStatus::Empty);
+        let light = light.expect("admission failure must retain light ownership");
+        assert_eq!(light.len(), 1);
+        assert_eq!(light[&(1, 0)].get_pos(), ChunkPos::new(1, 0));
+    }
+
+    #[test]
+    fn admitted_light_storage_survives_strict_structure_failure() {
+        let generator = generator();
+        let mut state = generator.create_holder(ChunkPos::ZERO).into_state();
+        // A detached task may legitimately own an empty fresh-light window.
+        state.restore_generated_light_storage(HashMap::new());
+        let mut owner = GeneratedChunkOwner::new(generator);
+        assert!(owner.admit(state).is_ok());
+        let consumer = owner.new_consumer();
+        owner.replace_requests(consumer, [(ChunkPos::ZERO, ChunkStatus::StructureStarts)]);
+        assert_eq!(owner.run_jobs(1).failed, 1);
+        assert!(
+            owner
+                .chunks
+                .get_mut(&ChunkPos::ZERO)
+                .unwrap()
+                .state
+                .take_generated_light_storage()
+                .is_some()
+        );
+    }
+}

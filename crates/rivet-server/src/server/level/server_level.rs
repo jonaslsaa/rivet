@@ -42,8 +42,13 @@ use super::chunk_storage_worker::{
     ChunkSave, ChunkStorageWorker, StorageWorkerError, StorageWorkerOutcome,
 };
 use super::chunk_tracking_view::ChunkTrackingView;
+use super::generated_chunk_owner::{GeneratedChunkOwner, GenerationReadiness};
+use super::generated_world::OverworldGenerator;
 use super::level_chunk::LevelChunkSaveError;
+use super::player_chunk_loader::ChunkSendReadiness;
 use super::region_backed::{RegionBackedBootError, RegionChunkSource};
+use rivet_world::chunk::status::ChunkStatus;
+use std::sync::Arc;
 
 /// How the player send path handles a position absent from `ChunkMap`.
 /// Repeating spawn content is confined to the legacy no-level fixture;
@@ -191,6 +196,9 @@ pub struct ServerLevel {
     /// (the region `fs::File` handles are owned, not shared), so the world
     /// stays `Send + !Sync` under the confinement marker.
     region_source: Option<RegionChunkSource>,
+    /// Canonical in-progress generation state, confined to the world tick
+    /// thread. Saved-world loading never implicitly enables generation.
+    generated_chunk_owner: Option<GeneratedChunkOwner>,
     /// Tick-thread confinement marker (OWNERSHIP §Ownership tree): `Cell` is
     /// `Send + !Sync`, so a `&ServerLevel` is rejected at compile time when it
     /// would cross threads.
@@ -198,6 +206,32 @@ pub struct ServerLevel {
 }
 
 impl ServerLevel {
+    /// Construct an explicitly generated world without installing placeholder
+    /// terrain. The supplied respawn position is not a generated spawn search;
+    /// joining must wait for its real runtime chunk to become available.
+    pub fn new_generated(
+        config: ServerLevelConfig,
+        generator: Arc<OverworldGenerator>,
+    ) -> Result<Self, &'static str> {
+        let settings = generator.generator();
+        if config.seed != generator.seed()
+            || config.min_y != settings.get_min_y()
+            || config.height != settings.get_gen_depth()
+            || config.sea_level != settings.get_sea_level()
+            || config.is_flat
+            || config.missing_chunk_policy != MissingChunkPolicy::RequireLoaded
+            || config.dimension != overworld_dimension()
+            || config.respawn_data.global_pos().dimension() != &config.dimension
+            || config.spawn_chunk != ChunkPos::containing(&config.respawn_data.pos())
+        {
+            return Err("generated world configuration does not match its overworld generator");
+        }
+        let chunk_map = ChunkMap::empty(config.view_distance);
+        let mut level = Self::with_chunk_map(config, chunk_map);
+        level.generated_chunk_owner = Some(GeneratedChunkOwner::new(generator));
+        Ok(level)
+    }
+
     /// `new ServerLevel(...)` — a deterministic single-superflat-dimension
     /// world owning a `ChunkMap` with the spawn chunk loaded.
     pub fn new(config: ServerLevelConfig) -> Self {
@@ -240,6 +274,7 @@ impl ServerLevel {
             is_flat: config.is_flat,
             game_time: 0,
             region_source: None,
+            generated_chunk_owner: None,
             _confinement: std::marker::PhantomData,
         }
     }
@@ -357,6 +392,41 @@ impl ServerLevel {
         self.region_source.is_some()
     }
 
+    pub fn generated_chunk_owner(&self) -> Option<&GeneratedChunkOwner> {
+        self.generated_chunk_owner.as_ref()
+    }
+
+    pub fn generated_chunk_owner_mut(&mut self) -> Option<&mut GeneratedChunkOwner> {
+        self.generated_chunk_owner.as_mut()
+    }
+
+    /// Resolve readiness before encoding. A completed proto is not a sendable
+    /// runtime chunk: only the canonical ChunkMap makes generated data ready.
+    pub fn prepare_chunk_for_send(&mut self, pos: ChunkPos) -> Result<ChunkSendReadiness, String> {
+        if self.chunk_map.get_chunk(pos).is_some() {
+            return Ok(ChunkSendReadiness::Ready);
+        }
+        if let Some(owner) = &self.generated_chunk_owner {
+            return match owner.readiness(pos, ChunkStatus::Full) {
+                GenerationReadiness::Failed { error, .. } => Err(error.to_string()),
+                GenerationReadiness::Ready | GenerationReadiness::Pending => {
+                    Ok(ChunkSendReadiness::Pending)
+                }
+            };
+        }
+        match self.missing_chunk_policy {
+            MissingChunkPolicy::RepeatSpawnFixture => Ok(ChunkSendReadiness::Ready),
+            MissingChunkPolicy::RequireLoaded if self.region_source.is_some() => {
+                self.load_chunk_from_region(pos)
+                    .map_err(|error| error.to_string())?;
+                Ok(ChunkSendReadiness::Ready)
+            }
+            MissingChunkPolicy::RequireLoaded => Err(format!(
+                "UNVERIFIED region-backed chunk {pos} is not loaded; generation and superflat fallback are disabled"
+            )),
+        }
+    }
+
     /// Install the read-only region chunk source the boot prepared — the world's
     /// on-demand authority for chunks outside the boot-time view (issue #185).
     /// The boot calls this only after installing the full 117-chunk view square,
@@ -445,6 +515,42 @@ mod tests {
 
     fn overworld() -> ServerLevel {
         ServerLevel::new(ServerLevelConfig::default())
+    }
+
+    #[test]
+    fn generated_world_waits_for_canonical_runtime_terrain() {
+        let generator = Arc::new(OverworldGenerator::new(42));
+        let config = ServerLevelConfig {
+            is_flat: false,
+            sea_level: generator.generator().get_sea_level(),
+            missing_chunk_policy: MissingChunkPolicy::RequireLoaded,
+            ..ServerLevelConfig::default()
+        };
+        let mut wrong_seed = config.clone();
+        wrong_seed.seed = 43;
+        assert!(ServerLevel::new_generated(wrong_seed, Arc::clone(&generator)).is_err());
+        let mut wrong_spawn = config.clone();
+        wrong_spawn.spawn_chunk = ChunkPos::new(1, 0);
+        assert!(ServerLevel::new_generated(wrong_spawn, Arc::clone(&generator)).is_err());
+        let mut level = ServerLevel::new_generated(config, generator).unwrap();
+        assert!(level.chunk_map().is_empty());
+        assert!(matches!(
+            level.prepare_chunk_for_send(ChunkPos::ZERO),
+            Ok(ChunkSendReadiness::Pending)
+        ));
+        let owner = level.generated_chunk_owner_mut().unwrap();
+        let consumer = owner.new_consumer();
+        owner.replace_requests(consumer, [(ChunkPos::ZERO, ChunkStatus::Full)]);
+        owner.run_jobs(1);
+        assert!(
+            level.chunk_map().is_empty(),
+            "a failed stage must not publish terrain"
+        );
+        // A queued request is neither a loaded chunk nor a fixture fallback.
+        assert!(!matches!(
+            level.prepare_chunk_for_send(ChunkPos::ZERO),
+            Ok(ChunkSendReadiness::Ready)
+        ));
     }
 
     #[test]

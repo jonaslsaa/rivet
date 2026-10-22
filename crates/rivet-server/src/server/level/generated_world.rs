@@ -946,6 +946,51 @@ impl fmt::Debug for GenerationChunkResumeError {
 }
 
 impl GenerationChunkState {
+    pub(super) fn belongs_to(&self, generator: &Arc<OverworldGenerator>) -> bool {
+        Arc::ptr_eq(&self.generator, generator)
+    }
+    pub(super) fn has_retained_dependencies(&self) -> bool {
+        !self.feature_dependencies.is_empty()
+    }
+    pub(super) fn has_structure_capability(&self) -> bool {
+        self.structure_feature_count.is_some()
+    }
+    pub(super) fn restore_generated_light_storage(&mut self, storage: GeneratedLightStorage) {
+        assert!(
+            self.generated_light_storage.is_none(),
+            "light storage must have one owner"
+        );
+        self.generated_light_storage = Some(storage);
+    }
+
+    /// Temporarily loan the actual proto while retaining every holder field.
+    /// Returning a different coordinate is refused without dropping either value.
+    pub fn into_loan(
+        self,
+    ) -> (
+        ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+        GenerationChunkLoan,
+    ) {
+        let Self {
+            chunk,
+            generator,
+            structure_feature_count,
+            features_failure,
+            feature_writebacks,
+            feature_dependencies,
+            generated_light_storage,
+        } = self;
+        let loan = GenerationChunkLoan {
+            pos: chunk.get_pos(),
+            generator,
+            structure_feature_count,
+            features_failure,
+            feature_writebacks,
+            feature_dependencies,
+            generated_light_storage,
+        };
+        (chunk, loan)
+    }
     pub fn pos(&self) -> ChunkPos {
         self.chunk.get_pos()
     }
@@ -968,6 +1013,42 @@ impl GenerationChunkState {
     }
     pub fn take_generated_light_storage(&mut self) -> Option<GeneratedLightStorage> {
         self.generated_light_storage.take()
+    }
+}
+
+/// Metadata held by the canonical owner while a region borrows its proto.
+pub struct GenerationChunkLoan {
+    pos: ChunkPos,
+    generator: Arc<OverworldGenerator>,
+    structure_feature_count: Option<usize>,
+    features_failure: Option<GenError>,
+    feature_writebacks: FeatureWritebacks,
+    feature_dependencies: FeatureWritebacks,
+    generated_light_storage: Option<GeneratedLightStorage>,
+}
+
+pub struct GenerationChunkLoanError {
+    pub chunk: ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+    pub loan: GenerationChunkLoan,
+}
+
+impl GenerationChunkLoan {
+    pub fn rejoin(
+        self,
+        chunk: ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+    ) -> Result<GenerationChunkState, Box<GenerationChunkLoanError>> {
+        if chunk.get_pos() != self.pos {
+            return Err(Box::new(GenerationChunkLoanError { chunk, loan: self }));
+        }
+        Ok(GenerationChunkState {
+            chunk,
+            generator: self.generator,
+            structure_feature_count: self.structure_feature_count,
+            features_failure: self.features_failure,
+            feature_writebacks: self.feature_writebacks,
+            feature_dependencies: self.feature_dependencies,
+            generated_light_storage: self.generated_light_storage,
+        })
     }
 }
 
@@ -4908,6 +4989,22 @@ impl fmt::Debug for GenerationChunkHolder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn structure_start_with_references(
+        references: i32,
+    ) -> rivet_world::levelgen::structure::StructureStart {
+        use rivet_world::levelgen::structure::{
+            StructureDefinition, StructureStart, TerrainAdjustment,
+        };
+        StructureStart::new(
+            StructureDefinition::BuriedTreasure {
+                registry_id: "minecraft:buried_treasure".into(),
+                terrain_adjustment: TerrainAdjustment::None,
+            },
+            ChunkPos::ZERO,
+            references,
+            StructureDefinition::buried_treasure_pieces(ChunkPos::ZERO),
+        )
+    }
     use crate::server::level::level_chunk::{
         StateId as ServerStateId, container_factory, state_flags,
     };
@@ -7927,7 +8024,9 @@ mod tests {
         holder.chunk.set_light_correct(true);
         holder.chunk.base_mut().set_inhabited_time(1234);
         let village = Identifier::parse("minecraft:village");
-        holder.chunk.set_start_for_structure(village.clone(), 11);
+        holder
+            .chunk
+            .set_start_for_structure(village.clone(), structure_start_with_references(11));
         holder.chunk.add_reference_for_structure(village, 13);
         holder.chunk.set_persisted_status(ChunkStatus::Spawn);
 
@@ -7953,8 +8052,12 @@ mod tests {
         assert_eq!(
             chunk
                 .get_all_starts()
-                .get(&Identifier::parse("minecraft:village")),
-            Some(&11)
+                .get(&Identifier::parse("minecraft:village"))
+                .unwrap()
+                .native()
+                .unwrap()
+                .references(),
+            11
         );
         assert_eq!(chunk.structures_references()[0].references, vec![13]);
         let (_, world_surface) = chunk
@@ -8205,9 +8308,10 @@ mod tests {
         let pos = ChunkPos::new(1, 1);
         let promote = |generator: Arc<OverworldGenerator>, start: i64| {
             let mut holder = generator.create_holder(pos);
-            holder
-                .chunk
-                .set_start_for_structure(Identifier::parse("minecraft:village"), start);
+            holder.chunk.set_start_for_structure(
+                Identifier::parse("minecraft:village"),
+                structure_start_with_references(start as i32),
+            );
             holder.chunk.set_persisted_status(ChunkStatus::Spawn);
             let (chunk, generated_light_storage) =
                 holder.into_level_chunk().expect("FULL promotes");
@@ -8232,8 +8336,12 @@ mod tests {
         assert_eq!(
             served
                 .get_all_starts()
-                .get(&Identifier::parse("minecraft:village")),
-            Some(&99)
+                .get(&Identifier::parse("minecraft:village"))
+                .unwrap()
+                .native()
+                .unwrap()
+                .references(),
+            99
         );
     }
 

@@ -44,6 +44,7 @@ use crate::chunk::chunk_access::{ChunkAccess, ChunkStatus};
 use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::paletted_container_factory::PalettedContainerFactory;
 use crate::chunk::strategy::Strategy;
+use crate::chunk::structure_access::StructureStartEntry;
 use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::SimpleLevelHeightAccessor;
 use crate::levelgen::heightmap::{FINAL_HEIGHTMAPS, Heightmap, StateFlags, Types};
@@ -433,22 +434,33 @@ where
     }
 
     /// `ChunkAccess.getStartForStructure(Structure)`.
-    pub fn get_start_for_structure(&self, structure: &S) -> Option<i64> {
+    pub fn get_start_for_structure(&self, structure: &S) -> Option<&StructureStartEntry> {
         self.base.get_start_for_structure(structure)
     }
 
+    pub fn get_start_for_structure_mut(
+        &mut self,
+        structure: &S,
+    ) -> Option<&mut StructureStartEntry> {
+        self.base.get_start_for_structure_mut(structure)
+    }
+
+    pub fn serialized_starts(&self, name: impl Fn(&S) -> String) -> CompoundTag {
+        self.base.serialized_starts(name)
+    }
+
     /// `ChunkAccess.setStartForStructure(Structure, StructureStart)`.
-    pub fn set_start_for_structure(&mut self, structure: S, start: i64) {
+    pub fn set_start_for_structure(&mut self, structure: S, start: impl Into<StructureStartEntry>) {
         self.base.set_start_for_structure(structure, start);
     }
 
     /// `ChunkAccess.getAllStarts()`.
-    pub fn get_all_starts(&self) -> &HashMap<S, i64> {
+    pub fn get_all_starts(&self) -> &HashMap<S, StructureStartEntry> {
         self.base.get_all_starts()
     }
 
     /// `ChunkAccess.setAllStarts(Map)`.
-    pub fn set_all_starts(&mut self, starts: HashMap<S, i64>) {
+    pub fn set_all_starts(&mut self, starts: HashMap<S, StructureStartEntry>) {
         self.base.set_all_starts(starts);
     }
 

@@ -67,6 +67,8 @@ use rivet_text::Component;
 
 use crate::server::keepalive::{KEEPALIVE_LIMIT_NS, KeepaliveResponseOutcome, KeepaliveState};
 use crate::server::level::entity_id_allocator::EntityIdAllocator;
+use crate::server::level::generated_chunk_owner::GenerationConsumerId;
+use crate::server::level::player_chunk_loader::ChunkSendReadiness;
 use crate::server::level::player_chunk_loader::PlayerChunkLoader;
 use crate::server::level::server_level::{ServerLevel, ServerLevelConfig};
 use crate::server::movement_math::{
@@ -160,6 +162,13 @@ pub struct PlayerSessionManager {
     /// anchors. Inserted at session spawn; every inbound move/ack frame is
     /// checked against it; removed alongside the keepalive state on disconnect.
     sessions: std::collections::HashMap<ConnectionId, Session>,
+    terrain_joins: std::collections::HashMap<ConnectionId, TerrainJoin>,
+}
+
+struct TerrainJoin {
+    profile: rivet_registry::core::GameProfile,
+    client_information: rivet_protocol::protocol::common::client_information::ClientInformation,
+    consumer: GenerationConsumerId,
 }
 
 /// The tick-owned session state for one connection (issue #158): the
@@ -266,6 +275,7 @@ impl PlayerSessionManager {
             keepalive: std::collections::HashMap::new(),
             keepalive_timeout_ns: config.keepalive_timeout_ns,
             sessions: std::collections::HashMap::new(),
+            terrain_joins: std::collections::HashMap::new(),
         }
     }
 
@@ -277,9 +287,36 @@ impl PlayerSessionManager {
         let ids: Vec<ConnectionId> = ctx.connections.ids().collect();
         for id in ids {
             if let Some((profile, client_information)) = ctx.connections.take_play_handoff(id) {
-                self.spawn_session(ctx, id, profile, client_information);
+                let spawn = rivet_registry::core::ChunkPos::containing(
+                    &self.level.get_respawn_data().pos(),
+                );
+                if self.level.chunk_map().get_chunk(spawn).is_none()
+                    && let Some(owner) = self.level.generated_chunk_owner_mut()
+                {
+                    let consumer = owner.new_consumer();
+                    owner.replace_requests(
+                        consumer,
+                        [(spawn, rivet_world::chunk::status::ChunkStatus::Full)],
+                    );
+                    self.terrain_joins.insert(
+                        id,
+                        TerrainJoin {
+                            profile,
+                            client_information,
+                            consumer,
+                        },
+                    );
+                } else {
+                    self.spawn_session(ctx, id, profile, client_information);
+                }
             }
         }
+        // Work is bounded by status jobs, not by player movement. Incomplete
+        // terrain never becomes a synthetic runtime chunk or a sent packet.
+        if let Some(owner) = self.level.generated_chunk_owner_mut() {
+            owner.run_jobs(1);
+        }
+        self.drive_terrain_joins(ctx);
         // `tickPlayer()` → `resetPosition()`: refresh every live session's move
         // anchors before any inbound move/ack frame is handled this tick (issue
         // #158). Paper resets `firstGood/lastGood` to the player's position at
@@ -290,6 +327,7 @@ impl PlayerSessionManager {
         for (id, frame) in inbound {
             self.route_inbound(ctx, id, frame);
         }
+        self.drain_ready_chunks(ctx);
         self.drive_keepalives(ctx);
         self.prune_lost(ctx);
     }
@@ -377,6 +415,70 @@ impl PlayerSessionManager {
         for session in self.sessions.values_mut() {
             let pos = session.player.position();
             session.movement.anchors.reset_position(pos.x, pos.y, pos.z);
+        }
+    }
+
+    fn drive_terrain_joins(&mut self, ctx: &mut TickContext) {
+        let ids: Vec<_> = self.terrain_joins.keys().copied().collect();
+        let spawn =
+            rivet_registry::core::ChunkPos::containing(&self.level.get_respawn_data().pos());
+        for id in ids {
+            let readiness = if ctx.connections.contains(id) {
+                self.level.prepare_chunk_for_send(spawn)
+            } else {
+                Err("connection closed while waiting for terrain".into())
+            };
+            if matches!(readiness, Ok(ChunkSendReadiness::Pending)) {
+                continue;
+            }
+            let join = self.terrain_joins.remove(&id).expect("pending join exists");
+            if let Some(owner) = self.level.generated_chunk_owner_mut() {
+                owner.release_consumer(join.consumer);
+            }
+            match readiness {
+                Ok(ChunkSendReadiness::Ready) => {
+                    self.spawn_session(ctx, id, join.profile, join.client_information);
+                }
+                Err(error) => {
+                    let _ = ctx.connections.send(
+                        id,
+                        OutboundEvent::Disconnect {
+                            reason: DisconnectReason::Unsupported(format!(
+                                "spawn terrain: {error}"
+                            )),
+                        },
+                    );
+                }
+                Ok(ChunkSendReadiness::Pending) => unreachable!(),
+            }
+        }
+    }
+
+    fn drain_ready_chunks(&mut self, ctx: &mut TickContext) {
+        let ids: Vec<_> = self.sessions.keys().copied().collect();
+        for id in ids {
+            if !ctx.connections.contains(id) {
+                continue;
+            }
+            let result = self
+                .sessions
+                .get_mut(&id)
+                .expect("session exists")
+                .loader
+                .drain_ready(&mut self.level);
+            match result {
+                Ok(packets) => self.send_loader_packets(ctx, id, packets),
+                Err(error) => {
+                    let _ = ctx.connections.send(
+                        id,
+                        OutboundEvent::Disconnect {
+                            reason: DisconnectReason::Unsupported(format!(
+                                "chunk readiness: {error}"
+                            )),
+                        },
+                    );
+                }
+            }
         }
     }
 
@@ -479,6 +581,13 @@ impl PlayerSessionManager {
             // re-connect starts clean.
             tracing::warn!(%connection_id, %e, "play session burst failed");
             self.indices.remove(&player.uuid());
+            loader.remove(&mut self.level);
+            let _ = ctx.connections.send(
+                connection_id,
+                OutboundEvent::Disconnect {
+                    reason: DisconnectReason::Unsupported(format!("join burst: {e}")),
+                },
+            );
             return;
         }
 
@@ -1087,7 +1196,9 @@ impl PlayerSessionManager {
                         self.move_frames_seen,
                     );
                 }
-                self.sessions.remove(&id);
+                if let Some(mut session) = self.sessions.remove(&id) {
+                    session.loader.remove(&mut self.level);
+                }
             }
         }
         // Reasons for connections this prune did not touch belong to
@@ -1528,6 +1639,60 @@ mod tests {
             create_offline_player_uuid("RivetProbe"),
             "RivetProbe".to_string(),
         )
+    }
+
+    #[test]
+    fn failed_join_chunk_encoding_disconnects_instead_of_leaving_an_orphan() {
+        let mut config = default_session_config(256, 42);
+        config.level = ServerLevel::new_region_backed(ServerLevelConfig {
+            missing_chunk_policy: crate::server::level::MissingChunkPolicy::RequireLoaded,
+            ..ServerLevelConfig::default()
+        });
+        let (mut registry, mut out_rx) = connected_registry();
+        apply_enter_play(&mut registry);
+        let manager = run_tick(PlayerSessionManager::new(config), &mut registry, vec![]);
+        assert_eq!(manager.session_count(), 0);
+        assert!(matches!(drained_disconnect_reason(&mut out_rx),
+            Some(DisconnectReason::Unsupported(reason)) if reason.contains("join burst:")));
+    }
+
+    #[test]
+    fn generated_join_never_spawns_before_terrain_and_releases_lost_demand() {
+        use crate::server::level::{MissingChunkPolicy, OverworldGenerator};
+        use std::sync::Arc;
+        let generator = Arc::new(OverworldGenerator::new(42));
+        let world = ServerLevel::new_generated(
+            ServerLevelConfig {
+                is_flat: false,
+                sea_level: generator.generator().get_sea_level(),
+                missing_chunk_policy: MissingChunkPolicy::RequireLoaded,
+                ..ServerLevelConfig::default()
+            },
+            generator,
+        )
+        .unwrap();
+        let mut config = default_session_config(256, 42);
+        config.level = world;
+        let (mut registry, _out_rx) = connected_registry();
+        apply_enter_play(&mut registry);
+        let mut manager = run_tick(PlayerSessionManager::new(config), &mut registry, vec![]);
+        assert_eq!(manager.session_count(), 0);
+        assert!(manager.sessions.is_empty());
+        assert!(manager.level.chunk_map().is_empty());
+        registry.apply(LifecycleEvent::Disconnect {
+            id: ID,
+            reason: DisconnectReason::Unsupported("test connection loss".into()),
+        });
+        manager = run_tick(manager, &mut registry, vec![]);
+        assert!(manager.terrain_joins.is_empty());
+        assert!(
+            manager
+                .level
+                .generated_chunk_owner()
+                .unwrap()
+                .requested_status(rivet_registry::core::ChunkPos::ZERO)
+                .is_none()
+        );
     }
 
     #[test]
@@ -2862,6 +3027,55 @@ mod tests {
         out
     }
 
+    /// Validate the actual forget-packet prefix before checking the existing
+    /// center/chunk sequence. A pending cell would not appear in this prefix;
+    /// these synchronous fixtures delivered every old-view cell at join.
+    fn assert_recenter_unloads(
+        packets: &[(u32, Vec<u8>)],
+        old: ChunkPos,
+        radius: i32,
+        next: ChunkPos,
+    ) -> &[(u32, Vec<u8>)] {
+        let previous = ChunkTrackingView::of(old, radius);
+        let desired = ChunkTrackingView::of(next, radius);
+        let mut expected = Vec::new();
+        let mut corners = Vec::new();
+        previous.for_each(|pos| {
+            if !desired.contains_pos(&pos) {
+                let margin = i64::from(radius) + 1;
+                if (i64::from(pos.x()) - i64::from(next.x())).abs() <= margin
+                    && (i64::from(pos.z()) - i64::from(next.z())).abs() <= margin
+                {
+                    corners.push(pos);
+                } else {
+                    expected.push(pos);
+                }
+            }
+        });
+        expected.extend(corners);
+        assert!(
+            packets.len() > expected.len(),
+            "unloads followed by cachecenter"
+        );
+        let actual:Vec<_>=packets[..expected.len()].iter().map(|(id,body)| {
+            assert_eq!(*id,rivet_protocol::generated::packets::play::clientbound::PacketType::ForgetLevelChunk.id());
+            ChunkPos::unpack(i64::from_be_bytes(body.as_slice().try_into().expect("forget chunk is exactly one packed long")))
+        }).collect();
+        assert_eq!(
+            actual, expected,
+            "departed delivered cells unload in canonical order before center"
+        );
+        let rest = &packets[expected.len()..];
+        assert_eq!(
+            rest[0].0,
+            rivet_protocol::generated::packets::play::clientbound::PacketType::SetChunkCacheCenter
+                .id()
+        );
+        assert_eq!(center_body_coords(&rest[0].1), next);
+        assert!(rest[1..].iter().all(|(id,_)|*id==rivet_protocol::generated::packets::play::clientbound::PacketType::LevelChunkWithLight.id()));
+        rest
+    }
+
     /// The official-client boundary case (issue #521): a client reporting view
     /// distance 8 (the capture client) joins at spawn chunk (0,0) — the send-4
     /// 117-chunk square spanning -5..5 — then moves into the fringe chunk
@@ -2904,6 +3118,7 @@ mod tests {
             "the loader recenters to the fringe chunk"
         );
         let recenter = drain_outbound_frames(&mut out_rx);
+        let recenter = assert_recenter_unloads(&recenter, ChunkPos::ZERO, 4, ChunkPos::new(-6, -5));
         assert_eq!(
             recenter[0].0,
             rivet_protocol::generated::packets::play::clientbound::PacketType::SetChunkCacheCenter
@@ -3000,6 +3215,7 @@ mod tests {
         );
         assert_eq!(manager.chunk_center(ID), Some(ChunkPos::new(-1, -1)));
         let recenter = drain_outbound_frames(&mut out_rx);
+        let recenter = assert_recenter_unloads(&recenter, ChunkPos::ZERO, 3, ChunkPos::new(-1, -1));
         assert_eq!(center_body_coords(&recenter[0].1), ChunkPos::new(-1, -1));
         let entered: Vec<ChunkPos> = recenter[1..]
             .iter()
@@ -3140,6 +3356,8 @@ mod tests {
             vec![(ID, move_pos_frame(0.0, 68.0, -48.0))],
         );
         let recenter1 = drain_outbound_frames(&mut out_rx);
+        let recenter1 =
+            assert_recenter_unloads(&recenter1, booted.center(), 3, ChunkPos::new(0, -3));
         assert!(
             drained_disconnect_reason(&mut out_rx).is_none(),
             "the first +x crossing must not disconnect: its enter cells are all inside \
@@ -3166,6 +3384,8 @@ mod tests {
             vec![(ID, move_pos_frame(16.0, 68.0, -48.0))],
         );
         let recenter2 = drain_outbound_frames(&mut out_rx);
+        let recenter2 =
+            assert_recenter_unloads(&recenter2, ChunkPos::new(0, -3), 3, ChunkPos::new(1, -3));
         assert!(
             drained_disconnect_reason(&mut out_rx).is_none(),
             "the second crossing's on-demand loads must not disconnect"
@@ -3285,12 +3505,19 @@ mod tests {
 
         let mut seen: std::collections::HashSet<ChunkPos> = std::collections::HashSet::new();
         for block in [(16.0, -63.0, 0.0), (32.0, -63.0, 0.0)] {
+            let previous_center = manager.chunk_center(ID).unwrap();
             manager = run_tick(
                 manager,
                 &mut registry,
                 vec![(ID, move_pos_frame(block.0, block.1, block.2))],
             );
             let recenter = drain_outbound_frames(&mut out_rx);
+            let recenter = assert_recenter_unloads(
+                &recenter,
+                previous_center,
+                3,
+                manager.chunk_center(ID).unwrap(),
+            );
             for (_, body) in &recenter[1..] {
                 let pos = chunk_body_coords(body);
                 assert!(
@@ -3449,6 +3676,8 @@ mod tests {
             "the matching ack recenters the loader to the new chunk"
         );
         let recenter = drain_outbound_frames(&mut out_rx);
+        let recenter =
+            assert_recenter_unloads(&recenter, ChunkPos::ZERO, 4, ChunkPos::new(-100, -100));
         assert!(!recenter.is_empty(), "the ack queues the missing view");
         assert_eq!(
             recenter[0].0,
@@ -3581,6 +3810,7 @@ mod tests {
             assert_eq!(send, 4);
 
             let recenter = drain_outbound_frames(&mut out_rx);
+            let recenter = assert_recenter_unloads(&recenter, prev.0, send, new_center);
             let entered: Vec<ChunkPos> = recenter[1..]
                 .iter()
                 .map(|(_, body)| chunk_body_coords(body))
