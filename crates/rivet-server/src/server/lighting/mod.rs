@@ -6,12 +6,16 @@
 //! `star_light_engine::SkyStarLightEngine`. The provider is now
 //! `star_light_provider_impl::SkyLightProvider` — a real synchronous layer that
 //! drives the engine on an explicitly supplied in-progress chunk and publishes
-//! the computed sky nibbles + sky-emptiness map back onto it. What defers with
-//! #184 is the real `StarLightInterface` queue wiring, the block engine, live
+//! the computed sky/block nibbles and emptiness maps back onto it. Generation
+//! includes block-source scanning and block edge reconciliation; conditional
+//! block-light occlusion faces remain explicit capability refusals. What defers
+//! with #184 is the live `StarLightInterface` queue wiring,
 //! `blockChange`/`sectionChange`/`relightChunks`/`checkChunkEdges`, the client
 //! notify path, and the final generated-serving pipeline wiring into a concrete
 //! chunk storage.
 
+#[cfg(test)]
+mod generated_block_light_fixture;
 pub mod generated_light_bridge;
 pub mod star_light_engine;
 pub mod star_light_provider_impl;

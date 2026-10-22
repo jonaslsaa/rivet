@@ -11,9 +11,10 @@
 //! `tryPropagateSkylight`, and the delayed-light-set write-backs
 //! `processDelayedIncreases`/`processDelayedDecreases`).
 //!
-//! #184 (M2) slices the Starlight compute engine in on the light-chunk path:
-//! the concrete engine is [`SkyStarLightEngine`] and the block-engine branches
-//! of the shared methods are not reachable from it. The seams the base leaves
+//! The light-chunk path has independent sky/block instances of the shared
+//! engine, retaining the original [`SkyStarLightEngine`] internal name. Block
+//! generation includes its ordered source scan and full edge reconciliation.
+//! The seams the Java base leaves
 //! open (the abstract hooks `getEmptinessMap`/`setEmptinessMap`,
 //! `getNibblesOnChunk`/`setNibbles`, `canUseChunk`) are implemented through the
 //! provider's [`ChunkAccessor`] and the write-back hooks (`pending_nibbles` /
@@ -36,24 +37,25 @@
 //!   skips a neighbour whose face occludes — the seam over-propagates there.
 //!   The *source* (from-shape) and column-walk branches instead assume occlusion
 //!   (`continue`/`break`), matching Java's skip when the face shape occludes.
-//!   Neither deviation affects the superflat air + stone content (neither block
+//!   The new block channel refuses a reached conditional occlusion face rather
+//!   than inheriting these sky approximations. Neither sky deviation affects
+//!   the superflat air + stone content (neither block
 //!   sets the flag), so the byte-exact contract is unaffected (the tests use
 //!   only air/stone).
 //! - `checkChunkEdges` (the `needsEdgeChecks=true` branch's per-edge decrease)
-//!   is not ported — `relightChunks`, `checkChunkEdges` and the client-side
+//!   remains unported for sky — `relightChunks`, `checkChunkEdges` and the client-side
 //!   notify path (`isClientSide`) defer with the edge-check unit (RivetTodo
 //!   #184 below); `lightChunk` on the edge-checks path runs the propagation that
 //!   is shared with the no-edge-checks path and skips the per-edge decrease.
 //!
 //! RivetTodo(#184): `blockChange`/`sectionChange` live re-lighting, the block
-//! engine, the face-occlusion shape test, `relightChunks`, `checkChunkEdges`
+//! face-occlusion shape test, `relightChunks`, live `checkChunkEdges`
 //! and the client-side notify path (`isClientSide`) are not ported. The
 //! remaining `StarLightProvider` mutators (`block_change`, `section_change`,
 //! `relight_chunks`, `check_chunk_edges`) are the no-ops the provider keeps for
 //! the deferred paths, and this engine is exercised through the provider's
-//! light-chunk path. The light-only branches of the shared methods are reachable
-//! from `SkyLightProvider`; the block-engine branches and the deferred edges
-//! still read as dead code to the compiler, so the allow stays.
+//! light-chunk path. Deferred live-update helpers remain unused, so the
+//! dead-code allowance stays until their owning integration lands.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -307,7 +309,7 @@ pub(crate) struct NeighborLightUpdate {
     pub(crate) emptiness_map: Option<Vec<bool>>,
 }
 
-/// The sky light engine — `SkyStarLightEngine` on the light-chunk path. Owns
+/// Shared sky/block light-chunk engine with independent per-channel instances. Owns
 /// the per-run scratch caches (chunk/section/nibble/emptiness arrays, the two
 /// FIFO queues, the null-propagation check) exactly as the Java instance does;
 /// each [`SkyStarLightEngine::light`] run re-`setupCaches`s them around the
@@ -316,6 +318,9 @@ pub(crate) struct NeighborLightUpdate {
 /// The engine is confined to a single run (the provider's `light_chunk`): it is
 /// not `Send`-shared, matching OWNERSHIP.md.
 pub(crate) struct SkyStarLightEngine {
+    /// Java's shared `skylightPropagator` selector. Both channel engines own
+    /// independent queues/caches; only the shared mechanics are reused.
+    sky: bool,
     /// `minLightSection` — `WorldUtil.getMinLightSection(world)`.
     min_light_section: i32,
     /// `maxLightSection` — `WorldUtil.getMaxLightSection(world)` (inclusive).
@@ -410,6 +415,7 @@ impl SkyStarLightEngine {
             .wrapping_add(1)) as usize;
         let min_array_size = 5 * 5 * (light_section_count + 2);
         SkyStarLightEngine {
+            sky: true,
             min_light_section,
             max_light_section,
             min_section,
@@ -441,6 +447,12 @@ impl SkyStarLightEngine {
             pending_emptiness_map: None,
             pending_neighbor_updates: HashMap::new(),
         }
+    }
+
+    pub(crate) fn new_block(accessor: &dyn LevelHeightAccessor) -> Self {
+        let mut engine = Self::new(accessor);
+        engine.sky = false;
+        engine
     }
 
     /// `setupEncodeOffset(centerX, centerY, centerZ)` — Java's per-run center
@@ -525,11 +537,12 @@ impl SkyStarLightEngine {
     /// regardless of this gate (Java forces it into the cache) and
     /// `setup_caches` filters only neighbours.
     fn can_use_chunk(&self, chunk: &ChunkAccess<StateId, ServerBiomeId, StructureKey>) -> bool {
-        // The generated pipeline does not stamp persisted status yet (#185);
-        // neighbours are trusted when light-correct, matching Java's server
-        // `canUseChunk` (status LIGHT is the only non-light-correct status the
-        // engine trusts for neighbours, and the pipeline has none of those yet).
-        chunk.is_light_correct()
+        // Persisted status survives the worldgen/runtime value projection.
+        // A hostile or stale correct=true flag must not bypass the status gate.
+        chunk
+            .get_persisted_status()
+            .is_or_after(rivet_world::chunk::status::ChunkStatus::Light)
+            && chunk.is_light_correct()
     }
 
     // --- chunk / section / nibble cache accessors (indexed like Java) ---
@@ -751,7 +764,12 @@ impl SkyStarLightEngine {
         &self,
         chunk: &ChunkAccess<StateId, ServerBiomeId, StructureKey>,
     ) -> Option<Vec<bool>> {
-        chunk.sky_emptiness_map().map(ToOwned::to_owned)
+        if self.sky {
+            chunk.sky_emptiness_map()
+        } else {
+            chunk.block_emptiness_map()
+        }
+        .map(ToOwned::to_owned)
     }
 
     /// `setEmptinessMap(chunk, to)` — publish the recomputed sky emptiness map
@@ -767,7 +785,12 @@ impl SkyStarLightEngine {
         &self,
         chunk: &ChunkAccess<StateId, ServerBiomeId, StructureKey>,
     ) -> Vec<SwmrNibbleArray> {
-        chunk.sky_nibbles().to_vec()
+        if self.sky {
+            chunk.sky_nibbles()
+        } else {
+            chunk.block_nibbles()
+        }
+        .to_vec()
     }
 
     /// `setNibbles(chunk, to)` — `starlight$setSkyNibbles(to)`. The engine
@@ -813,6 +836,21 @@ impl SkyStarLightEngine {
             || chunk_y > self.max_light_section
             || !self.is_chunk_in_cache(chunk_x, chunk_z)
         {
+            return;
+        }
+        if !self.sky {
+            match self.get_nibble_from_cache_mut(chunk_x, chunk_y, chunk_z) {
+                Some(nibble) => {
+                    nibble.set_non_null();
+                }
+                None if init_removed_nibbles => self.set_nibble_in_cache(
+                    chunk_x,
+                    chunk_y,
+                    chunk_z,
+                    Some(SwmrNibbleArray::new_with_bytes_and_null(None, false)),
+                ),
+                None => panic!("block nibble removed while not requested"),
+            }
             return;
         }
         match self.get_nibble_from_cache(chunk_x, chunk_y, chunk_z) {
@@ -911,8 +949,13 @@ impl SkyStarLightEngine {
 
     /// `setNibbleNull(chunkX, chunkY, chunkZ)` — `SkyStarLightEngine.setNibbleNull`.
     fn set_nibble_null(&mut self, chunk_x: i32, chunk_y: i32, chunk_z: i32) {
+        let sky = self.sky;
         if let Some(nibble) = self.get_nibble_from_cache_mut(chunk_x, chunk_y, chunk_z) {
-            nibble.set_null();
+            if sky {
+                nibble.set_null();
+            } else {
+                nibble.set_hidden();
+            }
         }
     }
 
@@ -1273,6 +1316,7 @@ impl SkyStarLightEngine {
                         continue; // already at the level we want
                     }
                     let block_state = self.get_block_state(section_index, local_index);
+                    self.require_block_occlusion(block_state);
                     let mut flags = 0u64;
                     if block_state.conditionally_full_opaque() {
                         // the shape test would decide; the seam keeps the flag
@@ -1302,6 +1346,7 @@ impl SkyStarLightEngine {
             } else {
                 // we actually need to worry about our state here
                 let from_block = self.get_block_state_at(pos_x, pos_y, pos_z);
+                self.require_block_occlusion(from_block);
                 let from_shape_blocked = from_block.conditionally_full_opaque();
                 for &propagate in check_directions {
                     let off_x = pos_x.wrapping_add(propagate.x());
@@ -1325,6 +1370,7 @@ impl SkyStarLightEngine {
                         continue; // already at the level we want
                     }
                     let block_state = self.get_block_state(section_index, local_index);
+                    self.require_block_occlusion(block_state);
                     let mut flags = 0u64;
                     if block_state.conditionally_full_opaque() {
                         // the shape test would decide; the seam keeps the flag
@@ -1369,7 +1415,7 @@ impl SkyStarLightEngine {
         let section_offset = self.chunk_section_index_offset;
         // `emittedLightMask = skylightPropagator ? 0 : 0xF` — the sky engine
         // never re-propagates emitted block light.
-        let emitted_mask = 0;
+        let emitted_mask = if self.sky { 0 } else { 15 };
 
         while queue_read_index < queue_length {
             let queue_value = self.decrease_queue[queue_read_index];
@@ -1401,6 +1447,7 @@ impl SkyStarLightEngine {
                         continue; // already at lowest, nothing we can do
                     }
                     let block_state = self.get_block_state(section_index, local_index);
+                    self.require_block_occlusion(block_state);
                     let mut flags = 0u64;
                     if block_state.conditionally_full_opaque() {
                         // the shape test would decide; the seam keeps the flag
@@ -1453,6 +1500,7 @@ impl SkyStarLightEngine {
             } else {
                 // we actually need to worry about our state here
                 let from_block = self.get_block_state_at(pos_x, pos_y, pos_z);
+                self.require_block_occlusion(from_block);
                 let from_shape_blocked = from_block.conditionally_full_opaque();
                 for &propagate in check_directions {
                     let off_x = pos_x.wrapping_add(propagate.x());
@@ -1477,6 +1525,7 @@ impl SkyStarLightEngine {
                     }
                     let block_state = self.get_block_state(section_index, local_index);
                     let mut flags = 0u64;
+                    self.require_block_occlusion(block_state);
                     if block_state.conditionally_full_opaque() {
                         // the shape test would decide; the seam keeps the flag
                         flags |= FLAG_HAS_SIDED_TRANSPARENT_BLOCKS;
@@ -1840,11 +1889,177 @@ impl SkyStarLightEngine {
     }
 
     /// `SkyStarLightEngine.lightChunk(lightAccess, chunk, needsEdgeChecks)`.
+    fn light_block_chunk(
+        &mut self,
+        chunk: &ChunkAccess<StateId, ServerBiomeId, StructureKey>,
+        needs_edge_checks: bool,
+    ) {
+        let cx = chunk.get_pos().x();
+        let cz = chunk.get_pos().z();
+        // BlockStarLightEngine.getSources: section Y, then the palette's
+        // x | z<<4 | y<<8 linear order. Palette maybeHas only skips zero scans.
+        for sy in self.min_section..=self.max_section {
+            let Some(section) = self.get_chunk_section(cx, sy, cz) else {
+                continue;
+            };
+            if section.has_only_air {
+                continue;
+            }
+            for index in 0..4096usize {
+                let x = cx.wrapping_shl(4) | (index as i32 & 15);
+                let y = sy.wrapping_shl(4) | (index as i32 >> 8);
+                let z = cz.wrapping_shl(4) | ((index as i32 >> 4) & 15);
+                let state = self.get_block_state_at(x, y, z);
+                let emitted = state.light_emission() & 15;
+                if emitted <= self.get_light_level(x, y, z) {
+                    continue;
+                }
+                self.require_block_occlusion(state);
+                self.append_to_increase_queue(
+                    encode_queue_position(x, y, z, self.coordinate_offset)
+                        | ((emitted as u64) << 28)
+                        | ((ALL_DIRECTIONS_BITSET as u64) << 32),
+                );
+                self.set_light_level(x, y, z, emitted);
+            }
+        }
+        if needs_edge_checks {
+            self.perform_light_increase();
+            for sy in (self.min_light_section..=self.max_light_section).rev() {
+                self.check_block_chunk_edge(cx, sy, cz);
+            }
+            self.perform_light_decrease();
+        } else {
+            self.propagate_neighbour_levels(chunk, self.min_light_section, self.max_light_section);
+            self.perform_light_increase();
+        }
+    }
+
+    /// Missing occlusion geometry is an explicit capability boundary. Collision
+    /// boxes are not interchangeable with the two occlusion faces Paper unions.
+    fn require_block_occlusion(&self, state: StateId) {
+        if !self.sky && state.conditionally_full_opaque() {
+            panic!(
+                "block light needs unported conditional occlusion shape for {}",
+                BlockState::new(state).block().name()
+            );
+        }
+    }
+
+    fn calculate_block_light_value(&self, x: i32, y: i32, z: i32, expect: i32) -> i32 {
+        let state = self.get_block_state_at(x, y, z);
+        let mut level = state.light_emission() & 15;
+        if level >= 14 || level > expect {
+            return level;
+        }
+        let opacity = state.light_dampening().max(1);
+        if opacity >= 15 {
+            return level;
+        }
+        self.require_block_occlusion(state);
+        for direction in AxisDirection::ALL {
+            let nx = x.wrapping_add(direction.x());
+            let ny = y.wrapping_add(direction.y());
+            let nz = z.wrapping_add(direction.z());
+            let neighbor = self.get_light_level(nx, ny, nz);
+            if neighbor - 1 <= level {
+                continue;
+            }
+            self.require_block_occlusion(self.get_block_state_at(nx, ny, nz));
+            level = level.max(neighbor - opacity);
+            if level > expect {
+                return level;
+            }
+        }
+        level
+    }
+
+    fn check_block_light(&mut self, x: i32, y: i32, z: i32) {
+        let current = self.get_light_level(x, y, z);
+        let state = self.get_block_state_at(x, y, z);
+        let emitted = state.light_emission() & 15;
+        self.set_light_level(x, y, z, emitted);
+        let encoded = encode_queue_position(x, y, z, self.coordinate_offset)
+            | ((ALL_DIRECTIONS_BITSET as u64) << 32);
+        if emitted != 0 {
+            self.require_block_occlusion(state);
+            self.append_to_increase_queue(encoded | ((emitted as u64) << 28));
+        }
+        self.append_to_decrease_queue(encoded | ((current as u64) << 28));
+    }
+
+    fn check_block_chunk_edge(&mut self, cx: i32, sy: i32, cz: i32) {
+        if self.get_nibble_from_cache(cx, sy, cz).is_none() {
+            return;
+        }
+        for direction in AxisDirection::ONLY_HORIZONTAL {
+            let nx = cx.wrapping_add(direction.x());
+            let nz = cz.wrapping_add(direction.z());
+            let Some(neighbor) = self.get_nibble_from_cache(nx, sy, nz) else {
+                continue;
+            };
+            if !neighbor.is_initialised_updating()
+                && !self
+                    .get_nibble_from_cache(cx, sy, cz)
+                    .unwrap()
+                    .is_initialised_updating()
+            {
+                continue;
+            }
+            let (start_x, start_z, inc_x, inc_z) = if direction.x() != 0 {
+                (
+                    cx.wrapping_shl(4) | if direction.x() < 0 { 0 } else { 15 },
+                    cz.wrapping_shl(4),
+                    0,
+                    1,
+                )
+            } else {
+                (
+                    cx.wrapping_shl(4),
+                    cz.wrapping_shl(4) | if direction.z() < 0 { 0 } else { 15 },
+                    1,
+                    0,
+                )
+            };
+            let mut center_checks = Vec::new();
+            let mut neighbor_checks = Vec::new();
+            for local_y in 0..16 {
+                let y = sy.wrapping_shl(4) | local_y;
+                for i in 0..16 {
+                    let x = start_x.wrapping_add(i * inc_x);
+                    let z = start_z.wrapping_add(i * inc_z);
+                    let off_x = x.wrapping_add(direction.x());
+                    let off_z = z.wrapping_add(direction.z());
+                    let current = self.get_light_level(x, y, z);
+                    let other = self.get_light_level(off_x, y, off_z);
+                    if self.calculate_block_light_value(x, y, z, current) != current {
+                        center_checks.push((x, y, z));
+                    }
+                    if self.calculate_block_light_value(off_x, y, off_z, other) != other {
+                        neighbor_checks.push((off_x, y, off_z));
+                    }
+                }
+            }
+            for i in 0..center_checks.len().max(neighbor_checks.len()) {
+                if let Some(&(x, y, z)) = center_checks.get(i) {
+                    self.check_block_light(x, y, z);
+                }
+                if let Some(&(x, y, z)) = neighbor_checks.get(i) {
+                    self.check_block_light(x, y, z);
+                }
+            }
+        }
+    }
+
     fn light_chunk_impl(
         &mut self,
         chunk: &ChunkAccess<StateId, ServerBiomeId, StructureKey>,
         needs_edge_checks: bool,
     ) {
+        if !self.sky {
+            self.light_block_chunk(chunk, needs_edge_checks);
+            return;
+        }
         let chunk_x = chunk.get_pos().x();
         let chunk_z = chunk.get_pos().z();
         self.rewrite_nibble_cache_for_skylight(chunk_x, chunk_z);
@@ -2446,6 +2661,7 @@ mod tests {
         let mut neighbour_nibbles: Vec<SwmrNibbleArray> = neighbour.sky_nibbles().to_vec();
         neighbour_nibbles[0] = SwmrNibbleArray::new_with_bytes(vec![0x0Fu8; 2048]);
         neighbour.set_sky_nibbles(neighbour_nibbles);
+        neighbour.set_persisted_status(rivet_world::chunk::status::ChunkStatus::Light);
         neighbour.set_light_correct(true);
         let mut provider = SingleNeighbourProvider(neighbour);
         engine.light(&mut provider, &chunk, &all_air_empty_sections());

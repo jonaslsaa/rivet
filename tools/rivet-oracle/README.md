@@ -11,6 +11,24 @@ diffs vs Rivet, packet round-trips) builds on top of these fixtures later.
 
 ## Status: what works
 
+### Generated lighting and structure primitives
+
+- `bash scripts/run_generated_block_light_probe.sh`: 14 cases execute Paper's
+  actual `BlockStarLightEngine` on real proto chunks. Emitters, overlap, opaque
+  and water walls, height boundaries, and lit/unlit/low-status neighbors compare
+  every visible nibble and block-emptiness entry. A height-only Level shell
+  supplies engine context; propagation is not mocked. Conditional occlusion
+  geometry remains an explicit Rust refusal, not a claim of full light parity.
+- `bash scripts/run_structure_core_probe.sh`: 41 cases cover actual piece NBT,
+  coordinates, bounding boxes, structure-start references and cached bounds,
+  plus buried-treasure terrain scanning with clipped chest placement. Native
+  placement requires an explicit transformer/loot authority; these fixtures do
+  not establish Bukkit event parity or complete structure generation.
+
+Both probes pin Paper `0a99345` and use the same Java 25/runtime setup below.
+Their fixtures are consumed directly by Rust tests. Neither establishes a live
+generated-world join or chunk streaming path.
+
 ### Direct tree-placement probes
 
 The scripts below execute the real feature and block-update implementations from
