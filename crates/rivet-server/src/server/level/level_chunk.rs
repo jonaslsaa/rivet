@@ -447,6 +447,16 @@ impl LevelChunk {
         self.chunk.get_height()
     }
 
+    /// Direct ChunkAccess.getHeight: highest occupied Y, not Level's +1.
+    pub(crate) fn get_height_at(
+        &mut self,
+        kind: rivet_world::levelgen::heightmap::Types,
+        x: i32,
+        z: i32,
+    ) -> i32 {
+        self.chunk.get_height_at(kind, x, z)
+    }
+
     /// `ChunkAccess.getPersistedStatus()` — a runtime `LevelChunk` is always
     /// persisted as `FULL`, including one produced by generated SPAWN-parent
     /// promotion.

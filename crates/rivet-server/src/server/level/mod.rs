@@ -21,14 +21,20 @@ pub mod chunk_map;
 pub mod chunk_result;
 pub mod chunk_storage_worker;
 pub mod chunk_tracking_view;
+#[cfg(unix)]
+pub mod directory_lock;
 pub mod entity_construction;
 pub mod entity_id_allocator;
 pub mod full_chunk_status;
 pub mod generated_boot;
 pub mod generated_chunk_owner;
 pub mod generated_world;
+pub mod generation_creature_runtime;
 pub mod generation_environment;
+pub mod initial_spawn;
 pub mod level_chunk;
+#[cfg(unix)]
+pub mod level_storage_access;
 pub mod player_chunk_loader;
 pub mod region_backed;
 pub mod server_level;

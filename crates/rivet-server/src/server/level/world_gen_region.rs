@@ -1023,6 +1023,23 @@ where
         Ok(true)
     }
 
+    /// WorldGenRegion.addFreshEntity(...,CHUNK_GEN) directly saves into the
+    /// actual ProtoChunk. The source does not install a live entity-manager
+    /// entry or synthesize Bukkit/Paper spawn-reason fields on this path.
+    /// NativeGenerationCreature currently has no passenger graph; other entity
+    /// families must implement that graph before claiming this boundary.
+    pub fn add_fresh_generation_creature(
+        &mut self,
+        entity: rivet_world::entity::generation_creature::NativeGenerationCreature,
+    ) -> Result<bool, rivet_world::levelgen::structure::StructureError> {
+        let pos = entity.entity().block_position();
+        // ProtoChunk.addEntity ignores Entity.save's boolean and appends the
+        // built output even when save refuses a removed entity (empty output).
+        self.structure_proto_chunk_mut(ChunkPos::new(pos.get_x() >> 4, pos.get_z() >> 4))?
+            .add_entity(entity.save().unwrap_or_default());
+        Ok(true)
+    }
+
     pub fn structure_chunk_entities_are_empty(
         &mut self,
         pos: ChunkPos,

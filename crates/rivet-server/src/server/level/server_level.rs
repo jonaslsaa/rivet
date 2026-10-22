@@ -170,6 +170,8 @@ impl Default for ServerLevelConfig {
 pub struct ServerLevel {
     dimension: ResourceKey<Level>,
     world_uuid: Option<rivet_util::mth::Uuid>,
+    #[cfg(unix)]
+    writable_storage: Option<Arc<super::level_storage_access::LevelStorageAccess>>,
     boot_settings: Option<super::generated_boot::GeneratedBootSettings>,
     seed: i64,
     min_y: i32,
@@ -209,6 +211,39 @@ pub struct ServerLevel {
 }
 
 impl ServerLevel {
+    /// Build a generated level with actual writable root ownership. Identity
+    /// is chosen once and retained; saving it is a separate durability step.
+    /// This does not fabricate level.dat, initial spawn, or FULL chunks.
+    #[cfg(unix)]
+    pub fn new_generated_with_storage(
+        config: ServerLevelConfig,
+        generator: Arc<OverworldGenerator>,
+        storage: Arc<super::level_storage_access::LevelStorageAccess>,
+    ) -> std::io::Result<Self> {
+        let mut level = Self::new_generated(config, generator)
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
+        let uuid = storage.load_world_uuid(level.dimension())?;
+        level.install_world_uuid(uuid);
+        level.writable_storage = Some(storage);
+        Ok(level)
+    }
+
+    /// Persist this level's already-selected identity under its retained root
+    /// lock. Retrying a failed save never allocates a replacement identity.
+    #[cfg(unix)]
+    pub fn save_world_metadata(&self) -> std::io::Result<()> {
+        let storage = self.writable_storage.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "level has no writable world storage",
+            )
+        })?;
+        let uuid = self
+            .world_uuid
+            .expect("writable generated level selects its identity at construction");
+        storage.save_world_uuid(self.dimension(), uuid)
+    }
+
     /// Construct an explicitly generated world without installing placeholder
     /// terrain. The supplied respawn position is not a generated spawn search;
     /// joining must wait for its real runtime chunk to become available.
@@ -266,6 +301,8 @@ impl ServerLevel {
         ServerLevel {
             dimension: config.dimension,
             world_uuid: None,
+            #[cfg(unix)]
+            writable_storage: None,
             boot_settings: None,
             seed: config.seed,
             min_y: config.min_y,
@@ -365,6 +402,42 @@ impl ServerLevel {
         &self.respawn_data
     }
 
+    /// Native GLOBAL spawn search during bootstrap, using canonical already
+    /// loaded FULL chunks. No implicit chunk generation or player-respawn
+    /// randomization. Call before player admission; unavailable chunks/shapes
+    /// return errors, retaining the source's already-written fallback spawn.
+    pub fn initialize_spawn_from_loaded_chunks<'context>(
+        &mut self,
+        generator: &dyn rivet_world::chunk::chunk_generator::ChunkGenerator,
+        sampler: &rivet_world::biome::climate::Sampler,
+        shape_context: Option<
+            &mut (dyn rivet_world::level::block_shape_context::BlockShapeContext + Send + 'context),
+        >,
+    ) -> Result<super::initial_spawn::InitialSpawnOutcome, super::initial_spawn::InitialSpawnError>
+    {
+        let environment = self
+            .generation_environment
+            .as_ref()
+            .ok_or(super::initial_spawn::InitialSpawnError::EnvironmentUnavailable)?;
+        let result = {
+            let mut terrain = super::initial_spawn::LoadedSpawnTerrain::new(
+                &mut self.chunk_map,
+                &mut self.respawn_data,
+                self.dimension.clone(),
+                self.seed,
+                environment,
+                generator,
+                shape_context,
+            );
+            super::initial_spawn::set_initial_spawn(&mut terrain, sampler)
+        };
+        self.view = ChunkTrackingView::of(
+            ChunkPos::containing(&self.respawn_data.pos()),
+            self.chunk_map.server_view_distance(),
+        );
+        result
+    }
+
     /// `ServerLevel.getChunkSource().getChunk` — the `ChunkMap`.
     pub fn chunk_map(&self) -> &ChunkMap {
         &self.chunk_map
@@ -435,6 +508,24 @@ impl ServerLevel {
 
     pub fn generated_chunk_owner_mut(&mut self) -> Option<&mut GeneratedChunkOwner> {
         self.generated_chunk_owner.as_mut()
+    }
+
+    /// A factory for another world must not consume this world's generation
+    /// task or write foreign WorldUUID metadata into its canonical protos.
+    pub fn install_generation_creature_factory(
+        &mut self,
+        factory: Arc<dyn super::generation_creature_runtime::GenerationCreatureFactory>,
+    ) -> Result<(), Arc<dyn super::generation_creature_runtime::GenerationCreatureFactory>> {
+        let Some(uuid) = self.world_uuid else {
+            return Err(factory);
+        };
+        if factory.world_uuid() != uuid {
+            return Err(factory);
+        }
+        let Some(owner) = self.generated_chunk_owner.as_mut() else {
+            return Err(factory);
+        };
+        owner.install_generation_creature_factory(uuid, factory)
     }
 
     /// Install actual dimension/SavedData generation settings. Refusal returns

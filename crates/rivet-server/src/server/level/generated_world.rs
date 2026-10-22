@@ -216,6 +216,7 @@ use rivet_world::levelgen::placement::{
 };
 use rivet_world::levelgen::world_generation_context::WorldGenerationContext;
 
+use super::generation_creature_runtime::{GenerationCreatureError, GenerationCreatureFactory};
 use super::structure_placement::StructurePlacementError;
 use super::structure_placement_adapter::StructurePlacementRuntime;
 use crate::server::level::level_chunk::{LevelChunk, LevelChunkBridgeError, StructureKey};
@@ -328,14 +329,20 @@ impl From<GeneratedWorkspaceError> for GenError {
 /// itself is fully backed by tick-thread-owned `ProtoChunk`s; a failure means
 /// the input workspace or the next entity capability is unavailable, never an
 /// implicit no-op or a fabricated entity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpawnRegionError {
     /// The cache must contain exactly the eight horizontal neighbours.
-    MissingNeighbour { pos: ChunkPos },
+    MissingNeighbour {
+        pos: ChunkPos,
+    },
     /// A supplied chunk is not one of the eight neighbours of the center.
-    UnexpectedChunk { pos: ChunkPos },
+    UnexpectedChunk {
+        pos: ChunkPos,
+    },
     /// A supplied position occurred more than once.
-    DuplicateChunk { pos: ChunkPos },
+    DuplicateChunk {
+        pos: ChunkPos,
+    },
     /// A center/ring proto does not carry the status required by the SPAWN
     /// step's direct dependency table (`LIGHT` at distance zero and `BIOMES` at
     /// distance one).
@@ -359,11 +366,21 @@ pub enum SpawnRegionError {
         entity_type: &'static str,
         position: BlockPos,
     },
+    CreatureRuntime(Arc<GenerationCreatureError>),
+    CreatureAdmission(Arc<rivet_world::levelgen::structure::StructureError>),
+    MissingSpawnLight {
+        position: BlockPos,
+    },
 }
 
 impl fmt::Display for SpawnRegionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::CreatureRuntime(error) => write!(f, "{error}"),
+            Self::CreatureAdmission(error) => write!(f, "{error}"),
+            Self::MissingSpawnLight { position } => {
+                write!(f, "SPAWN light data unavailable at {position}")
+            }
             SpawnRegionError::MissingNeighbour { pos } => {
                 write!(f, "generated SPAWN region is missing neighbour {pos}")
             }
@@ -1803,6 +1820,17 @@ impl GenerationChunkHolder {
         workspace: &mut SpawnRegionProtos,
         spawn_mobs_rule: bool,
     ) -> Result<(), GeneratedChunkError> {
+        self.generate_spawn_with_region_runtime(workspace, spawn_mobs_rule, None)
+    }
+
+    /// The owning world's real factory is borrowed only for this synchronous
+    /// task. Missing constructors are not represented by null or fake NBT.
+    pub fn generate_spawn_with_region_runtime(
+        &mut self,
+        workspace: &mut SpawnRegionProtos,
+        spawn_mobs_rule: bool,
+        factory: Option<&dyn GenerationCreatureFactory>,
+    ) -> Result<(), GeneratedChunkError> {
         let center = self.chunk.get_pos();
         // The scheduler invokes a status task only for a promotion. Mirror the
         // executor's idempotent target handling here so a retry cannot populate
@@ -1847,7 +1875,7 @@ impl GenerationChunkHolder {
         }
         let mut region = compose_spawn_region(&mut self.chunk, workspace, &self.generator)
             .map_err(GeneratedChunkError::SpawnRegion)?;
-        run_spawn_in_region(&mut region, &self.generator, spawn_mobs_rule)
+        run_spawn_in_region(&mut region, &self.generator, spawn_mobs_rule, factory)
             .map_err(GeneratedChunkError::SpawnRegion)?;
         drop(region);
         self.chunk.set_persisted_status(ChunkStatus::Spawn);
@@ -4100,18 +4128,15 @@ fn compose_spawn_region<'a>(
     }
 
     let world_border_settings = workspace.world_border_settings();
-    let center_status = center.get_persisted_status();
-    let center_base = center.base_mut();
     let mut holders: Vec<
         Box<dyn GenerationChunkHolderView<BlockState, WorldgenBiomeId, StructureKey> + 'a>,
     > = Vec::with_capacity(9);
     for (_, neighbour) in workspace.neighbours.iter_mut() {
-        let status = neighbour.get_persisted_status();
-        holders.push(Box::new(CenterHolder::new(neighbour.base_mut(), status)));
+        holders.push(Box::new(BorrowedProtoHolder::new(neighbour)));
     }
     // The eight neighbours were emitted in x-then-z order; inserting the
     // center at row-major slot 4 restores the complete 3x3 cache order.
-    holders.insert(4, Box::new(CenterHolder::new(center_base, center_status)));
+    holders.insert(4, Box::new(BorrowedProtoHolder::new(center)));
 
     Ok(WorldGenRegion::new_with_world_border_settings(
         StaticCache2D::from_entries(
@@ -4177,6 +4202,7 @@ fn run_spawn_in_region(
     region: &mut WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey>,
     generator: &OverworldGenerator,
     spawn_mobs_rule: bool,
+    factory: Option<&dyn GenerationCreatureFactory>,
 ) -> Result<(), SpawnRegionError> {
     let center_pos = region.get_center();
 
@@ -4236,17 +4262,42 @@ fn run_spawn_in_region(
             ));
     let mut level_random = region_random_factory.at(xo, 0, zo);
 
+    run_spawn_population(
+        region,
+        generator,
+        biome_name,
+        mob_settings,
+        &mut random,
+        &mut level_random,
+        factory,
+    )
+}
+
+fn run_spawn_population(
+    region: &mut WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey>,
+    generator: &OverworldGenerator,
+    biome_name: &'static str,
+    mob_settings: &rivet_registry::generated::feature_data::BiomeMobSettings,
+    random: &mut impl RandomSource,
+    level_random: &mut impl RandomSource,
+    factory: Option<&dyn GenerationCreatureFactory>,
+) -> Result<(), SpawnRegionError> {
+    use rivet_world::entity::generation_creature::{NativeGenerationCreature, SheepClimate};
+    let center_pos = region.get_center();
+    let xo = center_pos.get_min_block_x();
+    let zo = center_pos.get_min_block_z();
+
     // `NaturalSpawner.spawnMobsForChunkGeneration`. The loop retains Paper's
     // exact while/weighted/count/candidate/offset order. Placement and spawn
     // rule rejections continue to the next attempt; only a candidate which
     // passes every available gate reaches the genuinely unsupported entity
     // construction boundary.
     while random.next_float() < mob_settings.creature_probability {
-        let Some(spawner) = WeightedRandom::get_random_item_from_total(
-            &mut random,
-            mob_settings.creature,
-            |entry| i32::try_from(entry.weight).expect("generated spawn weight fits i32"),
-        ) else {
+        let Some(spawner) =
+            WeightedRandom::get_random_item_from_total(random, mob_settings.creature, |entry| {
+                i32::try_from(entry.weight).expect("generated spawn weight fits i32")
+            })
+        else {
             break;
         };
         let count = spawner.min
@@ -4256,15 +4307,16 @@ fn run_spawn_in_region(
         let mut z = zo.wrapping_add(random.next_int_bound(16));
         let start_x = x;
         let start_z = z;
+        let mut group_spawn_data = None;
 
         for _ in 0..count {
             for _ in 0..4 {
+                #[cfg(test)]
+                trace_spawn_candidate(x, z);
                 let top_y = region.get_height_at(spawn_heightmap_type(spawner.ty), x, z);
                 let y = adjust_spawn_y(region, spawner.ty, x, top_y, z);
                 let spawn_pos = BlockPos::new(x, y, z);
-                if region.is_inside_build_height(y)
-                    && is_spawn_position_ok(region, spawner.ty, &spawn_pos)
-                {
+                if is_spawn_position_ok(region, spawner.ty, &spawn_pos) {
                     // Paper keeps EntityType dimensions as Java floats until the
                     // AABB constructor promotes them to doubles. Converting the
                     // exact f32 values here preserves both the clamp endpoints
@@ -4276,47 +4328,122 @@ fn run_spawn_in_region(
                     let fx = (x as f64).clamp(xo as f64 + width, xo as f64 + 16.0 - width);
                     let fz = (z as f64).clamp(zo as f64 + width, zo as f64 + 16.0 - width);
                     let entity_pos = BlockPos::containing(fx, y as f64, fz);
-                    if no_collision(region, fx, y, fz, width, height)
-                        && check_spawn_rules(
+                    if !no_collision(region, fx, y, fz, width, height)
+                        || !check_spawn_rules(
                             region,
                             spawner.ty,
                             biome_name,
                             &entity_pos,
-                            &mut level_random,
+                            level_random,
                         )
                     {
-                        // Entity construction and Entity.snapTo happen before
-                        // Mob.checkSpawnObstruction in Paper. Consume the yaw
-                        // draw for every candidate that reaches that boundary,
-                        // including a candidate whose post-construction
-                        // obstruction check rejects it.
-                        consume_spawn_snap_yaw(&mut random);
-                        if spawn_obstruction_ok(region, spawner.ty, fx, y, fz, width, height) {
-                            // The current entity registry has no constructor or
-                            // insertion surface for these mob types. Do not
-                            // fabricate entity NBT at the intentional boundary.
-                            return Err(SpawnRegionError::UnsupportedEntity {
-                                chunk_pos: center_pos,
-                                biome: biome_name,
-                                entity_type: spawner.ty,
-                                position: entity_pos,
-                            });
-                        }
+                        // NaturalSpawner's continue is BEFORE the offset
+                        // block: retries repeat this position without consuming
+                        // the four candidate-offset draws.
+                        continue;
                     }
+                    let unsupported = || SpawnRegionError::UnsupportedEntity {
+                        chunk_pos: center_pos,
+                        biome: biome_name,
+                        entity_type: spawner.ty,
+                        position: entity_pos,
+                    };
+                    let Some(factory) = factory else {
+                        return Err(unsupported());
+                    };
+                    let mut entity = match factory.create(spawner.ty) {
+                        Ok(Some(entity)) => entity,
+                        // Actual feature-gating null is a continue before yaw
+                        // and before candidate-offset RNG, as in Java.
+                        Ok(None) => continue,
+                        Err(GenerationCreatureError::UnsupportedEntity(_)) => {
+                            return Err(unsupported());
+                        }
+                        Err(error) => {
+                            return Err(SpawnRegionError::CreatureRuntime(Arc::new(error)));
+                        }
+                    };
+                    entity.snap_to(
+                        rivet_registry::core::Vec3::new(fx, y as f64, fz),
+                        random.next_float() * 360.0,
+                        0.0,
+                    );
+                    let below = region.get_block_state(&entity_pos.below());
+                    let below_is_grass = below.block().name() == "minecraft:grass_block";
+                    let light_cost = if below_is_grass {
+                        0.0
+                    } else {
+                        // This generator is bound to the actual overworld
+                        // DimensionType (ambient_light=0). Preserve Java's
+                        // float operations in LevelReader's light curve.
+                        let raw = region.get_raw_brightness(&entity_pos).ok_or(
+                            SpawnRegionError::MissingSpawnLight {
+                                position: entity_pos,
+                            },
+                        )? as f32;
+                        let v = raw / 15.0;
+                        v / (4.0 - 3.0 * v) - 0.5
+                    };
+                    let NativeGenerationCreature::Sheep(sheep) = &mut entity;
+                    let mut success = false;
+                    if sheep.check_spawn_rules(below_is_grass, light_cost)
+                        && spawn_obstruction_ok(region, spawner.ty, fx, y, fz, width, height)
+                    {
+                        let biome = WorldGenLevel::get_biome(region, &entity_pos);
+                        let registry = generator
+                            .registry_access()
+                            .lookup_or_throw(&*rivet_registry::registries::BIOME);
+                        let tag = |name| {
+                            rivet_registry::tag_key::TagKey::create(
+                                &*rivet_registry::registries::BIOME,
+                                Identifier::with_default_namespace(name),
+                            )
+                        };
+                        let climate = if biome
+                            .is_tag(registry, &tag("spawns_warm_variant_farm_animals"))
+                        {
+                            SheepClimate::Warm
+                        } else if biome.is_tag(registry, &tag("spawns_cold_variant_farm_animals")) {
+                            SheepClimate::Cold
+                        } else {
+                            SheepClimate::Temperate
+                        };
+                        sheep.finalize_spawn(climate, level_random, &mut group_spawn_data);
+                        region
+                            .add_fresh_generation_creature(entity)
+                            .map_err(|error| {
+                                SpawnRegionError::CreatureAdmission(Arc::new(error))
+                            })?;
+                        success = true;
+                    }
+                    // Java executes this offset block even after a successful
+                    // admission, then exits the attempt loop for this member.
+                    advance_spawn_candidate(random, &mut x, &mut z, start_x, start_z, xo, zo);
+                    if success {
+                        break;
+                    }
+                    continue;
                 }
 
-                advance_spawn_candidate(&mut random, &mut x, &mut z, start_x, start_z, xo, zo);
+                advance_spawn_candidate(random, &mut x, &mut z, start_x, start_z, xo, zo);
             }
         }
     }
     Ok(())
 }
 
-/// Consume the population RNG draw used by Paper's `Entity.snapTo` yaw during
-/// the entity-construction boundary. Keeping it named makes the intentional
-/// unsupported-entity stop auditable alongside the candidate offset draws.
-fn consume_spawn_snap_yaw(random: &mut impl RandomSource) {
-    let _ = random.next_float();
+#[cfg(test)]
+thread_local! {
+    static SPAWN_CANDIDATE_TRACE: RefCell<Option<Vec<(i32, i32)>>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn trace_spawn_candidate(x: i32, z: i32) {
+    SPAWN_CANDIDATE_TRACE.with(|trace| {
+        if let Some(trace) = trace.borrow_mut().as_mut() {
+            trace.push((x, z));
+        }
+    });
 }
 
 /// Java's four-attempt candidate offset block, including the retry loop that
@@ -9614,6 +9741,135 @@ mod tests {
         holder
     }
 
+    #[test]
+    fn natural_population_rejection_and_feature_gate_trace_matches_actual_paper() {
+        use super::super::entity_construction::EntityConstructionRuntime;
+        use super::super::entity_id_allocator::EntityIdSequence;
+        use super::super::generation_creature_runtime::WorldGenerationCreatureFactory;
+        use rivet_world::flag::FeatureFlagSet;
+        let generator = test_generator();
+        let center = ChunkPos::ZERO;
+        let plains_id = BIOME_BY_ID
+            .iter()
+            .position(|name| *name == "minecraft:plains")
+            .unwrap() as u16;
+        let factory = WorldGenerationCreatureFactory::new(
+            EntityConstructionRuntime::with_seed(EntityIdSequence::default(), 42),
+            rivet_util::mth::Uuid { most: 0, least: 0 },
+            FeatureFlagSet::of(),
+            Arc::new(|_| false), // Explicit empty test destination, not boot authority.
+        );
+        for line in include_str!(
+            "../../../../../tools/rivet-oracle/fixtures/generation-population-trace.jsonl"
+        )
+        .lines()
+        {
+            let row: Value = serde_json::from_str(line).unwrap();
+            let mode = row["mode"].as_str().unwrap();
+            let mut holder = generator.create_holder(center);
+            let source = generator.biome_source();
+            holder
+                .chunk
+                .fill_biomes_from_noise(source, source.sampler(), &|_| WorldgenBiomeId(plains_id));
+            holder.chunk.set_persisted_status(ChunkStatus::Light);
+            holder.chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
+            for x in 0..16 {
+                for z in 0..16 {
+                    holder.chunk.set_block_state(
+                        x,
+                        63,
+                        z,
+                        Blocks::GRASS_BLOCK.default_block_state(),
+                    );
+                }
+            }
+            let heightmap = holder
+                .chunk
+                .get_or_create_heightmap_unprimed(Types::MotionBlockingNoLeaves)
+                .get_raw_data()
+                .to_vec();
+            if mode == "position_reject" || mode == "collision_reject" {
+                for x in 0..16 {
+                    for z in 0..16 {
+                        if mode == "position_reject" {
+                            holder.chunk.set_block_state(
+                                x,
+                                63,
+                                z,
+                                Blocks::AIR.default_block_state(),
+                            );
+                        } else {
+                            holder.chunk.set_block_state(
+                                x,
+                                64,
+                                z,
+                                Blocks::SNOW
+                                    .default_block_state()
+                                    .set_value(BlockStateProperties::LAYERS, PropertyValue::Int(2))
+                                    .expect("two snow layers are a registered state"),
+                            );
+                        }
+                    }
+                }
+                // The Java oracle supplies getHeight=64 as a controlled input.
+                // Restore precisely that supplied height surface after writes;
+                // Rust still executes genuine placement and collision geometry.
+                holder
+                    .chunk
+                    .base_mut()
+                    .set_heightmap(Types::MotionBlockingNoLeaves, &heightmap);
+            }
+            let mut nibbles = holder.chunk.sky_nibbles().to_vec();
+            for nibble in &mut nibbles {
+                if mode == "rule_reject" {
+                    nibble.set_zero();
+                } else {
+                    nibble.set_full();
+                }
+                nibble.update_visible();
+            }
+            holder.chunk.set_sky_nibbles(nibbles);
+            holder.chunk.set_light_correct(true);
+            let mut workspace = spawn_region_workspace(&generator, center, plains_id);
+            let mut region =
+                compose_spawn_region(&mut holder.chunk, &mut workspace, &generator).unwrap();
+            let mut random = LegacyRandomSource::new(row["seed"].as_i64().unwrap());
+            let mut level_random = LegacyRandomSource::new(99);
+            SPAWN_CANDIDATE_TRACE.with(|trace| trace.replace(Some(Vec::new())));
+            let result = run_spawn_population(
+                &mut region,
+                &generator,
+                "minecraft:plains",
+                &MOB_SPAWN_SETTINGS_BY_NAME["minecraft:plains"],
+                &mut random,
+                &mut level_random,
+                (mode == "feature_gate").then_some(&factory as &dyn GenerationCreatureFactory),
+            );
+            let trace = SPAWN_CANDIDATE_TRACE.with(|trace| trace.take().unwrap());
+            result.unwrap_or_else(|error| panic!("{mode}: {error}"));
+            assert_eq!(
+                serde_json::to_value(trace).unwrap(),
+                row["positions"],
+                "{mode}"
+            );
+            assert_eq!(
+                random.next_long(),
+                row["population_next"].as_i64().unwrap(),
+                "{mode}"
+            );
+            assert_eq!(
+                level_random.next_long(),
+                row["level_next"].as_i64().unwrap(),
+                "{mode}"
+            );
+            drop(region);
+            assert!(
+                holder.chunk.get_entities().is_empty(),
+                "a rejected or constructor-gated candidate never becomes an entity"
+            );
+        }
+    }
+
     /// Drive the SPAWN seam to the resolve step and force the center proto's
     /// top biome row to `biome`, returning the fresh chunk. The holder is driven
     /// through CARVERS (the real worldgen rungs) before the focused override;
@@ -9909,42 +10165,6 @@ mod tests {
         assert_eq!(
             actual.next_float().to_bits(),
             expected.next_float().to_bits()
-        );
-    }
-
-    #[test]
-    fn spawn_failed_obstruction_still_consumes_paper_snap_yaw_draw() {
-        let mut actual = WorldgenRandom::new(LegacyRandomSource::new(0x5eed));
-        let mut expected = WorldgenRandom::new(LegacyRandomSource::new(0x5eed));
-        let obstruction_ok = false;
-        // The candidate passed the pre-construction gates and reached
-        // Entity.snapTo. Its post-construction obstruction result is false,
-        // but the yaw draw has already happened in Paper's order.
-        consume_spawn_snap_yaw(&mut actual);
-        assert!(!obstruction_ok);
-        let _paper_yaw = expected.next_float();
-        assert_eq!(
-            actual.next_int_bound(5),
-            expected.next_int_bound(5),
-            "a failed obstruction check must not restore or skip the snap yaw draw"
-        );
-    }
-
-    #[test]
-    fn spawn_unsupported_boundary_consumes_paper_snap_yaw_draw() {
-        let mut actual = WorldgenRandom::new(LegacyRandomSource::new(0x5eed));
-        let mut expected = WorldgenRandom::new(LegacyRandomSource::new(0x5eed));
-        consume_spawn_snap_yaw(&mut actual);
-        let _paper_yaw = expected.next_float();
-        assert_eq!(
-            actual.next_float().to_bits(),
-            expected.next_float().to_bits(),
-            "the unsupported boundary must consume Paper's snap yaw"
-        );
-        assert_eq!(
-            actual.next_int_bound(5),
-            expected.next_int_bound(5),
-            "the next candidate draw must follow Paper's snap yaw"
         );
     }
 

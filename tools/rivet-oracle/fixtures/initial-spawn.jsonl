@@ -1,0 +1,8 @@
+{"seed":42,"terrain":"stone","climate":[-31,0,6],"writes":[[-24,64,8],[-32,64,0]],"queried_chunks":1,"spawn":[-32,64,0]}
+{"seed":42,"terrain":"late_column","climate":[-31,0,6],"writes":[[-24,64,8],[-30,64,3]],"queried_chunks":1,"spawn":[-30,64,3]}
+{"seed":42,"terrain":"skip_two","climate":[-31,0,6],"writes":[[-24,64,8],[-16,64,16]],"queried_chunks":3,"spawn":[-16,64,16]}
+{"seed":42,"terrain":"water","climate":[-31,0,6],"writes":[[-24,64,8]],"queried_chunks":121,"spawn":[-24,64,8]}
+{"seed":42,"terrain":"void","climate":[-31,0,6],"writes":[[-24,64,8]],"queried_chunks":121,"spawn":[-24,64,8]}
+{"seed":42,"terrain":"bottom_slab","climate":[-31,0,6],"writes":[[-24,64,8],[-32,63,0]],"queried_chunks":1,"spawn":[-32,63,0]}
+{"seed":42,"terrain":"top_slab","climate":[-31,0,6],"writes":[[-24,64,8],[-32,64,0]],"queried_chunks":1,"spawn":[-32,64,0]}
+{"seed":0,"terrain":"stone","climate":[-31,0,6],"writes":[[-24,64,8],[-32,64,0]],"queried_chunks":1,"spawn":[-32,64,0]}

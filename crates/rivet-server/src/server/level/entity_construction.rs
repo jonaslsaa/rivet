@@ -88,6 +88,16 @@ impl StructureEntityCreation for StructureMinecartFactory {
 }
 
 impl EntityConstructionRuntime {
+    /// Continue actual Entity.SHARED_RANDOM construction after UUID and ID
+    /// initialization. LivingEntity and subtype constructor draws belong here,
+    /// never to the population or WorldGenRegion random sources.
+    pub(super) fn with_entity_random<T>(
+        &self,
+        body: impl FnOnce(&mut LegacyRandomSource) -> T,
+    ) -> Result<T, EntityConstructionError> {
+        let mut random = self.random.lock().map_err(|_| EntityConstructionError)?;
+        Ok(body(&mut random))
+    }
     pub fn new(ids: EntityIdSequence) -> Self {
         Self::with_seed(ids, random_support::generate_unique_seed())
     }
