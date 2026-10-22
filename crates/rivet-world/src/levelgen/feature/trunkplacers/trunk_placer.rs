@@ -696,6 +696,7 @@ mod tests {
             foliage_provider: stub.foliage_provider.clone(),
             trunk_provider: stub.trunk_provider.clone(),
             below_trunk_provider: empty,
+            ..stub
         };
         let mut calls = 0;
         let mut setter = |_pos: &BlockPos, _state: BlockState| {

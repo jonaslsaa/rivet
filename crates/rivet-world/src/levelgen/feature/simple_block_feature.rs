@@ -22,7 +22,6 @@
 
 use crate::block::blocks::Blocks;
 use crate::block::double_plant_block;
-use crate::block::mossy_carpet_block;
 use crate::level::WorldGenLevel;
 use crate::levelgen::feature::FeatureBehavior;
 use crate::levelgen::feature::FeaturePlaceContext;
@@ -133,11 +132,9 @@ impl FeatureBehavior<SimpleBlockConfiguration> for SimpleBlockFeature {
                 // the LEVEL's random source (`WorldGenRegion.getRandom()`, the positional
                 // `worldgen_region_random` factory at the chunk centre), never the
                 // feature-context `random`. The feature-context RNG must NOT be consumed
-                // on this path — so no `random` is threaded into the seam; a future
-                // wiring must thread the level RNG through a `get_random` accessor
-                // (RivetTodo #232), not this `random`. The seam writes the base carpet
-                // (a defined result) and defers the face-negotiated topper to #232.
-                mossy_carpet_block::place_at(level, &origin, UPDATE_CLIENTS);
+                // on this path. The level owns the RNG while placing the base,
+                // negotiating topper faces, and re-updating the base.
+                level.place_mossy_carpet(&origin, UPDATE_CLIENTS);
             } else {
                 level.set_block(&origin, state_to_place, UPDATE_CLIENTS);
             }

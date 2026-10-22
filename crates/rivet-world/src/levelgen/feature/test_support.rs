@@ -640,11 +640,11 @@ mod tests {
     fn unsupported_dynamic_shape_uses_configured_fallback_in_test_level() {
         let mut level = TestLevel::over(access());
         let pos = BlockPos::new(0, 0, 0);
-        let bamboo = BlockState::of(BlockId::from_name("minecraft:bamboo").unwrap());
+        let scaffolding = BlockState::of(BlockId::from_name("minecraft:scaffolding").unwrap());
 
-        assert!(bamboo.has_dynamic_shape());
-        assert!(level.is_face_sturdy(&pos, &bamboo, &Direction::Up));
+        assert!(scaffolding.has_dynamic_shape());
+        assert!(level.is_face_sturdy(&pos, &scaffolding, &Direction::Up));
         level.face_sturdy = false;
-        assert!(!level.is_face_sturdy(&pos, &bamboo, &Direction::Up));
+        assert!(!level.is_face_sturdy(&pos, &scaffolding, &Direction::Up));
     }
 }

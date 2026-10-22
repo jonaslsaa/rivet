@@ -51,9 +51,9 @@
 //! resolves the random-selector root through the shared registries; Paper's
 //! seed-42 draw misses the 0.025 and 0.05 branches, then selects
 //! `minecraft:dark_oak_leaf_litter` at the 0.6666667 branch. Its supported
-//! placement chain then reaches the next honest boundary, the
-//! `minecraft:freeze_top_layer` world-state seam at step 10/global index 0.
-//! The chunk stays CARVERS. The INITIALIZE_LIGHT/
+//! placement chain and the biome-dependent freeze/snow pass now complete for
+//! seed 42's origin chunk, reaching FEATURES. Other selected paths retain
+//! explicit capability refusals; this is not whole-world feature parity. The INITIALIZE_LIGHT/
 //! LIGHT steps are executor-wired but engine-gated (the holder wires no light
 //! engine, so it cannot reach LIGHT). The public
 //! [`GenerationChunkHolder::generate_spawn_with_region`] API is the standalone
@@ -162,20 +162,35 @@ use rivet_world::level::height_accessor::LevelHeightAccessor;
 use rivet_world::level::height_accessor::create as create_height_accessor;
 use rivet_world::level::{WorldBorderSettings, WorldGenLevel};
 use rivet_world::levelgen::blending::blender::Blender;
+use rivet_world::levelgen::feature::configurations::block_blob_configuration::block_blob_configuration_codec;
 use rivet_world::levelgen::feature::configurations::block_column_configuration::block_column_configuration_codec;
+use rivet_world::levelgen::feature::configurations::block_pile_configuration::block_pile_configuration_codec;
+use rivet_world::levelgen::feature::configurations::block_state_configuration::block_state_configuration_codec;
+use rivet_world::levelgen::feature::configurations::column_feature_configuration::column_feature_configuration_codec;
+use rivet_world::levelgen::feature::configurations::count_configuration::count_configuration_codec;
+use rivet_world::levelgen::feature::configurations::delta_feature_configuration::delta_feature_configuration_codec;
 use rivet_world::levelgen::feature::configurations::disk_configuration::disk_configuration_codec;
+use rivet_world::levelgen::feature::configurations::fallen_tree_configuration::fallen_tree_configuration_codec;
 use rivet_world::levelgen::feature::configurations::geode_configuration::geode_configuration_codec;
 use rivet_world::levelgen::feature::configurations::huge_mushroom_feature_configuration::huge_mushroom_feature_configuration_codec;
+use rivet_world::levelgen::feature::configurations::layer_configuration::layer_configuration_codec;
 use rivet_world::levelgen::feature::configurations::multiface_growth_configuration::multiface_growth_configuration_codec;
+use rivet_world::levelgen::feature::configurations::nether_forest_vegetation_config::nether_forest_vegetation_config_codec;
+use rivet_world::levelgen::feature::configurations::none_feature_configuration::none_feature_configuration_codec;
 use rivet_world::levelgen::feature::configurations::ore_configuration::ore_configuration_codec;
 use rivet_world::levelgen::feature::configurations::probability_feature_configuration::probability_feature_configuration_codec;
+use rivet_world::levelgen::feature::configurations::replace_sphere_configuration::replace_sphere_configuration_codec;
+use rivet_world::levelgen::feature::configurations::sculk_patch_configuration::sculk_patch_configuration_codec;
 use rivet_world::levelgen::feature::configurations::simple_block_configuration::simple_block_configuration_codec;
+use rivet_world::levelgen::feature::configurations::spike_configuration::spike_configuration_codec;
 use rivet_world::levelgen::feature::configurations::spring_configuration::spring_configuration_codec;
+use rivet_world::levelgen::feature::configurations::tree_configuration::tree_configuration_codec;
 use rivet_world::levelgen::feature::configurations::underwater_magma_configuration::underwater_magma_configuration_codec;
+use rivet_world::levelgen::feature::configurations::vegetation_patch_configuration::vegetation_patch_configuration_codec;
 use rivet_world::levelgen::feature::configurations::weighted_random_feature_configuration::WeightedRandomFeatureConfiguration;
 use rivet_world::levelgen::feature::configurations::{
-    CompositeFeatureConfiguration, FeatureConfiguration, NoneFeatureConfiguration,
-    RandomBooleanFeatureConfiguration, RandomFeatureConfiguration,
+    CompositeFeatureConfiguration, FeatureConfiguration, RandomBooleanFeatureConfiguration,
+    RandomFeatureConfiguration,
 };
 use rivet_world::levelgen::feature::lake_feature::lake_configuration_codec;
 use rivet_world::levelgen::feature::registry_keys::{CONFIGURED_FEATURE, PLACED_FEATURE};
@@ -903,10 +918,9 @@ impl GenerationChunkHolder {
     /// STRUCTURE_STARTS through distance 8), and the Paper-order biome-union
     /// gather + `retainAll` — and then decodes and runs the registry-backed
     /// lake, amethyst-geode, monster-room, underwater_magma, and glow_lichen
-    /// paths at their exact feature seeds before stopping at the first selected
-    /// unsupported path (seed-42 chunk (0,0): the selector chooses
-    /// `minecraft:freeze_top_layer` at step 10/global 0); the chunk stays
-    /// CARVERS.
+    /// paths at their exact feature seeds. Seed 42's origin chunk completes
+    /// FEATURES, including freeze/snow. Other chunks refuse atomically at a
+    /// selected unsupported capability rather than skipping that feature.
     pub fn new(pos: ChunkPos, generator: Arc<OverworldGenerator>) -> Self {
         Self::new_with_workspace_and_structure_feature_count(
             pos,
@@ -1064,9 +1078,9 @@ impl GenerationChunkHolder {
                 // `ChunkGenerator.java` 97-100) and FeatureSorter, and the
                 // exact per-feature seeds — and then decodes and runs the
                 // registry-backed lake, amethyst-geode, monster-room,
-                // underwater_magma, and glow_lichen entries before failing
-                // typed at the first selected unsupported path
-                // (`minecraft:freeze_top_layer`, step 10/global 0 after selector dispatch).
+                // underwater_magma, and glow_lichen entries. Selected
+                // unsupported capabilities remain typed failures; seed 42's
+                // origin chunk now completes the final freeze/snow pass.
                 // It must never be "improved" into a silent skip or a blanket
                 // UnsupportedTask.
                 // The closure captures one generator clone; the holder keeps
@@ -1145,10 +1159,9 @@ impl GenerationChunkHolder {
     /// drives the full 17x17 dependency-window region (the 3x3 window is only
     /// the biome union), resolves the FULL possible-biome settings and builds
     /// the FeatureSorter, decodes and runs the registry-backed lake, geode,
-    /// monster-room, underwater_magma, and glow_lichen paths, and then fails
-    /// typed at the first selected unsupported path (`FeaturePlacementDecode`,
-    /// seed-42: `minecraft:freeze_top_layer` at step 10/global 0 after selector dispatch), so the
-    /// chunk is never stamped FEATURES.
+    /// monster-room, underwater_magma, and glow_lichen paths. FEATURES is
+    /// stamped only if every selected path succeeds (as for seed 42's origin);
+    /// unsupported selected capabilities still fail atomically and typed.
     pub fn status(&self) -> ChunkStatus {
         self.chunk.get_persisted_status()
     }
@@ -1398,6 +1411,7 @@ fn is_features_failure(error: GenError) -> bool {
     matches!(
         error,
         GenError::FeaturePlacementDecode { .. }
+            | GenError::FeatureSetOrderingUnavailable { .. }
             | GenError::SettingsNotGenerated { .. }
             | GenError::StructureDecorationIndexUnavailable { .. }
     )
@@ -1534,14 +1548,14 @@ fn generate_ring_chunk(
 /// glow_lichen leaves with their exact feature seeds. On seed-42 chunk (0,0),
 /// step 9/global index 17's `dark_forest_vegetation` parent selects no position:
 /// all 16 count/in-square candidates fail its max-depth-zero water filter, so
-/// the run reaches `minecraft:freeze_top_layer` at step 10/global index 0, whose
-/// biome `shouldFreeze` world-state seam is not yet implemented. A separate
-/// tree-bearing seed-42 chunk (4,4) does reach the same outer step-9/global-17
-/// parent; its selector falls through to `oak_leaf_litter`, whose
-/// `would_survive` state is the current unsupported `oak_sapling` seam. The
-/// typed error names the outer placed feature in both cases. The generated
-/// settings tables are the full 55-biome surface (no `SettingsNotGenerated`),
-/// so these boundaries are reached without fabricated or silently skipped
+/// the run reaches and completes `minecraft:freeze_top_layer` at step 10/global
+/// index 0 using the real biome/world-state freeze/snow predicates. A separate
+/// tree-bearing seed-42 chunk (4,4) reaches the same outer step-9/global-17
+/// parent and now completes its tree/leaf-litter decoration too. Ordinary oak
+/// survival and final neighbor-shape updates are real paths; unsupported
+/// selected extensions still return typed failures naming their outer dispatch.
+/// The settings tables cover all 55 possible biomes (no `SettingsNotGenerated`),
+/// without fabricating or silently skipping
 /// features.
 ///
 /// Compose the FEATURES `WorldGenRegion` over the complete accumulated
@@ -1646,7 +1660,7 @@ fn compose_feature_region_with_workspace<'a>(
         width,
         holders,
     );
-    WorldGenRegion::new(
+    let mut region = WorldGenRegion::new(
         cache,
         center_pos,
         step,
@@ -1656,7 +1670,19 @@ fn compose_feature_region_with_workspace<'a>(
         generator.generator().get_sea_level(),
         Arc::new(generator.biome_source.clone()),
         generator.feature_access().clone(),
-    )
+    );
+    let random = generator
+        .random_state()
+        .get_or_create_random_factory(&Identifier::with_default_namespace(
+            "worldgen_region_random",
+        ))
+        .at(
+            center_pos.get_min_block_x(),
+            0,
+            center_pos.get_min_block_z(),
+        );
+    region.set_region_random(random);
+    region
 }
 
 /// `possibleBiomes` — the 3x3 biome union, gathered in Paper order and
@@ -1785,7 +1811,7 @@ impl FeatureConfiguration for DeferredGeneratedFeatureConfiguration {
 /// features are mutually recursive; they are adopted only after the temporary
 /// access is fully dropped, so a decode failure cannot publish a partially
 /// populated access into the world.
-fn build_feature_access(worldgen: &RegistryAccess) -> RegistryAccess {
+pub(super) fn build_feature_access(worldgen: &RegistryAccess) -> RegistryAccess {
     let (placed, configured) = build_generated_feature_closure(worldgen)
         .unwrap_or_else(|error| panic!("generated feature closure refused atomically: {error}"));
     let feature_layer = RegistryAccess::from_pairs(vec![
@@ -2608,20 +2634,59 @@ fn decode_configured_feature_value(
         .get("config")
         .ok_or_else(|| format!("{configured_key} JSON has no config"))?;
     let config: Arc<dyn FeatureConfiguration> = match feature_type {
+        "minecraft:vegetation_patch" | "minecraft:waterlogged_vegetation_patch" => {
+            Arc::new(decode_value(
+                vegetation_patch_configuration_codec::<FeatureOps>(),
+                ops,
+                config_value,
+                &format!("decode {configured_key} config"),
+            )?)
+        }
+        "minecraft:fallen_tree" => Arc::new(decode_value(
+            fallen_tree_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:tree" => Arc::new(decode_value(
+            tree_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
         "minecraft:lake" => Arc::new(decode_value(
             lake_configuration_codec::<FeatureOps>(),
             ops,
             config_value,
             &format!("decode {configured_key} config"),
         )?),
-        "minecraft:monster_room" => Arc::new(NoneFeatureConfiguration),
+        "minecraft:no_op"
+        | "minecraft:monster_room"
+        | "minecraft:vines"
+        | "minecraft:freeze_top_layer"
+        | "minecraft:blue_ice"
+        | "minecraft:kelp"
+        | "minecraft:coral_tree"
+        | "minecraft:coral_claw"
+        | "minecraft:coral_mushroom"
+        | "minecraft:basalt_pillar"
+        | "minecraft:glowstone_blob"
+        | "minecraft:chorus_plant"
+        | "minecraft:void_start_platform"
+        | "minecraft:end_platform"
+        | "minecraft:end_island" => Arc::new(decode_value(
+            none_feature_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
         "minecraft:geode" => Arc::new(decode_value(
             geode_configuration_codec::<FeatureOps>(),
             ops,
             config_value,
             &format!("decode {configured_key} config"),
         )?),
-        "minecraft:ore" => Arc::new(decode_value(
+        "minecraft:ore" | "minecraft:scattered_ore" => Arc::new(decode_value(
             ore_configuration_codec::<FeatureOps>(),
             ops,
             config_value,
@@ -2651,8 +2716,7 @@ fn decode_configured_feature_value(
             config_value,
             &format!("decode {configured_key} config"),
         )?),
-        "minecraft:vines" | "minecraft:freeze_top_layer" => Arc::new(NoneFeatureConfiguration),
-        "minecraft:seagrass" => Arc::new(decode_value(
+        "minecraft:seagrass" | "minecraft:bamboo" => Arc::new(decode_value(
             probability_feature_configuration_codec::<FeatureOps>(),
             ops,
             config_value,
@@ -2672,6 +2736,72 @@ fn decode_configured_feature_value(
         )?),
         "minecraft:huge_red_mushroom" | "minecraft:huge_brown_mushroom" => Arc::new(decode_value(
             huge_mushroom_feature_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:block_pile" => Arc::new(decode_value(
+            block_pile_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:block_blob" => Arc::new(decode_value(
+            block_blob_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:sea_pickle" => Arc::new(decode_value(
+            count_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:iceberg" => Arc::new(decode_value(
+            block_state_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:basalt_columns" => Arc::new(decode_value(
+            column_feature_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:fill_layer" => Arc::new(decode_value(
+            layer_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:delta_feature" => Arc::new(decode_value(
+            delta_feature_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:netherrack_replace_blobs" => Arc::new(decode_value(
+            replace_sphere_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:nether_forest_vegetation" => Arc::new(decode_value(
+            nether_forest_vegetation_config_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:spike" => Arc::new(decode_value(
+            spike_configuration_codec::<FeatureOps>(),
+            ops,
+            config_value,
+            &format!("decode {configured_key} config"),
+        )?),
+        "minecraft:sculk_patch" => Arc::new(decode_value(
+            sculk_patch_configuration_codec::<FeatureOps>(),
             ops,
             config_value,
             &format!("decode {configured_key} config"),
@@ -2902,44 +3032,14 @@ fn set_paper_feature_seed(
     );
 }
 
-fn configured_feature_is_executable(placed_key: &str) -> Result<bool, String> {
-    let placed_entry = PLACED_FEATURE_BY_NAME
-        .get(placed_key)
-        .ok_or_else(|| format!("missing generated {placed_key} entry"))?;
-    let placed_json: Value = serde_json::from_str(placed_entry.json)
-        .map_err(|error| format!("decode {placed_key} JSON: {error}"))?;
-    let configured_key = placed_json
-        .get("feature")
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("{placed_key} JSON has no configured feature"))?;
-    let configured_entry = CONFIGURED_FEATURE_BY_NAME
-        .get(configured_key)
-        .ok_or_else(|| format!("missing generated {configured_key} entry"))?;
-    let configured_json: Value = serde_json::from_str(configured_entry.json)
-        .map_err(|error| format!("decode {configured_key} JSON: {error}"))?;
-    Ok(matches!(
-        configured_json.get("type").and_then(Value::as_str),
-        Some("minecraft:lake")
-            | Some("minecraft:monster_room")
-            | Some("minecraft:geode")
-            | Some("minecraft:ore")
-            | Some("minecraft:disk")
-            | Some("minecraft:spring_feature")
-            | Some("minecraft:simple_block")
-            | Some("minecraft:block_column")
-            | Some("minecraft:vines")
-            | Some("minecraft:seagrass")
-            | Some("minecraft:freeze_top_layer")
-            | Some("minecraft:underwater_magma")
-            | Some("minecraft:multiface_growth")
-            | Some("minecraft:huge_brown_mushroom")
-            | Some("minecraft:huge_red_mushroom")
-            | Some("minecraft:random_selector")
-            | Some("minecraft:weighted_random_selector")
-            | Some("minecraft:simple_random_selector")
-            | Some("minecraft:random_boolean_selector")
-            | Some("minecraft:sequence")
-    ))
+fn configured_feature_is_executable(
+    placed_key: &str,
+    generator: &OverworldGenerator,
+) -> Result<bool, String> {
+    let decoded = decode_placed_feature(placed_key, generator)?;
+    let placed = decoded.placed_holder.value(decoded.placed_registry);
+    let configured = placed.feature().value(decoded.configured_registry);
+    Ok(configured.config.unavailable_feature().is_none())
 }
 
 struct FeatureSelectionGenerator {
@@ -3008,6 +3108,27 @@ fn generated_boundary_panic_message(payload: &(dyn std::any::Any + Send)) -> Opt
         .downcast_ref::<String>()
         .map(String::as_str)
         .or_else(|| payload.downcast_ref::<&'static str>().copied())
+}
+
+/// Only the typed primitive capability error is converted here. Unrelated
+/// panics must retain the existing rollback-and-resume behavior; matching a
+/// string containing "Java set" would accidentally hide programmer bugs.
+fn generated_set_ordering_error(
+    payload: &(dyn std::any::Any + Send),
+    chunk_pos: ChunkPos,
+    step_index: usize,
+    global_feature_index: usize,
+    feature_key: &'static str,
+) -> Option<GenError> {
+    payload
+        .downcast_ref::<rivet_registry::core::JavaBlockPosSetError>()
+        .map(|&error| GenError::FeatureSetOrderingUnavailable {
+            chunk_pos,
+            step_index,
+            global_feature_index,
+            feature_key,
+            error,
+        })
 }
 
 fn generated_boundary_feature_key(
@@ -3154,14 +3275,15 @@ fn run_biome_decoration_through(
                 global_feature_index,
                 step_index,
             );
-            let executable = configured_feature_is_executable(feature_key).map_err(|_| {
-                GenError::FeaturePlacementDecode {
-                    chunk_pos: center_pos,
-                    step_index,
-                    global_feature_index,
-                    feature_key,
-                }
-            })?;
+            let executable =
+                configured_feature_is_executable(feature_key, generator).map_err(|_| {
+                    GenError::FeaturePlacementDecode {
+                        chunk_pos: center_pos,
+                        step_index,
+                        global_feature_index,
+                        feature_key,
+                    }
+                })?;
             if executable {
                 let placed = decode_placed_feature(feature_key, generator).map_err(|_| {
                     GenError::FeaturePlacementDecode {
@@ -3184,9 +3306,27 @@ fn run_biome_decoration_through(
                     );
                 }));
                 if let Err(payload) = placement {
+                    if let Some(error) = generated_set_ordering_error(
+                        payload.as_ref(),
+                        center_pos,
+                        step_index,
+                        global_feature_index,
+                        feature_key,
+                    ) {
+                        return Err(error);
+                    }
                     let boundary =
                         generated_boundary_panic_message(payload.as_ref()).is_some_and(|message| {
                             message.starts_with("generated feature ")
+                                || (message.starts_with("tree root placer ")
+                                    && message.ends_with(" is not implemented"))
+                                || (message.starts_with("tree decorator ")
+                                    && message.ends_with(" is not implemented"))
+                                || message.starts_with(
+                                    "StructureTemplate.updateShapeAtEdge is not implemented",
+                                )
+                                || message.starts_with("Block.updateShape is not implemented for ")
+                                || message == "BeehiveBlockEntity nonempty components codec is not implemented"
                                 || (message
                                     .contains("BlockStateBase.canSurvive is not implemented")
                                     || message
@@ -4586,6 +4726,7 @@ mod tests {
     use rivet_world::levelgen::feature::FeatureBehavior;
     use rivet_world::levelgen::feature::configurations::HugeMushroomFeatureConfiguration;
     use rivet_world::levelgen::feature::configurations::MultifaceGrowthConfiguration;
+    use rivet_world::levelgen::feature::configurations::NoneFeatureConfiguration;
     use rivet_world::levelgen::feature::configurations::ProbabilityFeatureConfiguration;
     use rivet_world::levelgen::feature::configurations::UnderwaterMagmaConfiguration;
     use rivet_world::levelgen::feature::configurations::disk_configuration::DiskConfiguration;
@@ -5386,7 +5527,7 @@ mod tests {
     /// FEATURES-failure cache: a later direct FEATURES request still runs the
     /// decoration body and reports its own typed boundary.
     #[test]
-    fn light_refusal_does_not_cache_features_failure() {
+    fn light_refusal_does_not_prevent_features_generation() {
         let generator = test_generator();
         let mut holder = feature_holder(&generator, ChunkPos::ZERO);
         holder
@@ -5402,18 +5543,10 @@ mod tests {
         ));
         assert_eq!(holder.status(), ChunkStatus::Carvers);
 
-        let features_error = holder
+        holder
             .generate_through(ChunkStatus::Features)
-            .expect_err("FEATURES must run after the earlier LIGHT refusal");
-        assert!(matches!(
-            features_error,
-            GeneratedChunkError::Generation(
-                GenError::FeaturePlacementDecode { .. }
-                    | GenError::SettingsNotGenerated { .. }
-                    | GenError::StructureDecorationIndexUnavailable { .. }
-            )
-        ));
-        assert_eq!(holder.status(), ChunkStatus::Carvers);
+            .expect("FEATURES must run after the earlier LIGHT refusal");
+        assert_eq!(holder.status(), ChunkStatus::Features);
     }
 
     /// Without a structure-decoration authority, FEATURES refuses before
@@ -5576,186 +5709,126 @@ mod tests {
         assert!(holder.features_failure.is_none());
     }
 
-    /// The FEATURES rung runs `addVanillaDecorations`'s full prologue and
-    /// dependency-window cache — `Heightmap.primeHeightmaps(chunk,
-    /// FINAL_HEIGHTMAPS)` (the `ChunkStatusTasks.generateFeatures` priming),
-    /// the decoration-seed derivation (`SectionPos.of(centerPos,
-    /// level.getMinSectionY()).origin()` fed to `setDecorationSeed(seed,
-    /// originX, originZ)`), the 17x17 `WorldGenRegion` cache (borrowed center,
-    /// CARVERS at distances 0/1, and STRUCTURE_STARTS through distance 8), the
-    /// Paper-order 3x3 biome-union gather + `retainAll`, and then resolves
-    /// generation settings for the FULL `biomeSource.possibleBiomes()` list in
-    /// source order (the exact argument Paper's `ChunkGenerator.featuresPerStep`
-    /// memoizes, `ChunkGenerator.java` 97-100). Every possible biome (55) now
-    /// resolves, so the full-list `FeatureSorter` is built, the per-step loop
-    /// maps the 3x3 union through it, and runs the registry-backed lake, geode,
-    /// and monster-room paths at their exact feature seeds before the first
-    /// unsupported selected path stops the slice.
-    /// For seed 42 chunk (0,0), the lakes and amethyst rarity filters drop;
-    /// `minecraft:amethyst_geode` and `minecraft:monster_room` execute through
-    /// their registry-backed leaves, and the Batch 2/3 ore/disk/spring/block
-    /// and underwater_magma decode arms advance the run through the full
-    /// UNDERGROUND_ORES step — underwater_magma (global 26) now executes but
-    /// places no magma in this dry origin union, so it consumes no placement
-    /// RNG past its scan. Batch 4 then decodes and executes `glow_lichen` through
-    /// `minecraft:multiface_growth`. The random-selector branch at global 17
-    /// selects `minecraft:dark_oak_leaf_litter`; the next typed boundary is
-    /// `minecraft:freeze_top_layer` at step 10/global index 0 when its
-    /// biome freeze query reaches the unimplemented `shouldFreeze` seam. The chunk
-    /// is never stamped FEATURES (it stays CARVERS).
     #[test]
-    fn generate_through_features_rolls_back_fresh_holder_and_caches_failure() {
+    fn identity_dependent_feature_set_refuses_typed_rolls_back_and_caches_failure() {
+        use rivet_registry::core::{JavaBlockPosSet, JavaBlockPosSetError};
         let generator = test_generator();
-        let mut holder = feature_holder(&generator, ChunkPos::new(0, 0));
-        let fresh = generator.create_holder(ChunkPos::new(0, 0));
-        assert_eq!(holder.status(), ChunkStatus::Empty);
-
-        let err = holder
-            .generate_through(ChunkStatus::Features)
-            .expect_err("FEATURES must stop at the first selected mismatch");
-        match err {
-            GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
-                chunk_pos,
-                step_index,
-                global_feature_index,
-                feature_key,
-            }) => {
-                assert_eq!(chunk_pos, ChunkPos::new(0, 0));
-                assert_eq!(step_index, 10);
-                assert_eq!(global_feature_index, 0);
-                assert_eq!(feature_key, "minecraft:freeze_top_layer");
-            }
-            other => {
-                panic!(
-                    "FEATURES must stop at the selected freeze_top_layer boundary; got {other:?}"
-                )
-            }
-        }
-
-        // The FEATURES prologue and earlier generation rungs may mutate every
-        // part of the center proto before the typed placement boundary. A
-        // failed transaction must restore the fresh EMPTY representation, not
-        // merely leave the status below FEATURES.
-        assert_eq!(holder.status(), fresh.status());
-        assert_eq!(holder.status(), ChunkStatus::Empty);
-        assert!(
-            holder.take_feature_writebacks().is_empty(),
-            "a failed FEATURES transaction must discard dependency writebacks"
-        );
-        let holder_heightmaps: Vec<Option<Vec<i64>>> = holder
-            .chunk
-            .heightmaps()
-            .iter()
-            .map(|heightmap| heightmap.as_ref().map(|map| map.get_raw_data().to_vec()))
-            .collect();
-        let fresh_heightmaps: Vec<Option<Vec<i64>>> = fresh
-            .chunk
-            .heightmaps()
-            .iter()
-            .map(|heightmap| heightmap.as_ref().map(|map| map.get_raw_data().to_vec()))
-            .collect();
-        assert_eq!(holder_heightmaps, fresh_heightmaps);
-        for ty in FINAL_HEIGHTMAPS {
-            assert!(
-                holder.chunk.heightmaps()[ty as usize].is_none(),
-                "a failed FEATURES transaction must roll back {ty:?}"
-            );
-        }
-
-        let min_y = holder.chunk.get_min_y();
-        let max_y = min_y + holder.chunk.get_height();
-        for y in min_y..max_y {
-            for z in 0..16 {
-                for x in 0..16 {
-                    assert_eq!(
-                        holder.chunk.get_block_state(x, y, z),
-                        fresh.chunk.get_block_state(x, y, z),
-                        "a failed FEATURES transaction must roll back block ({x}, {y}, {z})"
-                    );
-                }
-            }
-        }
-        for (holder_section, fresh_section) in holder
-            .chunk
-            .get_sections()
-            .iter()
-            .zip(fresh.chunk.get_sections())
-        {
-            assert_eq!(
-                holder_section.non_empty_block_count(),
-                fresh_section.non_empty_block_count(),
-                "a failed FEATURES transaction must roll back section block counts"
-            );
-            for y in 0..4 {
-                for z in 0..4 {
-                    for x in 0..4 {
-                        assert_eq!(
-                            holder_section.biomes().get(x, y, z),
-                            fresh_section.biomes().get(x, y, z),
-                            "a failed FEATURES transaction must roll back biome writes"
-                        );
+        let attempts = Rc::new(std::cell::Cell::new(0));
+        let task_attempts = Rc::clone(&attempts);
+        let expected = GenError::FeatureSetOrderingUnavailable {
+            chunk_pos: ChunkPos::ZERO,
+            step_index: 9,
+            global_feature_index: 17,
+            feature_key: "minecraft:dark_forest_vegetation",
+            error: JavaBlockPosSetError::IdentityHashRequired { hash: 0 },
+        };
+        let context = WorldGenContext::new(
+            |_| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            move |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
+                task_attempts.set(task_attempts.get() + 1);
+                chunk.set_block_state(0, chunk.get_min_y(), 0, Blocks::STONE.default_block_state());
+                chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
+                let placement = std::panic::catch_unwind(|| {
+                    // Real BlockPos collisions trigger Java's 16->32->64
+                    // bucket growth, then identity-dependent treeification.
+                    let mut positions = JavaBlockPosSet::new();
+                    for i in 0..=10 {
+                        positions
+                            .try_insert(BlockPos::new(-31 * i, i, 0))
+                            .unwrap_or_else(|error| std::panic::panic_any(error));
                     }
-                }
-            }
+                });
+                let payload =
+                    placement.expect_err("equal-hash tree ordering needs identity capability");
+                Err(generated_set_ordering_error(
+                    payload.as_ref(),
+                    chunk.get_pos(),
+                    9,
+                    17,
+                    "minecraft:dark_forest_vegetation",
+                )
+                .expect("the same production boundary recognizes the typed primitive payload"))
+            },
+        );
+        let mut chunk = fresh_worldgen_chunk(ChunkPos::ZERO, &generator);
+        chunk.set_persisted_status(ChunkStatus::Carvers);
+        let mut holder = GenerationChunkHolder {
+            chunk,
+            context,
+            features_failure: None,
+            generator,
+            feature_writebacks: Vec::new(),
+            pending_feature_writebacks: Rc::new(RefCell::new(None)),
+            feature_workspace: FeatureWorkspace::new(),
+        };
+        for _ in 0..2 {
+            assert!(matches!(holder.generate_through(ChunkStatus::Features),
+                Err(GeneratedChunkError::Generation(error)) if error == expected));
+            assert_eq!(holder.status(), ChunkStatus::Carvers);
+            assert_eq!(
+                holder.chunk.get_block_state(0, holder.chunk.get_min_y(), 0),
+                Blocks::AIR.default_block_state()
+            );
+            assert!(holder.chunk.heightmaps().iter().all(Option::is_none));
+            assert!(holder.feature_writebacks.is_empty());
+            assert_eq!(holder.features_failure, Some(expected));
         }
-        assert_eq!(holder.chunk.get_entities(), fresh.chunk.get_entities());
         assert_eq!(
-            holder.chunk.get_block_entity_nbts(),
-            fresh.chunk.get_block_entity_nbts()
+            attempts.get(),
+            1,
+            "terminal capability refusal must not rerun mutated placement"
         );
-        assert_eq!(
-            holder.chunk.get_post_processing(),
-            fresh.chunk.get_post_processing()
+        assert!(
+            generated_set_ordering_error(
+                &"Java set ordering bug",
+                ChunkPos::ZERO,
+                9,
+                17,
+                "minecraft:dark_forest_vegetation",
+            )
+            .is_none(),
+            "unrelated panics are never converted by string coincidence"
         );
-        assert_eq!(
-            holder.chunk.get_block_ticks().scheduled_ticks(),
-            fresh.chunk.get_block_ticks().scheduled_ticks()
-        );
-        assert_eq!(
-            holder.chunk.get_fluid_ticks().scheduled_ticks(),
-            fresh.chunk.get_fluid_ticks().scheduled_ticks()
-        );
-        assert_eq!(holder.chunk.get_all_starts(), fresh.chunk.get_all_starts());
-        assert_eq!(
-            holder.chunk.get_all_references(),
-            fresh.chunk.get_all_references()
-        );
-        assert_eq!(
-            holder.chunk.base().is_unsaved(),
-            fresh.chunk.base().is_unsaved()
-        );
-        assert_eq!(
-            holder.chunk.get_carving_mask().map(|mask| mask.to_array()),
-            fresh.chunk.get_carving_mask().map(|mask| mask.to_array())
-        );
+        let message = expected.to_string();
+        assert!(message.contains("identityHashCode"));
+        assert!(!message.contains("decode"));
+    }
 
-        // A retry is an idempotent terminal boundary: the holder returns the
-        // cached typed failure instead of replaying partial feature placement.
-        let retry = holder
-            .generate_through(ChunkStatus::Features)
-            .expect_err("the cached FEATURES boundary must remain refused");
-        assert!(matches!(
-            retry,
-            GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
-                chunk_pos,
-                step_index: 10,
-                global_feature_index: 0,
-                feature_key: "minecraft:freeze_top_layer",
-            }) if chunk_pos == ChunkPos::ZERO
-        ));
+    /// Seed 42's dry origin union now completes its selected feature paths,
+    /// including the final biome-dependent freeze/snow pass. This establishes
+    /// the FEATURES status boundary, not general tree or whole-world parity.
+    #[test]
+    fn generate_through_features_commits_fresh_holder_and_retry_is_idempotent() {
+        let generator = test_generator();
+        let mut holder = feature_holder(&generator, ChunkPos::ZERO);
         assert_eq!(holder.status(), ChunkStatus::Empty);
-        assert_eq!(holder.chunk.get_entities(), fresh.chunk.get_entities());
-        assert_eq!(
-            holder.chunk.get_block_entity_nbts(),
-            fresh.chunk.get_block_entity_nbts()
-        );
+        holder
+            .generate_through(ChunkStatus::Features)
+            .expect("seed-42 origin FEATURES");
+        assert_eq!(holder.status(), ChunkStatus::Features);
+        for ty in FINAL_HEIGHTMAPS {
+            assert!(holder.chunk.heightmaps()[ty as usize].is_some(), "{ty:?}");
+        }
         assert!(
             holder
                 .chunk
                 .get_sections()
                 .iter()
-                .all(|section| section.has_only_air()),
-            "cached retry must not replay partial feature block writes"
+                .any(|section| !section.has_only_air())
+        );
+
+        let completed = snapshot_generated_chunk(&holder.chunk);
+        holder.take_feature_writebacks();
+        holder
+            .generate_through(ChunkStatus::Features)
+            .expect("completed FEATURES retry");
+        assert_generated_proto_equal(&holder.chunk, &completed);
+        assert!(
+            holder.take_feature_writebacks().is_empty(),
+            "retry must not replay decoration"
         );
     }
 
@@ -5986,31 +6059,22 @@ mod tests {
         assert!(holder.take_feature_writebacks().is_empty());
     }
 
-    /// FULL remains the consuming ProtoChunk → LevelChunk boundary even after
-    /// FEATURES has reached its cached typed failure. The historical FEATURES
-    /// error must never shadow the stable FULL UnsupportedStatus response.
+    /// Successful decoration is not permission to bypass lighting, spawning,
+    /// or the consuming ProtoChunk → LevelChunk promotion boundary.
     #[test]
-    fn full_rejection_precedes_cached_features_failure() {
+    fn full_rejection_preserves_completed_features() {
         let generator = test_generator();
         let mut holder = feature_holder(&generator, ChunkPos::ZERO);
-        let features_error = holder
+        holder
             .generate_through(ChunkStatus::Features)
-            .expect_err("FEATURES must stop at its typed boundary");
-        assert!(matches!(
-            features_error,
-            GeneratedChunkError::Generation(GenError::FeaturePlacementDecode { .. })
-                | GeneratedChunkError::Generation(GenError::SettingsNotGenerated { .. })
-                | GeneratedChunkError::Generation(
-                    GenError::StructureDecorationIndexUnavailable { .. }
-                )
-        ));
-        assert_eq!(holder.status(), ChunkStatus::Empty);
+            .expect("seed-42 origin FEATURES");
+        assert_eq!(holder.status(), ChunkStatus::Features);
 
         assert!(matches!(
             holder.generate_through(ChunkStatus::Full),
             Err(GeneratedChunkError::UnsupportedStatus(ChunkStatus::Full))
         ));
-        assert_eq!(holder.status(), ChunkStatus::Empty);
+        assert_eq!(holder.status(), ChunkStatus::Features);
     }
 
     /// The generated placed/configured pair is decoded through registry-backed
@@ -6124,7 +6188,7 @@ mod tests {
     /// each dispatch leaf seated in the seed-42 closure. These focused tests
     /// cover the decoder arms directly — the seed-42 dark-forest parent is
     /// rejected by its surface-water filter before the nested selector executes,
-    /// and the runtime then stops at the step-10 `freeze_top_layer` boundary.
+    /// and the runtime now completes the step-10 freeze/snow pass.
     /// The later-step leaves therefore get their own independent decode coverage
     /// here. The simple_block, block_column, and vines arms are not separately
     /// exercised by these tests.
@@ -6232,6 +6296,161 @@ mod tests {
         );
     }
 
+    #[test]
+    fn aquatic_decoders_validate_the_real_configuration_shapes() {
+        let generator = test_generator();
+        let ops =
+            RegistryOps::create_from_access(&JsonOps::INSTANCE, generator.feature_access().clone());
+        let kelp = decode_configured_feature("minecraft:kelp", &ops, generator.feature_access())
+            .expect("generated kelp config");
+        assert!((kelp.config.as_ref() as &dyn std::any::Any).is::<NoneFeatureConfiguration>());
+        // A unit configuration is still a map codec, not permission to ignore
+        // arbitrary JSON. Likewise the count provider retains Paper's bounds.
+        for json in [
+            serde_json::json!({"type": "minecraft:kelp", "config": 0}),
+            serde_json::json!({"type": "minecraft:sea_pickle", "config": {"count": 257}}),
+            serde_json::json!({"type": "minecraft:sea_pickle", "config": {}}),
+            serde_json::json!({"type": "minecraft:bamboo", "config": {"probability": 1.1}}),
+        ] {
+            decode_configured_feature_value(
+                "invalid_aquatic",
+                &json,
+                &ops,
+                generator.feature_access(),
+            )
+            .expect_err("invalid feature config must be rejected during decoding");
+        }
+    }
+
+    /// Exercise the generated selector's inline coral holders through the real
+    /// registry and region. This catches configurations that decode but remain
+    /// deferred (or have the wrong erased type) at recursive feature dispatch.
+    #[test]
+    fn warm_ocean_selector_places_coral_against_the_features_region() {
+        let generator = test_generator();
+        let ops =
+            RegistryOps::create_from_access(&JsonOps::INSTANCE, generator.feature_access().clone());
+        let configured = decode_configured_feature(
+            "minecraft:warm_ocean_vegetation",
+            &ops,
+            generator.feature_access(),
+        )
+        .expect("generated coral selector");
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let mut region = compose_feature_region(&mut holder.chunk, &generator);
+        for x in 2..15 {
+            for z in 2..15 {
+                for y in 64..88 {
+                    assert!(region.set_block(
+                        &BlockPos::new(x, y, z),
+                        Blocks::WATER.default_block_state(),
+                        2,
+                        512,
+                    ));
+                }
+            }
+        }
+        let mut random = LegacyRandomSource::new(42);
+        assert!(configured.place(
+            &mut region,
+            generator.as_ref(),
+            &mut random,
+            &BlockPos::new(8, 64, 8),
+        ));
+        assert!((2..15).any(|x| (2..15).any(|z| (64..88).any(|y| {
+            region
+                .get_block_state(&BlockPos::new(x, y, z))
+                .is_in_tag("minecraft:coral_blocks")
+        }))));
+    }
+
+    #[test]
+    fn generated_kelp_grows_from_the_regions_ocean_floor() {
+        let generator = test_generator();
+        let ops =
+            RegistryOps::create_from_access(&JsonOps::INSTANCE, generator.feature_access().clone());
+        let configured =
+            decode_configured_feature("minecraft:kelp", &ops, generator.feature_access())
+                .expect("generated kelp");
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let mut region = compose_feature_region(&mut holder.chunk, &generator);
+        // Keep the fixture above the generated terrain. Water does not raise
+        // OCEAN_FLOOR, so this tests the feature's actual heightmap lookup,
+        // survival check, intermediate stalk writes, and aged top placement.
+        assert!(region.set_block(
+            &BlockPos::new(8, 199, 8),
+            Blocks::STONE.default_block_state(),
+            2,
+            512,
+        ));
+        for y in 200..224 {
+            assert!(region.set_block(
+                &BlockPos::new(8, y, 8),
+                Blocks::WATER.default_block_state(),
+                2,
+                512,
+            ));
+        }
+        assert_eq!(region.get_height_at(Types::OceanFloor, 8, 8), 200);
+        let mut random = LegacyRandomSource::new(42);
+        assert!(configured.place(
+            &mut region,
+            generator.as_ref(),
+            &mut random,
+            &BlockPos::new(8, 0, 8),
+        ));
+        assert_eq!(
+            region.get_block_state(&BlockPos::new(8, 200, 8)).block(),
+            Blocks::KELP_PLANT.id(),
+        );
+        let tops: Vec<_> = (201..212)
+            .map(|y| region.get_block_state(&BlockPos::new(8, y, 8)))
+            .filter(|state| state.block() == Blocks::KELP.id())
+            .collect();
+        assert_eq!(tops.len(), 1);
+        assert!(matches!(
+            tops[0].get_value(BlockStateProperties::AGE_25),
+            Some(PropertyValue::Int(20..=23)),
+        ));
+    }
+
+    #[test]
+    fn ordinary_oak_completes_neighbor_shape_updates_in_the_real_region() {
+        let generator = test_generator();
+        let ops =
+            RegistryOps::create_from_access(&JsonOps::INSTANCE, generator.feature_access().clone());
+        let configured =
+            decode_configured_feature("minecraft:oak", &ops, generator.feature_access())
+                .expect("undecorated oak config");
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder
+            .generate_through(ChunkStatus::Carvers)
+            .expect("CARVERS");
+        let mut region = compose_feature_region(&mut holder.chunk, &generator);
+        let origin = BlockPos::new(8, 200, 8);
+        assert!(region.set_block(&origin.below(), Blocks::DIRT.default_block_state(), 2, 512));
+        let mut random = LegacyRandomSource::new(42);
+        assert!(configured.place(&mut region, generator.as_ref(), &mut random, &origin));
+        assert_eq!(
+            region.get_block_state(&origin).block(),
+            Blocks::OAK_LOG.id()
+        );
+        assert!((196..216).any(|y| (3..14).any(|x| (3..14).any(|z| {
+            region.get_block_state(&BlockPos::new(x, y, z)).block() == Blocks::OAK_LEAVES.id()
+        }))));
+        drop(region);
+        assert!(
+            !holder.chunk.get_block_ticks().scheduled_ticks().is_empty(),
+            "unchanged boundary leaves must retain their scheduled ticks"
+        );
+    }
+
     /// The Batch 3 `minecraft:underwater_magma` configured entry (the seed-42
     /// global-26 leaf) decodes through the registry-backed arm into a
     /// `FeatureId::new(21)` holder carrying its exact `UnderwaterMagmaConfiguration`
@@ -6304,11 +6523,9 @@ mod tests {
     /// so the feature returns false having consumed no placement-box RNG. The
     /// run then continues into VEGETAL_DECORATION, where Batch 4 decodes and
     /// executes `minecraft:glow_lichen` through `minecraft:multiface_growth`.
-    /// It refuses at the next unsupported *selected* path WITHOUT mutating the
-    /// RNG past that refusal: the run returns typed immediately at
-    /// `minecraft:freeze_top_layer` (step 10/global 0), when its biome freeze
-    /// query reaches the unimplemented `shouldFreeze` seam. The chunk stays CARVERS
-    /// and FEATURES is never stamped. The typed-unavailable dispatches
+    /// It completes the final `minecraft:freeze_top_layer` pass at step 10/global
+    /// 0 using the biome/world-state predicates, so the origin chunk reaches
+    /// FEATURES. This does not establish all-biome or tree parity. The dispatches
     /// for underwater magma (id 21) and multiface growth (id 20) no longer
     /// refuse; both concrete features are reached.
     ///
@@ -6364,28 +6581,26 @@ mod tests {
     }
 
     #[test]
-    fn seed42_does_not_mutate_rng_past_the_next_selected_unsupported_leaf() {
+    fn seed42_features_complete_without_bypassing_the_light_engine_boundary() {
         let generator = test_generator();
         let mut holder = feature_holder(&generator, ChunkPos::new(0, 0));
         holder
             .generate_through(ChunkStatus::Carvers)
             .expect("CARVERS");
-        let err = holder
+        holder
             .generate_through(ChunkStatus::Features)
-            .expect_err("FEATURES must refuse at the selected mismatch");
+            .expect("seed-42 origin FEATURES");
+        assert_eq!(holder.status(), ChunkStatus::Features);
         assert!(
             matches!(
-                &err,
-                GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
-                    step_index: 10,
-                    global_feature_index: 0,
-                    feature_key: "minecraft:freeze_top_layer",
-                    ..
-                })
+                holder.generate_through(ChunkStatus::Light),
+                Err(GeneratedChunkError::Generation(
+                    GenError::LightEngineMissing { .. }
+                ))
             ),
-            "unexpected next FEATURES boundary: {err:?}"
+            "FEATURES success must not fabricate a light engine"
         );
-        assert_eq!(holder.status(), ChunkStatus::Carvers);
+        assert_eq!(holder.status(), ChunkStatus::Features);
     }
 
     /// The three Batch 2 selector leaves are wired in the decoder, and the
@@ -7045,70 +7260,65 @@ mod tests {
         );
     }
 
-    /// The tree-bearing seed-42 fixture follows a different path from the
-    /// all-water origin: its outer typed boundary is still the parent placed
-    /// feature at step 9/global 17, while the nested selector falls through to
-    /// `oak_leaf_litter`, whose `would_survive` state is `oak_sapling`.
+    /// The tree-bearing chunk now completes its actual dark-forest selector
+    /// and nested tree/leaf-litter paths. This is selected-chunk evidence, not
+    /// a claim that every tree extension or biome is implemented.
     #[test]
-    fn seed42_chunk44_reports_outer_dark_forest_and_nested_oak_boundary() {
+    fn seed42_chunk44_completes_tree_decoration_and_nested_oak_survival() {
         let generator = test_generator();
         let mut holder = feature_holder(&generator, ChunkPos::new(4, 4));
         holder
             .generate_through(ChunkStatus::Carvers)
             .expect("CARVERS");
-        let error = holder
+        let before = snapshot_generated_chunk(&holder.chunk);
+        holder
             .generate_through(ChunkStatus::Features)
-            .expect_err("the nested oak survival seam must refuse FEATURES");
-        assert!(matches!(
-            error,
-            GeneratedChunkError::Generation(GenError::FeaturePlacementDecode {
-                chunk_pos,
-                step_index: 9,
-                global_feature_index: 17,
-                feature_key: "minecraft:dark_forest_vegetation",
-            }) if chunk_pos == ChunkPos::new(4, 4)
-        ));
-
-        // The typed error deliberately names the outer decoration dispatch. Pin
-        // the nested path separately so a future diagnostic cannot confuse the
-        // parent boundary with the configured/placed tree leaf that panicked.
-        assert_eq!(
-            configured_feature_key_for_placed("minecraft:oak_leaf_litter")
-                .expect("oak leaf litter placed feature must resolve"),
-            "minecraft:oak_leaf_litter"
+            .expect("seed-42 chunk (4,4) tree decoration");
+        assert_eq!(holder.status(), ChunkStatus::Features);
+        let mut logs = 0;
+        let mut leaves = 0;
+        for y in holder.chunk.get_min_y()..holder.chunk.get_min_y() + holder.chunk.get_height() {
+            for z in 0..16 {
+                for x in 0..16 {
+                    let state = holder.chunk.get_block_state(x, y, z);
+                    if state != before.get_block_state(x, y, z) {
+                        logs += usize::from(state.is_in_tag("minecraft:logs"));
+                        leaves += usize::from(state.is_in_tag("minecraft:leaves"));
+                    }
+                }
+            }
+        }
+        assert!(logs > 0, "successful decoration must write real tree logs");
+        assert!(
+            leaves > 0,
+            "successful decoration must write real tree foliage"
         );
+
+        // Independently pin the formerly unavailable oak-sapling placement
+        // predicate against the same real CARVERS terrain, not a dummy world.
         let mut nested_holder = generator.create_holder(ChunkPos::new(4, 4));
         nested_holder
             .generate_through(ChunkStatus::Carvers)
             .expect("CARVERS");
         let mut region = compose_feature_region(&mut nested_holder.chunk, &generator);
         let decoded = decode_placed_feature("minecraft:oak_leaf_litter", &generator)
-            .expect("oak leaf litter placement must decode");
+            .expect("oak leaf litter placement");
         let nested = decoded.placed_holder.value(decoded.placed_registry);
         let selection_generator = FeatureSelectionGenerator {
             generator: Arc::clone(&generator),
             feature_key: "minecraft:oak_leaf_litter",
         };
         let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let origin = BlockPos::new(79, 67, 67);
+        assert_eq!(
             nested.first_placement_position(
                 &mut region,
                 &selection_generator,
                 &mut random,
-                &BlockPos::new(79, 67, 67),
-            )
-        }))
-        .expect_err("oak_leaf_litter must reach its oak_sapling would_survive seam");
-        let message = if let Some(message) = panic.downcast_ref::<String>() {
-            message.as_str()
-        } else if let Some(message) = panic.downcast_ref::<&'static str>() {
-            message
-        } else {
-            "<non-string panic>"
-        };
-        assert_eq!(
-            message,
-            "WorldGenRegion.canSurvive is not implemented for minecraft:oak_sapling (RivetTodo #232)"
+                &origin,
+            ),
+            Some(origin),
+            "ordinary oak sapling must survive on the real terrain"
         );
     }
 

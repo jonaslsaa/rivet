@@ -77,6 +77,7 @@ use rivet_registry::Identifier;
 use rivet_registry::access::RegistryAccess;
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::block_state::BlockState;
+use rivet_registry::block_state_properties::BlockStateProperties;
 use rivet_registry::core::{BlockPos, ChunkPos, QuartPos, SectionPos};
 use rivet_registry::fluid_id::FluidId;
 use rivet_registry::generated::block_behaviors::{
@@ -89,7 +90,10 @@ use rivet_serialization::float_format::java_float_equals;
 use rivet_util::StaticCache2D;
 use rivet_util::mth;
 use rivet_util::util::log_and_pause_if_in_ide;
+use rivet_util::worldgen_random::AlgorithmRandomSource;
+use rivet_world::biome::biome::generated_climate_settings;
 use rivet_world::biome::biome_manager::{BiomeManager, NoiseBiomeSource};
+use rivet_world::biome::generated_biome_source::dense_biome_id;
 use rivet_world::block::Block;
 use rivet_world::block::blocks::Blocks;
 use rivet_world::chunk::chunk_access::ChunkAccess;
@@ -102,7 +106,15 @@ use rivet_world::level::{WorldBorder, WorldBorderSettings, WorldGenLevel};
 use rivet_world::levelgen::heightmap::Types;
 use rivet_world::ticks::{SavedTick, ScheduledTick};
 
+use super::beehive_data::BeehiveData;
 use crate::server::level::level_chunk::{BiomeId as ServerBiomeId, StructureKey, state_flags};
+
+fn is_beehive_state(state: BlockState) -> bool {
+    matches!(
+        state.block().name(),
+        "minecraft:bee_nest" | "minecraft:beehive"
+    )
+}
 
 /// `Block.UPDATE_ALL` — `UPDATE_NEIGHBORS | UPDATE_CLIENTS` (1 | 2), the flag
 /// `removeBlock`/`destroyBlock` pass to `setBlock`.
@@ -122,8 +134,9 @@ const UPDATE_KNOWN_SHAPE: i32 = 16;
 /// small live state map rather than a block-state shortcut: `setBlock` creates
 /// an entity when the written block requires one, and the feature's entity
 /// queries only succeed for that live entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum WorldgenBlockEntity {
+    Beehive(BeehiveData),
     Chest {
         loot: Option<(i64, String)>,
     },
@@ -557,6 +570,9 @@ where
     write_radius: i32,
     /// `seed` — `level.getSeed()`.
     seed: i64,
+    /// Paper's worldgen_region_random factory at the center chunk origin.
+    /// Composition must supply the world's actual RandomState-derived stream.
+    region_random: Option<AlgorithmRandomSource>,
     /// `level.getMinY()`.
     min_y: i32,
     /// `level.getHeight()`.
@@ -678,6 +694,7 @@ where
             generating_step,
             write_radius,
             seed,
+            region_random: None,
             min_y,
             height,
             sea_level,
@@ -696,6 +713,10 @@ where
     /// Set the world clock used by subsequent `createTick` calls.
     pub fn set_game_time(&mut self, game_time: i64) {
         self.game_time = game_time;
+    }
+
+    pub fn set_region_random(&mut self, random: AlgorithmRandomSource) {
+        self.region_random = Some(random);
     }
 
     /// `WorldGenRegion.getCenter()`.
@@ -963,6 +984,107 @@ where
         })
     }
 
+    fn materialize_pending_heart(&mut self, pos: &BlockPos, state: BlockState) -> bool {
+        if state.block().name() != "minecraft:creaking_heart" {
+            return false;
+        }
+        // WorldGenRegion writes a DUMMY entity to protochunks. The tree
+        // decorator never requests a live heart, so do not fabricate one.
+        self.block_entities.remove(pos);
+        self.live_block_entities.remove(pos);
+        self.persist_block_entity_nbt(pos, dummy_block_entity(pos));
+        true
+    }
+
+    fn materialize_beehive(
+        &mut self,
+        pos: &BlockPos,
+        state: BlockState,
+        old_state: BlockState,
+    ) -> bool {
+        if !is_beehive_state(state) {
+            return false;
+        }
+        let same_block = state.block() == old_state.block();
+        let live = same_block && self.live_block_entities.contains(pos);
+        if !same_block {
+            self.block_entities.remove(pos);
+            self.live_block_entities.remove(pos);
+            self.remove_persisted_block_entity(pos);
+        }
+        let tag = if live {
+            self.existing_block_entity_nbt(pos)
+                .unwrap_or_else(|| dummy_block_entity(pos))
+        } else {
+            dummy_block_entity(pos)
+        };
+        self.block_entities
+            .insert(*pos, WorldgenBlockEntity::Beehive(BeehiveData::load(&tag)));
+        self.persist_block_entity_nbt(pos, tag);
+        true
+    }
+
+    fn has_beehive_for_state(&self, pos: &BlockPos, state: BlockState) -> bool {
+        if !is_beehive_state(state) {
+            return false;
+        }
+        if matches!(
+            self.block_entities.get(pos),
+            Some(WorldgenBlockEntity::Beehive(_))
+        ) {
+            return true;
+        }
+        self.existing_block_entity_nbt(pos).is_some_and(|tag| {
+            tag.get_string("id").is_some_and(|id| {
+                id == "DUMMY"
+                    || Identifier::try_parse_result(id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|id| id == Identifier::with_default_namespace("beehive"))
+            })
+        })
+    }
+
+    fn append_beehive_occupant(&mut self, pos: &BlockPos, state: BlockState, ticks: i32) {
+        if !self.load_beehive_for_state(pos, state) {
+            return;
+        }
+        let mut hive = match self.block_entities.get(pos) {
+            Some(WorldgenBlockEntity::Beehive(hive)) => hive.clone(),
+            _ => BeehiveData::load(
+                &self
+                    .existing_block_entity_nbt(pos)
+                    .expect("existing hive payload"),
+            ),
+        };
+        hive.store_worldgen_bee(ticks);
+        let tag = hive.save_with_full_metadata(pos);
+        self.block_entities
+            .insert(*pos, WorldgenBlockEntity::Beehive(hive));
+        self.persist_block_entity_nbt(pos, tag);
+        self.live_block_entities.insert(*pos);
+    }
+
+    fn load_beehive_for_state(&mut self, pos: &BlockPos, state: BlockState) -> bool {
+        if !self.has_beehive_for_state(pos, state) {
+            return false;
+        }
+        let hive = match self.block_entities.get(pos) {
+            Some(WorldgenBlockEntity::Beehive(hive)) => hive.clone(),
+            _ => BeehiveData::load(
+                &self
+                    .existing_block_entity_nbt(pos)
+                    .expect("typed hive payload"),
+            ),
+        };
+        let tag = hive.save_with_full_metadata(pos);
+        self.block_entities
+            .insert(*pos, WorldgenBlockEntity::Beehive(hive));
+        self.persist_block_entity_nbt(pos, tag);
+        self.live_block_entities.insert(*pos);
+        true
+    }
+
     fn persist_block_entity_nbt(&mut self, pos: &BlockPos, tag: CompoundTag) {
         let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
         let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
@@ -1067,6 +1189,17 @@ where
         0
     }
 
+    /// Paper's `WorldGenRegion.getBrightness` deliberately returns zero until
+    /// the target chunk is light-correct. Afterwards its BLOCK listener reads
+    /// the visible Starlight nibbles. Never substitute skylight or emission.
+    pub fn get_block_brightness(&self, pos: &BlockPos) -> i32 {
+        let chunk = self.get_chunk(pos.get_x() >> 4, pos.get_z() >> 4);
+        if !chunk.is_light_correct() {
+            return 0;
+        }
+        chunk.get_block_light_at(pos.get_x(), pos.get_y(), pos.get_z())
+    }
+
     /// Read the completed LIGHT values carried by the cached chunk. Paper's
     /// `WorldGenRegion.getRawBrightness` delegates to the level light engine;
     /// this value layer has no engine object in the region, so the equivalent
@@ -1118,6 +1251,11 @@ impl WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
         state: BlockState,
         old_state: BlockState,
     ) {
+        if self.materialize_pending_heart(pos, state)
+            || self.materialize_beehive(pos, state, old_state)
+        {
+            return;
+        }
         let same_block = old_state.block() == state.block();
         if state.block() != Blocks::CHEST.id() && state.block() != Blocks::SPAWNER.id() {
             self.block_entities.remove(pos);
@@ -1278,10 +1416,135 @@ impl LevelHeightAccessor for WorldGenRegion<'_, StateId, ServerBiomeId, Structur
 /// `Send`-bound but deliberately NOT `'static` (see the trait doc), so this
 /// impl covers every region lifetime — the server value layer's owning-holder
 /// `'static` region and the executor's borrow-carrying scoped region alike.
+pub(super) fn region_can_survive(
+    level: &dyn WorldGenLevel,
+    state: &BlockState,
+    pos: &BlockPos,
+) -> bool {
+    if let Some(verdict) = super::aquatic_survival::aquatic_can_survive(level, state, pos) {
+        return verdict;
+    }
+    match state.block().name() {
+        "minecraft:mangrove_propagule" => {
+            if state.get_value(BlockStateProperties::HANGING) == Some(rivet_registry::block_state_property::PropertyValue::Bool(true)) {
+                level.get_block_state(&pos.above()).is_in_tag("minecraft:supports_hanging_mangrove_propagule")
+            } else {
+                level.get_block_state(&pos.below()).is_in_tag("minecraft:supports_mangrove_propagule")
+            }
+        }
+        "minecraft:moss_carpet" => !level.get_block_state(&pos.below()).is_air(),
+        "minecraft:pale_moss_carpet" => rivet_world::block::mossy_carpet_block::can_survive(level, *state, pos),
+        "minecraft:pale_hanging_moss" => {
+            let above_pos = pos.above();
+            let above = level.get_block_state(&above_pos);
+            level.can_attach_to(&above_pos, &above, &rivet_registry::core::Direction::Down)
+                || above.block().name() == "minecraft:pale_hanging_moss"
+        }
+        "minecraft:tall_grass" | "minecraft:large_fern" => {
+            let below = level.get_block_state(&pos.below());
+            if state.get_value(BlockStateProperties::DOUBLE_BLOCK_HALF)
+                == Some(rivet_registry::block_state_property::PropertyValue::Enum("upper")) {
+                below.block() == state.block() && below.get_value(BlockStateProperties::DOUBLE_BLOCK_HALF)
+                    == Some(rivet_registry::block_state_property::PropertyValue::Enum("lower"))
+            } else { below.is_in_tag("minecraft:supports_vegetation") }
+        }
+        "minecraft:leaf_litter" => {
+            let below_pos = pos.below();
+            level.is_face_sturdy(&below_pos, &level.get_block_state(&below_pos), &rivet_registry::core::Direction::Up)
+        }
+        "minecraft:snow" => {
+            let below_pos = pos.below();
+            let below = level.get_block_state(&below_pos);
+            if below.is_in_tag("minecraft:cannot_support_snow_layer") {
+                false
+            } else if below.is_in_tag("minecraft:support_override_snow_layer") {
+                true
+            } else {
+                level.is_collision_face_full(
+                    &below_pos,
+                    &below,
+                    &rivet_registry::core::Direction::Up,
+                ) || (below.block() == Blocks::SNOW.id()
+                    && below.get_value(BlockStateProperties::LAYERS)
+                        == Some(rivet_registry::block_state_property::PropertyValue::Int(8)))
+            }
+        }
+        "minecraft:short_grass"
+        | "minecraft:fern"
+        | "minecraft:firefly_bush"
+        // Blocks.java constructs exactly these eight as plain SaplingBlock.
+        // SaplingBlock inherits VegetationBlock.canSurvive/mayPlaceOn;
+        // MangrovePropaguleBlock overrides both and is deliberately excluded.
+        | "minecraft:oak_sapling"
+        | "minecraft:spruce_sapling"
+        | "minecraft:birch_sapling"
+        | "minecraft:jungle_sapling"
+        | "minecraft:acacia_sapling"
+        | "minecraft:cherry_sapling"
+        | "minecraft:dark_oak_sapling"
+        | "minecraft:pale_oak_sapling" => level
+            .get_block_state(&pos.below())
+            .is_in_tag("minecraft:supports_vegetation"),
+        other => {
+            panic!("WorldGenRegion.canSurvive is not implemented for {other} (RivetTodo #232)")
+        }
+    }
+}
+
 impl WorldGenLevel for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
+    fn place_mossy_carpet(&mut self, pos: &BlockPos, flags: u32) {
+        let mut random = self
+            .region_random
+            .take()
+            .expect("moss carpet requires region RNG");
+        rivet_world::block::mossy_carpet_block::place_at(self, pos, &mut random, flags);
+        self.region_random = Some(random);
+    }
+    fn has_beehive_block_entity(&mut self, pos: &BlockPos) -> bool {
+        self.load_beehive_for_state(pos, self.get_block_state(pos))
+    }
+
+    fn store_beehive_occupant(&mut self, pos: &BlockPos, ticks: i32) {
+        self.append_beehive_occupant(pos, self.get_block_state(pos), ticks);
+    }
+    fn update_tree_shape_at_edge(&mut self, filled: &HashSet<BlockPos>) {
+        let mut random = self
+            .region_random
+            .take()
+            .expect("WorldGenRegion updateShape requires its RandomState-derived region RNG");
+        super::block_shape_update::update_shape_at_edge(self, &mut random, filled);
+        self.region_random = Some(random);
+    }
+
     /// `WorldGenLevel.getSeed()`.
     fn get_seed(&self) -> i64 {
         self.seed
+    }
+
+    fn get_sea_level(&self) -> i32 {
+        self.sea_level
+    }
+
+    fn get_block_brightness(&self, pos: &BlockPos) -> i32 {
+        self.get_block_brightness(pos)
+    }
+
+    fn should_freeze(&self, freeze_pos: &BlockPos, check_neighbors: bool) -> bool {
+        let biome = self.get_biome(&freeze_pos.above());
+        generated_climate_settings(BiomeId::from_id(dense_biome_id(&biome))).should_freeze(
+            self,
+            freeze_pos,
+            check_neighbors,
+        )
+    }
+
+    fn should_snow(&self, pos: &BlockPos) -> bool {
+        let biome = self.get_biome(pos);
+        generated_climate_settings(BiomeId::from_id(dense_biome_id(&biome))).should_snow(self, pos)
+    }
+
+    fn can_survive(&self, state: &BlockState, pos: &BlockPos) -> bool {
+        region_can_survive(self, state, pos)
     }
 
     /// `WorldGenLevel.ensureCanWrite(BlockPos)` — the write-radius gate.
@@ -1536,6 +1799,11 @@ impl WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
         state: BlockState,
         old_state: BlockState,
     ) {
+        if self.materialize_pending_heart(pos, state)
+            || self.materialize_beehive(pos, state, old_state)
+        {
+            return;
+        }
         let same_block = old_state.block() == state.block();
         if state.block() != Blocks::CHEST.id() && state.block() != Blocks::SPAWNER.id() {
             self.block_entities.remove(pos);
@@ -1647,9 +1915,51 @@ impl LevelHeightAccessor for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Str
 /// doc), so this impl covers every region lifetime, and the executor's scoped
 /// borrow-carrying region implements it directly.
 impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
+    fn place_mossy_carpet(&mut self, pos: &BlockPos, flags: u32) {
+        let mut random = self
+            .region_random
+            .take()
+            .expect("moss carpet requires region RNG");
+        rivet_world::block::mossy_carpet_block::place_at(self, pos, &mut random, flags);
+        self.region_random = Some(random);
+    }
+    fn has_beehive_block_entity(&mut self, pos: &BlockPos) -> bool {
+        self.load_beehive_for_state(pos, self.get_block_state(pos))
+    }
+
+    fn store_beehive_occupant(&mut self, pos: &BlockPos, ticks: i32) {
+        self.append_beehive_occupant(pos, self.get_block_state(pos), ticks);
+    }
+    fn update_tree_shape_at_edge(&mut self, filled: &HashSet<BlockPos>) {
+        let mut random = self
+            .region_random
+            .take()
+            .expect("WorldGenRegion updateShape requires its RandomState-derived region RNG");
+        super::block_shape_update::update_shape_at_edge(self, &mut random, filled);
+        self.region_random = Some(random);
+    }
+
     /// `WorldGenLevel.getSeed()`.
     fn get_seed(&self) -> i64 {
         self.seed
+    }
+
+    fn get_block_brightness(&self, pos: &BlockPos) -> i32 {
+        self.get_block_brightness(pos)
+    }
+
+    fn should_freeze(&self, freeze_pos: &BlockPos, check_neighbors: bool) -> bool {
+        let biome = self.get_biome(&freeze_pos.above());
+        generated_climate_settings(BiomeId::from_id(dense_biome_id(&biome))).should_freeze(
+            self,
+            freeze_pos,
+            check_neighbors,
+        )
+    }
+
+    fn should_snow(&self, pos: &BlockPos) -> bool {
+        let biome = self.get_biome(pos);
+        generated_climate_settings(BiomeId::from_id(dense_biome_id(&biome))).should_snow(self, pos)
     }
 
     /// `BlockBehaviour.BlockStateBase.canSurvive` for the vegetation states
@@ -1659,17 +1969,7 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
     /// this as a world-backed read (rather than a state-only shortcut) is
     /// important because the feature's random offset can land across chunks.
     fn can_survive(&self, state: &BlockState, pos: &BlockPos) -> bool {
-        match state.block().name() {
-            "minecraft:short_grass"
-            | "minecraft:fern"
-            | "minecraft:firefly_bush"
-            | "minecraft:dark_oak_sapling" => self
-                .get_block_state(&pos.below())
-                .is_in_tag("minecraft:supports_vegetation"),
-            other => {
-                panic!("WorldGenRegion.canSurvive is not implemented for {other} (RivetTodo #232)")
-            }
-        }
+        region_can_survive(self, state, pos)
     }
 
     /// `WorldGenLevel.ensureCanWrite(BlockPos)` — the write-radius gate.
@@ -2281,6 +2581,227 @@ mod tests {
     };
     use rivet_world::superflat::{SUPERFLAT_HEIGHT, SUPERFLAT_MIN_Y};
 
+    #[test]
+    fn real_bee_tree_persists_occupants_through_chunk_payload_reload_and_replacement() {
+        use rivet_nbt::{nbt_accounter::NbtAccounter, nbt_io};
+        use rivet_registry::registry_ops::RegistryOps;
+        use rivet_serialization::json_ops::JsonOps;
+        use rivet_util::random_source::XoroshiroRandomSource;
+        use rivet_util::worldgen_random::AlgorithmRandomSource;
+        use rivet_world::chunk::chunk_generator::ChunkGenerator;
+        use rivet_world::chunk::storage::serializable_chunk_data::parse_block_entities;
+        use rivet_world::levelgen::feature::configurations::tree_configuration::tree_configuration_codec;
+        use rivet_world::levelgen::feature::{FeatureBehavior, FeaturePlaceContext, TREE};
+
+        struct Generator;
+        impl ChunkGenerator for Generator {
+            fn get_min_y(&self) -> i32 {
+                SUPERFLAT_MIN_Y
+            }
+            fn get_gen_depth(&self) -> i32 {
+                SUPERFLAT_HEIGHT
+            }
+        }
+        let row = include_str!("../../../../../tools/rivet-oracle/fixtures/tree-placement.jsonl")
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|row| row["feature"] == "oak_bees_005" && row["seed"] == 20)
+            .expect("positive actual Paper bee-tree fixture");
+        let ops = RegistryOps::create_from_access(&JsonOps::INSTANCE, RegistryAccess::empty());
+        let decoded = tree_configuration_codec().parse(&ops, &row["config"]);
+        let config = decoded.result().expect("actual bee tree config");
+        let mut region = feature_region();
+        region.set_region_random(AlgorithmRandomSource::Xoroshiro(
+            XoroshiroRandomSource::new(99),
+        ));
+        let origin = BlockPos::new(8, 64, 8);
+        region.set_block(
+            &origin.below(),
+            Blocks::DIRT.default_block_state(),
+            2,
+            UPDATE_LIMIT,
+        );
+        let mut random = XoroshiroRandomSource::new(20);
+        assert!(TREE.place(&mut FeaturePlaceContext::new(
+            None,
+            &mut region,
+            &Generator,
+            &mut random,
+            &origin,
+            config
+        )));
+        let hive_pos = *region
+            .block_entities
+            .iter()
+            .find_map(|(pos, entity)| {
+                matches!(entity, WorldgenBlockEntity::Beehive(_)).then_some(pos)
+            })
+            .expect("tree must create a typed hive in the actual region");
+        let hive_state = region.get_block_state(&hive_pos);
+        assert!(is_beehive_state(hive_state));
+        let chunk_x = hive_pos.get_x() >> 4;
+        let chunk_z = hive_pos.get_z() >> 4;
+        let saved = region
+            .get_chunk(chunk_x, chunk_z)
+            .get_block_entity_nbt(&hive_pos)
+            .expect("occupants must reach the owning chunk, not just the region cache")
+            .clone();
+        let original_bees = saved.get_list("bees").expect("saved occupants").clone();
+        assert!((2..=3).contains(&original_bees.list.len()));
+        // Round-trip genuine pending chunk block_entities through binary NBT
+        // and the normal chunk payload parser. No proto is falsely made FULL.
+        let mut chunk_payload = CompoundTag::new();
+        chunk_payload.put(
+            "block_entities".to_string(),
+            Tag::List(ListTag::with_list(vec![Tag::Compound(saved)])),
+        );
+        let mut bytes = Vec::new();
+        nbt_io::write_compressed(&chunk_payload, &mut bytes).unwrap();
+        let loaded =
+            nbt_io::read_compressed(bytes.as_slice(), &mut NbtAccounter::unlimited_heap()).unwrap();
+        let loaded_tags = parse_block_entities(&loaded);
+        assert_eq!(loaded_tags.len(), 1);
+        drop(region);
+
+        let mut reloaded_region = feature_region();
+        reloaded_region.set_block(&hive_pos, hive_state, 2, UPDATE_LIMIT);
+        // Hand the reconstructed pending payload to its actual owner, with
+        // no cached live entity. Typed query/append must load this payload.
+        reloaded_region.block_entities.clear();
+        reloaded_region.block_entity_nbts.clear();
+        reloaded_region.live_block_entities.clear();
+        reloaded_region
+            .get_chunk_mut(chunk_x, chunk_z)
+            .set_block_entity_nbt(loaded_tags[0].clone());
+        assert!(WorldGenLevel::has_beehive_block_entity(
+            &mut reloaded_region,
+            &hive_pos
+        ));
+        let same_block = hive_state
+            .set_value(BlockStateProperties::LEVEL_HONEY, 2)
+            .unwrap();
+        reloaded_region.set_block(&hive_pos, same_block, 2, UPDATE_LIMIT);
+        assert_eq!(
+            reloaded_region
+                .existing_block_entity_nbt(&hive_pos)
+                .unwrap()
+                .get_list("bees")
+                .unwrap(),
+            &original_bees,
+            "lazy typed query must mark the entity live before a same-block write"
+        );
+        WorldGenLevel::store_beehive_occupant(&mut reloaded_region, &hive_pos, 77);
+        let appended = reloaded_region
+            .get_chunk(chunk_x, chunk_z)
+            .get_block_entity_nbt(&hive_pos)
+            .unwrap();
+        let bees = appended.get_list("bees").unwrap();
+        assert_eq!(
+            &bees.list[..original_bees.list.len()],
+            original_bees.list.as_slice()
+        );
+        assert_eq!(bees.list.len(), original_bees.list.len() + 1);
+        let Tag::Compound(last) = bees.list.last().unwrap() else {
+            panic!("occupant compound")
+        };
+        assert_eq!(last.get_int("ticks_in_hive"), Some(77));
+        assert_eq!(last.get_int("min_ticks_in_hive"), Some(600));
+        let same_block = hive_state
+            .set_value(BlockStateProperties::LEVEL_HONEY, 3)
+            .unwrap();
+        reloaded_region.set_block(&hive_pos, same_block, 2, UPDATE_LIMIT);
+        assert_eq!(
+            reloaded_region
+                .existing_block_entity_nbt(&hive_pos)
+                .unwrap()
+                .get_list("bees")
+                .unwrap()
+                .list
+                .len(),
+            original_bees.list.len() + 1
+        );
+        reloaded_region.set_block(
+            &hive_pos,
+            Blocks::STONE.default_block_state(),
+            2,
+            UPDATE_LIMIT,
+        );
+        assert!(!WorldGenLevel::has_beehive_block_entity(
+            &mut reloaded_region,
+            &hive_pos
+        ));
+        assert!(
+            reloaded_region
+                .get_chunk(chunk_x, chunk_z)
+                .get_block_entity_nbt(&hive_pos)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn ordinary_saplings_inherit_vegetation_support_without_including_mangrove() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(8, 64, 8);
+        for (support, survives, litter_survives) in [
+            (Blocks::DIRT.default_block_state(), true, true),
+            (Blocks::STONE.default_block_state(), false, true),
+            (Blocks::AIR.default_block_state(), false, false),
+        ] {
+            region.set_block(&pos.below(), support, 2, UPDATE_LIMIT);
+            let litter = BlockState::of(BlockId::from_name("minecraft:leaf_litter").unwrap());
+            assert_eq!(
+                WorldGenLevel::can_survive(&region, &litter, &pos),
+                litter_survives,
+                "leaf litter uses sturdy UP, not the sapling support tag"
+            );
+            for name in [
+                "oak", "spruce", "birch", "jungle", "acacia", "cherry", "dark_oak", "pale_oak",
+            ] {
+                let sapling = BlockState::of(
+                    BlockId::from_name(&format!("minecraft:{name}_sapling")).unwrap(),
+                );
+                for stage in [0, 1] {
+                    let sapling = sapling
+                        .set_value(BlockStateProperties::STAGE, stage)
+                        .unwrap();
+                    assert_eq!(
+                        WorldGenLevel::can_survive(&region, &sapling, &pos),
+                        survives,
+                        "{name} stage {stage} on {}",
+                        support.block().name()
+                    );
+                }
+            }
+        }
+        let mangrove = BlockState::of(BlockId::from_name("minecraft:mangrove_propagule").unwrap());
+        region.set_block(
+            &pos.below(),
+            BlockState::of(BlockId::from_name("minecraft:clay").unwrap()),
+            2,
+            UPDATE_LIMIT,
+        );
+        assert!(WorldGenLevel::can_survive(&region, &mangrove, &pos));
+        let oak = BlockState::of(BlockId::from_name("minecraft:oak_sapling").unwrap());
+        assert!(
+            !WorldGenLevel::can_survive(&region, &oak, &pos),
+            "mangrove's clay support is not plain vegetation support"
+        );
+        let hanging = mangrove
+            .set_value(BlockStateProperties::HANGING, true)
+            .unwrap();
+        assert!(!WorldGenLevel::can_survive(&region, &hanging, &pos));
+        region.set_block(
+            &pos.above(),
+            BlockState::of(BlockId::from_name("minecraft:mangrove_leaves").unwrap()),
+            2,
+            UPDATE_LIMIT,
+        );
+        assert!(
+            WorldGenLevel::can_survive(&region, &hanging, &pos),
+            "hanging propagules use the block above, not their floor"
+        );
+    }
+
     /// A test chunk — a superflat content chunk at `pos` with `sections_count`
     /// world sections, classified with the server's air/motion predicates.
     fn test_chunk(pos: ChunkPos) -> ChunkAccess<StateId, ServerBiomeId, StructureKey> {
@@ -2410,6 +2931,306 @@ mod tests {
     /// owning-holder region (the [`WorldGenLevel`] shape).
     fn feature_region() -> WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> {
         region_with_access(RegistryAccess::empty())
+    }
+
+    fn snowy_feature_region() -> WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> {
+        let mut region = feature_region();
+        let snowy = ServerBiomeId(BiomeId::from_name("minecraft:snowy_plains").unwrap().id());
+        // BiomeManager samples quart corners in adjacent chunks. Populate the
+        // actual cached section palettes, not just its uncached source.
+        for x in -1..=1 {
+            for z in -1..=1 {
+                let chunk = region.get_chunk_mut(x, z);
+                for section in 0..chunk.get_sections().len() {
+                    for qx in 0..4 {
+                        for qy in 0..4 {
+                            for qz in 0..4 {
+                                chunk
+                                    .get_section_mut(section)
+                                    .set_noise_biome(qx, qy, qz, snowy);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        region
+    }
+
+    #[test]
+    fn freezing_and_snow_use_paper_pre_light_zero_then_visible_block_nibbles() {
+        use rivet_world::lighting::swmr_nibble_array::SwmrNibbleArray;
+        let mut region = snowy_feature_region();
+        let water = BlockPos::new(8, 0, 8);
+        let snow = BlockPos::new(9, 1, 8);
+        region.set_block(&water, Blocks::WATER.default_block_state(), 2, UPDATE_LIMIT);
+        region.set_block(
+            &snow.below(),
+            Blocks::STONE.default_block_state(),
+            2,
+            UPDATE_LIMIT,
+        );
+        region.set_block(&snow, Blocks::AIR.default_block_state(), 2, UPDATE_LIMIT);
+        assert!(!region.get_chunk(0, 0).is_light_correct());
+        assert!(WorldGenLevel::should_freeze(&region, &water, false));
+        assert!(WorldGenLevel::should_snow(&region, &snow));
+
+        // Paper ignores even published light until isLightCorrect. Once the
+        // engine publishes correctness, 9 permits both and 10 rejects both.
+        for (brightness, allowed) in [(9, true), (10, false)] {
+            let chunk = region.get_chunk_mut(0, 0);
+            let mut nibbles: Vec<_> = chunk.block_nibbles().to_vec();
+            let light_section =
+                (water.get_y() >> 4) - chunk.height_accessor().get_min_section_y() + 1;
+            let nibble = &mut nibbles[light_section as usize];
+            *nibble = SwmrNibbleArray::new();
+            nibble.set(water.get_x(), water.get_y(), water.get_z(), brightness);
+            nibble.set(snow.get_x(), snow.get_y(), snow.get_z(), brightness);
+            nibble.update_visible();
+            chunk.set_block_nibbles(nibbles);
+            chunk.set_light_correct(false);
+            assert_eq!(region.get_block_brightness(&water), 0);
+            assert!(WorldGenLevel::should_freeze(&region, &water, false));
+            assert!(WorldGenLevel::should_snow(&region, &snow));
+            region.get_chunk_mut(0, 0).set_light_correct(true);
+            assert_eq!(region.get_block_brightness(&water), brightness);
+            assert_eq!(
+                WorldGenLevel::should_freeze(&region, &water, false),
+                allowed
+            );
+            assert_eq!(WorldGenLevel::should_snow(&region, &snow), allowed);
+        }
+    }
+
+    #[test]
+    fn freezing_requires_source_liquid_water_and_optional_exposed_edge() {
+        let mut region = snowy_feature_region();
+        let pos = BlockPos::new(8, 0, 8);
+        for neighbor in [pos, pos.west(), pos.east(), pos.north(), pos.south()] {
+            region.set_block(
+                &neighbor,
+                Blocks::WATER.default_block_state(),
+                2,
+                UPDATE_LIMIT,
+            );
+        }
+        assert!(WorldGenLevel::should_freeze(&region, &pos, false));
+        assert!(!WorldGenLevel::should_freeze(&region, &pos, true));
+        region.set_block(
+            &pos.west(),
+            Blocks::AIR.default_block_state(),
+            2,
+            UPDATE_LIMIT,
+        );
+        assert!(WorldGenLevel::should_freeze(&region, &pos, true));
+        let flowing = Blocks::WATER
+            .default_block_state()
+            .set_value(BlockStateProperties::LEVEL, 1)
+            .unwrap();
+        region.set_block(&pos, flowing, 2, UPDATE_LIMIT);
+        assert!(!WorldGenLevel::should_freeze(&region, &pos, false));
+        region.set_block(
+            &pos,
+            Blocks::SEAGRASS.default_block_state(),
+            2,
+            UPDATE_LIMIT,
+        );
+        assert!(!WorldGenLevel::should_freeze(&region, &pos, false));
+    }
+
+    #[test]
+    fn freeze_samples_top_biome_but_evaluates_water_below() {
+        let mut region = snowy_feature_region();
+        let warm = ServerBiomeId(BiomeId::from_name("minecraft:plains").unwrap().id());
+        for x in -1..=1 {
+            for z in -1..=1 {
+                let chunk = region.get_chunk_mut(x, z);
+                for section in 0..chunk.get_sections().len() {
+                    for qx in 0..4 {
+                        for qy in [0, 2] {
+                            for qz in 0..4 {
+                                chunk
+                                    .get_section_mut(section)
+                                    .set_noise_biome(qx, qy, qz, warm);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let sampled_cold = |region: &WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey>,
+                            pos: &BlockPos| {
+            generated_climate_settings(BiomeId::from_id(dense_biome_id(&WorldGenLevel::get_biome(
+                region, pos,
+            ))))
+            .temperature
+                == 0.0
+        };
+        // Find an actual BiomeManager interpolation boundary; sampling fixed
+        // quart ids directly would miss the topPos/belowPos caller contract.
+        for top_is_cold in [true, false] {
+            let pos = (-32..32)
+                .map(|y| BlockPos::new(8, y, 8))
+                .find(|pos| {
+                    sampled_cold(&region, &pos.above()) == top_is_cold
+                        && sampled_cold(&region, pos) != top_is_cold
+                })
+                .expect("alternating quart layers produce both biome boundaries");
+            region.set_block(&pos, Blocks::WATER.default_block_state(), 2, UPDATE_LIMIT);
+            assert_eq!(
+                WorldGenLevel::should_freeze(&region, &pos, false),
+                top_is_cold
+            );
+        }
+    }
+
+    #[test]
+    fn snow_survival_uses_collision_face_tags_and_full_snow_layers() {
+        let mut region = snowy_feature_region();
+        let pos = BlockPos::new(8, 1, 8);
+        for (support, survives) in [
+            (Blocks::STONE.default_block_state(), true),
+            (Blocks::ICE.default_block_state(), false),
+            (Blocks::HONEY_BLOCK.default_block_state(), true),
+            (Blocks::AIR.default_block_state(), false),
+            (Blocks::OAK_LEAVES.default_block_state(), true),
+            (
+                Blocks::SNOW
+                    .default_block_state()
+                    .set_value(BlockStateProperties::LAYERS, 7)
+                    .unwrap(),
+                false,
+            ),
+            (
+                Blocks::SNOW
+                    .default_block_state()
+                    .set_value(BlockStateProperties::LAYERS, 8)
+                    .unwrap(),
+                true,
+            ),
+        ] {
+            region.set_block(&pos.below(), support, 2, UPDATE_LIMIT);
+            region.set_block(&pos, Blocks::AIR.default_block_state(), 2, UPDATE_LIMIT);
+            assert_eq!(
+                WorldGenLevel::should_snow(&region, &pos),
+                survives,
+                "support {support:?}"
+            );
+        }
+        region.set_block(
+            &pos.below(),
+            Blocks::STONE.default_block_state(),
+            2,
+            UPDATE_LIMIT,
+        );
+        region.set_block(&pos, Blocks::SNOW.default_block_state(), 2, UPDATE_LIMIT);
+        assert!(WorldGenLevel::should_snow(&region, &pos));
+        region.set_block(
+            &pos,
+            BlockState::of(BlockId::from_name("minecraft:short_grass").unwrap()),
+            2,
+            UPDATE_LIMIT,
+        );
+        assert!(!WorldGenLevel::should_snow(&region, &pos));
+        assert!(!WorldGenLevel::should_snow(
+            &region,
+            &BlockPos::new(8, region.get_min_y() - 1, 8)
+        ));
+    }
+
+    #[test]
+    fn freeze_and_snow_match_live_paper_fixture() {
+        use rivet_world::biome::biome::{ClimateSettings, TemperatureModifier};
+        struct ProbeLevel {
+            pos: BlockPos,
+            target: BlockState,
+            support: BlockState,
+            neighbors: BlockState,
+            brightness: i32,
+        }
+        impl LevelHeightAccessor for ProbeLevel {
+            fn get_min_y(&self) -> i32 {
+                -64
+            }
+            fn get_height(&self) -> i32 {
+                384
+            }
+        }
+        impl WorldGenLevel for ProbeLevel {
+            fn get_seed(&self) -> i64 {
+                42
+            }
+            fn get_sea_level(&self) -> i32 {
+                63
+            }
+            fn get_block_brightness(&self, _: &BlockPos) -> i32 {
+                self.brightness
+            }
+            fn get_block_state(&self, pos: &BlockPos) -> BlockState {
+                if *pos == self.pos {
+                    self.target
+                } else if *pos == self.pos.below() {
+                    self.support
+                } else {
+                    self.neighbors
+                }
+            }
+            fn can_survive(&self, state: &BlockState, pos: &BlockPos) -> bool {
+                region_can_survive(self, state, pos)
+            }
+        }
+        fn state(text: &str) -> BlockState {
+            let (name, value) = text
+                .split_once(':')
+                .map_or((text, None), |(name, value)| (name, Some(value)));
+            let state = BlockState::of(BlockId::from_name(&format!("minecraft:{name}")).unwrap());
+            value.map_or(state, |value| {
+                state
+                    .set_value(
+                        if name == "snow" {
+                            BlockStateProperties::LAYERS
+                        } else {
+                            BlockStateProperties::LEVEL
+                        },
+                        value.parse::<i32>().unwrap(),
+                    )
+                    .unwrap()
+            })
+        }
+        let fixture = include_str!("../../../../../tools/rivet-oracle/fixtures/freeze-snow.tsv");
+        let mut rows = 0;
+        for row in fixture
+            .lines()
+            .filter(|row| !row.starts_with('#') && !row.is_empty())
+        {
+            let fields: Vec<_> = row.split('\t').collect();
+            assert_eq!(fields.len(), 10);
+            let climate = ClimateSettings {
+                temperature: fields[0].parse().unwrap(),
+                has_precipitation: fields[1].parse().unwrap(),
+                temperature_modifier: TemperatureModifier::None,
+                downfall: 0.5,
+            };
+            let level = ProbeLevel {
+                pos: BlockPos::new(0, fields[3].parse().unwrap(), 0),
+                target: state(fields[4]),
+                support: state(fields[5]),
+                neighbors: state(fields[6]),
+                brightness: fields[2].parse().unwrap(),
+            };
+            assert_eq!(
+                climate.should_freeze(&level, &level.pos, fields[7].parse().unwrap()),
+                fields[8].parse::<bool>().unwrap(),
+                "freeze: {row}"
+            );
+            assert_eq!(
+                climate.should_snow(&level, &level.pos),
+                fields[9].parse::<bool>().unwrap(),
+                "snow: {row}"
+            );
+            rows += 1;
+        }
+        assert_eq!(rows, 23);
     }
 
     /// A feature-step region: `generatingStep = getStepTo(FEATURES)` from the
@@ -3108,6 +3929,33 @@ mod tests {
         .map(|total| random.next_int_bound(total));
         assert_eq!(roll, None);
         assert_eq!(random.next_int_bound(100), baseline.next_int_bound(100));
+    }
+
+    #[test]
+    fn generated_heart_keeps_pending_entity_in_owning_chunk_until_replaced() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        let heart = BlockState::of(
+            rivet_registry::generated::blocks::BlockId::from_name("minecraft:creaking_heart")
+                .unwrap(),
+        );
+        assert!(region.set_block(&pos, heart, UPDATE_ALL, 0));
+        let pending = region
+            .get_chunk(0, 0)
+            .get_block_entity_nbt(&pos)
+            .expect("pending heart belongs to chunk");
+        assert_eq!(pending, &dummy_block_entity(&pos));
+        assert!(!region.live_block_entities.contains(&pos));
+        let mut bytes = Vec::new();
+        rivet_nbt::nbt_io::write_compressed(pending, &mut bytes).unwrap();
+        let loaded = rivet_nbt::nbt_io::read_compressed(
+            bytes.as_slice(),
+            &mut rivet_nbt::nbt_accounter::NbtAccounter::unlimited_heap(),
+        )
+        .unwrap();
+        assert_eq!(loaded, *pending);
+        assert!(region.set_block(&pos, Blocks::STONE.default_block_state(), UPDATE_ALL, 0));
+        assert!(region.get_chunk(0, 0).get_block_entity_nbt(&pos).is_none());
     }
 
     #[test]

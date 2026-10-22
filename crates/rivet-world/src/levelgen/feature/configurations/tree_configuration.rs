@@ -1,31 +1,103 @@
-//! Port of `net.minecraft.world.level.levelgen.feature.configurations.
-//! TreeConfiguration` (class, 26.2) — the foliage-consumed slice.
-//!
-//! STUB(mc.world.level.levelgen.feature.configurations.tree): the full record
-//! (trunk/foliage providers, trunk placer, foliage placer, root placer, minimum
-//! size, decorators, `ignoreVines`, `belowTrunkProvider`, and the 9-field
-//! `CODEC`) is owned by the pending `configurations.tree` manifest unit (issue
-//! #575's tree-family wave — see task #1322 "Port configurations (tree, root,
-//! fallen) + type registries"). The trunk/root/decorator slices that would
-//! consume the rest of the record live on the preserved
-//! `feature/worldgen-tree-scaffolding` branch.
-//!
-//! The foliage-placer slice consumes `foliageProvider` (`FoliagePlacer.
-//! tryPlaceLeaf` → `block_state_provider_get_state(config.foliage_provider,
-//! ...)`) and the trunk-placer slice (the merged `trunkplacers` manifest unit)
-//! consumes `trunkProvider` / `belowTrunkProvider` (`TrunkPlacer.
-//! placeBelowTrunkBlock`), so this stub carries those three fields as
-//! `Arc<dyn ErasedBlockStateProvider>`, plus a `stub()` constructor for the
-//! codec/geometry tests. When the owning unit lands it replaces this file.
-//!
-//! (There is no `FeatureConfiguration` impl here — that trait and the dispatch
-//! live in `configurations.core`, already merged.)
+//! TreeConfiguration's nine fields and executable trunk/foliage/root/size codec.
+//! Source: pinned Paper 26.2 TreeConfiguration.java.
+//! Untranslated decorator descriptors retain known type identities so the eager
+//! registry closure can load. Selecting one refuses before writes/RNG; encoding
+//! those incomplete descriptors also refuses explicitly. Vanilla roots execute.
 
+use super::FeatureConfiguration;
+use crate::levelgen::feature::featuresize::{FeatureSize, TwoLayersFeatureSize};
+use crate::levelgen::feature::foliageplacers::blob_foliage_placer::BlobFoliagePlacer;
+use crate::levelgen::feature::foliageplacers::foliage_placer::ErasedFoliagePlacer;
+use crate::levelgen::feature::rootplacers::{RootPlacer, root_placer_codec};
 use crate::levelgen::feature::stateproviders::block_state_provider::ErasedBlockStateProvider;
+use crate::levelgen::feature::treedecorators::{TreeDecorator, tree_decorator_codec};
+use crate::levelgen::feature::trunkplacers::straight_trunk_placer::StraightTrunkPlacer;
+use crate::levelgen::feature::trunkplacers::trunk_placer::ErasedTrunkPlacer;
 use std::sync::Arc;
 
+use rivet_registry::registry_ops::RegistryOpsLookup;
+use rivet_serialization::{
+    codec::{self, Codec},
+    dynamic_ops::DynamicOps,
+    map_codec,
+    record_builder::{self, RecordCodecBuilder},
+};
+
+pub fn tree_configuration_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>()
+-> Arc<dyn Codec<TreeConfiguration, Ops>> {
+    use crate::levelgen::feature::featuresize::feature_size_codec;
+    use crate::levelgen::feature::foliageplacers::foliage_placer::foliage_placer_codec;
+    use crate::levelgen::feature::stateproviders::block_state_provider::block_state_provider_codec;
+    use crate::levelgen::feature::trunkplacers::trunk_placer::trunk_placer_codec;
+    record_builder::create(|i| {
+        let placers = i
+            .group(RecordCodecBuilder::of(
+                Arc::new(|c: &TreeConfiguration| c.trunk_provider.clone()),
+                codec::field_of(
+                    block_state_provider_codec::<Ops>(),
+                    "trunk_provider".to_string(),
+                ),
+            ))
+            .and(RecordCodecBuilder::of(
+                Arc::new(|c: &TreeConfiguration| c.trunk_placer.clone()),
+                codec::field_of(trunk_placer_codec::<Ops>(), "trunk_placer".to_string()),
+            ))
+            .and(RecordCodecBuilder::of(
+                Arc::new(|c: &TreeConfiguration| c.foliage_provider.clone()),
+                codec::field_of(
+                    block_state_provider_codec::<Ops>(),
+                    "foliage_provider".to_string(),
+                ),
+            ))
+            .and(RecordCodecBuilder::of(
+                Arc::new(|c: &TreeConfiguration| c.foliage_placer.clone()),
+                codec::field_of(foliage_placer_codec::<Ops>(), "foliage_placer".to_string()),
+            ))
+            .apply(i, Arc::new(|a, b, c, d| (a, b, c, d)));
+        let settings = i
+            .group(RecordCodecBuilder::of(
+                Arc::new(|c: &TreeConfiguration| c.root_placer.clone()),
+                codec::optional_field("root_placer".to_string(), root_placer_codec::<Ops>(), false),
+            ))
+            .and(RecordCodecBuilder::of(
+                Arc::new(|c: &TreeConfiguration| c.minimum_size.clone()),
+                codec::field_of(feature_size_codec::<Ops>(), "minimum_size".to_string()),
+            ))
+            .and(RecordCodecBuilder::of(
+                Arc::new(|c: &TreeConfiguration| c.decorators.clone()),
+                codec::field_of(
+                    codec::list(tree_decorator_codec::<Ops>()),
+                    "decorators".to_string(),
+                ),
+            ))
+            .and(RecordCodecBuilder::of(
+                Arc::new(|c: &TreeConfiguration| c.ignore_vines),
+                map_codec::or_else_value(
+                    codec::field_of(codec::bool_codec::<Ops>(), "ignore_vines".to_string()),
+                    false,
+                ),
+            ))
+            .and(RecordCodecBuilder::of(
+                Arc::new(|c: &TreeConfiguration| c.below_trunk_provider.clone()),
+                codec::field_of(
+                    block_state_provider_codec::<Ops>(),
+                    "below_trunk_provider".to_string(),
+                ),
+            ))
+            .apply(i, Arc::new(|a, b, c, d, e| (a, b, c, d, e)));
+        i.group(placers).and(settings).apply(i, Arc::new(
+            |(trunk_provider, trunk_placer, foliage_provider, foliage_placer),
+             (root_placer, minimum_size, decorators, ignore_vines, below_trunk_provider)| TreeConfiguration {
+                trunk_provider, trunk_placer, foliage_provider, foliage_placer,
+                root_placer, minimum_size, decorators, ignore_vines, below_trunk_provider,
+            }
+        ))
+    })
+}
+
 /// `net.minecraft.world.level.levelgen.feature.configurations.TreeConfiguration`
-/// — the foliage-consumed slice of the tree config record.
+/// — executable tree parameters, with explicit untranslated decorator boundaries.
+#[derive(Debug, Clone)]
 pub struct TreeConfiguration {
     /// `this.foliageProvider` — the foliage (leaves) block state provider.
     pub foliage_provider: Arc<dyn ErasedBlockStateProvider>,
@@ -35,7 +107,15 @@ pub struct TreeConfiguration {
     /// provider (`getOptionalState`); `TrunkPlacer.placeBelowTrunkBlock`
     /// places its state only when the provider yields one.
     pub below_trunk_provider: Arc<dyn ErasedBlockStateProvider>,
+    pub trunk_placer: Arc<dyn ErasedTrunkPlacer>,
+    pub foliage_placer: Arc<dyn ErasedFoliagePlacer>,
+    pub root_placer: Option<RootPlacer>,
+    pub minimum_size: Arc<dyn FeatureSize>,
+    pub decorators: Vec<TreeDecorator>,
+    pub ignore_vines: bool,
 }
+
+impl FeatureConfiguration for TreeConfiguration {}
 
 impl TreeConfiguration {
     /// A test-only config whose providers are single `SimpleStateProvider`s of
@@ -51,6 +131,26 @@ impl TreeConfiguration {
             foliage_provider: erased.clone(),
             trunk_provider: erased.clone(),
             below_trunk_provider: erased,
+            trunk_placer: Arc::new(StraightTrunkPlacer::new(4, 2, 0)),
+            foliage_placer: Arc::new(BlobFoliagePlacer::new(
+                rivet_util::valueproviders::int_provider::IntProvider::Constant(
+                    rivet_util::valueproviders::constant_int::ConstantInt::of(2),
+                ),
+                rivet_util::valueproviders::int_provider::IntProvider::Constant(
+                    rivet_util::valueproviders::constant_int::ConstantInt::of(0),
+                ),
+                3,
+            )),
+            root_placer: None,
+            minimum_size: Arc::new(TwoLayersFeatureSize::new(1, 0, 1)),
+            decorators: Vec::new(),
+            ignore_vines: false,
+        }
+    }
+
+    pub(crate) fn require_supported_extensions(&self) {
+        for decorator in &self.decorators {
+            decorator.require_supported();
         }
     }
 }

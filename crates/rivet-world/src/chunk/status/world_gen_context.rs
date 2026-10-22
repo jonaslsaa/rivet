@@ -362,6 +362,16 @@ pub enum GenError {
         /// e.g. `minecraft:lake_lava_underground`).
         feature_key: &'static str,
     },
+    /// A selected feature needs Java HashSet tree-bin ordering that depends on
+    /// JVM object identity, unavailable from coordinate values. This is a
+    /// runtime capability refusal, not a missing configured-feature codec.
+    FeatureSetOrderingUnavailable {
+        chunk_pos: ChunkPos,
+        step_index: usize,
+        global_feature_index: usize,
+        feature_key: &'static str,
+        error: rivet_registry::core::JavaBlockPosSetError,
+    },
     /// The `FEATURES` body could not resolve a possible biome's
     /// `BiomeGenerationSettings` while building the decoration FeatureSorter.
     /// Paper builds the sorter once from the FULL `biomeSource.possibleBiomes()`
@@ -437,6 +447,16 @@ impl std::fmt::Display for GenError {
                 "cannot place feature {} (chunk {}, step {}, global feature index {}): \
                  its placed-feature value decode is unavailable (RivetTodo #126)",
                 feature_key, chunk_pos, step_index, global_feature_index
+            ),
+            GenError::FeatureSetOrderingUnavailable {
+                chunk_pos,
+                step_index,
+                global_feature_index,
+                feature_key,
+                error,
+            } => write!(
+                f,
+                "cannot place feature {feature_key} (chunk {chunk_pos}, step {step_index}, global feature index {global_feature_index}): {error}"
             ),
             GenError::SettingsNotGenerated { biome } => match biome {
                 Some(biome) => write!(

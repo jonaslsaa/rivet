@@ -11,6 +11,60 @@ diffs vs Rivet, packet round-trips) builds on top of these fixtures later.
 
 ## Status: what works
 
+### Direct tree-placement probes
+
+The scripts below execute the real feature and block-update implementations from
+Paper commit `0a993450f129c4942c2a9ed45ba047412b4667cf`, using a storage/tick-recording
+world proxy. They require the materialized Paper runtime under `work/run` and
+Java 25 (`RIVET_JAVA_HOME` selects its installation); each script checks the jar's
+commit before running. These are direct feature tests, not full-world parity.
+
+- `bash scripts/run_tree_placement_probe.sh`: 203 tree and ground-patch cases, exact
+  datapack configs, ordered write/final-block/tick SHA-256s and both random-stream
+  continuations, plus complete saved hive NBT. Terrain is flat dirt at
+  `(0,64,0)`, with four fixed seeds and seed-searched occupied-hive cases for
+  all 14 ordinary bee-bearing datapack configurations. A separate missing-hive
+  case verifies that occupant RNG is gated on actual entity availability.
+  Mangrove cases additionally cover dry dirt, mud, shallow water, and root-length
+  failures, including ordered water ticks and muddy/waterlogged root states.
+  Pale-oak cases execute the genuine nested pale-moss patch with its original
+  probability, including carpet/tall-grass placement and pending heart NBT.
+  Thirteen direct patch cases cover dirt, walls and void terrain. Nested calls
+  use real vanilla registries and a real generator; minimal Java getter shells
+  provide only the server-level-to-generator access chain, not feature behavior.
+- `bash scripts/run_fallen_tree_probe.sh`: 80 fallen-tree cases, every ordered
+  write and feature RNG continuation, across flat/void terrain and two origins.
+- `bash scripts/run_block_pos_set_probe.sh`: 26 Java collection snapshots,
+  including resizing, red-black bins, iterator removal and natural tree sets.
+  Equal-full-hash tree bins explicitly need JVM object-identity ordering; the
+  Rust implementation reports this unsupported case rather than inventing it.
+- `bash scripts/run_update_shape_probe.sh`: actual declaring update-shape owners
+  for all 1,196 blocks and exact voxel-boundary face traversal samples.
+- `bash scripts/run_block_shape_behavior_probe.sh`: 339 actual block-update
+  cases for wet/dry mangrove roots, hanging/planted propagule survival, and
+  source/flowing water, including bubble-column tick triggers, plus hanging
+  moss, moss carpets, creaking hearts and double plants.
+- `bash scripts/run_moss_carpet_placement_probe.sh`: 576 actual carpet-placement
+  cases across all horizontal support masks, four seeds and nine existing-top
+  and support conditions, comparing ordered writes and level RNG continuation.
+- `bash scripts/run_hive_storage_probe.sh`: 18 real hive load/store/save cases,
+  including partial malformed occupant lists, numeric coercion, persisted
+  flower/max-occupant fields, and Bukkit persistent data. Rust matches the 16
+  empty-component cases; the two nonempty component cases currently document
+  an explicit untranslated `DataComponentMap` codec boundary.
+
+The matching fixtures live directly under `fixtures/`. Rust tests in
+`tree_placement_fixture`, `fallen_tree_feature`, `java_block_pos_set` and
+`block_shape_update` consume them. The standing and fallen cases together cover
+all 38 tree configurations in the generated overworld
+closure, plus extra actual datapack configurations. Hive storage is distinct
+from bee ticking/release/AI, which remain untranslated. Generated hearts retain
+their pending protochunk entities; heart ticking and creaking AI remain separate
+untranslated capabilities. These selected feature fixtures do not prove full
+world generation, scheduler, lighting, gameplay or plugin compatibility.
+
+### Server and chunk captures
+
 - The Paper 26.2 server **boots headless** from the built paperclip bundler
   jar and reaches `Done (...)!` in ~5s.
 - A fixed-seed superflat world is generated and a **deterministic golden

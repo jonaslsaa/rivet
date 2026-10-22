@@ -1229,7 +1229,13 @@ mod tests {
             RegionFileVersion::VERSION_NONE,
         )
         .unwrap();
-        assert_eq!(std::env::current_dir().unwrap(), second_cwd);
+        // getcwd resolves macOS's /var -> /private/var alias, whereas the
+        // temporary directory can retain /var. Compare filesystem identity,
+        // not the spelling of the temp directory's existing symlink prefix.
+        assert_eq!(
+            std::env::current_dir().unwrap(),
+            fs::canonicalize(&second_cwd).unwrap()
+        );
 
         let pos = ChunkPos::new(6, -3);
         worker.enqueue(save_at(pos, 41)).unwrap();

@@ -1387,6 +1387,7 @@ fn require_fresh_output_root(path: &Path, what: &str) -> Result<(), Error> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn write_seed_config(
     root: &Path,
     contract: &GeneratedContract,
@@ -1407,7 +1408,6 @@ fn write_seed_config(
             "cannot serialize generated-full seed config: {error}"
         ))
     })?;
-    #[cfg(target_os = "linux")]
     let mut file = {
         use rustix::fs::{Mode, OFlags, openat};
         use std::os::fd::AsFd;
@@ -1421,17 +1421,21 @@ fn write_seed_config(
         .map_err(std::io::Error::from)
         .map_err(Error::Io)?
     };
-    #[cfg(not(target_os = "linux"))]
-    let mut file = {
-        let _ = &mut root_descriptor;
-        return Err(Error::Gate(
-            "descriptor-relative generated-full seed-config writes require Linux openat2".into(),
-        ));
-    };
     file.write_all(&bytes).map_err(Error::Io)?;
     file.write_all(b"\n").map_err(Error::Io)?;
     file.sync_all().map_err(Error::Io)?;
     Ok(root.join(SEED_CONFIG_BASENAME))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn write_seed_config(
+    _root: &Path,
+    _contract: &GeneratedContract,
+    _seed: u64,
+) -> Result<PathBuf, Error> {
+    Err(Error::Gate(
+        "descriptor-relative generated-full seed-config writes require Linux openat2".into(),
+    ))
 }
 
 fn write_fresh_file(path: &Path, bytes: &[u8], what: &str) -> Result<(), Error> {

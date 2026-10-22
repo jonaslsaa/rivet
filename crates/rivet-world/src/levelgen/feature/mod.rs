@@ -90,6 +90,7 @@ pub mod kelp_feature;
 pub mod nether_forest_vegetation_feature;
 pub mod sea_pickle_feature;
 pub mod seagrass_feature;
+pub mod vegetation_patch_feature;
 
 // The surface-fill feature wave (this unit) — the `AbstractHugeMushroomFeature`
 // abstract base and the ten concrete feature structs that live in this module
@@ -174,13 +175,14 @@ pub mod foliageplacers;
 // The `net.minecraft.world.level.levelgen.feature.trunkplacers` framework
 // (this unit) — the `TrunkPlacer` hierarchy, its `TrunkPlacerType` ids, and
 // the nine concrete placers (see the submodule doc).
+pub mod rootplacers;
+pub mod treedecorators;
 pub mod trunkplacers;
 
-// STUB(mc.world.level.levelgen.feature.tree): `TreeFeature.validTreePos` —
-// the cross-unit helper the foliage/trunk/root placer leaves consume before
-// every placement. Owned by the pending `feature.tree` manifest unit (row 569);
-// see `tree_feature.rs`.
-mod tree_feature;
+// Executable tree/fallen-tree algorithms; root/decorator families and the
+// final neighbor-shape update remain explicit capability boundaries.
+pub mod fallen_tree_feature;
+pub mod tree_feature;
 
 // The end-leaves wave — the five End-feature structs (each owned by its own
 // `.feature.end*`/`.feature.chorusplant`/`.feature.voidstartplatform` MANIFEST
@@ -211,6 +213,7 @@ use crate::levelgen::feature::configurations::CompositeFeatureConfiguration;
 use crate::levelgen::feature::configurations::CountConfiguration;
 use crate::levelgen::feature::configurations::DeltaFeatureConfiguration;
 use crate::levelgen::feature::configurations::DiskConfiguration;
+use crate::levelgen::feature::configurations::FallenTreeConfiguration;
 use crate::levelgen::feature::configurations::FeatureConfiguration;
 use crate::levelgen::feature::configurations::GeodeConfiguration;
 use crate::levelgen::feature::configurations::HugeMushroomFeatureConfiguration;
@@ -227,7 +230,9 @@ use crate::levelgen::feature::configurations::SculkPatchConfiguration;
 use crate::levelgen::feature::configurations::SimpleBlockConfiguration;
 use crate::levelgen::feature::configurations::SpikeConfiguration;
 use crate::levelgen::feature::configurations::SpringConfiguration;
+use crate::levelgen::feature::configurations::TreeConfiguration;
 use crate::levelgen::feature::configurations::UnderwaterMagmaConfiguration;
+use crate::levelgen::feature::configurations::VegetationPatchConfiguration;
 use crate::levelgen::feature::configurations::WeightedRandomFeatureConfiguration;
 use crate::levelgen::feature::no_op_feature::NO_OP;
 use rivet_registry::Holder;
@@ -252,6 +257,7 @@ pub use coral_mushroom_feature::{CORAL_MUSHROOM, CoralMushroomFeature};
 pub use coral_tree_feature::{CORAL_TREE, CoralTreeFeature};
 pub use delta_feature::{DELTA, DeltaFeature};
 pub use disk_feature::{DISK, DiskFeature};
+pub use fallen_tree_feature::{FALLEN_TREE, FallenTreeFeature};
 pub use feature_count_tracker::FeatureCountTracker;
 pub use feature_place_context::FeaturePlaceContext;
 pub use fill_layer_feature::{FILL_LAYER, FillLayerFeature};
@@ -277,7 +283,12 @@ pub use simple_block_feature::{SIMPLE_BLOCK, SimpleBlockFeature};
 pub use snow_and_freeze_feature::{FREEZE_TOP_LAYER, SnowAndFreezeFeature};
 pub use spike_feature::{SPIKE, SpikeFeature};
 pub use spring_feature::{SPRING, SpringFeature};
+pub use tree_feature::{TREE, TreeFeature};
 pub use underwater_magma_feature::{UNDERWATER_MAGMA, UnderwaterMagmaFeature};
+pub use vegetation_patch_feature::{
+    VEGETATION_PATCH, VegetationPatchFeature, WATERLOGGED_VEGETATION_PATCH,
+    WaterloggedVegetationPatchFeature,
+};
 pub use vines_feature::{VINES, VinesFeature};
 
 // The vegetation-family wave (issue #600) — the `.feature.selector` unit's
@@ -515,6 +526,8 @@ impl FeatureId {
 /// fallback.
 pub fn feature_id_from_registry_name(name: &str) -> Option<FeatureId> {
     match name {
+        "minecraft:no_op" => Some(FeatureId::new(0)),
+        "minecraft:scattered_ore" => Some(FeatureId::new(51)),
         // `Feature.LAKE` is the registered `minecraft:lake` singleton.
         "minecraft:lake" => Some(FeatureId::new(27)),
         // `Feature.MONSTER_ROOM` is the registered `minecraft:monster_room`
@@ -658,6 +671,34 @@ pub fn feature_place<R: RandomSource>(
         panic!("generated feature {name} is not implemented");
     }
     match feature.id {
+        17 | 18 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<VegetationPatchConfiguration>()
+                .expect("vegetation patch feature must carry a VegetationPatchConfiguration");
+            if feature.id == 17 {
+                VEGETATION_PATCH.place_with_config(config, level, chunk_generator, random, origin)
+            } else {
+                WATERLOGGED_VEGETATION_PATCH.place_with_config(
+                    config,
+                    level,
+                    chunk_generator,
+                    random,
+                    origin,
+                )
+            }
+        }
+        2 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<FallenTreeConfiguration>()
+                .expect("fallen_tree feature must carry a FallenTreeConfiguration");
+            FALLEN_TREE.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        1 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<TreeConfiguration>()
+                .expect("tree feature must carry a TreeConfiguration");
+            TREE.place_with_config(config, level, chunk_generator, random, origin)
+        }
         // `Feature.NO_OP` — the no-op feature returns `true` unconditionally.
         0 => {
             let config = (config as &dyn Any)
@@ -1244,12 +1285,12 @@ mod tests {
     }
 
     /// Hostile: dispatching to a registered feature whose behavior has not been
-    /// emitted (id 1, a generated-content leaf) fails explicitly with a panic
+    /// emitted (id 9, the fossil feature) fails explicitly with a panic
     /// naming the id — never fabricating a verdict (the `#399`-style
     /// capability-unavailable seam).
     #[test]
     #[should_panic(
-        expected = "Trying to place feature id '1' whose behavior is not ported yet (#181 codegen)"
+        expected = "Trying to place feature id '9' whose behavior is not ported yet (#181 codegen)"
     )]
     fn dispatch_panics_for_an_unported_leaf() {
         let mut level = TestLevel;
@@ -1257,7 +1298,7 @@ mod tests {
         let mut random = LegacyRandomSource::new(1);
         let origin = BlockPos::new(0, 0, 0);
         let _ = feature_place(
-            FeatureId::new(1),
+            FeatureId::new(9),
             &NoneFeatureConfiguration::INSTANCE,
             &mut level,
             &generator,
