@@ -32,7 +32,23 @@ struct Authority {
     writes: Vec<[i32; 5]>,
     chests: Vec<(BlockPos, BlockState, String, i64)>,
     lifecycle: Vec<&'static str>,
+    fault: Option<FailurePoint>,
+    active: bool,
+    staged_entities: usize,
+    committed_entities: usize,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FailurePoint {
+    BeginError,
+    BeginPanic,
+    ChestError,
+    ChestPanic,
+    FinishError,
+    FinishPanic,
+    FinishPartialError,
+}
+#[derive(Debug, PartialEq, Eq)]
+struct OriginalPanic(FailurePoint);
 impl Authority {
     fn new(terrain: &str) -> Self {
         Self {
@@ -41,6 +57,10 @@ impl Authority {
             writes: Vec::new(),
             chests: Vec::new(),
             lifecycle: Vec::new(),
+            fault: None,
+            active: false,
+            staged_entities: 0,
+            committed_entities: 0,
         }
     }
 }
@@ -99,11 +119,44 @@ impl StructurePlacementAuthority for Authority {
         _: ChunkPos,
     ) -> Result<(), StructureError> {
         self.lifecycle.push("begin");
+        self.active = true;
+        self.staged_entities = 2;
+        if self.fault == Some(FailurePoint::BeginError) {
+            return Err(StructureError::PlacementUnavailable(
+                "original begin error".into(),
+            ));
+        }
+        if self.fault == Some(FailurePoint::BeginPanic) {
+            std::panic::panic_any(OriginalPanic(FailurePoint::BeginPanic));
+        }
         Ok(())
     }
     fn finish_structure(&mut self) -> Result<(), StructureError> {
         self.lifecycle.push("finish");
+        if self.fault == Some(FailurePoint::FinishPartialError) {
+            self.staged_entities -= 1;
+            self.committed_entities += 1;
+            return Err(StructureError::PlacementUnavailable(
+                "original partial finish error".into(),
+            ));
+        }
+        if self.fault == Some(FailurePoint::FinishError) {
+            return Err(StructureError::PlacementUnavailable(
+                "original finish error".into(),
+            ));
+        }
+        if self.fault == Some(FailurePoint::FinishPanic) {
+            std::panic::panic_any(OriginalPanic(FailurePoint::FinishPanic));
+        }
+        self.committed_entities += self.staged_entities;
+        self.staged_entities = 0;
+        self.active = false;
         Ok(())
+    }
+    fn abort_structure(&mut self) {
+        self.lifecycle.push("abort");
+        self.staged_entities = 0;
+        self.active = false;
     }
     fn place_loot_chest(
         &mut self,
@@ -114,6 +167,14 @@ impl StructurePlacementAuthority for Authority {
     ) -> Result<(), StructureError> {
         self.chests.push((pos, state, loot.into(), seed));
         self.set_block(&pos, state, 2);
+        if self.fault == Some(FailurePoint::ChestError) {
+            return Err(StructureError::PlacementUnavailable(
+                "original chest error".into(),
+            ));
+        }
+        if self.fault == Some(FailurePoint::ChestPanic) {
+            std::panic::panic_any(OriginalPanic(FailurePoint::ChestPanic));
+        }
         Ok(())
     }
 }
@@ -280,6 +341,9 @@ fn start_dispatches_intersecting_piece_and_real_loot_rng_through_authority() {
         )
         .unwrap();
     assert_eq!(authority.lifecycle, ["begin", "finish"]);
+    assert!(!authority.active);
+    assert_eq!(authority.staged_entities, 0);
+    assert_eq!(authority.committed_entities, 2);
     assert_eq!(authority.chests.len(), 1);
     assert_eq!(authority.chests[0].0, BlockPos::new(9, 63, 9));
     assert_eq!(authority.chests[0].2, "minecraft:chests/buried_treasure");
@@ -297,4 +361,104 @@ fn start_dispatches_intersecting_piece_and_real_loot_rng_through_authority() {
         )
         .unwrap();
     assert!(outside.lifecycle.is_empty() && outside.writes.is_empty());
+}
+
+#[test]
+fn failed_structure_scope_aborts_without_committing_or_rolling_back_effects() {
+    for fault in [
+        FailurePoint::BeginError,
+        FailurePoint::BeginPanic,
+        FailurePoint::ChestError,
+        FailurePoint::ChestPanic,
+        FailurePoint::FinishError,
+        FailurePoint::FinishPanic,
+        FailurePoint::FinishPartialError,
+    ] {
+        let mut start = StructureStart::new(
+            definition("minecraft:buried_treasure"),
+            ChunkPos::ZERO,
+            0,
+            PiecesContainer::new(vec![StructurePiece::buried_treasure(BlockPos::new(
+                8, 90, 8,
+            ))]),
+        );
+        let mut authority = Authority::new("sand");
+        authority.fault = Some(fault);
+        let mut random = XoroshiroRandomSource::new(42);
+        let mut expected = XoroshiroRandomSource::new(42);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            start.place_in_chunk(
+                &mut authority,
+                &mut random,
+                BoundingBox::new([0, -64, 0, 15, 319, 15]),
+                ChunkPos::ZERO,
+            )
+        }));
+        match fault {
+            FailurePoint::BeginPanic | FailurePoint::ChestPanic | FailurePoint::FinishPanic => {
+                let payload = result.expect_err("the original panic must resume after cleanup");
+                assert_eq!(
+                    payload.downcast_ref::<OriginalPanic>(),
+                    Some(&OriginalPanic(fault))
+                );
+            }
+            _ => {
+                let message = match fault {
+                    FailurePoint::BeginError => "original begin error",
+                    FailurePoint::ChestError => "original chest error",
+                    FailurePoint::FinishError => "original finish error",
+                    FailurePoint::FinishPartialError => "original partial finish error",
+                    _ => unreachable!(),
+                };
+                assert_eq!(
+                    result.expect("ordinary errors must not become panics"),
+                    Err(StructureError::PlacementUnavailable(message.into())),
+                );
+            }
+        }
+        assert!(!authority.active, "{fault:?}");
+        assert_eq!(authority.staged_entities, 0, "{fault:?}");
+        assert_eq!(
+            authority.committed_entities,
+            usize::from(fault == FailurePoint::FinishPartialError),
+            "abort retains entities already committed by a partial finish, but commits no more",
+        );
+        let failed_begin = matches!(fault, FailurePoint::BeginError | FailurePoint::BeginPanic);
+        let failed_finish = matches!(
+            fault,
+            FailurePoint::FinishError
+                | FailurePoint::FinishPanic
+                | FailurePoint::FinishPartialError
+        );
+        assert_eq!(
+            authority.lifecycle,
+            if failed_finish {
+                vec!["begin", "finish", "abort"]
+            } else {
+                vec!["begin", "abort"]
+            },
+            "{fault:?}",
+        );
+        assert_eq!(
+            authority.chests.len(),
+            usize::from(!failed_begin),
+            "{fault:?}"
+        );
+        if failed_begin {
+            assert!(authority.writes.is_empty());
+        } else {
+            assert!(!authority.writes.is_empty());
+            assert_eq!(
+                authority.get_block_state(&BlockPos::new(8, 63, 8)).block(),
+                BlockId::from_name("minecraft:chest").unwrap()
+            );
+            assert_eq!(authority.chests[0].3, expected.next_long());
+        }
+        assert_eq!(
+            start.pieces().pieces()[0].data().bounding_box.min_y,
+            if failed_begin { 90 } else { 63 },
+            "piece mutations are not rolled back on failure",
+        );
+        assert_eq!(random.next_long(), expected.next_long(), "{fault:?}");
+    }
 }

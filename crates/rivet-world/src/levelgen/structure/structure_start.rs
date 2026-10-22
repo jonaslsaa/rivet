@@ -242,18 +242,35 @@ impl StructureStart {
             // Unsupported native piece placement must refuse before any
             // transformer, entity or terrain mutation begins.
             for &index in &intersecting {
-                self.piece_container.pieces()[index].validate_placement()?;
+                self.piece_container.pieces()[index].validate_placement(authority)?;
             }
-            authority.begin_structure(
-                self.structure.as_ref().expect("nonempty structure"),
-                chunk_bb,
-                chunk,
-            )?;
-            for index in intersecting {
-                self.piece_container.pieces_mut()[index]
-                    .post_process(authority, random, chunk_bb)?;
+            // Paper's successful discard saves entities before breaking the
+            // region link. Never call that commit operation from a finally
+            // path. Rust's reusable authority must instead abandon transient
+            // resources if begin, a piece, or finish fails or unwinds.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                authority.begin_structure(
+                    self.structure.as_ref().expect("nonempty structure"),
+                    chunk_bb,
+                    chunk,
+                )?;
+                for index in intersecting {
+                    self.piece_container.pieces_mut()[index]
+                        .post_process(authority, random, chunk_bb)?;
+                }
+                authority.finish_structure()
+            }));
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    authority.abort_structure();
+                    return Err(error);
+                }
+                Err(payload) => {
+                    authority.abort_structure();
+                    std::panic::resume_unwind(payload);
+                }
             }
-            authority.finish_structure()?;
         }
         // BuriedTreasureStructure and MineshaftStructure inherit no-op afterPlace,
         // including when no piece intersects. Future variants must dispatch it.

@@ -9,6 +9,8 @@
 pub mod bounding_box;
 pub mod generation;
 pub mod mineshaft;
+mod mineshaft_placement;
+mod piece_placement;
 pub mod pieces_container;
 pub mod placement;
 pub mod registry_keys;

@@ -14,9 +14,9 @@ use serde_json::{Value, json};
 
 /// Why a reference-oracle operation did not produce a result.
 ///
-/// A response with `ok: false` is a real Paper verdict for operations such as
-/// malformed SNBT. Transport, protocol, and process failures are not verdicts
-/// and must never be accepted as a declared rejection.
+/// Only an explicit operation-specific input-rejection discriminator is a
+/// Paper rejection. Unexpected Java exceptions and malformed/legacy error
+/// envelopes are unavailable evidence, never passing rejection verdicts.
 #[derive(Debug, Clone)]
 pub enum OracleCallError {
     Rejected(String),
@@ -109,29 +109,43 @@ impl Oracle {
         let response = self
             .request(op, fields)
             .map_err(OracleCallError::Unavailable)?;
-        match response.get("ok").and_then(Value::as_bool) {
-            Some(true) => response.get("result").cloned().ok_or_else(|| {
-                OracleCallError::Unavailable("oracle success without result".to_string())
-            }),
-            Some(false) => {
-                let Some(error) = response.get("error").filter(|value| value.is_object()) else {
-                    return Err(OracleCallError::Unavailable(
-                        "oracle rejection without structured error".to_string(),
-                    ));
-                };
-                Err(OracleCallError::Rejected(format!(
-                    "oracle {op} failed: {error}"
-                )))
-            }
-            None => Err(OracleCallError::Unavailable(
-                "oracle response missing boolean `ok`".to_string(),
-            )),
-        }
+        classify_response(op, response)
     }
 
     /// The `ping` provenance block (Paper spec/impl/commit/sha/java).
     pub fn provenance(&mut self) -> Result<Value, OracleCallError> {
         self.call("ping", &[])
+    }
+}
+
+fn classify_response(op: &str, response: Value) -> Result<Value, OracleCallError> {
+    match response.get("ok").and_then(Value::as_bool) {
+        Some(true) => response.get("result").cloned().ok_or_else(|| {
+            OracleCallError::Unavailable("oracle success without result".to_string())
+        }),
+        Some(false) => {
+            let Some(error) = response.get("error").filter(|value| value.is_object()) else {
+                return Err(OracleCallError::Unavailable(
+                    "oracle rejection without structured error".to_string(),
+                ));
+            };
+            let message = format!("oracle {op} failed: {error}");
+            if error.get("kind").and_then(Value::as_str) == Some("input_rejected")
+                && error.get("operation").and_then(Value::as_str) == Some(op)
+                && error
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| !name.is_empty())
+                && error.get("message").and_then(Value::as_str).is_some()
+            {
+                Err(OracleCallError::Rejected(message))
+            } else {
+                Err(OracleCallError::Unavailable(message))
+            }
+        }
+        None => Err(OracleCallError::Unavailable(
+            "oracle response missing boolean `ok`".to_string(),
+        )),
     }
 }
 
@@ -157,5 +171,36 @@ pub trait OracleCall {
 impl OracleCall for Oracle {
     fn call(&mut self, op: &str, fields: &[(&str, &str)]) -> Result<Value, OracleCallError> {
         Oracle::call(self, op, fields)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_requires_an_explicit_well_formed_rejection_for_the_requested_operation() {
+        for error in [
+            json!({}),
+            json!({"type":"java.lang.NullPointerException", "message":"internal failure"}),
+            json!({"kind":"unavailable", "operation":"snbt.parse", "type":"java.lang.NullPointerException", "message":"internal failure"}),
+            json!({"kind":"input_rejected", "operation":"nbt.decode", "type":"java.io.EOFException", "message":"truncated"}),
+            json!({"kind":"input_rejected", "operation":"snbt.parse"}),
+        ] {
+            assert!(matches!(
+                classify_response("snbt.parse", json!({"ok":false,"error":error})),
+                Err(OracleCallError::Unavailable(_))
+            ));
+        }
+        let rejection = json!({"ok":false,"error":{"kind":"input_rejected","operation":"snbt.parse","type":"com.mojang.brigadier.exceptions.CommandSyntaxException","message":"Expected value"}});
+        assert!(matches!(
+            classify_response("snbt.parse", rejection),
+            Err(OracleCallError::Rejected(_))
+        ));
+        let result = json!({"accept":false});
+        assert_eq!(
+            classify_response("component.json", json!({"ok":true,"result":result})).unwrap(),
+            result
+        );
     }
 }

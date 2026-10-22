@@ -30,6 +30,10 @@ public final class LongReferenceSetProbe {
         emit("monument", "default", new long[]{0x1234,0xabcd});
         emit("replacement", "array", new long[]{9,8});
         emit("dedup", "array", new long[]{1,2,1,3,2,3});
+        long[] repeatedNearby = new long[33];
+        java.util.Arrays.fill(repeatedNearby, 1L);
+        repeatedNearby[1] = 2L; repeatedNearby[2] = 8L;
+        emit("nearbyDuplicates33", "array", repeatedNearby);
         for (int count : new int[]{0,1,2,3,23,24,25,48,49,96,97,193,289,512}) {
             long[] random = new Random(42).longs(count).toArray();
             long[] grid = new long[count];

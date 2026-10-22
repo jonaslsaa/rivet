@@ -32,6 +32,12 @@ remain hard mismatches; they are not evidence that an input was accepted.
 
 Before any comparison, `fixtures/corpus-manifest.json` proves exact corpus closure. The 432 chunk files and all three text files (`corpus.json`, `golden.json`, and `manifest.json`) must match independently trusted normalized paths, byte counts, and SHA-256 values. File length is checked before a bounded read, and execution consumes the validated immutable text structures instead of reopening paths. The trusted contract also pins hand-built SNBT content plus the text corpus's 46 accepted, 16 invalid, and per-kind counts. The emitted closure hash binds the trusted manifest and all validated text bytes. Missing, extra, renamed, unreadable, oversized, symlinked, hardlinked, nonregular, or content-modified files fail closed. A missing required root is UNVERIFIED (exit 3); a present but unsafe or inconsistent corpus is FAILED (exit 1).
 
+Directory validation includes every ancestor below the trusted workspace, not
+just the final `chunk` and `text` directories. Oracle errors count as rejections
+only with an explicit, well-formed `input_rejected` discriminator naming the
+requested operation; unexpected Java exceptions and legacy error envelopes are
+unavailable evidence, even for declared-invalid input.
+
 Valid inputs must succeed on both Paper and Rust. If both implementations reject a valid SNBT/NBT/component fixture, that is a hard mismatch rather than an accept/reject match. Accept/reject parity is reserved for entries explicitly declared invalid (`parse-invalid.*` and text entries with `accept: false`).
 
 ### Known divergences

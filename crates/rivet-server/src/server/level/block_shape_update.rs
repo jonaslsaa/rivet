@@ -47,6 +47,17 @@ fn vine_face(direction: Direction) -> Property {
     }
 }
 
+fn horizontal_facing(state: BlockState) -> Direction {
+    let Some(PropertyValue::Enum(name)) = state.get_value(BlockStateProperties::HORIZONTAL_FACING)
+    else {
+        unreachable!("block has horizontal facing")
+    };
+    Direction::VALUES
+        .into_iter()
+        .find(|direction| direction.get_serialized_name() == name)
+        .expect("valid horizontal direction")
+}
+
 fn acceptable_vine_neighbor(
     level: &dyn WorldGenLevel,
     pos: &BlockPos,
@@ -167,6 +178,80 @@ fn update_shape(
 ) -> BlockState {
     match update_owner(state) {
         "BlockBehaviour" => state,
+        "FenceBlock" => {
+            if state.get_value(BlockStateProperties::WATERLOGGED) == Some(PropertyValue::Bool(true))
+            {
+                level.schedule_tick(pos, FluidId::WATER, 5);
+            }
+            if !Plane::Horizontal.faces().contains(&direction) {
+                return state;
+            }
+            let neighbor_pos = pos.relative(&direction);
+            let opposite = direction.get_opposite();
+            let face_solid = level.is_face_sturdy(&neighbor_pos, &neighbor, &opposite);
+            let same_fence = neighbor.is_in_tag("minecraft:fences")
+                && neighbor.is_in_tag("minecraft:wooden_fences")
+                    == state.is_in_tag("minecraft:wooden_fences");
+            let gate = update_owner(neighbor) == "FenceGateBlock"
+                && horizontal_facing(neighbor).get_axis() != direction.get_axis();
+            let exception = update_owner(neighbor) == "LeavesBlock"
+                || matches!(
+                    neighbor.block().name(),
+                    "minecraft:barrier"
+                        | "minecraft:carved_pumpkin"
+                        | "minecraft:jack_o_lantern"
+                        | "minecraft:melon"
+                        | "minecraft:pumpkin"
+                )
+                || neighbor.is_in_tag("minecraft:shulker_boxes");
+            state
+                .set_value(
+                    vine_face(direction),
+                    (!exception && face_solid) || same_fence || gate,
+                )
+                .unwrap()
+        }
+        "FenceGateBlock" => {
+            if horizontal_facing(state).get_clock_wise().get_axis() == direction.get_axis() {
+                state
+                    .set_value(
+                        BlockStateProperties::IN_WALL,
+                        neighbor.is_in_tag("minecraft:walls")
+                            || level
+                                .get_block_state(&pos.relative(&direction.get_opposite()))
+                                .is_in_tag("minecraft:walls"),
+                    )
+                    .unwrap()
+            } else {
+                state
+            }
+        }
+        "BaseTorchBlock" => {
+            if direction == Direction::Down && !level.can_survive(&state, pos) {
+                Blocks::AIR.default_block_state()
+            } else {
+                state
+            }
+        }
+        "WallTorchBlock" | "RedstoneWallTorchBlock" => {
+            if state.get_value(BlockStateProperties::HORIZONTAL_FACING)
+                == Some(PropertyValue::Enum(
+                    direction.get_opposite().get_serialized_name(),
+                ))
+                && !level.can_survive(&state, pos)
+            {
+                Blocks::AIR.default_block_state()
+            } else {
+                state
+            }
+        }
+        "BaseRailBlock" => {
+            if state.get_value(BlockStateProperties::WATERLOGGED) == Some(PropertyValue::Bool(true))
+            {
+                level.schedule_tick(pos, FluidId::WATER, 5);
+            }
+            state
+        }
         "LeavesBlock" => {
             if state.get_value(BlockStateProperties::WATERLOGGED) == Some(PropertyValue::Bool(true))
             {
@@ -709,12 +794,12 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "Block.updateShape is not implemented for minecraft:oak_fence (declared by FenceBlock)"
+        expected = "Block.updateShape is not implemented for minecraft:oak_door (declared by DoorBlock)"
     )]
     fn an_unported_declaring_override_never_defaults_to_unchanged() {
         let origin = BlockPos::new(0, 64, 0);
         let mut level = Level::default();
-        level.blocks.insert(origin, state("minecraft:oak_fence"));
+        level.blocks.insert(origin, state("minecraft:oak_door"));
         update_shape_at_edge(&mut level, &mut random(), &HashSet::from([origin]));
     }
 

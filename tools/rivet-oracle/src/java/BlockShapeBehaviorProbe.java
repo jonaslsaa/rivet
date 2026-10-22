@@ -31,6 +31,30 @@ public final class BlockShapeBehaviorProbe {
                     layers.getLayer(net.minecraft.server.RegistryLayer.STATIC)).forEach(pending -> pending.apply());
                 var cases = new ArrayList<Case>();
                 var air = Blocks.AIR.defaultBlockState(); var dirt = Blocks.DIRT.defaultBlockState();
+                for (Block fence : List.of(Blocks.OAK_FENCE,Blocks.NETHER_BRICK_FENCE))
+                    for (boolean wet : new boolean[]{false,true}) for (Direction dir : Direction.values())
+                        for (BlockState neighbor : List.of(air,Blocks.STONE.defaultBlockState(),Blocks.OAK_LEAVES.defaultBlockState(),
+                                Blocks.PUMPKIN.defaultBlockState(),Blocks.SHULKER_BOX.defaultBlockState(),
+                                Blocks.OAK_FENCE.defaultBlockState(),Blocks.NETHER_BRICK_FENCE.defaultBlockState(),
+                                Blocks.OAK_FENCE_GATE.defaultBlockState(),Blocks.OAK_FENCE_GATE.defaultBlockState().setValue(FenceGateBlock.FACING,Direction.EAST)))
+                            cases.add(new Case("structure_fence_"+Block.getId(fence.defaultBlockState())+"_"+wet+"_"+dir+"_"+Block.getId(neighbor),
+                                fence.defaultBlockState().setValue(BlockStateProperties.WATERLOGGED,wet),dir,neighbor,air,dirt));
+                for (Block torch : List.of(Blocks.TORCH,Blocks.SOUL_TORCH,Blocks.COPPER_TORCH,Blocks.REDSTONE_TORCH))
+                    for (BlockState support : List.of(air,Blocks.STONE.defaultBlockState(),Blocks.OAK_FENCE.defaultBlockState(),Blocks.SOUL_SAND.defaultBlockState()))
+                        cases.add(new Case("structure_torch_"+Block.getId(torch.defaultBlockState())+"_"+Block.getId(support),
+                            torch.defaultBlockState(),Direction.DOWN,support,air,support));
+                for (Block torch : List.of(Blocks.WALL_TORCH,Blocks.SOUL_WALL_TORCH,Blocks.COPPER_WALL_TORCH,Blocks.REDSTONE_WALL_TORCH))
+                    for (Direction facing : Direction.Plane.HORIZONTAL) for (BlockState support : List.of(air,Blocks.STONE.defaultBlockState()))
+                        cases.add(new Case("structure_wall_torch_"+Block.getId(torch.defaultBlockState())+"_"+facing+"_"+Block.getId(support),
+                            torch.defaultBlockState().setValue(BlockStateProperties.HORIZONTAL_FACING,facing),facing.getOpposite(),support,air,dirt));
+                for (Block rail : List.of(Blocks.RAIL,Blocks.POWERED_RAIL,Blocks.DETECTOR_RAIL,Blocks.ACTIVATOR_RAIL))
+                    for (boolean wet : new boolean[]{false,true}) for (BlockState support : List.of(air,Blocks.STONE.defaultBlockState(),Blocks.OAK_FENCE.defaultBlockState()))
+                        cases.add(new Case("structure_rail_"+Block.getId(rail.defaultBlockState())+"_"+wet+"_"+Block.getId(support),
+                            rail.defaultBlockState().setValue(BlockStateProperties.WATERLOGGED,wet),Direction.DOWN,support,air,support));
+                for (Direction facing : Direction.Plane.HORIZONTAL) for (Direction dir : Direction.values())
+                    for (BlockState neighbor : List.of(air,Blocks.COBBLESTONE_WALL.defaultBlockState()))
+                        cases.add(new Case("structure_gate_"+facing+"_"+dir+"_"+Block.getId(neighbor),
+                            Blocks.OAK_FENCE_GATE.defaultBlockState().setValue(FenceGateBlock.FACING,facing).setValue(FenceGateBlock.IN_WALL,true),dir,neighbor,air,dirt));
                 for (Block falling : List.of(Blocks.SAND,Blocks.RED_SAND,Blocks.GRAVEL,Blocks.DRAGON_EGG,Blocks.ANVIL,Blocks.CHIPPED_ANVIL,Blocks.DAMAGED_ANVIL))
                     for (Direction dir : Direction.values())
                         cases.add(new Case("falling_"+BuiltInRegistries.BLOCK.getKey(falling)+"_"+dir, falling.defaultBlockState(),dir,air,air,dirt));
@@ -106,6 +130,7 @@ public final class BlockShapeBehaviorProbe {
                     WorldGenLevel level = (WorldGenLevel) Proxy.newProxyInstance(WorldGenLevel.class.getClassLoader(),new Class<?>[]{WorldGenLevel.class},
                         (proxy,method,values) -> switch(method.getName()) {
                             case "getBlockState" -> states.getOrDefault((BlockPos)values[0],air);
+                            case "getBlockEntity" -> null;
                             case "getFluidState" -> states.getOrDefault((BlockPos)values[0],air).getFluidState();
                             case "scheduleTick" -> {
                                 var p=(BlockPos)values[0]; var tick=new JsonArray(); tick.add(p.getX());tick.add(p.getY());tick.add(p.getZ());
@@ -120,7 +145,9 @@ public final class BlockShapeBehaviorProbe {
                     row.addProperty("direction",test.direction().getSerializedName());row.addProperty("neighbor",Block.getId(test.neighbor()));
                     row.addProperty("above",Block.getId(test.above()));row.addProperty("below",Block.getId(test.below()));
                     row.addProperty("result",Block.getId(result));row.add("ticks",ticks);row.addProperty("next_long",random.nextLong());
-                    if (test.name().contains("dripleaf")) row.addProperty("can_survive",test.state().canSurvive(level,pos));
+                    if (test.name().contains("dripleaf") || test.name().startsWith("structure_torch_")
+                            || test.name().startsWith("structure_wall_torch_") || test.name().startsWith("structure_rail_"))
+                        row.addProperty("can_survive",test.state().canSurvive(level,pos));
                     output.println("BLOCK_SHAPE\t"+row);
                 }
             }

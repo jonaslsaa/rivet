@@ -971,9 +971,9 @@ pub fn parse_structure_references(
 /// chunk-longs whose chessboard distance from the chunk being reconstructed is
 /// <= 8 (Paper logs `"Found invalid structure reference ..."` and drops the
 /// rest). A dropped reference is recorded as a [`ChunkParseDiagnostic`] so the
-/// discard is never silent. Duplicate in-range references deduplicate silently,
-/// preserving first-insertion order — Paper builds the `LongOpenHashSet` from
-/// the filtered array, so the carried and installed sets agree.
+/// discard is never silent. Preserve duplicate in-range references until the
+/// actual `LongOpenHashSet` array constructor: its initial capacity depends on
+/// the filtered array length before deduplication, affecting iteration order.
 ///
 /// The map shape mirrors Paper's `outmap`: a key is preserved even when every
 /// reference filters out — Paper's
@@ -992,12 +992,6 @@ pub fn filter_structure_references(
     let mut diagnostics = Vec::new();
     for entry in references {
         let mut filtered: Vec<i64> = Vec::with_capacity(entry.references.len());
-        // O(n) dedup mirroring Paper's `LongOpenHashSet`: the membership set
-        // is transient and only guards first-insertion order (the `Vec` is the
-        // carried value). A hostile `long[]` must not degrade to an O(n^2)
-        // linear scan.
-        let mut seen: std::collections::HashSet<i64> =
-            std::collections::HashSet::with_capacity(entry.references.len());
         for reference in entry.references.iter().copied() {
             let ref_pos = ChunkPos::unpack(reference);
             if ref_pos.get_chessboard_distance(chunk_pos) > 8 {
@@ -1006,9 +1000,7 @@ pub fn filter_structure_references(
                     chunk: *chunk_pos,
                     chunk_pos: ref_pos,
                 });
-            } else if seen.insert(reference) {
-                // The `LongOpenHashSet` dedup is silent; only the out-of-range
-                // drop surfaces a diagnostic (Paper warns on that one).
+            } else {
                 filtered.push(reference);
             }
         }
@@ -3364,39 +3356,25 @@ mod tests {
         assert!(diagnostics.is_empty());
     }
 
-    /// A hostile `References` `long[]` of in-range duplicates deduplicates in
-    /// O(n): a huge, nearly-all-duplicate array must collapse to the distinct
-    /// entries while preserving first-insertion order. This is a regression
-    /// guard against a return to the linear `Vec::contains` dedup — the wire
-    /// carries every in-range position Paper's chessboard filter can produce
-    /// (289) followed by millions of repeats of the last one, so a
-    /// `Vec::contains` revert rescans the entire surviving set for every
-    /// repeat (~6e8 comparisons) while the `HashSet` dedup stays O(n). The
-    /// dedup itself is silent (Paper's `LongOpenHashSet`); the size of the
-    /// surviving set is asserted directly, so the test fails fast if the dedup
-    /// is wrong without relying on wall-clock timing.
+    /// Check the complete NBT -> distance filter -> runtime set boundary
+    /// against the actual fastutil array-constructor fixture. Deduplicating
+    /// before that constructor changes capacity and its observable iteration.
     #[test]
-    fn hostile_duplicate_references_dedup_in_linear_time_and_preserve_order() {
+    fn structure_reference_array_capacity_survives_runtime_reconstruction() {
+        use sha2::{Digest, Sha256};
         let height = height_accessor::create(-64, 384);
-        // Every position within chessboard distance 8 of (0,0) — the full
-        // in-range set Paper's filter can produce — so the surviving-set scan a
-        // `Vec::contains` revert would do per repeat is genuinely large (289
-        // distinct, not a handful).
-        let mut distinct: Vec<i64> = Vec::new();
-        for z in -8..=8 {
-            for x in -8..=8 {
-                distinct.push(ChunkPos::new(x, z).pack());
-            }
-        }
-        assert_eq!(distinct.len(), 289);
-        const REPEATS: usize = 2_000_000;
-        let mut wire = Vec::with_capacity(distinct.len() + REPEATS);
-        wire.extend_from_slice(&distinct);
-        // Repeat the LAST distinct position so every duplicate would scan the
-        // whole surviving set under `Vec::contains` (the worst case): the dedup
-        // must collapse the wire to the distinct entries in first-insertion
-        // order (Paper's `LongOpenHashSet` keeps first-insertion order).
-        wire.resize(wire.len() + REPEATS, *distinct.last().unwrap());
+        let row = include_str!("../../../../../tools/rivet-oracle/fixtures/long-reference-set.tsv")
+            .lines()
+            .find(|line| line.starts_with("nearbyDuplicates33\tarray\t"))
+            .unwrap();
+        let fields: Vec<_> = row.split('\t').collect();
+        let mut wire: Vec<i64> = fields[2]
+            .split(',')
+            .map(|value| u64::from_str_radix(value, 16).unwrap() as i64)
+            .collect();
+        // Out-of-range values are removed before capacity selection; they
+        // must neither enlarge the set nor suppress in-range duplicates.
+        wire.extend([ChunkPos::new(30, 0).pack(); 8]);
         let mut references = CompoundTag::new();
         references.put_long_array("minecraft:village", wire);
         let mut structures = CompoundTag::new();
@@ -3407,16 +3385,29 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let (kept, diagnostics) =
-            filter_structure_references(parsed.structures_references(), &ChunkPos::new(0, 0));
-        assert_eq!(kept.len(), 1);
+        let reconstructed = super::super::chunk_reconstruction::reconstruct_runtime_chunk(
+            ChunkPos::ZERO,
+            parsed,
+            height,
+            true,
+        )
+        .unwrap();
+        let key = Identifier::parse("minecraft:village");
+        let mut hash = Sha256::new();
+        for value in reconstructed.chunk.get_references_for_structure(&key) {
+            hash.update(value.to_be_bytes());
+        }
+        assert_eq!(format!("{:x}", hash.finalize()), fields[3]);
         assert_eq!(
-            kept[0].references, distinct,
-            "the dedup must collapse to the distinct in-range references in first-insertion order"
-        );
-        assert!(
-            diagnostics.is_empty(),
-            "every wire reference is in range; the silent dedup must not emit diagnostics"
+            reconstructed
+                .parse_diagnostics
+                .iter()
+                .filter(|diagnostic| matches!(
+                    diagnostic,
+                    ChunkParseDiagnostic::StructureReferenceOutOfRange { .. }
+                ))
+                .count(),
+            8
         );
     }
 

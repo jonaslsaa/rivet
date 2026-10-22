@@ -17,6 +17,7 @@ pub enum GenerationOwnerError {
     StructureGenerationUnavailable { status: ChunkStatus },
     Generation(GeneratedChunkError),
     StructureTerrain(rivet_world::levelgen::noise::beardifier::BeardifierError),
+    StructureGeneration(super::structure_generation::StructureGenerationError),
 }
 impl std::fmt::Display for GenerationOwnerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -27,6 +28,7 @@ impl std::fmt::Display for GenerationOwnerError {
             ),
             Self::Generation(error) => write!(f, "{error}"),
             Self::StructureTerrain(error) => write!(f, "{error}"),
+            Self::StructureGeneration(error) => write!(f, "{error}"),
         }
     }
 }
@@ -66,6 +68,7 @@ pub struct GeneratedChunkOwner {
     consumers: HashMap<GenerationConsumerId, HashMap<ChunkPos, ChunkStatus>>,
     required: HashMap<ChunkPos, ChunkStatus>,
     chunks: HashMap<ChunkPos, Entry>,
+    structure_runtime: Option<super::structure_generation::StructureGenerationRuntime>,
 }
 
 impl GeneratedChunkOwner {
@@ -76,10 +79,40 @@ impl GeneratedChunkOwner {
             consumers: HashMap::new(),
             required: HashMap::new(),
             chunks: HashMap::new(),
+            structure_runtime: None,
         }
     }
     pub fn generator(&self) -> &Arc<OverworldGenerator> {
         &self.generator
+    }
+    /// Installation is explicit and cannot transfer authority across worlds.
+    /// On rejection the caller retains the complete runtime and its caches.
+    pub fn install_structure_runtime(
+        &mut self,
+        runtime: super::structure_generation::StructureGenerationRuntime,
+    ) -> Result<(), Box<super::structure_generation::StructureGenerationRuntime>> {
+        if !runtime.belongs_to(&self.generator) || self.structure_runtime.is_some() {
+            return Err(Box::new(runtime));
+        }
+        self.structure_runtime = Some(runtime);
+        // Previously unavailable tasks can now be attempted with real authority.
+        for entry in self.chunks.values_mut() {
+            if matches!(
+                entry.failure,
+                Some((
+                    _,
+                    GenerationOwnerError::StructureGenerationUnavailable { .. }
+                ))
+            ) {
+                entry.failure = None;
+            }
+        }
+        Ok(())
+    }
+    pub fn structure_runtime(
+        &self,
+    ) -> Option<&super::structure_generation::StructureGenerationRuntime> {
+        self.structure_runtime.as_ref()
     }
     pub fn new_consumer(&mut self) -> GenerationConsumerId {
         let id = GenerationConsumerId(self.next_consumer);
@@ -248,11 +281,50 @@ impl GeneratedChunkOwner {
                 next,
                 ChunkStatus::StructureStarts | ChunkStatus::StructureReferences
             ) {
-                entry.failure = Some((
-                    next,
-                    GenerationOwnerError::StructureGenerationUnavailable { status: next },
-                ));
-                report.failed += 1;
+                let Some(mut runtime) = self.structure_runtime.take() else {
+                    entry.failure = Some((
+                        next,
+                        GenerationOwnerError::StructureGenerationUnavailable { status: next },
+                    ));
+                    report.failed += 1;
+                    continue;
+                };
+                let height = entry.state.chunk().height_accessor();
+                // Retain per-world caches/authority even on an unexpected
+                // implementation panic, just as canonical chunks are retained.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if next == ChunkStatus::StructureStarts {
+                        runtime.generate_starts(self, pos, &height)
+                    } else {
+                        super::structure_manager::StructureManager::new(
+                            self,
+                            &super::structure_manager::UnambiguousStructureOrder,
+                        )
+                        .create_references_commutative(pos)
+                        .map_err(super::structure_generation::StructureGenerationError::from)
+                    }
+                }));
+                self.structure_runtime = Some(runtime);
+                match result {
+                    Ok(Ok(())) => {
+                        self.chunks
+                            .get_mut(&pos)
+                            .expect("canonical task center")
+                            .state
+                            .chunk_mut()
+                            .set_persisted_status(next);
+                        report.advanced += 1;
+                    }
+                    Ok(Err(error)) => {
+                        self.chunks
+                            .get_mut(&pos)
+                            .expect("canonical task center")
+                            .failure =
+                            Some((next, GenerationOwnerError::StructureGeneration(error)));
+                        report.failed += 1;
+                    }
+                    Err(payload) => std::panic::resume_unwind(payload),
+                }
                 continue;
             }
             let terrain = if matches!(

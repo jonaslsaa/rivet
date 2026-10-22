@@ -24,6 +24,12 @@ pub trait StructurePlacementAuthority {
         chunk: ChunkPos,
     ) -> Result<(), StructureError>;
     fn finish_structure(&mut self) -> Result<(), StructureError>;
+    /// Abandon a partially begun/failed scope WITHOUT saving staged entities.
+    /// Must be non-panicking, idempotent, safe after partial begin/finish, and release
+    /// transformer/region links. Keep already-applied terrain/piece/RNG effects
+    /// and any entities already committed before a finish failure. This is
+    /// resource cleanup, not rollback and never the successful commit path.
+    fn abort_structure(&mut self);
     fn place_loot_chest(
         &mut self,
         pos: BlockPos,
@@ -31,6 +37,47 @@ pub trait StructurePlacementAuthority {
         loot_table: &str,
         seed: i64,
     ) -> Result<(), StructureError>;
+
+    /// Attest the complete block, Craft spawner and entity-placement authority
+    /// before an intersecting mineshaft start performs ANY mutation.
+    fn require_mineshaft_placement(&self) -> Result<(), StructureError> {
+        Err(StructureError::PlacementUnavailable(
+            "mineshaft block/spawner/minecart placement authority is unavailable".into(),
+        ))
+    }
+
+    /// True only while a genuine TransformerLevelAccessor owns fluid and shape
+    /// bookkeeping. Ordinary direct WorldGenRegion writes use the default.
+    fn structure_updates_handled(&self) -> bool {
+        false
+    }
+
+    /// Paper's placeCraftSpawner snapshot/placed-block-entity bridge. Its RNG
+    /// belongs to the placed world, never the feature random passed to pieces.
+    fn place_cave_spider_spawner(
+        &mut self,
+        _pos: BlockPos,
+        _flags: u32,
+    ) -> Result<(), StructureError> {
+        Err(StructureError::PlacementUnavailable(
+            "Craft cave-spider spawner placement is unavailable".into(),
+        ))
+    }
+
+    /// Genuine CHEST_MINECART.create(CHUNK_GENERATION), then initial position
+    /// (.5 offsets), conditional nextLong loot seed, and addFreshEntity. A null
+    /// construction is valid only when actual entity feature checks reject it;
+    /// an unimplemented entity runtime must return an error, not pretend null.
+    fn place_loot_minecart<R: RandomSource>(
+        &mut self,
+        _pos: BlockPos,
+        _loot_table: &str,
+        _random: &mut R,
+    ) -> Result<(), StructureError> {
+        Err(StructureError::PlacementUnavailable(
+            "chest-minecart construction/loot/admission is unavailable".into(),
+        ))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -135,12 +182,13 @@ impl StructurePiece {
         }
     }
 
-    pub(super) fn validate_placement(&self) -> Result<(), StructureError> {
+    pub(super) fn validate_placement(
+        &self,
+        authority: &impl StructurePlacementAuthority,
+    ) -> Result<(), StructureError> {
         match self {
             Self::BuriedTreasure(_) => Ok(()),
-            Self::Mineshaft(_) => Err(StructureError::PlacementUnavailable(
-                "mineshaft piece postProcess is not implemented".into(),
-            )),
+            Self::Mineshaft(_) => authority.require_mineshaft_placement(),
         }
     }
 
@@ -153,9 +201,9 @@ impl StructurePiece {
         chunk_bb: BoundingBox,
     ) -> Result<(), StructureError> {
         match self {
-            Self::Mineshaft(_) => Err(StructureError::PlacementUnavailable(
-                "mineshaft piece postProcess is not implemented".into(),
-            )),
+            Self::Mineshaft(piece) => {
+                super::mineshaft_placement::post_process(piece, authority, random, chunk_bb)
+            }
             Self::BuriedTreasure(data) => {
                 let mut pos = BlockPos::new(
                     data.bounding_box.min_x,
