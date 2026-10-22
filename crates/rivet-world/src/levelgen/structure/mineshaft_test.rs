@@ -69,6 +69,9 @@ fn actual_spawn_window_mineshaft_matches_all_135_ordered_pieces_and_full_saved_s
 
 struct NoPlacement;
 impl StructurePlacementAuthority for NoPlacement {
+    fn abort_structure(&mut self) {
+        panic!("no scope before capability preflight refusal")
+    }
     fn level(&mut self) -> &mut dyn WorldGenLevel {
         panic!("no world access before refusal")
     }

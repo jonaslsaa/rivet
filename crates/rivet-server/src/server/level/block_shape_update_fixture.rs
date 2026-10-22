@@ -17,6 +17,9 @@ use std::collections::HashMap;
 struct Storage {
     states: HashMap<BlockPos, BlockState>,
     ticks: Vec<serde_json::Value>,
+    // The Java fixture explicitly has no block entities. Supply that same
+    // detached authority for dynamic shapes rather than assuming live state.
+    shapes: rivet_world::level::block_shape_context::DetachedShapeContext,
 }
 impl Storage {
     fn tick(&mut self, pos: &BlockPos, name: &str, delay: i32) {
@@ -38,6 +41,11 @@ impl LevelHeightAccessor for Storage {
     }
 }
 impl WorldGenLevel for Storage {
+    fn shape_context(
+        &self,
+    ) -> Option<&dyn rivet_world::level::block_shape_context::BlockShapeContext> {
+        Some(&self.shapes)
+    }
     fn get_seed(&self) -> i64 {
         42
     }

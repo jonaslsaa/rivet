@@ -444,6 +444,59 @@ impl<'a, S: StructureChunkStorage> StructureManager<'a, S> {
         }
         Ok(())
     }
+
+    /// Successful reference values do not depend on interleaving different
+    /// structure keys within one source chunk. Preflight *all* native inputs
+    /// before mutation, then retain X-then-Z insertion order for every set.
+    /// This intentionally does not certify Java identity-map order, global
+    /// add-call traces, or source partial-write/first-error behavior. Call the
+    /// ordered method above when those observations are required.
+    pub fn create_references_commutative(
+        &mut self,
+        center: ChunkPos,
+    ) -> Result<(), StructureManagerError> {
+        self.require(center, ChunkStatus::StructureStarts)?;
+        let x = center.get_min_block_x();
+        let z = center.get_min_block_z();
+        let mut writes = Vec::new();
+        for dx in -8..=8 {
+            for dz in -8..=8 {
+                let source =
+                    ChunkPos::new(center.x().wrapping_add(dx), center.z().wrapping_add(dz));
+                self.require(source, ChunkStatus::StructureStarts)?;
+                if self.storage.has_unkeyed_starts(source) {
+                    return Err(StructureManagerError::UnresolvedUnkeyedStarts { pos: source });
+                }
+                for key in self.storage.start_keys(source) {
+                    let start = self.get_start(source, &key)?.expect("canonical start key");
+                    if !start.is_valid() {
+                        continue;
+                    }
+                    let bounds = start.bounding_box().map_err(|reason| {
+                        StructureManagerError::StartUnavailable {
+                            pos: source,
+                            key: key.clone(),
+                            reason,
+                        }
+                    })?;
+                    if bounds.max_x >= x
+                        && bounds.min_x <= x.wrapping_add(15)
+                        && bounds.max_z >= z
+                        && bounds.min_z <= z.wrapping_add(15)
+                    {
+                        let id = start.structure().expect("valid native start").registry_id();
+                        let key = Identifier::try_parse(id)
+                            .ok_or_else(|| StructureManagerError::InvalidStructureId(id.into()))?;
+                        writes.push((key, source.pack() as u64));
+                    }
+                }
+            }
+        }
+        for (key, reference) in writes {
+            self.storage.add_reference(center, key, reference);
+        }
+        Ok(())
+    }
 }
 
 /// Connect resolved native starts to the actual terrain collector. Registry
@@ -647,6 +700,103 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn commutative_references_keep_each_fastutil_set_identical_across_start_map_orders() {
+        use rivet_world::levelgen::structure::{
+            mineshaft::{MineshaftPiece, MineshaftPieceKind},
+            structure_body::MineshaftKind,
+        };
+        let mine_key = Identifier::parse("minecraft:mineshaft");
+        let mut snapshots = Vec::new();
+        for reverse in [false, true] {
+            let mut storage = chunks();
+            for x in -8..=8 {
+                let source = ChunkPos::new(x, 0);
+                let mine = StructureStart::new(
+                    StructureDefinition::Mineshaft {
+                        registry_id: mine_key.to_string(),
+                        terrain_adjustment: TerrainAdjustment::None,
+                        kind: MineshaftKind::Normal,
+                    },
+                    source,
+                    4,
+                    PiecesContainer::new(vec![StructurePiece::Mineshaft(MineshaftPiece {
+                        data: StructurePieceData {
+                            bounding_box: BoundingBox::new([0, 40, 0, 15, 50, 15]),
+                            gen_depth: 0,
+                            orientation: None,
+                        },
+                        mine_type: MineshaftKind::Normal,
+                        kind: MineshaftPieceKind::Room {
+                            entrances: Vec::new(),
+                        },
+                    })]),
+                );
+                let treasure = start(source, [0, -100, 0, 0, -99, 0], 7);
+                let entries = if reverse {
+                    vec![(mine_key.clone(), mine), (key(), treasure)]
+                } else {
+                    vec![(key(), treasure), (mine_key.clone(), mine)]
+                };
+                for (key, start) in entries {
+                    storage
+                        .get_mut(&source)
+                        .unwrap()
+                        .chunk_mut()
+                        .set_start_for_structure(key, start);
+                }
+            }
+            let mut manager = StructureManager::new(&mut storage, &UnambiguousStructureOrder);
+            assert!(matches!(
+                manager.create_references(ChunkPos::ZERO),
+                Err(StructureManagerError::OrderingUnavailable { .. })
+            ));
+            manager
+                .create_references_commutative(ChunkPos::ZERO)
+                .unwrap();
+            snapshots.push((
+                manager.storage.references(ChunkPos::ZERO, &key()),
+                manager.storage.references(ChunkPos::ZERO, &mine_key),
+            ));
+            assert_eq!(
+                manager.references_count(ChunkPos::ZERO, &mine_key).unwrap(),
+                4
+            );
+            assert_eq!(manager.references_count(ChunkPos::ZERO, &key()).unwrap(), 7);
+        }
+        assert_eq!(snapshots[0], snapshots[1]);
+        assert_eq!(snapshots[0].0.len(), 17);
+        assert_eq!(snapshots[0].1.len(), 17);
+    }
+
+    #[test]
+    fn commutative_reference_preflight_refuses_deferred_inputs_before_any_write() {
+        let mut storage = chunks();
+        let first = ChunkPos::new(-8, -8);
+        storage
+            .get_mut(&first)
+            .unwrap()
+            .chunk_mut()
+            .set_start_for_structure(key(), start(first, [0, 0, 0, 0, 0, 0], 0));
+        storage
+            .get_mut(&ChunkPos::ZERO)
+            .unwrap()
+            .chunk_mut()
+            .set_start_for_structure(
+                key(),
+                StructureStartEntry::deferred(rivet_nbt::tag::Tag::Int(
+                    rivet_nbt::int_tag::IntTag::value_of(9),
+                )),
+            );
+        let mut manager = StructureManager::new(&mut storage, &UnambiguousStructureOrder);
+        assert!(matches!(
+            manager.create_references_commutative(ChunkPos::ZERO),
+            Err(StructureManagerError::StartUnavailable { .. })
+        ));
+        assert!(manager.storage.reference_keys(ChunkPos::ZERO).is_empty());
+        assert_eq!(manager.references_count(first, &key()).unwrap(), 0);
     }
 
     #[test]

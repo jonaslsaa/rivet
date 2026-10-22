@@ -874,6 +874,10 @@ impl OverworldNoiseBiomeSource {
     pub fn source(&self) -> &dyn BiomeSource {
         &self.source
     }
+    /// Clone the source table while retaining the world's registry holders.
+    pub(super) fn shared_source(&self) -> Arc<dyn BiomeSource> {
+        Arc::new(self.source.clone())
+    }
     /// Registry-less standalone sampler. Its Direct holders carry real IDs
     /// but intentionally cannot claim named-tag identity in a live world.
     pub fn new(random_state: &RandomState) -> Self {

@@ -1452,6 +1452,7 @@ pub(super) fn region_can_survive(
             level.is_face_sturdy_with(&below, &level.get_block_state(&below),
                 &rivet_registry::core::Direction::Up,
                 rivet_world::level::block_shape_context::SupportType::Center)
+                .unwrap_or_else(|error| panic!("torch support shape unavailable: {error}"))
         }
         "minecraft:wall_torch" | "minecraft:soul_wall_torch" | "minecraft:copper_wall_torch" | "minecraft:redstone_wall_torch" => {
             let Some(rivet_registry::block_state_property::PropertyValue::Enum(name)) =
@@ -1466,6 +1467,7 @@ pub(super) fn region_can_survive(
             level.is_face_sturdy_with(&below, &level.get_block_state(&below),
                 &rivet_registry::core::Direction::Up,
                 rivet_world::level::block_shape_context::SupportType::Rigid)
+                .unwrap_or_else(|error| panic!("rail support shape unavailable: {error}"))
         }
         "minecraft:small_dripleaf" => {
             let below = level.get_block_state(&pos.below());

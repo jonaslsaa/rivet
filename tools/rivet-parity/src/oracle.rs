@@ -149,6 +149,31 @@ fn classify_response(op: &str, response: Value) -> Result<Value, OracleCallError
     }
 }
 
+impl Drop for Oracle {
+    fn drop(&mut self) {
+        // Closing stdin makes the oracle's readLine return null, but the JVM
+        // (Paper class-init) has started non-daemon threads, so it does NOT exit
+        // on EOF — `wait()` would block forever. Kill the child instead.
+        let _ = self.stdin.flush();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The single oracle operation the differential checks drive. Split out (rather
+/// than taking `Oracle` directly) so the accept/canonical decision logic in
+/// `check_component_json` can be unit-tested against a stub oracle without
+/// spawning the Paper JVM (issue #98).
+pub trait OracleCall {
+    fn call(&mut self, op: &str, fields: &[(&str, &str)]) -> Result<Value, OracleCallError>;
+}
+
+impl OracleCall for Oracle {
+    fn call(&mut self, op: &str, fields: &[(&str, &str)]) -> Result<Value, OracleCallError> {
+        Oracle::call(self, op, fields)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,30 +202,5 @@ mod tests {
             classify_response("component.json", json!({"ok":true,"result":result})).unwrap(),
             result
         );
-    }
-}
-
-impl Drop for Oracle {
-    fn drop(&mut self) {
-        // Closing stdin makes the oracle's readLine return null, but the JVM
-        // (Paper class-init) has started non-daemon threads, so it does NOT exit
-        // on EOF — `wait()` would block forever. Kill the child instead.
-        let _ = self.stdin.flush();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-/// The single oracle operation the differential checks drive. Split out (rather
-/// than taking `Oracle` directly) so the accept/canonical decision logic in
-/// `check_component_json` can be unit-tested against a stub oracle without
-/// spawning the Paper JVM (issue #98).
-pub trait OracleCall {
-    fn call(&mut self, op: &str, fields: &[(&str, &str)]) -> Result<Value, OracleCallError>;
-}
-
-impl OracleCall for Oracle {
-    fn call(&mut self, op: &str, fields: &[(&str, &str)]) -> Result<Value, OracleCallError> {
-        Oracle::call(self, op, fields)
     }
 }
