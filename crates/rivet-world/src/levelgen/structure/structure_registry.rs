@@ -37,6 +37,11 @@ impl Structure {
         key: &Identifier,
     ) -> Result<StructureDefinition, StructureError> {
         match self.body {
+            StructureBody::Mineshaft { kind } => Ok(StructureDefinition::Mineshaft {
+                registry_id: key.to_string(),
+                terrain_adjustment: self.settings.terrain_adaptation,
+                kind,
+            }),
             StructureBody::BuriedTreasure => Ok(StructureDefinition::BuriedTreasure {
                 registry_id: key.to_string(),
                 terrain_adjustment: self.settings.terrain_adaptation,

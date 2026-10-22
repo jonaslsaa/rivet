@@ -2,10 +2,11 @@
 //! (enum/interface, 26.2).
 //!
 //! Java's `BeardifierMarker` is the `beardifier` density-function value — the
-//! structural-beard marker used during structure placement. The full
-//! `Beardifier` structure runtime (the `BEARD_KERNEL` contributions, `Rigid`,
-//! `forStructuresInChunk`) belongs to the `mc.world.level.levelgen.structure`
-//! unit and defers — RivetTodo(#177). This module ports the value shell Java's
+//! structural-beard marker used during structure placement. The numerical
+//! runtime and ordered structure collector live in [`super::beardifier`];
+//! world use requires its real reference/piece/order authority and must not
+//! substitute this marker when that authority is missing. This module ports
+//! the value shell Java's
 //! `DensityFunctions` declares: `compute`/`fillArray`/`minValue`/`maxValue`
 //! all return `0.0` (the enum's exact bodies). The `BeardifierOrMarker` unit
 //! codec (`MapCodec.unit(INSTANCE)`) lives in `density_functions`.
@@ -17,9 +18,9 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 /// `DensityFunctions.BeardifierMarker.INSTANCE` — the `beardifier` value
-/// shell. The real `Beardifier` structure contributions defer to the structure
-/// unit (RivetTodo #177); the shell keeps Java's declared value behavior
-/// (everything `0.0`).
+/// shell. This is the genuine serialized marker and the structure-independent
+/// base-height probe input, not a fallback for unavailable runtime influence.
+/// Its declared value behavior is exactly Java's (everything `0.0`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BeardifierMarker;
 

@@ -50,12 +50,12 @@
 //!
 //! ## Deferred seams (sparse issue-linked markers)
 //!
-//! - `BeardifierMarker` is ported as the value shell (`compute`/`fillArray`/
-//!   `min`/`max` return the zero/empty surface Java's `DensityFunctions`
-//!   declares, and `BeardifierOrMarker` carries its unit codec), but the real
-//!   `Beardifier` structure (the `BEARD_KERNEL` contributions, `Rigid`,
-//!   `forStructuresInChunk`) defers to the `structure` unit —
-//!   `RivetTodo(#177)`, see `beardifier_marker`.
+//! - [`Beardifier`] implements the full structure terrain kernel and ordered
+//!   piece/junction collector. Real world use requires its explicit
+//!   [`beardifier::BeardifierSource`] authority; absent references, deferred
+//!   pieces, and unknown source iteration order are not empty influence.
+//!   [`BeardifierMarker`] remains Java's genuine zero-valued serialized marker
+//!   and the correct argument for structure-independent base-height probes.
 //! - `Column` (the `levelgen` class) is a separate manifest unit whose
 //!   `LevelSimulatedReader` dependency is not ported; the `FindTopSurface`
 //!   search loop and `NoiseRouter` do not reference it, so nothing here defers
@@ -66,6 +66,7 @@
 //!   `configFixMC159283()` = `true` (the long-sqrt path); the configurable
 //!   disable path is deferred with `PlatformHooks` (RivetTodo #177).
 
+pub mod beardifier;
 pub mod beardifier_marker;
 pub mod density;
 pub mod density_function;
@@ -76,6 +77,7 @@ pub mod noise_settings;
 pub mod noises;
 pub mod registry_keys;
 
+pub use beardifier::Beardifier;
 pub use beardifier_marker::BeardifierMarker;
 pub use density::Density;
 pub use density_function::{

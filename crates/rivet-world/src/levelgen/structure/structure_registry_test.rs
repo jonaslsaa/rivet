@@ -36,7 +36,12 @@ fn complete_registries_ids_tag_members_and_defaulted_settings_match_live_paper()
                 );
                 let normalized = Structure::parse(&row["encoded"], &access).unwrap();
                 assert_eq!(*actual, normalized, "actual Java codec defaults {key}");
-                if key.to_string() == "minecraft:buried_treasure" {
+                if matches!(
+                    key.to_string().as_str(),
+                    "minecraft:buried_treasure"
+                        | "minecraft:mineshaft"
+                        | "minecraft:mineshaft_mesa"
+                ) {
                     assert!(actual.native_definition(&key).is_ok());
                     supported += 1;
                 } else {
@@ -81,7 +86,7 @@ fn complete_registries_ids_tag_members_and_defaulted_settings_match_live_paper()
         }
     }
     assert_eq!(tags, 20);
-    assert_eq!(supported, 1);
+    assert_eq!(supported, 3);
     assert!(
         build_structure_access(&access).is_err(),
         "cannot silently replace holder identity"

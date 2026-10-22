@@ -44,9 +44,10 @@
 //! - `MaterialRuleList` (`mc.world.level.levelgen.material`): `NoiseChunk`'s
 //!   block-state-rule list is ported by the owning material unit
 //!   (`levelgen::material`) and consumed here.
-//! - `Beardifier` (structure unit): the real `forStructuresInChunk` defers;
-//!   `NoiseChunk`/`NoiseBasedChunkGenerator` use the `BeardifierMarker` value
-//!   shell (RivetTodo #177).
+//! - Runtime structure terrain is supplied explicitly through the generator's
+//!   `*_with_structure_terrain` methods. The real Beardifier kernel/collector
+//!   lives in `noise::beardifier`; world callers must resolve its source
+//!   authority. Standalone value-layer methods retain the genuine marker.
 //! - `OverworldBiomeBuilder` (biome unit): only the two leaves this SCC reads
 //!   are inlined — `isDeepDarkRegion` (in `Aquifer`) and `spawnTarget()` (in
 //!   `NoiseGeneratorSettings`).

@@ -149,6 +149,12 @@ impl<S: Eq + std::hash::Hash> StructureAccess<S> {
         &self.structure_starts
     }
 
+    /// Persisted aliases/malformed keys remain owned but unresolved outside
+    /// the keyed map. Executable traversals must not mistake them for absence.
+    pub fn has_unkeyed_starts(&self) -> bool {
+        !self.unkeyed_starts.is_empty()
+    }
+
     /// `ChunkAccess.setAllStarts(Map)` — `structureStarts.clear()` + `putAll`
     /// (the `markUnsaved` side effect lives on `ChunkAccess`).
     pub fn set_all_starts(&mut self, starts: HashMap<S, StructureStartEntry>) {

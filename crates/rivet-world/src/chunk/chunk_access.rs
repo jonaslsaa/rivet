@@ -1020,6 +1020,10 @@ where
         self.structure_access.get_all_starts()
     }
 
+    pub fn has_unkeyed_starts(&self) -> bool {
+        self.structure_access.has_unkeyed_starts()
+    }
+
     /// `ChunkAccess.setAllStarts(Map)` — clear + putAll, then marks unsaved.
     pub fn set_all_starts(&mut self, starts: HashMap<S, StructureStartEntry>) {
         self.structure_access.set_all_starts(starts);

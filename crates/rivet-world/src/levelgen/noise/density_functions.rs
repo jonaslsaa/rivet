@@ -2814,13 +2814,13 @@ fn blend_offset_map_codec<Ops: DynamicOps + 'static>()
     )
 }
 
-/// `BeardifierMarker.CODEC` — `MapCodec.unit(BeardifierMarker.INSTANCE)`.
+/// `BeardifierOrMarker.CODEC` — the unit decoder returns the marker, while
+/// encoding accepts the runtime Beardifier too and stores no runtime fields.
 fn beardifier_marker_map_codec<Ops: DynamicOps + 'static>()
 -> Arc<dyn MapCodec<Arc<dyn DensityFunction>, Ops>> {
-    erase_map_codec::<BeardifierMarker, Ops>(
-        map_codec::unit_with(Arc::new(BeardifierMarker::instance)),
-        "minecraft:beardifier".to_string(),
-    )
+    map_codec::unit_with(Arc::new(|| {
+        Arc::new(BeardifierMarker::instance()) as Arc<dyn DensityFunction>
+    }))
 }
 
 /// `Marker.Type.codec` — `singleFunctionArgumentCodec(input -> new Marker(this,
