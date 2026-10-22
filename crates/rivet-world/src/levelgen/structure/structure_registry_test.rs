@@ -199,4 +199,10 @@ fn random_pool_aliases_require_nonempty_positive_nonoverflowing_weight_totals() 
         Structure::parse(&trial, &access).is_ok(),
         "zero-weight entries are valid when total is positive"
     );
+    trial["type"] = serde_json::json!(":jigsaw");
+    trial["pool_aliases"][0]["type"] = serde_json::json!("random");
+    assert!(
+        Structure::parse(&trial, &access).is_ok(),
+        "registry type dispatch normalizes Identifier default namespaces"
+    );
 }

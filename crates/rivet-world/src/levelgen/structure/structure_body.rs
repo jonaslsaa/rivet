@@ -142,7 +142,7 @@ impl StructureBody {
         access: &RegistryAccess,
     ) -> Result<Self, StructureDataError> {
         let ops = RegistryOps::create_from_access(&JsonOps::INSTANCE, access.clone());
-        Ok(match text(value, "type")? {
+        Ok(match id(value, "type")?.to_string().as_str() {
             "minecraft:buried_treasure" => Self::BuriedTreasure,
             "minecraft:desert_pyramid" => Self::DesertPyramid,
             "minecraft:end_city" => Self::EndCity,
@@ -323,7 +323,7 @@ impl PortalSetup {
 }
 impl PoolAliasBinding {
     fn parse(value: &Value) -> Result<Self, StructureDataError> {
-        Ok(match text(value, "type")? {
+        Ok(match id(value, "type")?.to_string().as_str() {
             "minecraft:direct" => Self::Direct {
                 alias: id(value, "alias")?,
                 target: id(value, "target")?,
