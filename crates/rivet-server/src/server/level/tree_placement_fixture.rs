@@ -14,7 +14,6 @@ use rivet_util::RandomSource;
 use rivet_util::random_source::XoroshiroRandomSource;
 use rivet_util::worldgen_random::AlgorithmRandomSource;
 use rivet_world::block::Block;
-use rivet_world::block::blocks::Blocks;
 use rivet_world::chunk::chunk_generator::ChunkGenerator;
 use rivet_world::chunk::storage::chunk_reconstruction::resolve_state_flags;
 use rivet_world::level::{WorldGenLevel, height_accessor::LevelHeightAccessor};
@@ -28,6 +27,7 @@ struct Ground {
     states: HashMap<BlockPos, BlockState>,
     beehives: HashMap<BlockPos, BeehiveData>,
     materialize_beehives: bool,
+    terrain: String,
     writes: Vec<u8>,
     write_count: u64,
     ticks: Vec<String>,
@@ -40,6 +40,7 @@ impl Ground {
             states: HashMap::new(),
             beehives: HashMap::new(),
             materialize_beehives: true,
+            terrain: "dry_dirt".to_string(),
             writes: Vec::new(),
             write_count: 0,
             ticks: Vec::new(),
@@ -123,11 +124,44 @@ impl WorldGenLevel for Ground {
     }
     fn get_block_state(&self, pos: &BlockPos) -> BlockState {
         self.states.get(pos).copied().unwrap_or_else(|| {
-            if pos.get_y() < 64 {
-                Blocks::DIRT.default_block_state()
-            } else {
-                Blocks::AIR.default_block_state()
-            }
+            let y = pos.get_y();
+            let block = match self.terrain.as_str() {
+                "dry_dirt" => {
+                    if y < 64 {
+                        "dirt"
+                    } else {
+                        "air"
+                    }
+                }
+                "dry_mud" => {
+                    if y < 63 {
+                        "dirt"
+                    } else if y < 64 {
+                        "mud"
+                    } else {
+                        "air"
+                    }
+                }
+                "shallow_water" => {
+                    if y < 61 {
+                        "dirt"
+                    } else if y == 61 {
+                        "mud"
+                    } else if y < 64 {
+                        "water"
+                    } else {
+                        "air"
+                    }
+                }
+                "root_limit_void" => "air",
+                other => panic!("unknown Java fixture terrain {other}"),
+            };
+            BlockState::of(
+                rivet_registry::generated::blocks::BlockId::from_name(&format!(
+                    "minecraft:{block}"
+                ))
+                .expect("fixture block exists"),
+            )
         })
     }
     fn is_empty_block(&self, pos: &BlockPos) -> bool {
@@ -183,12 +217,7 @@ impl WorldGenLevel for Ground {
             .store_worldgen_bee(ticks_in_hive);
     }
     fn schedule_tick(&mut self, pos: &BlockPos, fluid: FluidId, delay: i32) {
-        assert_eq!(
-            fluid,
-            FluidId::WATER,
-            "fixture only reaches leaf water ticks"
-        );
-        self.tick(pos, "minecraft:water", delay);
+        self.tick(pos, fluid.name(), delay);
     }
     fn schedule_block_tick(&mut self, pos: &BlockPos, block: Block, delay: i32) {
         self.tick(pos, block.name(), delay);
@@ -216,10 +245,15 @@ fn hash(bytes: &[u8]) -> String {
 
 #[test]
 fn full_trees_match_paper_writes_blocks_ticks_and_both_random_streams() {
-    let ops = RegistryOps::create_from_access(&JsonOps::INSTANCE, RegistryAccess::empty());
+    let ops = RegistryOps::create_from_access(
+        &JsonOps::INSTANCE,
+        rivet_world::data::worldgen::worldgen_bootstraps::build_worldgen_registries(),
+    );
     let mut cases = 0;
     let mut occupied_successes = HashSet::new();
     let mut missing_hive_cases = 0;
+    let mut rooted_successes = HashSet::new();
+    let mut root_limit_failures = 0;
     for line in
         include_str!("../../../../../tools/rivet-oracle/fixtures/tree-placement.jsonl").lines()
     {
@@ -232,6 +266,7 @@ fn full_trees_match_paper_writes_blocks_ticks_and_both_random_streams() {
             .unwrap_or_else(|| panic!("{name} config: {decoded:?}"));
         let mut ground = Ground::new();
         ground.materialize_beehives = row["block_entities"].as_bool().unwrap_or(true);
+        ground.terrain = row["terrain"].as_str().unwrap_or("dry_dirt").to_string();
         let mut random = XoroshiroRandomSource::new(seed);
         let result = TREE.place(&mut FeaturePlaceContext::new(
             None,
@@ -303,10 +338,66 @@ fn full_trees_match_paper_writes_blocks_ticks_and_both_random_streams() {
                 occupied_successes.insert(name.to_string());
             }
         }
+        if let Some(terrain) = row["terrain"].as_str() {
+            let roots = ground
+                .states
+                .values()
+                .filter(|state| state.block().name() == "minecraft:mangrove_roots")
+                .count();
+            let muddy_roots = ground
+                .states
+                .values()
+                .filter(|state| state.block().name() == "minecraft:muddy_mangrove_roots")
+                .count();
+            let waterlogged_roots = ground.states.values().filter(|state| state.block().name() == "minecraft:mangrove_roots" && state.get_value(rivet_registry::block_state_properties::BlockStateProperties::WATERLOGGED) == Some(rivet_registry::block_state_property::PropertyValue::Bool(true))).count();
+            assert_eq!(
+                roots as u64,
+                row["roots"].as_u64().unwrap(),
+                "root count {context}"
+            );
+            assert_eq!(
+                muddy_roots as u64,
+                row["muddy_roots"].as_u64().unwrap(),
+                "muddy roots {context}"
+            );
+            assert_eq!(
+                waterlogged_roots as u64,
+                row["waterlogged_roots"].as_u64().unwrap(),
+                "waterlogged roots {context}"
+            );
+            if terrain == "root_limit_void" {
+                assert!(
+                    !result,
+                    "root length limit must reject an unsupported root network {context}"
+                );
+                assert_eq!(ground.write_count, 0);
+                assert!(ground.ticks.is_empty());
+                root_limit_failures += 1;
+            }
+            if row["root_seed_search_success"] == true {
+                assert!(result && roots > 0);
+                if terrain == "dry_mud" {
+                    assert!(muddy_roots > 0);
+                }
+                if terrain == "shallow_water" {
+                    assert!(waterlogged_roots > 0);
+                }
+                rooted_successes.insert((name.to_string(), terrain.to_string()));
+            }
+        }
         cases += 1;
     }
-    assert_eq!(cases, 143);
+    assert_eq!(cases, 181);
     assert_eq!(missing_hive_cases, 1);
+    assert_eq!(root_limit_failures, 8);
+    assert_eq!(
+        rooted_successes,
+        ["mangrove", "tall_mangrove"]
+            .into_iter()
+            .flat_map(|name| ["dry_dirt", "dry_mud", "shallow_water"]
+                .map(|terrain| (name.to_string(), terrain.to_string())))
+            .collect()
+    );
     assert_eq!(
         occupied_successes,
         HashSet::from([

@@ -38,10 +38,21 @@ public final class TreePlacementProbe {
         final XoroshiroRandomSource worldRandom = new XoroshiroRandomSource(99);
         int writeCount;
         final boolean materializeBeehives;
+        final String terrain;
         Ground(BlockPos origin) { this(origin, true); }
-        Ground(BlockPos origin, boolean materializeBeehives) { this.origin = origin; this.materializeBeehives = materializeBeehives; }
+        Ground(BlockPos origin, boolean materializeBeehives) { this(origin, materializeBeehives, "dry_dirt"); }
+        Ground(BlockPos origin, boolean materializeBeehives, String terrain) { this.origin = origin; this.materializeBeehives = materializeBeehives; this.terrain = terrain; }
         BlockState get(BlockPos p) {
-            return states.getOrDefault(p, p.getY() < origin.getY() ? Blocks.DIRT.defaultBlockState() : Blocks.AIR.defaultBlockState());
+            BlockState stored = states.get(p);
+            if (stored != null) return stored;
+            int y = p.getY(), groundY = origin.getY();
+            return switch (terrain) {
+                case "dry_dirt" -> (y < groundY ? Blocks.DIRT : Blocks.AIR).defaultBlockState();
+                case "dry_mud" -> (y < groundY - 1 ? Blocks.DIRT : y < groundY ? Blocks.MUD : Blocks.AIR).defaultBlockState();
+                case "shallow_water" -> (y < groundY - 3 ? Blocks.DIRT : y == groundY - 3 ? Blocks.MUD : y < groundY ? Blocks.WATER : Blocks.AIR).defaultBlockState();
+                case "root_limit_void" -> Blocks.AIR.defaultBlockState();
+                default -> throw new AssertionError("unknown terrain " + terrain);
+            };
         }
         int height(Heightmap.Types type, int x, int z) {
             for (int y = 319; y >= -64; --y) {
@@ -146,7 +157,6 @@ public final class TreePlacementProbe {
                     json = JsonParser.parseReader(reader).getAsJsonObject();
                 }
                 var config = TreeConfiguration.CODEC.parse(JsonOps.INSTANCE, json.get("config")).getOrThrow();
-                if (config.rootPlacer.isPresent()) throw new AssertionError("unsupported roots in " + name);
                 for (long seed : new long[]{0, 1, 42, 987654321}) {
                     BlockPos origin = new BlockPos(0, 64, 0);
                     Ground ground = new Ground(origin); var random = new XoroshiroRandomSource(seed);
@@ -194,6 +204,33 @@ public final class TreePlacementProbe {
                     if (!found) throw new AssertionError("No occupied bee nest found for " + name);
                 }
             }
+            for (String name : List.of("mangrove", "tall_mangrove")) {
+                JsonObject json;
+                try (var reader = resources.getResourceOrThrow(Identifier.withDefaultNamespace("worldgen/configured_feature/" + name + ".json")).openAsReader()) {
+                    json = JsonParser.parseReader(reader).getAsJsonObject();
+                }
+                var rootOps = net.minecraft.resources.RegistryOps.create(JsonOps.INSTANCE, registries);
+                var config = TreeConfiguration.CODEC.parse(rootOps, json.get("config")).getOrThrow();
+                for (String terrain : List.of("dry_dirt", "dry_mud", "shallow_water", "root_limit_void")) {
+                    for (long seed : new long[]{0, 1, 42, 987654321}) {
+                        JsonObject row = placeWithBeeData(name, json, config, seed, registries, true, terrain);
+                        output.println("TREE_PLACEMENT\t" + row);
+                    }
+                    if (!terrain.equals("root_limit_void")) {
+                        boolean found = false;
+                        for (long seed = 0; seed < 1000; seed++) {
+                            JsonObject row = placeWithBeeData(name, json, config, seed, registries, true, terrain);
+                            if (row.get("result").getAsBoolean()
+                                && (!terrain.equals("shallow_water") || row.get("waterlogged_roots").getAsInt() > 0)
+                                && (!terrain.equals("dry_mud") || row.get("muddy_roots").getAsInt() > 0)) {
+                                row.addProperty("root_seed_search_success", true);
+                                output.println("TREE_PLACEMENT\t" + row); found = true; break;
+                            }
+                        }
+                        if (!found) throw new AssertionError("No successful " + terrain + " rooted tree for " + name);
+                    }
+                }
+            }
         }
     }
 
@@ -201,8 +238,11 @@ public final class TreePlacementProbe {
         return placeWithBeeData(name, json, config, seed, registries, true);
     }
     private static JsonObject placeWithBeeData(String name, JsonObject json, TreeConfiguration config, long seed, HolderLookup.Provider registries, boolean materializeBeehives) throws Exception {
+        return placeWithBeeData(name, json, config, seed, registries, materializeBeehives, "dry_dirt");
+    }
+    private static JsonObject placeWithBeeData(String name, JsonObject json, TreeConfiguration config, long seed, HolderLookup.Provider registries, boolean materializeBeehives, String terrain) throws Exception {
         BlockPos origin = new BlockPos(0, 64, 0);
-        Ground ground = new Ground(origin, materializeBeehives); var random = new XoroshiroRandomSource(seed);
+        Ground ground = new Ground(origin, materializeBeehives, terrain); var random = new XoroshiroRandomSource(seed);
         boolean result = new TreeFeature(TreeConfiguration.CODEC).place(
             new FeaturePlaceContext<>(Optional.empty(), ground.level(), null, random, origin, config));
         JsonObject row = new JsonObject(); row.addProperty("feature", name); row.addProperty("seed", seed);
@@ -212,6 +252,18 @@ public final class TreePlacementProbe {
         row.addProperty("writes", ground.writeCount); row.addProperty("writes_sha256", ground.writesHash());
         row.addProperty("blocks_sha256", ground.blocksHash()); row.addProperty("ticks", ground.ticks.size());
         row.addProperty("ticks_sha256", ground.ticksHash()); row.add("beehives", ground.beehives(registries));
+        if (config.rootPlacer.isPresent()) {
+            row.addProperty("terrain", terrain);
+            int roots = 0, muddyRoots = 0, waterloggedRoots = 0;
+            for (BlockState state : ground.states.values()) {
+                if (state.is(Blocks.MANGROVE_ROOTS)) {
+                    roots++;
+                    if (state.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED)) waterloggedRoots++;
+                }
+                if (state.is(Blocks.MUDDY_MANGROVE_ROOTS)) muddyRoots++;
+            }
+            row.addProperty("roots", roots); row.addProperty("muddy_roots", muddyRoots); row.addProperty("waterlogged_roots", waterloggedRoots);
+        }
         return row;
     }
 }

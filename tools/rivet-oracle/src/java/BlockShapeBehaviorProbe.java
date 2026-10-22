@@ -1,0 +1,77 @@
+import com.google.gson.*;
+import java.lang.reflect.Proxy;
+import java.util.*;
+import net.minecraft.SharedConstants;
+import net.minecraft.core.*;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.server.Bootstrap;
+import net.minecraft.world.level.WorldGenLevel;
+import net.minecraft.world.level.block.*;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.levelgen.XoroshiroRandomSource;
+import net.minecraft.world.level.material.Fluid;
+
+/** Actual state.updateShape effects over controlled storage, never mocked block behavior. */
+public final class BlockShapeBehaviorProbe {
+    record Case(String name, BlockState state, Direction direction, BlockState neighbor, BlockState above, BlockState below) {}
+    public static void main(String[] args) {
+        var output = System.out; var errors = System.err;
+        try {
+            SharedConstants.tryDetectVersion(); Bootstrap.bootStrap();
+            var packs = net.minecraft.server.packs.repository.ServerPacksSource.createVanillaTrustedRepository();
+            net.minecraft.server.MinecraftServer.configurePackRepository(packs,
+                new net.minecraft.world.level.WorldDataConfiguration(
+                    new net.minecraft.world.level.DataPackConfig(List.of("vanilla"), List.of()),
+                    net.minecraft.world.flag.FeatureFlags.DEFAULT_FLAGS), true, false);
+            try (var resources = new net.minecraft.server.packs.resources.MultiPackResourceManager(
+                    net.minecraft.server.packs.PackType.SERVER_DATA, packs.openAllSelected())) {
+                var layers = net.minecraft.server.RegistryLayer.createRegistryAccess();
+                net.minecraft.tags.TagLoader.loadTagsForExistingRegistries(resources,
+                    layers.getLayer(net.minecraft.server.RegistryLayer.STATIC)).forEach(pending -> pending.apply());
+                var cases = new ArrayList<Case>();
+                var air = Blocks.AIR.defaultBlockState(); var dirt = Blocks.DIRT.defaultBlockState();
+                for (boolean wet : new boolean[]{false,true}) for (Direction dir : Direction.values())
+                    cases.add(new Case("roots_"+wet+"_"+dir, Blocks.MANGROVE_ROOTS.defaultBlockState().setValue(BlockStateProperties.WATERLOGGED,wet), dir, air, air, dirt));
+                for (boolean hanging : new boolean[]{false,true}) for (boolean wet : new boolean[]{false,true})
+                    for (Block above : List.of(Blocks.MANGROVE_LEAVES,Blocks.OAK_LEAVES,Blocks.AIR))
+                        for (Block below : List.of(Blocks.DIRT,Blocks.CLAY,Blocks.STONE)) {
+                            var state = Blocks.MANGROVE_PROPAGULE.defaultBlockState()
+                                .setValue(BlockStateProperties.HANGING,hanging).setValue(BlockStateProperties.WATERLOGGED,wet);
+                            cases.add(new Case("propagule_"+hanging+"_"+wet+"_"+BuiltInRegistries.BLOCK.getKey(above)+"_"+BuiltInRegistries.BLOCK.getKey(below),
+                                state,Direction.EAST,air,above.defaultBlockState(),below.defaultBlockState()));
+                        }
+                for (int waterLevel : new int[]{0,1,8}) for (Direction dir : new Direction[]{Direction.DOWN,Direction.UP,Direction.EAST})
+                    for (BlockState neighbor : List.of(air, Blocks.WATER.defaultBlockState(),
+                            Blocks.WATER.defaultBlockState().setValue(BlockStateProperties.LEVEL,1),
+                            Blocks.MAGMA_BLOCK.defaultBlockState(),Blocks.SOUL_SAND.defaultBlockState()))
+                        cases.add(new Case("water_"+waterLevel+"_"+dir+"_"+Block.getId(neighbor),
+                            Blocks.WATER.defaultBlockState().setValue(BlockStateProperties.LEVEL,waterLevel),dir,neighbor,air,dirt));
+                for (var test : cases) {
+                    var pos = new BlockPos(3,70,-5); var states = new HashMap<BlockPos,BlockState>();
+                    states.put(pos,test.state()); states.put(pos.above(),test.above()); states.put(pos.below(),test.below());
+                    states.put(pos.relative(test.direction()),test.neighbor());
+                    var ticks = new JsonArray();
+                    WorldGenLevel level = (WorldGenLevel) Proxy.newProxyInstance(WorldGenLevel.class.getClassLoader(),new Class<?>[]{WorldGenLevel.class},
+                        (proxy,method,values) -> switch(method.getName()) {
+                            case "getBlockState" -> states.getOrDefault((BlockPos)values[0],air);
+                            case "getFluidState" -> states.getOrDefault((BlockPos)values[0],air).getFluidState();
+                            case "scheduleTick" -> {
+                                var p=(BlockPos)values[0]; var tick=new JsonArray(); tick.add(p.getX());tick.add(p.getY());tick.add(p.getZ());
+                                tick.add(values[1] instanceof Block b ? BuiltInRegistries.BLOCK.getKey(b).toString() : BuiltInRegistries.FLUID.getKey((Fluid)values[1]).toString());
+                                tick.add((int)values[2]);ticks.add(tick);yield null;
+                            }
+                            default -> throw new UnsupportedOperationException(method.toString());
+                        });
+                    var random=new XoroshiroRandomSource(42);
+                    var result=test.state().updateShape(level,level,pos,test.direction(),pos.relative(test.direction()),test.neighbor(),random);
+                    var row=new JsonObject();row.addProperty("name",test.name());row.addProperty("state",Block.getId(test.state()));
+                    row.addProperty("direction",test.direction().getSerializedName());row.addProperty("neighbor",Block.getId(test.neighbor()));
+                    row.addProperty("above",Block.getId(test.above()));row.addProperty("below",Block.getId(test.below()));
+                    row.addProperty("result",Block.getId(result));row.add("ticks",ticks);row.addProperty("next_long",random.nextLong());
+                    output.println("BLOCK_SHAPE\t"+row);
+                }
+            }
+        } catch(Throwable error) {error.printStackTrace(errors);System.exit(1);}
+    }
+}

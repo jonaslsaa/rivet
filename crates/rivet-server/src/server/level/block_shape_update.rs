@@ -12,6 +12,10 @@ use rivet_world::level::WorldGenLevel;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
+#[cfg(test)]
+#[path = "block_shape_update_fixture.rs"]
+mod paper_fixture;
+
 /// Reflection of the actual declaring updateShape implementation in pinned
 /// Paper, not an inference from tags, collision geometry, or block names.
 fn update_owner(state: BlockState) -> &'static str {
@@ -192,6 +196,55 @@ fn update_shape(
             } else {
                 Blocks::AIR.default_block_state()
             }
+        }
+        "MangroveRootsBlock" => {
+            if state.get_value(BlockStateProperties::WATERLOGGED) == Some(PropertyValue::Bool(true))
+            {
+                level.schedule_tick(pos, FluidId::WATER, 5);
+            }
+            state
+        }
+        "MangrovePropaguleBlock" => {
+            if state.get_value(BlockStateProperties::WATERLOGGED) == Some(PropertyValue::Bool(true))
+            {
+                level.schedule_tick(pos, FluidId::WATER, 5);
+            }
+            if direction == Direction::Up && !level.can_survive(&state, pos) {
+                Blocks::AIR.default_block_state()
+            } else if !level.can_survive(&state, pos) {
+                // SaplingBlock inherits VegetationBlock.updateShape.
+                Blocks::AIR.default_block_state()
+            } else {
+                state
+            }
+        }
+        "CarpetBlock" => {
+            if level.get_block_state(&pos.below()).is_air() {
+                Blocks::AIR.default_block_state()
+            } else {
+                state
+            }
+        }
+        "LiquidBlock" => {
+            let own_fluid = FluidId::from_id(state.fluid_id());
+            let neighbor_fluid = FluidId::from_id(neighbor.fluid_id());
+            let is_source = |fluid| fluid == FluidId::WATER || fluid == FluidId::LAVA;
+            if is_source(own_fluid) || is_source(neighbor_fluid) {
+                if state.block().name() != "minecraft:water" {
+                    panic!(
+                        "Block.updateShape is not implemented for lava fluid tick delay without dimension context"
+                    );
+                }
+                level.schedule_tick(pos, own_fluid, 5);
+            }
+            if direction == Direction::Down
+                && own_fluid == FluidId::WATER
+                && (neighbor.is_in_tag("minecraft:enables_bubble_column_drag_down")
+                    || neighbor.is_in_tag("minecraft:enables_bubble_column_push_up"))
+            {
+                level.schedule_block_tick(pos, Block::new(state.block()), 20);
+            }
+            state
         }
         "SnowyBlock" => {
             if direction == Direction::Up {

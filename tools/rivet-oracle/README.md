@@ -19,12 +19,14 @@ world proxy. They require the materialized Paper runtime under `work/run` and
 Java 25 (`RIVET_JAVA_HOME` selects its installation); each script checks the jar's
 commit before running. These are direct feature tests, not full-world parity.
 
-- `bash scripts/run_tree_placement_probe.sh`: 143 standing-tree cases, exact
+- `bash scripts/run_tree_placement_probe.sh`: 181 standing-tree cases, exact
   datapack configs, ordered write/final-block/tick SHA-256s and both random-stream
   continuations, plus complete saved hive NBT. Terrain is flat dirt at
   `(0,64,0)`, with four fixed seeds and seed-searched occupied-hive cases for
   all 14 ordinary bee-bearing datapack configurations. A separate missing-hive
   case verifies that occupant RNG is gated on actual entity availability.
+  Mangrove cases additionally cover dry dirt, mud, shallow water, and root-length
+  failures, including ordered water ticks and muddy/waterlogged root states.
 - `bash scripts/run_fallen_tree_probe.sh`: 80 fallen-tree cases, every ordered
   write and feature RNG continuation, across flat/void terrain and two origins.
 - `bash scripts/run_block_pos_set_probe.sh`: 26 Java collection snapshots,
@@ -33,6 +35,9 @@ commit before running. These are direct feature tests, not full-world parity.
   Rust implementation reports this unsupported case rather than inventing it.
 - `bash scripts/run_update_shape_probe.sh`: actual declaring update-shape owners
   for all 1,196 blocks and exact voxel-boundary face traversal samples.
+- `bash scripts/run_block_shape_behavior_probe.sh`: 93 actual block-update
+  cases for wet/dry mangrove roots, hanging/planted propagule survival, and
+  source/flowing water, including bubble-column tick triggers.
 - `bash scripts/run_hive_storage_probe.sh`: 18 real hive load/store/save cases,
   including partial malformed occupant lists, numeric coercion, persisted
   flower/max-occupant fields, and Bukkit persistent data. Rust matches the 16
@@ -42,10 +47,10 @@ commit before running. These are direct feature tests, not full-world parity.
 The matching fixtures live directly under `fixtures/`. Rust tests in
 `tree_placement_fixture`, `fallen_tree_feature`, `java_block_pos_set` and
 `block_shape_update` consume them. The standing and fallen cases together cover
-the 34 currently executable tree configurations in the generated overworld
+the 36 currently executable tree configurations in the generated overworld
 closure, plus extra actual datapack configurations. Hive storage is distinct
-from bee ticking/release/AI, which remain untranslated. Mangrove roots and
-pale-oak extensions also remain separate untranslated capabilities.
+from bee ticking/release/AI, which remain untranslated. Pale-oak extensions
+also remain separate untranslated capabilities.
 
 ### Server and chunk captures
 

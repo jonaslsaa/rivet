@@ -1,7 +1,7 @@
 //! Port of TreeFeature's placement, clearance and leaf-distance algorithms.
 //! Source: Paper's pinned decompileJar.jar, TreeFeature.java (26.2).
-//! Supported decorators run against immediate world writes. Untranslated roots
-//! and decorators remain explicit capability boundaries, not successful no-ops.
+//! Roots and supported decorators run against immediate world writes.
+//! Untranslated decorators remain explicit capability boundaries, not no-ops.
 
 use super::configurations::TreeConfiguration;
 use super::foliageplacers::foliage_placer::FoliageSetter;
@@ -116,14 +116,21 @@ impl FeatureBehavior<TreeConfiguration> for TreeFeature {
         let height = runtime::tree_height(config, random);
         let foliage_height = runtime::foliage_height(config, random, height);
         let leaf_radius = runtime::foliage_radius(config, random, height - foliage_height);
-        // Roots are an explicit unsupported extension; without roots the trunk
-        // origin is the feature origin and no extra RNG draws occur.
-        if origin.get_y() < level.get_min_y() + 1
-            || origin.get_y() + height + 1 > level.get_max_y() + 1
-        {
+        let trunk_origin = config
+            .root_placer
+            .as_ref()
+            .map(|placer| placer.get_trunk_origin(&origin, random))
+            .unwrap_or(origin);
+        let min_y = origin.get_y().min(trunk_origin.get_y());
+        let max_y = origin
+            .get_y()
+            .max(trunk_origin.get_y())
+            .wrapping_add(height)
+            .wrapping_add(1);
+        if min_y < level.get_min_y().wrapping_add(1) || max_y > level.get_max_y().wrapping_add(1) {
             return false;
         }
-        let clipped_height = get_max_free_tree_height(&level, height, &origin, config);
+        let clipped_height = get_max_free_tree_height(&level, height, &trunk_origin, config);
         if clipped_height < height
             && !config
                 .minimum_size
@@ -131,6 +138,18 @@ impl FeatureBehavior<TreeConfiguration> for TreeFeature {
                 .is_some_and(|min| clipped_height >= min)
         {
             return false;
+        }
+        let mut roots = HashSet::new();
+        let mut root_insertions = Vec::new();
+        if let Some(placer) = &config.root_placer {
+            let mut setter = |pos: &BlockPos, state: BlockState| {
+                roots.insert(*pos);
+                root_insertions.push(*pos);
+                level.write(pos, state);
+            };
+            if !placer.place_roots(&level, &mut setter, random, &origin, &trunk_origin) {
+                return false;
+            }
         }
         let mut trunks = HashSet::new();
         let mut trunk_insertions = Vec::new();
@@ -145,7 +164,7 @@ impl FeatureBehavior<TreeConfiguration> for TreeFeature {
             &mut trunk_setter,
             random,
             clipped_height,
-            &origin,
+            &trunk_origin,
         );
         let mut foliage = Leaves {
             level: &level,
@@ -185,7 +204,7 @@ impl FeatureBehavior<TreeConfiguration> for TreeFeature {
                 random,
                 &trunk_insertions,
                 &foliage.insertions,
-                &[],
+                &root_insertions,
                 TreeDecoratorCallbacks {
                     height_at: &height_at,
                     has_beehive_block_entity: &has_beehive_block_entity,
@@ -198,12 +217,13 @@ impl FeatureBehavior<TreeConfiguration> for TreeFeature {
         }
         let mut bounds_positions: HashSet<_> = trunks.union(&foliage.positions).copied().collect();
         bounds_positions.extend(&decorations);
+        bounds_positions.extend(&roots);
         let shape = update_leaves(
             &level,
             &bounds_positions,
             &trunk_insertions,
             &decorations,
-            &HashSet::new(),
+            &roots,
         );
         level.0.borrow_mut().update_tree_shape_at_edge(&shape);
         true

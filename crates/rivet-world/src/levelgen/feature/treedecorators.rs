@@ -22,6 +22,8 @@ use rivet_serialization::{
 };
 use rivet_util::RandomSource;
 use std::sync::Arc;
+mod attached_to_leaves;
+pub use attached_to_leaves::AttachedToLeavesDecorator;
 
 #[derive(Debug, Clone)]
 pub struct AttachedToLogsDecorator {
@@ -59,6 +61,7 @@ pub struct PlaceOnGroundDecorator {
 
 #[derive(Debug, Clone)]
 pub enum TreeDecorator {
+    AttachedToLeaves(AttachedToLeavesDecorator),
     AttachedToLogs(AttachedToLogsDecorator),
     TrunkVine(TrunkVineDecorator),
     LeaveVine(LeaveVineDecorator),
@@ -79,6 +82,7 @@ impl TreeDecorator {
     }
     pub fn place<R: RandomSource>(&self, context: &mut TreeDecoratorContext<'_, R>) {
         match self {
+            Self::AttachedToLeaves(decorator) => decorator.place(context),
             Self::AttachedToLogs(decorator) => decorator.place(context),
             Self::TrunkVine(decorator) => decorator.place(context),
             Self::LeaveVine(decorator) => decorator.place(context),
@@ -465,6 +469,9 @@ pub fn tree_decorator_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>()
         "type",
         codec::string_codec::<Ops>(),
         Arc::new(|decorator: &TreeDecorator| match decorator {
+            TreeDecorator::AttachedToLeaves(_) => {
+                DataResult::success("minecraft:attached_to_leaves".to_string())
+            }
             TreeDecorator::AttachedToLogs(_) => {
                 DataResult::success("minecraft:attached_to_logs".to_string())
             }
@@ -638,7 +645,10 @@ fn decorator_map_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>(
                 }),
             ))
         }
-        "pale_moss" | "creaking_heart" | "attached_to_leaves" => {
+        "attached_to_leaves" => {
+            DataResult::success(attached_to_leaves::attached_to_leaves_codec::<Ops>())
+        }
+        "pale_moss" | "creaking_heart" => {
             DataResult::success(map_codec::unit(TreeDecorator::Unavailable {
                 type_name: format!("minecraft:{path}"),
             }))

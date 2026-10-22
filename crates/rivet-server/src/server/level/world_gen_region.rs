@@ -1411,6 +1411,14 @@ pub(super) fn region_can_survive(
         return verdict;
     }
     match state.block().name() {
+        "minecraft:mangrove_propagule" => {
+            if state.get_value(BlockStateProperties::HANGING) == Some(rivet_registry::block_state_property::PropertyValue::Bool(true)) {
+                level.get_block_state(&pos.above()).is_in_tag("minecraft:supports_hanging_mangrove_propagule")
+            } else {
+                level.get_block_state(&pos.below()).is_in_tag("minecraft:supports_mangrove_propagule")
+            }
+        }
+        "minecraft:moss_carpet" => !level.get_block_state(&pos.below()).is_air(),
         "minecraft:leaf_litter" => {
             let below_pos = pos.below();
             level.is_face_sturdy(&below_pos, &level.get_block_state(&below_pos), &rivet_registry::core::Direction::Up)
@@ -2719,12 +2727,31 @@ mod tests {
             }
         }
         let mangrove = BlockState::of(BlockId::from_name("minecraft:mangrove_propagule").unwrap());
-        let unavailable = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            WorldGenLevel::can_survive(&region, &mangrove, &pos)
-        }));
+        region.set_block(
+            &pos.below(),
+            BlockState::of(BlockId::from_name("minecraft:clay").unwrap()),
+            2,
+            UPDATE_LIMIT,
+        );
+        assert!(WorldGenLevel::can_survive(&region, &mangrove, &pos));
+        let oak = BlockState::of(BlockId::from_name("minecraft:oak_sapling").unwrap());
         assert!(
-            unavailable.is_err(),
-            "mangrove must not inherit the plain sapling path"
+            !WorldGenLevel::can_survive(&region, &oak, &pos),
+            "mangrove's clay support is not plain vegetation support"
+        );
+        let hanging = mangrove
+            .set_value(BlockStateProperties::HANGING, true)
+            .unwrap();
+        assert!(!WorldGenLevel::can_survive(&region, &hanging, &pos));
+        region.set_block(
+            &pos.above(),
+            BlockState::of(BlockId::from_name("minecraft:mangrove_leaves").unwrap()),
+            2,
+            UPDATE_LIMIT,
+        );
+        assert!(
+            WorldGenLevel::can_survive(&region, &hanging, &pos),
+            "hanging propagules use the block above, not their floor"
         );
     }
 

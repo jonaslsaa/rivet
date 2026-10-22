@@ -176,6 +176,7 @@ pub mod foliageplacers;
 // the nine concrete placers (see the submodule doc).
 pub mod treedecorators;
 pub mod trunkplacers;
+pub mod rootplacers;
 
 // Executable tree/fallen-tree algorithms; root/decorator families and the
 // final neighbor-shape update remain explicit capability boundaries.

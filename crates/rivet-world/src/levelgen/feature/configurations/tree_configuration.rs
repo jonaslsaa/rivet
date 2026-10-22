@@ -1,13 +1,14 @@
-//! TreeConfiguration's nine fields and executable trunk/foliage/size codec.
+//! TreeConfiguration's nine fields and executable trunk/foliage/root/size codec.
 //! Source: pinned Paper 26.2 TreeConfiguration.java.
-//! Root/decorator descriptors retain known unsupported type identities so the
-//! eager registry closure can be loaded. Selecting such a tree refuses before
-//! writes/RNG; encoding those incomplete descriptors also refuses explicitly.
+//! Untranslated decorator descriptors retain known type identities so the eager
+//! registry closure can load. Selecting one refuses before writes/RNG; encoding
+//! those incomplete descriptors also refuses explicitly. Vanilla roots execute.
 
 use super::FeatureConfiguration;
 use crate::levelgen::feature::featuresize::{FeatureSize, TwoLayersFeatureSize};
 use crate::levelgen::feature::foliageplacers::blob_foliage_placer::BlobFoliagePlacer;
 use crate::levelgen::feature::foliageplacers::foliage_placer::ErasedFoliagePlacer;
+use crate::levelgen::feature::rootplacers::{RootPlacer, root_placer_codec};
 use crate::levelgen::feature::stateproviders::block_state_provider::ErasedBlockStateProvider;
 use crate::levelgen::feature::treedecorators::{TreeDecorator, tree_decorator_codec};
 use crate::levelgen::feature::trunkplacers::straight_trunk_placer::StraightTrunkPlacer;
@@ -17,35 +18,10 @@ use std::sync::Arc;
 use rivet_registry::registry_ops::RegistryOpsLookup;
 use rivet_serialization::{
     codec::{self, Codec},
-    data_result::DataResult,
     dynamic_ops::DynamicOps,
     map_codec,
     record_builder::{self, RecordCodecBuilder},
 };
-
-fn unavailable_root_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<UnavailableRootPlacer, Ops>>
-{
-    codec::flat_xmap(
-        map_codec::codec_of(codec::field_of(
-            codec::string_codec::<Ops>(),
-            "type".to_string(),
-        )),
-        Arc::new(|name: &String| {
-            if name != "minecraft:mangrove_root_placer" && name != "mangrove_root_placer" {
-                return DataResult::error(format!("unknown root placer type {name}"));
-            }
-            DataResult::success(UnavailableRootPlacer {
-                type_name: "minecraft:mangrove_root_placer".to_string(),
-            })
-        }),
-        Arc::new(|value: &UnavailableRootPlacer| {
-            DataResult::error(format!(
-                "tree root placer {} is not implemented",
-                value.type_name
-            ))
-        }),
-    )
-}
 
 pub fn tree_configuration_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>()
 -> Arc<dyn Codec<TreeConfiguration, Ops>> {
@@ -81,11 +57,7 @@ pub fn tree_configuration_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>()
         let settings = i
             .group(RecordCodecBuilder::of(
                 Arc::new(|c: &TreeConfiguration| c.root_placer.clone()),
-                codec::optional_field(
-                    "root_placer".to_string(),
-                    unavailable_root_codec::<Ops>(),
-                    false,
-                ),
+                codec::optional_field("root_placer".to_string(), root_placer_codec::<Ops>(), false),
             ))
             .and(RecordCodecBuilder::of(
                 Arc::new(|c: &TreeConfiguration| c.minimum_size.clone()),
@@ -124,7 +96,7 @@ pub fn tree_configuration_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>()
 }
 
 /// `net.minecraft.world.level.levelgen.feature.configurations.TreeConfiguration`
-/// — executable tree parameters, with explicit root/decorator boundaries.
+/// — executable tree parameters, with explicit untranslated decorator boundaries.
 #[derive(Debug, Clone)]
 pub struct TreeConfiguration {
     /// `this.foliageProvider` — the foliage (leaves) block state provider.
@@ -137,16 +109,10 @@ pub struct TreeConfiguration {
     pub below_trunk_provider: Arc<dyn ErasedBlockStateProvider>,
     pub trunk_placer: Arc<dyn ErasedTrunkPlacer>,
     pub foliage_placer: Arc<dyn ErasedFoliagePlacer>,
-    pub root_placer: Option<UnavailableRootPlacer>,
+    pub root_placer: Option<RootPlacer>,
     pub minimum_size: Arc<dyn FeatureSize>,
     pub decorators: Vec<TreeDecorator>,
     pub ignore_vines: bool,
-}
-
-/// Explicit capability boundary, not a no-op root implementation.
-#[derive(Debug, Clone)]
-pub struct UnavailableRootPlacer {
-    pub type_name: String,
 }
 
 impl FeatureConfiguration for TreeConfiguration {}
@@ -183,9 +149,6 @@ impl TreeConfiguration {
     }
 
     pub(crate) fn require_supported_extensions(&self) {
-        if let Some(root) = &self.root_placer {
-            panic!("tree root placer {} is not implemented", root.type_name);
-        }
         for decorator in &self.decorators {
             decorator.require_supported();
         }
