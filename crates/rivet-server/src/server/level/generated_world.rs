@@ -3861,16 +3861,15 @@ fn run_biome_decoration_impl(
             // through their exact placed-feature chains; unsupported selected leaves
             // stop the run with a typed boundary.
             for step_index in 0..max_steps.min(generation_steps) {
-                if let Some((placement, errors)) = native {
-                    if let Err(error) =
+                if let Some((placement, errors)) = native
+                    && let Err(error) =
                         placement.place_step(&mut region, &mut random, decoration_seed, step_index)
-                    {
-                        *errors.borrow_mut() = Some(Arc::new(error));
-                        return Err(GenError::StructurePlacementUnavailable {
-                            chunk_pos: center_pos,
-                            step_index,
-                        });
-                    }
+                {
+                    *errors.borrow_mut() = Some(Arc::new(error));
+                    return Err(GenError::StructurePlacementUnavailable {
+                        chunk_pos: center_pos,
+                        step_index,
+                    });
                 }
                 if step_index >= feature_list.len() {
                     continue;
