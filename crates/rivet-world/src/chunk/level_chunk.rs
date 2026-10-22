@@ -104,6 +104,7 @@ where
             sections,
             resolve,
         );
+        base.set_persisted_status(ChunkStatus::Full);
         for ty in FINAL_HEIGHTMAPS {
             base.get_or_create_heightmap_unprimed(ty);
         }
@@ -123,6 +124,7 @@ where
     /// base that already carries them gets the existing data, never a reset.
     pub fn from_base(base: ChunkAccess<T, B, S>, air: T) -> Self {
         let mut base = base;
+        base.set_persisted_status(ChunkStatus::Full);
         for ty in FINAL_HEIGHTMAPS {
             base.get_or_create_heightmap_unprimed(ty);
         }

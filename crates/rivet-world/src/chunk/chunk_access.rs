@@ -10,9 +10,10 @@
 //! type, `B` the biome type, `S` the caller's structure key (the
 //! `StructureAccess<S>` map key, standing in for the unported `Structure`) —
 //! and the concrete chunk types *contain* a base (OWNERSHIP.md — no
-//! inheritance in the port). The base fixes no behavior: the abstract
-//! `getBlockState`/`setBlockState`/`getPersistedStatus` live on the concrete
-//! types, matching Java's abstract surface.
+//! inheritance in the port). Block reads/writes remain concrete-type behavior.
+//! Persisted status is stored once on the base so its Starlight projection
+//! retains the concrete status: ProtoChunk forwards it, while LevelChunk
+//! constructors fix it to FULL.
 //!
 //! Heightmaps are keyed on the world `Heightmap.Types` ordinal (declaration)
 //! order as a fixed `[Option<Heightmap>; 6]` — never the protocol enum's
@@ -120,6 +121,10 @@ where
     unsaved: bool,
     /// `isLightCorrect`.
     light_correct: bool,
+    /// Concrete chunk status retained through base projections used by
+    /// Starlight. ProtoChunk forwards to this single authoritative value;
+    /// LevelChunk construction fixes it to FULL.
+    persisted_status: ChunkStatus,
     /// `inhabitedTime`.
     inhabited_time: i64,
     /// `structureStarts`/`structuresRefences` — the `StructureAccess`
@@ -147,6 +152,9 @@ where
     /// the empty-section mask and publishes it here. `getDataLayerData` returns
     /// null until it is set.
     sky_emptiness_map: Option<Vec<bool>>,
+    /// Independent Starlight block-channel emptiness map. Like sky's map,
+    /// absent until that engine initializes this chunk's section state.
+    block_emptiness_map: Option<Vec<bool>>,
     /// The per-state behavior flags the heightmap predicates need. Java's
     /// `Heightmap` holds a `ChunkAccess` and calls `state.isAir()`/
     /// `state.blocksMotion()`/`getFluidState()`/`instanceof LeavesBlock`; the
@@ -220,6 +228,7 @@ where
             fluid_ticks: ProtoChunkTicks::new(),
             unsaved: false,
             light_correct: false,
+            persisted_status: ChunkStatus::Empty,
             inhabited_time,
             structure_access: StructureAccess::new(),
             pending_block_entities: IndexMap::new(),
@@ -227,6 +236,7 @@ where
             block_nibbles: filled_empty_light(light_section_count),
             sky_nibbles: filled_empty_light(light_section_count),
             sky_emptiness_map: None,
+            block_emptiness_map: None,
             resolve,
         }
     }
@@ -276,6 +286,7 @@ where
             fluid_ticks: self.fluid_ticks.clone(),
             unsaved: self.unsaved,
             light_correct: self.light_correct,
+            persisted_status: self.persisted_status,
             inhabited_time: self.inhabited_time,
             structure_access: self.structure_access.clone(),
             pending_block_entities: self.pending_block_entities.clone(),
@@ -283,6 +294,7 @@ where
             block_nibbles: self.block_nibbles.clone(),
             sky_nibbles: self.sky_nibbles.clone(),
             sky_emptiness_map: self.sky_emptiness_map.clone(),
+            block_emptiness_map: self.block_emptiness_map.clone(),
             resolve: self.resolve,
         }
     }
@@ -646,6 +658,22 @@ where
     /// `StarlightChunk.starlight$setSkyEmptinessMap(Boolean[])`.
     pub fn set_sky_emptiness_map(&mut self, map: Option<Vec<bool>>) {
         self.sky_emptiness_map = map;
+    }
+
+    pub fn block_emptiness_map(&self) -> Option<&[bool]> {
+        self.block_emptiness_map.as_deref()
+    }
+
+    pub fn get_persisted_status(&self) -> ChunkStatus {
+        self.persisted_status
+    }
+
+    pub fn set_persisted_status(&mut self, status: ChunkStatus) {
+        self.persisted_status = status;
+    }
+
+    pub fn set_block_emptiness_map(&mut self, map: Option<Vec<bool>>) {
+        self.block_emptiness_map = map;
     }
 
     /// `ChunkAccess.getNoiseBiome(int, int, int)` — Paper's get-block-chunk
@@ -1068,6 +1096,7 @@ where
             fluid_ticks,
             unsaved,
             light_correct,
+            persisted_status,
             inhabited_time,
             structure_access,
             pending_block_entities,
@@ -1075,6 +1104,7 @@ where
             block_nibbles,
             sky_nibbles,
             sky_emptiness_map,
+            block_emptiness_map,
             resolve: _,
         } = self;
         let factory = PalettedContainerFactory::new(
@@ -1100,6 +1130,7 @@ where
         );
         base.unsaved = unsaved;
         base.light_correct = light_correct;
+        base.persisted_status = persisted_status;
         base.post_processing = post_processing;
         base.block_ticks = block_ticks;
         base.fluid_ticks = fluid_ticks;
@@ -1107,6 +1138,7 @@ where
         base.block_nibbles = block_nibbles;
         base.sky_nibbles = sky_nibbles;
         base.sky_emptiness_map = sky_emptiness_map;
+        base.block_emptiness_map = block_emptiness_map;
         for (index, heightmap) in heightmaps.into_iter().enumerate() {
             if let Some(heightmap) = heightmap {
                 base.heightmaps[index] = Some(heightmap);
@@ -1161,6 +1193,7 @@ where
         );
         base.unsaved = self.unsaved;
         base.light_correct = self.light_correct;
+        base.persisted_status = self.persisted_status;
         base.post_processing = self.post_processing.clone();
         base.block_ticks = self.block_ticks.clone();
         base.fluid_ticks = self.fluid_ticks.clone();
@@ -1168,6 +1201,7 @@ where
         base.block_nibbles = self.block_nibbles.clone();
         base.sky_nibbles = self.sky_nibbles.clone();
         base.sky_emptiness_map = self.sky_emptiness_map.clone();
+        base.block_emptiness_map = self.block_emptiness_map.clone();
         base.heightmaps = self.heightmaps.clone();
         base.structure_access = self.structure_access.clone();
         Ok(base)

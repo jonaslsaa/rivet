@@ -38,7 +38,10 @@
 //! [`SkyLightProvider::get_block_light_value_in`] /
 //! [`SkyLightProvider::get_data_layer_data_in`].
 //!
-//! What defers with #184: block light (the `block_nibbles` stay empty), live
+//! Generation computes independent sky/block channels (emitter scans, increase
+//! and decrease queues, and block-channel edge checks). Conditional block-light
+//! occlusion shapes remain an explicit refusal, never collision approximations.
+//! What defers with #184: live
 //! `blockChange`/`sectionChange`/`relightChunks`/`checkChunkEdges`, the client
 //! notify path, and the final status/pipeline wiring (the frozen
 //! `world_gen_context.rs` caller drives `try_light_chunk` through the trait seam;
@@ -82,6 +85,7 @@ enum ChunkStorage {
 pub struct SkyLightProvider {
     /// The Starlight compute engine, built with the world's vertical extent.
     engine: SkyStarLightEngine,
+    block_engine: SkyStarLightEngine,
     /// `WorldUtil.getMinSection(levelHeightAccessor)` — for the reader bounds.
     min_section: i32,
     /// `WorldUtil.getMaxSection(levelHeightAccessor)` (inclusive).
@@ -115,6 +119,7 @@ impl SkyLightProvider {
         let max_section = height_accessor.get_max_section_y();
         SkyLightProvider {
             engine: SkyStarLightEngine::new(&height_accessor),
+            block_engine: SkyStarLightEngine::new_block(&height_accessor),
             min_section,
             max_section,
             min_light_section: min_section.wrapping_sub(1),
@@ -139,6 +144,7 @@ impl SkyLightProvider {
         let max_section = height_accessor.get_max_section_y();
         SkyLightProvider {
             engine: SkyStarLightEngine::new(&height_accessor),
+            block_engine: SkyStarLightEngine::new_block(&height_accessor),
             min_section,
             max_section,
             min_light_section: min_section.wrapping_sub(1),
@@ -199,7 +205,7 @@ impl SkyLightProvider {
     /// caller-owned callback. Generated-light workspaces use this to expose a
     /// real engine dependency without pretending a callback/global map exists.
     pub fn has_owned_runtime_storage(&self) -> bool {
-        matches!(&self.chunks, ChunkStorage::Owned(chunks) if !chunks.is_empty())
+        matches!(&self.chunks, ChunkStorage::Owned(_))
     }
 
     /// Whether owned runtime storage contains `pos`. Callback-backed providers
@@ -217,18 +223,14 @@ impl SkyLightProvider {
             ChunkStorage::Owned(chunks)
                 if chunks
                     .get(&(pos.x(), pos.z()))
-                    .is_some_and(|chunk| chunk.is_light_correct())
+                    .is_some_and(|chunk| chunk.is_light_correct() && chunk.get_persisted_status().is_or_after(rivet_world::chunk::status::ChunkStatus::Light))
         )
     }
 
-    /// Whether this concrete provider has a supported generated-light channel.
-    /// The current engine computes sky light only; block-light queue wiring is
-    /// still deferred, so a normal overworld request (both channels enabled)
-    /// must refuse rather than stamp LIGHT as if block light were complete.
-    /// Sky-only is supported only when the dimension genuinely disables block
-    /// light.
+    /// Whether at least one generation channel is enabled. Each enabled
+    /// channel is computed; selecting both never silently omits block light.
     pub fn supports_generated_light(&self) -> bool {
-        self.has_sky_light && !self.has_block_light
+        self.has_sky_light || self.has_block_light
     }
 
     /// Force-load a runtime center supplied by the generated-light bridge.
@@ -311,22 +313,36 @@ impl SkyLightProvider {
     fn publish_neighbor_updates(
         accessor: &mut CallbackAccessor<'_>,
         updates: HashMap<(i32, i32), super::star_light_engine::NeighborLightUpdate>,
+        sky: bool,
     ) {
         for ((chunk_x, chunk_z), update) in updates {
             let Some(chunk) = accessor.taken.get_mut(&(chunk_x, chunk_z)) else {
                 continue;
             };
             if !update.nibbles.is_empty() {
-                let mut nibbles = chunk.sky_nibbles().to_vec();
+                let mut nibbles = if sky {
+                    chunk.sky_nibbles()
+                } else {
+                    chunk.block_nibbles()
+                }
+                .to_vec();
                 for (index, nibble) in update.nibbles {
                     if let Some(existing) = nibbles.get_mut(index) {
                         *existing = nibble;
                     }
                 }
-                chunk.set_sky_nibbles(nibbles);
+                if sky {
+                    chunk.set_sky_nibbles(nibbles);
+                } else {
+                    chunk.set_block_nibbles(nibbles);
+                }
             }
             if let Some(emptiness_map) = update.emptiness_map {
-                chunk.set_sky_emptiness_map(Some(emptiness_map));
+                if sky {
+                    chunk.set_sky_emptiness_map(Some(emptiness_map));
+                } else {
+                    chunk.set_block_emptiness_map(Some(emptiness_map));
+                }
             }
         }
     }
@@ -363,14 +379,35 @@ impl SkyLightProvider {
         // the put-back run while the original payload is still recoverable, then
         // re-throws it — no neighbour dropped, no second panic mid-unwind.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.engine.light(&mut accessor, chunk, empty_sections);
-            let updates = self.engine.take_pending_neighbor_updates();
-            Self::publish_neighbor_updates(&mut accessor, updates);
-            if let Some(nibbles) = self.engine.take_pending_nibbles() {
-                chunk.set_sky_nibbles(nibbles);
+            if self.has_sky_light {
+                self.engine.light(&mut accessor, chunk, empty_sections);
             }
-            if let Some(map) = self.engine.take_pending_emptiness_map() {
-                chunk.set_sky_emptiness_map(Some(map));
+            if self.has_block_light {
+                self.block_engine
+                    .light(&mut accessor, chunk, empty_sections);
+            }
+            // Both engines operate on channel-local cache snapshots. Publish
+            // only after both succeed, so a block-channel capability refusal
+            // cannot leave partially published sky writes on neighbours.
+            if self.has_sky_light {
+                let updates = self.engine.take_pending_neighbor_updates();
+                Self::publish_neighbor_updates(&mut accessor, updates, true);
+                if let Some(nibbles) = self.engine.take_pending_nibbles() {
+                    chunk.set_sky_nibbles(nibbles);
+                }
+                if let Some(map) = self.engine.take_pending_emptiness_map() {
+                    chunk.set_sky_emptiness_map(Some(map));
+                }
+            }
+            if self.has_block_light {
+                let updates = self.block_engine.take_pending_neighbor_updates();
+                Self::publish_neighbor_updates(&mut accessor, updates, false);
+                if let Some(nibbles) = self.block_engine.take_pending_nibbles() {
+                    chunk.set_block_nibbles(nibbles);
+                }
+                if let Some(map) = self.block_engine.take_pending_emptiness_map() {
+                    chunk.set_block_emptiness_map(Some(map));
+                }
             }
         }));
         if let Err(payload) = result {
@@ -467,7 +504,7 @@ impl SkyLightProvider {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.engine.relight(&mut accessor, chunk, empty_sections);
             let updates = self.engine.take_pending_neighbor_updates();
-            Self::publish_neighbor_updates(&mut accessor, updates);
+            Self::publish_neighbor_updates(&mut accessor, updates, true);
             if let Some(nibbles) = self.engine.take_pending_nibbles() {
                 chunk.set_sky_nibbles(nibbles);
             }
@@ -989,6 +1026,7 @@ mod tests {
         let center = ChunkPos::new(0, 0);
         storage.insert((center.x(), center.z()), superflat_chunk(center));
         let mut neighbour = superflat_chunk(ChunkPos::new(1, 0));
+        neighbour.set_persisted_status(rivet_world::chunk::status::ChunkStatus::Light);
         neighbour.set_light_correct(true);
         storage.insert((1, 0), neighbour);
         let (closure_fn, shared) = {
@@ -1050,6 +1088,7 @@ mod tests {
         let center = ChunkPos::new(0, 0);
         let center_chunk = superflat_chunk(center);
         let mut neighbour = superflat_chunk(ChunkPos::new(1, 0));
+        neighbour.set_persisted_status(rivet_world::chunk::status::ChunkStatus::Light);
         neighbour.set_light_correct(true);
         storage.insert((center.x(), center.z()), center_chunk);
         storage.insert(
@@ -1087,6 +1126,7 @@ mod tests {
         let mut nibbles = neighbour.sky_nibbles().to_vec();
         nibbles[1] = SwmrNibbleArray::new_with_bytes(vec![0; 2048]);
         neighbour.set_sky_nibbles(nibbles);
+        neighbour.set_persisted_status(rivet_world::chunk::status::ChunkStatus::Light);
         neighbour.set_light_correct(true);
         let mut storage = HashMap::new();
         storage.insert((1, 0), neighbour);
@@ -1125,6 +1165,7 @@ mod tests {
         dirty_null.set_null();
         nibbles[10] = dirty_null;
         neighbour.set_sky_nibbles(nibbles);
+        neighbour.set_persisted_status(rivet_world::chunk::status::ChunkStatus::Light);
         neighbour.set_light_correct(true);
         let mut storage = HashMap::new();
         storage.insert((1, 0), neighbour);
@@ -1155,6 +1196,7 @@ mod tests {
                 }
                 let pos = ChunkPos::new(dx, dz);
                 let mut chunk = all_air_chunk(pos);
+                chunk.set_persisted_status(rivet_world::chunk::status::ChunkStatus::Light);
                 chunk.set_light_correct(true);
                 chunk.set_sky_emptiness_map(Some(vec![true; SECTION_COUNT]));
                 storage.insert((dx, dz), chunk);
@@ -1200,6 +1242,7 @@ mod tests {
         let center = ChunkPos::new(0, 0);
         storage.insert((center.x(), center.z()), superflat_chunk(center));
         let mut neighbour = superflat_chunk(ChunkPos::new(1, 0));
+        neighbour.set_persisted_status(rivet_world::chunk::status::ChunkStatus::Light);
         neighbour.set_light_correct(true);
         neighbour.set_sky_nibbles(vec![SwmrNibbleArray::new()]);
         storage.insert((1, 0), neighbour);
@@ -1263,6 +1306,7 @@ mod tests {
         let panic_once = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let allow_neighbours = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let mut cached_neighbour = all_air_chunk(ChunkPos::new(0, -1));
+        cached_neighbour.set_persisted_status(rivet_world::chunk::status::ChunkStatus::Light);
         cached_neighbour.set_light_correct(true);
         cached_neighbour.set_sky_emptiness_map(Some(vec![true; SECTION_COUNT]));
         let mut cached_nibbles = cached_neighbour.sky_nibbles().to_vec();
@@ -1340,6 +1384,7 @@ mod tests {
         assert_eq!(block_only.get_sky_light_value(pos), 0);
         assert_eq!(block_only.get_block_light_value(pos), 0);
         let mut resolved_block_only = all_air_chunk(ChunkPos::ZERO);
+        resolved_block_only.set_persisted_status(rivet_world::chunk::status::ChunkStatus::Light);
         resolved_block_only.set_light_correct(true);
         resolved_block_only.set_sky_emptiness_map(Some(vec![true; SECTION_COUNT]));
         assert_eq!(
@@ -1366,6 +1411,7 @@ mod tests {
         provider
             .light_chunk_with(&mut chunk, &superflat_empty_sections())
             .expect("lighting succeeds");
+        chunk.set_persisted_status(rivet_world::chunk::status::ChunkStatus::Light);
         chunk.set_light_correct(true);
 
         // Stone at y=-64 blocks sky: 0 at the floor, full sky above it.
@@ -1407,6 +1453,7 @@ mod tests {
         provider
             .light_chunk_with(&mut air, &all_air_empty_sections())
             .expect("lighting succeeds");
+        air.set_persisted_status(rivet_world::chunk::status::ChunkStatus::Light);
         air.set_light_correct(true);
         assert_eq!(
             provider.get_sky_light_value_in(&air, BlockPos::new(0, 64, 0)),

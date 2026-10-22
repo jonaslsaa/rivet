@@ -69,8 +69,6 @@ where
     /// `entities` — serialized entities awaiting the chunk's load (Java
     /// `Lists.newArrayList()`).
     entities: Vec<CompoundTag>,
-    /// `status` — `ChunkStatus.EMPTY` by default.
-    status: ChunkStatus,
     /// `carvingMask`.
     carving_mask: Option<CarvingMask>,
     /// `Blocks.AIR.defaultBlockState()` — returned for an all-air section.
@@ -122,7 +120,6 @@ where
                 resolve,
             ),
             entities: Vec::new(),
-            status: ChunkStatus::Empty,
             carving_mask: None,
             air,
             void_air,
@@ -148,7 +145,7 @@ where
         local_z: i32,
         placed: StateFlags,
     ) {
-        let after = self.status.heightmaps_after();
+        let after = self.get_persisted_status().heightmaps_after();
         self.base
             .update_heightmaps_after(after, local_x, y, local_z, placed);
     }
@@ -238,6 +235,14 @@ where
     /// `StarlightChunk.starlight$setSkyEmptinessMap(Boolean[])`.
     pub fn set_sky_emptiness_map(&mut self, map: Option<Vec<bool>>) {
         self.base.set_sky_emptiness_map(map);
+    }
+
+    pub fn block_emptiness_map(&self) -> Option<&[bool]> {
+        self.base.block_emptiness_map()
+    }
+
+    pub fn set_block_emptiness_map(&mut self, map: Option<Vec<bool>>) {
+        self.base.set_block_emptiness_map(map);
     }
 
     /// `ProtoChunk.getSections()`.
@@ -364,14 +369,14 @@ where
 
     /// `ProtoChunk.getPersistedStatus()`.
     pub fn get_persisted_status(&self) -> ChunkStatus {
-        self.status
+        self.base.get_persisted_status()
     }
 
     /// `ProtoChunk.setPersistedStatus(ChunkStatus)` — stores and marks unsaved.
     /// Paper also clears `belowZeroRetrogen` once the persisted status reaches
     /// its target, not merely when the SPAWN task runs.
     pub fn set_persisted_status(&mut self, status: ChunkStatus) {
-        self.status = status;
+        self.base.set_persisted_status(status);
         if self
             .upgrading
             .is_some_and(|target| status.is_or_after(target))
@@ -599,13 +604,12 @@ where
     /// proto `FULL`. The base carries sections, heightmaps, light nibbles,
     /// flags, inhabited time, pending block entities, post-processing, ticks,
     /// and structure access. The generated entity NBT list is returned for the
-    /// caller-owned post-load boundary; `status` and `carving_mask` are
-    /// proto-only and are intentionally not part of the runtime chunk.
+    /// caller-owned post-load boundary. The base retains its status until
+    /// LevelChunk construction fixes it to FULL; the carving mask is discarded.
     pub fn into_base_and_entities(self) -> (ChunkAccess<T, B, S>, Vec<CompoundTag>) {
         let ProtoChunk {
             base,
             entities,
-            status: _,
             carving_mask: _,
             air: _,
             void_air: _,
@@ -638,7 +642,6 @@ where
         let ProtoChunk {
             base,
             entities,
-            status,
             carving_mask,
             air: _,
             void_air: _,
@@ -657,7 +660,6 @@ where
         Ok(ProtoChunk {
             base,
             entities,
-            status,
             carving_mask,
             air,
             void_air,
@@ -706,7 +708,6 @@ where
                 resolve,
             )?,
             entities: self.entities.clone(),
-            status: self.status,
             carving_mask,
             air,
             void_air,

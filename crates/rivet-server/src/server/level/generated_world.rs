@@ -538,6 +538,39 @@ impl FeatureWorkspace {
         self.chunks.borrow_mut().insert(pos, chunk);
     }
 
+    /// Move a canonical dependency out for a scoped generation job. All
+    /// aliases of this workspace immediately observe its absence.
+    pub fn take(
+        &self,
+        pos: ChunkPos,
+    ) -> Option<ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>> {
+        self.chunks.borrow_mut().remove(&pos)
+    }
+
+    /// Return ownership without overwriting another canonical chunk. A
+    /// collision returns the supplied value intact to its caller.
+    pub fn put(
+        &self,
+        chunk: ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+    ) -> Result<(), Box<ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>>> {
+        let mut chunks = self.chunks.borrow_mut();
+        match chunks.entry(chunk.get_pos()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(chunk);
+                Ok(())
+            }
+            std::collections::hash_map::Entry::Occupied(_) => Err(Box::new(chunk)),
+        }
+    }
+
+    /// Recover every dependency after a scoped job, including mutations from
+    /// reads outside the block-write radius. No snapshot or clone is made.
+    pub fn take_all(&self) -> FeatureWritebacks {
+        let mut chunks: Vec<_> = self.chunks.borrow_mut().drain().collect();
+        chunks.sort_by_key(|(pos, _)| (pos.x(), pos.z()));
+        chunks
+    }
+
     /// Inspect one authoritative dependency chunk without exposing its map
     /// borrow beyond the synchronous callback.
     pub fn with_chunk<R>(
@@ -874,7 +907,72 @@ impl BiomeResolver for OverworldNoiseBiomeSource {
 /// worldgen `section_reconstruction::BiomeId`, structure key the server
 /// `StructureKey`) and the BIOMES→NOISE→SURFACE→CARVERS→FEATURES executor over
 /// the shared worldgen objects.
+/// Movable, callback-free state retained by the live tick owner between jobs.
+/// The proto is the actual owned value, including light arrays, ticks, entity
+/// tags, heightmaps and its genuine persisted status. Detached light-neighbour
+/// storage is retained separately; it is never discarded with a task wrapper.
+pub struct GenerationChunkState {
+    generator: Arc<OverworldGenerator>,
+    structure_feature_count: Option<usize>,
+    chunk: ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+    features_failure: Option<GenError>,
+    feature_writebacks: FeatureWritebacks,
+    feature_dependencies: FeatureWritebacks,
+    generated_light_storage: Option<GeneratedLightStorage>,
+}
+
+/// A resume collision transfers neither proto map. Both owners are returned
+/// intact so the scheduler can reconcile its canonical entries explicitly.
+pub struct GenerationChunkResumeError {
+    pub state: GenerationChunkState,
+    pub workspace: FeatureWorkspace,
+    pub reason: GenerationChunkResumeFailure,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GenerationChunkResumeFailure {
+    DifferentWorld,
+    DifferentStructureCapability,
+    DuplicateChunk(ChunkPos),
+}
+
+impl fmt::Debug for GenerationChunkResumeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GenerationChunkResumeError")
+            .field("center", &self.state.pos())
+            .field("reason", &self.reason)
+            .finish()
+    }
+}
+
+impl GenerationChunkState {
+    pub fn pos(&self) -> ChunkPos {
+        self.chunk.get_pos()
+    }
+    pub fn status(&self) -> ChunkStatus {
+        self.chunk.get_persisted_status()
+    }
+    pub fn chunk(&self) -> &ProtoChunk<BlockState, WorldgenBiomeId, StructureKey> {
+        &self.chunk
+    }
+    pub fn chunk_mut(&mut self) -> &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey> {
+        &mut self.chunk
+    }
+    pub fn take_feature_writebacks(&mut self) -> FeatureWritebacks {
+        std::mem::take(&mut self.feature_writebacks)
+    }
+    /// Move every canonical dependency back to the tick owner's map. Unlike
+    /// diagnostic writebacks this includes the entire read dependency window.
+    pub fn take_feature_dependencies(&mut self) -> FeatureWritebacks {
+        std::mem::take(&mut self.feature_dependencies)
+    }
+    pub fn take_generated_light_storage(&mut self) -> Option<GeneratedLightStorage> {
+        self.generated_light_storage.take()
+    }
+}
+
 pub struct GenerationChunkHolder {
+    structure_feature_count: Option<usize>,
     chunk: ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
     context: WorldGenContext<BlockState, WorldgenBiomeId, StructureKey, GeneratedLightStorage>,
     /// A typed FEATURES boundary is deterministic for the immutable world plan.
@@ -991,6 +1089,15 @@ impl GenerationChunkHolder {
             BlockState::of(BlockId(794)),
             &resolve_state_flags,
         );
+        Self::with_owned_chunk(chunk, generator, feature_workspace, structure_feature_count)
+    }
+
+    fn with_owned_chunk(
+        chunk: ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+        generator: Arc<OverworldGenerator>,
+        feature_workspace: FeatureWorkspace,
+        structure_feature_count: Option<usize>,
+    ) -> Self {
         let pending_feature_writebacks = Rc::new(RefCell::new(None));
         let context = WorldGenContext::new(
             {
@@ -1112,6 +1219,7 @@ impl GenerationChunkHolder {
         // `generate_through(ChunkStatus::Spawn)` remains a typed refusal rather
         // than silently reverting to a detached center-only spawn.
         GenerationChunkHolder {
+            structure_feature_count,
             chunk,
             context,
             features_failure: None,
@@ -1120,6 +1228,95 @@ impl GenerationChunkHolder {
             pending_feature_writebacks,
             feature_workspace,
         }
+    }
+
+    /// Suspend a completed synchronous job without cloning or losing any
+    /// canonical proto or light-neighbour values. Call this after errors too;
+    /// `generate_through` has already restored its transaction before return.
+    pub fn into_state(self) -> GenerationChunkState {
+        let Self {
+            generator,
+            structure_feature_count,
+            chunk,
+            context,
+            features_failure,
+            feature_writebacks,
+            pending_feature_writebacks,
+            feature_workspace,
+            ..
+        } = self;
+        // Public generation calls publish or discard staging before returning.
+        // A staged value here would indicate an internal ownership violation.
+        assert!(
+            pending_feature_writebacks.borrow().is_none(),
+            "unfinished FEATURES writeback transaction"
+        );
+        GenerationChunkState {
+            generator,
+            structure_feature_count,
+            chunk,
+            features_failure,
+            feature_writebacks,
+            feature_dependencies: feature_workspace.take_all(),
+            generated_light_storage: context.into_generated_light_storage(),
+        }
+    }
+
+    /// Rebuild only executable callbacks around the same owned proto. The
+    /// caller must use the same world's generator and structure capability.
+    /// Detached light storage is returned explicitly for validated workspace
+    /// reattachment; no light provider, channel, or completed status is invented.
+    pub fn from_state(
+        state: GenerationChunkState,
+        generator: Arc<OverworldGenerator>,
+        feature_workspace: FeatureWorkspace,
+        structure_feature_count: Option<usize>,
+    ) -> Result<(Self, Option<GeneratedLightStorage>), Box<GenerationChunkResumeError>> {
+        let refusal = if !Arc::ptr_eq(&state.generator, &generator) {
+            Some(GenerationChunkResumeFailure::DifferentWorld)
+        } else if state.structure_feature_count != structure_feature_count {
+            Some(GenerationChunkResumeFailure::DifferentStructureCapability)
+        } else if feature_workspace.with_chunk(state.pos(), |chunk| chunk.is_some()) {
+            Some(GenerationChunkResumeFailure::DuplicateChunk(state.pos()))
+        } else {
+            None
+        };
+        if let Some(reason) = refusal {
+            return Err(Box::new(GenerationChunkResumeError {
+                state,
+                workspace: feature_workspace,
+                reason,
+            }));
+        }
+        // Check the complete handoff before moving any dependency. Never
+        // overwrite a scheduler-owned value with a retained workspace value.
+        for (pos, _) in &state.feature_dependencies {
+            if *pos == state.pos() || feature_workspace.with_chunk(*pos, |chunk| chunk.is_some()) {
+                return Err(Box::new(GenerationChunkResumeError {
+                    reason: GenerationChunkResumeFailure::DuplicateChunk(*pos),
+                    state,
+                    workspace: feature_workspace,
+                }));
+            }
+        }
+        let GenerationChunkState {
+            chunk,
+            features_failure,
+            feature_writebacks,
+            feature_dependencies,
+            generated_light_storage,
+            generator: _,
+            structure_feature_count: _,
+        } = state;
+        for (_, chunk) in feature_dependencies {
+            // No user callbacks run between collision checking and insertion.
+            feature_workspace.insert(chunk);
+        }
+        let mut holder =
+            Self::with_owned_chunk(chunk, generator, feature_workspace, structure_feature_count);
+        holder.features_failure = features_failure;
+        holder.feature_writebacks = feature_writebacks;
+        Ok((holder, generated_light_storage))
     }
 
     /// Attach a finite generated-light workspace in place. This is the stable
@@ -4750,6 +4947,261 @@ mod tests {
         generator.create_holder_with_structure_feature_count(pos, Some(0))
     }
 
+    #[test]
+    fn movable_holder_state_keeps_failure_proto_writebacks_and_light_storage() {
+        fn assert_send<T: Send>() {}
+        assert_send::<GenerationChunkState>();
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder.attach_generated_light_workspace(full_light_workspace_for_test(ChunkPos::ZERO));
+        let error = holder
+            .generate_through(ChunkStatus::Features)
+            .expect_err("real unavailable structure boundary");
+        assert!(matches!(
+            error,
+            GeneratedChunkError::Generation(GenError::StructureDecorationIndexUnavailable { .. })
+        ));
+        let expected = snapshot_generated_chunk(&holder.chunk);
+        let neighbor = ChunkPos::new(1, 0);
+        holder
+            .feature_writebacks
+            .push((neighbor, fresh_worldgen_chunk(neighbor, &generator)));
+        let state = holder.into_state();
+        // Exercise the actual thread-movable value rather than declaring an
+        // unsafe Send implementation for the callback-bearing holder.
+        let state = std::thread::spawn(move || state).join().unwrap();
+        assert_eq!(state.pos(), ChunkPos::ZERO);
+        assert_eq!(state.status(), expected.get_persisted_status());
+        assert_generated_proto_equal(state.chunk(), &expected);
+        let (mut holder, storage) =
+            GenerationChunkHolder::from_state(state, generator, FeatureWorkspace::new(), None)
+                .expect("empty dependency workspace");
+        let storage = storage.expect("attached neighbour storage must not be discarded");
+        assert_eq!(storage.len(), 24);
+        assert!(storage.contains_key(&(1, 0)));
+        assert_eq!(
+            holder
+                .take_feature_writebacks()
+                .iter()
+                .map(|(pos, _)| *pos)
+                .collect::<Vec<_>>(),
+            [neighbor]
+        );
+        assert!(holder.take_feature_writebacks().is_empty());
+        assert!(matches!(
+            holder.generate_through(ChunkStatus::Features),
+            Err(GeneratedChunkError::Generation(
+                GenError::StructureDecorationIndexUnavailable { .. }
+            ))
+        ));
+        assert_generated_proto_equal(&holder.chunk, &expected);
+        assert!(
+            holder.into_state().take_generated_light_storage().is_none(),
+            "storage was returned exactly once, not retained as another canonical copy"
+        );
+    }
+
+    #[test]
+    fn feature_workspace_take_return_moves_chunks_and_refuses_overwrite() {
+        let generator = test_generator();
+        let workspace = FeatureWorkspace::new();
+        let alias = workspace.clone();
+        let pos = ChunkPos::new(1, -1);
+        workspace.insert(fresh_worldgen_chunk(pos, &generator));
+        let mut chunk = workspace.take(pos).expect("canonical dependency");
+        assert!(alias.is_empty());
+        chunk.set_block_state(16, 64, -16, Blocks::STONE.default_block_state());
+        assert!(alias.put(chunk).is_ok());
+        let rejected = workspace
+            .put(fresh_worldgen_chunk(pos, &generator))
+            .expect_err("must not overwrite canonical mutations");
+        assert_eq!(rejected.get_pos(), pos);
+        assert_eq!(
+            workspace.with_chunk(pos, |chunk| chunk.unwrap().get_block_state(16, 64, -16)),
+            Blocks::STONE.default_block_state()
+        );
+        let recovered = workspace.take_all();
+        assert!(alias.is_empty());
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].0, pos);
+        assert_eq!(
+            recovered[0].1.get_block_state(16, 64, -16),
+            Blocks::STONE.default_block_state()
+        );
+    }
+
+    #[test]
+    fn suspended_dependencies_are_moved_and_resume_collision_returns_both_owners() {
+        let generator = test_generator();
+        let holder = generator.create_holder(ChunkPos::ZERO);
+        let alias = holder.feature_workspace();
+        let pos = ChunkPos::new(1, 0);
+        let mut dependency = fresh_worldgen_chunk(pos, &generator);
+        dependency.set_block_state(16, 64, 0, Blocks::STONE.default_block_state());
+        alias.insert(dependency);
+        let state = holder.into_state();
+        assert!(
+            alias.is_empty(),
+            "suspension must move, not clone, dependencies"
+        );
+        let workspace = FeatureWorkspace::new();
+        workspace.insert(fresh_worldgen_chunk(pos, &generator));
+        let error =
+            GenerationChunkHolder::from_state(state, Arc::clone(&generator), workspace, None)
+                .err()
+                .expect("duplicate canonical dependency refuses before moving values");
+        assert_eq!(
+            error.reason,
+            GenerationChunkResumeFailure::DuplicateChunk(pos)
+        );
+        assert_eq!(error.state.feature_dependencies.len(), 1);
+        assert_eq!(
+            error.state.feature_dependencies[0]
+                .1
+                .get_block_state(16, 64, 0),
+            Blocks::STONE.default_block_state()
+        );
+        assert_eq!(
+            error
+                .workspace
+                .with_chunk(pos, |chunk| chunk.unwrap().get_block_state(16, 64, 0)),
+            Blocks::AIR.default_block_state()
+        );
+        // The caller resolves the duplicate without losing either chunk.
+        let other = error.workspace.take(pos).unwrap();
+        assert_eq!(other.get_pos(), pos);
+        let (holder, light) =
+            GenerationChunkHolder::from_state(error.state, generator, error.workspace, None)
+                .expect("resolved ownership collision");
+        assert!(light.is_none());
+        let mut state = holder.into_state();
+        let dependencies = state.take_feature_dependencies();
+        assert_eq!(dependencies.len(), 1);
+        assert_eq!(
+            dependencies[0].1.get_block_state(16, 64, 0),
+            Blocks::STONE.default_block_state()
+        );
+        assert!(state.take_feature_dependencies().is_empty());
+    }
+
+    #[test]
+    fn movable_state_refuses_cross_world_capability_and_duplicate_center() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder
+            .chunk
+            .set_block_state(0, 64, 0, Blocks::STONE.default_block_state());
+        let state = holder.into_state();
+        // Equal seeds are insufficient: registry/feature seed settings and
+        // cached failure provenance belong to the original world instance.
+        let other_world = Arc::new(OverworldGenerator::new(generator.seed()));
+        let error =
+            GenerationChunkHolder::from_state(state, other_world, FeatureWorkspace::new(), None)
+                .err()
+                .expect("different world identity");
+        assert_eq!(error.reason, GenerationChunkResumeFailure::DifferentWorld);
+        assert_eq!(
+            error.state.chunk().get_block_state(0, 64, 0),
+            Blocks::STONE.default_block_state()
+        );
+        let error = GenerationChunkHolder::from_state(
+            error.state,
+            Arc::clone(&generator),
+            error.workspace,
+            Some(0),
+        )
+        .err()
+        .expect("cannot invent structure capability while resuming");
+        assert_eq!(
+            error.reason,
+            GenerationChunkResumeFailure::DifferentStructureCapability
+        );
+        error
+            .workspace
+            .insert(fresh_worldgen_chunk(ChunkPos::ZERO, &generator));
+        let error = GenerationChunkHolder::from_state(
+            error.state,
+            Arc::clone(&generator),
+            error.workspace,
+            None,
+        )
+        .err()
+        .expect("workspace cannot own the center alongside the holder");
+        assert_eq!(
+            error.reason,
+            GenerationChunkResumeFailure::DuplicateChunk(ChunkPos::ZERO)
+        );
+        assert_eq!(error.workspace.len(), 1);
+        assert_eq!(
+            error.state.chunk().get_block_state(0, 64, 0),
+            Blocks::STONE.default_block_state()
+        );
+        let center = error
+            .workspace
+            .take(ChunkPos::ZERO)
+            .expect("other center remains owned");
+        assert_eq!(
+            center.get_block_state(0, 64, 0),
+            Blocks::AIR.default_block_state()
+        );
+        let (holder, light) =
+            GenerationChunkHolder::from_state(error.state, generator, error.workspace, None)
+                .expect("original identity and resolved ownership");
+        assert!(light.is_none());
+        assert_eq!(
+            holder.chunk.get_block_state(0, 64, 0),
+            Blocks::STONE.default_block_state()
+        );
+    }
+
+    #[test]
+    fn retained_center_dependency_refuses_resume_and_is_recoverable() {
+        let generator = test_generator();
+        let mut holder = generator.create_holder(ChunkPos::ZERO);
+        holder
+            .chunk
+            .set_block_state(0, 64, 0, Blocks::STONE.default_block_state());
+        holder
+            .feature_workspace()
+            .insert(fresh_worldgen_chunk(ChunkPos::ZERO, &generator));
+        let error = GenerationChunkHolder::from_state(
+            holder.into_state(),
+            Arc::clone(&generator),
+            FeatureWorkspace::new(),
+            None,
+        )
+        .err()
+        .expect("retained dependency cannot duplicate the owned center");
+        assert_eq!(
+            error.reason,
+            GenerationChunkResumeFailure::DuplicateChunk(ChunkPos::ZERO)
+        );
+        assert!(error.workspace.is_empty());
+        let GenerationChunkResumeError {
+            mut state,
+            workspace,
+            ..
+        } = *error;
+        let dependencies = state.take_feature_dependencies();
+        assert_eq!(dependencies.len(), 1);
+        assert_eq!(dependencies[0].0, ChunkPos::ZERO);
+        assert_eq!(
+            dependencies[0].1.get_block_state(0, 64, 0),
+            Blocks::AIR.default_block_state()
+        );
+        assert_eq!(
+            state.chunk().get_block_state(0, 64, 0),
+            Blocks::STONE.default_block_state()
+        );
+        let (holder, light) = GenerationChunkHolder::from_state(state, generator, workspace, None)
+            .expect("duplicate explicitly recovered");
+        assert!(light.is_none());
+        assert_eq!(
+            holder.chunk.get_block_state(0, 64, 0),
+            Blocks::STONE.default_block_state()
+        );
+    }
+
     fn transaction_probe_holder(
         generator: &Arc<OverworldGenerator>,
         starting_status: ChunkStatus,
@@ -4776,6 +5228,7 @@ mod tests {
             context,
             features_failure: None,
             generator: Arc::clone(generator),
+            structure_feature_count: None,
             feature_writebacks: Vec::new(),
             pending_feature_writebacks: Rc::new(RefCell::new(None)),
             feature_workspace: FeatureWorkspace::new(),
@@ -4830,6 +5283,7 @@ mod tests {
             context,
             features_failure: None,
             generator,
+            structure_feature_count: None,
             feature_writebacks: Vec::new(),
             pending_feature_writebacks,
             feature_workspace: FeatureWorkspace::new(),
@@ -4899,6 +5353,7 @@ mod tests {
             context,
             features_failure: None,
             generator: Arc::clone(generator),
+            structure_feature_count: None,
             feature_writebacks: Vec::new(),
             pending_feature_writebacks,
             feature_workspace: workspace.clone(),
@@ -5003,6 +5458,7 @@ mod tests {
                     &runtime_state_flags_for_test,
                 );
                 chunk.set_light_correct(true);
+                chunk.set_persisted_status(ChunkStatus::Light);
                 chunk.set_sky_emptiness_map(Some(vec![true; 24]));
                 chunks.insert((pos.x(), pos.z()), chunk);
             }
@@ -5688,6 +6144,7 @@ mod tests {
             context,
             features_failure: None,
             generator,
+            structure_feature_count: None,
             feature_writebacks: Vec::new(),
             pending_feature_writebacks: Rc::new(RefCell::new(None)),
             feature_workspace: FeatureWorkspace::new(),
@@ -5760,6 +6217,7 @@ mod tests {
             context,
             features_failure: None,
             generator,
+            structure_feature_count: None,
             feature_writebacks: Vec::new(),
             pending_feature_writebacks: Rc::new(RefCell::new(None)),
             feature_workspace: FeatureWorkspace::new(),
