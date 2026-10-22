@@ -174,6 +174,7 @@ pub mod foliageplacers;
 // The `net.minecraft.world.level.levelgen.feature.trunkplacers` framework
 // (this unit) — the `TrunkPlacer` hierarchy, its `TrunkPlacerType` ids, and
 // the nine concrete placers (see the submodule doc).
+pub mod treedecorators;
 pub mod trunkplacers;
 
 // Executable tree/fallen-tree algorithms; root/decorator families and the

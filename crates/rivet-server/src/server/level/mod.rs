@@ -14,6 +14,7 @@
 //! this slice is the smallest end-to-end world object #100/#101 build on.
 
 mod aquatic_survival;
+mod block_shape_update;
 pub mod chunk_level;
 pub mod chunk_map;
 pub mod chunk_result;
@@ -30,6 +31,8 @@ pub mod world_gen_region;
 
 #[cfg(test)]
 pub(crate) mod test_support;
+#[cfg(test)]
+mod tree_placement_fixture;
 
 pub use chunk_level::{
     BLOCK_TICKING_LEVEL, ENTITY_TICKING_LEVEL, FULL_CHUNK_LEVEL, MAX_LEVEL,

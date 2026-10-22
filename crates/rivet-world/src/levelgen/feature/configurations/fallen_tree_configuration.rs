@@ -1,11 +1,9 @@
 //! FallenTreeConfiguration (26.2): trunk provider, log length and decorator lists.
-use super::{
-    FeatureConfiguration,
-    tree_configuration::{UnavailableTreeDecorator, unavailable_decorator_codec},
-};
+use super::FeatureConfiguration;
 use crate::levelgen::feature::stateproviders::block_state_provider::{
     ErasedBlockStateProvider, block_state_provider_codec,
 };
+use crate::levelgen::feature::treedecorators::{TreeDecorator, tree_decorator_codec};
 use rivet_registry::registry_ops::RegistryOpsLookup;
 use rivet_serialization::{
     codec::{self, Codec},
@@ -19,8 +17,8 @@ use std::sync::Arc;
 pub struct FallenTreeConfiguration {
     pub trunk_provider: Arc<dyn ErasedBlockStateProvider>,
     pub log_length: IntProvider,
-    pub stump_decorators: Vec<UnavailableTreeDecorator>,
-    pub log_decorators: Vec<UnavailableTreeDecorator>,
+    pub stump_decorators: Vec<TreeDecorator>,
+    pub log_decorators: Vec<TreeDecorator>,
 }
 impl FeatureConfiguration for FallenTreeConfiguration {}
 
@@ -44,14 +42,14 @@ pub fn fallen_tree_configuration_codec<Ops: DynamicOps + 'static + RegistryOpsLo
         .and(RecordCodecBuilder::of(
             Arc::new(|c: &FallenTreeConfiguration| c.stump_decorators.clone()),
             codec::field_of(
-                codec::list(unavailable_decorator_codec::<Ops>()),
+                codec::list(tree_decorator_codec::<Ops>()),
                 "stump_decorators".to_string(),
             ),
         ))
         .and(RecordCodecBuilder::of(
             Arc::new(|c: &FallenTreeConfiguration| c.log_decorators.clone()),
             codec::field_of(
-                codec::list(unavailable_decorator_codec::<Ops>()),
+                codec::list(tree_decorator_codec::<Ops>()),
                 "log_decorators".to_string(),
             ),
         ))

@@ -9,6 +9,7 @@ use crate::levelgen::feature::featuresize::{FeatureSize, TwoLayersFeatureSize};
 use crate::levelgen::feature::foliageplacers::blob_foliage_placer::BlobFoliagePlacer;
 use crate::levelgen::feature::foliageplacers::foliage_placer::ErasedFoliagePlacer;
 use crate::levelgen::feature::stateproviders::block_state_provider::ErasedBlockStateProvider;
+use crate::levelgen::feature::treedecorators::{TreeDecorator, tree_decorator_codec};
 use crate::levelgen::feature::trunkplacers::straight_trunk_placer::StraightTrunkPlacer;
 use crate::levelgen::feature::trunkplacers::trunk_placer::ErasedTrunkPlacer;
 use std::sync::Arc;
@@ -22,45 +23,6 @@ use rivet_serialization::{
     record_builder::{self, RecordCodecBuilder},
 };
 
-/// Retain known unsupported decorators for eager registry resolution. Their
-/// behavior and serialization remain explicitly unavailable.
-pub(crate) fn unavailable_decorator_codec<Ops: DynamicOps + 'static>()
--> Arc<dyn Codec<UnavailableTreeDecorator, Ops>> {
-    codec::flat_xmap(
-        map_codec::codec_of(codec::field_of(
-            codec::string_codec::<Ops>(),
-            "type".to_string(),
-        )),
-        Arc::new(|name: &String| {
-            let path = name.strip_prefix("minecraft:").unwrap_or(name);
-            if !matches!(
-                path,
-                "trunk_vine"
-                    | "leave_vine"
-                    | "pale_moss"
-                    | "creaking_heart"
-                    | "cocoa"
-                    | "beehive"
-                    | "alter_ground"
-                    | "attached_to_leaves"
-                    | "place_on_ground"
-                    | "attached_to_logs"
-            ) || (name.contains(':') && !name.starts_with("minecraft:"))
-            {
-                return DataResult::error(format!("unknown tree decorator type {name}"));
-            }
-            DataResult::success(UnavailableTreeDecorator {
-                type_name: format!("minecraft:{path}"),
-            })
-        }),
-        Arc::new(|value: &UnavailableTreeDecorator| {
-            DataResult::error(format!(
-                "tree decorator {} is not implemented",
-                value.type_name
-            ))
-        }),
-    )
-}
 fn unavailable_root_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<UnavailableRootPlacer, Ops>>
 {
     codec::flat_xmap(
@@ -132,7 +94,7 @@ pub fn tree_configuration_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>()
             .and(RecordCodecBuilder::of(
                 Arc::new(|c: &TreeConfiguration| c.decorators.clone()),
                 codec::field_of(
-                    codec::list(unavailable_decorator_codec::<Ops>()),
+                    codec::list(tree_decorator_codec::<Ops>()),
                     "decorators".to_string(),
                 ),
             ))
@@ -177,19 +139,13 @@ pub struct TreeConfiguration {
     pub foliage_placer: Arc<dyn ErasedFoliagePlacer>,
     pub root_placer: Option<UnavailableRootPlacer>,
     pub minimum_size: Arc<dyn FeatureSize>,
-    pub decorators: Vec<UnavailableTreeDecorator>,
+    pub decorators: Vec<TreeDecorator>,
     pub ignore_vines: bool,
 }
 
 /// Explicit capability boundary, not a no-op root implementation.
 #[derive(Debug, Clone)]
 pub struct UnavailableRootPlacer {
-    pub type_name: String,
-}
-
-/// Explicit capability boundary, not a no-op decorator implementation.
-#[derive(Debug, Clone)]
-pub struct UnavailableTreeDecorator {
     pub type_name: String,
 }
 
@@ -230,8 +186,8 @@ impl TreeConfiguration {
         if let Some(root) = &self.root_placer {
             panic!("tree root placer {} is not implemented", root.type_name);
         }
-        if let Some(decorator) = self.decorators.first() {
-            panic!("tree decorator {} is not implemented", decorator.type_name);
+        for decorator in &self.decorators {
+            decorator.require_supported();
         }
     }
 }

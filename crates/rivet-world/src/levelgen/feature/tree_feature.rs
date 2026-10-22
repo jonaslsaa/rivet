@@ -1,10 +1,11 @@
 //! Port of TreeFeature's placement, clearance and leaf-distance algorithms.
 //! Source: Paper's pinned decompileJar.jar, TreeFeature.java (26.2).
-//! Root/decorator implementations and block shape-neighbor updates remain
-//! explicit capability boundaries, not successful no-ops.
+//! Supported decorators run against immediate world writes. Untranslated roots
+//! and decorators remain explicit capability boundaries, not successful no-ops.
 
 use super::configurations::TreeConfiguration;
 use super::foliageplacers::foliage_placer::FoliageSetter;
+use super::treedecorators::TreeDecoratorContext;
 use super::{FeatureBehavior, FeaturePlaceContext};
 use crate::level::{WorldGenLevel, height_accessor::LevelHeightAccessor};
 #[path = "tree_placer_runtime.rs"]
@@ -12,7 +13,7 @@ mod runtime;
 use rivet_registry::block_state::BlockState;
 use rivet_registry::block_state_properties::BlockStateProperties;
 use rivet_registry::block_state_property::PropertyValue;
-use rivet_registry::core::{BlockPos, Direction};
+use rivet_registry::core::{BlockPos, Direction, JavaBlockPosSet};
 use rivet_util::RandomSource;
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -78,17 +79,19 @@ impl WorldGenLevel for TreeLevel<'_> {
     }
 }
 impl TreeLevel<'_> {
-    fn write(&self, pos: &BlockPos, state: BlockState) {
+    pub(super) fn write(&self, pos: &BlockPos, state: BlockState) {
         self.0.borrow_mut().set_block(pos, state, 19);
     }
 }
 struct Leaves<'a, 'b> {
     level: &'a TreeLevel<'b>,
     positions: HashSet<BlockPos>,
+    insertions: Vec<BlockPos>,
 }
 impl FoliageSetter for Leaves<'_, '_> {
     fn set(&mut self, pos: &BlockPos, state: BlockState) {
         self.positions.insert(*pos);
+        self.insertions.push(*pos);
         self.level.write(pos, state);
     }
     fn is_set(&self, pos: &BlockPos) -> bool {
@@ -130,8 +133,10 @@ impl FeatureBehavior<TreeConfiguration> for TreeFeature {
             return false;
         }
         let mut trunks = HashSet::new();
+        let mut trunk_insertions = Vec::new();
         let mut trunk_setter = |pos: &BlockPos, state: BlockState| {
             trunks.insert(*pos);
+            trunk_insertions.push(*pos);
             level.write(pos, state);
         };
         let attachments = runtime::place_trunk(
@@ -145,6 +150,7 @@ impl FeatureBehavior<TreeConfiguration> for TreeFeature {
         let mut foliage = Leaves {
             level: &level,
             positions: HashSet::new(),
+            insertions: Vec::new(),
         };
         for attachment in attachments {
             runtime::create_foliage(
@@ -161,12 +167,33 @@ impl FeatureBehavior<TreeConfiguration> for TreeFeature {
         if trunks.is_empty() && foliage.positions.is_empty() {
             return false;
         }
-        let bounds_positions: HashSet<_> = trunks.union(&foliage.positions).copied().collect();
+        let mut decorations = HashSet::new();
+        if !config.decorators.is_empty() {
+            let mut setter = |pos: &BlockPos, state: BlockState| {
+                decorations.insert(*pos);
+                level.write(pos, state);
+            };
+            let height_at = |ty, x, z| level.0.borrow_mut().get_height_at(ty, x, z);
+            let mut decorator_context = TreeDecoratorContext::new(
+                &level,
+                &mut setter,
+                random,
+                &trunk_insertions,
+                &foliage.insertions,
+                &[],
+                &height_at,
+            );
+            for decorator in &config.decorators {
+                decorator.place(&mut decorator_context);
+            }
+        }
+        let mut bounds_positions: HashSet<_> = trunks.union(&foliage.positions).copied().collect();
+        bounds_positions.extend(&decorations);
         let shape = update_leaves(
             &level,
             &bounds_positions,
-            &trunks,
-            &HashSet::new(),
+            &trunk_insertions,
+            &decorations,
             &HashSet::new(),
         );
         level.0.borrow_mut().update_tree_shape_at_edge(&shape);
@@ -204,7 +231,7 @@ pub fn get_max_free_tree_height(
 fn update_leaves(
     level: &TreeLevel<'_>,
     bounds_positions: &HashSet<BlockPos>,
-    logs: &HashSet<BlockPos>,
+    logs: &[BlockPos],
     decorations: &HashSet<BlockPos>,
     roots: &HashSet<BlockPos>,
 ) -> HashSet<BlockPos> {
@@ -231,15 +258,24 @@ fn update_leaves(
         .filter(|p| inside(p))
         .copied()
         .collect();
-    let mut to_check: [HashSet<BlockPos>; 7] = std::array::from_fn(|_| HashSet::new());
-    to_check[0].extend(logs.iter().copied());
+    let mut log_set = JavaBlockPosSet::new();
+    for pos in logs {
+        log_set
+            .try_insert(*pos)
+            .unwrap_or_else(|error| std::panic::panic_any(error));
+    }
+    let mut to_check: [JavaBlockPosSet; 7] = std::array::from_fn(|_| JavaBlockPosSet::new());
+    for pos in log_set.iter() {
+        to_check[0]
+            .try_insert(*pos)
+            .unwrap_or_else(|error| std::panic::panic_any(error));
+    }
     let mut smallest = 0;
     while smallest < 7 {
-        let Some(pos) = to_check[smallest].iter().next().copied() else {
+        let Some(pos) = to_check[smallest].pop_first() else {
             smallest += 1;
             continue;
         };
-        to_check[smallest].remove(&pos);
         if !inside(&pos) {
             continue;
         }
@@ -268,7 +304,9 @@ fn update_leaves(
             if let Some(distance) = distance {
                 let next = distance.min(smallest as i32 + 1) as usize;
                 if next < 7 {
-                    to_check[next].insert(neighbor);
+                    to_check[next]
+                        .try_insert(neighbor)
+                        .unwrap_or_else(|error| std::panic::panic_any(error));
                     smallest = smallest.min(next);
                 }
             }
@@ -407,7 +445,7 @@ mod tests {
             let filled = update_leaves(
                 &TreeLevel(RefCell::new(&mut level)),
                 &HashSet::from([pos(0), pos(max_x.parse().unwrap())]),
-                &HashSet::from([pos(0)]),
+                &[pos(0)],
                 &decorations,
                 &roots,
             );

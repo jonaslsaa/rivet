@@ -90,6 +90,7 @@ use rivet_serialization::float_format::java_float_equals;
 use rivet_util::StaticCache2D;
 use rivet_util::mth;
 use rivet_util::util::log_and_pause_if_in_ide;
+use rivet_util::worldgen_random::AlgorithmRandomSource;
 use rivet_world::biome::biome::generated_climate_settings;
 use rivet_world::biome::biome_manager::{BiomeManager, NoiseBiomeSource};
 use rivet_world::biome::generated_biome_source::dense_biome_id;
@@ -560,6 +561,9 @@ where
     write_radius: i32,
     /// `seed` — `level.getSeed()`.
     seed: i64,
+    /// Paper's worldgen_region_random factory at the center chunk origin.
+    /// Composition must supply the world's actual RandomState-derived stream.
+    region_random: Option<AlgorithmRandomSource>,
     /// `level.getMinY()`.
     min_y: i32,
     /// `level.getHeight()`.
@@ -681,6 +685,7 @@ where
             generating_step,
             write_radius,
             seed,
+            region_random: None,
             min_y,
             height,
             sea_level,
@@ -699,6 +704,10 @@ where
     /// Set the world clock used by subsequent `createTick` calls.
     pub fn set_game_time(&mut self, game_time: i64) {
         self.game_time = game_time;
+    }
+
+    pub fn set_region_random(&mut self, random: AlgorithmRandomSource) {
+        self.region_random = Some(random);
     }
 
     /// `WorldGenRegion.getCenter()`.
@@ -1292,11 +1301,19 @@ impl LevelHeightAccessor for WorldGenRegion<'_, StateId, ServerBiomeId, Structur
 /// `Send`-bound but deliberately NOT `'static` (see the trait doc), so this
 /// impl covers every region lifetime — the server value layer's owning-holder
 /// `'static` region and the executor's borrow-carrying scoped region alike.
-fn region_can_survive(level: &dyn WorldGenLevel, state: &BlockState, pos: &BlockPos) -> bool {
+pub(super) fn region_can_survive(
+    level: &dyn WorldGenLevel,
+    state: &BlockState,
+    pos: &BlockPos,
+) -> bool {
     if let Some(verdict) = super::aquatic_survival::aquatic_can_survive(level, state, pos) {
         return verdict;
     }
     match state.block().name() {
+        "minecraft:leaf_litter" => {
+            let below_pos = pos.below();
+            level.is_face_sturdy(&below_pos, &level.get_block_state(&below_pos), &rivet_registry::core::Direction::Up)
+        }
         "minecraft:snow" => {
             let below_pos = pos.below();
             let below = level.get_block_state(&below_pos);
@@ -1317,7 +1334,17 @@ fn region_can_survive(level: &dyn WorldGenLevel, state: &BlockState, pos: &Block
         "minecraft:short_grass"
         | "minecraft:fern"
         | "minecraft:firefly_bush"
-        | "minecraft:dark_oak_sapling" => level
+        // Blocks.java constructs exactly these eight as plain SaplingBlock.
+        // SaplingBlock inherits VegetationBlock.canSurvive/mayPlaceOn;
+        // MangrovePropaguleBlock overrides both and is deliberately excluded.
+        | "minecraft:oak_sapling"
+        | "minecraft:spruce_sapling"
+        | "minecraft:birch_sapling"
+        | "minecraft:jungle_sapling"
+        | "minecraft:acacia_sapling"
+        | "minecraft:cherry_sapling"
+        | "minecraft:dark_oak_sapling"
+        | "minecraft:pale_oak_sapling" => level
             .get_block_state(&pos.below())
             .is_in_tag("minecraft:supports_vegetation"),
         other => {
@@ -1327,6 +1354,15 @@ fn region_can_survive(level: &dyn WorldGenLevel, state: &BlockState, pos: &Block
 }
 
 impl WorldGenLevel for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
+    fn update_tree_shape_at_edge(&mut self, filled: &HashSet<BlockPos>) {
+        let mut random = self
+            .region_random
+            .take()
+            .expect("WorldGenRegion updateShape requires its RandomState-derived region RNG");
+        super::block_shape_update::update_shape_at_edge(self, &mut random, filled);
+        self.region_random = Some(random);
+    }
+
     /// `WorldGenLevel.getSeed()`.
     fn get_seed(&self) -> i64 {
         self.seed
@@ -1721,6 +1757,15 @@ impl LevelHeightAccessor for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Str
 /// doc), so this impl covers every region lifetime, and the executor's scoped
 /// borrow-carrying region implements it directly.
 impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
+    fn update_tree_shape_at_edge(&mut self, filled: &HashSet<BlockPos>) {
+        let mut random = self
+            .region_random
+            .take()
+            .expect("WorldGenRegion updateShape requires its RandomState-derived region RNG");
+        super::block_shape_update::update_shape_at_edge(self, &mut random, filled);
+        self.region_random = Some(random);
+    }
+
     /// `WorldGenLevel.getSeed()`.
     fn get_seed(&self) -> i64 {
         self.seed
@@ -2362,6 +2407,51 @@ mod tests {
         BiomeId as ServerBiomeId, container_factory, superflat_content,
     };
     use rivet_world::superflat::{SUPERFLAT_HEIGHT, SUPERFLAT_MIN_Y};
+
+    #[test]
+    fn ordinary_saplings_inherit_vegetation_support_without_including_mangrove() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(8, 64, 8);
+        for (support, survives, litter_survives) in [
+            (Blocks::DIRT.default_block_state(), true, true),
+            (Blocks::STONE.default_block_state(), false, true),
+            (Blocks::AIR.default_block_state(), false, false),
+        ] {
+            region.set_block(&pos.below(), support, 2, UPDATE_LIMIT);
+            let litter = BlockState::of(BlockId::from_name("minecraft:leaf_litter").unwrap());
+            assert_eq!(
+                WorldGenLevel::can_survive(&region, &litter, &pos),
+                litter_survives,
+                "leaf litter uses sturdy UP, not the sapling support tag"
+            );
+            for name in [
+                "oak", "spruce", "birch", "jungle", "acacia", "cherry", "dark_oak", "pale_oak",
+            ] {
+                let sapling = BlockState::of(
+                    BlockId::from_name(&format!("minecraft:{name}_sapling")).unwrap(),
+                );
+                for stage in [0, 1] {
+                    let sapling = sapling
+                        .set_value(BlockStateProperties::STAGE, stage)
+                        .unwrap();
+                    assert_eq!(
+                        WorldGenLevel::can_survive(&region, &sapling, &pos),
+                        survives,
+                        "{name} stage {stage} on {}",
+                        support.block().name()
+                    );
+                }
+            }
+        }
+        let mangrove = BlockState::of(BlockId::from_name("minecraft:mangrove_propagule").unwrap());
+        let unavailable = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            WorldGenLevel::can_survive(&region, &mangrove, &pos)
+        }));
+        assert!(
+            unavailable.is_err(),
+            "mangrove must not inherit the plain sapling path"
+        );
+    }
 
     /// A test chunk — a superflat content chunk at `pos` with `sections_count`
     /// world sections, classified with the server's air/motion predicates.

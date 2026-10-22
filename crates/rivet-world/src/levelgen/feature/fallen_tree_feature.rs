@@ -2,12 +2,14 @@
 //! postprocessing. Source: pinned Paper 26.2 FallenTreeFeature.java.
 use super::configurations::fallen_tree_configuration::FallenTreeConfiguration;
 use super::stateproviders::block_state_provider::block_state_provider_get_state;
-use super::tree_feature::valid_tree_pos;
+use super::tree_feature::{TreeLevel, valid_tree_pos};
+use super::treedecorators::{TreeDecorator, TreeDecoratorContext};
 use super::{FeatureBehavior, FeaturePlaceContext, mark_above_for_post_processing};
 use crate::level::WorldGenLevel;
 use rivet_registry::block_state_properties::BlockStateProperties;
 use rivet_registry::core::{BlockPos, Direction, Plane};
 use rivet_util::RandomSource;
+use std::cell::RefCell;
 
 #[derive(Debug)]
 pub struct FallenTreeFeature;
@@ -19,17 +21,14 @@ impl FeatureBehavior<FallenTreeConfiguration> for FallenTreeFeature {
         context: &mut FeaturePlaceContext<'_, FallenTreeConfiguration, R>,
     ) -> bool {
         let config = context.config;
-        if let Some(d) = config
-            .stump_decorators
-            .first()
-            .or(config.log_decorators.first())
-        {
-            panic!("tree decorator {} is not implemented", d.type_name);
+        for decorator in config.stump_decorators.iter().chain(&config.log_decorators) {
+            decorator.require_supported();
         }
         let level = &mut *context.level;
         let random = &mut *context.random;
         let origin = *context.origin;
         place_log(config, level, random, &origin, None);
+        decorate_logs(level, random, &[origin], &config.stump_decorators);
         let direction = Plane::Horizontal.get_random_direction(random);
         let length = config.log_length.sample(random) - 2;
         let mut start = origin
@@ -56,6 +55,7 @@ impl FeatureBehavior<FallenTreeConfiguration> for FallenTreeFeature {
                 gap = 0;
             }
         }
+        let mut log_insertions = Vec::new();
         for i in 0..length {
             place_log(
                 config,
@@ -64,8 +64,28 @@ impl FeatureBehavior<FallenTreeConfiguration> for FallenTreeFeature {
                 &start.relative_steps(&direction, i),
                 Some(direction),
             );
+            log_insertions.push(start.relative_steps(&direction, i));
         }
+        decorate_logs(level, random, &log_insertions, &config.log_decorators);
         true
+    }
+}
+fn decorate_logs<R: RandomSource>(
+    level: &mut dyn WorldGenLevel,
+    random: &mut R,
+    logs: &[BlockPos],
+    decorators: &[TreeDecorator],
+) {
+    if decorators.is_empty() {
+        return;
+    }
+    let level = TreeLevel(RefCell::new(level));
+    let mut setter = |pos: &BlockPos, state| level.write(pos, state);
+    let height_at = |ty, x, z| level.0.borrow_mut().get_height_at(ty, x, z);
+    let mut context =
+        TreeDecoratorContext::new(&level, &mut setter, random, logs, &[], &[], &height_at);
+    for decorator in decorators {
+        decorator.place(&mut context);
     }
 }
 fn over_solid_ground(level: &dyn WorldGenLevel, pos: &BlockPos) -> bool {
@@ -92,6 +112,86 @@ fn place_log<R: RandomSource>(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn generated_fallen_trees_match_actual_paper_write_sequences_and_rng_continuation() {
+        use super::super::configurations::fallen_tree_configuration::fallen_tree_configuration_codec;
+        use rivet_registry::{
+            access::RegistryAccess, generated::feature_data::CONFIGURED_FEATURE_BY_NAME,
+            registry_ops::RegistryOps,
+        };
+        use rivet_serialization::json_ops::JsonOps;
+        use rivet_util::random::XoroshiroRandomSource;
+        let ops = RegistryOps::create_from_access(&JsonOps::INSTANCE, RegistryAccess::empty());
+        let codec = fallen_tree_configuration_codec();
+        let fixtures = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/rivet-oracle/fixtures/fallen-trees.jsonl"
+        ));
+        let mut cases = 0;
+        for line in fixtures
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            let row: serde_json::Value = serde_json::from_str(line).expect("Paper fixture JSON");
+            let feature = format!("minecraft:{}", row["feature"].as_str().unwrap());
+            let entry = &CONFIGURED_FEATURE_BY_NAME[feature.as_str()];
+            let payload: serde_json::Value = serde_json::from_str(entry.json).unwrap();
+            let config = codec
+                .parse(&ops, &payload["config"])
+                .result()
+                .unwrap_or_else(|| panic!("generated fallen config {feature} must decode"))
+                .clone();
+            let xyz: [i32; 3] = serde_json::from_value(row["origin"].clone()).unwrap();
+            let origin = BlockPos::new(xyz[0], xyz[1], xyz[2]);
+            let mut ground = Ground {
+                states: HashMap::new(),
+                writes: Vec::new(),
+                has_ground: row["terrain"] == "flat",
+                ground_y: xyz[1],
+            };
+            let mut random = XoroshiroRandomSource::new(row["seed"].as_i64().unwrap());
+            let result = FALLEN_TREE.place(&mut FeaturePlaceContext::new(
+                None,
+                &mut ground,
+                &TestGenerator,
+                &mut random,
+                &origin,
+                &config,
+            ));
+            assert_eq!(
+                result,
+                row["result"].as_bool().unwrap(),
+                "Paper result {line}"
+            );
+            let actual: Vec<[i64; 5]> = ground
+                .writes
+                .iter()
+                .map(|(pos, state, flags)| {
+                    [
+                        pos.get_x() as i64,
+                        pos.get_y() as i64,
+                        pos.get_z() as i64,
+                        state.id().0 as i64,
+                        *flags as i64,
+                    ]
+                })
+                .collect();
+            let expected: Vec<[i64; 5]> = serde_json::from_value(row["writes"].clone()).unwrap();
+            assert_eq!(actual, expected, "Paper write sequence {line}");
+            assert_eq!(
+                random.next_long(),
+                row["next_long"].as_i64().unwrap(),
+                "Paper RNG continuation {line}"
+            );
+            cases += 1;
+        }
+        assert_eq!(
+            cases, 80,
+            "all actual datapack-configured Paper cases exercised"
+        );
+    }
+
     use super::*;
     use crate::level::height_accessor::LevelHeightAccessor;
     use crate::levelgen::feature::stateproviders::simple_state_provider::SimpleStateProvider;
@@ -104,6 +204,7 @@ mod tests {
         states: HashMap<BlockPos, BlockState>,
         writes: Vec<(BlockPos, BlockState, u32)>,
         has_ground: bool,
+        ground_y: i32,
     }
     fn state(name: &str) -> BlockState {
         BlockState::of(BlockId::from_name(name).unwrap())
@@ -122,7 +223,7 @@ mod tests {
         }
         fn get_block_state(&self, pos: &BlockPos) -> BlockState {
             self.states.get(pos).copied().unwrap_or_else(|| {
-                if self.has_ground && pos.get_y() == 0 {
+                if self.has_ground && pos.get_y() < self.ground_y {
                     state("minecraft:dirt")
                 } else {
                     state("minecraft:air")
@@ -152,6 +253,7 @@ mod tests {
             states: HashMap::new(),
             writes: Vec::new(),
             has_ground: true,
+            ground_y: 1,
         };
         let mut random = RecordingRandom::new(42);
         let origin = BlockPos::new(0, 1, 0);
@@ -195,6 +297,7 @@ mod tests {
             states: HashMap::new(),
             writes: Vec::new(),
             has_ground: false,
+            ground_y: 1,
         };
         let mut random = RecordingRandom::new(42);
         assert!(FALLEN_TREE.place(&mut FeaturePlaceContext::new(

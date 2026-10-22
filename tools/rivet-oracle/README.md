@@ -11,6 +11,35 @@ diffs vs Rivet, packet round-trips) builds on top of these fixtures later.
 
 ## Status: what works
 
+### Direct tree-placement probes
+
+The scripts below execute the real feature and block-update implementations from
+Paper commit `0a993450f129c4942c2a9ed45ba047412b4667cf`, using a storage/tick-recording
+world proxy. They require the materialized Paper runtime under `work/run` and
+Java 25 (`RIVET_JAVA_HOME` selects its installation); each script checks the jar's
+commit before running. These are direct feature tests, not full-world parity.
+
+- `bash scripts/run_tree_placement_probe.sh`: 68 standing-tree cases, exact
+  datapack configs, ordered write/final-block/tick SHA-256s and both random-stream
+  continuations. Terrain is flat dirt, with four seeds at `(0,64,0)`.
+- `bash scripts/run_fallen_tree_probe.sh`: 80 fallen-tree cases, every ordered
+  write and feature RNG continuation, across flat/void terrain and two origins.
+- `bash scripts/run_block_pos_set_probe.sh`: 26 Java collection snapshots,
+  including resizing, red-black bins, iterator removal and natural tree sets.
+  Equal-full-hash tree bins explicitly need JVM object-identity ordering; the
+  Rust implementation reports this unsupported case rather than inventing it.
+- `bash scripts/run_update_shape_probe.sh`: actual declaring update-shape owners
+  for all 1,196 blocks and exact voxel-boundary face traversal samples.
+
+The matching fixtures live directly under `fixtures/`. Rust tests in
+`tree_placement_fixture`, `fallen_tree_feature`, `java_block_pos_set` and
+`block_shape_update` consume them. The standing and fallen cases together cover
+the 21 currently executable tree configurations in the generated overworld
+closure, plus plain birch. Bee occupants, mangrove roots and pale-oak extensions
+remain separate untranslated capabilities.
+
+### Server and chunk captures
+
 - The Paper 26.2 server **boots headless** from the built paperclip bundler
   jar and reaches `Done (...)!` in ~5s.
 - A fixed-seed superflat world is generated and a **deterministic golden
