@@ -21,6 +21,7 @@ pub mod chunk_map;
 pub mod chunk_result;
 pub mod chunk_storage_worker;
 pub mod chunk_tracking_view;
+pub mod entity_construction;
 pub mod entity_id_allocator;
 pub mod full_chunk_status;
 pub mod generated_chunk_owner;
@@ -29,10 +30,17 @@ pub mod level_chunk;
 pub mod player_chunk_loader;
 pub mod region_backed;
 pub mod server_level;
+pub mod structure_generate_events;
 pub mod structure_generation;
 pub mod structure_manager;
+pub mod structure_placement;
+pub mod structure_placement_adapter;
+mod structure_snapshot_blocks;
+pub mod structure_snapshot_data;
 pub mod structure_spawn_events;
+pub mod structure_transformer;
 pub mod world_gen_region;
+pub mod world_identity;
 
 #[cfg(test)]
 pub(crate) mod test_support;

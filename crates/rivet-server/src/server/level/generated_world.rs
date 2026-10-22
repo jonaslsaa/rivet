@@ -216,9 +216,11 @@ use rivet_world::levelgen::placement::{
 };
 use rivet_world::levelgen::world_generation_context::WorldGenerationContext;
 
+use super::structure_placement::StructurePlacementError;
+use super::structure_placement_adapter::StructurePlacementRuntime;
 use crate::server::level::level_chunk::{LevelChunk, LevelChunkBridgeError, StructureKey};
 use crate::server::level::world_gen_region::{
-    CenterHolder, GenerationChunkHolderView, OwnedProtoHolder, WorldGenRegion,
+    BorrowedProtoHolder, CenterHolder, GenerationChunkHolderView, OwnedProtoHolder, WorldGenRegion,
 };
 use crate::server::lighting::{GeneratedLightStorage, GeneratedLightWorkspace};
 
@@ -229,6 +231,7 @@ pub enum GeneratedChunkError {
     /// (`GenError::BiomesNotGenerated`/`DataNotCarried`), a demotion, or a
     /// wired-task mismatch. The chunk is left untouched.
     Generation(GenError),
+    StructurePlacement(Arc<StructurePlacementError>),
     /// A target past `LIGHT` — the executor rejected it before running any
     /// work. Naming the requested status makes the downstream boundary explicit.
     /// (A target through a light step with no engine is instead refused as
@@ -257,6 +260,9 @@ impl fmt::Debug for GeneratedChunkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Generation(error) => f.debug_tuple("Generation").field(error).finish(),
+            Self::StructurePlacement(error) => {
+                f.debug_tuple("StructurePlacement").field(error).finish()
+            }
             Self::UnsupportedStatus(status) => {
                 f.debug_tuple("UnsupportedStatus").field(status).finish()
             }
@@ -281,6 +287,9 @@ impl fmt::Display for GeneratedChunkError {
         match self {
             GeneratedChunkError::Generation(inner) => {
                 write!(f, "chunk generation failed: {inner}")
+            }
+            GeneratedChunkError::StructurePlacement(error) => {
+                write!(f, "structure placement failed: {error}")
             }
             GeneratedChunkError::UnsupportedStatus(status) => write!(
                 f,
@@ -950,6 +959,8 @@ impl BiomeResolver for OverworldNoiseBiomeSource {
 pub struct GenerationChunkState {
     generator: Arc<OverworldGenerator>,
     structure_feature_count: Option<usize>,
+    structure_placement: Option<Arc<StructurePlacementRuntime>>,
+    structure_placement_error: Option<Arc<StructurePlacementError>>,
     chunk: ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
     features_failure: Option<GenError>,
     feature_writebacks: FeatureWritebacks,
@@ -992,7 +1003,9 @@ impl GenerationChunkState {
         !self.feature_dependencies.is_empty()
     }
     pub(super) fn has_structure_capability(&self) -> bool {
-        self.structure_feature_count.is_some() || self.cached_structure_terrain.is_some()
+        self.structure_feature_count.is_some()
+            || self.cached_structure_terrain.is_some()
+            || self.structure_placement.is_some()
     }
     pub(super) fn cached_structure_terrain(
         &self,
@@ -1019,6 +1032,8 @@ impl GenerationChunkState {
             chunk,
             generator,
             structure_feature_count,
+            structure_placement,
+            structure_placement_error,
             features_failure,
             feature_writebacks,
             feature_dependencies,
@@ -1029,6 +1044,8 @@ impl GenerationChunkState {
             pos: chunk.get_pos(),
             generator,
             structure_feature_count,
+            structure_placement,
+            structure_placement_error,
             features_failure,
             feature_writebacks,
             feature_dependencies,
@@ -1067,6 +1084,8 @@ pub struct GenerationChunkLoan {
     pos: ChunkPos,
     generator: Arc<OverworldGenerator>,
     structure_feature_count: Option<usize>,
+    structure_placement: Option<Arc<StructurePlacementRuntime>>,
+    structure_placement_error: Option<Arc<StructurePlacementError>>,
     features_failure: Option<GenError>,
     feature_writebacks: FeatureWritebacks,
     feature_dependencies: FeatureWritebacks,
@@ -1091,6 +1110,8 @@ impl GenerationChunkLoan {
             chunk,
             generator: self.generator,
             structure_feature_count: self.structure_feature_count,
+            structure_placement: self.structure_placement,
+            structure_placement_error: self.structure_placement_error,
             features_failure: self.features_failure,
             feature_writebacks: self.feature_writebacks,
             feature_dependencies: self.feature_dependencies,
@@ -1101,6 +1122,8 @@ impl GenerationChunkLoan {
 }
 
 pub struct GenerationChunkHolder {
+    structure_placement: Rc<RefCell<Option<Arc<StructurePlacementRuntime>>>>,
+    structure_placement_error: Rc<RefCell<Option<Arc<StructurePlacementError>>>>,
     structure_terrain:
         Rc<RefCell<Option<Arc<rivet_world::levelgen::noise::beardifier::Beardifier>>>>,
     structure_feature_count: Option<usize>,
@@ -1230,6 +1253,8 @@ impl GenerationChunkHolder {
         structure_feature_count: Option<usize>,
     ) -> Self {
         let pending_feature_writebacks = Rc::new(RefCell::new(None));
+        let structure_placement = Rc::new(RefCell::new(None::<Arc<StructurePlacementRuntime>>));
+        let structure_placement_error = Rc::new(RefCell::new(None::<Arc<StructurePlacementError>>));
         let structure_terrain = Rc::new(RefCell::new(
             None::<Arc<rivet_world::levelgen::noise::beardifier::Beardifier>>,
         ));
@@ -1368,13 +1393,27 @@ impl GenerationChunkHolder {
                 let generator = Arc::clone(&generator);
                 let writeback_sink = Rc::clone(&pending_feature_writebacks);
                 let feature_workspace = feature_workspace.clone();
+                let structure_placement = Rc::clone(&structure_placement);
+                let structure_placement_error = Rc::clone(&structure_placement_error);
                 move |chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>| {
-                    match run_biome_decoration(
-                        chunk,
-                        &generator,
-                        &feature_workspace,
-                        structure_feature_count,
-                    ) {
+                    let placement = structure_placement.borrow().clone();
+                    let result = if let Some(placement) = placement {
+                        run_biome_decoration_native(
+                            chunk,
+                            &generator,
+                            &feature_workspace,
+                            &placement,
+                            &structure_placement_error,
+                        )
+                    } else {
+                        run_biome_decoration(
+                            chunk,
+                            &generator,
+                            &feature_workspace,
+                            structure_feature_count,
+                        )
+                    };
+                    match result {
                         Ok(writebacks) => {
                             *writeback_sink.borrow_mut() = Some(writebacks);
                             Ok(())
@@ -1392,6 +1431,8 @@ impl GenerationChunkHolder {
         // `generate_through(ChunkStatus::Spawn)` remains a typed refusal rather
         // than silently reverting to a detached center-only spawn.
         GenerationChunkHolder {
+            structure_placement,
+            structure_placement_error,
             structure_terrain,
             structure_feature_count,
             chunk,
@@ -1411,6 +1452,8 @@ impl GenerationChunkHolder {
         let Self {
             generator,
             structure_feature_count,
+            structure_placement,
+            structure_placement_error,
             chunk,
             context,
             features_failure,
@@ -1426,9 +1469,13 @@ impl GenerationChunkHolder {
             "unfinished FEATURES writeback transaction"
         );
         let cached_structure_terrain = structure_terrain.borrow().clone();
+        let structure_placement = structure_placement.borrow().clone();
+        let structure_placement_error = structure_placement_error.borrow().clone();
         GenerationChunkState {
             generator,
             structure_feature_count,
+            structure_placement,
+            structure_placement_error,
             chunk,
             features_failure,
             feature_writebacks,
@@ -1477,6 +1524,8 @@ impl GenerationChunkHolder {
         }
         let GenerationChunkState {
             chunk,
+            structure_placement,
+            structure_placement_error,
             features_failure,
             feature_writebacks,
             feature_dependencies,
@@ -1494,6 +1543,10 @@ impl GenerationChunkHolder {
         holder.features_failure = features_failure;
         holder.feature_writebacks = feature_writebacks;
         holder.structure_terrain.replace(cached_structure_terrain);
+        holder.structure_placement.replace(structure_placement);
+        holder
+            .structure_placement_error
+            .replace(structure_placement_error);
         Ok((holder, generated_light_storage))
     }
 
@@ -1581,6 +1634,33 @@ impl GenerationChunkHolder {
     /// `GeneratedChunkError::UnsupportedStatus`. FULL is deliberately a separate
     /// consuming promotion after an exact SPAWN parent, not a borrowed executor
     /// rung.
+    /// Attach the world's real native decoration authority. Installing it can
+    /// clear only the old pre-placement missing-capability marker, never a
+    /// failure after actual structure/feature mutations.
+    pub fn install_structure_placement(
+        &mut self,
+        runtime: Arc<StructurePlacementRuntime>,
+    ) -> Result<(), Arc<StructurePlacementRuntime>> {
+        if !runtime.belongs_to(&self.generator) {
+            return Err(runtime);
+        }
+        if let Some(existing) = self.structure_placement.borrow().as_ref() {
+            return if Arc::ptr_eq(existing, &runtime) {
+                Ok(())
+            } else {
+                Err(runtime)
+            };
+        }
+        self.structure_placement.replace(Some(runtime));
+        if matches!(
+            self.features_failure,
+            Some(GenError::StructureDecorationIndexUnavailable { .. })
+        ) {
+            self.features_failure = None;
+        }
+        Ok(())
+    }
+
     pub fn generate_through(&mut self, target: ChunkStatus) -> Result<(), GeneratedChunkError> {
         // FULL is always the consuming ProtoChunk → LevelChunk boundary. It
         // must win even after a cached FEATURES failure: callers must never
@@ -1592,6 +1672,9 @@ impl GenerationChunkHolder {
         if target.index() >= ChunkStatus::Features.index()
             && let Some(error) = self.features_failure
         {
+            if let Some(error) = self.structure_placement_error.borrow().clone() {
+                return Err(GeneratedChunkError::StructurePlacement(error));
+            }
             return Err(GeneratedChunkError::Generation(error));
         }
         let current = self.chunk.get_persisted_status();
@@ -1603,7 +1686,12 @@ impl GenerationChunkHolder {
         // the terminal failure cache.
         let can_enter_features = current.index() < ChunkStatus::Features.index()
             && target.index() >= ChunkStatus::Features.index();
-        let features_snapshot = can_enter_features.then(|| snapshot_generated_chunk(&self.chunk));
+        // Native structure scopes are source partial writes, not a cloned
+        // transaction. Retain terrain, piece bounds, entity IDs/RNG and every
+        // dependency on failures. Legacy standalone feature fixtures keep
+        // their existing transactional test contract.
+        let features_snapshot = (can_enter_features && self.structure_placement.borrow().is_none())
+            .then(|| snapshot_generated_chunk(&self.chunk));
         let prior_features_failure = self.features_failure;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.context
@@ -1627,7 +1715,7 @@ impl GenerationChunkHolder {
         };
         match result {
             Ok(()) => {
-                if features_snapshot.is_some() {
+                if can_enter_features {
                     self.feature_writebacks = self
                         .pending_feature_writebacks
                         .borrow_mut()
@@ -1655,6 +1743,14 @@ impl GenerationChunkHolder {
                 match error {
                     GenError::UnsupportedStatus(status) => {
                         Err(GeneratedChunkError::UnsupportedStatus(status))
+                    }
+                    GenError::StructurePlacementUnavailable { .. } => {
+                        Err(GeneratedChunkError::StructurePlacement(
+                            self.structure_placement_error
+                                .borrow()
+                                .clone()
+                                .expect("native placement marker retains its typed cause"),
+                        ))
                     }
                     error => Err(GeneratedChunkError::Generation(error)),
                 }
@@ -1805,6 +1901,7 @@ fn is_features_failure(error: GenError) -> bool {
             | GenError::FeatureSetOrderingUnavailable { .. }
             | GenError::SettingsNotGenerated { .. }
             | GenError::StructureDecorationIndexUnavailable { .. }
+            | GenError::StructurePlacementUnavailable { .. }
     )
 }
 
@@ -2074,6 +2171,107 @@ fn compose_feature_region_with_workspace<'a>(
         );
     region.set_region_random(random);
     region
+}
+
+/// Native FEATURES borrows the actual center proto and moves every supplied
+/// dependency into the region. No regeneration, copied chunks or placeholder
+/// STRUCTURE_STARTS are permitted at this production boundary.
+fn compose_feature_region_canonical<'a>(
+    center: &'a mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+    generator: &Arc<OverworldGenerator>,
+    workspace: &FeatureWorkspace,
+) -> Result<WorldGenRegion<'a, BlockState, WorldgenBiomeId, StructureKey>, StructurePlacementError>
+{
+    use super::structure_manager::StructureManagerError;
+    let pos = center.get_pos();
+    if workspace.with_chunk(pos, |chunk| chunk.is_some()) {
+        return Err(StructurePlacementError::DuplicateCanonicalChunk(pos));
+    }
+    let step = GENERATION_PYRAMID
+        .get_step_to(ChunkStatus::Features)
+        .clone();
+    let radius = step.direct_dependencies().size() as i32 - 1;
+    let width = radius * 2 + 1;
+    // Complete availability validation before transferring the first owner.
+    for dx in -radius..=radius {
+        for dz in -radius..=radius {
+            let dependency = ChunkPos::new(pos.x().wrapping_add(dx), pos.z().wrapping_add(dz));
+            let required = step
+                .direct_dependencies()
+                .get(dx.abs().max(dz.abs()) as usize);
+            let actual = if dependency == pos {
+                Some(center.get_persisted_status())
+            } else {
+                workspace.with_chunk(dependency, |chunk| {
+                    chunk.map(ProtoChunk::get_persisted_status)
+                })
+            };
+            match actual {
+                None => {
+                    return Err(StructureManagerError::MissingChunk {
+                        pos: dependency,
+                        required,
+                    }
+                    .into());
+                }
+                Some(actual) if actual.is_before(required) => {
+                    return Err(StructureManagerError::InsufficientStatus {
+                        pos: dependency,
+                        actual,
+                        required,
+                    }
+                    .into());
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    let mut holders: Vec<
+        Box<dyn GenerationChunkHolderView<BlockState, WorldgenBiomeId, StructureKey> + 'a>,
+    > = Vec::with_capacity((width * width) as usize);
+    for dx in -radius..=radius {
+        for dz in -radius..=radius {
+            let dependency = ChunkPos::new(pos.x().wrapping_add(dx), pos.z().wrapping_add(dz));
+            if dependency != pos {
+                holders.push(Box::new(OwnedProtoHolder::new(
+                    workspace
+                        .take(dependency)
+                        .expect("validated exclusive canonical dependency"),
+                )));
+            }
+        }
+    }
+    holders.insert(
+        (radius * width + radius) as usize,
+        Box::new(BorrowedProtoHolder::new(center)),
+    );
+    let cache = StaticCache2D::from_entries(
+        pos.x().wrapping_sub(radius),
+        pos.z().wrapping_sub(radius),
+        width,
+        width,
+        holders,
+    );
+    let mut region = WorldGenRegion::new(
+        cache,
+        pos,
+        step,
+        generator.seed(),
+        generator.generator().get_min_y(),
+        generator.generator().get_gen_depth(),
+        generator.generator().get_sea_level(),
+        Arc::new(generator.biome_source.clone()),
+        generator.feature_access().clone(),
+    );
+    region.set_region_random(
+        generator
+            .random_state()
+            .get_or_create_random_factory(&Identifier::with_default_namespace(
+                "worldgen_region_random",
+            ))
+            .at(pos.get_min_block_x(), 0, pos.get_min_block_z()),
+    );
+    Ok(region)
 }
 
 /// `possibleBiomes` — the 3x3 biome union, gathered in Paper order and
@@ -3577,6 +3775,37 @@ fn run_biome_decoration_through(
     workspace: &FeatureWorkspace,
     max_steps: usize,
 ) -> Result<FeatureWritebacks, GenError> {
+    run_biome_decoration_impl(chunk, generator, workspace, max_steps, None)
+}
+
+fn run_biome_decoration_native(
+    chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+    generator: &Arc<OverworldGenerator>,
+    workspace: &FeatureWorkspace,
+    placement: &StructurePlacementRuntime,
+    errors: &RefCell<Option<Arc<StructurePlacementError>>>,
+) -> Result<FeatureWritebacks, GenError> {
+    run_biome_decoration_impl(
+        chunk,
+        generator,
+        workspace,
+        Decoration::VALUES
+            .len()
+            .max(generator.feature_plan()?.feature_list.len()),
+        Some((placement, errors)),
+    )
+}
+
+fn run_biome_decoration_impl(
+    chunk: &mut ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+    generator: &Arc<OverworldGenerator>,
+    workspace: &FeatureWorkspace,
+    max_steps: usize,
+    native: Option<(
+        &StructurePlacementRuntime,
+        &RefCell<Option<Arc<StructurePlacementError>>>,
+    )>,
+) -> Result<FeatureWritebacks, GenError> {
     chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
     let center_pos = chunk.get_pos();
     let origin =
@@ -3587,123 +3816,148 @@ fn run_biome_decoration_through(
     let decoration_seed =
         random.set_decoration_seed(generator.seed(), origin.get_x(), origin.get_z());
 
-    let mut region = compose_feature_region_with_workspace(chunk, generator, Some(workspace));
-    let union_biomes = gather_possible_biomes(&region, generator);
-
-    // Resolve the FULL `biomeSource.possibleBiomes()` list in source order and
-    // build the FeatureSorter once from it — Paper's
-    // `ChunkGenerator.featuresPerStep` (`ChunkGenerator.java` 97-100), NOT the
-    // 3x3 union. The union only picks which global indices execute per step.
-    // The placed-feature holders are `Holder::Reference` over one fabricated
-    // `PLACED_FEATURE` registry id (the generated tables are keyed by name; the
-    // FeatureSorter keys on holder identity, so a single fabricated registry
-    // collapses the biomes' shared steps exactly like Paper's registry does).
-    // The `features` lists and sorter are built once in the immutable per-world
-    // plan (`OverworldGenerator::feature_plan`), matching Paper's memoized
-    // `featuresPerStep` rather than rebuilding them for each target extraction.
-    let plan = generator.feature_plan()?;
-    let placed_by_id = &plan.placed_by_id;
-    let settings_sources = &plan.settings_sources;
-    let feature_list = &plan.feature_list;
-
-    // The per-step loop — Paper's `addVanillaDecorations`. The structure body
-    // remains deferred with the unported structure manager, but the capability
-    // check above prevents this path from pretending that the structure loop
-    // consumed no work. Once a caller proves the capability, placed-feature
-    // seeds still use Paper's independent `globalIndexOfFeature`.
-    let generation_steps = Decoration::VALUES.len().max(feature_list.len());
-    // Paper walks steps in ascending order and, within a step, the sorted
-    // global feature indices of the union biomes mapped through the full-list
-    // sorter's `indexMapping`. Registry-backed configured features execute
-    // through their exact placed-feature chains; unsupported selected leaves
-    // stop the run with a typed boundary.
-    for step_index in 0..max_steps.min(generation_steps) {
-        if step_index >= feature_list.len() {
-            continue;
-        }
-        let step_feature_data = &feature_list[step_index];
-        let mut possible_features_this_step = Vec::new();
-        for name in &union_biomes {
-            let Some(settings) = settings_sources
-                .iter()
-                .find(|(_, source_name)| *source_name == *name)
-                .map(|(settings, _)| settings)
-            else {
-                continue;
-            };
-            if step_index < settings.features().len() {
-                for holder in settings.features()[step_index].iter() {
-                    if let Some(index) = step_feature_data.index_mapping(holder) {
-                        possible_features_this_step.push(index);
-                    }
-                }
+    let mut region = if let Some((_, errors)) = native {
+        compose_feature_region_canonical(chunk, generator, workspace).map_err(|error| {
+            *errors.borrow_mut() = Some(Arc::new(error));
+            GenError::StructurePlacementUnavailable {
+                chunk_pos: center_pos,
+                step_index: 0,
             }
-        }
-        possible_features_this_step.sort_unstable();
-        possible_features_this_step.dedup();
-        for global_feature_index in possible_features_this_step {
-            let feature = &feature_list[step_index].features[global_feature_index];
-            let feature_key = match feature {
-                Holder::Reference { id, .. } => {
-                    placed_by_id.get(id).copied().unwrap_or("minecraft:unknown")
+        })?
+    } else {
+        compose_feature_region_with_workspace(chunk, generator, Some(workspace))
+    };
+    // Always reclaim native loans, including when a feature or transformer
+    // panics. The source's partial block/entity/start mutations are retained.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || -> Result<(), GenError> {
+            let union_biomes = gather_possible_biomes(&region, generator);
+
+            // Resolve the FULL `biomeSource.possibleBiomes()` list in source order and
+            // build the FeatureSorter once from it — Paper's
+            // `ChunkGenerator.featuresPerStep` (`ChunkGenerator.java` 97-100), NOT the
+            // 3x3 union. The union only picks which global indices execute per step.
+            // The placed-feature holders are `Holder::Reference` over one fabricated
+            // `PLACED_FEATURE` registry id (the generated tables are keyed by name; the
+            // FeatureSorter keys on holder identity, so a single fabricated registry
+            // collapses the biomes' shared steps exactly like Paper's registry does).
+            // The `features` lists and sorter are built once in the immutable per-world
+            // plan (`OverworldGenerator::feature_plan`), matching Paper's memoized
+            // `featuresPerStep` rather than rebuilding them for each target extraction.
+            let plan = generator.feature_plan()?;
+            let placed_by_id = &plan.placed_by_id;
+            let settings_sources = &plan.settings_sources;
+            let feature_list = &plan.feature_list;
+
+            // Native decoration runs the real registry-ordered structure pass
+            // first at each step. The legacy standalone fixture path retains
+            // its explicit caller-proven capability; it cannot authorize the
+            // native owner. Placed-feature seeds independently use the global
+            // feature index, never the number of structures at this step.
+            let generation_steps = Decoration::VALUES.len().max(feature_list.len());
+            // Paper walks steps in ascending order and, within a step, the sorted
+            // global feature indices of the union biomes mapped through the full-list
+            // sorter's `indexMapping`. Registry-backed configured features execute
+            // through their exact placed-feature chains; unsupported selected leaves
+            // stop the run with a typed boundary.
+            for step_index in 0..max_steps.min(generation_steps) {
+                if let Some((placement, errors)) = native {
+                    if let Err(error) =
+                        placement.place_step(&mut region, &mut random, decoration_seed, step_index)
+                    {
+                        *errors.borrow_mut() = Some(Arc::new(error));
+                        return Err(GenError::StructurePlacementUnavailable {
+                            chunk_pos: center_pos,
+                            step_index,
+                        });
+                    }
                 }
-                Holder::Direct(_) => "minecraft:unknown",
-            };
-            // Paper's configurable population seed path uses the configured
-            // feature holder (`PlacedFeature.feature()`), not the surrounding
-            // placed-feature key. A configured seed other than `-1` reseeds via
-            // `setDecorationSeed` first, consuming its two scale draws, then
-            // `setFeatureSeed` receives that derived population seed.
-            set_paper_feature_seed(
-                &mut random,
-                generator,
-                decoration_seed,
-                &origin,
-                feature_key,
-                global_feature_index,
-                step_index,
-            );
-            let executable =
-                configured_feature_is_executable(feature_key, generator).map_err(|_| {
-                    GenError::FeaturePlacementDecode {
-                        chunk_pos: center_pos,
-                        step_index,
-                        global_feature_index,
-                        feature_key,
+                if step_index >= feature_list.len() {
+                    continue;
+                }
+                let step_feature_data = &feature_list[step_index];
+                let mut possible_features_this_step = Vec::new();
+                for name in &union_biomes {
+                    let Some(settings) = settings_sources
+                        .iter()
+                        .find(|(_, source_name)| *source_name == *name)
+                        .map(|(settings, _)| settings)
+                    else {
+                        continue;
+                    };
+                    if step_index < settings.features().len() {
+                        for holder in settings.features()[step_index].iter() {
+                            if let Some(index) = step_feature_data.index_mapping(holder) {
+                                possible_features_this_step.push(index);
+                            }
+                        }
                     }
-                })?;
-            if executable {
-                let placed = decode_placed_feature(feature_key, generator).map_err(|_| {
-                    GenError::FeaturePlacementDecode {
-                        chunk_pos: center_pos,
-                        step_index,
-                        global_feature_index,
-                        feature_key,
-                    }
-                })?;
-                let dispatch_generator = FeatureSelectionGenerator {
-                    generator: Arc::clone(generator),
-                    feature_key,
-                };
-                let placement = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    placed.place_with_biome_check(
-                        &mut region,
-                        &dispatch_generator,
+                }
+                possible_features_this_step.sort_unstable();
+                possible_features_this_step.dedup();
+                for global_feature_index in possible_features_this_step {
+                    let feature = &feature_list[step_index].features[global_feature_index];
+                    let feature_key = match feature {
+                        Holder::Reference { id, .. } => {
+                            placed_by_id.get(id).copied().unwrap_or("minecraft:unknown")
+                        }
+                        Holder::Direct(_) => "minecraft:unknown",
+                    };
+                    // Paper's configurable population seed path uses the configured
+                    // feature holder (`PlacedFeature.feature()`), not the surrounding
+                    // placed-feature key. A configured seed other than `-1` reseeds via
+                    // `setDecorationSeed` first, consuming its two scale draws, then
+                    // `setFeatureSeed` receives that derived population seed.
+                    set_paper_feature_seed(
                         &mut random,
+                        generator,
+                        decoration_seed,
                         &origin,
-                    );
-                }));
-                if let Err(payload) = placement {
-                    if let Some(error) = generated_set_ordering_error(
-                        payload.as_ref(),
-                        center_pos,
-                        step_index,
-                        global_feature_index,
                         feature_key,
-                    ) {
-                        return Err(error);
-                    }
-                    let boundary =
+                        global_feature_index,
+                        step_index,
+                    );
+                    let executable = configured_feature_is_executable(feature_key, generator)
+                        .map_err(|_| GenError::FeaturePlacementDecode {
+                            chunk_pos: center_pos,
+                            step_index,
+                            global_feature_index,
+                            feature_key,
+                        })?;
+                    if executable {
+                        let placed =
+                            decode_placed_feature(feature_key, generator).map_err(|_| {
+                                GenError::FeaturePlacementDecode {
+                                    chunk_pos: center_pos,
+                                    step_index,
+                                    global_feature_index,
+                                    feature_key,
+                                }
+                            })?;
+                        let dispatch_generator = FeatureSelectionGenerator {
+                            generator: Arc::clone(generator),
+                            feature_key,
+                        };
+                        let placement =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                placed.place_with_biome_check(
+                                    &mut region,
+                                    &dispatch_generator,
+                                    &mut random,
+                                    &origin,
+                                );
+                            }));
+                        if let Err(payload) = placement {
+                            if let Some(error) = generated_set_ordering_error(
+                                payload.as_ref(),
+                                center_pos,
+                                step_index,
+                                global_feature_index,
+                                feature_key,
+                            ) {
+                                return Err(error);
+                            }
+                            let boundary =
                         generated_boundary_panic_message(payload.as_ref()).is_some_and(|message| {
                             message.starts_with("generated feature ")
                                 || (message.starts_with("tree root placer ")
@@ -3722,42 +3976,54 @@ fn run_biome_decoration_through(
                                     || message.contains("Biome.shouldFreeze is not implemented")
                                     || message.contains("Biome.shouldSnow is not implemented"))
                         });
-                    if boundary {
-                        return Err(GenError::FeaturePlacementDecode {
-                            chunk_pos: center_pos,
-                            step_index,
-                            global_feature_index,
-                            feature_key: generated_boundary_feature_key(
-                                payload.as_ref(),
-                                feature_key,
-                            ),
-                        });
+                            if boundary {
+                                return Err(GenError::FeaturePlacementDecode {
+                                    chunk_pos: center_pos,
+                                    step_index,
+                                    global_feature_index,
+                                    feature_key: generated_boundary_feature_key(
+                                        payload.as_ref(),
+                                        feature_key,
+                                    ),
+                                });
+                            }
+                            std::panic::resume_unwind(payload);
+                        }
+                        continue;
                     }
-                    std::panic::resume_unwind(payload);
-                }
-                continue;
-            }
-            let selected =
-                placement_selects(&mut region, generator, &mut random, &origin, feature_key)
+                    let selected = placement_selects(
+                        &mut region,
+                        generator,
+                        &mut random,
+                        &origin,
+                        feature_key,
+                    )
                     .map_err(|_| GenError::FeaturePlacementDecode {
                         chunk_pos: center_pos,
                         step_index,
                         global_feature_index,
                         feature_key,
                     })?;
-            if selected {
-                return Err(GenError::FeaturePlacementDecode {
-                    chunk_pos: center_pos,
-                    step_index,
-                    global_feature_index,
-                    feature_key,
-                });
+                    if selected {
+                        return Err(GenError::FeaturePlacementDecode {
+                            chunk_pos: center_pos,
+                            step_index,
+                            global_feature_index,
+                            feature_key,
+                        });
+                    }
+                }
             }
-        }
-    }
+            Ok(())
+        },
+    ));
     let owned_entries = region.into_owned_proto_entries();
     let mut retained_writebacks = Vec::with_capacity(8);
+    let preserve = native.is_some() || matches!(result, Ok(Ok(())));
     for (pos, chunk) in owned_entries {
+        if !preserve {
+            continue;
+        }
         // Move every owned proto into the authoritative workspace. Paper's
         // region borrows these scheduler-owned chunks, so heightmaps,
         // post-processing, block entities, and scheduled ticks must survive
@@ -3766,12 +4032,22 @@ fn run_biome_decoration_through(
         // FEATURES write zone.
         let distance_one = center_pos.get_chessboard_distance_coords(pos.x(), pos.z()) == 1;
         let diagnostic = distance_one.then(|| snapshot_generated_chunk(&chunk));
-        workspace.insert(chunk);
+        if native.is_some() {
+            workspace.put(chunk).unwrap_or_else(|_| {
+                panic!("native FEATURES loan collided with canonical chunk {pos:?}")
+            });
+        } else {
+            workspace.insert(chunk);
+        }
         if let Some(diagnostic) = diagnostic {
             retained_writebacks.push((pos, diagnostic));
         }
     }
-    Ok(retained_writebacks)
+    match result {
+        Ok(Ok(())) => Ok(retained_writebacks),
+        Ok(Err(error)) => Err(error),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 /// Compose the SPAWN step's exact radius-one `WorldGenRegion` cache. The
@@ -5097,6 +5373,10 @@ impl fmt::Debug for GenerationChunkHolder {
 }
 
 #[cfg(test)]
+#[path = "structure_placement_region_fixture.rs"]
+mod structure_placement_region_fixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     fn structure_start_with_references(
@@ -5504,6 +5784,8 @@ mod tests {
             features_failure: None,
             generator: Arc::clone(generator),
             structure_terrain: Rc::new(RefCell::new(None)),
+            structure_placement: Rc::new(RefCell::new(None)),
+            structure_placement_error: Rc::new(RefCell::new(None)),
             structure_feature_count: None,
             feature_writebacks: Vec::new(),
             pending_feature_writebacks: Rc::new(RefCell::new(None)),
@@ -5560,6 +5842,8 @@ mod tests {
             features_failure: None,
             generator,
             structure_terrain: Rc::new(RefCell::new(None)),
+            structure_placement: Rc::new(RefCell::new(None)),
+            structure_placement_error: Rc::new(RefCell::new(None)),
             structure_feature_count: None,
             feature_writebacks: Vec::new(),
             pending_feature_writebacks,
@@ -5631,6 +5915,8 @@ mod tests {
             features_failure: None,
             generator: Arc::clone(generator),
             structure_terrain: Rc::new(RefCell::new(None)),
+            structure_placement: Rc::new(RefCell::new(None)),
+            structure_placement_error: Rc::new(RefCell::new(None)),
             structure_feature_count: None,
             feature_writebacks: Vec::new(),
             pending_feature_writebacks,
@@ -6467,6 +6753,8 @@ mod tests {
             features_failure: None,
             generator,
             structure_terrain: Rc::new(RefCell::new(None)),
+            structure_placement: Rc::new(RefCell::new(None)),
+            structure_placement_error: Rc::new(RefCell::new(None)),
             structure_feature_count: None,
             feature_writebacks: Vec::new(),
             pending_feature_writebacks: Rc::new(RefCell::new(None)),
@@ -6541,6 +6829,8 @@ mod tests {
             features_failure: None,
             generator,
             structure_terrain: Rc::new(RefCell::new(None)),
+            structure_placement: Rc::new(RefCell::new(None)),
+            structure_placement_error: Rc::new(RefCell::new(None)),
             structure_feature_count: None,
             feature_writebacks: Vec::new(),
             pending_feature_writebacks: Rc::new(RefCell::new(None)),

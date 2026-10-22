@@ -428,6 +428,12 @@ where
         &self.entities
     }
 
+    /// `getEntities().clear()` used by CraftLimitedRegion after loading its
+    /// actual entity list, before saving the surviving native entities again.
+    pub fn clear_entities(&mut self) {
+        self.entities.clear();
+    }
+
     /// `ProtoChunk.packOffsetCoordinates(BlockPos)` — the packed section-relative
     /// `short` `(x & 15) | (y & 15) << 4 | (z & 15) << 8` (x low, z high — a
     /// different layout from `SectionPos.sectionRelativePos`).

@@ -1,6 +1,8 @@
 //! Actual Paper postProcess output on the same controlled world storage.
 //! Entity/Craft callbacks are deliberately unavailable: the source corpus covers
 //! legitimate no-entity paths, not fabricated successful entity construction.
+#[path = "mineshaft_chest_fixture.rs"]
+mod chest;
 use super::*;
 use crate::level::{WorldGenLevel, height_accessor::LevelHeightAccessor};
 use crate::levelgen::heightmap::Types;

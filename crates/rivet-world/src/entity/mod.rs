@@ -9,15 +9,18 @@
 //! - `MobCategory` — the **full** `StringRepresentable` enum (eight values, the
 //!   max/despawn/spawn-persist fields and the `CODEC`).
 //! - `EntityType` — the complete pinned built-in identity table (id, name and
-//!   category) with the by-name `CODEC`; entity constructors and behavior
-//!   remain outside this identity-only surface.
+//!   category) with the by-name `CODEC`; general entity constructors and
+//!   behavior remain outside this identity table.
 //! - `EntityTypes` — the `PIG` constant the `SpawnerData` compact constructor
 //!   falls back to for `MISC`-category types.
 //!
 //! IDs/names use generated registry data; categories are captured from the
-//! actual pinned Paper runtime. This does not implement entity behavior.
+//! actual pinned Paper runtime. [`chest_minecart`] separately implements the
+//! fresh native constructor/save slice required by mineshaft placement; it does
+//! not imply general entity loading, movement or ticking support.
 
 mod builtin_categories;
+pub mod chest_minecart;
 
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::data_result::DataResult;

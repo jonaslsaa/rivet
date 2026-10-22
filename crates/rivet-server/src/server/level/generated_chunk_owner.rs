@@ -69,6 +69,7 @@ pub struct GeneratedChunkOwner {
     required: HashMap<ChunkPos, ChunkStatus>,
     chunks: HashMap<ChunkPos, Entry>,
     structure_runtime: Option<super::structure_generation::StructureGenerationRuntime>,
+    structure_placement: Option<Arc<super::structure_placement_adapter::StructurePlacementRuntime>>,
 }
 
 impl GeneratedChunkOwner {
@@ -80,10 +81,28 @@ impl GeneratedChunkOwner {
             required: HashMap::new(),
             chunks: HashMap::new(),
             structure_runtime: None,
+            structure_placement: None,
         }
     }
     pub fn generator(&self) -> &Arc<OverworldGenerator> {
         &self.generator
+    }
+    pub fn install_structure_placement(
+        &mut self,
+        runtime: Arc<super::structure_placement_adapter::StructurePlacementRuntime>,
+    ) -> Result<(), Arc<super::structure_placement_adapter::StructurePlacementRuntime>> {
+        if !runtime.belongs_to(&self.generator) || self.structure_placement.is_some() {
+            return Err(runtime);
+        }
+        self.structure_placement = Some(runtime);
+        for entry in self.chunks.values_mut() {
+            if matches!(entry.failure, Some((_, GenerationOwnerError::Generation(GeneratedChunkError::Generation(
+                rivet_world::chunk::status::world_gen_context::GenError::StructureDecorationIndexUnavailable { .. }
+            ))))) {
+                entry.failure = None;
+            }
+        }
+        Ok(())
     }
     /// Installation is explicit and cannot transfer authority across worlds.
     /// On rejection the caller retains the complete runtime and its caches.
@@ -404,6 +423,14 @@ impl GeneratedChunkOwner {
                     );
                 }
             };
+            if let Some(runtime) = &self.structure_placement {
+                assert!(
+                    holder
+                        .install_structure_placement(Arc::clone(runtime))
+                        .is_ok(),
+                    "canonical owner retains the world's placement runtime"
+                );
+            }
             // LIGHT attachment is an explicit later job seam, not a fabricated
             // engine. Keep detached storage even if this rung refuses.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

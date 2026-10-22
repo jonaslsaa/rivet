@@ -169,6 +169,7 @@ impl Default for ServerLevelConfig {
 /// encoded at the type level. `ChunkMap` is owned by value (no `Arc<RwLock>`).
 pub struct ServerLevel {
     dimension: ResourceKey<Level>,
+    world_uuid: Option<rivet_util::mth::Uuid>,
     seed: i64,
     min_y: i32,
     height: i32,
@@ -262,6 +263,7 @@ impl ServerLevel {
         let view = ChunkTrackingView::of(spawn_chunk, chunk_map.server_view_distance());
         ServerLevel {
             dimension: config.dimension,
+            world_uuid: None,
             seed: config.seed,
             min_y: config.min_y,
             height: config.height,
@@ -282,6 +284,20 @@ impl ServerLevel {
     /// `ServerLevel.dimension()`.
     pub fn dimension(&self) -> &ResourceKey<Level> {
         &self.dimension
+    }
+
+    /// Actual Paper saved world identity. Legacy fixtures without metadata do
+    /// not acquire a synthetic UUID and cannot supply entity construction.
+    pub fn world_uuid(&self) -> Option<rivet_util::mth::Uuid> {
+        self.world_uuid
+    }
+
+    pub(crate) fn install_world_uuid(&mut self, uuid: rivet_util::mth::Uuid) {
+        assert!(
+            self.world_uuid.is_none_or(|existing| existing == uuid),
+            "world identity cannot change after installation"
+        );
+        self.world_uuid = Some(uuid);
     }
 
     /// `ServerLevel.getSeed()`.
