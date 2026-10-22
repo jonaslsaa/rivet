@@ -95,23 +95,13 @@
 //! `HolderGetter` threaded through the settings bootstrap (the
 //! `noise_generator_settings` callers).
 //!
-//! RivetTodo(#179): the `is_biome` `HolderSet`s the builders resolve are
-//! bound to whatever `HolderGetter<BiomeId>` is handed in. In the
-//! `worldgen_bootstraps` access the biome registry registers each
-//! `SURFACE_RULE_BIOMES` key under its real generated id (`BiomeId::from_name`),
-//! so a condition holder resolved through it is a `Reference` whose value (via
-//! `Holder::value`) is that real id. But `Registry::get_id` is identity-based
-//! and returns the POSITIONAL registration index, so the `Reference`'s `id`
-//! field — and `dense_biome_id` on it — is the index into the 33-key subset,
-//! while the runtime biome source (`BiomeManager`) yields `Holder::Direct`
-//! holders carrying the real ids. `HolderSet::contains` compares holder values,
-//! and a `Reference` never equals a `Direct`, so the apply path cannot match
-//! today. The encode path requires `Reference` (a `Direct` holder errors in
-//! `RegistryFixedCodec::encode`), so the fix is not a Direct conversion: the
-//! runtime biome source must be rewired (biome-core) to produce `Reference`s
-//! from the same frozen biome registry, and the biome-id read path must resolve
-//! References to their value ids. Until then the apply path must not compare
-//! holders across forms.
+//! `is_biome` conditions retain the identity of their supplied biome getter.
+//! Production worldgen builds the complete actual BIOME registry in dense ID
+//! order and resolves both surface rules and runtime biome sources through
+//! that same immutable owner. Its Reference IDs equal the generated biome
+//! values. Registry-less standalone probes may still use Direct holders, but
+//! must use them consistently for both conditions and sampled biomes; they
+//! cannot claim membership in another world's named tags.
 //! The `@Deprecated` single-column [`SurfaceSystem::top_material`] probe (the
 //! carver's grass-replacement call) is ported and composed into the carver
 //! `CarvingContext` seam through [`bind_carver_top_material`], which the
@@ -4169,29 +4159,10 @@ mod tests {
         })
     }
 
-    /// A biome registry with the 33 `SurfaceRuleData`-referenced keys (the
-    /// single source of truth in `biome::biomes::SURFACE_RULE_BIOMES`) under
-    /// `Registries.BIOME`. The codec tests encode the real trees by KEY, so the
-    /// registered `BiomeId` VALUES are irrelevant here (encode never reads
-    /// them); each key is registered under its real generated id
-    /// (`BiomeId::from_name`), matching the production
-    /// `worldgen_bootstraps::build_biome_registry` exactly — one `#179`
-    /// runtime biome-registry identity, no fabricated indices.
+    /// Use the production complete biome registry with actual IDs and bound
+    /// tags, rather than maintaining an independent surface-only subset.
     fn biome_access() -> RegistryAccess {
-        let mut builder = RegistryBuilder::new(&*rivet_registry::registries::BIOME);
-        for name in biomes::SURFACE_RULE_BIOMES {
-            let value = BiomeId::from_name(&format!("minecraft:{name}"))
-                .expect("SURFACE_RULE_BIOMES entries are generated biome keys");
-            builder.register(
-                &ResourceKey::create(
-                    &*rivet_registry::registries::BIOME,
-                    Identifier::parse(&format!("minecraft:{name}")),
-                ),
-                Arc::new(value),
-                RegistrationInfo::BUILT_IN,
-            );
-        }
-        let registry = builder.freeze();
+        let registry = crate::data::worldgen::worldgen_bootstraps::build_biome_registry();
         RegistryAccess::from_pairs(vec![(
             ResourceKey::create_registry_key(Identifier::with_default_namespace("worldgen/biome")),
             Box::new(registry) as rivet_registry::root::AnyBox,

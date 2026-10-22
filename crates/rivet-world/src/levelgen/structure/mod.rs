@@ -7,8 +7,16 @@
 //! explicitly until their owning runtime is installed.
 
 pub mod bounding_box;
+pub mod generation;
 pub mod pieces_container;
+pub mod placement;
+pub mod registry_keys;
+pub mod selection;
+pub mod state;
+pub mod structure_body;
 pub mod structure_piece;
+pub mod structure_registry;
+pub mod structure_settings;
 pub mod structure_start;
 pub mod templatesystem;
 

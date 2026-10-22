@@ -58,6 +58,7 @@ rivet-core = { workspace = true }
 # the `RegionFile.write` call, which only `tempfile::TempPath` guarantees.
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+serde_json = { workspace = true }
 # The `gamerules` unit's `GameRule.deserialize` parses rule values through the
 # brigadier argument types (`BoolArgumentType`/`IntegerArgumentType`) and the
 # `GameRuleMap` dispatched-map codec encodes rule keys by name.
