@@ -1425,6 +1425,29 @@ pub(super) fn region_can_survive(
         return verdict;
     }
     match state.block().name() {
+        "minecraft:small_dripleaf" => {
+            let below = level.get_block_state(&pos.below());
+            if state.get_value(BlockStateProperties::DOUBLE_BLOCK_HALF)
+                == Some(rivet_registry::block_state_property::PropertyValue::Enum("upper")) {
+                below.block() == state.block() && below.get_value(BlockStateProperties::DOUBLE_BLOCK_HALF)
+                    == Some(rivet_registry::block_state_property::PropertyValue::Enum("lower"))
+            } else {
+                below.is_in_tag("minecraft:supports_small_dripleaf")
+                    || (FluidId::from_id(level.get_block_state(pos).fluid_id()) == FluidId::WATER
+                        && below.is_in_tag("minecraft:supports_vegetation"))
+            }
+        }
+        "minecraft:big_dripleaf" => {
+            let below = level.get_block_state(&pos.below());
+            matches!(below.block().name(), "minecraft:big_dripleaf" | "minecraft:big_dripleaf_stem")
+                || below.is_in_tag("minecraft:supports_big_dripleaf")
+        }
+        "minecraft:big_dripleaf_stem" => {
+            let below = level.get_block_state(&pos.below());
+            let above = level.get_block_state(&pos.above());
+            (below.block() == state.block() || below.is_in_tag("minecraft:supports_big_dripleaf"))
+                && matches!(above.block().name(), "minecraft:big_dripleaf_stem" | "minecraft:big_dripleaf")
+        }
         "minecraft:mangrove_propagule" => {
             if state.get_value(BlockStateProperties::HANGING) == Some(rivet_registry::block_state_property::PropertyValue::Bool(true)) {
                 level.get_block_state(&pos.above()).is_in_tag("minecraft:supports_hanging_mangrove_propagule")
@@ -2580,6 +2603,96 @@ mod tests {
         BiomeId as ServerBiomeId, container_factory, superflat_content,
     };
     use rivet_world::superflat::{SUPERFLAT_HEIGHT, SUPERFLAT_MIN_Y};
+
+    #[test]
+    fn real_clay_pool_matches_paper_in_chunk_backed_region() {
+        use rivet_util::random_source::XoroshiroRandomSource;
+        use rivet_util::worldgen_random::AlgorithmRandomSource;
+        use rivet_world::chunk::chunk_generator::ChunkGenerator;
+        use rivet_world::levelgen::feature::registry_keys::CONFIGURED_FEATURE;
+        use sha2::{Digest, Sha256};
+
+        struct Generator;
+        impl ChunkGenerator for Generator {
+            fn get_min_y(&self) -> i32 {
+                SUPERFLAT_MIN_Y
+            }
+            fn get_gen_depth(&self) -> i32 {
+                SUPERFLAT_HEIGHT
+            }
+        }
+        let row = include_str!("../../../../../tools/rivet-oracle/fixtures/tree-placement.jsonl")
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|row| {
+                row["feature"] == "clay_pool_with_dripleaves"
+                    && row["terrain"] == "dry_dirt"
+                    && row["seed"] == 0
+            })
+            .expect("actual Paper pool fixture with both dripleaf families");
+        let access = super::super::generated_world::build_feature_access(
+            &rivet_world::data::worldgen::worldgen_bootstraps::build_worldgen_registries(),
+        );
+        let mut region = region_with_access(access.clone());
+        region.set_region_random(AlgorithmRandomSource::Xoroshiro(
+            XoroshiroRandomSource::new(99),
+        ));
+        // Match the oracle's flat dirt around the entire patch, with a margin
+        // beyond its maximum radius and depth. Writes go to real chunk palettes.
+        for x in -12..=12 {
+            for z in -12..=12 {
+                for y in 56..64 {
+                    assert!(region.set_block(
+                        &BlockPos::new(x, y, z),
+                        Blocks::DIRT.default_block_state(),
+                        2,
+                        UPDATE_LIMIT
+                    ));
+                }
+            }
+        }
+        let registry = access.lookup(&*CONFIGURED_FEATURE).unwrap();
+        let feature = registry
+            .get_optional(&Identifier::parse("minecraft:clay_pool_with_dripleaves"))
+            .unwrap();
+        let mut random = XoroshiroRandomSource::new(0);
+        assert_eq!(
+            feature.place(
+                &mut region,
+                &Generator,
+                &mut random,
+                &BlockPos::new(0, 64, 0)
+            ),
+            row["result"].as_bool().unwrap()
+        );
+        let mut hash = Sha256::new();
+        for x in -12..=12 {
+            for y in 56..=85 {
+                for z in -12..=12 {
+                    let state = region.get_block_state(&BlockPos::new(x, y, z));
+                    let original = if y < 64 {
+                        Blocks::DIRT.default_block_state()
+                    } else {
+                        Blocks::AIR.default_block_state()
+                    };
+                    if state != original {
+                        for value in [x, y, z, i32::from(state.id().0)] {
+                            hash.update(value.to_be_bytes());
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            format!("{:x}", hash.finalize()),
+            row["blocks_sha256"].as_str().unwrap()
+        );
+        assert_eq!(random.next_long(), row["next_long"].as_i64().unwrap());
+        assert_eq!(
+            region.region_random.as_mut().unwrap().next_long(),
+            row["world_next_long"].as_i64().unwrap()
+        );
+    }
 
     #[test]
     fn real_bee_tree_persists_occupants_through_chunk_payload_reload_and_replacement() {

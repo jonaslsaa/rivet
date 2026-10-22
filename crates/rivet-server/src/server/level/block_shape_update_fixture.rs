@@ -82,6 +82,14 @@ fn tree_and_water_shape_updates_match_live_paper() {
         level
             .states
             .insert(pos.relative(&direction), state("neighbor"));
+        if let Some(expected) = row["can_survive"].as_bool() {
+            assert_eq!(
+                level.can_survive(&state("state"), &pos),
+                expected,
+                "survival {}",
+                row["name"]
+            );
+        }
         let mut random = AlgorithmRandomSource::Xoroshiro(XoroshiroRandomSource::new(42));
         let result = update_shape(
             &mut level,

@@ -19,7 +19,7 @@ world proxy. They require the materialized Paper runtime under `work/run` and
 Java 25 (`RIVET_JAVA_HOME` selects its installation); each script checks the jar's
 commit before running. These are direct feature tests, not full-world parity.
 
-- `bash scripts/run_tree_placement_probe.sh`: 203 tree and ground-patch cases, exact
+- `bash scripts/run_tree_placement_probe.sh`: 251 tree and ground-patch cases, exact
   datapack configs, ordered write/final-block/tick SHA-256s and both random-stream
   continuations, plus complete saved hive NBT. Terrain is flat dirt at
   `(0,64,0)`, with four fixed seeds and seed-searched occupied-hive cases for
@@ -32,6 +32,10 @@ commit before running. These are direct feature tests, not full-world parity.
   Thirteen direct patch cases cover dirt, walls and void terrain. Nested calls
   use real vanilla registries and a real generator; minimal Java getter shells
   provide only the server-level-to-generator access chain, not feature behavior.
+  Forty-eight clay/dripleaf cases execute the real pool, dry-patch and lush-cave
+  selector configurations across flat dirt, basins, leaking basins and void.
+  A chunk-backed Rust region independently matches the positive pool's final
+  modified-block hash and both random streams, beyond the map-backed fixture.
 - `bash scripts/run_fallen_tree_probe.sh`: 80 fallen-tree cases, every ordered
   write and feature RNG continuation, across flat/void terrain and two origins.
 - `bash scripts/run_block_pos_set_probe.sh`: 26 Java collection snapshots,
@@ -40,10 +44,11 @@ commit before running. These are direct feature tests, not full-world parity.
   Rust implementation reports this unsupported case rather than inventing it.
 - `bash scripts/run_update_shape_probe.sh`: actual declaring update-shape owners
   for all 1,196 blocks and exact voxel-boundary face traversal samples.
-- `bash scripts/run_block_shape_behavior_probe.sh`: 339 actual block-update
+- `bash scripts/run_block_shape_behavior_probe.sh`: 1,731 actual block-update
   cases for wet/dry mangrove roots, hanging/planted propagule survival, and
   source/flowing water, including bubble-column tick triggers, plus hanging
-  moss, moss carpets, creaking hearts and double plants.
+  moss, moss carpets, creaking hearts, double plants and all three dripleaf
+  block classes, including actual survival and ordered block/fluid ticks.
 - `bash scripts/run_moss_carpet_placement_probe.sh`: 576 actual carpet-placement
   cases across all horizontal support masks, four seeds and nine existing-top
   and support conditions, comparing ordered writes and level RNG continuation.

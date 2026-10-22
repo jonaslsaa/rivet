@@ -161,6 +161,19 @@ impl WorldGenLevel for Ground {
                     }
                 }
                 "root_limit_void" => "air",
+                "clay_basin" | "clay_basin_leak" => {
+                    let inside = pos.get_x().abs() <= 3 && pos.get_z().abs() <= 3;
+                    if (self.terrain == "clay_basin_leak"
+                        && pos.get_x() == 0
+                        && pos.get_z() == 0
+                        && y == 60)
+                        || y >= 64 - if inside { 2 } else { 0 }
+                    {
+                        "air"
+                    } else {
+                        "dirt"
+                    }
+                }
                 "patch_wall" => {
                     if y < 64 {
                         "dirt"
@@ -293,6 +306,10 @@ fn full_trees_match_paper_writes_blocks_ticks_and_both_random_streams() {
     let mut pale_heart_successes = 0;
     let mut moss_level_rng_successes = 0;
     let mut patch_cases = 0;
+    let mut clay_cases = 0;
+    let mut clay_small = false;
+    let mut clay_big = false;
+    let mut clay_wet = false;
     for line in
         include_str!("../../../../../tools/rivet-oracle/fixtures/tree-placement.jsonl").lines()
     {
@@ -303,7 +320,22 @@ fn full_trees_match_paper_writes_blocks_ticks_and_both_random_streams() {
         ground.materialize_beehives = row["block_entities"].as_bool().unwrap_or(true);
         ground.terrain = row["terrain"].as_str().unwrap_or("dry_dirt").to_string();
         let mut random = XoroshiroRandomSource::new(seed);
-        let result = if row["kind"] == "vegetation_patch" {
+        let result = if row["kind"] == "named_configured" {
+            clay_cases += 1;
+            access
+                .lookup(&*rivet_world::levelgen::feature::registry_keys::CONFIGURED_FEATURE)
+                .expect("real configured registry")
+                .get_optional(&rivet_registry::Identifier::parse(&format!(
+                    "minecraft:{name}"
+                )))
+                .expect("actual generated configured feature")
+                .place(
+                    &mut ground,
+                    &Generator,
+                    &mut random,
+                    &BlockPos::new(0, 64, 0),
+                )
+        } else if row["kind"] == "vegetation_patch" {
             let decoded = vegetation_patch_configuration_codec().parse(&ops, &row["config"]);
             let config = decoded
                 .result()
@@ -447,6 +479,11 @@ fn full_trees_match_paper_writes_blocks_ticks_and_both_random_streams() {
             ("tall_grass", "tall_grass"),
             ("pale_hanging_moss", "pale_hanging_moss"),
             ("creaking_hearts", "creaking_heart"),
+            ("clay", "clay"),
+            ("water", "water"),
+            ("small_dripleaf", "small_dripleaf"),
+            ("big_dripleaf", "big_dripleaf"),
+            ("big_dripleaf_stem", "big_dripleaf_stem"),
         ] {
             if let Some(expected) = row[field].as_u64() {
                 let name = format!("minecraft:{block}");
@@ -460,6 +497,40 @@ fn full_trees_match_paper_writes_blocks_ticks_and_both_random_streams() {
                     "actual {field} placement {context}"
                 );
             }
+        }
+        if row["kind"] == "named_configured" {
+            use rivet_registry::block_state_properties::BlockStateProperties;
+            use rivet_registry::block_state_property::PropertyValue;
+            let wet = |state: &&BlockState| {
+                state.get_value(BlockStateProperties::WATERLOGGED)
+                    == Some(PropertyValue::Bool(true))
+            };
+            let waterlogged = ground.states.values().filter(wet).count() as u64;
+            assert_eq!(
+                waterlogged,
+                row["waterlogged_dripleaves"].as_u64().unwrap(),
+                "waterlogged {context}"
+            );
+            for half in ["lower", "upper"] {
+                let count = ground
+                    .states
+                    .values()
+                    .filter(|state| {
+                        state.block().name() == "minecraft:small_dripleaf"
+                            && wet(state)
+                            && state.get_value(BlockStateProperties::DOUBLE_BLOCK_HALF)
+                                == Some(PropertyValue::Enum(half))
+                    })
+                    .count() as u64;
+                assert_eq!(
+                    count,
+                    row[format!("waterlogged_small_{half}")].as_u64().unwrap(),
+                    "small {half} waterlogging {context}"
+                );
+            }
+            clay_small |= row["small_dripleaf"].as_u64().unwrap() > 0;
+            clay_big |= row["big_dripleaf"].as_u64().unwrap() > 0;
+            clay_wet |= waterlogged > 0;
         }
         if let Some(hearts) = row["pending_heart_entities"].as_array() {
             assert_eq!(
@@ -501,7 +572,9 @@ fn full_trees_match_paper_writes_blocks_ticks_and_both_random_streams() {
         }
         cases += 1;
     }
-    assert_eq!(cases, 203);
+    assert_eq!(cases, 251);
+    assert_eq!(clay_cases, 48);
+    assert!(clay_small && clay_big && clay_wet);
     assert_eq!(patch_cases, 13);
     assert_eq!(pale_heart_successes, 1);
     assert_eq!(moss_level_rng_successes, 1);
