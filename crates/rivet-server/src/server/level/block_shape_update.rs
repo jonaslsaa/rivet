@@ -282,6 +282,18 @@ fn update_shape(
             }
             state
         }
+        "FallingBlock" => {
+            // FallingBlock.updateShape always schedules, independent of the
+            // changed face or support. DragonEggBlock is the only pinned
+            // getDelayAfterPlace override; falling itself belongs to tick().
+            let delay = if state.block().name() == "minecraft:dragon_egg" {
+                5
+            } else {
+                2
+            };
+            level.schedule_block_tick(pos, Block::new(state.block()), delay);
+            state
+        }
         "CreakingHeartBlock" => {
             level.schedule_block_tick(pos, Block::new(state.block()), 1);
             state

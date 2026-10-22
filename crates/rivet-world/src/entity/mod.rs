@@ -8,24 +8,23 @@
 //!
 //! - `MobCategory` — the **full** `StringRepresentable` enum (eight values, the
 //!   max/despawn/spawn-persist fields and the `CODEC`).
-//! - `EntityType` — a minimal id-handle STUB (id + name + category) with the
-//!   by-name `CODEC`; the full entity-type registry (`EntityTypes`, the
-//!   builder, the `BuiltInRegistries.ENTITY_TYPE` by-name codec) defers with the
-//!   entity unit.
+//! - `EntityType` — the complete pinned built-in identity table (id, name and
+//!   category) with the by-name `CODEC`; entity constructors and behavior
+//!   remain outside this identity-only surface.
 //! - `EntityTypes` — the `PIG` constant the `SpawnerData` compact constructor
 //!   falls back to for `MISC`-category types.
 //!
-//! The by-name `EntityType` codec resolves against the small `ENTITY_TYPES`
-//! constant list; a name outside it errors honestly (the real registry is
-//! generated data). RivetTodo(#178): the full `net.minecraft.world.entity`
-//! value/registry surface lands with the entity unit.
+//! IDs/names use generated registry data; categories are captured from the
+//! actual pinned Paper runtime. This does not implement entity behavior.
+
+mod builtin_categories;
 
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::data_result::DataResult;
 use rivet_serialization::dynamic_ops::{DynamicOps, Keyable};
 use rivet_util::string_representable::{self, EnumOrdinal, StringRepresentable};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 /// `net.minecraft.world.entity.MobCategory` — the `StringRepresentable` spawn
 /// category enum.
@@ -180,12 +179,11 @@ impl fmt::Display for MobCategory {
     }
 }
 
-/// `net.minecraft.world.entity.EntityType<?>` — the entity-type id-handle STUB.
+/// `net.minecraft.world.entity.EntityType<?>` — the entity-type identity handle.
 ///
-/// The full `EntityType` (the builder, the `BuiltInRegistries.ENTITY_TYPE`
-/// registry, the generated `EntityTypes` table) defers with the entity unit;
-/// this slice carries only the id/name/category identity `MobSpawnSettings`
-/// needs.
+/// All pinned built-in IDs, names and categories are available. Entity builders,
+/// constructors and live behavior still defer with the entity unit; this is
+/// the identity surface used by spawning configuration, not an entity runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EntityType {
     /// The registry insertion id (the `BuiltInRegistries.ENTITY_TYPE` index).
@@ -203,25 +201,29 @@ impl EntityType {
     }
 
     /// `EntityType.CODEC` — `BuiltInRegistries.ENTITY_TYPE.byNameCodec()`, as
-    /// the ops-generic by-name codec. Resolves against the small `ENTITY_TYPES`
-    /// constant list; an unknown name errors with Paper's exact
+    /// the ops-generic by-name codec. Resolves all pinned built-in identities;
+    /// an unknown name errors with Paper's exact
     /// `Registry.byNameCodec` diagnostic (`"Unknown registry key in " + key() +
     /// ": " + name`, where `Registries.ENTITY_TYPE` is
     /// `createRegistryKey("entity_type")`, whose `toString()` renders
     /// `ResourceKey[minecraft:root / minecraft:entity_type]`).
     pub fn codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<EntityType, Ops>> {
         codec::comap_flat_map(
-            codec::string_codec::<Ops>(),
-            Arc::new(
-                |name: &String| match entity_types().iter().find(|t| t.name == *name) {
+            rivet_registry::identifier::identifier_codec::<Ops>(),
+            Arc::new(|name: &rivet_registry::Identifier| {
+                let canonical = name.to_string();
+                match rivet_registry::generated::registries::ENTITY_TYPE_BY_NAME
+                    .get(canonical.as_str())
+                    .and_then(|&id| entity_types().get(usize::from(id)))
+                {
                     Some(t) => DataResult::success(*t),
                     None => DataResult::error(format!(
                         "Unknown registry key in ResourceKey[minecraft:root / minecraft:entity_type]: {}",
                         name
                     )),
-                },
-            ),
-            Arc::new(|t: &EntityType| t.name.to_string()),
+                }
+            }),
+            Arc::new(|t: &EntityType| rivet_registry::Identifier::parse(t.name)),
         )
     }
 
@@ -248,7 +250,7 @@ impl fmt::Display for EntityType {
 }
 
 /// `EntityType.byNameCodec`'s `Keyable` — the known entity-type names (the
-/// `BuiltInRegistries.ENTITY_TYPE` key set, STUB-limited).
+/// `BuiltInRegistries.ENTITY_TYPE` key set).
 #[derive(Debug, Clone, Copy)]
 pub struct EntityTypeKeys;
 
@@ -278,9 +280,19 @@ impl EntityTypes {
     pub const PIG: EntityType = EntityType::new(100, "minecraft:pig", MobCategory::Creature);
 }
 
-/// The known entity types — the STUB registry (only `PIG`).
-pub const fn entity_types() -> &'static [EntityType] {
-    &[EntityTypes::PIG]
+/// All built-in identity handles in the actual registry insertion order.
+pub fn entity_types() -> &'static [EntityType] {
+    static TYPES: LazyLock<Vec<EntityType>> = LazyLock::new(|| {
+        let names = rivet_registry::generated::registries::ENTITY_TYPE_BY_ID;
+        assert_eq!(names.len(), builtin_categories::CATEGORIES.len());
+        names
+            .iter()
+            .zip(builtin_categories::CATEGORIES)
+            .enumerate()
+            .map(|(id, (&name, &category))| EntityType::new(id as u16, name, category))
+            .collect()
+    });
+    &TYPES
 }
 
 #[cfg(test)]
@@ -364,17 +376,48 @@ mod tests {
     #[test]
     fn entity_type_unknown_name_errors() {
         let codec = EntityType::codec::<JsonOps>();
-        let result = codec.parse(&JsonOps::INSTANCE, &json!("minecraft:zombie"));
+        let result = codec.parse(&JsonOps::INSTANCE, &json!("minecraft:not_an_entity"));
         assert!(result.is_error());
         let msg = result.error_ref().map(|e| e.message().to_string()).unwrap();
         assert_eq!(
             msg,
-            "Unknown registry key in ResourceKey[minecraft:root / minecraft:entity_type]: minecraft:zombie"
+            "Unknown registry key in ResourceKey[minecraft:root / minecraft:entity_type]: minecraft:not_an_entity"
         );
     }
 
     #[test]
-    fn entity_type_keys_are_the_stub_names() {
-        assert_eq!(entity_types(), &[EntityTypes::PIG]);
+    fn entity_identity_and_categories_match_live_paper() {
+        let codec = EntityType::codec::<JsonOps>();
+        let rows = include_str!("../../../../tools/rivet-oracle/fixtures/entity-types.jsonl");
+        assert_eq!(rows.lines().count(), entity_types().len());
+        for line in rows.lines() {
+            let row: serde_json::Value = serde_json::from_str(line).unwrap();
+            let entity = codec
+                .parse(&JsonOps::INSTANCE, &row["name"])
+                .result()
+                .copied()
+                .unwrap();
+            assert_eq!(u64::from(entity.id()), row["id"].as_u64().unwrap());
+            assert_eq!(
+                entity.get_category().name(),
+                row["category"].as_str().unwrap()
+            );
+            assert_eq!(
+                codec
+                    .encode_start(&JsonOps::INSTANCE, &entity)
+                    .result()
+                    .unwrap(),
+                &row["name"]
+            );
+        }
+        assert_eq!(
+            codec.parse(&JsonOps::INSTANCE, &json!("pig")).result(),
+            Some(&EntityTypes::PIG)
+        );
+        assert!(
+            codec
+                .parse(&JsonOps::INSTANCE, &json!("Minecraft:Pig"))
+                .is_error()
+        );
     }
 }

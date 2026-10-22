@@ -146,7 +146,9 @@ use rivet_world::biome::biome_generation_settings::{BiomeGenerationSettings, Pla
 use rivet_world::biome::biome_manager::NoiseBiomeSource;
 use rivet_world::biome::climate::Sampler;
 use rivet_world::biome::feature_sorter::{StepFeatureData, build_features_per_step};
-use rivet_world::biome::generated_biome_source::{dense_biome_id, overworld_biome_source};
+use rivet_world::biome::generated_biome_source::{
+    dense_biome_id, overworld_biome_source, overworld_biome_source_from_getter,
+};
 use rivet_world::biome::multi_noise_biome_source::MultiNoiseBiomeSource;
 use rivet_world::block::blocks::Blocks;
 use rivet_world::chunk::chunk_generator::ChunkGenerator;
@@ -646,7 +648,12 @@ impl OverworldGenerator {
     /// population-seed overrides. A value of `-1` has Paper's sentinel meaning:
     /// retain the ordinary decoration seed and consume no extra draws.
     pub fn new_with_feature_seeds(seed: i64, feature_seeds: HashMap<String, i64>) -> Self {
-        let access: &'static RegistryAccess = Box::leak(Box::new(build_worldgen_registries()));
+        let access: &'static RegistryAccess = Box::leak(Box::new(
+            rivet_world::levelgen::structure::structure_registry::build_structure_access(
+                &build_worldgen_registries(),
+            )
+            .expect("pinned complete structure registry bootstrap"),
+        ));
         let random_state: &'static RandomState<'static> = Box::leak(Box::new(
             RandomState::create_from_provider(access, &OVERWORLD, seed),
         ));
@@ -663,7 +670,10 @@ impl OverworldGenerator {
         OverworldGenerator {
             generator,
             random_state,
-            biome_source: OverworldNoiseBiomeSource::new(random_state),
+            biome_source: OverworldNoiseBiomeSource::from_registry(
+                random_state,
+                access.lookup_or_throw(&*rivet_registry::registries::BIOME),
+            ),
             access,
             feature_seeds,
             feature_access,
@@ -798,6 +808,9 @@ impl OverworldGenerator {
 /// the `.chunk.generator` module doc's `RivetTodo(#185)` reconciliation note
 /// requires (no separate source of truth).
 impl ChunkGenerator for OverworldGenerator {
+    fn get_biome_source(&self) -> &dyn BiomeSource {
+        self.biome_source.source()
+    }
     fn get_min_y(&self) -> i32 {
         self.generator.get_min_y()
     }
@@ -856,10 +869,29 @@ pub struct OverworldNoiseBiomeSource {
 }
 
 impl OverworldNoiseBiomeSource {
-    /// Build the source over the random state's realized sampler.
+    /// The same registry-backed source exposed through ChunkGenerator to
+    /// structure-state generation, without copying or replacing its holders.
+    pub fn source(&self) -> &dyn BiomeSource {
+        &self.source
+    }
+    /// Registry-less standalone sampler. Its Direct holders carry real IDs
+    /// but intentionally cannot claim named-tag identity in a live world.
     pub fn new(random_state: &RandomState) -> Self {
         OverworldNoiseBiomeSource {
             source: overworld_biome_source(),
+            sampler: random_state.sampler().clone(),
+        }
+    }
+
+    /// Build the production source using the same frozen BIOME authority as
+    /// surface rules and structure settings. Both resolver traits return these
+    /// registry-owned references, not freshly wrapped Direct values.
+    pub fn from_registry(
+        random_state: &RandomState,
+        biomes: &rivet_registry::registry::Registry<BiomeId>,
+    ) -> Self {
+        Self {
+            source: overworld_biome_source_from_getter(biomes),
             sampler: random_state.sampler().clone(),
         }
     }
@@ -3339,10 +3371,7 @@ impl ChunkGenerator for FeatureSelectionGenerator {
         biome: &Holder<BiomeId>,
         _feature: &PlacedFeature,
     ) -> bool {
-        let Holder::Direct(biome) = biome else {
-            return false;
-        };
-        let Some(name) = BIOME_BY_ID.get(biome.0 as usize) else {
+        let Some(name) = BIOME_BY_ID.get(dense_biome_id(biome) as usize) else {
             return false;
         };
         BIOME_GENERATION_SETTINGS_BY_NAME
@@ -5630,6 +5659,50 @@ mod tests {
             seen.len() >= 2,
             "overworld biome source should vary; got {seen:?}"
         );
+    }
+
+    #[test]
+    fn production_biome_source_uses_shared_registry_identity_without_changing_climate_selection() {
+        let generator = test_generator();
+        let registry = generator
+            .registry_access()
+            .lookup_or_throw(&*rivet_registry::registries::BIOME);
+        let source = generator.biome_source();
+        let standalone = OverworldNoiseBiomeSource::new(generator.random_state());
+        for holder in source.possible_biomes() {
+            assert!(matches!(holder, Holder::Reference { .. }));
+            assert!(holder.can_serialize_in(registry));
+            assert_eq!(dense_biome_id(&holder), holder.value(registry).id());
+        }
+        for (x, y, z) in [
+            (0, 0, 0),
+            (20, 20, -30),
+            (-512, -12, 1024),
+            (1024, 32, -2048),
+        ] {
+            let holder = NoiseBiomeSource::get_noise_biome(source, x, y, z);
+            let direct = NoiseBiomeSource::get_noise_biome(&standalone, x, y, z);
+            assert_eq!(dense_biome_id(&holder), dense_biome_id(&direct));
+            assert!(holder.can_serialize_in(registry));
+        }
+        let beaches = rivet_registry::HolderGetter::get_tag_or_throw(
+            registry,
+            &rivet_registry::TagKey::create(
+                &*rivet_registry::registries::BIOME,
+                Identifier::parse("minecraft:has_structure/buried_treasure"),
+            ),
+        );
+        for name in ["minecraft:beach", "minecraft:snowy_beach"] {
+            let actual = source
+                .possible_biomes()
+                .into_iter()
+                .find(|holder| holder.key(registry).identifier().to_string() == name)
+                .expect("actual possible beach biome");
+            assert!(
+                beaches.contains(&actual),
+                "structure tag must accept source holder {name}"
+            );
+        }
     }
 
     /// The executor drives a fresh chunk EMPTY→BIOMES→NOISE and each body

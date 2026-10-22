@@ -68,11 +68,19 @@ impl HolderGetter<BiomeId> for GeneratedBiomeGetter {
 /// by the `.data`-owned `OverworldBiomeBuilder`). No registry bootstrapping is
 /// required.
 pub fn overworld_biome_source() -> MultiNoiseBiomeSource {
+    overworld_biome_source_from_getter(&GeneratedBiomeGetter)
+}
+
+/// Resolve the actual overworld parameter table through the supplied biome
+/// authority. Production worlds pass their shared frozen BIOME registry;
+/// registry-less samplers keep using the explicit Direct-holder helper above.
+pub fn overworld_biome_source_from_getter(
+    biomes: &dyn HolderGetter<BiomeId>,
+) -> MultiNoiseBiomeSource {
     let preset = BY_NAME
         .get("minecraft:overworld")
         .expect("overworld preset is generated");
-    let parameter_list =
-        MultiNoiseBiomeSourceParameterList::new(preset.clone(), &GeneratedBiomeGetter);
+    let parameter_list = MultiNoiseBiomeSourceParameterList::new(preset.clone(), biomes);
     MultiNoiseBiomeSource::create_from_preset(parameter_list)
 }
 

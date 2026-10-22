@@ -970,8 +970,30 @@ where
         quart_y: i32,
         quart_z: i32,
     ) -> Holder<BiomeId> {
-        self.uncached_biome_source
-            .get_noise_biome(quart_x, quart_y, quart_z)
+        let biome = self
+            .uncached_biome_source
+            .get_noise_biome(quart_x, quart_y, quart_z);
+        self.biome_holder_for_id(dense_biome_id(&biome))
+    }
+
+    fn biome_holder_for_id(&self, id: u16) -> Holder<BiomeId> {
+        if let Some(registry) = self
+            .registry_access
+            .lookup(&*rivet_registry::registries::BIOME)
+        {
+            let value = registry
+                .by_id(i32::from(id))
+                .expect("cached biome must exist in the world's BIOME registry");
+            assert_eq!(
+                value.id(),
+                id,
+                "world biome IDs must match generated palette IDs"
+            );
+            Holder::reference(registry.registry_id(), u32::from(id))
+        } else {
+            // Registry-less value-layer fixtures have no world owner to claim.
+            Holder::direct(BiomeId::from_id(id))
+        }
     }
 
     fn existing_block_entity_nbt(&self, pos: &BlockPos) -> Option<CompoundTag> {
@@ -1755,7 +1777,7 @@ impl WorldGenLevel for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> 
         self.biome_manager
             .get_biome_with(pos, |quart_x, quart_y, quart_z| {
                 self.get_noise_biome_cached(quart_x, quart_y, quart_z)
-                    .map(|biome| Holder::direct(BiomeId::from_id(biome.raw())))
+                    .map(|biome| self.biome_holder_for_id(biome.raw()))
                     .unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
             })
     }
@@ -2169,7 +2191,7 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
         self.biome_manager
             .get_biome_with(pos, |quart_x, quart_y, quart_z| {
                 self.get_noise_biome_cached(quart_x, quart_y, quart_z)
-                    .map(|biome| Holder::direct(BiomeId::from_id(biome.0)))
+                    .map(|biome| self.biome_holder_for_id(biome.0))
                     .unwrap_or_else(|diagnostic| panic!("{diagnostic}"))
             })
     }
@@ -2588,7 +2610,7 @@ mod tests {
     use rivet_registry::builder::RegistryBuilder;
     use rivet_registry::core::QuartPos;
     use rivet_registry::root::AnyBox;
-    use rivet_registry::{Identifier, ResourceKey};
+    use rivet_registry::{HolderGetter, Identifier, ResourceKey};
     use rivet_util::RandomSource;
     use rivet_util::StaticCache2D;
     use rivet_util::random::LegacyRandomSource;
@@ -3790,6 +3812,31 @@ mod tests {
             ),
             Holder::direct(BiomeId::from_id(40)),
         );
+    }
+
+    #[test]
+    fn cached_and_uncached_biomes_share_the_world_registry_holder_identity() {
+        let access = rivet_world::data::worldgen::worldgen_bootstraps::build_worldgen_registries();
+        let registry = access.lookup_or_throw(&*rivet_registry::registries::BIOME);
+        let expected = registry.get_or_throw(&rivet_registry::ResourceKey::create(
+            &*rivet_registry::registries::BIOME,
+            rivet_registry::Identifier::parse("minecraft:plains"),
+        ));
+        let tag = rivet_registry::HolderGetter::get_tag_or_throw(
+            registry,
+            &rivet_registry::TagKey::create(
+                &*rivet_registry::registries::BIOME,
+                rivet_registry::Identifier::parse("minecraft:is_overworld"),
+            ),
+        );
+        let region = region_with_access(access.clone());
+        let cached = region.get_biome(&BlockPos::new(0, 64, 0));
+        let uncached = region.get_uncached_noise_biome(0, 16, 0);
+        assert_eq!(cached, expected);
+        assert_eq!(uncached, expected);
+        assert!(cached.can_serialize_in(registry));
+        assert!(tag.contains(&cached));
+        assert!(tag.contains(&uncached));
     }
 
     #[test]

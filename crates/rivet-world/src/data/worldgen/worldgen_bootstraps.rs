@@ -62,7 +62,10 @@ use crate::levelgen::synth::normal_noise::NoiseParameters;
 use rivet_registry::access::{LayeredRegistryAccess, RegistryLayer};
 use rivet_registry::fluid_id::FluidId;
 use rivet_registry::generated::{
-    blocks::BLOCK_BY_NAME, registries::FLUID_BY_NAME, tags::BLOCK_TAG_BY_NAME,
+    biomes::BIOME_BY_NAME,
+    blocks::BLOCK_BY_NAME,
+    registries::FLUID_BY_NAME,
+    tags::{BLOCK_TAG_BY_NAME, WORLDGEN_BIOME_TAG_BY_NAME},
 };
 use rivet_registry::holder::{HolderId, RegistryId};
 use rivet_registry::registries::{BLOCK, BlockType, FLUID};
@@ -212,33 +215,42 @@ fn biome_key() -> ErasedKey {
     ResourceKey::create_registry_key(rivet_registry::registries::BIOME.identifier().clone())
 }
 
-/// A frozen biome registry carrying the 33 `SurfaceRuleData`-referenced keys
-/// (the single source of truth in `biome::biomes::SURFACE_RULE_BIOMES`) as
-/// `BiomeId` handles (the surface trees only need the holder identity).
-fn build_biome_registry() -> Registry<rivet_registry::biome_id::BiomeId> {
-    use crate::biome::biomes::SURFACE_RULE_BIOMES;
+/// The complete generated Paper biome registry and bound tags. Registry
+/// insertion order is the actual dense holder/network ID order, not the
+/// surface-rule subset or PHF iteration order. Values remain BiomeId handles;
+/// this does not invent biome feature settings or full biome payload codecs.
+pub(crate) fn build_biome_registry() -> Registry<rivet_registry::biome_id::BiomeId> {
     use rivet_registry::biome_id::BiomeId;
     let biome_key = &*rivet_registry::registries::BIOME;
     let mut builder: RegistryBuilder<BiomeId> = RegistryBuilder::new(biome_key);
-    for name in SURFACE_RULE_BIOMES {
-        // The value is the biome's real generated id (`BiomeId::from_name`), not
-        // a fabricated positional index: a `SurfaceRuleData` `is_biome` holder
-        // resolved through this registry reads this value back via
-        // `Holder::value`, so it must equal the id the generated biome table
-        // assigns the same key. (`dense_biome_id` on a `Reference` reads the
-        // positional `id` field, not this value — the `#179` apply-path gap the
-        // surface_rules module doc documents.)
-        let value = BiomeId::from_name(&format!("minecraft:{name}"))
-            .expect("SURFACE_RULE_BIOMES entries are generated biome keys");
+    let mut entries: Vec<_> = BIOME_BY_NAME.entries().collect();
+    entries.sort_unstable_by_key(|(_, id)| **id);
+    for (index, (name, id)) in entries.into_iter().enumerate() {
+        assert_eq!(*id as usize, index, "generated biome ids must be dense");
         builder.register(
-            &ResourceKey::create(
-                biome_key,
-                rivet_registry::Identifier::with_default_namespace(name),
-            ),
-            Arc::new(value),
+            &ResourceKey::create(biome_key, Identifier::parse(name)),
+            Arc::new(BiomeId::from_name(name).expect("generated biome registry key")),
             RegistrationInfo::BUILT_IN,
         );
     }
+    builder.bind_tags(
+        WORLDGEN_BIOME_TAG_BY_NAME
+            .entries()
+            .map(|(name, members)| {
+                let holders = members
+                    .iter()
+                    .map(|member| {
+                        HolderId(u32::from(
+                            *BIOME_BY_NAME
+                                .get(member)
+                                .expect("generated biome tag member must exist"),
+                        ))
+                    })
+                    .collect();
+                (TagKey::create(biome_key, Identifier::parse(name)), holders)
+            })
+            .collect(),
+    );
     builder.freeze()
 }
 
@@ -356,8 +368,8 @@ mod tests {
         );
         assert_eq!(
             biomes.key_set().len(),
-            33,
-            "the SurfaceRuleData-referenced biomes"
+            BIOME_BY_NAME.len(),
+            "the full generated biome registry"
         );
         // The overworld preset resolves to the real settings (never dummy()).
         let holder = settings.get_or_throw(&OVERWORLD);
@@ -447,16 +459,11 @@ mod tests {
         );
     }
 
-    /// The `#179` biome-registry identity: the bootstrapped biome registry
-    /// registers each `SURFACE_RULE_BIOMES` key under its real generated id, so
-    /// a `SurfaceRuleData` condition holder resolved through it (`is_biome` →
-    /// `getOrThrow`) reads back that real id via `Holder::value`. The reference
-    /// is `key`-round-trippable, and the fabricated-index regression (the old
-    /// `from_id(i)` values — basalt_deltas registered as id 1 instead of the
-    /// real 2) is pinned by the value/id split.
+    /// All actual registry entries use the same real ID for reference identity
+    /// and value. Surface rules and structure biome settings can share this
+    /// authority without the old subset-index/value mismatch.
     #[test]
     fn surface_rule_biome_registry_resolves_real_generated_ids() {
-        use crate::biome::biomes::SURFACE_RULE_BIOMES;
         use crate::biome::dense_biome_id;
         use rivet_registry::biome_id::BiomeId;
 
@@ -466,13 +473,10 @@ mod tests {
             .expect("BIOME registry");
         let biome_key = &*rivet_registry::registries::BIOME;
 
-        for name in SURFACE_RULE_BIOMES {
-            let key = ResourceKey::create(
-                biome_key,
-                rivet_registry::Identifier::with_default_namespace(name),
-            );
+        for (name, expected_id) in BIOME_BY_NAME.entries() {
+            let key = ResourceKey::create(biome_key, Identifier::parse(name));
             let holder = biomes.get_or_throw(&key);
-            // A positional `Reference` into the frozen subset registry
+            // A positional `Reference` into the complete frozen registry
             // (identity-based `get_id`), which resolves back to its key.
             assert!(
                 matches!(&holder, rivet_registry::Holder::Reference { .. }),
@@ -485,18 +489,16 @@ mod tests {
             );
             // The registered VALUE is the biome's real generated id (never the
             // fabricated subset index the builder used before #179).
-            let real = BiomeId::from_name(&format!("minecraft:{name}")).expect("generated key");
+            let real = BiomeId::from_name(name).expect("generated key");
             assert_eq!(
                 holder.value(biomes).id(),
                 real.id(),
                 "{name} value must be its real generated id"
             );
+            assert_eq!(dense_biome_id(&holder), *expected_id, "{name} holder id");
         }
 
-        // The residual `#179` apply-path gap, documented honestly: `dense_biome_id`
-        // on the positional `Reference` reads the subset index, not the real id.
-        // The biome-core wiring that makes the runtime biome source produce
-        // `Reference`s from this registry must also resolve them to their values.
+        // Basalt deltas used to be subset holder 1 but real value 2.
         let basalt_deltas = ResourceKey::create(
             biome_key,
             rivet_registry::Identifier::with_default_namespace("basalt_deltas"),
@@ -510,9 +512,53 @@ mod tests {
         );
         assert_eq!(
             dense_biome_id(&holder),
-            1,
-            "reference reads the subset index"
+            basalt_real.id(),
+            "reference now carries the actual registry id"
         );
-        assert_ne!(dense_biome_id(&holder), basalt_real.id());
+    }
+
+    #[test]
+    fn actual_biome_tags_bind_named_holders_to_the_shared_complete_registry() {
+        let access = build_worldgen_registries();
+        let registry = access.lookup(&*rivet_registry::registries::BIOME).unwrap();
+        assert_eq!(registry.key_set().len(), 66, "pinned Paper biome registry");
+        assert_eq!(registry.list_tags().len(), WORLDGEN_BIOME_TAG_BY_NAME.len());
+        for (name, members) in WORLDGEN_BIOME_TAG_BY_NAME.entries() {
+            let key = TagKey::create(&*rivet_registry::registries::BIOME, Identifier::parse(name));
+            let holders = registry.get_tag_or_throw(&key);
+            assert!(holders.can_serialize_in(registry), "{name} named owner");
+            let actual: Vec<_> = holders
+                .iter()
+                .map(|holder| {
+                    assert!(holder.can_serialize_in(registry), "{name} member owner");
+                    let value = holder.value(registry);
+                    assert_eq!(crate::biome::dense_biome_id(holder), value.id());
+                    holder.key(registry).identifier().to_string()
+                })
+                .collect();
+            assert_eq!(actual, *members, "{name} membership and order");
+        }
+        // This structure tag needs biomes that were absent from the old
+        // surface-only registry. Its named identity must not become a direct
+        // hand-written set while resolving structure settings.
+        let tag = TagKey::create(
+            &*rivet_registry::registries::BIOME,
+            Identifier::parse("minecraft:has_structure/buried_treasure"),
+        );
+        let members = registry.get_tag_or_throw(&tag);
+        assert_eq!(
+            members
+                .iter()
+                .map(|holder| holder.key(registry).identifier().to_string())
+                .collect::<Vec<_>>(),
+            ["minecraft:beach", "minecraft:snowy_beach"]
+        );
+        assert!(matches!(members, rivet_registry::HolderSet::Named { .. }));
+        let other = build_biome_registry();
+        let members = registry.get_tag_or_throw(&tag);
+        assert!(
+            !members.can_serialize_in(&other),
+            "equal entries do not imply equal registry owner"
+        );
     }
 }

@@ -31,6 +31,9 @@ public final class BlockShapeBehaviorProbe {
                     layers.getLayer(net.minecraft.server.RegistryLayer.STATIC)).forEach(pending -> pending.apply());
                 var cases = new ArrayList<Case>();
                 var air = Blocks.AIR.defaultBlockState(); var dirt = Blocks.DIRT.defaultBlockState();
+                for (Block falling : List.of(Blocks.SAND,Blocks.RED_SAND,Blocks.GRAVEL,Blocks.DRAGON_EGG,Blocks.ANVIL,Blocks.CHIPPED_ANVIL,Blocks.DAMAGED_ANVIL))
+                    for (Direction dir : Direction.values())
+                        cases.add(new Case("falling_"+BuiltInRegistries.BLOCK.getKey(falling)+"_"+dir, falling.defaultBlockState(),dir,air,air,dirt));
                 for (boolean wet : new boolean[]{false,true}) for (Direction dir : Direction.values())
                     cases.add(new Case("roots_"+wet+"_"+dir, Blocks.MANGROVE_ROOTS.defaultBlockState().setValue(BlockStateProperties.WATERLOGGED,wet), dir, air, air, dirt));
                 for (boolean hanging : new boolean[]{false,true}) for (boolean wet : new boolean[]{false,true})
@@ -95,6 +98,7 @@ public final class BlockShapeBehaviorProbe {
                             }
                 }
                 for (var test : cases) {
+                    if (args.length > 0 && !test.name().startsWith(args[0])) continue;
                     var pos = new BlockPos(3,70,-5); var states = new HashMap<BlockPos,BlockState>();
                     states.put(pos,test.state()); states.put(pos.above(),test.above()); states.put(pos.below(),test.below());
                     states.put(pos.relative(test.direction()),test.neighbor());
