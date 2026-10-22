@@ -13,8 +13,13 @@ Every check is one JSON-Lines object on stdout (`{"kind": ..., "id": ...,
 "ok": ..., "fields": [...]}`), followed by a `{"kind":"stats"}` line. The
 stats include a deterministic closure block with the manifest hash and
 `declared`, `discovered`, `executed`, `matched`, `diverged`, `mismatched`,
-`invalid_accepted`, `invalid_rejected`, `unreadable`, and `unlisted` counts. A
+`invalid_accepted`, `invalid_rejected`, `invalid_unavailable`, `unreadable`, and `unlisted` counts. A
 human-readable summary goes to stderr.
+
+Invalid-input counts use explicit decoder verdicts: acceptance by either side
+counts as accepted, two rejections count as rejected, and a missing verdict
+without an acceptance counts as unavailable. Oracle transport/protocol failures
+remain hard mismatches; they are not evidence that an input was accepted.
 
 | kind | input | compares |
 | --- | --- | --- |

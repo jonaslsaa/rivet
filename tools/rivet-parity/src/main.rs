@@ -65,6 +65,8 @@ struct Check {
     fields: Vec<Value>,
     note: Option<String>,
     invalid_declared: bool,
+    rust_accept: Option<bool>,
+    oracle_accept: Option<bool>,
 }
 
 impl Check {
@@ -79,6 +81,8 @@ impl Check {
             fields: Vec::new(),
             note: None,
             invalid_declared: false,
+            rust_accept: None,
+            oracle_accept: None,
         }
     }
 
@@ -129,6 +133,8 @@ impl Check {
             "ok": self.ok,
             "skipped": self.skipped,
             "invalid_declared": self.invalid_declared,
+            "rust_accept": self.rust_accept,
+            "oracle_accept": self.oracle_accept,
             "divergences": self.divergences,
             "fields": self.fields,
         });
@@ -153,6 +159,7 @@ struct Summary {
     hard_ids: Vec<String>,
     invalid_accepted: usize,
     invalid_rejected: usize,
+    invalid_unavailable: usize,
 }
 
 impl Summary {
@@ -166,10 +173,14 @@ impl Summary {
             .unwrap_or(0);
         let id = check["id"].as_str().unwrap_or("?").to_string();
         if check["invalid_declared"].as_bool().unwrap_or(false) && !skipped {
-            if ok {
+            let rust_accept = check["rust_accept"].as_bool();
+            let oracle_accept = check["oracle_accept"].as_bool();
+            if rust_accept == Some(true) || oracle_accept == Some(true) {
+                self.invalid_accepted += 1;
+            } else if rust_accept == Some(false) && oracle_accept == Some(false) {
                 self.invalid_rejected += 1;
             } else {
-                self.invalid_accepted += 1;
+                self.invalid_unavailable += 1;
             }
         }
 
@@ -260,6 +271,7 @@ fn check_snbt_parse<O: oracle::OracleCall>(
         check.declared_invalid();
     }
     let rust = rust_parse_snbt(input);
+    check.rust_accept = Some(rust.is_ok());
 
     let Some(handle) = oracle else {
         check.skip("oracle unavailable");
@@ -267,6 +279,7 @@ fn check_snbt_parse<O: oracle::OracleCall>(
     };
     match handle.call("snbt.parse", &[("input", input)]) {
         Ok(result) => {
+            check.oracle_accept = Some(true);
             if !expected_accept {
                 // The oracle accepted an input we classified as invalid: flag it.
                 check.field("reject", "rejected", "accepted");
@@ -290,26 +303,29 @@ fn check_snbt_parse<O: oracle::OracleCall>(
                 }
             }
         }
-        Err(oracle::OracleCallError::Rejected(oracle_err)) => match &rust {
-            Ok(_) => {
-                check.field("accept", "true", "false");
-                check.note(&format!("oracle error: {oracle_err}"));
-            }
-            Err(rust_err) => {
-                if expected_accept {
-                    check.field("valid_fixture", "accepted", "both rejected");
-                    check.note(&format!(
+        Err(oracle::OracleCallError::Rejected(oracle_err)) => {
+            check.oracle_accept = Some(false);
+            match &rust {
+                Ok(_) => {
+                    check.field("accept", "true", "false");
+                    check.note(&format!("oracle error: {oracle_err}"));
+                }
+                Err(rust_err) => {
+                    if expected_accept {
+                        check.field("valid_fixture", "accepted", "both rejected");
+                        check.note(&format!(
                         "valid SNBT failed on both implementations; oracle: {oracle_err}; rust: {rust_err}"
                     ));
-                } else {
-                    // Only manifest-declared invalid inputs use accept/reject parity.
-                    check.field_soft("error_text", "rejected", "rejected");
-                    check.note(&format!(
-                        "both rejected as declared invalid; oracle: {oracle_err}"
-                    ));
+                    } else {
+                        // Only manifest-declared invalid inputs use accept/reject parity.
+                        check.field_soft("error_text", "rejected", "rejected");
+                        check.note(&format!(
+                            "both rejected as declared invalid; oracle: {oracle_err}"
+                        ));
+                    }
                 }
             }
-        },
+        }
         Err(oracle::OracleCallError::Unavailable(oracle_err)) => {
             // A transport/protocol/process failure is not a Paper rejection,
             // including for an explicitly invalid fixture. Keep the check hard
@@ -582,6 +598,7 @@ fn check_component_json<O: oracle::OracleCall>(
     }
 
     let rust = rust_component_json(input, codec);
+    check.rust_accept = Some(rust.is_ok());
 
     let Some(handle) = oracle else {
         // No Paper comparison possible. The Rust-vs-golden byte identity is
@@ -602,6 +619,7 @@ fn check_component_json<O: oracle::OracleCall>(
                 check.note("oracle success without a boolean accept verdict");
                 return check.finish();
             };
+            check.oracle_accept = Some(oracle_accept);
             // Provenance: the committed golden is what this pinned Paper
             // produced at capture time; the live oracle must still agree.
             check.field(
@@ -1067,6 +1085,7 @@ fn main() {
         "mismatched": summary.mismatched.values().sum::<usize>(),
         "invalid_accepted": summary.invalid_accepted,
         "invalid_rejected": summary.invalid_rejected,
+        "invalid_unavailable": summary.invalid_unavailable,
         "unreadable": 0,
         "unlisted": 0,
         "fixture_limit": limit_fixtures,
@@ -1124,12 +1143,13 @@ fn main() {
         stats["matched"], stats["diverged"], stats["mismatched"], stats["skipped"]
     );
     eprintln!(
-        "  CLOSURE declared={} discovered={} executed={} invalid_rejected={} invalid_accepted={} unreadable=0 unlisted=0 manifest={}",
+        "  CLOSURE declared={} discovered={} executed={} invalid_rejected={} invalid_accepted={} invalid_unavailable={} unreadable=0 unlisted=0 manifest={}",
         stats["closure"]["declared"],
         stats["closure"]["discovered"],
         stats["closure"]["executed"],
         stats["closure"]["invalid_rejected"],
         stats["closure"]["invalid_accepted"],
+        stats["closure"]["invalid_unavailable"],
         stats["closure"]["manifest_sha256"].as_str().unwrap_or("?")
     );
     if !summary.hard_ids.is_empty() {
@@ -1373,6 +1393,68 @@ mod tests {
         summary.record(&check);
         assert_eq!(summary.mismatched.get("snbt.parse"), Some(&1));
         assert!(!summary.matched.contains_key("snbt.parse"));
+        assert_eq!(summary.invalid_accepted, 0);
+        assert_eq!(summary.invalid_rejected, 0);
+        assert_eq!(summary.invalid_unavailable, 1);
+    }
+
+    #[test]
+    fn invalid_snbt_accounting_uses_verdicts_instead_of_comparison_success() {
+        use oracle::OracleCallError::{Rejected, Unavailable};
+        for (input, response, expected) in [
+            ("{broken", Err(Rejected("parse error".into())), (0, 1, 0)),
+            ("1", Err(Rejected("parse error".into())), (1, 0, 0)),
+            ("{broken", Ok(json!({})), (1, 0, 0)),
+            ("1", Err(Unavailable("closed stdout".into())), (1, 0, 0)),
+            (
+                "{broken",
+                Err(Unavailable("closed stdout".into())),
+                (0, 0, 1),
+            ),
+        ] {
+            let mut oracle = StubOracle { response };
+            let check = check_snbt_parse(Some(&mut oracle), "invalid.verdict", input, false);
+            let mut summary = Summary::default();
+            summary.record(&check);
+            assert_eq!(
+                (
+                    summary.invalid_accepted,
+                    summary.invalid_rejected,
+                    summary.invalid_unavailable
+                ),
+                expected,
+                "{check}"
+            );
+            assert_eq!(
+                check["ok"],
+                expected.1 == 1,
+                "only genuine both-rejection passes: {check}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_component_missing_oracle_verdict_does_not_fabricate_acceptance() {
+        for response in [
+            Ok(json!({})),
+            Err(oracle::OracleCallError::Unavailable("closed stdout".into())),
+        ] {
+            let mut oracle = StubOracle { response };
+            let check = check_component_json(
+                Some(&mut oracle),
+                "component.invalid",
+                "{",
+                false,
+                None,
+                &component_codec(),
+            );
+            let mut summary = Summary::default();
+            summary.record(&check);
+            assert_eq!(summary.invalid_accepted, 0, "{check}");
+            assert_eq!(summary.invalid_rejected, 0, "{check}");
+            assert_eq!(summary.invalid_unavailable, 1, "{check}");
+            assert_eq!(summary.mismatched.get("component.json"), Some(&1));
+        }
     }
 
     #[test]
