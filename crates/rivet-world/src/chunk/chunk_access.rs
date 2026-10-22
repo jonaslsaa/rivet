@@ -64,7 +64,7 @@ use crate::chunk::light_chunk::LightChunk;
 use crate::chunk::paletted_container_factory::PalettedContainerFactory;
 pub use crate::chunk::status::ChunkStatus;
 use crate::chunk::strategy::Strategy;
-use crate::chunk::structure_access::StructureAccess;
+use crate::chunk::structure_access::{StructureAccess, StructureStartEntry};
 use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::{LevelHeightAccessor, SimpleLevelHeightAccessor};
 use crate::levelgen::heightmap::{Heightmap, StateFlags, Types};
@@ -1002,27 +1002,46 @@ where
 
     /// `ChunkAccess.getStartForStructure(Structure)` — delegate to the
     /// structure access (no `markUnsaved` on reads).
-    pub fn get_start_for_structure(&self, structure: &S) -> Option<i64> {
+    pub fn get_start_for_structure(&self, structure: &S) -> Option<&StructureStartEntry> {
         self.structure_access.get_start_for_structure(structure)
     }
 
     /// `ChunkAccess.setStartForStructure(Structure, StructureStart)` — sets
     /// and marks unsaved.
-    pub fn set_start_for_structure(&mut self, structure: S, start: i64) {
+    pub fn set_start_for_structure(&mut self, structure: S, start: impl Into<StructureStartEntry>) {
         self.structure_access
             .set_start_for_structure(structure, start);
         self.mark_unsaved();
     }
 
     /// `ChunkAccess.getAllStarts()`.
-    pub fn get_all_starts(&self) -> &HashMap<S, i64> {
+    pub fn get_all_starts(&self) -> &HashMap<S, StructureStartEntry> {
         self.structure_access.get_all_starts()
     }
 
     /// `ChunkAccess.setAllStarts(Map)` — clear + putAll, then marks unsaved.
-    pub fn set_all_starts(&mut self, starts: HashMap<S, i64>) {
+    pub fn set_all_starts(&mut self, starts: HashMap<S, StructureStartEntry>) {
         self.structure_access.set_all_starts(starts);
         self.mark_unsaved();
+    }
+
+    /// `ChunkAccess.getReferencesForStructure(Structure)`.
+    pub fn get_start_for_structure_mut(
+        &mut self,
+        structure: &S,
+    ) -> Option<&mut StructureStartEntry> {
+        self.mark_unsaved();
+        self.structure_access.get_start_for_structure_mut(structure)
+    }
+
+    pub fn defer_serialized_starts(&mut self, raw: &CompoundTag, key: impl Fn(&str) -> Option<S>) {
+        self.structure_access.defer_serialized_starts(raw, key);
+        self.mark_unsaved();
+    }
+
+    pub fn serialized_starts(&self, name: impl Fn(&S) -> String) -> CompoundTag {
+        self.structure_access
+            .serialized_starts(self.get_pos(), name)
     }
 
     /// `ChunkAccess.getReferencesForStructure(Structure)`.
@@ -1681,12 +1700,22 @@ mod tests {
     #[test]
     fn structure_mutations_mark_unsaved() {
         let mut base = default_base();
-        base.set_start_for_structure("monument", 7);
+        base.set_start_for_structure(
+            "monument",
+            crate::levelgen::structure::StructureStart::invalid(),
+        );
         assert!(base.is_unsaved());
         base.try_mark_saved();
         base.add_reference_for_structure("monument", 0x10);
         assert!(base.is_unsaved());
-        assert_eq!(base.get_start_for_structure(&"monument"), Some(7));
+        assert!(
+            !base
+                .get_start_for_structure(&"monument")
+                .unwrap()
+                .native()
+                .unwrap()
+                .is_valid()
+        );
         assert_eq!(base.get_all_starts().len(), 1);
         base.set_all_starts(HashMap::new());
         assert!(base.get_all_starts().is_empty());

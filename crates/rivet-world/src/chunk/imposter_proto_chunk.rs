@@ -46,6 +46,7 @@ use crate::chunk::carving_mask::CarvingMask;
 use crate::chunk::chunk_access::ChunkStatus;
 use crate::chunk::level_chunk::LevelChunk;
 use crate::chunk::level_chunk_section::LevelChunkSection;
+use crate::chunk::structure_access::StructureStartEntry;
 use crate::level::height_accessor::SimpleLevelHeightAccessor;
 use crate::levelgen::heightmap::Types;
 use rivet_nbt::compound_tag::CompoundTag;
@@ -218,20 +219,25 @@ where
     }
 
     /// `getStartForStructure(Structure)` — the wrapped chunk's starts.
-    pub fn get_start_for_structure(&self, structure: &S) -> Option<i64> {
+    pub fn get_start_for_structure(&self, structure: &S) -> Option<&StructureStartEntry> {
         self.wrapped.get_start_for_structure(structure)
     }
 
     /// `setStartForStructure(Structure, StructureStart)` — a no-op.
-    pub fn set_start_for_structure(&mut self, _structure: S, _start: i64) {}
+    pub fn set_start_for_structure(
+        &mut self,
+        _structure: S,
+        _start: impl Into<StructureStartEntry>,
+    ) {
+    }
 
     /// `getAllStarts()` — the wrapped chunk's starts map.
-    pub fn get_all_starts(&self) -> &std::collections::HashMap<S, i64> {
+    pub fn get_all_starts(&self) -> &std::collections::HashMap<S, StructureStartEntry> {
         self.wrapped.get_all_starts()
     }
 
     /// `setAllStarts(Map)` — a no-op.
-    pub fn set_all_starts(&mut self, _starts: std::collections::HashMap<S, i64>) {}
+    pub fn set_all_starts(&mut self, _starts: std::collections::HashMap<S, StructureStartEntry>) {}
 
     /// `getReferencesForStructure(Structure)` — the wrapped chunk's references.
     pub fn get_references_for_structure<'a>(
@@ -530,7 +536,10 @@ mod tests {
         imposter.mark_pos_for_post_processing(&BlockPos::new(0, 0, 0));
         imposter.set_block_entity_nbt(Default::default());
         imposter.remove_block_entity(&BlockPos::new(0, 0, 0));
-        imposter.set_start_for_structure("monument", 7);
+        imposter.set_start_for_structure(
+            "monument",
+            crate::levelgen::structure::StructureStart::invalid(),
+        );
         imposter.add_reference_for_structure("monument", 0x1234);
         assert!(imposter.get_start_for_structure(&"monument").is_none());
         assert!(

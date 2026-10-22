@@ -45,16 +45,14 @@
 //!
 //! ## Structure references
 //!
-//! Rivet has no `Structure`/`StructureStart` type yet (#369), so the chunk is
-//! keyed by the structure `Identifier` and only `structures.References` is
-//! installed: the references decode into [`StructureReference`]s at parse,
+//! The chunk is keyed by structure `Identifier`; references decode into
+//! [`StructureReference`]s at parse,
 //! are filtered by the >8-chunk chessboard rule against the requested position
 //! at reconstruction (Paper's `unpackStructureReferences`), and are installed
 //! into the chunk's `StructureAccess` map — the runtime authority (#537) — so
-//! no duplicate carry field is retained. Non-empty `starts` is carried verbatim
-//! on the reconstruction result (`ChunkReconstruction::structure_starts`, the
-//! `StructureStart` load path is not ported, #369) — never fabricated, never
-//! parsed, preserved for the future installer.
+//! no duplicate carry field is retained. Starts enter that same canonical
+//! owner as deferred tags: native registry resolution is unavailable here,
+//! and no malformed or unsupported payload is fabricated into a valid start.
 
 use crate::block::Block;
 use crate::chunk::level_chunk::LevelChunk;
@@ -126,10 +124,8 @@ pub fn resolve_state_flags(state: &BlockState) -> StateFlags {
 /// A FULL-status chunk reconstructed into an owned runtime `LevelChunk`.
 ///
 /// The structure key `S` is the structure `Identifier` (the registry key the
-/// `structures.References` map is keyed by, #369). Rivet has no `Structure`
-/// value type yet, so the chunk holds the reference map keyed by identifier and
-/// carries non-empty `starts` verbatim on the reconstruction result rather than
-/// fabricating `StructureStart` values.
+/// `structures.References` map is keyed by). Persisted starts are deferred
+/// entries in the same chunk-owned structure authority, not a second sidecar.
 pub type ReconstructedLevelChunk = LevelChunk<BlockState, BiomeId, Identifier>;
 
 /// The products of the reconstruction, mirroring `SerializableChunkData.read`'s
@@ -162,12 +158,6 @@ pub struct ChunkReconstruction {
     /// The typed, per-chunk-filtered stored fluid ticks (`ChunkAccess.PackedTicks
     /// .fluids()`). Same carry semantics as [`Self::stored_block_ticks`].
     pub stored_fluid_ticks: Vec<SavedTick<FluidId>>,
-    /// The raw `structures.starts` compound, when the chunk carries non-empty
-    /// structure starts. Preserved verbatim as owned carry state — the
-    /// `StructureStart` load path is not ported (#369), so nothing is parsed or
-    /// fabricated — for the future installer, mirroring the stored-ticks carry
-    /// semantics. `None` when the chunk has no starts.
-    pub structure_starts: Option<CompoundTag>,
 }
 
 /// Why a chunk is not reconstructable into an owned runtime `LevelChunk`.
@@ -212,9 +202,8 @@ pub enum ChunkReconstructionError {
 /// entities with the same typed variants `validate_full_for_reconstruction`
 /// uses — so the caller can distinguish "chunk was never generated" (proto
 /// status) from "chunk carries a deferred surface". Non-empty structure `starts`
-/// is not a boundary: the raw compound is carried verbatim on the result
-/// (`ChunkReconstruction::structure_starts`), since the `StructureStart` load
-/// path is not ported (#369) and a real region-backed chunk may carry them.
+/// is not a boundary: raw entries are preserved in the chunk's canonical
+/// structure authority with an explicit registry-unavailable access refusal.
 pub fn reconstruct_runtime_chunk(
     requested_pos: ChunkPos,
     mut data: SerializableChunkData,
@@ -316,6 +305,13 @@ pub fn reconstruct_runtime_chunk(
     let (structures_references, structure_diagnostics) =
         filter_structure_references(data.structures_references(), &requested_pos);
     install_structure_references(&mut chunk, &structures_references);
+    // No native STRUCTURE registry is fabricated here. Persisted starts enter
+    // the same canonical owner as generated starts, with explicit deferred
+    // access until real registry/subtype authority installs them.
+    chunk.base_mut().defer_serialized_starts(
+        &data.structure_data().get_compound_or_empty("starts"),
+        |key| Identifier::try_parse(key).filter(|id| id.to_string() == key),
+    );
 
     // The serialized block entities are installed into the chunk's pending map
     // — the runtime authority for loaded block entities (#537) — with
@@ -341,7 +337,6 @@ pub fn reconstruct_runtime_chunk(
         raw_fluid_ticks: data.raw_fluid_ticks().clone(),
         stored_block_ticks: data.stored_block_ticks().to_vec(),
         stored_fluid_ticks: data.stored_fluid_ticks().to_vec(),
-        structure_starts: data.structure_starts_compound(),
     })
 }
 
@@ -954,6 +949,17 @@ mod tests {
         .expect("a starts-bearing chunk reconstructs with the starts carried");
         let mut expected_starts = CompoundTag::new();
         expected_starts.put_int("minecraft:village", 1);
-        assert_eq!(reconstructed.structure_starts, Some(expected_starts));
+        assert_eq!(
+            reconstructed.chunk.serialized_starts(ToString::to_string),
+            expected_starts
+        );
+        assert!(matches!(
+            reconstructed
+                .chunk
+                .get_start_for_structure(&Identifier::parse("minecraft:village"))
+                .unwrap()
+                .native(),
+            Err(crate::levelgen::structure::StructureError::RegistryUnavailable)
+        ));
     }
 }

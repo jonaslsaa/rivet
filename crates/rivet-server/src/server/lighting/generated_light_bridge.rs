@@ -589,6 +589,22 @@ impl GeneratedLightTask<BlockState, WorldgenBiomeId, StructureKey, GeneratedLigh
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn structure_start_with_references(
+        references: i32,
+    ) -> rivet_world::levelgen::structure::StructureStart {
+        use rivet_world::levelgen::structure::{
+            StructureDefinition, StructureStart, TerrainAdjustment,
+        };
+        StructureStart::new(
+            StructureDefinition::BuriedTreasure {
+                registry_id: "minecraft:buried_treasure".into(),
+                terrain_adjustment: TerrainAdjustment::None,
+            },
+            ChunkPos::ZERO,
+            references,
+            StructureDefinition::buried_treasure_pieces(ChunkPos::ZERO),
+        )
+    }
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -739,7 +755,7 @@ mod tests {
         chunk.mark_pos_for_post_processing(&rivet_registry::core::BlockPos::new(1, -64, 2));
         chunk.get_or_create_carving_mask().set(1, -64, 2);
         let village = Identifier::parse("minecraft:village");
-        chunk.set_start_for_structure(village.clone(), 9);
+        chunk.set_start_for_structure(village.clone(), structure_start_with_references(9));
         chunk.add_reference_for_structure(village.clone(), 4);
 
         let (chunks, shared) =
@@ -781,7 +797,17 @@ mod tests {
                 .is_some_and(|mask| mask.get(1, -64, 2))
         );
         assert_eq!(chunk.get_post_processing()[0].len(), 1);
-        assert_eq!(chunk.get_start_for_structure(&village), Some(9));
+        let start = chunk
+            .get_start_for_structure(&village)
+            .unwrap()
+            .native()
+            .unwrap();
+        assert_eq!(start.references(), 9);
+        assert_eq!(start.pieces().pieces().len(), 1);
+        assert_eq!(
+            start.bounding_box().unwrap().to_array(),
+            [9, 90, 9, 9, 90, 9]
+        );
         assert_eq!(
             chunk
                 .get_references_for_structure(&village)
