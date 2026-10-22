@@ -663,6 +663,7 @@ dependencies = [
  "rivet-text",
  "rivet-util",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

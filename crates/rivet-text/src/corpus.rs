@@ -29,6 +29,7 @@ use std::path::PathBuf;
 /// `golden.json`), and — for accepted entries — Paper's canonical
 /// decode->re-encode JSON under non-compressed `JsonOps` (`canonical`, copied
 /// verbatim so the byte identity is preserved).
+#[derive(Debug, Clone)]
 pub struct TextFixtureEntry {
     pub id: String,
     pub input: String,
@@ -114,20 +115,26 @@ pub(crate) fn parse_text_corpus(
         }
         _ => {}
     }
-    let corpus: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(corpus_path).map_err(|e| {
-            CorpusError::Malformed(format!("{} unreadable: {e}", corpus_path.display()))
-        })?)
-        .map_err(|e| {
-            CorpusError::Malformed(format!("{} unparsable: {e}", corpus_path.display()))
-        })?;
-    let golden: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(golden_path).map_err(|e| {
-            CorpusError::Malformed(format!("{} unreadable: {e}", golden_path.display()))
-        })?)
-        .map_err(|e| {
-            CorpusError::Malformed(format!("{} unparsable: {e}", golden_path.display()))
-        })?;
+    let corpus_bytes = std::fs::read(corpus_path).map_err(|e| {
+        CorpusError::Malformed(format!("{} unreadable: {e}", corpus_path.display()))
+    })?;
+    let golden_bytes = std::fs::read(golden_path).map_err(|e| {
+        CorpusError::Malformed(format!("{} unreadable: {e}", golden_path.display()))
+    })?;
+    parse_text_corpus_bytes(&corpus_bytes, &golden_bytes)
+}
+
+/// Parse an already-validated immutable corpus + golden pair without reopening
+/// either path. Strict callers can use this to keep validation and execution on
+/// the same bytes.
+pub fn parse_text_corpus_bytes(
+    corpus_bytes: &[u8],
+    golden_bytes: &[u8],
+) -> Result<Vec<TextFixtureEntry>, CorpusError> {
+    let corpus: serde_json::Value = serde_json::from_slice(corpus_bytes)
+        .map_err(|e| CorpusError::Malformed(format!("corpus.json unparsable: {e}")))?;
+    let golden: serde_json::Value = serde_json::from_slice(golden_bytes)
+        .map_err(|e| CorpusError::Malformed(format!("golden.json unparsable: {e}")))?;
 
     let corpus_entries = corpus["entries"]
         .as_array()
@@ -141,14 +148,24 @@ pub(crate) fn parse_text_corpus(
         let gid = g["id"].as_str().ok_or_else(|| {
             CorpusError::Malformed("golden entry missing a string `id`".to_string())
         })?;
-        golden_by_id.insert(gid, g);
+        if golden_by_id.insert(gid, g).is_some() {
+            return Err(CorpusError::Malformed(format!(
+                "golden.json contains duplicate id {gid}"
+            )));
+        }
     }
 
+    let mut corpus_ids = std::collections::HashSet::new();
     let mut out = Vec::new();
     for entry in corpus_entries {
         let id = entry["id"]
             .as_str()
             .ok_or_else(|| CorpusError::Malformed("corpus entry missing `id`".to_string()))?;
+        if !corpus_ids.insert(id) {
+            return Err(CorpusError::Malformed(format!(
+                "corpus.json contains duplicate id {id}"
+            )));
+        }
         let input = entry["input"]
             .as_str()
             .ok_or_else(|| CorpusError::Malformed(format!("{id}: missing `input`")))?;
@@ -190,6 +207,11 @@ pub(crate) fn parse_text_corpus(
             accept,
             canonical,
         });
+    }
+    if golden_by_id.len() != corpus_ids.len() {
+        return Err(CorpusError::Malformed(
+            "golden.json contains entries not present in corpus.json".to_string(),
+        ));
     }
     Ok(out)
 }
