@@ -415,12 +415,12 @@ fn trusted_regular_file_bytes(path: &Path, expected_size: usize) -> Result<Vec<u
 pub fn load_fixture_closure() -> Result<CorpusClosure, ClosureError> {
     let workspace = workspace_root()
         .ok_or_else(|| ClosureError::Absent("workspace root cannot be resolved".to_string()))?;
-    let chunk_root = workspace.join("tools/rivet-oracle/fixtures/chunk");
+    // The workspace itself is trusted. Every component *below* it must be
+    // checked: lstat on the final root follows intermediate directory links.
+    let chunk_root = fixture_root(&workspace, "tools/rivet-oracle/fixtures/chunk")?;
+    let text_root = fixture_root(&workspace, "tools/rivet-oracle/fixtures/text")?;
     let mut closure = load_fixture_closure_from(chunk_root, MANIFEST_BYTES)?;
-    let text = load_text_fixture_closure_from(
-        workspace.join("tools/rivet-oracle/fixtures/text"),
-        MANIFEST_BYTES,
-    )?;
+    let text = load_text_fixture_closure_from(text_root, MANIFEST_BYTES)?;
 
     let mut contract = Sha256::new();
     contract.update(b"rivet-parity-corpus-closure-v2\0");
@@ -432,6 +432,27 @@ pub fn load_fixture_closure() -> Result<CorpusClosure, ClosureError> {
     closure.manifest_sha256 = format!("{:x}", contract.finalize());
     closure.text_entries = text.entries;
     Ok(closure)
+}
+
+fn fixture_root(workspace: &Path, relative: &str) -> Result<PathBuf, ClosureError> {
+    let mut path = workspace.to_path_buf();
+    for component in safe_relative_path(relative)?.components() {
+        path.push(component);
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ClosureError::Absent(format!("{} is absent", path.display()))
+            } else {
+                ClosureError::Invalid(format!("{} cannot be inspected: {error}", path.display()))
+            }
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(ClosureError::Invalid(format!(
+                "{} is not a regular non-symlink directory",
+                path.display()
+            )));
+        }
+    }
+    Ok(path)
 }
 
 fn hash_contract_field(hasher: &mut Sha256, bytes: &[u8]) {
@@ -1243,6 +1264,56 @@ mod closure_tests {
             Err(ClosureError::Invalid(_))
         ));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fixture_roots_reject_every_symlinked_ancestor_below_the_trusted_workspace() {
+        use std::os::unix::fs::symlink;
+        for ancestor in ["tools", "tools/rivet-oracle", "tools/rivet-oracle/fixtures"] {
+            let workspace = temp_root("ancestor-links");
+            let original = workspace.join(ancestor);
+            std::fs::create_dir_all(&original).unwrap();
+            let relocated = workspace.join("relocated");
+            std::fs::rename(&original, &relocated).unwrap();
+            symlink(&relocated, &original).unwrap();
+            for closure in ["chunk", "text"] {
+                let relative = format!("tools/rivet-oracle/fixtures/{closure}");
+                // Both valid and broken intermediate links are invalid, not
+                // an absent corpus that strict callers might merely skip.
+                assert!(matches!(
+                    fixture_root(&workspace, &relative),
+                    Err(ClosureError::Invalid(_))
+                ));
+                std::fs::create_dir_all(workspace.join(&relative)).unwrap();
+                assert!(matches!(
+                    fixture_root(&workspace, &relative),
+                    Err(ClosureError::Invalid(_))
+                ));
+            }
+            std::fs::remove_dir_all(&relocated).unwrap();
+            for closure in ["chunk", "text"] {
+                assert!(matches!(
+                    fixture_root(
+                        &workspace,
+                        &format!("tools/rivet-oracle/fixtures/{closure}")
+                    ),
+                    Err(ClosureError::Invalid(_))
+                ));
+            }
+            std::fs::remove_dir_all(workspace).unwrap();
+        }
+        let workspace = temp_root("ancestor-missing");
+        assert!(matches!(
+            fixture_root(&workspace, "tools/rivet-oracle/fixtures/chunk"),
+            Err(ClosureError::Absent(_))
+        ));
+        std::fs::create_dir_all(workspace.join("tools/rivet-oracle/fixtures/chunk")).unwrap();
+        assert_eq!(
+            fixture_root(&workspace, "tools/rivet-oracle/fixtures/chunk").unwrap(),
+            workspace.join("tools/rivet-oracle/fixtures/chunk")
+        );
+        std::fs::remove_dir_all(workspace).unwrap();
     }
 
     #[cfg(unix)]

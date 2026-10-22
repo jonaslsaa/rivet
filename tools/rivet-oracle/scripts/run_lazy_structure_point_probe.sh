@@ -11,7 +11,7 @@ mkdir -p "$classes"
 classpath="$runtime"
 while IFS= read -r -d '' library; do classpath="$classpath:$library"; done < <(find "$libraries" -name '*.jar' -print0)
 "${java_home:+$java_home/bin/}javac" -cp "$classpath" -d "$classes" "$root/src/java/LazyStructurePointProbe.java"
-probe_output="${1:-$(mktemp -t rivet-lazy-structure-point)}"
+probe_output="${1:-$(mktemp -t rivet-lazy-structure-point.XXXXXX)}"
 if [[ $# == 0 ]]; then trap 'rm -f "$probe_output"' EXIT; fi
 perl -e 'alarm 180; exec @ARGV' "${java_home:+$java_home/bin/}java" -Xmx2G --enable-native-access=ALL-UNNAMED -cp "$classes:$classpath" LazyStructurePointProbe "$probe_output" >&2
 if [[ $# == 0 ]]; then sed -n '/^{/p' "$probe_output"; fi

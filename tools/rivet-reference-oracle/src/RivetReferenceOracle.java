@@ -5,6 +5,8 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.google.gson.JsonParseException;
+import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.serialization.JsonOps;
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
@@ -12,11 +14,15 @@ import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.InputStreamReader;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtAccounter;
 import net.minecraft.nbt.NbtIo;
+import net.minecraft.nbt.NbtAccounterException;
+import net.minecraft.nbt.NbtFormatException;
+import net.minecraft.nbt.ReportedNbtException;
 import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.SnbtPrinterTagVisitor;
 import net.minecraft.nbt.Tag;
@@ -80,10 +86,11 @@ public final class RivetReferenceOracle {
 
     private static JsonObject processLine(final String line) {
         JsonElement id = null;
+        String operation = null;
         try {
             JsonObject request = JsonParser.parseString(line).getAsJsonObject();
             id = request.get("id");
-            String operation = requiredString(request, "op");
+            operation = requiredString(request, "op");
             JsonObject result = switch (operation) {
                 case "ping" -> ping();
                 case "snbt.parse" -> parseSnbt(requiredString(request, "input"));
@@ -94,7 +101,7 @@ public final class RivetReferenceOracle {
             };
             return success(id, result);
         } catch (Exception error) {
-            return failure(id, error);
+            return failure(id, operation, error);
         }
     }
 
@@ -127,17 +134,22 @@ public final class RivetReferenceOracle {
 
     private static JsonObject decodeNbt(final String input) throws Exception {
         if (input.length() > MAX_BASE64_CHARS) {
-            throw new IllegalArgumentException("base64 NBT input exceeds " + MAX_NBT_BYTES + " decoded bytes");
+            throw new RejectedInputException("base64 NBT input exceeds " + MAX_NBT_BYTES + " decoded bytes");
         }
-        byte[] bytes = Base64.getDecoder().decode(input);
+        byte[] bytes;
+        try {
+            bytes = Base64.getDecoder().decode(input);
+        } catch (IllegalArgumentException error) {
+            throw new RejectedInputException(error.getMessage());
+        }
         if (bytes.length > MAX_NBT_BYTES) {
-            throw new IllegalArgumentException("NBT input exceeds " + MAX_NBT_BYTES + " bytes");
+            throw new RejectedInputException("NBT input exceeds " + MAX_NBT_BYTES + " bytes");
         }
         CompoundTag tag;
         try (DataInputStream data = new DataInputStream(new ByteArrayInputStream(bytes))) {
             tag = NbtIo.read(data, NbtAccounter.create(MAX_NBT_BYTES));
             if (data.available() != 0) {
-                throw new IllegalArgumentException("trailing bytes after root compound: " + data.available());
+                throw new RejectedInputException("trailing bytes after root compound: " + data.available());
             }
         }
 
@@ -169,7 +181,7 @@ public final class RivetReferenceOracle {
         JsonElement element;
         try {
             element = JsonParser.parseString(input);
-        } catch (Exception error) {
+        } catch (JsonParseException error) {
             result.addProperty("accept", false);
             return result;
         }
@@ -222,8 +234,34 @@ public final class RivetReferenceOracle {
         return response;
     }
 
-    private static JsonObject failure(final JsonElement id, final Exception error) {
+    private static final class RejectedInputException extends Exception {
+        RejectedInputException(String message) {
+            super(message);
+        }
+    }
+
+    private static boolean isInputRejection(final String operation, final Exception error) {
+        if ("snbt.parse".equals(operation) || "nbt.encode".equals(operation)) {
+            return error instanceof CommandSyntaxException;
+        }
+        if ("nbt.decode".equals(operation)) {
+            // This operation reads only an in-memory byte array. IOException
+            // (including Paper's wrapping crash report) means malformed input,
+            // not unavailable disk/network I/O. Do not classify arbitrary
+            // runtime exceptions or arbitrary IllegalArgumentException here.
+            return error instanceof RejectedInputException
+                || error instanceof IOException
+                || error instanceof NbtAccounterException
+                || error instanceof NbtFormatException
+                || (error instanceof ReportedNbtException && error.getCause() instanceof IOException);
+        }
+        return false;
+    }
+
+    private static JsonObject failure(final JsonElement id, final String operation, final Exception error) {
         JsonObject details = new JsonObject();
+        details.addProperty("kind", isInputRejection(operation, error) ? "input_rejected" : "unavailable");
+        details.addProperty("operation", operation);
         details.addProperty("type", error.getClass().getName());
         details.addProperty("message", error.getMessage());
 
@@ -292,11 +330,27 @@ public final class RivetReferenceOracle {
         if (malformed.get("ok").getAsBoolean()) {
             throw new IllegalStateException("malformed SNBT was accepted");
         }
+        requireEquals("input_rejected", malformed.getAsJsonObject("error").get("kind").getAsString(), "syntax error verdict");
+        requireEquals("snbt.parse", malformed.getAsJsonObject("error").get("operation").getAsString(), "syntax error operation");
+        JsonObject internal = failure(null, "snbt.parse", new NullPointerException("injected internal failure"));
+        requireEquals("unavailable", internal.getAsJsonObject("error").get("kind").getAsString(), "internal error is not rejection");
+        JsonObject unknown = processLine("{\"op\":\"not_an_operation\"}");
+        requireEquals("unavailable", unknown.getAsJsonObject("error").get("kind").getAsString(), "unknown operation is not rejection");
+        JsonObject missingInput = processLine("{\"op\":\"snbt.parse\"}");
+        requireEquals("unavailable", missingInput.getAsJsonObject("error").get("kind").getAsString(), "malformed request is not rejection");
+        JsonObject badBase64 = processLine("{\"op\":\"nbt.decode\",\"input_base64\":\"!!!\"}");
+        requireEquals("input_rejected", badBase64.getAsJsonObject("error").get("kind").getAsString(), "base64 input rejection");
+        JsonObject truncated = processLine("{\"op\":\"nbt.decode\",\"input_base64\":\"\"}");
+        requireEquals("input_rejected", truncated.getAsJsonObject("error").get("kind").getAsString(), "truncated NBT rejection");
+        // Spigot's oversized-array guard throws a bare IllegalArgumentException.
+        // Without an unambiguous input-rejection type, preserve the failure as
+        // unavailable evidence rather than accepting arbitrary runtime faults.
+        requireEquals("unavailable", hostile.getAsJsonObject("error").get("kind").getAsString(), "ambiguous runtime failure is unavailable");
 
         JsonObject summary = new JsonObject();
         summary.addProperty("ok", true);
         summary.addProperty("protocol", PROTOCOL_VERSION);
-        summary.addProperty("tests", 9);
+        summary.addProperty("tests", 14);
         // Emit on the raw stream, not System.out: Bootstrap.bootStrap() has
         // re-wired System.out through log4j's SysOutOverSLF4J wrapper, so a
         // System.out.println here would surface as a `[HH:mm:ss LEVEL]: [STDOUT]:

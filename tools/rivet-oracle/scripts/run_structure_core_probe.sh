@@ -11,7 +11,7 @@ mkdir -p "$classes"
 classpath="$runtime"
 while IFS= read -r -d '' library; do classpath="$classpath:$library"; done < <(find "$libraries" -name '*.jar' -print0)
 "${java_home:+$java_home/bin/}javac" -cp "$classpath" -d "$classes" "$root/src/java/StructureCoreProbe.java"
-probe_output="$(mktemp -t rivet-structure-probe)"
+probe_output="$(mktemp -t rivet-structure-probe.XXXXXX)"
 trap 'rm -f "$probe_output"' EXIT
 "${java_home:+$java_home/bin/}java" --enable-native-access=ALL-UNNAMED -cp "$classes:$classpath" StructureCoreProbe "$probe_output" >&2
 sed -n 's/^STRUCTURE_CORE\t//p' "$probe_output"

@@ -53,6 +53,13 @@ JSON response carrying the request's optional `id`:
 {"id":"comp","protocol":1,"ok":true,"result":{"accept":true,"canonical":"{\"text\":\"hello\",\"bold\":true}"}}
 ```
 
+Failed operations include `error.kind` (`input_rejected` or `unavailable`),
+`error.operation`, `error.type`, and, when provided by Java, `error.message`.
+Only known operation-specific input errors are rejection verdicts. Unexpected
+exceptions, malformed requests, and ambiguous runtime failures remain unavailable
+evidence; clients must not treat every `ok:false` response as input rejection.
+Component codec rejection remains a successful result with `accept:false`.
+
 Run the built-in smoke test without starting a persistent session:
 
 ```sh
