@@ -59,6 +59,11 @@ public final class TreePlacementProbe {
                 case "dry_mud" -> (y < groundY - 1 ? Blocks.DIRT : y < groundY ? Blocks.MUD : Blocks.AIR).defaultBlockState();
                 case "shallow_water" -> (y < groundY - 3 ? Blocks.DIRT : y == groundY - 3 ? Blocks.MUD : y < groundY ? Blocks.WATER : Blocks.AIR).defaultBlockState();
                 case "root_limit_void" -> Blocks.AIR.defaultBlockState();
+                case "clay_basin", "clay_basin_leak" -> {
+                    boolean inside=Math.abs(p.getX())<=3 && Math.abs(p.getZ())<=3;
+                    boolean leak=terrain.equals("clay_basin_leak") && p.getX()==0 && p.getZ()==0 && y==groundY-4;
+                    yield (leak ? Blocks.AIR : y < groundY-(inside?2:0) ? Blocks.DIRT : Blocks.AIR).defaultBlockState();
+                }
                 case "patch_wall" -> (y < groundY ? Blocks.DIRT : ((p.getX()==2 && p.getZ()==0 && y<groundY+3) || (p.getX()==-2 && p.getZ()==1 && y<groundY+2)) ? Blocks.STONE : Blocks.AIR).defaultBlockState();
                 default -> throw new AssertionError("unknown terrain " + terrain);
             };
@@ -75,6 +80,7 @@ public final class TreePlacementProbe {
                 (proxy, method, args) -> switch (method.getName()) {
                     case "getBlockState" -> get((BlockPos) args[0]);
                     case "getFluidState" -> get((BlockPos) args[0]).getFluidState();
+                    case "isWaterAt" -> get((BlockPos) args[0]).getFluidState().is(net.minecraft.tags.FluidTags.WATER);
                     case "isEmptyBlock" -> get((BlockPos) args[0]).isAir();
                     case "ensureCanWrite" -> true;
                     case "isStateAtPosition" -> ((Predicate<BlockState>) args[1]).test(get((BlockPos) args[0]));
@@ -274,6 +280,7 @@ public final class TreePlacementProbe {
                 }
             }
             probeVegetationPatch(resources,output);
+            probeClayPatches(resources,output);
         }
     }
 
@@ -316,6 +323,31 @@ public final class TreePlacementProbe {
         var origin=new BlockPos(0,64,0);var ground=new Ground(origin,true,terrain);var random=new XoroshiroRandomSource(seed);
         boolean result=feature.place(ground.level(),nestedGenerator,random,origin);
         JsonObject row=placementRow("pale_moss_patch",json,seed,result,ground,random,nestedRegistries);row.addProperty("kind","vegetation_patch");row.addProperty("terrain",terrain);addPaleCounts(row,ground);return row;
+    }
+
+    private static void probeClayPatches(net.minecraft.server.packs.resources.ResourceManager resources,java.io.PrintStream output)throws Exception{
+        boolean small=false,big=false,wet=false;
+        for(String name:List.of("clay_pool_with_dripleaves","clay_with_dripleaves","lush_caves_clay")){
+            JsonObject json;
+            try(var reader=resources.getResourceOrThrow(Identifier.withDefaultNamespace("worldgen/configured_feature/"+name+".json")).openAsReader()){json=JsonParser.parseReader(reader).getAsJsonObject();}
+            var feature=nestedRegistries.lookupOrThrow(Registries.CONFIGURED_FEATURE).getOrThrow(net.minecraft.resources.ResourceKey.create(Registries.CONFIGURED_FEATURE,Identifier.withDefaultNamespace(name))).value();
+            for(String terrain:List.of("dry_dirt","clay_basin","clay_basin_leak","root_limit_void"))for(long seed:new long[]{0,1,42,987654321}){
+                var origin=new BlockPos(0,64,0);var ground=new Ground(origin,true,terrain);var random=new XoroshiroRandomSource(seed);
+                boolean result=feature.place(ground.level(),nestedGenerator,random,origin);
+                JsonObject row=placementRow(name,json,seed,result,ground,random,nestedRegistries);row.addProperty("kind","named_configured");row.addProperty("terrain",terrain);
+                for(String block:List.of("clay","water","small_dripleaf","big_dripleaf","big_dripleaf_stem")){
+                    long count=ground.states.values().stream().filter(state->BuiltInRegistries.BLOCK.getKey(state.getBlock()).getPath().equals(block)).count();row.addProperty(block,count);
+                    if(block.equals("small_dripleaf"))small|=count>0;if(block.equals("big_dripleaf"))big|=count>0;
+                }
+                long waterlogged=ground.states.values().stream().filter(state->state.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED)&&state.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED)).count();
+                row.addProperty("waterlogged_dripleaves",waterlogged);wet|=waterlogged>0;
+                for(var half:net.minecraft.world.level.block.state.properties.DoubleBlockHalf.values()){
+                    long count=ground.states.values().stream().filter(state->state.is(Blocks.SMALL_DRIPLEAF)&&state.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.DOUBLE_BLOCK_HALF)==half&&state.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED)).count();row.addProperty("waterlogged_small_"+half.getSerializedName(),count);
+                }
+                output.println("TREE_PLACEMENT\t"+row);
+            }
+        }
+        if(!small||!big||!wet)throw new AssertionError("clay patch corpus must contain real small/big/waterlogged dripleaves");
     }
 
     private static JsonObject placeWithBeeData(String name, JsonObject json, TreeConfiguration config, long seed, HolderLookup.Provider registries) throws Exception {

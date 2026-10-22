@@ -65,6 +65,35 @@ public final class BlockShapeBehaviorProbe {
                             cases.add(new Case("double_plant_"+dir+"_"+half+"_"+Block.getId(neighbor),
                                 Blocks.TALL_GRASS.defaultBlockState().setValue(DoublePlantBlock.HALF,half),dir,neighbor,air,dirt));
                 }
+                for (boolean wet : new boolean[]{false,true}) for (Direction dir : Direction.values()) {
+                    var lower=Blocks.SMALL_DRIPLEAF.defaultBlockState().setValue(BlockStateProperties.DOUBLE_BLOCK_HALF,
+                        net.minecraft.world.level.block.state.properties.DoubleBlockHalf.LOWER);
+                    var upper=lower.setValue(BlockStateProperties.DOUBLE_BLOCK_HALF,
+                        net.minecraft.world.level.block.state.properties.DoubleBlockHalf.UPPER);
+                    for (var half : net.minecraft.world.level.block.state.properties.DoubleBlockHalf.values())
+                        for (BlockState below : List.of(air,dirt,Blocks.CLAY.defaultBlockState(),Blocks.STONE.defaultBlockState()))
+                            for (BlockState neighbor : List.of(air,Blocks.STONE.defaultBlockState(),lower,upper)) {
+                                var state=lower.setValue(BlockStateProperties.DOUBLE_BLOCK_HALF,half).setValue(BlockStateProperties.WATERLOGGED,wet);
+                                cases.add(new Case("small_dripleaf_"+wet+"_"+dir+"_"+half+"_"+Block.getId(below)+"_"+Block.getId(neighbor),
+                                    state,dir,neighbor,upper,below));
+                            }
+                    var head=Blocks.BIG_DRIPLEAF.defaultBlockState();var stem=Blocks.BIG_DRIPLEAF_STEM.defaultBlockState();
+                    for (Direction facing : Direction.Plane.HORIZONTAL)
+                        for (BlockState below : List.of(air,Blocks.CLAY.defaultBlockState(),stem,head))
+                            for (BlockState neighbor : List.of(air,stem,head)) {
+                                var state=head.setValue(BlockStateProperties.HORIZONTAL_FACING,facing).setValue(BlockStateProperties.WATERLOGGED,wet)
+                                    .setValue(BlockStateProperties.TILT,net.minecraft.world.level.block.state.properties.Tilt.FULL);
+                                cases.add(new Case("big_dripleaf_"+wet+"_"+dir+"_"+facing+"_"+Block.getId(below)+"_"+Block.getId(neighbor),
+                                    state,dir,neighbor,air,below));
+                            }
+                    for (BlockState below : List.of(air,Blocks.CLAY.defaultBlockState(),stem,head))
+                        for (BlockState above : List.of(air,stem,head))
+                            for (BlockState neighbor : List.of(air,stem,head)) {
+                                var state=stem.setValue(BlockStateProperties.HORIZONTAL_FACING,Direction.EAST).setValue(BlockStateProperties.WATERLOGGED,wet);
+                                cases.add(new Case("big_dripleaf_stem_"+wet+"_"+dir+"_"+Block.getId(below)+"_"+Block.getId(above)+"_"+Block.getId(neighbor),
+                                    state,dir,neighbor,above,below));
+                            }
+                }
                 for (var test : cases) {
                     var pos = new BlockPos(3,70,-5); var states = new HashMap<BlockPos,BlockState>();
                     states.put(pos,test.state()); states.put(pos.above(),test.above()); states.put(pos.below(),test.below());
@@ -87,6 +116,7 @@ public final class BlockShapeBehaviorProbe {
                     row.addProperty("direction",test.direction().getSerializedName());row.addProperty("neighbor",Block.getId(test.neighbor()));
                     row.addProperty("above",Block.getId(test.above()));row.addProperty("below",Block.getId(test.below()));
                     row.addProperty("result",Block.getId(result));row.add("ticks",ticks);row.addProperty("next_long",random.nextLong());
+                    if (test.name().contains("dripleaf")) row.addProperty("can_survive",test.state().canSurvive(level,pos));
                     output.println("BLOCK_SHAPE\t"+row);
                 }
             }

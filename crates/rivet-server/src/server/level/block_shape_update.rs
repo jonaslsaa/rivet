@@ -218,7 +218,11 @@ fn update_shape(
                 state
             }
         }
-        "DoublePlantBlock" => {
+        "SmallDripleafBlock" | "DoublePlantBlock" => {
+            if state.get_value(BlockStateProperties::WATERLOGGED) == Some(PropertyValue::Bool(true))
+            {
+                level.schedule_tick(pos, FluidId::WATER, 5);
+            }
             let half = state.get_value(BlockStateProperties::DOUBLE_BLOCK_HALF);
             let lower = half == Some(PropertyValue::Enum("lower"));
             let vertical = direction == Direction::Up || direction == Direction::Down;
@@ -231,6 +235,52 @@ fn update_shape(
             } else {
                 state
             }
+        }
+        "BigDripleafBlock" => {
+            // The support failure returns before the water tick is scheduled.
+            if direction == Direction::Down && !level.can_survive(&state, pos) {
+                return Blocks::AIR.default_block_state();
+            }
+            if state.get_value(BlockStateProperties::WATERLOGGED) == Some(PropertyValue::Bool(true))
+            {
+                level.schedule_tick(pos, FluidId::WATER, 5);
+            }
+            if direction == Direction::Up && neighbor.block() == state.block() {
+                let stem = BlockState::of(
+                    rivet_registry::generated::blocks::BlockId::from_name(
+                        "minecraft:big_dripleaf_stem",
+                    )
+                    .expect("registered dripleaf stem"),
+                );
+                stem.set_value(
+                    BlockStateProperties::WATERLOGGED,
+                    state
+                        .get_value(BlockStateProperties::WATERLOGGED)
+                        .expect("dripleaf waterlogged"),
+                )
+                .expect("stem waterlogged")
+                .set_value(
+                    BlockStateProperties::HORIZONTAL_FACING,
+                    state
+                        .get_value(BlockStateProperties::HORIZONTAL_FACING)
+                        .expect("dripleaf facing"),
+                )
+                .expect("stem facing")
+            } else {
+                state
+            }
+        }
+        "BigDripleafStemBlock" => {
+            if matches!(direction, Direction::Down | Direction::Up)
+                && !level.can_survive(&state, pos)
+            {
+                level.schedule_block_tick(pos, Block::new(state.block()), 1);
+            }
+            if state.get_value(BlockStateProperties::WATERLOGGED) == Some(PropertyValue::Bool(true))
+            {
+                level.schedule_tick(pos, FluidId::WATER, 5);
+            }
+            state
         }
         "CreakingHeartBlock" => {
             level.schedule_block_tick(pos, Block::new(state.block()), 1);
@@ -402,7 +452,17 @@ mod tests {
             self.writes.push((*pos, state, flags));
             true
         }
-        fn can_survive(&self, _: &BlockState, pos: &BlockPos) -> bool {
+        fn can_survive(&self, state: &BlockState, pos: &BlockPos) -> bool {
+            if matches!(
+                state.block().name(),
+                "minecraft:small_dripleaf"
+                    | "minecraft:big_dripleaf"
+                    | "minecraft:big_dripleaf_stem"
+            ) {
+                return crate::server::level::world_gen_region::region_can_survive(
+                    self, state, pos,
+                );
+            }
             self.get_block_state(&pos.below())
                 .is_in_tag("minecraft:supports_vegetation")
         }
@@ -426,6 +486,113 @@ mod tests {
 
     fn state(name: &str) -> BlockState {
         BlockState::of(BlockId::from_name(name).expect("registered fixture block"))
+    }
+
+    #[test]
+    fn dripleaf_support_distinguishes_source_water_halves_and_stem_neighbors() {
+        let pos = BlockPos::new(0, 64, 0);
+        let lower = state("minecraft:small_dripleaf");
+        let upper = lower
+            .set_value(
+                BlockStateProperties::DOUBLE_BLOCK_HALF,
+                PropertyValue::Enum("upper"),
+            )
+            .unwrap();
+        let mut level = Level::default();
+        level.blocks.insert(pos.below(), state("minecraft:dirt"));
+        level.blocks.insert(pos, state("minecraft:water"));
+        assert!(level.can_survive(&lower, &pos));
+        level.blocks.insert(
+            pos,
+            state("minecraft:water")
+                .set_value(BlockStateProperties::LEVEL, 1)
+                .unwrap(),
+        );
+        assert!(
+            !level.can_survive(&lower, &pos),
+            "flowing water is not a source"
+        );
+        level.blocks.insert(pos, lower);
+        assert!(!level.can_survive(&lower, &pos));
+        level.blocks.insert(pos.below(), state("minecraft:clay"));
+        assert!(
+            level.can_survive(&lower, &pos),
+            "small-dripleaf support needs no water"
+        );
+        level.blocks.insert(pos.below(), upper);
+        assert!(!level.can_survive(&upper, &pos));
+        level.blocks.insert(pos.below(), lower);
+        assert!(level.can_survive(&upper, &pos));
+
+        let leaf = state("minecraft:big_dripleaf");
+        let stem = state("minecraft:big_dripleaf_stem");
+        level.blocks.insert(pos.below(), leaf);
+        level.blocks.insert(pos.above(), leaf);
+        assert!(level.can_survive(&leaf, &pos));
+        assert!(
+            !level.can_survive(&stem, &pos),
+            "a leaf is not stem support"
+        );
+        level.blocks.insert(pos.below(), stem);
+        assert!(level.can_survive(&stem, &pos));
+        level.blocks.remove(&pos.above());
+        assert!(!level.can_survive(&stem, &pos));
+    }
+
+    #[test]
+    fn dripleaf_neighbor_updates_preserve_tick_order_and_transition_properties() {
+        let pos = BlockPos::new(0, 64, 0);
+        let air = Blocks::AIR.default_block_state();
+        let leaf = state("minecraft:big_dripleaf")
+            .set_value(BlockStateProperties::WATERLOGGED, true)
+            .unwrap()
+            .set_value(BlockStateProperties::HORIZONTAL_FACING, Direction::East)
+            .unwrap();
+        let mut level = Level::default();
+        assert_eq!(
+            update_shape(&mut level, &mut random(), leaf, &pos, Direction::Down, air),
+            air
+        );
+        assert!(
+            level.ticks.is_empty(),
+            "support failure precedes water ticking"
+        );
+        let stem = update_shape(&mut level, &mut random(), leaf, &pos, Direction::Up, leaf);
+        assert_eq!(stem.block().name(), "minecraft:big_dripleaf_stem");
+        assert_eq!(
+            stem.get_value(BlockStateProperties::HORIZONTAL_FACING),
+            leaf.get_value(BlockStateProperties::HORIZONTAL_FACING)
+        );
+        assert_eq!(
+            stem.get_value(BlockStateProperties::WATERLOGGED),
+            Some(PropertyValue::Bool(true))
+        );
+        assert_eq!(level.ticks, [(pos, "water", 5)]);
+        level.ticks.clear();
+        assert_eq!(
+            update_shape(&mut level, &mut random(), stem, &pos, Direction::Up, air),
+            stem
+        );
+        assert_eq!(level.ticks, [(pos, "block", 1), (pos, "water", 5)]);
+        level.ticks.clear();
+        assert_eq!(
+            update_shape(&mut level, &mut random(), stem, &pos, Direction::East, air),
+            stem
+        );
+        assert_eq!(level.ticks, [(pos, "water", 5)]);
+        level.ticks.clear();
+        let small = state("minecraft:small_dripleaf")
+            .set_value(BlockStateProperties::WATERLOGGED, true)
+            .unwrap();
+        assert_eq!(
+            update_shape(&mut level, &mut random(), small, &pos, Direction::Up, air),
+            air
+        );
+        assert_eq!(
+            level.ticks,
+            [(pos, "water", 5)],
+            "small dripleaf ticks before rejecting its paired half"
+        );
     }
 
     #[test]
