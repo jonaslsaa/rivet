@@ -320,9 +320,7 @@ impl PlayerSessionManager {
         }
         // Work is bounded by status jobs, not by player movement. Incomplete
         // terrain never becomes a synthetic runtime chunk or a sent packet.
-        if let Some(owner) = self.level.generated_chunk_owner_mut() {
-            owner.run_jobs(1);
-        }
+        self.level.tick_generation(1);
         self.drive_terrain_joins(ctx);
         // `tickPlayer()` → `resetPosition()`: refresh every live session's move
         // anchors before any inbound move/ack frame is handled this tick (issue

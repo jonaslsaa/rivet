@@ -200,6 +200,7 @@ pub fn write_world_gen_settings_type(root: &Path, seed: i64, generator_type: &st
     let mut generator = CompoundTag::new();
     generator.put_string("type", generator_type);
     let mut overworld = CompoundTag::new();
+    overworld.put_string("type", "minecraft:overworld");
     overworld.put("generator".to_string(), Tag::Compound(generator));
     let mut dimensions = CompoundTag::new();
     dimensions.put("minecraft:overworld".to_string(), Tag::Compound(overworld));

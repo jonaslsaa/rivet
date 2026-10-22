@@ -16,8 +16,9 @@
 //!
 //! IDs/names use generated registry data; categories are captured from the
 //! actual pinned Paper runtime. [`chest_minecart`] separately implements the
-//! fresh native constructor/save slice required by mineshaft placement; it does
-//! not imply general entity loading, movement or ticking support.
+//! native constructor/load/save slice required by mineshaft placement and
+//! LimitedRegion persisted-cart access; it does not imply other entity-family
+//! constructors, passenger riding graphs, movement or ticking support.
 
 mod builtin_categories;
 pub mod chest_minecart;

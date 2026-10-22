@@ -101,42 +101,72 @@ impl StructurePlacementRuntime {
     }
 }
 
-impl StructureTransformBackend<NativeChestMinecart>
-    for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Identifier>
-{
+struct RegionTransformBackend<'a, 'r> {
+    region: &'a mut WorldGenRegion<'r, BlockState, WorldgenBiomeId, Identifier>,
+    factory: &'a dyn StructureEntityCreation,
+}
+impl LevelHeightAccessor for RegionTransformBackend<'_, '_> {
+    fn get_min_y(&self) -> i32 {
+        self.region.get_min_y()
+    }
+    fn get_height(&self) -> i32 {
+        self.region.get_height()
+    }
+}
+impl WorldGenLevel for RegionTransformBackend<'_, '_> {
+    fn get_seed(&self) -> i64 {
+        self.region.get_seed()
+    }
+    fn get_block_state(&self, pos: &BlockPos) -> BlockState {
+        self.region.get_block_state(pos)
+    }
+    fn set_block(&mut self, pos: &BlockPos, state: BlockState, flags: u32) -> bool {
+        WorldGenLevel::set_block(self.region, pos, state, flags)
+    }
+    fn schedule_tick(&mut self, pos: &BlockPos, fluid: FluidId, delay: i32) {
+        self.region.schedule_tick(pos, fluid, delay);
+    }
+    fn mark_pos_for_post_processing(&mut self, pos: &BlockPos) {
+        self.region.mark_pos_for_post_processing(pos);
+    }
+}
+impl StructureTransformBackend<NativeChestMinecart> for RegionTransformBackend<'_, '_> {
     fn fresh_snapshot(
         &mut self,
         pos: BlockPos,
         state: BlockState,
     ) -> Result<CraftBlockSnapshot, StructureError> {
-        self.structure_fresh_snapshot(pos, state)
+        self.region.structure_fresh_snapshot(pos, state)
     }
     fn world_snapshot(&mut self, pos: BlockPos) -> Result<CraftBlockSnapshot, StructureError> {
-        self.structure_world_snapshot(pos)
+        self.region.structure_world_snapshot(pos)
     }
     fn load_snapshot(&mut self, pos: BlockPos, data: &CompoundTag) -> Result<(), StructureError> {
-        self.structure_load_snapshot(pos, data)
+        self.region.structure_load_snapshot(pos, data)
     }
     fn add_entity_with_passengers(
         &mut self,
         entity: NativeChestMinecart,
     ) -> Result<bool, StructureError> {
-        self.add_fresh_chest_minecart(entity)
+        self.region.add_fresh_chest_minecart(entity)
     }
     fn load_chunk_entities(
         &mut self,
         chunk: ChunkPos,
     ) -> Result<Vec<NativeChestMinecart>, StructureError> {
-        if self.structure_chunk_entities_are_empty(chunk)? {
-            Ok(Vec::new())
-        } else {
-            Err(StructureError::PlacementUnavailable(
-                "EntityType.loadEntityRecursive for existing chunk entities is unavailable".into(),
-            ))
+        let tags = self.region.structure_chunk_entity_tags(chunk)?;
+        let mut loaded = Vec::new();
+        for tag in tags {
+            if let Some(entity) =
+                super::structure_entity_loading::load_native_entity(&tag, self.factory)?
+            {
+                loaded.push(entity);
+            }
         }
+        Ok(loaded)
     }
     fn clear_chunk_entities(&mut self, chunk: ChunkPos) -> Result<(), StructureError> {
-        self.clear_structure_chunk_entities(chunk)
+        self.region.clear_structure_chunk_entities(chunk)
     }
 }
 
@@ -163,7 +193,11 @@ impl RegionStructurePlacement<'_, '_> {
         let transformer = self.transformer.as_mut().ok_or_else(|| {
             StructureError::PlacementUnavailable("no active structure transformer scope".into())
         })?;
-        transformer.place_snapshot(self.region, pos, snapshot, flags)
+        let mut backend = RegionTransformBackend {
+            region: self.region,
+            factory: self.runtime.entities.as_ref(),
+        };
+        transformer.place_snapshot(&mut backend, pos, snapshot, flags)
     }
 }
 
@@ -215,7 +249,11 @@ impl StructurePlacementAuthority for RegionStructurePlacement<'_, '_> {
         let mut transformer = self.transformer.take().ok_or_else(|| {
             StructureError::PlacementUnavailable("no active structure transformer scope".into())
         })?;
-        let result = transformer.finish(self.region);
+        let mut backend = RegionTransformBackend {
+            region: self.region,
+            factory: self.runtime.entities.as_ref(),
+        };
+        let result = transformer.finish(&mut backend);
         if result.is_err() {
             transformer.abort();
         }
@@ -279,13 +317,17 @@ impl StructurePlacementAuthority for RegionStructurePlacement<'_, '_> {
             })?,
             random.next_long(),
         );
+        let mut backend = RegionTransformBackend {
+            region: self.region,
+            factory: self.runtime.entities.as_ref(),
+        };
         if self
             .transformer
             .as_mut()
             .expect("checked active scope")
-            .transform_entity(self.region, &mut entity)?
+            .transform_entity(&mut backend, &mut entity)?
         {
-            self.region.add_fresh_chest_minecart(entity)?;
+            backend.region.add_fresh_chest_minecart(entity)?;
         }
         Ok(())
     }
@@ -353,7 +395,13 @@ impl WorldGenLevel for RegionStructurePlacement<'_, '_> {
                     "structure write outside transformer scope".into(),
                 )
             })
-            .and_then(|transformer| transformer.set_block(self.region, *pos, state, flags));
+            .and_then(|transformer| {
+                let mut backend = RegionTransformBackend {
+                    region: self.region,
+                    factory: self.runtime.entities.as_ref(),
+                };
+                transformer.set_block(&mut backend, *pos, state, flags)
+            });
         result.unwrap_or_else(|error| std::panic::panic_any(StructurePlacementFailure(error)))
     }
     fn get_biome(&self, pos: &BlockPos) -> Holder<BiomeId> {

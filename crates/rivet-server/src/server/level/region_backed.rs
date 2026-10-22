@@ -261,6 +261,11 @@ pub fn boot_level(root: &Path) -> Result<ServerLevel, RegionBackedBootError> {
     let mut prepared = RegionLevelPreparation::prepare(root)?;
     let level = read_level_metadata(prepared.source().layout())?;
     let respawn = level.spawn;
+    let mut pack_authority =
+        super::generated_boot::PinnedBuiltinPackAuthority::for_world_root(root)?;
+    let boot_settings = level
+        .pending_settings
+        .finalize(&mut pack_authority, false, false)?;
     // This boot composes the overworld dimension exclusively: the region
     // layout, the geometry constants, and `ServerLevel::dimension()` are all
     // overworld. A same-version `level.dat` whose spawn anchors another
@@ -291,7 +296,21 @@ pub fn boot_level(root: &Path) -> Result<ServerLevel, RegionBackedBootError> {
     // The empty `ChunkMap` guarantees `RequireLoaded` fails on any position the
     // boot did not install — never a superflat placeholder.
     let mut world = ServerLevel::new_region_backed(config);
+    world.set_game_time(level.game_time);
+    world.install_boot_settings(boot_settings);
     let dimension_path = root.join("dimensions/minecraft/overworld");
+    let environment = super::generation_environment::GenerationEnvironment::load(
+        &dimension_path,
+        &world_gen.dimension_type,
+        world
+            .boot_settings()
+            .expect("finalized boot settings")
+            .enabled_features(),
+        level.game_time,
+    )?;
+    world
+        .install_generation_environment(environment)
+        .map_err(|error| RegionBackedBootError::GenerationEnvironment(error.error))?;
     if let Some(uuid) = super::world_identity::read_world_uuid(&dimension_path)
         .map_err(|error| RegionBackedBootError::WorldIdentityRead(dimension_path.clone(), error))?
     {
@@ -323,6 +342,8 @@ pub fn boot_level(root: &Path) -> Result<ServerLevel, RegionBackedBootError> {
 /// the decoded spawn.
 struct LevelMetadata {
     spawn: RespawnData,
+    game_time: i64,
+    pending_settings: super::generated_boot::PendingBootSettings,
 }
 
 /// Read + decompress `level.dat`, validate `Data.DataVersion` (4903), and
@@ -364,13 +385,18 @@ fn read_level_metadata(layout: &RegionWorldLayout) -> Result<LevelMetadata, Regi
         })?
         .0
         .clone();
-    Ok(LevelMetadata { spawn })
+    Ok(LevelMetadata {
+        spawn,
+        game_time: data.get_long_or("Time", 0),
+        pending_settings: super::generated_boot::PendingBootSettings::from_level_data(data),
+    })
 }
 
 /// The world-gen metadata the boot composes: the real seed and the overworld
 /// generator shape.
 struct WorldGenSettings {
     seed: i64,
+    dimension_type: rivet_registry::Identifier,
     /// `ServerLevel.isFlat()` — the overworld generator is a `FlatLevelSource`
     /// (`generator.type == "minecraft:flat"`). The real save uses
     /// `minecraft:noise` (not flat).
@@ -410,14 +436,27 @@ fn read_world_gen_settings(
     let generator_type = generator
         .get_string("type")
         .ok_or(RegionBackedBootError::MissingGeneratorType)?;
+    let dimension_type = overworld
+        .get_string("type")
+        .and_then(|key| {
+            rivet_registry::Identifier::try_parse_result(key)
+                .ok()
+                .flatten()
+        })
+        .ok_or(RegionBackedBootError::UnsupportedDimensionType)?;
     Ok(WorldGenSettings {
         seed,
+        dimension_type,
         is_flat: generator_type == "minecraft:flat",
     })
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum RegionBackedBootError {
+    #[error(transparent)]
+    GenerationEnvironment(#[from] super::generation_environment::GenerationEnvironmentError),
+    #[error(transparent)]
+    BootSettings(#[from] super::generated_boot::BootSettingsError),
     #[error("could not read Paper world identity under {0}: {1}")]
     WorldIdentityRead(PathBuf, #[source] io::Error),
     #[error("UNVERIFIED invalid disposable level root: {0}")]
@@ -452,6 +491,10 @@ pub enum RegionBackedBootError {
     MissingOverworldGenerator,
     #[error("UNVERIFIED world_gen_settings.dat overworld generator has no type")]
     MissingGeneratorType,
+    #[error(
+        "UNVERIFIED world_gen_settings.dat overworld type is not a registered dimension identifier"
+    )]
+    UnsupportedDimensionType,
     #[error("UNVERIFIED read-only region read failed: {0}")]
     RegionRead(#[source] io::Error),
     #[error("UNVERIFIED chunk {0} is absent; generation and superflat fallback are disabled")]
@@ -1156,6 +1199,49 @@ mod tests {
             REAL_SEED,
             "the loaded world keeps its real seed, not the config default"
         );
+    }
+
+    #[test]
+    fn loaded_world_features_reach_server_config_and_custom_resources_refuse() {
+        use rivet_nbt::{list_tag::ListTag, string_tag::StringTag};
+        use rivet_world::flag::feature_flags;
+        let temp = tempfile::tempdir().unwrap();
+        loaded_world_root(&temp);
+        let path = temp.path().join("level.dat");
+        let mut tag = nbt_io::read_compressed(
+            &std::fs::read(&path).unwrap()[..],
+            &mut NbtAccounter::unlimited_heap(),
+        )
+        .unwrap();
+        tag.get_compound_or_empty_mut("Data").put(
+            "enabled_features".into(),
+            Tag::List(ListTag::with_list(
+                ["vanilla", "minecart_improvements", "redstone_experiments"]
+                    .into_iter()
+                    .map(|name| Tag::String(StringTag::value_of(name.into())))
+                    .collect(),
+            )),
+        );
+        let mut bytes = Vec::new();
+        nbt_io::write_compressed(&tag, &mut bytes).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let server = crate::server::Server::try_new(crate::server::ServerConfig {
+            level_path: Some(temp.path().to_path_buf()),
+            ..Default::default()
+        })
+        .unwrap();
+        let flags = &server.config().enabled_features;
+        assert!(flags.contains(&feature_flags::VANILLA));
+        assert!(flags.contains(&feature_flags::MINECART_IMPROVEMENTS));
+        assert!(flags.contains(&feature_flags::REDSTONE_EXPERIMENTS));
+        std::fs::create_dir_all(temp.path().join("datapacks/custom")).unwrap();
+        std::fs::write(temp.path().join("datapacks/custom/pack.mcmeta"), "{}").unwrap();
+        assert!(matches!(
+            boot_level(temp.path()),
+            Err(RegionBackedBootError::BootSettings(
+                super::super::generated_boot::BootSettingsError::PackAuthorityUnavailable(_)
+            ))
+        ));
     }
 
     /// The `enable_join: false` mirror branch: `Server::try_new` with no live

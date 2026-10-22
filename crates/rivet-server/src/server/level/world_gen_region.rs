@@ -1033,6 +1033,15 @@ where
             .is_empty())
     }
 
+    /// Source ProtoChunk entity-tag order, copied only for the current loader
+    /// invocation. The region/owning chunk remains the sole persistent store.
+    pub fn structure_chunk_entity_tags(
+        &mut self,
+        pos: ChunkPos,
+    ) -> Result<Vec<CompoundTag>, rivet_world::levelgen::structure::StructureError> {
+        Ok(self.structure_proto_chunk_mut(pos)?.get_entities().to_vec())
+    }
+
     pub fn clear_structure_chunk_entities(
         &mut self,
         pos: ChunkPos,

@@ -2,10 +2,12 @@
 //! from the actual status pyramid; unavailable bodies are never pass-throughs.
 use super::generated_world::{
     FeatureWorkspace, FeatureWritebacks, GeneratedChunkError, GenerationChunkHolder,
-    GenerationChunkLoan, GenerationChunkState, OverworldGenerator,
+    GenerationChunkLoan, GenerationChunkState, OverworldGenerator, SpawnRegionProtos,
 };
+use crate::server::lighting::{GeneratedLightBridge, GeneratedLightWorkspace};
 use rivet_registry::core::ChunkPos;
 use rivet_world::chunk::status::{ChunkStatus, chunk_pyramid::GENERATION_PYRAMID};
+use rivet_world::level::WorldBorderSettings;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -18,6 +20,9 @@ pub enum GenerationOwnerError {
     Generation(GeneratedChunkError),
     StructureTerrain(rivet_world::levelgen::noise::beardifier::BeardifierError),
     StructureGeneration(super::structure_generation::StructureGenerationError),
+    RuntimeUnavailable { status: ChunkStatus },
+    LightProjection(crate::server::lighting::GeneratedLightBridgeError),
+    LightWorkspace(crate::server::lighting::GeneratedLightWorkspaceError),
 }
 impl std::fmt::Display for GenerationOwnerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -29,6 +34,11 @@ impl std::fmt::Display for GenerationOwnerError {
             Self::Generation(error) => write!(f, "{error}"),
             Self::StructureTerrain(error) => write!(f, "{error}"),
             Self::StructureGeneration(error) => write!(f, "{error}"),
+            Self::RuntimeUnavailable { status } => {
+                write!(f, "world runtime settings unavailable for {status:?}")
+            }
+            Self::LightProjection(error) => write!(f, "generated lighting: {error}"),
+            Self::LightWorkspace(error) => write!(f, "generated lighting workspace: {error:?}"),
         }
     }
 }
@@ -70,6 +80,8 @@ pub struct GeneratedChunkOwner {
     chunks: HashMap<ChunkPos, Entry>,
     structure_runtime: Option<super::structure_generation::StructureGenerationRuntime>,
     structure_placement: Option<Arc<super::structure_placement_adapter::StructurePlacementRuntime>>,
+    light_channels: Option<(bool, bool)>,
+    spawn_settings: Option<(WorldBorderSettings, bool)>,
 }
 
 impl GeneratedChunkOwner {
@@ -82,10 +94,42 @@ impl GeneratedChunkOwner {
             chunks: HashMap::new(),
             structure_runtime: None,
             structure_placement: None,
+            light_channels: None,
+            spawn_settings: None,
         }
     }
     pub fn generator(&self) -> &Arc<OverworldGenerator> {
         &self.generator
+    }
+    /// Supply the actual dimension's enabled light channels. Neither channel
+    /// is inferred from the generator or from the presence of a workspace.
+    pub fn set_light_channels(&mut self, has_sky_light: bool, has_block_light: bool) {
+        let was_missing = self.light_channels.is_none();
+        self.light_channels = Some((has_sky_light, has_block_light));
+        if was_missing {
+            self.retry_runtime_settings();
+        }
+    }
+
+    /// Refresh from the world's current border and SPAWN_MOBS gamerule before
+    /// running jobs. No default border or disabled-mob fallback is installed.
+    pub fn set_spawn_settings(&mut self, border: WorldBorderSettings, spawn_mobs: bool) {
+        let was_missing = self.spawn_settings.is_none();
+        self.spawn_settings = Some((border.current_bounds_snapshot(), spawn_mobs));
+        if was_missing {
+            self.retry_runtime_settings();
+        }
+    }
+
+    fn retry_runtime_settings(&mut self) {
+        for entry in self.chunks.values_mut() {
+            if matches!(
+                entry.failure,
+                Some((_, GenerationOwnerError::RuntimeUnavailable { .. }))
+            ) {
+                entry.failure = None;
+            }
+        }
     }
     pub fn install_structure_placement(
         &mut self,
@@ -214,6 +258,7 @@ impl GeneratedChunkOwner {
         if !state.belongs_to(&self.generator)
             || self.chunks.contains_key(&state.pos())
             || state.has_retained_dependencies()
+            || state.has_retained_light_storage()
             || state.has_structure_capability()
             || state.status() != ChunkStatus::Empty
         {
@@ -387,6 +432,65 @@ impl GeneratedChunkOwner {
             } else {
                 None
             };
+            if (matches!(next, ChunkStatus::InitializeLight | ChunkStatus::Light)
+                && self.light_channels.is_none())
+                || (next == ChunkStatus::Spawn && self.spawn_settings.is_none())
+            {
+                self.chunks.get_mut(&pos).expect("canonical center").failure = Some((
+                    next,
+                    GenerationOwnerError::RuntimeUnavailable { status: next },
+                ));
+                report.failed += 1;
+                continue;
+            }
+            // These are disposable value projections, not additional chunk
+            // owners. Only light buffers may be returned to the canonical
+            // protos; sections, status, entities and failures never come back
+            // from a provider projection.
+            let mut light_projections = HashMap::new();
+            if matches!(next, ChunkStatus::InitializeLight | ChunkStatus::Light) {
+                let projection_result = self.chunks.iter().try_for_each(|(&neighbor, entry)| {
+                    if neighbor != pos
+                        && pos.get_chessboard_distance(&neighbor) <= 2
+                        && entry.state.status().is_or_after(ChunkStatus::Light)
+                        && entry.state.chunk().base().is_light_correct()
+                    {
+                        let runtime =
+                            GeneratedLightBridge::runtime_from_generated(entry.state.chunk())
+                                .map_err(GenerationOwnerError::LightProjection)?;
+                        let (base, _) = runtime.into_base_and_entities();
+                        light_projections.insert((neighbor.x(), neighbor.z()), base);
+                    }
+                    Ok::<(), GenerationOwnerError>(())
+                });
+                if let Err(error) = projection_result {
+                    self.chunks.get_mut(&pos).expect("canonical center").failure =
+                        Some((next, error));
+                    report.failed += 1;
+                    continue;
+                }
+            }
+            let light_workspace =
+                if matches!(next, ChunkStatus::InitializeLight | ChunkStatus::Light) {
+                    let (sky, block) = self.light_channels.expect("validated dimension channels");
+                    match GeneratedLightWorkspace::new(
+                        self.chunks[&pos].state.chunk().height_accessor(),
+                        sky,
+                        block,
+                        pos,
+                        &mut light_projections,
+                    ) {
+                        Ok(workspace) => Some(workspace),
+                        Err(error) => {
+                            self.chunks.get_mut(&pos).expect("canonical center").failure =
+                                Some((next, GenerationOwnerError::LightWorkspace(error)));
+                            report.failed += 1;
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
             let entry = self.chunks.remove(&pos).expect("selected canonical chunk");
             let workspace = FeatureWorkspace::new();
             let mut loans = HashMap::new();
@@ -401,6 +505,30 @@ impl GeneratedChunkOwner {
                     loans.insert(neighbor, (metadata, entry.failure));
                 }
             }
+            let mut spawn_workspace = if next == ChunkStatus::Spawn {
+                let mut neighbors = Vec::with_capacity(8);
+                // The scheduler has already proved the exact radius-one
+                // BIOMES prerequisite. Preserve the full proto, not its base.
+                for (neighbor, _) in dependencies(pos, next, false) {
+                    let entry = self
+                        .chunks
+                        .remove(&neighbor)
+                        .expect("ready SPAWN dependency");
+                    let (chunk, metadata) = entry.state.into_loan();
+                    neighbors.push(chunk);
+                    loans.insert(neighbor, (metadata, entry.failure));
+                }
+                Some(
+                    SpawnRegionProtos::new_with_world_border_settings(
+                        pos,
+                        neighbors,
+                        self.spawn_settings.expect("validated SPAWN settings").0,
+                    )
+                    .expect("canonical exact radius-one neighbors"),
+                )
+            } else {
+                None
+            };
             let (mut holder, light) = match GenerationChunkHolder::from_state(
                 entry.state,
                 Arc::clone(&self.generator),
@@ -409,7 +537,16 @@ impl GeneratedChunkOwner {
             ) {
                 Ok(result) => result,
                 Err(error) => {
-                    self.return_loans(error.workspace.take_all(), loans);
+                    if let Some(workspace) = spawn_workspace.take() {
+                        let chunks = workspace
+                            .into_neighbours()
+                            .into_iter()
+                            .map(|chunk| (chunk.get_pos(), chunk))
+                            .collect();
+                        self.return_loans(chunks, loans);
+                    } else {
+                        self.return_loans(error.workspace.take_all(), loans);
+                    }
                     self.chunks.insert(
                         pos,
                         Entry {
@@ -431,19 +568,54 @@ impl GeneratedChunkOwner {
                     "canonical owner retains the world's placement runtime"
                 );
             }
-            // LIGHT attachment is an explicit later job seam, not a fabricated
-            // engine. Keep detached storage even if this rung refuses.
+            assert!(
+                light.is_none(),
+                "canonical owner never retains parallel light storage"
+            );
+            if let Some(workspace) = light_workspace {
+                assert!(holder.attach_generated_light_workspace(workspace).is_none());
+            }
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                if let Some(terrain) = terrain {
+                if let Some(workspace) = spawn_workspace.as_mut() {
+                    holder.generate_spawn_with_region_rule(
+                        workspace,
+                        self.spawn_settings.expect("validated SPAWN settings").1,
+                    )
+                } else if let Some(terrain) = terrain {
                     holder.generate_through_with_structure_terrain(next, terrain)
                 } else {
                     holder.generate_through(next)
                 }
             }));
+            if let Some(storage) = holder.take_generated_light_storage() {
+                for ((x, z), projection) in storage {
+                    let canonical = self
+                        .chunks
+                        .get_mut(&ChunkPos::new(x, z))
+                        .expect("lighting projection still has its canonical owner")
+                        .state
+                        .chunk_mut()
+                        .base_mut();
+                    canonical.set_block_nibbles(projection.block_nibbles().to_vec());
+                    canonical.set_sky_nibbles(projection.sky_nibbles().to_vec());
+                    canonical.set_block_emptiness_map(
+                        projection.block_emptiness_map().map(<[bool]>::to_vec),
+                    );
+                    canonical.set_sky_emptiness_map(
+                        projection.sky_emptiness_map().map(<[bool]>::to_vec),
+                    );
+                }
+            }
             let mut state = holder.into_state();
-            self.return_loans(state.take_feature_dependencies(), loans);
-            if let Some(light) = light {
-                state.restore_generated_light_storage(light);
+            if let Some(workspace) = spawn_workspace {
+                let chunks = workspace
+                    .into_neighbours()
+                    .into_iter()
+                    .map(|chunk| (chunk.get_pos(), chunk))
+                    .collect();
+                self.return_loans(chunks, loans);
+            } else {
+                self.return_loans(state.take_feature_dependencies(), loans);
             }
             match result {
                 Ok(Ok(())) => {
@@ -691,24 +863,189 @@ mod tests {
     }
 
     #[test]
-    fn admitted_light_storage_survives_strict_structure_failure() {
+    fn admission_returns_foreign_light_storage_without_creating_parallel_owners() {
         let generator = generator();
         let mut state = generator.create_holder(ChunkPos::ZERO).into_state();
         // A detached task may legitimately own an empty fresh-light window.
         state.restore_generated_light_storage(HashMap::new());
         let mut owner = GeneratedChunkOwner::new(generator);
-        assert!(owner.admit(state).is_ok());
-        let consumer = owner.new_consumer();
-        owner.replace_requests(consumer, [(ChunkPos::ZERO, ChunkStatus::StructureStarts)]);
+        let mut error = owner
+            .admit(state)
+            .expect_err("foreign provider must not shadow canonical neighbors");
+        assert!(owner.is_empty());
+        assert!(error.state.take_generated_light_storage().is_some());
+    }
+
+    fn insert_task_fixture(owner: &mut GeneratedChunkOwner, pos: ChunkPos, status: ChunkStatus) {
+        // Isolate the downstream task under test. These completed prerequisite
+        // labels are never admitted through the production owner API.
+        let mut state = owner.generator.create_holder(pos).into_state();
+        state.chunk_mut().set_persisted_status(status);
+        owner.chunks.insert(
+            pos,
+            Entry {
+                state,
+                failure: None,
+            },
+        );
+    }
+
+    #[test]
+    fn lighting_jobs_require_dimension_authority_then_compute_real_fresh_light() {
+        let mut owner = GeneratedChunkOwner::new(generator());
+        let center = ChunkPos::ZERO;
+        insert_task_fixture(&mut owner, center, ChunkStatus::Features);
+        owner.required.insert(center, ChunkStatus::Light);
         assert_eq!(owner.run_jobs(1).failed, 1);
+        assert_eq!(owner.status(center), ChunkStatus::Features);
+        assert!(!owner.state(center).unwrap().chunk().has_light_engine());
+
+        owner.set_light_channels(true, true);
+        assert_eq!(owner.run_jobs(1).advanced, 1);
+        let center_chunk = owner.state(center).unwrap().chunk();
+        assert!(center_chunk.has_light_engine());
         assert!(
+            !center_chunk.base().is_light_correct(),
+            "INITIALIZE_LIGHT does not fabricate computed light"
+        );
+        // The actual LIGHT rung requires eight initialized neighbors, not a
+        // fabricated pre-lit ring. They remain unchanged when ineligible for
+        // Starlight's relaxed neighbor cache.
+        for (pos, status) in dependencies(center, ChunkStatus::Light, false) {
+            insert_task_fixture(&mut owner, pos, status);
+        }
+        let neighbor = ChunkPos::new(2, 0);
+        insert_task_fixture(&mut owner, neighbor, ChunkStatus::Light);
+        let neighbor_chunk = owner.chunks.get_mut(&neighbor).unwrap().state.chunk_mut();
+        neighbor_chunk.base_mut().set_light_correct(true);
+        neighbor_chunk.add_entity(rivet_nbt::compound_tag::CompoundTag::new());
+        neighbor_chunk.set_upgrading(ChunkStatus::Spawn);
+        assert_eq!(owner.run_jobs(1).advanced, 1);
+        let chunk = owner.state(center).unwrap().chunk();
+        assert_eq!(chunk.get_persisted_status(), ChunkStatus::Light);
+        assert!(chunk.base().is_light_correct());
+        assert_eq!(chunk.base().get_sky_light_at(0, 64, 0), Some(15));
+        let neighbor_chunk = owner.state(neighbor).unwrap().chunk();
+        assert_eq!(neighbor_chunk.get_entities().len(), 1);
+        assert!(neighbor_chunk.is_upgrading());
+        assert_eq!(neighbor_chunk.get_persisted_status(), ChunkStatus::Light);
+        assert!(!owner.state(center).unwrap().has_retained_light_storage());
+        assert_eq!(
+            owner.status(ChunkPos::new(1, 0)),
+            ChunkStatus::InitializeLight
+        );
+    }
+
+    #[test]
+    fn spawn_job_requires_actual_settings_and_returns_neighbor_owners() {
+        let mut owner = GeneratedChunkOwner::new(generator());
+        let center = ChunkPos::ZERO;
+        insert_task_fixture(&mut owner, center, ChunkStatus::Light);
+        for (pos, status) in dependencies(center, ChunkStatus::Spawn, false) {
+            insert_task_fixture(&mut owner, pos, status);
             owner
                 .chunks
-                .get_mut(&ChunkPos::ZERO)
+                .get_mut(&pos)
                 .unwrap()
                 .state
-                .take_generated_light_storage()
-                .is_some()
+                .chunk_mut()
+                .add_entity(rivet_nbt::compound_tag::CompoundTag::new());
+        }
+        owner.required.insert(center, ChunkStatus::Spawn);
+        assert_eq!(owner.run_jobs(1).failed, 1);
+        assert_eq!(owner.status(center), ChunkStatus::Light);
+        assert_eq!(owner.len(), 9);
+        // This explicitly tests a world whose real gamerule is false; there
+        // is no production default or successful-mob-construction claim.
+        owner.set_spawn_settings(WorldBorderSettings::default_settings(), false);
+        assert_eq!(owner.run_jobs(1).advanced, 1);
+        assert_eq!(owner.status(center), ChunkStatus::Spawn);
+        assert_eq!(owner.len(), 9);
+        for (pos, status) in dependencies(center, ChunkStatus::Spawn, false) {
+            let state = owner.state(pos).unwrap();
+            assert_eq!(state.status(), status);
+            assert_eq!(state.chunk().get_entities().len(), 1);
+        }
+        assert!(
+            owner
+                .state(center)
+                .unwrap()
+                .chunk()
+                .get_entities()
+                .is_empty()
+        );
+        assert_eq!(owner.run_jobs(1).attempted, 0, "SPAWN is not FULL");
+    }
+
+    #[test]
+    fn spawn_true_preserves_all_owners_at_real_creature_construction_boundary() {
+        use rivet_world::block::blocks::Blocks;
+        use rivet_world::chunk::storage::section_reconstruction::BiomeId;
+        use rivet_world::levelgen::heightmap::FINAL_HEIGHTMAPS;
+        let generator = generator();
+        let mut owner = GeneratedChunkOwner::new(Arc::clone(&generator));
+        let center = ChunkPos::new(-8, -4);
+        let mut fixtures = dependencies(center, ChunkStatus::Spawn, false);
+        fixtures.push((center, ChunkStatus::Light));
+        for (pos, status) in fixtures {
+            insert_task_fixture(&mut owner, pos, status);
+            let chunk = owner.chunks.get_mut(&pos).unwrap().state.chunk_mut();
+            let source = generator.biome_source();
+            // Same actual beach biome / seed-42 turtle case exercised by the
+            // standalone SPAWN region test, now through canonical owner loans.
+            chunk.fill_biomes_from_noise(source, source.sampler(), &|_| BiomeId(3));
+            if pos == center {
+                chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
+                for x in 0..16 {
+                    for z in 0..16 {
+                        chunk.set_block_state(
+                            pos.get_min_block_x() + x,
+                            0,
+                            pos.get_min_block_z() + z,
+                            Blocks::SAND.default_block_state(),
+                        );
+                    }
+                }
+                let mut nibbles = chunk.base().sky_nibbles().to_vec();
+                for nibble in &mut nibbles {
+                    nibble.set_full();
+                    nibble.update_visible();
+                }
+                chunk.base_mut().set_sky_nibbles(nibbles);
+                chunk.base_mut().set_light_correct(true);
+            } else {
+                chunk.add_entity(rivet_nbt::compound_tag::CompoundTag::new());
+            }
+        }
+        owner.set_spawn_settings(WorldBorderSettings::default_settings(), true);
+        owner.required.insert(center, ChunkStatus::Spawn);
+        assert_eq!(owner.run_jobs(1).failed, 1);
+        assert!(matches!(
+            owner.chunks[&center].failure,
+            Some((
+                ChunkStatus::Spawn,
+                GenerationOwnerError::Generation(GeneratedChunkError::SpawnRegion(
+                    super::super::generated_world::SpawnRegionError::UnsupportedEntity {
+                        entity_type: "minecraft:turtle",
+                        ..
+                    }
+                ))
+            ))
+        ));
+        assert_eq!(owner.status(center), ChunkStatus::Light);
+        assert_eq!(owner.len(), 9);
+        for (pos, status) in dependencies(center, ChunkStatus::Spawn, false) {
+            let state = owner.state(pos).unwrap();
+            assert_eq!(state.status(), status);
+            assert_eq!(state.chunk().get_entities().len(), 1);
+        }
+        assert!(
+            owner
+                .state(center)
+                .unwrap()
+                .chunk()
+                .get_entities()
+                .is_empty()
         );
     }
 

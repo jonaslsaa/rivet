@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 
 use bytes::{Bytes, BytesMut};
 
@@ -258,6 +258,7 @@ impl ConfigurationTask for JoinWorldTask {
 /// The task queue is Java-shaped (`configurationTasks` FIFO drained by
 /// `startNextTask` into `currentTask`, finished by `finishCurrentTask`).
 pub struct ServerConfigurationPacketListener {
+    enabled_features: rivet_world::flag::FeatureFlagSet,
     /// `configurationTasks` — the FIFO of not-yet-started tasks.
     configuration_tasks: VecDeque<Box<dyn ConfigurationTask>>,
     /// `ServerConfigurationPacketListenerImpl.currentTask` — the in-flight task
@@ -304,7 +305,24 @@ impl ServerConfigurationPacketListener {
     /// comes from `ServerConfig.keepalive_timeout` (`paper.playerconnection.
     /// keepalive`, issue #236), read at the login ack construction site.
     pub fn new(profile: GameProfile, now_ns: i64, keepalive_timeout_ns: i64) -> Self {
+        Self::new_with_enabled_features(
+            profile,
+            now_ns,
+            keepalive_timeout_ns,
+            rivet_world::level::world_data_configuration::WorldDataConfiguration::default_config()
+                .enabled_features()
+                .clone(),
+        )
+    }
+
+    pub fn new_with_enabled_features(
+        profile: GameProfile,
+        now_ns: i64,
+        keepalive_timeout_ns: i64,
+        enabled_features: rivet_world::flag::FeatureFlagSet,
+    ) -> Self {
         ServerConfigurationPacketListener {
+            enabled_features,
             configuration_tasks: VecDeque::new(),
             current_task: None,
             client_information: ClientInformation::create_default(),
@@ -364,13 +382,13 @@ impl ServerConfigurationPacketListener {
             &body,
         )?;
 
-        // `send(new ClientboundUpdateEnabledFeaturesPacket(FeatureFlags.REGISTRY
-        // .toNames(this.server.getWorldData().enabledFeatures())))` — the M1
-        // offline world enables only the vanilla feature set.
-        let enabled =
-            ClientboundUpdateEnabledFeaturesPacket::new(HashSet::from([Identifier::parse(
-                "minecraft:vanilla",
-            )]));
+        // Use the same finalized world feature set as native constructors.
+        let enabled = ClientboundUpdateEnabledFeaturesPacket::new(
+            rivet_world::flag::feature_flags::REGISTRY
+                .to_names(&self.enabled_features)
+                .into_iter()
+                .collect(),
+        );
         let body = encode_body(
             ClientboundUpdateEnabledFeaturesPacket::stream_codec(),
             &enabled,
@@ -904,6 +922,55 @@ mod tests {
         );
         conn.set_outbound_protocol(ConnectionProtocol::Configuration);
         conn
+    }
+
+    #[tokio::test]
+    async fn configuration_packet_uses_finalized_world_feature_flags() {
+        use crate::server::level::generated_boot::{
+            PendingBootSettings, PinnedBuiltinPackAuthority,
+        };
+        use rivet_nbt::tag_parser::parse_compound_fully;
+        use rivet_protocol::codec::StreamDecoder;
+        let input = parse_compound_fully(
+            "{enabled_features:[\"vanilla\",\"minecart_improvements\",\"redstone_experiments\"]}",
+        )
+        .unwrap();
+        let settings = PendingBootSettings::from_level_data(&input)
+            .finalize(
+                &mut PinnedBuiltinPackAuthority::builtin_only(),
+                false,
+                false,
+            )
+            .unwrap();
+        let mut listener = test_listener();
+        listener.enabled_features = settings.enabled_features().clone();
+        let mut conn = config_connection().await;
+        listener.start_configuration(&mut conn).unwrap();
+        let mut wire = FriendlyByteBuf::new(BytesMut::from(conn.outbound_bytes()));
+        let mut actual = None;
+        while wire.readable_bytes() != 0 {
+            let length = wire.read_var_int();
+            let mut frame =
+                FriendlyByteBuf::new(BytesMut::from(wire.read_slice(length).as_slice()));
+            if frame.read_var_int() == CLIENTBOUND_UPDATE_ENABLED_FEATURES_ID as i32 {
+                actual = Some(
+                    ClientboundUpdateEnabledFeaturesPacket::stream_codec()
+                        .decode(&mut frame)
+                        .unwrap(),
+                );
+                assert_eq!(frame.readable_bytes(), 0);
+            }
+        }
+        let expected: std::collections::HashSet<_> = rivet_world::flag::feature_flags::REGISTRY
+            .to_names(settings.enabled_features())
+            .into_iter()
+            .collect();
+        assert_eq!(actual.unwrap().features(), &expected);
+        assert_eq!(
+            expected.len(),
+            3,
+            "not the previous hardcoded vanilla-only packet"
+        );
     }
 
     #[tokio::test]

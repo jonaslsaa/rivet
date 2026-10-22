@@ -1,16 +1,17 @@
-//! Fresh `EntityTypes.CHEST_MINECART.create(level, CHUNK_GENERATION)` state.
+//! Native chest-minecart construction, persisted loading and full save.
 //!
-//! This is a native constructor/save slice, not an arbitrary-NBT entity loader.
+//! This is a typed constructor/load/save slice, not an arbitrary-NBT wrapper.
 //! It implements the constructor chain through Entity, VehicleEntity,
 //! AbstractMinecart, AbstractMinecartContainer and MinecartChest. Movement,
-//! ticking, inventory interactions and recursive entity loading are not exposed.
+//! ticking, nonempty inventories, component names and passenger riding graphs
+//! remain explicit capability boundaries. Server-side type dispatch and source
+//! invalid-entity skipping live at the real owning-world load boundary.
 //! World identity and entity-ID allocation belong to the actual owning world;
 //! UUID generation uses the entity random source, never the structure RNG.
 
-use rivet_nbt::{
-    compound_tag::CompoundTag, double_tag::DoubleTag, float_tag::FloatTag, list_tag::ListTag,
-    tag::Tag,
-};
+use rivet_nbt::{compound_tag::CompoundTag, double_tag::DoubleTag, list_tag::ListTag, tag::Tag};
+#[path = "chest_minecart_data.rs"]
+mod saved_data;
 use rivet_registry::{
     Identifier,
     core::{BlockPos, Vec3},
@@ -19,6 +20,7 @@ use rivet_util::{
     mth::{Uuid, create_insecure_uuid},
     random_source::RandomSource,
 };
+pub use saved_data::{MinecartLoadError, NativeTriState};
 
 /// Values supplied by the owning level, not inferred from a structure seed.
 #[derive(Debug, Clone, Copy)]
@@ -42,8 +44,9 @@ pub enum FreshMinecartItemStack {
     Empty,
 }
 
-/// Genuine newly constructed, un-ticked chest minecart. All 27 inventory slots
-/// are initialized to ItemStack.EMPTY; loot assignment does not unpack them.
+/// Genuine native, un-ticked chest minecart, fresh or loaded into typed state.
+/// All 27 inventory slots are ItemStack.EMPTY in this executable slice; a
+/// nonempty stored inventory refuses instead of retaining fake ItemStacks.
 #[derive(Debug)]
 pub struct NativeChestMinecart {
     entity_id: i32,
@@ -57,6 +60,7 @@ pub struct NativeChestMinecart {
     inventory: [FreshMinecartItemStack; Self::CONTAINER_SIZE],
     generation: bool,
     removed: bool,
+    saved: saved_data::MinecartSavedState,
 }
 
 impl NativeChestMinecart {
@@ -91,6 +95,7 @@ impl NativeChestMinecart {
             inventory: [FreshMinecartItemStack::Empty; Self::CONTAINER_SIZE],
             generation: false,
             removed: false,
+            saved: saved_data::MinecartSavedState::default(),
         }
     }
 
@@ -108,6 +113,15 @@ impl NativeChestMinecart {
     }
     pub fn old_position(&self) -> Vec3 {
         self.old_position
+    }
+    pub fn delta_movement(&self) -> Vec3 {
+        self.saved.motion
+    }
+    pub fn rotation(&self) -> [f32; 2] {
+        self.saved.rotation
+    }
+    pub fn old_rotation(&self) -> [f32; 2] {
+        self.saved.old_rotation
     }
     pub fn movement(&self) -> MinecartMovement {
         self.movement
@@ -176,12 +190,11 @@ impl NativeChestMinecart {
         ]
     }
 
-    /// Full save of this fresh nonpassenger, persisting entity, as invoked by
-    /// ProtoChunk.addEntity. No Paper.SpawnReason/Origin is invented: direct
-    /// EntityType.create does not initialize either. Empty lootable metadata is
-    /// discarded by PaperLootableInventoryData; Items is still emitted empty.
+    /// Full save as invoked by ProtoChunk.addEntity. Fresh constructors do not
+    /// invent Paper.SpawnReason/Origin; actual loading initializes its source
+    /// DEFAULT/SPAWNER reason and preserves supported typed saved state.
     pub fn save(&self) -> Option<CompoundTag> {
-        if self.removed {
+        if self.removed || !self.saved.persist {
             return None;
         }
         let mut tag = CompoundTag::new();
@@ -190,20 +203,6 @@ impl NativeChestMinecart {
             "Pos".into(),
             doubles([self.position.x, self.position.y, self.position.z]),
         );
-        tag.put("Motion".into(), doubles([0.0; 3]));
-        tag.put(
-            "Rotation".into(),
-            Tag::List(ListTag::with_list(vec![
-                Tag::Float(FloatTag::value_of(0.0)),
-                Tag::Float(FloatTag::value_of(0.0)),
-            ])),
-        );
-        tag.put_double("fall_distance", 0.0);
-        tag.put_short("Fire", 0);
-        tag.put_short("Air", 300);
-        tag.put_boolean("OnGround", false);
-        tag.put_boolean("Invulnerable", false);
-        tag.put_int("PortalCooldown", 0);
         tag.put_int_array(
             "UUID",
             vec![
@@ -216,10 +215,6 @@ impl NativeChestMinecart {
         tag.put_long("WorldUUIDLeast", self.world_uuid.least);
         tag.put_long("WorldUUIDMost", self.world_uuid.most);
         tag.put_int("Bukkit.updateLevel", 2);
-        tag.put_int("Spigot.ticksLived", 0);
-        tag.put_boolean("FlippedRotation", false);
-        // Source writes firstTick under this name; a fresh entity writes true.
-        tag.put_boolean("HasTicked", true);
         if let Some(table) = &self.loot_table {
             tag.put_string("LootTable", &table.to_string());
             if self.loot_seed != 0 {
@@ -227,6 +222,7 @@ impl NativeChestMinecart {
             }
         }
         tag.put("Items".into(), Tag::List(ListTag::new()));
+        self.saved.write(&mut tag);
         Some(tag)
     }
 }

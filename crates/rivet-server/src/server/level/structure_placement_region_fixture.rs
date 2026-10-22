@@ -312,3 +312,91 @@ fn native_feature_failure_restores_all_loans_and_retains_real_neighbor_partial_w
     );
     assert_eq!(center.get_persisted_status(), ChunkStatus::Carvers);
 }
+
+#[test]
+fn limited_region_loads_real_saved_carts_and_commits_the_source_lazy_entity_list() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let rows: Vec<serde_json::Value> =
+        include_str!("../../../../../tools/rivet-oracle/fixtures/chest-minecart-load.jsonl")
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+    let inside = rows
+        .iter()
+        .find(|row| row["name"] == "minimal" && row["experimental"] == false)
+        .unwrap();
+    let outside = rows
+        .iter()
+        .find(|row| row["name"] == "persisted_generated" && row["experimental"] == false)
+        .unwrap();
+    let generator = Arc::new(OverworldGenerator::new(42));
+    let (mut center, workspace) = controlled_region_inputs(&generator);
+    install_corridor(&mut center, &generator);
+    center.add_entity(parse_compound_fully(inside["saved"].as_str().unwrap()).unwrap());
+    center.add_entity(parse_compound_fully(outside["saved"].as_str().unwrap()).unwrap());
+    let registry = Arc::new(NativeStructureEventRegistry::new(
+        std::thread::current().id(),
+        Arc::new(TracingStructureEventDiagnostics),
+    ));
+    let plugin = registry
+        .enable_plugin(NativePluginMetadata {
+            display_name: "loaded-native-carts".into(),
+            authors: vec!["fixture".into()],
+        })
+        .unwrap();
+    let queried = Arc::new(AtomicBool::new(false));
+    let visited = queried.clone();
+    registry
+        .register_generate_listener(
+            plugin,
+            EventPriority::Normal,
+            Arc::new(move |_, maps| {
+                let visited = visited.clone();
+                maps.set_block(
+                    Identifier::parse("fixture:query_existing_carts"),
+                    Arc::new(move |limited, _, snapshot, _| {
+                        if !visited.swap(true, Ordering::SeqCst) {
+                            let entities = limited.entities()?;
+                            assert_eq!(entities.len(), 1, "outside entity is retained separately");
+                            assert!(entities[0].generation());
+                            entities[0].set_loot_table(
+                                Identifier::parse("minecraft:chests/buried_treasure"),
+                                17,
+                            );
+                        }
+                        Ok(snapshot)
+                    }),
+                );
+                Ok(())
+            }),
+        )
+        .unwrap();
+    registry.finish_loading();
+    let runtime = runtime(&generator, registry);
+    let mut region = compose_feature_region_canonical(&mut center, &generator, &workspace).unwrap();
+    runtime
+        .place_step(
+            &mut region,
+            &mut WorldgenRandom::new(LegacyRandomSource::new(0)),
+            23 - 1 - 30_000,
+            3,
+        )
+        .unwrap();
+    assert!(queried.load(Ordering::SeqCst));
+    for (_, chunk) in region.into_owned_proto_entries() {
+        assert!(workspace.put(chunk).is_ok());
+    }
+    let mut expected_inside = parse_compound_fully(inside["saved"].as_str().unwrap()).unwrap();
+    expected_inside.put_string("LootTable", "minecraft:chests/buried_treasure");
+    expected_inside.put_long("LootTableSeed", 17);
+    assert_eq!(
+        center.get_entities(),
+        [expected_inside],
+        "source finish clears the loaded9chunks, including a later direct corridor cart, then writes the retained list"
+    );
+    let expected_outside = parse_compound_fully(outside["saved"].as_str().unwrap()).unwrap();
+    workspace.with_chunk(ChunkPos::new(-2, 2), |chunk| {
+        assert_eq!(chunk.unwrap().get_entities(), [expected_outside])
+    });
+    assert_eq!(workspace.len(), 288);
+}
