@@ -1447,6 +1447,26 @@ pub(super) fn region_can_survive(
         return verdict;
     }
     match state.block().name() {
+        "minecraft:torch" | "minecraft:soul_torch" | "minecraft:copper_torch" | "minecraft:redstone_torch" => {
+            let below = pos.below();
+            level.is_face_sturdy_with(&below, &level.get_block_state(&below),
+                &rivet_registry::core::Direction::Up,
+                rivet_world::level::block_shape_context::SupportType::Center)
+        }
+        "minecraft:wall_torch" | "minecraft:soul_wall_torch" | "minecraft:copper_wall_torch" | "minecraft:redstone_wall_torch" => {
+            let Some(rivet_registry::block_state_property::PropertyValue::Enum(name)) =
+                state.get_value(BlockStateProperties::HORIZONTAL_FACING) else { unreachable!("wall torch facing") };
+            let facing = rivet_registry::core::Direction::VALUES.into_iter()
+                .find(|direction| direction.get_serialized_name() == name).expect("wall torch direction");
+            let support = pos.relative(&facing.get_opposite());
+            level.is_face_sturdy(&support, &level.get_block_state(&support), &facing)
+        }
+        "minecraft:rail" | "minecraft:powered_rail" | "minecraft:detector_rail" | "minecraft:activator_rail" => {
+            let below = pos.below();
+            level.is_face_sturdy_with(&below, &level.get_block_state(&below),
+                &rivet_registry::core::Direction::Up,
+                rivet_world::level::block_shape_context::SupportType::Rigid)
+        }
         "minecraft:small_dripleaf" => {
             let below = level.get_block_state(&pos.below());
             if state.get_value(BlockStateProperties::DOUBLE_BLOCK_HALF)

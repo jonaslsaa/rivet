@@ -60,10 +60,20 @@ impl WorldGenLevel for Storage {
 
 #[test]
 fn tree_and_water_shape_updates_match_live_paper() {
-    for line in
-        include_str!("../../../../../tools/rivet-oracle/fixtures/block-shape-behavior.jsonl")
-            .lines()
-    {
+    check_fixture(include_str!(
+        "../../../../../tools/rivet-oracle/fixtures/block-shape-behavior.jsonl"
+    ));
+}
+
+#[test]
+fn structure_fences_torches_gates_and_rails_match_live_paper() {
+    check_fixture(include_str!(
+        "../../../../../tools/rivet-oracle/fixtures/structure-block-shape.jsonl"
+    ));
+}
+
+fn check_fixture(fixture: &str) {
+    for line in fixture.lines() {
         let row: serde_json::Value = serde_json::from_str(line).unwrap();
         let state = |field: &str| {
             BlockState::new(StateId(
