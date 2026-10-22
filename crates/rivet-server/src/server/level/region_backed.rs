@@ -291,6 +291,12 @@ pub fn boot_level(root: &Path) -> Result<ServerLevel, RegionBackedBootError> {
     // The empty `ChunkMap` guarantees `RequireLoaded` fails on any position the
     // boot did not install — never a superflat placeholder.
     let mut world = ServerLevel::new_region_backed(config);
+    let dimension_path = root.join("dimensions/minecraft/overworld");
+    if let Some(uuid) = super::world_identity::read_world_uuid(&dimension_path)
+        .map_err(|error| RegionBackedBootError::WorldIdentityRead(dimension_path.clone(), error))?
+    {
+        world.install_world_uuid(uuid);
+    }
     // Reconstruct and install every chunk of the exact 117-chunk view square:
     // the join send-set (issue #100) must resolve every position from the
     // read-only region. A missing or corrupt chunk anywhere in the view fails
@@ -412,6 +418,8 @@ fn read_world_gen_settings(
 
 #[derive(Debug, thiserror::Error)]
 pub enum RegionBackedBootError {
+    #[error("could not read Paper world identity under {0}: {1}")]
+    WorldIdentityRead(PathBuf, #[source] io::Error),
     #[error("UNVERIFIED invalid disposable level root: {0}")]
     InvalidLevelRoot(PathBuf),
     #[error("UNVERIFIED disposable level is missing level.dat: {0}")]

@@ -135,6 +135,7 @@ pub struct PlayerSessionManager {
     /// `static` to `ServerLevel`, so one counter is shared across dimensions and
     /// world instances; the manager is that shared scope in Rivet.
     entity_ids: EntityIdAllocator,
+    entity_construction: crate::server::level::entity_construction::EntityConstructionRuntime,
     sender: PlaySender,
     join: JoinConfig,
     indices: PlayerIndices,
@@ -262,9 +263,15 @@ impl PlayerSessionManager {
             config.dimension_type_access,
             config.world_clock_access,
         );
+        let entity_ids = EntityIdAllocator::new();
+        let entity_construction =
+            crate::server::level::entity_construction::EntityConstructionRuntime::new(
+                entity_ids.sequence(),
+            );
         PlayerSessionManager {
             level: config.level,
-            entity_ids: EntityIdAllocator::new(),
+            entity_ids,
+            entity_construction,
             sender,
             join: config.join,
             indices: PlayerIndices::default(),
@@ -378,6 +385,47 @@ impl PlayerSessionManager {
     /// when the connection has no session.
     pub fn player_entity_id(&self, id: ConnectionId) -> Option<i32> {
         self.sessions.get(&id).map(|s| s.player.player_id())
+    }
+
+    /// The same server-wide sequence used by player constructors. Generated
+    /// entities supply their destination level's live-ID occupancy query.
+    pub fn entity_id_sequence(
+        &self,
+    ) -> crate::server::level::entity_id_allocator::EntityIdSequence {
+        self.entity_ids.sequence()
+    }
+
+    /// All generated worlds share the server's entity UUID stream as well as
+    /// its ID sequence; constructing a new runtime per world would fork it.
+    pub fn entity_construction_runtime(
+        &self,
+    ) -> crate::server::level::entity_construction::EntityConstructionRuntime {
+        self.entity_construction.clone()
+    }
+
+    /// Bind generation to this destination level's real live-ID store. The
+    /// boot owner supplies its finalized enabled features, not fixture flags.
+    pub fn structure_entity_factory(
+        &self,
+        enabled_features: rivet_world::flag::feature_flag_set::FeatureFlagSet,
+    ) -> Result<
+        crate::server::level::entity_construction::StructureMinecartFactory,
+        rivet_world::levelgen::structure::StructureError,
+    > {
+        let uuid = self.level.world_uuid().ok_or_else(|| {
+            rivet_world::levelgen::structure::StructureError::PlacementUnavailable(
+                "destination world has no persisted Paper UUID".into(),
+            )
+        })?;
+        let occupancy = self.entity_ids.occupancy();
+        Ok(
+            crate::server::level::entity_construction::StructureMinecartFactory::new(
+                self.entity_construction.clone(),
+                uuid,
+                enabled_features,
+                std::sync::Arc::new(move |id| occupancy.contains(id)),
+            ),
+        )
     }
 
     /// The chunk center the session's `PlayerChunkLoader` is currently

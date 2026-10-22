@@ -395,6 +395,12 @@ pub enum GenError {
         /// The generating chunk whose decoration order is unavailable.
         chunk_pos: ChunkPos,
     },
+    /// The server retains the full typed placement cause beside this Copy
+    /// executor marker; no structure work may be silently omitted.
+    StructurePlacementUnavailable {
+        chunk_pos: ChunkPos,
+        step_index: usize,
+    },
     /// A wired generation task is installed at a rung it does not own —
     /// `GenerateBiomes` away from `BIOMES`, `GenerateNoise` away from `NOISE`.
     /// Only a malformed crate-internal pyramid can produce this: dispatching it
@@ -474,6 +480,13 @@ impl std::fmt::Display for GenError {
                 f,
                 "cannot decorate chunk {chunk_pos}: structure-consumed feature index is unavailable \
                  without the structure manager"
+            ),
+            GenError::StructurePlacementUnavailable {
+                chunk_pos,
+                step_index,
+            } => write!(
+                f,
+                "structure placement failed in chunk {chunk_pos} at decoration step {step_index}"
             ),
             GenError::DataNotCarried { status } => write!(
                 f,

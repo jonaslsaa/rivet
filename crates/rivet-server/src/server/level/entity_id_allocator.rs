@@ -48,6 +48,40 @@
 //! as Paper never rolls the counter back.
 
 use std::collections::HashSet;
+use std::sync::{
+    Arc, RwLock,
+    atomic::{AtomicI32, Ordering},
+};
+
+/// One server-wide counter, shared by player and generated-entity constructors.
+/// Occupancy remains a query of the destination level, as in Paper.
+#[derive(Clone, Debug, Default)]
+pub struct EntityIdSequence(Arc<AtomicI32>);
+
+/// Live IDs in the destination level. Clones observe admission/removal from
+/// the same store; saved ProtoChunk entities are not live tracked entities.
+#[derive(Clone, Debug, Default)]
+pub struct EntityIdOccupancy(Arc<RwLock<HashSet<i32>>>);
+
+impl EntityIdOccupancy {
+    pub fn contains(&self, id: i32) -> bool {
+        self.0
+            .read()
+            .expect("entity ID occupancy poisoned")
+            .contains(&id)
+    }
+}
+
+impl EntityIdSequence {
+    pub fn next_id(&self, mut is_in_use: impl FnMut(i32) -> bool) -> i32 {
+        loop {
+            let id = self.0.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
+            if id != 0 && !is_in_use(id) {
+                return id;
+            }
+        }
+    }
+}
 
 /// The server's entity-id allocator — `ENTITY_COUNTER` plus the
 /// `chunkSource.hasEntityWithId` guard, owned at the tick-thread server play
@@ -57,11 +91,11 @@ use std::collections::HashSet;
 pub struct EntityIdAllocator {
     /// `ENTITY_COUNTER` — the last incremented value (the high-water mark;
     /// never decremented, so freed ids are never reused).
-    next: i32,
+    next: EntityIdSequence,
     /// The ids of entities currently present in the world (the M1 players) —
     /// `chunkSource.hasEntityWithId` per level, tracked here because the M1
     /// world is a single level.
-    in_use: HashSet<i32>,
+    in_use: EntityIdOccupancy,
 }
 
 impl EntityIdAllocator {
@@ -69,8 +103,8 @@ impl EntityIdAllocator {
     /// allocation returns 1.
     pub fn new() -> Self {
         EntityIdAllocator {
-            next: 0,
-            in_use: HashSet::new(),
+            next: EntityIdSequence::default(),
+            in_use: EntityIdOccupancy::default(),
         }
     }
 
@@ -78,25 +112,36 @@ impl EntityIdAllocator {
     /// Returns a non-zero id not held by any live entity, advancing the counter
     /// (`AtomicInteger.incrementAndGet`, wrapping).
     pub fn next_id(&mut self) -> i32 {
-        loop {
-            self.next = self.next.wrapping_add(1);
-            let id = self.next;
-            if id != 0 && !self.in_use.contains(&id) {
-                return id;
-            }
-        }
+        self.next.next_id(|id| self.in_use.contains(id))
+    }
+
+    /// Share the existing server counter; do not create a per-world counter.
+    pub fn sequence(&self) -> EntityIdSequence {
+        self.next.clone()
+    }
+
+    pub fn occupancy(&self) -> EntityIdOccupancy {
+        self.in_use.clone()
     }
 
     /// Register `id` as held by a live entity (`hasEntityWithId` becomes true).
     /// Called when an entity spawns into the world.
     pub fn mark_in_use(&mut self, id: i32) {
-        self.in_use.insert(id);
+        self.in_use
+            .0
+            .write()
+            .expect("entity ID occupancy poisoned")
+            .insert(id);
     }
 
     /// Release `id` (the entity left the world; `hasEntityWithId` becomes
     /// false). The counter is untouched — freed ids are not reused.
     pub fn release(&mut self, id: i32) {
-        self.in_use.remove(&id);
+        self.in_use
+            .0
+            .write()
+            .expect("entity ID occupancy poisoned")
+            .remove(&id);
     }
 }
 
@@ -113,8 +158,8 @@ mod tests {
     /// An allocator seeded at a specific counter value (the wrap tests).
     fn at(next: i32) -> EntityIdAllocator {
         EntityIdAllocator {
-            next,
-            in_use: HashSet::new(),
+            next: EntityIdSequence(Arc::new(AtomicI32::new(next))),
+            in_use: EntityIdOccupancy::default(),
         }
     }
 
@@ -124,6 +169,25 @@ mod tests {
         // the `id == 0` guard means 0 is never returned.
         let mut a = EntityIdAllocator::new();
         assert_eq!(a.next_id(), 1);
+    }
+
+    #[test]
+    fn generated_and_player_constructors_share_counter_but_query_own_level() {
+        let mut players = EntityIdAllocator::new();
+        let generated = players.sequence();
+        assert_eq!(players.next_id(), 1);
+        assert_eq!(generated.next_id(|id| id == 2), 3);
+        assert_eq!(players.next_id(), 4);
+        let wrapped = at(-1);
+        let mut queried = Vec::new();
+        assert_eq!(
+            wrapped.sequence().next_id(|id| {
+                queried.push(id);
+                false
+            }),
+            1
+        );
+        assert_eq!(queried, vec![1], "zero is rejected before querying storage");
     }
 
     #[test]
@@ -139,10 +203,14 @@ mod tests {
         // `hasEntityWithId`: an id held by a live entity is skipped. Pre-seed
         // id 3 as in use → 1, 2, then 3 is skipped → 4.
         let mut a = EntityIdAllocator::new();
+        let destination = a.occupancy();
         a.mark_in_use(3);
+        assert!(destination.contains(3));
         assert_eq!(a.next_id(), 1);
         assert_eq!(a.next_id(), 2);
         assert_eq!(a.next_id(), 4, "in-use id 3 is skipped");
+        a.release(3);
+        assert!(!destination.contains(3));
     }
 
     #[test]

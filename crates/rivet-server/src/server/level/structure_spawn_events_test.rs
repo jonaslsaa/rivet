@@ -43,6 +43,95 @@ fn plugin(registry: &NativeStructureEventRegistry, name: &str) -> NativePluginId
 }
 
 #[test]
+fn generate_event_has_real_lifecycle_thread_flag_and_ordered_transformer_maps() {
+    use super::super::structure_generate_events::{
+        NativeBlockTransformer, StructureGenerateAuthority, StructureGenerateCause,
+    };
+    let (registry, diagnostics) = registry();
+    let authority = StructureGenerateAuthority::registered_native(registry.clone());
+    let event = StructureGeneratePayload::new(payload(), StructureGenerateCause::WorldGeneration);
+    assert!(authority.dispatch(event.clone()).is_err());
+    assert!(
+        StructureGenerateAuthority::unavailable("JVM host pending")
+            .dispatch(event.clone())
+            .is_err()
+    );
+    let plugin = plugin(&registry, "generate");
+    let key = Identifier::parse("test:transformer");
+    let first: NativeBlockTransformer = Arc::new(|_, _, snapshot, _| Ok(snapshot));
+    let replacement: NativeBlockTransformer = Arc::new(|_, _, snapshot, _| Ok(snapshot));
+    let extra: NativeBlockTransformer = Arc::new(|_, _, snapshot, _| Ok(snapshot));
+    let flags = Arc::new(Mutex::new(Vec::new()));
+    let thread_flags = flags.clone();
+    let first_for_listener = first.clone();
+    let key_for_listener = key.clone();
+    registry
+        .register_generate_listener(
+            plugin,
+            EventPriority::Lowest,
+            Arc::new(move |event, maps| {
+                thread_flags.lock().unwrap().push(event.is_asynchronous());
+                maps.set_block(key_for_listener.clone(), first_for_listener.clone());
+                Err(NativeListenerError::Failure(
+                    "listener failed after map edit".into(),
+                ))
+            }),
+        )
+        .unwrap();
+    let extra_for_listener = extra.clone();
+    registry
+        .register_generate_exception_listener(
+            plugin,
+            EventPriority::Normal,
+            Arc::new(move |failure, maps| {
+                assert_eq!(failure.event.cause, StructureGenerateCause::WorldGeneration);
+                maps.set_block(Identifier::parse("test:extra"), extra_for_listener.clone());
+                Err(NativeListenerError::Failure(
+                    "exception handler failure must not recurse".into(),
+                ))
+            }),
+        )
+        .unwrap();
+    let replacement_for_listener = replacement.clone();
+    let key_for_listener = key.clone();
+    let registration = registry
+        .register_generate_listener(
+            plugin,
+            EventPriority::Monitor,
+            Arc::new(move |_, maps| {
+                maps.set_block(key_for_listener.clone(), replacement_for_listener.clone());
+                Ok(())
+            }),
+        )
+        .unwrap();
+    registry.finish_loading();
+    let (blocks, entities) = authority.dispatch(event.clone()).unwrap().into_lists();
+    assert!(entities.is_empty());
+    assert_eq!(blocks.len(), 2);
+    assert!(Arc::ptr_eq(&blocks[0], &replacement));
+    assert!(Arc::ptr_eq(&blocks[1], &extra));
+    let worker_authority = authority.clone();
+    std::thread::spawn(move || worker_authority.dispatch(event).unwrap())
+        .join()
+        .unwrap();
+    assert_eq!(*flags.lock().unwrap(), [false, true]);
+    assert_eq!(diagnostics.0.lock().unwrap().len(), 4);
+    assert!(registry.unregister_listener(registration).unwrap());
+    registry.disable_plugin(plugin).unwrap();
+    registry.reenable_plugin(plugin).unwrap();
+    let maps = authority
+        .dispatch(StructureGeneratePayload::new(
+            payload(),
+            StructureGenerateCause::WorldGeneration,
+        ))
+        .unwrap();
+    assert!(
+        maps.into_lists().0.is_empty(),
+        "disable removes generate registrations, not merely temporarily hides them"
+    );
+}
+
+#[test]
 fn lifecycle_authority_and_async_guard_precede_empty_listener_shortcut() {
     let (registry, _) = registry();
     let event = payload();

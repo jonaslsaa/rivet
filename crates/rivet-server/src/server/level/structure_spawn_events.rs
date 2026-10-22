@@ -3,6 +3,10 @@
 //! as an empty listener registry. Native hosts explicitly register lifecycle,
 //! finish loading, and install this authority. World chunks stay tick-owned;
 //! only immutable event identity/data cross onto the dispatch worker.
+use super::structure_generate_events::{
+    GenerateExceptionListener, GenerateListener, StructureGenerateException,
+    StructureGeneratePayload, StructureTransformers,
+};
 use rivet_registry::{
     Holder, Identifier, RegistryAccess, ResourceKey, core::ChunkPos, holder_lookup::HolderGetter,
 };
@@ -239,6 +243,8 @@ struct Plugin {
 enum Callback {
     Spawn(Arc<SpawnListener>),
     Exception(Arc<ExceptionListener>),
+    Generate(Arc<GenerateListener>),
+    GenerateException(Arc<GenerateExceptionListener>),
 }
 struct Registration {
     id: NativeListenerId,
@@ -250,6 +256,8 @@ struct Listeners {
     plugins: HashMap<NativePluginId, Arc<Plugin>>,
     spawn: [Vec<Arc<Registration>>; 6],
     exception: [Vec<Arc<Registration>>; 6],
+    generate: [Vec<Arc<Registration>>; 6],
+    generate_exception: [Vec<Arc<Registration>>; 6],
 }
 pub struct NativeStructureEventRegistry {
     primary_thread: ThreadId,
@@ -268,6 +276,8 @@ impl NativeStructureEventRegistry {
                 plugins: HashMap::new(),
                 spawn: std::array::from_fn(|_| Vec::new()),
                 exception: std::array::from_fn(|_| Vec::new()),
+                generate: std::array::from_fn(|_| Vec::new()),
+                generate_exception: std::array::from_fn(|_| Vec::new()),
             }),
             diagnostics,
         }
@@ -313,6 +323,12 @@ impl NativeStructureEventRegistry {
         for bucket in lists.exception.iter_mut() {
             bucket.retain(|entry| entry.plugin.id != id);
         }
+        for bucket in lists.generate.iter_mut() {
+            bucket.retain(|entry| entry.plugin.id != id);
+        }
+        for bucket in lists.generate_exception.iter_mut() {
+            bucket.retain(|entry| entry.plugin.id != id);
+        }
         Ok(())
     }
     /// Re-enable the same plugin identity; the host registers its listeners
@@ -348,6 +364,16 @@ impl NativeStructureEventRegistry {
             bucket.retain(|entry| entry.id != id);
             removed |= old != bucket.len();
         }
+        for bucket in lists.generate.iter_mut() {
+            let old = bucket.len();
+            bucket.retain(|entry| entry.id != id);
+            removed |= old != bucket.len();
+        }
+        for bucket in lists.generate_exception.iter_mut() {
+            let old = bucket.len();
+            bucket.retain(|entry| entry.id != id);
+            removed |= old != bucket.len();
+        }
         Ok(removed)
     }
     pub fn register_spawn_listener(
@@ -372,6 +398,27 @@ impl NativeStructureEventRegistry {
     ) -> Result<NativeListenerId, StructureSpawnDispatchError> {
         self.register(plugin, priority, false, Callback::Exception(callback))
     }
+    pub fn register_generate_listener(
+        &self,
+        plugin: NativePluginId,
+        priority: EventPriority,
+        callback: Arc<GenerateListener>,
+    ) -> Result<NativeListenerId, StructureSpawnDispatchError> {
+        self.register(plugin, priority, false, Callback::Generate(callback))
+    }
+    pub fn register_generate_exception_listener(
+        &self,
+        plugin: NativePluginId,
+        priority: EventPriority,
+        callback: Arc<GenerateExceptionListener>,
+    ) -> Result<NativeListenerId, StructureSpawnDispatchError> {
+        self.register(
+            plugin,
+            priority,
+            false,
+            Callback::GenerateException(callback),
+        )
+    }
     fn register(
         &self,
         plugin: NativePluginId,
@@ -393,18 +440,19 @@ impl NativeStructureEventRegistry {
             return Err(StructureSpawnDispatchError::PluginDisabled(plugin.id.0));
         }
         let id = NativeListenerId(next_id(&NEXT_REGISTRATION));
-        let exception = matches!(callback, Callback::Exception(_));
         let entry = Arc::new(Registration {
             id,
             plugin,
             ignore_cancelled,
             callback,
         });
-        if exception {
-            lists.exception[priority.index()].push(entry);
-        } else {
-            lists.spawn[priority.index()].push(entry);
-        }
+        let bucket = match &entry.callback {
+            Callback::Spawn(_) => &mut lists.spawn[priority.index()],
+            Callback::Exception(_) => &mut lists.exception[priority.index()],
+            Callback::Generate(_) => &mut lists.generate[priority.index()],
+            Callback::GenerateException(_) => &mut lists.generate_exception[priority.index()],
+        };
+        bucket.push(entry);
         Ok(id)
     }
     fn snapshot(
@@ -506,6 +554,109 @@ impl NativeStructureEventRegistry {
                     // Paper logs failures in ServerExceptionEvent listeners
                     // but never recursively emits another exception event.
                     self.handle_failure(
+                        &listener,
+                        error,
+                        Arc::clone(&failure.event),
+                        control,
+                        true,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+    pub fn dispatch_generate_on_current_thread(
+        &self,
+        mut payload: StructureGeneratePayload,
+    ) -> Result<StructureTransformers, StructureSpawnDispatchError> {
+        payload.set_asynchronous(thread::current().id() != self.primary_thread);
+        if self.loading.load(Ordering::Acquire) {
+            return Err(StructureSpawnDispatchError::LifecycleLoading);
+        }
+        let event = Arc::new(payload);
+        let mut control = StructureTransformers::default();
+        for entry in self.generate_snapshot(false)? {
+            if !entry.plugin.enabled.load(Ordering::Acquire) {
+                continue;
+            }
+            let Callback::Generate(callback) = &entry.callback else {
+                unreachable!()
+            };
+            if let Err(error) = call_listener(|| callback(&event, &mut control)) {
+                self.handle_generate_failure(
+                    &entry,
+                    error,
+                    Arc::clone(&event),
+                    &mut control,
+                    false,
+                )?;
+            }
+        }
+        Ok(control)
+    }
+    fn generate_snapshot(
+        &self,
+        exception: bool,
+    ) -> Result<Vec<Arc<Registration>>, StructureSpawnDispatchError> {
+        let lists = self
+            .listeners
+            .read()
+            .map_err(|_| StructureSpawnDispatchError::RegistryPoisoned)?;
+        let buckets = if exception {
+            &lists.generate_exception
+        } else {
+            &lists.generate
+        };
+        Ok(buckets.iter().flatten().cloned().collect())
+    }
+    fn handle_generate_failure(
+        &self,
+        entry: &Registration,
+        error: NativeListenerError,
+        event: Arc<StructureGeneratePayload>,
+        control: &mut StructureTransformers,
+        exception_event: bool,
+    ) -> Result<(), StructureSpawnDispatchError> {
+        let message = match error {
+            NativeListenerError::AuthorNag(message) => {
+                if entry.plugin.naggable.swap(false, Ordering::AcqRel) {
+                    self.diagnostics
+                        .report(StructureEventDiagnostic::AuthorNag {
+                            plugin: entry.plugin.metadata.clone(),
+                            message,
+                        });
+                }
+                return Ok(());
+            }
+            NativeListenerError::Failure(message) => message,
+        };
+        self.diagnostics
+            .report(StructureEventDiagnostic::ListenerFailure {
+                plugin: entry.plugin.metadata.clone(),
+                listener: entry.id,
+                event_name: if exception_event {
+                    "ServerExceptionEvent"
+                } else {
+                    "AsyncStructureGenerateEvent"
+                },
+                message: message.clone(),
+            });
+        if !exception_event {
+            let failure = StructureGenerateException {
+                plugin: entry.plugin.metadata.clone(),
+                listener: entry.id,
+                event,
+                message,
+            };
+            for listener in self.generate_snapshot(true)? {
+                if !listener.plugin.enabled.load(Ordering::Acquire) {
+                    continue;
+                }
+                let Callback::GenerateException(callback) = &listener.callback else {
+                    unreachable!()
+                };
+                if let Err(error) = call_listener(|| callback(&failure, control)) {
+                    self.handle_generate_failure(
                         &listener,
                         error,
                         Arc::clone(&failure.event),

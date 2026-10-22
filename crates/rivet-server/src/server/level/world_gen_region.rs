@@ -155,6 +155,94 @@ fn dummy_block_entity(pos: &BlockPos) -> CompoundTag {
     tag
 }
 
+pub(super) fn structure_spawner_data(
+    pos: BlockPos,
+    input: &CompoundTag,
+) -> Result<CompoundTag, rivet_world::levelgen::structure::StructureError> {
+    use super::structure_snapshot_data::{common_data, fresh_snapshot};
+    use rivet_world::levelgen::structure::StructureError;
+    let state = BlockState::of(Blocks::SPAWNER.id());
+    let mut result = fresh_snapshot(pos, state)?
+        .block_entity
+        .expect("fresh spawner");
+    common_data(&mut result, input)?;
+    let delay = input.get_int_or("Paper.Delay", i32::from(input.get_short_or("Delay", 20)));
+    let min = input.get_int_or(
+        "Paper.MinSpawnDelay",
+        input.get_int_or("MinSpawnDelay", 200),
+    );
+    let max = input.get_int_or(
+        "Paper.MaxSpawnDelay",
+        input.get_int_or("MaxSpawnDelay", 800),
+    );
+    if delay > i32::from(i16::MAX) {
+        result.put_int("Paper.Delay", delay);
+    }
+    result.put_short("Delay", delay.min(i32::from(i16::MAX)) as i16);
+    if min > i32::from(i16::MAX) || max > i32::from(i16::MAX) {
+        result.put_int("Paper.MinSpawnDelay", min);
+        result.put_int("Paper.MaxSpawnDelay", max);
+    }
+    result.put_short("MinSpawnDelay", min.min(i32::from(i16::MAX)) as i16);
+    result.put_short("MaxSpawnDelay", max.min(i32::from(i16::MAX)) as i16);
+    for (key, default) in [
+        ("SpawnCount", 4),
+        ("MaxNearbyEntities", 6),
+        ("RequiredPlayerRange", 16),
+        ("SpawnRange", 4),
+    ] {
+        result.put_short(key, input.get_int_or(key, default) as i16);
+    }
+    let next = spawn_data(input);
+    if let Some(data) = &next {
+        result.put("SpawnData".into(), Tag::Compound(data.clone()));
+    }
+    let mut potentials = ListTag::new();
+    let mut sum = 0i64;
+    if let Some(list) = input.get_list("SpawnPotentials") {
+        for entry in &list.list {
+            let Tag::Compound(record) = entry else {
+                continue;
+            };
+            let Some(weight) = record
+                .get("weight")
+                .and_then(Tag::as_number)
+                .map(|n| n.int_value())
+                .filter(|weight| *weight >= 0)
+            else {
+                continue;
+            };
+            let Some(data) = record.get_compound("data").and_then(decode_spawn_data) else {
+                continue;
+            };
+            sum += i64::from(weight);
+            if sum > i64::from(i32::MAX) {
+                return Err(StructureError::PlacementUnavailable(
+                    "spawner sum of weights must be <= 2147483647".into(),
+                ));
+            }
+            let mut normalized = CompoundTag::new();
+            normalized.put_int("weight", weight);
+            normalized.put("data".into(), Tag::Compound(data));
+            potentials.list.push(Tag::Compound(normalized));
+        }
+    } else {
+        let mut data = next.unwrap_or_else(|| {
+            let mut data = CompoundTag::new();
+            data.put("entity".into(), Tag::Compound(CompoundTag::new()));
+            data
+        });
+        // SpawnData's constructor normalizes absent/malformed entity ids.
+        data = decode_spawn_data(&data).expect("default SpawnData entity compound");
+        let mut entry = CompoundTag::new();
+        entry.put_int("weight", 1);
+        entry.put("data".into(), Tag::Compound(data));
+        potentials.list.push(Tag::Compound(entry));
+    }
+    result.put("SpawnPotentials".into(), Tag::List(potentials));
+    Ok(result)
+}
+
 fn is_dummy_block_entity(tag: &CompoundTag) -> bool {
     tag.get_string("id").is_some_and(|id| id == "DUMMY")
 }
@@ -462,6 +550,15 @@ where
     fn into_owned_proto(self: Box<Self>) -> Option<ProtoChunk<T, B, S>> {
         None
     }
+
+    /// Concrete worldgen entity storage. A base-only ChunkAccess view cannot
+    /// pretend to own ProtoChunk's entity list.
+    fn get_proto_chunk_if_present_unchecked_mut(
+        &mut self,
+        _status: ChunkStatus,
+    ) -> Option<&mut ProtoChunk<T, B, S>> {
+        None
+    }
 }
 
 /// Why a `getChunk(x, z, status, loadOrGenerate)` request failed during world
@@ -617,6 +714,113 @@ where
     /// A fresh Proto block-entity write has only DUMMY NBT, which Paper replaces
     /// on a same-block write until a live entity mutator has run.
     live_block_entities: HashSet<BlockPos>,
+}
+
+impl<T, B, S> WorldGenRegion<'_, T, B, S>
+where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send,
+    Self: WorldGenLevel,
+{
+    pub fn structure_fresh_snapshot(
+        &mut self,
+        pos: BlockPos,
+        state: BlockState,
+    ) -> Result<
+        super::structure_transformer::CraftBlockSnapshot,
+        rivet_world::levelgen::structure::StructureError,
+    > {
+        super::structure_snapshot_data::fresh_snapshot(pos, state)
+    }
+
+    pub fn structure_world_snapshot(
+        &mut self,
+        pos: BlockPos,
+    ) -> Result<
+        super::structure_transformer::CraftBlockSnapshot,
+        rivet_world::levelgen::structure::StructureError,
+    > {
+        use super::{structure_snapshot_data, structure_transformer::CraftBlockSnapshot};
+        use rivet_world::levelgen::structure::StructureError;
+        let state = WorldGenLevel::get_block_state(self, &pos);
+        if !structure_snapshot_data::has_block_entity(state) {
+            return Ok(CraftBlockSnapshot {
+                position: pos,
+                state,
+                block_entity: None,
+            });
+        }
+        let pending = self.existing_block_entity_nbt(&pos).ok_or_else(|| {
+            StructureError::PlacementUnavailable(format!(
+                "Craft world snapshot at {pos:?} has no actual block entity"
+            ))
+        })?;
+        let data = if is_dummy_block_entity(&pending) {
+            structure_snapshot_data::fresh_snapshot(pos, state)?
+                .block_entity
+                .expect("supported entity snapshot")
+        } else {
+            match state.block().name() {
+                "minecraft:chest" => structure_snapshot_data::chest_data(pos, &pending)?,
+                "minecraft:spawner" => structure_spawner_data(pos, &pending)?,
+                _ => {
+                    return Err(StructureError::PlacementUnavailable(format!(
+                        "Craft existing snapshot for {} is unavailable",
+                        state.block().name()
+                    )));
+                }
+            }
+        };
+        self.structure_load_snapshot(pos, &data)?;
+        Ok(CraftBlockSnapshot {
+            position: pos,
+            state,
+            block_entity: Some(data),
+        })
+    }
+
+    pub fn structure_load_snapshot(
+        &mut self,
+        pos: BlockPos,
+        data: &CompoundTag,
+    ) -> Result<(), rivet_world::levelgen::structure::StructureError> {
+        use super::structure_snapshot_data;
+        use rivet_world::levelgen::structure::StructureError;
+        let state = WorldGenLevel::get_block_state(self, &pos);
+        if !structure_snapshot_data::has_block_entity(state)
+            || self.existing_block_entity_nbt(&pos).is_none()
+        {
+            return Ok(());
+        }
+        let (tag, entity) = match state.block().name() {
+            "minecraft:chest" => {
+                let tag = structure_snapshot_data::chest_data(pos, data)?;
+                let loot = tag
+                    .get_string("LootTable")
+                    .map(|table| (tag.get_long_or("LootTableSeed", 0), table.clone()));
+                (tag, WorldgenBlockEntity::Chest { loot })
+            }
+            "minecraft:spawner" => {
+                let tag = structure_spawner_data(pos, data)?;
+                let entity = WorldgenBlockEntity::Spawner {
+                    next_spawn: spawn_data_id(&tag),
+                    spawn_potentials: decode_spawn_potentials(&tag),
+                };
+                (tag, entity)
+            }
+            _ => {
+                return Err(StructureError::PlacementUnavailable(format!(
+                    "loadWithComponents for {} is unavailable",
+                    state.block().name()
+                )));
+            }
+        };
+        self.block_entities.insert(pos, entity);
+        self.live_block_entities.insert(pos);
+        self.persist_block_entity_nbt(&pos, tag);
+        Ok(())
+    }
 }
 
 impl<'a, T, B, S> WorldGenRegion<'a, T, B, S>
@@ -800,6 +1004,67 @@ where
     pub fn get_chunk(&self, chunk_x: i32, chunk_z: i32) -> &ChunkAccess<T, B, S> {
         self.try_get_chunk(chunk_x, chunk_z, ChunkStatus::Empty, true)
             .unwrap_or_else(|diagnostic| panic!("{}", diagnostic))
+    }
+
+    /// Actual WorldGenRegion.addFreshEntity -> ProtoChunk.addEntity path for
+    /// the native, nonpassenger chest-minecart constructor slice. Admission is
+    /// immediate, with no live ServerLevel entity-manager/event substitution.
+    pub fn add_fresh_chest_minecart(
+        &mut self,
+        entity: rivet_world::entity::chest_minecart::NativeChestMinecart,
+    ) -> Result<bool, rivet_world::levelgen::structure::StructureError> {
+        let pos = entity.block_position();
+        let chunk_x = pos.get_x() >> 4;
+        let chunk_z = pos.get_z() >> 4;
+        let chunk = self.structure_proto_chunk_mut(ChunkPos::new(chunk_x, chunk_z))?;
+        // Source ProtoChunk deliberately ignores Entity.save's bool and still
+        // appends the resulting (possibly empty, for discarded entities) tag.
+        chunk.add_entity(entity.save().unwrap_or_default());
+        Ok(true)
+    }
+
+    pub fn structure_chunk_entities_are_empty(
+        &mut self,
+        pos: ChunkPos,
+    ) -> Result<bool, rivet_world::levelgen::structure::StructureError> {
+        Ok(self
+            .structure_proto_chunk_mut(pos)?
+            .get_entities()
+            .is_empty())
+    }
+
+    pub fn clear_structure_chunk_entities(
+        &mut self,
+        pos: ChunkPos,
+    ) -> Result<(), rivet_world::levelgen::structure::StructureError> {
+        self.structure_proto_chunk_mut(pos)?.clear_entities();
+        Ok(())
+    }
+
+    fn structure_proto_chunk_mut(
+        &mut self,
+        pos: ChunkPos,
+    ) -> Result<&mut ProtoChunk<T, B, S>, rivet_world::levelgen::structure::StructureError> {
+        use rivet_world::levelgen::structure::StructureError;
+        let chunk_x = pos.x();
+        let chunk_z = pos.z();
+        self.try_get_chunk(chunk_x, chunk_z, ChunkStatus::Empty, true)
+            .map_err(|e| StructureError::PlacementUnavailable(e.to_string()))?;
+        let distance = self
+            .center_pos
+            .get_chessboard_distance_coords(chunk_x, chunk_z);
+        let required = self
+            .generating_step
+            .direct_dependencies()
+            .get(distance as usize);
+        self.cache
+            .get_mut(chunk_x, chunk_z)
+            .get_proto_chunk_if_present_unchecked_mut(required)
+            .ok_or_else(|| {
+                StructureError::PlacementUnavailable(format!(
+                    "chunk [{chunk_x}, {chunk_z}] does not expose actual ProtoChunk entity storage"
+                ))
+            })
     }
 
     /// `WorldGenRegion.getChunk(int, int, ChunkStatus, boolean)` — the
@@ -2469,14 +2734,109 @@ fn state_is_special_colliding_blockstate(_state: &BlockState) -> bool {
     false
 }
 
-/// A [`GenerationChunkHolderView`] that borrows a chunk — the worldgen
-/// executor's center-chunk adapter.
-///
-/// The executor owns the generating `ProtoChunk` and hands its `&mut` to the
-/// FEATURES body, which borrows it into a region through this adapter instead
-/// of cloning or moving it. `status` is captured at construction: the concrete
-/// `ProtoChunk` carries the persisted status the base `ChunkAccess` does not,
-/// and the region reads it back from the holder seam.
+impl WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
+    /// The structure pass asks for the center's STRUCTURE_REFERENCES and
+    /// traverses this exact fastutil set, not an outer-map iteration order.
+    pub(super) fn placement_reference_chunks(
+        &self,
+        structure: &Identifier,
+    ) -> Result<Vec<ChunkPos>, super::structure_placement::StructurePlacementError> {
+        let center = self.get_center();
+        let chunk = self
+            .try_get_chunk(
+                center.x(),
+                center.z(),
+                ChunkStatus::StructureReferences,
+                true,
+            )
+            .map_err(super::structure_placement::StructurePlacementError::RegionUnavailable)?;
+        Ok(chunk
+            .get_references_for_structure(structure)
+            .map(|key| ChunkPos::unpack(*key as i64))
+            .collect())
+    }
+
+    pub(super) fn placement_start_entry(
+        &self,
+        source: ChunkPos,
+        structure: &Identifier,
+    ) -> Result<
+        Option<&rivet_world::chunk::structure_access::StructureStartEntry>,
+        super::structure_placement::StructurePlacementError,
+    > {
+        let chunk = self
+            .try_get_chunk(source.x(), source.z(), ChunkStatus::StructureStarts, true)
+            .map_err(super::structure_placement::StructurePlacementError::RegionUnavailable)?;
+        if chunk.has_unkeyed_starts() {
+            return Err(
+                super::structure_manager::StructureManagerError::UnresolvedUnkeyedStarts {
+                    pos: source,
+                }
+                .into(),
+            );
+        }
+        Ok(chunk.get_start_for_structure(structure))
+    }
+
+    /// Keep the key/table slot installed while lending its unique native
+    /// value. A reentrant access gets an explicit unavailable entry, never an
+    /// invalid/absent start. The scheduler restores this slot on every exit.
+    pub(super) fn placement_take_start_entry(
+        &mut self,
+        source: ChunkPos,
+        structure: &Identifier,
+    ) -> Result<
+        Option<rivet_world::chunk::structure_access::StructureStartEntry>,
+        super::structure_placement::StructurePlacementError,
+    > {
+        use rivet_world::{
+            chunk::structure_access::StructureStartEntry, levelgen::structure::StructureError,
+        };
+        let chunk = self
+            .try_get_chunk_mut(source.x(), source.z(), ChunkStatus::StructureStarts, true)
+            .map_err(super::structure_placement::StructurePlacementError::RegionUnavailable)?;
+        if chunk.has_unkeyed_starts() {
+            return Err(
+                super::structure_manager::StructureManagerError::UnresolvedUnkeyedStarts {
+                    pos: source,
+                }
+                .into(),
+            );
+        }
+        Ok(chunk.get_start_for_structure_mut(structure).map(|entry| {
+            std::mem::replace(
+                entry,
+                StructureStartEntry::Deferred {
+                    tag: Box::new(Tag::Compound(CompoundTag::new())),
+                    reason: StructureError::PlacementUnavailable(
+                        "canonical structure start is exclusively loaned to placement".into(),
+                    ),
+                    source_key: None,
+                },
+            )
+        }))
+    }
+
+    pub(super) fn placement_return_start_entry(
+        &mut self,
+        source: ChunkPos,
+        structure: &Identifier,
+        entry: rivet_world::chunk::structure_access::StructureStartEntry,
+    ) {
+        // The region's holder cache and metadata map are inaccessible to
+        // transformer callbacks. This unique job cannot remove the checked
+        // slot or transfer its chunk while a start is loaned.
+        let chunk = self
+            .try_get_chunk_mut(source.x(), source.z(), ChunkStatus::StructureStarts, true)
+            .expect("placement loan retains its canonical source chunk");
+        *chunk
+            .get_start_for_structure_mut(structure)
+            .expect("placement loan retains its key slot") = entry;
+    }
+}
+
+/// A [`GenerationChunkHolderView`] that borrows the executor's center chunk.
+/// Complete ProtoChunk entity ownership instead uses BorrowedProtoHolder.
 pub struct CenterHolder<'a, T, B, S>
 where
     T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
@@ -2623,6 +2983,73 @@ where
 
     fn into_owned_proto(self: Box<Self>) -> Option<ProtoChunk<T, B, S>> {
         Some(self.chunk)
+    }
+
+    fn get_proto_chunk_if_present_unchecked_mut(
+        &mut self,
+        status: ChunkStatus,
+    ) -> Option<&mut ProtoChunk<T, B, S>> {
+        self.chunk
+            .get_persisted_status()
+            .is_or_after(status)
+            .then_some(&mut self.chunk)
+    }
+}
+
+/// Borrowed center holder retaining the actual ProtoChunk, including its
+/// entity list, rather than only borrowing the block-state base.
+pub struct BorrowedProtoHolder<'a, T, B, S>
+where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send,
+{
+    chunk: &'a mut ProtoChunk<T, B, S>,
+}
+
+impl<'a, T, B, S> BorrowedProtoHolder<'a, T, B, S>
+where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send,
+{
+    pub fn new(chunk: &'a mut ProtoChunk<T, B, S>) -> Self {
+        Self { chunk }
+    }
+}
+
+impl<T, B, S> GenerationChunkHolderView<T, B, S> for BorrowedProtoHolder<'_, T, B, S>
+where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send,
+{
+    fn get_chunk_if_present_unchecked(&self, status: ChunkStatus) -> Option<&ChunkAccess<T, B, S>> {
+        self.chunk
+            .get_persisted_status()
+            .is_or_after(status)
+            .then_some(self.chunk.base())
+    }
+    fn get_persisted_status(&self) -> Option<ChunkStatus> {
+        Some(self.chunk.get_persisted_status())
+    }
+    fn get_chunk_if_present_unchecked_mut(
+        &mut self,
+        status: ChunkStatus,
+    ) -> Option<&mut ChunkAccess<T, B, S>> {
+        self.chunk
+            .get_persisted_status()
+            .is_or_after(status)
+            .then_some(self.chunk.base_mut())
+    }
+    fn get_proto_chunk_if_present_unchecked_mut(
+        &mut self,
+        status: ChunkStatus,
+    ) -> Option<&mut ProtoChunk<T, B, S>> {
+        self.chunk
+            .get_persisted_status()
+            .is_or_after(status)
+            .then_some(&mut *self.chunk)
     }
 }
 
@@ -2959,6 +3386,127 @@ mod tests {
         );
     }
 
+    #[test]
+    fn native_minecart_admission_retains_actual_center_and_dependency_entity_storage() {
+        use rivet_nbt::tag_parser::parse_compound_fully;
+        use rivet_registry::core::Vec3;
+        use rivet_util::{mth::Uuid, random_source::LegacyRandomSource};
+        use rivet_world::entity::chest_minecart::{EntityConstructionContext, NativeChestMinecart};
+        fn proto(
+            pos: ChunkPos,
+            status: ChunkStatus,
+        ) -> ProtoChunk<StateId, ServerBiomeId, StructureKey> {
+            let accessor = create_accessor(SUPERFLAT_MIN_Y, SUPERFLAT_HEIGHT);
+            let mut chunk = ProtoChunk::new(
+                pos,
+                UpgradeData::empty(accessor.get_sections_count() as usize),
+                accessor,
+                &container_factory(),
+                None,
+                Blocks::AIR.default_block_state().id(),
+                BlockState::of(BlockId::from_name("minecraft:void_air").unwrap()).id(),
+                &|state: &StateId| resolve_state_flags(&BlockState::new(*state)),
+            );
+            chunk.set_persisted_status(status);
+            chunk
+        }
+        fn entity(pos: Vec3) -> NativeChestMinecart {
+            let mut entity = NativeChestMinecart::new(
+                EntityConstructionContext {
+                    entity_id: 101,
+                    world_uuid: Uuid {
+                        most: 0x1234_5678_9abc_def0,
+                        least: 0xfedc_ba98_7654_3210_u64 as i64,
+                    },
+                    experimental_minecart_movement: false,
+                },
+                &mut LegacyRandomSource::new(42),
+            );
+            entity.set_initial_pos(pos);
+            entity
+        }
+        let center_pos = ChunkPos::new(-1, 2);
+        let mut center = proto(center_pos, ChunkStatus::Carvers);
+        let step = GENERATION_PYRAMID
+            .get_step_to(ChunkStatus::Features)
+            .clone();
+        let deps = step.direct_dependencies().as_list();
+        let mut holders: Vec<
+            Box<dyn GenerationChunkHolderView<StateId, ServerBiomeId, StructureKey>>,
+        > = Vec::new();
+        for x in -9_i32..=7 {
+            for z in -6_i32..=10 {
+                if ChunkPos::new(x, z) == center_pos {
+                    continue;
+                }
+                let distance = center_pos.get_chessboard_distance_coords(x, z);
+                holders.push(Box::new(OwnedProtoHolder::new(proto(
+                    ChunkPos::new(x, z),
+                    deps[distance as usize],
+                ))));
+            }
+        }
+        // Explicit lifetime: only this holder borrows a real center ProtoChunk.
+        let mut holders: Vec<
+            Box<dyn GenerationChunkHolderView<StateId, ServerBiomeId, StructureKey> + '_>,
+        > = holders;
+        holders.insert(8 * 17 + 8, Box::new(BorrowedProtoHolder::new(&mut center)));
+        let mut region = WorldGenRegion::new(
+            StaticCache2D::from_entries(-9, -6, 17, 17, holders),
+            center_pos,
+            step,
+            42,
+            SUPERFLAT_MIN_Y,
+            SUPERFLAT_HEIGHT,
+            -63,
+            Arc::new(TestBiomeSource {
+                biome: BiomeId::from_id(40),
+            }),
+            RegistryAccess::empty(),
+        );
+        let center_entity = entity(Vec3::new(-0.5, 50.5, 32.5));
+        let center_saved = center_entity.save().unwrap();
+        assert!(region.add_fresh_chest_minecart(center_entity).unwrap());
+        assert!(
+            !region
+                .structure_chunk_entities_are_empty(center_pos)
+                .unwrap()
+        );
+        let row: serde_json::Value = serde_json::from_str(
+            include_str!("../../../../../tools/rivet-oracle/fixtures/chest-minecart.jsonl")
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        let expected = parse_compound_fully(row["saved"].as_str().unwrap()).unwrap();
+        assert!(
+            region
+                .add_fresh_chest_minecart(entity(Vec3::new(-16.5, 50.5, 32.5)))
+                .unwrap()
+        );
+        assert!(
+            !region
+                .structure_chunk_entities_are_empty(ChunkPos::new(-2, 2))
+                .unwrap()
+        );
+        let owned = region.into_owned_proto_entries();
+        assert_eq!(center.get_entities(), &[center_saved]);
+        let ring = owned
+            .into_iter()
+            .find(|(pos, _)| *pos == ChunkPos::new(-2, 2))
+            .unwrap()
+            .1;
+        assert_eq!(ring.get_entities(), &[expected]);
+        // Base-only views cannot silently serialize an entity into lost storage.
+        let mut base_only = feature_region();
+        assert!(
+            base_only
+                .add_fresh_chest_minecart(entity(Vec3::new(0.5, 50.5, 0.5)))
+                .is_err()
+        );
+    }
+
     /// A test chunk — a superflat content chunk at `pos` with `sections_count`
     /// world sections, classified with the server's air/motion predicates.
     fn test_chunk(pos: ChunkPos) -> ChunkAccess<StateId, ServerBiomeId, StructureKey> {
@@ -3088,6 +3636,45 @@ mod tests {
     /// owning-holder region (the [`WorldGenLevel`] shape).
     fn feature_region() -> WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> {
         region_with_access(RegistryAccess::empty())
+    }
+
+    #[test]
+    fn structure_craft_snapshots_persist_actual_paper_payloads_and_survive_same_block_writes() {
+        let pos = BlockPos::new(8, 64, 8);
+        let mut rows = 0;
+        for line in
+            include_str!("../../../../../tools/rivet-oracle/fixtures/structure-snapshots.jsonl")
+                .lines()
+        {
+            let row: serde_json::Value = serde_json::from_str(line).unwrap();
+            if row["name"] == "block_entity_types" {
+                continue;
+            }
+            let mut region = feature_region();
+            let state = BlockState::new(StateId(row["state"].as_u64().unwrap() as u16));
+            let expected =
+                rivet_nbt::tag_parser::parse_compound_fully(row["nbt"].as_str().unwrap()).unwrap();
+            let data = row["input"]
+                .as_str()
+                .map(|input| rivet_nbt::tag_parser::parse_compound_fully(input).unwrap())
+                .unwrap_or_else(|| expected.clone());
+            WorldGenLevel::set_block(&mut region, &pos, state, 2);
+            region.structure_load_snapshot(pos, &data).unwrap();
+            assert_eq!(
+                region.get_chunk(0, 0).get_block_entity_nbt(&pos),
+                Some(&expected),
+                "{}",
+                row["name"]
+            );
+            // Source getBlockEntity promotes the pending entity into the live
+            // map. A same-block set must preserve its loaded snapshot data.
+            WorldGenLevel::set_block(&mut region, &pos, state, 2);
+            let actual = region.structure_world_snapshot(pos).unwrap();
+            assert_eq!(actual.state, state);
+            assert_eq!(actual.block_entity, Some(expected));
+            rows += 1;
+        }
+        assert_eq!(rows, 7);
     }
 
     fn snowy_feature_region() -> WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> {
