@@ -3317,6 +3317,7 @@ fn run_biome_decoration_through(
                                     "StructureTemplate.updateShapeAtEdge is not implemented",
                                 )
                                 || message.starts_with("Block.updateShape is not implemented for ")
+                                || message == "BeehiveBlockEntity nonempty components codec is not implemented"
                                 || (message
                                     .contains("BlockStateBase.canSurvive is not implemented")
                                     || message

@@ -3,7 +3,7 @@
 use super::configurations::fallen_tree_configuration::FallenTreeConfiguration;
 use super::stateproviders::block_state_provider::block_state_provider_get_state;
 use super::tree_feature::{TreeLevel, valid_tree_pos};
-use super::treedecorators::{TreeDecorator, TreeDecoratorContext};
+use super::treedecorators::{TreeDecorator, TreeDecoratorCallbacks, TreeDecoratorContext};
 use super::{FeatureBehavior, FeaturePlaceContext, mark_above_for_post_processing};
 use crate::level::WorldGenLevel;
 use rivet_registry::block_state_properties::BlockStateProperties;
@@ -82,8 +82,24 @@ fn decorate_logs<R: RandomSource>(
     let level = TreeLevel(RefCell::new(level));
     let mut setter = |pos: &BlockPos, state| level.write(pos, state);
     let height_at = |ty, x, z| level.0.borrow_mut().get_height_at(ty, x, z);
-    let mut context =
-        TreeDecoratorContext::new(&level, &mut setter, random, logs, &[], &[], &height_at);
+    let has_beehive_block_entity =
+        |pos: &BlockPos| level.0.borrow_mut().has_beehive_block_entity(pos);
+    let store_beehive_occupant = |pos: &BlockPos, ticks| {
+        level.0.borrow_mut().store_beehive_occupant(pos, ticks);
+    };
+    let mut context = TreeDecoratorContext::new(
+        &level,
+        &mut setter,
+        random,
+        logs,
+        &[],
+        &[],
+        TreeDecoratorCallbacks {
+            height_at: &height_at,
+            has_beehive_block_entity: &has_beehive_block_entity,
+            store_beehive_occupant: &store_beehive_occupant,
+        },
+    );
     for decorator in decorators {
         decorator.place(&mut context);
     }

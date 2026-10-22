@@ -5,7 +5,7 @@
 
 use super::configurations::TreeConfiguration;
 use super::foliageplacers::foliage_placer::FoliageSetter;
-use super::treedecorators::TreeDecoratorContext;
+use super::treedecorators::{TreeDecoratorCallbacks, TreeDecoratorContext};
 use super::{FeatureBehavior, FeaturePlaceContext};
 use crate::level::{WorldGenLevel, height_accessor::LevelHeightAccessor};
 #[path = "tree_placer_runtime.rs"]
@@ -174,6 +174,11 @@ impl FeatureBehavior<TreeConfiguration> for TreeFeature {
                 level.write(pos, state);
             };
             let height_at = |ty, x, z| level.0.borrow_mut().get_height_at(ty, x, z);
+            let has_beehive_block_entity =
+                |pos: &BlockPos| level.0.borrow_mut().has_beehive_block_entity(pos);
+            let store_beehive_occupant = |pos: &BlockPos, ticks| {
+                level.0.borrow_mut().store_beehive_occupant(pos, ticks);
+            };
             let mut decorator_context = TreeDecoratorContext::new(
                 &level,
                 &mut setter,
@@ -181,7 +186,11 @@ impl FeatureBehavior<TreeConfiguration> for TreeFeature {
                 &trunk_insertions,
                 &foliage.insertions,
                 &[],
-                &height_at,
+                TreeDecoratorCallbacks {
+                    height_at: &height_at,
+                    has_beehive_block_entity: &has_beehive_block_entity,
+                    store_beehive_occupant: &store_beehive_occupant,
+                },
             );
             for decorator in &config.decorators {
                 decorator.place(&mut decorator_context);

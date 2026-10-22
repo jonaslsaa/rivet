@@ -14,6 +14,11 @@ import net.minecraft.world.level.WorldGenLevel;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.level.block.entity.BlockEntityTypes;
+import net.minecraft.world.level.block.entity.BeehiveBlockEntity;
+import net.minecraft.core.HolderLookup;
+import net.minecraft.nbt.NbtOps;
 import net.minecraft.world.level.material.Fluid;
 import net.minecraft.world.level.levelgen.XoroshiroRandomSource;
 import net.minecraft.world.level.levelgen.Heightmap;
@@ -25,13 +30,16 @@ import net.minecraft.world.level.levelgen.feature.configurations.TreeConfigurati
 public final class TreePlacementProbe {
     private static final class Ground {
         final Map<BlockPos, BlockState> states = new HashMap<>();
+        final Map<BlockPos, BlockEntity> blockEntities = new HashMap<>();
         final ByteArrayOutputStream writes = new ByteArrayOutputStream();
         final DataOutputStream stream = new DataOutputStream(writes);
         final List<String> ticks = new ArrayList<>();
         final BlockPos origin;
         final XoroshiroRandomSource worldRandom = new XoroshiroRandomSource(99);
         int writeCount;
-        Ground(BlockPos origin) { this.origin = origin; }
+        final boolean materializeBeehives;
+        Ground(BlockPos origin) { this(origin, true); }
+        Ground(BlockPos origin, boolean materializeBeehives) { this.origin = origin; this.materializeBeehives = materializeBeehives; }
         BlockState get(BlockPos p) {
             return states.getOrDefault(p, p.getY() < origin.getY() ? Blocks.DIRT.defaultBlockState() : Blocks.AIR.defaultBlockState());
         }
@@ -52,9 +60,18 @@ public final class TreePlacementProbe {
                     case "isFluidAtPosition" -> ((Predicate<net.minecraft.world.level.material.FluidState>) args[1]).test(get((BlockPos) args[0]).getFluidState());
                     case "setBlock" -> {
                         BlockPos p = ((BlockPos) args[0]).immutable(); BlockState state = (BlockState) args[1];
+                        BlockState old = get(p);
                         states.put(p, state); writeCount++;
+                        if (materializeBeehives && (state.is(Blocks.BEE_NEST) || state.is(Blocks.BEEHIVE))) {
+                            if (!old.is(state.getBlock()) || !blockEntities.containsKey(p)) blockEntities.put(p, new BeehiveBlockEntity(p, state));
+                        } else if (old.getBlock() != state.getBlock()) blockEntities.remove(p);
                         for (int value : new int[]{p.getX(),p.getY(),p.getZ(),Block.getId(state),(int) args[2]}) stream.writeInt(value);
                         yield true;
+                    }
+                    case "getBlockEntity" -> {
+                        BlockEntity entity = blockEntities.get((BlockPos) args[0]);
+                        yield args.length == 1 ? entity
+                            : entity != null && entity.getType() == args[1] ? Optional.of(entity) : Optional.empty();
                     }
                     case "scheduleTick" -> {
                         BlockPos p = (BlockPos) args[0];
@@ -86,6 +103,21 @@ public final class TreePlacementProbe {
             return hash(bytes.toByteArray());
         }
         String ticksHash() throws Exception { return hash(String.join("\n", ticks).getBytes(java.nio.charset.StandardCharsets.UTF_8)); }
+        JsonArray beehives(HolderLookup.Provider registries) {
+            JsonArray hives = new JsonArray();
+            var positions = new ArrayList<>(blockEntities.keySet());
+            positions.sort(Comparator.<BlockPos>comparingInt(BlockPos::getX).thenComparingInt(BlockPos::getY).thenComparingInt(BlockPos::getZ));
+            for (BlockPos p : positions) if (blockEntities.get(p) instanceof BeehiveBlockEntity hive) {
+                JsonObject entry = new JsonObject(); JsonArray pos = new JsonArray();
+                pos.add(p.getX()); pos.add(p.getY()); pos.add(p.getZ()); entry.add("pos", pos);
+                entry.addProperty("occupants", hive.getOccupantCount());
+                var tag = hive.saveWithFullMetadata(registries);
+                entry.add("nbt", NbtOps.INSTANCE.convertTo(JsonOps.INSTANCE, tag));
+                entry.addProperty("snbt", tag.toString());
+                hives.add(entry);
+            }
+            return hives;
+        }
     }
     private static String hash(byte[] bytes) throws Exception { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
     public static void main(String[] args) {
@@ -105,6 +137,7 @@ public final class TreePlacementProbe {
             var layers = net.minecraft.server.RegistryLayer.createRegistryAccess();
             net.minecraft.tags.TagLoader.loadTagsForExistingRegistries(resources,
                 layers.getLayer(net.minecraft.server.RegistryLayer.STATIC)).forEach(pending -> pending.apply());
+            HolderLookup.Provider registries = layers.compositeAccess();
             for (String name : List.of("oak", "fancy_oak", "birch", "acacia", "jungle_bush", "pine", "spruce", "azalea_tree",
                     "swamp_oak", "jungle_tree", "mega_jungle_tree", "mega_pine", "mega_spruce",
                     "oak_leaf_litter", "birch_leaf_litter", "dark_oak_leaf_litter", "fancy_oak_leaf_litter")) {
@@ -129,6 +162,56 @@ public final class TreePlacementProbe {
                     output.println("TREE_PLACEMENT\t" + row);
                 }
             }
+            // Append only: the original 68 rows above remain byte-identical.
+            for (String name : List.of("cherry", "oak_bees_005", "oak_bees_002", "oak_bees_0002_leaf_litter",
+                    "birch_bees_005", "birch_bees_002", "birch_bees_0002", "birch_bees_0002_leaf_litter",
+                    "fancy_oak_bees", "fancy_oak_bees_005", "fancy_oak_bees_002", "fancy_oak_bees_0002_leaf_litter",
+                    "super_birch_bees", "super_birch_bees_0002", "cherry_bees_005")) {
+                JsonObject json;
+                try (var reader = resources.getResourceOrThrow(Identifier.withDefaultNamespace("worldgen/configured_feature/" + name + ".json")).openAsReader()) {
+                    json = JsonParser.parseReader(reader).getAsJsonObject();
+                }
+                var config = TreeConfiguration.CODEC.parse(JsonOps.INSTANCE, json.get("config")).getOrThrow();
+                for (long seed : new long[]{0, 1, 42, 987654321}) {
+                    output.println("TREE_PLACEMENT\t" + placeWithBeeData(name, json, config, seed, registries));
+                }
+                if (name.contains("bees")) {
+                    boolean found = false;
+                    for (long seed = 0; seed < 10000; seed++) {
+                        JsonObject row = placeWithBeeData(name, json, config, seed, registries);
+                        JsonArray hives = row.getAsJsonArray("beehives");
+                        if (!hives.isEmpty() && hives.get(0).getAsJsonObject().get("occupants").getAsInt() > 0) {
+                            row.addProperty("seed_search_success", true);
+                            output.println("TREE_PLACEMENT\t" + row);
+                            if (name.equals("oak_bees_005")) {
+                                JsonObject missingHive = placeWithBeeData(name, json, config, seed, registries, false);
+                                missingHive.addProperty("block_entities", false);
+                                output.println("TREE_PLACEMENT\t" + missingHive);
+                            }
+                            found = true; break;
+                        }
+                    }
+                    if (!found) throw new AssertionError("No occupied bee nest found for " + name);
+                }
+            }
         }
+    }
+
+    private static JsonObject placeWithBeeData(String name, JsonObject json, TreeConfiguration config, long seed, HolderLookup.Provider registries) throws Exception {
+        return placeWithBeeData(name, json, config, seed, registries, true);
+    }
+    private static JsonObject placeWithBeeData(String name, JsonObject json, TreeConfiguration config, long seed, HolderLookup.Provider registries, boolean materializeBeehives) throws Exception {
+        BlockPos origin = new BlockPos(0, 64, 0);
+        Ground ground = new Ground(origin, materializeBeehives); var random = new XoroshiroRandomSource(seed);
+        boolean result = new TreeFeature(TreeConfiguration.CODEC).place(
+            new FeaturePlaceContext<>(Optional.empty(), ground.level(), null, random, origin, config));
+        JsonObject row = new JsonObject(); row.addProperty("feature", name); row.addProperty("seed", seed);
+        row.add("config", json.get("config"));
+        row.addProperty("result", result); row.addProperty("next_long", random.nextLong());
+        row.addProperty("world_next_long", ground.worldRandom.nextLong());
+        row.addProperty("writes", ground.writeCount); row.addProperty("writes_sha256", ground.writesHash());
+        row.addProperty("blocks_sha256", ground.blocksHash()); row.addProperty("ticks", ground.ticks.size());
+        row.addProperty("ticks_sha256", ground.ticksHash()); row.add("beehives", ground.beehives(registries));
+        return row;
     }
 }

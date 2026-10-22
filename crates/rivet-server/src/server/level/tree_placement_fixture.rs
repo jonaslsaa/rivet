@@ -1,6 +1,9 @@
 //! Full-tree differential against pinned Paper, including real edge updates.
 
+use super::beehive_data::BeehiveData;
 use super::block_shape_update::update_shape_at_edge;
+use rivet_nbt::compound_tag::CompoundTag;
+use rivet_nbt::tag_parser::parse_compound_fully;
 use rivet_registry::access::RegistryAccess;
 use rivet_registry::block_state::BlockState;
 use rivet_registry::core::BlockPos;
@@ -23,6 +26,8 @@ use std::collections::{HashMap, HashSet};
 
 struct Ground {
     states: HashMap<BlockPos, BlockState>,
+    beehives: HashMap<BlockPos, BeehiveData>,
+    materialize_beehives: bool,
     writes: Vec<u8>,
     write_count: u64,
     ticks: Vec<String>,
@@ -33,6 +38,8 @@ impl Ground {
     fn new() -> Self {
         Self {
             states: HashMap::new(),
+            beehives: HashMap::new(),
+            materialize_beehives: true,
             writes: Vec::new(),
             write_count: 0,
             ticks: Vec::new(),
@@ -68,6 +75,30 @@ impl Ground {
             name,
             delay
         ));
+    }
+
+    fn assert_beehives_match(&self, expected: &serde_json::Value, context: &str) {
+        let mut positions: Vec<_> = self.beehives.keys().copied().collect();
+        positions.sort_by_key(|pos| (pos.get_x(), pos.get_y(), pos.get_z()));
+        let expected = expected.as_array().expect("Paper beehives array");
+        assert_eq!(positions.len(), expected.len(), "live hive count {context}");
+        for (pos, row) in positions.into_iter().zip(expected) {
+            assert_eq!(
+                serde_json::json!([pos.get_x(), pos.get_y(), pos.get_z()]),
+                row["pos"],
+                "hive position {context}"
+            );
+            let tag = self.beehives[&pos].save_with_full_metadata(&pos);
+            let java_tag =
+                parse_compound_fully(row["snbt"].as_str().expect("actual Paper full hive SNBT"))
+                    .expect("valid Paper hive NBT");
+            assert_eq!(tag, java_tag, "complete persisted hive NBT {context}");
+            assert_eq!(
+                tag.get_list("bees").expect("saved hive bee list").size() as u64,
+                row["occupants"].as_u64().unwrap(),
+                "stored occupants {context}"
+            );
+        }
     }
 }
 
@@ -115,7 +146,21 @@ impl WorldGenLevel for Ground {
         self.get_min_y()
     }
     fn set_block(&mut self, pos: &BlockPos, state: BlockState, flags: u32) -> bool {
+        let old = self.get_block_state(pos);
         self.states.insert(*pos, state);
+        if self.materialize_beehives
+            && matches!(
+                state.block().name(),
+                "minecraft:bee_nest" | "minecraft:beehive"
+            )
+        {
+            if old.block() != state.block() || !self.beehives.contains_key(pos) {
+                self.beehives
+                    .insert(*pos, BeehiveData::load(&CompoundTag::new()));
+            }
+        } else if old.block() != state.block() {
+            self.beehives.remove(pos);
+        }
         self.write_count += 1;
         for value in [
             pos.get_x(),
@@ -127,6 +172,15 @@ impl WorldGenLevel for Ground {
             self.writes.extend_from_slice(&value.to_be_bytes());
         }
         true
+    }
+    fn has_beehive_block_entity(&mut self, pos: &BlockPos) -> bool {
+        self.beehives.contains_key(pos)
+    }
+    fn store_beehive_occupant(&mut self, pos: &BlockPos, ticks_in_hive: i32) {
+        self.beehives
+            .get_mut(pos)
+            .expect("genuine hive entity required")
+            .store_worldgen_bee(ticks_in_hive);
     }
     fn schedule_tick(&mut self, pos: &BlockPos, fluid: FluidId, delay: i32) {
         assert_eq!(
@@ -163,6 +217,9 @@ fn hash(bytes: &[u8]) -> String {
 #[test]
 fn full_trees_match_paper_writes_blocks_ticks_and_both_random_streams() {
     let ops = RegistryOps::create_from_access(&JsonOps::INSTANCE, RegistryAccess::empty());
+    let mut cases = 0;
+    let mut occupied_successes = HashSet::new();
+    let mut missing_hive_cases = 0;
     for line in
         include_str!("../../../../../tools/rivet-oracle/fixtures/tree-placement.jsonl").lines()
     {
@@ -174,6 +231,7 @@ fn full_trees_match_paper_writes_blocks_ticks_and_both_random_streams() {
             .result()
             .unwrap_or_else(|| panic!("{name} config: {decoded:?}"));
         let mut ground = Ground::new();
+        ground.materialize_beehives = row["block_entities"].as_bool().unwrap_or(true);
         let mut random = XoroshiroRandomSource::new(seed);
         let result = TREE.place(&mut FeaturePlaceContext::new(
             None,
@@ -220,5 +278,52 @@ fn full_trees_match_paper_writes_blocks_ticks_and_both_random_streams() {
             row["ticks_sha256"].as_str().unwrap(),
             "ordered ticks {context}"
         );
+        if let Some(beehives) = row.get("beehives") {
+            ground.assert_beehives_match(beehives, &context);
+            if !ground.materialize_beehives {
+                assert!(
+                    ground
+                        .states
+                        .values()
+                        .any(|state| state.block().name() == "minecraft:bee_nest"),
+                    "the no-entity branch must still place a real nest {context}"
+                );
+                assert!(ground.beehives.is_empty());
+                missing_hive_cases += 1;
+            }
+            if row["seed_search_success"] == true {
+                assert!(
+                    beehives
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|hive| hive["occupants"].as_u64().unwrap() >= 2),
+                    "positive hive case {context}"
+                );
+                occupied_successes.insert(name.to_string());
+            }
+        }
+        cases += 1;
     }
+    assert_eq!(cases, 143);
+    assert_eq!(missing_hive_cases, 1);
+    assert_eq!(
+        occupied_successes,
+        HashSet::from([
+            "oak_bees_005".to_string(),
+            "oak_bees_002".to_string(),
+            "oak_bees_0002_leaf_litter".to_string(),
+            "birch_bees_005".to_string(),
+            "birch_bees_002".to_string(),
+            "birch_bees_0002".to_string(),
+            "birch_bees_0002_leaf_litter".to_string(),
+            "fancy_oak_bees".to_string(),
+            "fancy_oak_bees_005".to_string(),
+            "fancy_oak_bees_002".to_string(),
+            "fancy_oak_bees_0002_leaf_litter".to_string(),
+            "super_birch_bees".to_string(),
+            "super_birch_bees_0002".to_string(),
+            "cherry_bees_005".to_string(),
+        ])
+    );
 }

@@ -212,6 +212,20 @@ fn update_shape(
                 updated_vine(state, level, pos)
             }
         }
+        "BeehiveBlock" => {
+            // Paper re-reads this neighbor and checks specifically FireBlock
+            // (not SoulFireBlock) before requesting emergency entity release.
+            if level
+                .get_block_state(&pos.relative(&direction))
+                .block()
+                .name()
+                == "minecraft:fire"
+                && level.has_beehive_block_entity(pos)
+            {
+                panic!("Block.updateShape is not implemented for beehive emergency bee release");
+            }
+            state
+        }
         "CocoaBlock" => {
             let Some(PropertyValue::Enum(facing)) =
                 state.get_value(BlockStateProperties::HORIZONTAL_FACING)
@@ -308,6 +322,12 @@ mod tests {
         fn schedule_block_tick(&mut self, pos: &BlockPos, _: Block, delay: i32) {
             self.ticks.push((*pos, "block", delay));
         }
+        fn has_beehive_block_entity(&mut self, pos: &BlockPos) -> bool {
+            matches!(
+                self.get_block_state(pos).block().name(),
+                "minecraft:bee_nest" | "minecraft:beehive"
+            )
+        }
     }
 
     fn random() -> AlgorithmRandomSource {
@@ -341,6 +361,48 @@ mod tests {
         assert_eq!(
             &level.ticks[6..8],
             [(origin.below(), "water", 5), (origin.below(), "block", 1)]
+        );
+    }
+
+    #[test]
+    fn hive_neighbor_changes_only_require_entity_release_for_actual_fire() {
+        let pos = BlockPos::new(0, 64, 0);
+        let hive = state("minecraft:bee_nest");
+        let mut level = Level::default();
+        level.blocks.insert(pos, hive);
+        for name in ["minecraft:air", "minecraft:soul_fire"] {
+            let neighbor = state(name);
+            level
+                .blocks
+                .insert(pos.relative(&Direction::East), neighbor);
+            assert_eq!(
+                update_shape(
+                    &mut level,
+                    &mut random(),
+                    hive,
+                    &pos,
+                    Direction::East,
+                    neighbor
+                ),
+                hive
+            );
+        }
+        level
+            .blocks
+            .insert(pos.relative(&Direction::East), state("minecraft:fire"));
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                update_shape(
+                    &mut level,
+                    &mut random(),
+                    hive,
+                    &pos,
+                    Direction::East,
+                    state("minecraft:air"),
+                )
+            }))
+            .is_err(),
+            "the live reread must not silently discard fire-triggered bee release"
         );
     }
 

@@ -106,7 +106,15 @@ use rivet_world::level::{WorldBorder, WorldBorderSettings, WorldGenLevel};
 use rivet_world::levelgen::heightmap::Types;
 use rivet_world::ticks::{SavedTick, ScheduledTick};
 
+use super::beehive_data::BeehiveData;
 use crate::server::level::level_chunk::{BiomeId as ServerBiomeId, StructureKey, state_flags};
+
+fn is_beehive_state(state: BlockState) -> bool {
+    matches!(
+        state.block().name(),
+        "minecraft:bee_nest" | "minecraft:beehive"
+    )
+}
 
 /// `Block.UPDATE_ALL` — `UPDATE_NEIGHBORS | UPDATE_CLIENTS` (1 | 2), the flag
 /// `removeBlock`/`destroyBlock` pass to `setBlock`.
@@ -126,8 +134,9 @@ const UPDATE_KNOWN_SHAPE: i32 = 16;
 /// small live state map rather than a block-state shortcut: `setBlock` creates
 /// an entity when the written block requires one, and the feature's entity
 /// queries only succeed for that live entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum WorldgenBlockEntity {
+    Beehive(BeehiveData),
     Chest {
         loot: Option<(i64, String)>,
     },
@@ -975,6 +984,95 @@ where
         })
     }
 
+    fn materialize_beehive(
+        &mut self,
+        pos: &BlockPos,
+        state: BlockState,
+        old_state: BlockState,
+    ) -> bool {
+        if !is_beehive_state(state) {
+            return false;
+        }
+        let same_block = state.block() == old_state.block();
+        let live = same_block && self.live_block_entities.contains(pos);
+        if !same_block {
+            self.block_entities.remove(pos);
+            self.live_block_entities.remove(pos);
+            self.remove_persisted_block_entity(pos);
+        }
+        let tag = if live {
+            self.existing_block_entity_nbt(pos)
+                .unwrap_or_else(|| dummy_block_entity(pos))
+        } else {
+            dummy_block_entity(pos)
+        };
+        self.block_entities
+            .insert(*pos, WorldgenBlockEntity::Beehive(BeehiveData::load(&tag)));
+        self.persist_block_entity_nbt(pos, tag);
+        true
+    }
+
+    fn has_beehive_for_state(&self, pos: &BlockPos, state: BlockState) -> bool {
+        if !is_beehive_state(state) {
+            return false;
+        }
+        if matches!(
+            self.block_entities.get(pos),
+            Some(WorldgenBlockEntity::Beehive(_))
+        ) {
+            return true;
+        }
+        self.existing_block_entity_nbt(pos).is_some_and(|tag| {
+            tag.get_string("id").is_some_and(|id| {
+                id == "DUMMY"
+                    || Identifier::try_parse_result(id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|id| id == Identifier::with_default_namespace("beehive"))
+            })
+        })
+    }
+
+    fn append_beehive_occupant(&mut self, pos: &BlockPos, state: BlockState, ticks: i32) {
+        if !self.load_beehive_for_state(pos, state) {
+            return;
+        }
+        let mut hive = match self.block_entities.get(pos) {
+            Some(WorldgenBlockEntity::Beehive(hive)) => hive.clone(),
+            _ => BeehiveData::load(
+                &self
+                    .existing_block_entity_nbt(pos)
+                    .expect("existing hive payload"),
+            ),
+        };
+        hive.store_worldgen_bee(ticks);
+        let tag = hive.save_with_full_metadata(pos);
+        self.block_entities
+            .insert(*pos, WorldgenBlockEntity::Beehive(hive));
+        self.persist_block_entity_nbt(pos, tag);
+        self.live_block_entities.insert(*pos);
+    }
+
+    fn load_beehive_for_state(&mut self, pos: &BlockPos, state: BlockState) -> bool {
+        if !self.has_beehive_for_state(pos, state) {
+            return false;
+        }
+        let hive = match self.block_entities.get(pos) {
+            Some(WorldgenBlockEntity::Beehive(hive)) => hive.clone(),
+            _ => BeehiveData::load(
+                &self
+                    .existing_block_entity_nbt(pos)
+                    .expect("typed hive payload"),
+            ),
+        };
+        let tag = hive.save_with_full_metadata(pos);
+        self.block_entities
+            .insert(*pos, WorldgenBlockEntity::Beehive(hive));
+        self.persist_block_entity_nbt(pos, tag);
+        self.live_block_entities.insert(*pos);
+        true
+    }
+
     fn persist_block_entity_nbt(&mut self, pos: &BlockPos, tag: CompoundTag) {
         let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
         let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
@@ -1141,6 +1239,9 @@ impl WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
         state: BlockState,
         old_state: BlockState,
     ) {
+        if self.materialize_beehive(pos, state, old_state) {
+            return;
+        }
         let same_block = old_state.block() == state.block();
         if state.block() != Blocks::CHEST.id() && state.block() != Blocks::SPAWNER.id() {
             self.block_entities.remove(pos);
@@ -1354,6 +1455,13 @@ pub(super) fn region_can_survive(
 }
 
 impl WorldGenLevel for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
+    fn has_beehive_block_entity(&mut self, pos: &BlockPos) -> bool {
+        self.load_beehive_for_state(pos, self.get_block_state(pos))
+    }
+
+    fn store_beehive_occupant(&mut self, pos: &BlockPos, ticks: i32) {
+        self.append_beehive_occupant(pos, self.get_block_state(pos), ticks);
+    }
     fn update_tree_shape_at_edge(&mut self, filled: &HashSet<BlockPos>) {
         let mut random = self
             .region_random
@@ -1646,6 +1754,9 @@ impl WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
         state: BlockState,
         old_state: BlockState,
     ) {
+        if self.materialize_beehive(pos, state, old_state) {
+            return;
+        }
         let same_block = old_state.block() == state.block();
         if state.block() != Blocks::CHEST.id() && state.block() != Blocks::SPAWNER.id() {
             self.block_entities.remove(pos);
@@ -1757,6 +1868,13 @@ impl LevelHeightAccessor for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Str
 /// doc), so this impl covers every region lifetime, and the executor's scoped
 /// borrow-carrying region implements it directly.
 impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
+    fn has_beehive_block_entity(&mut self, pos: &BlockPos) -> bool {
+        self.load_beehive_for_state(pos, self.get_block_state(pos))
+    }
+
+    fn store_beehive_occupant(&mut self, pos: &BlockPos, ticks: i32) {
+        self.append_beehive_occupant(pos, self.get_block_state(pos), ticks);
+    }
     fn update_tree_shape_at_edge(&mut self, filled: &HashSet<BlockPos>) {
         let mut random = self
             .region_random
@@ -2407,6 +2525,163 @@ mod tests {
         BiomeId as ServerBiomeId, container_factory, superflat_content,
     };
     use rivet_world::superflat::{SUPERFLAT_HEIGHT, SUPERFLAT_MIN_Y};
+
+    #[test]
+    fn real_bee_tree_persists_occupants_through_chunk_payload_reload_and_replacement() {
+        use rivet_nbt::{nbt_accounter::NbtAccounter, nbt_io};
+        use rivet_registry::registry_ops::RegistryOps;
+        use rivet_serialization::json_ops::JsonOps;
+        use rivet_util::random_source::XoroshiroRandomSource;
+        use rivet_util::worldgen_random::AlgorithmRandomSource;
+        use rivet_world::chunk::chunk_generator::ChunkGenerator;
+        use rivet_world::chunk::storage::serializable_chunk_data::parse_block_entities;
+        use rivet_world::levelgen::feature::configurations::tree_configuration::tree_configuration_codec;
+        use rivet_world::levelgen::feature::{FeatureBehavior, FeaturePlaceContext, TREE};
+
+        struct Generator;
+        impl ChunkGenerator for Generator {
+            fn get_min_y(&self) -> i32 {
+                SUPERFLAT_MIN_Y
+            }
+            fn get_gen_depth(&self) -> i32 {
+                SUPERFLAT_HEIGHT
+            }
+        }
+        let row = include_str!("../../../../../tools/rivet-oracle/fixtures/tree-placement.jsonl")
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|row| row["feature"] == "oak_bees_005" && row["seed"] == 20)
+            .expect("positive actual Paper bee-tree fixture");
+        let ops = RegistryOps::create_from_access(&JsonOps::INSTANCE, RegistryAccess::empty());
+        let decoded = tree_configuration_codec().parse(&ops, &row["config"]);
+        let config = decoded.result().expect("actual bee tree config");
+        let mut region = feature_region();
+        region.set_region_random(AlgorithmRandomSource::Xoroshiro(
+            XoroshiroRandomSource::new(99),
+        ));
+        let origin = BlockPos::new(8, 64, 8);
+        region.set_block(
+            &origin.below(),
+            Blocks::DIRT.default_block_state(),
+            2,
+            UPDATE_LIMIT,
+        );
+        let mut random = XoroshiroRandomSource::new(20);
+        assert!(TREE.place(&mut FeaturePlaceContext::new(
+            None,
+            &mut region,
+            &Generator,
+            &mut random,
+            &origin,
+            config
+        )));
+        let hive_pos = *region
+            .block_entities
+            .iter()
+            .find_map(|(pos, entity)| {
+                matches!(entity, WorldgenBlockEntity::Beehive(_)).then_some(pos)
+            })
+            .expect("tree must create a typed hive in the actual region");
+        let hive_state = region.get_block_state(&hive_pos);
+        assert!(is_beehive_state(hive_state));
+        let chunk_x = hive_pos.get_x() >> 4;
+        let chunk_z = hive_pos.get_z() >> 4;
+        let saved = region
+            .get_chunk(chunk_x, chunk_z)
+            .get_block_entity_nbt(&hive_pos)
+            .expect("occupants must reach the owning chunk, not just the region cache")
+            .clone();
+        let original_bees = saved.get_list("bees").expect("saved occupants").clone();
+        assert!((2..=3).contains(&original_bees.list.len()));
+        // Round-trip genuine pending chunk block_entities through binary NBT
+        // and the normal chunk payload parser. No proto is falsely made FULL.
+        let mut chunk_payload = CompoundTag::new();
+        chunk_payload.put(
+            "block_entities".to_string(),
+            Tag::List(ListTag::with_list(vec![Tag::Compound(saved)])),
+        );
+        let mut bytes = Vec::new();
+        nbt_io::write_compressed(&chunk_payload, &mut bytes).unwrap();
+        let loaded =
+            nbt_io::read_compressed(bytes.as_slice(), &mut NbtAccounter::unlimited_heap()).unwrap();
+        let loaded_tags = parse_block_entities(&loaded);
+        assert_eq!(loaded_tags.len(), 1);
+        drop(region);
+
+        let mut reloaded_region = feature_region();
+        reloaded_region.set_block(&hive_pos, hive_state, 2, UPDATE_LIMIT);
+        // Hand the reconstructed pending payload to its actual owner, with
+        // no cached live entity. Typed query/append must load this payload.
+        reloaded_region.block_entities.clear();
+        reloaded_region.block_entity_nbts.clear();
+        reloaded_region.live_block_entities.clear();
+        reloaded_region
+            .get_chunk_mut(chunk_x, chunk_z)
+            .set_block_entity_nbt(loaded_tags[0].clone());
+        assert!(WorldGenLevel::has_beehive_block_entity(
+            &mut reloaded_region,
+            &hive_pos
+        ));
+        let same_block = hive_state
+            .set_value(BlockStateProperties::LEVEL_HONEY, 2)
+            .unwrap();
+        reloaded_region.set_block(&hive_pos, same_block, 2, UPDATE_LIMIT);
+        assert_eq!(
+            reloaded_region
+                .existing_block_entity_nbt(&hive_pos)
+                .unwrap()
+                .get_list("bees")
+                .unwrap(),
+            &original_bees,
+            "lazy typed query must mark the entity live before a same-block write"
+        );
+        WorldGenLevel::store_beehive_occupant(&mut reloaded_region, &hive_pos, 77);
+        let appended = reloaded_region
+            .get_chunk(chunk_x, chunk_z)
+            .get_block_entity_nbt(&hive_pos)
+            .unwrap();
+        let bees = appended.get_list("bees").unwrap();
+        assert_eq!(
+            &bees.list[..original_bees.list.len()],
+            original_bees.list.as_slice()
+        );
+        assert_eq!(bees.list.len(), original_bees.list.len() + 1);
+        let Tag::Compound(last) = bees.list.last().unwrap() else {
+            panic!("occupant compound")
+        };
+        assert_eq!(last.get_int("ticks_in_hive"), Some(77));
+        assert_eq!(last.get_int("min_ticks_in_hive"), Some(600));
+        let same_block = hive_state
+            .set_value(BlockStateProperties::LEVEL_HONEY, 3)
+            .unwrap();
+        reloaded_region.set_block(&hive_pos, same_block, 2, UPDATE_LIMIT);
+        assert_eq!(
+            reloaded_region
+                .existing_block_entity_nbt(&hive_pos)
+                .unwrap()
+                .get_list("bees")
+                .unwrap()
+                .list
+                .len(),
+            original_bees.list.len() + 1
+        );
+        reloaded_region.set_block(
+            &hive_pos,
+            Blocks::STONE.default_block_state(),
+            2,
+            UPDATE_LIMIT,
+        );
+        assert!(!WorldGenLevel::has_beehive_block_entity(
+            &mut reloaded_region,
+            &hive_pos
+        ));
+        assert!(
+            reloaded_region
+                .get_chunk(chunk_x, chunk_z)
+                .get_block_entity_nbt(&hive_pos)
+                .is_none()
+        );
+    }
 
     #[test]
     fn ordinary_saplings_inherit_vegetation_support_without_including_mangrove() {

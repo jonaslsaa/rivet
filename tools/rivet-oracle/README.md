@@ -19,9 +19,12 @@ world proxy. They require the materialized Paper runtime under `work/run` and
 Java 25 (`RIVET_JAVA_HOME` selects its installation); each script checks the jar's
 commit before running. These are direct feature tests, not full-world parity.
 
-- `bash scripts/run_tree_placement_probe.sh`: 68 standing-tree cases, exact
+- `bash scripts/run_tree_placement_probe.sh`: 143 standing-tree cases, exact
   datapack configs, ordered write/final-block/tick SHA-256s and both random-stream
-  continuations. Terrain is flat dirt, with four seeds at `(0,64,0)`.
+  continuations, plus complete saved hive NBT. Terrain is flat dirt at
+  `(0,64,0)`, with four fixed seeds and seed-searched occupied-hive cases for
+  all 14 ordinary bee-bearing datapack configurations. A separate missing-hive
+  case verifies that occupant RNG is gated on actual entity availability.
 - `bash scripts/run_fallen_tree_probe.sh`: 80 fallen-tree cases, every ordered
   write and feature RNG continuation, across flat/void terrain and two origins.
 - `bash scripts/run_block_pos_set_probe.sh`: 26 Java collection snapshots,
@@ -30,13 +33,19 @@ commit before running. These are direct feature tests, not full-world parity.
   Rust implementation reports this unsupported case rather than inventing it.
 - `bash scripts/run_update_shape_probe.sh`: actual declaring update-shape owners
   for all 1,196 blocks and exact voxel-boundary face traversal samples.
+- `bash scripts/run_hive_storage_probe.sh`: 18 real hive load/store/save cases,
+  including partial malformed occupant lists, numeric coercion, persisted
+  flower/max-occupant fields, and Bukkit persistent data. Rust matches the 16
+  empty-component cases; the two nonempty component cases currently document
+  an explicit untranslated `DataComponentMap` codec boundary.
 
 The matching fixtures live directly under `fixtures/`. Rust tests in
 `tree_placement_fixture`, `fallen_tree_feature`, `java_block_pos_set` and
 `block_shape_update` consume them. The standing and fallen cases together cover
-the 21 currently executable tree configurations in the generated overworld
-closure, plus plain birch. Bee occupants, mangrove roots and pale-oak extensions
-remain separate untranslated capabilities.
+the 34 currently executable tree configurations in the generated overworld
+closure, plus extra actual datapack configurations. Hive storage is distinct
+from bee ticking/release/AI, which remain untranslated. Mangrove roots and
+pale-oak extensions also remain separate untranslated capabilities.
 
 ### Server and chunk captures
 

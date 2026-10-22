@@ -40,6 +40,10 @@ pub struct LeaveVineDecorator {
 pub struct CocoaDecorator {
     pub probability: f32,
 }
+#[derive(Debug, Clone, Copy)]
+pub struct BeehiveDecorator {
+    pub probability: f32,
+}
 #[derive(Debug, Clone)]
 pub struct AlterGroundDecorator {
     pub provider: Arc<dyn ErasedBlockStateProvider>,
@@ -59,6 +63,7 @@ pub enum TreeDecorator {
     TrunkVine(TrunkVineDecorator),
     LeaveVine(LeaveVineDecorator),
     Cocoa(CocoaDecorator),
+    Beehive(BeehiveDecorator),
     AlterGround(AlterGroundDecorator),
     PlaceOnGround(PlaceOnGroundDecorator),
     /// Known registry identity with an untranslated payload/behavior.
@@ -78,6 +83,7 @@ impl TreeDecorator {
             Self::TrunkVine(decorator) => decorator.place(context),
             Self::LeaveVine(decorator) => decorator.place(context),
             Self::Cocoa(decorator) => decorator.place(context),
+            Self::Beehive(decorator) => decorator.place(context),
             Self::AlterGround(decorator) => decorator.place(context),
             Self::PlaceOnGround(decorator) => decorator.place(context),
             Self::Unavailable { type_name } => {
@@ -93,7 +99,14 @@ pub struct TreeDecoratorContext<'a, R: RandomSource> {
     pub logs: Vec<BlockPos>,
     pub leaves: Vec<BlockPos>,
     pub roots: Vec<BlockPos>,
-    height_at: &'a dyn Fn(Types, i32, i32) -> i32,
+    callbacks: TreeDecoratorCallbacks<'a>,
+}
+/// Java shares one mutable world through both reader and mutation callbacks.
+/// These callbacks release the read borrow before invoking world mutations.
+pub struct TreeDecoratorCallbacks<'a> {
+    pub height_at: &'a dyn Fn(Types, i32, i32) -> i32,
+    pub has_beehive_block_entity: &'a dyn Fn(&BlockPos) -> bool,
+    pub store_beehive_occupant: &'a dyn Fn(&BlockPos, i32),
 }
 impl<'a, R: RandomSource> TreeDecoratorContext<'a, R> {
     pub fn new(
@@ -103,7 +116,7 @@ impl<'a, R: RandomSource> TreeDecoratorContext<'a, R> {
         logs: &[BlockPos],
         leaves: &[BlockPos],
         roots: &[BlockPos],
-        height_at: &'a dyn Fn(Types, i32, i32) -> i32,
+        callbacks: TreeDecoratorCallbacks<'a>,
     ) -> Self {
         fn sorted_positions(insertions: &[BlockPos]) -> Vec<BlockPos> {
             let mut set = JavaBlockPosSet::new();
@@ -122,7 +135,7 @@ impl<'a, R: RandomSource> TreeDecoratorContext<'a, R> {
             logs: sorted_positions(logs),
             leaves: sorted_positions(leaves),
             roots: sorted_positions(roots),
-            height_at,
+            callbacks,
         }
     }
     pub fn is_air(&self, pos: &BlockPos) -> bool {
@@ -274,6 +287,66 @@ impl CocoaDecorator {
         }
     }
 }
+
+impl BeehiveDecorator {
+    pub fn place<R: RandomSource>(&self, context: &mut TreeDecoratorContext<'_, R>) {
+        let Some(first_log) = context.logs.first() else {
+            return;
+        };
+        if context.random.next_float() >= self.probability {
+            return;
+        }
+        let hive_y = if let Some(first_leaf) = context.leaves.first() {
+            first_leaf
+                .get_y()
+                .wrapping_sub(1)
+                .max(first_log.get_y().wrapping_add(1))
+        } else {
+            first_log
+                .get_y()
+                .wrapping_add(1)
+                .wrapping_add(context.random.next_int_bound(3))
+                .min(context.logs.last().expect("nonempty logs").get_y())
+        };
+        // Plane.HORIZONTAL order is N,E,S,W, excluding north (opposite the
+        // worldgen south-facing entrance), hence E,S,W for every log.
+        let mut placements: Vec<_> = context
+            .logs
+            .iter()
+            .filter(|pos| pos.get_y() == hive_y)
+            .flat_map(|pos| {
+                [Direction::East, Direction::South, Direction::West].map(|dir| pos.relative(&dir))
+            })
+            .collect();
+        if placements.is_empty() {
+            return;
+        }
+        shuffle(&mut placements, context.random);
+        let Some(pos) = placements
+            .into_iter()
+            .find(|pos| context.is_air(pos) && context.is_air(&pos.relative(&Direction::South)))
+        else {
+            return;
+        };
+        let nest = BlockState::of(
+            rivet_registry::generated::blocks::BlockId::from_name("minecraft:bee_nest")
+                .expect("bee nest registered"),
+        )
+        .set_value(BlockStateProperties::HORIZONTAL_FACING, Direction::South)
+        .expect("bee nest facing");
+        context.set_block(&pos, nest);
+        // Java's typed getBlockEntity(..., BEEHIVE).ifPresent gates BOTH the
+        // count draw and occupant draws. A placed nest alone is not a hive.
+        if (context.callbacks.has_beehive_block_entity)(&pos) {
+            let count = 2 + context.random.next_int_bound(2);
+            for _ in 0..count {
+                let ticks = context.random.next_int_bound(599);
+                (context.callbacks.store_beehive_occupant)(&pos, ticks);
+            }
+        }
+    }
+}
+
 impl AlterGroundDecorator {
     pub fn place<R: RandomSource>(&self, context: &mut TreeDecoratorContext<'_, R>) {
         let positions = context.lowest_trunk_or_root();
@@ -368,8 +441,11 @@ impl PlaceOnGroundDecorator {
             let state = context.level.get_block_state(&above);
             if (state.is_air() || state.block().name() == "minecraft:vine")
                 && context.level.get_block_state(&pos).solid_render()
-                && (context.height_at)(Types::MotionBlockingNoLeaves, pos.get_x(), pos.get_z())
-                    <= above.get_y()
+                && (context.callbacks.height_at)(
+                    Types::MotionBlockingNoLeaves,
+                    pos.get_x(),
+                    pos.get_z(),
+                ) <= above.get_y()
             {
                 let state = block_state_provider_get_state(
                     self.block_state_provider.as_ref(),
@@ -395,6 +471,7 @@ pub fn tree_decorator_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>()
             TreeDecorator::TrunkVine(_) => DataResult::success("minecraft:trunk_vine".to_string()),
             TreeDecorator::LeaveVine(_) => DataResult::success("minecraft:leave_vine".to_string()),
             TreeDecorator::Cocoa(_) => DataResult::success("minecraft:cocoa".to_string()),
+            TreeDecorator::Beehive(_) => DataResult::success("minecraft:beehive".to_string()),
             TreeDecorator::AlterGround(_) => {
                 DataResult::success("minecraft:alter_ground".to_string())
             }
@@ -447,6 +524,21 @@ fn decorator_map_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>(
             Arc::new(|decorator: &TreeDecorator| match decorator {
                 TreeDecorator::Cocoa(d) => d.probability,
                 _ => unreachable!("cocoa codec dispatch"),
+            }),
+        )),
+        "beehive" => DataResult::success(map_codec::xmap(
+            codec::field_of(
+                codec::float_range::<Ops>(0.0, 1.0),
+                "probability".to_string(),
+            ),
+            Arc::new(|probability: &f32| {
+                TreeDecorator::Beehive(BeehiveDecorator {
+                    probability: *probability,
+                })
+            }),
+            Arc::new(|decorator: &TreeDecorator| match decorator {
+                TreeDecorator::Beehive(d) => d.probability,
+                _ => unreachable!("beehive codec dispatch"),
             }),
         )),
         "alter_ground" => DataResult::success(map_codec::xmap(
@@ -546,11 +638,92 @@ fn decorator_map_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>(
                 }),
             ))
         }
-        "pale_moss" | "creaking_heart" | "beehive" | "attached_to_leaves" => {
+        "pale_moss" | "creaking_heart" | "attached_to_leaves" => {
             DataResult::success(map_codec::unit(TreeDecorator::Unavailable {
                 type_name: format!("minecraft:{path}"),
             }))
         }
         _ => DataResult::error(format!("unknown tree decorator type {name}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::level::height_accessor::LevelHeightAccessor;
+    use crate::levelgen::feature::test_support::{RecordingRandom, RngCall};
+    use std::{cell::RefCell, collections::HashMap};
+
+    #[test]
+    fn beehive_absent_typed_entity_does_not_consume_occupant_randomness() {
+        struct HiveLevel {
+            states: RefCell<HashMap<BlockPos, BlockState>>,
+            queries: RefCell<usize>,
+        }
+        impl LevelHeightAccessor for HiveLevel {
+            fn get_height(&self) -> i32 {
+                384
+            }
+            fn get_min_y(&self) -> i32 {
+                -64
+            }
+        }
+        impl WorldGenLevel for HiveLevel {
+            fn get_seed(&self) -> i64 {
+                0
+            }
+            fn get_block_state(&self, pos: &BlockPos) -> BlockState {
+                self.states.borrow().get(pos).copied().unwrap_or_else(|| {
+                    BlockState::of(
+                        rivet_registry::generated::blocks::BlockId::from_name("minecraft:air")
+                            .unwrap(),
+                    )
+                })
+            }
+            fn set_block(&mut self, pos: &BlockPos, state: BlockState, _: u32) -> bool {
+                self.states.borrow_mut().insert(*pos, state);
+                true
+            }
+            fn has_beehive_block_entity(&mut self, pos: &BlockPos) -> bool {
+                assert_eq!(
+                    self.get_block_state(pos).block().name(),
+                    "minecraft:bee_nest",
+                    "typed query follows the actual nest write"
+                );
+                *self.queries.borrow_mut() += 1;
+                false
+            }
+        }
+        let mut level = HiveLevel {
+            states: RefCell::new(HashMap::new()),
+            queries: RefCell::new(0),
+        };
+        let mut random = RecordingRandom::new(42);
+        {
+            let shared = super::super::tree_feature::TreeLevel(RefCell::new(&mut level));
+            let mut setter = |pos: &BlockPos, state| shared.write(pos, state);
+            let height_at = |_, _, _| panic!("beehive decorator does not query heightmaps");
+            let has_hive = |pos: &BlockPos| shared.0.borrow_mut().has_beehive_block_entity(pos);
+            let store = |_: &BlockPos, _: i32| panic!("missing typed entity must not receive bees");
+            let mut context = TreeDecoratorContext::new(
+                &shared,
+                &mut setter,
+                &mut random,
+                &[BlockPos::new(0, 64, 0), BlockPos::new(0, 65, 0)],
+                &[BlockPos::new(0, 66, 0)],
+                &[],
+                TreeDecoratorCallbacks {
+                    height_at: &height_at,
+                    has_beehive_block_entity: &has_hive,
+                    store_beehive_occupant: &store,
+                },
+            );
+            BeehiveDecorator { probability: 1.0 }.place(&mut context);
+        }
+        assert_eq!(*level.queries.borrow(), 1);
+        assert_eq!(
+            random.calls,
+            [RngCall::Float, RngCall::IntBound(3), RngCall::IntBound(2)]
+        );
     }
 }

@@ -388,6 +388,16 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send {
         panic!("BlockGetter.getBlockEntity(SpawnerBlockEntity) is not implemented (RivetTodo #232)")
     }
 
+    /// Typed getBlockEntity(BEEHIVE), checked before occupant RNG draws.
+    fn has_beehive_block_entity(&mut self, _pos: &BlockPos) -> bool {
+        panic!("BlockGetter.getBlockEntity(BeehiveBlockEntity) is not implemented (RivetTodo #232)")
+    }
+
+    /// BeehiveBlockEntity.storeBee(Occupant.create(ticksInHive)).
+    fn store_beehive_occupant(&mut self, _pos: &BlockPos, _ticks_in_hive: i32) {
+        panic!("BeehiveBlockEntity.storeBee is not implemented (RivetTodo #232)")
+    }
+
     /// `BaseSpawner.getOrCreateNextSpawnData`'s weighted-list draw. `Some(total)`
     /// means that this spawner has no current `SpawnData` and a non-empty
     /// `SpawnPotentials`; the feature must consume exactly one
