@@ -19,10 +19,8 @@ bytes = { workspace = true }
 flate2 = { workspace = true }
 lz4_flex = { workspace = true }
 xxhash-rust = { workspace = true }
-# `StructureAccess`'s reference sets are an `IndexSet<u64>` — the Rust stand-in
-# for Java's `LongOpenHashSet`. Dedup and first-insertion order are the
-# IndexSet's, not Java's (which iterates in hash-probe slot order; see the
-# module `RivetTodo(#185)` in structure_access).
+# StructureAccess preserves decoded outer reference-map order with IndexMap;
+# each reference value uses the fastutil-compatible LongOpenHashSet in rivet-util.
 indexmap = { workspace = true }
 # PCRE2 is the closest maintained engine to Java Pattern: it supports the
 # lookarounds/backreferences used by `regex:` allow-list rules and keeps Java's

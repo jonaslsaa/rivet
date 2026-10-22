@@ -33,6 +33,7 @@ pub mod hash_ops;
 pub mod inclusive_range;
 pub mod java_float_format;
 pub mod java_hash;
+pub mod long_open_hash_set;
 pub mod known_pack;
 pub mod linear_congruential_generator;
 pub mod mth;

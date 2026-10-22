@@ -437,7 +437,7 @@ fn install_structure_references(
         .iter()
         .map(|entry| {
             // The `StructureAccess` reference map models the packed longs as their
-            // raw `u64` bit patterns (`IndexSet<u64>`); the parsed NBT carries the
+            // raw `u64` bit patterns (`LongOpenHashSet`); the parsed NBT carries the
             // signed `i64` wire form, so the cast is the install-boundary only.
             let packed: Vec<u64> = entry
                 .references

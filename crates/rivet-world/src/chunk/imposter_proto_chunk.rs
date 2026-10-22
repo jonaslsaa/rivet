@@ -252,7 +252,9 @@ where
 
     /// `getAllReferences()` — the wrapped chunk's references map
     /// (insertion-ordered, #537).
-    pub fn get_all_references(&self) -> &indexmap::IndexMap<S, indexmap::IndexSet<u64>> {
+    pub fn get_all_references(
+        &self,
+    ) -> &indexmap::IndexMap<S, rivet_util::long_open_hash_set::LongOpenHashSet> {
         self.wrapped.get_all_references()
     }
 

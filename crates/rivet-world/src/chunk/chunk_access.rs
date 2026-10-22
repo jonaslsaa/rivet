@@ -54,7 +54,8 @@
 
 use std::collections::HashMap;
 
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
+use rivet_util::long_open_hash_set::LongOpenHashSet;
 
 use crate::biome::biome_resolver::BiomeResolver;
 use crate::biome::climate::Sampler;
@@ -1063,7 +1064,7 @@ where
 
     /// `ChunkAccess.getAllReferences()` — the insertion-ordered runtime
     /// authority for structure references (#537).
-    pub fn get_all_references(&self) -> &IndexMap<S, IndexSet<u64>> {
+    pub fn get_all_references(&self) -> &IndexMap<S, LongOpenHashSet> {
         self.structure_access.get_all_references()
     }
 

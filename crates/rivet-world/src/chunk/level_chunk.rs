@@ -49,11 +49,12 @@ use crate::chunk::upgrade_data::UpgradeData;
 use crate::level::height_accessor::SimpleLevelHeightAccessor;
 use crate::levelgen::heightmap::{FINAL_HEIGHTMAPS, Heightmap, StateFlags, Types};
 use crate::lighting::swmr_nibble_array::SwmrNibbleArray;
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_protocol::friendly_byte_buf::FriendlyByteBuf;
 use rivet_protocol::protocol::game::heightmap_types::HeightmapType;
 use rivet_registry::core::{BlockPos, ChunkPos};
+use rivet_util::long_open_hash_set::LongOpenHashSet;
 use std::collections::HashMap;
 
 /// `net.minecraft.world.level.chunk.LevelChunk` — the loaded chunk value.
@@ -478,7 +479,7 @@ where
     }
 
     /// `ChunkAccess.getAllReferences()`.
-    pub fn get_all_references(&self) -> &IndexMap<S, IndexSet<u64>> {
+    pub fn get_all_references(&self) -> &IndexMap<S, LongOpenHashSet> {
         self.base.get_all_references()
     }
 

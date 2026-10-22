@@ -5,29 +5,23 @@
 //! (structureStarts + structuresRefences maps with a shared empty
 //! `LongOpenHashSet` default). Keys remain caller-supplied structure identities;
 //! values own executable native starts or explicitly deferred persisted tags.
-//! The reference set remains an
-//! `IndexSet<u64>` — the Rust stand-in for `LongOpenHashSet` (O(1) insert,
-//! dedup, first-insertion order).
+//! Reference values use fastutil-compatible long probe tables, preserving
+//! constructor capacity, collision history and descending-slot iteration.
 //!
 //! Java's `getReferencesForStructure` returns the shared immutable
 //! `EMPTY_REFERENCE_SET` for an unknown structure; the port yields no
 //! elements. The `markUnsaved` side effects of the setters are chunk
 //! dirty-tracking performed by the owning `ChunkAccess` wrappers.
 //!
-//! RivetTodo(#185): `LongOpenHashSet` iterates in its hash-probe slot order,
-//! which is deterministic per instance but *not* insertion order, and
-//! `SerializableChunkData` writes `getAllReferences().toLongArray()` into the
-//! NBT `References` tag in that slot order. The port's `IndexSet` yields
-//! first-insertion order, so a byte-for-byte parity check on serialized
-//! references diverges once the owning unit serializes them; #185 must model
-//! fastutil's probe order there.
-//!
-//! Complete registry resolution and fastutil reference ordering remain deferred.
+//! The outer map retains decoded source-key order. This is not Java's
+//! structure-object identity HashMap ordering; multi-structure consumers still
+//! need that distinct ordering authority.
 
 use crate::levelgen::structure::{StructureError, StructureStart};
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use rivet_nbt::{compound_tag::CompoundTag, tag::Tag};
 use rivet_registry::core::ChunkPos;
+use rivet_util::long_open_hash_set::LongOpenHashSet;
 use std::collections::HashMap;
 
 /// Canonical start ownership. Deferred persisted data is not an executable
@@ -87,15 +81,11 @@ pub struct StructureAccess<S> {
     /// Source key slots only, never a second payload owner.
     source_start_order: Vec<String>,
     /// `structuresRefences` — structure id -> chunk references. Java's
-    /// `LongOpenHashSet` is not ported; modeled as an `IndexSet<u64>` that
-    /// keeps the set's semantics — amortized O(1) insert/contains, dedup on
-    /// insert — but with first-insertion order where Java uses fastutil's
-    /// deterministic hash-probe slot order (see the module `RivetTodo(#185)`
-    /// note on the parity divergence once references serialize). The outer map
+    /// Values retain the actual fastutil probe-table iteration order. The outer map
     /// is an `IndexMap` — the runtime authority for structure references
     /// (#537), so the decoded `structures.References` source order is carried
     /// and a packet/derivation pass iterates it deterministically.
-    structure_references: IndexMap<S, IndexSet<u64>>,
+    structure_references: IndexMap<S, LongOpenHashSet>,
 }
 
 impl<S: Eq + std::hash::Hash> StructureAccess<S> {
@@ -131,9 +121,7 @@ impl<S: Eq + std::hash::Hash> StructureAccess<S> {
 
     /// `getReferencesForStructure(Structure)` — iterate the reference set for a
     /// structure, or yield nothing when absent (Java's `EMPTY_REFERENCE_SET`).
-    /// `IndexSet` exposes its entries as a contiguous `Slice` facade
-    /// (`as_slice()`) but not as a literal `&[u64]`, so the port returns an
-    /// iterator, matching Java's `LongSet` callers which only iterate it.
+    /// The iterator follows fastutil zero-first, descending-slot order.
     pub fn get_references_for_structure<'a>(
         &'a self,
         structure: &S,
@@ -147,7 +135,7 @@ impl<S: Eq + std::hash::Hash> StructureAccess<S> {
     /// `addReferenceForStructure(Structure, long)` — `computeIfAbsent(...,
     /// LongOpenHashSet).add(reference)` (the `markUnsaved` side effect is
     /// omitted). The set add is idempotent, so an already-present reference is
-    /// a no-op; the `IndexSet` deduplicates on insert to preserve that.
+    /// a no-op, including no capacity change.
     pub fn add_reference_for_structure(&mut self, structure: S, reference: u64) {
         self.structure_references
             .entry(structure)
@@ -233,14 +221,14 @@ impl<S: Eq + std::hash::Hash> StructureAccess<S> {
     /// view; the port returns a reference). The map is insertion-ordered
     /// (#537): the decoded `structures.References` source order is carried, so
     /// a derivation pass iterates it deterministically.
-    pub fn get_all_references(&self) -> &IndexMap<S, IndexSet<u64>> {
+    pub fn get_all_references(&self) -> &IndexMap<S, LongOpenHashSet> {
         &self.structure_references
     }
 
     /// `setAllReferences(Map)` — clear + putAll (the `markUnsaved` side
     /// effect is omitted). Java's values are already `LongOpenHashSet`s, so a
     /// caller handing over raw `Vec`s here must get the same set semantics:
-    /// duplicates dedupe on insert (first-insertion order preserved). The
+    /// array-constructor capacity is preserved before duplicate removal. The
     /// caller's iteration order is preserved by the insertion-ordered outer
     /// map (#537).
     ///
@@ -250,8 +238,12 @@ impl<S: Eq + std::hash::Hash> StructureAccess<S> {
     pub fn set_all_references<I: IntoIterator<Item = (S, Vec<u64>)>>(&mut self, data: I) {
         self.structure_references.clear();
         for (structure, references) in data {
-            let set = self.structure_references.entry(structure).or_default();
-            set.extend(references);
+            match self.structure_references.entry(structure) {
+                indexmap::map::Entry::Vacant(entry) => {
+                    entry.insert(LongOpenHashSet::from_slice(&references));
+                }
+                indexmap::map::Entry::Occupied(mut entry) => entry.get_mut().extend(references),
+            }
         }
     }
 }
@@ -359,7 +351,7 @@ mod tests {
                 .get_references_for_structure(&"monument")
                 .copied()
                 .collect::<Vec<_>>(),
-            vec![0x1234, 0xABCD]
+            vec![0xABCD, 0x1234]
         );
         assert_eq!(
             access
@@ -382,7 +374,7 @@ mod tests {
                 .get_references_for_structure(&"monument")
                 .copied()
                 .collect::<Vec<_>>(),
-            vec![0x1234, 0xABCD]
+            vec![0xABCD, 0x1234]
         );
     }
 
@@ -398,7 +390,7 @@ mod tests {
                 .get_references_for_structure(&"new")
                 .copied()
                 .collect::<Vec<_>>(),
-            vec![9, 8]
+            vec![8, 9]
         );
     }
 
@@ -416,7 +408,7 @@ mod tests {
                 .get_references_for_structure(&"monument")
                 .copied()
                 .collect::<Vec<_>>(),
-            vec![1, 2, 3]
+            vec![3, 2, 1]
         );
     }
 }

@@ -52,11 +52,12 @@ use crate::levelgen::carver::CarveChunk;
 use crate::levelgen::heightmap::{Heightmap, StateFlags, Types};
 use crate::levelgen::surface_rules::ChunkSurface;
 use crate::lighting::swmr_nibble_array::SwmrNibbleArray;
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::core::{BlockPos, ChunkPos, SectionPos};
 use rivet_registry::holder::Holder;
+use rivet_util::long_open_hash_set::LongOpenHashSet;
 
 /// `net.minecraft.world.level.chunk.ProtoChunk` — the worldgen chunk value.
 pub struct ProtoChunk<T, B, S>
@@ -594,7 +595,7 @@ where
 
     /// `ChunkAccess.getAllReferences()` — the insertion-ordered runtime
     /// authority (#537).
-    pub fn get_all_references(&self) -> &IndexMap<S, IndexSet<u64>> {
+    pub fn get_all_references(&self) -> &IndexMap<S, LongOpenHashSet> {
         self.base.get_all_references()
     }
 
