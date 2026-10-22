@@ -1,0 +1,25 @@
+# Pinned Paper 26.2 commit 0a99345; run_freeze_snow_probe.sh; real vanilla tags loaded.
+# temperature precipitation block_brightness y target support neighbors check_neighbors freezes snows
+0.0	true	0	64	water	stone	air	false	true	false
+0.0	false	0	64	water	stone	air	false	true	false
+0.15	true	0	64	water	stone	air	false	false	false
+0.0	true	9	64	water	stone	air	false	true	false
+0.0	true	10	64	water	stone	air	false	false	false
+0.0	true	0	64	water:1	stone	air	false	false	false
+0.0	true	0	64	seagrass	stone	air	false	false	false
+0.0	true	0	64	water	stone	water	true	false	false
+0.0	true	0	64	water	stone	water:1	true	false	false
+0.0	true	0	64	water	stone	air	true	true	false
+0.0	true	0	64	air	stone	air	false	false	true
+0.0	false	0	64	air	stone	air	false	false	false
+0.0	true	9	64	air	stone	air	false	false	true
+0.0	true	10	64	air	stone	air	false	false	false
+0.0	true	0	64	air	ice	air	false	false	false
+0.0	true	0	64	air	honey_block	air	false	false	true
+0.0	true	0	64	air	oak_leaves	air	false	false	true
+0.0	true	0	64	air	snow:7	air	false	false	false
+0.0	true	0	64	air	snow:8	air	false	false	true
+0.0	true	0	64	snow	stone	air	false	false	true
+0.0	true	0	64	short_grass	stone	air	false	false	false
+0.0	true	0	-65	water	stone	air	false	false	false
+0.0	true	0	320	air	stone	air	false	false	false

@@ -40,15 +40,16 @@
 //!   key decodes through the STUB, which errors honestly (RivetTodo #178) rather
 //!   than silently dropping the attribute data. Vanilla biomes never set
 //!   attributes, so the honest strict boundary only fires on malformed input.
-//! - **`shouldFreeze`/`shouldSnow` defer.** Both read the `LevelReader` block
-//!   surface (`getBlockState`/`getFluidState`/`getBrightness`/`isWaterAt`/
-//!   `isInsideBuildHeight`), which the #232 `mc.world.level` value slice has
-//!   not ported — see the `RivetTodo(#232)` in `level::level_reader`. They land
-//!   with that surface.
+//! - **`shouldFreeze`/`shouldSnow`.** The worldgen read facade supplies actual
+//!   states, BLOCK brightness and snow survival. Id-backed regions reuse the
+//!   climate projection of the generated synchronized registry rather than
+//!   inventing full biome values or a second temperature table.
 
 use crate::biome::biome_generation_settings::BiomeGenerationSettings;
 use crate::biome::biome_special_effects::BiomeSpecialEffects;
 use crate::biome::mob_spawn_settings::MobSpawnSettings;
+use crate::block::blocks::Blocks;
+use crate::level::WorldGenLevel;
 use crate::levelgen::synth::perlin_simplex_noise::PerlinSimplexNoise;
 use rivet_registry::core::BlockPos;
 use rivet_registry::holder::Holder;
@@ -289,28 +290,7 @@ impl Biome {
 
     /// `Biome.getHeightAdjustedTemperature(BlockPos, int seaLevel)`.
     fn get_height_adjusted_temperature(&self, pos: &BlockPos, sea_level: i32) -> f32 {
-        let adjusted_temperature = self
-            .climate_settings
-            .temperature_modifier
-            .modify_temperature(pos, self.get_base_temperature());
-        let snow_level = sea_level + 17;
-        if pos.get_y() > snow_level {
-            // Java: `(float)(TEMPERATURE_NOISE.getValue(pos.getX() / 8.0F,
-            // pos.getZ() / 8.0F, false) * 8.0)` — int / float promotes to
-            // float, then widens to the double parameter.
-            let v = (TEMPERATURE_NOISE.get_value(
-                (pos.get_x() as f32 / 8.0f32) as f64,
-                (pos.get_z() as f32 / 8.0f32) as f64,
-                false,
-            ) * 8.0) as f32;
-            // Java: `adjustedTemperature - (v + pos.getY() - snowLevel) *
-            // 0.05F / 40.0F` — the whole `v + pos.getY() - snowLevel` sum runs
-            // left-to-right in float (each int widened at its operand), so the
-            // i32 difference must NOT be formed first.
-            adjusted_temperature - (v + pos.get_y() as f32 - snow_level as f32) * 0.05f32 / 40.0f32
-        } else {
-            adjusted_temperature
-        }
+        self.climate_settings.get_temperature(pos, sea_level)
     }
 
     /// `Biome.getTemperature(BlockPos, int seaLevel)` (`@Deprecated` in Java).
@@ -326,6 +306,22 @@ impl Biome {
     /// `Biome.warmEnoughToRain(BlockPos, int seaLevel)`.
     pub fn warm_enough_to_rain(&self, pos: &BlockPos, sea_level: i32) -> bool {
         self.get_temperature(pos, sea_level) >= 0.15
+    }
+
+    /// `Biome.shouldFreeze(LevelReader, BlockPos, boolean)`.
+    pub fn should_freeze(
+        &self,
+        level: &dyn WorldGenLevel,
+        pos: &BlockPos,
+        check_neighbors: bool,
+    ) -> bool {
+        self.climate_settings
+            .should_freeze(level, pos, check_neighbors)
+    }
+
+    /// `Biome.shouldSnow(LevelReader, BlockPos)`.
+    pub fn should_snow(&self, level: &dyn WorldGenLevel, pos: &BlockPos) -> bool {
+        self.climate_settings.should_snow(level, pos)
     }
 
     /// `Biome.shouldMeltFrozenOceanIcebergSlightly(BlockPos, int seaLevel)`.
@@ -443,6 +439,73 @@ pub struct ClimateSettings {
 }
 
 impl ClimateSettings {
+    /// `Biome.shouldFreeze` reads source water in a liquid block, not a
+    /// waterlogged block or flowing water. Precipitation is irrelevant here.
+    pub fn should_freeze(
+        &self,
+        level: &dyn WorldGenLevel,
+        pos: &BlockPos,
+        check_neighbors: bool,
+    ) -> bool {
+        if self.get_temperature(pos, level.get_sea_level()) >= 0.15
+            || !level.is_inside_build_height_pos(pos)
+            || level.get_block_brightness(pos) >= 10
+        {
+            return false;
+        }
+        let state = level.get_block_state(pos);
+        if state.fluid_id() != rivet_registry::fluid_id::FluidId::WATER.id()
+            || state.block() != Blocks::WATER.id()
+        {
+            return false;
+        }
+        !check_neighbors
+            || [pos.west(), pos.east(), pos.north(), pos.south()]
+                .iter()
+                .any(|neighbor| {
+                    let fluid = rivet_registry::fluid_id::FluidId::from_id(
+                        level.get_block_state(neighbor).fluid_id(),
+                    );
+                    !rivet_registry::generated::tags::FLUID_TAG_BY_NAME["minecraft:water"]
+                        .contains(&fluid.name())
+                })
+    }
+
+    /// `Biome.shouldSnow`: precipitation, build bounds, BLOCK light, the
+    /// destination state, and SnowLayerBlock's actual survival predicate.
+    pub fn should_snow(&self, level: &dyn WorldGenLevel, pos: &BlockPos) -> bool {
+        if !self.has_precipitation
+            || self.get_temperature(pos, level.get_sea_level()) >= 0.15
+            || !level.is_inside_build_height_pos(pos)
+            || level.get_block_brightness(pos) >= 10
+        {
+            return false;
+        }
+        let state = level.get_block_state(pos);
+        (state.is_air() || state.block() == Blocks::SNOW.id())
+            && level.can_survive(&Blocks::SNOW.default_block_state(), pos)
+    }
+
+    /// The climate-only part of `Biome.getHeightAdjustedTemperature`. Keeping
+    /// this on the climate value lets the id-backed worldgen registry use the
+    /// same behavior without inventing effects or generation settings.
+    pub fn get_temperature(&self, pos: &BlockPos, sea_level: i32) -> f32 {
+        let adjusted_temperature = self
+            .temperature_modifier
+            .modify_temperature(pos, self.temperature);
+        let snow_level = sea_level + 17;
+        if pos.get_y() > snow_level {
+            let v = (TEMPERATURE_NOISE.get_value(
+                (pos.get_x() as f32 / 8.0f32) as f64,
+                (pos.get_z() as f32 / 8.0f32) as f64,
+                false,
+            ) * 8.0) as f32;
+            adjusted_temperature - (v + pos.get_y() as f32 - snow_level as f32) * 0.05f32 / 40.0f32
+        } else {
+            adjusted_temperature
+        }
+    }
+
     /// `ClimateSettings.CODEC` — the ops-generic `MapCodec` (four fields;
     /// `temperature_modifier` defaults to `NONE`).
     pub fn map_codec_of<Ops: DynamicOps + 'static>() -> Arc<dyn MapCodec<ClimateSettings, Ops>> {
@@ -486,6 +549,49 @@ impl ClimateSettings {
                 )
         })
     }
+}
+
+/// Resolve the climate projection of the generated, synchronized biome
+/// registry. The network codec retains every ClimateSettings field, so this
+/// reads the canonical data instead of maintaining a second temperature table
+/// or constructing a Biome with invented effects/generation settings.
+pub fn generated_climate_settings(
+    biome: rivet_registry::biome_id::BiomeId,
+) -> &'static ClimateSettings {
+    static CLIMATES: LazyLock<Vec<ClimateSettings>> = LazyLock::new(|| {
+        use rivet_nbt::nbt_accounter::NbtAccounter;
+        use rivet_nbt::nbt_ops::NbtOps;
+        use rivet_registry::generated::biomes::BIOME_BY_ID;
+        use rivet_registry::generated::registry_data::SYNCHRONIZED_NBT;
+        use rivet_util::DataInputStream;
+        let (_, entries) = SYNCHRONIZED_NBT
+            .iter()
+            .find(|(key, _)| *key == "minecraft:worldgen/biome")
+            .expect("generated synchronized registry contains biomes");
+        assert_eq!(entries.len(), BIOME_BY_ID.len());
+        let codec = map_codec::codec_of(ClimateSettings::map_codec_of::<NbtOps>());
+        entries
+            .iter()
+            .enumerate()
+            .map(|(id, (name, payload))| {
+                assert_eq!(*name, BIOME_BY_ID[id]);
+                let mut input = DataInputStream::new(std::io::Cursor::new(*payload));
+                let tag = rivet_nbt::nbt_io::read_any_tag(
+                    &mut input,
+                    &mut NbtAccounter::unlimited_heap(),
+                )
+                .expect("generated biome payload is valid NBT");
+                codec
+                    .parse(&NbtOps::instance(), &tag)
+                    .result()
+                    .copied()
+                    .expect("generated biome payload contains valid climate settings")
+            })
+            .collect()
+    });
+    CLIMATES
+        .get(biome.id() as usize)
+        .expect("biome id must exist in generated climate registry")
 }
 
 /// `Biome.Precipitation` — the `StringRepresentable` enum.
@@ -939,6 +1045,61 @@ mod tests {
             .mob_spawn_settings(MobSpawnSettings::empty())
             .generation_settings(BiomeGenerationSettings::EMPTY)
             .build()
+    }
+
+    #[test]
+    fn generated_climates_preserve_cold_warm_dry_and_frozen_modifier_data() {
+        use rivet_registry::biome_id::BiomeId;
+        let climate = |name| generated_climate_settings(BiomeId::from_name(name).unwrap());
+        assert_eq!(climate("minecraft:plains").temperature, 0.8);
+        assert_eq!(climate("minecraft:snowy_plains").temperature, 0.0);
+        assert!(!climate("minecraft:desert").has_precipitation);
+        assert_eq!(
+            climate("minecraft:frozen_ocean").temperature_modifier,
+            TemperatureModifier::Frozen
+        );
+        for id in 0..rivet_registry::generated::biomes::BIOME_BY_ID.len() {
+            assert!(
+                generated_climate_settings(BiomeId::from_id(id as u16))
+                    .temperature
+                    .is_finite()
+            );
+        }
+    }
+
+    #[test]
+    fn freezing_does_not_require_precipitation_but_snow_does() {
+        struct DryWater;
+        impl crate::level::LevelHeightAccessor for DryWater {
+            fn get_min_y(&self) -> i32 {
+                -64
+            }
+            fn get_height(&self) -> i32 {
+                384
+            }
+        }
+        impl WorldGenLevel for DryWater {
+            fn get_seed(&self) -> i64 {
+                42
+            }
+            fn get_sea_level(&self) -> i32 {
+                63
+            }
+            fn get_block_brightness(&self, _: &BlockPos) -> i32 {
+                0
+            }
+            fn get_block_state(&self, _: &BlockPos) -> rivet_registry::block_state::BlockState {
+                Blocks::WATER.default_block_state()
+            }
+        }
+        let mut biome = plains();
+        biome.climate_settings.has_precipitation = false;
+        biome.climate_settings.temperature = 0.0;
+        let pos = BlockPos::new(0, 63, 0);
+        assert!(biome.should_freeze(&DryWater, &pos, false));
+        assert!(!biome.should_snow(&DryWater, &pos));
+        biome.climate_settings.temperature = 0.15;
+        assert!(!biome.should_freeze(&DryWater, &pos, false));
     }
 
     #[test]

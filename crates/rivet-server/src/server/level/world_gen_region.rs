@@ -77,6 +77,7 @@ use rivet_registry::Identifier;
 use rivet_registry::access::RegistryAccess;
 use rivet_registry::biome_id::BiomeId;
 use rivet_registry::block_state::BlockState;
+use rivet_registry::block_state_properties::BlockStateProperties;
 use rivet_registry::core::{BlockPos, ChunkPos, QuartPos, SectionPos};
 use rivet_registry::fluid_id::FluidId;
 use rivet_registry::generated::block_behaviors::{
@@ -89,7 +90,9 @@ use rivet_serialization::float_format::java_float_equals;
 use rivet_util::StaticCache2D;
 use rivet_util::mth;
 use rivet_util::util::log_and_pause_if_in_ide;
+use rivet_world::biome::biome::generated_climate_settings;
 use rivet_world::biome::biome_manager::{BiomeManager, NoiseBiomeSource};
+use rivet_world::biome::generated_biome_source::dense_biome_id;
 use rivet_world::block::Block;
 use rivet_world::block::blocks::Blocks;
 use rivet_world::chunk::chunk_access::ChunkAccess;
@@ -1067,6 +1070,17 @@ where
         0
     }
 
+    /// Paper's `WorldGenRegion.getBrightness` deliberately returns zero until
+    /// the target chunk is light-correct. Afterwards its BLOCK listener reads
+    /// the visible Starlight nibbles. Never substitute skylight or emission.
+    pub fn get_block_brightness(&self, pos: &BlockPos) -> i32 {
+        let chunk = self.get_chunk(pos.get_x() >> 4, pos.get_z() >> 4);
+        if !chunk.is_light_correct() {
+            return 0;
+        }
+        chunk.get_block_light_at(pos.get_x(), pos.get_y(), pos.get_z())
+    }
+
     /// Read the completed LIGHT values carried by the cached chunk. Paper's
     /// `WorldGenRegion.getRawBrightness` delegates to the level light engine;
     /// this value layer has no engine object in the region, so the equivalent
@@ -1278,10 +1292,70 @@ impl LevelHeightAccessor for WorldGenRegion<'_, StateId, ServerBiomeId, Structur
 /// `Send`-bound but deliberately NOT `'static` (see the trait doc), so this
 /// impl covers every region lifetime — the server value layer's owning-holder
 /// `'static` region and the executor's borrow-carrying scoped region alike.
+fn region_can_survive(level: &dyn WorldGenLevel, state: &BlockState, pos: &BlockPos) -> bool {
+    if let Some(verdict) = super::aquatic_survival::aquatic_can_survive(level, state, pos) {
+        return verdict;
+    }
+    match state.block().name() {
+        "minecraft:snow" => {
+            let below_pos = pos.below();
+            let below = level.get_block_state(&below_pos);
+            if below.is_in_tag("minecraft:cannot_support_snow_layer") {
+                false
+            } else if below.is_in_tag("minecraft:support_override_snow_layer") {
+                true
+            } else {
+                level.is_collision_face_full(
+                    &below_pos,
+                    &below,
+                    &rivet_registry::core::Direction::Up,
+                ) || (below.block() == Blocks::SNOW.id()
+                    && below.get_value(BlockStateProperties::LAYERS)
+                        == Some(rivet_registry::block_state_property::PropertyValue::Int(8)))
+            }
+        }
+        "minecraft:short_grass"
+        | "minecraft:fern"
+        | "minecraft:firefly_bush"
+        | "minecraft:dark_oak_sapling" => level
+            .get_block_state(&pos.below())
+            .is_in_tag("minecraft:supports_vegetation"),
+        other => {
+            panic!("WorldGenRegion.canSurvive is not implemented for {other} (RivetTodo #232)")
+        }
+    }
+}
+
 impl WorldGenLevel for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
     /// `WorldGenLevel.getSeed()`.
     fn get_seed(&self) -> i64 {
         self.seed
+    }
+
+    fn get_sea_level(&self) -> i32 {
+        self.sea_level
+    }
+
+    fn get_block_brightness(&self, pos: &BlockPos) -> i32 {
+        self.get_block_brightness(pos)
+    }
+
+    fn should_freeze(&self, freeze_pos: &BlockPos, check_neighbors: bool) -> bool {
+        let biome = self.get_biome(&freeze_pos.above());
+        generated_climate_settings(BiomeId::from_id(dense_biome_id(&biome))).should_freeze(
+            self,
+            freeze_pos,
+            check_neighbors,
+        )
+    }
+
+    fn should_snow(&self, pos: &BlockPos) -> bool {
+        let biome = self.get_biome(pos);
+        generated_climate_settings(BiomeId::from_id(dense_biome_id(&biome))).should_snow(self, pos)
+    }
+
+    fn can_survive(&self, state: &BlockState, pos: &BlockPos) -> bool {
+        region_can_survive(self, state, pos)
     }
 
     /// `WorldGenLevel.ensureCanWrite(BlockPos)` — the write-radius gate.
@@ -1652,6 +1726,24 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
         self.seed
     }
 
+    fn get_block_brightness(&self, pos: &BlockPos) -> i32 {
+        self.get_block_brightness(pos)
+    }
+
+    fn should_freeze(&self, freeze_pos: &BlockPos, check_neighbors: bool) -> bool {
+        let biome = self.get_biome(&freeze_pos.above());
+        generated_climate_settings(BiomeId::from_id(dense_biome_id(&biome))).should_freeze(
+            self,
+            freeze_pos,
+            check_neighbors,
+        )
+    }
+
+    fn should_snow(&self, pos: &BlockPos) -> bool {
+        let biome = self.get_biome(pos);
+        generated_climate_settings(BiomeId::from_id(dense_biome_id(&biome))).should_snow(self, pos)
+    }
+
     /// `BlockBehaviour.BlockStateBase.canSurvive` for the vegetation states
     /// reached by the seed-42 FEATURES slice, including the stage-0 dark oak
     /// sapling used by `dark_oak_leaf_litter`. Paper's `VegetationBlock` checks
@@ -1659,17 +1751,7 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
     /// this as a world-backed read (rather than a state-only shortcut) is
     /// important because the feature's random offset can land across chunks.
     fn can_survive(&self, state: &BlockState, pos: &BlockPos) -> bool {
-        match state.block().name() {
-            "minecraft:short_grass"
-            | "minecraft:fern"
-            | "minecraft:firefly_bush"
-            | "minecraft:dark_oak_sapling" => self
-                .get_block_state(&pos.below())
-                .is_in_tag("minecraft:supports_vegetation"),
-            other => {
-                panic!("WorldGenRegion.canSurvive is not implemented for {other} (RivetTodo #232)")
-            }
-        }
+        region_can_survive(self, state, pos)
     }
 
     /// `WorldGenLevel.ensureCanWrite(BlockPos)` — the write-radius gate.
@@ -2410,6 +2492,306 @@ mod tests {
     /// owning-holder region (the [`WorldGenLevel`] shape).
     fn feature_region() -> WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> {
         region_with_access(RegistryAccess::empty())
+    }
+
+    fn snowy_feature_region() -> WorldGenRegion<'static, StateId, ServerBiomeId, StructureKey> {
+        let mut region = feature_region();
+        let snowy = ServerBiomeId(BiomeId::from_name("minecraft:snowy_plains").unwrap().id());
+        // BiomeManager samples quart corners in adjacent chunks. Populate the
+        // actual cached section palettes, not just its uncached source.
+        for x in -1..=1 {
+            for z in -1..=1 {
+                let chunk = region.get_chunk_mut(x, z);
+                for section in 0..chunk.get_sections().len() {
+                    for qx in 0..4 {
+                        for qy in 0..4 {
+                            for qz in 0..4 {
+                                chunk
+                                    .get_section_mut(section)
+                                    .set_noise_biome(qx, qy, qz, snowy);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        region
+    }
+
+    #[test]
+    fn freezing_and_snow_use_paper_pre_light_zero_then_visible_block_nibbles() {
+        use rivet_world::lighting::swmr_nibble_array::SwmrNibbleArray;
+        let mut region = snowy_feature_region();
+        let water = BlockPos::new(8, 0, 8);
+        let snow = BlockPos::new(9, 1, 8);
+        region.set_block(&water, Blocks::WATER.default_block_state(), 2, UPDATE_LIMIT);
+        region.set_block(
+            &snow.below(),
+            Blocks::STONE.default_block_state(),
+            2,
+            UPDATE_LIMIT,
+        );
+        region.set_block(&snow, Blocks::AIR.default_block_state(), 2, UPDATE_LIMIT);
+        assert!(!region.get_chunk(0, 0).is_light_correct());
+        assert!(WorldGenLevel::should_freeze(&region, &water, false));
+        assert!(WorldGenLevel::should_snow(&region, &snow));
+
+        // Paper ignores even published light until isLightCorrect. Once the
+        // engine publishes correctness, 9 permits both and 10 rejects both.
+        for (brightness, allowed) in [(9, true), (10, false)] {
+            let chunk = region.get_chunk_mut(0, 0);
+            let mut nibbles: Vec<_> = chunk.block_nibbles().to_vec();
+            let light_section =
+                (water.get_y() >> 4) - chunk.height_accessor().get_min_section_y() + 1;
+            let nibble = &mut nibbles[light_section as usize];
+            *nibble = SwmrNibbleArray::new();
+            nibble.set(water.get_x(), water.get_y(), water.get_z(), brightness);
+            nibble.set(snow.get_x(), snow.get_y(), snow.get_z(), brightness);
+            nibble.update_visible();
+            chunk.set_block_nibbles(nibbles);
+            chunk.set_light_correct(false);
+            assert_eq!(region.get_block_brightness(&water), 0);
+            assert!(WorldGenLevel::should_freeze(&region, &water, false));
+            assert!(WorldGenLevel::should_snow(&region, &snow));
+            region.get_chunk_mut(0, 0).set_light_correct(true);
+            assert_eq!(region.get_block_brightness(&water), brightness);
+            assert_eq!(
+                WorldGenLevel::should_freeze(&region, &water, false),
+                allowed
+            );
+            assert_eq!(WorldGenLevel::should_snow(&region, &snow), allowed);
+        }
+    }
+
+    #[test]
+    fn freezing_requires_source_liquid_water_and_optional_exposed_edge() {
+        let mut region = snowy_feature_region();
+        let pos = BlockPos::new(8, 0, 8);
+        for neighbor in [pos, pos.west(), pos.east(), pos.north(), pos.south()] {
+            region.set_block(
+                &neighbor,
+                Blocks::WATER.default_block_state(),
+                2,
+                UPDATE_LIMIT,
+            );
+        }
+        assert!(WorldGenLevel::should_freeze(&region, &pos, false));
+        assert!(!WorldGenLevel::should_freeze(&region, &pos, true));
+        region.set_block(
+            &pos.west(),
+            Blocks::AIR.default_block_state(),
+            2,
+            UPDATE_LIMIT,
+        );
+        assert!(WorldGenLevel::should_freeze(&region, &pos, true));
+        let flowing = Blocks::WATER
+            .default_block_state()
+            .set_value(BlockStateProperties::LEVEL, 1)
+            .unwrap();
+        region.set_block(&pos, flowing, 2, UPDATE_LIMIT);
+        assert!(!WorldGenLevel::should_freeze(&region, &pos, false));
+        region.set_block(
+            &pos,
+            Blocks::SEAGRASS.default_block_state(),
+            2,
+            UPDATE_LIMIT,
+        );
+        assert!(!WorldGenLevel::should_freeze(&region, &pos, false));
+    }
+
+    #[test]
+    fn freeze_samples_top_biome_but_evaluates_water_below() {
+        let mut region = snowy_feature_region();
+        let warm = ServerBiomeId(BiomeId::from_name("minecraft:plains").unwrap().id());
+        for x in -1..=1 {
+            for z in -1..=1 {
+                let chunk = region.get_chunk_mut(x, z);
+                for section in 0..chunk.get_sections().len() {
+                    for qx in 0..4 {
+                        for qy in [0, 2] {
+                            for qz in 0..4 {
+                                chunk
+                                    .get_section_mut(section)
+                                    .set_noise_biome(qx, qy, qz, warm);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let sampled_cold = |region: &WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey>,
+                            pos: &BlockPos| {
+            generated_climate_settings(BiomeId::from_id(dense_biome_id(&WorldGenLevel::get_biome(
+                region, pos,
+            ))))
+            .temperature
+                == 0.0
+        };
+        // Find an actual BiomeManager interpolation boundary; sampling fixed
+        // quart ids directly would miss the topPos/belowPos caller contract.
+        for top_is_cold in [true, false] {
+            let pos = (-32..32)
+                .map(|y| BlockPos::new(8, y, 8))
+                .find(|pos| {
+                    sampled_cold(&region, &pos.above()) == top_is_cold
+                        && sampled_cold(&region, pos) != top_is_cold
+                })
+                .expect("alternating quart layers produce both biome boundaries");
+            region.set_block(&pos, Blocks::WATER.default_block_state(), 2, UPDATE_LIMIT);
+            assert_eq!(
+                WorldGenLevel::should_freeze(&region, &pos, false),
+                top_is_cold
+            );
+        }
+    }
+
+    #[test]
+    fn snow_survival_uses_collision_face_tags_and_full_snow_layers() {
+        let mut region = snowy_feature_region();
+        let pos = BlockPos::new(8, 1, 8);
+        for (support, survives) in [
+            (Blocks::STONE.default_block_state(), true),
+            (Blocks::ICE.default_block_state(), false),
+            (Blocks::HONEY_BLOCK.default_block_state(), true),
+            (Blocks::AIR.default_block_state(), false),
+            (Blocks::OAK_LEAVES.default_block_state(), true),
+            (
+                Blocks::SNOW
+                    .default_block_state()
+                    .set_value(BlockStateProperties::LAYERS, 7)
+                    .unwrap(),
+                false,
+            ),
+            (
+                Blocks::SNOW
+                    .default_block_state()
+                    .set_value(BlockStateProperties::LAYERS, 8)
+                    .unwrap(),
+                true,
+            ),
+        ] {
+            region.set_block(&pos.below(), support, 2, UPDATE_LIMIT);
+            region.set_block(&pos, Blocks::AIR.default_block_state(), 2, UPDATE_LIMIT);
+            assert_eq!(
+                WorldGenLevel::should_snow(&region, &pos),
+                survives,
+                "support {support:?}"
+            );
+        }
+        region.set_block(
+            &pos.below(),
+            Blocks::STONE.default_block_state(),
+            2,
+            UPDATE_LIMIT,
+        );
+        region.set_block(&pos, Blocks::SNOW.default_block_state(), 2, UPDATE_LIMIT);
+        assert!(WorldGenLevel::should_snow(&region, &pos));
+        region.set_block(
+            &pos,
+            BlockState::of(BlockId::from_name("minecraft:short_grass").unwrap()),
+            2,
+            UPDATE_LIMIT,
+        );
+        assert!(!WorldGenLevel::should_snow(&region, &pos));
+        assert!(!WorldGenLevel::should_snow(
+            &region,
+            &BlockPos::new(8, region.get_min_y() - 1, 8)
+        ));
+    }
+
+    #[test]
+    fn freeze_and_snow_match_live_paper_fixture() {
+        use rivet_world::biome::biome::{ClimateSettings, TemperatureModifier};
+        struct ProbeLevel {
+            pos: BlockPos,
+            target: BlockState,
+            support: BlockState,
+            neighbors: BlockState,
+            brightness: i32,
+        }
+        impl LevelHeightAccessor for ProbeLevel {
+            fn get_min_y(&self) -> i32 {
+                -64
+            }
+            fn get_height(&self) -> i32 {
+                384
+            }
+        }
+        impl WorldGenLevel for ProbeLevel {
+            fn get_seed(&self) -> i64 {
+                42
+            }
+            fn get_sea_level(&self) -> i32 {
+                63
+            }
+            fn get_block_brightness(&self, _: &BlockPos) -> i32 {
+                self.brightness
+            }
+            fn get_block_state(&self, pos: &BlockPos) -> BlockState {
+                if *pos == self.pos {
+                    self.target
+                } else if *pos == self.pos.below() {
+                    self.support
+                } else {
+                    self.neighbors
+                }
+            }
+            fn can_survive(&self, state: &BlockState, pos: &BlockPos) -> bool {
+                region_can_survive(self, state, pos)
+            }
+        }
+        fn state(text: &str) -> BlockState {
+            let (name, value) = text
+                .split_once(':')
+                .map_or((text, None), |(name, value)| (name, Some(value)));
+            let state = BlockState::of(BlockId::from_name(&format!("minecraft:{name}")).unwrap());
+            value.map_or(state, |value| {
+                state
+                    .set_value(
+                        if name == "snow" {
+                            BlockStateProperties::LAYERS
+                        } else {
+                            BlockStateProperties::LEVEL
+                        },
+                        value.parse::<i32>().unwrap(),
+                    )
+                    .unwrap()
+            })
+        }
+        let fixture = include_str!("../../../../../tools/rivet-oracle/fixtures/freeze-snow.tsv");
+        let mut rows = 0;
+        for row in fixture
+            .lines()
+            .filter(|row| !row.starts_with('#') && !row.is_empty())
+        {
+            let fields: Vec<_> = row.split('\t').collect();
+            assert_eq!(fields.len(), 10);
+            let climate = ClimateSettings {
+                temperature: fields[0].parse().unwrap(),
+                has_precipitation: fields[1].parse().unwrap(),
+                temperature_modifier: TemperatureModifier::None,
+                downfall: 0.5,
+            };
+            let level = ProbeLevel {
+                pos: BlockPos::new(0, fields[3].parse().unwrap(), 0),
+                target: state(fields[4]),
+                support: state(fields[5]),
+                neighbors: state(fields[6]),
+                brightness: fields[2].parse().unwrap(),
+            };
+            assert_eq!(
+                climate.should_freeze(&level, &level.pos, fields[7].parse().unwrap()),
+                fields[8].parse::<bool>().unwrap(),
+                "freeze: {row}"
+            );
+            assert_eq!(
+                climate.should_snow(&level, &level.pos),
+                fields[9].parse::<bool>().unwrap(),
+                "snow: {row}"
+            );
+            rows += 1;
+        }
+        assert_eq!(rows, 23);
     }
 
     /// A feature-step region: `generatingStep = getStepTo(FEATURES)` from the

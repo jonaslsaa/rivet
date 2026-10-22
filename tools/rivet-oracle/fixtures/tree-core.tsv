@@ -1,0 +1,18 @@
+# Pinned Paper 26.2 commit 0a99345; run_tree_core_probe.sh; actual TreeFeature private methods, vanilla tags loaded.
+# clearance name height obstacleX relativeY obstacleZ block ignoreVines expectedHeight; origin=(0,1,0), size=TwoLayers(1,0,1).
+# leaves name maxX distances(x0..8,-=no DISTANCE) filledX; line y1,z0,log x0,leaves x1..8; exceptions encoded by case name.
+clearance	side_clip	8	1	4	0	stone	false	2
+clearance	outside_lower_radius	8	1	0	0	stone	false	8
+clearance	base_blocked	8	0	0	0	stone	false	-2
+clearance	extra_top_layer	8	0	9	0	stone	false	7
+clearance	outside_upper_radius	8	2	4	0	stone	false	8
+clearance	leaves_replaceable	8	0	4	0	oak_leaves	false	8
+clearance	vine_blocks	8	0	4	0	vine	false	2
+clearance	vine_ignored	8	0	4	0	vine	true	8
+clearance	water_replaceable	8	0	4	0	water	false	8
+leaves	normal	8	-,1,2,3,4,5,6,7,7	0,1,2,3,4,5,6
+leaves	priority	8	-,1,1,2,3,4,5,6,7	0,1,2,3,4,5,6,7
+leaves	extra_log	8	-,1,-,1,2,3,4,5,6	0,1,2,3,4,5,6,7,8
+leaves	decoration	8	-,1,-,7,7,7,7,7,7	0,1,2
+leaves	root	8	-,1,-,7,7,7,7,7,7	0,1,2
+leaves	clipped	3	-,1,2,3,7,7,7,7,7	0,1,2,3

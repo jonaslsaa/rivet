@@ -13,6 +13,7 @@
 //! `mc.server.level.pipeline.view`. The full pipeline units land on main later;
 //! this slice is the smallest end-to-end world object #100/#101 build on.
 
+mod aquatic_survival;
 pub mod chunk_level;
 pub mod chunk_map;
 pub mod chunk_result;

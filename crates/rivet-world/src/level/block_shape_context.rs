@@ -7,6 +7,7 @@ use rivet_registry::block_state::BlockState;
 use rivet_registry::block_state_properties::BlockStateProperties;
 use rivet_registry::block_state_property::PropertyValue;
 use rivet_registry::core::{BlockPos, Direction};
+use rivet_registry::generated::block_behaviors::static_collision_shape_of;
 
 /// The three `net.minecraft.world.level.block.SupportType` predicates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +56,35 @@ impl ShapeBox {
             self.max_y + y,
             self.max_z + z,
         )
+    }
+
+    /// Paper's `VoxelShape.calculateFaceDirect` slices at epsilon inside the
+    /// block boundary. Unlike a full-face test, even a narrow post counts;
+    /// geometry outside the other two axes is not clipped by getFaceShape.
+    fn has_face_slice(self, direction: Direction) -> bool {
+        const EPSILON: f64 = 16.0 * 1.0e-7;
+        let (min, max, area) = match direction {
+            Direction::Down | Direction::Up => (
+                self.min_y,
+                self.max_y,
+                self.min_x < self.max_x && self.min_z < self.max_z,
+            ),
+            Direction::North | Direction::South => (
+                self.min_z,
+                self.max_z,
+                self.min_x < self.max_x && self.min_y < self.max_y,
+            ),
+            Direction::West | Direction::East => (
+                self.min_x,
+                self.max_x,
+                self.min_y < self.max_y && self.min_z < self.max_z,
+            ),
+        };
+        let coordinate = match direction {
+            Direction::Up | Direction::South | Direction::East => 16.0 - EPSILON,
+            Direction::Down | Direction::North | Direction::West => EPSILON,
+        };
+        area && min <= coordinate && coordinate < max
     }
 }
 
@@ -223,7 +253,7 @@ fn covers(source: &[FaceRect], targets: &[FaceRect]) -> bool {
     })
 }
 
-/// The five face predicates used by support, multiface attachment, and face
+/// The six face predicates used by support, multiface attachment, and face
 /// occlusion. Masks use `Direction::VALUES` order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShapeQuery {
@@ -231,6 +261,7 @@ pub struct ShapeQuery {
     support_center: u8,
     support_rigid: u8,
     collision_full: u8,
+    collision_nonempty: u8,
     occlusion_full: u8,
 }
 
@@ -240,6 +271,7 @@ impl ShapeQuery {
         support_center: u8,
         support_rigid: u8,
         collision_full: u8,
+        collision_nonempty: u8,
         occlusion_full: u8,
     ) -> Self {
         Self {
@@ -247,6 +279,7 @@ impl ShapeQuery {
             support_center,
             support_rigid,
             collision_full,
+            collision_nonempty,
             occlusion_full,
         }
     }
@@ -260,6 +293,7 @@ impl ShapeQuery {
         let mut support_center = 0;
         let mut support_rigid = 0;
         let mut collision_full = 0;
+        let mut collision_nonempty = 0;
         let mut occlusion_full = 0;
         for (index, direction) in Direction::VALUES.into_iter().enumerate() {
             let bit = 1 << index;
@@ -275,6 +309,13 @@ impl ShapeQuery {
             if collision.face_is_full(direction) {
                 collision_full |= bit;
             }
+            if collision
+                .boxes
+                .iter()
+                .any(|shape| shape.has_face_slice(direction))
+            {
+                collision_nonempty |= bit;
+            }
             if occlusion.face_is_full(direction) {
                 occlusion_full |= bit;
             }
@@ -284,16 +325,38 @@ impl ShapeQuery {
             support_center,
             support_rigid,
             collision_full,
+            collision_nonempty,
             occlusion_full,
         )
     }
 
     pub fn from_static_state(state: BlockState) -> Self {
+        let boxes = static_collision_shape_of(state.id())
+            .expect("static ShapeQuery requires generated non-dynamic collision geometry");
+        let mut collision_nonempty = 0;
+        for direction in Direction::VALUES {
+            if boxes.iter().any(|shape| {
+                // The generated coordinates are signed 1/32-block units;
+                // ShapeBox uses 0..16 units (half a generated coordinate).
+                ShapeBox::new(
+                    f64::from(shape.min_x) / 2.0,
+                    f64::from(shape.min_y) / 2.0,
+                    f64::from(shape.min_z) / 2.0,
+                    f64::from(shape.max_x) / 2.0,
+                    f64::from(shape.max_y) / 2.0,
+                    f64::from(shape.max_z) / 2.0,
+                )
+                .has_face_slice(direction)
+            }) {
+                collision_nonempty |= Self::bit(direction);
+            }
+        }
         Self::from_masks(
             state.face_sturdy_mask(),
             state.center_support_mask(),
             state.rigid_support_mask(),
             state.collision_face_mask(),
+            collision_nonempty,
             state.occlusion_face_mask(),
         )
     }
@@ -313,6 +376,10 @@ impl ShapeQuery {
 
     pub fn is_collision_face_full(self, direction: Direction) -> bool {
         self.collision_full & Self::bit(direction) != 0
+    }
+
+    pub fn is_collision_face_empty(self, direction: Direction) -> bool {
+        self.collision_nonempty & Self::bit(direction) == 0
     }
 
     pub fn is_occlusion_face_full(self, direction: Direction) -> bool {
@@ -562,6 +629,29 @@ pub(crate) fn dynamic_shape_fallback(state: &BlockState) -> Option<ShapeQuery> {
     None
 }
 
+/// Bamboo has a dynamic shape because of its position offset, but does not
+/// consult block entities. Resolve it before requesting a live shape context.
+pub(crate) fn position_shape(state: &BlockState, pos: &BlockPos) -> Option<ShapeQuery> {
+    if state.block().name() != "minecraft:bamboo" {
+        return None;
+    }
+    let seed = rivet_util::mth::get_seed(pos.get_x(), 0, pos.get_z());
+    // BlockBehaviour.OffsetType.XZ: divide in float, then widen for the
+    // subtraction/multiplication. Block's horizontal cap is 0.25 blocks.
+    let offset =
+        |bits: i64| ((f64::from((bits & 15) as f32 / 15.0) - 0.5) * 0.5).clamp(-0.25, 0.25) * 16.0;
+    let shape = ShapeGeometry::from_box(ShapeBox::new(6.5, 0.0, 6.5, 9.5, 16.0, 9.5)).translated(
+        offset(seed),
+        0.0,
+        offset(seed >> 8),
+    );
+    Some(ShapeQuery::from_geometries(
+        &shape,
+        &shape,
+        &ShapeGeometry::empty(),
+    ))
+}
+
 fn shulker_state_facing(state: BlockState) -> Option<Direction> {
     let PropertyValue::Enum(name) = state.get_value(BlockStateProperties::FACING)? else {
         return None;
@@ -670,6 +760,50 @@ mod tests {
         assert!(ring_query.is_supporting(SupportType::Rigid, Direction::Up));
         assert!(!center_query.is_supporting(SupportType::Rigid, Direction::North));
         assert!(full_query.is_supporting(SupportType::Rigid, Direction::North));
+    }
+
+    #[test]
+    fn nonempty_collision_faces_preserve_partial_and_dynamic_geometry() {
+        let post = ShapeGeometry::from_box(ShapeBox::new(7.0, 0.0, 7.0, 9.0, 16.0, 9.0));
+        let query = ShapeQuery::from_geometries(&post, &post, &ShapeGeometry::empty());
+        assert!(!query.is_collision_face_full(Direction::Up));
+        assert!(!query.is_collision_face_empty(Direction::Up));
+        assert!(query.is_collision_face_empty(Direction::North));
+
+        let below_boundary = post.translated(0.0, -0.01, 0.0);
+        let query =
+            ShapeQuery::from_geometries(&below_boundary, &below_boundary, &ShapeGeometry::empty());
+        assert!(query.is_collision_face_empty(Direction::Up));
+        // Paper slices just inside the face (1 - COLLISION_EPSILON),
+        // including a shape whose top is less than epsilon below 1.
+        let almost_touching = post.translated(0.0, -0.0000008, 0.0);
+        let query = ShapeQuery::from_geometries(
+            &almost_touching,
+            &almost_touching,
+            &ShapeGeometry::empty(),
+        );
+        assert!(!query.is_collision_face_empty(Direction::Up));
+    }
+
+    #[test]
+    fn static_nonempty_collision_faces_use_boxes_not_full_face_masks() {
+        use rivet_registry::generated::blocks::BlockId;
+
+        for (name, empty) in [
+            ("minecraft:glass_pane", false),
+            ("minecraft:oak_fence", false),
+            ("minecraft:stone", false),
+            ("minecraft:oak_slab", true),
+            ("minecraft:water", true),
+            ("minecraft:air", true),
+        ] {
+            let state = BlockState::of(BlockId::from_name(name).unwrap());
+            assert_eq!(
+                ShapeQuery::from_static_state(state).is_collision_face_empty(Direction::Up),
+                empty,
+                "{name}",
+            );
+        }
     }
 
     #[test]

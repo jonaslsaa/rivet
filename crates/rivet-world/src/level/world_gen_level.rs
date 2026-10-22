@@ -46,6 +46,13 @@ use rivet_registry::holder::Holder;
 /// `LevelReader`/`BlockGetter`, plus the `LevelWriter` write surface) is ported
 /// by the owning unit.
 pub trait WorldGenLevel: LevelHeightAccessor + Send {
+    /// `StructureTemplate.updateShapeAtEdge` after tree placement. The
+    /// neighbour-shape update machinery must be supplied by a concrete world;
+    /// skipping it would publish a tree with incorrect boundary states.
+    fn update_tree_shape_at_edge(&mut self, _filled: &std::collections::HashSet<BlockPos>) {
+        panic!("StructureTemplate.updateShapeAtEdge is not implemented (RivetTodo #232)")
+    }
+
     /// `WorldGenLevel.getSeed()`.
     fn get_seed(&self) -> i64;
 
@@ -123,6 +130,9 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send {
     ) -> Result<ShapeQuery, ShapeQueryError> {
         if !state.has_dynamic_shape() {
             return Ok(ShapeQuery::from_static_state(*state));
+        }
+        if let Some(shape) = crate::level::block_shape_context::position_shape(state, pos) {
+            return Ok(shape);
         }
 
         let fallback =
@@ -281,6 +291,13 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send {
         panic!("ChunkAccess.markPosForPostProcessing is not implemented (RivetTodo #232)")
     }
 
+    /// `LevelReader.getBrightness(LightLayer.BLOCK, BlockPos)`. This is not
+    /// raw brightness: skylight must never inhibit snow or freezing. The
+    /// region must preserve Paper's explicit zero until `isLightCorrect`.
+    fn get_block_brightness(&self, _pos: &BlockPos) -> i32 {
+        panic!("WorldGenLevel.getBlockBrightness is not implemented (RivetTodo #232)")
+    }
+
     /// `Biome.shouldFreeze(LevelReader, BlockPos, boolean)` — the biome
     /// freeze verdict `SnowAndFreezeFeature` consumes (`level.getBiome(topPos)
     /// .value().shouldFreeze(level, belowPos, false)`).
@@ -293,12 +310,9 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send {
     /// `SnowAndFreezeFeature` topPos/belowPos split. This seam is only faithful
     /// for that single caller, and the offset is part of the contract.
     ///
-    /// STUB(mc.world.level): the biome
-    /// value is not reachable through `WorldGenLevel::get_biome` (it resolves a
-    /// `Holder<BiomeId>`, id only) and `shouldFreeze` reads the `LevelReader`
-    /// brightness/fluid surface (#232), so the verdict is a dedicated seam; the
-    /// default fails explicitly rather than fabricating a freeze. Test doubles
-    /// override it with a fixed verdict.
+    /// Regions resolve the climate projection of the biome id and run the
+    /// shared Biome behavior against real block-light/fluid reads. Worlds
+    /// without that capability fail explicitly here.
     fn should_freeze(&self, _freeze_pos: &BlockPos, _check_neighbors: bool) -> bool {
         panic!("Biome.shouldFreeze is not implemented (RivetTodo #232)")
     }
@@ -311,10 +325,8 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send {
     /// `should_freeze`, the sample and the evaluated cell are the same, so no
     /// offset.
     ///
-    /// STUB(mc.world.level): like
-    /// `should_freeze`, the verdict reads the unported `LevelReader` surface
-    /// (brightness, snow survival); the default fails explicitly rather than
-    /// fabricating a snowfall. Test doubles override it with a fixed verdict.
+    /// Regions run the shared Biome behavior against actual BLOCK brightness
+    /// and snow survival; the default fails explicitly for other worlds.
     fn should_snow(&self, _pos: &BlockPos) -> bool {
         panic!("Biome.shouldSnow is not implemented (RivetTodo #232)")
     }
@@ -616,7 +628,6 @@ mod tests {
         };
         let pos = BlockPos::new(0, 0, 0);
         for block in [
-            "minecraft:bamboo",
             "minecraft:scaffolding",
             "minecraft:powder_snow",
             "minecraft:pointed_dripstone",
