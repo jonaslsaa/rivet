@@ -1,13 +1,14 @@
 //! `net.minecraft.world.level.levelgen.structure` — structure generation.
 //!
-//! Executable starts, ordered pieces, integer bounds and the first concrete
-//! buried-treasure piece coexist with template rule tests. These types do not
+//! Executable buried-treasure pieces, native mineshaft start graphs, ordered
+//! persistence and integer bounds coexist with template rule tests. These types do not
 //! claim complete world structure selection/references or plugin transformer
 //! authority; unsupported subtype decoding and placement capabilities refuse
 //! explicitly until their owning runtime is installed.
 
 pub mod bounding_box;
 pub mod generation;
+pub mod mineshaft;
 pub mod pieces_container;
 pub mod placement;
 pub mod registry_keys;

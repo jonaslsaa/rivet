@@ -1,5 +1,6 @@
-//! Executable structure pieces. Unsupported registered subtypes refuse decoding;
-//! they are never silently skipped into a seemingly valid start.
+//! Native structure pieces. Buried treasure supports placement; mineshafts
+//! support graph generation/persistence and refuse terrain-writing placement.
+//! Other registered subtypes refuse decoding instead of silently disappearing.
 
 use super::{BoundingBox, StructureDefinition, StructureError};
 use crate::{block::blocks::Blocks, level::WorldGenLevel, levelgen::heightmap::Types};
@@ -89,6 +90,7 @@ impl StructurePieceData {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StructurePiece {
     BuriedTreasure(StructurePieceData),
+    Mineshaft(super::mineshaft::MineshaftPiece),
 }
 
 impl StructurePiece {
@@ -104,6 +106,12 @@ impl StructurePiece {
         let id = tag.get_string_or("id", "").to_lowercase();
         match id.strip_prefix("minecraft:").unwrap_or(&id) {
             "btp" => Ok(Self::BuriedTreasure(StructurePieceData::load(tag)?)),
+            "msroom" | "mscorridor" | "mscrossing" | "msstairs" => {
+                Ok(Self::Mineshaft(super::mineshaft::MineshaftPiece::load(
+                    tag,
+                    id.strip_prefix("minecraft:").unwrap_or(&id),
+                )?))
+            }
             _ => Err(StructureError::UnsupportedPiece(id)),
         }
     }
@@ -111,15 +119,29 @@ impl StructurePiece {
     pub fn data(&self) -> &StructurePieceData {
         match self {
             Self::BuriedTreasure(data) => data,
+            Self::Mineshaft(piece) => &piece.data,
         }
     }
     pub fn data_mut(&mut self) -> &mut StructurePieceData {
         match self {
             Self::BuriedTreasure(data) => data,
+            Self::Mineshaft(piece) => &mut piece.data,
         }
     }
     pub fn create_tag(&self) -> CompoundTag {
-        self.data().create_tag("minecraft:btp")
+        match self {
+            Self::BuriedTreasure(data) => data.create_tag("minecraft:btp"),
+            Self::Mineshaft(piece) => piece.create_tag(),
+        }
+    }
+
+    pub(super) fn validate_placement(&self) -> Result<(), StructureError> {
+        match self {
+            Self::BuriedTreasure(_) => Ok(()),
+            Self::Mineshaft(_) => Err(StructureError::PlacementUnavailable(
+                "mineshaft piece postProcess is not implemented".into(),
+            )),
+        }
     }
 
     /// Pinned BuriedTreasurePiece.postProcess. Fills are intentionally NOT
@@ -131,6 +153,9 @@ impl StructurePiece {
         chunk_bb: BoundingBox,
     ) -> Result<(), StructureError> {
         match self {
+            Self::Mineshaft(_) => Err(StructureError::PlacementUnavailable(
+                "mineshaft piece postProcess is not implemented".into(),
+            )),
             Self::BuriedTreasure(data) => {
                 let mut pos = BlockPos::new(
                     data.bounding_box.min_x,

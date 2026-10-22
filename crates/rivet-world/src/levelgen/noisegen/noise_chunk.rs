@@ -29,8 +29,8 @@
 //!   `SinglePointContext` (outside the loop) never downcasts to the chunk, so
 //!   the functions delegate to their noise filler exactly as Java delegates for
 //!   a non-chunk context.
-//! - `Beardifier.forStructuresInChunk` (the structure unit) defers: the
-//!   `beardifier` field is the `BeardifierMarker` value shell (RivetTodo #177).
+//! - Structure terrain is a required constructor input: runtime callers supply
+//!   the resolved real Beardifier; standalone column probes use Java's marker.
 //! - `Aquifer.create`'s `noiseChunk` self-reference is broken with the
 //!   `preliminary_surface_level` closure (see `aquifer.rs`). The closure and
 //!   the public `preliminary_surface_level` share one
@@ -207,7 +207,7 @@ pub struct NoiseChunk {
     block_state_rule: Arc<dyn BlockStateFiller>,
     /// `blender`.
     blender: Blender,
-    /// `beardifier` — the `BeardifierMarker` value shell (structure unit defers).
+    /// The caller's resolved runtime Beardifier or explicit standalone marker.
     beardifier: Arc<dyn DensityFunction>,
     /// The shared interpolation state (Java's `NoiseChunk.this` mutable fields).
     state: Arc<Mutex<InterpolationState>>,
@@ -223,9 +223,8 @@ impl NoiseChunk {
     /// `NoiseChunk.forChunk(chunk, randomState, beardifier, settings,
     /// globalFluidPicker, blender)`.
     ///
-    /// `beardifier` is the erased `BeardifierOrMarker` — the structure unit's
-    /// real `Beardifier` defers (RivetTodo #177); callers pass the
-    /// `BeardifierMarker` value shell.
+    /// `beardifier` is the erased `BeardifierOrMarker`: runtime callers supply
+    /// real structure influence; standalone value probes supply the marker.
     #[allow(clippy::too_many_arguments)]
     pub fn for_chunk(
         chunk: &dyn LevelHeightAccessor,

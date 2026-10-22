@@ -29,11 +29,17 @@ pub enum StructureError {
     PlacementUnavailable(String),
 }
 
-/// The first concrete native structure. Its generation stub creates one real
-/// buried-treasure piece; its afterPlace is the actual inherited no-op.
-/// Other structures must gain a typed variant and real afterPlace before load.
+/// Native structure identity and settings for supported start generators.
+/// Buried treasure is executable; mineshaft graph generation/persistence is
+/// supported but terrain-writing placement refuses explicitly. Both inherit
+/// the actual no-op afterPlace; future bodies require explicit variants.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StructureDefinition {
+    Mineshaft {
+        registry_id: String,
+        terrain_adjustment: TerrainAdjustment,
+        kind: super::structure_body::MineshaftKind,
+    },
     BuriedTreasure {
         registry_id: String,
         terrain_adjustment: TerrainAdjustment,
@@ -52,12 +58,27 @@ pub enum TerrainAdjustment {
 impl StructureDefinition {
     pub fn registry_id(&self) -> &str {
         match self {
-            Self::BuriedTreasure { registry_id, .. } => registry_id,
+            Self::BuriedTreasure { registry_id, .. } | Self::Mineshaft { registry_id, .. } => {
+                registry_id
+            }
+        }
+    }
+    pub fn terrain_adjustment(&self) -> TerrainAdjustment {
+        match self {
+            Self::BuriedTreasure {
+                terrain_adjustment, ..
+            }
+            | Self::Mineshaft {
+                terrain_adjustment, ..
+            } => *terrain_adjustment,
         }
     }
     fn adjust_bounding_box(&self, bounds: BoundingBox) -> BoundingBox {
         match self {
             Self::BuriedTreasure {
+                terrain_adjustment, ..
+            }
+            | Self::Mineshaft {
                 terrain_adjustment, ..
             } => {
                 if *terrain_adjustment == TerrainAdjustment::None {
@@ -218,6 +239,11 @@ impl StructureStart {
             .filter_map(|(i, piece)| piece.data().bounding_box.intersects(chunk_bb).then_some(i))
             .collect();
         if !intersecting.is_empty() {
+            // Unsupported native piece placement must refuse before any
+            // transformer, entity or terrain mutation begins.
+            for &index in &intersecting {
+                self.piece_container.pieces()[index].validate_placement()?;
+            }
             authority.begin_structure(
                 self.structure.as_ref().expect("nonempty structure"),
                 chunk_bb,
@@ -229,7 +255,7 @@ impl StructureStart {
             }
             authority.finish_structure()?;
         }
-        // BuriedTreasureStructure inherits the real no-op Structure.afterPlace,
+        // BuriedTreasureStructure and MineshaftStructure inherit no-op afterPlace,
         // including when no piece intersects. Future variants must dispatch it.
         Ok(())
     }

@@ -16,6 +16,7 @@ pub struct GenerationConsumerId(u64);
 pub enum GenerationOwnerError {
     StructureGenerationUnavailable { status: ChunkStatus },
     Generation(GeneratedChunkError),
+    StructureTerrain(rivet_world::levelgen::noise::beardifier::BeardifierError),
 }
 impl std::fmt::Display for GenerationOwnerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -25,6 +26,7 @@ impl std::fmt::Display for GenerationOwnerError {
                 "actual structure generation is unavailable for {status:?}"
             ),
             Self::Generation(error) => write!(f, "{error}"),
+            Self::StructureTerrain(error) => write!(f, "{error}"),
         }
     }
 }
@@ -135,6 +137,9 @@ impl GeneratedChunkOwner {
     }
     pub fn state(&self, pos: ChunkPos) -> Option<&GenerationChunkState> {
         self.chunks.get(&pos).map(|entry| &entry.state)
+    }
+    pub(super) fn state_mut(&mut self, pos: ChunkPos) -> Option<&mut GenerationChunkState> {
+        self.chunks.get_mut(&pos).map(|entry| &mut entry.state)
     }
     pub fn len(&self) -> usize {
         self.chunks.len()
@@ -250,6 +255,47 @@ impl GeneratedChunkOwner {
                 report.failed += 1;
                 continue;
             }
+            let terrain = if matches!(
+                next,
+                ChunkStatus::Biomes
+                    | ChunkStatus::Noise
+                    | ChunkStatus::Surface
+                    | ChunkStatus::Carvers
+            ) {
+                if let Some(terrain) = self
+                    .state(pos)
+                    .and_then(GenerationChunkState::cached_structure_terrain)
+                {
+                    Some(Arc::clone(terrain))
+                } else {
+                    use super::structure_manager::{
+                        StructureBeardifierSource, StructureManager, UnambiguousStructureOrder,
+                    };
+                    use rivet_world::levelgen::noise::beardifier::Beardifier;
+                    let access = self.generator.registry_access();
+                    let manager = StructureManager::new(self, &UnambiguousStructureOrder);
+                    match Beardifier::for_structures_in_chunk(
+                        &StructureBeardifierSource {
+                            manager: &manager,
+                            access,
+                        },
+                        pos,
+                    ) {
+                        Ok(terrain) => Some(Arc::new(terrain)),
+                        Err(error) => {
+                            self.chunks
+                                .get_mut(&pos)
+                                .expect("selected canonical chunk")
+                                .failure =
+                                Some((next, GenerationOwnerError::StructureTerrain(error)));
+                            report.failed += 1;
+                            continue;
+                        }
+                    }
+                }
+            } else {
+                None
+            };
             let entry = self.chunks.remove(&pos).expect("selected canonical chunk");
             let workspace = FeatureWorkspace::new();
             let mut loans = HashMap::new();
@@ -289,7 +335,11 @@ impl GeneratedChunkOwner {
             // LIGHT attachment is an explicit later job seam, not a fabricated
             // engine. Keep detached storage even if this rung refuses.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                holder.generate_through(next)
+                if let Some(terrain) = terrain {
+                    holder.generate_through_with_structure_terrain(next, terrain)
+                } else {
+                    holder.generate_through(next)
+                }
             }));
             let mut state = holder.into_state();
             self.return_loans(state.take_feature_dependencies(), loans);
@@ -556,6 +606,130 @@ mod tests {
             owner
                 .chunks
                 .get_mut(&ChunkPos::ZERO)
+                .unwrap()
+                .state
+                .take_generated_light_storage()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn first_noise_context_authority_refusal_preserves_canonical_chunk_before_biomes() {
+        use rivet_nbt::compound_tag::CompoundTag;
+        use rivet_registry::Identifier;
+        use rivet_world::{block::blocks::Blocks, chunk::structure_access::StructureStartEntry};
+        let generator = generator();
+        let mut owner = GeneratedChunkOwner::new(Arc::clone(&generator));
+        let center = ChunkPos::ZERO;
+        // Explicit test setup supplies already-completed dependency statuses;
+        // this is not a production admission or structure-generation path.
+        for (pos, status) in dependencies(center, ChunkStatus::Biomes, false) {
+            let mut state = generator.create_holder(pos).into_state();
+            state.chunk_mut().set_persisted_status(status);
+            owner.chunks.insert(
+                pos,
+                Entry {
+                    state,
+                    failure: None,
+                },
+            );
+        }
+        let mut state = generator.create_holder(center).into_state();
+        state
+            .chunk_mut()
+            .set_persisted_status(ChunkStatus::StructureReferences);
+        state
+            .chunk_mut()
+            .set_block_state(3, 200, 4, Blocks::STONE.default_block_state());
+        let key = Identifier::parse("minecraft:village_plains");
+        let mut tag = CompoundTag::new();
+        tag.put_string("id", "minecraft:village_plains");
+        state.chunk_mut().set_start_for_structure(
+            key.clone(),
+            StructureStartEntry::deferred(rivet_nbt::tag::Tag::Compound(tag.clone())),
+        );
+        state
+            .chunk_mut()
+            .add_reference_for_structure(key.clone(), center.pack() as u64);
+        state.restore_generated_light_storage(HashMap::new());
+        owner.chunks.insert(
+            center,
+            Entry {
+                state,
+                failure: None,
+            },
+        );
+        owner.required.insert(center, ChunkStatus::Biomes);
+        let snapshot = |state: &GenerationChunkState| {
+            let sections = state
+                .chunk()
+                .get_sections()
+                .iter()
+                .map(|section| {
+                    let mut blocks = Vec::with_capacity(4096);
+                    for x in 0..16 {
+                        for y in 0..16 {
+                            for z in 0..16 {
+                                blocks.push(section.get_block_state(x, y, z));
+                            }
+                        }
+                    }
+                    let mut biomes = Vec::with_capacity(64);
+                    for x in 0..4 {
+                        for y in 0..4 {
+                            for z in 0..4 {
+                                biomes.push(section.get_noise_biome(x, y, z));
+                            }
+                        }
+                    }
+                    (blocks, biomes)
+                })
+                .collect::<Vec<_>>();
+            let heightmaps = state
+                .chunk()
+                .heightmaps()
+                .iter()
+                .map(|heightmap| heightmap.as_ref().map(|map| map.get_raw_data().to_vec()))
+                .collect::<Vec<_>>();
+            (sections, heightmaps)
+        };
+        let before = snapshot(owner.state(center).unwrap());
+        let report = owner.run_jobs(1);
+        assert_eq!(
+            report,
+            GenerationJobReport {
+                attempted: 1,
+                advanced: 0,
+                failed: 1
+            }
+        );
+        let retained = owner.state(center).unwrap();
+        assert_eq!(retained.status(), ChunkStatus::StructureReferences);
+        assert!(retained.cached_structure_terrain().is_none());
+        assert_eq!(
+            retained.chunk().get_block_state(3, 200, 4),
+            Blocks::STONE.default_block_state()
+        );
+        assert_eq!(snapshot(retained), before);
+        assert_eq!(
+            retained
+                .chunk()
+                .get_start_for_structure(&key)
+                .unwrap()
+                .create_tag(center),
+            rivet_nbt::tag::Tag::Compound(tag)
+        );
+        assert!(matches!(
+            &owner.chunks[&center].failure,
+            Some((
+                ChunkStatus::Biomes,
+                GenerationOwnerError::StructureTerrain(_)
+            ))
+        ));
+        assert!(
+            owner
+                .chunks
+                .get_mut(&center)
                 .unwrap()
                 .state
                 .take_generated_light_storage()

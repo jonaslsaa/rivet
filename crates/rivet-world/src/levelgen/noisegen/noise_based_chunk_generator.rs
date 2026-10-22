@@ -35,6 +35,10 @@
 //! - `getInterpolatedNoiseValue`/`iterateNoiseColumn` are ported faithfully
 //!   (the `BeardifierMarker.INSTANCE` beardifier, `Blender.empty()`); their
 //!   `NoiseChunk` construction matches the wave's `NoiseChunk::new` seam.
+//! - Runtime NOISE/SURFACE/CARVERS callers use the explicit
+//!   `*_with_structure_terrain` methods with an authoritative Beardifier.
+//!   The legacy standalone methods deliberately use the marker and are not
+//!   evidence of complete structure-aware world generation.
 //! - `settings.value()` needs the `NOISE_SETTINGS` `HolderLookup` (RivetTodo
 //!   #126); every noisegen construction resolves the settings holder through
 //!   `RandomState.create_from_provider`, so the generator's holder is a
@@ -65,6 +69,7 @@ use crate::levelgen::blending::blender::Blender;
 use crate::levelgen::carver::carving_context::CarvingContext;
 use crate::levelgen::carver::overworld_carvers::overworld_carver_settings;
 use crate::levelgen::heightmap::{Heightmap, StateFlags, Types};
+use crate::levelgen::noise::beardifier::Beardifier;
 use crate::levelgen::noise::beardifier_marker::BeardifierMarker;
 use crate::levelgen::noise::density_function::{
     DensityFunction, FunctionContext, SinglePointContext,
@@ -479,6 +484,8 @@ impl NoiseBasedChunkGenerator {
     /// The mask is the `ProtoChunk`'s carving mask — Java's
     /// `getOrCreateCarvingMask` (lazily created, written back through the
     /// driver's take/set split).
+    /// This standalone wrapper uses the marker; runtime world callers use
+    /// [`Self::apply_carvers_with_structure_terrain`] instead.
     #[allow(clippy::too_many_arguments)]
     pub fn apply_carvers<B, S>(
         &self,
@@ -488,6 +495,58 @@ impl NoiseBasedChunkGenerator {
         biome_manager: &BiomeManager,
         biome_source: Arc<dyn NoiseBiomeSource>,
         chunk: &mut ProtoChunk<BlockState, B, S>,
+    ) where
+        B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+        S: Eq + std::hash::Hash + Send + Sync,
+    {
+        self.apply_carvers_with_density(
+            generator,
+            seed,
+            random_state,
+            biome_manager,
+            biome_source,
+            chunk,
+            Arc::new(BeardifierMarker::instance()),
+        );
+    }
+
+    /// Runtime carving requires the same authoritative terrain influence as
+    /// NOISE/SURFACE; callers resolve references before invoking this method.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_carvers_with_structure_terrain<B, S>(
+        &self,
+        generator: &dyn ChunkGenerator,
+        seed: i64,
+        random_state: &RandomState,
+        biome_manager: &BiomeManager,
+        biome_source: Arc<dyn NoiseBiomeSource>,
+        chunk: &mut ProtoChunk<BlockState, B, S>,
+        beardifier: Arc<Beardifier>,
+    ) where
+        B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+        S: Eq + std::hash::Hash + Send + Sync,
+    {
+        self.apply_carvers_with_density(
+            generator,
+            seed,
+            random_state,
+            biome_manager,
+            biome_source,
+            chunk,
+            beardifier,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_carvers_with_density<B, S>(
+        &self,
+        generator: &dyn ChunkGenerator,
+        seed: i64,
+        random_state: &RandomState,
+        biome_manager: &BiomeManager,
+        biome_source: Arc<dyn NoiseBiomeSource>,
+        chunk: &mut ProtoChunk<BlockState, B, S>,
+        beardifier: Arc<dyn DensityFunction>,
     ) where
         B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         S: Eq + std::hash::Hash + Send + Sync,
@@ -513,7 +572,8 @@ impl NoiseBasedChunkGenerator {
         // `chunk.getOrCreateNoiseChunk(...)` — the single-shot cache is not
         // ported; the `NoiseChunk` is constructed exactly once over an empty
         // blender (RivetTodo #185).
-        let noise_chunk = Arc::new(self.create_noise_chunk(chunk, random_state, Blender::empty()));
+        let noise_chunk =
+            Arc::new(self.create_noise_chunk(chunk, random_state, Blender::empty(), beardifier));
         let aquifer = noise_chunk.aquifer();
 
         // `new CarvingContext(this, registryAccess, chunk.
@@ -596,15 +656,48 @@ impl NoiseBasedChunkGenerator {
     /// `try`/`finally`). `acquire`/`release` are NO-OPs here (Paper disables
     /// the `ThreadingDetector`); the loops keep the lifecycle call structure
     /// faithful. The `getOrCreateNoiseChunk` lazy cache is not ported —
-    /// `fillFromNoise` is the only caller in this slice and constructs the
-    /// `NoiseChunk` exactly once via [`Self::create_noise_chunk`] (RivetTodo
-    /// #185: a later stage composing biomes/surface over the same chunk adds
-    /// the cache).
+    /// this method constructs a NoiseChunk for this invocation rather than
+    /// retaining Java's cross-stage cache. This standalone wrapper deliberately
+    /// uses the marker; authoritative world generation uses
+    /// [`Self::fill_from_noise_with_structure_terrain`].
     pub fn fill_from_noise<B, S>(
         &self,
         blender: Blender,
         random_state: &RandomState,
         center_chunk: &mut ProtoChunk<BlockState, B, S>,
+    ) where
+        B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+        S: Eq + std::hash::Hash,
+    {
+        self.fill_from_noise_with_density(
+            blender,
+            random_state,
+            center_chunk,
+            Arc::new(BeardifierMarker::instance()),
+        );
+    }
+
+    /// Real structure-aware NOISE body. The required influence is resolved
+    /// before any chunk mutation; absent structure authority has no default.
+    pub fn fill_from_noise_with_structure_terrain<B, S>(
+        &self,
+        blender: Blender,
+        random_state: &RandomState,
+        center_chunk: &mut ProtoChunk<BlockState, B, S>,
+        beardifier: Arc<Beardifier>,
+    ) where
+        B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+        S: Eq + std::hash::Hash,
+    {
+        self.fill_from_noise_with_density(blender, random_state, center_chunk, beardifier);
+    }
+
+    fn fill_from_noise_with_density<B, S>(
+        &self,
+        blender: Blender,
+        random_state: &RandomState,
+        center_chunk: &mut ProtoChunk<BlockState, B, S>,
+        beardifier: Arc<dyn DensityFunction>,
     ) where
         B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         S: Eq + std::hash::Hash,
@@ -640,6 +733,7 @@ impl NoiseBasedChunkGenerator {
             center_chunk,
             cell_min_y,
             cell_count_y,
+            beardifier,
         );
         for section_index in (bottom_section_index..=top_section_index).rev() {
             center_chunk.get_section(section_index as usize).release();
@@ -650,14 +744,14 @@ impl NoiseBasedChunkGenerator {
     /// `NoiseChunk.forChunk(chunk, randomState, beardifier, settings.value(),
     /// globalFluidPicker.get(), blender)`.
     ///
-    /// `Beardifier.forStructuresInChunk(structureManager, chunk.getPos())` is
-    /// the `BeardifierMarker` value shell (the structure unit defers, RivetTodo
-    /// #177) — the same seam the single-column probes use.
+    /// The caller supplies the resolved Beardifier. Only explicitly standalone
+    /// value-layer wrappers pass the genuine zero marker.
     fn create_noise_chunk<B, S>(
         &self,
         center_chunk: &ProtoChunk<BlockState, B, S>,
         random_state: &RandomState,
         blender: Blender,
+        beardifier: Arc<dyn DensityFunction>,
     ) -> NoiseChunk
     where
         B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
@@ -668,7 +762,7 @@ impl NoiseBasedChunkGenerator {
             &center_chunk.height_accessor(),
             &pos,
             random_state,
-            Arc::new(BeardifierMarker::instance()) as Arc<dyn DensityFunction>,
+            beardifier,
             settings_value(&self.settings),
             Box::new(self.global_fluid_picker),
             blender,
@@ -695,6 +789,7 @@ impl NoiseBasedChunkGenerator {
     /// The `lastSectionIndex`/`section` reference cache is Java's
     /// micro-optimization; the port re-indexes `center_chunk` per block (the
     /// section is identical), so the swap is not carried.
+    #[allow(clippy::too_many_arguments)]
     fn do_fill<B, S>(
         &self,
         blender: Blender,
@@ -702,11 +797,12 @@ impl NoiseBasedChunkGenerator {
         center_chunk: &mut ProtoChunk<BlockState, B, S>,
         cell_min_y: i32,
         cell_count_y: i32,
+        beardifier: Arc<dyn DensityFunction>,
     ) where
         B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         S: Eq + std::hash::Hash,
     {
-        let noise_chunk = self.create_noise_chunk(center_chunk, random_state, blender);
+        let noise_chunk = self.create_noise_chunk(center_chunk, random_state, blender, beardifier);
         // `getOrCreateHeightmapUnprimed(OCEAN_FLOOR_WG)` then
         // `getOrCreateHeightmapUnprimed(WORLD_SURFACE_WG)` — the doFill prologue
         // creates the two `Usage.WORLDGEN` heightmaps before the loop;
@@ -816,6 +912,8 @@ impl NoiseBasedChunkGenerator {
     /// is not threaded — the single-holder path has no `WorldGenRegion` to
     /// collect from, so `None` is the honest seam (the surface rules that take
     /// the possible-biomes short-circuit keep their whole-set behavior).
+    /// This standalone wrapper uses the marker; authoritative runtime callers
+    /// use [`Self::build_surface_with_structure_terrain`].
     pub fn build_surface<B, S>(
         &self,
         random_state: &RandomState,
@@ -827,7 +925,56 @@ impl NoiseBasedChunkGenerator {
         B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         S: Eq + std::hash::Hash,
     {
-        let noise_chunk = Arc::new(self.create_noise_chunk(chunk, random_state, Blender::empty()));
+        self.build_surface_with_density(
+            random_state,
+            biome_manager,
+            generation_context,
+            chunk,
+            possible_biomes,
+            Arc::new(BeardifierMarker::instance()),
+        );
+    }
+
+    /// Real structure-aware SURFACE path. Reuses the resolved terrain input;
+    /// missing/deferred world authority must be handled before this call.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_surface_with_structure_terrain<B, S>(
+        &self,
+        random_state: &RandomState,
+        biome_manager: Arc<BiomeManager>,
+        generation_context: Arc<WorldGenerationContext>,
+        chunk: &mut ProtoChunk<BlockState, B, S>,
+        possible_biomes: Option<&[Holder<BiomeId>]>,
+        beardifier: Arc<Beardifier>,
+    ) where
+        B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+        S: Eq + std::hash::Hash,
+    {
+        self.build_surface_with_density(
+            random_state,
+            biome_manager,
+            generation_context,
+            chunk,
+            possible_biomes,
+            beardifier,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_surface_with_density<B, S>(
+        &self,
+        random_state: &RandomState,
+        biome_manager: Arc<BiomeManager>,
+        generation_context: Arc<WorldGenerationContext>,
+        chunk: &mut ProtoChunk<BlockState, B, S>,
+        possible_biomes: Option<&[Holder<BiomeId>]>,
+        beardifier: Arc<dyn DensityFunction>,
+    ) where
+        B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+        S: Eq + std::hash::Hash,
+    {
+        let noise_chunk =
+            Arc::new(self.create_noise_chunk(chunk, random_state, Blender::empty(), beardifier));
         let settings = settings_value(&self.settings);
         random_state.surface_system().build_surface(
             random_state,
@@ -1246,6 +1393,7 @@ fn settings_value(settings: &Holder<NoiseGeneratorSettings>) -> &NoiseGeneratorS
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("beardifier_noise_test.rs");
 
     use crate::chunk::level_chunk_section::LevelChunkSection;
     use crate::chunk::storage::chunk_reconstruction::resolve_state_flags;
