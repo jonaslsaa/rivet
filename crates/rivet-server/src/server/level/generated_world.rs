@@ -186,6 +186,7 @@ use rivet_world::levelgen::feature::configurations::spike_configuration::spike_c
 use rivet_world::levelgen::feature::configurations::spring_configuration::spring_configuration_codec;
 use rivet_world::levelgen::feature::configurations::tree_configuration::tree_configuration_codec;
 use rivet_world::levelgen::feature::configurations::underwater_magma_configuration::underwater_magma_configuration_codec;
+use rivet_world::levelgen::feature::configurations::vegetation_patch_configuration::vegetation_patch_configuration_codec;
 use rivet_world::levelgen::feature::configurations::weighted_random_feature_configuration::WeightedRandomFeatureConfiguration;
 use rivet_world::levelgen::feature::configurations::{
     CompositeFeatureConfiguration, FeatureConfiguration, RandomBooleanFeatureConfiguration,
@@ -1810,7 +1811,7 @@ impl FeatureConfiguration for DeferredGeneratedFeatureConfiguration {
 /// features are mutually recursive; they are adopted only after the temporary
 /// access is fully dropped, so a decode failure cannot publish a partially
 /// populated access into the world.
-fn build_feature_access(worldgen: &RegistryAccess) -> RegistryAccess {
+pub(super) fn build_feature_access(worldgen: &RegistryAccess) -> RegistryAccess {
     let (placed, configured) = build_generated_feature_closure(worldgen)
         .unwrap_or_else(|error| panic!("generated feature closure refused atomically: {error}"));
     let feature_layer = RegistryAccess::from_pairs(vec![
@@ -2633,6 +2634,14 @@ fn decode_configured_feature_value(
         .get("config")
         .ok_or_else(|| format!("{configured_key} JSON has no config"))?;
     let config: Arc<dyn FeatureConfiguration> = match feature_type {
+        "minecraft:vegetation_patch" | "minecraft:waterlogged_vegetation_patch" => {
+            Arc::new(decode_value(
+                vegetation_patch_configuration_codec::<FeatureOps>(),
+                ops,
+                config_value,
+                &format!("decode {configured_key} config"),
+            )?)
+        }
         "minecraft:fallen_tree" => Arc::new(decode_value(
             fallen_tree_configuration_codec::<FeatureOps>(),
             ops,

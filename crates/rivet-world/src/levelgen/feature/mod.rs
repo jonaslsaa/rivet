@@ -90,6 +90,7 @@ pub mod kelp_feature;
 pub mod nether_forest_vegetation_feature;
 pub mod sea_pickle_feature;
 pub mod seagrass_feature;
+pub mod vegetation_patch_feature;
 
 // The surface-fill feature wave (this unit) — the `AbstractHugeMushroomFeature`
 // abstract base and the ten concrete feature structs that live in this module
@@ -174,9 +175,9 @@ pub mod foliageplacers;
 // The `net.minecraft.world.level.levelgen.feature.trunkplacers` framework
 // (this unit) — the `TrunkPlacer` hierarchy, its `TrunkPlacerType` ids, and
 // the nine concrete placers (see the submodule doc).
+pub mod rootplacers;
 pub mod treedecorators;
 pub mod trunkplacers;
-pub mod rootplacers;
 
 // Executable tree/fallen-tree algorithms; root/decorator families and the
 // final neighbor-shape update remain explicit capability boundaries.
@@ -231,6 +232,7 @@ use crate::levelgen::feature::configurations::SpikeConfiguration;
 use crate::levelgen::feature::configurations::SpringConfiguration;
 use crate::levelgen::feature::configurations::TreeConfiguration;
 use crate::levelgen::feature::configurations::UnderwaterMagmaConfiguration;
+use crate::levelgen::feature::configurations::VegetationPatchConfiguration;
 use crate::levelgen::feature::configurations::WeightedRandomFeatureConfiguration;
 use crate::levelgen::feature::no_op_feature::NO_OP;
 use rivet_registry::Holder;
@@ -283,6 +285,10 @@ pub use spike_feature::{SPIKE, SpikeFeature};
 pub use spring_feature::{SPRING, SpringFeature};
 pub use tree_feature::{TREE, TreeFeature};
 pub use underwater_magma_feature::{UNDERWATER_MAGMA, UnderwaterMagmaFeature};
+pub use vegetation_patch_feature::{
+    VEGETATION_PATCH, VegetationPatchFeature, WATERLOGGED_VEGETATION_PATCH,
+    WaterloggedVegetationPatchFeature,
+};
 pub use vines_feature::{VINES, VinesFeature};
 
 // The vegetation-family wave (issue #600) — the `.feature.selector` unit's
@@ -665,6 +671,22 @@ pub fn feature_place<R: RandomSource>(
         panic!("generated feature {name} is not implemented");
     }
     match feature.id {
+        17 | 18 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<VegetationPatchConfiguration>()
+                .expect("vegetation patch feature must carry a VegetationPatchConfiguration");
+            if feature.id == 17 {
+                VEGETATION_PATCH.place_with_config(config, level, chunk_generator, random, origin)
+            } else {
+                WATERLOGGED_VEGETATION_PATCH.place_with_config(
+                    config,
+                    level,
+                    chunk_generator,
+                    random,
+                    origin,
+                )
+            }
+        }
         2 => {
             let config = (config as &dyn Any)
                 .downcast_ref::<FallenTreeConfiguration>()

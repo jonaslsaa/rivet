@@ -24,6 +24,10 @@ use rivet_util::RandomSource;
 use std::sync::Arc;
 mod attached_to_leaves;
 pub use attached_to_leaves::AttachedToLeavesDecorator;
+mod pale_moss;
+pub use pale_moss::PaleMossDecorator;
+mod creaking_heart;
+pub use creaking_heart::CreakingHeartDecorator;
 
 #[derive(Debug, Clone)]
 pub struct AttachedToLogsDecorator {
@@ -67,6 +71,8 @@ pub enum TreeDecorator {
     LeaveVine(LeaveVineDecorator),
     Cocoa(CocoaDecorator),
     Beehive(BeehiveDecorator),
+    PaleMoss(PaleMossDecorator),
+    CreakingHeart(CreakingHeartDecorator),
     AlterGround(AlterGroundDecorator),
     PlaceOnGround(PlaceOnGroundDecorator),
     /// Known registry identity with an untranslated payload/behavior.
@@ -88,6 +94,8 @@ impl TreeDecorator {
             Self::LeaveVine(decorator) => decorator.place(context),
             Self::Cocoa(decorator) => decorator.place(context),
             Self::Beehive(decorator) => decorator.place(context),
+            Self::PaleMoss(decorator) => decorator.place(context),
+            Self::CreakingHeart(decorator) => decorator.place(context),
             Self::AlterGround(decorator) => decorator.place(context),
             Self::PlaceOnGround(decorator) => decorator.place(context),
             Self::Unavailable { type_name } => {
@@ -103,14 +111,15 @@ pub struct TreeDecoratorContext<'a, R: RandomSource> {
     pub logs: Vec<BlockPos>,
     pub leaves: Vec<BlockPos>,
     pub roots: Vec<BlockPos>,
-    callbacks: TreeDecoratorCallbacks<'a>,
+    callbacks: TreeDecoratorCallbacks<'a, R>,
 }
 /// Java shares one mutable world through both reader and mutation callbacks.
 /// These callbacks release the read borrow before invoking world mutations.
-pub struct TreeDecoratorCallbacks<'a> {
+pub struct TreeDecoratorCallbacks<'a, R: RandomSource> {
     pub height_at: &'a dyn Fn(Types, i32, i32) -> i32,
     pub has_beehive_block_entity: &'a dyn Fn(&BlockPos) -> bool,
     pub store_beehive_occupant: &'a dyn Fn(&BlockPos, i32),
+    pub place_configured_feature: &'a dyn Fn(&str, &BlockPos, &mut R) -> bool,
 }
 impl<'a, R: RandomSource> TreeDecoratorContext<'a, R> {
     pub fn new(
@@ -120,7 +129,7 @@ impl<'a, R: RandomSource> TreeDecoratorContext<'a, R> {
         logs: &[BlockPos],
         leaves: &[BlockPos],
         roots: &[BlockPos],
-        callbacks: TreeDecoratorCallbacks<'a>,
+        callbacks: TreeDecoratorCallbacks<'a, R>,
     ) -> Self {
         fn sorted_positions(insertions: &[BlockPos]) -> Vec<BlockPos> {
             let mut set = JavaBlockPosSet::new();
@@ -147,6 +156,9 @@ impl<'a, R: RandomSource> TreeDecoratorContext<'a, R> {
     }
     pub fn set_block(&mut self, pos: &BlockPos, state: BlockState) {
         (self.setter)(pos, state);
+    }
+    fn place_configured_feature(&mut self, name: &str, pos: &BlockPos) -> bool {
+        (self.callbacks.place_configured_feature)(name, pos, self.random)
     }
     /// TreeFeature.getLowestTrunkOrRootOfTree: roots take precedence unless
     /// their first Y equals the lowest log's Y, when logs come first.
@@ -479,6 +491,10 @@ pub fn tree_decorator_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>()
             TreeDecorator::LeaveVine(_) => DataResult::success("minecraft:leave_vine".to_string()),
             TreeDecorator::Cocoa(_) => DataResult::success("minecraft:cocoa".to_string()),
             TreeDecorator::Beehive(_) => DataResult::success("minecraft:beehive".to_string()),
+            TreeDecorator::PaleMoss(_) => DataResult::success("minecraft:pale_moss".to_string()),
+            TreeDecorator::CreakingHeart(_) => {
+                DataResult::success("minecraft:creaking_heart".to_string())
+            }
             TreeDecorator::AlterGround(_) => {
                 DataResult::success("minecraft:alter_ground".to_string())
             }
@@ -648,11 +664,8 @@ fn decorator_map_codec<Ops: DynamicOps + 'static + RegistryOpsLookup>(
         "attached_to_leaves" => {
             DataResult::success(attached_to_leaves::attached_to_leaves_codec::<Ops>())
         }
-        "pale_moss" | "creaking_heart" => {
-            DataResult::success(map_codec::unit(TreeDecorator::Unavailable {
-                type_name: format!("minecraft:{path}"),
-            }))
-        }
+        "pale_moss" => DataResult::success(pale_moss::pale_moss_codec::<Ops>()),
+        "creaking_heart" => DataResult::success(creaking_heart::creaking_heart_codec::<Ops>()),
         _ => DataResult::error(format!("unknown tree decorator type {name}")),
     }
 }
@@ -715,6 +728,9 @@ mod tests {
             let height_at = |_, _, _| panic!("beehive decorator does not query heightmaps");
             let has_hive = |pos: &BlockPos| shared.0.borrow_mut().has_beehive_block_entity(pos);
             let store = |_: &BlockPos, _: i32| panic!("missing typed entity must not receive bees");
+            let nested = |_: &str, _: &BlockPos, _: &mut RecordingRandom| {
+                panic!("beehive decorator does not place nested features")
+            };
             let mut context = TreeDecoratorContext::new(
                 &shared,
                 &mut setter,
@@ -726,6 +742,7 @@ mod tests {
                     height_at: &height_at,
                     has_beehive_block_entity: &has_hive,
                     store_beehive_occupant: &store,
+                    place_configured_feature: &nested,
                 },
             );
             BeehiveDecorator { probability: 1.0 }.place(&mut context);

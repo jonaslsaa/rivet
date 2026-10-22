@@ -218,6 +218,43 @@ fn update_shape(
                 state
             }
         }
+        "DoublePlantBlock" => {
+            let half = state.get_value(BlockStateProperties::DOUBLE_BLOCK_HALF);
+            let lower = half == Some(PropertyValue::Enum("lower"));
+            let vertical = direction == Direction::Up || direction == Direction::Down;
+            let matching_half = neighbor.block() == state.block()
+                && neighbor.get_value(BlockStateProperties::DOUBLE_BLOCK_HALF) != half;
+            if (vertical && lower == (direction == Direction::Up) && !matching_half)
+                || !level.can_survive(&state, pos)
+            {
+                Blocks::AIR.default_block_state()
+            } else {
+                state
+            }
+        }
+        "CreakingHeartBlock" => {
+            level.schedule_block_tick(pos, Block::new(state.block()), 1);
+            state
+        }
+        "HangingMossBlock" => {
+            let above_pos = pos.above();
+            let above = level.get_block_state(&above_pos);
+            if !level.can_attach_to(&above_pos, &above, &Direction::Down)
+                && above.block().name() != "minecraft:pale_hanging_moss"
+            {
+                level.schedule_block_tick(pos, Block::new(state.block()), 1);
+            }
+            state
+                .set_value(
+                    BlockStateProperties::TIP,
+                    level.get_block_state(&pos.below()).block().name()
+                        != "minecraft:pale_hanging_moss",
+                )
+                .expect("hanging moss tip")
+        }
+        "MossyCarpetBlock" => {
+            rivet_world::block::mossy_carpet_block::update_shape(level, state, pos)
+        }
         "CarpetBlock" => {
             if level.get_block_state(&pos.below()).is_air() {
                 Blocks::AIR.default_block_state()

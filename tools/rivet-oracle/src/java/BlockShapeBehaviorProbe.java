@@ -47,6 +47,24 @@ public final class BlockShapeBehaviorProbe {
                             Blocks.MAGMA_BLOCK.defaultBlockState(),Blocks.SOUL_SAND.defaultBlockState()))
                         cases.add(new Case("water_"+waterLevel+"_"+dir+"_"+Block.getId(neighbor),
                             Blocks.WATER.defaultBlockState().setValue(BlockStateProperties.LEVEL,waterLevel),dir,neighbor,air,dirt));
+                for (Direction dir : Direction.values()) {
+                    cases.add(new Case("heart_"+dir, Blocks.CREAKING_HEART.defaultBlockState(),dir,air,air,dirt));
+                    for (Block above : List.of(Blocks.AIR,Blocks.STONE,Blocks.OAK_LEAVES,Blocks.PALE_HANGING_MOSS))
+                        for (Block below : List.of(Blocks.AIR,Blocks.PALE_HANGING_MOSS))
+                            cases.add(new Case("hanging_moss_"+dir+"_"+BuiltInRegistries.BLOCK.getKey(above)+"_"+BuiltInRegistries.BLOCK.getKey(below),
+                                Blocks.PALE_HANGING_MOSS.defaultBlockState(),dir,air,above.defaultBlockState(),below.defaultBlockState()));
+                    for (boolean base : new boolean[]{false,true})
+                        for (BlockState below : List.of(air,dirt,Blocks.PALE_MOSS_CARPET.defaultBlockState(),
+                                Blocks.PALE_MOSS_CARPET.defaultBlockState().setValue(MossyCarpetBlock.BASE,false)))
+                            for (BlockState neighbor : List.of(air,Blocks.STONE.defaultBlockState(),Blocks.OAK_LEAVES.defaultBlockState()))
+                                cases.add(new Case("moss_carpet_"+dir+"_"+base+"_"+Block.getId(below)+"_"+Block.getId(neighbor),
+                                    Blocks.PALE_MOSS_CARPET.defaultBlockState().setValue(MossyCarpetBlock.BASE,base),dir,neighbor,air,below));
+                    for (var half : net.minecraft.world.level.block.state.properties.DoubleBlockHalf.values())
+                        for (BlockState neighbor : List.of(air,dirt,Blocks.TALL_GRASS.defaultBlockState(),
+                                Blocks.TALL_GRASS.defaultBlockState().setValue(DoublePlantBlock.HALF,net.minecraft.world.level.block.state.properties.DoubleBlockHalf.UPPER)))
+                            cases.add(new Case("double_plant_"+dir+"_"+half+"_"+Block.getId(neighbor),
+                                Blocks.TALL_GRASS.defaultBlockState().setValue(DoublePlantBlock.HALF,half),dir,neighbor,air,dirt));
+                }
                 for (var test : cases) {
                     var pos = new BlockPos(3,70,-5); var states = new HashMap<BlockPos,BlockState>();
                     states.put(pos,test.state()); states.put(pos.above(),test.above()); states.put(pos.below(),test.below());

@@ -82,6 +82,26 @@ impl TreeLevel<'_> {
     pub(super) fn write(&self, pos: &BlockPos, state: BlockState) {
         self.0.borrow_mut().set_block(pos, state, 19);
     }
+
+    pub(super) fn place_configured_feature<R: RandomSource>(
+        &self,
+        name: &str,
+        pos: &BlockPos,
+        random: &mut R,
+        generator: &dyn crate::chunk::chunk_generator::ChunkGenerator,
+    ) -> bool {
+        let mut level = self.0.borrow_mut();
+        let access = level.registry_access();
+        let Some(registry) = access.lookup(&*super::registry_keys::CONFIGURED_FEATURE) else {
+            return false;
+        };
+        let Some(feature) = registry.get_optional(&rivet_registry::Identifier::parse(name)) else {
+            return false;
+        };
+        // Nested features write directly into the world, not the decoration
+        // setter: their positions do not enlarge the tree's shape bounds.
+        feature.place(&mut **level, generator, random, pos)
+    }
 }
 struct Leaves<'a, 'b> {
     level: &'a TreeLevel<'b>,
@@ -198,6 +218,9 @@ impl FeatureBehavior<TreeConfiguration> for TreeFeature {
             let store_beehive_occupant = |pos: &BlockPos, ticks| {
                 level.0.borrow_mut().store_beehive_occupant(pos, ticks);
             };
+            let place_configured_feature = |name: &str, pos: &BlockPos, random: &mut R| {
+                level.place_configured_feature(name, pos, random, context.chunk_generator)
+            };
             let mut decorator_context = TreeDecoratorContext::new(
                 &level,
                 &mut setter,
@@ -209,6 +232,7 @@ impl FeatureBehavior<TreeConfiguration> for TreeFeature {
                     height_at: &height_at,
                     has_beehive_block_entity: &has_beehive_block_entity,
                     store_beehive_occupant: &store_beehive_occupant,
+                    place_configured_feature: &place_configured_feature,
                 },
             );
             for decorator in &config.decorators {

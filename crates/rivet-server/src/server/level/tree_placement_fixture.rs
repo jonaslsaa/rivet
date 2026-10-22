@@ -18,7 +18,10 @@ use rivet_world::chunk::chunk_generator::ChunkGenerator;
 use rivet_world::chunk::storage::chunk_reconstruction::resolve_state_flags;
 use rivet_world::level::{WorldGenLevel, height_accessor::LevelHeightAccessor};
 use rivet_world::levelgen::feature::configurations::tree_configuration::tree_configuration_codec;
-use rivet_world::levelgen::feature::{FeatureBehavior, FeaturePlaceContext, TREE};
+use rivet_world::levelgen::feature::configurations::vegetation_patch_configuration::vegetation_patch_configuration_codec;
+use rivet_world::levelgen::feature::{
+    FeatureBehavior, FeaturePlaceContext, TREE, VEGETATION_PATCH,
+};
 use rivet_world::levelgen::heightmap::{Heightmap, Types};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -28,6 +31,8 @@ struct Ground {
     beehives: HashMap<BlockPos, BeehiveData>,
     materialize_beehives: bool,
     terrain: String,
+    registry_access: RegistryAccess,
+    pending_hearts: HashMap<BlockPos, CompoundTag>,
     writes: Vec<u8>,
     write_count: u64,
     ticks: Vec<String>,
@@ -35,12 +40,14 @@ struct Ground {
 }
 
 impl Ground {
-    fn new() -> Self {
+    fn new(registry_access: RegistryAccess) -> Self {
         Self {
             states: HashMap::new(),
             beehives: HashMap::new(),
             materialize_beehives: true,
             terrain: "dry_dirt".to_string(),
+            registry_access,
+            pending_hearts: HashMap::new(),
             writes: Vec::new(),
             write_count: 0,
             ticks: Vec::new(),
@@ -120,7 +127,7 @@ impl WorldGenLevel for Ground {
         63
     }
     fn registry_access(&self) -> RegistryAccess {
-        RegistryAccess::empty()
+        self.registry_access.clone()
     }
     fn get_block_state(&self, pos: &BlockPos) -> BlockState {
         self.states.get(pos).copied().unwrap_or_else(|| {
@@ -154,6 +161,17 @@ impl WorldGenLevel for Ground {
                     }
                 }
                 "root_limit_void" => "air",
+                "patch_wall" => {
+                    if y < 64 {
+                        "dirt"
+                    } else if (pos.get_x() == 2 && pos.get_z() == 0 && y < 67)
+                        || (pos.get_x() == -2 && pos.get_z() == 1 && y < 66)
+                    {
+                        "stone"
+                    } else {
+                        "air"
+                    }
+                }
                 other => panic!("unknown Java fixture terrain {other}"),
             };
             BlockState::of(
@@ -182,6 +200,16 @@ impl WorldGenLevel for Ground {
     fn set_block(&mut self, pos: &BlockPos, state: BlockState, flags: u32) -> bool {
         let old = self.get_block_state(pos);
         self.states.insert(*pos, state);
+        if state.block().name() == "minecraft:creaking_heart" {
+            let mut tag = CompoundTag::new();
+            tag.put_int("x", pos.get_x());
+            tag.put_int("y", pos.get_y());
+            tag.put_int("z", pos.get_z());
+            tag.put_string("id", "DUMMY");
+            self.pending_hearts.insert(*pos, tag);
+        } else if old.block() != state.block() {
+            self.pending_hearts.remove(pos);
+        }
         if self.materialize_beehives
             && matches!(
                 state.block().name(),
@@ -227,6 +255,14 @@ impl WorldGenLevel for Ground {
         update_shape_at_edge(self, &mut random, filled);
         self.random = Some(random);
     }
+    fn place_mossy_carpet(&mut self, pos: &BlockPos, flags: u32) {
+        let mut random = self
+            .random
+            .take()
+            .expect("world RNG for actual moss carpet placement");
+        rivet_world::block::mossy_carpet_block::place_at(self, pos, &mut random, flags);
+        self.random = Some(random);
+    }
 }
 
 struct Generator;
@@ -245,37 +281,56 @@ fn hash(bytes: &[u8]) -> String {
 
 #[test]
 fn full_trees_match_paper_writes_blocks_ticks_and_both_random_streams() {
-    let ops = RegistryOps::create_from_access(
-        &JsonOps::INSTANCE,
-        rivet_world::data::worldgen::worldgen_bootstraps::build_worldgen_registries(),
+    let access = super::generated_world::build_feature_access(
+        &rivet_world::data::worldgen::worldgen_bootstraps::build_worldgen_registries(),
     );
+    let ops = RegistryOps::create_from_access(&JsonOps::INSTANCE, access.clone());
     let mut cases = 0;
     let mut occupied_successes = HashSet::new();
     let mut missing_hive_cases = 0;
     let mut rooted_successes = HashSet::new();
     let mut root_limit_failures = 0;
+    let mut pale_heart_successes = 0;
+    let mut moss_level_rng_successes = 0;
+    let mut patch_cases = 0;
     for line in
         include_str!("../../../../../tools/rivet-oracle/fixtures/tree-placement.jsonl").lines()
     {
         let row: serde_json::Value = serde_json::from_str(line).expect("Paper tree fixture");
         let name = row["feature"].as_str().expect("feature");
         let seed = row["seed"].as_i64().expect("seed");
-        let decoded = tree_configuration_codec().parse(&ops, &row["config"]);
-        let config = decoded
-            .result()
-            .unwrap_or_else(|| panic!("{name} config: {decoded:?}"));
-        let mut ground = Ground::new();
+        let mut ground = Ground::new(access.clone());
         ground.materialize_beehives = row["block_entities"].as_bool().unwrap_or(true);
         ground.terrain = row["terrain"].as_str().unwrap_or("dry_dirt").to_string();
         let mut random = XoroshiroRandomSource::new(seed);
-        let result = TREE.place(&mut FeaturePlaceContext::new(
-            None,
-            &mut ground,
-            &Generator,
-            &mut random,
-            &BlockPos::new(0, 64, 0),
-            config,
-        ));
+        let result = if row["kind"] == "vegetation_patch" {
+            let decoded = vegetation_patch_configuration_codec().parse(&ops, &row["config"]);
+            let config = decoded
+                .result()
+                .unwrap_or_else(|| panic!("{name} patch config: {decoded:?}"));
+            patch_cases += 1;
+            VEGETATION_PATCH.place(&mut FeaturePlaceContext::new(
+                None,
+                &mut ground,
+                &Generator,
+                &mut random,
+                &BlockPos::new(0, 64, 0),
+                config,
+            ))
+        } else {
+            let decoded = tree_configuration_codec().parse(&ops, &row["config"]);
+            let config = decoded
+                .result()
+                .unwrap_or_else(|| panic!("{name} config: {decoded:?}"));
+            TREE.place(&mut FeaturePlaceContext::new(
+                None,
+                &mut ground,
+                &Generator,
+                &mut random,
+                &BlockPos::new(0, 64, 0),
+                config,
+            ))
+        };
         let context = format!("{name} seed {seed}");
         assert_eq!(result, row["result"].as_bool().unwrap(), "result {context}");
         assert_eq!(
@@ -338,7 +393,8 @@ fn full_trees_match_paper_writes_blocks_ticks_and_both_random_streams() {
                 occupied_successes.insert(name.to_string());
             }
         }
-        if let Some(terrain) = row["terrain"].as_str() {
+        if row.get("roots").is_some() {
+            let terrain = row["terrain"].as_str().expect("root case terrain");
             let roots = ground
                 .states
                 .values()
@@ -385,9 +441,70 @@ fn full_trees_match_paper_writes_blocks_ticks_and_both_random_streams() {
                 rooted_successes.insert((name.to_string(), terrain.to_string()));
             }
         }
+        for (field, block) in [
+            ("pale_moss_ground", "pale_moss_block"),
+            ("pale_moss_carpet", "pale_moss_carpet"),
+            ("tall_grass", "tall_grass"),
+            ("pale_hanging_moss", "pale_hanging_moss"),
+            ("creaking_hearts", "creaking_heart"),
+        ] {
+            if let Some(expected) = row[field].as_u64() {
+                let name = format!("minecraft:{block}");
+                assert_eq!(
+                    ground
+                        .states
+                        .values()
+                        .filter(|state| state.block().name() == name)
+                        .count() as u64,
+                    expected,
+                    "actual {field} placement {context}"
+                );
+            }
+        }
+        if let Some(hearts) = row["pending_heart_entities"].as_array() {
+            assert_eq!(
+                ground.pending_hearts.len(),
+                hearts.len(),
+                "pending heart count {context}"
+            );
+            for heart in hearts {
+                let xyz: [i32; 3] = serde_json::from_value(heart["pos"].clone()).unwrap();
+                let tag = ground
+                    .pending_hearts
+                    .get(&BlockPos::new(xyz[0], xyz[1], xyz[2]))
+                    .expect("actual pending heart metadata");
+                assert_eq!(
+                    *tag,
+                    parse_compound_fully(heart["snbt"].as_str().unwrap()).unwrap(),
+                    "pending heart NBT {context}"
+                );
+            }
+        }
+        if row["pale_seed_search_success"] == true {
+            assert!(
+                row["creaking_hearts"].as_u64().unwrap() > 0
+                    && row["pale_moss_ground"].as_u64().unwrap() > 0
+            );
+            assert!(!ground.pending_hearts.is_empty());
+            pale_heart_successes += 1;
+        }
+        if row["moss_level_rng_success"] == true {
+            assert!(
+                row["pale_moss_carpet"].as_u64().unwrap() > 0
+                    && row["tall_grass"].as_u64().unwrap() > 0
+            );
+            assert_ne!(
+                row["world_next_long"].as_i64().unwrap(),
+                1454447627545378826
+            );
+            moss_level_rng_successes += 1;
+        }
         cases += 1;
     }
-    assert_eq!(cases, 181);
+    assert_eq!(cases, 203);
+    assert_eq!(patch_cases, 13);
+    assert_eq!(pale_heart_successes, 1);
+    assert_eq!(moss_level_rng_successes, 1);
     assert_eq!(missing_hive_cases, 1);
     assert_eq!(root_limit_failures, 8);
     assert_eq!(

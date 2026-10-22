@@ -202,6 +202,11 @@ pub trait WorldGenLevel: LevelHeightAccessor + Send {
             || query.is_collision_face_full(*direction)
     }
 
+    /// Place the moss base and randomized topper using the level's own RNG.
+    fn place_mossy_carpet(&mut self, _pos: &BlockPos, _flags: u32) {
+        panic!("WorldGenLevel.placeMossyCarpet requires the level random source")
+    }
+
     /// `BlockBehaviour.BlockStateBase.canSurvive(BlockGetter, BlockPos)` — the
     /// survival seam the `WouldSurvivePredicate` consumes
     /// (`state.canSurvive(level, origin.offset(offset))`).

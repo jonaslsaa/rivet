@@ -59,7 +59,7 @@ impl WorldGenLevel for Storage {
 }
 
 #[test]
-fn mangrove_and_water_shape_updates_match_live_paper() {
+fn tree_and_water_shape_updates_match_live_paper() {
     for line in
         include_str!("../../../../../tools/rivet-oracle/fixtures/block-shape-behavior.jsonl")
             .lines()

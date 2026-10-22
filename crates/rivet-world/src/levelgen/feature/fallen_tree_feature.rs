@@ -28,7 +28,13 @@ impl FeatureBehavior<FallenTreeConfiguration> for FallenTreeFeature {
         let random = &mut *context.random;
         let origin = *context.origin;
         place_log(config, level, random, &origin, None);
-        decorate_logs(level, random, &[origin], &config.stump_decorators);
+        decorate_logs(
+            level,
+            context.chunk_generator,
+            random,
+            &[origin],
+            &config.stump_decorators,
+        );
         let direction = Plane::Horizontal.get_random_direction(random);
         let length = config.log_length.sample(random) - 2;
         let mut start = origin
@@ -66,12 +72,19 @@ impl FeatureBehavior<FallenTreeConfiguration> for FallenTreeFeature {
             );
             log_insertions.push(start.relative_steps(&direction, i));
         }
-        decorate_logs(level, random, &log_insertions, &config.log_decorators);
+        decorate_logs(
+            level,
+            context.chunk_generator,
+            random,
+            &log_insertions,
+            &config.log_decorators,
+        );
         true
     }
 }
 fn decorate_logs<R: RandomSource>(
     level: &mut dyn WorldGenLevel,
+    generator: &dyn crate::chunk::chunk_generator::ChunkGenerator,
     random: &mut R,
     logs: &[BlockPos],
     decorators: &[TreeDecorator],
@@ -87,6 +100,9 @@ fn decorate_logs<R: RandomSource>(
     let store_beehive_occupant = |pos: &BlockPos, ticks| {
         level.0.borrow_mut().store_beehive_occupant(pos, ticks);
     };
+    let place_configured_feature = |name: &str, pos: &BlockPos, random: &mut R| {
+        level.place_configured_feature(name, pos, random, generator)
+    };
     let mut context = TreeDecoratorContext::new(
         &level,
         &mut setter,
@@ -98,6 +114,7 @@ fn decorate_logs<R: RandomSource>(
             height_at: &height_at,
             has_beehive_block_entity: &has_beehive_block_entity,
             store_beehive_occupant: &store_beehive_occupant,
+            place_configured_feature: &place_configured_feature,
         },
     );
     for decorator in decorators {

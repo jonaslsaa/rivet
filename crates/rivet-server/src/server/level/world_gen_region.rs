@@ -984,6 +984,18 @@ where
         })
     }
 
+    fn materialize_pending_heart(&mut self, pos: &BlockPos, state: BlockState) -> bool {
+        if state.block().name() != "minecraft:creaking_heart" {
+            return false;
+        }
+        // WorldGenRegion writes a DUMMY entity to protochunks. The tree
+        // decorator never requests a live heart, so do not fabricate one.
+        self.block_entities.remove(pos);
+        self.live_block_entities.remove(pos);
+        self.persist_block_entity_nbt(pos, dummy_block_entity(pos));
+        true
+    }
+
     fn materialize_beehive(
         &mut self,
         pos: &BlockPos,
@@ -1239,7 +1251,9 @@ impl WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
         state: BlockState,
         old_state: BlockState,
     ) {
-        if self.materialize_beehive(pos, state, old_state) {
+        if self.materialize_pending_heart(pos, state)
+            || self.materialize_beehive(pos, state, old_state)
+        {
             return;
         }
         let same_block = old_state.block() == state.block();
@@ -1419,6 +1433,21 @@ pub(super) fn region_can_survive(
             }
         }
         "minecraft:moss_carpet" => !level.get_block_state(&pos.below()).is_air(),
+        "minecraft:pale_moss_carpet" => rivet_world::block::mossy_carpet_block::can_survive(level, *state, pos),
+        "minecraft:pale_hanging_moss" => {
+            let above_pos = pos.above();
+            let above = level.get_block_state(&above_pos);
+            level.can_attach_to(&above_pos, &above, &rivet_registry::core::Direction::Down)
+                || above.block().name() == "minecraft:pale_hanging_moss"
+        }
+        "minecraft:tall_grass" | "minecraft:large_fern" => {
+            let below = level.get_block_state(&pos.below());
+            if state.get_value(BlockStateProperties::DOUBLE_BLOCK_HALF)
+                == Some(rivet_registry::block_state_property::PropertyValue::Enum("upper")) {
+                below.block() == state.block() && below.get_value(BlockStateProperties::DOUBLE_BLOCK_HALF)
+                    == Some(rivet_registry::block_state_property::PropertyValue::Enum("lower"))
+            } else { below.is_in_tag("minecraft:supports_vegetation") }
+        }
         "minecraft:leaf_litter" => {
             let below_pos = pos.below();
             level.is_face_sturdy(&below_pos, &level.get_block_state(&below_pos), &rivet_registry::core::Direction::Up)
@@ -1463,6 +1492,14 @@ pub(super) fn region_can_survive(
 }
 
 impl WorldGenLevel for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
+    fn place_mossy_carpet(&mut self, pos: &BlockPos, flags: u32) {
+        let mut random = self
+            .region_random
+            .take()
+            .expect("moss carpet requires region RNG");
+        rivet_world::block::mossy_carpet_block::place_at(self, pos, &mut random, flags);
+        self.region_random = Some(random);
+    }
     fn has_beehive_block_entity(&mut self, pos: &BlockPos) -> bool {
         self.load_beehive_for_state(pos, self.get_block_state(pos))
     }
@@ -1762,7 +1799,9 @@ impl WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
         state: BlockState,
         old_state: BlockState,
     ) {
-        if self.materialize_beehive(pos, state, old_state) {
+        if self.materialize_pending_heart(pos, state)
+            || self.materialize_beehive(pos, state, old_state)
+        {
             return;
         }
         let same_block = old_state.block() == state.block();
@@ -1876,6 +1915,14 @@ impl LevelHeightAccessor for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Str
 /// doc), so this impl covers every region lifetime, and the executor's scoped
 /// borrow-carrying region implements it directly.
 impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
+    fn place_mossy_carpet(&mut self, pos: &BlockPos, flags: u32) {
+        let mut random = self
+            .region_random
+            .take()
+            .expect("moss carpet requires region RNG");
+        rivet_world::block::mossy_carpet_block::place_at(self, pos, &mut random, flags);
+        self.region_random = Some(random);
+    }
     fn has_beehive_block_entity(&mut self, pos: &BlockPos) -> bool {
         self.load_beehive_for_state(pos, self.get_block_state(pos))
     }
@@ -3882,6 +3929,33 @@ mod tests {
         .map(|total| random.next_int_bound(total));
         assert_eq!(roll, None);
         assert_eq!(random.next_int_bound(100), baseline.next_int_bound(100));
+    }
+
+    #[test]
+    fn generated_heart_keeps_pending_entity_in_owning_chunk_until_replaced() {
+        let mut region = feature_region();
+        let pos = BlockPos::new(0, 64, 0);
+        let heart = BlockState::of(
+            rivet_registry::generated::blocks::BlockId::from_name("minecraft:creaking_heart")
+                .unwrap(),
+        );
+        assert!(region.set_block(&pos, heart, UPDATE_ALL, 0));
+        let pending = region
+            .get_chunk(0, 0)
+            .get_block_entity_nbt(&pos)
+            .expect("pending heart belongs to chunk");
+        assert_eq!(pending, &dummy_block_entity(&pos));
+        assert!(!region.live_block_entities.contains(&pos));
+        let mut bytes = Vec::new();
+        rivet_nbt::nbt_io::write_compressed(pending, &mut bytes).unwrap();
+        let loaded = rivet_nbt::nbt_io::read_compressed(
+            bytes.as_slice(),
+            &mut rivet_nbt::nbt_accounter::NbtAccounter::unlimited_heap(),
+        )
+        .unwrap();
+        assert_eq!(loaded, *pending);
+        assert!(region.set_block(&pos, Blocks::STONE.default_block_state(), UPDATE_ALL, 0));
+        assert!(region.get_chunk(0, 0).get_block_entity_nbt(&pos).is_none());
     }
 
     #[test]
