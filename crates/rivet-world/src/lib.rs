@@ -88,6 +88,7 @@ pub mod data;
 /// with the entity crate. See `entity::mod`.
 pub mod entity;
 pub mod flag;
+pub mod fluid;
 pub mod level;
 pub mod levelgen;
 pub mod lighting;
@@ -103,4 +104,3 @@ pub mod superflat;
 /// Level-level execution/scheduling surfaces (`LevelTicks`) stay deferred (see
 /// the module doc).
 pub mod ticks;
-pub mod fluid;
