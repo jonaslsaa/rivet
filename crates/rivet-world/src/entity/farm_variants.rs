@@ -84,12 +84,12 @@ impl FarmFamilyRegistry {
     ) -> Option<HolderId> {
         let mut entries = Vec::new();
         for id in 0..self.variants.size() {
-            let variant = self.variants.by_id_arc(id as i32).unwrap();
+            let variant = self.variants.by_id_arc(id).unwrap();
             for selector in &variant.selectors {
                 entries.push((HolderId(id as u32), selector));
             }
         }
-        entries.sort_by(|a, b| b.1.priority.cmp(&a.1.priority));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.1.priority));
         let mut highest = i32::MIN;
         entries.retain(|(_, selector)| {
             if selector.priority < highest {

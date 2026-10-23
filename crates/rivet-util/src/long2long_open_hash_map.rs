@@ -116,10 +116,10 @@ impl Long2LongOpenHashMap {
                 }
                 pos = (pos + 1) & mask;
             }
-            if pos < gap {
-                if let Some(wrapped) = &mut wrapped {
-                    wrapped.push(self.keys[pos]);
-                }
+            if pos < gap
+                && let Some(wrapped) = &mut wrapped
+            {
+                wrapped.push(self.keys[pos]);
             }
             self.keys[gap] = self.keys[pos];
             self.values[gap] = self.values[pos];
