@@ -137,8 +137,13 @@ impl<S: BlockEntityWorldServices> BlockEntityTickerBackend for CanonicalBackend<
                 // Source removes maps before debug, and setsRemoved only after
                 // debug returns. Do not roll back those partial effects on Err.
                 if !self.debug.is_sleeping() {
-                    self.debug
-                        .drop_block_entity(pos, self.services.hive_debug_transport()?)?;
+                    self.debug.drop_block_entity_with(pos, |members, update| {
+                        crate::server::level::level_debug_synchronizers::send_to_tracking(
+                            members,
+                            update,
+                            self.services.hive_debug_transport()?,
+                        )
+                    })?;
                 }
                 removed.set_removed();
             }
@@ -479,8 +484,7 @@ mod tests {
             self.added.push(pos);
             Ok(())
         }
-        fn require_ticker_body(&self, kind: NativeTickerKind) -> Result<()> {
-            assert_eq!(kind, NativeTickerKind::Beehive);
+        fn require_ticker_body(&self, _: NativeTickerKind) -> Result<()> {
             Ok(())
         }
         fn should_tick_blocks_at(&self, _: BlockPos) -> bool {
@@ -534,17 +538,22 @@ mod tests {
         use std::collections::HashSet;
         let pos = BlockPos::new(8, 64, 8);
         let player = Uuid { most: 3, least: 9 };
-        for (loaded, awake, transport) in [
-            (true, true, true),
-            (true, true, false),
-            (true, false, false),
-            (false, true, true),
+        for (loaded, awake, transport, name, hive_subscription, register) in [
+            (true, true, true, "bee_nest", true, true),
+            (true, true, false, "bee_nest", true, true),
+            (true, false, false, "bee_nest", true, true),
+            (false, true, true, "bee_nest", true, true),
+            (true, true, false, "chest", true, true),
+            (true, true, false, "spawner", true, true),
+            (true, true, false, "creaking_heart", true, true),
+            (true, true, false, "bee_nest", false, true),
+            (true, true, false, "bee_nest", true, false),
         ] {
             let generator = std::sync::Arc::new(
                 crate::server::level::generated_world::OverworldGenerator::new(42),
             );
             let mut state = generator.create_holder(ChunkPos::ZERO).into_state();
-            let block = BlockState::of(BlockId::from_name("minecraft:bee_nest").unwrap());
+            let block = BlockState::of(BlockId::from_name(&format!("minecraft:{name}")).unwrap());
             state.chunk_mut().set_block_state(8, 64, 8, block);
             state
                 .chunk_mut()
@@ -559,16 +568,23 @@ mod tests {
                 debug: transport.then(DebugTransport::default),
                 ..Default::default()
             };
-            let subscriptions = HashSet::from([DebugSubscription::BeeHives]);
+            let subscriptions = HashSet::from([if hive_subscription {
+                DebugSubscription::BeeHives
+            } else {
+                DebugSubscription::Brains
+            }]);
             if awake {
                 let mut subscribers = ServerDebugSubscribers::default();
                 subscribers.tick([(player, &subscriptions)]);
                 level.begin_debug_tick(&subscribers);
             }
-            level
-                .register_chunk_block_entities(ChunkPos::ZERO, true, true, &mut services)
-                .unwrap();
-            if awake && transport {
+            if register {
+                level
+                    .register_chunk_block_entities(ChunkPos::ZERO, true, true, &mut services)
+                    .unwrap();
+            }
+            if awake && name == "bee_nest" && hive_subscription && register {
+                services.debug.get_or_insert_with(DebugTransport::default);
                 level
                     .tick_hive_debug(
                         [(player, &subscriptions, vec![ChunkPos::ZERO])],
@@ -576,6 +592,9 @@ mod tests {
                     )
                     .unwrap();
                 assert_eq!(services.debug.as_ref().unwrap().0.len(), 1);
+                if !transport {
+                    services.debug = None;
+                }
             }
             let outcome = CanonicalBackend {
                 chunks: &mut level.chunk_map,
@@ -584,7 +603,8 @@ mod tests {
                 services: &mut services,
             }
             .remove_block_entity(pos);
-            assert_eq!(outcome.is_ok(), !loaded || !awake || transport);
+            let broadcasts = loaded && awake && name == "bee_nest" && hive_subscription && register;
+            assert_eq!(outcome.is_ok(), !broadcasts || transport);
             let live = level
                 .chunk_map
                 .get_chunk(ChunkPos::ZERO)
@@ -596,6 +616,13 @@ mod tests {
                 !loaded,
                 "native map mutation precedes any debug authority error"
             );
+            if loaded {
+                assert_eq!(
+                    level.debug_synchronizers.registered_hive_count(),
+                    0,
+                    "local source is removed even without subscribers or when sending fails"
+                );
+            }
             if loaded && awake && transport {
                 let packets = &services.debug.as_ref().unwrap().0;
                 assert_eq!(

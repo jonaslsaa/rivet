@@ -315,26 +315,39 @@ impl LevelDebugSynchronizers {
         pos: BlockPos,
         transport: &mut (impl HiveDebugTransport + ?Sized),
     ) -> Result<()> {
+        self.drop_block_entity_with(pos, |members, update| {
+            send_to_tracking(members, update, transport)
+        })
+    }
+    pub(super) fn drop_block_entity_with(
+        &mut self,
+        pos: BlockPos,
+        send: impl FnOnce(&HashSet<Uuid>, HiveDebugUpdate) -> Result<()>,
+    ) -> Result<()> {
         if self.awake && self.hives.remove(&pos).is_some() {
             self.hive_order.remove(&pos);
-            send_to_tracking(
-                &self.hive_subscribers,
-                HiveDebugUpdate {
-                    position: pos,
-                    value: None,
-                },
-                transport,
-            )?;
+            if !self.hive_subscribers.is_empty() {
+                send(
+                    &self.hive_subscribers,
+                    HiveDebugUpdate {
+                        position: pos,
+                        value: None,
+                    },
+                )?;
+            }
         }
         Ok(())
     }
 }
 
-fn send_to_tracking(
+pub(super) fn send_to_tracking(
     members: &HashSet<Uuid>,
     update: HiveDebugUpdate,
     transport: &mut (impl HiveDebugTransport + ?Sized),
 ) -> Result<()> {
+    if members.is_empty() {
+        return Ok(());
+    }
     let order = transport.subscriber_order(members)?;
     if order.len() != members.len() || order.iter().copied().collect::<HashSet<_>>() != *members {
         return Err(BlockEntityTickerError::Unavailable(
