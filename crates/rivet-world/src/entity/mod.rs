@@ -25,6 +25,7 @@ pub mod chest_minecart;
 pub mod farm_variants;
 pub mod generation_creature;
 pub mod loaded_entity;
+pub mod tracking;
 
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::data_result::DataResult;

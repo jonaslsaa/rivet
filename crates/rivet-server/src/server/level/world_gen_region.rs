@@ -451,6 +451,24 @@ fn spawn_potential_total(potentials: &[(String, i32)]) -> Option<i32> {
 /// borrows a chunk (the worldgen center `ProtoChunk` the executor already
 /// owns) or owns one (the ring chunks it generated) both type-check through
 /// the same trait object.
+#[path = "generation_chunk_view.rs"]
+mod generation_chunk_view;
+pub use generation_chunk_view::GenerationChunkView;
+
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Both variants are large owned chunk values; boxing would allocate per scoped loan solely to save the small size difference"
+)]
+pub enum OwnedGenerationChunk<T, B, S>
+where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    S: Eq + std::hash::Hash + Send,
+{
+    Proto(ProtoChunk<T, B, S>),
+    Runtime(super::level_chunk::LevelChunk),
+}
+
 pub trait GenerationChunkHolderView<T, B, S>: Send
 where
     T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
@@ -464,6 +482,27 @@ where
     /// `GenerationChunkHolder.getPersistedStatus()` — the held chunk's status,
     /// or `None` for a holder with no chunk (Java null).
     fn get_persisted_status(&self) -> Option<ChunkStatus>;
+
+    fn is_runtime(&self) -> bool {
+        false
+    }
+
+    fn generation_view(&self, status: ChunkStatus) -> Option<&dyn GenerationChunkView<T, B, S>> {
+        self.get_chunk_if_present_unchecked(status)
+            .map(|chunk| chunk as &dyn GenerationChunkView<T, B, S>)
+    }
+
+    fn generation_view_mut(
+        &mut self,
+        status: ChunkStatus,
+    ) -> Option<&mut dyn GenerationChunkView<T, B, S>> {
+        self.get_chunk_if_present_unchecked_mut(status)
+            .map(|chunk| chunk as &mut dyn GenerationChunkView<T, B, S>)
+    }
+
+    fn into_owned_dependency(self: Box<Self>) -> Option<OwnedGenerationChunk<T, B, S>> {
+        self.into_owned_proto().map(OwnedGenerationChunk::Proto)
+    }
 
     /// Rust-only mutable half of
     /// [`get_chunk_if_present_unchecked`](Self::get_chunk_if_present_unchecked)
@@ -828,6 +867,10 @@ where
         self.center_pos
     }
 
+    pub(super) fn generation_biomes(&self, x: i32, z: i32) -> Vec<B> {
+        self.get_chunk_view(x, z).biome_ids()
+    }
+
     /// `Level.getWorldBorder()` for the generated region.
     pub fn world_border(&self) -> &WorldBorder {
         &self.world_border
@@ -843,6 +886,18 @@ where
     /// that canonical order. The borrowed center and any base-only holders are
     /// intentionally omitted.
     pub fn into_owned_proto_entries(self) -> Vec<(ChunkPos, ProtoChunk<T, B, S>)> {
+        self.into_owned_dependency_entries()
+            .into_iter()
+            .map(|(pos, chunk)| match chunk {
+                OwnedGenerationChunk::Proto(chunk) => (pos, chunk),
+                OwnedGenerationChunk::Runtime(_) => {
+                    panic!("runtime ownership must be returned to its host")
+                }
+            })
+            .collect()
+    }
+
+    pub fn into_owned_dependency_entries(self) -> Vec<(ChunkPos, OwnedGenerationChunk<T, B, S>)> {
         let radius = self.generating_step.direct_dependencies().size() as i32 - 1;
         let width = radius * 2 + 1;
         let center_pos = self.center_pos;
@@ -857,7 +912,7 @@ where
                     center_pos.x().wrapping_add(dx),
                     center_pos.z().wrapping_add(dz),
                 );
-                holder.into_owned_proto().map(|chunk| (pos, chunk))
+                holder.into_owned_dependency().map(|chunk| (pos, chunk))
             })
             .collect()
     }
@@ -916,6 +971,9 @@ where
         let pos = entity.block_position();
         let chunk_x = pos.get_x() >> 4;
         let chunk_z = pos.get_z() >> 4;
+        if self.runtime_holder_at(ChunkPos::new(chunk_x, chunk_z))? {
+            return Ok(true);
+        }
         let chunk = self.structure_proto_chunk_mut(ChunkPos::new(chunk_x, chunk_z))?;
         // Source ProtoChunk deliberately ignores Entity.save's bool and still
         // appends the resulting (possibly empty, for discarded entities) tag.
@@ -933,6 +991,9 @@ where
         entity: rivet_world::entity::generation_creature::NativeGenerationCreature,
     ) -> Result<bool, rivet_world::levelgen::structure::StructureError> {
         let pos = entity.entity().block_position();
+        if self.runtime_holder_at(ChunkPos::new(pos.get_x() >> 4, pos.get_z() >> 4))? {
+            return Ok(true);
+        }
         // ProtoChunk.addEntity ignores Entity.save's boolean and appends the
         // built output even when save refuses a removed entity (empty output).
         self.structure_proto_chunk_mut(ChunkPos::new(pos.get_x() >> 4, pos.get_z() >> 4))?
@@ -944,6 +1005,9 @@ where
         &mut self,
         pos: ChunkPos,
     ) -> Result<bool, rivet_world::levelgen::structure::StructureError> {
+        if self.runtime_holder_at(pos)? {
+            return Ok(true);
+        }
         Ok(self
             .structure_proto_chunk_mut(pos)?
             .get_entities()
@@ -956,6 +1020,9 @@ where
         &mut self,
         pos: ChunkPos,
     ) -> Result<Vec<CompoundTag>, rivet_world::levelgen::structure::StructureError> {
+        if self.runtime_holder_at(pos)? {
+            return Ok(Vec::new());
+        }
         Ok(self.structure_proto_chunk_mut(pos)?.get_entities().to_vec())
     }
 
@@ -963,8 +1030,24 @@ where
         &mut self,
         pos: ChunkPos,
     ) -> Result<(), rivet_world::levelgen::structure::StructureError> {
+        if self.runtime_holder_at(pos)? {
+            return Ok(());
+        }
         self.structure_proto_chunk_mut(pos)?.clear_entities();
         Ok(())
+    }
+
+    fn runtime_holder_at(
+        &self,
+        pos: ChunkPos,
+    ) -> Result<bool, rivet_world::levelgen::structure::StructureError> {
+        self.try_get_chunk_view(pos.x(), pos.z(), ChunkStatus::Empty, true)
+            .map_err(|error| {
+                rivet_world::levelgen::structure::StructureError::PlacementUnavailable(
+                    error.to_string(),
+                )
+            })?;
+        Ok(self.cache.get(pos.x(), pos.z()).is_runtime())
     }
 
     fn structure_proto_chunk_mut(
@@ -974,7 +1057,7 @@ where
         use rivet_world::levelgen::structure::StructureError;
         let chunk_x = pos.x();
         let chunk_z = pos.z();
-        self.try_get_chunk(chunk_x, chunk_z, ChunkStatus::Empty, true)
+        self.try_get_chunk_view(chunk_x, chunk_z, ChunkStatus::Empty, true)
             .map_err(|e| StructureError::PlacementUnavailable(e.to_string()))?;
         let distance = self
             .center_pos
@@ -1048,15 +1131,59 @@ where
         })
     }
 
-    /// Rust-only mutable half of [`try_get_chunk`](Self::try_get_chunk) for the
-    /// `setBlock` chunk write (Java's shared-reference aliasing).
-    fn try_get_chunk_mut(
+    /// The same region dependency contract as [`Self::try_get_chunk`], with
+    /// live delegated access for a promoted runtime dependency.
+    pub fn try_get_chunk_view(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+        target_status: ChunkStatus,
+        _load_or_generate: bool,
+    ) -> Result<&dyn GenerationChunkView<T, B, S>, UnavailableChunkDiagnostic> {
+        let distance = self
+            .center_pos
+            .get_chessboard_distance_coords(chunk_x, chunk_z);
+        // The per-ring dependency slice is only materialized for the error
+        // diagnostic; the happy path reads it by index (no per-access Vec).
+        let dependencies = self.generating_step.direct_dependencies();
+        let max_allowed_status = if distance >= dependencies.size() as i32 {
+            None
+        } else {
+            Some(dependencies.get(distance as usize))
+        };
+
+        let actual_status = if let Some(max_allowed) = max_allowed_status {
+            let holder = self.cache.get(chunk_x, chunk_z);
+            if target_status.is_or_before(max_allowed)
+                && let Some(chunk) = holder.generation_view(max_allowed)
+            {
+                return Ok(chunk);
+            }
+            holder.get_persisted_status()
+        } else {
+            None
+        };
+
+        Err(UnavailableChunkDiagnostic {
+            chunk_x,
+            chunk_z,
+            generating_status: self.generating_step.target_status(),
+            requested_status: target_status,
+            actual_status,
+            max_allowed_status,
+            dependencies: dependencies.as_list().to_vec(),
+            distance,
+            generating_chunk: self.center_pos,
+        })
+    }
+
+    fn try_get_chunk_view_mut(
         &mut self,
         chunk_x: i32,
         chunk_z: i32,
         target_status: ChunkStatus,
         _load_or_generate: bool,
-    ) -> Result<&mut ChunkAccess<T, B, S>, UnavailableChunkDiagnostic> {
+    ) -> Result<&mut dyn GenerationChunkView<T, B, S>, UnavailableChunkDiagnostic> {
         let distance = self
             .center_pos
             .get_chessboard_distance_coords(chunk_x, chunk_z);
@@ -1079,7 +1206,7 @@ where
             // immutable holder borrow at once.
             let persisted = holder.get_persisted_status();
             if target_status.is_or_before(max_allowed)
-                && let Some(chunk) = holder.get_chunk_if_present_unchecked_mut(max_allowed)
+                && let Some(chunk) = holder.generation_view_mut(max_allowed)
             {
                 return Ok(chunk);
             }
@@ -1105,11 +1232,20 @@ where
         })
     }
 
-    /// `WorldGenRegion.getChunk(int, int)` mutable half — the 2-arg contract
-    /// for `setBlock`.
-    fn get_chunk_mut(&mut self, chunk_x: i32, chunk_z: i32) -> &mut ChunkAccess<T, B, S> {
-        self.try_get_chunk_mut(chunk_x, chunk_z, ChunkStatus::Empty, true)
-            .unwrap_or_else(|diagnostic| panic!("{}", diagnostic))
+    fn get_chunk_view(&self, x: i32, z: i32) -> &dyn GenerationChunkView<T, B, S> {
+        self.try_get_chunk_view(x, z, ChunkStatus::Empty, true)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+    fn get_chunk_view_mut(&mut self, x: i32, z: i32) -> &mut dyn GenerationChunkView<T, B, S> {
+        self.try_get_chunk_view_mut(x, z, ChunkStatus::Empty, true)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    #[cfg(test)]
+    fn get_chunk_mut(&mut self, x: i32, z: i32) -> &mut ChunkAccess<T, B, S> {
+        self.get_chunk_view_mut(x, z)
+            .proto_base_mut()
+            .expect("pure-proto fixture accessor")
     }
 
     /// `LevelAccessor.createTick` followed by `getChunk(pos).getBlockTicks()`.
@@ -1121,7 +1257,7 @@ where
         let trigger_tick = self.game_time.wrapping_add(delay as i64);
         let sub_tick_order = self.next_sub_tick_order;
         self.next_sub_tick_order = self.next_sub_tick_order.wrapping_add(1);
-        self.get_chunk_mut(chunk_x, chunk_z)
+        self.get_chunk_view_mut(chunk_x, chunk_z)
             .schedule_block_tick(ScheduledTick::new_normal(
                 block,
                 *pos,
@@ -1138,7 +1274,7 @@ where
         let trigger_tick = self.game_time.wrapping_add(delay as i64);
         let sub_tick_order = self.next_sub_tick_order;
         self.next_sub_tick_order = self.next_sub_tick_order.wrapping_add(1);
-        self.get_chunk_mut(chunk_x, chunk_z)
+        self.get_chunk_view_mut(chunk_x, chunk_z)
             .schedule_fluid_tick(ScheduledTick::new_normal(
                 fluid,
                 *pos,
@@ -1189,7 +1325,7 @@ where
 
     fn existing_block_entity_nbt(&self, pos: &BlockPos) -> Option<CompoundTag> {
         let chunk = self
-            .try_get_chunk(
+            .try_get_chunk_view(
                 SectionPos::block_to_section_coord(pos.get_x()),
                 SectionPos::block_to_section_coord(pos.get_z()),
                 ChunkStatus::Empty,
@@ -1205,7 +1341,7 @@ where
         &self,
         pos: &BlockPos,
     ) -> Option<&rivet_world::block_entity::NativeBlockEntity> {
-        self.try_get_chunk(
+        self.try_get_chunk_view(
             SectionPos::block_to_section_coord(pos.get_x()),
             SectionPos::block_to_section_coord(pos.get_z()),
             ChunkStatus::Empty,
@@ -1218,7 +1354,7 @@ where
         &mut self,
         pos: &BlockPos,
     ) -> Option<&mut rivet_world::block_entity::NativeBlockEntity> {
-        self.get_chunk_mut(
+        self.get_chunk_view_mut(
             SectionPos::block_to_section_coord(pos.get_x()),
             SectionPos::block_to_section_coord(pos.get_z()),
         )
@@ -1226,6 +1362,12 @@ where
     }
     fn promote_native_block_entity(&mut self, pos: &BlockPos, state: BlockState) -> bool {
         use rivet_world::block_entity::NativeBlockEntity;
+        if let Some(result) = self
+            .get_chunk_view_mut(pos.get_x() >> 4, pos.get_z() >> 4)
+            .load_pending_native(pos)
+        {
+            return result;
+        }
         if self.native_block_entity(pos).is_some() {
             return true;
         }
@@ -1238,7 +1380,7 @@ where
             NativeBlockEntity::load(*pos, state, &tag).unwrap_or_else(|error| panic!("{error}"))
         };
         let Some(entity) = entity else { return false };
-        self.get_chunk_mut(
+        self.get_chunk_view_mut(
             SectionPos::block_to_section_coord(pos.get_x()),
             SectionPos::block_to_section_coord(pos.get_z()),
         )
@@ -1259,7 +1401,7 @@ where
         let entity = NativeBlockEntity::load(*pos, state, &normalized)
             .unwrap_or_else(|error| panic!("{error}"))
             .expect("matching native block entity");
-        let chunk = self.get_chunk_mut(
+        let chunk = self.get_chunk_view_mut(
             SectionPos::block_to_section_coord(pos.get_x()),
             SectionPos::block_to_section_coord(pos.get_z()),
         );
@@ -1330,7 +1472,7 @@ where
     }
 
     fn persist_block_entity_nbt(&mut self, pos: &BlockPos, tag: CompoundTag) {
-        self.get_chunk_mut(
+        self.get_chunk_view_mut(
             SectionPos::block_to_section_coord(pos.get_x()),
             SectionPos::block_to_section_coord(pos.get_z()),
         )
@@ -1338,7 +1480,7 @@ where
     }
 
     fn remove_persisted_block_entity(&mut self, pos: &BlockPos) {
-        self.get_chunk_mut(
+        self.get_chunk_view_mut(
             SectionPos::block_to_section_coord(pos.get_x()),
             SectionPos::block_to_section_coord(pos.get_z()),
         )
@@ -1357,7 +1499,7 @@ where
     ) -> Result<B, UnavailableChunkDiagnostic> {
         let chunk_x = QuartPos::to_section(quart_x);
         let chunk_z = QuartPos::to_section(quart_z);
-        self.try_get_chunk(chunk_x, chunk_z, ChunkStatus::Biomes, false)
+        self.try_get_chunk_view(chunk_x, chunk_z, ChunkStatus::Biomes, false)
             .map(|chunk| chunk.get_noise_biome(quart_x, quart_y, quart_z))
     }
 
@@ -1437,7 +1579,7 @@ where
     /// the target chunk is light-correct. Afterwards its BLOCK listener reads
     /// the visible Starlight nibbles. Never substitute skylight or emission.
     pub fn get_block_brightness(&self, pos: &BlockPos) -> i32 {
-        let chunk = self.get_chunk(pos.get_x() >> 4, pos.get_z() >> 4);
+        let chunk = self.get_chunk_view(pos.get_x() >> 4, pos.get_z() >> 4);
         if !chunk.is_light_correct() {
             return 0;
         }
@@ -1457,7 +1599,7 @@ where
         let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
         let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
         let chunk = self
-            .try_get_chunk(chunk_x, chunk_z, ChunkStatus::Empty, false)
+            .try_get_chunk_view(chunk_x, chunk_z, ChunkStatus::Empty, false)
             .ok()?;
         if !chunk.is_light_correct() {
             return None;
@@ -1508,7 +1650,7 @@ impl WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
         let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
         let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
         self.warn_if_read_outside_write_zone(chunk_x, chunk_z);
-        let chunk = self.get_chunk(chunk_x, chunk_z);
+        let chunk = self.get_chunk_view(chunk_x, chunk_z);
         let state = chunk_block_state(chunk, pos);
         FluidId(state.fluid_id())
     }
@@ -1567,16 +1709,19 @@ impl WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
             .then(|| block_state.post_process_pos(pos))
             .flatten();
         let old_state = {
-            let chunk = self.get_chunk_mut(chunk_x, chunk_z);
+            let chunk = self.get_chunk_view_mut(chunk_x, chunk_z);
             // `oldState` — the previous state `chunk.setBlockState` returns; the
             // block-entity removal (`oldState.hasBlockEntity()`) and POI update
             // read it, so the write retains it for those deferred seams (#185).
+            let Some(chunk) = chunk.proto_base_mut() else {
+                return false;
+            };
             write_block(chunk, pos, block_state, persisted_status)
         };
         if let Some(post_process_pos) = post_process_pos {
             let post_process_chunk_x = SectionPos::block_to_section_coord(post_process_pos.get_x());
             let post_process_chunk_z = SectionPos::block_to_section_coord(post_process_pos.get_z());
-            self.get_chunk_mut(post_process_chunk_x, post_process_chunk_z)
+            self.get_chunk_view_mut(post_process_chunk_x, post_process_chunk_z)
                 .mark_pos_for_post_processing(&post_process_pos);
         }
         self.materialize_block_entity(pos, block_state, BlockState::new(old_state));
@@ -1601,7 +1746,7 @@ impl WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> {
         let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
         let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
         self.warn_if_read_outside_write_zone(chunk_x, chunk_z);
-        let chunk = self.get_chunk(chunk_x, chunk_z);
+        let chunk = self.get_chunk_view(chunk_x, chunk_z);
         chunk_block_state(chunk, pos)
     }
 }
@@ -1910,7 +2055,7 @@ impl WorldGenLevel for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> 
     fn mark_pos_for_post_processing(&mut self, pos: &BlockPos) {
         let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
         let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
-        self.get_chunk_mut(chunk_x, chunk_z)
+        self.get_chunk_view_mut(chunk_x, chunk_z)
             .mark_pos_for_post_processing(pos);
     }
 
@@ -1952,7 +2097,7 @@ impl WorldGenLevel for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> 
         let chunk_x = SectionPos::block_to_section_coord(x);
         let chunk_z = SectionPos::block_to_section_coord(z);
         self.warn_if_read_outside_write_zone(chunk_x, chunk_z);
-        let chunk = self.get_chunk_mut(chunk_x, chunk_z);
+        let chunk = self.get_chunk_view_mut(chunk_x, chunk_z);
         chunk.get_height_at(ty, x, z) + 1
     }
 
@@ -2024,13 +2169,16 @@ impl WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
             .then(|| block_state.post_process_pos(pos))
             .flatten();
         let old_state = {
-            let chunk = self.get_chunk_mut(chunk_x, chunk_z);
+            let chunk = self.get_chunk_view_mut(chunk_x, chunk_z);
+            let Some(chunk) = chunk.proto_base_mut() else {
+                return false;
+            };
             write_block_blockstate(chunk, pos, block_state, persisted_status)
         };
         if let Some(post_process_pos) = post_process_pos {
             let post_process_chunk_x = SectionPos::block_to_section_coord(post_process_pos.get_x());
             let post_process_chunk_z = SectionPos::block_to_section_coord(post_process_pos.get_z());
-            self.get_chunk_mut(post_process_chunk_x, post_process_chunk_z)
+            self.get_chunk_view_mut(post_process_chunk_x, post_process_chunk_z)
                 .mark_pos_for_post_processing(&post_process_pos);
         }
         self.materialize_block_entity(pos, block_state, old_state);
@@ -2049,7 +2197,7 @@ impl WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
         let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
         let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
         self.warn_if_read_outside_write_zone(chunk_x, chunk_z);
-        let chunk = self.get_chunk(chunk_x, chunk_z);
+        let chunk = self.get_chunk_view(chunk_x, chunk_z);
         chunk_block_state_blockstate(chunk, pos)
     }
 }
@@ -2231,7 +2379,7 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
     fn mark_pos_for_post_processing(&mut self, pos: &BlockPos) {
         let chunk_x = SectionPos::block_to_section_coord(pos.get_x());
         let chunk_z = SectionPos::block_to_section_coord(pos.get_z());
-        self.get_chunk_mut(chunk_x, chunk_z)
+        self.get_chunk_view_mut(chunk_x, chunk_z)
             .mark_pos_for_post_processing(pos);
     }
 
@@ -2259,7 +2407,7 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
         let chunk_x = SectionPos::block_to_section_coord(x);
         let chunk_z = SectionPos::block_to_section_coord(z);
         self.warn_if_read_outside_write_zone(chunk_x, chunk_z);
-        let chunk = self.get_chunk_mut(chunk_x, chunk_z);
+        let chunk = self.get_chunk_view_mut(chunk_x, chunk_z);
         chunk.get_height_at(ty, x, z) + 1
     }
 
@@ -2299,19 +2447,14 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
 /// both states are `isAir()` with an empty fluid, which is all the value-layer
 /// consumers observe.
 fn chunk_block_state(
-    chunk: &ChunkAccess<StateId, ServerBiomeId, StructureKey>,
+    chunk: &dyn GenerationChunkView<StateId, ServerBiomeId, StructureKey>,
     pos: &BlockPos,
 ) -> BlockState {
-    let y = pos.get_y();
-    if chunk.is_outside_build_height(y) {
-        return BlockState::new(StateId(0));
+    if chunk.is_outside_build_height(pos.get_y()) {
+        BlockState::new(StateId(0))
+    } else {
+        BlockState::new(chunk.block_in_bounds(pos))
     }
-    let section_index = chunk.get_section_index(y);
-    let section = chunk.get_section(section_index as usize);
-    if section.non_empty_block_count() == 0 {
-        return BlockState::new(StateId(0));
-    }
-    BlockState::new(section.get_block_state(pos.get_x() & 15, y & 15, pos.get_z() & 15))
 }
 
 /// The region's block-state write — the section-level `setBlockState` with the
@@ -2416,19 +2559,14 @@ fn state_is_special_colliding(_state: &StateId) -> bool {
 /// type — air for an out-of-build-height or all-air position, else the section
 /// storage read (which returns `BlockState` directly since `T = BlockState`).
 fn chunk_block_state_blockstate(
-    chunk: &ChunkAccess<BlockState, WorldgenBiomeId, StructureKey>,
+    chunk: &dyn GenerationChunkView<BlockState, WorldgenBiomeId, StructureKey>,
     pos: &BlockPos,
 ) -> BlockState {
-    let y = pos.get_y();
-    if chunk.is_outside_build_height(y) {
-        return BlockState::of(BlockId(794));
+    if chunk.is_outside_build_height(pos.get_y()) {
+        BlockState::of(BlockId(794))
+    } else {
+        chunk.block_in_bounds(pos)
     }
-    let section_index = chunk.get_section_index(y);
-    let section = chunk.get_section(section_index as usize);
-    if section.non_empty_block_count() == 0 {
-        return BlockState::new(StateId(0));
-    }
-    section.get_block_state(pos.get_x() & 15, y & 15, pos.get_z() & 15)
 }
 
 /// The region's block-state write over the FEATURES-pass `BlockState` value
@@ -2512,7 +2650,7 @@ impl WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
     ) -> Result<Vec<ChunkPos>, super::structure_placement::StructurePlacementError> {
         let center = self.get_center();
         let chunk = self
-            .try_get_chunk(
+            .try_get_chunk_view(
                 center.x(),
                 center.z(),
                 ChunkStatus::StructureReferences,
@@ -2520,8 +2658,9 @@ impl WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
             )
             .map_err(super::structure_placement::StructurePlacementError::RegionUnavailable)?;
         Ok(chunk
-            .get_references_for_structure(structure)
-            .map(|key| ChunkPos::unpack(*key as i64))
+            .references(structure)
+            .into_iter()
+            .map(|key| ChunkPos::unpack(key as i64))
             .collect())
     }
 
@@ -2534,7 +2673,7 @@ impl WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
         super::structure_placement::StructurePlacementError,
     > {
         let chunk = self
-            .try_get_chunk(source.x(), source.z(), ChunkStatus::StructureStarts, true)
+            .try_get_chunk_view(source.x(), source.z(), ChunkStatus::StructureStarts, true)
             .map_err(super::structure_placement::StructurePlacementError::RegionUnavailable)?;
         if chunk.has_unkeyed_starts() {
             return Err(
@@ -2562,7 +2701,7 @@ impl WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
             chunk::structure_access::StructureStartEntry, levelgen::structure::StructureError,
         };
         let chunk = self
-            .try_get_chunk_mut(source.x(), source.z(), ChunkStatus::StructureStarts, true)
+            .try_get_chunk_view_mut(source.x(), source.z(), ChunkStatus::StructureStarts, true)
             .map_err(super::structure_placement::StructurePlacementError::RegionUnavailable)?;
         if chunk.has_unkeyed_starts() {
             return Err(
@@ -2596,11 +2735,103 @@ impl WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {
         // transformer callbacks. This unique job cannot remove the checked
         // slot or transfer its chunk while a start is loaned.
         let chunk = self
-            .try_get_chunk_mut(source.x(), source.z(), ChunkStatus::StructureStarts, true)
+            .try_get_chunk_view_mut(source.x(), source.z(), ChunkStatus::StructureStarts, true)
             .expect("placement loan retains its canonical source chunk");
         *chunk
             .get_start_for_structure_mut(structure)
             .expect("placement loan retains its key slot") = entry;
+    }
+}
+
+/// A scoped exclusive loan of the real host-owned runtime value. Its view
+/// delegates reads and the source's explicitly permitted side effects, never
+/// recreates a proto or copies terrain into a second authority.
+pub struct OwnedRuntimeHolder {
+    chunk: super::level_chunk::LevelChunk,
+}
+impl OwnedRuntimeHolder {
+    pub fn new(chunk: super::level_chunk::LevelChunk) -> Self {
+        Self { chunk }
+    }
+}
+impl GenerationChunkHolderView<BlockState, WorldgenBiomeId, StructureKey> for OwnedRuntimeHolder {
+    fn is_runtime(&self) -> bool {
+        true
+    }
+    fn get_chunk_if_present_unchecked(
+        &self,
+        _: ChunkStatus,
+    ) -> Option<&ChunkAccess<BlockState, WorldgenBiomeId, StructureKey>> {
+        None
+    }
+    fn get_chunk_if_present_unchecked_mut(
+        &mut self,
+        _: ChunkStatus,
+    ) -> Option<&mut ChunkAccess<BlockState, WorldgenBiomeId, StructureKey>> {
+        None
+    }
+    fn get_persisted_status(&self) -> Option<ChunkStatus> {
+        Some(ChunkStatus::Full)
+    }
+    fn generation_view(
+        &self,
+        _: ChunkStatus,
+    ) -> Option<&dyn GenerationChunkView<BlockState, WorldgenBiomeId, StructureKey>> {
+        Some(&self.chunk)
+    }
+    fn generation_view_mut(
+        &mut self,
+        _: ChunkStatus,
+    ) -> Option<&mut dyn GenerationChunkView<BlockState, WorldgenBiomeId, StructureKey>> {
+        Some(&mut self.chunk)
+    }
+    fn into_owned_dependency(
+        self: Box<Self>,
+    ) -> Option<OwnedGenerationChunk<BlockState, WorldgenBiomeId, StructureKey>> {
+        Some(OwnedGenerationChunk::Runtime(self.chunk))
+    }
+}
+
+pub struct BorrowedRuntimeHolder<'a> {
+    chunk: &'a mut super::level_chunk::LevelChunk,
+}
+impl<'a> BorrowedRuntimeHolder<'a> {
+    pub fn new(chunk: &'a mut super::level_chunk::LevelChunk) -> Self {
+        Self { chunk }
+    }
+}
+impl GenerationChunkHolderView<BlockState, WorldgenBiomeId, StructureKey>
+    for BorrowedRuntimeHolder<'_>
+{
+    fn is_runtime(&self) -> bool {
+        true
+    }
+    fn get_chunk_if_present_unchecked(
+        &self,
+        _: ChunkStatus,
+    ) -> Option<&ChunkAccess<BlockState, WorldgenBiomeId, StructureKey>> {
+        None
+    }
+    fn get_chunk_if_present_unchecked_mut(
+        &mut self,
+        _: ChunkStatus,
+    ) -> Option<&mut ChunkAccess<BlockState, WorldgenBiomeId, StructureKey>> {
+        None
+    }
+    fn get_persisted_status(&self) -> Option<ChunkStatus> {
+        Some(ChunkStatus::Full)
+    }
+    fn generation_view(
+        &self,
+        _: ChunkStatus,
+    ) -> Option<&dyn GenerationChunkView<BlockState, WorldgenBiomeId, StructureKey>> {
+        Some(&*self.chunk)
+    }
+    fn generation_view_mut(
+        &mut self,
+        _: ChunkStatus,
+    ) -> Option<&mut dyn GenerationChunkView<BlockState, WorldgenBiomeId, StructureKey>> {
+        Some(&mut *self.chunk)
     }
 }
 

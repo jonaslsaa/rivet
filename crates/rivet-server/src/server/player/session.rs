@@ -267,39 +267,9 @@ impl PlayerSessionManager {
         Vec<crate::server::level::entity_post_load::DuplicateUuidDecision>,
         crate::server::level::server_level::LevelEntityError,
     > {
-        use crate::server::level::entity_lookup::{
-            EntityLifecycle, EntityLifecycleEvent, EntityLookupError,
-        };
         use crate::server::level::entity_post_load::ExistingEntityView;
-        use rivet_util::mth::Uuid;
-        use rivet_world::entity::loaded_entity::NativeLoadedEntity;
-        struct SessionLifecycle<'a> {
-            indices: &'a PlayerIndices,
-            sessions: &'a std::collections::HashMap<ConnectionId, Session>,
-            runtime: &'a mut dyn EntityLifecycle,
-        }
-        impl EntityLifecycle for SessionLifecycle<'_> {
-            fn external_uuid_in_use(&self, uuid: &Uuid) -> bool {
-                self.indices
-                    .connection_for(uuid)
-                    .is_some_and(|id| self.sessions.contains_key(&id))
-                    || self.runtime.external_uuid_in_use(uuid)
-            }
-            fn on_event(
-                &mut self,
-                event: EntityLifecycleEvent,
-                entity: &NativeLoadedEntity,
-            ) -> Result<(), EntityLookupError> {
-                self.runtime.on_event(event, entity)
-            }
-        }
         let indices = &self.indices;
         let sessions = &self.sessions;
-        let mut lifecycle = SessionLifecycle {
-            indices,
-            sessions,
-            runtime: lifecycle,
-        };
         self.level.run_chunk_entity_post_load(
             pos,
             context,
@@ -311,7 +281,37 @@ impl PlayerSessionManager {
                     is_removed: false,
                 })
             },
-            &mut lifecycle,
+            lifecycle,
+            crate::server::level::world_identity::random_uuid,
+        )
+    }
+
+    /// Uses the level's retained concrete tracker and the same borrowed live
+    /// player projection as generic post-load; no second session UUID index.
+    pub fn run_tracked_chunk_entity_post_load(
+        &mut self,
+        pos: rivet_registry::core::ChunkPos,
+        context: &mut crate::server::level::entity_post_load::EntityPostLoadContext<'_>,
+        authority: &mut dyn crate::server::level::entity_tracking::TrackingAuthority,
+    ) -> Result<
+        Vec<crate::server::level::entity_post_load::DuplicateUuidDecision>,
+        crate::server::level::server_level::LevelEntityError,
+    > {
+        use crate::server::level::entity_post_load::ExistingEntityView;
+        let indices = &self.indices;
+        let sessions = &self.sessions;
+        self.level.run_tracked_chunk_entity_post_load(
+            pos,
+            context,
+            |uuid| {
+                let session = sessions.get(&indices.connection_for(&uuid)?)?;
+                Some(ExistingEntityView {
+                    encode_id: None,
+                    position: session.player.position(),
+                    is_removed: false,
+                })
+            },
+            authority,
             crate::server::level::world_identity::random_uuid,
         )
     }

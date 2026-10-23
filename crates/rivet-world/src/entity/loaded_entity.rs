@@ -11,6 +11,42 @@ pub enum NativeLoadedEntity {
     Creature(NativeGenerationCreature),
 }
 impl NativeLoadedEntity {
+    pub fn tracking_snapshot(&self) -> super::tracking::EntityTrackingSnapshot {
+        match self {
+            Self::ChestMinecart(e) => e.tracking_snapshot(),
+            Self::Creature(e) => e.tracking_snapshot(),
+        }
+    }
+    pub fn lifecycle(&self) -> &super::tracking::NativeLifecycleState {
+        match self {
+            Self::ChestMinecart(e) => e.lifecycle(),
+            Self::Creature(e) => e.entity().lifecycle(),
+        }
+    }
+    pub fn mark_created(&mut self) {
+        match self {
+            Self::ChestMinecart(e) => e.mark_created(),
+            Self::Creature(e) => e.entity_mut().mark_created(),
+        }
+    }
+    pub fn begin_tracking(&mut self) {
+        match self {
+            Self::ChestMinecart(e) => e.begin_tracking(),
+            Self::Creature(e) => e.entity_mut().begin_tracking(),
+        }
+    }
+    pub fn initialize_tracking_origin(&mut self) {
+        match self {
+            Self::ChestMinecart(e) => e.initialize_tracking_origin(),
+            Self::Creature(e) => e.entity_mut().initialize_tracking_origin(),
+        }
+    }
+    pub fn mark_tracking_end(&mut self) {
+        match self {
+            Self::ChestMinecart(e) => e.mark_tracking_end(),
+            Self::Creature(e) => e.entity_mut().mark_tracking_end(),
+        }
+    }
     pub fn encode_id(&self) -> &'static str {
         match self {
             Self::ChestMinecart(_) => "minecraft:chest_minecart",

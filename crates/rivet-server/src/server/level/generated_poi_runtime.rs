@@ -157,5 +157,16 @@ mod tests {
                 .unwrap(),
             "retry does not reinstall or rebuild an already valid section"
         );
+        level.promote_generated_chunk(pos).unwrap();
+        assert!(level.chunk_map().get_chunk(pos).is_some());
+        assert!(level.generated_chunk_owner().unwrap().is_promoted(pos));
+        assert!(matches!(
+            level.prepare_chunk_for_send(pos),
+            Ok(ChunkSendReadiness::Pending)
+        ));
+        assert!(
+            level.promote_generated_chunk(pos).is_err(),
+            "promotion must not replace the canonical runtime on retry"
+        );
     }
 }

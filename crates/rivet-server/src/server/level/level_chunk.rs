@@ -139,6 +139,18 @@ pub struct LevelChunk {
 }
 
 impl LevelChunk {
+    pub(super) fn generation_base(
+        &self,
+    ) -> &rivet_world::chunk::chunk_access::ChunkAccess<StateId, BiomeId, StructureKey> {
+        self.chunk.get_base()
+    }
+
+    pub(super) fn generation_base_mut(
+        &mut self,
+    ) -> &mut rivet_world::chunk::chunk_access::ChunkAccess<StateId, BiomeId, StructureKey> {
+        self.chunk.base_mut()
+    }
+
     /// `new LevelChunk(ServerLevel, ChunkPos)` — builds the deterministic
     /// single-stone superflat content for the given chunk.
     pub fn new(pos: ChunkPos) -> Self {
@@ -353,6 +365,43 @@ impl LevelChunk {
         Self::from_proto_values(proto)
     }
 
+    /// Validate precisely the fallible palette re-encoding before a scheduler
+    /// relinquishes the original proto. Each temporary target section is
+    /// discarded immediately; no chunk metadata/entity/container is cloned and
+    /// no alternate terrain authority survives this preflight. Mapping uses
+    /// immutable IDs and the same target strategies as from_proto_values.
+    pub(super) fn validate_generated_spawn_proto(
+        proto: &ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+    ) -> Result<(), LevelChunkBridgeError> {
+        if proto.get_persisted_status() != ChunkStatus::Spawn {
+            return Err(LevelChunkBridgeError::GeneratedStatusNotSpawn(
+                proto.get_persisted_status(),
+            ));
+        }
+        if proto
+            .block_nibbles()
+            .iter()
+            .chain(proto.sky_nibbles())
+            .any(|nibble| nibble.has_unknown_state_visible())
+        {
+            return Err(LevelChunkBridgeError::UnsupportedLightState(
+                UnsupportedLightState,
+            ));
+        }
+        let (blocks, biomes) = strategies();
+        for section in proto.get_sections() {
+            section
+                .map_values_ref(
+                    &blocks,
+                    &biomes,
+                    &|state: &BlockState| state.id(),
+                    &|biome: &WorldgenBiomeId| BiomeId(biome.0),
+                )
+                .map_err(LevelChunkBridgeError::PaletteMap)?;
+        }
+        Ok(())
+    }
+
     fn from_proto_values(
         mut proto: ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
     ) -> Result<Self, LevelChunkBridgeError> {
@@ -372,10 +421,9 @@ impl LevelChunk {
         // LevelChunk(proto) installs the same live objects through
         // setBlockEntity, reconciling cached state to the actual terrain and
         // clearing their removed flag. Proto/WGR same-block writes did neither.
-        let states: Vec<_> = proto
-            .base()
-            .block_entities()
-            .keys()
+        let source_positions = proto.base().block_entity_positions_in_source_order();
+        let states: Vec<_> = source_positions
+            .iter()
             .map(|pos| {
                 (
                     *pos,
@@ -391,6 +439,9 @@ impl LevelChunk {
                 proto.base_mut().remove_block_entity(&pos);
             }
         }
+        proto
+            .base_mut()
+            .prepare_level_block_entity_order(source_positions);
         // Paper's full task hands ProtoChunk entities to postLoadProtoChunk.
         // Preserve the owned tags until the ServerLevel integration can consume
         // them; do not silently drop a representation already modeled by Rivet.

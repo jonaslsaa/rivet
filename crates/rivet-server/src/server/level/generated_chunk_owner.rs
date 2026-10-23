@@ -23,6 +23,7 @@ pub enum GenerationOwnerError {
     RuntimeUnavailable { status: ChunkStatus },
     LightProjection(crate::server::lighting::GeneratedLightBridgeError),
     LightWorkspace(crate::server::lighting::GeneratedLightWorkspaceError),
+    PromotedRuntimeUnavailable { pos: ChunkPos },
 }
 impl std::fmt::Display for GenerationOwnerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -39,6 +40,10 @@ impl std::fmt::Display for GenerationOwnerError {
             }
             Self::LightProjection(error) => write!(f, "generated lighting: {error}"),
             Self::LightWorkspace(error) => write!(f, "generated lighting workspace: {error:?}"),
+            Self::PromotedRuntimeUnavailable { pos } => write!(
+                f,
+                "canonical promoted runtime {pos} is unavailable from the host"
+            ),
         }
     }
 }
@@ -70,6 +75,29 @@ struct Entry {
     failure: Option<(ChunkStatus, GenerationOwnerError)>,
 }
 
+struct PromotedEntry {
+    // Same holder metadata survives replacement by ImposterProtoChunk. The
+    // terrain/BE/entity/tick value itself lives exclusively in ChunkMap.
+    _metadata: GenerationChunkLoan,
+    activated: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum GenerationPromotionError {
+    #[error("chunk {0} has no canonical completed SPAWN proto")]
+    NotSpawn(ChunkPos),
+    #[error("chunk {0} still retains generation dependencies or a terminal failure")]
+    RetainedWork(ChunkPos),
+    #[error("promoted chunk {0} is missing from its canonical runtime host")]
+    MissingRuntime(ChunkPos),
+    #[error("chunk {0} has not been promoted")]
+    NotPromoted(ChunkPos),
+    #[error("runtime chunk {0} is already activated")]
+    AlreadyActivated(ChunkPos),
+    #[error("chunk conversion failed: {0:?}")]
+    Conversion(super::level_chunk::LevelChunkBridgeError),
+}
+
 /// The owner retains values after cancellation. Eviction/save acknowledgement
 /// is intentionally not conflated with removing a consumer's demand.
 pub struct GeneratedChunkOwner {
@@ -78,6 +106,7 @@ pub struct GeneratedChunkOwner {
     consumers: HashMap<GenerationConsumerId, HashMap<ChunkPos, ChunkStatus>>,
     required: HashMap<ChunkPos, ChunkStatus>,
     chunks: HashMap<ChunkPos, Entry>,
+    promoted: HashMap<ChunkPos, PromotedEntry>,
     structure_runtime: Option<super::structure_generation::StructureGenerationRuntime>,
     structure_placement: Option<Arc<super::structure_placement_adapter::StructurePlacementRuntime>>,
     light_channels: Option<(bool, bool)>,
@@ -94,6 +123,7 @@ impl GeneratedChunkOwner {
             consumers: HashMap::new(),
             required: HashMap::new(),
             chunks: HashMap::new(),
+            promoted: HashMap::new(),
             structure_runtime: None,
             structure_placement: None,
             light_channels: None,
@@ -103,6 +133,79 @@ impl GeneratedChunkOwner {
     }
     pub fn generator(&self) -> &Arc<OverworldGenerator> {
         &self.generator
+    }
+
+    /// Consuming value conversion is not FULL activation. The host must install
+    /// the returned value immediately, then perform its actual lifecycle before
+    /// calling complete_full_activation. No second chunk owner is retained.
+    pub(super) fn promote_spawn(
+        &mut self,
+        pos: ChunkPos,
+    ) -> Result<super::level_chunk::LevelChunk, GenerationPromotionError> {
+        let entry = self
+            .chunks
+            .get(&pos)
+            .filter(|entry| entry.state.status() == ChunkStatus::Spawn)
+            .ok_or(GenerationPromotionError::NotSpawn(pos))?;
+        if entry.failure.is_some()
+            || entry.state.has_retained_dependencies()
+            || entry.state.has_retained_light_storage()
+        {
+            return Err(GenerationPromotionError::RetainedWork(pos));
+        }
+        super::level_chunk::LevelChunk::validate_generated_spawn_proto(entry.state.chunk())
+            .map_err(GenerationPromotionError::Conversion)?;
+        let entry = self.chunks.remove(&pos).expect("validated canonical SPAWN");
+        let (chunk, metadata) = entry.state.into_loan();
+        let runtime = super::level_chunk::LevelChunk::from_generated_spawn_proto(chunk)
+            .map_err(GenerationPromotionError::Conversion)?;
+        assert!(
+            self.promoted
+                .insert(
+                    pos,
+                    PromotedEntry {
+                        _metadata: metadata,
+                        activated: false
+                    }
+                )
+                .is_none()
+        );
+        Ok(runtime)
+    }
+
+    pub fn is_promoted(&self, pos: ChunkPos) -> bool {
+        self.promoted.contains_key(&pos)
+    }
+    pub fn is_activated(&self, pos: ChunkPos) -> bool {
+        self.promoted.get(&pos).is_some_and(|entry| entry.activated)
+    }
+
+    /// Only the tick-thread host that completed post-load, live BE/tick
+    /// registration and unsaved-listener installation may publish completion.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Actual FULL lifecycle orchestration is not installed yet; production must not bypass it merely to publish readiness"
+        )
+    )]
+    pub(super) fn complete_full_activation(
+        &mut self,
+        pos: ChunkPos,
+        host: &super::chunk_map::ChunkMap,
+    ) -> Result<(), GenerationPromotionError> {
+        if host.get_chunk(pos).is_none() {
+            return Err(GenerationPromotionError::MissingRuntime(pos));
+        }
+        let entry = self
+            .promoted
+            .get_mut(&pos)
+            .ok_or(GenerationPromotionError::NotPromoted(pos))?;
+        if entry.activated {
+            return Err(GenerationPromotionError::AlreadyActivated(pos));
+        }
+        entry.activated = true;
+        Ok(())
     }
 
     pub(super) fn install_generation_creature_factory(
@@ -266,12 +369,15 @@ impl GeneratedChunkOwner {
         self.chunks.get_mut(&pos).map(|entry| &mut entry.state)
     }
     pub fn len(&self) -> usize {
-        self.chunks.len()
+        self.chunks.len() + self.promoted.len()
     }
     pub fn is_empty(&self) -> bool {
-        self.chunks.is_empty()
+        self.chunks.is_empty() && self.promoted.is_empty()
     }
     fn status(&self, pos: ChunkPos) -> ChunkStatus {
+        if self.promoted.contains_key(&pos) {
+            return ChunkStatus::Full;
+        }
         self.state(pos)
             .map_or(ChunkStatus::Empty, GenerationChunkState::status)
     }
@@ -285,6 +391,7 @@ impl GeneratedChunkOwner {
     ) -> Result<(), Box<GenerationAdmissionError>> {
         if !state.belongs_to(&self.generator)
             || self.chunks.contains_key(&state.pos())
+            || self.promoted.contains_key(&state.pos())
             || state.has_retained_dependencies()
             || state.has_retained_light_storage()
             || state.has_structure_capability()
@@ -302,6 +409,13 @@ impl GeneratedChunkOwner {
         Ok(())
     }
     pub fn readiness(&self, pos: ChunkPos, target: ChunkStatus) -> GenerationReadiness<'_> {
+        if self
+            .promoted
+            .get(&pos)
+            .is_some_and(|entry| target != ChunkStatus::Full || entry.activated)
+        {
+            return GenerationReadiness::Ready;
+        }
         if self
             .state(pos)
             .is_some_and(|state| state.status().is_or_after(target))
@@ -332,6 +446,20 @@ impl GeneratedChunkOwner {
             .is_some_and(|entry| entry.failure.take().is_some())
     }
     pub fn run_jobs(&mut self, max_jobs: usize) -> GenerationJobReport {
+        self.run_jobs_with_host(max_jobs, None)
+    }
+    pub fn run_jobs_with_runtime(
+        &mut self,
+        max_jobs: usize,
+        runtime: &mut super::chunk_map::ChunkMap,
+    ) -> GenerationJobReport {
+        self.run_jobs_with_host(max_jobs, Some(runtime))
+    }
+    fn run_jobs_with_host(
+        &mut self,
+        max_jobs: usize,
+        mut host: Option<&mut super::chunk_map::ChunkMap>,
+    ) -> GenerationJobReport {
         let mut report = GenerationJobReport::default();
         while report.attempted < max_jobs {
             let mut ready: Vec<_> = self
@@ -340,7 +468,9 @@ impl GeneratedChunkOwner {
                 .filter_map(|(&pos, &target)| {
                     let current = self.status(pos);
                     if (current.is_or_after(target)
-                        && (self.chunks.contains_key(&pos) || target != ChunkStatus::Empty))
+                        && (self.chunks.contains_key(&pos)
+                            || self.promoted.contains_key(&pos)
+                            || target != ChunkStatus::Empty))
                         || self
                             .chunks
                             .get(&pos)
@@ -353,6 +483,9 @@ impl GeneratedChunkOwner {
                     } else {
                         ChunkStatus::ALL[current.index() + 1]
                     };
+                    if next == ChunkStatus::Full {
+                        return None;
+                    }
                     dependencies(pos, next, false)
                         .iter()
                         .all(|&(neighbor, status)| self.status(neighbor).is_or_after(status))
@@ -364,32 +497,54 @@ impl GeneratedChunkOwner {
                 break;
             };
             report.attempted += 1;
-            let entry = self.chunks.entry(pos).or_insert_with(|| Entry {
+            self.chunks.entry(pos).or_insert_with(|| Entry {
                 state: self.generator.create_holder(pos).into_state(),
                 failure: None,
             });
+            if let Some((missing, _)) =
+                dependencies(pos, next, true)
+                    .into_iter()
+                    .find(|(dependency, _)| {
+                        self.promoted.contains_key(dependency)
+                            && host
+                                .as_deref()
+                                .and_then(|host| host.get_chunk(*dependency))
+                                .is_none()
+                    })
+            {
+                self.chunks.get_mut(&pos).expect("canonical center").failure = Some((
+                    next,
+                    GenerationOwnerError::PromotedRuntimeUnavailable { pos: missing },
+                ));
+                report.failed += 1;
+                continue;
+            }
             // Existing executor structure stubs are not generation capability.
             if matches!(
                 next,
                 ChunkStatus::StructureStarts | ChunkStatus::StructureReferences
             ) {
                 let Some(mut runtime) = self.structure_runtime.take() else {
-                    entry.failure = Some((
+                    self.chunks.get_mut(&pos).expect("canonical center").failure = Some((
                         next,
                         GenerationOwnerError::StructureGenerationUnavailable { status: next },
                     ));
                     report.failed += 1;
                     continue;
                 };
-                let height = entry.state.chunk().height_accessor();
+                let height = self.chunks[&pos].state.chunk().height_accessor();
                 // Retain per-world caches/authority even on an unexpected
                 // implementation panic, just as canonical chunks are retained.
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut storage = RuntimeGenerationStorage {
+                        owner: self,
+                        host: host.as_deref_mut(),
+                    };
                     if next == ChunkStatus::StructureStarts {
-                        runtime.generate_starts(self, pos, &height)
+                        runtime.generate_starts(&mut storage, pos, &height)
                     } else {
                         super::structure_manager::StructureManager::new(
-                            self,
+                            &mut storage,
                             &super::structure_manager::UnambiguousStructureOrder,
                         )
                         .create_references_commutative(pos)
@@ -436,8 +591,13 @@ impl GeneratedChunkOwner {
                         StructureBeardifierSource, StructureManager, UnambiguousStructureOrder,
                     };
                     use rivet_world::levelgen::noise::beardifier::Beardifier;
-                    let access = self.generator.registry_access();
-                    let manager = StructureManager::new(self, &UnambiguousStructureOrder);
+                    let generator = Arc::clone(&self.generator);
+                    let access = generator.registry_access();
+                    let mut storage = RuntimeGenerationStorage {
+                        owner: self,
+                        host: host.as_deref_mut(),
+                    };
+                    let manager = StructureManager::new(&mut storage, &UnambiguousStructureOrder);
                     match Beardifier::for_structures_in_chunk(
                         &StructureBeardifierSource {
                             manager: &manager,
@@ -477,6 +637,20 @@ impl GeneratedChunkOwner {
             // from a provider projection.
             let mut light_projections = HashMap::new();
             if matches!(next, ChunkStatus::InitializeLight | ChunkStatus::Light) {
+                for &neighbor in self.promoted.keys() {
+                    if neighbor != pos
+                        && pos.get_chessboard_distance(&neighbor) <= 2
+                        && let Some(runtime) = host
+                            .as_deref()
+                            .and_then(|host| host.get_chunk(neighbor))
+                            .filter(|runtime| runtime.is_light_correct())
+                    {
+                        light_projections.insert(
+                            (neighbor.x(), neighbor.z()),
+                            runtime.generation_base().copy(),
+                        );
+                    }
+                }
                 let projection_result = self.chunks.iter().try_for_each(|(&neighbor, entry)| {
                     if neighbor != pos
                         && pos.get_chessboard_distance(&neighbor) <= 2
@@ -521,9 +695,19 @@ impl GeneratedChunkOwner {
                 };
             let entry = self.chunks.remove(&pos).expect("selected canonical chunk");
             let workspace = FeatureWorkspace::new();
+            let runtime_workspace = workspace.clone();
             let mut loans = HashMap::new();
             if next == ChunkStatus::Features {
                 for (neighbor, _) in dependencies(pos, next, true) {
+                    if self.promoted.contains_key(&neighbor) {
+                        workspace.insert_runtime(
+                            host.as_deref_mut()
+                                .expect("validated runtime host")
+                                .take(neighbor)
+                                .expect("validated runtime dependency"),
+                        );
+                        continue;
+                    }
                     let entry = self
                         .chunks
                         .remove(&neighbor)
@@ -538,6 +722,9 @@ impl GeneratedChunkOwner {
                 // The scheduler has already proved the exact radius-one
                 // BIOMES prerequisite. Preserve the full proto, not its base.
                 for (neighbor, _) in dependencies(pos, next, false) {
+                    if self.promoted.contains_key(&neighbor) {
+                        continue;
+                    }
                     let entry = self
                         .chunks
                         .remove(&neighbor)
@@ -547,9 +734,19 @@ impl GeneratedChunkOwner {
                     loans.insert(neighbor, (metadata, entry.failure));
                 }
                 Some(
-                    SpawnRegionProtos::new_with_world_border_settings(
+                    SpawnRegionProtos::new_with_runtime(
                         pos,
                         neighbors,
+                        dependencies(pos, next, false)
+                            .into_iter()
+                            .filter(|(neighbor, _)| self.promoted.contains_key(neighbor))
+                            .map(|(neighbor, _)| {
+                                host.as_deref_mut()
+                                    .expect("validated runtime host")
+                                    .take(neighbor)
+                                    .expect("validated runtime dependency")
+                            })
+                            .collect::<Vec<_>>(),
                         self.spawn_settings.expect("validated SPAWN settings").0,
                     )
                     .expect("canonical exact radius-one neighbors"),
@@ -565,7 +762,18 @@ impl GeneratedChunkOwner {
             ) {
                 Ok(result) => result,
                 Err(error) => {
+                    for runtime in runtime_workspace.take_all_runtime() {
+                        host.as_deref_mut()
+                            .expect("runtime loan host")
+                            .install(runtime.pos(), runtime);
+                    }
                     if let Some(workspace) = spawn_workspace.take() {
+                        let mut workspace = workspace;
+                        for runtime in workspace.take_runtime_neighbours() {
+                            host.as_deref_mut()
+                                .expect("runtime loan host")
+                                .install(runtime.pos(), runtime);
+                        }
                         let chunks = workspace
                             .into_neighbours()
                             .into_iter()
@@ -618,25 +826,33 @@ impl GeneratedChunkOwner {
             }));
             if let Some(storage) = holder.take_generated_light_storage() {
                 for ((x, z), projection) in storage {
-                    let canonical = self
-                        .chunks
-                        .get_mut(&ChunkPos::new(x, z))
-                        .expect("lighting projection still has its canonical owner")
-                        .state
-                        .chunk_mut()
-                        .base_mut();
-                    canonical.set_block_nibbles(projection.block_nibbles().to_vec());
-                    canonical.set_sky_nibbles(projection.sky_nibbles().to_vec());
-                    canonical.set_block_emptiness_map(
-                        projection.block_emptiness_map().map(<[bool]>::to_vec),
-                    );
-                    canonical.set_sky_emptiness_map(
-                        projection.sky_emptiness_map().map(<[bool]>::to_vec),
-                    );
+                    let pos = ChunkPos::new(x, z);
+                    if let Some(entry) = self.chunks.get_mut(&pos) {
+                        publish_runtime_light(entry.state.chunk_mut().base_mut(), &projection);
+                    } else {
+                        publish_runtime_light(
+                            host.as_deref_mut()
+                                .expect("runtime light host")
+                                .get_chunk_mut(pos)
+                                .expect("canonical runtime projection")
+                                .generation_base_mut(),
+                            &projection,
+                        );
+                    };
                 }
             }
             let mut state = holder.into_state();
-            if let Some(workspace) = spawn_workspace {
+            for runtime in runtime_workspace.take_all_runtime() {
+                host.as_deref_mut()
+                    .expect("runtime loan host")
+                    .install(runtime.pos(), runtime);
+            }
+            if let Some(mut workspace) = spawn_workspace {
+                for runtime in workspace.take_runtime_neighbours() {
+                    host.as_deref_mut()
+                        .expect("runtime loan host")
+                        .install(runtime.pos(), runtime);
+                }
                 let chunks = workspace
                     .into_neighbours()
                     .into_iter()
@@ -713,6 +929,140 @@ impl GeneratedChunkOwner {
     }
 }
 
+fn publish_runtime_light<T, B>(
+    canonical: &mut rivet_world::chunk::chunk_access::ChunkAccess<
+        T,
+        B,
+        super::level_chunk::StructureKey,
+    >,
+    projection: &rivet_world::chunk::chunk_access::ChunkAccess<
+        super::level_chunk::StateId,
+        super::level_chunk::BiomeId,
+        super::level_chunk::StructureKey,
+    >,
+) where
+    T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+    B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
+{
+    canonical.set_block_nibbles(projection.block_nibbles().to_vec());
+    canonical.set_sky_nibbles(projection.sky_nibbles().to_vec());
+    canonical.set_block_emptiness_map(projection.block_emptiness_map().map(<[bool]>::to_vec));
+    canonical.set_sky_emptiness_map(projection.sky_emptiness_map().map(<[bool]>::to_vec));
+}
+
+/// Short-lived view joining proto ownership with the actual ChunkMap host.
+/// No copied starts/references are installed in the generation owner.
+struct RuntimeGenerationStorage<'a> {
+    owner: &'a mut GeneratedChunkOwner,
+    host: Option<&'a mut super::chunk_map::ChunkMap>,
+}
+impl super::structure_manager::StructureChunkStorage for RuntimeGenerationStorage<'_> {
+    fn status(&self, pos: ChunkPos) -> Option<ChunkStatus> {
+        self.owner
+            .state(pos)
+            .map(GenerationChunkState::status)
+            .or_else(|| {
+                self.host
+                    .as_deref()?
+                    .get_chunk(pos)
+                    .map(super::level_chunk::LevelChunk::get_persisted_status)
+            })
+    }
+    fn has_unkeyed_starts(&self, pos: ChunkPos) -> bool {
+        if let Some(state) = self.owner.state(pos) {
+            state.chunk().base().has_unkeyed_starts()
+        } else {
+            self.host
+                .as_deref()
+                .expect("validated runtime host")
+                .get_chunk(pos)
+                .expect("validated runtime dependency")
+                .has_unkeyed_starts()
+        }
+    }
+    fn start_keys(&self, pos: ChunkPos) -> Vec<rivet_registry::Identifier> {
+        if let Some(state) = self.owner.state(pos) {
+            state.chunk().get_all_starts().keys().cloned().collect()
+        } else {
+            self.host
+                .as_deref()
+                .expect("validated runtime host")
+                .get_chunk(pos)
+                .expect("validated runtime dependency")
+                .get_all_starts()
+                .keys()
+                .cloned()
+                .collect()
+        }
+    }
+    fn start(
+        &self,
+        pos: ChunkPos,
+        key: &rivet_registry::Identifier,
+    ) -> Option<&rivet_world::chunk::structure_access::StructureStartEntry> {
+        if let Some(state) = self.owner.state(pos) {
+            state.chunk().get_start_for_structure(key)
+        } else {
+            self.host
+                .as_deref()?
+                .get_chunk(pos)?
+                .get_start_for_structure(key)
+        }
+    }
+    fn set_start(
+        &mut self,
+        pos: ChunkPos,
+        key: rivet_registry::Identifier,
+        start: rivet_world::chunk::structure_access::StructureStartEntry,
+    ) {
+        if let Some(state) = self.owner.state_mut(pos) {
+            state.chunk_mut().set_start_for_structure(key, start);
+        }
+    }
+    fn reference_keys(&self, pos: ChunkPos) -> Vec<rivet_registry::Identifier> {
+        if let Some(state) = self.owner.state(pos) {
+            state.chunk().get_all_references().keys().cloned().collect()
+        } else {
+            self.host
+                .as_deref()
+                .expect("validated runtime host")
+                .get_chunk(pos)
+                .expect("validated runtime dependency")
+                .generation_base()
+                .get_all_references()
+                .keys()
+                .cloned()
+                .collect()
+        }
+    }
+    fn references(&self, pos: ChunkPos, key: &rivet_registry::Identifier) -> Vec<u64> {
+        if let Some(state) = self.owner.state(pos) {
+            state
+                .chunk()
+                .get_references_for_structure(key)
+                .copied()
+                .collect()
+        } else {
+            self.host
+                .as_deref()
+                .expect("validated runtime host")
+                .get_chunk(pos)
+                .expect("validated runtime dependency")
+                .generation_base()
+                .get_references_for_structure(key)
+                .copied()
+                .collect()
+        }
+    }
+    fn add_reference(&mut self, pos: ChunkPos, key: rivet_registry::Identifier, reference: u64) {
+        if let Some(state) = self.owner.state_mut(pos) {
+            state
+                .chunk_mut()
+                .add_reference_for_structure(key, reference);
+        }
+    }
+}
+
 fn dependencies(
     pos: ChunkPos,
     target: ChunkStatus,
@@ -747,6 +1097,121 @@ mod tests {
         static GENERATOR: std::sync::LazyLock<Arc<OverworldGenerator>> =
             std::sync::LazyLock::new(|| Arc::new(OverworldGenerator::new(42)));
         Arc::clone(&GENERATOR)
+    }
+
+    #[test]
+    fn promoted_dependency_uses_real_host_and_survives_spawn_without_publishing_full() {
+        use super::super::chunk_map::ChunkMap;
+        let generator = generator();
+        let center = ChunkPos::ZERO;
+        let neighbor = ChunkPos::new(1, 0);
+        let mut owner = GeneratedChunkOwner::new(Arc::clone(&generator));
+        for x in -1..=1 {
+            for z in -1..=1 {
+                let pos = ChunkPos::new(x, z);
+                let mut state = generator.create_holder(pos).into_state();
+                state.chunk_mut().set_persisted_status(if pos == center {
+                    ChunkStatus::Light
+                } else if pos == neighbor {
+                    ChunkStatus::Spawn
+                } else {
+                    ChunkStatus::Biomes
+                });
+                if pos == neighbor {
+                    state.chunk_mut().set_block_state(
+                        16,
+                        71,
+                        3,
+                        rivet_world::block::Block::from_name("minecraft:gold_block")
+                            .unwrap()
+                            .default_block_state(),
+                    );
+                }
+                owner.chunks.insert(
+                    pos,
+                    Entry {
+                        state,
+                        failure: None,
+                    },
+                );
+            }
+        }
+        let runtime = owner.promote_spawn(neighbor).unwrap();
+        assert!(owner.state(neighbor).is_none());
+        assert_eq!(owner.status(neighbor), ChunkStatus::Full);
+        assert!(matches!(
+            owner.readiness(neighbor, ChunkStatus::Full),
+            GenerationReadiness::Pending
+        ));
+        let mut host = ChunkMap::empty(4);
+        host.install(neighbor, runtime);
+        owner.required.insert(center, ChunkStatus::Spawn);
+        owner.set_spawn_settings(WorldBorderSettings::default_settings(), false);
+        assert_eq!(
+            owner.run_jobs(1).failed,
+            1,
+            "absence of a runtime host cannot become an empty proto"
+        );
+        assert_eq!(owner.status(center), ChunkStatus::Light);
+        assert_eq!(owner.len(), 9);
+        assert!(owner.retry(center));
+        assert_eq!(owner.run_jobs_with_runtime(1, &mut host).advanced, 1);
+        assert_eq!(
+            host.get_chunk(neighbor).unwrap().get_block_state(16, 71, 3),
+            rivet_world::block::Block::from_name("minecraft:gold_block")
+                .unwrap()
+                .default_block_state()
+                .id()
+        );
+        assert_eq!(owner.status(center), ChunkStatus::Spawn);
+        assert!(!owner.is_activated(neighbor));
+        owner.complete_full_activation(neighbor, &host).unwrap();
+        assert!(matches!(
+            owner.readiness(neighbor, ChunkStatus::Full),
+            GenerationReadiness::Ready
+        ));
+    }
+
+    #[test]
+    fn promotion_refusal_retains_the_actual_proto_and_its_entity_carrier() {
+        use rivet_world::lighting::swmr_nibble_array::{ARRAY_SIZE, InitState, SwmrNibbleArray};
+        let generator = generator();
+        let pos = ChunkPos::ZERO;
+        let mut state = generator.create_holder(pos).into_state();
+        state.chunk_mut().set_persisted_status(ChunkStatus::Spawn);
+        state
+            .chunk_mut()
+            .add_entity(rivet_nbt::compound_tag::CompoundTag::new());
+        state
+            .chunk_mut()
+            .set_block_nibbles(vec![SwmrNibbleArray::new_with_state(
+                Some(vec![0; ARRAY_SIZE]),
+                InitState::Other(99),
+            )]);
+        let mut owner = GeneratedChunkOwner::new(generator);
+        owner.chunks.insert(
+            pos,
+            Entry {
+                state,
+                failure: None,
+            },
+        );
+        assert!(matches!(
+            owner.promote_spawn(pos),
+            Err(GenerationPromotionError::Conversion(_))
+        ));
+        assert_eq!(owner.state(pos).unwrap().chunk().get_entities().len(), 1);
+        assert!(!owner.is_promoted(pos));
+        owner
+            .state_mut(pos)
+            .unwrap()
+            .chunk_mut()
+            .set_block_nibbles(vec![SwmrNibbleArray::new_with_state(
+                Some(vec![0; ARRAY_SIZE]),
+                InitState::Hidden,
+            )]);
+        let runtime = owner.promote_spawn(pos).unwrap();
+        assert_eq!(runtime.post_load_entities().len(), 1);
     }
     #[test]
     fn empty_job_is_real_owned_progress_and_structure_refusal_keeps_actual_status() {

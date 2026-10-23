@@ -444,6 +444,7 @@ pub struct SpawnRegionProtos {
         ChunkPos,
         ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
     )>,
+    runtime_neighbours: Vec<LevelChunk>,
     /// Owned current-bounds snapshot for the production SPAWN region. This is
     /// a value copy, never a borrow or moved live `WorldBorder`; the snapshot
     /// is normalized to a stationary extent at construction time.
@@ -478,6 +479,15 @@ impl SpawnRegionProtos {
         neighbours: impl IntoIterator<Item = ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>>,
         settings: WorldBorderSettings,
     ) -> Result<Self, SpawnRegionError> {
+        Self::new_with_runtime(center, neighbours, Vec::new(), settings)
+    }
+
+    pub(super) fn new_with_runtime(
+        center: ChunkPos,
+        neighbours: impl IntoIterator<Item = ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>>,
+        mut runtime_neighbours: Vec<LevelChunk>,
+        settings: WorldBorderSettings,
+    ) -> Result<Self, SpawnRegionError> {
         let mut by_pos = HashMap::with_capacity(8);
         for chunk in neighbours {
             let pos = chunk.get_pos();
@@ -494,16 +504,33 @@ impl SpawnRegionProtos {
                     continue;
                 }
                 let pos = ChunkPos::new(center.x().wrapping_add(dx), center.z().wrapping_add(dz));
-                if !by_pos.contains_key(&pos) {
+                if !by_pos.contains_key(&pos)
+                    && !runtime_neighbours.iter().any(|chunk| chunk.pos() == pos)
+                {
                     return Err(SpawnRegionError::MissingNeighbour { pos });
                 }
             }
         }
         let mut neighbours: Vec<_> = by_pos.into_iter().collect();
         neighbours.sort_by_key(|(pos, _)| (pos.x(), pos.z()));
+        runtime_neighbours.sort_by_key(|chunk| (chunk.pos().x(), chunk.pos().z()));
+        for (index, chunk) in runtime_neighbours.iter().enumerate() {
+            let pos = chunk.pos();
+            if pos == center || center.get_chessboard_distance(&pos) > 1 {
+                return Err(SpawnRegionError::UnexpectedChunk { pos });
+            }
+            if neighbours.iter().any(|(other, _)| *other == pos)
+                || runtime_neighbours[..index]
+                    .iter()
+                    .any(|other| other.pos() == pos)
+            {
+                return Err(SpawnRegionError::DuplicateChunk { pos });
+            }
+        }
         Ok(Self {
             center,
             neighbours,
+            runtime_neighbours,
             world_border_settings: settings.current_bounds_snapshot(),
         })
     }
@@ -524,10 +551,17 @@ impl SpawnRegionProtos {
     /// preserved; each proto remains the same owned value that was supplied to
     /// [`Self::new`], including any heightmap writes made through the region.
     pub fn into_neighbours(self) -> Vec<ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>> {
+        assert!(
+            self.runtime_neighbours.is_empty(),
+            "runtime loans must be returned to their canonical host"
+        );
         self.neighbours
             .into_iter()
             .map(|(_, chunk)| chunk)
             .collect()
+    }
+    pub(super) fn take_runtime_neighbours(&mut self) -> Vec<LevelChunk> {
+        std::mem::take(&mut self.runtime_neighbours)
     }
 }
 
@@ -552,9 +586,35 @@ type OwnedDependencyChunks =
 #[derive(Clone, Default)]
 pub struct FeatureWorkspace {
     chunks: OwnedDependencyChunks,
+    runtime: Rc<RefCell<HashMap<ChunkPos, LevelChunk>>>,
 }
 
 impl FeatureWorkspace {
+    pub(super) fn insert_runtime(&self, chunk: LevelChunk) {
+        assert!(
+            self.runtime
+                .borrow_mut()
+                .insert(chunk.pos(), chunk)
+                .is_none(),
+            "unique runtime loan"
+        );
+    }
+    pub(super) fn take_runtime(&self, pos: ChunkPos) -> Option<LevelChunk> {
+        self.runtime.borrow_mut().remove(&pos)
+    }
+    pub(super) fn runtime_status(&self, pos: ChunkPos) -> Option<ChunkStatus> {
+        self.runtime
+            .borrow()
+            .get(&pos)
+            .map(LevelChunk::get_persisted_status)
+    }
+    pub(super) fn take_all_runtime(&self) -> Vec<LevelChunk> {
+        self.runtime
+            .borrow_mut()
+            .drain()
+            .map(|(_, chunk)| chunk)
+            .collect()
+    }
     /// Create an empty scheduler-owned dependency workspace.
     pub fn new() -> Self {
         Self::default()
@@ -2234,8 +2294,10 @@ fn compose_feature_region_canonical<'a>(
             let actual = if dependency == pos {
                 Some(center.get_persisted_status())
             } else {
-                workspace.with_chunk(dependency, |chunk| {
-                    chunk.map(ProtoChunk::get_persisted_status)
+                workspace.runtime_status(dependency).or_else(|| {
+                    workspace.with_chunk(dependency, |chunk| {
+                        chunk.map(ProtoChunk::get_persisted_status)
+                    })
                 })
             };
             match actual {
@@ -2265,11 +2327,17 @@ fn compose_feature_region_canonical<'a>(
         for dz in -radius..=radius {
             let dependency = ChunkPos::new(pos.x().wrapping_add(dx), pos.z().wrapping_add(dz));
             if dependency != pos {
-                holders.push(Box::new(OwnedProtoHolder::new(
-                    workspace
-                        .take(dependency)
-                        .expect("validated exclusive canonical dependency"),
-                )));
+                if let Some(runtime) = workspace.take_runtime(dependency) {
+                    holders.push(Box::new(super::world_gen_region::OwnedRuntimeHolder::new(
+                        runtime,
+                    )));
+                } else {
+                    holders.push(Box::new(OwnedProtoHolder::new(
+                        workspace
+                            .take(dependency)
+                            .expect("validated exclusive canonical dependency"),
+                    )));
+                }
             }
         }
     }
@@ -2318,13 +2386,10 @@ fn gather_possible_biomes(
     let center_pos = region.get_center();
     let mut possible_biomes = HashSet::new();
     for pos in ChunkPos::range_closed(&center_pos, 1) {
-        let chunk_in_range = region.get_chunk(pos.x(), pos.z());
-        for section in chunk_in_range.get_sections() {
-            section.biomes().get_all(|biome: WorldgenBiomeId| {
-                if let Some(name) = BIOME_BY_ID.get(biome.0 as usize) {
-                    possible_biomes.insert(*name);
-                }
-            });
+        for biome in region.generation_biomes(pos.x(), pos.z()) {
+            if let Some(name) = BIOME_BY_ID.get(biome.0 as usize) {
+                possible_biomes.insert(*name);
+            }
         }
     }
     let possible = generator.biome_source().possible_biomes();
@@ -4049,10 +4114,17 @@ fn run_biome_decoration_impl(
             Ok(())
         },
     ));
-    let owned_entries = region.into_owned_proto_entries();
+    let owned_entries = region.into_owned_dependency_entries();
     let mut retained_writebacks = Vec::with_capacity(8);
     let preserve = native.is_some() || matches!(result, Ok(Ok(())));
     for (pos, chunk) in owned_entries {
+        let chunk = match chunk {
+            super::world_gen_region::OwnedGenerationChunk::Proto(chunk) => chunk,
+            super::world_gen_region::OwnedGenerationChunk::Runtime(chunk) => {
+                workspace.insert_runtime(chunk);
+                continue;
+            }
+        };
         if !preserve {
             continue;
         }
@@ -4108,6 +4180,13 @@ fn compose_spawn_region<'a>(
                 let actual = center.get_persisted_status();
                 (actual, actual.is_or_after(required))
             } else {
+                if workspace
+                    .runtime_neighbours
+                    .iter()
+                    .any(|chunk| chunk.pos() == pos)
+                {
+                    continue;
+                }
                 let Some((_, neighbour)) = workspace
                     .neighbours
                     .iter()
@@ -4132,9 +4211,29 @@ fn compose_spawn_region<'a>(
     let mut holders: Vec<
         Box<dyn GenerationChunkHolderView<BlockState, WorldgenBiomeId, StructureKey> + 'a>,
     > = Vec::with_capacity(9);
+    let mut positioned = Vec::new();
     for (_, neighbour) in workspace.neighbours.iter_mut() {
-        holders.push(Box::new(BorrowedProtoHolder::new(neighbour)));
+        positioned.push((
+            neighbour.get_pos(),
+            Box::new(BorrowedProtoHolder::new(neighbour))
+                as Box<
+                    dyn GenerationChunkHolderView<BlockState, WorldgenBiomeId, StructureKey> + 'a,
+                >,
+        ));
     }
+    for neighbour in workspace.runtime_neighbours.iter_mut() {
+        positioned.push((
+            neighbour.pos(),
+            Box::new(super::world_gen_region::BorrowedRuntimeHolder::new(
+                neighbour,
+            ))
+                as Box<
+                    dyn GenerationChunkHolderView<BlockState, WorldgenBiomeId, StructureKey> + 'a,
+                >,
+        ));
+    }
+    positioned.sort_by_key(|(pos, _)| (pos.x(), pos.z()));
+    holders.extend(positioned.into_iter().map(|(_, holder)| holder));
     // The eight neighbours were emitted in x-then-z order; inserting the
     // center at row-major slot 4 restores the complete 3x3 cache order.
     holders.insert(4, Box::new(BorrowedProtoHolder::new(center)));
@@ -5544,6 +5643,96 @@ mod tests {
         static GENERATOR: std::sync::LazyLock<Arc<OverworldGenerator>> =
             std::sync::LazyLock::new(|| Arc::new(OverworldGenerator::new(42)));
         GENERATOR.clone()
+    }
+
+    #[test]
+    fn canonical_features_region_reads_runtime_imposter_and_keeps_its_source_write_gates() {
+        use super::super::world_gen_region::OwnedGenerationChunk;
+        let generator = test_generator();
+        let center = ChunkPos::ZERO;
+        let runtime_pos = ChunkPos::new(1, 0);
+        let mut chunk = generator.create_holder(center).into_state().into_loan().0;
+        chunk.set_persisted_status(ChunkStatus::Carvers);
+        let workspace = FeatureWorkspace::new();
+        let step = GENERATION_PYRAMID.get_step_to(ChunkStatus::Features);
+        let radius = step.direct_dependencies().size() as i32 - 1;
+        for x in -radius..=radius {
+            for z in -radius..=radius {
+                let pos = ChunkPos::new(x, z);
+                if pos == center {
+                    continue;
+                }
+                let mut dependency = generator.create_holder(pos).into_state().into_loan().0;
+                dependency.set_persisted_status(
+                    step.direct_dependencies()
+                        .get(x.abs().max(z.abs()) as usize),
+                );
+                if pos == runtime_pos {
+                    dependency.set_block_state(
+                        16,
+                        71,
+                        3,
+                        rivet_world::block::Block::from_name("minecraft:gold_block")
+                            .unwrap()
+                            .default_block_state(),
+                    );
+                    dependency.set_persisted_status(ChunkStatus::Spawn);
+                    workspace.insert_runtime(
+                        LevelChunk::from_generated_spawn_proto(dependency).unwrap(),
+                    );
+                } else {
+                    workspace.insert(dependency);
+                }
+            }
+        }
+        let mut region =
+            compose_feature_region_canonical(&mut chunk, &generator, &workspace).unwrap();
+        let target = BlockPos::new(16, 71, 3);
+        assert_eq!(
+            region.get_block_state(&target),
+            rivet_world::block::Block::from_name("minecraft:gold_block")
+                .unwrap()
+                .default_block_state()
+        );
+        assert_eq!(
+            WorldGenLevel::get_height_at(&mut region, Types::WorldSurfaceWg, 16, 3),
+            72
+        );
+        assert!(
+            !region.set_block(&target, BlockState::of(Blocks::STONE.id()), 3, 512),
+            "false imposter returns null from setBlockState even inside the write zone"
+        );
+        WorldGenLevel::schedule_block_tick(&mut region, &target, Blocks::STONE, 1);
+        WorldGenLevel::mark_pos_for_post_processing(&mut region, &target);
+        let entries = region.into_owned_dependency_entries();
+        let runtime = entries
+            .into_iter()
+            .find_map(|(pos, value)| {
+                if pos == runtime_pos {
+                    match value {
+                        OwnedGenerationChunk::Runtime(runtime) => Some(runtime),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        assert_eq!(
+            runtime.get_block_state(16, 71, 3),
+            rivet_world::block::Block::from_name("minecraft:gold_block")
+                .unwrap()
+                .default_block_state()
+                .id()
+        );
+        assert!(
+            runtime
+                .generation_base()
+                .has_primed_heightmap(Types::WorldSurface),
+            "height read primes the canonical FINAL map rather than a detached WG copy"
+        );
+        assert_eq!(runtime.block_ticks().count(), 0);
+        assert!(runtime.post_processing().iter().all(Vec::is_empty));
     }
 
     fn feature_holder(generator: &Arc<OverworldGenerator>, pos: ChunkPos) -> GenerationChunkHolder {

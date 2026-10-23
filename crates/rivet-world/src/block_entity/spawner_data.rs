@@ -1,4 +1,6 @@
-//! BaseSpawner's persisted fields; no mob tick/activation implementation.
+//! BaseSpawner's persistent and transient server-tick state.
+#[path = "spawner_tick.rs"]
+pub mod ticking;
 use super::NativeBlockEntityError;
 use rivet_nbt::{
     compound_tag::CompoundTag, float_tag::FloatTag, int_tag::IntTag, list_tag::ListTag, tag::Tag,
@@ -18,6 +20,7 @@ pub struct SpawnerData {
     next_spawn: Option<CompoundTag>,
     potentials: Vec<(i32, CompoundTag)>,
     public_bukkit_values: CompoundTag,
+    tick_delay: i32,
 }
 impl SpawnerData {
     pub fn spawn_count(&self) -> i32 {
@@ -85,6 +88,7 @@ impl SpawnerData {
             next_spawn: None,
             potentials: Vec::new(),
             public_bukkit_values: CompoundTag::new(),
+            tick_delay: 0,
         }
     }
     pub fn load(pos: BlockPos, input: &CompoundTag) -> Result<Self, NativeBlockEntityError> {
@@ -124,6 +128,7 @@ impl SpawnerData {
                 .get_compound("PublicBukkitValues")
                 .cloned()
                 .unwrap_or_default(),
+            tick_delay: 0,
         })
     }
     pub fn save(&self, pos: BlockPos) -> CompoundTag {

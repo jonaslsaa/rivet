@@ -61,6 +61,7 @@ pub struct NativeChestMinecart {
     generation: bool,
     removed: bool,
     saved: saved_data::MinecartSavedState,
+    lifecycle: super::tracking::NativeLifecycleState,
 }
 
 impl NativeChestMinecart {
@@ -96,11 +97,59 @@ impl NativeChestMinecart {
             generation: false,
             removed: false,
             saved: saved_data::MinecartSavedState::default(),
+            lifecycle: Default::default(),
         }
     }
 
     pub fn entity_id(&self) -> i32 {
         self.entity_id
+    }
+    pub fn lifecycle(&self) -> &super::tracking::NativeLifecycleState {
+        &self.lifecycle
+    }
+    pub fn mark_created(&mut self) {
+        self.old_position = self.position;
+        self.saved.old_rotation = self.saved.rotation;
+    }
+    pub fn begin_tracking(&mut self) {
+        self.lifecycle.in_world = true;
+        self.lifecycle.valid = true;
+    }
+    pub fn initialize_tracking_origin(&mut self) {
+        self.saved.origin.get_or_insert(self.position);
+        self.saved.origin_world.get_or_insert(self.world_uuid);
+    }
+    pub fn mark_tracking_end(&mut self) {
+        self.lifecycle.valid = false;
+    }
+    pub fn tracking_snapshot(&self) -> super::tracking::EntityTrackingSnapshot {
+        use super::tracking::{EntityTrackingSnapshot, MetadataItem as Item, MetadataValue as V};
+        let s = &self.saved;
+        let flags = (if s.invisible { 32 } else { 0 }) | (if s.glowing { 64 } else { 0 });
+        let metadata = vec![
+            Item::new(0, V::Byte(flags), V::Byte(0)),
+            Item::new(1, V::Int(s.air), V::Int(300)),
+            Item::new(3, V::Boolean(s.custom_name_visible), V::Boolean(false)),
+            Item::new(4, V::Boolean(s.silent), V::Boolean(false)),
+            Item::new(5, V::Boolean(s.no_gravity), V::Boolean(false)),
+            Item::new(7, V::Int(s.frozen), V::Int(0)),
+            Item::new(
+                11,
+                V::OptionalBlockState(s.display.map(|v| u32::from(v.id().0))),
+                V::OptionalBlockState(None),
+            ),
+            Item::new(12, V::Int(s.display_offset), V::Int(Self::DISPLAY_OFFSET)),
+        ];
+        EntityTrackingSnapshot {
+            position: self.position,
+            movement: s.motion,
+            rotation: s.rotation,
+            head_rotation: 0.,
+            on_ground: s.on_ground,
+            metadata,
+            experimental_minecart: self.movement == MinecartMovement::Experimental,
+            living: false,
+        }
     }
     pub fn uuid(&self) -> Uuid {
         self.uuid
@@ -163,6 +212,18 @@ impl NativeChestMinecart {
             self.position = position;
         }
         self.old_position = position;
+    }
+    /// Entity.snapTo for the native, non-interpolated cart. Index/section
+    /// movement belongs to the canonical world owner, not this value method.
+    pub fn snap_to(&mut self, position: Vec3, yaw: f32, pitch: f32) {
+        self.set_initial_pos(position);
+        if yaw.is_finite() {
+            self.saved.rotation[0] = yaw;
+        }
+        if pitch.is_finite() {
+            self.saved.rotation[1] = (pitch % 360.).clamp(-90., 90.);
+        }
+        self.saved.old_rotation = self.saved.rotation;
     }
 
     pub fn block_position(&self) -> BlockPos {

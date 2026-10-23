@@ -319,7 +319,7 @@ where
     }
 
     /// Narrow loader seam for `SerializableChunkData.read`.
-    pub(crate) fn base_mut(&mut self) -> &mut ChunkAccess<T, B, S> {
+    pub fn base_mut(&mut self) -> &mut ChunkAccess<T, B, S> {
         &mut self.base
     }
 

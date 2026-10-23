@@ -45,6 +45,9 @@ use rivet_serialization::dynamic_ops::DynamicOps;
 
 use crate::java_hash::{get_seed, string_hash as java_string_hash};
 
+mod thread_unsafe_random;
+pub use thread_unsafe_random::{ThreadUnsafeRandom, ThreadUnsafeRandomPositionalFactory};
+
 // ---------------------------------------------------------------------------
 // net.minecraft.util.RandomSource
 // ---------------------------------------------------------------------------
