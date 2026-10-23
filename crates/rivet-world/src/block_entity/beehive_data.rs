@@ -147,6 +147,10 @@ impl BeehiveData {
         !self.occupants.is_empty()
     }
 
+    pub fn occupant_count(&self) -> i32 {
+        self.occupants.len() as i32
+    }
+
     pub fn save_with_full_metadata(&self, pos: &BlockPos) -> CompoundTag {
         let mut tag = CompoundTag::new();
         if !self.public_bukkit_values.tags.is_empty() {

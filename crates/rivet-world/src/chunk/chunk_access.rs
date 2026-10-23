@@ -834,6 +834,16 @@ where
         self.block_entity_order.remove(*pos);
         self.block_entities.shift_remove(pos);
     }
+    /// Move the actual object out for LevelChunk.removeBlockEntity callbacks.
+    /// Pending-map removal, debug callbacks and setRemoved have distinct source
+    /// ordering; callers must not substitute a clone or drop the object early.
+    pub fn take_live_block_entity(
+        &mut self,
+        pos: &BlockPos,
+    ) -> Option<crate::block_entity::NativeBlockEntity> {
+        self.block_entity_order.remove(*pos);
+        self.block_entities.shift_remove(pos)
+    }
     /// SerializableChunkData uses live values first and pending tags otherwise.
     /// Only owned save copies receive keepPacked; canonical payloads do not.
     /// Ordering is a stable carry, not exact Paper serialization order: Paper

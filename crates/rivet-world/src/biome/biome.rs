@@ -32,14 +32,16 @@
 //!   value.
 //! - **`EnvironmentAttributeMap` STUB.** The attribute map is genuinely
 //!   entangled with the `mc.world.attribute` unit (`EnvironmentAttribute`,
-//!   `AttributeModifier`, the dispatched-map `CODEC_ONLY_POSITIONAL`). Vanilla
-//!   biomes never set attributes (no `putAttributes`/`setAttribute` usage in
-//!   `Biomes.java`/worldgen), so the port carries a unit `EMPTY`-only STUB:
+//!   `AttributeModifier`, the dispatched-map `CODEC_ONLY_POSITIONAL`). This
+//!   full Biome value codec still carries an `EMPTY`-only boundary:
 //!   the `"attributes"` field is `optionalFieldOf("attributes", EMPTY)` — it
 //!   omits on encode (the value is always `EMPTY`) and a present `"attributes"`
 //!   key decodes through the STUB, which errors honestly (RivetTodo #178) rather
-//!   than silently dropping the attribute data. Vanilla biomes never set
-//!   attributes, so the honest strict boundary only fires on malformed input.
+//!   than silently dropping the attribute data. Actual vanilla biomes DO set
+//!   attributes (including audio and sky colors), so this codec is not a full
+//!   vanilla-biome loader. The live id-backed bee/heart sampler separately uses
+//!   the full server registry's typed Boolean projection in
+//!   [`super::gameplay_environment`], not this empty value or network data.
 //! - **`shouldFreeze`/`shouldSnow`.** The worldgen read facade supplies actual
 //!   states, BLOCK brightness and snow survival. Id-backed regions reuse the
 //!   climate projection of the generated synchronized registry rather than

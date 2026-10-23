@@ -52,8 +52,7 @@ mod entity_runtime;
 mod full_activation;
 pub use block_entity_backend::BlockEntityWorldServices;
 pub use full_activation::{
-    FullActivationCause, FullActivationContext, FullActivationError, FullActivationSettings,
-    FullActivationStage,
+    FullActivationCause, FullActivationContext, FullActivationError, FullActivationStage,
 };
 #[cfg(unix)]
 #[path = "generated_poi_runtime.rs"]
@@ -63,7 +62,14 @@ mod tick_runtime;
 use super::level_chunk::LevelChunkSaveError;
 use super::player_chunk_loader::ChunkSendReadiness;
 use super::region_backed::{RegionBackedBootError, RegionChunkSource};
-pub use entity_runtime::{EntityChunkUnloadFailure,LevelEntityError};
+pub use entity_runtime::{EntityChunkUnloadFailure, LevelEntityError};
+#[path = "level_holder_transitions.rs"]
+mod holder_transitions;
+#[path = "level_environment_runtime.rs"]
+mod environment_runtime;
+pub use holder_transitions::{
+    HolderTransitionAuthority, HolderTransitionEffect, HolderTransitionError,
+};
 #[cfg(unix)]
 pub use poi_runtime::GeneratedPoiError;
 use rivet_world::chunk::status::ChunkStatus;
@@ -220,6 +226,7 @@ pub struct ServerLevel {
     /// Authoritative `ServerLevel.getGameTime()` for current-version chunk
     /// `LastUpdate`. This is world time, not a future autosave-aging clock.
     game_time: i64,
+    pub(super) debug_synchronizers: super::level_debug_synchronizers::LevelDebugSynchronizers,
     /// The read-only region chunk source (issue #185): `Some` only for the
     /// region-backed boot, which moves its prepared source in after installing
     /// the boot-time view square. The `PlayerChunkLoader` recenter resolves a
@@ -360,6 +367,7 @@ impl ServerLevel {
             missing_chunk_policy: config.missing_chunk_policy,
             is_flat: config.is_flat,
             game_time: 0,
+            debug_synchronizers: super::level_debug_synchronizers::LevelDebugSynchronizers::new(),
             region_source: None,
             generated_chunk_owner: None,
             entity_lookup: None,
@@ -759,7 +767,14 @@ impl ServerLevel {
                 && owner.is_promoted(pos)
             {
                 return match owner.readiness(pos, ChunkStatus::Full) {
-                    GenerationReadiness::Ready => Ok(ChunkSendReadiness::Ready),
+                    GenerationReadiness::Ready
+                        if owner
+                            .current_full_status(pos)
+                            .is_or_after(super::FullChunkStatus::Full) =>
+                    {
+                        Ok(ChunkSendReadiness::Ready)
+                    }
+                    GenerationReadiness::Ready => Ok(ChunkSendReadiness::Pending),
                     GenerationReadiness::Pending => Ok(ChunkSendReadiness::Pending),
                     GenerationReadiness::Failed { error, .. } => Err(error.to_string()),
                 };
@@ -933,7 +948,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             level.prepare_chunk_for_send(pos),
-            Ok(ChunkSendReadiness::Ready)
+            Ok(ChunkSendReadiness::Pending)
         ));
     }
 

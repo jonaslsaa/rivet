@@ -1,0 +1,25 @@
+{
+  "paper_commit": "0a993450f129c4942c2a9ed45ba047412b4667cf",
+  "minecraft_version": "26.2",
+  "probe": "tools/rivet-oracle/src/java/EnvironmentAttributesProbe.java",
+  "command": "RIVET_JAVA_HOME=<Java25> bash tools/rivet-oracle/scripts/run_environment_attributes_probe.sh /tmp/environment-registry.jsonl /tmp/environment-samples.jsonl /tmp/environment-maps.jsonl",
+  "registry_projection": {
+    "path": "crates/rivet-world/src/biome/gameplay_environment.jsonl",
+    "records": 74,
+    "sha256": "32abd88be0c7289c30f4de42bb98027645946e694fe5e4d603c7d6c5a3b1854f",
+    "description": "All 66 actual biome, 4 dimension-type and 4 timeline entries, projected through full server DIRECT codecs to the two requested Boolean attributes. Dimension timelines are resolved to their actual holder encounter order. NETWORK_CODEC is intentionally not used: it omits bees_stay_in_hive. Other attribute types are not claimed decoded by this projection."
+  },
+  "sampling": {
+    "path": "tools/rivet-oracle/fixtures/environment-attributes.jsonl",
+    "records": 1368,
+    "sha256": "147d108351d9fc2838b9b10b45c842f4f7fc6f21cb38a9b12ce0b725cccac994",
+    "description": "Actual EnvironmentAttributeSystem using real dimension/biome maps, timeline samplers, and WeatherAttributes layers. Explicit fixed clock/weather sources, three selected real biomes, all four dimensions. Negative/extreme clocks and transition/weather boundaries. Biome positional layers select an explicit actual biome without mocking attribute arithmetic."
+  },
+  "boolean_maps": {
+    "path": "tools/rivet-oracle/fixtures/environment-boolean-maps.jsonl",
+    "records": 70,
+    "sha256": "36b7adc3481737ea10ccf2193762f341591930210fdc0dd86e65c222d8cb61ff",
+    "description": "Actual EnvironmentAttributeMap.CODEC decode/normalize plus all seven Boolean modifier applications, including wide and fractional numeric Boolean coercion."
+  },
+  "repeat": "Registry projection and sampling outputs repeated byte-identically."
+}
