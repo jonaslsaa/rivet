@@ -318,7 +318,7 @@ mod tests {
         let pos = ChunkPos::ZERO;
         let t = Block::from_name("minecraft:sand").unwrap();
         let q = Block::from_name("minecraft:stone").unwrap();
-        assert!(world.install_loaded_chunk(LevelChunk::new(pos)).is_ok());
+        // The default fixture already owns the origin chunk.
         *world
             .chunk_map
             .get_chunk_mut(pos)
