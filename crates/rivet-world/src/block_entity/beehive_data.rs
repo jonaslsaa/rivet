@@ -15,6 +15,9 @@ struct Occupant {
     entity_data: CompoundTag,
     ticks_in_hive: i32,
     min_ticks_in_hive: i32,
+    // Paper BeeData: transient retry counter, reset from age on load. It must
+    // never replace ticks_in_hive in the persistent Occupant codec.
+    exit_tick_counter: i32,
 }
 
 fn codec_int(tag: &CompoundTag, name: &str) -> Option<i32> {
@@ -34,11 +37,13 @@ impl Occupant {
             return None;
         }
         entity_data.remove("id");
+        let ticks_in_hive = codec_int(tag, "ticks_in_hive")?;
         Some(Self {
             entity_type,
             entity_data,
-            ticks_in_hive: codec_int(tag, "ticks_in_hive")?,
+            ticks_in_hive,
             min_ticks_in_hive: codec_int(tag, "min_ticks_in_hive")?,
+            exit_tick_counter: ticks_in_hive,
         })
     }
 
@@ -100,7 +105,46 @@ impl BeehiveData {
             entity_data: CompoundTag::new(),
             ticks_in_hive,
             min_ticks_in_hive: 600,
+            exit_tick_counter: ticks_in_hive,
         });
+    }
+
+    /// Actual BeeData.tick/Iterator.remove order. Release owns the real world
+    /// behavior (environment gates, entity creation/admission and events), not
+    /// an assumed success. A capability error leaves the already-aged prefix
+    /// intact, with no claimed transaction or completed server tick.
+    pub fn tick_occupants<E>(
+        &mut self,
+        cooldown_failed_releases: bool,
+        mut release: impl FnMut(&CompoundTag, bool, Option<BlockPos>) -> Result<bool, E>,
+    ) -> Result<bool, E> {
+        let mut changed = false;
+        let mut index = 0;
+        while index < self.occupants.len() {
+            let occupant = &mut self.occupants[index];
+            occupant.ticks_in_hive = occupant.ticks_in_hive.wrapping_add(1);
+            let attempt = occupant.exit_tick_counter > occupant.min_ticks_in_hive;
+            occupant.exit_tick_counter = occupant.exit_tick_counter.wrapping_add(1);
+            if attempt {
+                let Tag::Compound(saved) = occupant.save() else {
+                    unreachable!()
+                };
+                let nectar = occupant.entity_data.get_boolean_or("HasNectar", false);
+                if release(&saved, nectar, self.flower_pos)? {
+                    self.occupants.remove(index);
+                    changed = true;
+                    continue;
+                } else if cooldown_failed_releases {
+                    occupant.exit_tick_counter = occupant.min_ticks_in_hive / 2;
+                }
+            }
+            index += 1;
+        }
+        Ok(changed)
+    }
+
+    pub fn has_occupants(&self) -> bool {
+        !self.occupants.is_empty()
     }
 
     pub fn save_with_full_metadata(&self, pos: &BlockPos) -> CompoundTag {
@@ -142,6 +186,45 @@ impl BeehiveData {
 mod tests {
     use super::*;
     use rivet_nbt::tag_parser::parse_compound_fully;
+
+    #[test]
+    fn live_paper_occupant_aging_and_retry_counter_are_distinct() {
+        let pos = BlockPos::new(3, 64, -8);
+        let mut cases = 0;
+        for line in
+            include_str!("../../../../tools/rivet-oracle/fixtures/block-entity-ticker.jsonl")
+                .lines()
+        {
+            let row: serde_json::Value = serde_json::from_str(line).unwrap();
+            if row["kind"] != "hive" {
+                continue;
+            }
+            let input = parse_compound_fully(row["input_snbt"].as_str().unwrap()).unwrap();
+            let mut hive = BeehiveData::load(&input);
+            for _ in 0..row["ticks"].as_u64().unwrap() {
+                assert!(
+                    !hive
+                        .tick_occupants(row["cooldown"].as_bool().unwrap(), |_, nectar, _| {
+                            assert!(nectar);
+                            Ok::<_, ()>(false)
+                        })
+                        .unwrap()
+                );
+            }
+            assert_eq!(
+                hive.occupants[0].exit_tick_counter,
+                row["exit_counter"].as_i64().unwrap() as i32,
+                "{row}"
+            );
+            assert_eq!(
+                hive.save_with_full_metadata(&pos),
+                parse_compound_fully(row["output_snbt"].as_str().unwrap()).unwrap(),
+                "{row}"
+            );
+            cases += 1;
+        }
+        assert_eq!(cases, 30);
+    }
 
     #[test]
     fn load_store_and_full_save_match_live_paper_hive_storage() {

@@ -44,8 +44,11 @@ use super::chunk_storage_worker::{
 use super::chunk_tracking_view::ChunkTrackingView;
 use super::generated_chunk_owner::{GeneratedChunkOwner, GenerationReadiness};
 use super::generated_world::OverworldGenerator;
+#[path = "level_block_entity_backend.rs"]
+mod block_entity_backend;
 #[path = "level_entity_runtime.rs"]
 mod entity_runtime;
+pub use block_entity_backend::BlockEntityWorldServices;
 #[cfg(unix)]
 #[path = "generated_poi_runtime.rs"]
 mod poi_runtime;
@@ -187,6 +190,11 @@ pub struct ServerLevel {
     poi_storage: Option<super::poi_storage::StoredPoiManager>,
     boot_settings: Option<super::generated_boot::GeneratedBootSettings>,
     seed: i64,
+    /// Level.random: one unique-seeded stream, independent of terrain and
+    /// entity-constructor randomness, retained for the world's lifetime.
+    world_random: rivet_util::random::ThreadUnsafeRandom,
+    /// Rebindable tick handles only; live payloads remain in canonical chunks.
+    block_entity_runtime: super::level_block_entity_runtime::LevelBlockEntityRuntime,
     min_y: i32,
     height: i32,
     sea_level: i32,
@@ -219,6 +227,7 @@ pub struct ServerLevel {
     /// Native entity values share ID occupancy with session-owned players.
     /// The session owner binds this once; no per-world ID sequence is created.
     entity_lookup: Option<super::entity_lookup::EntityLookup>,
+    entity_tracking: Option<super::entity_tracking::EntityTrackingRuntime>,
     block_ticks: rivet_world::ticks::LevelTicks<rivet_world::block::Block>,
     fluid_ticks: rivet_world::ticks::LevelTicks<rivet_registry::fluid_id::FluidId>,
     generation_environment: Option<super::generation_environment::GenerationEnvironment>,
@@ -325,6 +334,10 @@ impl ServerLevel {
             poi_storage: None,
             boot_settings: None,
             seed: config.seed,
+            world_random: rivet_util::random::ThreadUnsafeRandom::new(
+                rivet_util::random::random_support::generate_unique_seed(),
+            ),
+            block_entity_runtime: super::level_block_entity_runtime::LevelBlockEntityRuntime::new(),
             min_y: config.min_y,
             height: config.height,
             sea_level: config.sea_level,
@@ -338,6 +351,7 @@ impl ServerLevel {
             region_source: None,
             generated_chunk_owner: None,
             entity_lookup: None,
+            entity_tracking: None,
             block_ticks: rivet_world::ticks::LevelTicks::new(),
             fluid_ticks: rivet_world::ticks::LevelTicks::new(),
             generation_environment: None,
@@ -348,6 +362,18 @@ impl ServerLevel {
     /// `ServerLevel.dimension()`.
     pub fn dimension(&self) -> &ResourceKey<Level> {
         &self.dimension
+    }
+
+    /// `Level.getRandom()`. Borrow the owning stream; never seed it from the
+    /// terrain seed or substitute an entity-construction RNG.
+    pub fn random_mut(&mut self) -> &mut rivet_util::random::ThreadUnsafeRandom {
+        &mut self.world_random
+    }
+
+    pub fn block_entity_runtime(
+        &self,
+    ) -> &super::level_block_entity_runtime::LevelBlockEntityRuntime {
+        &self.block_entity_runtime
     }
 
     /// Actual Paper saved world identity. Legacy fixtures without metadata do
@@ -635,13 +661,48 @@ impl ServerLevel {
         }
         self.generated_chunk_owner
             .as_mut()
-            .map_or_else(Default::default, |owner| owner.run_jobs(max_jobs))
+            .map_or_else(Default::default, |owner| {
+                owner.run_jobs_with_runtime(max_jobs, &mut self.chunk_map)
+            })
     }
 
-    /// Resolve readiness before encoding. A completed proto is not a sendable
-    /// runtime chunk: only the canonical ChunkMap makes generated data ready.
+    /// Move a completed generated proto into canonical runtime ownership after
+    /// actual POI preparation. This begins, but does not complete, FULL activation.
+    #[cfg(unix)]
+    pub fn promote_generated_chunk(&mut self, pos: ChunkPos) -> Result<(), String> {
+        if self.chunk_map.get_chunk(pos).is_some() {
+            return Err(format!("runtime chunk {pos} already has a canonical owner"));
+        }
+        // Source FULL first loads/repairs POI, then consumes the proto. Any
+        // subsequent lifecycle error retains the resulting canonical runtime.
+        self.prepare_generated_poi(pos)
+            .map_err(|error| error.to_string())?;
+        let owner = self
+            .generated_chunk_owner
+            .as_mut()
+            .ok_or_else(|| "level has no generated chunk owner".to_owned())?;
+        let runtime = owner
+            .promote_spawn(pos)
+            .map_err(|error| error.to_string())?;
+        self.chunk_map.install(pos, runtime);
+        Ok(())
+    }
+
+    /// Resolve readiness before encoding. Promotion alone is not FULL readiness.
     pub fn prepare_chunk_for_send(&mut self, pos: ChunkPos) -> Result<ChunkSendReadiness, String> {
         if self.chunk_map.get_chunk(pos).is_some() {
+            // Promotion installs canonical storage before post-load entities,
+            // block-entity registration and tick registration finish. Storage
+            // presence alone must not publish a partially activated chunk.
+            if let Some(owner) = &self.generated_chunk_owner
+                && owner.is_promoted(pos)
+            {
+                return match owner.readiness(pos, ChunkStatus::Full) {
+                    GenerationReadiness::Ready => Ok(ChunkSendReadiness::Ready),
+                    GenerationReadiness::Pending => Ok(ChunkSendReadiness::Pending),
+                    GenerationReadiness::Failed { error, .. } => Err(error.to_string()),
+                };
+            }
             return Ok(ChunkSendReadiness::Ready);
         }
         // The first FULL operation reads the real POI store and repairs it
@@ -771,6 +832,48 @@ mod tests {
 
     fn overworld() -> ServerLevel {
         ServerLevel::new(ServerLevelConfig::default())
+    }
+
+    #[test]
+    fn promoted_storage_is_not_sendable_before_full_activation() {
+        let generator = Arc::new(OverworldGenerator::new(42));
+        let config = ServerLevelConfig {
+            is_flat: false,
+            sea_level: generator.generator().get_sea_level(),
+            missing_chunk_policy: MissingChunkPolicy::RequireLoaded,
+            ..ServerLevelConfig::default()
+        };
+        let mut level = ServerLevel::new_generated(config, Arc::clone(&generator)).unwrap();
+        let pos = ChunkPos::ZERO;
+        let owner = level.generated_chunk_owner.as_mut().unwrap();
+        assert!(
+            owner
+                .admit(generator.create_holder(pos).into_state())
+                .is_ok()
+        );
+        // Lifecycle-boundary fixture, not evidence of completed generation.
+        owner
+            .state_mut(pos)
+            .unwrap()
+            .chunk_mut()
+            .set_persisted_status(ChunkStatus::Spawn);
+        let runtime = owner.promote_spawn(pos).unwrap();
+        level.chunk_map.install(pos, runtime);
+        assert!(matches!(
+            level.prepare_chunk_for_send(pos),
+            Ok(ChunkSendReadiness::Pending)
+        ));
+        // Simulate the completion notification to isolate the publication gate.
+        level
+            .generated_chunk_owner
+            .as_mut()
+            .unwrap()
+            .complete_full_activation(pos, &level.chunk_map)
+            .unwrap();
+        assert!(matches!(
+            level.prepare_chunk_for_send(pos),
+            Ok(ChunkSendReadiness::Ready)
+        ));
     }
 
     #[test]

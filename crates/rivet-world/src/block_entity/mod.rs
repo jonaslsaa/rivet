@@ -13,6 +13,7 @@ use rivet_registry::{
 };
 use rivet_util::mth::Uuid;
 use spawner_data::SpawnerData;
+use std::sync::{Arc, Weak};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum NativeBlockEntityError {
@@ -124,12 +125,22 @@ pub enum NativeBlockEntityData {
     CreakingHeart(HeartData),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct NativeBlockEntity {
     position: BlockPos,
     state: BlockState,
     data: NativeBlockEntityData,
     removed: bool,
+    identity: Arc<()>,
+    level_associated: bool,
+}
+impl PartialEq for NativeBlockEntity {
+    fn eq(&self, other: &Self) -> bool {
+        self.position == other.position
+            && self.state == other.state
+            && self.data == other.data
+            && self.removed == other.removed
+    }
 }
 impl NativeBlockEntity {
     pub fn fresh(position: BlockPos, state: BlockState) -> Result<Self, NativeBlockEntityError> {
@@ -154,6 +165,8 @@ impl NativeBlockEntity {
             state,
             data,
             removed: false,
+            identity: Arc::new(()),
+            level_associated: false,
         })
     }
     /// loadStatic resolves the entity id independently, then validates its
@@ -209,7 +222,20 @@ impl NativeBlockEntity {
             state,
             data,
             removed: false,
+            identity: Arc::new(()),
+            level_associated: false,
         }))
+    }
+    /// Stable identity for a borrowed live ticker, not a second payload owner.
+    /// Payload equality and persistent NBT deliberately exclude this identity.
+    pub fn ticker_identity(&self) -> Weak<()> {
+        Arc::downgrade(&self.identity)
+    }
+    pub fn has_level(&self) -> bool {
+        self.level_associated
+    }
+    pub fn associate_level(&mut self) {
+        self.level_associated = true;
     }
     pub fn position(&self) -> BlockPos {
         self.position

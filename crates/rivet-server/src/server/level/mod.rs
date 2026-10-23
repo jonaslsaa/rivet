@@ -25,6 +25,7 @@ pub mod directory_lock;
 pub mod entity_construction;
 pub mod entity_id_allocator;
 pub mod entity_lookup;
+pub mod entity_tracking;
 pub mod entity_post_load;
 pub mod full_chunk_status;
 pub mod generated_boot;
@@ -33,6 +34,7 @@ pub mod generated_world;
 pub mod generation_creature_runtime;
 pub mod generation_environment;
 pub mod initial_spawn;
+pub mod level_block_entity_runtime;
 pub mod level_chunk;
 #[cfg(unix)]
 pub mod level_storage_access;

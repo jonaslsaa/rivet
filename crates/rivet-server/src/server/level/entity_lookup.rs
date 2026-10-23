@@ -62,6 +62,16 @@ pub trait EntityLifecycle {
         event: EntityLifecycleEvent,
         entity: &NativeLoadedEntity,
     ) -> Result<(), EntityLookupError>;
+    /// Optional readonly observer of the source callback's final native-state
+    /// phase. This default is not event-dispatch authority: a production
+    /// tracker must explicitly implement actual world add/remove events here.
+    fn after_event(
+        &mut self,
+        _event: EntityLifecycleEvent,
+        _entity: &NativeLoadedEntity,
+    ) -> Result<(), EntityLookupError> {
+        Ok(())
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionRejection {
@@ -418,7 +428,9 @@ fn transition(
     let id = record.entity.entity_id();
     let result = catch_unwind(AssertUnwindSafe(|| {
         if created {
+            record.entity.mark_created();
             lifecycle.on_event(EntityLifecycleEvent::Created, &record.entity)?;
+            lifecycle.after_event(EntityLifecycleEvent::Created, &record.entity)?;
         }
         // Source returns early for equal visibility even when destroy=true.
         if old == new {
@@ -428,7 +440,10 @@ fn transition(
             if !old.is_accessible() && new.is_accessible() {
                 tracked.push(id);
                 accessible.push(id);
+                record.entity.begin_tracking();
                 lifecycle.on_event(EntityLifecycleEvent::TrackingStart, &record.entity)?;
+                record.entity.initialize_tracking_origin();
+                lifecycle.after_event(EntityLifecycleEvent::TrackingStart, &record.entity)?;
             }
             if !old.is_ticking() && new.is_ticking() {
                 lifecycle.on_event(EntityLifecycleEvent::TickingStart, &record.entity)?;
@@ -441,6 +456,8 @@ fn transition(
                 remove_id(tracked, id);
                 remove_id(accessible, id);
                 lifecycle.on_event(EntityLifecycleEvent::TrackingEnd, &record.entity)?;
+                record.entity.mark_tracking_end();
+                lifecycle.after_event(EntityLifecycleEvent::TrackingEnd, &record.entity)?;
             }
         }
         if destroyed {

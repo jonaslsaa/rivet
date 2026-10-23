@@ -45,6 +45,7 @@ pub struct NativeEntityState {
     generation: bool,
     removed: bool,
     loaded: load_data::EntityLoadState,
+    lifecycle: super::tracking::NativeLifecycleState,
 }
 impl NativeEntityState {
     pub fn new(identity: NativeEntityIdentity) -> Self {
@@ -65,6 +66,7 @@ impl NativeEntityState {
             generation: false,
             removed: false,
             loaded: Default::default(),
+            lifecycle: Default::default(),
         }
     }
     pub fn identity(&self) -> NativeEntityIdentity {
@@ -87,6 +89,16 @@ impl NativeEntityState {
     }
     pub fn rotation(&self) -> [f32; 2] {
         self.rotation
+    }
+    pub fn lifecycle(&self) -> &super::tracking::NativeLifecycleState {
+        &self.lifecycle
+    }
+    pub fn mark_created(&mut self) {
+        self.old_position = self.position;
+        self.old_rotation = self.rotation;
+    }
+    pub fn mark_tracking_end(&mut self) {
+        self.lifecycle.valid = false;
     }
     pub fn is_alive(&self) -> bool {
         !self.removed
@@ -576,6 +588,61 @@ pub enum NativeGenerationCreature {
     Farm(NativeFarmAnimal),
 }
 impl NativeGenerationCreature {
+    pub fn tracking_snapshot(&self) -> super::tracking::EntityTrackingSnapshot {
+        use super::tracking::{EntityTrackingSnapshot, MetadataItem as Item, MetadataValue as V};
+        let animal = match self {
+            Self::Sheep(e) => &e.animal,
+            Self::Farm(e) => &e.animal,
+        };
+        let mut metadata = animal.tracking_metadata();
+        match self {
+            Self::Sheep(e) => metadata.push(Item::new(
+                18,
+                V::Byte(e.color.id() | (if e.sheared { 16 } else { 0 })),
+                V::Byte(0),
+            )),
+            Self::Farm(e) => {
+                let (id, appearance, sound) = match e.family() {
+                    FarmFamily::Cow => (18, 23, 24),
+                    FarmFamily::Pig => (19, 28, 29),
+                    FarmFamily::Chicken => (18, 30, 31),
+                };
+                metadata.push(Item::new(
+                    id,
+                    V::Registry {
+                        serializer: appearance,
+                        id: e.variant.0,
+                    },
+                    V::Registry {
+                        serializer: appearance,
+                        id: e.registry.default_variant().0,
+                    },
+                ));
+                metadata.push(Item::new(
+                    id + 1,
+                    V::Registry {
+                        serializer: sound,
+                        id: e.sound_variant.0,
+                    },
+                    V::Registry {
+                        serializer: sound,
+                        id: e.registry.default_sound().0,
+                    },
+                ));
+            }
+        }
+        let e = &animal.mob.entity;
+        EntityTrackingSnapshot {
+            position: e.position,
+            movement: e.motion,
+            rotation: e.rotation,
+            head_rotation: e.rotation[0],
+            on_ground: e.on_ground,
+            metadata,
+            experimental_minecart: false,
+            living: true,
+        }
+    }
     pub fn entity(&self) -> &NativeEntityState {
         match self {
             Self::Sheep(value) => value.entity(),

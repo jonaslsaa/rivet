@@ -333,6 +333,32 @@ fn spawn_reason(s: &str) -> bool {
 }
 
 impl NativeAnimal {
+    pub(super) fn tracking_metadata(&self) -> Vec<super::super::tracking::MetadataItem> {
+        use super::super::tracking::{MetadataItem as Item, MetadataValue as V};
+        let e = &self.mob.entity;
+        let s = &e.loaded;
+        let flags = (if s.invisible { 32 } else { 0 })
+            | (if s.glowing { 64 } else { 0 })
+            | (if self.mob.loaded.fall_flying { -128 } else { 0 });
+        vec![
+            Item::new(0, V::Byte(flags), V::Byte(0)),
+            Item::new(1, V::Int(e.air), V::Int(300)),
+            Item::new(3, V::Boolean(s.name_visible), V::Boolean(false)),
+            Item::new(4, V::Boolean(s.silent), V::Boolean(false)),
+            Item::new(5, V::Boolean(s.no_gravity), V::Boolean(false)),
+            Item::new(7, V::Int(s.frozen), V::Int(0)),
+            Item::new(9, V::Float(self.mob.health), V::Float(1.)),
+            Item::new(
+                15,
+                V::Byte(
+                    (if self.mob.loaded.no_ai { 1 } else { 0 })
+                        | (if self.mob.left_handed { 2 } else { 0 }),
+                ),
+                V::Byte(0),
+            ),
+            Item::new(16, V::Boolean(self.is_baby()), V::Boolean(false)),
+        ]
+    }
     fn load_animal(&mut self, input: &CompoundTag) -> Result<(), CreatureLoadError> {
         self.mob.entity.load_entity(input)?;
         for key in ["active_effects"] {
@@ -452,6 +478,19 @@ impl NativeAnimal {
         self.in_love = input.get_int_or("InLove", 0);
         self.love_cause = uuid(input, "LoveCause");
         Ok(())
+    }
+}
+
+impl super::NativeEntityState {
+    pub fn begin_tracking(&mut self) {
+        self.lifecycle.in_world = true;
+        self.lifecycle.valid = true;
+    }
+    pub fn initialize_tracking_origin(&mut self) {
+        self.loaded.origin.get_or_insert(self.position);
+        self.loaded
+            .origin_world
+            .get_or_insert(self.identity.world_uuid);
     }
 }
 impl NativeGenerationCreature {

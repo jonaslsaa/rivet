@@ -365,12 +365,10 @@ fn update_attributes_unknown_holder_id_panics() {
 
 #[test]
 fn absent_entity_packets_are_blocked_stubs() {
-    use rivet_protocol::game::clientbound_add_entity_packet::add_entity_codec;
     use rivet_protocol::game::clientbound_remove_entities_packet::remove_entities_codec;
     use rivet_protocol::game::clientbound_set_passengers_packet::set_passengers_codec;
     use rivet_protocol::game::clientbound_teleport_entity_packet::teleport_entity_codec;
 
-    let access = attribute_access();
     let mut b = plain_buf();
     let msg = panic_message(|| {
         let _ = remove_entities_codec().decode(&mut b);
@@ -386,12 +384,6 @@ fn absent_entity_packets_are_blocked_stubs() {
     let mut b = plain_buf();
     let msg = panic_message(|| {
         let _ = teleport_entity_codec().decode(&mut b);
-    });
-    assert!(msg.contains("blocked"), "got: {msg}");
-
-    let mut r = registry_buf(&access);
-    let msg = panic_message(|| {
-        let _ = add_entity_codec().decode(&mut r);
     });
     assert!(msg.contains("blocked"), "got: {msg}");
 }

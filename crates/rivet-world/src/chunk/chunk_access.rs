@@ -54,6 +54,8 @@
 
 use std::collections::HashMap;
 
+#[path = "block_entity_order.rs"]
+mod block_entity_order;
 use indexmap::IndexMap;
 use rivet_util::long_open_hash_set::LongOpenHashSet;
 
@@ -141,6 +143,7 @@ where
     pending_block_entities: IndexMap<BlockPos, CompoundTag>,
     /// Actual materialized values, separate from lazy pending serialized data.
     block_entities: IndexMap<BlockPos, crate::block_entity::NativeBlockEntity>,
+    block_entity_order: block_entity_order::BlockEntityOrder,
     /// `heightmaps` — the `EnumMap<Heightmap.Types, Heightmap>`, keyed by the
     /// world `Types` ordinal (see the module doc).
     heightmaps: [Option<Heightmap>; 6],
@@ -236,6 +239,7 @@ where
             structure_access: StructureAccess::new(),
             pending_block_entities: IndexMap::new(),
             block_entities: IndexMap::new(),
+            block_entity_order: block_entity_order::BlockEntityOrder::default(),
             heightmaps: [None, None, None, None, None, None],
             block_nibbles: filled_empty_light(light_section_count),
             sky_nibbles: filled_empty_light(light_section_count),
@@ -295,6 +299,7 @@ where
             structure_access: self.structure_access.clone(),
             pending_block_entities: self.pending_block_entities.clone(),
             block_entities: self.block_entities.clone(),
+            block_entity_order: self.block_entity_order.clone(),
             heightmaps: self.heightmaps.clone(),
             block_nibbles: self.block_nibbles.clone(),
             sky_nibbles: self.sky_nibbles.clone(),
@@ -754,6 +759,37 @@ where
     pub fn block_entities(&self) -> &IndexMap<BlockPos, crate::block_entity::NativeBlockEntity> {
         &self.block_entities
     }
+    /// Actual fastutil live-map iteration, including resize/removal history.
+    /// Pending NBT has a separate lazy map and is not enumerated.
+    pub fn block_entity_positions_in_source_order(&self) -> Vec<BlockPos> {
+        self.block_entity_order.iter().collect()
+    }
+    /// Real ProtoChunk→LevelChunk construction inserts proto values in source
+    /// iteration order into a NEW default map. Generic value projections must
+    /// instead preserve the existing table metadata unchanged.
+    pub fn prepare_level_block_entity_order(
+        &mut self,
+        source_positions: impl IntoIterator<Item = BlockPos>,
+    ) {
+        let mut order = block_entity_order::BlockEntityOrder::default();
+        for pos in source_positions {
+            if self.block_entities.contains_key(&pos) {
+                order.insert(pos);
+            }
+        }
+        self.block_entity_order = order;
+        for entity in self.block_entities.values_mut() {
+            entity.clear_removed();
+            entity.associate_level();
+        }
+    }
+    pub fn clear_level_block_entities(&mut self) {
+        for entity in self.block_entities.values_mut() {
+            entity.set_removed();
+        }
+        self.block_entities.clear();
+        self.block_entity_order.clear();
+    }
     pub fn get_block_entity(
         &self,
         pos: &BlockPos,
@@ -770,6 +806,7 @@ where
     pub fn set_block_entity(&mut self, entity: crate::block_entity::NativeBlockEntity) {
         let pos = entity.position();
         self.pending_block_entities.shift_remove(&pos);
+        self.block_entity_order.insert(pos);
         self.block_entities.insert(pos, entity);
     }
     pub(crate) fn set_level_block_entity(
@@ -777,13 +814,16 @@ where
         mut entity: crate::block_entity::NativeBlockEntity,
     ) {
         entity.clear_removed();
+        entity.associate_level();
         let pos = entity.position();
         self.pending_block_entities.shift_remove(&pos);
+        self.block_entity_order.insert(pos);
         if let Some(mut old) = self.block_entities.insert(pos, entity) {
             old.set_removed();
         }
     }
     pub fn remove_block_entity(&mut self, pos: &BlockPos) {
+        self.block_entity_order.remove(*pos);
         self.block_entities.shift_remove(pos);
         self.pending_block_entities.shift_remove(pos);
     }
@@ -1213,6 +1253,7 @@ where
             structure_access,
             pending_block_entities,
             block_entities,
+            block_entity_order,
             heightmaps,
             block_nibbles,
             sky_nibbles,
@@ -1249,6 +1290,7 @@ where
         base.fluid_ticks = fluid_ticks;
         base.pending_block_entities = pending_block_entities;
         base.block_entities = block_entities;
+        base.block_entity_order = block_entity_order;
         base.block_nibbles = block_nibbles;
         base.sky_nibbles = sky_nibbles;
         base.sky_emptiness_map = sky_emptiness_map;
@@ -1313,6 +1355,7 @@ where
         base.fluid_ticks = self.fluid_ticks.clone();
         base.pending_block_entities = self.pending_block_entities.clone();
         base.block_entities = self.block_entities.clone();
+        base.block_entity_order = self.block_entity_order.clone();
         base.block_nibbles = self.block_nibbles.clone();
         base.sky_nibbles = self.sky_nibbles.clone();
         base.sky_emptiness_map = self.sky_emptiness_map.clone();
@@ -1490,6 +1533,81 @@ mod tests {
             None,
             &test_flags,
         )
+    }
+
+    #[test]
+    fn canonical_live_block_entity_order_survives_mutations_and_value_projections() {
+        use crate::block_entity::NativeBlockEntity;
+        use rivet_registry::{block_state::BlockState, generated::blocks::BlockId};
+        let chest = BlockState::of(BlockId::from_name("minecraft:chest").unwrap());
+        let mut base = default_base();
+        for line in
+            include_str!("../../../../tools/rivet-oracle/fixtures/block-entity-map-order.jsonl")
+                .lines()
+        {
+            let row: serde_json::Value = serde_json::from_str(line).unwrap();
+            for op in row["operations"].as_array().unwrap() {
+                let op = op.as_array().unwrap();
+                let pos = || {
+                    BlockPos::new(
+                        op[1].as_i64().unwrap() as i32,
+                        op[2].as_i64().unwrap() as i32,
+                        op[3].as_i64().unwrap() as i32,
+                    )
+                };
+                match op[0].as_str().unwrap() {
+                    "put" => base.set_block_entity(NativeBlockEntity::fresh(pos(), chest).unwrap()),
+                    "remove" => base.remove_block_entity(&pos()),
+                    "clear" => base.clear_level_block_entities(),
+                    "clone" => {
+                        base = base
+                            .copy()
+                            .map_values(
+                                block_strategy(),
+                                biome_strategy(),
+                                0,
+                                0,
+                                &|v| *v,
+                                &|v| *v,
+                                &test_flags,
+                            )
+                            .unwrap();
+                        base = base
+                            .map_values_ref(
+                                block_strategy(),
+                                biome_strategy(),
+                                0,
+                                0,
+                                &|v| *v,
+                                &|v| *v,
+                                &test_flags,
+                            )
+                            .unwrap();
+                    }
+                    "promote" => {
+                        let positions = base.block_entity_positions_in_source_order();
+                        base.prepare_level_block_entity_order(positions);
+                        assert!(
+                            base.block_entities()
+                                .values()
+                                .all(|entity| entity.has_level() && !entity.is_removed())
+                        );
+                    }
+                    op => panic!("unknown oracle operation {op}"),
+                }
+            }
+            let actual: Vec<_> = base
+                .block_entity_positions_in_source_order()
+                .into_iter()
+                .map(|pos| [pos.get_x(), pos.get_y(), pos.get_z()])
+                .collect();
+            assert_eq!(
+                serde_json::to_value(actual).unwrap(),
+                row["order"],
+                "{}",
+                row["name"]
+            );
+        }
     }
 
     #[test]
