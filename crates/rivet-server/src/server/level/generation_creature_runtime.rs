@@ -3,11 +3,15 @@
 //! structure entities. An unported enabled family never becomes null or NBT.
 use super::entity_construction::EntityConstructionRuntime;
 use rivet_nbt::{nbt_ops::NbtOps, string_tag::StringTag, tag::Tag};
+use rivet_registry::{RegistryAccess, holder::RegistryId, registries::BIOME};
 use rivet_util::mth::Uuid;
 use rivet_world::{
     entity::{
         EntityType, MobCategory,
-        generation_creature::{NativeEntityIdentity, NativeGenerationCreature, NativeSheep},
+        farm_variants::{FarmFamily, FarmVariantRegistries},
+        generation_creature::{
+            NativeEntityIdentity, NativeFarmAnimal, NativeGenerationCreature, NativeSheep,
+        },
     },
     flag::{feature_flag_set::FeatureFlagSet, feature_flags},
 };
@@ -30,12 +34,15 @@ pub trait GenerationCreatureFactory: Send + Sync {
     fn create(
         &self,
         entity_type: &str,
+        registry_access: &RegistryAccess,
     ) -> Result<Option<NativeGenerationCreature>, GenerationCreatureError>;
 }
 pub struct WorldGenerationCreatureFactory {
     runtime: EntityConstructionRuntime,
     world_uuid: Uuid,
     enabled: FeatureFlagSet,
+    biome_registry: Option<RegistryId>,
+    farm_variants: Result<Arc<FarmVariantRegistries>, GenerationCreatureError>,
     is_in_use: Arc<dyn Fn(i32) -> bool + Send + Sync>,
 }
 impl WorldGenerationCreatureFactory {
@@ -43,12 +50,27 @@ impl WorldGenerationCreatureFactory {
         runtime: EntityConstructionRuntime,
         world_uuid: Uuid,
         enabled: FeatureFlagSet,
+        registry_access: &RegistryAccess,
         is_in_use: Arc<dyn Fn(i32) -> bool + Send + Sync>,
     ) -> Self {
+        let biome_registry = registry_access
+            .lookup(&BIOME)
+            .map(|registry| registry.registry_id());
+        let farm_variants = if biome_registry.is_none() {
+            Err(GenerationCreatureError::AuthorityUnavailable(
+                "destination world has no BIOME registry".into(),
+            ))
+        } else {
+            FarmVariantRegistries::builtin(registry_access)
+                .map(Arc::new)
+                .map_err(GenerationCreatureError::AuthorityUnavailable)
+        };
         Self {
             runtime,
             world_uuid,
             enabled,
+            biome_registry,
+            farm_variants,
             is_in_use,
         }
     }
@@ -65,6 +87,7 @@ impl GenerationCreatureFactory for WorldGenerationCreatureFactory {
     fn create(
         &self,
         entity_type: &str,
+        registry_access: &RegistryAccess,
     ) -> Result<Option<NativeGenerationCreature>, GenerationCreatureError> {
         let registered = EntityType::codec::<NbtOps>()
             .parse(
@@ -83,9 +106,30 @@ impl GenerationCreatureFactory for WorldGenerationCreatureFactory {
         if !feature_flags::vanilla_set().is_subset_of(&self.enabled) {
             return Ok(None);
         }
-        if key != "minecraft:sheep" {
-            return Err(GenerationCreatureError::UnsupportedEntity(key));
-        }
+        let family = match key.as_str() {
+            "minecraft:sheep" => None,
+            "minecraft:cow" => Some(FarmFamily::Cow),
+            "minecraft:pig" => Some(FarmFamily::Pig),
+            "minecraft:chicken" => Some(FarmFamily::Chicken),
+            _ => return Err(GenerationCreatureError::UnsupportedEntity(key)),
+        };
+        let family_registry = family
+            .map(|family| {
+                if registry_access
+                    .lookup(&BIOME)
+                    .map(|registry| registry.registry_id())
+                    != self.biome_registry
+                {
+                    return Err(GenerationCreatureError::AuthorityUnavailable(
+                        "farm constructor received a foreign world BIOME registry".into(),
+                    ));
+                }
+                self.farm_variants
+                    .as_ref()
+                    .map(|registries| registries.family(family))
+                    .map_err(Clone::clone)
+            })
+            .transpose()?;
         let (uuid, entity_id) = self
             .runtime
             .allocate(|id| (self.is_in_use)(id))
@@ -96,8 +140,13 @@ impl GenerationCreatureFactory for WorldGenerationCreatureFactory {
             world_uuid: self.world_uuid,
         };
         self.runtime
-            .with_entity_random(|random| {
-                NativeGenerationCreature::Sheep(NativeSheep::from_identity(identity, random))
+            .with_entity_random(|random| match family_registry {
+                Some(registry) => NativeGenerationCreature::Farm(NativeFarmAnimal::from_identity(
+                    identity, registry, random,
+                )),
+                None => {
+                    NativeGenerationCreature::Sheep(NativeSheep::from_identity(identity, random))
+                }
             })
             .map(Some)
             .map_err(|error| GenerationCreatureError::AuthorityUnavailable(error.to_string()))
@@ -126,9 +175,13 @@ mod tests {
             runtime.clone(),
             uuid(),
             feature_flags::vanilla_set(),
+            &RegistryAccess::empty(),
             Arc::new(|_| false),
         );
-        let sheep = factory.create("minecraft:sheep").unwrap().unwrap();
+        let sheep = factory
+            .create("minecraft:sheep", &RegistryAccess::empty())
+            .unwrap()
+            .unwrap();
         let row: serde_json::Value = serde_json::from_str(
             include_str!("../../../../../tools/rivet-oracle/fixtures/generation-sheep.jsonl")
                 .lines()
@@ -154,15 +207,21 @@ mod tests {
             runtime.clone(),
             uuid(),
             FeatureFlagSet::of(),
+            &RegistryAccess::empty(),
             Arc::new(|_| false),
         );
         for name in ["minecraft:sheep", "minecraft:cow"] {
-            assert!(disabled.create(name).unwrap().is_none());
+            assert!(
+                disabled
+                    .create(name, &RegistryAccess::empty())
+                    .unwrap()
+                    .is_none()
+            );
         }
         // This authority is deliberately scoped to NaturalSpawner's CREATURE
         // pool; other categories cannot inherit its vanilla/peaceful gate.
         assert!(matches!(
-            disabled.create("minecraft:zombie"),
+            disabled.create("minecraft:zombie", &RegistryAccess::empty()),
             Err(GenerationCreatureError::UnsupportedCategory(_))
         ));
         assert_eq!(
@@ -174,11 +233,91 @@ mod tests {
             runtime,
             uuid(),
             feature_flags::vanilla_set(),
+            &RegistryAccess::empty(),
             Arc::new(|_| false),
         );
         assert!(matches!(
-            enabled.create("minecraft:cow"),
+            enabled.create("minecraft:horse", &RegistryAccess::empty()),
             Err(GenerationCreatureError::UnsupportedEntity(_))
         ));
+    }
+
+    #[test]
+    fn all_native_farm_constructors_use_world_identity_and_actual_entity_stream() {
+        let access = rivet_world::data::worldgen::worldgen_bootstraps::build_worldgen_registries();
+        for line in
+            include_str!("../../../../../tools/rivet-oracle/fixtures/generation-farm-animals.jsonl")
+                .lines()
+        {
+            let row: serde_json::Value = serde_json::from_str(line).unwrap();
+            if row["finalize"] != false {
+                continue;
+            }
+            let mut players = EntityIdAllocator::new();
+            for _ in 0..100 {
+                players.next_id();
+            }
+            let runtime = EntityConstructionRuntime::with_seed(players.sequence(), 42);
+            let factory = WorldGenerationCreatureFactory::new(
+                runtime.clone(),
+                uuid(),
+                feature_flags::vanilla_set(),
+                &access,
+                Arc::new(|_| false),
+            );
+            let entity = factory
+                .create(
+                    &format!("minecraft:{}", row["family"].as_str().unwrap()),
+                    &access,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                entity.save().unwrap(),
+                rivet_nbt::tag_parser::parse_compound_fully(row["saved"].as_str().unwrap())
+                    .unwrap(),
+                "{line}"
+            );
+            assert_eq!(
+                runtime
+                    .with_entity_random(|random| random.next_long())
+                    .unwrap(),
+                row["entity_rng_next"].as_i64().unwrap()
+            );
+            assert_eq!(players.next_id(), 102);
+        }
+    }
+
+    #[test]
+    fn foreign_world_registry_refuses_before_identity_or_constructor_draws() {
+        use rivet_world::data::worldgen::worldgen_bootstraps::build_worldgen_registries;
+        let owner = build_worldgen_registries();
+        let foreign = build_worldgen_registries();
+        assert_ne!(
+            owner.lookup_or_throw(&BIOME).registry_id(),
+            foreign.lookup_or_throw(&BIOME).registry_id()
+        );
+        let players = EntityIdAllocator::new();
+        let runtime = EntityConstructionRuntime::with_seed(players.sequence(), 42);
+        let factory = WorldGenerationCreatureFactory::new(
+            runtime.clone(),
+            uuid(),
+            feature_flags::vanilla_set(),
+            &owner,
+            Arc::new(|_| false),
+        );
+        for name in ["minecraft:cow", "minecraft:pig", "minecraft:chicken"] {
+            assert!(
+                matches!(factory.create(name,&foreign),Err(GenerationCreatureError::AuthorityUnavailable(message))if message.contains("foreign world"))
+            );
+        }
+        assert_eq!(players.sequence().next_id(|_| false), 1);
+        assert_eq!(
+            runtime
+                .with_entity_random(|random| random.next_long())
+                .unwrap(),
+            -5025562857975149833
+        );
+        assert!(factory.create("minecraft:cow", &owner).unwrap().is_some());
     }
 }

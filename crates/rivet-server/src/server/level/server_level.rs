@@ -44,11 +44,14 @@ use super::chunk_storage_worker::{
 use super::chunk_tracking_view::ChunkTrackingView;
 use super::generated_chunk_owner::{GeneratedChunkOwner, GenerationReadiness};
 use super::generated_world::OverworldGenerator;
+#[path = "level_tick_runtime.rs"]
+mod tick_runtime;
 use super::level_chunk::LevelChunkSaveError;
 use super::player_chunk_loader::ChunkSendReadiness;
 use super::region_backed::{RegionBackedBootError, RegionChunkSource};
 use rivet_world::chunk::status::ChunkStatus;
 use std::sync::Arc;
+pub use tick_runtime::{BlockTickContainers, FluidTickContainers, TickRuntimeError};
 
 /// How the player send path handles a position absent from `ChunkMap`.
 /// Repeating spawn content is confined to the legacy no-level fixture;
@@ -203,6 +206,8 @@ pub struct ServerLevel {
     /// Canonical in-progress generation state, confined to the world tick
     /// thread. Saved-world loading never implicitly enables generation.
     generated_chunk_owner: Option<GeneratedChunkOwner>,
+    block_ticks: rivet_world::ticks::LevelTicks<rivet_world::block::Block>,
+    fluid_ticks: rivet_world::ticks::LevelTicks<rivet_registry::fluid_id::FluidId>,
     generation_environment: Option<super::generation_environment::GenerationEnvironment>,
     /// Tick-thread confinement marker (OWNERSHIP §Ownership tree): `Cell` is
     /// `Send + !Sync`, so a `&ServerLevel` is rejected at compile time when it
@@ -317,6 +322,8 @@ impl ServerLevel {
             game_time: 0,
             region_source: None,
             generated_chunk_owner: None,
+            block_ticks: rivet_world::ticks::LevelTicks::new(),
+            fluid_ticks: rivet_world::ticks::LevelTicks::new(),
             generation_environment: None,
             _confinement: std::marker::PhantomData,
         }
@@ -637,12 +644,18 @@ impl ServerLevel {
     /// surfaces. `Err` leaves the map unchanged (the chunk was never
     /// installed), so a later retry re-reads the region.
     pub fn load_chunk_from_region(&mut self, pos: ChunkPos) -> Result<(), RegionBackedBootError> {
+        if self.chunk_map.get_chunk(pos).is_some() {
+            return Ok(());
+        }
         let source = self
             .region_source
             .as_mut()
             .expect("region-backed world carries its read-only source");
         let chunk = super::region_backed::load_and_reconstruct_chunk(source, pos)?;
-        self.chunk_map_mut().install(pos, chunk);
+        assert!(
+            self.install_loaded_chunk(chunk).is_ok(),
+            "existing-only load cannot race the tick owner"
+        );
         Ok(())
     }
 
@@ -665,14 +678,14 @@ impl ServerLevel {
                 .chunk_map_mut()
                 .get_chunk_mut(pos)
                 .ok_or(NormalSaveError::MissingChunk(pos))?;
-            if !chunk.is_unsaved() {
+            if !chunk.is_unsaved(game_time) {
                 return Ok(NormalSaveResult::SkippedClean);
             }
             let tag = chunk.snapshot_for_save(game_time)?;
             let save = ChunkSave::new(pos, tag);
-            if !chunk.try_mark_saved() {
-                return Ok(NormalSaveResult::SkippedClean);
-            }
+            // Source ignores this return value: packing ticks above records
+            // lastSaved and may already have cleared time-only dirtiness.
+            chunk.try_mark_saved(game_time);
             save
         };
 
@@ -880,6 +893,61 @@ mod tests {
     }
 
     #[test]
+    fn time_only_tick_dirtiness_still_enqueues_after_snapshot_pack() {
+        use rivet_world::{
+            block::Block,
+            ticks::{LevelChunkTicks, SavedTick, TickPriority},
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let mut worker = start_storage_worker(temp.path());
+        let mut world = overworld();
+        let pos = ChunkPos::ZERO;
+        *world
+            .chunk_map_mut()
+            .get_chunk_mut(pos)
+            .unwrap()
+            .block_ticks_mut() = LevelChunkTicks::new_with_pending(vec![SavedTick::new(
+            Block::from_name("minecraft:sand").unwrap(),
+            rivet_registry::core::BlockPos::new(1, 64, 1),
+            5,
+            TickPriority::Normal,
+        )]);
+        world.set_game_time(100);
+        world.register_chunk_ticks(pos).unwrap();
+        world.activate_chunk_ticks(pos).unwrap();
+        assert!(!world.chunk_map().get_chunk(pos).unwrap().is_unsaved(100));
+        world.set_game_time(101);
+        assert!(world.chunk_map().get_chunk(pos).unwrap().is_unsaved(101));
+        // Actual Java lifecycle fixture proves pack changes time-only dirty to
+        // clean. Source still enqueues this already-created snapshot.
+        assert_eq!(
+            world.save_chunk(pos, &worker).unwrap(),
+            NormalSaveResult::Enqueued
+        );
+        assert!(!world.chunk_map().get_chunk(pos).unwrap().is_unsaved(101));
+        assert!(
+            ServerLevel::shutdown_chunk_storage(&mut worker)
+                .first_error
+                .is_none()
+        );
+        let mut reader = RegionFileStorage::new_read_only_with_version(
+            storage_info(),
+            temp.path().to_path_buf(),
+            RegionFileVersion::VERSION_NONE,
+        );
+        let root = reader
+            .read(&pos)
+            .unwrap()
+            .expect("time-only tick save reached actual storage");
+        let parsed = SerializableChunkData::parse(height_accessor::create(-64, 384), &root)
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.stored_block_ticks().len(), 1);
+        assert_eq!(parsed.stored_block_ticks()[0].delay, 4);
+        reader.close().unwrap();
+    }
+
+    #[test]
     fn normal_save_roundtrips_canonical_chunk_through_storage_and_reconstruction() {
         let temp = tempfile::tempdir().unwrap();
         let mut worker = start_storage_worker(temp.path());
@@ -903,7 +971,13 @@ mod tests {
             world.save_chunk(pos, &worker).unwrap(),
             NormalSaveResult::Enqueued
         );
-        assert!(!world.chunk_map().get_chunk(pos).unwrap().is_unsaved());
+        assert!(
+            !world
+                .chunk_map()
+                .get_chunk(pos)
+                .unwrap()
+                .is_unsaved(world.game_time())
+        );
         // Pending live tags remain the authority and are not mutated by the
         // save-time `keepPacked=true` copy.
         assert!(
@@ -1031,7 +1105,7 @@ mod tests {
                 .chunk_map()
                 .get_chunk(ChunkPos::ZERO)
                 .unwrap()
-                .is_unsaved()
+                .is_unsaved(world.game_time())
         );
     }
 

@@ -22,6 +22,7 @@
 
 mod builtin_categories;
 pub mod chest_minecart;
+pub mod farm_variants;
 pub mod generation_creature;
 
 use rivet_serialization::codec::{self, Codec};

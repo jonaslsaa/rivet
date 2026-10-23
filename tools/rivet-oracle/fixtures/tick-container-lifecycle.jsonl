@@ -1,0 +1,8 @@
+{"phase":"pending","time":100,"before_pack_dirty":false,"count":2,"saved":[["t",1,64,1,5,0],["q",2,64,1,0,-1]],"after_pack_dirty":false}
+{"phase":"registered","time":100,"before_pack_dirty":false,"count":2,"saved":[["t",1,64,1,5,0],["q",2,64,1,0,-1]],"after_pack_dirty":false}
+{"phase":"activated","time":100,"before_pack_dirty":false,"count":2,"saved":[["t",1,64,1,5,0],["q",2,64,1,0,-1]],"after_pack_dirty":false}
+{"phase":"aged","time":101,"before_pack_dirty":true,"count":2,"saved":[["t",1,64,1,4,0],["q",2,64,1,-1,-1]],"after_pack_dirty":false}
+{"phase":"polled","time":101,"before_pack_dirty":true,"count":1,"saved":[["t",1,64,1,4,0]],"after_pack_dirty":true}
+{"phase":"cleaned","time":101,"before_pack_dirty":false,"count":1,"saved":[["t",1,64,1,4,0]],"after_pack_dirty":false}
+{"phase":"scheduled","time":101,"before_pack_dirty":true,"count":2,"saved":[["t",1,64,1,4,0],["q",2,64,1,7,1]],"after_pack_dirty":true}
+{"phase":"detached","time":101,"before_pack_dirty":true,"count":3,"saved":[["t",1,64,1,4,0],["q",2,64,1,7,1],["t",3,64,1,1,0]],"after_pack_dirty":true}

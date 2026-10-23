@@ -232,6 +232,22 @@ where
         &self.base
     }
 
+    /// Runtime loader consumes the base's proto carriers exactly once and
+    /// installs actual LevelChunkTicks on its concrete owning LevelChunk.
+    /// Empty carriers stay on this generic base; they are not a second save
+    /// or scheduling authority.
+    pub fn take_proto_tick_containers(
+        &mut self,
+    ) -> (
+        crate::ticks::ProtoChunkTicks<crate::block::Block>,
+        crate::ticks::ProtoChunkTicks<rivet_registry::fluid_id::FluidId>,
+    ) {
+        (
+            std::mem::take(self.base.get_block_ticks_mut()),
+            std::mem::take(self.base.get_fluid_ticks_mut()),
+        )
+    }
+
     /// Consume the chunk, moving the owned base out. Mirrors
     /// [`ProtoChunk::into_base`]: the runtime chunk's base state (sections,
     /// heightmaps, light nibbles, flags, inhabited time, pending block

@@ -90,6 +90,7 @@ pub mod flag;
 pub mod level;
 pub mod levelgen;
 pub mod lighting;
+pub mod poi;
 pub mod superflat;
 /// `net.minecraft.world.ticks` value and container layer (#370/#522):
 /// [`ticks::TickPriority`], [`ticks::SavedTick`] (+ the

@@ -63,3 +63,79 @@ fn actual_paper_sheep_constructor_group_finalize_full_save_and_two_rng_streams()
     assert_eq!(count, 37);
     assert_eq!(babies, 3);
 }
+
+#[test]
+fn actual_paper_farm_animals_use_registered_selectors_full_saves_and_both_rng_streams() {
+    use crate::{
+        data::worldgen::worldgen_bootstraps::build_worldgen_registries,
+        entity::farm_variants::FarmVariantRegistries,
+    };
+    let access = build_worldgen_registries();
+    let registries = FarmVariantRegistries::builtin(&access).unwrap();
+    let biomes = access.lookup_or_throw(&BIOME);
+    let mut count = 0;
+    let mut babies = 0;
+    for line in
+        include_str!("../../../../tools/rivet-oracle/fixtures/generation-farm-animals.jsonl")
+            .lines()
+    {
+        let row: serde_json::Value = serde_json::from_str(line).unwrap();
+        let family = match row["family"].as_str().unwrap() {
+            "cow" => FarmFamily::Cow,
+            "pig" => FarmFamily::Pig,
+            "chicken" => FarmFamily::Chicken,
+            _ => unreachable!(),
+        };
+        let biome = biomes
+            .get_optional(&Identifier::with_default_namespace(
+                row["biome"].as_str().unwrap(),
+            ))
+            .unwrap();
+        let biome = Holder::reference(biomes.registry_id(), biomes.get_id(biome) as u32);
+        let mut entity_random = LegacyRandomSource::new(42);
+        let mut level_random = LegacyRandomSource::new(row["seed"].as_i64().unwrap());
+        let mut group = None;
+        let mut actual = None;
+        for i in 0..=row["index"].as_i64().unwrap() {
+            let identity = NativeEntityIdentity {
+                entity_id: 101 + i as i32,
+                uuid: create_insecure_uuid(&mut entity_random),
+                world_uuid: Uuid {
+                    most: 0x1234_5678_9abc_def0,
+                    least: 0xfedc_ba98_7654_3210_u64 as i64,
+                },
+            };
+            let mut animal = NativeGenerationCreature::Farm(NativeFarmAnimal::from_identity(
+                identity,
+                registries.family(family),
+                &mut entity_random,
+            ));
+            if row["finalize"].as_bool().unwrap() {
+                animal.snap_to(Vec3::new(8.5, 64., 8.5), 123., 0.);
+                animal.finalize_spawn(&biome, &access, &mut level_random, &mut group);
+            }
+            actual = Some(animal);
+        }
+        let animal = actual.unwrap();
+        let saved = animal.save().unwrap();
+        babies += usize::from(saved.get_int("Age").unwrap() < 0);
+        assert_eq!(
+            saved,
+            parse_compound_fully(row["saved"].as_str().unwrap()).unwrap(),
+            "{line}"
+        );
+        assert_eq!(
+            entity_random.next_long(),
+            row["entity_rng_next"].as_i64().unwrap(),
+            "entity stream {line}"
+        );
+        assert_eq!(
+            level_random.next_long(),
+            row["level_rng_next"].as_i64().unwrap(),
+            "level stream {line}"
+        );
+        count += 1;
+    }
+    assert_eq!(count, 111);
+    assert!(babies > 0, "actual positive age group branch required");
+}

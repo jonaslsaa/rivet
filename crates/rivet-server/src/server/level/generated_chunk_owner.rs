@@ -1124,14 +1124,15 @@ mod tests {
             ids.next_id(|_| false);
         } // Actual Java shell starts its shared counter at100.
         let runtime = EntityConstructionRuntime::with_seed(ids.clone(), 42);
+        let generator = generator();
         let factory: Arc<dyn GenerationCreatureFactory> =
             Arc::new(WorldGenerationCreatureFactory::new(
                 runtime.clone(),
                 uuid,
                 vanilla_set(),
+                generator.registry_access(),
                 Arc::new(|_| false),
             ));
-        let generator = generator();
         let mut owner = GeneratedChunkOwner::new(Arc::clone(&generator));
         let refused = owner
             .install_generation_creature_factory(

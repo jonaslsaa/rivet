@@ -102,8 +102,14 @@ impl ChunkMap {
     /// world into an empty map by installing every chunk of the view square
     /// the caller already validated (tick-thread-owned by value, never
     /// `Arc<RwLock>`).
-    pub fn install(&mut self, pos: ChunkPos, chunk: LevelChunk) {
+    pub(super) fn install(&mut self, pos: ChunkPos, chunk: LevelChunk) {
         self.chunks.insert(pos, chunk);
+    }
+
+    /// Only the level owner may move a loaded chunk out: it first detaches
+    /// scheduler callbacks/indexes from the canonical tick containers.
+    pub(super) fn take(&mut self, pos: ChunkPos) -> Option<LevelChunk> {
+        self.chunks.remove(&pos)
     }
 
     /// The number of loaded chunks. Deterministic: 1 for the M1 superflat
