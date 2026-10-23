@@ -265,6 +265,11 @@ impl PlayerChunkLoader {
         &self.desired
     }
 
+    /// Actual completed chunk delivery, not a desired/pending view position.
+    pub fn has_sent(&self, pos: ChunkPos) -> bool {
+        self.sent.contains(&pos)
+    }
+
     fn replace_desired(&mut self, view: &ChunkTrackingView) -> (Vec<PlayPacket>, Vec<PlayPacket>) {
         let mut desired = Vec::with_capacity(view.chunk_count());
         view.for_each(|pos| desired.push(pos));

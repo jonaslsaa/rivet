@@ -51,6 +51,10 @@
 //! authoritative position and counts. The gate is one-time env read and the
 //! records flow through the existing subscriber — no new shared state.
 
+#[path = "world_transport.rs"]
+mod world_transport;
+pub use world_transport::{WorldTransport, WorldTransportError};
+
 use rivet_protocol::codec::StreamDecoder;
 use rivet_protocol::friendly_byte_buf::FriendlyByteBuf;
 use rivet_protocol::game::serversbound_accept_teleportation_packet::accept_teleportation_codec;
@@ -130,6 +134,8 @@ pub const PLAY_CLIENTBOUND_PLAYER_POSITION_ID: u32 =
 /// fields readable by tests.
 pub struct PlayerSessionManager {
     level: ServerLevel,
+    native_events: Option<std::sync::Arc<crate::server::level::world_events::NativeWorldEventHost>>,
+    world_transport: world_transport::WorldTransport,
     /// `ServerLevel.ENTITY_COUNTER` + `getNextEntityId()` (GitHub #222) — the
     /// server-global entity-id allocator, tick-thread-owned. Java's counter is
     /// `static` to `ServerLevel`, so one counter is shared across dimensions and
@@ -332,6 +338,8 @@ impl PlayerSessionManager {
             );
         PlayerSessionManager {
             level: config.level,
+            native_events: None,
+            world_transport: world_transport::WorldTransport::default(),
             entity_ids,
             entity_construction,
             sender,
@@ -353,6 +361,16 @@ impl PlayerSessionManager {
     /// into sessions, run each live session's keepalive tick (transmit +
     /// timeout), then clean up sessions whose connection is gone.
     pub fn tick(&mut self, ctx: &mut TickContext) {
+        self.native_events.get_or_insert_with(|| {
+            let host = crate::server::level::world_events::NativeWorldEventHost::start_on_current_thread(
+                std::sync::Arc::new(crate::server::level::structure_spawn_events::TracingStructureEventDiagnostics),
+                std::sync::Arc::clone(&ctx.shutdown),
+            );
+            // This server currently loads no native plugins at startup. This
+            // completes that actual native lifecycle, not a JVM-plugin bridge.
+            host.finish_loading();
+            std::sync::Arc::new(host)
+        });
         // MinecraftServer.tickChildren ticks the clock managers before world
         // and connection work. This tick loop currently runs normal ticks only;
         // a future freeze/step owner must gate this at runsNormally.
@@ -361,6 +379,15 @@ impl PlayerSessionManager {
         }
         if ctx.tick.is_multiple_of(20) {
             self.synchronize_game_time(ctx);
+        }
+        self.level.tick_world_border();
+        if let Err(error) = self
+            .level
+            .tick_world_time(&mut crate::server::level::server_level::UnavailableScheduledFunctions)
+        {
+            tracing::error!(%error, "world time execution failed; stopping the server");
+            ctx.shutdown.request();
+            return;
         }
         let ids: Vec<ConnectionId> = ctx.connections.ids().collect();
         for id in ids {
@@ -404,6 +431,11 @@ impl PlayerSessionManager {
             self.route_inbound(ctx, id, frame);
         }
         self.drain_ready_chunks(ctx);
+        if let Err(error) = self.flush_world_transport(ctx.connections) {
+            tracing::error!(%error, "world update delivery failed; stopping the server");
+            ctx.shutdown.request();
+            return;
+        }
         self.drive_keepalives(ctx);
         self.prune_lost(ctx);
     }
@@ -1644,6 +1676,37 @@ fn world_clock_access() -> RegistryAccess {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn normal_tick_stops_on_unavailable_due_function_after_advancing_time() {
+        use crate::server::level::server_level::FunctionCallback;
+        let (mut registry, _outbound) = connected_registry();
+        let mut config = default_session_config(256, ServerLevelConfig::M1_FIXTURE_SEED);
+        config.level.set_game_time(10);
+        config.level.world_time_mut().unwrap().schedule(
+            "actual-due-event".into(),
+            11,
+            FunctionCallback::Function(rivet_registry::Identifier::with_default_namespace("tick")),
+        );
+        let mut manager = PlayerSessionManager::new(config);
+        let shutdown = std::sync::Arc::new(crate::server::tick::shutdown::Shutdown::new());
+        manager.tick(&mut TickContext {
+            tick: 1,
+            shutdown: std::sync::Arc::clone(&shutdown),
+            now_ns: 0,
+            now_ms: 0,
+            connections: &mut registry,
+            inbound: Vec::new(),
+        });
+        assert_eq!(manager.level.game_time(), 11);
+        assert!(shutdown.is_requested());
+        manager
+            .native_events
+            .as_ref()
+            .unwrap()
+            .check_block_place_thread()
+            .unwrap();
+    }
+
     use super::*;
     use crate::server::level::ChunkTrackingView;
     use crate::server::level::test_support::{loaded_world_root, write_entered_cells};
@@ -1824,6 +1887,7 @@ mod tests {
         let mut ctx = TickContext {
             tick: 1,
             now_ns: now_ms * 1_000_000,
+            shutdown: std::sync::Arc::new(crate::server::tick::shutdown::Shutdown::new()),
             now_ms,
             connections: registry,
             inbound,
@@ -1856,6 +1920,11 @@ mod tests {
             missing_chunk_policy: crate::server::level::MissingChunkPolicy::RequireLoaded,
             ..ServerLevelConfig::default()
         });
+        config
+            .level
+            .install_world_time(crate::server::level::server_level::LevelWorldTime::new(
+                true,
+            ));
         let (mut registry, mut out_rx) = connected_registry();
         apply_enter_play(&mut registry);
         let manager = run_tick(PlayerSessionManager::new(config), &mut registry, vec![]);
@@ -1865,11 +1934,11 @@ mod tests {
     }
 
     #[test]
-    fn generated_join_never_spawns_before_terrain_and_releases_lost_demand() {
+    fn generated_join_refuses_missing_structure_authority_and_releases_demand() {
         use crate::server::level::{MissingChunkPolicy, OverworldGenerator};
         use std::sync::Arc;
         let generator = Arc::new(OverworldGenerator::new(42));
-        let world = ServerLevel::new_generated(
+        let mut world = ServerLevel::new_generated(
             ServerLevelConfig {
                 is_flat: false,
                 sea_level: generator.generator().get_sea_level(),
@@ -1879,19 +1948,37 @@ mod tests {
             generator,
         )
         .unwrap();
+        world.install_world_time(crate::server::level::server_level::LevelWorldTime::new(
+            true,
+        ));
         let mut config = default_session_config(256, 42);
         config.level = world;
-        let (mut registry, _out_rx) = connected_registry();
+        let (mut registry, mut out_rx) = connected_registry();
         apply_enter_play(&mut registry);
-        let mut manager = run_tick(PlayerSessionManager::new(config), &mut registry, vec![]);
+        let manager = run_tick(PlayerSessionManager::new(config), &mut registry, vec![]);
         assert_eq!(manager.session_count(), 0);
         assert!(manager.sessions.is_empty());
         assert!(manager.level.chunk_map().is_empty());
-        registry.apply(LifecycleEvent::Disconnect {
-            id: ID,
-            reason: DisconnectReason::Unsupported("test connection loss".into()),
-        });
-        manager = run_tick(manager, &mut registry, vec![]);
+        assert_eq!(manager.level.game_time(), 1, "the actual world tick ran");
+        // One admitted generation job reaches STRUCTURE_STARTS immediately.
+        // This fixture deliberately has no structure runtime/event authority:
+        // it must fail honestly, not retain an artificially pending join.
+        assert!(matches!(drained_disconnect_reason(&mut out_rx),
+            Some(DisconnectReason::Unsupported(reason))
+                if reason == "spawn terrain: actual structure generation is unavailable for StructureStarts"));
+        assert!(
+            matches!(
+                manager.level.generated_chunk_owner().unwrap().readiness(
+                    ChunkPos::ZERO,
+                    rivet_world::chunk::status::ChunkStatus::Full,
+                ),
+                crate::server::level::generated_chunk_owner::GenerationReadiness::Failed {
+                    status: rivet_world::chunk::status::ChunkStatus::StructureStarts,
+                    ..
+                }
+            ),
+            "the generation failure is retained by its canonical owner"
+        );
         assert!(manager.terrain_joins.is_empty());
         assert!(
             manager
@@ -2173,7 +2260,7 @@ mod tests {
             .unwrap()
             .1;
         let packet = decode(body);
-        assert_eq!(packet.game_time(), 901);
+        assert_eq!(packet.game_time(), 902);
         let state = manager
             .level
             .clock_runtime()
@@ -2197,6 +2284,7 @@ mod tests {
         manager.level.set_game_time(902);
         manager.tick(&mut TickContext {
             tick: 20,
+            shutdown: std::sync::Arc::new(crate::server::tick::shutdown::Shutdown::new()),
             now_ns: 0,
             now_ms: 0,
             connections: &mut registry,
@@ -2778,6 +2866,7 @@ mod tests {
             now_ms: 0,
             connections: &mut registry,
             inbound: Vec::new(),
+            shutdown: std::sync::Arc::new(crate::server::tick::shutdown::Shutdown::new()),
         };
         manager.disconnect_invalid_movement(&mut ctx, ID);
 
@@ -3966,6 +4055,7 @@ mod tests {
             now_ms: 0,
             connections: &mut registry,
             inbound: Vec::new(),
+            shutdown: std::sync::Arc::new(crate::server::tick::shutdown::Shutdown::new()),
         };
         manager.route_inbound(&mut ctx, ID, move_pos_frame(-90.0, -63.0, -72.0));
 
@@ -4026,6 +4116,7 @@ mod tests {
     fn direct_ctx(registry: &mut ConnectionRegistry) -> TickContext<'_> {
         TickContext {
             tick: 1,
+            shutdown: std::sync::Arc::new(crate::server::tick::shutdown::Shutdown::new()),
             now_ns: 0,
             now_ms: 0,
             connections: registry,

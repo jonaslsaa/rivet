@@ -1,0 +1,12 @@
+{"input":"{}","present":false}
+{"input":"{events:[]}","present":true,"dirty":false,"encoded":"{events:[]}"}
+{"input":"{events:[B;]}","present":true,"dirty":false,"encoded":"{events:[]}"}
+{"input":"{events:[I;]}","present":true,"dirty":false,"encoded":"{events:[]}"}
+{"input":"{events:[L;]}","present":true,"dirty":false,"encoded":"{events:[]}"}
+{"input":"{events:[B;1b]}","present":true,"dirty":false,"encoded":"{events:[]}"}
+{"input":"{events:[I;2]}","present":true,"dirty":false,"encoded":"{events:[]}"}
+{"input":"{events:[L;3L]}","present":true,"dirty":false,"encoded":"{events:[]}"}
+{"input":"{events:[{id:\"a\",trigger_time:4L,callback:{type:\"function\",id:\"test:a\"}},{id:\"b\",trigger_time:2L,callback:{type:\"function_tag\",id:\"test:b\"}}]}","present":true,"dirty":true,"encoded":"{events:[{callback:{id:\"test:b\",type:\"minecraft:function_tag\"},id:\"b\",trigger_time:2L},{callback:{id:\"test:a\",type:\"minecraft:function\"},id:\"a\",trigger_time:4L}]}"}
+{"input":"{events:[{}, {id:\"a\",trigger_time:3.75d,callback:{type:\"function\",id:\"test:a\"}}]}","present":true,"dirty":true,"encoded":"{events:[{callback:{id:\"test:a\",type:\"minecraft:function\"},id:\"a\",trigger_time:3L}]}"}
+{"input":"{events:[{id:\"bad\",trigger_time:1,callback:{type:\"missing\",id:\"test:a\"}}]}","present":true,"dirty":false,"encoded":"{events:[]}"}
+{"input":"{events:[{id:\"a\",trigger_time:2,callback:{type:\"function\",id:\"test:first\"}},{id:\"a\",trigger_time:2,callback:{type:\"function\",id:\"test:duplicate\"}}]}","present":true,"dirty":true,"encoded":"{events:[{callback:{id:\"test:first\",type:\"minecraft:function\"},id:\"a\",trigger_time:2L}]}"}

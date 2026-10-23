@@ -11,6 +11,25 @@ diffs vs Rivet, packet round-trips) builds on top of these fixtures later.
 
 ## Status: what works
 
+### Live world callbacks and transport
+
+- `run_timer_queue_probe.sh` executes the actual scheduled-event queue and its
+  codec, including duplicate keys, overdue entries, reentrant scheduling,
+  callback failures and partial saved-data decoding.
+- `run_world_event_probe.sh` executes 13 actual Paper dispatch cases for physics,
+  fluid-level, flow and block-form events, including altered data, cancellation
+  and listener failures routed through the real exception event.
+- `run_neighbor_collector_probe.sh` executes 21 actual collecting-neighbour
+  traces, including chained-update limits, nested work and failure cleanup.
+- `run_live_block_packets_probe.sh <output.jsonl>` captures block, section and
+  level-event packet bodies at positive/negative and boundary coordinates.
+  `run_chunk_block_batch_probe.sh` separately captures source short-set ordering
+  across duplicates and table growth. Rust transport tests inspect real
+  outbound frames, sent watchers and call-time event recipients.
+
+These comparisons do not certify fresh-world FULL activation, normal autosave,
+complete world-effects services or JVM plugin compatibility.
+
 ### Generated lighting and structure primitives
 
 - `bash scripts/run_liquid_block_probe.sh <output.jsonl>`: 108 actual Paper

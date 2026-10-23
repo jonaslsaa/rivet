@@ -29,6 +29,8 @@ mod tests;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LiveBlockMutationError {
+    #[error("enabled AntiXray block-change controller is not implemented")]
+    AntiXrayEnabled,
     #[error("live block mutation requires canonical chunk {0}")]
     MissingChunk(ChunkPos),
     #[error("live block mutation requires retained world runtime settings")]
@@ -130,20 +132,26 @@ pub trait LiveBlockMutationServices: BlockEntityWorldServices + Send {
 // lists, these distinguish inherited empty bodies from nonempty overrides and
 // cache-null collision states from static collision boxes. Regenerate with
 // run_block_mutation_metadata_probe.sh (Paper 0a99345).
-static CALLBACKS: LazyLock<HashMap<&'static str, [&'static str; 4]>> = LazyLock::new(|| {
+static CALLBACKS: LazyLock<HashMap<&'static str, [&'static str; 5]>> = LazyLock::new(|| {
     include_str!("block_mutation_callbacks.tsv")
         .lines()
         .map(|line| {
             let fields: Vec<_> = line.split('\t').collect();
-            assert_eq!(fields.len(), 5);
-            (fields[0], [fields[1], fields[2], fields[3], fields[4]])
+            assert_eq!(fields.len(), 6);
+            (
+                fields[0],
+                [fields[1], fields[2], fields[3], fields[4], fields[5]],
+            )
         })
         .collect()
 });
 fn nonempty_callback(state: BlockState, index: usize) -> bool {
+    callback_owner(state, index) != "BlockBehaviour"
+}
+pub(super) fn callback_owner(state: BlockState, index: usize) -> &'static str {
     CALLBACKS
         .get(state.block().name())
-        .is_some_and(|owners| owners[index] != "BlockBehaviour")
+        .map_or("BlockBehaviour", |owners| owners[index])
 }
 fn different_light(old: BlockState, new: BlockState) -> bool {
     old != new
@@ -154,6 +162,26 @@ fn different_light(old: BlockState, new: BlockState) -> bool {
 }
 
 impl ServerLevel {
+    /// Level's constructor chooses NO_OPERATION_INSTANCE only from the actual
+    /// decoded world setting. Its onBlockChange body is empty. The enabled
+    /// controller's solid palette/exposure cache has no native owner yet.
+    pub fn anti_xray_block_change_live(
+        &self,
+        _pos: BlockPos,
+        _state: BlockState,
+        _old: Option<BlockState>,
+        _flags: u32,
+        _limit: i32,
+    ) -> Result<(), LiveBlockMutationError> {
+        let settings = self
+            .runtime_settings()
+            .ok_or(LiveBlockMutationError::MissingSettings)?;
+        if settings.anti_xray_enabled {
+            Err(LiveBlockMutationError::AntiXrayEnabled)
+        } else {
+            Ok(())
+        }
+    }
     fn mutation_state(&self, pos: BlockPos) -> Result<BlockState, LiveBlockMutationError> {
         self.chunk_map
             .get_chunk(ChunkPos::containing(&pos))

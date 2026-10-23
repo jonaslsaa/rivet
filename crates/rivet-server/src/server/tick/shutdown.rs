@@ -13,6 +13,9 @@ use tokio::sync::watch;
 #[derive(Debug)]
 pub struct Shutdown {
     flag: AtomicBool,
+    /// MinecraftServer.hasStopped becomes true when stopServer begins, not
+    /// when another thread merely asks the active server loop to shut down.
+    stopping: AtomicBool,
     lock: Mutex<()>,
     condvar: Condvar,
     /// Async wake for the accept loop (`wait_async`).
@@ -24,6 +27,7 @@ impl Shutdown {
         let (watch_tx, _) = watch::channel(false);
         Shutdown {
             flag: AtomicBool::new(false),
+            stopping: AtomicBool::new(false),
             lock: Mutex::new(()),
             condvar: Condvar::new(),
             watch_tx,
@@ -43,6 +47,16 @@ impl Shutdown {
 
     pub fn is_requested(&self) -> bool {
         self.flag.load(Ordering::SeqCst)
+    }
+
+    /// Actual stop-owner transition after the normal loop has exited. Merely
+    /// requesting shutdown must not relax synchronous event thread checks.
+    pub(crate) fn begin_stopping(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
     }
 
     /// Sleep for `dur`, or until `request()` fires. Returns whether shutdown was

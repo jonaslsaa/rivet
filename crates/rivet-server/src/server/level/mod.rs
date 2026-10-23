@@ -45,6 +45,7 @@ pub mod level_clock_runtime;
 pub mod level_debug_synchronizers;
 #[cfg(unix)]
 pub mod level_storage_access;
+pub mod native_world_services;
 pub mod player_chunk_loader;
 pub mod poi_chunk;
 pub mod poi_manager;
@@ -63,6 +64,7 @@ pub mod structure_snapshot_data;
 pub mod structure_spawn_events;
 pub mod structure_transformer;
 pub mod world_clocks;
+pub mod world_events;
 pub mod world_gen_region;
 pub mod world_identity;
 pub mod world_runtime_settings;

@@ -49,6 +49,18 @@ mod block_entity_backend;
 #[path = "level_block_mutation.rs"]
 mod block_mutation;
 pub use block_mutation::{LiveBlockEffect, LiveBlockMutationError, LiveBlockMutationServices};
+#[path = "level_world_time.rs"]
+mod world_time;
+pub use world_time::{
+    FunctionCallback, LevelWorldTime, ScheduledFunctionExecutor, UnavailableScheduledFunctions,
+    WorldTimeError,
+};
+#[path = "level_neighbor_updates.rs"]
+mod neighbor_updates;
+pub use neighbor_updates::{
+    LiveNeighborServices, LiveNeighborUpdater, dispatch_live_block_effect,
+    postprocess_fluid_tick_live, postprocess_liquid_tick_live, postprocess_set_block_live,
+};
 #[path = "level_entity_runtime.rs"]
 mod entity_runtime;
 #[path = "level_full_activation.rs"]
@@ -234,6 +246,7 @@ pub struct ServerLevel {
     game_time: i64,
     sub_tick_count: i64,
     clock_runtime: Option<super::level_clock_runtime::LevelClockRuntime>,
+    world_time: Option<LevelWorldTime>,
     live_light: Option<crate::server::lighting::LiveLightRuntime>,
     pub(super) debug_synchronizers: super::level_debug_synchronizers::LevelDebugSynchronizers,
     /// The read-only region chunk source (issue #185): `Some` only for the
@@ -276,6 +289,10 @@ impl ServerLevel {
             .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
         let uuid = storage.load_world_uuid(level.dimension())?;
         level.install_world_uuid(uuid);
+        level.install_world_time(
+            LevelWorldTime::load(&storage.dimension_path(level.dimension()), true)
+                .map_err(std::io::Error::other)?,
+        );
         level.writable_storage = Some(storage);
         Ok(level)
     }
@@ -283,7 +300,9 @@ impl ServerLevel {
     /// Persist this level's already-selected identity under its retained root
     /// lock. Retrying a failed save never allocates a replacement identity.
     #[cfg(unix)]
-    pub fn save_world_metadata(&self) -> std::io::Result<()> {
+    pub fn save_world_metadata(
+        &mut self,
+    ) -> std::io::Result<super::level_storage_access::LevelDataTimeSave> {
         let storage = self.writable_storage.as_ref().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -293,7 +312,8 @@ impl ServerLevel {
         let uuid = self
             .world_uuid
             .expect("writable generated level selects its identity at construction");
-        storage.save_world_uuid(self.dimension(), uuid)
+        storage.save_world_uuid(self.dimension(), uuid)?;
+        self.save_world_saved_data_and_time()
     }
 
     /// Construct an explicitly generated world without installing placeholder
@@ -335,6 +355,7 @@ impl ServerLevel {
             )
             .expect("pinned synthetic overworld clock registry"),
         );
+        level.install_world_time(LevelWorldTime::new(true));
         level
     }
 
@@ -386,6 +407,7 @@ impl ServerLevel {
             game_time: 0,
             sub_tick_count: 0,
             clock_runtime: None,
+            world_time: None,
             live_light: None,
             debug_synchronizers: super::level_debug_synchronizers::LevelDebugSynchronizers::new(),
             region_source: None,
@@ -803,12 +825,8 @@ impl ServerLevel {
         self.generation_environment.as_mut()
     }
 
-    /// Called once by the world's tick owner. Border interpolation advances
-    /// once, then SPAWN sees the current bounds and actual mob rule.
-    pub fn tick_generation(
-        &mut self,
-        max_jobs: usize,
-    ) -> super::generated_chunk_owner::GenerationJobReport {
+    /// ServerLevel's normal-tick border phase precedes game time and chunks.
+    pub fn tick_world_border(&mut self) {
         if let Some(environment) = self.generation_environment.as_mut() {
             environment.tick();
             if let Some(owner) = self.generated_chunk_owner.as_mut() {
@@ -817,6 +835,12 @@ impl ServerLevel {
                     .expect("installed world environment matches its canonical generator");
             }
         }
+    }
+
+    pub fn tick_generation(
+        &mut self,
+        max_jobs: usize,
+    ) -> super::generated_chunk_owner::GenerationJobReport {
         self.generated_chunk_owner
             .as_mut()
             .map_or_else(Default::default, |owner| {

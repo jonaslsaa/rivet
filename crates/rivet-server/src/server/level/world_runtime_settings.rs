@@ -36,6 +36,10 @@ pub enum RuntimeSettingsInstallError {
 pub struct WorldRuntimeSettings {
     pub duplicate_uuid: DuplicateUuidSettings,
     pub block_entity_ticking: bool,
+    pub max_block_ticks: i32,
+    pub max_fluid_ticks: i32,
+    pub water_over_lava_flow_speed: i32,
+    pub anti_xray_enabled: bool,
     pub mob_spawner_tick_rate: i32,
     pub cooldown_failed_beehive_releases: bool,
     pub nerf_spawner_mobs: bool,
@@ -147,6 +151,10 @@ impl WorldRuntimeSettings {
                 &["unsupported-settings", "ticking", "block-entities"],
                 true,
             )?,
+            anti_xray_enabled: boolean(&["anticheat", "anti-xray", "enabled"], false)?,
+            max_block_ticks: int(&["environment", "max-block-ticks"], 65536)?,
+            max_fluid_ticks: int(&["environment", "max-fluid-ticks"], 65536)?,
+            water_over_lava_flow_speed: int(&["environment", "water-over-lava-flow-speed"], 5)?,
             mob_spawner_tick_rate: int(&["tick-rates", "mob-spawner"], 1)?,
             cooldown_failed_beehive_releases: boolean(
                 &["entities", "behavior", "cooldown-failed-beehive-releases"],
@@ -389,7 +397,7 @@ mod tests {
                 DuplicateUuidMode::Nothing => "NOTHING",
             };
             assert_eq!(
-                json!({"spawner_rate":value.mob_spawner_tick_rate,"block_entities":value.block_entity_ticking,"bee_cooldown":value.cooldown_failed_beehive_releases,"duplicate_mode":mode,"duplicate_range":value.duplicate_uuid.safe_regen_delete_range,"animal_y":value.animal_tracking_range_y.unwrap_or(-1.) as i32,"other_y":value.other_tracking_range_y.unwrap_or(-1.) as i32}),
+                json!({"spawner_rate":value.mob_spawner_tick_rate,"block_entities":value.block_entity_ticking,"anti_xray_enabled":value.anti_xray_enabled,"bee_cooldown":value.cooldown_failed_beehive_releases,"duplicate_mode":mode,"duplicate_range":value.duplicate_uuid.safe_regen_delete_range,"animal_y":value.animal_tracking_range_y.unwrap_or(-1.) as i32,"other_y":value.other_tracking_range_y.unwrap_or(-1.) as i32,"max_block_ticks":value.max_block_ticks,"max_fluid_ticks":value.max_fluid_ticks,"water_over_lava_flow_speed":value.water_over_lava_flow_speed}),
                 row["result"],
                 "{row}"
             );

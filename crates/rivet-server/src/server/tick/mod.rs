@@ -41,6 +41,8 @@ pub type Tickable = Box<dyn FnMut(&mut TickContext) + Send>;
 
 /// Per-tick context handed to tickables.
 pub struct TickContext<'a> {
+    /// The actual loop's shared stop signal, also used by synchronous events.
+    pub shutdown: Arc<Shutdown>,
     /// The current tick number (`MinecraftServer.currentTick`, 1-based).
     pub tick: u64,
     /// The monotonic nanosecond reading at this tick (Paper `System.nanoTime()`)
@@ -116,6 +118,7 @@ impl ServerTickLoop {
                 self.time.sleep_until(self.scheduler.next_deadline_nanos());
             }
         }
+        self.shutdown.begin_stopping();
         // Final pass: deliver anything already accepted into the channels.
         self.run_tick();
         // Tell every live connection the server is stopping (best-effort; a full
@@ -195,9 +198,11 @@ impl ServerTickLoop {
         let ServerTickLoop {
             registry,
             tickables,
+            shutdown,
             ..
         } = &mut *self;
         let mut ctx = TickContext {
+            shutdown: Arc::clone(shutdown),
             tick,
             now_ns,
             now_ms,
@@ -246,6 +251,27 @@ mod tests {
         ServerboundFrame {
             bytes: Bytes::from(vec![byte]),
         }
+    }
+
+    #[test]
+    fn shutdown_stopping_phase_begins_only_after_normal_tick_exits() {
+        let (mut loop_, _) = test_loop(Arc::new(Mutex::new(Vec::new())));
+        let phases = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&phases);
+        loop_.tickables = vec![Box::new(move |ctx| {
+            observed
+                .lock()
+                .unwrap()
+                .push((ctx.shutdown.is_requested(), ctx.shutdown.is_stopping()));
+            ctx.shutdown.request();
+            // The active normal tick cannot begin the stopping phase merely
+            // by requesting shutdown; the loop owns that later transition.
+            if !ctx.shutdown.is_stopping() {
+                assert!(ctx.shutdown.is_requested());
+            }
+        })];
+        loop_.run();
+        assert_eq!(*phases.lock().unwrap(), [(false, false), (true, true)]);
     }
 
     /// Build a `ServerTickLoop` whose tickable records every delivered inbound

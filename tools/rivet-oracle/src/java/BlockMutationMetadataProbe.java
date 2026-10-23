@@ -15,7 +15,7 @@ public final class BlockMutationMetadataProbe {
  public static void main(String[] args)throws Exception {
   net.minecraft.SharedConstants.tryDetectVersion();net.minecraft.server.Bootstrap.bootStrap();
   try(var blocks=new PrintStream(args[0]);var states=new PrintStream(args[1])) {
-   for(Block b:BuiltInRegistries.BLOCK)blocks.println(BuiltInRegistries.BLOCK.getKey(b)+"\t"+owner(b.getClass(),"onPlace")+"\t"+owner(b.getClass(),"affectNeighborsAfterRemoval")+"\t"+owner(b.getClass(),"shouldChangedStateKeepBlockEntity")+"\t"+owner(b.getClass(),"updateIndirectNeighbourShapes"));
+   for(Block b:BuiltInRegistries.BLOCK)blocks.println(BuiltInRegistries.BLOCK.getKey(b)+"\t"+owner(b.getClass(),"onPlace")+"\t"+owner(b.getClass(),"affectNeighborsAfterRemoval")+"\t"+owner(b.getClass(),"shouldChangedStateKeepBlockEntity")+"\t"+owner(b.getClass(),"updateIndirectNeighbourShapes")+"\t"+owner(b.getClass(),"neighborChanged"));
    int start=0,last=-1;
    for(int id=0;id<=Block.BLOCK_STATE_REGISTRY.size();id++){
     int flags=-2;if(id<Block.BLOCK_STATE_REGISTRY.size()){BlockState s=Block.BLOCK_STATE_REGISTRY.byId(id);flags=(CollisionUtil.isSpecialCollidingBlock(s)?1:0)|(s.getFluidState().isRandomlyTicking()?2:0)|(s.hasAnalogOutputSignal()?4:0);}

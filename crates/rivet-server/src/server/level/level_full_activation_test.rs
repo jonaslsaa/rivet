@@ -104,12 +104,6 @@ impl BlockEntityWorldServices for Services {
     fn require_ticker_body(&self, _: NativeTickerKind) -> Result<(), BlockEntityTickerError> {
         panic!("live chest has no ticker; pending hive stays lazy")
     }
-    fn should_tick_blocks_at(&self, _: BlockPos) -> bool {
-        panic!("FULL is not a block tick")
-    }
-    fn is_ticking(&self, _: BlockPos) -> bool {
-        panic!("FULL is not a block tick")
-    }
     fn tick_body(
         &mut self,
         _: &mut LevelBlockEntityRuntime,
