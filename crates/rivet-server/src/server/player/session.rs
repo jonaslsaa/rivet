@@ -255,15 +255,77 @@ pub fn session_manager_tickable(config: SessionManagerConfig) -> Tickable {
 }
 
 impl PlayerSessionManager {
+    /// Post-load through the actual level and player owners. The boot/runtime
+    /// caller supplies loaded settings, removal and tracking implementations;
+    /// this does not create permissive defaults for missing runtime behavior.
+    pub fn run_chunk_entity_post_load(
+        &mut self,
+        pos: rivet_registry::core::ChunkPos,
+        context: &mut crate::server::level::entity_post_load::EntityPostLoadContext<'_>,
+        lifecycle: &mut dyn crate::server::level::entity_lookup::EntityLifecycle,
+    ) -> Result<
+        Vec<crate::server::level::entity_post_load::DuplicateUuidDecision>,
+        crate::server::level::server_level::LevelEntityError,
+    > {
+        use crate::server::level::entity_lookup::{
+            EntityLifecycle, EntityLifecycleEvent, EntityLookupError,
+        };
+        use crate::server::level::entity_post_load::ExistingEntityView;
+        use rivet_util::mth::Uuid;
+        use rivet_world::entity::loaded_entity::NativeLoadedEntity;
+        struct SessionLifecycle<'a> {
+            indices: &'a PlayerIndices,
+            sessions: &'a std::collections::HashMap<ConnectionId, Session>,
+            runtime: &'a mut dyn EntityLifecycle,
+        }
+        impl EntityLifecycle for SessionLifecycle<'_> {
+            fn external_uuid_in_use(&self, uuid: &Uuid) -> bool {
+                self.indices
+                    .connection_for(uuid)
+                    .is_some_and(|id| self.sessions.contains_key(&id))
+                    || self.runtime.external_uuid_in_use(uuid)
+            }
+            fn on_event(
+                &mut self,
+                event: EntityLifecycleEvent,
+                entity: &NativeLoadedEntity,
+            ) -> Result<(), EntityLookupError> {
+                self.runtime.on_event(event, entity)
+            }
+        }
+        let indices = &self.indices;
+        let sessions = &self.sessions;
+        let mut lifecycle = SessionLifecycle {
+            indices,
+            sessions,
+            runtime: lifecycle,
+        };
+        self.level.run_chunk_entity_post_load(
+            pos,
+            context,
+            |uuid| {
+                let session = sessions.get(&indices.connection_for(&uuid)?)?;
+                Some(ExistingEntityView {
+                    encode_id: None,
+                    position: session.player.position(),
+                    is_removed: false,
+                })
+            },
+            &mut lifecycle,
+            crate::server::level::world_identity::random_uuid,
+        )
+    }
+
     /// Build the manager. Called on the tokio side when `enable_join` is set;
     /// the manager is moved into the tick thread by `Server::serve`.
-    pub fn new(config: SessionManagerConfig) -> Self {
+    pub fn new(mut config: SessionManagerConfig) -> Self {
         let sender = PlaySender::new(
             config.compression_threshold,
             config.dimension_type_access,
             config.world_clock_access,
         );
         let entity_ids = EntityIdAllocator::new();
+        config.level.bind_entity_occupancy(entity_ids.occupancy());
         let entity_construction =
             crate::server::level::entity_construction::EntityConstructionRuntime::new(
                 entity_ids.sequence(),
@@ -364,6 +426,32 @@ impl PlayerSessionManager {
     /// when the connection has no session.
     pub fn player_position(&self, id: ConnectionId) -> Option<rivet_registry::core::Vec3> {
         self.sessions.get(&id).map(|s| s.player.position())
+    }
+
+    /// Resolve duplicate-policy input from the real owners. Player state is
+    /// borrowed from its session; native state comes from the visible lookup,
+    /// never a second UUID/position snapshot maintained alongside either.
+    pub fn existing_world_entity(
+        &self,
+        uuid: rivet_util::mth::Uuid,
+    ) -> Option<crate::server::level::entity_post_load::ExistingEntityView> {
+        use crate::server::level::entity_post_load::ExistingEntityView;
+        if let Some(id) = self.indices.connection_for(&uuid)
+            && let Some(session) = self.sessions.get(&id)
+        {
+            return Some(ExistingEntityView {
+                // EntityTypes.PLAYER is noSave; Entity.getEncodeId is null.
+                encode_id: None,
+                position: session.player.position(),
+                is_removed: false,
+            });
+        }
+        let entity = self.level.entity_lookup()?.get_by_uuid(&uuid)?;
+        Some(ExistingEntityView {
+            encode_id: Some(rivet_registry::Identifier::parse(entity.encode_id())),
+            position: entity.position(),
+            is_removed: entity.is_removed(),
+        })
     }
 
     /// The authoritative `ServerPlayer` yaw of a live session (issue #158 test
@@ -601,6 +689,24 @@ impl PlayerSessionManager {
             respawn.pitch(),
             rivet_registry::core::GameType::Survival,
         );
+        if self
+            .level
+            .entity_lookup()
+            .is_some_and(|lookup| lookup.contains_uuid(&player.uuid()))
+        {
+            // Paper's raw entity UUID index cannot admit a second owner. Its
+            // visible force-removal path assumes the existing value is a
+            // ServerPlayer; native replacement is not implemented here.
+            let _ = ctx.connections.send(
+                connection_id,
+                OutboundEvent::Disconnect {
+                    reason: DisconnectReason::Unsupported(
+                        "player UUID is already held by a native world entity".into(),
+                    ),
+                },
+            );
+            return;
+        }
         self.indices.insert(player.uuid(), connection_id);
 
         // The spawn teleport (issue #158): `PlayerList.placeNewPlayer` calls
@@ -2101,6 +2207,86 @@ mod tests {
         );
     }
 
+    #[test]
+    fn player_uuid_collision_with_hidden_native_preserves_owner_and_consumes_id() {
+        use crate::server::level::entity_lookup::{
+            Admission, EntityLifecycle, EntityLifecycleEvent, EntityLookupError,
+        };
+        use rivet_util::{mth::Uuid, random_source::LegacyRandomSource};
+        use rivet_world::entity::{
+            generation_creature::{NativeEntityIdentity, NativeGenerationCreature, NativeSheep},
+            loaded_entity::NativeLoadedEntity,
+        };
+        #[derive(Default)]
+        struct Lifecycle(Vec<EntityLifecycleEvent>);
+        impl EntityLifecycle for Lifecycle {
+            fn external_uuid_in_use(&self, _: &Uuid) -> bool {
+                false
+            }
+            fn on_event(
+                &mut self,
+                event: EntityLifecycleEvent,
+                _: &NativeLoadedEntity,
+            ) -> Result<(), EntityLookupError> {
+                self.0.push(event);
+                Ok(())
+            }
+        }
+        let (mut registry, mut out_rx) = connected_registry();
+        let mut manager = PlayerSessionManager::new(default_session_config(
+            256,
+            ServerLevelConfig::M1_FIXTURE_SEED,
+        ));
+        let uuid = probe_profile().id();
+        let native_id = 42;
+        let sheep = NativeSheep::from_identity(
+            NativeEntityIdentity {
+                entity_id: native_id,
+                uuid,
+                world_uuid: Uuid { most: 1, least: 2 },
+            },
+            &mut LegacyRandomSource::new(7),
+        );
+        let mut lifecycle = Lifecycle::default();
+        let lookup = manager.level.entity_lookup_mut().unwrap();
+        assert!(matches!(
+            lookup
+                .add_entity(
+                    NativeLoadedEntity::Creature(NativeGenerationCreature::Sheep(sheep)),
+                    false,
+                    &mut lifecycle,
+                )
+                .unwrap(),
+            Admission::Added(42)
+        ));
+        assert!(lookup.get_by_uuid(&uuid).is_none(), "native is hidden");
+        assert_eq!(lifecycle.0, vec![EntityLifecycleEvent::Created]);
+
+        apply_enter_play(&mut registry);
+        manager = run_tick(manager, &mut registry, vec![]);
+        assert!(matches!(
+            drained_disconnect_reason(&mut out_rx),
+            Some(DisconnectReason::Unsupported(reason))
+                if reason == "player UUID is already held by a native world entity"
+        ));
+        assert_eq!(manager.session_count(), 0);
+        assert!(manager.indices.connection_for(&uuid).is_none());
+        assert!(manager.indices.uuid_for(ID).is_none());
+        let lookup = manager.level.entity_lookup().unwrap();
+        assert_eq!(
+            lookup.get_raw_by_uuid(&uuid).unwrap().entity_id(),
+            native_id
+        );
+        assert!(lookup.has_entity(native_id));
+        assert!(!lookup.has_entity(1), "rejected player was not registered");
+        assert_eq!(
+            manager.entity_ids.next_id(),
+            2,
+            "failed player consumed ID 1"
+        );
+        assert_eq!(lifecycle.0, vec![EntityLifecycleEvent::Created]);
+    }
+
     /// A genuine `hasEntityWithId` skip through the real spawn path (GitHub
     /// #222) — the highest practical integration seam where the skip is
     /// reachable. The pure forward counter never re-encounters an id it already
@@ -2129,6 +2315,16 @@ mod tests {
             manager.player_entity_id(ID),
             Some(3),
             "the spawn skips the in-use id 2 (hasEntityWithId)"
+        );
+        let entities = manager.level.entity_lookup().unwrap();
+        assert!(entities.has_entity(2));
+        assert!(
+            entities.has_entity(3),
+            "player admission updates shared occupancy"
+        );
+        assert!(
+            entities.get_raw(3).is_none(),
+            "player remains session-owned"
         );
     }
 
@@ -2172,6 +2368,16 @@ mod tests {
             (5.0, -63.0, 5.0),
             "move accepted after ack"
         );
+        let existing = manager.existing_world_entity(probe_profile().id()).unwrap();
+        assert_eq!(
+            existing.position, pos,
+            "duplicate policy reads the moved player"
+        );
+        assert!(
+            existing.encode_id.is_none(),
+            "players are not saveable entity types"
+        );
+        assert!(!existing.is_removed);
     }
 
     /// A stale/wrong ack id is a silent no-op (`handleAcceptTeleportPacket`'s

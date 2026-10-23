@@ -52,6 +52,10 @@ impl StructureMinecartFactory {
 }
 
 impl StructureEntityCreation for StructureMinecartFactory {
+    fn world_uuid(&self) -> Option<Uuid> {
+        Some(self.world_uuid)
+    }
+
     fn require_creation_authority(&self) -> Result<(), StructureError> {
         // Construction requires an explicit world identity, enabled flags,
         // shared server identity runtime and destination occupancy callback.

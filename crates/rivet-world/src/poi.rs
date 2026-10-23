@@ -51,6 +51,30 @@ pub fn bootstrap_poi_types() -> Registry<PoiType> {
             RegistrationInfo::BUILT_IN,
         );
     }
+    registry.bind_tags(
+        rivet_registry::generated::tags::POINT_OF_INTEREST_TYPE_TAG_BY_NAME
+            .entries()
+            .map(|(name, members)| {
+                let ids = members
+                    .iter()
+                    .map(|member| {
+                        rivet_registry::holder::HolderId(
+                            PoiType::by_name(&Identifier::parse(member))
+                                .expect("generated POI tag member exists")
+                                .0 as u32,
+                        )
+                    })
+                    .collect();
+                (
+                    rivet_registry::TagKey::create(
+                        &POINT_OF_INTEREST_TYPE,
+                        Identifier::parse(name),
+                    ),
+                    ids,
+                )
+            })
+            .collect(),
+    );
     registry.freeze()
 }
 const TYPES: [(&str, i32, i32); 21] = [

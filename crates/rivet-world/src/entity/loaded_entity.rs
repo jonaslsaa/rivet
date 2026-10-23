@@ -11,6 +11,29 @@ pub enum NativeLoadedEntity {
     Creature(NativeGenerationCreature),
 }
 impl NativeLoadedEntity {
+    pub fn encode_id(&self) -> &'static str {
+        match self {
+            Self::ChestMinecart(_) => "minecraft:chest_minecart",
+            Self::Creature(NativeGenerationCreature::Sheep(_)) => "minecraft:sheep",
+            Self::Creature(NativeGenerationCreature::Farm(value)) => match value.family() {
+                super::farm_variants::FarmFamily::Cow => "minecraft:cow",
+                super::farm_variants::FarmFamily::Pig => "minecraft:pig",
+                super::farm_variants::FarmFamily::Chicken => "minecraft:chicken",
+            },
+        }
+    }
+    pub fn set_uuid(&mut self, uuid: Uuid) {
+        match self {
+            Self::ChestMinecart(value) => value.set_uuid(uuid),
+            Self::Creature(value) => value.entity_mut().set_uuid(uuid),
+        }
+    }
+    pub fn is_removed(&self) -> bool {
+        match self {
+            Self::ChestMinecart(value) => value.is_removed(),
+            Self::Creature(value) => value.entity().is_removed(),
+        }
+    }
     pub fn entity_id(&self) -> i32 {
         match self {
             Self::ChestMinecart(e) => e.entity_id(),

@@ -23,6 +23,12 @@ pub fn load_or_create_world_uuid(dimension_path: &Path) -> io::Result<Uuid> {
             tracing::error!(path = %dimension_path.display(), "Unchecked NBT failure loading Paper world metadata")
         }
     }
+    random_uuid()
+}
+
+/// java.util.UUID.randomUUID: independent secure randomness, never the
+/// deterministic world-generation or shared entity-construction stream.
+pub fn random_uuid() -> io::Result<Uuid> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).map_err(|error| io::Error::other(error.to_string()))?;
     // java.util.UUID.randomUUID uses secure bytes and these version/variant

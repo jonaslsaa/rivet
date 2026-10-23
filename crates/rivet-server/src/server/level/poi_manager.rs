@@ -48,6 +48,9 @@ pub struct PoiManager {
 }
 
 impl PoiManager {
+    pub fn has_chunk(&self, pos: ChunkPos) -> bool {
+        self.chunks.contains_key(&pos)
+    }
     /// Requires the owning world's actual bound #minecraft:village tag. It
     /// cannot default to a hand-picked subset or mix holders from other worlds.
     pub fn new(

@@ -39,6 +39,11 @@ use std::sync::Arc;
 /// real CHEST_MINECART enabled-feature checks decline construction. An absent
 /// constructor, UUID, global-ID source or live occupancy query is an error.
 pub trait StructureEntityCreation: Send + Sync {
+    /// The destination of the constructor, when world identity is available.
+    /// An unidentified test/adapter factory cannot be used for live admission.
+    fn world_uuid(&self) -> Option<rivet_util::mth::Uuid> {
+        None
+    }
     fn require_creation_authority(&self) -> Result<(), StructureError>;
     fn create_chest_minecart(&self) -> Result<Option<NativeChestMinecart>, StructureError>;
 }

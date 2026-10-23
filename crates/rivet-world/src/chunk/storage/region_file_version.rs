@@ -13,12 +13,12 @@
 //!
 //! `DEFAULT = VERSION_DEFLATE`; `configure` switches the selected version from
 //! `server.properties` `region-file-compression`. Under DECISIONS.md D13 the
-//! byte-identity gate pins `region-file-compression=none`, so Rivet's writer is
-//! only required to emit id 3; the other ids are read-side-only requirements.
+//! byte-identity gate pins `region-file-compression=none`; normal persistence
+//! also supports the default zlib-wrapped DEFLATE writer.
 //!
 //! `wrap_input`/`wrap_output` (Java's `StreamWrapper` functional interface)
-//! unwrap/rewrap a stream with the registered codec. gzip read and gzip/none
-//! write are wired on `flate2`; deflate **read** is zlib-wrapped — Java's
+//! unwrap/rewrap a stream with the registered codec. gzip/deflate read/write
+//! are wired on `flate2`; deflate is zlib-wrapped — Java's
 //! `InflaterInputStream` defaults to `nowrap=false`, the RFC 1950 zlib framing
 //! that `flate2`'s `ZlibDecoder` reads. LZ4 read ports lz4-java's framed
 //! `LZ4BlockInputStream` over `lz4_flex`, including its seeded xxHash32 check.
@@ -26,10 +26,7 @@
 //! The id `127` custom codec has no `option_name` and so can never be selected
 //! (it is absent from `VERSIONS_BY_NAME`), exactly like Paper.
 
-// RivetTodo(#231): deflate/lz4 **write** are the remaining deferred codec
-// paths. deflate write stays
-// deferred (Java `Deflater` is not `flate2`-reproducible in general — D13);
-// lz4 write is not ported. The id-127 read path lives in
+// RivetTodo(#231): lz4 write is not ported. The id-127 read path lives in
 // `RegionFile::create_chunk_input_stream` (region_file.rs), which reads the
 // modified-UTF-8 id, logs, and returns null like Paper. gzip read/write and
 // deflate read (zlib-wrapped, via `flate2`'s `ZlibDecoder`) are wired on
@@ -196,9 +193,10 @@ impl RegionFileVersion {
     }
 
     /// `wrap(OutputStream)` — rewrap a chunk stream with this codec (Java's
-    /// `StreamWrapper<OutputStream>`). Only `none` and `gzip` are writable:
-    /// D13 pins the gate to `none`, and gzip write is proven in `rivet-nbt`;
-    /// deflate/lz4 writes and custom error. The returned writer must be
+    /// `StreamWrapper<OutputStream>`). `none`, `gzip`, and zlib-wrapped
+    /// `deflate` are writable; lz4 and custom error. Compressor implementations
+    /// need not emit identical bytes; D13 still uses `none` for byte identity.
+    /// The returned writer must be
     /// finalized with [`RegionFileWriter::finish`] to emit a complete stream.
     pub fn wrap_output<W: Write>(self, output: W) -> io::Result<RegionFileWriter<W>> {
         match self.id {
@@ -207,10 +205,10 @@ impl RegionFileVersion {
                 flate2::Compression::default(),
             ))),
             3 => Ok(RegionFileWriter::Identity(output)),
-            2 => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "deflate write is deferred: Java `Deflater` output is not `flate2`-reproducible (DECISIONS.md D13)",
-            )),
+            2 => Ok(RegionFileWriter::Deflate(flate2::write::ZlibEncoder::new(
+                output,
+                flate2::Compression::default(),
+            ))),
             4 => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "lz4 write is deferred: the lz4-java block compressor is not ported (issue #231)",
@@ -383,6 +381,8 @@ pub enum RegionFileWriter<W: Write> {
     /// `BufferedOutputStream(GZIPOutputStream(out))` — `Compression::default()`
     /// matches `GZIPOutputStream`'s default level 6 (the `rivet-nbt` precedent).
     Gzip(flate2::write::GzEncoder<W>),
+    /// Java's default `DeflaterOutputStream`: RFC 1950 framing, default level 6.
+    Deflate(flate2::write::ZlibEncoder<W>),
     /// `BufferedOutputStream(out)` — byte-transparent.
     Identity(W),
 }
@@ -401,6 +401,7 @@ impl<W: Write> RegionFileWriter<W> {
     pub fn finish(self) -> io::Result<W> {
         match self {
             RegionFileWriter::Gzip(w) => w.finish(),
+            RegionFileWriter::Deflate(w) => w.finish(),
             RegionFileWriter::Identity(w) => Ok(w),
         }
     }
@@ -410,6 +411,7 @@ impl<W: Write> Write for RegionFileWriter<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
             RegionFileWriter::Gzip(w) => w.write(buf),
+            RegionFileWriter::Deflate(w) => w.write(buf),
             RegionFileWriter::Identity(w) => w.write(buf),
         }
     }
@@ -419,6 +421,7 @@ impl<W: Write> Write for RegionFileWriter<W> {
         // gzip trailer — only `RegionFileWriter::finish` does.
         match self {
             RegionFileWriter::Gzip(w) => w.flush(),
+            RegionFileWriter::Deflate(w) => w.flush(),
             RegionFileWriter::Identity(w) => w.flush(),
         }
     }
@@ -757,11 +760,7 @@ mod tests {
 
     #[test]
     fn deflate_wrap_reads_java_zlib_stream() {
-        // The write side is deferred (D13), so the reader is exercised against
-        // Java/Paper-compatible bytes: Java's `DeflaterOutputStream` (default
-        // `nowrap=false`) writes RFC 1950 zlib-wrapped deflate, which flate2's
-        // `ZlibEncoder` produces byte-for-byte compatibly (a `0x78` CMF header
-        // byte — deflate with a 32K window — and an adler32 trailer).
+        // Java defaults to nowrap=false: RFC 1950 framing, not raw DEFLATE.
         let mut encoder =
             flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(b"deflate payload").unwrap();
@@ -798,6 +797,95 @@ mod tests {
         );
     }
 
+    fn decode_hex(value: &str) -> Vec<u8> {
+        value
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    fn deflate_cases() -> impl Iterator<Item = (Vec<u8>, Vec<u8>)> {
+        include_str!("../../../../../tools/rivet-oracle/fixtures/region-deflate.jsonl")
+            .lines()
+            .map(|line| {
+                let row: serde_json::Value = serde_json::from_str(line).unwrap();
+                let size = row["size"].as_u64().unwrap() as usize;
+                let payload = (0..size)
+                    .map(|i| {
+                        if size == 4096 {
+                            65
+                        } else {
+                            (i * 31 + i / 7) as u8
+                        }
+                    })
+                    .collect();
+                (payload, decode_hex(row["compressed"].as_str().unwrap()))
+            })
+    }
+
+    #[test]
+    fn default_deflate_matches_actual_paper_stream_corpus() {
+        assert_eq!(
+            RegionFileVersion::DEFAULT,
+            RegionFileVersion::VERSION_DEFLATE
+        );
+        for (payload, java) in deflate_cases() {
+            let mut decoded = Vec::new();
+            RegionFileVersion::VERSION_DEFLATE
+                .wrap_input(java.as_slice())
+                .unwrap()
+                .read_to_end(&mut decoded)
+                .unwrap();
+            assert_eq!(decoded, payload);
+            let mut writer = RegionFileVersion::DEFAULT.wrap_output(Vec::new()).unwrap();
+            writer.write_all(&payload).unwrap();
+            // Exact compressed bytes are evidence for this bounded corpus,
+            // not a guarantee across all zlib versions or stream write patterns.
+            assert_eq!(
+                writer.finish().unwrap(),
+                java,
+                "payload length {}",
+                payload.len()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the pinned local Paper runtime and Java"]
+    fn actual_paper_reads_rust_default_deflate_streams() {
+        use std::process::{Command, Stdio};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut child = Command::new("bash")
+            .arg(root.join("tools/rivet-oracle/scripts/run_region_deflate_probe.sh"))
+            .arg("verify")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let mut expected = Vec::new();
+        for (payload, _) in deflate_cases() {
+            let mut writer = RegionFileVersion::DEFAULT.wrap_output(Vec::new()).unwrap();
+            writer.write_all(&payload).unwrap();
+            for byte in writer.finish().unwrap() {
+                write!(input, "{byte:02x}").unwrap();
+            }
+            writeln!(input).unwrap();
+            expected.push(payload);
+        }
+        drop(input);
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let decoded: Vec<_> = std::str::from_utf8(&output.stdout)
+            .unwrap()
+            .lines()
+            .map(decode_hex)
+            .collect();
+        assert_eq!(decoded, expected);
+    }
+
     #[test]
     fn wrap_input_rejects_custom_codec_wrapper() {
         let err = RegionFileVersion::VERSION_CUSTOM
@@ -820,7 +908,6 @@ mod tests {
     #[test]
     fn wrap_output_rejects_deferred_and_custom_codecs() {
         for version in [
-            RegionFileVersion::VERSION_DEFLATE,
             RegionFileVersion::VERSION_LZ4,
             RegionFileVersion::VERSION_CUSTOM,
         ] {
@@ -833,6 +920,7 @@ mod tests {
         }
         for version in [
             RegionFileVersion::VERSION_GZIP,
+            RegionFileVersion::VERSION_DEFLATE,
             RegionFileVersion::VERSION_NONE,
         ] {
             assert!(

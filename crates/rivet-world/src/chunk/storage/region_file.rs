@@ -1654,7 +1654,7 @@ mod tests {
 
     #[test]
     fn deflate_read_through_container() {
-        // deflate write is deferred (D13), so exercise the read path by
+        // Exercise the reader independently of the region writer by
         // hand-crafting a zlib-wrapped chunk in the region file.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("r.0.0.mca");

@@ -620,6 +620,61 @@ impl LevelChunk {
         &self.post_load_entities
     }
 
+    /// Source runPostLoad retains its callback/carrier if execution throws and
+    /// clears it only on normal return. Construction/policy consumes the whole
+    /// stream before this single batch-admission call. Admission is not a
+    /// transaction: a caller that errors after partial external registration
+    /// must retain that fact; this helper does not roll back or auto-retry.
+    /// This executes entity reconstruction/admission only, not the later FULL
+    /// listener/ticker/block-entity-registration lifecycle.
+    pub fn run_native_post_load<W>(
+        &mut self,
+        context: &mut super::entity_post_load::EntityPostLoadContext<'_>,
+        world: &mut W,
+        mut lookup: impl FnMut(
+            &W,
+            rivet_util::mth::Uuid,
+        ) -> Option<super::entity_post_load::ExistingEntityView>,
+        secure_uuid: impl FnMut() -> std::io::Result<rivet_util::mth::Uuid>,
+        admit: impl FnOnce(
+            &mut W,
+            &mut super::entity_post_load::PreparedEntityBatch,
+        ) -> Result<(), rivet_world::levelgen::structure::StructureError>,
+    ) -> Result<
+        Vec<super::entity_post_load::DuplicateUuidDecision>,
+        super::entity_post_load::NativePostLoadError,
+    > {
+        use super::entity_post_load::{NativePostLoadError, prepare_native_entities};
+        if self.post_load_entities.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut batch = prepare_native_entities(
+            &self.post_load_entities,
+            context,
+            |uuid| lookup(&*world, uuid),
+            secure_uuid,
+        )?;
+        if let Err(source) = admit(world, &mut batch) {
+            return Err(NativePostLoadError::Admission {
+                source,
+                batch: Box::new(batch),
+            });
+        }
+        if !batch.entities.is_empty() {
+            return Err(NativePostLoadError::Admission {
+                source: rivet_world::levelgen::structure::StructureError::PlacementUnavailable(
+                    format!(
+                        "native entity admission returned without consuming {} prepared values",
+                        batch.entities.len()
+                    ),
+                ),
+                batch: Box::new(batch),
+            });
+        }
+        self.post_load_entities.clear();
+        Ok(batch.decisions)
+    }
+
     /// `ChunkAccess.getPostProcessing()` — packed post-processing offsets
     /// carried from the generating proto until the runtime post-load hook.
     pub fn post_processing(&self) -> &[Vec<i16>] {
@@ -1692,6 +1747,241 @@ mod tests {
     /// given structure starts, so the typed `StructureAccess` authority is
     /// empty too; the carry-through of starts a proto *does* carry is covered
     /// by its own test.
+    #[test]
+    fn server_level_post_load_collects_before_admission_and_preserves_failed_carrier() {
+        use crate::server::level::{
+            entity_construction::{EntityConstructionRuntime, StructureMinecartFactory},
+            entity_id_allocator::{EntityIdAllocator, EntityIdOccupancy},
+            entity_lookup::{EntityLifecycle, EntityLifecycleEvent, EntityLookupError},
+            entity_post_load::{
+                DetachedAnimalRemoval, DuplicateUuidDecision, DuplicateUuidMode,
+                DuplicateUuidSettings, EntityPostLoadContext, NativePostLoadError,
+            },
+            full_chunk_status::FullChunkStatus,
+            generation_creature_runtime::WorldGenerationCreatureFactory,
+            server_level::{ServerLevel, ServerLevelConfig},
+        };
+        use rivet_util::{RandomSource, mth::Uuid, random_source::LegacyRandomSource};
+        use rivet_world::{
+            data::worldgen::worldgen_bootstraps::build_worldgen_registries,
+            entity::loaded_entity::NativeLoadedEntity, flag::feature_flags,
+        };
+        use std::sync::Arc;
+        struct Lifecycle(Vec<EntityLifecycleEvent>);
+        impl EntityLifecycle for Lifecycle {
+            fn external_uuid_in_use(&self, _: &Uuid) -> bool {
+                false
+            }
+            fn on_event(
+                &mut self,
+                event: EntityLifecycleEvent,
+                _: &NativeLoadedEntity,
+            ) -> Result<(), EntityLookupError> {
+                self.0.push(event);
+                Ok(())
+            }
+        }
+        let occupancy = EntityIdOccupancy::default();
+        let mut ids = EntityIdAllocator::new();
+        let runtime = EntityConstructionRuntime::with_seed(ids.sequence(), 42);
+        let world_uuid = Uuid { most: 7, least: 8 };
+        let access = build_worldgen_registries();
+        let cart_occupancy = occupancy.clone();
+        let animal_occupancy = occupancy.clone();
+        let carts = StructureMinecartFactory::new(
+            runtime.clone(),
+            world_uuid,
+            feature_flags::vanilla_set(),
+            Arc::new(move |id| cart_occupancy.contains(id)),
+        );
+        let animals = WorldGenerationCreatureFactory::new(
+            runtime.clone(),
+            world_uuid,
+            feature_flags::vanilla_set(),
+            &access,
+            Arc::new(move |id| animal_occupancy.contains(id)),
+        );
+        let mut removal = DetachedAnimalRemoval;
+        let mut context = EntityPostLoadContext {
+            cart_factory: &carts,
+            creature_factory: &animals,
+            registries: &access,
+            settings: DuplicateUuidSettings {
+                mode: DuplicateUuidMode::SafeRegen,
+                safe_regen_delete_range: 32,
+            },
+            removal: &mut removal,
+        };
+        let input = rivet_nbt::tag_parser::parse_compound_fully(
+            "{id:'minecraft:chest_minecart',UUID:[I;0,1,0,2],Pos:[8d,64d,8d]}",
+        )
+        .unwrap();
+        let mut foreign_proto = build_persisted_full_proto(ChunkPos::ZERO);
+        foreign_proto.add_entity(input.clone());
+        let mut foreign_world = ServerLevel::new(ServerLevelConfig::default());
+        foreign_world.install_world_uuid(Uuid { most: 9, least: 10 });
+        foreign_world.bind_entity_occupancy(occupancy.clone());
+        foreign_world.chunk_map_mut().install(
+            ChunkPos::ZERO,
+            LevelChunk::from_persisted_full_proto(foreign_proto).unwrap(),
+        );
+        let mut lifecycle = Lifecycle(Vec::new());
+        assert!(matches!(
+            foreign_world.run_chunk_entity_post_load(
+                ChunkPos::ZERO,
+                &mut context,
+                |_| panic!("foreign factories must be rejected before lookup"),
+                &mut lifecycle,
+                || panic!("foreign factories must not request a UUID"),
+            ),
+            Err(crate::server::level::server_level::LevelEntityError::ForeignWorld)
+        ));
+        assert_eq!(
+            foreign_world
+                .chunk_map()
+                .get_chunk(ChunkPos::ZERO)
+                .unwrap()
+                .post_load_entities(),
+            std::slice::from_ref(&input)
+        );
+        assert!(lifecycle.0.is_empty());
+        // Observe the first draws only after refusal: neither constructor
+        // identity authority was touched by the foreign-world preflight.
+        assert_eq!(ids.next_id(), 1);
+        assert_eq!(
+            runtime
+                .with_entity_random(|random| random.next_long())
+                .unwrap(),
+            LegacyRandomSource::new(42).next_long()
+        );
+        let mut proto = build_persisted_full_proto(ChunkPos::ZERO);
+        proto.add_entity(input.clone());
+        proto.add_entity(input.clone());
+        let chunk = LevelChunk::from_persisted_full_proto(proto).unwrap();
+        let mut world = ServerLevel::new(ServerLevelConfig::default());
+        world.install_world_uuid(world_uuid);
+        world.bind_entity_occupancy(occupancy.clone());
+        world.chunk_map_mut().install(ChunkPos::ZERO, chunk);
+        let mut lifecycle = Lifecycle(Vec::new());
+        let decisions = world
+            .run_chunk_entity_post_load(
+                ChunkPos::ZERO,
+                &mut context,
+                |_| None,
+                &mut lifecycle,
+                || panic!("same-stream duplicates must not regenerate"),
+            )
+            .unwrap();
+        assert_eq!(
+            decisions,
+            [DuplicateUuidDecision::Keep, DuplicateUuidDecision::Keep]
+        );
+        assert!(
+            world
+                .chunk_map()
+                .get_chunk(ChunkPos::ZERO)
+                .unwrap()
+                .post_load_entities()
+                .is_empty()
+        );
+        let retained = world
+            .entity_lookup()
+            .unwrap()
+            .get_raw_by_uuid(&Uuid { most: 1, least: 2 })
+            .unwrap();
+        assert!(occupancy.contains(retained.entity_id()));
+        assert_eq!(lifecycle.0, [EntityLifecycleEvent::Created]);
+        world
+            .entity_lookup_mut()
+            .unwrap()
+            .set_chunk_status(ChunkPos::ZERO, FullChunkStatus::Full, &mut lifecycle)
+            .unwrap();
+        assert_eq!(
+            lifecycle.0,
+            [
+                EntityLifecycleEvent::Created,
+                EntityLifecycleEvent::TrackingStart
+            ]
+        );
+        assert!(
+            world
+                .entity_lookup()
+                .unwrap()
+                .get_by_uuid(&Uuid { most: 1, least: 2 })
+                .is_some()
+        );
+        let mut next = input;
+        next.put_int_array("UUID", vec![0, 3, 0, 4]);
+        world
+            .chunk_map_mut()
+            .get_chunk_mut(ChunkPos::ZERO)
+            .unwrap()
+            .post_load_entities = vec![
+            next,
+            rivet_nbt::tag_parser::parse_compound_fully("{id:'minecraft:zombie'}").unwrap(),
+        ];
+        let error = world
+            .run_chunk_entity_post_load(
+                ChunkPos::ZERO,
+                &mut context,
+                |_| None,
+                &mut lifecycle,
+                || panic!("no duplicate"),
+            )
+            .unwrap_err();
+        let crate::server::level::server_level::LevelEntityError::PostLoad(
+            NativePostLoadError::Prepare(error),
+        ) = error
+        else {
+            panic!("unsupported constructor must preserve prepared prefix")
+        };
+        assert_eq!(error.input_index, 1);
+        assert_eq!(error.prepared.entities.len(), 1);
+        assert_eq!(
+            world
+                .chunk_map()
+                .get_chunk(ChunkPos::ZERO)
+                .unwrap()
+                .post_load_entities()
+                .len(),
+            2
+        );
+        assert!(
+            world
+                .entity_lookup()
+                .unwrap()
+                .get_raw_by_uuid(&Uuid { most: 3, least: 4 })
+                .is_none(),
+            "no admission before full preparation"
+        );
+        let chunk = world.chunk_map_mut().get_chunk_mut(ChunkPos::ZERO).unwrap();
+        chunk.post_load_entities = vec![
+            rivet_nbt::tag_parser::parse_compound_fully(
+                "{id:'minecraft:chest_minecart',UUID:[I;0,5,0,6],Pos:[8d,64d,8d]}",
+            )
+            .unwrap(),
+        ];
+        let error = chunk
+            .run_native_post_load(
+                &mut context,
+                &mut (),
+                |_, _| None,
+                || panic!("no duplicate"),
+                |_, _| Ok(()),
+            )
+            .unwrap_err();
+        let NativePostLoadError::Admission { source, batch } = error else {
+            panic!("unconsumed batch must not be successful admission")
+        };
+        assert!(source.to_string().contains("without consuming"));
+        assert_eq!(batch.entities.len(), 1);
+        assert_eq!(
+            chunk.post_load_entities().len(),
+            1,
+            "failed authority must not clear source carrier"
+        );
+    }
+
     #[test]
     fn native_live_and_lazy_pending_entities_survive_full_projection_and_save_reload() {
         use rivet_world::block_entity::NativeBlockEntity;
