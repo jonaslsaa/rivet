@@ -258,6 +258,16 @@ pub fn load_and_reconstruct_chunk(
 /// installed chunks carry the serialized block entities, but the join burst
 /// still sends an empty block-entity list (#341 materialization).
 pub fn boot_level(root: &Path) -> Result<ServerLevel, RegionBackedBootError> {
+    boot_level_with_time_policy(root, false)
+}
+
+/// The caller owns the resolved server-global time policy. The default
+/// read-only harness uses Paper's per-world default; it does not parse a
+/// different server's paper-global.yml from inside the world directory.
+pub fn boot_level_with_time_policy(
+    root: &Path,
+    affects_all_worlds: bool,
+) -> Result<ServerLevel, RegionBackedBootError> {
     let mut prepared = RegionLevelPreparation::prepare(root)?;
     let level = read_level_metadata(prepared.source().layout())?;
     let respawn = level.spawn;
@@ -308,6 +318,12 @@ pub fn boot_level(root: &Path) -> Result<ServerLevel, RegionBackedBootError> {
             .enabled_features(),
         level.game_time,
     )?;
+    world.install_clock_runtime(super::level_clock_runtime::LevelClockRuntime::load(
+        &dimension_path,
+        &world_gen.dimension_type,
+        environment.advance_time(),
+        affects_all_worlds,
+    )?);
     world
         .install_generation_environment(environment)
         .map_err(|error| RegionBackedBootError::GenerationEnvironment(error.error))?;
@@ -456,6 +472,8 @@ fn read_world_gen_settings(
 
 #[derive(Debug, thiserror::Error)]
 pub enum RegionBackedBootError {
+    #[error(transparent)]
+    Clock(#[from] super::level_clock_runtime::LevelClockError),
     #[error(transparent)]
     GenerationEnvironment(#[from] super::generation_environment::GenerationEnvironmentError),
     #[error(transparent)]
@@ -663,6 +681,90 @@ mod tests {
         .err()
         .expect("configured level must fail at its current typed boundary");
         assert!(matches!(error, RegionBackedBootError::LevelDatRead(_, _)));
+    }
+
+    #[test]
+    fn region_boot_owns_saved_clocks_and_respects_the_saved_time_rule() {
+        use super::super::world_clocks::ClockState;
+        use rivet_nbt::tag_parser::parse_compound_fully;
+        use rivet_registry::Identifier;
+
+        let temp = tempfile::tempdir().unwrap();
+        loaded_world_root(&temp);
+        let level_path = temp.path().join("level.dat");
+        let mut metadata = nbt_io::read_compressed(
+            &fs::read(&level_path).unwrap()[..],
+            &mut NbtAccounter::unlimited_heap(),
+        )
+        .unwrap();
+        metadata
+            .get_compound_or_empty_mut("Data")
+            .put_long("Time", 42000);
+        nbt_io::write_compressed(&metadata, fs::File::create(&level_path).unwrap()).unwrap();
+
+        let saved_dir = temp
+            .path()
+            .join("dimensions/minecraft/overworld/data/minecraft");
+        fs::create_dir_all(&saved_dir).unwrap();
+        let clock_path = saved_dir.join("world_clocks.dat");
+        let rules_path = saved_dir.join("game_rules.dat");
+        for (path, data) in [
+            (
+                &clock_path,
+                r#"{"minecraft:overworld":{total_ticks:13000L,partial_tick:0.5f,rate:0.25f,paused:false}}"#,
+            ),
+            (&rules_path, r#"{"minecraft:advance_time":false}"#),
+        ] {
+            let mut root = CompoundTag::new();
+            root.put_int("DataVersion", EXPECTED_DATA_VERSION);
+            root.put(
+                "data".into(),
+                Tag::Compound(parse_compound_fully(data).unwrap()),
+            );
+            nbt_io::write_compressed(&root, fs::File::create(path).unwrap()).unwrap();
+        }
+        let inputs = [&level_path, &clock_path, &rules_path].map(|path| fs::read(path).unwrap());
+        let mut world = boot_level(temp.path()).expect("saved clocks compose through region boot");
+        assert_eq!(
+            world.game_time(),
+            42000,
+            "game time is not the named clock's time"
+        );
+        let clocks = world
+            .clock_runtime_mut()
+            .expect("boot installs the clock owner");
+        let overworld = Identifier::with_default_namespace("overworld");
+        let expected = ClockState {
+            total_ticks: 13000,
+            partial_tick: 0.5,
+            rate: 0.25,
+            paused: false,
+        };
+        assert_eq!(clocks.clocks().state(&overworld).unwrap(), expected);
+        assert!(
+            !clocks.advance_time(),
+            "the actual SavedData rule reaches the clock owner"
+        );
+        assert!(!clocks.clocks().is_dirty(), "loading is not a mutation");
+        clocks.tick();
+        assert_eq!(clocks.clocks().state(&overworld).unwrap(), expected);
+        assert!(
+            !clocks.clocks().is_dirty(),
+            "disabled advancement does not mark dirty"
+        );
+        assert_eq!(world.game_time(), 42000);
+        drop(world);
+        for (path, original) in [&level_path, &clock_path, &rules_path]
+            .into_iter()
+            .zip(inputs)
+        {
+            assert_eq!(
+                fs::read(path).unwrap(),
+                original,
+                "read-only boot rewrote {}",
+                path.display()
+            );
+        }
     }
 
     /// The real boot: `boot_level` on the pinned-loaded-world temp world

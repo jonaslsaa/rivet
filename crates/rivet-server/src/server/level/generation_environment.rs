@@ -40,6 +40,7 @@ pub struct GenerationEnvironment {
     min_y: i32,
     height: i32,
     spawn_mobs: bool,
+    advance_time: bool,
     border: WorldBorder,
 }
 
@@ -81,12 +82,6 @@ impl GenerationEnvironment {
                 rules.remove(rule);
             }
         }
-        let spawn_rule = registry
-            .get_optional(&Identifier::with_default_namespace("spawn_mobs"))
-            .expect("pinned SPAWN_MOBS registration");
-        let Some(GameRuleValue::Bool(spawn_mobs)) = rules.get(spawn_rule) else {
-            unreachable!("SPAWN_MOBS is an enabled boolean in the pinned registry");
-        };
         let mut border = read_saved_data(dimension_path, "world_border")?
             .and_then(|data| decode_saved(data, WorldBorder::codec::<NbtOps>(), "world_border"))
             .unwrap_or_else(WorldBorder::default);
@@ -96,7 +91,8 @@ impl GenerationEnvironment {
             has_ceiling,
             min_y,
             height,
-            spawn_mobs,
+            spawn_mobs: boolean_rule(&rules, "spawn_mobs"),
+            advance_time: boolean_rule(&rules, "advance_time"),
             border,
         })
     }
@@ -112,6 +108,9 @@ impl GenerationEnvironment {
     }
     pub fn spawn_mobs(&self) -> bool {
         self.spawn_mobs
+    }
+    pub fn advance_time(&self) -> bool {
+        self.advance_time
     }
     pub fn world_border(&self) -> &WorldBorder {
         &self.border
@@ -145,10 +144,20 @@ impl GenerationEnvironment {
         owner.set_light_channels(self.has_skylight, true);
         owner.set_spawn_settings(
             WorldBorderSettings::from_world_border(&self.border),
-            self.spawn_mobs,
+            self.spawn_mobs(),
         );
         Ok(())
     }
+}
+
+fn boolean_rule(rules: &GameRuleMap, name: &str) -> bool {
+    let rule = game_rules::built_in_registry()
+        .get_optional(&Identifier::with_default_namespace(name))
+        .expect("pinned game-rule registration");
+    let Some(GameRuleValue::Bool(value)) = rules.get(rule) else {
+        unreachable!("enabled boolean game rule reconciled at initialization");
+    };
+    value
 }
 
 fn dimension_fields(
@@ -296,6 +305,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut rules = CompoundTag::new();
         rules.put_boolean("minecraft:spawn_mobs", false);
+        rules.put_boolean("minecraft:advance_time", false);
         rules.put_int("minecraft:not_a_rule", 1);
         write_saved(
             dir.path(),
@@ -314,6 +324,10 @@ mod tests {
         assert!(
             !env.spawn_mobs(),
             "resultOrPartial retains the valid rule beside an invalid key"
+        );
+        assert!(
+            !env.advance_time(),
+            "saved clock rule is not replaced by its default"
         );
         assert_eq!(
             WorldBorderSettings::from_world_border(env.world_border()),

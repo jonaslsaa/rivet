@@ -353,6 +353,15 @@ impl PlayerSessionManager {
     /// into sessions, run each live session's keepalive tick (transmit +
     /// timeout), then clean up sessions whose connection is gone.
     pub fn tick(&mut self, ctx: &mut TickContext) {
+        // MinecraftServer.tickChildren ticks the clock managers before world
+        // and connection work. This tick loop currently runs normal ticks only;
+        // a future freeze/step owner must gate this at runsNormally.
+        if let Some(clocks) = self.level.clock_runtime_mut() {
+            clocks.tick();
+        }
+        if ctx.tick.is_multiple_of(20) {
+            self.synchronize_game_time(ctx);
+        }
         let ids: Vec<ConnectionId> = ctx.connections.ids().collect();
         for id in ids {
             if let Some((profile, client_information)) = ctx.connections.take_play_handoff(id) {
@@ -397,6 +406,34 @@ impl PlayerSessionManager {
         self.drain_ready_chunks(ctx);
         self.drive_keepalives(ctx);
         self.prune_lost(ctx);
+    }
+
+    /// Periodic synchronization carries game time only. Clock updates belong
+    /// to the initial full sync or actual clock mutations, not this heartbeat.
+    fn synchronize_game_time(&mut self, ctx: &mut TickContext) {
+        use rivet_protocol::protocol::game::clientbound_set_time::ClientboundSetTimePacket;
+        let packet = ClientboundSetTimePacket::new(self.level.game_time(), Vec::new());
+        let body = match self.sender.encode_registry_body(
+            ClientboundSetTimePacket::stream_codec(),
+            &packet,
+            self.sender.world_clock_access(),
+        ) {
+            Ok(body) => body,
+            Err(error) => {
+                tracing::error!(%error, "encoding game time synchronization");
+                return;
+            }
+        };
+        for id in self.sessions.keys().copied() {
+            if let Err(error) = self.sender.send_packet(
+                ctx.connections,
+                id,
+                rivet_protocol::generated::packets::play::clientbound::PacketType::SetTime.id(),
+                &body,
+            ) {
+                tracing::warn!(%id, %error, "sending game time synchronization");
+            }
+        }
     }
 
     /// The number of live sessions (player indices size).
@@ -1599,28 +1636,10 @@ fn dimension_type_access() -> RegistryAccess {
     RegistryAccess::from_single_registry((*registries::DIMENSION_TYPE).clone(), builder.freeze())
 }
 
-/// A `WORLD_CLOCK` registry/access with the two clocks the flat world runs
-/// (day/night and weather, holder ids 0/1), matching the capture's set-time
-/// clock-update holders.
+/// Actual pinned clock names/order, shared by bootstrap and packet encoding.
 fn world_clock_access() -> RegistryAccess {
-    let mut builder = RegistryBuilder::new(&*registries::WORLD_CLOCK);
-    builder.register(
-        &ResourceKey::create(
-            &*registries::WORLD_CLOCK,
-            Identifier::with_default_namespace("day"),
-        ),
-        std::sync::Arc::new(rivet_registry::registries::WorldClock),
-        RegistrationInfo::BUILT_IN,
-    );
-    builder.register(
-        &ResourceKey::create(
-            &*registries::WORLD_CLOCK,
-            Identifier::with_default_namespace("weather"),
-        ),
-        std::sync::Arc::new(rivet_registry::registries::WorldClock),
-        RegistrationInfo::BUILT_IN,
-    );
-    RegistryAccess::from_single_registry((*registries::WORLD_CLOCK).clone(), builder.freeze())
+    crate::server::level::level_clock_runtime::pinned_clock_registry_access()
+        .expect("pinned world clock registry")
 }
 
 #[cfg(test)]
@@ -2110,6 +2129,97 @@ mod tests {
             }
         }
         frames
+    }
+
+    #[test]
+    fn owned_clocks_tick_before_join_and_periodic_sync_sends_only_game_time() {
+        use crate::server::level::world_clocks::ClockState;
+        use rivet_protocol::protocol::game::clientbound_set_time::ClientboundSetTimePacket;
+        use rivet_protocol::registry_friendly_byte_buf::RegistryFriendlyByteBuf;
+        let (mut registry, mut out_rx) = connected_registry();
+        let mut config = default_session_config(256, ServerLevelConfig::M1_FIXTURE_SEED);
+        config.level.set_game_time(901);
+        let key = Identifier::with_default_namespace("overworld");
+        config
+            .level
+            .clock_runtime_mut()
+            .unwrap()
+            .clocks_mut()
+            .load_state(
+                &key,
+                ClockState {
+                    total_ticks: 13000,
+                    partial_tick: 0.25,
+                    rate: 0.5,
+                    paused: false,
+                },
+            )
+            .unwrap();
+        let manager = PlayerSessionManager::new(config);
+        apply_enter_play(&mut registry);
+        let mut manager = run_tick(manager, &mut registry, vec![]);
+        let id = rivet_protocol::generated::packets::play::clientbound::PacketType::SetTime.id();
+        let decode = |body: Vec<u8>| {
+            ClientboundSetTimePacket::stream_codec()
+                .decode(&mut RegistryFriendlyByteBuf::new(
+                    bytes::BytesMut::from(body.as_slice()),
+                    world_clock_access(),
+                ))
+                .unwrap()
+        };
+        let body = drain_outbound_frames(&mut out_rx)
+            .into_iter()
+            .find(|(packet, _)| *packet == id)
+            .unwrap()
+            .1;
+        let packet = decode(body);
+        assert_eq!(packet.game_time(), 901);
+        let state = manager
+            .level
+            .clock_runtime()
+            .unwrap()
+            .clocks()
+            .state(&key)
+            .unwrap();
+        assert_eq!((state.total_ticks, state.partial_tick), (13000, 0.75));
+        assert_eq!(packet.clock_updates().len(), 2);
+        assert!(
+            packet
+                .clock_updates()
+                .iter()
+                .any(|(_, value)| value.total_ticks() == 13000 && value.partial_tick() == 0.75)
+        );
+        manager
+            .level
+            .clock_runtime_mut()
+            .unwrap()
+            .set_advance_time(false);
+        manager.level.set_game_time(902);
+        manager.tick(&mut TickContext {
+            tick: 20,
+            now_ns: 0,
+            now_ms: 0,
+            connections: &mut registry,
+            inbound: vec![],
+        });
+        let body = drain_outbound_frames(&mut out_rx)
+            .into_iter()
+            .find(|(packet, _)| *packet == id)
+            .unwrap()
+            .1;
+        let packet = decode(body);
+        assert_eq!(packet.game_time(), 902);
+        assert!(packet.clock_updates().is_empty());
+        assert_eq!(
+            manager
+                .level
+                .clock_runtime()
+                .unwrap()
+                .clocks()
+                .state(&key)
+                .unwrap(),
+            state
+        );
     }
 
     /// `create_default` (view distance 2) must NOT resolve to the M1 capture's

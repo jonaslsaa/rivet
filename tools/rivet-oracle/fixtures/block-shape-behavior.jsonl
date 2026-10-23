@@ -1771,3 +1771,9 @@
 {"name":"falling_minecraft:damaged_anvil_south","state":11203,"direction":"south","neighbor":0,"above":0,"below":10,"result":11203,"ticks":[[3,70,-5,"minecraft:damaged_anvil",2]],"next_long":-4695948378737616609}
 {"name":"falling_minecraft:damaged_anvil_west","state":11203,"direction":"west","neighbor":0,"above":0,"below":10,"result":11203,"ticks":[[3,70,-5,"minecraft:damaged_anvil",2]],"next_long":-4695948378737616609}
 {"name":"falling_minecraft:damaged_anvil_east","state":11203,"direction":"east","neighbor":0,"above":0,"below":10,"result":11203,"ticks":[[3,70,-5,"minecraft:damaged_anvil",2]],"next_long":-4695948378737616609}
+{"name":"vine_up_slab_bottom_up","state":8387,"direction":"up","neighbor":13333,"above":13333,"below":0,"result":0,"ticks":[],"next_long":-4695948378737616609}
+{"name":"vine_up_slab_bottom_east","state":8387,"direction":"east","neighbor":0,"above":13333,"below":0,"result":0,"ticks":[],"next_long":-4695948378737616609}
+{"name":"vine_up_slab_bottom_down","state":8387,"direction":"down","neighbor":0,"above":13333,"below":0,"result":8387,"ticks":[],"next_long":-4695948378737616609}
+{"name":"vine_up_slab_top_up","state":8387,"direction":"up","neighbor":13331,"above":13331,"below":0,"result":8387,"ticks":[],"next_long":-4695948378737616609}
+{"name":"vine_up_slab_top_east","state":8387,"direction":"east","neighbor":0,"above":13331,"below":0,"result":8387,"ticks":[],"next_long":-4695948378737616609}
+{"name":"vine_up_slab_top_down","state":8387,"direction":"down","neighbor":0,"above":13331,"below":0,"result":8387,"ticks":[],"next_long":-4695948378737616609}

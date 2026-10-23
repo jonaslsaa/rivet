@@ -72,6 +72,8 @@ fn updated_vine(mut state: BlockState, level: &dyn WorldGenLevel, pos: &BlockPos
         state = state
             .set_value(
                 BlockStateProperties::UP,
+                // Paper's VineBlock.getUpdatedState passes DOWN here, unlike
+                // placement's UP. Preserve its top-face check for slab parity.
                 acceptable_vine_neighbor(level, &above, Direction::Down),
             )
             .unwrap();
@@ -171,6 +173,15 @@ pub(super) fn boundary_faces(filled: &HashSet<BlockPos>) -> Vec<(Direction, Bloc
 fn update_shape(
     level: &mut dyn WorldGenLevel,
     _random: &mut AlgorithmRandomSource,
+    state: BlockState,
+    pos: &BlockPos,
+    direction: Direction,
+    neighbor: BlockState,
+) -> BlockState {
+    update_shape_deterministic(level, state, pos, direction, neighbor)
+}
+fn update_shape_deterministic(
+    level: &mut dyn WorldGenLevel,
     state: BlockState,
     pos: &BlockPos,
     direction: Direction,
@@ -484,6 +495,28 @@ fn update_shape(
             state.block().name()
         ),
     }
+}
+
+/// Block.updateFromNeighbourShapes. These translated declaring handlers do
+/// not consume random; unimplemented handlers refuse rather than consuming a
+/// substitute RNG. Each direction sees the state returned by the prior one.
+pub(super) fn update_from_neighbour_shapes(
+    level: &mut dyn WorldGenLevel,
+    mut state: BlockState,
+    pos: &BlockPos,
+) -> BlockState {
+    for direction in [
+        Direction::West,
+        Direction::East,
+        Direction::North,
+        Direction::South,
+        Direction::Down,
+        Direction::Up,
+    ] {
+        let neighbor = level.get_block_state(&pos.relative(&direction));
+        state = update_shape_deterministic(level, state, pos, direction, neighbor);
+    }
+    state
 }
 
 pub(super) fn update_shape_at_edge(

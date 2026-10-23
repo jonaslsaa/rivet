@@ -63,15 +63,18 @@ use super::level_chunk::LevelChunkSaveError;
 use super::player_chunk_loader::ChunkSendReadiness;
 use super::region_backed::{RegionBackedBootError, RegionChunkSource};
 pub use entity_runtime::{EntityChunkUnloadFailure, LevelEntityError};
-#[path = "level_holder_transitions.rs"]
-mod holder_transitions;
 #[path = "level_environment_runtime.rs"]
 mod environment_runtime;
+#[path = "level_holder_transitions.rs"]
+mod holder_transitions;
+#[path = "level_post_process.rs"]
+mod post_process;
 pub use holder_transitions::{
     HolderTransitionAuthority, HolderTransitionEffect, HolderTransitionError,
 };
 #[cfg(unix)]
 pub use poi_runtime::GeneratedPoiError;
+pub use post_process::{GenerationPostProcessError, GenerationPostProcessServices};
 use rivet_world::chunk::status::ChunkStatus;
 use std::sync::Arc;
 pub use tick_runtime::{BlockTickContainers, FluidTickContainers, TickRuntimeError};
@@ -226,6 +229,8 @@ pub struct ServerLevel {
     /// Authoritative `ServerLevel.getGameTime()` for current-version chunk
     /// `LastUpdate`. This is world time, not a future autosave-aging clock.
     game_time: i64,
+    sub_tick_count: i64,
+    clock_runtime: Option<super::level_clock_runtime::LevelClockRuntime>,
     pub(super) debug_synchronizers: super::level_debug_synchronizers::LevelDebugSynchronizers,
     /// The read-only region chunk source (issue #185): `Some` only for the
     /// region-backed boot, which moves its prepared source in after installing
@@ -318,7 +323,15 @@ impl ServerLevel {
     pub fn new(config: ServerLevelConfig) -> Self {
         let spawn_chunk = config.spawn_chunk;
         let chunk_map = ChunkMap::new(spawn_chunk, config.view_distance);
-        Self::with_chunk_map(config, chunk_map)
+        let mut level = Self::with_chunk_map(config, chunk_map);
+        level.install_clock_runtime(
+            super::level_clock_runtime::LevelClockRuntime::new(
+                &Identifier::with_default_namespace("overworld"),
+                true,
+            )
+            .expect("pinned synthetic overworld clock registry"),
+        );
+        level
     }
 
     /// The region-backed world constructor: an empty `ChunkMap` the #516 boot
@@ -367,6 +380,8 @@ impl ServerLevel {
             missing_chunk_policy: config.missing_chunk_policy,
             is_flat: config.is_flat,
             game_time: 0,
+            sub_tick_count: 0,
+            clock_runtime: None,
             debug_synchronizers: super::level_debug_synchronizers::LevelDebugSynchronizers::new(),
             region_source: None,
             generated_chunk_owner: None,
@@ -485,6 +500,35 @@ impl ServerLevel {
     /// chunk save `LastUpdate`. No autosave-aging semantics are attached.
     pub fn game_time(&self) -> i64 {
         self.game_time
+    }
+
+    /// Level.nextSubTickCount: one ordering sequence shared by all scheduled
+    /// block/fluid ticks in this live world, including chunk post-processing.
+    pub fn next_sub_tick_count(&mut self) -> i64 {
+        let current = self.sub_tick_count;
+        self.sub_tick_count = current.wrapping_add(1);
+        current
+    }
+
+    pub fn clock_runtime(&self) -> Option<&super::level_clock_runtime::LevelClockRuntime> {
+        self.clock_runtime.as_ref()
+    }
+
+    pub fn clock_runtime_mut(
+        &mut self,
+    ) -> Option<&mut super::level_clock_runtime::LevelClockRuntime> {
+        self.clock_runtime.as_mut()
+    }
+
+    pub fn install_clock_runtime(
+        &mut self,
+        runtime: super::level_clock_runtime::LevelClockRuntime,
+    ) {
+        assert!(
+            self.clock_runtime.is_none(),
+            "world clock manager already initialized"
+        );
+        self.clock_runtime = Some(runtime);
     }
 
     /// Tick-thread setter used by the future authoritative tick driver and by

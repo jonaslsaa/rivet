@@ -31,6 +31,14 @@ public final class BlockShapeBehaviorProbe {
                     layers.getLayer(net.minecraft.server.RegistryLayer.STATIC)).forEach(pending -> pending.apply());
                 var cases = new ArrayList<Case>();
                 var air = Blocks.AIR.defaultBlockState(); var dirt = Blocks.DIRT.defaultBlockState();
+                for (var half : List.of(net.minecraft.world.level.block.state.properties.SlabType.BOTTOM,
+                        net.minecraft.world.level.block.state.properties.SlabType.TOP)) {
+                    var support = Blocks.OAK_SLAB.defaultBlockState().setValue(BlockStateProperties.SLAB_TYPE,half);
+                    for (Direction dir : List.of(Direction.UP,Direction.EAST,Direction.DOWN))
+                        cases.add(new Case("vine_up_slab_"+half+"_"+dir,
+                            Blocks.VINE.defaultBlockState().setValue(BlockStateProperties.UP,true),dir,
+                            dir == Direction.UP ? support : air,support,air));
+                }
                 for (Block fence : List.of(Blocks.OAK_FENCE,Blocks.NETHER_BRICK_FENCE))
                     for (boolean wet : new boolean[]{false,true}) for (Direction dir : Direction.values())
                         for (BlockState neighbor : List.of(air,Blocks.STONE.defaultBlockState(),Blocks.OAK_LEAVES.defaultBlockState(),
