@@ -4,7 +4,7 @@
 //! (NOISE), [`noise_router_data`] (DENSITY_FUNCTION), and
 //! [`noise_generator_settings`] (NOISE_SETTINGS) — through the test seam
 //! `RecordingContext` into frozen `rivet-registry` registries, and returns the
-//! `RegistryAccess` with all six populated (BLOCK, FLUID, NOISE,
+//! `RegistryAccess` with all seven populated (BLOCK, FLUID, POINT_OF_INTEREST_TYPE, NOISE,
 //! DENSITY_FUNCTION, BIOME, NOISE_SETTINGS). The BLOCK registry rides along for registry-backed
 //! worldgen codecs, and the BIOME registry rides along because the NOISE_SETTINGS
 //! bootstrap's `SurfaceRuleData` builders resolve their biome holders through
@@ -13,7 +13,7 @@
 //! wiring) instead of re-deriving the `RecordingContext` → `RegistryBuilder` →
 //! `freeze` sequence per call site.
 //!
-//! Build order is Java's dependency order: BLOCK and FLUID are independent, then
+//! Build order is Java's dependency order: BLOCK, FLUID and POI are independent, then
 //! NOISE (the density-function bootstrap resolves `Holder<NoiseParameters>` through
 //! it), DENSITY_FUNCTION, BIOME, and finally NOISE_SETTINGS (which resolves the
 //! `overworld` router functions through the density-function registry and the
@@ -302,6 +302,12 @@ pub fn build_worldgen_registries() -> RegistryAccess {
             Box::new(build_density_function_registry()) as AnyBox,
         ),
         (biome_key(), Box::new(build_biome_registry()) as AnyBox),
+        (
+            ResourceKey::create_registry_key(
+                crate::poi::POINT_OF_INTEREST_TYPE.identifier().clone(),
+            ),
+            Box::new(crate::poi::bootstrap_poi_types()) as AnyBox,
+        ),
     ]);
     let settings = build_noise_settings_registry(base.clone());
     let settings_access =

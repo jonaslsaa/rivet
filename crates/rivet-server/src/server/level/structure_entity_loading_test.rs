@@ -102,6 +102,229 @@ struct Factory {
     experimental: bool,
     enabled: bool,
 }
+
+struct UnavailableCreatures;
+impl super::super::generation_creature_runtime::GenerationCreatureFactory for UnavailableCreatures {
+    fn world_uuid(&self) -> Uuid {
+        Uuid {
+            most: 0x1234_5678_9abc_def0,
+            least: 0xfedc_ba98_7654_3210_u64 as i64,
+        }
+    }
+    fn require_authority(
+        &self,
+    ) -> Result<(), super::super::generation_creature_runtime::GenerationCreatureError> {
+        Err(super::super::generation_creature_runtime::GenerationCreatureError::AuthorityUnavailable("fixture has no creature factory".into()))
+    }
+    fn create(
+        &self,
+        entity_type: &str,
+        _: &rivet_registry::RegistryAccess,
+    ) -> Result<
+        Option<rivet_world::entity::generation_creature::NativeGenerationCreature>,
+        super::super::generation_creature_runtime::GenerationCreatureError,
+    > {
+        Err(
+            super::super::generation_creature_runtime::GenerationCreatureError::UnsupportedEntity(
+                entity_type.into(),
+            ),
+        )
+    }
+}
+
+#[test]
+fn actual_paper_duplicate_uuid_stream_policy_and_removal_rng() {
+    use super::super::entity_post_load::*;
+    use rivet_registry::{Identifier, RegistryAccess, core::Vec3};
+    use rivet_world::entity::loaded_entity::NativeLoadedEntity;
+    struct RecordingRemoval<'a> {
+        inner: EmptyInventoryEntityRemoval<'a, LegacyRandomSource>,
+        events: Vec<&'static str>,
+    }
+    impl EntityRemoval for RecordingRemoval<'_> {
+        fn discard(
+            &mut self,
+            entity: &mut NativeLoadedEntity,
+            decision: DuplicateUuidDecision,
+        ) -> Result<(), StructureError> {
+            let events = &mut self.events;
+            self.inner
+                .discard_with_event_authority(entity, decision, &mut |entity| {
+                    assert!(
+                        !entity.is_removed(),
+                        "actual event fires before removed flag"
+                    );
+                    events.push("DISCARD");
+                    Ok(())
+                })?;
+            assert!(entity.is_removed());
+            Ok(())
+        }
+    }
+    for line in
+        include_str!("../../../../../tools/rivet-oracle/fixtures/entity-post-load-policy.jsonl")
+            .lines()
+    {
+        let row: serde_json::Value = serde_json::from_str(line).unwrap();
+        let mode = match row["mode"].as_str().unwrap() {
+            "SAFE_REGEN" => DuplicateUuidMode::SafeRegen,
+            "DELETE" => DuplicateUuidMode::Delete,
+            "WARN" => DuplicateUuidMode::Warn,
+            "NOTHING" => DuplicateUuidMode::Nothing,
+            _ => panic!("mode"),
+        };
+        let situation = row["situation"].as_str().unwrap();
+        let count = row["count"].as_u64().unwrap() as usize;
+        let input = parse_compound_fully(
+            "{id:'minecraft:chest_minecart',UUID:[I;0,1,0,2],Pos:[0d,64d,0d]}",
+        )
+        .unwrap();
+        let inputs = vec![input; count];
+        let factory = Factory::new(false);
+        let access = RegistryAccess::empty();
+        let mut world_random = LegacyRandomSource::new(99);
+        let mut removal = RecordingRemoval {
+            inner: EmptyInventoryEntityRemoval {
+                world_random: &mut world_random,
+            },
+            events: Vec::new(),
+        };
+        let mut context = EntityPostLoadContext {
+            cart_factory: &factory,
+            creature_factory: &UnavailableCreatures,
+            registries: &access,
+            settings: DuplicateUuidSettings {
+                mode,
+                safe_regen_delete_range: 32,
+            },
+            removal: &mut removal,
+        };
+        let mut lookups = 0;
+        let mut secure_calls = 0;
+        let batch = prepare_native_entities(
+            &inputs,
+            &mut context,
+            |_| {
+                lookups += 1;
+                (situation != "absent").then(|| ExistingEntityView {
+                    encode_id: Some(Identifier::parse(if situation == "different_type" {
+                        "minecraft:minecart"
+                    } else {
+                        "minecraft:chest_minecart"
+                    })),
+                    position: Vec3::new(
+                        if situation == "far" {
+                            40.
+                        } else if situation == "boundary" {
+                            32.
+                        } else {
+                            1.
+                        },
+                        64.,
+                        0.,
+                    ),
+                    is_removed: situation == "removed",
+                })
+            },
+            || {
+                secure_calls += 1;
+                Ok(Uuid { most: 3, least: 4 })
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            batch.entities.len(),
+            row["accepted"].as_u64().unwrap() as usize
+        );
+        assert_eq!(lookups, row["lookups"].as_u64().unwrap());
+        let decisions:Vec<_>=batch.decisions.iter().map(|d|serde_json::json!({"discard":matches!(d,DuplicateUuidDecision::Discard|DuplicateUuidDecision::DiscardWithoutCause),"removed":matches!(d,DuplicateUuidDecision::Discard|DuplicateUuidDecision::DiscardWithoutCause),"uuid_changed":*d==DuplicateUuidDecision::Regenerated})).collect();
+        assert_eq!(
+            serde_json::json!(decisions),
+            row["decisions"],
+            "{mode:?}/{situation}"
+        );
+        assert_eq!(
+            secure_calls,
+            batch
+                .decisions
+                .iter()
+                .filter(|d| **d == DuplicateUuidDecision::Regenerated)
+                .count()
+        );
+        for entity in &batch.entities {
+            assert!(!entity.is_removed());
+            assert_eq!(
+                entity.uuid() != Uuid { most: 1, least: 2 },
+                batch
+                    .decisions
+                    .contains(&DuplicateUuidDecision::Regenerated)
+            );
+        }
+        assert_eq!(serde_json::json!(removal.events), row["remove_events"]);
+        assert_eq!(
+            world_random.next_long(),
+            row["world_rng_next"].as_i64().unwrap()
+        );
+        assert_eq!(
+            factory.last_id.load(Ordering::SeqCst),
+            row["next_id"].as_i64().unwrap() as i32
+        );
+        assert_eq!(
+            factory.random.lock().unwrap().next_long(),
+            row["entity_rng_next"].as_i64().unwrap()
+        );
+    }
+}
+
+#[test]
+fn post_load_unavailable_support_preserves_typed_prefix_and_current_removal_value() {
+    use super::super::entity_post_load::*;
+    use rivet_registry::{Identifier, RegistryAccess, core::Vec3};
+    let factory = Factory::new(false);
+    let access = RegistryAccess::empty();
+    let mut removal = DetachedAnimalRemoval;
+    let mut context = EntityPostLoadContext {
+        cart_factory: &factory,
+        creature_factory: &UnavailableCreatures,
+        registries: &access,
+        settings: DuplicateUuidSettings {
+            mode: DuplicateUuidMode::SafeRegen,
+            safe_regen_delete_range: 32,
+        },
+        removal: &mut removal,
+    };
+    let input = parse_compound_fully("{id:'minecraft:chest_minecart',UUID:[I;0,1,0,2]}").unwrap();
+    let error = prepare_native_entities(
+        &[
+            input.clone(),
+            parse_compound_fully("{id:'minecraft:pig'}").unwrap(),
+        ],
+        &mut context,
+        |_| None,
+        || panic!("no duplicate"),
+    )
+    .unwrap_err();
+    assert_eq!(error.input_index, 1);
+    assert_eq!(error.prepared.entities.len(), 1);
+    assert!(error.current.is_none());
+    let error = prepare_native_entities(
+        &[input],
+        &mut context,
+        |_| {
+            Some(ExistingEntityView {
+                encode_id: Some(Identifier::parse("minecraft:chest_minecart")),
+                position: Vec3::new(0., 0., 0.),
+                is_removed: false,
+            })
+        },
+        || panic!("near duplicate does not regenerate"),
+    )
+    .unwrap_err();
+    assert!(error.prepared.entities.is_empty());
+    let entity = error.current.unwrap();
+    assert!(!entity.is_removed());
+    assert_eq!(entity.uuid(), Uuid { most: 1, least: 2 });
+}
 impl Factory {
     fn new(experimental: bool) -> Self {
         Self {

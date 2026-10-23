@@ -64,6 +64,20 @@ pub struct EntityIdSequence(Arc<AtomicI32>);
 pub struct EntityIdOccupancy(Arc<RwLock<HashSet<i32>>>);
 
 impl EntityIdOccupancy {
+    /// Admit/release the actual world's indexed entities. Cloned handles used
+    /// by native constructors and players observe this SAME destination set.
+    pub fn register(&self, id: i32) -> bool {
+        self.0
+            .write()
+            .expect("entity ID occupancy poisoned")
+            .insert(id)
+    }
+    pub fn release(&self, id: i32) -> bool {
+        self.0
+            .write()
+            .expect("entity ID occupancy poisoned")
+            .remove(&id)
+    }
     pub fn contains(&self, id: i32) -> bool {
         self.0
             .read()
@@ -127,21 +141,13 @@ impl EntityIdAllocator {
     /// Register `id` as held by a live entity (`hasEntityWithId` becomes true).
     /// Called when an entity spawns into the world.
     pub fn mark_in_use(&mut self, id: i32) {
-        self.in_use
-            .0
-            .write()
-            .expect("entity ID occupancy poisoned")
-            .insert(id);
+        self.in_use.register(id);
     }
 
     /// Release `id` (the entity left the world; `hasEntityWithId` becomes
     /// false). The counter is untouched — freed ids are not reused.
     pub fn release(&mut self, id: i32) {
-        self.in_use
-            .0
-            .write()
-            .expect("entity ID occupancy poisoned")
-            .remove(&id);
+        self.in_use.release(id);
     }
 }
 

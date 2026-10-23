@@ -22,7 +22,7 @@ public final class GenerationSheepProbe {
  static {try{var f=sun.misc.Unsafe.class.getDeclaredField("theUnsafe");f.setAccessible(true);U=(sun.misc.Unsafe)f.get(null);}catch(Exception e){throw new ExceptionInInitializerError(e);}}
  static RegistryAccess access;
  static final class LevelShell extends ServerLevel {
-  WorldConfiguration config;ChestMinecartProbe.WorldShell world;int nextId;net.minecraft.server.MinecraftServer server;
+  WorldConfiguration config;ChestMinecartProbe.WorldShell world;int nextId;net.minecraft.server.MinecraftServer server;net.minecraft.world.level.gamerules.GameRules rules;
   private LevelShell(){super(null,null,null,null,null,null,false,0L,List.of(),false,null,null,null,null,null,null);}
   @Override public int getNextEntityId(){return ++nextId;}
   @Override public net.minecraft.world.flag.FeatureFlagSet enabledFeatures(){return net.minecraft.world.flag.FeatureFlags.DEFAULT_FLAGS;}
@@ -30,10 +30,11 @@ public final class GenerationSheepProbe {
   @Override public org.bukkit.craftbukkit.CraftWorld getWorld(){return world;}
   @Override public RegistryAccess registryAccess(){return access;}
   @Override public net.minecraft.server.MinecraftServer getServer(){return server;}
+  @Override public net.minecraft.world.level.gamerules.GameRules getGameRules(){return rules;}
   @Override public String toString(){return "ServerLevel[GenerationCreatureOracle]";}
  }
  static LevelShell level()throws Exception{
-  var level=(LevelShell)U.allocateInstance(LevelShell.class);level.nextId=100;level.world=(ChestMinecartProbe.WorldShell)U.allocateInstance(ChestMinecartProbe.WorldShell.class);level.server=(net.minecraft.server.MinecraftServer)U.allocateInstance(net.minecraft.server.dedicated.DedicatedServer.class);
+  var level=(LevelShell)U.allocateInstance(LevelShell.class);level.nextId=100;level.world=(ChestMinecartProbe.WorldShell)U.allocateInstance(ChestMinecartProbe.WorldShell.class);level.server=(net.minecraft.server.MinecraftServer)U.allocateInstance(net.minecraft.server.dedicated.DedicatedServer.class);level.rules=new net.minecraft.world.level.gamerules.GameRules(net.minecraft.world.flag.FeatureFlags.DEFAULT_FLAGS);
   var spigot=(org.spigotmc.SpigotWorldConfig)U.allocateInstance(org.spigotmc.SpigotWorldConfig.class);var field=Level.class.getDeclaredField("spigotConfig");field.setAccessible(true);field.set(level,spigot);
   var ctor=WorldConfiguration.class.getDeclaredConstructor(org.spigotmc.SpigotWorldConfig.class,Identifier.class);ctor.setAccessible(true);level.config=ctor.newInstance(spigot,Identifier.withDefaultNamespace("overworld"));level.config.entities=level.config.new Entities();level.config.entities.spawning=level.config.entities.new Spawning();level.config.entities.behavior=level.config.entities.new Behavior();return level;
  }

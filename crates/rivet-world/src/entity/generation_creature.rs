@@ -70,6 +70,12 @@ impl NativeEntityState {
     pub fn identity(&self) -> NativeEntityIdentity {
         self.identity
     }
+    pub fn set_uuid(&mut self, uuid: Uuid) {
+        self.identity.uuid = uuid;
+    }
+    pub fn is_removed(&self) -> bool {
+        self.removed
+    }
     pub fn position(&self) -> Vec3 {
         self.position
     }

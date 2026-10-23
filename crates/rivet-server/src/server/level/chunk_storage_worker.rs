@@ -1163,16 +1163,16 @@ mod tests {
     }
 
     #[test]
-    fn start_rejects_default_deflate_before_spawn_or_folder_creation() {
+    fn start_rejects_unported_lz4_before_spawn_or_folder_creation() {
         let root = tempfile::tempdir().unwrap();
         let folder = root.path().join("not-created");
         let err = match ChunkStorageWorker::start(
             storage_info(),
             folder.clone(),
             1,
-            RegionFileVersion::VERSION_DEFLATE,
+            RegionFileVersion::VERSION_LZ4,
         ) {
-            Ok(_) => panic!("unsupported default writer must be rejected at start"),
+            Ok(_) => panic!("unsupported writer must be rejected at start"),
             Err(err) => err,
         };
         assert_eq!(err.kind(), io::ErrorKind::Unsupported);

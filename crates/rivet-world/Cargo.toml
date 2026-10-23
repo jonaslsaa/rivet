@@ -13,10 +13,11 @@ workspace = true
 # backed; the #100 superflat content builder writes sections through it.
 bytes = { workspace = true }
 # Region-file codecs (#231, `world.level.chunk.storage`): gzip/deflate read and
-# gzip write ride on flate2 (gzip proven via rivet-nbt). Paper's lz4-java
-# block stream is decoded with lz4_flex + xxHash32; lz4 and deflate writes stay
-# deferred (see CRATES.md).
-flate2 = { workspace = true }
+# gzip/deflate write ride on flate2. Paper's lz4-java block stream is decoded
+# with lz4_flex + xxHash32; lz4 writes remain deferred.
+# Paper's Deflater uses native zlib's default level/strategy; do not substitute
+# the default miniz backend when comparing registered DEFLATE writer bytes.
+flate2 = { workspace = true, features = ["zlib"] }
 lz4_flex = { workspace = true }
 xxhash-rust = { workspace = true }
 # StructureAccess preserves decoded outer reference-map order with IndexMap;

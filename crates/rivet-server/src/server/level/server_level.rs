@@ -44,11 +44,19 @@ use super::chunk_storage_worker::{
 use super::chunk_tracking_view::ChunkTrackingView;
 use super::generated_chunk_owner::{GeneratedChunkOwner, GenerationReadiness};
 use super::generated_world::OverworldGenerator;
+#[path = "level_entity_runtime.rs"]
+mod entity_runtime;
+#[cfg(unix)]
+#[path = "generated_poi_runtime.rs"]
+mod poi_runtime;
 #[path = "level_tick_runtime.rs"]
 mod tick_runtime;
 use super::level_chunk::LevelChunkSaveError;
 use super::player_chunk_loader::ChunkSendReadiness;
 use super::region_backed::{RegionBackedBootError, RegionChunkSource};
+pub use entity_runtime::LevelEntityError;
+#[cfg(unix)]
+pub use poi_runtime::GeneratedPoiError;
 use rivet_world::chunk::status::ChunkStatus;
 use std::sync::Arc;
 pub use tick_runtime::{BlockTickContainers, FluidTickContainers, TickRuntimeError};
@@ -175,6 +183,8 @@ pub struct ServerLevel {
     world_uuid: Option<rivet_util::mth::Uuid>,
     #[cfg(unix)]
     writable_storage: Option<Arc<super::level_storage_access::LevelStorageAccess>>,
+    #[cfg(unix)]
+    poi_storage: Option<super::poi_storage::StoredPoiManager>,
     boot_settings: Option<super::generated_boot::GeneratedBootSettings>,
     seed: i64,
     min_y: i32,
@@ -206,6 +216,9 @@ pub struct ServerLevel {
     /// Canonical in-progress generation state, confined to the world tick
     /// thread. Saved-world loading never implicitly enables generation.
     generated_chunk_owner: Option<GeneratedChunkOwner>,
+    /// Native entity values share ID occupancy with session-owned players.
+    /// The session owner binds this once; no per-world ID sequence is created.
+    entity_lookup: Option<super::entity_lookup::EntityLookup>,
     block_ticks: rivet_world::ticks::LevelTicks<rivet_world::block::Block>,
     fluid_ticks: rivet_world::ticks::LevelTicks<rivet_registry::fluid_id::FluidId>,
     generation_environment: Option<super::generation_environment::GenerationEnvironment>,
@@ -308,6 +321,8 @@ impl ServerLevel {
             world_uuid: None,
             #[cfg(unix)]
             writable_storage: None,
+            #[cfg(unix)]
+            poi_storage: None,
             boot_settings: None,
             seed: config.seed,
             min_y: config.min_y,
@@ -322,6 +337,7 @@ impl ServerLevel {
             game_time: 0,
             region_source: None,
             generated_chunk_owner: None,
+            entity_lookup: None,
             block_ticks: rivet_world::ticks::LevelTicks::new(),
             fluid_ticks: rivet_world::ticks::LevelTicks::new(),
             generation_environment: None,
@@ -513,6 +529,29 @@ impl ServerLevel {
         self.generated_chunk_owner.as_ref()
     }
 
+    pub(crate) fn bind_entity_occupancy(
+        &mut self,
+        occupancy: super::entity_id_allocator::EntityIdOccupancy,
+    ) {
+        assert!(
+            self.entity_lookup.is_none(),
+            "entity owner is already bound"
+        );
+        self.entity_lookup = Some(super::entity_lookup::EntityLookup::new(
+            self.min_y >> 4,
+            (self.min_y + self.height - 1) >> 4,
+            occupancy,
+        ));
+    }
+
+    pub fn entity_lookup(&self) -> Option<&super::entity_lookup::EntityLookup> {
+        self.entity_lookup.as_ref()
+    }
+
+    pub fn entity_lookup_mut(&mut self) -> Option<&mut super::entity_lookup::EntityLookup> {
+        self.entity_lookup.as_mut()
+    }
+
     pub fn generated_chunk_owner_mut(&mut self) -> Option<&mut GeneratedChunkOwner> {
         self.generated_chunk_owner.as_mut()
     }
@@ -604,6 +643,18 @@ impl ServerLevel {
     pub fn prepare_chunk_for_send(&mut self, pos: ChunkPos) -> Result<ChunkSendReadiness, String> {
         if self.chunk_map.get_chunk(pos).is_some() {
             return Ok(ChunkSendReadiness::Ready);
+        }
+        // The first FULL operation reads the real POI store and repairs it
+        // against the canonical proto. These source effects precede runtime
+        // promotion and remain owned if a later activation step refuses.
+        #[cfg(unix)]
+        if self.generated_chunk_owner.as_ref().is_some_and(|owner| {
+            owner
+                .state(pos)
+                .is_some_and(|state| state.status() == ChunkStatus::Spawn)
+        }) {
+            self.prepare_generated_poi(pos)
+                .map_err(|error| error.to_string())?;
         }
         if let Some(owner) = &self.generated_chunk_owner {
             return match owner.readiness(pos, ChunkStatus::Full) {

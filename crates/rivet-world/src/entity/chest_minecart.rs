@@ -105,6 +105,12 @@ impl NativeChestMinecart {
     pub fn uuid(&self) -> Uuid {
         self.uuid
     }
+    pub fn set_uuid(&mut self, uuid: Uuid) {
+        self.uuid = uuid;
+    }
+    pub fn is_removed(&self) -> bool {
+        self.removed
+    }
     pub fn world_uuid(&self) -> Uuid {
         self.world_uuid
     }

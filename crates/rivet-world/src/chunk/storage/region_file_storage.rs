@@ -118,7 +118,7 @@ impl RegionFileStorage {
 
     /// `getRegionFileName(chunkX, chunkZ)` — exact signed arithmetic-shift
     /// mapping, including negative chunk coordinates.
-    fn get_region_file_name(chunk_x: i32, chunk_z: i32) -> String {
+    pub fn get_region_file_name(chunk_x: i32, chunk_z: i32) -> String {
         format!(
             "r.{}.{}{}",
             chunk_x >> REGION_SHIFT,
@@ -187,9 +187,8 @@ impl RegionFileStorage {
     ///
     /// The `SharedConstants.DEBUG_DONT_SAVE_WORLD` dev flag that Paper gates
     /// the whole method on is not ported (it is false in production). And like
-    /// `RegionFile.getChunkDataOutputStream`, this path is only functional under
-    /// the D13 `region-file-compression=none` selection: deflate/lz4 writes are
-    /// deferred, so selecting them makes `wrap_output` fail with `Unsupported`.
+    /// `RegionFile.getChunkDataOutputStream`, this supports none, gzip and
+    /// default deflate; unported lz4 writes fail with `Unsupported`.
     /// The failure surfaces after `get_region_file` has already created the
     /// storage folder and an empty region file (Paper opens the region with
     /// CREATE before wrapping the output stream), but no chunk bytes reach
@@ -1248,12 +1247,12 @@ mod tests {
 
     #[test]
     fn deferred_codec_write_creates_folder_and_empty_file_but_no_chunk_bytes() {
-        // The doc for `write` says deflate/lz4 writes are deferred: `wrap_output`
+        // LZ4 writing is deferred: `wrap_output`
         // rejects with `Unsupported` *after* `get_region_file` has created the
         // storage folder and an empty region file (Paper opens the region with
         // CREATE before wrapping the output stream). This pins that exact
         // ordering — the failure is loud, and no chunk bytes reach disk.
-        with_selection("deflate", || {
+        with_selection("lz4", || {
             let root = tempfile::tempdir().unwrap();
             let folder = root.path().join("region");
             let pos = ChunkPos::new(0, 0);
