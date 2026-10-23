@@ -1,0 +1,8 @@
+{"phase":"tag","types":["minecraft:armorer","minecraft:butcher","minecraft:cartographer","minecraft:cleric","minecraft:farmer","minecraft:fisherman","minecraft:fletcher","minecraft:leatherworker","minecraft:librarian","minecraft:mason","minecraft:shepherd","minecraft:toolsmith","minecraft:weaponsmith","minecraft:home","minecraft:meeting"]}
+{"phase":"loaded_occupied","distances":[0,1,1,6,7,6],"chunk":{"loaded":true,"dirty":false,"empty":false,"saved":"{DataVersion:4903,Sections:{\"0\":{Records:[{pos:[I;-31,2,51],type:\"minecraft:home\"}],Valid:1b}}}"}}
+{"phase":"released","distances":[7,7,7,7,7,7],"chunk":{"loaded":true,"dirty":true,"empty":false,"saved":"{DataVersion:4903,Sections:{\"0\":{Records:[{free_tickets:1,pos:[I;-31,2,51],type:\"minecraft:home\"}],Valid:1b}}}"}}
+{"phase":"reacquired","distances":[0,1,1,6,7,6],"chunk":{"loaded":true,"dirty":true,"empty":false,"saved":"{DataVersion:4903,Sections:{\"0\":{Records:[{pos:[I;-31,2,51],type:\"minecraft:home\"}],Valid:1b}}}"}}
+{"phase":"meeting_remains","distances":[0,1,1,6,7,6],"chunk":{"loaded":true,"dirty":true,"empty":false,"saved":"{DataVersion:4903,Sections:{\"0\":{Records:[{free_tickets:31,pos:[I;-30,2,51],type:\"minecraft:meeting\"}],Valid:1b}}}"}}
+{"phase":"all_removed","distances":[7,7,7,7,7,7],"chunk":{"loaded":true,"dirty":true,"empty":false,"saved":"{DataVersion:4903,Sections:{\"0\":{Records:[],Valid:1b}}}"}}
+{"phase":"occupied_again","distances":[0,1,1,6,7,6],"chunk":{"loaded":true,"dirty":true,"empty":false,"saved":"{DataVersion:4903,Sections:{\"0\":{Records:[{pos:[I;-31,2,51],type:\"minecraft:home\"}],Valid:1b}}}"}}
+{"phase":"unloaded","distances":[7,7,7,7,7,7]}

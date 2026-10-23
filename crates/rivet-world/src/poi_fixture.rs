@@ -35,7 +35,7 @@ fn all_builtin_states_and_native_ticket_transitions_match_paper() {
             record_count += 1;
             let dirty = Arc::new(AtomicUsize::new(0));
             let callback = Arc::clone(&dirty);
-            let mut record = PackedPoiRecord {
+            let record = PackedPoiRecord {
                 pos: BlockPos::new(-17, 63, 32),
                 poi_type: registry
                     .get(&ResourceKey::create(

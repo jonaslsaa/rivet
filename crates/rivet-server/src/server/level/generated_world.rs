@@ -4000,6 +4000,7 @@ fn run_biome_decoration_impl(
                                 )
                                 || message.starts_with("Block.updateShape is not implemented for ")
                                 || message == "BeehiveBlockEntity nonempty components codec is not implemented"
+                                || message.starts_with("native block entity capability unavailable: ")
                                 || (message
                                     .contains("BlockStateBase.canSurvive is not implemented")
                                     || message

@@ -10,6 +10,92 @@ use std::sync::{
     Mutex,
     atomic::{AtomicI32, Ordering},
 };
+
+#[test]
+fn actual_paper_animals_load_into_native_values_with_constructor_then_uuid_restoration() {
+    use super::super::{
+        entity_construction::EntityConstructionRuntime, entity_id_allocator::EntityIdAllocator,
+        generation_creature_runtime::WorldGenerationCreatureFactory,
+    };
+    use rivet_world::{
+        data::worldgen::worldgen_bootstraps::build_worldgen_registries, flag::feature_flags,
+    };
+    use std::sync::Arc;
+    let access = build_worldgen_registries();
+    let mut count = 0;
+    for line in
+        include_str!("../../../../../tools/rivet-oracle/fixtures/generation-creature-load.jsonl")
+            .lines()
+    {
+        let row: serde_json::Value = serde_json::from_str(line).unwrap();
+        let input = parse_compound_fully(row["input"].as_str().unwrap()).unwrap();
+        let mut players = EntityIdAllocator::new();
+        for _ in 0..100 {
+            players.next_id();
+        }
+        let runtime = EntityConstructionRuntime::with_seed(players.sequence(), 42);
+        let animals = WorldGenerationCreatureFactory::new(
+            runtime.clone(),
+            Uuid {
+                most: 0x1234_5678_9abc_def0,
+                least: 0xfedc_ba98_7654_3210_u64 as i64,
+            },
+            feature_flags::vanilla_set(),
+            &access,
+            Arc::new(|_| false),
+        );
+        let carts = Factory::new(false);
+        let entity = load_native_world_entity(&input, &carts, &animals, &access).unwrap();
+        let callbacks = row["callbacks"].as_array().unwrap();
+        assert_eq!(
+            usize::from(entity.is_some()),
+            callbacks.len(),
+            "{}",
+            row["name"]
+        );
+        if let Some(entity) = entity {
+            assert_eq!(
+                entity.entity_id(),
+                callbacks[0]["id"].as_i64().unwrap() as i32
+            );
+            assert_eq!(
+                entity.uuid().to_string(),
+                callbacks[0]["uuid"].as_str().unwrap()
+            );
+            assert_eq!(
+                entity.generation(),
+                callbacks[0]["generation"].as_bool().unwrap()
+            );
+            let old = entity.old_position();
+            assert_eq!(
+                [old.x, old.y, old.z],
+                serde_json::from_value::<[f64; 3]>(row["old_pos"].clone()).unwrap()
+            );
+            assert_eq!(
+                entity.save().is_some(),
+                row["save_result"].as_bool().unwrap()
+            );
+            assert_eq!(
+                entity.save().unwrap_or_default(),
+                parse_compound_fully(row["saved"].as_str().unwrap()).unwrap(),
+                "{}",
+                row["name"]
+            );
+        }
+        assert_eq!(
+            players.next_id() - 1,
+            row["next_id"].as_i64().unwrap() as i32
+        );
+        assert_eq!(
+            runtime.with_entity_random(|r| r.next_long()).unwrap(),
+            row["rng_next"].as_i64().unwrap(),
+            "{}",
+            row["name"]
+        );
+        count += 1;
+    }
+    assert_eq!(count, 169);
+}
 struct Factory {
     random: Mutex<LegacyRandomSource>,
     last_id: AtomicI32,

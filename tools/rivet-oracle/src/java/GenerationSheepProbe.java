@@ -30,6 +30,7 @@ public final class GenerationSheepProbe {
   @Override public org.bukkit.craftbukkit.CraftWorld getWorld(){return world;}
   @Override public RegistryAccess registryAccess(){return access;}
   @Override public net.minecraft.server.MinecraftServer getServer(){return server;}
+  @Override public String toString(){return "ServerLevel[GenerationCreatureOracle]";}
  }
  static LevelShell level()throws Exception{
   var level=(LevelShell)U.allocateInstance(LevelShell.class);level.nextId=100;level.world=(ChestMinecartProbe.WorldShell)U.allocateInstance(ChestMinecartProbe.WorldShell.class);level.server=(net.minecraft.server.MinecraftServer)U.allocateInstance(net.minecraft.server.dedicated.DedicatedServer.class);

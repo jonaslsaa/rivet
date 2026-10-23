@@ -492,15 +492,18 @@ where
     /// `ProtoChunk.getBlockEntityNbtForSaving(BlockPos, HolderLookup)` — Java
     /// saves the materialized block entity or falls back to the pending tag;
     /// the block-entity map is unported, so the port returns the pending tag.
-    pub fn get_block_entity_nbt_for_saving(&self, pos: &BlockPos) -> Option<&CompoundTag> {
-        self.base.get_block_entity_nbt(pos)
+    pub fn get_block_entity_nbt_for_saving(&self, pos: &BlockPos) -> Option<CompoundTag> {
+        self.base
+            .get_block_entity(pos)
+            .map(|entity| entity.save_with_full_metadata())
+            .or_else(|| self.base.get_block_entity_nbt(pos).cloned())
     }
 
     /// `ProtoChunk.removeBlockEntity(BlockPos)` — removes from `blockEntities`
     /// and `pendingBlockEntities`; the port removes the pending entry (the
     /// materialized map is unported).
     pub fn remove_block_entity(&mut self, pos: &BlockPos) {
-        self.base.remove_block_entity_nbt(pos);
+        self.base.remove_block_entity(pos);
     }
 
     /// `ProtoChunk.getCarvingMask()`.
