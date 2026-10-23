@@ -236,15 +236,7 @@ impl LevelChunk {
         // Paper's `LevelChunk.getBlockEntityNbtForSaving` preserves a pending
         // (not-yet-materialized) entry and forces `keepPacked=true` on the copy.
         // Never mutate the canonical authority: the save owns these tags.
-        let block_entities = self
-            .pending_block_entities()
-            .values()
-            .cloned()
-            .map(|mut tag| {
-                tag.put_boolean("keepPacked", true);
-                tag
-            })
-            .collect();
+        let block_entities = self.chunk.get_base().block_entity_tags_for_saving();
         let data = LiveChunkSaveData::from_full_runtime(
             world_chunk.height_accessor().get_min_section_y(),
             world_chunk.get_inhabited_time(),
@@ -362,7 +354,7 @@ impl LevelChunk {
     }
 
     fn from_proto_values(
-        proto: ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
+        mut proto: ProtoChunk<BlockState, WorldgenBiomeId, StructureKey>,
     ) -> Result<Self, LevelChunkBridgeError> {
         // The #184 send seam panics on an unsupported persisted Starlight state
         // (`to_vanilla_nibble` has no typed error surface), so reject it before
@@ -376,6 +368,28 @@ impl LevelChunk {
             return Err(LevelChunkBridgeError::UnsupportedLightState(
                 UnsupportedLightState,
             ));
+        }
+        // LevelChunk(proto) installs the same live objects through
+        // setBlockEntity, reconciling cached state to the actual terrain and
+        // clearing their removed flag. Proto/WGR same-block writes did neither.
+        let states: Vec<_> = proto
+            .base()
+            .block_entities()
+            .keys()
+            .map(|pos| {
+                (
+                    *pos,
+                    proto.get_block_state(pos.get_x(), pos.get_y(), pos.get_z()),
+                )
+            })
+            .collect();
+        for (pos, state) in states {
+            let entity = proto.base_mut().get_block_entity_mut(&pos).unwrap();
+            if entity.set_block_state(state) {
+                entity.clear_removed();
+            } else {
+                proto.base_mut().remove_block_entity(&pos);
+            }
         }
         // Paper's full task hands ProtoChunk entities to postLoadProtoChunk.
         // Preserve the owned tags until the ServerLevel integration can consume
@@ -620,6 +634,58 @@ impl LevelChunk {
         self.chunk.pending_block_entities()
     }
 
+    pub fn block_entities(
+        &self,
+    ) -> &indexmap::IndexMap<BlockPos, rivet_world::block_entity::NativeBlockEntity> {
+        self.chunk.get_base().block_entities()
+    }
+    pub fn get_block_entity(
+        &self,
+        pos: &BlockPos,
+    ) -> Option<&rivet_world::block_entity::NativeBlockEntity> {
+        self.chunk
+            .get_base()
+            .get_block_entity(pos)
+            .filter(|entity| !entity.is_removed())
+    }
+    /// Lazy native load only. This does not register listeners or tickers and
+    /// cannot be used as proof of FULL post-load completion.
+    pub fn promote_pending_block_entity(
+        &mut self,
+        pos: BlockPos,
+    ) -> Result<bool, rivet_world::block_entity::NativeBlockEntityError> {
+        use rivet_world::block_entity::NativeBlockEntity;
+        if self.get_block_entity(&pos).is_some() {
+            return Ok(true);
+        }
+        let Some(tag) = self.chunk.get_base().get_block_entity_nbt(&pos).cloned() else {
+            return Ok(false);
+        };
+        let state = rivet_registry::block_state::BlockState::new(self.get_block_state(
+            pos.get_x(),
+            pos.get_y(),
+            pos.get_z(),
+        ));
+        let entity = if tag.get_string("id").is_some_and(|id| id == "DUMMY") {
+            if super::structure_snapshot_data::has_block_entity(state) {
+                Some(NativeBlockEntity::fresh(pos, state)?)
+            } else {
+                None
+            }
+        } else {
+            NativeBlockEntity::load(pos, state, &tag)?
+        };
+        // LevelChunk.getBlockEntity consumes the pending entry before known
+        // promotion failure. A capability error above instead preserves it so
+        // unavailable native support cannot silently destroy owned data.
+        self.chunk.remove_block_entity_nbt(&pos);
+        let Some(entity) = entity else {
+            return Ok(false);
+        };
+        self.chunk.set_block_entity(entity);
+        Ok(true)
+    }
+
     /// `ChunkAccess.setBlockEntityNbt(CompoundTag)` — the runtime set/update
     /// mutator: installs or updates the entry at its corrected position
     /// (duplicate positions collapse last-wins in place, #537). A later
@@ -648,9 +714,12 @@ impl LevelChunk {
         reconstruct_block_entities(
             &pos,
             self.chunk
-                .pending_block_entities()
+                .get_base()
+                .block_entities()
                 .values()
-                .cloned()
+                .filter(|entity| !entity.is_removed())
+                .map(|entity| entity.save_with_full_metadata())
+                .chain(self.pending_block_entities().values().cloned())
                 .collect::<Vec<_>>()
                 .as_slice(),
             BlockEntityChunkKind::Level,
@@ -1623,6 +1692,108 @@ mod tests {
     /// given structure starts, so the typed `StructureAccess` authority is
     /// empty too; the carry-through of starts a proto *does* carry is covered
     /// by its own test.
+    #[test]
+    fn native_live_and_lazy_pending_entities_survive_full_projection_and_save_reload() {
+        use rivet_world::block_entity::NativeBlockEntity;
+        let pos = ChunkPos::ZERO;
+        let chest = BlockPos::new(8, 64, 8);
+        let heart = BlockPos::new(9, 64, 8);
+        let chest_state = Blocks::CHEST.default_block_state();
+        let actual_chest_state = chest_state
+            .set_value(
+                rivet_registry::block_state_properties::BlockStateProperties::WATERLOGGED,
+                true,
+            )
+            .unwrap();
+        let heart_state = BlockState::of(
+            rivet_registry::generated::blocks::BlockId::from_name("minecraft:creaking_heart")
+                .unwrap(),
+        );
+        let mut proto = build_persisted_full_proto(pos);
+        proto.set_block_state(8, 64, 8, actual_chest_state);
+        proto.set_block_state(9, 64, 8, heart_state);
+        let mut input = CompoundTag::new();
+        input.put_string("id", "minecraft:chest");
+        input.put_string("LootTable", "chests/abandoned_mineshaft");
+        input.put_long("LootTableSeed", 42);
+        let mut native = NativeBlockEntity::load(chest, chest_state, &input)
+            .unwrap()
+            .unwrap();
+        let expected = native.save_with_full_metadata();
+        native.set_removed();
+        proto.base_mut().set_block_entity(native);
+        assert!(
+            proto.base().get_block_entity(&chest).unwrap().is_removed(),
+            "Proto set/get does not clear or filter removed values"
+        );
+        let mut pending = CompoundTag::new();
+        pending.put_string("id", "DUMMY");
+        pending.put_int("x", 9);
+        pending.put_int("y", 64);
+        pending.put_int("z", 8);
+        proto.base_mut().set_block_entity_nbt(pending.clone());
+        let chunk = LevelChunk::from_persisted_full_proto(proto).unwrap();
+        assert_eq!(chunk.block_entities().len(), 1);
+        assert!(!chunk.get_block_entity(&chest).unwrap().is_removed());
+        assert_eq!(
+            chunk.get_block_entity(&chest).unwrap().state(),
+            actual_chest_state,
+            "Level installation reconciles cached Proto state"
+        );
+        assert_eq!(
+            chunk
+                .get_block_entity(&chest)
+                .unwrap()
+                .save_with_full_metadata(),
+            expected
+        );
+        assert_eq!(chunk.pending_block_entities().get(&heart), Some(&pending));
+        assert!(!chunk.pending_block_entities().contains_key(&chest));
+        let saved = chunk.snapshot_for_save(100).unwrap();
+        let data =
+            rivet_world::chunk::storage::serializable_chunk_data::SerializableChunkData::parse(
+                create_accessor(SUPERFLAT_MIN_Y, SUPERFLAT_HEIGHT),
+                &saved,
+            )
+            .unwrap()
+            .unwrap();
+        let live_tag = data
+            .block_entities()
+            .iter()
+            .find(|tag| {
+                tag.get_string("id")
+                    .is_some_and(|id| id == "minecraft:chest")
+            })
+            .unwrap();
+        assert_eq!(live_tag.get_boolean("keepPacked"), Some(false));
+        let pending_tag = data
+            .block_entities()
+            .iter()
+            .find(|tag| tag.get_string("id").is_some_and(|id| id == "DUMMY"))
+            .unwrap();
+        assert_eq!(pending_tag.get_boolean("keepPacked"), Some(true));
+        // A storage reload is lazy again, not a claim of listener/ticker
+        // registration. Explicit native lookup normalizes its own saved value.
+        let reconstruction = rivet_world::chunk::storage::reconstruct_runtime_chunk(
+            pos,
+            data,
+            create_accessor(SUPERFLAT_MIN_Y, SUPERFLAT_HEIGHT),
+            true,
+        )
+        .unwrap();
+        let mut loaded = LevelChunk::from_bridge(reconstruction).unwrap();
+        assert!(loaded.block_entities().is_empty());
+        assert!(loaded.promote_pending_block_entity(chest).unwrap());
+        assert_eq!(
+            loaded
+                .get_block_entity(&chest)
+                .unwrap()
+                .save_with_full_metadata(),
+            expected
+        );
+        assert!(loaded.pending_block_entities().contains_key(&heart));
+    }
+
     #[test]
     fn full_proto_promotes_blocks_biomes_position_and_aux() {
         let mut proto = build_persisted_full_proto(ChunkPos::new(3, -2));

@@ -1,6 +1,6 @@
 //! Pinned builtin PoiTypes and native PoiRecord ticket state. The section
-//! index, disk manager, village-distance propagation and FULL consistency
-//! integration are separate unfinished layers, not implied by this module.
+//! section index is in [`PoiSection`]; disk manager, village-distance
+//! propagation and FULL integration are separate layers.
 use rivet_registry::{
     Holder, Identifier, RegistrationInfo, RegistryBuilder, ResourceKey,
     block_state::BlockState,
@@ -21,8 +21,16 @@ use rivet_serialization::{
 };
 use std::{
     hash::{Hash, Hasher},
-    sync::{Arc, LazyLock},
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicI32, Ordering},
+    },
 };
+
+mod poi_section;
+pub use poi_section::{PackedPoiSection, PoiOccupancy, PoiSection, PoiSectionError};
+mod distance;
+pub use distance::{Delayed26WayDistancePropagator3D, DistancePropagationError};
 
 /// Canonical identity in the complete pinned builtin POI registry. Private
 /// representation prevents an unregistered type from acquiring ticket state.
@@ -209,14 +217,22 @@ impl PackedPoiRecord {
     ) -> PoiRecord {
         let resolved_type = *self.poi_type.value(lookup);
         PoiRecord {
-            packed: self,
+            pos: self.pos,
+            poi_type: self.poi_type,
+            free_tickets: AtomicI32::new(self.free_tickets),
             resolved_type,
             set_dirty,
         }
     }
 }
+/// A shared POI object, mutated by its canonical tick-thread owner. The ticket
+/// cell permits both section indices to retain the same record without a lock
+/// held across setDirty (which may inspect the updated occupancy). Atomics make
+/// the owning world movable; they do not introduce concurrent ticket semantics.
 pub struct PoiRecord {
-    packed: PackedPoiRecord,
+    pos: BlockPos,
+    poi_type: Holder<PoiType>,
+    free_tickets: AtomicI32,
     resolved_type: PoiType,
     set_dirty: Arc<dyn Fn() + Send + Sync>,
 }
@@ -236,16 +252,20 @@ impl PoiRecord {
         .unpack(lookup, set_dirty)
     }
     pub fn pack(&self) -> PackedPoiRecord {
-        self.packed.clone()
+        PackedPoiRecord {
+            pos: self.pos,
+            poi_type: self.poi_type.clone(),
+            free_tickets: self.free_tickets(),
+        }
     }
     pub fn pos(&self) -> BlockPos {
-        self.packed.pos
+        self.pos
     }
     pub fn poi_type(&self) -> &Holder<PoiType> {
-        &self.packed.poi_type
+        &self.poi_type
     }
     pub fn free_tickets(&self) -> i32 {
-        self.packed.free_tickets
+        self.free_tickets.load(Ordering::Relaxed)
     }
     pub fn has_space(&self) -> bool {
         self.free_tickets() > 0
@@ -253,19 +273,21 @@ impl PoiRecord {
     pub fn is_occupied(&self) -> bool {
         self.free_tickets() != self.resolved_type.max_tickets()
     }
-    pub fn acquire_ticket(&mut self) -> bool {
+    pub fn acquire_ticket(&self) -> bool {
         if self.free_tickets() <= 0 {
             return false;
         }
-        self.packed.free_tickets = self.free_tickets().wrapping_sub(1);
+        self.free_tickets
+            .store(self.free_tickets().wrapping_sub(1), Ordering::Relaxed);
         (self.set_dirty)();
         true
     }
-    pub fn release_ticket(&mut self) -> bool {
+    pub fn release_ticket(&self) -> bool {
         if self.free_tickets() >= self.resolved_type.max_tickets() {
             return false;
         }
-        self.packed.free_tickets = self.free_tickets().wrapping_add(1);
+        self.free_tickets
+            .store(self.free_tickets().wrapping_add(1), Ordering::Relaxed);
         (self.set_dirty)();
         true
     }

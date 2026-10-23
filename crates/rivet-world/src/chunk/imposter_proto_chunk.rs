@@ -277,7 +277,7 @@ where
 
     /// `getBlockEntityNbtForSaving(BlockPos, HolderLookup)` — the wrapped
     /// chunk's saving NBT.
-    pub fn get_block_entity_nbt_for_saving(&self, pos: &BlockPos) -> Option<&CompoundTag> {
+    pub fn get_block_entity_nbt_for_saving(&self, pos: &BlockPos) -> Option<CompoundTag> {
         self.wrapped.get_block_entity_nbt_for_saving(pos)
     }
 

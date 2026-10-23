@@ -232,6 +232,13 @@ where
         &self.base
     }
 
+    pub fn set_block_entity(&mut self, entity: crate::block_entity::NativeBlockEntity) {
+        self.base.set_level_block_entity(entity);
+    }
+    pub fn remove_block_entity(&mut self, pos: &BlockPos) {
+        self.base.remove_block_entity(pos);
+    }
+
     /// Runtime loader consumes the base's proto carriers exactly once and
     /// installs actual LevelChunkTicks on its concrete owning LevelChunk.
     /// Empty carriers stay on this generic base; they are not a second save
@@ -435,8 +442,8 @@ where
     ///
     /// The `blockEntities.containsKey` guard and the
     /// `saveWithFullMetadata`/`keepPacked` copy live with the block-entity unit.
-    pub fn get_block_entity_nbt_for_saving(&self, pos: &BlockPos) -> Option<&CompoundTag> {
-        self.base.get_block_entity_nbt(pos)
+    pub fn get_block_entity_nbt_for_saving(&self, pos: &BlockPos) -> Option<CompoundTag> {
+        self.base.block_entity_nbt_for_saving(pos)
     }
 
     /// `ChunkAccess.isYSpaceEmpty(int, int)`.

@@ -50,3 +50,46 @@ pub fn load_native_entity(
         }
     }
 }
+
+/// FULL postLoad's supported native dispatch. Construction ALWAYS precedes
+/// Entity.load, even when input restores an existing UUID. LimitedRegion's
+/// existing cart-only return contract remains separate above.
+pub fn load_native_world_entity(
+    input: &CompoundTag,
+    cart_factory: &dyn StructureEntityCreation,
+    creature_factory: &dyn super::generation_creature_runtime::GenerationCreatureFactory,
+    registries: &rivet_registry::RegistryAccess,
+) -> Result<Option<rivet_world::entity::loaded_entity::NativeLoadedEntity>, StructureError> {
+    use rivet_world::entity::{
+        generation_creature::CreatureLoadError, loaded_entity::NativeLoadedEntity,
+    };
+    let entity_type = input.get("id").and_then(|id| {
+        EntityType::codec::<NbtOps>()
+            .parse(&NbtOps, id)
+            .result_or_partial_silent()
+    });
+    let Some(entity_type) = entity_type else {
+        tracing::warn!(id=?input.get_string("id"),"Skipping entity with invalid or unregistered id");
+        return Ok(None);
+    };
+    if entity_type.get_key() == "minecraft:chest_minecart" {
+        return load_native_entity(input, cart_factory)
+            .map(|e| e.map(NativeLoadedEntity::ChestMinecart));
+    }
+    let Some(mut entity) = creature_factory
+        .create(entity_type.get_key(), registries)
+        .map_err(|error| StructureError::PlacementUnavailable(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    match entity.load(input) {
+        Ok(()) => Ok(Some(NativeLoadedEntity::Creature(entity))),
+        Err(CreatureLoadError::Invalid(message)) => {
+            tracing::warn!(%message,"Exception loading entity");
+            Ok(None)
+        }
+        Err(error @ CreatureLoadError::Unsupported(_)) => {
+            Err(StructureError::PlacementUnavailable(error.to_string()))
+        }
+    }
+}

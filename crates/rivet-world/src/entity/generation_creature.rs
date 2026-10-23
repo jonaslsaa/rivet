@@ -1,6 +1,7 @@
-//! Native generation-time Entity/LivingEntity/Mob/AgeableMob/Animal state.
-//! This executable constructor/finalize/save slice does not implement AI ticks,
-//! damage, nonempty equipment, passenger riding, or persisted animal loading.
+//! Native Entity/LivingEntity/Mob/AgeableMob/Animal state for generation and
+//! supported persisted animal reconstruction. Constructor/finalize/load/save
+//! execute native typed state; AI ticks, damage, nonempty equipment/effects,
+//! and passenger riding remain explicit capability boundaries.
 use super::farm_variants::{FarmFamily, FarmFamilyRegistry};
 use rivet_nbt::{compound_tag::CompoundTag, list_tag::ListTag, tag::Tag};
 use rivet_registry::core::{BlockPos, Vec3, uuid_to_int_array};
@@ -12,6 +13,9 @@ use rivet_registry::{
 };
 use rivet_util::{RandomSource, mth::Uuid};
 use std::sync::Arc;
+#[path = "generation_creature_load.rs"]
+mod load_data;
+pub use load_data::CreatureLoadError;
 
 #[cfg(test)]
 #[path = "generation_creature_fixture.rs"]
@@ -40,6 +44,7 @@ pub struct NativeEntityState {
     age: i32,
     generation: bool,
     removed: bool,
+    loaded: load_data::EntityLoadState,
 }
 impl NativeEntityState {
     pub fn new(identity: NativeEntityIdentity) -> Self {
@@ -59,6 +64,7 @@ impl NativeEntityState {
             age: 0,
             generation: false,
             removed: false,
+            loaded: Default::default(),
         }
     }
     pub fn identity(&self) -> NativeEntityIdentity {
@@ -102,7 +108,7 @@ impl NativeEntityState {
         self.old_rotation = self.rotation;
     }
     fn save(&self, id: &str) -> Option<CompoundTag> {
-        if self.removed {
+        if self.removed || !self.loaded.persist {
             return None;
         }
         let mut tag = CompoundTag::new();
@@ -133,6 +139,7 @@ impl NativeEntityState {
         tag.put_long("WorldUUIDLeast", self.identity.world_uuid.least);
         tag.put_int("Bukkit.updateLevel", 2);
         tag.put_int("Spigot.ticksLived", self.age);
+        self.loaded.write(&mut tag);
         Some(tag)
     }
 }
@@ -153,6 +160,7 @@ pub struct NativeEmptyBrain;
 pub struct NativeLivingMob {
     pub entity: NativeEntityState,
     health: f32,
+    max_health: f32,
     hurt_time: i16,
     death_time: i16,
     absorption: f32,
@@ -163,6 +171,7 @@ pub struct NativeLivingMob {
     persistence_required: bool,
     left_handed: bool,
     aware: bool,
+    loaded: load_data::MobLoadState,
 }
 #[derive(Debug)]
 struct FollowRange {
@@ -182,6 +191,7 @@ impl NativeLivingMob {
         Self {
             entity,
             health: max_health,
+            max_health,
             hurt_time: 0,
             death_time: 0,
             absorption: 0.0,
@@ -192,6 +202,7 @@ impl NativeLivingMob {
             persistence_required: false,
             left_handed: false,
             aware: true,
+            loaded: Default::default(),
         }
     }
     fn finalize_spawn(&mut self, random: &mut impl RandomSource) {
@@ -213,7 +224,7 @@ impl NativeLivingMob {
             "current_impulse_context_reset_grace_time",
             self.impulse_grace,
         );
-        tag.put_boolean("FallFlying", false);
+        tag.put_boolean("FallFlying", self.loaded.fall_flying);
         let NativeEmptyBrain = self.brain;
         let mut brain = CompoundTag::new();
         brain.put("memories".into(), Tag::Compound(CompoundTag::new()));
@@ -240,6 +251,7 @@ impl NativeLivingMob {
         tag.put_boolean("PersistenceRequired", self.persistence_required);
         tag.put_boolean("LeftHanded", self.left_handed);
         tag.put_boolean("Bukkit.Aware", self.aware);
+        self.loaded.write(tag);
     }
 }
 
@@ -270,6 +282,7 @@ pub struct NativeAnimal {
     forced_age: i32,
     age_locked: bool,
     in_love: i32,
+    love_cause: Option<Uuid>,
 }
 impl NativeAnimal {
     fn new(identity: NativeEntityIdentity, health: f32, random: &mut impl RandomSource) -> Self {
@@ -279,6 +292,7 @@ impl NativeAnimal {
             forced_age: 0,
             age_locked: false,
             in_love: 0,
+            love_cause: None,
         }
     }
     pub fn is_baby(&self) -> bool {
@@ -305,6 +319,9 @@ impl NativeAnimal {
         tag.put_int("ForcedAge", self.forced_age);
         tag.put_boolean("AgeLocked", self.age_locked);
         tag.put_int("InLove", self.in_love);
+        if let Some(uuid) = self.love_cause {
+            tag.put_int_array("LoveCause", uuid_to_int_array(uuid).to_vec());
+        }
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,6 +338,16 @@ pub enum SheepColor {
     LightGray,
     Brown,
     Pink,
+    Orange,
+    Magenta,
+    LightBlue,
+    Yellow,
+    Lime,
+    Cyan,
+    Purple,
+    Blue,
+    Green,
+    Red,
 }
 impl SheepColor {
     pub fn id(self) -> i8 {
@@ -331,6 +358,16 @@ impl SheepColor {
             Self::LightGray => 8,
             Self::Brown => 12,
             Self::Pink => 6,
+            Self::Orange => 1,
+            Self::Magenta => 2,
+            Self::LightBlue => 3,
+            Self::Yellow => 4,
+            Self::Lime => 5,
+            Self::Cyan => 9,
+            Self::Purple => 10,
+            Self::Blue => 11,
+            Self::Green => 13,
+            Self::Red => 14,
         }
     }
 }
@@ -439,6 +476,7 @@ pub struct NativeFarmAnimal {
     variant: HolderId,
     sound_variant: HolderId,
     egg_time: Option<i32>,
+    chicken_jockey: bool,
 }
 impl NativeFarmAnimal {
     pub fn from_identity(
@@ -459,6 +497,7 @@ impl NativeFarmAnimal {
             sound_variant: registry.default_sound(),
             registry,
             egg_time,
+            chicken_jockey: false,
         }
     }
     pub fn family(&self) -> FarmFamily {
@@ -492,7 +531,7 @@ impl NativeFarmAnimal {
             &self.registry.sound_name(self.sound_variant).to_string(),
         );
         if let Some(egg_time) = self.egg_time {
-            tag.put_boolean("IsChickenJockey", false);
+            tag.put_boolean("IsChickenJockey", self.chicken_jockey);
             tag.put_int("EggLayTime", egg_time);
         }
         Some(tag)

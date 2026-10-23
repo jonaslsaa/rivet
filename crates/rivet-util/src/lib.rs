@@ -50,6 +50,7 @@ pub mod mth_sin_table;
 pub mod mth_stubs;
 pub mod problem_reporter;
 pub mod random;
+pub mod short2object_open_hash_map;
 pub mod simple_bit_storage;
 pub mod static_cache2d;
 pub mod string_representable;

@@ -54,7 +54,7 @@ impl Occupant {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct BeehiveData {
+pub struct BeehiveData {
     occupants: Vec<Occupant>,
     flower_pos: Option<BlockPos>,
     max_bees: i32,
@@ -63,7 +63,7 @@ pub(super) struct BeehiveData {
 }
 
 impl BeehiveData {
-    pub(super) fn load(tag: &CompoundTag) -> Self {
+    pub fn load(tag: &CompoundTag) -> Self {
         let components = tag.get_compound("components").cloned().unwrap_or_default();
         assert!(
             components.tags.is_empty(),
@@ -94,7 +94,7 @@ impl BeehiveData {
 
     /// Occupant.create: a typed BEE with no entity payload and minTicks600.
     /// storeBee appends without enforcing maxBees (as in Paper's source).
-    pub(super) fn store_worldgen_bee(&mut self, ticks_in_hive: i32) {
+    pub fn store_worldgen_bee(&mut self, ticks_in_hive: i32) {
         self.occupants.push(Occupant {
             entity_type: Identifier::with_default_namespace("bee"),
             entity_data: CompoundTag::new(),
@@ -103,7 +103,7 @@ impl BeehiveData {
         });
     }
 
-    pub(super) fn save_with_full_metadata(&self, pos: &BlockPos) -> CompoundTag {
+    pub fn save_with_full_metadata(&self, pos: &BlockPos) -> CompoundTag {
         let mut tag = CompoundTag::new();
         if !self.public_bukkit_values.tags.is_empty() {
             tag.put(
@@ -147,7 +147,7 @@ mod tests {
     fn load_store_and_full_save_match_live_paper_hive_storage() {
         let pos = BlockPos::new(-17, 70, 31);
         for line in
-            include_str!("../../../../../tools/rivet-oracle/fixtures/hive-storage.jsonl").lines()
+            include_str!("../../../../tools/rivet-oracle/fixtures/hive-storage.jsonl").lines()
         {
             let row: serde_json::Value = serde_json::from_str(line).unwrap();
             let input = row["input_snbt"]

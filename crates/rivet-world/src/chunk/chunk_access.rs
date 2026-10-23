@@ -139,6 +139,8 @@ where
     /// winning, in place, so the map is exactly one entry per position and
     /// iteration order is first-insertion for surviving positions.
     pending_block_entities: IndexMap<BlockPos, CompoundTag>,
+    /// Actual materialized values, separate from lazy pending serialized data.
+    block_entities: IndexMap<BlockPos, crate::block_entity::NativeBlockEntity>,
     /// `heightmaps` — the `EnumMap<Heightmap.Types, Heightmap>`, keyed by the
     /// world `Types` ordinal (see the module doc).
     heightmaps: [Option<Heightmap>; 6],
@@ -233,6 +235,7 @@ where
             inhabited_time,
             structure_access: StructureAccess::new(),
             pending_block_entities: IndexMap::new(),
+            block_entities: IndexMap::new(),
             heightmaps: [None, None, None, None, None, None],
             block_nibbles: filled_empty_light(light_section_count),
             sky_nibbles: filled_empty_light(light_section_count),
@@ -291,6 +294,7 @@ where
             inhabited_time: self.inhabited_time,
             structure_access: self.structure_access.clone(),
             pending_block_entities: self.pending_block_entities.clone(),
+            block_entities: self.block_entities.clone(),
             heightmaps: self.heightmaps.clone(),
             block_nibbles: self.block_nibbles.clone(),
             sky_nibbles: self.sky_nibbles.clone(),
@@ -747,6 +751,87 @@ where
         &self.pending_block_entities
     }
 
+    pub fn block_entities(&self) -> &IndexMap<BlockPos, crate::block_entity::NativeBlockEntity> {
+        &self.block_entities
+    }
+    pub fn get_block_entity(
+        &self,
+        pos: &BlockPos,
+    ) -> Option<&crate::block_entity::NativeBlockEntity> {
+        self.block_entities.get(pos)
+    }
+    pub fn get_block_entity_mut(
+        &mut self,
+        pos: &BlockPos,
+    ) -> Option<&mut crate::block_entity::NativeBlockEntity> {
+        self.block_entities.get_mut(pos)
+    }
+    /// ProtoChunk.setBlockEntity: no Level lifecycle side effects.
+    pub fn set_block_entity(&mut self, entity: crate::block_entity::NativeBlockEntity) {
+        let pos = entity.position();
+        self.pending_block_entities.shift_remove(&pos);
+        self.block_entities.insert(pos, entity);
+    }
+    pub(crate) fn set_level_block_entity(
+        &mut self,
+        mut entity: crate::block_entity::NativeBlockEntity,
+    ) {
+        entity.clear_removed();
+        let pos = entity.position();
+        self.pending_block_entities.shift_remove(&pos);
+        if let Some(mut old) = self.block_entities.insert(pos, entity) {
+            old.set_removed();
+        }
+    }
+    pub fn remove_block_entity(&mut self, pos: &BlockPos) {
+        self.block_entities.shift_remove(pos);
+        self.pending_block_entities.shift_remove(pos);
+    }
+    /// SerializableChunkData uses live values first and pending tags otherwise.
+    /// Only owned save copies receive keepPacked; canonical payloads do not.
+    /// Ordering is a stable carry, not exact Paper serialization order: Paper
+    /// iterates a HashSet union seeded by its fastutil live map and HashMap
+    /// pending map. Their collision/resize iteration is not represented by
+    /// these IndexMaps; values and live-over-pending precedence are preserved.
+    pub fn block_entity_tags_for_saving(&self) -> Vec<CompoundTag> {
+        let mut tags: Vec<_> = self
+            .block_entities
+            .values()
+            .filter(|entity| !entity.is_removed())
+            .map(|entity| {
+                let mut tag = entity.save_with_full_metadata();
+                tag.put_boolean("keepPacked", false);
+                tag
+            })
+            .collect();
+        tags.extend(
+            self.pending_block_entities
+                .iter()
+                .filter(|(pos, _)| !self.block_entities.contains_key(*pos))
+                .map(|(_, tag)| {
+                    let mut tag = tag.clone();
+                    tag.put_boolean("keepPacked", true);
+                    tag
+                }),
+        );
+        tags
+    }
+    pub fn block_entity_nbt_for_saving(&self, pos: &BlockPos) -> Option<CompoundTag> {
+        if let Some(entity) = self
+            .get_block_entity(pos)
+            .filter(|entity| !entity.is_removed())
+        {
+            let mut tag = entity.save_with_full_metadata();
+            tag.put_boolean("keepPacked", false);
+            return Some(tag);
+        }
+        self.pending_block_entities.get(pos).map(|tag| {
+            let mut tag = tag.clone();
+            tag.put_boolean("keepPacked", true);
+            tag
+        })
+    }
+
     /// `ProtoChunk.removeBlockEntity(BlockPos)`'s pending half —
     /// `pendingBlockEntities.remove(pos)` (the `blockEntities` half is not
     /// ported with the block-entity unit). Removes the position from the
@@ -764,6 +849,9 @@ where
     /// second entry). This is the runtime set/update mutator (#537).
     pub fn set_block_entity_nbt(&mut self, entity_tag: CompoundTag) {
         let pos_from_tag = get_pos_from_tag(Some(&self.pos), &entity_tag);
+        if self.block_entities.contains_key(&pos_from_tag) {
+            return;
+        }
         match self.pending_block_entities.get_mut(&pos_from_tag) {
             Some(slot) => *slot = entity_tag,
             None => {
@@ -1124,6 +1212,7 @@ where
             inhabited_time,
             structure_access,
             pending_block_entities,
+            block_entities,
             heightmaps,
             block_nibbles,
             sky_nibbles,
@@ -1159,6 +1248,7 @@ where
         base.block_ticks = block_ticks;
         base.fluid_ticks = fluid_ticks;
         base.pending_block_entities = pending_block_entities;
+        base.block_entities = block_entities;
         base.block_nibbles = block_nibbles;
         base.sky_nibbles = sky_nibbles;
         base.sky_emptiness_map = sky_emptiness_map;
@@ -1222,6 +1312,7 @@ where
         base.block_ticks = self.block_ticks.clone();
         base.fluid_ticks = self.fluid_ticks.clone();
         base.pending_block_entities = self.pending_block_entities.clone();
+        base.block_entities = self.block_entities.clone();
         base.block_nibbles = self.block_nibbles.clone();
         base.sky_nibbles = self.sky_nibbles.clone();
         base.sky_emptiness_map = self.sky_emptiness_map.clone();

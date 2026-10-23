@@ -72,6 +72,7 @@
 /// `biome::mod`.
 pub mod biome;
 pub mod block;
+pub mod block_entity;
 pub mod chunk;
 /// `net.minecraft.data.worldgen` — the `mc.data.worldgen.prereq` unit's
 /// `data::worldgen` slice: the `BootstrapContext` registry-bootstrap contract

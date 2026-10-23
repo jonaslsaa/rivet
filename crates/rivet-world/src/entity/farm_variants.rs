@@ -53,6 +53,16 @@ pub struct FarmFamilyRegistry {
     sounds: Registry<FarmSoundVariant>,
 }
 impl FarmFamilyRegistry {
+    pub fn variant_by_name(&self, key: &Identifier) -> Option<HolderId> {
+        self.variants
+            .get_optional(key)
+            .map(|value| HolderId(self.variants.get_id(value) as u32))
+    }
+    pub fn sound_by_name(&self, key: &Identifier) -> Option<HolderId> {
+        self.sounds
+            .get_optional(key)
+            .map(|value| HolderId(self.sounds.get_id(value) as u32))
+    }
     pub fn default_variant(&self) -> HolderId {
         self.variants
             .get_optional(&Identifier::with_default_namespace("temperate"))

@@ -14,7 +14,6 @@
 //! this slice is the smallest end-to-end world object #100/#101 build on.
 
 mod aquatic_survival;
-mod beehive_data;
 mod block_shape_update;
 pub mod chunk_level;
 pub mod chunk_map;
@@ -36,6 +35,8 @@ pub mod level_chunk;
 #[cfg(unix)]
 pub mod level_storage_access;
 pub mod player_chunk_loader;
+pub mod poi_chunk;
+pub mod poi_manager;
 pub mod region_backed;
 pub mod server_level;
 pub mod structure_entity_loading;
