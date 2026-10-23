@@ -76,7 +76,6 @@ use rivet_world::levelgen::heightmap::{StateFlags, Types};
 use rivet_world::lighting::light_update_data::build_light_update_data;
 use rivet_world::lighting::swmr_nibble_array::SwmrNibbleArray;
 use rivet_world::superflat::{SUPERFLAT_HEIGHT, SUPERFLAT_MIN_Y, build_superflat};
-use rivet_world::ticks::SavedTick;
 
 /// The chunk's structure-key type — the structure `Identifier` the
 /// `structures.References` map is keyed by, matching the #519
@@ -127,17 +126,10 @@ pub struct LevelChunk {
     /// reallocate the 26 sky/block layer arrays per chunk per player, so the
     /// prebuilt value is reused instead.
     light_data: LightUpdatePacketData,
-    /// The typed stored block ticks carried off persisted reconstruction or
-    /// generated FULL promotion (`ChunkAccess.PackedTicks.blocks()`), owned here
-    /// as tick-thread state until the runtime `LevelChunkTicks` hook exists.
-    /// Generated promotion also retains the source `ProtoChunkTicks` in the
-    /// generic base; this snapshot is the deferred unpacked representation and
-    /// is never scheduled, spawned, installed, or executed (#370).
-    stored_block_ticks: Vec<SavedTick<Block>>,
-    /// The typed stored fluid ticks — the same deferred carry semantics as
-    /// [`Self::stored_block_ticks`], copied from the generated proto's owning
-    /// `ProtoChunkTicks` container.
-    stored_fluid_ticks: Vec<SavedTick<FluidId>>,
+    /// Canonical live containers, initially retaining saved relative delays.
+    /// Registration does not unpack; block-ticking activation does.
+    block_ticks: rivet_world::ticks::LevelChunkTicks<Block>,
+    fluid_ticks: rivet_world::ticks::LevelChunkTicks<FluidId>,
     /// Serialized entities carried by a generated/persisted proto until the
     /// ServerLevel post-load hook can consume them. Paper's FULL task passes
     /// these to `postLoadProtoChunk`; this value layer has no entity registry or
@@ -181,8 +173,8 @@ impl LevelChunk {
         LevelChunk {
             chunk,
             light_data,
-            stored_block_ticks: Vec::new(),
-            stored_fluid_ticks: Vec::new(),
+            block_ticks: rivet_world::ticks::LevelChunkTicks::new(),
+            fluid_ticks: rivet_world::ticks::LevelChunkTicks::new(),
             post_load_entities: Vec::new(),
         }
     }
@@ -260,8 +252,8 @@ impl LevelChunk {
             world_chunk.is_light_correct(),
             block_entities,
             structures,
-            self.stored_block_ticks.clone(),
-            self.stored_fluid_ticks.clone(),
+            self.block_ticks.pack(game_time),
+            self.fluid_ticks.pack(game_time),
             post_processing_sections,
         );
         Ok(write_live(
@@ -299,7 +291,7 @@ impl LevelChunk {
             ));
         }
         let (block_strategy, biome_strategy) = strategies();
-        let world_chunk = world_chunk
+        let mut world_chunk = world_chunk
             .map_values(
                 block_strategy,
                 biome_strategy,
@@ -312,6 +304,9 @@ impl LevelChunk {
                 &|state: &StateId| state_flags(*state),
             )
             .map_err(LevelChunkBridgeError::PaletteMap)?;
+        // Reconstruction's saved lists preserve pending duplicates/order;
+        // discard the old proto carriers after consuming this one bridge.
+        world_chunk.take_proto_tick_containers();
         let light_data = light_data_from_nibbles(
             world_chunk.block_nibbles(),
             world_chunk.sky_nibbles(),
@@ -320,8 +315,8 @@ impl LevelChunk {
         Ok(LevelChunk {
             chunk: world_chunk,
             light_data,
-            stored_block_ticks,
-            stored_fluid_ticks,
+            block_ticks: rivet_world::ticks::LevelChunkTicks::new_with_pending(stored_block_ticks),
+            fluid_ticks: rivet_world::ticks::LevelChunkTicks::new_with_pending(stored_fluid_ticks),
             post_load_entities: Vec::new(),
         })
     }
@@ -385,9 +380,9 @@ impl LevelChunk {
         // Paper's full task hands ProtoChunk entities to postLoadProtoChunk.
         // Preserve the owned tags until the ServerLevel integration can consume
         // them; do not silently drop a representation already modeled by Rivet.
-        let block_ticks = proto.get_block_ticks().scheduled_ticks();
-        let fluid_ticks = proto.get_fluid_ticks().scheduled_ticks();
-        let (base, post_load_entities) = proto.into_base_and_entities();
+        let (mut base, post_load_entities) = proto.into_base_and_entities();
+        let block_ticks = std::mem::take(base.get_block_ticks_mut()).into_scheduled_ticks();
+        let fluid_ticks = std::mem::take(base.get_fluid_ticks_mut()).into_scheduled_ticks();
         let (block_strategy, biome_strategy) = strategies();
         let base = base
             .map_values(
@@ -409,8 +404,8 @@ impl LevelChunk {
         Ok(LevelChunk {
             chunk,
             light_data,
-            stored_block_ticks: block_ticks,
-            stored_fluid_ticks: fluid_ticks,
+            block_ticks: rivet_world::ticks::LevelChunkTicks::new_with_pending(block_ticks),
+            fluid_ticks: rivet_world::ticks::LevelChunkTicks::new_with_pending(fluid_ticks),
             post_load_entities,
         })
     }
@@ -470,13 +465,21 @@ impl LevelChunk {
     }
 
     /// `ChunkAccess.isUnsaved()` carried through generated promotion.
-    pub fn is_unsaved(&self) -> bool {
-        self.chunk.get_base().is_unsaved()
+    pub fn is_unsaved(&self, game_time: i64) -> bool {
+        self.block_ticks.is_dirty(game_time)
+            || self.fluid_ticks.is_dirty(game_time)
+            || self.chunk.get_base().is_unsaved()
     }
 
     /// `ChunkAccess.tryMarkSaved()` on the canonical tick-thread chunk.
-    pub fn try_mark_saved(&mut self) -> bool {
-        self.chunk.try_mark_saved()
+    pub fn try_mark_saved(&mut self, game_time: i64) -> bool {
+        if !self.is_unsaved(game_time) {
+            return false;
+        }
+        self.block_ticks.clear_dirty();
+        self.fluid_ticks.clear_dirty();
+        self.chunk.try_mark_saved();
+        true
     }
 
     /// Restore the honest dirty bit after an enqueue rejection.
@@ -578,17 +581,23 @@ impl LevelChunk {
         self.chunk.get_block_state(x, y, z)
     }
 
-    /// The typed stored block ticks carried off the #519 reconstruction
-    /// (`ChunkAccess.PackedTicks.blocks()`). Owned tick-thread state — never
-    /// scheduled or executed (#370).
-    pub fn stored_block_ticks(&self) -> &[SavedTick<Block>] {
-        &self.stored_block_ticks
+    pub fn block_ticks(&self) -> &rivet_world::ticks::LevelChunkTicks<Block> {
+        &self.block_ticks
     }
-
-    /// The typed stored fluid ticks (`ChunkAccess.PackedTicks.fluids()`). Same
-    /// carry semantics as [`Self::stored_block_ticks`].
-    pub fn stored_fluid_ticks(&self) -> &[SavedTick<FluidId>] {
-        &self.stored_fluid_ticks
+    pub fn block_ticks_mut(&mut self) -> &mut rivet_world::ticks::LevelChunkTicks<Block> {
+        &mut self.block_ticks
+    }
+    pub fn fluid_ticks(&self) -> &rivet_world::ticks::LevelChunkTicks<FluidId> {
+        &self.fluid_ticks
+    }
+    pub fn fluid_ticks_mut(&mut self) -> &mut rivet_world::ticks::LevelChunkTicks<FluidId> {
+        &mut self.fluid_ticks
+    }
+    /// ServerLevel.startTickingChunk, not FULL registration, establishes the
+    /// absolute triggers and negative saved-order subTickOrder values.
+    pub fn unpack_ticks(&mut self, game_time: i64) {
+        self.block_ticks.unpack(game_time);
+        self.fluid_ticks.unpack(game_time);
     }
 
     /// Serialized entity tags awaiting the ServerLevel `postLoadProtoChunk`
@@ -1644,8 +1653,8 @@ mod tests {
         // region-reconstruction path only); this proto was never given any typed
         // starts either, so the authority is empty too.
         assert_eq!(chunk.post_load_entities().len(), 1);
-        assert!(chunk.stored_block_ticks().is_empty());
-        assert!(chunk.stored_fluid_ticks().is_empty());
+        assert_eq!(chunk.block_ticks().count(), 0);
+        assert_eq!(chunk.fluid_ticks().count(), 0);
         assert!(chunk.structure_starts().is_none());
         assert!(chunk.get_all_starts().is_empty());
 

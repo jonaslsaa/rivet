@@ -35,6 +35,7 @@ pub mod java_float_format;
 pub mod java_hash;
 pub mod known_pack;
 pub mod linear_congruential_generator;
+pub mod long2long_open_hash_map;
 pub mod long_open_hash_set;
 pub mod mth;
 pub mod mth_atan_tables;

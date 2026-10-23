@@ -1,5 +1,5 @@
 //! Port of `net.minecraft.world.ticks` (MC 26.2, #370/#522) — the value and
-//! container layer.
+//! container and level scheduler layers.
 //!
 //! Java source: `working/Paper/.../net/minecraft/world/ticks/`. This slice
 //! ports the serializable value surface that a stored chunk's `block_ticks`/
@@ -28,11 +28,12 @@
 //! - [`TickAccess`]/[`TickContainerAccess`]/[`SerializableTickContainer`] — the
 //!   interface chain these containers implement.
 //!
-//! The level-level scheduling surface (`LevelTicks`, `LevelTickAccess`,
-//! `WorldGenTickAccess`, `BlackholeTickAccess`, and the `ScheduledTick`
-//! execution/`willTickThisTick` machinery) stays deferred — RivetTodo below.
-//! Nothing here schedules or executes; the containers only store, deduplicate,
-//! pack, and unpack.
+//! [`LevelTicks`] implements the level scheduler over borrowed canonical
+//! chunk containers, including registration, ordered collection, reentrant
+//! execution callbacks, queries and area operations. It requires an actual
+//! chunk-ticking predicate and execution callback; it supplies no invented
+//! block/fluid handlers or FULL/ticking status. `WorldGenTickAccess` and
+//! `BlackholeTickAccess` remain separate unported adapters.
 
 use rivet_registry::core::{BlockPos, ChunkPos};
 use rivet_serialization::codec::{self, Codec};
@@ -42,6 +43,9 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+
+pub mod level_ticks;
+pub use level_ticks::{LevelTicks, TickContainers};
 
 /// `net.minecraft.world.ticks.TickPriority` — the scheduling-priority enum.
 ///
@@ -546,7 +550,7 @@ pub struct LevelChunkTicks<T> {
 
 /// `BiConsumer<LevelChunkTicks<T>, ScheduledTick<T>>` — the `onTickAdded`
 /// hook. The deferred `LevelTicks` wires its `chunkScheduleUpdater` here.
-pub type OnTickAdded<T> = dyn Fn(&LevelChunkTicks<T>, &ScheduledTick<T>);
+pub type OnTickAdded<T> = dyn Fn(&LevelChunkTicks<T>, &ScheduledTick<T>) + Send + Sync;
 
 impl<T> LevelChunkTicks<T> {
     /// `new LevelChunkTicks<>()` — the empty container.
@@ -869,6 +873,12 @@ impl<T> ProtoChunkTicks<T> {
         T: Clone,
     {
         self.ticks.clone()
+    }
+
+    /// Consuming ownership bridge for ProtoChunk -> LevelChunkTicks. No
+    /// retained proto list remains as a competing runtime tick authority.
+    pub fn into_scheduled_ticks(self) -> Vec<SavedTick<T>> {
+        self.ticks
     }
 
     /// `load(List<SavedTick<T>>)` — build a container from stored ticks,

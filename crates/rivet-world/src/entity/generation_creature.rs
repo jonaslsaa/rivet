@@ -1,9 +1,17 @@
 //! Native generation-time Entity/LivingEntity/Mob/AgeableMob/Animal state.
 //! This executable constructor/finalize/save slice does not implement AI ticks,
 //! damage, nonempty equipment, passenger riding, or persisted animal loading.
+use super::farm_variants::{FarmFamily, FarmFamilyRegistry};
 use rivet_nbt::{compound_tag::CompoundTag, list_tag::ListTag, tag::Tag};
 use rivet_registry::core::{BlockPos, Vec3, uuid_to_int_array};
+use rivet_registry::{
+    Identifier, RegistryAccess, TagKey,
+    biome_id::BiomeId,
+    holder::{Holder, HolderId},
+    registries::BIOME,
+};
 use rivet_util::{RandomSource, mth::Uuid};
+use std::sync::Arc;
 
 #[cfg(test)]
 #[path = "generation_creature_fixture.rs"]
@@ -421,34 +429,162 @@ impl NativeSheep {
     }
 }
 
+/// Cow/Pig/Chicken share Animal's native storage and finalize chain. The
+/// family fixes constructor health/dimensions; Chicken owns its real egg
+/// timer and consumes its constructor draw after LivingEntity's yaw draw.
+#[derive(Debug)]
+pub struct NativeFarmAnimal {
+    pub animal: NativeAnimal,
+    registry: Arc<FarmFamilyRegistry>,
+    variant: HolderId,
+    sound_variant: HolderId,
+    egg_time: Option<i32>,
+}
+impl NativeFarmAnimal {
+    pub fn from_identity(
+        identity: NativeEntityIdentity,
+        registry: Arc<FarmFamilyRegistry>,
+        random: &mut impl RandomSource,
+    ) -> Self {
+        let health = match registry.family {
+            FarmFamily::Cow | FarmFamily::Pig => 10.0,
+            FarmFamily::Chicken => 4.0,
+        };
+        let animal = NativeAnimal::new(identity, health, random);
+        let egg_time =
+            (registry.family == FarmFamily::Chicken).then(|| random.next_int_bound(6000) + 6000);
+        Self {
+            animal,
+            variant: registry.default_variant(),
+            sound_variant: registry.default_sound(),
+            registry,
+            egg_time,
+        }
+    }
+    pub fn family(&self) -> FarmFamily {
+        self.registry.family
+    }
+    pub fn finalize_spawn(
+        &mut self,
+        biome: &Holder<BiomeId>,
+        random: &mut impl RandomSource,
+        group: &mut Option<AgeableSpawnGroup>,
+    ) {
+        if let Some(variant) = self.registry.pick_variant(biome, random) {
+            self.variant = variant;
+        }
+        self.sound_variant = self.registry.pick_sound(random);
+        self.animal.finalize_spawn(random, group);
+    }
+    pub fn save(&self) -> Option<CompoundTag> {
+        let mut tag = self
+            .animal
+            .mob
+            .entity
+            .save(&format!("minecraft:{}", self.family().name()))?;
+        self.animal.write(&mut tag);
+        tag.put_string(
+            "variant",
+            &self.registry.variant_name(self.variant).to_string(),
+        );
+        tag.put_string(
+            "sound_variant",
+            &self.registry.sound_name(self.sound_variant).to_string(),
+        );
+        if let Some(egg_time) = self.egg_time {
+            tag.put_boolean("IsChickenJockey", false);
+            tag.put_int("EggLayTime", egg_time);
+        }
+        Some(tag)
+    }
+    pub fn bounding_box(&self) -> [f64; 6] {
+        let (width, height) = match self.family() {
+            FarmFamily::Cow => (0.9f32, 1.4f32),
+            FarmFamily::Pig => (0.9, 0.9),
+            FarmFamily::Chicken => (0.4, 0.7),
+        };
+        let (width, height) = if self.animal.is_baby() {
+            match self.family() {
+                FarmFamily::Chicken => (0.3, 0.4),
+                _ => (width * 0.5, height * 0.5),
+            }
+        } else {
+            (width, height)
+        };
+        let half = f64::from(width) / 2.0;
+        let height = f64::from(height);
+        let p = self.animal.mob.entity.position();
+        [
+            p.x - half,
+            p.y,
+            p.z - half,
+            p.x + half,
+            p.y + height,
+            p.z + half,
+        ]
+    }
+}
+
 #[derive(Debug)]
 pub enum NativeGenerationCreature {
     Sheep(NativeSheep),
+    Farm(NativeFarmAnimal),
 }
 impl NativeGenerationCreature {
     pub fn entity(&self) -> &NativeEntityState {
         match self {
             Self::Sheep(value) => value.entity(),
+            Self::Farm(value) => &value.animal.mob.entity,
         }
     }
     pub fn entity_mut(&mut self) -> &mut NativeEntityState {
         match self {
             Self::Sheep(value) => value.entity_mut(),
+            Self::Farm(value) => &mut value.animal.mob.entity,
         }
     }
     pub fn snap_to(&mut self, pos: Vec3, yaw: f32, pitch: f32) {
         match self {
             Self::Sheep(value) => value.snap_to(pos, yaw, pitch),
+            Self::Farm(value) => value.animal.mob.entity.snap_to(pos, yaw, pitch),
         }
     }
     pub fn bounding_box(&self) -> [f64; 6] {
         match self {
             Self::Sheep(value) => value.bounding_box(),
+            Self::Farm(value) => value.bounding_box(),
         }
     }
     pub fn save(&self) -> Option<CompoundTag> {
         match self {
             Self::Sheep(value) => value.save(),
+            Self::Farm(value) => value.save(),
+        }
+    }
+    pub fn check_spawn_rules(&self, below_is_grass: bool, pathfinding_light_cost: f32) -> bool {
+        below_is_grass || pathfinding_light_cost >= 0.0
+    }
+    pub fn finalize_spawn(
+        &mut self,
+        biome: &Holder<BiomeId>,
+        access: &RegistryAccess,
+        random: &mut impl RandomSource,
+        group: &mut Option<AgeableSpawnGroup>,
+    ) {
+        match self {
+            Self::Farm(value) => value.finalize_spawn(biome, random, group),
+            Self::Sheep(value) => {
+                let registry = access.lookup_or_throw(&BIOME);
+                let tag = |name| TagKey::create(&BIOME, Identifier::with_default_namespace(name));
+                let climate = if biome.is_tag(registry, &tag("spawns_warm_variant_farm_animals")) {
+                    SheepClimate::Warm
+                } else if biome.is_tag(registry, &tag("spawns_cold_variant_farm_animals")) {
+                    SheepClimate::Cold
+                } else {
+                    SheepClimate::Temperate
+                };
+                value.finalize_spawn(climate, random, group);
+            }
         }
     }
 }

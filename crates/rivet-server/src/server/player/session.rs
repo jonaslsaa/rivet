@@ -444,10 +444,21 @@ impl PlayerSessionManager {
             )
         })?;
         let occupancy = self.entity_ids.occupancy();
+        let registry_access = self
+            .level
+            .generated_chunk_owner()
+            .ok_or_else(|| {
+                GenerationCreatureError::AuthorityUnavailable(
+                    "destination world has no canonical generator registries".into(),
+                )
+            })?
+            .generator()
+            .registry_access();
         Ok(WorldGenerationCreatureFactory::new(
             self.entity_construction.clone(),
             uuid,
             enabled_features,
+            registry_access,
             std::sync::Arc::new(move |id| occupancy.contains(id)),
         ))
     }
@@ -3324,9 +3335,13 @@ mod tests {
             v
         };
         for pos in positions {
-            level
-                .chunk_map_mut()
-                .install(pos, crate::server::level::LevelChunk::new(pos));
+            if level.chunk_map().get_chunk(pos).is_none() {
+                assert!(
+                    level
+                        .install_loaded_chunk(crate::server::level::LevelChunk::new(pos))
+                        .is_ok()
+                );
+            }
         }
         let mut config = default_session_config(256, ServerLevelConfig::M1_FIXTURE_SEED);
         config.level = level;
@@ -3926,9 +3941,13 @@ mod tests {
         let mut positions = Vec::new();
         spawn_view.for_each(|p| positions.push(p));
         for pos in positions {
-            level
-                .chunk_map_mut()
-                .install(pos, crate::server::level::LevelChunk::new(pos));
+            if level.chunk_map().get_chunk(pos).is_none() {
+                assert!(
+                    level
+                        .install_loaded_chunk(crate::server::level::LevelChunk::new(pos))
+                        .is_ok()
+                );
+            }
         }
         let mut config = default_session_config(256, ServerLevelConfig::M1_FIXTURE_SEED);
         config.level = level;

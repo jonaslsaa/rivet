@@ -4282,7 +4282,6 @@ fn run_spawn_population(
     level_random: &mut impl RandomSource,
     factory: Option<&dyn GenerationCreatureFactory>,
 ) -> Result<(), SpawnRegionError> {
-    use rivet_world::entity::generation_creature::{NativeGenerationCreature, SheepClimate};
     let center_pos = region.get_center();
     let xo = center_pos.get_min_block_x();
     let zo = center_pos.get_min_block_z();
@@ -4351,7 +4350,7 @@ fn run_spawn_population(
                     let Some(factory) = factory else {
                         return Err(unsupported());
                     };
-                    let mut entity = match factory.create(spawner.ty) {
+                    let mut entity = match factory.create(spawner.ty, generator.registry_access()) {
                         Ok(Some(entity)) => entity,
                         // Actual feature-gating null is a continue before yaw
                         // and before candidate-offset RNG, as in Java.
@@ -4384,31 +4383,17 @@ fn run_spawn_population(
                         let v = raw / 15.0;
                         v / (4.0 - 3.0 * v) - 0.5
                     };
-                    let NativeGenerationCreature::Sheep(sheep) = &mut entity;
                     let mut success = false;
-                    if sheep.check_spawn_rules(below_is_grass, light_cost)
+                    if entity.check_spawn_rules(below_is_grass, light_cost)
                         && spawn_obstruction_ok(region, spawner.ty, fx, y, fz, width, height)
                     {
                         let biome = WorldGenLevel::get_biome(region, &entity_pos);
-                        let registry = generator
-                            .registry_access()
-                            .lookup_or_throw(&*rivet_registry::registries::BIOME);
-                        let tag = |name| {
-                            rivet_registry::tag_key::TagKey::create(
-                                &*rivet_registry::registries::BIOME,
-                                Identifier::with_default_namespace(name),
-                            )
-                        };
-                        let climate = if biome
-                            .is_tag(registry, &tag("spawns_warm_variant_farm_animals"))
-                        {
-                            SheepClimate::Warm
-                        } else if biome.is_tag(registry, &tag("spawns_cold_variant_farm_animals")) {
-                            SheepClimate::Cold
-                        } else {
-                            SheepClimate::Temperate
-                        };
-                        sheep.finalize_spawn(climate, level_random, &mut group_spawn_data);
+                        entity.finalize_spawn(
+                            &biome,
+                            generator.registry_access(),
+                            level_random,
+                            &mut group_spawn_data,
+                        );
                         region
                             .add_fresh_generation_creature(entity)
                             .map_err(|error| {
@@ -8688,12 +8673,12 @@ mod tests {
         assert_eq!(chunk.get_height(), 384);
         assert_eq!(chunk.get_persisted_status(), ChunkStatus::Full);
         assert_eq!(chunk.post_load_entities().len(), 1);
-        assert_eq!(chunk.stored_block_ticks().len(), 1);
-        assert_eq!(chunk.stored_fluid_ticks().len(), 1);
+        assert_eq!(chunk.block_ticks().count(), 1);
+        assert_eq!(chunk.fluid_ticks().count(), 1);
         assert_eq!(chunk.pending_block_entities().len(), 1);
         assert!(chunk.is_light_correct());
         assert_eq!(chunk.inhabited_time(), 1234);
-        assert!(chunk.is_unsaved());
+        assert!(chunk.is_unsaved(0));
         assert_eq!(chunk.sky_emptiness_map(), Some(&[true; 24][..]));
         assert_eq!(chunk.post_processing()[0].len(), 1);
         assert_eq!(
@@ -9757,6 +9742,7 @@ mod tests {
             EntityConstructionRuntime::with_seed(EntityIdSequence::default(), 42),
             rivet_util::mth::Uuid { most: 0, least: 0 },
             FeatureFlagSet::of(),
+            generator.registry_access(),
             Arc::new(|_| false), // Explicit empty test destination, not boot authority.
         );
         for line in include_str!(

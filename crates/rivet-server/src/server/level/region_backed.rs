@@ -326,7 +326,10 @@ pub fn boot_level(root: &Path) -> Result<ServerLevel, RegionBackedBootError> {
     world.view().for_each(|pos| positions.push(pos));
     for pos in positions {
         let chunk = load_and_reconstruct_chunk(prepared.source_mut(), pos)?;
-        world.chunk_map_mut().install(pos, chunk);
+        assert!(
+            world.install_loaded_chunk(chunk).is_ok(),
+            "validated boot view contains each coordinate once"
+        );
     }
     // The read-only region source moves into the world as its on-demand
     // authority (issue #185): a movement-driven recenter requesting a chunk
@@ -915,7 +918,7 @@ mod tests {
 
         // Stored block ticks carried as owned tick-thread state.
         let block_ticks_chunk = world.chunk_map().get_chunk(block_ticks_pos).unwrap();
-        let carried = block_ticks_chunk.stored_block_ticks();
+        let carried = block_ticks_chunk.block_ticks().pack(world.game_time());
         assert_eq!(carried.len(), 1, "the relocated sand tick is carried");
         assert_eq!(
             carried[0].pos,
@@ -928,7 +931,7 @@ mod tests {
 
         // Stored fluid ticks carried (no relocation needed — natural position).
         let fluid_ticks_chunk = world.chunk_map().get_chunk(fluid_ticks_pos).unwrap();
-        let carried_fluid = fluid_ticks_chunk.stored_fluid_ticks();
+        let carried_fluid = fluid_ticks_chunk.fluid_ticks().pack(world.game_time());
         assert_eq!(carried_fluid.len(), 1, "the fluid tick is carried");
         assert_ne!(
             carried_fluid[0].r#type,
