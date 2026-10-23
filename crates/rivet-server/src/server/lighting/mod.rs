@@ -16,7 +16,11 @@
 
 #[cfg(test)]
 mod generated_block_light_fixture;
+#[cfg(test)]
+mod incremental_light_fixture;
 pub mod generated_light_bridge;
+pub mod live_light_runtime;
+pub use live_light_runtime::{LiveLightRuntime, LiveLightError};
 pub mod star_light_engine;
 pub mod star_light_provider_impl;
 

@@ -35,12 +35,15 @@ pub enum GenerationEnvironmentError {
 
 #[derive(Debug)]
 pub struct GenerationEnvironment {
+    dimension_type: Identifier,
     has_skylight: bool,
     has_ceiling: bool,
     min_y: i32,
     height: i32,
     spawn_mobs: bool,
     advance_time: bool,
+    water_source_conversion: bool,
+    lava_source_conversion: bool,
     border: WorldBorder,
 }
 
@@ -87,12 +90,15 @@ impl GenerationEnvironment {
             .unwrap_or_else(WorldBorder::default);
         border.apply_initial_settings(game_time);
         Ok(Self {
+            dimension_type: dimension_type.clone(),
             has_skylight,
             has_ceiling,
             min_y,
             height,
             spawn_mobs: boolean_rule(&rules, "spawn_mobs"),
             advance_time: boolean_rule(&rules, "advance_time"),
+            water_source_conversion: boolean_rule(&rules, "water_source_conversion"),
+            lava_source_conversion: boolean_rule(&rules, "lava_source_conversion"),
             border,
         })
     }
@@ -111,6 +117,20 @@ impl GenerationEnvironment {
     }
     pub fn advance_time(&self) -> bool {
         self.advance_time
+    }
+    pub fn dimension_type(&self) -> &Identifier {
+        &self.dimension_type
+    }
+    pub fn water_source_conversion(&self) -> bool {
+        self.water_source_conversion
+    }
+    pub fn lava_source_conversion(&self) -> bool {
+        self.lava_source_conversion
+    }
+    /// Propagate actual rule changes after updating the authoritative rule owner.
+    pub fn set_fluid_source_conversion(&mut self, water: bool, lava: bool) {
+        self.water_source_conversion = water;
+        self.lava_source_conversion = lava;
     }
     pub fn world_border(&self) -> &WorldBorder {
         &self.border

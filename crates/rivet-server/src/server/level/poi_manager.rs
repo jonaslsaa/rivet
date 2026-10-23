@@ -12,8 +12,8 @@ use rivet_registry::{
 use rivet_world::{
     chunk::level_chunk_section::LevelChunkSection,
     poi::{
-        Delayed26WayDistancePropagator3D, POINT_OF_INTEREST_TYPE, PoiOccupancy, PoiSectionError,
-        PoiType,
+        Delayed26WayDistancePropagator3D, POINT_OF_INTEREST_TYPE, PoiOccupancy, PoiRecord,
+        PoiSectionError, PoiType,
     },
 };
 use std::{
@@ -209,6 +209,14 @@ impl PoiManager {
     }
 
     pub fn add(&mut self, pos: BlockPos, kind: Holder<PoiType>) -> Result<bool, PoiManagerError> {
+        Ok(self.add_record(pos, kind)?.is_some())
+    }
+    /// Returns the actual shared source record, not a reconstructed snapshot.
+    pub fn add_record(
+        &mut self,
+        pos: BlockPos,
+        kind: Holder<PoiType>,
+    ) -> Result<Option<Arc<PoiRecord>>, PoiManagerError> {
         self.flush_dirty();
         let registry = self.access.lookup(&POINT_OF_INTEREST_TYPE).unwrap();
         if kind.registry_id() != Some(registry.registry_id()) {
@@ -221,10 +229,26 @@ impl PoiManager {
             .ok_or(PoiManagerError::MissingChunk(chunk_pos))?;
         let added = chunk
             .get_or_create_section(pos.get_y() >> 4)?
-            .add(pos, kind, registry)
-            .is_some();
+            .add(pos, kind, registry);
         self.flush_dirty();
         Ok(added)
+    }
+    pub fn record_at(&self, pos: BlockPos) -> Option<&Arc<PoiRecord>> {
+        self.chunks
+            .get(&ChunkPos::containing(&pos))?
+            .section(pos.get_y() >> 4)?
+            .record(&pos)
+    }
+    /// Resolves the type through this manager's real registry authority.
+    pub fn holder_for_type(&self, kind: PoiType) -> Result<Holder<PoiType>, PoiManagerError> {
+        HolderGetter::get(
+            self.access.lookup(&POINT_OF_INTEREST_TYPE).unwrap(),
+            &rivet_registry::ResourceKey::create(
+                &POINT_OF_INTEREST_TYPE,
+                Identifier::parse(kind.name()),
+            ),
+        )
+        .ok_or(PoiManagerError::ForeignHolder)
     }
     pub fn remove(&mut self, pos: BlockPos) -> Result<bool, PoiManagerError> {
         self.flush_dirty();

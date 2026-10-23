@@ -79,18 +79,15 @@ use rivet_registry::fluid_id::FluidId;
 ///
 /// These are the same five `LevelChunkSection` predicates `section_tag_decode.rs`
 /// feeds `reconstruct_sections` for the real-fixture goldens: air/random-tick/
-/// fluid flags from the generated behavior table, lava as Paper's only
-/// randomly-ticking vanilla fluid, and no large-collision or moving-piston
-/// states in the committed fixtures.
+/// fluid flags from the generated behavior table plus the genuine pinned
+/// fluid-random-tick and CollisionUtil cache values for every state.
 pub fn block_state_predicates() -> SectionBlockPredicates {
     SectionBlockPredicates {
         is_air: |state| state.is_air(),
         is_randomly_ticking: |state| state.random_ticking(),
         fluid_is_empty: |state| state.fluid_empty(),
-        fluid_is_randomly_ticking: |state| {
-            !state.fluid_empty() && state.block().name() == "minecraft:lava"
-        },
-        is_special_colliding: |_| false,
+        fluid_is_randomly_ticking: |state| state.fluid_randomly_ticking(),
+        is_special_colliding: |state| state.is_special_colliding(),
     }
 }
 

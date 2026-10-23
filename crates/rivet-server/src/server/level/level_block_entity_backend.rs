@@ -159,6 +159,45 @@ impl<S: BlockEntityWorldServices> BlockEntityTickerBackend for CanonicalBackend<
 }
 
 impl ServerLevel {
+    /// LevelChunk.removeBlockEntity followed by removal of its live ticker
+    /// handle. The actual backend owns debug clear and canonical map removal.
+    pub(super) fn remove_native_block_entity(
+        &mut self,
+        pos: BlockPos,
+        services: &mut impl BlockEntityWorldServices,
+    ) -> Result<()> {
+        let mut backend = CanonicalBackend {
+            chunks: &mut self.chunk_map,
+            random: &mut self.world_random,
+            debug: &mut self.debug_synchronizers,
+            services,
+        };
+        backend.remove_block_entity(pos)?;
+        self.block_entity_runtime.remove_ticker(pos);
+        Ok(())
+    }
+
+    /// Updating a retained entity's state does not run onAdded again.
+    pub(super) fn update_native_block_entity_ticker(
+        &mut self,
+        pos: BlockPos,
+        ticking_enabled: bool,
+        services: &mut impl BlockEntityWorldServices,
+    ) -> Result<()> {
+        let loaded = self
+            .chunk_map
+            .get_chunk(ChunkPos::containing(&pos))
+            .is_some_and(|chunk| chunk.is_loaded());
+        let backend = CanonicalBackend {
+            chunks: &mut self.chunk_map,
+            random: &mut self.world_random,
+            debug: &mut self.debug_synchronizers,
+            services,
+        };
+        self.block_entity_runtime
+            .update_ticker(&backend, pos, ticking_enabled, loaded)
+    }
+
     /// Only the hive source is polled here. A global debug tick must also
     /// execute wake enumeration and the other enabled source synchronizers.
     pub fn tick_hive_debug<'a>(

@@ -145,6 +145,29 @@ impl ServerLevel {
             output,
         );
     }
+
+    /// The same source collect/run/cleanup phases, with canonical world access
+    /// during output. The scheduler never moves, so reentrant schedule and
+    /// willTickThisTick reach its actual active queues/index. Errors/panics
+    /// leave the source partial state and do not run normal-return cleanup.
+    pub fn run_fluid_ticks_with_world<E>(
+        &mut self,
+        max: i32,
+        check: impl FnMut(ChunkPos) -> bool,
+        mut output: impl FnMut(&mut Self, BlockPos, FluidId) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.fluid_ticks.collect_due_ticks(
+            &mut FluidTickContainers(&mut self.chunk_map),
+            self.game_time,
+            max,
+            check,
+        );
+        while let Some((pos, kind)) = self.fluid_ticks.next_collected_tick() {
+            output(self, pos, kind)?;
+        }
+        self.fluid_ticks.cleanup_after_tick();
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -160,6 +183,64 @@ mod tests {
             "minecraft:stone" => "q",
             _ => panic!("fixture block"),
         }
+    }
+
+    #[test]
+    fn fluid_world_callback_reenters_actual_scheduler_and_preserves_failed_output() {
+        let mut world = ServerLevel::new(ServerLevelConfig::default());
+        world.register_chunk_ticks(ChunkPos::ZERO).unwrap();
+        world.activate_chunk_ticks(ChunkPos::ZERO).unwrap();
+        let a = BlockPos::new(0, 64, 0);
+        let b = BlockPos::new(1, 64, 0);
+        let c = BlockPos::new(2, 64, 0);
+        for (order, pos) in [a, b].into_iter().enumerate() {
+            assert!(world.schedule_fluid_tick(ScheduledTick::new_normal(
+                FluidId::WATER,
+                pos,
+                0,
+                order as i64
+            )));
+        }
+        let mut seen = Vec::new();
+        let result = world.run_fluid_ticks_with_world(
+            10,
+            |_| true,
+            |level, pos, fluid| {
+                seen.push(pos);
+                assert_eq!(fluid, FluidId::WATER);
+                assert!(!level.fluid_ticks.will_tick_this_tick(&a, &fluid));
+                assert!(level.fluid_ticks.will_tick_this_tick(&b, &fluid));
+                assert!(level.schedule_fluid_tick(ScheduledTick::new_normal(fluid, c, 0, 2)));
+                assert!(level.fluid_ticks.has_scheduled_tick(
+                    &FluidTickContainers(&mut level.chunk_map),
+                    &c,
+                    &fluid
+                ));
+                Err::<(), _>("actual effect unavailable")
+            },
+        );
+        assert_eq!(result, Err("actual effect unavailable"));
+        // Java LevelTicks has no finally cleanup after a thrown output. B is
+        // still collected; C was scheduled on the retained canonical engine.
+        assert!(world.fluid_ticks.will_tick_this_tick(&b, &FluidId::WATER));
+        world
+            .run_fluid_ticks_with_world(
+                10,
+                |_| true,
+                |_, pos, _| {
+                    seen.push(pos);
+                    Ok::<_, ()>(())
+                },
+            )
+            .unwrap();
+        assert_eq!(seen, [a, b, c]);
+        assert!(!world.fluid_ticks.will_tick_this_tick(&b, &FluidId::WATER));
+        assert_eq!(
+            world
+                .fluid_ticks
+                .count(&FluidTickContainers(&mut world.chunk_map)),
+            0
+        );
     }
 
     #[test]

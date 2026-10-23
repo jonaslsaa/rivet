@@ -1,4 +1,4 @@
-//! The live Boolean environment attributes used by beehives and creaking hearts.
+//! The live Boolean environment attributes used by beehives, hearts and fluids.
 //!
 //! This is an explicit projection of the pinned full server registry, not a second
 //! biome registry and not an implementation of unrelated color/audio attributes.
@@ -13,6 +13,7 @@ use std::{collections::HashMap, sync::LazyLock};
 pub enum GameplayBoolean {
     BeesStayInHive,
     CreakingActive,
+    FastLava,
 }
 
 impl GameplayBoolean {
@@ -20,6 +21,7 @@ impl GameplayBoolean {
         match self {
             Self::BeesStayInHive => "minecraft:gameplay/bees_stay_in_hive",
             Self::CreakingActive => "minecraft:gameplay/creaking_active",
+            Self::FastLava => "minecraft:gameplay/fast_lava",
         }
     }
 
@@ -27,6 +29,7 @@ impl GameplayBoolean {
         match self {
             Self::BeesStayInHive => 0,
             Self::CreakingActive => 1,
+            Self::FastLava => 2,
         }
     }
 }
@@ -87,10 +90,10 @@ struct Entry {
     argument: bool,
 }
 
-/// The two requested entries of an actual EnvironmentAttributeMap. All other
+/// The requested entries of an actual EnvironmentAttributeMap. All other
 /// attributes are deliberately outside this projection, not decoded as empty.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct GameplayAttributeMap([Option<Entry>; 2]);
+pub struct GameplayAttributeMap([Option<Entry>; 3]);
 
 impl GameplayAttributeMap {
     pub fn from_nbt(input: &CompoundTag) -> Result<Self, GameplayEnvironmentError> {
@@ -98,6 +101,7 @@ impl GameplayAttributeMap {
         for attribute in [
             GameplayBoolean::BeesStayInHive,
             GameplayBoolean::CreakingActive,
+            GameplayBoolean::FastLava,
         ] {
             let Some(tag) = input.get(attribute.name()) else {
                 continue;
@@ -126,7 +130,7 @@ impl GameplayAttributeMap {
         Ok(result)
     }
 
-    /// Canonical CODEC representation of this explicit two-attribute
+    /// Canonical CODEC representation of this explicit gameplay-attribute
     /// projection: override entries encode as direct values, other modifiers
     /// encode the operation/argument pair. Unprojected attributes are not owned
     /// by this value and are not represented as a purported full-map save.
@@ -135,6 +139,7 @@ impl GameplayAttributeMap {
         for attribute in [
             GameplayBoolean::BeesStayInHive,
             GameplayBoolean::CreakingActive,
+            GameplayBoolean::FastLava,
         ] {
             if let Some(entry) = self.0[attribute.index()] {
                 if entry.modifier == BooleanModifier::Override {
@@ -226,7 +231,7 @@ pub struct EnvironmentWeather {
 pub struct GameplayEnvironment {
     dimension: GameplayAttributeMap,
     biomes: HashMap<BiomeId, GameplayAttributeMap>,
-    biome_layers: [bool; 2],
+    biome_layers: [bool; 3],
     tracks: Vec<Track>,
     can_have_weather: bool,
 }
@@ -256,7 +261,7 @@ impl GameplayEnvironment {
                 .ok_or_else(|| invalid(format!("unknown biome {}", row.key)))?;
             biomes.insert(id, projected_map(&row.data)?);
         }
-        let biome_layers = [0, 1].map(|index| biomes.values().any(|map| map.0[index].is_some()));
+        let biome_layers = [0, 1, 2].map(|index| biomes.values().any(|map| map.0[index].is_some()));
         let mut tracks = Vec::new();
         if let Some(timelines) = dimension.get("timelines") {
             let names: Vec<&str> = match timelines {
@@ -307,6 +312,25 @@ impl GameplayEnvironment {
     /// registry neither bee nor heart attribute has such a biome layer.
     pub fn has_biome_layer(&self, attribute: GameplayBoolean) -> bool {
         self.biome_layers[attribute.index()]
+    }
+
+    /// LavaFluid.isFastLava calls getDimensionValue, never a positional query.
+    /// FAST_LAVA's source declaration is notPositional, with default false;
+    /// actual dimension modifiers and clock-driven layers still apply.
+    pub fn fast_lava(
+        &self,
+        mut clock: impl FnMut(&Identifier) -> Result<i64, GameplayEnvironmentError>,
+    ) -> Result<bool, GameplayEnvironmentError> {
+        let attribute = GameplayBoolean::FastLava;
+        let mut value = self.dimension.apply(attribute, false);
+        for track in &self.tracks {
+            if track.attribute == attribute {
+                value = track
+                    .modifier
+                    .apply(value, track.sample(clock(&track.clock)?));
+            }
+        }
+        Ok(value)
     }
 
     /// Lazy actual getNoiseBiomeAtPosition authority. No biome lookup is made
@@ -380,6 +404,7 @@ fn decode_tracks(
     for attribute in [
         GameplayBoolean::BeesStayInHive,
         GameplayBoolean::CreakingActive,
+        GameplayBoolean::FastLava,
     ] {
         let Some(track) = tracks.get_compound(attribute.name()) else {
             continue;
@@ -503,6 +528,13 @@ mod tests {
                 rain: row["rain"].as_f64().unwrap() as f32,
                 thunder: row["thunder"].as_f64().unwrap() as f32,
             };
+            assert_eq!(
+                environment
+                    .fast_lava(|_| Ok(row["clock"].as_i64().unwrap()))
+                    .unwrap(),
+                row["fast_lava"].as_bool().unwrap(),
+                "{row}"
+            );
             for (attribute, expected) in [
                 (GameplayBoolean::BeesStayInHive, "bees"),
                 (GameplayBoolean::CreakingActive, "creaking"),

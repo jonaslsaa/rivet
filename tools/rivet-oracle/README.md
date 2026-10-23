@@ -13,6 +13,23 @@ diffs vs Rivet, packet round-trips) builds on top of these fixtures later.
 
 ### Generated lighting and structure primitives
 
+- `bash scripts/run_liquid_block_probe.sh <output.jsonl>`: 108 actual Paper
+  `LiquidBlock.onPlace` and `neighborChanged` cases compare water/lava scheduling,
+  unloaded-neighbour handling, configured water-over-lava delays, bubble-column
+  tick scheduling, and lava mixing with allowed, cancelled or altered Bukkit
+  form events. The shell records storage writes; it does not execute downstream
+  live physics. `run_bubble_column_probe.sh <output.jsonl>` separately covers
+  360 actual liquid/bubble ticks, including upward propagation and rejected writes.
+- `bash scripts/run_incremental_light_probe.sh`: eleven cases execute actual
+  `SkyStarLightEngine.blocksChangedInChunk` and
+  `BlockStarLightEngine.blocksChangedInChunk` over retained light buffers.
+  Initial lighting is followed by emitter insertion/removal/replacement,
+  opaque-column changes, section-only emptiness changes, cross-chunk boundary
+-  propagation and unchanged lit/dark checks. Rust compares every visible nibble
+  state/value hash, both emptiness maps and notified chunks, including dirty
+  updates whose final bytes are unchanged. These are incremental engine
+  comparisons, not full relight, client notification or fresh-world walking
+  evidence. Conditional face geometry remains an explicit block-light refusal.
 - `bash scripts/run_generated_block_light_probe.sh`: 14 cases execute Paper's
   actual `BlockStarLightEngine` on real proto chunks. Emitters, overlap, opaque
   and water walls, height boundaries, and lit/unlit/low-status neighbors compare

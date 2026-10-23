@@ -13,6 +13,8 @@
 //! and the named constants on top.
 
 pub mod blocks;
+pub mod bubble_column_block;
+pub mod liquid_block;
 /// `net.minecraft.world.level.block.state` — the package mirror hosting the
 /// `state.predicate` sub-package (issue #228); the `BlockState`/`StateDefinition`
 /// value types themselves live in `rivet-registry` (issue #228).

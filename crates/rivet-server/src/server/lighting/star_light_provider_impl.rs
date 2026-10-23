@@ -41,11 +41,10 @@
 //! Generation computes independent sky/block channels (emitter scans, increase
 //! and decrease queues, and block-channel edge checks). Conditional block-light
 //! occlusion shapes remain an explicit refusal, never collision approximations.
-//! What defers with #184: live
-//! `blockChange`/`sectionChange`/`relightChunks`/`checkChunkEdges`, the client
-//! notify path, and the final status/pipeline wiring (the frozen
-//! `world_gen_context.rs` caller drives `try_light_chunk` through the trait seam;
-//! the concrete chunk storage it would resolve into lands with the chunk map).
+//! `blockChange`/`sectionChange` retain tasks drained by `try_run_updates` using
+//! existing light data; canonical live chunks use `LiveLightRuntime` directly.
+//! What defers with #184: bulk relight, persisted sky-edge reconciliation,
+//! complete conditional faces and the production client notification path.
 
 use std::collections::{HashMap, HashSet};
 
@@ -56,6 +55,7 @@ use rivet_world::level::LevelHeightAccessor;
 use rivet_world::level::height_accessor::SimpleLevelHeightAccessor;
 use rivet_world::lighting::star_light_provider::{LightProviderError, StarLightProvider};
 
+use super::live_light_runtime::{LightChanges, LiveLightError, compute_changes, publish_update};
 use super::star_light_engine::{ChunkAccessor, SkyStarLightEngine};
 use crate::server::level::level_chunk::{BiomeId as ServerBiomeId, StateId, StructureKey};
 
@@ -103,9 +103,77 @@ pub struct SkyLightProvider {
     chunks: ChunkStorage,
     /// Chunks whose storage callback panicked before accepting ownership.
     pending_restores: Vec<(i32, i32, LightChunk)>,
+    changes: LightChanges,
+    /// Published light can outlive a later task or storage-restore refusal.
+    /// Retain its notifications until a complete successful drain reports them.
+    pending_notifications: Vec<ChunkPos>,
 }
 
 impl SkyLightProvider {
+    /// Drain retained block/section changes over the same storage used for
+    /// lighting reads. A refusal keeps the current task for an explicit retry.
+    pub fn try_run_updates(&mut self) -> Result<Vec<ChunkPos>, LiveLightError> {
+        self.flush_pending_restores()
+            .map_err(|error| LiveLightError::Propagation(format!("{error:?}")))?;
+        while let Some((pos, _)) = self.changes.front() {
+            let mut center = self
+                .take_chunk(pos)
+                .map_err(|error| LiveLightError::Propagation(format!("{error:?}")))?
+                .ok_or(LiveLightError::NotReady(pos))?;
+            let mut access = CallbackAccessor {
+                chunks: &mut self.chunks,
+                taken: HashMap::new(),
+            };
+            let mut with_center = CenterAccessor {
+                center: &center,
+                neighbors: &mut access,
+            };
+            let task = self.changes.front().expect("current task retained").1;
+            let computed = compute_changes(
+                self.has_sky_light.then_some(&mut self.engine),
+                self.has_block_light.then_some(&mut self.block_engine),
+                &mut with_center,
+                &center,
+                task,
+                self.min_section,
+                self.max_section,
+            );
+            let mut outcome = computed;
+            if let Ok(updates) = outcome.as_mut() {
+                for (sky, channel) in [(true, &mut updates.sky), (false, &mut updates.block)] {
+                    for ((x, z), update) in std::mem::take(channel) {
+                        let key = ChunkPos::new(x, z);
+                        let chunk = if key == pos {
+                            &mut center
+                        } else {
+                            access
+                                .taken
+                                .get_mut(&(x, z))
+                                .expect("cached neighbor remains taken")
+                        };
+                        if publish_update(chunk, update, sky)
+                            && !self.pending_notifications.contains(&key)
+                        {
+                            self.pending_notifications.push(key);
+                        }
+                    }
+                }
+            }
+            let taken = std::mem::take(&mut access.taken);
+            drop(access);
+            let restore_failed = self.restore_chunks(taken);
+            let center_result = self.put_chunk(pos, center);
+            if restore_failed || center_result.is_err() {
+                return Err(LiveLightError::Propagation(
+                    "light storage restore failed".into(),
+                ));
+            }
+            outcome?;
+            self.changes.complete(pos);
+        }
+        Ok(std::mem::take(&mut self.pending_notifications))
+    }
+
     /// Build the provider for the world with the given vertical extent and
     /// light flags, lighting through `chunks` — a take/put closure over the
     /// caller's chunk storage (see [`ChunkAccessFn`] for the contract).
@@ -128,6 +196,8 @@ impl SkyLightProvider {
             has_block_light,
             chunks: ChunkStorage::Callback(chunks),
             pending_restores: Vec::new(),
+            changes: LightChanges::default(),
+            pending_notifications: Vec::new(),
         }
     }
 
@@ -153,6 +223,8 @@ impl SkyLightProvider {
             has_block_light,
             chunks: ChunkStorage::Owned(chunks),
             pending_restores: Vec::new(),
+            changes: LightChanges::default(),
+            pending_notifications: Vec::new(),
         }
     }
 
@@ -649,6 +721,20 @@ struct CallbackAccessor<'a> {
     taken: HashMap<(i32, i32), ChunkAccess<StateId, ServerBiomeId, StructureKey>>,
 }
 
+struct CenterAccessor<'a, 'b> {
+    center: &'a LightChunk,
+    neighbors: &'a mut CallbackAccessor<'b>,
+}
+impl ChunkAccessor for CenterAccessor<'_, '_> {
+    fn get_chunk_for_lighting(&mut self, x: i32, z: i32) -> Option<&LightChunk> {
+        if self.center.get_pos() == ChunkPos::new(x, z) {
+            Some(self.center)
+        } else {
+            self.neighbors.get_chunk_for_lighting(x, z)
+        }
+    }
+}
+
 impl ChunkAccessor for CallbackAccessor<'_> {
     fn get_chunk_for_lighting(
         &mut self,
@@ -672,14 +758,18 @@ impl ChunkAccessor for CallbackAccessor<'_> {
 }
 
 impl StarLightProvider for SkyLightProvider {
-    fn block_change(&mut self, _pos: BlockPos) {
-        // `StarLightInterface.blockChange` queues a block-light relight; live
-        // relighting defers with the block engine and the light queue (#184).
+    fn block_change(&mut self, pos: BlockPos) {
+        if (self.min_section..=self.max_section).contains(&(pos.get_y() >> 4)) {
+            self.changes.block_change(pos);
+        }
     }
 
-    fn section_change(&mut self, _pos: SectionPos, _new_empty_value: bool) {
-        // `StarLightInterface.sectionChange` queues a section-emptiness change;
-        // live relighting defers with the light queue (#184).
+    fn section_change(&mut self, pos: SectionPos, new_empty_value: bool) {
+        assert!(
+            (self.min_section..=self.max_section).contains(&pos.y()),
+            "light section outside world"
+        );
+        self.changes.section_change(pos, new_empty_value);
     }
 
     fn light_chunk(&mut self, pos: ChunkPos, empty_sections: &[Option<bool>]) {
@@ -860,6 +950,130 @@ mod tests {
 
     fn all_air_empty_sections() -> Vec<Option<bool>> {
         vec![Some(true); SECTION_COUNT]
+    }
+
+    #[test]
+    fn incremental_notifications_survive_a_later_task_readiness_failure() {
+        use super::super::generated_block_light_fixture::write;
+        use rivet_registry::block_state::BlockState;
+        use rivet_registry::generated::blocks::BlockId;
+        use rivet_world::chunk::status::ChunkStatus;
+        let first = ChunkPos::ZERO;
+        let later = ChunkPos::new(3, 0);
+        let mut initial = HashMap::new();
+        for pos in [first, later] {
+            let mut chunk = all_air_chunk(pos);
+            SkyLightProvider::new(overworld(), true, true, no_chunks())
+                .light_chunk_with(&mut chunk, &all_air_empty_sections())
+                .unwrap();
+            chunk.set_persisted_status(ChunkStatus::Full);
+            chunk.set_light_correct(pos == first);
+            initial.insert((pos.x(), pos.z()), chunk);
+        }
+        write(
+            initial.get_mut(&(0, 0)).unwrap(),
+            8,
+            64,
+            8,
+            BlockState::of(BlockId::from_name("minecraft:torch").unwrap()).id(),
+        );
+        let (callback, storage) = storage_closure(&mut initial);
+        let mut provider = SkyLightProvider::new(overworld(), true, true, callback);
+        provider.section_change(SectionPos::of(0, 4, 0), false);
+        provider.block_change(BlockPos::new(8, 64, 8));
+        provider.section_change(SectionPos::of(3, 4, 0), true);
+        assert!(
+            matches!(provider.try_run_updates(),Err(LiveLightError::NotReady(pos)) if pos == later)
+        );
+        {
+            let mut storage = storage.lock().unwrap();
+            assert_eq!(
+                storage[&(0, 0)].block_nibbles()[9].get_visible(8, 64, 8),
+                14,
+                "the first task already committed before the later refusal"
+            );
+            storage.get_mut(&(3, 0)).unwrap().set_light_correct(true);
+        }
+        // The completed first task is not requeued: its light is already
+        // current, but its unreported notification must still be returned.
+        assert_eq!(provider.try_run_updates().unwrap(), [first]);
+        assert!(provider.try_run_updates().unwrap().is_empty());
+    }
+
+    #[test]
+    fn incremental_refusal_preserves_both_channels_and_retains_work_for_retry() {
+        use super::super::generated_block_light_fixture::write;
+        use rivet_registry::block_state::BlockState;
+        use rivet_registry::generated::blocks::BlockId;
+        use rivet_world::chunk::status::ChunkStatus;
+        let state = |name: &str| BlockState::of(BlockId::from_name(name).unwrap()).id();
+        let center = ChunkPos::ZERO;
+        let (callback, storage) = storage_closure(&mut HashMap::new());
+        let mut provider = SkyLightProvider::new(overworld(), true, true, callback);
+        let mut chunk = all_air_chunk(center);
+        provider
+            .light_chunk_with(&mut chunk, &all_air_empty_sections())
+            .unwrap();
+        chunk.set_persisted_status(ChunkStatus::Full);
+        // Readiness refusal must retain the queued operation, not consume it.
+        chunk.set_light_correct(false);
+        write(&mut chunk, 8, 64, 8, state("minecraft:torch"));
+        write(&mut chunk, 9, 64, 8, state("minecraft:stone_slab"));
+        let original_sky: Vec<_> = chunk
+            .sky_nibbles()
+            .iter()
+            .flat_map(|n| (0..4096).map(|i| n.get_visible_index(i)))
+            .collect();
+        let original_block: Vec<_> = chunk
+            .block_nibbles()
+            .iter()
+            .flat_map(|n| (0..4096).map(|i| n.get_visible_index(i)))
+            .collect();
+        let original_sky_map = chunk.sky_emptiness_map().map(ToOwned::to_owned);
+        storage.lock().unwrap().insert((0, 0), chunk);
+        provider.section_change(SectionPos::of(0, 4, 0), false);
+        provider.block_change(BlockPos::new(8, 64, 8));
+        provider.block_change(BlockPos::new(9, 64, 8));
+        assert!(
+            matches!(provider.try_run_updates(), Err(LiveLightError::NotReady(pos)) if pos==center)
+        );
+        storage
+            .lock()
+            .unwrap()
+            .get_mut(&(0, 0))
+            .unwrap()
+            .set_light_correct(true);
+        assert!(matches!(
+            provider.try_run_updates(),
+            Err(LiveLightError::Propagation(_))
+        ));
+        assert!(provider.engine.per_run_caches_are_clear());
+        assert!(provider.block_engine.per_run_caches_are_clear());
+        {
+            let mut storage = storage.lock().unwrap();
+            let chunk = storage.get_mut(&(0, 0)).unwrap();
+            let sky: Vec<_> = chunk
+                .sky_nibbles()
+                .iter()
+                .flat_map(|n| (0..4096).map(|i| n.get_visible_index(i)))
+                .collect();
+            let block: Vec<_> = chunk
+                .block_nibbles()
+                .iter()
+                .flat_map(|n| (0..4096).map(|i| n.get_visible_index(i)))
+                .collect();
+            assert_eq!(sky, original_sky, "failed block propagation published sky");
+            assert_eq!(
+                block, original_block,
+                "failed block propagation published block light"
+            );
+            assert_eq!(chunk.sky_emptiness_map(), original_sky_map.as_deref());
+            write(chunk, 9, 64, 8, StateId(0));
+        }
+        assert!(!provider.try_run_updates().unwrap().is_empty());
+        let storage = storage.lock().unwrap();
+        let chunk = &storage[&(0, 0)];
+        assert_eq!(chunk.block_nibbles()[9].get_visible(9, 64, 8), 13);
     }
 
     /// The primary path end to end: an explicitly supplied in-progress chunk is

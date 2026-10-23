@@ -46,6 +46,9 @@ use super::generated_chunk_owner::{GeneratedChunkOwner, GenerationReadiness};
 use super::generated_world::OverworldGenerator;
 #[path = "level_block_entity_backend.rs"]
 mod block_entity_backend;
+#[path = "level_block_mutation.rs"]
+mod block_mutation;
+pub use block_mutation::{LiveBlockEffect, LiveBlockMutationError, LiveBlockMutationServices};
 #[path = "level_entity_runtime.rs"]
 mod entity_runtime;
 #[path = "level_full_activation.rs"]
@@ -231,6 +234,7 @@ pub struct ServerLevel {
     game_time: i64,
     sub_tick_count: i64,
     clock_runtime: Option<super::level_clock_runtime::LevelClockRuntime>,
+    live_light: Option<crate::server::lighting::LiveLightRuntime>,
     pub(super) debug_synchronizers: super::level_debug_synchronizers::LevelDebugSynchronizers,
     /// The read-only region chunk source (issue #185): `Some` only for the
     /// region-backed boot, which moves its prepared source in after installing
@@ -382,6 +386,7 @@ impl ServerLevel {
             game_time: 0,
             sub_tick_count: 0,
             clock_runtime: None,
+            live_light: None,
             debug_synchronizers: super::level_debug_synchronizers::LevelDebugSynchronizers::new(),
             region_source: None,
             generated_chunk_owner: None,
@@ -508,6 +513,25 @@ impl ServerLevel {
         let current = self.sub_tick_count;
         self.sub_tick_count = current.wrapping_add(1);
         current
+    }
+
+    pub fn install_live_light(&mut self, runtime: crate::server::lighting::LiveLightRuntime) {
+        assert!(self.live_light.is_none(), "live light runtime already initialized");
+        self.live_light = Some(runtime);
+    }
+
+    pub fn queue_light_block_change(&mut self, pos: BlockPos) -> Result<(), crate::server::lighting::LiveLightError> {
+        self.live_light.as_mut().ok_or(crate::server::lighting::LiveLightError::NotInstalled)?.block_change(pos);
+        Ok(())
+    }
+
+    pub fn queue_light_section_change(&mut self, pos: rivet_registry::core::SectionPos, empty: bool) -> Result<(), crate::server::lighting::LiveLightError> {
+        self.live_light.as_mut().ok_or(crate::server::lighting::LiveLightError::NotInstalled)?.section_change(pos, empty);
+        Ok(())
+    }
+
+    pub fn run_live_light_updates(&mut self) -> Result<Vec<ChunkPos>, crate::server::lighting::LiveLightError> {
+        self.live_light.as_mut().ok_or(crate::server::lighting::LiveLightError::NotInstalled)?.run_updates(&mut self.chunk_map)
     }
 
     pub fn clock_runtime(&self) -> Option<&super::level_clock_runtime::LevelClockRuntime> {

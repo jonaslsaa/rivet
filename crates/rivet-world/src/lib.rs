@@ -103,3 +103,4 @@ pub mod superflat;
 /// Level-level execution/scheduling surfaces (`LevelTicks`) stay deferred (see
 /// the module doc).
 pub mod ticks;
+pub mod fluid;
