@@ -102,6 +102,83 @@ fn snapshot(lookup: &EntityLookup, ids: &[i32], result: Value) -> Value {
         .collect();
     json!({"result":result,"raw":raw,"accessible":lookup.all().map(NativeLoadedEntity::entity_id).collect::<Vec<_>>(),"tracked":lookup.tracked_ids()})
 }
+
+#[test]
+fn removal_callback_panic_retains_unindexed_native_and_original_payload() {
+    let access = rivet_world::data::worldgen::worldgen_bootstraps::build_worldgen_registries();
+    let registries = FarmVariantRegistries::builtin(&access).unwrap();
+    let occupancy = EntityIdOccupancy::default();
+    let mut lookup = EntityLookup::new(-4, 19, occupancy.clone());
+    let mut events = Events::default();
+    let pos = ChunkPos::new(0, 0);
+    lookup.ensure_entity_chunk(pos, FullChunkStatus::Full);
+    let native = entity(
+        &json!({"id":7,"uuid":"00000000-0000-0000-0000-000000000007",
+        "family":"sheep","pos":[1.,64.,1.],"dead":false,"removed":false}),
+        &registries,
+    );
+    lookup.add_entity(native, true, &mut events).unwrap();
+    events.panicking = Some("TrackingEnd".into());
+    let panic = catch_unwind(AssertUnwindSafe(|| {
+        let _ = lookup.remove_with_authority(7, false, &mut events, |entity| {
+            entity.discard();
+            Ok(())
+        });
+    }))
+    .unwrap_err();
+    assert_eq!(panic.downcast_ref::<&str>(), Some(&"source panic sentinel"));
+    assert!(lookup.get_raw(7).is_none());
+    assert!(lookup.chunk_ids(pos).is_empty());
+    assert!(!occupancy.contains(7));
+    assert_eq!(lookup.interrupted_removals().len(), 1);
+    let recovered = lookup.take_interrupted_removals();
+    assert_eq!(recovered[0].entity_id(), 7);
+    assert!(recovered[0].is_removed());
+    assert!(lookup.interrupted_removals().is_empty());
+}
+
+#[test]
+fn worldgen_admission_inherits_holder_status_only_for_new_entity_slices() {
+    let access = rivet_world::data::worldgen::worldgen_bootstraps::build_worldgen_registries();
+    let registries = FarmVariantRegistries::builtin(&access).unwrap();
+    for existing in [false, true] {
+        let mut lookup = EntityLookup::new(-4, 19, EntityIdOccupancy::default());
+        if existing {
+            lookup.ensure_entity_chunk(ChunkPos::ZERO, FullChunkStatus::Inaccessible);
+        }
+        let native = entity(
+            &json!({"id":7,"uuid":"00000000-0000-0000-0000-000000000007",
+            "family":"sheep","pos":[1.,64.,1.],"dead":false,"removed":false}),
+            &registries,
+        );
+        let mut batch = vec![native];
+        let mut events = Events::default();
+        lookup
+            .add_worldgen_chunk_entities(
+                &mut batch,
+                Some(ChunkPos::ZERO),
+                Some(FullChunkStatus::Full),
+                &mut events,
+            )
+            .unwrap();
+        assert_eq!(
+            lookup.visibility(7),
+            Some(if existing {
+                Visibility::Hidden
+            } else {
+                Visibility::Tracked
+            })
+        );
+        assert_eq!(
+            events.events,
+            if existing {
+                vec![json!(["Created", 7])]
+            } else {
+                vec![json!(["Created", 7]), json!(["TrackingStart", 7])]
+            }
+        );
+    }
+}
 #[test]
 fn actual_paper_lookup_admission_visibility_sections_and_callback_failure() {
     let access = rivet_world::data::worldgen::worldgen_bootstraps::build_worldgen_registries();
@@ -166,6 +243,7 @@ fn actual_paper_lookup_admission_visibility_sections_and_callback_failure() {
                                 command[2].as_i64().unwrap() as i32,
                                 command[3].as_i64().unwrap() as i32,
                             )),
+                            None,
                             &mut events,
                         )
                         .unwrap();
@@ -259,7 +337,7 @@ fn batch_callback_failure_retains_unprocessed_native_values() {
         ..Events::default()
     };
     assert!(matches!(
-        lookup.add_worldgen_chunk_entities(&mut batch, Some(ChunkPos::ZERO), &mut events),
+        lookup.add_worldgen_chunk_entities(&mut batch, Some(ChunkPos::ZERO), None, &mut events),
         Err(EntityLookupError::LifecycleUnavailable(_))
     ));
     assert_eq!(batch.len(), 1);

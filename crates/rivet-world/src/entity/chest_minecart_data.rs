@@ -206,7 +206,21 @@ impl NativeChestMinecart {
     /// caller must not optimize away constructor UUID/ID consumption when the
     /// input contains a replacement UUID. Unsupported families remain errors.
     pub fn load(&mut self, input: &CompoundTag) -> Result<(), MinecartLoadError> {
-        for field in ["Passengers", "Items", "Tags"] {
+        self.load_root(input)?;
+        if input
+            .get_list("Passengers")
+            .is_some_and(|list| !list.list.is_empty())
+        {
+            return Err(MinecartLoadError::Unsupported(
+                "nonempty Passengers requires its actual runtime/codec".into(),
+            ));
+        }
+        Ok(())
+    }
+    /// Entity.load itself does not recurse passengers; the outer loader must
+    /// run postLoad (including limits) before requesting passenger support.
+    pub fn load_root(&mut self, input: &CompoundTag) -> Result<(), MinecartLoadError> {
+        for field in ["Items", "Tags"] {
             if input.get_list(field).is_some_and(|v| !v.list.is_empty()) {
                 return Err(MinecartLoadError::Unsupported(format!(
                     "nonempty {field} requires its actual runtime/codec"

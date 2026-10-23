@@ -5,11 +5,13 @@ use crate::server::level::{
     entity_lookup::{EntityLifecycle, EntityLifecycleEvent, EntityLookupError},
     generation_creature_runtime::WorldGenerationCreatureFactory,
     overworld_dimension,
-    structure_entity_loading::load_native_world_entity,
+    structure_entity_loading::{
+        load_native_world_entity, load_native_world_entity_root, require_supported_passengers,
+    },
 };
 use rivet_nbt::tag_parser::parse_compound_fully;
 use rivet_registry::{Identifier, RegistryAccess};
-use rivet_util::mth::Uuid;
+use rivet_util::{RandomSource, mth::Uuid};
 use rivet_world::{
     data::worldgen::worldgen_bootstraps::build_worldgen_registries, flag::feature_flags,
 };
@@ -23,6 +25,7 @@ fn pos() -> ChunkPos {
     ChunkPos::new(-3, 7)
 }
 struct Factories {
+    random: EntityConstructionRuntime,
     ids: EntityIdAllocator,
     carts: StructureMinecartFactory,
     animals: WorldGenerationCreatureFactory,
@@ -41,13 +44,14 @@ fn factories(access: &RegistryAccess, occupancy: EntityIdOccupancy) -> Factories
         Arc::new(move |id| cart_occupancy.contains(id)),
     );
     let animals = WorldGenerationCreatureFactory::new(
-        runtime,
+        runtime.clone(),
         WORLD,
         feature_flags::vanilla_set(),
         access,
         Arc::new(move |id| occupancy.contains(id)),
     );
     Factories {
+        random: runtime,
         ids,
         carts,
         animals,
@@ -152,11 +156,16 @@ fn actual_paper_entity_chunk_save_read_limits_and_transient_copy() {
                     let Tag::Compound(tag) = tag else {
                         continue;
                     };
-                    if let Some(entity) =
-                        load_native_world_entity(tag, &factories.carts, &factories.animals, &access)
-                            .unwrap()
+                    if let Some(entity) = load_native_world_entity_root(
+                        tag,
+                        &factories.carts,
+                        &factories.animals,
+                        &access,
+                    )
+                    .unwrap()
                         && limits.accepts(entity.encode_id(), &mut counts)
                     {
+                        require_supported_passengers(tag).unwrap();
                         saved.push(entity.save().unwrap());
                     }
                 }
@@ -173,6 +182,15 @@ fn actual_paper_entity_chunk_save_read_limits_and_transient_copy() {
                     "constructor count {}",
                     row["name"]
                 );
+                if let Some(expected) = row["rng_next"].as_i64() {
+                    assert_eq!(
+                        factories
+                            .random
+                            .with_entity_random(|random| random.next_long())
+                            .unwrap(),
+                        expected
+                    );
+                }
             }
             "copy" => {
                 let from = row["from"]
@@ -189,7 +207,88 @@ fn actual_paper_entity_chunk_save_read_limits_and_transient_copy() {
         }
         cases += 1;
     }
-    assert_eq!(cases, 14);
+    assert_eq!(cases, 16);
+}
+
+#[test]
+fn proto_load_limits_skip_passengers_only_after_real_root_construction() {
+    use crate::server::level::entity_post_load::{
+        DetachedAnimalRemoval, DuplicateUuidMode, DuplicateUuidSettings, EntityPostLoadContext,
+        prepare_native_entities,
+    };
+
+    let access = build_worldgen_registries();
+    let mut cases = 0;
+    for line in
+        include_str!("../../../../../tools/rivet-oracle/fixtures/entity-region.jsonl").lines()
+    {
+        let row: Value = serde_json::from_str(line).unwrap();
+        if !row["name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("root_limit_"))
+        {
+            continue;
+        }
+        let mut factories = factories(&access, EntityIdOccupancy::default());
+        let input = parse_compound_fully(row["input"].as_str().unwrap()).unwrap();
+        let inputs: Vec<_> = input
+            .get_list("Entities")
+            .unwrap()
+            .list
+            .iter()
+            .map(|tag| {
+                let Tag::Compound(tag) = tag else {
+                    panic!("compound fixture root")
+                };
+                tag.clone()
+            })
+            .collect();
+        let limits = limits(&row["limits"]);
+        let mut removal = DetachedAnimalRemoval;
+        let mut context = EntityPostLoadContext {
+            save_limits: &limits,
+            cart_factory: &factories.carts,
+            creature_factory: &factories.animals,
+            registries: &access,
+            settings: DuplicateUuidSettings {
+                mode: DuplicateUuidMode::Nothing,
+                safe_regen_delete_range: 32,
+            },
+            removal: &mut removal,
+        };
+        let batch = prepare_native_entities(
+            &inputs,
+            &mut context,
+            |_| panic!("NOTHING does not query UUIDs"),
+            || panic!("NOTHING does not regenerate UUIDs"),
+        )
+        .unwrap();
+        let saved: Vec<_> = batch
+            .entities
+            .iter()
+            .map(|entity| entity.save().unwrap())
+            .collect();
+        let expected: Vec<_> = row["saved"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tag| parse_compound_fully(tag.as_str().unwrap()).unwrap())
+            .collect();
+        assert_eq!(saved, expected, "{}", row["name"]);
+        assert_eq!(
+            factories.ids.next_id() - 1,
+            row["next_id"].as_i64().unwrap() as i32
+        );
+        assert_eq!(
+            factories
+                .random
+                .with_entity_random(|random| random.next_long())
+                .unwrap(),
+            row["rng_next"].as_i64().unwrap()
+        );
+        cases += 1;
+    }
+    assert_eq!(cases, 2);
 }
 
 #[test]
@@ -615,5 +714,121 @@ fn actual_world_unload_never_calls_removal_before_ack_and_retains_native_on_fail
             .len(),
         1,
         "acknowledged copy persists before removal refusal"
+    );
+
+    // A later removal hook panic must not drop the successfully unindexed
+    // prefix. The current and untouched suffix still belong to the lookup.
+    let generator = Arc::new(OverworldGenerator::new(42));
+    let access = generator.registry_access().clone();
+    let mut level = ServerLevel::new_generated_with_storage(
+        ServerLevelConfig {
+            is_flat: false,
+            sea_level: generator.generator().get_sea_level(),
+            missing_chunk_policy: crate::server::level::MissingChunkPolicy::RequireLoaded,
+            ..ServerLevelConfig::default()
+        },
+        generator,
+        storage,
+    )
+    .unwrap();
+    let occupancy = EntityIdOccupancy::default();
+    level.bind_entity_occupancy(occupancy.clone());
+    level
+        .install_entity_tracking(
+            access,
+            EntityTrackingConfig {
+                world_uuid: level.world_uuid().unwrap(),
+                animal_range_blocks: 48,
+                other_range_blocks: 64,
+                animal_range_y: None,
+                other_range_y: None,
+            },
+        )
+        .unwrap();
+    level
+        .open_entity_storage(false, EntitySaveLimits::default())
+        .unwrap();
+    for id in 1..=3 {
+        let mut sheep = NativeSheep::from_identity(
+            NativeEntityIdentity {
+                entity_id: id,
+                uuid: Uuid {
+                    most: 0,
+                    least: i64::from(id),
+                },
+                world_uuid: level.world_uuid().unwrap(),
+            },
+            &mut LegacyRandomSource::new(42),
+        );
+        sheep.snap_to(rivet_registry::core::Vec3::new(-47.5, 64., 112.5), 90., 0.);
+        level
+            .entity_lookup_mut()
+            .unwrap()
+            .add_entity(
+                NativeLoadedEntity::Creature(NativeGenerationCreature::Sheep(sheep)),
+                false,
+                &mut Lifecycle::default(),
+            )
+            .unwrap();
+    }
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = level.unload_entity_chunk_after_save(pos(), &mut NoTracking, &mut |entity| {
+            if entity.entity_id() == 2 {
+                std::panic::panic_any(732_i32);
+            }
+            entity.discard();
+            Ok(())
+        });
+    }))
+    .unwrap_err();
+    assert_eq!(panic.downcast_ref::<i32>(), Some(&732));
+    let lookup = level.entity_lookup().unwrap();
+    assert_eq!(
+        lookup
+            .interrupted_removals()
+            .iter()
+            .map(NativeLoadedEntity::entity_id)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert!(lookup.interrupted_removals()[0].is_removed());
+    assert!(lookup.get_raw(1).is_none());
+    assert!(lookup.get_raw(2).is_some());
+    assert!(lookup.get_raw(3).is_some());
+    assert!(!occupancy.contains(1));
+    assert!(occupancy.contains(2));
+    assert!(occupancy.contains(3));
+    assert_eq!(
+        level.entity_storage().unwrap().readiness(pos()),
+        EntityChunkReadiness::Incomplete
+    );
+    let saved = level
+        .entity_storage_mut()
+        .unwrap()
+        .read_raw(pos())
+        .unwrap()
+        .unwrap();
+    let saved_entities = &saved.get_list("Entities").unwrap().list;
+    // This second level has transient slices over the first level's saved
+    // population. Source unload prepends that untouched disk entity rather
+    // than silently replacing it with the three newly constructed roots.
+    assert_eq!(saved_entities.len(), 4);
+    let uuids: Vec<_> = saved_entities
+        .iter()
+        .map(|tag| {
+            let Tag::Compound(tag) = tag else {
+                panic!("saved native entity compound")
+            };
+            tag.get_int_array("UUID").unwrap().clone()
+        })
+        .collect();
+    assert_eq!(
+        uuids,
+        vec![
+            vec![0, 0, 0, 7],
+            vec![0, 0, 0, 1],
+            vec![0, 0, 0, 2],
+            vec![0, 0, 0, 3]
+        ]
     );
 }

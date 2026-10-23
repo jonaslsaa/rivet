@@ -3,7 +3,7 @@
 //! This module does not implement tracking, AI, spawn events or default config.
 use super::{
     generation_creature_runtime::GenerationCreatureFactory,
-    structure_entity_loading::load_native_world_entity,
+    structure_entity_loading::{load_native_world_entity_root, require_supported_passengers},
     structure_placement_adapter::StructureEntityCreation,
 };
 use rivet_nbt::compound_tag::CompoundTag;
@@ -260,7 +260,7 @@ pub fn prepare_native_entities(
     };
     let mut loaded_counts = std::collections::HashMap::new();
     for (input_index, input) in inputs.iter().enumerate() {
-        let mut entity = match load_native_world_entity(
+        let mut entity = match load_native_world_entity_root(
             input,
             context.cart_factory,
             context.creature_factory,
@@ -301,6 +301,17 @@ pub fn prepare_native_entities(
             }
         };
         prepared.decisions.push(decision);
+        // mapMulti emits the root to the downstream duplicate-policy filter
+        // during postLoad, then EntityType recurses its passengers. A limit-
+        // rejected root never reaches either of those subsequent operations.
+        if let Err(source) = require_supported_passengers(input) {
+            return Err(Box::new(EntityPostLoadFailure {
+                input_index,
+                source,
+                prepared,
+                current: Some(Box::new(entity)),
+            }));
+        }
         if !decision.is_discard() {
             prepared.entities.push(entity);
         }

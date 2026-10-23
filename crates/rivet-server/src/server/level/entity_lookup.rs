@@ -118,6 +118,9 @@ pub struct EntityLookup {
     chunks: HashMap<ChunkPos, ChunkEntities>,
     accessible: Vec<i32>,
     tracked: Vec<i32>,
+    /// Recovery ownership only: these values have already left the indexes.
+    /// A callback panic must not destroy them while unwinding its native frame.
+    interrupted_removals: Vec<NativeLoadedEntity>,
 }
 fn remove_id(ids: &mut Vec<i32>, id: i32) {
     if let Some(index) = ids.iter().position(|candidate| *candidate == id) {
@@ -139,10 +142,26 @@ impl EntityLookup {
             chunks: HashMap::new(),
             accessible: Vec::new(),
             tracked: Vec::new(),
+            interrupted_removals: Vec::new(),
         }
     }
     pub fn occupancy(&self) -> EntityIdOccupancy {
         self.occupancy.clone()
+    }
+    pub fn interrupted_removals(&self) -> &[NativeLoadedEntity] {
+        &self.interrupted_removals
+    }
+    /// Transfer retained recovery values, never reinsert committed indexes or
+    /// replay callbacks implicitly. The caller now owns their recovery.
+    pub fn take_interrupted_removals(&mut self) -> Vec<NativeLoadedEntity> {
+        std::mem::take(&mut self.interrupted_removals)
+    }
+    pub(super) fn retain_interrupted_removals(
+        &mut self,
+        before: usize,
+        entities: impl IntoIterator<Item = NativeLoadedEntity>,
+    ) {
+        self.interrupted_removals.splice(before..before, entities);
     }
     /// Source hasEntity does NOT mask HIDDEN values, including IDs held by
     /// the separately owned players sharing this same occupancy handle.
@@ -229,9 +248,10 @@ impl EntityLookup {
         &mut self,
         entities: &mut Vec<NativeLoadedEntity>,
         source: Option<ChunkPos>,
+        initial_status: Option<FullChunkStatus>,
         lifecycle: &mut dyn EntityLifecycle,
     ) -> Result<Vec<Admission>, EntityLookupError> {
-        self.add_chunk_entities(entities, source, false, lifecycle)
+        self.add_chunk_entities(entities, source, initial_status, false, lifecycle)
     }
     /// Actual entity-region disk admission suppresses onCreated and does not
     /// run proto-chunk duplicate-UUID regeneration policy.
@@ -241,12 +261,13 @@ impl EntityLookup {
         source: ChunkPos,
         lifecycle: &mut dyn EntityLifecycle,
     ) -> Result<Vec<Admission>, EntityLookupError> {
-        self.add_chunk_entities(entities, Some(source), true, lifecycle)
+        self.add_chunk_entities(entities, Some(source), None, true, lifecycle)
     }
     fn add_chunk_entities(
         &mut self,
         entities: &mut Vec<NativeLoadedEntity>,
         source: Option<ChunkPos>,
+        initial_status: Option<FullChunkStatus>,
         from_disk: bool,
         lifecycle: &mut dyn EntityLifecycle,
     ) -> Result<Vec<Admission>, EntityLookupError> {
@@ -267,7 +288,7 @@ impl EntityLookup {
                 continue;
             }
             match catch_unwind(AssertUnwindSafe(|| {
-                self.add_entity(entity, from_disk, lifecycle)
+                self.add_entity_with_initial_status(entity, from_disk, initial_status, lifecycle)
             })) {
                 Ok(Ok(outcome)) => outcomes.push(outcome),
                 Ok(Err(error)) => {
@@ -292,6 +313,15 @@ impl EntityLookup {
         &mut self,
         entity: NativeLoadedEntity,
         from_disk: bool,
+        lifecycle: &mut dyn EntityLifecycle,
+    ) -> Result<Admission, EntityLookupError> {
+        self.add_entity_with_initial_status(entity, from_disk, None, lifecycle)
+    }
+    fn add_entity_with_initial_status(
+        &mut self,
+        entity: NativeLoadedEntity,
+        from_disk: bool,
+        initial_status: Option<FullChunkStatus>,
         lifecycle: &mut dyn EntityLifecycle,
     ) -> Result<Admission, EntityLookupError> {
         if entity.is_removed() {
@@ -320,6 +350,11 @@ impl EntityLookup {
         let chunk = ChunkPos::containing(&block);
         let y = (block.get_y() >> 4).clamp(self.min_section, self.max_section);
         let section_index = (y - self.min_section) as usize;
+        if let Some(status) = initial_status {
+            // Source getOrCreateEntityChunk(true): inherit holder status only
+            // when admission actually creates slices, after ID/UUID checks.
+            self.ensure_entity_chunk(chunk, status);
+        }
         let slices = self.ensure_chunk(chunk);
         slices.ids.push(id);
         slices.sections[section_index].push(id);
@@ -436,22 +471,29 @@ impl EntityLookup {
         }
         let old = record.visibility;
         record.visibility = Visibility::Hidden;
-        if let Err(error) = transition(
-            &mut record,
-            old,
-            Visibility::Hidden,
-            false,
-            destroy,
-            &mut self.accessible,
-            &mut self.tracked,
-            lifecycle,
-        ) {
-            return Err(EntityRemovalFailure {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            transition(
+                &mut record,
+                old,
+                Visibility::Hidden,
+                false,
+                destroy,
+                &mut self.accessible,
+                &mut self.tracked,
+                lifecycle,
+            )
+        }));
+        match result {
+            Ok(Ok(())) => Ok(Some(record.entity)),
+            Ok(Err(error)) => Err(EntityRemovalFailure {
                 error,
                 entity: Some(Box::new(record.entity)),
-            });
+            }),
+            Err(panic) => {
+                self.interrupted_removals.push(record.entity);
+                resume_unwind(panic);
+            }
         }
-        Ok(Some(record.entity))
     }
 }
 #[allow(clippy::too_many_arguments)] // Source entityStatusChange plus split owned list borrows.

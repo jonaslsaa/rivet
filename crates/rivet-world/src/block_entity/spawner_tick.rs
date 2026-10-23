@@ -522,4 +522,68 @@ mod tests {
         }
         assert_eq!(cases, 53);
     }
+
+    #[test]
+    fn actual_paper_spawner_reload_preserves_throttle_phase_and_prior_spawn_choice() {
+        let pos = BlockPos::new(3, 64, -8);
+        let mut cases = 0;
+        for line in
+            include_str!("../../../../tools/rivet-oracle/fixtures/spawner-reload.jsonl").lines()
+        {
+            let row: serde_json::Value = serde_json::from_str(line).unwrap();
+            let mut data = SpawnerData::load(
+                pos,
+                &parse_compound_fully(row["initial_snbt"].as_str().unwrap()).unwrap(),
+            )
+            .unwrap();
+            let mut world = BlockedWorld {
+                random: LegacyRandomSource::new(99),
+                rate: 4,
+                near: false,
+                enabled: true,
+                near_calls: 0,
+                collisions: 0,
+                trace: Vec::new(),
+            };
+            data.server_tick(&mut world, pos).unwrap();
+            assert_eq!(
+                i64::from(data.tick_delay),
+                row["before_counter"].as_i64().unwrap()
+            );
+            data.reload(
+                pos,
+                &parse_compound_fully(row["reload_snbt"].as_str().unwrap()).unwrap(),
+            )
+            .unwrap();
+            data.server_tick(&mut world, pos).unwrap();
+            // This is behavioral, not only a private counter comparison: the
+            // post-load tick must stay throttled and never query players.
+            assert_eq!(
+                world.near_calls,
+                row["near_calls"].as_u64().unwrap(),
+                "{row}"
+            );
+            assert_eq!(
+                i64::from(data.tick_delay),
+                row["after_counter"].as_i64().unwrap(),
+                "{row}"
+            );
+            let mut saved = data.save(pos);
+            for key in ["id", "x", "y", "z", "components"] {
+                saved.remove(key);
+            }
+            assert_eq!(
+                saved,
+                parse_compound_fully(row["output_snbt"].as_str().unwrap()).unwrap(),
+                "{row}"
+            );
+            assert_eq!(
+                world.random.next_long(),
+                row["rng_next"].as_i64().unwrap(),
+                "{row}"
+            );
+            cases += 1;
+        }
+        assert_eq!(cases, 3);
+    }
 }

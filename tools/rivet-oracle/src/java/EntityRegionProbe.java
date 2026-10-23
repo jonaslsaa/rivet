@@ -31,7 +31,7 @@ public final class EntityRegionProbe {
  static void read(PrintStream out,String name,String input,Map<String,Integer> limits)throws Exception{
   var world=GenerationSheepProbe.level();world.config.chunks=world.config.new Chunks();world.config.chunks.entityPerChunkSaveLimit.clear();for(var entry:limits.entrySet())world.config.chunks.entityPerChunkSaveLimit.put(BuiltInRegistries.ENTITY_TYPE.getValue(Identifier.parse(entry.getKey())),entry.getValue().intValue());Entity.SHARED_RANDOM=new ca.spottedleaf.moonrise.common.util.ThreadUnsafeRandom(42);
   var values=ChunkEntitySlices.readEntities(world,POS,TagParser.parseCompoundFully(input));var saved=new JsonArray();for(var entity:values){var tag=net.minecraft.world.level.storage.TagValueOutput.createWithContext(net.minecraft.util.ProblemReporter.DISCARDING,GenerationSheepProbe.access);if(!entity.save(tag))throw new AssertionError("unexpected save decline");saved.add(tag.buildResult().toString());}
-  var row=new JsonObject();row.addProperty("mode","read");row.addProperty("name",name);row.addProperty("input",input);row.add("limits",G.toJsonTree(new TreeMap<>(limits)));row.addProperty("next_id",world.nextId);row.add("saved",saved);out.println(row);
+  var row=new JsonObject();row.addProperty("mode","read");row.addProperty("name",name);row.addProperty("input",input);row.add("limits",G.toJsonTree(new TreeMap<>(limits)));row.addProperty("next_id",world.nextId);row.add("saved",saved);if(name.startsWith("root_limit_"))row.addProperty("rng_next",Entity.SHARED_RANDOM.nextLong());out.println(row);
  }
  static void copy(PrintStream out,String from,String into)throws Exception{
   var source=from==null?null:TagParser.parseCompoundFully(from);var target=TagParser.parseCompoundFully(into);ChunkEntitySlices.copyEntities(source,target);
@@ -53,6 +53,9 @@ public final class EntityRegionProbe {
    read(out,"load_limit_still_constructs","{Entities:["+all.get(0)+","+all.get(0)+","+all.get(1)+"]}",Map.of("minecraft:sheep",0));
    copy(out,"{Entities:[{id:'old:unknown',custom:42}]}","{DataVersion:4903,Entities:[{id:'new:native'}],Position:[I;-3,7]}");
    copy(out,"{Entities:[{old:1}]}","{Entities:3}");copy(out,null,"{Entities:[{id:'kept'}]}");
+   String passengerRoot=all.get(0).substring(0,all.get(0).length()-1)+",Passengers:[{id:'minecraft:zombie'}]}";
+   read(out,"root_limit_zero_skips_passengers","{Entities:["+passengerRoot+"]}",Map.of("minecraft:sheep",0));
+   read(out,"root_limit_exhausted_skips_passengers","{Entities:["+all.get(0)+","+passengerRoot+"]}",Map.of("minecraft:sheep",1));
   }
  }
 }

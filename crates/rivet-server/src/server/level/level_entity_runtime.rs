@@ -165,24 +165,39 @@ impl ServerLevel {
         let ids = entities.chunk_ids(pos).to_vec();
         let mut removed = Vec::new();
         let mut lifecycle = tracker.lifecycle(authority);
-        for id in ids {
-            if entities
-                .get_raw(id)
-                .is_none_or(NativeLoadedEntity::is_removed)
-            {
-                continue;
-            }
-            match entities.remove_with_authority(id, false, &mut lifecycle, |entity| remove(entity))
-            {
-                Ok(Some(entity)) => removed.push(entity),
-                Ok(None) => {}
-                Err(error) => {
-                    return Err(EntityChunkUnloadFailure {
-                        source: LevelEntityError::Tracking(error.error),
-                        removed,
-                        current: error.entity,
-                    });
+        let recovery_start = entities.interrupted_removals().len();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for id in ids {
+                if entities
+                    .get_raw(id)
+                    .is_none_or(NativeLoadedEntity::is_removed)
+                {
+                    continue;
                 }
+                match entities
+                    .remove_with_authority(id, false, &mut lifecycle, |entity| remove(entity))
+                {
+                    Ok(Some(entity)) => removed.push(entity),
+                    Ok(None) => {}
+                    Err(error) => {
+                        return Err(EntityChunkUnloadFailure {
+                            source: LevelEntityError::Tracking(error.error),
+                            removed: std::mem::take(&mut removed),
+                            current: error.entity,
+                        });
+                    }
+                }
+            }
+            Ok(())
+        }));
+        match result {
+            Ok(result) => result?,
+            Err(panic) => {
+                // unregister_removed retained the current unindexed value;
+                // preserve this operation's completed prefix ahead of it too.
+                // A panic in the removal hook itself leaves current indexed.
+                entities.retain_interrupted_removals(recovery_start, removed);
+                std::panic::resume_unwind(panic);
             }
         }
         entities.unload_empty_entity_chunk(pos);
@@ -233,7 +248,7 @@ impl ServerLevel {
         storage.begin_native_load(pos);
         let mut loaded_counts = std::collections::HashMap::new();
         for (index, input) in inputs.iter().enumerate() {
-            match crate::server::level::structure_entity_loading::load_native_world_entity(
+            match crate::server::level::structure_entity_loading::load_native_world_entity_root(
                 input,
                 context.cart_factory,
                 context.creature_factory,
@@ -245,6 +260,10 @@ impl ServerLevel {
                         .accepts(entity.encode_id(), &mut loaded_counts)
                     {
                         storage.prepared_entities_mut(pos)?.push(entity);
+                        if let Err(source)=crate::server::level::structure_entity_loading::require_supported_passengers(input){
+                            storage.fail_load(pos,source,Some(index));
+                            return Err(EntityRegionError::IncompleteLoad(pos).into());
+                        }
                     }
                 }
                 Ok(None) => {}
@@ -409,6 +428,7 @@ fn run_post_load(
     lifecycle: &mut dyn EntityLifecycle,
     secure_uuid: impl FnMut() -> std::io::Result<Uuid>,
 ) -> Result<Vec<DuplicateUuidDecision>, LevelEntityError> {
+    let initial_status = chunk.get_full_status();
     let mut world = AdmissionWorld {
         entities,
         players,
@@ -435,7 +455,12 @@ fn run_post_load(
             };
             world
                 .entities
-                .add_worldgen_chunk_entities(&mut batch.entities, Some(pos), &mut lifecycle)
+                .add_worldgen_chunk_entities(
+                    &mut batch.entities,
+                    Some(pos),
+                    initial_status,
+                    &mut lifecycle,
+                )
                 .map(|_| ())
                 .map_err(|error| StructureError::PlacementUnavailable(error.to_string()))
         },

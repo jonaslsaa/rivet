@@ -752,7 +752,25 @@ where
         }
         let tag = match state.block().name() {
             "minecraft:chest" => structure_snapshot_data::chest_data(pos, data)?,
-            "minecraft:spawner" => structure_spawner_data(pos, data)?,
+            "minecraft:spawner" => {
+                if !self.promote_native_block_entity(&pos, state) {
+                    return Ok(());
+                }
+                let Some(entity) = self.native_block_entity_mut(&pos) else {
+                    return Ok(());
+                };
+                let rivet_world::block_entity::NativeBlockEntityData::Spawner(spawner) =
+                    entity.data_mut()
+                else {
+                    return Err(StructureError::PlacementUnavailable(
+                        "snapshot target is not a native spawner".into(),
+                    ));
+                };
+                spawner
+                    .reload(pos, data)
+                    .map_err(|error| StructureError::PlacementUnavailable(error.to_string()))?;
+                return Ok(());
+            }
             _ => {
                 return Err(StructureError::PlacementUnavailable(format!(
                     "loadWithComponents for {} is unavailable",
