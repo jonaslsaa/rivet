@@ -67,7 +67,7 @@
 {"registry":"minecraft:dimension_type","key":"minecraft:overworld","snbt":"{attributes:{},has_ceiling:0b,has_skylight:1b,timelines:[\"minecraft:villager_schedule\",\"minecraft:day\",\"minecraft:moon\",\"minecraft:early_game\"]}"}
 {"registry":"minecraft:dimension_type","key":"minecraft:overworld_caves","snbt":"{attributes:{},has_ceiling:1b,has_skylight:1b,timelines:[\"minecraft:villager_schedule\",\"minecraft:day\",\"minecraft:moon\",\"minecraft:early_game\"]}"}
 {"registry":"minecraft:dimension_type","key":"minecraft:the_end","snbt":"{attributes:{},has_ceiling:0b,has_skylight:1b,timelines:[\"minecraft:villager_schedule\"]}"}
-{"registry":"minecraft:dimension_type","key":"minecraft:the_nether","snbt":"{attributes:{},has_ceiling:1b,has_skylight:0b,timelines:[\"minecraft:villager_schedule\"]}"}
+{"registry":"minecraft:dimension_type","key":"minecraft:the_nether","snbt":"{attributes:{\"minecraft:gameplay/fast_lava\":1b},has_ceiling:1b,has_skylight:0b,timelines:[\"minecraft:villager_schedule\"]}"}
 {"registry":"minecraft:timeline","key":"minecraft:day","snbt":"{clock:\"minecraft:overworld\",period_ticks:24000,tracks:{\"minecraft:gameplay/bees_stay_in_hive\":{keyframes:[{ticks:12542,value:1b},{ticks:23460,value:0b}],modifier:\"or\"},\"minecraft:gameplay/creaking_active\":{keyframes:[{ticks:12600,value:1b},{ticks:23401,value:0b}],modifier:\"or\"}}}"}
 {"registry":"minecraft:timeline","key":"minecraft:early_game","snbt":"{clock:\"minecraft:overworld\",tracks:{}}"}
 {"registry":"minecraft:timeline","key":"minecraft:moon","snbt":"{clock:\"minecraft:overworld\",period_ticks:192000,tracks:{}}"}

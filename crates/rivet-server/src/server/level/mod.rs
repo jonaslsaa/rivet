@@ -30,6 +30,7 @@ pub mod entity_post_load;
 pub mod entity_region_storage;
 pub mod entity_save_limits;
 pub mod entity_tracking;
+pub mod fluid_runtime;
 pub mod full_chunk_status;
 pub mod generated_boot;
 pub mod generated_chunk_owner;

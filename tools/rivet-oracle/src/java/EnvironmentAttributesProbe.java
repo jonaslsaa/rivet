@@ -16,7 +16,7 @@ import net.minecraft.world.phys.Vec3;
 /** Full server-registry projection, NOT RegistrySynchronization/NETWORK_CODEC.
  * BeesStayInHive is not syncable and is absent from the network timeline. */
 public final class EnvironmentAttributesProbe {
-    static final String[] NAMES={"minecraft:gameplay/bees_stay_in_hive","minecraft:gameplay/creaking_active"};
+    static final String[] NAMES={"minecraft:gameplay/bees_stay_in_hive","minecraft:gameplay/creaking_active","minecraft:gameplay/fast_lava"};
     static CompoundTag project(EnvironmentAttributeMap map) {
         var full=(CompoundTag)EnvironmentAttributeMap.CODEC.encodeStart(NbtOps.INSTANCE,map).getOrThrow();
         var result=new CompoundTag();
@@ -67,7 +67,7 @@ public final class EnvironmentAttributesProbe {
                 for(var timeline:type.value().timelines())builder.addTimelineLayer(timeline,clock);
                 // Here world dimension identity matches the type's builtin key.
                 if(type.value().hasSkyLight()&&!type.value().hasCeiling()&&!type.getRegisteredName().equals("minecraft:the_end"))WeatherAttributes.addBuiltinLayers(builder,new WeatherAttributes.WeatherAccess(){public float rainLevel(){return strengths[0];}public float thunderLevel(){return strengths[1];}});
-                var system=builder.build();var row=new JsonObject();row.addProperty("dimension",type.getRegisteredName());row.addProperty("biome","minecraft:"+biomeName);row.addProperty("clock",time);row.addProperty("rain",strengths[0]);row.addProperty("thunder",strengths[1]);row.addProperty("bees",system.getValue(EnvironmentAttributes.BEES_STAY_IN_HIVE,new Vec3(-0.5,64.5,3.5)));row.addProperty("creaking",system.getValue(EnvironmentAttributes.CREAKING_ACTIVE,new Vec3(-0.5,64.5,3.5)));samples.println(row);
+                var system=builder.build();var row=new JsonObject();row.addProperty("dimension",type.getRegisteredName());row.addProperty("biome","minecraft:"+biomeName);row.addProperty("clock",time);row.addProperty("rain",strengths[0]);row.addProperty("thunder",strengths[1]);row.addProperty("bees",system.getValue(EnvironmentAttributes.BEES_STAY_IN_HIVE,new Vec3(-0.5,64.5,3.5)));row.addProperty("creaking",system.getValue(EnvironmentAttributes.CREAKING_ACTIVE,new Vec3(-0.5,64.5,3.5)));row.addProperty("fast_lava",system.getDimensionValue(EnvironmentAttributes.FAST_LAVA));samples.println(row);
             }
         }
     }

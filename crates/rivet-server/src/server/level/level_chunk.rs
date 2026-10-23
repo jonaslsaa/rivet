@@ -183,13 +183,13 @@ impl LevelChunk {
         // setUnsavedListener immediately invokes the listener if dirty. The
         // actual installed Paper listener's body is empty, including this call.
     }
-    pub(super) fn generation_base(
+    pub(crate) fn generation_base(
         &self,
     ) -> &rivet_world::chunk::chunk_access::ChunkAccess<StateId, BiomeId, StructureKey> {
         self.chunk.get_base()
     }
 
-    pub(super) fn generation_base_mut(
+    pub(crate) fn generation_base_mut(
         &mut self,
     ) -> &mut rivet_world::chunk::chunk_access::ChunkAccess<StateId, BiomeId, StructureKey> {
         self.chunk.base_mut()
@@ -540,6 +540,16 @@ impl LevelChunk {
     /// construction (the packet body takes it by value).
     pub fn light_data(&self) -> LightUpdatePacketData {
         self.light_data.clone()
+    }
+
+    /// Rebuild the packet projection after canonical incremental light
+    /// publication; serving must never retain the pre-mutation nibble snapshot.
+    pub(crate) fn refresh_light_data(&mut self) {
+        self.light_data = light_data_from_nibbles(
+            self.chunk.block_nibbles(),
+            self.chunk.sky_nibbles(),
+            self.chunk.get_height(),
+        );
     }
 
     /// `LevelChunk.getPos()`.

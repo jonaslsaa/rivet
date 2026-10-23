@@ -48,20 +48,19 @@
 //!   #184 below); `lightChunk` on the edge-checks path runs the propagation that
 //!   is shared with the no-edge-checks path and skips the per-edge decrease.
 //!
-//! RivetTodo(#184): `blockChange`/`sectionChange` live re-lighting, the block
-//! face-occlusion shape test, `relightChunks`, live `checkChunkEdges`
-//! and the client-side notify path (`isClientSide`) are not ported. The
-//! remaining `StarLightProvider` mutators (`block_change`, `section_change`,
-//! `relight_chunks`, `check_chunk_edges`) are the no-ops the provider keeps for
-//! the deferred paths, and this engine is exercised through the provider's
-//! light-chunk path. Deferred live-update helpers remain unused, so the
-//! dead-code allowance stays until their owning integration lands.
+//! Live block/section changes use existing nibble caches, changed skylight
+//! columns, and the shared increase/decrease queues. `LiveLightRuntime` and
+//! the provider retain tasks until both channel computations succeed.
+//! RivetTodo(#184): conditional face occlusion, `relightChunks`, persisted
+//! sky-edge reconciliation and production client notification remain separate
+//! boundaries; incremental fixtures do not establish those capabilities.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
 
 use crate::server::level::level_chunk::{BiomeId as ServerBiomeId, StateId, StructureKey};
 use rivet_registry::block_state::BlockState;
+use rivet_registry::core::BlockPos;
 use rivet_world::chunk::chunk_access::ChunkAccess;
 use rivet_world::chunk::level_chunk_section::LevelChunkSection;
 use rivet_world::level::height_accessor::LevelHeightAccessor;
@@ -307,6 +306,9 @@ pub(crate) struct NeighborLightUpdate {
     /// neighbour's original nibble array.
     pub(crate) nibbles: Vec<(usize, SwmrNibbleArray)>,
     pub(crate) emptiness_map: Option<Vec<bool>>,
+    /// Source onLightUpdate sections, including dirty writes whose final
+    /// visible bytes equal their previous value. Indices start at minLightY.
+    pub(crate) notifications: Vec<usize>,
 }
 
 /// Shared sky/block light-chunk engine with independent per-channel instances. Owns
@@ -343,6 +345,9 @@ pub(crate) struct SkyStarLightEngine {
     /// writes that replacement back to a neighbour, so those entries must not
     /// be published during the provider's explicit write-back.
     nibble_cache_writeback: Vec<bool>,
+    /// The actual SWMR.updateVisible return, captured before its dirty reset.
+    /// This is not derivable by comparing final visible buffers.
+    published_sections: Vec<bool>,
     /// A source nibble removed by `rewriteNibbleCacheForSkylight`. Java calls
     /// `updateVisible` on the source object before dropping its cache entry, so
     /// retain that post-publication value for the provider's neighbour write-back.
@@ -423,6 +428,7 @@ impl SkyStarLightEngine {
             section_cache: (0..min_array_size).map(|_| None).collect(),
             nibble_cache: (0..min_array_size).map(|_| None).collect(),
             nibble_cache_writeback: vec![false; min_array_size],
+            published_sections: vec![false; min_array_size],
             dropped_nibble_writeback: (0..min_array_size).map(|_| None).collect(),
             chunk_cache: vec![false; 25],
             emptiness_map_cache: (0..25).map(|_| None).collect(),
@@ -1787,6 +1793,114 @@ impl SkyStarLightEngine {
         self.light_impl(provider, chunk, empty_sections, true);
     }
 
+    /// StarLightEngine.blocksChangedInChunk: retain existing light, update
+    /// section emptiness, and propagate only the changed block columns/cells.
+    /// The caller publishes both channel outputs only after both succeed.
+    pub(crate) fn blocks_changed(
+        &mut self,
+        provider: &mut dyn ChunkAccessor,
+        chunk: &ChunkAccess<StateId, ServerBiomeId, StructureKey>,
+        positions: &[BlockPos],
+        changed_sections: &[Option<bool>],
+    ) {
+        let cx = chunk.get_pos().x();
+        let cz = chunk.get_pos().z();
+        self.pending_nibbles = None;
+        self.pending_emptiness_map = None;
+        self.pending_neighbor_updates.clear();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.setup_caches(
+                provider,
+                cx.wrapping_mul(16).wrapping_add(7),
+                128,
+                cz.wrapping_mul(16).wrapping_add(7),
+                true,
+                true,
+            );
+            assert!(
+                self.is_chunk_in_cache(cx, cz),
+                "incremental light center is not ready"
+            );
+            if changed_sections.iter().any(Option::is_some) {
+                self.handle_empty_section_changes(chunk, changed_sections, false);
+            }
+            if !positions.is_empty() {
+                if self.sky {
+                    self.propagate_sky_block_changes(cx, cz, positions);
+                } else {
+                    for pos in positions {
+                        self.check_block_light(pos.get_x(), pos.get_y(), pos.get_z());
+                    }
+                    self.perform_light_decrease();
+                }
+            }
+            self.update_visible();
+            self.pending_neighbor_updates = self.collect_light_updates(cx, cz, true);
+        }));
+        self.destroy_caches();
+        if let Err(payload) = result {
+            self.pending_neighbor_updates.clear();
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    fn propagate_sky_block_changes(&mut self, cx: i32, cz: i32, positions: &[BlockPos]) {
+        self.rewrite_nibble_cache_for_skylight(cx, cz);
+        self.null_propagation_check_cache.fill(false);
+        let mut heights = [i32::MIN; 256];
+        for pos in positions {
+            let index = ((pos.get_x() & 15) | ((pos.get_z() & 15) << 4)) as usize;
+            heights[index] = heights[index].max(pos.get_y());
+        }
+        for (index, max_y) in heights.into_iter().enumerate() {
+            if max_y == i32::MIN {
+                continue;
+            }
+            let x = cx.wrapping_shl(4) | (index as i32 & 15);
+            let z = cz.wrapping_shl(4) | (index as i32 >> 4);
+            let max_propagation_y = self.try_propagate_skylight(x, max_y, z, true, true);
+            if self.get_light_level_extruded(x, max_propagation_y, z) == 15 {
+                self.check_null_section(cx, max_propagation_y >> 4, cz, true);
+                let mut y = max_propagation_y;
+                while y >= self.min_light_section.wrapping_shl(4) {
+                    if y & 15 == 15 {
+                        self.check_null_section(cx, y >> 4, cz, true);
+                    }
+                    let Some(nibble) = self.get_nibble_from_cache(cx, y >> 4, cz) else {
+                        y = (y & !15).wrapping_sub(1);
+                        continue;
+                    };
+                    if nibble.get_updating(x, y, z) != 15 {
+                        break;
+                    }
+                    self.append_to_decrease_queue(
+                        encode_queue_position(x, y, z, self.coordinate_offset)
+                            | (15u64 << 28)
+                            | (AxisDirection::PositiveY.everything_but_this_direction() << 32),
+                    );
+                    y = y.wrapping_sub(1);
+                }
+            }
+        }
+        self.process_delayed_increases();
+        self.process_delayed_decreases();
+        for pos in positions {
+            let (x, y, z) = (pos.get_x(), pos.get_y(), pos.get_z());
+            let current = self.get_light_level(x, y, z);
+            let encoded = encode_queue_position(x, y, z, self.coordinate_offset)
+                | ((ALL_DIRECTIONS_BITSET as u64) << 32);
+            if current == 15 {
+                self.append_to_increase_queue(
+                    encoded | (15u64 << 28) | FLAG_HAS_SIDED_TRANSPARENT_BLOCKS,
+                );
+            } else {
+                self.set_light_level(x, y, z, 0);
+            }
+            self.append_to_decrease_queue(encoded | ((current as u64) << 28));
+        }
+        self.perform_light_decrease();
+    }
+
     /// The per-neighbour `lightChunk(lightAccess, chunk, false)` path from
     /// `relightChunks` — the idempotent re-light. The only difference from
     /// [`Self::light`] is `needsEdgeChecks == false`, so the neighbour-light
@@ -2173,12 +2287,13 @@ impl SkyStarLightEngine {
     }
 
     /// `updateVisible(lightAccess)` — publish every dirty nibble's updating
-    /// state into its visible state. Java also fires `onLightUpdate` to the
-    /// client; the server-side notify path defers (#184), so only the SWMR
-    /// copy-on-write publication happens here.
+    /// state into its visible state and retain the actual source notification
+    /// condition. A same-value write still makes SWMR dirty and notifies.
     fn update_visible(&mut self) {
-        for nibble in self.nibble_cache.iter_mut().flatten() {
-            nibble.update_visible();
+        for (index, nibble) in self.nibble_cache.iter_mut().enumerate() {
+            if let Some(nibble) = nibble {
+                self.published_sections[index] |= nibble.update_visible();
+            }
         }
     }
 
@@ -2191,10 +2306,19 @@ impl SkyStarLightEngine {
         center_x: i32,
         center_z: i32,
     ) -> HashMap<(i32, i32), NeighborLightUpdate> {
+        self.collect_light_updates(center_x, center_z, false)
+    }
+
+    fn collect_light_updates(
+        &self,
+        center_x: i32,
+        center_z: i32,
+        include_center: bool,
+    ) -> HashMap<(i32, i32), NeighborLightUpdate> {
         let mut updates = HashMap::new();
         for dz in -2i32..=2 {
             for dx in -2i32..=2 {
-                if dx == 0 && dz == 0 {
+                if dx == 0 && dz == 0 && !include_center {
                     continue;
                 }
                 let chunk_x = center_x.wrapping_add(dx);
@@ -2221,12 +2345,21 @@ impl SkyStarLightEngine {
                     })
                     .collect::<Vec<_>>();
                 let emptiness_map = self.get_emptiness_map(chunk_x, chunk_z).cloned();
-                if !nibbles.is_empty() || emptiness_map.is_some() {
+                let notifications = (self.min_light_section..=self.max_light_section)
+                    .enumerate()
+                    .filter_map(|(index, chunk_y)| {
+                        let slot =
+                            cache_index(chunk_x, chunk_y, chunk_z, self.chunk_section_index_offset);
+                        self.published_sections[slot].then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                if !nibbles.is_empty() || emptiness_map.is_some() || !notifications.is_empty() {
                     updates.insert(
                         (chunk_x, chunk_z),
                         NeighborLightUpdate {
                             nibbles,
                             emptiness_map,
+                            notifications,
                         },
                     );
                 }
@@ -2240,6 +2373,7 @@ impl SkyStarLightEngine {
         self.section_cache.iter_mut().for_each(|s| *s = None);
         self.nibble_cache.iter_mut().for_each(|s| *s = None);
         self.nibble_cache_writeback.fill(false);
+        self.published_sections.fill(false);
         self.dropped_nibble_writeback
             .iter_mut()
             .for_each(|s| *s = None);

@@ -212,7 +212,14 @@ impl NativeBlockEntity {
         self.removed = false;
     }
     pub fn set_block_state(&mut self, state: BlockState) -> bool {
-        let valid = match &self.data {
+        if !self.is_valid_block_state(state) {
+            return false;
+        }
+        self.state = state;
+        true
+    }
+    pub fn is_valid_block_state(&self, state: BlockState) -> bool {
+        match &self.data {
             NativeBlockEntityData::Chest(_) => state.block().name() == "minecraft:chest",
             NativeBlockEntityData::Spawner(_) => state.block().name() == "minecraft:spawner",
             NativeBlockEntityData::Beehive(_) => matches!(
@@ -222,12 +229,7 @@ impl NativeBlockEntity {
             NativeBlockEntityData::CreakingHeart(_) => {
                 state.block().name() == "minecraft:creaking_heart"
             }
-        };
-        if !valid {
-            return false;
         }
-        self.state = state;
-        true
     }
     pub fn save_with_full_metadata(&self) -> CompoundTag {
         match &self.data {

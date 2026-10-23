@@ -791,6 +791,7 @@ dependencies = [
  "rivet-serialization",
  "rivet-text",
  "rivet-util",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",

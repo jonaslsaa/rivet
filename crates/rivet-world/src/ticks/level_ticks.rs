@@ -250,16 +250,36 @@ impl<T: Clone + Eq + Hash + 'static> LevelTicks<T> {
         check: impl FnMut(ChunkPos) -> bool,
         mut output: impl FnMut(&mut Self, &mut S, BlockPos, T),
     ) {
-        self.collect_ticks(store, current, max, check);
-        while let Some(tick) = self.to_run.pop_front() {
-            if !self.to_run_set.is_empty() {
-                self.to_run_set.remove(&UniqueTickKey::from(&tick));
-            }
-            let pos = tick.pos;
-            let kind = tick.r#type.clone();
-            self.already_run.push(tick);
+        self.collect_due_ticks(store, current, max, check);
+        while let Some((pos, kind)) = self.next_collected_tick() {
             output(self, store, pos, kind);
         }
+        self.cleanup_after_tick();
+    }
+    /// The collect phase of the same LevelTicks.tick algorithm. Splitting
+    /// borrows lets a canonical world own this scheduler while its output
+    /// calls back into that world, including reentrant schedule/clear/query.
+    /// Call cleanup only after all outputs return normally: Java has no finally.
+    pub fn collect_due_ticks(
+        &mut self,
+        store: &mut impl TickContainers<T>,
+        current: i64,
+        max: i32,
+        check: impl FnMut(ChunkPos) -> bool,
+    ) {
+        self.collect_ticks(store, current, max, check);
+    }
+    /// Source runCollectedTicks updates membership/alreadyRun BEFORE output.
+    pub fn next_collected_tick(&mut self) -> Option<(BlockPos, T)> {
+        let tick = self.to_run.pop_front()?;
+        if !self.to_run_set.is_empty() {
+            self.to_run_set.remove(&UniqueTickKey::from(&tick));
+        }
+        let result = (tick.pos, tick.r#type.clone());
+        self.already_run.push(tick);
+        Some(result)
+    }
+    pub fn cleanup_after_tick(&mut self) {
         self.to_run.clear();
         self.containers_to_tick.clear();
         self.already_run.clear();

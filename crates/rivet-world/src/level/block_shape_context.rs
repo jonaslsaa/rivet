@@ -123,6 +123,39 @@ impl ShapeGeometry {
         Self::from_boxes(self.boxes.iter().chain(&other.boxes).copied())
     }
 
+    /// Shapes.mergedFaceOccludes uses opposing *clamped collision* faces.
+    /// Two partial faces can jointly close the boundary; testing individual
+    /// full-face masks cannot answer this query. Outside tangential geometry
+    /// is clipped to the unit block, matching Moonrise's clamped face slices.
+    pub fn merged_face_occludes(&self, other: &Self, direction: Direction) -> bool {
+        let mut rects = Vec::new();
+        for (geometry, face) in [(self, direction), (other, direction.get_opposite())] {
+            for shape in &geometry.boxes {
+                if !shape.has_face_slice(face) {
+                    continue;
+                }
+                let (min_u, min_v, max_u, max_v) = match face {
+                    Direction::Down | Direction::Up => {
+                        (shape.min_x, shape.min_z, shape.max_x, shape.max_z)
+                    }
+                    Direction::North | Direction::South => {
+                        (shape.min_x, shape.min_y, shape.max_x, shape.max_y)
+                    }
+                    Direction::West | Direction::East => {
+                        (shape.min_z, shape.min_y, shape.max_z, shape.max_y)
+                    }
+                };
+                rects.push(FaceRect::new(
+                    min_u.max(0.0),
+                    min_v.max(0.0),
+                    max_u.min(16.0),
+                    max_v.min(16.0),
+                ));
+            }
+        }
+        covers(&rects, &[FaceRect::full()])
+    }
+
     fn face_rects(&self, direction: Direction) -> Vec<FaceRect> {
         let mut rects = Vec::new();
         for shape in &self.boxes {
@@ -634,6 +667,35 @@ pub(crate) fn dynamic_shape_fallback(state: &BlockState) -> Option<ShapeQuery> {
 /// Exact position/context-empty geometry that does not require a block entity.
 /// Shared by worldgen and native spawn queries; no missing-entity fallback.
 pub fn position_shape(state: &BlockState, pos: &BlockPos) -> Option<ShapeQuery> {
+    let shape = position_collision_geometry(state, pos)?;
+    Some(ShapeQuery::from_geometries(
+        &shape,
+        &shape,
+        &ShapeGeometry::empty(),
+    ))
+}
+
+/// Exact generated static collision boxes or pure position-dependent bamboo
+/// geometry. Other dynamic families require their real block-entity context.
+pub fn collision_geometry(state: &BlockState, pos: &BlockPos) -> Option<ShapeGeometry> {
+    if let Some(shape) = position_collision_geometry(state, pos) {
+        return Some(shape);
+    }
+    static_collision_shape_of(state.id()).map(|boxes| {
+        ShapeGeometry::from_boxes(boxes.iter().map(|shape| {
+            ShapeBox::new(
+                f64::from(shape.min_x) / 2.0,
+                f64::from(shape.min_y) / 2.0,
+                f64::from(shape.min_z) / 2.0,
+                f64::from(shape.max_x) / 2.0,
+                f64::from(shape.max_y) / 2.0,
+                f64::from(shape.max_z) / 2.0,
+            )
+        }))
+    })
+}
+
+fn position_collision_geometry(state: &BlockState, pos: &BlockPos) -> Option<ShapeGeometry> {
     if state.block().name() != "minecraft:bamboo" {
         return None;
     }
@@ -647,11 +709,7 @@ pub fn position_shape(state: &BlockState, pos: &BlockPos) -> Option<ShapeQuery> 
         0.0,
         offset(seed >> 8),
     );
-    Some(ShapeQuery::from_geometries(
-        &shape,
-        &shape,
-        &ShapeGeometry::empty(),
-    ))
+    Some(shape)
 }
 
 fn shulker_state_facing(state: BlockState) -> Option<Direction> {

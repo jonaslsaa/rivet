@@ -2539,11 +2539,9 @@ fn write_block(
 
 // The `BlockBehaviour` predicate set `LevelChunkSection.setBlockState` needs —
 // the generated behavior-table flags (`is_air`/`is_randomly_ticking`/
-// `fluid_is_empty`) and the two flags the table does not carry
-// (`fluid_is_randomly_ticking`/`is_special_colliding`), conservatively false
-// (exact for the air/stone superflat content and the no-fluid value layer;
-// the real `FluidState.isRandomlyTicking`/`CollisionUtil.isSpecialCollidingBlock`
-// defer with the fluid/block-behavior units).
+// `fluid_is_empty`) and the actual pinned cache predicates for fluid random
+// ticks and CollisionUtil special collisions. These must agree with section
+// construction/reconstruction, otherwise incremental decrements corrupt counts.
 
 /// `BlockBehaviour.isAir(state)`.
 fn state_is_air(state: &StateId) -> bool {
@@ -2560,17 +2558,14 @@ fn fluid_is_empty(state: &StateId) -> bool {
     behavior_of(*state) & BEHAVIOR_FLAG_FLUID_EMPTY != 0
 }
 
-/// `getFluidState().isRandomlyTicking()` — lava fluid states randomly tick;
-/// the generated state table carries the fluid registry id even though it does
-/// not carry the fluid behavior flag itself.
+/// Actual `getFluidState().isRandomlyTicking()`.
 fn fluid_is_randomly_ticking(state: &StateId) -> bool {
-    matches!(BlockState::new(*state).fluid_id(), 3 | 4)
+    BlockState::new(*state).fluid_randomly_ticking()
 }
 
-/// `CollisionUtil.isSpecialCollidingBlock(state)` — false (no special-colliding
-/// flag in the generated table; exact for the superflat content).
-fn state_is_special_colliding(_state: &StateId) -> bool {
-    false
+/// Actual `CollisionUtil.isSpecialCollidingBlock(state)`.
+fn state_is_special_colliding(state: &StateId) -> bool {
+    BlockState::new(*state).is_special_colliding()
 }
 
 /// The region's block-state read over the FEATURES-pass `BlockState` value
@@ -2646,17 +2641,14 @@ fn fluid_is_empty_blockstate(state: &BlockState) -> bool {
     state.fluid_empty()
 }
 
-/// `getFluidState().isRandomlyTicking()` — lava fluid states randomly tick;
-/// the generated state table carries the fluid registry id even though it does
-/// not carry the fluid behavior flag itself.
+/// Actual `getFluidState().isRandomlyTicking()`.
 fn fluid_is_randomly_ticking_blockstate(state: &BlockState) -> bool {
-    matches!(state.fluid_id(), 3 | 4)
+    state.fluid_randomly_ticking()
 }
 
-/// `CollisionUtil.isSpecialCollidingBlock(state)` — false (no special-colliding
-/// flag in the generated table; exact for the superflat content).
-fn state_is_special_colliding_blockstate(_state: &BlockState) -> bool {
-    false
+/// Actual `CollisionUtil.isSpecialCollidingBlock(state)`.
+fn state_is_special_colliding_blockstate(state: &BlockState) -> bool {
+    state.is_special_colliding()
 }
 
 impl WorldGenRegion<'_, BlockState, WorldgenBiomeId, StructureKey> {

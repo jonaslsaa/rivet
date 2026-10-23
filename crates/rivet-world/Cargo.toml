@@ -66,6 +66,7 @@ rivet-brigadier = { workspace = true }
 rivet-text = { workspace = true }
 
 [dev-dependencies]
+serde = { version = "1", features = ["derive"] }
 # Tests build real containers (BytesMut-backed FriendlyByteBuf).
 bytes = { workspace = true }
 # The `feature.configurations` codec tests decode/encode through

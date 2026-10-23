@@ -48,6 +48,8 @@ use crate::generated::blocks::BlockId;
 use crate::generated::tags::BLOCK_TAG_BY_NAME;
 use crate::map_color::MapColor;
 
+mod section_flags;
+
 /// A concrete block state: a dense global state id with the owning block's
 /// property values already fixed. `Copy`/`Eq`/`Hash` mirror the id it wraps, so
 /// it can be used directly in palettes and sets.
@@ -420,6 +422,23 @@ impl BlockState {
     #[inline]
     pub fn fluid_empty(self) -> bool {
         self.behavior() & crate::generated::block_behaviors::BEHAVIOR_FLAG_FLUID_EMPTY != 0
+    }
+
+    /// Actual FluidState.isRandomlyTicking cache value from pinned Paper.
+    pub fn fluid_randomly_ticking(self) -> bool {
+        section_flags::flags(self.0) & 2 != 0
+    }
+
+    /// CollisionUtil.isSpecialCollidingBlock: large/cache-null collision
+    /// shape or MOVING_PISTON. Not inferred from static shape bounds.
+    pub fn is_special_colliding(self) -> bool {
+        section_flags::flags(self.0) & 1 != 0
+    }
+
+    /// Actual BlockState.hasAnalogOutputSignal, including state-dependent
+    /// behavior, rather than a hand-picked container/block family list.
+    pub fn has_analog_output_signal(self) -> bool {
+        section_flags::flags(self.0) & 4 != 0
     }
 
     /// Whether the state is solid — Paper `BlockBehaviour.BlockStateBase.isSolid()`

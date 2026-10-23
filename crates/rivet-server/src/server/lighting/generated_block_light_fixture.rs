@@ -9,7 +9,7 @@ use rivet_world::{
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
-fn air(pos: ChunkPos) -> LightChunk {
+pub(super) fn air(pos: ChunkPos) -> LightChunk {
     let height = create(-64, 384);
     ChunkAccess::new(
         pos,
@@ -21,7 +21,7 @@ fn air(pos: ChunkPos) -> LightChunk {
         &|state: &StateId| state_flags(*state),
     )
 }
-fn empty(chunk: &LightChunk) -> Vec<Option<bool>> {
+pub(super) fn empty(chunk: &LightChunk) -> Vec<Option<bool>> {
     chunk
         .get_sections()
         .iter()
@@ -29,7 +29,7 @@ fn empty(chunk: &LightChunk) -> Vec<Option<bool>> {
         .collect()
 }
 
-fn write(chunk: &mut LightChunk, x: i32, y: i32, z: i32, state: StateId) {
+pub(super) fn write(chunk: &mut LightChunk, x: i32, y: i32, z: i32, state: StateId) {
     let section = chunk.get_section_index(y) as usize;
     chunk.get_section_mut(section).set_block_state(
         x & 15,

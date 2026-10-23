@@ -88,6 +88,7 @@ pub mod data;
 /// with the entity crate. See `entity::mod`.
 pub mod entity;
 pub mod flag;
+pub mod fluid;
 pub mod level;
 pub mod levelgen;
 pub mod lighting;
