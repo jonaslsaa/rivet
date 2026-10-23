@@ -128,24 +128,8 @@ fn dimension_type_access() -> RegistryAccess {
 /// (day/night and weather, holder ids 0/1), matching the capture's set-time
 /// clock-update holders.
 fn world_clock_access() -> RegistryAccess {
-    let mut builder = RegistryBuilder::new(&*registries::WORLD_CLOCK);
-    builder.register(
-        &ResourceKey::create(
-            &*registries::WORLD_CLOCK,
-            Identifier::with_default_namespace("day"),
-        ),
-        Arc::new(rivet_registry::registries::WorldClock),
-        RegistrationInfo::BUILT_IN,
-    );
-    builder.register(
-        &ResourceKey::create(
-            &*registries::WORLD_CLOCK,
-            Identifier::with_default_namespace("weather"),
-        ),
-        Arc::new(rivet_registry::registries::WorldClock),
-        RegistrationInfo::BUILT_IN,
-    );
-    RegistryAccess::from_single_registry((*registries::WORLD_CLOCK).clone(), builder.freeze())
+    rivet_server::server::level::level_clock_runtime::pinned_clock_registry_access()
+        .expect("actual pinned WorldClock registry")
 }
 
 /// The `PlaySender` for the M1 server (compression threshold 256, the two

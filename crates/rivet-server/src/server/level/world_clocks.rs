@@ -23,6 +23,54 @@ impl Default for ClockState {
     }
 }
 impl ClockState {
+    pub fn codec<Ops: rivet_serialization::dynamic_ops::DynamicOps + 'static>()
+    -> std::sync::Arc<dyn rivet_serialization::codec::Codec<Self, Ops>> {
+        use rivet_serialization::{
+            codec,
+            data_result::DataResult,
+            record_builder::{self, RecordCodecBuilder},
+        };
+        use std::sync::Arc;
+        let rate = codec::validate(
+            codec::float_codec::<Ops>(),
+            Arc::new(|value: &f32| {
+                if *value > 0.0 && *value <= f32::MAX {
+                    DataResult::success(*value)
+                } else {
+                    DataResult::error(format!("Value must be positive: {value}"))
+                }
+            }),
+        );
+        record_builder::create(|instance| {
+            instance
+                .group(RecordCodecBuilder::of_named(
+                    Arc::new(|state: &Self| state.total_ticks),
+                    "total_ticks".into(),
+                    codec::long_codec::<Ops>(),
+                ))
+                .and(RecordCodecBuilder::of(
+                    Arc::new(|state: &Self| state.partial_tick),
+                    codec::optional_field_of("partial_tick", codec::float_codec::<Ops>(), 0.0),
+                ))
+                .and(RecordCodecBuilder::of(
+                    Arc::new(|state: &Self| state.rate),
+                    codec::optional_field_of("rate", rate, 1.0),
+                ))
+                .and(RecordCodecBuilder::of(
+                    Arc::new(|state: &Self| state.paused),
+                    codec::optional_field_of("paused", codec::bool_codec::<Ops>(), false),
+                ))
+                .apply(
+                    instance,
+                    Arc::new(|total_ticks, partial_tick, rate, paused| Self {
+                        total_ticks,
+                        partial_tick,
+                        rate,
+                        paused,
+                    }),
+                )
+        })
+    }
     fn tick(&mut self) {
         if !self.paused {
             self.partial_tick += self.rate;
@@ -169,6 +217,11 @@ impl WorldClocks {
     }
     pub fn mark_saved(&mut self) {
         self.dirty = false;
+    }
+    /// SavedDataStorage.set marks a freshly constructed/defaulted manager dirty.
+    /// Loading a successfully parsed saved manager does not.
+    pub(super) fn mark_created(&mut self) {
+        self.dirty = true;
     }
     pub fn states(&self) -> impl Iterator<Item = (&Identifier, ClockState)> {
         self.instances

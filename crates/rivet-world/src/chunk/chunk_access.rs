@@ -75,7 +75,7 @@ use crate::lighting::swmr_nibble_array::SwmrNibbleArray;
 use crate::ticks::{ProtoChunkTicks, ScheduledTick};
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_registry::biome_id::BiomeId;
-use rivet_registry::core::{BlockPos, ChunkPos, QuartPos, SectionPos};
+use rivet_registry::core::{BlockPos, ChunkPos, JavaBlockPosSet, QuartPos, SectionPos};
 use rivet_registry::fluid_id::FluidId;
 use rivet_registry::holder::Holder;
 
@@ -141,6 +141,7 @@ where
     /// winning, in place, so the map is exactly one entry per position and
     /// iteration order is first-insertion for surviving positions.
     pending_block_entities: IndexMap<BlockPos, CompoundTag>,
+    pending_block_entity_order: JavaBlockPosSet,
     /// Actual materialized values, separate from lazy pending serialized data.
     block_entities: IndexMap<BlockPos, crate::block_entity::NativeBlockEntity>,
     block_entity_order: block_entity_order::BlockEntityOrder,
@@ -238,6 +239,7 @@ where
             inhabited_time,
             structure_access: StructureAccess::new(),
             pending_block_entities: IndexMap::new(),
+            pending_block_entity_order: JavaBlockPosSet::new(),
             block_entities: IndexMap::new(),
             block_entity_order: block_entity_order::BlockEntityOrder::default(),
             heightmaps: [None, None, None, None, None, None],
@@ -298,6 +300,7 @@ where
             inhabited_time: self.inhabited_time,
             structure_access: self.structure_access.clone(),
             pending_block_entities: self.pending_block_entities.clone(),
+            pending_block_entity_order: self.pending_block_entity_order.clone(),
             block_entities: self.block_entities.clone(),
             block_entity_order: self.block_entity_order.clone(),
             heightmaps: self.heightmaps.clone(),
@@ -755,6 +758,23 @@ where
     pub fn pending_block_entities(&self) -> &IndexMap<BlockPos, CompoundTag> {
         &self.pending_block_entities
     }
+    pub fn pending_block_entity_positions_in_source_order(&self) -> Vec<BlockPos> {
+        self.pending_block_entity_order.iter().copied().collect()
+    }
+    pub fn prepare_level_pending_block_entity_order(&mut self) {
+        self.pending_block_entity_order =
+            JavaBlockPosSet::try_from_map_entries(self.pending_block_entity_order.iter().copied())
+                .unwrap_or_else(|error| std::panic::panic_any(error));
+    }
+    pub fn clear_pending_block_entities(&mut self) {
+        self.pending_block_entities.clear();
+        // Java HashMap.clear retains capacity. Remove each key from the same
+        // native table rather than replacing it with a new default table.
+        let keys = self.pending_block_entity_positions_in_source_order();
+        for key in keys {
+            self.pending_block_entity_order.remove(&key);
+        }
+    }
 
     pub fn block_entities(&self) -> &IndexMap<BlockPos, crate::block_entity::NativeBlockEntity> {
         &self.block_entities
@@ -806,6 +826,7 @@ where
     pub fn set_block_entity(&mut self, entity: crate::block_entity::NativeBlockEntity) {
         let pos = entity.position();
         self.pending_block_entities.shift_remove(&pos);
+        self.pending_block_entity_order.remove(&pos);
         self.block_entity_order.insert(pos);
         self.block_entities.insert(pos, entity);
     }
@@ -817,6 +838,7 @@ where
         entity.associate_level();
         let pos = entity.position();
         self.pending_block_entities.shift_remove(&pos);
+        self.pending_block_entity_order.remove(&pos);
         self.block_entity_order.insert(pos);
         if let Some(mut old) = self.block_entities.insert(pos, entity) {
             old.set_removed();
@@ -826,6 +848,7 @@ where
         self.block_entity_order.remove(*pos);
         self.block_entities.shift_remove(pos);
         self.pending_block_entities.shift_remove(pos);
+        self.pending_block_entity_order.remove(pos);
     }
     /// LevelChunk.getBlockEntity's removed-live branch removes only this map
     /// entry and returns immediately. A pending entry at the same key remains
@@ -894,6 +917,7 @@ where
     /// ported with the block-entity unit). Removes the position from the
     /// runtime authority, so a later packet materialization no longer emits it.
     pub fn remove_block_entity_nbt(&mut self, pos: &BlockPos) -> Option<CompoundTag> {
+        self.pending_block_entity_order.remove(pos);
         self.pending_block_entities.shift_remove(pos)
     }
 
@@ -912,6 +936,9 @@ where
         match self.pending_block_entities.get_mut(&pos_from_tag) {
             Some(slot) => *slot = entity_tag,
             None => {
+                self.pending_block_entity_order
+                    .try_insert(pos_from_tag)
+                    .unwrap_or_else(|error| std::panic::panic_any(error));
                 self.pending_block_entities.insert(pos_from_tag, entity_tag);
             }
         }
@@ -1269,6 +1296,7 @@ where
             inhabited_time,
             structure_access,
             pending_block_entities,
+            pending_block_entity_order,
             block_entities,
             block_entity_order,
             heightmaps,
@@ -1306,6 +1334,7 @@ where
         base.block_ticks = block_ticks;
         base.fluid_ticks = fluid_ticks;
         base.pending_block_entities = pending_block_entities;
+        base.pending_block_entity_order = pending_block_entity_order;
         base.block_entities = block_entities;
         base.block_entity_order = block_entity_order;
         base.block_nibbles = block_nibbles;
@@ -1371,6 +1400,7 @@ where
         base.block_ticks = self.block_ticks.clone();
         base.fluid_ticks = self.fluid_ticks.clone();
         base.pending_block_entities = self.pending_block_entities.clone();
+        base.pending_block_entity_order = self.pending_block_entity_order.clone();
         base.block_entities = self.block_entities.clone();
         base.block_entity_order = self.block_entity_order.clone();
         base.block_nibbles = self.block_nibbles.clone();

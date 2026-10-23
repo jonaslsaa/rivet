@@ -369,6 +369,7 @@ fn default_config() -> ServerConfig {
         enable_join: false,
         keepalive_timeout: Duration::from_secs(30),
         level_path: None,
+        time_affects_all_worlds: false,
         seed: ServerLevelConfig::M1_FIXTURE_SEED,
         enabled_features: rivet_world::flag::feature_flags::vanilla_set(),
     }

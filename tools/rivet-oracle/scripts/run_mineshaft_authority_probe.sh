@@ -11,7 +11,7 @@ mkdir -p "$classes"
 classpath="$runtime"
 while IFS= read -r -d '' library; do classpath="$classpath:$library"; done < <(find "$libraries" -name '*.jar' -print0)
 "${java_home:+$java_home/bin/}javac" -cp "$classpath" -d "$classes" "$root/src/java/MineshaftPlacementProbe.java" "$root/src/java/MineshaftAuthorityProbe.java"
-probe_output="${1:-$(mktemp -t rivet-mineshaft-authority)}"
+probe_output="${1:-$(mktemp -t rivet-mineshaft-authority.XXXXXX)}"
 if [[ $# == 0 ]]; then trap 'rm -f "$probe_output"' EXIT; fi
 perl -e 'alarm 180; exec @ARGV' "${java_home:+$java_home/bin/}java" -Xmx2G --enable-native-access=ALL-UNNAMED -cp "$classes:$classpath" MineshaftAuthorityProbe "$probe_output" >&2
 if [[ $# == 0 ]]; then cat "$probe_output"; fi

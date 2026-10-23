@@ -79,6 +79,9 @@ pub struct ServerConfig {
     /// Disposable world copy supplied by the load-world harness. `None` keeps
     /// the deterministic no-level superflat boot path.
     pub level_path: Option<PathBuf>,
+    /// Resolved Paper GlobalConfiguration.time.affectsAllWorlds. The default
+    /// is per-world; enabling global ownership requires its server manager.
+    pub time_affects_all_worlds: bool,
     /// The world seed for the generated world (`--seed` CLI argument; Paper
     /// `level-seed`). The superflat no-level boot uses it for the world object
     /// and the login packet's obfuscated seed; the region-backed boot always
@@ -107,6 +110,7 @@ impl Default for ServerConfig {
             enable_join: false,
             keepalive_timeout: Duration::from_secs(30),
             level_path: None,
+            time_affects_all_worlds: false,
             seed: level::ServerLevelConfig::M1_FIXTURE_SEED,
             enabled_features: rivet_world::level::world_data_configuration::WorldDataConfiguration::default_config().enabled_features().clone(),
         }
@@ -151,13 +155,23 @@ impl Server {
     /// Build the server, surfacing typed region-backed capability boundaries
     /// before the binary announces readiness.
     pub fn try_new(mut config: ServerConfig) -> Result<Self, level::RegionBackedBootError> {
+        if config.time_affects_all_worlds {
+            return Err(
+                level::level_clock_runtime::LevelClockError::GlobalClockManagerUnavailable.into(),
+            );
+        }
         // World selection is independent of whether the live join manager is
         // installed. A requested disk level must never be silently ignored and
         // replaced by superflat for a library caller with `enable_join=false`.
         let region_level = config
             .level_path
             .as_deref()
-            .map(level::region_backed::boot_level)
+            .map(|root| {
+                level::region_backed::boot_level_with_time_policy(
+                    root,
+                    config.time_affects_all_worlds,
+                )
+            })
             .transpose()?;
         config.enabled_features = region_level.as_ref().map_or_else(
             || rivet_world::level::world_data_configuration::WorldDataConfiguration::default_config().enabled_features().clone(),

@@ -43,6 +43,26 @@ impl JavaBlockPosSet {
     pub fn new() -> Self {
         Self::default()
     }
+    /// New HashMap<>().putAll(source): unlike repeated default-map put,
+    /// putMapEntries pre-sizes using the source map's complete entry count.
+    pub fn try_from_map_entries(
+        positions: impl IntoIterator<Item = BlockPos>,
+    ) -> Result<Self, JavaBlockPosSetError> {
+        let positions: Vec<_> = positions.into_iter().collect();
+        let mut set = Self::new();
+        if !positions.is_empty() {
+            // Pinned JDK putMapEntries uses double ceil, not the older
+            // float(size / loadFactor + 1) implementation (different at 12).
+            let target = ((positions.len() as f64) / 0.75).ceil() as usize;
+            let capacity = target.min(1 << 30).next_power_of_two();
+            set.bins = vec![Bin::default(); capacity];
+            set.threshold = capacity * 3 / 4;
+        }
+        for pos in positions {
+            set.try_insert(pos)?;
+        }
+        Ok(set)
+    }
     /// Replays new HashSet<>() then adds; not the pre-sized collection constructor.
     pub fn try_from_insertions(
         positions: impl IntoIterator<Item = BlockPos>,

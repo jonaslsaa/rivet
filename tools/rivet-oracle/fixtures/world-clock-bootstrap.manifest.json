@@ -1,0 +1,11 @@
+{
+  "paper_commit": "0a993450f129c4942c2a9ed45ba047412b4667cf",
+  "probe": "tools/rivet-oracle/src/java/WorldClockBootstrapProbe.java",
+  "command": "RIVET_JAVA_HOME=<Java25> bash tools/rivet-oracle/scripts/run_world_clock_bootstrap_probe.sh /tmp/world-clock-bootstrap.jsonl",
+  "records": 302,
+  "sha256": "38b0c1301a494c7c36be8348a405192ef6e12d2bc3a885872f65bcbbf1476484",
+  "codec_cases": "14 actual PackedClockStates.CODEC parse/resultOrPartial/encode cases, including required state, optional-field error partial defaults, unknown registry keys, default namespace aliases, duplicate canonical keys, and wide/fractional numeric coercion.",
+  "sync_cases": "288 actual ServerClockManager.createFullSyncPacket(player) calls across three actual dimension types, negative/extreme ticks, pause and ADVANCE_TIME gates, relative/fixed player time and wrapping offsets. Actual ClockInstance values loaded through its loadFrom body. Explicit world/player getter shells; no player constructor, simulation or transport claim.",
+  "ordering": "Packet update maps are recorded by sorted clock name for byte-stable semantic comparison. This does not claim JVM identity-hash HashMap order or alter actual packet construction. All i64 values are emitted directly by Java without floating JSON roundtrips.",
+  "repeat": "Two complete final probe runs byte-identical."
+}

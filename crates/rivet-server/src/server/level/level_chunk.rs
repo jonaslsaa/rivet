@@ -119,6 +119,7 @@ impl TryFrom<u16> for BiomeId {
 pub struct LevelChunk {
     /// Runtime lifecycle, distinct from persisted FULL and ticket activation.
     loaded: bool,
+    post_processing_done: bool,
     holder_full_status: Option<super::full_chunk_status::FullChunkStatusBinding>,
     unsaved_listener: Option<ChunkUnsavedListener>,
     /// The generic rivet-world chunk value.
@@ -153,6 +154,12 @@ pub enum ChunkUnsavedListener {
 impl LevelChunk {
     pub fn is_loaded(&self) -> bool {
         self.loaded
+    }
+    pub fn is_post_processing_done(&self) -> bool {
+        self.post_processing_done
+    }
+    pub(super) fn mark_post_processing_done(&mut self) {
+        self.post_processing_done = true;
     }
     pub fn get_full_status(&self) -> Option<super::full_chunk_status::FullChunkStatus> {
         self.holder_full_status
@@ -226,6 +233,7 @@ impl LevelChunk {
             fluid_ticks: rivet_world::ticks::LevelChunkTicks::new(),
             post_load_entities: Vec::new(),
             loaded: false,
+            post_processing_done: false,
             holder_full_status: None,
             unsaved_listener: None,
         }
@@ -363,6 +371,7 @@ impl LevelChunk {
             fluid_ticks: rivet_world::ticks::LevelChunkTicks::new_with_pending(stored_fluid_ticks),
             post_load_entities: Vec::new(),
             loaded: false,
+            post_processing_done: false,
             holder_full_status: None,
             unsaved_listener: None,
         })
@@ -489,6 +498,7 @@ impl LevelChunk {
         proto
             .base_mut()
             .prepare_level_block_entity_order(source_positions);
+        proto.base_mut().prepare_level_pending_block_entity_order();
         // Paper's full task hands ProtoChunk entities to postLoadProtoChunk.
         // Preserve the owned tags until the ServerLevel integration can consume
         // them; do not silently drop a representation already modeled by Rivet.
@@ -520,6 +530,7 @@ impl LevelChunk {
             fluid_ticks: rivet_world::ticks::LevelChunkTicks::new_with_pending(fluid_ticks),
             post_load_entities,
             loaded: false,
+            post_processing_done: false,
             holder_full_status: None,
             unsaved_listener: None,
         })

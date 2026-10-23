@@ -95,7 +95,6 @@ use rivet_protocol::protocol::game::clientbound_set_default_spawn::{
 };
 use rivet_protocol::protocol::game::clientbound_set_held_slot::ClientboundSetHeldSlotPacket;
 use rivet_protocol::protocol::game::clientbound_set_time::ClientboundSetTimePacket;
-use rivet_protocol::protocol::game::clock_network_state::ClockNetworkState;
 use rivet_protocol::protocol::game::common_player_spawn_info::CommonPlayerSpawnInfo;
 use rivet_protocol::protocol::game::position_move_rotation::PositionMoveRotation;
 use rivet_registry::ResourceKey;
@@ -400,22 +399,18 @@ pub fn send_level_info(
     sender.send_packet(connections, connection_id, INITIALIZE_BORDER_ID, &body)?;
     sent.push(INITIALIZE_BORDER_ID);
 
-    // `player.connection.send(level.clockManager().createFullSyncPacket(player))`
-    // — the two clocks the flat world runs (day/night and weather), both at
-    // `(totalTicks 0, partialTick 0.0, rate 1.0)`.
-    let clock_registry_id = sender
-        .world_clock_access()
-        .lookup(&*registries::WORLD_CLOCK)
-        .expect("WORLD_CLOCK registry present in the play sender")
-        .registry_id();
-    let clock_state = ClockNetworkState::new(0, 0.0, 1.0);
-    let set_time = ClientboundSetTimePacket::new(
-        0,
-        vec![
-            (Holder::reference(clock_registry_id, 0), clock_state),
-            (Holder::reference(clock_registry_id, 1), clock_state),
-        ],
-    );
+    // Actual ServerClockManager state, not a second set of join-only clocks.
+    // Current ServerPlayer construction initializes relativeTime=true and
+    // timeOffset=0; no per-player time mutation API exists in this slice.
+    let set_time = level
+        .clock_runtime()
+        .ok_or_else(|| PlaySendError::Encode("world clock manager is not initialized".into()))?
+        .full_sync_packet(
+            sender.world_clock_access(),
+            level.game_time(),
+            Some(crate::server::level::level_clock_runtime::PlayerClockProjection::default()),
+        )
+        .map_err(|error| PlaySendError::Encode(error.to_string()))?;
     let body = sender.encode_registry_body(
         ClientboundSetTimePacket::stream_codec(),
         &set_time,
