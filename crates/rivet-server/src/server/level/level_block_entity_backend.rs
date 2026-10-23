@@ -19,7 +19,18 @@ type Result<T> = std::result::Result<T, BlockEntityTickerError>;
 /// Actual world operations, supplied by the tick owner. No default implementation
 /// declares absent event, entity-spawn or environmental authority available.
 pub trait BlockEntityWorldServices {
+    /// Optional observer after the canonical Level/ServerLevel debug hook.
+    /// This is not a replacement authority for the source onAdded behavior.
     fn on_block_entity_added(&mut self, pos: BlockPos) -> Result<()>;
+    /// Awake removal must execute the real source clear immediately. Missing
+    /// transport is an unavailable authority, never a successful debug no-op.
+    fn hive_debug_transport(
+        &mut self,
+    ) -> Result<&mut dyn crate::server::level::level_debug_synchronizers::HiveDebugTransport> {
+        Err(BlockEntityTickerError::Unavailable(
+            "awake block-entity removal requires actual hive debug transport".into(),
+        ))
+    }
     fn require_ticker_body(&self, kind: NativeTickerKind) -> Result<()>;
     fn should_tick_blocks_at(&self, pos: BlockPos) -> bool;
     /// Includes actual border, BLOCK_TICKING status and loaded entity chunk.
@@ -45,6 +56,7 @@ pub enum NativeBlockEntityCreation {
 struct CanonicalBackend<'a, S> {
     chunks: &'a mut ChunkMap,
     random: &'a mut ThreadUnsafeRandom,
+    debug: &'a mut crate::server::level::level_debug_synchronizers::LevelDebugSynchronizers,
     services: &'a mut S,
 }
 
@@ -78,6 +90,16 @@ impl<S: BlockEntityWorldServices> BlockEntityTickerBackend for CanonicalBackend<
     }
 
     fn on_block_entity_added(&mut self, pos: BlockPos) -> Result<()> {
+        if self.live_entity(pos).is_some() {
+            // Disjoint borrows: the source getter refers to this live object,
+            // while the retained synchronizer owns only identity and cache.
+            let entity = self
+                .chunks
+                .get_chunk(ChunkPos::containing(&pos))
+                .and_then(|chunk| chunk.generation_base().get_block_entity(&pos))
+                .expect("live entity checked");
+            self.debug.register_block_entity(entity)?;
+        }
         self.services.on_block_entity_added(pos)
     }
     fn require_ticker_body(&self, kind: NativeTickerKind) -> Result<()> {
@@ -105,7 +127,22 @@ impl<S: BlockEntityWorldServices> BlockEntityTickerBackend for CanonicalBackend<
             .ok_or_else(|| {
                 BlockEntityTickerError::Unavailable(format!("missing runtime chunk at {pos:?}"))
             })?;
-        chunk.generation_base_mut().remove_block_entity(&pos);
+        // isInLevel is loaded || clientSide; this is a real server chunk.
+        if chunk.is_loaded() {
+            let base = chunk.generation_base_mut();
+            let removed = base.take_live_block_entity(&pos);
+            base.remove_block_entity_nbt(&pos);
+            if let Some(mut removed) = removed {
+                // The four supported EntityBlocks have no game-event listener.
+                // Source removes maps before debug, and setsRemoved only after
+                // debug returns. Do not roll back those partial effects on Err.
+                if !self.debug.is_sleeping() {
+                    self.debug
+                        .drop_block_entity(pos, self.services.hive_debug_transport()?)?;
+                }
+                removed.set_removed();
+            }
+        }
         Ok(())
     }
     fn report_tick_exception(&mut self, pos: BlockPos, message: &str) -> Result<()> {
@@ -117,6 +154,25 @@ impl<S: BlockEntityWorldServices> BlockEntityTickerBackend for CanonicalBackend<
 }
 
 impl ServerLevel {
+    /// Only the hive source is polled here. A global debug tick must also
+    /// execute wake enumeration and the other enabled source synchronizers.
+    pub fn tick_hive_debug<'a>(
+        &mut self,
+        players: impl IntoIterator<
+            Item = (
+                rivet_util::mth::Uuid,
+                &'a std::collections::HashSet<
+                    crate::server::level::level_debug_synchronizers::DebugSubscription,
+                >,
+                Vec<ChunkPos>,
+            ),
+        >,
+        transport: &mut impl crate::server::level::level_debug_synchronizers::HiveDebugTransport,
+    ) -> Result<()> {
+        self.debug_synchronizers
+            .tick_hives(&self.chunk_map, players, transport)
+    }
+
     /// Real LevelChunk lazy lookup/promotion followed by addAndRegister's
     /// loaded-only hooks. Pending tags are consumed only by actual promotion;
     /// missing native codecs/bodies remain errors with canonical data retained.
@@ -166,6 +222,7 @@ impl ServerLevel {
             let mut backend = CanonicalBackend {
                 chunks: &mut self.chunk_map,
                 random: &mut self.world_random,
+                debug: &mut self.debug_synchronizers,
                 services,
             };
             self.block_entity_runtime.register_existing_live(
@@ -201,6 +258,7 @@ impl ServerLevel {
         let mut backend = CanonicalBackend {
             chunks: &mut self.chunk_map,
             random: &mut self.world_random,
+            debug: &mut self.debug_synchronizers,
             services,
         };
         self.block_entity_runtime.register_existing_live(
@@ -222,6 +280,7 @@ impl ServerLevel {
             &mut CanonicalBackend {
                 chunks: &mut self.chunk_map,
                 random: &mut self.world_random,
+                debug: &mut self.debug_synchronizers,
                 services,
             },
             runs_normally,
@@ -384,8 +443,38 @@ mod tests {
     struct Services {
         added: Vec<BlockPos>,
         ticks: usize,
+        debug: Option<DebugTransport>,
+    }
+    #[derive(Default)]
+    struct DebugTransport(Vec<crate::server::level::level_debug_synchronizers::HiveDebugUpdate>);
+    impl crate::server::level::level_debug_synchronizers::HiveDebugTransport for DebugTransport {
+        fn subscriber_order(
+            &self,
+            members: &std::collections::HashSet<rivet_util::mth::Uuid>,
+        ) -> Result<Vec<rivet_util::mth::Uuid>> {
+            assert!(members.len() <= 1);
+            Ok(members.iter().copied().collect())
+        }
+        fn is_chunk_tracked(&self, _: rivet_util::mth::Uuid, _: ChunkPos) -> bool {
+            true
+        }
+        fn send(
+            &mut self,
+            _: rivet_util::mth::Uuid,
+            update: crate::server::level::level_debug_synchronizers::HiveDebugUpdate,
+        ) -> Result<()> {
+            self.0.push(update);
+            Ok(())
+        }
     }
     impl BlockEntityWorldServices for Services {
+        fn hive_debug_transport(
+            &mut self,
+        ) -> Result<&mut dyn crate::server::level::level_debug_synchronizers::HiveDebugTransport>
+        {
+            self.debug.as_mut().map(|debug| debug as &mut dyn crate::server::level::level_debug_synchronizers::HiveDebugTransport)
+                .ok_or_else(|| BlockEntityTickerError::Unavailable("actual test transport absent".into()))
+        }
         fn on_block_entity_added(&mut self, pos: BlockPos) -> Result<()> {
             self.added.push(pos);
             Ok(())
@@ -433,6 +522,90 @@ mod tests {
         }
         fn mid_tick_tasks(&mut self) -> Result<()> {
             panic!("one ticker cannot reach mid-tick batch")
+        }
+    }
+
+    #[test]
+    fn canonical_removal_clears_awake_hive_immediately_and_requires_real_transport() {
+        use crate::server::level::level_debug_synchronizers::{
+            DebugSubscription, ServerDebugSubscribers,
+        };
+        use rivet_util::mth::Uuid;
+        use std::collections::HashSet;
+        let pos = BlockPos::new(8, 64, 8);
+        let player = Uuid { most: 3, least: 9 };
+        for (loaded, awake, transport) in [
+            (true, true, true),
+            (true, true, false),
+            (true, false, false),
+            (false, true, true),
+        ] {
+            let generator = std::sync::Arc::new(
+                crate::server::level::generated_world::OverworldGenerator::new(42),
+            );
+            let mut state = generator.create_holder(ChunkPos::ZERO).into_state();
+            let block = BlockState::of(BlockId::from_name("minecraft:bee_nest").unwrap());
+            state.chunk_mut().set_block_state(8, 64, 8, block);
+            state
+                .chunk_mut()
+                .base_mut()
+                .set_block_entity(NativeBlockEntity::fresh(pos, block).unwrap());
+            state.chunk_mut().set_persisted_status(ChunkStatus::Spawn);
+            let mut chunk = LevelChunk::from_generated_spawn_proto(state.into_loan().0).unwrap();
+            chunk.set_loaded(loaded);
+            let mut level = ServerLevel::new_region_backed(ServerLevelConfig::default());
+            level.chunk_map.install(ChunkPos::ZERO, chunk);
+            let mut services = Services {
+                debug: transport.then(DebugTransport::default),
+                ..Default::default()
+            };
+            let subscriptions = HashSet::from([DebugSubscription::BeeHives]);
+            if awake {
+                let mut subscribers = ServerDebugSubscribers::default();
+                subscribers.tick([(player, &subscriptions)]);
+                level.begin_debug_tick(&subscribers);
+            }
+            level
+                .register_chunk_block_entities(ChunkPos::ZERO, true, true, &mut services)
+                .unwrap();
+            if awake && transport {
+                level
+                    .tick_hive_debug(
+                        [(player, &subscriptions, vec![ChunkPos::ZERO])],
+                        services.debug.as_mut().unwrap(),
+                    )
+                    .unwrap();
+                assert_eq!(services.debug.as_ref().unwrap().0.len(), 1);
+            }
+            let outcome = CanonicalBackend {
+                chunks: &mut level.chunk_map,
+                random: &mut level.world_random,
+                debug: &mut level.debug_synchronizers,
+                services: &mut services,
+            }
+            .remove_block_entity(pos);
+            assert_eq!(outcome.is_ok(), !loaded || !awake || transport);
+            let live = level
+                .chunk_map
+                .get_chunk(ChunkPos::ZERO)
+                .unwrap()
+                .generation_base()
+                .get_block_entity(&pos);
+            assert_eq!(
+                live.is_some(),
+                !loaded,
+                "native map mutation precedes any debug authority error"
+            );
+            if loaded && awake && transport {
+                let packets = &services.debug.as_ref().unwrap().0;
+                assert_eq!(
+                    packets.len(),
+                    2,
+                    "clear is immediate, not deferred to a later tick"
+                );
+                assert_eq!(packets[1].value, None);
+                assert_eq!(level.debug_synchronizers.registered_hive_count(), 0);
+            }
         }
     }
 

@@ -33,6 +33,7 @@
 // package/class name collision trips `module_inception`.
 #[allow(clippy::module_inception)]
 pub mod biome;
+pub mod gameplay_environment;
 pub mod biome_generation_settings;
 pub mod biome_id_codec;
 pub mod biome_manager;

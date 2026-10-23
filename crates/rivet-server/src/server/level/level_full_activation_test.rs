@@ -7,7 +7,7 @@ use crate::server::level::{
     entity_post_load::DetachedAnimalRemoval,
     entity_region_storage::EntitySaveLimits,
     entity_tracking::{TrackingPacket, TrackingPlayer, TrackingWorldEvent},
-    full_chunk_status::FullChunkStatus,
+    full_chunk_status::{FullChunkStatus, FullChunkStatusBinding},
     generated_chunk_owner::GenerationReadiness,
     generated_world::OverworldGenerator,
     generation_creature_runtime::WorldGenerationCreatureFactory,
@@ -141,6 +141,167 @@ struct Fixture {
     limits: EntitySaveLimits,
     _root: tempfile::TempDir,
 }
+
+#[test]
+fn holder_border_driver_requires_authority_and_orders_actual_owner_transitions() {
+    use crate::server::level::server_level::{
+        HolderTransitionAuthority, HolderTransitionEffect as Effect, HolderTransitionError,
+    };
+    struct Hooks {
+        events: Vec<(Effect, FullChunkStatus)>,
+        available: bool,
+        panic_at: Option<Effect>,
+    }
+    impl HolderTransitionAuthority for Hooks {
+        fn validate(&self, _: &ServerLevel, _: ChunkPos) -> Result<(), HolderTransitionError> {
+            if self.available {
+                Ok(())
+            } else {
+                Err(HolderTransitionError::Authority(
+                    "fixture listener authority absent".into(),
+                ))
+            }
+        }
+        fn apply(
+            &mut self,
+            world: &mut ServerLevel,
+            pos: ChunkPos,
+            effect: Effect,
+        ) -> Result<(), HolderTransitionError> {
+            self.events.push((
+                effect,
+                world
+                    .chunk_map
+                    .get_chunk(pos)
+                    .unwrap()
+                    .get_full_status()
+                    .unwrap(),
+            ));
+            if self.panic_at == Some(effect) {
+                std::panic::panic_any(914_i32);
+            }
+            Ok(())
+        }
+    }
+    let mut fixture = Fixture::new();
+    let owner = fixture.level.generated_chunk_owner_mut().unwrap();
+    let consumer = owner.new_consumer();
+    owner.replace_full_requests(consumer, [(ChunkPos::ZERO, FullChunkStatus::Full)]);
+    fixture.binding = owner.holder_status_binding(ChunkPos::ZERO);
+    fixture.activate(&mut Services::default()).unwrap();
+    assert!(
+        matches!(
+            fixture.level.prepare_chunk_for_send(ChunkPos::ZERO),
+            Ok(crate::server::level::player_chunk_loader::ChunkSendReadiness::Pending)
+        ),
+        "canonical activation is not real border readiness"
+    );
+    let mut hooks = Hooks {
+        events: Vec::new(),
+        available: false,
+        panic_at: None,
+    };
+    assert!(matches!(
+        fixture.level.process_generated_holder_status(
+            ChunkPos::ZERO,
+            &mut hooks,
+            &mut EmptyObservers
+        ),
+        Err(HolderTransitionError::Authority(_))
+    ));
+    assert_eq!(fixture.binding.get(), FullChunkStatus::Inaccessible);
+    hooks.available = true;
+    assert!(
+        fixture
+            .level
+            .process_generated_holder_status(ChunkPos::ZERO, &mut hooks, &mut EmptyObservers)
+            .unwrap()
+    );
+    assert_eq!(
+        hooks.events,
+        vec![
+            (Effect::PreBorder, FullChunkStatus::Full),
+            (Effect::EnsureAutosave, FullChunkStatus::Full),
+            (Effect::Border, FullChunkStatus::Full),
+            (
+                Effect::CompleteConsumers(FullChunkStatus::Full),
+                FullChunkStatus::Full
+            ),
+        ]
+    );
+    assert!(matches!(
+        fixture.level.prepare_chunk_for_send(ChunkPos::ZERO),
+        Ok(crate::server::level::player_chunk_loader::ChunkSendReadiness::Ready)
+    ));
+    assert!(
+        !fixture
+            .level
+            .generated_chunk_owner()
+            .unwrap()
+            .is_ticking_ready(ChunkPos::ZERO)
+    );
+    fixture
+        .level
+        .generated_chunk_owner_mut()
+        .unwrap()
+        .release_consumer(consumer);
+    hooks.events.clear();
+    assert!(
+        fixture
+            .level
+            .process_generated_holder_status(ChunkPos::ZERO, &mut hooks, &mut EmptyObservers)
+            .unwrap()
+    );
+    assert_eq!(
+        hooks.events,
+        vec![
+            (Effect::NotBorder, FullChunkStatus::Full),
+            (Effect::PostNotBorder, FullChunkStatus::Full),
+            (Effect::CheckUnload, FullChunkStatus::Inaccessible)
+        ]
+    );
+    assert_eq!(fixture.binding.get(), FullChunkStatus::Inaccessible);
+    assert!(matches!(
+        fixture.level.prepare_chunk_for_send(ChunkPos::ZERO),
+        Ok(crate::server::level::player_chunk_loader::ChunkSendReadiness::Pending)
+    ));
+    assert!(
+        fixture.level.block_ticks.has_container(ChunkPos::ZERO),
+        "FULL border leave is not chunk eviction"
+    );
+    let owner = fixture.level.generated_chunk_owner_mut().unwrap();
+    let consumer = owner.new_consumer();
+    owner.replace_full_requests(consumer, [(ChunkPos::ZERO, FullChunkStatus::Full)]);
+    hooks.panic_at = Some(Effect::PreBorder);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = fixture.level.process_generated_holder_status(
+            ChunkPos::ZERO,
+            &mut hooks,
+            &mut EmptyObservers,
+        );
+    }))
+    .unwrap_err();
+    assert_eq!(panic.downcast_ref::<i32>(), Some(&914));
+    assert_eq!(
+        fixture.binding.get(),
+        FullChunkStatus::Full,
+        "source prehook status publication survives panic"
+    );
+    hooks.panic_at = None;
+    fixture
+        .level
+        .generated_chunk_owner_mut()
+        .unwrap()
+        .release_consumer(consumer);
+    assert!(
+        fixture
+            .level
+            .process_generated_holder_status(ChunkPos::ZERO, &mut hooks, &mut EmptyObservers)
+            .unwrap(),
+        "finally must clear processing guard"
+    );
+    assert_eq!(fixture.binding.get(), FullChunkStatus::Inaccessible);
+}
 impl Fixture {
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
@@ -232,12 +393,16 @@ impl Fixture {
             .unwrap()
             .chunk_mut()
             .set_persisted_status(ChunkStatus::Spawn);
+        let binding = level
+            .generated_chunk_owner_mut()
+            .unwrap()
+            .holder_status_binding(ChunkPos::ZERO);
         Self {
             level,
             generator,
             carts,
             animals,
-            binding: FullChunkStatusBinding::new(FullChunkStatus::Inaccessible),
+            binding,
             limits,
             _root: root,
         }
@@ -260,9 +425,6 @@ impl Fixture {
             secure_uuid: &mut secure,
             tracking: &mut observers,
             block_entities: services,
-            settings: FullActivationSettings {
-                holder_status: self.binding.clone(),
-            },
         };
         self.level
             .activate_generated_chunk(ChunkPos::ZERO, &mut context)

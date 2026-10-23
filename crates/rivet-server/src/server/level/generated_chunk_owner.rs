@@ -4,6 +4,10 @@ use super::generated_world::{
     FeatureWorkspace, FeatureWritebacks, GeneratedChunkError, GenerationChunkHolder,
     GenerationChunkLoan, GenerationChunkState, OverworldGenerator, SpawnRegionProtos,
 };
+use super::{
+    full_chunk_status::{FullChunkStatus, FullChunkStatusBinding},
+    holder_readiness::HolderReadiness,
+};
 use crate::server::lighting::{GeneratedLightBridge, GeneratedLightWorkspace};
 use rivet_registry::core::ChunkPos;
 use rivet_world::chunk::status::{ChunkStatus, chunk_pyramid::GENERATION_PYRAMID};
@@ -107,6 +111,8 @@ pub struct GeneratedChunkOwner {
     generator: Arc<OverworldGenerator>,
     next_consumer: u64,
     consumers: HashMap<GenerationConsumerId, HashMap<ChunkPos, ChunkStatus>>,
+    full_consumers: HashMap<GenerationConsumerId, HashMap<ChunkPos, FullChunkStatus>>,
+    holders: HashMap<ChunkPos, HolderReadiness>,
     required: HashMap<ChunkPos, ChunkStatus>,
     chunks: HashMap<ChunkPos, Entry>,
     promoted: HashMap<ChunkPos, PromotedEntry>,
@@ -124,6 +130,8 @@ impl GeneratedChunkOwner {
             generator,
             next_consumer: 0,
             consumers: HashMap::new(),
+            full_consumers: HashMap::new(),
+            holders: HashMap::new(),
             required: HashMap::new(),
             chunks: HashMap::new(),
             promoted: HashMap::new(),
@@ -238,7 +246,86 @@ impl GeneratedChunkOwner {
             return Err(GenerationPromotionError::AlreadyActivated(pos));
         }
         entry.activated = true;
+        self.holders.entry(pos).or_default().set_generation_full();
         Ok(())
+    }
+
+    /// The supplier bound during actual FULL conversion; activation alone does
+    /// not publish border/ticking availability through this shared metadata.
+    pub fn holder_status_binding(&mut self, pos: ChunkPos) -> FullChunkStatusBinding {
+        self.ensure_holder(pos);
+        self.holders[&pos].binding()
+    }
+    fn ensure_holder(&mut self, pos: ChunkPos) {
+        if self.holders.contains_key(&pos) {
+            return;
+        }
+        let mut holder = HolderReadiness::default();
+        for z in -2_i32..=2 {
+            for x in -2_i32..=2 {
+                let neighbour = ChunkPos::new(pos.x().wrapping_add(x), pos.z().wrapping_add(z));
+                if self
+                    .holders
+                    .get(&neighbour)
+                    .is_some_and(HolderReadiness::border_published)
+                {
+                    holder.set_neighbour(x, z, true);
+                }
+            }
+        }
+        self.holders.insert(pos, holder);
+    }
+    pub fn pending_full_status(&self, pos: ChunkPos) -> Option<FullChunkStatus> {
+        self.holders.get(&pos).map(HolderReadiness::pending)
+    }
+    pub fn current_full_status(&self, pos: ChunkPos) -> FullChunkStatus {
+        self.holders
+            .get(&pos)
+            .map_or(FullChunkStatus::Inaccessible, HolderReadiness::current)
+    }
+    pub fn is_ticking_ready(&self, pos: ChunkPos) -> bool {
+        self.current_full_status(pos)
+            .is_or_after(FullChunkStatus::BlockTicking)
+    }
+    pub fn is_entity_ticking_ready(&self, pos: ChunkPos) -> bool {
+        self.current_full_status(pos)
+            .is_or_after(FullChunkStatus::EntityTicking)
+    }
+    pub fn next_full_status(&self, pos: ChunkPos) -> Option<FullChunkStatus> {
+        self.holders.get(&pos)?.next()
+    }
+    /// Host executes NewChunkHolder.handleFullStatusChange's real side effects.
+    /// Upgrades publish before hooks, downgrades after hooks. This deliberately
+    /// cannot complete generation or skip a rung of the CURRENT ladder.
+    pub(super) fn publish_full_status(&mut self, pos: ChunkPos, status: FullChunkStatus) -> bool {
+        self.holders
+            .get_mut(&pos)
+            .is_some_and(|h| h.publish_current(status))
+    }
+    /// Actual FULL border enter/leave, NOT LevelChunk.loaded or conversion.
+    /// Source notification order is dz outer, dx inner, reversed offsets.
+    pub(super) fn publish_full_border(&mut self, pos: ChunkPos, loaded: bool) {
+        if let Some(holder) = self.holders.get_mut(&pos) {
+            holder.set_border_published(loaded);
+        }
+        for z in -2_i32..=2 {
+            for x in -2_i32..=2 {
+                let neighbour = ChunkPos::new(pos.x().wrapping_add(x), pos.z().wrapping_add(z));
+                if let Some(holder) = self.holders.get_mut(&neighbour) {
+                    holder.set_neighbour(-x, -z, loaded);
+                }
+            }
+        }
+    }
+    pub(super) fn begin_full_status_change(&mut self, pos: ChunkPos) -> bool {
+        self.holders
+            .get_mut(&pos)
+            .is_some_and(HolderReadiness::begin_processing)
+    }
+    pub(super) fn end_full_status_change(&mut self, pos: ChunkPos) {
+        if let Some(holder) = self.holders.get_mut(&pos) {
+            holder.end_processing();
+        }
     }
 
     pub(super) fn install_generation_creature_factory(
@@ -370,6 +457,7 @@ impl GeneratedChunkOwner {
     }
     pub fn release_consumer(&mut self, id: GenerationConsumerId) -> bool {
         let removed = self.consumers.remove(&id).is_some();
+        self.full_consumers.remove(&id);
         if removed {
             self.rebuild_requirements();
         }
@@ -391,6 +479,81 @@ impl GeneratedChunkOwner {
                     .or_insert(target);
             }
         }
+        // A ticket at 31/32 requires FULL neighbours at Chebyshev distance
+        // two/one, respectively; their own accumulated generation dependency
+        // pyramids remain the sole terrain dependency authority.
+        let mut tickets = HashMap::<ChunkPos, i32>::new();
+        for consumer in self.consumers.values() {
+            for (&pos, &target) in consumer {
+                if target == ChunkStatus::Full {
+                    tickets
+                        .entry(pos)
+                        .and_modify(|level| *level = (*level).min(33))
+                        .or_insert(33);
+                }
+            }
+        }
+        for consumer in self.full_consumers.values() {
+            for (&origin, &status) in consumer {
+                if status == FullChunkStatus::Inaccessible {
+                    continue;
+                }
+                let level = super::chunk_level::by_full_status(status);
+                let radius = 33 - level;
+                for z in -radius..=radius {
+                    for x in -radius..=radius {
+                        let pos =
+                            ChunkPos::new(origin.x().wrapping_add(x), origin.z().wrapping_add(z));
+                        let ticket = level + x.abs().max(z.abs());
+                        tickets
+                            .entry(pos)
+                            .and_modify(|old| *old = (*old).min(ticket))
+                            .or_insert(ticket);
+                        for (dependency, status) in dependencies(pos, ChunkStatus::Full, true)
+                            .into_iter()
+                            .chain([(pos, ChunkStatus::Full)])
+                        {
+                            self.required
+                                .entry(dependency)
+                                .and_modify(|old| *old = ChunkStatus::max(*old, status))
+                                .or_insert(status);
+                        }
+                    }
+                }
+            }
+        }
+        for holder in self.holders.values_mut() {
+            holder.set_ticket_level(i32::MAX);
+        }
+        for (pos, level) in tickets {
+            self.ensure_holder(pos);
+            self.holders.get_mut(&pos).unwrap().set_ticket_level(level);
+        }
+    }
+    /// Explicit ticket demand, separate from mere terrain/generation targets.
+    /// Releasing a consumer removes both kinds without evicting native values.
+    pub fn replace_full_requests(
+        &mut self,
+        id: GenerationConsumerId,
+        requests: impl IntoIterator<Item = (ChunkPos, FullChunkStatus)>,
+    ) -> bool {
+        if !self.consumers.contains_key(&id) {
+            return false;
+        }
+        let consumer = self.full_consumers.entry(id).or_default();
+        consumer.clear();
+        for (pos, status) in requests {
+            consumer
+                .entry(pos)
+                .and_modify(|old| {
+                    if status.is_or_after(*old) {
+                        *old = status;
+                    }
+                })
+                .or_insert(status);
+        }
+        self.rebuild_requirements();
+        true
     }
     pub fn requested_status(&self, pos: ChunkPos) -> Option<ChunkStatus> {
         self.required.get(&pos).copied()
@@ -1153,6 +1316,75 @@ fn dependencies(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_ticking_tickets_require_real_full_neighbours_and_preserve_current() {
+        let mut owner = GeneratedChunkOwner::new(generator());
+        let consumer = owner.new_consumer();
+        let center = ChunkPos::ZERO;
+        owner.replace_full_requests(consumer, [(center, FullChunkStatus::EntityTicking)]);
+        for z in -2..=2 {
+            for x in -2..=2 {
+                assert_eq!(
+                    owner.requested_status(ChunkPos::new(x, z)),
+                    Some(ChunkStatus::Full)
+                );
+            }
+        }
+        let binding = owner.holder_status_binding(center);
+        owner
+            .holders
+            .get_mut(&center)
+            .unwrap()
+            .set_generation_full();
+        assert_eq!(
+            owner.pending_full_status(center),
+            Some(FullChunkStatus::Full)
+        );
+        assert_eq!(binding.get(), FullChunkStatus::Inaccessible);
+        // These explicit calls model completed real host border callbacks;
+        // no loaded flag or generation status substitutes for publication.
+        for z in -2..=2 {
+            for x in -2..=2 {
+                let pos = ChunkPos::new(x, z);
+                owner.holders.get_mut(&pos).unwrap().set_generation_full();
+                assert!(owner.publish_full_status(pos, FullChunkStatus::Full));
+                owner.publish_full_border(pos, true);
+            }
+        }
+        assert_eq!(
+            owner.pending_full_status(center),
+            Some(FullChunkStatus::EntityTicking)
+        );
+        assert_eq!(binding.get(), FullChunkStatus::Full);
+        assert!(
+            !owner.publish_full_status(center, FullChunkStatus::EntityTicking),
+            "cannot skip real block-ticking hooks"
+        );
+        assert!(owner.publish_full_status(center, FullChunkStatus::BlockTicking));
+        assert!(owner.publish_full_status(center, FullChunkStatus::EntityTicking));
+        owner.publish_full_border(ChunkPos::new(2, 2), false);
+        assert_eq!(
+            owner.pending_full_status(center),
+            Some(FullChunkStatus::BlockTicking)
+        );
+        assert_eq!(
+            binding.get(),
+            FullChunkStatus::EntityTicking,
+            "downgrade hooks have not executed"
+        );
+        assert!(owner.publish_full_status(center, FullChunkStatus::BlockTicking));
+        owner.release_consumer(consumer);
+        assert_eq!(
+            owner.pending_full_status(center),
+            Some(FullChunkStatus::Inaccessible)
+        );
+        assert_eq!(
+            binding.get(),
+            FullChunkStatus::BlockTicking,
+            "ticket removal alone cannot skip source unload effects"
+        );
+    }
     fn generator() -> Arc<OverworldGenerator> {
         static GENERATOR: std::sync::LazyLock<Arc<OverworldGenerator>> =
             std::sync::LazyLock::new(|| Arc::new(OverworldGenerator::new(42)));

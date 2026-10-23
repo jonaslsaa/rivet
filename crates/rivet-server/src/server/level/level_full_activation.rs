@@ -6,7 +6,6 @@ use crate::server::level::{
     entity_post_load::{EntityPostLoadContext, ExistingEntityView},
     entity_save_limits::{EntitySaveLimitError, EntitySaveLimits},
     entity_tracking::TrackingAuthority,
-    full_chunk_status::FullChunkStatusBinding,
     generated_chunk_owner::GenerationPromotionError,
     level_block_entity_runtime::BlockEntityTickerError,
 };
@@ -18,12 +17,6 @@ use std::sync::Arc;
 #[path = "level_full_activation_test.rs"]
 mod tests;
 
-#[derive(Debug, Clone)]
-pub struct FullActivationSettings {
-    /// The actual holder/ticket owner's supplier, not persisted chunk status.
-    pub holder_status: FullChunkStatusBinding,
-}
-
 /// Authorities for effects not encoded in a chunk. Existing POI, entity,
 /// tracker, BE and scheduler work is called directly, not replaced by these.
 pub struct FullActivationContext<'entity, 'world, S: BlockEntityWorldServices> {
@@ -32,7 +25,6 @@ pub struct FullActivationContext<'entity, 'world, S: BlockEntityWorldServices> {
     pub secure_uuid: &'world mut dyn FnMut() -> std::io::Result<Uuid>,
     pub tracking: &'world mut dyn TrackingAuthority,
     pub block_entities: &'world mut S,
-    pub settings: FullActivationSettings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,10 +180,15 @@ impl ServerLevel {
             self.chunk_map.install(pos, runtime);
         }
         *stage = FullActivationStage::HolderBinding;
+        let holder_status = self
+            .generated_chunk_owner
+            .as_mut()
+            .expect("validated canonical owner")
+            .holder_status_binding(pos);
         self.chunk_map
             .get_chunk_mut(pos)
             .expect("canonical promoted runtime")
-            .bind_full_status(context.settings.holder_status.clone());
+            .bind_full_status(holder_status);
 
         // Pinned PaperHooks.setCurrentlyLoading is empty. The source finally
         // calls that same empty body with null; there is no native loading
