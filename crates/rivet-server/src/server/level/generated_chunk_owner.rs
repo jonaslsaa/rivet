@@ -16,6 +16,7 @@ pub struct GenerationConsumerId(u64);
 
 #[derive(Debug)]
 pub enum GenerationOwnerError {
+    FullActivation(Arc<super::server_level::FullActivationError>),
     StructureGenerationUnavailable { status: ChunkStatus },
     Generation(GeneratedChunkError),
     StructureTerrain(rivet_world::levelgen::noise::beardifier::BeardifierError),
@@ -28,6 +29,7 @@ pub enum GenerationOwnerError {
 impl std::fmt::Display for GenerationOwnerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::FullActivation(error) => write!(f, "{error}"),
             Self::StructureGenerationUnavailable { status } => write!(
                 f,
                 "actual structure generation is unavailable for {status:?}"
@@ -80,6 +82,7 @@ struct PromotedEntry {
     // terrain/BE/entity/tick value itself lives exclusively in ChunkMap.
     _metadata: GenerationChunkLoan,
     activated: bool,
+    failure: Option<GenerationOwnerError>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -165,7 +168,8 @@ impl GeneratedChunkOwner {
                     pos,
                     PromotedEntry {
                         _metadata: metadata,
-                        activated: false
+                        activated: false,
+                        failure: None
                     }
                 )
                 .is_none()
@@ -180,15 +184,44 @@ impl GeneratedChunkOwner {
         self.promoted.get(&pos).is_some_and(|entry| entry.activated)
     }
 
+    pub(super) fn full_activation_error(
+        &self,
+        pos: ChunkPos,
+    ) -> Option<&Arc<super::server_level::FullActivationError>> {
+        let failure = self
+            .promoted
+            .get(&pos)
+            .and_then(|entry| entry.failure.as_ref())
+            .or_else(|| {
+                self.chunks
+                    .get(&pos)?
+                    .failure
+                    .as_ref()
+                    .map(|(_, error)| error)
+            });
+        match failure {
+            Some(GenerationOwnerError::FullActivation(error)) => Some(error),
+            _ => None,
+        }
+    }
+
+    pub(super) fn record_full_activation_error(
+        &mut self,
+        pos: ChunkPos,
+        error: Arc<super::server_level::FullActivationError>,
+    ) {
+        if let Some(entry) = self.promoted.get_mut(&pos) {
+            entry.failure = Some(GenerationOwnerError::FullActivation(error));
+        } else if let Some(entry) = self.chunks.get_mut(&pos) {
+            entry.failure = Some((
+                ChunkStatus::Full,
+                GenerationOwnerError::FullActivation(error),
+            ));
+        }
+    }
+
     /// Only the tick-thread host that completed post-load, live BE/tick
     /// registration and unsaved-listener installation may publish completion.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Actual FULL lifecycle orchestration is not installed yet; production must not bypass it merely to publish readiness"
-        )
-    )]
     pub(super) fn complete_full_activation(
         &mut self,
         pos: ChunkPos,
@@ -409,6 +442,18 @@ impl GeneratedChunkOwner {
         Ok(())
     }
     pub fn readiness(&self, pos: ChunkPos, target: ChunkStatus) -> GenerationReadiness<'_> {
+        if target == ChunkStatus::Full
+            && let Some(error) = self
+                .promoted
+                .get(&pos)
+                .and_then(|entry| entry.failure.as_ref())
+        {
+            return GenerationReadiness::Failed {
+                pos,
+                status: ChunkStatus::Full,
+                error,
+            };
+        }
         if self
             .promoted
             .get(&pos)
@@ -425,6 +470,18 @@ impl GeneratedChunkOwner {
         let mut required = dependencies(pos, target, true);
         required.push((pos, target));
         for (dependency, status) in required {
+            if status == ChunkStatus::Full
+                && let Some(error) = self
+                    .promoted
+                    .get(&dependency)
+                    .and_then(|entry| entry.failure.as_ref())
+            {
+                return GenerationReadiness::Failed {
+                    pos: dependency,
+                    status: ChunkStatus::Full,
+                    error,
+                };
+            }
             if let Some(entry) = self.chunks.get(&dependency)
                 && let Some((failed_status, error)) = &entry.failure
                 && status.is_or_after(*failed_status)
@@ -441,6 +498,9 @@ impl GeneratedChunkOwner {
     /// Explicit retry after an external capability change; canonical data and
     /// the holder's own terminal FEATURES failure cache remain intact.
     pub fn retry(&mut self, pos: ChunkPos) -> bool {
+        if let Some(entry) = self.promoted.get_mut(&pos) {
+            return entry.failure.take().is_some();
+        }
         self.chunks
             .get_mut(&pos)
             .is_some_and(|entry| entry.failure.take().is_some())

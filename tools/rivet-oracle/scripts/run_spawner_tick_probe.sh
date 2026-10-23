@@ -13,5 +13,5 @@ while IFS= read -r -d '' library; do classpath="$classpath:$library"; done < <(f
 "${java_home:+$java_home/bin/}javac" -cp "$classpath" -d "$classes" "$root/src/java/ChestMinecartProbe.java" "$root/src/java/SpawnerTickProbe.java"
 probe_output="$(mktemp -t rivet-spawner-tick)"
 trap 'rm -f "$probe_output"' EXIT
-"${java_home:+$java_home/bin/}java" --enable-native-access=ALL-UNNAMED -cp "$classes:$classpath" SpawnerTickProbe "$probe_output" >&2
+"${java_home:+$java_home/bin/}java" --enable-native-access=ALL-UNNAMED -cp "$classes:$classpath" SpawnerTickProbe "$probe_output" "$@" >&2
 sed -n '/^{/p' "$probe_output"

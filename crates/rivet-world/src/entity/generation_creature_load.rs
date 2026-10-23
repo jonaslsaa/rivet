@@ -178,7 +178,7 @@ fn unsupported(message: &str) -> CreatureLoadError {
 
 impl NativeEntityState {
     fn load_entity(&mut self, input: &CompoundTag) -> Result<(), CreatureLoadError> {
-        for key in ["Passengers", "Tags"] {
+        for key in ["Tags"] {
             if input.get_list(key).is_some_and(|v| !v.list.is_empty()) {
                 return Err(unsupported(&format!(
                     "nonempty {key} requires native runtime"
@@ -495,6 +495,18 @@ impl super::NativeEntityState {
 }
 impl NativeGenerationCreature {
     pub fn load(&mut self, input: &CompoundTag) -> Result<(), CreatureLoadError> {
+        self.load_root(input)?;
+        if input
+            .get_list("Passengers")
+            .is_some_and(|list| !list.list.is_empty())
+        {
+            return Err(unsupported("nonempty Passengers requires native runtime"));
+        }
+        Ok(())
+    }
+    /// Actual root Entity.load chain only. EntityType.loadEntityRecursive
+    /// performs its postLoad callback/limits BEFORE passenger recursion.
+    pub fn load_root(&mut self, input: &CompoundTag) -> Result<(), CreatureLoadError> {
         match self {
             Self::Sheep(sheep) => {
                 sheep.animal.load_animal(input)?;

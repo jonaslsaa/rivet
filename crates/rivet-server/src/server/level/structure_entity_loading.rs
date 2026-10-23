@@ -19,6 +19,16 @@ pub fn load_native_entity(
     input: &CompoundTag,
     factory: &dyn StructureEntityCreation,
 ) -> Result<Option<NativeChestMinecart>, StructureError> {
+    let entity = load_native_cart_root(input, factory)?;
+    if entity.is_some() {
+        require_supported_passengers(input)?;
+    }
+    Ok(entity)
+}
+fn load_native_cart_root(
+    input: &CompoundTag,
+    factory: &dyn StructureEntityCreation,
+) -> Result<Option<NativeChestMinecart>, StructureError> {
     let entity_type = input.get("id").and_then(|id| {
         EntityType::codec::<NbtOps>()
             .parse(&NbtOps, id)
@@ -39,7 +49,7 @@ pub fn load_native_entity(
     let Some(mut entity) = factory.create_chest_minecart()? else {
         return Ok(None);
     };
-    match entity.load(input) {
+    match entity.load_root(input) {
         Ok(()) => Ok(Some(entity)),
         Err(MinecartLoadError::Invalid(message)) => {
             tracing::warn!(%message,"Exception loading entity");
@@ -60,6 +70,20 @@ pub fn load_native_world_entity(
     creature_factory: &dyn super::generation_creature_runtime::GenerationCreatureFactory,
     registries: &rivet_registry::RegistryAccess,
 ) -> Result<Option<rivet_world::entity::loaded_entity::NativeLoadedEntity>, StructureError> {
+    let entity = load_native_world_entity_root(input, cart_factory, creature_factory, registries)?;
+    if entity.is_some() {
+        require_supported_passengers(input)?;
+    }
+    Ok(entity)
+}
+/// Genuine loadStaticEntity (constructor + root load), without pretending the
+/// later EntityType postLoad callback/passenger recursion already executed.
+pub fn load_native_world_entity_root(
+    input: &CompoundTag,
+    cart_factory: &dyn StructureEntityCreation,
+    creature_factory: &dyn super::generation_creature_runtime::GenerationCreatureFactory,
+    registries: &rivet_registry::RegistryAccess,
+) -> Result<Option<rivet_world::entity::loaded_entity::NativeLoadedEntity>, StructureError> {
     use rivet_world::entity::{
         generation_creature::CreatureLoadError, loaded_entity::NativeLoadedEntity,
     };
@@ -73,7 +97,7 @@ pub fn load_native_world_entity(
         return Ok(None);
     };
     if entity_type.get_key() == "minecraft:chest_minecart" {
-        return load_native_entity(input, cart_factory)
+        return load_native_cart_root(input, cart_factory)
             .map(|e| e.map(NativeLoadedEntity::ChestMinecart));
     }
     let Some(mut entity) = creature_factory
@@ -82,7 +106,7 @@ pub fn load_native_world_entity(
     else {
         return Ok(None);
     };
-    match entity.load(input) {
+    match entity.load_root(input) {
         Ok(()) => Ok(Some(NativeLoadedEntity::Creature(entity))),
         Err(CreatureLoadError::Invalid(message)) => {
             tracing::warn!(%message,"Exception loading entity");
@@ -92,4 +116,18 @@ pub fn load_native_world_entity(
             Err(StructureError::PlacementUnavailable(error.to_string()))
         }
     }
+}
+
+/// Explicit boundary after a surviving root's postLoad callback. Passenger
+/// relationships/recursive constructors are not implemented by this slice.
+pub fn require_supported_passengers(input: &CompoundTag) -> Result<(), StructureError> {
+    if input
+        .get_list("Passengers")
+        .is_some_and(|list| !list.list.is_empty())
+    {
+        return Err(StructureError::PlacementUnavailable(
+            "EntityType.loadPassengersRecursive requires native passenger graph authority".into(),
+        ));
+    }
+    Ok(())
 }

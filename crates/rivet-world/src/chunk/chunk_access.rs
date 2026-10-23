@@ -827,6 +827,13 @@ where
         self.block_entities.shift_remove(pos);
         self.pending_block_entities.shift_remove(pos);
     }
+    /// LevelChunk.getBlockEntity's removed-live branch removes only this map
+    /// entry and returns immediately. A pending entry at the same key remains
+    /// for the next lookup; this is distinct from removeBlockEntity's lifecycle.
+    pub fn remove_live_block_entity(&mut self, pos: &BlockPos) {
+        self.block_entity_order.remove(*pos);
+        self.block_entities.shift_remove(pos);
+    }
     /// SerializableChunkData uses live values first and pending tags otherwise.
     /// Only owned save copies receive keepPacked; canonical payloads do not.
     /// Ordering is a stable carry, not exact Paper serialization order: Paper
@@ -1608,6 +1615,26 @@ mod tests {
                 row["name"]
             );
         }
+    }
+
+    #[test]
+    fn removed_live_lookup_does_not_consume_pending_authority() {
+        use crate::block_entity::NativeBlockEntity;
+        use rivet_registry::{block_state::BlockState, generated::blocks::BlockId};
+        let mut base = default_base();
+        let pos = BlockPos::new(8, 64, 8);
+        let state = BlockState::of(BlockId::from_name("minecraft:chest").unwrap());
+        let mut entity = NativeBlockEntity::fresh(pos, state).unwrap();
+        entity.set_removed();
+        base.set_block_entity(entity);
+        // Hostile duplicated live/pending load state: source getBlockEntity
+        // removes only the removed live value, leaving pending for next call.
+        let tag = rivet_nbt::tag_parser::parse_compound_fully("{id:'DUMMY',x:8,y:64,z:8}").unwrap();
+        base.pending_block_entities.insert(pos, tag.clone());
+        base.remove_live_block_entity(&pos);
+        assert!(base.get_block_entity(&pos).is_none());
+        assert_eq!(base.get_block_entity_nbt(&pos), Some(&tag));
+        assert!(base.block_entity_positions_in_source_order().is_empty());
     }
 
     #[test]

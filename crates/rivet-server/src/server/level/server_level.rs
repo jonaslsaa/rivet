@@ -48,7 +48,13 @@ use super::generated_world::OverworldGenerator;
 mod block_entity_backend;
 #[path = "level_entity_runtime.rs"]
 mod entity_runtime;
+#[path = "level_full_activation.rs"]
+mod full_activation;
 pub use block_entity_backend::BlockEntityWorldServices;
+pub use full_activation::{
+    FullActivationCause, FullActivationContext, FullActivationError, FullActivationSettings,
+    FullActivationStage,
+};
 #[cfg(unix)]
 #[path = "generated_poi_runtime.rs"]
 mod poi_runtime;
@@ -57,7 +63,7 @@ mod tick_runtime;
 use super::level_chunk::LevelChunkSaveError;
 use super::player_chunk_loader::ChunkSendReadiness;
 use super::region_backed::{RegionBackedBootError, RegionChunkSource};
-pub use entity_runtime::LevelEntityError;
+pub use entity_runtime::{EntityChunkUnloadFailure,LevelEntityError};
 #[cfg(unix)]
 pub use poi_runtime::GeneratedPoiError;
 use rivet_world::chunk::status::ChunkStatus;
@@ -188,7 +194,10 @@ pub struct ServerLevel {
     writable_storage: Option<Arc<super::level_storage_access::LevelStorageAccess>>,
     #[cfg(unix)]
     poi_storage: Option<super::poi_storage::StoredPoiManager>,
+    #[cfg(unix)]
+    entity_storage: Option<super::entity_region_storage::StoredEntityRegion>,
     boot_settings: Option<super::generated_boot::GeneratedBootSettings>,
+    runtime_settings: Option<super::world_runtime_settings::WorldRuntimeSettings>,
     seed: i64,
     /// Level.random: one unique-seeded stream, independent of terrain and
     /// entity-constructor randomness, retained for the world's lifetime.
@@ -332,7 +341,10 @@ impl ServerLevel {
             writable_storage: None,
             #[cfg(unix)]
             poi_storage: None,
+            #[cfg(unix)]
+            entity_storage: None,
             boot_settings: None,
+            runtime_settings: None,
             seed: config.seed,
             world_random: rivet_util::random::ThreadUnsafeRandom::new(
                 rivet_util::random::random_support::generate_unique_seed(),
@@ -368,6 +380,55 @@ impl ServerLevel {
     /// terrain seed or substitute an entity-construction RNG.
     pub fn random_mut(&mut self) -> &mut rivet_util::random::ThreadUnsafeRandom {
         &mut self.world_random
+    }
+
+    pub fn runtime_settings(&self) -> Option<&super::world_runtime_settings::WorldRuntimeSettings> {
+        self.runtime_settings.as_ref()
+    }
+
+    /// Install one resolved configuration and its actual world-bound tracker.
+    /// Parsing alone never publishes a runtime configuration for another world.
+    pub fn install_runtime_settings(
+        &mut self,
+        access: rivet_registry::RegistryAccess,
+        settings: super::world_runtime_settings::WorldRuntimeSettings,
+    ) -> Result<(), LevelEntityError> {
+        let uuid = self
+            .world_uuid
+            .ok_or(LevelEntityError::MissingWorldIdentity)?;
+        self.install_entity_tracking(access, settings.tracking_config(uuid))?;
+        self.runtime_settings = Some(settings);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    pub fn load_runtime_settings_from_files(
+        &mut self,
+        paper_defaults: &std::path::Path,
+        spigot: &std::path::Path,
+    ) -> Result<(), super::world_runtime_settings::RuntimeSettingsInstallError> {
+        use super::world_runtime_settings::{RuntimeSettingsInstallError, WorldRuntimeSettings};
+        let storage = self
+            .writable_storage
+            .as_ref()
+            .ok_or(RuntimeSettingsInstallError::MissingWorldOwner)?;
+        let generator = self
+            .generated_chunk_owner
+            .as_ref()
+            .ok_or(RuntimeSettingsInstallError::MissingWorldOwner)?
+            .generator();
+        let access = generator.registry_access().clone();
+        let world_config = storage
+            .dimension_path(&self.dimension)
+            .join("paper-world.yml");
+        let settings = WorldRuntimeSettings::load(
+            paper_defaults,
+            &world_config,
+            spigot,
+            &self.dimension.identifier().to_string(),
+        )?;
+        self.install_runtime_settings(access, settings)?;
+        Ok(())
     }
 
     pub fn block_entity_runtime(

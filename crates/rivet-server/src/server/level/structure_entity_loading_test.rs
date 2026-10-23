@@ -190,6 +190,7 @@ fn actual_paper_duplicate_uuid_stream_policy_and_removal_rng() {
             events: Vec::new(),
         };
         let mut context = EntityPostLoadContext {
+            save_limits: &Default::default(), // Oracle world has no restrictive per-type limits.
             cart_factory: &factory,
             creature_factory: &UnavailableCreatures,
             registries: &access,
@@ -284,6 +285,7 @@ fn post_load_unavailable_support_preserves_typed_prefix_and_current_removal_valu
     let access = RegistryAccess::empty();
     let mut removal = DetachedAnimalRemoval;
     let mut context = EntityPostLoadContext {
+        save_limits: &Default::default(),
         cart_factory: &factory,
         creature_factory: &UnavailableCreatures,
         registries: &access,

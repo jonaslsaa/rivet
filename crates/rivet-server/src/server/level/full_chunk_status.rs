@@ -20,6 +20,26 @@ pub enum FullChunkStatus {
     EntityTicking,
 }
 
+/// Shared holder metadata behind LevelChunk's source status supplier. This is
+/// not a chunk owner or an activation result. The actual ticket/status owner
+/// retains the binding and publishes its transitions; chunks only read it.
+#[derive(Debug, Clone)]
+pub struct FullChunkStatusBinding(std::sync::Arc<std::sync::atomic::AtomicU8>);
+impl FullChunkStatusBinding {
+    pub fn new(status: FullChunkStatus) -> Self {
+        Self(std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+            status as u8,
+        )))
+    }
+    pub fn get(&self) -> FullChunkStatus {
+        FullChunkStatus::ALL[self.0.load(std::sync::atomic::Ordering::Relaxed) as usize]
+    }
+    pub fn set(&self, status: FullChunkStatus) {
+        self.0
+            .store(status as u8, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 impl FullChunkStatus {
     /// The ladder in Java declaration order (indices are the ordinals).
     pub const ALL: [Self; 4] = [

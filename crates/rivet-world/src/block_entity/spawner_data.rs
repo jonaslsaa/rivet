@@ -131,6 +131,27 @@ impl SpawnerData {
             tick_delay: 0,
         })
     }
+    /// BaseSpawner.load on an existing object. Unlike construction, loading
+    /// does not reset Paper's transient tickDelay; an absent/invalid SpawnData
+    /// also leaves the previous nextSpawnData installed before the potentials
+    /// fallback is evaluated. Display-entity invalidation is not modeled as a
+    /// server actor here; no such actor is fabricated or retained.
+    pub fn reload(
+        &mut self,
+        pos: BlockPos,
+        input: &CompoundTag,
+    ) -> Result<(), NativeBlockEntityError> {
+        let mut effective = input.clone();
+        if spawn_data(input).is_none()
+            && let Some(previous) = &self.next_spawn
+        {
+            effective.put("SpawnData".into(), Tag::Compound(previous.clone()));
+        }
+        let mut loaded = Self::load(pos, &effective)?;
+        loaded.tick_delay = self.tick_delay;
+        *self = loaded;
+        Ok(())
+    }
     pub fn save(&self, pos: BlockPos) -> CompoundTag {
         let mut tag = super::base_tag(pos, "minecraft:mob_spawner");
         if !self.public_bukkit_values.tags.is_empty() {
