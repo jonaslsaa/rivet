@@ -36,6 +36,7 @@ pub enum GenerationEnvironmentError {
 #[derive(Debug)]
 pub struct GenerationEnvironment {
     has_skylight: bool,
+    has_ceiling: bool,
     min_y: i32,
     height: i32,
     spawn_mobs: bool,
@@ -58,7 +59,7 @@ impl GenerationEnvironment {
         enabled_features: &FeatureFlagSet,
         game_time: i64,
     ) -> Result<Self, GenerationEnvironmentError> {
-        let (has_skylight, min_y, height) = dimension_fields(dimension_type)?;
+        let (has_skylight, has_ceiling, min_y, height) = dimension_fields(dimension_type)?;
         let mut rules = read_saved_data(dimension_path, "game_rules")?
             .and_then(|data| {
                 decode_saved(
@@ -92,6 +93,7 @@ impl GenerationEnvironment {
         border.apply_initial_settings(game_time);
         Ok(Self {
             has_skylight,
+            has_ceiling,
             min_y,
             height,
             spawn_mobs,
@@ -101,6 +103,9 @@ impl GenerationEnvironment {
 
     pub fn has_skylight(&self) -> bool {
         self.has_skylight
+    }
+    pub fn has_ceiling(&self) -> bool {
+        self.has_ceiling
     }
     pub fn height_range(&self) -> (i32, i32) {
         (self.min_y, self.height)
@@ -146,7 +151,9 @@ impl GenerationEnvironment {
     }
 }
 
-fn dimension_fields(key: &Identifier) -> Result<(bool, i32, i32), GenerationEnvironmentError> {
+fn dimension_fields(
+    key: &Identifier,
+) -> Result<(bool, bool, i32, i32), GenerationEnvironmentError> {
     let elements = SYNCHRONIZED_NBT
         .iter()
         .find(|(name, _)| *name == "minecraft:dimension_type")
@@ -168,10 +175,11 @@ fn dimension_fields(key: &Identifier) -> Result<(bool, i32, i32), GenerationEnvi
     };
     match (
         data.get_boolean("has_skylight"),
+        data.get_boolean("has_ceiling"),
         data.get_int("min_y"),
         data.get_int("height"),
     ) {
-        (Some(sky), Some(min_y), Some(height)) => Ok((sky, min_y, height)),
+        (Some(sky), Some(ceiling), Some(min_y), Some(height)) => Ok((sky, ceiling, min_y, height)),
         _ => Err(GenerationEnvironmentError::InvalidDimensionType(
             key.clone(),
         )),
@@ -271,11 +279,11 @@ mod tests {
     fn dimension_channels_come_from_actual_pinned_registry() {
         assert_eq!(
             dimension_fields(&Identifier::parse("minecraft:overworld")).unwrap(),
-            (true, -64, 384)
+            (true, false, -64, 384)
         );
         assert_eq!(
             dimension_fields(&Identifier::parse("minecraft:the_nether")).unwrap(),
-            (false, 0, 256)
+            (false, true, 0, 256)
         );
         assert!(matches!(
             dimension_fields(&Identifier::parse("example:missing")),

@@ -720,6 +720,7 @@ dependencies = [
  "rivet-text",
  "rivet-util",
  "rivet-world",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

@@ -82,6 +82,8 @@ pub struct GeneratedChunkOwner {
     structure_placement: Option<Arc<super::structure_placement_adapter::StructurePlacementRuntime>>,
     light_channels: Option<(bool, bool)>,
     spawn_settings: Option<(WorldBorderSettings, bool)>,
+    generation_creature_factory:
+        Option<Arc<dyn super::generation_creature_runtime::GenerationCreatureFactory>>,
 }
 
 impl GeneratedChunkOwner {
@@ -96,10 +98,36 @@ impl GeneratedChunkOwner {
             structure_placement: None,
             light_channels: None,
             spawn_settings: None,
+            generation_creature_factory: None,
         }
     }
     pub fn generator(&self) -> &Arc<OverworldGenerator> {
         &self.generator
+    }
+
+    pub(super) fn install_generation_creature_factory(
+        &mut self,
+        world_uuid: rivet_util::mth::Uuid,
+        factory: Arc<dyn super::generation_creature_runtime::GenerationCreatureFactory>,
+    ) -> Result<(), Arc<dyn super::generation_creature_runtime::GenerationCreatureFactory>> {
+        if self.generation_creature_factory.is_some() || factory.world_uuid() != world_uuid {
+            return Err(factory);
+        }
+        self.generation_creature_factory = Some(factory);
+        for entry in self.chunks.values_mut() {
+            if matches!(
+                entry.failure,
+                Some((
+                    ChunkStatus::Spawn,
+                    GenerationOwnerError::Generation(GeneratedChunkError::SpawnRegion(
+                        super::generated_world::SpawnRegionError::UnsupportedEntity { .. }
+                    ))
+                ))
+            ) {
+                entry.failure = None;
+            }
+        }
+        Ok(())
     }
     /// Supply the actual dimension's enabled light channels. Neither channel
     /// is inferred from the generator or from the presence of a workspace.
@@ -577,9 +605,10 @@ impl GeneratedChunkOwner {
             }
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 if let Some(workspace) = spawn_workspace.as_mut() {
-                    holder.generate_spawn_with_region_rule(
+                    holder.generate_spawn_with_region_runtime(
                         workspace,
                         self.spawn_settings.expect("validated SPAWN settings").1,
+                        self.generation_creature_factory.as_deref(),
                     )
                 } else if let Some(terrain) = terrain {
                     holder.generate_through_with_structure_terrain(next, terrain)
@@ -1046,6 +1075,135 @@ mod tests {
                 .chunk()
                 .get_entities()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn canonical_spawn_admits_actual_paper_sheep_population_and_preserves_neighbors() {
+        use super::super::{
+            entity_construction::EntityConstructionRuntime,
+            entity_id_allocator::EntityIdSequence,
+            generation_creature_runtime::{
+                GenerationCreatureFactory, WorldGenerationCreatureFactory,
+            },
+        };
+        use rivet_nbt::tag_parser::parse_compound_fully;
+        use rivet_registry::generated::biomes::BIOME_BY_ID;
+        use rivet_util::RandomSource;
+        use rivet_world::{
+            block::blocks::Blocks, chunk::storage::section_reconstruction::BiomeId,
+            flag::feature_flags::vanilla_set, levelgen::heightmap::FINAL_HEIGHTMAPS,
+        };
+        let rows: Vec<serde_json::Value> = include_str!(
+            "../../../../../tools/rivet-oracle/fixtures/generation-population-positive.jsonl"
+        )
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+        let expected = &rows[1];
+        let center = ChunkPos::new(
+            expected["chunk_x"].as_i64().unwrap() as i32,
+            expected["chunk_z"].as_i64().unwrap() as i32,
+        );
+        let saved: Vec<_> = expected["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tag| parse_compound_fully(tag.as_str().unwrap()).unwrap())
+            .collect();
+        assert!(
+            !saved.is_empty(),
+            "the live oracle must actually populate creatures"
+        );
+        let uuid = rivet_util::mth::Uuid {
+            most: saved[0].get_long("WorldUUIDMost").unwrap(),
+            least: saved[0].get_long("WorldUUIDLeast").unwrap(),
+        };
+        let ids = EntityIdSequence::default();
+        for _ in 0..100 {
+            ids.next_id(|_| false);
+        } // Actual Java shell starts its shared counter at100.
+        let runtime = EntityConstructionRuntime::with_seed(ids.clone(), 42);
+        let factory: Arc<dyn GenerationCreatureFactory> =
+            Arc::new(WorldGenerationCreatureFactory::new(
+                runtime.clone(),
+                uuid,
+                vanilla_set(),
+                Arc::new(|_| false),
+            ));
+        let generator = generator();
+        let mut owner = GeneratedChunkOwner::new(Arc::clone(&generator));
+        let refused = owner
+            .install_generation_creature_factory(
+                rivet_util::mth::Uuid {
+                    most: uuid.most ^ 1,
+                    least: uuid.least,
+                },
+                Arc::clone(&factory),
+            )
+            .expect_err("wrong world cannot gain construction authority");
+        assert!(Arc::ptr_eq(&refused, &factory));
+        assert!(
+            owner
+                .install_generation_creature_factory(uuid, factory)
+                .is_ok()
+        );
+        let plains_id = BIOME_BY_ID
+            .iter()
+            .position(|name| *name == "minecraft:plains")
+            .unwrap() as u16;
+        let mut fixtures = dependencies(center, ChunkStatus::Spawn, false);
+        fixtures.push((center, ChunkStatus::Light));
+        for (pos, status) in fixtures {
+            insert_task_fixture(&mut owner, pos, status);
+            let chunk = owner.chunks.get_mut(&pos).unwrap().state.chunk_mut();
+            let source = generator.biome_source();
+            chunk.fill_biomes_from_noise(source, source.sampler(), &|_| BiomeId(plains_id));
+            chunk.prime_heightmaps(&FINAL_HEIGHTMAPS);
+            for x in 0..16 {
+                for z in 0..16 {
+                    chunk.set_block_state(
+                        pos.get_min_block_x() + x,
+                        63,
+                        pos.get_min_block_z() + z,
+                        Blocks::GRASS_BLOCK.default_block_state(),
+                    );
+                }
+            }
+            let mut nibbles = chunk.base().sky_nibbles().to_vec();
+            for nibble in &mut nibbles {
+                nibble.set_full();
+                nibble.update_visible();
+            }
+            chunk.base_mut().set_sky_nibbles(nibbles);
+            chunk.base_mut().set_light_correct(true);
+        }
+        owner.set_spawn_settings(WorldBorderSettings::default_settings(), true);
+        owner.required.insert(center, ChunkStatus::Spawn);
+        let report = owner.run_jobs(1);
+        assert_eq!(report.advanced, 1, "{:?}", owner.chunks[&center].failure);
+        assert_eq!(owner.status(center), ChunkStatus::Spawn);
+        assert_eq!(
+            owner.state(center).unwrap().chunk().get_entities(),
+            saved.as_slice(),
+            "full native saved tags from actual NaturalSpawner"
+        );
+        assert_eq!(
+            runtime
+                .with_entity_random(|random| random.next_long())
+                .unwrap(),
+            expected["entity_next"].as_i64().unwrap()
+        );
+        assert_eq!(ids.next_id(|_| false), 101 + saved.len() as i32);
+        assert_eq!(owner.len(), 9);
+        for (pos, status) in dependencies(center, ChunkStatus::Spawn, false) {
+            assert_eq!(owner.status(pos), status);
+            assert!(owner.state(pos).unwrap().chunk().get_entities().is_empty());
+        }
+        assert_eq!(
+            owner.run_jobs(1).attempted,
+            0,
+            "completed population does not repeat or fabricate FULL"
         );
     }
 

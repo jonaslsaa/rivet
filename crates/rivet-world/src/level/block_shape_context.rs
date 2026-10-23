@@ -631,7 +631,9 @@ pub(crate) fn dynamic_shape_fallback(state: &BlockState) -> Option<ShapeQuery> {
 
 /// Bamboo has a dynamic shape because of its position offset, but does not
 /// consult block entities. Resolve it before requesting a live shape context.
-pub(crate) fn position_shape(state: &BlockState, pos: &BlockPos) -> Option<ShapeQuery> {
+/// Exact position/context-empty geometry that does not require a block entity.
+/// Shared by worldgen and native spawn queries; no missing-entity fallback.
+pub fn position_shape(state: &BlockState, pos: &BlockPos) -> Option<ShapeQuery> {
     if state.block().name() != "minecraft:bamboo" {
         return None;
     }

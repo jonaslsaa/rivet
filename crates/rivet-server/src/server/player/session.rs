@@ -426,6 +426,32 @@ impl PlayerSessionManager {
         )
     }
 
+    /// Construct generation creatures using this server's shared identity
+    /// stream and this destination world's actual UUID/live-ID occupancy.
+    pub fn generation_creature_factory(
+        &self,
+        enabled_features: rivet_world::flag::feature_flag_set::FeatureFlagSet,
+    ) -> Result<
+        crate::server::level::generation_creature_runtime::WorldGenerationCreatureFactory,
+        crate::server::level::generation_creature_runtime::GenerationCreatureError,
+    > {
+        use crate::server::level::generation_creature_runtime::{
+            GenerationCreatureError, WorldGenerationCreatureFactory,
+        };
+        let uuid = self.level.world_uuid().ok_or_else(|| {
+            GenerationCreatureError::AuthorityUnavailable(
+                "destination world has no persisted Paper UUID".into(),
+            )
+        })?;
+        let occupancy = self.entity_ids.occupancy();
+        Ok(WorldGenerationCreatureFactory::new(
+            self.entity_construction.clone(),
+            uuid,
+            enabled_features,
+            std::sync::Arc::new(move |id| occupancy.contains(id)),
+        ))
+    }
+
     /// The chunk center the session's `PlayerChunkLoader` is currently
     /// centered on (issue #521 test observability: proves a move recentered the
     /// loader — the cache center the client's cache is anchored to). `None`
