@@ -32,9 +32,6 @@ pub trait BlockEntityWorldServices {
         ))
     }
     fn require_ticker_body(&self, kind: NativeTickerKind) -> Result<()>;
-    fn should_tick_blocks_at(&self, pos: BlockPos) -> bool;
-    /// Includes actual border, BLOCK_TICKING status and loaded entity chunk.
-    fn is_ticking(&self, pos: BlockPos) -> bool;
     fn tick_body(
         &mut self,
         runtime: &mut LevelBlockEntityRuntime,
@@ -53,7 +50,16 @@ pub enum NativeBlockEntityCreation {
     Immediate,
 }
 
+enum CanonicalTickReadiness<'a> {
+    World {
+        owner: &'a crate::server::level::generated_chunk_owner::GeneratedChunkOwner,
+        border: &'a rivet_world::level::WorldBorder,
+    },
+    #[cfg(test)]
+    Fixture,
+}
 struct CanonicalBackend<'a, S> {
+    readiness: Option<CanonicalTickReadiness<'a>>,
     chunks: &'a mut ChunkMap,
     random: &'a mut ThreadUnsafeRandom,
     debug: &'a mut crate::server::level::level_debug_synchronizers::LevelDebugSynchronizers,
@@ -106,10 +112,34 @@ impl<S: BlockEntityWorldServices> BlockEntityTickerBackend for CanonicalBackend<
         self.services.require_ticker_body(kind)
     }
     fn should_tick_blocks_at(&self, pos: BlockPos) -> bool {
-        self.services.should_tick_blocks_at(pos)
+        match self
+            .readiness
+            .as_ref()
+            .expect("tick entry validates canonical readiness")
+        {
+            CanonicalTickReadiness::World { owner, .. } => {
+                owner.is_ticking_ready(ChunkPos::containing(&pos))
+            }
+            #[cfg(test)]
+            CanonicalTickReadiness::Fixture => true,
+        }
     }
     fn is_ticking(&self, pos: BlockPos) -> bool {
-        self.services.is_ticking(pos)
+        match self
+            .readiness
+            .as_ref()
+            .expect("tick entry validates canonical readiness")
+        {
+            CanonicalTickReadiness::World { owner, border } => {
+                border.is_within_bounds(&pos)
+                    && owner
+                        .current_full_status(ChunkPos::containing(&pos))
+                        .is_or_after(crate::server::level::FullChunkStatus::BlockTicking)
+                    && self.chunks.get_chunk(ChunkPos::containing(&pos)).is_some()
+            }
+            #[cfg(test)]
+            CanonicalTickReadiness::Fixture => true,
+        }
     }
     fn tick_body(
         &mut self,
@@ -167,6 +197,7 @@ impl ServerLevel {
         services: &mut impl BlockEntityWorldServices,
     ) -> Result<()> {
         let mut backend = CanonicalBackend {
+            readiness: None,
             chunks: &mut self.chunk_map,
             random: &mut self.world_random,
             debug: &mut self.debug_synchronizers,
@@ -189,6 +220,7 @@ impl ServerLevel {
             .get_chunk(ChunkPos::containing(&pos))
             .is_some_and(|chunk| chunk.is_loaded());
         let backend = CanonicalBackend {
+            readiness: None,
             chunks: &mut self.chunk_map,
             random: &mut self.world_random,
             debug: &mut self.debug_synchronizers,
@@ -264,6 +296,7 @@ impl ServerLevel {
         let loaded = chunk.is_loaded();
         if loaded {
             let mut backend = CanonicalBackend {
+                readiness: None,
                 chunks: &mut self.chunk_map,
                 random: &mut self.world_random,
                 debug: &mut self.debug_synchronizers,
@@ -300,6 +333,7 @@ impl ServerLevel {
             .generation_base()
             .block_entity_positions_in_source_order();
         let mut backend = CanonicalBackend {
+            readiness: None,
             chunks: &mut self.chunk_map,
             random: &mut self.world_random,
             debug: &mut self.debug_synchronizers,
@@ -320,8 +354,32 @@ impl ServerLevel {
         runs_normally: bool,
         services: &mut impl BlockEntityWorldServices,
     ) -> Result<()> {
+        let readiness = if runs_normally
+            && (self.block_entity_runtime.registered_count() != 0
+                || self.block_entity_runtime.pending_count() != 0)
+        {
+            Some(CanonicalTickReadiness::World {
+                owner: self.generated_chunk_owner.as_ref().ok_or_else(|| {
+                    BlockEntityTickerError::Unavailable(
+                        "actual block-entity ticking holder owner".into(),
+                    )
+                })?,
+                border: self
+                    .generation_environment
+                    .as_ref()
+                    .ok_or_else(|| {
+                        BlockEntityTickerError::Unavailable(
+                            "actual block-entity ticking world border".into(),
+                        )
+                    })?
+                    .world_border(),
+            })
+        } else {
+            None
+        };
         self.block_entity_runtime.tick(
             &mut CanonicalBackend {
+                readiness,
                 chunks: &mut self.chunk_map,
                 random: &mut self.world_random,
                 debug: &mut self.debug_synchronizers,
@@ -354,12 +412,6 @@ mod tests {
             Err(BlockEntityTickerError::Unavailable(format!(
                 "fixture has no {kind:?} world/entity/event executor"
             )))
-        }
-        fn should_tick_blocks_at(&self, _: BlockPos) -> bool {
-            panic!("lookup does not tick")
-        }
-        fn is_ticking(&self, _: BlockPos) -> bool {
-            panic!("lookup does not tick")
         }
         fn tick_body(
             &mut self,
@@ -526,12 +578,6 @@ mod tests {
         fn require_ticker_body(&self, _: NativeTickerKind) -> Result<()> {
             Ok(())
         }
-        fn should_tick_blocks_at(&self, _: BlockPos) -> bool {
-            true
-        }
-        fn is_ticking(&self, _: BlockPos) -> bool {
-            true
-        }
         fn tick_body(
             &mut self,
             _: &mut LevelBlockEntityRuntime,
@@ -636,6 +682,7 @@ mod tests {
                 }
             }
             let outcome = CanonicalBackend {
+                readiness: None,
                 chunks: &mut level.chunk_map,
                 random: &mut level.world_random,
                 debug: &mut level.debug_synchronizers,
@@ -709,8 +756,28 @@ mod tests {
         assert_eq!(level.block_entity_runtime.registered_count(), 1);
         level.tick_block_entities(false, &mut services).unwrap();
         assert_eq!(services.ticks, 0);
-        level.tick_block_entities(true, &mut services).unwrap();
-        level.tick_block_entities(true, &mut services).unwrap();
+        assert!(matches!(
+            level.tick_block_entities(true, &mut services),
+            Err(BlockEntityTickerError::Unavailable(_))
+        ));
+        // No real ticket/holder owner exists in this bounded storage fixture.
+        // Only the private backend receives its controlled readiness; the
+        // production entry must refuse missing canonical authority above.
+        for _ in 0..2 {
+            level
+                .block_entity_runtime
+                .tick(
+                    &mut CanonicalBackend {
+                        readiness: Some(CanonicalTickReadiness::Fixture),
+                        chunks: &mut level.chunk_map,
+                        random: &mut level.world_random,
+                        debug: &mut level.debug_synchronizers,
+                        services: &mut services,
+                    },
+                    true,
+                )
+                .unwrap();
+        }
         assert_eq!(services.ticks, 2);
         let chunk = level.chunk_map.get_chunk(ChunkPos::ZERO).unwrap();
         assert!(chunk.get_block_entity(&pos).unwrap().has_level());

@@ -180,6 +180,15 @@ fn update_shape(
 ) -> BlockState {
     update_shape_deterministic(level, state, pos, direction, neighbor)
 }
+pub(super) fn update_shape_live(
+    level: &mut dyn WorldGenLevel,
+    state: BlockState,
+    pos: &BlockPos,
+    direction: Direction,
+    neighbor: BlockState,
+) -> BlockState {
+    update_shape_deterministic(level, state, pos, direction, neighbor)
+}
 fn update_shape_deterministic(
     level: &mut dyn WorldGenLevel,
     state: BlockState,

@@ -45,6 +45,7 @@
 //! Java class and this slice's [`serverbound_chunk_batch_received`] is the one
 //! that shares `packet_types` with the rest of the chunk-send trio.
 
+pub mod clientbound_block_updates;
 pub mod clientbound_bundle;
 pub mod clientbound_bundle_delimiter;
 pub mod clientbound_change_difficulty;

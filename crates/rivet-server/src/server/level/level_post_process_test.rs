@@ -33,12 +33,6 @@ impl BlockEntityWorldServices for Services {
     fn require_ticker_body(&self, _: NativeTickerKind) -> Result<(), BlockEntityTickerError> {
         panic!("chests have no ticker")
     }
-    fn should_tick_blocks_at(&self, _: BlockPos) -> bool {
-        panic!("postprocessing is not a tick batch")
-    }
-    fn is_ticking(&self, _: BlockPos) -> bool {
-        panic!("postprocessing is not a tick batch")
-    }
     fn tick_body(
         &mut self,
         _: &mut LevelBlockEntityRuntime,

@@ -7,6 +7,9 @@ use super::structure_generate_events::{
     GenerateExceptionListener, GenerateListener, StructureGenerateException,
     StructureGeneratePayload, StructureTransformers,
 };
+use super::world_events::{WorldEventKind, WorldExceptionListener, WorldListener};
+#[path = "world_event_channels.rs"]
+mod world_event_channels;
 use rivet_registry::{
     Holder, Identifier, RegistryAccess, ResourceKey, core::ChunkPos, holder_lookup::HolderGetter,
 };
@@ -144,6 +147,8 @@ pub enum StructureSpawnDispatchError {
     AuthorityUnavailable(String),
     #[error("AsyncStructureSpawnEvent may only be triggered asynchronously.")]
     PrimaryThread,
+    #[error("native block event may only be triggered synchronously")]
+    SynchronousThreadRequired,
     #[error("native plugin listener lifecycle has not finished loading")]
     LifecycleLoading,
     #[error("plugin {0} is not enabled")]
@@ -245,6 +250,8 @@ enum Callback {
     Exception(Arc<ExceptionListener>),
     Generate(Arc<GenerateListener>),
     GenerateException(Arc<GenerateExceptionListener>),
+    World(WorldEventKind, Arc<WorldListener>),
+    WorldException(Arc<WorldExceptionListener>),
 }
 struct Registration {
     id: NativeListenerId,
@@ -258,6 +265,8 @@ struct Listeners {
     exception: [Vec<Arc<Registration>>; 6],
     generate: [Vec<Arc<Registration>>; 6],
     generate_exception: [Vec<Arc<Registration>>; 6],
+    world: [[Vec<Arc<Registration>>; 6]; 4],
+    world_exception: [Vec<Arc<Registration>>; 6],
 }
 pub struct NativeStructureEventRegistry {
     primary_thread: ThreadId,
@@ -278,6 +287,8 @@ impl NativeStructureEventRegistry {
                 exception: std::array::from_fn(|_| Vec::new()),
                 generate: std::array::from_fn(|_| Vec::new()),
                 generate_exception: std::array::from_fn(|_| Vec::new()),
+                world: std::array::from_fn(|_| std::array::from_fn(|_| Vec::new())),
+                world_exception: std::array::from_fn(|_| Vec::new()),
             }),
             diagnostics,
         }
@@ -317,6 +328,12 @@ impl NativeStructureEventRegistry {
             .get(&id)
             .ok_or(StructureSpawnDispatchError::UnknownPlugin(id.0))?;
         plugin.enabled.store(false, Ordering::Release);
+        for bucket in lists.world.iter_mut().flatten() {
+            bucket.retain(|entry| entry.plugin.id != id);
+        }
+        for bucket in &mut lists.world_exception {
+            bucket.retain(|entry| entry.plugin.id != id);
+        }
         for bucket in lists.spawn.iter_mut() {
             bucket.retain(|entry| entry.plugin.id != id);
         }
@@ -354,6 +371,16 @@ impl NativeStructureEventRegistry {
             .write()
             .map_err(|_| StructureSpawnDispatchError::RegistryPoisoned)?;
         let mut removed = false;
+        for bucket in lists.world.iter_mut().flatten() {
+            let old = bucket.len();
+            bucket.retain(|entry| entry.id != id);
+            removed |= old != bucket.len();
+        }
+        for bucket in &mut lists.world_exception {
+            let old = bucket.len();
+            bucket.retain(|entry| entry.id != id);
+            removed |= old != bucket.len();
+        }
         for bucket in lists.spawn.iter_mut() {
             let old = bucket.len();
             bucket.retain(|entry| entry.id != id);
@@ -451,6 +478,8 @@ impl NativeStructureEventRegistry {
             Callback::Exception(_) => &mut lists.exception[priority.index()],
             Callback::Generate(_) => &mut lists.generate[priority.index()],
             Callback::GenerateException(_) => &mut lists.generate_exception[priority.index()],
+            Callback::World(kind, _) => &mut lists.world[kind.index()][priority.index()],
+            Callback::WorldException(_) => &mut lists.world_exception[priority.index()],
         };
         bucket.push(entry);
         Ok(id)

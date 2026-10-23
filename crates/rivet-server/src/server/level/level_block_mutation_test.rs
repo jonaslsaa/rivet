@@ -31,12 +31,6 @@ impl BlockEntityWorldServices for Services {
     fn require_ticker_body(&self, _: NativeTickerKind) -> Result<(), BlockEntityTickerError> {
         panic!("no entities")
     }
-    fn should_tick_blocks_at(&self, _: BlockPos) -> bool {
-        panic!("not ticking")
-    }
-    fn is_ticking(&self, _: BlockPos) -> bool {
-        panic!("not ticking")
-    }
     fn tick_body(
         &mut self,
         _: &mut LevelBlockEntityRuntime,
@@ -223,4 +217,29 @@ fn off_thread_poi_change_refuses_before_touching_storage() {
         matches!(result,Err(LiveBlockMutationError::Unavailable(message)) if message=="not the retained tick owner")
     );
     assert!(level.poi_storage.is_none());
+}
+
+#[test]
+fn anti_xray_controller_requires_actual_configuration_and_only_executes_source_disabled_body() {
+    use crate::server::level::world_runtime_settings::WorldRuntimeSettings;
+    let air = BlockState::new(StateId(0));
+    let mut level = level(air, false);
+    assert!(matches!(
+        level.anti_xray_block_change_live(POS, air, None, 276, 512),
+        Err(LiveBlockMutationError::MissingSettings)
+    ));
+    for enabled in [false, true] {
+        let yaml = format!("anticheat: {{anti-xray: {{enabled: {enabled}}}}}");
+        level.runtime_settings =
+            Some(WorldRuntimeSettings::from_yaml("", &yaml, "", "minecraft:overworld").unwrap());
+        let result = level.anti_xray_block_change_live(POS, air, None, 276, 512);
+        if enabled {
+            assert!(matches!(
+                result,
+                Err(LiveBlockMutationError::AntiXrayEnabled)
+            ));
+        } else {
+            assert!(result.is_ok());
+        }
+    }
 }

@@ -111,6 +111,7 @@ fn run_tick(
     registry: &mut ConnectionRegistry,
 ) -> PlayerSessionManager {
     let mut ctx = TickContext {
+        shutdown: std::sync::Arc::new(rivet_server::server::tick::shutdown::Shutdown::new()),
         tick: 1,
         now_ns: 0,
         now_ms: 0,

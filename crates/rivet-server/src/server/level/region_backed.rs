@@ -309,6 +309,10 @@ pub fn boot_level_with_time_policy(
     world.set_game_time(level.game_time);
     world.install_boot_settings(boot_settings);
     let dimension_path = root.join("dimensions/minecraft/overworld");
+    world.install_world_time(super::server_level::LevelWorldTime::load(
+        &dimension_path,
+        true,
+    )?);
     let environment = super::generation_environment::GenerationEnvironment::load(
         &dimension_path,
         &world_gen.dimension_type,
@@ -472,6 +476,8 @@ fn read_world_gen_settings(
 
 #[derive(Debug, thiserror::Error)]
 pub enum RegionBackedBootError {
+    #[error(transparent)]
+    WorldTime(#[from] super::server_level::WorldTimeError),
     #[error(transparent)]
     Clock(#[from] super::level_clock_runtime::LevelClockError),
     #[error(transparent)]

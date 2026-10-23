@@ -13,7 +13,7 @@ use rivet_world::levelgen::structure::StructureError;
 fn unavailable(message: impl Into<String>) -> StructureError {
     StructureError::PlacementUnavailable(message.into())
 }
-pub(super) fn has_block_entity(state: BlockState) -> bool {
+pub(crate) fn has_block_entity(state: BlockState) -> bool {
     BLOCKS_WITH_ENTITIES.contains(&state.block().name())
 }
 fn base(pos: BlockPos, id: &str) -> CompoundTag {

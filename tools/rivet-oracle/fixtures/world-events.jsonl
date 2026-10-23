@@ -1,0 +1,13 @@
+{"kind":"physics","scenario":"priorities","trace":["cancel","uncancel","monitor"],"cancelled":false}
+{"kind":"physics","scenario":"failure","trace":["failure","exception"],"cancelled":true}
+{"kind":"physics","scenario":"disable","trace":["disable","other"],"cancelled":false}
+{"kind":"fluid","scenario":"priorities","trace":["cancel","uncancel","monitor"],"cancelled":false,"state":93}
+{"kind":"fluid","scenario":"failure","trace":["failure","exception"],"cancelled":true,"state":93}
+{"kind":"fluid","scenario":"disable","trace":["disable","other"],"cancelled":false,"state":86}
+{"kind":"fluid","scenario":"wrong_material","trace":["failure","exception"],"cancelled":true,"state":86}
+{"kind":"from_to","scenario":"priorities","trace":["cancel","uncancel","monitor"],"cancelled":false}
+{"kind":"from_to","scenario":"failure","trace":["failure","exception"],"cancelled":true}
+{"kind":"from_to","scenario":"disable","trace":["disable","other"],"cancelled":false}
+{"kind":"form","scenario":"priorities","trace":["cancel","uncancel","monitor"],"cancelled":false,"state":562}
+{"kind":"form","scenario":"failure","trace":["failure","exception"],"cancelled":true,"state":562}
+{"kind":"form","scenario":"disable","trace":["disable","other"],"cancelled":false,"state":1}
