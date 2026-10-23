@@ -25,7 +25,7 @@ diffs vs Rivet, packet round-trips) builds on top of these fixtures later.
   `BlockStarLightEngine.blocksChangedInChunk` over retained light buffers.
   Initial lighting is followed by emitter insertion/removal/replacement,
   opaque-column changes, section-only emptiness changes, cross-chunk boundary
--  propagation and unchanged lit/dark checks. Rust compares every visible nibble
+  propagation and unchanged lit/dark checks. Rust compares every visible nibble
   state/value hash, both emptiness maps and notified chunks, including dirty
   updates whose final bytes are unchanged. These are incremental engine
   comparisons, not full relight, client notification or fresh-world walking

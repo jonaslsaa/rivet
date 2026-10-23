@@ -154,7 +154,11 @@ impl FluidWorld for World {
             new
         }))
     }
-    fn from_to_event(&mut self, _source: BlockPos, direction: Direction) -> FluidResult<bool> {
+    fn dispatch_from_to_event(
+        &mut self,
+        _source: BlockPos,
+        direction: Direction,
+    ) -> FluidResult<bool> {
         self.trace.push(format!(
             "flow:{}",
             direction.get_name().to_ascii_uppercase()

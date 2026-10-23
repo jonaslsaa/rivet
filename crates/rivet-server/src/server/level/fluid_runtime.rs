@@ -240,7 +240,7 @@ impl<S: FluidRuntimeServices> FluidWorld for LiveFluidWorld<'_, S> {
     ) -> FluidResult<Option<BlockState>> {
         self.services.fluid_level_change(self.level, pos, new)
     }
-    fn from_to_event(&mut self, pos: BlockPos, direction: Direction) -> FluidResult<bool> {
+    fn dispatch_from_to_event(&mut self, pos: BlockPos, direction: Direction) -> FluidResult<bool> {
         self.services.fluid_from_to(self.level, pos, direction)
     }
     fn form_block_event(

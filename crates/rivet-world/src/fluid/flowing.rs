@@ -53,7 +53,11 @@ pub trait FluidWorld {
         pos: BlockPos,
         new_state: BlockState,
     ) -> FluidResult<Option<BlockState>>;
-    fn from_to_event(&mut self, source: BlockPos, direction: Direction) -> FluidResult<bool>;
+    fn dispatch_from_to_event(
+        &mut self,
+        source: BlockPos,
+        direction: Direction,
+    ) -> FluidResult<bool>;
     /// handleBlockFormEvent includes the actual event-altered world write.
     fn form_block_event(
         &mut self,
@@ -101,6 +105,8 @@ impl FlowingFluid {
             Ok(true)
         }
     }
+    // Preserve source canMaybePassThrough's paired positions/states/fluid.
+    #[allow(clippy::too_many_arguments)]
     fn maybe_pass(
         self,
         world: &mut impl FluidWorld,
@@ -115,6 +121,8 @@ impl FlowingFluid {
             && self.can_hold_any(world, to_state)?
             && world.can_pass_wall(from, state, direction, to, to_state)?)
     }
+    // Same source argument tuple, with specific-fluid container validation.
+    #[allow(clippy::too_many_arguments)]
     fn can_pass(
         self,
         world: &mut impl FluidWorld,
@@ -290,7 +298,7 @@ impl FlowingFluid {
             if self.replaceable(world, below_pos, below_fluid, new, Direction::Down)?
                 && self.can_hold_specific(world, below_pos, below, new.id())?
             {
-                if !world.from_to_event(pos, Direction::Down)? {
+                if !world.dispatch_from_to_event(pos, Direction::Down)? {
                     return Ok(());
                 }
                 self.spread_to(world, below_pos, below, Direction::Down, new)?;
@@ -385,7 +393,7 @@ impl FlowingFluid {
             let Some(state) = world.block_if_loaded(next)? else {
                 continue;
             };
-            if !world.from_to_event(pos, direction)? {
+            if !world.dispatch_from_to_event(pos, direction)? {
                 continue;
             }
             self.spread_to(world, next, state, direction, fluid)?;
