@@ -25,6 +25,9 @@ pub mod directory_lock;
 pub mod entity_construction;
 pub mod entity_id_allocator;
 pub mod entity_lookup;
+pub mod entity_save_limits;
+#[cfg(unix)]
+pub mod entity_region_storage;
 pub mod entity_tracking;
 pub mod entity_post_load;
 pub mod full_chunk_status;
@@ -45,6 +48,7 @@ pub mod poi_manager;
 pub mod poi_storage;
 pub mod region_backed;
 pub mod server_level;
+pub mod world_runtime_settings;
 pub mod structure_entity_loading;
 pub mod structure_generate_events;
 pub mod structure_generation;

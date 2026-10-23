@@ -36,6 +36,12 @@ pub trait BlockEntityWorldServices {
     fn mid_tick_tasks(&mut self) -> Result<()>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeBlockEntityCreation {
+    Check,
+    Immediate,
+}
+
 struct CanonicalBackend<'a, S> {
     chunks: &'a mut ChunkMap,
     random: &'a mut ThreadUnsafeRandom,
@@ -111,6 +117,70 @@ impl<S: BlockEntityWorldServices> BlockEntityTickerBackend for CanonicalBackend<
 }
 
 impl ServerLevel {
+    /// Real LevelChunk lazy lookup/promotion followed by addAndRegister's
+    /// loaded-only hooks. Pending tags are consumed only by actual promotion;
+    /// missing native codecs/bodies remain errors with canonical data retained.
+    /// Reading an already-live value is not evidence of FULL activation.
+    pub fn load_native_block_entity(
+        &mut self,
+        pos: BlockPos,
+        creation: NativeBlockEntityCreation,
+        ticking_enabled: bool,
+        services: &mut impl BlockEntityWorldServices,
+    ) -> Result<Option<&NativeBlockEntity>> {
+        let chunk_pos = ChunkPos::containing(&pos);
+        let chunk = self.chunk_map.get_chunk_mut(chunk_pos).ok_or_else(|| {
+            BlockEntityTickerError::Unavailable(format!("missing runtime chunk {chunk_pos}"))
+        })?;
+        if let Some(entity) = chunk.generation_base().get_block_entity(&pos) {
+            if entity.is_removed() {
+                chunk.generation_base_mut().remove_live_block_entity(&pos);
+                return Ok(None);
+            }
+            return Ok(self
+                .chunk_map
+                .get_chunk(chunk_pos)
+                .and_then(|chunk| chunk.get_block_entity(&pos)));
+        }
+        let native_error = |error: rivet_world::block_entity::NativeBlockEntityError| {
+            BlockEntityTickerError::Unavailable(error.to_string())
+        };
+        let mut created = chunk
+            .promote_pending_block_entity(pos)
+            .map_err(native_error)?;
+        if !created && creation == NativeBlockEntityCreation::Immediate {
+            let state =
+                BlockState::new(chunk.get_block_state(pos.get_x(), pos.get_y(), pos.get_z()));
+            if crate::server::level::structure_snapshot_data::has_block_entity(state) {
+                let mut entity = NativeBlockEntity::fresh(pos, state).map_err(native_error)?;
+                entity.associate_level();
+                chunk.generation_base_mut().set_block_entity(entity);
+                created = true;
+            }
+        }
+        if !created {
+            return Ok(None);
+        }
+        let loaded = chunk.is_loaded();
+        if loaded {
+            let mut backend = CanonicalBackend {
+                chunks: &mut self.chunk_map,
+                random: &mut self.world_random,
+                services,
+            };
+            self.block_entity_runtime.register_existing_live(
+                &mut backend,
+                [pos],
+                ticking_enabled,
+                true,
+            )?;
+        }
+        Ok(self
+            .chunk_map
+            .get_chunk(chunk_pos)
+            .and_then(|chunk| chunk.get_block_entity(&pos)))
+    }
+
     /// FULL registration visits only live objects. Pending NBT remains lazy.
     /// This does not itself complete FULL or activate block ticking.
     pub fn register_chunk_block_entities(
@@ -168,6 +238,147 @@ mod tests {
     use rivet_util::RandomSource;
     use rivet_world::block_entity::NativeBlockEntityData;
     use rivet_world::chunk::status::ChunkStatus;
+
+    struct LazyServices {
+        added: usize,
+    }
+    impl BlockEntityWorldServices for LazyServices {
+        fn on_block_entity_added(&mut self, _: BlockPos) -> Result<()> {
+            self.added += 1;
+            Ok(())
+        }
+        fn require_ticker_body(&self, kind: NativeTickerKind) -> Result<()> {
+            Err(BlockEntityTickerError::Unavailable(format!(
+                "fixture has no {kind:?} world/entity/event executor"
+            )))
+        }
+        fn should_tick_blocks_at(&self, _: BlockPos) -> bool {
+            panic!("lookup does not tick")
+        }
+        fn is_ticking(&self, _: BlockPos) -> bool {
+            panic!("lookup does not tick")
+        }
+        fn tick_body(
+            &mut self,
+            _: &mut LevelBlockEntityRuntime,
+            _: &mut ChunkMap,
+            _: &mut ThreadUnsafeRandom,
+            _: BlockPos,
+            _: NativeTickerKind,
+        ) -> Result<()> {
+            panic!("lookup must not run a body")
+        }
+        fn report_tick_exception(&mut self, _: BlockPos, _: &str) -> Result<()> {
+            panic!("lookup must not run a body")
+        }
+        fn mid_tick_tasks(&mut self) -> Result<()> {
+            panic!("lookup does not tick")
+        }
+    }
+
+    #[test]
+    fn actual_paper_lazy_creation_and_explicit_unavailable_ticker_boundaries() {
+        let generator =
+            std::sync::Arc::new(crate::server::level::generated_world::OverworldGenerator::new(42));
+        let pos = BlockPos::new(8, 64, 8);
+        let mut cases = 0;
+        for line in
+            include_str!("../../../../../tools/rivet-oracle/fixtures/lazy-block-entity.jsonl")
+                .lines()
+        {
+            let row: serde_json::Value = serde_json::from_str(line).unwrap();
+            let family = row["family"].as_str().unwrap();
+            let name = match family {
+                "chest" => "minecraft:chest",
+                "hive" => "minecraft:bee_nest",
+                "spawner" => "minecraft:spawner",
+                "heart" => "minecraft:creaking_heart",
+                _ => panic!("oracle family"),
+            };
+            let block = BlockState::of(BlockId::from_name(name).unwrap());
+            let mut state = generator.create_holder(ChunkPos::ZERO).into_state();
+            state.chunk_mut().set_block_state(8, 64, 8, block);
+            if let Some(input) = row["input_snbt"].as_str() {
+                state
+                    .chunk_mut()
+                    .base_mut()
+                    .set_block_entity_nbt(parse_compound_fully(input).unwrap());
+            }
+            state.chunk_mut().set_persisted_status(ChunkStatus::Spawn);
+            let mut chunk = LevelChunk::from_generated_spawn_proto(state.into_loan().0).unwrap();
+            chunk.set_loaded(row["loaded"].as_bool().unwrap());
+            let mut level = ServerLevel::new_region_backed(ServerLevelConfig::default());
+            level.chunk_map.install(ChunkPos::ZERO, chunk);
+            let mut services = LazyServices { added: 0 };
+            let creation = if row["immediate"].as_bool().unwrap() {
+                NativeBlockEntityCreation::Immediate
+            } else {
+                NativeBlockEntityCreation::Check
+            };
+            let first = level.load_native_block_entity(pos, creation, true, &mut services);
+            if row["tickers"].as_u64().unwrap() > 0 {
+                // Paper has a complete executor. This controlled Rust world
+                // deliberately does not: retaining the actual promoted value
+                // is valid, claiming successful FULL registration is not.
+                assert!(
+                    matches!(first, Err(BlockEntityTickerError::Unavailable(_))),
+                    "{row}"
+                );
+                assert_eq!(level.block_entity_runtime.registered_count(), 0);
+                let entity = level
+                    .chunk_map
+                    .get_chunk(ChunkPos::ZERO)
+                    .unwrap()
+                    .get_block_entity(&pos)
+                    .unwrap();
+                assert_eq!(
+                    entity.save_with_full_metadata(),
+                    parse_compound_fully(row["saved"].as_str().unwrap()).unwrap(),
+                    "{row}"
+                );
+                assert!(entity.has_level());
+            } else {
+                let first = first.unwrap().map(NativeBlockEntity::ticker_identity);
+                assert_eq!(first.is_some(), row["present"].as_bool().unwrap(), "{row}");
+                let second = level
+                    .load_native_block_entity(pos, creation, true, &mut services)
+                    .unwrap();
+                let same = first.as_ref().zip(second).is_some_and(|(first, second)| {
+                    std::sync::Weak::ptr_eq(first, &second.ticker_identity())
+                });
+                assert_eq!(same, row["same_identity"].as_bool().unwrap(), "{row}");
+                if let Some(entity) = second {
+                    assert_eq!(
+                        entity.has_level(),
+                        row["has_level"].as_bool().unwrap(),
+                        "{row}"
+                    );
+                    assert_eq!(
+                        entity.save_with_full_metadata(),
+                        parse_compound_fully(row["saved"].as_str().unwrap()).unwrap(),
+                        "{row}"
+                    );
+                }
+            }
+            assert_eq!(
+                services.added as u64,
+                row["added"].as_u64().unwrap(),
+                "{row}"
+            );
+            assert_eq!(
+                level
+                    .chunk_map
+                    .get_chunk(ChunkPos::ZERO)
+                    .unwrap()
+                    .pending_block_entities()
+                    .contains_key(&pos),
+                row["pending"].as_bool().unwrap(),
+                "{row}"
+            );
+            cases += 1;
+        }
+        assert_eq!(cases, 80);
+    }
 
     #[derive(Default)]
     struct Services {

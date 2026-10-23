@@ -186,6 +186,25 @@ impl EntityLookup {
             .get(&pos)
             .map_or(&[], |chunk| chunk.ids.as_slice())
     }
+    /// Holder-owned entity-section load. Existing transient slices retain
+    /// their actual status/membership; only a new empty slice inherits status.
+    pub fn ensure_entity_chunk(&mut self, pos: ChunkPos, status: FullChunkStatus) {
+        if !self.chunks.contains_key(&pos) {
+            self.ensure_chunk(pos).status = status;
+        }
+    }
+    pub fn unload_empty_entity_chunk(&mut self, pos: ChunkPos) -> bool {
+        if self
+            .chunks
+            .get(&pos)
+            .is_some_and(|chunk| chunk.ids.is_empty() && !chunk.prevent_status_updates)
+        {
+            self.chunks.remove(&pos);
+            true
+        } else {
+            false
+        }
+    }
     pub fn section_ids(&self, pos: ChunkPos, y: i32) -> &[i32] {
         self.chunks
             .get(&pos)
@@ -212,6 +231,25 @@ impl EntityLookup {
         source: Option<ChunkPos>,
         lifecycle: &mut dyn EntityLifecycle,
     ) -> Result<Vec<Admission>, EntityLookupError> {
+        self.add_chunk_entities(entities, source, false, lifecycle)
+    }
+    /// Actual entity-region disk admission suppresses onCreated and does not
+    /// run proto-chunk duplicate-UUID regeneration policy.
+    pub fn add_entity_chunk_entities(
+        &mut self,
+        entities: &mut Vec<NativeLoadedEntity>,
+        source: ChunkPos,
+        lifecycle: &mut dyn EntityLifecycle,
+    ) -> Result<Vec<Admission>, EntityLookupError> {
+        self.add_chunk_entities(entities, Some(source), true, lifecycle)
+    }
+    fn add_chunk_entities(
+        &mut self,
+        entities: &mut Vec<NativeLoadedEntity>,
+        source: Option<ChunkPos>,
+        from_disk: bool,
+        lifecycle: &mut dyn EntityLifecycle,
+    ) -> Result<Vec<Admission>, EntityLookupError> {
         let mut outcomes = Vec::with_capacity(entities.len());
         let mut pending = std::mem::take(entities).into_iter();
         while let Some(entity) = pending.next() {
@@ -228,14 +266,20 @@ impl EntityLookup {
                 });
                 continue;
             }
-            match self.add_entity(entity, false, lifecycle) {
-                Ok(outcome) => outcomes.push(outcome),
-                Err(error) => {
+            match catch_unwind(AssertUnwindSafe(|| {
+                self.add_entity(entity, from_disk, lifecycle)
+            })) {
+                Ok(Ok(outcome)) => outcomes.push(outcome),
+                Ok(Err(error)) => {
                     // The failing value already belongs to the canonical
                     // lookup. Keep every not-yet-admitted native value with
                     // the caller; reconstruction consumed real identity/RNG.
                     entities.extend(pending);
                     return Err(error);
+                }
+                Err(panic) => {
+                    entities.extend(pending);
+                    resume_unwind(panic);
                 }
             }
         }

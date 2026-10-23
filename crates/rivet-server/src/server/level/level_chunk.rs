@@ -117,6 +117,10 @@ impl TryFrom<u16> for BiomeId {
 /// value (OWNERSHIP.md — no inheritance; the server chunk *contains* the value
 /// chunk). All reads delegate to it.
 pub struct LevelChunk {
+    /// Runtime lifecycle, distinct from persisted FULL and ticket activation.
+    loaded: bool,
+    holder_full_status: Option<super::full_chunk_status::FullChunkStatusBinding>,
+    unsaved_listener: Option<ChunkUnsavedListener>,
     /// The generic rivet-world chunk value.
     chunk: WorldLevelChunk<StateId, BiomeId, StructureKey>,
     /// The deterministic superflat light payload, computed once at
@@ -138,7 +142,40 @@ pub struct LevelChunk {
     post_load_entities: Vec<CompoundTag>,
 }
 
+/// WorldGenContext binds ChunkMap.setChunkUnsaved, whose pinned Paper body is
+/// empty after the Moonrise rewrite. Attachment is still a real lifecycle step;
+/// no queue or autosave notification is invented for that empty source body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkUnsavedListener {
+    PaperChunkMap,
+}
+
 impl LevelChunk {
+    pub fn is_loaded(&self) -> bool {
+        self.loaded
+    }
+    pub fn get_full_status(&self) -> Option<super::full_chunk_status::FullChunkStatus> {
+        self.holder_full_status
+            .as_ref()
+            .map(super::full_chunk_status::FullChunkStatusBinding::get)
+    }
+    pub fn has_unsaved_listener(&self) -> bool {
+        self.unsaved_listener.is_some()
+    }
+    pub(super) fn bind_full_status(
+        &mut self,
+        status: super::full_chunk_status::FullChunkStatusBinding,
+    ) {
+        self.holder_full_status = Some(status);
+    }
+    pub(super) fn set_loaded(&mut self, loaded: bool) {
+        self.loaded = loaded;
+    }
+    pub(super) fn install_paper_unsaved_listener(&mut self) {
+        self.unsaved_listener = Some(ChunkUnsavedListener::PaperChunkMap);
+        // setUnsavedListener immediately invokes the listener if dirty. The
+        // actual installed Paper listener's body is empty, including this call.
+    }
     pub(super) fn generation_base(
         &self,
     ) -> &rivet_world::chunk::chunk_access::ChunkAccess<StateId, BiomeId, StructureKey> {
@@ -188,6 +225,9 @@ impl LevelChunk {
             block_ticks: rivet_world::ticks::LevelChunkTicks::new(),
             fluid_ticks: rivet_world::ticks::LevelChunkTicks::new(),
             post_load_entities: Vec::new(),
+            loaded: false,
+            holder_full_status: None,
+            unsaved_listener: None,
         }
     }
 
@@ -322,6 +362,9 @@ impl LevelChunk {
             block_ticks: rivet_world::ticks::LevelChunkTicks::new_with_pending(stored_block_ticks),
             fluid_ticks: rivet_world::ticks::LevelChunkTicks::new_with_pending(stored_fluid_ticks),
             post_load_entities: Vec::new(),
+            loaded: false,
+            holder_full_status: None,
+            unsaved_listener: None,
         })
     }
 
@@ -362,7 +405,11 @@ impl LevelChunk {
         if status != ChunkStatus::Spawn {
             return Err(LevelChunkBridgeError::GeneratedStatusNotSpawn(status));
         }
-        Self::from_proto_values(proto)
+        let mut runtime = Self::from_proto_values(proto)?;
+        // Source LevelChunk(ServerLevel,ProtoChunk,...) explicitly dirties the
+        // newly promoted value even when the proto itself happened to be clean.
+        runtime.mark_unsaved();
+        Ok(runtime)
     }
 
     /// Validate precisely the fallible palette re-encoding before a scheduler
@@ -472,6 +519,9 @@ impl LevelChunk {
             block_ticks: rivet_world::ticks::LevelChunkTicks::new_with_pending(block_ticks),
             fluid_ticks: rivet_world::ticks::LevelChunkTicks::new_with_pending(fluid_ticks),
             post_load_entities,
+            loaded: false,
+            holder_full_status: None,
+            unsaved_listener: None,
         })
     }
 
@@ -1854,6 +1904,7 @@ mod tests {
         );
         let mut removal = DetachedAnimalRemoval;
         let mut context = EntityPostLoadContext {
+            save_limits: &Default::default(),
             cart_factory: &carts,
             creature_factory: &animals,
             registries: &access,

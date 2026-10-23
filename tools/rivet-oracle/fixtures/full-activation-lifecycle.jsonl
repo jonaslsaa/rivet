@@ -1,0 +1,3 @@
+{"name":"normal","callback_calls":1,"retained":false,"loaded_before":false,"loaded_after":true,"status_before":"INACCESSIBLE","status_after":"BLOCK_TICKING","dirty_attach_notifications":1}
+{"name":"callback_throw","callback_calls":2,"retained":true,"loaded_before":false,"loaded_after":true,"status_before":"INACCESSIBLE","status_after":"BLOCK_TICKING","dirty_attach_notifications":1}
+{"name":"paper_platform_noops","accepted_null":true}

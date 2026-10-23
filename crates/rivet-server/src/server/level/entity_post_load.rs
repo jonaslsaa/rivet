@@ -212,11 +212,12 @@ pub fn check_duplicate_uuid(
 pub struct PreparedEntityBatch {
     /// Source encounter order, with invalid loads and policy discards omitted.
     pub entities: Vec<NativeLoadedEntity>,
-    /// Decisions are in successful-construction order, including discards.
+    /// Policy-visited encounter order after load limits, including discards.
     pub decisions: Vec<DuplicateUuidDecision>,
 }
 
 pub struct EntityPostLoadContext<'a> {
+    pub save_limits: &'a super::entity_save_limits::EntitySaveLimits,
     pub cart_factory: &'a dyn StructureEntityCreation,
     pub creature_factory: &'a dyn GenerationCreatureFactory,
     pub registries: &'a RegistryAccess,
@@ -257,6 +258,7 @@ pub fn prepare_native_entities(
         entities: Vec::new(),
         decisions: Vec::new(),
     };
+    let mut loaded_counts = std::collections::HashMap::new();
     for (input_index, input) in inputs.iter().enumerate() {
         let mut entity = match load_native_world_entity(
             input,
@@ -275,6 +277,12 @@ pub fn prepare_native_entities(
                 }));
             }
         };
+        if !context
+            .save_limits
+            .accepts(entity.encode_id(), &mut loaded_counts)
+        {
+            continue;
+        }
         let decision = match check_duplicate_uuid(
             &mut entity,
             context.settings,

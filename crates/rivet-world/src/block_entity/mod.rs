@@ -2,16 +2,13 @@
 //! separate lazy-load authority. These values implement persistence and
 //! identity/state transitions, not server ticking, inventories or entity AI.
 pub mod beehive_data;
+pub mod creaking_heart_data;
 pub mod spawner_data;
 
 use beehive_data::BeehiveData;
-use rivet_nbt::{compound_tag::CompoundTag, list_tag::ListTag, nbt_ops::NbtOps, tag::Tag};
-use rivet_registry::{
-    Identifier,
-    block_state::BlockState,
-    core::{BlockPos, uuid_codec},
-};
-use rivet_util::mth::Uuid;
+pub use creaking_heart_data::HeartData;
+use rivet_nbt::{compound_tag::CompoundTag, list_tag::ListTag, tag::Tag};
+use rivet_registry::{Identifier, block_state::BlockState, core::BlockPos};
 use spawner_data::SpawnerData;
 use std::sync::{Arc, Weak};
 
@@ -68,50 +65,6 @@ impl ChestData {
             if *seed != 0 {
                 tag.put_long("LootTableSeed", *seed);
             }
-        }
-        tag
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct HeartData {
-    creaking: Option<Uuid>,
-    public_bukkit_values: CompoundTag,
-}
-impl HeartData {
-    fn load(input: &CompoundTag) -> Result<Self, NativeBlockEntityError> {
-        let mut common = CompoundTag::new();
-        common_data(&mut common, input)?;
-        let creaking = input.get("creaking").and_then(|tag| {
-            uuid_codec::<NbtOps>()
-                .parse(&NbtOps, tag)
-                .result_or_partial_silent()
-        });
-        Ok(Self {
-            creaking,
-            public_bukkit_values: common
-                .get_compound("PublicBukkitValues")
-                .cloned()
-                .unwrap_or_default(),
-        })
-    }
-    fn save(&self, pos: BlockPos) -> CompoundTag {
-        let mut tag = base_tag(pos, "minecraft:creaking_heart");
-        if !self.public_bukkit_values.tags.is_empty() {
-            tag.put(
-                "PublicBukkitValues".into(),
-                Tag::Compound(self.public_bukkit_values.clone()),
-            );
-        }
-        if let Some(uuid) = self.creaking {
-            tag.put(
-                "creaking".into(),
-                uuid_codec::<NbtOps>()
-                    .encode_start(&NbtOps, &uuid)
-                    .result()
-                    .expect("valid uuid")
-                    .clone(),
-            );
         }
         tag
     }

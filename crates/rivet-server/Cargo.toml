@@ -25,6 +25,7 @@ rivet-text = { workspace = true }
 rivet-util = { workspace = true }
 rivet-world = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml_ng = "0.10.0"
 # `IndexMap` — the insertion-ordered runtime block-entity authority surface
 # the chunk exposes (#537).
 indexmap = { workspace = true }
