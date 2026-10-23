@@ -11,15 +11,68 @@ pub struct SpawnerData {
     delay: i32,
     min_delay: i32,
     max_delay: i32,
-    spawn_count: i16,
-    max_nearby: i16,
-    required_range: i16,
-    spawn_range: i16,
+    spawn_count: i32,
+    max_nearby: i32,
+    required_range: i32,
+    spawn_range: i32,
     next_spawn: Option<CompoundTag>,
     potentials: Vec<(i32, CompoundTag)>,
     public_bukkit_values: CompoundTag,
 }
 impl SpawnerData {
+    pub fn spawn_count(&self) -> i32 {
+        self.spawn_count
+    }
+    pub fn min_spawn_delay(&self) -> i32 {
+        self.min_delay
+    }
+    /// BaseSpawner.setEntityId changes only the chosen SpawnData and clears
+    /// potentials. It must not serialize/reload unrelated numeric state.
+    /// The owning world supplies the genuine prior weighted-selection draw.
+    pub fn set_entity_id(
+        &mut self,
+        id: &Identifier,
+        potential_roll: Option<i32>,
+    ) -> Result<(), NativeBlockEntityError> {
+        if self.next_spawn.is_none() {
+            let total: i64 = self
+                .potentials
+                .iter()
+                .map(|(weight, _)| i64::from(*weight))
+                .sum();
+            let selected = if total > 0 {
+                let mut roll = potential_roll
+                    .filter(|roll| *roll >= 0 && i64::from(*roll) < total)
+                    .ok_or_else(|| {
+                        NativeBlockEntityError::Unsupported(
+                            "setEntityId requires actual weighted selection draw".into(),
+                        )
+                    })?;
+                self.potentials.iter().find_map(|(weight, data)| {
+                    if roll < *weight {
+                        Some(data.clone())
+                    } else {
+                        roll -= *weight;
+                        None
+                    }
+                })
+            } else {
+                None
+            };
+            self.next_spawn = Some(selected.unwrap_or_else(|| {
+                let mut data = CompoundTag::new();
+                data.put("entity".into(), Tag::Compound(CompoundTag::new()));
+                data
+            }));
+        }
+        self.next_spawn
+            .as_mut()
+            .expect("chosen SpawnData")
+            .get_compound_or_empty_mut("entity")
+            .put_string("id", &id.to_string());
+        self.potentials.clear();
+        Ok(())
+    }
     pub fn fresh() -> Self {
         Self {
             delay: 20,
@@ -52,19 +105,19 @@ impl SpawnerData {
             })
             .collect();
         Ok(Self {
-            delay: tag.get_int_or("Paper.Delay", i32::from(tag.get_short_or("Delay", 20))),
-            min_delay: tag.get_int_or(
+            delay: input.get_int_or("Paper.Delay", i32::from(input.get_short_or("Delay", 20))),
+            min_delay: input.get_int_or(
                 "Paper.MinSpawnDelay",
-                i32::from(tag.get_short_or("MinSpawnDelay", 200)),
+                input.get_int_or("MinSpawnDelay", 200),
             ),
-            max_delay: tag.get_int_or(
+            max_delay: input.get_int_or(
                 "Paper.MaxSpawnDelay",
-                i32::from(tag.get_short_or("MaxSpawnDelay", 800)),
+                input.get_int_or("MaxSpawnDelay", 800),
             ),
-            spawn_count: tag.get_short_or("SpawnCount", 4),
-            max_nearby: tag.get_short_or("MaxNearbyEntities", 6),
-            required_range: tag.get_short_or("RequiredPlayerRange", 16),
-            spawn_range: tag.get_short_or("SpawnRange", 4),
+            spawn_count: input.get_int_or("SpawnCount", 4),
+            max_nearby: input.get_int_or("MaxNearbyEntities", 6),
+            required_range: input.get_int_or("RequiredPlayerRange", 16),
+            spawn_range: input.get_int_or("SpawnRange", 4),
             next_spawn: tag.get_compound("SpawnData").cloned(),
             potentials,
             public_bukkit_values: tag
@@ -101,7 +154,7 @@ impl SpawnerData {
             ("RequiredPlayerRange", self.required_range),
             ("SpawnRange", self.spawn_range),
         ] {
-            tag.put_short(key, value);
+            tag.put_short(key, value as i16);
         }
         if let Some(data) = &self.next_spawn {
             tag.put("SpawnData".into(), Tag::Compound(data.clone()));

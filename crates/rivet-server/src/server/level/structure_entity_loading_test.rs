@@ -94,7 +94,7 @@ fn actual_paper_animals_load_into_native_values_with_constructor_then_uuid_resto
         );
         count += 1;
     }
-    assert_eq!(count, 169);
+    assert_eq!(count, 170);
 }
 struct Factory {
     random: Mutex<LegacyRandomSource>,

@@ -13,5 +13,5 @@ while IFS= read -r -d '' library; do classpath="$classpath:$library"; done < <(f
 "${java_home:+$java_home/bin/}javac" -cp "$classpath" -d "$classes" "$root/src/java/BlockEntityLifecycleProbe.java"
 probe_output="$(mktemp -t rivet-block-entity-lifecycle)"
 trap 'rm -f "$probe_output"' EXIT
-"${java_home:+$java_home/bin/}java" --enable-native-access=ALL-UNNAMED -cp "$classes:$classpath" BlockEntityLifecycleProbe "$probe_output" >&2
+"${java_home:+$java_home/bin/}java" --enable-native-access=ALL-UNNAMED -cp "$classes:$classpath" BlockEntityLifecycleProbe "$probe_output" "${RIVET_BLOCK_ENTITY_PROBE_MODE:-lifecycle}" >&2
 sed -n '/^{/p' "$probe_output"

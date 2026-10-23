@@ -224,12 +224,14 @@ impl NativeEntityState {
         if let Some(uuid) = uuid(input, "UUID") {
             self.identity.uuid = uuid;
         }
-        let mut loaded = EntityLoadState::default();
-        loaded.name_visible = input.get_boolean_or("CustomNameVisible", false);
-        loaded.silent = input.get_boolean_or("Silent", false);
-        loaded.no_gravity = input.get_boolean_or("NoGravity", false);
-        loaded.glowing = input.get_boolean_or("Glowing", false);
-        loaded.frozen = input.get_int_or("TicksFrozen", 0);
+        let mut loaded = EntityLoadState {
+            name_visible: input.get_boolean_or("CustomNameVisible", false),
+            silent: input.get_boolean_or("Silent", false),
+            no_gravity: input.get_boolean_or("NoGravity", false),
+            glowing: input.get_boolean_or("Glowing", false),
+            frozen: input.get_int_or("TicksFrozen", 0),
+            ..EntityLoadState::default()
+        };
         loaded.visual_fire = if let Some(s) = input.get_string("Paper.FireOverride") {
             TriState::parse(s).unwrap_or_default()
         } else {
@@ -458,7 +460,16 @@ impl NativeGenerationCreature {
             Self::Sheep(sheep) => {
                 sheep.animal.load_animal(input)?;
                 sheep.sheared = input.get_boolean_or("Sheared", false);
-                let id = input.get_byte_or("Color", 0);
+                // DyeColor.LEGACY_ID_CODEC is Codec.BYTE over the boxed
+                // Number, not NumericTag.byteValue (which floors floats).
+                let id = input
+                    .get("Color")
+                    .and_then(|value| {
+                        rivet_serialization::codec::byte_codec::<NbtOps>()
+                            .parse(&NbtOps, value)
+                            .result_or_partial_silent()
+                    })
+                    .unwrap_or(0);
                 sheep.color = match id {
                     1 => SheepColor::Orange,
                     2 => SheepColor::Magenta,
@@ -483,18 +494,16 @@ impl NativeGenerationCreature {
                 if let Some(key) = input
                     .get_string("variant")
                     .and_then(|id| Identifier::try_parse(id))
+                    && let Some(id) = animal.registry.variant_by_name(&key)
                 {
-                    if let Some(id) = animal.registry.variant_by_name(&key) {
-                        animal.variant = id;
-                    }
+                    animal.variant = id;
                 }
                 if let Some(key) = input
                     .get_string("sound_variant")
                     .and_then(|id| Identifier::try_parse(id))
+                    && let Some(id) = animal.registry.sound_by_name(&key)
                 {
-                    if let Some(id) = animal.registry.sound_by_name(&key) {
-                        animal.sound_variant = id;
-                    }
+                    animal.sound_variant = id;
                 }
                 if animal.family() == FarmFamily::Chicken {
                     animal.chicken_jockey = input.get_boolean_or("IsChickenJockey", false);

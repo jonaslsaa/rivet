@@ -414,26 +414,6 @@ fn decode_spawn_potentials(tag: &CompoundTag) -> Vec<(String, i32)> {
     potentials
 }
 
-fn selected_spawn_potential(tag: &CompoundTag, mut roll: i32) -> Option<CompoundTag> {
-    let list = tag.get_list("SpawnPotentials")?;
-    for entry in &list.list {
-        let Tag::Compound(compound) = entry else {
-            continue;
-        };
-        let Some(weight) = compound.get_int("weight").filter(|weight| *weight >= 0) else {
-            continue;
-        };
-        let Some(data) = compound.get_compound("data").and_then(decode_spawn_data) else {
-            continue;
-        };
-        if roll < weight {
-            return Some(data);
-        }
-        roll = roll.wrapping_sub(weight);
-    }
-    None
-}
-
 fn spawn_potential_total(potentials: &[(String, i32)]) -> Option<i32> {
     let total: i64 = potentials
         .iter()
@@ -1913,19 +1893,13 @@ impl WorldGenLevel for WorldGenRegion<'_, StateId, ServerBiomeId, StructureKey> 
         if state.block() != Blocks::SPAWNER.id() || !self.promote_native_block_entity(pos, state) {
             return;
         }
-        let mut tag = self.existing_block_entity_nbt(pos).expect("live spawner");
-        if let Some(decoded) = spawn_data(&tag) {
-            tag.put("SpawnData".into(), Tag::Compound(decoded));
-        } else if let Some(roll) = potential_roll
-            && let Some(selected) = selected_spawn_potential(&tag, roll)
+        if let Some(entity) = self.native_block_entity_mut(pos)
+            && let rivet_world::block_entity::NativeBlockEntityData::Spawner(data) =
+                entity.data_mut()
         {
-            tag.put("SpawnData".into(), Tag::Compound(selected));
+            data.set_entity_id(&Identifier::parse(entity_id), potential_roll)
+                .unwrap_or_else(|error| panic!("{error}"));
         }
-        tag.get_compound_or_empty_mut("SpawnData")
-            .get_compound_or_empty_mut("entity")
-            .put_string("id", entity_id);
-        tag.put("SpawnPotentials".into(), Tag::List(ListTag::new()));
-        self.persist_live_block_entity(pos, state, &tag);
     }
 
     /// `ChunkAccess.markPosForPostProcessing(BlockPos)` — Java's private
@@ -2243,19 +2217,13 @@ impl WorldGenLevel for WorldGenRegion<'_, BlockState, WorldgenBiomeId, Structure
         if state.block() != Blocks::SPAWNER.id() || !self.promote_native_block_entity(pos, state) {
             return;
         }
-        let mut tag = self.existing_block_entity_nbt(pos).expect("live spawner");
-        if let Some(decoded) = spawn_data(&tag) {
-            tag.put("SpawnData".into(), Tag::Compound(decoded));
-        } else if let Some(roll) = potential_roll
-            && let Some(selected) = selected_spawn_potential(&tag, roll)
+        if let Some(entity) = self.native_block_entity_mut(pos)
+            && let rivet_world::block_entity::NativeBlockEntityData::Spawner(data) =
+                entity.data_mut()
         {
-            tag.put("SpawnData".into(), Tag::Compound(selected));
+            data.set_entity_id(&Identifier::parse(entity_id), potential_roll)
+                .unwrap_or_else(|error| panic!("{error}"));
         }
-        tag.get_compound_or_empty_mut("SpawnData")
-            .get_compound_or_empty_mut("entity")
-            .put_string("id", entity_id);
-        tag.put("SpawnPotentials".into(), Tag::List(ListTag::new()));
-        self.persist_live_block_entity(pos, state, &tag);
     }
 
     /// `ChunkAccess.markPosForPostProcessing(BlockPos)` — the chunk-access hop
@@ -4769,12 +4737,59 @@ mod tests {
     }
 
     #[test]
+    fn native_spawner_set_entity_id_retains_wide_numeric_state_like_actual_paper() {
+        use rivet_nbt::tag_parser::parse_compound_fully;
+        for line in
+            include_str!("../../../../../tools/rivet-oracle/fixtures/spawner-entity-id.jsonl")
+                .lines()
+        {
+            let row: serde_json::Value = serde_json::from_str(line).unwrap();
+            let mut region = feature_region();
+            let pos = BlockPos::new(8, 64, 8);
+            assert!(region.set_block(
+                &pos,
+                Blocks::SPAWNER.default_block_state(),
+                UPDATE_KNOWN_SHAPE,
+                0
+            ));
+            let mut input = parse_compound_fully(row["input"].as_str().unwrap()).unwrap();
+            input.put_int("x", 8);
+            input.put_int("y", 64);
+            input.put_int("z", 8);
+            region.persist_block_entity_nbt(&pos, input);
+            let mut random = LegacyRandomSource::new(42);
+            let roll = WorldGenLevel::spawner_potential_weight(&region, &pos)
+                .map(|total| random.next_int_bound(total));
+            WorldGenLevel::set_spawner_entity(&mut region, &pos, "minecraft:zombie", roll);
+            let entity = region.native_block_entity(&pos).unwrap();
+            let rivet_world::block_entity::NativeBlockEntityData::Spawner(data) = entity.data()
+            else {
+                panic!("typed spawner")
+            };
+            assert_eq!(
+                i64::from(data.spawn_count()),
+                row["spawn_count"].as_i64().unwrap()
+            );
+            assert_eq!(
+                i64::from(data.min_spawn_delay()),
+                row["min_delay"].as_i64().unwrap()
+            );
+            assert_eq!(
+                entity.save_with_full_metadata(),
+                parse_compound_fully(row["saved"].as_str().unwrap()).unwrap()
+            );
+            assert_eq!(random.next_long(), row["world_next_long"].as_i64().unwrap());
+        }
+    }
+
+    #[test]
     fn spawner_partial_spawn_data_controls_selection_and_save_state() {
         let mut region = feature_region();
         let pos = BlockPos::new(0, 64, 0);
         assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
 
         let mut tag = dummy_block_entity(&pos);
+        tag.put_string("id", "minecraft:mob_spawner");
         let mut data = CompoundTag::new();
         let mut entity = CompoundTag::new();
         entity.put_int("custom_entity_field", 7);
@@ -4858,6 +4873,7 @@ mod tests {
         assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
 
         let mut tag = dummy_block_entity(&pos);
+        tag.put_string("id", "minecraft:mob_spawner");
         let mut data = CompoundTag::new();
         data.put("entity".to_string(), Tag::Compound(CompoundTag::new()));
         let mut rules = CompoundTag::new();
@@ -4891,6 +4907,7 @@ mod tests {
         assert!(region.set_block(&pos, Blocks::SPAWNER.default_block_state(), UPDATE_ALL, 0));
 
         let mut tag = dummy_block_entity(&pos);
+        tag.put_string("id", "minecraft:mob_spawner");
         let mut data = CompoundTag::new();
         data.put("entity".to_string(), Tag::Compound(CompoundTag::new()));
         let mut equipment = CompoundTag::new();

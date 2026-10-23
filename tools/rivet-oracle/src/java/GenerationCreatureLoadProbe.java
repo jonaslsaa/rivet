@@ -35,6 +35,7 @@ public final class GenerationCreatureLoadProbe {
     run(out,family+"_persist_false","{"+id+",Bukkit.persist:0b}");
    }
    run(out,"invalid_id","{id:\"minecraft:missing\"}");
+   run(out,"sheep_fractional_color","{id:\"minecraft:sheep\",Color:-254.5f}");
   }
  }
 }

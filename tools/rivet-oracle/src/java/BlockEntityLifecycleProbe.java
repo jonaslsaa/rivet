@@ -59,6 +59,19 @@ public final class BlockEntityLifecycleProbe {
  }
  public static void main(String[] args)throws Exception {
   net.minecraft.SharedConstants.tryDetectVersion();Bootstrap.bootStrap();
+  if(args.length>1&&args[1].equals("spawner")) {
+   access=RegistryAccess.fromRegistryOfRegistries(BuiltInRegistries.REGISTRY);
+   try(var out=new PrintStream(args[0])) {
+    for(boolean weighted:new boolean[]{false,true}) {
+     String input="{id:'minecraft:mob_spawner',Paper.Delay:-40000,MinSpawnDelay:-50000,MaxSpawnDelay:90000,SpawnCount:70000,MaxNearbyEntities:80000,RequiredPlayerRange:-40001,SpawnRange:99999,"+(weighted?"SpawnPotentials:[{weight:2,data:{entity:{id:'skeleton',custom:7}}},{weight:3,data:{entity:{id:'creeper',custom:9}}}]":"SpawnData:{entity:{id:'skeleton',custom:11}},SpawnPotentials:[]")+"}";
+     var pos=new BlockPos(8,64,8);var entity=new SpawnerBlockEntity(pos,Blocks.SPAWNER.defaultBlockState());
+     entity.loadWithComponents(net.minecraft.world.level.storage.TagValueInput.create(net.minecraft.util.ProblemReporter.DISCARDING,access,TagParser.parseCompoundFully(input)));
+     var random=new net.minecraft.world.level.levelgen.LegacyRandomSource(42);entity.setEntityId(net.minecraft.world.entity.EntityTypes.ZOMBIE,random);
+     var row=new JsonObject();row.addProperty("weighted",weighted);row.addProperty("input",input);row.addProperty("saved",entity.saveWithFullMetadata(access).toString());row.addProperty("spawn_count",entity.getSpawner().spawnCount);row.addProperty("min_delay",entity.getSpawner().minSpawnDelay);row.addProperty("world_next_long",random.nextLong());out.println(row);
+    }
+   }
+   return;
+  }
   var packs=net.minecraft.server.packs.repository.ServerPacksSource.createVanillaTrustedRepository();MinecraftServer.configurePackRepository(packs,WorldDataConfiguration.DEFAULT,true,false);
   try(var resources=new net.minecraft.server.packs.resources.MultiPackResourceManager(net.minecraft.server.packs.PackType.SERVER_DATA,packs.openAllSelected());var out=new PrintStream(args[0])) {
    var layers=RegistryLayer.createRegistryAccess();var lookups=net.minecraft.tags.TagLoader.buildUpdatedLookups(layers.getAccessForLoading(RegistryLayer.WORLDGEN),net.minecraft.tags.TagLoader.loadTagsForExistingRegistries(resources,layers.getLayer(RegistryLayer.STATIC)));

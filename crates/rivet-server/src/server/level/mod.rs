@@ -14,7 +14,6 @@
 //! this slice is the smallest end-to-end world object #100/#101 build on.
 
 mod aquatic_survival;
-mod beehive_data;
 mod block_shape_update;
 pub mod chunk_level;
 pub mod chunk_map;

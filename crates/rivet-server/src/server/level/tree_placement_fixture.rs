@@ -1,6 +1,6 @@
 //! Full-tree differential against pinned Paper, including real edge updates.
 
-use super::beehive_data::BeehiveData;
+use rivet_world::block_entity::beehive_data::BeehiveData;
 use super::block_shape_update::update_shape_at_edge;
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_nbt::tag_parser::parse_compound_fully;

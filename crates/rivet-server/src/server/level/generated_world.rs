@@ -9200,12 +9200,13 @@ mod tests {
 
         let chest_tag = holder
             .chunk
-            .get_block_entity_nbts()
-            .get(&chest_pos)
-            .expect("FEATURES chest NBT must survive region drop");
+            .base()
+            .get_block_entity(&chest_pos)
+            .expect("FEATURES chest NBT must survive region drop")
+            .save_with_full_metadata();
         assert_eq!(
             chest_tag.get_string("id").map(String::as_str),
-            Some("DUMMY")
+            Some("minecraft:chest")
         );
         assert_eq!(
             chest_tag.get_string("LootTable").map(String::as_str),
@@ -9215,9 +9216,10 @@ mod tests {
 
         let spawner_tag = holder
             .chunk
-            .get_block_entity_nbts()
-            .get(&spawner_pos)
-            .expect("FEATURES spawner NBT must survive region drop");
+            .base()
+            .get_block_entity(&spawner_pos)
+            .expect("FEATURES spawner NBT must survive region drop")
+            .save_with_full_metadata();
         let spawn_data = spawner_tag
             .get_compound("SpawnData")
             .expect("spawner SpawnData must be persisted");
@@ -9359,19 +9361,24 @@ mod tests {
 
         let persisted = holder
             .chunk
-            .get_block_entity_nbts()
-            .get(&preserved_pos)
-            .expect("preserved spawner payload");
-        for key in [
-            "Delay",
-            "MinSpawnDelay",
-            "MaxSpawnDelay",
-            "SpawnCount",
-            "MaxNearbyEntities",
-            "RequiredPlayerRange",
-            "SpawnRange",
+            .base()
+            .get_block_entity(&preserved_pos)
+            .expect("preserved spawner payload")
+            .save_with_full_metadata();
+        for (key, value) in [
+            ("Delay", 20),
+            ("MinSpawnDelay", 200),
+            ("MaxSpawnDelay", 800),
+            ("SpawnCount", 4),
+            ("MaxNearbyEntities", 6),
+            ("RequiredPlayerRange", 16),
+            ("SpawnRange", 4),
         ] {
-            assert_eq!(persisted.get_int(key), None, "stale field {key}");
+            assert_eq!(
+                persisted.get_short(key),
+                Some(value),
+                "fresh native default {key}"
+            );
         }
         let preserved_data = persisted
             .get_compound("SpawnData")
@@ -9393,9 +9400,10 @@ mod tests {
 
         let selected = holder
             .chunk
-            .get_block_entity_nbts()
-            .get(&selected_pos)
-            .expect("selected spawner payload");
+            .base()
+            .get_block_entity(&selected_pos)
+            .expect("selected spawner payload")
+            .save_with_full_metadata();
         let selected_data = selected
             .get_compound("SpawnData")
             .expect("materialized SpawnData");
@@ -9421,10 +9429,11 @@ mod tests {
 
         let repaired = holder
             .chunk
-            .get_block_entity_nbts()
-            .get(&malformed_pos)
-            .expect("malformed spawner payload");
-        assert_eq!(repaired.get_int("Delay"), None);
+            .base()
+            .get_block_entity(&malformed_pos)
+            .expect("malformed spawner payload")
+            .save_with_full_metadata();
+        assert_eq!(repaired.get_short("Delay"), Some(20));
         assert_eq!(
             repaired
                 .get_compound("SpawnData")
