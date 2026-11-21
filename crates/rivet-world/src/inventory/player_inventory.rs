@@ -188,12 +188,19 @@ impl PlayerInventory {
         self.add_at_slot(NOT_FOUND_INDEX, stack)
     }
 
+    fn is_valid_slot(&self, slot: usize) -> bool {
+        slot < self.items.len() || self.equipment.contains_key(&slot)
+    }
+
     /// `Inventory.add(int, ItemStack)` — exact Paper flow:
     /// 1. Empty stack -> `false`.
     /// 2. If stack is non-stackable / damaged -> place directly in `slot` or free slot.
     /// 3. Otherwise loop `add_resource` until empty or no progress.
     pub fn add_at_slot(&mut self, mut slot: i32, stack: &mut InventoryItemStack) -> bool {
         if stack.is_empty() {
+            return false;
+        }
+        if slot != NOT_FOUND_INDEX && (slot < 0 || !self.is_valid_slot(slot as usize)) {
             return false;
         }
         if !stack.is_stackable() {
@@ -281,6 +288,9 @@ impl PlayerInventory {
 
     fn add_resource_in_slot(&mut self, slot: usize, stack: &InventoryItemStack) -> i32 {
         let mut count = stack.get_count();
+        if !self.is_valid_slot(slot) {
+            return count;
+        }
         let current = self.get_item(slot).clone();
         if current.is_empty() {
             let max = self.get_max_stack_size_for_item(stack);

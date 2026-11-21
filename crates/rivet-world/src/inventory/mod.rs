@@ -733,4 +733,15 @@ mod tests {
         assert_eq!(inv.get_item(0).get_count(), 1);
         assert_eq!(tools.get_count(), 1);
     }
+
+    #[test]
+    fn invalid_explicit_slot_does_not_consume_items() {
+        let mut inv = PlayerInventory::new();
+        let mut stack = stone(12);
+        assert!(!inv.add_at_slot(999, &mut stack));
+        assert_eq!(stack.get_count(), 12);
+        assert!(!inv.add_at_slot(-5, &mut stack));
+        assert_eq!(stack.get_count(), 12);
+        assert!(inv.is_empty());
+    }
 }
