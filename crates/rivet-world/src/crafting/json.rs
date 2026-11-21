@@ -340,6 +340,12 @@ fn parse_result_template(value: Option<&Value>) -> Result<ItemStackTemplate, Rec
         Value::String(s) => {
             let item =
                 ItemId::from_name(s).ok_or_else(|| RecipeJsonError::UnknownItem(s.clone()))?;
+            if item.is_air() {
+                return Err(RecipeJsonError::InvalidField {
+                    field: "result",
+                    message: "result item must not be air".to_owned(),
+                });
+            }
             Ok(ItemStackTemplate::new(item, 1))
         }
         Value::Object(map) => {
@@ -349,10 +355,30 @@ fn parse_result_template(value: Option<&Value>) -> Result<ItemStackTemplate, Rec
                 .ok_or(RecipeJsonError::MissingField("result.id"))?;
             let item = ItemId::from_name(id_str)
                 .ok_or_else(|| RecipeJsonError::UnknownItem(id_str.to_owned()))?;
-            let count = map
-                .get("count")
-                .and_then(Value::as_i64)
-                .map_or(1_i32, |c| c as i32);
+            if item.is_air() {
+                return Err(RecipeJsonError::InvalidField {
+                    field: "result.id",
+                    message: "result item must not be air".to_owned(),
+                });
+            }
+            let count = match map.get("count") {
+                None => 1_i32,
+                Some(count_val) => {
+                    let raw = count_val
+                        .as_i64()
+                        .ok_or_else(|| RecipeJsonError::InvalidField {
+                            field: "result.count",
+                            message: "expected integer count in 1..=99".to_owned(),
+                        })?;
+                    if !(1..=99).contains(&raw) {
+                        return Err(RecipeJsonError::InvalidField {
+                            field: "result.count",
+                            message: format!("count {raw} out of valid range 1..=99"),
+                        });
+                    }
+                    raw as i32
+                }
+            };
             let mut components = BTreeMap::new();
             if let Some(comp_val) = map.get("components") {
                 let comp_obj = comp_val

@@ -692,4 +692,31 @@ fn json_loader_parses_vanilla_recipes() {
                 "suspicious_stew_effects"
             ))
     );
+
+    // Controlled negative: result count 0, negative, or > 99 is rejected.
+    let zero_count_json = json!({
+        "type": "minecraft:smelting",
+        "ingredient": "minecraft:cobblestone",
+        "result": { "id": "minecraft:stone", "count": 0 }
+    });
+    assert!(matches!(
+        parse_recipe_json(&zero_count_json, &empty_tag_resolver),
+        Err(RecipeJsonError::InvalidField {
+            field: "result.count",
+            ..
+        })
+    ));
+
+    let air_result_json = json!({
+        "type": "minecraft:smelting",
+        "ingredient": "minecraft:cobblestone",
+        "result": "minecraft:air"
+    });
+    assert!(matches!(
+        parse_recipe_json(&air_result_json, &empty_tag_resolver),
+        Err(RecipeJsonError::InvalidField {
+            field: "result",
+            ..
+        })
+    ));
 }
