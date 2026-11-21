@@ -5,6 +5,7 @@
 //! exposing CraftBukkit object graphs, arena pointers, or Rust references
 //! across the plugin boundary.
 
+use std::any::Any;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -527,13 +528,7 @@ where
             message,
         }),
         Err(payload) => {
-            let message = if let Some(s) = payload.downcast_ref::<&str>() {
-                (*s).to_owned()
-            } else if let Some(s) = payload.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "non-string panic payload".to_owned()
-            };
+            let message = extract_panic_message_and_drop(payload);
             Err(LifecycleError::PluginPanicked {
                 plugin: slot.descriptor.name.clone(),
                 phase,
@@ -541,6 +536,20 @@ where
             })
         }
     }
+}
+
+fn extract_panic_message_and_drop(payload: Box<dyn Any + Send>) -> String {
+    let message = if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_owned()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_owned()
+    };
+    if let Err(secondary) = catch_unwind(AssertUnwindSafe(move || drop(payload))) {
+        std::mem::forget(secondary);
+    }
+    message
 }
 
 /// Minimal lifecycle fixture plugin used for synthetic conformance verification.

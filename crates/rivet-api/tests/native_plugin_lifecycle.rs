@@ -392,3 +392,40 @@ fn invalid_names_duplicates_and_state_transitions_fail_closed() {
         .unwrap();
     assert_ne!(p, p2);
 }
+
+#[test]
+fn panic_payload_with_panicking_drop_is_contained_and_cleans_up() {
+    struct BombPayload;
+    impl Drop for BombPayload {
+        fn drop(&mut self) {
+            panic!("secondary panic while dropping panic payload");
+        }
+    }
+
+    struct BombPlugin;
+    impl NativePlugin for BombPlugin {
+        fn descriptor(&self) -> PluginDescriptor {
+            PluginDescriptor::new("bomb-payload", "0.1.0")
+        }
+
+        fn on_enable(&mut self, ctx: &mut PluginContext<'_>) -> Result<(), String> {
+            ctx.alloc_resource("leaked-before-bomb").unwrap();
+            std::panic::panic_any(BombPayload);
+        }
+    }
+
+    let mut host = NativePluginHost::synthetic_default();
+    let p = host.register(Box::new(BombPlugin)).unwrap();
+    host.load(p).unwrap();
+
+    let err = host.enable(p).unwrap_err();
+    assert!(matches!(
+        err,
+        LifecycleError::PluginPanicked {
+            phase: LifecyclePhase::Enable,
+            ..
+        }
+    ));
+    assert_eq!(host.state(p).unwrap(), PluginState::Failed);
+    assert_eq!(host.live_resource_count_for(p).unwrap(), 0);
+}
