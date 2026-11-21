@@ -335,8 +335,8 @@ impl<B: EntityRegionBackend> PersistentEntitySectionManager<B> {
 
     /// Port of `PersistentEntitySectionManager.tick()`.
     pub fn tick(&mut self) -> Result<(), EntityStorageError> {
-        self.process_unloads()?;
         self.process_pending_loads()?;
+        self.process_unloads()?;
         Ok(())
     }
 
@@ -634,6 +634,10 @@ impl<B: EntityRegionBackend> PersistentEntitySectionManager<B> {
             .copied()
             .unwrap_or(ChunkLoadStatus::Fresh);
 
+        if load_status == ChunkLoadStatus::Pending {
+            return Ok(false);
+        }
+
         let section_entity_ids: Vec<i32> = self
             .section_storage
             .existing_sections_in_chunk(chunk_key)
@@ -657,13 +661,14 @@ impl<B: EntityRegionBackend> PersistentEntitySectionManager<B> {
             if load_status == ChunkLoadStatus::Loaded {
                 self.permanent_storage
                     .store_entities(&ChunkEntities::empty(pos))?;
-                self.dirty_chunks.remove(&chunk_key);
-                if unload {
-                    for id in section_entity_ids {
+            }
+            self.dirty_chunks.remove(&chunk_key);
+            if unload {
+                for id in section_entity_ids {
+                    if self.entities.contains_key(&id) {
                         self.unload_entity_tree(id);
                     }
                 }
-                return Ok(true);
             }
             return Ok(true);
         }

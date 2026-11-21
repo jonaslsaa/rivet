@@ -839,3 +839,81 @@ fn add_new_entity_with_passengers_wires_riding_links_automatically() {
     assert_eq!(reloaded_boat.passenger_ids, vec![reloaded_rider.network_id]);
     assert_eq!(reloaded_rider.vehicle_id, Some(reloaded_boat.network_id));
 }
+
+#[test]
+fn pending_chunk_unload_waits_for_load_and_does_not_overwrite_disk_entities() {
+    let chunk = ChunkPos::new(0, 0);
+    let disk_uuid = make_uuid(601, 1);
+    let spawned_uuid = make_uuid(601, 2);
+
+    // Pre-populate disk with one entity.
+    let mut storage =
+        EntityStorage::new(InMemoryEntityRegionBackend::new(), EntitySaveLimits::new());
+    storage
+        .store_entities(&ChunkEntities::new(
+            chunk,
+            vec![make_entity("minecraft:pig", 1, disk_uuid, 4.0, 64.0, 4.0)],
+        ))
+        .unwrap();
+
+    let mut manager = PersistentEntitySectionManager::new(storage);
+    // Queue load (status = Pending), spawn a new entity before load drains, then hide chunk.
+    manager
+        .update_chunk_status(chunk, Visibility::Ticking)
+        .unwrap();
+    assert_eq!(manager.chunk_load_status(chunk), ChunkLoadStatus::Pending);
+
+    let spawned_id = manager.allocate_network_id();
+    manager
+        .add_new_entity(make_entity(
+            "minecraft:cow",
+            spawned_id,
+            spawned_uuid,
+            6.0,
+            64.0,
+            6.0,
+        ))
+        .unwrap();
+    manager
+        .update_chunk_status(chunk, Visibility::Hidden)
+        .unwrap();
+
+    // Direct process_unloads while Pending must defer without overwriting disk.
+    assert_eq!(manager.process_unloads().unwrap(), 0);
+    assert_eq!(manager.loaded_entity_count(), 1);
+
+    // tick() drains pending loads first, merges disk + spawned entities, then saves & unloads both.
+    manager.tick().unwrap();
+    assert_eq!(manager.loaded_entity_count(), 0);
+    assert_eq!(manager.chunk_load_status(chunk), ChunkLoadStatus::Fresh);
+
+    // Reloading must contain BOTH the original disk entity and the newly spawned entity.
+    manager
+        .update_chunk_status(chunk, Visibility::Tracked)
+        .unwrap();
+    manager.process_pending_loads().unwrap();
+    assert_eq!(manager.loaded_entity_count(), 2);
+    assert!(manager.get_visible_by_uuid(&disk_uuid).is_some());
+    assert!(manager.get_visible_by_uuid(&spawned_uuid).is_some());
+}
+
+#[test]
+fn fresh_chunk_unload_cleans_up_nonpersistent_entities() {
+    let storage = EntityStorage::new(InMemoryEntityRegionBackend::new(), EntitySaveLimits::new());
+    let mut manager = PersistentEntitySectionManager::new(storage);
+    let chunk = ChunkPos::new(2, 2);
+
+    let id = manager.allocate_network_id();
+    let mut transient = make_entity("minecraft:marker", id, make_uuid(602, 1), 36.0, 64.0, 36.0);
+    transient.persist = false;
+    manager.add_new_entity(transient).unwrap();
+    assert_eq!(manager.chunk_load_status(chunk), ChunkLoadStatus::Fresh);
+    assert_eq!(manager.loaded_entity_count(), 1);
+
+    manager
+        .update_chunk_status(chunk, Visibility::Hidden)
+        .unwrap();
+    assert_eq!(manager.process_unloads().unwrap(), 1);
+    assert_eq!(manager.loaded_entity_count(), 0);
+    assert!(!manager.is_chunk_dirty(chunk));
+}
