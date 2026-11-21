@@ -677,10 +677,18 @@ impl StoredEntityRecord {
 
     /// Flattens this root entity and its nested `passengers` tree in pre-order
     /// (vehicle before passengers, matching Paper `Entity.getSelfAndPassengers`
-    /// / `EntityType.loadEntitiesRecursive`), preserving `vehicle_id` and `passenger_ids`.
+    /// / `EntityType.loadEntitiesRecursive`), wiring `vehicle_id` and `passenger_ids`
+    /// links from the nested tree if not already populated.
     #[must_use]
     pub fn flatten_tree(mut self) -> Vec<StoredEntityRecord> {
-        let nested = std::mem::take(&mut self.passengers);
+        let self_id = self.network_id;
+        let mut nested = std::mem::take(&mut self.passengers);
+        for child in &mut nested {
+            child.vehicle_id = Some(self_id);
+            if !self.passenger_ids.contains(&child.network_id) {
+                self.passenger_ids.push(child.network_id);
+            }
+        }
         let mut out = vec![self];
         for child in nested {
             out.extend(child.flatten_tree());
@@ -689,25 +697,39 @@ impl StoredEntityRecord {
     }
 }
 
-/// Encodes a chunk's root entities into a current-format `CompoundTag`
+/// Encodes a chunk's entities into a current-format `CompoundTag`
 /// (`EntityStorage.storeEntities`).
+///
+/// Accepts either pre-nested root trees or flattened slices (such as those
+/// returned by [`decode_chunk_entities_nbt`] / `EntityStorage::load_entities`),
+/// reconstructing nested `Passengers` from `passenger_ids` when needed.
 ///
 /// Writes `DataVersion = WORLD_VERSION`, `Entities`, and `Position = [x, z]`.
 /// Enforces Paper's per-chunk `EntitySaveLimits` and `Entity.save` eligibility.
 #[must_use]
 pub fn encode_chunk_entities_nbt(
     pos: ChunkPos,
-    roots: &[StoredEntityRecord],
+    entities: &[StoredEntityRecord],
     limits: &EntitySaveLimits,
 ) -> CompoundTag {
+    let by_id: HashMap<i32, &StoredEntityRecord> = entities
+        .iter()
+        .map(|entity| (entity.network_id, entity))
+        .collect();
+
     let mut entities_list = ListTag::new();
     let mut saved_counts: HashMap<String, i32> = HashMap::new();
 
-    for entity in roots {
+    for entity in entities {
+        if entity.is_passenger() {
+            continue;
+        }
         if !limits.try_consume(&entity.id, &mut saved_counts) {
             continue;
         }
-        if let Some(encoded) = entity.save_root() {
+        let mut visited = std::collections::HashSet::new();
+        let reconstructed = reconstruct_passenger_tree(entity, &by_id, &mut visited);
+        if let Some(encoded) = reconstructed.save_root() {
             entities_list.add(Tag::Compound(encoded));
         }
     }
@@ -717,6 +739,30 @@ pub fn encode_chunk_entities_nbt(
     chunk_tag.put(TAG_ENTITIES.to_string(), Tag::List(entities_list));
     chunk_tag.put_int_array(TAG_POSITION, vec![pos.x(), pos.z()]);
     chunk_tag
+}
+
+fn reconstruct_passenger_tree(
+    entity: &StoredEntityRecord,
+    by_id: &HashMap<i32, &StoredEntityRecord>,
+    visited: &mut std::collections::HashSet<i32>,
+) -> StoredEntityRecord {
+    visited.insert(entity.network_id);
+    let mut out = entity.clone();
+    if out.passengers.is_empty() && !out.passenger_ids.is_empty() {
+        out.passengers = out
+            .passenger_ids
+            .iter()
+            .filter_map(|pid| {
+                if visited.contains(pid) {
+                    return None;
+                }
+                by_id
+                    .get(pid)
+                    .map(|child| reconstruct_passenger_tree(child, by_id, visited))
+            })
+            .collect();
+    }
+    out
 }
 
 /// Decodes a current-format chunk entity `CompoundTag` into flattened entities

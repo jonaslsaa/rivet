@@ -761,3 +761,81 @@ fn uuid_less_entities_receive_unique_uuids_across_fresh_allocators() {
 
     assert_ne!(first[0].uuid, second[0].uuid);
 }
+
+#[test]
+fn storage_load_then_store_round_trip_preserves_passengers() {
+    let pos = ChunkPos::new(0, 0);
+    let boat_uuid = make_uuid(501, 1);
+    let rider_uuid = make_uuid(501, 2);
+
+    let mut boat = make_entity("minecraft:oak_boat", 1, boat_uuid, 4.0, 64.0, 4.0);
+    let rider = make_entity("minecraft:zombie", 2, rider_uuid, 4.0, 64.5, 4.0);
+    boat.passengers.push(rider);
+
+    let mut storage =
+        EntityStorage::new(InMemoryEntityRegionBackend::new(), EntitySaveLimits::new());
+    storage
+        .store_entities(&ChunkEntities::new(pos, vec![boat]))
+        .unwrap();
+
+    // Load returns flattened [boat, rider]; storing that ChunkEntities back must keep rider.
+    let loaded = storage.load_entities(pos).unwrap();
+    assert_eq!(loaded.len(), 2);
+    storage.store_entities(&loaded).unwrap();
+
+    let reloaded = storage.load_entities(pos).unwrap();
+    assert_eq!(reloaded.len(), 2);
+    assert_eq!(reloaded.entities()[0].uuid, boat_uuid);
+    assert_eq!(reloaded.entities()[1].uuid, rider_uuid);
+    assert_eq!(
+        reloaded.entities()[0].passenger_ids,
+        vec![reloaded.entities()[1].network_id]
+    );
+    assert_eq!(
+        reloaded.entities()[1].vehicle_id,
+        Some(reloaded.entities()[0].network_id)
+    );
+}
+
+#[test]
+fn add_new_entity_with_passengers_wires_riding_links_automatically() {
+    let storage = EntityStorage::new(InMemoryEntityRegionBackend::new(), EntitySaveLimits::new());
+    let mut manager = PersistentEntitySectionManager::new(storage);
+    let chunk = ChunkPos::new(0, 0);
+    manager
+        .update_chunk_status(chunk, Visibility::Ticking)
+        .unwrap();
+    manager.process_pending_loads().unwrap();
+
+    let boat_id = manager.allocate_network_id();
+    let rider_id = manager.allocate_network_id();
+    let boat_uuid = make_uuid(502, 1);
+    let rider_uuid = make_uuid(502, 2);
+
+    // Caller only nests `rider` in `boat.passengers` without pre-populating ID links.
+    let mut boat = make_entity("minecraft:oak_boat", boat_id, boat_uuid, 4.0, 64.0, 4.0);
+    let rider = make_entity("minecraft:zombie", rider_id, rider_uuid, 4.0, 64.5, 4.0);
+    boat.passengers.push(rider);
+
+    manager.add_new_entity_with_passengers(boat).unwrap();
+
+    let live_boat = manager.get_visible_by_id(boat_id).unwrap();
+    let live_rider = manager.get_visible_by_id(rider_id).unwrap();
+    assert_eq!(live_boat.passenger_ids, vec![rider_id]);
+    assert_eq!(live_rider.vehicle_id, Some(boat_id));
+
+    // Verify the relationship survives save + unload + reload.
+    manager
+        .update_chunk_status(chunk, Visibility::Hidden)
+        .unwrap();
+    manager.process_unloads().unwrap();
+    manager
+        .update_chunk_status(chunk, Visibility::Tracked)
+        .unwrap();
+    manager.process_pending_loads().unwrap();
+
+    let reloaded_boat = manager.get_visible_by_uuid(&boat_uuid).unwrap();
+    let reloaded_rider = manager.get_visible_by_uuid(&rider_uuid).unwrap();
+    assert_eq!(reloaded_boat.passenger_ids, vec![reloaded_rider.network_id]);
+    assert_eq!(reloaded_rider.vehicle_id, Some(reloaded_boat.network_id));
+}
