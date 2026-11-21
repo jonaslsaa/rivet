@@ -76,25 +76,30 @@ impl PlayerSurvivalState {
     /// Exact port of `Player.causeFoodExhaustion(float, ExhaustionReason)`.
     pub fn cause_food_exhaustion(
         &mut self,
-        host: &impl SurvivalPlayerHost,
+        host: &mut impl SurvivalPlayerHost,
         amount: f32,
         reason: ExhaustionReason,
         events: &mut Vec<SurvivalEvent>,
     ) {
-        if !host.is_invulnerable() {
-            events.push(SurvivalEvent::Exhaustion { amount, reason });
-            self.food.add_exhaustion(amount);
+        if !host.is_invulnerable()
+            && let Some(accepted_amount) = host.on_exhaustion(reason, amount)
+        {
+            events.push(SurvivalEvent::Exhaustion {
+                amount: accepted_amount,
+                reason,
+            });
+            self.food.add_exhaustion(accepted_amount);
         }
     }
 
     /// Exact port of `FoodData.eat(FoodProperties, ItemStack, ServerPlayer)`.
     pub fn eat_food(
         &mut self,
-        host: &impl SurvivalPlayerHost,
+        host: &mut impl SurvivalPlayerHost,
         properties: FoodProperties,
         events: &mut Vec<SurvivalEvent>,
     ) {
-        self.food.eat_with_events(properties, host.health(), events);
+        self.food.eat_with_events(host, properties, events);
     }
 
     /// Exact port of `ServerPlayer.giveExperiencePoints(int)`.
@@ -127,7 +132,7 @@ impl PlayerSurvivalState {
     /// Exact port of `ServerPlayer.jumpFromGround()` exhaustion portion.
     pub fn on_jump(
         &mut self,
-        host: &impl SurvivalPlayerHost,
+        host: &mut impl SurvivalPlayerHost,
         is_sprinting: bool,
         config: &ExhaustionConfig,
         events: &mut Vec<SurvivalEvent>,
@@ -152,7 +157,7 @@ impl PlayerSurvivalState {
     /// Exact port of `ServerPlayer.checkMovementStatistics(dx, dy, dz)` exhaustion portion.
     pub fn check_movement_exhaustion(
         &mut self,
-        host: &impl SurvivalPlayerHost,
+        host: &mut impl SurvivalPlayerHost,
         kind: MovementKind,
         delta: [f64; 3],
         config: &ExhaustionConfig,

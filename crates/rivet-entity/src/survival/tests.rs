@@ -15,6 +15,8 @@ struct MockPlayerHost {
     score: i32,
     heals: Vec<(f32, RegainReason, bool)>,
     starve_hits: Vec<f32>,
+    food_level_override: Option<Option<i32>>,
+    exhaustion_override: Option<Option<f32>>,
 }
 
 impl MockPlayerHost {
@@ -29,6 +31,8 @@ impl MockPlayerHost {
             score: 0,
             heals: Vec::new(),
             starve_hits: Vec::new(),
+            food_level_override: None,
+            exhaustion_override: None,
         }
     }
 }
@@ -76,6 +80,14 @@ impl SurvivalPlayerHost for MockPlayerHost {
 
     fn increase_score(&mut self, delta: i32) {
         self.score = self.score.wrapping_add(delta);
+    }
+
+    fn on_food_level_change(&mut self, _old_food_level: i32, new_food_level: i32) -> Option<i32> {
+        self.food_level_override.unwrap_or(Some(new_food_level))
+    }
+
+    fn on_exhaustion(&mut self, _reason: ExhaustionReason, exhaustion: f32) -> Option<f32> {
+        self.exhaustion_override.unwrap_or(Some(exhaustion))
     }
 }
 
@@ -562,13 +574,13 @@ fn movement_and_jump_exhaustion_and_dead_player_guard() {
     let mut events = Vec::new();
 
     // Sprint jump adds 0.2, normal jump adds 0.05.
-    state.on_jump(&host, true, &cfg, &mut events);
-    state.on_jump(&host, false, &cfg, &mut events);
+    state.on_jump(&mut host, true, &cfg, &mut events);
+    state.on_jump(&mut host, false, &cfg, &mut events);
     assert!((state.food.exhaustion_level - 0.25).abs() < 1e-6);
 
     // Sprinting 10 blocks horizontally -> 1000 cm * 0.1 * 0.01 = 1.0 exhaustion.
     state.check_movement_exhaustion(
-        &host,
+        &mut host,
         MovementKind::OnGroundSprinting,
         [10.0, 0.0, 0.0],
         &cfg,
@@ -578,7 +590,7 @@ fn movement_and_jump_exhaustion_and_dead_player_guard() {
 
     // Invulnerable player accumulates zero exhaustion.
     host.invulnerable = true;
-    state.on_jump(&host, true, &cfg, &mut events);
+    state.on_jump(&mut host, true, &cfg, &mut events);
     assert!((state.food.exhaustion_level - 1.25).abs() < 1e-6);
 
     // Invalid/pending-respawn player skips food tick (Paper doTick guard).
@@ -635,5 +647,84 @@ fn controlled_negative_detects_non_paper_exhaustion_and_easy_starvation() {
     assert!(
         !buggy_easy_damaged_at_10hp,
         "controlled negative: Easy starvation must stop at 10.0 HP"
+    );
+}
+
+#[test]
+fn synchronous_event_cancellation_and_override_affect_progression() {
+    let mut state = PlayerSurvivalState::new();
+    let mut host = MockPlayerHost::new(15.0, 20.0);
+    let rules = SurvivalGameRules::default();
+    let cfg = ExhaustionConfig::default();
+    let mut events = Vec::new();
+
+    // 1. Cancelling FoodLevelChangeEvent on eat prevents food/saturation mutation,
+    //    but still sends the health packet (matching Paper FoodData.eat lines 40-44).
+    state.food.set_food_level(10);
+    state.food.set_saturation(2.0);
+    host.food_level_override = Some(None);
+    state.eat_food(&mut host, Foods::APPLE, &mut events);
+    assert_eq!(state.food.food_level(), 10);
+    assert_eq!(state.food.saturation_level(), 2.0);
+    assert_eq!(
+        events,
+        vec![SurvivalEvent::SendHealthPacket {
+            health: 15.0,
+            food_level: 10,
+            saturation: 2.0,
+        }]
+    );
+
+    // 2. Modifying new_food_level on eat applies the handler-modified level.
+    events.clear();
+    host.food_level_override = Some(Some(17));
+    state.eat_food(&mut host, Foods::APPLE, &mut events);
+    assert_eq!(state.food.food_level(), 17);
+    assert!((state.food.saturation_level() - (2.0 + Foods::APPLE.saturation)).abs() < 1e-6);
+    assert_eq!(
+        events[0],
+        SurvivalEvent::FoodLevelChange {
+            old_food_level: 10,
+            new_food_level: 17,
+        }
+    );
+
+    // 3. Cancelling FoodLevelChangeEvent on exhaustion drain keeps food_level unchanged.
+    events.clear();
+    state.food.set_food_level(10);
+    state.food.set_saturation(0.0);
+    state.food.exhaustion_level = 4.5;
+    host.food_level_override = Some(None);
+    state
+        .food
+        .tick(&mut host, Difficulty::Normal, rules, &cfg, &mut events);
+    assert_eq!(state.food.food_level(), 10);
+    assert_eq!(
+        events,
+        vec![SurvivalEvent::SendHealthPacket {
+            health: 15.0,
+            food_level: 10,
+            saturation: 0.0,
+        }]
+    );
+
+    // 4. Cancelling EntityExhaustionEvent skips exhaustion in both cause_food_exhaustion and regen.
+    events.clear();
+    state.food.exhaustion_level = 0.0;
+    host.exhaustion_override = Some(None);
+    state.cause_food_exhaustion(&mut host, 2.0, ExhaustionReason::Jump, &mut events);
+    assert_eq!(state.food.exhaustion_level, 0.0);
+    assert!(events.is_empty());
+
+    // 5. Modifying exhaustion in EntityExhaustionEvent applies the modified amount.
+    host.exhaustion_override = Some(Some(0.75));
+    state.cause_food_exhaustion(&mut host, 2.0, ExhaustionReason::Jump, &mut events);
+    assert!((state.food.exhaustion_level - 0.75).abs() < 1e-6);
+    assert_eq!(
+        events,
+        vec![SurvivalEvent::Exhaustion {
+            amount: 0.75,
+            reason: ExhaustionReason::Jump,
+        }]
     );
 }

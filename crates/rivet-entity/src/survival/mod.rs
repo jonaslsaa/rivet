@@ -141,4 +141,16 @@ pub trait SurvivalPlayerHost {
     fn heal(&mut self, amount: f32, reason: RegainReason, is_fast_regen: bool);
     fn hurt_starve(&mut self, amount: f32) -> bool;
     fn increase_score(&mut self, delta: i32);
+
+    /// Synchronous Bukkit/Paper `FoodLevelChangeEvent` dispatch hook.
+    /// Return `Some(food_level)` (possibly modified) to apply the change, or `None` to cancel.
+    fn on_food_level_change(&mut self, _old_food_level: i32, new_food_level: i32) -> Option<i32> {
+        Some(new_food_level)
+    }
+
+    /// Synchronous Bukkit/Paper `EntityExhaustionEvent` dispatch hook.
+    /// Return `Some(exhaustion)` (possibly modified) to apply exhaustion, or `None` to cancel.
+    fn on_exhaustion(&mut self, _reason: ExhaustionReason, exhaustion: f32) -> Option<f32> {
+        Some(exhaustion)
+    }
 }

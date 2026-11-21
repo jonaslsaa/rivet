@@ -67,25 +67,30 @@ impl FoodData {
     }
 
     /// Paper/CraftBukkit `FoodData.eat(FoodProperties, ItemStack, ServerPlayer)`.
-    /// Emits `FoodLevelChange` and immediate `SendHealthPacket` matching Paper line 40-44.
+    /// Dispatches `on_food_level_change` synchronously before mutating food/saturation
+    /// and emits immediate `SendHealthPacket` matching Paper line 40-44.
     pub fn eat_with_events(
         &mut self,
+        host: &mut impl SurvivalPlayerHost,
         properties: FoodProperties,
-        current_health: f32,
         events: &mut Vec<SurvivalEvent>,
     ) {
         let old_food_level = self.food_level;
         let requested_food_level = properties.nutrition.wrapping_add(old_food_level);
-        events.push(SurvivalEvent::FoodLevelChange {
-            old_food_level,
-            new_food_level: requested_food_level,
-        });
-        self.add(
-            requested_food_level.wrapping_sub(old_food_level),
-            properties.saturation,
-        );
+        if let Some(accepted_food_level) =
+            host.on_food_level_change(old_food_level, requested_food_level)
+        {
+            events.push(SurvivalEvent::FoodLevelChange {
+                old_food_level,
+                new_food_level: accepted_food_level,
+            });
+            self.add(
+                accepted_food_level.wrapping_sub(old_food_level),
+                properties.saturation,
+            );
+        }
         events.push(SurvivalEvent::SendHealthPacket {
-            health: current_health,
+            health: host.health(),
             food_level: self.food_level,
             saturation: self.saturation_level,
         });
@@ -106,12 +111,16 @@ impl FoodData {
                 self.saturation_level = java_max_f32(self.saturation_level - 1.0, 0.0);
             } else if difficulty != Difficulty::Peaceful {
                 let old_food_level = self.food_level;
-                let new_food_level = self.food_level.wrapping_sub(1).max(0);
-                events.push(SurvivalEvent::FoodLevelChange {
-                    old_food_level,
-                    new_food_level,
-                });
-                self.food_level = new_food_level;
+                let requested_food_level = self.food_level.wrapping_sub(1).max(0);
+                if let Some(accepted_food_level) =
+                    host.on_food_level_change(old_food_level, requested_food_level)
+                {
+                    events.push(SurvivalEvent::FoodLevelChange {
+                        old_food_level,
+                        new_food_level: accepted_food_level,
+                    });
+                    self.food_level = accepted_food_level;
+                }
                 events.push(SurvivalEvent::SendHealthPacket {
                     health: host.health(),
                     food_level: self.food_level,
@@ -136,12 +145,15 @@ impl FoodData {
                     reason: RegainReason::Satiated,
                     is_fast_regen: true,
                 });
-                if !host.is_invulnerable() {
+                if !host.is_invulnerable()
+                    && let Some(accepted_exhaustion) =
+                        host.on_exhaustion(ExhaustionReason::Regen, saturation_spent)
+                {
                     events.push(SurvivalEvent::Exhaustion {
-                        amount: saturation_spent,
+                        amount: accepted_exhaustion,
                         reason: ExhaustionReason::Regen,
                     });
-                    self.add_exhaustion(saturation_spent);
+                    self.add_exhaustion(accepted_exhaustion);
                 }
                 self.tick_timer = 0;
             }
@@ -154,13 +166,15 @@ impl FoodData {
                     reason: RegainReason::Satiated,
                     is_fast_regen: false,
                 });
-                if !host.is_invulnerable() {
-                    let regen_exhaustion = exhaustion_config.regen_exhaustion;
+                if !host.is_invulnerable()
+                    && let Some(accepted_exhaustion) = host
+                        .on_exhaustion(ExhaustionReason::Regen, exhaustion_config.regen_exhaustion)
+                {
                     events.push(SurvivalEvent::Exhaustion {
-                        amount: regen_exhaustion,
+                        amount: accepted_exhaustion,
                         reason: ExhaustionReason::Regen,
                     });
-                    self.add_exhaustion(regen_exhaustion);
+                    self.add_exhaustion(accepted_exhaustion);
                 }
                 self.tick_timer = 0;
             }
