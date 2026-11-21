@@ -182,7 +182,8 @@ pub fn load_strict_paper_resources(
         }
     }
 
-    // 2. Verify no unexpected files exist in data/minecraft/test_environment or test_instance.
+    // 2. Verify no unexpected files exist in data/minecraft/test_environment or test_instance,
+    //    and no non-minecraft namespace defines unexpected GameTest resources.
     verify_exact_directory_entries(
         resource_root,
         "data/minecraft/test_environment",
@@ -193,6 +194,20 @@ pub fn load_strict_paper_resources(
         "data/minecraft/test_instance",
         &["always_pass.json"],
     )?;
+    for (namespace, ns_dir) in collect_sorted_subdirs(&resource_root.join("data"), "data")? {
+        if namespace == "minecraft" {
+            continue;
+        }
+        for sub in ["test_environment", "test_instance"] {
+            let sub_dir = ns_dir.join(sub);
+            if sub_dir.exists() {
+                return Err(GameTestResourceError::UnexpectedResource {
+                    directory: format!("data/{namespace}"),
+                    path: format!("data/{namespace}/{sub}"),
+                });
+            }
+        }
+    }
 
     // 3. Load and decode all files deterministically via the general directory loader.
     load_from_resource_root(resource_root, loaders)
@@ -203,88 +218,112 @@ pub fn load_strict_paper_resources(
 /// that every referenced environment, test function, and
 /// `data/<ns>/structure/<path>.nbt` file exists.
 ///
-/// Always fails closed on missing directories/files, invalid JSON/schema, or
-/// broken references. Entries are registered in sorted path order for
-/// deterministic registry IDs.
+/// Always fails closed on missing `data/` directory, invalid JSON/schema, or
+/// broken references. Entries are registered in sorted `(namespace, path)`
+/// order for deterministic registry IDs.
 pub fn load_from_resource_root(
     resource_root: &Path,
     loaders: &TestFunctionLoaderRegistry,
 ) -> Result<GameTestRegistries, GameTestResourceError> {
-    let env_dir = resource_root.join("data/minecraft/test_environment");
-    let inst_dir = resource_root.join("data/minecraft/test_instance");
-
-    let env_files = collect_sorted_json_files(&env_dir, "data/minecraft/test_environment")?;
-    let inst_files = collect_sorted_json_files(&inst_dir, "data/minecraft/test_instance")?;
-
-    let mut environments = Vec::with_capacity(env_files.len());
-    for (rel_path, full_path) in env_files {
-        let stem = strip_json_stem(&rel_path)?;
-        let id = Identifier::try_parse_result(&format!("minecraft:{stem}"))
-            .ok()
-            .flatten()
-            .ok_or_else(|| GameTestResourceError::InvalidResourceId {
-                path: rel_path.clone(),
-                value: format!("minecraft:{stem}"),
-            })?;
-        let text = fs::read_to_string(&full_path).map_err(|source| GameTestResourceError::Io {
-            path: rel_path.clone(),
-            source,
-        })?;
-        let json: serde_json::Value =
-            serde_json::from_str(&text).map_err(|source| GameTestResourceError::InvalidJson {
-                path: rel_path.clone(),
-                source,
-            })?;
-        let def = TestEnvironmentDefinition::decode_json(&json).map_err(|source| {
-            GameTestResourceError::EnvironmentDecode {
-                path: rel_path.clone(),
-                source,
-            }
-        })?;
-        environments.push((ResourceKey::create(&TEST_ENVIRONMENT, id), def));
+    let data_dir = resource_root.join("data");
+    if !data_dir.is_dir() {
+        return Err(GameTestResourceError::MissingResource {
+            path: "data".to_string(),
+        });
     }
 
-    let mut instances = Vec::with_capacity(inst_files.len());
-    for (rel_path, full_path) in inst_files {
-        let stem = strip_json_stem(&rel_path)?;
-        let id = Identifier::try_parse_result(&format!("minecraft:{stem}"))
-            .ok()
-            .flatten()
-            .ok_or_else(|| GameTestResourceError::InvalidResourceId {
-                path: rel_path.clone(),
-                value: format!("minecraft:{stem}"),
-            })?;
-        let text = fs::read_to_string(&full_path).map_err(|source| GameTestResourceError::Io {
-            path: rel_path.clone(),
-            source,
-        })?;
-        let json: serde_json::Value =
-            serde_json::from_str(&text).map_err(|source| GameTestResourceError::InvalidJson {
-                path: rel_path.clone(),
-                source,
-            })?;
-        let inst = GameTestInstance::decode_json(&json).map_err(|source| {
-            GameTestResourceError::InstanceDecode {
-                path: rel_path.clone(),
-                source,
-            }
-        })?;
+    let namespaces = collect_sorted_subdirs(&data_dir, "data")?;
 
-        // Fail closed if the referenced structure NBT file is missing.
-        let structure_rel = format!(
-            "data/{}/structure/{}.nbt",
-            inst.structure().namespace(),
-            inst.structure().path()
-        );
-        if !resource_root.join(&structure_rel).is_file() {
-            return Err(GameTestResourceError::MissingReferencedStructure {
-                instance: id.to_string(),
-                structure: inst.structure().to_string(),
-                expected_path: structure_rel,
-            });
+    let mut environments = Vec::new();
+    let mut instances = Vec::new();
+
+    for (namespace, ns_dir) in &namespaces {
+        let env_rel_dir = format!("data/{namespace}/test_environment");
+        let env_dir = ns_dir.join("test_environment");
+        if env_dir.exists() {
+            let env_files = collect_sorted_json_files(&env_dir, &env_rel_dir)?;
+            for (rel_path, full_path) in env_files {
+                let stem = strip_json_stem(&rel_path)?;
+                let full_rel = format!("{env_rel_dir}/{rel_path}");
+                let raw_id = format!("{namespace}:{stem}");
+                let id = Identifier::try_parse_result(&raw_id)
+                    .ok()
+                    .flatten()
+                    .ok_or_else(|| GameTestResourceError::InvalidResourceId {
+                        path: full_rel.clone(),
+                        value: raw_id,
+                    })?;
+                let text =
+                    fs::read_to_string(&full_path).map_err(|source| GameTestResourceError::Io {
+                        path: full_rel.clone(),
+                        source,
+                    })?;
+                let json: serde_json::Value = serde_json::from_str(&text).map_err(|source| {
+                    GameTestResourceError::InvalidJson {
+                        path: full_rel.clone(),
+                        source,
+                    }
+                })?;
+                let def = TestEnvironmentDefinition::decode_json(&json).map_err(|source| {
+                    GameTestResourceError::EnvironmentDecode {
+                        path: full_rel,
+                        source,
+                    }
+                })?;
+                environments.push((ResourceKey::create(&TEST_ENVIRONMENT, id), def));
+            }
         }
 
-        instances.push((ResourceKey::create(&TEST_INSTANCE, id), inst));
+        let inst_rel_dir = format!("data/{namespace}/test_instance");
+        let inst_dir = ns_dir.join("test_instance");
+        if inst_dir.exists() {
+            let inst_files = collect_sorted_json_files(&inst_dir, &inst_rel_dir)?;
+            for (rel_path, full_path) in inst_files {
+                let stem = strip_json_stem(&rel_path)?;
+                let full_rel = format!("{inst_rel_dir}/{rel_path}");
+                let raw_id = format!("{namespace}:{stem}");
+                let id = Identifier::try_parse_result(&raw_id)
+                    .ok()
+                    .flatten()
+                    .ok_or_else(|| GameTestResourceError::InvalidResourceId {
+                        path: full_rel.clone(),
+                        value: raw_id,
+                    })?;
+                let text =
+                    fs::read_to_string(&full_path).map_err(|source| GameTestResourceError::Io {
+                        path: full_rel.clone(),
+                        source,
+                    })?;
+                let json: serde_json::Value = serde_json::from_str(&text).map_err(|source| {
+                    GameTestResourceError::InvalidJson {
+                        path: full_rel.clone(),
+                        source,
+                    }
+                })?;
+                let inst = GameTestInstance::decode_json(&json).map_err(|source| {
+                    GameTestResourceError::InstanceDecode {
+                        path: full_rel,
+                        source,
+                    }
+                })?;
+
+                // Fail closed if the referenced structure NBT file is missing.
+                let structure_rel = format!(
+                    "data/{}/structure/{}.nbt",
+                    inst.structure().namespace(),
+                    inst.structure().path()
+                );
+                if !resource_root.join(&structure_rel).is_file() {
+                    return Err(GameTestResourceError::MissingReferencedStructure {
+                        instance: id.to_string(),
+                        structure: inst.structure().to_string(),
+                        expected_path: structure_rel,
+                    });
+                }
+
+                instances.push((ResourceKey::create(&TEST_INSTANCE, id), inst));
+            }
+        }
     }
 
     Ok(GameTestRegistries::from_entries(
@@ -401,6 +440,29 @@ fn verify_exact_directory_entries(
         }
     }
     Ok(())
+}
+
+fn collect_sorted_subdirs(
+    dir: &Path,
+    rel_dir: &str,
+) -> Result<Vec<(String, PathBuf)>, GameTestResourceError> {
+    let read_dir = fs::read_dir(dir).map_err(|source| GameTestResourceError::Io {
+        path: rel_dir.to_string(),
+        source,
+    })?;
+    let mut found = BTreeMap::new();
+    for entry in read_dir {
+        let entry = entry.map_err(|source| GameTestResourceError::Io {
+            path: rel_dir.to_string(),
+            source,
+        })?;
+        let path = entry.path();
+        if path.is_dir() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            found.insert(name, path);
+        }
+    }
+    Ok(found.into_iter().collect())
 }
 
 fn collect_sorted_json_files(

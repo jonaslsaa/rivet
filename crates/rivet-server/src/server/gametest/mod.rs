@@ -592,6 +592,49 @@ mod tests {
     }
 
     #[test]
+    fn resource_loader_discovers_custom_namespace_environments_and_instances() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+
+        fs::create_dir_all(root.join("data/example/test_environment")).unwrap();
+        fs::create_dir_all(root.join("data/example/test_instance")).unwrap();
+        fs::create_dir_all(root.join("data/example/structure")).unwrap();
+
+        fs::write(
+            root.join("data/example/test_environment/rainy.json"),
+            r#"{"type":"minecraft:weather","weather":"rain"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("data/example/test_instance/custom_pass.json"),
+            r#"{"type":"minecraft:function","environment":"example:rainy","function":"minecraft:always_pass","max_ticks":15,"structure":"example:arena"}"#,
+        )
+        .unwrap();
+        fs::write(root.join("data/example/structure/arena.nbt"), b"dummy").unwrap();
+
+        let loaders = TestFunctionLoaderRegistry::with_builtin();
+        let regs = load_from_resource_root(root, &loaders)
+            .expect("custom-namespace-only resource root must load cleanly");
+
+        let env_id = Identifier::from_namespace_and_path("example", "rainy");
+        let inst_id = Identifier::from_namespace_and_path("example", "custom_pass");
+        assert!(
+            regs.test_environments
+                .get_value(&ResourceKey::create(&TEST_ENVIRONMENT, env_id))
+                .is_some()
+        );
+        let inst = regs
+            .test_instances
+            .get_value(&ResourceKey::create(&TEST_INSTANCE, inst_id))
+            .expect("custom instance");
+        assert_eq!(inst.max_ticks(), 15);
+        assert_eq!(
+            inst.structure(),
+            &Identifier::from_namespace_and_path("example", "arena")
+        );
+    }
+
+    #[test]
     fn paper_working_checkout_resources_match_census_when_present() {
         let paper_resources = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../working/Paper/paper-server/src/minecraft/resources");
