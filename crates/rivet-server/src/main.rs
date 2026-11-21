@@ -32,6 +32,22 @@ use tracing_subscriber::EnvFilter;
 use rivet_server::server::{Server, ServerConfig};
 
 fn main() -> ExitCode {
+    let config = match production_action_from_args(std::env::args().skip(1)) {
+        Ok(CliAction::Run(config)) => config,
+        Ok(CliAction::Help) => {
+            println!("{}", usage_text());
+            return ExitCode::SUCCESS;
+        }
+        Ok(CliAction::Version) => {
+            println!("{}", version_text());
+            return ExitCode::SUCCESS;
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(2);
+        }
+    };
+
     // tracing output mirrors Paper's log level. Default to INFO; RIVET_LOG
     // overrides globally (e.g. RIVET_LOG=debug enables this crate's debug! logs).
     // No per-target `rivet_server=...` directive is added: in EnvFilter a
@@ -47,7 +63,6 @@ fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .init();
 
-    let config = server_config_from_args();
     let server = match Server::try_new(config) {
         Ok(server) => server,
         Err(error) => {
@@ -96,6 +111,38 @@ async fn run_server(server: Server) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+#[derive(Debug)]
+enum CliAction {
+    Run(ServerConfig),
+    Help,
+    Version,
+}
+
+fn version_text() -> String {
+    format!(
+        "{} {} (Minecraft {})",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION"),
+        rivet_core::VERSION_NAME
+    )
+}
+
+fn usage_text() -> String {
+    format!(
+        "{}\n\n\
+         Usage: {} [OPTIONS]\n\n\
+         Options:\n\
+         \x20     --host <ADDR>    Bind address (default: 0.0.0.0)\n\
+         \x20     --port <PORT>    TCP port (default: 25565)\n\
+         \x20     --level <PATH>   Disposable world directory path\n\
+         \x20     --seed <SEED>    Signed 64-bit world generation seed\n\
+         \x20 -h, --help           Print help\n\
+         \x20 -V, --version        Print version",
+        version_text(),
+        env!("CARGO_PKG_NAME"),
+    )
+}
+
 /// Parse the bind config. `--host`, `--port`, `--level`, and `--seed` override
 /// the defaults so the binary is runnable without a `server.properties` parser.
 /// `--seed <i64>` is the generated-world seed (the `generated-world`
@@ -110,57 +157,67 @@ async fn run_server(server: Server) -> ExitCode {
 /// handoff and fires the join burst (issue #101 Slice B). `ServerConfig::default()`
 /// leaves `enable_join` off so the offline-login tests exercise the handoff
 /// seam without the burst; this entry point turns it on.
-fn server_config_from_args() -> ServerConfig {
-    production_config_from_args(std::env::args().skip(1))
-}
-
-/// The M1 production config: the parsed bind config with `enable_join` forced
-/// on (see [`server_config_from_args`]). Pure so tests can assert the binary's
-/// join behavior without touching real process args.
-fn production_config_from_args(args: impl Iterator<Item = String>) -> ServerConfig {
-    ServerConfig {
-        enable_join: true,
-        ..config_from_args(args)
+fn production_action_from_args(args: impl Iterator<Item = String>) -> Result<CliAction, String> {
+    match action_from_args(args)? {
+        CliAction::Run(config) => Ok(CliAction::Run(ServerConfig {
+            enable_join: true,
+            ..config
+        })),
+        other => Ok(other),
     }
 }
 
-fn config_from_args(args: impl Iterator<Item = String>) -> ServerConfig {
+fn action_from_args(args: impl Iterator<Item = String>) -> Result<CliAction, String> {
     let mut config = ServerConfig::default();
     let mut i = 0;
     let args: Vec<String> = args.collect();
     while i < args.len() {
         match args[i].as_str() {
+            "--help" | "-h" => return Ok(CliAction::Help),
+            "--version" | "-V" => return Ok(CliAction::Version),
             "--host" => {
-                i += 1;
-                let raw = args.get(i).expect("--host requires a value (e.g. 0.0.0.0)");
-                config.bind_host = raw
-                    .parse()
-                    .expect("invalid --host (expected an IPv4/IPv6 address)");
-            }
-            "--port" => {
-                i += 1;
-                let raw = args.get(i).expect("--port requires a value (e.g. 25565)");
-                config.port = raw.parse().expect("invalid --port (expected 0-65535)");
-            }
-            "--level" => {
                 i += 1;
                 let raw = args
                     .get(i)
-                    .expect("--level requires a disposable world directory path");
+                    .ok_or_else(|| "--host requires a value (e.g. 0.0.0.0)".to_owned())?;
+                config.bind_host = raw.parse().map_err(|_| {
+                    format!("invalid --host {raw:?} (expected an IPv4/IPv6 address)")
+                })?;
+            }
+            "--port" => {
+                i += 1;
+                let raw = args
+                    .get(i)
+                    .ok_or_else(|| "--port requires a value (e.g. 25565)".to_owned())?;
+                config.port = raw
+                    .parse()
+                    .map_err(|_| format!("invalid --port {raw:?} (expected 0-65535)"))?;
+            }
+            "--level" => {
+                i += 1;
+                let raw = args.get(i).ok_or_else(|| {
+                    "--level requires a disposable world directory path".to_owned()
+                })?;
                 config.level_path = Some(raw.into());
             }
             "--seed" => {
                 i += 1;
-                let raw = args.get(i).expect("--seed requires a value (e.g. 42)");
-                config.seed = raw
-                    .parse()
-                    .expect("invalid --seed (expected a signed 64-bit integer)");
+                let raw = args
+                    .get(i)
+                    .ok_or_else(|| "--seed requires a value (e.g. 42)".to_owned())?;
+                config.seed = raw.parse().map_err(|_| {
+                    format!("invalid --seed {raw:?} (expected a signed 64-bit integer)")
+                })?;
             }
-            other => panic!("unknown argument {other:?} (expected --host/--port/--level/--seed)"),
+            other => {
+                return Err(format!(
+                    "unknown argument {other:?} (expected --host/--port/--level/--seed; run --help for usage)"
+                ));
+            }
         }
         i += 1;
     }
-    config
+    Ok(CliAction::Run(config))
 }
 
 #[cfg(test)]
@@ -170,9 +227,16 @@ mod tests {
 
     use rivet_server::server::level::ServerLevelConfig;
 
+    fn expect_run(args: impl IntoIterator<Item = &'static str>) -> ServerConfig {
+        match action_from_args(args.into_iter().map(str::to_owned)) {
+            Ok(CliAction::Run(config)) => config,
+            other => panic!("expected CliAction::Run, got {other:?}"),
+        }
+    }
+
     #[test]
     fn default_config_binds_any_interface_on_25565() {
-        let config = config_from_args(Vec::<String>::new().into_iter());
+        let config = expect_run([]);
         assert_eq!(config.bind_host, IpAddr::from([0, 0, 0, 0]));
         assert_eq!(config.port, 25565);
         assert!(config.level_path.is_none());
@@ -180,22 +244,14 @@ mod tests {
 
     #[test]
     fn parses_host_and_port_overrides() {
-        let config = config_from_args(
-            ["--host", "127.0.0.1", "--port", "25599"]
-                .into_iter()
-                .map(str::to_owned),
-        );
+        let config = expect_run(["--host", "127.0.0.1", "--port", "25599"]);
         assert_eq!(config.bind_host, IpAddr::from([127, 0, 0, 1]));
         assert_eq!(config.port, 25599);
     }
 
     #[test]
     fn parses_disposable_level_path() {
-        let config = config_from_args(
-            ["--level", "/tmp/rivet-disposable-world"]
-                .into_iter()
-                .map(str::to_owned),
-        );
+        let config = expect_run(["--level", "/tmp/rivet-disposable-world"]);
         assert_eq!(
             config.level_path.as_deref(),
             Some(std::path::Path::new("/tmp/rivet-disposable-world"))
@@ -204,18 +260,14 @@ mod tests {
 
     #[test]
     fn parses_level_with_bind_overrides() {
-        let config = config_from_args(
-            [
-                "--host",
-                "127.0.0.1",
-                "--level",
-                "/tmp/rivet-disposable-world",
-                "--port",
-                "25599",
-            ]
-            .into_iter()
-            .map(str::to_owned),
-        );
+        let config = expect_run([
+            "--host",
+            "127.0.0.1",
+            "--level",
+            "/tmp/rivet-disposable-world",
+            "--port",
+            "25599",
+        ]);
         assert_eq!(config.bind_host, IpAddr::from([127, 0, 0, 1]));
         assert_eq!(config.port, 25599);
         assert_eq!(
@@ -225,14 +277,20 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "--level requires a disposable world directory path")]
     fn level_requires_a_path() {
-        let _ = config_from_args(["--level"].into_iter().map(str::to_owned));
+        let err = action_from_args(["--level"].into_iter().map(str::to_owned)).unwrap_err();
+        assert!(
+            err.contains("--level requires a disposable world directory path"),
+            "{err}"
+        );
     }
 
     #[test]
     fn production_config_enables_live_join() {
-        let config = production_config_from_args(Vec::<String>::new().into_iter());
+        let config = match production_action_from_args(Vec::<String>::new().into_iter()) {
+            Ok(CliAction::Run(config)) => config,
+            other => panic!("expected CliAction::Run, got {other:?}"),
+        };
         assert!(
             config.enable_join,
             "the M1 binary must run the live play path (issue #101 Slice B)"
@@ -241,7 +299,7 @@ mod tests {
 
     #[test]
     fn parses_seed_override() {
-        let config = config_from_args(["--seed", "7"].into_iter().map(str::to_owned));
+        let config = expect_run(["--seed", "7"]);
         assert_eq!(config.seed, 7);
     }
 
@@ -249,39 +307,40 @@ mod tests {
     fn seed_defaults_to_the_m1_fixture() {
         // No `--seed` keeps the M1 superflat fixture seed, so the byte-exact
         // join burst is unchanged.
-        let config = config_from_args(Vec::<String>::new().into_iter());
+        let config = expect_run([]);
         assert_eq!(config.seed, ServerLevelConfig::M1_FIXTURE_SEED);
     }
 
     #[test]
     fn parses_seed_negative_and_i64_boundaries() {
+        let min = i64::MIN.to_string();
+        let max = i64::MAX.to_string();
         for (raw, expected) in [
             ("-1", -1i64),
             ("0", 0i64),
-            (&i64::MIN.to_string(), i64::MIN),
-            (&i64::MAX.to_string(), i64::MAX),
+            (min.as_str(), i64::MIN),
+            (max.as_str(), i64::MAX),
         ] {
-            let config = config_from_args(["--seed", raw].into_iter().map(str::to_owned));
+            let config = match action_from_args(["--seed", raw].into_iter().map(str::to_owned)) {
+                Ok(CliAction::Run(config)) => config,
+                other => panic!("expected CliAction::Run for seed {raw}, got {other:?}"),
+            };
             assert_eq!(config.seed, expected, "seed {raw}");
         }
     }
 
     #[test]
     fn parses_seed_with_bind_overrides() {
-        let config = config_from_args(
-            [
-                "--host",
-                "127.0.0.1",
-                "--seed",
-                "7",
-                "--level",
-                "/tmp/rivet-disposable-world",
-                "--port",
-                "25599",
-            ]
-            .into_iter()
-            .map(str::to_owned),
-        );
+        let config = expect_run([
+            "--host",
+            "127.0.0.1",
+            "--seed",
+            "7",
+            "--level",
+            "/tmp/rivet-disposable-world",
+            "--port",
+            "25599",
+        ]);
         assert_eq!(config.bind_host, IpAddr::from([127, 0, 0, 1]));
         assert_eq!(config.port, 25599);
         // A non-default seed proves the `--seed` arm overrides in the
@@ -295,14 +354,43 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "--seed requires a value")]
     fn seed_requires_a_value() {
-        let _ = config_from_args(["--seed"].into_iter().map(str::to_owned));
+        let err = action_from_args(["--seed"].into_iter().map(str::to_owned)).unwrap_err();
+        assert!(err.contains("--seed requires a value"), "{err}");
     }
 
     #[test]
-    #[should_panic(expected = "invalid --seed (expected a signed 64-bit integer)")]
     fn seed_rejects_non_integer() {
-        let _ = config_from_args(["--seed", "not-a-seed"].into_iter().map(str::to_owned));
+        let err =
+            action_from_args(["--seed", "not-a-seed"].into_iter().map(str::to_owned)).unwrap_err();
+        assert!(
+            err.contains("invalid --seed") && err.contains("expected a signed 64-bit integer"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parses_help_and_version_flags() {
+        for flag in ["--help", "-h"] {
+            assert!(matches!(
+                action_from_args([flag].into_iter().map(str::to_owned)),
+                Ok(CliAction::Help)
+            ));
+        }
+        for flag in ["--version", "-V"] {
+            assert!(matches!(
+                action_from_args([flag].into_iter().map(str::to_owned)),
+                Ok(CliAction::Version)
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_argument_without_panicking() {
+        let err = action_from_args(["--bogus"].into_iter().map(str::to_owned)).unwrap_err();
+        assert!(
+            err.contains("unknown argument") && err.contains("--bogus"),
+            "{err}"
+        );
     }
 }

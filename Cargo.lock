@@ -724,6 +724,7 @@ dependencies = [
  "getrandom",
  "indexmap",
  "phf",
+ "rivet-core",
  "rivet-nbt",
  "rivet-protocol",
  "rivet-registry",
