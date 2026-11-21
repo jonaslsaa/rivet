@@ -509,12 +509,17 @@ def check_gradle_task_execution(
 
 def detect_java_version(java_home: str | None) -> str:
     java_bin = str(Path(java_home) / "bin" / "java") if java_home else "java"
-    proc = subprocess.run(
-        [java_bin, "-version"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            [java_bin, "-version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise CensusError(
+            f"failed to run `{java_bin} -version`: {exc}", exit_code=EXIT_UNVERIFIED
+        ) from exc
     if proc.returncode != 0:
         raise CensusError(
             f"failed to run `{java_bin} -version`", exit_code=EXIT_UNVERIFIED
