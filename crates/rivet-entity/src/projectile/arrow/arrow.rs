@@ -198,9 +198,12 @@ impl ArrowHooks for TippedArrowHooks {
         };
         let source = arrow.projectile.get_effect_source(world);
         for effect in &contents.effects {
-            let scaled_duration =
-                ((effect.duration as f32) * self.potion_duration_scale).round() as i32;
-            let duration = scaled_duration.max(1);
+            // Paper `MobEffectInstance.mapDuration` preserves `-1` (infinite) and `0`.
+            let duration = if effect.duration == -1 || effect.duration == 0 {
+                effect.duration
+            } else {
+                (((effect.duration as f32) * self.potion_duration_scale).round() as i32).max(1)
+            };
             world.apply_post_hurt_effect(
                 target_id,
                 PostHurtEffect {

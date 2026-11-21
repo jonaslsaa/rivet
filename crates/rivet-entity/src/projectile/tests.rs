@@ -784,3 +784,27 @@ fn arrow_discarded_on_first_tick_still_emits_projectile_shoot() {
             .any(|e| matches!(e, ProjectileGameEvent::ProjectileShoot { .. }))
     );
 }
+
+#[test]
+fn tipped_arrow_preserves_infinite_effect_duration() {
+    let mut world = TestWorld::new();
+    world.add_entity(TestWorld::make_entity(100, Vec3::new(1.5, 0.0, 0.0)));
+
+    let mut arrow = Arrow::new(EntityId(101), Vec3::new(0.0, 1.0, 0.0));
+    arrow.set_potion_contents(Some(PotionContents {
+        effects: vec![PotionEffect {
+            effect_id: "minecraft:weakness".to_owned(),
+            duration: -1,
+            amplifier: 0,
+        }],
+        custom_color: None,
+    }));
+    arrow.abstract_arrow.projectile.delta_movement = Vec3::new(3.0, 0.0, 0.0);
+
+    let mut rng = LegacyRandomSource::new(5);
+    arrow.tick(&mut world, &mut rng);
+
+    assert_eq!(world.effect_log.len(), 1);
+    assert_eq!(world.effect_log[0].1.effect_id, "minecraft:weakness");
+    assert_eq!(world.effect_log[0].1.duration, -1);
+}
