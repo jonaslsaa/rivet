@@ -1206,12 +1206,8 @@ run_paper_junit_baseline() {
   shared_repo="$(shared_repo_dir_for)"
   local paper_dir="$shared_repo/working/Paper"
   local rc=0
-  if [ -d "$paper_dir/.git" ]; then
-    python3 "$REPO_DIR/tools/paper-junit-baseline/validate.py" \
-      --paper-source "$paper_dir" || rc=$?
-  else
-    python3 "$REPO_DIR/tools/paper-junit-baseline/validate.py" || rc=$?
-  fi
+  python3 "$REPO_DIR/tools/paper-junit-baseline/validate.py" \
+    --paper-source "$paper_dir" || rc=$?
   if [ "$rc" -eq 3 ]; then
     echo "    UNVERIFIED — paper-junit-baseline could not verify against working/Paper"
     ORACLE_UNVERIFIED=1
