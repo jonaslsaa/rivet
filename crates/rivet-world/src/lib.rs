@@ -89,6 +89,7 @@ pub mod data;
 pub mod entity;
 pub mod flag;
 pub mod fluid;
+pub mod inventory;
 pub mod level;
 pub mod levelgen;
 pub mod lighting;
