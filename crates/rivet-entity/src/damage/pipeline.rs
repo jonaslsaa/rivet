@@ -5,7 +5,8 @@
 
 use super::combat_rules::{
     Difficulty, apply_resistance, get_damage_after_absorb_with_modifier,
-    get_damage_after_magic_absorb, scale_damage_for_difficulty,
+    get_damage_after_magic_absorb, java_max_f32, java_min_f32, mth_clamp_f32,
+    scale_damage_for_difficulty,
 };
 use super::combat_tracker::{CombatTracker, FallLocation};
 use super::damage_source::{DamageEntityRef, DamageSource, DeathMessage};
@@ -186,11 +187,11 @@ impl DamagePipelineState {
     }
 
     pub fn set_health(&mut self, health: f32) {
-        self.health = health.clamp(0.0, self.max_health);
+        self.health = mth_clamp_f32(health, 0.0, self.max_health);
     }
 
     pub fn set_absorption_amount(&mut self, amount: f32) {
-        self.absorption_amount = amount.max(0.0);
+        self.absorption_amount = java_max_f32(amount, 0.0);
     }
 
     /// Mirrors `LivingEntity#getKillCredit()`: prefers `last_hurt_by_player`, else `last_hurt_by_mob`.
@@ -321,7 +322,7 @@ impl DamagePipelineState {
         // base -> invulnerability_reduction -> freezing -> hard_hat -> blocking
         // -> armor -> resistance -> magic -> absorption.
         let base = amount;
-        let mut remaining = (base + invulnerability_reduction).max(0.0);
+        let mut remaining = java_max_f32(base + invulnerability_reduction, 0.0);
 
         let freezing = if source.is_tag(DamageTypeTag::IsFreezing) && ctx.freeze_hurts_extra {
             let extra = remaining * 5.0 - remaining;
@@ -342,7 +343,7 @@ impl DamagePipelineState {
 
         let blocking =
             if ctx.shield_blocked_damage > 0.0 && !source.is_tag(DamageTypeTag::BypassesShield) {
-                let blocked = ctx.shield_blocked_damage.min(remaining);
+                let blocked = java_min_f32(ctx.shield_blocked_damage, remaining);
                 remaining -= blocked;
                 -blocked
             } else {
@@ -391,9 +392,9 @@ impl DamagePipelineState {
             0.0
         };
 
-        let absorbed = remaining.min(self.absorption_amount).max(0.0);
+        let absorbed = java_max_f32(java_min_f32(remaining, self.absorption_amount), 0.0);
         let absorption = -absorbed;
-        let final_damage = (remaining - absorbed).max(0.0);
+        let final_damage = java_max_f32(remaining - absorbed, 0.0);
 
         let modifiers = DamageModifiers {
             base,

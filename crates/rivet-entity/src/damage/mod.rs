@@ -9,7 +9,8 @@ pub mod pipeline;
 pub use combat_rules::{
     ARMOR_PROTECTION_DIVIDER, BASE_ARMOR_TOUGHNESS, Difficulty, MAX_ARMOR, MIN_ARMOR_RATIO,
     apply_resistance, get_damage_after_absorb, get_damage_after_absorb_with_modifier,
-    get_damage_after_magic_absorb, mth_clamp_f32, scale_damage_for_difficulty,
+    get_damage_after_magic_absorb, java_max_f32, java_max_f64, java_min_f32, java_min_f64,
+    mth_clamp_f32, scale_damage_for_difficulty,
 };
 pub use combat_tracker::{CombatEntry, CombatTracker, FallLocation};
 pub use damage_source::{DamageEntityRef, DamageSource, DamageSources, DeathMessage};
@@ -439,5 +440,27 @@ mod tests {
             igd_msg.intentional_game_design_link_key.as_deref(),
             Some("death.attack.badRespawnPoint.link")
         );
+    }
+
+    #[test]
+    fn java_min_max_nan_and_signed_zero_semantics() {
+        let sources = DamageSources::new();
+        let zombie = DamageEntityRef::living(1, "Zombie");
+        let scaling = sources.mob_attack(zombie);
+
+        assert!(
+            scale_damage_for_difficulty(f32::NAN, Difficulty::Easy, &scaling)
+                .unwrap()
+                .is_nan()
+        );
+        assert!(apply_resistance(f32::NAN, 0).is_nan());
+        assert!(java_min_f32(f32::NAN, 1.0).is_nan());
+        assert!(java_max_f32(f32::NAN, 0.0).is_nan());
+
+        assert!(java_min_f32(0.0, -0.0).is_sign_negative());
+        assert!(java_min_f32(-0.0, 0.0).is_sign_negative());
+        assert!(!java_max_f32(0.0, -0.0).is_sign_negative());
+        assert!(!java_max_f32(-0.0, 0.0).is_sign_negative());
+        assert!(java_max_f32(-0.0, -0.0).is_sign_negative());
     }
 }

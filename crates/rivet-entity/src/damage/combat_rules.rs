@@ -7,15 +7,81 @@ pub const ARMOR_PROTECTION_DIVIDER: f32 = 25.0;
 pub const BASE_ARMOR_TOUGHNESS: f32 = 2.0;
 pub const MIN_ARMOR_RATIO: f32 = 0.2;
 
+/// Exact Java `Math.min(float, float)`: propagates NaN, returns `-0.0` for mixed-sign zeroes,
+/// and returns the first operand for same-sign zeroes (per `PORTING.md`).
+#[inline]
+pub fn java_min_f32(a: f32, b: f32) -> f32 {
+    if a.is_nan() {
+        return a;
+    }
+    if a == 0.0 && b == 0.0 {
+        return if a.is_sign_negative() != b.is_sign_negative() {
+            -0.0
+        } else {
+            a
+        };
+    }
+    if a <= b { a } else { b }
+}
+
+/// Exact Java `Math.max(float, float)`: propagates NaN, returns `+0.0` for mixed-sign zeroes,
+/// and returns the first operand for same-sign zeroes (per `PORTING.md`).
+#[inline]
+pub fn java_max_f32(a: f32, b: f32) -> f32 {
+    if a.is_nan() {
+        return a;
+    }
+    if a == 0.0 && b == 0.0 {
+        return if a.is_sign_negative() != b.is_sign_negative() {
+            0.0
+        } else {
+            a
+        };
+    }
+    if a >= b { a } else { b }
+}
+
+/// Exact Java `Math.min(double, double)`: propagates NaN, returns `-0.0` for mixed-sign zeroes,
+/// and returns the first operand for same-sign zeroes (per `PORTING.md`).
+#[inline]
+pub fn java_min_f64(a: f64, b: f64) -> f64 {
+    if a.is_nan() {
+        return a;
+    }
+    if a == 0.0 && b == 0.0 {
+        return if a.is_sign_negative() != b.is_sign_negative() {
+            -0.0
+        } else {
+            a
+        };
+    }
+    if a <= b { a } else { b }
+}
+
+/// Exact Java `Math.max(double, double)`: propagates NaN, returns `+0.0` for mixed-sign zeroes,
+/// and returns the first operand for same-sign zeroes (per `PORTING.md`).
+#[inline]
+pub fn java_max_f64(a: f64, b: f64) -> f64 {
+    if a.is_nan() {
+        return a;
+    }
+    if a == 0.0 && b == 0.0 {
+        return if a.is_sign_negative() != b.is_sign_negative() {
+            0.0
+        } else {
+            a
+        };
+    }
+    if a >= b { a } else { b }
+}
+
 /// Java `Mth.clamp(float, float, float)`: `value < min ? min : Math.min(value, max)`.
 #[inline]
 pub fn mth_clamp_f32(value: f32, min: f32, max: f32) -> f32 {
     if value < min {
         min
-    } else if value > max {
-        max
     } else {
-        value
+        java_min_f32(value, max)
     }
 }
 
@@ -78,7 +144,7 @@ pub fn scale_damage_for_difficulty(
     }
     match difficulty {
         Difficulty::Peaceful => None,
-        Difficulty::Easy => Some((damage / 2.0 + 1.0).min(damage)),
+        Difficulty::Easy => Some(java_min_f32(damage / 2.0 + 1.0, damage)),
         Difficulty::Normal => Some(damage),
         Difficulty::Hard => Some(damage * 3.0 / 2.0),
     }
@@ -92,5 +158,5 @@ pub fn apply_resistance(damage: f32, amplifier: i32) -> f32 {
     let absorb_value = amplifier.wrapping_add(1).wrapping_mul(5);
     let absorb = 25_i32.wrapping_sub(absorb_value);
     let v = damage * (absorb as f32);
-    (v / 25.0).max(0.0)
+    java_max_f32(v / 25.0, 0.0)
 }
