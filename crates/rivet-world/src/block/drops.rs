@@ -1358,11 +1358,22 @@ pub enum NumberProvider {
     Binomial { n: i32, p: f32 },
 }
 
+#[inline]
+fn java_math_round_f32(v: f32) -> i32 {
+    if v.is_nan() {
+        0
+    } else {
+        (v + 0.5_f32).floor() as i32
+    }
+}
+
 impl NumberProvider {
     pub fn get_int<R: RandomSource>(self, random: &mut R) -> i32 {
         match self {
-            Self::Constant(v) => v.round() as i32,
-            Self::Uniform { min, max } => mth::next_int(random, min as i32, max as i32),
+            Self::Constant(v) => java_math_round_f32(v),
+            Self::Uniform { min, max } => {
+                mth::next_int(random, java_math_round_f32(min), java_math_round_f32(max))
+            }
             Self::Binomial { n, p } => {
                 let mut count = 0_i32;
                 for _ in 0..n {
@@ -3008,5 +3019,25 @@ mod tests {
             ToolStack::tool(ToolTier::Iron, ToolKind::Pickaxe),
         );
         assert!(table.evaluate(&pick_ctx, &mut rng).is_empty());
+    }
+
+    #[test]
+    fn number_provider_get_int_matches_java_math_round_for_constant_and_uniform() {
+        let mut rng = SingleThreadedRandomSource::new(101);
+        assert_eq!(NumberProvider::Constant(1.5).get_int(&mut rng), 2);
+        assert_eq!(NumberProvider::Constant(-0.5).get_int(&mut rng), 0);
+        // UniformGenerator.getInt calls min.getInt / max.getInt (Math.round on ConstantValue bounds).
+        assert_eq!(
+            NumberProvider::Uniform { min: 1.6, max: 1.6 }.get_int(&mut rng),
+            2
+        );
+        assert_eq!(
+            NumberProvider::Uniform {
+                min: -1.6,
+                max: -1.6
+            }
+            .get_int(&mut rng),
+            -2
+        );
     }
 }
