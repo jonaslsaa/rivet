@@ -917,3 +917,56 @@ fn fresh_chunk_unload_cleans_up_nonpersistent_entities() {
     assert_eq!(manager.loaded_entity_count(), 0);
     assert!(!manager.is_chunk_dirty(chunk));
 }
+
+#[test]
+fn save_all_loads_merges_and_persists_newly_populated_fresh_chunks() {
+    let chunk = ChunkPos::new(4, -1);
+    let existing_uuid = make_uuid(603, 1);
+    let fresh_uuid = make_uuid(603, 2);
+
+    let mut storage =
+        EntityStorage::new(InMemoryEntityRegionBackend::new(), EntitySaveLimits::new());
+    storage
+        .store_entities(&ChunkEntities::new(
+            chunk,
+            vec![make_entity(
+                "minecraft:pig",
+                1,
+                existing_uuid,
+                68.0,
+                64.0,
+                -8.0,
+            )],
+        ))
+        .unwrap();
+
+    let mut manager = PersistentEntitySectionManager::new(storage);
+    // Chunk is Fresh; spawn a new entity into it and immediately call save_all().
+    let fresh_id = manager.allocate_network_id();
+    manager
+        .add_new_entity(make_entity(
+            "minecraft:sheep",
+            fresh_id,
+            fresh_uuid,
+            70.0,
+            64.0,
+            -8.0,
+        ))
+        .unwrap();
+    assert_eq!(manager.chunk_load_status(chunk), ChunkLoadStatus::Fresh);
+
+    let saved = manager.save_all().unwrap();
+    assert_eq!(saved, 1);
+    assert!(!manager.is_chunk_dirty(chunk));
+    assert_eq!(manager.chunk_load_status(chunk), ChunkLoadStatus::Loaded);
+
+    // Reloading directly from backend must contain both the prior disk entity and the fresh one.
+    let persisted = manager
+        .permanent_storage_mut()
+        .load_entities(chunk)
+        .unwrap();
+    assert_eq!(persisted.len(), 2);
+    let uuids: Vec<Uuid> = persisted.entities().iter().map(|e| e.uuid).collect();
+    assert!(uuids.contains(&existing_uuid));
+    assert!(uuids.contains(&fresh_uuid));
+}

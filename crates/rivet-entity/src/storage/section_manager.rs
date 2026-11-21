@@ -360,18 +360,34 @@ impl<B: EntityRegionBackend> PersistentEntitySectionManager<B> {
 
     /// Port of `PersistentEntitySectionManager.saveAll()`.
     ///
-    /// Processes pending loads, persists all loaded chunks (including dirty empty
-    /// chunks), and flushes the underlying region storage.
+    /// Processes pending loads, persists all loaded and newly-populated `Fresh`
+    /// chunks (loading any `Fresh` chunks before saving so existing disk entities
+    /// are merged rather than overwritten), and flushes the underlying storage.
     pub fn save_all(&mut self) -> Result<usize, EntityStorageError> {
-        self.process_pending_loads()?;
-        let mut candidates = self.section_storage.all_chunks_with_existing_sections();
-        candidates.extend(self.dirty_chunks.iter().copied());
+        let mut remaining = self.section_storage.all_chunks_with_existing_sections();
+        remaining.extend(self.dirty_chunks.iter().copied());
         let mut saved = 0;
-        for chunk_key in candidates {
-            if self.store_chunk_sections(chunk_key, false)? {
-                saved += 1;
+
+        while !remaining.is_empty() {
+            self.process_pending_loads()?;
+            let mut next_remaining = BTreeSet::new();
+            for chunk_key in remaining {
+                if self.store_chunk_sections(chunk_key, false)? {
+                    saved += 1;
+                } else {
+                    next_remaining.insert(chunk_key);
+                }
             }
+            if next_remaining.is_empty() {
+                break;
+            }
+            // Drain any loads just queued for Fresh chunks before retrying.
+            if self.loading_inbox.is_empty() {
+                break;
+            }
+            remaining = next_remaining;
         }
+
         self.permanent_storage.flush(true)?;
         Ok(saved)
     }
