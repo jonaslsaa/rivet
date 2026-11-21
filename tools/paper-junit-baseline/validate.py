@@ -174,6 +174,10 @@ def validate_census_doc(doc: dict[str, Any]) -> None:
                 isinstance(s.get("sha256"), str) and len(s["sha256"]) == 64,
                 f"{mod}: invalid suite sha256 for {fname}",
             )
+            _require(
+                isinstance(s.get("testcase_sha256"), str) and len(s["testcase_sha256"]) == 64,
+                f"{mod}: invalid suite testcase_sha256 for {fname}",
+            )
             sel = s["selected"]
             exe = s["executed"]
             pas = s["passed"]
@@ -265,11 +269,27 @@ def validate_against_paper(
         if check_results:
             parsed = parse_junit_results(paper_dir / spec["results_dir"], mod)
             stored_suites = [
-                (s["name"], s["file"], s["selected"], s["executed"], s["passed"], s["skipped"])
+                (
+                    s["name"],
+                    s["file"],
+                    s["testcase_sha256"],
+                    s["selected"],
+                    s["executed"],
+                    s["passed"],
+                    s["skipped"],
+                )
                 for s in doc["modules"][mod]["execution"]["suites"]
             ]
             live_suites = [
-                (s["name"], s["file"], s["selected"], s["executed"], s["passed"], s["skipped"])
+                (
+                    s["name"],
+                    s["file"],
+                    s["testcase_sha256"],
+                    s["selected"],
+                    s["executed"],
+                    s["passed"],
+                    s["skipped"],
+                )
                 for s in parsed["suites"]
             ]
             _require(

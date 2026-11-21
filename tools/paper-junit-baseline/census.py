@@ -403,6 +403,24 @@ def parse_junit_results(results_dir: Path, module_name: str) -> dict[str, Any]:
                 f"tests attribute ({tests}) in {xml_path.name}"
             )
 
+        tc_identities: list[tuple[str, str, str]] = []
+        for tc in testcases:
+            tc_class = tc.attrib.get("classname", "")
+            tc_name = tc.attrib.get("name", "")
+            if tc.find("failure") is not None:
+                tc_status = "failure"
+            elif tc.find("error") is not None:
+                tc_status = "error"
+            elif tc.find("skipped") is not None:
+                tc_status = "skipped"
+            else:
+                tc_status = "passed"
+            tc_identities.append((tc_class, tc_name, tc_status))
+        tc_identities.sort()
+        testcase_sha256 = hashlib.sha256(
+            json.dumps(tc_identities, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+
         executed = tests - skipped
         passed = executed - failures - errors
 
@@ -410,6 +428,7 @@ def parse_junit_results(results_dir: Path, module_name: str) -> dict[str, Any]:
             "name": name,
             "file": xml_path.name,
             "sha256": sha256_file(xml_path),
+            "testcase_sha256": testcase_sha256,
             "selected": tests,
             "executed": executed,
             "passed": passed,
