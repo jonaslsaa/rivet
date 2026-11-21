@@ -600,6 +600,14 @@ dependencies = [
 [[package]]
 name = "rivet-entity"
 version = "0.1.0-dev+mc26.2"
+dependencies = [
+ "indexmap",
+ "rivet-core",
+ "rivet-nbt",
+ "rivet-registry",
+ "rivet-util",
+ "thiserror",
+]
 
 [[package]]
 name = "rivet-ffi"

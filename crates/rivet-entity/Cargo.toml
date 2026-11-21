@@ -6,3 +6,11 @@ license.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+indexmap = { workspace = true }
+rivet-core = { workspace = true }
+rivet-nbt = { workspace = true }
+rivet-registry = { workspace = true }
+rivet-util = { workspace = true }
+thiserror = { workspace = true }
