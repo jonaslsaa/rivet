@@ -429,3 +429,83 @@ fn panic_payload_with_panicking_drop_is_contained_and_cleans_up() {
     assert_eq!(host.state(p).unwrap(), PluginState::Failed);
     assert_eq!(host.live_resource_count_for(p).unwrap(), 0);
 }
+
+#[test]
+fn registration_descriptor_and_teardown_drop_panics_are_contained() {
+    struct PanicDescriptorPlugin;
+    impl NativePlugin for PanicDescriptorPlugin {
+        fn descriptor(&self) -> PluginDescriptor {
+            panic!("descriptor boom");
+        }
+    }
+
+    struct PanicDropPlugin {
+        name: &'static str,
+    }
+    impl Drop for PanicDropPlugin {
+        fn drop(&mut self) {
+            panic!("drop boom for {}", self.name);
+        }
+    }
+    impl NativePlugin for PanicDropPlugin {
+        fn descriptor(&self) -> PluginDescriptor {
+            PluginDescriptor::new(self.name, "0.1.0")
+        }
+
+        fn on_enable(&mut self, ctx: &mut PluginContext<'_>) -> Result<(), String> {
+            ctx.alloc_resource("owned-before-unload").unwrap();
+            Ok(())
+        }
+    }
+
+    let mut host = NativePluginHost::synthetic_default();
+
+    // 1. Panicking descriptor() is contained and reported as LifecyclePhase::Register.
+    let err = host.register(Box::new(PanicDescriptorPlugin)).unwrap_err();
+    assert!(matches!(
+        err,
+        LifecycleError::PluginPanicked {
+            phase: LifecyclePhase::Register,
+            ref message,
+            ..
+        } if message.contains("descriptor boom")
+    ));
+
+    // 2. Rejected registration drops the plugin inside containment without unwinding.
+    let err = host
+        .register(Box::new(PanicDropPlugin { name: "bad name!" }))
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        LifecycleError::Negotiation(NegotiationError::InvalidPluginName(_))
+    ));
+
+    // 3. Unload contains Drop panics while still revoking resources, handle, and name.
+    let p = host
+        .register(Box::new(PanicDropPlugin { name: "drop-boom" }))
+        .unwrap();
+    host.load(p).unwrap();
+    host.enable(p).unwrap();
+    host.disable(p).unwrap();
+
+    let err = host.unload(p).unwrap_err();
+    assert!(matches!(
+        err,
+        LifecycleError::PluginPanicked {
+            phase: LifecyclePhase::Unload,
+            ref message,
+            ..
+        } if message.contains("drop boom for drop-boom")
+    ));
+    assert!(matches!(
+        host.state(p),
+        Err(LifecycleError::Handle(HandleError::Stale { .. }))
+    ));
+    assert_eq!(host.live_resource_count(), 0);
+
+    // Name reservation was released so a replacement plugin can register cleanly.
+    let replacement = host
+        .register(Box::new(MinimalLifecyclePlugin::new("drop-boom")))
+        .unwrap();
+    assert_eq!(host.state(replacement).unwrap(), PluginState::Registered);
+}

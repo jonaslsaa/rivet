@@ -40,6 +40,7 @@ pub enum PluginState {
 /// Lifecycle hook phase reported in errors.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum LifecyclePhase {
+    Register,
     Load,
     Enable,
     Disable,
@@ -304,15 +305,61 @@ impl NativePluginHost {
         &mut self,
         plugin: Box<dyn NativePlugin>,
     ) -> Result<PluginHandle, LifecycleError> {
-        let descriptor = plugin.descriptor();
+        let descriptor = match catch_unwind(AssertUnwindSafe(|| plugin.descriptor())) {
+            Ok(descriptor) => descriptor,
+            Err(payload) => {
+                let message = extract_panic_message_and_drop(payload);
+                let _ = drop_plugin_contained(plugin);
+                return Err(LifecycleError::PluginPanicked {
+                    plugin: "<unregistered>".to_owned(),
+                    phase: LifecyclePhase::Register,
+                    message,
+                });
+            }
+        };
+
+        let granted = match self.validate_registration(&descriptor) {
+            Ok(granted) => granted,
+            Err(err) => {
+                let _ = drop_plugin_contained(plugin);
+                return Err(err.into());
+            }
+        };
+
+        let Some(next_id) = self.next_plugin_id.checked_add(1) else {
+            let _ = drop_plugin_contained(plugin);
+            return Err(HandleError::TableExhausted.into());
+        };
+        let id = PluginId::new(self.next_plugin_id);
+
+        let name = descriptor.name.clone();
+        let slot = PluginSlot {
+            id,
+            descriptor,
+            granted_capabilities: granted,
+            state: PluginState::Registered,
+            instance: plugin,
+        };
+        let handle = self.plugins.insert(id, slot)?;
+        self.next_plugin_id = next_id;
+        self.registered_names.insert(name);
+        Ok(handle)
+    }
+
+    fn validate_registration(
+        &self,
+        descriptor: &PluginDescriptor,
+    ) -> Result<CapabilitySet, NegotiationError> {
         validate_plugin_name(&descriptor.name)?;
         if self.registered_names.contains(&descriptor.name) {
-            return Err(NegotiationError::DuplicatePluginName(descriptor.name).into());
+            return Err(NegotiationError::DuplicatePluginName(
+                descriptor.name.clone(),
+            ));
         }
         match &descriptor.loading_mode {
             LoadingMode::StaticInProcess => {}
             other @ LoadingMode::DynamicCdylib { .. } => {
-                return Err(NegotiationError::UnsupportedLoadingMode(other.clone()).into());
+                return Err(NegotiationError::UnsupportedLoadingMode(other.clone()));
             }
         }
         if !descriptor
@@ -322,14 +369,13 @@ impl NativePluginHost {
             return Err(NegotiationError::IncompatibleApiVersion {
                 host: self.api_version,
                 requested: descriptor.target_api,
-            }
-            .into());
+            });
         }
         let missing = descriptor
             .required_capabilities
             .missing_from(&self.capabilities);
         if !missing.is_empty() {
-            return Err(NegotiationError::MissingCapabilities(missing).into());
+            return Err(NegotiationError::MissingCapabilities(missing));
         }
 
         let mut granted = descriptor.required_capabilities.clone();
@@ -340,26 +386,7 @@ impl NativePluginHost {
         {
             granted.insert(cap);
         }
-
-        let id = PluginId::new(self.next_plugin_id);
-        self.next_plugin_id = self
-            .next_plugin_id
-            .checked_add(1)
-            .ok_or(HandleError::TableExhausted)?;
-
-        let name = descriptor.name.clone();
-        let handle = self.plugins.insert(
-            id,
-            PluginSlot {
-                id,
-                descriptor,
-                granted_capabilities: granted,
-                state: PluginState::Registered,
-                instance: plugin,
-            },
-        )?;
-        self.registered_names.insert(name);
-        Ok(handle)
+        Ok(granted)
     }
 
     pub fn load(&mut self, handle: PluginHandle) -> Result<(), LifecycleError> {
@@ -473,9 +500,19 @@ impl NativePluginHost {
                 });
             }
         }
-        let slot = self.plugins.remove(handle, None)?;
-        let _ = self.resources.revoke_owned_by(slot.id);
-        self.registered_names.remove(&slot.descriptor.name);
+        let PluginSlot {
+            id,
+            descriptor,
+            instance,
+            ..
+        } = self.plugins.remove(handle, None)?;
+        let _ = self.resources.revoke_owned_by(id);
+        self.registered_names.remove(&descriptor.name);
+        drop_plugin_contained(instance).map_err(|message| LifecycleError::PluginPanicked {
+            plugin: descriptor.name,
+            phase: LifecyclePhase::Unload,
+            message,
+        })?;
         Ok(())
     }
 }
@@ -536,6 +573,10 @@ where
             })
         }
     }
+}
+
+fn drop_plugin_contained(plugin: Box<dyn NativePlugin>) -> Result<(), String> {
+    catch_unwind(AssertUnwindSafe(move || drop(plugin))).map_err(extract_panic_message_and_drop)
 }
 
 fn extract_panic_message_and_drop(payload: Box<dyn Any + Send>) -> String {
