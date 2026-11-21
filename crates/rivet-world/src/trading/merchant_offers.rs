@@ -2,8 +2,9 @@
 
 use rivet_nbt::{compound_tag::CompoundTag, list_tag::ListTag, tag::Tag};
 
-use super::item_cost::{TradeItemStack, TradingCodecError};
+use super::data_component_exact_predicate::TradingCodecError;
 use super::merchant_offer::MerchantOffer;
+use super::trade_item_stack::TradeItemStack;
 
 /// Ordered collection of merchant offers mirroring
 /// `net.minecraft.world.item.trading.MerchantOffers`.
@@ -118,9 +119,7 @@ impl MerchantOffers {
     /// Decodes from Paper 26.2 `MerchantOffers.CODEC` NBT. Missing `Recipes`
     /// decodes as an empty `MerchantOffers` (`optionalFieldOf("Recipes", List.of())`).
     pub fn from_nbt(tag: &CompoundTag) -> Result<Self, TradingCodecError> {
-        Self::from_nbt_with_item_max_stack(tag, |_| {
-            super::TradeItemStack::DEFAULT_MAX_STACK_SIZE
-        })
+        Self::from_nbt_with_item_max_stack(tag, |_| super::TradeItemStack::DEFAULT_MAX_STACK_SIZE)
     }
 
     /// Decodes from Paper 26.2 `MerchantOffers.CODEC` NBT with an item max-stack resolver.

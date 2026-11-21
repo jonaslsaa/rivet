@@ -3,7 +3,9 @@
 use rivet_nbt::{compound_tag::CompoundTag, tag::Tag};
 use rivet_util::mth;
 
-use super::item_cost::{ItemCost, TradeItemStack, TradingCodecError};
+use super::data_component_exact_predicate::TradingCodecError;
+use super::item_cost::ItemCost;
+use super::trade_item_stack::TradeItemStack;
 
 /// Mirrors `net.minecraft.world.item.trading.MerchantOffer` (Paper 26.2).
 #[derive(Debug, Clone, PartialEq)]

@@ -485,7 +485,10 @@ fn nbt_round_trip_and_codec_defaults() {
     let mut capped_offer = MerchantOffer::new(capped_cost, stack("diamond", 1), 12, 5, 0.2);
     capped_offer.demand = 10;
     let reloaded_capped = MerchantOffer::from_nbt(&capped_offer.to_nbt()).unwrap();
-    assert_eq!(reloaded_capped.item_cost_a().item_stack().max_stack_size(), 16);
+    assert_eq!(
+        reloaded_capped.item_cost_a().item_stack().max_stack_size(),
+        16
+    );
     assert_eq!(reloaded_capped.cost_a().count(), 16);
 
     let pearl_offer = MerchantOffer::new(
@@ -501,6 +504,9 @@ fn nbt_round_trip_and_codec_defaults() {
         if item == &id("ender_pearl") { 16 } else { 64 }
     })
     .unwrap();
-    assert_eq!(reloaded_pearl.item_cost_a().item_stack().max_stack_size(), 16);
+    assert_eq!(
+        reloaded_pearl.item_cost_a().item_stack().max_stack_size(),
+        16
+    );
     assert_eq!(reloaded_pearl.cost_a().count(), 16);
 }
