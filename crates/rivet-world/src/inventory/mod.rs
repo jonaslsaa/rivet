@@ -8,34 +8,56 @@
 //! AbstractContainerMenu, ClickAction, ContainerInput, ContainerLevelAccess}`,
 //! and the core `net.minecraft.world.entity.player.Inventory` storage behavior.
 
+pub mod abstract_container_menu;
+pub mod click_action;
+pub mod compound_container;
 pub mod container;
-pub mod data;
+pub mod container_data;
+pub mod container_helper;
+pub mod container_input;
+pub mod container_level_access;
+pub mod container_listener;
+pub mod container_synchronizer;
+pub mod data_slot;
 pub mod item_stack;
-pub mod menu;
+pub mod menu_provider;
 pub mod player_inventory;
-pub mod remote;
+pub mod remote_slot;
+pub mod simple_container;
+pub mod simple_container_data;
+pub mod simple_menu_provider;
 pub mod slot;
 
-pub use container::{
-    CompoundContainer, Container, ContainerAccessContext, ContainerExt, ContainerHelper,
-    ContainerIter, DEFAULT_DISTANCE_BUFFER, DEFAULT_MAX_STACK_SIZE, LARGE_MAX_STACK_SIZE,
-    SimpleContainer,
+pub use abstract_container_menu::{
+    AbstractContainerMenu, ClickOutcome, QUICKCRAFT_HEADER_CONTINUE, QUICKCRAFT_HEADER_END,
+    QUICKCRAFT_HEADER_START, QUICKCRAFT_TYPE_CHARITABLE, QUICKCRAFT_TYPE_CLONE,
+    QUICKCRAFT_TYPE_GREEDY, SLOT_CLICKED_OUTSIDE, STATE_ID_MASK,
 };
-pub use data::{ContainerData, DataSlot, SimpleContainerData};
+pub use click_action::ClickAction;
+pub use compound_container::CompoundContainer;
+pub use container::{
+    Container, ContainerAccessContext, ContainerExt, ContainerIter, DEFAULT_DISTANCE_BUFFER,
+    DEFAULT_MAX_STACK_SIZE, LARGE_MAX_STACK_SIZE,
+};
+pub use container_data::ContainerData;
+pub use container_helper::ContainerHelper;
+pub use container_input::ContainerInput;
+pub use container_level_access::ContainerLevelAccess;
+pub use container_listener::{ListenerId, MenuContainerListener};
+pub use container_synchronizer::ContainerSynchronizer;
+pub use data_slot::DataSlot;
 pub use item_stack::{
     ComponentMap, DEFAULT_ITEM_MAX_STACK_SIZE, HashedStack, InventoryItemStack, ItemId,
 };
-pub use menu::{
-    AbstractContainerMenu, ClickAction, ClickOutcome, ContainerInput, ContainerLevelAccess,
-    MenuProvider, QUICKCRAFT_HEADER_CONTINUE, QUICKCRAFT_HEADER_END, QUICKCRAFT_HEADER_START,
-    QUICKCRAFT_TYPE_CHARITABLE, QUICKCRAFT_TYPE_CLONE, QUICKCRAFT_TYPE_GREEDY,
-    SLOT_CLICKED_OUTSIDE, STATE_ID_MASK, SimpleMenuProvider,
-};
+pub use menu_provider::MenuProvider;
 pub use player_inventory::{
     EQUIPMENT_SLOT_END_INCLUSIVE, EQUIPMENT_SLOT_START, INVENTORY_SIZE, InvalidHotbarSlot,
     NOT_FOUND_INDEX, PlayerInventory, SELECTION_SIZE, SLOT_BODY_ARMOR, SLOT_OFFHAND, SLOT_SADDLE,
 };
-pub use remote::{ContainerSynchronizer, ListenerId, MenuContainerListener, RemoteSlot};
+pub use remote_slot::RemoteSlot;
+pub use simple_container::SimpleContainer;
+pub use simple_container_data::SimpleContainerData;
+pub use simple_menu_provider::SimpleMenuProvider;
 pub use slot::{CustomSlotPolicy, DefaultSlotPolicy, Slot, SlotPolicy};
 
 #[cfg(test)]
@@ -771,9 +793,10 @@ mod tests {
             }),
         ));
         let survival = ContainerAccessContext::survival(1);
-        let noop_quick_move = |_menu: &AbstractContainerMenu,
-                               _containers: &mut [&mut dyn Container],
-                               _slot: usize| InventoryItemStack::empty();
+        let noop_quick_move =
+            |_menu: &AbstractContainerMenu,
+             _containers: &mut [&mut dyn Container],
+             _slot: usize| InventoryItemStack::empty();
 
         let outcome = {
             let mut refs: [&mut dyn Container; 2] = [&mut chest, &mut player_inv];

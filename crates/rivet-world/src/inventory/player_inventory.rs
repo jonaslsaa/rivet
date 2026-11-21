@@ -11,9 +11,8 @@ use std::sync::LazyLock;
 
 use thiserror::Error;
 
-use super::container::{
-    Container, ContainerAccessContext, ContainerHelper, DEFAULT_MAX_STACK_SIZE,
-};
+use super::container::{Container, ContainerAccessContext, DEFAULT_MAX_STACK_SIZE};
+use super::container_helper::ContainerHelper;
 use super::item_stack::InventoryItemStack;
 
 /// `Inventory.INVENTORY_SIZE` (9 hotbar + 27 main inventory slots).

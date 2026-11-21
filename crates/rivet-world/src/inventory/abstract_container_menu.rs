@@ -1,17 +1,18 @@
-//! Paper `net.minecraft.world.inventory.AbstractContainerMenu`, `ClickAction`,
-//! `ContainerInput`, `ContainerLevelAccess`, and `net.minecraft.world.MenuProvider`
-//! / `SimpleMenuProvider`.
+//! Paper `net.minecraft.world.inventory.AbstractContainerMenu`.
 
 use indexmap::{IndexMap, IndexSet};
-use rivet_registry::core::BlockPos;
-use rivet_text::Component;
 use rivet_util::mth;
 
+use super::click_action::ClickAction;
 use super::container::{Container, ContainerAccessContext};
-use super::data::{ContainerData, DataSlot};
+use super::container_data::ContainerData;
+use super::container_input::ContainerInput;
+use super::container_listener::{ListenerId, MenuContainerListener};
+use super::container_synchronizer::ContainerSynchronizer;
+use super::data_slot::DataSlot;
 use super::item_stack::{HashedStack, InventoryItemStack};
 use super::player_inventory::{INVENTORY_SIZE, PlayerInventory, SLOT_OFFHAND};
-use super::remote::{ContainerSynchronizer, ListenerId, MenuContainerListener, RemoteSlot};
+use super::remote_slot::RemoteSlot;
 use super::slot::Slot;
 
 /// `AbstractContainerMenu.SLOT_CLICKED_OUTSIDE`.
@@ -37,141 +38,6 @@ pub const QUICKCRAFT_HEADER_END: i32 = 2;
 
 /// Maximum state id mask (`32767`, Paper `incrementStateId`).
 pub const STATE_ID_MASK: i32 = 32767;
-
-/// Paper `net.minecraft.world.inventory.ClickAction`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ClickAction {
-    Primary,
-    Secondary,
-}
-
-/// Paper `net.minecraft.world.inventory.ContainerInput`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(i32)]
-pub enum ContainerInput {
-    Pickup = 0,
-    QuickMove = 1,
-    Swap = 2,
-    Clone = 3,
-    Throw = 4,
-    QuickCraft = 5,
-    PickupAll = 6,
-}
-
-impl ContainerInput {
-    /// Wire/protocol id matching Paper's `ContainerInput.id()`.
-    pub const fn id(self) -> i32 {
-        self as i32
-    }
-
-    /// Decode a Paper `ContainerInput` id.
-    pub const fn from_id(id: i32) -> Option<Self> {
-        match id {
-            0 => Some(Self::Pickup),
-            1 => Some(Self::QuickMove),
-            2 => Some(Self::Swap),
-            3 => Some(Self::Clone),
-            4 => Some(Self::Throw),
-            5 => Some(Self::QuickCraft),
-            6 => Some(Self::PickupAll),
-            _ => None,
-        }
-    }
-}
-
-/// Paper `net.minecraft.world.inventory.ContainerLevelAccess` seam for
-/// block-entity / world-bound menus without coupling to `ServerLevel`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ContainerLevelAccess {
-    /// `ContainerLevelAccess.NULL`.
-    Null,
-    /// `ContainerLevelAccess.create(Level, BlockPos)` identity seam.
-    At { dimension_id: String, pos: BlockPos },
-}
-
-impl ContainerLevelAccess {
-    /// `ContainerLevelAccess.create(...)`.
-    pub fn create(dimension_id: impl Into<String>, pos: BlockPos) -> Self {
-        Self::At {
-            dimension_id: dimension_id.into(),
-            pos,
-        }
-    }
-
-    /// `ContainerLevelAccess.isBlock()`.
-    pub const fn is_block(&self) -> bool {
-        matches!(self, Self::At { .. })
-    }
-
-    /// `ContainerLevelAccess.evaluate(BiFunction)`.
-    pub fn evaluate<T, F: FnOnce(&str, BlockPos) -> T>(&self, f: F) -> Option<T> {
-        match self {
-            Self::Null => None,
-            Self::At { dimension_id, pos } => Some(f(dimension_id.as_str(), *pos)),
-        }
-    }
-
-    /// `ContainerLevelAccess.evaluate(BiFunction, T)`.
-    pub fn evaluate_or<T, F: FnOnce(&str, BlockPos) -> T>(&self, default: T, f: F) -> T {
-        self.evaluate(f).unwrap_or(default)
-    }
-
-    /// `ContainerLevelAccess.execute(BiConsumer)`.
-    pub fn execute<F: FnOnce(&str, BlockPos)>(&self, f: F) {
-        if let Self::At { dimension_id, pos } = self {
-            f(dimension_id.as_str(), *pos);
-        }
-    }
-}
-
-/// Narrow Paper `net.minecraft.world.MenuProvider` seam for block entities and
-/// server-side menu opening.
-pub trait MenuProvider {
-    /// `MenuProvider.getDisplayName()`.
-    fn get_display_name(&self) -> Component;
-
-    /// `MenuConstructor.createMenu(int, Inventory, Player)`.
-    fn create_menu(
-        &self,
-        container_id: i32,
-        ctx: &ContainerAccessContext,
-    ) -> Option<AbstractContainerMenu>;
-}
-
-/// Paper `net.minecraft.world.SimpleMenuProvider`.
-pub struct SimpleMenuProvider<F>
-where
-    F: Fn(i32, &ContainerAccessContext) -> Option<AbstractContainerMenu>,
-{
-    title: Component,
-    constructor: F,
-}
-
-impl<F> SimpleMenuProvider<F>
-where
-    F: Fn(i32, &ContainerAccessContext) -> Option<AbstractContainerMenu>,
-{
-    pub fn new(title: Component, constructor: F) -> Self {
-        Self { title, constructor }
-    }
-}
-
-impl<F> MenuProvider for SimpleMenuProvider<F>
-where
-    F: Fn(i32, &ContainerAccessContext) -> Option<AbstractContainerMenu>,
-{
-    fn get_display_name(&self) -> Component {
-        self.title.clone()
-    }
-
-    fn create_menu(
-        &self,
-        container_id: i32,
-        ctx: &ContainerAccessContext,
-    ) -> Option<AbstractContainerMenu> {
-        (self.constructor)(container_id, ctx)
-    }
-}
 
 /// Outcome of a single [`AbstractContainerMenu::clicked`] transaction.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
