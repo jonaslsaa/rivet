@@ -116,11 +116,7 @@ fn place_stem<R: RandomSource>(
                 if is_replaceable(level, &block_pos, config, true) {
                     if config.planted {
                         if !level.get_block_state(&block_pos.below()).is_air() {
-                            level.set_block(
-                                &block_pos,
-                                Blocks::AIR.default_block_state(),
-                                UPDATE_ALL,
-                            );
+                            level.destroy_block(&block_pos, true);
                         }
 
                         level.set_block(&block_pos, block_state, UPDATE_ALL);
@@ -176,7 +172,7 @@ fn place_hat<R: RandomSource>(
                 let block_pos = surface_origin.offset(dx, dy, dz);
                 if is_replaceable(level, &block_pos, config, false) {
                     if config.planted && !level.get_block_state(&block_pos.below()).is_air() {
-                        level.set_block(&block_pos, Blocks::AIR.default_block_state(), UPDATE_ALL);
+                        level.destroy_block(&block_pos, true);
                     }
 
                     if is_hat_bottom {
@@ -291,6 +287,7 @@ mod tests {
     struct MapLevel {
         blocks: HashMap<BlockPos, BlockState>,
         writes: Vec<(BlockPos, BlockState, u32)>,
+        destroyed: Vec<(BlockPos, bool)>,
     }
 
     impl MapLevel {
@@ -298,6 +295,7 @@ mod tests {
             Self {
                 blocks: HashMap::new(),
                 writes: Vec::new(),
+                destroyed: Vec::new(),
             }
         }
     }
@@ -331,6 +329,12 @@ mod tests {
         fn set_block(&mut self, pos: &BlockPos, state: BlockState, flags: u32) -> bool {
             self.blocks.insert(*pos, state);
             self.writes.push((*pos, state, flags));
+            true
+        }
+
+        fn destroy_block(&mut self, pos: &BlockPos, drop: bool) -> bool {
+            self.blocks.insert(*pos, Blocks::AIR.default_block_state());
+            self.destroyed.push((*pos, drop));
             true
         }
     }
@@ -441,5 +445,34 @@ mod tests {
                 .values()
                 .any(|s| s.block() == nether_wart_block_id())
         );
+    }
+
+    #[test]
+    fn planted_fungus_destroys_supported_blocks_with_drops() {
+        let mut level = MapLevel::new();
+        let origin = BlockPos::new(0, 32, 0);
+        level
+            .blocks
+            .insert(origin.below(), state("minecraft:crimson_nylium"));
+        // Place a non-air support block in the hat region so place_hat also triggers destroy_block.
+        level.blocks.insert(
+            origin.offset(1, 2, 0),
+            Blocks::NETHERRACK.default_block_state(),
+        );
+        let config = crimson_config(true);
+        let generator = StubGenerator(128);
+        let mut random = LegacyRandomSource::new(42);
+
+        assert!(feature_place(
+            FeatureId::new(41),
+            &config,
+            &mut level,
+            &generator,
+            &mut random,
+            &origin,
+        ));
+
+        assert!(level.destroyed.contains(&(origin, true)));
+        assert!(level.destroyed.iter().all(|(_, drop)| *drop));
     }
 }
