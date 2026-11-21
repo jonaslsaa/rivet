@@ -643,3 +643,47 @@ fn air_drag_and_gravity_match_paper_constants() {
     assert!((arrow.abstract_arrow.projectile.delta_movement.x - AIR_INERTIA as f64).abs() < 1.0e-6);
     assert!((arrow.abstract_arrow.projectile.delta_movement.y - (-DEFAULT_GRAVITY)).abs() < 1.0e-9);
 }
+
+#[test]
+fn tipped_arrow_nbt_round_trip_preserves_effects_and_duration_scale() {
+    let mut arrow = Arrow::new(EntityId(41), Vec3::ZERO);
+    arrow.potion_duration_scale = 0.25;
+    arrow.set_potion_contents(Some(PotionContents {
+        effects: vec![
+            PotionEffect {
+                effect_id: "minecraft:poison".to_owned(),
+                duration: 200,
+                amplifier: 1,
+            },
+            PotionEffect {
+                effect_id: "minecraft:slowness".to_owned(),
+                duration: -1,
+                amplifier: 0,
+            },
+        ],
+        custom_color: Some(0x123456),
+    }));
+
+    let mut tag = CompoundTag::new();
+    arrow.save_nbt(&mut tag);
+
+    let mut loaded = Arrow::new(EntityId(42), Vec3::ZERO);
+    loaded.load_nbt(&tag);
+
+    assert_eq!(loaded.potion_duration_scale, 0.25);
+    assert_eq!(loaded.effect_color, 0x123456);
+    assert_eq!(
+        loaded.abstract_arrow.pickup_item.item_id,
+        "minecraft:tipped_arrow"
+    );
+    let contents = loaded
+        .get_potion_contents()
+        .expect("potion contents restored");
+    assert_eq!(contents.custom_color, Some(0x123456));
+    assert_eq!(contents.effects.len(), 2);
+    assert_eq!(contents.effects[0].effect_id, "minecraft:poison");
+    assert_eq!(contents.effects[0].duration, 200);
+    assert_eq!(contents.effects[0].amplifier, 1);
+    assert_eq!(contents.effects[1].effect_id, "minecraft:slowness");
+    assert_eq!(contents.effects[1].duration, -1);
+}

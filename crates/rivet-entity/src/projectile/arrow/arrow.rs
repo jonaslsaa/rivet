@@ -1,6 +1,8 @@
 //! Port of `net.minecraft.world.entity.projectile.arrow.Arrow` (Paper 26.2).
 
 use rivet_nbt::compound_tag::CompoundTag;
+use rivet_nbt::list_tag::ListTag;
+use rivet_nbt::tag::Tag;
 use rivet_util::random::RandomSource;
 
 use crate::projectile::arrow::abstract_arrow::{AbstractArrow, ArrowHooks};
@@ -122,26 +124,60 @@ impl Arrow {
 
     pub fn save_nbt(&self, tag: &mut CompoundTag) {
         self.abstract_arrow.save_nbt(tag);
-        if let Some(contents) = self.get_potion_contents()
-            && let Some(color) = contents.custom_color
-        {
-            tag.put_int("CustomPotionColor", color);
+        tag.put_float("PotionDurationScale", self.potion_duration_scale);
+        if let Some(contents) = self.get_potion_contents() {
+            if let Some(color) = contents.custom_color {
+                tag.put_int("CustomPotionColor", color);
+            }
+            if !contents.effects.is_empty() {
+                let effect_tags = contents
+                    .effects
+                    .iter()
+                    .map(|effect| {
+                        let mut entry = CompoundTag::new();
+                        entry.put_string("id", &effect.effect_id);
+                        entry.put_int("duration", effect.duration);
+                        entry.put_int("amplifier", effect.amplifier);
+                        Tag::Compound(entry)
+                    })
+                    .collect();
+                tag.put(
+                    "PotionEffects".to_owned(),
+                    Tag::List(ListTag::with_list(effect_tags)),
+                );
+            }
         }
     }
 
     pub fn load_nbt(&mut self, tag: &CompoundTag) {
         self.abstract_arrow.load_nbt(tag);
-        if let Some(color) = tag.get_int("CustomPotionColor") {
-            let mut contents = self
-                .abstract_arrow
-                .pickup_item
-                .potion_contents
-                .take()
-                .unwrap_or_default();
-            contents.custom_color = Some(color);
-            self.set_potion_contents(Some(contents));
+        self.potion_duration_scale = tag
+            .get_float("PotionDurationScale")
+            .unwrap_or(TIPPED_ARROW_DURATION_SCALE);
+
+        let custom_color = tag.get_int("CustomPotionColor");
+        let mut effects = Vec::new();
+        if let Some(list) = tag.get_list("PotionEffects") {
+            for item in &list.list {
+                if let Tag::Compound(entry) = item
+                    && let Some(effect_id) = entry.get_string("id")
+                {
+                    effects.push(PotionEffect {
+                        effect_id: effect_id.clone(),
+                        duration: entry.get_int("duration").unwrap_or(0),
+                        amplifier: entry.get_int("amplifier").unwrap_or(0),
+                    });
+                }
+            }
+        }
+
+        if custom_color.is_some() || !effects.is_empty() {
+            self.set_potion_contents(Some(PotionContents {
+                effects,
+                custom_color,
+            }));
         } else {
-            self.update_color();
+            self.set_potion_contents(None);
         }
     }
 }
