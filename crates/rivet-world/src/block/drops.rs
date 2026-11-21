@@ -2060,15 +2060,30 @@ fn parse_function(value: &Value) -> Result<LootFunction, LootTableError> {
             })
         }
         "limit_count" => {
-            let limit = obj.get("limit").and_then(Value::as_object);
-            let min = limit
-                .and_then(|l| l.get("min"))
-                .and_then(Value::as_f64)
-                .map(|v| v as i32);
-            let max = limit
-                .and_then(|l| l.get("max"))
-                .and_then(Value::as_f64)
-                .map(|v| v as i32);
+            let (min, max) = match obj.get("limit") {
+                Some(Value::Number(n)) => {
+                    let v = n
+                        .as_i64()
+                        .or_else(|| n.as_f64().map(|f| java_math_round_f32(f as f32) as i64))
+                        .ok_or_else(|| {
+                            LootTableError::Schema("limit_count 'limit' number out of range".into())
+                        })? as i32;
+                    (Some(v), Some(v))
+                }
+                Some(Value::Object(l)) => (
+                    l.get("min")
+                        .and_then(Value::as_f64)
+                        .map(|v| java_math_round_f32(v as f32)),
+                    l.get("max")
+                        .and_then(Value::as_f64)
+                        .map(|v| java_math_round_f32(v as f32)),
+                ),
+                _ => {
+                    return Err(LootTableError::Schema(
+                        "limit_count missing valid 'limit'".into(),
+                    ));
+                }
+            };
             Ok(LootFunction::LimitCount {
                 min,
                 max,
@@ -3038,6 +3053,38 @@ mod tests {
             }
             .get_int(&mut rng),
             -2
+        );
+    }
+
+    #[test]
+    fn limit_count_parses_numeric_exact_int_range() {
+        let json = r#"{
+          "pools": [
+            {
+              "rolls": 1,
+              "entries": [
+                {
+                  "type": "minecraft:item",
+                  "name": "minecraft:glowstone_dust",
+                  "functions": [
+                    { "function": "minecraft:set_count", "count": 7 },
+                    { "function": "minecraft:limit_count", "limit": 3 }
+                  ]
+                }
+              ]
+            }
+          ]
+        }"#;
+        let table = BlockLootTable::from_json(json).expect("valid numeric limit_count");
+        let ctx = BlockDropContext::new(
+            state_of("minecraft:glowstone"),
+            BlockPos::new(0, 64, 0),
+            ToolStack::empty(),
+        );
+        let mut rng = SingleThreadedRandomSource::new(5);
+        assert_eq!(
+            table.evaluate(&ctx, &mut rng),
+            vec![BlockDropStack::new("minecraft:glowstone_dust", 3)]
         );
     }
 }
