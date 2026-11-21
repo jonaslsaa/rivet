@@ -36,18 +36,20 @@ fi
 # paper pin before capturing anything, so a stale materialized jar cannot
 # silently stamp the wrong commit as truth.
 EXPECTED_SHA="${PAPER_PIN##*@}"
-if [ -n "$EXPECTED_SHA" ] && [ "$EXPECTED_SHA" != "$PAPER_PIN" ]; then
-  JAR_COMMIT="$(unzip -p "$PAPER_JAR" META-INF/MANIFEST.MF 2>/dev/null \
-    | tr -d '\r' \
-    | awk -F': ' '/^Git-Commit:/ { print $2; exit }')"
-  if [ -z "$JAR_COMMIT" ]; then
-    echo "error: could not read Git-Commit from $PAPER_JAR META-INF/MANIFEST.MF" >&2
-    exit 2
-  fi
-  if [ "${JAR_COMMIT#"$EXPECTED_SHA"}" = "$JAR_COMMIT" ]; then
-    echo "error: Paper runtime jar Git-Commit '$JAR_COMMIT' does not match pin '$PAPER_PIN' (expected prefix '$EXPECTED_SHA')" >&2
-    exit 2
-  fi
+if [ -z "$EXPECTED_SHA" ] || [ "$EXPECTED_SHA" = "$PAPER_PIN" ]; then
+  echo "error: PAPER_PIN '$PAPER_PIN' must include '@<commit>' (e.g. 26.2-DEV-main@0a99345)" >&2
+  exit 2
+fi
+JAR_COMMIT="$(unzip -p "$PAPER_JAR" META-INF/MANIFEST.MF 2>/dev/null \
+  | tr -d '\r' \
+  | awk -F': ' '/^Git-Commit:/ { print $2; exit }')"
+if [ -z "$JAR_COMMIT" ]; then
+  echo "error: could not read Git-Commit from $PAPER_JAR META-INF/MANIFEST.MF" >&2
+  exit 2
+fi
+if [ "${JAR_COMMIT#"$EXPECTED_SHA"}" = "$JAR_COMMIT" ]; then
+  echo "error: Paper runtime jar Git-Commit '$JAR_COMMIT' does not match pin '$PAPER_PIN' (expected prefix '$EXPECTED_SHA')" >&2
+  exit 2
 fi
 
 # Build classpath: paper-26.2.jar first, then every jar under libraries/.
