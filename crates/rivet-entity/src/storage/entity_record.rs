@@ -18,6 +18,7 @@ use rivet_registry::core::{
     BlockPos, ChunkPos, SectionPos, Vec3, uuid_from_int_array, uuid_to_int_array,
 };
 use rivet_util::mth::{self, Uuid};
+use rivet_util::random::{SingleThreadedRandomSource, random_support};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -606,12 +607,10 @@ impl StoredEntityRecord {
             }
             Some(_) => return Err(EntityStorageError::MalformedUuid),
             None => {
-                // Deterministic non-zero fallback UUID derived from allocated network_id
-                // when an entity tag omits UUID (mirrors Entity assigning a fresh UUID on construction).
-                Uuid {
-                    most: i64::from(network_id),
-                    least: i64::from(network_id).wrapping_mul(0x517cc1b727220a95_u64 as i64),
-                }
+                // Matches Paper `Entity` constructor: `Mth.createInsecureUUID(RandomSource.create())`.
+                let mut rng =
+                    SingleThreadedRandomSource::new(random_support::generate_unique_seed());
+                mth::create_insecure_uuid(&mut rng)
             }
         };
 

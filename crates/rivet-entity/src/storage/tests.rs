@@ -740,3 +740,24 @@ fn section_storage_orders_chunk_sections_deterministically_across_negative_and_p
     let ys: Vec<i32> = ordered.into_iter().map(SectionPos::y_of).collect();
     assert_eq!(ys, vec![0, 3, 12, -4, -1]);
 }
+
+#[test]
+fn uuid_less_entities_receive_unique_uuids_across_fresh_allocators() {
+    let pos = ChunkPos::new(0, 0);
+    let mut entity_tag = CompoundTag::new();
+    entity_tag.put_string(TAG_ID, "minecraft:pig");
+    let mut list = ListTag::new();
+    list.add(Tag::Compound(entity_tag));
+    let mut chunk_tag = CompoundTag::new();
+    chunk_tag.put_int(TAG_DATA_VERSION, WORLD_VERSION);
+    chunk_tag.put_int_array(TAG_POSITION, vec![0, 0]);
+    chunk_tag.put(TAG_ENTITIES.to_string(), Tag::List(list));
+
+    let limits = EntitySaveLimits::new();
+    let mut alloc_a = NetworkIdAllocator::new();
+    let mut alloc_b = NetworkIdAllocator::new();
+    let first = decode_chunk_entities_nbt(pos, &chunk_tag, &mut alloc_a, &limits).unwrap();
+    let second = decode_chunk_entities_nbt(pos, &chunk_tag, &mut alloc_b, &limits).unwrap();
+
+    assert_ne!(first[0].uuid, second[0].uuid);
+}
