@@ -474,4 +474,33 @@ fn nbt_round_trip_and_codec_defaults() {
     assert_eq!(default_offer.price_multiplier(), 0.0);
     assert_eq!(default_offer.xp(), 1);
     assert!(!default_offer.ignore_discounts);
+
+    // Custom stack limits survive reload via minecraft:max_stack_size component and item resolver
+    let capped_cost = ItemCost::with_components(
+        id("emerald"),
+        10,
+        DataComponentExactPredicate::empty()
+            .expect(id("max_stack_size"), Tag::Int(IntTag { value: 16 })),
+    );
+    let mut capped_offer = MerchantOffer::new(capped_cost, stack("diamond", 1), 12, 5, 0.2);
+    capped_offer.demand = 10;
+    let reloaded_capped = MerchantOffer::from_nbt(&capped_offer.to_nbt()).unwrap();
+    assert_eq!(reloaded_capped.item_cost_a().item_stack().max_stack_size(), 16);
+    assert_eq!(reloaded_capped.cost_a().count(), 16);
+
+    let pearl_offer = MerchantOffer::new(
+        ItemCost::with_max_stack_size(id("ender_pearl"), 10, 16),
+        stack("emerald", 1),
+        12,
+        5,
+        0.2,
+    );
+    let mut pearl_nbt = pearl_offer.to_nbt();
+    pearl_nbt.put_int("demand", 10);
+    let reloaded_pearl = MerchantOffer::from_nbt_with_item_max_stack(&pearl_nbt, |item| {
+        if item == &id("ender_pearl") { 16 } else { 64 }
+    })
+    .unwrap();
+    assert_eq!(reloaded_pearl.item_cost_a().item_stack().max_stack_size(), 16);
+    assert_eq!(reloaded_pearl.cost_a().count(), 16);
 }

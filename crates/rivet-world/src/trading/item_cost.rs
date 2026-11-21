@@ -94,6 +94,14 @@ pub struct TradeItemStack {
 
 impl TradeItemStack {
     pub const DEFAULT_MAX_STACK_SIZE: i32 = 64;
+    pub const ABSOLUTE_MAX_STACK_SIZE: i32 = 99;
+
+    fn max_stack_size_override(components: &IndexMap<Identifier, Tag>) -> Option<i32> {
+        match components.get(&Identifier::with_default_namespace("max_stack_size")) {
+            Some(Tag::Int(tag)) => Some(tag.value.clamp(1, Self::ABSOLUTE_MAX_STACK_SIZE)),
+            _ => None,
+        }
+    }
 
     /// `ItemStack.EMPTY` (`minecraft:air`, count `0`).
     pub fn empty() -> Self {
@@ -126,6 +134,9 @@ impl TradeItemStack {
         components: impl IntoIterator<Item = (Identifier, Tag)>,
     ) -> Self {
         self.components = components.into_iter().collect();
+        if let Some(override_max) = Self::max_stack_size_override(&self.components) {
+            self.max_stack_size = override_max;
+        }
         self
     }
 
@@ -194,8 +205,22 @@ impl TradeItemStack {
         tag
     }
 
-    /// Decodes from MC 26.2 `ItemStack.CODEC` NBT.
+    /// Decodes from MC 26.2 `ItemStack.CODEC` NBT using `DEFAULT_MAX_STACK_SIZE`
+    /// when neither `minecraft:max_stack_size` nor an item-type resolver is supplied.
     pub fn from_nbt(tag: &CompoundTag) -> Result<Self, TradingCodecError> {
+        Self::from_nbt_with_item_max_stack(tag, |_| Self::DEFAULT_MAX_STACK_SIZE)
+    }
+
+    /// Decodes from MC 26.2 `ItemStack.CODEC` NBT, resolving each item's default
+    /// max stack size via `item_max_stack` and honoring any `minecraft:max_stack_size`
+    /// component override (matching `ItemInstance.getMaxStackSize()`).
+    pub fn from_nbt_with_item_max_stack<F>(
+        tag: &CompoundTag,
+        mut item_max_stack: F,
+    ) -> Result<Self, TradingCodecError>
+    where
+        F: FnMut(&Identifier) -> i32,
+    {
         let id_str = tag
             .get_string("id")
             .ok_or(TradingCodecError::MissingField("id"))?;
@@ -215,10 +240,12 @@ impl TradeItemStack {
             Some(comp_tag) => DataComponentExactPredicate::from_nbt(comp_tag)?.expected,
             None => IndexMap::new(),
         };
+        let max_stack_size = Self::max_stack_size_override(&components)
+            .unwrap_or_else(|| item_max_stack(&item).max(1));
         Ok(Self {
             item,
             count,
-            max_stack_size: Self::DEFAULT_MAX_STACK_SIZE,
+            max_stack_size,
             components,
         })
     }
@@ -323,6 +350,19 @@ impl ItemCost {
 
     /// Decodes from MC 26.2 `ItemCost.CODEC` NBT (`count` defaults to `1`).
     pub fn from_nbt(tag: &CompoundTag) -> Result<Self, TradingCodecError> {
+        Self::from_nbt_with_item_max_stack(tag, |_| TradeItemStack::DEFAULT_MAX_STACK_SIZE)
+    }
+
+    /// Decodes from MC 26.2 `ItemCost.CODEC` NBT, resolving each item's default
+    /// max stack size via `item_max_stack` and honoring any `minecraft:max_stack_size`
+    /// component override.
+    pub fn from_nbt_with_item_max_stack<F>(
+        tag: &CompoundTag,
+        mut item_max_stack: F,
+    ) -> Result<Self, TradingCodecError>
+    where
+        F: FnMut(&Identifier) -> i32,
+    {
         let id_str = tag
             .get_string("id")
             .ok_or(TradingCodecError::MissingField("id"))?;
@@ -342,6 +382,12 @@ impl ItemCost {
             Some(comp_tag) => DataComponentExactPredicate::from_nbt(comp_tag)?,
             None => DataComponentExactPredicate::empty(),
         };
-        Ok(Self::with_components(item, count, components))
+        let default_max = item_max_stack(&item).max(1);
+        Ok(Self::with_components_and_max_stack(
+            item,
+            count,
+            components,
+            default_max,
+        ))
     }
 }

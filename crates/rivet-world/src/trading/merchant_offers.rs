@@ -118,6 +118,19 @@ impl MerchantOffers {
     /// Decodes from Paper 26.2 `MerchantOffers.CODEC` NBT. Missing `Recipes`
     /// decodes as an empty `MerchantOffers` (`optionalFieldOf("Recipes", List.of())`).
     pub fn from_nbt(tag: &CompoundTag) -> Result<Self, TradingCodecError> {
+        Self::from_nbt_with_item_max_stack(tag, |_| {
+            super::TradeItemStack::DEFAULT_MAX_STACK_SIZE
+        })
+    }
+
+    /// Decodes from Paper 26.2 `MerchantOffers.CODEC` NBT with an item max-stack resolver.
+    pub fn from_nbt_with_item_max_stack<F>(
+        tag: &CompoundTag,
+        mut item_max_stack: F,
+    ) -> Result<Self, TradingCodecError>
+    where
+        F: FnMut(&rivet_registry::identifier::Identifier) -> i32,
+    {
         let Some(recipes) = tag.get_list("Recipes") else {
             return Ok(Self::new());
         };
@@ -129,7 +142,10 @@ impl MerchantOffers {
                     reason: "expected compound tag entry".to_string(),
                 });
             };
-            offers.push(MerchantOffer::from_nbt(offer_tag)?);
+            offers.push(MerchantOffer::from_nbt_with_item_max_stack(
+                offer_tag,
+                &mut item_max_stack,
+            )?);
         }
         Ok(Self { offers })
     }

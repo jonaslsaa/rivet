@@ -276,20 +276,36 @@ impl MerchantOffer {
 
     /// Decodes from Paper 26.2 `MerchantOffer.CODEC` NBT with exact defaults.
     pub fn from_nbt(tag: &CompoundTag) -> Result<Self, TradingCodecError> {
+        Self::from_nbt_with_item_max_stack(tag, |_| TradeItemStack::DEFAULT_MAX_STACK_SIZE)
+    }
+
+    /// Decodes from Paper 26.2 `MerchantOffer.CODEC` NBT, resolving each item's
+    /// default max stack size via `item_max_stack` while honoring any
+    /// `minecraft:max_stack_size` component override.
+    pub fn from_nbt_with_item_max_stack<F>(
+        tag: &CompoundTag,
+        mut item_max_stack: F,
+    ) -> Result<Self, TradingCodecError>
+    where
+        F: FnMut(&rivet_registry::identifier::Identifier) -> i32,
+    {
         let buy_tag = tag
             .get_compound("buy")
             .ok_or(TradingCodecError::MissingField("buy"))?;
-        let base_cost_a = ItemCost::from_nbt(buy_tag)?;
+        let base_cost_a = ItemCost::from_nbt_with_item_max_stack(buy_tag, &mut item_max_stack)?;
 
         let cost_b = match tag.get_compound("buyB") {
-            Some(buy_b_tag) => Some(ItemCost::from_nbt(buy_b_tag)?),
+            Some(buy_b_tag) => Some(ItemCost::from_nbt_with_item_max_stack(
+                buy_b_tag,
+                &mut item_max_stack,
+            )?),
             None => None,
         };
 
         let sell_tag = tag
             .get_compound("sell")
             .ok_or(TradingCodecError::MissingField("sell"))?;
-        let result = TradeItemStack::from_nbt(sell_tag)?;
+        let result = TradeItemStack::from_nbt_with_item_max_stack(sell_tag, &mut item_max_stack)?;
 
         let uses = tag.get_int("uses").unwrap_or(0);
         let max_uses = tag.get_int("maxUses").unwrap_or(4);
