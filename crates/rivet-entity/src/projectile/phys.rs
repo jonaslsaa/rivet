@@ -177,12 +177,12 @@ pub struct Aabb {
 impl Aabb {
     pub fn new(x1: f64, y1: f64, z1: f64, x2: f64, y2: f64, z2: f64) -> Self {
         Self {
-            min_x: x1.min(x2),
-            min_y: y1.min(y2),
-            min_z: z1.min(z2),
-            max_x: x1.max(x2),
-            max_y: y1.max(y2),
-            max_z: z1.max(z2),
+            min_x: rivet_util::mth::min_f64(x1, x2),
+            min_y: rivet_util::mth::min_f64(y1, y2),
+            min_z: rivet_util::mth::min_f64(z1, z2),
+            max_x: rivet_util::mth::max_f64(x1, x2),
+            max_y: rivet_util::mth::max_f64(y1, y2),
+            max_z: rivet_util::mth::max_f64(z1, z2),
         }
     }
 

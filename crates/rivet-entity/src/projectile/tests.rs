@@ -808,3 +808,14 @@ fn tipped_arrow_preserves_infinite_effect_duration() {
     assert_eq!(world.effect_log[0].1.effect_id, "minecraft:weakness");
     assert_eq!(world.effect_log[0].1.duration, -1);
 }
+
+#[test]
+fn aabb_new_matches_java_math_min_max_for_nan_and_signed_zero() {
+    let nan_box = Aabb::new(f64::NAN, -0.0, 1.0, 2.0, 0.0, f64::NAN);
+    assert!(nan_box.min_x.is_nan());
+    assert!(nan_box.max_x.is_nan());
+    assert!(nan_box.min_y.is_sign_negative() && nan_box.min_y == 0.0);
+    assert!(nan_box.max_y.is_sign_positive() && nan_box.max_y == 0.0);
+    assert!(nan_box.min_z.is_nan());
+    assert!(nan_box.max_z.is_nan());
+}
