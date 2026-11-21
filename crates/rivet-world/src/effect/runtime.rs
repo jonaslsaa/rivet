@@ -290,13 +290,12 @@ impl ActiveEffects {
         }
 
         let effect_id = instance.effect();
-        if let Some(existing) = self.effects.get_mut(&effect_id) {
+        let incoming_amp = instance.amplifier();
+        let changed = if let Some(existing) = self.effects.get_mut(&effect_id) {
             let upgraded = existing.update(&instance);
             if upgraded {
-                let updated_amp = existing.amplifier();
                 let updated_inst = existing.clone();
                 Self::on_effect_updated(&updated_inst, true, target);
-                let _ = updated_amp;
                 self.effects_dirty = true;
             }
             upgraded
@@ -306,7 +305,9 @@ impl ActiveEffects {
             Self::on_effect_added(&added, target);
             self.effects_dirty = true;
             true
-        }
+        };
+        Self::on_effect_started(effect_id, incoming_amp, target);
+        changed
     }
 
     /// `LivingEntity.forceAddEffect(MobEffectInstance, Entity, Cause)` — replaces any
@@ -641,7 +642,6 @@ impl ActiveEffects {
     fn on_effect_added(instance: &MobEffectInstance, target: &mut dyn EffectTarget) {
         let def = instance.effect_def();
         Self::add_attribute_modifiers(instance.effect(), instance.amplifier(), target);
-        Self::on_effect_started(instance.effect(), instance.amplifier(), target);
         if let Some(sound_id) = def.sound_on_added {
             target.on_sound(SoundTrigger { sound_id });
         }
@@ -656,7 +656,6 @@ impl ActiveEffects {
             Self::remove_attribute_modifiers(instance.effect(), target);
             Self::add_attribute_modifiers(instance.effect(), instance.amplifier(), target);
         }
-        Self::on_effect_started(instance.effect(), instance.amplifier(), target);
     }
 
     fn on_effects_removed(removed: &[MobEffectInstance], target: &mut dyn EffectTarget) {

@@ -513,9 +513,44 @@ fn runtime_tick_by_tick_regen_poison_wither_hunger_absorption() {
         EffectUpdateCause::Food,
     );
     assert_eq!(target.absorption, 8.0);
+    // Reapplying weaker Absorption refills depleted hearts via onEffectStarted even when update returns false
+    target.set_absorption_amount(0.0);
+    let changed = active.add_effect(
+        MobEffectInstance::with_duration_and_amplifier(MobEffectId::Absorption, 50, 0),
+        &mut target,
+        EffectUpdateCause::Food,
+    );
+    assert!(!changed);
+    assert_eq!(target.absorption, 4.0);
     target.set_absorption_amount(0.0);
     active.tick_effects(&mut target);
     assert!(!active.has_effect(MobEffectId::Absorption));
+
+    // Hidden-effect promotion does NOT refill depleted Absorption hearts
+    let mut active = ActiveEffects::new();
+    let mut target = MockTarget::new(20.0, 20.0);
+    active.add_effect(
+        MobEffectInstance::with_duration_and_amplifier(MobEffectId::Absorption, 100, 0),
+        &mut target,
+        EffectUpdateCause::Food,
+    );
+    active.add_effect(
+        MobEffectInstance::with_duration_and_amplifier(MobEffectId::Absorption, 1, 1),
+        &mut target,
+        EffectUpdateCause::Food,
+    );
+    assert_eq!(target.absorption, 8.0);
+    // Keep 1.0 absorption so the tick doesn't remove Absorption, then let amp 1 expire and promote hidden amp 0
+    target.set_absorption_amount(1.0);
+    active.tick_effects(&mut target);
+    assert_eq!(
+        active
+            .get_effect(MobEffectId::Absorption)
+            .unwrap()
+            .amplifier(),
+        0
+    );
+    assert_eq!(target.absorption, 1.0);
 }
 
 #[test]
