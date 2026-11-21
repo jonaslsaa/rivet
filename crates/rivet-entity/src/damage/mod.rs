@@ -505,4 +505,29 @@ mod tests {
             other => panic!("expected Damaged on cooldown delta, got {other:?}"),
         }
     }
+
+    #[test]
+    fn last_hurt_by_mob_expires_after_100_ticks() {
+        let sources = DamageSources::new();
+        let mut state = DamagePipelineState::new(20.0);
+        let zombie = DamageEntityRef::living(1, "Zombie");
+
+        state.hurt_server(
+            sources.mob_attack(zombie.clone()),
+            2.0,
+            &HurtContext {
+                tick_count: 10,
+                ..Default::default()
+            },
+        );
+        assert_eq!(state.kill_credit(), Some(&zombie));
+
+        // Exactly 100 ticks later (tick 110): still active (`>` not `>=`).
+        state.tick_timers(110);
+        assert_eq!(state.kill_credit(), Some(&zombie));
+
+        // 101 ticks later (tick 111): expired.
+        state.tick_timers(111);
+        assert_eq!(state.kill_credit(), None);
+    }
 }

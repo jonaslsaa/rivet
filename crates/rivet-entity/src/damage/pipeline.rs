@@ -244,6 +244,12 @@ impl DamagePipelineState {
                 self.last_hurt_by_player = None;
             }
         }
+        // Paper `LivingEntity#baseTick` (lines 520-527): expire `lastHurtByMob` after 100 ticks.
+        if self.last_hurt_by_mob.is_some()
+            && tick_count.wrapping_sub(self.last_hurt_by_mob_timestamp) > 100
+        {
+            self.last_hurt_by_mob = None;
+        }
         self.combat_tracker
             .recheck_status(tick_count, self.is_alive())
     }
