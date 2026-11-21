@@ -215,7 +215,7 @@ where
                 .get("pattern")
                 .and_then(Value::as_str)
                 .ok_or(RecipeJsonError::MissingField("pattern"))?;
-            let pattern = Identifier::parse(pattern_str);
+            let pattern = parse_identifier(pattern_str, "pattern")?;
             Ok(Recipe::SmithingTrim(SmithingTrimRecipe {
                 common_info,
                 template,
@@ -280,6 +280,18 @@ fn parse_string_list(
     Ok(out)
 }
 
+fn parse_identifier(raw: &str, field: &'static str) -> Result<Identifier, RecipeJsonError> {
+    Identifier::try_parse_result(raw)
+        .map_err(|err| RecipeJsonError::InvalidField {
+            field,
+            message: format!("invalid identifier '{raw}': {err}"),
+        })?
+        .ok_or_else(|| RecipeJsonError::InvalidField {
+            field,
+            message: format!("invalid identifier '{raw}'"),
+        })
+}
+
 /// Parse a Minecraft 26.2 `Ingredient` JSON value:
 /// - `"#minecraft:planks"` -> tag ingredient
 /// - `"minecraft:stick"` -> single-item ingredient
@@ -291,7 +303,7 @@ where
     match value {
         Value::String(s) => {
             if let Some(tag_str) = s.strip_prefix('#') {
-                let tag = Identifier::parse(tag_str);
+                let tag = parse_identifier(tag_str, "ingredient")?;
                 let items = tag_resolver(&tag);
                 Ok(Ingredient::of_tag(tag, items)?)
             } else {

@@ -625,4 +625,33 @@ fn json_loader_parses_vanilla_recipes() {
         parse_recipe_json(&bad_json, &empty_tag_resolver),
         Err(RecipeJsonError::UnknownSerializer(_))
     ));
+
+    // Controlled negative: invalid tag and trim pattern identifiers return errors instead of panicking.
+    let bad_tag_json = json!({
+        "type": "minecraft:smelting",
+        "ingredient": "#minecraft:BAD TAG!",
+        "result": "minecraft:stone"
+    });
+    assert!(matches!(
+        parse_recipe_json(&bad_tag_json, &empty_tag_resolver),
+        Err(RecipeJsonError::InvalidField {
+            field: "ingredient",
+            ..
+        })
+    ));
+
+    let bad_pattern_json = json!({
+        "type": "minecraft:smithing_trim",
+        "template": "minecraft:coast_armor_trim_smithing_template",
+        "base": "minecraft:diamond_chestplate",
+        "addition": "minecraft:gold_ingot",
+        "pattern": "INVALID PATTERN!"
+    });
+    assert!(matches!(
+        parse_recipe_json(&bad_pattern_json, &empty_tag_resolver),
+        Err(RecipeJsonError::InvalidField {
+            field: "pattern",
+            ..
+        })
+    ));
 }
