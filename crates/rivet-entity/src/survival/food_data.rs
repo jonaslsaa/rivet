@@ -1,3 +1,5 @@
+use rivet_util::mth::{clamp, clamp_f32, max_f32, min_f32};
+
 use super::{
     Difficulty, ExhaustionConfig, ExhaustionReason, FoodConstants, FoodProperties, RegainReason,
     SurvivalEvent, SurvivalGameRules, SurvivalPlayerHost,
@@ -43,12 +45,12 @@ impl FoodData {
     }
 
     fn add(&mut self, food: i32, saturation: f32) {
-        self.food_level = mth_clamp_i32(
+        self.food_level = clamp(
             food.wrapping_add(self.food_level),
             0,
             FoodConstants::MAX_FOOD,
         );
-        self.saturation_level = mth_clamp_f32(
+        self.saturation_level = clamp_f32(
             saturation + self.saturation_level,
             0.0,
             self.food_level as f32,
@@ -108,7 +110,7 @@ impl FoodData {
         if self.exhaustion_level > FoodConstants::EXHAUSTION_DROP {
             self.exhaustion_level -= FoodConstants::EXHAUSTION_DROP;
             if self.saturation_level > 0.0 {
-                self.saturation_level = java_max_f32(self.saturation_level - 1.0, 0.0);
+                self.saturation_level = max_f32(self.saturation_level - 1.0, 0.0);
             } else if difficulty != Difficulty::Peaceful {
                 let old_food_level = self.food_level;
                 let requested_food_level = self.food_level.wrapping_sub(1).max(0);
@@ -137,7 +139,7 @@ impl FoodData {
         {
             self.tick_timer = self.tick_timer.wrapping_add(1);
             if self.tick_timer >= self.saturated_regen_rate {
-                let saturation_spent = java_min_f32(self.saturation_level, 6.0);
+                let saturation_spent = min_f32(self.saturation_level, 6.0);
                 let heal_amount = saturation_spent / 6.0;
                 host.heal(heal_amount, RegainReason::Satiated, true);
                 events.push(SurvivalEvent::Heal {
@@ -231,7 +233,7 @@ impl FoodData {
     }
 
     pub fn add_exhaustion(&mut self, amount: f32) {
-        self.exhaustion_level = java_min_f32(
+        self.exhaustion_level = min_f32(
             self.exhaustion_level + amount,
             FoodConstants::MAX_EXHAUSTION,
         );
@@ -253,55 +255,5 @@ impl FoodData {
 
     pub fn set_saturation(&mut self, saturation: f32) {
         self.saturation_level = saturation;
-    }
-}
-
-/// Java `Mth.clamp(int, int, int)`: `Math.min(Math.max(value, min), max)`.
-#[inline]
-pub(crate) fn mth_clamp_i32(value: i32, min: i32, max: i32) -> i32 {
-    if value < min {
-        min
-    } else if value > max {
-        max
-    } else {
-        value
-    }
-}
-
-/// Java `Mth.clamp(float, float, float)`: `value < min ? min : Math.min(value, max)`.
-#[inline]
-pub(crate) fn mth_clamp_f32(value: f32, min: f32, max: f32) -> f32 {
-    if value < min {
-        min
-    } else {
-        java_min_f32(value, max)
-    }
-}
-
-/// Java `Math.min(float, float)` semantics (NaN propagates).
-#[inline]
-pub(crate) fn java_min_f32(a: f32, b: f32) -> f32 {
-    if a.is_nan() || b.is_nan() {
-        f32::NAN
-    } else if a == 0.0 && b == 0.0 && b.is_sign_negative() {
-        b
-    } else if a <= b {
-        a
-    } else {
-        b
-    }
-}
-
-/// Java `Math.max(float, float)` semantics (NaN propagates).
-#[inline]
-pub(crate) fn java_max_f32(a: f32, b: f32) -> f32 {
-    if a.is_nan() || b.is_nan() {
-        f32::NAN
-    } else if a == 0.0 && b == 0.0 && a.is_sign_negative() {
-        b
-    } else if a >= b {
-        a
-    } else {
-        b
     }
 }

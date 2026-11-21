@@ -1,5 +1,6 @@
+use rivet_util::mth::{clamp, clamp_f32};
+
 use super::SurvivalEvent;
-use super::food_data::{mth_clamp_f32, mth_clamp_i32};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExperienceSaveData {
@@ -47,16 +48,16 @@ impl ExperienceState {
 
     /// Exact port of `ServerPlayer.giveExperiencePoints` -> `Player.giveExperiencePoints`.
     /// Returns the score delta to pass to `host.increase_score` (0 if `points == 0`).
+    /// `ServerPlayer.giveExperiencePoints` unconditionally invalidates `last_sent_exp`.
     pub fn give_experience_points(
         &mut self,
         points: i32,
         tick_count: i32,
         events: &mut Vec<SurvivalEvent>,
     ) -> i32 {
-        if points == 0 {
-            return 0;
+        if points != 0 {
+            self.give_experience_points_inner(points, tick_count, events);
         }
-        self.give_experience_points_inner(points, tick_count, events);
         self.last_sent_exp = -1;
         points
     }
@@ -68,8 +69,7 @@ impl ExperienceState {
         events: &mut Vec<SurvivalEvent>,
     ) {
         self.experience_progress += points as f32 / self.xp_needed_for_next_level() as f32;
-        self.total_experience =
-            mth_clamp_i32(self.total_experience.wrapping_add(points), 0, i32::MAX);
+        self.total_experience = clamp(self.total_experience.wrapping_add(points), 0, i32::MAX);
 
         while self.experience_progress < 0.0 {
             let remaining = self.experience_progress * self.xp_needed_for_next_level() as f32;
@@ -91,6 +91,7 @@ impl ExperienceState {
     }
 
     /// Exact port of `ServerPlayer.giveExperienceLevels` -> `Player.giveExperienceLevels`.
+    /// `ServerPlayer.giveExperienceLevels` unconditionally invalidates `last_sent_exp`.
     pub fn give_experience_levels(
         &mut self,
         amount: i32,
@@ -99,8 +100,8 @@ impl ExperienceState {
     ) {
         if amount != 0 {
             self.give_experience_levels_inner(amount, tick_count, events);
-            self.last_sent_exp = -1;
         }
+        self.last_sent_exp = -1;
     }
 
     fn give_experience_levels_inner(
@@ -137,7 +138,7 @@ impl ExperienceState {
     pub fn set_experience_points(&mut self, amount: i32) {
         let limit = self.xp_needed_for_next_level() as f32;
         let max = (limit - 1.0) / limit;
-        let experience_points_to_set = mth_clamp_f32(amount as f32 / limit, 0.0, max);
+        let experience_points_to_set = clamp_f32(amount as f32 / limit, 0.0, max);
         if experience_points_to_set != self.experience_progress {
             self.experience_progress = experience_points_to_set;
             self.last_sent_exp = -1;

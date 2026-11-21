@@ -728,3 +728,93 @@ fn synchronous_event_cancellation_and_override_affect_progression() {
         }]
     );
 }
+
+#[test]
+fn java_round_f32_matches_jdk_6430675_boundaries() {
+    use super::player_survival::java_round_f32;
+
+    // 0.49999997_f32 (0x3effffff): naive `(v + 0.5_f32).floor()` returns 1; Java returns 0.
+    assert_eq!(java_round_f32(f32::from_bits(0x3eff_ffff)), 0);
+    assert_eq!(java_round_f32(0.5_f32), 1);
+    assert_eq!(java_round_f32(-0.5_f32), 0);
+    // -0.50000006_f32 (0xbf000001): strictly below -0.5 rounds to -1.
+    assert_eq!(java_round_f32(f32::from_bits(0xbf00_0001)), -1);
+
+    // Odd integers >= 2^23: naive `(v + 0.5_f32)` rounds to even (+1); Java preserves exact integer.
+    assert_eq!(java_round_f32(8_388_608.0_f32), 8_388_608);
+    assert_eq!(java_round_f32(8_388_609.0_f32), 8_388_609);
+    assert_eq!(java_round_f32(16_777_215.0_f32), 16_777_215);
+    assert_eq!(java_round_f32(-8_388_609.0_f32), -8_388_609);
+
+    // NaN and infinities / i32 saturation bounds.
+    assert_eq!(java_round_f32(f32::NAN), 0);
+    assert_eq!(java_round_f32(f32::INFINITY), i32::MAX);
+    assert_eq!(java_round_f32(f32::NEG_INFINITY), i32::MIN);
+    assert_eq!(java_round_f32(2_147_483_648.0_f32), i32::MAX);
+    assert_eq!(java_round_f32(-2_147_483_648.0_f32), i32::MIN);
+
+    // Movement exhaustion at sub-0.5 cm distance must round to 0 cm and emit no exhaustion.
+    let mut state = PlayerSurvivalState::new();
+    let mut host = MockPlayerHost::new(20.0, 20.0);
+    let cfg = ExhaustionConfig::default();
+    let mut events = Vec::new();
+    let dx = 0.004_999_999_4_f64;
+    state.check_movement_exhaustion(
+        &mut host,
+        MovementKind::OnGroundSprinting,
+        [dx, 0.0, 0.0],
+        &cfg,
+        &mut events,
+    );
+    assert_eq!(state.food.exhaustion_level, 0.0);
+    assert!(events.is_empty());
+}
+
+#[test]
+fn zero_delta_experience_calls_unconditionally_invalidate_last_sent_exp() {
+    let mut state = PlayerSurvivalState::new();
+    let mut host = MockPlayerHost::new(20.0, 20.0);
+    let rules = SurvivalGameRules::default();
+    let cfg = ExhaustionConfig::default();
+    let mut events = Vec::new();
+
+    // Prime sync state via an initial tick so last_sent_exp == total_experience (0).
+    let _ = state.do_tick(&mut host, Difficulty::Normal, rules, &cfg, true, false);
+    assert_eq!(state.experience.last_sent_exp, 0);
+
+    // give_experience_points(0) leaves XP/score unchanged, sets last_sent_exp = -1,
+    // and forces a SendExperiencePacket on the next tick.
+    state.give_experience_points(&mut host, 0, &mut events);
+    assert_eq!(state.experience.last_sent_exp, -1);
+    assert_eq!(state.experience.total_experience, 0);
+    assert_eq!(host.score, 0);
+    assert!(events.is_empty());
+
+    let tick_events = state.do_tick(&mut host, Difficulty::Normal, rules, &cfg, true, false);
+    assert_eq!(state.experience.last_sent_exp, 0);
+    assert!(tick_events.iter().any(|e| matches!(
+        e,
+        SurvivalEvent::SendExperiencePacket {
+            progress,
+            total_experience: 0,
+            level: 0,
+        } if *progress == 0.0
+    )));
+
+    // give_experience_levels(0) likewise sets last_sent_exp = -1 and forces a sync packet.
+    state.give_experience_levels(&host, 0, &mut events);
+    assert_eq!(state.experience.last_sent_exp, -1);
+    assert_eq!(state.experience.experience_level, 0);
+    assert!(events.is_empty());
+
+    let tick_events = state.do_tick(&mut host, Difficulty::Normal, rules, &cfg, true, false);
+    assert_eq!(state.experience.last_sent_exp, 0);
+    assert!(tick_events.iter().any(|e| matches!(
+        e,
+        SurvivalEvent::SendExperiencePacket {
+            progress,
+            total_experience: 0,
+            level: 0,
+        } if *progress == 0.0
+    )));
+}

@@ -362,12 +362,12 @@ impl PlayerSurvivalState {
     }
 }
 
-/// Java `Math.round(float)` for finite non-negative movement distances.
+/// Exact port of Java `Math.round(float)` (JDK-6430675).
 #[inline]
-fn java_round_f32(value: f32) -> i32 {
+pub(super) fn java_round_f32(value: f32) -> i32 {
     if value.is_nan() {
         0
     } else {
-        (value + 0.5_f32).floor() as i32
+        (value as f64 + 0.5_f64).floor() as i32
     }
 }
