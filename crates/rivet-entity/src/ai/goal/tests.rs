@@ -1118,6 +1118,11 @@ fn melee_attack_goal_cooldown_repath_and_attack() {
     assert_eq!(ctx.hurt_targets, vec![target.id]);
     assert_eq!(melee.ticks_until_next_attack(), 20);
 
+    // While path recalculation is on cooldown, stationary targets must NOT draw from random.
+    ctx.random.push_float(0.5);
+    melee.tick(&mut ctx);
+    assert_eq!(ctx.random.floats.len(), 1);
+
     // On stop, creative/spectator targets are cleared.
     if let Some(t) = ctx.target.as_mut() {
         t.is_creative_or_spectator = true;

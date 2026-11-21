@@ -134,13 +134,15 @@ impl<C: GoalContext> Goal<C> for MeleeAttackGoal {
             self.pathed_target_y,
             self.pathed_target_z,
         );
-        let needs_repath = (self.pathed_target_x == 0.0
-            && self.pathed_target_y == 0.0
-            && self.pathed_target_z == 0.0)
-            || target.pos.distance_to_sqr(pathed_pos) >= 1.0
-            || ctx.random().next_float() < 0.05;
 
-        if can_see && self.ticks_until_next_path_recalculation <= 0 && needs_repath {
+        if can_see
+            && self.ticks_until_next_path_recalculation <= 0
+            && ((self.pathed_target_x == 0.0
+                && self.pathed_target_y == 0.0
+                && self.pathed_target_z == 0.0)
+                || target.pos.distance_to_sqr(pathed_pos) >= 1.0
+                || ctx.random().next_float() < 0.05)
+        {
             self.pathed_target_x = target.pos.x;
             self.pathed_target_y = target.pos.y;
             self.pathed_target_z = target.pos.z;
