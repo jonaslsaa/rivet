@@ -1,14 +1,18 @@
 pub mod experience;
-pub mod food;
+pub mod food_constants;
+pub mod food_data;
+pub mod food_properties;
+pub mod foods;
 pub mod player_survival;
 
 #[cfg(test)]
 mod tests;
 
 pub use experience::{ExperienceSaveData, ExperienceState, xp_needed_for_next_level};
-pub use food::{
-    FoodConstants, FoodData, FoodProperties, FoodPropertiesBuilder, FoodSaveData, Foods,
-};
+pub use food_constants::FoodConstants;
+pub use food_data::{FoodData, FoodSaveData};
+pub use food_properties::{FoodProperties, FoodPropertiesBuilder};
+pub use foods::Foods;
 pub use player_survival::{MovementKind, PlayerSurvivalState, RestoreOutcome, SurvivalSaveData};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

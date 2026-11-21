@@ -1,5 +1,5 @@
 use super::SurvivalEvent;
-use super::food::{mth_clamp_f32, mth_clamp_i32};
+use super::food_data::{mth_clamp_f32, mth_clamp_i32};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExperienceSaveData {
