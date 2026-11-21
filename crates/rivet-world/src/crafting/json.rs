@@ -5,6 +5,8 @@
 //! `campfire_cooking`, `stonecutting`, `smithing_transform`, `smithing_trim`,
 //! and special crafting serializers) into [`Recipe`] values.
 
+use std::collections::BTreeMap;
+
 use indexmap::IndexMap;
 use rivet_registry::Identifier;
 use serde_json::Value;
@@ -351,7 +353,24 @@ fn parse_result_template(value: Option<&Value>) -> Result<ItemStackTemplate, Rec
                 .get("count")
                 .and_then(Value::as_i64)
                 .map_or(1_i32, |c| c as i32);
-            Ok(ItemStackTemplate::new(item, count))
+            let mut components = BTreeMap::new();
+            if let Some(comp_val) = map.get("components") {
+                let comp_obj = comp_val
+                    .as_object()
+                    .ok_or_else(|| RecipeJsonError::InvalidField {
+                        field: "result.components",
+                        message: "expected object".to_owned(),
+                    })?;
+                for (k, v) in comp_obj {
+                    let comp_id = parse_identifier(k, "result.components")?;
+                    let serialized = match v {
+                        Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    components.insert(comp_id, serialized);
+                }
+            }
+            Ok(ItemStackTemplate::with_components(item, count, components))
         }
         _ => Err(RecipeJsonError::InvalidField {
             field: "result",

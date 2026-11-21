@@ -654,4 +654,42 @@ fn json_loader_parses_vanilla_recipes() {
             ..
         })
     ));
+
+    // Result components (e.g. suspicious_stew_effects) are preserved on crafted output.
+    let stew_json = json!({
+        "type": "minecraft:crafting_shapeless",
+        "ingredients": [
+            "minecraft:brown_mushroom",
+            "minecraft:red_mushroom",
+            "minecraft:bowl",
+            "minecraft:allium"
+        ],
+        "result": {
+            "id": "minecraft:suspicious_stew",
+            "count": 1,
+            "components": {
+                "minecraft:suspicious_stew_effects": [{"id": "minecraft:fire_resistance", "duration": 60}]
+            }
+        }
+    });
+    let stew = parse_recipe_json(&stew_json, &empty_tag_resolver).unwrap();
+    let stew_grid = CraftingInput::of(
+        2,
+        2,
+        vec![
+            stack("brown_mushroom", 1),
+            stack("red_mushroom", 1),
+            stack("bowl", 1),
+            stack("allium", 1),
+        ],
+    );
+    let crafted_stew = stew.assemble_crafting(&stew_grid).unwrap();
+    assert_eq!(crafted_stew.item(), item("suspicious_stew"));
+    assert!(
+        crafted_stew
+            .components()
+            .contains_key(&Identifier::with_default_namespace(
+                "suspicious_stew_effects"
+            ))
+    );
 }
