@@ -206,17 +206,19 @@ impl DamagePipelineState {
         !is_baby && mob_drops_gamerule
     }
 
-    /// Mirrors `LivingEntity#shouldDropExperience()` + `getExpReward()` player-kill gating.
+    /// Mirrors `LivingEntity#getExpReward()` (Paper 26.2 lines 1926-1935):
+    /// `!wasExperienceConsumed() && (isAlwaysExperienceDropper() || lastHurtByPlayerMemoryTime > 0 && shouldDropExperience() && MOB_DROPS)`.
     pub fn should_drop_experience(
         &self,
         is_baby: bool,
         mob_drops_gamerule: bool,
         always_drops_experience: bool,
     ) -> bool {
-        if self.experience_consumed || is_baby || !mob_drops_gamerule {
+        if self.experience_consumed {
             return false;
         }
-        always_drops_experience || self.last_hurt_by_player_memory_time > 0
+        always_drops_experience
+            || (self.last_hurt_by_player_memory_time > 0 && !is_baby && mob_drops_gamerule)
     }
 
     /// Marks experience as dropped (`LivingEntity#dropExperience`), preventing double-drops.

@@ -417,9 +417,12 @@ mod tests {
             HurtOutcome::Rejected(HurtRejection::PeacefulDifficulty)
         );
 
-        // Baby mob drops neither loot nor experience even on player kill.
+        // Baby mob drops neither loot nor experience when not an unconditional XP dropper;
+        // `isAlwaysExperienceDropper()` bypasses `is_baby` and `MOB_DROPS` (Paper `getExpReward`).
         assert!(!DamagePipelineState::should_drop_loot(true, true));
-        assert!(!state.should_drop_experience(true, true, true));
+        assert!(!state.should_drop_experience(true, true, false));
+        assert!(state.should_drop_experience(true, false, true));
+        assert!(state.should_drop_experience(false, false, true));
 
         // Intentional game design death message produces `.message` + `.link`.
         let mut igd_tracker = CombatTracker::new();
