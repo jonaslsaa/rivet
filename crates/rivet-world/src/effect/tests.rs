@@ -894,6 +894,37 @@ fn potion_contents_color_composition_nbt_and_brewing() {
         );
     }
 
+    // Brewing returns fresh PotionContents with only the resulting base potion (drops custom effects/color/name)
+    let customized = PotionContents {
+        potion: Some(PotionId::Swiftness),
+        custom_color: Some(0x112233),
+        custom_effects: vec![MobEffectInstance::with_duration(MobEffectId::Luck, 200)],
+        custom_name: Some("custom_swift".to_string()),
+    };
+    let (splash_item_2, splash_brewed) = brewing
+        .mix("minecraft:gunpowder", "minecraft:potion", &customized)
+        .unwrap();
+    assert_eq!(splash_item_2, "minecraft:splash_potion");
+    assert_eq!(
+        splash_brewed,
+        PotionContents::from_potion(PotionId::Swiftness)
+    );
+    let (_, upgraded_brewed) = brewing
+        .mix("minecraft:glowstone_dust", "minecraft:potion", &customized)
+        .unwrap();
+    assert_eq!(
+        upgraded_brewed,
+        PotionContents::from_potion(PotionId::StrongSwiftness)
+    );
+    // Container with no base potion cannot be brewed
+    let custom_only = PotionContents::EMPTY
+        .with_effect_added(MobEffectInstance::with_duration(MobEffectId::Luck, 200));
+    assert!(
+        brewing
+            .mix("minecraft:gunpowder", "minecraft:potion", &custom_only)
+            .is_none()
+    );
+
     // Invalid container or ingredient -> None
     assert!(
         brewing

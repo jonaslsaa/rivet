@@ -1203,18 +1203,17 @@ impl PotionBrewing {
         if !self.is_input(container_item) {
             return None;
         }
+        let potion = contents.potion?;
 
         for mix in &self.container_mixes {
             if mix.from == container_item && mix.ingredient == ingredient {
-                return Some((mix.to, contents.clone()));
+                return Some((mix.to, PotionContents::from_potion(potion)));
             }
         }
 
-        if let Some(potion) = contents.potion {
-            for mix in &self.potion_mixes {
-                if mix.from == potion && mix.ingredient == ingredient {
-                    return Some((container_item, contents.with_potion(mix.to)));
-                }
+        for mix in &self.potion_mixes {
+            if mix.from == potion && mix.ingredient == ingredient {
+                return Some((container_item, PotionContents::from_potion(mix.to)));
             }
         }
 
