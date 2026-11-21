@@ -303,6 +303,12 @@ fn villager_restock_schedule_and_special_prices() {
     assert_eq!(villager.number_of_restocks_today, 0);
     assert_eq!(villager.offers.get(0).unwrap().uses(), 0);
     assert_eq!(villager.offers.get(0).unwrap().demand(), 2);
+
+    // Villager progression XP is awarded even when reward_exp == false
+    villager.offers.get_mut(0).unwrap().reward_exp = false;
+    let xp_before = villager.villager_xp();
+    villager.notify_trade(0);
+    assert_eq!(villager.villager_xp(), xp_before + 15);
 }
 
 #[test]

@@ -394,9 +394,9 @@ impl Merchant for VillagerMerchantState {
     fn notify_trade(&mut self, offer_index: usize) {
         if let Some(offer) = self.offers.get_mut(offer_index) {
             offer.increase_uses();
-            if offer.should_reward_exp() {
-                self.villager_xp = self.villager_xp.wrapping_add(offer.xp());
-            }
+            // Matches Villager.rewardTradeXp: villager progression XP is always added;
+            // `offer.should_reward_exp()` only gates spawning the player's ExperienceOrb.
+            self.villager_xp = self.villager_xp.wrapping_add(offer.xp());
         }
     }
 
