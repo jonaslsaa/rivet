@@ -1313,17 +1313,25 @@ async fn join_to_play(
 /// Read one clientbound play `keep_alive` (id 44) and return its 8-byte
 /// challenge id (the raw big-endian `long` the server expects echoed back). The
 /// frame is under the 256 threshold, so it arrives with `declaredLength 0`.
+///
+/// Periodic `set_time` heartbeats (id 113, sent every 20 ticks by the tick loop)
+/// are skipped; any other packet fails the assertion.
 async fn read_play_keepalive_challenge(stream: &mut TcpStream) -> [u8; 8] {
-    let (_, payload) = read_compressed_packet(stream).await;
-    let (id, used) = decode_varint(&payload);
-    assert_eq!(
-        id,
-        PacketType::KeepAlive.id() as i32,
-        "clientbound play keep_alive"
-    );
-    payload[used..used + 8]
-        .try_into()
-        .expect("keep_alive body is an 8-byte long")
+    loop {
+        let (_, payload) = read_compressed_packet(stream).await;
+        let (id, used) = decode_varint(&payload);
+        if id == PacketType::SetTime.id() as i32 {
+            continue;
+        }
+        assert_eq!(
+            id,
+            PacketType::KeepAlive.id() as i32,
+            "clientbound play keep_alive"
+        );
+        return payload[used..used + 8]
+            .try_into()
+            .expect("keep_alive body is an 8-byte long");
+    }
 }
 
 /// Read one clientbound play packet and return its id + body (the payload
