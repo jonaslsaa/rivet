@@ -958,7 +958,11 @@ impl PotionBrewing {
             PotionId::LongWeakness,
         );
 
-        b.add_start_mix("minecraft:golden_carrot", PotionId::NightVision);
+        b.add_mix(
+            PotionId::Awkward,
+            "minecraft:golden_carrot",
+            PotionId::NightVision,
+        );
         b.add_mix(
             PotionId::NightVision,
             "minecraft:redstone",
@@ -1020,7 +1024,11 @@ impl PotionBrewing {
             PotionId::StrongSlowness,
         );
 
-        b.add_start_mix("minecraft:turtle_helmet", PotionId::TurtleMaster);
+        b.add_mix(
+            PotionId::Awkward,
+            "minecraft:turtle_helmet",
+            PotionId::TurtleMaster,
+        );
         b.add_mix(
             PotionId::TurtleMaster,
             "minecraft:redstone",
@@ -1054,7 +1062,11 @@ impl PotionBrewing {
             PotionId::StrongSwiftness,
         );
 
-        b.add_start_mix("minecraft:pufferfish", PotionId::WaterBreathing);
+        b.add_mix(
+            PotionId::Awkward,
+            "minecraft:pufferfish",
+            PotionId::WaterBreathing,
+        );
         b.add_mix(
             PotionId::WaterBreathing,
             "minecraft:redstone",
@@ -1130,7 +1142,11 @@ impl PotionBrewing {
             PotionId::StrongStrength,
         );
 
-        b.add_start_mix("minecraft:phantom_membrane", PotionId::SlowFalling);
+        b.add_mix(
+            PotionId::Awkward,
+            "minecraft:phantom_membrane",
+            PotionId::SlowFalling,
+        );
         b.add_mix(
             PotionId::SlowFalling,
             "minecraft:redstone",

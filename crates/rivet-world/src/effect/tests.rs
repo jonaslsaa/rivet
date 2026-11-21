@@ -873,6 +873,27 @@ fn potion_contents_color_composition_nbt_and_brewing() {
         .unwrap();
     assert!(wind.is(PotionId::WindCharged));
 
+    // Ingredients registered with addMix(AWKWARD, ...) in Paper do NOT brew water -> mundane
+    for ingredient in [
+        "minecraft:golden_carrot",
+        "minecraft:turtle_helmet",
+        "minecraft:pufferfish",
+        "minecraft:phantom_membrane",
+    ] {
+        assert!(
+            brewing
+                .mix(ingredient, "minecraft:potion", &water)
+                .is_none(),
+            "{ingredient} must not brew water into mundane"
+        );
+        assert!(
+            brewing
+                .mix(ingredient, "minecraft:potion", &awkward)
+                .is_some(),
+            "{ingredient} must still brew awkward potion"
+        );
+    }
+
     // Invalid container or ingredient -> None
     assert!(
         brewing
