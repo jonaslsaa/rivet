@@ -507,6 +507,13 @@ def check_gradle_task_execution(
     return {t: statuses[t] for t in expected_tasks}
 
 
+JDK25_VERSION_RE = re.compile(r'(?:"|\s)25(?:[."\-+\s]|$)')
+
+
+def is_jdk25_version(line: str) -> bool:
+    return bool(JDK25_VERSION_RE.search(line))
+
+
 def detect_java_version(java_home: str | None) -> str:
     java_bin = str(Path(java_home) / "bin" / "java") if java_home else "java"
     try:
@@ -528,7 +535,7 @@ def detect_java_version(java_home: str | None) -> str:
     version_line = ""
     for line in combined.splitlines():
         s = line.strip()
-        if "version" in s.lower() and ('"25.' in s or " 25." in s):
+        if "version" in s.lower() and is_jdk25_version(s):
             version_line = s
             break
     if not version_line:

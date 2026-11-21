@@ -35,6 +35,7 @@ from census import (
     CensusError,
     compute_content_sha256,
     inventory_module,
+    is_jdk25_version,
     parse_junit_results,
     verify_paper_config,
 )
@@ -72,7 +73,7 @@ def validate_census_doc(doc: dict[str, Any]) -> None:
     )
     java_ver = prov.get("java_version", "")
     _require(
-        isinstance(java_ver, str) and ('"25.' in java_ver or " 25." in java_ver),
+        isinstance(java_ver, str) and is_jdk25_version(java_ver),
         f"java_version must be JDK 25, got: {java_ver!r}",
     )
     _require(
