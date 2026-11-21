@@ -1057,7 +1057,6 @@ fn is_silk_touch_only_block(name: &str) -> bool {
     matches!(
         name,
         "glass"
-            | "tinted_glass"
             | "glass_pane"
             | "ice"
             | "packed_ice"
@@ -2823,5 +2822,36 @@ mod tests {
             }
         }
         assert!(diamonds > 0 && emeralds > diamonds && empties > emeralds);
+    }
+
+    #[test]
+    fn tinted_glass_drops_self_without_silk_touch_while_chiseled_bookshelf_requires_silk_touch() {
+        let mut rng = SingleThreadedRandomSource::new(77);
+        let pos = BlockPos::new(0, 64, 0);
+
+        let tinted = resolve_block_break(
+            &BlockBreakContext::for_player(
+                GameType::Survival,
+                state_of("minecraft:tinted_glass"),
+                pos,
+                ToolStack::empty(),
+            ),
+            &mut rng,
+        );
+        assert_eq!(
+            tinted.items,
+            vec![BlockDropStack::new("minecraft:tinted_glass", 1)]
+        );
+
+        let chiseled = resolve_block_break(
+            &BlockBreakContext::for_player(
+                GameType::Survival,
+                state_of("minecraft:chiseled_bookshelf"),
+                pos,
+                ToolStack::empty(),
+            ),
+            &mut rng,
+        );
+        assert!(chiseled.items.is_empty());
     }
 }
