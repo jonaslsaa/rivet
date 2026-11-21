@@ -138,6 +138,6 @@ impl TargetGoalState {
         };
         let xx = end_node.x.wrapping_sub(target.block_pos.x);
         let zz = end_node.z.wrapping_sub(target.block_pos.z);
-        ((xx * xx + zz * zz) as f64) <= 2.25
+        (xx.wrapping_mul(xx).wrapping_add(zz.wrapping_mul(zz)) as f64) <= 2.25
     }
 }

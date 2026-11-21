@@ -1218,6 +1218,18 @@ fn target_goal_unseen_memory_team_and_must_reach_cache() {
     });
     assert!(!state.can_attack(&mut ctx, Some(enemy), TargetingConditions::DEFAULT));
 
+    // Large coordinate delta (e.g. 50_000 blocks) must wrap like Java int instead of panicking in debug builds.
+    state.start();
+    ctx.created_path = Some(PathHandle {
+        id: 3,
+        end_node: Some(PathNode {
+            x: 50_000,
+            y: 0,
+            z: 0,
+        }),
+    });
+    let _ = state.can_attack(&mut ctx, Some(enemy), TargetingConditions::DEFAULT);
+
     // Reset cache and supply close end node (dx=1, dz=1 -> 2.0 <= 2.25).
     state.start();
     ctx.created_path = Some(PathHandle {
