@@ -606,4 +606,46 @@ mod tests {
             other => panic!("expected fatal outcome with owner kill credit, got {other:?}"),
         }
     }
+
+    #[test]
+    fn modifier_pipeline_preserves_paper_double_delta_float_accumulation() {
+        let sources = DamageSources::new();
+        let mut state = DamagePipelineState::new(100.0);
+        let zombie = DamageEntityRef::living(1, "Zombie");
+
+        // Verify armor -> resistance -> magic uses Paper's `delta = -(mod - after) as f32; damage += delta`.
+        let base = 7.3_f32;
+        let armor_after = get_damage_after_absorb(base, 15.0, 2.0);
+        let armor_delta = -(base as f64 - armor_after as f64) as f32;
+        let after_armor = base + armor_delta;
+        let res_after = apply_resistance(after_armor, 1);
+        let res_delta = -(after_armor as f64 - res_after as f64) as f32;
+        let after_res = after_armor + res_delta;
+        let magic_after = get_damage_after_magic_absorb(after_res, 8.0);
+        let magic_delta = -(after_res as f64 - magic_after as f64) as f32;
+        let expected_final =
+            (base as f64 + armor_delta as f64 + res_delta as f64 + magic_delta as f64) as f32;
+
+        let outcome = state.hurt_server(
+            sources.mob_attack(zombie),
+            base,
+            &HurtContext {
+                tick_count: 1,
+                armor: 15.0,
+                armor_toughness: 2.0,
+                resistance_amplifier: Some(1),
+                magic_armor: 8.0,
+                ..Default::default()
+            },
+        );
+        match outcome {
+            HurtOutcome::Damaged { modifiers, .. } => {
+                assert_eq!(modifiers.armor.to_bits(), armor_delta.to_bits());
+                assert_eq!(modifiers.resistance.to_bits(), res_delta.to_bits());
+                assert_eq!(modifiers.magic.to_bits(), magic_delta.to_bits());
+                assert_eq!(modifiers.final_damage.to_bits(), expected_final.to_bits());
+            }
+            other => panic!("expected Damaged, got {other:?}"),
+        }
+    }
 }

@@ -5,7 +5,7 @@
 
 use super::combat_rules::{
     Difficulty, apply_resistance, get_damage_after_absorb_with_modifier,
-    get_damage_after_magic_absorb, java_max_f32, java_min_f32, mth_clamp_f32,
+    get_damage_after_magic_absorb, java_max_f32, java_max_f64, java_min_f32, mth_clamp_f32,
     scale_damage_for_difficulty,
 };
 use super::combat_tracker::{CombatTracker, FallLocation};
@@ -332,28 +332,34 @@ impl DamagePipelineState {
         let base = amount;
         let mut remaining = java_max_f32(base + invulnerability_reduction, 0.0);
 
+        // Paper `LivingEntity#handleEntityDamage` (lines 2419-2469):
+        // each modifier computes a `double` delta from `-(mod - after)` cast to `float`,
+        // then accumulates via `damage += modifier` in `float`.
         let freezing = if source.is_tag(DamageTypeTag::IsFreezing) && ctx.freeze_hurts_extra {
-            let extra = remaining * 5.0 - remaining;
+            let mod_d = remaining as f64;
+            let extra = -(mod_d - mod_d * 5.0_f64) as f32;
             remaining += extra;
             extra
         } else {
-            0.0
+            -0.0
         };
 
         let should_damage_helmet = source.is_tag(DamageTypeTag::DamagesHelmet) && ctx.has_helmet;
         let hard_hat = if should_damage_helmet {
-            let reduction = -(remaining - remaining * 0.75);
+            let mod_d = remaining as f64;
+            let reduction = -(mod_d - mod_d * 0.75_f64) as f32;
             remaining += reduction;
             reduction
         } else {
-            0.0
+            -0.0
         };
 
         let blocking =
             if ctx.shield_blocked_damage > 0.0 && !source.is_tag(DamageTypeTag::BypassesShield) {
                 let blocked = java_min_f32(ctx.shield_blocked_damage, remaining);
-                remaining -= blocked;
-                -blocked
+                let delta = -blocked;
+                remaining += delta;
+                delta
             } else {
                 0.0
             };
@@ -366,8 +372,8 @@ impl DamagePipelineState {
                 ctx.armor_toughness,
                 |fraction| fraction * ctx.armor_effectiveness_multiplier,
             );
-            let delta = after - remaining;
-            remaining = after;
+            let delta = -(remaining as f64 - after as f64) as f32;
+            remaining += delta;
             delta
         } else {
             0.0
@@ -378,14 +384,14 @@ impl DamagePipelineState {
         {
             if let Some(amp) = ctx.resistance_amplifier {
                 let after = apply_resistance(remaining, amp);
-                let delta = after - remaining;
-                remaining = after;
+                let delta = -(remaining as f64 - after as f64) as f32;
+                remaining += delta;
                 delta
             } else {
-                0.0
+                -0.0
             }
         } else {
-            0.0
+            -0.0
         };
 
         let magic = if !source.is_tag(DamageTypeTag::BypassesEffects)
@@ -393,16 +399,29 @@ impl DamagePipelineState {
             && ctx.magic_armor > 0.0
         {
             let after = get_damage_after_magic_absorb(remaining, ctx.magic_armor);
-            let delta = after - remaining;
-            remaining = after;
+            let delta = -(remaining as f64 - after as f64) as f32;
+            remaining += delta;
             delta
         } else {
             0.0
         };
 
-        let absorbed = java_max_f32(java_min_f32(remaining, self.absorption_amount), 0.0);
-        let absorption = -absorbed;
-        let final_damage = java_max_f32(remaining - absorbed, 0.0);
+        let mod_d = remaining as f64;
+        let absorption = -(java_max_f64(
+            mod_d - java_max_f64(mod_d - self.absorption_amount as f64, 0.0),
+            0.0,
+        )) as f32;
+        let absorbed = -absorption;
+        let final_damage_f64 = base as f64
+            + invulnerability_reduction as f64
+            + freezing as f64
+            + hard_hat as f64
+            + blocking as f64
+            + armor as f64
+            + resistance as f64
+            + magic as f64
+            + absorption as f64;
+        let final_damage = java_max_f32(final_damage_f64 as f32, 0.0);
 
         let modifiers = DamageModifiers {
             base,
