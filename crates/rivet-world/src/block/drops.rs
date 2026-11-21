@@ -1267,6 +1267,7 @@ pub struct LootPool {
 pub enum LootEntry {
     Item {
         name: String,
+        weight: i32,
         conditions: Vec<LootCondition>,
         functions: Vec<LootFunction>,
     },
@@ -1283,6 +1284,7 @@ pub enum LootEntry {
         conditions: Vec<LootCondition>,
     },
     Empty {
+        weight: i32,
         conditions: Vec<LootCondition>,
     },
 }
@@ -1414,8 +1416,24 @@ impl BlockLootTable {
             let rolls = pool.rolls.get_int(random);
             for _ in 0..rolls {
                 let start = drops.len();
+                let mut valid_entries: Vec<ExpandedEntry<'_>> = Vec::new();
+                let mut total_weight = 0_i32;
                 for entry in &pool.entries {
-                    expand_entry(entry, ctx, random, &mut drops);
+                    expand_entry(entry, ctx, random, &mut valid_entries, &mut total_weight);
+                }
+                if total_weight > 0 && !valid_entries.is_empty() {
+                    if valid_entries.len() == 1 {
+                        valid_entries[0].create_item_stack(ctx, random, &mut drops);
+                    } else {
+                        let mut index = random.next_int_bound(total_weight);
+                        for expanded in &valid_entries {
+                            index = index.wrapping_sub(expanded.weight);
+                            if index < 0 {
+                                expanded.create_item_stack(ctx, random, &mut drops);
+                                break;
+                            }
+                        }
+                    }
                 }
                 for stack in &mut drops[start..] {
                     apply_functions(&pool.functions, stack, ctx, random);
@@ -1431,25 +1449,59 @@ impl BlockLootTable {
     }
 }
 
-fn expand_entry<R: RandomSource>(
-    entry: &LootEntry,
+enum ExpandedEntryKind<'a> {
+    Item {
+        name: &'a str,
+        functions: &'a [LootFunction],
+    },
+    Empty,
+}
+
+struct ExpandedEntry<'a> {
+    weight: i32,
+    kind: ExpandedEntryKind<'a>,
+}
+
+impl ExpandedEntry<'_> {
+    fn create_item_stack<R: RandomSource>(
+        &self,
+        ctx: &BlockDropContext,
+        random: &mut R,
+        out: &mut Vec<BlockDropStack>,
+    ) {
+        if let ExpandedEntryKind::Item { name, functions } = self.kind {
+            let mut stack = BlockDropStack::new(name, 1);
+            apply_functions(functions, &mut stack, ctx, random);
+            if stack.count > 0 {
+                out.push(stack);
+            }
+        }
+    }
+}
+
+fn expand_entry<'a, R: RandomSource>(
+    entry: &'a LootEntry,
     ctx: &BlockDropContext,
     random: &mut R,
-    out: &mut Vec<BlockDropStack>,
+    valid: &mut Vec<ExpandedEntry<'a>>,
+    total_weight: &mut i32,
 ) -> bool {
     match entry {
         LootEntry::Item {
             name,
+            weight,
             conditions,
             functions,
         } => {
             if !all_conditions_pass(conditions, ctx, random) {
                 return false;
             }
-            let mut stack = BlockDropStack::new(name, 1);
-            apply_functions(functions, &mut stack, ctx, random);
-            if stack.count > 0 {
-                out.push(stack);
+            if *weight > 0 {
+                valid.push(ExpandedEntry {
+                    weight: *weight,
+                    kind: ExpandedEntryKind::Item { name, functions },
+                });
+                *total_weight = total_weight.wrapping_add(*weight);
             }
             true
         }
@@ -1461,7 +1513,7 @@ fn expand_entry<R: RandomSource>(
                 return false;
             }
             for child in children {
-                if expand_entry(child, ctx, random, out) {
+                if expand_entry(child, ctx, random, valid, total_weight) {
                     return true;
                 }
             }
@@ -1476,7 +1528,7 @@ fn expand_entry<R: RandomSource>(
             }
             let mut any = false;
             for child in children {
-                if expand_entry(child, ctx, random, out) {
+                if expand_entry(child, ctx, random, valid, total_weight) {
                     any = true;
                 }
             }
@@ -1490,13 +1542,25 @@ fn expand_entry<R: RandomSource>(
                 return false;
             }
             for child in children {
-                if !expand_entry(child, ctx, random, out) {
+                if !expand_entry(child, ctx, random, valid, total_weight) {
                     return false;
                 }
             }
             true
         }
-        LootEntry::Empty { conditions } => all_conditions_pass(conditions, ctx, random),
+        LootEntry::Empty { weight, conditions } => {
+            if !all_conditions_pass(conditions, ctx, random) {
+                return false;
+            }
+            if *weight > 0 {
+                valid.push(ExpandedEntry {
+                    weight: *weight,
+                    kind: ExpandedEntryKind::Empty,
+                });
+                *total_weight = total_weight.wrapping_add(*weight);
+            }
+            true
+        }
     }
 }
 
@@ -1689,9 +1753,11 @@ fn parse_entry(value: &Value) -> Result<LootEntry, LootTableError> {
                 .get("name")
                 .and_then(Value::as_str)
                 .ok_or_else(|| LootTableError::Schema("item entry missing 'name'".into()))?;
+            let weight = obj.get("weight").and_then(Value::as_i64).unwrap_or(1) as i32;
             let functions = parse_functions(obj.get("functions"))?;
             Ok(LootEntry::Item {
                 name: normalize_id(name),
+                weight,
                 conditions,
                 functions,
             })
@@ -1717,7 +1783,10 @@ fn parse_entry(value: &Value) -> Result<LootEntry, LootTableError> {
                 conditions,
             })
         }
-        "empty" | "dynamic" => Ok(LootEntry::Empty { conditions }),
+        "empty" | "dynamic" => {
+            let weight = obj.get("weight").and_then(Value::as_i64).unwrap_or(1) as i32;
+            Ok(LootEntry::Empty { weight, conditions })
+        }
         other => Err(LootTableError::Schema(format!(
             "unsupported loot entry type '{other}'"
         ))),
@@ -2714,5 +2783,45 @@ mod tests {
         }
         // Expected ~25% (50 of 200); assert strictly between 0 and trials.
         assert!(survived > 15 && survived < 90, "survived={survived}");
+    }
+
+    #[test]
+    fn loot_pool_selects_one_weighted_entry_per_roll() {
+        let json = r#"{
+          "pools": [
+            {
+              "rolls": 1,
+              "entries": [
+                { "type": "minecraft:item", "name": "minecraft:diamond", "weight": 1 },
+                { "type": "minecraft:item", "name": "minecraft:emerald", "weight": 3 },
+                { "type": "minecraft:empty", "weight": 6 }
+              ]
+            }
+          ]
+        }"#;
+        let table = BlockLootTable::from_json(json).expect("valid weighted pool");
+        let ctx = BlockDropContext::new(
+            state_of("minecraft:stone"),
+            BlockPos::new(0, 64, 0),
+            ToolStack::empty(),
+        );
+        let mut rng = SingleThreadedRandomSource::new(12345);
+        let mut diamonds = 0;
+        let mut emeralds = 0;
+        let mut empties = 0;
+        for _ in 0..300 {
+            let drops = table.evaluate(&ctx, &mut rng);
+            assert!(
+                drops.len() <= 1,
+                "single roll must emit at most one entry, got {drops:?}"
+            );
+            match drops.first().map(|s| s.item_id.as_str()) {
+                Some("minecraft:diamond") => diamonds += 1,
+                Some("minecraft:emerald") => emeralds += 1,
+                None => empties += 1,
+                other => panic!("unexpected drop {other:?}"),
+            }
+        }
+        assert!(diamonds > 0 && emeralds > diamonds && empties > emeralds);
     }
 }
