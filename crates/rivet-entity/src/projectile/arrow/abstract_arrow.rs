@@ -324,6 +324,7 @@ impl AbstractArrow {
             .inflate(1.0);
         let margin = projectile_util::compute_margin(self.projectile.tick_count);
 
+        // Paper `AbstractArrow.findHitEntities` passes `includeFromEntity = false`.
         let mut entities_hit = projectile_util::get_many_entity_hit_result(
             world,
             &self.projectile,
@@ -332,7 +333,7 @@ impl AbstractArrow {
             search_area,
             |e| self.can_hit_entity(world, e),
             margin,
-            !self.is_no_physics(),
+            false,
         );
 
         // Paper sorts entity hits by `initialPosition.distanceToSqr(entity.position())`.

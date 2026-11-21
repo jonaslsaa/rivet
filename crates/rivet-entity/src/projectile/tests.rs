@@ -687,3 +687,29 @@ fn tipped_arrow_nbt_round_trip_preserves_effects_and_duration_scale() {
     assert_eq!(contents.effects[1].effect_id, "minecraft:slowness");
     assert_eq!(contents.effects[1].duration, -1);
 }
+
+#[test]
+fn rejected_non_piercing_arrow_moves_away_from_min_hitbox_face() {
+    let mut world = TestWorld::new();
+    // Width 0.6 centered at x = 3.0 -> min X face is at x = 2.7.
+    world.add_entity(TestWorld::make_entity(70, Vec3::new(3.0, 0.0, 0.0)));
+    world
+        .hurt_outcomes
+        .insert(EntityId(70), HurtOutcome::ignored());
+
+    let mut arrow = Arrow::new(EntityId(71), Vec3::new(0.0, 1.0, 0.0));
+    arrow.abstract_arrow.projectile.delta_movement = Vec3::new(4.0, 0.0, 0.0);
+
+    let mut rng = LegacyRandomSource::new(1);
+    arrow.tick(&mut world, &mut rng);
+
+    // First tick hits target at min X face (x = 2.7), is rejected, and reverses velocity.
+    assert_eq!(world.damage_log.len(), 1);
+    assert!((arrow.abstract_arrow.projectile.position.x - 2.7).abs() < 1.0e-9);
+    assert!(arrow.abstract_arrow.projectile.delta_movement.x < 0.0);
+
+    // Second tick must move away from the hitbox instead of re-hitting the same entity.
+    arrow.tick(&mut world, &mut rng);
+    assert_eq!(world.damage_log.len(), 1);
+    assert!(arrow.abstract_arrow.projectile.position.x < 2.7);
+}
