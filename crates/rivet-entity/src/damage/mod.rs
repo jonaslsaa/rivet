@@ -463,4 +463,46 @@ mod tests {
         assert!(!java_max_f32(-0.0, 0.0).is_sign_negative());
         assert!(java_max_f32(-0.0, -0.0).is_sign_negative());
     }
+
+    #[test]
+    fn last_hurt_includes_blocking_freezing_and_hard_hat_modifiers() {
+        let sources = DamageSources::new();
+        let mut state = DamagePipelineState::new(20.0);
+        let zombie = DamageEntityRef::living(1, "Zombie");
+
+        // 10.0 damage with 6.0 blocked by shield -> computeAmountFromEntityDamageEvent = 4.0.
+        let first = state.hurt_server(
+            sources.mob_attack(zombie.clone()),
+            10.0,
+            &HurtContext {
+                tick_count: 1,
+                shield_blocked_damage: 6.0,
+                ..Default::default()
+            },
+        );
+        assert!(matches!(first, HurtOutcome::Damaged { .. }));
+        assert_close(state.last_hurt, 4.0);
+
+        // Follow-up 6.0 hit during invulnerability window exceeds last_hurt (4.0) and deals delta 2.0.
+        let second = state.hurt_server(
+            sources.mob_attack(zombie),
+            6.0,
+            &HurtContext {
+                tick_count: 2,
+                ..Default::default()
+            },
+        );
+        match second {
+            HurtOutcome::Damaged {
+                modifiers,
+                took_full_damage,
+                ..
+            } => {
+                assert!(!took_full_damage);
+                assert_close(modifiers.invulnerability_reduction, -4.0);
+                assert_close(modifiers.final_damage, 2.0);
+            }
+            other => panic!("expected Damaged on cooldown delta, got {other:?}"),
+        }
+    }
 }

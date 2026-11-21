@@ -410,8 +410,15 @@ impl DamagePipelineState {
         };
 
         // Apply damage (`actuallyHurt`).
+        // Paper `LivingEntity#computeAmountFromEntityDamageEvent`: `lastHurt` records the
+        // pre-armor/resistance/magic/absorption damage after blocking, freezing, and hard-hat.
         self.set_absorption_amount(self.absorption_amount - absorbed);
-        self.last_hurt = base;
+        let mut last_hurt_amount = 0.0_f32;
+        last_hurt_amount += modifiers.base;
+        last_hurt_amount += modifiers.blocking;
+        last_hurt_amount += modifiers.freezing;
+        last_hurt_amount += modifiers.hard_hat;
+        self.last_hurt = last_hurt_amount;
         if took_full_damage {
             self.invulnerable_time = self.invulnerable_duration;
             self.hurt_duration = HURT_DURATION;
