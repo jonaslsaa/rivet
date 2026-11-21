@@ -648,4 +648,20 @@ mod tests {
             other => panic!("expected Damaged, got {other:?}"),
         }
     }
+
+    #[test]
+    fn combat_tracker_paper_max_entries_default_and_pre_append_trim() {
+        assert_eq!(CombatTracker::DEFAULT_PAPER_MAX_ENTRIES, 10_240);
+        let sources = DamageSources::new();
+        let mut tracker = CombatTracker::with_max_entries(Some(2));
+
+        // Paper trims `while (entries.size() > maxEntries)` BEFORE adding the new entry,
+        // so with max_entries = 2: 1 -> 2 -> 3 (len 2 not > 2), then 4th trims len 3 -> 2 and adds -> 3.
+        for i in 1..=4 {
+            tracker.record_damage(sources.fall(), i as f32, None, 0.0, i, true);
+        }
+        assert_eq!(tracker.entries().len(), 3);
+        let damages: Vec<f32> = tracker.entries().iter().map(|e| e.damage).collect();
+        assert_eq!(damages, vec![2.0, 3.0, 4.0]);
+    }
 }

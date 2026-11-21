@@ -79,8 +79,9 @@ pub struct CombatTracker {
     combat_end_time: i32,
     in_combat: bool,
     taking_damage: bool,
-    /// Paper MC-301114 bound (`0` = unbounded, matching vanilla; Paper defaults to `10000`).
-    max_entries: usize,
+    /// Paper MC-301114 `maxTrackingCombatEntries` (`None` = disabled/unbounded;
+    /// Paper defaults to `Some(10_240)`).
+    max_entries: Option<usize>,
 }
 
 impl Default for CombatTracker {
@@ -92,13 +93,13 @@ impl Default for CombatTracker {
 impl CombatTracker {
     pub const RESET_DAMAGE_STATUS_TIME: i32 = 100;
     pub const RESET_COMBAT_STATUS_TIME: i32 = 300;
-    pub const DEFAULT_PAPER_MAX_ENTRIES: usize = 10_000;
+    pub const DEFAULT_PAPER_MAX_ENTRIES: usize = 10_240;
 
     pub fn new() -> Self {
-        Self::with_max_entries(Self::DEFAULT_PAPER_MAX_ENTRIES)
+        Self::with_max_entries(Some(Self::DEFAULT_PAPER_MAX_ENTRIES))
     }
 
-    pub fn with_max_entries(max_entries: usize) -> Self {
+    pub fn with_max_entries(max_entries: Option<usize>) -> Self {
         Self {
             entries: VecDeque::new(),
             last_damage_time: 0,
@@ -145,15 +146,21 @@ impl CombatTracker {
     ) -> bool {
         self.recheck_status(tick_count, is_alive);
         let should_enter = Self::should_enter_combat(&source);
+        // Paper MC-301114 (`CombatTracker#recordDamageAndCheckCombatState`, lines 51-59):
+        // trim while `entries.len() > max_entries` BEFORE appending the new entry.
+        if !self.entries.is_empty()
+            && let Some(max_entries) = self.max_entries
+        {
+            while self.entries.len() > max_entries {
+                self.entries.pop_front();
+            }
+        }
         self.entries.push_back(CombatEntry {
             source,
             damage,
             fall_location,
             fall_distance,
         });
-        if self.max_entries > 0 && self.entries.len() > self.max_entries {
-            self.entries.pop_front();
-        }
         self.last_damage_time = tick_count;
         self.taking_damage = true;
         if !self.in_combat && is_alive && should_enter {
