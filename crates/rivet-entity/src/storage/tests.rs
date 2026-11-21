@@ -1002,3 +1002,55 @@ fn failed_chunk_read_leaves_status_fresh_and_recovers_on_retry() {
     assert_eq!(manager.chunk_load_status(chunk), ChunkLoadStatus::Loaded);
     assert!(manager.get_visible_by_uuid(&uuid).is_some());
 }
+
+#[test]
+fn duplicate_vehicle_uuid_on_load_detaches_unique_passenger_for_saving() {
+    let chunk = ChunkPos::new(0, 0);
+    let boat_uuid = make_uuid(605, 1);
+    let rider_uuid = make_uuid(605, 2);
+
+    // Pre-populate disk with a boat carrying a zombie passenger.
+    let mut disk_boat = make_entity("minecraft:oak_boat", 1, boat_uuid, 4.0, 64.0, 4.0);
+    let disk_rider = make_entity("minecraft:zombie", 2, rider_uuid, 4.0, 64.5, 4.0);
+    disk_boat.passengers.push(disk_rider);
+
+    let mut storage =
+        EntityStorage::new(InMemoryEntityRegionBackend::new(), EntitySaveLimits::new());
+    storage
+        .store_entities(&ChunkEntities::new(chunk, vec![disk_boat]))
+        .unwrap();
+
+    let mut manager = PersistentEntitySectionManager::new(storage);
+    // Register a boat with the SAME UUID in another chunk so the disk boat is skipped on load.
+    let other_chunk = ChunkPos::new(5, 5);
+    let existing_boat_id = manager.allocate_network_id();
+    manager
+        .add_new_entity(make_entity(
+            "minecraft:oak_boat",
+            existing_boat_id,
+            boat_uuid,
+            84.0,
+            64.0,
+            84.0,
+        ))
+        .unwrap();
+    assert_eq!(manager.chunk_visibility(other_chunk), Visibility::Hidden);
+
+    // Load chunk: disk boat is skipped as duplicate, unique passenger is admitted detached.
+    manager
+        .update_chunk_status(chunk, Visibility::Ticking)
+        .unwrap();
+    manager.process_pending_loads().unwrap();
+
+    let rider = manager.get_visible_by_uuid(&rider_uuid).unwrap();
+    assert_eq!(rider.vehicle_id, None);
+
+    // Saving and reloading chunk must preserve the detached passenger rather than dropping it.
+    manager.save_all().unwrap();
+    let persisted = manager
+        .permanent_storage_mut()
+        .load_entities(chunk)
+        .unwrap();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted.entities()[0].uuid, rider_uuid);
+}

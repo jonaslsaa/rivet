@@ -302,10 +302,17 @@ impl<B: EntityRegionBackend> PersistentEntitySectionManager<B> {
         let mut loaded_chunks = 0;
         while let Some(chunk) = self.loading_inbox.pop_front() {
             let chunk_key = chunk.pos().pack();
-            for entity in chunk.into_entities() {
+            for mut entity in chunk.into_entities() {
                 // Skip duplicate UUIDs on load (matching Paper `addEntityUuid` warning/skip).
                 if self.known_uuids.contains(&entity.uuid) {
                     continue;
+                }
+                // If this passenger's vehicle was skipped (e.g. duplicate UUID), detach it
+                // so it is not stranded as an unsaveable orphan.
+                if let Some(vehicle_id) = entity.vehicle_id
+                    && !self.entities.contains_key(&vehicle_id)
+                {
+                    entity.vehicle_id = None;
                 }
                 self.add_entity_internal(entity, true)?;
             }
