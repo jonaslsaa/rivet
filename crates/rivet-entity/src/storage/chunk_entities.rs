@@ -97,6 +97,7 @@ pub struct InMemoryEntityRegionBackend {
     write_count: usize,
     delete_count: usize,
     flush_count: usize,
+    fail_next_read: bool,
     fail_next_write: bool,
 }
 
@@ -142,6 +143,11 @@ impl InMemoryEntityRegionBackend {
         self.flush_count
     }
 
+    /// Configures the next `read_chunk` call to return a backend error.
+    pub fn fail_next_read(&mut self) {
+        self.fail_next_read = true;
+    }
+
     /// Configures the next `write_chunk` call to return a backend error.
     pub fn fail_next_write(&mut self) {
         self.fail_next_write = true;
@@ -150,6 +156,12 @@ impl InMemoryEntityRegionBackend {
 
 impl EntityRegionBackend for InMemoryEntityRegionBackend {
     fn read_chunk(&mut self, pos: ChunkPos) -> Result<Option<CompoundTag>, EntityStorageError> {
+        if self.fail_next_read {
+            self.fail_next_read = false;
+            return Err(EntityStorageError::Backend {
+                message: "injected read failure".to_string(),
+            });
+        }
         self.read_count += 1;
         Ok(self.chunks.get(&pos.pack()).cloned())
     }

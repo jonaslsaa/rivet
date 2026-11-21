@@ -616,10 +616,10 @@ impl<B: EntityRegionBackend> PersistentEntitySectionManager<B> {
     }
 
     fn request_chunk_load(&mut self, chunk_key: i64) -> Result<(), EntityStorageError> {
-        self.chunk_load_statuses
-            .insert(chunk_key, ChunkLoadStatus::Pending);
         let pos = ChunkPos::unpack(chunk_key);
         let loaded = self.permanent_storage.load_entities(pos)?;
+        self.chunk_load_statuses
+            .insert(chunk_key, ChunkLoadStatus::Pending);
         self.loading_inbox.push_back(loaded);
         Ok(())
     }

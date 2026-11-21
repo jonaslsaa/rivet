@@ -970,3 +970,35 @@ fn save_all_loads_merges_and_persists_newly_populated_fresh_chunks() {
     assert!(uuids.contains(&existing_uuid));
     assert!(uuids.contains(&fresh_uuid));
 }
+
+#[test]
+fn failed_chunk_read_leaves_status_fresh_and_recovers_on_retry() {
+    let chunk = ChunkPos::new(1, -4);
+    let uuid = make_uuid(604, 1);
+
+    let mut storage =
+        EntityStorage::new(InMemoryEntityRegionBackend::new(), EntitySaveLimits::new());
+    storage
+        .store_entities(&ChunkEntities::new(
+            chunk,
+            vec![make_entity("minecraft:cow", 1, uuid, 20.0, 64.0, -60.0)],
+        ))
+        .unwrap();
+    storage.backend_mut().fail_next_read();
+
+    let mut manager = PersistentEntitySectionManager::new(storage);
+    let err = manager
+        .update_chunk_status(chunk, Visibility::Ticking)
+        .unwrap_err();
+    assert!(matches!(err, EntityStorageError::Backend { .. }));
+    assert_eq!(manager.chunk_load_status(chunk), ChunkLoadStatus::Fresh);
+
+    // Retry once backend recovers: chunk loads normally and restores entity.
+    manager
+        .update_chunk_status(chunk, Visibility::Ticking)
+        .unwrap();
+    assert_eq!(manager.chunk_load_status(chunk), ChunkLoadStatus::Pending);
+    manager.process_pending_loads().unwrap();
+    assert_eq!(manager.chunk_load_status(chunk), ChunkLoadStatus::Loaded);
+    assert!(manager.get_visible_by_uuid(&uuid).is_some());
+}
