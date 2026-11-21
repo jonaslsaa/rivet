@@ -419,6 +419,11 @@ def parse_junit_results(results_dir: Path, module_name: str) -> dict[str, Any]:
         }
 
         if name.startswith("Gradle Test Run "):
+            if failures > 0 or errors > 0:
+                raise CensusError(
+                    f"{module_name}: synthetic JUnit wrapper {name} reported "
+                    f"failures={failures}, errors={errors} in {xml_path.name}"
+                )
             synthetic_wrappers.append(entry)
             continue
 

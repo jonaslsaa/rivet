@@ -201,6 +201,15 @@ def validate_census_doc(doc: dict[str, Any]) -> None:
         _require(ex.get("failed") == s_fail + s_err == 0, f"{mod}: failed must be 0")
         _require(ex.get("skipped") == s_skip, f"{mod}: skipped rollup mismatch")
 
+        wrappers = ex.get("synthetic_wrappers", [])
+        _require(isinstance(wrappers, list), f"{mod}: synthetic_wrappers must be a list")
+        for w in wrappers:
+            _require(isinstance(w, dict), f"{mod}: synthetic wrapper entry must be object")
+            _require(
+                w.get("failures", 0) == 0 and w.get("errors", 0) == 0,
+                f"{mod}: synthetic wrapper {w.get('name')} has failures/errors",
+            )
+
         src_inv = m.get("source_inventory")
         assets = m.get("non_test_assets")
         _require(isinstance(src_inv, dict), f"{mod}: missing source_inventory")
