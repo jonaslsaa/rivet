@@ -2175,11 +2175,13 @@ fn block_name_matches(block_name: &str, expected: &str) -> bool {
 
 fn matches_item_tag(tool: &ToolStack, tag: &str) -> bool {
     let normalized_tag = normalize_id(tag.trim_start_matches('#'));
-    let normalized_item = normalize_id(&tool.item_id);
-    if let Some(items) =
-        rivet_registry::generated::tags::ITEM_TAG_BY_NAME.get(normalized_tag.as_str())
-    {
-        return items.contains(&normalized_item.as_str());
+    if let Some(item_id) = tool.item_id.as_deref() {
+        let normalized_item = normalize_id(item_id);
+        if let Some(items) =
+            rivet_registry::generated::tags::ITEM_TAG_BY_NAME.get(normalized_tag.as_str())
+        {
+            return items.contains(&normalized_item.as_str());
+        }
     }
     match strip_minecraft_ns(&normalized_tag) {
         "pickaxes" => tool.is_pickaxe(),
