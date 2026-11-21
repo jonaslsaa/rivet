@@ -372,12 +372,48 @@ fn cooking_stonecutting_and_smithing_behavior() {
     );
     let trimmed = trim.assemble(&trim_in);
     assert!(!trimmed.is_empty());
+    assert_eq!(
+        trimmed
+            .components()
+            .get(&Identifier::with_default_namespace("trim"))
+            .map(String::as_str),
+        Some("minecraft:ward:minecraft:gold")
+    );
     let repeat_trim_in = SmithingRecipeInput::new(
         stack("ward_armor_trim_smithing_template", 1),
         trimmed,
         stack("gold_ingot", 1),
     );
     assert!(trim.assemble(&repeat_trim_in).is_empty());
+
+    // Addition component `provides_trim_material` overrides the default material.
+    let mut override_comps = BTreeMap::new();
+    override_comps.insert(
+        Identifier::with_default_namespace("provides_trim_material"),
+        "minecraft:diamond".to_owned(),
+    );
+    let override_addition = ItemStack::with_components(item("gold_ingot"), 1, override_comps);
+    let override_in = SmithingRecipeInput::new(
+        stack("ward_armor_trim_smithing_template", 1),
+        stack("diamond_chestplate", 1),
+        override_addition,
+    );
+    let override_trimmed = trim.assemble(&override_in);
+    assert_eq!(
+        override_trimmed
+            .components()
+            .get(&Identifier::with_default_namespace("trim"))
+            .map(String::as_str),
+        Some("minecraft:ward:minecraft:diamond")
+    );
+
+    // Addition with no trim material returns EMPTY.
+    let no_mat_in = SmithingRecipeInput::new(
+        stack("ward_armor_trim_smithing_template", 1),
+        stack("diamond_chestplate", 1),
+        stack("stick", 1),
+    );
+    assert!(trim.assemble(&no_mat_in).is_empty());
 
     // Manager property sets & stonecutter ordering.
     let manager = RecipeManager::from_recipes(vec![

@@ -351,9 +351,14 @@ impl SmithingTrimRecipe {
     }
 
     pub fn assemble(&self, input: &SmithingRecipeInput) -> ItemStack {
+        // Paper `SmithingTrimRecipe.applyTrim`: resolve `PROVIDES_TRIM_MATERIAL`
+        // from the addition stack (component override first, then vanilla item default).
+        let Some(material) = resolve_trim_material(&input.addition) else {
+            return ItemStack::empty();
+        };
         let mut components = input.base.components().clone();
         let trim_key = Identifier::with_default_namespace("trim");
-        let new_trim = format!("{}:{}", self.pattern, input.addition.item().name());
+        let new_trim = format!("{}:{material}", self.pattern);
         // Paper: if the base already has the exact same trim, return EMPTY.
         if components
             .get(&trim_key)
@@ -545,6 +550,35 @@ impl Recipe {
             _ => None,
         }
     }
+}
+
+/// Resolve the `DataComponents.PROVIDES_TRIM_MATERIAL` value for a smithing
+/// addition stack, matching Paper `TrimMaterials.getFromIngredient`.
+pub fn resolve_trim_material(addition: &ItemStack) -> Option<String> {
+    if addition.is_empty() {
+        return None;
+    }
+    let override_key = Identifier::with_default_namespace("provides_trim_material");
+    if let Some(mat) = addition.components().get(&override_key)
+        && !mat.is_empty()
+    {
+        return Some(mat.clone());
+    }
+    let default_mat = match addition.item().name() {
+        "minecraft:quartz" => "minecraft:quartz",
+        "minecraft:iron_ingot" => "minecraft:iron",
+        "minecraft:netherite_ingot" => "minecraft:netherite",
+        "minecraft:redstone" => "minecraft:redstone",
+        "minecraft:copper_ingot" => "minecraft:copper",
+        "minecraft:gold_ingot" => "minecraft:gold",
+        "minecraft:emerald" => "minecraft:emerald",
+        "minecraft:diamond" => "minecraft:diamond",
+        "minecraft:lapis_lazuli" => "minecraft:lapis",
+        "minecraft:amethyst_shard" => "minecraft:amethyst",
+        "minecraft:resin_brick" => "minecraft:resin",
+        _ => return None,
+    };
+    Some(default_mat.to_owned())
 }
 
 /// `CraftingRecipe.defaultCraftingReminder(CraftingInput)`.
