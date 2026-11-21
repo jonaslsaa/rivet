@@ -287,6 +287,54 @@ class PaperJunitBaselineTests(unittest.TestCase):
                 census.verify_paper_config(missing, check_git=False)
             self.assertEqual(ctx.exception.exit_code, census.EXIT_UNVERIFIED)
 
+    def test_synthetic_wrapper_failure_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = build_synthetic_paper(Path(tmp))
+            bad_wrapper = """<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="Gradle Test Run :paper-server:test" tests="1" skipped="0" failures="0" errors="1">
+  <testcase name="executionError" classname="Gradle Test Run :paper-server:test" time="0.0"><error message="container boom"/></testcase>
+</testsuite>
+"""
+            (
+                root / "paper-server" / "build" / "test-results" / "test" / "TEST-Gradle-Test-Run--paper-server-test.xml"
+            ).write_text(bad_wrapper, encoding="utf-8")
+            with self.assertRaises(census.CensusError):
+                self._produce_valid(root)
+
+    def test_renamed_testcase_fails_live_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = build_synthetic_paper(Path(tmp))
+            doc = self._produce_valid(root)
+            api_xml = root / "paper-api" / "build" / "test-results" / "test" / "TEST-org.bukkit.SampleApiTest.xml"
+            api_xml.write_text(
+                api_xml.read_text(encoding="utf-8").replace("testOne()", "testRenamed()"),
+                encoding="utf-8",
+            )
+            with self.assertRaises(census.CensusError):
+                validate.validate_against_paper(doc, root, check_results=True, check_git=False)
+
+    def test_missing_java_returns_unverified(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(census.CensusError) as ctx:
+                census.detect_java_version(str(Path(tmp) / "no-such-jdk"))
+            self.assertEqual(ctx.exception.exit_code, census.EXIT_UNVERIFIED)
+
+    def test_jdk25_ga_version_accepted_and_other_majors_rejected(self) -> None:
+        self.assertTrue(census.is_jdk25_version('openjdk version "25" 2025-09-16'))
+        self.assertTrue(census.is_jdk25_version('openjdk version "25.0.5" 2025-10-21 LTS'))
+        self.assertTrue(census.is_jdk25_version('openjdk version "25-ea" 2025-09-16'))
+        self.assertFalse(census.is_jdk25_version('openjdk version "24.0.2" 2025-07-15'))
+        self.assertFalse(census.is_jdk25_version('openjdk version "250.0.1" 2030-01-01'))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = build_synthetic_paper(Path(tmp))
+            doc = census.produce_census(
+                paper_dir=root,
+                gradle_log_text=SAMPLE_GRADLE_LOG,
+                java_version_override='openjdk version "25" 2025-09-16',
+                check_git=False,
+            )
+            validate.validate_census_doc(doc)
+
 
 if __name__ == "__main__":
     unittest.main()
