@@ -724,4 +724,13 @@ mod tests {
         assert_eq!(container.get_item(0).get_count(), 16);
         assert_eq!(remainder.get_count(), 32);
     }
+
+    #[test]
+    fn non_stackable_multi_count_insertion_preserves_extra_items() {
+        let mut inv = PlayerInventory::new();
+        let mut tools = InventoryItemStack::with_max_stack_size(ItemId(1), 2, 1);
+        assert!(inv.add(&mut tools));
+        assert_eq!(inv.get_item(0).get_count(), 1);
+        assert_eq!(tools.get_count(), 1);
+    }
 }

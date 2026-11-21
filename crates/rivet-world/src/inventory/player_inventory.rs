@@ -205,7 +205,11 @@ impl PlayerInventory {
             }
             let target = slot as usize;
             if target < self.items.len() && self.items[target].is_empty() {
-                let moved = stack.copy_and_clear();
+                let limit = self.get_max_stack_size_for_item(stack);
+                if limit <= 0 {
+                    return false;
+                }
+                let moved = stack.split(limit);
                 self.set_item(target, moved);
                 return true;
             }
