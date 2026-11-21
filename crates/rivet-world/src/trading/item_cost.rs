@@ -166,7 +166,7 @@ impl TradeItemStack {
 
     /// Mirrors `ItemStack.copyWithCount(int)`.
     pub fn copy_with_count(&self, count: i32) -> Self {
-        if count <= 0 || self.item == Identifier::with_default_namespace("air") {
+        if self.is_empty() || count <= 0 {
             return Self::empty();
         }
         let mut copy = self.clone();

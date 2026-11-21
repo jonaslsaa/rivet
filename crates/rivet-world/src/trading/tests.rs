@@ -65,6 +65,11 @@ fn item_cost_matches_item_and_exact_components() {
     assert!(!item_cost.test(&wrong_component));
     assert!(!item_cost.test(&wrong_item));
     assert!(!item_cost.test(&TradeItemStack::empty()));
+
+    // copy_with_count on a zero-count non-air stack must stay empty (ItemStack.copyWithCount)
+    let depleted = stack("emerald", 0);
+    assert!(depleted.is_empty());
+    assert!(depleted.copy_with_count(1).is_empty());
 }
 
 #[test]
