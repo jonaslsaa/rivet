@@ -111,6 +111,15 @@ where
                 .get("ingredients")
                 .and_then(Value::as_array)
                 .ok_or(RecipeJsonError::MissingField("ingredients"))?;
+            if ing_arr.is_empty() || ing_arr.len() > 9 {
+                return Err(RecipeJsonError::InvalidField {
+                    field: "ingredients",
+                    message: format!(
+                        "shapeless recipe must have between 1 and 9 ingredients, got {}",
+                        ing_arr.len()
+                    ),
+                });
+            }
             let mut ingredients = Vec::with_capacity(ing_arr.len());
             for item in ing_arr {
                 ingredients.push(parse_ingredient(item, tag_resolver)?);

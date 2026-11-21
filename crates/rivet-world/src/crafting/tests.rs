@@ -719,4 +719,31 @@ fn json_loader_parses_vanilla_recipes() {
             ..
         })
     ));
+
+    // Controlled negative: shapeless recipes with 0 or > 9 ingredients are rejected.
+    let empty_shapeless = json!({
+        "type": "minecraft:crafting_shapeless",
+        "ingredients": [],
+        "result": "minecraft:stick"
+    });
+    assert!(matches!(
+        parse_recipe_json(&empty_shapeless, &empty_tag_resolver),
+        Err(RecipeJsonError::InvalidField {
+            field: "ingredients",
+            ..
+        })
+    ));
+
+    let ten_shapeless = json!({
+        "type": "minecraft:crafting_shapeless",
+        "ingredients": vec!["minecraft:stick"; 10],
+        "result": "minecraft:stick"
+    });
+    assert!(matches!(
+        parse_recipe_json(&ten_shapeless, &empty_tag_resolver),
+        Err(RecipeJsonError::InvalidField {
+            field: "ingredients",
+            ..
+        })
+    ));
 }
