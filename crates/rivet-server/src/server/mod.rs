@@ -8,6 +8,7 @@
 //! shared mutable structure — the OWNERSHIP "connection registry" exception.
 
 pub mod dataconverter;
+pub mod gametest;
 pub mod keepalive;
 pub mod level;
 pub mod lighting;
