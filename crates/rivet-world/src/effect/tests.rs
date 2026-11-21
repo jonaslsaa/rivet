@@ -395,16 +395,16 @@ fn instance_equality_hashing_and_compare_to_cutoff() {
     // compareTo 32147 cutoff: when both > 32147, duration is ignored and color breaks ties
     let long_a = MobEffectInstance::with_duration(MobEffectId::Speed, 40_000);
     let long_b = MobEffectInstance::with_duration(MobEffectId::Speed, 50_000);
-    assert_eq!(long_a.cmp(&long_b), std::cmp::Ordering::Equal);
+    assert_eq!(long_a.compare_java(&long_b), std::cmp::Ordering::Equal);
 
     // Below cutoff, shorter duration sorts first
     let short_a = MobEffectInstance::with_duration(MobEffectId::Speed, 100);
     let short_b = MobEffectInstance::with_duration(MobEffectId::Speed, 200);
-    assert!(short_a < short_b);
+    assert_eq!(short_a.compare_java(&short_b), std::cmp::Ordering::Less);
 
     // Infinite duration sorts after finite duration below cutoff
     let inf = MobEffectInstance::with_duration(MobEffectId::Speed, INFINITE_DURATION);
-    assert!(short_a < inf);
+    assert_eq!(short_a.compare_java(&inf), std::cmp::Ordering::Less);
 }
 
 #[test]

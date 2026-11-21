@@ -454,9 +454,13 @@ impl Hash for MobEffectInstance {
     }
 }
 
-/// Exact Java `MobEffectInstance.compareTo(MobEffectInstance o)` with the `32147` cutoff.
-impl Ord for MobEffectInstance {
-    fn cmp(&self, other: &Self) -> Ordering {
+impl MobEffectInstance {
+    /// Exact Java `MobEffectInstance.compareTo(MobEffectInstance o)` with the `32147` cutoff.
+    ///
+    /// Exposed as an explicit method rather than `Ord`/`PartialOrd` because Java's `compareTo`
+    /// ignores amplifier/visibility/icon and duration above `32147`, which is inconsistent with
+    /// `Eq` (`a.compare_java(b) == Equal` does not imply `a == b`).
+    pub fn compare_java(&self, other: &Self) -> Ordering {
         const UPDATE_CUTOFF: i32 = 32_147;
         let self_color = self.effect.def().color;
         let other_color = other.effect.def().color;
@@ -477,12 +481,6 @@ impl Ord for MobEffectInstance {
                 .cmp(&other.ambient)
                 .then_with(|| self_color.cmp(&other_color))
         }
-    }
-}
-
-impl PartialOrd for MobEffectInstance {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
     }
 }
 
