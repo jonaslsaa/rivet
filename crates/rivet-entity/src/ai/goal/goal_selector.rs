@@ -188,7 +188,8 @@ impl<C> GoalSelector<C> {
                 && self.goal_can_be_replaced_for_all_flags(flags, priority)
                 && self.available_goals[idx].can_use(ctx)
             {
-                for flag in flags.iter() {
+                let active_flags = self.available_goals[idx].flags();
+                for flag in active_flags.iter() {
                     if let Some(current_id) = self.locked_flags[flag.ordinal()]
                         && let Some(current_idx) = self.index_of(current_id)
                     {

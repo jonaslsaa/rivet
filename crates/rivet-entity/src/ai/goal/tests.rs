@@ -1323,3 +1323,50 @@ fn hurt_by_nearest_owner_and_universal_anger_target_goals() {
     assert_eq!(ctx.universal_anger_alerts.len(), 1);
     assert!(!reset_anger.can_use(&mut ctx));
 }
+
+#[test]
+fn goal_selector_locks_flags_mutated_during_can_use() {
+    struct MutatingFlagGoal {
+        flags: GoalFlags,
+        started: bool,
+    }
+    impl Goal<MockContext> for MutatingFlagGoal {
+        fn can_use(&mut self, _ctx: &mut MockContext) -> bool {
+            self.set_flags(GoalFlags::from_flags([GoalFlag::Move, GoalFlag::Look]));
+            true
+        }
+        fn start(&mut self, _ctx: &mut MockContext) {
+            self.started = true;
+        }
+        fn flags(&self) -> GoalFlags {
+            self.flags
+        }
+        fn set_flags(&mut self, required_control_flags: GoalFlags) {
+            self.flags = required_control_flags.normalize();
+        }
+    }
+
+    let mut ctx = MockContext::default();
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut selector = GoalSelector::<MockContext>::new();
+    let look_id = selector.add_goal(
+        5,
+        ProbeGoal::new("look", GoalFlags::from_flag(GoalFlag::Look), Rc::clone(&log)),
+    );
+    selector.tick(&mut ctx);
+    assert!(selector.get_goal(look_id).unwrap().is_running());
+
+    // Add a higher-priority goal that starts with Move only, then adds Look inside can_use.
+    let mutating_id = selector.add_goal(
+        1,
+        MutatingFlagGoal {
+            flags: GoalFlags::from_flag(GoalFlag::Move),
+            started: false,
+        },
+    );
+    selector.tick(&mut ctx);
+    assert!(selector.get_goal(mutating_id).unwrap().is_running());
+    assert!(!selector.get_goal(look_id).unwrap().is_running());
+    assert_eq!(selector.locked_goal_for(GoalFlag::Move), Some(mutating_id));
+    assert_eq!(selector.locked_goal_for(GoalFlag::Look), Some(mutating_id));
+}
