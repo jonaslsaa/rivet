@@ -9,6 +9,13 @@
 //! - `net.minecraft.world.item.crafting.RecipeCache`
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_MANAGER_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_manager_instance_id() -> u64 {
+    NEXT_MANAGER_INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 use indexmap::{IndexMap, IndexSet};
 use rivet_registry::Identifier;
@@ -263,8 +270,9 @@ impl RecipeMap {
 }
 
 /// `net.minecraft.world.item.crafting.RecipeManager`.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct RecipeManager {
+    instance_id: u64,
     recipes: RecipeMap,
     property_sets: IndexMap<Identifier, RecipePropertySet>,
     stonecutter_recipes: SingleInputSet,
@@ -273,6 +281,20 @@ pub struct RecipeManager {
     /// Generation counter incremented on every recipe reload/mutation so
     /// `RecipeCache` can detect manager invalidation.
     generation: u64,
+}
+
+impl Clone for RecipeManager {
+    fn clone(&self) -> Self {
+        Self {
+            instance_id: next_manager_instance_id(),
+            recipes: self.recipes.clone(),
+            property_sets: self.property_sets.clone(),
+            stonecutter_recipes: self.stonecutter_recipes.clone(),
+            all_displays: self.all_displays.clone(),
+            recipe_to_display: self.recipe_to_display.clone(),
+            generation: self.generation,
+        }
+    }
 }
 
 impl Default for RecipeManager {
@@ -284,6 +306,7 @@ impl Default for RecipeManager {
 impl RecipeManager {
     pub fn new() -> Self {
         Self {
+            instance_id: next_manager_instance_id(),
             recipes: RecipeMap::empty(),
             property_sets: IndexMap::new(),
             stonecutter_recipes: SingleInputSet::empty(),
@@ -634,7 +657,7 @@ impl CachedCheck {
 #[derive(Debug, Clone)]
 pub struct RecipeCache {
     entries: Vec<Option<RecipeCacheEntry>>,
-    cached_generation: Option<u64>,
+    cached_manager: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -667,7 +690,7 @@ impl RecipeCache {
     pub fn new(capacity: usize) -> Self {
         Self {
             entries: vec![None; capacity],
-            cached_generation: None,
+            cached_manager: None,
         }
     }
 
@@ -700,8 +723,9 @@ impl RecipeCache {
     }
 
     fn validate_recipe_manager(&mut self, manager: &RecipeManager) {
-        if self.cached_generation != Some(manager.generation()) {
-            self.cached_generation = Some(manager.generation());
+        let token = (manager.instance_id, manager.generation());
+        if self.cached_manager != Some(token) {
+            self.cached_manager = Some(token);
             for slot in &mut self.entries {
                 *slot = None;
             }

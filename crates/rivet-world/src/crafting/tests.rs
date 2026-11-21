@@ -489,6 +489,26 @@ fn recipe_manager_last_match_priority_duplicate_rejection_and_caches() {
         cache.get(&manager, &input).unwrap().id,
         key("first_stick_recipe")
     );
+
+    // Replacing the manager with a brand-new instance at the same generation (1)
+    // must still invalidate the cache so stale hits/misses are never reused.
+    let manager_b = RecipeManager::from_recipes(vec![RecipeHolder::new(
+        key("replacement_stick_recipe"),
+        Recipe::Shapeless(ShapelessRecipe {
+            common_info: CommonInfo {
+                show_notification: true,
+            },
+            book_info: CraftingBookInfo::default(),
+            ingredients: vec![Ingredient::of_item(item("oak_planks")).unwrap()],
+            result: ItemStackTemplate::new(item("stick"), 4),
+        }),
+    )])
+    .unwrap();
+    assert_eq!(manager_b.generation(), 1);
+    assert_eq!(
+        cache.get(&manager_b, &input).unwrap().id,
+        key("replacement_stick_recipe")
+    );
 }
 
 #[test]
