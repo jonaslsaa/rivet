@@ -608,6 +608,37 @@ fn runtime_instant_effects_undead_inversion_and_immunity() {
         EffectUpdateCause::PotionSplash,
     ));
     assert!(!active.has_effect(MobEffectId::Poison));
+
+    // Paper EntityEffectTickEvent cancellation prevents instantaneous effects
+    let mut cancelled = MockTarget::new(10.0, 20.0);
+    cancelled.cancel_ticks_for.push(MobEffectId::InstantHealth);
+    cancelled.cancel_ticks_for.push(MobEffectId::InstantDamage);
+    cancelled.cancel_ticks_for.push(MobEffectId::Saturation);
+    ActiveEffects::apply_instantaneous_effect(
+        MobEffectId::InstantHealth,
+        0,
+        1.0,
+        false,
+        &mut cancelled,
+    );
+    ActiveEffects::apply_instantaneous_effect(
+        MobEffectId::InstantDamage,
+        0,
+        1.0,
+        false,
+        &mut cancelled,
+    );
+    ActiveEffects::apply_instantaneous_effect(
+        MobEffectId::Saturation,
+        0,
+        1.0,
+        false,
+        &mut cancelled,
+    );
+    assert_eq!(cancelled.health, 10.0);
+    assert!(cancelled.healed.is_empty());
+    assert!(cancelled.magic_damage_taken.is_empty());
+    assert!(cancelled.saturation_eaten.is_empty());
 }
 
 #[test]

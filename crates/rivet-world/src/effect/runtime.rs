@@ -421,6 +421,9 @@ impl ActiveEffects {
         target: &mut dyn EffectTarget,
     ) {
         let clamped_amp = amplifier.clamp(0, 255);
+        if !target.on_effect_tick_event(effect, clamped_amp) {
+            return;
+        }
         match effect {
             MobEffectId::InstantHealth => {
                 if target.is_inverted_heal_and_harm() {
