@@ -1315,7 +1315,7 @@ pub enum LootCondition {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct EnchantmentPredicate {
-    pub enchantment: String,
+    pub enchantments: Vec<String>,
     pub min_level: Option<i32>,
     pub max_level: Option<i32>,
 }
@@ -1607,15 +1607,21 @@ fn eval_condition<R: RandomSource>(
                 }
             }
             for ench in enchantments {
-                let lvl = ctx.tool.enchantment_level(&ench.enchantment);
-                if let Some(min) = ench.min_level
-                    && lvl < min
-                {
-                    return false;
-                }
-                if let Some(max) = ench.max_level
-                    && lvl > max
-                {
+                let matched = ench.enchantments.iter().any(|id| {
+                    let lvl = ctx.tool.enchantment_level(id);
+                    if let Some(min) = ench.min_level
+                        && lvl < min
+                    {
+                        return false;
+                    }
+                    if let Some(max) = ench.max_level
+                        && lvl > max
+                    {
+                        return false;
+                    }
+                    lvl > 0
+                });
+                if !matched {
                     return false;
                 }
             }
@@ -1920,8 +1926,26 @@ fn parse_match_tool(predicate: Option<&Value>) -> Result<LootCondition, LootTabl
             let Some(eobj) = item.as_object() else {
                 continue;
             };
-            let Some(ench_id) = eobj.get("enchantments").and_then(Value::as_str) else {
-                continue;
+            let ench_ids: Vec<String> = match eobj.get("enchantments") {
+                Some(Value::String(s)) => vec![normalize_id(s)],
+                Some(Value::Array(ids)) => {
+                    let mut out = Vec::with_capacity(ids.len());
+                    for id in ids {
+                        let s = id.as_str().ok_or_else(|| {
+                            LootTableError::Schema(
+                                "enchantment predicate 'enchantments' entries must be strings"
+                                    .into(),
+                            )
+                        })?;
+                        out.push(normalize_id(s));
+                    }
+                    out
+                }
+                _ => {
+                    return Err(LootTableError::Schema(
+                        "enchantment predicate missing valid 'enchantments'".into(),
+                    ));
+                }
             };
             let (min_level, max_level) = match eobj.get("levels") {
                 Some(Value::Number(n)) => {
@@ -1935,7 +1959,7 @@ fn parse_match_tool(predicate: Option<&Value>) -> Result<LootCondition, LootTabl
                 _ => (Some(1), None),
             };
             enchantments.push(EnchantmentPredicate {
-                enchantment: normalize_id(ench_id),
+                enchantments: ench_ids,
                 min_level,
                 max_level,
             });
@@ -2853,5 +2877,67 @@ mod tests {
             &mut rng,
         );
         assert!(chiseled.items.is_empty());
+    }
+
+    #[test]
+    fn match_tool_enchantment_list_rejects_unenchanted_tool() {
+        let json = r#"{
+          "pools": [
+            {
+              "rolls": 1,
+              "entries": [
+                {
+                  "type": "minecraft:alternatives",
+                  "children": [
+                    {
+                      "type": "minecraft:item",
+                      "name": "minecraft:stone",
+                      "conditions": [
+                        {
+                          "condition": "minecraft:match_tool",
+                          "predicate": {
+                            "predicates": {
+                              "minecraft:enchantments": [
+                                { "enchantments": ["minecraft:silk_touch"], "levels": { "min": 1 } }
+                              ]
+                            }
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "type": "minecraft:item",
+                      "name": "minecraft:cobblestone"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }"#;
+        let table = BlockLootTable::from_json(json).expect("valid enchantment list predicate");
+        let pos = BlockPos::new(0, 64, 0);
+        let mut rng = SingleThreadedRandomSource::new(11);
+
+        let plain_ctx = BlockDropContext::new(
+            state_of("minecraft:stone"),
+            pos,
+            ToolStack::tool(ToolTier::Iron, ToolKind::Pickaxe),
+        );
+        assert_eq!(
+            table.evaluate(&plain_ctx, &mut rng),
+            vec![BlockDropStack::new("minecraft:cobblestone", 1)]
+        );
+
+        let silk_ctx = BlockDropContext::new(
+            state_of("minecraft:stone"),
+            pos,
+            ToolStack::tool(ToolTier::Iron, ToolKind::Pickaxe)
+                .with_enchantment("minecraft:silk_touch", 1),
+        );
+        assert_eq!(
+            table.evaluate(&silk_ctx, &mut rng),
+            vec![BlockDropStack::new("minecraft:stone", 1)]
+        );
     }
 }
