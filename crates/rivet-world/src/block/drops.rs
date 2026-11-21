@@ -944,9 +944,9 @@ pub fn resolve_builtin_block_drops<R: RandomSource>(
         "gravel" => {
             if silk {
                 vec![BlockDropStack::new(full_name, 1)]
-            } else if survives_explosion(random, ctx.explosion_radius)
-                && test_table_bonus(random, fortune, GRAVEL_FLINT_CHANCES)
-            {
+            } else if !survives_explosion(random, ctx.explosion_radius) {
+                Vec::new()
+            } else if test_table_bonus(random, fortune, GRAVEL_FLINT_CHANCES) {
                 vec![BlockDropStack::new("minecraft:flint", 1)]
             } else {
                 vec![BlockDropStack::new("minecraft:gravel", 1)]
@@ -955,12 +955,11 @@ pub fn resolve_builtin_block_drops<R: RandomSource>(
         "gilded_blackstone" => {
             if silk {
                 vec![BlockDropStack::new(full_name, 1)]
-            } else if survives_explosion(random, ctx.explosion_radius)
-                && test_table_bonus(random, fortune, GRAVEL_FLINT_CHANCES)
-            {
+            } else if !survives_explosion(random, ctx.explosion_radius) {
+                Vec::new()
+            } else if test_table_bonus(random, fortune, GRAVEL_FLINT_CHANCES) {
                 let count = mth::next_int(random, 2, 5);
-                let final_count = apply_explosion_decay(random, count, ctx.explosion_radius);
-                non_empty_drop("minecraft:gold_nugget", final_count)
+                non_empty_drop("minecraft:gold_nugget", count)
             } else {
                 vec![BlockDropStack::new("minecraft:gilded_blackstone", 1)]
             }
@@ -2939,5 +2938,25 @@ mod tests {
             table.evaluate(&silk_ctx, &mut rng),
             vec![BlockDropStack::new("minecraft:stone", 1)]
         );
+    }
+
+    #[test]
+    fn gravel_and_gilded_blackstone_drop_nothing_when_destroyed_by_explosion() {
+        let pos = BlockPos::new(0, 64, 0);
+        for block in ["minecraft:gravel", "minecraft:gilded_blackstone"] {
+            let mut rng = SingleThreadedRandomSource::new(4242);
+            let ctx = BlockDropContext::new(state_of(block), pos, ToolStack::empty())
+                .with_explosion_radius(4.0);
+            let mut empty_count = 0;
+            for _ in 0..100 {
+                if resolve_builtin_block_drops(&ctx, &mut rng).is_empty() {
+                    empty_count += 1;
+                }
+            }
+            assert!(
+                empty_count > 40,
+                "{block} should drop nothing when explosion survival fails, empty_count={empty_count}"
+            );
+        }
     }
 }
