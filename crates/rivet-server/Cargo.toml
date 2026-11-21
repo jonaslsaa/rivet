@@ -12,6 +12,7 @@ getrandom = "0.4.3"
 phf = { workspace = true }
 # `registry_sync` decodes the pre-baked registry NBT payloads back into `Tag`s
 # (`NbtIo.readAnyTag`) before the `PackedRegistryEntry` codec re-encodes them.
+rivet-core = { workspace = true }
 rivet-nbt = { workspace = true }
 rivet-protocol = { workspace = true, features = ["packets"] }
 # `blocks` enables the generated element tables the configuration registry sync
