@@ -290,6 +290,19 @@ fn villager_restock_schedule_and_special_prices() {
     // New day resets restocks today and allows restock again
     assert!(villager.should_restock(7100, 2));
     assert_eq!(villager.number_of_restocks_today, 0);
+
+    // Day rollover with missed restocks runs catch_up_demand():
+    // With 1 restock done today (1 missed), offer uses reset and demand updates once.
+    villager.offers.get_mut(0).unwrap().uses = 2;
+    villager.offers.get_mut(0).unwrap().demand = 5;
+    villager.number_of_restocks_today = 1;
+    villager.last_restock_game_time = 7100;
+    // Day 3 triggers reset_number_of_restocks() -> catch_up_demand() (1 missed update):
+    // uses reset to 0 first, then update_demand runs: 5 + 0 - (3 - 0) = 2.
+    assert!(!villager.should_restock(7200, 3));
+    assert_eq!(villager.number_of_restocks_today, 0);
+    assert_eq!(villager.offers.get(0).unwrap().uses(), 0);
+    assert_eq!(villager.offers.get(0).unwrap().demand(), 2);
 }
 
 #[test]

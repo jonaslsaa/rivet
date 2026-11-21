@@ -233,6 +233,20 @@ impl VillagerMerchantState {
 
     /// Mirrors `Villager.shouldRestock(ServerLevel)`.
     pub fn should_restock(&mut self, game_time: i64, current_day: i64) -> bool {
+        self.should_restock_with_event(game_time, current_day, |_| true)
+    }
+
+    /// Mirrors `Villager.shouldRestock(ServerLevel)` with a Paper
+    /// `VillagerReplenishTradeEvent` predicate invoked during `catchUpDemand()`.
+    pub fn should_restock_with_event<F>(
+        &mut self,
+        game_time: i64,
+        current_day: i64,
+        allow_replenish: F,
+    ) -> bool
+    where
+        F: FnMut(&MerchantOffer) -> bool,
+    {
         let half_day_passed_time = self
             .last_restock_game_time
             .wrapping_add(Self::HALF_DAY_TICKS);
@@ -241,9 +255,18 @@ impl VillagerMerchantState {
         self.last_restock_check_day = current_day;
         if is_new_day {
             self.last_restock_game_time = game_time;
-            self.number_of_restocks_today = 0;
+            self.reset_number_of_restocks(allow_replenish);
         }
         self.allowed_to_restock(game_time) && self.needs_to_restock()
+    }
+
+    /// Mirrors `Villager.resetNumberOfRestocks()`.
+    fn reset_number_of_restocks<F>(&mut self, allow_replenish: F)
+    where
+        F: FnMut(&MerchantOffer) -> bool,
+    {
+        self.catch_up_demand(allow_replenish);
+        self.number_of_restocks_today = 0;
     }
 
     /// Mirrors `Villager.updateDemand()`.
