@@ -578,6 +578,17 @@ mod tests {
             bad_rot,
             Err(InstanceDecodeError::InvalidRotation(_))
         ));
+        // Oversized identifiers (> Paper's length limit) must return an error, not panic.
+        let huge = format!("minecraft:{}", "a".repeat(22_000));
+        let oversized_env = TestEnvironmentDefinition::decode_json(&json!({
+            "type": "minecraft:clock_time",
+            "clock": huge,
+            "time": 0
+        }));
+        assert!(matches!(
+            oversized_env,
+            Err(EnvironmentDecodeError::InvalidIdentifier { field: "clock", .. })
+        ));
     }
 
     #[test]

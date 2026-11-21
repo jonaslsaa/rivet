@@ -608,10 +608,13 @@ pub(crate) fn parse_identifier_strict(
     raw: &str,
     field: &'static str,
 ) -> Result<Identifier, EnvironmentDecodeError> {
-    Identifier::try_parse(raw).ok_or_else(|| EnvironmentDecodeError::InvalidIdentifier {
-        field,
-        value: raw.to_string(),
-    })
+    match Identifier::try_parse_result(raw) {
+        Ok(Some(id)) => Ok(id),
+        Ok(None) | Err(_) => Err(EnvironmentDecodeError::InvalidIdentifier {
+            field,
+            value: raw.to_string(),
+        }),
+    }
 }
 
 fn required_json_str<'a>(

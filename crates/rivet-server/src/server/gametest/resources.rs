@@ -219,12 +219,13 @@ pub fn load_from_resource_root(
     let mut environments = Vec::with_capacity(env_files.len());
     for (rel_path, full_path) in env_files {
         let stem = strip_json_stem(&rel_path)?;
-        let id = Identifier::try_parse(&format!("minecraft:{stem}")).ok_or_else(|| {
-            GameTestResourceError::InvalidResourceId {
+        let id = Identifier::try_parse_result(&format!("minecraft:{stem}"))
+            .ok()
+            .flatten()
+            .ok_or_else(|| GameTestResourceError::InvalidResourceId {
                 path: rel_path.clone(),
                 value: format!("minecraft:{stem}"),
-            }
-        })?;
+            })?;
         let text = fs::read_to_string(&full_path).map_err(|source| GameTestResourceError::Io {
             path: rel_path.clone(),
             source,
@@ -246,12 +247,13 @@ pub fn load_from_resource_root(
     let mut instances = Vec::with_capacity(inst_files.len());
     for (rel_path, full_path) in inst_files {
         let stem = strip_json_stem(&rel_path)?;
-        let id = Identifier::try_parse(&format!("minecraft:{stem}")).ok_or_else(|| {
-            GameTestResourceError::InvalidResourceId {
+        let id = Identifier::try_parse_result(&format!("minecraft:{stem}"))
+            .ok()
+            .flatten()
+            .ok_or_else(|| GameTestResourceError::InvalidResourceId {
                 path: rel_path.clone(),
                 value: format!("minecraft:{stem}"),
-            }
-        })?;
+            })?;
         let text = fs::read_to_string(&full_path).map_err(|source| GameTestResourceError::Io {
             path: rel_path.clone(),
             source,
@@ -316,12 +318,13 @@ pub fn load_from_synchronized_nbt(
 
     let mut environments = Vec::with_capacity(env_entries.len());
     for (name, bytes) in env_entries {
-        let id = Identifier::try_parse(name).ok_or_else(|| {
-            GameTestResourceError::InvalidResourceId {
+        let id = Identifier::try_parse_result(name)
+            .ok()
+            .flatten()
+            .ok_or_else(|| GameTestResourceError::InvalidResourceId {
                 path: format!("SYNCHRONIZED_NBT/minecraft:test_environment/{name}"),
                 value: (*name).to_string(),
-            }
-        })?;
+            })?;
         let tag = decode_nbt_payload("minecraft:test_environment", name, bytes)?;
         let def = TestEnvironmentDefinition::decode_nbt(&tag).map_err(|source| {
             GameTestResourceError::EnvironmentDecode {
@@ -334,12 +337,13 @@ pub fn load_from_synchronized_nbt(
 
     let mut instances = Vec::with_capacity(inst_entries.len());
     for (name, bytes) in inst_entries {
-        let id = Identifier::try_parse(name).ok_or_else(|| {
-            GameTestResourceError::InvalidResourceId {
+        let id = Identifier::try_parse_result(name)
+            .ok()
+            .flatten()
+            .ok_or_else(|| GameTestResourceError::InvalidResourceId {
                 path: format!("SYNCHRONIZED_NBT/minecraft:test_instance/{name}"),
                 value: (*name).to_string(),
-            }
-        })?;
+            })?;
         let tag = decode_nbt_payload("minecraft:test_instance", name, bytes)?;
         let inst = GameTestInstance::decode_nbt(&tag).map_err(|source| {
             GameTestResourceError::InstanceDecode {
