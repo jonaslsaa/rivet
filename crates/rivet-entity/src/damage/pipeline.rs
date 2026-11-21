@@ -450,18 +450,29 @@ impl DamagePipelineState {
             }
         }
 
-        let exhaustion = source.food_exhaustion();
-        let entered_combat = self.combat_tracker.record_damage(
-            source,
-            final_damage,
-            ctx.fall_location,
-            ctx.fall_distance,
-            ctx.tick_count,
-            self.is_alive(),
-        );
-
-        let new_health = self.health - final_damage;
-        self.set_health(new_health);
+        // Paper `LivingEntity#actuallyHurt` (lines 2535-2552): when a player takes 0 final
+        // damage (e.g. fully absorbed by shield/absorption/resistance), exhaustion, combat
+        // tracker recording, and health mutation are skipped.
+        let (exhaustion, entered_combat) = if final_damage > 0.0 || !ctx.is_player_victim {
+            let exhaustion = if ctx.is_player_victim {
+                source.food_exhaustion()
+            } else {
+                0.0
+            };
+            let entered_combat = self.combat_tracker.record_damage(
+                source,
+                final_damage,
+                ctx.fall_location,
+                ctx.fall_distance,
+                ctx.tick_count,
+                self.is_alive(),
+            );
+            let new_health = self.health - final_damage;
+            self.set_health(new_health);
+            (exhaustion, entered_combat)
+        } else {
+            (0.0, false)
+        };
 
         let death = if self.is_dead_or_dying() && !self.dead {
             self.dead = true;

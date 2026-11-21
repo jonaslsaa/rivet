@@ -533,4 +533,40 @@ mod tests {
         state.tick_timers(111);
         assert_eq!(state.kill_credit(), None);
     }
+
+    #[test]
+    fn fully_mitigated_player_damage_skips_exhaustion_and_combat_tracker() {
+        let sources = DamageSources::new();
+        let mut state = DamagePipelineState::new(20.0);
+        state.set_absorption_amount(10.0);
+        let zombie = DamageEntityRef::living(1, "Zombie");
+
+        let outcome = state.hurt_server(
+            sources.mob_attack(zombie),
+            6.0,
+            &HurtContext {
+                victim_name: "Steve".into(),
+                tick_count: 5,
+                is_player_victim: true,
+                ..Default::default()
+            },
+        );
+        match outcome {
+            HurtOutcome::Damaged {
+                modifiers,
+                exhaustion,
+                entered_combat,
+                ..
+            } => {
+                assert_close(modifiers.final_damage, 0.0);
+                assert_close(exhaustion, 0.0);
+                assert!(!entered_combat);
+            }
+            other => panic!("expected Damaged with 0 final_damage, got {other:?}"),
+        }
+        assert!(state.combat_tracker.entries().is_empty());
+        assert!(!state.combat_tracker.is_in_combat());
+        assert_close(state.health, 20.0);
+        assert_close(state.absorption_amount, 4.0);
+    }
 }
