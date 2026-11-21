@@ -71,8 +71,9 @@ pub use recipe_type::{
 };
 pub use recipes::{
     CookingKind, CookingRecipe, DEFAULT_BLASTING_TIME, DEFAULT_CAMPFIRE_COOKING_TIME,
-    DEFAULT_SMELTING_TIME, DEFAULT_SMOKING_TIME, Recipe, RecipeHolder, RecipeKey, RecipeMarker,
-    ShapedRecipe, ShapelessRecipe, SmithingTransformRecipe, SmithingTrimRecipe, StonecutterRecipe,
-    default_crafting_remainder, recipe_key,
+    DEFAULT_SMELTING_TIME, DEFAULT_SMOKING_TIME, DyeRecipe, ImbueRecipe, Recipe, RecipeHolder,
+    RecipeKey, RecipeMarker, ShapedRecipe, ShapelessRecipe, SmithingTransformRecipe,
+    SmithingTrimRecipe, StonecutterRecipe, TransmuteRecipe, default_crafting_remainder, recipe_key,
+    resolve_trim_material,
 };
 pub use stacked_contents::StackedItemContents;

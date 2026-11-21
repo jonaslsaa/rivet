@@ -139,6 +139,10 @@ impl ItemStack {
         &self.components
     }
 
+    pub fn components_mut(&mut self) -> &mut BTreeMap<Identifier, String> {
+        &mut self.components
+    }
+
     /// `ItemStack.isEmpty()` — true iff item is air or count <= 0.
     pub const fn is_empty(&self) -> bool {
         self.item.is_air() || self.count <= 0

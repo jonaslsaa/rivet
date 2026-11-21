@@ -519,7 +519,12 @@ impl RecipeManager {
                     smithing_template.push(st.template.clone());
                     smithing_addition.push(st.addition.clone());
                 }
-                Recipe::Shaped(_) | Recipe::Shapeless(_) | Recipe::Special { .. } => {}
+                Recipe::Shaped(_)
+                | Recipe::Shapeless(_)
+                | Recipe::Dye(_)
+                | Recipe::Imbue(_)
+                | Recipe::Transmute(_)
+                | Recipe::Special { .. } => {}
             }
         }
 

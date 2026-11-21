@@ -394,13 +394,361 @@ impl SmithingTrimRecipe {
     }
 }
 
+/// `net.minecraft.world.item.crafting.DyeRecipe`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DyeRecipe {
+    pub common_info: CommonInfo,
+    pub book_info: CraftingBookInfo,
+    pub target: Ingredient,
+    pub dye: Ingredient,
+    pub result: ItemStackTemplate,
+}
+
+impl DyeRecipe {
+    fn has_dye_component(stack: &ItemStack) -> bool {
+        stack
+            .components()
+            .contains_key(&Identifier::with_default_namespace("dye"))
+            || stack.item().name().ends_with("_dye")
+    }
+
+    fn dye_name(stack: &ItemStack) -> String {
+        if let Some(dye) = stack
+            .components()
+            .get(&Identifier::with_default_namespace("dye"))
+        {
+            return dye.clone();
+        }
+        stack
+            .item()
+            .name()
+            .strip_prefix("minecraft:")
+            .and_then(|s| s.strip_suffix("_dye"))
+            .unwrap_or("white")
+            .to_owned()
+    }
+
+    /// `DyeRecipe.matches(CraftingInput, Level)`.
+    pub fn matches(&self, input: &CraftingInput) -> bool {
+        if input.ingredient_count() < 2 {
+            return false;
+        }
+        let mut has_target = false;
+        let mut has_dyes = false;
+        for slot in 0..input.size() {
+            let stack = input.get_item(slot);
+            if !stack.is_empty() {
+                if self.target.test(stack) {
+                    if has_target {
+                        return false;
+                    }
+                    has_target = true;
+                } else {
+                    if !self.dye.test(stack) || !Self::has_dye_component(stack) {
+                        return false;
+                    }
+                    has_dyes = true;
+                }
+            }
+        }
+        has_dyes && has_target
+    }
+
+    /// `DyeRecipe.assemble(CraftingInput)`.
+    pub fn assemble(&self, input: &CraftingInput) -> ItemStack {
+        let mut dyes = Vec::new();
+        let mut target_stack: Option<&ItemStack> = None;
+        for slot in 0..input.size() {
+            let stack = input.get_item(slot);
+            if !stack.is_empty() {
+                if self.target.test(stack) {
+                    if target_stack.is_some() {
+                        return ItemStack::empty();
+                    }
+                    target_stack = Some(stack);
+                } else {
+                    if !self.dye.test(stack) {
+                        return ItemStack::empty();
+                    }
+                    dyes.push(Self::dye_name(stack));
+                }
+            }
+        }
+        let Some(target) = target_stack else {
+            return ItemStack::empty();
+        };
+        if dyes.is_empty() {
+            return ItemStack::empty();
+        }
+        let mut out = self.result.create_with_original_components(target);
+        let dyed_key = Identifier::with_default_namespace("dyed_color");
+        let combined = match out.components().get(&dyed_key) {
+            Some(prev) if !prev.is_empty() => format!("{prev}+{}", dyes.join("+")),
+            _ => dyes.join("+"),
+        };
+        out.components_mut().insert(dyed_key, combined);
+        out
+    }
+
+    pub fn placement_info(&self) -> PlacementInfo {
+        PlacementInfo::create(vec![self.target.clone(), self.dye.clone()])
+    }
+
+    pub fn display(&self) -> Vec<RecipeDisplay> {
+        let station = ItemId::from_name("minecraft:crafting_table").unwrap_or(ItemId::AIR);
+        let dyes_with_comp = SlotDisplay::OnlyWithComponent {
+            source: Box::new(self.dye.display()),
+            component: Identifier::with_default_namespace("dye"),
+        };
+        let target_display = self.target.display();
+        vec![RecipeDisplay::ShapelessCrafting {
+            ingredients: vec![target_display.clone(), dyes_with_comp.clone()],
+            result: SlotDisplay::Dyed {
+                dye: Box::new(dyes_with_comp),
+                target: Box::new(target_display),
+            },
+            crafting_station: SlotDisplay::Item(station),
+        }]
+    }
+}
+
+/// `net.minecraft.world.item.crafting.ImbueRecipe`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImbueRecipe {
+    pub common_info: CommonInfo,
+    pub book_info: CraftingBookInfo,
+    pub source: Ingredient,
+    pub material: Ingredient,
+    pub result: ItemStackTemplate,
+}
+
+impl ImbueRecipe {
+    /// `ImbueRecipe.matches(CraftingInput, Level)`.
+    pub fn matches(&self, input: &CraftingInput) -> bool {
+        if input.width() != 3 || input.height() != 3 || input.ingredient_count() != 9 {
+            return false;
+        }
+        for y in 0..3 {
+            for x in 0..3 {
+                let stack = input.get_item_xy(x, y);
+                if stack.is_empty() {
+                    return false;
+                }
+                let ing = if x == 1 && y == 1 {
+                    &self.source
+                } else {
+                    &self.material
+                };
+                if !ing.test(stack) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// `ImbueRecipe.assemble(CraftingInput)`.
+    pub fn assemble(&self, input: &CraftingInput) -> ItemStack {
+        let source = input.get_item_xy(1, 1);
+        let mut out = self.result.create();
+        let potion_key = Identifier::with_default_namespace("potion_contents");
+        if let Some(potion) = source.components().get(&potion_key) {
+            out.components_mut().insert(potion_key, potion.clone());
+        }
+        out
+    }
+
+    pub fn placement_info(&self) -> PlacementInfo {
+        PlacementInfo::create(vec![
+            self.material.clone(),
+            self.material.clone(),
+            self.material.clone(),
+            self.material.clone(),
+            self.source.clone(),
+            self.material.clone(),
+            self.material.clone(),
+            self.material.clone(),
+            self.material.clone(),
+        ])
+    }
+
+    pub fn display(&self) -> Vec<RecipeDisplay> {
+        let station = ItemId::from_name("minecraft:crafting_table").unwrap_or(ItemId::AIR);
+        let mat = self.material.display();
+        let src = SlotDisplay::WithAnyPotion {
+            display: Box::new(self.source.display()),
+        };
+        vec![RecipeDisplay::ShapedCrafting {
+            width: 3,
+            height: 3,
+            ingredients: vec![
+                mat.clone(),
+                mat.clone(),
+                mat.clone(),
+                mat.clone(),
+                src,
+                mat.clone(),
+                mat.clone(),
+                mat.clone(),
+                mat,
+            ],
+            result: SlotDisplay::WithAnyPotion {
+                display: Box::new(SlotDisplay::ItemStack(self.result.clone())),
+            },
+            crafting_station: SlotDisplay::Item(station),
+        }]
+    }
+}
+
+/// `net.minecraft.world.item.crafting.TransmuteRecipe`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransmuteRecipe {
+    pub common_info: CommonInfo,
+    pub book_info: CraftingBookInfo,
+    pub input: Ingredient,
+    pub material: Ingredient,
+    pub min_material_count: i32,
+    pub max_material_count: i32,
+    pub result: ItemStackTemplate,
+    pub add_material_count_to_result: bool,
+}
+
+impl TransmuteRecipe {
+    fn compute_result_size(&self, material_count: i32) -> i32 {
+        if self.add_material_count_to_result {
+            material_count.wrapping_add(self.result.count)
+        } else {
+            self.result.count
+        }
+    }
+
+    fn compute_result(&self, input_ingredient: &ItemStack, extra_count: i32) -> ItemStack {
+        let out = self
+            .result
+            .create_with_original_components(input_ingredient);
+        let count = self.result.count.wrapping_add(extra_count);
+        out.copy_with_count(count)
+    }
+
+    /// `TransmuteRecipe.matches(CraftingInput, Level)`.
+    pub fn matches(&self, input: &CraftingInput) -> bool {
+        let min_mc = self.min_material_count;
+        let max_mc = self.max_material_count;
+        let count = input.ingredient_count();
+        if count < min_mc + 1 || count > max_mc + 1 {
+            return false;
+        }
+        let mut found_input: Option<&ItemStack> = None;
+        let mut material_count = 0_i32;
+        for slot in 0..input.size() {
+            let stack = input.get_item(slot);
+            if !stack.is_empty() {
+                if self.input.test(stack) {
+                    if found_input.is_some() {
+                        return false;
+                    }
+                    found_input = Some(stack);
+                } else {
+                    if !self.material.test(stack) {
+                        return false;
+                    }
+                    material_count += 1;
+                    if material_count > max_mc {
+                        return false;
+                    }
+                }
+            }
+        }
+        let Some(found) = found_input else {
+            return false;
+        };
+        if found.is_empty() || material_count < min_mc || material_count > max_mc {
+            return false;
+        }
+        let result_count = self.compute_result_size(material_count);
+        if result_count != 1 {
+            return true;
+        }
+        let result = self.compute_result(found, 0);
+        !result.is_empty() && !found.is_same_item_same_components(&result)
+    }
+
+    /// `TransmuteRecipe.assemble(CraftingInput)`.
+    pub fn assemble(&self, input: &CraftingInput) -> ItemStack {
+        if self.add_material_count_to_result {
+            let mut material_count = 0_i32;
+            let mut input_ingredient: Option<&ItemStack> = None;
+            for slot in 0..input.size() {
+                let stack = input.get_item(slot);
+                if !stack.is_empty() {
+                    if self.input.test(stack) {
+                        input_ingredient = Some(stack);
+                    } else if self.material.test(stack) {
+                        material_count += 1;
+                    }
+                }
+            }
+            match input_ingredient {
+                Some(ing) => self.compute_result(ing, material_count),
+                None => ItemStack::empty(),
+            }
+        } else {
+            for slot in 0..input.size() {
+                let stack = input.get_item(slot);
+                if !stack.is_empty() && self.input.test(stack) {
+                    return self.compute_result(stack, 0);
+                }
+            }
+            ItemStack::empty()
+        }
+    }
+
+    pub fn placement_info(&self) -> PlacementInfo {
+        let max_mc = self.max_material_count.max(1) as usize;
+        let mut ingredients = Vec::with_capacity(1 + max_mc);
+        ingredients.push(self.input.clone());
+        for _ in 0..max_mc {
+            ingredients.push(self.material.clone());
+        }
+        PlacementInfo::create(ingredients)
+    }
+
+    pub fn display(&self) -> Vec<RecipeDisplay> {
+        let station = ItemId::from_name("minecraft:crafting_table").unwrap_or(ItemId::AIR);
+        let mut displays = Vec::new();
+        let material_display = self.material.display();
+        for mc in self.min_material_count..=self.max_material_count {
+            let mut ingredient_slots = Vec::with_capacity(1 + mc.max(0) as usize);
+            ingredient_slots.push(self.input.display());
+            for _ in 0..mc.max(0) {
+                ingredient_slots.push(material_display.clone());
+            }
+            let result_count = self.compute_result_size(mc);
+            let res_template = ItemStackTemplate::with_components(
+                self.result.item,
+                result_count,
+                self.result.components.clone(),
+            );
+            displays.push(RecipeDisplay::ShapelessCrafting {
+                ingredients: ingredient_slots,
+                result: SlotDisplay::ItemStack(res_template),
+                crafting_station: SlotDisplay::Item(station),
+            });
+        }
+        displays
+    }
+}
+
 /// Unified recipe sum type covering all standard vanilla recipe categories
-/// plus a `Special` marker for dynamic/special crafting recipes (e.g. armor
-/// dyeing, book cloning, map extending).
+/// plus a `Special` marker for dynamic/special crafting recipes (e.g.
+/// book cloning, map extending, firework crafting).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Recipe {
     Shaped(ShapedRecipe),
     Shapeless(ShapelessRecipe),
+    Dye(DyeRecipe),
+    Imbue(ImbueRecipe),
+    Transmute(TransmuteRecipe),
     Cooking(CookingRecipe),
     Stonecutter(StonecutterRecipe),
     SmithingTransform(SmithingTransformRecipe),
@@ -414,7 +762,12 @@ pub enum Recipe {
 impl Recipe {
     pub const fn recipe_type(&self) -> RecipeType {
         match self {
-            Self::Shaped(_) | Self::Shapeless(_) | Self::Special { .. } => RecipeType::Crafting,
+            Self::Shaped(_)
+            | Self::Shapeless(_)
+            | Self::Dye(_)
+            | Self::Imbue(_)
+            | Self::Transmute(_)
+            | Self::Special { .. } => RecipeType::Crafting,
             Self::Cooking(c) => c.kind.recipe_type(),
             Self::Stonecutter(_) => RecipeType::Stonecutting,
             Self::SmithingTransform(_) | Self::SmithingTrim(_) => RecipeType::Smithing,
@@ -425,6 +778,9 @@ impl Recipe {
         match self {
             Self::Shaped(_) => RecipeSerializerId::CraftingShaped,
             Self::Shapeless(_) => RecipeSerializerId::CraftingShapeless,
+            Self::Dye(_) => RecipeSerializerId::CraftingDye,
+            Self::Imbue(_) => RecipeSerializerId::CraftingImbue,
+            Self::Transmute(_) => RecipeSerializerId::CraftingTransmute,
             Self::Cooking(c) => c.kind.serializer(),
             Self::Stonecutter(_) => RecipeSerializerId::Stonecutting,
             Self::SmithingTransform(_) => RecipeSerializerId::SmithingTransform,
@@ -444,6 +800,9 @@ impl Recipe {
         match self {
             Self::Shaped(r) => r.common_info.show_notification,
             Self::Shapeless(r) => r.common_info.show_notification,
+            Self::Dye(r) => r.common_info.show_notification,
+            Self::Imbue(r) => r.common_info.show_notification,
+            Self::Transmute(r) => r.common_info.show_notification,
             Self::Cooking(r) => r.common_info.show_notification,
             Self::Stonecutter(r) => r.common_info.show_notification,
             Self::SmithingTransform(r) => r.common_info.show_notification,
@@ -457,6 +816,9 @@ impl Recipe {
         match self {
             Self::Shaped(r) => &r.book_info.group,
             Self::Shapeless(r) => &r.book_info.group,
+            Self::Dye(r) => &r.book_info.group,
+            Self::Imbue(r) => &r.book_info.group,
+            Self::Transmute(r) => &r.book_info.group,
             Self::Cooking(r) => &r.book_info.group,
             Self::Stonecutter(_)
             | Self::SmithingTransform(_)
@@ -470,6 +832,9 @@ impl Recipe {
         match self {
             Self::Shaped(r) => crafting_to_book_category(r.book_info.category),
             Self::Shapeless(r) => crafting_to_book_category(r.book_info.category),
+            Self::Dye(r) => crafting_to_book_category(r.book_info.category),
+            Self::Imbue(r) => crafting_to_book_category(r.book_info.category),
+            Self::Transmute(r) => crafting_to_book_category(r.book_info.category),
             Self::Special { category, .. } => crafting_to_book_category(*category),
             Self::Cooking(r) => r.kind.recipe_book_category(r.book_info.category),
             Self::Stonecutter(_) => RecipeBookCategory::Stonecutter,
@@ -482,6 +847,9 @@ impl Recipe {
         match self {
             Self::Shaped(r) => r.placement_info(),
             Self::Shapeless(r) => r.placement_info(),
+            Self::Dye(r) => r.placement_info(),
+            Self::Imbue(r) => r.placement_info(),
+            Self::Transmute(r) => r.placement_info(),
             Self::Cooking(r) => r.placement_info(),
             Self::Stonecutter(r) => r.placement_info(),
             Self::SmithingTransform(r) => r.placement_info(),
@@ -495,6 +863,9 @@ impl Recipe {
         match self {
             Self::Shaped(r) => r.display(),
             Self::Shapeless(r) => r.display(),
+            Self::Dye(r) => r.display(),
+            Self::Imbue(r) => r.display(),
+            Self::Transmute(r) => r.display(),
             Self::Cooking(r) => r.display(),
             Self::Stonecutter(r) => r.display(),
             Self::SmithingTransform(r) => r.display(),
@@ -507,6 +878,9 @@ impl Recipe {
         match self {
             Self::Shaped(r) => r.matches(input),
             Self::Shapeless(r) => r.matches(input),
+            Self::Dye(r) => r.matches(input),
+            Self::Imbue(r) => r.matches(input),
+            Self::Transmute(r) => r.matches(input),
             _ => false,
         }
     }
@@ -515,6 +889,9 @@ impl Recipe {
         match self {
             Self::Shaped(r) => Some(r.assemble(input)),
             Self::Shapeless(r) => Some(r.assemble(input)),
+            Self::Dye(r) => Some(r.assemble(input)),
+            Self::Imbue(r) => Some(r.assemble(input)),
+            Self::Transmute(r) => Some(r.assemble(input)),
             _ => None,
         }
     }

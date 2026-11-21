@@ -803,3 +803,111 @@ fn json_loader_parses_vanilla_recipes() {
         })
     ));
 }
+
+#[test]
+fn json_dye_imbue_transmute_recipes_are_normal_and_discoverable() {
+    let dye_json = json!({
+        "type": "minecraft:crafting_dye",
+        "category": "equipment",
+        "target": "minecraft:leather_helmet",
+        "dye": "minecraft:red_dye",
+        "result": "minecraft:leather_helmet"
+    });
+    let dye_recipe = parse_recipe_json(&dye_json, &empty_tag_resolver).unwrap();
+    assert!(!dye_recipe.is_special());
+    assert_eq!(dye_recipe.display().len(), 1);
+    let dye_input = CraftingInput::of(2, 1, vec![stack("leather_helmet", 1), stack("red_dye", 1)]);
+    assert!(dye_recipe.matches_crafting(&dye_input));
+    let dyed = dye_recipe.assemble_crafting(&dye_input).unwrap();
+    assert_eq!(dyed.item(), item("leather_helmet"));
+    assert_eq!(
+        dyed.components()
+            .get(&Identifier::with_default_namespace("dyed_color"))
+            .map(String::as_str),
+        Some("red")
+    );
+
+    let imbue_json = json!({
+        "type": "minecraft:crafting_imbue",
+        "category": "misc",
+        "source": "minecraft:lingering_potion",
+        "material": "minecraft:arrow",
+        "result": { "id": "minecraft:tipped_arrow", "count": 8 }
+    });
+    let imbue_recipe = parse_recipe_json(&imbue_json, &empty_tag_resolver).unwrap();
+    assert!(!imbue_recipe.is_special());
+    assert_eq!(imbue_recipe.display().len(), 1);
+    let mut potion = stack("lingering_potion", 1);
+    potion.components_mut().insert(
+        Identifier::with_default_namespace("potion_contents"),
+        "minecraft:healing".to_owned(),
+    );
+    let imbue_input = CraftingInput::of(
+        3,
+        3,
+        vec![
+            stack("arrow", 1),
+            stack("arrow", 1),
+            stack("arrow", 1),
+            stack("arrow", 1),
+            potion,
+            stack("arrow", 1),
+            stack("arrow", 1),
+            stack("arrow", 1),
+            stack("arrow", 1),
+        ],
+    );
+    assert!(imbue_recipe.matches_crafting(&imbue_input));
+    let arrows = imbue_recipe.assemble_crafting(&imbue_input).unwrap();
+    assert_eq!(arrows.item(), item("tipped_arrow"));
+    assert_eq!(arrows.count(), 8);
+    assert_eq!(
+        arrows
+            .components()
+            .get(&Identifier::with_default_namespace("potion_contents"))
+            .map(String::as_str),
+        Some("minecraft:healing")
+    );
+
+    let transmute_json = json!({
+        "type": "minecraft:crafting_transmute",
+        "category": "misc",
+        "group": "shulker_box_dye",
+        "input": "minecraft:shulker_box",
+        "material": "minecraft:blue_dye",
+        "result": "minecraft:blue_shulker_box"
+    });
+    let transmute_recipe = parse_recipe_json(&transmute_json, &empty_tag_resolver).unwrap();
+    assert!(!transmute_recipe.is_special());
+    assert_eq!(transmute_recipe.display().len(), 1);
+    let mut shulker = stack("shulker_box", 1);
+    shulker.components_mut().insert(
+        Identifier::with_default_namespace("custom_name"),
+        "Loot".to_owned(),
+    );
+    let transmute_input = CraftingInput::of(2, 1, vec![shulker, stack("blue_dye", 1)]);
+    assert!(transmute_recipe.matches_crafting(&transmute_input));
+    let blue_box = transmute_recipe
+        .assemble_crafting(&transmute_input)
+        .unwrap();
+    assert_eq!(blue_box.item(), item("blue_shulker_box"));
+    assert_eq!(
+        blue_box
+            .components()
+            .get(&Identifier::with_default_namespace("custom_name"))
+            .map(String::as_str),
+        Some("Loot")
+    );
+
+    // All three must unpack displays and be discoverable in ServerRecipeBook.
+    let manager = RecipeManager::from_recipes(vec![
+        RecipeHolder::new(key("dye_leather_helmet"), dye_recipe),
+        RecipeHolder::new(key("tipped_arrow"), imbue_recipe),
+        RecipeHolder::new(key("blue_shulker_box"), transmute_recipe),
+    ])
+    .unwrap();
+    let mut book = ServerRecipeBook::new();
+    let (added, entries) = book.add_recipes(manager.recipes().values(), &manager);
+    assert_eq!(added, 3);
+    assert_eq!(entries.len(), 3);
+}

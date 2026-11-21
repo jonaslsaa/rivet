@@ -20,8 +20,8 @@ use super::recipe_type::{
     RecipeSerializerId,
 };
 use super::recipes::{
-    CookingKind, CookingRecipe, Recipe, ShapedRecipe, ShapelessRecipe, SmithingTransformRecipe,
-    SmithingTrimRecipe, StonecutterRecipe,
+    CookingKind, CookingRecipe, DyeRecipe, ImbueRecipe, Recipe, ShapedRecipe, ShapelessRecipe,
+    SmithingTransformRecipe, SmithingTrimRecipe, StonecutterRecipe, TransmuteRecipe,
 };
 
 /// Errors when parsing a vanilla recipe JSON document.
@@ -235,6 +235,80 @@ where
                 pattern,
             }))
         }
+        RecipeSerializerId::CraftingDye => {
+            let category = parse_crafting_category(obj.get("category"))?;
+            let target = parse_ingredient(
+                obj.get("target")
+                    .ok_or(RecipeJsonError::MissingField("target"))?,
+                tag_resolver,
+            )?;
+            let dye = parse_ingredient(
+                obj.get("dye").ok_or(RecipeJsonError::MissingField("dye"))?,
+                tag_resolver,
+            )?;
+            let result = parse_result_template(obj.get("result"))?;
+            Ok(Recipe::Dye(DyeRecipe {
+                common_info,
+                book_info: CraftingBookInfo { category, group },
+                target,
+                dye,
+                result,
+            }))
+        }
+        RecipeSerializerId::CraftingImbue => {
+            let category = parse_crafting_category(obj.get("category"))?;
+            let source = parse_ingredient(
+                obj.get("source")
+                    .ok_or(RecipeJsonError::MissingField("source"))?,
+                tag_resolver,
+            )?;
+            let material = parse_ingredient(
+                obj.get("material")
+                    .ok_or(RecipeJsonError::MissingField("material"))?,
+                tag_resolver,
+            )?;
+            let result = parse_result_template(obj.get("result"))?;
+            Ok(Recipe::Imbue(ImbueRecipe {
+                common_info,
+                book_info: CraftingBookInfo { category, group },
+                source,
+                material,
+                result,
+            }))
+        }
+        RecipeSerializerId::CraftingTransmute => {
+            let category = parse_crafting_category(obj.get("category"))?;
+            let input = parse_ingredient(
+                obj.get("input")
+                    .ok_or(RecipeJsonError::MissingField("input"))?,
+                tag_resolver,
+            )?;
+            let material = parse_ingredient(
+                obj.get("material")
+                    .ok_or(RecipeJsonError::MissingField("material"))?,
+                tag_resolver,
+            )?;
+            let (min_material_count, max_material_count) =
+                parse_material_count(obj.get("material_count"))?;
+            let result = parse_result_template(obj.get("result"))?;
+            let add_material_count_to_result = match obj.get("add_material_count_to_result") {
+                None => false,
+                Some(v) => v.as_bool().ok_or_else(|| RecipeJsonError::InvalidField {
+                    field: "add_material_count_to_result",
+                    message: "expected boolean".to_owned(),
+                })?,
+            };
+            Ok(Recipe::Transmute(TransmuteRecipe {
+                common_info,
+                book_info: CraftingBookInfo { category, group },
+                input,
+                material,
+                min_material_count,
+                max_material_count,
+                result,
+                add_material_count_to_result,
+            }))
+        }
         other => {
             let category = parse_crafting_category(obj.get("category"))?;
             Ok(Recipe::Special {
@@ -289,6 +363,52 @@ fn parse_string_list(
         out.push(s.to_owned());
     }
     Ok(out)
+}
+
+fn parse_material_count(value: Option<&Value>) -> Result<(i32, i32), RecipeJsonError> {
+    match value {
+        None => Ok((1, 1)),
+        Some(Value::Number(n)) => {
+            let raw = n.as_i64().ok_or_else(|| RecipeJsonError::InvalidField {
+                field: "material_count",
+                message: "expected integer in 1..=8".to_owned(),
+            })?;
+            if !(1..=8).contains(&raw) {
+                return Err(RecipeJsonError::InvalidField {
+                    field: "material_count",
+                    message: format!("material_count {raw} out of valid range 1..=8"),
+                });
+            }
+            Ok((raw as i32, raw as i32))
+        }
+        Some(Value::Object(map)) => {
+            let min = match map.get("min") {
+                None => 1_i64,
+                Some(v) => v.as_i64().ok_or_else(|| RecipeJsonError::InvalidField {
+                    field: "material_count.min",
+                    message: "expected integer in 1..=8".to_owned(),
+                })?,
+            };
+            let max = match map.get("max") {
+                None => 8_i64,
+                Some(v) => v.as_i64().ok_or_else(|| RecipeJsonError::InvalidField {
+                    field: "material_count.max",
+                    message: "expected integer in 1..=8".to_owned(),
+                })?,
+            };
+            if !(1..=8).contains(&min) || !(1..=8).contains(&max) || min > max {
+                return Err(RecipeJsonError::InvalidField {
+                    field: "material_count",
+                    message: format!("invalid material_count bounds min={min} max={max}"),
+                });
+            }
+            Ok((min as i32, max as i32))
+        }
+        Some(_) => Err(RecipeJsonError::InvalidField {
+            field: "material_count",
+            message: "expected integer or {min, max} bounds object".to_owned(),
+        }),
+    }
 }
 
 fn parse_identifier(raw: &str, field: &'static str) -> Result<Identifier, RecipeJsonError> {
@@ -390,12 +510,13 @@ fn parse_result_template(value: Option<&Value>) -> Result<ItemStackTemplate, Rec
             };
             let mut components = BTreeMap::new();
             if let Some(comp_val) = map.get("components") {
-                let comp_obj = comp_val
-                    .as_object()
-                    .ok_or_else(|| RecipeJsonError::InvalidField {
-                        field: "result.components",
-                        message: "expected object".to_owned(),
-                    })?;
+                let comp_obj =
+                    comp_val
+                        .as_object()
+                        .ok_or_else(|| RecipeJsonError::InvalidField {
+                            field: "result.components",
+                            message: "expected object".to_owned(),
+                        })?;
                 for (k, v) in comp_obj {
                     let comp_id = parse_identifier(k, "result.components")?;
                     let serialized = match v {
