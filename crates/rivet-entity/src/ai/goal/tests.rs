@@ -1274,6 +1274,10 @@ fn hurt_by_nearest_owner_and_universal_anger_target_goals() {
         ctx.set_target_log.last(),
         Some(&(Some(player.id), TargetReason::ClosestPlayer))
     );
+    // Clearing combat target must NOT be restored by NearestAttackableTargetGoal.
+    ctx.target = None;
+    assert!(!nearest.can_continue_to_use(&mut ctx));
+    assert!(ctx.target.is_none());
 
     // OwnerHurtByTargetGoal & OwnerHurtTargetGoal require tame & not sitting.
     ctx.is_tame = true;
@@ -1289,6 +1293,9 @@ fn hurt_by_nearest_owner_and_universal_anger_target_goals() {
         ctx.set_target_log.last(),
         Some(&(Some(attacker.id), TargetReason::TargetAttackedOwner))
     );
+    ctx.target = None;
+    assert!(!owner_hurt_by.can_continue_to_use(&mut ctx));
+    assert!(ctx.target.is_none());
 
     let mut owner_hurt = OwnerHurtTargetGoal::new();
     assert!(owner_hurt.can_use(&mut ctx));
@@ -1297,6 +1304,9 @@ fn hurt_by_nearest_owner_and_universal_anger_target_goals() {
         ctx.set_target_log.last(),
         Some(&(Some(attacker.id), TargetReason::OwnerAttackedTarget))
     );
+    ctx.target = None;
+    assert!(!owner_hurt.can_continue_to_use(&mut ctx));
+    assert!(ctx.target.is_none());
 
     // ResetUniversalAngerTargetGoal triggers on player hurt when gamerule enabled.
     ctx.universal_anger = true;

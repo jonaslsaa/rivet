@@ -55,7 +55,6 @@ impl<C: GoalContext> Goal<C> for OwnerHurtTargetGoal {
 
     fn start(&mut self, ctx: &mut C) {
         ctx.set_target(self.owner_last_hurt, TargetReason::OwnerAttackedTarget);
-        self.base.target_mob = self.owner_last_hurt;
         if let Some((_, hurt_timestamp)) = ctx.owner_last_hurt_mob() {
             self.timestamp = hurt_timestamp;
         }

@@ -84,7 +84,7 @@ impl<C: GoalContext> Goal<C> for HurtByTargetGoal {
     fn start(&mut self, ctx: &mut C) {
         let attacker = ctx.last_hurt_by_mob().map(|e| e.id);
         ctx.set_target(attacker, TargetReason::TargetAttackedEntity);
-        self.base.target_mob = attacker;
+        self.base.target_mob = ctx.target().map(|e| e.id);
         self.timestamp = ctx.last_hurt_by_mob_timestamp();
         self.base.unseen_memory_ticks = Self::RETALIATION_UNSEEN_MEMORY_TICKS;
         if self.alert_same_type

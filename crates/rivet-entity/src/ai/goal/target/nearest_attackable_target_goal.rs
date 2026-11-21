@@ -99,7 +99,6 @@ impl<C: GoalContext> Goal<C> for NearestAttackableTargetGoal {
             AttackableTargetType::EntityType(_) => TargetReason::ClosestEntity,
         };
         ctx.set_target(self.target, reason);
-        self.base.target_mob = self.target;
         self.base.start();
     }
 
