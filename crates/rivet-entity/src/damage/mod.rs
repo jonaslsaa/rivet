@@ -664,4 +664,25 @@ mod tests {
         let damages: Vec<f32> = tracker.entries().iter().map(|e| e.damage).collect();
         assert_eq!(damages, vec![2.0, 3.0, 4.0]);
     }
+
+    #[test]
+    fn nan_absorption_falls_back_to_zero_without_corrupting_health() {
+        let sources = DamageSources::new();
+        let mut state = DamagePipelineState::new(20.0);
+        state.set_absorption_amount(f32::NAN);
+        assert_eq!(state.absorption_amount, 0.0);
+
+        let zombie = DamageEntityRef::living(1, "Zombie");
+        let outcome = state.hurt_server(
+            sources.mob_attack(zombie),
+            5.0,
+            &HurtContext {
+                tick_count: 1,
+                ..Default::default()
+            },
+        );
+        assert!(matches!(outcome, HurtOutcome::Damaged { .. }));
+        assert_close(state.health, 15.0);
+        assert!(state.is_alive());
+    }
 }

@@ -190,8 +190,14 @@ impl DamagePipelineState {
         self.health = mth_clamp_f32(health, 0.0, self.max_health);
     }
 
+    /// Mirrors `LivingEntity#setAbsorptionAmount(float)` (Paper 26.2 line 4118):
+    /// NaN falls back to `0.0`, otherwise clamped to `>= 0.0`.
     pub fn set_absorption_amount(&mut self, amount: f32) {
-        self.absorption_amount = java_max_f32(amount, 0.0);
+        self.absorption_amount = if amount.is_nan() {
+            0.0
+        } else {
+            java_max_f32(amount, 0.0)
+        };
     }
 
     /// Mirrors `LivingEntity#getKillCredit()`: prefers `last_hurt_by_player`, else `last_hurt_by_mob`.
