@@ -362,6 +362,20 @@ fn deterministic_trade_set_generation_and_validation() {
     let offer = enchanted_trade.get_offer(&mut rng_3).unwrap();
     assert_eq!(offer.item_cost_a().count(), 17); // 5 + (6 * 2)
 
+    // Java Math.round(-0.5f) == 0 (ties toward +infinity), so additional_cost = 1 yields cost 1
+    let mut negative_half_trade = VillagerTrade::new(
+        TradeCost::new(id("emerald"), TradeNumberProvider::exactly(-0.5)),
+        stack("bread", 1),
+    );
+    negative_half_trade.additional_cost = 1;
+    let offer_neg_half = negative_half_trade.get_offer(&mut rng_3).unwrap();
+    assert_eq!(offer_neg_half.item_cost_a().count(), 1);
+    assert_eq!(TradeNumberProvider::exactly(-1.5).get_int(&mut rng_3), -1);
+    assert_eq!(
+        TradeNumberProvider::between(-0.5, -0.5).get_int(&mut rng_3),
+        0
+    );
+
     // TradeSets constants & defaults match TradeSets.java
     assert_eq!(
         TradeSets::WANDERING_TRADER_ORDER,

@@ -17,6 +17,15 @@ pub enum TradeNumberProvider {
     Uniform { min: f32, max: f32 },
 }
 
+/// Mirrors Java `Math.round(float)`: ties round toward `+infinity`
+/// (`Math.floor(a + 0.5)` with `NaN -> 0` and saturation to `i32::MIN..=i32::MAX`).
+fn java_round_f32(v: f32) -> i32 {
+    if v.is_nan() {
+        return 0;
+    }
+    (f64::from(v) + 0.5_f64).floor() as i32
+}
+
 impl TradeNumberProvider {
     pub const fn exactly(value: f32) -> Self {
         Self::Constant(value)
@@ -29,10 +38,10 @@ impl TradeNumberProvider {
     /// Mirrors `NumberProvider.getInt(LootContext)`.
     pub fn get_int<R: RandomSource>(&self, rng: &mut R) -> i32 {
         match *self {
-            Self::Constant(v) => v.round() as i32,
+            Self::Constant(v) => java_round_f32(v),
             Self::Uniform { min, max } => {
-                let min_i = min.round() as i32;
-                let max_i = max.round() as i32;
+                let min_i = java_round_f32(min);
+                let max_i = java_round_f32(max);
                 if min_i >= max_i {
                     min_i
                 } else {
