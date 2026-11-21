@@ -665,15 +665,17 @@ where
             upgrading,
             light_engine_attached,
         } = self;
-        let base = base.map_values(
-            block_strategy,
-            biome_strategy,
-            air.clone(),
-            default_biome,
-            map_block,
-            map_biome,
-            resolve,
-        )?;
+        let base = base
+            .map_values(
+                block_strategy,
+                biome_strategy,
+                air.clone(),
+                default_biome,
+                map_block,
+                map_biome,
+                resolve,
+            )
+            .map_err(|err| err.to_string())?;
         Ok(ProtoChunk {
             base,
             entities,
@@ -715,15 +717,18 @@ where
             })
             .transpose()?;
         Ok(ProtoChunk {
-            base: self.base.map_values_ref(
-                block_strategy,
-                biome_strategy,
-                air.clone(),
-                default_biome,
-                map_block,
-                map_biome,
-                resolve,
-            )?,
+            base: self
+                .base
+                .map_values_ref(
+                    block_strategy,
+                    biome_strategy,
+                    air.clone(),
+                    default_biome,
+                    map_block,
+                    map_biome,
+                    resolve,
+                )
+                .map_err(|err| err.to_string())?,
             entities: self.entities.clone(),
             carving_mask,
             air,

@@ -516,7 +516,7 @@ impl LevelChunk {
                 &|biome: &WorldgenBiomeId| BiomeId(biome.0),
                 &|state: &StateId| state_flags(*state),
             )
-            .map_err(LevelChunkBridgeError::PaletteMap)?;
+            .map_err(|err| LevelChunkBridgeError::PaletteMap(err.to_string()))?;
         let chunk = WorldLevelChunk::from_base(base, StateId(0));
         let light_data = light_data_from_nibbles(
             chunk.block_nibbles(),

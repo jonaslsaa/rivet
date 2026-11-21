@@ -83,6 +83,45 @@ use rivet_registry::holder::Holder;
 /// chunk with no non-air section.
 pub const NO_FILLED_SECTION: i32 = -1;
 
+/// Why [`ChunkAccess::map_values`] or [`ChunkAccess::map_values_ref`] refused
+/// to re-type a chunk.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ChunkMapValuesError {
+    /// The chunk's section vector length disagrees with its height accessor's
+    /// section count. Rebuilding through [`ChunkAccess::new`] would silently
+    /// substitute all-air sections while preserving unrelated auxiliary state;
+    /// re-typing rejects the mismatch explicitly instead.
+    #[error(
+        "chunk section count {actual} does not match height accessor section count {expected} (min_y={min_y}, height={height})"
+    )]
+    SectionCountMismatch {
+        actual: usize,
+        expected: i32,
+        min_y: i32,
+        height: i32,
+    },
+    /// One of the section paletted containers could not be mapped into the
+    /// target strategy.
+    #[error("{0}")]
+    Palette(String),
+}
+
+fn validate_section_count(
+    sections_len: usize,
+    height_accessor: SimpleLevelHeightAccessor,
+) -> Result<(), ChunkMapValuesError> {
+    let expected = height_accessor.get_sections_count();
+    if usize::try_from(expected).ok() != Some(sections_len) {
+        return Err(ChunkMapValuesError::SectionCountMismatch {
+            actual: sections_len,
+            expected,
+            min_y: height_accessor.get_min_y(),
+            height: height_accessor.get_height(),
+        });
+    }
+    Ok(())
+}
+
 fn filled_empty_light(count: usize) -> Vec<SwmrNibbleArray> {
     (0..count)
         .map(|_| SwmrNibbleArray::new_with_bytes_and_null(None, true))
@@ -1255,16 +1294,16 @@ where
     /// Value-transform the block-state and biome value types while preserving
     /// every other field (sections, heightmaps, light nibbles, pending block
     /// entities, post-processing, block/fluid ticks, flags, structure access).
-    /// The #516 server
-    /// bridge converts a reconstructed `ChunkAccess<BlockState, BiomeId, ()>`
-    /// into the server's `ChunkAccess<StateId, BiomeId, ()>`.
+    /// The #516 server bridge converts a reconstructed
+    /// `ChunkAccess<BlockState, BiomeId, ()>` into the server's
+    /// `ChunkAccess<StateId, BiomeId, ()>`.
     ///
-    /// The base is rebuilt through [`Self::new`] (the section-Y layout and the
-    /// FULL heightmap priming), then every owned field `Self::new` reset —
-    /// unsaved, light-correct, post-processing, block/fluid ticks, pending
-    /// block entities, light nibbles, heightmaps, structure access — is
-    /// reinstalled from the source,
-    /// so the conversion is a pure re-type with no semantic change.
+    /// Rejects any mismatch between `self.sections.len()` and
+    /// `self.height_accessor.get_sections_count()` with
+    /// [`ChunkMapValuesError::SectionCountMismatch`] and reconstructs the
+    /// re-typed struct directly instead of routing through [`Self::new`], so a
+    /// mismatch can never silently substitute all-air sections while keeping
+    /// unrelated heightmaps, light, block entities, or structures.
     #[allow(clippy::too_many_arguments)] // the two strategies + the re-encoded
     // air/default-biome defaults + the two mappers + the resolve closure — the
     // full re-type surface `ChunkAccess::new` mirrors.
@@ -1277,11 +1316,12 @@ where
         map_block: &impl Fn(&T) -> T2,
         map_biome: &impl Fn(&B) -> B2,
         resolve: &'static (dyn Fn(&T2) -> StateFlags + Sync),
-    ) -> Result<ChunkAccess<T2, B2, S>, String>
+    ) -> Result<ChunkAccess<T2, B2, S>, ChunkMapValuesError>
     where
         T2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         B2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     {
+        let _ = (air, default_biome);
         let ChunkAccess {
             pos,
             upgrade_data,
@@ -1306,54 +1346,49 @@ where
             block_emptiness_map,
             resolve: _,
         } = self;
-        let factory = PalettedContainerFactory::new(
-            block_strategy.clone(),
-            air,
-            biome_strategy.clone(),
-            default_biome,
-        );
+        validate_section_count(sections.len(), height_accessor)?;
         let sections: Vec<LevelChunkSection<T2, B2>> = sections
             .into_iter()
             .map(|section| {
-                section.map_values(&block_strategy, &biome_strategy, map_block, map_biome)
+                section
+                    .map_values(&block_strategy, &biome_strategy, map_block, map_biome)
+                    .map_err(ChunkMapValuesError::Palette)
             })
             .collect::<Result<_, _>>()?;
-        let mut base = ChunkAccess::new(
+        Ok(ChunkAccess {
             pos,
             upgrade_data,
             height_accessor,
-            &factory,
+            sections,
+            post_processing,
+            block_ticks,
+            fluid_ticks,
+            unsaved,
+            light_correct,
+            persisted_status,
             inhabited_time,
-            Some(sections),
+            structure_access,
+            pending_block_entities,
+            pending_block_entity_order,
+            block_entities,
+            block_entity_order,
+            heightmaps,
+            block_nibbles,
+            sky_nibbles,
+            sky_emptiness_map,
+            block_emptiness_map,
             resolve,
-        );
-        base.unsaved = unsaved;
-        base.light_correct = light_correct;
-        base.persisted_status = persisted_status;
-        base.post_processing = post_processing;
-        base.block_ticks = block_ticks;
-        base.fluid_ticks = fluid_ticks;
-        base.pending_block_entities = pending_block_entities;
-        base.pending_block_entity_order = pending_block_entity_order;
-        base.block_entities = block_entities;
-        base.block_entity_order = block_entity_order;
-        base.block_nibbles = block_nibbles;
-        base.sky_nibbles = sky_nibbles;
-        base.sky_emptiness_map = sky_emptiness_map;
-        base.block_emptiness_map = block_emptiness_map;
-        for (index, heightmap) in heightmaps.into_iter().enumerate() {
-            if let Some(heightmap) = heightmap {
-                base.heightmaps[index] = Some(heightmap);
-            }
-        }
-        base.structure_access = structure_access;
-        Ok(base)
+        })
     }
 
     /// Value-transform this chunk without consuming the source. This is the
     /// transactional counterpart to [`Self::map_values`]: all owned metadata
     /// is cloned and the paletted values are rebuilt from borrowed containers,
     /// so a conversion error cannot consume or partially mutate the source.
+    ///
+    /// Like [`Self::map_values`], rejects section-count/height mismatches
+    /// explicitly with [`ChunkMapValuesError::SectionCountMismatch`] instead
+    /// of falling back to all-air sections through [`Self::new`].
     #[allow(clippy::too_many_arguments)]
     pub fn map_values_ref<T2, B2>(
         &self,
@@ -1364,52 +1399,48 @@ where
         map_block: &impl Fn(&T) -> T2,
         map_biome: &impl Fn(&B) -> B2,
         resolve: &'static (dyn Fn(&T2) -> StateFlags + Sync),
-    ) -> Result<ChunkAccess<T2, B2, S>, String>
+    ) -> Result<ChunkAccess<T2, B2, S>, ChunkMapValuesError>
     where
         T: Eq + std::hash::Hash,
         T2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         B2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
         S: Clone,
     {
-        let factory = PalettedContainerFactory::new(
-            block_strategy.clone(),
-            air,
-            biome_strategy.clone(),
-            default_biome,
-        );
+        let _ = (air, default_biome);
+        validate_section_count(self.sections.len(), self.height_accessor)?;
         let sections = self
             .sections
             .iter()
             .map(|section| {
-                section.map_values_ref(&block_strategy, &biome_strategy, map_block, map_biome)
+                section
+                    .map_values_ref(&block_strategy, &biome_strategy, map_block, map_biome)
+                    .map_err(ChunkMapValuesError::Palette)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let mut base = ChunkAccess::new(
-            self.pos,
-            self.upgrade_data.clone(),
-            self.height_accessor,
-            &factory,
-            self.inhabited_time,
-            Some(sections),
+        Ok(ChunkAccess {
+            pos: self.pos,
+            upgrade_data: self.upgrade_data.clone(),
+            height_accessor: self.height_accessor,
+            sections,
+            post_processing: self.post_processing.clone(),
+            block_ticks: self.block_ticks.clone(),
+            fluid_ticks: self.fluid_ticks.clone(),
+            unsaved: self.unsaved,
+            light_correct: self.light_correct,
+            persisted_status: self.persisted_status,
+            inhabited_time: self.inhabited_time,
+            structure_access: self.structure_access.clone(),
+            pending_block_entities: self.pending_block_entities.clone(),
+            pending_block_entity_order: self.pending_block_entity_order.clone(),
+            block_entities: self.block_entities.clone(),
+            block_entity_order: self.block_entity_order.clone(),
+            heightmaps: self.heightmaps.clone(),
+            block_nibbles: self.block_nibbles.clone(),
+            sky_nibbles: self.sky_nibbles.clone(),
+            sky_emptiness_map: self.sky_emptiness_map.clone(),
+            block_emptiness_map: self.block_emptiness_map.clone(),
             resolve,
-        );
-        base.unsaved = self.unsaved;
-        base.light_correct = self.light_correct;
-        base.persisted_status = self.persisted_status;
-        base.post_processing = self.post_processing.clone();
-        base.block_ticks = self.block_ticks.clone();
-        base.fluid_ticks = self.fluid_ticks.clone();
-        base.pending_block_entities = self.pending_block_entities.clone();
-        base.pending_block_entity_order = self.pending_block_entity_order.clone();
-        base.block_entities = self.block_entities.clone();
-        base.block_entity_order = self.block_entity_order.clone();
-        base.block_nibbles = self.block_nibbles.clone();
-        base.sky_nibbles = self.sky_nibbles.clone();
-        base.sky_emptiness_map = self.sky_emptiness_map.clone();
-        base.block_emptiness_map = self.block_emptiness_map.clone();
-        base.heightmaps = self.heightmaps.clone();
-        base.structure_access = self.structure_access.clone();
-        Ok(base)
+        })
     }
 }
 
@@ -1713,6 +1744,116 @@ mod tests {
         assert_eq!(ticks[0].r#type, crate::block::blocks::Blocks::AIR);
         assert_eq!(ticks[0].pos, pos);
         assert_eq!(ticks[0].delay, 0);
+    }
+
+    #[test]
+    fn map_values_rejects_section_count_mismatch() {
+        let mut base = default_base();
+        base.set_light_correct(true);
+        base.set_block_entity_nbt(
+            rivet_nbt::tag_parser::parse_compound_fully("{id:'minecraft:chest',x:1,y:64,z:2}")
+                .unwrap(),
+        );
+        base.add_reference_for_structure("minecraft:village", 42);
+        base.get_or_create_heightmap_unprimed(Types::WorldSurface);
+        base.sections.truncate(1);
+
+        let err = base
+            .map_values_ref(
+                block_strategy(),
+                biome_strategy(),
+                0,
+                0,
+                &|value| *value,
+                &|value| *value,
+                &test_flags,
+            )
+            .err()
+            .expect("map_values_ref must reject section count mismatch");
+        assert_eq!(
+            err,
+            ChunkMapValuesError::SectionCountMismatch {
+                actual: 1,
+                expected: 24,
+                min_y: -64,
+                height: 384,
+            }
+        );
+        // Transactional guarantee: source state is preserved untouched.
+        assert_eq!(base.get_sections().len(), 1);
+        assert!(base.is_light_correct());
+
+        let err = base
+            .map_values(
+                block_strategy(),
+                biome_strategy(),
+                0,
+                0,
+                &|value| *value,
+                &|value| *value,
+                &test_flags,
+            )
+            .err()
+            .expect("map_values must reject section count mismatch");
+        assert_eq!(
+            err,
+            ChunkMapValuesError::SectionCountMismatch {
+                actual: 1,
+                expected: 24,
+                min_y: -64,
+                height: 384,
+            }
+        );
+    }
+
+    #[test]
+    fn map_values_rejects_height_metadata_mismatch() {
+        let mut base = default_base();
+        base.height_accessor = create_accessor(0, 256);
+
+        let ref_err = base
+            .map_values_ref(
+                block_strategy(),
+                biome_strategy(),
+                0,
+                0,
+                &|value| *value,
+                &|value| *value,
+                &test_flags,
+            )
+            .err()
+            .expect("map_values_ref must reject height metadata mismatch");
+        assert_eq!(
+            ref_err,
+            ChunkMapValuesError::SectionCountMismatch {
+                actual: 24,
+                expected: 16,
+                min_y: 0,
+                height: 256,
+            }
+        );
+
+        let owned_err = base
+            .map_values(
+                block_strategy(),
+                biome_strategy(),
+                0,
+                0,
+                &|value| *value,
+                &|value| *value,
+                &test_flags,
+            )
+            .err()
+            .expect("map_values must reject height metadata mismatch");
+        assert_eq!(
+            owned_err,
+            ChunkMapValuesError::SectionCountMismatch {
+                actual: 24,
+                expected: 16,
+                min_y: 0,
+                height: 256,
+            }
+        );
     }
 
     #[test]

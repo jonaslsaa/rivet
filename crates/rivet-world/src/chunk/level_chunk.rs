@@ -158,11 +158,10 @@ where
     /// `pack`/`unpack` re-encode against the target strategies preserves the
     /// wire-identical section buffers.
     ///
-    /// The new base is rebuilt through the same path as [`new`](Self::new)
-    /// (the FULL heightmap priming and the all-air fallback), then the owned
-    /// state that `ChunkAccess::new` resets — unsaved, light-correct,
-    /// post-processing, pending block entities, light nibbles, heightmaps,
-    /// structure access — is reinstalled so the conversion is a pure re-type.
+    /// Value-transform the block-state and biome value types while preserving
+    /// every other field. Delegates to [`ChunkAccess::map_values`], which
+    /// validates the section-count/height invariant explicitly rather than
+    /// falling back to all-air sections.
     #[allow(clippy::too_many_arguments)] // the full re-type surface, mirroring
     // `ChunkAccess::map_values` 1:1.
     pub fn map_values<T2, B2>(
@@ -180,15 +179,17 @@ where
         B2: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
     {
         let LevelChunk { base, air: _ } = self;
-        let base = base.map_values(
-            block_strategy,
-            biome_strategy,
-            air.clone(),
-            default_biome,
-            map_block,
-            map_biome,
-            resolve,
-        )?;
+        let base = base
+            .map_values(
+                block_strategy,
+                biome_strategy,
+                air.clone(),
+                default_biome,
+                map_block,
+                map_biome,
+                resolve,
+            )
+            .map_err(|err| err.to_string())?;
         Ok(LevelChunk { base, air })
     }
 
