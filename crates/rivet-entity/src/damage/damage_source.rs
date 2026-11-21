@@ -15,8 +15,8 @@ pub struct DamageEntityRef {
     pub is_living: bool,
     pub is_player: bool,
     pub is_creative_player: bool,
-    /// If the entity is a tame wolf with an owner, the owner's player entity ID for kill credit.
-    pub tame_owner_player_id: Option<i32>,
+    /// If the entity is a tame wolf with an owner, the owner player reference for kill credit.
+    pub tame_owner_player: Option<Box<DamageEntityRef>>,
     /// Custom display name of the entity's main-hand item (`DataComponents.CUSTOM_NAME`), if any.
     pub main_hand_custom_name: Option<String>,
     /// Entity world position `[x, y, z]` used as fallback for `DamageSource::source_position`.
@@ -31,7 +31,7 @@ impl DamageEntityRef {
             is_living: true,
             is_player: false,
             is_creative_player: false,
-            tame_owner_player_id: None,
+            tame_owner_player: None,
             main_hand_custom_name: None,
             position: None,
         }
@@ -44,7 +44,7 @@ impl DamageEntityRef {
             is_living: true,
             is_player: true,
             is_creative_player: instabuild,
-            tame_owner_player_id: None,
+            tame_owner_player: None,
             main_hand_custom_name: None,
             position: None,
         }
@@ -57,7 +57,7 @@ impl DamageEntityRef {
             is_living: false,
             is_player: false,
             is_creative_player: false,
-            tame_owner_player_id: None,
+            tame_owner_player: None,
             main_hand_custom_name: None,
             position: None,
         }
@@ -73,8 +73,8 @@ impl DamageEntityRef {
         self
     }
 
-    pub fn with_tame_owner_player_id(mut self, owner_player_id: i32) -> Self {
-        self.tame_owner_player_id = Some(owner_player_id);
+    pub fn with_tame_owner_player(mut self, owner: DamageEntityRef) -> Self {
+        self.tame_owner_player = Some(Box::new(owner));
         self
     }
 }

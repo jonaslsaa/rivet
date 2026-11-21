@@ -569,4 +569,41 @@ mod tests {
         assert_close(state.health, 20.0);
         assert_close(state.absorption_amount, 4.0);
     }
+
+    #[test]
+    fn tamed_wolf_kill_credit_preserves_owner_display_name() {
+        let sources = DamageSources::new();
+        let mut state = DamagePipelineState::new(10.0);
+        let owner = DamageEntityRef::player(7, "Alex", false);
+        let wolf = DamageEntityRef::living(8, "Wolf").with_tame_owner_player(owner.clone());
+
+        // Wolf hurts victim, then victim dies to environmental lava -> kill credit is owner "Alex".
+        state.hurt_server(
+            sources.mob_attack(wolf),
+            4.0,
+            &HurtContext {
+                victim_name: "Zombie".into(),
+                tick_count: 1,
+                ..Default::default()
+            },
+        );
+        let fatal = state.hurt_server(
+            sources.lava(),
+            10.0,
+            &HurtContext {
+                victim_name: "Zombie".into(),
+                tick_count: 25,
+                ..Default::default()
+            },
+        );
+        match fatal {
+            HurtOutcome::Damaged { death: Some(d), .. } => {
+                assert_eq!(d.kill_credit, Some(owner));
+                assert!(d.player_killed);
+                assert_eq!(d.death_message.translation_key, "death.attack.lava.player");
+                assert_eq!(d.death_message.args, vec!["Zombie", "Alex"]);
+            }
+            other => panic!("expected fatal outcome with owner kill credit, got {other:?}"),
+        }
+    }
 }

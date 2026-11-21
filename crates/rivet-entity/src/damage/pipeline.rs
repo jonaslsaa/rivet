@@ -443,9 +443,8 @@ impl DamagePipelineState {
             if causing.is_player {
                 self.last_hurt_by_player = Some(causing.clone());
                 self.last_hurt_by_player_memory_time = PLAYER_HURT_EXPERIENCE_TIME;
-            } else if let Some(owner_id) = causing.tame_owner_player_id {
-                self.last_hurt_by_player =
-                    Some(DamageEntityRef::player(owner_id, String::new(), false));
+            } else if let Some(owner) = causing.tame_owner_player.as_deref() {
+                self.last_hurt_by_player = Some(owner.clone());
                 self.last_hurt_by_player_memory_time = PLAYER_HURT_EXPERIENCE_TIME;
             }
         }
