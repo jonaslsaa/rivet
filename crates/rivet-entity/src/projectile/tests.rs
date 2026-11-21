@@ -730,3 +730,29 @@ fn thrown_trident_uses_custom_base_damage() {
     assert_eq!(world.damage_log[0].1.kind, DamageKind::Trident);
     assert_eq!(world.damage_log[0].1.amount, 13.5);
 }
+
+#[test]
+fn loyal_trident_non_player_collection_uses_owner_bb_width() {
+    let mut world = TestWorld::new();
+    let mut mob_owner = TestWorld::make_entity(90, Vec3::ZERO);
+    mob_owner.bb_width = 2.0;
+    mob_owner.eye_position = Vec3::new(0.0, 1.5, 0.0);
+    world.add_entity(mob_owner.clone());
+
+    // Distance 2.5 from owner eye position: >= trident.bb_width + 1.0 (1.5),
+    // but < owner.bb_width + 1.0 (3.0).
+    let mut trident = ThrownTrident::new(EntityId(91), Vec3::new(2.5, 1.5, 0.0), 3, false);
+    trident
+        .abstract_arrow
+        .projectile
+        .set_owner(Some(EntityReference::new(
+            mob_owner.uuid,
+            Some(mob_owner.id),
+        )));
+    trident.dealt_damage = true;
+
+    let mut rng = LegacyRandomSource::new(3);
+    trident.tick(&mut world, &mut rng);
+
+    assert!(!trident.abstract_arrow.projectile.alive);
+}

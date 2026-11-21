@@ -91,14 +91,14 @@ impl ThrownTrident {
                 return;
             }
 
-            // Non-player owners collect returning tridents within bb_width + 1.0 of eye pos.
+            // Non-player owners collect returning tridents within owner.bb_width + 1.0 of eye pos.
             if !owner.is_player
                 && self
                     .abstract_arrow
                     .projectile
                     .position
                     .distance_to(owner.eye_position)
-                    < self.abstract_arrow.projectile.bb_width + 1.0
+                    < owner.bb_width + 1.0
             {
                 self.abstract_arrow.projectile.discard();
                 return;
