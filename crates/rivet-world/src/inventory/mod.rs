@@ -744,4 +744,62 @@ mod tests {
         assert_eq!(stack.get_count(), 12);
         assert!(inv.is_empty());
     }
+
+    #[test]
+    fn capped_swap_uses_main_inventory_only_and_never_equipment_slots() {
+        let mut chest = SimpleContainer::new(1);
+        chest.set_item(0, granite(10));
+
+        let mut player_inv = PlayerInventory::new();
+        // Hotbar slot 0 holds 32 stone; remaining 35 main slots are filled with granite
+        // (slot 1 has space for 4 more granite; slots 2..36 are full).
+        player_inv.set_item(0, stone(32));
+        player_inv.set_item(1, granite(60));
+        for s in 2..INVENTORY_SIZE {
+            player_inv.set_item(s, granite(64));
+        }
+
+        let mut menu = AbstractContainerMenu::new(1);
+        menu.add_slot(Slot::with_policy(
+            0,
+            0,
+            0,
+            0,
+            Box::new(CustomSlotPolicy {
+                max_stack_size: Some(16),
+                ..CustomSlotPolicy::default()
+            }),
+        ));
+        let survival = ContainerAccessContext::survival(1);
+        let noop_quick_move = |_menu: &AbstractContainerMenu,
+                               _containers: &mut [&mut dyn Container],
+                               _slot: usize| InventoryItemStack::empty();
+
+        let outcome = {
+            let mut refs: [&mut dyn Container; 2] = [&mut chest, &mut player_inv];
+            menu.clicked(
+                0,
+                0,
+                ContainerInput::Swap,
+                &survival,
+                &mut refs,
+                Some(1),
+                noop_quick_move,
+            )
+        };
+        assert!(!outcome.rejected);
+        // Capped slot gets 16 stone; hotbar slot 0 keeps 16 stone.
+        assert_eq!(chest.get_item(0).get_count(), 16);
+        assert_eq!(player_inv.get_item(0).get_count(), 16);
+        // Displaced 10 granite: 4 merged into main slot 1, 6 dropped, and armor/offhand stay empty.
+        assert_eq!(player_inv.get_item(1).get_count(), 64);
+        assert_eq!(outcome.dropped_items.len(), 1);
+        assert_eq!(outcome.dropped_items[0].get_count(), 6);
+        for eq_slot in INVENTORY_SIZE..player_inv.get_container_size() {
+            assert!(
+                player_inv.get_item(eq_slot).is_empty(),
+                "equipment slot {eq_slot} must not receive displaced swap items"
+            );
+        }
+    }
 }

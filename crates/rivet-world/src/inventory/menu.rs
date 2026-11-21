@@ -10,7 +10,7 @@ use rivet_util::mth;
 use super::container::{Container, ContainerAccessContext};
 use super::data::{ContainerData, DataSlot};
 use super::item_stack::{HashedStack, InventoryItemStack};
-use super::player_inventory::{PlayerInventory, SLOT_OFFHAND};
+use super::player_inventory::{INVENTORY_SIZE, PlayerInventory, SLOT_OFFHAND};
 use super::remote::{ContainerSynchronizer, ListenerId, MenuContainerListener, RemoteSlot};
 use super::slot::Slot;
 
@@ -940,13 +940,45 @@ impl AbstractContainerMenu {
                 let moved = remaining.split(max_size);
                 containers[player_cid].set_item(player_slot, remaining);
                 self.slots[idx].set_by_player(&mut *containers[slot_cid], moved);
-                // Put displaced `target` back into player's inventory if possible, else drop.
+                // Put displaced `target` back into player's main inventory (never armor/offhand),
+                // merging into compatible stacks first, then empty slots, else drop.
                 let mut displaced = target;
-                let player_size = containers[player_cid].get_container_size();
-                for s in 0..player_size {
-                    if containers[player_cid].get_item(s).is_empty() {
-                        containers[player_cid].set_item(s, displaced.copy_and_clear());
+                let main_size = containers[player_cid]
+                    .get_container_size()
+                    .min(INVENTORY_SIZE);
+                if displaced.is_stackable() {
+                    for s in 0..main_size {
+                        if displaced.is_empty() {
+                            break;
+                        }
+                        let existing = containers[player_cid].get_item(s).clone();
+                        if !existing.is_empty()
+                            && InventoryItemStack::is_same_item_same_components(
+                                &existing, &displaced,
+                            )
+                        {
+                            let max = containers[player_cid].get_max_stack_size_for_item(&existing);
+                            let space = max - existing.get_count();
+                            if space > 0 {
+                                let move_count = displaced.get_count().min(space);
+                                let mut updated = existing;
+                                updated.grow(move_count);
+                                displaced.shrink(move_count);
+                                containers[player_cid].set_item(s, updated);
+                            }
+                        }
+                    }
+                }
+                for s in 0..main_size {
+                    if displaced.is_empty() {
                         break;
+                    }
+                    if containers[player_cid].get_item(s).is_empty() {
+                        let max = containers[player_cid].get_max_stack_size_for_item(&displaced);
+                        if max > 0 {
+                            let moved = displaced.split(max);
+                            containers[player_cid].set_item(s, moved);
+                        }
                     }
                 }
                 if !displaced.is_empty() {
