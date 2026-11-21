@@ -713,3 +713,20 @@ fn rejected_non_piercing_arrow_moves_away_from_min_hitbox_face() {
     assert_eq!(world.damage_log.len(), 1);
     assert!(arrow.abstract_arrow.projectile.position.x < 2.7);
 }
+
+#[test]
+fn thrown_trident_uses_custom_base_damage() {
+    let mut world = TestWorld::new();
+    world.add_entity(TestWorld::make_entity(80, Vec3::new(2.0, 0.0, 0.0)));
+
+    let mut trident = ThrownTrident::new(EntityId(81), Vec3::new(0.0, 1.0, 0.0), 0, false);
+    trident.abstract_arrow.base_damage = 13.5;
+    trident.abstract_arrow.projectile.delta_movement = Vec3::new(4.0, 0.0, 0.0);
+
+    let mut rng = LegacyRandomSource::new(2);
+    trident.tick(&mut world, &mut rng);
+
+    assert_eq!(world.damage_log.len(), 1);
+    assert_eq!(world.damage_log[0].1.kind, DamageKind::Trident);
+    assert_eq!(world.damage_log[0].1.amount, 13.5);
+}

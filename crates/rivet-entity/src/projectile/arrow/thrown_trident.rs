@@ -274,7 +274,7 @@ impl ThrownTrident {
             kind: DamageKind::Trident,
             direct_entity: self.abstract_arrow.projectile.id,
             causing_entity,
-            amount: TRIDENT_BASE_DAMAGE,
+            amount: self.abstract_arrow.base_damage as f32,
             knockback_x: self.abstract_arrow.projectile.delta_movement.x,
             knockback_z: self.abstract_arrow.projectile.delta_movement.z,
         };
