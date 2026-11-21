@@ -1199,8 +1199,34 @@ main() {
     fi
   fi
 
-  # --- oracle steps (full gate only; the oracle verifies the whole server) -----
+run_paper_junit_baseline() {
+  echo "==> paper-junit-baseline (issue #517: unit tests + committed census validation)"
+  python3 -m unittest discover -s "$REPO_DIR/tools/paper-junit-baseline" -q
+  local shared_repo
+  shared_repo="$(shared_repo_dir_for)"
+  local paper_dir="$shared_repo/working/Paper"
+  local rc=0
+  if [ -d "$paper_dir/.git" ]; then
+    python3 "$REPO_DIR/tools/paper-junit-baseline/validate.py" \
+      --paper-source "$paper_dir" || rc=$?
+  else
+    python3 "$REPO_DIR/tools/paper-junit-baseline/validate.py" || rc=$?
+  fi
+  if [ "$rc" -eq 3 ]; then
+    echo "    UNVERIFIED — paper-junit-baseline could not verify against working/Paper"
+    ORACLE_UNVERIFIED=1
+    if [ "$REQUIRE_ORACLE" = 1 ]; then
+      exit 1
+    fi
+  elif [ "$rc" -ne 0 ]; then
+    echo "    FAILED — paper-junit-baseline validation exited $rc"
+    exit 1
+  fi
+}
+
+# --- oracle steps (full gate only; the oracle verifies the whole server) -----
   if [ "$FULL_GATE" = true ]; then
+    run_paper_junit_baseline
     run_oracle_verify
     run_oracle_generated_full
     run_oracle_hash
