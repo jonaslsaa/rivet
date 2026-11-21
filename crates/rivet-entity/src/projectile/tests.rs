@@ -756,3 +756,31 @@ fn loyal_trident_non_player_collection_uses_owner_bb_width() {
 
     assert!(!trident.abstract_arrow.projectile.alive);
 }
+
+#[test]
+fn arrow_discarded_on_first_tick_still_emits_projectile_shoot() {
+    let mut world = TestWorld::new();
+    world.add_entity(TestWorld::make_entity(95, Vec3::new(1.5, 0.0, 0.0)));
+
+    let mut arrow = Arrow::new(EntityId(96), Vec3::new(0.0, 1.0, 0.0));
+    arrow.abstract_arrow.projectile.delta_movement = Vec3::new(3.0, 0.0, 0.0);
+
+    let mut rng = LegacyRandomSource::new(4);
+    arrow.tick(&mut world, &mut rng);
+
+    // Non-piercing arrow hits and is discarded on tick 0, but still emits ProjectileShoot.
+    assert!(!arrow.abstract_arrow.projectile.alive);
+    assert!(arrow.abstract_arrow.projectile.has_been_shot);
+    assert!(
+        world
+            .event_log
+            .iter()
+            .any(|e| matches!(e, ProjectileGameEvent::ProjectileLandEntity { .. }))
+    );
+    assert!(
+        world
+            .event_log
+            .iter()
+            .any(|e| matches!(e, ProjectileGameEvent::ProjectileShoot { .. }))
+    );
+}

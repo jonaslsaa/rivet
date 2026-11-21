@@ -273,11 +273,7 @@ impl AbstractArrow {
 
         self.step_move_and_hit(world, random, hooks, block_hit);
 
-        if !self.projectile.alive {
-            return;
-        }
-
-        if !self.in_ground {
+        if self.projectile.alive && !self.in_ground {
             movement = self.projectile.delta_movement.scale(inertia as f64);
             if physics_enabled {
                 movement = movement.add_xyz(0.0, -DEFAULT_GRAVITY, 0.0);
@@ -286,6 +282,8 @@ impl AbstractArrow {
             self.projectile.update_rotation();
         }
 
+        // Paper `AbstractArrow.tick()` always calls `super.tick()` (`Projectile.tick()`),
+        // so `PROJECTILE_SHOOT` is emitted even if the arrow was discarded during `stepMoveAndHit`.
         self.projectile.tick_base(world);
     }
 
@@ -295,7 +293,7 @@ impl AbstractArrow {
     /// 1. Start with `block_hit` from `initial_position` to `initial_position + delta`.
     /// 2. If `block_hit` is not a miss, truncate `target_pos` to `block_hit.location`.
     /// 3. Collect all candidate entities along `[initial_position, target_pos]` with
-    ///    `compute_margin(tick_count)` and `include_inside = !is_no_physics()`.
+    ///    `compute_margin(tick_count)` and `include_inside = false`.
     /// 4. Sort `entities_hit` stably by `initial_position.distance_to_sqr(entity.position)`
     ///    (Java `List.sort` / TimSort).
     /// 5. Process each entity hit in sorted order until discarded, deflected, or non-piercing hit.

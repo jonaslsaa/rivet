@@ -231,11 +231,7 @@ impl ThrownTrident {
             self.abstract_arrow.projectile.set_pos(target_pos);
         }
 
-        if !self.abstract_arrow.projectile.alive {
-            return;
-        }
-
-        if !self.abstract_arrow.in_ground {
+        if self.abstract_arrow.projectile.alive && !self.abstract_arrow.in_ground {
             let inertia = if self.abstract_arrow.projectile.in_water {
                 TRIDENT_WATER_INERTIA
             } else {
@@ -257,6 +253,7 @@ impl ThrownTrident {
             self.abstract_arrow.projectile.update_rotation();
         }
 
+        // Paper `AbstractArrow.tick()` always calls `super.tick()` (`Projectile.tick()`).
         self.abstract_arrow.projectile.tick_base(world);
     }
 
