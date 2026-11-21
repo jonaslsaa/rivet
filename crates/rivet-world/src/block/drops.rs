@@ -2148,7 +2148,14 @@ fn block_name_matches(block_name: &str, expected: &str) -> bool {
 }
 
 fn matches_item_tag(tool: &ToolStack, tag: &str) -> bool {
-    match strip_minecraft_ns(tag) {
+    let normalized_tag = normalize_id(tag.trim_start_matches('#'));
+    let normalized_item = normalize_id(&tool.item_id);
+    if let Some(items) =
+        rivet_registry::generated::tags::ITEM_TAG_BY_NAME.get(normalized_tag.as_str())
+    {
+        return items.contains(&normalized_item.as_str());
+    }
+    match strip_minecraft_ns(&normalized_tag) {
         "pickaxes" => tool.is_pickaxe(),
         "shears" => tool.is_shears(),
         _ => false,
@@ -2958,5 +2965,48 @@ mod tests {
                 "{block} should drop nothing when explosion survival fails, empty_count={empty_count}"
             );
         }
+    }
+
+    #[test]
+    fn match_tool_item_tags_use_generated_item_tag_registry() {
+        let json = r##"{
+          "pools": [
+            {
+              "rolls": 1,
+              "entries": [
+                {
+                  "type": "minecraft:item",
+                  "name": "minecraft:oak_log",
+                  "conditions": [
+                    {
+                      "condition": "minecraft:match_tool",
+                      "predicate": { "items": "#minecraft:axes" }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }"##;
+        let table = BlockLootTable::from_json(json).expect("valid item tag predicate");
+        let pos = BlockPos::new(0, 64, 0);
+        let mut rng = SingleThreadedRandomSource::new(19);
+
+        let axe_ctx = BlockDropContext::new(
+            state_of("minecraft:oak_log"),
+            pos,
+            ToolStack::tool(ToolTier::Iron, ToolKind::Axe),
+        );
+        assert_eq!(
+            table.evaluate(&axe_ctx, &mut rng),
+            vec![BlockDropStack::new("minecraft:oak_log", 1)]
+        );
+
+        let pick_ctx = BlockDropContext::new(
+            state_of("minecraft:oak_log"),
+            pos,
+            ToolStack::tool(ToolTier::Iron, ToolKind::Pickaxe),
+        );
+        assert!(table.evaluate(&pick_ctx, &mut rng).is_empty());
     }
 }
