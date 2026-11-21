@@ -705,4 +705,23 @@ mod tests {
             .unwrap();
         assert_eq!(menu.container_id, 3);
     }
+
+    #[test]
+    fn differing_max_stack_size_components_do_not_merge_or_lose_items() {
+        let mut container = SimpleContainer::new(1);
+        let limited = InventoryItemStack::with_max_stack_size(ItemId(1), 16, 16);
+        let normal = InventoryItemStack::with_max_stack_size(ItemId(1), 32, 64);
+
+        assert!(!InventoryItemStack::is_same_item_same_components(
+            &limited, &normal
+        ));
+        assert!(!InventoryItemStack::matches(&limited, &normal));
+        assert_ne!(limited.component_hash(), normal.component_hash());
+
+        container.set_item(0, limited);
+        let slot = Slot::new(0, 0, 0, 0);
+        let remainder = slot.safe_insert(&mut container, normal);
+        assert_eq!(container.get_item(0).get_count(), 16);
+        assert_eq!(remainder.get_count(), 32);
+    }
 }

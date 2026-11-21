@@ -213,7 +213,7 @@ impl InventoryItemStack {
         if a.is_empty() && b.is_empty() {
             return true;
         }
-        a.components == b.components
+        a.max_stack_size == b.max_stack_size && a.components == b.components
     }
 
     /// `ItemStack.matches(ItemStack, ItemStack)`.
@@ -224,12 +224,16 @@ impl InventoryItemStack {
         if a.is_empty() || b.is_empty() {
             return false;
         }
-        a.get_count() == b.get_count() && a.item() == b.item() && a.components == b.components
+        a.get_count() == b.get_count()
+            && a.item() == b.item()
+            && a.max_stack_size == b.max_stack_size
+            && a.components == b.components
     }
 
     /// Deterministic hash over component entries for `HashedStack` comparisons.
     pub fn component_hash(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.max_stack_size.hash(&mut hasher);
         self.components.hash(&mut hasher);
         hasher.finish()
     }
