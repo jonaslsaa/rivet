@@ -71,8 +71,8 @@ impl rivet_serialization::codec::JavaEquals for RenderType {
 /// Built-in criteria match Paper 26.2's `CUSTOM_CRITERIA` table (11 core
 /// criteria + 16 `teamkill.<color>` + 16 `killedByTeam.<color>` = 43 custom
 /// criteria). Stat-backed criteria (`<stat_type>:<stat_key>`, e.g.
-/// `minecraft.custom:minecraft.deaths`) can also be constructed via
-/// [`ObjectiveCriteria::stat`] and resolved by [`ObjectiveCriteria::by_name`].
+/// `minecraft.custom:minecraft.deaths`) are resolved by
+/// [`ObjectiveCriteria::by_name`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ObjectiveCriteria {
     name: String,
@@ -81,8 +81,7 @@ pub struct ObjectiveCriteria {
 }
 
 impl ObjectiveCriteria {
-    /// Construct a custom or stat criteria explicitly.
-    pub fn new(name: impl Into<String>, read_only: bool, default_render_type: RenderType) -> Self {
+    fn new(name: impl Into<String>, read_only: bool, default_render_type: RenderType) -> Self {
         Self {
             name: name.into(),
             read_only,
@@ -150,9 +149,7 @@ impl ObjectiveCriteria {
         )
     }
 
-    /// Construct a stat-backed criteria (`Stat` extends `ObjectiveCriteria` with
-    /// `readOnly = false`, `RenderType.INTEGER`).
-    pub fn stat(name: impl Into<String>) -> Self {
+    fn stat(name: impl Into<String>) -> Self {
         Self::new(name, false, RenderType::Integer)
     }
 
