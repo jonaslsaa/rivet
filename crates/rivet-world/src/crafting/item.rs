@@ -56,6 +56,99 @@ impl ItemId {
         self.0 == Self::AIR.0
     }
 
+    /// `Item.getDefaultMaxStackSize()` for standard vanilla stack-size buckets
+    /// (1 for unstackable items, 16 for 16-stack items, 64 default).
+    pub fn default_max_stack_size(self) -> i32 {
+        let path = self
+            .name()
+            .strip_prefix("minecraft:")
+            .unwrap_or(self.name());
+        if path == "air" {
+            return 0;
+        }
+        if matches!(
+            path,
+            "ender_pearl"
+                | "egg"
+                | "blue_egg"
+                | "brown_egg"
+                | "snowball"
+                | "bucket"
+                | "honey_bottle"
+                | "armor_stand"
+                | "written_book"
+        ) || path.ends_with("_sign")
+            || path.ends_with("_banner")
+        {
+            return 16;
+        }
+        if matches!(
+            path,
+            "shulker_box"
+                | "bow"
+                | "crossbow"
+                | "trident"
+                | "mace"
+                | "shield"
+                | "elytra"
+                | "fishing_rod"
+                | "carrot_on_a_stick"
+                | "warped_fungus_on_a_stick"
+                | "flint_and_steel"
+                | "shears"
+                | "brush"
+                | "spyglass"
+                | "goat_horn"
+                | "bundle"
+                | "totem_of_undying"
+                | "enchanted_book"
+                | "writable_book"
+                | "knowledge_book"
+                | "potion"
+                | "splash_potion"
+                | "lingering_potion"
+                | "mushroom_stew"
+                | "rabbit_stew"
+                | "beetroot_soup"
+                | "suspicious_stew"
+                | "cake"
+                | "saddle"
+                | "minecart"
+                | "turtle_helmet"
+                | "wolf_armor"
+                | "debug_stick"
+                | "recovery_compass"
+                | "ominous_bottle"
+        ) || path.ends_with("_shulker_box")
+            || path.ends_with("_sword")
+            || path.ends_with("_pickaxe")
+            || path.ends_with("_axe")
+            || path.ends_with("_shovel")
+            || path.ends_with("_hoe")
+            || path.ends_with("_helmet")
+            || path.ends_with("_chestplate")
+            || path.ends_with("_leggings")
+            || path.ends_with("_boots")
+            || path.ends_with("_horse_armor")
+            || path.ends_with("_nautilus_armor")
+            || path.ends_with("_harness")
+            || path.ends_with("_bed")
+            || path.ends_with("_boat")
+            || path.ends_with("_chest_boat")
+            || path.ends_with("_raft")
+            || path.ends_with("_chest_raft")
+            || path.ends_with("_minecart")
+            || path.ends_with("_bucket")
+            || path.ends_with("_bundle")
+            || path.starts_with("music_disc_")
+            || path.ends_with("_banner_pattern")
+            || path.ends_with("_spear")
+        {
+            return 1;
+        }
+        64
+    }
+
     /// `Item.getCraftingRemainder()` for standard vanilla container items.
     pub fn crafting_remainder(self) -> Option<ItemStackTemplate> {
         let remainder_name = match self.name() {
@@ -141,6 +234,20 @@ impl ItemStack {
 
     pub fn components_mut(&mut self) -> &mut BTreeMap<Identifier, String> {
         &mut self.components
+    }
+
+    /// `ItemStack.getMaxStackSize()` — uses `minecraft:max_stack_size`
+    /// component override when present, otherwise the item's default limit.
+    pub fn max_stack_size(&self) -> i32 {
+        if let Some(raw) = self
+            .components
+            .get(&Identifier::with_default_namespace("max_stack_size"))
+            && let Ok(v) = raw.trim().parse::<i32>()
+            && (1..=99).contains(&v)
+        {
+            return v;
+        }
+        self.item.default_max_stack_size()
     }
 
     /// `ItemStack.isEmpty()` — true iff item is air or count <= 0.
@@ -232,16 +339,38 @@ impl ItemStackTemplate {
         }
     }
 
+    fn validate(result: ItemStack) -> ItemStack {
+        if result.is_empty() || result.count() > result.max_stack_size() {
+            ItemStack::empty()
+        } else {
+            result
+        }
+    }
+
     /// `ItemStackTemplate.create()`.
     pub fn create(&self) -> ItemStack {
-        ItemStack::with_components(self.item, self.count, self.components.clone())
+        Self::validate(ItemStack::with_components(
+            self.item,
+            self.count,
+            self.components.clone(),
+        ))
     }
 
     /// `TransmuteRecipe.createWithOriginalComponents(result, input)` — creates
     /// a stack of `self.item` with `self.count`, applying this template's
     /// component patch (removals and overrides) on top of `original`'s
-    /// components.
+    /// components and validating against `max_stack_size`.
     pub fn create_with_original_components(&self, original: &ItemStack) -> ItemStack {
+        self.create_with_original_components_extra(original, 0)
+    }
+
+    /// `TransmuteRecipe.createWithOriginalComponents(result, input, extraCount)`
+    /// — `result.apply(result.count() + extraCount, input.getComponentsPatch())`.
+    pub fn create_with_original_components_extra(
+        &self,
+        original: &ItemStack,
+        extra_count: i32,
+    ) -> ItemStack {
         let mut merged = original.components().clone();
         for removed in &self.removed_components {
             merged.remove(removed);
@@ -249,6 +378,7 @@ impl ItemStackTemplate {
         for (k, v) in &self.components {
             merged.insert(k.clone(), v.clone());
         }
-        ItemStack::with_components(self.item, self.count, merged)
+        let count = self.count.wrapping_add(extra_count);
+        Self::validate(ItemStack::with_components(self.item, count, merged))
     }
 }

@@ -737,11 +737,8 @@ impl TransmuteRecipe {
     }
 
     fn compute_result(&self, input_ingredient: &ItemStack, extra_count: i32) -> ItemStack {
-        let out = self
-            .result
-            .create_with_original_components(input_ingredient);
-        let count = self.result.count.wrapping_add(extra_count);
-        out.copy_with_count(count)
+        self.result
+            .create_with_original_components_extra(input_ingredient, extra_count)
     }
 
     /// `TransmuteRecipe.matches(CraftingInput, Level)`.

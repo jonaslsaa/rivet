@@ -1037,3 +1037,56 @@ fn imbue_clears_template_potion_contents_when_source_has_none() {
             .contains_key(&Identifier::with_default_namespace("potion_contents"))
     );
 }
+
+#[test]
+fn transmute_rejects_output_exceeding_max_stack_size() {
+    // Unstackable shulker_box (max_stack_size == 1) with add_material_count_to_result = true
+    // produces count 2 > 1, which Paper's ItemStackTemplate.validate rejects as EMPTY.
+    let transmute_json = json!({
+        "type": "minecraft:crafting_transmute",
+        "category": "misc",
+        "input": "minecraft:shulker_box",
+        "material": "minecraft:blue_dye",
+        "material_count": { "min": 1, "max": 2 },
+        "add_material_count_to_result": true,
+        "result": "minecraft:blue_shulker_box"
+    });
+    let recipe = parse_recipe_json(&transmute_json, &empty_tag_resolver).unwrap();
+    let input = CraftingInput::of(2, 1, vec![stack("shulker_box", 1), stack("blue_dye", 1)]);
+    let out = recipe.assemble_crafting(&input).unwrap();
+    assert!(out.is_empty());
+
+    // Stackable item with max_stack_size component override (limit 2):
+    // 1 material -> count 2 (valid), 2 materials -> count 3 > 2 (EMPTY).
+    let custom_limit_json = json!({
+        "type": "minecraft:crafting_transmute",
+        "category": "misc",
+        "input": "minecraft:stick",
+        "material": "minecraft:blue_dye",
+        "material_count": { "min": 1, "max": 2 },
+        "add_material_count_to_result": true,
+        "result": {
+            "id": "minecraft:blaze_rod",
+            "count": 1,
+            "components": {
+                "minecraft:max_stack_size": 2
+            }
+        }
+    });
+    let custom_recipe = parse_recipe_json(&custom_limit_json, &empty_tag_resolver).unwrap();
+    let ok_in = CraftingInput::of(2, 1, vec![stack("stick", 1), stack("blue_dye", 1)]);
+    let ok_out = custom_recipe.assemble_crafting(&ok_in).unwrap();
+    assert_eq!(ok_out.count(), 2);
+
+    let over_in = CraftingInput::of(
+        3,
+        1,
+        vec![
+            stack("stick", 1),
+            stack("blue_dye", 1),
+            stack("blue_dye", 1),
+        ],
+    );
+    let over_out = custom_recipe.assemble_crafting(&over_in).unwrap();
+    assert!(over_out.is_empty());
+}
