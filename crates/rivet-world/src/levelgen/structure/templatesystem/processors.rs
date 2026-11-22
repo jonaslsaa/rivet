@@ -572,7 +572,12 @@ impl StructureProcessor for LavaSubmergedBlockProcessor {
         let pos = processed_block_info.pos;
         let lava_id = block_id("minecraft:lava");
         let was_lava_before = level.get_block_state(&pos).block() == lava_id;
-        if was_lava_before && !processed_block_info.state.is_solid() {
+        // Paper: !Block.isShapeFullBlock(state.getShape(level, pos)).
+        // All 6 faces full (0b0011_1111) identifies full-cube shapes (e.g. stone, glass, double
+        // slabs) and excludes partial blocks such as stairs, single slabs, walls, and air.
+        const ALL_SIX_FACES_FULL: u8 = 0b0011_1111;
+        let is_full_block = processed_block_info.state.face_sturdy_mask() == ALL_SIX_FACES_FULL;
+        if was_lava_before && !is_full_block {
             Some(StructureBlockInfo::new(
                 pos,
                 BlockState::of(lava_id),
@@ -1361,8 +1366,36 @@ mod tests {
                 air,
                 &settings,
             )
-            .expect("lava submerged replaces non-solid block with lava");
+            .expect("lava submerged replaces air with lava");
         assert_eq!(out.state, state_of("minecraft:lava"));
+
+        // Partial legacy-solid blocks (stairs, single slabs) are also replaced by lava,
+        // while full-cube blocks (stone, glass) displace lava.
+        let stairs = StructureBlockInfo::new(pos, state_of("minecraft:stone_brick_stairs"), None);
+        let out_stairs = lava_proc
+            .process_block(
+                &mut level,
+                BlockPos::ZERO,
+                BlockPos::ZERO,
+                BlockPos::ZERO,
+                stairs,
+                &settings,
+            )
+            .unwrap();
+        assert_eq!(out_stairs.state, state_of("minecraft:lava"));
+
+        let stone = StructureBlockInfo::new(pos, state_of("minecraft:stone"), None);
+        let out_stone = lava_proc
+            .process_block(
+                &mut level,
+                BlockPos::ZERO,
+                BlockPos::ZERO,
+                BlockPos::ZERO,
+                stone,
+                &settings,
+            )
+            .unwrap();
+        assert_eq!(out_stone.state, state_of("minecraft:stone"));
 
         let bs_proc = BlackstoneReplaceProcessor::new();
         let cobble = StructureBlockInfo::new(pos, state_of("minecraft:cobblestone"), None);
