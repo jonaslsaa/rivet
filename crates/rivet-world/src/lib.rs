@@ -86,6 +86,7 @@ pub mod data;
 /// mob effects, status-effect instances, active-effect runtime, utilities, potions,
 /// potion contents, and vanilla brewing mixes.
 pub mod effect;
+pub mod enchantment;
 /// `net.minecraft.world.entity` — the entity-identity slice: the `MobCategory`
 /// enum and the `EntityType` id-handle STUB (`MobSpawnSettings`'s spawner and
 /// spawn-cost map keys; issue #178). The full `mc.world.entity` unit defers
