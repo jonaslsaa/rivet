@@ -48,7 +48,10 @@ impl FuelValues {
         let mut b = Self::builder();
 
         b.add_name("minecraft:lava_bucket", base_unit.wrapping_mul(100))
-            .add_name("minecraft:coal_block", base_unit.wrapping_mul(8).wrapping_mul(10))
+            .add_name(
+                "minecraft:coal_block",
+                base_unit.wrapping_mul(8).wrapping_mul(10),
+            )
             .add_name("minecraft:blaze_rod", base_unit.wrapping_mul(12))
             .add_name("minecraft:coal", base_unit.wrapping_mul(8))
             .add_name("minecraft:charcoal", base_unit.wrapping_mul(8))
@@ -57,17 +60,29 @@ impl FuelValues {
             .add_tag("minecraft:planks", base_unit.wrapping_mul(3) / 2)
             .add_name("minecraft:bamboo_mosaic", base_unit.wrapping_mul(3) / 2)
             .add_tag("minecraft:wooden_stairs", base_unit.wrapping_mul(3) / 2)
-            .add_name("minecraft:bamboo_mosaic_stairs", base_unit.wrapping_mul(3) / 2)
+            .add_name(
+                "minecraft:bamboo_mosaic_stairs",
+                base_unit.wrapping_mul(3) / 2,
+            )
             .add_tag("minecraft:wooden_slabs", base_unit.wrapping_mul(3) / 4)
-            .add_name("minecraft:bamboo_mosaic_slab", base_unit.wrapping_mul(3) / 4)
+            .add_name(
+                "minecraft:bamboo_mosaic_slab",
+                base_unit.wrapping_mul(3) / 4,
+            )
             .add_tag("minecraft:wooden_trapdoors", base_unit.wrapping_mul(3) / 2)
-            .add_tag("minecraft:wooden_pressure_plates", base_unit.wrapping_mul(3) / 2)
+            .add_tag(
+                "minecraft:wooden_pressure_plates",
+                base_unit.wrapping_mul(3) / 2,
+            )
             .add_tag("minecraft:wooden_shelves", base_unit.wrapping_mul(3) / 2)
             .add_tag("minecraft:wooden_fences", base_unit.wrapping_mul(3) / 2)
             .add_tag("minecraft:fence_gates", base_unit.wrapping_mul(3) / 2)
             .add_name("minecraft:note_block", base_unit.wrapping_mul(3) / 2)
             .add_name("minecraft:bookshelf", base_unit.wrapping_mul(3) / 2)
-            .add_name("minecraft:chiseled_bookshelf", base_unit.wrapping_mul(3) / 2)
+            .add_name(
+                "minecraft:chiseled_bookshelf",
+                base_unit.wrapping_mul(3) / 2,
+            )
             .add_name("minecraft:lectern", base_unit.wrapping_mul(3) / 2)
             .add_name("minecraft:jukebox", base_unit.wrapping_mul(3) / 2)
             .add_name("minecraft:chest", base_unit.wrapping_mul(3) / 2)
