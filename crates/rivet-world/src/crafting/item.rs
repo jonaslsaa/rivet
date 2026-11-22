@@ -117,8 +117,6 @@ impl ItemId {
                 | "turtle_helmet"
                 | "wolf_armor"
                 | "debug_stick"
-                | "recovery_compass"
-                | "ominous_bottle"
         ) || path.ends_with("_shulker_box")
             || path.ends_with("_sword")
             || path.ends_with("_pickaxe")

@@ -1089,4 +1089,13 @@ fn transmute_rejects_output_exceeding_max_stack_size() {
     );
     let over_out = custom_recipe.assemble_crafting(&over_in).unwrap();
     assert!(over_out.is_empty());
+
+    // recovery_compass and ominous_bottle stack to 64 in Paper 26.2, so multi-item outputs are valid.
+    for item_name in ["minecraft:recovery_compass", "minecraft:ominous_bottle"] {
+        let id = ItemId::from_name(item_name).unwrap();
+        assert_eq!(id.default_max_stack_size(), 64);
+        let tpl = ItemStackTemplate::new(id, 4);
+        let crafted = tpl.create();
+        assert_eq!(crafted.count(), 4);
+    }
 }
