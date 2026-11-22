@@ -113,8 +113,11 @@ impl StructureTemplateSource for MemoryTemplateSource {
     }
 }
 
+/// `StructureTemplateManager.STRUCTURE_DIRECTORY_NAME`.
+pub const STRUCTURE_DIRECTORY_NAME: &str = "structure";
+
 /// Filesystem source reading gzip-compressed `.nbt` or text `.snbt` templates
-/// under `<root>/<namespace>/structures/<path>.<ext>`.
+/// under `<root>/<namespace>/structure/<path>.<ext>`.
 pub struct FilesystemTemplateSource {
     root: PathBuf,
     folder: String,
@@ -125,7 +128,7 @@ impl FilesystemTemplateSource {
     pub fn nbt(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
-            folder: "structures".to_string(),
+            folder: STRUCTURE_DIRECTORY_NAME.to_string(),
             snbt: false,
         }
     }
@@ -133,7 +136,7 @@ impl FilesystemTemplateSource {
     pub fn snbt(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
-            folder: "structures".to_string(),
+            folder: STRUCTURE_DIRECTORY_NAME.to_string(),
             snbt: true,
         }
     }
@@ -297,7 +300,7 @@ impl StructureTemplateManager {
     }
 
     /// `StructureTemplateManager.save(Identifier)` — writes the cached template
-    /// to `<generated_dir>/<namespace>/structures/<path>.nbt` as compressed NBT.
+    /// to `<generated_dir>/<namespace>/structure/<path>.nbt` as compressed NBT.
     pub fn save(&self, id: &Identifier) -> Result<bool, StructureTemplateError> {
         let Some(Some(template)) = self.structure_repository.get(id) else {
             return Ok(false);
@@ -305,7 +308,7 @@ impl StructureTemplateManager {
         let Some(dir) = &self.generated_dir else {
             return Ok(false);
         };
-        let path = resolve_template_path(dir, id, "structures", ".nbt")?;
+        let path = resolve_template_path(dir, id, STRUCTURE_DIRECTORY_NAME, ".nbt")?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -416,6 +419,44 @@ mod tests {
             loaded.palettes()[0].blocks()[0].state,
             BlockState::of(BlockId::from_name("minecraft:stone").unwrap())
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn filesystem_source_and_save_use_singular_structure_directory() {
+        let dir =
+            std::env::temp_dir().join(format!("rivet_structure_dir_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let id = Identifier::from_namespace_and_path("minecraft", "village/house");
+
+        let mut mem = MemoryTemplateSource::new();
+        mem.insert(
+            id.clone(),
+            StructureTemplate::from_parts(
+                [1, 1, 1],
+                vec![Palette::new(vec![StructureBlockInfo::new(
+                    BlockPos::ZERO,
+                    BlockState::of(BlockId::from_name("minecraft:stone").unwrap()),
+                    None,
+                )])],
+                Vec::new(),
+            ),
+        );
+
+        let mut mgr = StructureTemplateManager::new(vec![Box::new(mem)], Some(dir.clone()));
+        assert!(mgr.get(&id).unwrap().is_some());
+        assert!(mgr.save(&id).unwrap());
+
+        let expected_path = dir
+            .join("minecraft")
+            .join("structure")
+            .join("village/house.nbt");
+        assert!(expected_path.is_file());
+
+        let fs_source = FilesystemTemplateSource::nbt(&dir);
+        assert_eq!(fs_source.list(), vec![id.clone()]);
+        assert!(fs_source.load(&id).unwrap().is_some());
 
         let _ = fs::remove_dir_all(&dir);
     }
