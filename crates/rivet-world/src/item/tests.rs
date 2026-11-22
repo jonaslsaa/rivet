@@ -626,3 +626,39 @@ fn controlled_negative_validations_and_codec_rejections() {
     );
     assert!(ItemStackTemplate::of_item_count(stone(), 0).is_err());
 }
+
+#[test]
+fn bundle_fraction_addition_reduces_before_overflow_and_reports_excessive_weight() {
+    // 10 distinct prime stack sizes whose LCM (~4.0e18) fits in i64, even though
+    // naive `a*d2 + b*d1` in i64 overflows before GCD reduction.
+    let primes = [97, 89, 83, 79, 73, 71, 67, 61, 59, 53];
+    let mut items = Vec::new();
+    for p in primes {
+        let mut pb = DataComponentPatch::builder();
+        pb.set(
+            DataComponentTypeId::MAX_STACK_SIZE,
+            DataComponentValue::Int(p),
+        );
+        items.push(ItemStackTemplate::try_new(stone().holder(), 1, pb.build()).unwrap());
+    }
+    let bundle = BundleContents::try_new(items).unwrap();
+    let w = bundle.weight_checked();
+    assert!(w.is_success());
+    assert!(bundle.validate().is_success());
+
+    // More distinct primes push the exact reduced denominator past i64::MAX:
+    // must return a DataResult error instead of panicking or wrapping.
+    let more_primes = [97, 89, 83, 79, 73, 71, 67, 61, 59, 53, 47, 43];
+    let mut overflow_items = Vec::new();
+    for p in more_primes {
+        let mut pb = DataComponentPatch::builder();
+        pb.set(
+            DataComponentTypeId::MAX_STACK_SIZE,
+            DataComponentValue::Int(p),
+        );
+        overflow_items.push(ItemStackTemplate::try_new(stone().holder(), 1, pb.build()).unwrap());
+    }
+    let overflow_bundle = BundleContents::try_new(overflow_items).unwrap();
+    assert!(overflow_bundle.weight_checked().is_error());
+    assert!(overflow_bundle.validate().is_error());
+}

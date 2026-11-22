@@ -47,27 +47,60 @@ impl Fraction {
         denominator: 16,
     };
 
-    pub fn new(numerator: i64, denominator: i64) -> Self {
-        assert!(denominator != 0, "Fraction denominator must not be zero");
-        let (mut n, mut d) = if denominator < 0 {
-            (-numerator, -denominator)
+    fn from_i128_reduced(numerator: i128, denominator: i128) -> Option<Self> {
+        if denominator == 0 {
+            return None;
+        }
+        let (n, d) = if denominator < 0 {
+            (numerator.checked_neg()?, denominator.checked_neg()?)
         } else {
             (numerator, denominator)
         };
         if n == 0 {
-            return Self::ZERO;
+            return Some(Self::ZERO);
         }
-        let g = gcd(n.unsigned_abs(), d.unsigned_abs()) as i64;
-        n /= g;
-        d /= g;
-        Self {
-            numerator: n,
-            denominator: d,
-        }
+        let g = gcd_u128(n.unsigned_abs(), d.unsigned_abs()) as i128;
+        let rn = i64::try_from(n / g).ok()?;
+        let rd = i64::try_from(d / g).ok()?;
+        Some(Self {
+            numerator: rn,
+            denominator: rd,
+        })
+    }
+
+    pub fn new(numerator: i64, denominator: i64) -> Self {
+        assert!(denominator != 0, "Fraction denominator must not be zero");
+        Self::from_i128_reduced(i128::from(numerator), i128::from(denominator))
+            .expect("Fraction overflow")
+    }
+
+    pub fn checked_mul_int(self, factor: i64) -> Option<Self> {
+        let n = i128::from(self.numerator).checked_mul(i128::from(factor))?;
+        Self::from_i128_reduced(n, i128::from(self.denominator))
     }
 
     pub fn mul_int(self, factor: i64) -> Self {
-        Self::new(self.numerator * factor, self.denominator)
+        self.checked_mul_int(factor)
+            .expect("Fraction multiplication overflow")
+    }
+
+    pub fn checked_add(self, other: Self) -> Option<Self> {
+        if self.numerator == 0 {
+            return Some(other);
+        }
+        if other.numerator == 0 {
+            return Some(self);
+        }
+        let d1 = i128::from(self.denominator);
+        let d2 = i128::from(other.denominator);
+        let g = gcd_u128(d1.unsigned_abs(), d2.unsigned_abs()) as i128;
+        let d1_red = d1 / g;
+        let d2_red = d2 / g;
+        let lhs = i128::from(self.numerator).checked_mul(d2_red)?;
+        let rhs = i128::from(other.numerator).checked_mul(d1_red)?;
+        let num = lhs.checked_add(rhs)?;
+        let den = d1_red.checked_mul(d2)?;
+        Self::from_i128_reduced(num, den)
     }
 
     pub fn cmp_one(self) -> std::cmp::Ordering {
@@ -79,14 +112,11 @@ impl std::ops::Add for Fraction {
     type Output = Self;
 
     fn add(self, other: Self) -> Self {
-        Self::new(
-            self.numerator * other.denominator + other.numerator * self.denominator,
-            self.denominator * other.denominator,
-        )
+        self.checked_add(other).expect("Fraction addition overflow")
     }
 }
 
-fn gcd(mut a: u64, mut b: u64) -> u64 {
+fn gcd_u128(mut a: u128, mut b: u128) -> u128 {
     while b != 0 {
         let r = a % b;
         a = b;
@@ -549,32 +579,63 @@ impl BundleContents {
         self.items.len()
     }
 
-    /// Port of `BundleContents.getWeight(ItemInstance)`.
-    pub fn item_weight(item: &impl ItemInstance) -> Fraction {
+    /// Port of `BundleContents.getWeight(ItemInstance)`, returning a
+    /// `DataResult` error on rational overflow (`"Excessive total bundle weight"`).
+    pub fn item_weight_checked(item: &impl ItemInstance) -> DataResult<Fraction> {
         if let Some(nested) = item
             .get(DataComponentTypeId::BUNDLE_CONTENTS)
             .and_then(|v| v.as_bundle_contents())
         {
-            return Fraction::BUNDLE_IN_BUNDLE_WEIGHT + nested.weight();
+            return nested.weight_checked().flat_map(|w| {
+                match Fraction::BUNDLE_IN_BUNDLE_WEIGHT.checked_add(w) {
+                    Some(total) => DataResult::success(total),
+                    None => DataResult::error("Excessive total bundle weight"),
+                }
+            });
         }
         if let Some(bees) = item
             .get(DataComponentTypeId::BEES)
             .and_then(|v| v.as_bees())
             && !bees.is_empty()
         {
-            return Fraction::ONE;
+            return DataResult::success(Fraction::ONE);
         }
-        Fraction::new(1, i64::from(item.max_stack_size().max(1)))
+        DataResult::success(Fraction::new(1, i64::from(item.max_stack_size().max(1))))
+    }
+
+    /// Port of `BundleContents.getWeight(ItemInstance)`.
+    pub fn item_weight(item: &impl ItemInstance) -> Fraction {
+        Self::item_weight_checked(item)
+            .result()
+            .copied()
+            .expect("Excessive total bundle weight")
+    }
+
+    /// Port of `BundleContents.weight()` returning `DataResult<Fraction>`.
+    pub fn weight_checked(&self) -> DataResult<Fraction> {
+        let mut total = Fraction::ZERO;
+        for tmpl in &self.items {
+            let item_w = match crate::item::data_result_into(Self::item_weight_checked(tmpl)) {
+                Ok(w) => w,
+                Err(err) => return DataResult::error(err),
+            };
+            let Some(scaled) = item_w.checked_mul_int(i64::from(tmpl.count())) else {
+                return DataResult::error("Excessive total bundle weight");
+            };
+            let Some(next) = total.checked_add(scaled) else {
+                return DataResult::error("Excessive total bundle weight");
+            };
+            total = next;
+        }
+        DataResult::success(total)
     }
 
     /// Port of `BundleContents.weight()`.
     pub fn weight(&self) -> Fraction {
-        let mut total = Fraction::ZERO;
-        for tmpl in &self.items {
-            let item_w = Self::item_weight(tmpl).mul_int(i64::from(tmpl.count()));
-            total = total + item_w;
-        }
-        total
+        self.weight_checked()
+            .result()
+            .copied()
+            .expect("Excessive total bundle weight")
     }
 
     /// Port of `BundleContents.canItemBeInBundle(ItemStack)`.
@@ -582,7 +643,7 @@ impl BundleContents {
         !stack.is_empty() && stack.can_fit_inside_container_items()
     }
 
-    /// Validates that total weight does not exceed `1` (full bundle capacity).
+    /// Validates that total weight does not overflow or exceed `1` (full bundle capacity).
     pub fn validate(&self) -> DataResult<()> {
         if self.items.len() > BUNDLE_MAX_ITEMS {
             return DataResult::error(format!(
@@ -591,10 +652,13 @@ impl BundleContents {
                 BUNDLE_MAX_ITEMS
             ));
         }
-        if self.weight().cmp_one().is_gt() {
-            return DataResult::error("Bundle weight exceeds capacity (1)");
-        }
-        DataResult::success(())
+        self.weight_checked().flat_map(|w| {
+            if w.cmp_one().is_gt() {
+                DataResult::error("Bundle weight exceeds capacity (1)")
+            } else {
+                DataResult::success(())
+            }
+        })
     }
 }
 
