@@ -191,6 +191,9 @@ mod tests {
         assert!(aabb_block_distance_to_sqr(pos, Vec3::new(f64::NAN, 2.5, 3.5)).is_nan());
         assert!(aabb_block_distance_to_sqr(pos, Vec3::new(1.5, f64::NAN, 3.5)).is_nan());
         assert!(aabb_block_distance_to_sqr(pos, Vec3::new(1.5, 2.5, f64::NAN)).is_nan());
-        assert_eq!(aabb_block_distance_to_sqr(pos, Vec3::new(1.5, 2.5, 3.5)), 0.0);
+        assert_eq!(
+            aabb_block_distance_to_sqr(pos, Vec3::new(1.5, 2.5, 3.5)),
+            0.0
+        );
     }
 }

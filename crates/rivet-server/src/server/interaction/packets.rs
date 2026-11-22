@@ -1,14 +1,9 @@
-//! Paper 26.2 wire codecs and typed packet structs for world interaction.
+//! Paper 26.2 wire codec helpers and non-panicking frame decoders for world interaction.
 //!
 //! Wire layouts match `working/Paper` commit `0a993450f129c4942c2a9ed45ba047412b4667cf`:
 //! - `FriendlyByteBuf.readBlockHitResult` / `writeBlockHitResult`
-//! - `ServerboundUseItemOnPacket` (protocol 776, play serverbound ID 66)
-//! - `ServerboundUseItemPacket` (protocol 776, play serverbound ID 67)
-//! - `ClientboundBlockChangedAckPacket` (protocol 776, play clientbound ID 4)
-//! - `ClientboundBlockDestructionPacket` (protocol 776, play clientbound ID 5)
-//!
-//! `ServerboundPlayerActionPacket` and `ClientboundBlockUpdatePacket` are reused directly
-//! from `rivet-protocol`, with a non-panicking decode wrapper for malformed wire frames.
+//! - `ServerboundPlayerActionPacket` (non-panicking decode wrapper)
+//! - `ServerboundUseItemOnPacket` / `ServerboundUseItemPacket` (trailing-byte checking wrappers)
 
 use rivet_protocol::friendly_byte_buf::FriendlyByteBuf;
 pub use rivet_protocol::game::serversbound_player_action_packet::{
@@ -18,205 +13,12 @@ pub use rivet_protocol::protocol::game::clientbound_block_updates::ClientboundBl
 use rivet_registry::core::{BlockPos, Direction, Vec3};
 use thiserror::Error;
 
-/// `net.minecraft.world.InteractionHand` — declaration order matches Java ordinals.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(i32)]
-pub enum InteractionHand {
-    MainHand = 0,
-    OffHand = 1,
-}
-
-impl InteractionHand {
-    /// Converts a wire VarInt ordinal to `InteractionHand`.
-    pub fn from_ordinal(ordinal: i32) -> Result<Self, InteractionPacketError> {
-        match ordinal {
-            0 => Ok(Self::MainHand),
-            1 => Ok(Self::OffHand),
-            other => Err(InteractionPacketError::InvalidHandOrdinal(other)),
-        }
-    }
-
-    /// Java `Enum.ordinal()`.
-    pub fn ordinal(self) -> i32 {
-        self as i32
-    }
-}
-
-/// `net.minecraft.world.phys.BlockHitResult` wire projection.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BlockHitResult {
-    pub location: Vec3,
-    pub direction: Direction,
-    pub block_pos: BlockPos,
-    pub inside: bool,
-    pub world_border_hit: bool,
-}
-
-impl BlockHitResult {
-    /// `new BlockHitResult(Vec3 location, Direction direction, BlockPos pos, boolean inside, boolean worldBorderHit)`.
-    pub fn new(
-        location: Vec3,
-        direction: Direction,
-        block_pos: BlockPos,
-        inside: bool,
-        world_border_hit: bool,
-    ) -> Self {
-        Self {
-            location,
-            direction,
-            block_pos,
-            inside,
-            world_border_hit,
-        }
-    }
-}
-
-/// `net.minecraft.network.protocol.game.ServerboundUseItemOnPacket`.
-///
-/// Wire body: `VarInt hand`, `BlockHitResult blockHit`, `VarInt sequence`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ServerboundUseItemOnPacket {
-    pub hand: InteractionHand,
-    pub hit_result: BlockHitResult,
-    pub sequence: i32,
-}
-
-impl ServerboundUseItemOnPacket {
-    pub fn new(hand: InteractionHand, hit_result: BlockHitResult, sequence: i32) -> Self {
-        Self {
-            hand,
-            hit_result,
-            sequence,
-        }
-    }
-
-    /// Encodes the packet body matching `ServerboundUseItemOnPacket.write`.
-    pub fn encode(&self, output: &mut FriendlyByteBuf) {
-        output.write_var_int(self.hand.ordinal());
-        write_block_hit_result(output, &self.hit_result);
-        output.write_var_int(self.sequence);
-    }
-
-    /// Decodes the packet body matching `ServerboundUseItemOnPacket(FriendlyByteBuf)`.
-    pub fn decode(input: &mut FriendlyByteBuf) -> Result<Self, InteractionPacketError> {
-        let hand = InteractionHand::from_ordinal(read_var_int_checked(input)?)?;
-        let hit_result = read_block_hit_result(input)?;
-        let sequence = read_var_int_checked(input)?;
-        Ok(Self {
-            hand,
-            hit_result,
-            sequence,
-        })
-    }
-}
-
-/// `net.minecraft.network.protocol.game.ServerboundUseItemPacket`.
-///
-/// Wire body: `VarInt hand`, `VarInt sequence`, `f32 yRot`, `f32 xRot`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ServerboundUseItemPacket {
-    pub hand: InteractionHand,
-    pub sequence: i32,
-    pub y_rot: f32,
-    pub x_rot: f32,
-}
-
-impl ServerboundUseItemPacket {
-    pub fn new(hand: InteractionHand, sequence: i32, y_rot: f32, x_rot: f32) -> Self {
-        Self {
-            hand,
-            sequence,
-            y_rot,
-            x_rot,
-        }
-    }
-
-    /// Encodes the packet body matching `ServerboundUseItemPacket.write`.
-    pub fn encode(&self, output: &mut FriendlyByteBuf) {
-        output.write_var_int(self.hand.ordinal());
-        output.write_var_int(self.sequence);
-        output.write_float(self.y_rot);
-        output.write_float(self.x_rot);
-    }
-
-    /// Decodes the packet body matching `ServerboundUseItemPacket(FriendlyByteBuf)`.
-    pub fn decode(input: &mut FriendlyByteBuf) -> Result<Self, InteractionPacketError> {
-        let hand = InteractionHand::from_ordinal(read_var_int_checked(input)?)?;
-        let sequence = read_var_int_checked(input)?;
-        let y_rot = read_float_checked(input)?;
-        let x_rot = read_float_checked(input)?;
-        Ok(Self {
-            hand,
-            sequence,
-            y_rot,
-            x_rot,
-        })
-    }
-}
-
-/// `net.minecraft.network.protocol.game.ClientboundBlockChangedAckPacket`.
-///
-/// Wire body: `VarInt sequence`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ClientboundBlockChangedAckPacket {
-    pub sequence: i32,
-}
-
-impl ClientboundBlockChangedAckPacket {
-    pub fn new(sequence: i32) -> Self {
-        Self { sequence }
-    }
-
-    /// Encodes the packet body matching `ClientboundBlockChangedAckPacket.write`.
-    pub fn encode(&self, output: &mut FriendlyByteBuf) {
-        output.write_var_int(self.sequence);
-    }
-
-    /// Decodes the packet body matching `ClientboundBlockChangedAckPacket(FriendlyByteBuf)`.
-    pub fn decode(input: &mut FriendlyByteBuf) -> Result<Self, InteractionPacketError> {
-        Ok(Self {
-            sequence: read_var_int_checked(input)?,
-        })
-    }
-}
-
-/// `net.minecraft.network.protocol.game.ClientboundBlockDestructionPacket`.
-///
-/// Wire body: `VarInt id`, `i64 packed BlockPos`, `i8 progress`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ClientboundBlockDestructionPacket {
-    pub id: i32,
-    pub pos: BlockPos,
-    pub progress: i8,
-}
-
-impl ClientboundBlockDestructionPacket {
-    /// `new ClientboundBlockDestructionPacket(int id, BlockPos pos, int progress)`.
-    ///
-    /// Java stores `progress` as `int` and writes `(byte) progress`.
-    pub fn new(id: i32, pos: BlockPos, progress: i32) -> Self {
-        Self {
-            id,
-            pos,
-            progress: progress as i8,
-        }
-    }
-
-    /// Encodes the packet body matching `ClientboundBlockDestructionPacket.write`.
-    pub fn encode(&self, output: &mut FriendlyByteBuf) {
-        output.write_var_int(self.id);
-        output.write_long(self.pos.as_long());
-        output.write_byte(self.progress);
-    }
-
-    /// Decodes the packet body matching `ClientboundBlockDestructionPacket(FriendlyByteBuf)`.
-    pub fn decode(input: &mut FriendlyByteBuf) -> Result<Self, InteractionPacketError> {
-        let id = read_var_int_checked(input)?;
-        let pos = BlockPos::of_long(read_long_checked(input)?);
-        let progress = read_byte_checked(input)?;
-        Ok(Self { id, pos, progress })
-    }
-}
+pub use super::block_hit_result::BlockHitResult;
+pub use super::clientbound_block_changed_ack_packet::ClientboundBlockChangedAckPacket;
+pub use super::clientbound_block_destruction_packet::ClientboundBlockDestructionPacket;
+pub use super::interaction_hand::InteractionHand;
+pub use super::serverbound_use_item_on_packet::ServerboundUseItemOnPacket;
+pub use super::serverbound_use_item_packet::ServerboundUseItemPacket;
 
 /// Wire decode errors for malformed serverbound interaction packets.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -340,7 +142,9 @@ pub fn write_block_hit_result(output: &mut FriendlyByteBuf, hit: &BlockHitResult
     output.write_boolean(hit.world_border_hit);
 }
 
-fn read_var_int_checked(input: &mut FriendlyByteBuf) -> Result<i32, InteractionPacketError> {
+pub(super) fn read_var_int_checked(
+    input: &mut FriendlyByteBuf,
+) -> Result<i32, InteractionPacketError> {
     let mut result: i32 = 0;
     let mut shift: u32 = 0;
     for _ in 0..5 {
@@ -357,28 +161,34 @@ fn read_var_int_checked(input: &mut FriendlyByteBuf) -> Result<i32, InteractionP
     Err(InteractionPacketError::VarIntTooBig)
 }
 
-fn read_byte_checked(input: &mut FriendlyByteBuf) -> Result<i8, InteractionPacketError> {
+pub(super) fn read_byte_checked(input: &mut FriendlyByteBuf) -> Result<i8, InteractionPacketError> {
     if input.readable_bytes() < 1 {
         return Err(InteractionPacketError::UnexpectedEof { field: "byte" });
     }
     Ok(input.read_byte())
 }
 
-fn read_bool_checked(input: &mut FriendlyByteBuf) -> Result<bool, InteractionPacketError> {
+pub(super) fn read_bool_checked(
+    input: &mut FriendlyByteBuf,
+) -> Result<bool, InteractionPacketError> {
     if input.readable_bytes() < 1 {
         return Err(InteractionPacketError::UnexpectedEof { field: "boolean" });
     }
     Ok(input.read_boolean())
 }
 
-fn read_long_checked(input: &mut FriendlyByteBuf) -> Result<i64, InteractionPacketError> {
+pub(super) fn read_long_checked(
+    input: &mut FriendlyByteBuf,
+) -> Result<i64, InteractionPacketError> {
     if input.readable_bytes() < 8 {
         return Err(InteractionPacketError::UnexpectedEof { field: "long" });
     }
     Ok(input.read_long())
 }
 
-fn read_float_checked(input: &mut FriendlyByteBuf) -> Result<f32, InteractionPacketError> {
+pub(super) fn read_float_checked(
+    input: &mut FriendlyByteBuf,
+) -> Result<f32, InteractionPacketError> {
     if input.readable_bytes() < 4 {
         return Err(InteractionPacketError::UnexpectedEof { field: "float" });
     }
