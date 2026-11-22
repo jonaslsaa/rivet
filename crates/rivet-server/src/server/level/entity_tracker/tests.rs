@@ -436,6 +436,27 @@ fn tracking_range_and_visibility_predicates_match_paper() {
     v.can_see = true;
     v.chunk_tracked = false;
     assert!(!is_visible_to_player(1, entity_pos, 64, -1.0, &v));
+
+    // TrackingRangeY defaults are unrestricted (-1.0) even when enabled, and EnderDragon is always exempt.
+    let mut y_cfg = TrackingRangeYConfig::default();
+    y_cfg.enabled = true;
+    y_cfg.monster = 32.0;
+    assert_eq!(
+        y_cfg.range_for(TrackingEntityKind::Other, ActivationType::Monster),
+        32.0
+    );
+    assert_eq!(
+        y_cfg.range_for(TrackingEntityKind::Other, ActivationType::Animal),
+        -1.0
+    );
+    assert_eq!(
+        y_cfg.range_for(TrackingEntityKind::ServerPlayer, ActivationType::Misc),
+        -1.0
+    );
+    assert_eq!(
+        y_cfg.range_for(TrackingEntityKind::EnderDragon, ActivationType::Monster),
+        -1.0
+    );
 }
 
 #[test]

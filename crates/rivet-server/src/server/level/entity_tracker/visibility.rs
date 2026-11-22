@@ -46,39 +46,39 @@ impl Default for TrackingRangeYConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            player: 320.0,
-            animal: 320.0,
-            monster: 320.0,
-            misc: 320.0,
-            display: 320.0,
-            other: 320.0,
+            player: -1.0,
+            animal: -1.0,
+            monster: -1.0,
+            misc: -1.0,
+            display: -1.0,
+            other: -1.0,
         }
     }
 }
 
 impl TrackingRangeYConfig {
     /// Returns the configured Y tracking range for the entity category, or
-    /// `-1.0` when disabled.
+    /// `-1.0` when disabled or unrestricted (`IntOr.Default.USE_DEFAULT`).
+    /// Mirrors Paper `WorldConfiguration.Entities.TrackingRangeY.get(Entity, -1)`.
     pub fn range_for(&self, kind: TrackingEntityKind, activation_type: ActivationType) -> f64 {
         if !self.enabled {
             return -1.0;
         }
-        if kind == TrackingEntityKind::ServerPlayer {
-            return self.player;
+        match kind {
+            TrackingEntityKind::EnderDragon => return -1.0,
+            TrackingEntityKind::Display => return self.display,
+            TrackingEntityKind::ServerPlayer => return self.player,
+            TrackingEntityKind::MiscTracked => return self.misc,
+            TrackingEntityKind::Other => {}
         }
         match activation_type {
-            ActivationType::Raider | ActivationType::Monster | ActivationType::FlyingMonster => {
-                return self.monster;
+            ActivationType::Animal | ActivationType::Water | ActivationType::Villager => {
+                self.animal
             }
-            ActivationType::Water | ActivationType::Villager | ActivationType::Animal => {
-                return self.animal;
+            ActivationType::Monster | ActivationType::FlyingMonster | ActivationType::Raider => {
+                self.monster
             }
-            ActivationType::Misc => {}
-        }
-        match kind {
-            TrackingEntityKind::MiscTracked => self.misc,
-            TrackingEntityKind::Display => self.display,
-            _ => self.other,
+            ActivationType::Misc => self.other,
         }
     }
 }
