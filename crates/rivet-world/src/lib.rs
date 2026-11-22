@@ -96,6 +96,7 @@ pub mod entity;
 pub mod flag;
 pub mod fluid;
 pub mod inventory;
+pub mod item;
 pub mod level;
 pub mod levelgen;
 pub mod lighting;
