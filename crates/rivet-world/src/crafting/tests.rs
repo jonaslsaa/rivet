@@ -442,6 +442,28 @@ fn cooking_stonecutting_and_smithing_behavior() {
     );
     assert!(trim.assemble(&no_mat_in).is_empty());
 
+    // Inline trim material JSON object in minecraft:provides_trim_material is accepted
+    // and duplicate inline trims are rejected.
+    let mut inline_comps = BTreeMap::new();
+    inline_comps.insert(
+        Identifier::with_default_namespace("provides_trim_material"),
+        r#"{"asset_name":"custom","description":"Custom"}"#.to_owned(),
+    );
+    let inline_addition = ItemStack::with_components(item("gold_ingot"), 1, inline_comps);
+    let inline_in = SmithingRecipeInput::new(
+        stack("ward_armor_trim_smithing_template", 1),
+        stack("diamond_chestplate", 1),
+        inline_addition.clone(),
+    );
+    let inline_trimmed = trim.assemble(&inline_in);
+    assert!(!inline_trimmed.is_empty());
+    let inline_dup_in = SmithingRecipeInput::new(
+        stack("ward_armor_trim_smithing_template", 1),
+        inline_trimmed,
+        inline_addition,
+    );
+    assert!(trim.assemble(&inline_dup_in).is_empty());
+
     // Manager property sets & stonecutter ordering.
     let manager = RecipeManager::from_recipes(vec![
         RecipeHolder::new(key("iron_smelt"), Recipe::Cooking(smelt)),

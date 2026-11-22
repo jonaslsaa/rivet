@@ -350,12 +350,34 @@ impl SmithingTrimRecipe {
             && self.addition.test(&input.addition)
     }
 
-    fn parse_trim_component(raw: &str) -> Option<(Identifier, Identifier)> {
+    fn parse_trim_material_value(val: &serde_json::Value) -> Option<serde_json::Value> {
+        match val {
+            serde_json::Value::String(s) => {
+                Identifier::try_parse(s).map(|id| serde_json::Value::String(id.to_string()))
+            }
+            serde_json::Value::Object(_) => Some(val.clone()),
+            _ => None,
+        }
+    }
+
+    fn parse_trim_material_str(raw: &str) -> Option<serde_json::Value> {
+        let trimmed = raw.trim();
+        if trimmed.starts_with('{') {
+            if let Ok(val @ serde_json::Value::Object(_)) =
+                serde_json::from_str::<serde_json::Value>(trimmed)
+            {
+                return Some(val);
+            }
+            return None;
+        }
+        Identifier::try_parse(trimmed).map(|id| serde_json::Value::String(id.to_string()))
+    }
+
+    fn parse_trim_component(raw: &str) -> Option<(Identifier, serde_json::Value)> {
         if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(raw) {
             let material = map
                 .get("material")
-                .and_then(serde_json::Value::as_str)
-                .and_then(Identifier::try_parse)?;
+                .and_then(Self::parse_trim_material_value)?;
             let pattern = map
                 .get("pattern")
                 .and_then(serde_json::Value::as_str)
@@ -371,7 +393,7 @@ impl SmithingTrimRecipe {
         let Some(material_raw) = resolve_trim_material(&input.addition) else {
             return ItemStack::empty();
         };
-        let Some(material) = Identifier::try_parse(&material_raw) else {
+        let Some(material) = Self::parse_trim_material_str(&material_raw) else {
             return ItemStack::empty();
         };
         let mut components = input.base.components().clone();
@@ -385,7 +407,7 @@ impl SmithingTrimRecipe {
             return ItemStack::empty();
         }
         let new_trim = serde_json::json!({
-            "material": material.to_string(),
+            "material": material,
             "pattern": self.pattern.to_string(),
         })
         .to_string();
