@@ -506,9 +506,10 @@ impl ServerEntity {
         if lerp_steps.is_empty() {
             let position_changed = vec3_length_sqr(self.position_codec.delta(entity.position()))
                 >= TOLERANCE_LEVEL_POSITION;
+            let should_send_position = position_changed || self.tick_count % 60 == 0;
             let delta_changed =
                 vec3_distance_to_sqr(entity.delta_movement(), self.last_sent_movement) > 1.0e-7;
-            if position_changed || should_send_rotation || delta_changed {
+            if should_send_position || should_send_rotation || delta_changed {
                 synchronizer.send_to_tracking_players(EntityTrackerPacket::MoveMinecart {
                     entity_id,
                     steps: vec![MinecartStep {

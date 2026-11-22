@@ -438,9 +438,11 @@ fn tracking_range_and_visibility_predicates_match_paper() {
     assert!(!is_visible_to_player(1, entity_pos, 64, -1.0, &v));
 
     // TrackingRangeY defaults are unrestricted (-1.0) even when enabled, and EnderDragon is always exempt.
-    let mut y_cfg = TrackingRangeYConfig::default();
-    y_cfg.enabled = true;
-    y_cfg.monster = 32.0;
+    let y_cfg = TrackingRangeYConfig {
+        enabled: true,
+        monster: 32.0,
+        ..Default::default()
+    };
     assert_eq!(
         y_cfg.range_for(TrackingEntityKind::Other, ActivationType::Monster),
         32.0
@@ -1023,4 +1025,43 @@ fn update_player_against_all_respects_per_entity_can_see() {
 
     assert!(!tracker.get(20).unwrap().seen_by().contains(&1));
     assert!(tracker.get(21).unwrap().seen_by().contains(&1));
+}
+
+#[test]
+fn stationary_minecart_refreshes_position_every_60_ticks() {
+    let mut cart = MockEntity::new(505);
+    cart.living = false;
+    cart.new_minecart = true;
+    let mut tracked = TrackedEntity::new(&cart, 64, 1, true);
+    let mut host = RecordingHost::new();
+    tracked.update_player(
+        &mut cart,
+        &viewer(10, Vec3::new(10.0, 64.0, 20.0)),
+        &[],
+        100,
+        -1.0,
+        &mut host,
+    );
+    host.clear();
+
+    // Tick 0: tick_count % 60 == 0 -> emits periodic MoveMinecart even when stationary.
+    tracked.send_changes(&mut cart, 10, &mut host);
+    assert!(matches!(
+        host.packets_for(10).as_slice(),
+        [EntityTrackerPacket::MoveMinecart { entity_id: 505, steps }] if steps.len() == 1
+    ));
+    host.clear();
+
+    // Ticks 1..60: stationary, no MoveMinecart.
+    for _ in 1..60 {
+        tracked.send_changes(&mut cart, 10, &mut host);
+    }
+    assert!(host.packets_for(10).is_empty());
+
+    // Tick 60: tick_count % 60 == 0 -> periodic refresh fires again.
+    tracked.send_changes(&mut cart, 10, &mut host);
+    assert!(matches!(
+        host.packets_for(10).as_slice(),
+        [EntityTrackerPacket::MoveMinecart { entity_id: 505, steps }] if steps.len() == 1
+    ));
 }
