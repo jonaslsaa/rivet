@@ -204,7 +204,13 @@ impl WalkNodeEvaluator {
     }
 
     fn aabb_cache_key(aabb: Aabb) -> [u64; 6] {
-        let norm = |v: f64| if v == 0.0 { 0.0_f64.to_bits() } else { v.to_bits() };
+        let norm = |v: f64| {
+            if v == 0.0 {
+                0.0_f64.to_bits()
+            } else {
+                v.to_bits()
+            }
+        };
         [
             norm(aabb.min_x),
             norm(aabb.min_y),
@@ -215,7 +221,11 @@ impl WalkNodeEvaluator {
         ]
     }
 
-    pub(crate) fn has_collisions<W: PathWorldView + ?Sized>(&mut self, world: &W, aabb: Aabb) -> bool {
+    pub(crate) fn has_collisions<W: PathWorldView + ?Sized>(
+        &mut self,
+        world: &W,
+        aabb: Aabb,
+    ) -> bool {
         let key = Self::aabb_cache_key(aabb);
         if let Some(&cached) = self.collision_cache.get(&key) {
             return cached;
