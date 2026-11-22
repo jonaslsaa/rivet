@@ -1363,7 +1363,9 @@ fn java_math_round_f32(v: f32) -> i32 {
     if v.is_nan() {
         0
     } else {
-        (v + 0.5_f32).floor() as i32
+        // Widen to f64 before adding 0.5 to avoid f32 precision rounding
+        // (e.g., 0.49999997_f32 + 0.5_f32 == 1.0_f32), matching Java Math.round(float).
+        ((v as f64) + 0.5_f64).floor() as i32
     }
 }
 
@@ -3043,6 +3045,10 @@ mod tests {
         let mut rng = SingleThreadedRandomSource::new(101);
         assert_eq!(NumberProvider::Constant(1.5).get_int(&mut rng), 2);
         assert_eq!(NumberProvider::Constant(-0.5).get_int(&mut rng), 0);
+        assert_eq!(
+            NumberProvider::Constant(0.49999997_f32).get_int(&mut rng),
+            0
+        );
         // UniformGenerator.getInt calls min.getInt / max.getInt (Math.round on ConstantValue bounds).
         assert_eq!(
             NumberProvider::Uniform { min: 1.6, max: 1.6 }.get_int(&mut rng),
