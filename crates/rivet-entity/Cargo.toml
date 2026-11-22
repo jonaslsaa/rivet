@@ -4,17 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[dependencies]
-indexmap.workspace = true
-rivet-nbt.workspace = true
-rivet-util.workspace = true
 [lints]
 workspace = true
 
 [dependencies]
-indexmap = { workspace = true }
-rivet-core = { workspace = true }
-rivet-nbt = { workspace = true }
-rivet-registry = { workspace = true }
-rivet-util = { workspace = true }
-thiserror = { workspace = true }
+indexmap.workspace = true
+rivet-core.workspace = true
+rivet-nbt.workspace = true
+rivet-registry.workspace = true
+rivet-util.workspace = true
+thiserror.workspace = true
