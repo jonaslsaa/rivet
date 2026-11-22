@@ -496,9 +496,6 @@ impl GameTestRunner {
 
         for (id, outcome) in newly_completed {
             self.handle_test_completion(id, outcome);
-            if self.stopped || self.halted_on_error {
-                break;
-            }
         }
 
         if tick_result.halted || self.halted_on_error {

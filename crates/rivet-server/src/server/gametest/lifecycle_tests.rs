@@ -1270,3 +1270,60 @@ fn unspawned_required_test_fails_transcript_instead_of_passing() {
     assert_eq!(transcript.skipped_count, 1);
     assert_eq!(transcript.executed_count, 0);
 }
+
+#[test]
+fn halt_on_error_still_records_same_tick_completions() {
+    let registries = build_registries_with(
+        vec![],
+        vec![
+            (
+                Identifier::with_default_namespace("a_fail"),
+                fn_instance(
+                    "boom",
+                    TestEnvironmentRef::Key(default_environment_key()),
+                    5,
+                    0,
+                    true,
+                    1,
+                    1,
+                ),
+            ),
+            (
+                Identifier::with_default_namespace("b_pass_same_tick"),
+                fn_instance(
+                    "always_pass",
+                    TestEnvironmentRef::Key(default_environment_key()),
+                    5,
+                    0,
+                    true,
+                    1,
+                    1,
+                ),
+            ),
+        ],
+    );
+    let mut functions = TestFunctionRegistry::with_builtins();
+    functions.register(Identifier::with_default_namespace("boom"), |h| {
+        h.fail("hard failure");
+        Ok(())
+    });
+
+    let infos = vec![
+        make_info(&registries, "a_fail", RetryOptions::no_retries()),
+        make_info(&registries, "b_pass_same_tick", RetryOptions::no_retries()),
+    ];
+    let config = GameTestRunnerConfig {
+        halt_on_error: true,
+        ..GameTestRunnerConfig::default()
+    };
+    let mut runner = GameTestRunner::new(infos, registries, config);
+    let transcript = runner.run_to_completion(&functions, 20);
+
+    assert_eq!(transcript.status, GameTestRunStatus::Failed);
+    assert_eq!(transcript.failed_required_count, 1);
+    assert_eq!(
+        transcript.passed_count, 1,
+        "test that completed on the same tick must still be recorded as Passed"
+    );
+    assert_eq!(transcript.skipped_count, 0);
+}
