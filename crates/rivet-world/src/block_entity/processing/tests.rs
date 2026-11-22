@@ -629,3 +629,40 @@ fn furnace_preserves_components_and_max_stack_size_in_recipes() {
     assert_eq!(furnace.get_item(SLOT_RESULT).get_count(), 1);
     assert_eq!(furnace.get_item(SLOT_INPUT).get_count(), 1);
 }
+
+#[test]
+fn furnace_hopper_inserted_input_recomputes_cook_time_and_multiplier() {
+    let recipes = recipe_manager_with_cooking(
+        "minecraft:custom_fast_smelt",
+        CookingKind::Smelting,
+        "minecraft:raw_iron",
+        "minecraft:iron_ingot",
+        40,
+    );
+    let fuel = FuelValues::vanilla_burn_times();
+
+    let mut furnace = new_furnace();
+    furnace.cook_speed_multiplier = 2.0; // 40 / 2.0 = 20 ticks
+    furnace.set_item(SLOT_FUEL, stack("minecraft:coal", 1));
+
+    // Insert input via hopper (uses Container::set_item without RecipeManager).
+    let mut hopper = HopperBlockEntity::new(Direction::Down);
+    hopper.set_item(0, stack("minecraft:raw_iron", 1));
+    assert!(hopper.eject_items(&mut HopperTarget::Worldly(&mut furnace), 1));
+    assert_eq!(furnace.get_item(SLOT_INPUT).get_count(), 1);
+
+    for tick_idx in 1..=20 {
+        let res = furnace.server_tick(&recipes, &fuel);
+        if tick_idx < 20 {
+            assert!(!res.burned_item, "should not finish before tick 20");
+        } else {
+            assert!(res.burned_item, "should finish at tick 20");
+        }
+    }
+    assert_eq!(furnace.cooking_total_time, 20);
+    assert_eq!(
+        furnace.get_item(SLOT_RESULT).item().name(),
+        Some("minecraft:iron_ingot")
+    );
+    assert_eq!(furnace.get_item(SLOT_RESULT).get_count(), 1);
+}

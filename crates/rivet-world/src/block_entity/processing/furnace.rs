@@ -449,7 +449,10 @@ impl Container for AbstractFurnaceBlockEntity {
         self.items[slot] = stack;
         if slot == SLOT_INPUT && !same {
             self.cooking_timer = 0;
-            self.cooking_total_time = self.kind.cooking_kind().default_cooking_time();
+            // Mark cooking_total_time for recomputation from the active recipe
+            // and cook_speed_multiplier on the next server_tick (since the
+            // Container trait has no RecipeManager parameter).
+            self.cooking_total_time = 0;
             self.set_changed();
         }
     }
