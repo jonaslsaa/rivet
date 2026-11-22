@@ -458,8 +458,10 @@ impl ServerPlayerGameMode {
 
                 if state.is_some_and(|s| !s.is_air()) && progress >= 1.0_f32 {
                     self.destroy_and_ack(player, world, pos, out);
-                } else if self.is_destroying_block {
-                    if let Some(prev_state) = world.get_block_state_if_loaded(self.destroy_pos) {
+                } else {
+                    if self.is_destroying_block
+                        && let Some(prev_state) = world.get_block_state_if_loaded(self.destroy_pos)
+                    {
                         out.push(CorrectionPacket::BlockUpdate(
                             ClientboundBlockUpdatePacket {
                                 pos: self.destroy_pos,
@@ -467,8 +469,7 @@ impl ServerPlayerGameMode {
                             },
                         ));
                     }
-                    self.is_destroying_block = false;
-                } else {
+
                     self.is_destroying_block = true;
                     self.destroy_pos = pos;
                     let stage = (progress * 10.0_f32) as i32;
