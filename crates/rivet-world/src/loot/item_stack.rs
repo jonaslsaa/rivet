@@ -80,10 +80,10 @@ impl LootItemStack {
         &self.item
     }
 
-    /// `ItemStack.getCount()`.
+    /// `ItemStack.getCount()` — returns `0` when the stack is empty (including `minecraft:air`).
     #[must_use]
     pub fn count(&self) -> i32 {
-        self.count
+        if self.is_empty() { 0 } else { self.count }
     }
 
     /// `ItemStack.setCount(int)`.

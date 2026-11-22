@@ -867,3 +867,23 @@ fn context_map_builder_rejects_missing_required_and_disallowed_params() {
         ContextMapError::DisallowedParams { .. }
     ));
 }
+
+#[test]
+fn empty_air_stack_returns_zero_count_and_does_not_hang_splitting() {
+    let registry = LootRegistry::new();
+    let air_table = LootTable::builder()
+        .with_pool(
+            LootPool::builder()
+                .add(
+                    LootPoolEntryContainer::item(id("air"))
+                        .apply(LootItemFunction::set_count(NumberProvider::constant(64.0))),
+                )
+                .build(),
+        )
+        .build();
+
+    let items = air_table.get_random_items_with_seed(empty_params(), &registry, 1);
+    assert_eq!(items.len(), 1);
+    assert!(items[0].is_empty());
+    assert_eq!(items[0].count(), 0);
+}
