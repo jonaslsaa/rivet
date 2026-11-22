@@ -888,6 +888,33 @@ fn json_dye_imbue_transmute_recipes_are_normal_and_discoverable() {
             .map(String::as_str),
         Some("11359128")
     );
+    // Re-dyeing an item whose dyed_color is stored as an RGB float triplet ([r, g, b] or {"rgb":[r,g,b]})
+    // must blend with the new dye rather than treating it as undyed.
+    // [1.0, 0.0, 0.0] -> 0xFF0000 (255, 0, 0) mixed with blue_dye (60, 68, 170):
+    // r=(255+60)/2=157, g=(0+68)/2=34, b=(0+170)/2=85; avgIntensity=(255+170)/2.0=212.5, resIntensity=157.0
+    // -> r=212, g=(int)(34*212.5/157)=46, b=(int)(85*212.5/157)=115 -> (212<<16)|(46<<8)|115 = 13905523
+    for raw_triplet in ["[1.0, 0.0, 0.0]", r#"{"rgb":[1.0, 0.0, 0.0]}"#] {
+        let mut triplet_comps = BTreeMap::new();
+        triplet_comps.insert(
+            Identifier::with_default_namespace("dyed_color"),
+            raw_triplet.to_owned(),
+        );
+        let triplet_helmet = ItemStack::with_components(item("leather_helmet"), 1, triplet_comps);
+        let blended = dye_recipe
+            .assemble_crafting(&CraftingInput::of(
+                2,
+                1,
+                vec![triplet_helmet, stack("blue_dye", 1)],
+            ))
+            .unwrap();
+        assert_eq!(
+            blended
+                .components()
+                .get(&Identifier::with_default_namespace("dyed_color"))
+                .map(String::as_str),
+            Some("13905523")
+        );
+    }
 
     let imbue_json = json!({
         "type": "minecraft:crafting_imbue",

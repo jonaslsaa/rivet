@@ -495,6 +495,22 @@ impl DyeRecipe {
         }
     }
 
+    fn parse_rgb_json_value(val: &serde_json::Value) -> Option<i32> {
+        match val {
+            serde_json::Value::Number(n) => n.as_i64().map(|rgb| (rgb as i32) & 0x00FF_FFFF),
+            serde_json::Value::Array(arr) if arr.len() == 3 => {
+                // Paper `ExtraCodecs.RGB_COLOR_CODEC`: VECTOR3F -> ARGB.colorFromFloat(1.0F, x, y, z)
+                // where `ARGB.as8BitChannel(v) = Mth.floor(v * 255.0F)`.
+                let r = (arr[0].as_f64()? as f32 * 255.0_f32).floor() as i32;
+                let g = (arr[1].as_f64()? as f32 * 255.0_f32).floor() as i32;
+                let b = (arr[2].as_f64()? as f32 * 255.0_f32).floor() as i32;
+                Some((((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF)) & 0x00FF_FFFF)
+            }
+            serde_json::Value::Object(map) => map.get("rgb").and_then(Self::parse_rgb_json_value),
+            _ => None,
+        }
+    }
+
     fn parse_dyed_color_rgb(raw: &str) -> Option<i32> {
         let trimmed = raw.trim();
         if let Ok(rgb) = trimmed.parse::<i32>() {
@@ -505,13 +521,9 @@ impl DyeRecipe {
         {
             return Some(rgb & 0x00FF_FFFF);
         }
-        if let Ok(serde_json::Value::Object(map)) =
-            serde_json::from_str::<serde_json::Value>(trimmed)
-            && let Some(rgb) = map.get("rgb").and_then(serde_json::Value::as_i64)
-        {
-            return Some((rgb as i32) & 0x00FF_FFFF);
-        }
-        None
+        serde_json::from_str::<serde_json::Value>(trimmed)
+            .ok()
+            .and_then(|val| Self::parse_rgb_json_value(&val))
     }
 
     /// Exact port of Paper `DyedItemColor.applyDyes(DyedItemColor, List<DyeColor>)`.
