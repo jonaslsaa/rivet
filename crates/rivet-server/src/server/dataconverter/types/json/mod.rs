@@ -23,7 +23,7 @@ pub(crate) type SharedJsonObject = Rc<RefCell<IndexMap<String, JsonNode>>>;
 
 /// Internal reference-counted JSON representation that preserves Java/Gson
 /// nested-view aliasing and exact boxed `Number` types.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub(crate) enum JsonNode {
     Null,
     Bool(bool),
@@ -34,6 +34,48 @@ pub(crate) enum JsonNode {
     String(String),
     Array(SharedJsonArray),
     Object(SharedJsonObject),
+}
+
+impl JsonNode {
+    fn exact_i64_value(&self) -> Option<i64> {
+        match self {
+            Self::Number(Number::Byte(v)) => Some(i64::from(*v)),
+            Self::Number(Number::Short(v)) => Some(i64::from(*v)),
+            Self::Number(Number::Int(v)) => Some(i64::from(*v)),
+            Self::Number(Number::Long(v)) => Some(*v),
+            Self::ParsedNumber(n) => n.as_i64().or_else(|| parse_decimal_exact_i64(n.as_str())),
+            _ => None,
+        }
+    }
+
+    fn numeric_double_value(&self) -> Option<f64> {
+        match self {
+            Self::Number(n) => Some(n.double_value()),
+            Self::ParsedNumber(n) => Some(n.as_f64().unwrap_or(0.0)),
+            _ => None,
+        }
+    }
+}
+
+impl PartialEq for JsonNode {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Null, Self::Null) => true,
+            (Self::Bool(a), Self::Bool(b)) => a == b,
+            (Self::String(a), Self::String(b)) => a == b,
+            (Self::Array(a), Self::Array(b)) => a == b,
+            (Self::Object(a), Self::Object(b)) => a == b,
+            (Self::Number(_) | Self::ParsedNumber(_), Self::Number(_) | Self::ParsedNumber(_)) => {
+                if let (Some(ai), Some(bi)) = (self.exact_i64_value(), other.exact_i64_value()) {
+                    return ai == bi;
+                }
+                let a = self.numeric_double_value().unwrap_or(0.0);
+                let b = other.numeric_double_value().unwrap_or(0.0);
+                a == b || (a.is_nan() && b.is_nan())
+            }
+            _ => false,
+        }
+    }
 }
 
 impl JsonNode {
@@ -655,6 +697,49 @@ mod tests {
         assert_eq!(list.get_string(0), "0.05");
         assert_eq!(list.get_string(1), "1.0");
         assert_eq!(list.get_string(2), "2.0");
+    }
+
+    #[test]
+    fn json_container_numeric_equality_matches_gson() {
+        let mut m_int = JsonMapType::new(false);
+        m_int.set_int("x", 1);
+        m_int.set_long("big", 9_007_199_254_740_993);
+
+        let mut m_long = JsonMapType::new(false);
+        m_long.set_long("x", 1);
+        m_long.set_long("big", 9_007_199_254_740_993);
+
+        let mut m_double = JsonMapType::new(false);
+        m_double.set_double("x", 1.0);
+        m_double.set_long("big", 9_007_199_254_740_993);
+
+        let parsed_obj: JsonObject<String, JsonValue> =
+            serde_json::from_str(r#"{"x": 1, "big": 9007199254740993.0}"#).unwrap();
+        let m_parsed = JsonMapType::from_json(&parsed_obj, false);
+
+        assert_eq!(m_int, m_long);
+        assert_eq!(m_int, m_double);
+        assert_eq!(m_int, m_parsed);
+
+        let mut m_diff = JsonMapType::new(false);
+        m_diff.set_int("x", 1);
+        m_diff.set_long("big", 9_007_199_254_740_992);
+        assert_ne!(m_int, m_diff);
+
+        let mut l1 = JsonListType::new(false);
+        l1.add_int(1);
+        l1.add_double(f64::NAN);
+        let mut l2 = JsonListType::new(false);
+        l2.add_long(1);
+        l2.add_float(f32::NAN);
+        assert_eq!(l1, l2);
+
+        let parsed_arr: Vec<JsonValue> = serde_json::from_str(r#"[1, 2.5]"#).unwrap();
+        let l_parsed = JsonListType::from_json(&parsed_arr, false);
+        let mut l_typed = JsonListType::new(false);
+        l_typed.add_byte(1);
+        l_typed.add_float(2.5);
+        assert_eq!(l_parsed, l_typed);
     }
 
     #[test]
