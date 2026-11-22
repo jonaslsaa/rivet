@@ -662,3 +662,56 @@ fn bundle_fraction_addition_reduces_before_overflow_and_reports_excessive_weight
     assert!(overflow_bundle.weight_checked().is_error());
     assert!(overflow_bundle.validate().is_error());
 }
+
+#[test]
+fn container_with_overweight_nested_bundle_round_trips() {
+    // Paper's `BundleContents.CODEC` only enforces the 256-entry list bound,
+    // not capacity <= 1; a container storing an overweight bundle must remain
+    // readable after being saved.
+    let t1 = ItemStackTemplate::of_item_count(stone(), 64).unwrap();
+    let t2 = ItemStackTemplate::of_item_count(granite(), 1).unwrap();
+    let overfull = BundleContents::try_new(vec![t1, t2]).unwrap();
+    assert!(overfull.validate().is_error());
+
+    let mut nested_patch = DataComponentPatch::builder();
+    nested_patch.set(
+        DataComponentTypeId::BUNDLE_CONTENTS,
+        DataComponentValue::BundleContents(overfull.clone()),
+    );
+    let nested_bundle_tmpl =
+        ItemStackTemplate::try_new(stone().holder(), 1, nested_patch.build()).unwrap();
+    let container = ItemContainerContents::try_from_slots(vec![Some(nested_bundle_tmpl)]).unwrap();
+
+    let mut outer = ItemStack::of(stone());
+    outer.set(
+        DataComponentTypeId::CONTAINER,
+        DataComponentValue::Container(container),
+    );
+
+    let nbt_codec = item_stack_codec::<NbtOps>();
+    let encoded_nbt = nbt_codec
+        .encode_start(&NbtOps::instance(), &outer)
+        .result()
+        .cloned()
+        .expect("encode container with overweight nested bundle to NBT");
+    let decoded_nbt = nbt_codec
+        .parse(&NbtOps::instance(), &encoded_nbt)
+        .result()
+        .cloned()
+        .expect("decode container with overweight nested bundle from NBT");
+    assert!(ItemStack::matches(&outer, &decoded_nbt));
+
+    let json_ops = JsonOps::new(false);
+    let json_codec = item_stack_codec::<JsonOps>();
+    let encoded_json = json_codec
+        .encode_start(&json_ops, &outer)
+        .result()
+        .cloned()
+        .expect("encode container with overweight nested bundle to JSON");
+    let decoded_json = json_codec
+        .parse(&json_ops, &encoded_json)
+        .result()
+        .cloned()
+        .expect("decode container with overweight nested bundle from JSON");
+    assert!(ItemStack::matches(&outer, &decoded_json));
+}

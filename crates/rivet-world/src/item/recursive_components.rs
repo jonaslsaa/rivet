@@ -662,7 +662,7 @@ impl BundleContents {
     }
 }
 
-/// Port of `BundleContents.CODEC`.
+/// Port of `BundleContents.CODEC` (`ItemStackTemplate.CODEC.sizeLimitedListOf(256).xmap(...)`).
 pub fn bundle_contents_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<BundleContents, Ops>> {
     let list_codec = codec::list_with_range(
         item_stack_template_codec::<Ops>(),
@@ -673,7 +673,7 @@ pub fn bundle_contents_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Bundl
         list_codec,
         Arc::new(
             |items: &Vec<ItemStackTemplate>| match BundleContents::try_new(items.clone()) {
-                Ok(b) => b.validate().map(|()| b),
+                Ok(b) => DataResult::success(b),
                 Err(err) => DataResult::error(err),
             },
         ),
