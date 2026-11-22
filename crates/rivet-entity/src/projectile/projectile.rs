@@ -282,14 +282,12 @@ impl ProjectileState {
         deflection: ProjectileDeflection,
         entity: Option<&EntitySnapshot>,
         new_owner: Option<EntityReference>,
-        by_attack: bool,
+        _by_attack: bool,
         random: &mut R,
     ) -> bool {
         deflection.apply(self, entity, random);
         if deflection != ProjectileDeflection::None {
-            if by_attack {
-                self.owner = new_owner;
-            }
+            self.owner = new_owner;
             self.last_deflected_by = entity.map(|e| e.id);
             true
         } else {
@@ -320,12 +318,18 @@ impl ProjectileState {
                 ProjectileDeflection::None
             }
             HitResult::Block(block_hit) => {
-                if should_bounce_on_world_border
-                    && block_hit.world_border_hit
-                    && self.deflect(ProjectileDeflection::Reverse, None, None, false, random)
-                {
-                    self.delta_movement = self.delta_movement.scale(0.2);
-                    return ProjectileDeflection::Reverse;
+                if should_bounce_on_world_border && block_hit.world_border_hit {
+                    let current_owner = self.owner;
+                    if self.deflect(
+                        ProjectileDeflection::Reverse,
+                        None,
+                        current_owner,
+                        false,
+                        random,
+                    ) {
+                        self.delta_movement = self.delta_movement.scale(0.2);
+                        return ProjectileDeflection::Reverse;
+                    }
                 }
                 ProjectileDeflection::None
             }

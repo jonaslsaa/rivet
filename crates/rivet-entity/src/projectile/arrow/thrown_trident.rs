@@ -135,6 +135,10 @@ impl ThrownTrident {
         world: &mut W,
         random: &mut R,
     ) {
+        // Paper `AbstractArrow.tick()` calls `super.tick()` (`Projectile.tick()`) first,
+        // so `PROJECTILE_SHOOT`, `checkLeftOwner()`, and `tickCount++` happen before collision.
+        self.abstract_arrow.projectile.tick_base(world);
+
         let physics_enabled = !self.abstract_arrow.is_no_physics();
         if self.abstract_arrow.shake_time > 0 {
             self.abstract_arrow.shake_time = self.abstract_arrow.shake_time.wrapping_sub(1);
@@ -153,12 +157,10 @@ impl ThrownTrident {
                 self.tick_despawn();
             }
             self.abstract_arrow.in_ground_time = self.abstract_arrow.in_ground_time.wrapping_add(1);
-            self.abstract_arrow.projectile.tick_base(world);
             return;
         }
 
         self.abstract_arrow.in_ground_time = 0;
-        self.abstract_arrow.projectile.check_left_owner(world);
 
         let initial_position = self.abstract_arrow.projectile.position;
         let movement = self.abstract_arrow.projectile.delta_movement;
@@ -252,9 +254,6 @@ impl ThrownTrident {
             self.abstract_arrow.projectile.delta_movement = next_delta;
             self.abstract_arrow.projectile.update_rotation();
         }
-
-        // Paper `AbstractArrow.tick()` always calls `super.tick()` (`Projectile.tick()`).
-        self.abstract_arrow.projectile.tick_base(world);
     }
 
     /// `ThrownTrident.onHitEntity(EntityHitResult)`.
@@ -282,10 +281,11 @@ impl ThrownTrident {
         }
 
         // Paper: trident always reverse-deflects and scales movement by (0.02, 0.2, 0.02).
+        let current_owner = self.abstract_arrow.projectile.owner;
         self.abstract_arrow.projectile.deflect(
             ProjectileDeflection::Reverse,
             world.get_entity(entity_hit.entity_id).as_ref(),
-            None,
+            current_owner,
             false,
             random,
         );

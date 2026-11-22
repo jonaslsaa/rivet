@@ -209,6 +209,10 @@ impl AbstractArrow {
             return;
         }
 
+        // Paper `AbstractArrow.tick()` calls `super.tick()` (`Projectile.tick()`) first,
+        // so `PROJECTILE_SHOOT`, `checkLeftOwner()`, and `tickCount++` happen before collision.
+        self.projectile.tick_base(world);
+
         let physics_enabled = !self.is_no_physics();
         let mut movement = self.projectile.delta_movement;
 
@@ -240,7 +244,6 @@ impl AbstractArrow {
                 self.tick_despawn();
             }
             self.in_ground_time = self.in_ground_time.wrapping_add(1);
-            self.projectile.tick_base(world);
             return;
         }
 
@@ -251,8 +254,6 @@ impl AbstractArrow {
         if self.projectile.in_water {
             inertia = hooks.water_inertia();
         }
-
-        self.projectile.check_left_owner(world);
 
         let initial_position = self.projectile.position;
         let next_position = initial_position.add(movement);
@@ -281,10 +282,6 @@ impl AbstractArrow {
             self.projectile.delta_movement = movement;
             self.projectile.update_rotation();
         }
-
-        // Paper `AbstractArrow.tick()` always calls `super.tick()` (`Projectile.tick()`),
-        // so `PROJECTILE_SHOOT` is emitted even if the arrow was discarded during `stepMoveAndHit`.
-        self.projectile.tick_base(world);
     }
 
     /// `AbstractArrow.stepMoveAndHit(BlockHitResult)`.
@@ -457,10 +454,11 @@ impl AbstractArrow {
             }
         } else {
             // Paper: on failed hurt, deflect in reverse and scale by 0.2.
+            let current_owner = self.projectile.owner;
             self.projectile.deflect(
                 ProjectileDeflection::Reverse,
                 world.get_entity(entity_hit.entity_id).as_ref(),
-                None,
+                current_owner,
                 false,
                 random,
             );

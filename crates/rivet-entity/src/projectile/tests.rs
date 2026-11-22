@@ -768,21 +768,173 @@ fn arrow_discarded_on_first_tick_still_emits_projectile_shoot() {
     let mut rng = LegacyRandomSource::new(4);
     arrow.tick(&mut world, &mut rng);
 
-    // Non-piercing arrow hits and is discarded on tick 0, but still emits ProjectileShoot.
+    // Non-piercing arrow hits and is discarded on tick 0, but still emits ProjectileShoot first.
     assert!(!arrow.abstract_arrow.projectile.alive);
     assert!(arrow.abstract_arrow.projectile.has_been_shot);
+    let shoot_idx = world
+        .event_log
+        .iter()
+        .position(|e| matches!(e, ProjectileGameEvent::ProjectileShoot { .. }))
+        .expect("ProjectileShoot should be emitted");
+    let land_idx = world
+        .event_log
+        .iter()
+        .position(|e| matches!(e, ProjectileGameEvent::ProjectileLandEntity { .. }))
+        .expect("ProjectileLandEntity should be emitted");
     assert!(
-        world
-            .event_log
-            .iter()
-            .any(|e| matches!(e, ProjectileGameEvent::ProjectileLandEntity { .. }))
+        shoot_idx < land_idx,
+        "ProjectileShoot must be emitted before ProjectileLandEntity (super.tick() ordering)"
     );
-    assert!(
-        world
-            .event_log
-            .iter()
-            .any(|e| matches!(e, ProjectileGameEvent::ProjectileShoot { .. }))
+}
+
+#[test]
+fn entity_driven_deflection_transfers_owner() {
+    let mut world = TestWorld::new();
+    let original_owner = TestWorld::make_entity(110, Vec3::new(-5.0, 0.0, 0.0));
+    let mut deflector = TestWorld::make_entity(111, Vec3::new(1.5, 0.0, 0.0));
+    deflector.deflection = ProjectileDeflection::Reverse;
+    world.add_entity(original_owner.clone());
+    world.add_entity(deflector.clone());
+
+    let mut arrow = Arrow::new(EntityId(112), Vec3::new(0.0, 1.0, 0.0));
+    arrow
+        .abstract_arrow
+        .projectile
+        .set_owner(Some(EntityReference::from_snapshot(&original_owner)));
+    arrow.abstract_arrow.projectile.left_owner = true;
+    arrow.abstract_arrow.projectile.delta_movement = Vec3::new(3.0, 0.0, 0.0);
+
+    let mut rng = LegacyRandomSource::new(6);
+    arrow.tick(&mut world, &mut rng);
+
+    assert_eq!(
+        arrow
+            .abstract_arrow
+            .projectile
+            .owner
+            .as_ref()
+            .and_then(|o| o.cached_id),
+        Some(deflector.id)
     );
+    assert_eq!(
+        arrow.abstract_arrow.projectile.last_deflected_by,
+        Some(deflector.id)
+    );
+}
+
+#[test]
+fn reverse_bounces_preserve_current_owner() {
+    // 1. World border bounce
+    let mut world = TestWorld::new();
+    let owner = TestWorld::make_entity(120, Vec3::new(-5.0, 0.0, 0.0));
+    world.add_entity(owner.clone());
+    world.block_hit_override = Some(BlockHitResult::hit(
+        Vec3::new(2.0, 1.0, 0.0),
+        Direction::West,
+        BlockPos::new(2, 1, 0),
+        true,
+    ));
+
+    let mut arrow = Arrow::new(EntityId(121), Vec3::new(0.0, 1.0, 0.0));
+    arrow
+        .abstract_arrow
+        .projectile
+        .set_owner(Some(EntityReference::from_snapshot(&owner)));
+    arrow.abstract_arrow.projectile.left_owner = true;
+    arrow.abstract_arrow.projectile.delta_movement = Vec3::new(3.0, 0.0, 0.0);
+    let mut rng = LegacyRandomSource::new(7);
+    arrow.tick(&mut world, &mut rng);
+    assert_eq!(
+        arrow
+            .abstract_arrow
+            .projectile
+            .owner
+            .as_ref()
+            .and_then(|o| o.cached_id),
+        Some(owner.id)
+    );
+
+    // 2. Arrow failed-hurt bounce
+    let mut world = TestWorld::new();
+    world.add_entity(owner.clone());
+    world.add_entity(TestWorld::make_entity(122, Vec3::new(1.5, 0.0, 0.0)));
+    world.hurt_outcomes.insert(
+        EntityId(122),
+        HurtOutcome {
+            hurt_applied: false,
+            target_is_living: true,
+            target_is_enderman: false,
+        },
+    );
+    let mut arrow = Arrow::new(EntityId(123), Vec3::new(0.0, 1.0, 0.0));
+    arrow
+        .abstract_arrow
+        .projectile
+        .set_owner(Some(EntityReference::from_snapshot(&owner)));
+    arrow.abstract_arrow.projectile.left_owner = true;
+    arrow.abstract_arrow.projectile.delta_movement = Vec3::new(3.0, 0.0, 0.0);
+    arrow.tick(&mut world, &mut rng);
+    assert_eq!(
+        arrow
+            .abstract_arrow
+            .projectile
+            .owner
+            .as_ref()
+            .and_then(|o| o.cached_id),
+        Some(owner.id)
+    );
+
+    // 3. ThrownTrident hit bounce
+    let mut world = TestWorld::new();
+    world.add_entity(owner.clone());
+    world.add_entity(TestWorld::make_entity(124, Vec3::new(1.5, 0.0, 0.0)));
+    let mut trident = ThrownTrident::new(EntityId(125), Vec3::new(0.0, 1.0, 0.0), 0, false);
+    trident
+        .abstract_arrow
+        .projectile
+        .set_owner(Some(EntityReference::from_snapshot(&owner)));
+    trident.abstract_arrow.projectile.left_owner = true;
+    trident.abstract_arrow.projectile.delta_movement = Vec3::new(3.0, 0.0, 0.0);
+    trident.tick(&mut world, &mut rng);
+    assert_eq!(
+        trident
+            .abstract_arrow
+            .projectile
+            .owner
+            .as_ref()
+            .and_then(|o| o.cached_id),
+        Some(owner.id)
+    );
+}
+
+#[test]
+fn tick_base_increments_tick_count_before_margin_hit_detection() {
+    // Target AABB covers x in [1.2, 1.8], y in [0.0, 1.8], z in [-0.3, 0.3].
+    // Ray at z = 0.33 misses with margin = 0.0 (tick_count == 2) but hits with
+    // margin = 0.05 (tick_count == 3 after super.tick() increments tick_count).
+    let mut world = TestWorld::new();
+    world.add_entity(TestWorld::make_entity(130, Vec3::new(1.5, 0.0, 0.0)));
+
+    let mut arrow = Arrow::new(EntityId(131), Vec3::new(0.0, 1.0, 0.33));
+    arrow.abstract_arrow.projectile.tick_count = 2;
+    arrow.abstract_arrow.projectile.delta_movement = Vec3::new(3.0, 0.0, 0.0);
+    let mut rng = LegacyRandomSource::new(8);
+    arrow.tick(&mut world, &mut rng);
+
+    assert_eq!(world.damage_log.len(), 1);
+    assert_eq!(world.damage_log[0].0, EntityId(130));
+
+    // Same check for ThrownTrident.
+    let mut world = TestWorld::new();
+    world.add_entity(TestWorld::make_entity(132, Vec3::new(1.5, 0.0, 0.0)));
+
+    let mut trident = ThrownTrident::new(EntityId(133), Vec3::new(0.0, 1.0, 0.33), 0, false);
+    trident.abstract_arrow.projectile.tick_count = 2;
+    trident.abstract_arrow.projectile.delta_movement = Vec3::new(3.0, 0.0, 0.0);
+    trident.tick(&mut world, &mut rng);
+
+    assert_eq!(world.damage_log.len(), 1);
+    assert_eq!(world.damage_log[0].0, EntityId(132));
 }
 
 #[test]
