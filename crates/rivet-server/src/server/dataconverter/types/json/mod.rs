@@ -51,7 +51,7 @@ impl JsonNode {
     fn numeric_double_value(&self) -> Option<f64> {
         match self {
             Self::Number(n) => Some(n.double_value()),
-            Self::ParsedNumber(n) => Some(n.as_f64().unwrap_or(0.0)),
+            Self::ParsedNumber(n) => Some(parsed_number_as_f64(n)),
             _ => None,
         }
     }
@@ -177,7 +177,7 @@ impl JsonNode {
             Self::ParsedNumber(n) => Some(
                 n.as_str()
                     .parse::<f32>()
-                    .unwrap_or_else(|_| n.as_f64().unwrap_or(0.0) as f32),
+                    .unwrap_or_else(|_| parsed_number_as_f64(n) as f32),
             ),
             Self::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
             Self::String(s) if compressed => s.parse::<i32>().ok().map(|v| v as f32),
@@ -188,7 +188,7 @@ impl JsonNode {
     pub(crate) fn as_double(&self, compressed: bool) -> Option<f64> {
         match self {
             Self::Number(n) => Some(n.double_value()),
-            Self::ParsedNumber(n) => Some(n.as_f64().unwrap_or(0.0)),
+            Self::ParsedNumber(n) => Some(parsed_number_as_f64(n)),
             Self::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
             Self::String(s) if compressed => s.parse::<i32>().ok().map(f64::from),
             _ => None,
@@ -365,7 +365,7 @@ pub(crate) fn convert_parsed_number_to_generic_number(n: &JsonNumber) -> Number 
         }
         return Number::Long(l);
     }
-    let d = n.as_f64().unwrap_or(0.0);
+    let d = parsed_number_as_f64(n);
     let f = d as f32;
     if f64::from(f) == d {
         Number::Float(f)
@@ -469,12 +469,19 @@ pub(crate) fn parse_decimal_trunc_wrapping_i64(s: &str) -> i64 {
     }
 }
 
+/// Parses a `serde_json::Number` to `f64`, falling back to `str::parse::<f64>()`
+/// so overflowing values like `1e400` become `+/-inf` as in Java `Double.parseDouble`.
+fn parsed_number_as_f64(n: &JsonNumber) -> f64 {
+    n.as_f64()
+        .unwrap_or_else(|| n.as_str().parse::<f64>().unwrap_or(0.0))
+}
+
 /// Converts a parsed `serde_json::Number` to `Number` for `get_number()` reads.
 pub(crate) fn parsed_number_to_number(n: &JsonNumber) -> Number {
     if let Some(l) = n.as_i64().or_else(|| parse_decimal_exact_i64(n.as_str())) {
         Number::Long(l)
     } else {
-        Number::Double(n.as_f64().unwrap_or(0.0))
+        Number::Double(parsed_number_as_f64(n))
     }
 }
 
@@ -737,6 +744,21 @@ mod tests {
         l_typed.add_byte(1);
         l_typed.add_float(2.5);
         assert_eq!(l_parsed, l_typed);
+
+        let parsed_inf: serde_json::Map<String, JsonValue> =
+            serde_json::from_str(r#"{"v": 1e400, "neg": -1e400}"#).unwrap();
+        let parsed_zero: serde_json::Map<String, JsonValue> =
+            serde_json::from_str(r#"{"v": 0, "neg": 0}"#).unwrap();
+        let m_inf = JsonMapType::from_json(&parsed_inf, false);
+        let m_zero = JsonMapType::from_json(&parsed_zero, false);
+        assert_ne!(m_inf, m_zero);
+        assert_eq!(m_inf.get_double("v"), f64::INFINITY);
+        assert_eq!(m_inf.get_double("neg"), f64::NEG_INFINITY);
+
+        let mut m_typed_inf = JsonMapType::new(false);
+        m_typed_inf.set_double("v", f64::INFINITY);
+        m_typed_inf.set_double("neg", f64::NEG_INFINITY);
+        assert_eq!(m_inf, m_typed_inf);
     }
 
     #[test]
