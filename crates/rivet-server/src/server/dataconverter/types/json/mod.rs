@@ -137,11 +137,108 @@ pub(crate) fn number_to_string(n: Number) -> String {
     }
 }
 
+/// Parses a JSON decimal/scientific number string as an exact `i64`, matching
+/// Java's `BigDecimal.longValueExact()`. Returns `None` if the value has a
+/// non-zero fractional part or falls outside `[i64::MIN, i64::MAX]`.
+pub(crate) fn parse_decimal_exact_i64(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (neg, rest) = if let Some(r) = s.strip_prefix('-') {
+        (true, r)
+    } else if let Some(r) = s.strip_prefix('+') {
+        (false, r)
+    } else {
+        (false, s)
+    };
+
+    let (mantissa, exp_str) = match rest.find(['e', 'E']) {
+        Some(idx) => (&rest[..idx], Some(&rest[idx + 1..])),
+        None => (rest, None),
+    };
+
+    let (int_part, frac_part) = match mantissa.find('.') {
+        Some(idx) => (&mantissa[..idx], &mantissa[idx + 1..]),
+        None => (mantissa, ""),
+    };
+
+    if int_part.is_empty() && frac_part.is_empty() {
+        return None;
+    }
+    if !int_part.bytes().all(|b| b.is_ascii_digit())
+        || !frac_part.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+
+    let mut digits = String::with_capacity(int_part.len() + frac_part.len());
+    digits.push_str(int_part);
+    digits.push_str(frac_part);
+    let trimmed = digits.trim_start_matches('0');
+    if trimmed.is_empty() {
+        return Some(0);
+    }
+
+    let exp: i64 = match exp_str {
+        Some(es) => es.parse::<i64>().ok()?,
+        None => 0,
+    };
+    let frac_len = i64::try_from(frac_part.len()).ok()?;
+    let scale_exp = exp.checked_sub(frac_len)?;
+
+    let (int_digits, trailing_zeros): (&str, usize) = if scale_exp < 0 {
+        let shift = usize::try_from(-scale_exp).ok()?;
+        if trimmed.len() <= shift {
+            return None;
+        }
+        let split = trimmed.len() - shift;
+        if trimmed.as_bytes()[split..].iter().any(|&b| b != b'0') {
+            return None;
+        }
+        (&trimmed[..split], 0)
+    } else {
+        let tz = usize::try_from(scale_exp).ok()?;
+        (trimmed, tz)
+    };
+
+    // i64::MIN has 19 decimal digits (9223372036854775808).
+    if int_digits.len().checked_add(trailing_zeros)? > 19 {
+        return None;
+    }
+
+    let mut val: u64 = 0;
+    for b in int_digits.bytes() {
+        val = val * 10 + u64::from(b - b'0');
+    }
+    for _ in 0..trailing_zeros {
+        val = val.checked_mul(10)?;
+    }
+
+    if neg {
+        let max_pos = i64::MAX as u64;
+        if val <= max_pos {
+            Some(-(val as i64))
+        } else if val == max_pos + 1 {
+            Some(i64::MIN)
+        } else {
+            None
+        }
+    } else if val <= i64::MAX as u64 {
+        Some(val as i64)
+    } else {
+        None
+    }
+}
+
 /// Converts a parsed `serde_json::Number` to `Number`, matching Paper's
 /// `JsonTypeUtil.convertBDToGeneric` (narrows exact integers to smallest of
 /// `Byte`/`Short`/`Int`/`Long`; floats to `Float` if lossless, else `Double`).
 pub(crate) fn convert_parsed_number_to_generic_number(n: &JsonNumber) -> Number {
-    if let Some(l) = n.as_i64() {
+    if let Some(l) = n
+        .as_i64()
+        .or_else(|| parse_decimal_exact_i64(n.as_str()))
+    {
         let b = l as i8;
         if i64::from(b) == l {
             return Number::Byte(b);
@@ -157,28 +254,6 @@ pub(crate) fn convert_parsed_number_to_generic_number(n: &JsonNumber) -> Number 
         return Number::Long(l);
     }
     let d = n.as_f64().unwrap_or(0.0);
-    // Check if float has an exact integer value representable in i64 (e.g. 1.0)
-    // Note: in Java BigDecimal("1.0").longValueExact() succeeds and returns 1L.
-    if d.is_finite()
-        && d.fract() == 0.0
-        && d >= (i64::MIN as f64)
-        && d < 9_223_372_036_854_775_808.0_f64
-    {
-        let l = d as i64;
-        let b = l as i8;
-        if i64::from(b) == l {
-            return Number::Byte(b);
-        }
-        let s = l as i16;
-        if i64::from(s) == l {
-            return Number::Short(s);
-        }
-        let i = l as i32;
-        if i64::from(i) == l {
-            return Number::Int(i);
-        }
-        return Number::Long(l);
-    }
     let f = d as f32;
     if f64::from(f) == d {
         Number::Float(f)
@@ -351,6 +426,28 @@ mod tests {
         assert!(matches!(
             Types::JSON.base_to_generic(&d),
             Some(Generic::Double(_))
+        ));
+
+        // Exact decimal integer above 2^53 must not round through f64.
+        let exact_big = serde_json::from_str::<JsonValue>("9007199254740993.0").unwrap();
+        assert!(matches!(
+            Types::JSON.base_to_generic(&exact_big),
+            Some(Generic::Long(9_007_199_254_740_993))
+        ));
+        let exact_min = serde_json::from_str::<JsonValue>("-9223372036854775808.00").unwrap();
+        assert!(matches!(
+            Types::JSON.base_to_generic(&exact_min),
+            Some(Generic::Long(i64::MIN))
+        ));
+        let sci_int = serde_json::from_str::<JsonValue>("1.5e2").unwrap();
+        assert!(matches!(
+            Types::JSON.base_to_generic(&sci_int),
+            Some(Generic::Short(150))
+        ));
+        let neg_zero = serde_json::from_str::<JsonValue>("-0.0").unwrap();
+        assert!(matches!(
+            Types::JSON.base_to_generic(&neg_zero),
+            Some(Generic::Byte(0))
         ));
     }
 
