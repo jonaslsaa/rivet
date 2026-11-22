@@ -446,7 +446,8 @@ impl LivingEntity {
             death_time: self.death_time,
         });
         if self.death_time >= DEATH_REMOVAL_TICKS && !self.entity.is_removed() {
-            self.entity.removal_reason = Some(EntityRemovalReason::Killed);
+            self.entity
+                .request_remove_taken(ctx, EntityRemovalReason::Killed);
         }
     }
 
@@ -461,8 +462,12 @@ impl LivingEntity {
         if self.entity.entity_type.despawn_time >= 0
             && self.entity.total_entity_age >= self.entity.entity_type.despawn_time
         {
-            ctx.record_event(LifecycleEvent::Despawn { id: self.entity.id });
-            self.entity.removal_reason = Some(EntityRemovalReason::Discarded);
+            if self
+                .entity
+                .request_remove_taken(ctx, EntityRemovalReason::Discarded)
+            {
+                ctx.record_event(LifecycleEvent::Despawn { id: self.entity.id });
+            }
         } else {
             run_base_tick(self, ctx);
         }

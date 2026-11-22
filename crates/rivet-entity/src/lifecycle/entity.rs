@@ -542,13 +542,43 @@ impl Entity {
     // Core tick & baseTick (explicit parent methods called by subclasses)
     // -------------------------------------------------------------------------
 
+    /// Requests removal of a currently-taken entity (`Entity#setRemoved` during tick/despawn).
+    ///
+    /// Mirrors `LevelCtx::remove_entity`: respects `ctx.section_update_lock`, preserves the
+    /// first `removal_reason`, marks `valid = false`, detaches from its vehicle when
+    /// `reason.should_destroy()`, and queues post-putback cleanup (`eject_passengers` and
+    /// `LifecycleEvent::EntityRemoved`) on `ctx`.
+    pub(crate) fn request_remove_taken(
+        &mut self,
+        ctx: &mut LevelCtx,
+        reason: EntityRemovalReason,
+    ) -> bool {
+        if ctx.section_update_lock.contains(&self.id) {
+            return false;
+        }
+        let first_time = self.removal_reason.is_none();
+        if first_time {
+            self.removal_reason = Some(reason);
+        }
+        self.valid = false;
+        let effective_reason = self.removal_reason.unwrap_or(reason);
+        if removal_reason_should_destroy(effective_reason) {
+            ctx.stop_riding_taken(self, false);
+        }
+        if first_time {
+            ctx.queue_pending_removal(self.id, effective_reason);
+        }
+        true
+    }
+
     /// Paper `Entity#tick()`.
     pub fn entity_tick(&mut self, ctx: &mut LevelCtx) {
         if self.entity_type.despawn_time >= 0
             && self.total_entity_age >= self.entity_type.despawn_time
         {
-            ctx.record_event(LifecycleEvent::Despawn { id: self.id });
-            self.removal_reason = Some(EntityRemovalReason::Discarded);
+            if self.request_remove_taken(ctx, EntityRemovalReason::Discarded) {
+                ctx.record_event(LifecycleEvent::Despawn { id: self.id });
+            }
             return;
         }
         self.entity_base_tick(ctx);
@@ -620,7 +650,7 @@ impl Entity {
         );
         if self.pos.y < threshold {
             ctx.record_event(LifecycleEvent::BelowWorld { id: self.id });
-            self.removal_reason = Some(EntityRemovalReason::Discarded);
+            self.request_remove_taken(ctx, EntityRemovalReason::Discarded);
         }
     }
 

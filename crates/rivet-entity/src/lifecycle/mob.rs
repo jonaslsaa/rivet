@@ -284,11 +284,17 @@ impl Mob {
         if ctx.difficulty == Difficulty::Peaceful
             && !self.living.entity.entity_type.allowed_in_peaceful
         {
-            self.living.entity.removal_reason = Some(EntityRemovalReason::Discarded);
-            ctx.record_event(LifecycleEvent::Despawn {
-                id: self.living.entity.id,
-            });
-            return true;
+            if self
+                .living
+                .entity
+                .request_remove_taken(ctx, EntityRemovalReason::Discarded)
+            {
+                ctx.record_event(LifecycleEvent::Despawn {
+                    id: self.living.entity.id,
+                });
+                return true;
+            }
+            return false;
         }
 
         if self.persistence_required || self.requires_custom_persistence {
@@ -307,22 +313,34 @@ impl Mob {
         let dist_sqr = dx * dx + dy * dy + dz * dz;
 
         if dist_sqr > HARD_DESPAWN_DISTANCE_SQR {
-            self.living.entity.removal_reason = Some(EntityRemovalReason::Discarded);
-            ctx.record_event(LifecycleEvent::Despawn {
-                id: self.living.entity.id,
-            });
-            return true;
+            if self
+                .living
+                .entity
+                .request_remove_taken(ctx, EntityRemovalReason::Discarded)
+            {
+                ctx.record_event(LifecycleEvent::Despawn {
+                    id: self.living.entity.id,
+                });
+                return true;
+            }
+            return false;
         }
 
         if self.no_action_time > 600
             && self.living.entity.random.next_int_bound(800) == 0
             && dist_sqr > SOFT_DESPAWN_DISTANCE_SQR
         {
-            self.living.entity.removal_reason = Some(EntityRemovalReason::Discarded);
-            ctx.record_event(LifecycleEvent::Despawn {
-                id: self.living.entity.id,
-            });
-            return true;
+            if self
+                .living
+                .entity
+                .request_remove_taken(ctx, EntityRemovalReason::Discarded)
+            {
+                ctx.record_event(LifecycleEvent::Despawn {
+                    id: self.living.entity.id,
+                });
+                return true;
+            }
+            return false;
         }
 
         if dist_sqr < SOFT_DESPAWN_DISTANCE_SQR {

@@ -249,6 +249,7 @@ pub struct LevelCtx {
     /// Test/plugin hook: cancels non-suppressed dismount attempts (`EntityDismountEvent`).
     pub cancel_dismount: bool,
     pub events: Vec<LifecycleEvent>,
+    pending_removals: Vec<(i32, EntityRemovalReason)>,
 }
 
 impl Default for LevelCtx {
@@ -276,6 +277,7 @@ impl LevelCtx {
             cancel_mount: false,
             cancel_dismount: false,
             events: Vec::new(),
+            pending_removals: Vec::new(),
         }
     }
 
@@ -382,6 +384,7 @@ impl LevelCtx {
 
         let passengers = entity.entity().passengers.clone();
         self.put_back_entity(entity);
+        self.flush_pending_removals();
 
         for passenger_id in passengers {
             self.tick_passenger(id, passenger_id, is_active);
@@ -427,6 +430,7 @@ impl LevelCtx {
 
         let sub_passengers = passenger.entity().passengers.clone();
         self.put_back_entity(passenger);
+        self.flush_pending_removals();
 
         for sub_id in sub_passengers {
             self.tick_passenger(passenger_id, sub_id, is_active);
@@ -728,6 +732,20 @@ impl LevelCtx {
         };
         for passenger_id in passengers.into_iter().rev() {
             self.stop_riding(passenger_id, false);
+        }
+    }
+
+    pub(crate) fn queue_pending_removal(&mut self, id: i32, reason: EntityRemovalReason) {
+        self.pending_removals.push((id, reason));
+    }
+
+    pub(crate) fn flush_pending_removals(&mut self) {
+        let pending = std::mem::take(&mut self.pending_removals);
+        for (id, reason) in pending {
+            if reason != EntityRemovalReason::UnloadedToChunk {
+                self.eject_passengers(id);
+            }
+            self.record_event(LifecycleEvent::EntityRemoved { id, reason });
         }
     }
 

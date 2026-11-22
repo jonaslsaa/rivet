@@ -508,6 +508,45 @@ fn drowning_death_timer_and_peaceful_despawn() {
         mob.living.entity.removal_reason,
         Some(EntityRemovalReason::Discarded)
     );
+    assert!(!mob.living.entity.valid);
+}
+
+#[test]
+fn automatic_removal_runs_lifecycle_cleanup_and_ejects_passengers() {
+    let mut ctx = LevelCtx::new();
+    let pig_id = ctx.next_entity_id();
+    let rider_id = ctx.next_entity_id();
+
+    let mut pig = Mob::new(pig_id, pig_meta(), 10.0, 30);
+    pig.living.health = 0.0;
+    pig.living.death_time = 19;
+    ctx.add_entity(LifecycleEntity::Mob(pig));
+    ctx.add_entity(LifecycleEntity::Living(LivingEntity::new(
+        rider_id,
+        zombie_meta(),
+        20.0,
+        31,
+    )));
+    assert!(ctx.start_riding(rider_id, pig_id, false, false));
+    ctx.take_events();
+
+    ctx.tick_all(true);
+
+    // Dying vehicle at death_time == 20 must eject its passenger, clear valid, and emit EntityRemoved
+    assert_eq!(ctx.get(rider_id).unwrap().entity().vehicle, None);
+    let evs = ctx.take_events();
+    assert!(evs.iter().any(|e| matches!(
+        e,
+        LifecycleEvent::Dismount { passenger_id, vehicle_id }
+            if *passenger_id == rider_id && *vehicle_id == pig_id
+    )));
+    assert!(evs.iter().any(|e| matches!(
+        e,
+        LifecycleEvent::EntityRemoved {
+            id,
+            reason: EntityRemovalReason::Killed,
+        } if *id == pig_id
+    )));
 }
 
 #[test]
