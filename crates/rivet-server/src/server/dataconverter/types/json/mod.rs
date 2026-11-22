@@ -14,6 +14,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use indexmap::IndexMap;
+use rivet_serialization::float_format::{java_double_to_string, java_float_to_string};
 use rivet_serialization::number::Number;
 use serde_json::{Map as JsonObject, Number as JsonNumber, Value as JsonValue};
 
@@ -184,9 +185,17 @@ pub(crate) fn number_to_json_value(n: Number) -> JsonValue {
         Number::Int(v) => JsonValue::Number(JsonNumber::from(v)),
         Number::Long(v) => JsonValue::Number(JsonNumber::from(v)),
         Number::Float(v) => {
-            JsonNumber::from_f64(f64::from(v)).map_or(JsonValue::Null, JsonValue::Number)
+            if !v.is_finite() {
+                return JsonValue::Null;
+            }
+            JsonValue::Number(JsonNumber::from_string_unchecked(java_float_to_string(v)))
         }
-        Number::Double(v) => JsonNumber::from_f64(v).map_or(JsonValue::Null, JsonValue::Number),
+        Number::Double(v) => {
+            if !v.is_finite() {
+                return JsonValue::Null;
+            }
+            JsonValue::Number(JsonNumber::from_string_unchecked(java_double_to_string(v)))
+        }
     }
 }
 
@@ -196,8 +205,8 @@ pub(crate) fn number_to_string(n: Number) -> String {
         Number::Short(v) => v.to_string(),
         Number::Int(v) => v.to_string(),
         Number::Long(v) => v.to_string(),
-        Number::Float(v) => v.to_string(),
-        Number::Double(v) => v.to_string(),
+        Number::Float(v) => java_float_to_string(v),
+        Number::Double(v) => java_double_to_string(v),
     }
 }
 
@@ -617,6 +626,35 @@ mod tests {
         assert_eq!(list.get_int(1), i32::MAX);
         assert_eq!(list.get_byte(2), 0);
         assert_eq!(list.get_long(3), i64::MIN);
+    }
+
+    #[test]
+    fn json_float_double_rendering_matches_java() {
+        let mut map = JsonMapType::new(false);
+        map.set_float("f", 0.05_f32);
+        map.set_float("whole_f", 1.0_f32);
+        map.set_double("whole_d", 2.0_f64);
+
+        let serialized = serde_json::to_string(&map.get_json()).unwrap();
+        assert_eq!(serialized, r#"{"f":0.05,"whole_f":1.0,"whole_d":2.0}"#);
+
+        // Forced string reads (JsonPrimitive.getAsString -> Number.toString) preserve Java float/double formatting.
+        assert_eq!(map.get_string_or("f", "fallback".to_owned()), "fallback");
+        let mut compressed = JsonMapType::new(true);
+        compressed.set_float("f", 0.05_f32);
+        compressed.set_float("whole_f", 1.0_f32);
+        compressed.set_double("whole_d", 2.0_f64);
+        assert_eq!(compressed.get_string("f").as_deref(), Some("0.05"));
+        assert_eq!(compressed.get_string("whole_f").as_deref(), Some("1.0"));
+        assert_eq!(compressed.get_string("whole_d").as_deref(), Some("2.0"));
+
+        let mut list = JsonListType::new(true);
+        list.add_float(0.05_f32);
+        list.add_float(1.0_f32);
+        list.add_double(2.0_f64);
+        assert_eq!(list.get_string(0), "0.05");
+        assert_eq!(list.get_string(1), "1.0");
+        assert_eq!(list.get_string(2), "2.0");
     }
 
     #[test]
