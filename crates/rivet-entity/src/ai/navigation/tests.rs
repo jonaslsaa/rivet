@@ -784,11 +784,20 @@ fn fly_node_evaluator_checks_full_mob_bounding_box() {
     let mut ctx = PathfindingContext::new(&world, None, BlockPos::new(0, 2, 0));
 
     // Origin cell (1, 2, 0) is air, but (1, 3, 0) is solid inside the mob's 2x2x2 volume
-    assert_eq!(eval.get_path_type_of_mob(&mut ctx, &mob, 1, 2, 0), PathType::Blocked);
+    assert_eq!(
+        eval.get_path_type_of_mob(&mut ctx, &mob, 1, 2, 0),
+        PathType::Blocked
+    );
     // Origin cell (3, 2, 0) is air, but (4, 2, 1) is solid inside the mob's 2x2x2 volume
-    assert_eq!(eval.get_path_type_of_mob(&mut ctx, &mob, 3, 2, 0), PathType::Blocked);
+    assert_eq!(
+        eval.get_path_type_of_mob(&mut ctx, &mob, 3, 2, 0),
+        PathType::Blocked
+    );
     // Clear cell at (8, 5, 8) is Open
-    assert_eq!(eval.get_path_type_of_mob(&mut ctx, &mob, 8, 5, 8), PathType::Open);
+    assert_eq!(
+        eval.get_path_type_of_mob(&mut ctx, &mob, 8, 5, 8),
+        PathType::Open
+    );
 }
 
 #[test]
@@ -868,4 +877,16 @@ fn aabb_collision_free_detects_protruding_fence_top_from_cell_below() {
     // Box starting at y = 2.5 is clear of the fence top
     let clear = Aabb::new(0.2, 2.5, 0.2, 0.8, 3.5, 0.8);
     assert!(world.is_aabb_collision_free(clear));
+}
+
+#[test]
+fn direct_movement_dda_detects_clipped_diagonal_block_corner() {
+    let mut world = TestWorld::flat(0);
+    // Solid pillar at (1, 1, 0)
+    world.set(1, 1, 0, BlockPathInfo::SOLID);
+
+    // Crosses x=1.0 at z=0.95 (entering (1, 1, 0)) before reaching (1, 1, 1)
+    let from = Vec3::new(0.8, 1.5, 0.85);
+    let to = Vec3::new(1.2, 1.5, 1.05);
+    assert!(!world.is_clear_for_movement_between(from, to, false));
 }

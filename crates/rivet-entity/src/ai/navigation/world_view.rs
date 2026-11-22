@@ -320,24 +320,113 @@ pub trait PathWorldView {
     }
 
     /// Mirrors `PathNavigation.isClearForMovementBetween(Mob, Vec3, Vec3, boolean)`.
+    ///
+    /// Uses Paper's 3D DDA voxel traversal (`BlockGetter.traverseBlocks`) so every block
+    /// cell intersected by the segment `from..to` is checked without skipping corners.
     fn is_clear_for_movement_between(&self, from: Vec3, to: Vec3, include_fluids: bool) -> bool {
-        let dx = to.x - from.x;
-        let dy = to.y - from.y;
-        let dz = to.z - from.z;
-        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-        let steps = mth::ceil_d(dist * 2.0).max(1);
-        for i in 0..=steps {
-            let t = i as f64 / steps as f64;
-            let pos = BlockPos::new(
-                mth::floor_d(from.x + dx * t),
-                mth::floor_d(from.y + dy * t),
-                mth::floor_d(from.z + dz * t),
-            );
+        let is_cell_clear = |pos: BlockPos| -> bool {
             let info = self.block_info(pos);
             if !info.is_loaded || info.has_collision() {
                 return false;
             }
             if include_fluids && (info.is_water || info.is_lava) {
+                return false;
+            }
+            true
+        };
+
+        if from == to {
+            return is_cell_clear(BlockPos::new(
+                mth::floor_d(from.x),
+                mth::floor_d(from.y),
+                mth::floor_d(from.z),
+            ));
+        }
+
+        let lerp = |delta: f64, start: f64, end: f64| start + delta * (end - start);
+        let frac = |v: f64| v - mth::floor_d(v) as f64;
+        let sign = |v: f64| -> i32 {
+            if v == 0.0 {
+                0
+            } else if v > 0.0 {
+                1
+            } else {
+                -1
+            }
+        };
+
+        let to_x = lerp(-1.0e-7, to.x, from.x);
+        let to_y = lerp(-1.0e-7, to.y, from.y);
+        let to_z = lerp(-1.0e-7, to.z, from.z);
+        let from_x = lerp(-1.0e-7, from.x, to.x);
+        let from_y = lerp(-1.0e-7, from.y, to.y);
+        let from_z = lerp(-1.0e-7, from.z, to.z);
+
+        let mut cur_x = mth::floor_d(from_x);
+        let mut cur_y = mth::floor_d(from_y);
+        let mut cur_z = mth::floor_d(from_z);
+        if !is_cell_clear(BlockPos::new(cur_x, cur_y, cur_z)) {
+            return false;
+        }
+
+        let dx = to_x - from_x;
+        let dy = to_y - from_y;
+        let dz = to_z - from_z;
+        let sign_x = sign(dx);
+        let sign_y = sign(dy);
+        let sign_z = sign(dz);
+        let t_delta_x = if sign_x == 0 {
+            f64::MAX
+        } else {
+            f64::from(sign_x) / dx
+        };
+        let t_delta_y = if sign_y == 0 {
+            f64::MAX
+        } else {
+            f64::from(sign_y) / dy
+        };
+        let t_delta_z = if sign_z == 0 {
+            f64::MAX
+        } else {
+            f64::from(sign_z) / dz
+        };
+        let mut t_x = t_delta_x
+            * if sign_x > 0 {
+                1.0 - frac(from_x)
+            } else {
+                frac(from_x)
+            };
+        let mut t_y = t_delta_y
+            * if sign_y > 0 {
+                1.0 - frac(from_y)
+            } else {
+                frac(from_y)
+            };
+        let mut t_z = t_delta_z
+            * if sign_z > 0 {
+                1.0 - frac(from_z)
+            } else {
+                frac(from_z)
+            };
+
+        while t_x <= 1.0 || t_y <= 1.0 || t_z <= 1.0 {
+            if t_x < t_y {
+                if t_x < t_z {
+                    cur_x += sign_x;
+                    t_x += t_delta_x;
+                } else {
+                    cur_z += sign_z;
+                    t_z += t_delta_z;
+                }
+            } else if t_y < t_z {
+                cur_y += sign_y;
+                t_y += t_delta_y;
+            } else {
+                cur_z += sign_z;
+                t_z += t_delta_z;
+            }
+
+            if !is_cell_clear(BlockPos::new(cur_x, cur_y, cur_z)) {
                 return false;
             }
         }
