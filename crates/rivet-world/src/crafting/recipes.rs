@@ -666,6 +666,8 @@ impl ImbueRecipe {
         let potion_key = Identifier::with_default_namespace("potion_contents");
         if let Some(potion) = source.components().get(&potion_key) {
             out.components_mut().insert(potion_key, potion.clone());
+        } else {
+            out.components_mut().remove(&potion_key);
         }
         out
     }

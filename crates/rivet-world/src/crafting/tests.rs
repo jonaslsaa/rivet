@@ -998,3 +998,42 @@ fn json_result_component_removals_are_parsed_and_applied() {
         Some("epic")
     );
 }
+
+#[test]
+fn imbue_clears_template_potion_contents_when_source_has_none() {
+    let imbue_json = json!({
+        "type": "minecraft:crafting_imbue",
+        "category": "misc",
+        "source": "minecraft:lingering_potion",
+        "material": "minecraft:arrow",
+        "result": {
+            "id": "minecraft:tipped_arrow",
+            "count": 8,
+            "components": {
+                "minecraft:potion_contents": "minecraft:poison"
+            }
+        }
+    });
+    let recipe = parse_recipe_json(&imbue_json, &empty_tag_resolver).unwrap();
+    let input = CraftingInput::of(
+        3,
+        3,
+        vec![
+            stack("arrow", 1),
+            stack("arrow", 1),
+            stack("arrow", 1),
+            stack("arrow", 1),
+            stack("lingering_potion", 1),
+            stack("arrow", 1),
+            stack("arrow", 1),
+            stack("arrow", 1),
+            stack("arrow", 1),
+        ],
+    );
+    assert!(recipe.matches_crafting(&input));
+    let out = recipe.assemble_crafting(&input).unwrap();
+    assert!(
+        !out.components()
+            .contains_key(&Identifier::with_default_namespace("potion_contents"))
+    );
+}
