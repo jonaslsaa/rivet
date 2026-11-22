@@ -154,8 +154,19 @@ impl StructureTemplateSource for FilesystemTemplateSource {
         }
         let tag = if self.snbt {
             let text = fs::read_to_string(&path)?;
-            nbt_utils::snbt_to_structure(&text)
-                .map_err(|e| StructureTemplateError::Nbt(format!("{e:?}")))?
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                nbt_utils::snbt_to_structure(&text)
+            })) {
+                Ok(res) => res.map_err(|e| StructureTemplateError::Nbt(format!("{e:?}")))?,
+                Err(payload) => {
+                    let msg = payload
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| payload.downcast_ref::<&str>().copied())
+                        .unwrap_or("malformed packed SNBT structure");
+                    return Err(StructureTemplateError::Nbt(msg.to_string()));
+                }
+            }
         } else {
             let mut reader = BufReader::new(File::open(&path)?);
             nbt_io::read_compressed(&mut reader, &mut NbtAccounter::unlimited_heap())
@@ -457,6 +468,34 @@ mod tests {
         let fs_source = FilesystemTemplateSource::nbt(&dir);
         assert_eq!(fs_source.list(), vec![id.clone()]);
         assert!(fs_source.load(&id).unwrap().is_some());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snbt_source_returns_error_on_missing_palette_entry() {
+        let dir = std::env::temp_dir().join(format!(
+            "rivet_snbt_bad_palette_test_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let id = Identifier::from_namespace_and_path("minecraft", "bad_palette");
+        let file = dir
+            .join("minecraft")
+            .join("structure")
+            .join("bad_palette.snbt");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(
+            &file,
+            r#"{size:[1,1,1],palette:["minecraft:stone"],data:[{pos:[0,0,0],state:"minecraft:dirt"}],entities:[]}"#,
+        )
+        .unwrap();
+
+        let source = FilesystemTemplateSource::snbt(&dir);
+        let err = source
+            .load(&id)
+            .expect_err("missing palette entry should return Err instead of panicking");
+        assert!(matches!(err, StructureTemplateError::Nbt(_)));
 
         let _ = fs::remove_dir_all(&dir);
     }
