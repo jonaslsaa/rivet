@@ -175,6 +175,7 @@ pub struct StructureTemplate {
     entity_info_list: Vec<StructureEntityInfo>,
     size: [i32; 3],
     author: String,
+    persistent_data_container: CompoundTag,
 }
 
 impl StructureTemplate {
@@ -189,6 +190,7 @@ impl StructureTemplate {
     pub const BLOCK_TAG_STATE: &'static str = "state";
     pub const BLOCK_TAG_NBT: &'static str = "nbt";
     pub const SIZE_TAG: &'static str = "size";
+    pub const BUKKIT_VALUES_TAG: &'static str = "BukkitValues";
 
     pub fn new() -> Self {
         Self {
@@ -196,6 +198,7 @@ impl StructureTemplate {
             entity_info_list: Vec::new(),
             size: [0, 0, 0],
             author: "?".to_string(),
+            persistent_data_container: CompoundTag::new(),
         }
     }
 
@@ -209,7 +212,16 @@ impl StructureTemplate {
             entity_info_list,
             size,
             author: "?".to_string(),
+            persistent_data_container: CompoundTag::new(),
         }
+    }
+
+    pub fn persistent_data_container(&self) -> &CompoundTag {
+        &self.persistent_data_container
+    }
+
+    pub fn persistent_data_container_mut(&mut self) -> &mut CompoundTag {
+        &mut self.persistent_data_container
     }
 
     pub fn get_size(&self) -> [i32; 3] {
@@ -597,12 +609,19 @@ impl StructureTemplate {
         );
         tag.put(Self::SIZE_TAG.to_string(), int_list_tag(&self.size));
         nbt_utils::add_current_data_version(tag);
+        if !self.persistent_data_container.is_empty() {
+            tag.put(
+                Self::BUKKIT_VALUES_TAG.to_string(),
+                Tag::Compound(self.persistent_data_container.clone()),
+            );
+        }
     }
 
     /// `StructureTemplate.load(HolderGetter<Block>, CompoundTag)` — exact Paper NBT schema.
     pub fn load(&mut self, tag: &CompoundTag) {
         self.palettes.clear();
         self.entity_info_list.clear();
+        self.persistent_data_container = CompoundTag::new();
 
         let size_list = get_list_slice(tag, Self::SIZE_TAG);
         self.size = [
@@ -647,6 +666,10 @@ impl StructureTemplate {
                     ));
                 }
             }
+        }
+
+        if let Some(Tag::Compound(bukkit_values)) = tag.get(Self::BUKKIT_VALUES_TAG) {
+            self.persistent_data_container = bukkit_values.clone();
         }
     }
 
@@ -891,5 +914,39 @@ mod tests {
     fn simple_palette_unknown_id_returns_air() {
         let palette = SimplePalette::new();
         assert_eq!(palette.state_for(999), air_state());
+    }
+
+    #[test]
+    fn bukkit_values_round_trip() {
+        let mut original = StructureTemplate::from_parts(
+            [1, 1, 1],
+            vec![Palette::new(vec![StructureBlockInfo::new(
+                BlockPos::ZERO,
+                BlockState::of(block_id("minecraft:stone")),
+                None,
+            )])],
+            Vec::new(),
+        );
+        original
+            .persistent_data_container_mut()
+            .put_string("my_plugin:key", "secret_value");
+
+        let mut tag = CompoundTag::new();
+        original.save(&mut tag);
+        assert!(tag.contains(StructureTemplate::BUKKIT_VALUES_TAG));
+
+        let mut loaded = StructureTemplate::new();
+        loaded.load(&tag);
+        assert_eq!(
+            loaded
+                .persistent_data_container()
+                .get_string("my_plugin:key")
+                .map(String::as_str),
+            Some("secret_value")
+        );
+
+        let mut re_saved = CompoundTag::new();
+        loaded.save(&mut re_saved);
+        assert!(re_saved.contains(StructureTemplate::BUKKIT_VALUES_TAG));
     }
 }
