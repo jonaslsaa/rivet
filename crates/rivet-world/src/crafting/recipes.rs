@@ -350,22 +350,45 @@ impl SmithingTrimRecipe {
             && self.addition.test(&input.addition)
     }
 
+    fn parse_trim_component(raw: &str) -> Option<(Identifier, Identifier)> {
+        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(raw) {
+            let material = map
+                .get("material")
+                .and_then(serde_json::Value::as_str)
+                .and_then(Identifier::try_parse)?;
+            let pattern = map
+                .get("pattern")
+                .and_then(serde_json::Value::as_str)
+                .and_then(Identifier::try_parse)?;
+            return Some((pattern, material));
+        }
+        None
+    }
+
     pub fn assemble(&self, input: &SmithingRecipeInput) -> ItemStack {
         // Paper `SmithingTrimRecipe.applyTrim`: resolve `PROVIDES_TRIM_MATERIAL`
         // from the addition stack (component override first, then vanilla item default).
-        let Some(material) = resolve_trim_material(&input.addition) else {
+        let Some(material_raw) = resolve_trim_material(&input.addition) else {
+            return ItemStack::empty();
+        };
+        let Some(material) = Identifier::try_parse(&material_raw) else {
             return ItemStack::empty();
         };
         let mut components = input.base.components().clone();
         let trim_key = Identifier::with_default_namespace("trim");
-        let new_trim = format!("{}:{material}", self.pattern);
-        // Paper: if the base already has the exact same trim, return EMPTY.
+        // Paper: if the base already has the exact same trim (pattern + material), return EMPTY.
         if components
             .get(&trim_key)
-            .is_some_and(|existing| existing == &new_trim)
+            .and_then(|existing| Self::parse_trim_component(existing))
+            .is_some_and(|(pat, mat)| pat == self.pattern && mat == material)
         {
             return ItemStack::empty();
         }
+        let new_trim = serde_json::json!({
+            "material": material.to_string(),
+            "pattern": self.pattern.to_string(),
+        })
+        .to_string();
         components.insert(trim_key, new_trim);
         ItemStack::with_components(input.base.item(), 1, components)
     }

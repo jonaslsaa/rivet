@@ -377,7 +377,7 @@ fn cooking_stonecutting_and_smithing_behavior() {
             .components()
             .get(&Identifier::with_default_namespace("trim"))
             .map(String::as_str),
-        Some("minecraft:ward:minecraft:gold")
+        Some(r#"{"material":"minecraft:gold","pattern":"minecraft:ward"}"#)
     );
     let repeat_trim_in = SmithingRecipeInput::new(
         stack("ward_armor_trim_smithing_template", 1),
@@ -385,6 +385,33 @@ fn cooking_stonecutting_and_smithing_behavior() {
         stack("gold_ingot", 1),
     );
     assert!(trim.assemble(&repeat_trim_in).is_empty());
+
+    // Pre-trimmed armor from a datapack JSON component (even with short identifiers)
+    // must also be detected as a duplicate trim and rejected.
+    let pretrimmed_json = json!({
+        "type": "minecraft:crafting_shapeless",
+        "ingredients": ["minecraft:diamond_chestplate"],
+        "result": {
+            "id": "minecraft:diamond_chestplate",
+            "components": {
+                "minecraft:trim": { "pattern": "ward", "material": "gold" }
+            }
+        }
+    });
+    let pretrimmed_recipe = parse_recipe_json(&pretrimmed_json, &empty_tag_resolver).unwrap();
+    let pretrimmed = pretrimmed_recipe
+        .assemble_crafting(&CraftingInput::of(
+            1,
+            1,
+            vec![stack("diamond_chestplate", 1)],
+        ))
+        .unwrap();
+    let pretrimmed_in = SmithingRecipeInput::new(
+        stack("ward_armor_trim_smithing_template", 1),
+        pretrimmed,
+        stack("gold_ingot", 1),
+    );
+    assert!(trim.assemble(&pretrimmed_in).is_empty());
 
     // Addition component `provides_trim_material` overrides the default material.
     let mut override_comps = BTreeMap::new();
@@ -404,7 +431,7 @@ fn cooking_stonecutting_and_smithing_behavior() {
             .components()
             .get(&Identifier::with_default_namespace("trim"))
             .map(String::as_str),
-        Some("minecraft:ward:minecraft:diamond")
+        Some(r#"{"material":"minecraft:diamond","pattern":"minecraft:ward"}"#)
     );
 
     // Addition with no trim material returns EMPTY.
