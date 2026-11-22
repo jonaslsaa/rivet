@@ -109,6 +109,13 @@ impl BaseContainerState {
         self.custom_name = input.get_string("CustomName").cloned();
     }
 
+    /// Clear any pending loot table reference once items are unpacked or mutated
+    /// (`RandomizableContainer.setLootTable(null)`).
+    pub fn clear_loot_table(&mut self) {
+        self.loot_table = None;
+        self.loot_table_seed = 0;
+    }
+
     /// `RandomizableContainer.trySaveLootTable(ValueOutput)`.
     ///
     /// Returns `true` if a loot table was present and written (in which case

@@ -511,3 +511,35 @@ fn container_nbt_preserves_typed_item_components() {
         Some("Excalibur")
     );
 }
+
+#[test]
+fn loot_table_container_clears_loot_table_on_item_mutation() {
+    let mut input = CompoundTag::new();
+    input.put_string("LootTable", "minecraft:chests/simple_dungeon");
+    input.put_long("LootTableSeed", 42);
+
+    let mut chest = ChestBlockEntity::new();
+    chest.load_additional(&input);
+    assert_eq!(
+        chest
+            .base
+            .loot_table
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("minecraft:chests/simple_dungeon")
+    );
+
+    chest.set_item(0, stack("minecraft:diamond", 3));
+    assert!(chest.base.loot_table.is_none());
+    assert_eq!(chest.base.loot_table_seed, 0);
+
+    let mut saved = CompoundTag::new();
+    chest.save_additional(&mut saved);
+    assert!(saved.get_string("LootTable").is_none());
+
+    let mut restored = ChestBlockEntity::new();
+    restored.load_additional(&saved);
+    assert_eq!(restored.get_item(0).item().name(), Some("minecraft:diamond"));
+    assert_eq!(restored.get_item(0).get_count(), 3);
+}

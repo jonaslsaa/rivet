@@ -387,6 +387,7 @@ impl Container for HopperBlockEntity {
     }
 
     fn remove_item(&mut self, slot: usize, count: i32) -> InventoryItemStack {
+        self.base.clear_loot_table();
         let result = ContainerHelper::remove_item(&mut self.items, slot, count);
         if !result.is_empty() {
             self.set_changed();
@@ -395,10 +396,12 @@ impl Container for HopperBlockEntity {
     }
 
     fn remove_item_no_update(&mut self, slot: usize) -> InventoryItemStack {
+        self.base.clear_loot_table();
         ContainerHelper::take_item(&mut self.items, slot)
     }
 
     fn set_item(&mut self, slot: usize, mut stack: InventoryItemStack) {
+        self.base.clear_loot_table();
         if slot >= HOPPER_CONTAINER_SIZE {
             return;
         }
@@ -417,6 +420,7 @@ impl Container for HopperBlockEntity {
     }
 
     fn clear_content(&mut self) {
+        self.base.clear_loot_table();
         for slot in &mut self.items {
             *slot = InventoryItemStack::empty();
         }
