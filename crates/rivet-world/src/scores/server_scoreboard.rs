@@ -307,6 +307,9 @@ impl ServerScoreboard {
 
     /// `ServerScoreboard.startTrackingObjective(Objective)`.
     pub fn start_tracking_objective(&mut self, objective_name: &str) {
+        if self.scoreboard.get_objective(objective_name).is_none() {
+            return;
+        }
         let packets = self.start_tracking_packets(objective_name);
         for packet in packets {
             self.pending_effects
