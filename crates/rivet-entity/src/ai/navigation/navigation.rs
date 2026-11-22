@@ -579,14 +579,17 @@ impl PathNavigation {
             } = &mut self.variant
                 && let Some(target) = *path_to_position
             {
-                let horiz_dist_sqr = (target.x as f64 + 0.5 - mob.pos.x).powi(2)
-                    + (target.z as f64 + 0.5 - mob.pos.z).powi(2);
-                let width_sqr = f64::from(mob.bb_width * mob.bb_width);
-                if horiz_dist_sqr < width_sqr
-                    || (mob.pos.y > target.y as f64
-                        && (target.x as f64 + 0.5 - mob.pos.x).powi(2)
-                            + (target.z as f64 + 0.5 - mob.pos.z).powi(2)
-                            < width_sqr)
+                let closer_to_center = |bp: BlockPos| {
+                    let dx = bp.x as f64 + 0.5 - mob.pos.x;
+                    let dy = bp.y as f64 + 0.5 - mob.pos.y;
+                    let dz = bp.z as f64 + 0.5 - mob.pos.z;
+                    let dist_sqr = dx * dx + dy * dy + dz * dz;
+                    let radius = f64::from(mob.bb_width);
+                    dist_sqr < radius * radius
+                };
+                let at_mob_y = BlockPos::new(target.x, mth::floor_d(mob.pos.y), target.z);
+                if closer_to_center(target)
+                    || (mob.pos.y > target.y as f64 && closer_to_center(at_mob_y))
                 {
                     *path_to_position = None;
                 } else {

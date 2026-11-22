@@ -832,3 +832,23 @@ fn walk_collision_cache_distinguishes_aabbs_with_same_min_corner() {
     assert!(!eval.has_collisions(&world, short_box));
     assert!(eval.has_collisions(&world, tall_box));
 }
+
+#[test]
+fn wall_climber_fallback_keeps_climbing_toward_elevated_target() {
+    let world = TestWorld::flat(0);
+    // Spider at (0.5, 1.0, 0.5) directly underneath elevated target (0, 6, 0)
+    let mut mob = MobPathingState::new(Vec3::new(0.5, 1.0, 0.5), 1.4, 0.9);
+    let mut nav = PathNavigation::wall_climber(64);
+    let mut mc = MoveControl::new();
+
+    // Create path to elevated target (0, 6, 0) which sets WallClimber's path_to_position,
+    // then clear the path so WallClimber's direct climbing fallback runs.
+    let _ = nav.move_to_xyz(&mut mob, &world, 0.5, 6.0, 0.5, 1.0, 0);
+    nav.path = None;
+    nav.speed_modifier = 1.0;
+    nav.tick(&mut mob, &world, &mut mc, 1);
+
+    // Must still want to move toward (0, 6, 0) instead of clearing path_to_position
+    assert!(mc.has_wanted());
+    assert_eq!(mc.wanted_y, 6.0);
+}
