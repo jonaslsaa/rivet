@@ -1,7 +1,6 @@
-//! Paper 26.2 `ServerPlayerGameMode` and `InteractionResult` port.
+//! Paper 26.2 `net.minecraft.server.level.ServerPlayerGameMode` port.
 //!
 //! Mirrors `working/Paper` commit `0a993450f129c4942c2a9ed45ba047412b4667cf`:
-//! - `net.minecraft.world.InteractionResult`
 //! - `net.minecraft.server.level.ServerPlayerGameMode`
 //!   (`tick`, `incrementDestroyProgress`, `handleBlockBreakAction`, `destroyAndAck`,
 //!   `useItemOn`, `useItem`)
@@ -12,99 +11,15 @@
 use rivet_registry::block_state::BlockState;
 use rivet_registry::core::{BlockPos, Direction, GameType, Vec3};
 
-use super::packets::{
-    BlockHitResult, ClientboundBlockChangedAckPacket, ClientboundBlockDestructionPacket,
-    ClientboundBlockUpdatePacket, InteractionHand, PlayerAction,
-};
+use super::block_hit_result::BlockHitResult;
+use super::clientbound_block_changed_ack_packet::ClientboundBlockChangedAckPacket;
+use super::clientbound_block_destruction_packet::ClientboundBlockDestructionPacket;
+use super::interaction_hand::InteractionHand;
+use super::interaction_result::InteractionResult;
+use super::packets::{ClientboundBlockUpdatePacket, PlayerAction};
 use super::validation::{
     DEFAULT_BLOCK_INTERACTION_RANGE, INTERACTION_RANGE_BUFFER, is_within_block_interaction_range,
 };
-
-/// `InteractionResult.SwingSource`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SwingSource {
-    None,
-    Client,
-    Server,
-}
-
-/// `InteractionResult.PaperSuccessContext`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct PaperSuccessContext {
-    pub placed_pos: Option<BlockPos>,
-    pub updated_block_entity: bool,
-}
-
-impl PaperSuccessContext {
-    pub fn placed_block_at(self, pos: BlockPos) -> Self {
-        Self {
-            placed_pos: Some(pos),
-            updated_block_entity: self.updated_block_entity,
-        }
-    }
-
-    pub fn updated_block_entity(self, updated_block_entity: bool) -> Self {
-        Self {
-            placed_pos: self.placed_pos,
-            updated_block_entity,
-        }
-    }
-}
-
-/// `net.minecraft.world.InteractionResult`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InteractionResult {
-    Success {
-        swing_source: SwingSource,
-        was_item_interaction: bool,
-        paper_context: PaperSuccessContext,
-    },
-    Fail,
-    Pass,
-    TryEmptyHandInteraction,
-}
-
-impl InteractionResult {
-    pub const SUCCESS: Self = Self::Success {
-        swing_source: SwingSource::Client,
-        was_item_interaction: true,
-        paper_context: PaperSuccessContext {
-            placed_pos: None,
-            updated_block_entity: false,
-        },
-    };
-
-    pub const SUCCESS_SERVER: Self = Self::Success {
-        swing_source: SwingSource::Server,
-        was_item_interaction: true,
-        paper_context: PaperSuccessContext {
-            placed_pos: None,
-            updated_block_entity: false,
-        },
-    };
-
-    pub const CONSUME: Self = Self::Success {
-        swing_source: SwingSource::None,
-        was_item_interaction: true,
-        paper_context: PaperSuccessContext {
-            placed_pos: None,
-            updated_block_entity: false,
-        },
-    };
-
-    /// `InteractionResult.consumesAction()`.
-    pub fn consumes_action(self) -> bool {
-        matches!(self, Self::Success { .. })
-    }
-
-    /// `Success.swingSource()` when `self` is `Success`.
-    pub fn swing_source(self) -> Option<SwingSource> {
-        match self {
-            Self::Success { swing_source, .. } => Some(swing_source),
-            _ => None,
-        }
-    }
-}
 
 /// Tick-thread view of the acting player passed into the interaction service.
 #[derive(Debug, Clone, Copy, PartialEq)]

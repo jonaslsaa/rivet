@@ -8,7 +8,9 @@
 //! - `net.minecraft.server.level.ServerPlayerGameMode`
 //! - `net.minecraft.server.network.ServerGamePacketListenerImpl` (interaction ingress
 //!   validation, sequence acknowledgement, and correction dispatch)
+//! - `net.minecraft.world.InteractionHand`
 //! - `net.minecraft.world.InteractionResult`
+//! - `net.minecraft.world.phys.BlockHitResult`
 //! - `net.minecraft.world.entity.player.Player` (block interaction reach and adventure
 //!   restriction checks)
 //!
@@ -19,20 +21,31 @@
 //!   [`CorrectionPacket`] outputs for E9 to dispatch on the player's outbound channel.
 //! - Target-entity attacks belong to #23 and container clicks belong to #22.
 
-pub mod game_mode;
+pub mod block_hit_result;
+pub mod clientbound_block_changed_ack_packet;
+pub mod clientbound_block_destruction_packet;
+pub mod interaction_hand;
+pub mod interaction_result;
 pub mod packets;
+pub mod server_player_game_mode;
+pub mod serverbound_use_item_on_packet;
+pub mod serverbound_use_item_packet;
 pub mod service;
 pub mod validation;
 
-pub use game_mode::{
-    CorrectionPacket, InteractionPlayer, InteractionResult, InteractionWorld, PaperSuccessContext,
-    ServerPlayerGameMode, SwingSource,
-};
+pub use block_hit_result::BlockHitResult;
+pub use clientbound_block_changed_ack_packet::ClientboundBlockChangedAckPacket;
+pub use clientbound_block_destruction_packet::ClientboundBlockDestructionPacket;
+pub use interaction_hand::InteractionHand;
+pub use interaction_result::{InteractionResult, PaperSuccessContext, SwingSource};
 pub use packets::{
-    BlockHitResult, ClientboundBlockChangedAckPacket, ClientboundBlockDestructionPacket,
-    InteractionHand, InteractionPacketError, ServerboundUseItemOnPacket, ServerboundUseItemPacket,
-    decode_player_action, decode_use_item, decode_use_item_on,
+    InteractionPacketError, decode_player_action, decode_use_item, decode_use_item_on,
 };
+pub use server_player_game_mode::{
+    CorrectionPacket, InteractionPlayer, InteractionWorld, ServerPlayerGameMode,
+};
+pub use serverbound_use_item_on_packet::ServerboundUseItemOnPacket;
+pub use serverbound_use_item_packet::ServerboundUseItemPacket;
 pub use service::WorldInteractionService;
 pub use validation::{
     DEFAULT_BLOCK_INTERACTION_RANGE, HitLocationError, INTERACTION_RANGE_BUFFER,

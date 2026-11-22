@@ -11,14 +11,14 @@
 use rivet_protocol::friendly_byte_buf::FriendlyByteBuf;
 use rivet_util::mth::wrap_degrees_f32;
 
-use super::game_mode::{
-    CorrectionPacket, InteractionPlayer, InteractionResult, InteractionWorld, ServerPlayerGameMode,
-    SwingSource,
-};
+use super::interaction_result::{InteractionResult, SwingSource};
 use super::packets::{
     ClientboundBlockUpdatePacket, InteractionPacketError, PlayerAction,
     ServerboundPlayerActionPacket, ServerboundUseItemOnPacket, ServerboundUseItemPacket,
     decode_player_action, decode_use_item, decode_use_item_on,
+};
+use super::server_player_game_mode::{
+    CorrectionPacket, InteractionPlayer, InteractionWorld, ServerPlayerGameMode,
 };
 use super::validation::{
     INTERACTION_RANGE_BUFFER, INVALID_SEQUENCE_DISCONNECT_MESSAGE, SequenceAckTracker,
@@ -1013,7 +1013,7 @@ mod tests {
         assert_eq!(service.game_mode().destroy_pos(), second);
 
         // One tick + StopDestroyBlock reaches 0.4 * 2 = 0.8 >= 0.7 and destroys `second`.
-        let _ = service.tick(&player, &mut world);
+        let _ = service.tick(1, &player, &mut world);
         let _ = service.handle_player_action(
             &ServerboundPlayerActionPacket::new(
                 PlayerAction::StopDestroyBlock,
