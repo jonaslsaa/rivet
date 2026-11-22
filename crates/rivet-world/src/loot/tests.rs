@@ -458,7 +458,7 @@ fn explosion_condition_and_decay_exact_rng() {
     let mut oracle = LegacyRandomSource::new(seed);
 
     let survives = LootItemCondition::SurvivesExplosion.test(&mut ctx);
-    assert_eq!(survives, oracle.next_float() < 1.0_f32 / 4.0_f32);
+    assert_eq!(survives, oracle.next_float() <= 1.0_f32 / 4.0_f32);
 
     let decay = LootItemFunction::explosion_decay();
     let stack = LootItemStack::with_count(id("cobblestone"), 6);
@@ -1044,4 +1044,38 @@ fn builtin_param_sets_match_paper_contracts() {
             .required()
             .contains(&LootContextParams::additional_cost_component_allowed())
     );
+}
+
+#[test]
+fn survives_explosion_accepts_exact_boundary_draw() {
+    let registry = LootRegistry::new();
+    let mut params_builder = LootParams::builder();
+    params_builder
+        .with_parameter(
+            LootContextParams::block_state(),
+            ContextValue::BlockState(id("stone")),
+        )
+        .with_parameter(
+            LootContextParams::origin(),
+            ContextValue::Origin([0.0, 64.0, 0.0]),
+        )
+        .with_parameter(
+            LootContextParams::tool(),
+            ContextValue::Tool(LootItemStack::new(id("diamond_pickaxe"))),
+        )
+        .with_optional_parameter(
+            LootContextParams::explosion_radius(),
+            Some(ContextValue::Float(2.0)),
+        );
+    let params = params_builder
+        .create(LootContextParamSets::block())
+        .unwrap();
+
+    // Seed whose first LegacyRandomSource::next_float() draw is exactly 0.5 == 1.0 / 2.0.
+    let boundary_seed = 247_775_869_193_412_i64;
+    let mut oracle = LegacyRandomSource::new(boundary_seed);
+    assert_eq!(oracle.next_float(), 0.5_f32);
+
+    let mut ctx = make_context(params, boundary_seed, &registry);
+    assert!(LootItemCondition::SurvivesExplosion.test(&mut ctx));
 }

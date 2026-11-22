@@ -37,7 +37,7 @@ pub enum LootItemCondition {
     /// `LootItemRandomChanceCondition` — `random.nextFloat() < chance.getFloat(ctx)`.
     RandomChance(NumberProvider),
     /// `ExplosionCondition` — if `EXPLOSION_RADIUS` is absent, returns `true`
-    /// without consuming RNG; otherwise `random.nextFloat() < 1.0F / radius`.
+    /// without consuming RNG; otherwise `random.nextFloat() <= 1.0F / radius`.
     SurvivesExplosion,
     /// `ConditionReference` — resolves a predicate from `LootRegistry` with
     /// runtime visited-breadcrumb cycle detection.
@@ -144,7 +144,7 @@ impl LootItemCondition {
                     return true;
                 };
                 let probability = 1.0_f32 / radius;
-                context.random_mut().next_float() < probability
+                context.random_mut().next_float() <= probability
             }
             Self::Reference(name) => {
                 let Some(referenced) = context.resolver().get_condition(name).cloned() else {
