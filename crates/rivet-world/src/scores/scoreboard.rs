@@ -256,7 +256,8 @@ impl Scoreboard {
             .filter_map(|(&slot, name)| (name == objective_name).then_some(slot))
             .collect();
         for slot in slots_to_clear {
-            let _ = self.set_display_objective(slot, None, listener);
+            self.display_objectives.remove(&slot);
+            listener.on_display_slot_changed(slot, Some(&objective), None);
         }
 
         if let Some(list) = self.objectives_by_criteria.get_mut(objective.criteria()) {
