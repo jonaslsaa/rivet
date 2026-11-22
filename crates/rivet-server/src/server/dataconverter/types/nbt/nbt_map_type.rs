@@ -161,7 +161,11 @@ impl MapType for NBTMapType {
     }
 
     fn get_byte_or(&self, key: &str, dfl: i8) -> i8 {
-        self.get_number(key).map_or(dfl, |n| n.byte_value())
+        self.map
+            .borrow()
+            .get(key)
+            .and_then(NbtValue::as_numeric_tag)
+            .map_or(dfl, |n| n.byte_value())
     }
 
     fn set_byte(&mut self, key: &str, val: i8) {
@@ -175,7 +179,11 @@ impl MapType for NBTMapType {
     }
 
     fn get_short_or(&self, key: &str, dfl: i16) -> i16 {
-        self.get_number(key).map_or(dfl, |n| n.short_value())
+        self.map
+            .borrow()
+            .get(key)
+            .and_then(NbtValue::as_numeric_tag)
+            .map_or(dfl, |n| n.short_value())
     }
 
     fn set_short(&mut self, key: &str, val: i16) {
@@ -189,7 +197,11 @@ impl MapType for NBTMapType {
     }
 
     fn get_int_or(&self, key: &str, dfl: i32) -> i32 {
-        self.get_number(key).map_or(dfl, |n| n.int_value())
+        self.map
+            .borrow()
+            .get(key)
+            .and_then(NbtValue::as_numeric_tag)
+            .map_or(dfl, |n| n.int_value())
     }
 
     fn set_int(&mut self, key: &str, val: i32) {
@@ -203,7 +215,11 @@ impl MapType for NBTMapType {
     }
 
     fn get_long_or(&self, key: &str, dfl: i64) -> i64 {
-        self.get_number(key).map_or(dfl, |n| n.long_value())
+        self.map
+            .borrow()
+            .get(key)
+            .and_then(NbtValue::as_numeric_tag)
+            .map_or(dfl, |n| n.long_value())
     }
 
     fn set_long(&mut self, key: &str, val: i64) {
@@ -217,7 +233,11 @@ impl MapType for NBTMapType {
     }
 
     fn get_float_or(&self, key: &str, dfl: f32) -> f32 {
-        self.get_number(key).map_or(dfl, |n| n.float_value())
+        self.map
+            .borrow()
+            .get(key)
+            .and_then(NbtValue::as_numeric_tag)
+            .map_or(dfl, |n| n.float_value())
     }
 
     fn set_float(&mut self, key: &str, val: f32) {
@@ -231,7 +251,11 @@ impl MapType for NBTMapType {
     }
 
     fn get_double_or(&self, key: &str, dfl: f64) -> f64 {
-        self.get_number(key).map_or(dfl, |n| n.double_value())
+        self.map
+            .borrow()
+            .get(key)
+            .and_then(NbtValue::as_numeric_tag)
+            .map_or(dfl, |n| n.double_value())
     }
 
     fn set_double(&mut self, key: &str, val: f64) {

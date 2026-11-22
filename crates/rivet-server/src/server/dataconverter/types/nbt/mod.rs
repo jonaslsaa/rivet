@@ -31,6 +31,7 @@ use rivet_nbt::int_tag::IntTag;
 use rivet_nbt::list_tag::ListTag;
 use rivet_nbt::long_array_tag::LongArrayTag;
 use rivet_nbt::long_tag::LongTag;
+use rivet_nbt::numeric_tag::NumericTag;
 use rivet_nbt::short_tag::ShortTag;
 use rivet_nbt::string_tag::StringTag;
 use rivet_nbt::tag::{
@@ -81,16 +82,20 @@ impl NbtValue {
         }
     }
 
-    pub(crate) fn as_number(&self) -> Option<Number> {
+    pub(crate) fn as_numeric_tag(&self) -> Option<NumericTag> {
         match self {
-            Self::Byte(v) => Some(Number::Byte(*v)),
-            Self::Short(v) => Some(Number::Short(*v)),
-            Self::Int(v) => Some(Number::Int(*v)),
-            Self::Long(v) => Some(Number::Long(*v)),
-            Self::Float(v) => Some(Number::Float(*v)),
-            Self::Double(v) => Some(Number::Double(*v)),
+            Self::Byte(v) => Some(NumericTag::Byte(ByteTag::value_of(*v))),
+            Self::Short(v) => Some(NumericTag::Short(ShortTag::value_of(*v))),
+            Self::Int(v) => Some(NumericTag::Int(IntTag::value_of(*v))),
+            Self::Long(v) => Some(NumericTag::Long(LongTag::value_of(*v))),
+            Self::Float(v) => Some(NumericTag::Float(FloatTag::value_of(*v))),
+            Self::Double(v) => Some(NumericTag::Double(DoubleTag::value_of(*v))),
             _ => None,
         }
+    }
+
+    pub(crate) fn as_number(&self) -> Option<Number> {
+        self.as_numeric_tag().map(|t| t.boxed())
     }
 
     pub(crate) fn deep_copy(&self) -> Self {
@@ -495,5 +500,53 @@ mod tests {
     fn nbt_map_shorts_unsupported() {
         let mut map = NBTMapType::new();
         map.set_shorts("s", vec![1, 2]);
+    }
+
+    #[test]
+    fn nbt_negative_fractional_coercion_matches_numeric_tag() {
+        let mut map = NBTMapType::new();
+        map.set_float("f", -0.5);
+        map.set_double("d", -0.5);
+        map.set_float("f_neg", -1.2);
+        map.set_double("d_neg", -1.2);
+
+        // NumericTag floors float/double for byte/short/int; FloatTag::long_value truncates while DoubleTag::long_value floors.
+        assert_eq!(map.get_byte_or("f", 0), -1);
+        assert_eq!(map.get_short_or("f", 0), -1);
+        assert_eq!(map.get_int_or("f", 0), -1);
+        assert_eq!(map.get_long_or("f", 99), 0);
+        assert!(map.get_boolean("f"));
+
+        assert_eq!(map.get_byte_or("d", 0), -1);
+        assert_eq!(map.get_short_or("d", 0), -1);
+        assert_eq!(map.get_int_or("d", 0), -1);
+        assert_eq!(map.get_long_or("d", 99), -1);
+        assert!(map.get_boolean("d"));
+
+        assert_eq!(map.get_int("f_neg"), -2);
+        assert_eq!(map.get_long("f_neg"), -1);
+        assert_eq!(map.get_int("d_neg"), -2);
+        assert_eq!(map.get_long("d_neg"), -2);
+
+        let mut list = NBTListType::new();
+        list.add_float(-0.5);
+        list.add_double(-0.5);
+        assert_eq!(list.get_byte(0), -1);
+        assert_eq!(list.get_byte_or(0, 0), -1);
+        assert_eq!(list.get_short(0), -1);
+        assert_eq!(list.get_short_or(0, 0), -1);
+        assert_eq!(list.get_int(0), -1);
+        assert_eq!(list.get_int_or(0, 0), -1);
+        assert_eq!(list.get_long(0), 0);
+        assert_eq!(list.get_long_or(0, 99), 0);
+
+        assert_eq!(list.get_byte(1), -1);
+        assert_eq!(list.get_byte_or(1, 0), -1);
+        assert_eq!(list.get_short(1), -1);
+        assert_eq!(list.get_short_or(1, 0), -1);
+        assert_eq!(list.get_int(1), -1);
+        assert_eq!(list.get_int_or(1, 0), -1);
+        assert_eq!(list.get_long(1), -1);
+        assert_eq!(list.get_long_or(1, 99), -1);
     }
 }

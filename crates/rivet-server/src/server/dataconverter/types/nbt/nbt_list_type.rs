@@ -137,13 +137,17 @@ impl ListType for NBTListType {
     }
 
     fn get_byte(&self, index: usize) -> i8 {
-        self.get_number(index).byte_value()
+        let list = self.list.borrow();
+        let tag = &list[index];
+        tag.as_numeric_tag()
+            .expect("Expected NumericTag in NBTListType::get_byte")
+            .byte_value()
     }
 
     fn get_byte_or(&self, index: usize, dfl: i8) -> i8 {
         let list = self.list.borrow();
         let tag = &list[index];
-        tag.as_number().map_or(dfl, |n| n.byte_value())
+        tag.as_numeric_tag().map_or(dfl, |n| n.byte_value())
     }
 
     fn set_byte(&mut self, index: usize, to: i8) {
@@ -151,13 +155,17 @@ impl ListType for NBTListType {
     }
 
     fn get_short(&self, index: usize) -> i16 {
-        self.get_number(index).short_value()
+        let list = self.list.borrow();
+        let tag = &list[index];
+        tag.as_numeric_tag()
+            .expect("Expected NumericTag in NBTListType::get_short")
+            .short_value()
     }
 
     fn get_short_or(&self, index: usize, dfl: i16) -> i16 {
         let list = self.list.borrow();
         let tag = &list[index];
-        tag.as_number().map_or(dfl, |n| n.short_value())
+        tag.as_numeric_tag().map_or(dfl, |n| n.short_value())
     }
 
     fn set_short(&mut self, index: usize, to: i16) {
@@ -165,13 +173,17 @@ impl ListType for NBTListType {
     }
 
     fn get_int(&self, index: usize) -> i32 {
-        self.get_number(index).int_value()
+        let list = self.list.borrow();
+        let tag = &list[index];
+        tag.as_numeric_tag()
+            .expect("Expected NumericTag in NBTListType::get_int")
+            .int_value()
     }
 
     fn get_int_or(&self, index: usize, dfl: i32) -> i32 {
         let list = self.list.borrow();
         let tag = &list[index];
-        tag.as_number().map_or(dfl, |n| n.int_value())
+        tag.as_numeric_tag().map_or(dfl, |n| n.int_value())
     }
 
     fn set_int(&mut self, index: usize, to: i32) {
@@ -179,13 +191,17 @@ impl ListType for NBTListType {
     }
 
     fn get_long(&self, index: usize) -> i64 {
-        self.get_number(index).long_value()
+        let list = self.list.borrow();
+        let tag = &list[index];
+        tag.as_numeric_tag()
+            .expect("Expected NumericTag in NBTListType::get_long")
+            .long_value()
     }
 
     fn get_long_or(&self, index: usize, dfl: i64) -> i64 {
         let list = self.list.borrow();
         let tag = &list[index];
-        tag.as_number().map_or(dfl, |n| n.long_value())
+        tag.as_numeric_tag().map_or(dfl, |n| n.long_value())
     }
 
     fn set_long(&mut self, index: usize, to: i64) {
@@ -193,13 +209,17 @@ impl ListType for NBTListType {
     }
 
     fn get_float(&self, index: usize) -> f32 {
-        self.get_number(index).float_value()
+        let list = self.list.borrow();
+        let tag = &list[index];
+        tag.as_numeric_tag()
+            .expect("Expected NumericTag in NBTListType::get_float")
+            .float_value()
     }
 
     fn get_float_or(&self, index: usize, dfl: f32) -> f32 {
         let list = self.list.borrow();
         let tag = &list[index];
-        tag.as_number().map_or(dfl, |n| n.float_value())
+        tag.as_numeric_tag().map_or(dfl, |n| n.float_value())
     }
 
     fn set_float(&mut self, index: usize, to: f32) {
@@ -207,13 +227,17 @@ impl ListType for NBTListType {
     }
 
     fn get_double(&self, index: usize) -> f64 {
-        self.get_number(index).double_value()
+        let list = self.list.borrow();
+        let tag = &list[index];
+        tag.as_numeric_tag()
+            .expect("Expected NumericTag in NBTListType::get_double")
+            .double_value()
     }
 
     fn get_double_or(&self, index: usize, dfl: f64) -> f64 {
         let list = self.list.borrow();
         let tag = &list[index];
-        tag.as_number().map_or(dfl, |n| n.double_value())
+        tag.as_numeric_tag().map_or(dfl, |n| n.double_value())
     }
 
     fn set_double(&mut self, index: usize, to: f64) {
