@@ -960,4 +960,71 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn replacement_start_destroy_resyncs_old_block_and_starts_new_target() {
+        let mut service = WorldInteractionService::new();
+        let mut world = MockWorld::new();
+        world.destroy_progress = 0.4;
+        let first = BlockPos::new(1, 65, 0);
+        let second = BlockPos::new(2, 65, 0);
+        world.set_block(first, stone());
+        world.set_block(second, dirt());
+        let player = survival_player();
+
+        let _ = service.handle_player_action(
+            &ServerboundPlayerActionPacket::new(
+                PlayerAction::StartDestroyBlock,
+                first,
+                Direction::Up,
+                1,
+            ),
+            &player,
+            &mut world,
+        );
+        assert!(service.game_mode().is_destroying_block());
+        assert_eq!(service.game_mode().destroy_pos(), first);
+
+        let out = service.handle_player_action(
+            &ServerboundPlayerActionPacket::new(
+                PlayerAction::StartDestroyBlock,
+                second,
+                Direction::Up,
+                2,
+            ),
+            &player,
+            &mut world,
+        );
+        assert_eq!(
+            out,
+            vec![
+                CorrectionPacket::BlockUpdate(ClientboundBlockUpdatePacket {
+                    pos: first,
+                    state: stone(),
+                }),
+                CorrectionPacket::BlockDestruction(ClientboundBlockDestructionPacket::new(
+                    player.player_id,
+                    second,
+                    4,
+                )),
+            ]
+        );
+        assert!(service.game_mode().is_destroying_block());
+        assert_eq!(service.game_mode().destroy_pos(), second);
+
+        // One tick + StopDestroyBlock reaches 0.4 * 2 = 0.8 >= 0.7 and destroys `second`.
+        let _ = service.tick(&player, &mut world);
+        let _ = service.handle_player_action(
+            &ServerboundPlayerActionPacket::new(
+                PlayerAction::StopDestroyBlock,
+                second,
+                Direction::Up,
+                3,
+            ),
+            &player,
+            &mut world,
+        );
+        assert_eq!(world.get_block_state_if_loaded(first), Some(stone()));
+        assert_eq!(world.get_block_state_if_loaded(second), Some(air()));
+    }
 }
