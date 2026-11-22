@@ -805,6 +805,7 @@ fn remove_entity_and_moonrise_tick_transitions() {
     assert!(!tracker.get(200).unwrap().seen_by().contains(&1));
     assert!(tracker.get(200).unwrap().seen_by().contains(&2));
     assert_eq!(host.events[0], HostEvent::PlayerStatus(1, false));
+    assert!(host.events.contains(&HostEvent::UntrackEvent(2, 1)));
     assert!(
         host.packets_for(2)
             .contains(&&EntityTrackerPacket::RemoveEntities(

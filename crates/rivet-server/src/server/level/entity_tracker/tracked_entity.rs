@@ -192,13 +192,14 @@ impl TrackedEntity {
     /// `ChunkMap.TrackedEntity.broadcastRemoved()`.
     pub fn broadcast_removed(&mut self, host: &mut dyn EntityTrackerHost) {
         let viewers: Vec<i32> = self.seen_by.iter().copied().collect();
-        let mut sync = TrackedSynchronizer {
-            entity_id: self.entity_id,
-            is_server_player: self.is_server_player,
-            seen_by: &self.seen_by,
-            host,
-        };
         for viewer_id in viewers {
+            host.on_player_untrack_entity(viewer_id, self.entity_id);
+            let mut sync = TrackedSynchronizer {
+                entity_id: self.entity_id,
+                is_server_player: self.is_server_player,
+                seen_by: &self.seen_by,
+                host,
+            };
             self.server_entity
                 .remove_pairing(self.entity_id, viewer_id, &mut sync);
         }
