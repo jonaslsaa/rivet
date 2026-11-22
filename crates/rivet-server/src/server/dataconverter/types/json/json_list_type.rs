@@ -284,51 +284,51 @@ impl ListType for JsonListType {
     }
 
     fn get_bytes(&self, _index: usize) -> Vec<i8> {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn get_bytes_or(&self, _index: usize, _dfl: Vec<i8>) -> Vec<i8> {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn set_bytes(&mut self, _index: usize, _to: Vec<i8>) {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn get_shorts(&self, _index: usize) -> Vec<i16> {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn get_shorts_or(&self, _index: usize, _dfl: Vec<i16>) -> Vec<i16> {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn set_shorts(&mut self, _index: usize, _to: Vec<i16>) {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn get_ints(&self, _index: usize) -> Vec<i32> {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn get_ints_or(&self, _index: usize, _dfl: Vec<i32>) -> Vec<i32> {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn set_ints(&mut self, _index: usize, _to: Vec<i32>) {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn get_longs(&self, _index: usize) -> Vec<i64> {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn get_longs_or(&self, _index: usize, _dfl: Vec<i64>) -> Vec<i64> {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn set_longs(&mut self, _index: usize, _to: Vec<i64>) {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn get_list(&self, index: usize) -> Box<dyn ListType> {
@@ -385,7 +385,7 @@ impl ListType for JsonListType {
     }
 
     fn add_byte_at(&mut self, _index: usize, _b: i8) {
-        unimplemented!("JsonListType does not support indexed insertion")
+        panic!("JsonListType does not support indexed insertion")
     }
 
     fn add_short(&mut self, s: i16) {
@@ -395,7 +395,7 @@ impl ListType for JsonListType {
     }
 
     fn add_short_at(&mut self, _index: usize, _s: i16) {
-        unimplemented!("JsonListType does not support indexed insertion")
+        panic!("JsonListType does not support indexed insertion")
     }
 
     fn add_int(&mut self, i: i32) {
@@ -405,7 +405,7 @@ impl ListType for JsonListType {
     }
 
     fn add_int_at(&mut self, _index: usize, _i: i32) {
-        unimplemented!("JsonListType does not support indexed insertion")
+        panic!("JsonListType does not support indexed insertion")
     }
 
     fn add_long(&mut self, l: i64) {
@@ -415,7 +415,7 @@ impl ListType for JsonListType {
     }
 
     fn add_long_at(&mut self, _index: usize, _l: i64) {
-        unimplemented!("JsonListType does not support indexed insertion")
+        panic!("JsonListType does not support indexed insertion")
     }
 
     fn add_float(&mut self, f: f32) {
@@ -425,7 +425,7 @@ impl ListType for JsonListType {
     }
 
     fn add_float_at(&mut self, _index: usize, _f: f32) {
-        unimplemented!("JsonListType does not support indexed insertion")
+        panic!("JsonListType does not support indexed insertion")
     }
 
     fn add_double(&mut self, d: f64) {
@@ -435,39 +435,39 @@ impl ListType for JsonListType {
     }
 
     fn add_double_at(&mut self, _index: usize, _d: f64) {
-        unimplemented!("JsonListType does not support indexed insertion")
+        panic!("JsonListType does not support indexed insertion")
     }
 
     fn add_byte_array(&mut self, _arr: Vec<i8>) {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn add_byte_array_at(&mut self, _index: usize, _arr: Vec<i8>) {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn add_short_array(&mut self, _arr: Vec<i16>) {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn add_short_array_at(&mut self, _index: usize, _arr: Vec<i16>) {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn add_int_array(&mut self, _arr: Vec<i32>) {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn add_int_array_at(&mut self, _index: usize, _arr: Vec<i32>) {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn add_long_array(&mut self, _arr: Vec<i64>) {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn add_long_array_at(&mut self, _index: usize, _arr: Vec<i64>) {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn add_list(&mut self, list: Box<dyn ListType>) {
@@ -481,7 +481,7 @@ impl ListType for JsonListType {
     }
 
     fn add_list_at(&mut self, _index: usize, _list: Box<dyn ListType>) {
-        unimplemented!("JsonListType does not support indexed insertion")
+        panic!("JsonListType does not support indexed insertion")
     }
 
     fn add_map(&mut self, map: Box<dyn MapType>) {
@@ -495,7 +495,7 @@ impl ListType for JsonListType {
     }
 
     fn add_map_at(&mut self, _index: usize, _map: Box<dyn MapType>) {
-        unimplemented!("JsonListType does not support indexed insertion")
+        panic!("JsonListType does not support indexed insertion")
     }
 
     fn add_string(&mut self, string: String) {
@@ -503,6 +503,6 @@ impl ListType for JsonListType {
     }
 
     fn add_string_at(&mut self, _index: usize, _string: String) {
-        unimplemented!("JsonListType does not support indexed insertion")
+        panic!("JsonListType does not support indexed insertion")
     }
 }

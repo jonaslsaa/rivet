@@ -292,7 +292,7 @@ impl MapType for NBTMapType {
     }
 
     fn set_shorts(&mut self, _key: &str, _val: Vec<i16>) {
-        unimplemented!("NBT does not support short arrays")
+        panic!("NBT does not support short arrays")
     }
 
     fn get_ints(&self, key: &str) -> Option<Vec<i32>> {

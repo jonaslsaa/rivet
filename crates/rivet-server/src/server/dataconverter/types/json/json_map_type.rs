@@ -359,7 +359,7 @@ impl MapType for JsonMapType {
     }
 
     fn set_bytes(&mut self, _key: &str, _val: Vec<i8>) {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn get_shorts(&self, _key: &str) -> Option<Vec<i16>> {
@@ -371,7 +371,7 @@ impl MapType for JsonMapType {
     }
 
     fn set_shorts(&mut self, _key: &str, _val: Vec<i16>) {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn get_ints(&self, _key: &str) -> Option<Vec<i32>> {
@@ -383,7 +383,7 @@ impl MapType for JsonMapType {
     }
 
     fn set_ints(&mut self, _key: &str, _val: Vec<i32>) {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn get_longs(&self, _key: &str) -> Option<Vec<i64>> {
@@ -395,7 +395,7 @@ impl MapType for JsonMapType {
     }
 
     fn set_longs(&mut self, _key: &str, _val: Vec<i64>) {
-        unimplemented!("JSON does not support raw primitive arrays")
+        panic!("JSON does not support raw primitive arrays")
     }
 
     fn get_list_unchecked(&self, key: &str) -> Option<Box<dyn ListType>> {

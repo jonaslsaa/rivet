@@ -265,15 +265,15 @@ impl ListType for NBTListType {
     }
 
     fn get_shorts(&self, _index: usize) -> Vec<i16> {
-        unimplemented!("NBT does not support short arrays")
+        panic!("NBT does not support short arrays")
     }
 
     fn get_shorts_or(&self, _index: usize, _dfl: Vec<i16>) -> Vec<i16> {
-        unimplemented!("NBT does not support short arrays")
+        panic!("NBT does not support short arrays")
     }
 
     fn set_shorts(&mut self, _index: usize, _to: Vec<i16>) {
-        unimplemented!("NBT does not support short arrays")
+        panic!("NBT does not support short arrays")
     }
 
     fn get_ints(&self, index: usize) -> Vec<i32> {
@@ -443,11 +443,11 @@ impl ListType for NBTListType {
     }
 
     fn add_short_array(&mut self, _arr: Vec<i16>) {
-        unimplemented!("NBT does not support short arrays")
+        panic!("NBT does not support short arrays")
     }
 
     fn add_short_array_at(&mut self, _index: usize, _arr: Vec<i16>) {
-        unimplemented!("NBT does not support short arrays")
+        panic!("NBT does not support short arrays")
     }
 
     fn add_int_array(&mut self, arr: Vec<i32>) {
