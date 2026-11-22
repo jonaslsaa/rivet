@@ -110,8 +110,8 @@ impl NbtValue {
             Self::Short(v) => Some(NumericTag::Short(ShortTag::value_of(*v))),
             Self::Int(v) => Some(NumericTag::Int(IntTag::value_of(*v))),
             Self::Long(v) => Some(NumericTag::Long(LongTag::value_of(*v))),
-            Self::Float(v) => Some(NumericTag::Float(FloatTag::value_of(*v))),
-            Self::Double(v) => Some(NumericTag::Double(DoubleTag::value_of(*v))),
+            Self::Float(v) => Some(NumericTag::Float(FloatTag::new(*v))),
+            Self::Double(v) => Some(NumericTag::Double(DoubleTag::new(*v))),
             _ => None,
         }
     }
@@ -173,8 +173,8 @@ impl NbtValue {
             Self::Short(v) => Tag::Short(ShortTag::value_of(*v)),
             Self::Int(v) => Tag::Int(IntTag::value_of(*v)),
             Self::Long(v) => Tag::Long(LongTag::value_of(*v)),
-            Self::Float(v) => Tag::Float(FloatTag::value_of(*v)),
-            Self::Double(v) => Tag::Double(DoubleTag::value_of(*v)),
+            Self::Float(v) => Tag::Float(FloatTag::new(*v)),
+            Self::Double(v) => Tag::Double(DoubleTag::new(*v)),
             Self::ByteArray(v) => Tag::ByteArray(ByteArrayTag::new(v.clone())),
             Self::String(v) => Tag::String(StringTag::value_of(v.clone())),
             Self::List(list) => Tag::List(to_list_tag(list)),
@@ -599,5 +599,46 @@ mod tests {
         l3.add_double(-0.0_f64);
         assert_eq!(l1, l2);
         assert_ne!(l1, l3);
+    }
+
+    #[test]
+    fn nbt_imported_negative_zero_preserves_sign_in_getters() {
+        let mut compound = CompoundTag::new();
+        compound.put("f".to_owned(), Tag::Float(FloatTag::new(-0.0_f32)));
+        compound.put("d".to_owned(), Tag::Double(DoubleTag::new(-0.0_f64)));
+
+        let map = NBTMapType::from_tag(&compound);
+        assert_eq!(map.get_float("f").to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(map.get_float_or("f", 1.0).to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(map.get_double("d").to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(map.get_double_or("d", 1.0).to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(
+            map.get_number("f").unwrap().float_value().to_bits(),
+            (-0.0_f32).to_bits()
+        );
+        assert_eq!(
+            map.get_number("d").unwrap().double_value().to_bits(),
+            (-0.0_f64).to_bits()
+        );
+
+        let exported = map.get_tag();
+        assert_eq!(
+            exported.get_float("f").unwrap().to_bits(),
+            (-0.0_f32).to_bits()
+        );
+        assert_eq!(
+            exported.get_double("d").unwrap().to_bits(),
+            (-0.0_f64).to_bits()
+        );
+
+        let mut list_tag = ListTag::new();
+        list_tag.list.push(Tag::Float(FloatTag::new(-0.0_f32)));
+        let list = NBTListType::from_tag(&list_tag);
+        assert_eq!(list.get_float(0).to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(list.get_float_or(0, 1.0).to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(
+            list.get_number(0).float_value().to_bits(),
+            (-0.0_f32).to_bits()
+        );
     }
 }
