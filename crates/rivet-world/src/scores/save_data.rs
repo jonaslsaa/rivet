@@ -24,7 +24,7 @@ struct OrderedDisplaySlotsCodec<Ops: DynamicOps + 'static> {
 }
 
 impl<Ops: DynamicOps + 'static> OrderedDisplaySlotsCodec<Ops> {
-    fn new() -> Arc<dyn Codec<BTreeMap<DisplaySlot, String>, Ops>> {
+    fn codec() -> Arc<dyn Codec<BTreeMap<DisplaySlot, String>, Ops>> {
         let key_codec = DisplaySlot::codec::<Ops>();
         let value_codec = codec::string_codec::<Ops>();
         let decode_delegate = codec::unbounded_map(key_codec.clone(), value_codec.clone());
@@ -106,7 +106,7 @@ impl PackedScoreboardData {
     /// - `"DisplaySlots"` (default `{}`)
     /// - `"Teams"` (default `[]`)
     pub fn codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<PackedScoreboardData, Ops>> {
-        let display_slots_map_codec = OrderedDisplaySlotsCodec::<Ops>::new();
+        let display_slots_map_codec = OrderedDisplaySlotsCodec::<Ops>::codec();
         let display_slots_field = map_codec::xmap(
             codec::optional_field("DisplaySlots".to_owned(), display_slots_map_codec, false),
             Arc::new(|opt: &Option<BTreeMap<DisplaySlot, String>>| opt.clone().unwrap_or_default()),

@@ -204,10 +204,11 @@ impl ServerScoreboard {
         }
         self.enable_player_collisions = enabled;
         for team in self.scoreboard.player_teams() {
-            self.pending_effects
-                .push(ScoreboardEffect::Broadcast(ScoreboardPacket::SetPlayerTeam(
+            self.pending_effects.push(ScoreboardEffect::Broadcast(
+                ScoreboardPacket::SetPlayerTeam(
                     ClientboundSetPlayerTeamPacket::create_add_or_modify(team, false, enabled),
-                )));
+                ),
+            ));
         }
     }
 
