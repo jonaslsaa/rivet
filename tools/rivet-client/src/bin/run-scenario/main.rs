@@ -1605,6 +1605,22 @@ fn verify_rivet_connection(log_path: &Path) -> Result<(), RunnerError> {
     Ok(())
 }
 
+/// Server-side half of the invalid-movement kick proof: `rivet-server`'s
+/// `server_connection_listener` logs `"invalid player movement, disconnected"`
+/// when `DisconnectReason::InvalidPlayerMovement` closes the connection.
+fn verify_rivet_invalid_movement(log_path: &Path) -> Result<(), RunnerError> {
+    let text = fs::read_to_string(log_path)?;
+    if !text.contains("invalid player movement, disconnected") {
+        return Err(RunnerError::Gate(format!(
+            "rivet log {} shows no server-side invalid-movement disconnect \
+             ('invalid player movement, disconnected') — client-only disconnect key is \
+             insufficient without server-side anti-cheat evidence",
+            log_path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn verify_capture_connection(kind: server::ServerKind, log_path: &Path) -> Result<(), RunnerError> {
     if kind == server::ServerKind::Rivet {
         return verify_rivet_connection(log_path);
@@ -1619,34 +1635,35 @@ fn verify_capture_connection(kind: server::ServerKind, log_path: &Path) -> Resul
     Ok(())
 }
 
-fn verify_capture_play_boundary(normalized: &Value) -> Result<(), RunnerError> {
-    if normalized.get("outcome").and_then(Value::as_str) != Some("spawned") {
-        return Err(RunnerError::Gate(format!(
-            "capture client did not reach spawn (outcome={:?})",
-            normalized.get("outcome")
-        )));
-    }
-    let lifecycle = normalized
-        .get("lifecycle")
-        .and_then(Value::as_array)
-        .ok_or_else(|| RunnerError::Gate("capture transcript has no lifecycle".to_owned()))?;
-    for required in ["login", "spawn"] {
-        if !lifecycle
-            .iter()
-            .any(|event| event.as_str() == Some(required))
-        {
-            return Err(RunnerError::Gate(format!(
-                "capture transcript lifecycle is missing {required}"
-            )));
+fn verify_capture_play_boundary(
+    kind: server::ServerKind,
+    normalized: &Value,
+) -> Result<(), RunnerError> {
+    match kind {
+        server::ServerKind::Paper => {
+            transcript::paper_join_verdict(normalized).map_err(RunnerError::Gate)?;
+        }
+        server::ServerKind::Rivet => {
+            transcript::rivet_play_verdict(normalized).map_err(RunnerError::Gate)?;
         }
     }
-    if normalized.get("azalea_revision").and_then(Value::as_str)
-        != Some(transcript::PINNED_AZALEA_REVISION)
-    {
-        return Err(RunnerError::Gate(format!(
-            "capture transcript does not carry pinned azalea revision {}",
-            transcript::PINNED_AZALEA_REVISION
-        )));
+    let provenance = normalized
+        .get("client_binary")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            RunnerError::Gate("capture transcript is missing client_binary provenance".to_owned())
+        })?;
+    for required in ["selected_source_path", "executed_sha256"] {
+        if provenance
+            .get(required)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .is_none()
+        {
+            return Err(RunnerError::Gate(format!(
+                "capture transcript client_binary provenance is missing non-empty {required}"
+            )));
+        }
     }
     Ok(())
 }
@@ -1774,10 +1791,9 @@ fn one_join(
         normalized["outcome"],
         transcript_path.display()
     );
-    if normalized["outcome"] != "spawned" {
+    if let Err(reason) = transcript::paper_join_verdict(&normalized) {
         return Err(RunnerError::Gate(format!(
-            "run {idx} did not spawn (outcome={}) — refusing to compare. Raw transcript: {}, stderr: {}",
-            normalized["outcome"],
+            "run {idx} failed paper join verdict ({reason}) — refusing to compare. Raw transcript: {}, stderr: {}",
             client_run.stdout_path.display(),
             client_run.stderr_path.display()
         )));
@@ -1976,10 +1992,9 @@ fn one_move(
         normalized["outcome"],
         transcript_path.display()
     );
-    if normalized["outcome"] != "moved" {
+    if let Err(reason) = transcript::move_verdict(&normalized, "paper") {
         return Err(RunnerError::Gate(format!(
-            "run {idx} did not move (outcome={}) — refusing to compare. Raw transcript: {}, stderr: {}",
-            normalized["outcome"],
+            "run {idx} failed move verdict ({reason}) — refusing to compare. Raw transcript: {}, stderr: {}",
             client_run.stdout_path.display(),
             client_run.stderr_path.display()
         )));
@@ -2283,6 +2298,17 @@ fn run_rivet_play(args: &Args) -> Result<(), RunnerError> {
 /// future half-implemented `set_health` that reports any other value fails here
 /// rather than being waved through.
 fn check_paper_rivet_divergence(d: &comparator::TranscriptDiff) -> Result<(), RunnerError> {
+    if !d.excluded_policy_diffs.is_empty() {
+        let mut msg = format!(
+            "Paper-vs-Rivet exclusion policy mismatch ({} field(s)) — excluded declarations may \
+             not broaden, disappear, or drift between servers; refusing PASS:",
+            d.excluded_policy_diffs.len()
+        );
+        for f in &d.excluded_policy_diffs {
+            msg.push_str(&format!("\n    {f}"));
+        }
+        return Err(RunnerError::Gate(msg));
+    }
     const DOCUMENTED_GAPS: [(&str, f64, f64); 1] = [("health.health", 20.0, 1.0)];
     for f in &d.diffs {
         let Some((expected, actual)) = DOCUMENTED_GAPS
@@ -2327,6 +2353,17 @@ fn check_paper_rivet_divergence(d: &comparator::TranscriptDiff) -> Result<(), Ru
 /// remove — so any compared-field divergence is a genuine movement mismatch and
 /// fails the run.
 fn check_move_divergence(d: &comparator::TranscriptDiff) -> Result<(), RunnerError> {
+    if !d.excluded_policy_diffs.is_empty() {
+        let mut msg = format!(
+            "Paper-vs-Rivet movement exclusion policy mismatch ({} field(s)) — excluded \
+             declarations may not broaden, disappear, or drift between servers; refusing PASS:",
+            d.excluded_policy_diffs.len()
+        );
+        for f in &d.excluded_policy_diffs {
+            msg.push_str(&format!("\n    {f}"));
+        }
+        return Err(RunnerError::Gate(msg));
+    }
     if let Some(f) = d.diffs.first() {
         let mut msg = format!(
             "Paper-vs-Rivet movement divergence on {}: expected {} got {} — the move \
@@ -2497,6 +2534,49 @@ fn check_rivet_authoritative(
     rivet_walk: &Value,
 ) -> Result<String, RunnerError> {
     let summary = trace.check_authoritative().map_err(RunnerError::Gate)?;
+    // Correlate client-recorded teleport acks with server-accepted teleport acks.
+    if let Some(client_acks) = rivet_walk.get("teleport_acks").and_then(Value::as_array) {
+        let server_accepted_ids: std::collections::BTreeSet<i64> = trace
+            .teleport_acks
+            .iter()
+            .filter(|a| a.outcome == "accepted")
+            .map(|a| a.ack_id)
+            .collect();
+        for ack in client_acks {
+            let Some(ack_id) = ack.as_i64() else {
+                return Err(RunnerError::Gate(format!(
+                    "rivet walk teleport_acks contains non-integer entry: {ack}"
+                )));
+            };
+            if !server_accepted_ids.contains(&ack_id) {
+                return Err(RunnerError::Gate(format!(
+                    "client teleport_ack id={ack_id} was not accepted in rivet server trace \
+                     (accepted ids: {server_accepted_ids:?})"
+                )));
+            }
+        }
+    }
+    // Verify accepted movement frames in the server trace are non-empty and
+    // monotonically increasing, and correlate with session_end.accepted_frames.
+    let mut prev_accepted: usize = 0;
+    for mv in &trace.moves {
+        if mv.accepted_frames <= prev_accepted {
+            return Err(RunnerError::Gate(format!(
+                "rivet movement trace accepted_frames regressed or stalled: {} after {}",
+                mv.accepted_frames, prev_accepted
+            )));
+        }
+        prev_accepted = mv.accepted_frames;
+    }
+    if let Some(end) = &trace.session_end
+        && end.accepted_frames != prev_accepted
+    {
+        return Err(RunnerError::Gate(format!(
+            "rivet movement trace session_end accepted_frames={} disagrees with last \
+             RIVET_MOVE_ACCEPTED accepted_frames={prev_accepted}",
+            end.accepted_frames
+        )));
+    }
     let last_sent = rivet_walk.get("last_sent").cloned().unwrap_or(Value::Null);
     let last_sent_x = last_sent.get("x").and_then(Value::as_f64).ok_or_else(|| {
         RunnerError::Gate(
@@ -2731,10 +2811,9 @@ fn run_paper_vs_rivet(args: &Args) -> Result<(), RunnerError> {
         paper_t["outcome"],
         paper_tp.display()
     );
-    if paper_t["outcome"] != "spawned" {
+    if let Err(reason) = transcript::paper_join_verdict(&paper_t) {
         return Err(RunnerError::Gate(format!(
-            "Paper did not spawn (outcome={}) — regression in the reference server; refusing the comparison",
-            paper_t["outcome"]
+            "Paper failed join verdict ({reason}) — regression in the reference server; refusing the comparison"
         )));
     }
 
@@ -2944,11 +3023,10 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
         paper_t["outcome"],
         paper_tp.display()
     );
-    if paper_t["outcome"] != "moved" {
+    if let Err(reason) = transcript::move_verdict(&paper_t, "paper") {
         return Err(RunnerError::Gate(format!(
-            "Paper did not move (outcome={}) — regression in the reference server; refusing the \
-             comparison",
-            paper_t["outcome"]
+            "Paper failed move verdict ({reason}) — regression in the reference server; refusing \
+             the comparison"
         )));
     }
 
@@ -2991,11 +3069,10 @@ fn run_paper_vs_rivet_move(args: &Args) -> Result<(), RunnerError> {
         rivet_t["outcome"],
         rivet_tp.display()
     );
-    if rivet_t["outcome"] != "moved" {
+    if let Err(reason) = transcript::move_verdict(&rivet_t, "rivet") {
         return Err(RunnerError::Gate(format!(
-            "Rivet did not move (outcome={}) — the movement scenario did not complete; refusing \
-             the comparison",
-            rivet_t["outcome"]
+            "Rivet failed move verdict ({reason}) — the movement scenario did not complete; refusing \
+             the comparison"
         )));
     }
 
@@ -3342,9 +3419,11 @@ fn run_kick(args: &Args) -> Result<(), RunnerError> {
         "kick1",
     )?;
     server::shutdown(&mut srv)?;
-    // Server-side half of the connection proof: the real rivet-server must have
-    // accepted the client (connection established on TCP accept).
+    // Server-side half of the connection and anti-cheat proof: the real
+    // rivet-server must have accepted the client AND logged the
+    // InvalidPlayerMovement disconnect.
     verify_rivet_connection(&log_path)?;
+    verify_rivet_invalid_movement(&log_path)?;
 
     let normalized = client_run.normalize(transcript::normalize_kick)?;
     let transcript_path = work.join("kick1.transcript.json");
@@ -3487,7 +3566,7 @@ fn run_capture(args: &Args) -> Result<(), RunnerError> {
     server::shutdown(&mut srv)?;
 
     let normalized = client_run.normalize(transcript::normalize_join)?;
-    verify_capture_play_boundary(&normalized)?;
+    verify_capture_play_boundary(kind, &normalized)?;
     println!();
     println!("Normalized transcript:");
     println!("{}", serde_json::to_string_pretty(&normalized)?);
@@ -5258,22 +5337,58 @@ mod tests {
 
     #[test]
     fn capture_boundary_requires_spawn_lifecycle_and_pinned_revision() {
+        let chunks: Vec<Value> = transcript::expected_rivet_join_chunks()
+            .into_iter()
+            .map(|(cx, cz)| json!([cx, cz]))
+            .collect();
         let valid = json!({
             "outcome": "spawned",
             "lifecycle": ["init", "login", "spawn"],
             "azalea_revision": transcript::PINNED_AZALEA_REVISION,
+            "position": { "x": 0.5, "y": -63.0, "z": 0.5 },
+            "world": "minecraft:overworld",
+            "gamemode": "survival",
+            "health": { "health": 20.0, "food": 20, "saturation": 5.0 },
+            "experience": { "level": 0, "total": 0, "progress": 0.0 },
+            "inventory": { "selected_slot": 0, "items": [] },
+            "chunk_count": chunks.len(),
+            "chunks": chunks,
+            "client_binary": {
+                "selected_source_path": "/tmp/rivet-client",
+                "executed_sha256": "deadbeef",
+            },
         });
-        verify_capture_play_boundary(&valid).unwrap();
+        verify_capture_play_boundary(server::ServerKind::Paper, &valid).unwrap();
+        verify_capture_play_boundary(server::ServerKind::Rivet, &valid).unwrap();
 
         let mut missing_spawn = valid.clone();
         missing_spawn["lifecycle"] = json!(["init", "login"]);
-        assert!(verify_capture_play_boundary(&missing_spawn).is_err());
+        assert!(verify_capture_play_boundary(server::ServerKind::Paper, &missing_spawn).is_err());
+
+        let mut out_of_order = valid.clone();
+        out_of_order["lifecycle"] = json!(["spawn", "login", "init"]);
+        assert!(verify_capture_play_boundary(server::ServerKind::Paper, &out_of_order).is_err());
+
         let mut wrong_revision = valid.clone();
         wrong_revision["azalea_revision"] = json!("deadbeef");
-        assert!(verify_capture_play_boundary(&wrong_revision).is_err());
+        assert!(verify_capture_play_boundary(server::ServerKind::Paper, &wrong_revision).is_err());
+
+        let mut missing_world = valid.clone();
+        missing_world.as_object_mut().unwrap().remove("world");
+        assert!(verify_capture_play_boundary(server::ServerKind::Paper, &missing_world).is_err());
+
+        let mut missing_provenance = valid.clone();
+        missing_provenance
+            .as_object_mut()
+            .unwrap()
+            .remove("client_binary");
+        assert!(
+            verify_capture_play_boundary(server::ServerKind::Paper, &missing_provenance).is_err()
+        );
+
         let mut failed = valid;
         failed["outcome"] = json!("connection_failed");
-        assert!(verify_capture_play_boundary(&failed).is_err());
+        assert!(verify_capture_play_boundary(server::ServerKind::Paper, &failed).is_err());
     }
 
     #[test]
@@ -6790,17 +6905,64 @@ mod tests {
 
     #[test]
     fn both_mode_negative_fails_if_position_y_is_silently_excluded() {
-        // If a future edit moves position.y into the `excluded` map (so the
-        // comparison could pass by never seeing the tamper), the negative must
-        // FAIL: the reported divergence must not observe the tampered value.
+        // If a future edit moves position.y into the `excluded` map on both
+        // sides (so the comparison could pass by never seeing the tamper), the
+        // negative must FAIL: the reported divergence must not observe the
+        // tampered value.
         let mut paper = join_transcript(-63.0, 20.0);
+        let mut rivet = join_transcript(-63.0, 1.0);
         paper["excluded"]["position.y"] = json!("silently dropped from parity");
-        let rivet = join_transcript(-63.0, 1.0);
+        rivet["excluded"]["position.y"] = json!("silently dropped from parity");
         let err = prove_both_mode_non_vacuous(&paper, &rivet).unwrap_err();
         assert!(
             err.to_string().contains("position.y"),
             "error must name the missing position.y divergence, got {err}"
         );
+    }
+
+    #[test]
+    fn paper_rivet_and_move_divergence_reject_excluded_policy_drift() {
+        let mut paper = join_transcript(-63.0, 20.0);
+        let rivet = join_transcript(-63.0, 1.0);
+        paper["excluded"]["gamemode"] = json!("smuggled exclusion");
+        let d = comparator::diff(&paper, &rivet);
+        let err = check_paper_rivet_divergence(&d).unwrap_err();
+        assert!(
+            err.to_string().contains("exclusion policy mismatch"),
+            "expected policy mismatch error, got {err}"
+        );
+        let move_err = check_move_divergence(&d).unwrap_err();
+        assert!(
+            move_err.to_string().contains("exclusion policy mismatch"),
+            "expected move policy mismatch error, got {move_err}"
+        );
+    }
+
+    #[test]
+    fn verify_rivet_invalid_movement_requires_server_log_evidence() {
+        let work = env::temp_dir().join(format!("rivet-invalid-move-test-{}", std::process::id()));
+        fs::create_dir_all(&work).unwrap();
+        let good = work.join("good.log");
+        fs::write(
+            &good,
+            "INFO connection established\nWARN invalid player movement, disconnected\n",
+        )
+        .unwrap();
+        verify_rivet_invalid_movement(&good).unwrap();
+
+        let bad = work.join("bad.log");
+        fs::write(
+            &bad,
+            "INFO connection established\nINFO client disconnected\n",
+        )
+        .unwrap();
+        let err = verify_rivet_invalid_movement(&bad).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid player movement, disconnected"),
+            "unexpected error: {err}"
+        );
+        fs::remove_dir_all(&work).unwrap();
     }
 
     #[test]

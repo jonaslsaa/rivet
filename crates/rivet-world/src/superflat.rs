@@ -30,6 +30,7 @@
 
 use bytes::BytesMut;
 
+use crate::chunk::chunk_packet_info::ChunkPacketInfo;
 use crate::chunk::data_layer::DataLayer;
 use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::paletted_container::PalettedContainer;
@@ -72,14 +73,22 @@ impl<
     B: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static,
 > SuperflatChunkContent<T, B>
 {
-    /// `calculateChunkSize` + `extractChunkData` — the opaque sections buffer
-    /// the `LevelChunkPacketData` carries. Java sizes the byte array from the
-    /// per-section serialized sizes, then each section writes exactly its
-    /// share; the port asserts the same invariant after writing.
-    pub fn sections_buffer(&self) -> Vec<u8> {
+    /// `calculateChunkSize` + `extractChunkData` with optional Paper Anti-Xray
+    /// `ChunkPacketInfo<T>`. Threads the monotonically increasing
+    /// `chunkSectionIndex` (`0..self.sections.len()`) into each section's
+    /// `write_with_info` and, when `chunk_packet_info` is `Some`, records the
+    /// serialized buffer on it (`chunkPacketInfo.setBuffer`).
+    pub fn sections_buffer_with_info(
+        &self,
+        mut chunk_packet_info: Option<&mut ChunkPacketInfo<T>>,
+    ) -> Vec<u8> {
         let mut buf = FriendlyByteBuf::new(BytesMut::new());
-        for section in &self.sections {
-            section.write(&mut buf);
+        for (chunk_section_index, section) in self.sections.iter().enumerate() {
+            section.write_with_info(
+                &mut buf,
+                chunk_packet_info.as_deref_mut(),
+                chunk_section_index,
+            );
         }
         let bytes = buf.into_inner().to_vec();
         let expected: i32 = self.sections.iter().map(|s| s.get_serialized_size()).sum();
@@ -88,7 +97,18 @@ impl<
             expected,
             "section buffer must be exactly the sum of getSerializedSize()"
         );
+        if let Some(info) = chunk_packet_info {
+            info.set_buffer(bytes.clone());
+        }
         bytes
+    }
+
+    /// `calculateChunkSize` + `extractChunkData` — the opaque sections buffer
+    /// the `LevelChunkPacketData` carries. Java sizes the byte array from the
+    /// per-section serialized sizes, then each section writes exactly its
+    /// share; the port asserts the same invariant after writing.
+    pub fn sections_buffer(&self) -> Vec<u8> {
+        self.sections_buffer_with_info(None)
     }
 
     /// `new ClientboundLevelChunkPacketData(levelChunk, null)` — the superflat

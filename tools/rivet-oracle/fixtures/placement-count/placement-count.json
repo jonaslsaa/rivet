@@ -1,0 +1,105 @@
+{
+  "paper": "26.2-DEV-main@0a99345",
+  "cases": [
+    {
+      "x": 8,
+      "z": 8,
+      "noiseToCountRatio": 10,
+      "noiseFactor": 0.01,
+      "noiseFactorBits": 4576918229304087675,
+      "noiseOffset": 0.0,
+      "noiseOffsetBits": 0,
+      "count": -8
+    },
+    {
+      "x": 8,
+      "z": 8,
+      "noiseToCountRatio": 10,
+      "noiseFactor": 3.0,
+      "noiseFactorBits": 4613937818241073152,
+      "noiseOffset": 0.0,
+      "noiseOffsetBits": 0,
+      "count": -9
+    },
+    {
+      "x": -8,
+      "z": -8,
+      "noiseToCountRatio": 10,
+      "noiseFactor": 0.01,
+      "noiseFactorBits": 4576918229304087675,
+      "noiseOffset": 0.0,
+      "noiseOffsetBits": 0,
+      "count": 3
+    },
+    {
+      "x": 8,
+      "z": 8,
+      "noiseToCountRatio": -3,
+      "noiseFactor": 0.01,
+      "noiseFactorBits": 4576918229304087675,
+      "noiseOffset": 0.0,
+      "noiseOffsetBits": 0,
+      "count": 3
+    },
+    {
+      "x": 8,
+      "z": 8,
+      "noiseToCountRatio": 0,
+      "noiseFactor": 0.01,
+      "noiseFactorBits": 4576918229304087675,
+      "noiseOffset": 0.0,
+      "noiseOffsetBits": 0,
+      "count": 0
+    },
+    {
+      "x": 8,
+      "z": 8,
+      "noiseToCountRatio": 5,
+      "noiseFactor": 0.01,
+      "noiseFactorBits": 4576918229304087675,
+      "noiseOffset": -5.0,
+      "noiseOffsetBits": -4606056518893174784,
+      "count": -29
+    },
+    {
+      "x": 8,
+      "z": 8,
+      "noiseToCountRatio": 10,
+      "noiseFactor": 0.01,
+      "noiseFactorBits": 4576918229304087675,
+      "noiseOffset": 0.5,
+      "noiseOffsetBits": 4602678819172646912,
+      "count": -3
+    },
+    {
+      "x": 8,
+      "z": 8,
+      "noiseToCountRatio": 10,
+      "noiseFactor": 1000000.0,
+      "noiseFactorBits": 4696837146684686336,
+      "noiseOffset": 0.0,
+      "noiseOffsetBits": 0,
+      "count": 1
+    },
+    {
+      "x": 123,
+      "z": -456,
+      "noiseToCountRatio": 7,
+      "noiseFactor": 3.5,
+      "noiseFactorBits": 4615063718147915776,
+      "noiseOffset": -0.25,
+      "noiseOffsetBits": -4625196817309499392,
+      "count": -3
+    },
+    {
+      "x": 8,
+      "z": 8,
+      "noiseToCountRatio": 2147483647,
+      "noiseFactor": 0.01,
+      "noiseFactorBits": 4576918229304087675,
+      "noiseOffset": 2.0,
+      "noiseOffsetBits": 4611686018427387904,
+      "count": 2147483647
+    }
+  ]
+}

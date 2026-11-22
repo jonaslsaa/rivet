@@ -1,4 +1,5 @@
-//! Port of `ca.spottedleaf.dataconverter.types` — the abstract type layer.
+//! Port of `ca.spottedleaf.dataconverter.types` — the abstract and concrete
+//! DataConverter type layer.
 //!
 //! Java source:
 //! `working/Paper/paper-server/src/minecraft/java/ca/spottedleaf/dataconverter/types/`
@@ -6,25 +7,23 @@
 //!   - `ListType.java` / `MapType.java` — the container interfaces plus their
 //!     generic-dispatch defaults;
 //!   - `TypeUtil.java` — the per-backing conversion interface (NBT/JSON);
-//!   - `Types.java` — the concrete `NBT`/`JSON`/`JSON_COMPRESSED` singletons.
-//!
-//! The concrete backings (`types.nbt`, `types.json`) and the `Types` handles are
-//! later manifest units; this scaffold carries only the abstract contracts plus
-//! the boxed [`generic::Generic`] value that models Java's runtime `Object`
-//! slot (see [`crate::server::dataconverter`] for the object-model notes).
+//!   - `Types.java` — the concrete `NBT`/`JSON`/`JSON_COMPRESSED` singletons;
+//!   - `nbt/` — `NBTListType`, `NBTMapType`, `NBTTypeUtil`;
+//!   - `json/` — `JsonListType`, `JsonMapType`, `JsonTypeUtil`.
 
 pub mod generic;
+pub mod json;
 pub mod list_type;
 pub mod map_type;
+pub mod nbt;
 pub mod object_type;
 pub mod type_util;
+#[allow(clippy::module_inception)]
+pub mod types;
+
+pub use types::Types;
 
 /// Test-only reference backings used by the container tests; compiled only in
-/// test builds (the concrete NBT/JSON backings are later manifest units).
+/// test builds.
 #[cfg(test)]
 pub(crate) mod test_support;
-
-// RivetTodo(#535): `Types.java`'s `NBT`/`JSON`/`JSON_COMPRESSED` handles are
-// provided by the `ca.spottedleaf.dataconverter.types.nbt` /
-// `ca.spottedleaf.dataconverter.types.json` manifest units (wave 4), which
-// implement the concrete `NBTTypeUtil`/`JsonTypeUtil` behind [`type_util::TypeUtil`].

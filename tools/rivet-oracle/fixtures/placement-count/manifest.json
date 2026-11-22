@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "paper": "26.2-DEV-main@0a99345",
+  "kind": "placement-count",
+  "note": "golden samples of net.minecraft.world.level.levelgen.placement.NoiseBasedCountPlacement#count(RandomSource, BlockPos) captured from the pinned Paper 26.2 runtime via PlacementCountProbe. Deterministic across boots.",
+  "captured": [
+    {
+      "path": "placement-count.json",
+      "sha256": "8724abe9b7031d5098fc123087d79f5c5aa19b64745eb57cbd58f62260c2c1ff",
+      "bytes": 2323
+    }
+  ]
+}
