@@ -10,11 +10,76 @@ use crate::scores::{
 use rivet_nbt::nbt_ops::NbtOps;
 use rivet_nbt::tag::Tag;
 use rivet_serialization::codec::{self, Codec};
+use rivet_serialization::data_result::DataResult;
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::map_codec;
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, OnceLock};
+
+struct OrderedDisplaySlotsCodec<Ops: DynamicOps + 'static> {
+    key_codec: Arc<dyn Codec<DisplaySlot, Ops>>,
+    value_codec: Arc<dyn Codec<String, Ops>>,
+    decode_delegate: Arc<dyn Codec<HashMap<DisplaySlot, String>, Ops>>,
+}
+
+impl<Ops: DynamicOps + 'static> OrderedDisplaySlotsCodec<Ops> {
+    fn new() -> Arc<dyn Codec<BTreeMap<DisplaySlot, String>, Ops>> {
+        let key_codec = DisplaySlot::codec::<Ops>();
+        let value_codec = codec::string_codec::<Ops>();
+        let decode_delegate = codec::unbounded_map(key_codec.clone(), value_codec.clone());
+        Arc::new(Self {
+            key_codec,
+            value_codec,
+            decode_delegate,
+        })
+    }
+}
+
+impl<Ops: DynamicOps + 'static> std::fmt::Debug for OrderedDisplaySlotsCodec<Ops> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OrderedDisplaySlotsCodec")
+    }
+}
+
+impl<Ops: DynamicOps + 'static> rivet_serialization::Decoder<BTreeMap<DisplaySlot, String>, Ops>
+    for OrderedDisplaySlotsCodec<Ops>
+{
+    fn decode(
+        &self,
+        ops: &Ops,
+        input: &Ops::Output,
+    ) -> DataResult<(BTreeMap<DisplaySlot, String>, Ops::Output)> {
+        self.decode_delegate
+            .decode(ops, input)
+            .map_owned(|(map, rest)| (map.into_iter().collect(), rest))
+    }
+}
+
+impl<Ops: DynamicOps + 'static> rivet_serialization::Encoder<BTreeMap<DisplaySlot, String>, Ops>
+    for OrderedDisplaySlotsCodec<Ops>
+{
+    fn encode(
+        &self,
+        input: &BTreeMap<DisplaySlot, String>,
+        ops: &Ops,
+        prefix: &Ops::Output,
+    ) -> DataResult<Ops::Output> {
+        let mut builder = ops.map_builder();
+        for (slot, objective_name) in input {
+            builder.add_result_result(
+                self.key_codec.encode_start(ops, slot),
+                self.value_codec.encode_start(ops, objective_name),
+            );
+        }
+        builder.build(prefix.clone())
+    }
+}
+
+impl<Ops: DynamicOps + 'static> Codec<BTreeMap<DisplaySlot, String>, Ops>
+    for OrderedDisplaySlotsCodec<Ops>
+{
+}
 
 /// Vanilla saved-data file identifier (`minecraft:scoreboard` / `data/scoreboard.dat`).
 pub const SCOREBOARD_SAVED_DATA_ID: &str = "scoreboard";
@@ -41,19 +106,7 @@ impl PackedScoreboardData {
     /// - `"DisplaySlots"` (default `{}`)
     /// - `"Teams"` (default `[]`)
     pub fn codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<PackedScoreboardData, Ops>> {
-        let display_slots_map_codec = codec::xmap(
-            codec::unbounded_map(DisplaySlot::codec::<Ops>(), codec::string_codec::<Ops>()),
-            Arc::new(|m: &HashMap<DisplaySlot, String>| {
-                m.iter()
-                    .map(|(k, v)| (*k, v.clone()))
-                    .collect::<BTreeMap<_, _>>()
-            }),
-            Arc::new(|m: &BTreeMap<DisplaySlot, String>| {
-                m.iter()
-                    .map(|(k, v)| (*k, v.clone()))
-                    .collect::<HashMap<_, _>>()
-            }),
-        );
+        let display_slots_map_codec = OrderedDisplaySlotsCodec::<Ops>::new();
         let display_slots_field = map_codec::xmap(
             codec::optional_field("DisplaySlots".to_owned(), display_slots_map_codec, false),
             Arc::new(|opt: &Option<BTreeMap<DisplaySlot, String>>| opt.clone().unwrap_or_default()),
