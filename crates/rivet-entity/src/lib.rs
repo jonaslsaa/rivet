@@ -1,3 +1,7 @@
-//! `net.minecraft.world.entity` and loaded-section entity persistence.
+//! Port of `net.minecraft.world.entity`.
 
+pub mod ai;
+pub mod damage;
+pub mod projectile;
 pub mod storage;
+pub mod survival;

@@ -67,6 +67,10 @@ pub(crate) const PINNED_JOIN_CAPTURE_SHA256: &str =
 // is a build of the exact pinned source, never an arbitrary jar.
 pub(crate) const PINNED_SERVER_JAR_SHA256_FEATURE_DATA: &str =
     "88ccec843a9c94b938d71105294e3d064786dbc29bcd1e0da6417fb8c2c93446";
+// Same for the #685 entity_spawn_descriptors fixture, extracted from a fresh
+// clean build of the exact pinned Paper commit `0a993450f129c4942c2a9ed45ba047412b4667cf`.
+pub(crate) const PINNED_SERVER_JAR_SHA256_ENTITY_SPAWN_DESCRIPTORS: &str =
+    "14e368d93c5ab0f451c9f4c4c3d1f8549e6c41f6df92ce042ab8f7d2ca3d0823";
 pub(crate) const PINNED_MINECRAFT_VERSION: &str = "26.2";
 pub(crate) const PINNED_PROTOCOL_VERSION: u32 = 776;
 pub(crate) const PINNED_WORLD_VERSION: u32 = 4903;
@@ -430,6 +434,7 @@ pub(crate) fn verify_pinned_source(source: &SourceProvenance) -> Result<()> {
     ensure!(
         source.jar_sha256 == PINNED_SERVER_JAR_SHA256
             || source.jar_sha256 == PINNED_SERVER_JAR_SHA256_FEATURE_DATA
+            || source.jar_sha256 == PINNED_SERVER_JAR_SHA256_ENTITY_SPAWN_DESCRIPTORS
             || source.jar_sha256 == PINNED_JOIN_CAPTURE_SHA256,
         "UNVERIFIED: fixture source SHA {} is not a pinned source",
         source.jar_sha256

@@ -82,6 +82,11 @@ pub mod chunk;
 /// `net.minecraft.data.worldgen` package (the 26-file residual of the
 /// `mc.data.worldgen` row) stays pending.
 pub mod data;
+/// `net.minecraft.world.effect` and `net.minecraft.world.item.alchemy` (issue #450):
+/// mob effects, status-effect instances, active-effect runtime, utilities, potions,
+/// potion contents, and vanilla brewing mixes.
+pub mod effect;
+pub mod enchantment;
 /// `net.minecraft.world.entity` — the entity-identity slice: the `MobCategory`
 /// enum and the `EntityType` id-handle STUB (`MobSpawnSettings`'s spawner and
 /// spawn-cost map keys; issue #178). The full `mc.world.entity` unit defers
@@ -89,10 +94,13 @@ pub mod data;
 pub mod entity;
 pub mod flag;
 pub mod fluid;
+pub mod inventory;
 pub mod level;
 pub mod levelgen;
 pub mod lighting;
+pub mod loot;
 pub mod poi;
+pub mod scores;
 pub mod superflat;
 /// `net.minecraft.world.ticks` value and container layer (#370/#522):
 /// [`ticks::TickPriority`], [`ticks::SavedTick`] (+ the

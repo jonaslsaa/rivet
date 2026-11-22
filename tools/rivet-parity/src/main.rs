@@ -260,6 +260,20 @@ fn is_single_key_deep(tag: &Tag) -> bool {
 
 // ---- section runners ----
 
+fn extract_tag_fields(result: &Value) -> Result<(&str, &str, &str, i64), &'static str> {
+    let snbt = result["snbt"].as_str().ok_or("missing string field snbt")?;
+    let pretty = result["pretty_snbt"]
+        .as_str()
+        .ok_or("missing string field pretty_snbt")?;
+    let tag_type = result["tag_type"]
+        .as_str()
+        .ok_or("missing string field tag_type")?;
+    let tag_id = result["tag_id"]
+        .as_i64()
+        .ok_or("missing integer field tag_id")?;
+    Ok((snbt, pretty, tag_type, tag_id))
+}
+
 fn check_snbt_parse<O: oracle::OracleCall>(
     oracle: Option<&mut O>,
     id: &str,
@@ -288,10 +302,13 @@ fn check_snbt_parse<O: oracle::OracleCall>(
             match &rust {
                 Ok(tag) => {
                     let rd = describe_tag(tag);
-                    let oc = result["snbt"].as_str().unwrap_or("");
-                    let op = result["pretty_snbt"].as_str().unwrap_or("");
-                    let ot = result["tag_type"].as_str().unwrap_or("");
-                    let oi = result["tag_id"].as_i64().unwrap_or(-1);
+                    let (oc, op, ot, oi) = match extract_tag_fields(&result) {
+                        Ok(fields) => fields,
+                        Err(err) => {
+                            check.field("oracle_output", "valid tag fields", err);
+                            return check.finish();
+                        }
+                    };
                     check.field("tag_type", ot, &rd.type_name);
                     check.field("tag_id", &oi.to_string(), &rd.id.to_string());
                     check.field("canonical", oc, &rd.canonical);
@@ -368,10 +385,13 @@ fn check_nbt_decode<O: oracle::OracleCall>(
         Ok(result) => match &rust {
             Ok(compound) => {
                 let rd = describe_compound(compound);
-                let oc = result["snbt"].as_str().unwrap_or("");
-                let op = result["pretty_snbt"].as_str().unwrap_or("");
-                let ot = result["tag_type"].as_str().unwrap_or("");
-                let oi = result["tag_id"].as_i64().unwrap_or(-1);
+                let (oc, op, ot, oi) = match extract_tag_fields(&result) {
+                    Ok(fields) => fields,
+                    Err(err) => {
+                        check.field("oracle_output", "valid tag fields", err);
+                        return check.finish();
+                    }
+                };
                 check.field("tag_type", ot, &rd.type_name);
                 check.field("tag_id", &oi.to_string(), &rd.id.to_string());
                 check.field("canonical", oc, &rd.canonical);
@@ -419,11 +439,21 @@ fn check_nbt_encode<O: oracle::OracleCall>(
     match handle.call("nbt.encode", &[("input", input)]) {
         Ok(result) => match &rust_bytes {
             Ok(rbytes) => {
-                let oc = result["snbt"].as_str().unwrap_or("");
-                let op = result["pretty_snbt"].as_str().unwrap_or("");
-                let ot = result["tag_type"].as_str().unwrap_or("");
-                let oi = result["tag_id"].as_i64().unwrap_or(-1);
-                let oracle_len = result["bytes"].as_i64().unwrap_or(-1);
+                let (oc, op, ot, oi) = match extract_tag_fields(&result) {
+                    Ok(fields) => fields,
+                    Err(err) => {
+                        check.field("oracle_output", "valid tag fields", err);
+                        return check.finish();
+                    }
+                };
+                let Some(oracle_len) = result["bytes"].as_i64() else {
+                    check.field("oracle_output", "integer field bytes", "missing");
+                    return check.finish();
+                };
+                let Some(oracle_b64) = result["output_base64"].as_str() else {
+                    check.field("oracle_output", "string field output_base64", "missing");
+                    return check.finish();
+                };
 
                 let rust_tag = match rust_parse_snbt(input) {
                     Ok(tag) => tag,
@@ -447,8 +477,7 @@ fn check_nbt_encode<O: oracle::OracleCall>(
                 );
 
                 // Binary field order.
-                let oracle_bytes = match B64.decode(result["output_base64"].as_str().unwrap_or(""))
-                {
+                let oracle_bytes = match B64.decode(oracle_b64) {
                     Ok(b) => b,
                     Err(e) => {
                         check.field("oracle_base64", "valid", "invalid");
@@ -631,7 +660,11 @@ fn check_component_json<O: oracle::OracleCall>(
             match &rust {
                 Ok(rust_canonical) => {
                     if oracle_accept {
-                        let oracle_canonical = result["canonical"].as_str().unwrap_or("");
+                        let Some(oracle_canonical) = result["canonical"].as_str() else {
+                            check.field("oracle_canonical", "string", "missing");
+                            check.note("oracle accepted component without string canonical output");
+                            return check.finish();
+                        };
                         check.field("canonical_oracle", oracle_canonical, rust_canonical);
                         if let Some(golden) = golden_canonical {
                             check.field("canonical_golden", golden, rust_canonical);
@@ -733,7 +766,43 @@ fn m1_scenario_gate_section() -> String {
 /// mismatches) leaves the `mismatched` column visibly nonzero instead of
 /// writing a green-washed table. When `fixture_cap` is set, a provenance note
 /// is appended so a capped snapshot is not mistaken for full-corpus coverage.
-fn write_scoreboard(summary: &Summary, fixture_cap: Option<usize>) {
+struct ClosureReport {
+    manifest_sha256: String,
+    declared: usize,
+    discovered: usize,
+    executed: usize,
+    matched: usize,
+    diverged: usize,
+    mismatched: usize,
+    invalid_accepted: usize,
+    invalid_rejected: usize,
+    invalid_unavailable: usize,
+    unreadable: usize,
+    unlisted: usize,
+    fixture_limit: Option<usize>,
+}
+
+impl ClosureReport {
+    fn to_json(&self) -> Value {
+        json!({
+            "manifest_sha256": self.manifest_sha256,
+            "declared": self.declared,
+            "discovered": self.discovered,
+            "executed": self.executed,
+            "matched": self.matched,
+            "diverged": self.diverged,
+            "mismatched": self.mismatched,
+            "invalid_accepted": self.invalid_accepted,
+            "invalid_rejected": self.invalid_rejected,
+            "invalid_unavailable": self.invalid_unavailable,
+            "unreadable": self.unreadable,
+            "unlisted": self.unlisted,
+            "fixture_limit": self.fixture_limit,
+        })
+    }
+}
+
+fn render_scoreboard(summary: &Summary, closure: &ClosureReport, date: &str) -> String {
     let mut rows: BTreeMap<String, (usize, usize, usize, usize)> = BTreeMap::new();
     // NBT/SNBT checks are `rivet-nbt:*`; the component-JSON corpus (issue #98)
     // is `rivet-text:component.json`.
@@ -762,7 +831,6 @@ fn write_scoreboard(summary: &Summary, fixture_cap: Option<usize>) {
         );
     }
 
-    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
     let mut md = String::new();
     md.push_str("# PARITY scoreboard\n\n");
     md.push_str(&format!(
@@ -777,17 +845,43 @@ fn write_scoreboard(summary: &Summary, fixture_cap: Option<usize>) {
             "| {check} | {total} | {matched} | {diverged} | {mismatched} | {date} |\n"
         ));
     }
-    if let Some(cap) = fixture_cap {
+    if let Some(cap) = closure.fixture_limit {
         md.push_str(&format!(
             "\n_Snapshot: fixture-backed rows above were generated with `--limit-fixtures={cap}` \
              (a deliberate capped run); the full corpus is the 432 committed M0 chunk-NBT fixtures._\n"
         ));
     }
+    md.push_str("\n### Corpus closure\n\n");
+    md.push_str(&format!(
+        "Manifest SHA-256: `{}`\n\n",
+        closure.manifest_sha256
+    ));
+    md.push_str("| declared | discovered | executed | matched | diverged | mismatched | invalid_accepted | invalid_rejected | invalid_unavailable | unreadable | unlisted |\n");
+    md.push_str("|---|---|---|---|---|---|---|---|---|---|---|\n");
+    md.push_str(&format!(
+        "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+        closure.declared,
+        closure.discovered,
+        closure.executed,
+        closure.matched,
+        closure.diverged,
+        closure.mismatched,
+        closure.invalid_accepted,
+        closure.invalid_rejected,
+        closure.invalid_unavailable,
+        closure.unreadable,
+        closure.unlisted,
+    ));
     md.push_str(&m1_scenario_gate_section());
     md.push_str("\n### Divergences\n\n");
     md.push_str("`compound_key_order` is the documented insertion-order divergence (DECISIONS.md D12): Rust's `CompoundTag` is insertion-ordered, so hand-built compounds emit Rust's put sequence while Java emits fastutil hash order; read-back fixtures round-trip byte-for-byte. All such checks remain `ok` and are counted under `diverged`, never under `mismatched`.\n");
     md.push_str("\n`component.json` must match Paper byte-for-byte: accept/reject parity and, for accepted entries, the canonical decode->re-encode under non-compressed `JsonOps`. The corpus's four `malformed-*-wrong-key` negatives pin the `ClickEvent`/`HoverEvent` codec field names (ShowText `value`, OpenUrl `url`, RunCommand `command`, CopyToClipboard `value`) as load-bearing. Any divergence is counted under `mismatched`.\n");
+    md
+}
 
+fn write_scoreboard(summary: &Summary, closure: &ClosureReport) {
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let md = render_scoreboard(summary, closure, &date);
     let path = scoreboard_path();
     match std::fs::write(&path, md) {
         Ok(()) => eprintln!("[rivet-parity] scoreboard written to {}", path.display()),
@@ -1071,32 +1165,32 @@ fn main() {
         + corpus::encode_corpus().len()
         + closure.declared * 4
         + closure.text_entries.len();
-    let closure_stats = json!({
-        "manifest_sha256": closure.manifest_sha256,
-        "declared": full_declared_checks,
-        "discovered": corpus::parse_corpus().len()
+    let closure_report = ClosureReport {
+        manifest_sha256: closure.manifest_sha256,
+        declared: full_declared_checks,
+        discovered: corpus::parse_corpus().len()
             + corpus::invalid_corpus().len()
             + corpus::encode_corpus().len()
             + closure.discovered * 4
             + closure.text_entries.len(),
-        "executed": transcript.len() - skipped,
-        "matched": summary.matched.values().sum::<usize>(),
-        "diverged": summary.diverged.values().sum::<usize>(),
-        "mismatched": summary.mismatched.values().sum::<usize>(),
-        "invalid_accepted": summary.invalid_accepted,
-        "invalid_rejected": summary.invalid_rejected,
-        "invalid_unavailable": summary.invalid_unavailable,
-        "unreadable": 0,
-        "unlisted": 0,
-        "fixture_limit": limit_fixtures,
-    });
+        executed: transcript.len() - skipped,
+        matched: summary.matched.values().sum::<usize>(),
+        diverged: summary.diverged.values().sum::<usize>(),
+        mismatched: summary.mismatched.values().sum::<usize>(),
+        invalid_accepted: summary.invalid_accepted,
+        invalid_rejected: summary.invalid_rejected,
+        invalid_unavailable: summary.invalid_unavailable,
+        unreadable: 0,
+        unlisted: 0,
+        fixture_limit: limit_fixtures,
+    };
     let stats = json!({
         "total": transcript.len(),
-        "matched": summary.matched.values().sum::<usize>(),
-        "diverged": summary.diverged.values().sum::<usize>(),
-        "mismatched": summary.mismatched.values().sum::<usize>(),
+        "matched": closure_report.matched,
+        "diverged": closure_report.diverged,
+        "mismatched": closure_report.mismatched,
         "skipped": skipped,
-        "closure": closure_stats,
+        "closure": closure_report.to_json(),
     });
     let _ = writeln!(
         out,
@@ -1109,7 +1203,7 @@ fn main() {
     // root) when asked. Runs regardless of hard mismatches so a red gate is
     // reflected in the committed numbers.
     if write_scoreboard_flag {
-        write_scoreboard(&summary, limit_fixtures);
+        write_scoreboard(&summary, &closure_report);
     }
 
     // Human summary on stderr.
@@ -1477,5 +1571,105 @@ mod tests {
         };
         let check = check_nbt_encode(Some(&mut oracle), "encode.broken", "{broken", true);
         assert!(!check["ok"].as_bool().unwrap(), "{check}");
+    }
+
+    #[test]
+    fn valid_component_both_fail_is_a_hard_mismatch() {
+        let mut oracle = StubOracle {
+            response: Ok(json!({ "accept": false, "error": "SyntaxException" })),
+        };
+        let check = check_component_json(
+            Some(&mut oracle),
+            "component.valid-but-broken",
+            "{not-valid-json",
+            true,
+            Some("\"ok\""),
+            &component_codec(),
+        );
+        assert!(!check["ok"].as_bool().unwrap(), "{check}");
+    }
+
+    #[test]
+    fn valid_snbt_malformed_oracle_output_is_a_hard_mismatch() {
+        let mut oracle = StubOracle {
+            response: Ok(json!({ "snbt": "1b" })),
+        };
+        let check = check_snbt_parse(Some(&mut oracle), "parse.malformed-oracle", "1b", true);
+        assert!(!check["ok"].as_bool().unwrap(), "{check}");
+    }
+
+    #[test]
+    fn valid_nbt_decode_malformed_oracle_output_is_a_hard_mismatch() {
+        let bytes = rust_encode_compound("{a:1}").unwrap();
+        let mut oracle = StubOracle {
+            response: Ok(json!({ "snbt": "{a:1}" })),
+        };
+        let check = check_nbt_decode(
+            Some(&mut oracle),
+            "decode.malformed-oracle",
+            "fixture.nbt",
+            &bytes,
+        );
+        assert!(!check["ok"].as_bool().unwrap(), "{check}");
+    }
+
+    #[test]
+    fn valid_nbt_encode_missing_base64_is_a_hard_mismatch() {
+        let mut oracle = StubOracle {
+            response: Ok(json!({
+                "snbt": "{a:1}",
+                "pretty_snbt": "{\n    a: 1\n}",
+                "tag_type": "TAG_Compound",
+                "tag_id": 10,
+                "bytes": 10,
+            })),
+        };
+        let check = check_nbt_encode(Some(&mut oracle), "encode.missing-base64", "{a:1}", true);
+        assert!(!check["ok"].as_bool().unwrap(), "{check}");
+    }
+
+    #[test]
+    fn valid_component_missing_canonical_is_a_hard_mismatch() {
+        let mut oracle = StubOracle {
+            response: Ok(json!({ "accept": true })),
+        };
+        let check = check_component_json(
+            Some(&mut oracle),
+            "component.missing-canonical",
+            "\"hi\"",
+            true,
+            Some("\"hi\""),
+            &component_codec(),
+        );
+        assert!(!check["ok"].as_bool().unwrap(), "{check}");
+    }
+
+    #[test]
+    fn scoreboard_records_exact_corpus_closure_counts_and_manifest_hash() {
+        let mut summary = Summary::default();
+        summary.totals.insert("snbt.parse".to_string(), 170);
+        summary.matched.insert("snbt.parse".to_string(), 170);
+        let closure = ClosureReport {
+            manifest_sha256: "deadbeef".to_string(),
+            declared: 1995,
+            discovered: 1995,
+            executed: 1995,
+            matched: 1974,
+            diverged: 21,
+            mismatched: 0,
+            invalid_accepted: 0,
+            invalid_rejected: 37,
+            invalid_unavailable: 0,
+            unreadable: 0,
+            unlisted: 0,
+            fixture_limit: None,
+        };
+        let md = render_scoreboard(&summary, &closure, "2026-11-21");
+        assert!(md.contains("### Corpus closure"), "{md}");
+        assert!(md.contains("Manifest SHA-256: `deadbeef`"), "{md}");
+        assert!(
+            md.contains("| 1995 | 1995 | 1995 | 1974 | 21 | 0 | 0 | 37 | 0 | 0 | 0 |"),
+            "{md}"
+        );
     }
 }
