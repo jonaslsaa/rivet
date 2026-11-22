@@ -52,6 +52,8 @@
 //! stale or locally-modified client binary cannot stand in for the pinned
 //! headless client.
 
+use std::collections::BTreeSet;
+
 use serde_json::{Value, json};
 
 /// Protocol version emitted by `rivet-client`. Consumers must reject any other
@@ -308,6 +310,198 @@ pub const JOIN_SPAWN_Y: f64 = -63.0;
 /// player entity spawn. The companion server-side check (`connection
 /// established` in the rivet log) is the genuinely Rivet-specific half of that
 /// proof.
+/// Deterministic 117-chunk send-set for Rivet's view-distance-4 superflat spawn
+/// centered at chunk `(0, 0)`: the 11x11 square `cx in -5..=5, cz in -5..=5`
+/// minus the 4 corners `(-5, -5), (-5, 5), (5, -5), (5, 5)`.
+pub fn expected_rivet_join_chunks() -> BTreeSet<(i64, i64)> {
+    let mut set = BTreeSet::new();
+    for cx in -5_i64..=5_i64 {
+        for cz in -5_i64..=5_i64 {
+            if cx.abs() == 5 && cz.abs() == 5 {
+                continue;
+            }
+            set.insert((cx, cz));
+        }
+    }
+    set
+}
+
+/// Verify the transcript lifecycle matches `["init", "login", "spawn"]` in exact
+/// order (not merely unordered presence of `login` and `spawn`).
+pub fn check_ordered_lifecycle(t: &Value, context: &str) -> Result<(), String> {
+    let lifecycle_arr = t
+        .get("lifecycle")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{context} transcript has no lifecycle array"))?;
+    let mut lifecycle = Vec::with_capacity(lifecycle_arr.len());
+    for entry in lifecycle_arr {
+        let s = entry.as_str().ok_or_else(|| {
+            format!("{context} transcript lifecycle contains non-string entry: {entry}")
+        })?;
+        lifecycle.push(s);
+    }
+    if lifecycle.as_slice() != LIFECYCLE_EVENTS.as_slice() {
+        return Err(format!(
+            "{context} transcript lifecycle is {lifecycle:?} (expected {:?} in exact order) — \
+             malformed transcript or out-of-order play lifecycle",
+            LIFECYCLE_EVENTS
+        ));
+    }
+    Ok(())
+}
+
+/// Verify the transcript carries the exact pinned unmodified Azalea revision.
+pub fn check_pinned_azalea_revision(t: &Value, context: &str) -> Result<(), String> {
+    if t.get("azalea_revision").and_then(Value::as_str) != Some(PINNED_AZALEA_REVISION) {
+        return Err(format!(
+            "{context} transcript azalea_revision is {:?} (expected {PINNED_AZALEA_REVISION}) — \
+             the client was not built from the pinned unmodified Azalea revision",
+            t.get("azalea_revision").and_then(Value::as_str)
+        ));
+    }
+    Ok(())
+}
+
+fn require_finite_f64(obj: &Value, field: &str, context: &str) -> Result<f64, String> {
+    let v = obj
+        .get(field)
+        .and_then(Value::as_f64)
+        .ok_or_else(|| format!("{context} transcript is missing numeric {field}"))?;
+    if !v.is_finite() {
+        return Err(format!("{context} transcript {field} is not finite: {v}"));
+    }
+    Ok(v)
+}
+
+/// Validate all required `join` transcript fields and return the deduplicated
+/// chunk coordinate set, rejecting malformed coordinates, duplicate coordinates,
+/// count mismatches, or missing/invalid join fields.
+fn validate_join_fields(t: &Value, context: &str) -> Result<BTreeSet<(i64, i64)>, String> {
+    let position = t
+        .get("position")
+        .filter(|v| v.is_object())
+        .ok_or_else(|| format!("{context} transcript is missing position object"))?;
+    for axis in ["x", "y", "z"] {
+        require_finite_f64(position, axis, context)?;
+    }
+
+    let world = t
+        .get("world")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("{context} transcript is missing non-empty world"))?;
+    let _ = world;
+
+    let gamemode = t
+        .get("gamemode")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("{context} transcript is missing non-empty gamemode"))?;
+    let _ = gamemode;
+
+    let health = t
+        .get("health")
+        .filter(|v| v.is_object())
+        .ok_or_else(|| format!("{context} transcript is missing health object"))?;
+    require_finite_f64(health, "health", context)?;
+    health
+        .get("food")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| format!("{context} transcript is missing integer health.food"))?;
+    require_finite_f64(health, "saturation", context)?;
+
+    let experience = t
+        .get("experience")
+        .filter(|v| v.is_object())
+        .ok_or_else(|| format!("{context} transcript is missing experience object"))?;
+    experience
+        .get("level")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| format!("{context} transcript is missing integer experience.level"))?;
+    require_finite_f64(experience, "progress", context)?;
+    experience
+        .get("total")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| format!("{context} transcript is missing integer experience.total"))?;
+
+    let inventory = t
+        .get("inventory")
+        .filter(|v| v.is_object())
+        .ok_or_else(|| format!("{context} transcript is missing inventory object"))?;
+    inventory
+        .get("selected_slot")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            format!("{context} transcript is missing integer inventory.selected_slot")
+        })?;
+    inventory
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{context} transcript is missing inventory.items array"))?;
+
+    let chunk_count = t
+        .get("chunk_count")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("{context} transcript is missing integer chunk_count"))?;
+    let chunks = t
+        .get("chunks")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{context} transcript is missing chunks array"))?;
+    if chunks.len() as u64 != chunk_count {
+        return Err(format!(
+            "{context} transcript chunk_count={chunk_count} does not match chunks.len()={}",
+            chunks.len()
+        ));
+    }
+    if chunks.is_empty() {
+        return Err(format!("{context} transcript received 0 chunks"));
+    }
+
+    let mut coords = BTreeSet::new();
+    for (idx, entry) in chunks.iter().enumerate() {
+        let pair = entry.as_array().ok_or_else(|| {
+            format!("{context} transcript chunks[{idx}] is not a [cx, cz] pair: {entry}")
+        })?;
+        if pair.len() != 2 {
+            return Err(format!(
+                "{context} transcript chunks[{idx}] must have length 2, got {}: {entry}",
+                pair.len()
+            ));
+        }
+        let cx = pair[0].as_i64().ok_or_else(|| {
+            format!("{context} transcript chunks[{idx}][0] is not an integer: {entry}")
+        })?;
+        let cz = pair[1].as_i64().ok_or_else(|| {
+            format!("{context} transcript chunks[{idx}][1] is not an integer: {entry}")
+        })?;
+        if !coords.insert((cx, cz)) {
+            return Err(format!(
+                "{context} transcript chunks contains duplicate coordinate [{cx}, {cz}]"
+            ));
+        }
+    }
+    Ok(coords)
+}
+
+/// Verify a normalized Paper `join` transcript satisfies the full join contract:
+/// `outcome == "spawned"`, ordered lifecycle `["init", "login", "spawn"]`,
+/// pinned unmodified Azalea revision, and complete valid join fields & chunks.
+pub fn paper_join_verdict(t: &Value) -> Result<&'static str, String> {
+    let outcome = t
+        .get("outcome")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if outcome != "spawned" {
+        return Err(format!(
+            "paper transcript outcome is {outcome} (expected spawned)"
+        ));
+    }
+    check_ordered_lifecycle(t, "paper")?;
+    check_pinned_azalea_revision(t, "paper")?;
+    let _ = validate_join_fields(t, "paper")?;
+    Ok("play (login + configuration + spawn)")
+}
+
 pub fn rivet_play_verdict(t: &Value) -> Result<&'static str, String> {
     let outcome = t
         .get("outcome")
@@ -322,29 +516,23 @@ pub fn rivet_play_verdict(t: &Value) -> Result<&'static str, String> {
              or a stale pre-play Rivet build, produces"
         ));
     }
-    let lifecycle: Vec<&str> = t
-        .get("lifecycle")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
-        .unwrap_or_default();
-    if !lifecycle.contains(&"login") || !lifecycle.contains(&"spawn") {
-        return Err(format!(
-            "rivet transcript lifecycle is {lifecycle:?} (expected to contain login and spawn) \
-             — malformed transcript or the client never reached play"
-        ));
-    }
-    if t.get("azalea_revision").and_then(Value::as_str) != Some(PINNED_AZALEA_REVISION) {
-        return Err(format!(
-            "rivet transcript azalea_revision is {:?} (expected {PINNED_AZALEA_REVISION}) — the \
-             client was not built from the pinned unmodified Azalea revision",
-            t.get("azalea_revision").and_then(Value::as_str)
-        ));
-    }
+    check_ordered_lifecycle(t, "rivet")?;
+    check_pinned_azalea_revision(t, "rivet")?;
+    let coords = validate_join_fields(t, "rivet")?;
     let chunk_count = t.get("chunk_count").and_then(Value::as_u64).unwrap_or(0);
     if chunk_count != JOIN_CHUNK_COUNT {
         return Err(format!(
             "rivet transcript received {chunk_count} chunks (expected {JOIN_CHUNK_COUNT}): the \
              server did not send the deterministic view-distance-4 send-set"
+        ));
+    }
+    let expected = expected_rivet_join_chunks();
+    if coords != expected {
+        let missing: Vec<(i64, i64)> = expected.difference(&coords).copied().take(5).collect();
+        let extra: Vec<(i64, i64)> = coords.difference(&expected).copied().take(5).collect();
+        return Err(format!(
+            "rivet transcript chunk coordinates do not match the deterministic 117-chunk \
+             view-distance-4 send-set (missing sample: {missing:?}, extra sample: {extra:?})"
         ));
     }
     let y = t
@@ -396,8 +584,11 @@ pub fn normalize_join(raw: &str) -> Result<Value, String> {
     });
 
     if let Some(mut joined) = joined {
-        // Copy every observable field the client already normalizes.
-        let joined_obj = joined.as_object_mut().expect("joined is an object");
+        // Require every observable join field to be present and non-null so
+        // truncated or partial `joined` records cannot pass silently.
+        let joined_obj = joined
+            .as_object_mut()
+            .ok_or_else(|| "joined record is not a JSON object".to_owned())?;
         for key in [
             "position",
             "world",
@@ -408,9 +599,13 @@ pub fn normalize_join(raw: &str) -> Result<Value, String> {
             "chunk_count",
             "chunks",
         ] {
-            if let Some(value) = joined_obj.remove(key) {
-                transcript[key] = value;
+            let value = joined_obj
+                .remove(key)
+                .ok_or_else(|| format!("joined record is missing required field '{key}'"))?;
+            if value.is_null() {
+                return Err(format!("joined record has null required field '{key}'"));
             }
+            transcript[key] = value;
         }
     }
 
@@ -489,11 +684,18 @@ pub fn normalize_move(raw: &str) -> Result<Value, String> {
     };
     check_outcome_terminal(&records, outcome)?;
 
+    let azalea_revision = records
+        .iter()
+        .find(|r| r.get("event") == Some(&json!("starting")))
+        .and_then(|r| r.get("azalea_revision").and_then(Value::as_str))
+        .map(str::to_owned);
+
     let mut transcript = json!({
         "protocol": PROTOCOL,
         "scenario": "move",
         "outcome": outcome,
         "lifecycle": lifecycle,
+        "azalea_revision": azalea_revision,
         "excluded": excluded_move_fields(),
     });
 
@@ -556,17 +758,134 @@ pub fn normalize_move(raw: &str) -> Result<Value, String> {
             );
         }
 
-        // Semantic invariant: the sampled walk must show meaningful forward
-        // progress. A no-op boot (the walk direction was never applied, or the
-        // player never actually moved) is a harness failure, not a valid `moved`
-        // outcome — reporting it as `noop` makes the runner FAIL rather than
-        // compare two identically frozen walks.
+        // Semantic invariant: the sampled walk must have well-formed, finite,
+        // monotonic samples and show meaningful forward progress. A no-op boot
+        // (the walk direction was never applied, or the player never actually
+        // moved) is a harness failure, not a valid `moved` outcome — reporting
+        // it as `noop` makes the runner FAIL rather than compare two
+        // identically frozen walks.
+        validate_move_samples(&transcript["walk"]["samples"])?;
         if !walk_moved(&transcript["walk"]["samples"]) {
             transcript["outcome"] = json!("noop");
         }
     }
 
     Ok(transcript)
+}
+
+/// Float epsilon for monotonic `dx` progression across walk samples.
+const SAMPLE_MONOTONIC_EPSILON: f64 = 1e-6;
+
+/// Validate that `samples` is a non-empty array of well-formed movement sample
+/// objects with finite numeric fields and monotonic non-decreasing `dx`.
+pub fn validate_move_samples(samples: &Value) -> Result<(), String> {
+    let arr = samples
+        .as_array()
+        .ok_or_else(|| "move transcript walk.samples is not an array".to_owned())?;
+    if arr.is_empty() {
+        return Err("move transcript walk.samples is empty".to_owned());
+    }
+    let mut prev_dx: Option<f64> = None;
+    for (idx, sample) in arr.iter().enumerate() {
+        if !sample.is_object() {
+            return Err(format!("walk.samples[{idx}] is not a JSON object"));
+        }
+        let ctx = format!("walk.samples[{idx}]");
+        let dx = require_finite_f64(sample, "dx", &ctx)?;
+        require_finite_f64(sample, "y", &ctx)?;
+        require_finite_f64(sample, "dz", &ctx)?;
+        if let Some(vx) = sample.get("vx")
+            && !vx.as_f64().is_some_and(f64::is_finite)
+        {
+            return Err(format!("{ctx} has non-finite vx: {vx}"));
+        }
+        if let Some(vy) = sample.get("vy")
+            && !vy.as_f64().is_some_and(f64::is_finite)
+        {
+            return Err(format!("{ctx} has non-finite vy: {vy}"));
+        }
+        if let Some(vz) = sample.get("vz")
+            && !vz.as_f64().is_some_and(f64::is_finite)
+        {
+            return Err(format!("{ctx} has non-finite vz: {vz}"));
+        }
+        if let Some(on_ground) = sample.get("on_ground")
+            && !on_ground.is_boolean()
+        {
+            return Err(format!("{ctx} has non-boolean on_ground: {on_ground}"));
+        }
+        if let Some(prev) = prev_dx
+            && dx + SAMPLE_MONOTONIC_EPSILON < prev
+        {
+            return Err(format!(
+                "walk.samples[{idx}].dx={dx} regressed below previous sample dx={prev} \
+                 (non-monotonic movement sample sequence)"
+            ));
+        }
+        prev_dx = Some(dx);
+    }
+    Ok(())
+}
+
+/// Verify a normalized `move` transcript satisfies the full move contract:
+/// `outcome == "moved"`, ordered lifecycle `["init", "login", "spawn"]`,
+/// pinned unmodified Azalea revision, complete walk metadata, 1:1 teleport and
+/// keepalive echo sets, and valid monotonic movement samples with net progress
+/// >= `MOVED_DISTANCE_BLOCKS`.
+pub fn move_verdict(t: &Value, context: &str) -> Result<&'static str, String> {
+    let outcome = t
+        .get("outcome")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if outcome != "moved" {
+        return Err(format!(
+            "{context} move transcript outcome is {outcome} (expected moved)"
+        ));
+    }
+    check_ordered_lifecycle(t, context)?;
+    check_pinned_azalea_revision(t, context)?;
+    let walk = t
+        .get("walk")
+        .filter(|v| v.is_object())
+        .ok_or_else(|| format!("{context} move transcript is missing walk object"))?;
+    let samples = walk
+        .get("samples")
+        .ok_or_else(|| format!("{context} move transcript is missing walk.samples"))?;
+    validate_move_samples(samples)?;
+    let sample_len = samples.as_array().map(|a| a.len()).unwrap_or(0);
+    let sampled_ticks = walk
+        .get("sampled_ticks")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("{context} move transcript is missing walk.sampled_ticks"))?;
+    if sampled_ticks as usize != sample_len {
+        return Err(format!(
+            "{context} move transcript sampled_ticks={sampled_ticks} != samples.len()={sample_len}"
+        ));
+    }
+    if !walk_moved(samples) {
+        return Err(format!(
+            "{context} move transcript did not advance at least {MOVED_DISTANCE_BLOCKS} blocks"
+        ));
+    }
+    if walk.get("teleport_ack_echo").and_then(Value::as_bool) != Some(true) {
+        return Err(format!(
+            "{context} move transcript teleport_ack_echo is not true"
+        ));
+    }
+    if walk.get("keepalive_echo").and_then(Value::as_bool) != Some(true) {
+        return Err(format!(
+            "{context} move transcript keepalive_echo is not true"
+        ));
+    }
+    let teleports = walk.get("teleports").unwrap_or(&Value::Null);
+    if is_unobserved(teleports) {
+        return Err(format!("{context} move transcript recorded no teleports"));
+    }
+    let keepalives = walk.get("keepalives").unwrap_or(&Value::Null);
+    if is_unobserved(keepalives) {
+        return Err(format!("{context} move transcript recorded no keepalives"));
+    }
+    Ok("moved (ordered lifecycle + pinned azalea + monotonic samples + 1:1 echoes)")
 }
 
 /// Minimum forward progress (in blocks) a `move` walk must show across its
@@ -1701,12 +2020,29 @@ mod tests {
     /// Rivet's fixed superflat spawn y=-63.0, and receives exactly the
     /// deterministic 117-chunk send-set.
     fn rivet_play_records() -> String {
+        let chunks: Vec<Value> = expected_rivet_join_chunks()
+            .into_iter()
+            .map(|(cx, cz)| json!([cx, cz]))
+            .collect();
+        let joined = json!({
+            "event": "joined",
+            "position": {"x": 0.0, "y": -63.0, "z": 0.0},
+            "world": "minecraft:overworld",
+            "gamemode": "survival",
+            "health": {"health": 1.0, "food": 20, "saturation": 5.0},
+            "experience": {"level": 0, "progress": 0.0, "total": 0},
+            "inventory": {"selected_slot": 0, "items": []},
+            "chunk_count": 117,
+            "chunks": chunks,
+            "observation_ms": 4123,
+            "protocol": 1
+        });
         [
-            r#"{"event":"starting","address":"127.0.0.1:25598","username":"RivetProbe","timeout_seconds":40,"azalea_revision":"6249c295d353b9b3ef68f665b311cba39211fd19","protocol":1}"#,
-            r#"{"event":"init","protocol":1}"#,
-            r#"{"event":"login","protocol":1}"#,
-            r#"{"event":"spawn","position":{"x":0.0,"y":-63.0,"z":0.0},"protocol":1}"#,
-            r#"{"event":"joined","position":{"x":0.0,"y":-63.0,"z":0.0},"world":"minecraft:overworld","gamemode":"survival","health":{"health":1.0,"food":20,"saturation":5.0},"experience":{"level":0,"progress":0.0,"total":0},"inventory":{"selected_slot":0,"items":[]},"chunk_count":117,"chunks":[[-5,-5],[-5,-4],[0,0],[5,5]],"observation_ms":4123,"protocol":1}"#,
+            r#"{"event":"starting","address":"127.0.0.1:25598","username":"RivetProbe","timeout_seconds":40,"azalea_revision":"6249c295d353b9b3ef68f665b311cba39211fd19","protocol":1}"#.to_owned(),
+            r#"{"event":"init","protocol":1}"#.to_owned(),
+            r#"{"event":"login","protocol":1}"#.to_owned(),
+            r#"{"event":"spawn","position":{"x":0.0,"y":-63.0,"z":0.0},"protocol":1}"#.to_owned(),
+            joined.to_string(),
         ]
         .join("\n")
     }
@@ -2024,6 +2360,69 @@ mod tests {
             verdict.contains("play"),
             "verdict must name the play boundary, got {verdict}"
         );
+    }
+
+    #[test]
+    fn rivet_play_verdict_rejects_wrong_chunk_coordinates_and_duplicates() {
+        let mut t = normalize_join(&rivet_play_records()).expect("normalize");
+        // Replace one valid chunk with a cut corner (-5, -5) -> still 117 unique chunks,
+        // but not the exact deterministic 117-chunk send-set.
+        let mut wrong_coords = t.clone();
+        wrong_coords["chunks"][0] = json!([-5, -5]);
+        let err = rivet_play_verdict(&wrong_coords).expect_err("cut corner must be rejected");
+        assert!(err.contains("117-chunk"), "unexpected error: {err}");
+
+        // Duplicate a coordinate while keeping len == 117.
+        let mut dup = t.clone();
+        let first = dup["chunks"][0].clone();
+        dup["chunks"][1] = first;
+        let err = rivet_play_verdict(&dup).expect_err("duplicate chunk must be rejected");
+        assert!(err.contains("duplicate"), "unexpected error: {err}");
+
+        // Out-of-order lifecycle must be rejected even though login and spawn are present.
+        t["lifecycle"] = json!(["init", "spawn", "login"]);
+        let err = rivet_play_verdict(&t).expect_err("out-of-order lifecycle must be rejected");
+        assert!(err.contains("exact order"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn normalize_join_rejects_missing_required_joined_field() {
+        let raw = rivet_play_records().replace(r#","world":"minecraft:overworld""#, "");
+        let err = normalize_join(&raw).expect_err("missing world must fail normalization");
+        assert!(err.contains("world"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn paper_join_verdict_enforces_pinned_revision_and_ordered_lifecycle() {
+        let mut t = normalize_join(&rivet_play_records()).expect("normalize");
+        paper_join_verdict(&t).expect("valid paper join");
+
+        let mut wrong_rev = t.clone();
+        wrong_rev["azalea_revision"] = json!("deadbeef");
+        assert!(paper_join_verdict(&wrong_rev).is_err());
+
+        t["lifecycle"] = json!(["login", "init", "spawn"]);
+        assert!(paper_join_verdict(&t).is_err());
+    }
+
+    #[test]
+    fn move_verdict_carries_azalea_revision_and_rejects_non_monotonic_samples() {
+        let pinned_raw = move_records().replace(
+            r#""azalea_revision":"x""#,
+            &format!(r#""azalea_revision":"{PINNED_AZALEA_REVISION}""#),
+        );
+        let mut t = normalize_move(&pinned_raw).expect("normalize");
+        assert_eq!(t["azalea_revision"], json!(PINNED_AZALEA_REVISION));
+        move_verdict(&t, "paper").expect("valid move");
+
+        let mut wrong_rev = t.clone();
+        wrong_rev["azalea_revision"] = json!("deadbeef");
+        assert!(move_verdict(&wrong_rev, "paper").is_err());
+
+        // Non-monotonic dx regression must fail.
+        t["walk"]["samples"][50]["dx"] = json!(0.0);
+        let err = move_verdict(&t, "paper").expect_err("non-monotonic dx must fail");
+        assert!(err.contains("regressed"), "unexpected error: {err}");
     }
 
     #[test]

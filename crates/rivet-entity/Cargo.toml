@@ -5,7 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-rivet-util = { workspace = true }
-
+indexmap.workspace = true
+rivet-nbt.workspace = true
+rivet-util.workspace = true
 [lints]
 workspace = true
