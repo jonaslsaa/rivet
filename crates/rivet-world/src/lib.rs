@@ -92,6 +92,7 @@ pub mod fluid;
 pub mod level;
 pub mod levelgen;
 pub mod lighting;
+pub mod loot;
 pub mod poi;
 pub mod superflat;
 /// `net.minecraft.world.ticks` value and container layer (#370/#522):
