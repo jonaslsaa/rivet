@@ -33,4 +33,5 @@ pub mod light_update_data;
 pub mod spatial_long_set;
 pub mod star_light_engine;
 pub mod star_light_provider;
+pub mod static_block_light;
 pub mod swmr_nibble_array;
