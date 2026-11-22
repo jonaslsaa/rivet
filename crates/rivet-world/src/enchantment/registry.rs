@@ -16,7 +16,7 @@ use rivet_registry::{
 };
 use rivet_util::DataInputStream;
 
-use crate::enchantment::definition::{Enchantment, EnchantmentDecodeError};
+use crate::enchantment::definition::{Enchantment, EnchantmentDecodeError, NamedHolderSet};
 
 /// Errors returned when loading the vanilla [`EnchantmentRegistry`].
 #[derive(Debug, thiserror::Error)]
@@ -231,10 +231,27 @@ impl EnchantmentRegistry {
             .any(|holder_id| holder_id.0 == target_idx)
     }
 
-    /// `Enchantment.areCompatible` checked via registry lookup.
+    /// Checks whether `set` contains enchantment `id`, resolving tag sets against
+    /// this registry's bound tags (matching Paper's `HolderSet<Enchantment>.contains`).
+    pub fn holder_set_contains_enchantment(&self, set: &NamedHolderSet, id: &Identifier) -> bool {
+        match set {
+            NamedHolderSet::Empty => false,
+            NamedHolderSet::Tag(tag) => self.is_in_tag(id, tag),
+            NamedHolderSet::Direct(ids) => ids.contains(id),
+        }
+    }
+
+    /// `Enchantment.areCompatible` checked via registry lookup, resolving
+    /// `exclusive_set` tags against this registry's bound tags.
     pub fn are_compatible(&self, a: &Identifier, b: &Identifier) -> bool {
+        if a == b {
+            return false;
+        }
         match (self.get(a), self.get(b)) {
-            (Some(ea), Some(eb)) => Enchantment::are_compatible(ea, eb),
+            (Some(ea), Some(eb)) => {
+                !self.holder_set_contains_enchantment(&ea.exclusive_set, b)
+                    && !self.holder_set_contains_enchantment(&eb.exclusive_set, a)
+            }
             _ => false,
         }
     }

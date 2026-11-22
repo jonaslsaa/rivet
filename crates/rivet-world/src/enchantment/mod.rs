@@ -731,5 +731,33 @@ mod tests {
             id("in_enchanting_table"),
         );
         assert!(!underlying.get_tag_or_empty(&tag_key).is_empty());
+
+        // Custom bound exclusion tags on a custom Registry<Enchantment> must be respected
+        // by EnchantmentRegistry::are_compatible.
+        let reg_key = EnchantmentRegistry::registry_key();
+        let mut custom_builder = EnchantmentRegistry::builder();
+        let mut custom_a = reg.get(&id("unbreaking")).unwrap().clone();
+        let mut custom_b = reg.get(&id("mending")).unwrap().clone();
+        custom_a.id = id("custom_alpha");
+        custom_b.id = id("custom_beta");
+        custom_a.exclusive_set = NamedHolderSet::Tag("minecraft:custom_exclusive".to_owned());
+        custom_b.exclusive_set = NamedHolderSet::Direct(Vec::new());
+        let ha = custom_builder.register(
+            &rivet_registry::ResourceKey::create(&reg_key, custom_a.id.clone()),
+            std::sync::Arc::new(custom_a),
+            rivet_registry::RegistrationInfo::BUILT_IN,
+        );
+        let hb = custom_builder.register(
+            &rivet_registry::ResourceKey::create(&reg_key, custom_b.id.clone()),
+            std::sync::Arc::new(custom_b),
+            rivet_registry::RegistrationInfo::BUILT_IN,
+        );
+        custom_builder.bind_tags(vec![(
+            rivet_registry::TagKey::create(&reg_key, id("custom_exclusive")),
+            vec![ha, hb],
+        )]);
+        let custom_reg = EnchantmentRegistry::from_registry(custom_builder.freeze());
+        assert!(!custom_reg.are_compatible(&id("custom_alpha"), &id("custom_beta")));
+        assert!(!custom_reg.are_compatible(&id("custom_beta"), &id("custom_alpha")));
     }
 }
