@@ -223,7 +223,12 @@ impl MapType for JsonMapType {
         if let Some(element) = map.get(key) {
             match element {
                 JsonNode::Number(n) => return n.byte_value() != 0,
-                JsonNode::ParsedNumber(n) => return parsed_number_to_number(n).byte_value() != 0,
+                JsonNode::ParsedNumber(n) => {
+                    return crate::server::dataconverter::types::json::parse_decimal_trunc_wrapping_i64(
+                        n.as_str(),
+                    ) as i8
+                        != 0;
+                }
                 JsonNode::Bool(b) => return *b,
                 _ => {}
             }
@@ -242,7 +247,11 @@ impl MapType for JsonMapType {
     }
 
     fn get_byte_or(&self, key: &str, dfl: i8) -> i8 {
-        self.get_number(key).map_or(dfl, |n| n.byte_value())
+        self.map
+            .borrow()
+            .get(key)
+            .and_then(|n| n.as_byte(self.compressed))
+            .unwrap_or(dfl)
     }
 
     fn set_byte(&mut self, key: &str, val: i8) {
@@ -256,7 +265,11 @@ impl MapType for JsonMapType {
     }
 
     fn get_short_or(&self, key: &str, dfl: i16) -> i16 {
-        self.get_number(key).map_or(dfl, |n| n.short_value())
+        self.map
+            .borrow()
+            .get(key)
+            .and_then(|n| n.as_short(self.compressed))
+            .unwrap_or(dfl)
     }
 
     fn set_short(&mut self, key: &str, val: i16) {
@@ -270,7 +283,11 @@ impl MapType for JsonMapType {
     }
 
     fn get_int_or(&self, key: &str, dfl: i32) -> i32 {
-        self.get_number(key).map_or(dfl, |n| n.int_value())
+        self.map
+            .borrow()
+            .get(key)
+            .and_then(|n| n.as_int(self.compressed))
+            .unwrap_or(dfl)
     }
 
     fn set_int(&mut self, key: &str, val: i32) {
@@ -284,7 +301,11 @@ impl MapType for JsonMapType {
     }
 
     fn get_long_or(&self, key: &str, dfl: i64) -> i64 {
-        self.get_number(key).map_or(dfl, |n| n.long_value())
+        self.map
+            .borrow()
+            .get(key)
+            .and_then(|n| n.as_long(self.compressed))
+            .unwrap_or(dfl)
     }
 
     fn set_long(&mut self, key: &str, val: i64) {
@@ -298,7 +319,11 @@ impl MapType for JsonMapType {
     }
 
     fn get_float_or(&self, key: &str, dfl: f32) -> f32 {
-        self.get_number(key).map_or(dfl, |n| n.float_value())
+        self.map
+            .borrow()
+            .get(key)
+            .and_then(|n| n.as_float(self.compressed))
+            .unwrap_or(dfl)
     }
 
     fn set_float(&mut self, key: &str, val: f32) {
@@ -312,7 +337,11 @@ impl MapType for JsonMapType {
     }
 
     fn get_double_or(&self, key: &str, dfl: f64) -> f64 {
-        self.get_number(key).map_or(dfl, |n| n.double_value())
+        self.map
+            .borrow()
+            .get(key)
+            .and_then(|n| n.as_double(self.compressed))
+            .unwrap_or(dfl)
     }
 
     fn set_double(&mut self, key: &str, val: f64) {

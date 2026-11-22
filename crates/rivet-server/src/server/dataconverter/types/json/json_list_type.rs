@@ -188,11 +188,15 @@ impl ListType for JsonListType {
     }
 
     fn get_byte(&self, index: usize) -> i8 {
-        self.try_get_number(index).map_or(0, |n| n.byte_value())
+        self.array.borrow()[index]
+            .as_byte(self.compressed)
+            .unwrap_or(0)
     }
 
     fn get_byte_or(&self, index: usize, dfl: i8) -> i8 {
-        self.try_get_number(index).map_or(dfl, |n| n.byte_value())
+        self.array.borrow()[index]
+            .as_byte(self.compressed)
+            .unwrap_or(dfl)
     }
 
     fn set_byte(&mut self, index: usize, to: i8) {
@@ -200,11 +204,15 @@ impl ListType for JsonListType {
     }
 
     fn get_short(&self, index: usize) -> i16 {
-        self.try_get_number(index).map_or(0, |n| n.short_value())
+        self.array.borrow()[index]
+            .as_short(self.compressed)
+            .unwrap_or(0)
     }
 
     fn get_short_or(&self, index: usize, dfl: i16) -> i16 {
-        self.try_get_number(index).map_or(dfl, |n| n.short_value())
+        self.array.borrow()[index]
+            .as_short(self.compressed)
+            .unwrap_or(dfl)
     }
 
     fn set_short(&mut self, index: usize, to: i16) {
@@ -212,11 +220,15 @@ impl ListType for JsonListType {
     }
 
     fn get_int(&self, index: usize) -> i32 {
-        self.try_get_number(index).map_or(0, |n| n.int_value())
+        self.array.borrow()[index]
+            .as_int(self.compressed)
+            .unwrap_or(0)
     }
 
     fn get_int_or(&self, index: usize, dfl: i32) -> i32 {
-        self.try_get_number(index).map_or(dfl, |n| n.int_value())
+        self.array.borrow()[index]
+            .as_int(self.compressed)
+            .unwrap_or(dfl)
     }
 
     fn set_int(&mut self, index: usize, to: i32) {
@@ -224,11 +236,15 @@ impl ListType for JsonListType {
     }
 
     fn get_long(&self, index: usize) -> i64 {
-        self.try_get_number(index).map_or(0, |n| n.long_value())
+        self.array.borrow()[index]
+            .as_long(self.compressed)
+            .unwrap_or(0)
     }
 
     fn get_long_or(&self, index: usize, dfl: i64) -> i64 {
-        self.try_get_number(index).map_or(dfl, |n| n.long_value())
+        self.array.borrow()[index]
+            .as_long(self.compressed)
+            .unwrap_or(dfl)
     }
 
     fn set_long(&mut self, index: usize, to: i64) {
@@ -236,11 +252,15 @@ impl ListType for JsonListType {
     }
 
     fn get_float(&self, index: usize) -> f32 {
-        self.try_get_number(index).map_or(0.0, |n| n.float_value())
+        self.array.borrow()[index]
+            .as_float(self.compressed)
+            .unwrap_or(0.0)
     }
 
     fn get_float_or(&self, index: usize, dfl: f32) -> f32 {
-        self.try_get_number(index).map_or(dfl, |n| n.float_value())
+        self.array.borrow()[index]
+            .as_float(self.compressed)
+            .unwrap_or(dfl)
     }
 
     fn set_float(&mut self, index: usize, to: f32) {
@@ -248,11 +268,15 @@ impl ListType for JsonListType {
     }
 
     fn get_double(&self, index: usize) -> f64 {
-        self.try_get_number(index).map_or(0.0, |n| n.double_value())
+        self.array.borrow()[index]
+            .as_double(self.compressed)
+            .unwrap_or(0.0)
     }
 
     fn get_double_or(&self, index: usize, dfl: f64) -> f64 {
-        self.try_get_number(index).map_or(dfl, |n| n.double_value())
+        self.array.borrow()[index]
+            .as_double(self.compressed)
+            .unwrap_or(dfl)
     }
 
     fn set_double(&mut self, index: usize, to: f64) {

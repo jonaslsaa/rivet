@@ -87,6 +87,70 @@ impl JsonNode {
             _ => None,
         }
     }
+
+    pub(crate) fn as_byte(&self, compressed: bool) -> Option<i8> {
+        match self {
+            Self::Number(n) => Some(n.byte_value()),
+            Self::ParsedNumber(n) => Some(parse_decimal_trunc_wrapping_i64(n.as_str()) as i8),
+            Self::Bool(b) => Some(if *b { 1 } else { 0 }),
+            Self::String(s) if compressed => s.parse::<i32>().ok().map(|v| v as i8),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_short(&self, compressed: bool) -> Option<i16> {
+        match self {
+            Self::Number(n) => Some(n.short_value()),
+            Self::ParsedNumber(n) => Some(parse_decimal_trunc_wrapping_i64(n.as_str()) as i16),
+            Self::Bool(b) => Some(if *b { 1 } else { 0 }),
+            Self::String(s) if compressed => s.parse::<i32>().ok().map(|v| v as i16),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_int(&self, compressed: bool) -> Option<i32> {
+        match self {
+            Self::Number(n) => Some(n.int_value()),
+            Self::ParsedNumber(n) => Some(parse_decimal_trunc_wrapping_i64(n.as_str()) as i32),
+            Self::Bool(b) => Some(if *b { 1 } else { 0 }),
+            Self::String(s) if compressed => s.parse::<i32>().ok(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_long(&self, compressed: bool) -> Option<i64> {
+        match self {
+            Self::Number(n) => Some(n.long_value()),
+            Self::ParsedNumber(n) => Some(parse_decimal_trunc_wrapping_i64(n.as_str())),
+            Self::Bool(b) => Some(if *b { 1 } else { 0 }),
+            Self::String(s) if compressed => s.parse::<i32>().ok().map(i64::from),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_float(&self, compressed: bool) -> Option<f32> {
+        match self {
+            Self::Number(n) => Some(n.float_value()),
+            Self::ParsedNumber(n) => Some(
+                n.as_str()
+                    .parse::<f32>()
+                    .unwrap_or_else(|_| n.as_f64().unwrap_or(0.0) as f32),
+            ),
+            Self::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+            Self::String(s) if compressed => s.parse::<i32>().ok().map(|v| v as f32),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_double(&self, compressed: bool) -> Option<f64> {
+        match self {
+            Self::Number(n) => Some(n.double_value()),
+            Self::ParsedNumber(n) => Some(n.as_f64().unwrap_or(0.0)),
+            Self::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+            Self::String(s) if compressed => s.parse::<i32>().ok().map(f64::from),
+            _ => None,
+        }
+    }
 }
 
 pub(crate) fn from_json_array(arr: &[JsonValue]) -> SharedJsonArray {
@@ -277,9 +341,89 @@ pub(crate) fn number_to_generic(
     }
 }
 
+/// Parses a JSON decimal/scientific number string by truncating toward zero and
+/// returning the low 64 two's-complement bits, matching Gson's
+/// `LazilyParsedNumber` -> `BigDecimal.longValue()` / `intValue()` semantics.
+pub(crate) fn parse_decimal_trunc_wrapping_i64(s: &str) -> i64 {
+    let s = s.trim();
+    if s.is_empty() {
+        return 0;
+    }
+    let (neg, rest) = if let Some(r) = s.strip_prefix('-') {
+        (true, r)
+    } else if let Some(r) = s.strip_prefix('+') {
+        (false, r)
+    } else {
+        (false, s)
+    };
+
+    let (mantissa, exp_str) = match rest.find(['e', 'E']) {
+        Some(idx) => (&rest[..idx], Some(&rest[idx + 1..])),
+        None => (rest, None),
+    };
+
+    let (int_part, frac_part) = match mantissa.find('.') {
+        Some(idx) => (&mantissa[..idx], &mantissa[idx + 1..]),
+        None => (mantissa, ""),
+    };
+
+    if !int_part.bytes().all(|b| b.is_ascii_digit())
+        || !frac_part.bytes().all(|b| b.is_ascii_digit())
+    {
+        return 0;
+    }
+
+    let mut digits = String::with_capacity(int_part.len() + frac_part.len());
+    digits.push_str(int_part);
+    digits.push_str(frac_part);
+    let trimmed = digits.trim_start_matches('0');
+    if trimmed.is_empty() {
+        return 0;
+    }
+
+    let exp: i128 = match exp_str {
+        Some(es) => match es.parse::<i128>() {
+            Ok(v) => v,
+            Err(_) => return 0,
+        },
+        None => 0,
+    };
+    let scale_exp = exp - (frac_part.len() as i128);
+
+    let (int_digits, trailing_zeros): (&str, u64) = if scale_exp < 0 {
+        let Ok(shift) = usize::try_from(-scale_exp) else {
+            return 0;
+        };
+        if shift >= trimmed.len() {
+            return 0;
+        }
+        (&trimmed[..trimmed.len() - shift], 0)
+    } else {
+        // 10^64 is divisible by 2^64, so any >= 64 trailing zeros yields 0 mod 2^64.
+        if scale_exp >= 64 {
+            return 0;
+        }
+        (trimmed, scale_exp as u64)
+    };
+
+    let mut acc: u64 = 0;
+    for b in int_digits.bytes() {
+        acc = acc.wrapping_mul(10).wrapping_add(u64::from(b - b'0'));
+    }
+    for _ in 0..trailing_zeros {
+        acc = acc.wrapping_mul(10);
+    }
+
+    if neg {
+        acc.wrapping_neg() as i64
+    } else {
+        acc as i64
+    }
+}
+
 /// Converts a parsed `serde_json::Number` to `Number` for `get_number()` reads.
 pub(crate) fn parsed_number_to_number(n: &JsonNumber) -> Number {
-    if let Some(l) = n.as_i64() {
+    if let Some(l) = n.as_i64().or_else(|| parse_decimal_exact_i64(n.as_str())) {
         Number::Long(l)
     } else {
         Number::Double(n.as_f64().unwrap_or(0.0))
@@ -449,6 +593,30 @@ mod tests {
             Types::JSON.base_to_generic(&neg_zero),
             Some(Generic::Byte(0))
         ));
+    }
+
+    #[test]
+    fn json_parsed_decimal_wrapping_matches_gson() {
+        let obj: JsonObject<String, JsonValue> = serde_json::from_str(
+            r#"{"i": 2147483648.0, "i_frac": 2147483648.9, "neg": -2147483649.0, "b": 256.5, "l": 9223372036854775808.0}"#,
+        )
+        .unwrap();
+        let map = JsonMapType::from_json(&obj, false);
+        assert_eq!(map.get_int("i"), i32::MIN);
+        assert_eq!(map.get_int("i_frac"), i32::MIN);
+        assert_eq!(map.get_int("neg"), i32::MAX);
+        assert_eq!(map.get_byte("b"), 0);
+        assert!(!map.get_boolean("b"));
+        assert_eq!(map.get_long("l"), i64::MIN);
+
+        let arr: Vec<JsonValue> =
+            serde_json::from_str(r#"[2147483648.0, -2147483649.0, 256.5, 9223372036854775808.0]"#)
+                .unwrap();
+        let list = JsonListType::from_json(&arr, false);
+        assert_eq!(list.get_int(0), i32::MIN);
+        assert_eq!(list.get_int(1), i32::MAX);
+        assert_eq!(list.get_byte(2), 0);
+        assert_eq!(list.get_long(3), i64::MIN);
     }
 
     #[test]
