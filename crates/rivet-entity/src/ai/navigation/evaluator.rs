@@ -167,8 +167,9 @@ pub fn get_floor_level_static<W: PathWorldView + ?Sized>(world: &W, pos: BlockPo
 #[derive(Debug, Default)]
 pub struct WalkNodeEvaluator {
     pub config: EvaluatorConfig,
+    amphibious: bool,
     path_types_by_pos_cache: HashMap<i64, PathType>,
-    collision_cache: HashMap<i64, bool>,
+    collision_cache: HashMap<[u64; 6], bool>,
 }
 
 impl WalkNodeEvaluator {
@@ -178,6 +179,14 @@ impl WalkNodeEvaluator {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[must_use]
+    fn new_amphibious() -> Self {
+        Self {
+            amphibious: true,
+            ..Self::default()
+        }
     }
 
     pub fn clear_caches(&mut self) {
@@ -203,12 +212,14 @@ impl WalkNodeEvaluator {
     }
 
     fn has_collisions<W: PathWorldView + ?Sized>(&mut self, world: &W, aabb: Aabb) -> bool {
-        // Quantize AABB key by its integer min corner + dimensions for cache lookup
-        let key = block_pos_as_long(
-            mth::floor_d(aabb.min_x * 16.0),
-            mth::floor_d(aabb.min_y * 16.0),
-            mth::floor_d(aabb.min_z * 16.0),
-        );
+        let key = [
+            aabb.min_x.to_bits(),
+            aabb.min_y.to_bits(),
+            aabb.min_z.to_bits(),
+            aabb.max_x.to_bits(),
+            aabb.max_y.to_bits(),
+            aabb.max_z.to_bits(),
+        ];
         if let Some(&cached) = self.collision_cache.get(&key) {
             return cached;
         }
@@ -218,7 +229,7 @@ impl WalkNodeEvaluator {
     }
 
     fn get_mob_jump_height(&self, mob: &MobPathingState) -> f64 {
-        f64::from(mob.max_up_step).max(Self::DEFAULT_MOB_JUMP_HEIGHT)
+        mth::max_f64(f64::from(mob.max_up_step), Self::DEFAULT_MOB_JUMP_HEIGHT)
     }
 
     fn get_floor_level<W: PathWorldView + ?Sized>(
@@ -236,7 +247,7 @@ impl WalkNodeEvaluator {
     }
 
     fn is_amphibious(&self) -> bool {
-        false
+        self.amphibious
     }
 
     fn can_start_at<W: PathWorldView + ?Sized>(
@@ -331,8 +342,9 @@ impl WalkNodeEvaluator {
         let dx = node.x as f64 - bb.min_x + (bb.max_x - bb.min_x) / 2.0;
         let dy = node.y as f64 - bb.min_y + (bb.max_y - bb.min_y) / 2.0;
         let dz = node.z as f64 - bb.min_z + (bb.max_z - bb.min_z) / 2.0;
-        let step_count =
-            mth::ceil_d((dx * dx + dy * dy + dz * dz).sqrt() / f64::from(mob.bb_width.max(0.1)));
+        let step_count = mth::ceil_d(
+            (dx * dx + dy * dy + dz * dz).sqrt() / f64::from(mth::max_f32(mob.bb_width, 0.1)),
+        );
         if step_count <= 0 {
             return true;
         }
@@ -366,7 +378,7 @@ impl WalkNodeEvaluator {
         let idx = arena.get_or_create(x, y, z);
         let node = arena.get_mut(idx);
         node.path_type = path_type;
-        node.cost_malus = node.cost_malus.max(cost_malus);
+        node.cost_malus = mth::max_f32(node.cost_malus, cost_malus);
         idx
     }
 
@@ -771,7 +783,7 @@ impl NodeEvaluator for WalkNodeEvaluator {
         let vertical_delta_limit = if mob.get_pathfinding_malus(path_type_above) >= 0.0
             && path_type_current != PathType::StickyHoney
         {
-            mth::floor(mob.max_up_step.max(1.0))
+            mth::floor(mth::max_f32(mob.max_up_step, 1.0))
         } else {
             0
         };
@@ -847,6 +859,12 @@ impl NodeEvaluator for WalkNodeEvaluator {
         y: i32,
         z: i32,
     ) -> PathType {
+        if self.amphibious {
+            let pt = self.get_path_type(ctx, x, y, z);
+            if pt == PathType::Water || pt == PathType::WaterBorder {
+                return pt;
+            }
+        }
         self.evaluate_path_type_at_pos(ctx, mob, x, y, z)
     }
 
@@ -857,6 +875,22 @@ impl NodeEvaluator for WalkNodeEvaluator {
         y: i32,
         z: i32,
     ) -> PathType {
+        if self.amphibious {
+            let block_path_type = ctx.get_path_type_from_state(x, y, z);
+            if block_path_type == PathType::Water {
+                for dir in Direction::ALL {
+                    let neighbor_type = ctx.get_path_type_from_state(
+                        x + dir.step_x(),
+                        y + dir.step_y(),
+                        z + dir.step_z(),
+                    );
+                    if neighbor_type == PathType::Blocked {
+                        return PathType::WaterBorder;
+                    }
+                }
+                return PathType::Water;
+            }
+        }
         get_path_type_static(ctx, x, y, z)
     }
 }
@@ -906,7 +940,7 @@ impl FlyNodeEvaluator {
             let idx = arena.get_or_create(x, y, z);
             let node = arena.get_mut(idx);
             node.path_type = pt;
-            node.cost_malus = node.cost_malus.max(malus);
+            node.cost_malus = mth::max_f32(node.cost_malus, malus);
             if pt == PathType::Walkable {
                 node.cost_malus += 1.0;
             }
@@ -1245,7 +1279,7 @@ impl SwimNodeEvaluator {
                 let idx = arena.get_or_create(x, y, z);
                 let node = arena.get_mut(idx);
                 node.path_type = pt;
-                node.cost_malus = node.cost_malus.max(malus);
+                node.cost_malus = mth::max_f32(node.cost_malus, malus);
                 let info = ctx.get_block_info(BlockPos::new(x, y, z));
                 if !info.is_water && !info.is_lava {
                     node.cost_malus += 8.0;
@@ -1408,7 +1442,7 @@ impl NodeEvaluator for SwimNodeEvaluator {
 }
 
 /// Port of `net.minecraft.world.level.pathfinder.AmphibiousNodeEvaluator` in Paper 26.2.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AmphibiousNodeEvaluator {
     walk: WalkNodeEvaluator,
     pub prefers_shallow_swimming: bool,
@@ -1416,11 +1450,17 @@ pub struct AmphibiousNodeEvaluator {
     old_water_border_cost: f32,
 }
 
+impl Default for AmphibiousNodeEvaluator {
+    fn default() -> Self {
+        Self::new(false)
+    }
+}
+
 impl AmphibiousNodeEvaluator {
     #[must_use]
     pub fn new(prefers_shallow_swimming: bool) -> Self {
         Self {
-            walk: WalkNodeEvaluator::new(),
+            walk: WalkNodeEvaluator::new_amphibious(),
             prefers_shallow_swimming,
             old_walkable_cost: 0.0,
             old_water_border_cost: 0.0,
@@ -1508,11 +1548,13 @@ impl NodeEvaluator for AmphibiousNodeEvaluator {
         let vertical_delta_limit = if mob.get_pathfinding_malus(path_type_above) >= 0.0
             && path_type_current != PathType::StickyHoney
         {
-            mth::floor(mob.max_up_step.max(1.0))
+            mth::floor(mth::max_f32(mob.max_up_step, 1.0))
         } else {
             0
         };
-        let floor_level = get_floor_level_static(ctx.level(), BlockPos::new(x, y, z));
+        let floor_level = self
+            .walk
+            .get_floor_level(ctx.level(), mob, BlockPos::new(x, y, z));
 
         let up = self.walk.find_accepted_node(
             ctx,
@@ -1572,10 +1614,6 @@ impl NodeEvaluator for AmphibiousNodeEvaluator {
         y: i32,
         z: i32,
     ) -> PathType {
-        let pt = self.get_path_type(ctx, x, y, z);
-        if pt == PathType::Water || pt == PathType::WaterBorder {
-            return pt;
-        }
         self.walk.get_path_type_of_mob(ctx, mob, x, y, z)
     }
 
@@ -1586,20 +1624,6 @@ impl NodeEvaluator for AmphibiousNodeEvaluator {
         y: i32,
         z: i32,
     ) -> PathType {
-        let block_path_type = ctx.get_path_type_from_state(x, y, z);
-        if block_path_type == PathType::Water {
-            for dir in Direction::ALL {
-                let neighbor_type = ctx.get_path_type_from_state(
-                    x + dir.step_x(),
-                    y + dir.step_y(),
-                    z + dir.step_z(),
-                );
-                if neighbor_type == PathType::Blocked {
-                    return PathType::WaterBorder;
-                }
-            }
-            return PathType::Water;
-        }
-        get_path_type_static(ctx, x, y, z)
+        self.walk.get_path_type(ctx, x, y, z)
     }
 }

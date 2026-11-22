@@ -154,8 +154,10 @@ impl TargetingConditions {
                 } else {
                     1.0
                 };
-                let visibility_distance =
-                    (self.range * modifier).max(Self::MIN_VISIBILITY_DISTANCE_FOR_INVISIBLE_TARGET);
+                let visibility_distance = rivet_util::mth::max_f64(
+                    self.range * modifier,
+                    Self::MIN_VISIBILITY_DISTANCE_FOR_INVISIBLE_TARGET,
+                );
                 let dist_sqr = targeter.pos().distance_to_sqr(target.pos());
                 if dist_sqr > visibility_distance * visibility_distance {
                     return false;

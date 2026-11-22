@@ -546,7 +546,7 @@ impl PathNavigation {
         world: &W,
         game_time: i64,
     ) {
-        if game_time - self.time_last_recompute > Self::MAX_TIME_RECOMPUTE {
+        if game_time.wrapping_sub(self.time_last_recompute) > Self::MAX_TIME_RECOMPUTE {
             if let Some(target_pos) = self.target_pos {
                 self.path = None;
                 self.path = self.create_path(mob, world, target_pos, self.reach_range, game_time);
@@ -567,7 +567,7 @@ impl PathNavigation {
         move_control: &mut MoveControl,
         game_time: i64,
     ) {
-        self.tick += 1;
+        self.tick = self.tick.wrapping_add(1);
         if self.has_delayed_recomputation {
             self.recompute_path(mob, world, game_time);
         }
@@ -579,14 +579,15 @@ impl PathNavigation {
             } = &mut self.variant
                 && let Some(target) = *path_to_position
             {
-                let horiz_dist_sqr = (target.x as f64 + 0.5 - mob.pos.x).powi(2)
-                    + (target.z as f64 + 0.5 - mob.pos.z).powi(2);
-                let width_sqr = f64::from(mob.bb_width * mob.bb_width);
-                if horiz_dist_sqr < width_sqr
-                    || (mob.pos.y > target.y as f64
-                        && (target.x as f64 + 0.5 - mob.pos.x).powi(2)
-                            + (target.z as f64 + 0.5 - mob.pos.z).powi(2)
-                            < width_sqr)
+                let dx = target.x as f64 + 0.5 - mob.pos.x;
+                let dy = target.y as f64 + 0.5 - mob.pos.y;
+                let dz = target.z as f64 + 0.5 - mob.pos.z;
+                let dist_sqr_3d = dx * dx + dy * dy + dz * dz;
+                let horiz_dist_sqr = dx * dx + dz * dz;
+                let width = f64::from(mob.bb_width);
+                let width_sqr = width * width;
+                if dist_sqr_3d < width_sqr
+                    || (mob.pos.y > target.y as f64 && horiz_dist_sqr < width_sqr)
                 {
                     *path_to_position = None;
                 } else {
@@ -721,7 +722,7 @@ impl PathNavigation {
 
     /// Mirrors `PathNavigation.doStuckDetection(Vec3)` in Paper 26.2.
     fn do_stucked_detection(&mut self, mob: &MobPathingState, temp_pos: Vec3, game_time: i64) {
-        if self.tick - self.last_stucked_check > Self::STUCK_CHECK_INTERVAL {
+        if self.tick.wrapping_sub(self.last_stucked_check) >= Self::STUCK_CHECK_INTERVAL {
             let effective_speed = if mob.speed >= 1.0 {
                 mob.speed
             } else {
@@ -744,7 +745,11 @@ impl PathNavigation {
         {
             let next_node = path.get_next_node_pos();
             if self.timeout_cached_node == Some(next_node) {
-                self.timeout_timer += game_time - self.last_timeout_check;
+                self.timeout_timer = self.timeout_timer.wrapping_add(
+                    game_time
+                        .wrapping_sub(self.last_timeout_check)
+                        .wrapping_mul(50),
+                );
             } else {
                 self.timeout_cached_node = Some(next_node);
                 let dist = temp_pos

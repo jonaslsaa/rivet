@@ -121,17 +121,17 @@ impl Node {
 
     #[must_use]
     pub fn distance_manhattan(&self, other: &Self) -> f32 {
-        let f = (other.x.wrapping_sub(self.x)).abs() as f32;
-        let f1 = (other.y.wrapping_sub(self.y)).abs() as f32;
-        let f2 = (other.z.wrapping_sub(self.z)).abs() as f32;
+        let f = (other.x.wrapping_sub(self.x)).wrapping_abs() as f32;
+        let f1 = (other.y.wrapping_sub(self.y)).wrapping_abs() as f32;
+        let f2 = (other.z.wrapping_sub(self.z)).wrapping_abs() as f32;
         f + f1 + f2
     }
 
     #[must_use]
     pub fn distance_manhattan_pos(&self, pos: BlockPos) -> f32 {
-        let f = (pos.x.wrapping_sub(self.x)).abs() as f32;
-        let f1 = (pos.y.wrapping_sub(self.y)).abs() as f32;
-        let f2 = (pos.z.wrapping_sub(self.z)).abs() as f32;
+        let f = (pos.x.wrapping_sub(self.x)).wrapping_abs() as f32;
+        let f1 = (pos.y.wrapping_sub(self.y)).wrapping_abs() as f32;
+        let f2 = (pos.z.wrapping_sub(self.z)).wrapping_abs() as f32;
         f + f1 + f2
     }
 
@@ -234,9 +234,9 @@ impl Target {
 
     #[must_use]
     pub fn distance_manhattan_node(&self, node: &Node) -> f32 {
-        let f = (self.x.wrapping_sub(node.x)).abs() as f32;
-        let f1 = (self.y.wrapping_sub(node.y)).abs() as f32;
-        let f2 = (self.z.wrapping_sub(node.z)).abs() as f32;
+        let f = (self.x.wrapping_sub(node.x)).wrapping_abs() as f32;
+        let f1 = (self.y.wrapping_sub(node.y)).wrapping_abs() as f32;
+        let f2 = (self.z.wrapping_sub(node.z)).wrapping_abs() as f32;
         f + f1 + f2
     }
 }

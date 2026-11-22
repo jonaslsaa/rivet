@@ -207,7 +207,7 @@ impl MoveControl {
                 let pos = mob.block_position();
                 let info = world.block_info(pos);
                 let shape_max_y = info.collision_max_y.unwrap_or(0.0);
-                let horizontal_threshold = f64::from(mob.bb_width).max(1.0);
+                let horizontal_threshold = mth::max_f64(f64::from(mob.bb_width), 1.0);
                 if (yd > f64::from(mob.max_up_step)
                     && xd * xd + zd * zd < horizontal_threshold * horizontal_threshold)
                     || (info.has_collision()

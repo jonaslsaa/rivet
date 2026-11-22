@@ -515,7 +515,9 @@ fn amphibious_evaluator_restores_malus_on_done() {
 fn ground_navigation_follows_path_and_detects_stuck() {
     let world = TestWorld::flat(0);
     let mut mob = MobPathingState::new(Vec3::new(0.5, 1.0, 0.5), 0.6, 1.8);
-    mob.speed = 0.25;
+    // Use a speed low enough that per-node timeout (> 3 * dist / speed * 100 ms)
+    // does not fire before the 100-tick stuck check interval.
+    mob.speed = 0.04;
 
     let mut nav = PathNavigation::ground(200);
     let mut move_control = MoveControl::new();
@@ -527,12 +529,29 @@ fn ground_navigation_follows_path_and_detects_stuck() {
     nav.tick(&mut mob, &world, &mut move_control, 1);
     assert!(move_control.has_wanted());
 
-    // Standing still for > 100 ticks triggers stuck detection and stops path
-    for t in 2..=105 {
+    // Standing still for 100 ticks (>= STUCK_CHECK_INTERVAL) triggers stuck detection
+    for t in 2..=100 {
         nav.tick(&mut mob, &world, &mut move_control, t);
     }
     assert!(nav.is_stuck());
     assert!(nav.is_done());
+
+    // Verify per-node timeout fires in milliseconds (50 ms/tick vs dist / speed * 100 ms)
+    let mut fast_mob = MobPathingState::new(Vec3::new(0.5, 1.0, 0.5), 0.6, 1.8);
+    fast_mob.speed = 0.25;
+    let mut fast_nav = PathNavigation::ground(200);
+    let mut fast_mc = MoveControl::new();
+    assert!(fast_nav.move_to_xyz(&mut fast_mob, &world, 4.5, 1.0, 0.5, 1.0, 0));
+    // dist ~= 0.7071, timeout_limit ~= 282.84 ms, 3x ~= 848.5 ms (~17 ticks)
+    for t in 1..=16 {
+        fast_nav.tick(&mut fast_mob, &world, &mut fast_mc, t);
+    }
+    assert!(fast_nav.is_in_progress());
+    for t in 17..=20 {
+        fast_nav.tick(&mut fast_mob, &world, &mut fast_mc, t);
+    }
+    assert!(fast_nav.is_done());
+    assert!(!fast_nav.is_stuck());
 }
 
 #[test]
@@ -740,4 +759,65 @@ fn targeting_conditions_combat_non_combat_invisibility_and_negatives() {
         &target,
         Some(&reject_all),
     ));
+}
+
+#[test]
+fn amphibious_evaluator_preserves_water_height_and_water_border() {
+    use super::evaluator::NodeEvaluator;
+
+    let mut world = TestWorld::flat(0);
+    // 5-block deep water basin from y=1..=5 at x=0..=4, z=0
+    for x in 0..=4 {
+        for y in 1..=5 {
+            world.set(x, y, 0, BlockPathInfo::WATER);
+        }
+    }
+    // Solid wall adjacent to (2, 4, 0) at (2, 4, 1) so (2, 4, 0) is WaterBorder
+    world.set(2, 4, 1, BlockPathInfo::SOLID);
+
+    let mut mob = MobPathingState::new(Vec3::new(1.5, 4.0, 0.5), 0.6, 0.8);
+    mob.in_water = true;
+
+    let mut eval = AmphibiousNodeEvaluator::new(false);
+    let mut arena = NodeArena::new();
+    let mut ctx = PathfindingContext::new(&world, None, BlockPos::new(1, 4, 0));
+    eval.prepare(&mut mob, &world);
+
+    let start_idx = arena.get_or_create(1, 4, 0);
+    let mut out = [0usize; 32];
+    let count = eval.get_neighbors(&mut ctx, &mob, &mut arena, start_idx, &mut out);
+
+    // Neighbor at (2, 4, 0) must stay at y=4 (not sink to y=1) and have PathType::WaterBorder
+    let border_neighbor = out[..count]
+        .iter()
+        .map(|&idx| arena.get(idx))
+        .find(|n| n.x == 2 && n.z == 0);
+    let border_node = border_neighbor.expect("amphibious neighbor at (2, *, 0) must exist");
+    assert_eq!(border_node.y, 4);
+    assert_eq!(border_node.path_type, PathType::WaterBorder);
+
+    eval.done(&mut mob);
+}
+
+#[test]
+fn wall_climber_fallback_checks_3d_distance_when_below_target() {
+    let world = TestWorld::flat(0);
+    let mut mob = MobPathingState::new(Vec3::new(0.5, 1.0, 0.5), 1.4, 0.9);
+    let mut nav = PathNavigation::wall_climber(200);
+    let mut move_control = MoveControl::new();
+
+    // Target is directly above mob (horiz_dist == 0 < bb_width, but dy == 5.0)
+    let _ = nav.create_path(&mut mob, &world, BlockPos::new(0, 6, 0), 0, 0);
+    nav.stop();
+
+    // Tick while mob is directly below target: 3D distance >= bb_width, so fallback must NOT clear
+    nav.tick(&mut mob, &world, &mut move_control, 1);
+    assert!(move_control.has_wanted());
+    assert_eq!(move_control.wanted_y, 6.0);
+
+    // Move mob above target with same X/Z: second disjunct (mob.pos.y > target.y && horiz < width) clears fallback
+    mob.pos.y = 7.0;
+    move_control = MoveControl::new();
+    nav.tick(&mut mob, &world, &mut move_control, 2);
+    assert!(!move_control.has_wanted());
 }

@@ -252,7 +252,7 @@ impl PathFinder {
         for (target, _) in targets.iter_mut() {
             let h = target.distance_to_node(node);
             target.update_best(h, node_idx);
-            best_h = best_h.min(h);
+            best_h = rivet_util::mth::min_f32(best_h, h);
         }
         best_h
     }
