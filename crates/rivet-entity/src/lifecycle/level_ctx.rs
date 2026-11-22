@@ -120,6 +120,14 @@ impl LifecycleEntity {
     pub fn inactive_tick(&mut self, ctx: &mut LevelCtx) {
         self.entity_mut().entity_inactive_tick(ctx);
     }
+
+    /// Dispatches `Mob#checkDespawn()` (no-op for non-mob entities).
+    pub fn check_despawn(&mut self, ctx: &mut LevelCtx) -> bool {
+        match self {
+            Self::Mob(m) => m.check_despawn(ctx),
+            Self::Base(_) | Self::Living(_) => false,
+        }
+    }
 }
 
 /// Observable lifecycle events emitted in exact Paper execution order.
@@ -438,11 +446,23 @@ impl LevelCtx {
     }
 
     /// Ticks all non-passenger, non-removed entities in `IndexMap` order
-    /// (matching Paper `ServerLevel` entity tick loop).
+    /// (matching Paper `ServerLevel` entity tick loop, including `Entity#checkDespawn()`).
     pub fn tick_all(&mut self, is_active: bool) {
         self.game_time = self.game_time.wrapping_add(1);
         let ids: Vec<i32> = self.entities.keys().copied().collect();
         for id in ids {
+            if self.get(id).is_none_or(|e| e.entity().is_removed()) {
+                continue;
+            }
+
+            if matches!(self.get(id), Some(LifecycleEntity::Mob(_)))
+                && let Some(mut entity) = self.take_entity(id)
+            {
+                entity.check_despawn(self);
+                self.put_back_entity(entity);
+                self.flush_pending_removals();
+            }
+
             let should_tick = self
                 .get(id)
                 .is_some_and(|e| !e.entity().is_removed() && !e.entity().is_passenger());

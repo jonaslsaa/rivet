@@ -499,16 +499,35 @@ fn drowning_death_timer_and_peaceful_despawn() {
     );
     assert_eq!(ctx.get(id).unwrap().entity().air_supply, 0);
 
-    // Peaceful despawn for hostile mob
+    // Peaceful despawn for hostile mob runs automatically during tick_all
     ctx.difficulty = Difficulty::Peaceful;
     let mob_id = ctx.next_entity_id();
-    let mut mob = Mob::new(mob_id, zombie_meta(), 20.0, 6);
-    assert!(mob.check_despawn(&mut ctx));
-    assert_eq!(
-        mob.living.entity.removal_reason,
-        Some(EntityRemovalReason::Discarded)
+    ctx.add_entity(LifecycleEntity::Mob(Mob::new(
+        mob_id,
+        zombie_meta(),
+        20.0,
+        6,
+    )));
+    ctx.take_events();
+    ctx.tick_all(true);
+    let despawn_evs = ctx.take_events();
+    assert!(
+        despawn_evs
+            .iter()
+            .any(|e| matches!(e, LifecycleEvent::Despawn { id } if *id == mob_id))
     );
-    assert!(!mob.living.entity.valid);
+    assert!(despawn_evs.iter().any(|e| matches!(
+        e,
+        LifecycleEvent::EntityRemoved {
+            id,
+            reason: EntityRemovalReason::Discarded,
+        } if *id == mob_id
+    )));
+    assert!(
+        !despawn_evs
+            .iter()
+            .any(|e| matches!(e, LifecycleEvent::EntityTickStart { id, .. } if *id == mob_id))
+    );
 }
 
 #[test]
