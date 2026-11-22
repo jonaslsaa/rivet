@@ -530,12 +530,28 @@ impl StaticBlockLightEngine {
                         let sec_idx = (y.wrapping_sub(self.min_section)) as usize;
                         for dz2 in -1..=1 {
                             for dx2 in -1..=1 {
-                                if let Some(map) =
-                                    emptiness_grid[grid_index(dx + dx2, dz + dz2)].as_ref()
-                                    && !map[sec_idx]
-                                {
-                                    all_empty = false;
-                                    break 'empty;
+                                let nx = dx + dx2;
+                                let nz = dz + dz2;
+                                if let Some(map) = emptiness_grid[grid_index(nx, nz)].as_ref() {
+                                    if !map[sec_idx] {
+                                        all_empty = false;
+                                        break 'empty;
+                                    }
+                                } else if nx.abs() <= 1 && nz.abs() <= 1 {
+                                    // Paper's `StarLightEngine.handleEmptySectionChanges` falls back
+                                    // to `getChunkSection(nx, y, nz).hasOnlyAir()` when the cached
+                                    // emptiness map is null (e.g. a neighbor loaded from disk).
+                                    let npos = ChunkPos::new(
+                                        center.x().wrapping_add(nx),
+                                        center.z().wrapping_add(nz),
+                                    );
+                                    if let Some(nchunk) = chunks.get(&npos)
+                                        && can_use_neighbor_chunk(nchunk)
+                                        && !nchunk.get_sections()[sec_idx].has_only_air()
+                                    {
+                                        all_empty = false;
+                                        break 'empty;
+                                    }
                                 }
                             }
                         }
@@ -1878,6 +1894,63 @@ mod tests {
         assert!(
             !chunks[&far].is_unsaved(),
             "untouched radius-2 neighbor must remain clean"
+        );
+    }
+
+    #[test]
+    fn loaded_neighbor_without_emptiness_map_propagates_light_into_all_air_center() {
+        let height = create_accessor(0, 64);
+        let center = ChunkPos::ZERO;
+        let west = ChunkPos::new(-1, 0);
+        let mut chunks = make_workspace(center, 0, 64);
+
+        // Simulate a chunk loaded from disk: already lit with a torch on its east border
+        // and populated block_nibbles, but no cached block_emptiness_map (None).
+        {
+            let w = chunks.get_mut(&west).unwrap();
+            set_block(w, 0, 15, 20, 8, TORCH);
+            let mut nibbles = filled_empty_light(6);
+            // Section y=1 corresponds to nibble index 2 (min_light_section = -1).
+            nibbles[2].set_non_null();
+            nibbles[2].set(15, 4, 8, 14);
+            nibbles[2].update_visible();
+            w.set_block_nibbles(nibbles);
+            w.set_block_emptiness_map(None);
+            w.set_persisted_status(ChunkStatus::Light);
+            w.set_light_correct(true);
+        }
+
+        // Center chunk is completely air.
+        publish_generated_light_atomic(
+            &height,
+            LightChannelCapability::block_light_only(),
+            DimensionLightPolicy::BlockLightOnly,
+            center,
+            &mut chunks,
+            &TestProps,
+            None,
+        )
+        .expect("publication succeeds");
+
+        assert!(chunks[&center].is_light_correct());
+        assert_eq!(
+            get_block_light_value(
+                &height,
+                true,
+                BlockPos::new(0, 20, 8),
+                Some(&chunks[&center])
+            ),
+            13,
+            "incoming light from loaded neighbor without emptiness map must reach center border"
+        );
+        assert_eq!(
+            get_block_light_value(
+                &height,
+                true,
+                BlockPos::new(1, 20, 8),
+                Some(&chunks[&center])
+            ),
+            12
         );
     }
 }
