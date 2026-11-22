@@ -13,7 +13,7 @@ use super::data_component_exact_predicate::{DataComponentExactPredicate, Trading
 pub struct TradeItemStack {
     item: Identifier,
     count: i32,
-    max_stack_size: i32,
+    base_max_stack_size: i32,
     components: IndexMap<Identifier, Tag>,
 }
 
@@ -33,7 +33,7 @@ impl TradeItemStack {
         Self {
             item: Identifier::with_default_namespace("air"),
             count: 0,
-            max_stack_size: Self::DEFAULT_MAX_STACK_SIZE,
+            base_max_stack_size: Self::DEFAULT_MAX_STACK_SIZE,
             components: IndexMap::new(),
         }
     }
@@ -48,7 +48,7 @@ impl TradeItemStack {
         Self {
             item,
             count,
-            max_stack_size: max_stack_size.max(1),
+            base_max_stack_size: max_stack_size.max(1),
             components: IndexMap::new(),
         }
     }
@@ -59,9 +59,6 @@ impl TradeItemStack {
         components: impl IntoIterator<Item = (Identifier, Tag)>,
     ) -> Self {
         self.components = components.into_iter().collect();
-        if let Some(override_max) = Self::max_stack_size_override(&self.components) {
-            self.max_stack_size = override_max;
-        }
         self
     }
 
@@ -74,7 +71,7 @@ impl TradeItemStack {
     }
 
     pub fn max_stack_size(&self) -> i32 {
-        self.max_stack_size
+        Self::max_stack_size_override(&self.components).unwrap_or(self.base_max_stack_size)
     }
 
     pub fn components(&self) -> &IndexMap<Identifier, Tag> {
@@ -165,12 +162,11 @@ impl TradeItemStack {
             Some(comp_tag) => DataComponentExactPredicate::from_nbt(comp_tag)?.expected,
             None => IndexMap::new(),
         };
-        let max_stack_size = Self::max_stack_size_override(&components)
-            .unwrap_or_else(|| item_max_stack(&item).max(1));
+        let base_max_stack_size = item_max_stack(&item).max(1);
         Ok(Self {
             item,
             count,
-            max_stack_size,
+            base_max_stack_size,
             components,
         })
     }

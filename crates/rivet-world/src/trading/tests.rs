@@ -509,4 +509,19 @@ fn nbt_round_trip_and_codec_defaults() {
         16
     );
     assert_eq!(reloaded_pearl.cost_a().count(), 16);
+
+    // Removing minecraft:max_stack_size via with_components restores the base max stack size.
+    let overridden = TradeItemStack::with_max_stack_size(id("ender_pearl"), 4, 16)
+        .with_components([(id("max_stack_size"), Tag::Int(IntTag { value: 8 }))]);
+    assert_eq!(overridden.max_stack_size(), 8);
+    let restored = overridden.with_components([]);
+    assert_eq!(restored.max_stack_size(), 16);
+    assert_eq!(
+        TradeItemStack::from_nbt_with_item_max_stack(&restored.to_nbt(), |item| {
+            if item == &id("ender_pearl") { 16 } else { 64 }
+        })
+        .unwrap()
+        .max_stack_size(),
+        16
+    );
 }
