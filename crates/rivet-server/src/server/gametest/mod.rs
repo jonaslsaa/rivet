@@ -635,6 +635,56 @@ mod tests {
     }
 
     #[test]
+    fn nbt_decoding_accepts_any_numeric_tag_matching_nbt_ops() {
+        use rivet_nbt::compound_tag::CompoundTag;
+        use rivet_nbt::int_tag::IntTag;
+        use rivet_nbt::short_tag::ShortTag;
+        use rivet_nbt::string_tag::StringTag;
+        use rivet_nbt::tag::Tag;
+
+        let mut inst = CompoundTag::new();
+        inst.put(
+            "type".to_string(),
+            Tag::String(StringTag::value_of("minecraft:block_based".to_string())),
+        );
+        inst.put(
+            "environment".to_string(),
+            Tag::String(StringTag::value_of("minecraft:default".to_string())),
+        );
+        inst.put(
+            "structure".to_string(),
+            Tag::String(StringTag::value_of("minecraft:empty".to_string())),
+        );
+        inst.put("max_ticks".to_string(), Tag::Short(ShortTag::value_of(20)));
+        inst.put("required".to_string(), Tag::Int(IntTag::value_of(0)));
+
+        let decoded = GameTestInstance::decode_nbt(&Tag::Compound(inst))
+            .expect("Short max_ticks and Int required must decode like NbtOps");
+        assert_eq!(decoded.max_ticks(), 20);
+        assert!(!decoded.required());
+
+        let mut env = CompoundTag::new();
+        env.put(
+            "type".to_string(),
+            Tag::String(StringTag::value_of("minecraft:clock_time".to_string())),
+        );
+        env.put(
+            "clock".to_string(),
+            Tag::String(StringTag::value_of("minecraft:overworld".to_string())),
+        );
+        env.put("time".to_string(), Tag::Short(ShortTag::value_of(100)));
+        let decoded_env = TestEnvironmentDefinition::decode_nbt(&Tag::Compound(env))
+            .expect("Short time must decode like NbtOps");
+        assert_eq!(
+            decoded_env,
+            TestEnvironmentDefinition::ClockTime {
+                clock: Identifier::with_default_namespace("overworld"),
+                time: 100,
+            }
+        );
+    }
+
+    #[test]
     fn paper_working_checkout_resources_match_census_when_present() {
         let paper_resources = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../working/Paper/paper-server/src/minecraft/resources");

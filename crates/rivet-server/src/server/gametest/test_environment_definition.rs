@@ -672,14 +672,13 @@ fn required_nbt_i32(
     let tag = compound
         .get(field)
         .ok_or(EnvironmentDecodeError::MissingField(field))?;
-    match tag {
-        Tag::Int(i) => Ok(i.value),
-        other => Err(EnvironmentDecodeError::InvalidFieldType {
+    tag.as_number()
+        .map(|n| n.int_value())
+        .ok_or_else(|| EnvironmentDecodeError::InvalidFieldType {
             field,
-            expected: "int tag",
-            actual: nbt_type_name(other),
-        }),
-    }
+            expected: "numeric tag",
+            actual: nbt_type_name(tag),
+        })
 }
 
 pub(crate) fn json_type_name(value: &JsonValue) -> &'static str {

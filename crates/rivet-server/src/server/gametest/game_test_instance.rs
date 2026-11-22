@@ -535,14 +535,13 @@ fn required_nbt_i32(
     let tag = compound
         .get(field)
         .ok_or(InstanceDecodeError::MissingField(field))?;
-    match tag {
-        Tag::Int(i) => Ok(i.value),
-        other => Err(InstanceDecodeError::InvalidFieldType {
+    tag.as_number()
+        .map(|n| n.int_value())
+        .ok_or_else(|| InstanceDecodeError::InvalidFieldType {
             field,
-            expected: "int tag",
-            actual: nbt_type_name(other),
-        }),
-    }
+            expected: "numeric tag",
+            actual: nbt_type_name(tag),
+        })
 }
 
 fn optional_nbt_i32(
@@ -551,11 +550,12 @@ fn optional_nbt_i32(
     default: i32,
 ) -> Result<i32, InstanceDecodeError> {
     match compound.get(field) {
-        Some(Tag::Int(i)) => Ok(i.value),
-        Some(other) => Err(InstanceDecodeError::InvalidFieldType {
-            field,
-            expected: "int tag",
-            actual: nbt_type_name(other),
+        Some(tag) => tag.as_number().map(|n| n.int_value()).ok_or_else(|| {
+            InstanceDecodeError::InvalidFieldType {
+                field,
+                expected: "numeric tag",
+                actual: nbt_type_name(tag),
+            }
         }),
         None => Ok(default),
     }
@@ -567,12 +567,14 @@ fn optional_nbt_bool(
     default: bool,
 ) -> Result<bool, InstanceDecodeError> {
     match compound.get(field) {
-        Some(Tag::Byte(b)) => Ok(b.value != 0),
-        Some(other) => Err(InstanceDecodeError::InvalidFieldType {
-            field,
-            expected: "byte (bool) tag",
-            actual: nbt_type_name(other),
-        }),
+        Some(tag) => tag
+            .as_number()
+            .map(|n| n.double_value() != 0.0)
+            .ok_or_else(|| InstanceDecodeError::InvalidFieldType {
+                field,
+                expected: "numeric (bool) tag",
+                actual: nbt_type_name(tag),
+            }),
         None => Ok(default),
     }
 }
