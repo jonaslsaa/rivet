@@ -520,6 +520,19 @@ impl StructureTemplate {
             let mut simple_palettes: Vec<SimplePalette> = (0..self.palettes.len())
                 .map(|_| SimplePalette::new())
                 .collect();
+            let alt_maps: Vec<IndexMap<BlockPos, BlockState>> = self
+                .palettes
+                .iter()
+                .skip(1)
+                .map(|palette| {
+                    palette
+                        .blocks()
+                        .iter()
+                        .map(|info| (info.pos, info.state))
+                        .collect()
+                })
+                .collect();
+            let mut tuple_to_id: IndexMap<Vec<BlockState>, i32> = IndexMap::new();
             let mut block_list: Vec<Tag> = Vec::new();
             let main_blocks = self.palettes[0].blocks();
 
@@ -533,20 +546,42 @@ impl StructureTemplate {
                         block_info.pos.get_z(),
                     ]),
                 );
-                let id = simple_palettes[0].id_for(block_info.state);
+                let id = if self.palettes.len() == 1 {
+                    simple_palettes[0].id_for(block_info.state)
+                } else {
+                    let mut state_tuple = Vec::with_capacity(self.palettes.len());
+                    state_tuple.push(block_info.state);
+                    for (alt_idx, alt_map) in alt_maps.iter().enumerate() {
+                        let alt_state = alt_map
+                            .get(&block_info.pos)
+                            .copied()
+                            .or_else(|| {
+                                self.palettes[alt_idx + 1]
+                                    .blocks()
+                                    .get(i)
+                                    .map(|info| info.state)
+                            })
+                            .unwrap_or_else(air_state);
+                        state_tuple.push(alt_state);
+                    }
+                    if let Some(&existing) = tuple_to_id.get(&state_tuple) {
+                        existing
+                    } else {
+                        let next_id = tuple_to_id.len() as i32;
+                        for (simple_palette, &state) in
+                            simple_palettes.iter_mut().zip(state_tuple.iter())
+                        {
+                            simple_palette.add_mapping(state, next_id);
+                        }
+                        tuple_to_id.insert(state_tuple, next_id);
+                        next_id
+                    }
+                };
                 block_tag.put_int(Self::BLOCK_TAG_STATE, id);
                 if let Some(nbt) = &block_info.nbt {
                     block_tag.put(Self::BLOCK_TAG_NBT.to_string(), Tag::Compound(nbt.clone()));
                 }
                 block_list.push(Tag::Compound(block_tag));
-
-                for (palette, simple_palette) in
-                    self.palettes.iter().zip(simple_palettes.iter_mut()).skip(1)
-                {
-                    if let Some(alt_info) = palette.blocks().get(i) {
-                        simple_palette.add_mapping(alt_info.state, id);
-                    }
-                }
             }
 
             tag.put(
@@ -948,5 +983,88 @@ mod tests {
         let mut re_saved = CompoundTag::new();
         loaded.save(&mut re_saved);
         assert!(re_saved.contains(StructureTemplate::BUKKIT_VALUES_TAG));
+    }
+
+    #[test]
+    fn save_preserves_alternate_palettes_across_sort_order_and_shared_primary_states() {
+        let p0 = BlockPos::new(0, 0, 0);
+        let p1 = BlockPos::new(1, 0, 0);
+        let p2 = BlockPos::new(2, 0, 0);
+
+        let stone = BlockState::of(block_id("minecraft:stone"));
+        let stairs = BlockState::of(block_id("minecraft:oak_stairs"));
+        let cobble = BlockState::of(block_id("minecraft:cobblestone"));
+        let mossy = BlockState::of(block_id("minecraft:mossy_cobblestone"));
+
+        // Palette 0 has stone at p0 and p2 (shared primary state) and stairs at p1.
+        // Palette 1 has stairs at p0 (different full-block classification -> different sort order
+        // after load_palette), stone at p1, and mossy_cobblestone vs cobblestone at p0/p2.
+        let mut initial_tag = CompoundTag::new();
+        initial_tag.put(
+            StructureTemplate::SIZE_TAG.to_string(),
+            int_list_tag(&[3, 1, 1]),
+        );
+        initial_tag.put(
+            StructureTemplate::PALETTE_LIST_TAG.to_string(),
+            Tag::List(ListTag {
+                list: vec![
+                    Tag::List(ListTag {
+                        list: vec![
+                            Tag::Compound(nbt_utils::write_block_state(stone)),
+                            Tag::Compound(nbt_utils::write_block_state(stairs)),
+                            Tag::Compound(nbt_utils::write_block_state(stone)),
+                        ],
+                    }),
+                    Tag::List(ListTag {
+                        list: vec![
+                            Tag::Compound(nbt_utils::write_block_state(stairs)),
+                            Tag::Compound(nbt_utils::write_block_state(cobble)),
+                            Tag::Compound(nbt_utils::write_block_state(mossy)),
+                        ],
+                    }),
+                ],
+            }),
+        );
+        let make_block = |pos: BlockPos, state_id: i32| {
+            let mut b = CompoundTag::new();
+            b.put(
+                StructureTemplate::BLOCK_TAG_POS.to_string(),
+                int_list_tag(&[pos.get_x(), pos.get_y(), pos.get_z()]),
+            );
+            b.put_int(StructureTemplate::BLOCK_TAG_STATE, state_id);
+            Tag::Compound(b)
+        };
+        initial_tag.put(
+            StructureTemplate::BLOCKS_TAG.to_string(),
+            Tag::List(ListTag {
+                list: vec![make_block(p0, 0), make_block(p1, 1), make_block(p2, 2)],
+            }),
+        );
+
+        let mut loaded = StructureTemplate::new();
+        loaded.load(&initial_tag);
+
+        let mut re_saved = CompoundTag::new();
+        loaded.save(&mut re_saved);
+
+        let mut reloaded = StructureTemplate::new();
+        reloaded.load(&re_saved);
+
+        let state_at = |tpl: &StructureTemplate, pal_idx: usize, pos: BlockPos| {
+            tpl.palettes()[pal_idx]
+                .blocks()
+                .iter()
+                .find(|info| info.pos == pos)
+                .map(|info| info.state)
+                .unwrap()
+        };
+
+        assert_eq!(state_at(&reloaded, 0, p0), stone);
+        assert_eq!(state_at(&reloaded, 0, p1), stairs);
+        assert_eq!(state_at(&reloaded, 0, p2), stone);
+
+        assert_eq!(state_at(&reloaded, 1, p0), stairs);
+        assert_eq!(state_at(&reloaded, 1, p1), cobble);
+        assert_eq!(state_at(&reloaded, 1, p2), mossy);
     }
 }
