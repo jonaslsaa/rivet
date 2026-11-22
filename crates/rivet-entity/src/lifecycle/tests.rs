@@ -709,3 +709,163 @@ fn negative_cancelled_dismount_moonrise_lock_no_ai_and_double_take() {
     assert!(!ctx.is_taken(boat));
     assert_eq!(ctx.entity_ids(), order_before);
 }
+
+#[test]
+fn living_base_tick_preserves_self_hurt_ids_while_taken() {
+    let mut ctx = LevelCtx::new();
+    let id = ctx.next_entity_id();
+    let mut living = LivingEntity::new(id, zombie_meta(), 20.0, 40);
+    living.last_hurt_mob = Some(id);
+    living.set_last_hurt_by_mob(Some(id));
+    ctx.add_entity(LifecycleEntity::Living(living));
+
+    ctx.tick_all(true);
+    let l = ctx.get(id).unwrap().living().unwrap();
+    assert_eq!(l.last_hurt_mob, Some(id));
+    assert_eq!(l.last_hurt_by_mob, Some(id));
+
+    // Once dead, self-referencing hurt IDs clear on baseTick
+    ctx.get_mut(id).unwrap().living_mut().unwrap().health = 0.0;
+    ctx.tick_all(true);
+    let l = ctx.get(id).unwrap().living().unwrap();
+    assert_eq!(l.last_hurt_mob, None);
+    assert_eq!(l.last_hurt_by_mob, None);
+}
+
+#[test]
+fn tick_passenger_cleans_stale_entries_and_suppresses_cancel_for_removed_passenger() {
+    let mut ctx = LevelCtx::new();
+    let vehicle_a = ctx.next_entity_id();
+    let vehicle_b = ctx.next_entity_id();
+    let rider = ctx.next_entity_id();
+    let missing_id = 9999;
+
+    ctx.add_entity(LifecycleEntity::Base(Entity::new(
+        vehicle_a,
+        EntityTypeMeta::boat(),
+        1,
+    )));
+    ctx.add_entity(LifecycleEntity::Base(Entity::new(
+        vehicle_b,
+        EntityTypeMeta::boat(),
+        2,
+    )));
+    ctx.add_entity(LifecycleEntity::Living(LivingEntity::new(
+        rider,
+        zombie_meta(),
+        20.0,
+        3,
+    )));
+
+    // Rider is legitimately mounted on vehicle_b, while vehicle_a holds stale entries
+    // for both `missing_id` and `rider`.
+    assert!(ctx.start_riding(rider, vehicle_b, false, false));
+    ctx.get_mut(vehicle_a)
+        .unwrap()
+        .entity_mut()
+        .passengers
+        .extend_from_slice(&[missing_id, rider]);
+
+    ctx.tick_passenger(vehicle_a, missing_id, true);
+    ctx.tick_passenger(vehicle_a, rider, true);
+
+    assert!(ctx.get(vehicle_a).unwrap().entity().passengers.is_empty());
+    assert_eq!(ctx.get(rider).unwrap().entity().vehicle, Some(vehicle_b));
+    assert_eq!(ctx.get(vehicle_b).unwrap().entity().passengers, vec![rider]);
+
+    // A removed passenger still linked to vehicle_b must detach even when cancel_dismount is true.
+    ctx.cancel_dismount = true;
+    ctx.get_mut(rider).unwrap().entity_mut().removal_reason = Some(EntityRemovalReason::Discarded);
+    ctx.tick_passenger(vehicle_b, rider, true);
+    assert_eq!(ctx.get(rider).unwrap().entity().vehicle, None);
+    assert!(ctx.get(vehicle_b).unwrap().entity().passengers.is_empty());
+}
+
+#[test]
+fn living_rotation_wrap_uses_jdk_6430675_rounding() {
+    let mut ctx = LevelCtx::new();
+    let id = ctx.next_entity_id();
+    let mut living = LivingEntity::new(id, zombie_meta(), 20.0, 50);
+    // 0.49999997_f32 (0x3eff_ffff) must round to 0, not 1
+    let just_under_half = f32::from_bits(0x3eff_ffff);
+    living.entity.y_rot_o = 0.0_f32;
+    living.entity.y_rot = just_under_half * 360.0_f32;
+    ctx.add_entity(LifecycleEntity::Living(living));
+
+    // Tick directly through living_tick (skipping set_old_pos_and_rot) to exercise the wrap
+    let mut taken = ctx.take_entity(id).unwrap();
+    if let LifecycleEntity::Living(ref mut l) = taken {
+        l.living_tick_with_hooks(&mut ctx, |_this, _c| {}, |_this, _c| {});
+        assert_eq!(l.entity.y_rot_o, 0.0_f32);
+    }
+    ctx.put_back_entity(taken);
+
+    assert_eq!(
+        crate::survival::player_survival::java_round_f32(just_under_half),
+        0
+    );
+    assert_eq!(
+        crate::survival::player_survival::java_round_f32(8_388_609.0_f32),
+        8_388_609
+    );
+}
+
+#[test]
+fn distance_despawn_runs_via_tick_all_and_removed_vehicle_sets_cooldown() {
+    let mut ctx = LevelCtx::new();
+    ctx.difficulty = Difficulty::Normal;
+    ctx.nearest_player_pos = Some(Vec3::new(0.0, 0.0, 0.0));
+
+    let far_mob_id = ctx.next_entity_id();
+    let mut far_mob = Mob::new(far_mob_id, zombie_meta(), 20.0, 60);
+    far_mob.living.entity.set_pos(200.0, 0.0, 0.0);
+    ctx.add_entity(LifecycleEntity::Mob(far_mob));
+
+    ctx.take_events();
+    ctx.tick_all(true);
+    assert!(ctx.get(far_mob_id).is_none());
+    let evs = ctx.take_events();
+    assert!(
+        evs.iter()
+            .any(|e| matches!(e, LifecycleEvent::Despawn { id } if *id == far_mob_id))
+    );
+    assert!(evs.iter().any(|e| matches!(
+        e,
+        LifecycleEvent::EntityRemoved {
+            id,
+            reason: EntityRemovalReason::Discarded,
+        } if *id == far_mob_id
+    )));
+
+    // Removed-vehicle detach in Entity::entity_base_tick sets boarding_cooldown = 60 and emits Dismount
+    let vehicle_id = ctx.next_entity_id();
+    let rider_id = ctx.next_entity_id();
+    ctx.add_entity(LifecycleEntity::Base(Entity::new(
+        vehicle_id,
+        EntityTypeMeta::boat(),
+        61,
+    )));
+    ctx.add_entity(LifecycleEntity::Base(Entity::new(
+        rider_id,
+        zombie_meta(),
+        62,
+    )));
+    assert!(ctx.start_riding(rider_id, vehicle_id, false, false));
+    ctx.get_mut(vehicle_id).unwrap().entity_mut().removal_reason =
+        Some(EntityRemovalReason::UnloadedToChunk);
+    ctx.take_events();
+
+    let mut taken_rider = ctx.take_entity(rider_id).unwrap();
+    taken_rider.entity_mut().entity_base_tick(&mut ctx);
+    assert_eq!(taken_rider.entity().vehicle, None);
+    // stop_riding sets boarding_cooldown = 60, then entity_base_tick decrements it to 59
+    assert_eq!(taken_rider.entity().boarding_cooldown, 59);
+    ctx.put_back_entity(taken_rider);
+
+    let detach_evs = ctx.take_events();
+    assert!(detach_evs.iter().any(|e| matches!(
+        e,
+        LifecycleEvent::Dismount { passenger_id, vehicle_id: vid }
+            if *passenger_id == rider_id && *vid == vehicle_id
+    )));
+}

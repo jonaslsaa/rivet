@@ -364,7 +364,7 @@ impl PlayerSurvivalState {
 
 /// Exact port of Java `Math.round(float)` (JDK-6430675).
 #[inline]
-pub(super) fn java_round_f32(value: f32) -> i32 {
+pub(crate) fn java_round_f32(value: f32) -> i32 {
     if value.is_nan() {
         0
     } else {

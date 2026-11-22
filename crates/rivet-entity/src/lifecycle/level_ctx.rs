@@ -409,13 +409,24 @@ impl LevelCtx {
     /// using take-tick-putback, detaching invalid/removed passengers and recursing
     /// into nested passengers.
     pub fn tick_passenger(&mut self, vehicle_id: i32, passenger_id: i32, is_active: bool) {
-        let should_detach = match self.get(passenger_id) {
-            None => true,
-            Some(p) => p.entity().is_removed() || p.entity().vehicle != Some(vehicle_id),
-        };
-        if should_detach {
-            self.stop_riding(passenger_id, false);
-            return;
+        match self.get(passenger_id) {
+            None => {
+                if let Some(v) = self.get_mut(vehicle_id) {
+                    v.entity_mut().passengers.retain(|&pid| pid != passenger_id);
+                }
+                return;
+            }
+            Some(p) if p.entity().vehicle != Some(vehicle_id) => {
+                if let Some(v) = self.get_mut(vehicle_id) {
+                    v.entity_mut().passengers.retain(|&pid| pid != passenger_id);
+                }
+                return;
+            }
+            Some(p) if p.entity().is_removed() => {
+                self.stop_riding(passenger_id, true);
+                return;
+            }
+            Some(_) => {}
         }
 
         let Some(mut passenger) = self.take_entity(passenger_id) else {

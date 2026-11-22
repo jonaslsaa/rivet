@@ -415,21 +415,32 @@ impl LivingEntity {
             self.last_hurt_by_player = None;
         }
 
-        if let Some(last_mob) = self.last_hurt_mob
-            && !ctx.is_entity_alive(last_mob)
-        {
-            self.last_hurt_mob = None;
+        if let Some(last_mob) = self.last_hurt_mob {
+            let alive = if last_mob == self.entity.id {
+                self.is_alive()
+            } else {
+                ctx.is_entity_alive(last_mob)
+            };
+            if !alive {
+                self.last_hurt_mob = None;
+            }
         }
 
-        if let Some(hurt_by) = self.last_hurt_by_mob
-            && (!ctx.is_entity_alive(hurt_by)
+        if let Some(hurt_by) = self.last_hurt_by_mob {
+            let alive = if hurt_by == self.entity.id {
+                self.is_alive()
+            } else {
+                ctx.is_entity_alive(hurt_by)
+            };
+            if !alive
                 || self
                     .entity
                     .tick_count
                     .wrapping_sub(self.last_hurt_by_mob_timestamp)
-                    > LAST_HURT_BY_MOB_EXPIRY_TICKS)
-        {
-            self.set_last_hurt_by_mob(None);
+                    > LAST_HURT_BY_MOB_EXPIRY_TICKS
+            {
+                self.set_last_hurt_by_mob(None);
+            }
         }
 
         self.y_head_rot_o = self.y_head_rot;
@@ -632,10 +643,8 @@ impl LivingEntity {
     }
 }
 
-/// Java `Math.round(float)` semantics: `(int) Math.floor(a + 0.5f)` cast back to `f32`.
+/// Exact port of Java `Math.round(float)` (JDK-6430675) cast back to `f32`.
+#[inline]
 fn java_round_f32(value: f32) -> f32 {
-    if value.is_nan() {
-        return 0.0_f32;
-    }
-    ((value + 0.5_f32).floor() as i32) as f32
+    crate::survival::player_survival::java_round_f32(value) as f32
 }
