@@ -503,11 +503,20 @@ impl LootPoolEntryContainer {
                 false
             }
             Self::Group { children, .. } => {
-                // EntryGroup: empty -> ALWAYS_TRUE; otherwise expand ALL children in order, return true.
-                for child in children {
-                    child.expand(context, output);
+                // EntryGroup.compose:
+                // - 0 children -> ALWAYS_TRUE
+                // - 1 child    -> delegates directly to that child's return value
+                // - 2+ children -> expands every child in order and returns true
+                match children.as_slice() {
+                    [] => true,
+                    [only] => only.expand(context, output),
+                    many => {
+                        for child in many {
+                            child.expand(context, output);
+                        }
+                        true
+                    }
                 }
-                true
             }
             Self::Sequence { children, .. } => {
                 // SequentialEntry: empty -> ALWAYS_TRUE; otherwise short-circuit AND.

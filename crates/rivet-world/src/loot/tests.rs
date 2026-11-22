@@ -955,3 +955,44 @@ fn expanded_tag_entry_bypasses_entry_functions_matching_paper() {
     let mut oracle = LegacyRandomSource::new(seed);
     assert_eq!(ctx.random_mut().next_long(), oracle.next_long());
 }
+
+#[test]
+fn single_child_group_propagates_failure_in_alternatives_and_sequence() {
+    let registry = LootRegistry::new();
+    let failing_group = LootPoolEntryContainer::group(vec![
+        LootPoolEntryContainer::item(id("never"))
+            .when(LootItemCondition::ParamPresent(LootContextParams::origin())),
+    ]);
+
+    // Inside Alternatives: single-child failing Group returns false -> fallback runs.
+    let alt_table = LootTable::builder()
+        .with_pool(
+            LootPool::builder()
+                .add(LootPoolEntryContainer::alternatives(vec![
+                    failing_group.clone(),
+                    LootPoolEntryContainer::item(id("fallback")),
+                ]))
+                .build(),
+        )
+        .build();
+    let mut ctx = make_context(empty_params(), 1, &registry);
+    let mut alt_items = Vec::new();
+    alt_table.get_random_items_raw(&mut ctx, &mut |s| alt_items.push(s.item().clone()));
+    assert_eq!(alt_items, vec![id("fallback")]);
+
+    // Inside Sequence: single-child failing Group returns false -> stops sequence.
+    let seq_table = LootTable::builder()
+        .with_pool(
+            LootPool::builder()
+                .add(LootPoolEntryContainer::sequence(vec![
+                    failing_group,
+                    LootPoolEntryContainer::item(id("after")),
+                ]))
+                .build(),
+        )
+        .build();
+    let mut ctx = make_context(empty_params(), 1, &registry);
+    let mut seq_items = Vec::new();
+    seq_table.get_random_items_raw(&mut ctx, &mut |s| seq_items.push(s.item().clone()));
+    assert!(seq_items.is_empty());
+}
