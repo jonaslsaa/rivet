@@ -139,7 +139,7 @@ impl SkyLightProvider {
                 self.max_section,
             );
             let mut outcome = computed;
-            if let Ok(updates) = outcome.as_mut() {
+            let committed = if let Ok(updates) = outcome.as_mut() {
                 for (sky, channel) in [(true, &mut updates.sky), (false, &mut updates.block)] {
                     for ((x, z), update) in std::mem::take(channel) {
                         let key = ChunkPos::new(x, z);
@@ -158,6 +158,12 @@ impl SkyLightProvider {
                         }
                     }
                 }
+                true
+            } else {
+                false
+            };
+            if committed {
+                self.changes.complete(pos);
             }
             let taken = std::mem::take(&mut access.taken);
             drop(access);
@@ -169,7 +175,6 @@ impl SkyLightProvider {
                 ));
             }
             outcome?;
-            self.changes.complete(pos);
         }
         Ok(std::mem::take(&mut self.pending_notifications))
     }
@@ -709,6 +714,25 @@ impl SkyLightProvider {
         chunk.sky_nibbles()[(section_y.wrapping_sub(self.min_light_section)) as usize]
             .to_vanilla_nibble()
     }
+
+    /// `StarLightInterface`'s block-light `getDataLayerData(SectionPos)` with
+    /// the chunk already resolved. Matches Paper's block-light reader: only
+    /// `hasBlockLight` and light-section bounds gate the lookup.
+    pub fn get_block_data_layer_data_in(
+        &self,
+        chunk: &ChunkAccess<StateId, ServerBiomeId, StructureKey>,
+        pos: SectionPos,
+    ) -> Option<DataLayer> {
+        if !self.has_block_light {
+            return None;
+        }
+        let section_y = pos.y();
+        if section_y > self.max_light_section || section_y < self.min_light_section {
+            return None;
+        }
+        chunk.block_nibbles()[(section_y.wrapping_sub(self.min_light_section)) as usize]
+            .to_vanilla_nibble()
+    }
 }
 
 /// The engine's [`ChunkAccessor`] over the provider's narrow take/put callback.
@@ -826,24 +850,43 @@ impl StarLightProvider for SkyLightProvider {
         false
     }
 
-    fn get_sky_light_value(&self, _pos: BlockPos) -> i32 {
-        // The readers run on `&self`, so they cannot resolve a chunk through
-        // the exclusive take/put callback; Java's null-chunk branch is reported
-        // faithfully (`getSkyLightValue` returns 15 for a null chunk when sky
-        // light is enabled). Callers with a resolved chunk use
-        // [`Self::get_sky_light_value_in`].
+    fn get_sky_light_value(&self, pos: BlockPos) -> i32 {
+        if let ChunkStorage::Owned(chunks) = &self.chunks
+            && let Some(chunk) = chunks.get(&(pos.get_x() >> 4, pos.get_z() >> 4))
+        {
+            return self.get_sky_light_value_in(chunk, pos);
+        }
+        // Callback storage cannot resolve a chunk on `&self`; report Java's
+        // null-chunk branch (`15` when sky light is enabled).
         if self.has_sky_light { 15 } else { 0 }
     }
 
-    fn get_block_light_value(&self, _pos: BlockPos) -> i32 {
+    fn get_block_light_value(&self, pos: BlockPos) -> i32 {
+        if let ChunkStorage::Owned(chunks) = &self.chunks
+            && let Some(chunk) = chunks.get(&(pos.get_x() >> 4, pos.get_z() >> 4))
+        {
+            return self.get_block_light_value_in(chunk, pos);
+        }
         // `getBlockLightValue` returns 0 for a null chunk (and with no block
-        // light). Real reads go through [`Self::get_block_light_value_in`].
+        // light). Callback callers use [`Self::get_block_light_value_in`].
         0
     }
 
-    fn get_data_layer_data(&self, _pos: SectionPos) -> Option<DataLayer> {
-        // `getDataLayerData` returns null for a null chunk. Real reads go
-        // through [`Self::get_data_layer_data_in`].
+    fn get_data_layer_data(&self, pos: SectionPos) -> Option<DataLayer> {
+        if let ChunkStorage::Owned(chunks) = &self.chunks
+            && let Some(chunk) = chunks.get(&(pos.x(), pos.z()))
+        {
+            return self.get_data_layer_data_in(chunk, pos);
+        }
+        None
+    }
+
+    fn get_block_data_layer_data(&self, pos: SectionPos) -> Option<DataLayer> {
+        if let ChunkStorage::Owned(chunks) = &self.chunks
+            && let Some(chunk) = chunks.get(&(pos.x(), pos.z()))
+        {
+            return self.get_block_data_layer_data_in(chunk, pos);
+        }
         None
     }
 }
@@ -1913,5 +1956,324 @@ mod tests {
             compared_light_sections > 0,
             "the engine published no light — the comparison is vacuous"
         );
+    }
+
+    #[test]
+    fn block_light_only_provider_publishes_real_block_nibbles_and_counterfactual_disabled_publishes_none()
+     {
+        use super::super::generated_block_light_fixture::write;
+        use rivet_registry::block_state::BlockState;
+        use rivet_registry::generated::blocks::BlockId;
+        use rivet_world::chunk::status::ChunkStatus;
+
+        let torch = BlockState::of(BlockId::from_name("minecraft:torch").unwrap()).id();
+        let mut chunk_enabled = all_air_chunk(ChunkPos::ZERO);
+        SkyLightProvider::new(overworld(), false, true, no_chunks())
+            .light_chunk_with(&mut chunk_enabled, &all_air_empty_sections())
+            .unwrap();
+        chunk_enabled.set_persisted_status(ChunkStatus::Full);
+        chunk_enabled.set_light_correct(true);
+        let original_sky: Vec<_> = chunk_enabled
+            .sky_nibbles()
+            .iter()
+            .map(|n| n.to_vanilla_nibble().map(|l| l.get_data()))
+            .collect();
+        write(&mut chunk_enabled, 8, 64, 8, torch);
+
+        let mut owned_enabled = HashMap::new();
+        owned_enabled.insert((0, 0), chunk_enabled);
+        let mut block_only =
+            SkyLightProvider::with_owned_storage(overworld(), false, true, owned_enabled);
+        block_only.section_change(SectionPos::of(0, 4, 0), false);
+        block_only.block_change(BlockPos::new(8, 64, 8));
+        assert_eq!(block_only.try_run_updates().unwrap(), [ChunkPos::ZERO]);
+
+        assert_eq!(
+            block_only.get_block_light_value(BlockPos::new(8, 64, 8)),
+            14
+        );
+        assert_eq!(
+            block_only.get_block_light_value(BlockPos::new(9, 64, 8)),
+            13
+        );
+        let layer = block_only
+            .get_block_data_layer_data(SectionPos::of(0, 4, 0))
+            .expect("has_block_light=true must publish a real block DataLayer");
+        assert_eq!(layer.get(8, 0, 8), 14);
+        assert_eq!(layer.get(9, 0, 8), 13);
+        let lit = block_only.take_chunk(ChunkPos::ZERO).unwrap().unwrap();
+        let after_sky: Vec<_> = lit
+            .sky_nibbles()
+            .iter()
+            .map(|n| n.to_vanilla_nibble().map(|l| l.get_data()))
+            .collect();
+        assert_eq!(
+            after_sky, original_sky,
+            "block-light-only provider must not mutate sky nibbles"
+        );
+
+        // Counterfactual: has_block_light=false must publish no block light.
+        let mut chunk_disabled = all_air_chunk(ChunkPos::ZERO);
+        SkyLightProvider::new(overworld(), true, false, no_chunks())
+            .light_chunk_with(&mut chunk_disabled, &all_air_empty_sections())
+            .unwrap();
+        chunk_disabled.set_persisted_status(ChunkStatus::Full);
+        chunk_disabled.set_light_correct(true);
+        write(&mut chunk_disabled, 8, 64, 8, torch);
+
+        let mut owned_disabled = HashMap::new();
+        owned_disabled.insert((0, 0), chunk_disabled);
+        let mut sky_only =
+            SkyLightProvider::with_owned_storage(overworld(), true, false, owned_disabled);
+        sky_only.section_change(SectionPos::of(0, 4, 0), false);
+        sky_only.block_change(BlockPos::new(8, 64, 8));
+        sky_only.try_run_updates().unwrap();
+        assert_eq!(sky_only.get_block_light_value(BlockPos::new(8, 64, 8)), 0);
+        assert!(
+            sky_only
+                .get_block_data_layer_data(SectionPos::of(0, 4, 0))
+                .is_none(),
+            "has_block_light=false must never publish a block DataLayer"
+        );
+    }
+
+    #[test]
+    fn owned_provider_block_change_publishes_block_data_layers_and_deinitializes_across_chunk_boundary()
+     {
+        use super::super::generated_block_light_fixture::write;
+        use rivet_registry::block_state::BlockState;
+        use rivet_registry::generated::blocks::BlockId;
+        use rivet_world::chunk::status::ChunkStatus;
+
+        let state = |name: &str| BlockState::of(BlockId::from_name(name).unwrap()).id();
+        let mut storage = HashMap::new();
+        // Paper's handleEmptySectionChanges only deinitializes a section once all
+        // radius-1 neighbours have loaded emptiness maps.
+        for cz in -1..=1 {
+            for cx in -1..=2 {
+                let pos = ChunkPos::new(cx, cz);
+                let mut chunk = all_air_chunk(pos);
+                SkyLightProvider::new(overworld(), true, true, no_chunks())
+                    .light_chunk_with(&mut chunk, &all_air_empty_sections())
+                    .unwrap();
+                chunk.set_persisted_status(ChunkStatus::Full);
+                chunk.set_light_correct(true);
+                storage.insert((pos.x(), pos.z()), chunk);
+            }
+        }
+
+        let mut provider = SkyLightProvider::with_owned_storage(overworld(), true, true, storage);
+
+        // 1. Add torch at eastern edge of chunk (0, 0) -> propagates into chunk (1, 0).
+        {
+            let mut c0 = provider.take_chunk(ChunkPos::new(0, 0)).unwrap().unwrap();
+            write(&mut c0, 15, 64, 8, state("minecraft:torch"));
+            provider.put_chunk(ChunkPos::new(0, 0), c0).unwrap();
+        }
+        provider.section_change(SectionPos::of(0, 4, 0), false);
+        provider.block_change(BlockPos::new(15, 64, 8));
+        let notified = provider.try_run_updates().unwrap();
+        assert!(notified.contains(&ChunkPos::new(0, 0)));
+        assert!(notified.contains(&ChunkPos::new(1, 0)));
+        assert_eq!(provider.get_block_light_value(BlockPos::new(15, 64, 8)), 14);
+        assert_eq!(provider.get_block_light_value(BlockPos::new(16, 64, 8)), 13);
+        let neighbor_layer = provider
+            .get_block_data_layer_data(SectionPos::of(1, 4, 0))
+            .expect("neighbor chunk must receive a real block DataLayer");
+        assert_eq!(neighbor_layer.get(0, 0, 8), 13);
+
+        // 2. Remove torch and mark section empty -> extinguishes across both chunks
+        //    and deinitializes block nibbles back to non-visible (None DataLayer).
+        {
+            let mut c0 = provider.take_chunk(ChunkPos::new(0, 0)).unwrap().unwrap();
+            write(&mut c0, 15, 64, 8, state("minecraft:air"));
+            provider.put_chunk(ChunkPos::new(0, 0), c0).unwrap();
+        }
+        provider.section_change(SectionPos::of(0, 4, 0), true);
+        provider.block_change(BlockPos::new(15, 64, 8));
+        let notified = provider.try_run_updates().unwrap();
+        assert!(notified.contains(&ChunkPos::new(0, 0)));
+        assert!(notified.contains(&ChunkPos::new(1, 0)));
+        assert_eq!(provider.get_block_light_value(BlockPos::new(15, 64, 8)), 0);
+        assert_eq!(provider.get_block_light_value(BlockPos::new(16, 64, 8)), 0);
+        assert!(
+            provider
+                .get_block_data_layer_data(SectionPos::of(0, 4, 0))
+                .is_none(),
+            "deinitialized center section should have no visible block DataLayer"
+        );
+        assert!(
+            provider
+                .get_block_data_layer_data(SectionPos::of(1, 4, 0))
+                .is_none(),
+            "deinitialized neighbor section should have no visible block DataLayer"
+        );
+
+        // 3. Re-add glowstone -> cleanly re-initializes and propagates across boundary.
+        {
+            let mut c0 = provider.take_chunk(ChunkPos::new(0, 0)).unwrap().unwrap();
+            write(&mut c0, 15, 64, 8, state("minecraft:glowstone"));
+            provider.put_chunk(ChunkPos::new(0, 0), c0).unwrap();
+        }
+        provider.section_change(SectionPos::of(0, 4, 0), false);
+        provider.block_change(BlockPos::new(15, 64, 8));
+        provider.try_run_updates().unwrap();
+        assert_eq!(provider.get_block_light_value(BlockPos::new(15, 64, 8)), 15);
+        assert_eq!(provider.get_block_light_value(BlockPos::new(16, 64, 8)), 14);
+        assert_eq!(
+            provider
+                .get_block_data_layer_data(SectionPos::of(1, 4, 0))
+                .expect("re-initialized neighbor DataLayer")
+                .get(0, 0, 8),
+            14
+        );
+    }
+
+    #[test]
+    fn vertical_section_boundary_emission_add_change_and_remove() {
+        use super::super::generated_block_light_fixture::write;
+        use rivet_registry::block_state::BlockState;
+        use rivet_registry::generated::blocks::BlockId;
+        use rivet_world::chunk::status::ChunkStatus;
+
+        let state = |name: &str| BlockState::of(BlockId::from_name(name).unwrap()).id();
+        let mut chunk = all_air_chunk(ChunkPos::ZERO);
+        SkyLightProvider::new(overworld(), true, true, no_chunks())
+            .light_chunk_with(&mut chunk, &all_air_empty_sections())
+            .unwrap();
+        chunk.set_persisted_status(ChunkStatus::Full);
+        chunk.set_light_correct(true);
+        let mut storage = HashMap::new();
+        storage.insert((0, 0), chunk);
+        let mut provider = SkyLightProvider::with_owned_storage(overworld(), true, true, storage);
+
+        // Add glowstone (15) at y=64 (bottom of section 4), propagating into section 3 (y=63).
+        {
+            let mut c0 = provider.take_chunk(ChunkPos::ZERO).unwrap().unwrap();
+            write(&mut c0, 8, 64, 8, state("minecraft:glowstone"));
+            provider.put_chunk(ChunkPos::ZERO, c0).unwrap();
+        }
+        provider.section_change(SectionPos::of(0, 4, 0), false);
+        provider.block_change(BlockPos::new(8, 64, 8));
+        provider.try_run_updates().unwrap();
+        assert_eq!(provider.get_block_light_value(BlockPos::new(8, 64, 8)), 15);
+        assert_eq!(provider.get_block_light_value(BlockPos::new(8, 63, 8)), 14);
+        assert_eq!(provider.get_block_light_value(BlockPos::new(8, 78, 8)), 1);
+        assert_eq!(provider.get_block_light_value(BlockPos::new(8, 79, 8)), 0);
+        assert_eq!(
+            provider
+                .get_block_data_layer_data(SectionPos::of(0, 3, 0))
+                .expect("lower section DataLayer")
+                .get(8, 15, 8),
+            14
+        );
+
+        // Replace with redstone_torch (emission 7): decreases across vertical boundary.
+        {
+            let mut c0 = provider.take_chunk(ChunkPos::ZERO).unwrap().unwrap();
+            write(&mut c0, 8, 64, 8, state("minecraft:redstone_torch"));
+            provider.put_chunk(ChunkPos::ZERO, c0).unwrap();
+        }
+        provider.block_change(BlockPos::new(8, 64, 8));
+        provider.try_run_updates().unwrap();
+        assert_eq!(provider.get_block_light_value(BlockPos::new(8, 64, 8)), 7);
+        assert_eq!(provider.get_block_light_value(BlockPos::new(8, 63, 8)), 6);
+        assert_eq!(provider.get_block_light_value(BlockPos::new(8, 71, 8)), 0);
+
+        // Remove emitter completely -> all zeros.
+        {
+            let mut c0 = provider.take_chunk(ChunkPos::ZERO).unwrap().unwrap();
+            write(&mut c0, 8, 64, 8, state("minecraft:air"));
+            provider.put_chunk(ChunkPos::ZERO, c0).unwrap();
+        }
+        provider.section_change(SectionPos::of(0, 4, 0), true);
+        provider.block_change(BlockPos::new(8, 64, 8));
+        provider.try_run_updates().unwrap();
+        assert_eq!(provider.get_block_light_value(BlockPos::new(8, 64, 8)), 0);
+        assert_eq!(provider.get_block_light_value(BlockPos::new(8, 63, 8)), 0);
+    }
+
+    #[test]
+    fn out_of_world_block_change_is_ignored() {
+        let mut provider =
+            SkyLightProvider::with_owned_storage(overworld(), true, true, HashMap::new());
+        // Overworld min Y is -64, max Y is 319. Both positions are outside world bounds.
+        provider.block_change(BlockPos::new(0, -65, 0));
+        provider.block_change(BlockPos::new(0, 320, 0));
+        assert!(
+            provider.try_run_updates().unwrap().is_empty(),
+            "out-of-world block changes must not queue tasks"
+        );
+    }
+
+    #[test]
+    fn restore_panic_after_commit_completes_queued_task_and_delivers_chunks_on_retry() {
+        use super::super::generated_block_light_fixture::write;
+        use rivet_registry::block_state::BlockState;
+        use rivet_registry::generated::blocks::BlockId;
+        use rivet_world::chunk::status::ChunkStatus;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut chunk = all_air_chunk(ChunkPos::ZERO);
+        SkyLightProvider::new(overworld(), true, true, no_chunks())
+            .light_chunk_with(&mut chunk, &all_air_empty_sections())
+            .unwrap();
+        chunk.set_persisted_status(ChunkStatus::Full);
+        chunk.set_light_correct(true);
+        write(
+            &mut chunk,
+            8,
+            64,
+            8,
+            BlockState::of(BlockId::from_name("minecraft:torch").unwrap()).id(),
+        );
+
+        let shared = Arc::new(Mutex::new(HashMap::from([((0, 0), chunk)])));
+        let fail_next_put = Arc::new(AtomicBool::new(true));
+        let callback_storage = Arc::clone(&shared);
+        let callback_fail = Arc::clone(&fail_next_put);
+        let callback: ChunkAccessFn = Box::new(move |x, z, put| match put {
+            None => callback_storage.lock().unwrap().remove(&(x, z)),
+            Some(slot) => {
+                if callback_fail.swap(false, Ordering::SeqCst) {
+                    panic!("simulated transient storage put failure");
+                }
+                if let Some(chunk) = slot.take() {
+                    callback_storage.lock().unwrap().insert((x, z), chunk);
+                }
+                None
+            }
+        });
+
+        let mut provider = SkyLightProvider::new(overworld(), true, true, callback);
+        provider.section_change(SectionPos::of(0, 4, 0), false);
+        provider.block_change(BlockPos::new(8, 64, 8));
+
+        assert!(
+            matches!(
+                provider.try_run_updates(),
+                Err(LiveLightError::Propagation(_))
+            ),
+            "transient put failure must surface as Propagation error"
+        );
+        assert!(
+            shared.lock().unwrap().get(&(0, 0)).is_none(),
+            "failed put leaves chunk buffered in pending_restores"
+        );
+
+        // Retry flushes pending_restores and returns the notification without
+        // re-running the already-committed task.
+        assert_eq!(provider.try_run_updates().unwrap(), [ChunkPos::ZERO]);
+        let guard = shared.lock().unwrap();
+        let restored = guard.get(&(0, 0)).expect("chunk restored on retry");
+        assert_eq!(
+            provider.get_block_light_value_in(restored, BlockPos::new(8, 64, 8)),
+            14
+        );
+        assert_eq!(
+            provider.get_block_light_value_in(restored, BlockPos::new(9, 64, 8)),
+            13
+        );
+        assert!(provider.try_run_updates().unwrap().is_empty());
     }
 }

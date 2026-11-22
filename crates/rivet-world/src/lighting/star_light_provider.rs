@@ -135,9 +135,16 @@ pub trait StarLightProvider {
     /// `StarLightInterface.getBlockLightValue(BlockPos, ChunkAccess)`.
     fn get_block_light_value(&self, pos: BlockPos) -> i32;
 
-    /// `LayerLightEventListener.getDataLayerData(SectionPos)` — the sky/block
+    /// `LayerLightEventListener.getDataLayerData(SectionPos)` — the sky
     /// `DataLayer` at `pos`, or `None` when the engine has none (Java `null`).
     fn get_data_layer_data(&self, pos: SectionPos) -> Option<DataLayer>;
+
+    /// `StarLightInterface`'s block-light `LayerLightEventListener.getDataLayerData(SectionPos)` —
+    /// the block-light `DataLayer` at `pos`, or `None` when block light is
+    /// disabled or the chunk/section has no visible layer (Java `null`).
+    fn get_block_data_layer_data(&self, _pos: SectionPos) -> Option<DataLayer> {
+        None
+    }
 }
 
 #[cfg(test)]
