@@ -11,10 +11,11 @@
 //! Deferred (not part of M1): `acquire`/`release` threading guards (the
 //! container is tick-thread-confined game state — OWNERSHIP.md — and Java's
 //! `synchronized` is dropped with a note, as PORTING.md prescribes for
-//! tick-confined state) and the Anti-Xray `write`/`ChunkPacketInfo` params.
+//! tick-confined state).
 //!
-//! The Anti-Xray `presetValues` constructor surface and the Moonrise
-//! `FastPalette` read-path snapshot are ported (issue #216).
+//! The Anti-Xray `presetValues` constructor surface, the Anti-Xray
+//! `write_with_info`/`ChunkPacketInfo` metadata path (issue #692), and the
+//! Moonrise `FastPalette` read-path snapshot (issue #216) are ported.
 //!
 //! The `onResize` reentrancy is ported by deferring the resize: `Palette::id_for`
 //! returns `IdForResult` and the container grows, then inserts the value. The
@@ -28,6 +29,7 @@ use rivet_util::bit_storage::BitStorage;
 use rivet_util::simple_bit_storage::{InitializationException, SimpleBitStorage};
 use rivet_util::zero_bit_storage::ZeroBitStorage;
 
+use crate::chunk::chunk_packet_info::ChunkPacketInfo;
 use crate::chunk::configuration::{Configuration, PaletteFactoryKind};
 use crate::chunk::palette::{GlobalIdMap, HashMapPalette, IdForResult, Palette, ceillog2};
 use crate::chunk::strategy::Strategy;
@@ -376,9 +378,33 @@ impl<T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static> PalettedCon
         self.add_preset_values();
     }
 
+    /// `write(FriendlyByteBuf, @Nullable ChunkPacketInfo<T>, int chunkSectionIndex)`
+    /// (Paper Anti-Xray).
+    ///
+    /// Delegates wire serialization to `Data::write_with_info` (which records
+    /// `bits`, `palette`, and the raw-storage `writerIndex` right before the
+    /// fixed-size long array) and then records `presetValues` on the
+    /// `ChunkPacketInfo`.
+    pub fn write_with_info(
+        &self,
+        buffer: &mut FriendlyByteBuf,
+        mut chunk_packet_info: Option<&mut ChunkPacketInfo<T>>,
+        chunk_section_index: usize,
+    ) {
+        self.data.write_with_info(
+            buffer,
+            self.strategy.global_map(),
+            chunk_packet_info.as_deref_mut(),
+            chunk_section_index,
+        );
+        if let Some(info) = chunk_packet_info {
+            info.set_preset_values(chunk_section_index, self.preset_values.clone());
+        }
+    }
+
     /// `write(FriendlyByteBuf)`.
     pub fn write(&self, buffer: &mut FriendlyByteBuf) {
-        self.data.write(buffer, self.strategy.global_map());
+        self.write_with_info(buffer, None, 0);
     }
 
     /// `getSerializedSize()` — `1 + palette + raw.len() * 8`.
@@ -662,12 +688,15 @@ pub trait PalettedContainerRO<T: Clone + PartialEq + Send + Sync + std::fmt::Deb
     fn get(&self, x: i32, y: i32, z: i32) -> T;
     /// `getAll(Consumer<T>)`.
     fn get_all(&self, consumer: &mut dyn FnMut(T));
-    /// `write(FriendlyByteBuf)` — the deprecated no-Anti-Xray-info variant.
-    ///
-    /// The Anti-Xray overload `write(FriendlyByteBuf,
-    /// @Nullable ChunkPacketInfo<T>, int chunkSectionIndex)` is omitted —
-    /// `ChunkPacketInfo` is deferred with the `paper.antixray` chunk-storage
-    /// unit; re-add it when that type lands.
+    /// `write(FriendlyByteBuf, @Nullable ChunkPacketInfo<T>, int chunkSectionIndex)`
+    /// (Paper Anti-Xray).
+    fn write_with_info(
+        &self,
+        buffer: &mut FriendlyByteBuf,
+        chunk_packet_info: Option<&mut ChunkPacketInfo<T>>,
+        chunk_section_index: usize,
+    );
+    /// `write(FriendlyByteBuf)` — the no-Anti-Xray-info variant.
     fn write(&self, buffer: &mut FriendlyByteBuf);
     /// `getSerializedSize()`.
     fn get_serialized_size(&self) -> i32;
@@ -696,6 +725,15 @@ impl<T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static> PalettedCon
 
     fn get_all(&self, consumer: &mut dyn FnMut(T)) {
         PalettedContainer::get_all(self, consumer)
+    }
+
+    fn write_with_info(
+        &self,
+        buffer: &mut FriendlyByteBuf,
+        chunk_packet_info: Option<&mut ChunkPacketInfo<T>>,
+        chunk_section_index: usize,
+    ) {
+        PalettedContainer::write_with_info(self, buffer, chunk_packet_info, chunk_section_index)
     }
 
     fn write(&self, buffer: &mut FriendlyByteBuf) {
@@ -788,10 +826,22 @@ impl<T: Clone + PartialEq + Send + Sync + std::fmt::Debug + 'static> Data<T> {
         }
     }
 
-    /// `Data.write(FriendlyByteBuf, IdMap)`.
-    fn write(&self, buffer: &mut FriendlyByteBuf, global_map: &dyn GlobalIdMap<T>) {
+    /// `Data.write(FriendlyByteBuf, IdMap, @Nullable ChunkPacketInfo<T>, int chunkSectionIndex)`
+    /// (Paper Anti-Xray).
+    fn write_with_info(
+        &self,
+        buffer: &mut FriendlyByteBuf,
+        global_map: &dyn GlobalIdMap<T>,
+        chunk_packet_info: Option<&mut ChunkPacketInfo<T>>,
+        chunk_section_index: usize,
+    ) {
         buffer.write_byte(self.storage.get_bits() as i8);
         self.palette.write(buffer, global_map);
+        if let Some(info) = chunk_packet_info {
+            info.set_bits(chunk_section_index, self.configuration.bits_in_memory());
+            info.set_palette(chunk_section_index, self.palette.copy_palette());
+            info.set_index(chunk_section_index, buffer.as_slice().len() as i32);
+        }
         buffer.write_fixed_size_long_array(self.storage.get_raw());
     }
 

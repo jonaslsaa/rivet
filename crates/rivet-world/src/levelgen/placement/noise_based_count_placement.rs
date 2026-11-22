@@ -169,34 +169,55 @@ mod tests {
 
     #[test]
     fn count_matches_paper_goldens() {
+        use sha2::{Digest, Sha256};
+
+        const FIXTURE: &str = include_str!(
+            "../../../../../tools/rivet-oracle/fixtures/placement-count/placement-count.json"
+        );
+        const MANIFEST: &str = include_str!(
+            "../../../../../tools/rivet-oracle/fixtures/placement-count/manifest.json"
+        );
+        const PAPER_PIN: &str = "26.2-DEV-main@0a99345";
+
         // `count(RandomSource, BlockPos)` — the full `(int)Math.ceil((
         // BIOME_INFO_NOISE.getValue(x / noiseFactor, z / noiseFactor, false) +
         // noiseOffset) * noiseToCountRatio)` arithmetic. `random` is unused.
-        // The expected values are frozen snapshots captured from the pinned
-        // Paper 26.2 runtime (`26.2-DEV-main@0a99345`) with an ad-hoc
-        // development-time `PlacementCountProbe` (the runtime's protected
-        // `count` invoked reflectively) that was NOT retained in the repo.
-        // They pin the f64-division, `ceil`, and saturating-cast behavior
-        // against real Paper but cannot be regenerated or independently
-        // re-verified from the tree.
-        // RivetTodo(#567): commit a reproducible oracle probe for these goldens.
-        let cases: [(i32, i32, i32, f64, f64, i32); 10] = [
-            // (x, z, noiseToCountRatio, noiseFactor, noiseOffset, expected)
-            (8, 8, 10, 0.01, 0.0, -8),
-            (8, 8, 10, 3.0, 0.0, -9),
-            (-8, -8, 10, 0.01, 0.0, 3),
-            (8, 8, -3, 0.01, 0.0, 3),
-            (8, 8, 0, 0.01, 0.0, 0),
-            (8, 8, 5, 0.01, -5.0, -29),
-            (8, 8, 10, 0.01, 0.5, -3),
-            (8, 8, 10, 1.0e6, 0.0, 1),
-            (123, -456, 7, 3.5, -0.25, -3),
-            // Java's `(int)` cast saturates: `(flowerNoise + 2.0) * i32::MAX`
-            // overflows the f64→i32 range, so Paper yields i32::MAX.
-            (8, 8, i32::MAX, 0.01, 2.0, i32::MAX),
-        ];
+        // Captured from the pinned Paper 26.2 runtime via
+        // `tools/rivet-oracle/scripts/run_placement_count_probe.sh`.
+        let data: serde_json::Value =
+            serde_json::from_str(FIXTURE).expect("placement-count fixture JSON parses");
+        assert_eq!(
+            data["paper"].as_str().unwrap(),
+            PAPER_PIN,
+            "fixture must be captured against the pinned Paper commit"
+        );
+
+        let manifest: serde_json::Value =
+            serde_json::from_str(MANIFEST).expect("placement-count manifest JSON parses");
+        let mut hasher = Sha256::new();
+        hasher.update(FIXTURE.as_bytes());
+        let digest = format!("{:x}", hasher.finalize());
+        let captured = &manifest["captured"][0];
+        assert_eq!(captured["path"].as_str().unwrap(), "placement-count.json");
+        assert_eq!(
+            captured["sha256"].as_str().unwrap(),
+            digest,
+            "fixture must match the manifest SHA-256"
+        );
+        assert_eq!(manifest["paper"].as_str().unwrap(), PAPER_PIN);
+
+        let cases = data["cases"].as_array().expect("cases array");
+        assert_eq!(cases.len(), 10, "expected 10 placement-count golden cases");
+
         let mut random = rivet_util::random::LegacyRandomSource::new(0);
-        for (x, z, ratio, factor, offset, expected) in cases {
+        for case in cases {
+            let x = case["x"].as_i64().unwrap() as i32;
+            let z = case["z"].as_i64().unwrap() as i32;
+            let ratio = case["noiseToCountRatio"].as_i64().unwrap() as i32;
+            let factor = f64::from_bits(case["noiseFactorBits"].as_i64().unwrap() as u64);
+            let offset = f64::from_bits(case["noiseOffsetBits"].as_i64().unwrap() as u64);
+            let expected = case["count"].as_i64().unwrap() as i32;
+
             let placement = NoiseBasedCountPlacement::of(ratio, factor, offset);
             let origin = BlockPos::new(x, 0, z);
             assert_eq!(

@@ -109,8 +109,13 @@ pub mod snow_and_freeze_feature;
 // The seed-42 feature slice — `UnderwaterMagmaFeature` (the
 // `mc.world.level.levelgen.feature.underwatermagma` manifest unit), wired at
 // id 21.
+pub mod huge_fungus_configuration;
+pub mod huge_fungus_feature;
+pub mod replace_block_feature;
+pub mod twisting_vines_feature;
 pub mod underwater_magma_feature;
 pub mod vines_feature;
+pub mod weeping_vines_feature;
 
 // The `net.minecraft.world.level.levelgen.feature.stateproviders` value layer
 // (this unit) — the `BlockStateProvider` hierarchy and its declaration-order
@@ -225,12 +230,14 @@ use crate::levelgen::feature::configurations::OreConfiguration;
 use crate::levelgen::feature::configurations::ProbabilityFeatureConfiguration;
 use crate::levelgen::feature::configurations::RandomBooleanFeatureConfiguration;
 use crate::levelgen::feature::configurations::RandomFeatureConfiguration;
+use crate::levelgen::feature::configurations::ReplaceBlockConfiguration;
 use crate::levelgen::feature::configurations::ReplaceSphereConfiguration;
 use crate::levelgen::feature::configurations::SculkPatchConfiguration;
 use crate::levelgen::feature::configurations::SimpleBlockConfiguration;
 use crate::levelgen::feature::configurations::SpikeConfiguration;
 use crate::levelgen::feature::configurations::SpringConfiguration;
 use crate::levelgen::feature::configurations::TreeConfiguration;
+use crate::levelgen::feature::configurations::TwistingVinesConfig;
 use crate::levelgen::feature::configurations::UnderwaterMagmaConfiguration;
 use crate::levelgen::feature::configurations::VegetationPatchConfiguration;
 use crate::levelgen::feature::configurations::WeightedRandomFeatureConfiguration;
@@ -264,6 +271,8 @@ pub use fill_layer_feature::{FILL_LAYER, FillLayerFeature};
 pub use geode_feature::{GEODE, GeodeFeature};
 pub use glowstone_feature::{GLOWSTONE_BLOB, GlowstoneFeature};
 pub use huge_brown_mushroom_feature::{HUGE_BROWN_MUSHROOM, HugeBrownMushroomFeature};
+pub use huge_fungus_configuration::{HugeFungusConfiguration, huge_fungus_configuration_codec};
+pub use huge_fungus_feature::{HUGE_FUNGUS, HugeFungusFeature};
 pub use huge_red_mushroom_feature::{HUGE_RED_MUSHROOM, HugeRedMushroomFeature};
 pub use iceberg_feature::{ICEBERG, IcebergFeature};
 pub use kelp_feature::{KELP, KelpFeature};
@@ -275,6 +284,7 @@ pub use nether_forest_vegetation_feature::{
 };
 pub use no_op_feature::NoOpFeature;
 pub use ore_feature::{ORE, OreFeature};
+pub use replace_block_feature::{REPLACE_SINGLE_BLOCK, ReplaceBlockFeature};
 pub use scattered_ore_feature::{SCATTERED_ORE, ScatteredOreFeature};
 pub use sculk_patch_feature::{SCULK_PATCH, SculkPatchFeature};
 pub use sea_pickle_feature::{SEA_PICKLE, SeaPickleFeature};
@@ -284,12 +294,14 @@ pub use snow_and_freeze_feature::{FREEZE_TOP_LAYER, SnowAndFreezeFeature};
 pub use spike_feature::{SPIKE, SpikeFeature};
 pub use spring_feature::{SPRING, SpringFeature};
 pub use tree_feature::{TREE, TreeFeature};
+pub use twisting_vines_feature::{TWISTING_VINES, TwistingVinesFeature};
 pub use underwater_magma_feature::{UNDERWATER_MAGMA, UnderwaterMagmaFeature};
 pub use vegetation_patch_feature::{
     VEGETATION_PATCH, VegetationPatchFeature, WATERLOGGED_VEGETATION_PATCH,
     WaterloggedVegetationPatchFeature,
 };
 pub use vines_feature::{VINES, VinesFeature};
+pub use weeping_vines_feature::{WEEPING_VINES, WeepingVinesFeature};
 
 // The vegetation-family wave (issue #600) — the `.feature.selector` unit's
 // slice that lives in this module: `WeightedPlacedFeature` (owned by
@@ -1067,6 +1079,34 @@ pub fn feature_place<R: RandomSource>(
                 .downcast_ref::<ColumnFeatureConfiguration>()
                 .expect("basalt_columns feature must carry a ColumnFeatureConfiguration");
             BASALT_COLUMNS.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.REPLACE_SINGLE_BLOCK`.
+        6 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<ReplaceBlockConfiguration>()
+                .expect("replace_single_block feature must carry a ReplaceBlockConfiguration");
+            REPLACE_SINGLE_BLOCK.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.HUGE_FUNGUS`.
+        41 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<HugeFungusConfiguration>()
+                .expect("huge_fungus feature must carry a HugeFungusConfiguration");
+            HUGE_FUNGUS.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.WEEPING_VINES`.
+        43 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<NoneFeatureConfiguration>()
+                .expect("weeping_vines feature must carry a NoneFeatureConfiguration");
+            WEEPING_VINES.place_with_config(config, level, chunk_generator, random, origin)
+        }
+        // `Feature.TWISTING_VINES`.
+        44 => {
+            let config = (config as &dyn Any)
+                .downcast_ref::<TwistingVinesConfig>()
+                .expect("twisting_vines feature must carry a TwistingVinesConfig");
+            TWISTING_VINES.place_with_config(config, level, chunk_generator, random, origin)
         }
         // `Feature.FILL_LAYER`.
         48 => {

@@ -186,6 +186,12 @@ pub mod block_state_tests;
 #[path = "biomes_tags_tests.rs"]
 pub mod biomes_tags_tests;
 
+/// Generated CREATURE entity spawn descriptor table integration tests (issue #685).
+/// Same pattern: outside `src/generated/` so codegen owns the generated dir.
+#[cfg(test)]
+#[path = "entity_spawn_descriptors_tests.rs"]
+pub mod entity_spawn_descriptors_tests;
+
 // ---------------------------------------------------------------------------
 // Ownership D — serialization context (`net.minecraft.resources`)
 // ---------------------------------------------------------------------------
