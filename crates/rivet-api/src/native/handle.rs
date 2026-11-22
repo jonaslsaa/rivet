@@ -18,6 +18,12 @@ impl PluginId {
         Self(raw)
     }
 
+    /// Construct a `PluginId` from a host-assigned raw identifier.
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
     /// Raw numeric identifier suitable for logging or FFI-free diagnostics.
     #[must_use]
     pub const fn as_u32(self) -> u32 {
@@ -253,6 +259,11 @@ impl<M, V> HandleTable<M, V> {
             });
         }
         Ok(idx)
+    }
+
+    pub fn owner_of(&self, handle: Handle<M>) -> Result<PluginId, HandleError> {
+        let idx = self.resolve_slot_index(handle)?;
+        Ok(self.slots[idx].owner.expect("live slot always has owner"))
     }
 
     pub fn get(&self, handle: Handle<M>, caller: Option<PluginId>) -> Result<&V, HandleError> {
