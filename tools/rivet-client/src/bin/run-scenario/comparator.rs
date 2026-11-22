@@ -56,7 +56,7 @@ pub struct TranscriptDiff {
 
 impl TranscriptDiff {
     pub fn is_identical(&self) -> bool {
-        self.diffs.is_empty()
+        self.diffs.is_empty() && self.excluded_policy_diffs.is_empty()
     }
 }
 
@@ -72,14 +72,14 @@ fn excluded_map(transcript: &Value) -> Map<String, Value> {
 pub fn diff(expected: &Value, actual: &Value) -> TranscriptDiff {
     let excluded_expected = excluded_map(expected);
     let excluded_actual = excluded_map(actual);
-    let mut excluded = BTreeSet::new();
-    excluded.extend(excluded_expected.keys().cloned());
-    excluded.extend(excluded_actual.keys().cloned());
+    let mut all_excluded = BTreeSet::new();
+    all_excluded.extend(excluded_expected.keys().cloned());
+    all_excluded.extend(excluded_actual.keys().cloned());
 
     let mut result = TranscriptDiff::default();
 
     // Compare the exclusion policy itself.
-    for path in &excluded {
+    for path in &all_excluded {
         let (e, a) = (excluded_expected.get(path), excluded_actual.get(path));
         if e != a {
             result.excluded_policy_diffs.push(FieldDiff {
@@ -90,11 +90,23 @@ pub fn diff(expected: &Value, actual: &Value) -> TranscriptDiff {
         }
     }
 
-    // Compare the transcripts, skipping excluded paths.
+    // Only exclude a path from payload comparison when BOTH sides agree on its
+    // exclusion declaration, and never allow `excluded` to exclude itself.
+    let agreed_excluded: BTreeSet<String> = all_excluded
+        .into_iter()
+        .filter(|path| {
+            path != "excluded"
+                && !path.starts_with("excluded.")
+                && excluded_expected.get(path).is_some()
+                && excluded_expected.get(path) == excluded_actual.get(path)
+        })
+        .collect();
+
+    // Compare the transcripts, skipping only mutually agreed excluded paths.
     let mut diffs = Vec::new();
-    diff_at("", expected, actual, &excluded, &mut diffs);
+    diff_at("", expected, actual, &agreed_excluded, &mut diffs);
     for field in diffs {
-        if excluded.contains(field.path.as_str()) {
+        if agreed_excluded.contains(field.path.as_str()) {
             result.excluded.push(field);
         } else {
             result.diffs.push(field);
@@ -294,5 +306,52 @@ mod tests {
         assert!(!d.is_identical());
         assert_eq!(d.diffs[0].path, "gamemode");
         assert_eq!(d.diffs[0].actual, Value::Null);
+    }
+
+    #[test]
+    fn is_identical_fails_on_excluded_policy_diffs_even_when_payload_diffs_empty() {
+        let d = TranscriptDiff {
+            diffs: Vec::new(),
+            excluded: Vec::new(),
+            excluded_policy_diffs: vec![FieldDiff {
+                path: "excluded.position.y".to_owned(),
+                expected: Value::Null,
+                actual: json!("smuggled exclusion"),
+            }],
+        };
+        assert!(!d.is_identical());
+    }
+
+    #[test]
+    fn unilateral_exclusion_does_not_suppress_payload_diff() {
+        let a = sample();
+        let mut b = sample();
+        b["excluded"]["position.y"] = json!("broadened on one side");
+        b["position"]["y"] = json!(-58.0);
+        let d = diff(&a, &b);
+        assert!(!d.is_identical());
+        assert_eq!(d.excluded_policy_diffs.len(), 1);
+        assert_eq!(d.excluded_policy_diffs[0].path, "excluded.position.y");
+        let diff_paths: Vec<&str> = d.diffs.iter().map(|f| f.path.as_str()).collect();
+        assert!(
+            diff_paths.contains(&"position.y"),
+            "unilateral exclusion must not hide payload diff: {d:?}"
+        );
+    }
+
+    #[test]
+    fn self_excluding_excluded_map_cannot_hide_policy_drift() {
+        let mut a = sample();
+        let mut b = sample();
+        a["excluded"]["excluded"] = json!("attempt to hide policy");
+        b["excluded"]["excluded"] = json!("attempt to hide policy");
+        b["excluded"]["gamemode"] = json!("smuggled");
+        b["gamemode"] = json!("creative");
+        let d = diff(&a, &b);
+        assert!(!d.is_identical());
+        assert_eq!(d.excluded_policy_diffs.len(), 1);
+        assert_eq!(d.excluded_policy_diffs[0].path, "excluded.gamemode");
+        let diff_paths: Vec<&str> = d.diffs.iter().map(|f| f.path.as_str()).collect();
+        assert!(diff_paths.contains(&"gamemode"));
     }
 }

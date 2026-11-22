@@ -18,9 +18,11 @@
 mod biomes_tags;
 mod block_behaviors;
 mod block_states;
+mod entity_spawn_descriptors;
 mod extract;
 mod extract_biomes_tags;
 mod extract_block_behaviors;
+mod extract_entity_spawn_descriptors;
 mod extract_feature_data;
 mod extract_worldgen;
 mod feature_data;
@@ -32,6 +34,7 @@ mod packets;
 mod probe_biomes_tags;
 mod probe_block_behaviors;
 mod probe_block_states;
+mod probe_entity_spawn_descriptors;
 mod probe_feature_data;
 mod probe_worldgen;
 mod registries;
@@ -110,6 +113,15 @@ fn main() -> Result<()> {
             let bundler = flag(&args, "--bundler");
             probe_feature_data::run(bundler)
         }
+        Some("extract-entity-spawn-descriptors") => {
+            let bundler = flag(&args, "--bundler");
+            let output = flag(&args, "--output");
+            extract_entity_spawn_descriptors::run(bundler, output)
+        }
+        Some("probe-entity-spawn-descriptors") => {
+            let bundler = flag(&args, "--bundler");
+            probe_entity_spawn_descriptors::run(bundler)
+        }
         Some("reports") => {
             let jar = flag(&args, "--jar");
             let output = flag(&args, "--output");
@@ -139,7 +151,7 @@ fn print_usage() {
         "rivet-codegen — vanilla data extraction + registry codegen\n\
          \n\
          USAGE:\n\
-         \x20   rivet-codegen <extract|generate|registries|mth-gen|probe-block-states|extract-biomes-tags|probe-biomes-tags|extract-block-behaviors|probe-block-behaviors|extract-worldgen|probe-worldgen|extract-feature-data|probe-feature-data|reports> [flags]\n\
+         \x20   rivet-codegen <extract|generate|registries|mth-gen|probe-block-states|extract-biomes-tags|probe-biomes-tags|extract-block-behaviors|probe-block-behaviors|extract-worldgen|probe-worldgen|extract-feature-data|probe-feature-data|extract-entity-spawn-descriptors|probe-entity-spawn-descriptors|reports> [flags]\n\
          \n\
          SUBCOMMANDS:\n\
          \x20   extract   Extract the block registry + block states from the Paper 26.2\n\
@@ -211,6 +223,16 @@ fn print_usage() {
          \x20             byte-identity with the committed data/feature_data.json, plus the anchor\n\
          \x20             counts (5 reachable biomes, 203 placed, 170 configured), the paper pin, and\n\
          \x20             non-vacuity. Flags: --bundler <path>\n\
+         \x20   extract-entity-spawn-descriptors  Dump the deterministic CREATURE entity spawn\n\
+         \x20             descriptors reachable from overworld possibleBiomes() MobSpawnSettings from\n\
+         \x20             a live Paper 26.2 load (EntitySpawnDescriptorExtractor.java) into\n\
+         \x20             data/entity_spawn_descriptors.json (+ provenance manifest), issue #685.\n\
+         \x20             Flags: --bundler <path>   path to paper-bundler-26.2*.jar\n\
+         \x20                     --output <path>   output JSON (default data/entity_spawn_descriptors.json)\n\
+         \x20   probe-entity-spawn-descriptors  Re-run the entity spawn descriptor extractor against\n\
+         \x20             the real Paper jar and require byte-identity with the committed\n\
+         \x20             data/entity_spawn_descriptors.json, provenance, and cross-checks (issue #685).\n\
+         \x20             Flags: --bundler <path>\n\
          \x20   reports   Run the vanilla net.minecraft.data.Main --reports datagen against the\n\
          \x20             materialized Paper 26.2 server jar and pin packets.json, registries.json,\n\
          \x20             blocks.json with provenance under data/reports/.\n\

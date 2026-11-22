@@ -1,0 +1,15 @@
+{
+  "generator": "EntitySpawnDescriptorExtractor (possible-biome CREATURE entity spawn descriptors)",
+  "source": {
+    "jar": "tools/rivet-oracle/work/run/versions/26.2/paper-26.2.jar",
+    "jar_sha256": "14e368d93c5ab0f451c9f4c4c3d1f8549e6c41f6df92ce042ab8f7d2ca3d0823",
+    "paper_git": "0a993450f129c4942c2a9ed45ba047412b4667cf",
+    "minecraft_version": "26.2",
+    "protocol_version": 776,
+    "world_version": 4903
+  },
+  "file": {
+    "bytes": 10955,
+    "sha256": "7a9bb495192499dc2c7ea44922837883dab8b855d5c97fda1a64f63fc329489e"
+  }
+}
