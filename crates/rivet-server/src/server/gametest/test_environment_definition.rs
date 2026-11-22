@@ -217,6 +217,15 @@ pub enum GameRuleValue {
 
 /// `net.minecraft.gametest.framework.TestEnvironmentDefinition` — all 7 Paper
 /// variants.
+/// Decoded representation of `HolderSet<Timeline>` (`RegistryCodecs.homogeneousList`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimelineSet {
+    /// Named timeline tag (`"#namespace:path"`).
+    Tag(Identifier),
+    /// Direct list of one or more timeline identifiers.
+    Direct(Vec<Identifier>),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TestEnvironmentDefinition {
     /// `TestEnvironmentDefinition.AllOf(List<Holder<TestEnvironmentDefinition<?>>> definitions)`.
@@ -239,7 +248,7 @@ pub enum TestEnvironmentDefinition {
         rules: IndexMap<Identifier, GameRuleValue>,
     },
     /// `TestEnvironmentDefinition.Timelines(HolderSet<Timeline> timelines)`.
-    Timelines { timelines: Vec<Identifier> },
+    Timelines { timelines: TimelineSet },
     /// `TestEnvironmentDefinition.Weather(Weather.Type weather)`.
     Weather { weather: WeatherType },
 }
@@ -411,13 +420,16 @@ impl TestEnvironmentDefinition {
                 let timelines_val = obj
                     .get("timelines")
                     .ok_or(EnvironmentDecodeError::MissingField("timelines"))?;
-                let mut timelines = Vec::new();
-                match timelines_val {
+                let timelines = match timelines_val {
                     JsonValue::String(s) => {
-                        timelines.push(parse_identifier_strict(s, "timelines")?);
+                        if let Some(tag_str) = s.strip_prefix('#') {
+                            TimelineSet::Tag(parse_identifier_strict(tag_str, "timelines")?)
+                        } else {
+                            TimelineSet::Direct(vec![parse_identifier_strict(s, "timelines")?])
+                        }
                     }
                     JsonValue::Array(arr) => {
-                        timelines.reserve(arr.len());
+                        let mut ids = Vec::with_capacity(arr.len());
                         for item in arr {
                             let s = item.as_str().ok_or_else(|| {
                                 EnvironmentDecodeError::InvalidFieldType {
@@ -426,17 +438,18 @@ impl TestEnvironmentDefinition {
                                     actual: json_type_name(item),
                                 }
                             })?;
-                            timelines.push(parse_identifier_strict(s, "timelines")?);
+                            ids.push(parse_identifier_strict(s, "timelines")?);
                         }
+                        TimelineSet::Direct(ids)
                     }
                     other => {
                         return Err(EnvironmentDecodeError::InvalidFieldType {
                             field: "timelines",
-                            expected: "identifier string or array of identifier strings",
+                            expected: "identifier/tag string or array of identifier strings",
                             actual: json_type_name(other),
                         });
                     }
-                }
+                };
                 Ok(Self::Timelines { timelines })
             }
             TestEnvironmentDefinitionType::Weather => {
@@ -584,13 +597,19 @@ impl TestEnvironmentDefinition {
                 let timelines_tag = compound
                     .get("timelines")
                     .ok_or(EnvironmentDecodeError::MissingField("timelines"))?;
-                let mut timelines = Vec::new();
-                match timelines_tag {
+                let timelines = match timelines_tag {
                     Tag::String(s) => {
-                        timelines.push(parse_identifier_strict(&s.value, "timelines")?);
+                        if let Some(tag_str) = s.value.strip_prefix('#') {
+                            TimelineSet::Tag(parse_identifier_strict(tag_str, "timelines")?)
+                        } else {
+                            TimelineSet::Direct(vec![parse_identifier_strict(
+                                &s.value,
+                                "timelines",
+                            )?])
+                        }
                     }
                     Tag::List(items) => {
-                        timelines.reserve(items.list.len());
+                        let mut ids = Vec::with_capacity(items.list.len());
                         for item in &items.list {
                             let Tag::String(s) = item else {
                                 return Err(EnvironmentDecodeError::InvalidFieldType {
@@ -599,8 +618,9 @@ impl TestEnvironmentDefinition {
                                     actual: nbt_type_name(item),
                                 });
                             };
-                            timelines.push(parse_identifier_strict(&s.value, "timelines")?);
+                            ids.push(parse_identifier_strict(&s.value, "timelines")?);
                         }
+                        TimelineSet::Direct(ids)
                     }
                     other => {
                         return Err(EnvironmentDecodeError::InvalidFieldType {
@@ -609,7 +629,7 @@ impl TestEnvironmentDefinition {
                             actual: nbt_type_name(other),
                         });
                     }
-                }
+                };
                 Ok(Self::Timelines { timelines })
             }
             TestEnvironmentDefinitionType::Weather => {

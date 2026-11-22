@@ -54,8 +54,8 @@ pub use test_data::{
 };
 pub use test_environment_definition::{
     DEFAULT_ENVIRONMENT_NAME, EnvironmentDecodeError, GameRuleValue, TestEnvironmentDefinition,
-    TestEnvironmentDefinitionType, TestEnvironmentRef, WeatherType, default_environment_definition,
-    default_environment_key, environment_key,
+    TestEnvironmentDefinitionType, TestEnvironmentRef, TimelineSet, WeatherType,
+    default_environment_definition, default_environment_key, environment_key,
 };
 pub use test_function_loader::{
     ALWAYS_PASS_FUNCTION_NAME, BuiltinTestFunctions, GeneratedTest, TestFunctionEntry,
@@ -268,7 +268,39 @@ mod tests {
         assert_eq!(
             timelines_single,
             TestEnvironmentDefinition::Timelines {
-                timelines: vec![Identifier::with_default_namespace("day")],
+                timelines: TimelineSet::Direct(vec![Identifier::with_default_namespace("day")]),
+            }
+        );
+
+        let timelines_tag_json = TestEnvironmentDefinition::decode_json(&json!({
+            "type": "minecraft:timeline_attributes",
+            "timelines": "#minecraft:in_overworld"
+        }))
+        .unwrap();
+        assert_eq!(
+            timelines_tag_json,
+            TestEnvironmentDefinition::Timelines {
+                timelines: TimelineSet::Tag(Identifier::with_default_namespace("in_overworld")),
+            }
+        );
+
+        let mut tag_nbt = rivet_nbt::compound_tag::CompoundTag::new();
+        tag_nbt.tags.insert(
+            "type".to_string(),
+            rivet_nbt::tag::Tag::String(rivet_nbt::string_tag::StringTag::value_of(
+                "minecraft:timeline_attributes".to_string(),
+            )),
+        );
+        tag_nbt.tags.insert(
+            "timelines".to_string(),
+            rivet_nbt::tag::Tag::String(rivet_nbt::string_tag::StringTag::value_of(
+                "#minecraft:in_overworld".to_string(),
+            )),
+        );
+        assert_eq!(
+            TestEnvironmentDefinition::decode_nbt(&rivet_nbt::tag::Tag::Compound(tag_nbt)).unwrap(),
+            TestEnvironmentDefinition::Timelines {
+                timelines: TimelineSet::Tag(Identifier::with_default_namespace("in_overworld")),
             }
         );
 
