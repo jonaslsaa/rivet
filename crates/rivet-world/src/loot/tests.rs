@@ -22,8 +22,7 @@ fn empty_params() -> LootParams {
 
 fn make_context<'a>(params: LootParams, seed: i64, resolver: &'a LootRegistry) -> LootContext<'a> {
     LootContext::builder(params, resolver)
-        .with_optional_random_source(Some(LootRandom::Legacy(LegacyRandomSource::new(seed))))
-        .create(None)
+        .create_with_default(LootRandom::Legacy(LegacyRandomSource::new(seed)))
 }
 
 // ---------------------------------------------------------------------------
@@ -634,8 +633,10 @@ fn self_referencing_registered_table_runs_productive_pool_only_once() {
         .build();
     registry.register_table(id("self_ref"), self_ref);
 
+    let mut random_state = LootRandomState::new();
     let registered = registry.get_table(&id("self_ref")).unwrap();
-    let items = registered.get_random_items_with_seed(empty_params(), &registry, 42);
+    let items =
+        registered.get_random_items_with_seed(empty_params(), &registry, &mut random_state, 42);
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].item(), &id("gold_nugget"));
 }
@@ -713,7 +714,9 @@ fn public_stack_splitting_and_disabled_items() {
         )
         .build();
 
-    let items = big_table.get_random_items_with_seed(empty_params(), &registry, 99);
+    let mut random_state = LootRandomState::new();
+    let items =
+        big_table.get_random_items_with_seed(empty_params(), &registry, &mut random_state, 99);
     let counts: Vec<i32> = items.iter().map(LootItemStack::count).collect();
     assert_eq!(counts, vec![64, 64, 2]);
 
@@ -723,7 +726,8 @@ fn public_stack_splitting_and_disabled_items() {
     let unsplit_params = unsplit_builder
         .create(LootContextParamSets::empty())
         .unwrap();
-    let unsplit = big_table.get_random_items_with_seed(unsplit_params, &registry, 99);
+    let unsplit =
+        big_table.get_random_items_with_seed(unsplit_params, &registry, &mut random_state, 99);
     assert_eq!(unsplit.len(), 1);
     assert_eq!(unsplit[0].count(), 130);
 
@@ -733,7 +737,8 @@ fn public_stack_splitting_and_disabled_items() {
     let disabled_params = disabled_builder
         .create(LootContextParamSets::empty())
         .unwrap();
-    let disabled = table.get_random_items_with_seed(disabled_params, &registry, 99);
+    let disabled =
+        table.get_random_items_with_seed(disabled_params, &registry, &mut random_state, 99);
     assert!(disabled.is_empty());
 }
 
@@ -752,11 +757,24 @@ fn container_fill_is_deterministic_with_seed_and_splits_stacks() {
         )
         .build();
 
+    let mut random_state = LootRandomState::new();
     let mut chest_a = SimpleLootContainer::new(27);
     let mut chest_b = SimpleLootContainer::new(27);
 
-    table.fill(&mut chest_a, empty_params(), &registry, 12345);
-    table.fill(&mut chest_b, empty_params(), &registry, 12345);
+    table.fill(
+        &mut chest_a,
+        empty_params(),
+        &registry,
+        &mut random_state,
+        12345,
+    );
+    table.fill(
+        &mut chest_b,
+        empty_params(),
+        &registry,
+        &mut random_state,
+        12345,
+    );
 
     assert_eq!(chest_a.slots(), chest_b.slots());
 
@@ -771,8 +789,12 @@ fn container_fill_is_deterministic_with_seed_and_splits_stacks() {
 
 #[test]
 fn named_random_sequence_and_default_rng_advance_across_unseeded_rolls() {
-    let mut registry = LootRegistry::new();
-    registry.register_random_sequence(id("chests/simple"), RandomSequenceSeed::Legacy(777));
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<LootRegistry>();
+
+    let registry = LootRegistry::new();
+    let mut random_state = LootRandomState::new();
+    random_state.register_random_sequence(id("chests/simple"), RandomSequenceSeed::Legacy(777));
 
     let table = LootTable::builder()
         .set_random_sequence(id("chests/simple"))
@@ -784,8 +806,18 @@ fn named_random_sequence_and_default_rng_advance_across_unseeded_rolls() {
         )
         .build();
 
-    let items_a = table.get_random_items_with_seed(empty_params(), &registry, RANDOMIZE_SEED);
-    let items_b = table.get_random_items_with_seed(empty_params(), &registry, RANDOMIZE_SEED);
+    let items_a = table.get_random_items_with_seed(
+        empty_params(),
+        &registry,
+        &mut random_state,
+        RANDOMIZE_SEED,
+    );
+    let items_b = table.get_random_items_with_seed(
+        empty_params(),
+        &registry,
+        &mut random_state,
+        RANDOMIZE_SEED,
+    );
 
     let mut oracle = LegacyRandomSource::new(777);
     let expected_a = mth::next_int(&mut oracle, 1, 5) as usize;
@@ -794,7 +826,7 @@ fn named_random_sequence_and_default_rng_advance_across_unseeded_rolls() {
     assert_eq!(items_b.len(), expected_b);
 
     // Without a named sequence, successive unseeded rolls also advance default_random.
-    registry.set_default_random(LootRandom::Legacy(LegacyRandomSource::new(12345)));
+    random_state.set_default_random(LootRandom::Legacy(LegacyRandomSource::new(12345)));
     let unseq_table = LootTable::builder()
         .with_pool(
             LootPool::builder()
@@ -803,8 +835,18 @@ fn named_random_sequence_and_default_rng_advance_across_unseeded_rolls() {
                 .build(),
         )
         .build();
-    let r1 = unseq_table.get_random_items_with_seed(empty_params(), &registry, RANDOMIZE_SEED);
-    let r2 = unseq_table.get_random_items_with_seed(empty_params(), &registry, RANDOMIZE_SEED);
+    let r1 = unseq_table.get_random_items_with_seed(
+        empty_params(),
+        &registry,
+        &mut random_state,
+        RANDOMIZE_SEED,
+    );
+    let r2 = unseq_table.get_random_items_with_seed(
+        empty_params(),
+        &registry,
+        &mut random_state,
+        RANDOMIZE_SEED,
+    );
     let mut default_oracle = LegacyRandomSource::new(12345);
     assert_eq!(
         r1.len(),
@@ -934,7 +976,9 @@ fn empty_air_stack_returns_zero_count_and_does_not_hang_splitting() {
         )
         .build();
 
-    let items = air_table.get_random_items_with_seed(empty_params(), &registry, 1);
+    let mut random_state = LootRandomState::new();
+    let items =
+        air_table.get_random_items_with_seed(empty_params(), &registry, &mut random_state, 1);
     assert_eq!(items.len(), 1);
     assert!(items[0].is_empty());
     assert_eq!(items[0].count(), 0);
@@ -956,7 +1000,8 @@ fn custom_item_max_stack_size_splits_ender_pearls_into_16_16_8() {
         )
         .build();
 
-    let items = table.get_random_items_with_seed(empty_params(), &registry, 99);
+    let mut random_state = LootRandomState::new();
+    let items = table.get_random_items_with_seed(empty_params(), &registry, &mut random_state, 99);
     let counts: Vec<i32> = items.iter().map(LootItemStack::count).collect();
     assert_eq!(counts, vec![16, 16, 8]);
 }

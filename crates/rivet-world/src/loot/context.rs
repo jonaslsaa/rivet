@@ -5,7 +5,6 @@
 //! - `net/minecraft/world/level/storage/loot/LootParams.java`
 //! - `net/minecraft/world/level/storage/loot/LootContext.java`
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use indexmap::{IndexMap, IndexSet};
@@ -34,11 +33,6 @@ pub enum LootRandom {
     Legacy(LegacyRandomSource),
     Xoroshiro(XoroshiroRandomSource),
     SingleThreaded(SingleThreadedRandomSource),
-    /// Shared tick-thread-owned RNG stream (used for persistent named random
-    /// sequences and the level's default RNG so successive unseeded rolls
-    /// advance the stream in place, matching Paper's `RandomSequences` and
-    /// `ServerLevel.getRandom()`).
-    Shared(Rc<RefCell<LootRandom>>),
 }
 
 impl std::fmt::Debug for LootRandom {
@@ -47,7 +41,6 @@ impl std::fmt::Debug for LootRandom {
             Self::Legacy(_) => f.write_str("LootRandom::Legacy(..)"),
             Self::Xoroshiro(_) => f.write_str("LootRandom::Xoroshiro(..)"),
             Self::SingleThreaded(_) => f.write_str("LootRandom::SingleThreaded(..)"),
-            Self::Shared(_) => f.write_str("LootRandom::Shared(..)"),
         }
     }
 }
@@ -133,7 +126,6 @@ impl RandomSource for LootRandom {
             Self::Legacy(r) => Self::Legacy(r.fork()),
             Self::Xoroshiro(r) => Self::Xoroshiro(r.fork()),
             Self::SingleThreaded(r) => Self::SingleThreaded(r.fork()),
-            Self::Shared(r) => r.borrow_mut().fork(),
         }
     }
 
@@ -142,7 +134,6 @@ impl RandomSource for LootRandom {
             Self::Legacy(r) => LootPositionalRandomFactory::Legacy(r.fork_positional()),
             Self::Xoroshiro(r) => LootPositionalRandomFactory::Xoroshiro(r.fork_positional()),
             Self::SingleThreaded(r) => LootPositionalRandomFactory::Legacy(r.fork_positional()),
-            Self::Shared(r) => r.borrow_mut().fork_positional(),
         }
     }
 
@@ -151,7 +142,6 @@ impl RandomSource for LootRandom {
             Self::Legacy(r) => r.set_seed(seed),
             Self::Xoroshiro(r) => r.set_seed(seed),
             Self::SingleThreaded(r) => r.set_seed(seed),
-            Self::Shared(r) => r.borrow_mut().set_seed(seed),
         }
     }
 
@@ -160,7 +150,6 @@ impl RandomSource for LootRandom {
             Self::Legacy(r) => r.next_int(),
             Self::Xoroshiro(r) => r.next_int(),
             Self::SingleThreaded(r) => r.next_int(),
-            Self::Shared(r) => r.borrow_mut().next_int(),
         }
     }
 
@@ -169,7 +158,6 @@ impl RandomSource for LootRandom {
             Self::Legacy(r) => r.next_int_bound(bound),
             Self::Xoroshiro(r) => r.next_int_bound(bound),
             Self::SingleThreaded(r) => r.next_int_bound(bound),
-            Self::Shared(r) => r.borrow_mut().next_int_bound(bound),
         }
     }
 
@@ -178,7 +166,6 @@ impl RandomSource for LootRandom {
             Self::Legacy(r) => r.next_long(),
             Self::Xoroshiro(r) => r.next_long(),
             Self::SingleThreaded(r) => r.next_long(),
-            Self::Shared(r) => r.borrow_mut().next_long(),
         }
     }
 
@@ -187,7 +174,6 @@ impl RandomSource for LootRandom {
             Self::Legacy(r) => r.next_boolean(),
             Self::Xoroshiro(r) => r.next_boolean(),
             Self::SingleThreaded(r) => r.next_boolean(),
-            Self::Shared(r) => r.borrow_mut().next_boolean(),
         }
     }
 
@@ -196,7 +182,6 @@ impl RandomSource for LootRandom {
             Self::Legacy(r) => r.next_float(),
             Self::Xoroshiro(r) => r.next_float(),
             Self::SingleThreaded(r) => r.next_float(),
-            Self::Shared(r) => r.borrow_mut().next_float(),
         }
     }
 
@@ -205,7 +190,6 @@ impl RandomSource for LootRandom {
             Self::Legacy(r) => r.next_double(),
             Self::Xoroshiro(r) => r.next_double(),
             Self::SingleThreaded(r) => r.next_double(),
-            Self::Shared(r) => r.borrow_mut().next_double(),
         }
     }
 
@@ -214,36 +198,23 @@ impl RandomSource for LootRandom {
             Self::Legacy(r) => r.next_gaussian(),
             Self::Xoroshiro(r) => r.next_gaussian(),
             Self::SingleThreaded(r) => r.next_gaussian(),
-            Self::Shared(r) => r.borrow_mut().next_gaussian(),
         }
     }
 }
 
-/// Registry/resolver providing loot tables, predicates, item modifiers, item
-/// tags, and named random sequences in deterministic insertion order.
-#[derive(Debug, Clone)]
+/// Immutable registry/resolver providing loot tables, predicates, item
+/// modifiers, item tags, and per-item max stack sizes in deterministic
+/// insertion order.
+///
+/// Frozen after registration with no interior mutability per `OWNERSHIP.md`
+/// (`Send + Sync`); mutable level RNG streams live in [`LootRandomState`].
+#[derive(Debug, Clone, Default)]
 pub struct LootRegistry {
     tables: IndexMap<Identifier, LootTable>,
     conditions: IndexMap<Identifier, LootItemCondition>,
     functions: IndexMap<Identifier, LootItemFunction>,
     item_tags: IndexMap<Identifier, Vec<Identifier>>,
     item_max_stack_sizes: IndexMap<Identifier, i32>,
-    random_sequences: IndexMap<Identifier, Rc<RefCell<LootRandom>>>,
-    default_random: Rc<RefCell<LootRandom>>,
-}
-
-impl Default for LootRegistry {
-    fn default() -> Self {
-        Self {
-            tables: IndexMap::new(),
-            conditions: IndexMap::new(),
-            functions: IndexMap::new(),
-            item_tags: IndexMap::new(),
-            item_max_stack_sizes: IndexMap::new(),
-            random_sequences: IndexMap::new(),
-            default_random: Rc::new(RefCell::new(LootRandom::Legacy(LegacyRandomSource::new(0)))),
-        }
-    }
 }
 
 impl LootRegistry {
@@ -292,26 +263,6 @@ impl LootRegistry {
         self
     }
 
-    /// Registers a named random sequence (`ServerLevel.getRandomSequence(Identifier)`).
-    ///
-    /// The sequence's RNG state persists and advances across successive unseeded
-    /// loot rolls, matching Paper's `RandomSequences`.
-    pub fn register_random_sequence(
-        &mut self,
-        id: Identifier,
-        seed: RandomSequenceSeed,
-    ) -> &mut Self {
-        self.random_sequences
-            .insert(id, Rc::new(RefCell::new(seed.instantiate())));
-        self
-    }
-
-    /// Replaces the fallback level random stream (`ServerLevel.getRandom()`).
-    pub fn set_default_random(&mut self, random: LootRandom) -> &mut Self {
-        self.default_random = Rc::new(RefCell::new(random));
-        self
-    }
-
     /// Looks up a loot table by identifier.
     #[must_use]
     pub fn get_table(&self, id: &Identifier) -> Option<&LootTable> {
@@ -345,21 +296,90 @@ impl LootRegistry {
             .copied()
             .unwrap_or(DEFAULT_MAX_STACK_SIZE)
     }
+}
 
-    /// Returns a handle to a registered random sequence whose state advances in
-    /// place across successive lookups, matching `ServerLevel.getRandomSequence`.
+/// Tick-thread-owned mutable RNG state for unseeded loot rolls, mirroring
+/// Paper's `ServerLevel.getRandom()` and `ServerLevel.getRandomSequences()`.
+///
+/// Kept separate from the immutable [`LootRegistry`] per `OWNERSHIP.md` so
+/// registries stay frozen and `Send + Sync` with a single mutable owner for
+/// advancing RNG streams.
+#[derive(Debug)]
+pub struct LootRandomState {
+    random_sequences: IndexMap<Identifier, LootRandom>,
+    default_random: LootRandom,
+}
+
+impl Default for LootRandomState {
+    fn default() -> Self {
+        Self {
+            random_sequences: IndexMap::new(),
+            default_random: LootRandom::Legacy(LegacyRandomSource::new(0)),
+        }
+    }
+}
+
+impl LootRandomState {
+    /// Creates a new [`LootRandomState`] with a default legacy RNG seeded at `0`.
     #[must_use]
-    pub fn get_random_sequence(&self, id: &Identifier) -> Option<LootRandom> {
-        self.random_sequences
-            .get(id)
-            .map(|seq| LootRandom::Shared(Rc::clone(seq)))
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Returns a handle to the persistent fallback level random stream
-    /// (`ServerLevel.getRandom()`).
+    /// Creates a new [`LootRandomState`] with the given fallback level RNG.
     #[must_use]
-    pub fn default_random(&self) -> LootRandom {
-        LootRandom::Shared(Rc::clone(&self.default_random))
+    pub fn with_default_random(default_random: LootRandom) -> Self {
+        Self {
+            random_sequences: IndexMap::new(),
+            default_random,
+        }
+    }
+
+    /// Registers a named random sequence (`ServerLevel.getRandomSequence(Identifier)`).
+    pub fn register_random_sequence(
+        &mut self,
+        id: Identifier,
+        seed: RandomSequenceSeed,
+    ) -> &mut Self {
+        self.random_sequences.insert(id, seed.instantiate());
+        self
+    }
+
+    /// Replaces the fallback level random stream (`ServerLevel.getRandom()`).
+    pub fn set_default_random(&mut self, random: LootRandom) -> &mut Self {
+        self.default_random = random;
+        self
+    }
+
+    /// Borrows a registered random sequence mutably so successive rolls advance
+    /// the stream in place.
+    #[must_use]
+    pub fn get_random_sequence_mut(&mut self, id: &Identifier) -> Option<&mut LootRandom> {
+        self.random_sequences.get_mut(id)
+    }
+
+    /// Borrows the fallback level random stream mutably.
+    #[must_use]
+    pub fn default_random_mut(&mut self) -> &mut LootRandom {
+        &mut self.default_random
+    }
+
+    /// Selects the named random sequence if present, otherwise falls back to
+    /// the level's default random stream.
+    #[must_use]
+    pub fn select_random_mut(
+        &mut self,
+        random_sequence_key: Option<&Identifier>,
+    ) -> &mut LootRandom {
+        if let Some(id) = random_sequence_key
+            && self.random_sequences.contains_key(id)
+        {
+            return self
+                .random_sequences
+                .get_mut(id)
+                .expect("checked contains_key");
+        }
+        &mut self.default_random
     }
 }
 
@@ -550,10 +570,15 @@ pub enum VisitedEntry {
     FunctionId(Identifier),
 }
 
+enum ContextRandom<'a> {
+    Owned(LootRandom),
+    Borrowed(&'a mut LootRandom),
+}
+
 /// `net.minecraft.world.level.storage.loot.LootContext`.
 pub struct LootContext<'a> {
     params: LootParams,
-    random: LootRandom,
+    random: ContextRandom<'a>,
     resolver: &'a LootRegistry,
     visited_elements: IndexSet<VisitedEntry>,
 }
@@ -601,7 +626,10 @@ impl<'a> LootContext<'a> {
 
     /// `LootContext.getRandom()` (mutable borrow for RNG consumption).
     pub fn random_mut(&mut self) -> &mut LootRandom {
-        &mut self.random
+        match &mut self.random {
+            ContextRandom::Owned(r) => r,
+            ContextRandom::Borrowed(r) => r,
+        }
     }
 
     /// `LootContext.getResolver()`.
@@ -675,18 +703,18 @@ impl<'a> LootContextBuilder<'a> {
     /// `Builder.create(Optional<Identifier> randomSequenceKey)` — Paper's exact
     /// random selection precedence:
     /// 1. Explicit random source (from seed or source setter).
-    /// 2. Named random sequence from `resolver` if `random_sequence_key` is `Some`.
-    /// 3. Fallback `default_random` (representing `level.getRandom()`).
+    /// 2. Named random sequence from `random_state` if `random_sequence_key` is `Some`.
+    /// 3. Fallback `random_state.default_random_mut()` (`ServerLevel.getRandom()`).
     #[must_use]
-    pub fn create_with_default(
+    pub fn create(
         self,
         random_sequence_key: Option<&Identifier>,
-        default_random: LootRandom,
+        random_state: &'a mut LootRandomState,
     ) -> LootContext<'a> {
-        let random = self
-            .random
-            .or_else(|| random_sequence_key.and_then(|id| self.resolver.get_random_sequence(id)))
-            .unwrap_or(default_random);
+        let random = match self.random {
+            Some(explicit) => ContextRandom::Owned(explicit),
+            None => ContextRandom::Borrowed(random_state.select_random_mut(random_sequence_key)),
+        };
 
         LootContext {
             params: self.params,
@@ -696,11 +724,17 @@ impl<'a> LootContextBuilder<'a> {
         }
     }
 
-    /// `Builder.create(Optional<Identifier>)` falling back to `resolver.default_random()`
-    /// (`ServerLevel.getRandom()`) so successive unseeded rolls advance the stream.
+    /// Creates a [`LootContext`] using the explicitly configured random source
+    /// or `default_random` when no [`LootRandomState`] is needed.
     #[must_use]
-    pub fn create(self, random_sequence_key: Option<&Identifier>) -> LootContext<'a> {
-        let default_random = self.resolver.default_random();
-        self.create_with_default(random_sequence_key, default_random)
+    pub fn create_with_default(self, default_random: LootRandom) -> LootContext<'a> {
+        let random = ContextRandom::Owned(self.random.unwrap_or(default_random));
+
+        LootContext {
+            params: self.params,
+            random,
+            resolver: self.resolver,
+            visited_elements: IndexSet::new(),
+        }
     }
 }

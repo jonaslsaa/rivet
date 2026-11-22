@@ -41,7 +41,7 @@ mod tests;
 
 pub use context::{
     DynamicDropFn, LootContext, LootContextBuilder, LootParams, LootParamsBuilder, LootRandom,
-    LootRegistry, RandomSequenceSeed, VisitedEntry,
+    LootRandomState, LootRegistry, RandomSequenceSeed, VisitedEntry,
 };
 pub use entries::{
     DEFAULT_QUALITY, DEFAULT_WEIGHT, ExpandedLootPoolEntry, LootPoolEntryContainer, NestedTableRef,

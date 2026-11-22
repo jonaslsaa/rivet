@@ -8,7 +8,9 @@ use rivet_util::mth;
 use rivet_util::random::RandomSource;
 use rivet_util::util::shuffle;
 
-use super::context::{LootContext, LootParams, LootRandom, LootRegistry, VisitedEntry};
+use super::context::{
+    LootContext, LootParams, LootRandom, LootRandomState, LootRegistry, VisitedEntry,
+};
 use super::functions::LootItemFunction;
 use super::item_stack::{LootContainer, LootItemStack};
 use super::parameters::{ContextKeySet, LootContextParamSets};
@@ -144,12 +146,13 @@ impl LootTable {
         &self,
         params: LootParams,
         resolver: &LootRegistry,
+        random_state: &mut LootRandomState,
         optional_loot_table_seed: i64,
         output: &mut dyn FnMut(LootItemStack),
     ) {
         let mut context = LootContext::builder(params, resolver)
             .with_optional_random_seed(optional_loot_table_seed)
-            .create(self.random_sequence.as_ref());
+            .create(self.random_sequence.as_ref(), random_state);
         self.get_random_items_with_context(&mut context, output);
     }
 
@@ -159,12 +162,14 @@ impl LootTable {
         &self,
         params: LootParams,
         resolver: &LootRegistry,
+        random_state: &mut LootRandomState,
         optional_loot_table_seed: i64,
     ) -> Vec<LootItemStack> {
         let mut result = Vec::new();
         self.get_random_items_with_seed_into(
             params,
             resolver,
+            random_state,
             optional_loot_table_seed,
             &mut |stack| result.push(stack),
         );
@@ -179,9 +184,7 @@ impl LootTable {
         resolver: &LootRegistry,
         random_source: LootRandom,
     ) -> Vec<LootItemStack> {
-        let mut context = LootContext::builder(params, resolver)
-            .with_optional_random_source(Some(random_source))
-            .create(self.random_sequence.as_ref());
+        let mut context = LootContext::builder(params, resolver).create_with_default(random_source);
         let mut result = Vec::new();
         self.get_random_items_with_context(&mut context, &mut |stack| result.push(stack));
         result
@@ -193,9 +196,10 @@ impl LootTable {
         &self,
         params: LootParams,
         resolver: &LootRegistry,
+        random_state: &mut LootRandomState,
     ) -> Vec<LootItemStack> {
-        let mut context =
-            LootContext::builder(params, resolver).create(self.random_sequence.as_ref());
+        let mut context = LootContext::builder(params, resolver)
+            .create(self.random_sequence.as_ref(), random_state);
         let mut result = Vec::new();
         self.get_random_items_with_context(&mut context, &mut |stack| result.push(stack));
         result
@@ -209,11 +213,12 @@ impl LootTable {
         container: &mut dyn LootContainer,
         params: LootParams,
         resolver: &LootRegistry,
+        random_state: &mut LootRandomState,
         optional_random_seed: i64,
     ) {
         let mut context = LootContext::builder(params, resolver)
             .with_optional_random_seed(optional_random_seed)
-            .create(self.random_sequence.as_ref());
+            .create(self.random_sequence.as_ref(), random_state);
         self.fill_with_context(container, &mut context);
     }
 
