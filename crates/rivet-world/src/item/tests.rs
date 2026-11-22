@@ -748,3 +748,103 @@ fn untyped_json_component_preserves_booleans_across_round_trip() {
     );
     assert_eq!(reencoded, input);
 }
+
+#[test]
+fn styled_and_translated_item_names_round_trip_in_json_and_nbt() {
+    let json_ops = JsonOps::new(false);
+    let json_codec = item_stack_codec::<JsonOps>();
+
+    // Styled JSON object custom_name + translated item_name + list form.
+    let styled_json = serde_json::json!({
+        "id": "minecraft:stone",
+        "count": 1,
+        "components": {
+            "minecraft:custom_name": {
+                "text": "Excalibur",
+                "color": "gold",
+                "italic": false
+            },
+            "minecraft:item_name": {
+                "translate": "item.minecraft.stone"
+            }
+        }
+    });
+    let decoded = json_codec
+        .parse(&json_ops, &styled_json)
+        .result()
+        .cloned()
+        .expect("decode item with styled/translated names from JSON");
+    let reencoded = json_codec
+        .encode_start(&json_ops, &decoded)
+        .result()
+        .cloned()
+        .expect("re-encode item with styled/translated names to JSON");
+    assert_eq!(reencoded, styled_json);
+
+    // Non-empty list form text component.
+    let list_json = serde_json::json!({
+        "id": "minecraft:stone",
+        "count": 1,
+        "components": {
+            "minecraft:custom_name": ["Prefix ", {"text": "Blade", "bold": true}]
+        }
+    });
+    let decoded_list = json_codec
+        .parse(&json_ops, &list_json)
+        .result()
+        .cloned()
+        .expect("decode item with list custom_name from JSON");
+    let reencoded_list = json_codec
+        .encode_start(&json_ops, &decoded_list)
+        .result()
+        .cloned()
+        .expect("re-encode item with list custom_name to JSON");
+    assert_eq!(reencoded_list, list_json);
+
+    // NBT compound form for styled custom_name.
+    let nbt_codec = item_stack_codec::<NbtOps>();
+    let mut name_compound = CompoundTag::new();
+    name_compound.put_string("text", "Excalibur");
+    name_compound.put_string("color", "gold");
+    name_compound.put_boolean("italic", false);
+    let mut comps = CompoundTag::new();
+    comps.put(
+        "minecraft:custom_name".to_string(),
+        Tag::Compound(name_compound),
+    );
+    let mut stack_tag = CompoundTag::new();
+    stack_tag.put_string("id", "minecraft:stone");
+    stack_tag.put_int("count", 1);
+    stack_tag.put("components".to_string(), Tag::Compound(comps));
+    let nbt_input = Tag::Compound(stack_tag);
+
+    let decoded_nbt = nbt_codec
+        .parse(&NbtOps::instance(), &nbt_input)
+        .result()
+        .cloned()
+        .expect("decode item with styled NBT custom_name");
+    let reencoded_nbt = nbt_codec
+        .encode_start(&NbtOps::instance(), &decoded_nbt)
+        .result()
+        .cloned()
+        .expect("re-encode item with styled NBT custom_name");
+    assert_eq!(reencoded_nbt, nbt_input);
+
+    // Empty list or bare number must still be rejected.
+    let invalid_empty_list = serde_json::json!({
+        "id": "minecraft:stone",
+        "count": 1,
+        "components": {
+            "minecraft:custom_name": []
+        }
+    });
+    assert!(json_codec.parse(&json_ops, &invalid_empty_list).is_error());
+    let invalid_num = serde_json::json!({
+        "id": "minecraft:stone",
+        "count": 1,
+        "components": {
+            "minecraft:custom_name": 42
+        }
+    });
+    assert!(json_codec.parse(&json_ops, &invalid_num).is_error());
+}

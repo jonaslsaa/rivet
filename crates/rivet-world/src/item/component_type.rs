@@ -600,12 +600,16 @@ pub fn encode_component_value<Ops: DynamicOps + 'static>(
             };
             identifier_codec::<Ops>().encode_start(ops, id)
         }
-        DataComponentTypeId::CUSTOM_NAME | DataComponentTypeId::ITEM_NAME => {
-            let Some(s) = value.as_text() else {
-                return DataResult::error(format!("Expected text value for {component_type}"));
-            };
-            codec::string_codec::<Ops>().encode_start(ops, &s.to_string())
-        }
+        DataComponentTypeId::CUSTOM_NAME | DataComponentTypeId::ITEM_NAME => match value {
+            DataComponentValue::Text(s) => codec::string_codec::<Ops>().encode_start(ops, s),
+            DataComponentValue::RawNbt(tag) => {
+                DataResult::success(NbtOps::instance().convert_to(ops, tag))
+            }
+            DataComponentValue::RawJson(val) => {
+                DataResult::success(JsonOps::new(false).convert_to(ops, val))
+            }
+            _ => DataResult::error(format!("Expected text value for {component_type}")),
+        },
         DataComponentTypeId::RARITY => {
             let Some(r) = value.as_rarity() else {
                 return DataResult::error(format!("Expected Rarity value for {component_type}"));
@@ -719,9 +723,31 @@ pub fn decode_component_value<Ops: DynamicOps + 'static>(
             .parse(ops, input)
             .map_owned(DataComponentValue::Identifier),
         DataComponentTypeId::CUSTOM_NAME | DataComponentTypeId::ITEM_NAME => {
-            codec::string_codec::<Ops>()
-                .parse(ops, input)
-                .map_owned(DataComponentValue::Text)
+            if let Some(s) = ops.get_string_value(input).result() {
+                return DataResult::success(DataComponentValue::Text(s.clone()));
+            }
+            // Paper's `ComponentSerialization.CODEC` accepts plain strings,
+            // structured objects/compounds (styled/translated text), and
+            // non-empty component lists.
+            let is_structured = ops.get_map(input).is_success()
+                || ops
+                    .get_stream(input)
+                    .result()
+                    .is_some_and(|items| !items.is_empty());
+            if !is_structured {
+                return DataResult::error(format!(
+                    "Expected string, object, or non-empty list for text component {component_type}"
+                ));
+            }
+            if TypeId::of::<Ops>() == TypeId::of::<JsonOps>() {
+                DataResult::success(DataComponentValue::RawJson(
+                    ops.convert_to(&JsonOps::new(false), input),
+                ))
+            } else {
+                DataResult::success(DataComponentValue::RawNbt(
+                    ops.convert_to(&NbtOps::instance(), input),
+                ))
+            }
         }
         DataComponentTypeId::RARITY => {
             codec::string_codec::<Ops>()
