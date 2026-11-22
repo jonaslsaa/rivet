@@ -666,3 +666,21 @@ fn furnace_hopper_inserted_input_recomputes_cook_time_and_multiplier() {
     );
     assert_eq!(furnace.get_item(SLOT_RESULT).get_count(), 1);
 }
+
+#[test]
+fn fuel_values_expands_vanilla_tags_and_removes_non_flammable_wood() {
+    let fuel = FuelValues::vanilla_burn_times();
+
+    assert_eq!(fuel.burn_duration(&stack("minecraft:stripped_oak_log", 1)), 300);
+    assert_eq!(fuel.burn_duration(&stack("minecraft:red_wool", 1)), 100);
+    assert_eq!(fuel.burn_duration(&stack("minecraft:red_carpet", 1)), 67);
+    assert_eq!(fuel.burn_duration(&stack("minecraft:spruce_door", 1)), 200);
+    assert_eq!(fuel.burn_duration(&stack("minecraft:oak_hanging_sign", 1)), 800);
+    assert_eq!(fuel.burn_duration(&stack("minecraft:white_banner", 1)), 300);
+    assert_eq!(fuel.burn_duration(&stack("minecraft:dead_bush", 1)), 100);
+
+    // NON_FLAMMABLE_WOOD tag entries must be excluded.
+    assert!(!fuel.is_fuel(&stack("minecraft:crimson_planks", 1)));
+    assert!(!fuel.is_fuel(&stack("minecraft:warped_stem", 1)));
+    assert!(!fuel.is_fuel(&stack("minecraft:crimson_door", 1)));
+}

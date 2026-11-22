@@ -5,6 +5,7 @@
 //! insertion order.
 
 use indexmap::IndexMap;
+use rivet_registry::generated::tags::ITEM_TAG_BY_NAME;
 
 use crate::inventory::{InventoryItemStack, ItemId};
 
@@ -38,147 +39,82 @@ impl FuelValues {
         Self::vanilla_burn_times_with_smelt_time(BURN_TIME_STANDARD)
     }
 
-    /// `FuelValues.vanillaBurnTimes(..., int smeltTime)`.
+    /// `FuelValues.vanillaBurnTimes(..., int baseUnit)`.
     ///
-    /// Exact Paper 26.2 fuel durations parameterized by `smelt_time` (default 200).
-    pub fn vanilla_burn_times_with_smelt_time(smelt_time: i32) -> Self {
+    /// Exact Paper 26.2 fuel durations parameterized by `base_unit` (default 200),
+    /// matching `FuelValues.java` lines 42–110 in order including tag expansion
+    /// and `minecraft:non_flammable_wood` removal.
+    pub fn vanilla_burn_times_with_smelt_time(base_unit: i32) -> Self {
         let mut b = Self::builder();
 
-        // Exact Paper FuelValues.vanillaBurnTimes order & multipliers:
-        b.add_name("minecraft:lava_bucket", smelt_time.wrapping_mul(100));
-        b.add_name("minecraft:coal_block", smelt_time.wrapping_mul(80));
-        b.add_name("minecraft:blaze_rod", smelt_time.wrapping_mul(12));
-        b.add_name("minecraft:coal", smelt_time.wrapping_mul(8));
-        b.add_name("minecraft:charcoal", smelt_time.wrapping_mul(8));
-
-        // Logs & planks (smelt_time * 3 / 2 = 300)
-        let wood_burn = smelt_time.wrapping_mul(3) / 2;
-        for name in [
-            "minecraft:oak_log",
-            "minecraft:spruce_log",
-            "minecraft:birch_log",
-            "minecraft:jungle_log",
-            "minecraft:acacia_log",
-            "minecraft:dark_oak_log",
-            "minecraft:mangrove_log",
-            "minecraft:cherry_log",
-            "minecraft:pale_oak_log",
-            "minecraft:oak_planks",
-            "minecraft:spruce_planks",
-            "minecraft:birch_planks",
-            "minecraft:jungle_planks",
-            "minecraft:acacia_planks",
-            "minecraft:dark_oak_planks",
-            "minecraft:mangrove_planks",
-            "minecraft:cherry_planks",
-            "minecraft:pale_oak_planks",
-            "minecraft:bamboo_planks",
-            "minecraft:bamboo_mosaic",
-            "minecraft:bamboo_block",
-            "minecraft:stripped_bamboo_block",
-            "minecraft:crafting_table",
-            "minecraft:chest",
-            "minecraft:trapped_chest",
-            "minecraft:barrel",
-            "minecraft:bookshelf",
-            "minecraft:chiseled_bookshelf",
-            "minecraft:lectern",
-            "minecraft:jukebox",
-            "minecraft:note_block",
-            "minecraft:composter",
-            "minecraft:loom",
-            "minecraft:cartography_table",
-            "minecraft:fletching_table",
-            "minecraft:smithing_table",
-            "minecraft:daylight_detector",
-            "minecraft:crossbow",
-            "minecraft:bow",
-            "minecraft:fishing_rod",
-            "minecraft:ladder",
-            "minecraft:mangrove_roots",
-            "minecraft:oak_fence",
-            "minecraft:oak_fence_gate",
-            "minecraft:oak_stairs",
-            "minecraft:oak_trapdoor",
-            "minecraft:oak_pressure_plate",
-        ] {
-            b.add_name(name, wood_burn);
-        }
-
-        // Boats (smelt_time * 6 = 1200)
-        let boat_burn = smelt_time.wrapping_mul(6);
-        for name in [
-            "minecraft:oak_boat",
-            "minecraft:spruce_boat",
-            "minecraft:birch_boat",
-            "minecraft:jungle_boat",
-            "minecraft:acacia_boat",
-            "minecraft:dark_oak_boat",
-            "minecraft:mangrove_boat",
-            "minecraft:cherry_boat",
-            "minecraft:pale_oak_boat",
-            "minecraft:bamboo_raft",
-        ] {
-            b.add_name(name, boat_burn);
-        }
-
-        // Dried kelp block (1 + smelt_time * 20 = 4001)
-        b.add_name(
-            "minecraft:dried_kelp_block",
-            1_i32.wrapping_add(smelt_time.wrapping_mul(20)),
-        );
-
-        // Wooden doors, signs, tools (smelt_time = 200)
-        for name in [
-            "minecraft:oak_door",
-            "minecraft:oak_sign",
-            "minecraft:oak_hanging_sign",
-            "minecraft:wooden_pickaxe",
-            "minecraft:wooden_shovel",
-            "minecraft:wooden_hoe",
-            "minecraft:wooden_axe",
-            "minecraft:wooden_sword",
-        ] {
-            b.add_name(name, smelt_time);
-        }
-
-        // Slabs (smelt_time * 3 / 4 = 150)
-        let slab_burn = smelt_time.wrapping_mul(3) / 4;
-        for name in [
-            "minecraft:oak_slab",
-            "minecraft:spruce_slab",
-            "minecraft:birch_slab",
-            "minecraft:bamboo_slab",
-            "minecraft:bamboo_mosaic_slab",
-        ] {
-            b.add_name(name, slab_burn);
-        }
-
-        // Sticks, saplings, bowls, buttons, wool, azalea, leaf_litter (smelt_time / 2 = 100)
-        let half_burn = smelt_time / 2;
-        for name in [
-            "minecraft:stick",
-            "minecraft:bowl",
-            "minecraft:oak_sapling",
-            "minecraft:spruce_sapling",
-            "minecraft:birch_sapling",
-            "minecraft:oak_button",
-            "minecraft:white_wool",
-            "minecraft:azalea",
-            "minecraft:flowering_azalea",
-            "minecraft:leaf_litter",
-        ] {
-            b.add_name(name, half_burn);
-        }
-
-        // Carpet (1 + smelt_time / 3 = 67)
-        b.add_name("minecraft:white_carpet", 1_i32.wrapping_add(smelt_time / 3));
-
-        // Bamboo & scaffolding (smelt_time / 4 = 50)
-        let quarter_burn = smelt_time / 4;
-        for name in ["minecraft:bamboo", "minecraft:scaffolding"] {
-            b.add_name(name, quarter_burn);
-        }
+        b.add_name("minecraft:lava_bucket", base_unit.wrapping_mul(100))
+            .add_name("minecraft:coal_block", base_unit.wrapping_mul(8).wrapping_mul(10))
+            .add_name("minecraft:blaze_rod", base_unit.wrapping_mul(12))
+            .add_name("minecraft:coal", base_unit.wrapping_mul(8))
+            .add_name("minecraft:charcoal", base_unit.wrapping_mul(8))
+            .add_tag("minecraft:logs", base_unit.wrapping_mul(3) / 2)
+            .add_tag("minecraft:bamboo_blocks", base_unit.wrapping_mul(3) / 2)
+            .add_tag("minecraft:planks", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:bamboo_mosaic", base_unit.wrapping_mul(3) / 2)
+            .add_tag("minecraft:wooden_stairs", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:bamboo_mosaic_stairs", base_unit.wrapping_mul(3) / 2)
+            .add_tag("minecraft:wooden_slabs", base_unit.wrapping_mul(3) / 4)
+            .add_name("minecraft:bamboo_mosaic_slab", base_unit.wrapping_mul(3) / 4)
+            .add_tag("minecraft:wooden_trapdoors", base_unit.wrapping_mul(3) / 2)
+            .add_tag("minecraft:wooden_pressure_plates", base_unit.wrapping_mul(3) / 2)
+            .add_tag("minecraft:wooden_shelves", base_unit.wrapping_mul(3) / 2)
+            .add_tag("minecraft:wooden_fences", base_unit.wrapping_mul(3) / 2)
+            .add_tag("minecraft:fence_gates", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:note_block", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:bookshelf", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:chiseled_bookshelf", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:lectern", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:jukebox", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:chest", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:trapped_chest", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:crafting_table", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:daylight_detector", base_unit.wrapping_mul(3) / 2)
+            .add_tag("minecraft:banners", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:bow", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:fishing_rod", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:ladder", base_unit.wrapping_mul(3) / 2)
+            .add_tag("minecraft:signs", base_unit)
+            .add_tag("minecraft:hanging_signs", base_unit.wrapping_mul(4))
+            .add_name("minecraft:wooden_shovel", base_unit)
+            .add_name("minecraft:wooden_sword", base_unit)
+            .add_name("minecraft:wooden_spear", base_unit)
+            .add_name("minecraft:wooden_hoe", base_unit)
+            .add_name("minecraft:wooden_axe", base_unit)
+            .add_name("minecraft:wooden_pickaxe", base_unit)
+            .add_tag("minecraft:wooden_doors", base_unit)
+            .add_tag("minecraft:boats", base_unit.wrapping_mul(6))
+            .add_tag("minecraft:wool", base_unit / 2)
+            .add_tag("minecraft:wooden_buttons", base_unit / 2)
+            .add_name("minecraft:stick", base_unit / 2)
+            .add_tag("minecraft:saplings", base_unit / 2)
+            .add_name("minecraft:bowl", base_unit / 2)
+            .add_tag("minecraft:wool_carpets", 1_i32.wrapping_add(base_unit / 3))
+            .add_name(
+                "minecraft:dried_kelp_block",
+                1_i32.wrapping_add(base_unit.wrapping_mul(20)),
+            )
+            .add_name("minecraft:crossbow", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:bamboo", base_unit / 4)
+            .add_name("minecraft:dead_bush", base_unit / 2)
+            .add_name("minecraft:short_dry_grass", base_unit / 2)
+            .add_name("minecraft:tall_dry_grass", base_unit / 2)
+            .add_name("minecraft:scaffolding", base_unit / 4)
+            .add_name("minecraft:loom", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:barrel", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:cartography_table", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:fletching_table", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:smithing_table", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:composter", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:azalea", base_unit / 2)
+            .add_name("minecraft:flowering_azalea", base_unit / 2)
+            .add_name("minecraft:mangrove_roots", base_unit.wrapping_mul(3) / 2)
+            .add_name("minecraft:leaf_litter", base_unit / 2)
+            .remove_tag("minecraft:non_flammable_wood");
 
         b.build()
     }
@@ -226,9 +162,31 @@ impl FuelValuesBuilder {
         self
     }
 
+    /// Register every item in a vanilla item tag (`FuelValues.Builder.add(TagKey<Item>, int)`).
+    pub fn add_tag(&mut self, tag: &str, burn_time: i32) -> &mut Self {
+        if let Some(items) = ITEM_TAG_BY_NAME.get(tag) {
+            for &name in *items {
+                self.add_name(name, burn_time);
+            }
+        }
+        self
+    }
+
     /// Remove an item from the fuel map.
     pub fn remove(&mut self, item: ItemId) -> &mut Self {
         self.values.shift_remove(&item);
+        self
+    }
+
+    /// Remove every item in a vanilla item tag (`FuelValues.Builder.remove(TagKey<Item>)`).
+    pub fn remove_tag(&mut self, tag: &str) -> &mut Self {
+        if let Some(items) = ITEM_TAG_BY_NAME.get(tag) {
+            for &name in *items {
+                if let Some(item) = ItemId::from_name(name) {
+                    self.remove(item);
+                }
+            }
+        }
         self
     }
 
