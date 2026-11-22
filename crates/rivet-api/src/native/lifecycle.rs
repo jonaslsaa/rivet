@@ -10,8 +10,16 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use super::commands::{
+    CommandDispatchOutcome, CommandError, CommandHandle, CommandRegistry, CommandSender,
+    CommandSpec,
+};
+use super::events::{
+    EventBus, EventDispatchReport, EventError, EventListenerHandle, EventPriority, NativeEvent,
+};
 use super::handle::{Handle, HandleError, HandleTable, PluginId};
-use super::version::{ApiVersion, CapabilitySet, LoadingMode, NegotiationError};
+use super::scheduler::{ScheduleError, SyncScheduler, TaskContext, TaskHandle, TickReport};
+use super::version::{ApiVersion, Capability, CapabilitySet, LoadingMode, NegotiationError};
 
 /// Marker type for handles referring to registered plugins.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -92,6 +100,28 @@ pub enum LifecycleError {
         phase: LifecyclePhase,
         message: String,
     },
+    CapabilityNotGranted(Capability),
+    Event(EventError),
+    Command(CommandError),
+    Schedule(ScheduleError),
+}
+
+impl From<EventError> for LifecycleError {
+    fn from(value: EventError) -> Self {
+        Self::Event(value)
+    }
+}
+
+impl From<CommandError> for LifecycleError {
+    fn from(value: CommandError) -> Self {
+        Self::Command(value)
+    }
+}
+
+impl From<ScheduleError> for LifecycleError {
+    fn from(value: ScheduleError) -> Self {
+        Self::Schedule(value)
+    }
 }
 
 impl From<NegotiationError> for LifecycleError {
@@ -129,6 +159,12 @@ impl fmt::Display for LifecycleError {
                 phase,
                 message,
             } => write!(f, "plugin {plugin} panicked in {phase:?}: {message}"),
+            Self::CapabilityNotGranted(cap) => {
+                write!(f, "capability not granted to plugin: {cap:?}")
+            }
+            Self::Event(err) => write!(f, "{err}"),
+            Self::Command(err) => write!(f, "{err}"),
+            Self::Schedule(err) => write!(f, "{err}"),
         }
     }
 }
@@ -145,6 +181,9 @@ pub struct PluginContext<'a> {
     host_api: ApiVersion,
     granted_capabilities: &'a CapabilitySet,
     resources: &'a mut HandleTable<ResourceMarker, String>,
+    events: &'a mut EventBus,
+    commands: &'a mut CommandRegistry,
+    scheduler: &'a mut SyncScheduler,
     logs: &'a mut Vec<String>,
 }
 
@@ -193,6 +232,108 @@ impl<'a> PluginContext<'a> {
         self.logs
             .push(format!("[{}] {}", self.plugin_name, message.as_ref()));
     }
+
+    pub fn subscribe_event<E, F>(
+        &mut self,
+        priority: EventPriority,
+        ignore_cancelled: bool,
+        handler: F,
+    ) -> Result<EventListenerHandle, LifecycleError>
+    where
+        E: NativeEvent,
+        F: FnMut(&mut E) + 'static,
+    {
+        if !self
+            .granted_capabilities
+            .contains(Capability::EventSubscription)
+        {
+            return Err(LifecycleError::CapabilityNotGranted(
+                Capability::EventSubscription,
+            ));
+        }
+        Ok(self
+            .events
+            .register(self.plugin_id, priority, ignore_cancelled, handler)?)
+    }
+
+    pub fn unsubscribe_event(&mut self, handle: EventListenerHandle) -> Result<(), LifecycleError> {
+        Ok(self.events.unregister(self.plugin_id, handle)?)
+    }
+
+    pub fn register_command<F>(
+        &mut self,
+        spec: CommandSpec,
+        executor: F,
+    ) -> Result<CommandHandle, LifecycleError>
+    where
+        F: FnMut(&CommandSender, &str, &[&str]) -> Result<(), String> + 'static,
+    {
+        if !self
+            .granted_capabilities
+            .contains(Capability::CommandRegistration)
+        {
+            return Err(LifecycleError::CapabilityNotGranted(
+                Capability::CommandRegistration,
+            ));
+        }
+        Ok(self
+            .commands
+            .register(self.plugin_id, self.plugin_name, spec, executor)?)
+    }
+
+    pub fn unregister_command(&mut self, handle: CommandHandle) -> Result<(), LifecycleError> {
+        Ok(self.commands.unregister(self.plugin_id, handle)?)
+    }
+
+    pub fn schedule_delayed<F>(
+        &mut self,
+        delay_ticks: u64,
+        callback: F,
+    ) -> Result<TaskHandle, LifecycleError>
+    where
+        F: FnMut(&mut TaskContext<'_>) + 'static,
+    {
+        if !self
+            .granted_capabilities
+            .contains(Capability::TickScheduler)
+        {
+            return Err(LifecycleError::CapabilityNotGranted(
+                Capability::TickScheduler,
+            ));
+        }
+        Ok(self
+            .scheduler
+            .schedule_delayed(self.plugin_id, delay_ticks, callback)?)
+    }
+
+    pub fn schedule_repeating<F>(
+        &mut self,
+        delay_ticks: u64,
+        period_ticks: u64,
+        callback: F,
+    ) -> Result<TaskHandle, LifecycleError>
+    where
+        F: FnMut(&mut TaskContext<'_>) + 'static,
+    {
+        if !self
+            .granted_capabilities
+            .contains(Capability::TickScheduler)
+        {
+            return Err(LifecycleError::CapabilityNotGranted(
+                Capability::TickScheduler,
+            ));
+        }
+        Ok(self.scheduler.schedule_repeating(
+            self.plugin_id,
+            delay_ticks,
+            period_ticks,
+            callback,
+        )?)
+    }
+
+    pub fn cancel_task(&mut self, handle: TaskHandle) -> Result<(), LifecycleError> {
+        Ok(self.scheduler.cancel(self.plugin_id, handle)?)
+    }
 }
 
 /// Synchronous native Rust plugin contract executed on the tick/host thread.
@@ -230,6 +371,9 @@ pub struct NativePluginHost {
     registered_names: BTreeSet<String>,
     plugins: HandleTable<PluginMarker, PluginSlot>,
     resources: HandleTable<ResourceMarker, String>,
+    events: EventBus,
+    commands: CommandRegistry,
+    scheduler: SyncScheduler,
     logs: Vec<String>,
 }
 
@@ -243,6 +387,9 @@ impl NativePluginHost {
             registered_names: BTreeSet::new(),
             plugins: HandleTable::new(),
             resources: HandleTable::new(),
+            events: EventBus::new(),
+            commands: CommandRegistry::new(),
+            scheduler: SyncScheduler::new(),
             logs: Vec::new(),
         }
     }
@@ -250,6 +397,73 @@ impl NativePluginHost {
     #[must_use]
     pub fn synthetic_default() -> Self {
         Self::new(ApiVersion::CURRENT, CapabilitySet::synthetic_default())
+    }
+
+    /// Creates a synthetic host with lifecycle, synthetic resources, events,
+    /// commands, and synchronous tick-scheduler capabilities enabled.
+    #[must_use]
+    pub fn with_callback_capabilities() -> Self {
+        let mut caps = CapabilitySet::synthetic_default();
+        caps.insert(Capability::EventSubscription);
+        caps.insert(Capability::CommandRegistration);
+        caps.insert(Capability::TickScheduler);
+        Self::new(ApiVersion::CURRENT, caps)
+    }
+
+    #[must_use]
+    pub const fn events(&self) -> &EventBus {
+        &self.events
+    }
+
+    #[must_use]
+    pub fn events_mut(&mut self) -> &mut EventBus {
+        &mut self.events
+    }
+
+    #[must_use]
+    pub const fn commands(&self) -> &CommandRegistry {
+        &self.commands
+    }
+
+    #[must_use]
+    pub fn commands_mut(&mut self) -> &mut CommandRegistry {
+        &mut self.commands
+    }
+
+    #[must_use]
+    pub const fn scheduler(&self) -> &SyncScheduler {
+        &self.scheduler
+    }
+
+    #[must_use]
+    pub fn scheduler_mut(&mut self) -> &mut SyncScheduler {
+        &mut self.scheduler
+    }
+
+    /// Dispatches a typed synchronous event across all registered listeners.
+    pub fn dispatch_event<E: NativeEvent>(&mut self, event: &mut E) -> EventDispatchReport {
+        self.events.dispatch(event)
+    }
+
+    /// Dispatches a command line to the registered command registry.
+    pub fn dispatch_command(
+        &mut self,
+        sender: &CommandSender,
+        command_line: &str,
+    ) -> CommandDispatchOutcome {
+        self.commands.dispatch(sender, command_line)
+    }
+
+    /// Advances the synchronous scheduler by one server tick.
+    pub fn tick_scheduler(&mut self) -> TickReport {
+        self.scheduler.tick()
+    }
+
+    /// Shuts down all callbacks, listeners, commands, and scheduled tasks cleanly.
+    pub fn shutdown_callbacks(&mut self) {
+        let _ = self.events.clear();
+        let _ = self.commands.clear();
+        let _ = self.scheduler.shutdown();
     }
 
     #[must_use]
@@ -404,6 +618,9 @@ impl NativePluginHost {
             slot,
             self.api_version,
             &mut self.resources,
+            &mut self.events,
+            &mut self.commands,
+            &mut self.scheduler,
             &mut self.logs,
             LifecyclePhase::Load,
             |plugin, ctx| plugin.on_load(ctx),
@@ -416,6 +633,9 @@ impl NativePluginHost {
             Err(err) => {
                 slot.state = PluginState::Failed;
                 let _ = self.resources.revoke_owned_by(plugin_id);
+                let _ = self.events.unregister_all_for_plugin(plugin_id);
+                let _ = self.commands.unregister_all_for_plugin(plugin_id);
+                let _ = self.scheduler.cancel_all_for_plugin(plugin_id);
                 let _ = plugin_name;
                 Err(err)
             }
@@ -436,6 +656,9 @@ impl NativePluginHost {
             slot,
             self.api_version,
             &mut self.resources,
+            &mut self.events,
+            &mut self.commands,
+            &mut self.scheduler,
             &mut self.logs,
             LifecyclePhase::Enable,
             |plugin, ctx| plugin.on_enable(ctx),
@@ -448,6 +671,9 @@ impl NativePluginHost {
             Err(err) => {
                 slot.state = PluginState::Failed;
                 let _ = self.resources.revoke_owned_by(plugin_id);
+                let _ = self.events.unregister_all_for_plugin(plugin_id);
+                let _ = self.commands.unregister_all_for_plugin(plugin_id);
+                let _ = self.scheduler.cancel_all_for_plugin(plugin_id);
                 Err(err)
             }
         }
@@ -469,11 +695,17 @@ impl NativePluginHost {
             slot,
             self.api_version,
             &mut self.resources,
+            &mut self.events,
+            &mut self.commands,
+            &mut self.scheduler,
             &mut self.logs,
             LifecyclePhase::Disable,
             |plugin, ctx| plugin.on_disable(ctx),
         );
         let _ = self.resources.revoke_owned_by(plugin_id);
+        let _ = self.events.unregister_all_for_plugin(plugin_id);
+        let _ = self.commands.unregister_all_for_plugin(plugin_id);
+        let _ = self.scheduler.cancel_all_for_plugin(plugin_id);
         match outcome {
             Ok(()) => {
                 slot.state = PluginState::Disabled;
@@ -507,6 +739,9 @@ impl NativePluginHost {
             ..
         } = self.plugins.remove(handle, None)?;
         let _ = self.resources.revoke_owned_by(id);
+        let _ = self.events.unregister_all_for_plugin(id);
+        let _ = self.commands.unregister_all_for_plugin(id);
+        let _ = self.scheduler.cancel_all_for_plugin(id);
         self.registered_names.remove(&descriptor.name);
         drop_plugin_contained(instance).map_err(|message| LifecycleError::PluginPanicked {
             plugin: descriptor.name,
@@ -529,10 +764,14 @@ fn validate_plugin_name(name: &str) -> Result<(), NegotiationError> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_hook_contained<F>(
     slot: &mut PluginSlot,
     host_api: ApiVersion,
     resources: &mut HandleTable<ResourceMarker, String>,
+    events: &mut EventBus,
+    commands: &mut CommandRegistry,
+    scheduler: &mut SyncScheduler,
     logs: &mut Vec<String>,
     phase: LifecyclePhase,
     hook: F,
@@ -552,6 +791,9 @@ where
             host_api,
             granted_capabilities: granted,
             resources,
+            events,
+            commands,
+            scheduler,
             logs,
         };
         hook(instance, &mut ctx)
@@ -579,7 +821,7 @@ fn drop_plugin_contained(plugin: Box<dyn NativePlugin>) -> Result<(), String> {
     catch_unwind(AssertUnwindSafe(move || drop(plugin))).map_err(extract_panic_message_and_drop)
 }
 
-fn extract_panic_message_and_drop(payload: Box<dyn Any + Send>) -> String {
+pub(crate) fn extract_panic_message_and_drop(payload: Box<dyn Any + Send>) -> String {
     let message = if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_owned()
     } else if let Some(s) = payload.downcast_ref::<String>() {
