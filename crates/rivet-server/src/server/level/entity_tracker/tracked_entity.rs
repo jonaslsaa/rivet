@@ -56,6 +56,21 @@ pub trait EntityTrackerHost {
 
     /// `ChunkMap.updatePlayerStatus(ServerPlayer, boolean track)`.
     fn update_player_status(&mut self, _player_id: i32, _track: bool) {}
+
+    /// Per-pair Bukkit visibility check (`player.getBukkitEntity().canSee(entity.getBukkitEntity())`).
+    fn can_see(&self, _viewer_id: i32, _entity_id: i32) -> bool {
+        true
+    }
+
+    /// Per-pair entity broadcast predicate (`entity.broadcastToPlayer(player)`).
+    fn broadcast_to_player(&self, _entity_id: i32, _viewer_id: i32) -> bool {
+        true
+    }
+
+    /// Per-pair Moonrise chunk tracking check (`ChunkMap.isChunkTracked(player, chunkX, chunkZ)`).
+    fn is_chunk_tracked(&self, _viewer_id: i32, _chunk_x: i32, _chunk_z: i32) -> bool {
+        true
+    }
 }
 
 /// Port of `ChunkMap.TrackedEntity`.
@@ -234,12 +249,23 @@ impl TrackedEntity {
         if viewer.player_id == self.entity_id {
             return;
         }
+        let pos = entity.position();
+        let chunk_x = (pos.x.floor() as i64 >> 4) as i32;
+        let chunk_z = (pos.z.floor() as i64 >> 4) as i32;
+        let effective_viewer = ViewerInfo {
+            broadcast_to_player: viewer.broadcast_to_player
+                && host.broadcast_to_player(self.entity_id, viewer.player_id),
+            chunk_tracked: viewer.chunk_tracked
+                && host.is_chunk_tracked(viewer.player_id, chunk_x, chunk_z),
+            can_see: viewer.can_see && host.can_see(viewer.player_id, self.entity_id),
+            ..*viewer
+        };
         let visible = is_visible_to_player(
             self.entity_id,
-            entity.position(),
+            pos,
             effective_range,
             range_y,
-            viewer,
+            &effective_viewer,
         );
         if visible {
             if self.seen_by.insert(viewer.player_id) {

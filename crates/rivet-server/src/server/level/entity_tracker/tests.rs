@@ -250,6 +250,7 @@ struct RecordingHost {
     events: Vec<HostEvent>,
     allow_track: bool,
     velocity_override: Option<Option<Vec3>>,
+    hidden_pairs: Vec<(i32, i32)>,
 }
 
 impl RecordingHost {
@@ -258,6 +259,7 @@ impl RecordingHost {
             events: Vec::new(),
             allow_track: true,
             velocity_override: None,
+            hidden_pairs: Vec::new(),
         }
     }
 
@@ -313,6 +315,10 @@ impl EntityTrackerHost for RecordingHost {
     }
     fn update_player_status(&mut self, player_id: i32, track: bool) {
         self.events.push(HostEvent::PlayerStatus(player_id, track));
+    }
+
+    fn can_see(&self, viewer_id: i32, entity_id: i32) -> bool {
+        !self.hidden_pairs.contains(&(viewer_id, entity_id))
     }
 }
 
@@ -949,4 +955,50 @@ impl ServerEntitySynchronizer for NoopSync {
     fn send_to_player(&mut self, _player_id: i32, _packet: EntityTrackerPacket) {}
     fn start_seen_by_player(&mut self, _entity_id: i32, _player_id: i32) {}
     fn stop_seen_by_player(&mut self, _entity_id: i32, _player_id: i32) {}
+}
+
+#[test]
+fn update_player_against_all_respects_per_entity_can_see() {
+    let mut tracker = ChunkMapEntityTracker::new(1, TrackingRangeConfig::default());
+    let mut host = RecordingHost::new();
+    // Joining player 1 cannot see hidden entity 20, but can see entity 21.
+    host.hidden_pairs.push((1, 20));
+
+    let mut hidden = MockEntity::new(20);
+    hidden.position = Vec3::new(4.0, 64.0, 4.0);
+    let mut visible = MockEntity::new(21);
+    visible.position = Vec3::new(6.0, 64.0, 6.0);
+
+    tracker
+        .add_entity_simple(&mut hidden, &default_reg(), &[], &mut host)
+        .unwrap();
+    tracker
+        .add_entity_simple(&mut visible, &default_reg(), &[], &mut host)
+        .unwrap();
+
+    let v1 = viewer(1, Vec3::new(0.0, 64.0, 0.0));
+    tracker.update_player_against_all(
+        &v1,
+        |id, apply| {
+            if id == 20 {
+                apply(
+                    &mut hidden,
+                    TrackingEntityKind::Other,
+                    ActivationType::Animal,
+                    &[],
+                );
+            } else if id == 21 {
+                apply(
+                    &mut visible,
+                    TrackingEntityKind::Other,
+                    ActivationType::Animal,
+                    &[],
+                );
+            }
+        },
+        &mut host,
+    );
+
+    assert!(!tracker.get(20).unwrap().seen_by().contains(&1));
+    assert!(tracker.get(21).unwrap().seen_by().contains(&1));
 }
