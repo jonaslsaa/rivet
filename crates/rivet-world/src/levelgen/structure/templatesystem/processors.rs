@@ -39,7 +39,7 @@ use rivet_serialization::map_codec::{self, MapCodec};
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
 use rivet_util::RandomSource;
 use rivet_util::mth;
-use rivet_util::random::{LegacyRandomSource, PositionalRandomFactory, XoroshiroRandomSource};
+use rivet_util::random::{LegacyRandomSource, PositionalRandomFactory};
 use rivet_util::valueproviders::int_provider::{IntProvider, positive_int_provider_codec};
 use std::any::Any;
 use std::sync::Arc;
@@ -964,7 +964,8 @@ impl StructureProcessor for CappedProcessor {
             return processed_block_info_list;
         }
 
-        let mut random = XoroshiroRandomSource::new(level.get_seed())
+        // Paper: RandomSource.createThreadLocalInstance(level.getLevel().getSeed()).forkPositional().at(position)
+        let mut random = LegacyRandomSource::new(level.get_seed())
             .fork_positional()
             .at(position.get_x(), position.get_y(), position.get_z());
         let sampled = self.limit.sample(&mut random);
@@ -1529,6 +1530,22 @@ mod tests {
             .filter(|b| b.state == state_of("minecraft:blackstone"))
             .count();
         assert_eq!(blackstone_count, 2);
+
+        // Verify exact index selection matches Paper's LegacyRandomSource positional stream.
+        let mut expected_rng = LegacyRandomSource::new(42).fork_positional().at(10, 64, 10);
+        let mut expected_indices = vec![0usize, 1, 2, 3];
+        for i in (1..expected_indices.len()).rev() {
+            let j = expected_rng.next_int_bound((i + 1) as i32) as usize;
+            expected_indices.swap(i, j);
+        }
+        let mut expected_replaced = vec![expected_indices[0], expected_indices[1]];
+        expected_replaced.sort_unstable();
+        let actual_replaced: Vec<usize> = run1
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| (b.state == state_of("minecraft:blackstone")).then_some(i))
+            .collect();
+        assert_eq!(actual_replaced, expected_replaced);
     }
 
     #[test]
