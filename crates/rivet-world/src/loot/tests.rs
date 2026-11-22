@@ -806,8 +806,14 @@ fn named_random_sequence_and_default_rng_advance_across_unseeded_rolls() {
     let r1 = unseq_table.get_random_items_with_seed(empty_params(), &registry, RANDOMIZE_SEED);
     let r2 = unseq_table.get_random_items_with_seed(empty_params(), &registry, RANDOMIZE_SEED);
     let mut default_oracle = LegacyRandomSource::new(12345);
-    assert_eq!(r1.len(), mth::next_int(&mut default_oracle, 1, 100) as usize);
-    assert_eq!(r2.len(), mth::next_int(&mut default_oracle, 1, 100) as usize);
+    assert_eq!(
+        r1.len(),
+        mth::next_int(&mut default_oracle, 1, 100) as usize
+    );
+    assert_eq!(
+        r2.len(),
+        mth::next_int(&mut default_oracle, 1, 100) as usize
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -963,12 +969,9 @@ fn expanded_tag_entry_bypasses_entry_functions_matching_paper() {
     let table = LootTable::builder()
         .with_pool(
             LootPool::builder()
-                .add(
-                    LootPoolEntryContainer::expand_tag(id("single_gem"))
-                        .apply(LootItemFunction::set_count(NumberProvider::uniform_between(
-                            2.0, 5.0,
-                        ))),
-                )
+                .add(LootPoolEntryContainer::expand_tag(id("single_gem")).apply(
+                    LootItemFunction::set_count(NumberProvider::uniform_between(2.0, 5.0)),
+                ))
                 .build(),
         )
         .build();
@@ -1036,7 +1039,11 @@ fn builtin_param_sets_match_paper_contracts() {
     );
 
     let entity_interact = LootContextParamSets::get(&id("entity_interact")).unwrap();
-    assert!(entity_interact.required().contains(&LootContextParams::tool()));
+    assert!(
+        entity_interact
+            .required()
+            .contains(&LootContextParams::tool())
+    );
 
     let generic = LootContextParamSets::all_params();
     assert!(
