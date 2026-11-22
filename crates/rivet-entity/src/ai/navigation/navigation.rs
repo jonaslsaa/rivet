@@ -579,15 +579,17 @@ impl PathNavigation {
             } = &mut self.variant
                 && let Some(target) = *path_to_position
             {
-                let dx = target.x as f64 + 0.5 - mob.pos.x;
-                let dy = target.y as f64 + 0.5 - mob.pos.y;
-                let dz = target.z as f64 + 0.5 - mob.pos.z;
-                let dist_sqr_3d = dx * dx + dy * dy + dz * dz;
-                let horiz_dist_sqr = dx * dx + dz * dz;
-                let width = f64::from(mob.bb_width);
-                let width_sqr = width * width;
-                if dist_sqr_3d < width_sqr
-                    || (mob.pos.y > target.y as f64 && horiz_dist_sqr < width_sqr)
+                let closer_to_center = |bp: BlockPos| {
+                    let dx = bp.x as f64 + 0.5 - mob.pos.x;
+                    let dy = bp.y as f64 + 0.5 - mob.pos.y;
+                    let dz = bp.z as f64 + 0.5 - mob.pos.z;
+                    let dist_sqr = dx * dx + dy * dy + dz * dz;
+                    let radius = f64::from(mob.bb_width);
+                    dist_sqr < radius * radius
+                };
+                let at_mob_y = BlockPos::new(target.x, mth::floor_d(mob.pos.y), target.z);
+                if closer_to_center(target)
+                    || (mob.pos.y > target.y as f64 && closer_to_center(at_mob_y))
                 {
                     *path_to_position = None;
                 } else {
@@ -677,7 +679,7 @@ impl PathNavigation {
                 && dy < max_y_dist;
 
             let can_cut = Self::can_cut_corner(path.get_next_node().path_type)
-                && self.should_target_next_node_in_direction(mob, temp_pos, path);
+                && self.should_target_next_node_in_direction(mob, world, temp_pos, path);
             close_enough || can_cut
         } else {
             false
@@ -690,34 +692,70 @@ impl PathNavigation {
         self.do_stucked_detection(mob, temp_pos, game_time);
     }
 
-    fn should_target_next_node_in_direction(
+    fn should_target_next_node_in_direction<W: PathWorldView + ?Sized>(
         &self,
         mob: &MobPathingState,
-        temp_pos: Vec3,
+        world: &W,
+        mob_position: Vec3,
         path: &Path,
     ) -> bool {
         if path.get_next_node_index() + 1 >= path.get_node_count() {
             return false;
         }
+
         let cur = path.get_next_node_pos();
-        let cur_center = Vec3::new(cur.x as f64 + 0.5, cur.y as f64, cur.z as f64 + 0.5);
-        if temp_pos.distance_to_sqr(cur_center) > 4.0 {
+        let current_node = Vec3::new(cur.x as f64 + 0.5, cur.y as f64, cur.z as f64 + 0.5);
+        if mob_position.distance_to_sqr(current_node) >= 4.0 {
             return false;
         }
+
+        if self.can_move_directly(
+            mob,
+            world,
+            mob_position,
+            path.get_next_entity_pos(mob.bb_width),
+        ) {
+            return true;
+        }
+
         let next = path.get_node_pos(path.get_next_node_index() + 1);
-        let next_center = Vec3::new(next.x as f64 + 0.5, next.y as f64, next.z as f64 + 0.5);
-        let seg = Vec3::new(
-            next_center.x - cur_center.x,
-            next_center.y - cur_center.y,
-            next_center.z - cur_center.z,
+        let next_node = Vec3::new(next.x as f64 + 0.5, next.y as f64, next.z as f64 + 0.5);
+        let mob_to_current = Vec3::new(
+            current_node.x - mob_position.x,
+            current_node.y - mob_position.y,
+            current_node.z - mob_position.z,
         );
-        let to_mob = Vec3::new(
-            mob.pos.x - cur_center.x,
-            mob.pos.y - cur_center.y,
-            mob.pos.z - cur_center.z,
+        let mob_to_next = Vec3::new(
+            next_node.x - mob_position.x,
+            next_node.y - mob_position.y,
+            next_node.z - mob_position.z,
         );
-        let dot = seg.x * to_mob.x + seg.y * to_mob.y + seg.z * to_mob.z;
-        dot > 0.0
+        let mob_to_current_sqr = mob_to_current.x * mob_to_current.x
+            + mob_to_current.y * mob_to_current.y
+            + mob_to_current.z * mob_to_current.z;
+        let mob_to_next_sqr = mob_to_next.x * mob_to_next.x
+            + mob_to_next.y * mob_to_next.y
+            + mob_to_next.z * mob_to_next.z;
+        let closer_to_next_than_current = mob_to_next_sqr < mob_to_current_sqr;
+        let within_current_block = mob_to_current_sqr < 0.5;
+        if !closer_to_next_than_current && !within_current_block {
+            return false;
+        }
+
+        let normalize = |v: Vec3, len_sqr: f64| {
+            let len = len_sqr.sqrt();
+            if len < 1.0e-4 {
+                Vec3::ZERO
+            } else {
+                Vec3::new(v.x / len, v.y / len, v.z / len)
+            }
+        };
+        let mob_direction = normalize(mob_to_current, mob_to_current_sqr);
+        let path_direction = normalize(mob_to_next, mob_to_next_sqr);
+        let dot = path_direction.x * mob_direction.x
+            + path_direction.y * mob_direction.y
+            + path_direction.z * mob_direction.z;
+        dot < 0.0
     }
 
     /// Mirrors `PathNavigation.doStuckDetection(Vec3)` in Paper 26.2.

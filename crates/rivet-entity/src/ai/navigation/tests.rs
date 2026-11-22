@@ -760,7 +760,6 @@ fn targeting_conditions_combat_non_combat_invisibility_and_negatives() {
         Some(&reject_all),
     ));
 }
-
 #[test]
 fn amphibious_evaluator_preserves_water_height_and_water_border() {
     use super::evaluator::NodeEvaluator;
@@ -820,4 +819,153 @@ fn wall_climber_fallback_checks_3d_distance_when_below_target() {
     move_control = MoveControl::new();
     nav.tick(&mut mob, &world, &mut move_control, 2);
     assert!(!move_control.has_wanted());
+}
+
+#[test]
+fn amphibious_path_finder_swims_upward_underwater() {
+    let mut world = TestWorld::flat(0);
+    world.fill_water(-3, 1, -3, 3, 6, 3);
+
+    let mut mob = MobPathingState::new(Vec3::new(0.5, 1.0, 0.5), 0.6, 0.8);
+    mob.in_water = true;
+    mob.on_ground = false;
+
+    let mut eval = AmphibiousNodeEvaluator::new(false);
+    let mut finder = PathFinder::new(64);
+    let path = finder
+        .find_path(
+            &mut eval,
+            &world,
+            &mut mob,
+            &[BlockPos::new(0, 4, 0)],
+            16.0,
+            0,
+            1.0,
+        )
+        .expect("amphibious mob should find upward underwater path");
+    assert!(path.can_reach());
+    assert_eq!(path.get_end_node().map(|n| n.y), Some(4));
+}
+
+#[test]
+fn fly_node_evaluator_checks_full_mob_bounding_box() {
+    use super::NodeEvaluator;
+
+    let mut world = TestWorld::empty();
+    // Place a solid ceiling block at (1, 3, 0) that blocks a 2-tall flying mob at (1, 2, 0)
+    world.set(1, 3, 0, BlockPathInfo::SOLID);
+    // Place a solid side block at (4, 2, 1) that blocks a 2-wide flying mob at (3, 2, 0)
+    world.set(4, 2, 1, BlockPathInfo::SOLID);
+
+    let mut mob = MobPathingState::new(Vec3::new(0.5, 2.0, 0.5), 1.6, 1.8);
+    let mut eval = FlyNodeEvaluator::new();
+    eval.prepare(&mut mob, &world);
+    let mut ctx = PathfindingContext::new(&world, None, BlockPos::new(0, 2, 0));
+
+    // Origin cell (1, 2, 0) is air, but (1, 3, 0) is solid inside the mob's 2x2x2 volume
+    assert_eq!(
+        eval.get_path_type_of_mob(&mut ctx, &mob, 1, 2, 0),
+        PathType::Blocked
+    );
+    // Origin cell (3, 2, 0) is air, but (4, 2, 1) is solid inside the mob's 2x2x2 volume
+    assert_eq!(
+        eval.get_path_type_of_mob(&mut ctx, &mob, 3, 2, 0),
+        PathType::Blocked
+    );
+    // Clear cell at (8, 5, 8) is Open
+    assert_eq!(
+        eval.get_path_type_of_mob(&mut ctx, &mob, 8, 5, 8),
+        PathType::Open
+    );
+}
+
+#[test]
+fn ground_navigation_does_not_prematurely_cut_corner_around_wall() {
+    let mut world = TestWorld::flat(0);
+    // Wall corner at (1, 1, 1)
+    world.set(1, 1, 1, BlockPathInfo::SOLID);
+
+    // Path goes (0,1,0) -> (1,1,0) -> (1,1,2) around a corner; mob is at (0.5, 1.0, 1.4),
+    // which is closer to next node? No, mob at (0.2, 1.0, 1.2) is farther than 0.5 sqr from
+    // current node (1.5, 1.0, 0.5) and closer to current than next (2.5, 1.0, 2.5),
+    // yet previously had positive projection onto segment (1,1,0)->(2,1,2).
+    let mut n0 = Node::new(1, 1, 0);
+    n0.path_type = PathType::Walkable;
+    let mut n1 = Node::new(1, 1, 2);
+    n1.path_type = PathType::Walkable;
+    let path = Path::new(vec![n0, n1], BlockPos::new(1, 1, 2), true);
+
+    let mut mob = MobPathingState::new(Vec3::new(0.6, 1.0, 1.3), 0.6, 1.8);
+    let mut nav = PathNavigation::ground(64);
+    let mut mc = MoveControl::new();
+    assert!(nav.move_to_path(Some(path), 1.0, &mob, &world, 0));
+    nav.tick(&mut mob, &world, &mut mc, 1);
+
+    // Mob has not passed (1,1,0) and cannot move directly on ground; must not skip node 0
+    assert_eq!(nav.path.as_ref().map(Path::get_next_node_index), Some(0));
+}
+
+#[test]
+fn walk_collision_cache_distinguishes_aabbs_with_same_min_corner() {
+    use crate::ai::goal::Aabb;
+
+    let mut world = TestWorld::flat(0);
+    // Low ceiling block at (0, 3, 0)
+    world.set(0, 3, 0, BlockPathInfo::SOLID);
+
+    let mut eval = WalkNodeEvaluator::new();
+    let short_box = Aabb::new(0.2, 1.0, 0.2, 0.8, 2.8, 0.8);
+    let tall_box = Aabb::new(0.2, 1.0, 0.2, 0.8, 3.5, 0.8);
+
+    assert!(!eval.has_collisions(&world, short_box));
+    assert!(eval.has_collisions(&world, tall_box));
+}
+
+#[test]
+fn wall_climber_fallback_keeps_climbing_toward_elevated_target() {
+    let world = TestWorld::flat(0);
+    // Spider at (0.5, 1.0, 0.5) directly underneath elevated target (0, 6, 0)
+    let mut mob = MobPathingState::new(Vec3::new(0.5, 1.0, 0.5), 1.4, 0.9);
+    let mut nav = PathNavigation::wall_climber(64);
+    let mut mc = MoveControl::new();
+
+    // Create path to elevated target (0, 6, 0) which sets WallClimber's path_to_position,
+    // then clear the path so WallClimber's direct climbing fallback runs.
+    let _ = nav.move_to_xyz(&mut mob, &world, 0.5, 6.0, 0.5, 1.0, 0);
+    nav.path = None;
+    nav.speed_modifier = 1.0;
+    nav.tick(&mut mob, &world, &mut mc, 1);
+
+    // Must still want to move toward (0, 6, 0) instead of clearing path_to_position
+    assert!(mc.has_wanted());
+    assert_eq!(mc.wanted_y, 6.0);
+}
+
+#[test]
+fn aabb_collision_free_detects_protruding_fence_top_from_cell_below() {
+    use crate::ai::goal::Aabb;
+
+    let mut world = TestWorld::flat(0);
+    // Fence at (0, 1, 0) protrudes to y = 2.5
+    world.set(0, 1, 0, BlockPathInfo::FENCE);
+
+    // Box starts at y = 2.1 (in cell y = 2, above fence's cell y = 1) and overlaps 2.1..2.5
+    let overlapping = Aabb::new(0.2, 2.1, 0.2, 0.8, 3.0, 0.8);
+    assert!(!world.is_aabb_collision_free(overlapping));
+
+    // Box starting at y = 2.5 is clear of the fence top
+    let clear = Aabb::new(0.2, 2.5, 0.2, 0.8, 3.5, 0.8);
+    assert!(world.is_aabb_collision_free(clear));
+}
+
+#[test]
+fn direct_movement_dda_detects_clipped_diagonal_block_corner() {
+    let mut world = TestWorld::flat(0);
+    // Solid pillar at (1, 1, 0)
+    world.set(1, 1, 0, BlockPathInfo::SOLID);
+
+    // Crosses x=1.0 at z=0.95 (entering (1, 1, 0)) before reaching (1, 1, 1)
+    let from = Vec3::new(0.8, 1.5, 0.85);
+    let to = Vec3::new(1.2, 1.5, 1.05);
+    assert!(!world.is_clear_for_movement_between(from, to, false));
 }

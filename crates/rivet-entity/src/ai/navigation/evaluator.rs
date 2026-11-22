@@ -167,7 +167,7 @@ pub fn get_floor_level_static<W: PathWorldView + ?Sized>(world: &W, pos: BlockPo
 #[derive(Debug, Default)]
 pub struct WalkNodeEvaluator {
     pub config: EvaluatorConfig,
-    amphibious: bool,
+    pub(crate) amphibious: bool,
     path_types_by_pos_cache: HashMap<i64, PathType>,
     collision_cache: HashMap<[u64; 6], bool>,
 }
@@ -179,14 +179,6 @@ impl WalkNodeEvaluator {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
-    }
-
-    #[must_use]
-    fn new_amphibious() -> Self {
-        Self {
-            amphibious: true,
-            ..Self::default()
-        }
     }
 
     pub fn clear_caches(&mut self) {
@@ -211,15 +203,30 @@ impl WalkNodeEvaluator {
         pt
     }
 
-    fn has_collisions<W: PathWorldView + ?Sized>(&mut self, world: &W, aabb: Aabb) -> bool {
-        let key = [
-            aabb.min_x.to_bits(),
-            aabb.min_y.to_bits(),
-            aabb.min_z.to_bits(),
-            aabb.max_x.to_bits(),
-            aabb.max_y.to_bits(),
-            aabb.max_z.to_bits(),
-        ];
+    fn aabb_cache_key(aabb: Aabb) -> [u64; 6] {
+        let norm = |v: f64| {
+            if v == 0.0 {
+                0.0_f64.to_bits()
+            } else {
+                v.to_bits()
+            }
+        };
+        [
+            norm(aabb.min_x),
+            norm(aabb.min_y),
+            norm(aabb.min_z),
+            norm(aabb.max_x),
+            norm(aabb.max_y),
+            norm(aabb.max_z),
+        ]
+    }
+
+    pub(crate) fn has_collisions<W: PathWorldView + ?Sized>(
+        &mut self,
+        world: &W,
+        aabb: Aabb,
+    ) -> bool {
+        let key = Self::aabb_cache_key(aabb);
         if let Some(&cached) = self.collision_cache.get(&key) {
             return cached;
         }
@@ -248,6 +255,29 @@ impl WalkNodeEvaluator {
 
     fn is_amphibious(&self) -> bool {
         self.amphibious
+    }
+
+    fn amphibious_path_type<W: PathWorldView + ?Sized>(
+        ctx: &mut PathfindingContext<'_, W>,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> PathType {
+        let block_path_type = ctx.get_path_type_from_state(x, y, z);
+        if block_path_type == PathType::Water {
+            for dir in Direction::ALL {
+                let neighbor_type = ctx.get_path_type_from_state(
+                    x + dir.step_x(),
+                    y + dir.step_y(),
+                    z + dir.step_z(),
+                );
+                if neighbor_type == PathType::Blocked {
+                    return PathType::WaterBorder;
+                }
+            }
+            return PathType::Water;
+        }
+        get_path_type_static(ctx, x, y, z)
     }
 
     fn can_start_at<W: PathWorldView + ?Sized>(
@@ -605,13 +635,36 @@ impl WalkNodeEvaluator {
         y: i32,
         z: i32,
     ) -> PathType {
+        let amphibious = self.amphibious;
+        self.evaluate_path_type_with(ctx, mob, x, y, z, |ctx, bx, by, bz| {
+            if amphibious {
+                Self::amphibious_path_type(ctx, bx, by, bz)
+            } else {
+                get_path_type_static(ctx, bx, by, bz)
+            }
+        })
+    }
+
+    pub(crate) fn evaluate_path_type_with<W, F>(
+        &mut self,
+        ctx: &mut PathfindingContext<'_, W>,
+        mob: &MobPathingState,
+        x: i32,
+        y: i32,
+        z: i32,
+        mut get_type: F,
+    ) -> PathType
+    where
+        W: PathWorldView + ?Sized,
+        F: FnMut(&mut PathfindingContext<'_, W>, i32, i32, i32) -> PathType,
+    {
         let mut mask: u32 = 0;
         let mob_pos = ctx.mob_position();
 
         for dx in 0..self.config.entity_width {
             for dy in 0..self.config.entity_height {
                 for dz in 0..self.config.entity_depth {
-                    let mut pt = self.get_path_type(ctx, x + dx, y + dy, z + dz);
+                    let mut pt = get_type(ctx, x + dx, y + dy, z + dz);
                     pt = self.evaluate_block_path_type(ctx, mob, mob_pos, pt);
                     mask |= 1_u32 << pt.index();
                 }
@@ -646,7 +699,7 @@ impl WalkNodeEvaluator {
             }
         }
 
-        let current_node_type = self.get_path_type(ctx, x, y, z);
+        let current_node_type = get_type(ctx, x, y, z);
         if self.config.entity_width > 1 {
             let is_current_cheaper = mob.get_pathfinding_malus(current_node_type) < highest_malus;
             let cap_malus = is_current_cheaper
@@ -876,22 +929,10 @@ impl NodeEvaluator for WalkNodeEvaluator {
         z: i32,
     ) -> PathType {
         if self.amphibious {
-            let block_path_type = ctx.get_path_type_from_state(x, y, z);
-            if block_path_type == PathType::Water {
-                for dir in Direction::ALL {
-                    let neighbor_type = ctx.get_path_type_from_state(
-                        x + dir.step_x(),
-                        y + dir.step_y(),
-                        z + dir.step_z(),
-                    );
-                    if neighbor_type == PathType::Blocked {
-                        return PathType::WaterBorder;
-                    }
-                }
-                return PathType::Water;
-            }
+            Self::amphibious_path_type(ctx, x, y, z)
+        } else {
+            get_path_type_static(ctx, x, y, z)
         }
-        get_path_type_static(ctx, x, y, z)
     }
 }
 
@@ -906,6 +947,40 @@ impl FlyNodeEvaluator {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn fly_path_type<W: PathWorldView + ?Sized>(
+        ctx: &mut PathfindingContext<'_, W>,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> PathType {
+        let mut pt = ctx.get_path_type_from_state(x, y, z);
+        if pt == PathType::Open && y > ctx.level().min_y() {
+            let below = ctx.get_path_type_from_state(x, y - 1, z);
+            if below == PathType::DamageFire || below == PathType::Lava {
+                pt = PathType::DamageFire;
+            } else if below == PathType::DamageOther {
+                pt = PathType::DamageOther;
+            } else if below == PathType::Cocoa {
+                pt = PathType::Cocoa;
+            } else if below == PathType::Fence {
+                pt = PathType::Fence;
+            } else {
+                pt = if below != PathType::Walkable
+                    && below != PathType::Open
+                    && below != PathType::Water
+                {
+                    PathType::Walkable
+                } else {
+                    PathType::Open
+                };
+            }
+        }
+        if pt == PathType::Walkable || pt == PathType::Open {
+            pt = check_neighbour_blocks(ctx, x, y, z, pt);
+        }
+        pt
     }
 
     fn get_cached_path_type<W: PathWorldView + ?Sized>(
@@ -1185,33 +1260,8 @@ impl NodeEvaluator for FlyNodeEvaluator {
         y: i32,
         z: i32,
     ) -> PathType {
-        let mut pt = self.get_path_type(ctx, x, y, z);
-        if pt == PathType::Open && y > ctx.level().min_y() {
-            let below = self.get_path_type(ctx, x, y - 1, z);
-            if below == PathType::DamageFire || below == PathType::Lava {
-                pt = PathType::DamageFire;
-            } else if below == PathType::DamageOther {
-                pt = PathType::DamageOther;
-            } else if below == PathType::Cocoa {
-                pt = PathType::Cocoa;
-            } else if below == PathType::Fence {
-                pt = PathType::Fence;
-            } else {
-                pt = if below != PathType::Walkable
-                    && below != PathType::Open
-                    && below != PathType::Water
-                {
-                    PathType::Walkable
-                } else {
-                    PathType::Open
-                };
-            }
-        }
-        if pt == PathType::Walkable || pt == PathType::Open {
-            pt = check_neighbour_blocks(ctx, x, y, z, pt);
-        }
-        let mob_pos = ctx.mob_position();
-        self.walk.evaluate_block_path_type(ctx, mob, mob_pos, pt)
+        self.walk
+            .evaluate_path_type_with(ctx, mob, x, y, z, Self::fly_path_type)
     }
 
     fn get_path_type<W: PathWorldView + ?Sized>(
@@ -1221,7 +1271,7 @@ impl NodeEvaluator for FlyNodeEvaluator {
         y: i32,
         z: i32,
     ) -> PathType {
-        ctx.get_path_type_from_state(x, y, z)
+        Self::fly_path_type(ctx, x, y, z)
     }
 }
 
@@ -1459,8 +1509,10 @@ impl Default for AmphibiousNodeEvaluator {
 impl AmphibiousNodeEvaluator {
     #[must_use]
     pub fn new(prefers_shallow_swimming: bool) -> Self {
+        let mut walk = WalkNodeEvaluator::new();
+        walk.amphibious = true;
         Self {
-            walk: WalkNodeEvaluator::new_amphibious(),
+            walk,
             prefers_shallow_swimming,
             old_walkable_cost: 0.0,
             old_water_border_cost: 0.0,
@@ -1586,7 +1638,7 @@ impl NodeEvaluator for AmphibiousNodeEvaluator {
             count += 1;
         }
         if Self::is_vertical_neighbor_valid(arena, down, node_idx)
-            && path_type_current != PathType::Walkable
+            && path_type_current != PathType::Trapdoor
             && count < 32
         {
             out[count] = down.unwrap();
@@ -1624,6 +1676,6 @@ impl NodeEvaluator for AmphibiousNodeEvaluator {
         y: i32,
         z: i32,
     ) -> PathType {
-        self.walk.get_path_type(ctx, x, y, z)
+        WalkNodeEvaluator::amphibious_path_type(ctx, x, y, z)
     }
 }
