@@ -293,13 +293,19 @@ pub trait PathWorldView {
         let max_y = mth::floor_d(aabb.max_y - 1.0e-7);
         let min_z = mth::floor_d(aabb.min_z + 1.0e-7);
         let max_z = mth::floor_d(aabb.max_z - 1.0e-7);
+        // Inspect one block below min_y so protruding shapes (fences/walls with height 1.5)
+        // are included, matching Paper's BlockCollisions.
+        let start_y = min_y.saturating_sub(1);
 
         for x in min_x..=max_x {
-            for y in min_y..=max_y {
+            for y in start_y..=max_y {
                 for z in min_z..=max_z {
                     let info = self.block_info(BlockPos::new(x, y, z));
                     if !info.is_loaded {
-                        return false;
+                        if y >= min_y {
+                            return false;
+                        }
+                        continue;
                     }
                     if let Some(max_local_y) = info.collision_max_y {
                         let block_top = y as f64 + max_local_y;

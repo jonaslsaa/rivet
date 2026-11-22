@@ -852,3 +852,20 @@ fn wall_climber_fallback_keeps_climbing_toward_elevated_target() {
     assert!(mc.has_wanted());
     assert_eq!(mc.wanted_y, 6.0);
 }
+
+#[test]
+fn aabb_collision_free_detects_protruding_fence_top_from_cell_below() {
+    use crate::ai::goal::Aabb;
+
+    let mut world = TestWorld::flat(0);
+    // Fence at (0, 1, 0) protrudes to y = 2.5
+    world.set(0, 1, 0, BlockPathInfo::FENCE);
+
+    // Box starts at y = 2.1 (in cell y = 2, above fence's cell y = 1) and overlaps 2.1..2.5
+    let overlapping = Aabb::new(0.2, 2.1, 0.2, 0.8, 3.0, 0.8);
+    assert!(!world.is_aabb_collision_free(overlapping));
+
+    // Box starting at y = 2.5 is clear of the fence top
+    let clear = Aabb::new(0.2, 2.5, 0.2, 0.8, 3.5, 0.8);
+    assert!(world.is_aabb_collision_free(clear));
+}
