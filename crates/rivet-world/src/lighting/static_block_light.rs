@@ -981,6 +981,7 @@ where
         for (pos, nibbles) in sky.neighbor_nibbles {
             if let Some(chunk) = chunks.get_mut(&pos) {
                 chunk.set_sky_nibbles(nibbles);
+                chunk.mark_unsaved();
             }
         }
         let center_chunk = chunks.get_mut(&center).expect("validated center exists");
@@ -992,6 +993,7 @@ where
         for (pos, nibbles) in block.neighbor_nibbles {
             if let Some(chunk) = chunks.get_mut(&pos) {
                 chunk.set_block_nibbles(nibbles);
+                chunk.mark_unsaved();
             }
         }
         let center_chunk = chunks.get_mut(&center).expect("validated center exists");
@@ -1817,6 +1819,65 @@ mod tests {
                 Some(&chunks[&west])
             ),
             13
+        );
+    }
+
+    #[test]
+    fn neighbor_light_updates_mark_neighbors_unsaved() {
+        let height = create_accessor(0, 64);
+        let center = ChunkPos::new(0, 0);
+        let west = ChunkPos::new(-1, 0);
+        let east = ChunkPos::new(1, 0);
+        let far = ChunkPos::new(2, 2);
+        let mut chunks = make_workspace(center, 0, 64);
+
+        // Place a torch on the west border of center so block light spills into west.
+        set_block(chunks.get_mut(&center).unwrap(), 0, 0, 20, 8, TORCH);
+
+        // Prepare west, east, and far as previously lit & saved (clean) neighbors.
+        for pos in [west, east, far] {
+            let chunk = chunks.get_mut(&pos).unwrap();
+            chunk.set_persisted_status(ChunkStatus::Light);
+            chunk.set_light_correct(true);
+            chunk.set_block_nibbles(filled_empty_light(6));
+            chunk.set_block_emptiness_map(Some(vec![true; 4]));
+            chunk.try_mark_saved();
+            assert!(!chunk.is_unsaved());
+        }
+
+        // Also stage a sky nibble update targeting east to verify sky neighbor marking.
+        let mut east_sky = filled_empty_light(6);
+        east_sky[2].set_non_null();
+        east_sky[2].set(0, 4, 8, 15);
+        let staged_sky = StagedSkyLightPublication {
+            center_nibbles: filled_empty_light(6),
+            center_emptiness_map: vec![true; 4],
+            neighbor_nibbles: vec![(east, east_sky)],
+        };
+
+        publish_generated_light_atomic(
+            &height,
+            LightChannelCapability::normal_overworld(),
+            DimensionLightPolicy::NormalOverworld,
+            center,
+            &mut chunks,
+            &TestProps,
+            Some(staged_sky),
+        )
+        .expect("publication succeeds");
+
+        assert!(chunks[&center].is_unsaved());
+        assert!(
+            chunks[&west].is_unsaved(),
+            "neighbor receiving block-light update must be marked unsaved"
+        );
+        assert!(
+            chunks[&east].is_unsaved(),
+            "neighbor receiving sky-light update must be marked unsaved"
+        );
+        assert!(
+            !chunks[&far].is_unsaved(),
+            "untouched radius-2 neighbor must remain clean"
         );
     }
 }
