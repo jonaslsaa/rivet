@@ -22,13 +22,15 @@ pub const HOPPER_EMPTY: i32 = 0;
 pub const HOPPER_IS_FULL: i32 = 1;
 pub const HOPPER_HAS_ITEMS: i32 = 2;
 
-/// Uniform view over either a plain `Container` or a sided `WorldlyContainer`
-/// for hopper push/pull transfer operations.
+/// Uniform view over a plain `Container`, a sided `WorldlyContainer`, or a
+/// receiving `HopperBlockEntity` for hopper push/pull transfer operations.
 pub enum HopperTarget<'a> {
-    /// Ordinary unsided `Container` (e.g. chest, barrel, hopper, crafter).
+    /// Ordinary unsided `Container` (e.g. chest, barrel, crafter).
     Plain(&'a mut dyn Container),
     /// Sided `WorldlyContainer` (e.g. furnace, brewing stand).
     Worldly(&'a mut dyn WorldlyContainer),
+    /// Another `HopperBlockEntity` (so empty-hopper transfer cooldown is applied).
+    Hopper(&'a mut HopperBlockEntity),
 }
 
 impl HopperTarget<'_> {
@@ -36,6 +38,7 @@ impl HopperTarget<'_> {
         match self {
             Self::Plain(c) => *c,
             Self::Worldly(w) => *w,
+            Self::Hopper(h) => *h,
         }
     }
 
@@ -43,6 +46,7 @@ impl HopperTarget<'_> {
         match self {
             Self::Plain(c) => *c,
             Self::Worldly(w) => *w,
+            Self::Hopper(h) => *h,
         }
     }
 
@@ -63,7 +67,7 @@ impl HopperTarget<'_> {
             return false;
         }
         match self {
-            Self::Plain(_) => true,
+            Self::Plain(_) | Self::Hopper(_) => true,
             Self::Worldly(w) => w.can_place_item_through_face(slot, stack, direction),
         }
     }
@@ -78,7 +82,7 @@ impl HopperTarget<'_> {
             return false;
         }
         match self {
-            Self::Plain(_) => true,
+            Self::Plain(_) | Self::Hopper(_) => true,
             Self::Worldly(w) => w.can_take_item_through_face(slot, stack, direction),
         }
     }
@@ -153,15 +157,24 @@ impl HopperBlockEntity {
     /// uninserted remainder.
     pub fn add_item(
         dest: &mut HopperTarget<'_>,
+        stack: InventoryItemStack,
+        direction: Option<Direction>,
+    ) -> InventoryItemStack {
+        Self::add_item_with_source_tick(dest, stack, direction, None)
+    }
+
+    fn add_item_with_source_tick(
+        dest: &mut HopperTarget<'_>,
         mut stack: InventoryItemStack,
         direction: Option<Direction>,
+        from_ticked_game_time: Option<i64>,
     ) -> InventoryItemStack {
         let slots = dest.slots_for_face(direction);
         for slot in slots {
             if stack.is_empty() {
                 break;
             }
-            stack = Self::try_move_in_item(dest, stack, slot, direction);
+            stack = Self::try_move_in_item(dest, stack, slot, direction, from_ticked_game_time);
         }
         stack
     }
@@ -172,11 +185,13 @@ impl HopperBlockEntity {
         mut stack: InventoryItemStack,
         slot: usize,
         direction: Option<Direction>,
+        from_ticked_game_time: Option<i64>,
     ) -> InventoryItemStack {
         if !dest.can_place_in_container(&stack, slot, direction) {
             return stack;
         }
 
+        let was_empty = dest.container().is_empty();
         let current = dest.container().get_item(slot).clone();
         let mut moved = false;
 
@@ -207,6 +222,16 @@ impl HopperBlockEntity {
         }
 
         if moved {
+            if was_empty
+                && let HopperTarget::Hopper(dest_hopper) = dest
+                && !dest_hopper.is_on_custom_cooldown()
+            {
+                let skip_tick_count = match from_ticked_game_time {
+                    Some(from_time) if dest_hopper.ticked_game_time >= from_time => 1,
+                    _ => 0,
+                };
+                dest_hopper.set_cooldown(MOVE_ITEM_SPEED.wrapping_sub(skip_tick_count));
+            }
             dest.container_mut().set_changed();
         }
         stack
@@ -230,7 +255,12 @@ impl HopperBlockEntity {
             }
             let original = self.items[slot].clone();
             let extracted = self.remove_item(slot, hopper_amount);
-            let remainder = Self::add_item(dest, extracted, Some(insert_face));
+            let remainder = Self::add_item_with_source_tick(
+                dest,
+                extracted,
+                Some(insert_face),
+                Some(self.ticked_game_time),
+            );
             if remainder.is_empty() {
                 dest.container_mut().set_changed();
                 return true;

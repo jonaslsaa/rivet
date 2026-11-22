@@ -507,7 +507,9 @@ fn container_nbt_preserves_typed_item_components() {
         Some(1)
     );
     assert_eq!(
-        saved_comp.get_string("minecraft:custom_name").map(String::as_str),
+        saved_comp
+            .get_string("minecraft:custom_name")
+            .map(String::as_str),
         Some("Excalibur")
     );
 }
@@ -540,7 +542,10 @@ fn loot_table_container_clears_loot_table_on_item_mutation() {
 
     let mut restored = ChestBlockEntity::new();
     restored.load_additional(&saved);
-    assert_eq!(restored.get_item(0).item().name(), Some("minecraft:diamond"));
+    assert_eq!(
+        restored.get_item(0).item().name(),
+        Some("minecraft:diamond")
+    );
     assert_eq!(restored.get_item(0).get_count(), 3);
 }
 
@@ -604,7 +609,10 @@ fn furnace_preserves_components_and_max_stack_size_in_recipes() {
 
     // Matching component-bearing input DOES cook and preserves result components and max_stack_size=1.
     let mut inv_comps = ComponentMap::new();
-    inv_comps.insert("minecraft:custom_name".to_string(), "Blessed Ore".to_string());
+    inv_comps.insert(
+        "minecraft:custom_name".to_string(),
+        "Blessed Ore".to_string(),
+    );
     let tagged_input = stack("minecraft:raw_iron", 2).with_components(inv_comps);
     furnace.set_item_with_recipes(SLOT_INPUT, tagged_input, &manager);
     for _ in 0..10 {
@@ -671,11 +679,17 @@ fn furnace_hopper_inserted_input_recomputes_cook_time_and_multiplier() {
 fn fuel_values_expands_vanilla_tags_and_removes_non_flammable_wood() {
     let fuel = FuelValues::vanilla_burn_times();
 
-    assert_eq!(fuel.burn_duration(&stack("minecraft:stripped_oak_log", 1)), 300);
+    assert_eq!(
+        fuel.burn_duration(&stack("minecraft:stripped_oak_log", 1)),
+        300
+    );
     assert_eq!(fuel.burn_duration(&stack("minecraft:red_wool", 1)), 100);
     assert_eq!(fuel.burn_duration(&stack("minecraft:red_carpet", 1)), 67);
     assert_eq!(fuel.burn_duration(&stack("minecraft:spruce_door", 1)), 200);
-    assert_eq!(fuel.burn_duration(&stack("minecraft:oak_hanging_sign", 1)), 800);
+    assert_eq!(
+        fuel.burn_duration(&stack("minecraft:oak_hanging_sign", 1)),
+        800
+    );
     assert_eq!(fuel.burn_duration(&stack("minecraft:white_banner", 1)), 300);
     assert_eq!(fuel.burn_duration(&stack("minecraft:dead_bush", 1)), 100);
 
@@ -683,4 +697,46 @@ fn fuel_values_expands_vanilla_tags_and_removes_non_flammable_wood() {
     assert!(!fuel.is_fuel(&stack("minecraft:crimson_planks", 1)));
     assert!(!fuel.is_fuel(&stack("minecraft:warped_stem", 1)));
     assert!(!fuel.is_fuel(&stack("minecraft:crimson_door", 1)));
+}
+
+#[test]
+fn hopper_chain_sets_receiving_empty_hopper_cooldown() {
+    // Case 1: receiving hopper has not ticked yet this tick (dest.ticked_game_time < from.ticked_game_time)
+    // -> cooldown set to MOVE_ITEM_SPEED (8).
+    let mut upstream = HopperBlockEntity::new(Direction::East);
+    upstream.ticked_game_time = 100;
+    upstream.set_item(0, stack("minecraft:stone", 2));
+
+    let mut downstream = HopperBlockEntity::new(Direction::East);
+    downstream.ticked_game_time = 99;
+    downstream.cooldown_time = 0;
+
+    assert!(upstream.eject_items(&mut HopperTarget::Hopper(&mut downstream), 1));
+    assert_eq!(downstream.get_item(0).get_count(), 1);
+    assert_eq!(downstream.cooldown_time, MOVE_ITEM_SPEED);
+
+    // Downstream must not immediately forward the item on the same tick.
+    let mut sink = ChestBlockEntity::new();
+    assert!(!downstream.push_items_tick(100, Some(&mut HopperTarget::Plain(&mut sink)), None));
+    assert!(sink.is_empty());
+
+    // Case 2: receiving hopper already ticked on the same game tick
+    // (dest.ticked_game_time >= from.ticked_game_time) -> skip_tick_count = 1 -> cooldown = 7.
+    let mut downstream_same_tick = HopperBlockEntity::new(Direction::East);
+    downstream_same_tick.ticked_game_time = 100;
+    downstream_same_tick.cooldown_time = 0;
+
+    assert!(upstream.eject_items(&mut HopperTarget::Hopper(&mut downstream_same_tick), 1));
+    assert_eq!(downstream_same_tick.cooldown_time, MOVE_ITEM_SPEED - 1);
+
+    // Case 3: custom cooldown (> 8) is preserved.
+    let mut upstream2 = HopperBlockEntity::new(Direction::East);
+    upstream2.ticked_game_time = 100;
+    upstream2.set_item(0, stack("minecraft:stone", 1));
+
+    let mut custom_cd_hopper = HopperBlockEntity::new(Direction::East);
+    custom_cd_hopper.ticked_game_time = 99;
+    custom_cd_hopper.set_cooldown(20);
+    assert!(upstream2.eject_items(&mut HopperTarget::Hopper(&mut custom_cd_hopper), 1));
+    assert_eq!(custom_cd_hopper.cooldown_time, 20);
 }
