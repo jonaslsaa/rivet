@@ -412,12 +412,12 @@ impl DyeRecipe {
             || stack.item().name().ends_with("_dye")
     }
 
-    fn dye_name(stack: &ItemStack) -> String {
+    fn dye_name(stack: &ItemStack) -> &str {
         if let Some(dye) = stack
             .components()
             .get(&Identifier::with_default_namespace("dye"))
         {
-            return dye.clone();
+            return dye.as_str();
         }
         stack
             .item()
@@ -425,7 +425,95 @@ impl DyeRecipe {
             .strip_prefix("minecraft:")
             .and_then(|s| s.strip_suffix("_dye"))
             .unwrap_or("white")
-            .to_owned()
+    }
+
+    /// Paper `DyeColor.getTextureDiffuseColor()` RGB values (opaque 24-bit RGB).
+    fn dye_texture_diffuse_rgb(name: &str) -> i32 {
+        match name {
+            "white" => 16_383_998,
+            "orange" => 16_351_261,
+            "magenta" => 13_061_821,
+            "light_blue" => 3_847_130,
+            "yellow" => 16_701_501,
+            "lime" => 8_439_583,
+            "pink" => 15_961_002,
+            "gray" => 4_673_362,
+            "light_gray" => 10_329_495,
+            "cyan" => 1_481_884,
+            "purple" => 8_991_416,
+            "blue" => 3_949_738,
+            "brown" => 8_606_770,
+            "green" => 6_192_150,
+            "red" => 11_546_150,
+            "black" => 1_908_001,
+            _ => 16_383_998, // DyeColor.WHITE default
+        }
+    }
+
+    fn parse_dyed_color_rgb(raw: &str) -> Option<i32> {
+        let trimmed = raw.trim();
+        if let Ok(rgb) = trimmed.parse::<i32>() {
+            return Some(rgb & 0x00FF_FFFF);
+        }
+        if let Some(hex) = trimmed.strip_prefix('#')
+            && let Ok(rgb) = i32::from_str_radix(hex, 16)
+        {
+            return Some(rgb & 0x00FF_FFFF);
+        }
+        if let Ok(serde_json::Value::Object(map)) =
+            serde_json::from_str::<serde_json::Value>(trimmed)
+            && let Some(rgb) = map.get("rgb").and_then(serde_json::Value::as_i64)
+        {
+            return Some((rgb as i32) & 0x00FF_FFFF);
+        }
+        None
+    }
+
+    /// Exact port of Paper `DyedItemColor.applyDyes(DyedItemColor, List<DyeColor>)`.
+    fn apply_dyes(current_rgb: Option<i32>, dye_rgbs: &[i32]) -> i32 {
+        let mut red_total = 0_i32;
+        let mut green_total = 0_i32;
+        let mut blue_total = 0_i32;
+        let mut intensity_total = 0_i32;
+        let mut color_count = 0_i32;
+
+        if let Some(rgb) = current_rgb {
+            let red = (rgb >> 16) & 0xFF;
+            let green = (rgb >> 8) & 0xFF;
+            let blue = rgb & 0xFF;
+            intensity_total = intensity_total.wrapping_add(red.max(green.max(blue)));
+            red_total = red_total.wrapping_add(red);
+            green_total = green_total.wrapping_add(green);
+            blue_total = blue_total.wrapping_add(blue);
+            color_count = color_count.wrapping_add(1);
+        }
+
+        for &color in dye_rgbs {
+            let red = (color >> 16) & 0xFF;
+            let green = (color >> 8) & 0xFF;
+            let blue = color & 0xFF;
+            intensity_total = intensity_total.wrapping_add(red.max(green.max(blue)));
+            red_total = red_total.wrapping_add(red);
+            green_total = green_total.wrapping_add(green);
+            blue_total = blue_total.wrapping_add(blue);
+            color_count = color_count.wrapping_add(1);
+        }
+
+        if color_count == 0 {
+            return 0;
+        }
+
+        let mut red = red_total / color_count;
+        let mut green = green_total / color_count;
+        let mut blue = blue_total / color_count;
+        let average_intensity = intensity_total as f32 / color_count as f32;
+        let result_intensity = red.max(green.max(blue)) as f32;
+        if result_intensity > 0.0 {
+            red = (red as f32 * average_intensity / result_intensity) as i32;
+            green = (green as f32 * average_intensity / result_intensity) as i32;
+            blue = (blue as f32 * average_intensity / result_intensity) as i32;
+        }
+        ((red & 0xFF) << 16) | ((green & 0xFF) << 8) | (blue & 0xFF)
     }
 
     /// `DyeRecipe.matches(CraftingInput, Level)`.
@@ -456,7 +544,7 @@ impl DyeRecipe {
 
     /// `DyeRecipe.assemble(CraftingInput)`.
     pub fn assemble(&self, input: &CraftingInput) -> ItemStack {
-        let mut dyes = Vec::new();
+        let mut dye_rgbs = Vec::new();
         let mut target_stack: Option<&ItemStack> = None;
         for slot in 0..input.size() {
             let stack = input.get_item(slot);
@@ -470,23 +558,24 @@ impl DyeRecipe {
                     if !self.dye.test(stack) {
                         return ItemStack::empty();
                     }
-                    dyes.push(Self::dye_name(stack));
+                    dye_rgbs.push(Self::dye_texture_diffuse_rgb(Self::dye_name(stack)));
                 }
             }
         }
         let Some(target) = target_stack else {
             return ItemStack::empty();
         };
-        if dyes.is_empty() {
+        if dye_rgbs.is_empty() {
             return ItemStack::empty();
         }
-        let mut out = self.result.create_with_original_components(target);
         let dyed_key = Identifier::with_default_namespace("dyed_color");
-        let combined = match out.components().get(&dyed_key) {
-            Some(prev) if !prev.is_empty() => format!("{prev}+{}", dyes.join("+")),
-            _ => dyes.join("+"),
-        };
-        out.components_mut().insert(dyed_key, combined);
+        let current_rgb = target
+            .components()
+            .get(&dyed_key)
+            .and_then(|raw| Self::parse_dyed_color_rgb(raw));
+        let new_rgb = Self::apply_dyes(current_rgb, &dye_rgbs);
+        let mut out = self.result.create_with_original_components(target);
+        out.components_mut().insert(dyed_key, new_rgb.to_string());
         out
     }
 

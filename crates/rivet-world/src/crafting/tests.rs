@@ -810,7 +810,7 @@ fn json_dye_imbue_transmute_recipes_are_normal_and_discoverable() {
         "type": "minecraft:crafting_dye",
         "category": "equipment",
         "target": "minecraft:leather_helmet",
-        "dye": "minecraft:red_dye",
+        "dye": ["minecraft:red_dye", "minecraft:blue_dye"],
         "result": "minecraft:leather_helmet"
     });
     let dye_recipe = parse_recipe_json(&dye_json, &empty_tag_resolver).unwrap();
@@ -820,11 +820,24 @@ fn json_dye_imbue_transmute_recipes_are_normal_and_discoverable() {
     assert!(dye_recipe.matches_crafting(&dye_input));
     let dyed = dye_recipe.assemble_crafting(&dye_input).unwrap();
     assert_eq!(dyed.item(), item("leather_helmet"));
+    // Paper DyeColor.RED.getTextureDiffuseColor() == 11546150 (0xB02E26)
     assert_eq!(
         dyed.components()
             .get(&Identifier::with_default_namespace("dyed_color"))
             .map(String::as_str),
-        Some("red")
+        Some("11546150")
+    );
+    // Mixing red (0xB02E26) + blue (0x3C44AA) via Paper DyedItemColor.applyDyes:
+    // r=(176+60)/2=118, g=(46+68)/2=57, b=(38+170)/2=104; avgIntensity=(176+170)/2=173, resIntensity=118
+    // -> r=173, g=(int)(57*173/118)=83, b=(int)(104*173/118)=152 -> (173<<16)|(83<<8)|152 = 11359128
+    let re_dyed_input = CraftingInput::of(2, 1, vec![dyed, stack("blue_dye", 1)]);
+    let re_dyed = dye_recipe.assemble_crafting(&re_dyed_input).unwrap();
+    assert_eq!(
+        re_dyed
+            .components()
+            .get(&Identifier::with_default_namespace("dyed_color"))
+            .map(String::as_str),
+        Some("11359128")
     );
 
     let imbue_json = json!({
