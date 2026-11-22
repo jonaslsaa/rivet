@@ -14,6 +14,7 @@
 
 pub mod blocks;
 pub mod bubble_column_block;
+pub mod drops;
 pub mod liquid_block;
 /// `net.minecraft.world.level.block.state` — the package mirror hosting the
 /// `state.predicate` sub-package (issue #228); the `BlockState`/`StateDefinition`
