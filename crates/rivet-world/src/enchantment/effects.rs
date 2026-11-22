@@ -535,16 +535,22 @@ pub struct EnchantmentEvalContext {
     pub can_see_sky: bool,
     /// Whether the `direct_attacker` position can see the sky.
     pub direct_attacker_can_see_sky: Option<bool>,
+    /// Whether the `attacker` position can see the sky.
+    pub attacker_can_see_sky: Option<bool>,
     /// Whether the `this` entity is on the ground.
     pub on_ground: Option<bool>,
     /// Whether the `direct_attacker` entity is on the ground.
     pub direct_attacker_on_ground: Option<bool>,
+    /// Whether the `attacker` entity is on the ground.
+    pub attacker_on_ground: Option<bool>,
     /// Optional explicit damage tags active on the damage source (overrides/extends static table).
     pub extra_damage_tags: Vec<String>,
     /// Optional explicit entity tags active on the `this` entity (overrides/extends static table).
     pub extra_entity_tags: Vec<String>,
     /// Optional explicit entity tags active on the `direct_attacker` entity.
     pub extra_direct_attacker_tags: Vec<String>,
+    /// Optional explicit entity tags active on the `attacker` entity.
+    pub extra_attacker_tags: Vec<String>,
 }
 
 impl EnchantmentEvalContext {
@@ -570,7 +576,9 @@ impl EnchantmentEvalContext {
             }
             LootContextEntityTarget::Attacker
             | LootContextEntityTarget::AttackingPlayer
-            | LootContextEntityTarget::InteractingEntity => (&self.attacker_type, &[]),
+            | LootContextEntityTarget::InteractingEntity => {
+                (&self.attacker_type, &self.extra_attacker_tags)
+            }
         };
         let Some(et) = entity_type else {
             return false;
@@ -596,15 +604,23 @@ impl EnchantmentEvalContext {
 
     fn on_ground_for(&self, target: LootContextEntityTarget) -> Option<bool> {
         match target {
+            LootContextEntityTarget::This | LootContextEntityTarget::TargetEntity => self.on_ground,
             LootContextEntityTarget::DirectAttacker => self.direct_attacker_on_ground,
-            _ => self.on_ground,
+            LootContextEntityTarget::Attacker
+            | LootContextEntityTarget::AttackingPlayer
+            | LootContextEntityTarget::InteractingEntity => self.attacker_on_ground,
         }
     }
 
     fn can_see_sky_for(&self, target: LootContextEntityTarget) -> Option<bool> {
         match target {
+            LootContextEntityTarget::This | LootContextEntityTarget::TargetEntity => {
+                Some(self.can_see_sky)
+            }
             LootContextEntityTarget::DirectAttacker => self.direct_attacker_can_see_sky,
-            _ => Some(self.can_see_sky),
+            LootContextEntityTarget::Attacker
+            | LootContextEntityTarget::AttackingPlayer
+            | LootContextEntityTarget::InteractingEntity => self.attacker_can_see_sky,
         }
     }
 

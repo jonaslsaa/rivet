@@ -591,6 +591,30 @@ mod tests {
             "Power must not boost damage when direct_attacker is not an arrow, got {unboosted}"
         );
 
+        // Attacker predicates must check attacker_on_ground / attacker_can_see_sky, not victim's.
+        let attacker_grounded_cond = EffectCondition::EntityProperties {
+            entity: LootContextEntityTarget::Attacker,
+            entity_type: Some("minecraft:player".to_owned()),
+            on_ground: Some(true),
+            can_see_sky: Some(true),
+        };
+        let airborne_attacker_grounded_victim = EnchantmentEvalContext {
+            entity_type: Some(id("zombie")),
+            on_ground: Some(true),
+            can_see_sky: true,
+            attacker_type: Some(id("player")),
+            attacker_on_ground: Some(false),
+            attacker_can_see_sky: Some(false),
+            ..Default::default()
+        };
+        assert!(!attacker_grounded_cond.matches(&airborne_attacker_grounded_victim, &mut rng));
+        let grounded_attacker = EnchantmentEvalContext {
+            attacker_on_ground: Some(true),
+            attacker_can_see_sky: Some(true),
+            ..airborne_attacker_grounded_victim
+        };
+        assert!(attacker_grounded_cond.matches(&grounded_attacker, &mut rng));
+
         // Findings 2 & 3: Soul Speed decodes on_ground from `flags.is_on_ground`
         // and preserves FloatProvider distributions on PlaySound.
         let soul_speed = reg.get(&id("soul_speed")).expect("soul_speed exists");
