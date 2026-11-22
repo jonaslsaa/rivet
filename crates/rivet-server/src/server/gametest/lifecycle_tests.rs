@@ -1152,3 +1152,42 @@ fn deterministic_repeated_runs_produce_identical_transcripts() {
     let t2 = run_once();
     assert_eq!(t1, t2);
 }
+
+#[test]
+fn sequence_terminal_failures_fail_immediately_instead_of_retrying() {
+    // 1) then_execute assertion error fails immediately instead of retrying.
+    let mut seq = GameTestSequence::new()
+        .then_execute(|tick| Err(GameTestException::assert("execute boom", tick)))
+        .then_succeed();
+    let err = seq.tick_and_continue(0);
+    assert!(
+        err.is_some() && err.as_ref().unwrap().message().contains("execute boom"),
+        "then_execute error must fail immediately, got: {err:?}"
+    );
+    assert_eq!(seq.take_completed_effect(), None);
+
+    // 2) then_fail fails immediately instead of being swallowed as a wait.
+    let mut seq = GameTestSequence::new()
+        .then_fail(|| GameTestException::assert("explicit fail", 0))
+        .then_succeed();
+    let err = seq.tick_and_continue(0);
+    assert!(
+        err.is_some() && err.as_ref().unwrap().message().contains("explicit fail"),
+        "then_fail must fail immediately, got: {err:?}"
+    );
+
+    // 3) expected_delay mismatch fails immediately instead of popping and letting then_succeed pass.
+    let mut seq = GameTestSequence::new()
+        .then_wait_until_at(5, |_| Ok(()))
+        .then_succeed();
+    let err = seq.tick_and_continue(2);
+    assert!(
+        err.is_some()
+            && err
+                .as_ref()
+                .unwrap()
+                .message()
+                .contains("Succeeded in invalid tick: expected 5, but current tick is 2"),
+        "expected_delay mismatch must fail immediately, got: {err:?}"
+    );
+}
