@@ -8,27 +8,27 @@
 //! `getSerializedSize()` = `4 + states.getSerializedSize() +
 //! biomes.getSerializedSize()`.
 //!
-//! The Paper block-counting (`moonrise$countEntries`) fields are ported
-//! (issue #216): `specialCollidingBlocks` (a predicate-count shortcut) and the
-//! `tickingBlocks` coordinate list are fed by `recalcBlockCounts`'s storage
-//! walk, and `read()` adopts Java's client-side forced-special-colliding
-//! behavior. `specialCollidingBlocks` is never observable from the wire — it
-//! only drives the Moonrise collision fast path — so the `is_special_colliding`
-//! predicate is parameterized like `is_air`: every constructor takes the
-//! caller's real `BlockBehaviour` predicates (there is no placeholder default
-//! that silently zeroes the ticking/special-colliding fields). The superflat
-//! callers wire the generated behavior table where it covers a flag and
-//! exact-for-content stand-ins where it does not.
+//! The Paper block-counting (`moonrise$countEntries`) fields, client-side
+//! `isClient` flag/shortcut, and Anti-Xray `chunkPacketInfo`/`chunkSectionIndex`
+//! write path are ported (issues #216, #692): `specialCollidingBlocks` (a
+//! predicate-count shortcut) and the `tickingBlocks` coordinate list are fed by
+//! `recalcBlockCounts`'s storage walk, `read()` sets `isClient = true` and
+//! adopts Java's client-side forced-special-colliding behavior, and
+//! `setBlockState`'s `updateBlockCallback` honors the `isClient` branch.
+//! `specialCollidingBlocks` is never observable from the wire — it only drives
+//! the Moonrise collision fast path — so the `is_special_colliding` predicate
+//! is parameterized like `is_air`: every constructor takes the caller's real
+//! `BlockBehaviour` predicates (there is no placeholder default that silently
+//! zeroes the ticking/special-colliding fields). The superflat callers wire the
+//! generated behavior table where it covers a flag and exact-for-content
+//! stand-ins where it does not.
 //!
-//! Deferred with the owning unit: the Anti-Xray `chunkPacketInfo`/
-//! `chunkSectionIndex` write params (with `paper.antixray`), the fluid
-//! set/accessors (with the fluid-state unit), and `setBlockState`'s client-side
-//! `isClient` shortcut (the section has no client flag; the worldgen `doFill`
-//! write path uses `checkThreading = false`, so the non-client branch is the
-//! only one this port's [`set_block_state`](Self::set_block_state) reaches).
+//! Deferred with the owning unit: the fluid set/accessors (with the fluid-state
+//! unit).
 
 use crate::biome::biome_resolver::BiomeResolver;
 use crate::biome::climate::Sampler;
+use crate::chunk::chunk_packet_info::ChunkPacketInfo;
 use crate::chunk::moonrise_short_list::ShortList;
 use crate::chunk::paletted_container::PalettedContainer;
 use crate::chunk::strategy::Strategy;
@@ -79,6 +79,9 @@ pub struct LevelChunkSection<
     /// `tickingBlocks` — the Moonrise insertion-ordered list of packed
     /// positions (`x | z<<4 | y<<8`) of randomly-ticking blocks.
     ticking_blocks: ShortList,
+    /// `isClient` — set by `read()` to mirror Paper's Moonrise client-side
+    /// section flag; governs `updateBlockCallback` in `set_block_state`.
+    is_client: bool,
 }
 
 impl<
@@ -116,6 +119,7 @@ impl<
             biomes,
             special_colliding_blocks: 0,
             ticking_blocks: ShortList::new(),
+            is_client: false,
         };
         section.recalc_block_counts(
             &is_air,
@@ -144,11 +148,12 @@ impl<
             biomes,
             special_colliding_blocks: 0,
             ticking_blocks: ShortList::new(),
+            is_client: false,
         }
     }
 
-    /// Copy this section as an owned value, including cached counts and the
-    /// Moonrise ticking-position list.
+    /// Copy this section as an owned value, including cached counts, the
+    /// Moonrise ticking-position list, and the `is_client` flag.
     pub fn copy(&self) -> Self {
         Self {
             non_empty_block_count: self.non_empty_block_count,
@@ -159,6 +164,7 @@ impl<
             biomes: self.biomes.copy(),
             special_colliding_blocks: self.special_colliding_blocks,
             ticking_blocks: self.ticking_blocks.clone(),
+            is_client: self.is_client,
         }
     }
 
@@ -190,6 +196,7 @@ impl<
             biomes,
             special_colliding_blocks,
             ticking_blocks,
+            is_client,
         } = self;
         let states: PalettedContainer<T2> = states.map_values(block_strategy, map_block)?;
         let biomes: PalettedContainer<B2> = biomes.map_values(biome_strategy, map_biome)?;
@@ -202,6 +209,7 @@ impl<
             biomes,
             special_colliding_blocks,
             ticking_blocks,
+            is_client,
         })
     }
 
@@ -228,7 +236,13 @@ impl<
             biomes: self.biomes.map_values(biome_strategy, map_biome)?,
             special_colliding_blocks: self.special_colliding_blocks,
             ticking_blocks: self.ticking_blocks.clone(),
+            is_client: self.is_client,
         })
+    }
+
+    /// Paper Moonrise `isClient` flag (true after `read()`).
+    pub fn is_client(&self) -> bool {
+        self.is_client
     }
 
     /// `getBlockState(int, int, int)`.
@@ -257,14 +271,10 @@ impl<
     /// The count bookkeeping is ported exactly: Java decrements the previous
     /// state's counts (non-empty, randomly-ticking block, fluid, randomly-
     /// ticking fluid) and increments the new state's, then runs Paper's
-    /// `updateBlockCallback` (special-colliding tally + the `tickingBlocks`
-    /// list). The `isClient` branch of `updateBlockCallback` is unreachable
-    /// here (no client flag — see the module doc); the special-colliding and
-    /// randomly-ticking branches use the same caller-supplied predicates
-    /// [`new`](Self::new)/`recalc_block_counts` take, so the write stays
-    /// faithful to the caller's real `BlockBehaviour` flags. `checkThreading`
-    /// itself is omitted (Paper's `getAndSet`/`getAndSetUnchecked` differ only
-    /// by the acquire/release no-ops, which [`get_and_set`] already omits).
+    /// `updateBlockCallback` (honoring the `isClient` shortcut when `is_client`
+    /// is true, otherwise updating `specialCollidingBlocks` and `tickingBlocks`).
+    /// `checkThreading` itself is omitted (Paper's `getAndSet`/`getAndSetUnchecked`
+    /// differ only by the acquire/release no-ops, which [`get_and_set`] already omits).
     ///
     /// Returns the previous state, matching Java.
     #[allow(clippy::too_many_arguments)] // Java's `setBlockState` has 7 params + the `BlockBehaviour` predicate set.
@@ -313,6 +323,12 @@ impl<
         }
         // `updateBlockCallback(x, y, z, state, previous)`.
         if previous != state {
+            if self.is_client {
+                if is_special_colliding(&state) {
+                    self.special_colliding_blocks = CLIENT_FORCED_SPECIAL_COLLIDING_BLOCKS;
+                }
+                return previous;
+            }
             let is_special_old = is_special_colliding(&previous);
             let is_special_new = is_special_colliding(&state);
             if is_special_old != is_special_new {
@@ -497,13 +513,14 @@ impl<
         self.special_colliding_blocks = 0;
         self.ticking_blocks.clear();
         if self.states.maybe_has(|state| !is_air(state)) {
-            // Tally into locals so the closures do not capture `self` while
-            // `self.states` is borrowed; the fields are updated after.
-            let mut non_empty = 0i32;
-            let mut fluid = 0i32;
-            let mut ticking_block = 0i32;
-            let mut ticking_fluid = 0i32;
-            let mut special_colliding = 0i32;
+            // Tally into `i16` locals with Java-exact wrapping addition so
+            // closures do not capture `self` while `self.states` is borrowed;
+            // the fields are updated after.
+            let mut non_empty = 0i16;
+            let mut fluid = 0i16;
+            let mut ticking_block = 0i16;
+            let mut ticking_fluid = 0i16;
+            let mut special_colliding = 0i16;
 
             let palette_size = self.states.palette_size();
             // Java's `paletteSize == 1` fast path reuses the static `FULL_LIST`
@@ -523,17 +540,17 @@ impl<
             };
 
             for (palette_idx, coordinates) in counts {
-                let palette_count = coordinates.len() as i32;
+                let palette_count = coordinates.len() as i16;
                 let state = self.states.value_for_palette(palette_idx);
                 if is_air(&state) {
                     continue;
                 }
-                non_empty += palette_count;
+                non_empty = non_empty.wrapping_add(palette_count);
                 if is_special_colliding(&state) {
-                    special_colliding += palette_count;
+                    special_colliding = special_colliding.wrapping_add(palette_count);
                 }
                 if is_randomly_ticking(&state) {
-                    ticking_block += palette_count;
+                    ticking_block = ticking_block.wrapping_add(palette_count);
                     // Java's setMinCapacity(Math.min((rawLen + size) * 3 / 2,
                     // 16*16*16)) — a capacity-only allocation hint; its exact
                     // value is unobservable (`ShortList` contents never change).
@@ -549,21 +566,21 @@ impl<
                     }
                 }
                 if !fluid_is_empty(&state) {
-                    fluid += palette_count;
+                    fluid = fluid.wrapping_add(palette_count);
                     // Paper uses the fluid state's own random-tick predicate
                     // (`fluid.isRandomlyTicking()`), distinct from the block
                     // state's — threaded separately.
                     if fluid_is_randomly_ticking(&state) {
-                        ticking_fluid += palette_count;
+                        ticking_fluid = ticking_fluid.wrapping_add(palette_count);
                     }
                 }
             }
 
-            self.non_empty_block_count = non_empty as i16;
-            self.fluid_count = fluid as i16;
-            self.ticking_block_count = ticking_block as i16;
-            self.ticking_fluid_count = ticking_fluid as i16;
-            self.special_colliding_blocks = special_colliding as i16;
+            self.non_empty_block_count = non_empty;
+            self.fluid_count = fluid;
+            self.ticking_block_count = ticking_block;
+            self.ticking_fluid_count = ticking_fluid;
+            self.special_colliding_blocks = special_colliding;
         }
     }
 
@@ -573,26 +590,40 @@ impl<
         4 + self.states.get_serialized_size() + self.biomes.get_serialized_size()
     }
 
-    /// `write(FriendlyByteBuf, ...)` — the wire form. Java's Anti-Xray
-    /// `chunkPacketInfo`/`chunkSectionIndex` parameters are a no-op for the
-    /// superflat send path (deferred with Anti-Xray).
-    pub fn write(&self, buffer: &mut FriendlyByteBuf) {
+    /// `write(FriendlyByteBuf, @Nullable ChunkPacketInfo<BlockState>, int chunkSectionIndex)`
+    /// (Paper Anti-Xray).
+    ///
+    /// Writes `nonEmptyBlockCount`, `fluidCount`, block states (forwarding
+    /// `chunk_packet_info` and `chunk_section_index`), and biomes (always
+    /// passing `None` for `chunk_packet_info`, matching Paper's
+    /// `this.biomes.write(buffer, null, chunkSectionIndex)`).
+    pub fn write_with_info(
+        &self,
+        buffer: &mut FriendlyByteBuf,
+        chunk_packet_info: Option<&mut ChunkPacketInfo<T>>,
+        chunk_section_index: usize,
+    ) {
         buffer.write_short(self.non_empty_block_count);
         buffer.write_short(self.fluid_count);
-        self.states.write(buffer);
-        self.biomes.write(buffer);
+        self.states
+            .write_with_info(buffer, chunk_packet_info, chunk_section_index);
+        self.biomes
+            .write_with_info(buffer, None, chunk_section_index);
+    }
+
+    /// `write(FriendlyByteBuf)` — the wire form with no Anti-Xray metadata.
+    pub fn write(&self, buffer: &mut FriendlyByteBuf) {
+        self.write_with_info(buffer, None, 0);
     }
 
     /// `read(FriendlyByteBuf)` — adopts the wire containers and the wire counts
-    /// (Java does not recalc on read). Java's read sets `isClient = true`
-    /// (stored only for its `setBlockState` client-side shortcut, which the
-    /// port defers) and forces `specialCollidingBlocks` to the
-    /// `CLIENT_FORCED_SPECIAL_COLLIDING_BLOCKS` sentinel when the section has
-    /// any non-empty block and `maybeHas` a special-colliding state, else 0.
-    /// Java leaves `tickingBlocks` untouched on read — a read-in client
-    /// section's list is repopulated only by a later `recalcBlockCounts` or a
-    /// block mutation. The port's read-in sections are freshly constructed, so
-    /// the list stays empty, matching Java's read-in state.
+    /// (Java does not recalc on read). Sets `isClient = true` and forces
+    /// `specialCollidingBlocks` to `CLIENT_FORCED_SPECIAL_COLLIDING_BLOCKS`
+    /// when the section has any non-empty block and `maybeHas` a
+    /// special-colliding state, else 0. Java leaves `tickingBlocks` untouched
+    /// on read — a read-in client section's list is repopulated only by a
+    /// later `recalcBlockCounts` (not by `setBlockState`, which takes the
+    /// `isClient` early return).
     ///
     /// `is_special_colliding` is the caller's `CollisionUtil.isSpecialCollidingBlock`
     /// equivalent — the section is generic over `T`, so the real `BlockBehaviour`
@@ -608,6 +639,7 @@ impl<
         let mut biomes = self.biomes.recreate();
         biomes.read(buffer);
         self.biomes = biomes;
+        self.is_client = true;
         self.special_colliding_blocks = if self.non_empty_block_count != 0
             && self.states.maybe_has(|state| is_special_colliding(state))
         {
@@ -1142,5 +1174,280 @@ mod tests {
         // Neighboring cells are untouched.
         assert_eq!(section.get_noise_biome(0, 2, 3), 0);
         assert_eq!(section.get_noise_biome(1, 1, 3), 0);
+    }
+
+    /// Paper Moonrise `isClient` semantics (issue #692):
+    /// - Fresh sections have `is_client == false`.
+    /// - `read()` sets `is_client == true` and forces `specialCollidingBlocks`
+    ///   to `CLIENT_FORCED_SPECIAL_COLLIDING_BLOCKS` (9999) when
+    ///   `nonEmptyBlockCount != 0 && maybeHas(isSpecialColliding)`.
+    /// - Subsequent `set_block_state` on a client section takes the `isClient`
+    ///   early return in `updateBlockCallback`: it does NOT decrement
+    ///   `specialCollidingBlocks` or update `tickingBlocks`, and only forces
+    ///   `specialCollidingBlocks = 9999` if the new state is special-colliding.
+    /// - `copy()`, `map_values_ref()`, and `map_values()` preserve `is_client`.
+    #[test]
+    fn client_read_sets_is_client_and_update_block_callback_honors_client_branch() {
+        let is_air = |s: &u8| *s == 0;
+        let is_ticking = |s: &u8| *s == 3;
+        let fluid_empty = |_: &u8| true;
+        let fluid_ticking = |_: &u8| false;
+        let is_special = |s: &u8| *s == 2;
+
+        // 1. Section containing a special-colliding block (state 2).
+        let mut src = all_air_section();
+        assert!(!src.is_client());
+        src.set_block_state(
+            1,
+            2,
+            3,
+            2,
+            &is_air,
+            &is_ticking,
+            &fluid_empty,
+            &fluid_ticking,
+            &is_special,
+        );
+        let mut buf = FriendlyByteBuf::new(BytesMut::new());
+        src.write(&mut buf);
+
+        let mut client = all_air_section();
+        client.read(&mut buf, &is_special);
+        assert!(client.is_client());
+        assert_eq!(
+            client.special_colliding_blocks,
+            CLIENT_FORCED_SPECIAL_COLLIDING_BLOCKS
+        );
+        assert!(client.has_special_colliding_blocks());
+        assert_eq!(client.ticking_blocks().size(), 0);
+
+        // Removing the special-colliding block on a client section must NOT
+        // decrement `special_colliding_blocks` (stays 9999), though
+        // `non_empty_block_count` still updates.
+        client.set_block_state(
+            1,
+            2,
+            3,
+            0,
+            &is_air,
+            &is_ticking,
+            &fluid_empty,
+            &fluid_ticking,
+            &is_special,
+        );
+        assert_eq!(client.non_empty_block_count(), 0);
+        assert_eq!(
+            client.special_colliding_blocks,
+            CLIENT_FORCED_SPECIAL_COLLIDING_BLOCKS
+        );
+
+        // Writing a randomly-ticking block (state 3) on a client section must
+        // update `ticking_block_count` but must NOT populate `ticking_blocks`.
+        client.set_block_state(
+            4,
+            5,
+            6,
+            3,
+            &is_air,
+            &is_ticking,
+            &fluid_empty,
+            &fluid_ticking,
+            &is_special,
+        );
+        assert_eq!(client.ticking_block_count(), 1);
+        assert_eq!(client.ticking_blocks().size(), 0);
+
+        // `copy`, `map_values_ref`, and `map_values` preserve `is_client`.
+        let copied = client.copy();
+        assert!(copied.is_client());
+        let mapped_ref = client
+            .map_values_ref(&block_strategy(), &biome_strategy(), &|v| *v, &|v| *v)
+            .unwrap();
+        assert!(mapped_ref.is_client());
+        let mapped = copied
+            .map_values(&block_strategy(), &biome_strategy(), &|v| *v, &|v| *v)
+            .unwrap();
+        assert!(mapped.is_client());
+
+        // 2. Client section initially read with NO special-colliding blocks.
+        let mut src_plain = all_air_section();
+        src_plain.set_block_state(
+            0,
+            0,
+            0,
+            1,
+            &is_air,
+            &is_ticking,
+            &fluid_empty,
+            &fluid_ticking,
+            &is_special,
+        );
+        let mut buf2 = FriendlyByteBuf::new(BytesMut::new());
+        src_plain.write(&mut buf2);
+
+        let mut client_plain = all_air_section();
+        client_plain.read(&mut buf2, &is_special);
+        assert!(client_plain.is_client());
+        assert_eq!(client_plain.special_colliding_blocks, 0);
+        assert!(!client_plain.has_special_colliding_blocks());
+
+        // Writing a special-colliding block forces `special_colliding_blocks`
+        // to the client sentinel (9999), not 1.
+        client_plain.set_block_state(
+            0,
+            0,
+            0,
+            2,
+            &is_air,
+            &is_ticking,
+            &fluid_empty,
+            &fluid_ticking,
+            &is_special,
+        );
+        assert_eq!(
+            client_plain.special_colliding_blocks,
+            CLIENT_FORCED_SPECIAL_COLLIDING_BLOCKS
+        );
+    }
+
+    /// Malformed wire data: `nonEmptyBlockCount == 0` with a special-colliding
+    /// block in the palette must NOT force `specialCollidingBlocks`, and
+    /// subsequent `set_block_state` replacing that block with air wraps the
+    /// `i16` counters (`0 -> -1`) with Java `short` semantics instead of
+    /// panicking.
+    #[test]
+    fn malformed_client_read_zero_count_and_wrapping_underflow() {
+        let is_air = |s: &u8| *s == 0;
+        let is_ticking = |s: &u8| *s == 2;
+        let fluid_empty = |s: &u8| *s != 2;
+        let fluid_ticking = |s: &u8| *s == 2;
+        let is_special = |s: &u8| *s == 2;
+
+        // Build a valid wire buffer for a section with state 2 at (0,0,0),
+        // then overwrite the leading `nonEmptyBlockCount` and `fluidCount`
+        // shorts to 0 to simulate malformed wire counters.
+        let mut src = all_air_section();
+        src.set_block_state(
+            0,
+            0,
+            0,
+            2,
+            &is_air,
+            &is_ticking,
+            &fluid_empty,
+            &fluid_ticking,
+            &is_special,
+        );
+        let mut buf = FriendlyByteBuf::new(BytesMut::new());
+        src.write(&mut buf);
+        let mut raw = buf.into_inner();
+        raw[0..4].copy_from_slice(&[0, 0, 0, 0]);
+        let mut malformed_buf = FriendlyByteBuf::new(raw);
+
+        let mut section = all_air_section();
+        section.read(&mut malformed_buf, &is_special);
+        assert!(section.is_client());
+        assert_eq!(section.non_empty_block_count(), 0);
+        assert_eq!(section.fluid_count(), 0);
+        assert_eq!(section.special_colliding_blocks, 0);
+
+        // Replacing state 2 with air (0) wraps both counters from 0 to -1.
+        section.set_block_state(
+            0,
+            0,
+            0,
+            0,
+            &is_air,
+            &is_ticking,
+            &fluid_empty,
+            &fluid_ticking,
+            &is_special,
+        );
+        assert_eq!(section.non_empty_block_count(), -1);
+        assert_eq!(section.fluid_count(), -1);
+        assert_eq!(section.ticking_block_count(), -1);
+        assert_eq!(section.ticking_fluid_count(), -1);
+    }
+
+    /// Paper Anti-Xray `LevelChunkSection::write_with_info` (issue #692):
+    /// - Produces identical wire bytes to `write()`.
+    /// - Records `bits` (`bits_in_memory`), `palette`, raw-storage `writerIndex`
+    ///   (immediately after the block palette and before the raw `long[]`), and
+    ///   `preset_values` on `ChunkPacketInfo<T>`.
+    /// - Passes `None` to `biomes.write_with_info` so biomes never overwrite
+    ///   the block-state metadata slot.
+    /// - Single-value (0-bit) sections record `bits = 0` (`is_written == false`),
+    ///   while multi-value sections record `bits > 0` (`is_written == true`).
+    #[test]
+    fn write_with_info_records_antixray_metadata_without_touching_biomes() {
+        let presets = vec![1u8, 2u8];
+        let mut states =
+            PalettedContainer::new_with_preset_values(0u8, block_strategy(), Some(presets.clone()));
+        states.set(0, 0, 0, 1);
+        states.set(1, 0, 0, 2);
+        let mut biomes = PalettedContainer::new(0u8, biome_strategy());
+        biomes.set(0, 0, 0, 5);
+        biomes.set(1, 0, 0, 6);
+
+        let multi_section = LevelChunkSection::new(
+            states,
+            biomes,
+            |s| *s == 0,
+            |_| false,
+            |_| true,
+            |_| false,
+            |_| false,
+        );
+        let single_section = all_air_section();
+
+        let mut plain_buf = FriendlyByteBuf::new(BytesMut::new());
+        single_section.write(&mut plain_buf);
+        multi_section.write(&mut plain_buf);
+
+        let mut info = ChunkPacketInfo::<u8>::new(3);
+        let mut info_buf = FriendlyByteBuf::new(BytesMut::new());
+        single_section.write_with_info(&mut info_buf, Some(&mut info), 0);
+        multi_section.write_with_info(&mut info_buf, Some(&mut info), 1);
+
+        let bytes = info_buf.into_inner().to_vec();
+        assert_eq!(bytes, plain_buf.into_inner().to_vec());
+
+        // Slot 0: single-value all-air section -> bits == 0, is_written == false.
+        assert_eq!(info.get_bits(0), 0);
+        assert!(!info.is_written(0));
+        assert!(info.get_palette(0).is_some());
+        assert_eq!(info.get_preset_values(0), None);
+
+        // Slot 1: multi-value section with preset_values -> Paper's Anti-Xray
+        // `onResize` widens from 4 bits (size 16) to `ceillog2(16 + 2 - 1) = 5`
+        // (`HashMapPalette`), `is_written == true`, palette has block states
+        // (0, 1, 2) and NOT biome values (5, 6), `preset_values == Some([1, 2])`.
+        assert_eq!(info.get_bits(1), 5);
+        assert!(info.is_written(1));
+        let pal = info.get_palette(1).expect("palette recorded");
+        assert_eq!(pal.get_size(), 3);
+        assert!(pal.maybe_has(&mut |v| *v == 1));
+        assert!(pal.maybe_has(&mut |v| *v == 2));
+        assert!(!pal.maybe_has(&mut |v| *v == 5));
+        assert_eq!(info.get_preset_values(1), Some(presets.as_slice()));
+
+        // Verify `get_index(1)` points to the exact start of the block raw
+        // `long[]` in `bytes`: slot 0 length + 4 (section header shorts) + 1
+        // (bits byte) + block palette serialized size.
+        let slot0_len = single_section.get_serialized_size() as usize;
+        let raw_offset = info.get_index(1) as usize;
+        let expected_raw_offset =
+            slot0_len + 4 + 1 + pal.get_serialized_size(block_strategy().global_map()) as usize;
+        assert_eq!(raw_offset, expected_raw_offset);
+        // The raw storage for 4096 5-bit entries packs 12 values per u64
+        // (`ceil(4096 / 12) = 342` longs = 2736 bytes), followed by the biome
+        // container.
+        let biome_size = multi_section.biomes.get_serialized_size() as usize;
+        assert_eq!(raw_offset + 342 * 8 + biome_size, bytes.len());
+
+        // Slot 2 was never written.
+        assert!(!info.is_written(2));
+        assert!(info.get_palette(2).is_none());
+        assert_eq!(info.get_index(2), 0);
     }
 }

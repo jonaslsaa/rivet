@@ -1345,4 +1345,85 @@ mod closure_tests {
         ));
         let _ = std::fs::remove_file(root);
     }
+
+    #[test]
+    fn closure_reports_absent_on_missing_chunk_or_text_root() {
+        let missing_chunk = temp_root("missing-chunk").join("does-not-exist");
+        let manifest = one_file_manifest("a.nbt", b"fixture");
+        assert!(matches!(
+            load_fixture_closure_from(missing_chunk.clone(), &manifest),
+            Err(ClosureError::Absent(_))
+        ));
+        let _ = std::fs::remove_dir_all(missing_chunk.parent().unwrap());
+
+        let missing_text = temp_root("missing-text").join("does-not-exist");
+        assert!(matches!(
+            load_text_fixture_closure_from(missing_text.clone(), MANIFEST_BYTES),
+            Err(ClosureError::Absent(_))
+        ));
+        let _ = std::fs::remove_dir_all(missing_text.parent().unwrap());
+    }
+
+    #[test]
+    fn closure_rejects_wrong_manifest_metadata_and_expected_counts() {
+        let root = temp_root("bad-meta");
+        let bytes = b"fixture";
+        std::fs::write(root.join("a.nbt"), bytes).unwrap();
+        let base: serde_json::Value =
+            serde_json::from_slice(&one_file_manifest("a.nbt", bytes)).unwrap();
+
+        let mut bad_format = base.clone();
+        bad_format["format"] = 2.into();
+        assert!(matches!(
+            load_fixture_closure_from(root.clone(), &serde_json::to_vec(&bad_format).unwrap()),
+            Err(ClosureError::Invalid(_))
+        ));
+
+        let mut bad_kind = base.clone();
+        bad_kind["kind"] = "wrong-kind".into();
+        assert!(matches!(
+            load_fixture_closure_from(root.clone(), &serde_json::to_vec(&bad_kind).unwrap()),
+            Err(ClosureError::Invalid(_))
+        ));
+
+        let mut bad_paper = base.clone();
+        bad_paper["paper"] = "26.2-DEV-main@0000000".into();
+        assert!(matches!(
+            load_fixture_closure_from(root.clone(), &serde_json::to_vec(&bad_paper).unwrap()),
+            Err(ClosureError::Invalid(_))
+        ));
+
+        let mut bad_count = base;
+        bad_count["expected"]["chunk_nbt"] = 2.into();
+        assert!(matches!(
+            load_fixture_closure_from(root.clone(), &serde_json::to_vec(&bad_count).unwrap()),
+            Err(ClosureError::Invalid(_))
+        ));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn closure_rejects_unreadable_manifest_entry() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temp_root("unreadable");
+        let bytes = b"fixture";
+        let file = root.join("a.nbt");
+        std::fs::write(&file, bytes).unwrap();
+        let manifest = one_file_manifest("a.nbt", bytes);
+
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Only assert if the OS actually denies reads (root ignores mode 000).
+        let read_denied = std::fs::File::open(&file).is_err();
+        if read_denied {
+            assert!(matches!(
+                load_fixture_closure_from(root.clone(), &manifest),
+                Err(ClosureError::Invalid(_))
+            ));
+        }
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
