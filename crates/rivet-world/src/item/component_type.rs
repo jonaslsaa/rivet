@@ -5,6 +5,7 @@
 //! All 111 vanilla data component types are sourced from
 //! `rivet_registry::generated::registries::{DATA_COMPONENT_TYPE_BY_ID, DATA_COMPONENT_TYPE_BY_NAME}`.
 
+use std::any::TypeId;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
@@ -16,7 +17,7 @@ use rivet_registry::generated::registries::{
     DATA_COMPONENT_TYPE_BY_ID, DATA_COMPONENT_TYPE_BY_NAME,
 };
 use rivet_registry::identifier::identifier_codec;
-use rivet_serialization::{DataResult, DynamicOps, Unit, codec, extra_codecs};
+use rivet_serialization::{DataResult, DynamicOps, JsonOps, Unit, codec, extra_codecs};
 
 use crate::item::component_patch::PatchedDataComponentMap;
 use crate::item::recursive_components::{
@@ -251,6 +252,9 @@ pub enum DataComponentValue {
     Bees(Vec<CompoundTag>),
     /// Generic lossless NBT value for leaf component types not yet specialized.
     RawNbt(Tag),
+    /// Generic lossless JSON value for leaf component types decoded via `JsonOps`
+    /// (preserves JSON booleans without collapsing them to NBT bytes).
+    RawJson(serde_json::Value),
 }
 
 impl PartialEq for DataComponentValue {
@@ -269,6 +273,7 @@ impl PartialEq for DataComponentValue {
             (Self::ChargedProjectiles(a), Self::ChargedProjectiles(b)) => a == b,
             (Self::Bees(a), Self::Bees(b)) => a == b,
             (Self::RawNbt(a), Self::RawNbt(b)) => a == b,
+            (Self::RawJson(a), Self::RawJson(b)) => a == b,
             _ => false,
         }
     }
@@ -312,6 +317,42 @@ fn hash_tag<H: Hasher>(tag: &Tag, state: &mut H) {
     }
 }
 
+fn hash_json<H: Hasher>(val: &serde_json::Value, state: &mut H) {
+    match val {
+        serde_json::Value::Null => 0u8.hash(state),
+        serde_json::Value::Bool(b) => {
+            1u8.hash(state);
+            b.hash(state);
+        }
+        serde_json::Value::Number(n) => {
+            2u8.hash(state);
+            n.hash(state);
+        }
+        serde_json::Value::String(s) => {
+            3u8.hash(state);
+            s.hash(state);
+        }
+        serde_json::Value::Array(arr) => {
+            4u8.hash(state);
+            arr.len().hash(state);
+            for item in arr {
+                hash_json(item, state);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            5u8.hash(state);
+            let mut acc: u64 = 0;
+            for (k, v) in map {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                k.hash(&mut h);
+                hash_json(v, &mut h);
+                acc = acc.wrapping_add(h.finish());
+            }
+            acc.hash(state);
+        }
+    }
+}
+
 impl Hash for DataComponentValue {
     fn hash<H: Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);
@@ -334,6 +375,7 @@ impl Hash for DataComponentValue {
                 }
             }
             Self::RawNbt(tag) => hash_tag(tag, state),
+            Self::RawJson(val) => hash_json(val, state),
         }
     }
 }
@@ -459,6 +501,7 @@ impl fmt::Display for DataComponentValue {
             Self::ChargedProjectiles(p) => write!(f, "{p:?}"),
             Self::Bees(bees) => write!(f, "Bees({})", bees.len()),
             Self::RawNbt(tag) => write!(f, "{tag:?}"),
+            Self::RawJson(val) => write!(f, "{val}"),
         }
     }
 }
@@ -618,6 +661,9 @@ pub fn encode_component_value<Ops: DynamicOps + 'static>(
             DataComponentValue::RawNbt(tag) => {
                 DataResult::success(NbtOps::instance().convert_to(ops, tag))
             }
+            DataComponentValue::RawJson(val) => {
+                DataResult::success(JsonOps::new(false).convert_to(ops, val))
+            }
             DataComponentValue::Int(v) => codec::int_codec::<Ops>().encode_start(ops, v),
             DataComponentValue::Float(v) => codec::float_codec::<Ops>().encode_start(ops, v),
             DataComponentValue::Bool(v) => codec::bool_codec::<Ops>().encode_start(ops, v),
@@ -715,8 +761,13 @@ pub fn decode_component_value<Ops: DynamicOps + 'static>(
             })
         }
         _ => {
-            let tag = ops.convert_to(&NbtOps::instance(), input);
-            DataResult::success(DataComponentValue::RawNbt(tag))
+            if TypeId::of::<Ops>() == TypeId::of::<JsonOps>() {
+                let json = ops.convert_to(&JsonOps::new(false), input);
+                DataResult::success(DataComponentValue::RawJson(json))
+            } else {
+                let tag = ops.convert_to(&NbtOps::instance(), input);
+                DataResult::success(DataComponentValue::RawNbt(tag))
+            }
         }
     }
 }

@@ -715,3 +715,36 @@ fn container_with_overweight_nested_bundle_round_trips() {
         .expect("decode container with overweight nested bundle from JSON");
     assert!(ItemStack::matches(&outer, &decoded_json));
 }
+
+#[test]
+fn untyped_json_component_preserves_booleans_across_round_trip() {
+    let json_ops = JsonOps::new(false);
+    let json_codec = item_stack_codec::<JsonOps>();
+    let input = serde_json::json!({
+        "id": "minecraft:stone",
+        "count": 1,
+        "components": {
+            "minecraft:tooltip_display": {
+                "hide_tooltip": true,
+                "hidden_components": []
+            }
+        }
+    });
+
+    let decoded = json_codec
+        .parse(&json_ops, &input)
+        .result()
+        .cloned()
+        .expect("decode item with untyped JSON boolean component");
+    let reencoded = json_codec
+        .encode_start(&json_ops, &decoded)
+        .result()
+        .cloned()
+        .expect("re-encode item with untyped JSON boolean component");
+
+    assert_eq!(
+        reencoded["components"]["minecraft:tooltip_display"]["hide_tooltip"],
+        serde_json::Value::Bool(true)
+    );
+    assert_eq!(reencoded, input);
+}
