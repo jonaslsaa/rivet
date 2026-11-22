@@ -38,6 +38,7 @@ use rivet_nbt::tag::{
     TAG_BYTE, TAG_BYTE_ARRAY, TAG_COMPOUND, TAG_DOUBLE, TAG_END, TAG_FLOAT, TAG_INT, TAG_INT_ARRAY,
     TAG_LIST, TAG_LONG, TAG_LONG_ARRAY, TAG_SHORT, TAG_STRING, Tag,
 };
+use rivet_serialization::float_format::{java_double_equals, java_float_equals};
 use rivet_serialization::number::Number;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -46,7 +47,7 @@ pub(crate) type SharedNbtList = Rc<RefCell<Vec<NbtValue>>>;
 pub(crate) type SharedNbtCompound = Rc<RefCell<IndexMap<String, NbtValue>>>;
 
 /// Reference-aliased internal NBT node backing `NBTListType` and `NBTMapType`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub(crate) enum NbtValue {
     End,
     Byte(i8),
@@ -61,6 +62,27 @@ pub(crate) enum NbtValue {
     Compound(SharedNbtCompound),
     IntArray(Vec<i32>),
     LongArray(Vec<i64>),
+}
+
+impl PartialEq for NbtValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::End, Self::End) => true,
+            (Self::Byte(a), Self::Byte(b)) => a == b,
+            (Self::Short(a), Self::Short(b)) => a == b,
+            (Self::Int(a), Self::Int(b)) => a == b,
+            (Self::Long(a), Self::Long(b)) => a == b,
+            (Self::Float(a), Self::Float(b)) => java_float_equals(*a, *b),
+            (Self::Double(a), Self::Double(b)) => java_double_equals(*a, *b),
+            (Self::ByteArray(a), Self::ByteArray(b)) => a == b,
+            (Self::String(a), Self::String(b)) => a == b,
+            (Self::List(a), Self::List(b)) => a == b,
+            (Self::Compound(a), Self::Compound(b)) => a == b,
+            (Self::IntArray(a), Self::IntArray(b)) => a == b,
+            (Self::LongArray(a), Self::LongArray(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 impl NbtValue {
@@ -548,5 +570,34 @@ mod tests {
         assert_eq!(list.get_int_or(1, 0), -1);
         assert_eq!(list.get_long(1), -1);
         assert_eq!(list.get_long_or(1, 99), -1);
+    }
+
+    #[test]
+    fn nbt_container_float_equality_matches_java_float_double_tag() {
+        let mut m1 = NBTMapType::new();
+        m1.set_float("nan_f", f32::NAN);
+        m1.set_double("nan_d", f64::NAN);
+        let mut m2 = NBTMapType::new();
+        m2.set_float("nan_f", f32::NAN);
+        m2.set_double("nan_d", f64::NAN);
+        assert_eq!(m1, m2);
+
+        let mut pos_zero = NBTMapType::new();
+        pos_zero.set_float("z", 0.0_f32);
+        let mut neg_zero = NBTMapType::new();
+        neg_zero.set_float("z", -0.0_f32);
+        assert_ne!(pos_zero, neg_zero);
+
+        let mut l1 = NBTListType::new();
+        l1.add_double(f64::NAN);
+        l1.add_double(0.0_f64);
+        let mut l2 = NBTListType::new();
+        l2.add_double(f64::NAN);
+        l2.add_double(0.0_f64);
+        let mut l3 = NBTListType::new();
+        l3.add_double(f64::NAN);
+        l3.add_double(-0.0_f64);
+        assert_eq!(l1, l2);
+        assert_ne!(l1, l3);
     }
 }
