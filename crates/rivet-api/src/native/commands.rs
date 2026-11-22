@@ -385,7 +385,7 @@ fn normalize_token(raw: &str) -> Option<String> {
     if trimmed.is_empty()
         || !trimmed
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
     {
         return None;
     }

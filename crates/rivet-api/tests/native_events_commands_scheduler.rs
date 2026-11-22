@@ -404,11 +404,12 @@ fn host_capability_gating_plugin_disable_cleanup_and_shutdown() {
     assert_eq!(minimal_host.scheduler().pending_task_count(), 0);
 
     // 2. Host with callback capabilities grants them, runs them, and revokes all on disable.
+    // Use a dotted plugin name to verify fallback prefixes accept '.' just like plugin names do.
     let mut host = NativePluginHost::with_callback_capabilities();
     let runs = Rc::new(RefCell::new(0usize));
     let p = host
         .register(Box::new(CallbackPlugin {
-            name: "full-caps".to_owned(),
+            name: "example.plugin".to_owned(),
             require_callbacks: true,
             runs: Rc::clone(&runs),
         }))
@@ -428,7 +429,7 @@ fn host_capability_gating_plugin_disable_cleanup_and_shutdown() {
     assert_eq!(ev.message, "hi!");
 
     assert!(matches!(
-        host.dispatch_command(&CommandSender::Console, "hello"),
+        host.dispatch_command(&CommandSender::Console, "example.plugin:hello"),
         CommandDispatchOutcome::Handled { .. }
     ));
 
