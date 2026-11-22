@@ -10,6 +10,7 @@
 
 pub mod commands;
 pub mod events;
+pub mod facades;
 pub mod handle;
 pub mod lifecycle;
 pub mod scheduler;
@@ -22,6 +23,14 @@ pub use commands::{
 pub use events::{
     Cancellable, EventBus, EventDispatchReport, EventError, EventListenerHandle,
     EventListenerMarker, EventPriority, ListenerPanic, NativeEvent,
+};
+pub use facades::{
+    BatchMode, BatchReceipt, BlockPos, BlockStateSnapshot, ChunkPos, CommandOutcome, EntityCommand,
+    EntityHandle, EntityMarker, EntitySnapshot, FacadeError, GameMode, InventoryCommand,
+    InventoryHandle, InventoryKind, InventoryMarker, InventorySnapshot, ItemStackSnapshot,
+    MenuCommand, MenuHandle, MenuMarker, MenuSnapshot, NativeFacadeView, PlayerCommand,
+    PlayerHandle, PlayerMarker, PlayerSnapshot, SyntheticWorldState, TickCommand, TickCommandBatch,
+    WorldCommand, WorldId, WorldSnapshot,
 };
 pub use handle::{Handle, HandleError, HandleTable, PluginId};
 pub use lifecycle::{

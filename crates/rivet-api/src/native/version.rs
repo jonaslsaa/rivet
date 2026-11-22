@@ -70,6 +70,18 @@ pub enum Capability {
     EntityRead,
     /// M3-gated: entity mutation seam.
     EntityWrite,
+    /// M3-gated: read-only player inspection seam.
+    PlayerRead,
+    /// M3-gated: player mutation seam.
+    PlayerWrite,
+    /// M3-gated: read-only item/inventory inspection seam.
+    InventoryRead,
+    /// M3-gated: item/inventory mutation seam.
+    InventoryWrite,
+    /// M3-gated: read-only container menu inspection seam.
+    MenuRead,
+    /// M3-gated: container menu open/close mutation seam.
+    MenuWrite,
     /// M3-gated: Brigadier command registration seam.
     CommandRegistration,
 }
