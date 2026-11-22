@@ -451,12 +451,12 @@ fn removal_preserves_passengers_on_chunk_unload_but_ejects_on_discard() {
     ctx.add_entity(LifecycleEntity::Mob(Mob::new(pig1, pig_meta(), 10.0, 2)));
     assert!(ctx.start_riding(pig1, boat1, false, false));
 
-    // UnloadedToChunk must NOT eject passengers
+    // UnloadedToChunk must NOT eject passengers, and removes the unloaded boat from level storage
     assert!(ctx.remove_entity(boat1, EntityRemovalReason::UnloadedToChunk));
     assert_eq!(ctx.get(pig1).unwrap().entity().vehicle, Some(boat1));
-    assert_eq!(ctx.get(boat1).unwrap().entity().passengers, vec![pig1]);
+    assert!(ctx.get(boat1).is_none());
 
-    // Discarded MUST eject passengers
+    // Discarded MUST eject passengers and purge the discarded boat from level storage
     let boat2 = ctx.next_entity_id();
     let pig2 = ctx.next_entity_id();
     ctx.add_entity(LifecycleEntity::Base(Entity::new(
@@ -469,7 +469,8 @@ fn removal_preserves_passengers_on_chunk_unload_but_ejects_on_discard() {
 
     assert!(ctx.remove_entity(boat2, EntityRemovalReason::Discarded));
     assert_eq!(ctx.get(pig2).unwrap().entity().vehicle, None);
-    assert!(ctx.get(boat2).unwrap().entity().passengers.is_empty());
+    assert!(ctx.get(boat2).is_none());
+    assert_eq!(ctx.entity_count(), 2);
 }
 
 // ============================================================================
@@ -551,8 +552,10 @@ fn automatic_removal_runs_lifecycle_cleanup_and_ejects_passengers() {
 
     ctx.tick_all(true);
 
-    // Dying vehicle at death_time == 20 must eject its passenger, clear valid, and emit EntityRemoved
+    // Dying vehicle at death_time == 20 must eject its passenger, emit EntityRemoved, and be purged
     assert_eq!(ctx.get(rider_id).unwrap().entity().vehicle, None);
+    assert!(ctx.get(pig_id).is_none());
+    assert_eq!(ctx.entity_count(), 1);
     let evs = ctx.take_events();
     assert!(evs.iter().any(|e| matches!(
         e,

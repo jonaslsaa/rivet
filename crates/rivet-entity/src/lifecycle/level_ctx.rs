@@ -341,6 +341,12 @@ impl LevelCtx {
         self.entities.keys().copied().collect()
     }
 
+    /// Returns the number of resident/taken entity slots currently stored in the level.
+    #[must_use]
+    pub fn entity_count(&self) -> usize {
+        self.entities.len()
+    }
+
     // -------------------------------------------------------------------------
     // Take-tick-putback core
     // -------------------------------------------------------------------------
@@ -766,6 +772,9 @@ impl LevelCtx {
                 self.eject_passengers(id);
             }
             self.record_event(LifecycleEvent::EntityRemoved { id, reason });
+            if !self.taken_ids.contains(&id) {
+                self.entities.shift_remove(&id);
+            }
         }
     }
 
@@ -870,6 +879,9 @@ impl LevelCtx {
             id,
             reason: effective_reason,
         });
+        if !self.taken_ids.contains(&id) {
+            self.entities.shift_remove(&id);
+        }
         true
     }
 }
