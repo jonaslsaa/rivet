@@ -1533,12 +1533,12 @@ mod tests {
 
         // Verify exact index selection matches Paper's LegacyRandomSource positional stream.
         let mut expected_rng = LegacyRandomSource::new(42).fork_positional().at(10, 64, 10);
-        let mut expected_indices = vec![0usize, 1, 2, 3];
+        let mut expected_indices = [0usize, 1, 2, 3];
         for i in (1..expected_indices.len()).rev() {
             let j = expected_rng.next_int_bound((i + 1) as i32) as usize;
             expected_indices.swap(i, j);
         }
-        let mut expected_replaced = vec![expected_indices[0], expected_indices[1]];
+        let mut expected_replaced = [expected_indices[0], expected_indices[1]];
         expected_replaced.sort_unstable();
         let actual_replaced: Vec<usize> = run1
             .iter()
