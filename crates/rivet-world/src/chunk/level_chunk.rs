@@ -41,6 +41,7 @@
 use bytes::BytesMut;
 
 use crate::chunk::chunk_access::{ChunkAccess, ChunkStatus};
+use crate::chunk::chunk_packet_info::ChunkPacketInfo;
 use crate::chunk::level_chunk_section::LevelChunkSection;
 use crate::chunk::paletted_container_factory::PalettedContainerFactory;
 use crate::chunk::strategy::Strategy;
@@ -530,12 +531,23 @@ where
 
     /// The opaque sections buffer — the `[bits][palette][raw]` wire bytes of
     /// every section concatenated (Java `calculateChunkSize` +
-    /// `extractChunkData`). Mirrors `SuperflatChunkContent::sections_buffer`;
-    /// asserts the exact-size invariant after writing.
-    pub fn sections_buffer(&self) -> Vec<u8> {
+    /// `extractChunkData(FriendlyByteBuf, LevelChunk, @Nullable ChunkPacketInfo<BlockState>)`).
+    ///
+    /// Threads the monotonically increasing `chunkSectionIndex` (`0..sections.len()`)
+    /// into each section's `write_with_info` and, when `chunk_packet_info` is
+    /// `Some`, records the serialized buffer on it (`chunkPacketInfo.setBuffer`).
+    /// Asserts the exact-size invariant after writing.
+    pub fn sections_buffer_with_info(
+        &self,
+        mut chunk_packet_info: Option<&mut ChunkPacketInfo<T>>,
+    ) -> Vec<u8> {
         let mut buf = FriendlyByteBuf::new(BytesMut::new());
-        for section in self.base.get_sections() {
-            section.write(&mut buf);
+        for (chunk_section_index, section) in self.base.get_sections().iter().enumerate() {
+            section.write_with_info(
+                &mut buf,
+                chunk_packet_info.as_deref_mut(),
+                chunk_section_index,
+            );
         }
         let bytes = buf.into_inner().to_vec();
         let expected: i32 = self
@@ -549,7 +561,15 @@ where
             expected,
             "section buffer must be exactly the sum of getSerializedSize()"
         );
+        if let Some(info) = chunk_packet_info {
+            info.set_buffer(bytes.clone());
+        }
         bytes
+    }
+
+    /// The opaque sections buffer without Anti-Xray metadata.
+    pub fn sections_buffer(&self) -> Vec<u8> {
+        self.sections_buffer_with_info(None)
     }
 }
 
@@ -778,6 +798,36 @@ mod tests {
         // The stone section is a 4-bit linear palette [air, stone]: its
         // serialized size is nonzero, so the buffer is not empty.
         assert!(!buffer.is_empty());
+    }
+
+    #[test]
+    fn sections_buffer_with_info_threads_monotonic_indices_and_records_metadata() {
+        let chunk = stone_chunk();
+        let section_count = chunk.get_sections().len();
+        let mut info = ChunkPacketInfo::<u8>::new(section_count);
+        let bytes = chunk.sections_buffer_with_info(Some(&mut info));
+        assert_eq!(bytes, chunk.sections_buffer());
+        assert_eq!(info.buffer(), Some(bytes.as_slice()));
+
+        // `stone_chunk` populates section index 0 with air + stone (4-bit linear
+        // palette) and leaves all other sections single-value air (0-bit).
+        let mut prev_index = -1;
+        for idx in 0..section_count {
+            let offset = info.get_index(idx);
+            assert!(
+                offset > prev_index,
+                "raw-storage writer index must strictly advance per section (idx={idx}, offset={offset}, prev={prev_index})"
+            );
+            prev_index = offset;
+            assert!(info.get_palette(idx).is_some());
+            if idx == 0 {
+                assert_eq!(info.get_bits(idx), 4);
+                assert!(info.is_written(idx));
+            } else {
+                assert_eq!(info.get_bits(idx), 0);
+                assert!(!info.is_written(idx));
+            }
+        }
     }
 
     /// `from_base` wraps a `ChunkAccess` without resetting anything: a heightmap

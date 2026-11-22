@@ -22,6 +22,7 @@ pub mod chunk_access;
 // worldgen unit (see the module doc).
 pub mod chunk_generator;
 pub use chunk_generator::ChunkGenerator;
+pub mod chunk_packet_info;
 pub mod chunk_source;
 pub mod configuration;
 pub mod data_layer;
