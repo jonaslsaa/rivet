@@ -543,3 +543,89 @@ fn loot_table_container_clears_loot_table_on_item_mutation() {
     assert_eq!(restored.get_item(0).item().name(), Some("minecraft:diamond"));
     assert_eq!(restored.get_item(0).get_count(), 3);
 }
+
+#[test]
+fn furnace_preserves_components_and_max_stack_size_in_recipes() {
+    use std::collections::BTreeMap;
+
+    use crate::inventory::ComponentMap;
+
+    // Recipe with exact-component input and unstackable + component-bearing result.
+    let mut in_comps = BTreeMap::new();
+    in_comps.insert(
+        Identifier::parse("minecraft:custom_name"),
+        "Blessed Ore".to_string(),
+    );
+    let exact_input = crate::crafting::ItemStack::with_components(
+        CraftingItemId::from_name("minecraft:raw_iron").expect("raw_iron"),
+        1,
+        in_comps,
+    );
+
+    let mut out_comps = BTreeMap::new();
+    out_comps.insert(
+        Identifier::parse("minecraft:custom_name"),
+        "Relic Sword".to_string(),
+    );
+    let result_template = ItemStackTemplate::with_components(
+        CraftingItemId::from_name("minecraft:iron_sword").expect("iron_sword"),
+        1,
+        out_comps,
+    );
+
+    let recipe = CookingRecipe {
+        kind: CookingKind::Smelting,
+        common_info: CommonInfo {
+            show_notification: true,
+        },
+        book_info: CookingBookInfo {
+            category: CookingBookCategory::Misc,
+            group: String::new(),
+        },
+        ingredient: Ingredient::of_exact_stacks(vec![exact_input]).expect("exact ingredient"),
+        result: result_template,
+        experience: 1.0,
+        cooking_time: 10,
+    };
+    let manager = RecipeManager::from_recipes(vec![RecipeHolder::new(
+        recipe_key(Identifier::parse("minecraft:exact_sword_smelt")),
+        Recipe::Cooking(recipe),
+    )])
+    .expect("valid recipe manager");
+    let fuel = FuelValues::vanilla_burn_times();
+
+    let mut furnace = new_furnace();
+    furnace.set_item(SLOT_FUEL, stack("minecraft:coal", 1));
+
+    // Plain input without the required component must NOT match.
+    furnace.set_item_with_recipes(SLOT_INPUT, stack("minecraft:raw_iron", 1), &manager);
+    let tick = furnace.server_tick(&manager, &fuel);
+    assert!(!tick.is_lit);
+
+    // Matching component-bearing input DOES cook and preserves result components and max_stack_size=1.
+    let mut inv_comps = ComponentMap::new();
+    inv_comps.insert("minecraft:custom_name".to_string(), "Blessed Ore".to_string());
+    let tagged_input = stack("minecraft:raw_iron", 2).with_components(inv_comps);
+    furnace.set_item_with_recipes(SLOT_INPUT, tagged_input, &manager);
+    for _ in 0..10 {
+        furnace.server_tick(&manager, &fuel);
+    }
+    let output = furnace.get_item(SLOT_RESULT);
+    assert_eq!(output.item().name(), Some("minecraft:iron_sword"));
+    assert_eq!(output.get_count(), 1);
+    assert_eq!(output.get_max_stack_size(), 1);
+    assert_eq!(
+        output
+            .components()
+            .get("minecraft:custom_name")
+            .map(String::as_str),
+        Some("Relic Sword")
+    );
+
+    // Second item must NOT overstack into the unstackable (max_stack_size=1) sword result slot.
+    for _ in 0..15 {
+        furnace.server_tick(&manager, &fuel);
+    }
+    assert_eq!(furnace.get_item(SLOT_RESULT).get_count(), 1);
+    assert_eq!(furnace.get_item(SLOT_INPUT).get_count(), 1);
+}

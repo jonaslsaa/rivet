@@ -7,6 +7,8 @@
 //! - `net.minecraft.world.level.block.entity.BlastFurnaceBlockEntity`
 //! - `net.minecraft.world.level.block.entity.SmokerBlockEntity`
 
+use std::collections::BTreeMap;
+
 use indexmap::IndexMap;
 use rivet_nbt::{compound_tag::CompoundTag, tag::Tag};
 use rivet_registry::{Identifier, core::Direction};
@@ -16,7 +18,8 @@ use crate::crafting::{
     RecipeKey, RecipeManager, SingleRecipeInput,
 };
 use crate::inventory::{
-    Container, ContainerAccessContext, ContainerData, ContainerHelper, InventoryItemStack, ItemId,
+    ComponentMap, Container, ContainerAccessContext, ContainerData, ContainerHelper,
+    InventoryItemStack, ItemId,
 };
 
 use super::fuel_values::{BURN_TIME_STANDARD, FuelValues, inventory_crafting_remainder};
@@ -562,7 +565,20 @@ fn inventory_to_crafting_stack(stack: &InventoryItemStack) -> Option<CraftingIte
     }
     let name = stack.item().name()?;
     let id = CraftingItemId::from_name(name)?;
-    Some(CraftingItemStack::new(id, stack.get_count()))
+    if stack.components().is_empty() {
+        Some(CraftingItemStack::new(id, stack.get_count()))
+    } else {
+        let components: BTreeMap<Identifier, String> = stack
+            .components()
+            .iter()
+            .filter_map(|(k, v)| Identifier::try_parse(k).map(|id| (id, v.clone())))
+            .collect();
+        Some(CraftingItemStack::with_components(
+            id,
+            stack.get_count(),
+            components,
+        ))
+    }
 }
 
 fn crafting_to_inventory_stack(stack: &CraftingItemStack) -> Option<InventoryItemStack> {
@@ -571,7 +587,23 @@ fn crafting_to_inventory_stack(stack: &CraftingItemStack) -> Option<InventoryIte
     }
     let name = stack.item().name();
     let id = ItemId::from_name(name)?;
-    Some(InventoryItemStack::new(id, stack.count()))
+    let mut max_stack_size = stack.item().default_max_stack_size().max(1);
+    let mut components = ComponentMap::new();
+    for (k, v) in stack.components() {
+        components.insert(k.to_string(), v.clone());
+    }
+    if let Some(override_max) = components
+        .get("minecraft:max_stack_size")
+        .and_then(|v| v.parse::<i32>().ok())
+        .filter(|&n| n > 0)
+    {
+        max_stack_size = override_max;
+    }
+    let mut inv = InventoryItemStack::with_max_stack_size(id, stack.count(), max_stack_size);
+    if !components.is_empty() {
+        inv = inv.with_components(components);
+    }
+    Some(inv)
 }
 
 static EMPTY_STACK: std::sync::LazyLock<InventoryItemStack> =
