@@ -85,7 +85,8 @@ impl ExpandedLootPoolEntry<'_> {
 
         match &self.kind {
             ExpandedEntryKind::Item(item) => {
-                emit(LootItemStack::new(item.clone()), context);
+                let max_stack = context.resolver().item_max_stack_size(item);
+                emit(LootItemStack::with_count_and_max(item.clone(), 1, max_stack), context);
             }
             ExpandedEntryKind::Empty => {}
             ExpandedEntryKind::Dynamic(name) => {
@@ -102,7 +103,8 @@ impl ExpandedLootPoolEntry<'_> {
                     .map(<[Identifier]>::to_vec)
                     .unwrap_or_default();
                 for item in items {
-                    emit(LootItemStack::new(item), context);
+                    let max_stack = context.resolver().item_max_stack_size(&item);
+                    emit(LootItemStack::with_count_and_max(item, 1, max_stack), context);
                 }
             }
             ExpandedEntryKind::NestedTable(table_ref) => match table_ref {

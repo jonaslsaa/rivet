@@ -904,3 +904,24 @@ fn empty_air_stack_returns_zero_count_and_does_not_hang_splitting() {
     assert!(items[0].is_empty());
     assert_eq!(items[0].count(), 0);
 }
+
+#[test]
+fn custom_item_max_stack_size_splits_ender_pearls_into_16_16_8() {
+    let mut registry = LootRegistry::new();
+    registry.register_item_max_stack_size(id("ender_pearl"), 16);
+
+    let table = LootTable::builder()
+        .with_pool(
+            LootPool::builder()
+                .add(
+                    LootPoolEntryContainer::item(id("ender_pearl"))
+                        .apply(LootItemFunction::set_count(NumberProvider::constant(40.0))),
+                )
+                .build(),
+        )
+        .build();
+
+    let items = table.get_random_items_with_seed(empty_params(), &registry, 99);
+    let counts: Vec<i32> = items.iter().map(LootItemStack::count).collect();
+    assert_eq!(counts, vec![16, 16, 8]);
+}

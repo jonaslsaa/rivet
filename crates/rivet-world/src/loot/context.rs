@@ -16,7 +16,7 @@ use rivet_util::random::{
 };
 
 use super::functions::LootItemFunction;
-use super::item_stack::LootItemStack;
+use super::item_stack::{DEFAULT_MAX_STACK_SIZE, LootItemStack};
 use super::parameters::{
     ContextKey, ContextKeySet, ContextMap, ContextMapBuilder, ContextMapError, ContextValue,
 };
@@ -227,6 +227,7 @@ pub struct LootRegistry {
     conditions: IndexMap<Identifier, LootItemCondition>,
     functions: IndexMap<Identifier, LootItemFunction>,
     item_tags: IndexMap<Identifier, Vec<Identifier>>,
+    item_max_stack_sizes: IndexMap<Identifier, i32>,
     random_sequences: IndexMap<Identifier, Rc<RefCell<LootRandom>>>,
     default_random: Rc<RefCell<LootRandom>>,
 }
@@ -238,6 +239,7 @@ impl Default for LootRegistry {
             conditions: IndexMap::new(),
             functions: IndexMap::new(),
             item_tags: IndexMap::new(),
+            item_max_stack_sizes: IndexMap::new(),
             random_sequences: IndexMap::new(),
             default_random: Rc::new(RefCell::new(LootRandom::Legacy(LegacyRandomSource::new(0)))),
         }
@@ -276,6 +278,17 @@ impl LootRegistry {
     /// Registers an ordered item tag list for [`super::entries::LootPoolEntryContainer::Tag`].
     pub fn register_item_tag(&mut self, tag: Identifier, items: Vec<Identifier>) -> &mut Self {
         self.item_tags.insert(tag, items);
+        self
+    }
+
+    /// Registers a per-item maximum stack size (`Item.getDefaultMaxStackSize()`),
+    /// e.g. `16` for `minecraft:ender_pearl` or `1` for unstackable equipment.
+    pub fn register_item_max_stack_size(
+        &mut self,
+        item: Identifier,
+        max_stack_size: i32,
+    ) -> &mut Self {
+        self.item_max_stack_sizes.insert(item, max_stack_size);
         self
     }
 
@@ -321,6 +334,16 @@ impl LootRegistry {
     #[must_use]
     pub fn get_item_tag(&self, tag: &Identifier) -> Option<&[Identifier]> {
         self.item_tags.get(tag).map(Vec::as_slice)
+    }
+
+    /// Returns the registered max stack size for `item`, defaulting to
+    /// [`DEFAULT_MAX_STACK_SIZE`] (`64`).
+    #[must_use]
+    pub fn item_max_stack_size(&self, item: &Identifier) -> i32 {
+        self.item_max_stack_sizes
+            .get(item)
+            .copied()
+            .unwrap_or(DEFAULT_MAX_STACK_SIZE)
     }
 
     /// Returns a handle to a registered random sequence whose state advances in
