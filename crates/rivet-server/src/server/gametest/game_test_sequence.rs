@@ -41,11 +41,20 @@ impl Default for GameTestSequence {
 
 impl GameTestSequence {
     pub fn new() -> Self {
+        Self::with_start_tick(0)
+    }
+
+    /// Paper: `GameTestSequence(GameTestInfo parent)` sets `this.lastTick = parent.getTick()`.
+    pub fn with_start_tick(start_tick: i64) -> Self {
         Self {
             events: VecDeque::new(),
-            last_tick: 0,
+            last_tick: start_tick,
             completed_effect: None,
         }
+    }
+
+    pub(crate) fn set_start_tick(&mut self, start_tick: i64) {
+        self.last_tick = start_tick;
     }
 
     pub fn is_empty(&self) -> bool {

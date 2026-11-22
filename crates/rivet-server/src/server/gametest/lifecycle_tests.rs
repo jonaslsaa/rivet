@@ -1191,3 +1191,40 @@ fn sequence_terminal_failures_fail_immediately_instead_of_retrying() {
         "expected_delay mismatch must fail immediately, got: {err:?}"
     );
 }
+
+#[test]
+fn late_sequence_anchors_delays_to_parent_tick() {
+    let registries = build_registries_with(
+        vec![],
+        vec![(
+            Identifier::with_default_namespace("late_seq"),
+            fn_instance(
+                "late_seq_fn",
+                TestEnvironmentRef::Key(default_environment_key()),
+                30,
+                0,
+                true,
+                1,
+                1,
+            ),
+        )],
+    );
+    let mut functions = TestFunctionRegistry::with_builtins();
+    functions.register(Identifier::with_default_namespace("late_seq_fn"), |h| {
+        h.run_at_tick_time(10, |h2| {
+            h2.add_sequence(GameTestSequence::new().then_idle(5).then_succeed());
+            Ok(())
+        });
+        Ok(())
+    });
+
+    let infos = vec![make_info(&registries, "late_seq", RetryOptions::no_retries())];
+    let mut runner = GameTestRunner::new(infos, registries, GameTestRunnerConfig::default());
+    let transcript = runner.run_to_completion(&functions, 50);
+
+    assert!(transcript.is_success());
+    assert_eq!(
+        transcript.records[0].final_test_tick, 15,
+        "sequence added at tick 10 with then_idle(5) must succeed at tick 15, not 10"
+    );
+}

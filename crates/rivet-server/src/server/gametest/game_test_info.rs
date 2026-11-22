@@ -140,8 +140,10 @@ impl TestExecutionHandle {
         self.run_at_tick_time(i64::from(self.current_tick).wrapping_add(delay), callback);
     }
 
-    /// Paper: `GameTestHelper.startSequence()`.
-    pub fn add_sequence(&mut self, sequence: GameTestSequence) {
+    /// Paper: `GameTestHelper.startSequence()` -> `GameTestSequence(parent)` sets
+    /// `lastTick = parent.getTick()`.
+    pub fn add_sequence(&mut self, mut sequence: GameTestSequence) {
+        sequence.set_start_tick(i64::from(self.current_tick));
         self.sequences.push(sequence);
     }
 }
@@ -395,7 +397,8 @@ impl GameTestInfo {
             .push(Box::new(callback));
     }
 
-    pub fn add_sequence(&mut self, sequence: GameTestSequence) {
+    pub fn add_sequence(&mut self, mut sequence: GameTestSequence) {
+        sequence.set_start_tick(i64::from(self.tick_count));
         self.sequences.push(sequence);
     }
 
