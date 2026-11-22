@@ -477,6 +477,13 @@ impl LevelCtx {
             .is_some_and(|e| e.entity().entity_type.dismounts_underwater)
     }
 
+    /// Returns whether entity `id` is a player (`EntityTypeMeta::is_player`).
+    #[must_use]
+    pub fn is_entity_player(&self, id: i32) -> bool {
+        self.get(id)
+            .is_some_and(|e| e.entity().entity_type.is_player)
+    }
+
     /// Paper `Mob#hasControllingPassenger()` check used by `Mob#updateControlFlags()`.
     #[must_use]
     pub fn has_mob_controlling_passenger(&self, vehicle_id: i32) -> bool {
@@ -486,8 +493,7 @@ impl LevelCtx {
         else {
             return false;
         };
-        self.get(first_passenger)
-            .is_some_and(|p| p.entity().entity_type.is_player)
+        self.is_entity_player(first_passenger)
     }
 
     /// Paper `Entity#getRootVehicle()`.

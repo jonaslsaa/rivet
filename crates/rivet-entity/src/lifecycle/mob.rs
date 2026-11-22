@@ -256,7 +256,11 @@ impl Mob {
 
     /// Paper `Mob#updateControlFlags()`.
     pub fn update_control_flags(&mut self, ctx: &mut LevelCtx) {
-        let no_controller = !ctx.has_mob_controlling_passenger(self.living.entity.id);
+        let no_controller = !self
+            .living
+            .entity
+            .first_passenger()
+            .is_some_and(|pid| ctx.is_entity_player(pid));
         let not_in_boat = self
             .living
             .entity

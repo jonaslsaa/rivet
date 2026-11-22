@@ -254,6 +254,23 @@ fn mob_selector_alternation_and_control_flags_every_five_ticks() {
     );
     // updateControlFlags runs only when tickCount % 5 == 0
     assert_eq!(control_flag_ticks, vec![5]);
+
+    // Mounting a player onto the mob must disable move/jump/look flags during tick_all
+    let player_id = ctx.next_entity_id();
+    ctx.add_entity(LifecycleEntity::Living(LivingEntity::new(
+        player_id,
+        EntityTypeMeta::player(),
+        20.0,
+        2,
+    )));
+    assert!(ctx.start_riding(player_id, id, false, false));
+    for _ in 0..4 {
+        ctx.tick_all(true);
+    }
+    let flags = ctx.get(id).unwrap().mob().unwrap().control_flags;
+    assert!(!flags.move_enabled);
+    assert!(!flags.jump_enabled);
+    assert!(!flags.look_enabled);
 }
 
 // ============================================================================
