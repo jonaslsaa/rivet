@@ -767,3 +767,26 @@ fn amphibious_path_finder_swims_upward_underwater() {
     assert!(path.can_reach());
     assert_eq!(path.get_end_node().map(|n| n.y), Some(4));
 }
+
+#[test]
+fn fly_node_evaluator_checks_full_mob_bounding_box() {
+    use super::NodeEvaluator;
+
+    let mut world = TestWorld::empty();
+    // Place a solid ceiling block at (1, 3, 0) that blocks a 2-tall flying mob at (1, 2, 0)
+    world.set(1, 3, 0, BlockPathInfo::SOLID);
+    // Place a solid side block at (4, 2, 1) that blocks a 2-wide flying mob at (3, 2, 0)
+    world.set(4, 2, 1, BlockPathInfo::SOLID);
+
+    let mut mob = MobPathingState::new(Vec3::new(0.5, 2.0, 0.5), 1.6, 1.8);
+    let mut eval = FlyNodeEvaluator::new();
+    eval.prepare(&mut mob, &world);
+    let mut ctx = PathfindingContext::new(&world, None, BlockPos::new(0, 2, 0));
+
+    // Origin cell (1, 2, 0) is air, but (1, 3, 0) is solid inside the mob's 2x2x2 volume
+    assert_eq!(eval.get_path_type_of_mob(&mut ctx, &mob, 1, 2, 0), PathType::Blocked);
+    // Origin cell (3, 2, 0) is air, but (4, 2, 1) is solid inside the mob's 2x2x2 volume
+    assert_eq!(eval.get_path_type_of_mob(&mut ctx, &mob, 3, 2, 0), PathType::Blocked);
+    // Clear cell at (8, 5, 8) is Open
+    assert_eq!(eval.get_path_type_of_mob(&mut ctx, &mob, 8, 5, 8), PathType::Open);
+}

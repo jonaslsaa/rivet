@@ -617,13 +617,36 @@ impl WalkNodeEvaluator {
         y: i32,
         z: i32,
     ) -> PathType {
+        let amphibious = self.amphibious;
+        self.evaluate_path_type_with(ctx, mob, x, y, z, |ctx, bx, by, bz| {
+            if amphibious {
+                Self::amphibious_path_type(ctx, bx, by, bz)
+            } else {
+                get_path_type_static(ctx, bx, by, bz)
+            }
+        })
+    }
+
+    pub(crate) fn evaluate_path_type_with<W, F>(
+        &mut self,
+        ctx: &mut PathfindingContext<'_, W>,
+        mob: &MobPathingState,
+        x: i32,
+        y: i32,
+        z: i32,
+        mut get_type: F,
+    ) -> PathType
+    where
+        W: PathWorldView + ?Sized,
+        F: FnMut(&mut PathfindingContext<'_, W>, i32, i32, i32) -> PathType,
+    {
         let mut mask: u32 = 0;
         let mob_pos = ctx.mob_position();
 
         for dx in 0..self.config.entity_width {
             for dy in 0..self.config.entity_height {
                 for dz in 0..self.config.entity_depth {
-                    let mut pt = self.get_path_type(ctx, x + dx, y + dy, z + dz);
+                    let mut pt = get_type(ctx, x + dx, y + dy, z + dz);
                     pt = self.evaluate_block_path_type(ctx, mob, mob_pos, pt);
                     mask |= 1_u32 << pt.index();
                 }
@@ -658,7 +681,7 @@ impl WalkNodeEvaluator {
             }
         }
 
-        let current_node_type = self.get_path_type(ctx, x, y, z);
+        let current_node_type = get_type(ctx, x, y, z);
         if self.config.entity_width > 1 {
             let is_current_cheaper = mob.get_pathfinding_malus(current_node_type) < highest_malus;
             let cap_malus = is_current_cheaper
@@ -900,6 +923,40 @@ impl FlyNodeEvaluator {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn fly_path_type<W: PathWorldView + ?Sized>(
+        ctx: &mut PathfindingContext<'_, W>,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> PathType {
+        let mut pt = ctx.get_path_type_from_state(x, y, z);
+        if pt == PathType::Open && y > ctx.level().min_y() {
+            let below = ctx.get_path_type_from_state(x, y - 1, z);
+            if below == PathType::DamageFire || below == PathType::Lava {
+                pt = PathType::DamageFire;
+            } else if below == PathType::DamageOther {
+                pt = PathType::DamageOther;
+            } else if below == PathType::Cocoa {
+                pt = PathType::Cocoa;
+            } else if below == PathType::Fence {
+                pt = PathType::Fence;
+            } else {
+                pt = if below != PathType::Walkable
+                    && below != PathType::Open
+                    && below != PathType::Water
+                {
+                    PathType::Walkable
+                } else {
+                    PathType::Open
+                };
+            }
+        }
+        if pt == PathType::Walkable || pt == PathType::Open {
+            pt = check_neighbour_blocks(ctx, x, y, z, pt);
+        }
+        pt
     }
 
     fn get_cached_path_type<W: PathWorldView + ?Sized>(
@@ -1179,33 +1236,8 @@ impl NodeEvaluator for FlyNodeEvaluator {
         y: i32,
         z: i32,
     ) -> PathType {
-        let mut pt = self.get_path_type(ctx, x, y, z);
-        if pt == PathType::Open && y > ctx.level().min_y() {
-            let below = self.get_path_type(ctx, x, y - 1, z);
-            if below == PathType::DamageFire || below == PathType::Lava {
-                pt = PathType::DamageFire;
-            } else if below == PathType::DamageOther {
-                pt = PathType::DamageOther;
-            } else if below == PathType::Cocoa {
-                pt = PathType::Cocoa;
-            } else if below == PathType::Fence {
-                pt = PathType::Fence;
-            } else {
-                pt = if below != PathType::Walkable
-                    && below != PathType::Open
-                    && below != PathType::Water
-                {
-                    PathType::Walkable
-                } else {
-                    PathType::Open
-                };
-            }
-        }
-        if pt == PathType::Walkable || pt == PathType::Open {
-            pt = check_neighbour_blocks(ctx, x, y, z, pt);
-        }
-        let mob_pos = ctx.mob_position();
-        self.walk.evaluate_block_path_type(ctx, mob, mob_pos, pt)
+        self.walk
+            .evaluate_path_type_with(ctx, mob, x, y, z, Self::fly_path_type)
     }
 
     fn get_path_type<W: PathWorldView + ?Sized>(
@@ -1215,7 +1247,7 @@ impl NodeEvaluator for FlyNodeEvaluator {
         y: i32,
         z: i32,
     ) -> PathType {
-        ctx.get_path_type_from_state(x, y, z)
+        Self::fly_path_type(ctx, x, y, z)
     }
 }
 
