@@ -247,6 +247,15 @@ fn player_inventory_and_menu_lifecycle_and_disconnect_cleanup() {
         view.execute(TickCommand::Menu(MenuCommand::CloseMenu { menu })),
         Err(FacadeError::MenuClosed(menu))
     );
+    drop(view);
+
+    // Purging closed menus reclaims their slots so old handles become MenuStale.
+    assert_eq!(state.purge_closed_menus(), 1);
+    let view = state.view(&caps);
+    assert!(matches!(
+        view.get_menu(menu),
+        Err(FacadeError::MenuStale(HandleError::Stale { .. }))
+    ));
 }
 
 #[test]

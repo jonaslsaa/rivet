@@ -531,6 +531,23 @@ impl SyntheticWorldState {
         Ok(())
     }
 
+    /// Removes all closed menu handles from the table, freeing their slots and
+    /// bumping their generations so stale handles return `FacadeError::MenuStale`.
+    pub fn purge_closed_menus(&mut self) -> usize {
+        let closed: Vec<MenuHandle> = self
+            .menu_handles
+            .iter()
+            .copied()
+            .filter(|m| self.menus.get(*m, None).is_ok_and(|rec| !rec.open))
+            .collect();
+        let count = closed.len();
+        for menu in closed {
+            let _ = self.menus.remove(menu, None);
+            self.menu_handles.remove(&menu);
+        }
+        count
+    }
+
     fn close_menu_internal(&mut self, menu: MenuHandle) -> Result<(), FacadeError> {
         let viewer = {
             let rec = self
@@ -578,7 +595,14 @@ impl SyntheticWorldState {
             menus: self
                 .menu_handles
                 .iter()
-                .filter_map(|&h| self.menus.get(h, None).ok().cloned().map(|r| (h, r)))
+                .filter_map(|&h| {
+                    self.menus
+                        .get(h, None)
+                        .ok()
+                        .filter(|r| r.open)
+                        .cloned()
+                        .map(|r| (h, r))
+                })
                 .collect(),
         }
     }
