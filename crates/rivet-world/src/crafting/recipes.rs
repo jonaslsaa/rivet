@@ -350,12 +350,37 @@ impl SmithingTrimRecipe {
             && self.addition.test(&input.addition)
     }
 
+    fn normalize_inline_trim_material(
+        map: &serde_json::Map<String, serde_json::Value>,
+    ) -> serde_json::Value {
+        let mut normalized = map.clone();
+        // Paper `MaterialAssetGroup.MAP_CODEC`: `override_armor_assets` is optional and defaults
+        // to `Map.of()`, with `ResourceKey<EquipmentAsset>` keys (namespace-normalized identifiers).
+        if let Some(serde_json::Value::Object(overrides)) =
+            normalized.remove("override_armor_assets")
+            && !overrides.is_empty()
+        {
+            let mut canonical_overrides = serde_json::Map::new();
+            for (k, v) in overrides {
+                let canonical_key = Identifier::try_parse(&k)
+                    .map(|id| id.to_string())
+                    .unwrap_or(k);
+                canonical_overrides.insert(canonical_key, v);
+            }
+            normalized.insert(
+                "override_armor_assets".to_owned(),
+                serde_json::Value::Object(canonical_overrides),
+            );
+        }
+        serde_json::Value::Object(normalized)
+    }
+
     fn parse_trim_material_value(val: &serde_json::Value) -> Option<serde_json::Value> {
         match val {
             serde_json::Value::String(s) => {
                 Identifier::try_parse(s).map(|id| serde_json::Value::String(id.to_string()))
             }
-            serde_json::Value::Object(_) => Some(val.clone()),
+            serde_json::Value::Object(map) => Some(Self::normalize_inline_trim_material(map)),
             _ => None,
         }
     }
@@ -363,12 +388,9 @@ impl SmithingTrimRecipe {
     fn parse_trim_material_str(raw: &str) -> Option<serde_json::Value> {
         let trimmed = raw.trim();
         if trimmed.starts_with('{') {
-            if let Ok(val @ serde_json::Value::Object(_)) =
-                serde_json::from_str::<serde_json::Value>(trimmed)
-            {
-                return Some(val);
-            }
-            return None;
+            return serde_json::from_str::<serde_json::Value>(trimmed)
+                .ok()
+                .and_then(|val| Self::parse_trim_material_value(&val));
         }
         Identifier::try_parse(trimmed).map(|id| serde_json::Value::String(id.to_string()))
     }

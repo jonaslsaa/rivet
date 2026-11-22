@@ -459,10 +459,26 @@ fn cooking_stonecutting_and_smithing_behavior() {
     assert!(!inline_trimmed.is_empty());
     let inline_dup_in = SmithingRecipeInput::new(
         stack("ward_armor_trim_smithing_template", 1),
-        inline_trimmed,
+        inline_trimmed.clone(),
         inline_addition,
     );
     assert!(trim.assemble(&inline_dup_in).is_empty());
+
+    // Equivalent inline trim material with explicit empty `override_armor_assets: {}`
+    // is also recognized as a duplicate trim.
+    let mut inline_empty_overrides_comps = BTreeMap::new();
+    inline_empty_overrides_comps.insert(
+        Identifier::with_default_namespace("provides_trim_material"),
+        r#"{"asset_name":"custom","description":"Custom","override_armor_assets":{}}"#.to_owned(),
+    );
+    let inline_empty_overrides_addition =
+        ItemStack::with_components(item("gold_ingot"), 1, inline_empty_overrides_comps);
+    let inline_empty_overrides_dup_in = SmithingRecipeInput::new(
+        stack("ward_armor_trim_smithing_template", 1),
+        inline_trimmed,
+        inline_empty_overrides_addition,
+    );
+    assert!(trim.assemble(&inline_empty_overrides_dup_in).is_empty());
 
     // Manager property sets & stonecutter ordering.
     let manager = RecipeManager::from_recipes(vec![
