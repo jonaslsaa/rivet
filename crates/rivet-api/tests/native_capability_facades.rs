@@ -256,6 +256,37 @@ fn player_inventory_and_menu_lifecycle_and_disconnect_cleanup() {
         view.get_menu(menu),
         Err(FacadeError::MenuStale(HandleError::Stale { .. }))
     ));
+    drop(view);
+
+    // Unloading an occupied world disconnects its players and closes their menus.
+    let player2 = state
+        .connect_player(world, [8u8; 16], "Alex", GameMode::Survival)
+        .unwrap();
+    let menu2 = {
+        let mut view = state.view(&caps);
+        let CommandOutcome::OpenedMenu(m) = view
+            .execute(TickCommand::Menu(MenuCommand::OpenMenu {
+                player: player2,
+                inventory: chest,
+                title: "Chest".to_owned(),
+            }))
+            .unwrap()
+        else {
+            panic!("expected OpenedMenu");
+        };
+        m
+    };
+    assert!(state.unload_world(world));
+    let mut view = state.view(&caps);
+    assert!(!view.get_player(player2).unwrap().online);
+    assert!(!view.get_menu(menu2).unwrap().open);
+    assert_eq!(
+        view.execute(TickCommand::Player(PlayerCommand::SetFoodLevel {
+            handle: player2,
+            food_level: 5,
+        })),
+        Err(FacadeError::PlayerOffline(player2))
+    );
 }
 
 #[test]

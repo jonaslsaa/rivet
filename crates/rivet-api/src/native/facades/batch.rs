@@ -325,10 +325,25 @@ impl SyntheticWorldState {
         id
     }
 
-    /// Unloads a world, discarding all entities residing in it.
+    /// Unloads a world, disconnecting any players and discarding all entities residing in it.
     pub fn unload_world(&mut self, world: WorldId) -> bool {
         let removed = self.worlds.remove(&world).is_some();
         if removed {
+            let players_in_world: Vec<PlayerHandle> = self
+                .player_handles
+                .iter()
+                .copied()
+                .filter(|p| {
+                    self.players.get(*p, None).is_ok_and(|rec| {
+                        self.entities
+                            .get(rec.entity, None)
+                            .is_ok_and(|e| e.world == world)
+                    })
+                })
+                .collect();
+            for player in players_in_world {
+                let _ = self.disconnect_player(player);
+            }
             let to_discard: Vec<EntityHandle> = self
                 .entity_handles
                 .iter()
