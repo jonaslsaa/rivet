@@ -14,7 +14,7 @@ use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::map_codec;
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Vanilla saved-data file identifier (`minecraft:scoreboard` / `data/scoreboard.dat`).
 pub const SCOREBOARD_SAVED_DATA_ID: &str = "scoreboard";
@@ -108,16 +108,19 @@ impl PackedScoreboardData {
         })
     }
 
+    fn nbt_codec() -> &'static Arc<dyn Codec<PackedScoreboardData, NbtOps>> {
+        static CODEC: OnceLock<Arc<dyn Codec<PackedScoreboardData, NbtOps>>> = OnceLock::new();
+        CODEC.get_or_init(Self::codec::<NbtOps>)
+    }
+
     /// Encode to an NBT `Tag` using `NbtOps`.
     pub fn encode_nbt(&self) -> Result<Tag, String> {
-        let codec = Self::codec::<NbtOps>();
-        data_result_to_result(codec.encode_start(&NbtOps, self))
+        data_result_to_result(Self::nbt_codec().encode_start(&NbtOps, self))
     }
 
     /// Decode from an NBT `Tag` using `NbtOps`.
     pub fn decode_nbt(tag: &Tag) -> Result<Self, String> {
-        let codec = Self::codec::<NbtOps>();
-        data_result_to_result(codec.parse(&NbtOps, tag))
+        data_result_to_result(Self::nbt_codec().parse(&NbtOps, tag))
     }
 }
 

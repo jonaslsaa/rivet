@@ -41,9 +41,11 @@ pub use team_color::TeamColor;
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_nbt::nbt_ops::NbtOps;
 use rivet_nbt::tag::Tag;
+use rivet_serialization::codec::Codec;
 use rivet_serialization::data_result::DataResult;
 use rivet_text::contents::translatable::{TranslatableArg, TranslatableContents};
 use rivet_text::{Component, ComponentContents, HoverEvent, component_serialization};
+use std::sync::{Arc, OnceLock};
 
 pub(crate) fn data_result_to_result<T>(dr: DataResult<T>) -> Result<T, String> {
     if let Some(err) = dr.error_ref() {
@@ -65,8 +67,16 @@ pub(crate) fn wrap_in_square_brackets(inner: Component) -> Component {
 
 /// Build `HoverEvent::ShowText` without needing a private field constructor in `rivet-text`.
 pub(crate) fn show_text_hover(value: Component) -> HoverEvent {
-    let comp_codec = component_serialization::codec::<NbtOps>();
-    let hover_codec = HoverEvent::codec::<NbtOps>(comp_codec.clone());
+    type HoverCodecs = (
+        Arc<dyn Codec<Component, NbtOps>>,
+        Arc<dyn Codec<HoverEvent, NbtOps>>,
+    );
+    static CODECS: OnceLock<HoverCodecs> = OnceLock::new();
+    let (comp_codec, hover_codec) = CODECS.get_or_init(|| {
+        let comp_codec = component_serialization::codec::<NbtOps>();
+        let hover_codec = HoverEvent::codec::<NbtOps>(comp_codec.clone());
+        (comp_codec, hover_codec)
+    });
     let encoded_value = comp_codec
         .encode_start(&NbtOps, &value)
         .result_or_partial_silent()
