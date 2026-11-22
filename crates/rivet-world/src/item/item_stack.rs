@@ -597,6 +597,33 @@ pub fn validate_components<G: DataComponentGetter>(components: &G) -> DataResult
     DataResult::success(())
 }
 
+/// Computes the `DataComponentPatch` representing `components` relative to
+/// `item`'s standard registry prototype so codecs preserve custom prototype
+/// defaults across save/load round trips.
+pub(crate) fn patch_relative_to_standard_prototype(
+    item: ItemId,
+    components: &PatchedDataComponentMap,
+) -> DataComponentPatch {
+    let standard = item.default_components();
+    if components.prototype() == &standard {
+        return components.as_patch();
+    }
+    let mut builder = DataComponentPatch::builder();
+    for k in components.key_set() {
+        if let Some(v) = components.get(k)
+            && standard.get(k) != Some(v)
+        {
+            builder.set(k, v.clone());
+        }
+    }
+    for (k, _) in standard.iter() {
+        if !components.has(k) {
+            builder.remove(k);
+        }
+    }
+    builder.build()
+}
+
 /// Port of `ItemStack.CODEC` (`id`, `count` in `1..=99` defaulting to 1,
 /// `components` patch defaulting to empty, validated via `validate_components`).
 pub fn item_stack_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<ItemStack, Ops>> {
@@ -633,7 +660,7 @@ pub fn item_stack_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<ItemStack,
                     count_val,
                 ),
             ];
-            let patch = stack.components_patch();
+            let patch = patch_relative_to_standard_prototype(stack.item(), &stack.components);
             if !patch.is_empty() {
                 let comp_val = match crate::item::data_result_into(
                     data_component_patch_codec::<Ops>().encode_start(ops, &patch),

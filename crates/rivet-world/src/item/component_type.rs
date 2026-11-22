@@ -6,6 +6,7 @@
 //! `rivet_registry::generated::registries::{DATA_COMPONENT_TYPE_BY_ID, DATA_COMPONENT_TYPE_BY_NAME}`.
 
 use std::any::TypeId;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
@@ -18,6 +19,8 @@ use rivet_registry::generated::registries::{
 };
 use rivet_registry::identifier::identifier_codec;
 use rivet_serialization::{DataResult, DynamicOps, JsonOps, Unit, codec, extra_codecs};
+use rivet_text::Component;
+use rivet_text::component_serialization;
 
 use crate::item::component_patch::PatchedDataComponentMap;
 use crate::item::recursive_components::{
@@ -238,8 +241,11 @@ pub enum DataComponentValue {
     Unit,
     /// Identifier-valued components (`item_model`, `tooltip_style`, `break_sound`, etc.).
     Identifier(Identifier),
-    /// Text/string-valued components (`custom_name`, `item_name`).
+    /// Plain text/string-valued components (`custom_name`, `item_name`).
     Text(String),
+    /// Structured text component (`custom_name`, `item_name`) validated by
+    /// `rivet_text::component_serialization::codec`.
+    Component(Component),
     /// `minecraft:rarity`.
     Rarity(Rarity),
     /// `minecraft:container` (`ItemContainerContents`) — recursive SCC member.
@@ -257,6 +263,76 @@ pub enum DataComponentValue {
     RawJson(serde_json::Value),
 }
 
+#[derive(PartialEq, Eq, Hash)]
+enum CanonicalRawValue {
+    Null,
+    Int(i64),
+    Float(u64),
+    String(String),
+    List(Vec<CanonicalRawValue>),
+    Map(BTreeMap<String, CanonicalRawValue>),
+}
+
+impl CanonicalRawValue {
+    fn from_tag(tag: &Tag) -> Self {
+        match tag {
+            Tag::End(_) => Self::Null,
+            Tag::Byte(t) => Self::Int(i64::from(t.value)),
+            Tag::Short(t) => Self::Int(i64::from(t.value)),
+            Tag::Int(t) => Self::Int(i64::from(t.value)),
+            Tag::Long(t) => Self::Int(t.value),
+            Tag::Float(t) => Self::Float(f64::from(t.value).to_bits()),
+            Tag::Double(t) => Self::Float(t.value.to_bits()),
+            Tag::ByteArray(t) => {
+                Self::List(t.data.iter().map(|&v| Self::Int(i64::from(v))).collect())
+            }
+            Tag::String(t) => Self::String(t.value.clone()),
+            Tag::List(t) => Self::List(t.list.iter().map(Self::from_tag).collect()),
+            Tag::Compound(c) => Self::Map(
+                c.entry_set()
+                    .map(|(k, v)| (k.clone(), Self::from_tag(v)))
+                    .collect(),
+            ),
+            Tag::IntArray(t) => {
+                Self::List(t.data.iter().map(|&v| Self::Int(i64::from(v))).collect())
+            }
+            Tag::LongArray(t) => Self::List(t.data.iter().map(|&v| Self::Int(v)).collect()),
+        }
+    }
+
+    fn from_json(val: &serde_json::Value) -> Self {
+        match val {
+            serde_json::Value::Null => Self::Null,
+            serde_json::Value::Bool(b) => Self::Int(i64::from(*b)),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Self::Int(i)
+                } else if let Some(u) = n.as_u64() {
+                    Self::Int(u as i64)
+                } else {
+                    Self::Float(n.as_f64().unwrap_or(f64::NAN).to_bits())
+                }
+            }
+            serde_json::Value::String(s) => Self::String(s.clone()),
+            serde_json::Value::Array(arr) => Self::List(arr.iter().map(Self::from_json).collect()),
+            serde_json::Value::Object(map) => Self::Map(
+                map.iter()
+                    .map(|(k, v)| (k.clone(), Self::from_json(v)))
+                    .collect(),
+            ),
+        }
+    }
+}
+
+fn component_to_canonical_json(comp: &Component) -> serde_json::Value {
+    let ops = JsonOps::new(false);
+    component_serialization::codec::<JsonOps>()
+        .encode_start(&ops, comp)
+        .result()
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::String(comp.to_string()))
+}
+
 impl PartialEq for DataComponentValue {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -267,13 +343,27 @@ impl PartialEq for DataComponentValue {
             (Self::Unit, Self::Unit) => true,
             (Self::Identifier(a), Self::Identifier(b)) => a == b,
             (Self::Text(a), Self::Text(b)) => a == b,
+            (Self::Component(a), Self::Component(b)) => a == b,
+            (Self::Text(a), Self::Component(b)) | (Self::Component(b), Self::Text(a)) => {
+                *b == Component::literal(a)
+            }
             (Self::Rarity(a), Self::Rarity(b)) => a == b,
             (Self::Container(a), Self::Container(b)) => a == b,
             (Self::BundleContents(a), Self::BundleContents(b)) => a == b,
             (Self::ChargedProjectiles(a), Self::ChargedProjectiles(b)) => a == b,
             (Self::Bees(a), Self::Bees(b)) => a == b,
-            (Self::RawNbt(a), Self::RawNbt(b)) => a == b,
-            (Self::RawJson(a), Self::RawJson(b)) => a == b,
+            (Self::RawNbt(a), Self::RawNbt(b)) => {
+                CanonicalRawValue::from_tag(a) == CanonicalRawValue::from_tag(b)
+            }
+            (Self::RawJson(a), Self::RawJson(b)) => {
+                CanonicalRawValue::from_json(a) == CanonicalRawValue::from_json(b)
+            }
+            (Self::RawNbt(a), Self::RawJson(b)) => {
+                CanonicalRawValue::from_tag(a) == CanonicalRawValue::from_json(b)
+            }
+            (Self::RawJson(a), Self::RawNbt(b)) => {
+                CanonicalRawValue::from_json(a) == CanonicalRawValue::from_tag(b)
+            }
             _ => false,
         }
     }
@@ -355,27 +445,69 @@ fn hash_json<H: Hasher>(val: &serde_json::Value, state: &mut H) {
 
 impl Hash for DataComponentValue {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        std::mem::discriminant(self).hash(state);
         match self {
-            Self::CustomData(tag) => hash_compound(tag, state),
-            Self::Int(v) => v.hash(state),
-            Self::Float(v) => v.to_bits().hash(state),
-            Self::Bool(v) => v.hash(state),
-            Self::Unit => {}
-            Self::Identifier(id) => id.hash(state),
-            Self::Text(s) => s.hash(state),
-            Self::Rarity(r) => r.hash(state),
-            Self::Container(c) => c.hash(state),
-            Self::BundleContents(b) => b.hash(state),
-            Self::ChargedProjectiles(p) => p.hash(state),
+            Self::CustomData(tag) => {
+                0u8.hash(state);
+                hash_compound(tag, state);
+            }
+            Self::Int(v) => {
+                1u8.hash(state);
+                v.hash(state);
+            }
+            Self::Float(v) => {
+                2u8.hash(state);
+                v.to_bits().hash(state);
+            }
+            Self::Bool(v) => {
+                3u8.hash(state);
+                v.hash(state);
+            }
+            Self::Unit => {
+                4u8.hash(state);
+            }
+            Self::Identifier(id) => {
+                5u8.hash(state);
+                id.hash(state);
+            }
+            Self::Text(s) => {
+                6u8.hash(state);
+                hash_json(&serde_json::Value::String(s.clone()), state);
+            }
+            Self::Component(c) => {
+                6u8.hash(state);
+                hash_json(&component_to_canonical_json(c), state);
+            }
+            Self::Rarity(r) => {
+                7u8.hash(state);
+                r.hash(state);
+            }
+            Self::Container(c) => {
+                8u8.hash(state);
+                c.hash(state);
+            }
+            Self::BundleContents(b) => {
+                9u8.hash(state);
+                b.hash(state);
+            }
+            Self::ChargedProjectiles(p) => {
+                10u8.hash(state);
+                p.hash(state);
+            }
             Self::Bees(bees) => {
+                11u8.hash(state);
                 bees.len().hash(state);
                 for bee in bees {
                     hash_compound(bee, state);
                 }
             }
-            Self::RawNbt(tag) => hash_tag(tag, state),
-            Self::RawJson(val) => hash_json(val, state),
+            Self::RawNbt(tag) => {
+                12u8.hash(state);
+                CanonicalRawValue::from_tag(tag).hash(state);
+            }
+            Self::RawJson(val) => {
+                12u8.hash(state);
+                CanonicalRawValue::from_json(val).hash(state);
+            }
         }
     }
 }
@@ -495,6 +627,7 @@ impl fmt::Display for DataComponentValue {
             Self::Unit => f.write_str("UNIT"),
             Self::Identifier(id) => write!(f, "{id}"),
             Self::Text(s) => f.write_str(s),
+            Self::Component(c) => write!(f, "{c}"),
             Self::Rarity(r) => write!(f, "{r}"),
             Self::Container(c) => write!(f, "{c:?}"),
             Self::BundleContents(b) => write!(f, "{b:?}"),
@@ -602,11 +735,8 @@ pub fn encode_component_value<Ops: DynamicOps + 'static>(
         }
         DataComponentTypeId::CUSTOM_NAME | DataComponentTypeId::ITEM_NAME => match value {
             DataComponentValue::Text(s) => codec::string_codec::<Ops>().encode_start(ops, s),
-            DataComponentValue::RawNbt(tag) => {
-                DataResult::success(NbtOps::instance().convert_to(ops, tag))
-            }
-            DataComponentValue::RawJson(val) => {
-                DataResult::success(JsonOps::new(false).convert_to(ops, val))
+            DataComponentValue::Component(comp) => {
+                component_serialization::codec::<Ops>().encode_start(ops, comp)
             }
             _ => DataResult::error(format!("Expected text value for {component_type}")),
         },
@@ -674,6 +804,9 @@ pub fn encode_component_value<Ops: DynamicOps + 'static>(
             DataComponentValue::Unit => codec::empty::<Ops>().encode_start(ops, &Unit),
             DataComponentValue::Identifier(id) => identifier_codec::<Ops>().encode_start(ops, id),
             DataComponentValue::Text(s) => codec::string_codec::<Ops>().encode_start(ops, s),
+            DataComponentValue::Component(comp) => {
+                component_serialization::codec::<Ops>().encode_start(ops, comp)
+            }
             DataComponentValue::CustomData(c) => {
                 DataResult::success(NbtOps::instance().convert_to(ops, &Tag::Compound(c.clone())))
             }
@@ -726,28 +859,18 @@ pub fn decode_component_value<Ops: DynamicOps + 'static>(
             if let Some(s) = ops.get_string_value(input).result() {
                 return DataResult::success(DataComponentValue::Text(s.clone()));
             }
-            // Paper's `ComponentSerialization.CODEC` accepts plain strings,
-            // structured objects/compounds (styled/translated text), and
-            // non-empty component lists.
-            let is_structured = ops.get_map(input).is_success()
-                || ops
-                    .get_stream(input)
-                    .result()
-                    .is_some_and(|items| !items.is_empty());
-            if !is_structured {
-                return DataResult::error(format!(
-                    "Expected string, object, or non-empty list for text component {component_type}"
-                ));
-            }
-            if TypeId::of::<Ops>() == TypeId::of::<JsonOps>() {
-                DataResult::success(DataComponentValue::RawJson(
-                    ops.convert_to(&JsonOps::new(false), input),
-                ))
-            } else {
-                DataResult::success(DataComponentValue::RawNbt(
-                    ops.convert_to(&NbtOps::instance(), input),
-                ))
-            }
+            component_serialization::codec::<Ops>()
+                .parse(ops, input)
+                .map_owned(|comp| {
+                    if comp.get_style().is_empty()
+                        && comp.get_siblings().is_empty()
+                        && let rivet_text::ComponentContents::PlainText(p) = comp.get_contents()
+                    {
+                        DataComponentValue::Text(p.text().to_owned())
+                    } else {
+                        DataComponentValue::Component(comp)
+                    }
+                })
         }
         DataComponentTypeId::RARITY => {
             codec::string_codec::<Ops>()

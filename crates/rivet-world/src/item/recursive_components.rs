@@ -304,9 +304,13 @@ pub fn item_stack_template_codec<Ops: DynamicOps + 'static>()
                     count_val,
                 ));
             }
-            if !tmpl.components.is_empty() {
+            let patch = crate::item::item_stack::patch_relative_to_standard_prototype(
+                tmpl.item(),
+                &tmpl.effective_components(),
+            );
+            if !patch.is_empty() {
                 let comp_val = match crate::item::data_result_into(
-                    data_component_patch_codec::<Ops>().encode_start(ops, &tmpl.components),
+                    data_component_patch_codec::<Ops>().encode_start(ops, &patch),
                 ) {
                     Ok(v) => v,
                     Err(err) => return DataResult::error(err),
@@ -364,7 +368,15 @@ pub fn item_stack_template_codec<Ops: DynamicOps + 'static>()
                 None => DataComponentPatch::empty(),
             };
             match ItemStackTemplate::try_new(item.holder(), count, patch) {
-                Ok(tmpl) => DataResult::success(tmpl),
+                Ok(tmpl) => {
+                    let effective = tmpl.effective_components();
+                    if effective.has(DataComponentTypeId::MAX_DAMAGE)
+                        && effective.get_i32_or(DataComponentTypeId::MAX_STACK_SIZE, 1) > 1
+                    {
+                        return DataResult::error("Item cannot be both damageable and stackable");
+                    }
+                    DataResult::success(tmpl)
+                }
                 Err(err) => DataResult::error(err),
             }
         },

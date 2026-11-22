@@ -799,7 +799,25 @@ fn styled_and_translated_item_names_round_trip_in_json_and_nbt() {
         .result()
         .cloned()
         .expect("re-encode item with list custom_name to JSON");
-    assert_eq!(reencoded_list, list_json);
+    assert_eq!(
+        reencoded_list,
+        serde_json::json!({
+            "id": "minecraft:stone",
+            "count": 1,
+            "components": {
+                "minecraft:custom_name": {
+                    "text": "Prefix ",
+                    "extra": [{"text": "Blade", "bold": true}]
+                }
+            }
+        })
+    );
+    let reparsed_list = json_codec
+        .parse(&json_ops, &reencoded_list)
+        .result()
+        .cloned()
+        .expect("re-parse canonical list custom_name");
+    assert!(ItemStack::matches(&decoded_list, &reparsed_list));
 
     // NBT compound form for styled custom_name.
     let nbt_codec = item_stack_codec::<NbtOps>();
@@ -847,4 +865,244 @@ fn styled_and_translated_item_names_round_trip_in_json_and_nbt() {
         }
     });
     assert!(json_codec.parse(&json_ops, &invalid_num).is_error());
+}
+
+#[test]
+fn styled_nbt_item_name_exports_json_boolean_flags() {
+    let nbt_codec = item_stack_codec::<NbtOps>();
+    let json_codec = item_stack_codec::<JsonOps>();
+    let json_ops = JsonOps::new(false);
+
+    let mut name_compound = CompoundTag::new();
+    name_compound.put_string("text", "Excalibur");
+    name_compound.put_string("color", "gold");
+    name_compound.put_boolean("italic", false);
+    let mut comps = CompoundTag::new();
+    comps.put(
+        "minecraft:custom_name".to_string(),
+        Tag::Compound(name_compound),
+    );
+    let mut root = CompoundTag::new();
+    root.put_string("id", "minecraft:stone");
+    root.put_int("count", 1);
+    root.put("components".to_string(), Tag::Compound(comps));
+
+    let decoded = nbt_codec
+        .parse(&NbtOps, &Tag::Compound(root))
+        .result()
+        .cloned()
+        .expect("decode styled NBT custom_name");
+
+    let exported = json_codec
+        .encode_start(&json_ops, &decoded)
+        .result()
+        .cloned()
+        .expect("export styled NBT custom_name to JSON");
+    let custom_name = &exported["components"]["minecraft:custom_name"];
+    assert_eq!(custom_name["italic"], serde_json::Value::Bool(false));
+    assert_eq!(
+        custom_name["text"],
+        serde_json::Value::String("Excalibur".into())
+    );
+    assert_eq!(
+        custom_name["color"],
+        serde_json::Value::String("gold".into())
+    );
+
+    // The exported JSON must be accepted by rivet-text's component codec as well as item_stack_codec.
+    assert!(
+        rivet_text::component_serialization::codec::<JsonOps>()
+            .parse(&json_ops, custom_name)
+            .result()
+            .is_some()
+    );
+    let reparsed = json_codec
+        .parse(&json_ops, &exported)
+        .result()
+        .cloned()
+        .expect("re-parse exported JSON item");
+    assert!(ItemStack::matches(&decoded, &reparsed));
+}
+
+#[test]
+fn malformed_item_name_object_is_rejected() {
+    let json_codec = item_stack_codec::<JsonOps>();
+    let json_ops = JsonOps::new(false);
+
+    let malformed_json = serde_json::json!({
+        "id": "minecraft:stone",
+        "count": 1,
+        "components": {
+            "minecraft:custom_name": {
+                "type": "text"
+            }
+        }
+    });
+    assert!(
+        json_codec.parse(&json_ops, &malformed_json).is_error(),
+        "object with type=text but no text field must be rejected"
+    );
+
+    let nbt_codec = item_stack_codec::<NbtOps>();
+    let mut bad_name = CompoundTag::new();
+    bad_name.put_string("type", "text");
+    let mut comps = CompoundTag::new();
+    comps.put("minecraft:item_name".to_string(), Tag::Compound(bad_name));
+    let mut root = CompoundTag::new();
+    root.put_string("id", "minecraft:stone");
+    root.put_int("count", 1);
+    root.put("components".to_string(), Tag::Compound(comps));
+    assert!(
+        nbt_codec.parse(&NbtOps, &Tag::Compound(root)).is_error(),
+        "NBT object with type=text but no text field must be rejected"
+    );
+}
+
+#[test]
+fn equivalent_untyped_components_match_and_hash_across_json_and_nbt() {
+    let json_codec = item_stack_codec::<JsonOps>();
+    let nbt_codec = item_stack_codec::<NbtOps>();
+    let json_ops = JsonOps::new(false);
+
+    let json_item = serde_json::json!({
+        "id": "minecraft:stone",
+        "count": 1,
+        "components": {
+            "minecraft:enchantment_glint_override": true,
+            "minecraft:tooltip_display": {
+                "hide_tooltip": true,
+                "level": 3
+            }
+        }
+    });
+
+    let mut tooltip = CompoundTag::new();
+    tooltip.put_boolean("hide_tooltip", true);
+    tooltip.put_int("level", 3);
+    let mut comps = CompoundTag::new();
+    comps.put_boolean("minecraft:enchantment_glint_override", true);
+    comps.put(
+        "minecraft:tooltip_display".to_string(),
+        Tag::Compound(tooltip),
+    );
+    let mut nbt_root = CompoundTag::new();
+    nbt_root.put_string("id", "minecraft:stone");
+    nbt_root.put_int("count", 1);
+    nbt_root.put("components".to_string(), Tag::Compound(comps));
+
+    let from_json = json_codec
+        .parse(&json_ops, &json_item)
+        .result()
+        .cloned()
+        .expect("decode JSON stack");
+    let from_nbt = nbt_codec
+        .parse(&NbtOps, &Tag::Compound(nbt_root))
+        .result()
+        .cloned()
+        .expect("decode NBT stack");
+
+    assert!(ItemStack::matches(&from_json, &from_nbt));
+    assert!(ItemStack::is_same_item_same_components(
+        &from_json, &from_nbt
+    ));
+    assert_eq!(
+        ItemStack::hash_item_and_components(&from_json),
+        ItemStack::hash_item_and_components(&from_nbt)
+    );
+}
+
+#[test]
+fn custom_item_prototype_defaults_survive_codec_round_trips() {
+    let stone = ItemId::from_name("minecraft:stone").unwrap();
+    let mut custom_proto_builder = DataComponentMap::builder();
+    for (k, v) in stone.default_components().iter() {
+        if k != DataComponentTypeId::REPAIR_COST {
+            custom_proto_builder.set(k, v.clone());
+        }
+    }
+    custom_proto_builder.set(
+        DataComponentTypeId::CUSTOM_NAME,
+        DataComponentValue::Text("Custom Default".into()),
+    );
+    let custom_proto = custom_proto_builder
+        .build()
+        .expect("valid custom prototype");
+    let custom_holder = ItemHolder::with_components(stone, custom_proto);
+
+    let stack =
+        ItemStack::from_holder_and_patch(custom_holder.clone(), 3, &DataComponentPatch::empty());
+    let tmpl = ItemStackTemplate::try_new(custom_holder, 3, DataComponentPatch::empty())
+        .expect("build template with custom prototype");
+
+    let json_ops = JsonOps::new(false);
+    let stack_codec = item_stack_codec::<JsonOps>();
+    let encoded_stack = stack_codec
+        .encode_start(&json_ops, &stack)
+        .result()
+        .cloned()
+        .expect("encode stack with custom prototype");
+    let decoded_stack = stack_codec
+        .parse(&json_ops, &encoded_stack)
+        .result()
+        .cloned()
+        .expect("decode stack with custom prototype");
+    assert_eq!(
+        decoded_stack.get(DataComponentTypeId::CUSTOM_NAME),
+        Some(&DataComponentValue::Text("Custom Default".into()))
+    );
+    assert!(!decoded_stack.has(DataComponentTypeId::REPAIR_COST));
+
+    let tmpl_codec = item_stack_template_codec::<JsonOps>();
+    let encoded_tmpl = tmpl_codec
+        .encode_start(&json_ops, &tmpl)
+        .result()
+        .cloned()
+        .expect("encode template with custom prototype");
+    let decoded_tmpl = tmpl_codec
+        .parse(&json_ops, &encoded_tmpl)
+        .result()
+        .cloned()
+        .expect("decode template with custom prototype");
+    assert_eq!(
+        decoded_tmpl.get(DataComponentTypeId::CUSTOM_NAME),
+        Some(&DataComponentValue::Text("Custom Default".into()))
+    );
+    assert!(!decoded_tmpl.has(DataComponentTypeId::REPAIR_COST));
+}
+
+#[test]
+fn invalid_stored_item_damageable_and_stackable_is_rejected() {
+    let json_ops = JsonOps::new(false);
+    let container_codec = item_container_contents_codec::<JsonOps>();
+
+    let invalid_container = serde_json::json!([
+        {
+            "slot": 0,
+            "item": {
+                "id": "minecraft:stone",
+                "count": 1,
+                "components": {
+                    "minecraft:max_damage": 100,
+                    "minecraft:max_stack_size": 16
+                }
+            }
+        }
+    ]);
+    assert!(
+        container_codec
+            .parse(&json_ops, &invalid_container)
+            .is_error(),
+        "container containing an item with both max_damage and max_stack_size > 1 must fail decoding"
+    );
+
+    // Also rejected when nested inside an item stack's minecraft:container component.
+    let stack_codec = item_stack_codec::<JsonOps>();
+    let shulker_like = serde_json::json!({
+        "id": "minecraft:stone",
+        "count": 1,
+        "components": {
+            "minecraft:container": invalid_container
+        }
+    });
+    assert!(stack_codec.parse(&json_ops, &shulker_like).is_error());
 }
