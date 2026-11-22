@@ -400,14 +400,6 @@ impl PackedPlayerTeam {
     /// - `"Players"` (default empty list)
     pub fn codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<PackedPlayerTeam, Ops>> {
         let comp_codec = component_serialization::codec::<Ops>();
-        let lenient_color = codec::comap_flat_map(
-            codec::string_codec::<Ops>(),
-            Arc::new(|s: &String| DataResult::success(TeamColor::from_name(s))),
-            Arc::new(|c: &Option<TeamColor>| match c {
-                Some(tc) => tc.serialized_name().to_owned(),
-                None => String::new(),
-            }),
-        );
         let optional_comp_default = |field: &str, c: Arc<dyn Codec<Component, Ops>>| {
             map_codec::xmap(
                 codec::optional_field(field.to_owned(), c, false),
@@ -452,8 +444,8 @@ impl PackedPlayerTeam {
                     codec::optional_field("DisplayName".to_owned(), comp_codec.clone(), false),
                 ))
                 .and(RecordCodecBuilder::of(
-                    Arc::new(|p: &TeamPart1| p.color.map(Some)),
-                    codec::optional_field("TeamColor".to_owned(), lenient_color, false),
+                    Arc::new(|p: &TeamPart1| p.color),
+                    codec::optional_field("TeamColor".to_owned(), TeamColor::codec::<Ops>(), true),
                 ))
                 .and(RecordCodecBuilder::of(
                     Arc::new(|p: &TeamPart1| p.allow_friendly_fire),
@@ -476,13 +468,13 @@ impl PackedPlayerTeam {
                     Arc::new(
                         |name,
                          display_name,
-                         color_opt: Option<Option<TeamColor>>,
+                         color: Option<TeamColor>,
                          allow_friendly_fire,
                          see_friendly_invisibles,
                          member_name_prefix| TeamPart1 {
                             name,
                             display_name,
-                            color: color_opt.flatten(),
+                            color,
                             allow_friendly_fire,
                             see_friendly_invisibles,
                             member_name_prefix,
