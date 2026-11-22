@@ -1228,3 +1228,45 @@ fn late_sequence_anchors_delays_to_parent_tick() {
         "sequence added at tick 10 with then_idle(5) must succeed at tick 15, not 10"
     );
 }
+
+#[test]
+fn unspawned_required_test_fails_transcript_instead_of_passing() {
+    struct RejectingSpawner;
+    impl super::StructureSpawner for RejectingSpawner {
+        fn on_batch_start(&mut self, _batch_index: i32) {}
+        fn spawn_structure(&mut self, _info: &mut GameTestInfo) -> Option<BlockPos> {
+            None
+        }
+        fn clear_structures(&mut self, _positions: &[BlockPos]) {}
+    }
+
+    let registries = build_registries_with(
+        vec![],
+        vec![(
+            Identifier::with_default_namespace("unspawned_req"),
+            fn_instance(
+                "always_pass",
+                TestEnvironmentRef::Key(default_environment_key()),
+                5,
+                0,
+                true,
+                1,
+                1,
+            ),
+        )],
+    );
+    let functions = TestFunctionRegistry::with_builtins();
+    let infos = vec![make_info(
+        &registries,
+        "unspawned_req",
+        RetryOptions::no_retries(),
+    )];
+    let mut runner = GameTestRunner::new(infos, registries, GameTestRunnerConfig::default());
+    runner.set_spawner(Box::new(RejectingSpawner));
+    let transcript = runner.run_to_completion(&functions, 20);
+
+    assert_eq!(transcript.status, GameTestRunStatus::Failed);
+    assert!(!transcript.is_success());
+    assert_eq!(transcript.skipped_count, 1);
+    assert_eq!(transcript.executed_count, 0);
+}

@@ -550,6 +550,7 @@ impl GameTestRunner {
         let mut failed_required_count = 0usize;
         let mut failed_optional_count = 0usize;
         let mut skipped_count = 0usize;
+        let mut skipped_required_count = 0usize;
 
         for state in &self.logical_states {
             let info = &self.arena[state.latest_info_id.0];
@@ -561,7 +562,12 @@ impl GameTestRunner {
                 GameTestOutcome::Passed => passed_count += 1,
                 GameTestOutcome::FailedRequired => failed_required_count += 1,
                 GameTestOutcome::FailedOptional => failed_optional_count += 1,
-                GameTestOutcome::Skipped => skipped_count += 1,
+                GameTestOutcome::Skipped => {
+                    skipped_count += 1;
+                    if info.is_required() {
+                        skipped_required_count += 1;
+                    }
+                }
             }
 
             let env_id = self.environment_identifier(info.batch());
@@ -588,7 +594,7 @@ impl GameTestRunner {
 
         let status = if !self.finished {
             GameTestRunStatus::Incomplete
-        } else if failed_required_count > 0 || self.halted_on_error {
+        } else if failed_required_count > 0 || skipped_required_count > 0 || self.halted_on_error {
             GameTestRunStatus::Failed
         } else {
             GameTestRunStatus::Passed
