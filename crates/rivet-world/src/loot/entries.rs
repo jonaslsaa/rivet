@@ -109,14 +109,14 @@ impl ExpandedLootPoolEntry<'_> {
             }
             ExpandedEntryKind::NestedTable(table_ref) => match table_ref {
                 NestedTableRef::Reference(id) => {
-                    if let Some(table) = context.resolver().get_table(id).cloned() {
-                        table.get_random_items_raw_by_id(Some(id), context, &mut |stack, ctx| {
+                    if let Some(table) = context.resolver().get_table(id) {
+                        table.get_random_items_raw_with_ctx(context, &mut |stack, ctx| {
                             emit(stack, ctx);
                         });
                     }
                 }
                 NestedTableRef::Inline(table) => {
-                    table.get_random_items_raw_by_id(None, context, &mut |stack, ctx| {
+                    table.get_random_items_raw_with_ctx(context, &mut |stack, ctx| {
                         emit(stack, ctx);
                     });
                 }

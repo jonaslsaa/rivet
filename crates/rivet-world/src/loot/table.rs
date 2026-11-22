@@ -95,20 +95,14 @@ impl LootTable {
         }
     }
 
-    /// Internal raw execution with an optional table identifier for
-    /// breadcrumb-based cycle detection (when referenced by ID via
-    /// [`LootRegistry`], uses [`VisitedEntry::TableId`]; otherwise uses
-    /// [`VisitedEntry::TablePtr`]).
-    pub(crate) fn get_random_items_raw_by_id(
+    /// Internal raw execution with pointer-identity breadcrumb cycle detection
+    /// matching Paper's `LootContext.createVisitedEntry(this)`.
+    pub(crate) fn get_random_items_raw_with_ctx(
         &self,
-        table_id: Option<&Identifier>,
         context: &mut LootContext<'_>,
         output: &mut dyn FnMut(LootItemStack, &mut LootContext<'_>),
     ) {
-        let breadcrumb = match table_id {
-            Some(id) => VisitedEntry::TableId(id.clone()),
-            None => VisitedEntry::TablePtr((self as *const Self) as usize),
-        };
+        let breadcrumb = VisitedEntry::TablePtr((self as *const Self) as usize);
 
         if context.push_visited_element(breadcrumb.clone()) {
             let functions = &self.functions;
@@ -131,7 +125,7 @@ impl LootTable {
         context: &mut LootContext<'_>,
         output: &mut dyn FnMut(LootItemStack),
     ) {
-        self.get_random_items_raw_by_id(None, context, &mut |stack, _| output(stack));
+        self.get_random_items_raw_with_ctx(context, &mut |stack, _| output(stack));
     }
 
     /// `LootTable.getRandomItems(LootContext, Consumer<ItemStack>)`.
@@ -140,7 +134,7 @@ impl LootTable {
         context: &mut LootContext<'_>,
         output: &mut dyn FnMut(LootItemStack),
     ) {
-        self.get_random_items_raw_by_id(None, context, &mut |stack, ctx| {
+        self.get_random_items_raw_with_ctx(context, &mut |stack, ctx| {
             Self::split_and_emit(ctx.params(), stack, output);
         });
     }

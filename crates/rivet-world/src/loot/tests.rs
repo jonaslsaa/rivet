@@ -591,24 +591,53 @@ fn mutual_table_recursion_stops_cleanly_and_pops_breadcrumbs() {
         )
         .build();
 
-    registry.register_table(id("table_a"), table_a.clone());
+    registry.register_table(id("table_a"), table_a);
     registry.register_table(id("table_b"), table_b);
+
+    let registered_a = registry.get_table(&id("table_a")).unwrap();
+    let ptr_a = VisitedEntry::TablePtr((registered_a as *const LootTable) as usize);
+    let ptr_b = VisitedEntry::TablePtr(
+        (registry.get_table(&id("table_b")).unwrap() as *const LootTable) as usize,
+    );
 
     let mut ctx = make_context(empty_params(), 123, &registry);
     let mut items = Vec::new();
-    table_a.get_random_items_raw_by_id(Some(&id("table_a")), &mut ctx, &mut |s, _| {
+    registered_a.get_random_items_raw(&mut ctx, &mut |s| {
         items.push(s.item().clone());
     });
 
     // Breadcrumbs popped cleanly: a second run succeeds and leaves no stale breadcrumbs.
     let mut items2 = Vec::new();
-    table_a.get_random_items_raw_by_id(Some(&id("table_a")), &mut ctx, &mut |s, _| {
+    registered_a.get_random_items_raw(&mut ctx, &mut |s| {
         items2.push(s.item().clone());
     });
 
-    assert!(!ctx.has_visited_element(&VisitedEntry::TableId(id("table_a"))));
-    assert!(!ctx.has_visited_element(&VisitedEntry::TableId(id("table_b"))));
+    assert!(!ctx.has_visited_element(&ptr_a));
+    assert!(!ctx.has_visited_element(&ptr_b));
     assert_eq!(items.len(), items2.len());
+}
+
+#[test]
+fn self_referencing_registered_table_runs_productive_pool_only_once() {
+    let mut registry = LootRegistry::new();
+    let self_ref = LootTable::builder()
+        .with_pool(
+            LootPool::builder()
+                .add(LootPoolEntryContainer::item(id("gold_nugget")))
+                .build(),
+        )
+        .with_pool(
+            LootPool::builder()
+                .add(LootPoolEntryContainer::loot_table_reference(id("self_ref")))
+                .build(),
+        )
+        .build();
+    registry.register_table(id("self_ref"), self_ref);
+
+    let registered = registry.get_table(&id("self_ref")).unwrap();
+    let items = registered.get_random_items_with_seed(empty_params(), &registry, 42);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].item(), &id("gold_nugget"));
 }
 
 #[test]
