@@ -68,6 +68,18 @@ pub trait StarLightProvider {
     /// (the light-queue defers with the engine units, #184).
     fn section_change(&mut self, pos: SectionPos, new_empty_value: bool);
 
+    /// `StarLightInterface.hasUpdates()` — whether the provider has pending
+    /// light updates queued to run.
+    fn has_updates(&self) -> bool {
+        false
+    }
+
+    /// `StarLightInterface.propagateChanges()` — run queued light updates and
+    /// return the number of updated chunks/tasks propagated.
+    fn propagate_changes(&mut self) -> i32 {
+        0
+    }
+
     /// `StarLightInterface.lightChunk(ChunkAccess, Boolean[])` — light a chunk
     /// whose per-section emptiness is `empty_sections`. Java's `Boolean[]` is
     /// tri-state, mirrored as `Option<bool>`: `Some(true)`/`Some(false)` are
@@ -192,6 +204,14 @@ mod tests {
                 .section_changes
                 .push((pos, new_empty_value));
         }
+        fn has_updates(&self) -> bool {
+            let log = self.log.lock().unwrap();
+            !log.block_changes.is_empty() || !log.section_changes.is_empty()
+        }
+        fn propagate_changes(&mut self) -> i32 {
+            let log = self.log.lock().unwrap();
+            i32::try_from(log.block_changes.len() + log.section_changes.len()).unwrap_or(i32::MAX)
+        }
         fn light_chunk(&mut self, pos: ChunkPos, empty_sections: &[Option<bool>]) {
             self.log
                 .lock()
@@ -241,9 +261,13 @@ mod tests {
         let log = Arc::clone(&recording.log);
         let mut provider: Box<dyn StarLightProvider + Send> = Box::new(recording);
 
+        assert!(!provider.has_updates());
+        assert_eq!(provider.propagate_changes(), 0);
         provider.block_change(BlockPos::new(1, 2, 3));
         let pos = SectionPos::of(4, 5, 6);
         provider.section_change(pos, true);
+        assert!(provider.has_updates());
+        assert_eq!(provider.propagate_changes(), 2);
         provider.light_chunk(ChunkPos::new(7, 8), &[Some(false), None, Some(true)]);
         provider.force_load_in_chunk(ChunkPos::new(8, 9), &[Some(true), None, Some(false)]);
         let mut chunks = HashSet::new();
