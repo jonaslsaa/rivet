@@ -6,7 +6,7 @@ use super::structure_template::StructureTemplate;
 use indexmap::{IndexMap, IndexSet};
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_nbt::nbt_accounter::NbtAccounter;
-use rivet_nbt::{nbt_io, tag_parser};
+use rivet_nbt::{nbt_io, nbt_utils};
 use rivet_registry::identifier::Identifier;
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter};
@@ -151,7 +151,7 @@ impl StructureTemplateSource for FilesystemTemplateSource {
         }
         let tag = if self.snbt {
             let text = fs::read_to_string(&path)?;
-            tag_parser::parse_compound_fully(&text)
+            nbt_utils::snbt_to_structure(&text)
                 .map_err(|e| StructureTemplateError::Nbt(format!("{e:?}")))?
         } else {
             let mut reader = BufReader::new(File::open(&path)?);
@@ -378,5 +378,45 @@ mod tests {
         let tpl = mgr.get(&id).unwrap().expect("should find template");
         assert_eq!(tpl.get_size(), [1, 1, 1]);
         assert_eq!(mgr.list_templates(), vec![id]);
+    }
+
+    #[test]
+    fn snbt_source_unpacks_paper_packed_snbt() {
+        let dir =
+            std::env::temp_dir().join(format!("rivet_snbt_packed_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let id = Identifier::from_namespace_and_path("minecraft", "packed_box");
+        let tpl = StructureTemplate::from_parts(
+            [1, 1, 1],
+            vec![Palette::new(vec![StructureBlockInfo::new(
+                BlockPos::ZERO,
+                BlockState::of(BlockId::from_name("minecraft:stone").unwrap()),
+                None,
+            )])],
+            Vec::new(),
+        );
+        let mut raw = CompoundTag::new();
+        tpl.save(&mut raw);
+        let packed_snbt = nbt_utils::structure_to_snbt(&mut raw);
+        assert!(packed_snbt.contains("data:"));
+
+        let source = FilesystemTemplateSource::snbt(&dir);
+        let file_path = dir
+            .join("minecraft")
+            .join(&source.folder)
+            .join("packed_box.snbt");
+        fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        fs::write(&file_path, packed_snbt).unwrap();
+
+        let loaded = source.load(&id).unwrap().expect("should load packed snbt");
+        assert_eq!(loaded.get_size(), [1, 1, 1]);
+        assert_eq!(loaded.palettes().len(), 1);
+        assert_eq!(loaded.palettes()[0].blocks().len(), 1);
+        assert_eq!(
+            loaded.palettes()[0].blocks()[0].state,
+            BlockState::of(BlockId::from_name("minecraft:stone").unwrap())
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
