@@ -709,7 +709,23 @@ impl StructureProcessor for BlackstoneReplaceProcessor {
         let Some(&new_block) = self.replacements.get(&processed_block_info.state.block()) else {
             return Some(processed_block_info);
         };
-        let new_state = BlockState::of(new_block);
+        let old_state = processed_block_info.state;
+        let mut new_state = BlockState::of(new_block);
+        if let Some(facing) = old_state.get_value(BlockStateProperties::HORIZONTAL_FACING)
+            && let Ok(next) = new_state.set_value(BlockStateProperties::HORIZONTAL_FACING, facing)
+        {
+            new_state = next;
+        }
+        if let Some(half) = old_state.get_value(BlockStateProperties::HALF)
+            && let Ok(next) = new_state.set_value(BlockStateProperties::HALF, half)
+        {
+            new_state = next;
+        }
+        if let Some(slab_type) = old_state.get_value(BlockStateProperties::SLAB_TYPE)
+            && let Ok(next) = new_state.set_value(BlockStateProperties::SLAB_TYPE, slab_type)
+        {
+            new_state = next;
+        }
         Some(StructureBlockInfo::new(
             processed_block_info.pos,
             new_state,
@@ -1361,6 +1377,65 @@ mod tests {
             )
             .expect("blackstone replace produces blackstone");
         assert_eq!(out_bs.state, state_of("minecraft:blackstone"));
+
+        // Preserves stair facing/half and slab type (Paper BlackstoneReplaceProcessor).
+        let top_west_stairs = state_of("minecraft:cobblestone_stairs")
+            .set_value(
+                BlockStateProperties::HORIZONTAL_FACING,
+                PropertyValue::Enum("west"),
+            )
+            .unwrap()
+            .set_value(BlockStateProperties::HALF, PropertyValue::Enum("top"))
+            .unwrap();
+        let out_stairs = bs_proc
+            .process_block(
+                &mut level,
+                BlockPos::ZERO,
+                BlockPos::ZERO,
+                BlockPos::ZERO,
+                StructureBlockInfo::new(pos, top_west_stairs, None),
+                &settings,
+            )
+            .unwrap();
+        assert_eq!(
+            out_stairs.state.block(),
+            block_id("minecraft:blackstone_stairs")
+        );
+        assert_eq!(
+            out_stairs
+                .state
+                .get_value(BlockStateProperties::HORIZONTAL_FACING),
+            Some(PropertyValue::Enum("west"))
+        );
+        assert_eq!(
+            out_stairs.state.get_value(BlockStateProperties::HALF),
+            Some(PropertyValue::Enum("top"))
+        );
+
+        let double_slab = state_of("minecraft:cobblestone_slab")
+            .set_value(
+                BlockStateProperties::SLAB_TYPE,
+                PropertyValue::Enum("double"),
+            )
+            .unwrap();
+        let out_slab = bs_proc
+            .process_block(
+                &mut level,
+                BlockPos::ZERO,
+                BlockPos::ZERO,
+                BlockPos::ZERO,
+                StructureBlockInfo::new(pos, double_slab, None),
+                &settings,
+            )
+            .unwrap();
+        assert_eq!(
+            out_slab.state.block(),
+            block_id("minecraft:blackstone_slab")
+        );
+        assert_eq!(
+            out_slab.state.get_value(BlockStateProperties::SLAB_TYPE),
+            Some(PropertyValue::Enum("double"))
+        );
     }
 
     #[test]
