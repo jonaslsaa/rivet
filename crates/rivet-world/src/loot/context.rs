@@ -5,6 +5,7 @@
 //! - `net/minecraft/world/level/storage/loot/LootParams.java`
 //! - `net/minecraft/world/level/storage/loot/LootContext.java`
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use indexmap::{IndexMap, IndexSet};
@@ -33,6 +34,11 @@ pub enum LootRandom {
     Legacy(LegacyRandomSource),
     Xoroshiro(XoroshiroRandomSource),
     SingleThreaded(SingleThreadedRandomSource),
+    /// Shared tick-thread-owned RNG stream (used for persistent named random
+    /// sequences and the level's default RNG so successive unseeded rolls
+    /// advance the stream in place, matching Paper's `RandomSequences` and
+    /// `ServerLevel.getRandom()`).
+    Shared(Rc<RefCell<LootRandom>>),
 }
 
 impl std::fmt::Debug for LootRandom {
@@ -41,6 +47,7 @@ impl std::fmt::Debug for LootRandom {
             Self::Legacy(_) => f.write_str("LootRandom::Legacy(..)"),
             Self::Xoroshiro(_) => f.write_str("LootRandom::Xoroshiro(..)"),
             Self::SingleThreaded(_) => f.write_str("LootRandom::SingleThreaded(..)"),
+            Self::Shared(_) => f.write_str("LootRandom::Shared(..)"),
         }
     }
 }
@@ -126,6 +133,7 @@ impl RandomSource for LootRandom {
             Self::Legacy(r) => Self::Legacy(r.fork()),
             Self::Xoroshiro(r) => Self::Xoroshiro(r.fork()),
             Self::SingleThreaded(r) => Self::SingleThreaded(r.fork()),
+            Self::Shared(r) => r.borrow_mut().fork(),
         }
     }
 
@@ -134,6 +142,7 @@ impl RandomSource for LootRandom {
             Self::Legacy(r) => LootPositionalRandomFactory::Legacy(r.fork_positional()),
             Self::Xoroshiro(r) => LootPositionalRandomFactory::Xoroshiro(r.fork_positional()),
             Self::SingleThreaded(r) => LootPositionalRandomFactory::Legacy(r.fork_positional()),
+            Self::Shared(r) => r.borrow_mut().fork_positional(),
         }
     }
 
@@ -142,6 +151,7 @@ impl RandomSource for LootRandom {
             Self::Legacy(r) => r.set_seed(seed),
             Self::Xoroshiro(r) => r.set_seed(seed),
             Self::SingleThreaded(r) => r.set_seed(seed),
+            Self::Shared(r) => r.borrow_mut().set_seed(seed),
         }
     }
 
@@ -150,6 +160,7 @@ impl RandomSource for LootRandom {
             Self::Legacy(r) => r.next_int(),
             Self::Xoroshiro(r) => r.next_int(),
             Self::SingleThreaded(r) => r.next_int(),
+            Self::Shared(r) => r.borrow_mut().next_int(),
         }
     }
 
@@ -158,6 +169,7 @@ impl RandomSource for LootRandom {
             Self::Legacy(r) => r.next_int_bound(bound),
             Self::Xoroshiro(r) => r.next_int_bound(bound),
             Self::SingleThreaded(r) => r.next_int_bound(bound),
+            Self::Shared(r) => r.borrow_mut().next_int_bound(bound),
         }
     }
 
@@ -166,6 +178,7 @@ impl RandomSource for LootRandom {
             Self::Legacy(r) => r.next_long(),
             Self::Xoroshiro(r) => r.next_long(),
             Self::SingleThreaded(r) => r.next_long(),
+            Self::Shared(r) => r.borrow_mut().next_long(),
         }
     }
 
@@ -174,6 +187,7 @@ impl RandomSource for LootRandom {
             Self::Legacy(r) => r.next_boolean(),
             Self::Xoroshiro(r) => r.next_boolean(),
             Self::SingleThreaded(r) => r.next_boolean(),
+            Self::Shared(r) => r.borrow_mut().next_boolean(),
         }
     }
 
@@ -182,6 +196,7 @@ impl RandomSource for LootRandom {
             Self::Legacy(r) => r.next_float(),
             Self::Xoroshiro(r) => r.next_float(),
             Self::SingleThreaded(r) => r.next_float(),
+            Self::Shared(r) => r.borrow_mut().next_float(),
         }
     }
 
@@ -190,6 +205,7 @@ impl RandomSource for LootRandom {
             Self::Legacy(r) => r.next_double(),
             Self::Xoroshiro(r) => r.next_double(),
             Self::SingleThreaded(r) => r.next_double(),
+            Self::Shared(r) => r.borrow_mut().next_double(),
         }
     }
 
@@ -198,19 +214,34 @@ impl RandomSource for LootRandom {
             Self::Legacy(r) => r.next_gaussian(),
             Self::Xoroshiro(r) => r.next_gaussian(),
             Self::SingleThreaded(r) => r.next_gaussian(),
+            Self::Shared(r) => r.borrow_mut().next_gaussian(),
         }
     }
 }
 
 /// Registry/resolver providing loot tables, predicates, item modifiers, item
 /// tags, and named random sequences in deterministic insertion order.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct LootRegistry {
     tables: IndexMap<Identifier, LootTable>,
     conditions: IndexMap<Identifier, LootItemCondition>,
     functions: IndexMap<Identifier, LootItemFunction>,
     item_tags: IndexMap<Identifier, Vec<Identifier>>,
-    random_sequences: IndexMap<Identifier, RandomSequenceSeed>,
+    random_sequences: IndexMap<Identifier, Rc<RefCell<LootRandom>>>,
+    default_random: Rc<RefCell<LootRandom>>,
+}
+
+impl Default for LootRegistry {
+    fn default() -> Self {
+        Self {
+            tables: IndexMap::new(),
+            conditions: IndexMap::new(),
+            functions: IndexMap::new(),
+            item_tags: IndexMap::new(),
+            random_sequences: IndexMap::new(),
+            default_random: Rc::new(RefCell::new(LootRandom::Legacy(LegacyRandomSource::new(0)))),
+        }
+    }
 }
 
 impl LootRegistry {
@@ -249,12 +280,22 @@ impl LootRegistry {
     }
 
     /// Registers a named random sequence (`ServerLevel.getRandomSequence(Identifier)`).
+    ///
+    /// The sequence's RNG state persists and advances across successive unseeded
+    /// loot rolls, matching Paper's `RandomSequences`.
     pub fn register_random_sequence(
         &mut self,
         id: Identifier,
         seed: RandomSequenceSeed,
     ) -> &mut Self {
-        self.random_sequences.insert(id, seed);
+        self.random_sequences
+            .insert(id, Rc::new(RefCell::new(seed.instantiate())));
+        self
+    }
+
+    /// Replaces the fallback level random stream (`ServerLevel.getRandom()`).
+    pub fn set_default_random(&mut self, random: LootRandom) -> &mut Self {
+        self.default_random = Rc::new(RefCell::new(random));
         self
     }
 
@@ -282,13 +323,20 @@ impl LootRegistry {
         self.item_tags.get(tag).map(Vec::as_slice)
     }
 
-    /// Instantiates a registered random sequence if present.
+    /// Returns a handle to a registered random sequence whose state advances in
+    /// place across successive lookups, matching `ServerLevel.getRandomSequence`.
     #[must_use]
     pub fn get_random_sequence(&self, id: &Identifier) -> Option<LootRandom> {
         self.random_sequences
             .get(id)
-            .copied()
-            .map(RandomSequenceSeed::instantiate)
+            .map(|seq| LootRandom::Shared(Rc::clone(seq)))
+    }
+
+    /// Returns a handle to the persistent fallback level random stream
+    /// (`ServerLevel.getRandom()`).
+    #[must_use]
+    pub fn default_random(&self) -> LootRandom {
+        LootRandom::Shared(Rc::clone(&self.default_random))
     }
 }
 
@@ -625,13 +673,11 @@ impl<'a> LootContextBuilder<'a> {
         }
     }
 
-    /// Convenience `create(Optional<Identifier>)` defaulting to
-    /// `LegacyRandomSource::new(0)` when no explicit seed/sequence is provided.
+    /// `Builder.create(Optional<Identifier>)` falling back to `resolver.default_random()`
+    /// (`ServerLevel.getRandom()`) so successive unseeded rolls advance the stream.
     #[must_use]
     pub fn create(self, random_sequence_key: Option<&Identifier>) -> LootContext<'a> {
-        self.create_with_default(
-            random_sequence_key,
-            LootRandom::Legacy(LegacyRandomSource::new(0)),
-        )
+        let default_random = self.resolver.default_random();
+        self.create_with_default(random_sequence_key, default_random)
     }
 }

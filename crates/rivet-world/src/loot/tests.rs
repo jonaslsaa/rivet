@@ -741,7 +741,7 @@ fn container_fill_is_deterministic_with_seed_and_splits_stacks() {
 }
 
 #[test]
-fn named_random_sequence_used_when_seed_is_zero() {
+fn named_random_sequence_and_default_rng_advance_across_unseeded_rolls() {
     let mut registry = LootRegistry::new();
     registry.register_random_sequence(id("chests/simple"), RandomSequenceSeed::Legacy(777));
 
@@ -757,11 +757,28 @@ fn named_random_sequence_used_when_seed_is_zero() {
 
     let items_a = table.get_random_items_with_seed(empty_params(), &registry, RANDOMIZE_SEED);
     let items_b = table.get_random_items_with_seed(empty_params(), &registry, RANDOMIZE_SEED);
-    assert_eq!(items_a, items_b);
 
     let mut oracle = LegacyRandomSource::new(777);
-    let expected_rolls = mth::next_int(&mut oracle, 1, 5) as usize;
-    assert_eq!(items_a.len(), expected_rolls);
+    let expected_a = mth::next_int(&mut oracle, 1, 5) as usize;
+    let expected_b = mth::next_int(&mut oracle, 1, 5) as usize;
+    assert_eq!(items_a.len(), expected_a);
+    assert_eq!(items_b.len(), expected_b);
+
+    // Without a named sequence, successive unseeded rolls also advance default_random.
+    registry.set_default_random(LootRandom::Legacy(LegacyRandomSource::new(12345)));
+    let unseq_table = LootTable::builder()
+        .with_pool(
+            LootPool::builder()
+                .set_rolls(NumberProvider::uniform_between(1.0, 100.0))
+                .add(LootPoolEntryContainer::item(id("apple")))
+                .build(),
+        )
+        .build();
+    let r1 = unseq_table.get_random_items_with_seed(empty_params(), &registry, RANDOMIZE_SEED);
+    let r2 = unseq_table.get_random_items_with_seed(empty_params(), &registry, RANDOMIZE_SEED);
+    let mut default_oracle = LegacyRandomSource::new(12345);
+    assert_eq!(r1.len(), mth::next_int(&mut default_oracle, 1, 100) as usize);
+    assert_eq!(r2.len(), mth::next_int(&mut default_oracle, 1, 100) as usize);
 }
 
 // ---------------------------------------------------------------------------
