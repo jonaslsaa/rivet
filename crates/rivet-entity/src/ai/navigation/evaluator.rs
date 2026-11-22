@@ -167,6 +167,7 @@ pub fn get_floor_level_static<W: PathWorldView + ?Sized>(world: &W, pos: BlockPo
 #[derive(Debug, Default)]
 pub struct WalkNodeEvaluator {
     pub config: EvaluatorConfig,
+    pub(crate) amphibious: bool,
     path_types_by_pos_cache: HashMap<i64, PathType>,
     collision_cache: HashMap<i64, bool>,
 }
@@ -236,7 +237,30 @@ impl WalkNodeEvaluator {
     }
 
     fn is_amphibious(&self) -> bool {
-        false
+        self.amphibious
+    }
+
+    fn amphibious_path_type<W: PathWorldView + ?Sized>(
+        ctx: &mut PathfindingContext<'_, W>,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> PathType {
+        let block_path_type = ctx.get_path_type_from_state(x, y, z);
+        if block_path_type == PathType::Water {
+            for dir in Direction::ALL {
+                let neighbor_type = ctx.get_path_type_from_state(
+                    x + dir.step_x(),
+                    y + dir.step_y(),
+                    z + dir.step_z(),
+                );
+                if neighbor_type == PathType::Blocked {
+                    return PathType::WaterBorder;
+                }
+            }
+            return PathType::Water;
+        }
+        get_path_type_static(ctx, x, y, z)
     }
 
     fn can_start_at<W: PathWorldView + ?Sized>(
@@ -857,7 +881,11 @@ impl NodeEvaluator for WalkNodeEvaluator {
         y: i32,
         z: i32,
     ) -> PathType {
-        get_path_type_static(ctx, x, y, z)
+        if self.amphibious {
+            Self::amphibious_path_type(ctx, x, y, z)
+        } else {
+            get_path_type_static(ctx, x, y, z)
+        }
     }
 }
 
@@ -1419,8 +1447,10 @@ pub struct AmphibiousNodeEvaluator {
 impl AmphibiousNodeEvaluator {
     #[must_use]
     pub fn new(prefers_shallow_swimming: bool) -> Self {
+        let mut walk = WalkNodeEvaluator::new();
+        walk.amphibious = true;
         Self {
-            walk: WalkNodeEvaluator::new(),
+            walk,
             prefers_shallow_swimming,
             old_walkable_cost: 0.0,
             old_water_border_cost: 0.0,
@@ -1512,7 +1542,9 @@ impl NodeEvaluator for AmphibiousNodeEvaluator {
         } else {
             0
         };
-        let floor_level = get_floor_level_static(ctx.level(), BlockPos::new(x, y, z));
+        let floor_level = self
+            .walk
+            .get_floor_level(ctx.level(), mob, BlockPos::new(x, y, z));
 
         let up = self.walk.find_accepted_node(
             ctx,
@@ -1544,7 +1576,7 @@ impl NodeEvaluator for AmphibiousNodeEvaluator {
             count += 1;
         }
         if Self::is_vertical_neighbor_valid(arena, down, node_idx)
-            && path_type_current != PathType::Walkable
+            && path_type_current != PathType::Trapdoor
             && count < 32
         {
             out[count] = down.unwrap();
@@ -1572,10 +1604,6 @@ impl NodeEvaluator for AmphibiousNodeEvaluator {
         y: i32,
         z: i32,
     ) -> PathType {
-        let pt = self.get_path_type(ctx, x, y, z);
-        if pt == PathType::Water || pt == PathType::WaterBorder {
-            return pt;
-        }
         self.walk.get_path_type_of_mob(ctx, mob, x, y, z)
     }
 
@@ -1586,20 +1614,6 @@ impl NodeEvaluator for AmphibiousNodeEvaluator {
         y: i32,
         z: i32,
     ) -> PathType {
-        let block_path_type = ctx.get_path_type_from_state(x, y, z);
-        if block_path_type == PathType::Water {
-            for dir in Direction::ALL {
-                let neighbor_type = ctx.get_path_type_from_state(
-                    x + dir.step_x(),
-                    y + dir.step_y(),
-                    z + dir.step_z(),
-                );
-                if neighbor_type == PathType::Blocked {
-                    return PathType::WaterBorder;
-                }
-            }
-            return PathType::Water;
-        }
-        get_path_type_static(ctx, x, y, z)
+        WalkNodeEvaluator::amphibious_path_type(ctx, x, y, z)
     }
 }

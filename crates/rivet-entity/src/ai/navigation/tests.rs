@@ -741,3 +741,29 @@ fn targeting_conditions_combat_non_combat_invisibility_and_negatives() {
         Some(&reject_all),
     ));
 }
+
+#[test]
+fn amphibious_path_finder_swims_upward_underwater() {
+    let mut world = TestWorld::flat(0);
+    world.fill_water(-3, 1, -3, 3, 6, 3);
+
+    let mut mob = MobPathingState::new(Vec3::new(0.5, 1.0, 0.5), 0.6, 0.8);
+    mob.in_water = true;
+    mob.on_ground = false;
+
+    let mut eval = AmphibiousNodeEvaluator::new(false);
+    let mut finder = PathFinder::new(64);
+    let path = finder
+        .find_path(
+            &mut eval,
+            &world,
+            &mut mob,
+            &[BlockPos::new(0, 4, 0)],
+            16.0,
+            0,
+            1.0,
+        )
+        .expect("amphibious mob should find upward underwater path");
+    assert!(path.can_reach());
+    assert_eq!(path.get_end_node().map(|n| n.y), Some(4));
+}
