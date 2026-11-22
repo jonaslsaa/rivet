@@ -160,7 +160,7 @@ impl WorldInteractionService {
             return out;
         }
 
-        if pos.get_y() <= world.max_y() {
+        if pos.get_y() <= world.max_y() && world.may_interact(player, pos) {
             let result = self.game_mode.use_item_on(player, world, packet.hand, hit);
             if matches!(
                 result,
@@ -908,5 +908,47 @@ mod tests {
             )]
         );
         assert!(!service.game_mode().is_destroying_block());
+    }
+
+    #[test]
+    fn use_item_on_denies_protected_block_when_may_interact_is_false() {
+        let mut service = WorldInteractionService::new();
+        let mut world = MockWorld::new();
+        let clicked = BlockPos::new(2, 64, 0);
+        let placed = BlockPos::new(2, 65, 0);
+        world.set_block(clicked, stone());
+        world.may_interact = false;
+        world.place_on_item_use_on = Some(dirt());
+        world.item_use_on_result = InteractionResult::SUCCESS_SERVER;
+
+        let player = survival_player();
+        let hit = BlockHitResult::new(
+            Vec3::new(2.5, 65.0, 0.5),
+            Direction::Up,
+            clicked,
+            false,
+            false,
+        );
+        let out = service.handle_use_item_on(
+            &ServerboundUseItemOnPacket::new(InteractionHand::MainHand, hit, 9),
+            &player,
+            &mut world,
+        );
+
+        // Block must not be placed, no SwingArm emitted, and authoritative updates still sent.
+        assert_eq!(world.get_block_state_if_loaded(placed), Some(air()));
+        assert_eq!(
+            out,
+            vec![
+                CorrectionPacket::BlockUpdate(ClientboundBlockUpdatePacket {
+                    pos: clicked,
+                    state: stone(),
+                }),
+                CorrectionPacket::BlockUpdate(ClientboundBlockUpdatePacket {
+                    pos: placed,
+                    state: air(),
+                }),
+            ]
+        );
     }
 }
