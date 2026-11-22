@@ -218,11 +218,14 @@ pub trait Goal<C> {
     ///
     /// Per Paper 26.2, a goal's effective flag set is never empty — an empty set
     /// defaults to [`GoalFlags::UNKNOWN_BEHAVIOR`].
-    fn flags(&self) -> GoalFlags {
-        GoalFlags::UNKNOWN_BEHAVIOR
-    }
+    fn flags(&self) -> GoalFlags;
 
-    fn set_flags(&mut self, _required_control_flags: GoalFlags) {}
+    /// Replaces the goal's control flags.
+    ///
+    /// Implementors should normalize empty sets via [`GoalFlags::for_goal`] so that
+    /// `flags()`, `add_flag()`, and [`WrappedGoal::set_flags`] always observe the
+    /// mutated flag state.
+    fn set_flags(&mut self, required_control_flags: GoalFlags);
 
     fn has_flag(&self, flag: GoalFlag) -> bool {
         GoalFlags::for_goal(self.flags()).has_element(flag)
