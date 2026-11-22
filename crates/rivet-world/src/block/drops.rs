@@ -12,6 +12,8 @@
 //!   (`survives_explosion`, `block_state_property`, `match_tool`, `any_of`, `all_of`, `inverted`,
 //!   `table_bonus`, `random_chance`, `set_count`, `apply_bonus`, `limit_count`, `explosion_decay`).
 
+use std::collections::BTreeMap;
+
 use indexmap::IndexMap;
 use rivet_registry::block_state::BlockState;
 use rivet_registry::block_state_property::PropertyValue;
@@ -521,6 +523,9 @@ pub struct BlockDropStack {
     pub item_id: String,
     /// Positive stack count (stacks with `count <= 0` are suppressed per `Block.popResource`).
     pub count: i32,
+    /// Item data components (e.g. `minecraft:block_state`, `minecraft:custom_name`,
+    /// `minecraft:container`) populated by `copy_components` / `copy_state` loot functions.
+    pub components: BTreeMap<String, Value>,
 }
 
 impl BlockDropStack {
@@ -529,7 +534,14 @@ impl BlockDropStack {
         Self {
             item_id: normalize_id(&item_id.into()),
             count,
+            components: BTreeMap::new(),
         }
+    }
+
+    #[inline]
+    pub fn with_component(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.components.insert(normalize_id(&key.into()), value);
+        self
     }
 }
 
@@ -542,6 +554,13 @@ pub struct BlockDropContext {
     /// `LootContextParams.EXPLOSION_RADIUS`: `None` for player block breaking,
     /// `Some(radius)` for explosion-caused block drops.
     pub explosion_radius: Option<f32>,
+    /// `LootContext.getLuck()` (default `0.0`).
+    pub luck: f32,
+    /// Block entity data components for `minecraft:copy_components` (`source: "block_entity"`).
+    pub block_entity_components: BTreeMap<String, Value>,
+    /// Dynamic drop lists for `minecraft:dynamic` entries (e.g. `"minecraft:contents"` for
+    /// shulker boxes and decorated pots).
+    pub dynamic_drops: BTreeMap<String, Vec<BlockDropStack>>,
 }
 
 impl BlockDropContext {
@@ -551,11 +570,34 @@ impl BlockDropContext {
             pos,
             tool,
             explosion_radius: None,
+            luck: 0.0,
+            block_entity_components: BTreeMap::new(),
+            dynamic_drops: BTreeMap::new(),
         }
     }
 
     pub fn with_explosion_radius(mut self, radius: f32) -> Self {
         self.explosion_radius = Some(radius);
+        self
+    }
+
+    pub fn with_luck(mut self, luck: f32) -> Self {
+        self.luck = luck;
+        self
+    }
+
+    pub fn with_block_entity_component(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.block_entity_components
+            .insert(normalize_id(&key.into()), value);
+        self
+    }
+
+    pub fn with_dynamic_drops(
+        mut self,
+        name: impl Into<String>,
+        drops: Vec<BlockDropStack>,
+    ) -> Self {
+        self.dynamic_drops.insert(normalize_id(&name.into()), drops);
         self
     }
 }
@@ -579,6 +621,8 @@ pub struct BlockBreakContext {
     pub block_removed: bool,
     /// Optional explosion radius (`None` for player mining).
     pub explosion_radius: Option<f32>,
+    /// Player luck attribute (`LootContext.getLuck()`, default `0.0`).
+    pub luck: f32,
 }
 
 impl BlockBreakContext {
@@ -600,6 +644,7 @@ impl BlockBreakContext {
             event_drop_exp: true,
             block_removed: true,
             explosion_radius: None,
+            luck: 0.0,
         }
     }
 
@@ -664,6 +709,9 @@ pub fn resolve_block_break_with_table<R: RandomSource>(
         pos: ctx.pos,
         tool: ctx.tool.clone(),
         explosion_radius: ctx.explosion_radius,
+        luck: ctx.luck,
+        block_entity_components: BTreeMap::new(),
+        dynamic_drops: BTreeMap::new(),
     };
 
     let mut items = if ctx.event_drop_items && ctx.block_drops_rule {
@@ -1003,7 +1051,13 @@ pub fn resolve_builtin_block_drops<R: RandomSource>(
 
         // Default ordinary survival block: drops itself if it survives explosion.
         _ => {
-            // Double-block items (doors, tall flowers, beds) only drop from the lower/primary half
+            // Beds drop only from the `part=head` half (Paper `data/minecraft/loot_table/blocks/*_bed.json`).
+            if name.ends_with("_bed")
+                && !block_state_property_equals(ctx.block_state, "part", "head")
+            {
+                return Vec::new();
+            }
+            // Double-block items (doors, tall flowers) only drop from the lower half
             // when `half` property is present.
             if block_state_property_equals(ctx.block_state, "half", "upper") {
                 return Vec::new();
@@ -1266,6 +1320,14 @@ pub enum LootEntry {
     Item {
         name: String,
         weight: i32,
+        quality: i32,
+        conditions: Vec<LootCondition>,
+        functions: Vec<LootFunction>,
+    },
+    Dynamic {
+        name: String,
+        weight: i32,
+        quality: i32,
         conditions: Vec<LootCondition>,
         functions: Vec<LootFunction>,
     },
@@ -1283,6 +1345,7 @@ pub enum LootEntry {
     },
     Empty {
         weight: i32,
+        quality: i32,
         conditions: Vec<LootCondition>,
     },
 }
@@ -1307,9 +1370,6 @@ pub enum LootCondition {
         chances: Vec<f32>,
     },
     RandomChance(f32),
-    /// Conditions whose runtime context lives outside `rivet-world` (e.g. `location_check`,
-    /// `entity_properties`); conservatively evaluates to `false` unless explicitly satisfied.
-    Unsupported(String),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1340,8 +1400,17 @@ pub enum LootFunction {
     ExplosionDecay {
         conditions: Vec<LootCondition>,
     },
-    /// Pass-through metadata functions (`copy_components`, `copy_state`) that do not alter item counts.
-    NoOp,
+    CopyComponents {
+        source: String,
+        include: Option<Vec<String>>,
+        exclude: Option<Vec<String>>,
+        conditions: Vec<LootCondition>,
+    },
+    CopyState {
+        block: String,
+        properties: Vec<String>,
+        conditions: Vec<LootCondition>,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -1385,6 +1454,20 @@ impl NumberProvider {
             }
         }
     }
+
+    pub fn get_float<R: RandomSource>(self, random: &mut R) -> f32 {
+        match self {
+            Self::Constant(v) => v,
+            Self::Uniform { min, max } => {
+                if min >= max {
+                    min
+                } else {
+                    random.next_float() * (max - min) + min
+                }
+            }
+            Self::Binomial { .. } => self.get_int(random) as f32,
+        }
+    }
 }
 
 impl BlockLootTable {
@@ -1422,7 +1505,10 @@ impl BlockLootTable {
             if !all_conditions_pass(&pool.conditions, ctx, random) {
                 continue;
             }
-            let rolls = pool.rolls.get_int(random);
+            let rolls = pool
+                .rolls
+                .get_int(random)
+                .wrapping_add(mth::floor(pool.bonus_rolls.get_float(random) * ctx.luck));
             for _ in 0..rolls {
                 let start = drops.len();
                 let mut valid_entries: Vec<ExpandedEntry<'_>> = Vec::new();
@@ -1463,6 +1549,10 @@ enum ExpandedEntryKind<'a> {
         name: &'a str,
         functions: &'a [LootFunction],
     },
+    Dynamic {
+        name: &'a str,
+        functions: &'a [LootFunction],
+    },
     Empty,
 }
 
@@ -1478,14 +1568,33 @@ impl ExpandedEntry<'_> {
         random: &mut R,
         out: &mut Vec<BlockDropStack>,
     ) {
-        if let ExpandedEntryKind::Item { name, functions } = self.kind {
-            let mut stack = BlockDropStack::new(name, 1);
-            apply_functions(functions, &mut stack, ctx, random);
-            if stack.count > 0 {
-                out.push(stack);
+        match self.kind {
+            ExpandedEntryKind::Item { name, functions } => {
+                let mut stack = BlockDropStack::new(name, 1);
+                apply_functions(functions, &mut stack, ctx, random);
+                if stack.count > 0 {
+                    out.push(stack);
+                }
             }
+            ExpandedEntryKind::Dynamic { name, functions } => {
+                if let Some(dynamic_stacks) = ctx.dynamic_drops.get(name) {
+                    for base in dynamic_stacks {
+                        let mut stack = base.clone();
+                        apply_functions(functions, &mut stack, ctx, random);
+                        if stack.count > 0 {
+                            out.push(stack);
+                        }
+                    }
+                }
+            }
+            ExpandedEntryKind::Empty => {}
         }
     }
+}
+
+#[inline]
+fn effective_entry_weight(weight: i32, quality: i32, luck: f32) -> i32 {
+    mth::floor(weight as f32 + quality as f32 * luck).max(0)
 }
 
 fn expand_entry<'a, R: RandomSource>(
@@ -1499,18 +1608,40 @@ fn expand_entry<'a, R: RandomSource>(
         LootEntry::Item {
             name,
             weight,
+            quality,
             conditions,
             functions,
         } => {
             if !all_conditions_pass(conditions, ctx, random) {
                 return false;
             }
-            if *weight > 0 {
+            let w = effective_entry_weight(*weight, *quality, ctx.luck);
+            if w > 0 {
                 valid.push(ExpandedEntry {
-                    weight: *weight,
+                    weight: w,
                     kind: ExpandedEntryKind::Item { name, functions },
                 });
-                *total_weight = total_weight.wrapping_add(*weight);
+                *total_weight = total_weight.wrapping_add(w);
+            }
+            true
+        }
+        LootEntry::Dynamic {
+            name,
+            weight,
+            quality,
+            conditions,
+            functions,
+        } => {
+            if !all_conditions_pass(conditions, ctx, random) {
+                return false;
+            }
+            let w = effective_entry_weight(*weight, *quality, ctx.luck);
+            if w > 0 {
+                valid.push(ExpandedEntry {
+                    weight: w,
+                    kind: ExpandedEntryKind::Dynamic { name, functions },
+                });
+                *total_weight = total_weight.wrapping_add(w);
             }
             true
         }
@@ -1557,16 +1688,21 @@ fn expand_entry<'a, R: RandomSource>(
             }
             true
         }
-        LootEntry::Empty { weight, conditions } => {
+        LootEntry::Empty {
+            weight,
+            quality,
+            conditions,
+        } => {
             if !all_conditions_pass(conditions, ctx, random) {
                 return false;
             }
-            if *weight > 0 {
+            let w = effective_entry_weight(*weight, *quality, ctx.luck);
+            if w > 0 {
                 valid.push(ExpandedEntry {
-                    weight: *weight,
+                    weight: w,
                     kind: ExpandedEntryKind::Empty,
                 });
-                *total_weight = total_weight.wrapping_add(*weight);
+                *total_weight = total_weight.wrapping_add(w);
             }
             true
         }
@@ -1648,7 +1784,6 @@ fn eval_condition<R: RandomSource>(
             test_table_bonus(random, level, chances)
         }
         LootCondition::RandomChance(chance) => random.next_float() < *chance,
-        LootCondition::Unsupported(_) => false,
     }
 }
 
@@ -1711,7 +1846,46 @@ fn apply_functions<R: RandomSource>(
                     stack.count = apply_explosion_decay(random, stack.count, ctx.explosion_radius);
                 }
             }
-            LootFunction::NoOp => {}
+            LootFunction::CopyComponents {
+                source,
+                include,
+                exclude,
+                conditions,
+            } => {
+                if all_conditions_pass(conditions, ctx, random) && source == "block_entity" {
+                    for (key, value) in &ctx.block_entity_components {
+                        let included = include.as_ref().is_none_or(|inc| inc.contains(key));
+                        let excluded = exclude.as_ref().is_some_and(|exc| exc.contains(key));
+                        if included && !excluded {
+                            stack.components.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
+            }
+            LootFunction::CopyState {
+                block,
+                properties,
+                conditions,
+            } => {
+                if all_conditions_pass(conditions, ctx, random)
+                    && block_name_matches(ctx.block_state.block().name(), block)
+                {
+                    let entry = stack
+                        .components
+                        .entry("minecraft:block_state".to_string())
+                        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                    if !entry.is_object() {
+                        *entry = Value::Object(serde_json::Map::new());
+                    }
+                    if let Some(map) = entry.as_object_mut() {
+                        for prop in properties {
+                            if let Some(val) = block_state_property_value(ctx.block_state, prop) {
+                                map.insert(prop.clone(), Value::String(val));
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1769,10 +1943,28 @@ fn parse_entry(value: &Value) -> Result<LootEntry, LootTableError> {
                 .and_then(Value::as_str)
                 .ok_or_else(|| LootTableError::Schema("item entry missing 'name'".into()))?;
             let weight = obj.get("weight").and_then(Value::as_i64).unwrap_or(1) as i32;
+            let quality = obj.get("quality").and_then(Value::as_i64).unwrap_or(0) as i32;
             let functions = parse_functions(obj.get("functions"))?;
             Ok(LootEntry::Item {
                 name: normalize_id(name),
                 weight,
+                quality,
+                conditions,
+                functions,
+            })
+        }
+        "dynamic" => {
+            let name = obj
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| LootTableError::Schema("dynamic entry missing 'name'".into()))?;
+            let weight = obj.get("weight").and_then(Value::as_i64).unwrap_or(1) as i32;
+            let quality = obj.get("quality").and_then(Value::as_i64).unwrap_or(0) as i32;
+            let functions = parse_functions(obj.get("functions"))?;
+            Ok(LootEntry::Dynamic {
+                name: normalize_id(name),
+                weight,
+                quality,
                 conditions,
                 functions,
             })
@@ -1798,9 +1990,14 @@ fn parse_entry(value: &Value) -> Result<LootEntry, LootTableError> {
                 conditions,
             })
         }
-        "empty" | "dynamic" => {
+        "empty" => {
             let weight = obj.get("weight").and_then(Value::as_i64).unwrap_or(1) as i32;
-            Ok(LootEntry::Empty { weight, conditions })
+            let quality = obj.get("quality").and_then(Value::as_i64).unwrap_or(0) as i32;
+            Ok(LootEntry::Empty {
+                weight,
+                quality,
+                conditions,
+            })
         }
         other => Err(LootTableError::Schema(format!(
             "unsupported loot entry type '{other}'"
@@ -1902,7 +2099,9 @@ fn parse_condition(value: &Value) -> Result<LootCondition, LootTableError> {
                 })? as f32;
             Ok(LootCondition::RandomChance(chance))
         }
-        other => Ok(LootCondition::Unsupported(other.to_string())),
+        other => Err(LootTableError::Schema(format!(
+            "unsupported loot condition '{other}'"
+        ))),
     }
 }
 
@@ -2091,7 +2290,80 @@ fn parse_function(value: &Value) -> Result<LootFunction, LootTableError> {
             })
         }
         "explosion_decay" => Ok(LootFunction::ExplosionDecay { conditions }),
-        "copy_components" | "copy_state" => Ok(LootFunction::NoOp),
+        "copy_components" => {
+            let source = obj
+                .get("source")
+                .and_then(Value::as_str)
+                .ok_or_else(|| LootTableError::Schema("copy_components missing 'source'".into()))?;
+            let include = match obj.get("include") {
+                None => None,
+                Some(Value::Array(arr)) => Some(
+                    arr.iter()
+                        .map(|v| {
+                            v.as_str().map(normalize_id).ok_or_else(|| {
+                                LootTableError::Schema(
+                                    "copy_components 'include' entries must be strings".into(),
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                Some(_) => {
+                    return Err(LootTableError::Schema(
+                        "copy_components 'include' must be an array".into(),
+                    ));
+                }
+            };
+            let exclude = match obj.get("exclude") {
+                None => None,
+                Some(Value::Array(arr)) => Some(
+                    arr.iter()
+                        .map(|v| {
+                            v.as_str().map(normalize_id).ok_or_else(|| {
+                                LootTableError::Schema(
+                                    "copy_components 'exclude' entries must be strings".into(),
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                Some(_) => {
+                    return Err(LootTableError::Schema(
+                        "copy_components 'exclude' must be an array".into(),
+                    ));
+                }
+            };
+            Ok(LootFunction::CopyComponents {
+                source: strip_minecraft_ns(source).to_string(),
+                include,
+                exclude,
+                conditions,
+            })
+        }
+        "copy_state" => {
+            let block = obj
+                .get("block")
+                .and_then(Value::as_str)
+                .ok_or_else(|| LootTableError::Schema("copy_state missing 'block'".into()))?;
+            let properties = obj
+                .get("properties")
+                .and_then(Value::as_array)
+                .ok_or_else(|| LootTableError::Schema("copy_state missing 'properties'".into()))?
+                .iter()
+                .map(|v| {
+                    v.as_str().map(str::to_string).ok_or_else(|| {
+                        LootTableError::Schema(
+                            "copy_state 'properties' entries must be strings".into(),
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(LootFunction::CopyState {
+                block: normalize_id(block),
+                properties,
+                conditions,
+            })
+        }
         other => Err(LootTableError::Schema(format!(
             "unsupported loot function '{other}'"
         ))),
@@ -2188,6 +2460,17 @@ fn matches_item_tag(tool: &ToolStack, tag: &str) -> bool {
         "shears" => tool.is_shears(),
         _ => false,
     }
+}
+
+fn block_state_property_value(state: BlockState, prop_name: &str) -> Option<String> {
+    let def = StateDefinition::for_block(state.block());
+    let prop = def.get_property(prop_name)?;
+    let val = state.get_value(prop)?;
+    Some(match val {
+        PropertyValue::Bool(b) => b.to_string(),
+        PropertyValue::Int(i) => i.to_string(),
+        PropertyValue::Enum(s) => s.to_string(),
+    })
 }
 
 fn block_state_property_equals(state: BlockState, prop_name: &str, expected: &str) -> bool {
@@ -3088,5 +3371,189 @@ mod tests {
             table.evaluate(&ctx, &mut rng),
             vec![BlockDropStack::new("minecraft:glowstone_dust", 3)]
         );
+    }
+
+    #[test]
+    fn loot_pool_applies_bonus_rolls_scaled_by_luck_with_floor() {
+        let json = r#"{
+          "pools": [
+            {
+              "rolls": 1,
+              "bonus_rolls": 1.5,
+              "entries": [
+                { "type": "minecraft:item", "name": "minecraft:diamond" }
+              ]
+            }
+          ]
+        }"#;
+        let table = BlockLootTable::from_json(json).expect("valid bonus_rolls table");
+        let base_ctx = BlockDropContext::new(
+            state_of("minecraft:diamond_ore"),
+            BlockPos::new(0, 64, 0),
+            ToolStack::empty(),
+        );
+        let mut rng = SingleThreadedRandomSource::new(17);
+
+        // luck = 0.0 -> 1 + floor(0.0) = 1 roll
+        assert_eq!(table.evaluate(&base_ctx, &mut rng).len(), 1);
+        // luck = 1.0 -> 1 + floor(1.5) = 2 rolls
+        assert_eq!(
+            table
+                .evaluate(&base_ctx.clone().with_luck(1.0), &mut rng)
+                .len(),
+            2
+        );
+        // luck = 2.0 -> 1 + floor(3.0) = 4 rolls
+        assert_eq!(
+            table
+                .evaluate(&base_ctx.clone().with_luck(2.0), &mut rng)
+                .len(),
+            4
+        );
+        // luck = -0.5 -> 1 + floor(-0.75) = 1 + (-1) = 0 rolls
+        assert!(
+            table
+                .evaluate(&base_ctx.with_luck(-0.5), &mut rng)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn dynamic_entry_emits_context_dynamic_drops_and_applies_functions() {
+        let json = r#"{
+          "pools": [
+            {
+              "rolls": 1,
+              "entries": [
+                {
+                  "type": "minecraft:dynamic",
+                  "name": "minecraft:contents",
+                  "functions": [
+                    { "function": "minecraft:set_count", "count": 2, "add": true }
+                  ]
+                }
+              ]
+            }
+          ]
+        }"#;
+        let table = BlockLootTable::from_json(json).expect("valid dynamic entry table");
+        let ctx = BlockDropContext::new(
+            state_of("minecraft:shulker_box"),
+            BlockPos::new(0, 64, 0),
+            ToolStack::empty(),
+        )
+        .with_dynamic_drops(
+            "minecraft:contents",
+            vec![BlockDropStack::new("minecraft:diamond", 3)],
+        );
+        let mut rng = SingleThreadedRandomSource::new(19);
+        assert_eq!(
+            table.evaluate(&ctx, &mut rng),
+            vec![BlockDropStack::new("minecraft:diamond", 5)]
+        );
+    }
+
+    #[test]
+    fn unsupported_loot_condition_returns_schema_error() {
+        let json = r#"{
+          "pools": [
+            {
+              "rolls": 1,
+              "conditions": [
+                { "condition": "minecraft:location_check" }
+              ],
+              "entries": [
+                { "type": "minecraft:item", "name": "minecraft:stone" }
+              ]
+            }
+          ]
+        }"#;
+        let err = BlockLootTable::from_json(json).expect_err("unsupported condition must error");
+        assert!(
+            matches!(err, LootTableError::Schema(ref msg) if msg.contains("location_check")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn copy_components_and_copy_state_populate_drop_stack_components() {
+        let json = r#"{
+          "pools": [
+            {
+              "rolls": 1,
+              "entries": [
+                {
+                  "type": "minecraft:item",
+                  "name": "minecraft:beehive",
+                  "functions": [
+                    {
+                      "function": "minecraft:copy_components",
+                      "source": "block_entity",
+                      "include": ["minecraft:custom_name", "minecraft:bees"],
+                      "exclude": ["minecraft:bees"]
+                    },
+                    {
+                      "function": "minecraft:copy_state",
+                      "block": "minecraft:beehive",
+                      "properties": ["honey_level"]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }"#;
+        let table = BlockLootTable::from_json(json).expect("valid copy_components/copy_state");
+        let hive_state = state_with_prop("minecraft:beehive", "honey_level", PropertyValue::Int(5));
+        let ctx = BlockDropContext::new(hive_state, BlockPos::new(0, 64, 0), ToolStack::empty())
+            .with_block_entity_component("minecraft:custom_name", serde_json::json!("Apiary"))
+            .with_block_entity_component("minecraft:bees", serde_json::json!([1, 2]))
+            .with_block_entity_component("minecraft:lock", serde_json::json!("secret"));
+
+        let mut rng = SingleThreadedRandomSource::new(23);
+        let drops = table.evaluate(&ctx, &mut rng);
+        assert_eq!(drops.len(), 1);
+        assert_eq!(drops[0].item_id, "minecraft:beehive");
+        assert_eq!(
+            drops[0].components.get("minecraft:custom_name"),
+            Some(&serde_json::json!("Apiary"))
+        );
+        assert!(!drops[0].components.contains_key("minecraft:bees"));
+        assert!(!drops[0].components.contains_key("minecraft:lock"));
+        assert_eq!(
+            drops[0].components.get("minecraft:block_state"),
+            Some(&serde_json::json!({ "honey_level": "5" }))
+        );
+    }
+
+    #[test]
+    fn bed_drops_only_from_head_part() {
+        let mut rng = SingleThreadedRandomSource::new(29);
+        let pos = BlockPos::new(0, 64, 0);
+
+        let head = resolve_block_break(
+            &BlockBreakContext::for_player(
+                GameType::Survival,
+                state_with_prop("minecraft:red_bed", "part", PropertyValue::Enum("head")),
+                pos,
+                ToolStack::empty(),
+            ),
+            &mut rng,
+        );
+        assert_eq!(
+            head.items,
+            vec![BlockDropStack::new("minecraft:red_bed", 1)]
+        );
+
+        let foot = resolve_block_break(
+            &BlockBreakContext::for_player(
+                GameType::Survival,
+                state_with_prop("minecraft:red_bed", "part", PropertyValue::Enum("foot")),
+                pos,
+                ToolStack::empty(),
+            ),
+            &mut rng,
+        );
+        assert!(foot.items.is_empty());
     }
 }
