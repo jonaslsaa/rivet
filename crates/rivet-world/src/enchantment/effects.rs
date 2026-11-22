@@ -3,14 +3,17 @@
 //! `EnchantmentEffectComponents` (MC 26.2).
 
 use rivet_nbt::compound_tag::CompoundTag;
+use rivet_nbt::nbt_ops::NbtOps;
 use rivet_nbt::tag::Tag;
 use rivet_protocol::game::clientbound_update_attributes_packet::{AttributeModifier, Operation};
 use rivet_registry::Identifier;
 use rivet_registry::generated::tags::{DAMAGE_TYPE_TAG_BY_NAME, ENTITY_TYPE_TAG_BY_NAME};
 use rivet_util::random::RandomSource;
+use rivet_util::valueproviders::constant_float::ConstantFloat;
+use rivet_util::valueproviders::float_provider::{FloatProvider, float_provider_codec};
 
 use crate::enchantment::level_based_value::{
-    LevelBasedValue, LevelBasedValueError, get_string, strip_minecraft_prefix, tag_as_f32,
+    LevelBasedValue, LevelBasedValueError, get_string, strip_minecraft_prefix,
 };
 use crate::enchantment::{EnchantmentTarget, EquipmentSlot};
 
@@ -309,8 +312,8 @@ pub enum EnchantmentEntityEffect {
     },
     PlaySound {
         sound_events: Vec<Identifier>,
-        volume: f32,
-        pitch: f32,
+        volume: FloatProvider,
+        pitch: FloatProvider,
     },
     SummonEntity {
         entity: Identifier,
@@ -434,16 +437,14 @@ impl EnchantmentEntityEffect {
                     }
                     _ => return Err(EffectDecodeError::InvalidField("sound")),
                 };
-                let volume = compound
-                    .tags
-                    .get("volume")
-                    .and_then(tag_as_f32)
-                    .unwrap_or(1.0);
-                let pitch = compound
-                    .tags
-                    .get("pitch")
-                    .and_then(tag_as_f32)
-                    .unwrap_or(1.0);
+                let volume = match compound.tags.get("volume") {
+                    Some(tag) => decode_float_provider(tag, "volume")?,
+                    None => FloatProvider::Constant(ConstantFloat::of(1.0)),
+                };
+                let pitch = match compound.tags.get("pitch") {
+                    Some(tag) => decode_float_provider(tag, "pitch")?,
+                    None => FloatProvider::Constant(ConstantFloat::of(1.0)),
+                };
                 Ok(Self::PlaySound {
                     sound_events,
                     volume,
@@ -484,6 +485,32 @@ impl EnchantmentEntityEffect {
     }
 }
 
+/// `net.minecraft.world.level.storage.loot.LootContext.EntityTarget`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum LootContextEntityTarget {
+    #[default]
+    This,
+    Attacker,
+    DirectAttacker,
+    AttackingPlayer,
+    TargetEntity,
+    InteractingEntity,
+}
+
+impl LootContextEntityTarget {
+    pub fn from_serialized_name(name: &str) -> Option<Self> {
+        match strip_minecraft_prefix(name) {
+            "this" => Some(Self::This),
+            "attacker" => Some(Self::Attacker),
+            "direct_attacker" => Some(Self::DirectAttacker),
+            "attacking_player" => Some(Self::AttackingPlayer),
+            "target_entity" => Some(Self::TargetEntity),
+            "interacting_entity" => Some(Self::InteractingEntity),
+            _ => None,
+        }
+    }
+}
+
 /// Evaluation context passed to conditional enchantment effects by combat
 /// (`#23`), item-use, and loot consumers.
 #[derive(Debug, Clone, Default)]
@@ -492,6 +519,10 @@ pub struct EnchantmentEvalContext {
     pub enchantment_level: i32,
     /// Entity type identifier of the `this` (target/victim) entity, e.g. `"minecraft:zombie"`.
     pub entity_type: Option<Identifier>,
+    /// Entity type identifier of `direct_attacker` (e.g. `"minecraft:arrow"`, `"minecraft:trident"`).
+    pub direct_attacker_type: Option<Identifier>,
+    /// Entity type identifier of `attacker` (e.g. `"minecraft:player"`, `"minecraft:skeleton"`).
+    pub attacker_type: Option<Identifier>,
     /// Whether the entity is in water or rain (used by Impaling / Riptide).
     pub in_water_or_rain: bool,
     /// Damage type identifier, e.g. `"minecraft:fall"`, `"minecraft:on_fire"`.
@@ -502,31 +533,78 @@ pub struct EnchantmentEvalContext {
     pub is_thundering: bool,
     /// Whether the target position can see the sky.
     pub can_see_sky: bool,
-    /// Whether the entity is on the ground.
+    /// Whether the `direct_attacker` position can see the sky.
+    pub direct_attacker_can_see_sky: Option<bool>,
+    /// Whether the `this` entity is on the ground.
     pub on_ground: Option<bool>,
+    /// Whether the `direct_attacker` entity is on the ground.
+    pub direct_attacker_on_ground: Option<bool>,
     /// Optional explicit damage tags active on the damage source (overrides/extends static table).
     pub extra_damage_tags: Vec<String>,
-    /// Optional explicit entity tags active on the entity (overrides/extends static table).
+    /// Optional explicit entity tags active on the `this` entity (overrides/extends static table).
     pub extra_entity_tags: Vec<String>,
+    /// Optional explicit entity tags active on the `direct_attacker` entity.
+    pub extra_direct_attacker_tags: Vec<String>,
 }
 
 impl EnchantmentEvalContext {
-    /// Checks whether the context's `entity_type` belongs to `tag_or_id`
+    /// Checks whether the context's `this` `entity_type` belongs to `tag_or_id`
     /// (`"#minecraft:..."` tag or exact entity type ID).
     pub fn matches_entity_type(&self, tag_or_id: &str) -> bool {
-        let Some(ref et) = self.entity_type else {
+        self.matches_entity_type_for(LootContextEntityTarget::This, tag_or_id)
+    }
+
+    /// Checks whether the entity identified by `target` matches `tag_or_id`
+    /// (`"#minecraft:..."` tag or exact entity type ID).
+    pub fn matches_entity_type_for(
+        &self,
+        target: LootContextEntityTarget,
+        tag_or_id: &str,
+    ) -> bool {
+        let (entity_type, extra_tags): (&Option<Identifier>, &[String]) = match target {
+            LootContextEntityTarget::This | LootContextEntityTarget::TargetEntity => {
+                (&self.entity_type, &self.extra_entity_tags)
+            }
+            LootContextEntityTarget::DirectAttacker => {
+                (&self.direct_attacker_type, &self.extra_direct_attacker_tags)
+            }
+            LootContextEntityTarget::Attacker
+            | LootContextEntityTarget::AttackingPlayer
+            | LootContextEntityTarget::InteractingEntity => (&self.attacker_type, &[]),
+        };
+        let Some(et) = entity_type else {
             return false;
         };
         let et_str = et.to_string();
-        if let Some(tag) = tag_or_id.strip_prefix('#') {
-            if self.extra_entity_tags.iter().any(|t| t == tag) {
+        if let Some(raw_tag) = tag_or_id.strip_prefix('#') {
+            let normalized = Identifier::try_parse(raw_tag)
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| raw_tag.to_owned());
+            if extra_tags.iter().any(|t| t == &normalized || t == raw_tag) {
                 return true;
             }
             ENTITY_TYPE_TAG_BY_NAME
-                .get(tag)
+                .get(normalized.as_str())
                 .is_some_and(|members| members.contains(&et_str.as_str()))
         } else {
-            et_str == tag_or_id
+            let normalized = Identifier::try_parse(tag_or_id)
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| tag_or_id.to_owned());
+            et_str == normalized
+        }
+    }
+
+    fn on_ground_for(&self, target: LootContextEntityTarget) -> Option<bool> {
+        match target {
+            LootContextEntityTarget::DirectAttacker => self.direct_attacker_on_ground,
+            _ => self.on_ground,
+        }
+    }
+
+    fn can_see_sky_for(&self, target: LootContextEntityTarget) -> Option<bool> {
+        match target {
+            LootContextEntityTarget::DirectAttacker => self.direct_attacker_can_see_sky,
+            _ => Some(self.can_see_sky),
         }
     }
 
@@ -557,6 +635,7 @@ pub enum EffectCondition {
         is_direct: Option<bool>,
     },
     EntityProperties {
+        entity: LootContextEntityTarget,
         entity_type: Option<String>,
         on_ground: Option<bool>,
         can_see_sky: Option<bool>,
@@ -592,22 +671,23 @@ impl EffectCondition {
                 true
             }
             Self::EntityProperties {
+                entity,
                 entity_type,
                 on_ground,
                 can_see_sky,
             } => {
                 if let Some(et) = entity_type
-                    && !ctx.matches_entity_type(et)
+                    && !ctx.matches_entity_type_for(*entity, et)
                 {
                     return false;
                 }
                 if let Some(og) = on_ground
-                    && ctx.on_ground != Some(*og)
+                    && ctx.on_ground_for(*entity) != Some(*og)
                 {
                     return false;
                 }
                 if let Some(sky) = can_see_sky
-                    && ctx.can_see_sky != *sky
+                    && ctx.can_see_sky_for(*entity) != Some(*sky)
                 {
                     return false;
                 }
@@ -685,6 +765,9 @@ impl EffectCondition {
                 Self::DamageSourceProperties { tags, is_direct }
             }
             "entity_properties" => {
+                let entity = get_string(compound, "entity")
+                    .and_then(LootContextEntityTarget::from_serialized_name)
+                    .unwrap_or_default();
                 let mut entity_type = None;
                 let mut on_ground = None;
                 let mut can_see_sky = None;
@@ -694,7 +777,10 @@ impl EffectCondition {
                     {
                         entity_type = Some(et.to_owned());
                     }
-                    if let Some(Tag::Compound(flags)) = pred.tags.get("flags")
+                    if let Some(Tag::Compound(flags)) = pred
+                        .tags
+                        .get("minecraft:flags")
+                        .or_else(|| pred.tags.get("flags"))
                         && let Some(Tag::Byte(b)) = flags.tags.get("is_on_ground")
                     {
                         on_ground = Some(b.value != 0);
@@ -709,6 +795,7 @@ impl EffectCondition {
                     }
                 }
                 Self::EntityProperties {
+                    entity,
                     entity_type,
                     on_ground,
                     can_see_sky,
@@ -1143,4 +1230,15 @@ fn decode_targeted_value_list(
         });
     }
     Ok(out)
+}
+
+fn decode_float_provider(
+    tag: &Tag,
+    field: &'static str,
+) -> Result<FloatProvider, EffectDecodeError> {
+    float_provider_codec::<NbtOps>()
+        .parse(&NbtOps, tag)
+        .result()
+        .cloned()
+        .ok_or(EffectDecodeError::InvalidField(field))
 }

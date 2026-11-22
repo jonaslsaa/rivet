@@ -36,7 +36,7 @@ pub use effects::{
     ConditionalEffect, DamageImmunity, EffectCondition, EffectDecodeError,
     EnchantmentAttributeEffect, EnchantmentEffectComponent, EnchantmentEffects,
     EnchantmentEntityEffect, EnchantmentEvalContext, EnchantmentValueEffect,
-    TargetedConditionalEffect,
+    LootContextEntityTarget, TargetedConditionalEffect,
 };
 pub use helper::{EnchantedItemInUse, EnchantingTableOffer, MatchedPostAttackEffect};
 pub use item_enchantments::{
@@ -551,5 +551,161 @@ mod tests {
         let stick = EnchantableItemStack::new(id("stick"), None);
         let empty_offers = helper::generate_enchanting_table_offers(&mut r1, 1337, 15, &stick, reg);
         assert!(empty_offers.iter().all(|o| o.cost == 0 && o.clue.is_none()));
+    }
+
+    #[test]
+    fn direct_attacker_entity_properties_and_sound_float_providers() {
+        use rivet_util::valueproviders::constant_float::ConstantFloat;
+        use rivet_util::valueproviders::float_provider::FloatProvider;
+        use rivet_util::valueproviders::uniform_float::UniformFloat;
+
+        let reg = EnchantmentRegistry::vanilla();
+
+        // Finding 1: Power's damage bonus requires direct_attacker in #minecraft:arrows,
+        // not the victim (this).
+        let mut bow = EnchantableItemStack::new(id("bow"), Some(Enchantable::new(1).unwrap()));
+        helper::update_enchantments(&mut bow, |m| m.set(id("power"), 5), true);
+        let mut rng = LegacyRandomSource::new(1);
+
+        let arrow_hitting_zombie = EnchantmentEvalContext {
+            enchantment_level: 5,
+            entity_type: Some(id("zombie")),
+            direct_attacker_type: Some(id("arrow")),
+            ..Default::default()
+        };
+        let boosted = helper::modify_damage(&bow, 6.0, &arrow_hitting_zombie, &mut rng, reg);
+        assert!(
+            boosted > 6.0,
+            "Power must boost damage when direct_attacker is an arrow, got {boosted}"
+        );
+
+        let snowball_hitting_arrow = EnchantmentEvalContext {
+            enchantment_level: 5,
+            entity_type: Some(id("arrow")),
+            direct_attacker_type: Some(id("snowball")),
+            ..Default::default()
+        };
+        let unboosted = helper::modify_damage(&bow, 6.0, &snowball_hitting_arrow, &mut rng, reg);
+        assert!(
+            (unboosted - 6.0).abs() < 1e-6,
+            "Power must not boost damage when direct_attacker is not an arrow, got {unboosted}"
+        );
+
+        // Findings 2 & 3: Soul Speed decodes on_ground from `flags.is_on_ground`
+        // and preserves FloatProvider distributions on PlaySound.
+        let soul_speed = reg.get(&id("soul_speed")).expect("soul_speed exists");
+        let tick_effects = &soul_speed.effects.tick;
+        assert!(!tick_effects.is_empty());
+        let has_on_ground_condition = tick_effects.iter().any(|ce| {
+            ce.requirements.as_ref().is_some_and(|cond| match cond {
+                EffectCondition::AllOf(terms) => terms.iter().any(|t| {
+                    matches!(
+                        t,
+                        EffectCondition::EntityProperties {
+                            on_ground: Some(true),
+                            ..
+                        }
+                    )
+                }),
+                EffectCondition::EntityProperties {
+                    on_ground: Some(true),
+                    ..
+                } => true,
+                _ => false,
+            })
+        });
+        assert!(
+            has_on_ground_condition,
+            "Soul Speed tick effect must decode flags.is_on_ground"
+        );
+
+        let has_uniform_pitch_sound = tick_effects.iter().any(|ce| {
+            fn find_play_sound(effect: &EnchantmentEntityEffect) -> bool {
+                match effect {
+                    EnchantmentEntityEffect::PlaySound { volume, pitch, .. } => {
+                        *volume == FloatProvider::Constant(ConstantFloat::of(0.6))
+                            && *pitch == FloatProvider::Uniform(UniformFloat::of(0.6, 1.0))
+                    }
+                    EnchantmentEntityEffect::AllOf { effects } => {
+                        effects.iter().any(find_play_sound)
+                    }
+                    _ => false,
+                }
+            }
+            find_play_sound(&ce.effect)
+        });
+        assert!(
+            has_uniform_pitch_sound,
+            "Soul Speed PlaySound must preserve Uniform(0.6, 1.0) pitch FloatProvider"
+        );
+    }
+
+    #[test]
+    fn unqualified_tags_numeric_nbt_java_max_and_rivet_registry_backing() {
+        use rivet_nbt::byte_tag::ByteTag;
+        use rivet_nbt::double_tag::DoubleTag;
+        use rivet_nbt::int_tag::IntTag;
+        use rivet_nbt::long_tag::LongTag;
+        use rivet_nbt::short_tag::ShortTag;
+        use rivet_nbt::string_tag::StringTag;
+        use rivet_nbt::tag::Tag;
+
+        // Finding 4: Unqualified `#enchantable/weapon` normalizes to `minecraft:enchantable/weapon`.
+        let holder_set = NamedHolderSet::from_nbt(&Tag::String(StringTag::value_of(
+            "#enchantable/weapon".to_owned(),
+        )))
+        .expect("unqualified tag should parse");
+        assert_eq!(
+            holder_set,
+            NamedHolderSet::Tag("minecraft:enchantable/weapon".to_owned())
+        );
+        assert!(holder_set.contains_item(&id("diamond_sword")));
+
+        // Finding 5: LevelBasedValue::from_nbt accepts all numeric NBT tag types.
+        assert_eq!(
+            LevelBasedValue::from_nbt(&Tag::Int(IntTag::new(3))).unwrap(),
+            LevelBasedValue::constant(3.0)
+        );
+        assert_eq!(
+            LevelBasedValue::from_nbt(&Tag::Byte(ByteTag::new(2))).unwrap(),
+            LevelBasedValue::constant(2.0)
+        );
+        assert_eq!(
+            LevelBasedValue::from_nbt(&Tag::Short(ShortTag::new(4))).unwrap(),
+            LevelBasedValue::constant(4.0)
+        );
+        assert_eq!(
+            LevelBasedValue::from_nbt(&Tag::Long(LongTag::new(5))).unwrap(),
+            LevelBasedValue::constant(5.0)
+        );
+        assert_eq!(
+            LevelBasedValue::from_nbt(&Tag::Double(DoubleTag::new(2.5))).unwrap(),
+            LevelBasedValue::constant(2.5)
+        );
+
+        // Finding 6: Java Math.max(0.0F, x) semantics (propagates NaN, prefers +0.0 over -0.0).
+        let reg = EnchantmentRegistry::vanilla();
+        let crossbow =
+            EnchantableItemStack::new(id("crossbow"), Some(Enchantable::new(1).unwrap()));
+        let mut rng = LegacyRandomSource::new(1);
+        assert!(helper::modify_crossbow_charge_time(&crossbow, f32::NAN, &mut rng, reg).is_nan());
+        let spread_zero = helper::process_projectile_spread(
+            &crossbow,
+            -0.0_f32,
+            &EnchantmentEvalContext::default(),
+            &mut rng,
+            reg,
+        );
+        assert_eq!(spread_zero, 0.0_f32);
+        assert!(spread_zero.is_sign_positive());
+
+        // Finding 7: EnchantmentRegistry is backed by frozen rivet_registry::Registry<Enchantment>.
+        let underlying = reg.as_registry();
+        assert_eq!(underlying.size(), 43);
+        let tag_key = rivet_registry::TagKey::create(
+            &EnchantmentRegistry::registry_key(),
+            id("in_enchanting_table"),
+        );
+        assert!(!underlying.get_tag_or_empty(&tag_key).is_empty());
     }
 }

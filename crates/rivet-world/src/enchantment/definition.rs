@@ -47,8 +47,11 @@ impl NamedHolderSet {
     pub fn from_nbt(tag: &Tag) -> Result<Self, EnchantmentDecodeError> {
         match tag {
             Tag::String(s) => {
-                if let Some(tag_name) = s.value.strip_prefix('#') {
-                    Ok(Self::Tag(tag_name.to_owned()))
+                if let Some(raw_tag) = s.value.strip_prefix('#') {
+                    let tag_id = Identifier::try_parse(raw_tag).ok_or_else(|| {
+                        EnchantmentDecodeError::InvalidIdentifier(raw_tag.to_owned())
+                    })?;
+                    Ok(Self::Tag(tag_id.to_string()))
                 } else {
                     let id = Identifier::try_parse(&s.value).ok_or_else(|| {
                         EnchantmentDecodeError::InvalidIdentifier(s.value.clone())
@@ -339,8 +342,11 @@ impl EnchantmentInstance {
 fn get_i32(compound: &CompoundTag, key: &'static str) -> Result<i32, EnchantmentDecodeError> {
     match compound.tags.get(key) {
         Some(Tag::Int(i)) => Ok(i.value),
+        Some(Tag::Long(l)) => Ok(l.value as i32),
         Some(Tag::Short(s)) => Ok(i32::from(s.value)),
         Some(Tag::Byte(b)) => Ok(i32::from(b.value)),
+        Some(Tag::Float(f)) => Ok(f.value as i32),
+        Some(Tag::Double(d)) => Ok(d.value as i32),
         Some(_) => Err(EnchantmentDecodeError::InvalidField(key)),
         None => Err(EnchantmentDecodeError::MissingField(key)),
     }

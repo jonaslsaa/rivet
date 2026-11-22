@@ -688,7 +688,7 @@ pub fn process_projectile_spread<R: RandomSource>(
             spread,
         );
     });
-    spread.max(0.0_f32)
+    mth::max_f32(0.0_f32, spread)
 }
 
 /// `EnchantmentHelper.getPiercingCount(ServerLevel, ItemStack, ItemStack)`.
@@ -724,7 +724,7 @@ pub fn modify_crossbow_charge_time<R: RandomSource>(
             time = effect.process(level, random, time);
         }
     });
-    time.max(0.0_f32)
+    mth::max_f32(0.0_f32, time)
 }
 
 /// A matched `post_attack` effect ready for combat (`#23`) execution.

@@ -170,14 +170,10 @@ impl LevelBasedValue {
     /// Decodes a [`LevelBasedValue`] from an NBT [`Tag`] (matches Paper's
     /// `Codec.either(Constant.CODEC, DISPATCH_CODEC)`).
     pub fn from_nbt(tag: &Tag) -> Result<Self, LevelBasedValueError> {
+        if let Some(value) = tag_as_f32(tag) {
+            return Ok(Self::Constant { value });
+        }
         match tag {
-            Tag::Float(f) => Ok(Self::Constant { value: f.value }),
-            Tag::Double(d) => Ok(Self::Constant {
-                value: d.value as f32,
-            }),
-            Tag::Int(i) => Ok(Self::Constant {
-                value: i.value as f32,
-            }),
             Tag::Compound(compound) => Self::from_compound(compound),
             other => Err(LevelBasedValueError::InvalidTagType(other.id())),
         }
@@ -279,6 +275,7 @@ pub(crate) fn tag_as_f32(tag: &Tag) -> Option<f32> {
         Tag::Float(f) => Some(f.value),
         Tag::Double(d) => Some(d.value as f32),
         Tag::Int(i) => Some(i.value as f32),
+        Tag::Long(l) => Some(l.value as f32),
         Tag::Short(s) => Some(f32::from(s.value)),
         Tag::Byte(b) => Some(f32::from(b.value)),
         _ => None,
