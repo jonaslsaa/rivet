@@ -221,14 +221,19 @@ impl WorldInteractionService {
 
         let target_y_rot = wrap_degrees_f32(packet.y_rot);
         let target_x_rot = wrap_degrees_f32(packet.x_rot);
+        let mut effective_player = *player;
         if target_x_rot != player.pitch || target_y_rot != player.yaw {
+            effective_player.yaw = target_y_rot;
+            effective_player.pitch = target_x_rot;
             out.push(CorrectionPacket::SnapRotation {
                 yaw: target_y_rot,
                 pitch: target_x_rot,
             });
         }
 
-        let result = self.game_mode.use_item(player, world, packet.hand);
+        let result = self
+            .game_mode
+            .use_item(&effective_player, world, packet.hand);
         if matches!(
             result,
             InteractionResult::Success {
@@ -334,6 +339,7 @@ mod tests {
         item_use_on_result: InteractionResult,
         item_use_result: InteractionResult,
         place_on_item_use_on: Option<BlockState>,
+        last_item_use_rotation: Option<(f32, f32)>,
     }
 
     impl MockWorld {
@@ -356,6 +362,7 @@ mod tests {
                 item_use_on_result: InteractionResult::Pass,
                 item_use_result: InteractionResult::Pass,
                 place_on_item_use_on: None,
+                last_item_use_rotation: None,
             }
         }
 
@@ -444,9 +451,10 @@ mod tests {
 
         fn item_use(
             &mut self,
-            _player: &InteractionPlayer,
+            player: &InteractionPlayer,
             _hand: InteractionHand,
         ) -> InteractionResult {
+            self.last_item_use_rotation = Some((player.yaw, player.pitch));
             self.item_use_result
         }
     }
@@ -843,6 +851,7 @@ mod tests {
                 CorrectionPacket::SwingArm(InteractionHand::MainHand),
             ]
         );
+        assert_eq!(world.last_item_use_rotation, Some((90.0, -10.0)));
     }
 
     #[test]
