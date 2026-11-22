@@ -350,10 +350,7 @@ pub(crate) fn parse_decimal_exact_i64(s: &str) -> Option<i64> {
 /// `JsonTypeUtil.convertBDToGeneric` (narrows exact integers to smallest of
 /// `Byte`/`Short`/`Int`/`Long`; floats to `Float` if lossless, else `Double`).
 pub(crate) fn convert_parsed_number_to_generic_number(n: &JsonNumber) -> Number {
-    if let Some(l) = n
-        .as_i64()
-        .or_else(|| parse_decimal_exact_i64(n.as_str()))
-    {
+    if let Some(l) = n.as_i64().or_else(|| parse_decimal_exact_i64(n.as_str())) {
         let b = l as i8;
         if i64::from(b) == l {
             return Number::Byte(b);
