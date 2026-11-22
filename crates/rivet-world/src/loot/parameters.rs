@@ -399,7 +399,7 @@ static REGISTRY: LazyLock<IndexMap<Identifier, ContextKeySet>> = LazyLock::new(|
         ContextKeySet::builder()
             .required(LootContextParams::origin())
             .required(LootContextParams::this_entity())
-            .optional(LootContextParams::additional_cost_component_allowed())
+            .required(LootContextParams::additional_cost_component_allowed())
             .build(),
     );
     reg(
@@ -501,6 +501,7 @@ static REGISTRY: LazyLock<IndexMap<Identifier, ContextKeySet>> = LazyLock::new(|
             .required(LootContextParams::block_entity())
             .required(LootContextParams::tool())
             .required(LootContextParams::explosion_radius())
+            .required(LootContextParams::additional_cost_component_allowed())
             .build(),
     );
     reg(
@@ -527,7 +528,7 @@ static REGISTRY: LazyLock<IndexMap<Identifier, ContextKeySet>> = LazyLock::new(|
         ContextKeySet::builder()
             .required(LootContextParams::target_entity())
             .optional(LootContextParams::interacting_entity())
-            .optional(LootContextParams::tool())
+            .required(LootContextParams::tool())
             .build(),
     );
     reg(

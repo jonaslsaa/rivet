@@ -996,3 +996,23 @@ fn single_child_group_propagates_failure_in_alternatives_and_sequence() {
     seq_table.get_random_items_raw(&mut ctx, &mut |s| seq_items.push(s.item().clone()));
     assert!(seq_items.is_empty());
 }
+
+#[test]
+fn builtin_param_sets_match_paper_contracts() {
+    let villager_trade = LootContextParamSets::get(&id("villager_trade")).unwrap();
+    assert!(
+        villager_trade
+            .required()
+            .contains(&LootContextParams::additional_cost_component_allowed())
+    );
+
+    let entity_interact = LootContextParamSets::get(&id("entity_interact")).unwrap();
+    assert!(entity_interact.required().contains(&LootContextParams::tool()));
+
+    let generic = LootContextParamSets::all_params();
+    assert!(
+        generic
+            .required()
+            .contains(&LootContextParams::additional_cost_component_allowed())
+    );
+}
