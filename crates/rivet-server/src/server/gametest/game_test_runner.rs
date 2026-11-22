@@ -150,6 +150,7 @@ pub struct DeterministicGridSpawner {
     stride: i32,
     tests_per_row: i32,
     next_index: i32,
+    occupied_in_batch: Vec<BlockPos>,
     cleared_positions: Vec<BlockPos>,
 }
 
@@ -166,6 +167,7 @@ impl DeterministicGridSpawner {
             stride: stride.max(1),
             tests_per_row: tests_per_row.max(1),
             next_index: 0,
+            occupied_in_batch: Vec::new(),
             cleared_positions: Vec::new(),
         }
     }
@@ -178,15 +180,16 @@ impl DeterministicGridSpawner {
 impl StructureSpawner for DeterministicGridSpawner {
     fn on_batch_start(&mut self, _batch_index: i32) {
         self.next_index = 0;
+        self.occupied_in_batch.clear();
     }
 
     fn spawn_structure(&mut self, info: &mut GameTestInfo) -> Option<BlockPos> {
-        let pos = info.test_block_pos().unwrap_or_else(|| {
+        let pos = info.test_block_pos().unwrap_or_else(|| loop {
             let idx = self.next_index;
             self.next_index = self.next_index.wrapping_add(1);
             let col = idx % self.tests_per_row;
             let row = idx / self.tests_per_row;
-            BlockPos::new(
+            let candidate = BlockPos::new(
                 self.origin
                     .get_x()
                     .wrapping_add(col.wrapping_mul(self.stride)),
@@ -194,8 +197,14 @@ impl StructureSpawner for DeterministicGridSpawner {
                 self.origin
                     .get_z()
                     .wrapping_add(row.wrapping_mul(self.stride)),
-            )
+            );
+            if !self.occupied_in_batch.contains(&candidate) {
+                break candidate;
+            }
         });
+        if !self.occupied_in_batch.contains(&pos) {
+            self.occupied_in_batch.push(pos);
+        }
         info.set_test_block_pos(Some(pos));
         info.set_placed(true);
         Some(pos)

@@ -1327,3 +1327,52 @@ fn halt_on_error_still_records_same_tick_completions() {
     );
     assert_eq!(transcript.skipped_count, 0);
 }
+
+#[test]
+fn deterministic_grid_spawner_skips_preserved_positions_to_avoid_collisions() {
+    let registries = build_registries_with(
+        vec![],
+        vec![
+            (
+                Identifier::with_default_namespace("preserved"),
+                fn_instance(
+                    "always_pass",
+                    TestEnvironmentRef::Key(default_environment_key()),
+                    5,
+                    0,
+                    true,
+                    1,
+                    1,
+                ),
+            ),
+            (
+                Identifier::with_default_namespace("fresh"),
+                fn_instance(
+                    "always_pass",
+                    TestEnvironmentRef::Key(default_environment_key()),
+                    5,
+                    0,
+                    true,
+                    1,
+                    1,
+                ),
+            ),
+        ],
+    );
+    let mut preserved = make_info(&registries, "preserved", RetryOptions::no_retries());
+    let origin = BlockPos::new(0, 64, 0);
+    preserved.set_test_block_pos(Some(origin));
+    let mut fresh = make_info(&registries, "fresh", RetryOptions::no_retries());
+
+    use super::StructureSpawner;
+    let mut spawner = DeterministicGridSpawner::new(origin, 16, 8);
+    spawner.on_batch_start(0);
+    let p1 = spawner.spawn_structure(&mut preserved).unwrap();
+    let p2 = spawner.spawn_structure(&mut fresh).unwrap();
+
+    assert_eq!(p1, origin);
+    assert_ne!(
+        p1, p2,
+        "fresh grid allocation must skip slots already occupied by preserved positions"
+    );
+}
