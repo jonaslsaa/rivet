@@ -423,18 +423,15 @@ pub fn requires_correct_tool_for_drops(state: BlockState) -> bool {
             | "moving_piston"
             | "beacon"
             | "conduit"
-            | "brewing_stand"
             | "shulker_box"
             | "amethyst_cluster"
             | "large_amethyst_bud"
             | "medium_amethyst_bud"
             | "small_amethyst_bud"
             | "budding_amethyst"
-            | "heavy_core"
             | "calibrated_sculk_sensor"
             | "sculk_sensor"
             | "sculk_catalyst"
-            | "ender_chest"
             | "stone_button"
             | "polished_blackstone_button"
             | "decorated_pot"
@@ -3561,5 +3558,64 @@ mod tests {
             &mut rng,
         );
         assert!(foot.items.is_empty());
+    }
+
+    #[test]
+    fn ender_chest_brewing_stand_and_heavy_core_require_pickaxe_for_drops() {
+        let mut rng = SingleThreadedRandomSource::new(31);
+        let pos = BlockPos::new(0, 64, 0);
+        let pickaxe = ToolStack::tool(ToolTier::Wood, ToolKind::Pickaxe);
+        let silk_pickaxe = ToolStack::tool(ToolTier::Diamond, ToolKind::Pickaxe)
+            .with_enchantment("minecraft:silk_touch", 1);
+
+        for (block_id, expected_pickaxe_drop) in [
+            (
+                "minecraft:ender_chest",
+                BlockDropStack::new("minecraft:obsidian", 8),
+            ),
+            (
+                "minecraft:brewing_stand",
+                BlockDropStack::new("minecraft:brewing_stand", 1),
+            ),
+            (
+                "minecraft:heavy_core",
+                BlockDropStack::new("minecraft:heavy_core", 1),
+            ),
+        ] {
+            let state = state_of(block_id);
+            assert!(
+                requires_correct_tool_for_drops(state),
+                "{block_id} must require correct tool for drops"
+            );
+
+            let bare_hand = resolve_block_break(
+                &BlockBreakContext::for_player(GameType::Survival, state, pos, ToolStack::empty()),
+                &mut rng,
+            );
+            assert!(
+                bare_hand.items.is_empty(),
+                "{block_id} should drop nothing when mined with empty hand"
+            );
+
+            let with_pick = resolve_block_break(
+                &BlockBreakContext::for_player(GameType::Survival, state, pos, pickaxe.clone()),
+                &mut rng,
+            );
+            assert_eq!(with_pick.items, vec![expected_pickaxe_drop]);
+        }
+
+        let silk_ender = resolve_block_break(
+            &BlockBreakContext::for_player(
+                GameType::Survival,
+                state_of("minecraft:ender_chest"),
+                pos,
+                silk_pickaxe,
+            ),
+            &mut rng,
+        );
+        assert_eq!(
+            silk_ender.items,
+            vec![BlockDropStack::new("minecraft:ender_chest", 1)]
+        );
     }
 }
