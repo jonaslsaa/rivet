@@ -11,6 +11,7 @@ use rivet_registry::block_state_codec::block_state_codec;
 use rivet_registry::registry_ops::RegistryOpsLookup;
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::dynamic_ops::DynamicOps;
+use rivet_serialization::map_codec;
 use rivet_serialization::record_builder::{self, RecordCodecBuilder};
 use std::sync::Arc;
 
@@ -86,7 +87,10 @@ pub fn huge_fungus_configuration_codec<Ops: DynamicOps + 'static + RegistryOpsLo
             ))
             .and(RecordCodecBuilder::of(
                 Arc::new(|c: &HugeFungusConfiguration| c.planted),
-                codec::optional_field_of::<bool, Ops>("planted", codec::bool_codec::<Ops>(), false),
+                map_codec::or_else_value(
+                    codec::field_of::<bool, Ops>(codec::bool_codec::<Ops>(), "planted".to_string()),
+                    false,
+                ),
             ))
             .apply(
                 instance,
@@ -166,6 +170,10 @@ mod tests {
             block_id("minecraft:shroomlight")
         );
         assert!(!parsed.planted);
+
+        let encode_default_result = codec.encode_start(&ops, &parsed);
+        let encoded_default = encode_default_result.result().unwrap();
+        assert_eq!(encoded_default.get("planted"), Some(&json!(false)));
 
         let planted_cfg = HugeFungusConfiguration::new(
             state("minecraft:warped_nylium"),
