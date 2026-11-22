@@ -924,3 +924,50 @@ fn json_dye_imbue_transmute_recipes_are_normal_and_discoverable() {
     assert_eq!(added, 3);
     assert_eq!(entries.len(), 3);
 }
+
+#[test]
+fn json_result_component_removals_are_parsed_and_applied() {
+    let transmute_json = json!({
+        "type": "minecraft:crafting_transmute",
+        "category": "misc",
+        "input": "minecraft:shulker_box",
+        "material": "minecraft:blue_dye",
+        "result": {
+            "id": "minecraft:blue_shulker_box",
+            "components": {
+                "!minecraft:custom_name": {},
+                "minecraft:rarity": "epic"
+            }
+        }
+    });
+    let recipe = parse_recipe_json(&transmute_json, &empty_tag_resolver).unwrap();
+    let mut shulker = stack("shulker_box", 1);
+    shulker.components_mut().insert(
+        Identifier::with_default_namespace("custom_name"),
+        "Old Name".to_owned(),
+    );
+    shulker.components_mut().insert(
+        Identifier::with_default_namespace("lore"),
+        "keep me".to_owned(),
+    );
+    let input = CraftingInput::of(2, 1, vec![shulker, stack("blue_dye", 1)]);
+    assert!(recipe.matches_crafting(&input));
+    let out = recipe.assemble_crafting(&input).unwrap();
+    assert_eq!(out.item(), item("blue_shulker_box"));
+    assert!(
+        !out.components()
+            .contains_key(&Identifier::with_default_namespace("custom_name"))
+    );
+    assert_eq!(
+        out.components()
+            .get(&Identifier::with_default_namespace("lore"))
+            .map(String::as_str),
+        Some("keep me")
+    );
+    assert_eq!(
+        out.components()
+            .get(&Identifier::with_default_namespace("rarity"))
+            .map(String::as_str),
+        Some("epic")
+    );
+}

@@ -5,7 +5,7 @@
 //! `campfire_cooking`, `stonecutting`, `smithing_transform`, `smithing_trim`,
 //! and special crafting serializers) into [`Recipe`] values.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use indexmap::IndexMap;
 use rivet_registry::Identifier;
@@ -509,6 +509,7 @@ fn parse_result_template(value: Option<&Value>) -> Result<ItemStackTemplate, Rec
                 }
             };
             let mut components = BTreeMap::new();
+            let mut removed_components = BTreeSet::new();
             if let Some(comp_val) = map.get("components") {
                 let comp_obj =
                     comp_val
@@ -518,15 +519,27 @@ fn parse_result_template(value: Option<&Value>) -> Result<ItemStackTemplate, Rec
                             message: "expected object".to_owned(),
                         })?;
                 for (k, v) in comp_obj {
-                    let comp_id = parse_identifier(k, "result.components")?;
-                    let serialized = match v {
-                        Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    };
-                    components.insert(comp_id, serialized);
+                    if let Some(stripped) = k.strip_prefix('!') {
+                        let comp_id = parse_identifier(stripped, "result.components")?;
+                        components.remove(&comp_id);
+                        removed_components.insert(comp_id);
+                    } else {
+                        let comp_id = parse_identifier(k, "result.components")?;
+                        let serialized = match v {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        removed_components.remove(&comp_id);
+                        components.insert(comp_id, serialized);
+                    }
                 }
             }
-            Ok(ItemStackTemplate::with_components(item, count, components))
+            Ok(ItemStackTemplate::with_component_patch(
+                item,
+                count,
+                components,
+                removed_components,
+            ))
         }
         _ => Err(RecipeJsonError::InvalidField {
             field: "result",

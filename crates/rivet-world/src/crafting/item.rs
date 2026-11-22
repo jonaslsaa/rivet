@@ -3,7 +3,7 @@
 //! Backed directly by `rivet_registry::generated::registries::{ITEM_BY_NAME, ITEM_BY_ID}`
 //! until the full `net.minecraft.world.item` crate/module lands.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use rivet_registry::Identifier;
@@ -191,6 +191,8 @@ pub struct ItemStackTemplate {
     pub item: ItemId,
     pub count: i32,
     pub components: BTreeMap<Identifier, String>,
+    /// Component removals from a `DataComponentPatch` (`!<id>` entries in JSON).
+    pub removed_components: BTreeSet<Identifier>,
 }
 
 impl ItemStackTemplate {
@@ -199,6 +201,7 @@ impl ItemStackTemplate {
             item,
             count,
             components: BTreeMap::new(),
+            removed_components: BTreeSet::new(),
         }
     }
 
@@ -211,6 +214,21 @@ impl ItemStackTemplate {
             item,
             count,
             components,
+            removed_components: BTreeSet::new(),
+        }
+    }
+
+    pub fn with_component_patch(
+        item: ItemId,
+        count: i32,
+        components: BTreeMap<Identifier, String>,
+        removed_components: BTreeSet<Identifier>,
+    ) -> Self {
+        Self {
+            item,
+            count,
+            components,
+            removed_components,
         }
     }
 
@@ -220,10 +238,14 @@ impl ItemStackTemplate {
     }
 
     /// `TransmuteRecipe.createWithOriginalComponents(result, input)` — creates
-    /// a stack of `self.item` with `self.count`, merging `input`'s data
-    /// components underneath `self.components` (template overrides win).
+    /// a stack of `self.item` with `self.count`, applying this template's
+    /// component patch (removals and overrides) on top of `original`'s
+    /// components.
     pub fn create_with_original_components(&self, original: &ItemStack) -> ItemStack {
         let mut merged = original.components().clone();
+        for removed in &self.removed_components {
+            merged.remove(removed);
+        }
         for (k, v) in &self.components {
             merged.insert(k.clone(), v.clone());
         }
