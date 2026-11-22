@@ -74,6 +74,7 @@ pub mod biome;
 pub mod block;
 pub mod block_entity;
 pub mod chunk;
+pub mod crafting;
 /// `net.minecraft.data.worldgen` — the `mc.data.worldgen.prereq` unit's
 /// `data::worldgen` slice: the `BootstrapContext` registry-bootstrap contract
 /// (+ test-only `RecordingContext` until `RegistrySetBuilder` lands), the
