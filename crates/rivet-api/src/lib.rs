@@ -8,4 +8,5 @@
 //! packages with the `io.papermc.paper` prefix folded into the crate root:
 //! `io.papermc.paper.plugin.loader.library` → `plugin::loader::library`.
 
+pub mod native;
 pub mod plugin;
