@@ -171,7 +171,7 @@ mod tests {
         );
         assert!(!parsed.planted);
 
-        let encode_default_result = codec.encode_start(&ops, &parsed);
+        let encode_default_result = codec.encode_start(&ops, parsed);
         let encoded_default = encode_default_result.result().unwrap();
         assert_eq!(encoded_default.get("planted"), Some(&json!(false)));
 
