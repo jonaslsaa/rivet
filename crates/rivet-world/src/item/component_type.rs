@@ -5,10 +5,11 @@
 //! All 111 vanilla data component types are sourced from
 //! `rivet_registry::generated::registries::{DATA_COMPONENT_TYPE_BY_ID, DATA_COMPONENT_TYPE_BY_NAME}`.
 
-use std::any::TypeId;
-use std::collections::BTreeMap;
+use std::any::{Any, TypeId};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_nbt::nbt_ops::NbtOps;
@@ -18,9 +19,8 @@ use rivet_registry::generated::registries::{
     DATA_COMPONENT_TYPE_BY_ID, DATA_COMPONENT_TYPE_BY_NAME,
 };
 use rivet_registry::identifier::identifier_codec;
-use rivet_serialization::{DataResult, DynamicOps, JsonOps, Unit, codec, extra_codecs};
-use rivet_text::Component;
-use rivet_text::component_serialization;
+use rivet_serialization::{Codec, DataResult, DynamicOps, JsonOps, Unit, codec, extra_codecs};
+use rivet_text::{Component, TextColor, component_serialization};
 
 use crate::item::component_patch::PatchedDataComponentMap;
 use crate::item::recursive_components::{
@@ -269,6 +269,9 @@ enum CanonicalRawValue {
     Int(i64),
     Float(u64),
     String(String),
+    ByteArray(Vec<i8>),
+    IntArray(Vec<i32>),
+    LongArray(Vec<i64>),
     List(Vec<CanonicalRawValue>),
     Map(BTreeMap<String, CanonicalRawValue>),
 }
@@ -283,9 +286,7 @@ impl CanonicalRawValue {
             Tag::Long(t) => Self::Int(t.value),
             Tag::Float(t) => Self::Float(f64::from(t.value).to_bits()),
             Tag::Double(t) => Self::Float(t.value.to_bits()),
-            Tag::ByteArray(t) => {
-                Self::List(t.data.iter().map(|&v| Self::Int(i64::from(v))).collect())
-            }
+            Tag::ByteArray(t) => Self::ByteArray(t.data.clone()),
             Tag::String(t) => Self::String(t.value.clone()),
             Tag::List(t) => Self::List(t.list.iter().map(Self::from_tag).collect()),
             Tag::Compound(c) => Self::Map(
@@ -293,10 +294,8 @@ impl CanonicalRawValue {
                     .map(|(k, v)| (k.clone(), Self::from_tag(v)))
                     .collect(),
             ),
-            Tag::IntArray(t) => {
-                Self::List(t.data.iter().map(|&v| Self::Int(i64::from(v))).collect())
-            }
-            Tag::LongArray(t) => Self::List(t.data.iter().map(|&v| Self::Int(v)).collect()),
+            Tag::IntArray(t) => Self::IntArray(t.data.clone()),
+            Tag::LongArray(t) => Self::LongArray(t.data.clone()),
         }
     }
 
@@ -324,13 +323,56 @@ impl CanonicalRawValue {
     }
 }
 
+fn cached_component_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Component, Ops>> {
+    static CACHE: OnceLock<Mutex<HashMap<TypeId, Box<dyn Any + Send + Sync>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let entry = guard
+        .entry(TypeId::of::<Ops>())
+        .or_insert_with(|| Box::new(component_serialization::codec::<Ops>()));
+    entry
+        .downcast_ref::<Arc<dyn Codec<Component, Ops>>>()
+        .expect("cached component codec type matches Ops")
+        .clone()
+}
+
+fn normalize_component_json_colors(val: &mut serde_json::Value) {
+    match val {
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                normalize_component_json_colors(item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(color_str)) = map.get("color")
+                && let Ok(color) = TextColor::parse_color(color_str)
+            {
+                map.insert(
+                    "color".to_string(),
+                    serde_json::Value::String(format!("#{:06X}", color.get_value())),
+                );
+            }
+            for (k, v) in map.iter_mut() {
+                if k != "color" {
+                    normalize_component_json_colors(v);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn component_to_canonical_json(comp: &Component) -> serde_json::Value {
     let ops = JsonOps::new(false);
-    component_serialization::codec::<JsonOps>()
+    let mut json = cached_component_codec::<JsonOps>()
         .encode_start(&ops, comp)
         .result()
         .cloned()
-        .unwrap_or_else(|| serde_json::Value::String(comp.to_string()))
+        .unwrap_or_else(|| serde_json::Value::String(comp.to_string()));
+    normalize_component_json_colors(&mut json);
+    json
 }
 
 impl PartialEq for DataComponentValue {
@@ -736,7 +778,7 @@ pub fn encode_component_value<Ops: DynamicOps + 'static>(
         DataComponentTypeId::CUSTOM_NAME | DataComponentTypeId::ITEM_NAME => match value {
             DataComponentValue::Text(s) => codec::string_codec::<Ops>().encode_start(ops, s),
             DataComponentValue::Component(comp) => {
-                component_serialization::codec::<Ops>().encode_start(ops, comp)
+                cached_component_codec::<Ops>().encode_start(ops, comp)
             }
             _ => DataResult::error(format!("Expected text value for {component_type}")),
         },
@@ -805,7 +847,7 @@ pub fn encode_component_value<Ops: DynamicOps + 'static>(
             DataComponentValue::Identifier(id) => identifier_codec::<Ops>().encode_start(ops, id),
             DataComponentValue::Text(s) => codec::string_codec::<Ops>().encode_start(ops, s),
             DataComponentValue::Component(comp) => {
-                component_serialization::codec::<Ops>().encode_start(ops, comp)
+                cached_component_codec::<Ops>().encode_start(ops, comp)
             }
             DataComponentValue::CustomData(c) => {
                 DataResult::success(NbtOps::instance().convert_to(ops, &Tag::Compound(c.clone())))
@@ -859,7 +901,7 @@ pub fn decode_component_value<Ops: DynamicOps + 'static>(
             if let Some(s) = ops.get_string_value(input).result() {
                 return DataResult::success(DataComponentValue::Text(s.clone()));
             }
-            component_serialization::codec::<Ops>()
+            cached_component_codec::<Ops>()
                 .parse(ops, input)
                 .map_owned(|comp| {
                     if comp.get_style().is_empty()

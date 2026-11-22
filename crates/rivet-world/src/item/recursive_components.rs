@@ -304,10 +304,21 @@ pub fn item_stack_template_codec<Ops: DynamicOps + 'static>()
                     count_val,
                 ));
             }
-            let patch = crate::item::item_stack::patch_relative_to_standard_prototype(
-                tmpl.item(),
-                &tmpl.effective_components(),
-            );
+            let effective = tmpl.effective_components();
+            if effective.has(DataComponentTypeId::MAX_DAMAGE)
+                && effective.get_i32_or(DataComponentTypeId::MAX_STACK_SIZE, 1) > 1
+            {
+                return DataResult::error("Item cannot be both damageable and stackable");
+            }
+            let standard = tmpl.item().default_components();
+            let patch = if tmpl.item_holder().components() == &standard {
+                tmpl.components_patch().clone()
+            } else {
+                crate::item::item_stack::patch_relative_to_standard_prototype(
+                    tmpl.item(),
+                    &effective,
+                )
+            };
             if !patch.is_empty() {
                 let comp_val = match crate::item::data_result_into(
                     data_component_patch_codec::<Ops>().encode_start(ops, &patch),

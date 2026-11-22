@@ -1106,3 +1106,196 @@ fn invalid_stored_item_damageable_and_stackable_is_rejected() {
     });
     assert!(stack_codec.parse(&json_ops, &shulker_like).is_error());
 }
+
+#[test]
+fn structured_item_name_codec_is_cached_across_calls() {
+    use crate::item::{decode_component_value, encode_component_value};
+    use rivet_text::component_serialization::CODEC_BUILD_COUNT;
+
+    let json_ops = JsonOps::new(false);
+    let nbt_ops = NbtOps::instance();
+    let styled_json = serde_json::json!({"text": "Blade", "italic": false});
+
+    // Warm up the cache for JsonOps and NbtOps.
+    let val = decode_component_value(DataComponentTypeId::CUSTOM_NAME, &json_ops, &styled_json)
+        .result()
+        .cloned()
+        .expect("decode warm-up");
+    let _ = encode_component_value(DataComponentTypeId::CUSTOM_NAME, &val, &nbt_ops)
+        .result()
+        .cloned()
+        .expect("encode warm-up");
+    let _ = val.java_hash_code();
+
+    let count_after_warmup = CODEC_BUILD_COUNT.with(|c| c.get());
+    for _ in 0..10 {
+        let decoded =
+            decode_component_value(DataComponentTypeId::CUSTOM_NAME, &json_ops, &styled_json)
+                .result()
+                .cloned()
+                .expect("decode cached");
+        let nbt_encoded =
+            encode_component_value(DataComponentTypeId::CUSTOM_NAME, &decoded, &nbt_ops)
+                .result()
+                .cloned()
+                .expect("encode cached nbt");
+        let json_encoded =
+            encode_component_value(DataComponentTypeId::CUSTOM_NAME, &decoded, &json_ops)
+                .result()
+                .cloned()
+                .expect("encode cached json");
+        let _ = decode_component_value(DataComponentTypeId::CUSTOM_NAME, &nbt_ops, &nbt_encoded)
+            .result()
+            .cloned()
+            .expect("decode cached nbt");
+        let _ = decode_component_value(DataComponentTypeId::CUSTOM_NAME, &json_ops, &json_encoded)
+            .result()
+            .cloned()
+            .expect("decode cached json");
+        let _ = decoded.java_hash_code();
+    }
+    let count_after_loop = CODEC_BUILD_COUNT.with(|c| c.get());
+    assert_eq!(
+        count_after_warmup, count_after_loop,
+        "component_serialization::codec must be cached and not rebuilt per call"
+    );
+}
+
+#[test]
+fn equal_component_colors_hash_identically() {
+    use crate::item::decode_component_value;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let json_ops = JsonOps::new(false);
+    let named_gold = serde_json::json!({"text": "Crown", "color": "gold"});
+    let hex_gold = serde_json::json!({"text": "Crown", "color": "#FFAA00"});
+
+    let val_named =
+        decode_component_value(DataComponentTypeId::CUSTOM_NAME, &json_ops, &named_gold)
+            .result()
+            .cloned()
+            .expect("decode named gold");
+    let val_hex = decode_component_value(DataComponentTypeId::CUSTOM_NAME, &json_ops, &hex_gold)
+        .result()
+        .cloned()
+        .expect("decode hex gold");
+
+    assert_eq!(val_named, val_hex);
+    let hash_of = |v: &DataComponentValue| {
+        let mut h = DefaultHasher::new();
+        v.hash(&mut h);
+        h.finish()
+    };
+    assert_eq!(hash_of(&val_named), hash_of(&val_hex));
+    assert_eq!(val_named.java_hash_code(), val_hex.java_hash_code());
+}
+
+#[test]
+fn invalid_stored_item_damageable_and_stackable_fails_encode() {
+    let stone = ItemId::from_name("minecraft:stone").expect("stone");
+    let mut patch_builder = DataComponentPatch::builder();
+    patch_builder.set(
+        DataComponentTypeId::MAX_DAMAGE,
+        DataComponentValue::Int(100),
+    );
+    patch_builder.set(
+        DataComponentTypeId::MAX_STACK_SIZE,
+        DataComponentValue::Int(16),
+    );
+    let invalid_tmpl = ItemStackTemplate::try_new(stone.holder(), 1, patch_builder.build())
+        .expect("construct template");
+
+    let json_ops = JsonOps::new(false);
+    let tmpl_codec = item_stack_template_codec::<JsonOps>();
+    assert!(
+        tmpl_codec.encode_start(&json_ops, &invalid_tmpl).is_error(),
+        "encoding a damageable + stackable ItemStackTemplate must fail fast"
+    );
+
+    let container =
+        ItemContainerContents::try_from_slots(vec![Some(invalid_tmpl)]).expect("container");
+    let container_codec = item_container_contents_codec::<JsonOps>();
+    assert!(
+        container_codec
+            .encode_start(&json_ops, &container)
+            .is_error(),
+        "encoding a container holding a damageable + stackable item must fail fast"
+    );
+}
+
+#[test]
+fn nbt_array_type_overrides_are_not_collapsed() {
+    use rivet_nbt::byte_array_tag::ByteArrayTag;
+    use rivet_nbt::int_array_tag::IntArrayTag;
+    use rivet_nbt::long_array_tag::LongArrayTag;
+
+    let byte_arr = DataComponentValue::RawNbt(Tag::ByteArray(ByteArrayTag::new(vec![1, 2])));
+    let int_arr = DataComponentValue::RawNbt(Tag::IntArray(IntArrayTag::new(vec![1, 2])));
+    let long_arr = DataComponentValue::RawNbt(Tag::LongArray(LongArrayTag::new(vec![1, 2])));
+
+    assert_ne!(byte_arr, int_arr);
+    assert_ne!(int_arr, long_arr);
+    assert_ne!(byte_arr, long_arr);
+
+    let mut proto_builder = DataComponentMap::builder();
+    proto_builder.set(DataComponentTypeId::CUSTOM_MODEL_DATA, byte_arr.clone());
+    let proto = proto_builder.build().expect("valid prototype");
+
+    let mut patched = PatchedDataComponentMap::new(proto);
+    patched.set(DataComponentTypeId::CUSTOM_MODEL_DATA, int_arr.clone());
+    assert_eq!(
+        patched.get(DataComponentTypeId::CUSTOM_MODEL_DATA),
+        Some(&int_arr),
+        "IntArray override over ByteArray prototype must be preserved"
+    );
+    assert!(
+        patched
+            .as_patch()
+            .get(DataComponentTypeId::CUSTOM_MODEL_DATA)
+            .is_some(),
+        "patch must retain type-changing NBT array override"
+    );
+}
+
+#[test]
+fn standard_prototype_template_preserves_explicit_default_patch_on_round_trip() {
+    let stone = ItemId::from_name("minecraft:stone").expect("stone");
+    let mut patch_builder = DataComponentPatch::builder();
+    // 64 matches stone's standard MAX_STACK_SIZE default, but is explicitly patched on the template.
+    patch_builder.set(
+        DataComponentTypeId::MAX_STACK_SIZE,
+        DataComponentValue::Int(64),
+    );
+    let tmpl = ItemStackTemplate::try_new(stone.holder(), 1, patch_builder.build())
+        .expect("construct template");
+
+    let json_ops = JsonOps::new(false);
+    let tmpl_codec = item_stack_template_codec::<JsonOps>();
+    let encoded = tmpl_codec
+        .encode_start(&json_ops, &tmpl)
+        .result()
+        .cloned()
+        .expect("encode template");
+    let decoded = tmpl_codec
+        .parse(&json_ops, &encoded)
+        .result()
+        .cloned()
+        .expect("decode template");
+    assert_eq!(decoded, tmpl);
+
+    let container =
+        ItemContainerContents::try_from_slots(vec![Some(tmpl.clone())]).expect("container");
+    let container_codec = item_container_contents_codec::<JsonOps>();
+    let enc_c = container_codec
+        .encode_start(&json_ops, &container)
+        .result()
+        .cloned()
+        .expect("encode container");
+    let dec_c = container_codec
+        .parse(&json_ops, &enc_c)
+        .result()
+        .cloned()
+        .expect("decode container");
+    assert_eq!(dec_c, container);
+}
