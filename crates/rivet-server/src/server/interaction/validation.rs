@@ -24,6 +24,23 @@ pub const MAX_HIT_LOCATION_OFFSET: f64 = 1.0000001;
 /// Paper's exact disconnect reason for negative sequence numbers in `ackBlockChangesUpTo`.
 pub const INVALID_SEQUENCE_DISCONNECT_MESSAGE: &str = "Expected packet sequence nr >= 0";
 
+/// Exact `java.lang.Math.max(double, double)` semantics per `PORTING.md`:
+/// propagates NaN, returns `+0.0` for mixed-sign zeroes, and returns `a` for same-sign zeroes.
+#[inline]
+fn java_max_f64(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        return f64::NAN;
+    }
+    if a == 0.0 && b == 0.0 {
+        return if a.is_sign_positive() || b.is_sign_positive() {
+            0.0
+        } else {
+            -0.0
+        };
+    }
+    if a >= b { a } else { b }
+}
+
 /// `new AABB(pos).distanceToSqr(point)`.
 ///
 /// Exact translation of `AABB.java`:
@@ -41,9 +58,9 @@ pub fn aabb_block_distance_to_sqr(pos: BlockPos, point: Vec3) -> f64 {
     let max_y = (pos.get_y().wrapping_add(1)) as f64;
     let max_z = (pos.get_z().wrapping_add(1)) as f64;
 
-    let dx = (min_x - point.x).max(point.x - max_x).max(0.0);
-    let dy = (min_y - point.y).max(point.y - max_y).max(0.0);
-    let dz = (min_z - point.z).max(point.z - max_z).max(0.0);
+    let dx = java_max_f64(java_max_f64(min_x - point.x, point.x - max_x), 0.0);
+    let dy = java_max_f64(java_max_f64(min_y - point.y, point.y - max_y), 0.0);
+    let dz = java_max_f64(java_max_f64(min_z - point.z, point.z - max_z), 0.0);
     dx * dx + dy * dy + dz * dz
 }
 
@@ -161,5 +178,19 @@ impl SequenceAckTracker {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aabb_block_distance_to_sqr_propagates_nan_like_java_math_max() {
+        let pos = BlockPos::new(1, 2, 3);
+        assert!(aabb_block_distance_to_sqr(pos, Vec3::new(f64::NAN, 2.5, 3.5)).is_nan());
+        assert!(aabb_block_distance_to_sqr(pos, Vec3::new(1.5, f64::NAN, 3.5)).is_nan());
+        assert!(aabb_block_distance_to_sqr(pos, Vec3::new(1.5, 2.5, f64::NAN)).is_nan());
+        assert_eq!(aabb_block_distance_to_sqr(pos, Vec3::new(1.5, 2.5, 3.5)), 0.0);
     }
 }
