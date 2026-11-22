@@ -13,6 +13,8 @@ use rivet_nbt::compound_tag::CompoundTag;
 use rivet_nbt::tag::Tag;
 use rivet_registry::core::Difficulty;
 use rivet_registry::{Identifier, ResourceKey};
+use rivet_world::level::gamerules::game_rule::GameRuleValueCodec;
+use rivet_world::level::gamerules::game_rules as world_game_rules;
 use serde_json::Value as JsonValue;
 
 use crate::server::gametest::registries::{TEST_ENVIRONMENT, TEST_ENVIRONMENT_DEFINITION_TYPE};
@@ -355,28 +357,51 @@ impl TestEnvironmentDefinition {
                         actual: json_type_name(rules_val),
                     }
                 })?;
+                let registry = world_game_rules::built_in_registry();
                 let mut rules = IndexMap::with_capacity(rules_obj.len());
                 for (k, v) in rules_obj {
                     let rule_id = parse_identifier_strict(k, "rules")?;
-                    let rule_val = match v {
-                        JsonValue::Bool(b) => GameRuleValue::Bool(*b),
-                        JsonValue::Number(n) => {
-                            let i = n.as_i64().and_then(|x| i32::try_from(x).ok()).ok_or(
-                                EnvironmentDecodeError::InvalidFieldType {
+                    let rule = registry.get_value_by_id(&rule_id).ok_or_else(|| {
+                        EnvironmentDecodeError::UnknownGameRule(rule_id.to_string())
+                    })?;
+                    let rule_val = match rule.value_codec {
+                        GameRuleValueCodec::Bool => match v {
+                            JsonValue::Bool(b) => GameRuleValue::Bool(*b),
+                            other => {
+                                return Err(EnvironmentDecodeError::InvalidFieldType {
                                     field: "rules",
-                                    expected: "bool or 32-bit integer",
-                                    actual: "out-of-range number",
-                                },
-                            )?;
-                            GameRuleValue::Int(i)
-                        }
-                        other => {
-                            return Err(EnvironmentDecodeError::InvalidFieldType {
-                                field: "rules",
-                                expected: "bool or 32-bit integer",
-                                actual: json_type_name(other),
-                            });
-                        }
+                                    expected: "boolean",
+                                    actual: json_type_name(other),
+                                });
+                            }
+                        },
+                        GameRuleValueCodec::Int { min, max } => match v {
+                            JsonValue::Number(n) => {
+                                let i = n.as_i64().and_then(|x| i32::try_from(x).ok()).ok_or(
+                                    EnvironmentDecodeError::InvalidFieldType {
+                                        field: "rules",
+                                        expected: "32-bit integer",
+                                        actual: "out-of-range number",
+                                    },
+                                )?;
+                                if i < min || i > max {
+                                    return Err(EnvironmentDecodeError::GameRuleOutOfRange {
+                                        rule: rule_id.to_string(),
+                                        value: i,
+                                        min,
+                                        max,
+                                    });
+                                }
+                                GameRuleValue::Int(i)
+                            }
+                            other => {
+                                return Err(EnvironmentDecodeError::InvalidFieldType {
+                                    field: "rules",
+                                    expected: "32-bit integer",
+                                    actual: json_type_name(other),
+                                });
+                            }
+                        },
                     };
                     rules.insert(rule_id, rule_val);
                 }
@@ -516,18 +541,39 @@ impl TestEnvironmentDefinition {
                         actual: nbt_type_name(rules_tag),
                     });
                 };
+                let registry = world_game_rules::built_in_registry();
                 let mut rules = IndexMap::with_capacity(rules_compound.tags.len());
                 for (k, v) in &rules_compound.tags {
                     let rule_id = parse_identifier_strict(k, "rules")?;
-                    let rule_val = match v {
-                        Tag::Byte(b) => GameRuleValue::Bool(b.value != 0),
-                        Tag::Int(i) => GameRuleValue::Int(i.value),
-                        other => {
-                            return Err(EnvironmentDecodeError::InvalidFieldType {
+                    let rule = registry.get_value_by_id(&rule_id).ok_or_else(|| {
+                        EnvironmentDecodeError::UnknownGameRule(rule_id.to_string())
+                    })?;
+                    let rule_val = match rule.value_codec {
+                        GameRuleValueCodec::Bool => v
+                            .as_number()
+                            .map(|n| GameRuleValue::Bool(n.double_value() != 0.0))
+                            .ok_or_else(|| EnvironmentDecodeError::InvalidFieldType {
                                 field: "rules",
-                                expected: "byte (bool) or int tag",
-                                actual: nbt_type_name(other),
-                            });
+                                expected: "numeric (bool) tag",
+                                actual: nbt_type_name(v),
+                            })?,
+                        GameRuleValueCodec::Int { min, max } => {
+                            let i = v.as_number().map(|n| n.int_value()).ok_or_else(|| {
+                                EnvironmentDecodeError::InvalidFieldType {
+                                    field: "rules",
+                                    expected: "numeric tag",
+                                    actual: nbt_type_name(v),
+                                }
+                            })?;
+                            if i < min || i > max {
+                                return Err(EnvironmentDecodeError::GameRuleOutOfRange {
+                                    rule: rule_id.to_string(),
+                                    value: i,
+                                    min,
+                                    max,
+                                });
+                            }
+                            GameRuleValue::Int(i)
                         }
                     };
                     rules.insert(rule_id, rule_val);
@@ -596,6 +642,15 @@ pub enum EnvironmentDecodeError {
     InvalidDifficulty(String),
     #[error("invalid weather `{0}`")]
     InvalidWeather(String),
+    #[error("unknown game rule `{0}`")]
+    UnknownGameRule(String),
+    #[error("game rule `{rule}` value {value} out of range [{min}, {max}]")]
+    GameRuleOutOfRange {
+        rule: String,
+        value: i32,
+        min: i32,
+        max: i32,
+    },
     #[error("field `{field}` value {value} out of range (expected {expected})")]
     OutOfRange {
         field: &'static str,

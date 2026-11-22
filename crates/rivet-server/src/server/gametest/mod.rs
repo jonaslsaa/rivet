@@ -240,8 +240,8 @@ mod tests {
         let rules = TestEnvironmentDefinition::decode_json(&json!({
             "type": "minecraft:game_rules",
             "rules": {
-                "minecraft:do_daylight_cycle": false,
-                "minecraft:random_tick_speed": 3
+                "minecraft:advance_time": false,
+                "minecraft:max_snow_accumulation_height": 3
             }
         }))
         .unwrap();
@@ -250,11 +250,13 @@ mod tests {
         };
         assert_eq!(rules.len(), 2);
         assert_eq!(
-            rules.get(&Identifier::with_default_namespace("do_daylight_cycle")),
+            rules.get(&Identifier::with_default_namespace("advance_time")),
             Some(&GameRuleValue::Bool(false))
         );
         assert_eq!(
-            rules.get(&Identifier::with_default_namespace("random_tick_speed")),
+            rules.get(&Identifier::with_default_namespace(
+                "max_snow_accumulation_height"
+            )),
             Some(&GameRuleValue::Int(3))
         );
 
@@ -682,6 +684,79 @@ mod tests {
                 time: 100,
             }
         );
+    }
+
+    #[test]
+    fn game_rules_environment_validates_rule_names_types_and_ranges() {
+        use rivet_nbt::compound_tag::CompoundTag;
+        use rivet_nbt::int_tag::IntTag;
+        use rivet_nbt::string_tag::StringTag;
+        use rivet_nbt::tag::Tag;
+
+        // Unknown rule rejected (JSON).
+        let unknown = TestEnvironmentDefinition::decode_json(&json!({
+            "type": "minecraft:game_rules",
+            "rules": { "minecraft:not_a_real_rule": true }
+        }));
+        assert!(matches!(
+            unknown,
+            Err(EnvironmentDecodeError::UnknownGameRule(_))
+        ));
+
+        // Mismatched type rejected (int for bool rule, bool for int rule).
+        let wrong_type = TestEnvironmentDefinition::decode_json(&json!({
+            "type": "minecraft:game_rules",
+            "rules": { "minecraft:advance_time": 1 }
+        }));
+        assert!(matches!(
+            wrong_type,
+            Err(EnvironmentDecodeError::InvalidFieldType { field: "rules", .. })
+        ));
+        let wrong_type_int = TestEnvironmentDefinition::decode_json(&json!({
+            "type": "minecraft:game_rules",
+            "rules": { "minecraft:max_snow_accumulation_height": true }
+        }));
+        assert!(matches!(
+            wrong_type_int,
+            Err(EnvironmentDecodeError::InvalidFieldType { field: "rules", .. })
+        ));
+
+        // Out-of-range integer rejected (max_snow_accumulation_height is 0..=8).
+        let out_of_range = TestEnvironmentDefinition::decode_json(&json!({
+            "type": "minecraft:game_rules",
+            "rules": { "minecraft:max_snow_accumulation_height": 99 }
+        }));
+        assert!(matches!(
+            out_of_range,
+            Err(EnvironmentDecodeError::GameRuleOutOfRange {
+                value: 99,
+                min: 0,
+                max: 8,
+                ..
+            })
+        ));
+
+        // NBT rejects unknown rules and out-of-range integers too.
+        let mut bad_rules_nbt = CompoundTag::new();
+        bad_rules_nbt.put(
+            "minecraft:max_snow_accumulation_height".to_string(),
+            Tag::Int(IntTag::value_of(-1)),
+        );
+        let mut env_nbt = CompoundTag::new();
+        env_nbt.put(
+            "type".to_string(),
+            Tag::String(StringTag::value_of("minecraft:game_rules".to_string())),
+        );
+        env_nbt.put("rules".to_string(), Tag::Compound(bad_rules_nbt));
+        assert!(matches!(
+            TestEnvironmentDefinition::decode_nbt(&Tag::Compound(env_nbt)),
+            Err(EnvironmentDecodeError::GameRuleOutOfRange {
+                value: -1,
+                min: 0,
+                max: 8,
+                ..
+            })
+        ));
     }
 
     #[test]
