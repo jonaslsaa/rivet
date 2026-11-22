@@ -855,3 +855,188 @@ fn scoreboard_provider_trait_access() {
         .unwrap();
     assert!(holder.scoreboard().get_objective("m4_test").is_some());
 }
+
+#[test]
+fn set_enable_player_collisions_broadcasts_updated_team_parameters() {
+    let mut sb = ServerScoreboard::new();
+    sb.add_player_team("red").unwrap();
+    sb.set_team_collision_rule("red", CollisionRule::PushOtherTeams)
+        .unwrap();
+    sb.drain_effects();
+
+    // Toggling off broadcasts an updated modify packet with CollisionRule::Never.
+    sb.set_enable_player_collisions(false);
+    let effects = sb.drain_effects();
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        ScoreboardEffect::Broadcast(ScoreboardPacket::SetPlayerTeam(pkt)) => {
+            assert_eq!(pkt.name, "red");
+            assert_eq!(pkt.method, ClientboundSetPlayerTeamPacket::METHOD_CHANGE);
+            let params = pkt.parameters.as_ref().expect("modify carries parameters");
+            assert_eq!(params.collision_rule, CollisionRule::Never);
+        }
+        other => panic!("expected Broadcast(SetPlayerTeam), got {other:?}"),
+    }
+
+    // Setting the same value again is a no-op.
+    sb.set_enable_player_collisions(false);
+    assert!(sb.drain_effects().is_empty());
+
+    // Toggling back on restores PushOtherTeams.
+    sb.set_enable_player_collisions(true);
+    let effects = sb.drain_effects();
+    assert_eq!(effects.len(), 1);
+    match &effects[0] {
+        ScoreboardEffect::Broadcast(ScoreboardPacket::SetPlayerTeam(pkt)) => {
+            assert_eq!(pkt.method, ClientboundSetPlayerTeamPacket::METHOD_CHANGE);
+            let params = pkt.parameters.as_ref().expect("modify carries parameters");
+            assert_eq!(params.collision_rule, CollisionRule::PushOtherTeams);
+        }
+        other => panic!("expected Broadcast(SetPlayerTeam), got {other:?}"),
+    }
+}
+
+#[test]
+fn start_tracking_unknown_objective_does_not_suppress_later_sync() {
+    let mut sb = ServerScoreboard::new();
+    sb.start_tracking_objective("later");
+    assert!(!sb.is_objective_tracked("later"));
+    assert!(sb.drain_effects().is_empty());
+
+    sb.add_objective(
+        "later",
+        ObjectiveCriteria::dummy(),
+        Component::literal("Later"),
+        RenderType::Integer,
+        false,
+        None,
+    )
+    .unwrap();
+    sb.mutate_player_score(&ScoreHolder::for_name_only("Alice"), "later", true, |s| {
+        s.set(7)
+    })
+    .unwrap();
+    sb.drain_effects();
+
+    sb.set_display_objective(DisplaySlot::Sidebar, Some("later"))
+        .unwrap();
+    assert!(sb.is_objective_tracked("later"));
+
+    let effects = sb.drain_effects();
+    // Must emit SetObjective(Add), SetDisplayObjective, and SetScore for Alice.
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        ScoreboardEffect::Broadcast(ScoreboardPacket::SetObjective(p))
+            if p.objective_name == "later" && p.method == ClientboundSetObjectivePacket::METHOD_ADD
+    )));
+    assert!(effects.iter().any(|e| matches!(
+        e,
+        ScoreboardEffect::Broadcast(ScoreboardPacket::SetScore(p))
+            if p.objective_name == "later" && p.owner == "Alice" && p.score == 7
+    )));
+}
+
+#[test]
+fn persistence_tolerates_non_string_team_color() {
+    let mut team_tag = CompoundTag::new();
+    team_tag.put_string("Name", "bad_color_type");
+    team_tag.put_int("TeamColor", 42);
+
+    let mut teams_list = ListTag::new();
+    teams_list.list.push(Tag::Compound(team_tag));
+
+    let mut root = CompoundTag::new();
+    root.put("Teams".to_owned(), Tag::List(teams_list));
+
+    let loaded = ScoreboardSaveData::decode_nbt(&Tag::Compound(root))
+        .expect("non-string TeamColor should decode leniently");
+    let mut sb = ServerScoreboard::new();
+    loaded.apply_to(&mut sb).expect("load into scoreboard");
+
+    let team = sb.get_player_team("bad_color_type").unwrap();
+    assert_eq!(team.color(), None);
+}
+
+#[test]
+fn persistence_display_slots_encode_in_deterministic_order() {
+    let mut sb = ServerScoreboard::new();
+    for name in ["obj_a", "obj_b", "obj_c", "obj_d"] {
+        sb.add_objective(
+            name,
+            ObjectiveCriteria::dummy(),
+            Component::literal(name),
+            RenderType::Integer,
+            false,
+            None,
+        )
+        .unwrap();
+    }
+    sb.set_display_objective(DisplaySlot::TeamRed, Some("obj_d"))
+        .unwrap();
+    sb.set_display_objective(DisplaySlot::BelowName, Some("obj_c"))
+        .unwrap();
+    sb.set_display_objective(DisplaySlot::Sidebar, Some("obj_b"))
+        .unwrap();
+    sb.set_display_objective(DisplaySlot::List, Some("obj_a"))
+        .unwrap();
+
+    let save = ScoreboardSaveData::from_scoreboard(&sb);
+    let expected_keys: Vec<&str> = vec!["list", "sidebar", "below_name", "sidebar.team.red"];
+
+    for _ in 0..8 {
+        let tag = save.encode_nbt().expect("encode");
+        let Tag::Compound(root) = tag else {
+            panic!("expected compound root");
+        };
+        let Some(Tag::Compound(slots)) = root.get("DisplaySlots") else {
+            panic!("expected DisplaySlots compound");
+        };
+        let keys: Vec<&str> = slots.key_set().map(String::as_str).collect();
+        assert_eq!(keys, expected_keys);
+    }
+}
+
+#[test]
+fn remove_objective_reports_previous_objective_to_display_slot_listener() {
+    struct RecordingListener {
+        transitions: Vec<(DisplaySlot, Option<String>, Option<String>)>,
+    }
+    impl ScoreboardListener for RecordingListener {
+        fn on_display_slot_changed(
+            &mut self,
+            slot: DisplaySlot,
+            old_objective: Option<&Objective>,
+            new_objective: Option<&Objective>,
+        ) {
+            self.transitions.push((
+                slot,
+                old_objective.map(|o| o.name().to_owned()),
+                new_objective.map(|o| o.name().to_owned()),
+            ));
+        }
+    }
+
+    let mut sb = Scoreboard::new();
+    let mut listener = RecordingListener {
+        transitions: Vec::new(),
+    };
+    sb.add_objective(
+        "kills",
+        ObjectiveCriteria::dummy(),
+        Component::literal("Kills"),
+        RenderType::Integer,
+        false,
+        None,
+        &mut listener,
+    )
+    .unwrap();
+    sb.set_display_objective(DisplaySlot::Sidebar, Some("kills"), &mut listener)
+        .unwrap();
+    listener.transitions.clear();
+
+    sb.remove_objective("kills", &mut listener);
+    assert_eq!(
+        listener.transitions,
+        vec![(DisplaySlot::Sidebar, Some("kills".to_owned()), None)]
+    );
+}
