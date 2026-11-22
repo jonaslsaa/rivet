@@ -49,6 +49,10 @@ impl LookAtPlayerGoal {
         probability: f32,
         only_horizontal: bool,
     ) -> Self {
+        let mut look_at_context = TargetingConditions::for_non_combat().range(look_distance as f64);
+        if matches!(look_at_type, LookAtTargetType::Player) {
+            look_at_context = look_at_context.exclude_riding_mob();
+        }
         Self {
             flags: GoalFlags::LOOK,
             look_at: None,
@@ -57,8 +61,12 @@ impl LookAtPlayerGoal {
             probability,
             only_horizontal,
             look_at_type,
-            look_at_context: TargetingConditions::for_non_combat().range(look_distance as f64),
+            look_at_context,
         }
+    }
+
+    pub fn look_at_context(&self) -> TargetingConditions {
+        self.look_at_context
     }
 
     pub fn look_at(&self) -> Option<EntityId> {

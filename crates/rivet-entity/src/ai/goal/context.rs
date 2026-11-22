@@ -213,6 +213,9 @@ pub struct TargetingConditions {
     pub range: f64,
     pub check_line_of_sight: bool,
     pub test_invisible: bool,
+    /// Mirrors Paper `EntitySelector.notRiding(mob)` selector attached by `LookAtPlayerGoal`
+    /// when `lookAtType == Player.class`.
+    pub exclude_riding_mob: bool,
 }
 
 impl TargetingConditions {
@@ -224,6 +227,7 @@ impl TargetingConditions {
             range: -1.0,
             check_line_of_sight: true,
             test_invisible: true,
+            exclude_riding_mob: false,
         }
     }
 
@@ -233,6 +237,7 @@ impl TargetingConditions {
             range: -1.0,
             check_line_of_sight: true,
             test_invisible: true,
+            exclude_riding_mob: false,
         }
     }
 
@@ -248,6 +253,11 @@ impl TargetingConditions {
 
     pub const fn ignore_invisibility_testing(mut self) -> Self {
         self.test_invisible = false;
+        self
+    }
+
+    pub const fn exclude_riding_mob(mut self) -> Self {
+        self.exclude_riding_mob = true;
         self
     }
 }
