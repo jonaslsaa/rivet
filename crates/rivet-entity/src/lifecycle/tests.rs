@@ -471,6 +471,31 @@ fn removal_preserves_passengers_on_chunk_unload_but_ejects_on_discard() {
     assert_eq!(ctx.get(pig2).unwrap().entity().vehicle, None);
     assert!(ctx.get(boat2).is_none());
     assert_eq!(ctx.entity_count(), 2);
+
+    // If a passenger is removed while cancel_dismount is active, once cancellation clears
+    // the next tick detaches the missing passenger ID so the vehicle seat is freed.
+    let boat3 = ctx.next_entity_id();
+    let pig3 = ctx.next_entity_id();
+    let pig4 = ctx.next_entity_id();
+    ctx.add_entity(LifecycleEntity::Base(Entity::new(
+        boat3,
+        EntityTypeMeta::boat(),
+        5,
+    )));
+    ctx.add_entity(LifecycleEntity::Mob(Mob::new(pig3, pig_meta(), 10.0, 6)));
+    ctx.add_entity(LifecycleEntity::Mob(Mob::new(pig4, pig_meta(), 10.0, 7)));
+    assert!(ctx.start_riding(pig3, boat3, false, false));
+
+    ctx.cancel_dismount = true;
+    assert!(ctx.remove_entity(pig3, EntityRemovalReason::Discarded));
+    assert!(ctx.get(pig3).is_none());
+    assert_eq!(ctx.get(boat3).unwrap().entity().passengers, vec![pig3]);
+
+    ctx.cancel_dismount = false;
+    ctx.take_events();
+    ctx.tick_all(true);
+    assert!(ctx.get(boat3).unwrap().entity().passengers.is_empty());
+    assert!(ctx.start_riding(pig4, boat3, false, false));
 }
 
 // ============================================================================
