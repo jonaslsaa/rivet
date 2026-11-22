@@ -925,3 +925,33 @@ fn custom_item_max_stack_size_splits_ender_pearls_into_16_16_8() {
     let counts: Vec<i32> = items.iter().map(LootItemStack::count).collect();
     assert_eq!(counts, vec![16, 16, 8]);
 }
+
+#[test]
+fn expanded_tag_entry_bypasses_entry_functions_matching_paper() {
+    let mut registry = LootRegistry::new();
+    registry.register_item_tag(id("single_gem"), vec![id("diamond")]);
+
+    let table = LootTable::builder()
+        .with_pool(
+            LootPool::builder()
+                .add(
+                    LootPoolEntryContainer::expand_tag(id("single_gem"))
+                        .apply(LootItemFunction::set_count(NumberProvider::uniform_between(
+                            2.0, 5.0,
+                        ))),
+                )
+                .build(),
+        )
+        .build();
+
+    let seed = 4242;
+    let mut ctx = make_context(empty_params(), seed, &registry);
+    let mut items = Vec::new();
+    table.get_random_items_raw(&mut ctx, &mut |s| items.push(s));
+
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].count(), 1);
+    // Entry function was bypassed -> 0 RNG calls consumed.
+    let mut oracle = LegacyRandomSource::new(seed);
+    assert_eq!(ctx.random_mut().next_long(), oracle.next_long());
+}

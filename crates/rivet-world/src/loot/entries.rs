@@ -451,6 +451,9 @@ impl LootPoolEntryContainer {
             } => {
                 if *expand {
                     // TagEntry.expandTag: expand each item in the tag as its own weighted entry.
+                    // In Paper 26.2, expandTag constructs anonymous EntryBase instances whose
+                    // createItemStack emits `new ItemStack(item)` directly without applying
+                    // `this.functions`.
                     let items: Vec<Identifier> = context
                         .resolver()
                         .get_item_tag(tag)
@@ -460,7 +463,7 @@ impl LootPoolEntryContainer {
                         output(ExpandedLootPoolEntry {
                             weight: *weight,
                             quality: *quality,
-                            functions,
+                            functions: &[],
                             kind: ExpandedEntryKind::Item(item),
                         });
                     }
