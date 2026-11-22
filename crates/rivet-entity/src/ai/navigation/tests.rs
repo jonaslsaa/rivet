@@ -816,3 +816,19 @@ fn ground_navigation_does_not_prematurely_cut_corner_around_wall() {
     // Mob has not passed (1,1,0) and cannot move directly on ground; must not skip node 0
     assert_eq!(nav.path.as_ref().map(Path::get_next_node_index), Some(0));
 }
+
+#[test]
+fn walk_collision_cache_distinguishes_aabbs_with_same_min_corner() {
+    use crate::ai::goal::Aabb;
+
+    let mut world = TestWorld::flat(0);
+    // Low ceiling block at (0, 3, 0)
+    world.set(0, 3, 0, BlockPathInfo::SOLID);
+
+    let mut eval = WalkNodeEvaluator::new();
+    let short_box = Aabb::new(0.2, 1.0, 0.2, 0.8, 2.8, 0.8);
+    let tall_box = Aabb::new(0.2, 1.0, 0.2, 0.8, 3.5, 0.8);
+
+    assert!(!eval.has_collisions(&world, short_box));
+    assert!(eval.has_collisions(&world, tall_box));
+}

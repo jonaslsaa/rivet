@@ -169,7 +169,7 @@ pub struct WalkNodeEvaluator {
     pub config: EvaluatorConfig,
     pub(crate) amphibious: bool,
     path_types_by_pos_cache: HashMap<i64, PathType>,
-    collision_cache: HashMap<i64, bool>,
+    collision_cache: HashMap<[u64; 6], bool>,
 }
 
 impl WalkNodeEvaluator {
@@ -203,13 +203,20 @@ impl WalkNodeEvaluator {
         pt
     }
 
-    fn has_collisions<W: PathWorldView + ?Sized>(&mut self, world: &W, aabb: Aabb) -> bool {
-        // Quantize AABB key by its integer min corner + dimensions for cache lookup
-        let key = block_pos_as_long(
-            mth::floor_d(aabb.min_x * 16.0),
-            mth::floor_d(aabb.min_y * 16.0),
-            mth::floor_d(aabb.min_z * 16.0),
-        );
+    fn aabb_cache_key(aabb: Aabb) -> [u64; 6] {
+        let norm = |v: f64| if v == 0.0 { 0.0_f64.to_bits() } else { v.to_bits() };
+        [
+            norm(aabb.min_x),
+            norm(aabb.min_y),
+            norm(aabb.min_z),
+            norm(aabb.max_x),
+            norm(aabb.max_y),
+            norm(aabb.max_z),
+        ]
+    }
+
+    pub(crate) fn has_collisions<W: PathWorldView + ?Sized>(&mut self, world: &W, aabb: Aabb) -> bool {
+        let key = Self::aabb_cache_key(aabb);
         if let Some(&cached) = self.collision_cache.get(&key) {
             return cached;
         }
