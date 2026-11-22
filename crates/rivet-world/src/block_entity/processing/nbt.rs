@@ -5,10 +5,18 @@
 //! - `net.minecraft.world.level.block.entity.BaseContainerBlockEntity`
 //! - `net.minecraft.world.ContainerHelper` (`saveAllItems` / `loadAllItems`)
 
-use rivet_nbt::{compound_tag::CompoundTag, list_tag::ListTag, tag::Tag};
+use rivet_nbt::{
+    compound_tag::CompoundTag, list_tag::ListTag, nbt_ops::NbtOps,
+    string_tag_visitor::StringTagVisitor, tag::Tag, tag_parser::TagParser,
+};
 use rivet_registry::Identifier;
 
 use crate::inventory::{ComponentMap, DEFAULT_ITEM_MAX_STACK_SIZE, InventoryItemStack, ItemId};
+
+/// Prefix used to store non-string NBT component tags losslessly inside
+/// `ComponentMap` (`BTreeMap<String, String>`) until #431's typed
+/// `DataComponentPatch` lands.
+const SNBT_COMPONENT_PREFIX: &str = "\0snbt:";
 
 /// Paper `net.minecraft.world.LockCode` seam for `BaseContainerBlockEntity`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -160,8 +168,15 @@ pub fn save_all_items(
         }
         if !stack.components().is_empty() {
             let mut comp = CompoundTag::new();
+            let parser = TagParser::create(NbtOps);
             for (k, v) in stack.components() {
-                comp.put_string(k, v);
+                if let Some(snbt) = v.strip_prefix(SNBT_COMPONENT_PREFIX)
+                    && let Ok(parsed) = parser.parse_fully(snbt)
+                {
+                    comp.put(k.clone(), parsed);
+                } else {
+                    comp.put_string(k, v);
+                }
             }
             entry.put("components".into(), Tag::Compound(comp));
         }
@@ -203,8 +218,17 @@ pub fn load_all_items(input: &CompoundTag, items: &mut [InventoryItemStack]) {
         if let Some(comp_tag) = entry.get_compound("components") {
             let mut map = ComponentMap::new();
             for (k, v) in &comp_tag.tags {
-                if let Tag::String(s) = v {
-                    map.insert(k.clone(), s.value.clone());
+                match v {
+                    Tag::String(s) => {
+                        map.insert(k.clone(), s.value.clone());
+                    }
+                    other => {
+                        let encoded = format!(
+                            "{SNBT_COMPONENT_PREFIX}{}",
+                            StringTagVisitor::to_string(other)
+                        );
+                        map.insert(k.clone(), encoded);
+                    }
                 }
             }
             stack = stack.with_components(map);

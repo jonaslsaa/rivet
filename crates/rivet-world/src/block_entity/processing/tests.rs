@@ -454,3 +454,60 @@ fn crafter_round_robin_disabled_slots_redstone_and_persistence() {
     assert_eq!(restored.get_item(0).get_count(), 2);
     assert_eq!(restored.get_item(4).get_count(), 1);
 }
+
+#[test]
+fn container_nbt_preserves_typed_item_components() {
+    use rivet_nbt::{int_tag::IntTag, list_tag::ListTag, tag::Tag};
+
+    let mut comp = CompoundTag::new();
+    comp.put_int("minecraft:damage", 12);
+    let mut ench = CompoundTag::new();
+    ench.put_int("minecraft:sharpness", 5);
+    comp.put("minecraft:enchantments".into(), Tag::Compound(ench));
+    let mut lore = ListTag::new();
+    lore.list.push(Tag::Int(IntTag::value_of(7)));
+    comp.put("minecraft:custom_list".into(), Tag::List(lore));
+    comp.put_string("minecraft:custom_name", "Excalibur");
+
+    let mut entry = CompoundTag::new();
+    entry.put_byte("Slot", 3);
+    entry.put_string("id", "minecraft:diamond_sword");
+    entry.put_int("count", 1);
+    entry.put("components".into(), Tag::Compound(comp));
+
+    let mut list = ListTag::new();
+    list.list.push(Tag::Compound(entry));
+    let mut input = CompoundTag::new();
+    input.put("Items".into(), Tag::List(list));
+
+    let mut chest = ChestBlockEntity::new();
+    chest.load_additional(&input);
+    let loaded = chest.get_item(3);
+    assert_eq!(loaded.item().name(), Some("minecraft:diamond_sword"));
+    assert_eq!(loaded.components().len(), 4);
+
+    let mut saved = CompoundTag::new();
+    chest.save_additional(&mut saved);
+    let saved_items = saved.get_list("Items").expect("Items saved");
+    let Tag::Compound(saved_entry) = &saved_items.list[0] else {
+        panic!("expected compound entry");
+    };
+    let saved_comp = saved_entry.get_compound("components").expect("components");
+    assert_eq!(saved_comp.get_int("minecraft:damage"), Some(12));
+    assert_eq!(
+        saved_comp
+            .get_compound("minecraft:enchantments")
+            .and_then(|e| e.get_int("minecraft:sharpness")),
+        Some(5)
+    );
+    assert_eq!(
+        saved_comp
+            .get_list("minecraft:custom_list")
+            .map(|l| l.list.len()),
+        Some(1)
+    );
+    assert_eq!(
+        saved_comp.get_string("minecraft:custom_name").map(String::as_str),
+        Some("Excalibur")
+    );
+}
