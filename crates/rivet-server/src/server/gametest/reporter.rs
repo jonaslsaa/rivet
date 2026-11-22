@@ -238,6 +238,13 @@ fn format_seconds(ms: i64) -> String {
     format!("{}", (ms as f64) / 1000.0)
 }
 
+fn is_valid_xml_1_0_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x09 | 0x0A | 0x0D | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF
+    )
+}
+
 fn escape_xml_attr(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -247,7 +254,8 @@ fn escape_xml_attr(s: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
-            other => out.push(other),
+            other if is_valid_xml_1_0_char(other) => out.push(other),
+            _ => {}
         }
     }
     out

@@ -1218,7 +1218,11 @@ fn late_sequence_anchors_delays_to_parent_tick() {
         Ok(())
     });
 
-    let infos = vec![make_info(&registries, "late_seq", RetryOptions::no_retries())];
+    let infos = vec![make_info(
+        &registries,
+        "late_seq",
+        RetryOptions::no_retries(),
+    )];
     let mut runner = GameTestRunner::new(infos, registries, GameTestRunnerConfig::default());
     let transcript = runner.run_to_completion(&functions, 50);
 
@@ -1375,4 +1379,28 @@ fn deterministic_grid_spawner_skips_preserved_positions_to_avoid_collisions() {
         p1, p2,
         "fresh grid allocation must skip slots already occupied by preserved positions"
     );
+}
+
+#[test]
+fn junit_xml_strips_illegal_xml_1_0_control_characters() {
+    use rivet_registry::core::Rotation;
+    let mut reporter = JUnitLikeTestReporter::new("2026-01-01T00:00:00Z");
+    reporter.on_test_failed(&GameTestReportEntry {
+        id: Identifier::with_default_namespace("ctrl_test"),
+        structure: Identifier::with_default_namespace("empty"),
+        required: true,
+        rotation: Rotation::None,
+        test_block_pos: None,
+        run_time_ms: 10,
+        tick_count: 1,
+        error: Some(GameTestException::assert(
+            "bad\u{0000}null\u{001B}esc\tand\nok",
+            1,
+        )),
+    });
+    reporter.finish();
+    let xml = reporter.to_xml();
+    assert!(!xml.contains('\u{0000}'), "NUL must be stripped from XML");
+    assert!(!xml.contains('\u{001B}'), "ESC must be stripped from XML");
+    assert!(xml.contains("badnullesc\tand\nok"));
 }

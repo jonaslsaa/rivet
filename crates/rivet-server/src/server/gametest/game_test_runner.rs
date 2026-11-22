@@ -184,22 +184,24 @@ impl StructureSpawner for DeterministicGridSpawner {
     }
 
     fn spawn_structure(&mut self, info: &mut GameTestInfo) -> Option<BlockPos> {
-        let pos = info.test_block_pos().unwrap_or_else(|| loop {
-            let idx = self.next_index;
-            self.next_index = self.next_index.wrapping_add(1);
-            let col = idx % self.tests_per_row;
-            let row = idx / self.tests_per_row;
-            let candidate = BlockPos::new(
-                self.origin
-                    .get_x()
-                    .wrapping_add(col.wrapping_mul(self.stride)),
-                self.origin.get_y(),
-                self.origin
-                    .get_z()
-                    .wrapping_add(row.wrapping_mul(self.stride)),
-            );
-            if !self.occupied_in_batch.contains(&candidate) {
-                break candidate;
+        let pos = info.test_block_pos().unwrap_or_else(|| {
+            loop {
+                let idx = self.next_index;
+                self.next_index = self.next_index.wrapping_add(1);
+                let col = idx % self.tests_per_row;
+                let row = idx / self.tests_per_row;
+                let candidate = BlockPos::new(
+                    self.origin
+                        .get_x()
+                        .wrapping_add(col.wrapping_mul(self.stride)),
+                    self.origin.get_y(),
+                    self.origin
+                        .get_z()
+                        .wrapping_add(row.wrapping_mul(self.stride)),
+                );
+                if !self.occupied_in_batch.contains(&candidate) {
+                    break candidate;
+                }
             }
         });
         if !self.occupied_in_batch.contains(&pos) {
