@@ -790,3 +790,29 @@ fn fly_node_evaluator_checks_full_mob_bounding_box() {
     // Clear cell at (8, 5, 8) is Open
     assert_eq!(eval.get_path_type_of_mob(&mut ctx, &mob, 8, 5, 8), PathType::Open);
 }
+
+#[test]
+fn ground_navigation_does_not_prematurely_cut_corner_around_wall() {
+    let mut world = TestWorld::flat(0);
+    // Wall corner at (1, 1, 1)
+    world.set(1, 1, 1, BlockPathInfo::SOLID);
+
+    // Path goes (0,1,0) -> (1,1,0) -> (1,1,2) around a corner; mob is at (0.5, 1.0, 1.4),
+    // which is closer to next node? No, mob at (0.2, 1.0, 1.2) is farther than 0.5 sqr from
+    // current node (1.5, 1.0, 0.5) and closer to current than next (2.5, 1.0, 2.5),
+    // yet previously had positive projection onto segment (1,1,0)->(2,1,2).
+    let mut n0 = Node::new(1, 1, 0);
+    n0.path_type = PathType::Walkable;
+    let mut n1 = Node::new(1, 1, 2);
+    n1.path_type = PathType::Walkable;
+    let path = Path::new(vec![n0, n1], BlockPos::new(1, 1, 2), true);
+
+    let mut mob = MobPathingState::new(Vec3::new(0.6, 1.0, 1.3), 0.6, 1.8);
+    let mut nav = PathNavigation::ground(64);
+    let mut mc = MoveControl::new();
+    assert!(nav.move_to_path(Some(path), 1.0, &mob, &world, 0));
+    nav.tick(&mut mob, &world, &mut mc, 1);
+
+    // Mob has not passed (1,1,0) and cannot move directly on ground; must not skip node 0
+    assert_eq!(nav.path.as_ref().map(Path::get_next_node_index), Some(0));
+}
