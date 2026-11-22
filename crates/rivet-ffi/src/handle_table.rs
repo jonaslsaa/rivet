@@ -66,7 +66,8 @@ impl<T> GenerationalTable<T> {
             return Ok((slot_idx, entry.generation));
         }
 
-        let next_slot = u32::try_from(self.slots.len()).map_err(|_| HandleInsertError::CapacityExceeded)?;
+        let next_slot =
+            u32::try_from(self.slots.len()).map_err(|_| HandleInsertError::CapacityExceeded)?;
         if next_slot >= self.max_slots {
             return Err(HandleInsertError::CapacityExceeded);
         }
