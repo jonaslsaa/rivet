@@ -1,0 +1,792 @@
+//! Concrete JSON backing types for Spottedleaf's DataConverter.
+//!
+//! Mirrors `ca.spottedleaf.dataconverter.types.json.*` from Paper 26.2.
+
+pub mod json_list_type;
+pub mod json_map_type;
+pub mod json_type_util;
+
+pub use json_list_type::JsonListType;
+pub use json_map_type::JsonMapType;
+pub use json_type_util::JsonTypeUtil;
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use indexmap::IndexMap;
+use rivet_serialization::float_format::{java_double_to_string, java_float_to_string};
+use rivet_serialization::number::Number;
+use serde_json::{Map as JsonObject, Number as JsonNumber, Value as JsonValue};
+
+pub(crate) type SharedJsonArray = Rc<RefCell<Vec<JsonNode>>>;
+pub(crate) type SharedJsonObject = Rc<RefCell<IndexMap<String, JsonNode>>>;
+
+/// Internal reference-counted JSON representation that preserves Java/Gson
+/// nested-view aliasing and exact boxed `Number` types.
+#[derive(Debug, Clone)]
+pub(crate) enum JsonNode {
+    Null,
+    Bool(bool),
+    /// Typed numeric primitive (e.g. written via `set_byte`, `set_int`, etc.).
+    Number(Number),
+    /// Untyped parsed JSON number (analogous to Gson's `LazilyParsedNumber`).
+    ParsedNumber(JsonNumber),
+    String(String),
+    Array(SharedJsonArray),
+    Object(SharedJsonObject),
+}
+
+impl JsonNode {
+    fn exact_i64_value(&self) -> Option<i64> {
+        match self {
+            Self::Number(Number::Byte(v)) => Some(i64::from(*v)),
+            Self::Number(Number::Short(v)) => Some(i64::from(*v)),
+            Self::Number(Number::Int(v)) => Some(i64::from(*v)),
+            Self::Number(Number::Long(v)) => Some(*v),
+            Self::ParsedNumber(n) => n.as_i64().or_else(|| parse_decimal_exact_i64(n.as_str())),
+            _ => None,
+        }
+    }
+
+    fn numeric_double_value(&self) -> Option<f64> {
+        match self {
+            Self::Number(n) => Some(n.double_value()),
+            Self::ParsedNumber(n) => Some(parsed_number_as_f64(n)),
+            _ => None,
+        }
+    }
+}
+
+impl PartialEq for JsonNode {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Null, Self::Null) => true,
+            (Self::Bool(a), Self::Bool(b)) => a == b,
+            (Self::String(a), Self::String(b)) => a == b,
+            (Self::Array(a), Self::Array(b)) => a == b,
+            (Self::Object(a), Self::Object(b)) => a == b,
+            (Self::Number(_) | Self::ParsedNumber(_), Self::Number(_) | Self::ParsedNumber(_)) => {
+                if let (Some(ai), Some(bi)) = (self.exact_i64_value(), other.exact_i64_value()) {
+                    return ai == bi;
+                }
+                let a = self.numeric_double_value().unwrap_or(0.0);
+                let b = other.numeric_double_value().unwrap_or(0.0);
+                a == b || (a.is_nan() && b.is_nan())
+            }
+            _ => false,
+        }
+    }
+}
+
+impl JsonNode {
+    pub(crate) fn deep_copy(&self) -> Self {
+        match self {
+            Self::Null => Self::Null,
+            Self::Bool(b) => Self::Bool(*b),
+            Self::Number(n) => Self::Number(*n),
+            Self::ParsedNumber(n) => Self::ParsedNumber(n.clone()),
+            Self::String(s) => Self::String(s.clone()),
+            Self::Array(arr) => {
+                let copy = arr.borrow().iter().map(Self::deep_copy).collect();
+                Self::Array(Rc::new(RefCell::new(copy)))
+            }
+            Self::Object(obj) => {
+                let mut copy = IndexMap::with_capacity(obj.borrow().len());
+                for (k, v) in obj.borrow().iter() {
+                    copy.insert(k.clone(), v.deep_copy());
+                }
+                Self::Object(Rc::new(RefCell::new(copy)))
+            }
+        }
+    }
+
+    pub(crate) fn from_value(value: &JsonValue) -> Self {
+        match value {
+            JsonValue::Null => Self::Null,
+            JsonValue::Bool(b) => Self::Bool(*b),
+            JsonValue::Number(n) => Self::ParsedNumber(n.clone()),
+            JsonValue::String(s) => Self::String(s.clone()),
+            JsonValue::Array(arr) => Self::Array(from_json_array(arr)),
+            JsonValue::Object(obj) => Self::Object(from_json_object(obj)),
+        }
+    }
+
+    pub(crate) fn to_value(&self) -> JsonValue {
+        match self {
+            Self::Null => JsonValue::Null,
+            Self::Bool(b) => JsonValue::Bool(*b),
+            Self::Number(n) => number_to_json_value(*n),
+            Self::ParsedNumber(n) => JsonValue::Number(n.clone()),
+            Self::String(s) => JsonValue::String(s.clone()),
+            Self::Array(arr) => JsonValue::Array(to_json_array(arr)),
+            Self::Object(obj) => JsonValue::Object(to_json_object(obj)),
+        }
+    }
+
+    pub(crate) fn number_as_string(&self) -> Option<String> {
+        match self {
+            Self::Number(n) => Some(number_to_string(*n)),
+            Self::ParsedNumber(n) => Some(n.to_string()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_byte(&self, compressed: bool) -> Option<i8> {
+        match self {
+            Self::Number(n) => Some(n.byte_value()),
+            Self::ParsedNumber(n) => Some(parse_decimal_trunc_wrapping_i64(n.as_str()) as i8),
+            Self::Bool(b) => Some(if *b { 1 } else { 0 }),
+            Self::String(s) if compressed => s.parse::<i32>().ok().map(|v| v as i8),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_short(&self, compressed: bool) -> Option<i16> {
+        match self {
+            Self::Number(n) => Some(n.short_value()),
+            Self::ParsedNumber(n) => Some(parse_decimal_trunc_wrapping_i64(n.as_str()) as i16),
+            Self::Bool(b) => Some(if *b { 1 } else { 0 }),
+            Self::String(s) if compressed => s.parse::<i32>().ok().map(|v| v as i16),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_int(&self, compressed: bool) -> Option<i32> {
+        match self {
+            Self::Number(n) => Some(n.int_value()),
+            Self::ParsedNumber(n) => Some(parse_decimal_trunc_wrapping_i64(n.as_str()) as i32),
+            Self::Bool(b) => Some(if *b { 1 } else { 0 }),
+            Self::String(s) if compressed => s.parse::<i32>().ok(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_long(&self, compressed: bool) -> Option<i64> {
+        match self {
+            Self::Number(n) => Some(n.long_value()),
+            Self::ParsedNumber(n) => Some(parse_decimal_trunc_wrapping_i64(n.as_str())),
+            Self::Bool(b) => Some(if *b { 1 } else { 0 }),
+            Self::String(s) if compressed => s.parse::<i32>().ok().map(i64::from),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_float(&self, compressed: bool) -> Option<f32> {
+        match self {
+            Self::Number(n) => Some(n.float_value()),
+            Self::ParsedNumber(n) => Some(
+                n.as_str()
+                    .parse::<f32>()
+                    .unwrap_or_else(|_| parsed_number_as_f64(n) as f32),
+            ),
+            Self::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+            Self::String(s) if compressed => s.parse::<i32>().ok().map(|v| v as f32),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_double(&self, compressed: bool) -> Option<f64> {
+        match self {
+            Self::Number(n) => Some(n.double_value()),
+            Self::ParsedNumber(n) => Some(parsed_number_as_f64(n)),
+            Self::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+            Self::String(s) if compressed => s.parse::<i32>().ok().map(f64::from),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) fn from_json_array(arr: &[JsonValue]) -> SharedJsonArray {
+    Rc::new(RefCell::new(arr.iter().map(JsonNode::from_value).collect()))
+}
+
+pub(crate) fn to_json_array(arr: &SharedJsonArray) -> Vec<JsonValue> {
+    arr.borrow().iter().map(JsonNode::to_value).collect()
+}
+
+pub(crate) fn from_json_object(obj: &JsonObject<String, JsonValue>) -> SharedJsonObject {
+    let mut map = IndexMap::with_capacity(obj.len());
+    for (k, v) in obj {
+        map.insert(k.clone(), JsonNode::from_value(v));
+    }
+    Rc::new(RefCell::new(map))
+}
+
+pub(crate) fn to_json_object(obj: &SharedJsonObject) -> JsonObject<String, JsonValue> {
+    let mut map = JsonObject::with_capacity(obj.borrow().len());
+    for (k, v) in obj.borrow().iter() {
+        map.insert(k.clone(), v.to_value());
+    }
+    map
+}
+
+pub(crate) fn number_to_json_value(n: Number) -> JsonValue {
+    match n {
+        Number::Byte(v) => JsonValue::Number(JsonNumber::from(v)),
+        Number::Short(v) => JsonValue::Number(JsonNumber::from(v)),
+        Number::Int(v) => JsonValue::Number(JsonNumber::from(v)),
+        Number::Long(v) => JsonValue::Number(JsonNumber::from(v)),
+        Number::Float(v) => {
+            if !v.is_finite() {
+                return JsonValue::Null;
+            }
+            JsonValue::Number(JsonNumber::from_string_unchecked(java_float_to_string(v)))
+        }
+        Number::Double(v) => {
+            if !v.is_finite() {
+                return JsonValue::Null;
+            }
+            JsonValue::Number(JsonNumber::from_string_unchecked(java_double_to_string(v)))
+        }
+    }
+}
+
+pub(crate) fn number_to_string(n: Number) -> String {
+    match n {
+        Number::Byte(v) => v.to_string(),
+        Number::Short(v) => v.to_string(),
+        Number::Int(v) => v.to_string(),
+        Number::Long(v) => v.to_string(),
+        Number::Float(v) => java_float_to_string(v),
+        Number::Double(v) => java_double_to_string(v),
+    }
+}
+
+/// Parses a JSON decimal/scientific number string as an exact `i64`, matching
+/// Java's `BigDecimal.longValueExact()`. Returns `None` if the value has a
+/// non-zero fractional part or falls outside `[i64::MIN, i64::MAX]`.
+pub(crate) fn parse_decimal_exact_i64(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (neg, rest) = if let Some(r) = s.strip_prefix('-') {
+        (true, r)
+    } else if let Some(r) = s.strip_prefix('+') {
+        (false, r)
+    } else {
+        (false, s)
+    };
+
+    let (mantissa, exp_str) = match rest.find(['e', 'E']) {
+        Some(idx) => (&rest[..idx], Some(&rest[idx + 1..])),
+        None => (rest, None),
+    };
+
+    let (int_part, frac_part) = match mantissa.find('.') {
+        Some(idx) => (&mantissa[..idx], &mantissa[idx + 1..]),
+        None => (mantissa, ""),
+    };
+
+    if int_part.is_empty() && frac_part.is_empty() {
+        return None;
+    }
+    if !int_part.bytes().all(|b| b.is_ascii_digit())
+        || !frac_part.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+
+    let mut digits = String::with_capacity(int_part.len() + frac_part.len());
+    digits.push_str(int_part);
+    digits.push_str(frac_part);
+    let trimmed = digits.trim_start_matches('0');
+    if trimmed.is_empty() {
+        return Some(0);
+    }
+
+    let exp: i64 = match exp_str {
+        Some(es) => es.parse::<i64>().ok()?,
+        None => 0,
+    };
+    let frac_len = i64::try_from(frac_part.len()).ok()?;
+    let scale_exp = exp.checked_sub(frac_len)?;
+
+    let (int_digits, trailing_zeros): (&str, usize) = if scale_exp < 0 {
+        let shift = usize::try_from(-scale_exp).ok()?;
+        if trimmed.len() <= shift {
+            return None;
+        }
+        let split = trimmed.len() - shift;
+        if trimmed.as_bytes()[split..].iter().any(|&b| b != b'0') {
+            return None;
+        }
+        (&trimmed[..split], 0)
+    } else {
+        let tz = usize::try_from(scale_exp).ok()?;
+        (trimmed, tz)
+    };
+
+    // i64::MIN has 19 decimal digits (9223372036854775808).
+    if int_digits.len().checked_add(trailing_zeros)? > 19 {
+        return None;
+    }
+
+    let mut val: u64 = 0;
+    for b in int_digits.bytes() {
+        val = val * 10 + u64::from(b - b'0');
+    }
+    for _ in 0..trailing_zeros {
+        val = val.checked_mul(10)?;
+    }
+
+    if neg {
+        let max_pos = i64::MAX as u64;
+        if val <= max_pos {
+            Some(-(val as i64))
+        } else if val == max_pos + 1 {
+            Some(i64::MIN)
+        } else {
+            None
+        }
+    } else if val <= i64::MAX as u64 {
+        Some(val as i64)
+    } else {
+        None
+    }
+}
+
+/// Converts a parsed `serde_json::Number` to `Number`, matching Paper's
+/// `JsonTypeUtil.convertBDToGeneric` (narrows exact integers to smallest of
+/// `Byte`/`Short`/`Int`/`Long`; floats to `Float` if lossless, else `Double`).
+pub(crate) fn convert_parsed_number_to_generic_number(n: &JsonNumber) -> Number {
+    if let Some(l) = n.as_i64().or_else(|| parse_decimal_exact_i64(n.as_str())) {
+        let b = l as i8;
+        if i64::from(b) == l {
+            return Number::Byte(b);
+        }
+        let s = l as i16;
+        if i64::from(s) == l {
+            return Number::Short(s);
+        }
+        let i = l as i32;
+        if i64::from(i) == l {
+            return Number::Int(i);
+        }
+        return Number::Long(l);
+    }
+    let d = parsed_number_as_f64(n);
+    let f = d as f32;
+    if f64::from(f) == d {
+        Number::Float(f)
+    } else {
+        Number::Double(d)
+    }
+}
+
+/// Converts a `Number` to its corresponding `Generic` variant.
+pub(crate) fn number_to_generic(
+    n: Number,
+) -> crate::server::dataconverter::types::generic::Generic {
+    use crate::server::dataconverter::types::generic::Generic;
+    match n {
+        Number::Byte(v) => Generic::Byte(v),
+        Number::Short(v) => Generic::Short(v),
+        Number::Int(v) => Generic::Int(v),
+        Number::Long(v) => Generic::Long(v),
+        Number::Float(v) => Generic::Float(v),
+        Number::Double(v) => Generic::Double(v),
+    }
+}
+
+/// Parses a JSON decimal/scientific number string by truncating toward zero and
+/// returning the low 64 two's-complement bits, matching Gson's
+/// `LazilyParsedNumber` -> `BigDecimal.longValue()` / `intValue()` semantics.
+pub(crate) fn parse_decimal_trunc_wrapping_i64(s: &str) -> i64 {
+    let s = s.trim();
+    if s.is_empty() {
+        return 0;
+    }
+    let (neg, rest) = if let Some(r) = s.strip_prefix('-') {
+        (true, r)
+    } else if let Some(r) = s.strip_prefix('+') {
+        (false, r)
+    } else {
+        (false, s)
+    };
+
+    let (mantissa, exp_str) = match rest.find(['e', 'E']) {
+        Some(idx) => (&rest[..idx], Some(&rest[idx + 1..])),
+        None => (rest, None),
+    };
+
+    let (int_part, frac_part) = match mantissa.find('.') {
+        Some(idx) => (&mantissa[..idx], &mantissa[idx + 1..]),
+        None => (mantissa, ""),
+    };
+
+    if !int_part.bytes().all(|b| b.is_ascii_digit())
+        || !frac_part.bytes().all(|b| b.is_ascii_digit())
+    {
+        return 0;
+    }
+
+    let mut digits = String::with_capacity(int_part.len() + frac_part.len());
+    digits.push_str(int_part);
+    digits.push_str(frac_part);
+    let trimmed = digits.trim_start_matches('0');
+    if trimmed.is_empty() {
+        return 0;
+    }
+
+    let exp: i128 = match exp_str {
+        Some(es) => match es.parse::<i128>() {
+            Ok(v) => v,
+            Err(_) => return 0,
+        },
+        None => 0,
+    };
+    let scale_exp = exp - (frac_part.len() as i128);
+
+    let (int_digits, trailing_zeros): (&str, u64) = if scale_exp < 0 {
+        let Ok(shift) = usize::try_from(-scale_exp) else {
+            return 0;
+        };
+        if shift >= trimmed.len() {
+            return 0;
+        }
+        (&trimmed[..trimmed.len() - shift], 0)
+    } else {
+        // 10^64 is divisible by 2^64, so any >= 64 trailing zeros yields 0 mod 2^64.
+        if scale_exp >= 64 {
+            return 0;
+        }
+        (trimmed, scale_exp as u64)
+    };
+
+    let mut acc: u64 = 0;
+    for b in int_digits.bytes() {
+        acc = acc.wrapping_mul(10).wrapping_add(u64::from(b - b'0'));
+    }
+    for _ in 0..trailing_zeros {
+        acc = acc.wrapping_mul(10);
+    }
+
+    if neg {
+        acc.wrapping_neg() as i64
+    } else {
+        acc as i64
+    }
+}
+
+/// Parses a `serde_json::Number` to `f64`, falling back to `str::parse::<f64>()`
+/// so overflowing values like `1e400` become `+/-inf` as in Java `Double.parseDouble`.
+fn parsed_number_as_f64(n: &JsonNumber) -> f64 {
+    n.as_f64()
+        .unwrap_or_else(|| n.as_str().parse::<f64>().unwrap_or(0.0))
+}
+
+/// Converts a parsed `serde_json::Number` to `Number` for `get_number()` reads.
+pub(crate) fn parsed_number_to_number(n: &JsonNumber) -> Number {
+    if let Some(l) = n.as_i64().or_else(|| parse_decimal_exact_i64(n.as_str())) {
+        Number::Long(l)
+    } else {
+        Number::Double(parsed_number_as_f64(n))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::dataconverter::types::Types;
+    use crate::server::dataconverter::types::generic::Generic;
+    use crate::server::dataconverter::types::list_type::ListType;
+    use crate::server::dataconverter::types::map_type::MapType;
+    use crate::server::dataconverter::types::object_type::ObjectType;
+    use crate::server::dataconverter::types::type_util::TypeUtil;
+
+    #[test]
+    fn json_view_aliasing_and_deep_copy_independence() {
+        let mut root = JsonMapType::new(false);
+        {
+            let mut sub = root.get_or_create_map("sub");
+            sub.set_int("v", 1);
+            let mut arr = sub.get_or_create_list("arr", ObjectType::Map);
+            arr.add_map(Box::new(JsonMapType::new(false)));
+            arr.get_map(0).set_string("k", "orig".to_owned());
+        }
+
+        // Aliasing through get_map / get_generic
+        root.get_map("sub").unwrap().set_int("v", 2);
+        assert_eq!(root.get_map("sub").unwrap().get_int("v"), 2);
+        if let Some(Generic::Map(mut m)) = root.get_generic("sub") {
+            m.set_int("v", 3);
+        }
+        assert_eq!(root.get_map("sub").unwrap().get_int("v"), 3);
+
+        // Deep copy does not alias original
+        let copy = root.copy();
+        root.get_map("sub").unwrap().set_int("v", 100);
+        assert_eq!(copy.get_map("sub").unwrap().get_int("v"), 3);
+        assert_eq!(
+            copy.get_map("sub")
+                .unwrap()
+                .get_list_unchecked("arr")
+                .unwrap()
+                .get_map(0)
+                .get_string("k")
+                .as_deref(),
+            Some("orig")
+        );
+    }
+
+    #[test]
+    fn json_compressed_vs_uncompressed_string_numbers() {
+        let mut uncompressed = JsonMapType::new(false);
+        uncompressed.set_string("num", "123".to_owned());
+        assert_eq!(uncompressed.get_number("num"), None);
+        assert_eq!(uncompressed.get_int_or("num", -1), -1);
+        assert!(!uncompressed.has_key_of_type("num", ObjectType::Number));
+
+        let mut compressed = JsonMapType::new(true);
+        compressed.set_string("num", "123".to_owned());
+        compressed.set_string("nonnum", "abc".to_owned());
+        assert_eq!(compressed.get_number("num"), Some(Number::Int(123)));
+        assert_eq!(compressed.get_int("num"), 123);
+        assert_eq!(compressed.get_number("nonnum"), None);
+
+        // Deep copy preserves compressed flag.
+        let copy = compressed.copy();
+        assert_eq!(copy.get_int("num"), 123);
+
+        // Compressed JsonListType also parses integer strings.
+        let mut clist = JsonListType::new(true);
+        clist.add_string("456".to_owned());
+        assert_eq!(clist.get_int(0), 456);
+        assert_eq!(clist.get_number(0), Number::Int(456));
+
+        let mut ulist = JsonListType::new(false);
+        ulist.add_string("456".to_owned());
+        assert_eq!(ulist.get_int_or(0, -5), -5);
+    }
+
+    #[test]
+    fn json_booleans_numbers_and_null_handling() {
+        let mut map = JsonMapType::new(false);
+        map.set_boolean("b_true", true);
+        map.set_boolean("b_false", false);
+        map.set_int("zero", 0);
+        map.set_int("nonzero", 5);
+
+        assert!(map.get_boolean("b_true"));
+        assert!(!map.get_boolean("b_false"));
+        assert!(!map.get_boolean("zero"));
+        assert!(map.get_boolean("nonzero"));
+        assert_eq!(map.get_number("b_true"), Some(Number::Byte(1)));
+        assert_eq!(map.get_number("b_false"), Some(Number::Byte(0)));
+        assert!(map.has_key_of_type("b_true", ObjectType::Byte));
+        assert!(map.has_key_of_type("b_true", ObjectType::Number));
+        assert!(matches!(
+            map.get_generic("b_true"),
+            Some(Generic::Bool(true))
+        ));
+
+        // JSON null handling via JsonTypeUtil
+        assert!(Types::JSON.base_to_generic(&JsonValue::Null).is_none());
+        assert_eq!(Types::JSON.generic_to_base(None), JsonValue::Null);
+
+        let mut obj = JsonObject::new();
+        obj.insert("null_key".to_owned(), JsonValue::Null);
+        obj.insert("int_key".to_owned(), JsonValue::from(7));
+        let wrapped = JsonMapType::from_json(&obj, false);
+        assert!(!wrapped.has_key("missing"));
+        assert!(wrapped.get_generic("null_key").is_none());
+        assert_eq!(wrapped.get_int("int_key"), 7);
+    }
+
+    #[test]
+    fn json_parsed_number_narrowing() {
+        let b = serde_json::from_str::<JsonValue>("12").unwrap();
+        assert!(matches!(
+            Types::JSON.base_to_generic(&b),
+            Some(Generic::Byte(12))
+        ));
+        let s = serde_json::from_str::<JsonValue>("1000").unwrap();
+        assert!(matches!(
+            Types::JSON.base_to_generic(&s),
+            Some(Generic::Short(1000))
+        ));
+        let i = serde_json::from_str::<JsonValue>("100000").unwrap();
+        assert!(matches!(
+            Types::JSON.base_to_generic(&i),
+            Some(Generic::Int(100_000))
+        ));
+        let l = serde_json::from_str::<JsonValue>("5000000000").unwrap();
+        assert!(matches!(
+            Types::JSON.base_to_generic(&l),
+            Some(Generic::Long(5_000_000_000))
+        ));
+        let f = serde_json::from_str::<JsonValue>("1.5").unwrap();
+        assert!(matches!(
+            Types::JSON.base_to_generic(&f),
+            Some(Generic::Float(v)) if (v - 1.5).abs() < f32::EPSILON
+        ));
+        let d = serde_json::from_str::<JsonValue>("1.123456789012345").unwrap();
+        assert!(matches!(
+            Types::JSON.base_to_generic(&d),
+            Some(Generic::Double(_))
+        ));
+
+        // Exact decimal integer above 2^53 must not round through f64.
+        let exact_big = serde_json::from_str::<JsonValue>("9007199254740993.0").unwrap();
+        assert!(matches!(
+            Types::JSON.base_to_generic(&exact_big),
+            Some(Generic::Long(9_007_199_254_740_993))
+        ));
+        let exact_min = serde_json::from_str::<JsonValue>("-9223372036854775808.00").unwrap();
+        assert!(matches!(
+            Types::JSON.base_to_generic(&exact_min),
+            Some(Generic::Long(i64::MIN))
+        ));
+        let sci_int = serde_json::from_str::<JsonValue>("1.5e2").unwrap();
+        assert!(matches!(
+            Types::JSON.base_to_generic(&sci_int),
+            Some(Generic::Short(150))
+        ));
+        let neg_zero = serde_json::from_str::<JsonValue>("-0.0").unwrap();
+        assert!(matches!(
+            Types::JSON.base_to_generic(&neg_zero),
+            Some(Generic::Byte(0))
+        ));
+    }
+
+    #[test]
+    fn json_parsed_decimal_wrapping_matches_gson() {
+        let obj: JsonObject<String, JsonValue> = serde_json::from_str(
+            r#"{"i": 2147483648.0, "i_frac": 2147483648.9, "neg": -2147483649.0, "b": 256.5, "l": 9223372036854775808.0}"#,
+        )
+        .unwrap();
+        let map = JsonMapType::from_json(&obj, false);
+        assert_eq!(map.get_int("i"), i32::MIN);
+        assert_eq!(map.get_int("i_frac"), i32::MIN);
+        assert_eq!(map.get_int("neg"), i32::MAX);
+        assert_eq!(map.get_byte("b"), 0);
+        assert!(!map.get_boolean("b"));
+        assert_eq!(map.get_long("l"), i64::MIN);
+
+        let arr: Vec<JsonValue> =
+            serde_json::from_str(r#"[2147483648.0, -2147483649.0, 256.5, 9223372036854775808.0]"#)
+                .unwrap();
+        let list = JsonListType::from_json(&arr, false);
+        assert_eq!(list.get_int(0), i32::MIN);
+        assert_eq!(list.get_int(1), i32::MAX);
+        assert_eq!(list.get_byte(2), 0);
+        assert_eq!(list.get_long(3), i64::MIN);
+    }
+
+    #[test]
+    fn json_float_double_rendering_matches_java() {
+        let mut map = JsonMapType::new(false);
+        map.set_float("f", 0.05_f32);
+        map.set_float("whole_f", 1.0_f32);
+        map.set_double("whole_d", 2.0_f64);
+
+        let serialized = serde_json::to_string(&map.get_json()).unwrap();
+        assert_eq!(serialized, r#"{"f":0.05,"whole_f":1.0,"whole_d":2.0}"#);
+
+        // Forced string reads (JsonPrimitive.getAsString -> Number.toString) preserve Java float/double formatting.
+        assert_eq!(map.get_string_or("f", "fallback".to_owned()), "fallback");
+        let mut compressed = JsonMapType::new(true);
+        compressed.set_float("f", 0.05_f32);
+        compressed.set_float("whole_f", 1.0_f32);
+        compressed.set_double("whole_d", 2.0_f64);
+        assert_eq!(compressed.get_string("f").as_deref(), Some("0.05"));
+        assert_eq!(compressed.get_string("whole_f").as_deref(), Some("1.0"));
+        assert_eq!(compressed.get_string("whole_d").as_deref(), Some("2.0"));
+
+        let mut list = JsonListType::new(true);
+        list.add_float(0.05_f32);
+        list.add_float(1.0_f32);
+        list.add_double(2.0_f64);
+        assert_eq!(list.get_string(0), "0.05");
+        assert_eq!(list.get_string(1), "1.0");
+        assert_eq!(list.get_string(2), "2.0");
+    }
+
+    #[test]
+    fn json_container_numeric_equality_matches_gson() {
+        let mut m_int = JsonMapType::new(false);
+        m_int.set_int("x", 1);
+        m_int.set_long("big", 9_007_199_254_740_993);
+
+        let mut m_long = JsonMapType::new(false);
+        m_long.set_long("x", 1);
+        m_long.set_long("big", 9_007_199_254_740_993);
+
+        let mut m_double = JsonMapType::new(false);
+        m_double.set_double("x", 1.0);
+        m_double.set_long("big", 9_007_199_254_740_993);
+
+        let parsed_obj: JsonObject<String, JsonValue> =
+            serde_json::from_str(r#"{"x": 1, "big": 9007199254740993.0}"#).unwrap();
+        let m_parsed = JsonMapType::from_json(&parsed_obj, false);
+
+        assert_eq!(m_int, m_long);
+        assert_eq!(m_int, m_double);
+        assert_eq!(m_int, m_parsed);
+
+        let mut m_diff = JsonMapType::new(false);
+        m_diff.set_int("x", 1);
+        m_diff.set_long("big", 9_007_199_254_740_992);
+        assert_ne!(m_int, m_diff);
+
+        let mut l1 = JsonListType::new(false);
+        l1.add_int(1);
+        l1.add_double(f64::NAN);
+        let mut l2 = JsonListType::new(false);
+        l2.add_long(1);
+        l2.add_float(f32::NAN);
+        assert_eq!(l1, l2);
+
+        let parsed_arr: Vec<JsonValue> = serde_json::from_str(r#"[1, 2.5]"#).unwrap();
+        let l_parsed = JsonListType::from_json(&parsed_arr, false);
+        let mut l_typed = JsonListType::new(false);
+        l_typed.add_byte(1);
+        l_typed.add_float(2.5);
+        assert_eq!(l_parsed, l_typed);
+
+        let parsed_inf: serde_json::Map<String, JsonValue> =
+            serde_json::from_str(r#"{"v": 1e400, "neg": -1e400}"#).unwrap();
+        let parsed_zero: serde_json::Map<String, JsonValue> =
+            serde_json::from_str(r#"{"v": 0, "neg": 0}"#).unwrap();
+        let m_inf = JsonMapType::from_json(&parsed_inf, false);
+        let m_zero = JsonMapType::from_json(&parsed_zero, false);
+        assert_ne!(m_inf, m_zero);
+        assert_eq!(m_inf.get_double("v"), f64::INFINITY);
+        assert_eq!(m_inf.get_double("neg"), f64::NEG_INFINITY);
+
+        let mut m_typed_inf = JsonMapType::new(false);
+        m_typed_inf.set_double("v", f64::INFINITY);
+        m_typed_inf.set_double("neg", f64::NEG_INFINITY);
+        assert_eq!(m_inf, m_typed_inf);
+    }
+
+    #[test]
+    #[should_panic]
+    fn json_list_strict_wrong_type_panics() {
+        let mut list = JsonListType::new(false);
+        list.add_string("abc".to_owned());
+        let _ = list.get_number(0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn json_list_primitive_array_unsupported() {
+        let mut list = JsonListType::new(false);
+        list.add_int_array(vec![1, 2]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn json_list_indexed_insert_unsupported() {
+        let mut list = JsonListType::new(false);
+        list.add_int_at(0, 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn json_map_primitive_array_set_unsupported() {
+        let mut map = JsonMapType::new(false);
+        map.set_ints("a", vec![1, 2]);
+    }
+}
