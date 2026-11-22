@@ -411,8 +411,14 @@ impl LevelCtx {
     pub fn tick_passenger(&mut self, vehicle_id: i32, passenger_id: i32, is_active: bool) {
         match self.get(passenger_id) {
             None => {
-                if let Some(v) = self.get_mut(vehicle_id) {
-                    v.entity_mut().passengers.retain(|&pid| pid != passenger_id);
+                if !self.cancel_dismount {
+                    if let Some(v) = self.get_mut(vehicle_id) {
+                        v.entity_mut().passengers.retain(|&pid| pid != passenger_id);
+                    }
+                    self.record_event(LifecycleEvent::Dismount {
+                        passenger_id,
+                        vehicle_id,
+                    });
                 }
                 return;
             }
@@ -768,7 +774,17 @@ impl LevelCtx {
             None => return,
         };
         for passenger_id in passengers.into_iter().rev() {
-            self.stop_riding(passenger_id, false);
+            if self.get(passenger_id).is_some() {
+                self.stop_riding(passenger_id, false);
+            } else if !self.cancel_dismount {
+                if let Some(v) = self.get_mut(vehicle_id) {
+                    v.entity_mut().passengers.retain(|&pid| pid != passenger_id);
+                }
+                self.record_event(LifecycleEvent::Dismount {
+                    passenger_id,
+                    vehicle_id,
+                });
+            }
         }
     }
 
