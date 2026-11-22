@@ -85,23 +85,39 @@ fn pose_ids_and_refresh_dimensions_growth() {
 
     let mut entity = Entity::new(1, zombie_meta(), 42);
     entity.first_tick = false;
-    entity.set_pose(Pose::Sleeping);
-    assert!(!entity.refresh_dimensions());
+    assert!(!entity.set_pose(Pose::Sleeping));
     assert!((entity.dimensions.height - 0.2_f32).abs() < 1e-6);
     assert!((entity.eye_height - 0.2_f32).abs() < 1e-6);
 
-    // Growing back from Sleeping (0.2x0.2) to Standing (0.6x1.95) triggers growth flag
-    entity.set_pose(Pose::Standing);
-    assert!(entity.refresh_dimensions());
+    // Growing back from Sleeping (0.2x0.2) to Standing (0.6x1.95) triggers growth flag immediately
+    assert!(entity.set_pose(Pose::Standing));
     assert!((entity.dimensions.height - 1.95_f32).abs() < 1e-6);
+    assert!((entity.eye_height - 1.95_f32 * 0.85_f32).abs() < 1e-5);
 
     // Players never trigger the non-player growth fudge
     let mut player = Entity::new(2, EntityTypeMeta::player(), 43);
     player.first_tick = false;
-    player.set_pose(Pose::Sleeping);
-    player.refresh_dimensions();
-    player.set_pose(Pose::Standing);
-    assert!(!player.refresh_dimensions());
+    assert!(!player.set_pose(Pose::Sleeping));
+    assert!(!player.set_pose(Pose::Standing));
+
+    // start_riding resets a sleeping entity to Standing and refreshes its dimensions immediately
+    let mut ctx = LevelCtx::new();
+    let boat_id = ctx.next_entity_id();
+    let rider_id = ctx.next_entity_id();
+    ctx.add_entity(LifecycleEntity::Base(Entity::new(
+        boat_id,
+        EntityTypeMeta::boat(),
+        10,
+    )));
+    let mut rider = Mob::new(rider_id, zombie_meta(), 20.0, 11);
+    rider.living.entity.set_pose(Pose::Sleeping);
+    assert!((rider.living.entity.dimensions.height - 0.2_f32).abs() < 1e-6);
+    ctx.add_entity(LifecycleEntity::Mob(rider));
+    assert!(ctx.start_riding(rider_id, boat_id, false, false));
+    let rider_after = ctx.get(rider_id).unwrap().entity();
+    assert_eq!(rider_after.pose, Pose::Standing);
+    assert!((rider_after.dimensions.height - 1.95_f32).abs() < 1e-6);
+    assert!((rider_after.eye_height - 1.95_f32 * 0.85_f32).abs() < 1e-5);
 }
 
 // ============================================================================

@@ -375,11 +375,16 @@ impl Entity {
     }
 
     /// Paper `Entity#setPose(Pose)`.
-    pub fn set_pose(&mut self, pose: Pose) {
-        if self.fixed_pose {
-            return;
+    ///
+    /// Mirrors Paper `SynchedEntityData#set(DATA_POSE)` -> `Entity#onSyncedDataUpdated(DATA_POSE)`
+    /// which synchronously calls `refreshDimensions()` whenever the pose changes.
+    /// Returns `true` if `refresh_dimensions()` triggered the non-player growth fudge.
+    pub fn set_pose(&mut self, pose: Pose) -> bool {
+        if self.fixed_pose || self.pose == pose {
+            return false;
         }
         self.pose = pose;
+        self.refresh_dimensions()
     }
 
     /// Paper `Entity#getDimensions(Pose)`.
