@@ -191,6 +191,26 @@ fn player_inventory_and_menu_lifecycle_and_disconnect_cleanup() {
         .unwrap();
         assert_eq!(view.get_slot(chest, 0).unwrap(), Some(diamond));
 
+        // Directly constructed invalid stack limits (> 99) are rejected by SetSlot.
+        let invalid_stack = ItemStackSnapshot {
+            item_id: "minecraft:diamond".to_owned(),
+            count: 100,
+            max_stack_size: 100,
+            custom_name: None,
+            components: std::collections::BTreeMap::new(),
+        };
+        assert_eq!(
+            view.execute(TickCommand::Inventory(InventoryCommand::SetSlot {
+                inventory: chest,
+                slot: 0,
+                item: Some(invalid_stack),
+            })),
+            Err(FacadeError::InvalidItemCount {
+                count: 100,
+                max_stack_size: 100,
+            })
+        );
+
         // Setting an air stack normalizes to empty (None).
         let air = ItemStackSnapshot::new("minecraft:air", 1, 64).unwrap();
         assert!(air.is_empty());
@@ -247,16 +267,15 @@ fn player_inventory_and_menu_lifecycle_and_disconnect_cleanup() {
         view.execute(TickCommand::Menu(MenuCommand::CloseMenu { menu })),
         Err(FacadeError::MenuClosed(menu))
     );
-    drop(view);
-
     // Purging closed menus reclaims their slots so old handles become MenuStale.
     assert_eq!(state.purge_closed_menus(), 1);
-    let view = state.view(&caps);
-    assert!(matches!(
-        view.get_menu(menu),
-        Err(FacadeError::MenuStale(HandleError::Stale { .. }))
-    ));
-    drop(view);
+    {
+        let view = state.view(&caps);
+        assert!(matches!(
+            view.get_menu(menu),
+            Err(FacadeError::MenuStale(HandleError::Stale { .. }))
+        ));
+    }
 
     // Unloading an occupied world disconnects its players and closes their menus.
     let player2 = state

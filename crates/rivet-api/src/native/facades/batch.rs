@@ -1154,7 +1154,10 @@ impl<'a> NativeFacadeView<'a> {
                 item,
             }) => {
                 if let Some(ref stack) = item
-                    && (stack.count < 0 || stack.count > stack.max_stack_size)
+                    && (stack.max_stack_size <= 0
+                        || stack.max_stack_size > 99
+                        || stack.count < 0
+                        || stack.count > stack.max_stack_size)
                 {
                     return Err(FacadeError::InvalidItemCount {
                         count: stack.count,
