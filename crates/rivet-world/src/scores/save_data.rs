@@ -72,7 +72,7 @@ impl<Ops: DynamicOps + 'static> rivet_serialization::Encoder<BTreeMap<DisplaySlo
                 self.value_codec.encode_start(ops, objective_name),
             );
         }
-        builder.build(prefix.clone())
+        builder.build(Some(prefix.clone()))
     }
 }
 
