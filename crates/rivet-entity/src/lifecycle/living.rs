@@ -380,9 +380,7 @@ impl LivingEntity {
                 if let Some(vehicle_id) = self.entity.vehicle
                     && ctx.vehicle_dismounts_underwater(vehicle_id)
                 {
-                    self.entity.vehicle = None;
-                    ctx.detach_passenger_from_vehicle(vehicle_id, self.entity.id);
-                    self.entity.boarding_cooldown = super::entity::BOARDING_COOLDOWN;
+                    ctx.stop_riding_taken(&mut self.entity, false);
                 }
             } else if self.entity.air_supply < self.entity.max_air_supply {
                 self.entity.air_supply = self.increase_air_supply(self.entity.air_supply);

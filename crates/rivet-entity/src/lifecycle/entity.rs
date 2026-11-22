@@ -563,8 +563,7 @@ impl Entity {
         if let Some(vehicle_id) = self.vehicle
             && ctx.is_entity_removed(vehicle_id)
         {
-            self.vehicle = None;
-            ctx.detach_passenger_from_vehicle(vehicle_id, self.id);
+            ctx.stop_riding_taken(self, false);
         }
 
         if self.boarding_cooldown > 0 {

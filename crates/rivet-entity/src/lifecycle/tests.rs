@@ -591,9 +591,38 @@ fn negative_cancelled_dismount_moonrise_lock_no_ai_and_double_take() {
     ctx.cancel_dismount = true;
     assert!(!ctx.stop_riding(mob_id, false));
     assert_eq!(ctx.get(mob_id).unwrap().entity().vehicle, Some(boat));
+
+    // Underwater dismount in LivingEntity::baseTick must also respect cancel_dismount
+    let pig_id = ctx.next_entity_id();
+    let rider_id = ctx.next_entity_id();
+    ctx.add_entity(LifecycleEntity::Mob(Mob::new(pig_id, pig_meta(), 10.0, 20)));
+    let mut submerged_rider = LivingEntity::new(rider_id, zombie_meta(), 20.0, 21);
+    submerged_rider.entity.eye_in_water = true;
+    ctx.add_entity(LifecycleEntity::Living(submerged_rider));
+    assert!(ctx.start_riding(rider_id, pig_id, false, false));
+    ctx.take_events();
+    ctx.tick_all(true);
+    assert_eq!(ctx.get(rider_id).unwrap().entity().vehicle, Some(pig_id));
+    assert!(!ctx.take_events().iter().any(|e| matches!(
+        e,
+        LifecycleEvent::Dismount { passenger_id, .. } if *passenger_id == rider_id
+    )));
+
+    // Once cancellation is cleared, underwater dismount succeeds and emits Dismount
+    ctx.cancel_dismount = false;
+    ctx.tick_all(true);
+    assert_eq!(ctx.get(rider_id).unwrap().entity().vehicle, None);
+    assert!(ctx.take_events().iter().any(|e| matches!(
+        e,
+        LifecycleEvent::Dismount { passenger_id, vehicle_id }
+            if *passenger_id == rider_id && *vehicle_id == pig_id
+    )));
+
     // suppress_cancellation=true overrides cancellation
+    ctx.cancel_dismount = true;
     assert!(ctx.stop_riding(mob_id, true));
     assert_eq!(ctx.get(mob_id).unwrap().entity().vehicle, None);
+    ctx.cancel_dismount = false;
 
     // Moonrise section_update_lock prevents removal
     ctx.section_update_lock.insert(mob_id);

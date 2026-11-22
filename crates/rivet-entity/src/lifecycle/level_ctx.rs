@@ -731,11 +731,42 @@ impl LevelCtx {
         }
     }
 
-    /// Internal helper used when a currently-taken passenger detaches itself during `baseTick`.
-    pub(crate) fn detach_passenger_from_vehicle(&mut self, vehicle_id: i32, passenger_id: i32) {
+    /// Paper `Entity#stopRiding(boolean suppressCancellation)` for a currently-taken passenger.
+    ///
+    /// Respects `cancel_dismount` (restoring `passenger.vehicle` when cancelled) and emits
+    /// `LifecycleEvent::Dismount` on success, matching `stop_riding`.
+    pub(crate) fn stop_riding_taken(
+        &mut self,
+        passenger: &mut Entity,
+        suppress_cancellation: bool,
+    ) -> bool {
+        let Some(vehicle_id) = passenger.vehicle else {
+            return false;
+        };
+        let passenger_id = passenger.id;
+        let removal_reason = passenger.removal_reason;
+
+        passenger.vehicle = None;
+
+        if self.cancel_dismount && !suppress_cancellation {
+            passenger.vehicle = Some(vehicle_id);
+            return false;
+        }
+
         if let Some(v) = self.get_mut(vehicle_id) {
             v.entity_mut().passengers.retain(|&pid| pid != passenger_id);
         }
+
+        passenger.boarding_cooldown = BOARDING_COOLDOWN;
+
+        let should_emit = removal_reason.is_none_or(removal_reason_should_destroy);
+        if should_emit {
+            self.record_event(LifecycleEvent::Dismount {
+                passenger_id,
+                vehicle_id,
+            });
+        }
+        true
     }
 
     /// Positions a currently-taken rider relative to its resident vehicle (`Entity#positionRider`).
