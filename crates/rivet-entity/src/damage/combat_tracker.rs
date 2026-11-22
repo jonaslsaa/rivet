@@ -306,24 +306,13 @@ impl CombatTracker {
             );
         }
 
-        let fall_attacker = fall_source
-            .causing_entity()
-            .or_else(|| fall_source.direct_entity());
+        let fall_attacker = fall_source.causing_entity();
         let fall_attacker_name = fall_attacker.map(|e| e.display_name.as_str());
         let killer_name = killer_entity.map(|e| e.display_name.as_str());
 
-        if let (Some(fall_name), Some(kill_name)) = (fall_attacker_name, killer_name)
-            && fall_name != kill_name
+        if let Some(fall_name) = fall_attacker_name
+            && killer_name != Some(fall_name)
         {
-            return Self::assisted_fall_message(
-                victim_name,
-                fall_attacker,
-                fall_name,
-                "death.fell.assist.item",
-                "death.fell.assist",
-            );
-        }
-        if let Some(fall_name) = fall_attacker_name {
             return Self::assisted_fall_message(
                 victim_name,
                 fall_attacker,

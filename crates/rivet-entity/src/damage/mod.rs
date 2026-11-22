@@ -685,4 +685,160 @@ mod tests {
         assert_close(state.health, 15.0);
         assert!(state.is_alive());
     }
+
+    #[test]
+    fn fall_message_same_attacker_returns_finish_and_ignores_direct_entity_fallback() {
+        let sources = DamageSources::new();
+
+        // Same attacker knocks victim off ladder and causes the fatal fall -> death.fell.finish(.item).
+        let mut tracker = CombatTracker::new();
+        let alex = DamageEntityRef::player(1, "Alex", false);
+        let alex_with_sword =
+            DamageEntityRef::player(1, "Alex", false).with_main_hand_custom_name("Excalibur");
+        tracker.record_damage(
+            sources.player_attack(alex),
+            2.0,
+            Some(FallLocation::Ladder),
+            0.0,
+            10,
+            true,
+        );
+        tracker.record_damage(
+            DamageSource::with_causing(DamageTypeKey::Fall, Some(alex_with_sword)),
+            10.0,
+            None,
+            10.0,
+            20,
+            true,
+        );
+        let msg = tracker.death_message("Steve", Some("Alex"));
+        assert_eq!(msg.translation_key, "death.fell.finish.item");
+        assert_eq!(msg.args, vec!["Steve", "Alex", "Excalibur"]);
+
+        // Without custom item name -> death.fell.finish.
+        let mut tracker_plain = CombatTracker::new();
+        let zombie = DamageEntityRef::living(2, "Zombie");
+        tracker_plain.record_damage(
+            sources.mob_attack(zombie.clone()),
+            2.0,
+            Some(FallLocation::Ladder),
+            0.0,
+            10,
+            true,
+        );
+        tracker_plain.record_damage(
+            DamageSource::with_causing(DamageTypeKey::Fall, Some(zombie.clone())),
+            10.0,
+            None,
+            10.0,
+            20,
+            true,
+        );
+        let plain_msg = tracker_plain.death_message("Steve", Some("Zombie"));
+        assert_eq!(plain_msg.translation_key, "death.fell.finish");
+        assert_eq!(plain_msg.args, vec!["Steve", "Zombie"]);
+
+        // Different fall attacker and killer -> death.fell.assist.
+        let mut tracker_diff = CombatTracker::new();
+        let skeleton = DamageEntityRef::living(3, "Skeleton");
+        tracker_diff.record_damage(
+            sources.mob_attack(zombie),
+            2.0,
+            Some(FallLocation::Ladder),
+            0.0,
+            10,
+            true,
+        );
+        tracker_diff.record_damage(
+            DamageSource::with_causing(DamageTypeKey::Fall, Some(skeleton)),
+            10.0,
+            None,
+            10.0,
+            20,
+            true,
+        );
+        let diff_msg = tracker_diff.death_message("Steve", Some("Skeleton"));
+        assert_eq!(diff_msg.translation_key, "death.fell.assist");
+        assert_eq!(diff_msg.args, vec!["Steve", "Zombie"]);
+
+        // Dispenser arrow (direct_entity = Some(Arrow), causing_entity = None) does NOT fall back
+        // to direct_entity(): Paper checks `damageSource.getEntity()` (`causing_entity()`) only.
+        let mut tracker_unowned = CombatTracker::new();
+        let arrow = DamageEntityRef::non_living(4, "Arrow");
+        tracker_unowned.record_damage(
+            sources.arrow(arrow, None),
+            2.0,
+            Some(FallLocation::Ladder),
+            0.0,
+            10,
+            true,
+        );
+        tracker_unowned.record_damage(sources.fall(), 10.0, None, 10.0, 20, true);
+        let unowned_msg = tracker_unowned.death_message("Steve", None);
+        assert_eq!(unowned_msg.translation_key, "death.fell.killer");
+        assert_eq!(unowned_msg.args, vec!["Steve"]);
+    }
+
+    #[test]
+    fn player_zero_damage_is_rejected_before_timers_and_combat_entry() {
+        let sources = DamageSources::new();
+        let snowball = DamageEntityRef::non_living(1, "Snowball");
+        let thrower = DamageEntityRef::player(2, "Alex", false);
+
+        for difficulty in [
+            Difficulty::Peaceful,
+            Difficulty::Easy,
+            Difficulty::Normal,
+            Difficulty::Hard,
+        ] {
+            let mut state = DamagePipelineState::new(20.0);
+            let outcome = state.hurt_server(
+                sources.thrown(snowball.clone(), Some(thrower.clone())),
+                0.0,
+                &HurtContext {
+                    victim_name: "Steve".into(),
+                    tick_count: 50,
+                    is_player_victim: true,
+                    difficulty,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(outcome, HurtOutcome::Rejected(HurtRejection::ZeroDamage));
+            assert_eq!(state.invulnerable_time, 0);
+            assert_eq!(state.hurt_time, 0);
+            assert_close(state.last_hurt, 0.0);
+            assert!(state.combat_tracker.entries().is_empty());
+        }
+
+        // Non-player victims still process 0.0 damage (`LivingEntity#hurtServer` has no 0-damage guard).
+        let mut mob_state = DamagePipelineState::new(20.0);
+        let mob_outcome = mob_state.hurt_server(
+            sources.thrown(snowball, Some(thrower)),
+            0.0,
+            &HurtContext {
+                victim_name: "Zombie".into(),
+                tick_count: 50,
+                is_player_victim: false,
+                difficulty: Difficulty::Normal,
+                ..Default::default()
+            },
+        );
+        assert!(matches!(mob_outcome, HurtOutcome::Damaged { .. }));
+        assert_eq!(mob_state.invulnerable_time, INVULNERABLE_DURATION);
+    }
+
+    #[test]
+    fn set_health_uses_non_panicking_mth_clamp_for_invalid_max_health() {
+        let mut neg_max = DamagePipelineState::new(20.0);
+        neg_max.max_health = -5.0;
+        neg_max.set_health(10.0);
+        assert_close(neg_max.health, -5.0);
+
+        let mut nan_max = DamagePipelineState::new(20.0);
+        nan_max.max_health = f32::NAN;
+        nan_max.set_health(10.0);
+        assert!(nan_max.health.is_nan());
+        nan_max.set_health(-1.0);
+        assert_close(nan_max.health, 0.0);
+    }
 }

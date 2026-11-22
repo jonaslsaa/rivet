@@ -97,6 +97,7 @@ pub enum HurtRejection {
     InvulnerableToSource,
     FireResistance,
     PeacefulDifficulty,
+    ZeroDamage,
     InvulnerabilityCooldown,
 }
 
@@ -308,11 +309,14 @@ impl DamagePipelineState {
             raw_amount
         };
 
-        // Player difficulty scaling (`Player#hurtServer` lines 733-745).
+        // Player difficulty scaling and zero-damage rejection (`Player#hurtServer` lines 733-748).
         if ctx.is_player_victim {
             match scale_damage_for_difficulty(amount, ctx.difficulty, &source) {
                 Some(scaled) => amount = scaled,
                 None => return HurtOutcome::Rejected(HurtRejection::PeacefulDifficulty),
+            }
+            if amount == 0.0 {
+                return HurtOutcome::Rejected(HurtRejection::ZeroDamage);
             }
         }
 
