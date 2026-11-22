@@ -23,6 +23,8 @@ use crate::levelgen::heightmap::{Types as HeightmapType, types_codec as heightma
 use indexmap::IndexMap;
 use rivet_registry::block_state::BlockState;
 use rivet_registry::block_state_codec::block_state_codec;
+use rivet_registry::block_state_properties::BlockStateProperties;
+use rivet_registry::block_state_property::PropertyValue;
 use rivet_registry::core::BlockPos;
 use rivet_registry::generated::blocks::BlockId;
 use rivet_registry::holder_set::HolderSet;
@@ -30,6 +32,7 @@ use rivet_registry::identifier::Identifier;
 use rivet_registry::registries::{self, BlockType};
 use rivet_registry::registry_file_codec::{HolderSetCodec, RegistryFixedCodec};
 use rivet_registry::registry_ops::RegistryOpsLookup;
+use rivet_registry::state_definition::StateDefinition;
 use rivet_serialization::codec::{self, Codec};
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::map_codec::{self, MapCodec};
@@ -47,6 +50,20 @@ fn block_id(name: &str) -> BlockId {
 
 fn default_state(name: &str) -> BlockState {
     BlockState::of(block_id(name))
+}
+
+/// `Block.withPropertiesOf(BlockState)` — copy every shared property value from
+/// `source` onto `target_block`'s default state.
+fn with_properties_of(target_block: BlockId, source: BlockState) -> BlockState {
+    let mut result = BlockState::of(target_block);
+    for prop in StateDefinition::for_block(source.block()).properties() {
+        if let Some(val) = source.get_value(prop)
+            && let Ok(next) = result.try_set_value(prop, val)
+        {
+            result = next;
+        }
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -749,6 +766,28 @@ impl BlockAgeProcessor {
             normal[random.next_int_bound(normal.len() as i32) as usize]
         }
     }
+
+    /// `BlockAgeProcessor.getRandomFacingStairs(RandomSource, Block)`.
+    fn get_random_facing_stairs<R: RandomSource>(
+        random: &mut R,
+        stair_block: BlockId,
+    ) -> BlockState {
+        // Paper: Direction.Plane.HORIZONTAL = [NORTH, EAST, SOUTH, WEST], Half.values() = [TOP, BOTTOM].
+        const HORIZONTAL_DIRECTIONS: [&str; 4] = ["north", "east", "south", "west"];
+        const HALVES: [&str; 2] = ["top", "bottom"];
+        let facing = HORIZONTAL_DIRECTIONS[random.next_int_bound(4) as usize];
+        let half = HALVES[random.next_int_bound(2) as usize];
+        let state = BlockState::of(stair_block);
+        let state = state
+            .set_value(
+                BlockStateProperties::HORIZONTAL_FACING,
+                PropertyValue::Enum(facing),
+            )
+            .unwrap_or(state);
+        state
+            .set_value(BlockStateProperties::HALF, PropertyValue::Enum(half))
+            .unwrap_or(state)
+    }
 }
 
 impl StructureProcessor for BlockAgeProcessor {
@@ -772,41 +811,51 @@ impl StructureProcessor for BlockAgeProcessor {
             if random.next_float() >= Self::PROBABILITY_OF_REPLACING_FULL_BLOCK {
                 None
             } else {
-                // Match Paper's exact RNG consumption order in maybeReplaceFullStoneBlock:
-                // 2 stair-facing draws (each consumes nextInt(4) + nextInt(2)), then pickRandomBlock.
-                let _ = random.next_int_bound(4);
-                let _ = random.next_int_bound(2);
-                let _ = random.next_int_bound(4);
-                let _ = random.next_int_bound(2);
-                let normal = [
-                    default_state("minecraft:stone_brick_slab"),
-                    default_state("minecraft:stone_brick_stairs"),
+                let non_mossy = [
+                    default_state("minecraft:cracked_stone_bricks"),
+                    Self::get_random_facing_stairs(
+                        &mut random,
+                        block_id("minecraft:stone_brick_stairs"),
+                    ),
                 ];
                 let mossy = [
                     default_state("minecraft:mossy_stone_bricks"),
-                    default_state("minecraft:mossy_stone_brick_stairs"),
+                    Self::get_random_facing_stairs(
+                        &mut random,
+                        block_id("minecraft:mossy_stone_brick_stairs"),
+                    ),
                 ];
-                Some(self.pick_random_block(&mut random, &normal, &mossy))
+                Some(self.pick_random_block(&mut random, &non_mossy, &mossy))
             }
-        } else if block == block_id("minecraft:stone_brick_stairs") {
-            if random.next_float() < Self::PROBABILITY_OF_REPLACING_STAIRS {
-                if random.next_float() < self.mossiness {
-                    Some(default_state("minecraft:mossy_stone_brick_stairs"))
-                } else {
-                    None
-                }
+        } else if state.is_in_tag("minecraft:stairs") {
+            if random.next_float() >= Self::PROBABILITY_OF_REPLACING_STAIRS {
+                None
+            } else {
+                let non_mossy = [
+                    default_state("minecraft:stone_slab"),
+                    default_state("minecraft:stone_brick_slab"),
+                ];
+                let mossy = [
+                    with_properties_of(block_id("minecraft:mossy_stone_brick_stairs"), state),
+                    default_state("minecraft:mossy_stone_brick_slab"),
+                ];
+                Some(self.pick_random_block(&mut random, &non_mossy, &mossy))
+            }
+        } else if state.is_in_tag("minecraft:slabs") {
+            if random.next_float() < self.mossiness {
+                Some(with_properties_of(
+                    block_id("minecraft:mossy_stone_brick_slab"),
+                    state,
+                ))
             } else {
                 None
             }
-        } else if block == block_id("minecraft:stone_brick_slab") {
+        } else if state.is_in_tag("minecraft:walls") {
             if random.next_float() < self.mossiness {
-                Some(default_state("minecraft:mossy_stone_brick_slab"))
-            } else {
-                None
-            }
-        } else if block == block_id("minecraft:stone_brick_wall") {
-            if random.next_float() < self.mossiness {
-                Some(default_state("minecraft:mossy_stone_brick_wall"))
+                Some(with_properties_of(
+                    block_id("minecraft:mossy_stone_brick_wall"),
+                    state,
+                ))
             } else {
                 None
             }
@@ -1372,5 +1421,112 @@ mod tests {
             .filter(|b| b.state == state_of("minecraft:blackstone"))
             .count();
         assert_eq!(blackstone_count, 2);
+    }
+
+    #[test]
+    fn block_age_processor_matches_paper_blocks_tags_and_properties() {
+        let mut level = MockLevel::new(0);
+        let settings = StructurePlaceSettings::new();
+
+        // Full stone block with mossiness=0.0 produces cracked_stone_bricks or randomized stairs (never slab).
+        let dry_age = BlockAgeProcessor::new(0.0);
+        let mut saw_cracked = false;
+        let mut saw_non_default_stair = false;
+        let default_stairs = state_of("minecraft:stone_brick_stairs");
+        for x in 0..64 {
+            let info = StructureBlockInfo::new(
+                BlockPos::new(x, 0, 0),
+                state_of("minecraft:stone_bricks"),
+                None,
+            );
+            let out = dry_age
+                .process_block(
+                    &mut level,
+                    BlockPos::ZERO,
+                    BlockPos::ZERO,
+                    BlockPos::ZERO,
+                    info,
+                    &settings,
+                )
+                .unwrap();
+            assert_ne!(out.state.block(), block_id("minecraft:stone_brick_slab"));
+            if out.state.block() == block_id("minecraft:cracked_stone_bricks") {
+                saw_cracked = true;
+            }
+            if out.state.block() == block_id("minecraft:stone_brick_stairs")
+                && out.state != default_stairs
+            {
+                saw_non_default_stair = true;
+            }
+        }
+        assert!(saw_cracked, "expected cracked_stone_bricks replacement");
+        assert!(
+            saw_non_default_stair,
+            "expected randomized stair facing/half"
+        );
+
+        // Tagged slab (e.g. oak_slab) with mossiness=1.0 ages to mossy_stone_brick_slab preserving type=top.
+        let mossy_age = BlockAgeProcessor::new(1.0);
+        let top_oak_slab = state_of("minecraft:oak_slab")
+            .set_value(BlockStateProperties::SLAB_TYPE, PropertyValue::Enum("top"))
+            .unwrap();
+        let out_slab = mossy_age
+            .process_block(
+                &mut level,
+                BlockPos::ZERO,
+                BlockPos::ZERO,
+                BlockPos::ZERO,
+                StructureBlockInfo::new(BlockPos::new(1, 2, 3), top_oak_slab, None),
+                &settings,
+            )
+            .unwrap();
+        assert_eq!(
+            out_slab.state.block(),
+            block_id("minecraft:mossy_stone_brick_slab")
+        );
+        assert_eq!(
+            out_slab.state.get_value(BlockStateProperties::SLAB_TYPE),
+            Some(PropertyValue::Enum("top"))
+        );
+
+        // Tagged stairs (e.g. oak_stairs) with mossiness=1.0 preserve facing/half when replaced by mossy stairs.
+        let top_south_stairs = state_of("minecraft:oak_stairs")
+            .set_value(
+                BlockStateProperties::HORIZONTAL_FACING,
+                PropertyValue::Enum("south"),
+            )
+            .unwrap()
+            .set_value(BlockStateProperties::HALF, PropertyValue::Enum("top"))
+            .unwrap();
+        let mut saw_preserved_mossy_stairs = false;
+        for x in 0..64 {
+            let out_stairs = mossy_age
+                .process_block(
+                    &mut level,
+                    BlockPos::ZERO,
+                    BlockPos::ZERO,
+                    BlockPos::ZERO,
+                    StructureBlockInfo::new(BlockPos::new(x, 10, 0), top_south_stairs, None),
+                    &settings,
+                )
+                .unwrap();
+            if out_stairs.state.block() == block_id("minecraft:mossy_stone_brick_stairs") {
+                assert_eq!(
+                    out_stairs
+                        .state
+                        .get_value(BlockStateProperties::HORIZONTAL_FACING),
+                    Some(PropertyValue::Enum("south"))
+                );
+                assert_eq!(
+                    out_stairs.state.get_value(BlockStateProperties::HALF),
+                    Some(PropertyValue::Enum("top"))
+                );
+                saw_preserved_mossy_stairs = true;
+            }
+        }
+        assert!(
+            saw_preserved_mossy_stairs,
+            "expected mossy_stone_brick_stairs preserving properties"
+        );
     }
 }
