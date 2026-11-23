@@ -20,6 +20,9 @@ pub const LIVING_ENTITY_FLAG_OFF_HAND: u8 = 2;
 /// Paper `LivingEntity.LIVING_ENTITY_FLAG_SPIN_ATTACK`.
 pub const LIVING_ENTITY_FLAG_SPIN_ATTACK: u8 = 4;
 
+/// Paper `LivingEntity#getMaxHeadRotationRelativeToBody()` default.
+pub const MAX_HEAD_ROTATION_RELATIVE_TO_BODY: f32 = 50.0;
+
 /// Paper `LivingEntity.PLAYER_HURT_EXPERIENCE_TIME` (100 ticks).
 pub const LAST_HURT_BY_MOB_EXPIRY_TICKS: i32 = 100;
 
@@ -33,6 +36,8 @@ pub struct LivingEntity {
     pub hurt_time: i32,
     pub hurt_duration: i32,
     pub death_time: i32,
+    /// Paper `LivingEntity.noActionTime`.
+    pub no_action_time: i32,
     pub attack_anim: f32,
     pub o_attack_anim: f32,
     pub y_body_rot: f32,
@@ -79,6 +84,7 @@ impl LivingEntity {
             hurt_time: 0,
             hurt_duration: 0,
             death_time: 0,
+            no_action_time: 0,
             attack_anim: 0.0,
             o_attack_anim: 0.0,
             y_body_rot: 0.0,
@@ -225,6 +231,8 @@ impl LivingEntity {
     }
 
     /// Paper `LivingEntity#onEquipItem(EquipmentSlot, ItemStack oldItem, ItemStack newItem, boolean silent)`.
+    ///
+    /// Compares with `ItemStack.isSameItemSameComponents` (count-insensitive).
     pub fn on_equip_item(
         &mut self,
         slot: EquipmentSlot,
@@ -233,8 +241,7 @@ impl LivingEntity {
         silent: bool,
         ctx: &mut LevelCtx,
     ) {
-        let nothing_equipped = new_item.is_empty() && old_item.is_empty();
-        if !nothing_equipped && !old_item.matches(new_item) && !self.entity.first_tick {
+        if !old_item.is_same_item_same_components(new_item) && !self.entity.first_tick {
             ctx.record_event(LifecycleEvent::EquipmentEquipped {
                 id: self.entity.id,
                 slot,
@@ -342,8 +349,9 @@ impl LivingEntity {
             );
         }
 
-        // super.baseTick()
-        self.entity.entity_base_tick(ctx);
+        // super.baseTick() with the LivingEntity#onBelowWorld override
+        self.entity
+            .entity_base_tick_with_hook(ctx, Self::on_below_world);
 
         ctx.record_event(LifecycleEvent::LivingBaseTick { id: self.entity.id });
 
@@ -449,6 +457,22 @@ impl LivingEntity {
         self.entity.x_rot_o = self.entity.x_rot;
     }
 
+    /// Paper `LivingEntity#onBelowWorld()`:
+    /// `hurt(damageSources().fellOutOfWorld(), level().getWorld().getVoidDamageAmount())`.
+    pub fn on_below_world(entity: &mut Entity, ctx: &mut LevelCtx) {
+        ctx.record_event(LifecycleEvent::Hurt {
+            id: entity.id,
+            amount: ctx.void_damage_amount,
+            source: "fell_out_of_world",
+        });
+    }
+
+    /// Paper `LivingEntity#inactiveTick()`: `super.inactiveTick(); ++noActionTime;`.
+    pub fn living_inactive_tick(&mut self, ctx: &mut LevelCtx) {
+        self.entity.entity_inactive_tick(ctx);
+        self.no_action_time = self.no_action_time.wrapping_add(1);
+    }
+
     /// Paper `LivingEntity#tickDeath()`.
     pub fn tick_death(&mut self, ctx: &mut LevelCtx) {
         self.death_time = self.death_time.wrapping_add(1);
@@ -462,12 +486,14 @@ impl LivingEntity {
         }
     }
 
-    /// Paper `LivingEntity#tick()` (with customizable `base_tick` / `ai_step` hooks for `Mob`).
+    /// Paper `LivingEntity#tick()` with the virtual `baseTick()`, `aiStep()`, and
+    /// `tickHeadTurn(float)` overrides supplied as hooks (used by `Mob`).
     pub fn living_tick_with_hooks(
         &mut self,
         ctx: &mut LevelCtx,
         mut run_base_tick: impl FnMut(&mut Self, &mut LevelCtx),
         mut run_ai_step: impl FnMut(&mut Self, &mut LevelCtx),
+        mut run_tick_head_turn: impl FnMut(&mut Self, f32, &mut LevelCtx),
     ) {
         // super.tick(): Entity.tick() checks despawnTime, then calls this.baseTick()
         if self.entity.entity_type.despawn_time >= 0
@@ -537,7 +563,7 @@ impl LivingEntity {
         if self.attack_anim > 0.0_f32 {
             y_body_rot_t = self.entity.y_rot;
         }
-        self.tick_head_turn(y_body_rot_t);
+        run_tick_head_turn(self, y_body_rot_t, ctx);
 
         // Paper start - stop large pitch and yaw changes from crashing the server
         self.entity.y_rot_o +=
@@ -569,9 +595,12 @@ impl LivingEntity {
 
     /// Paper `LivingEntity#tick()`.
     pub fn living_tick(&mut self, ctx: &mut LevelCtx) {
-        self.living_tick_with_hooks(ctx, Self::living_base_tick, |this, c| {
-            this.living_ai_step(c, |_, _| {});
-        });
+        self.living_tick_with_hooks(
+            ctx,
+            Self::living_base_tick,
+            |this, c| this.living_ai_step(c, |_, _| {}),
+            |this, y_body_rot_t, _| this.tick_head_turn(y_body_rot_t),
+        );
     }
 
     /// Paper `LivingEntity#aiStep()`.
@@ -623,13 +652,13 @@ impl LivingEntity {
 
     /// Paper `LivingEntity#tickHeadTurn(float)`.
     pub fn tick_head_turn(&mut self, y_body_rot_t: f32) {
-        let delta = mth::wrap_degrees_f32(y_body_rot_t - self.y_body_rot);
-        self.y_body_rot += delta * 0.3_f32;
+        let y_body_rot_d = mth::wrap_degrees_f32(y_body_rot_t - self.y_body_rot);
+        self.y_body_rot += y_body_rot_d * 0.3_f32;
         let head_diff = mth::wrap_degrees_f32(self.entity.y_rot - self.y_body_rot);
-        let clamped = head_diff.clamp(-75.0_f32, 75.0_f32);
-        self.y_body_rot = self.entity.y_rot - clamped;
-        if clamped * clamped > 2500.0_f32 {
-            self.y_body_rot += clamped * 0.2_f32;
+        let max_head_rotation = MAX_HEAD_ROTATION_RELATIVE_TO_BODY;
+        if head_diff.abs() > max_head_rotation {
+            self.y_body_rot +=
+                head_diff - mth::sign(f64::from(head_diff)) as f32 * max_head_rotation;
         }
     }
 

@@ -21,7 +21,7 @@ pub use dimensions::{
 pub use entity::{
     BASE_TICKS_REQUIRED_TO_FREEZE, BOARDING_COOLDOWN, Entity, EntityTypeMeta, FLAG_FALL_FLYING,
     FLAG_GLOWING, FLAG_INVISIBLE, FLAG_ONFIRE, FLAG_SHIFT_KEY_DOWN, FLAG_SPRINTING, FLAG_SWIMMING,
-    TOTAL_AIR_SUPPLY, removal_reason_should_destroy, removal_reason_should_save,
+    TOTAL_AIR_SUPPLY,
 };
 pub use equipment::{
     EntityEquipment, EquipmentItem, EquipmentSlot, EquipmentSlotChange, EquipmentSlotType,
@@ -30,9 +30,10 @@ pub use equipment::{
 pub use level_ctx::{LevelCtx, LifecycleEntity, LifecycleEvent};
 pub use living::{
     LAST_HURT_BY_MOB_EXPIRY_TICKS, LIVING_ENTITY_FLAG_IS_USING, LIVING_ENTITY_FLAG_OFF_HAND,
-    LIVING_ENTITY_FLAG_SPIN_ATTACK, LivingEntity,
+    LIVING_ENTITY_FLAG_SPIN_ATTACK, LivingEntity, MAX_HEAD_ROTATION_RELATIVE_TO_BODY,
 };
 pub use mob::{
-    DEFAULT_AMBIENT_SOUND_INTERVAL, HARD_DESPAWN_DISTANCE_SQR, MOB_FLAG_AGGRESSIVE,
-    MOB_FLAG_LEFTHANDED, MOB_FLAG_NO_AI, Mob, MobControlFlags, SOFT_DESPAWN_DISTANCE_SQR,
+    DEFAULT_AMBIENT_SOUND_INTERVAL, DEFAULT_MAX_HEAD_Y_ROT, HARD_DESPAWN_DISTANCE_SQR,
+    MOB_FLAG_AGGRESSIVE, MOB_FLAG_LEFTHANDED, MOB_FLAG_NO_AI, Mob, MobControlFlags,
+    SOFT_DESPAWN_DISTANCE_SQR,
 };

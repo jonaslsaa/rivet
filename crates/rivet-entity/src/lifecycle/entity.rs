@@ -30,24 +30,6 @@ pub const TOTAL_AIR_SUPPLY: i32 = 300;
 /// Paper `Entity.BASE_TICKS_REQUIRED_TO_FREEZE`.
 pub const BASE_TICKS_REQUIRED_TO_FREEZE: i32 = 140;
 
-/// Returns Paper `Entity.RemovalReason#shouldDestroy()`.
-#[must_use]
-pub const fn removal_reason_should_destroy(reason: EntityRemovalReason) -> bool {
-    matches!(
-        reason,
-        EntityRemovalReason::Killed | EntityRemovalReason::Discarded
-    )
-}
-
-/// Returns Paper `Entity.RemovalReason#shouldSave()`.
-#[must_use]
-pub const fn removal_reason_should_save(reason: EntityRemovalReason) -> bool {
-    matches!(
-        reason,
-        EntityRemovalReason::UnloadedToChunk | EntityRemovalReason::UnloadedWithPlayer
-    )
-}
-
 /// Static entity-type metadata needed by the `Entity` / `LivingEntity` / `Mob` lifecycle.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntityTypeMeta {
@@ -59,6 +41,8 @@ pub struct EntityTypeMeta {
     pub dismounts_underwater: bool,
     pub is_player: bool,
     pub is_boat: bool,
+    /// Membership in `EntityTypeTags.NON_CONTROLLING_RIDER` (`Entity#canControlVehicle()`).
+    pub non_controlling_rider: bool,
     /// Paper configurable entity despawn time (`Entity.despawnTime`; `-1` disables).
     pub despawn_time: i32,
     /// Maximum number of passengers accepted by default (`1` in `Entity#canAddPassenger`).
@@ -78,6 +62,7 @@ impl EntityTypeMeta {
             dismounts_underwater: true,
             is_player: false,
             is_boat: false,
+            non_controlling_rider: false,
             despawn_time: -1,
             max_passengers: 1,
         }
@@ -218,7 +203,7 @@ impl Entity {
             first_tick: true,
             on_ground: false,
             no_physics: false,
-            remaining_fire_ticks: -1,
+            remaining_fire_ticks: 0,
             air_supply: TOTAL_AIR_SUPPLY,
             max_air_supply: TOTAL_AIR_SUPPLY,
             invulnerable: false,
@@ -272,16 +257,23 @@ impl Entity {
         }
     }
 
-    /// Paper `Entity#setSharedFlagOnFire(boolean)`.
+    /// Paper `Entity#setSharedFlagOnFire(boolean)`:
+    /// `setSharedFlag(FLAG_ONFIRE, visualFire.toBooleanOrElse(value))`.
     pub fn set_shared_flag_on_fire(&mut self, value: bool) {
-        self.set_shared_flag(FLAG_ONFIRE, value);
+        self.set_shared_flag(FLAG_ONFIRE, self.visual_fire.unwrap_or(value));
     }
 
-    /// Paper `Entity#isOnFire()`.
+    /// Paper `Entity#isOnFire()` on the server (`isClientSide == false`, so the
+    /// shared `FLAG_ONFIRE` bit is not consulted).
     #[must_use]
-    pub fn is_on_fire(&self) -> bool {
-        !self.entity_type.fire_immune
-            && (self.remaining_fire_ticks > 0 || self.get_shared_flag(FLAG_ONFIRE))
+    pub const fn is_on_fire(&self) -> bool {
+        !self.entity_type.fire_immune && self.remaining_fire_ticks > 0
+    }
+
+    /// Paper `Entity#canControlVehicle()`.
+    #[must_use]
+    pub const fn can_control_vehicle(&self) -> bool {
+        !self.entity_type.non_controlling_rider
     }
 
     #[must_use]
@@ -437,15 +429,9 @@ impl Entity {
         self.removal_reason = None;
     }
 
-    /// Paper `Entity#getFireImmuneTicks()` (default `1`).
-    #[must_use]
-    pub const fn fire_immune_ticks(&self) -> i32 {
-        1
-    }
-
-    /// Paper `Entity#clearFire()`.
+    /// Paper `Entity#clearFire()`: `setRemainingFireTicks(Math.min(0, remainingFireTicks))`.
     pub fn clear_fire(&mut self) {
-        self.remaining_fire_ticks = 0;
+        self.remaining_fire_ticks = self.remaining_fire_ticks.min(0);
     }
 
     /// Paper `Entity#igniteForTicks(int)`.
@@ -562,7 +548,7 @@ impl Entity {
         }
         self.valid = false;
         let effective_reason = self.removal_reason.unwrap_or(reason);
-        if removal_reason_should_destroy(effective_reason) {
+        if effective_reason.should_destroy() {
             ctx.stop_riding_taken(self, false);
         }
         if first_time {
@@ -584,8 +570,18 @@ impl Entity {
         self.entity_base_tick(ctx);
     }
 
-    /// Paper `Entity#baseTick()`.
+    /// Paper `Entity#baseTick()` with the base `Entity#onBelowWorld()` (discard).
     pub fn entity_base_tick(&mut self, ctx: &mut LevelCtx) {
+        self.entity_base_tick_with_hook(ctx, Self::on_below_world);
+    }
+
+    /// Paper `Entity#baseTick()` with a virtual `onBelowWorld()` override supplied by
+    /// subclasses (`LivingEntity#onBelowWorld` deals void damage instead of discarding).
+    pub fn entity_base_tick_with_hook(
+        &mut self,
+        ctx: &mut LevelCtx,
+        on_below_world: impl FnOnce(&mut Self, &mut LevelCtx),
+    ) {
         ctx.record_event(LifecycleEvent::EntityBaseTick { id: self.id });
         self.compute_speed();
         self.in_block_state_present = false;
@@ -603,17 +599,10 @@ impl Entity {
         self.was_in_powder_snow = self.is_in_powder_snow;
         self.is_in_powder_snow = false;
 
-        // Fire ticking (Paper Entity.java lines 960-988)
-        if self.in_lava {
-            self.fall_distance *= 0.5;
-        }
-
+        // Fire ticking (server branch of Paper Entity#baseTick)
         if self.remaining_fire_ticks > 0 {
             if self.entity_type.fire_immune {
-                self.remaining_fire_ticks = self.remaining_fire_ticks.wrapping_sub(4);
-                if self.remaining_fire_ticks < 0 {
-                    self.clear_fire();
-                }
+                self.clear_fire();
             } else {
                 if self.remaining_fire_ticks % 20 == 0 && !self.in_lava {
                     ctx.record_event(LifecycleEvent::Hurt {
@@ -624,23 +613,24 @@ impl Entity {
                 }
                 self.remaining_fire_ticks = self.remaining_fire_ticks.wrapping_sub(1);
             }
-        } else if self.remaining_fire_ticks == 0 {
-            self.remaining_fire_ticks = -self.fire_immune_ticks();
         }
 
-        self.check_below_world(ctx);
+        if self.in_lava {
+            self.fall_distance *= 0.5;
+        }
 
-        let shared_fire = match self.visual_fire {
-            Some(true) => true,
-            _ => self.remaining_fire_ticks > 0,
-        };
-        self.set_shared_flag_on_fire(shared_fire);
+        self.check_below_world(ctx, on_below_world);
+        self.set_shared_flag_on_fire(self.remaining_fire_ticks > 0);
 
         self.first_tick = false;
     }
 
-    /// Paper `Entity#checkBelowWorld()`.
-    pub fn check_below_world(&mut self, ctx: &mut LevelCtx) {
+    /// Paper `Entity#checkBelowWorld()`, invoking the supplied `onBelowWorld()` override.
+    pub fn check_below_world(
+        &mut self,
+        ctx: &mut LevelCtx,
+        on_below_world: impl FnOnce(&mut Self, &mut LevelCtx),
+    ) {
         if !ctx.void_damage_enabled {
             return;
         }
@@ -650,8 +640,13 @@ impl Entity {
         );
         if self.pos.y < threshold {
             ctx.record_event(LifecycleEvent::BelowWorld { id: self.id });
-            self.request_remove_taken(ctx, EntityRemovalReason::Discarded);
+            on_below_world(self, ctx);
         }
+    }
+
+    /// Paper `Entity#onBelowWorld()`: `discard(OUT_OF_WORLD)`.
+    pub fn on_below_world(&mut self, ctx: &mut LevelCtx) {
+        self.request_remove_taken(ctx, EntityRemovalReason::Discarded);
     }
 
     /// Paper `Entity#postTick()` (CraftBukkit hook).

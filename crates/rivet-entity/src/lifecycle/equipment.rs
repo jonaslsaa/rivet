@@ -247,6 +247,20 @@ impl EquipmentItem {
         self.item_id == other.item_id && self.count == other.count && self.broken == other.broken
     }
 
+    /// Paper `ItemStack.isSameItemSameComponents(a, b)` (count-insensitive).
+    ///
+    /// An empty stack's item is `minecraft:air`, so two empty stacks compare equal and an
+    /// empty stack never matches a non-empty one. `broken` stands in for the damage
+    /// components that make a stack broken.
+    #[must_use]
+    pub fn is_same_item_same_components(&self, other: &Self) -> bool {
+        match (self.is_empty(), other.is_empty()) {
+            (true, true) => true,
+            (false, false) => self.item_id == other.item_id && self.broken == other.broken,
+            _ => false,
+        }
+    }
+
     /// Paper `EquipmentSlot#limit(ItemStack)` -> `countLimit > 0 ? toEquip.split(countLimit) : toEquip`.
     pub fn limit_for_slot(&mut self, slot: EquipmentSlot) -> Self {
         let limit = slot.count_limit();

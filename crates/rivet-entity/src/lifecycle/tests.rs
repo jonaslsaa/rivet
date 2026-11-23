@@ -255,7 +255,8 @@ fn mob_selector_alternation_and_control_flags_every_five_ticks() {
     // updateControlFlags runs only when tickCount % 5 == 0
     assert_eq!(control_flag_ticks, vec![5]);
 
-    // Mounting a player onto the mob must disable move/jump/look flags during tick_all
+    // A player rider is not a Mob, so Mob#getControllingPassenger() is null and
+    // move/jump/look stay enabled.
     let player_id = ctx.next_entity_id();
     ctx.add_entity(LifecycleEntity::Living(LivingEntity::new(
         player_id,
@@ -267,10 +268,38 @@ fn mob_selector_alternation_and_control_flags_every_five_ticks() {
     for _ in 0..4 {
         ctx.tick_all(true);
     }
+    assert_eq!(
+        ctx.get(id).unwrap().mob().unwrap().control_flags,
+        MobControlFlags::default()
+    );
+
+    // A Mob rider that can control vehicles disables move/jump/look.
+    assert!(ctx.stop_riding(player_id, false));
+    let rider_mob_id = ctx.next_entity_id();
+    ctx.add_entity(LifecycleEntity::Mob(Mob::new(
+        rider_mob_id,
+        zombie_meta(),
+        20.0,
+        3,
+    )));
+    assert!(ctx.start_riding(rider_mob_id, id, false, false));
+    for _ in 0..5 {
+        ctx.tick_all(true);
+    }
     let flags = ctx.get(id).unwrap().mob().unwrap().control_flags;
     assert!(!flags.move_enabled);
     assert!(!flags.jump_enabled);
     assert!(!flags.look_enabled);
+
+    // A NoAI vehicle has no controlling passenger.
+    ctx.get_mut(id).unwrap().mob_mut().unwrap().set_no_ai(true);
+    for _ in 0..5 {
+        ctx.tick_all(true);
+    }
+    assert_eq!(
+        ctx.get(id).unwrap().mob().unwrap().control_flags,
+        MobControlFlags::default()
+    );
 }
 
 // ============================================================================
@@ -549,11 +578,18 @@ fn drowning_death_timer_and_peaceful_despawn() {
             reason: EntityRemovalReason::Discarded,
         } if *id == mob_id
     )));
-    assert!(
-        !despawn_evs
-            .iter()
-            .any(|e| matches!(e, LifecycleEvent::EntityTickStart { id, .. } if *id == mob_id))
-    );
+    // Paper's entity loop does not re-check isRemoved() after checkDespawn(): the
+    // discarded mob still gets this tick, after its removal, and is purged afterwards.
+    let removed_idx = despawn_evs
+        .iter()
+        .position(|e| matches!(e, LifecycleEvent::EntityRemoved { id, .. } if *id == mob_id))
+        .unwrap();
+    let tick_idx = despawn_evs
+        .iter()
+        .position(|e| matches!(e, LifecycleEvent::EntityTickStart { id, .. } if *id == mob_id))
+        .expect("despawned mob still ticks once");
+    assert!(removed_idx < tick_idx);
+    assert!(ctx.get(mob_id).is_none());
 }
 
 #[test]
@@ -689,7 +725,9 @@ fn negative_cancelled_dismount_moonrise_lock_no_ai_and_double_take() {
     ctx.take_events();
     ctx.tick_all(true);
     assert_eq!(ctx.get(rider_id).unwrap().entity().vehicle, Some(pig_id));
-    assert!(!ctx.take_events().iter().any(|e| matches!(
+    assert_eq!(ctx.get(pig_id).unwrap().entity().passengers, vec![rider_id]);
+    // Entity#removeVehicle still fires GameEvent.ENTITY_DISMOUNT after a cancelled dismount.
+    assert!(ctx.take_events().iter().any(|e| matches!(
         e,
         LifecycleEvent::Dismount { passenger_id, .. } if *passenger_id == rider_id
     )));
@@ -758,7 +796,7 @@ fn living_base_tick_preserves_self_hurt_ids_while_taken() {
 }
 
 #[test]
-fn tick_passenger_cleans_stale_entries_and_suppresses_cancel_for_removed_passenger() {
+fn tick_passenger_stops_stale_and_removed_passengers_like_paper() {
     let mut ctx = LevelCtx::new();
     let vehicle_a = ctx.next_entity_id();
     let vehicle_b = ctx.next_entity_id();
@@ -791,16 +829,28 @@ fn tick_passenger_cleans_stale_entries_and_suppresses_cancel_for_removed_passeng
         .passengers
         .extend_from_slice(&[missing_id, rider]);
 
+    // The purged ID is detached from vehicle_a.
     ctx.tick_passenger(vehicle_a, missing_id, true);
-    ctx.tick_passenger(vehicle_a, rider, true);
+    assert_eq!(ctx.get(vehicle_a).unwrap().entity().passengers, vec![rider]);
 
-    assert!(ctx.get(vehicle_a).unwrap().entity().passengers.is_empty());
+    // ServerLevel#tickPassenger calls rider.stopRiding() when rider.getVehicle() != vehicle_a,
+    // which dismounts the rider from its actual vehicle (vehicle_b); vehicle_a's stale entry
+    // is left untouched.
+    ctx.tick_passenger(vehicle_a, rider, true);
+    assert_eq!(ctx.get(rider).unwrap().entity().vehicle, None);
+    assert!(ctx.get(vehicle_b).unwrap().entity().passengers.is_empty());
+    assert_eq!(ctx.get(vehicle_a).unwrap().entity().passengers, vec![rider]);
+
+    // A removed passenger gets a plain (cancellable) stopRiding().
+    ctx.get_mut(rider).unwrap().entity_mut().boarding_cooldown = 0;
+    assert!(ctx.start_riding(rider, vehicle_b, false, false));
+    ctx.get_mut(rider).unwrap().entity_mut().removal_reason = Some(EntityRemovalReason::Discarded);
+    ctx.cancel_dismount = true;
+    ctx.tick_passenger(vehicle_b, rider, true);
     assert_eq!(ctx.get(rider).unwrap().entity().vehicle, Some(vehicle_b));
     assert_eq!(ctx.get(vehicle_b).unwrap().entity().passengers, vec![rider]);
 
-    // A removed passenger still linked to vehicle_b must detach even when cancel_dismount is true.
-    ctx.cancel_dismount = true;
-    ctx.get_mut(rider).unwrap().entity_mut().removal_reason = Some(EntityRemovalReason::Discarded);
+    ctx.cancel_dismount = false;
     ctx.tick_passenger(vehicle_b, rider, true);
     assert_eq!(ctx.get(rider).unwrap().entity().vehicle, None);
     assert!(ctx.get(vehicle_b).unwrap().entity().passengers.is_empty());
@@ -820,7 +870,12 @@ fn living_rotation_wrap_uses_jdk_6430675_rounding() {
     // Tick directly through living_tick (skipping set_old_pos_and_rot) to exercise the wrap
     let mut taken = ctx.take_entity(id).unwrap();
     if let LifecycleEntity::Living(ref mut l) = taken {
-        l.living_tick_with_hooks(&mut ctx, |_this, _c| {}, |_this, _c| {});
+        l.living_tick_with_hooks(
+            &mut ctx,
+            |_this, _c| {},
+            |_this, _c| {},
+            |this, y_body_rot_t, _c| this.tick_head_turn(y_body_rot_t),
+        );
         assert_eq!(l.entity.y_rot_o, 0.0_f32);
     }
     ctx.put_back_entity(taken);
@@ -893,4 +948,231 @@ fn distance_despawn_runs_via_tick_all_and_removed_vehicle_sets_cooldown() {
         LifecycleEvent::Dismount { passenger_id, vehicle_id: vid }
             if *passenger_id == rider_id && *vid == vehicle_id
     )));
+}
+
+// ============================================================================
+// 8. Paper-fidelity regressions (PR #767 review)
+// ============================================================================
+
+#[test]
+fn entity_fire_state_matches_paper_server_semantics() {
+    let mut ctx = LevelCtx::new();
+    let fresh = Entity::new(1, pig_meta(), 1);
+    assert_eq!(fresh.remaining_fire_ticks, 0);
+
+    // A fire-immune entity clears its fire ticks in one baseTick.
+    let mut immune_meta = pig_meta();
+    immune_meta.fire_immune = true;
+    let mut immune = Entity::new(2, immune_meta, 2);
+    immune.remaining_fire_ticks = 100;
+    immune.entity_base_tick(&mut ctx);
+    assert_eq!(immune.remaining_fire_ticks, 0);
+
+    // clearFire() keeps negative (fire-protection) ticks; a zero count stays zero.
+    let mut e = Entity::new(3, pig_meta(), 3);
+    e.remaining_fire_ticks = -20;
+    e.clear_fire();
+    assert_eq!(e.remaining_fire_ticks, -20);
+    let mut e = Entity::new(4, pig_meta(), 4);
+    e.entity_base_tick(&mut ctx);
+    assert_eq!(e.remaining_fire_ticks, 0);
+
+    // visualFire FALSE forces the flag off; the server's isOnFire() ignores the flag.
+    let mut e = Entity::new(5, pig_meta(), 5);
+    e.remaining_fire_ticks = 40;
+    e.visual_fire = Some(false);
+    e.entity_base_tick(&mut ctx);
+    assert!(!e.get_shared_flag(FLAG_ONFIRE));
+    assert!(e.is_on_fire());
+
+    let mut e = Entity::new(6, pig_meta(), 6);
+    e.visual_fire = Some(true);
+    e.entity_base_tick(&mut ctx);
+    assert!(e.get_shared_flag(FLAG_ONFIRE));
+    assert!(!e.is_on_fire());
+}
+
+#[test]
+fn living_below_world_takes_void_damage_instead_of_discard() {
+    let mut ctx = LevelCtx::new();
+    let living_id = ctx.next_entity_id();
+    let mut living = LivingEntity::new(living_id, zombie_meta(), 20.0, 1);
+    living.entity.set_pos(0.0, -200.0, 0.0);
+    ctx.add_entity(LifecycleEntity::Living(living));
+    let base_id = ctx.next_entity_id();
+    let mut base = Entity::new(base_id, pig_meta(), 2);
+    base.set_pos(0.0, -200.0, 0.0);
+    ctx.add_entity(LifecycleEntity::Base(base));
+    ctx.take_events();
+
+    ctx.tick_all(true);
+    let evs = ctx.take_events();
+    assert!(evs.iter().any(|e| matches!(
+        e,
+        LifecycleEvent::Hurt { id, amount, source: "fell_out_of_world" }
+            if *id == living_id && *amount == 4.0
+    )));
+    assert!(!ctx.get(living_id).unwrap().entity().is_removed());
+    // Base Entity#onBelowWorld discards.
+    assert!(ctx.get(base_id).is_none());
+}
+
+#[test]
+fn inactive_ticks_accumulate_no_action_time_for_soft_despawn() {
+    let mut ctx = LevelCtx::new();
+    let mob_id = ctx.next_entity_id();
+    ctx.add_entity(LifecycleEntity::Mob(Mob::new(mob_id, pig_meta(), 10.0, 1)));
+    let living_id = ctx.next_entity_id();
+    ctx.add_entity(LifecycleEntity::Living(LivingEntity::new(
+        living_id,
+        zombie_meta(),
+        20.0,
+        2,
+    )));
+    for _ in 0..3 {
+        ctx.tick_all(false);
+    }
+    assert_eq!(ctx.get(mob_id).unwrap().living().unwrap().no_action_time, 3);
+    assert_eq!(
+        ctx.get(living_id).unwrap().living().unwrap().no_action_time,
+        3
+    );
+}
+
+#[test]
+fn passenger_mob_requires_custom_persistence() {
+    let mut ctx = LevelCtx::new();
+    ctx.nearest_player_pos = Some(Vec3::new(0.0, 0.0, 0.0));
+    let boat_id = ctx.next_entity_id();
+    let mut boat = Entity::new(boat_id, EntityTypeMeta::boat(), 1);
+    boat.set_pos(200.0, 0.0, 0.0);
+    ctx.add_entity(LifecycleEntity::Base(boat));
+    let mob_id = ctx.next_entity_id();
+    let mut mob = Mob::new(mob_id, zombie_meta(), 20.0, 2);
+    mob.living.entity.set_pos(200.0, 0.0, 0.0);
+    mob.living.no_action_time = 50;
+    ctx.add_entity(LifecycleEntity::Mob(mob));
+    assert!(ctx.start_riding(mob_id, boat_id, false, false));
+
+    ctx.tick_all(true);
+    let mob = ctx.get(mob_id).expect("riding mob is persistent");
+    assert!(!mob.entity().is_removed());
+    assert_eq!(mob.living().unwrap().no_action_time, 0);
+}
+
+#[test]
+fn passenger_of_purged_vehicle_stops_riding_and_keeps_ticking() {
+    let mut ctx = LevelCtx::new();
+    let boat_id = ctx.next_entity_id();
+    let pig_id = ctx.next_entity_id();
+    ctx.add_entity(LifecycleEntity::Base(Entity::new(
+        boat_id,
+        EntityTypeMeta::boat(),
+        1,
+    )));
+    ctx.add_entity(LifecycleEntity::Mob(Mob::new(pig_id, pig_meta(), 10.0, 2)));
+    assert!(ctx.start_riding(pig_id, boat_id, false, false));
+    assert!(ctx.remove_entity(boat_id, EntityRemovalReason::UnloadedToChunk));
+    assert_eq!(ctx.get(pig_id).unwrap().entity().vehicle, Some(boat_id));
+    ctx.take_events();
+
+    ctx.tick_all(true);
+    assert_eq!(ctx.get(pig_id).unwrap().entity().vehicle, None);
+    assert!(ctx.take_events().iter().any(|e| matches!(
+        e,
+        LifecycleEvent::EntityTickStart { id, as_passenger: false } if *id == pig_id
+    )));
+}
+
+#[test]
+fn living_tick_head_turn_matches_paper_26_2() {
+    let mut living = LivingEntity::new(1, zombie_meta(), 20.0, 1);
+    living.entity.y_rot = 60.0;
+    living.tick_head_turn(0.0);
+    assert_eq!(living.y_body_rot, 10.0);
+
+    let mut living = LivingEntity::new(1, zombie_meta(), 20.0, 1);
+    living.entity.y_rot = -30.0;
+    living.tick_head_turn(0.0);
+    assert_eq!(living.y_body_rot, 0.0);
+}
+
+#[test]
+fn start_riding_mount_cancellation_and_ignored_dismount_result() {
+    let mut ctx = LevelCtx::new();
+    let p = ctx.next_entity_id();
+    let v1 = ctx.next_entity_id();
+    let v2 = ctx.next_entity_id();
+    ctx.add_entity(LifecycleEntity::Mob(Mob::new(p, pig_meta(), 10.0, 1)));
+    ctx.add_entity(LifecycleEntity::Base(Entity::new(
+        v1,
+        EntityTypeMeta::boat(),
+        2,
+    )));
+    ctx.add_entity(LifecycleEntity::Base(Entity::new(
+        v2,
+        EntityTypeMeta::boat(),
+        3,
+    )));
+
+    // EntityMountEvent fires (and can cancel) even when sendEventAndTriggers is false.
+    ctx.cancel_mount = true;
+    assert!(!ctx.start_riding(p, v1, false, false));
+    assert!(!ctx.start_riding(p, v1, true, false));
+    ctx.cancel_mount = false;
+
+    // Paper ignores a cancelled dismount from the old vehicle and still mounts the new one.
+    assert!(ctx.start_riding(p, v1, false, false));
+    ctx.cancel_dismount = true;
+    assert!(ctx.start_riding(p, v2, true, false));
+    assert_eq!(ctx.get(p).unwrap().entity().vehicle, Some(v2));
+    assert_eq!(ctx.get(v2).unwrap().entity().passengers, vec![p]);
+    assert_eq!(ctx.get(v1).unwrap().entity().passengers, vec![p]);
+}
+
+#[test]
+fn equip_event_ignores_count_changes() {
+    let mut ctx = LevelCtx::new();
+    let mut living = LivingEntity::new(1, zombie_meta(), 20.0, 1);
+    living.entity.first_tick = false;
+    living.set_item_slot(
+        EquipmentSlot::MainHand,
+        EquipmentItem::new("minecraft:stone", 1),
+        false,
+        &mut ctx,
+    );
+    ctx.take_events();
+    living.set_item_slot(
+        EquipmentSlot::MainHand,
+        EquipmentItem::new("minecraft:stone", 2),
+        false,
+        &mut ctx,
+    );
+    assert!(
+        !ctx.take_events()
+            .iter()
+            .any(|e| matches!(e, LifecycleEvent::EquipmentEquipped { .. }))
+    );
+    living.set_item_slot(
+        EquipmentSlot::MainHand,
+        EquipmentItem::empty(),
+        false,
+        &mut ctx,
+    );
+    assert!(
+        ctx.take_events()
+            .iter()
+            .any(|e| matches!(e, LifecycleEvent::EquipmentEquipped { .. }))
+    );
+}
+
+#[test]
+fn removal_reason_save_and_destroy_flags_match_paper() {
+    use EntityRemovalReason::*;
+    let flags = |r: EntityRemovalReason| (r.should_destroy(), r.should_save());
+    assert_eq!(flags(Killed), (true, false));
+    assert_eq!(flags(Discarded), (true, false));
+    assert_eq!(flags(UnloadedToChunk), (false, true));
+    assert_eq!(flags(UnloadedWithPlayer), (false, false));
+    assert_eq!(flags(ChangedDimension), (false, false));
 }
