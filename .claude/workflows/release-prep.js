@@ -1,7 +1,7 @@
 export const meta = {
   name: 'release-prep',
   description: 'Refresh an already-implemented worktree onto current main, run focused checks, and loop fresh exact-head review and fixes until it is ready for the serialized release gate',
-  whenToUse: 'Use after implementation is complete but before the coordinator-owned strict gate. Pass {worktree, task, maxRounds?, checks?}. The workflow may fetch, rebase, resolve conflicts, fix findings, and commit locally; it never runs the full gate, pushes, opens a PR, or merges.',
+  whenToUse: 'Use after implementation is complete but before the coordinator-owned strict gate. Pass {worktree, task, maxRounds?, checks?}. The workflow may fetch, merge origin/main (never rebase), resolve conflicts, fix findings, and commit locally; it never runs the full gate, pushes, opens a PR, or merges.',
   phases: [{ title: 'Refresh' }, { title: 'Check' }, { title: 'Review' }, { title: 'Fix' }],
 }
 
@@ -116,12 +116,13 @@ async function resilientAgent(prompt, opts, attempts = 2) {
 const HARD_RULES =
   `Never git stash/reset/force-push, never push, never open or merge a PR, and never run ` +
   `\`scripts/gate.sh\` or \`scripts/gate.sh --require-oracle\`; the coordinator owns the serialized strict gate and release. ` +
-  `Never weaken tests or fixtures. Never abort a rebase or discard conflicting/unexplained files; resolve in place or stop blocked. ` +
+  `Never weaken tests or fixtures. Never rebase: branches may already be pushed PR heads and must stay fast-forward pushable. ` +
+  `Never abort a merge or discard conflicting/unexplained files; resolve in place or stop blocked. ` +
   `Never modify or commit anything from \`${WT}/working\`.`
 
 const RESUME_NOTE =
-  `This workflow may resume after interruption. Re-read branch, status, log, and rebase state from disk before acting. ` +
-  `If a rebase is already in progress, resolve it faithfully and continue it; never abort it or assume a clean starting state.`
+  `This workflow may resume after interruption. Re-read branch, status, log, and merge state from disk before acting. ` +
+  `If a merge is already in progress, resolve it faithfully and conclude it; never abort it or assume a clean starting state.`
 
 const REVIEW_SCOPE =
   `In \`${WT}\`, fetch origin, record full 40-character hashes from \`git rev-parse HEAD\` and \`git rev-parse origin/main\`, then inspect ` +
@@ -157,12 +158,12 @@ for (let round = 1; round <= MAX; round++) {
   phase('Refresh')
   const refresh = await resilientAgent(
     `Refresh the already-implemented branch in \`${WT}\` onto current \`origin/main\` before release review. ` +
-      `${HARD_RULES} ${RESUME_NOTE} Run \`git fetch origin\`. If the tree is clean, rebase onto ` +
-      `\`origin/main\` when behind; resolve any rebase conflicts faithfully using the task and current main, then continue the ` +
-      `rebase without weakening or dropping the deliverable. If the tree is dirty, do not rebase or discard anything: report ` +
+      `${HARD_RULES} ${RESUME_NOTE} Run \`git fetch origin\`. If the tree is clean and behind, merge ` +
+      `\`origin/main\` into the branch (\`git merge --no-edit origin/main\`); resolve any merge conflicts faithfully using the task and ` +
+      `current main, then commit the merge without weakening or dropping the deliverable. If the tree is dirty, do not merge or discard anything: report ` +
       `ready=false so the fix phase can inspect and commit legitimate task work. Finish by reporting full 40-character hashes, ` +
       `ahead/behind counts, cleanliness, and every merge-base-diff deliverable file as a repo-relative path. ready=true requires ` +
-      `a named feature/fix/chore/refactor branch, clean tree, ` +
+      `a named non-main branch, clean tree, ` +
       `ahead>0, and behind=0. Task:\n${TASK}`,
     { label: `refresh:${SLUG}:r${round}`, phase: 'Refresh', schema: REFRESH },
   )
