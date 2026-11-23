@@ -1,10 +1,11 @@
 //! Port of `net.minecraft.world.entity.Entity` lifecycle foundation
 //! (Paper 26.2, commit `0a993450f129c4942c2a9ed45ba047412b4667cf`).
 
-use super::dimensions::{EntityAttachment, EntityDimensions, Pose};
+use super::dimensions::{EntityAttachment, EntityAttachments, EntityDimensions, Pose};
 use super::level_ctx::{LevelCtx, LifecycleEvent};
 use crate::storage::{Aabb, EntityRemovalReason};
 use rivet_registry::core::{BlockPos, ChunkPos, Vec3};
+use rivet_registry::generated::tags::ENTITY_TYPE_TAG_BY_NAME;
 use rivet_util::mth::{self, Uuid};
 use rivet_util::random::SingleThreadedRandomSource;
 
@@ -38,6 +39,7 @@ pub struct EntityTypeMeta {
     pub can_serialize: bool,
     pub allowed_in_peaceful: bool,
     pub fire_immune: bool,
+    /// Membership in `EntityTypeTags.DISMOUNTS_UNDERWATER`.
     pub dismounts_underwater: bool,
     pub is_player: bool,
     pub is_boat: bool,
@@ -49,39 +51,56 @@ pub struct EntityTypeMeta {
     pub max_passengers: usize,
 }
 
+/// Whether `type_id` is listed by the vanilla entity-type tag `tag`.
+fn entity_type_in_tag(tag: &str, type_id: &str) -> bool {
+    ENTITY_TYPE_TAG_BY_NAME
+        .get(tag)
+        .is_some_and(|members| members.contains(&type_id))
+}
+
 impl EntityTypeMeta {
-    /// Creates a standard mob/entity type metadata with Paper defaults.
+    /// Creates a standard mob/entity type metadata with Paper defaults. Tag memberships
+    /// (`dismounts_underwater`, `non_controlling_rider`) are read from the vanilla tag data.
     #[must_use]
     pub fn new(type_id: impl Into<String>, width: f32, height: f32) -> Self {
+        let type_id = type_id.into();
+        let dismounts_underwater = entity_type_in_tag("minecraft:dismounts_underwater", &type_id);
+        let non_controlling_rider = entity_type_in_tag("minecraft:non_controlling_rider", &type_id);
         Self {
-            type_id: type_id.into(),
+            type_id,
             dimensions: EntityDimensions::scalable(width, height),
             can_serialize: true,
             allowed_in_peaceful: true,
             fire_immune: false,
-            dismounts_underwater: true,
+            dismounts_underwater,
             is_player: false,
             is_boat: false,
-            non_controlling_rider: false,
+            non_controlling_rider,
             despawn_time: -1,
             max_passengers: 1,
         }
     }
 
-    /// Standard player metadata (`0.6 x 1.8`, `eye_height = 1.62`, `can_serialize = false`).
+    /// `EntityTypes.PLAYER` metadata (`0.6 x 1.8`, `eyeHeight(1.62F)`,
+    /// `vehicleAttachment(Avatar.DEFAULT_VEHICLE_ATTACHMENT)`, `noSave()`).
     #[must_use]
     pub fn player() -> Self {
         let mut meta = Self::new("minecraft:player", 0.6, 1.8);
-        meta.dimensions = meta.dimensions.with_eye_height(1.62);
+        meta.dimensions = meta.dimensions.with_eye_height(1.62).with_attachments(
+            EntityAttachments::builder()
+                .attach(EntityAttachment::Vehicle, Vec3::new(0.0, 0.6, 0.0)),
+        );
         meta.can_serialize = false;
         meta.is_player = true;
         meta
     }
 
-    /// Standard boat metadata (`1.375 x 0.5625`, `max_passengers = 2`, `is_boat = true`).
+    /// `EntityTypes.OAK_BOAT` metadata (`1.375 x 0.5625`, `eyeHeight(0.5625F)`,
+    /// `max_passengers = 2`, `is_boat = true`).
     #[must_use]
     pub fn boat() -> Self {
         let mut meta = Self::new("minecraft:oak_boat", 1.375, 0.5625);
+        meta.dimensions = meta.dimensions.with_eye_height(0.5625);
         meta.is_boat = true;
         meta.max_passengers = 2;
         meta
@@ -147,6 +166,9 @@ pub struct Entity {
     pub passengers: Vec<i32>,
     pub removal_reason: Option<EntityRemovalReason>,
     pub valid: bool,
+    /// `this instanceof LivingEntity`; set by `LivingEntity::new` so the embedded base can
+    /// dispatch the `LivingEntity#getDimensions(Pose)` override.
+    pub is_living: bool,
     pub persist: bool,
     pub random: SingleThreadedRandomSource,
 }
@@ -224,6 +246,7 @@ impl Entity {
             passengers: Vec::new(),
             removal_reason: None,
             valid: false,
+            is_living: false,
             persist: true,
             random,
         };
@@ -379,12 +402,15 @@ impl Entity {
         self.refresh_dimensions()
     }
 
-    /// Paper `Entity#getDimensions(Pose)`.
+    /// Paper `Entity#getDimensions(Pose)` (`this.type.getDimensions()`), with the
+    /// `LivingEntity#getDimensions(Pose)` override returning `SLEEPING_DIMENSIONS`
+    /// (`fixed(0.2F, 0.2F).withEyeHeight(0.2F)`) for living entities in `Pose::Sleeping`.
     #[must_use]
     pub fn dimensions_for_pose(&self, pose: Pose) -> EntityDimensions {
-        match pose {
-            Pose::Sleeping => EntityDimensions::fixed(0.2, 0.2).with_eye_height(0.2),
-            _ => self.entity_type.dimensions.clone(),
+        if self.is_living && pose == Pose::Sleeping {
+            EntityDimensions::fixed(0.2, 0.2).with_eye_height(0.2)
+        } else {
+            self.entity_type.dimensions.clone()
         }
     }
 
@@ -469,10 +495,11 @@ impl Entity {
         self.passengers.first().copied()
     }
 
-    /// Paper `Entity#couldAcceptPassenger()`.
+    /// Paper `Entity#couldAcceptPassenger()` (base implementation; only `Marker` and
+    /// `OminousItemSpawner` override it).
     #[must_use]
     pub const fn could_accept_passenger(&self) -> bool {
-        !self.is_removed()
+        true
     }
 
     /// Paper `Entity#canRide(Entity)`.
@@ -528,12 +555,13 @@ impl Entity {
     // Core tick & baseTick (explicit parent methods called by subclasses)
     // -------------------------------------------------------------------------
 
-    /// Requests removal of a currently-taken entity (`Entity#setRemoved` during tick/despawn).
+    /// Paper `Entity#setRemoved` for a currently-taken entity (removal during tick/despawn).
     ///
-    /// Mirrors `LevelCtx::remove_entity`: respects `ctx.section_update_lock`, preserves the
-    /// first `removal_reason`, marks `valid = false`, detaches from its vehicle when
-    /// `reason.should_destroy()`, and queues post-putback cleanup (`eject_passengers` and
-    /// `LifecycleEvent::EntityRemoved`) on `ctx`.
+    /// Mirrors `LevelCtx::remove_entity` synchronously, as in Paper: respects
+    /// `ctx.section_update_lock`, preserves the first `removal_reason`, detaches from its
+    /// vehicle when `reason.should_destroy()`, stops its passengers riding unless
+    /// `UnloadedToChunk`, and on the first removal marks `valid = false` and emits
+    /// `LifecycleEvent::EntityRemoved` (`levelCallback.onRemove`).
     pub(crate) fn request_remove_taken(
         &mut self,
         ctx: &mut LevelCtx,
@@ -546,13 +574,16 @@ impl Entity {
         if first_time {
             self.removal_reason = Some(reason);
         }
-        self.valid = false;
         let effective_reason = self.removal_reason.unwrap_or(reason);
         if effective_reason.should_destroy() {
             ctx.stop_riding_taken(self, false);
         }
+        if effective_reason != EntityRemovalReason::UnloadedToChunk {
+            ctx.stop_riding_passengers_of_taken(self);
+        }
         if first_time {
-            ctx.queue_pending_removal(self.id, effective_reason);
+            self.valid = false;
+            ctx.on_entity_removed(self.id, reason);
         }
         true
     }

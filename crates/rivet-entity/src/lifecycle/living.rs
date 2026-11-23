@@ -75,6 +75,7 @@ impl LivingEntity {
     #[must_use]
     pub fn new(id: i32, entity_type: EntityTypeMeta, max_health: f32, random_seed: i64) -> Self {
         let mut entity = Entity::new(id, entity_type, random_seed);
+        entity.is_living = true;
         entity.reapply_position();
         Self {
             entity,
@@ -662,13 +663,14 @@ impl LivingEntity {
         }
     }
 
-    /// Paper `LivingEntity#rideTick()`.
+    /// Paper `LivingEntity#rideTick()`: `super.rideTick(); this.resetFallDistance();`.
     pub fn living_ride_tick(&mut self, ctx: &mut LevelCtx) {
         self.entity.delta_movement = Vec3::new(0.0, 0.0, 0.0);
         self.living_tick(ctx);
         if let Some(vehicle_id) = self.entity.vehicle {
             ctx.position_taken_rider(vehicle_id, &mut self.entity);
         }
+        self.entity.fall_distance = 0.0;
     }
 }
 

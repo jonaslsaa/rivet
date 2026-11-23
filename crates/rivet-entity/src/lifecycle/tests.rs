@@ -83,7 +83,9 @@ fn pose_ids_and_refresh_dimensions_growth() {
     assert_eq!(Pose::by_id(999), Pose::Standing);
     assert_eq!(Pose::by_id(-1), Pose::Standing);
 
-    let mut entity = Entity::new(1, zombie_meta(), 42);
+    // SLEEPING_DIMENSIONS is a LivingEntity#getDimensions override.
+    let mut living = LivingEntity::new(1, zombie_meta(), 20.0, 42);
+    let entity = &mut living.entity;
     entity.first_tick = false;
     assert!(!entity.set_pose(Pose::Sleeping));
     assert!((entity.dimensions.height - 0.2_f32).abs() < 1e-6);
@@ -94,11 +96,20 @@ fn pose_ids_and_refresh_dimensions_growth() {
     assert!((entity.dimensions.height - 1.95_f32).abs() < 1e-6);
     assert!((entity.eye_height - 1.95_f32 * 0.85_f32).abs() < 1e-5);
 
+    // Base Entity#getDimensions(pose) always returns the type dimensions.
+    let mut boat = Entity::new(3, EntityTypeMeta::boat(), 44);
+    boat.first_tick = false;
+    assert!(!boat.set_pose(Pose::Sleeping));
+    assert!((boat.dimensions.width - 1.375_f32).abs() < 1e-6);
+    assert!((boat.dimensions.height - 0.5625_f32).abs() < 1e-6);
+    assert!((boat.eye_height - 0.5625_f32).abs() < 1e-6);
+
     // Players never trigger the non-player growth fudge
-    let mut player = Entity::new(2, EntityTypeMeta::player(), 43);
-    player.first_tick = false;
-    assert!(!player.set_pose(Pose::Sleeping));
-    assert!(!player.set_pose(Pose::Standing));
+    let mut player = LivingEntity::new(2, EntityTypeMeta::player(), 20.0, 43);
+    player.entity.first_tick = false;
+    assert!(!player.entity.set_pose(Pose::Sleeping));
+    assert!((player.entity.dimensions.height - 0.2_f32).abs() < 1e-6);
+    assert!(!player.entity.set_pose(Pose::Standing));
 
     // start_riding resets a sleeping entity to Standing and refreshes its dimensions immediately
     let mut ctx = LevelCtx::new();
@@ -416,9 +427,10 @@ fn multi_level_passenger_traversal_and_position_rider() {
     assert!((pig_pos.y - (64.0 + f64::from(0.5625_f32))).abs() < 1e-6);
     assert!((pig_pos.z - 20.0).abs() < 1e-6);
 
-    // Player was positioned on top of pig (y = pig_pos.y + pig height 0.9)
+    // Player was positioned on top of pig (y = pig_pos.y + pig height 0.9), minus the player
+    // VEHICLE attachment (Avatar.DEFAULT_VEHICLE_ATTACHMENT = (0, 0.6, 0))
     let player_pos = ctx.get(player_id).unwrap().entity().pos;
-    assert!((player_pos.y - (pig_pos.y + f64::from(0.9_f32))).abs() < 1e-6);
+    assert!((player_pos.y - (pig_pos.y + f64::from(0.9_f32) - 0.6)).abs() < 1e-6);
 }
 
 #[test]
@@ -630,6 +642,16 @@ fn automatic_removal_runs_lifecycle_cleanup_and_ejects_passengers() {
             reason: EntityRemovalReason::Killed,
         } if *id == pig_id
     )));
+
+    // Paper setRemoved runs synchronously inside tickDeath: DeathTick, then the rider's
+    // dismount, then the removal callback, and only then the rest of LivingEntity#tick.
+    let pos = |pred: &dyn Fn(&LifecycleEvent) -> bool| evs.iter().position(pred).unwrap();
+    let death = pos(&|e| matches!(e, LifecycleEvent::DeathTick { id, .. } if *id == pig_id));
+    let dismount =
+        pos(&|e| matches!(e, LifecycleEvent::Dismount { vehicle_id, .. } if *vehicle_id == pig_id));
+    let removed = pos(&|e| matches!(e, LifecycleEvent::EntityRemoved { id, .. } if *id == pig_id));
+    let living_tick = pos(&|e| matches!(e, LifecycleEvent::LivingTick { id } if *id == pig_id));
+    assert!(death < dismount && dismount < removed && removed < living_tick);
 }
 
 #[test]
@@ -1175,4 +1197,133 @@ fn removal_reason_save_and_destroy_flags_match_paper() {
     assert_eq!(flags(UnloadedToChunk), (false, true));
     assert_eq!(flags(UnloadedWithPlayer), (false, false));
     assert_eq!(flags(ChangedDimension), (false, false));
+}
+
+#[test]
+fn dismount_cancellation_requires_valid_vehicle() {
+    let mut ctx = LevelCtx::new();
+    let boat_id = ctx.next_entity_id();
+    let pig_id = ctx.next_entity_id();
+    ctx.add_entity(LifecycleEntity::Base(Entity::new(
+        boat_id,
+        EntityTypeMeta::boat(),
+        1,
+    )));
+    ctx.add_entity(LifecycleEntity::Mob(Mob::new(pig_id, pig_meta(), 10.0, 2)));
+    assert!(ctx.start_riding(pig_id, boat_id, false, false));
+
+    // The boat is still valid inside setRemoved, so the passenger dismount is cancelled.
+    ctx.cancel_dismount = true;
+    assert!(ctx.remove_entity(boat_id, EntityRemovalReason::Discarded));
+    assert!(ctx.get(boat_id).is_none());
+    assert_eq!(ctx.get(pig_id).unwrap().entity().vehicle, Some(boat_id));
+
+    // Once removed the boat is invalid: EntityDismountEvent no longer fires, so the
+    // pig detaches on the next tick even though cancellation is still requested.
+    ctx.tick_all(true);
+    let pig = ctx.get(pig_id).unwrap();
+    assert_eq!(pig.entity().vehicle, None);
+    assert!(!pig.mob().unwrap().requires_custom_persistence());
+
+    // A removed-but-stored (invalid) vehicle cannot cancel either.
+    let boat2 = ctx.next_entity_id();
+    ctx.add_entity(LifecycleEntity::Base(Entity::new(
+        boat2,
+        EntityTypeMeta::boat(),
+        3,
+    )));
+    ctx.cancel_dismount = false;
+    assert!(ctx.start_riding(pig_id, boat2, true, false));
+    ctx.cancel_dismount = true;
+    ctx.get_mut(boat2).unwrap().entity_mut().valid = false;
+    assert!(ctx.stop_riding(pig_id, false));
+    assert!(ctx.get(boat2).unwrap().entity().passengers.is_empty());
+}
+
+#[test]
+fn ride_tick_resets_fall_distance_for_living_passengers() {
+    let mut ctx = LevelCtx::new();
+    let boat_id = ctx.next_entity_id();
+    let mob_id = ctx.next_entity_id();
+    let living_id = ctx.next_entity_id();
+    ctx.add_entity(LifecycleEntity::Base(Entity::new(
+        boat_id,
+        EntityTypeMeta::boat(),
+        1,
+    )));
+    let mut mob = Mob::new(mob_id, zombie_meta(), 20.0, 2);
+    mob.living.entity.fall_distance = 5.0;
+    ctx.add_entity(LifecycleEntity::Mob(mob));
+    let mut living = LivingEntity::new(living_id, zombie_meta(), 20.0, 3);
+    living.entity.fall_distance = 5.0;
+    ctx.add_entity(LifecycleEntity::Living(living));
+    assert!(ctx.start_riding(mob_id, boat_id, false, false));
+    assert!(ctx.start_riding(living_id, boat_id, false, false));
+
+    ctx.tick_all(true);
+    assert_eq!(ctx.get(mob_id).unwrap().entity().fall_distance, 0.0);
+    assert_eq!(ctx.get(living_id).unwrap().entity().fall_distance, 0.0);
+}
+
+#[test]
+fn entity_type_presets_match_paper_type_data() {
+    // EntityTypeTags.DISMOUNTS_UNDERWATER membership comes from the vanilla tag.
+    assert!(pig_meta().dismounts_underwater);
+    assert!(!zombie_meta().dismounts_underwater);
+    assert!(!EntityTypeMeta::boat().dismounts_underwater);
+    assert!(!EntityTypeMeta::player().dismounts_underwater);
+    assert!(EntityTypeMeta::new("minecraft:slime", 0.52, 0.52).non_controlling_rider);
+    assert!(!pig_meta().non_controlling_rider);
+
+    // OAK_BOAT `.eyeHeight(0.5625F)`; PLAYER `.vehicleAttachment((0, 0.6, 0))`.
+    assert_eq!(EntityTypeMeta::boat().dimensions.eye_height, 0.5625_f32);
+    let player = EntityTypeMeta::player();
+    assert_eq!(
+        player
+            .dimensions
+            .attachments
+            .get(EntityAttachment::Vehicle, 0, 0.0),
+        Vec3::new(0.0, 0.6, 0.0)
+    );
+
+    // A rider with its eyes in water stays on a boat (not in DISMOUNTS_UNDERWATER).
+    let mut ctx = LevelCtx::new();
+    let boat_id = ctx.next_entity_id();
+    let rider_id = ctx.next_entity_id();
+    ctx.add_entity(LifecycleEntity::Base(Entity::new(
+        boat_id,
+        EntityTypeMeta::boat(),
+        1,
+    )));
+    let mut rider = LivingEntity::new(rider_id, zombie_meta(), 20.0, 2);
+    rider.entity.eye_in_water = true;
+    ctx.add_entity(LifecycleEntity::Living(rider));
+    assert!(ctx.start_riding(rider_id, boat_id, false, false));
+    ctx.tick_all(true);
+    assert_eq!(ctx.get(rider_id).unwrap().entity().vehicle, Some(boat_id));
+}
+
+#[test]
+fn start_riding_accepts_removed_vehicle_and_unleashes_mob() {
+    let mut ctx = LevelCtx::new();
+    let boat_id = ctx.next_entity_id();
+    let mob_id = ctx.next_entity_id();
+    ctx.add_entity(LifecycleEntity::Base(Entity::new(
+        boat_id,
+        EntityTypeMeta::boat(),
+        1,
+    )));
+    let mut mob = Mob::new(mob_id, zombie_meta(), 20.0, 2);
+    mob.leashed = true;
+    ctx.add_entity(LifecycleEntity::Mob(mob));
+
+    // Entity#couldAcceptPassenger() is unconditionally true for a base entity.
+    ctx.get_mut(boat_id).unwrap().entity_mut().removal_reason =
+        Some(EntityRemovalReason::Discarded);
+    assert!(ctx.start_riding(mob_id, boat_id, false, false));
+
+    // Mob#startRiding drops the leash of a mob that mounts successfully.
+    let mob = ctx.get(mob_id).unwrap().mob().unwrap();
+    assert!(!mob.leashed);
+    assert_eq!(mob.living.entity.vehicle, Some(boat_id));
 }

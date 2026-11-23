@@ -266,7 +266,6 @@ pub struct LevelCtx {
     /// Test/plugin hook: cancels non-suppressed dismount attempts (`EntityDismountEvent`).
     pub cancel_dismount: bool,
     pub events: Vec<LifecycleEvent>,
-    pending_removals: Vec<(i32, EntityRemovalReason)>,
     /// Removed entities whose storage slot is dropped at the next purge point. Purging is
     /// deferred so an entity discarded by `checkDespawn` still receives its tick, as in Paper.
     purge_queue: Vec<i32>,
@@ -298,7 +297,6 @@ impl LevelCtx {
             cancel_mount: false,
             cancel_dismount: false,
             events: Vec::new(),
-            pending_removals: Vec::new(),
             purge_queue: Vec::new(),
         }
     }
@@ -412,7 +410,6 @@ impl LevelCtx {
 
         let passengers = entity.entity().passengers.clone();
         self.put_back_entity(entity);
-        self.flush_pending_removals();
 
         for passenger_id in passengers {
             self.tick_passenger(id, passenger_id, is_active);
@@ -462,7 +459,6 @@ impl LevelCtx {
 
         let sub_passengers = passenger.entity().passengers.clone();
         self.put_back_entity(passenger);
-        self.flush_pending_removals();
 
         for sub_id in sub_passengers {
             self.tick_passenger(passenger_id, sub_id, is_active);
@@ -487,7 +483,6 @@ impl LevelCtx {
             {
                 entity.check_despawn(self);
                 self.put_back_entity(entity);
-                self.flush_pending_removals();
             }
 
             let vehicle_id = self.get(id).and_then(|e| e.entity().vehicle);
@@ -626,6 +621,7 @@ impl LevelCtx {
     /// - Stops existing riding (result ignored) before attaching to the new vehicle.
     /// - `emit_event` (`sendEventAndTriggers`) only controls the `ENTITY_MOUNT` game event.
     /// - Resets passenger pose to `Pose::Standing` and attaches with player-priority order.
+    /// - Applies the `Mob#startRiding` override: a mounted leashed mob loses its leash.
     pub fn start_riding(
         &mut self,
         passenger_id: i32,
@@ -728,15 +724,27 @@ impl LevelCtx {
                 vehicle_id,
             });
         }
+
+        // Paper `Mob#startRiding` override: a successfully mounted leashed mob fires
+        // `EntityUnleashEvent` (never cancelled here) and drops or removes its leash; both
+        // clear the leash data.
+        if let Some(mob) = self
+            .get_mut(passenger_id)
+            .and_then(LifecycleEntity::mob_mut)
+            && mob.leashed
+        {
+            mob.leashed = false;
+        }
         true
     }
 
     /// Paper `Entity#stopRiding(boolean suppressCancellation)` / `removeVehicle`.
     ///
-    /// If dismount is cancelled and `!suppress_cancellation`, restores `passenger.vehicle`
-    /// and returns `false` (exact Paper CraftBukkit cancellation recovery). The
-    /// `ENTITY_DISMOUNT` game event is emitted either way when the passenger is not removed
-    /// or was removed for a destroying reason.
+    /// The vehicle side follows `Entity#removePassenger`: the dismount is cancelled
+    /// (restoring `passenger.vehicle`, returning `false`) only when `cancel_dismount` is set,
+    /// `!suppress_cancellation`, and the vehicle is still `valid`. A purged vehicle counts as
+    /// invalid. The `ENTITY_DISMOUNT` game event is emitted either way when the passenger is
+    /// not removed or was removed for a destroying reason.
     pub fn stop_riding(&mut self, passenger_id: i32, suppress_cancellation: bool) -> bool {
         let (vehicle_id, removal_reason) = {
             let Some(p) = self.get(passenger_id) else {
@@ -753,29 +761,94 @@ impl LevelCtx {
             p.entity_mut().vehicle = None;
         }
 
-        let removed = if self.cancel_dismount && !suppress_cancellation {
-            // Restore vehicle on cancellation
-            if let Some(p) = self.get_mut(passenger_id) {
-                p.entity_mut().vehicle = Some(vehicle_id);
-            }
-            false
-        } else {
-            if let Some(v) = self.get_mut(vehicle_id) {
-                v.entity_mut().passengers.retain(|&pid| pid != passenger_id);
-            }
-            if let Some(p) = self.get_mut(passenger_id) {
-                p.entity_mut().boarding_cooldown = BOARDING_COOLDOWN;
-            }
-            true
-        };
+        let cancel_dismount = self.cancel_dismount;
+        let removed = self.get_mut(vehicle_id).is_none_or(|v| {
+            Self::vehicle_remove_passenger(
+                cancel_dismount,
+                v.entity_mut(),
+                passenger_id,
+                suppress_cancellation,
+            )
+        });
 
+        if let Some(p) = self.get_mut(passenger_id) {
+            let pe = p.entity_mut();
+            if removed {
+                pe.boarding_cooldown = BOARDING_COOLDOWN;
+            } else {
+                pe.vehicle = Some(vehicle_id);
+            }
+        }
+
+        self.record_dismount(passenger_id, vehicle_id, removal_reason);
+        removed
+    }
+
+    /// Paper `Entity#stopRiding(boolean suppressCancellation)` for a currently-taken passenger
+    /// whose vehicle is resident (or purged), with the same semantics as [`Self::stop_riding`].
+    pub(crate) fn stop_riding_taken(
+        &mut self,
+        passenger: &mut Entity,
+        suppress_cancellation: bool,
+    ) -> bool {
+        let Some(vehicle_id) = passenger.vehicle else {
+            return false;
+        };
+        let passenger_id = passenger.id;
+
+        passenger.vehicle = None;
+
+        let cancel_dismount = self.cancel_dismount;
+        let removed = self.get_mut(vehicle_id).is_none_or(|v| {
+            Self::vehicle_remove_passenger(
+                cancel_dismount,
+                v.entity_mut(),
+                passenger_id,
+                suppress_cancellation,
+            )
+        });
+        if removed {
+            passenger.boarding_cooldown = BOARDING_COOLDOWN;
+        } else {
+            passenger.vehicle = Some(vehicle_id);
+        }
+
+        self.record_dismount(passenger_id, vehicle_id, passenger.removal_reason);
+        removed
+    }
+
+    /// Vehicle side of Paper `Entity#removePassenger(Entity, boolean suppressCancellation)`.
+    ///
+    /// CraftBukkit fires `VehicleExitEvent` / `EntityDismountEvent` only `if (this.valid)`
+    /// (`this` being the vehicle), so `cancel_dismount` applies only to a valid vehicle.
+    /// Returns whether `passenger_id` was removed from `vehicle.passengers`.
+    fn vehicle_remove_passenger(
+        cancel_dismount: bool,
+        vehicle: &mut Entity,
+        passenger_id: i32,
+        suppress_cancellation: bool,
+    ) -> bool {
+        if vehicle.valid && cancel_dismount && !suppress_cancellation {
+            return false;
+        }
+        vehicle.passengers.retain(|&pid| pid != passenger_id);
+        true
+    }
+
+    /// `level().gameEvent(passenger, GameEvent.ENTITY_DISMOUNT, ..)` from
+    /// `Entity#removeVehicle`, gated on the passenger's removal reason.
+    fn record_dismount(
+        &mut self,
+        passenger_id: i32,
+        vehicle_id: i32,
+        removal_reason: Option<EntityRemovalReason>,
+    ) {
         if removal_reason.is_none_or(EntityRemovalReason::should_destroy) {
             self.record_event(LifecycleEvent::Dismount {
                 passenger_id,
                 vehicle_id,
             });
         }
-        removed
     }
 
     /// Paper `Entity#ejectPassengers()` — iterates passengers in reverse order.
@@ -812,36 +885,71 @@ impl LevelCtx {
     /// Detaches a passenger ID whose entity was already purged from storage but is still
     /// listed by `vehicle_id` (dismount cancellation kept it attached when it was removed).
     fn stop_riding_purged_passenger(&mut self, vehicle_id: i32, passenger_id: i32) {
-        if self.cancel_dismount {
+        let cancel_dismount = self.cancel_dismount;
+        let Some(v) = self.get_mut(vehicle_id) else {
             return;
-        }
-        if let Some(v) = self.get_mut(vehicle_id) {
-            v.entity_mut().passengers.retain(|&pid| pid != passenger_id);
-        }
-        self.record_event(LifecycleEvent::Dismount {
-            passenger_id,
-            vehicle_id,
-        });
-    }
-
-    pub(crate) fn queue_pending_removal(&mut self, id: i32, reason: EntityRemovalReason) {
-        self.pending_removals.push((id, reason));
-    }
-
-    /// Completes removals requested by taken entities once they are back in storage.
-    pub(crate) fn flush_pending_removals(&mut self) {
-        let pending = std::mem::take(&mut self.pending_removals);
-        for (id, reason) in pending {
-            self.finish_removal(id, reason);
+        };
+        if Self::vehicle_remove_passenger(cancel_dismount, v.entity_mut(), passenger_id, false) {
+            self.record_event(LifecycleEvent::Dismount {
+                passenger_id,
+                vehicle_id,
+            });
         }
     }
 
-    /// Tail of Paper `Entity#setRemoved`: passengers stop riding unless
-    /// `UNLOADED_TO_CHUNK`, then `levelCallback.onRemove` (queued storage purge).
-    fn finish_removal(&mut self, id: i32, reason: EntityRemovalReason) {
-        if reason != EntityRemovalReason::UnloadedToChunk {
-            self.stop_riding_passengers_of_removed(id);
+    /// Paper `Entity#setRemoved`: `getPassengers().forEach(Entity::stopRiding)` for a
+    /// currently-taken vehicle (removal requested during its own tick or despawn check).
+    pub(crate) fn stop_riding_passengers_of_taken(&mut self, vehicle: &mut Entity) {
+        for passenger_id in vehicle.passengers.clone() {
+            let actual_vehicle = match self.get(passenger_id) {
+                Some(p) => p.entity().vehicle,
+                None => {
+                    let cancel_dismount = self.cancel_dismount;
+                    if Self::vehicle_remove_passenger(cancel_dismount, vehicle, passenger_id, false)
+                    {
+                        self.record_event(LifecycleEvent::Dismount {
+                            passenger_id,
+                            vehicle_id: vehicle.id,
+                        });
+                    }
+                    continue;
+                }
+            };
+            match actual_vehicle {
+                Some(vid) if vid == vehicle.id => {
+                    self.stop_riding_of_taken_vehicle(vehicle, passenger_id);
+                }
+                Some(_) => {
+                    self.stop_riding(passenger_id, false);
+                }
+                None => {}
+            }
         }
+    }
+
+    /// `passenger.stopRiding()` for a resident passenger whose vehicle is currently taken.
+    fn stop_riding_of_taken_vehicle(&mut self, vehicle: &mut Entity, passenger_id: i32) {
+        let cancel_dismount = self.cancel_dismount;
+        let Some(p) = self.get_mut(passenger_id) else {
+            return;
+        };
+        let pe = p.entity_mut();
+        pe.vehicle = None;
+        let removed = Self::vehicle_remove_passenger(cancel_dismount, vehicle, passenger_id, false);
+        if removed {
+            pe.boarding_cooldown = BOARDING_COOLDOWN;
+        } else {
+            pe.vehicle = Some(vehicle.id);
+        }
+        let removal_reason = pe.removal_reason;
+        self.record_dismount(passenger_id, vehicle.id, removal_reason);
+    }
+
+    /// Moonrise `EntityLookup` callback `onRemove(reason)`: emits
+    /// `LifecycleEvent::EntityRemoved` and queues the storage purge. The caller has already
+    /// cleared `valid` (`ServerLevel` `onTrackingEnd`). Later `onRemove` calls are no-ops
+    /// (`NoOpCallback`), so callers invoke this only for the first removal.
+    pub(crate) fn on_entity_removed(&mut self, id: i32, reason: EntityRemovalReason) {
         self.record_event(LifecycleEvent::EntityRemoved { id, reason });
         self.purge_queue.push(id);
     }
@@ -856,43 +964,6 @@ impl LevelCtx {
                 self.entities.shift_remove(&id);
             }
         }
-    }
-
-    /// Paper `Entity#stopRiding(boolean suppressCancellation)` for a currently-taken passenger.
-    ///
-    /// Respects `cancel_dismount` (restoring `passenger.vehicle` when cancelled) and emits
-    /// `LifecycleEvent::Dismount`, matching `stop_riding`.
-    pub(crate) fn stop_riding_taken(
-        &mut self,
-        passenger: &mut Entity,
-        suppress_cancellation: bool,
-    ) -> bool {
-        let Some(vehicle_id) = passenger.vehicle else {
-            return false;
-        };
-        let passenger_id = passenger.id;
-        let removal_reason = passenger.removal_reason;
-
-        passenger.vehicle = None;
-
-        let removed = if self.cancel_dismount && !suppress_cancellation {
-            passenger.vehicle = Some(vehicle_id);
-            false
-        } else {
-            if let Some(v) = self.get_mut(vehicle_id) {
-                v.entity_mut().passengers.retain(|&pid| pid != passenger_id);
-            }
-            passenger.boarding_cooldown = BOARDING_COOLDOWN;
-            true
-        };
-
-        if removal_reason.is_none_or(EntityRemovalReason::should_destroy) {
-            self.record_event(LifecycleEvent::Dismount {
-                passenger_id,
-                vehicle_id,
-            });
-        }
-        removed
     }
 
     /// Positions a currently-taken rider relative to its resident vehicle (`Entity#positionRider`).
@@ -923,35 +994,43 @@ impl LevelCtx {
     // Removal (exact Paper Entity#setRemoved semantics)
     // -------------------------------------------------------------------------
 
-    /// Paper `Entity#setRemoved(RemovalReason)`.
+    /// Paper `Entity#setRemoved(RemovalReason)` for a resident entity.
     ///
     /// - Respects Moonrise `section_update_lock` (`canRemoveEntity` guard).
     /// - Preserves the first `removal_reason`.
     /// - Calls `stop_riding` when `reason.should_destroy()`.
     /// - Stops every passenger riding (forward order) when `reason != UnloadedToChunk`.
-    /// - Marks `valid = false`, emits `LifecycleEvent::EntityRemoved`, and purges the
-    ///   entity from storage.
+    /// - On the first removal only (`levelCallback.onRemove`), marks `valid = false` after the
+    ///   dismounts above, emits `LifecycleEvent::EntityRemoved`, and purges the entity.
     pub fn remove_entity(&mut self, id: i32, reason: EntityRemovalReason) -> bool {
         if self.section_update_lock.contains(&id) {
             return false;
         }
-        let effective_reason = {
+        let (first_time, effective_reason) = {
             let Some(entity) = self.get_mut(id) else {
                 return false;
             };
             let e = entity.entity_mut();
-            if e.removal_reason.is_none() {
+            let first_time = e.removal_reason.is_none();
+            if first_time {
                 e.removal_reason = Some(reason);
             }
-            e.valid = false;
-            e.removal_reason.unwrap_or(reason)
+            (first_time, e.removal_reason.unwrap_or(reason))
         };
 
         if effective_reason.should_destroy() {
             self.stop_riding(id, false);
         }
+        if effective_reason != EntityRemovalReason::UnloadedToChunk {
+            self.stop_riding_passengers_of_removed(id);
+        }
 
-        self.finish_removal(id, effective_reason);
+        if first_time {
+            if let Some(entity) = self.get_mut(id) {
+                entity.entity_mut().valid = false;
+            }
+            self.on_entity_removed(id, reason);
+        }
         self.purge_removed();
         true
     }

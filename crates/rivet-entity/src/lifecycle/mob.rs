@@ -378,12 +378,14 @@ impl Mob {
         // RivetTodo(#422) run goalSelector/targetSelector inactiveTick() (gated on `aware`) once `Mob` owns its `GoalSelector`s.
     }
 
-    /// Paper `Mob#rideTick()`.
+    /// Paper `rideTick()` for a `Mob` (inherited `LivingEntity#rideTick()`:
+    /// `Entity#rideTick()` dispatching the `Mob#tick()` override, then `resetFallDistance()`).
     pub fn mob_ride_tick(&mut self, ctx: &mut LevelCtx) {
         self.living.entity.delta_movement = Vec3::new(0.0, 0.0, 0.0);
         self.mob_tick(ctx);
         if let Some(vehicle_id) = self.living.entity.vehicle {
             ctx.position_taken_rider(vehicle_id, &mut self.living.entity);
         }
+        self.living.entity.fall_distance = 0.0;
     }
 }
