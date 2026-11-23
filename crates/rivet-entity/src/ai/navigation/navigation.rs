@@ -8,7 +8,7 @@
 
 use rivet_util::mth;
 
-use crate::ai::goal::context::{BlockPos, Vec3};
+use crate::ai::goal::context::{BlockPos, GoalRandom, Vec3};
 use crate::ai::navigation::control::MoveControl;
 use crate::ai::navigation::evaluator::{
     AmphibiousNodeEvaluator, FlyNodeEvaluator, NodeEvaluator, SwimNodeEvaluator, WalkNodeEvaluator,
@@ -51,9 +51,9 @@ pub struct PathNavigation {
     pub path: Option<Path>,
     pub speed_modifier: f64,
     pub tick: i32,
-    last_stucked_check: i32,
-    last_stucked_check_pos: Vec3,
-    timeout_cached_node: Option<BlockPos>,
+    last_stuck_check: i32,
+    last_stuck_check_pos: Vec3,
+    timeout_cached_node: BlockPos,
     timeout_timer: i64,
     last_timeout_check: i64,
     timeout_limit: f64,
@@ -71,6 +71,7 @@ pub struct PathNavigation {
 impl PathNavigation {
     pub const MAX_TIME_RECOMPUTE: i64 = 20;
     pub const STUCK_CHECK_INTERVAL: i32 = 100;
+    pub const STUCK_THRESHOLD_DISTANCE_FACTOR: f32 = 0.25;
     pub const DEFAULT_FOLLOW_RANGE: f32 = 16.0;
 
     #[must_use]
@@ -136,9 +137,9 @@ impl PathNavigation {
             path: None,
             speed_modifier: 1.0,
             tick: 0,
-            last_stucked_check: 0,
-            last_stucked_check_pos: Vec3::ZERO,
-            timeout_cached_node: None,
+            last_stuck_check: 0,
+            last_stuck_check_pos: Vec3::ZERO,
+            timeout_cached_node: BlockPos::new(0, 0, 0),
             timeout_timer: 0,
             last_timeout_check: 0,
             timeout_limit: 0.0,
@@ -290,19 +291,11 @@ impl PathNavigation {
         world: &W,
     ) -> Vec3 {
         match &self.variant {
-            NavigationVariant::Ground { .. } | NavigationVariant::WallClimber { .. } => {
-                let mut y = mth::floor_d(mob.pos.y + 0.5);
-                if self.can_float_flag() && mob.in_water {
-                    let bx = mth::floor_d(mob.pos.x);
-                    let bz = mth::floor_d(mob.pos.z);
-                    let mut steps = 0;
-                    while world.block_info(BlockPos::new(bx, y, bz)).is_water && steps < 16 {
-                        y += 1;
-                        steps += 1;
-                    }
-                }
-                Vec3::new(mob.pos.x, y as f64, mob.pos.z)
-            }
+            NavigationVariant::Ground { .. } | NavigationVariant::WallClimber { .. } => Vec3::new(
+                mob.pos.x,
+                f64::from(self.get_surface_y(mob, world)),
+                mob.pos.z,
+            ),
             NavigationVariant::Flying { .. } => mob.pos,
             NavigationVariant::WaterBound { .. } | NavigationVariant::Amphibious { .. } => {
                 Vec3::new(
@@ -311,6 +304,28 @@ impl PathNavigation {
                     mob.pos.z,
                 )
             }
+        }
+    }
+
+    /// Mirrors `GroundPathNavigation.getSurfaceY()`.
+    fn get_surface_y<W: PathWorldView + ?Sized>(&self, mob: &MobPathingState, world: &W) -> i32 {
+        if mob.in_water && self.can_float_flag() {
+            let block_pos = mob.block_position();
+            let mut surface = block_pos.y;
+            let mut steps = 0;
+            while world
+                .block_info(BlockPos::new(block_pos.x, surface, block_pos.z))
+                .is_water_block
+            {
+                surface += 1;
+                steps += 1;
+                if steps > 16 {
+                    return block_pos.y;
+                }
+            }
+            surface
+        } else {
+            mth::floor_d(mob.pos.y + 0.5)
         }
     }
 
@@ -323,16 +338,17 @@ impl PathNavigation {
         }
     }
 
-    /// Mirrors `PathNavigation.createPath(BlockPos, int accuracy)` in Paper 26.2.
+    /// Mirrors `PathNavigation.createPath(BlockPos, int reachRange)` in Paper 26.2,
+    /// including the `GroundPathNavigation` and `WallClimberNavigation` overrides.
     pub fn create_path<W: PathWorldView + ?Sized>(
         &mut self,
         mob: &mut MobPathingState,
         world: &W,
+        random: &mut dyn GoalRandom,
         mut target: BlockPos,
-        accuracy: i32,
-        game_time: i64,
+        reach_range: i32,
     ) -> Option<Path> {
-        // WallClimberNavigation records target position for direct fallback
+        // WallClimberNavigation records the requested position before the surface search.
         if let NavigationVariant::WallClimber {
             path_to_position, ..
         } = &mut self.variant
@@ -340,7 +356,6 @@ impl PathNavigation {
             *path_to_position = Some(target);
         }
 
-        // GroundPathNavigation surface adjustment
         if let NavigationVariant::Ground {
             can_path_to_targets_below_surface,
             ..
@@ -350,32 +365,52 @@ impl PathNavigation {
             ..
         } = &self.variant
         {
-            let info = world.block_info(target);
-            if info.is_air {
-                let mut probe = BlockPos::new(target.x, target.y - 1, target.z);
-                while probe.y >= world.min_y() && world.block_info(probe).is_air {
-                    probe.y -= 1;
-                }
-                if probe.y >= world.min_y() {
-                    target = BlockPos::new(probe.x, probe.y + 1, probe.z);
-                }
-            } else if !*can_path_to_targets_below_surface && info.has_collision() {
-                let mut probe = BlockPos::new(target.x, target.y + 1, target.z);
-                while probe.y < world.max_y() && world.block_info(probe).has_collision() {
-                    probe.y += 1;
-                }
-                target = probe;
+            // `getChunkNow(...) == null`
+            if !world.block_info(target).is_loaded {
+                return None;
+            }
+            if !*can_path_to_targets_below_surface {
+                target = Self::find_surface_position(world, target);
             }
         }
 
         self.create_path_targets(
             mob,
             world,
+            random,
             &[target],
-            accuracy,
+            reach_range,
             self.required_path_length,
-            game_time,
         )
+    }
+
+    /// Mirrors `GroundPathNavigation.findSurfacePosition(LevelChunk, BlockPos, int)`.
+    fn find_surface_position<W: PathWorldView + ?Sized>(world: &W, mut pos: BlockPos) -> BlockPos {
+        if world.block_info(pos).is_air {
+            let mut column = BlockPos::new(pos.x, pos.y - 1, pos.z);
+            while column.y >= world.min_y() && world.block_info(column).is_air {
+                column.y -= 1;
+            }
+            if column.y >= world.min_y() {
+                return BlockPos::new(column.x, column.y + 1, column.z);
+            }
+
+            column.y = pos.y + 1;
+            while column.y <= world.max_y() && world.block_info(column).is_air {
+                column.y += 1;
+            }
+            pos = column;
+        }
+
+        if !world.block_info(pos).is_solid {
+            return pos;
+        }
+
+        let mut column = BlockPos::new(pos.x, pos.y + 1, pos.z);
+        while column.y <= world.max_y() && world.block_info(column).is_solid {
+            column.y += 1;
+        }
+        column
     }
 
     /// Mirrors `PathNavigation.createPath(Set<BlockPos>, int, boolean, int, float)`.
@@ -383,10 +418,10 @@ impl PathNavigation {
         &mut self,
         mob: &mut MobPathingState,
         world: &W,
+        random: &mut dyn GoalRandom,
         targets: &[BlockPos],
-        accuracy: i32,
-        follow_range: f32,
-        game_time: i64,
+        reach_range: i32,
+        max_path_length: f32,
     ) -> Option<Path> {
         if targets.is_empty() {
             return None;
@@ -404,63 +439,62 @@ impl PathNavigation {
             return Some(existing.copy());
         }
 
-        let max_visited_mult = self.max_visited_nodes_multiplier;
-        let mut path = match &mut self.variant {
+        let multiplier = self.max_visited_nodes_multiplier;
+        let path = match &mut self.variant {
             NavigationVariant::Ground { evaluator, .. }
             | NavigationVariant::WallClimber { evaluator, .. } => self.path_finder.find_path(
                 evaluator,
                 world,
                 mob,
+                random,
                 targets,
-                follow_range,
-                accuracy,
-                max_visited_mult,
+                max_path_length,
+                reach_range,
+                multiplier,
             ),
             NavigationVariant::Flying { evaluator } => self.path_finder.find_path(
                 evaluator,
                 world,
                 mob,
+                random,
                 targets,
-                follow_range,
-                accuracy,
-                max_visited_mult,
+                max_path_length,
+                reach_range,
+                multiplier,
             ),
             NavigationVariant::WaterBound { evaluator, .. } => self.path_finder.find_path(
                 evaluator,
                 world,
                 mob,
+                random,
                 targets,
-                follow_range,
-                accuracy,
-                max_visited_mult,
+                max_path_length,
+                reach_range,
+                multiplier,
             ),
             NavigationVariant::Amphibious { evaluator } => self.path_finder.find_path(
                 evaluator,
                 world,
                 mob,
+                random,
                 targets,
-                follow_range,
-                accuracy,
-                max_visited_mult,
+                max_path_length,
+                reach_range,
+                multiplier,
             ),
         };
 
-        if let Some(ref mut p) = path {
-            self.trim_path(p, mob, world);
+        if let Some(ref p) = path {
             self.target_pos = Some(p.get_target());
-            self.reach_range = accuracy;
-            self.reset_stucked_entities_position(mob, game_time);
+            self.reach_range = reach_range;
+            self.reset_stuck_timeout();
         }
         path
     }
 
-    /// Mirrors `GroundPathNavigation.trimPath()` (avoid-sun truncation).
-    fn trim_path<W: PathWorldView + ?Sized>(
-        &self,
-        path: &mut Path,
-        mob: &MobPathingState,
-        world: &W,
-    ) {
+    /// Mirrors `PathNavigation.trimPath()` plus the `GroundPathNavigation`
+    /// avoid-sun override. Called from `moveTo(Path, double)` on the current path.
+    fn trim_path<W: PathWorldView + ?Sized>(&mut self, mob: &MobPathingState, world: &W) {
         let avoid_sun = matches!(
             self.variant,
             NavigationVariant::Ground {
@@ -471,14 +505,40 @@ impl PathNavigation {
                 ..
             }
         );
-        if avoid_sun
-            && world.is_bright_outside()
-            && !mob.has_helmet
-            && !world.block_info(mob.block_position()).can_see_sky
-        {
+        let Some(path) = self.path.as_mut() else {
+            return;
+        };
+
+        for i in 0..path.get_node_count() {
+            let node = path.get_node(i).clone();
+            let next_node = (i + 1 < path.get_node_count()).then(|| path.get_node(i + 1).clone());
+            if world.block_info(node.as_block_pos()).is_cauldron {
+                path.replace_node(i, node.clone_and_move(node.x, node.y + 1, node.z));
+                if let Some(next_node) = next_node
+                    && node.y >= next_node.y
+                {
+                    path.replace_node(
+                        i + 1,
+                        node.clone_and_move(next_node.x, node.y + 1, next_node.z),
+                    );
+                }
+            }
+        }
+
+        if avoid_sun {
+            let mob_pos = BlockPos::new(
+                mth::floor_d(mob.pos.x),
+                mth::floor_d(mob.pos.y + 0.5),
+                mth::floor_d(mob.pos.z),
+            );
+            if world.block_info(mob_pos).can_see_sky {
+                return;
+            }
             for i in 0..path.get_node_count() {
-                let node = path.get_node(i);
-                if world.block_info(node.as_block_pos()).can_see_sky {
+                if world
+                    .block_info(path.get_node(i).as_block_pos())
+                    .can_see_sky
+                {
                     path.truncate_nodes(i);
                     return;
                 }
@@ -492,15 +552,15 @@ impl PathNavigation {
         &mut self,
         mob: &mut MobPathingState,
         world: &W,
+        random: &mut dyn GoalRandom,
         x: f64,
         y: f64,
         z: f64,
         speed_modifier: f64,
-        game_time: i64,
     ) -> bool {
         let target = BlockPos::new(mth::floor_d(x), mth::floor_d(y), mth::floor_d(z));
-        let path = self.create_path(mob, world, target, 1, game_time);
-        self.move_to_path(path, speed_modifier, mob, world, game_time)
+        let path = self.create_path(mob, world, random, target, 1);
+        self.move_to_path(path, speed_modifier, mob, world)
     }
 
     /// Mirrors `PathNavigation.moveTo(@Nullable Path newPath, double speedModifier)`.
@@ -510,7 +570,6 @@ impl PathNavigation {
         speed_modifier: f64,
         mob: &MobPathingState,
         world: &W,
-        game_time: i64,
     ) -> bool {
         let Some(new_path) = new_path else {
             self.path = None;
@@ -525,17 +584,15 @@ impl PathNavigation {
             return false;
         }
 
-        if let Some(ref p) = self.path
-            && p.get_node_count() == 0
-        {
+        self.trim_path(mob, world);
+        if self.path.as_ref().is_none_or(|p| p.get_node_count() == 0) {
             return false;
         }
 
         self.speed_modifier = speed_modifier;
-        let temp_pos = self.get_temp_mob_pos(mob, world);
-        self.last_stucked_check = self.tick;
-        self.last_stucked_check_pos = temp_pos;
-        let _ = game_time;
+        let mob_pos = self.get_temp_mob_pos(mob, world);
+        self.last_stuck_check = self.tick;
+        self.last_stuck_check_pos = mob_pos;
         true
     }
 
@@ -544,41 +601,38 @@ impl PathNavigation {
         &mut self,
         mob: &mut MobPathingState,
         world: &W,
+        random: &mut dyn GoalRandom,
         game_time: i64,
     ) {
-        if game_time.wrapping_sub(self.time_last_recompute) > Self::MAX_TIME_RECOMPUTE {
-            if let Some(target_pos) = self.target_pos {
-                self.path = None;
-                self.path = self.create_path(mob, world, target_pos, self.reach_range, game_time);
-                self.time_last_recompute = game_time;
-                self.has_delayed_recomputation = false;
-            }
-        } else {
+        if game_time.wrapping_sub(self.time_last_recompute) <= Self::MAX_TIME_RECOMPUTE
+            || !self.can_update_path(mob)
+        {
             self.has_delayed_recomputation = true;
+        } else if let Some(target_pos) = self.target_pos {
+            self.path = None;
+            self.path = self.create_path(mob, world, random, target_pos, self.reach_range);
+            self.time_last_recompute = game_time;
+            self.has_delayed_recomputation = false;
         }
     }
 
-    /// Mirrors `PathNavigation.tick()` (including `FlyingPathNavigation` and
+    /// Mirrors `PathNavigation.tick()` (including the `FlyingPathNavigation` and
     /// `WallClimberNavigation` overrides) in Paper 26.2.
     pub fn tick<W: PathWorldView + ?Sized>(
         &mut self,
         mob: &mut MobPathingState,
         world: &W,
+        random: &mut dyn GoalRandom,
         move_control: &mut MoveControl,
         game_time: i64,
     ) {
-        self.tick = self.tick.wrapping_add(1);
-        if self.has_delayed_recomputation {
-            self.recompute_path(mob, world, game_time);
-        }
-
-        if self.is_done() {
-            // WallClimberNavigation direct fallback when no path exists
-            if let NavigationVariant::WallClimber {
-                path_to_position, ..
-            } = &mut self.variant
-                && let Some(target) = *path_to_position
-            {
+        // WallClimberNavigation.tick: runs super.tick() only while a path is in progress.
+        if let NavigationVariant::WallClimber {
+            path_to_position, ..
+        } = &mut self.variant
+            && self.path.as_ref().is_none_or(Path::is_done)
+        {
+            if let Some(target) = *path_to_position {
                 let closer_to_center = |bp: BlockPos| {
                     let dx = bp.x as f64 + 0.5 - mob.pos.x;
                     let dy = bp.y as f64 + 0.5 - mob.pos.y;
@@ -588,31 +642,54 @@ impl PathNavigation {
                     dist_sqr < radius * radius
                 };
                 let at_mob_y = BlockPos::new(target.x, mth::floor_d(mob.pos.y), target.z);
-                if closer_to_center(target)
-                    || (mob.pos.y > target.y as f64 && closer_to_center(at_mob_y))
+                if !closer_to_center(target)
+                    && (mob.pos.y <= target.y as f64 || !closer_to_center(at_mob_y))
                 {
-                    *path_to_position = None;
-                } else {
                     move_control.set_wanted_position(
                         target.x as f64,
                         target.y as f64,
                         target.z as f64,
                         self.speed_modifier,
                     );
+                } else {
+                    *path_to_position = None;
                 }
             }
             return;
         }
 
+        self.tick = self.tick.wrapping_add(1);
+        if self.has_delayed_recomputation {
+            self.recompute_path(mob, world, random, game_time);
+        }
+
+        if self.is_done() {
+            return;
+        }
+
         if self.can_update_path(mob) {
             self.follow_the_path(mob, world, game_time);
+        } else if let NavigationVariant::Flying { .. } = self.variant {
+            if let Some(ref mut path) = self.path
+                && !path.is_done()
+            {
+                let pos = path.get_next_entity_pos(mob.bb_width);
+                if mob.block_position()
+                    == BlockPos::new(
+                        mth::floor_d(pos.x),
+                        mth::floor_d(pos.y),
+                        mth::floor_d(pos.z),
+                    )
+                {
+                    path.advance();
+                }
+            }
         } else {
             let temp_pos = self.get_temp_mob_pos(mob, world);
             if let Some(ref mut path) = self.path
-                && path.get_next_node_index() < path.get_node_count()
+                && !path.is_done()
             {
-                let next_pos =
-                    path.get_entity_pos_at_node(mob.bb_width, path.get_next_node_index());
+                let next_pos = path.get_next_entity_pos(mob.bb_width);
                 if temp_pos.y > next_pos.y
                     && !mob.on_ground
                     && mth::floor_d(temp_pos.x) == mth::floor_d(next_pos.x)
@@ -629,6 +706,8 @@ impl PathNavigation {
                 .as_ref()
                 .unwrap()
                 .get_next_entity_pos(mob.bb_width);
+            // `getGroundY`: overridden to `target.y` by the water-bound and
+            // amphibious navigations; FlyingPathNavigation.tick uses `target.y`.
             let target_y = match self.variant {
                 NavigationVariant::Ground { .. } | NavigationVariant::WallClimber { .. } => {
                     let bp = BlockPos::new(
@@ -689,7 +768,7 @@ impl PathNavigation {
             path.advance();
         }
 
-        self.do_stucked_detection(mob, temp_pos, game_time);
+        self.do_stuck_detection(mob, temp_pos, game_time);
     }
 
     fn should_target_next_node_in_direction<W: PathWorldView + ?Sized>(
@@ -744,7 +823,7 @@ impl PathNavigation {
 
         let normalize = |v: Vec3, len_sqr: f64| {
             let len = len_sqr.sqrt();
-            if len < 1.0e-4 {
+            if len < f64::from(1.0e-5_f32) {
                 Vec3::ZERO
             } else {
                 Vec3::new(v.x / len, v.y / len, v.z / len)
@@ -759,46 +838,41 @@ impl PathNavigation {
     }
 
     /// Mirrors `PathNavigation.doStuckDetection(Vec3)` in Paper 26.2.
-    fn do_stucked_detection(&mut self, mob: &MobPathingState, temp_pos: Vec3, game_time: i64) {
-        if self.tick.wrapping_sub(self.last_stucked_check) >= Self::STUCK_CHECK_INTERVAL {
-            let effective_speed = if mob.speed >= 1.0 {
+    fn do_stuck_detection(&mut self, mob: &MobPathingState, mob_pos: Vec3, game_time: i64) {
+        if self.tick.wrapping_sub(self.last_stuck_check) > Self::STUCK_CHECK_INTERVAL {
+            let effective_speed: f32 = if mob.speed >= 1.0 {
                 mob.speed
             } else {
                 mob.speed * mob.speed
             };
-            let min_move_dist = f64::from(effective_speed) * 100.0 * 0.25;
-            if temp_pos.distance_to_sqr(self.last_stucked_check_pos) < min_move_dist * min_move_dist
+            let threshold_distance: f32 =
+                effective_speed * 100.0 * Self::STUCK_THRESHOLD_DISTANCE_FACTOR;
+            if mob_pos.distance_to_sqr(self.last_stuck_check_pos)
+                < f64::from(threshold_distance * threshold_distance)
             {
                 self.is_stuck = true;
                 self.stop();
             } else {
                 self.is_stuck = false;
             }
-            self.last_stucked_check = self.tick;
-            self.last_stucked_check_pos = temp_pos;
+            self.last_stuck_check = self.tick;
+            self.last_stuck_check_pos = mob_pos;
         }
 
         if let Some(ref path) = self.path
             && !path.is_done()
         {
-            let next_node = path.get_next_node_pos();
-            if self.timeout_cached_node == Some(next_node) {
-                self.timeout_timer = self.timeout_timer.wrapping_add(
-                    game_time
-                        .wrapping_sub(self.last_timeout_check)
-                        .wrapping_mul(50),
-                );
+            let pos = path.get_next_node_pos();
+            if pos == self.timeout_cached_node {
+                self.timeout_timer = self
+                    .timeout_timer
+                    .wrapping_add(game_time.wrapping_sub(self.last_timeout_check));
             } else {
-                self.timeout_cached_node = Some(next_node);
-                let dist = temp_pos
-                    .distance_to_sqr(Vec3::new(
-                        next_node.x as f64,
-                        next_node.y as f64,
-                        next_node.z as f64,
-                    ))
-                    .sqrt();
+                self.timeout_cached_node = pos;
+                let node_center = Vec3::new(pos.x as f64 + 0.5, pos.y as f64, pos.z as f64 + 0.5);
+                let dist_to_node = mob_pos.distance_to_sqr(node_center).sqrt();
                 self.timeout_limit = if mob.speed > 0.0 {
-                    dist / f64::from(mob.speed) * 100.0
+                    dist_to_node / f64::from(mob.speed) * 20.0
                 } else {
                     0.0
                 };
@@ -812,19 +886,16 @@ impl PathNavigation {
     }
 
     fn timeout_path(&mut self) {
-        self.reset_stucked_entities_position_raw();
+        self.reset_stuck_timeout();
         self.stop();
     }
 
-    fn reset_stucked_entities_position(&mut self, _mob: &MobPathingState, game_time: i64) {
-        self.reset_stucked_entities_position_raw();
-        self.last_timeout_check = game_time;
-    }
-
-    fn reset_stucked_entities_position_raw(&mut self) {
-        self.timeout_cached_node = None;
+    /// Mirrors `PathNavigation.resetStuckTimeout()`.
+    fn reset_stuck_timeout(&mut self) {
+        self.timeout_cached_node = BlockPos::new(0, 0, 0);
         self.timeout_timer = 0;
         self.timeout_limit = 0.0;
+        self.is_stuck = false;
     }
 
     /// Mirrors `PathNavigation.canMoveDirectly(Vec3, Vec3)`.
@@ -848,7 +919,10 @@ impl PathNavigation {
         }
     }
 
-    /// Mirrors `AmphibiousPathNavigation.isStableDestination(BlockPos)`.
+    /// Mirrors `PathNavigation.isStableDestination(BlockPos)` and its overrides.
+    ///
+    /// `isSolidRender` / `entityCanStandOn` are approximated by a non-empty
+    /// collision shape until block shape data is exposed through `BlockPathInfo`.
     #[must_use]
     pub fn is_stable_destination<W: PathWorldView + ?Sized>(
         &self,
@@ -859,6 +933,7 @@ impl PathNavigation {
         match self.variant {
             NavigationVariant::Amphibious { .. } => !world.block_info(below).is_air,
             NavigationVariant::WaterBound { .. } => !world.block_info(pos).has_collision(),
+            NavigationVariant::Flying { .. } => world.block_info(pos).has_collision(),
             _ => world.block_info(below).has_collision(),
         }
     }

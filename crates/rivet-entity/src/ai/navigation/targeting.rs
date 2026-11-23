@@ -136,16 +136,13 @@ impl TargetingConditions {
         }
 
         if let Some(targeter) = targeter {
-            if self.is_combat {
-                if !targeter.can_attack(target.entity_id())
-                    || !target.can_be_seen_as_enemy()
-                    || difficulty == Difficulty::Peaceful
-                {
-                    return false;
-                }
-                if targeter.is_allied_to(target.entity_id()) {
-                    return false;
-                }
+            // `LivingEntity.canAttack` owns the enemy-visibility and peaceful
+            // (player-only) rules; Paper checks no difficulty here.
+            if self.is_combat
+                && (!targeter.can_attack(target.entity_id())
+                    || targeter.is_allied_to(target.entity_id()))
+            {
+                return false;
             }
 
             if self.range > 0.0 {

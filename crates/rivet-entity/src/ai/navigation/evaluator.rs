@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use rivet_util::mth;
 
-use crate::ai::goal::context::{Aabb, BlockPos};
+use crate::ai::goal::context::{Aabb, BlockPos, GoalRandom};
 use crate::ai::navigation::node::{NodeArena, Target};
 use crate::ai::navigation::path_type::{Direction, PathType, block_pos_as_long};
 use crate::ai::navigation::world_view::{MobPathingState, PathWorldView, PathfindingContext};
@@ -59,11 +59,14 @@ pub trait NodeEvaluator {
 
     fn done(&mut self, _mob: &mut MobPathingState) {}
 
+    /// Mirrors `NodeEvaluator.getStart()`. `random` is the mob's `getRandom()`,
+    /// consumed only by `FlyNodeEvaluator`'s small-mob start candidates.
     fn get_start<W: PathWorldView + ?Sized>(
         &mut self,
         ctx: &mut PathfindingContext<'_, W>,
         mob: &MobPathingState,
         arena: &mut NodeArena,
+        random: &mut dyn GoalRandom,
     ) -> usize;
 
     fn get_target(&self, x: f64, y: f64, z: f64) -> Target {
@@ -334,6 +337,9 @@ impl WalkNodeEvaluator {
         if a1.path_type == PathType::WalkableDoor || a2.path_type == PathType::WalkableDoor {
             return false;
         }
+        if mob.bb_width > 1.0 && (a1.cost_malus > 0.0 || a2.cost_malus > 0.0) {
+            return false;
+        }
         let is_fence_gap = a2.path_type == PathType::Fence
             && a1.path_type == PathType::Fence
             && mob.bb_width < 0.5;
@@ -368,29 +374,32 @@ impl WalkNodeEvaluator {
         mob: &MobPathingState,
         node: &crate::ai::navigation::node::Node,
     ) -> bool {
-        let bb = mob.bounding_box();
-        let dx = node.x as f64 - bb.min_x + (bb.max_x - bb.min_x) / 2.0;
-        let dy = node.y as f64 - bb.min_y + (bb.max_y - bb.min_y) / 2.0;
-        let dz = node.z as f64 - bb.min_z + (bb.max_z - bb.min_z) / 2.0;
-        let step_count = mth::ceil_d(
-            (dx * dx + dy * dy + dz * dz).sqrt() / f64::from(mth::max_f32(mob.bb_width, 0.1)),
-        );
-        if step_count <= 0 {
-            return true;
-        }
-        let sx = dx / step_count as f64;
-        let sy = dy / step_count as f64;
-        let sz = dz / step_count as f64;
-        for i in 1..=step_count {
-            let shifted = Aabb::new(
-                bb.min_x + sx * i as f64,
-                bb.min_y + sy * i as f64,
-                bb.min_z + sz * i as f64,
-                bb.max_x + sx * i as f64,
-                bb.max_y + sy * i as f64,
-                bb.max_z + sz * i as f64,
+        let mut bb = mob.bounding_box();
+        let x_size = bb.max_x - bb.min_x;
+        let y_size = bb.max_y - bb.min_y;
+        let z_size = bb.max_z - bb.min_z;
+        // `posTo - mob.position() + bb size / 2`
+        let mut dx = node.x as f64 - mob.pos.x + x_size / 2.0;
+        let mut dy = node.y as f64 - mob.pos.y + y_size / 2.0;
+        let mut dz = node.z as f64 - mob.pos.z + z_size / 2.0;
+        // `Mth.ceil(delta.length() / bb.getSize())`
+        let size = (x_size + y_size + z_size) / 3.0;
+        let steps = mth::ceil_d((dx * dx + dy * dy + dz * dz).sqrt() / size);
+        // `delta.scale(1.0F / steps)`: the float reciprocal widened to double.
+        let scale = f64::from(1.0_f32 / steps as f32);
+        dx *= scale;
+        dy *= scale;
+        dz *= scale;
+        for _ in 1..=steps {
+            bb = Aabb::new(
+                bb.min_x + dx,
+                bb.min_y + dy,
+                bb.min_z + dz,
+                bb.max_x + dx,
+                bb.max_y + dy,
+                bb.max_z + dz,
             );
-            if self.has_collisions(world, shifted) {
+            if self.has_collisions(world, bb) {
                 return false;
             }
         }
@@ -604,13 +613,10 @@ impl WalkNodeEvaluator {
         y: i32,
         z: i32,
     ) -> Option<usize> {
-        let mut cur_y = y;
-        let max_fall = mob.max_fall_distance.max(1);
         let min_y = ctx.level().min_y();
-
-        while cur_y > min_y {
-            cur_y -= 1;
-            if y - cur_y > max_fall {
+        let mut cur_y = y.wrapping_sub(1);
+        while cur_y >= min_y {
+            if y.wrapping_sub(cur_y) > mob.max_fall_distance {
                 return Some(Self::get_blocked_node(arena, x, cur_y, z));
             }
             let pt = self.get_cached_path_type(ctx, mob, x, cur_y, z);
@@ -623,8 +629,9 @@ impl WalkNodeEvaluator {
                 }
                 return Some(Self::get_blocked_node(arena, x, cur_y, z));
             }
+            cur_y -= 1;
         }
-        Some(Self::get_blocked_node(arena, x, cur_y, z))
+        Some(Self::get_blocked_node(arena, x, y, z))
     }
 
     fn evaluate_path_type_at_pos<W: PathWorldView + ?Sized>(
@@ -658,14 +665,29 @@ impl WalkNodeEvaluator {
         W: PathWorldView + ?Sized,
         F: FnMut(&mut PathfindingContext<'_, W>, i32, i32, i32) -> PathType,
     {
+        // `getPathTypeWithinMobBB`: `get_type` is the evaluator's virtual
+        // `getPathType`, also used for the rail check at the mob's position.
         let mut mask: u32 = 0;
         let mob_pos = ctx.mob_position();
+        let can_pass_doors = self.config.can_pass_doors;
+        let can_open_doors = self.config.can_open_doors;
 
         for dx in 0..self.config.entity_width {
             for dy in 0..self.config.entity_height {
                 for dz in 0..self.config.entity_depth {
-                    let mut pt = get_type(ctx, x + dx, y + dy, z + dz);
-                    pt = self.evaluate_block_path_type(ctx, mob, mob_pos, pt);
+                    let mut pt = get_type(ctx, dx + x, dy + y, dz + z);
+                    if pt == PathType::DoorWoodClosed && can_open_doors && can_pass_doors {
+                        pt = PathType::WalkableDoor;
+                    }
+                    if pt == PathType::DoorOpen && !can_pass_doors {
+                        pt = PathType::Blocked;
+                    }
+                    if pt == PathType::Rail
+                        && get_type(ctx, mob_pos.x, mob_pos.y, mob_pos.z) != PathType::Rail
+                        && get_type(ctx, mob_pos.x, mob_pos.y - 1, mob_pos.z) != PathType::Rail
+                    {
+                        pt = PathType::UnpassableRail;
+                    }
                     mask |= 1_u32 << pt.index();
                 }
             }
@@ -718,34 +740,6 @@ impl WalkNodeEvaluator {
             highest_type
         }
     }
-
-    fn evaluate_block_path_type<W: PathWorldView + ?Sized>(
-        &mut self,
-        ctx: &mut PathfindingContext<'_, W>,
-        mob: &MobPathingState,
-        mob_pos: BlockPos,
-        mut path_type: PathType,
-    ) -> PathType {
-        if path_type == PathType::DoorWoodClosed
-            && self.config.can_open_doors
-            && self.config.can_pass_doors
-        {
-            path_type = PathType::WalkableDoor;
-        }
-        if path_type == PathType::DoorOpen && !self.config.can_pass_doors {
-            path_type = PathType::Blocked;
-        }
-        if path_type == PathType::Rail
-            && self.get_path_type(ctx, mob_pos.x, mob_pos.y, mob_pos.z) != PathType::Rail
-            && self.get_path_type(ctx, mob_pos.x, mob_pos.y - 1, mob_pos.z) != PathType::Rail
-        {
-            path_type = PathType::UnpassableRail;
-        }
-        if path_type == PathType::PowderSnow && mob.can_stand_on_powder_snow {
-            path_type = PathType::Walkable;
-        }
-        path_type
-    }
 }
 
 impl NodeEvaluator for WalkNodeEvaluator {
@@ -771,46 +765,55 @@ impl NodeEvaluator for WalkNodeEvaluator {
         ctx: &mut PathfindingContext<'_, W>,
         mob: &MobPathingState,
         arena: &mut NodeArena,
+        _random: &mut dyn GoalRandom,
     ) -> usize {
-        let mut y = mth::floor_d(mob.pos.y + 0.5);
-        let base_pos = BlockPos::new(mth::floor_d(mob.pos.x), y, mth::floor_d(mob.pos.z));
-        if self.config.can_float && mob.in_water {
-            let mut probe_y = mth::floor_d(mob.pos.y);
-            while ctx
-                .get_block_info(BlockPos::new(base_pos.x, probe_y, base_pos.z))
-                .is_water
-            {
-                probe_y += 1;
+        let start_pos = mob.block_position();
+        let (bx, bz) = (start_pos.x, start_pos.z);
+        let mut start_y = start_pos.y;
+        let mut info = ctx.get_block_info(BlockPos::new(bx, start_y, bz));
+        if !mob.can_stand_on_fluid(info) {
+            if self.config.can_float && mob.in_water {
+                // `!state.is(Blocks.WATER) && fluid != WATER source` is exactly
+                // "the fluid at this position is not water" (`FluidTags.WATER`).
+                while info.is_water {
+                    start_y += 1;
+                    info = ctx.get_block_info(BlockPos::new(bx, start_y, bz));
+                }
+                start_y -= 1;
+            } else if mob.on_ground {
+                start_y = mth::floor_d(mob.pos.y + 0.5);
+            } else {
+                let mut probe_y = mth::floor_d(mob.pos.y + 1.0);
+                while probe_y > ctx.level().min_y() {
+                    start_y = probe_y;
+                    probe_y -= 1;
+                    let below = ctx.get_block_info(BlockPos::new(bx, probe_y, bz));
+                    if !below.is_air && !below.is_pathfindable_land {
+                        break;
+                    }
+                }
             }
-            y = probe_y - 1;
-        } else if !mob.on_ground {
-            let mut probe_y = mth::floor_d(mob.pos.y);
-            while probe_y > ctx.level().min_y()
-                && !ctx
-                    .get_block_info(BlockPos::new(base_pos.x, probe_y - 1, base_pos.z))
-                    .has_collision()
-            {
-                probe_y -= 1;
+        } else {
+            while mob.can_stand_on_fluid(info) {
+                start_y += 1;
+                info = ctx.get_block_info(BlockPos::new(bx, start_y, bz));
             }
-            y = probe_y;
+            start_y -= 1;
         }
 
-        let start = BlockPos::new(base_pos.x, y, base_pos.z);
-        if self.can_start_at(ctx, mob, start) {
-            return self.get_start_node(ctx, mob, arena, start);
-        }
-
-        // Try the 4 corners of the mob's bounding box in deterministic order
-        let bb = mob.bounding_box();
-        let corners = [
-            BlockPos::new(mth::floor_d(bb.min_x), y, mth::floor_d(bb.min_z)),
-            BlockPos::new(mth::floor_d(bb.min_x), y, mth::floor_d(bb.max_z)),
-            BlockPos::new(mth::floor_d(bb.max_x), y, mth::floor_d(bb.min_z)),
-            BlockPos::new(mth::floor_d(bb.max_x), y, mth::floor_d(bb.max_z)),
-        ];
-        for corner in corners {
-            if self.can_start_at(ctx, mob, corner) {
-                return self.get_start_node(ctx, mob, arena, corner);
+        let start = BlockPos::new(bx, start_y, bz);
+        if !self.can_start_at(ctx, mob, start) {
+            let bb = mob.bounding_box();
+            let corners = [
+                BlockPos::new(mth::floor_d(bb.min_x), start_y, mth::floor_d(bb.min_z)),
+                BlockPos::new(mth::floor_d(bb.min_x), start_y, mth::floor_d(bb.max_z)),
+                BlockPos::new(mth::floor_d(bb.max_x), start_y, mth::floor_d(bb.min_z)),
+                BlockPos::new(mth::floor_d(bb.max_x), start_y, mth::floor_d(bb.max_z)),
+            ];
+            for corner in corners {
+                if self.can_start_at(ctx, mob, corner) {
+                    return self.get_start_node(ctx, mob, arena, corner);
+                }
             }
         }
 
@@ -843,15 +846,10 @@ impl NodeEvaluator for WalkNodeEvaluator {
 
         let floor_level = self.get_floor_level(ctx.level(), mob, BlockPos::new(nx, ny, nz));
 
-        // Exact Paper 26.2 order: SOUTH, WEST, EAST, NORTH
+        // `Direction.Plane.HORIZONTAL` iteration order: NORTH, EAST, SOUTH, WEST.
+        // `reusable` is indexed by iteration position instead of `get2DDataValue`.
         let mut reusable = [None; 4];
-        let dirs = [
-            Direction::South,
-            Direction::West,
-            Direction::East,
-            Direction::North,
-        ];
-        for (i, dir) in dirs.iter().copied().enumerate() {
+        for (i, dir) in Direction::HORIZONTAL.iter().copied().enumerate() {
             let neighbor = self.find_accepted_node(
                 ctx,
                 mob,
@@ -871,16 +869,11 @@ impl NodeEvaluator for WalkNodeEvaluator {
             }
         }
 
-        // Exact Paper 26.2 diagonal order:
-        // (North, East), (East, South), (South, West), (West, North)
-        // Mapped into `reusable` indices: South=0, West=1, East=2, North=3
-        let diag_pairs = [
-            (Direction::North, Direction::East, 3_usize, 2_usize),
-            (Direction::East, Direction::South, 2_usize, 0_usize),
-            (Direction::South, Direction::West, 0_usize, 1_usize),
-            (Direction::West, Direction::North, 1_usize, 3_usize),
-        ];
-        for (d1, d2, i1, i2) in diag_pairs {
+        // Diagonals: each horizontal direction paired with its clockwise neighbour:
+        // (NORTH, EAST), (EAST, SOUTH), (SOUTH, WEST), (WEST, NORTH).
+        for (i1, d1) in Direction::HORIZONTAL.iter().copied().enumerate() {
+            let d2 = d1.clock_wise();
+            let i2 = (i1 + 1) % 4;
             if Self::is_diagonal_valid(arena, mob, node_idx, reusable[i1], reusable[i2]) {
                 let diag = self.find_accepted_node(
                     ctx,
@@ -912,12 +905,6 @@ impl NodeEvaluator for WalkNodeEvaluator {
         y: i32,
         z: i32,
     ) -> PathType {
-        if self.amphibious {
-            let pt = self.get_path_type(ctx, x, y, z);
-            if pt == PathType::Water || pt == PathType::WaterBorder {
-                return pt;
-            }
-        }
         self.evaluate_path_type_at_pos(ctx, mob, x, y, z)
     }
 
@@ -944,9 +931,40 @@ pub struct FlyNodeEvaluator {
 }
 
 impl FlyNodeEvaluator {
+    const SMALL_MOB_INFLATED_START_NODE_BOUNDING_BOX: f32 = 1.1;
+    const MAX_START_NODE_CANDIDATES: i32 = 10;
+
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Mirrors `FlyNodeEvaluator.canStartAt(BlockPos)`.
+    fn can_start_at<W: PathWorldView + ?Sized>(
+        &mut self,
+        ctx: &mut PathfindingContext<'_, W>,
+        mob: &MobPathingState,
+        pos: BlockPos,
+    ) -> bool {
+        let pt = self.get_cached_path_type(ctx, mob, pos.x, pos.y, pos.z);
+        mob.get_pathfinding_malus(pt) >= 0.0
+    }
+
+    /// Mirrors the inherited `WalkNodeEvaluator.getStartNode(BlockPos)`, reading
+    /// through this evaluator's path type cache.
+    fn get_start_node<W: PathWorldView + ?Sized>(
+        &mut self,
+        ctx: &mut PathfindingContext<'_, W>,
+        mob: &MobPathingState,
+        arena: &mut NodeArena,
+        pos: BlockPos,
+    ) -> usize {
+        let idx = arena.get_or_create(pos.x, pos.y, pos.z);
+        let pt = self.get_cached_path_type(ctx, mob, pos.x, pos.y, pos.z);
+        let node = arena.get_mut(idx);
+        node.path_type = pt;
+        node.cost_malus = mob.get_pathfinding_malus(pt);
+        idx
     }
 
     fn fly_path_type<W: PathWorldView + ?Sized>(
@@ -965,7 +983,9 @@ impl FlyNodeEvaluator {
             } else if below == PathType::Cocoa {
                 pt = PathType::Cocoa;
             } else if below == PathType::Fence {
-                pt = PathType::Fence;
+                if BlockPos::new(x, y - 1, z) != ctx.mob_position() {
+                    pt = PathType::Fence;
+                }
             } else {
                 pt = if below != PathType::Walkable
                     && below != PathType::Open
@@ -1058,28 +1078,70 @@ impl NodeEvaluator for FlyNodeEvaluator {
         ctx: &mut PathfindingContext<'_, W>,
         mob: &MobPathingState,
         arena: &mut NodeArena,
+        random: &mut dyn GoalRandom,
     ) -> usize {
-        let mut y = mth::floor_d(mob.pos.y + 0.5);
-        let base_x = mth::floor_d(mob.pos.x);
-        let base_z = mth::floor_d(mob.pos.z);
-        if self.walk.config.can_float && mob.in_water {
-            let mut probe_y = mth::floor_d(mob.pos.y);
+        let block_pos = mob.block_position();
+        let start_y = if self.walk.config.can_float && mob.in_water {
+            let mut start_y = block_pos.y;
             while ctx
-                .get_block_info(BlockPos::new(base_x, probe_y, base_z))
-                .is_water
+                .get_block_info(BlockPos::new(block_pos.x, start_y, block_pos.z))
+                .is_water_block
             {
-                probe_y += 1;
+                start_y += 1;
             }
-            y = probe_y;
+            start_y
+        } else {
+            mth::floor_d(mob.pos.y + 0.5)
+        };
+
+        let start_pos = BlockPos::new(block_pos.x, start_y, block_pos.z);
+        if !self.can_start_at(ctx, mob, start_pos) {
+            // `iteratePathfindingStartNodeCandidatePositions`, consumed lazily.
+            let bb = mob.bounding_box();
+            let x_size = bb.max_x - bb.min_x;
+            let y_size = bb.max_y - bb.min_y;
+            let z_size = bb.max_z - bb.min_z;
+            let is_small_mob = (x_size + y_size + z_size) / 3.0 < 1.0;
+            if is_small_mob {
+                let inflated_size = f64::from(Self::SMALL_MOB_INFLATED_START_NODE_BOUNDING_BOX);
+                let z_padding = mth::max_f64(0.0, inflated_size - z_size);
+                let x_padding = mth::max_f64(0.0, inflated_size - x_size);
+                let y_padding = mth::max_f64(0.0, inflated_size - y_size);
+                let min_x = mth::floor_d(bb.min_x - x_padding);
+                let min_y = mth::floor_d(bb.min_y - y_padding);
+                let min_z = mth::floor_d(bb.min_z - z_padding);
+                let max_x = mth::floor_d(bb.max_x + x_padding);
+                let max_y = mth::floor_d(bb.max_y + y_padding);
+                let max_z = mth::floor_d(bb.max_z + z_padding);
+                let width = max_x.wrapping_sub(min_x).wrapping_add(1);
+                let height = max_y.wrapping_sub(min_y).wrapping_add(1);
+                let depth = max_z.wrapping_sub(min_z).wrapping_add(1);
+                for _ in 0..Self::MAX_START_NODE_CANDIDATES {
+                    let cx = min_x.wrapping_add(random.next_int(width));
+                    let cy = min_y.wrapping_add(random.next_int(height));
+                    let cz = min_z.wrapping_add(random.next_int(depth));
+                    let candidate = BlockPos::new(cx, cy, cz);
+                    if self.can_start_at(ctx, mob, candidate) {
+                        return self.get_start_node(ctx, mob, arena, candidate);
+                    }
+                }
+            } else {
+                let mob_y = block_pos.y;
+                let corners = [
+                    BlockPos::new(mth::floor_d(bb.min_x), mob_y, mth::floor_d(bb.min_z)),
+                    BlockPos::new(mth::floor_d(bb.min_x), mob_y, mth::floor_d(bb.max_z)),
+                    BlockPos::new(mth::floor_d(bb.max_x), mob_y, mth::floor_d(bb.min_z)),
+                    BlockPos::new(mth::floor_d(bb.max_x), mob_y, mth::floor_d(bb.max_z)),
+                ];
+                for corner in corners {
+                    if self.can_start_at(ctx, mob, corner) {
+                        return self.get_start_node(ctx, mob, arena, corner);
+                    }
+                }
+            }
         }
-        let start_pos = BlockPos::new(base_x, y, base_z);
-        let pt = self.get_cached_path_type(ctx, mob, start_pos.x, start_pos.y, start_pos.z);
-        let malus = mob.get_pathfinding_malus(pt);
-        let idx = arena.get_or_create(start_pos.x, start_pos.y, start_pos.z);
-        let node = arena.get_mut(idx);
-        node.path_type = pt;
-        node.cost_malus = malus;
-        idx
+
+        self.get_start_node(ctx, mob, arena, start_pos)
     }
 
     fn get_neighbors<W: PathWorldView + ?Sized>(
@@ -1096,158 +1158,135 @@ impl NodeEvaluator for FlyNodeEvaluator {
         };
         let mut count = 0;
 
-        // Exact Paper 26.2 FlyNodeEvaluator cardinal order: S, W, E, N, U, D
-        let south = self.find_accepted_node(ctx, mob, arena, x, y, z + 1);
-        if Self::is_open(arena, south) {
-            out[count] = south.unwrap();
-            count += 1;
-        }
-        let west = self.find_accepted_node(ctx, mob, arena, x - 1, y, z);
-        if Self::is_open(arena, west) {
-            out[count] = west.unwrap();
-            count += 1;
-        }
-        let east = self.find_accepted_node(ctx, mob, arena, x + 1, y, z);
-        if Self::is_open(arena, east) {
-            out[count] = east.unwrap();
-            count += 1;
-        }
-        let north = self.find_accepted_node(ctx, mob, arena, x, y, z - 1);
-        if Self::is_open(arena, north) {
-            out[count] = north.unwrap();
-            count += 1;
-        }
-        let up = self.find_accepted_node(ctx, mob, arena, x, y + 1, z);
-        if Self::is_open(arena, up) {
-            out[count] = up.unwrap();
-            count += 1;
-        }
-        let down = self.find_accepted_node(ctx, mob, arena, x, y - 1, z);
-        if Self::is_open(arena, down) {
-            out[count] = down.unwrap();
-            count += 1;
-        }
-
-        let open_up = Self::has_malus(arena, up);
-        let open_down = Self::has_malus(arena, down);
-        let open_north = Self::has_malus(arena, north);
-        let open_south = Self::has_malus(arena, south);
-        let open_east = Self::has_malus(arena, east);
-        let open_west = Self::has_malus(arena, west);
-
-        // Vertical diagonals (Paper order)
-        let mut try_push = |arena: &mut NodeArena,
-                            cond: bool,
-                            dx: i32,
-                            dy: i32,
-                            dz: i32,
-                            count: &mut usize|
-         -> Option<usize> {
-            if cond {
-                let n = self.find_accepted_node(ctx, mob, arena, x + dx, y + dy, z + dz);
-                if Self::is_open(arena, n) {
-                    out[*count] = n.unwrap();
-                    *count += 1;
-                }
-                n
-            } else {
-                None
+        // Exact `FlyNodeEvaluator.getNeighbors` order. Every candidate goes through
+        // `findAcceptedNode` unconditionally (it bumps WALKABLE `costMalus` each
+        // call); only the push into `out` is guarded.
+        let mut accept = |this: &mut Self, arena: &mut NodeArena, dx: i32, dy: i32, dz: i32| {
+            this.find_accepted_node(ctx, mob, arena, x + dx, y + dy, z + dz)
+        };
+        let mut push = |arena: &NodeArena, node: Option<usize>, guard: bool, count: &mut usize| {
+            if Self::is_open(arena, node) && guard {
+                out[*count] = node.unwrap();
+                *count += 1;
             }
         };
+        let m = |arena: &NodeArena, node: Option<usize>| Self::has_malus(arena, node);
 
-        let north_up = try_push(arena, open_north && open_up, 0, 1, -1, &mut count);
-        let south_up = try_push(arena, open_south && open_up, 0, 1, 1, &mut count);
-        let east_up = try_push(arena, open_east && open_up, 1, 1, 0, &mut count);
-        let west_up = try_push(arena, open_west && open_up, -1, 1, 0, &mut count);
-        let north_down = try_push(arena, open_north && open_down, 0, -1, -1, &mut count);
-        let south_down = try_push(arena, open_south && open_down, 0, -1, 1, &mut count);
-        let east_down = try_push(arena, open_east && open_down, 1, -1, 0, &mut count);
-        let west_down = try_push(arena, open_west && open_down, -1, -1, 0, &mut count);
+        let south = accept(self, arena, 0, 0, 1);
+        push(arena, south, true, &mut count);
+        let west = accept(self, arena, -1, 0, 0);
+        push(arena, west, true, &mut count);
+        let east = accept(self, arena, 1, 0, 0);
+        push(arena, east, true, &mut count);
+        let north = accept(self, arena, 0, 0, -1);
+        push(arena, north, true, &mut count);
+        let up = accept(self, arena, 0, 1, 0);
+        push(arena, up, true, &mut count);
+        let down = accept(self, arena, 0, -1, 0);
+        push(arena, down, true, &mut count);
 
-        // Horizontal diagonals (Paper order)
-        let north_east = try_push(arena, open_north && open_east, 1, 0, -1, &mut count);
-        let north_west = try_push(arena, open_north && open_west, -1, 0, -1, &mut count);
-        let south_east = try_push(arena, open_south && open_east, 1, 0, 1, &mut count);
-        let south_west = try_push(arena, open_south && open_west, -1, 0, 1, &mut count);
+        let south_up = accept(self, arena, 0, 1, 1);
+        let g = m(arena, south) && m(arena, up);
+        push(arena, south_up, g, &mut count);
+        let west_up = accept(self, arena, -1, 1, 0);
+        let g = m(arena, west) && m(arena, up);
+        push(arena, west_up, g, &mut count);
+        let east_up = accept(self, arena, 1, 1, 0);
+        let g = m(arena, east) && m(arena, up);
+        push(arena, east_up, g, &mut count);
+        let north_up = accept(self, arena, 0, 1, -1);
+        let g = m(arena, north) && m(arena, up);
+        push(arena, north_up, g, &mut count);
+        let south_down = accept(self, arena, 0, -1, 1);
+        let g = m(arena, south) && m(arena, down);
+        push(arena, south_down, g, &mut count);
+        let west_down = accept(self, arena, -1, -1, 0);
+        let g = m(arena, west) && m(arena, down);
+        push(arena, west_down, g, &mut count);
+        let east_down = accept(self, arena, 1, -1, 0);
+        let g = m(arena, east) && m(arena, down);
+        push(arena, east_down, g, &mut count);
+        let north_down = accept(self, arena, 0, -1, -1);
+        let g = m(arena, north) && m(arena, down);
+        push(arena, north_down, g, &mut count);
 
-        // 3D corners
-        let open_ne = Self::has_malus(arena, north_east);
-        let open_nw = Self::has_malus(arena, north_west);
-        let open_se = Self::has_malus(arena, south_east);
-        let open_sw = Self::has_malus(arena, south_west);
-        let open_nu = Self::has_malus(arena, north_up);
-        let open_su = Self::has_malus(arena, south_up);
-        let open_eu = Self::has_malus(arena, east_up);
-        let open_wu = Self::has_malus(arena, west_up);
-        let open_nd = Self::has_malus(arena, north_down);
-        let open_sd = Self::has_malus(arena, south_down);
-        let open_ed = Self::has_malus(arena, east_down);
-        let open_wd = Self::has_malus(arena, west_down);
+        let north_east = accept(self, arena, 1, 0, -1);
+        let g = m(arena, north) && m(arena, east);
+        push(arena, north_east, g, &mut count);
+        let south_east = accept(self, arena, 1, 0, 1);
+        let g = m(arena, south) && m(arena, east);
+        push(arena, south_east, g, &mut count);
+        let north_west = accept(self, arena, -1, 0, -1);
+        let g = m(arena, north) && m(arena, west);
+        push(arena, north_west, g, &mut count);
+        let south_west = accept(self, arena, -1, 0, 1);
+        let g = m(arena, south) && m(arena, west);
+        push(arena, south_west, g, &mut count);
 
-        let _ = try_push(
-            arena,
-            open_up && open_ne && open_nu && open_eu,
-            1,
-            1,
-            -1,
-            &mut count,
-        );
-        let _ = try_push(
-            arena,
-            open_up && open_nw && open_nu && open_wu,
-            -1,
-            1,
-            -1,
-            &mut count,
-        );
-        let _ = try_push(
-            arena,
-            open_up && open_se && open_su && open_eu,
-            1,
-            1,
-            1,
-            &mut count,
-        );
-        let _ = try_push(
-            arena,
-            open_up && open_sw && open_su && open_wu,
-            -1,
-            1,
-            1,
-            &mut count,
-        );
-        let _ = try_push(
-            arena,
-            open_down && open_ne && open_nd && open_ed,
-            1,
-            -1,
-            -1,
-            &mut count,
-        );
-        let _ = try_push(
-            arena,
-            open_down && open_nw && open_nd && open_wd,
-            -1,
-            -1,
-            -1,
-            &mut count,
-        );
-        let _ = try_push(
-            arena,
-            open_down && open_se && open_sd && open_ed,
-            1,
-            -1,
-            1,
-            &mut count,
-        );
-        let _ = try_push(
-            arena,
-            open_down && open_sw && open_sd && open_wd,
-            -1,
-            -1,
-            1,
-            &mut count,
-        );
+        let north_east_up = accept(self, arena, 1, 1, -1);
+        let g = m(arena, north_east)
+            && m(arena, north)
+            && m(arena, east)
+            && m(arena, up)
+            && m(arena, north_up)
+            && m(arena, east_up);
+        push(arena, north_east_up, g, &mut count);
+        let south_east_up = accept(self, arena, 1, 1, 1);
+        let g = m(arena, south_east)
+            && m(arena, south)
+            && m(arena, east)
+            && m(arena, up)
+            && m(arena, south_up)
+            && m(arena, east_up);
+        push(arena, south_east_up, g, &mut count);
+        let north_west_up = accept(self, arena, -1, 1, -1);
+        let g = m(arena, north_west)
+            && m(arena, north)
+            && m(arena, west)
+            && m(arena, up)
+            && m(arena, north_up)
+            && m(arena, west_up);
+        push(arena, north_west_up, g, &mut count);
+        let south_west_up = accept(self, arena, -1, 1, 1);
+        let g = m(arena, south_west)
+            && m(arena, south)
+            && m(arena, west)
+            && m(arena, up)
+            && m(arena, south_up)
+            && m(arena, west_up);
+        push(arena, south_west_up, g, &mut count);
+        let north_east_down = accept(self, arena, 1, -1, -1);
+        let g = m(arena, north_east)
+            && m(arena, north)
+            && m(arena, east)
+            && m(arena, down)
+            && m(arena, north_down)
+            && m(arena, east_down);
+        push(arena, north_east_down, g, &mut count);
+        let south_east_down = accept(self, arena, 1, -1, 1);
+        let g = m(arena, south_east)
+            && m(arena, south)
+            && m(arena, east)
+            && m(arena, down)
+            && m(arena, south_down)
+            && m(arena, east_down);
+        push(arena, south_east_down, g, &mut count);
+        let north_west_down = accept(self, arena, -1, -1, -1);
+        let g = m(arena, north_west)
+            && m(arena, north)
+            && m(arena, west)
+            && m(arena, down)
+            && m(arena, north_down)
+            && m(arena, west_down);
+        push(arena, north_west_down, g, &mut count);
+        let south_west_down = accept(self, arena, -1, -1, 1);
+        let g = m(arena, south_west)
+            && m(arena, south)
+            && m(arena, west)
+            && m(arena, down)
+            && m(arena, south_down)
+            && m(arena, west_down);
+        push(arena, south_west_down, g, &mut count);
 
         count
     }
@@ -1372,6 +1411,7 @@ impl NodeEvaluator for SwimNodeEvaluator {
         _ctx: &mut PathfindingContext<'_, W>,
         mob: &MobPathingState,
         arena: &mut NodeArena,
+        _random: &mut dyn GoalRandom,
     ) -> usize {
         let bb = mob.bounding_box();
         arena.get_or_create(
@@ -1558,9 +1598,10 @@ impl NodeEvaluator for AmphibiousNodeEvaluator {
         ctx: &mut PathfindingContext<'_, W>,
         mob: &MobPathingState,
         arena: &mut NodeArena,
+        random: &mut dyn GoalRandom,
     ) -> usize {
         if !mob.in_water {
-            self.walk.get_start(ctx, mob, arena)
+            self.walk.get_start(ctx, mob, arena, random)
         } else {
             let bb = mob.bounding_box();
             let pos = BlockPos::new(
@@ -1568,13 +1609,7 @@ impl NodeEvaluator for AmphibiousNodeEvaluator {
                 mth::floor_d(bb.min_y + 0.5),
                 mth::floor_d(bb.min_z),
             );
-            let idx = arena.get_or_create(pos.x, pos.y, pos.z);
-            let pt = self.get_path_type_of_mob(ctx, mob, pos.x, pos.y, pos.z);
-            let malus = mob.get_pathfinding_malus(pt);
-            let node = arena.get_mut(idx);
-            node.path_type = pt;
-            node.cost_malus = malus;
-            idx
+            self.walk.get_start_node(ctx, mob, arena, pos)
         }
     }
 

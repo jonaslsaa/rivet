@@ -27,7 +27,10 @@ pub struct BlockPathInfo {
     /// `Blocks.WITHER_ROSE` or `BlockTags.SPELEOTHEMS`.
     pub is_damage_cautious: bool,
     pub is_lava: bool,
+    /// `fluidState.is(FluidTags.WATER)` (includes waterlogged blocks).
     pub is_water: bool,
+    /// `blockState.is(Blocks.WATER)`: the water block itself, not waterlogged blocks.
+    pub is_water_block: bool,
     /// `WalkNodeEvaluator.isBurningBlock(BlockState)`.
     pub is_burning: bool,
     pub is_door_open: bool,
@@ -35,8 +38,16 @@ pub struct BlockPathInfo {
     pub is_iron_door_closed: bool,
     pub is_rail: bool,
     pub is_leaves: bool,
-    /// `BlockTags.FENCES`, `BlockTags.WALLS`, or closed `FenceGateBlock`.
-    pub is_fence_or_wall: bool,
+    /// `BlockTags.FENCES`.
+    pub is_fence: bool,
+    /// `BlockTags.WALLS`.
+    pub is_wall: bool,
+    /// `FenceGateBlock` with `OPEN = false`.
+    pub is_closed_fence_gate: bool,
+    /// `BlockTags.CAULDRONS`.
+    pub is_cauldron: bool,
+    /// `blockState.isSolid()` (the legacy-solid flag).
+    pub is_solid: bool,
     /// `blockState.isPathfindable(PathComputationType.LAND)`.
     pub is_pathfindable_land: bool,
     /// `blockState.isPathfindable(PathComputationType.WATER)`.
@@ -61,13 +72,18 @@ impl BlockPathInfo {
         is_damage_cautious: false,
         is_lava: false,
         is_water: false,
+        is_water_block: false,
         is_burning: false,
         is_door_open: false,
         is_wood_door_closed: false,
         is_iron_door_closed: false,
         is_rail: false,
         is_leaves: false,
-        is_fence_or_wall: false,
+        is_fence: false,
+        is_wall: false,
+        is_closed_fence_gate: false,
+        is_cauldron: false,
+        is_solid: false,
         is_pathfindable_land: true,
         is_pathfindable_water: false,
         collision_max_y: None,
@@ -86,13 +102,18 @@ impl BlockPathInfo {
         is_damage_cautious: false,
         is_lava: false,
         is_water: false,
+        is_water_block: false,
         is_burning: false,
         is_door_open: false,
         is_wood_door_closed: false,
         is_iron_door_closed: false,
         is_rail: false,
         is_leaves: false,
-        is_fence_or_wall: false,
+        is_fence: false,
+        is_wall: false,
+        is_closed_fence_gate: false,
+        is_cauldron: false,
+        is_solid: true,
         is_pathfindable_land: false,
         is_pathfindable_water: false,
         collision_max_y: Some(1.0),
@@ -110,6 +131,7 @@ impl BlockPathInfo {
         is_loaded: true,
         is_air: false,
         is_water: true,
+        is_water_block: true,
         is_pathfindable_land: true,
         is_pathfindable_water: true,
         collision_max_y: None,
@@ -128,11 +150,12 @@ impl BlockPathInfo {
         ..Self::AIR
     };
 
-    /// Standard fence/wall (collision height 1.5).
+    /// Standard fence (collision height 1.5).
     pub const FENCE: Self = Self {
         is_loaded: true,
         is_air: false,
-        is_fence_or_wall: true,
+        is_fence: true,
+        is_solid: true,
         is_pathfindable_land: false,
         is_pathfindable_water: false,
         collision_max_y: Some(1.5),
@@ -155,6 +178,7 @@ impl BlockPathInfo {
         is_loaded: true,
         is_air: false,
         is_damaging: true,
+        is_solid: true,
         is_pathfindable_land: false,
         is_pathfindable_water: false,
         collision_max_y: Some(1.0),
@@ -166,6 +190,7 @@ impl BlockPathInfo {
         is_loaded: true,
         is_air: false,
         is_wood_door_closed: true,
+        is_solid: true,
         is_pathfindable_land: false,
         is_pathfindable_water: false,
         collision_max_y: Some(1.0),
@@ -188,6 +213,7 @@ impl BlockPathInfo {
         is_loaded: true,
         is_air: false,
         is_iron_door_closed: true,
+        is_solid: true,
         is_pathfindable_land: false,
         is_pathfindable_water: false,
         collision_max_y: Some(1.0),
@@ -243,7 +269,7 @@ impl BlockPathInfo {
         if self.is_leaves {
             return PathType::Leaves;
         }
-        if self.is_fence_or_wall {
+        if self.is_fence || self.is_wall || self.is_closed_fence_gate {
             return PathType::Fence;
         }
         if !self.is_pathfindable_land {
@@ -260,6 +286,12 @@ impl BlockPathInfo {
     pub const fn has_collision(self) -> bool {
         self.collision_max_y.is_some()
     }
+
+    /// `blockState.is(BlockTags.DOORS)`: every `DoorBlock`, open or closed.
+    #[must_use]
+    pub const fn is_door(self) -> bool {
+        self.is_door_open || self.is_wood_door_closed || self.is_iron_door_closed
+    }
 }
 
 /// Read-only world view used by pathfinding evaluators, navigation, and controls.
@@ -268,16 +300,13 @@ pub trait PathWorldView {
         -64
     }
 
+    /// `Level.getMaxY()`: the highest buildable block Y (inclusive).
     fn max_y(&self) -> i32 {
-        320
+        319
     }
 
     fn sea_level(&self) -> i32 {
         63
-    }
-
-    fn is_bright_outside(&self) -> bool {
-        false
     }
 
     fn block_info(&self, pos: BlockPos) -> BlockPathInfo;
@@ -496,11 +525,11 @@ pub struct MobPathingState {
     pub is_passenger: bool,
     pub affected_by_fluids: bool,
     pub is_baby: bool,
-    pub can_stand_on_fluid: bool,
-    pub can_stand_on_powder_snow: bool,
+    /// `Strider.canStandOnFluid(FluidState)` (`fluid.is(FluidTags.LAVA)`); the
+    /// `LivingEntity` default stands on no fluid.
+    pub can_stand_on_lava: bool,
     pub is_dolphin: bool,
     pub is_sun_sensitive: bool,
-    pub has_helmet: bool,
     pub movement_speed: f64,
     pub flying_speed: f64,
     pub y_rot: f32,
@@ -544,11 +573,9 @@ impl MobPathingState {
             is_passenger: false,
             affected_by_fluids: true,
             is_baby: false,
-            can_stand_on_fluid: false,
-            can_stand_on_powder_snow: false,
+            can_stand_on_lava: false,
             is_dolphin: false,
             is_sun_sensitive: false,
-            has_helmet: false,
             movement_speed: 0.25,
             flying_speed: 0.4,
             y_rot: 0.0,
@@ -597,6 +624,12 @@ impl MobPathingState {
     #[must_use]
     pub fn eye_y(&self) -> f64 {
         self.pos.y + f64::from(self.eye_height)
+    }
+
+    /// Mirrors `LivingEntity.canStandOnFluid(FluidState)` for the fluid at `info`.
+    #[must_use]
+    pub const fn can_stand_on_fluid(&self, info: BlockPathInfo) -> bool {
+        self.can_stand_on_lava && info.is_lava
     }
 
     #[must_use]

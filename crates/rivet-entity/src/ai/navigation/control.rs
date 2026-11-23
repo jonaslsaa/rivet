@@ -11,6 +11,15 @@ use crate::ai::goal::context::{BlockPos, Vec3};
 use crate::ai::navigation::path_type::PathType;
 use crate::ai::navigation::world_view::{MobPathingState, PathWorldView};
 
+/// `Mth.atan2(y, x) * 180.0F / (float)Math.PI` evaluated in double with the
+/// float-widened constants, as Java does before the caller's `(float)` cast.
+fn atan2_degrees(y: f64, x: f64) -> f64 {
+    mth::atan2(y, x) * f64::from(180.0_f32) / f64::from(std::f32::consts::PI)
+}
+
+/// `1.0E-5F` widened to double, the epsilon of the rotation guards.
+const ROTATION_EPSILON: f64 = 1.0e-5_f32 as f64;
+
 /// Exact port of `Control.rotateTowards(float fromAngle, float toAngle, float maxRot)`.
 #[must_use]
 pub fn rotate_towards(from_angle: f32, to_angle: f32, max_rot: f32) -> f32 {
@@ -160,7 +169,7 @@ impl MoveControl {
     {
         match self.operation {
             MoveOperation::Strafe => {
-                let speed = (self.speed_modifier * mob.movement_speed) as f32;
+                let speed = (self.speed_modifier as f32) * (mob.movement_speed as f32);
                 let mut forwards = self.strafe_forwards;
                 let mut right = self.strafe_right;
                 let mut mag = mth::sqrt(forwards * forwards + right * right);
@@ -200,22 +209,21 @@ impl MoveControl {
                     return;
                 }
 
-                let y_rot_d = (mth::atan2(zd, xd) * (180.0 / std::f64::consts::PI)) as f32 - 90.0;
+                let y_rot_d = atan2_degrees(zd, xd) as f32 - 90.0;
                 mob.y_rot = rotlerp(mob.y_rot, y_rot_d, Self::MAX_TURN);
                 mob.set_speed((self.speed_modifier * mob.movement_speed) as f32);
 
                 let pos = mob.block_position();
                 let info = world.block_info(pos);
                 let shape_max_y = info.collision_max_y.unwrap_or(0.0);
-                let horizontal_threshold = mth::max_f64(f64::from(mob.bb_width), 1.0);
-                if (yd > f64::from(mob.max_up_step)
-                    && xd * xd + zd * zd < horizontal_threshold * horizontal_threshold)
+                // `Math.max(1.0F, bbWidth)` is compared against the squared
+                // horizontal distance without squaring it.
+                let horizontal_threshold = f64::from(mth::max_f32(1.0, mob.bb_width));
+                if (yd > f64::from(mob.max_up_step) && xd * xd + zd * zd < horizontal_threshold)
                     || (info.has_collision()
-                        && mob.pos.y < pos.y as f64 + shape_max_y
-                        && !info.is_door_open
-                        && !info.is_wood_door_closed
-                        && !info.is_iron_door_closed
-                        && !info.is_fence_or_wall)
+                        && mob.pos.y < shape_max_y + pos.y as f64
+                        && !info.is_door()
+                        && !info.is_fence)
                 {
                     jump_control.jump();
                     self.operation = MoveOperation::Jumping;
@@ -223,7 +231,7 @@ impl MoveControl {
             }
             MoveOperation::Jumping => {
                 mob.set_speed((self.speed_modifier * mob.movement_speed) as f32);
-                if mob.on_ground || mob.is_in_liquid() {
+                if mob.on_ground || (mob.is_in_liquid() && mob.affected_by_fluids) {
                     self.operation = MoveOperation::Wait;
                 }
             }
@@ -271,7 +279,7 @@ impl FlyingMoveControl {
                 return;
             }
 
-            let y_rot_d = (mth::atan2(zd, xd) * (180.0 / std::f64::consts::PI)) as f32 - 90.0;
+            let y_rot_d = atan2_degrees(zd, xd) as f32 - 90.0;
             mob.y_rot = rotlerp(mob.y_rot, y_rot_d, 90.0);
 
             let speed = if mob.on_ground {
@@ -282,8 +290,8 @@ impl FlyingMoveControl {
             mob.set_speed(speed);
 
             let sd = (xd * xd + zd * zd).sqrt();
-            if yd.abs() > 1.0e-5 || sd.abs() > 1.0e-5 {
-                let x_rot_d = -((mth::atan2(yd, sd) * (180.0 / std::f64::consts::PI)) as f32);
+            if yd.abs() > ROTATION_EPSILON || sd.abs() > ROTATION_EPSILON {
+                let x_rot_d = (-atan2_degrees(yd, sd)) as f32;
                 mob.x_rot = rotlerp(mob.x_rot, x_rot_d, self.max_turn as f32);
                 mob.yya = if yd > 0.0 { speed } else { -speed };
             }
@@ -365,7 +373,7 @@ impl SmoothSwimmingMoveControl {
                 return;
             }
 
-            let y_rot_d = (mth::atan2(zd, xd) * (180.0 / std::f64::consts::PI)) as f32 - 90.0;
+            let y_rot_d = atan2_degrees(zd, xd) as f32 - 90.0;
             mob.y_rot = rotlerp(mob.y_rot, y_rot_d, self.max_turn_y as f32);
             mob.y_body_rot = mob.y_rot;
             mob.y_head_rot = mob.y_rot;
@@ -374,9 +382,8 @@ impl SmoothSwimmingMoveControl {
             if mob.in_water {
                 mob.set_speed(speed * self.in_water_speed_modifier);
                 let sd = (xd * xd + zd * zd).sqrt();
-                if yd.abs() > 1.0e-5 || sd.abs() > 1.0e-5 {
-                    let mut x_rot_d =
-                        -((mth::atan2(yd, sd) * (180.0 / std::f64::consts::PI)) as f32);
+                if yd.abs() > ROTATION_EPSILON || sd.abs() > ROTATION_EPSILON {
+                    let mut x_rot_d = -(atan2_degrees(yd, sd) as f32);
                     x_rot_d = mth::clamp_f32(
                         mth::wrap_degrees_f32(x_rot_d),
                         -(self.max_turn_x as f32),
@@ -454,27 +461,29 @@ impl LookControl {
 
     /// Mirrors `LookControl.getXRotD()`.
     #[must_use]
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     pub fn get_x_rot_d(&self, mob: &MobPathingState) -> Option<f32> {
         let xd = self.wanted_x - mob.pos.x;
         let yd = self.wanted_y - mob.eye_y();
         let zd = self.wanted_z - mob.pos.z;
         let sd = (xd * xd + zd * zd).sqrt();
-        if yd.abs() <= 1.0e-5 && sd.abs() <= 1.0e-5 {
+        if !(yd.abs() > ROTATION_EPSILON) && !(sd.abs() > ROTATION_EPSILON) {
             None
         } else {
-            Some(-((mth::atan2(yd, sd) * (180.0 / std::f64::consts::PI)) as f32))
+            Some((-atan2_degrees(yd, sd)) as f32)
         }
     }
 
     /// Mirrors `LookControl.getYRotD()`.
     #[must_use]
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     pub fn get_y_rot_d(&self, mob: &MobPathingState) -> Option<f32> {
         let xd = self.wanted_x - mob.pos.x;
         let zd = self.wanted_z - mob.pos.z;
-        if zd.abs() <= 1.0e-5 && xd.abs() <= 1.0e-5 {
+        if !(zd.abs() > ROTATION_EPSILON) && !(xd.abs() > ROTATION_EPSILON) {
             None
         } else {
-            Some((mth::atan2(zd, xd) * (180.0 / std::f64::consts::PI)) as f32 - 90.0)
+            Some(atan2_degrees(zd, xd) as f32 - 90.0)
         }
     }
 
@@ -601,7 +610,9 @@ impl BodyRotationControl {
                 Self::rotate_body_if_necessary(mob);
             } else {
                 self.head_stable_time += 1;
-                self.rotate_head_towards_front(mob);
+                if self.head_stable_time > Self::DELAY_UNTIL_STARTING_TO_FACE_FORWARD {
+                    self.rotate_head_towards_front(mob);
+                }
             }
         }
     }
@@ -630,7 +641,7 @@ impl BodyRotationControl {
     fn is_moving(mob: &MobPathingState) -> bool {
         let xd = mob.pos.x - mob.prev_pos.x;
         let zd = mob.pos.z - mob.prev_pos.z;
-        xd * xd + zd * zd > 2.500_000_3e-7
+        xd * xd + zd * zd > f64::from(MoveControl::MIN_SPEED_SQR)
     }
 }
 

@@ -1,8 +1,8 @@
 //! Port of `net.minecraft.world.level.pathfinder.PathFinder` in Paper 26.2.
 
-use indexmap::IndexMap;
+use std::cmp::Ordering;
 
-use crate::ai::goal::context::BlockPos;
+use crate::ai::goal::context::{BlockPos, GoalRandom};
 use crate::ai::navigation::evaluator::NodeEvaluator;
 use crate::ai::navigation::node::{BinaryHeap, Node, NodeArena, Target};
 use crate::ai::navigation::path::Path;
@@ -43,12 +43,14 @@ impl PathFinder {
     ///
     /// Targets are passed as a slice in deterministic order (matching an ordered
     /// target set). Calls `evaluator.prepare`, runs A*, and always calls `evaluator.done`.
+    /// `random` is the mob's `getRandom()`, used by `NodeEvaluator.getStart()`.
     #[allow(clippy::too_many_arguments)]
     pub fn find_path<E: NodeEvaluator, W: PathWorldView + ?Sized>(
         &mut self,
         evaluator: &mut E,
         world: &W,
         mob: &mut MobPathingState,
+        random: &mut dyn GoalRandom,
         targets: &[BlockPos],
         max_path_distance: f32,
         reach_range: i32,
@@ -61,7 +63,7 @@ impl PathFinder {
         evaluator.prepare(mob, world);
         let mut arena = NodeArena::new();
         let mut ctx = PathfindingContext::new(world, None, mob.block_position());
-        let start_idx = evaluator.get_start(&mut ctx, mob, &mut arena);
+        let start_idx = evaluator.get_start(&mut ctx, mob, &mut arena, random);
 
         // Build ordered map of Target -> BlockPos (deterministic iteration)
         let mut target_entries: Vec<(Target, BlockPos)> = Vec::with_capacity(targets.len());
@@ -88,7 +90,7 @@ impl PathFinder {
         result
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::neg_cmp_op_on_partial_ord)]
     fn find_path_internal<E: NodeEvaluator, W: PathWorldView + ?Sized>(
         &mut self,
         evaluator: &mut E,
@@ -127,9 +129,6 @@ impl PathFinder {
 
             let current_idx = self.open_set.pop(arena);
             arena.get_mut(current_idx).closed = true;
-            if self.capture_debug {
-                closed_indices.push(current_idx);
-            }
 
             for (t_idx, (target, _)) in targets.iter_mut().enumerate() {
                 if arena
@@ -146,7 +145,11 @@ impl PathFinder {
                 break;
             }
 
-            if arena.get(current_idx).distance_to(arena.get(start_idx)) < max_path_distance {
+            if self.capture_debug {
+                closed_indices.push(current_idx);
+            }
+
+            if !(arena.get(current_idx).distance_to(arena.get(start_idx)) >= max_path_distance) {
                 let neighbor_count =
                     evaluator.get_neighbors(ctx, mob, arena, current_idx, &mut neighbors);
 
@@ -156,7 +159,10 @@ impl PathFinder {
                     let current_g = arena.get(current_idx).g;
                     let neighbor_malus = arena.get(neighbor_idx).cost_malus;
 
+                    // Paper writes `walkedDistance` before the acceptance test, so a
+                    // rejected open-set neighbour keeps the overwritten value.
                     let new_walked = current_walked + dist;
+                    arena.get_mut(neighbor_idx).walked_distance = new_walked;
                     let new_g = current_g + dist + neighbor_malus;
 
                     let neighbor_in_open = arena.get(neighbor_idx).in_open_set();
@@ -167,7 +173,6 @@ impl PathFinder {
                         {
                             let n = arena.get_mut(neighbor_idx);
                             n.came_from = Some(current_idx);
-                            n.walked_distance = new_walked;
                             n.g = new_g;
                             n.h = h;
                         }
@@ -182,47 +187,38 @@ impl PathFinder {
             }
         }
 
-        // Exact Paper 26.2 candidate path selection:
-        // If any target was reached, compare reached targets by node count;
-        // otherwise compare all targets by (dist_to_target, node_count).
-        let mut best_path: Option<Path> = None;
-        if !reached_targets.is_empty() {
-            // Deduplicate while preserving order
-            let mut seen: IndexMap<usize, ()> = IndexMap::new();
-            for t_idx in reached_targets {
-                seen.entry(t_idx).or_insert(());
-            }
-            for (t_idx, ()) in seen {
-                let (target, pos) = &targets[t_idx];
-                if let Some(best_node_idx) = target.best_node() {
-                    let candidate = Self::reconstruct_path(arena, best_node_idx, *pos, true);
-                    let replace = match &best_path {
-                        None => true,
-                        Some(existing) => candidate.get_node_count() < existing.get_node_count(),
-                    };
-                    if replace {
-                        best_path = Some(candidate);
-                    }
-                }
-            }
+        // Paper feature patch "Optimize-Pathfinder": when no target was reached,
+        // all targets compete on node count alone; otherwise the reached targets
+        // compete on `getDistToTarget` (`Double.compare`), then node count.
+        let reached = !reached_targets.is_empty();
+        let candidates: Vec<usize> = if reached {
+            reached_targets
         } else {
-            for (target, pos) in targets.iter() {
-                if let Some(best_node_idx) = target.best_node() {
-                    let candidate = Self::reconstruct_path(arena, best_node_idx, *pos, false);
-                    let replace = match &best_path {
-                        None => true,
-                        Some(existing) => {
-                            let c_dist = candidate.get_dist_to_target();
-                            let e_dist = existing.get_dist_to_target();
-                            c_dist < e_dist
-                                || (c_dist == e_dist
-                                    && candidate.get_node_count() < existing.get_node_count())
-                        }
+            (0..targets.len()).collect()
+        };
+        let mut best_path: Option<Path> = None;
+        for t_idx in candidates {
+            let (target, pos) = &targets[t_idx];
+            let Some(best_node_idx) = target.best_node() else {
+                continue;
+            };
+            let candidate = Self::reconstruct_path(arena, best_node_idx, *pos, reached);
+            let replace = match &best_path {
+                None => true,
+                Some(existing) => {
+                    let by_count = candidate.get_node_count().cmp(&existing.get_node_count());
+                    let ordering = if reached {
+                        f64::from(candidate.get_dist_to_target())
+                            .total_cmp(&f64::from(existing.get_dist_to_target()))
+                            .then(by_count)
+                    } else {
+                        by_count
                     };
-                    if replace {
-                        best_path = Some(candidate);
-                    }
+                    ordering == Ordering::Less
                 }
+            };
+            if replace {
+                best_path = Some(candidate);
             }
         }
 
