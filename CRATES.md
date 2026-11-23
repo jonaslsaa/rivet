@@ -2,6 +2,8 @@
 
 ## Workspace (bottom-up dependency order)
 
+> D15 supersedes this table where they differ: `rivet-entity` folds into the live-game crate `rivet-server`, and the `COVERAGE.tsv` ledger assigns every class its crate.
+
 | Crate | Ports | Notes |
 |---|---|---|
 | `rivet-core` | `net.minecraft` root package | `CrashReport`, `ChatFormatting`, `SharedConstants`, `Util`, root exceptions. Bottom of the stack — keeps module-path mirroring clean instead of scattering root classes ad hoc. |
