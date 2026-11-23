@@ -213,10 +213,14 @@ impl LightEventListener for LevelLightEngine {
             .is_some_and(StarLightProvider::has_updates)
     }
 
+    /// Paper's `runLightUpdates()`: `hadUpdates = hasLightWork()`, then
+    /// `propagateChanges()`, returning `hadUpdates ? 1 : 0` (not a count).
     fn run_light_updates(&mut self) -> i32 {
-        self.provider
-            .as_deref_mut()
-            .map_or(0, StarLightProvider::propagate_changes)
+        let had_updates = self.has_light_work();
+        if let Some(provider) = self.provider.as_deref_mut() {
+            provider.propagate_changes();
+        }
+        i32::from(had_updates)
     }
 
     fn update_section_status(&mut self, pos: SectionPos, section_empty: bool) {
@@ -451,10 +455,8 @@ mod tests {
             fn has_updates(&self) -> bool {
                 self.pending_updates > 0
             }
-            fn propagate_changes(&mut self) -> i32 {
-                let ran = self.pending_updates;
+            fn propagate_changes(&mut self) {
                 self.pending_updates = 0;
-                ran
             }
             fn light_chunk(&mut self, _pos: ChunkPos, _empty_sections: &[Option<bool>]) {}
             fn force_load_in_chunk(&mut self, _pos: ChunkPos, _empty_sections: &[Option<bool>]) {}
@@ -501,7 +503,8 @@ mod tests {
         both.check_block(pos);
         both.update_section_status(sec, false);
         assert!(both.has_light_work());
-        assert_eq!(both.run_light_updates(), 2);
+        // Paper returns `hadUpdates ? 1 : 0`, not the number of queued changes.
+        assert_eq!(both.run_light_updates(), 1);
         assert!(!both.has_light_work());
         assert_eq!(both.run_light_updates(), 0);
         assert_eq!(

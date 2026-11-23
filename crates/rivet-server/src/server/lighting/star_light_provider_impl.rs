@@ -800,10 +800,13 @@ impl StarLightProvider for SkyLightProvider {
         self.changes.front().is_some() || !self.pending_restores.is_empty()
     }
 
-    fn propagate_changes(&mut self) -> i32 {
-        match self.try_run_updates() {
-            Ok(notified) => i32::try_from(notified.len()).unwrap_or(i32::MAX),
-            Err(_) => 0,
+    /// Paper's `propagateChanges()` is `void` and never throws. Drain queued
+    /// tasks, but keep the changed-chunk notifications for the owner's next
+    /// `try_run_updates`, which reports them; a refusal already retains its
+    /// task (so `has_updates` stays true) and surfaces on that explicit drain.
+    fn propagate_changes(&mut self) {
+        if let Ok(notified) = self.try_run_updates() {
+            self.pending_notifications = notified;
         }
     }
 
@@ -2329,5 +2332,49 @@ mod tests {
         assert!(!engine.has_light_work());
         assert_eq!(engine.get_block_light_value(BlockPos::new(8, 64, 8)), 14);
         assert_eq!(engine.get_block_light_value(BlockPos::new(9, 64, 8)), 13);
+
+        // A queued check that changes no light still had work: Paper returns
+        // `hadUpdates ? 1 : 0`, independent of how many chunks changed.
+        engine.check_block(BlockPos::new(8, 64, 8));
+        assert!(engine.has_light_work());
+        assert_eq!(engine.run_light_updates(), 1);
+        assert!(!engine.has_light_work());
+        assert_eq!(engine.run_light_updates(), 0);
+    }
+
+    #[test]
+    fn propagate_changes_retains_notifications_for_the_owner_drain() {
+        use super::super::generated_block_light_fixture::write;
+        use rivet_registry::block_state::BlockState;
+        use rivet_registry::generated::blocks::BlockId;
+        use rivet_world::chunk::status::ChunkStatus;
+
+        let mut chunk = all_air_chunk(ChunkPos::ZERO);
+        SkyLightProvider::new(overworld(), true, true, no_chunks())
+            .light_chunk_with(&mut chunk, &all_air_empty_sections())
+            .unwrap();
+        chunk.set_persisted_status(ChunkStatus::Full);
+        chunk.set_light_correct(true);
+        write(
+            &mut chunk,
+            8,
+            64,
+            8,
+            BlockState::of(BlockId::from_name("minecraft:torch").unwrap()).id(),
+        );
+        let mut provider = SkyLightProvider::with_owned_storage(
+            overworld(),
+            true,
+            true,
+            HashMap::from([((0, 0), chunk)]),
+        );
+
+        provider.section_change(SectionPos::of(0, 4, 0), false);
+        provider.block_change(BlockPos::new(8, 64, 8));
+        provider.propagate_changes();
+        assert!(!provider.has_updates());
+        assert_eq!(provider.get_block_light_value(BlockPos::new(8, 64, 8)), 14);
+        assert_eq!(provider.try_run_updates().unwrap(), [ChunkPos::ZERO]);
+        assert!(provider.try_run_updates().unwrap().is_empty());
     }
 }
