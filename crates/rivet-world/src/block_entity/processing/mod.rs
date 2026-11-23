@@ -4,6 +4,7 @@
 //! families:
 //! - [`WorldlyContainer`] (`net.minecraft.world.WorldlyContainer`)
 //! - [`BaseContainerState`] / [`LockCode`] (`BaseContainerBlockEntity`)
+//! - [`RandomizableContainer`] (`RandomizableContainer.unpackLootTable`)
 //! - [`FuelValues`] (`FuelValues`)
 //! - [`ChestBlockEntity`] (`ChestBlockEntity`)
 //! - [`BarrelBlockEntity`] (`BarrelBlockEntity`)
@@ -21,6 +22,7 @@ pub mod fuel_values;
 pub mod furnace;
 pub mod hopper;
 pub mod nbt;
+pub mod randomizable;
 pub mod worldly_container;
 
 #[cfg(test)]
@@ -55,5 +57,6 @@ pub use hopper::{
     DEFAULT_COOLDOWN, HOPPER_CONTAINER_SIZE, HOPPER_EMPTY, HOPPER_HAS_ITEMS, HOPPER_IS_FULL,
     HopperBlockEntity, HopperTarget, MOVE_ITEM_SPEED,
 };
-pub use nbt::{BaseContainerState, LockCode, load_all_items, save_all_items};
+pub use nbt::{BaseContainerState, LockCode, PaperLootableData, load_all_items, save_all_items};
+pub use randomizable::{LootUnpackContext, RandomizableContainer};
 pub use worldly_container::WorldlyContainer;

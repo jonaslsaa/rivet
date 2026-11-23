@@ -9,6 +9,7 @@ use crate::inventory::{
 };
 
 use super::nbt::{BaseContainerState, load_all_items, save_all_items};
+use super::randomizable::RandomizableContainer;
 
 /// `CrafterBlockEntity.CONTAINER_WIDTH = 3`.
 pub const CONTAINER_WIDTH: usize = 3;
@@ -30,7 +31,7 @@ pub const DEFAULT_CRAFTING_TICKS_REMAINING: i32 = 0;
 pub const DEFAULT_TRIGGERED: i32 = 0;
 
 /// Paper `net.minecraft.world.level.block.entity.CrafterBlockEntity`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CrafterBlockEntity {
     pub base: BaseContainerState,
     items: [InventoryItemStack; CONTAINER_SIZE],
@@ -67,21 +68,17 @@ impl CrafterBlockEntity {
         slot < CONTAINER_SIZE && self.items[slot].is_empty()
     }
 
-    /// `CrafterBlockEntity.setSlotState(int, boolean)`.
+    /// `CrafterBlockEntity.setSlotState(int, boolean)` — only empty slots may
+    /// be toggled; an applied toggle always marks the block entity changed.
     ///
-    /// Returns `true` if the state was changed.
+    /// Returns whether the slot could be toggled (`slotCanBeDisabled`).
     pub fn set_slot_state(&mut self, slot: usize, enabled: bool) -> bool {
         if !self.slot_can_be_disabled(slot) {
             return false;
         }
-        let disabled = !enabled;
-        if self.disabled_slots[slot] != disabled {
-            self.disabled_slots[slot] = disabled;
-            self.set_changed();
-            true
-        } else {
-            false
-        }
+        self.disabled_slots[slot] = !enabled;
+        self.set_changed();
+        true
     }
 
     /// `CrafterBlockEntity.setTriggered(boolean)`.
@@ -148,6 +145,9 @@ impl CrafterBlockEntity {
     pub fn save_additional(&self, output: &mut CompoundTag) {
         self.base.save_base(output);
         output.put_int("crafting_ticks_remaining", self.crafting_ticks_remaining);
+        // `trySaveLootTable` returns `false` for Paper block entities (they carry
+        // `lootableData`), so `Items` is always written.
+        self.base.save_loot_table(output);
         save_all_items(output, &self.items, true);
         let disabled_indices: Vec<i32> = (0..CONTAINER_SIZE)
             .filter(|&i| self.disabled_slots[i])
@@ -165,12 +165,18 @@ impl CrafterBlockEntity {
         self.base.load_base(input);
         self.crafting_ticks_remaining =
             input.get_int_or("crafting_ticks_remaining", DEFAULT_CRAFTING_TICKS_REMAINING);
+        // `tryLoadLootTable` returns `false` for Paper block entities (they carry
+        // `lootableData`), so `Items` is always read.
+        self.base.load_loot_table(input);
         load_all_items(input, &mut self.items);
         self.disabled_slots = [false; CONTAINER_SIZE];
         if let Some(Tag::IntArray(arr)) = input.get("disabled_slots") {
             for &idx in &arr.data {
-                if (0..CONTAINER_SIZE as i32).contains(&idx) {
-                    self.disabled_slots[idx as usize] = true;
+                // `slotCanBeDisabled(ix)`: in range and the loaded slot is empty.
+                if let Ok(slot) = usize::try_from(idx)
+                    && self.slot_can_be_disabled(slot)
+                {
+                    self.disabled_slots[slot] = true;
                 }
             }
         }
@@ -208,7 +214,7 @@ impl Container for CrafterBlockEntity {
             return;
         }
         if self.is_slot_disabled(slot) {
-            self.disabled_slots[slot] = false;
+            self.set_slot_state(slot, true);
         }
         let max_size = self.get_max_stack_size_for_item(&stack);
         stack.limit_size(max_size);
@@ -266,6 +272,16 @@ impl ContainerData for CrafterBlockEntity {
 
     fn get_count(&self) -> usize {
         NUM_DATA
+    }
+}
+
+impl RandomizableContainer for CrafterBlockEntity {
+    fn container_state(&self) -> &BaseContainerState {
+        &self.base
+    }
+
+    fn container_state_mut(&mut self) -> &mut BaseContainerState {
+        &mut self.base
     }
 }
 

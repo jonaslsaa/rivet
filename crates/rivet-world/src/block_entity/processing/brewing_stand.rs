@@ -2,7 +2,7 @@
 //!
 //! Mirrors `working/Paper/paper-server/src/minecraft/java/net/minecraft/world/level/block/entity/BrewingStandBlockEntity.java`.
 
-use rivet_nbt::compound_tag::CompoundTag;
+use rivet_nbt::{compound_tag::CompoundTag, tag::Tag};
 use rivet_registry::core::Direction;
 
 use crate::effect::{PotionBrewing, PotionContents, PotionId};
@@ -12,7 +12,10 @@ use crate::inventory::{
 };
 
 use super::fuel_values::inventory_crafting_remainder;
-use super::nbt::{BaseContainerState, load_all_items, save_all_items};
+use super::nbt::{
+    BaseContainerState, decode_component_tag, encode_component_tag, item_stack, load_all_items,
+    save_all_items,
+};
 use super::worldly_container::WorldlyContainer;
 
 /// `BrewingStandBlockEntity.INGREDIENT_SLOT = 3`.
@@ -43,7 +46,7 @@ pub const DATA_RECIPE_BREW_TIME: usize = 2;
 /// `BrewingStandBlockEntity.NUM_DATA_VALUES = 3`.
 pub const NUM_DATA_VALUES: usize = 3;
 
-/// Component key storing the canonical potion identifier on potion item stacks.
+/// `DataComponents.POTION_CONTENTS` patch key on potion item stacks.
 pub const POTION_COMPONENT_KEY: &str = "minecraft:potion_contents";
 
 /// Observable outcomes of one `BrewingStandBlockEntity.serverTick(...)`.
@@ -68,7 +71,8 @@ pub struct BrewingStandBlockEntity {
     pub brew_time: i32,
     pub recipe_brew_time: i32,
     pub fuel: i32,
-    last_potion_count: [bool; 3],
+    /// Paper `lastPotionCount` (`null` until the first tick).
+    last_potion_count: Option<[bool; 3]>,
     ingredient: ItemId,
     potion_brewing: PotionBrewing,
 }
@@ -93,30 +97,39 @@ impl BrewingStandBlockEntity {
             brew_time: 0,
             recipe_brew_time: DEFAULT_BREW_TIME,
             fuel: 0,
-            last_potion_count: [false; 3],
+            last_potion_count: None,
             ingredient: ItemId::AIR,
             potion_brewing,
         }
     }
 
-    /// Helper to construct a potion `InventoryItemStack` with canonical potion
-    /// component metadata (`max_stack_size = 1`).
+    /// `PotionContents.createItemStack(item, potion)`: a single potion item
+    /// whose `minecraft:potion_contents` is encoded with
+    /// `PotionContents.FULL_CODEC` (`{potion:"minecraft:..."}`).
     pub fn make_potion_stack(container_name: &str, potion: PotionId) -> InventoryItemStack {
         let Some(item_id) = ItemId::from_name(container_name) else {
             return InventoryItemStack::empty();
         };
+        let mut contents = CompoundTag::new();
+        contents.put_string("potion", potion.def().identifier);
         let mut comps = ComponentMap::new();
         comps.insert(
             POTION_COMPONENT_KEY.to_string(),
-            potion.def().identifier.to_string(),
+            encode_component_tag(&Tag::Compound(contents)),
         );
-        InventoryItemStack::with_max_stack_size(item_id, 1, 1).with_components(comps)
+        item_stack(item_id, 1).with_components(comps)
     }
 
-    /// Read the `PotionId` encoded on a potion stack, if any.
+    /// The `PotionContents.potion()` on a stack, decoded with
+    /// `PotionContents.CODEC` (`FULL_CODEC` compound, or the bare `Potion.CODEC`
+    /// id alternative).
     pub fn potion_of_stack(stack: &InventoryItemStack) -> Option<PotionId> {
-        let id_str = stack.components().get(POTION_COMPONENT_KEY)?;
-        PotionId::by_name(id_str)
+        let value = stack.components().get(POTION_COMPONENT_KEY)?;
+        match decode_component_tag(value) {
+            Tag::Compound(contents) => PotionId::by_name(contents.get_string("potion")?),
+            Tag::String(id) => PotionId::by_name(&id.value),
+            _ => None,
+        }
     }
 
     /// `BrewingStandBlockEntity.getPotionBits()`.
@@ -172,8 +185,8 @@ impl BrewingStandBlockEntity {
                 result.brewed = true;
             } else if !brewable || ingredient_item != self.ingredient {
                 self.brew_time = 0;
-                self.set_changed();
             }
+            self.set_changed();
         } else if brewable && self.fuel > 0 {
             self.fuel = self.fuel.wrapping_sub(1);
             self.brew_time = DEFAULT_BREW_TIME;
@@ -184,8 +197,8 @@ impl BrewingStandBlockEntity {
 
         // 3. Update bottle presence bits.
         let bits = self.get_potion_bits();
-        if bits != self.last_potion_count {
-            self.last_potion_count = bits;
+        if self.last_potion_count != Some(bits) {
+            self.last_potion_count = Some(bits);
             result.bottle_bits_changed = true;
         }
         result.bottle_bits = bits;
@@ -207,7 +220,9 @@ impl BrewingStandBlockEntity {
         }
 
         self.items[INGREDIENT_SLOT].shrink(1);
-        if let Some(remainder) = inventory_crafting_remainder(ingredient_item) {
+        // `ingredient.getItem().getCraftingRemainder()` after the shrink: an
+        // emptied stack reports `Items.AIR`, which has no remainder.
+        if let Some(remainder) = inventory_crafting_remainder(self.items[INGREDIENT_SLOT].item()) {
             if self.items[INGREDIENT_SLOT].is_empty() {
                 self.items[INGREDIENT_SLOT] = remainder;
             } else {
@@ -215,7 +230,6 @@ impl BrewingStandBlockEntity {
             }
         }
 
-        self.set_changed();
         dropped
     }
 
@@ -232,8 +246,10 @@ impl BrewingStandBlockEntity {
         self.base.load_base(input);
         load_all_items(input, &mut self.items);
         self.brew_time = i32::from(input.get_short_or("BrewTime", 0));
+        if self.brew_time > 0 {
+            self.ingredient = self.items[INGREDIENT_SLOT].item();
+        }
         self.fuel = i32::from(input.get_byte_or("Fuel", 0));
-        self.last_potion_count = self.get_potion_bits();
     }
 }
 

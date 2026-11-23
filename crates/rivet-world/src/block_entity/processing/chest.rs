@@ -9,6 +9,7 @@ use crate::inventory::{
 };
 
 use super::nbt::{BaseContainerState, load_all_items, save_all_items};
+use super::randomizable::RandomizableContainer;
 
 /// `ChestBlockEntity.DEFAULT_ROWS * 9 = 27`.
 pub const CHEST_CONTAINER_SIZE: usize = 27;
@@ -91,18 +92,20 @@ impl ChestBlockEntity {
     /// `ChestBlockEntity.saveAdditional(ValueOutput)`.
     pub fn save_additional(&self, output: &mut CompoundTag) {
         self.base.save_base(output);
-        if !self.base.try_save_loot_table(output) {
-            save_all_items(output, &self.items, true);
-        }
+        // `trySaveLootTable` returns `false` for Paper block entities (they carry
+        // `lootableData`), so `Items` is always written.
+        self.base.save_loot_table(output);
+        save_all_items(output, &self.items, true);
     }
 
     /// `ChestBlockEntity.loadAdditional(ValueInput)`.
     pub fn load_additional(&mut self, input: &CompoundTag) {
         self.base.load_base(input);
         self.items = vec![InventoryItemStack::empty(); CHEST_CONTAINER_SIZE];
-        if !self.base.try_load_loot_table(input) {
-            load_all_items(input, &mut self.items);
-        }
+        // `tryLoadLootTable` returns `false` for Paper block entities (they carry
+        // `lootableData`), so `Items` is always read.
+        self.base.load_loot_table(input);
+        load_all_items(input, &mut self.items);
     }
 }
 
@@ -120,7 +123,6 @@ impl Container for ChestBlockEntity {
     }
 
     fn remove_item(&mut self, slot: usize, count: i32) -> InventoryItemStack {
-        self.base.clear_loot_table();
         let result = ContainerHelper::remove_item(&mut self.items, slot, count);
         if !result.is_empty() {
             self.set_changed();
@@ -129,12 +131,10 @@ impl Container for ChestBlockEntity {
     }
 
     fn remove_item_no_update(&mut self, slot: usize) -> InventoryItemStack {
-        self.base.clear_loot_table();
         ContainerHelper::take_item(&mut self.items, slot)
     }
 
     fn set_item(&mut self, slot: usize, mut stack: InventoryItemStack) {
-        self.base.clear_loot_table();
         if slot >= self.items.len() {
             return;
         }
@@ -161,10 +161,19 @@ impl Container for ChestBlockEntity {
     }
 
     fn clear_content(&mut self) {
-        self.base.clear_loot_table();
         for slot in &mut self.items {
             *slot = InventoryItemStack::empty();
         }
+    }
+}
+
+impl RandomizableContainer for ChestBlockEntity {
+    fn container_state(&self) -> &BaseContainerState {
+        &self.base
+    }
+
+    fn container_state_mut(&mut self) -> &mut BaseContainerState {
+        &mut self.base
     }
 }
 

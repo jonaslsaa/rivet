@@ -8,6 +8,7 @@ use rivet_registry::core::Direction;
 use crate::inventory::{Container, ContainerAccessContext, ContainerHelper, InventoryItemStack};
 
 use super::nbt::{BaseContainerState, load_all_items, save_all_items};
+use super::randomizable::RandomizableContainer;
 use super::worldly_container::WorldlyContainer;
 
 /// `HopperBlockEntity.MOVE_ITEM_SPEED = 8`.
@@ -17,10 +18,12 @@ pub const HOPPER_CONTAINER_SIZE: usize = 5;
 /// `HopperBlockEntity.DEFAULT_COOLDOWN = -1`.
 pub const DEFAULT_COOLDOWN: i32 = -1;
 
-/// Paper hopper inventory state codes.
+/// Paper `HopperBlockEntity.HOPPER_EMPTY` (`getFullState`, Perf: Optimize Hoppers).
 pub const HOPPER_EMPTY: i32 = 0;
-pub const HOPPER_IS_FULL: i32 = 1;
-pub const HOPPER_HAS_ITEMS: i32 = 2;
+/// Paper `HopperBlockEntity.HOPPER_HAS_ITEMS`.
+pub const HOPPER_HAS_ITEMS: i32 = 1;
+/// Paper `HopperBlockEntity.HOPPER_IS_FULL`.
+pub const HOPPER_IS_FULL: i32 = 2;
 
 /// Uniform view over a plain `Container`, a sided `WorldlyContainer`, or a
 /// receiving `HopperBlockEntity` for hopper push/pull transfer operations.
@@ -89,7 +92,7 @@ impl HopperTarget<'_> {
 }
 
 /// Paper `net.minecraft.world.level.block.entity.HopperBlockEntity`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HopperBlockEntity {
     pub base: BaseContainerState,
     items: [InventoryItemStack; HOPPER_CONTAINER_SIZE],
@@ -237,9 +240,13 @@ impl HopperBlockEntity {
         stack
     }
 
-    /// `HopperBlockEntity.ejectItems(...)` — pushes up to `hopper_amount`
-    /// (default `1`) from the first eligible hopper slot into `dest` through
-    /// `self.facing.opposite()`.
+    /// `HopperBlockEntity.ejectItems(...)` / `hopperPush(...)` — pushes up to
+    /// `hopper_amount` (default `1`) from the first eligible hopper slot into
+    /// `dest` through `self.facing.opposite()`.
+    ///
+    /// With Paper's default `hopper.cooldown-when-full: true`, a push that finds
+    /// items but moves none sets the cooldown to `MOVE_ITEM_SPEED`
+    /// (`spigotConfig.hopperTransfer`).
     pub fn eject_items(&mut self, dest: &mut HopperTarget<'_>, hopper_amount: i32) -> bool {
         if self.is_empty() || hopper_amount <= 0 {
             return false;
@@ -249,10 +256,12 @@ impl HopperBlockEntity {
             return false;
         }
 
+        let mut found_item = false;
         for slot in 0..HOPPER_CONTAINER_SIZE {
             if self.items[slot].is_empty() {
                 continue;
             }
+            found_item = true;
             let original = self.items[slot].clone();
             let extracted = self.remove_item(slot, hopper_amount);
             let remainder = Self::add_item_with_source_tick(
@@ -285,11 +294,20 @@ impl HopperBlockEntity {
             }
             self.items[slot] = original;
         }
+        if found_item {
+            // `hopper.cooldownWhenFull` — inventory was full.
+            self.set_cooldown(MOVE_ITEM_SPEED);
+        }
         false
     }
 
-    /// `HopperBlockEntity.suckInItems(...)` — pulls up to `hopper_amount`
-    /// (default `1`) from `source` through `Direction::Down` into this hopper.
+    /// `HopperBlockEntity.suckInItems(...)` / `hopperPull(...)` — pulls up to
+    /// `hopper_amount` (default `1`) from `source` through `Direction::Down`
+    /// into this hopper.
+    ///
+    /// Each attempted slot marks the source changed; with Paper's default
+    /// `hopper.cooldown-when-full: true`, each failed slot transfer applies the
+    /// `MOVE_ITEM_SPEED` cooldown before the next slot is tried.
     pub fn suck_in_items(&mut self, source: &mut HopperTarget<'_>, hopper_amount: i32) -> bool {
         if self.inventory_full() || hopper_amount <= 0 {
             return false;
@@ -303,6 +321,8 @@ impl HopperBlockEntity {
             if !source.can_take_from_container(&stack, slot, Direction::Down) {
                 continue;
             }
+            // "original logic always marks source inv as changed even if no move happens."
+            source.container_mut().set_changed();
             let original = stack;
             let taken = source.container_mut().remove_item(slot, hopper_amount);
             if taken.is_empty() {
@@ -327,6 +347,8 @@ impl HopperBlockEntity {
                 return true;
             }
             source.container_mut().set_item(slot, original);
+            // `hopper.cooldownWhenFull` — `applyCooldown(hopper)`.
+            self.set_cooldown(MOVE_ITEM_SPEED);
         }
         false
     }
@@ -375,9 +397,10 @@ impl HopperBlockEntity {
     /// `HopperBlockEntity.saveAdditional(ValueOutput)`.
     pub fn save_additional(&self, output: &mut CompoundTag) {
         self.base.save_base(output);
-        if !self.base.try_save_loot_table(output) {
-            save_all_items(output, &self.items, true);
-        }
+        // `trySaveLootTable` returns `false` for Paper block entities (they carry
+        // `lootableData`), so `Items` is always written.
+        self.base.save_loot_table(output);
+        save_all_items(output, &self.items, true);
         output.put_int("TransferCooldown", self.cooldown_time);
     }
 
@@ -385,9 +408,10 @@ impl HopperBlockEntity {
     pub fn load_additional(&mut self, input: &CompoundTag) {
         self.base.load_base(input);
         self.items = std::array::from_fn(|_| InventoryItemStack::empty());
-        if !self.base.try_load_loot_table(input) {
-            load_all_items(input, &mut self.items);
-        }
+        // `tryLoadLootTable` returns `false` for Paper block entities (they carry
+        // `lootableData`), so `Items` is always read.
+        self.base.load_loot_table(input);
+        load_all_items(input, &mut self.items);
         self.cooldown_time = input.get_int_or("TransferCooldown", DEFAULT_COOLDOWN);
     }
 }
@@ -417,7 +441,6 @@ impl Container for HopperBlockEntity {
     }
 
     fn remove_item(&mut self, slot: usize, count: i32) -> InventoryItemStack {
-        self.base.clear_loot_table();
         let result = ContainerHelper::remove_item(&mut self.items, slot, count);
         if !result.is_empty() {
             self.set_changed();
@@ -426,12 +449,10 @@ impl Container for HopperBlockEntity {
     }
 
     fn remove_item_no_update(&mut self, slot: usize) -> InventoryItemStack {
-        self.base.clear_loot_table();
         ContainerHelper::take_item(&mut self.items, slot)
     }
 
     fn set_item(&mut self, slot: usize, mut stack: InventoryItemStack) {
-        self.base.clear_loot_table();
         if slot >= HOPPER_CONTAINER_SIZE {
             return;
         }
@@ -450,10 +471,19 @@ impl Container for HopperBlockEntity {
     }
 
     fn clear_content(&mut self) {
-        self.base.clear_loot_table();
         for slot in &mut self.items {
             *slot = InventoryItemStack::empty();
         }
+    }
+}
+
+impl RandomizableContainer for HopperBlockEntity {
+    fn container_state(&self) -> &BaseContainerState {
+        &self.base
+    }
+
+    fn container_state_mut(&mut self) -> &mut BaseContainerState {
+        &mut self.base
     }
 }
 

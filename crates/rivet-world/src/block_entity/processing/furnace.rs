@@ -169,9 +169,11 @@ impl AbstractFurnaceBlockEntity {
         *count = count.wrapping_add(1);
     }
 
-    /// `AbstractFurnaceBlockEntity.setItem` with `RecipeManager` context so
-    /// replacing slot 0 with a different item recalculates `cooking_total_time`
-    /// and resets `cooking_timer = 0` (exact Paper semantics).
+    /// `AbstractFurnaceBlockEntity.setItem` on a level-bound furnace
+    /// (`this.level instanceof ServerLevel`): replacing slot 0 with a different
+    /// item recalculates `cooking_total_time` via `getTotalCookTime` and resets
+    /// `cooking_timer = 0`. The level's `RecipeManager` is passed down per
+    /// OWNERSHIP.md instead of being stored on the block entity.
     pub fn set_item_with_recipes(
         &mut self,
         slot: usize,
@@ -193,14 +195,15 @@ impl AbstractFurnaceBlockEntity {
         }
     }
 
-    /// Compute `getTotalCookTime` for the current input item.
+    /// `AbstractFurnaceBlockEntity.getTotalCookTime(level, this, recipeType, cookSpeedMultiplier)`
+    /// for the current input item: `(int) Math.ceil(cookTime / cookSpeedMultiplier)`
+    /// with `BURN_TIME_STANDARD` when no recipe matches.
     pub fn compute_total_cook_time(&mut self, recipes: &RecipeManager) -> i32 {
         let cook_time = self
             .lookup_cooking_recipe(recipes)
             .map(|(_, r)| r.cooking_time)
             .unwrap_or(BURN_TIME_STANDARD);
-        let scaled = (cook_time as f64 / self.cook_speed_multiplier).ceil() as i32;
-        scaled.max(1)
+        scaled_cook_time(cook_time, self.cook_speed_multiplier)
     }
 
     fn lookup_cooking_recipe<'a>(
@@ -272,63 +275,67 @@ impl AbstractFurnaceBlockEntity {
         if is_lit || (has_fuel && has_ingredient) {
             let max_stack_size = self.get_max_stack_size();
             let matched = if has_ingredient {
-                self.lookup_cooking_recipe(recipes).and_then(|(id, r)| {
-                    let result = crafting_to_inventory_stack(&r.result.create())?;
-                    Some((id, r.cooking_time, result))
+                self.lookup_cooking_recipe(recipes).map(|(id, r)| {
+                    // `recipe.value().assemble(input)`.
+                    let result = crafting_to_inventory_stack(&r.result.create())
+                        .unwrap_or_else(InventoryItemStack::empty);
+                    (id, r.cooking_time, result)
                 })
             } else {
                 None
             };
 
-            let burn_result = matched.as_ref().map(|(_, _, res)| res);
-            let can_cook = burn_result.is_some_and(|res| self.can_burn(res));
-
-            if !is_lit && can_cook {
-                let burn_duration = self.get_burn_duration(fuel_values, &self.items[SLOT_FUEL]);
-                self.lit_time_remaining = burn_duration;
-                self.lit_total_time = burn_duration;
-                if self.is_lit() {
-                    is_lit = true;
-                    dirty = true;
-                    if has_fuel {
-                        let fuel_item = self.items[SLOT_FUEL].item();
-                        self.items[SLOT_FUEL].shrink(1);
-                        if self.items[SLOT_FUEL].is_empty() {
-                            self.items[SLOT_FUEL] = inventory_crafting_remainder(fuel_item)
-                                .unwrap_or_else(InventoryItemStack::empty);
+            match matched {
+                // `recipe != null`
+                Some((recipe_id, recipe_cook_time, burn_result)) => {
+                    if !burn_result.is_empty() && self.can_burn(&burn_result) {
+                        if !is_lit {
+                            let burn_duration =
+                                self.get_burn_duration(fuel_values, &self.items[SLOT_FUEL]);
+                            self.lit_time_remaining = burn_duration;
+                            self.lit_total_time = burn_duration;
+                            if burn_duration > 0 {
+                                self.consume_fuel();
+                                is_lit = true;
+                                dirty = true;
+                            }
                         }
-                    }
-                }
-            }
 
-            if is_lit && can_cook {
-                if let Some((recipe_id, recipe_cook_time, result_stack)) = matched {
-                    if self.cooking_total_time <= 0 {
-                        let scaled =
-                            (recipe_cook_time as f64 / self.cook_speed_multiplier).ceil() as i32;
-                        self.cooking_total_time = scaled.max(1);
-                    }
-                    self.cooking_timer = self.cooking_timer.wrapping_add(1);
-                    if self.cooking_timer == self.cooking_total_time {
+                        if is_lit {
+                            // `FurnaceStartSmeltEvent` default: `getTotalCookTime(...)`.
+                            if self.cooking_timer == 0 {
+                                self.cooking_total_time =
+                                    scaled_cook_time(recipe_cook_time, self.cook_speed_multiplier);
+                            }
+                            self.cooking_timer = self.cooking_timer.wrapping_add(1);
+                            // Paper - cook speed multiplier API (`>=`).
+                            if self.cooking_timer >= self.cooking_total_time {
+                                self.cooking_timer = 0;
+                                self.cooking_total_time =
+                                    scaled_cook_time(recipe_cook_time, self.cook_speed_multiplier);
+                                if self.burn_item(max_stack_size, &burn_result) {
+                                    self.set_recipe_used(recipe_id);
+                                    burned_item = true;
+                                }
+                                dirty = true;
+                            }
+                        } else {
+                            self.cooking_timer = 0;
+                        }
+                    } else {
                         self.cooking_timer = 0;
-                        let scaled =
-                            (recipe_cook_time as f64 / self.cook_speed_multiplier).ceil() as i32;
-                        self.cooking_total_time = scaled.max(1);
-                        if self.burn_item(max_stack_size, &result_stack) {
-                            self.set_recipe_used(recipe_id);
-                            burned_item = true;
-                            dirty = true;
-                        }
                     }
                 }
-            } else {
-                self.cooking_timer = 0;
+                // `recipe == null` with an ingredient leaves the timer untouched.
+                None if has_ingredient => {}
+                None => self.cooking_timer = 0,
             }
-        } else if !is_lit && self.cooking_timer > 0 {
-            self.cooking_timer = self
-                .cooking_timer
-                .wrapping_sub(BURN_COOL_SPEED)
-                .clamp(0, self.cooking_total_time.max(0));
+        } else if self.cooking_timer > 0 {
+            self.cooking_timer = mth_clamp(
+                self.cooking_timer.wrapping_sub(BURN_COOL_SPEED),
+                0,
+                self.cooking_total_time,
+            );
         }
 
         let lit_changed = was_lit != is_lit;
@@ -344,6 +351,16 @@ impl AbstractFurnaceBlockEntity {
             is_lit,
             burned_item,
             dirty,
+        }
+    }
+
+    /// `AbstractFurnaceBlockEntity.consumeFuel(NonNullList, ItemStack)`.
+    fn consume_fuel(&mut self) {
+        let fuel_item = self.items[SLOT_FUEL].item();
+        self.items[SLOT_FUEL].shrink(1);
+        if self.items[SLOT_FUEL].is_empty() {
+            self.items[SLOT_FUEL] =
+                inventory_crafting_remainder(fuel_item).unwrap_or_else(InventoryItemStack::empty);
         }
     }
 
@@ -382,13 +399,13 @@ impl AbstractFurnaceBlockEntity {
         output.put_short("lit_total_time", self.lit_total_time as i16);
         output.put_double("Paper.CookSpeedMultiplier", self.cook_speed_multiplier);
         save_all_items(output, &self.items, true);
-        if !self.recipes_used.is_empty() {
-            let mut recipes_tag = CompoundTag::new();
-            for (id, &count) in &self.recipes_used {
-                recipes_tag.put_int(&id.to_string(), count);
-            }
-            output.put("RecipesUsed".into(), Tag::Compound(recipes_tag));
+        // `output.store("RecipesUsed", RECIPES_USED_CODEC, recipesUsed)` always
+        // writes the map, as an empty compound when no recipe was used.
+        let mut recipes_tag = CompoundTag::new();
+        for (id, &count) in &self.recipes_used {
+            recipes_tag.put_int(&id.to_string(), count);
         }
+        output.put("RecipesUsed".into(), Tag::Compound(recipes_tag));
     }
 
     /// `AbstractFurnaceBlockEntity.loadAdditional(ValueInput)`.
@@ -442,19 +459,13 @@ impl Container for AbstractFurnaceBlockEntity {
         if slot >= FURNACE_CONTAINER_SIZE {
             return;
         }
-        let same = !stack.is_empty()
-            && InventoryItemStack::is_same_item_same_components(&self.items[slot], &stack);
+        // Level-less `setItem` (`this.level` is not a `ServerLevel`): the slot is
+        // replaced and limited, and the cook timers are left untouched.
+        // Level-bound callers use `set_item_with_recipes`, which applies
+        // Paper's `getTotalCookTime` / `cookingTimer = 0` branch.
         let max_size = self.get_max_stack_size_for_item(&stack);
         stack.limit_size(max_size);
         self.items[slot] = stack;
-        if slot == SLOT_INPUT && !same {
-            self.cooking_timer = 0;
-            // Mark cooking_total_time for recomputation from the active recipe
-            // and cook_speed_multiplier on the next server_tick (since the
-            // Container trait has no RecipeManager parameter).
-            self.cooking_total_time = 0;
-            self.set_changed();
-        }
     }
 
     fn set_changed(&mut self) {
@@ -560,6 +571,17 @@ pub fn new_blast_furnace() -> AbstractFurnaceBlockEntity {
 /// Paper `net.minecraft.world.level.block.entity.SmokerBlockEntity`.
 pub fn new_smoker() -> AbstractFurnaceBlockEntity {
     AbstractFurnaceBlockEntity::new(FurnaceKind::Smoker)
+}
+
+/// `(int) Math.ceil(cookTime / cookSpeedMultiplier)` (Java's saturating
+/// `double -> int` narrowing, `NaN -> 0`).
+fn scaled_cook_time(cook_time: i32, cook_speed_multiplier: f64) -> i32 {
+    (f64::from(cook_time) / cook_speed_multiplier).ceil() as i32
+}
+
+/// `Mth.clamp(int, int, int)`: `value < min ? min : Math.min(value, max)`.
+fn mth_clamp(value: i32, min: i32, max: i32) -> i32 {
+    if value < min { min } else { value.min(max) }
 }
 
 fn inventory_to_crafting_stack(stack: &InventoryItemStack) -> Option<CraftingItemStack> {

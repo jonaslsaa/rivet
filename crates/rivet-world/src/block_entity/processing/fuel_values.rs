@@ -9,6 +9,8 @@ use rivet_registry::generated::tags::ITEM_TAG_BY_NAME;
 
 use crate::inventory::{InventoryItemStack, ItemId};
 
+use super::nbt::item_stack;
+
 /// Standard burn time unit (`AbstractFurnaceBlockEntity.BURN_TIME_STANDARD = 200`).
 pub const BURN_TIME_STANDARD: i32 = 200;
 
@@ -134,9 +136,9 @@ impl FuelValues {
         b.build()
     }
 
-    /// `FuelValues.isFuel(ItemStack)`.
+    /// `FuelValues.isFuel(ItemStack)` — `values.containsKey(itemStack.getItem())`.
     pub fn is_fuel(&self, stack: &InventoryItemStack) -> bool {
-        !stack.is_empty() && self.values.contains_key(&stack.item())
+        self.values.contains_key(&stack.item())
     }
 
     /// `FuelValues.burnDuration(ItemStack)`.
@@ -161,11 +163,12 @@ pub struct FuelValuesBuilder {
 }
 
 impl FuelValuesBuilder {
-    /// Register an item with a burn duration in ticks.
+    /// Register an item with a burn duration in ticks
+    /// (`FuelValues.Builder.putInternal`). Paper filters entries only by
+    /// `item.isEnabled(enabledFeatures)`, never by burn time, so zero burn
+    /// times from a small `baseUnit` still register the item as fuel.
     pub fn add(&mut self, item: ItemId, burn_time: i32) -> &mut Self {
-        if !item.is_air() && burn_time > 0 {
-            self.values.insert(item, burn_time);
-        }
+        self.values.insert(item, burn_time);
         self
     }
 
@@ -216,22 +219,17 @@ impl FuelValuesBuilder {
 /// Paper `Item.getCraftingRemainder()` seam for inventory items used in
 /// furnaces (e.g. `lava_bucket -> bucket`) and brewing stands (e.g.
 /// `dragon_breath -> glass_bottle`).
+///
+/// Exactly the `Items.java` entries declared with `.craftRemainder(...)`:
+/// water, lava and milk buckets, dragon's breath and honey bottle.
 pub fn inventory_crafting_remainder(item: ItemId) -> Option<InventoryItemStack> {
     let remainder_name = match item.name()? {
-        "minecraft:lava_bucket"
-        | "minecraft:water_bucket"
-        | "minecraft:milk_bucket"
-        | "minecraft:powder_snow_bucket" => "minecraft:bucket",
+        "minecraft:lava_bucket" | "minecraft:water_bucket" | "minecraft:milk_bucket" => {
+            "minecraft:bucket"
+        }
         "minecraft:dragon_breath" | "minecraft:honey_bottle" => "minecraft:glass_bottle",
         _ => return None,
     };
     let rem_id = ItemId::from_name(remainder_name)?;
-    let max_stack = if remainder_name == "minecraft:bucket" {
-        16
-    } else {
-        64
-    };
-    Some(InventoryItemStack::with_max_stack_size(
-        rem_id, 1, max_stack,
-    ))
+    Some(item_stack(rem_id, 1))
 }
