@@ -170,7 +170,7 @@ present with the PORTING.md name, parameter and return types mapped per PORTING.
 visibility mapped as above, enum constants complete and in order, nothing invented and no logic ported, files and
 mod lines mirroring the Java package, every STUB marker naming the right owning unit, no duplicate or stand-in of
 an existing canonical type. Run \`cd ${WT} && ${CARGO} cargo check -p ${A.crate} --locked\` (set cargo_check_pass),
-the clippy command, and \`python3 scripts/check_markers.py\`; a failure of any is a critical finding.
+the clippy command, and \`cd ${WT} && python3 scripts/check_markers.py\`; a failure of any is a critical finding.
 
 You are READ-ONLY: do not edit files and run no git command that changes state. Severity: critical = surface
 mismatch with the Java or a broken build, major = convention violation, minor = style. An empty findings list is

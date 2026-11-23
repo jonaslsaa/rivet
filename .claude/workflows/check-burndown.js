@@ -11,6 +11,10 @@ if (!A || !A.worktree) throw new Error('check-burndown requires {worktree}')
 // Workflow agents inherit the SESSION cwd, so every prompt pins the worktree.
 const WT = String(A.worktree).replace(/\/+$/, '')
 if (!WT.startsWith('/')) throw new Error(`check-burndown: worktree must be an absolute path (got ${WT})`)
+// Lane worktrees live at <main checkout>/.claude/worktrees/<name>; the Paper
+// source tree is the main checkout's working/Paper (a worktree may lack the symlink).
+const WT_MARK = '/.claude/worktrees/'
+const PAPER = `${WT.includes(WT_MARK) ? WT.slice(0, WT.indexOf(WT_MARK)) : WT}/working/Paper`
 const FIX_OPTS = { model: A.fixModel || 'sonnet', effort: A.fixEffort || 'high' }
 const CARGO = 'PATH=$HOME/.cargo/bin:$PATH CARGO_BUILD_JOBS=4'
 const WHERE = `Work ONLY in the git worktree \`${WT}\`: your shell does not start there, so prefix every command with
@@ -54,7 +58,7 @@ const FIX_REPORT = {
 const RULES = `HARD RULES: never git commit/stash/reset/push; never delete functionality, tests, or
 whole items to silence an error; never add todo!()/unimplemented!() — if an error can only be fixed
 by changing another crate's stub, extend that stub minimally (marked // STUB). Fix errors by
-correcting the translation against the Java original in ${WT}/working/Paper (PORTING.md governs).
+correcting the translation against the Java original in ${PAPER} (read-only; PORTING.md governs).
 Never weaken types to () or Box<dyn Any> as an escape hatch. Never define a second copy or local
 stand-in of a type that already exists elsewhere in the workspace — import the canonical one. Never
 change an expected value, fixture, golden, or comparator to resolve a compile or test failure.`

@@ -391,7 +391,11 @@ const results = await pipeline(
   },
 )
 
-const done = results.filter(Boolean)
+// Stamp every result with its unit id and crate from the pipeline order, never
+// from an agent-reported field.
+const done = results
+  .map((r, i) => (r ? { ...r, unit: UNITS[i].id, crate: UNITS[i].crate } : null))
+  .filter(Boolean)
 const blocked = done.filter((r) => r.status === 'blocked')
 
 // Wave-level check once every unit has settled: per-unit gates only count a
@@ -415,5 +419,11 @@ else {
   for (const c of waveCheck.crates) log(`cargo check -p ${c.crate}: ${c.pass ? 'clean' : `${c.error_count} error(s)`}`)
   if (!committed) log(`uncommitted leftovers: ${waveCheck.uncommitted.join(', ')}`)
 }
+// Convergence requires the crate to compile with the whole wave in place: a
+// unit whose crate is not clean (or unknown) is demoted, never reported done.
+const cleanCrates = new Set(waveCheck ? waveCheck.crates.filter((c) => c.pass).map((c) => c.crate) : [])
+const final = done.map((r) => (r.converged && !cleanCrates.has(r.crate)
+  ? { ...r, converged: false, crate_check_failed: true }
+  : r))
 log(`wave ${A.waveId} complete: ${done.length}/${UNITS.length} reported, ${blocked.length} blocked, crates ${cratesClean ? 'clean' : 'NOT clean'}`)
-return { waveId: A.waveId, worktree: WT, rigor: RIGOR, results: done, crates_clean: cratesClean, all_committed: committed, wave_check: waveCheck }
+return { waveId: A.waveId, worktree: WT, rigor: RIGOR, results: final, crates_clean: cratesClean, all_committed: committed, wave_check: waveCheck }
