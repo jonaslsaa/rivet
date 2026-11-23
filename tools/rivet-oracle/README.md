@@ -26,6 +26,12 @@ diffs vs Rivet, packet round-trips) builds on top of these fixtures later.
   `run_chunk_block_batch_probe.sh` separately captures source short-set ordering
   across duplicates and table growth. Rust transport tests inspect real
   outbound frames, sent watchers and call-time event recipients.
+- `run_interaction_packets_probe.sh <output.jsonl>` (#448) runs the actual
+  `ServerboundUseItemOnPacket`/`ServerboundUseItemPacket`/
+  `ClientboundBlockChangedAckPacket`/`ClientboundBlockDestructionPacket`
+  codecs: boundary coordinates, non-exact click offsets, raw NaN/infinite
+  rotations, unsigned destruction progress, and out-of-range hand/direction
+  ordinals as controlled negatives.
 
 These comparisons do not certify fresh-world FULL activation, normal autosave,
 complete world-effects services or JVM plugin compatibility.
