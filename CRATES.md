@@ -2,7 +2,7 @@
 
 ## Workspace (bottom-up dependency order)
 
-> D15 supersedes this table where they differ: `rivet-entity` folds into the live-game crate `rivet-server`, and the `COVERAGE.tsv` ledger assigns every class its crate.
+> D15 and OWNERSHIP.md supersede this table where they differ: `rivet-entity` folds into the live-game crate `rivet-server`, the `COVERAGE.tsv` ledger assigns every class its crate, and entities use OWNERSHIP's dispatch pattern, not an `AnyEntity` enum.
 
 | Crate | Ports | Notes |
 |---|---|---|
