@@ -1,43 +1,173 @@
 # OWNERSHIP.md — memory architecture
 
-How Java's GC'd, cyclic object graph maps to owned Rust data. This is decided **here, per subsystem, never per-unit**. Implementers follow it; reviewer lens 2 audits against it. v1 — sections marked *(refine)* get detail PRs before their subsystem's first wave.
+How Java's GC'd, cyclic object graph maps to owned Rust data. This is decided **here, per subsystem, never per unit**. Implementers follow it; reviewers audit against it. It changes only through dedicated PRs (D9); ROADMAP R5 is the signal that would reopen the entity model. Crate placement of every class is D15's ledger, not this file.
 
 ## The rule
 
-**One owner, IDs everywhere else.** Java back-references (`entity.level`, `blockEntity.level`, `player.connection`) become either (a) an ID/key resolved through the owner, or (b) a `&`/`&mut` parameter passed down the call stack. Storing `Arc<RwLock<T>>` to game state is a design smell — game state has exactly one owner: the tick thread (D5).
+**One owner, IDs everywhere else.** Game state has exactly one owner: `MinecraftServer` on the tick thread (D5). A Java reference to a game object (`entity.level`, `this.mob`, `damageSource.getEntity()`, `blockEntity.level`, `player.containerMenu`) becomes a **handle**, an ID or key resolved through the owner at each use. No Rust borrow of game state is held across a call that can reach game state. `Arc<RwLock<T>>` on game state is forbidden; the exceptions are listed at the end.
 
 ## Ownership tree
 
 ```
-Server
-├── ServerConnection (tokio side: accept loop, per-conn tasks)
-│     └── channels ⇄ tick thread (packet in/out queues per player)
-├── Registries / GameData (immutable after startup, Arc, shared freely)
-└── Vec<Level>                        (the worlds)
-      ├── ChunkMap: HashMap<ChunkPos, Chunk>
-      │     ├── sections: palettes + block states
-      │     ├── block_entities: HashMap<BlockPos, BlockEntity>
-      │     └── heightmaps, light, poi
-      ├── EntityStorage: SlotMap<EntityId, EntityRecord> + spatial + uuid indices
-      ├── PlayerList indices (EntityId ↔ ConnectionId ↔ Uuid)
-      ├── scheduled ticks, events, raids, …
-      └── LevelData (world settings, time, weather)
+tick thread
+├── MinecraftServer                                  all game state; one &mut at a time
+│   ├── levels: ResourceKey<Level> → ServerLevel     Java LinkedHashMap order; LevelId = index
+│   │   └── ServerLevel { level: Level, … }
+│   │       ├── chunk source / ChunkMap: LevelChunk by value
+│   │       │     sections (palettes), heightmaps, light, POI,
+│   │       │     block_entities: BlockPos → BlockEntityId      (index only)
+│   │       ├── entity arena: EntityId → Box<dyn EntityBehavior>
+│   │       ├── EntityLookup (Moonrise): by-id, by-uuid, section, tick-list, tracking indices of EntityId
+│   │       ├── block-entity arena: SlotMap<BlockEntityId, Box<dyn BlockEntityBehavior>>, ticker list
+│   │       └── scheduled ticks, block events, raids, saved data, LevelData, …
+│   ├── PlayerList: EntityId ↔ ConnectionId ↔ UUID indices
+│   └── server services: commands, recipes, advancements, scoreboard, …
+└── PluginBridge                                     beside the server; no game state (§Events)
+
+shared immutable: Arc<GameData> (registries), the 'static Blocks/Fluids/Items behaviour tables, config snapshots
+off the tick thread: tokio connections and rayon chunk workers, talking to the tick thread over channels (D5)
 ```
 
-- `EntityId` = slotmap generational key (Java object identity). Vanilla's `int` network entity-id is a separate field mapped through an index.
-- Cross-world references (portals, teleports) go through `Server` by `(DimensionId, EntityId)`.
+- **`EntityId`** is Java's `Entity.getId()`: a newtype over `i32` from the one port of `ServerLevel.ENTITY_COUNTER`/`getNextEntityId()` (static, shared by every level and by players, skips ids still in use). It is the identity, the network id and the arena key; there is no second id space. Cross-level references are `(LevelId, EntityId)`.
+- **`LevelId`** is a level's index in `MinecraftServer.levels`; `ResourceKey<Level>` stays the persistent identity.
+- **`BlockEntityId`** is a `slotmap` generational key. Java has no block-entity id; the key is the object identity, so the block entity that replaces another at the same position is a different id, just as Java's `this` and `level.getBlockEntity(pos)` are then different objects.
 
-## Entity hierarchy *(the hard one)*
+## Receivers and handles
 
-- Struct embedding per PORTING.md: `Zombie { monster: Monster { mob: Mob { living: LivingEntity { entity: Entity }}}}`. Field access is `self.monster.mob.living.entity.pos` — verbose, faithful, greppable; accessor helpers (`fn entity(&self) -> &Entity`) generated per level.
-- Storage: `enum AnyEntity` over concrete leaf types (~100 variants, generated), stored by value in the slotmap. Enum dispatch, not `Box<dyn>`: match generates the vtable, downcasts (`instanceof Zombie`) become patterns, and memory stays contiguous.
-- Behavior: one trait per abstract level (`EntityBehavior`, `LivingEntityBehavior`, `MobBehavior`…) implemented by leaf types; default impls carry the Java base-class bodies; `super.tick()` = explicit `living_entity::tick(self, ctx)` call.
+Every translated method takes one of two forms.
 
-### The reentrancy problem (Java: `entity.tick()` touches `level.getEntity(other)`)
-Rust can't hold `&mut entity` (inside the arena) and `&mut level` (owning the arena) at once. Pattern: **take-tick-putback** — the tick loop removes the entity value from the slotmap slot, ticks it with `(&mut entity, ctx: &mut LevelCtx)`, reinserts. `LevelCtx` exposes the rest of the level (chunks, other entities, RNG, events) without the ticked entity. Access to *self through the level* during own tick (rare in vanilla) resolves by ID lookup returning `None` — matches Java semantics closely enough; deviations get documented per call site. *(refine: exact LevelCtx API before the entity wave)*
+- **Handle form** `fn m(ctx: &mut LevelCtx, this: H, …)` is used when the receiver lives inside the state `ctx` owns (entities, block entities, levels, the server, a player's components) and the Java body, or any override of it, reaches the level, the server or another game object. The body re-borrows the receiver through `ctx` for each group of statements that touches it.
+- **Receiver form** `&self` / `&mut self` is used (a) for methods of those same objects whose Java body and overrides touch only the receiver's own fields and the arguments, with no `ctx` parameter, and (b) for objects outside `ctx`: the `'static` block, fluid and item singletons, values not admitted to a level (a block entity just built by `newBlockEntity`, `ProtoChunk` contents, locals), and components taken out under rule 6. Methods in (b) take `ctx` as a parameter wherever Java passes a `Level`.
 
-## Chunks & blocks
-Chunks owned by `ChunkMap` by value. Block state = palette index into generated global state table (`rivet-registry`), copy `u32`-ish IDs, no references. BlockEntities live in their chunk; ticking uses the same take-tick-putback pattern with a `BlockEntityCtx`. Chunk gen/lighting runs on `rayon` on detached `ProtoChunk` values, results merged into `ChunkMap` on the tick thread via channel.
+The compiler polices the split: a receiver-form method of an object inside `ctx` has no `ctx`, so it cannot call a handle-form method. When that bites, the method becomes handle form, decided once on the hub class (ROADMAP R6), never per call site.
+
+**Why not take-tick-putback** (v1 of this file, and PR #767's `level_ctx.rs`): Java routinely reaches the running object through the level. `LivingEntity.hurtServer` resolves `source.getEntity()` (the mob that is mid-`doHurtTarget` in its own tick) and mutates it: `setLastHurtByMob`, then thorns through `EnchantmentHelper.doPostAttackEffects`. A hopper's `setChanged()` calls `Level.updateNeighbourForOutputSignal`, which reaches `ComparatorBlock`, which calls `HopperBlock.getAnalogOutputSignal`, which reads `level.getBlockEntity(pos)`: the hopper that is mid-tick. A receiver moved out of its slot is invisible on those paths, and safe Rust cannot lend `&mut self` back to the level. A handle is what Java's reference is, and re-resolving it on every use is exactly Java's aliasing semantics.
+
+Rules:
+
+1. **No borrow across a `ctx` call.** Read what the Java expression reads into locals, in Java evaluation order, then call, then re-borrow. Java re-reads fields after a call; so does the port.
+2. **Dereferencing a handle is not a Java lookup.** `ctx.entity(id)` dereferences a Java reference: it finds any object in the level's arena, including one constructed but not yet added and one removed earlier in this tick. Java lookups (`Level.getEntity(int)`, `getEntities(except, aabb, predicate)`, `getBlockEntity(pos)` with its creation-type semantics) go through the ported indices with Java's semantics. Never answer one with the other.
+3. **Construction and admission.** An entity is constructed into its level's arena, because Java's constructor takes the level and allocates the id, and Java calls level-touching methods (`snapTo`, `finalizeSpawn` in `NaturalSpawner`) before `addFreshEntity`. Admission (`addFreshEntity`, load) inserts the id into the `EntityLookup` indices. A block entity is a value until `LevelChunk.setBlockEntity` admits it into the arena; Java calls only receiver-form methods (`loadWithComponents`, `setBlockState`) on it before that. Worldgen threads never touch an arena (§Chunks).
+4. **Removal is immediate; freeing waits for the tick to end.** `Entity.setRemoved` updates every index in the same call (`levelCallback.onRemove`), as in Java, and Moonrise's iterator-safe tick list keeps the running iteration valid. The arena entry is freed at the end of the server tick if the object was removed or never admitted: Rivet's stand-in for the GC. A handle to a freed object dereferences to `None`, which ports Java's `isRemoved()` and `!isAlive()` checks. A Java site that reads other fields of a removed object through a stored reference is a fidelity gap: mark it `RivetTodo(#issue)`; reviewers flag it.
+5. **No invented queues.** Effects happen in Java order. Deferred structures exist only where Java has them: `Level.pendingBlockEntityTickers` while `tickingBlockEntities`, `EntityTickList`'s `IteratorSafeOrderedReferenceSet`, `ServerLevel.blockEvents`, `LevelTicks`, the `BlockableEventLoop` task queue, and Moonrise's `canRemoveEntity` guard (which drops the removal with a warning, as Paper does). A queue added to satisfy the borrow checker reorders observable effects and is a blocking review finding.
+6. **Iterate as Java iterates.** An index loop that re-reads `size()` stays an index loop; Moonrise's iterator-safe collections are ported as such. Iterating a snapshot of ids, or taking a component out of its owner for the loop and restoring it, is allowed only where Java's iterator would throw `ConcurrentModificationException` on modification, so Java code cannot depend on the difference. Example: `GoalSelector.tick()` iterates `availableGoals` (an `ObjectLinkedOpenHashSet`) with for-each.
+7. **Components.** Owned sub-objects without identity of their own (`GoalSelector` and its goals, `Brain`, `PathNavigation`, the move, look and jump controls, `FoodData`, `Inventory`, `AbstractContainerMenu`, `ServerGamePacketListenerImpl`, `CommandSourceStack`'s references) live inside their owner and are reached through the owner's handle (`ctx.mob_mut(this).navigation`). Their Java back-reference (`this.mob`) becomes a field holding the owner's handle.
+8. **References typed by an interface** whose implementors are game objects become an enum of handles, one variant per implementor family, resolved through `ctx`. `Container` (block entities, container entities, the player inventory, compound containers) is the main case. Item stacks follow Java's own `SlotAccess`: see §Items.
+
+## LevelCtx
+
+`LevelCtx` replaces every back-reference Java code follows to world state: `this.level()`, `level.getServer()`, `this.server`, `level.getCraftServer()`. It is one concrete struct, not a trait, at `rivet_server::server::level::level_ctx`; it has no Java counterpart, and its module doc says so.
+
+```rust
+pub struct ServerCtx<'t> {
+    pub server: &'t mut MinecraftServer,
+    pub bridge: &'t PluginBridge,
+}
+
+pub struct LevelCtx<'t> {
+    pub server: &'t mut MinecraftServer,
+    pub bridge: &'t PluginBridge,
+    /// Java `this.level()` for the code running now.
+    pub level: LevelId,
+}
+
+impl ServerCtx<'_> {
+    pub fn level_ctx(&mut self, level: LevelId) -> LevelCtx<'_>;
+}
+
+impl LevelCtx<'_> {
+    // levels
+    pub fn level(&self) -> &ServerLevel;
+    pub fn level_mut(&mut self) -> &mut ServerLevel;
+    pub fn server_ctx(&mut self) -> ServerCtx<'_>;              // Java level.getServer()
+    pub fn in_level(&mut self, level: LevelId) -> LevelCtx<'_>; // Java server.getLevel(key)
+
+    // handle dereference (rule 2)
+    pub fn entity(&self, id: EntityId) -> Option<&dyn EntityBehavior>;
+    pub fn entity_mut(&mut self, id: EntityId) -> Option<&mut dyn EntityBehavior>;
+    pub fn entity_dispatch(&self, id: EntityId) -> Option<&'static EntityDispatchRow>;
+    pub fn block_entity(&self, id: BlockEntityId) -> Option<&dyn BlockEntityBehavior>;
+    pub fn block_entity_mut(&mut self, id: BlockEntityId) -> Option<&mut dyn BlockEntityBehavior>;
+    pub fn block_entity_dispatch(&self, id: BlockEntityId) -> Option<&'static BlockEntityDispatchRow>;
+
+    // Bukkit/Paper events (§Events)
+    pub fn call_event<E: Event>(&mut self, event: &mut E);
+}
+```
+
+- Typed accessors per hierarchy class (`ctx.living_mut(this)`, `ctx.mob(this)`, `ctx.block_entity_as::<HopperBlockEntity>(id)`) are generated by the family scaffold. Accessors used on `this` panic if the object is gone, because dispatch only reaches live objects and rule 4 keeps removed ones until the tick ends; accessors used on stored references return `Option`.
+- The tick loop owns `MinecraftServer` and `PluginBridge` side by side and builds one `ServerCtx` per tick. `MinecraftServer.tickChildren` builds a `LevelCtx` per level for `ServerLevel::tick(ctx)`; packet handling builds one for the player's level. Rayon and tokio threads never see a `ctx`.
+- A handle-form method whose receiver changes level mid-body (a player in `ServerPlayer.teleport`; Java keeps the same object, and `this.level()` changes) continues with `ctx.in_level(new_level)`.
+- `ServerLevel` and `Level` methods follow the same two forms: those that touch only the level's own fields are `&self`/`&mut self`; those that reach entities, block behaviour, the server or events take `ctx`.
+
+**What PR #767's `level_ctx.rs` becomes.** Kept: the Paper-ordered passenger traversal (`tickNonPassenger`/`tickPassenger` with Paper's activation-range `isActive` branch), the preconditions and ordering of `startRiding`, `stopRiding` and `ejectPassengers`, the Moonrise `canRemoveEntity` guard, and ids starting at 1. Moved: riding and removal become handle-form `Entity` methods in `world::entity::entity`, where Java declares them; the traversal becomes `ServerLevel::tick_non_passenger`/`tick_passenger` in `server::level::server_level`. Deleted: `LifecycleEntity` (replaced by §Class hierarchies), the `IndexMap<i32, Option<_>>` slots with `taken_ids` (take-tick-putback), `pending_removals`/`flush_pending_removals` (Java removes immediately), the `cancel_mount`/`cancel_dismount` flags (`EntityMountEvent`/`EntityDismountEvent` through `call_event`), the `events: Vec<LifecycleEvent>` log (test instrumentation with no Java counterpart; tests observe state, D18), and the separate `NetworkIdAllocator`.
+
+## Class hierarchies: the dispatch pattern
+
+This applies to every Java class hierarchy with virtual methods: entities, blocks, fluids, items, block entities, menus, goals and behaviors. Java dispatches on the object's runtime class; the port keeps one Rust construct per Java construct.
+
+- **Data.** Each Java class is a struct of its own fields, with its parent embedded as a field named after the parent (`struct Husk { zombie: Zombie }`, PORTING.md).
+- **Value trait `<Class>Behavior`** for the root and for every class that has subclasses; its supertrait is the parent's trait, and the root's supertrait is `Any`. It is object safe and holds: generated accessors to the embedded struct at each level (`entity()`, `living_mut()`), generated `as_<x>()`/`as_<x>_mut()` accessors for every class with subclasses and every Java interface in the hierarchy, and the receiver-form virtual methods first declared at that class. Java `instanceof X` is `as_x().is_some()` for those; for a class without subclasses it is an `Any` downcast.
+- **Dispatch trait `<Class>Dispatch`**, for hierarchies whose objects live inside `ctx` (entities, block entities), holds the handle-form virtual methods first declared at that class: `fn tick(&self, ctx: &mut LevelCtx, this: EntityId)`. `&self` is a per-class `'static` marker, not the object. Dispatch objects are found through a generated table indexed by the `EntityType` or `BlockEntityType` registry id (each Java type's factory fixes the runtime class), with one `Option<&'static dyn XDispatch>` per hierarchy level in each row.
+- **Bodies.** The Java body of a method declared or overridden in class X is a free function in X's module: `pub fn tick(ctx: &mut LevelCtx, this: EntityId)` in handle form, `pub fn random_tick(this: &dyn CropBlockBehavior, …)` in receiver form. Inside a body, a virtual call on `this` always goes through dynamic dispatch (`ctx.entity_dispatch(this)`, `this.get_max_age()`), because that is what Java does when a subclass overrides it; there are no static shortcuts. `super.m()` is a direct call to the parent class's free function.
+- **Routing is generated.** For every concrete class, the family scaffold (ROADMAP §2.3) generates the trait impls from the Java class graph: the accessors, the `as_*` methods, and, for each virtual method, the call to the free function of the nearest class that declares it in Java's method resolution order. A missed inherited override silently runs the base body, so routing is never written by hand, and the coverage ledger checks it against the Java class graph. Hand-written code is the free functions: the Java bodies.
+- **Interfaces** with methods (`EntityBlock`, `Container`, `SimpleWaterloggedBlock`, `BonemealableBlock`, `Leashable`) are traits; the root value trait's `as_<iface>()` returns `Option<&dyn Iface>`.
+- **R1 readiness.** All dispatch goes through `'static` trait objects and type-indexed tables, so a leaf family can move to a higher crate and register its rows at bootstrap without changing a caller.
+
+## Entities
+
+Java: `Entity` → `LivingEntity` → `Mob` → … (158 entity types in `EntityTypes`). `ServerLevel` ticks them from `entityTickList`, an `EntityTickList` over Moonrise's `IteratorSafeOrderedReferenceSet`, whose iterator never visits entries added during the iteration.
+
+- **Storage.** The per-level arena maps `EntityId → Box<dyn EntityBehavior>`; the Moonrise `EntityLookup` holds only ids. Boxed, because concrete classes range from `ItemEntity` to `ServerPlayer` (inventories, menus, advancements): an enum would size every slot for the largest. The arena's internal layout is an implementation choice; the `LevelCtx` API is the contract.
+- **Traits.** `EntityBehavior`/`EntityDispatch`, `LivingEntityBehavior`/`LivingEntityDispatch`, `MobBehavior`/`MobDispatch`, and so on down every class with subclasses.
+- **Tick.** `ServerLevel::tick` walks the ported `EntityTickList` with Java's checks in Java's order (`isRemoved`, `isEntityFrozen`, `checkDespawn`, the vehicle and `hasPassenger` test, `stopRiding`), then `tick_non_passenger(ctx, id)`: `setOldPosAndRot`, `tickCount++`, `totalEntityAge++`, the activation-range `checkIfActive`, then `tick` and `postTick` or `inactiveTick` through the dispatch table, then each passenger through `tick_passenger` (`ServerLevel.tickNonPassenger`/`tickPassenger`).
+- **Removal.** `entity::set_removed(ctx, this, reason, cause)` follows `Entity.setRemoved`: the Moonrise guard, the `EntityRemoveEvent` hook, `removalReason`, `stopRiding` when `shouldDestroy`, passengers' `stopRiding` unless `UNLOADED_TO_CHUNK`, `levelCallback.onRemove`, `onRemoval`. All immediate (rule 4).
+- **Players.** `ServerPlayer` is an entity like any other: arena entry plus `PlayerList` indices; its connection listener, inventory and open menu are components. Changing dimension moves the value from one level's arena to the other's under the same `EntityId`, because Java keeps the same object.
+- **Loading.** Java `EntityType.loadEntityRecursive`/`create` constructs into the arena, runs the receiver-form `load(ValueInput)`, then admits (rule 3).
+
+## Blocks and fluids
+
+Java: `BlockBehaviour` (abstract) → `Block` → about 295 subclasses. `Blocks` constructs one instance per block, in registration order, during static initialization; every field is final. `BlockBehaviour.BlockStateBase` delegates as `this.getBlock().m(this.asState(), …)`, and its `initCache` fills per-state caches by calling those methods once.
+
+- **Identity.** The `Block` handle (`rivet-world`) and `BlockState` (`rivet-registry`) stay the only identities. Java `==` on blocks and states is handle equality.
+- **Instances.** `'static` immutable singletons in one table, built in Java order by the translated `Blocks` registration code, a `LazyLock` as Java's static initializer is. `Blocks` is split (D15): the named `Block` handles stay in `rivet-world`, the registration and table sit in the live-game crate. Lookup is the extension method `block.behavior() -> &'static dyn BlockBehavior` (trait `BlockLive`), because Java's `state.getBlock()` *is* the behaviour object. A startup check asserts table index == generated registry id.
+- **Data.** The struct `BlockBehaviour` holds Java `BlockBehaviour`'s instance fields (`properties`, `hasCollision`, `explosionResistance`, `soundType`, `friction`, `drops`, …). Java `Block`'s own fields (`stateDefinition`, `defaultBlockState`, the registry holder, `item`) are served by the generated tables behind the handle, so the embedding chain starts at `BlockBehaviour`: `struct CropBlock { vegetation_block: VegetationBlock }`, `struct VegetationBlock { block: BlockBehaviour }`. A plain Java `Block` instance is a `BlockBehaviour` value.
+- **Dispatch.** One root value trait, `BlockBehavior` (named for `Block`, per the `<Class>Behavior` rule), carries the virtual surface Java splits across `BlockBehaviour` and `Block`; `BlockBehaviour` is abstract with `Block` as its only subclass, so they are one dispatch level. Bodies sit in `block_behaviour.rs` or `block.rs`, wherever Java declares them. Everything is receiver form, because `&self` is a static singleton and never inside `ctx`. Java `Level`/`ServerLevel` parameters become `&mut LevelCtx`; reader-interface parameters (`BlockGetter`, `LevelReader`, `CollisionGetter`) become `&dyn` reader traits, which worldgen satisfies with `WorldGenRegion` and the live game with `ctx.level()`.
+- **Live `BlockState` methods** (`tick`, `randomTick`, `useItemOn`, `entityInside`, `handleNeighborChanged`, …) are the `BlockStateBaseLive` extension trait (D15 split), implemented for `BlockState` in the live-game crate, each delegating as Java does: `self.block().behavior().tick(*self, ctx, pos, random)`. The cached `BlockStateBase` fields stay in the generated tables (`block_behaviors.rs`, dumped from live Paper). The ported virtuals that Java's `initCache` calls must reproduce those tables, checked by a fixture-backed test over all block states (D18 kind 2).
+- **Fluids** (`Fluid` → `FlowingFluid` → `WaterFluid`/`LavaFluid`) follow the same pattern, with `FluidState` as the value type, a `Fluids` table and `fluid.behavior()`.
+
+## Block entities
+
+Java: `BlockEntity` (abstract) → about 54 subclasses. `BlockEntityType` holds a factory and the valid blocks. `EntityBlock.newBlockEntity(pos, state)` constructs; `EntityBlock.getTicker(level, state, type)` returns a `BlockEntityTicker<T>`, in practice a static method (`HopperBlockEntity::pushItemsTick`, `AbstractFurnaceBlockEntity::serverTick`) wrapped by `BaseEntityBlock.createTickerHelper`. `LevelChunk` keeps `pos → BlockEntity` and registers each ticker, wrapped in a `RebindableTickingBlockEntityWrapper`, into `Level.blockEntityTickers`; `Level.tickBlockEntities` walks that list by index and removes dead wrappers (Paper's `removeAll` fix).
+
+- **Values.** A struct per class embeds `BlockEntity`. The value trait `BlockEntityBehavior` (load, save, components, `as_container()`, `as_randomizable_container()`, …) and the structs sit below the live-game crate (D15 split), because `ProtoChunk` holds block entities (Java `ChunkAccess.blockEntities`) and worldgen uses them (`RandomizableContainer.setBlockEntityLootTable`; `MonsterRoomFeature` configuring its `SpawnerBlockEntity`).
+- **Arena.** Each level owns `SlotMap<BlockEntityId, Box<dyn BlockEntityBehavior>>`; `LevelChunk` maps `BlockPos → BlockEntityId` and keeps the Java `HashMap` save order the chunk layer already reproduces. Promoting a `ProtoChunk` moves its values into the arena.
+- **Handle-form virtuals** (the ones that reach the level: `setChanged`, `preRemoveSideEffects`, `setRemoved` overrides) go through `BlockEntityDispatch`, found in the `BlockEntityType`-indexed table.
+- **Tickers.** `type BlockEntityTicker = fn(&mut LevelCtx, BlockPos, BlockState, BlockEntityId)`. Java's static ticker methods are handle-form free functions with that signature; the block's `get_ticker` returns `Option<BlockEntityTicker>` through the `createTickerHelper` port. The level's ticker list holds `(BlockEntityId, BlockEntityTicker)` wrappers with Java's rebinding semantics: the existing `LevelBlockEntityRuntime`, holding `BlockEntityId` instead of a `Weak<()>` identity.
+- This replaces v1's "block entities live in their chunk and tick by take-tick-putback through a `BlockEntityCtx`": the hopper-and-comparator path above needs the ticking block entity reachable through the level.
+
+## Items
+
+Java: `Item` (concrete) → about 70 subclasses. `Items` registers one instance per item, every field final. `ItemStack` is a mutable object referenced from slots: `ItemStack.use` calls `this.getItem().use(level, player, hand)`, and item code re-reads `player.getItemInHand(hand)` and mutates that stack in place (`itemStack.consume(1, player)`).
+
+- **Instances.** `'static` immutable singletons in one table, built in registration order (generated per #186 or translated), looked up by the extension method `item.behavior() -> &'static dyn ItemBehavior` on the `ItemId` handle (trait `ItemLive`, D15 split). The struct `Item` holds only the fields of Java `Item` that the generated tables do not serve (default components come from the generated table); subclasses embed `item: Item`, and `BlockItem` holds a `Block` handle.
+- **Dispatch.** The root value trait `ItemBehavior` carries Java `Item`'s virtual methods, all receiver form: `ctx` where Java passes a `Level`, the player or entity as an `EntityId`, the stack as a `StackRef`.
+
+**Stacks.** `ItemStack` is a value type in `rivet-world` (count, `ItemId`, component patch); its live methods (`use`, `useOn`, `hurtAndBreak`, `inventoryTick`, `finishUsingItem`, …) are the `ItemStackLive` extension trait (D15 split) and take the stack as a handle:
+
+```rust
+pub enum StackRef<'a> {
+    /// Java's `SlotAccess` / `Container` + index: a stack inside game state.
+    Slot(SlotRef),
+    /// A stack outside game state (a fresh result, an event record); disjoint from ctx.
+    Local(&'a mut ItemStack),
+}
+```
+
+`SlotRef` names an owner handle plus a slot (an entity's equipment or inventory slot, a block entity's container slot, a menu slot, an item entity's stack) and is resolved through `ctx` at each access, as Java's code re-reads the shared object. Where Java keeps mutating a stack after its slot was overwritten (the stack is now detached), the port moves the stack out into a `Local` at the point Java detaches it.
+
+## Chunks
+Chunks owned by `ChunkMap` by value. Block state = palette index into generated global state table (`rivet-registry`), copy `u32`-ish IDs, no references. Block entities are indexed by the chunk and owned by the level's arena (§Block entities). Chunk gen/lighting runs on `rayon` on detached `ProtoChunk` values, results merged into `ChunkMap` on the tick thread via channel; worker threads never touch an entity or block-entity arena or a `LevelCtx`.
 
 The chunk *pipeline* — ticket levels and holder lifecycle, the `ChunkStatus` generation DAG and radii, chunk send ordering, storage-worker/write ordering, cancellation/backpressure, and the determinism-under-parallelism invariants — is specified in `docs/chunk-pipeline-spec.md` (issue #185). Tick-thread ownership (§5 there) is the realization of this section's rule; the Moonrise scheduler internals (executors, propagation engine) are deliberately deferred to that issue.
 
@@ -104,11 +234,25 @@ Registry model (decided #107, implemented in rivet-registry):
   (layer order STATIC → WORLDGEN → DIMENSIONS → RELOADABLE is observable —
   keep an explicit ordered vec).
 
-## Events (Bukkit/Paper layer)
-Events dispatch synchronously on the tick thread at the same call sites as Paper's patches. Handlers (Rust or JVM-bridged) receive `&mut` access via the same ctx objects — no event queue, ordering matches Bukkit.
+## Events and the plugin bridge
+
+Java: Paper's patches fire Bukkit and Paper events at fixed points in NMS code, either through CraftBukkit helpers (about 470 `CraftEventFactory` calls in about 250 files, measured on `0a99345`; the most frequent are `callEntityChangeBlockEvent`, `callBinaryRedstoneChange`, `handleBlockGrowEvent` and `handleBlockSpreadEvent`) or by building the event inline and calling `event.callEvent()`/`PluginManager.callEvent` (about 420 sites). `PaperEventManager.callEvent` dispatches synchronously, on the main thread, to the event's `HandlerList`, and the call site then reads the event back (`isCancelled()`, modified fields). Some helpers carry game logic: `handleBlockGrowEvent` places its `CraftBlockState` snapshot (`snapshot.place(flags)`) when the event is not cancelled. A few sites skip work when no listener is registered (`getHandlerList().getRegisteredListeners().length == 0`, in hoppers and signs).
+
+1. **Call sites are translated in place**, in Java order relative to the surrounding game-state changes.
+2. **`CraftEventFactory` helpers** reached from translated code are ported, with their Java names, to `rivet_server::bukkit::craftbukkit::event::craft_event_factory` (the D15 path of `org.bukkit.craftbukkit.event.CraftEventFactory`). Their game-state logic is ported exactly (D16, bucket E); the Bukkit wrapper objects (`CraftBlock.at`, `getBukkitEntity()`, `asBlockData()`) are replaced by handles. Inline event sites stay inline.
+3. **Event records.** Each Bukkit or Paper event class that translated code fires gets one plain struct with the Java class name, in the live-game crate at the D15 path of its Java class (`org.bukkit.event.block.BlockGrowEvent` → `rivet_server::bukkit::event::block::BlockGrowEvent`; Paper's `io.papermc.paper.event.…` → `rivet_server::papermc::paper::event::…`). Its fields hold exactly what the call site passes in and reads back, as handles and owned values (`EntityId`, `(LevelId, BlockPos)`, `BlockState`, `ItemStack`); `Cancellable` becomes a `cancelled: bool` field. `trait Event { const TYPE: EventType; }`, with `EventType` a generated enum, is the marshalling key, not a gameplay seam.
+4. **`LevelCtx::call_event(&mut self, event: &mut E)`** is `PaperEventManager.callEvent`. If the bridge reports no listener for `E::TYPE`, it returns: building the Bukkit wrappers has no game-state effect, so skipping them is unobservable. Otherwise `PluginBridge::dispatch` lends the whole `LevelCtx` to the plugin runtime until the last handler returns, and the call site then reads the record back. Paper's explicit no-listener checks become `ctx.bridge.has_listeners(EventType::X)` at the same sites.
+5. **Plugins touch game state only inside a lent `ctx`**: during an event dispatch, during the scheduler heartbeat (`MinecraftServer.tickServer` → `mainThreadHeartbeat`), and during plugin lifecycle calls. Every plugin-side operation resolves ids through that `ctx` and may fire nested events, as Bukkit's reentrant `callEvent` allows. No game state sits behind `Arc`, a lock or a queue.
+6. **`PluginBridge`** is owned by the tick loop beside `MinecraftServer` (Java's `CraftServer` is adapter code, D16) and lent as `&PluginBridge` in every `ctx`. It holds the listener-presence table (`Cell`, tick thread only, updated when plugins register or unregister), the JVM adapter handle and native handlers, and no game state; that is what makes lending it shared next to `&mut MinecraftServer` sound.
+7. **Asynchronous events** (`Event.isAsynchronous()`: `AsyncPlayerPreLoginEvent`, `AsyncChatEvent`, …) are dispatched from the thread Paper uses, with owned data only and no `ctx`; the tick thread consumes their results where Paper does.
+8. **Bukkit state that Paper persists in NMS saves** (`PersistentDataContainer` → `PublicBukkitValues`) is a field of the Rust entity or block entity, not adapter state.
+9. **Before P3** the bridge has no plugin runtime and `has_listeners` is always false; every hook still runs its game logic.
 
 ## JVM adapter boundary
-JVM plugin thread and tick thread alternate via a rendezvous (tick thread parks while plugin callbacks run — Bukkit semantics, zero data races by construction). All FFI calls marshal IDs (`EntityId`, `BlockPos`, …), never pointers into arenas; lookups re-resolve per call. *(refine: rivet-ffi handle table design at M1)*
+
+The JVM plugin thread and the tick thread alternate through a rendezvous: the tick thread parks while plugin code runs (D11), so exactly one thread touches game state at any time. Handing the lent `ctx` to the plugin thread for the duration of a rendezvous is the one place a tick-thread borrow crosses threads; it is `unsafe`, confined to `rivet-ffi`, and justified by that park/unpark protocol.
+
+FFI handles are the Rust ids themselves, marshalled as `u64` words (D11): an entity is one word, its `EntityId` (unique across levels, so resolution checks each level's arena); a world is its `LevelId`; a block is two words, `LevelId` and `BlockPos.asLong()`; a block entity is two words, `LevelId` and the `BlockEntityId` key (`KeyData::as_ffi`); a stack is the words of its `SlotRef`. There is no separate handle table: the arenas are the table, and D11's per-call re-resolution is an arena lookup through the lent `ctx`. A stale handle returns an explicit ABI status, which the shim maps to Bukkit's behaviour for a dead object. Pointers into arenas never cross the boundary.
 
 ## Allowed shared-state exceptions
-`Arc`: registries/GameData, config snapshots, the connection registry. `Mutex`: cross-thread queues only. Anything else needs an OWNERSHIP.md amendment PR first.
+`Arc`: registries/GameData, config snapshots, the connection registry. `'static` immutable: the `Blocks`, `Fluids` and `Items` behaviour tables and the generated dispatch tables. `Mutex`: cross-thread queues only. `Cell`: tick-thread-only bookkeeping that is not game state (the plugin bridge's listener table). Anything else needs an OWNERSHIP.md amendment PR first.
