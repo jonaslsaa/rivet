@@ -22,6 +22,8 @@ fn native_smoke_acceptance_passes_end_to_end_and_reports_non_terminal_gate() {
         report.non_terminal_gate.contains("#251"),
         "report must explicitly distinguish itself from #251 JVM Tier 1 gate"
     );
+    assert!(report.non_terminal_for_m4);
+    assert_eq!(report.jvm_corpus_gate_issue, 251);
     assert!(report.lifecycle_passed);
     assert!(report.events_passed);
     assert!(report.commands_passed);

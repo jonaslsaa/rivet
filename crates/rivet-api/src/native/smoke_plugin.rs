@@ -11,7 +11,7 @@
 //! - No arena pointer, retained caller buffer, Rust reference into game state,
 //!   or foreign exception crosses the plugin boundary.
 //! - All reads return value-copy snapshots; all mutations flow through typed
-//!   tick-thread commands on [`NativeFacadeView`].
+//!   tick-thread commands on [`NativeFacadeView`](super::facades::NativeFacadeView).
 //! - All handles (`PluginHandle`, `ResourceHandle`, `EventListenerHandle`,
 //!   `CommandHandle`, `TaskHandle`, `EntityHandle`, `PlayerHandle`,
 //!   `InventoryHandle`, `MenuHandle`) are generational and reject stale/reused
@@ -23,8 +23,8 @@ use std::rc::Rc;
 use super::commands::{CommandDispatchOutcome, CommandHandle, CommandSender, CommandSpec};
 use super::events::{Cancellable, EventListenerHandle, EventPriority, NativeEvent};
 use super::facades::{
-    BatchMode, BlockPos, BlockStateSnapshot, ChunkPos, CommandOutcome, EntityCommand, FacadeError,
-    GameMode, InventoryCommand, InventoryKind, ItemStackSnapshot, MenuCommand, PlayerCommand,
+    BatchMode, BlockPos, BlockStateSnapshot, ChunkPos, EntityCommand, FacadeError, GameMode,
+    InventoryCommand, InventoryKind, ItemStackSnapshot, MenuCommand, PlayerCommand,
     SyntheticWorldState, TickCommand, TickCommandBatch, WorldCommand, WorldId,
 };
 use super::handle::HandleError;
@@ -88,8 +88,13 @@ pub struct SmokeTelemetry {
 }
 
 /// Source-controlled native smoke plugin exercising lifecycle, events, commands,
-/// synchronous scheduler tasks, and capability-facade world/entity/player/item
-/// state (#509).
+/// and synchronous scheduler tasks through its [`PluginContext`] (#509).
+///
+/// [`PluginContext`] has no facade seam, so the plugin's hooks cannot reach
+/// world/entity/player/item state themselves. The representative facade
+/// exercise ([`SmokePlugin::exercise_world_state`]) is host-driven: the
+/// acceptance runner calls it on the tick thread on the plugin's behalf, scoped
+/// to the capability set negotiated for the registered plugin.
 pub struct SmokePlugin {
     telemetry: Rc<RefCell<SmokeTelemetry>>,
     resource: Option<ResourceHandle>,
@@ -165,6 +170,11 @@ impl SmokePlugin {
     /// Exercises representative world, entity, player, item, inventory, and
     /// menu capability facades on the tick thread through value snapshots and
     /// atomic [`TickCommandBatch`] execution.
+    ///
+    /// Host-driven: this is not a plugin hook. `granted` should be the set the
+    /// host negotiated for the registered plugin
+    /// ([`NativePluginHost::granted_capabilities`]), so every facade call is
+    /// checked against the plugin's grants rather than the host's full set.
     pub fn exercise_world_state(
         world_state: &mut SyntheticWorldState,
         granted: &CapabilitySet,
@@ -348,6 +358,10 @@ impl NativePlugin for SmokePlugin {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SmokeAcceptanceReport {
     pub non_terminal_gate: &'static str,
+    /// Always `true`: passing this suite is not an M4 terminal dependency.
+    pub non_terminal_for_m4: bool,
+    /// The separately reported M4 JVM Tier 1 Paper plugin corpus gate issue.
+    pub jvm_corpus_gate_issue: u32,
     pub lifecycle_passed: bool,
     pub events_passed: bool,
     pub commands_passed: bool,
@@ -423,9 +437,14 @@ pub fn run_native_smoke_acceptance() -> Result<SmokeAcceptanceReport, String> {
     let scheduler_passed =
         telemetry.borrow().delayed_runs == 1 && telemetry.borrow().repeating_runs == 2;
 
-    // 4. World/entity/player/item/inventory/menu capability facades.
-    let world_outcome = SmokePlugin::exercise_world_state(&mut world_state, &caps, world_id)
-        .map_err(|e| format!("exercise_world_state failed: {e}"))?;
+    // 4. World/entity/player/item/inventory/menu capability facades, driven by
+    //    the host on the plugin's behalf under its negotiated grants.
+    let plugin_grants = host
+        .granted_capabilities(handle)
+        .map_err(|e| format!("granted_capabilities failed: {e}"))?;
+    let world_outcome =
+        SmokePlugin::exercise_world_state(&mut world_state, plugin_grants, world_id)
+            .map_err(|e| format!("exercise_world_state failed: {e}"))?;
     let world_facade_passed = world_outcome.initial_block_id == "minecraft:air"
         && world_outcome.updated_block_id == "minecraft:stone_bricks"
         && world_outcome.villager_name.as_deref() == Some("SmokeGuide")
@@ -552,11 +571,10 @@ pub fn run_native_smoke_acceptance() -> Result<SmokeAcceptanceReport, String> {
         }
     }
 
-    // Keep CommandOutcome import used in public doc-tested contracts if needed.
-    let _ = std::any::type_name::<CommandOutcome>();
-
     Ok(SmokeAcceptanceReport {
         non_terminal_gate: "native-rust-api-non-terminal (separate from #251 JVM Tier 1 gate)",
+        non_terminal_for_m4: true,
+        jvm_corpus_gate_issue: 251,
         lifecycle_passed,
         events_passed,
         commands_passed,
