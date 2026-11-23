@@ -133,6 +133,9 @@ Known blind spots
   and a minority of a package's classes may keep direct references to live
   types. Those references need the 1C dispatch/`LevelCtx` seams; they are
   not crate moves.
+- Only the three Paper source roots are rows. Libraries Rivet ports from jars
+  (DataFixerUpper's com.mojang.serialization/datafixers, most of Brigadier)
+  have no rows; only the few classes Paper patches into the minecraft root do.
 - The lexers (scripts/java_scan.py, scripts/rust_scan.py) are regex-based.
 """
 

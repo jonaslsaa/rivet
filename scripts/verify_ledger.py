@@ -112,6 +112,7 @@ LAYERS = {f"L{i}" for i in range(9)}
 TIERS = {"T0", "T1", "T2", "T3"}
 
 BOOT_NOTE = "needs a Paper boot; not run by the ledger tool"
+NO_NEGATIVE = "no tamper negative yet, so it cannot be PASS (VERIFICATION 2.4)"
 
 # Probe script -> oracle fixtures it writes (paths under tools/rivet-oracle/fixtures
 # or repo-relative). Names follow the script except where the probe writes several
@@ -273,7 +274,7 @@ CURATED: list[dict] = [
                     "crates/rivet-nbt/src/snbt_printer_tag_visitor.rs"],
      "java_classes": ["net.minecraft.nbt.NbtIo", "net.minecraft.nbt.SnbtPrinterTagVisitor",
                       "net.minecraft.nbt.StringTagVisitor"],
-     "note": BOOT_NOTE},
+     "note": f"{BOOT_NOTE}; {NO_NEGATIVE}"},
     {"id": "parity.snbt.parse", "layer": "L2", "tier": "T1", "negative": "n",
      "mechanism": "op:rivet-parity snbt.parse", "corpus": ("parity", "snbt.parse"),
      "fixtures": ["tools/rivet-parity/fixtures/corpus-manifest.json"],
@@ -283,13 +284,13 @@ CURATED: list[dict] = [
      "java_classes": ["net.minecraft.nbt.TagParser", "net.minecraft.nbt.SnbtGrammar",
                       "net.minecraft.nbt.SnbtOperations", "net.minecraft.nbt.StringTagVisitor",
                       "net.minecraft.nbt.SnbtPrinterTagVisitor"],
-     "note": BOOT_NOTE},
+     "note": f"{BOOT_NOTE}; {NO_NEGATIVE}"},
     {"id": "parity.nbt.encode", "layer": "L2", "tier": "T1", "negative": "n",
      "mechanism": "op:rivet-parity nbt.encode", "corpus": ("parity", "nbt.encode"),
      "fixtures": ["tools/rivet-parity/fixtures/corpus-manifest.json"],
      "rust_globs": ["crates/rivet-nbt/src/nbt_io.rs", "crates/rivet-nbt/src/compound_tag.rs"],
      "java_classes": ["net.minecraft.nbt.NbtIo", "net.minecraft.nbt.CompoundTag"],
-     "note": BOOT_NOTE + "; 437 of 467 were semantic-only (compound_key_order) on the last scoreboard"},
+     "note": f"{BOOT_NOTE}; {NO_NEGATIVE}; 437 of 467 were semantic-only (compound_key_order) on the last scoreboard"},
     {"id": "parity.idem", "layer": "L0", "tier": "T1", "negative": "n",
      "mechanism": "self-check:rivet-parity idem (Rust read-write-read, no Paper)", "corpus": ("parity", "idem"),
      "fixtures": ["tools/rivet-parity/fixtures/corpus-manifest.json"],
@@ -300,7 +301,7 @@ CURATED: list[dict] = [
      "fixtures": ["tools/rivet-parity/fixtures/corpus-manifest.json", "tools/rivet-oracle/fixtures/text"],
      "rust_globs": ["crates/rivet-text/src/**"],
      "java_classes": ["net.minecraft.network.chat.ComponentSerialization"],
-     "note": BOOT_NOTE},
+     "note": f"{BOOT_NOTE}; {NO_NEGATIVE}"},
     # -- rivet-oracle verify: Paper against its own committed baseline (L3 harness).
     {"id": "oracle.verify.m0", "layer": "L3", "tier": "T2", "negative": "y",
      "mechanism": "harness:rivet-oracle verify (+ --expect-fail)", "fixtures": ["tools/rivet-oracle/fixtures/manifest.json"],
@@ -376,14 +377,14 @@ CURATED: list[dict] = [
      "java_classes": ["net.minecraft.server.network.ServerLoginPacketListenerImpl",
                       "net.minecraft.server.network.ServerConfigurationPacketListenerImpl",
                       "net.minecraft.server.players.PlayerList"],
-     "note": BOOT_NOTE},
+     "note": f"{BOOT_NOTE}; {NO_NEGATIVE} (the negative runs in scenario.join.paper)"},
     {"id": "scenario.move.both", "layer": "L5", "tier": "T2", "negative": "n",
      "mechanism": "scenario:run-scenario.sh move --server both (Paper-vs-Rivet authoritative walk)",
      "fixtures": [], "corpus": ("const", 1),
      "rust_globs": ["crates/rivet-server/src/server/movement_math.rs", "crates/rivet-server/src/server/movement_trace.rs",
                     "crates/rivet-server/src/server/teleport_ack.rs"],
      "java_classes": ["net.minecraft.server.network.ServerGamePacketListenerImpl"],
-     "note": BOOT_NOTE},
+     "note": f"{BOOT_NOTE}; {NO_NEGATIVE}"},
     {"id": "scenario.loaded-world", "layer": "L5", "tier": "T2", "negative": "n",
      "mechanism": "scenario:run-scenario.sh loaded-world (official client vs a copied Paper world)",
      "fixtures": ["tools/rivet-oracle/fixtures/loaded-world"], "corpus": ("const", 1),
