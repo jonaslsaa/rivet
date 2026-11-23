@@ -26,13 +26,15 @@ Single-threaded synchronous game tick owning all world state (matches vanilla's 
 `working/Pumpkin` is for **learning and unblocking only**: study its design decisions, consult it when stuck on a parity problem. **Never copy code from it while porting** — our source of truth is Paper's Java. (Rationale: fidelity to Paper is the differentiator; mixing in a second reimplementation's interpretations breaks the "faithful port" verification story.)
 
 ## D8 — Verification
-The Java server is the oracle; parity is measured, not asserted (`WORKFLOWS.md` → PARITY scoreboard). No agent may weaken a test, fixture, or oracle criterion to go green. `todo!()` requires a `blocked` manifest/issue note.
+The Java server is the oracle; parity is measured, not asserted (the `VERIFY.tsv` ledger and the generated `PARITY.md` scoreboard, D19; what a test must be to count, D18). No agent may weaken a test, fixture, or oracle criterion to go green. `todo!()` requires a `blocked` manifest/issue note.
 
 ## D9 — Process
-Work is organized as GitHub **epics → agent-created sub-issues → PRs**, milestones M0–M4 (see `WORKFLOWS.md`). Reference docs (`PORTING.md`, `OWNERSHIP.md`) are updated via dedicated PRs, never silently mid-wave. Rust edition 2024, `rustfmt` defaults, clippy clean at wave gates.
+Work follows the phases and batches of `ROADMAP.md` (P0–P4; its §0 is binding over the rest of it). Progress is measured only by the tool-written ledgers, `COVERAGE.tsv` (D15) and `VERIFY.tsv` (D19). GitHub issues are for family trackers, defects and parity mismatches, and decisions (ROADMAP §5.4). Leaf work is never issue-scoped: spine clusters and infrastructure run as `worktree-task`, leaf units as `translate-wave` over ledger units (ROADMAP §3.1). Reference docs (`DECISIONS.md`, `PORTING.md`, `OWNERSHIP.md`) are updated via dedicated PRs, never silently mid-wave. Rust edition 2024, `rustfmt` defaults, clippy `-Dwarnings` clean in every gate tier (D17).
+*Amended 2026-11-23 by D15, D17 and D19; previously "GitHub epics → agent-created sub-issues → PRs, milestones M0–M4 (see `WORKFLOWS.md`)". Where `WORKFLOWS.md` still describes the old process, D15–D19 and `ROADMAP.md` win until that file is rewritten.*
 
 ## D10 — No hosted CI
-No GitHub Actions (or any hosted CI). The merge gate is `scripts/gate.sh` (fmt → clippy `-Dwarnings` → tests → oracle steps: `rivet-oracle verify` and the byte-for-byte `rivet-parity` diff vs the Paper Java oracle), run locally by the controller before merging any PR and at the end of every wave. Oracle verification is never silently skipped: missing prerequisites make the gate exit nonzero with an UNVERIFIED status and a per-item fix list; `--require-oracle` turns any missing oracle prerequisite into a hard failure. A red gate blocks the merge; enforcement is by process (PR checklist + controller), not by GitHub.
+No GitHub Actions (or any hosted CI). The merge gate is `scripts/gate.sh` (fmt → clippy `-Dwarnings` → tests → oracle steps: `rivet-oracle verify` and the byte-for-byte `rivet-parity` diff vs the Paper Java oracle), run locally by the controller in the tiers of D17: T1 before merging any PR, T2 at every batch boundary and before any milestone or phase closes. Oracle verification is never silently skipped: missing prerequisites make the gate exit nonzero with an UNVERIFIED status and a per-item fix list; `--require-oracle` turns any missing oracle prerequisite into a hard failure. A red gate blocks the merge; enforcement is by process (PR checklist + controller), not by GitHub.
+*Amended 2026-11-23 by D17: "before merging any PR and at the end of every wave" became the T0–T3 tiers. No hosted CI, no silent skip, and the blocking rule are unchanged.*
 
 ## D11 — JVM-adapter FFI design: GO (in-process FFM)
 De-risking spike for epic #14 / sub-issue #81 (the `spikes/ffi-latency/` crate + Java FFM benchmark) concluded **GO** on the in-process Java FFM/Panama bridge design (D6). The C-ABI spike measures: scalar downcall, per-call handle-table re-resolution, batched event publish, a Rust→Java→Rust callback round-trip, and back-to-back callback storms. Reproduce with `spikes/ffi-latency/run.sh`, which builds the cdylib, compiles the Java harness, runs the correctness assertions (including exception containment), benchmarks, and writes the machine-readable report to `spikes/ffi-latency/results/benchmark.json`. That report is a **regenerable artifact**: it is gitignored and never committed; any claim in this decision is backed by the recorded run in issue #81, not by a checked-in result file.
@@ -67,3 +69,73 @@ Locked 2026-08-19 for issue #668. Paper 26.2 builds `Mth`'s `COS_TAB`/`ASIN_TAB`
 - **Generator provenance is fail-closed** (D14/D8): `rivet-codegen mth-gen` writes **only the host arch's** `COS_TAB` module — x86_64 (primary release-gate target) writes `mth_cos_tab_x86_64.rs` and leaves `mth_cos_tab_aarch64.rs` untouched; the committed `aarch64` module is provenance-checked (generated + verified on native aarch64 Paper) and must never be substituted or silently overwritten by an x86_64 run. The renderer uses `compile_error!` for any `target_arch` that is neither x86_64 nor aarch64, and re-checks the four aarch64 expected bits against faithful atan2 arithmetic over the committed aarch64 table so a stale/mismatched literal fails at generation time.
 
 This refines the "exact `Mth` tables" fidelity language: the requirement is per-platform bit-exact match to native Paper (11 `COS_TAB` entries, 1 ULP each), with NaN width-for-width canonicalization via the same `floatToIntBits`/`doubleToLongBits` semantics Java's oracle uses — not a single architecture-independent run-to-run table.
+
+## D15 — Crate topology: one live-game crate; the ledger assigns every class
+Locked 2026-11-23 (ROADMAP §5.1). Paper's runtime is one class-level strongly connected component (4,303 classes, ROADMAP §1.3): `ServerLevel`, `Entity` and its hierarchy, block, item and block-entity behaviour, menus, commands, the player and its connection, and the Paper event call sites reference each other directly. Rust's crate graph is acyclic, and breaking the cycle with traits where Java has concrete classes is forbidden (PORTING.md), so all of them live in **one crate, `rivet-server`**, the live-game crate.
+- `rivet-entity` folds into `rivet-server` at the mirrored module path and the crate is deleted (ROADMAP Batch 2.0). In the live-game crate a module path is the Java package with `net.minecraft.` dropped: `net.minecraft.world.entity.monster` → `rivet_server::world::entity::monster`, `net.minecraft.server.level` → `rivet_server::server::level`.
+- The crates below keep exactly what compiles without live types. `rivet-world` keeps chunks and `ProtoChunk`, chunk storage, levelgen, lighting, the reader interfaces (`BlockGetter`, `LevelReader`, `LevelAccessor`, `WorldGenLevel`, …) and the block-entity and item *value* types; `rivet-registry` keeps the block-state tables. Packages that need live types move up whole, including today's gameplay islands in `rivet-world` (`loot`, `enchantment`, `crafting`, `trading`, `scores`, `effect`, `inventory`) when the ledger says so.
+- **The ledger assigns; agents never choose.** `COVERAGE.tsv`, written by `scripts/coverage_ledger.py` (ROADMAP Batch 1A), carries a computed crate and module path for every Java class, derived from the class graph: a package belongs to the live-game crate when any of its classes needs a live type. A wrong assignment is fixed in the tool, never overridden in a PR.
+- **Split classes** are the one exception to whole-package assignment. A class needed below the live-game crate (by worldgen, storage or lighting) that also has members needing live types is split by member: its struct, fields and live-type-free members stay below at the mirrored path; members needing live types go to the live-game crate at the same mirrored path, non-virtual ones as an extension trait `<JavaClass>Live` with exactly one `impl`, virtual ones through the dispatch pattern of OWNERSHIP.md §Class hierarchies. Examples: `BlockState` (tables in `rivet-registry`, `BlockStateBaseLive` above), `ItemStack` (`ItemStackLive`), `BlockEntity`. The ledger lists every split with both homes; no other class straddles crates.
+- No other crate is carved out of the live-game component. If compile cost forces a split (ROADMAP R1), whole leaf families move to a higher crate and register into the `'static` dispatch tables OWNERSHIP.md defines; that is a move, not a redesign.
+
+## D16 — Scope: what "all of Paper ported" means
+Locked 2026-11-23 (ROADMAP §2.1). The denominator, measured on Paper `0a99345`:
+
+| Bucket | Java LOC | Treatment |
+|---|---|---|
+| A. Minecraft runtime (`net.minecraft` minus B and C, plus DataConverter and Moonrise) | ≈558k | Translate, file for file. |
+| B. Datagen (`net.minecraft.data.*`) | 36k | Not translated: `rivet-codegen` extracts the generated data. Port only classes an audited runtime call site needs (keys such as `BuiltInLootTables`, `PlacementUtils`). |
+| C. DFU datafixers (`net.minecraft.util.datafix`) | 35k | Not translated: Paper routes world data through DataConverter (bucket A). Port a DFU fix only when an audited live call site needs it. |
+| D. Paper server layer (`io.papermc.paper`, `com.destroystokyo`, Moonrise in `src/main`) | 48k | Translate the behaviour: config, patches, chunk system, event call sites. |
+| E. CraftBukkit (`org.bukkit.craftbukkit`) | 76k | Adapter track, not translated: generated Java shims over `rivet-ffi` (D6). The Rust side is a facade plus event hooks: the game-state logic of the CraftBukkit helpers that translated patch sites call (`CraftEventFactory`, block-state snapshot placement) is ported with the call site; Bukkit wrapper objects are not (OWNERSHIP.md §Events). |
+| F. `paper-api` | 191k | Unchanged jar (D6). Zero translation. |
+
+The translation target is A + D, about 606k Java LOC; the adapter target is the E + F surface, reached by shim generation. The ledger and manifest label B units `n/a(datagen)`, C units `deferred(dfu-audit)`, and E and F units `adapter`; the wave picker never selects them. An audit means the PR names the live call site, ports exactly the classes that call reaches, and records them in the ledger. Anything larger, or any request to translate CraftBukkit, is an owner decision, asked once and recorded here (ROADMAP R8).
+
+## D17 — Gate tiers (amends D10)
+Locked 2026-11-23 (docs/VERIFICATION.md §3.2; supersedes ROADMAP §3.5 per its §0.4). `scripts/gate.sh` runs in four tiers. Tiering changes *when* a row runs, never *whether*:
+
+| Tier | When | Contents |
+|---|---|---|
+| T0 scoped | Every PR, in its worktree, by the workflow, at the exact head | fmt, clippy `-Dwarnings` and nextest for the touched crates (this runs every L1 golden), marker audit, `verify-ledger --check` on the diff |
+| T1 merge | Every merge, serialized under the build lock | T0 workspace-wide, codegen drift, ledger monotonicity (D19), the oracle rows whose `rust_globs` intersect the diff (path-triggered), and the always-on cheap rows (`rivet-parity`, live oracle ops on one JVM boot) |
+| T2 full | Every batch (at most 5 merges or 24 hours, whichever comes first) and before any milestone, phase or epic closes | Everything, with `--require-oracle`: all Paper boots, scenarios, arenas, Stage A hash-diff, harness self-checks |
+| T3 nightly | Once a day, unattended | T2, `regen --check` of every probe and op, Stage B/C seeds, time-boxed differential fuzzing, rayon 1-thread vs default determinism |
+
+- Unchanged from D10: no hosted CI; the controller runs the gate locally; oracle steps never silently skip; a red tier blocks.
+- No row is ever dropped from T2.
+- A red T2 or T3 on `main` freezes merges of port PRs. The only allowed work is the fix or a revert; the batch size bounds the bisect.
+- The controller may require T2 before merging a specific PR whose regression risk warrants it (for example ROADMAP Batch 3C).
+- Until `gate.sh` implements the tiers and `VERIFY.tsv` exists (ROADMAP Batch 1A, VERIFICATION §5 item 1), the full `gate.sh` stays the per-merge gate, as D10 originally said.
+
+## D18 — Tests: only Java-sourced expectations earn verification credit
+Locked 2026-11-23 (ROADMAP §5.1; docs/VERIFICATION.md §2.2, §3.3). A test counts toward verification only if it is one of:
+1. a ported Paper JUnit test for a class with a direct Rust twin, translated with that class and never weakened (Paper's registry and CraftBukkit consistency suites run unchanged against the JVM adapter in P3 instead);
+2. a test whose expected values come from a Java-generated fixture with provenance (Paper commit, producing op or probe, SHA-256 in a manifest, reproducible by `regen`), or are derived from one;
+3. a differential row: an oracle op (L2), a world-state diff (L3), an arena tick trace (L4) or a client scenario (L5).
+
+- Hand-written tests are allowed for ownership invariants, error paths and Rust-only seams. They earn zero credit, and none may assert by hand a value or ordering that Paper computes: no invented behavioural unit tests.
+- No golden master of Rivet's own output. A Rivet-vs-Rivet round trip or a snapshot of Rivet output earns nothing.
+- Fixtures, goldens, exclusion tables, comparators and normalizers change only in verification PRs, and a fixture change must be reproducible by `regen`. A port PR that touches them is rejected.
+- A test that can pass vacuously (empty corpus, a filter that drops every row, an early return when a file is missing) is a defect: rows assert closure counts.
+- This supersedes `WORKFLOWS.md` "Test reuse" items 2 and 4 (vanilla ships no GameTest corpus, and round-trip tests earn no credit) until that file is rewritten.
+
+## D19 — Verification ledger, scoreboard and debt policy
+Locked 2026-11-23 (docs/VERIFICATION.md §3–§4; ROADMAP §0.1–§0.2).
+- **Two ledgers, written by tools, never by hand.** `COVERAGE.tsv` (D15: Java class → Rust home, method coverage, markers) answers "how much is ported". `VERIFY.tsv` answers "how much is checked against Paper", one row per verification surface: `id`, `layer`, `rust_globs`, `java_classes`, `mechanism`, `corpus_n`, `negative`, `tier`, `status`, `matched`, `mismatched`, `last_verified_commit`. `status` is `PASS`, `FAIL`, `UNVERIFIED` or `INACTIVE`, and only the tool writes status and counts. A row whose tamper negative is not detected, or that executed zero inputs, is `UNVERIFIED`. A row is admitted only after Paper-vs-Paper twin runs are byte-identical after normalization.
+- **`PARITY.md` is rendered from `VERIFY.tsv`** (`rivet-parity --scoreboard`) and never hand-edited.
+- **Monotone scoreboard.** A row never disappears; `inputs` and `matched` never decrease; `status` never leaves `PASS`; `mismatched` never increases; a subsystem's verified-LOC share never drops by more than the PR's own registered debt. Adding a `FAIL` or `UNVERIFIED` row is always allowed. The only exit from a violation is a dedicated PR that changes nothing else and is approved by the owner; agents cannot approve it. A known divergence is a `FAIL` row with an issue, not an exclusion; an accepted divergence needs its own decision here (D12 precedent).
+- **Coverage declaration in every PR.** Each new or materially changed `crates/**/src/**.rs` file is (a) matched by a Java-sourced row that is `PASS` after the PR, (b) given its row in the same PR, (c) covered by a row an earlier verification PR added as `UNVERIFIED`, or (d) registered as debt with an owning issue, which is legal only while its subsystem is under threshold.
+- **Test-first is preferred.** A verification PR lands the op or arena and its recorded goldens while the Rust side is a `STUB`, so the row is `UNVERIFIED`; the port PR flips it to `PASS`. The expectation then predates the implementation.
+- **Debt.** `scripts/verify_debt.py` (offline, deterministic) classes the non-test LOC of every source file as V2 (a `PASS` live differential row with a negative control), V1 (a `PASS` recorded golden reproducible by `regen`) or V0 (no Java-sourced row). A row credits at most K × `corpus_n` LOC, with K = 50; the excess counts as V0. Thresholds (VERIFICATION §4.2):
+
+| Condition | Action |
+|---|---|
+| Subsystem `debt_ratio > 0.30` and `debt_loc > 10k` | No new port waves in that subsystem; its next workflow runs are verification items. |
+| Subsystem `debt_delta > 0` for 2 consecutive batches | The same. |
+| Global `debt_ratio > 0.35` | Global pause on translate-waves; the next cycle works the top of the V0 list. |
+| A subsystem with no rows | Its first wave is preceded by its first op or arena. No exceptions. |
+| Steady-state target | Global `debt_ratio <= 0.15`, and every subsystem has at least one V2 row. |
+
+- **Hard stops** (no new translate-wave anywhere): T2 or T3 red on `main`; any scoreboard row regressed; `regen --check` drift; the oracle unbootable for more than one batch. **Subsystem stops:** debt over threshold, or the subsystem's milestone-terminal row still `INACTIVE`/`UNVERIFIED` while units downstream of it are being ported (VERIFICATION §3.5).
+- **Spine exception** (ROADMAP §0.2). The P1 spine proceeds despite the debt thresholds, because no gameplay verification can run without it. Every spine cluster PR ships with, or after, a Java-sourced row for its surface, and P2 leaf fan-out in a family is gated by that family's `debt_ratio`.
