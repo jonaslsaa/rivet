@@ -1,18 +1,69 @@
-//! Runtime registry, entity table, and quiescent callback dispatcher for `rivet-ffi`.
+//! Thread-confined runtime state, entity table, and callback dispatcher for
+//! `rivet-ffi`.
+//!
+//! # Thread confinement (`OWNERSHIP.md` §JVM-adapter, `DECISIONS.md` D5/D6)
+//!
+//! A runtime is owned by the OS thread that created it with
+//! `rivet_ffi_v1_init` (the host's dedicated tick-synchronized thread). Its
+//! state lives in that thread's thread-local table and is never reachable from
+//! any other thread, so it needs no lock. Event callbacks run synchronously on
+//! the owner thread, which means an invocation can only be in flight on the
+//! owner's own call stack.
+//!
+//! A lock-free global slot table records only `(generation, owner thread tag)`
+//! per runtime slot. It keeps runtime handles globally unique (no ABA aliasing
+//! across threads) and lets a call from any other thread fail with
+//! [`RivetStatus::WrongThread`] without touching the runtime's state.
 
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::thread::ThreadId;
+use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::abi::{
     RIVET_EVENT_CANCEL, RIVET_FFI_MAX_PAYLOAD_BYTES, RivetBlockPos, RivetByteView,
     RivetCallbackToken, RivetEntityHandle, RivetEntityInfo, RivetEventCallback, RivetOwnedBytes,
     RivetRuntimeHandle, RivetStatus,
 };
-use crate::handle_table::{GenerationalTable, HandleInsertError, HandleLookupError};
+use crate::handle_table::{
+    GenerationalTable, HandleInsertError, HandleLookupError, next_generation,
+};
 
-const MAX_RUNTIMES: u32 = 64;
+const MAX_RUNTIMES: usize = 64;
 const MAX_ENTITIES_PER_RUNTIME: u32 = 65_536;
 const MAX_CALLBACKS_PER_RUNTIME: u32 = 4_096;
+
+/// Ownership word per runtime slot: the high 32 bits hold the slot generation
+/// (`0` = never allocated), the low 32 bits hold the owner thread tag
+/// (`0` = free). Only the owner thread writes a claimed word; other threads
+/// only claim free words with a compare-exchange.
+static RUNTIME_SLOTS: [AtomicU64; MAX_RUNTIMES] = [const { AtomicU64::new(0) }; MAX_RUNTIMES];
+
+/// Source of process-unique, never-reused thread tags (`0` is reserved).
+static NEXT_THREAD_TAG: AtomicU32 = AtomicU32::new(1);
+
+thread_local! {
+    /// This thread's tag, or `0` if it has never created a runtime.
+    static THREAD_TAG: Cell<u32> = const { Cell::new(0) };
+    /// Runtimes owned by this thread, indexed by runtime slot.
+    static OWNED_RUNTIMES: RefCell<OwnedRuntimes> = const {
+        RefCell::new(OwnedRuntimes { slots: Vec::new() })
+    };
+}
+
+/// Per-thread runtime table. Dropping it at thread exit releases every slot
+/// the thread still owns so a dead thread never pins runtime capacity.
+struct OwnedRuntimes {
+    slots: Vec<Option<RuntimeState>>,
+}
+
+impl Drop for OwnedRuntimes {
+    fn drop(&mut self) {
+        for (slot, entry) in self.slots.iter().enumerate() {
+            if let Some(state) = entry {
+                release_slot(slot, state.generation);
+            }
+        }
+    }
+}
 
 pub(crate) struct EntityRecord {
     pub type_id: u32,
@@ -25,58 +76,191 @@ struct CallbackRecord {
     event_kind: u32,
     callback: RivetEventCallback,
     user_data: u64,
+    /// Invocations of this callback currently on the owner thread's stack.
     active_calls: u32,
-    unregistered: bool,
-    calling_threads: Vec<ThreadId>,
 }
 
 struct RuntimeState {
+    generation: u32,
     tick_number: u64,
-    shutting_down: bool,
+    /// `publish_event` dispatches of this runtime currently on the stack.
+    dispatch_depth: u32,
     entities: GenerationalTable<EntityRecord>,
     callbacks: GenerationalTable<CallbackRecord>,
     /// Deterministic registration order of live callback tokens.
     callback_order: Vec<RivetCallbackToken>,
 }
 
-pub(crate) struct RuntimeInstance {
-    state: Mutex<RuntimeState>,
-    quiesce_cv: Condvar,
+impl RuntimeState {
+    fn new(generation: u32) -> Self {
+        Self {
+            generation,
+            tick_number: 0,
+            dispatch_depth: 0,
+            entities: GenerationalTable::new(MAX_ENTITIES_PER_RUNTIME),
+            callbacks: GenerationalTable::new(MAX_CALLBACKS_PER_RUNTIME),
+            callback_order: Vec::new(),
+        }
+    }
+
+    fn entity(&self, handle: RivetEntityHandle) -> Result<&EntityRecord, RivetStatus> {
+        let rec = self
+            .entities
+            .get(handle.slot, handle.generation)
+            .map_err(map_lookup_err)?;
+        if rec.type_id != handle.type_id {
+            return Err(RivetStatus::HandleInvalid);
+        }
+        Ok(rec)
+    }
 }
 
-impl RuntimeInstance {
-    fn new() -> Self {
-        Self {
-            state: Mutex::new(RuntimeState {
-                tick_number: 0,
-                shutting_down: false,
-                entities: GenerationalTable::new(MAX_ENTITIES_PER_RUNTIME),
-                callbacks: GenerationalTable::new(MAX_CALLBACKS_PER_RUNTIME),
-                callback_order: Vec::new(),
-            }),
-            quiesce_cv: Condvar::new(),
-        }
-    }
+const fn pack_slot(generation: u32, owner: u32) -> u64 {
+    ((generation as u64) << 32) | owner as u64
+}
 
-    pub(crate) fn tick(&self) -> Result<u64, RivetStatus> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.shutting_down {
+const fn unpack_slot(word: u64) -> (u32, u32) {
+    ((word >> 32) as u32, word as u32)
+}
+
+fn release_slot(slot: usize, generation: u32) {
+    RUNTIME_SLOTS[slot].store(pack_slot(next_generation(generation), 0), Ordering::Release);
+}
+
+fn claim_thread_tag() -> Result<u32, RivetStatus> {
+    let tag = THREAD_TAG.get();
+    if tag != 0 {
+        return Ok(tag);
+    }
+    let tag = NEXT_THREAD_TAG
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |t| t.checked_add(1))
+        .map_err(|_| RivetStatus::CapacityExceeded)?;
+    THREAD_TAG.set(tag);
+    Ok(tag)
+}
+
+/// Validates `handle` against the global slot table and confirms the calling
+/// thread owns it.
+fn resolve_slot(handle: RivetRuntimeHandle) -> Result<usize, RivetStatus> {
+    if handle.generation == 0 {
+        return Err(RivetStatus::HandleInvalid);
+    }
+    let slot = handle.slot as usize;
+    let word = RUNTIME_SLOTS.get(slot).ok_or(RivetStatus::HandleInvalid)?;
+    let (generation, owner) = unpack_slot(word.load(Ordering::Acquire));
+    if generation == 0 {
+        return Err(RivetStatus::HandleInvalid);
+    }
+    if generation != handle.generation || owner == 0 {
+        return Err(RivetStatus::HandleStale);
+    }
+    if owner != THREAD_TAG.get() {
+        return Err(RivetStatus::WrongThread);
+    }
+    Ok(slot)
+}
+
+/// Runs `f` on the calling thread's state for `handle`. The state stays
+/// borrowed while `f` runs, so `f` must never call foreign code.
+fn with_runtime<R>(
+    handle: RivetRuntimeHandle,
+    f: impl FnOnce(&mut RuntimeState) -> Result<R, RivetStatus>,
+) -> Result<R, RivetStatus> {
+    let slot = resolve_slot(handle)?;
+    OWNED_RUNTIMES
+        .try_with(|owned| {
+            let mut owned = owned.borrow_mut();
+            let state = owned
+                .slots
+                .get_mut(slot)
+                .and_then(Option::as_mut)
+                .ok_or(RivetStatus::HandleStale)?;
+            f(state)
+        })
+        // The thread is tearing down its thread-locals; its runtimes are gone.
+        .unwrap_or(Err(RivetStatus::HandleStale))
+}
+
+/// Creates a runtime owned by the calling thread.
+pub(crate) fn create_runtime() -> Result<RivetRuntimeHandle, RivetStatus> {
+    let tag = claim_thread_tag()?;
+    for (slot, word) in RUNTIME_SLOTS.iter().enumerate() {
+        let current = word.load(Ordering::Acquire);
+        let (generation, owner) = unpack_slot(current);
+        if owner != 0 {
+            continue;
+        }
+        let generation = if generation == 0 { 1 } else { generation };
+        if word
+            .compare_exchange(
+                current,
+                pack_slot(generation, tag),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            continue;
+        }
+        let stored = OWNED_RUNTIMES.try_with(|owned| {
+            let mut owned = owned.borrow_mut();
+            if owned.slots.len() <= slot {
+                owned.slots.resize_with(slot + 1, || None);
+            }
+            owned.slots[slot] = Some(RuntimeState::new(generation));
+        });
+        if stored.is_err() {
+            release_slot(slot, generation);
             return Err(RivetStatus::HandleStale);
         }
+        return Ok(RivetRuntimeHandle {
+            slot: slot as u32,
+            generation,
+        });
+    }
+    Err(RivetStatus::CapacityExceeded)
+}
+
+/// Destroys a runtime owned by the calling thread, dropping its entities and
+/// callbacks and advancing its slot generation.
+///
+/// Rejected with [`RivetStatus::CallbackReentrantUnregister`], leaving the
+/// runtime fully intact, while any `publish_event` dispatch of this runtime is
+/// on the stack (i.e. when called from inside one of its callbacks). Otherwise
+/// no callback invocation can be in flight, so shutdown is quiescent on return.
+pub(crate) fn shutdown_runtime(handle: RivetRuntimeHandle) -> Result<(), RivetStatus> {
+    let slot = resolve_slot(handle)?;
+    let removed = OWNED_RUNTIMES
+        .try_with(|owned| {
+            let mut owned = owned.borrow_mut();
+            let entry = owned.slots.get_mut(slot).ok_or(RivetStatus::HandleStale)?;
+            let state = entry.as_ref().ok_or(RivetStatus::HandleStale)?;
+            if state.dispatch_depth > 0 {
+                return Err(RivetStatus::CallbackReentrantUnregister);
+            }
+            let state = entry.take().ok_or(RivetStatus::HandleStale)?;
+            release_slot(slot, state.generation);
+            Ok(state)
+        })
+        .unwrap_or(Err(RivetStatus::HandleStale))?;
+    drop(removed);
+    Ok(())
+}
+
+pub(crate) fn tick(handle: RivetRuntimeHandle) -> Result<u64, RivetStatus> {
+    with_runtime(handle, |state| {
         state.tick_number = state.tick_number.wrapping_add(1);
         Ok(state.tick_number)
-    }
+    })
+}
 
-    pub(crate) fn spawn_entity(
-        &self,
-        type_id: u32,
-        pos: RivetBlockPos,
-        name: String,
-    ) -> Result<RivetEntityHandle, RivetStatus> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.shutting_down {
-            return Err(RivetStatus::HandleStale);
-        }
+pub(crate) fn spawn_entity(
+    handle: RivetRuntimeHandle,
+    type_id: u32,
+    pos: RivetBlockPos,
+    name: String,
+) -> Result<RivetEntityHandle, RivetStatus> {
+    with_runtime(handle, |state| {
         let (slot, generation) = state
             .entities
             .insert(EntityRecord {
@@ -92,46 +276,30 @@ impl RuntimeInstance {
             type_id,
             flags: 0,
         })
-    }
+    })
+}
 
-    pub(crate) fn lookup_entity(
-        &self,
-        handle: RivetEntityHandle,
-    ) -> Result<RivetEntityInfo, RivetStatus> {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.shutting_down {
-            return Err(RivetStatus::HandleStale);
-        }
-        let rec = state
-            .entities
-            .get(handle.slot, handle.generation)
-            .map_err(map_lookup_err)?;
-        if rec.type_id != handle.type_id {
-            return Err(RivetStatus::HandleInvalid);
-        }
+pub(crate) fn lookup_entity(
+    runtime: RivetRuntimeHandle,
+    handle: RivetEntityHandle,
+) -> Result<RivetEntityInfo, RivetStatus> {
+    with_runtime(runtime, |state| {
+        let rec = state.entity(handle)?;
         Ok(RivetEntityInfo {
             handle,
             pos: rec.pos,
             alive: u32::from(rec.alive),
             reserved: 0,
         })
-    }
+    })
+}
 
-    pub(crate) fn describe_entity_json(
-        &self,
-        handle: RivetEntityHandle,
-    ) -> Result<Vec<u8>, RivetStatus> {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.shutting_down {
-            return Err(RivetStatus::HandleStale);
-        }
-        let rec = state
-            .entities
-            .get(handle.slot, handle.generation)
-            .map_err(map_lookup_err)?;
-        if rec.type_id != handle.type_id {
-            return Err(RivetStatus::HandleInvalid);
-        }
+pub(crate) fn describe_entity_json(
+    runtime: RivetRuntimeHandle,
+    handle: RivetEntityHandle,
+) -> Result<Vec<u8>, RivetStatus> {
+    with_runtime(runtime, |state| {
+        let rec = state.entity(handle)?;
         let escaped_name = escape_json_string(&rec.name);
         let json = format!(
             "{{\"slot\":{},\"generation\":{},\"type_id\":{},\"world_id\":{},\"x\":{},\"y\":{},\"z\":{},\"alive\":{},\"name\":\"{}\"}}",
@@ -146,37 +314,30 @@ impl RuntimeInstance {
             escaped_name,
         );
         Ok(json.into_bytes())
-    }
+    })
+}
 
-    pub(crate) fn despawn_entity(&self, handle: RivetEntityHandle) -> Result<(), RivetStatus> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.shutting_down {
-            return Err(RivetStatus::HandleStale);
-        }
-        let rec = state
-            .entities
-            .get(handle.slot, handle.generation)
-            .map_err(map_lookup_err)?;
-        if rec.type_id != handle.type_id {
-            return Err(RivetStatus::HandleInvalid);
-        }
+pub(crate) fn despawn_entity(
+    runtime: RivetRuntimeHandle,
+    handle: RivetEntityHandle,
+) -> Result<(), RivetStatus> {
+    with_runtime(runtime, |state| {
+        state.entity(handle)?;
         state
             .entities
             .remove(handle.slot, handle.generation)
             .map_err(map_lookup_err)?;
         Ok(())
-    }
+    })
+}
 
-    pub(crate) fn register_callback(
-        &self,
-        event_kind: u32,
-        callback: RivetEventCallback,
-        user_data: u64,
-    ) -> Result<RivetCallbackToken, RivetStatus> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.shutting_down {
-            return Err(RivetStatus::HandleStale);
-        }
+pub(crate) fn register_callback(
+    runtime: RivetRuntimeHandle,
+    event_kind: u32,
+    callback: RivetEventCallback,
+    user_data: u64,
+) -> Result<RivetCallbackToken, RivetStatus> {
+    with_runtime(runtime, |state| {
         let (slot, generation) = state
             .callbacks
             .insert(CallbackRecord {
@@ -184,238 +345,138 @@ impl RuntimeInstance {
                 callback,
                 user_data,
                 active_calls: 0,
-                unregistered: false,
-                calling_threads: Vec::new(),
             })
             .map_err(map_insert_err)?;
         let token = RivetCallbackToken { slot, generation };
         state.callback_order.push(token);
         Ok(token)
-    }
+    })
+}
 
-    /// Unregisters a callback and blocks until all in-flight invocations on
-    /// other threads have finished (quiescence).
-    ///
-    /// Rejects reentrant unregistration from the thread currently executing
-    /// that same callback with [`RivetStatus::CallbackReentrantUnregister`]
-    /// instead of deadlocking.
-    pub(crate) fn unregister_callback(&self, token: RivetCallbackToken) -> Result<(), RivetStatus> {
-        let current_thread = std::thread::current().id();
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-
-        {
-            let rec = state
-                .callbacks
-                .get_mut(token.slot, token.generation)
-                .map_err(|_| RivetStatus::CallbackNotFound)?;
-            if rec.calling_threads.contains(&current_thread) {
-                return Err(RivetStatus::CallbackReentrantUnregister);
-            }
-            if rec.unregistered && rec.active_calls == 0 {
-                return Err(RivetStatus::CallbackNotFound);
-            }
-            rec.unregistered = true;
+/// Unregisters a callback. On `Ok`, no invocation of it is in flight and it
+/// will never be invoked again, including later in a dispatch that is
+/// currently on the stack.
+///
+/// Rejected with [`RivetStatus::CallbackReentrantUnregister`], leaving the
+/// callback registered, while that callback is itself executing (it is on the
+/// owner thread's stack, so waiting for it would deadlock).
+pub(crate) fn unregister_callback(
+    runtime: RivetRuntimeHandle,
+    token: RivetCallbackToken,
+) -> Result<(), RivetStatus> {
+    with_runtime(runtime, |state| {
+        let rec = state
+            .callbacks
+            .get(token.slot, token.generation)
+            .map_err(|_| RivetStatus::CallbackNotFound)?;
+        if rec.active_calls > 0 {
+            return Err(RivetStatus::CallbackReentrantUnregister);
         }
-
+        state
+            .callbacks
+            .remove(token.slot, token.generation)
+            .map_err(|_| RivetStatus::CallbackNotFound)?;
         state.callback_order.retain(|t| *t != token);
+        Ok(())
+    })
+}
 
-        loop {
-            match state.callbacks.get(token.slot, token.generation) {
-                Ok(rec) if rec.active_calls > 0 => {
-                    state = self
-                        .quiesce_cv
-                        .wait(state)
-                        .unwrap_or_else(|e| e.into_inner());
-                }
-                Ok(_) => {
-                    let _ = state.callbacks.remove(token.slot, token.generation);
-                    return Ok(());
-                }
-                Err(_) => return Ok(()),
-            }
-        }
+/// Decrements the dispatch depth when a `publish_event` dispatch leaves the
+/// stack, including on unwind.
+struct DispatchGuard {
+    runtime: RivetRuntimeHandle,
+}
+
+impl Drop for DispatchGuard {
+    fn drop(&mut self) {
+        let _ = with_runtime(self.runtime, |state| {
+            state.dispatch_depth = state.dispatch_depth.saturating_sub(1);
+            Ok(())
+        });
     }
+}
 
-    /// Dispatches `event_kind` with a copied bounded payload to all registered
-    /// callbacks in registration order.
-    pub(crate) fn publish_event(
-        &self,
-        event_kind: u32,
-        payload: &[u8],
-    ) -> Result<(u32, bool), RivetStatus> {
-        let current_thread = std::thread::current().id();
+/// Releases one claimed callback invocation, including on unwind.
+struct InvocationGuard {
+    runtime: RivetRuntimeHandle,
+    token: RivetCallbackToken,
+}
 
-        let targets: Vec<(RivetCallbackToken, RivetEventCallback, u64)> = {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if state.shutting_down {
-                return Err(RivetStatus::HandleStale);
+impl Drop for InvocationGuard {
+    fn drop(&mut self) {
+        let _ = with_runtime(self.runtime, |state| {
+            if let Ok(rec) = state
+                .callbacks
+                .get_mut(self.token.slot, self.token.generation)
+            {
+                rec.active_calls = rec.active_calls.saturating_sub(1);
             }
-            let order = state.callback_order.clone();
-            let mut out = Vec::new();
-            for token in order {
-                if let Ok(rec) = state.callbacks.get_mut(token.slot, token.generation)
-                    && !rec.unregistered
-                    && rec.event_kind == event_kind
-                {
-                    rec.active_calls += 1;
-                    rec.calling_threads.push(current_thread);
-                    out.push((token, rec.callback, rec.user_data));
-                }
-            }
-            out
-        };
-
-        // RAII guard ensures active_calls are always decremented even if a
-        // callback unwinds or panics.
-        struct ActiveCallGuard<'a> {
-            runtime: &'a RuntimeInstance,
-            remaining: Vec<RivetCallbackToken>,
-            thread: ThreadId,
-        }
-
-        impl Drop for ActiveCallGuard<'_> {
-            fn drop(&mut self) {
-                if self.remaining.is_empty() {
-                    return;
-                }
-                let mut state = self.runtime.state.lock().unwrap_or_else(|e| e.into_inner());
-                let mut notify = false;
-                for token in self.remaining.drain(..) {
-                    if let Ok(rec) = state.callbacks.get_mut(token.slot, token.generation) {
-                        rec.active_calls = rec.active_calls.saturating_sub(1);
-                        if let Some(pos) =
-                            rec.calling_threads.iter().position(|t| *t == self.thread)
-                        {
-                            rec.calling_threads.swap_remove(pos);
-                        }
-                        if rec.active_calls == 0 {
-                            notify = true;
-                        }
-                    }
-                }
-                if notify {
-                    self.runtime.quiesce_cv.notify_all();
-                }
-            }
-        }
-
-        let mut guard = ActiveCallGuard {
-            runtime: self,
-            remaining: targets.iter().map(|(t, _, _)| *t).collect(),
-            thread: current_thread,
-        };
-
-        let payload_len = u32::try_from(payload.len()).map_err(|_| RivetStatus::BufferTooLarge)?;
-        let payload_ptr = if payload.is_empty() {
-            std::ptr::null()
-        } else {
-            payload.as_ptr()
-        };
-
-        let mut delivered = 0u32;
-        let mut cancelled = false;
-
-        for (idx, (_token, callback, user_data)) in targets.into_iter().enumerate() {
-            let ret = callback(event_kind, payload_ptr, payload_len, user_data);
-            delivered += 1;
-            if ret == RIVET_EVENT_CANCEL {
-                cancelled = true;
-            }
-            // Mark this token's invocation complete immediately so a waiting
-            // unregister_callback can make progress without waiting for later
-            // callbacks in the same dispatch.
-            let done_token = guard.remaining[idx];
-            guard.remaining[idx] = RivetCallbackToken::default();
-            if done_token.generation != 0 {
-                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                if let Ok(rec) = state
-                    .callbacks
-                    .get_mut(done_token.slot, done_token.generation)
-                {
-                    rec.active_calls = rec.active_calls.saturating_sub(1);
-                    if let Some(pos) = rec
-                        .calling_threads
-                        .iter()
-                        .position(|t| *t == current_thread)
-                    {
-                        rec.calling_threads.swap_remove(pos);
-                    }
-                    if rec.active_calls == 0 {
-                        self.quiesce_cv.notify_all();
-                    }
-                }
-            }
-        }
-        guard.remaining.clear();
-
-        Ok((delivered, cancelled))
+            Ok(())
+        });
     }
+}
 
-    /// Marks the runtime shutting down, unregisters all callbacks, and waits
-    /// until every in-flight callback invocation finishes.
-    pub(crate) fn shutdown_and_quiesce(&self) -> Result<(), RivetStatus> {
-        let current_thread = std::thread::current().id();
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.shutting_down = true;
-        let tokens: Vec<RivetCallbackToken> = state.callback_order.drain(..).collect();
-        for token in &tokens {
-            if let Ok(rec) = state.callbacks.get_mut(token.slot, token.generation) {
-                if rec.calling_threads.contains(&current_thread) {
-                    return Err(RivetStatus::CallbackReentrantUnregister);
-                }
-                rec.unregistered = true;
-            }
-        }
-        loop {
-            let any_active = tokens.iter().any(|t| {
+/// Dispatches `event_kind` with a copied bounded payload, synchronously on the
+/// owner thread, to the callbacks registered for it, in registration order.
+///
+/// The target list is the registration order at dispatch start. Each
+/// invocation is claimed just before it runs; a target unregistered in the
+/// meantime (e.g. by an earlier callback of the same dispatch) is skipped and
+/// not counted as delivered.
+pub(crate) fn publish_event(
+    runtime: RivetRuntimeHandle,
+    event_kind: u32,
+    payload: &[u8],
+) -> Result<(u32, bool), RivetStatus> {
+    let payload_len = u32::try_from(payload.len()).map_err(|_| RivetStatus::BufferTooLarge)?;
+    let payload_ptr = if payload.is_empty() {
+        std::ptr::null()
+    } else {
+        payload.as_ptr()
+    };
+
+    let targets = with_runtime(runtime, |state| {
+        state.dispatch_depth += 1;
+        let targets: Vec<RivetCallbackToken> = state
+            .callback_order
+            .iter()
+            .copied()
+            .filter(|t| {
                 state
                     .callbacks
                     .get(t.slot, t.generation)
-                    .is_ok_and(|rec| rec.active_calls > 0)
-            });
-            if !any_active {
-                break;
-            }
-            state = self
-                .quiesce_cv
-                .wait(state)
-                .unwrap_or_else(|e| e.into_inner());
+                    .is_ok_and(|rec| rec.event_kind == event_kind)
+            })
+            .collect();
+        Ok(targets)
+    })?;
+    let _dispatch = DispatchGuard { runtime };
+
+    let mut delivered = 0u32;
+    let mut cancelled = false;
+    for token in targets {
+        let claimed = with_runtime(runtime, |state| {
+            Ok(state
+                .callbacks
+                .get_mut(token.slot, token.generation)
+                .ok()
+                .map(|rec| {
+                    rec.active_calls += 1;
+                    (rec.callback, rec.user_data)
+                }))
+        })?;
+        let Some((callback, user_data)) = claimed else {
+            continue;
+        };
+        let _invocation = InvocationGuard { runtime, token };
+        let ret = callback(event_kind, payload_ptr, payload_len, user_data);
+        delivered += 1;
+        if ret == RIVET_EVENT_CANCEL {
+            cancelled = true;
         }
-        for token in tokens {
-            let _ = state.callbacks.remove(token.slot, token.generation);
-        }
-        Ok(())
     }
-}
 
-fn registry() -> &'static Mutex<GenerationalTable<Arc<RuntimeInstance>>> {
-    static REGISTRY: OnceLock<Mutex<GenerationalTable<Arc<RuntimeInstance>>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(GenerationalTable::new(MAX_RUNTIMES)))
-}
-
-pub(crate) fn create_runtime() -> Result<RivetRuntimeHandle, RivetStatus> {
-    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
-    let (slot, generation) = reg
-        .insert(Arc::new(RuntimeInstance::new()))
-        .map_err(map_insert_err)?;
-    Ok(RivetRuntimeHandle { slot, generation })
-}
-
-pub(crate) fn lookup_runtime(
-    handle: RivetRuntimeHandle,
-) -> Result<Arc<RuntimeInstance>, RivetStatus> {
-    let reg = registry().lock().unwrap_or_else(|e| e.into_inner());
-    reg.get(handle.slot, handle.generation)
-        .cloned()
-        .map_err(map_lookup_err)
-}
-
-pub(crate) fn remove_runtime(
-    handle: RivetRuntimeHandle,
-) -> Result<Arc<RuntimeInstance>, RivetStatus> {
-    let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
-    reg.remove(handle.slot, handle.generation)
-        .map_err(map_lookup_err)
+    Ok((delivered, cancelled))
 }
 
 /// Validates and copies a caller-borrowed [`RivetByteView`] into an owned

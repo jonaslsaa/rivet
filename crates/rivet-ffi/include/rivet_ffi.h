@@ -1,3 +1,14 @@
+/*
+ * rivet-ffi C ABI v1. Must match crates/rivet-ffi/src/abi.rs; the
+ * c_header_smoke test checks layouts and links a C caller against the cdylib.
+ *
+ * Threading: a runtime is owned by the OS thread that called
+ * rivet_ffi_v1_init. Every call taking its handle from another thread returns
+ * RIVET_STATUS_WRONG_THREAD. Event callbacks run synchronously on the owner
+ * thread. Unregistering a callback while it executes, or shutting a runtime
+ * down from inside one of its callbacks, returns
+ * RIVET_STATUS_CALLBACK_REENTRANT_UNREGISTER and changes nothing.
+ */
 #ifndef RIVET_FFI_H
 #define RIVET_FFI_H
 

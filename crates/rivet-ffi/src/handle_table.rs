@@ -17,6 +17,11 @@
 //!   observes [`HandleLookupError::Stale`] rather than ABA aliasing.
 //! - Capacity is explicitly bounded (`max_slots`) so untrusted callers cannot
 //!   exhaust memory without hitting [`HandleInsertError::CapacityExceeded`].
+//!
+//! Entities and callback tokens live in a [`GenerationalTable`] inside their
+//! runtime's thread-confined state. Runtime handles follow the same
+//! `(slot, generation)` rules through a lock-free global slot table that also
+//! records the owner thread (see `runtime.rs`).
 
 /// Failure returned when resolving a `(slot, generation)` pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,8 +140,9 @@ impl<T> GenerationalTable<T> {
     }
 }
 
+/// Advances a slot generation, skipping the reserved invalid generation `0`.
 #[inline]
-fn next_generation(current: u32) -> u32 {
+pub(crate) fn next_generation(current: u32) -> u32 {
     let next = current.wrapping_add(1);
     if next == 0 { 1 } else { next }
 }

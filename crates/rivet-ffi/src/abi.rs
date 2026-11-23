@@ -51,7 +51,11 @@ pub enum RivetStatus {
     BufferTooLarge = 6,
     InvalidUtf8 = 7,
     CallbackNotFound = 8,
+    /// Unregister or shutdown called while the affected callback or dispatch
+    /// is executing on the owner thread's stack; nothing was changed.
     CallbackReentrantUnregister = 9,
+    /// The runtime handle is owned by a different thread (the one that called
+    /// `rivet_ffi_v1_init`); nothing was changed.
     WrongThread = 10,
     PanicCaught = 11,
     CapacityExceeded = 12,

@@ -13,10 +13,20 @@
 //!   bounds-checked (`<= 1 MiB`), validated, and copied synchronously — foreign
 //!   memory is never retained. Output [`RivetOwnedBytes`] buffers are allocated
 //!   by Rust and freed via [`rivet_ffi_v1_bytes_free`].
-//! - **Callback quiescence**: [`rivet_ffi_v1_unregister_event_callback`] and
-//!   [`rivet_ffi_v1_shutdown`] wait for all in-flight invocations of a callback
-//!   to complete before returning, while rejecting reentrant self-unregistration
-//!   with [`RivetStatus::CallbackReentrantUnregister`].
+//! - **Thread confinement**: a runtime is owned by the OS thread that called
+//!   [`rivet_ffi_v1_init`] (the host's dedicated tick-synchronized thread,
+//!   `DECISIONS.md` D5/D6). Its state is thread-local and lock-free; every
+//!   call taking its handle from any other thread returns
+//!   [`RivetStatus::WrongThread`]. The owner must be a platform thread, not a
+//!   Java virtual thread that may migrate between carriers.
+//! - **Callback quiescence**: callbacks run synchronously on the owner thread,
+//!   so an invocation is only ever in flight on the owner's own stack. When
+//!   [`rivet_ffi_v1_unregister_event_callback`] or [`rivet_ffi_v1_shutdown`]
+//!   returns [`RivetStatus::Ok`], no affected invocation is in flight and none
+//!   will start. Unregistering a callback that is currently executing, or
+//!   shutting down a runtime from inside one of its callbacks, returns
+//!   [`RivetStatus::CallbackReentrantUnregister`] and changes nothing. A
+//!   callback unregistered mid-dispatch before its turn is skipped.
 //! - **Panic containment**: every `extern "C"` entrypoint wraps its body in
 //!   `std::panic::catch_unwind` and maps any panic to [`RivetStatus::PanicCaught`].
 

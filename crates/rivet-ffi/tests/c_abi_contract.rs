@@ -1,7 +1,8 @@
 #![allow(unsafe_code)]
 
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Barrier, Mutex, OnceLock};
+use std::sync::{Barrier, Mutex, OnceLock, mpsc};
 use std::thread;
 
 use rivet_ffi::{
@@ -359,89 +360,281 @@ fn callback_reentrant_self_unregister_returns_error_without_deadlock() {
     assert_eq!(rivet_ffi_v1_shutdown(rt.handle), RivetStatus::Ok);
 }
 
-struct QuiesceSync {
-    entered: Arc<Barrier>,
-    release: Arc<Barrier>,
-    callback_done: Arc<AtomicBool>,
+struct BlockingSync {
+    entered: Barrier,
+    release: Barrier,
+    callback_done: AtomicBool,
 }
 
-static QUIESCE_SYNC: OnceLock<Mutex<Option<QuiesceSync>>> = OnceLock::new();
+static BLOCKING_SYNC: OnceLock<BlockingSync> = OnceLock::new();
 
-extern "C" fn blocking_quiesce_callback(
+extern "C" fn blocking_callback(
     _event_kind: u32,
     _payload_ptr: *const u8,
     _payload_len: u32,
     _user_data: u64,
 ) -> i32 {
-    let sync = {
-        let guard = QUIESCE_SYNC.get().unwrap().lock().unwrap();
-        let s = guard.as_ref().unwrap();
-        (
-            Arc::clone(&s.entered),
-            Arc::clone(&s.release),
-            Arc::clone(&s.callback_done),
-        )
+    let sync = BLOCKING_SYNC.get().expect("sync initialised");
+    sync.entered.wait();
+    sync.release.wait();
+    sync.callback_done.store(true, Ordering::SeqCst);
+    RIVET_EVENT_CONTINUE
+}
+
+/// The owner thread is blocked inside a callback while two other threads try
+/// to unregister that callback and shut the runtime down concurrently. Both
+/// must be rejected with `WrongThread` without blocking or changing anything,
+/// so neither can return while the callback is still running.
+#[test]
+fn cross_thread_unregister_and_shutdown_during_blocked_callback_return_wrong_thread() {
+    let sync = BLOCKING_SYNC.get_or_init(|| BlockingSync {
+        entered: Barrier::new(2),
+        release: Barrier::new(2),
+        callback_done: AtomicBool::new(false),
+    });
+
+    let (handles_tx, handles_rx) = mpsc::channel();
+    let owner = thread::spawn(move || {
+        let rt = rivet_ffi_v1_init(RIVET_FFI_ABI_MAJOR, RIVET_FFI_ABI_MINOR);
+        assert_eq!(rt.status, RivetStatus::Ok);
+        let reg = rivet_ffi_v1_register_event_callback(rt.handle, 300, Some(blocking_callback), 0);
+        assert_eq!(reg.status, RivetStatus::Ok);
+        handles_tx
+            .send((rt.handle, reg.token))
+            .expect("send handles");
+
+        // SAFETY: empty slice.
+        let published = unsafe { rivet_ffi_v1_publish_event(rt.handle, 300, byte_view(&[])) };
+        // The callback survived the foreign unregister attempt and can be
+        // removed, and the runtime shut down, by its owner afterwards.
+        let unregistered = rivet_ffi_v1_unregister_event_callback(rt.handle, reg.token);
+        let tick = rivet_ffi_v1_tick(rt.handle);
+        let shutdown = rivet_ffi_v1_shutdown(rt.handle);
+        (published, unregistered, tick, shutdown)
+    });
+
+    let (runtime, token) = handles_rx.recv().expect("owner handles");
+    // Wait until the callback is executing on the owner thread.
+    sync.entered.wait();
+
+    let unregistrant =
+        thread::spawn(move || rivet_ffi_v1_unregister_event_callback(runtime, token));
+    let shutdowner = thread::spawn(move || rivet_ffi_v1_shutdown(runtime));
+    assert_eq!(
+        unregistrant.join().expect("unregistrant joined"),
+        RivetStatus::WrongThread
+    );
+    assert_eq!(
+        shutdowner.join().expect("shutdowner joined"),
+        RivetStatus::WrongThread
+    );
+    assert!(!sync.callback_done.load(Ordering::SeqCst));
+
+    // Every other runtime-bound entrypoint is confined too.
+    assert_eq!(rivet_ffi_v1_tick(runtime).status, RivetStatus::WrongThread);
+    assert_eq!(
+        // SAFETY: empty slice.
+        unsafe { rivet_ffi_v1_publish_event(runtime, 300, byte_view(&[])) }.status,
+        RivetStatus::WrongThread
+    );
+    assert_eq!(
+        // SAFETY: valid slice.
+        unsafe { rivet_ffi_v1_entity_spawn(runtime, 1, RivetBlockPos::default(), byte_view(b"x")) }
+            .status,
+        RivetStatus::WrongThread
+    );
+    assert_eq!(
+        rivet_ffi_v1_register_event_callback(runtime, 300, Some(counting_callback), 0).status,
+        RivetStatus::WrongThread
+    );
+
+    sync.release.wait();
+    let (published, unregistered, tick, shutdown) = owner.join().expect("owner joined");
+    assert!(sync.callback_done.load(Ordering::SeqCst));
+    assert_eq!(published.status, RivetStatus::Ok);
+    assert_eq!(published.delivered_count, 1);
+    assert_eq!(unregistered, RivetStatus::Ok);
+    assert_eq!(tick.status, RivetStatus::Ok);
+    assert_eq!(tick.tick_number, 1);
+    assert_eq!(shutdown, RivetStatus::Ok);
+
+    // Once shut down, the handle is stale from every thread.
+    assert_eq!(rivet_ffi_v1_tick(runtime).status, RivetStatus::HandleStale);
+}
+
+// Callbacks run synchronously on the owner (test) thread, so per-test state can
+// live in thread-locals.
+thread_local! {
+    static TL_RUNTIME: Cell<RivetRuntimeHandle> = const {
+        Cell::new(RivetRuntimeHandle { slot: 0, generation: 0 })
     };
-    sync.0.wait();
-    sync.1.wait();
-    sync.2.store(true, Ordering::SeqCst);
+    static TL_TOKEN: Cell<RivetCallbackToken> = const {
+        Cell::new(RivetCallbackToken { slot: 0, generation: 0 })
+    };
+    static TL_LOG: RefCell<Vec<(&'static str, RivetStatus)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn log(entry: &'static str, status: RivetStatus) {
+    TL_LOG.with_borrow_mut(|l| l.push((entry, status)));
+}
+
+extern "C" fn unregister_other_callback(_: u32, _: *const u8, _: u32, _: u64) -> i32 {
+    let status = rivet_ffi_v1_unregister_event_callback(TL_RUNTIME.get(), TL_TOKEN.get());
+    log("a", status);
+    RIVET_EVENT_CONTINUE
+}
+
+extern "C" fn logging_callback(_: u32, _: *const u8, _: u32, _: u64) -> i32 {
+    log("b", RivetStatus::Ok);
     RIVET_EVENT_CONTINUE
 }
 
 #[test]
-fn unregister_blocks_until_inflight_callback_completes_quiescence() {
-    let cell = QUIESCE_SYNC.get_or_init(|| Mutex::new(None));
-    let entered = Arc::new(Barrier::new(2));
-    let release = Arc::new(Barrier::new(2));
-    let callback_done = Arc::new(AtomicBool::new(false));
-    let unregister_done = Arc::new(AtomicBool::new(false));
-
-    *cell.lock().unwrap() = Some(QuiesceSync {
-        entered: Arc::clone(&entered),
-        release: Arc::clone(&release),
-        callback_done: Arc::clone(&callback_done),
-    });
-
+fn callback_unregistering_a_later_callback_skips_it_in_the_current_dispatch() {
+    TL_LOG.with_borrow_mut(Vec::clear);
     let rt = rivet_ffi_v1_init(RIVET_FFI_ABI_MAJOR, RIVET_FFI_ABI_MINOR);
     assert_eq!(rt.status, RivetStatus::Ok);
+    let a =
+        rivet_ffi_v1_register_event_callback(rt.handle, 400, Some(unregister_other_callback), 0);
+    let b = rivet_ffi_v1_register_event_callback(rt.handle, 400, Some(logging_callback), 0);
+    assert_eq!(a.status, RivetStatus::Ok);
+    assert_eq!(b.status, RivetStatus::Ok);
+    TL_RUNTIME.set(rt.handle);
+    TL_TOKEN.set(b.token);
 
-    let reg =
-        rivet_ffi_v1_register_event_callback(rt.handle, 300, Some(blocking_quiesce_callback), 0);
-    assert_eq!(reg.status, RivetStatus::Ok);
+    // SAFETY: empty slice.
+    let res = unsafe { rivet_ffi_v1_publish_event(rt.handle, 400, byte_view(&[])) };
+    assert_eq!(res.status, RivetStatus::Ok);
+    assert_eq!(res.delivered_count, 1);
+    assert_eq!(TL_LOG.take(), vec![("a", RivetStatus::Ok)]);
 
-    let rt_handle = rt.handle;
-    let publisher = thread::spawn(move || {
-        // SAFETY: empty slice.
-        unsafe { rivet_ffi_v1_publish_event(rt_handle, 300, byte_view(&[])) }
-    });
+    // B stays gone for later events; A now finds it already unregistered.
+    // SAFETY: empty slice.
+    let res = unsafe { rivet_ffi_v1_publish_event(rt.handle, 400, byte_view(&[])) };
+    assert_eq!(res.delivered_count, 1);
+    assert_eq!(TL_LOG.take(), vec![("a", RivetStatus::CallbackNotFound)]);
+    assert_eq!(
+        rivet_ffi_v1_unregister_event_callback(rt.handle, b.token),
+        RivetStatus::CallbackNotFound
+    );
 
-    // Wait until callback is actively executing on publisher thread.
-    entered.wait();
-
-    let token = reg.token;
-    let unreg_done_flag = Arc::clone(&unregister_done);
-    let cb_done_check = Arc::clone(&callback_done);
-    let unregistrant = thread::spawn(move || {
-        let status = rivet_ffi_v1_unregister_event_callback(rt_handle, token);
-        assert_eq!(status, RivetStatus::Ok);
-        // Must only return AFTER callback_done is true.
-        assert!(cb_done_check.load(Ordering::SeqCst));
-        unreg_done_flag.store(true, Ordering::SeqCst);
-    });
-
-    // Give unregistrant a brief window to enter the wait; it must still be blocked.
-    thread::sleep(std::time::Duration::from_millis(30));
-    assert!(!unregister_done.load(Ordering::SeqCst));
-
-    // Release the callback and verify both threads complete cleanly.
-    release.wait();
-    let pub_res = publisher.join().expect("publisher joined");
-    assert_eq!(pub_res.status, RivetStatus::Ok);
-    assert_eq!(pub_res.delivered_count, 1);
-
-    unregistrant.join().expect("unregistrant joined");
-    assert!(unregister_done.load(Ordering::SeqCst));
-
-    *cell.lock().unwrap() = None;
     assert_eq!(rivet_ffi_v1_shutdown(rt.handle), RivetStatus::Ok);
+}
+
+extern "C" fn shutdown_inside_callback(_: u32, _: *const u8, _: u32, _: u64) -> i32 {
+    log("shutdown", rivet_ffi_v1_shutdown(TL_RUNTIME.get()));
+    RIVET_EVENT_CONTINUE
+}
+
+#[test]
+fn shutdown_inside_callback_is_rejected_without_destroying_runtime() {
+    TL_LOG.with_borrow_mut(Vec::clear);
+    let rt = rivet_ffi_v1_init(RIVET_FFI_ABI_MAJOR, RIVET_FFI_ABI_MINOR);
+    assert_eq!(rt.status, RivetStatus::Ok);
+    TL_RUNTIME.set(rt.handle);
+    let reg =
+        rivet_ffi_v1_register_event_callback(rt.handle, 500, Some(shutdown_inside_callback), 0);
+    assert_eq!(reg.status, RivetStatus::Ok);
+    let other = rivet_ffi_v1_register_event_callback(rt.handle, 500, Some(logging_callback), 0);
+    assert_eq!(other.status, RivetStatus::Ok);
+
+    // SAFETY: empty slice.
+    let res = unsafe { rivet_ffi_v1_publish_event(rt.handle, 500, byte_view(&[])) };
+    assert_eq!(res.status, RivetStatus::Ok);
+    assert_eq!(res.delivered_count, 2);
+    assert_eq!(
+        TL_LOG.take(),
+        vec![
+            ("shutdown", RivetStatus::CallbackReentrantUnregister),
+            ("b", RivetStatus::Ok)
+        ]
+    );
+
+    // The runtime and both callbacks are fully intact.
+    let tick = rivet_ffi_v1_tick(rt.handle);
+    assert_eq!(tick.status, RivetStatus::Ok);
+    assert_eq!(tick.tick_number, 1);
+    assert_eq!(
+        rivet_ffi_v1_unregister_event_callback(rt.handle, reg.token),
+        RivetStatus::Ok
+    );
+    // SAFETY: empty slice.
+    let res = unsafe { rivet_ffi_v1_publish_event(rt.handle, 500, byte_view(&[])) };
+    assert_eq!(res.delivered_count, 1);
+    assert_eq!(TL_LOG.take(), vec![("b", RivetStatus::Ok)]);
+
+    assert_eq!(rivet_ffi_v1_shutdown(rt.handle), RivetStatus::Ok);
+    assert_eq!(
+        rivet_ffi_v1_tick(rt.handle).status,
+        RivetStatus::HandleStale
+    );
+}
+
+extern "C" fn outer_publishing_callback(_: u32, _: *const u8, _: u32, _: u64) -> i32 {
+    // SAFETY: empty slice.
+    let res = unsafe { rivet_ffi_v1_publish_event(TL_RUNTIME.get(), 601, byte_view(&[])) };
+    log("outer", res.status);
+    RIVET_EVENT_CONTINUE
+}
+
+extern "C" fn inner_unregister_outer_callback(_: u32, _: *const u8, _: u32, _: u64) -> i32 {
+    log(
+        "inner",
+        rivet_ffi_v1_unregister_event_callback(TL_RUNTIME.get(), TL_TOKEN.get()),
+    );
+    RIVET_EVENT_CONTINUE
+}
+
+#[test]
+fn unregister_of_callback_executing_further_up_the_stack_is_rejected() {
+    TL_LOG.with_borrow_mut(Vec::clear);
+    let rt = rivet_ffi_v1_init(RIVET_FFI_ABI_MAJOR, RIVET_FFI_ABI_MINOR);
+    assert_eq!(rt.status, RivetStatus::Ok);
+    TL_RUNTIME.set(rt.handle);
+    let outer =
+        rivet_ffi_v1_register_event_callback(rt.handle, 600, Some(outer_publishing_callback), 0);
+    let inner = rivet_ffi_v1_register_event_callback(
+        rt.handle,
+        601,
+        Some(inner_unregister_outer_callback),
+        0,
+    );
+    assert_eq!(outer.status, RivetStatus::Ok);
+    assert_eq!(inner.status, RivetStatus::Ok);
+    TL_TOKEN.set(outer.token);
+
+    // SAFETY: empty slice.
+    let res = unsafe { rivet_ffi_v1_publish_event(rt.handle, 600, byte_view(&[])) };
+    assert_eq!(res.status, RivetStatus::Ok);
+    assert_eq!(res.delivered_count, 1);
+    assert_eq!(
+        TL_LOG.take(),
+        vec![
+            ("inner", RivetStatus::CallbackReentrantUnregister),
+            ("outer", RivetStatus::Ok)
+        ]
+    );
+
+    // Outside dispatch the outer callback is quiescent and can be removed.
+    assert_eq!(
+        rivet_ffi_v1_unregister_event_callback(rt.handle, outer.token),
+        RivetStatus::Ok
+    );
+    assert_eq!(rivet_ffi_v1_shutdown(rt.handle), RivetStatus::Ok);
+}
+
+#[test]
+fn runtime_owned_by_exited_thread_is_released() {
+    let runtime = thread::spawn(|| {
+        let rt = rivet_ffi_v1_init(RIVET_FFI_ABI_MAJOR, RIVET_FFI_ABI_MINOR);
+        assert_eq!(rt.status, RivetStatus::Ok);
+        rt.handle
+    })
+    .join()
+    .expect("owner joined");
+
+    // The owner thread exited without shutting down; its slot was released and
+    // the handle is stale rather than permanently owned by a dead thread.
+    assert_eq!(rivet_ffi_v1_tick(runtime).status, RivetStatus::HandleStale);
+    assert_eq!(rivet_ffi_v1_shutdown(runtime), RivetStatus::HandleStale);
 }
