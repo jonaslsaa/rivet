@@ -139,8 +139,11 @@ FAIL_MACHETE="$SANDBOX/fail_machete"             # presence makes `machete tools
 # `--manifest-path` marker, so a single case honors FAIL_CODEGEN_TEST for the
 # two branches. Workspace-wide steps (`cargo test --workspace`,
 # `cargo nextest run --workspace`) have no `--manifest-path` and never fail.
-# The oracle steps run as `cargo run -q -p rivet-oracle -- verify` and
-# `cargo run -q -p rivet-parity -- --require-oracle`; the gate reads their exit 0
+# gate.sh passes --locked to every cargo call; `machete` is an external
+# subcommand that only accepts it in cargo's global position
+# (`cargo --locked machete ...`), so that case matches the global form.
+# The oracle steps run as `cargo run -q -p rivet-oracle --locked -- verify` and
+# `cargo run -q -p rivet-parity --locked -- --require-oracle`; the gate reads their exit 0
 # as VERIFIED, so the stub passing keeps ORACLE_UNVERIFIED clear.
 cat > "$SANDBOX/home/.cargo/bin/cargo" <<EOF
 #!/bin/bash
@@ -152,7 +155,7 @@ case " \$* " in
       exit 1
     fi
     ;;
-  " machete "*"rivet-codegen"*)
+  " --locked machete "*"rivet-codegen"*)
     if [ -f "$FAIL_MACHETE" ]; then
       echo "stub: machete found unused dep in rivet-codegen" >&2
       exit 1

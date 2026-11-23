@@ -34,6 +34,9 @@ tools/rivet-codegen/target/
 .claude/worktrees/
 .claude/settings.local.json
 
+# scripts/gate.sh work dir (per-step timing TSV) — regenerated every run
+/work/
+
 # Worktree provenance logs (serialized gate runs recorded by run_gate_closure.sh) —
 # never committed, like the oracle workdirs above.
 /logs/
