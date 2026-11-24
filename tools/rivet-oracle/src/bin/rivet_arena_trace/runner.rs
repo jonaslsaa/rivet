@@ -2,31 +2,42 @@
 //! level runtime and emits the `rivet.arena-trace/1` schema
 //! (`tools/rivet-oracle/arenas/README.md`, docs/VERIFICATION.md section 2.2).
 //!
-//! Test support, compiled only for tests and for the `arena-trace` feature the
-//! `rivet-arena-trace` tool enables. The runner owns no game logic. It builds a
-//! [`ServerLevel`] with the canonical owners the live paths require, applies
-//! the arena through `set_block_live`, and drives the `ServerLevel.tick` phases
-//! that have a Rust body, in Paper's order:
+//! The runner lives in the tool, over rivet-server's public level API, so no
+//! test support is compiled into the server library. It owns no game logic.
+//! It builds a [`ServerLevel`] with the canonical owners the live paths
+//! require, applies the arena through `set_block_live`, and drives the
+//! `ServerLevel.tick` phases that have a Rust entry point, in Paper's order:
 //!
 //! | Paper `ServerLevel.tick` phase | Here |
 //! |---|---|
 //! | clock managers (`MinecraftServer.tickChildren`), world border | `LevelClockRuntime::tick`, `tick_world_border` |
 //! | `tickTime` | `tick_world_time` |
-//! | `blockTicks.tick(.., this::tickBlock)` | `run_block_ticks_with_world`; `tickBlock` dispatches only blocks with a Rust tick body |
+//! | `blockTicks.tick(.., this::tickBlock)` | `run_block_ticks_live` (`ServerLevel::tick_block_live`) |
 //! | `fluidTicks.tick(.., this::tickFluid)` | `run_fluid_ticks_live` |
 //! | raids, `chunkSource.tick` (random ticks at speed 0, no spawning) | nothing runs in Paper either |
-//! | `runBlockEvents` | no Rust block-event queue exists: always empty |
-//! | entity ticking | no arena entity runtime: always empty |
+//! | `runBlockEvents` | `ServerLevel` has no block-event queue: no Rust path can queue one |
+//! | entity ticking | no entity owner is bound: entity admission refuses (`MissingOwner`) |
 //! | `tickBlockEntities` | `tick_block_entities` |
 //!
 //! A Rust authority that is missing or refuses (an `Unavailable` error from a
-//! live path, a block tick without a Rust body) ends the trace with an
-//! `error` line at that tick. The comparator reports it as the first
-//! divergence; nothing is substituted for the missing surface.
+//! live path, a block tick without a Rust body, an entity the runner cannot
+//! render) ends the trace with an `error` line at that tick. The comparator
+//! reports it as the first divergence; nothing is substituted for the missing
+//! surface.
 //!
 //! Inputs come from the Paper header line, which carries the arena resolved to
 //! registry ids (block-state parsing lives in Paper's `BlockStateParser`).
-use super::{
+use rivet_nbt::{
+    compound_tag::CompoundTag, string_tag::StringTag, tag::Tag, tag_parser::parse_compound_fully,
+};
+use rivet_registry::{
+    block_state::BlockState,
+    core::{BlockPos, ChunkPos},
+    fluid_id::FluidId,
+    generated::block_states::StateId,
+    identifier::Identifier,
+};
+use rivet_server::server::level::{
     ServerLevel,
     level_block_entity_runtime::{
         BlockEntityTickerError, LevelBlockEntityRuntime, NativeTickerKind,
@@ -41,15 +52,7 @@ use super::{
     world_events::NativeWorldEventHost,
     world_runtime_settings::WorldRuntimeSettings,
 };
-use crate::server::{level::ChunkMap, lighting::LiveLightRuntime};
-use rivet_nbt::{compound_tag::CompoundTag, tag::Tag, tag_parser::parse_compound_fully};
-use rivet_registry::{
-    block_state::BlockState,
-    core::{BlockPos, ChunkPos},
-    fluid_id::FluidId,
-    generated::block_states::StateId,
-    identifier::Identifier,
-};
+use rivet_server::server::{level::ChunkMap, lighting::LiveLightRuntime};
 use rivet_util::{
     RandomSource,
     mth::Uuid,
@@ -283,6 +286,46 @@ impl ArenaHeader {
     }
 }
 
+/// NBT floats and doubles as IEEE-754 bits, the probe's `normalizeFloats`
+/// (VERIFICATION 2.4): a float becomes the string `#f:0x<floatToIntBits>`, a
+/// double `#d:0x<doubleToLongBits>` (NaN canonicalized, D14), and a real string
+/// starting with `#` gains one more `#` so the mapping stays injective.
+pub fn normalize_floats(tag: &mut Tag) {
+    let replacement = match tag {
+        Tag::Float(f) => {
+            let bits = if f.value.is_nan() {
+                0x7fc0_0000
+            } else {
+                f.value.to_bits()
+            };
+            format!("#f:0x{bits:08x}")
+        }
+        Tag::Double(d) => {
+            let bits = if d.value.is_nan() {
+                0x7ff8_0000_0000_0000
+            } else {
+                d.value.to_bits()
+            };
+            format!("#d:0x{bits:016x}")
+        }
+        Tag::String(s) if s.value.starts_with('#') => format!("#{}", s.value),
+        Tag::Compound(c) => {
+            c.for_each(|_, value| normalize_floats(value));
+            return;
+        }
+        Tag::List(l) => {
+            for i in 0..l.size() {
+                let mut item = l.get(i).clone();
+                normalize_floats(&mut item);
+                l.set(i, item);
+            }
+            return;
+        }
+        _ => return,
+    };
+    *tag = Tag::String(StringTag::value_of(replacement));
+}
+
 /// `mix(seed, site, ordinal)` of the seed-injection contract.
 pub fn mix(seed: i64, site: i64, ordinal: i64) -> i64 {
     mix_stafford13(
@@ -453,13 +496,14 @@ fn build_world(
     level.install_clock_runtime(
         LevelClockRuntime::new(&overworld, false).map_err(|e| format!("clock runtime: {e:?}"))?,
     );
-    let mut environment = super::generation_environment::GenerationEnvironment::load(
-        std::path::Path::new("/nonexistent-arena-world"),
-        &overworld,
-        &rivet_world::flag::feature_flags::vanilla_set(),
-        0,
-    )
-    .map_err(|e| format!("environment: {e:?}"))?;
+    let mut environment =
+        rivet_server::server::level::generation_environment::GenerationEnvironment::load(
+            std::path::Path::new("/nonexistent-arena-world"),
+            &overworld,
+            &rivet_world::flag::feature_flags::vanilla_set(),
+            0,
+        )
+        .map_err(|e| format!("environment: {e:?}"))?;
     environment.set_spawn_mobs(false);
     level
         .install_generation_environment(environment)
@@ -498,8 +542,10 @@ fn build_world(
         }
     }
     let host = NativeWorldEventHost::start_on_current_thread(
-        Arc::new(super::structure_spawn_events::TracingStructureEventDiagnostics),
-        Arc::new(crate::server::tick::shutdown::Shutdown::new()),
+        Arc::new(
+            rivet_server::server::level::structure_spawn_events::TracingStructureEventDiagnostics,
+        ),
+        Arc::new(rivet_server::server::tick::shutdown::Shutdown::new()),
     );
     host.finish_loading();
     let services = NativeWorldServices::new(
@@ -635,13 +681,13 @@ impl Runner<'_> {
             .map_err(|e| e.to_string())
             .map_err(stop("tickTime"))?;
         let chunks = self.chunks.clone();
-        let services = &mut self.services;
         self.level
-            .run_block_ticks_with_world(
+            .run_block_ticks_live(
                 settings.max_block_ticks,
                 |pos| chunks.contains(&pos),
-                |level, pos, block| tick_block(level, pos, block, services),
+                &mut self.services,
             )
+            .map_err(|e| e.to_string())
             .map_err(stop("blockTicks"))?;
         let chunks = self.chunks.clone();
         self.level
@@ -661,7 +707,25 @@ impl Runner<'_> {
         Ok(())
     }
 
-    fn snapshot(&mut self, t: i32) -> Value {
+    /// `entities`: read from the level's entity owner. The runner binds none,
+    /// so every entity admission refuses (`MissingOwner`) and the level holds
+    /// no entity. An owner that holds one is a refusal: no Rust emitter for
+    /// the `{n,type,pos,delta,health,nbt}` row exists yet.
+    fn entities(&self) -> Result<Vec<Value>, Stop> {
+        let Some(lookup) = self.level.entity_lookup() else {
+            return Ok(Vec::new());
+        };
+        match lookup.all().next() {
+            None => Ok(Vec::new()),
+            Some(entity) => Err(stop("entities")(format!(
+                "{} at {:?} is in the arena level: the runner has no entity row emitter",
+                entity.encode_id(),
+                entity.position()
+            ))),
+        }
+    }
+
+    fn snapshot(&mut self, t: i32) -> Result<Value, Stop> {
         let h = self.header;
         let mut blocks = Vec::new();
         for y in 0..h.size[1] {
@@ -722,22 +786,19 @@ impl Runner<'_> {
                 .chunk_map()
                 .get_chunk(pos)
                 .expect("arena chunk installed");
-            for be_pos in chunk
-                .generation_base()
-                .block_entity_positions_in_source_order()
-            {
+            // Keyed by (y, z, x) below, so the map's order is not observed.
+            for (&be_pos, entity) in chunk.block_entities() {
                 if !h.contains(be_pos) {
                     continue;
                 }
-                let entity = chunk
-                    .get_block_entity(&be_pos)
-                    .expect("live order names a live entity");
                 let mut tag = entity.save_with_full_metadata();
                 for key in &self.exclusions.block_entity_nbt {
                     tag.remove(key);
                 }
+                let mut tag = Tag::Compound(tag);
+                normalize_floats(&mut tag);
                 let [x, y, z] = h.rel(be_pos);
-                now_entities.insert((y, z, x), Tag::Compound(tag).to_string());
+                now_entities.insert((y, z, x), tag.to_string());
             }
         }
         let mut changed: Vec<(i32, i32, i32)> = now_entities
@@ -765,42 +826,21 @@ impl Runner<'_> {
                 }
             }
         }
-        json!({
+        let entities = self.entities()?;
+        // `ServerLevel` has no `blockEvents` queue (`runBlockEvents`): no Rust
+        // path can queue a block event, so a Paper event is a divergence here.
+        // The port that adds the queue makes this read it.
+        let block_events: [Value; 0] = [];
+        Ok(json!({
             "kind": "tick",
             "t": t,
             "blocks": blocks,
             "block_ticks": block_ticks,
             "fluid_ticks": fluid_ticks,
-            "block_events": [],
+            "block_events": block_events,
             "block_entities": block_entities,
-            "entities": [],
-        })
-    }
-}
-
-/// `ServerLevel.tickBlock`: the scheduled block must still be there, then
-/// `BlockState.tick` dispatches to the block's own body. Only bodies that exist
-/// in Rust are dispatched; any other block is a refusal, never a no-op.
-fn tick_block(
-    level: &mut ServerLevel,
-    pos: BlockPos,
-    block: Block,
-    services: &mut Services,
-) -> Result<(), String> {
-    let state = read(level, pos);
-    if Block::new(state.block()) != block {
-        return Ok(());
-    }
-    match state.block().name() {
-        "minecraft:water" | "minecraft:lava" => level
-            .tick_liquid_block_live(pos, state, services)
-            .map_err(|e| e.to_string()),
-        "minecraft:bubble_column" => level
-            .tick_bubble_column_live(pos, state, services)
-            .map_err(|e| e.to_string()),
-        name => Err(format!(
-            "no Rust scheduled-tick body for {name} (BlockState.tick) at {pos:?}"
-        )),
+            "entities": entities,
+        }))
     }
 }
 
@@ -854,13 +894,16 @@ pub fn run(
                 message: format!("panic: {message}"),
             })
         });
-        if let Err(Stop { phase, message }) = step {
-            lines.push(
-                json!({"kind": "error", "t": t, "phase": phase, "message": message}).to_string(),
-            );
-            return Ok(lines);
+        match step.and_then(|()| runner.snapshot(t)) {
+            Ok(record) => lines.push(record.to_string()),
+            Err(Stop { phase, message }) => {
+                lines.push(
+                    json!({"kind": "error", "t": t, "phase": phase, "message": message})
+                        .to_string(),
+                );
+                return Ok(lines);
+            }
         }
-        lines.push(runner.snapshot(t).to_string());
     }
     lines.push(json!({"kind": "end", "ticks": header.ticks}).to_string());
     Ok(lines)

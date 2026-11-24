@@ -15,9 +15,10 @@
 //! missing. An arena that diverges is a FAIL result, not a harness failure.
 
 mod compare;
+mod runner;
 
 use compare::{Comparison, compare as compare_traces, tamper};
-use rivet_server::server::level::arena_trace::{self, ArenaHeader, Exclusions};
+use runner::{ArenaHeader, Exclusions};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -155,7 +156,7 @@ fn rivet_trace(paper: &str, exclusions: &Exclusions) -> Result<String, String> {
             .map_err(|e| e.to_string())?;
     let header = ArenaHeader::parse(&header)?;
     let world_defaults = read(&oracle_dir().join("fixtures/paper-world-defaults.yml"))?;
-    Ok(arena_trace::run(&header, exclusions, &world_defaults)?.join("\n") + "\n")
+    Ok(runner::run(&header, exclusions, &world_defaults)?.join("\n") + "\n")
 }
 
 struct Outcome {
@@ -394,7 +395,7 @@ fn record(names: &[String]) -> Result<(), (u8, String)> {
         }
         manifest["arenas"] = serde_json::json!({});
     }
-    manifest["schema"] = arena_trace::SCHEMA.into();
+    manifest["schema"] = runner::SCHEMA.into();
     manifest["paper_commit"] = PAPER_COMMIT.into();
     manifest["probe_sha256"] = probe.into();
     manifest["twin_identical"] = true.into();

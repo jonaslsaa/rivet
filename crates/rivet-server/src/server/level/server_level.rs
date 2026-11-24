@@ -510,7 +510,7 @@ impl ServerLevel {
         self.boot_settings = Some(settings);
     }
 
-    pub(crate) fn install_world_uuid(&mut self, uuid: rivet_util::mth::Uuid) {
+    pub fn install_world_uuid(&mut self, uuid: rivet_util::mth::Uuid) {
         assert!(
             self.world_uuid.is_none_or(|existing| existing == uuid),
             "world identity cannot change after installation"
