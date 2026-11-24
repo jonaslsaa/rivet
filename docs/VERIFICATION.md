@@ -541,6 +541,7 @@ L = several days / multiple rounds. Ordered by risk x already-ported-unverified 
   `GameplayData.java`, Rust in `tools/rivet-parity/src/ops/gameplay/` (one file per op). The corpora are
   generated from the vanilla data pack by `tools/rivet-reference-oracle/harvest_gameplay.py` into
   `fixtures/ops/corpus-src/gameplay-data.json` (1,585 recipes, 40 item tags, 1,355 loot tables, 68 trade sets)
+  and `corpus-src/block-loot-tables.json` (the 1,113 `blocks/*` loot table documents)
   and recorded with `run.sh --record`. Rust handlers exist only for what rivet-world already ports; nothing
   new was ported. Inputs Rust cannot answer are `unavailable` (declared == executed + excluded +
   unavailable, reasons in `fixtures/ops/unavailable.tsv`), never silently dropped.
@@ -552,7 +553,7 @@ L = several days / multiple rounds. Ordered by risk x already-ported-unverified 
   | `enchant.select` | 3,252 | 3,252 | 0 | 0 |
   | `effect` | 520 | 472 | 48 (#817) | 0 |
   | `scoreboard.saved_data` | 82 | 77 | 5 (#818, #819) | 0 |
-  | `loot.roll` | 21,680 | 0 | 0 | 21,680 |
+  | `loot.roll` | 21,680 | 17,502 | 306 (#825-#829) | 3,872 |
   | `trade.offers` | 1,088 | 0 | 0 | 1,088 |
 
 - `recipe.match`: all 1,585 recipes (7,928 crafting, 1,749 single-input cooking/stonecutting and 288 smithing
@@ -568,10 +569,24 @@ L = several days / multiple rounds. Ordered by risk x already-ported-unverified 
 - `scoreboard.saved_data`: `ScoreboardSaveData` codec round trip, compared in canonical SNBT with compound
   keys sorted (D12: Java fastutil hash order vs Rivet insertion order). Five documents are excluded:
   four on packed hash order (#818) and one on a duplicate team name, which Paper merges and Rivet rejects (#819).
-- `loot.roll` and `trade.offers` are recorded from Paper but have no Rust side: rivet-world holds the loot and
-  trading runtimes only, with no decoder for loot-table or villager-trade documents. Their ledger rows stay
-  `UNVERIFIED`, and `rivet-parity ops` prints them as UNPORTED without failing the status. The goldens are
-  there for the day those decoders land.
+- `loot.roll`: 1,355 tables x 16 seeds. Rust answers the 1,113 `blocks/*` tables (17,808 inputs) with
+  `rivet_world::block::drops::BlockLootTable` over `LegacyRandomSource(seed)`; a stack is compared as
+  `{count:N,id:"ID"}` (component values are not compared: none of the block cells carries a component in
+  Paper). 17,502 match and 306 are excluded as five root causes: #825 (`binomial` with a float `n`, the four
+  stem tables, 64 inputs), #826 (`entity_properties` condition, chorus_flower and snow, 32), #827
+  (`location_check` condition, tall_grass and large_fern, 32), #828 (Rust drops the zero-count stacks
+  `LootTable.getRandomItems` returns, brown/red mushroom block, chorus_plant, dead_bush and resin_clump, 50)
+  and #829 (`copy_state` on the eight copper golem statue tables: Rust emits the `block_state` component that
+  the item prototype already carries, 128). The other 242 tables (chests, entities, gameplay, fishing,
+  archaeology, shearing: 3,872 inputs) need loot functions, conditions and entity/level context that are not
+  ported: `unavailable`.
+- `trade.offers` is recorded from Paper but has no Rust side: `rivet_world::trading` has the trade value types
+  and the selection loop but no loader for the `villager_trade` and `trade_set` documents (nor the loot
+  context their providers read). Its ledger rows stay `UNVERIFIED` and `rivet-parity ops` prints the op as
+  UNPORTED without failing the status. The golden is there for the day that loader lands. It is the
+  vanilla `VillagerTrade.getOffer` result of Paper's selection loops, not Paper's full acquire path (that
+  also round-trips each offer through `CraftMerchantRecipe` and fires a Bukkit event, which need a running
+  server).
 - Oracle live context (no server boots): `GameplayData` loads the vanilla data pack through
   `ReloadableServerRegistries.reload` and the recipe manager's own `prepare`, and `LevelShell` is a
   `ServerLevel` allocated without its constructor over a proxy `ServerLevelData` (game time 0, NORMAL
@@ -585,12 +600,14 @@ L = several days / multiple rounds. Ordered by risk x already-ported-unverified 
   shell lacks the surface they need (loot: `chests/shipwreck_map`, `entities/drowned`, `entities/ender_dragon`,
   `entities/pillager`, `entities/player` and `entities/wither` for all 16 seeds, `chests/underwater_ruin_big`
   for 7 and `chests/underwater_ruin_small` for 4; trades: `cartographer/level_2`, `level_3` and `level_5`
-  for all 16 seeds). They are real Paper behaviour of the shell, not loot or trade semantics.
+  for all 16 seeds). They are answers of the oracle's level shell (no chunk source, structure search, Bukkit
+  server, raids or player entity), not Paper answers: a Rust handler for those tables needs the goldens
+  re-recorded over a fuller context first. The loot cells sit in unported tables, the trade cells in an unported op.
 - Ledger and live run (2026-11-24): `op.recipe.match`, `op.enchant.select`, `op.effect` and
-  `op.scoreboard.saved_data` are PASS on both the `.recorded` and `.live` rows, with the matched counts of the
-  table above; `op.loot.roll` and `op.trade.offers` stay `UNVERIFIED` on both. One `ops live` run against
-  Paper reproduced every recorded golden of all six ops (recorded-vs-live PASS, including the 21,680 loot and
-  1,088 trade inputs), so the loot and trade goldens are fresh even though Rust cannot answer them yet.
+  `op.scoreboard.saved_data` and `op.loot.roll` are PASS on both the `.recorded` and `.live` rows, with the
+  matched counts of the table above; `op.trade.offers` stays `UNVERIFIED` on both. One `ops live` run against
+  Paper reproduced every recorded golden of all six ops (recorded-vs-live PASS, including the 1,088 trade
+  inputs Rust cannot answer yet).
   `scripts/ledger_check.sh` is green.
 - Run: `cargo run -p rivet-parity -- ops check` (offline) or `-- ops live` (needs the Paper runtime);
   `python3 tools/rivet-reference-oracle/harvest_gameplay.py` regenerates the corpus source.
