@@ -9,6 +9,7 @@
 pub mod component_map;
 pub mod component_patch;
 pub mod component_type;
+pub mod components;
 pub mod item_id;
 pub mod item_stack;
 pub mod recursive_components;
