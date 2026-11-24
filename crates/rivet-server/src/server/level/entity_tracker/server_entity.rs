@@ -397,7 +397,7 @@ impl ServerEntity {
                     self.teleport_delay = 0;
                     packet = Some(EntityTrackerPacket::EntityPositionSync {
                         entity_id,
-                        position: entity.position(),
+                        position: current_position,
                         delta_movement: entity.delta_movement(),
                         y_rot: entity.y_rot(),
                         x_rot: entity.x_rot(),

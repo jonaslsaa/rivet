@@ -20,6 +20,9 @@ use rivet_registry::core::Vec3;
 #[derive(Debug, Clone)]
 pub struct NearbyPlayersChunk {
     pub chunk_key: i64,
+    /// Object identity of the Java `TrackedChunk` instance: a chunk removed when empty and
+    /// recreated for the same key gets a fresh identity (`lastTrackedChunk != chunk`).
+    pub identity: u64,
     pub update_count: i64,
     pub viewers: Vec<ViewerInfo>,
 }
@@ -82,7 +85,7 @@ pub struct TrackedEntity {
     range: i32,
     seen_by: IndexSet<i32>,
     last_chunk_update: i64,
-    last_tracked_chunk_key: Option<i64>,
+    last_tracked_chunk: Option<u64>,
 }
 
 impl TrackedEntity {
@@ -99,7 +102,7 @@ impl TrackedEntity {
             range,
             seen_by: IndexSet::new(),
             last_chunk_update: -1,
-            last_tracked_chunk_key: None,
+            last_tracked_chunk: None,
         }
     }
 
@@ -157,16 +160,16 @@ impl TrackedEntity {
 
         let prev_chunk_update = self.last_chunk_update;
         let curr_chunk_update = chunk.update_count;
-        let prev_chunk_key = self.last_tracked_chunk_key;
+        let prev_chunk = self.last_tracked_chunk;
         self.last_chunk_update = curr_chunk_update;
-        self.last_tracked_chunk_key = Some(chunk.chunk_key);
+        self.last_tracked_chunk = Some(chunk.identity);
 
         let effective = self.effective_range(indirect_passenger_ranges, broadcast_range_percentage);
         for viewer in &chunk.viewers {
             self.update_player_with_effective_range(entity, viewer, effective, range_y, host);
         }
 
-        if prev_chunk_update != curr_chunk_update || prev_chunk_key != Some(chunk.chunk_key) {
+        if prev_chunk_update != curr_chunk_update || prev_chunk != Some(chunk.identity) {
             let current_viewers: Vec<i32> = self.seen_by.iter().copied().collect();
             for viewer_id in current_viewers {
                 if !chunk.viewers.iter().any(|v| v.player_id == viewer_id) {
@@ -179,7 +182,7 @@ impl TrackedEntity {
     /// `ChunkMap.TrackedEntity.moonrise$clearPlayers()`.
     pub fn clear_players(&mut self, host: &mut dyn EntityTrackerHost) {
         self.last_chunk_update = -1;
-        self.last_tracked_chunk_key = None;
+        self.last_tracked_chunk = None;
         if self.seen_by.is_empty() {
             return;
         }

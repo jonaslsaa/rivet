@@ -729,6 +729,62 @@ fn riding_sends_rotation_only_and_dismount_triggers_position_sync() {
 }
 
 #[test]
+fn position_sync_uses_tracking_position() {
+    // Painting-style: trackingPosition() is the lower block corner, not position().
+    let mut entity = MockEntity::new(60);
+    entity.position = Vec3::new(10.5, 64.5, 20.5);
+    entity.tracking_position = Some(Vec3::new(10.0, 64.0, 20.0));
+    let mut tracked = TrackedEntity::new(&entity, 64, 1, true);
+    let mut host = RecordingHost::new();
+    tracked.update_player(
+        &mut entity,
+        &viewer(10, Vec3::new(10.0, 64.0, 20.0)),
+        &[],
+        100,
+        -1.0,
+        &mut host,
+    );
+    host.clear();
+    tracked.send_changes(&mut entity, 10, &mut host);
+    let pkts = host.packets_for(10);
+    assert!(
+        pkts.iter().any(|p| matches!(
+            p,
+            EntityTrackerPacket::EntityPositionSync { entity_id: 60, position, .. }
+                if *position == Vec3::new(10.0, 64.0, 20.0)
+        )),
+        "{pkts:?}"
+    );
+}
+
+#[test]
+fn moonrise_tick_purges_when_tracked_chunk_identity_changes() {
+    let mut entity = MockEntity::new(70);
+    let mut tracked = TrackedEntity::new(&entity, 64, 1, true);
+    let mut host = RecordingHost::new();
+    let chunk = |identity: u64, player: i32| NearbyPlayersChunk {
+        chunk_key: 5,
+        identity,
+        update_count: 3,
+        viewers: vec![viewer(player, Vec3::new(10.0, 64.0, 20.0))],
+    };
+    tracked.moonrise_tick(&mut entity, Some(&chunk(1, 10)), &[], 100, -1.0, &mut host);
+    assert_eq!(tracked.seen_by_vec(), vec![10]);
+
+    // Same key and updateCount, but a recreated TrackedChunk with a different viewer.
+    tracked.moonrise_tick(&mut entity, Some(&chunk(2, 11)), &[], 100, -1.0, &mut host);
+    assert_eq!(tracked.seen_by_vec(), vec![11]);
+
+    // Same identity and updateCount: no purge pass (viewer 11 stays even if absent).
+    let same = NearbyPlayersChunk {
+        viewers: vec![viewer(12, Vec3::new(10.0, 64.0, 20.0))],
+        ..chunk(2, 11)
+    };
+    tracked.moonrise_tick(&mut entity, Some(&same), &[], 100, -1.0, &mut host);
+    assert!(tracked.seen_by_vec().contains(&11));
+}
+
+#[test]
 fn new_minecart_emits_dirty_data_before_move_minecart() {
     let mut cart = MockEntity::new(77);
     cart.living = false;
