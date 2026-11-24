@@ -14,6 +14,7 @@ pub mod facades;
 pub mod handle;
 pub mod lifecycle;
 pub mod scheduler;
+pub mod smoke_plugin;
 pub mod version;
 
 pub use commands::{
@@ -40,5 +41,9 @@ pub use lifecycle::{
 };
 pub use scheduler::{
     ScheduleError, SyncScheduler, TaskContext, TaskHandle, TaskMarker, TaskPanic, TickReport,
+};
+pub use smoke_plugin::{
+    SmokeAcceptanceReport, SmokeBlockPlaceEvent, SmokePlugin, SmokeTelemetry, SmokeWorldOutcome,
+    run_native_smoke_acceptance,
 };
 pub use version::{ApiVersion, Capability, CapabilitySet, LoadingMode, NegotiationError};
