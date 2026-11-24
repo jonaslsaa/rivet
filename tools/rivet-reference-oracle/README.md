@@ -33,13 +33,26 @@ The tool currently supports:
   unregistered id, a decode failure or a `DecoderException` is an input
   rejection. Paper's `GlobalConfiguration` is initialised with defaults first.
 
+- `damage.calc`, `damage_source.scaling`, `food.exhaustion`, `xp.curves` — the pure
+  entity ops (VERIFICATION item 9), implemented in `src/EntityOps.java` (every `src/*.java`
+  is compiled, and the manifest pins each one beside the main file). Floats travel as
+  `0x`+8 hex digits in requests and results. `damage.calc`: `{fn:"after_absorb", damage,
+  armor, toughness}` and `{fn:"after_magic_absorb", damage, protection}` run
+  `CombatRules` (no weapon, so no victim is read), `{fn:"type", damage_type}` answers the
+  vanilla damage type definition and its tags. The other three run the real Paper
+  methods (`Player.hurtServer` scaling, `FoodData.tick/eat/addExhaustion`,
+  `ServerPlayer.giveExperiencePoints/Levels`) on entities allocated without their
+  constructor; the exact harness contract (what the level, health, events and sounds
+  answer) is the class comment of `EntityOps.java`, and the Rust twin in
+  `tools/rivet-parity/src/ops/entity.rs` reproduces it.
+
 Registry loading logs to stdout, so the first `codec.reencode`/`packet.reencode`
 request silences log4j until the registries are ready (live mode speaks JSON
 Lines on that stream). `harvest_datapack.py` extracts `codec.reencode` seeds
 from the vanilla data pack in the Paper jar into `fixtures/ops/corpus-src/`.
 
-All seven operations live in one op registry (`OPS` in
-`RivetReferenceOracle.java`). Each op declares its result-key order (the
+All eleven operations live in one op registry (`OPS` in
+`RivetReferenceOracle.java`, the entity ones contributed by `EntityOps.java`). Each op declares its result-key order (the
 canonical-JSON contract: results are re-emitted in exactly that order, an
 undeclared key or a raw floating-point number is an `unavailable` fault — floats
 travel as IEEE-754 bit hex via `f32Bits`/`f64Bits`, with human decimals only in

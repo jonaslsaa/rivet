@@ -483,6 +483,31 @@ OP_SURFACES = {
          "net.minecraft.world.item.component.Consumable", "net.minecraft.util.valueproviders.IntProviders",
          "net.minecraft.world.level.levelgen.structure.templatesystem.RuleTest",
          "net.minecraft.world.level.levelgen.synth.NormalNoise", "net.minecraft.network.chat.ComponentSerialization"]),
+    # Pure entity ops (VERIFICATION item 9): handlers in tools/rivet-parity/src/ops/entity.rs.
+    "damage.calc": (
+        ["crates/rivet-server/src/world/damagesource/combat_rules.rs",
+         "crates/rivet-server/src/world/damagesource/damage_type.rs"],
+        ["net.minecraft.world.damagesource.CombatRules", "net.minecraft.world.damagesource.DamageType",
+         "net.minecraft.world.damagesource.DamageTypes", "net.minecraft.tags.DamageTypeTags"]),
+    "damage_source.scaling": (
+        ["crates/rivet-server/src/world/damagesource/combat_rules.rs",
+         "crates/rivet-server/src/world/damagesource/damage_source.rs",
+         "crates/rivet-server/src/world/damagesource/damage_type.rs"],
+        ["net.minecraft.world.damagesource.DamageSource", "net.minecraft.world.damagesource.DamageScaling",
+         "net.minecraft.world.entity.player.Player"]),
+    "food.exhaustion": (
+        ["crates/rivet-server/src/world/food/food_constants.rs",
+         "crates/rivet-server/src/world/food/food_data.rs",
+         "crates/rivet-server/src/world/food/food_properties.rs",
+         "crates/rivet-server/src/world/entity/player/survival/mod.rs",
+         "crates/rivet-util/src/mth.rs"],
+        ["net.minecraft.world.food.FoodData", "net.minecraft.world.food.FoodConstants",
+         "net.minecraft.world.food.FoodProperties", "net.minecraft.world.entity.player.Player"]),
+    "xp.curves": (
+        ["crates/rivet-server/src/world/entity/player/survival/experience.rs",
+         "crates/rivet-server/src/world/entity/player/survival/mod.rs",
+         "crates/rivet-util/src/mth.rs"],
+        ["net.minecraft.world.entity.player.Player", "net.minecraft.server.level.ServerPlayer"]),
 }
 
 
