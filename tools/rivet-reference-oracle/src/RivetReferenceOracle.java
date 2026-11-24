@@ -8,6 +8,9 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.JsonParseException;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
+import com.mojang.serialization.Codec;
+import com.mojang.serialization.DataResult;
+import com.mojang.serialization.DynamicOps;
 import com.mojang.serialization.JsonOps;
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
@@ -40,7 +43,22 @@ import net.minecraft.nbt.NbtOps;
 import net.minecraft.nbt.SnbtPrinterTagVisitor;
 import net.minecraft.nbt.Tag;
 import net.minecraft.nbt.TagParser;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufUtil;
+import io.netty.buffer.Unpooled;
 import net.minecraft.SharedConstants;
+import net.minecraft.core.RegistryAccess;
+import net.minecraft.network.ProtocolInfo;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.network.VarInt;
+import net.minecraft.network.protocol.Packet;
+import net.minecraft.network.protocol.configuration.ConfigurationProtocols;
+import net.minecraft.network.protocol.game.GameProtocols;
+import net.minecraft.network.protocol.handshake.HandshakeProtocols;
+import net.minecraft.network.protocol.login.LoginProtocols;
+import net.minecraft.network.protocol.status.StatusProtocols;
+import net.minecraft.resources.RegistryOps;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.ComponentSerialization;
 import net.minecraft.server.Bootstrap;
@@ -134,6 +152,27 @@ public final class RivetReferenceOracle {
             List.of("accept", "canonical"),
             (request, dec) -> componentJson(requiredString(request, "input")),
             error -> false
+        ));
+        // `codec.reencode`: decode a JSON value (or SNBT) with a named vanilla
+        // codec under RegistryOps over the server's frozen registries, then
+        // re-encode. A decline is a successful `accept:false` result naming the
+        // phase, like `component.json`; only a malformed SNBT input is a
+        // rejection verdict.
+        register(ops, new Op(
+            "codec.reencode",
+            List.of("accept", "phase", "canonical"),
+            (request, dec) -> codecReencode(request, dec),
+            error -> error instanceof CommandSyntaxException
+        ));
+        // `packet.reencode`: look the packet up by protocol phase, direction
+        // and id in the real ProtocolInfo, decode the body, re-encode it.
+        // Any exception while decoding or encoding the supplied bytes is the
+        // verdict "Paper rejects this packet"; a bad request is unavailable.
+        register(ops, new Op(
+            "packet.reencode",
+            List.of("name", "body"),
+            (request, dec) -> packetReencode(request),
+            error -> error instanceof PacketRejection
         ));
         return Collections.unmodifiableMap(ops);
     }
@@ -488,6 +527,449 @@ public final class RivetReferenceOracle {
         return result;
     }
 
+    // ---- the named codec table ----------------------------------------------
+
+    /** Every codec Rivet has ported, keyed by the name `rivet-parity`'s Rust handler table uses. */
+    private static final class CodecTable {
+        private static Map<String, Codec<?>> build() {
+            Map<String, Codec<?>> codecs = new LinkedHashMap<>();
+            codecs.put("ItemStack.CODEC", net.minecraft.world.item.ItemStack.CODEC);
+            codecs.put("ItemStack.OPTIONAL_CODEC", net.minecraft.world.item.ItemStack.OPTIONAL_CODEC);
+            codecs.put("DataComponentPatch.CODEC", net.minecraft.core.component.DataComponentPatch.CODEC);
+            codecs.put("DataComponentMap.CODEC", net.minecraft.core.component.DataComponentMap.CODEC);
+            codecs.put("ItemStackTemplate.CODEC", net.minecraft.world.item.ItemStackTemplate.CODEC);
+            codecs.put("ItemContainerContents.CODEC", net.minecraft.world.item.component.ItemContainerContents.CODEC);
+            codecs.put("BundleContents.CODEC", net.minecraft.world.item.component.BundleContents.CODEC);
+            codecs.put("ChargedProjectiles.CODEC", net.minecraft.world.item.component.ChargedProjectiles.CODEC);
+            codecs.put("FoodProperties.DIRECT_CODEC", net.minecraft.world.food.FoodProperties.DIRECT_CODEC);
+            codecs.put("ItemUseAnimation.CODEC", net.minecraft.world.item.ItemUseAnimation.CODEC);
+            codecs.put("ConsumeEffect.CODEC", net.minecraft.world.item.consume_effects.ConsumeEffect.CODEC);
+            codecs.put("Consumable.CODEC", net.minecraft.world.item.component.Consumable.CODEC);
+            codecs.put("DeathProtection.CODEC", net.minecraft.world.item.component.DeathProtection.CODEC);
+            codecs.put("SuspiciousStewEffects.CODEC", net.minecraft.world.item.component.SuspiciousStewEffects.CODEC);
+            codecs.put("UseCooldown.CODEC", net.minecraft.world.item.component.UseCooldown.CODEC);
+            codecs.put("UseEffects.CODEC", net.minecraft.world.item.component.UseEffects.CODEC);
+            codecs.put("UseRemainder.CODEC", net.minecraft.world.item.component.UseRemainder.CODEC);
+            codecs.put("OminousBottleAmplifier.CODEC", net.minecraft.world.item.component.OminousBottleAmplifier.CODEC);
+            codecs.put("BlockState.CODEC", net.minecraft.world.level.block.state.BlockState.CODEC);
+            codecs.put("IntProviders.CODEC", net.minecraft.util.valueproviders.IntProviders.CODEC);
+            codecs.put("FloatProviders.CODEC", net.minecraft.util.valueproviders.FloatProviders.CODEC);
+            codecs.put("TextColor.CODEC", net.minecraft.network.chat.TextColor.CODEC);
+            codecs.put("ComponentSerialization.CODEC", net.minecraft.network.chat.ComponentSerialization.CODEC);
+            codecs.put("Xoroshiro128PlusPlus.CODEC", net.minecraft.world.level.levelgen.Xoroshiro128PlusPlus.CODEC);
+            codecs.put("UUIDUtil.CODEC", net.minecraft.core.UUIDUtil.CODEC);
+            codecs.put("Identifier.CODEC", net.minecraft.resources.Identifier.CODEC);
+            codecs.put("BlockPos.CODEC", net.minecraft.core.BlockPos.CODEC);
+            codecs.put("GlobalPos.CODEC", net.minecraft.core.GlobalPos.CODEC);
+            codecs.put("Rotations.CODEC", net.minecraft.core.Rotations.CODEC);
+            codecs.put("Direction.CODEC", net.minecraft.core.Direction.CODEC);
+            codecs.put("Difficulty.CODEC", net.minecraft.world.Difficulty.CODEC);
+            codecs.put("GameType.CODEC", net.minecraft.world.level.GameType.CODEC);
+            codecs.put("Heightmap.Types.CODEC", net.minecraft.world.level.levelgen.Heightmap.Types.CODEC);
+            codecs.put("LiquidSettings.CODEC", net.minecraft.world.level.levelgen.structure.templatesystem.LiquidSettings.CODEC);
+            codecs.put("HeightProvider.CODEC", net.minecraft.world.level.levelgen.heightproviders.HeightProvider.CODEC);
+            codecs.put("VerticalAnchor.CODEC", net.minecraft.world.level.levelgen.VerticalAnchor.CODEC);
+            codecs.put("GeodeCrackSettings.CODEC", net.minecraft.world.level.levelgen.GeodeCrackSettings.CODEC);
+            codecs.put("GeodeLayerSettings.CODEC", net.minecraft.world.level.levelgen.GeodeLayerSettings.CODEC);
+            codecs.put("CarverDebugSettings.CODEC", net.minecraft.world.level.levelgen.carver.CarverDebugSettings.CODEC);
+            codecs.put("MobEffectInstance.CODEC", net.minecraft.world.effect.MobEffectInstance.CODEC);
+            codecs.put("FeatureSize.CODEC", net.minecraft.world.level.levelgen.feature.featuresize.FeatureSize.CODEC);
+            codecs.put("RuleTest.CODEC", net.minecraft.world.level.levelgen.structure.templatesystem.RuleTest.CODEC);
+            codecs.put("PosRuleTest.CODEC", net.minecraft.world.level.levelgen.structure.templatesystem.PosRuleTest.CODEC);
+            codecs.put("RuleBlockEntityModifier.CODEC", net.minecraft.world.level.levelgen.structure.templatesystem.rule.blockentity.RuleBlockEntityModifier.CODEC);
+            codecs.put("ProcessorRule.CODEC", net.minecraft.world.level.levelgen.structure.templatesystem.ProcessorRule.CODEC);
+            codecs.put("NormalNoise.NoiseParameters.DIRECT_CODEC", net.minecraft.world.level.levelgen.synth.NormalNoise.NoiseParameters.DIRECT_CODEC);
+            codecs.put("WorldPreset.DIRECT_CODEC", net.minecraft.world.level.levelgen.presets.WorldPreset.DIRECT_CODEC);
+            codecs.put("DataPackConfig.CODEC", net.minecraft.world.level.DataPackConfig.CODEC);
+            codecs.put("WorldDataConfiguration.CODEC", net.minecraft.world.level.WorldDataConfiguration.CODEC);
+            codecs.put("FeatureFlags.CODEC", net.minecraft.world.flag.FeatureFlags.CODEC);
+            codecs.put("WorldBorder.CODEC", net.minecraft.world.level.border.WorldBorder.CODEC);
+            codecs.put("WorldBorder.Settings.CODEC", net.minecraft.world.level.border.WorldBorder.Settings.CODEC);
+            codecs.put("WeatherData.CODEC", net.minecraft.world.level.saveddata.WeatherData.CODEC);
+            codecs.put("WanderingTraderData.CODEC", net.minecraft.world.level.saveddata.WanderingTraderData.CODEC);
+            codecs.put("LevelSettings.DifficultySettings.CODEC", net.minecraft.world.level.LevelSettings.DifficultySettings.CODEC);
+            codecs.put("LevelData.RespawnData.CODEC", net.minecraft.world.level.storage.LevelData.RespawnData.CODEC);
+            codecs.put("BlendingData.Packed.CODEC", net.minecraft.world.level.levelgen.blending.BlendingData.Packed.CODEC);
+            codecs.put("NoiseSettings.CODEC", net.minecraft.world.level.levelgen.NoiseSettings.CODEC);
+            codecs.put("ObjectiveCriteria.RenderType.CODEC", net.minecraft.world.scores.criteria.ObjectiveCriteria.RenderType.CODEC);
+            codecs.put("ObjectiveCriteria.CODEC", net.minecraft.world.scores.criteria.ObjectiveCriteria.CODEC);
+            codecs.put("DisplaySlot.CODEC", net.minecraft.world.scores.DisplaySlot.CODEC);
+            codecs.put("NumberFormatTypes.CODEC", net.minecraft.network.chat.numbers.NumberFormatTypes.CODEC);
+            codecs.put("Objective.Packed.CODEC", net.minecraft.world.scores.Objective.Packed.CODEC);
+            codecs.put("ScoreboardSaveData.Packed.CODEC", net.minecraft.world.scores.ScoreboardSaveData.Packed.CODEC);
+            codecs.put("Scoreboard.PackedScore.CODEC", net.minecraft.world.scores.Scoreboard.PackedScore.CODEC);
+            codecs.put("Team.Visibility.CODEC", net.minecraft.world.scores.Team.Visibility.CODEC);
+            codecs.put("Team.CollisionRule.CODEC", net.minecraft.world.scores.Team.CollisionRule.CODEC);
+            codecs.put("PlayerTeam.Packed.CODEC", net.minecraft.world.scores.PlayerTeam.Packed.CODEC);
+            codecs.put("TeamColor.CODEC", net.minecraft.world.scores.TeamColor.CODEC);
+            codecs.put("Biome.Precipitation.CODEC", net.minecraft.world.level.biome.Biome.Precipitation.CODEC);
+            codecs.put("Biome.TemperatureModifier.CODEC", net.minecraft.world.level.biome.Biome.TemperatureModifier.CODEC);
+            codecs.put("BiomeSpecialEffects.CODEC", net.minecraft.world.level.biome.BiomeSpecialEffects.CODEC);
+            codecs.put("BiomeSpecialEffects.GrassColorModifier.CODEC", net.minecraft.world.level.biome.BiomeSpecialEffects.GrassColorModifier.CODEC);
+            codecs.put("Climate.Parameter.CODEC", net.minecraft.world.level.biome.Climate.Parameter.CODEC);
+            codecs.put("Climate.ParameterPoint.CODEC", net.minecraft.world.level.biome.Climate.ParameterPoint.CODEC);
+            codecs.put("MobSpawnSettings.MobSpawnCost.CODEC", net.minecraft.world.level.biome.MobSpawnSettings.MobSpawnCost.CODEC);
+            codecs.put("MultiNoiseBiomeSourceParameterList.Preset.CODEC", net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterList.Preset.CODEC);
+            codecs.put("TickPriority.CODEC", net.minecraft.world.ticks.TickPriority.CODEC);
+            codecs.put("MobCategory.CODEC", net.minecraft.world.entity.MobCategory.CODEC);
+            codecs.put("GenerationStep.Decoration.CODEC", net.minecraft.world.level.levelgen.GenerationStep.Decoration.CODEC);
+            codecs.put("RarityFilter.CODEC", net.minecraft.world.level.levelgen.placement.RarityFilter.CODEC.codec());
+            codecs.put("HeightRangePlacement.CODEC", net.minecraft.world.level.levelgen.placement.HeightRangePlacement.CODEC.codec());
+            codecs.put("CountOnEveryLayerPlacement.CODEC", net.minecraft.world.level.levelgen.placement.CountOnEveryLayerPlacement.CODEC.codec());
+            codecs.put("FixedPlacement.CODEC", net.minecraft.world.level.levelgen.placement.FixedPlacement.CODEC.codec());
+            codecs.put("SurfaceWaterDepthFilter.CODEC", net.minecraft.world.level.levelgen.placement.SurfaceWaterDepthFilter.CODEC.codec());
+            codecs.put("CaveSurface.CODEC", net.minecraft.world.level.levelgen.placement.CaveSurface.CODEC);
+            codecs.put("InSquarePlacement.CODEC", net.minecraft.world.level.levelgen.placement.InSquarePlacement.CODEC.codec());
+            codecs.put("HeightmapPlacement.CODEC", net.minecraft.world.level.levelgen.placement.HeightmapPlacement.CODEC.codec());
+            codecs.put("RandomOffsetPlacement.CODEC", net.minecraft.world.level.levelgen.placement.RandomOffsetPlacement.CODEC.codec());
+            codecs.put("SurfaceRelativeThresholdFilter.CODEC", net.minecraft.world.level.levelgen.placement.SurfaceRelativeThresholdFilter.CODEC.codec());
+            codecs.put("CanyonCarverConfiguration.CanyonShapeConfiguration.CODEC", net.minecraft.world.level.levelgen.carver.CanyonCarverConfiguration.CanyonShapeConfiguration.CODEC);
+            codecs.put("FoliagePlacer.CODEC", net.minecraft.world.level.levelgen.feature.foliageplacers.FoliagePlacer.CODEC);
+            codecs.put("CountConfiguration.CODEC", net.minecraft.world.level.levelgen.feature.configurations.CountConfiguration.CODEC);
+            codecs.put("BlockStateConfiguration.CODEC", net.minecraft.world.level.levelgen.feature.configurations.BlockStateConfiguration.CODEC);
+            codecs.put("LayerConfiguration.CODEC", net.minecraft.world.level.levelgen.feature.configurations.LayerConfiguration.CODEC);
+            codecs.put("DeltaFeatureConfiguration.CODEC", net.minecraft.world.level.levelgen.feature.configurations.DeltaFeatureConfiguration.CODEC);
+            codecs.put("ReplaceSphereConfiguration.CODEC", net.minecraft.world.level.levelgen.feature.configurations.ReplaceSphereConfiguration.CODEC);
+            codecs.put("NoneFeatureConfiguration.CODEC", net.minecraft.world.level.levelgen.feature.configurations.NoneFeatureConfiguration.CODEC);
+            codecs.put("ColumnFeatureConfiguration.CODEC", net.minecraft.world.level.levelgen.feature.configurations.ColumnFeatureConfiguration.CODEC);
+            codecs.put("UnderwaterMagmaConfiguration.CODEC", net.minecraft.world.level.levelgen.feature.configurations.UnderwaterMagmaConfiguration.CODEC);
+            codecs.put("ItemLore.CODEC", net.minecraft.world.item.component.ItemLore.CODEC);
+            codecs.put("CustomModelData.CODEC", net.minecraft.world.item.component.CustomModelData.CODEC);
+            codecs.put("DyedItemColor.CODEC", net.minecraft.world.item.component.DyedItemColor.CODEC);
+            codecs.put("MapItemColor.CODEC", net.minecraft.world.item.component.MapItemColor.CODEC);
+            codecs.put("FireworkExplosion.CODEC", net.minecraft.world.item.component.FireworkExplosion.CODEC);
+            codecs.put("Fireworks.CODEC", net.minecraft.world.item.component.Fireworks.CODEC);
+            codecs.put("WritableBookContent.CODEC", net.minecraft.world.item.component.WritableBookContent.CODEC);
+            codecs.put("BlockItemStateProperties.CODEC", net.minecraft.world.item.component.BlockItemStateProperties.CODEC);
+            codecs.put("CustomData.CODEC", net.minecraft.world.item.component.CustomData.CODEC);
+            codecs.put("AttackRange.CODEC", net.minecraft.world.item.component.AttackRange.CODEC);
+            codecs.put("SwingAnimation.CODEC", net.minecraft.world.item.component.SwingAnimation.CODEC);
+            codecs.put("Weapon.CODEC", net.minecraft.world.item.component.Weapon.CODEC);
+            codecs.put("OreConfiguration.CODEC", net.minecraft.world.level.levelgen.feature.configurations.OreConfiguration.CODEC);
+            codecs.put("ReplaceBlockConfiguration.CODEC", net.minecraft.world.level.levelgen.feature.configurations.ReplaceBlockConfiguration.CODEC);
+            codecs.put("EndSpikeConfiguration.CODEC", net.minecraft.world.level.levelgen.feature.configurations.EndSpikeConfiguration.CODEC);
+            codecs.put("EndSpikeFeature.EndSpike.CODEC", net.minecraft.world.level.levelgen.feature.EndSpikeFeature.EndSpike.CODEC);
+            codecs.put("TwistingVinesConfig.CODEC", net.minecraft.world.level.levelgen.feature.configurations.TwistingVinesConfig.CODEC);
+            codecs.put("SculkPatchConfiguration.CODEC", net.minecraft.world.level.levelgen.feature.configurations.SculkPatchConfiguration.CODEC);
+            codecs.put("ProbabilityFeatureConfiguration.CODEC", net.minecraft.world.level.levelgen.feature.configurations.ProbabilityFeatureConfiguration.CODEC);
+            codecs.put("EndGatewayConfiguration.CODEC", net.minecraft.world.level.levelgen.feature.configurations.EndGatewayConfiguration.CODEC);
+            codecs.put("WorldOptions.CODEC", net.minecraft.world.level.levelgen.WorldOptions.CODEC.codec());
+            codecs.put("BelowZeroRetrogen.CODEC", net.minecraft.world.level.levelgen.BelowZeroRetrogen.CODEC);
+            codecs.put("WrittenBookContent.CODEC", net.minecraft.world.item.component.WrittenBookContent.CODEC);
+            codecs.put("LodestoneTracker.CODEC", net.minecraft.world.item.component.LodestoneTracker.CODEC);
+            codecs.put("SeededContainerLoot.CODEC", net.minecraft.world.item.component.SeededContainerLoot.CODEC);
+            codecs.put("TooltipDisplay.CODEC", net.minecraft.world.item.component.TooltipDisplay.CODEC);
+            codecs.put("Enchantable.CODEC", net.minecraft.world.item.enchantment.Enchantable.CODEC);
+            codecs.put("BlocksAttacks.ItemDamageFunction.CODEC", net.minecraft.world.item.component.BlocksAttacks.ItemDamageFunction.CODEC);
+            codecs.put("KineticWeapon.Condition.CODEC", net.minecraft.world.item.component.KineticWeapon.Condition.CODEC);
+            codecs.put("CountPlacement.CODEC", net.minecraft.world.level.levelgen.placement.CountPlacement.CODEC.codec());
+            codecs.put("NoiseBasedCountPlacement.CODEC", net.minecraft.world.level.levelgen.placement.NoiseBasedCountPlacement.CODEC.codec());
+            codecs.put("NoiseThresholdCountPlacement.CODEC", net.minecraft.world.level.levelgen.placement.NoiseThresholdCountPlacement.CODEC.codec());
+            codecs.put("BiomeFilter.CODEC", net.minecraft.world.level.levelgen.placement.BiomeFilter.CODEC.codec());
+            codecs.put("FontDescription.CODEC", net.minecraft.network.chat.FontDescription.CODEC);
+            codecs.put("Tool.CODEC", net.minecraft.world.item.component.Tool.CODEC);
+            codecs.put("Tool.Rule.CODEC", net.minecraft.world.item.component.Tool.Rule.CODEC);
+            codecs.put("Repairable.CODEC", net.minecraft.world.item.enchantment.Repairable.CODEC);
+            codecs.put("BlocksAttacks.CODEC", net.minecraft.world.item.component.BlocksAttacks.CODEC);
+            codecs.put("BlocksAttacks.DamageReduction.CODEC", net.minecraft.world.item.component.BlocksAttacks.DamageReduction.CODEC);
+            codecs.put("DamageResistant.CODEC", net.minecraft.world.item.component.DamageResistant.CODEC);
+            codecs.put("KineticWeapon.CODEC", net.minecraft.world.item.component.KineticWeapon.CODEC);
+            codecs.put("PiercingWeapon.CODEC", net.minecraft.world.item.component.PiercingWeapon.CODEC);
+            codecs.put("SwingAnimationType.CODEC", net.minecraft.world.item.SwingAnimationType.CODEC);
+            codecs.put("MapDecorations.CODEC", net.minecraft.world.item.component.MapDecorations.CODEC);
+            codecs.put("MapDecorations.Entry.CODEC", net.minecraft.world.item.component.MapDecorations.Entry.CODEC);
+            codecs.put("ItemAttributeModifiers.CODEC", net.minecraft.world.item.component.ItemAttributeModifiers.CODEC);
+            codecs.put("ItemAttributeModifiers.Entry.CODEC", net.minecraft.world.item.component.ItemAttributeModifiers.Entry.CODEC);
+            codecs.put("FireworkExplosion.Shape.CODEC", net.minecraft.world.item.component.FireworkExplosion.Shape.CODEC);
+            codecs.put("InstrumentComponent.CODEC", net.minecraft.world.item.component.InstrumentComponent.CODEC);
+            codecs.put("Instrument.DIRECT_CODEC", net.minecraft.world.item.Instrument.DIRECT_CODEC);
+            codecs.put("TrimMaterial.DIRECT_CODEC", net.minecraft.world.item.equipment.trim.TrimMaterial.DIRECT_CODEC);
+            codecs.put("ProvidesTrimMaterial.CODEC", net.minecraft.world.item.component.ProvidesTrimMaterial.CODEC);
+            codecs.put("SulfurCubeContent.CODEC", net.minecraft.world.item.component.SulfurCubeContent.CODEC);
+            codecs.put("IntProviders.NON_NEGATIVE_CODEC", net.minecraft.util.valueproviders.IntProviders.NON_NEGATIVE_CODEC);
+            codecs.put("IntProviders.POSITIVE_CODEC", net.minecraft.util.valueproviders.IntProviders.POSITIVE_CODEC);
+            codecs.put("Direction.Axis.CODEC", net.minecraft.core.Direction.Axis.CODEC);
+            codecs.put("Biome.NETWORK_CODEC", net.minecraft.world.level.biome.Biome.NETWORK_CODEC);
+            return Collections.unmodifiableMap(codecs);
+        }
+    }
+
+    // ---- registries ------------------------------------------------------
+
+    /**
+     * The server's frozen registries, loaded the way {@code WorldLoader} does it
+     * from the vanilla data pack: static registries plus the worldgen layer.
+     * Initialized on first use so ops that need no registry never pay for it.
+     */
+    private static final class ServerRegistries {
+        /**
+         * Loading logs to the process's stdout ("Found new data pack ...");
+         * live mode speaks JSON Lines on that stream, so logging is switched
+         * off until the registries and Paper's configuration are ready.
+         */
+        private static final org.apache.logging.log4j.Level LOG_LEVEL = org.apache.logging.log4j.LogManager.getRootLogger().getLevel();
+
+        static {
+            org.apache.logging.log4j.core.config.Configurator.setRootLevel(org.apache.logging.log4j.Level.OFF);
+        }
+
+        static final RegistryAccess ACCESS = load();
+
+        static {
+            // Paper's packets read GlobalConfiguration (data sanitization,
+            // packet limiter): initialize it with its defaults, as a first
+            // start writes them, into a scratch directory.
+            try {
+                java.nio.file.Path scratch = Files.createTempDirectory("rivet-paper-config");
+                new io.papermc.paper.configuration.PaperConfigurations(scratch).initializeGlobalConfiguration(ACCESS);
+                // `anticheat.obfuscation.items` is only built by a running
+                // MinecraftServer (its binding reads the server's registries),
+                // and the packets read it for data sanitization. The op wants
+                // the pure codec behaviour, so install the section with an
+                // allocated binding whose level is NONE: nothing is obfuscated.
+                var obfuscation = io.papermc.paper.configuration.GlobalConfiguration.get().anticheat.obfuscation;
+                if (obfuscation.items == null) {
+                    obfuscation.items = obfuscation.new Items();
+                    var unsafeField = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+                    unsafeField.setAccessible(true);
+                    var unsafe = (sun.misc.Unsafe) unsafeField.get(null);
+                    var bindingClass = io.papermc.paper.util.sanitizer.ItemObfuscationBinding.class;
+                    var binding = unsafe.allocateInstance(bindingClass);
+                    unsafe.putObject(binding, unsafe.objectFieldOffset(bindingClass.getDeclaredField("level")),
+                        io.papermc.paper.util.sanitizer.ItemObfuscationSession.ObfuscationLevel.NONE);
+                    obfuscation.items.binding = (io.papermc.paper.util.sanitizer.ItemObfuscationBinding) binding;
+                }
+            } catch (Exception error) {
+                throw new IllegalStateException("cannot initialize Paper's global configuration", error);
+            } finally {
+                org.apache.logging.log4j.core.config.Configurator.setRootLevel(LOG_LEVEL);
+            }
+        }
+
+        private static RegistryAccess load() {
+            try {
+                var packs = net.minecraft.server.packs.repository.ServerPacksSource.createVanillaTrustedRepository();
+                net.minecraft.server.MinecraftServer.configurePackRepository(
+                    packs, net.minecraft.world.level.WorldDataConfiguration.DEFAULT, true, false
+                );
+                try (var resources = new net.minecraft.server.packs.resources.MultiPackResourceManager(
+                    net.minecraft.server.packs.PackType.SERVER_DATA, packs.openAllSelected()
+                )) {
+                    var layers = net.minecraft.server.RegistryLayer.createRegistryAccess();
+                    var pending = net.minecraft.tags.TagLoader.loadTagsForExistingRegistries(
+                        resources, layers.getLayer(net.minecraft.server.RegistryLayer.STATIC)
+                    );
+                    var lookups = net.minecraft.tags.TagLoader.buildUpdatedLookups(
+                        layers.getAccessForLoading(net.minecraft.server.RegistryLayer.WORLDGEN), pending
+                    );
+                    pending.forEach(tags -> tags.apply());
+                    var worldgen = net.minecraft.resources.RegistryDataLoader.load(
+                        resources, lookups, net.minecraft.resources.RegistryDataLoader.WORLDGEN_REGISTRIES, Runnable::run
+                    ).join();
+                    var access = layers.replaceFrom(net.minecraft.server.RegistryLayer.WORLDGEN, worldgen).compositeAccess().freeze();
+                    // ReloadableServerResources: bind every item's prototype components.
+                    net.minecraft.core.registries.BuiltInRegistries.DATA_COMPONENT_INITIALIZERS.build(access)
+                        .forEach(net.minecraft.core.component.DataComponentInitializers.PendingComponents::apply);
+                    return access;
+                }
+            } catch (Exception error) {
+                throw new IllegalStateException("cannot load the vanilla registries", error);
+            }
+        }
+    }
+
+    // ---- codec.reencode ---------------------------------------------------
+
+    /** The named codec table: every codec Rivet has ported, by the name the Rust handler table uses. */
+    private static final Map<String, Codec<?>> CODECS = CodecTable.build();
+
+    @SuppressWarnings("unchecked")
+    private static JsonObject codecReencode(final JsonObject request, final JsonObject dec) throws Exception {
+        String name = requiredString(request, "codec");
+        String opsName = requiredString(request, "ops");
+        Codec<Object> codec = (Codec<Object>) CODECS.get(name);
+        if (codec == null) {
+            throw new IllegalArgumentException("unknown codec: " + name);
+        }
+        JsonObject result = new JsonObject();
+        switch (opsName) {
+            case "json" -> {
+                JsonElement input = request.get("input");
+                if (input == null) {
+                    throw new IllegalArgumentException("property 'input' is required");
+                }
+                DynamicOps<JsonElement> ops = RegistryOps.create(JsonOps.INSTANCE, ServerRegistries.ACCESS);
+                reencode(codec, ops, input, GSON::toJson, result, dec);
+            }
+            case "nbt" -> {
+                Tag input = SNBT_PARSER.parseFully(requiredString(request, "input"));
+                DynamicOps<Tag> ops = RegistryOps.create(NbtOps.INSTANCE, ServerRegistries.ACCESS);
+                reencode(codec, ops, input, Tag::toString, result, dec);
+            }
+            default -> throw new IllegalArgumentException("unknown ops: " + opsName);
+        }
+        return result;
+    }
+
+    /**
+     * Decode then re-encode. A DataResult error, or an exception thrown by the
+     * codec's own code, declines the input at that phase; the canonical form is
+     * the encoder's output rendered compactly.
+     */
+    private static <T> void reencode(
+        final Codec<Object> codec, final DynamicOps<T> ops, final T input,
+        final java.util.function.Function<T, String> render, final JsonObject result, final JsonObject dec
+    ) {
+        Object value;
+        try {
+            DataResult<Object> decoded = codec.parse(ops, input);
+            if (decoded.result().isEmpty()) {
+                decline(result, "decode");
+                dec.addProperty("error", decoded.error().map(DataResult.Error::message).orElse(""));
+                return;
+            }
+            value = decoded.result().get();
+        } catch (RuntimeException error) {
+            decline(result, "decode");
+            dec.addProperty("thrown", error.toString());
+            return;
+        }
+        try {
+            DataResult<T> encoded = codec.encodeStart(ops, value);
+            if (encoded.result().isEmpty()) {
+                decline(result, "encode");
+                dec.addProperty("error", encoded.error().map(DataResult.Error::message).orElse(""));
+                return;
+            }
+            result.addProperty("accept", true);
+            result.addProperty("canonical", render.apply(encoded.result().get()));
+        } catch (RuntimeException error) {
+            decline(result, "encode");
+            dec.addProperty("thrown", error.toString());
+        }
+    }
+
+    private static void decline(final JsonObject result, final String phase) {
+        result.addProperty("accept", false);
+        result.addProperty("phase", phase);
+    }
+
+    // ---- packet.reencode --------------------------------------------------
+
+    /** Paper rejected the supplied packet bytes (any exception while decoding or encoding them). */
+    private static final class PacketRejection extends Exception {
+        PacketRejection(final Throwable cause) {
+            super(chain(cause), cause);
+        }
+
+        /** The exception and its causes, outermost first, for the recorded (never compared) detail. */
+        private static String chain(final Throwable error) {
+            StringBuilder text = new StringBuilder();
+            for (Throwable current = error; current != null && text.length() < 600; current = current.getCause()) {
+                if (text.length() > 0) {
+                    text.append(" <- ");
+                }
+                text.append(current.getClass().getName()).append(": ").append(current.getMessage());
+            }
+            return text.toString();
+        }
+    }
+
+    private static final Map<String, ProtocolInfo<?>> PROTOCOLS = new java.util.HashMap<>();
+
+    private static synchronized ProtocolInfo<?> protocolInfo(final String state, final String direction) {
+        String key = state + "/" + direction;
+        ProtocolInfo<?> cached = PROTOCOLS.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        boolean clientbound = switch (direction) {
+            case "clientbound" -> true;
+            case "serverbound" -> false;
+            default -> throw new IllegalArgumentException("unknown direction: " + direction);
+        };
+        ProtocolInfo<?> info = switch (state) {
+            case "handshake" -> {
+                if (clientbound) {
+                    throw new IllegalArgumentException("handshake has no clientbound protocol");
+                }
+                yield HandshakeProtocols.SERVERBOUND;
+            }
+            case "status" -> clientbound ? StatusProtocols.CLIENTBOUND : StatusProtocols.SERVERBOUND;
+            case "login" -> clientbound ? LoginProtocols.CLIENTBOUND : LoginProtocols.SERVERBOUND;
+            case "configuration" -> clientbound ? ConfigurationProtocols.CLIENTBOUND : ConfigurationProtocols.SERVERBOUND;
+            case "play" -> {
+                var decorator = RegistryFriendlyByteBuf.decorator(ServerRegistries.ACCESS);
+                yield clientbound
+                    ? GameProtocols.CLIENTBOUND_TEMPLATE.bind(decorator)
+                    : GameProtocols.SERVERBOUND_TEMPLATE.bind(decorator, () -> true);
+            }
+            default -> throw new IllegalArgumentException("unknown state: " + state);
+        };
+        PROTOCOLS.put(key, info);
+        return info;
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static JsonObject packetReencode(final JsonObject request) throws Exception {
+        String state = requiredString(request, "state");
+        String direction = requiredString(request, "direction");
+        JsonElement idElement = request.get("packet_id");
+        if (idElement == null || !idElement.isJsonPrimitive() || !idElement.getAsJsonPrimitive().isNumber()) {
+            throw new IllegalArgumentException("property 'packet_id' must be a number");
+        }
+        int id = idElement.getAsInt();
+        byte[] body;
+        try {
+            body = HexFormat.of().parseHex(requiredString(request, "body"));
+        } catch (IllegalArgumentException error) {
+            throw new IllegalArgumentException("property 'body' must be hex: " + error.getMessage());
+        }
+        ProtocolInfo info = protocolInfo(state, direction);
+
+        ByteBuf input = Unpooled.buffer();
+        VarInt.write(input, id);
+        input.writeBytes(body);
+        int prefix = input.readableBytes() - body.length;
+        Packet<?> packet;
+        byte[] encoded;
+        try {
+            packet = (Packet<?>) info.codec().decode(input);
+            if (input.isReadable()) {
+                // PacketDecoder: "was larger than I expected, found N bytes extra"
+                throw new IOException("packet " + packet.type() + " has " + input.readableBytes() + " bytes extra");
+            }
+            ByteBuf output = Unpooled.buffer();
+            info.codec().encode(output, packet);
+            encoded = ByteBufUtil.getBytes(output);
+        } catch (Exception | OutOfMemoryError error) {
+            // A hostile length prefix can make Paper's trusted (unlimited) NBT
+            // reader allocate past the heap: Paper cannot decode that packet.
+            // A NullPointerException that names Paper's global configuration or
+            // the (absent) MinecraftServer is a fault in the oracle's own setup,
+            // never a verdict; any other NPE is Paper failing on the packet.
+            for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+                if (cause instanceof NullPointerException
+                    && cause.getMessage() != null
+                    && (cause.getMessage().contains("GlobalConfiguration") || cause.getMessage().contains("MinecraftServer"))) {
+                    throw error instanceof Exception exception ? exception : new IllegalStateException(error);
+                }
+            }
+            throw new PacketRejection(error);
+        }
+        ByteBuf expectedPrefix = Unpooled.buffer();
+        VarInt.write(expectedPrefix, id);
+        if (encoded.length < prefix || !java.util.Arrays.equals(
+            java.util.Arrays.copyOf(encoded, prefix), ByteBufUtil.getBytes(expectedPrefix)
+        )) {
+            throw new IllegalStateException("encoded packet does not carry packet id " + id);
+        }
+        JsonObject result = new JsonObject();
+        result.addProperty("name", packet.type().id().toString());
+        result.addProperty("body", HexFormat.of().formatHex(encoded, prefix, encoded.length));
+        return result;
+    }
+
     private static JsonObject describeTag(final Tag tag) {
         JsonObject result = new JsonObject();
         result.addProperty("tag_id", tag.getId());
@@ -544,6 +1026,14 @@ public final class RivetReferenceOracle {
         details.addProperty("operation", operation);
         details.addProperty("type", error.getClass().getName());
         details.addProperty("message", error.getMessage());
+        if (error.getCause() != null) {
+            // Diagnostics only: the causes behind a wrapped exception.
+            StringBuilder causes = new StringBuilder();
+            for (Throwable cause = error.getCause(); cause != null && causes.length() < 600; cause = cause.getCause()) {
+                causes.append(causes.length() > 0 ? " <- " : "").append(cause.getClass().getName()).append(": ").append(cause.getMessage());
+            }
+            details.addProperty("cause", causes.toString());
+        }
 
         JsonObject response = response(id);
         response.addProperty("ok", false);

@@ -39,6 +39,18 @@ pub fn handler(op: &str) -> Option<Handler> {
         "snbt.parse" => Some(snbt_parse),
         "nbt.decode" => Some(nbt_decode),
         "component.json" => Some(component_json),
+        "packet.reencode" => Some(super::packet::packet_reencode),
+        "codec.reencode" => Some(super::codec::codec_reencode),
+        _ => None,
+    }
+}
+
+/// The scoreboard subject of one corpus input: the ported Rust type it
+/// exercises (a packet struct, a codec), for per-subject tallies.
+pub fn subject(op: &str, request: &Map<String, Value>) -> Option<String> {
+    match op {
+        "packet.reencode" => super::packet::subject_of(request),
+        "codec.reencode" => super::codec::subject_of(request),
         _ => None,
     }
 }

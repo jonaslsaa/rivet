@@ -53,6 +53,12 @@ pub struct Closure {
     pub executed: usize,
     pub matched: usize,
     pub mismatched: usize,
+    /// Inputs a committed, issue-linked exclusion took out of the comparison
+    /// (a known divergence left unfixed by the verification change). They are
+    /// declared but never executed on the Rust side (`executed` counts only
+    /// the inputs that ran, so `matched + mismatched == executed` and
+    /// `executed + excluded == declared`), and are always reported.
+    pub excluded: usize,
 }
 
 impl Closure {
@@ -68,7 +74,7 @@ impl Closure {
         if self.executed == 0 {
             return Status::Unverified;
         }
-        if self.executed != self.declared {
+        if self.executed + self.excluded != self.declared {
             return Status::Fail;
         }
         if !negative_detected {
@@ -84,7 +90,11 @@ impl fmt::Display for Closure {
             f,
             "declared={} executed={} matched={} mismatched={}",
             self.declared, self.executed, self.matched, self.mismatched
-        )
+        )?;
+        if self.excluded > 0 {
+            write!(f, " excluded={}", self.excluded)?;
+        }
+        Ok(())
     }
 }
 
@@ -98,6 +108,7 @@ mod tests {
             executed,
             matched,
             mismatched,
+            excluded: 0,
         }
     }
 
@@ -131,6 +142,38 @@ mod tests {
     #[test]
     fn inconsistent_accounting_fails() {
         assert_eq!(closure(5, 5, 3, 0).status(true), Status::Fail);
+    }
+
+    #[test]
+    fn excluded_inputs_close_the_accounting_without_counting_as_executed() {
+        let excluded = Closure {
+            declared: 5,
+            executed: 3,
+            matched: 3,
+            mismatched: 0,
+            excluded: 2,
+        };
+        assert_eq!(excluded.status(true), Status::Pass);
+        assert!(excluded.to_string().ends_with("excluded=2"));
+        // An exclusion never hides a mismatch or a dropped input.
+        assert_eq!(
+            Closure {
+                mismatched: 1,
+                matched: 2,
+                ..excluded
+            }
+            .status(true),
+            Status::Fail
+        );
+        assert_eq!(
+            Closure {
+                executed: 2,
+                matched: 2,
+                ..excluded
+            }
+            .status(true),
+            Status::Fail
+        );
     }
 
     #[test]

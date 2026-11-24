@@ -107,6 +107,17 @@ class ValidateTest(unittest.TestCase):
         self.assertTrue(vl.validate(render(row(), row())))  # duplicate id
 
 
+    def test_op_row_counts_must_add_up_to_the_corpus_minus_exclusions(self):
+        excluded = vl.op_excluded_counts().get("codec.reencode", 0)
+        self.assertGreater(excluded, 0)
+        ok = row(id="op.codec.reencode.recorded", corpus_n=str(1000 + excluded), status="PASS",
+                 matched="1000", mismatched="0", last_verified_commit="abc")
+        self.assertEqual(vl.validate(render(ok)), [])
+        stale = dict(ok, matched="990")
+        errs = vl.validate(render(stale))
+        self.assertTrue(any("re-record the row" in e for e in errs), errs)
+
+
 class CorpusTest(unittest.TestCase):
     def test_json_records(self):
         self.assertEqual(vl.json_records([1, 2, 3]), 3)
