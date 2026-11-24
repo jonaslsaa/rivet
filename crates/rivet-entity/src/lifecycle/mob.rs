@@ -28,8 +28,6 @@ pub const MOB_FLAG_AGGRESSIVE: u8 = 4;
 
 /// Default ambient sound interval (`Mob#getAmbientSoundInterval()` = 80).
 pub const DEFAULT_AMBIENT_SOUND_INTERVAL: i32 = 80;
-/// Hard despawn distance squared (`MobCategory#getDespawnDistance()` = 128, squared).
-pub const HARD_DESPAWN_DISTANCE_SQR: f64 = 128.0 * 128.0;
 /// Soft despawn distance squared (`MobCategory#getNoDespawnDistance()` = 32, squared).
 pub const SOFT_DESPAWN_DISTANCE_SQR: f64 = 32.0 * 32.0;
 /// Paper `Mob#getMaxHeadYRot()` default.
@@ -334,9 +332,12 @@ impl Mob {
         let dx_sqr = (player_pos.x - pos.x) * (player_pos.x - pos.x);
         let dz_sqr = (player_pos.z - pos.z) * (player_pos.z - pos.z);
 
+        // DespawnRange#preComputed: Math.pow(MobCategory#getDespawnDistance(), 2)
+        let hard_distance = f64::from(self.living.entity.entity_type.despawn_distance);
+        let hard_distance_sqr = hard_distance * hard_distance;
         let mut discarded = false;
         // DespawnRange#shouldDespawn(ELLIPSOID): dxSqr + dzSqr + dySqr * 1.0 > limitSqr
-        if dx_sqr + dz_sqr + dy_sqr > HARD_DESPAWN_DISTANCE_SQR {
+        if dx_sqr + dz_sqr + dy_sqr > hard_distance_sqr {
             discarded |= self.discard_for_despawn(ctx);
         }
 

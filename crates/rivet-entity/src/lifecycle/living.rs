@@ -12,6 +12,7 @@ use crate::damage::DEATH_REMOVAL_TICKS;
 use crate::storage::EntityRemovalReason;
 use rivet_registry::core::{BlockPos, Vec3};
 use rivet_util::mth;
+use rivet_util::random::RandomSource;
 
 /// Paper `LivingEntity.LIVING_ENTITY_FLAG_IS_USING`.
 pub const LIVING_ENTITY_FLAG_IS_USING: u8 = 1;
@@ -77,6 +78,9 @@ impl LivingEntity {
         let mut entity = Entity::new(id, entity_type, random_seed);
         entity.is_living = true;
         entity.reapply_position();
+        // setYRot(this.random.nextFloat() * (float) (Math.PI * 2)); yHeadRot = getYRot()
+        entity.y_rot = entity.random.next_float() * (std::f64::consts::PI * 2.0) as f32;
+        let y_head_rot = entity.y_rot;
         Self {
             entity,
             living_flags: 0,
@@ -90,7 +94,7 @@ impl LivingEntity {
             o_attack_anim: 0.0,
             y_body_rot: 0.0,
             y_body_rot_o: 0.0,
-            y_head_rot: 0.0,
+            y_head_rot,
             y_head_rot_o: 0.0,
             no_jump_delay: 0,
             fall_fly_ticks: 0,

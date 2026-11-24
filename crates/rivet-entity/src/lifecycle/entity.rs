@@ -43,10 +43,14 @@ pub struct EntityTypeMeta {
     pub dismounts_underwater: bool,
     pub is_player: bool,
     pub is_boat: bool,
+    /// Whether the type's entity class extends `Animal` (`passenger instanceof Animal`).
+    pub is_animal: bool,
     /// Membership in `EntityTypeTags.NON_CONTROLLING_RIDER` (`Entity#canControlVehicle()`).
     pub non_controlling_rider: bool,
     /// Paper configurable entity despawn time (`Entity.despawnTime`; `-1` disables).
     pub despawn_time: i32,
+    /// `MobCategory#getDespawnDistance()` of the type's category (`128`; `64` for `WATER_AMBIENT`).
+    pub despawn_distance: i32,
     /// Maximum number of passengers accepted by default (`1` in `Entity#canAddPassenger`).
     pub max_passengers: usize,
 }
@@ -75,8 +79,10 @@ impl EntityTypeMeta {
             dismounts_underwater,
             is_player: false,
             is_boat: false,
+            is_animal: false,
             non_controlling_rider,
             despawn_time: -1,
+            despawn_distance: 128,
             max_passengers: 1,
         }
     }
@@ -511,17 +517,42 @@ impl Entity {
     /// Paper `Entity#canAddPassenger(Entity)`.
     #[must_use]
     pub fn can_add_passenger(&self) -> bool {
+        // AbstractBoat#canAddPassenger also requires `!isEyeInFluid(FluidTags.WATER)`.
         self.passengers.len() < self.entity_type.max_passengers
+            && !(self.entity_type.is_boat && self.eye_in_water)
     }
 
-    /// Paper `Entity#getPassengerRidingPosition(Entity)` using `EntityAttachment.PASSENGER`.
+    /// Paper `Entity#getPassengerRidingPosition(Entity)`:
+    /// `position().add(getPassengerAttachmentPoint(passenger, dimensions, 1.0F))`, with the
+    /// `AbstractBoat#getPassengerAttachmentPoint` override for boats.
     #[must_use]
-    pub fn passenger_riding_position(&self, passenger_index: i32) -> Vec3 {
-        let attachment = self.dimensions.attachments.get_clamped(
-            EntityAttachment::Passenger,
-            passenger_index,
-            self.y_rot,
-        );
+    pub fn passenger_riding_position(
+        &self,
+        passenger_index: i32,
+        passenger_is_animal: bool,
+    ) -> Vec3 {
+        let attachment = if self.entity_type.is_boat {
+            // Boat#rideHeight = dimensions.height() / 3.0F
+            let ride_height = f64::from(self.dimensions.height / 3.0_f32);
+            let mut offset = 0.0_f32;
+            if self.passengers.len() > 1 {
+                offset = if passenger_index == 0 { 0.2 } else { -0.6 };
+                if passenger_is_animal {
+                    offset += 0.2;
+                }
+            }
+            let angle = -self.y_rot * mth::DEG_TO_RAD;
+            let cos = f64::from(mth::cos(f64::from(angle)));
+            let sin = f64::from(mth::sin(f64::from(angle)));
+            let z = f64::from(offset);
+            Vec3::new(z * sin, ride_height, z * cos)
+        } else {
+            self.dimensions.attachments.get_clamped(
+                EntityAttachment::Passenger,
+                passenger_index,
+                self.y_rot,
+            )
+        };
         Vec3::new(
             self.pos.x + attachment.x,
             self.pos.y + attachment.y,
@@ -665,10 +696,7 @@ impl Entity {
         if !ctx.void_damage_enabled {
             return;
         }
-        let threshold = f64::from(
-            ctx.min_y
-                .wrapping_add(ctx.void_damage_min_build_height_offset),
-        );
+        let threshold = f64::from(ctx.min_y) + ctx.void_damage_min_build_height_offset;
         if self.pos.y < threshold {
             ctx.record_event(LifecycleEvent::BelowWorld { id: self.id });
             on_below_world(self, ctx);

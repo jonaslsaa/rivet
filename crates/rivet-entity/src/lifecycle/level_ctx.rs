@@ -10,7 +10,7 @@ use crate::damage::Difficulty;
 use crate::storage::{EntityRemovalReason, NetworkIdAllocator};
 use indexmap::IndexMap;
 use rivet_registry::core::{BlockPos, Vec3};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Unified entity node stored in `LevelCtx` preserving Paper's inheritance hierarchy
 /// via struct embedding (`Entity` <- `LivingEntity` <- `Mob`).
@@ -254,7 +254,7 @@ pub struct LevelCtx {
     pub difficulty: Difficulty,
     pub min_y: i32,
     pub void_damage_enabled: bool,
-    pub void_damage_min_build_height_offset: i32,
+    pub void_damage_min_build_height_offset: f64,
     /// `CraftWorld#getVoidDamageAmount()` (Paper world config default `4.0`).
     pub void_damage_amount: f32,
     pub nearest_player_pos: Option<Vec3>,
@@ -269,6 +269,9 @@ pub struct LevelCtx {
     /// Removed entities whose storage slot is dropped at the next purge point. Purging is
     /// deferred so an entity discarded by `checkDespawn` still receives its tick, as in Paper.
     purge_queue: Vec<i32>,
+    /// Removal reasons of purged entities that still have a `vehicle` (and are thus still listed
+    /// by it), so `Entity#removeVehicle` can gate `ENTITY_DISMOUNT` on the reason as in Paper.
+    purged_riders: HashMap<i32, Option<EntityRemovalReason>>,
 }
 
 impl Default for LevelCtx {
@@ -290,7 +293,7 @@ impl LevelCtx {
             difficulty: Difficulty::Normal,
             min_y: -64,
             void_damage_enabled: true,
-            void_damage_min_build_height_offset: -64,
+            void_damage_min_build_height_offset: -64.0,
             void_damage_amount: 4.0,
             nearest_player_pos: None,
             section_update_lock: HashSet::new(),
@@ -298,6 +301,7 @@ impl LevelCtx {
             cancel_dismount: false,
             events: Vec::new(),
             purge_queue: Vec::new(),
+            purged_riders: HashMap::new(),
         }
     }
 
@@ -889,12 +893,21 @@ impl LevelCtx {
         let Some(v) = self.get_mut(vehicle_id) else {
             return;
         };
-        if Self::vehicle_remove_passenger(cancel_dismount, v.entity_mut(), passenger_id, false) {
-            self.record_event(LifecycleEvent::Dismount {
-                passenger_id,
-                vehicle_id,
-            });
+        let removed =
+            Self::vehicle_remove_passenger(cancel_dismount, v.entity_mut(), passenger_id, false);
+        self.record_purged_rider_dismount(passenger_id, vehicle_id, removed);
+    }
+
+    /// `Entity#removeVehicle` tail for a purged passenger: the dismount game event is gated on the
+    /// removal reason remembered at purge time, whether or not the dismount was cancelled.
+    fn record_purged_rider_dismount(&mut self, passenger_id: i32, vehicle_id: i32, removed: bool) {
+        let removal_reason = if removed {
+            self.purged_riders.remove(&passenger_id)
+        } else {
+            self.purged_riders.get(&passenger_id).copied()
         }
+        .flatten();
+        self.record_dismount(passenger_id, vehicle_id, removal_reason);
     }
 
     /// Paper `Entity#setRemoved`: `getPassengers().forEach(Entity::stopRiding)` for a
@@ -905,13 +918,13 @@ impl LevelCtx {
                 Some(p) => p.entity().vehicle,
                 None => {
                     let cancel_dismount = self.cancel_dismount;
-                    if Self::vehicle_remove_passenger(cancel_dismount, vehicle, passenger_id, false)
-                    {
-                        self.record_event(LifecycleEvent::Dismount {
-                            passenger_id,
-                            vehicle_id: vehicle.id,
-                        });
-                    }
+                    let removed = Self::vehicle_remove_passenger(
+                        cancel_dismount,
+                        vehicle,
+                        passenger_id,
+                        false,
+                    );
+                    self.record_purged_rider_dismount(passenger_id, vehicle.id, removed);
                     continue;
                 }
             };
@@ -960,8 +973,11 @@ impl LevelCtx {
         for id in queue {
             if self.taken_ids.contains(&id) {
                 self.purge_queue.push(id);
-            } else {
-                self.entities.shift_remove(&id);
+            } else if let Some(Some(entity)) = self.entities.shift_remove(&id) {
+                let entity = entity.entity();
+                if entity.vehicle.is_some() {
+                    self.purged_riders.insert(id, entity.removal_reason);
+                }
             }
         }
     }
@@ -975,7 +991,7 @@ impl LevelCtx {
         let Some(idx) = ve.passengers.iter().position(|&pid| pid == passenger.id) else {
             return;
         };
-        let riding_pos = ve.passenger_riding_position(idx as i32);
+        let riding_pos = ve.passenger_riding_position(idx as i32, passenger.entity_type.is_animal);
         let attach = passenger.vehicle_attachment_point();
         let new_pos = Vec3::new(
             riding_pos.x - attach.x,

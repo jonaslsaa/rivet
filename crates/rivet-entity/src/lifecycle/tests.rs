@@ -7,7 +7,9 @@ use crate::storage::{Aabb, EntityRemovalReason};
 use rivet_registry::core::{BlockPos, Vec3};
 
 fn pig_meta() -> EntityTypeMeta {
-    EntityTypeMeta::new("minecraft:pig", 0.9, 0.9)
+    let mut meta = EntityTypeMeta::new("minecraft:pig", 0.9, 0.9);
+    meta.is_animal = true;
+    meta
 }
 
 fn zombie_meta() -> EntityTypeMeta {
@@ -421,10 +423,11 @@ fn multi_level_passenger_traversal_and_position_rider() {
         vec![(boat_id, false), (pig_id, true), (player_id, true)]
     );
 
-    // Pig was positioned on top of boat (y = 64.0 + boat height 0.5625)
+    // Pig was positioned at AbstractBoat#getPassengerAttachmentPoint: y = 64.0 + rideHeight
+    // (boat height 0.5625F / 3.0F)
     let pig_pos = ctx.get(pig_id).unwrap().entity().pos;
     assert!((pig_pos.x - 10.0).abs() < 1e-6);
-    assert!((pig_pos.y - (64.0 + f64::from(0.5625_f32))).abs() < 1e-6);
+    assert!((pig_pos.y - (64.0 + f64::from(0.5625_f32 / 3.0_f32))).abs() < 1e-6);
     assert!((pig_pos.z - 20.0).abs() < 1e-6);
 
     // Player was positioned on top of pig (y = pig_pos.y + pig height 0.9), minus the player
@@ -1326,4 +1329,93 @@ fn start_riding_accepts_removed_vehicle_and_unleashes_mob() {
     let mob = ctx.get(mob_id).unwrap().mob().unwrap();
     assert!(!mob.leashed);
     assert_eq!(mob.living.entity.vehicle, Some(boat_id));
+}
+
+#[test]
+fn purged_rider_dismount_event_is_gated_on_remembered_removal_reason() {
+    // Non-destroying reason: Paper's stopRiding() emits no ENTITY_DISMOUNT.
+    let mut ctx = LevelCtx::new();
+    let boat = ctx.next_entity_id();
+    let pig = ctx.next_entity_id();
+    ctx.add_entity(LifecycleEntity::Base(Entity::new(
+        boat,
+        EntityTypeMeta::boat(),
+        1,
+    )));
+    ctx.add_entity(LifecycleEntity::Mob(Mob::new(pig, pig_meta(), 10.0, 2)));
+    assert!(ctx.start_riding(pig, boat, false, false));
+    assert!(ctx.remove_entity(pig, EntityRemovalReason::UnloadedToChunk));
+    ctx.take_events();
+    ctx.tick_all(true);
+    assert!(
+        !ctx.take_events()
+            .iter()
+            .any(|e| matches!(e, LifecycleEvent::Dismount { .. }))
+    );
+
+    // Cancelled dismount of a destroyed passenger still emits the event on every tick.
+    let mut ctx = LevelCtx::new();
+    let boat = ctx.next_entity_id();
+    let pig = ctx.next_entity_id();
+    ctx.add_entity(LifecycleEntity::Base(Entity::new(
+        boat,
+        EntityTypeMeta::boat(),
+        1,
+    )));
+    ctx.add_entity(LifecycleEntity::Mob(Mob::new(pig, pig_meta(), 10.0, 2)));
+    assert!(ctx.start_riding(pig, boat, false, false));
+    ctx.cancel_dismount = true;
+    assert!(ctx.remove_entity(pig, EntityRemovalReason::Discarded));
+    for _ in 0..2 {
+        ctx.take_events();
+        ctx.tick_all(true);
+        let count = ctx
+            .take_events()
+            .iter()
+            .filter(|e| matches!(e, LifecycleEvent::Dismount { .. }))
+            .count();
+        assert_eq!(count, 1);
+    }
+}
+
+#[test]
+fn boat_rejects_passenger_while_eye_in_water() {
+    let mut boat = Entity::new(1, EntityTypeMeta::boat(), 1);
+    assert!(boat.can_add_passenger());
+    boat.eye_in_water = true;
+    assert!(!boat.can_add_passenger());
+}
+
+#[test]
+fn boat_two_passenger_attachment_offsets() {
+    let mut boat = Entity::new(1, EntityTypeMeta::boat(), 1);
+    boat.passengers = vec![2, 3];
+    let first = boat.passenger_riding_position(0, true);
+    let second = boat.passenger_riding_position(1, false);
+    assert!((first.z - f64::from(0.2_f32 + 0.2_f32)).abs() < 1e-6);
+    assert!((second.z - f64::from(-0.6_f32)).abs() < 1e-6);
+    assert!((first.y - f64::from(0.5625_f32 / 3.0_f32)).abs() < 1e-6);
+}
+
+#[test]
+fn water_ambient_hard_despawns_at_64_blocks() {
+    let mut ctx = LevelCtx::new();
+    ctx.nearest_player_pos = Some(Vec3::new(0.0, 0.0, 0.0));
+    let mut meta = EntityTypeMeta::new("minecraft:cod", 0.5, 0.3);
+    meta.despawn_distance = 64;
+    let id = ctx.next_entity_id();
+    let mut mob = Mob::new(id, meta, 3.0, 1);
+    mob.living.entity.set_pos(100.0, 0.0, 0.0);
+    assert!(mob.check_despawn(&mut ctx));
+}
+
+#[test]
+fn fractional_void_offset_is_double() {
+    let mut ctx = LevelCtx::new();
+    ctx.void_damage_min_build_height_offset = -64.5;
+    let mut e = Entity::new(1, pig_meta(), 1);
+    e.set_pos(0.0, f64::from(ctx.min_y) - 64.25, 0.0);
+    ctx.take_events();
+    e.check_below_world(&mut ctx, |_, _| {});
+    assert!(ctx.take_events().is_empty());
 }
