@@ -47,6 +47,8 @@ pub struct EntityTypeMeta {
     pub is_animal: bool,
     /// Membership in `EntityTypeTags.NON_CONTROLLING_RIDER` (`Entity#canControlVehicle()`).
     pub non_controlling_rider: bool,
+    /// Membership in `EntityTypeTags.CAN_TURN_IN_BOATS` (`AbstractBoat#positionRider`).
+    pub can_turn_in_boats: bool,
     /// Paper configurable entity despawn time (`Entity.despawnTime`; `-1` disables).
     pub despawn_time: i32,
     /// `MobCategory#getDespawnDistance()` of the type's category (`128`; `64` for `WATER_AMBIENT`).
@@ -64,12 +66,14 @@ fn entity_type_in_tag(tag: &str, type_id: &str) -> bool {
 
 impl EntityTypeMeta {
     /// Creates a standard mob/entity type metadata with Paper defaults. Tag memberships
-    /// (`dismounts_underwater`, `non_controlling_rider`) are read from the vanilla tag data.
+    /// (`dismounts_underwater`, `non_controlling_rider`, `can_turn_in_boats`) are read from the
+    /// vanilla tag data.
     #[must_use]
     pub fn new(type_id: impl Into<String>, width: f32, height: f32) -> Self {
         let type_id = type_id.into();
         let dismounts_underwater = entity_type_in_tag("minecraft:dismounts_underwater", &type_id);
         let non_controlling_rider = entity_type_in_tag("minecraft:non_controlling_rider", &type_id);
+        let can_turn_in_boats = entity_type_in_tag("minecraft:can_turn_in_boats", &type_id);
         Self {
             type_id,
             dimensions: EntityDimensions::scalable(width, height),
@@ -81,6 +85,7 @@ impl EntityTypeMeta {
             is_boat: false,
             is_animal: false,
             non_controlling_rider,
+            can_turn_in_boats,
             despawn_time: -1,
             despawn_distance: 128,
             max_passengers: 1,
@@ -118,6 +123,55 @@ impl EntityTypeMeta {
         let mut meta = Self::new(type_id, width, height);
         meta.allowed_in_peaceful = false;
         meta
+    }
+}
+
+/// `LivingEntity` rotation state behind the virtual `Entity#getYHeadRot()` /
+/// `setYHeadRot(float)` / `setYBodyRot(float)`, borrowed next to the embedded [`Entity`].
+///
+/// A base `Entity` has none: `getYHeadRot()` is `0.0F` and both setters are no-ops.
+pub struct HeadBodyRot<'a> {
+    living: Option<(&'a mut f32, &'a mut f32)>,
+}
+
+impl<'a> HeadBodyRot<'a> {
+    /// Rotation view of a base (non-living) `Entity`.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self { living: None }
+    }
+
+    /// Rotation view of a `LivingEntity` (`yHeadRot`, `yBodyRot`).
+    pub const fn living(y_head_rot: &'a mut f32, y_body_rot: &'a mut f32) -> Self {
+        Self {
+            living: Some((y_head_rot, y_body_rot)),
+        }
+    }
+
+    /// Paper `Entity#getYHeadRot()` (`LivingEntity` override returns `yHeadRot`).
+    #[must_use]
+    pub fn y_head_rot(&self) -> f32 {
+        self.living.as_ref().map_or(0.0, |(head, _)| **head)
+    }
+
+    /// Paper `Entity#setYHeadRot(float)` (`LivingEntity` override stores `yHeadRot`).
+    pub fn set_y_head_rot(&mut self, value: f32) {
+        if let Some((head, _)) = self.living.as_mut() {
+            **head = value;
+        }
+    }
+
+    /// `LivingEntity.yBodyRot`, if this is a living entity.
+    #[must_use]
+    pub fn y_body_rot(&self) -> Option<f32> {
+        self.living.as_ref().map(|(_, body)| **body)
+    }
+
+    /// Paper `Entity#setYBodyRot(float)` (`LivingEntity` override stores `yBodyRot`).
+    pub fn set_y_body_rot(&mut self, value: f32) {
+        if let Some((_, body)) = self.living.as_mut() {
+            **body = value;
+        }
     }
 }
 
@@ -384,6 +438,25 @@ impl Entity {
         self.chunk_pos = ChunkPos::new(bx >> 4, bz >> 4);
     }
 
+    /// Paper `Entity#snapTo(double, double, double, float, float)`, including the Paper
+    /// `setYHeadRot(yRot)` patch.
+    pub fn snap_to(
+        &mut self,
+        rot: &mut HeadBodyRot<'_>,
+        x: f64,
+        y: f64,
+        z: f64,
+        y_rot: f32,
+        x_rot: f32,
+    ) {
+        self.set_pos_raw(x, y, z);
+        self.y_rot = y_rot;
+        self.x_rot = x_rot;
+        self.set_old_pos_and_rot();
+        self.reapply_position();
+        rot.set_y_head_rot(y_rot);
+    }
+
     /// Paper `Entity#reapplyPosition()`.
     pub fn reapply_position(&mut self) {
         self.set_pos(self.pos.x, self.pos.y, self.pos.z);
@@ -560,6 +633,16 @@ impl Entity {
         )
     }
 
+    /// Paper `Entity#getDismountLocationForPassenger(LivingEntity)`:
+    /// `(getX(), getBoundingBox().maxY, getZ())`.
+    ///
+    /// `AbstractBoat` overrides it with a `DismountHelper` floor search next to the boat; on the
+    /// block-less `LevelCtx` level no floor is valid, so the boat falls back to this base result.
+    #[must_use]
+    pub fn dismount_location_for_passenger(&self) -> Vec3 {
+        Vec3::new(self.pos.x, self.bounding_box.max_y, self.pos.z)
+    }
+
     /// Paper `Entity#getVehicleAttachmentPoint(Entity)` using `EntityAttachment.VEHICLE`.
     #[must_use]
     pub fn vehicle_attachment_point(&self) -> Vec3 {
@@ -592,10 +675,12 @@ impl Entity {
     /// `ctx.section_update_lock`, preserves the first `removal_reason`, detaches from its
     /// vehicle when `reason.should_destroy()`, stops its passengers riding unless
     /// `UnloadedToChunk`, and on the first removal marks `valid = false` and emits
-    /// `LifecycleEvent::EntityRemoved` (`levelCallback.onRemove`).
+    /// `LifecycleEvent::EntityRemoved` (`levelCallback.onRemove`). `rot` carries the
+    /// `LivingEntity` rotation written by the virtual `stopRiding()` dismount.
     pub(crate) fn request_remove_taken(
         &mut self,
         ctx: &mut LevelCtx,
+        rot: &mut HeadBodyRot<'_>,
         reason: EntityRemovalReason,
     ) -> bool {
         if ctx.section_update_lock.contains(&self.id) {
@@ -607,7 +692,7 @@ impl Entity {
         }
         let effective_reason = self.removal_reason.unwrap_or(reason);
         if effective_reason.should_destroy() {
-            ctx.stop_riding_taken(self, false);
+            ctx.stop_riding_taken(self, rot, false);
         }
         if effective_reason != EntityRemovalReason::UnloadedToChunk {
             ctx.stop_riding_passengers_of_taken(self);
@@ -624,7 +709,11 @@ impl Entity {
         if self.entity_type.despawn_time >= 0
             && self.total_entity_age >= self.entity_type.despawn_time
         {
-            if self.request_remove_taken(ctx, EntityRemovalReason::Discarded) {
+            if self.request_remove_taken(
+                ctx,
+                &mut HeadBodyRot::none(),
+                EntityRemovalReason::Discarded,
+            ) {
                 ctx.record_event(LifecycleEvent::Despawn { id: self.id });
             }
             return;
@@ -634,14 +723,16 @@ impl Entity {
 
     /// Paper `Entity#baseTick()` with the base `Entity#onBelowWorld()` (discard).
     pub fn entity_base_tick(&mut self, ctx: &mut LevelCtx) {
-        self.entity_base_tick_with_hook(ctx, Self::on_below_world);
+        self.entity_base_tick_with_hook(ctx, &mut HeadBodyRot::none(), Self::on_below_world);
     }
 
     /// Paper `Entity#baseTick()` with a virtual `onBelowWorld()` override supplied by
     /// subclasses (`LivingEntity#onBelowWorld` deals void damage instead of discarding).
+    /// `rot` carries the `LivingEntity` rotation written by the virtual `stopRiding()` dismount.
     pub fn entity_base_tick_with_hook(
         &mut self,
         ctx: &mut LevelCtx,
+        rot: &mut HeadBodyRot<'_>,
         on_below_world: impl FnOnce(&mut Self, &mut LevelCtx),
     ) {
         ctx.record_event(LifecycleEvent::EntityBaseTick { id: self.id });
@@ -651,7 +742,7 @@ impl Entity {
         if let Some(vehicle_id) = self.vehicle
             && ctx.is_entity_removed(vehicle_id)
         {
-            ctx.stop_riding_taken(self, false);
+            ctx.stop_riding_taken(self, rot, false);
         }
 
         if self.boarding_cooldown > 0 {
@@ -705,7 +796,11 @@ impl Entity {
 
     /// Paper `Entity#onBelowWorld()`: `discard(OUT_OF_WORLD)`.
     pub fn on_below_world(&mut self, ctx: &mut LevelCtx) {
-        self.request_remove_taken(ctx, EntityRemovalReason::Discarded);
+        self.request_remove_taken(
+            ctx,
+            &mut HeadBodyRot::none(),
+            EntityRemovalReason::Discarded,
+        );
     }
 
     /// Paper `Entity#postTick()` (CraftBukkit hook).
@@ -726,7 +821,7 @@ impl Entity {
         self.delta_movement = Vec3::new(0.0, 0.0, 0.0);
         self.entity_tick(ctx);
         if let Some(vehicle_id) = self.vehicle {
-            ctx.position_taken_rider(vehicle_id, self);
+            ctx.position_taken_rider(vehicle_id, self, &mut HeadBodyRot::none());
         }
     }
 }

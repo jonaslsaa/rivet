@@ -1419,3 +1419,224 @@ fn fractional_void_offset_is_double() {
     e.check_below_world(&mut ctx, |_, _| {});
     assert!(ctx.take_events().is_empty());
 }
+
+fn minecart_like_meta() -> EntityTypeMeta {
+    EntityTypeMeta::new("minecraft:minecart", 0.98, 0.5625)
+}
+
+#[test]
+fn living_stop_riding_dismounts_to_vehicle_top_and_teleports_own_passengers() {
+    let mut ctx = LevelCtx::new();
+    let cart_id = ctx.next_entity_id();
+    let zombie_id = ctx.next_entity_id();
+    let rider_id = ctx.next_entity_id();
+
+    let mut cart = Entity::new(cart_id, minecart_like_meta(), 1);
+    cart.set_pos(10.0, 64.0, 20.0);
+    let mut zombie = LivingEntity::new(zombie_id, zombie_meta(), 20.0, 2);
+    zombie.entity.y_rot = 30.0;
+    zombie.y_head_rot = 5.0;
+    let rider = Entity::new(rider_id, pig_meta(), 3);
+    ctx.add_entity(LifecycleEntity::Base(cart));
+    ctx.add_entity(LifecycleEntity::Living(zombie));
+    ctx.add_entity(LifecycleEntity::Base(rider));
+    assert!(ctx.start_riding(zombie_id, cart_id, false, true));
+    assert!(ctx.start_riding(rider_id, zombie_id, false, true));
+    ctx.tick_all(true);
+    let zombie_riding_y = ctx.get(zombie_id).unwrap().entity().pos.y;
+    assert!((zombie_riding_y - (64.0 + f64::from(0.5625_f32))).abs() < 1e-6);
+    ctx.get_mut(zombie_id)
+        .unwrap()
+        .entity_mut()
+        .set_pos(10.0, 70.0, 20.0);
+
+    // LivingEntity#dismountVehicle: (vehicle.x, vehicle.boundingBox.maxY, vehicle.z) via snapTo.
+    assert!(ctx.stop_riding(zombie_id, false));
+    let cart_max_y = ctx.get(cart_id).unwrap().entity().bounding_box.max_y;
+    let z = ctx.get(zombie_id).unwrap().living().unwrap();
+    assert_eq!(z.entity.pos, Vec3::new(10.0, cart_max_y, 20.0));
+    assert_eq!(
+        (z.entity.xo, z.entity.yo, z.entity.zo),
+        (10.0, cart_max_y, 20.0)
+    );
+    assert_eq!(z.entity.y_rot_o, 30.0);
+    assert_eq!(z.y_head_rot, 30.0);
+
+    // teleportPassengers(): the zombie's own rider is snapped onto its riding position.
+    let zombie_top = cart_max_y + f64::from(1.95_f32);
+    let r = ctx.get(rider_id).unwrap().entity();
+    assert!((r.pos.y - zombie_top).abs() < 1e-6);
+    assert_eq!((r.xo, r.yo, r.zo), (r.pos.x, r.pos.y, r.pos.z));
+
+    // A base Entity passenger has no LivingEntity#stopRiding override and stays put.
+    let rider_pos = r.pos;
+    assert!(ctx.stop_riding(rider_id, false));
+    assert_eq!(ctx.get(rider_id).unwrap().entity().pos, rider_pos);
+}
+
+#[test]
+fn living_dismount_from_removed_vehicle_and_removed_passenger_targets() {
+    let mut ctx = LevelCtx::new();
+    let cart_id = ctx.next_entity_id();
+    let zombie_id = ctx.next_entity_id();
+    let mut cart = Entity::new(cart_id, minecart_like_meta(), 1);
+    cart.set_pos(0.0, 80.0, 0.0);
+    let zombie = LivingEntity::new(zombie_id, zombie_meta(), 20.0, 2);
+    ctx.add_entity(LifecycleEntity::Base(cart));
+    ctx.add_entity(LifecycleEntity::Living(zombie));
+    assert!(ctx.start_riding(zombie_id, cart_id, false, true));
+    ctx.get_mut(zombie_id)
+        .unwrap()
+        .entity_mut()
+        .set_pos(3.0, 75.0, -4.0);
+
+    // Vehicle removed (still valid during setRemoved's passenger loop): the target is
+    // (x, max(y, vehicle.y), z), passed through findFreePosition (unchanged on an empty level).
+    assert!(ctx.remove_entity(cart_id, EntityRemovalReason::Discarded));
+    let half_height = f64::from(1.95_f32) / 2.0;
+    let e = ctx.get(zombie_id).unwrap().entity();
+    assert_eq!(
+        e.pos,
+        Vec3::new(3.0, (80.0 + half_height) + -half_height, -4.0)
+    );
+    assert_eq!(e.yo, e.pos.y);
+
+    // A removed passenger dismounts onto its own position (snapTo still snaps old position).
+    let cart2_id = ctx.next_entity_id();
+    let mut cart2 = Entity::new(cart2_id, minecart_like_meta(), 3);
+    cart2.set_pos(0.0, 90.0, 0.0);
+    ctx.add_entity(LifecycleEntity::Base(cart2));
+    assert!(ctx.start_riding(zombie_id, cart2_id, true, true));
+    {
+        let e = ctx.get_mut(zombie_id).unwrap().entity_mut();
+        e.set_pos(1.0, 2.0, 3.0);
+        e.xo = 50.0;
+    }
+    let mut zombie = ctx.take_entity(zombie_id).unwrap();
+    {
+        let (entity, mut rot) = zombie.split_rot();
+        assert!(entity.request_remove_taken(&mut ctx, &mut rot, EntityRemovalReason::Killed));
+    }
+    let e = zombie.entity();
+    assert_eq!(e.pos, Vec3::new(1.0, 2.0, 3.0));
+    assert_eq!(e.xo, 1.0);
+    assert_eq!(e.vehicle, None);
+    ctx.put_back_entity(zombie);
+}
+
+#[test]
+fn sleeping_entity_that_cannot_interact_with_level_wakes() {
+    let mut ctx = LevelCtx::new();
+    let id = ctx.next_entity_id();
+    let mut living = LivingEntity::new(id, zombie_meta(), 20.0, 8);
+    living.sleeping_pos = Some(BlockPos::new(0, 64, 0));
+    living.bed_exists = true;
+    ctx.add_entity(LifecycleEntity::Living(living));
+    ctx.tick_all(true);
+    assert!(ctx.get(id).unwrap().living().unwrap().is_sleeping());
+
+    // Dying (bed still present) fails canInteractWithLevel() and wakes the entity.
+    ctx.get_mut(id).unwrap().living_mut().unwrap().health = 0.0;
+    ctx.tick_all(true);
+    assert!(!ctx.get(id).unwrap().living().unwrap().is_sleeping());
+}
+
+#[test]
+fn last_hurt_by_mob_reference_survives_removed_attacker() {
+    let mut ctx = LevelCtx::new();
+    let attacker_id = ctx.next_entity_id();
+    let victim_id = ctx.next_entity_id();
+    ctx.add_entity(LifecycleEntity::Living(LivingEntity::new(
+        attacker_id,
+        zombie_meta(),
+        20.0,
+        1,
+    )));
+    let mut victim = LivingEntity::new(victim_id, zombie_meta(), 20.0, 2);
+    victim.set_last_hurt_by_mob(Some(attacker_id));
+    ctx.add_entity(LifecycleEntity::Living(victim));
+
+    // EntityReference#getEntity resolves a removed attacker to null: neither branch runs, so
+    // the reference and its timestamp survive even past the 100-tick expiry.
+    assert!(ctx.remove_entity(attacker_id, EntityRemovalReason::UnloadedToChunk));
+    ctx.get_mut(victim_id).unwrap().entity_mut().tick_count = 500;
+    ctx.tick_all(true);
+    let v = ctx.get(victim_id).unwrap().living().unwrap();
+    assert_eq!(v.last_hurt_by_mob, Some(attacker_id));
+    assert_eq!(v.last_hurt_by_mob_timestamp, 0);
+
+    // A resident but dead attacker clears the reference and restamps it.
+    let dead_id = ctx.next_entity_id();
+    let mut dead = LivingEntity::new(dead_id, zombie_meta(), 20.0, 3);
+    dead.health = 0.0;
+    ctx.add_entity(LifecycleEntity::Living(dead));
+    ctx.get_mut(victim_id)
+        .unwrap()
+        .living_mut()
+        .unwrap()
+        .set_last_hurt_by_mob(Some(dead_id));
+    ctx.tick_all(true);
+    let v = ctx.get(victim_id).unwrap().living().unwrap();
+    assert_eq!(v.last_hurt_by_mob, None);
+    assert_eq!(v.last_hurt_by_mob_timestamp, 502);
+}
+
+#[test]
+fn boat_clamps_rider_rotation_and_turns_animals_in_full_boat() {
+    let mut ctx = LevelCtx::new();
+    let boat_id = ctx.next_entity_id();
+    let zombie_id = ctx.next_entity_id();
+    let pig_id = ctx.next_entity_id();
+    let breeze_id = ctx.next_entity_id();
+    let boat2_id = ctx.next_entity_id();
+
+    ctx.add_entity(LifecycleEntity::Base(Entity::new(
+        boat_id,
+        EntityTypeMeta::boat(),
+        1,
+    )));
+    let mut zombie = LivingEntity::new(zombie_id, zombie_meta(), 20.0, 2);
+    zombie.entity.y_rot = 180.0;
+    ctx.add_entity(LifecycleEntity::Living(zombie));
+    let mut pig = LivingEntity::new(pig_id, pig_meta(), 10.0, 3);
+    pig.entity.y_rot = 10.0;
+    ctx.add_entity(LifecycleEntity::Living(pig));
+    assert!(ctx.start_riding(zombie_id, boat_id, false, true));
+    assert!(ctx.start_riding(pig_id, boat_id, false, true));
+
+    ctx.add_entity(LifecycleEntity::Base(Entity::new(
+        boat2_id,
+        EntityTypeMeta::boat(),
+        4,
+    )));
+    let mut breeze = LivingEntity::new(
+        breeze_id,
+        EntityTypeMeta::hostile("minecraft:breeze", 0.6, 1.77),
+        30.0,
+        5,
+    );
+    breeze.entity.y_rot = 180.0;
+    ctx.add_entity(LifecycleEntity::Living(breeze));
+    assert!(ctx.start_riding(breeze_id, boat2_id, false, true));
+
+    ctx.tick_all(true);
+
+    // AbstractBoat#clampRotation: delta = wrapDegrees(180 - 0) = -180 -> clamped to -105.
+    let z = ctx.get(zombie_id).unwrap().living().unwrap();
+    assert_eq!(z.y_body_rot, 0.0);
+    assert_eq!(z.entity.y_rot, 255.0);
+    assert_eq!(z.entity.y_rot_o, 255.0);
+    assert_eq!(z.y_head_rot, 255.0);
+
+    // Full boat: an Animal rider is turned by 90 (even id) or 270 (odd id) degrees.
+    let offset = if pig_id % 2 == 0 { 90.0 } else { 270.0 };
+    let p = ctx.get(pig_id).unwrap().living().unwrap();
+    assert_eq!(p.entity.y_rot, 10.0);
+    assert_eq!(p.y_body_rot, offset);
+    assert_eq!(p.y_head_rot, 10.0 + offset);
+
+    // EntityTypeTags.CAN_TURN_IN_BOATS riders keep their rotation.
+    let b = ctx.get(breeze_id).unwrap().living().unwrap();
+    assert!(b.entity.entity_type.can_turn_in_boats);
+    assert_eq!(b.entity.y_rot, 180.0);
+}

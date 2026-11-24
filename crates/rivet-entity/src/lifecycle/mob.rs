@@ -359,10 +359,8 @@ impl Mob {
     /// Returns `true` only when this call newly removed the mob.
     fn discard_for_despawn(&mut self, ctx: &mut LevelCtx) -> bool {
         let already_removed = self.living.entity.is_removed();
-        let removed = self
-            .living
-            .entity
-            .request_remove_taken(ctx, EntityRemovalReason::Discarded);
+        let (entity, mut rot) = self.living.split_rot();
+        let removed = entity.request_remove_taken(ctx, &mut rot, EntityRemovalReason::Discarded);
         if removed && !already_removed {
             ctx.record_event(LifecycleEvent::Despawn {
                 id: self.living.entity.id,
@@ -385,7 +383,8 @@ impl Mob {
         self.living.entity.delta_movement = Vec3::new(0.0, 0.0, 0.0);
         self.mob_tick(ctx);
         if let Some(vehicle_id) = self.living.entity.vehicle {
-            ctx.position_taken_rider(vehicle_id, &mut self.living.entity);
+            let (entity, mut rot) = self.living.split_rot();
+            ctx.position_taken_rider(vehicle_id, entity, &mut rot);
         }
         self.living.entity.fall_distance = 0.0;
     }

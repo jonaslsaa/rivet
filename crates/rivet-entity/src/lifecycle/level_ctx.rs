@@ -2,7 +2,7 @@
 //! `Arc<RwLock>` game state (per `OWNERSHIP.md` and Paper 26.2 `ServerLevel.java`).
 
 use super::dimensions::Pose;
-use super::entity::{BOARDING_COOLDOWN, Entity};
+use super::entity::{BOARDING_COOLDOWN, Entity, HeadBodyRot};
 use super::equipment::{EquipmentSlot, EquipmentSlotChange};
 use super::living::LivingEntity;
 use super::mob::{Mob, MobControlFlags};
@@ -10,6 +10,7 @@ use crate::damage::Difficulty;
 use crate::storage::{EntityRemovalReason, NetworkIdAllocator};
 use indexmap::IndexMap;
 use rivet_registry::core::{BlockPos, Vec3};
+use rivet_util::mth;
 use std::collections::{HashMap, HashSet};
 
 /// Unified entity node stored in `LevelCtx` preserving Paper's inheritance hierarchy
@@ -74,6 +75,16 @@ impl LifecycleEntity {
         match self {
             Self::Mob(m) => Some(m),
             _ => None,
+        }
+    }
+
+    /// Splits the embedded [`Entity`] from the rotation behind its virtual
+    /// `getYHeadRot` / `setYHeadRot` / `setYBodyRot` (none for a base `Entity`).
+    pub fn split_rot(&mut self) -> (&mut Entity, HeadBodyRot<'_>) {
+        match self {
+            Self::Base(e) => (e, HeadBodyRot::none()),
+            Self::Living(l) => l.split_rot(),
+            Self::Mob(m) => m.living.split_rot(),
         }
     }
 
@@ -457,7 +468,8 @@ impl LevelCtx {
             passenger.entity_mut().delta_movement = Vec3::new(0.0, 0.0, 0.0);
             passenger.inactive_tick(self);
             if let Some(vid) = passenger.entity().vehicle {
-                self.position_taken_rider(vid, passenger.entity_mut());
+                let (entity, mut rot) = passenger.split_rot();
+                self.position_taken_rider(vid, entity, &mut rot);
             }
         }
 
@@ -749,6 +761,9 @@ impl LevelCtx {
     /// `!suppress_cancellation`, and the vehicle is still `valid`. A purged vehicle counts as
     /// invalid. The `ENTITY_DISMOUNT` game event is emitted either way when the passenger is
     /// not removed or was removed for a destroying reason.
+    ///
+    /// A living passenger that left a still-`valid` vehicle then runs the
+    /// `LivingEntity#stopRiding(boolean)` override's `dismountVehicle(oldVehicle)`.
     pub fn stop_riding(&mut self, passenger_id: i32, suppress_cancellation: bool) -> bool {
         let (vehicle_id, removal_reason) = {
             let Some(p) = self.get(passenger_id) else {
@@ -785,14 +800,21 @@ impl LevelCtx {
         }
 
         self.record_dismount(passenger_id, vehicle_id, removal_reason);
+        if removed && let Some(mut passenger) = self.take_entity(passenger_id) {
+            let (entity, mut rot) = passenger.split_rot();
+            self.dismount_resident_vehicle(vehicle_id, entity, &mut rot);
+            self.put_back_entity(passenger);
+        }
         removed
     }
 
     /// Paper `Entity#stopRiding(boolean suppressCancellation)` for a currently-taken passenger
     /// whose vehicle is resident (or purged), with the same semantics as [`Self::stop_riding`].
+    /// `rot` carries the passenger's `LivingEntity` rotation for the dismount teleport.
     pub(crate) fn stop_riding_taken(
         &mut self,
         passenger: &mut Entity,
+        rot: &mut HeadBodyRot<'_>,
         suppress_cancellation: bool,
     ) -> bool {
         let Some(vehicle_id) = passenger.vehicle else {
@@ -818,7 +840,101 @@ impl LevelCtx {
         }
 
         self.record_dismount(passenger_id, vehicle_id, passenger.removal_reason);
+        if removed {
+            self.dismount_resident_vehicle(vehicle_id, passenger, rot);
+        }
         removed
+    }
+
+    /// `LivingEntity#stopRiding(boolean)` tail for a vehicle in storage: `dismountVehicle` runs
+    /// only for a living passenger whose old vehicle is still `valid` (a purged vehicle is not).
+    fn dismount_resident_vehicle(
+        &mut self,
+        vehicle_id: i32,
+        passenger: &mut Entity,
+        rot: &mut HeadBodyRot<'_>,
+    ) {
+        let target = match self.get(vehicle_id) {
+            Some(v) if v.entity().valid => Self::dismount_target(passenger, v.entity()),
+            _ => return,
+        };
+        if let Some(target) = target {
+            self.dismount_to(passenger, rot, target);
+        }
+    }
+
+    /// Paper `LivingEntity#dismountVehicle(Entity)` teleport target, or `None` when the
+    /// `LivingEntity#stopRiding(boolean)` override does not apply (non-living passenger).
+    ///
+    /// `LevelCtx` models a level without blocks, so the `BlockTags.PORTALS` check at the
+    /// vehicle's block position never matches and `Level#findFreePosition` returns the
+    /// preferred centre unchanged whenever the allowed-centre shape is non-empty.
+    fn dismount_target(passenger: &Entity, vehicle: &Entity) -> Option<Vec3> {
+        if !passenger.is_living {
+            return None;
+        }
+        if passenger.is_removed() {
+            return Some(passenger.pos);
+        }
+        if !vehicle.is_removed() {
+            return Some(vehicle.dismount_location_for_passenger());
+        }
+        let max_y = mth::max_f64(passenger.pos.y, vehicle.pos.y);
+        let target = Vec3::new(passenger.pos.x, max_y, passenger.pos.z);
+        let width = passenger.dimensions.width;
+        let height = passenger.dimensions.height;
+        if width <= 4.0_f32 && height <= 4.0_f32 {
+            let (width, height) = (f64::from(width), f64::from(height));
+            let half_height = height / 2.0;
+            let center = Vec3::new(target.x + 0.0, target.y + half_height, target.z + 0.0);
+            // Shapes.create(AABB.ofSize(center, width, height, width)) is empty below 1.0E-7.
+            let degenerate = |c: f64, size: f64| (c + size / 2.0) - (c - size / 2.0) < 1.0e-7;
+            if !(degenerate(center.x, width)
+                || degenerate(center.y, height)
+                || degenerate(center.z, width))
+            {
+                return Some(Vec3::new(
+                    center.x + 0.0,
+                    center.y + -half_height,
+                    center.z + 0.0,
+                ));
+            }
+        }
+        Some(target)
+    }
+
+    /// Paper `Entity#dismountTo` -> `Entity#teleportTo(double, double, double)`:
+    /// `snapTo(x, y, z, getYRot(), getXRot())`, then `teleportPassengers()`.
+    fn dismount_to(&mut self, passenger: &mut Entity, rot: &mut HeadBodyRot<'_>, target: Vec3) {
+        if passenger.entity_type.is_player {
+            // RivetTodo(#422) ServerPlayer#dismountTo teleports through
+            // ServerGamePacketListenerImpl#teleport (PlayerTeleportEvent, DISMOUNT cause), which
+            // belongs to the player connection layer rather than this lifecycle slice.
+            return;
+        }
+        let (y_rot, x_rot) = (passenger.y_rot, passenger.x_rot);
+        passenger.snap_to(rot, target.x, target.y, target.z, y_rot, x_rot);
+        self.teleport_passengers(passenger);
+    }
+
+    /// Paper `Entity#teleportPassengers()`: for every entity of `getSelfAndPassengers()`
+    /// (depth-first preorder), `positionRider(passenger, Entity::snapTo)` for each passenger.
+    /// `root` is out of storage; its passenger tree is resident.
+    fn teleport_passengers(&mut self, root: &Entity) {
+        for &passenger_id in &root.passengers {
+            let Some(mut passenger) = self.take_entity(passenger_id) else {
+                continue;
+            };
+            let (entity, mut rot) = passenger.split_rot();
+            self.position_rider(root, entity, &mut rot, true);
+            self.put_back_entity(passenger);
+        }
+        for &passenger_id in &root.passengers {
+            if let Some(passenger) = self.take_entity(passenger_id) {
+                self.teleport_passengers(passenger.entity());
+                self.put_back_entity(passenger);
+            }
+        }
     }
 
     /// Vehicle side of Paper `Entity#removePassenger(Entity, boolean suppressCancellation)`.
@@ -956,6 +1072,16 @@ impl LevelCtx {
         }
         let removal_reason = pe.removal_reason;
         self.record_dismount(passenger_id, vehicle.id, removal_reason);
+        if removed
+            && vehicle.valid
+            && let Some(mut passenger) = self.take_entity(passenger_id)
+        {
+            let (entity, mut rot) = passenger.split_rot();
+            if let Some(target) = Self::dismount_target(entity, vehicle) {
+                self.dismount_to(entity, &mut rot, target);
+            }
+            self.put_back_entity(passenger);
+        }
     }
 
     /// Moonrise `EntityLookup` callback `onRemove(reason)`: emits
@@ -982,28 +1108,98 @@ impl LevelCtx {
         }
     }
 
-    /// Positions a currently-taken rider relative to its resident vehicle (`Entity#positionRider`).
-    pub(crate) fn position_taken_rider(&mut self, vehicle_id: i32, passenger: &mut Entity) {
+    /// Positions a currently-taken rider relative to its resident vehicle
+    /// (`Entity#positionRider(Entity)`, a no-op unless `vehicle.hasPassenger(passenger)`).
+    pub(crate) fn position_taken_rider(
+        &mut self,
+        vehicle_id: i32,
+        passenger: &mut Entity,
+        rot: &mut HeadBodyRot<'_>,
+    ) {
         let Some(vehicle) = self.get(vehicle_id) else {
             return;
         };
-        let ve = vehicle.entity();
-        let Some(idx) = ve.passengers.iter().position(|&pid| pid == passenger.id) else {
-            return;
-        };
-        let riding_pos = ve.passenger_riding_position(idx as i32, passenger.entity_type.is_animal);
+        if let Some(pos) = Self::move_rider(vehicle.entity(), passenger, rot, false) {
+            self.record_event(LifecycleEvent::PositionRider {
+                vehicle_id,
+                passenger_id: passenger.id,
+                pos,
+            });
+        }
+    }
+
+    /// Paper `Entity#positionRider(Entity, MoveFunction)` for a rider out of storage, recording
+    /// `LifecycleEvent::PositionRider`. `snap` selects `Entity::snapTo` over `Entity::setPos`.
+    fn position_rider(
+        &mut self,
+        vehicle: &Entity,
+        passenger: &mut Entity,
+        rot: &mut HeadBodyRot<'_>,
+        snap: bool,
+    ) {
+        if let Some(pos) = Self::move_rider(vehicle, passenger, rot, snap) {
+            self.record_event(LifecycleEvent::PositionRider {
+                vehicle_id: vehicle.id,
+                passenger_id: passenger.id,
+                pos,
+            });
+        }
+    }
+
+    /// Paper `Entity#positionRider(Entity, MoveFunction)` with the `AbstractBoat#positionRider`
+    /// override. Returns the moved-to position, or `None` if `passenger` is not listed by
+    /// `vehicle`.
+    fn move_rider(
+        vehicle: &Entity,
+        passenger: &mut Entity,
+        rot: &mut HeadBodyRot<'_>,
+        snap: bool,
+    ) -> Option<Vec3> {
+        let idx = vehicle
+            .passengers
+            .iter()
+            .position(|&pid| pid == passenger.id)?;
+        let riding_pos =
+            vehicle.passenger_riding_position(idx as i32, passenger.entity_type.is_animal);
         let attach = passenger.vehicle_attachment_point();
         let new_pos = Vec3::new(
             riding_pos.x - attach.x,
             riding_pos.y - attach.y,
             riding_pos.z - attach.z,
         );
-        passenger.set_pos(new_pos.x, new_pos.y, new_pos.z);
-        self.record_event(LifecycleEvent::PositionRider {
-            vehicle_id,
-            passenger_id: passenger.id,
-            pos: new_pos,
-        });
+        if snap {
+            let (y_rot, x_rot) = (passenger.y_rot, passenger.x_rot);
+            passenger.snap_to(rot, new_pos.x, new_pos.y, new_pos.z, y_rot, x_rot);
+        } else {
+            passenger.set_pos(new_pos.x, new_pos.y, new_pos.z);
+        }
+        if vehicle.entity_type.is_boat && !passenger.entity_type.can_turn_in_boats {
+            // RivetTodo(#422) AbstractBoat.deltaRotation is driven by the boat movement
+            // (AbstractBoat#controlBoat / floatBoat), which is not ported; it stays 0.0F.
+            let delta_rotation = 0.0_f32;
+            passenger.y_rot += delta_rotation;
+            rot.set_y_head_rot(rot.y_head_rot() + delta_rotation);
+            Self::clamp_boat_rider_rotation(vehicle, passenger, rot);
+            if passenger.entity_type.is_animal
+                && vehicle.passengers.len() == vehicle.entity_type.max_passengers
+                && let Some(y_body_rot) = rot.y_body_rot()
+            {
+                let rotation_offset = if passenger.id % 2 == 0 { 90 } else { 270 };
+                rot.set_y_body_rot(y_body_rot + rotation_offset as f32);
+                rot.set_y_head_rot(rot.y_head_rot() + rotation_offset as f32);
+            }
+        }
+        Some(new_pos)
+    }
+
+    /// Paper `AbstractBoat#clampRotation(Entity)`.
+    fn clamp_boat_rider_rotation(boat: &Entity, passenger: &mut Entity, rot: &mut HeadBodyRot<'_>) {
+        rot.set_y_body_rot(boat.y_rot);
+        let delta = mth::wrap_degrees_f32(passenger.y_rot - boat.y_rot);
+        let target_delta = mth::clamp_f32(delta, -105.0_f32, 105.0_f32);
+        passenger.y_rot_o += target_delta - delta;
+        passenger.y_rot = passenger.y_rot + target_delta - delta;
+        rot.set_y_head_rot(passenger.y_rot);
     }
 
     // -------------------------------------------------------------------------

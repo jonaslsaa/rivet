@@ -5,9 +5,9 @@
 //! (`self.entity.entity_base_tick(ctx)`, `self.entity.entity_tick(ctx)`) per `PORTING.md`.
 
 use super::dimensions::Pose;
-use super::entity::{Entity, EntityTypeMeta};
+use super::entity::{Entity, EntityTypeMeta, HeadBodyRot};
 use super::equipment::{EntityEquipment, EquipmentItem, EquipmentSlot, EquipmentSlotChange};
-use super::level_ctx::{LevelCtx, LifecycleEvent};
+use super::level_ctx::{LevelCtx, LifecycleEntity, LifecycleEvent};
 use crate::damage::DEATH_REMOVAL_TICKS;
 use crate::storage::EntityRemovalReason;
 use rivet_registry::core::{BlockPos, Vec3};
@@ -154,6 +154,24 @@ impl LivingEntity {
     #[must_use]
     pub fn is_alive(&self) -> bool {
         !self.entity.is_removed() && self.health > 0.0_f32
+    }
+
+    /// Paper `Entity#canInteractWithLevel()`: `isAlive() && !isRemoved() && !isSpectator()`.
+    ///
+    /// `isSpectator()` is `false` for every non-player entity; player game modes are not
+    /// modelled by this lifecycle slice.
+    #[must_use]
+    pub fn can_interact_with_level(&self) -> bool {
+        self.is_alive() && !self.entity.is_removed()
+    }
+
+    /// Splits the embedded [`Entity`] from the `LivingEntity` rotation behind its virtual
+    /// `getYHeadRot` / `setYHeadRot` / `setYBodyRot`.
+    pub fn split_rot(&mut self) -> (&mut Entity, HeadBodyRot<'_>) {
+        (
+            &mut self.entity,
+            HeadBodyRot::living(&mut self.y_head_rot, &mut self.y_body_rot),
+        )
     }
 
     /// Paper `LivingEntity#isSleeping()`.
@@ -355,8 +373,8 @@ impl LivingEntity {
         }
 
         // super.baseTick() with the LivingEntity#onBelowWorld override
-        self.entity
-            .entity_base_tick_with_hook(ctx, Self::on_below_world);
+        let (entity, mut rot) = self.split_rot();
+        entity.entity_base_tick_with_hook(ctx, &mut rot, Self::on_below_world);
 
         ctx.record_event(LifecycleEvent::LivingBaseTick { id: self.entity.id });
 
@@ -393,7 +411,8 @@ impl LivingEntity {
                 if let Some(vehicle_id) = self.entity.vehicle
                     && ctx.vehicle_dismounts_underwater(vehicle_id)
                 {
-                    ctx.stop_riding_taken(&mut self.entity, false);
+                    let (entity, mut rot) = self.split_rot();
+                    ctx.stop_riding_taken(entity, &mut rot, false);
                 }
             } else if self.entity.air_supply < self.entity.max_air_supply {
                 self.entity.air_supply = self.increase_air_supply(self.entity.air_supply);
@@ -439,21 +458,26 @@ impl LivingEntity {
             }
         }
 
-        if let Some(hurt_by) = self.last_hurt_by_mob {
-            let alive = if hurt_by == self.entity.id {
-                self.is_alive()
+        // getLastHurtByMob() resolves the EntityReference: a removed (or unloaded) attacker
+        // resolves to null, so neither branch runs and the reference and timestamp are kept.
+        let hurt_by_alive = self.last_hurt_by_mob.and_then(|hurt_by| {
+            if hurt_by == self.entity.id {
+                (!self.entity.is_removed()).then(|| self.is_alive())
             } else {
-                ctx.is_entity_alive(hurt_by)
-            };
-            if !alive
+                ctx.get(hurt_by)
+                    .filter(|e| e.living().is_some() && !e.entity().is_removed())
+                    .map(LifecycleEntity::is_alive)
+            }
+        });
+        if let Some(alive) = hurt_by_alive
+            && (!alive
                 || self
                     .entity
                     .tick_count
                     .wrapping_sub(self.last_hurt_by_mob_timestamp)
-                    > LAST_HURT_BY_MOB_EXPIRY_TICKS
-            {
-                self.set_last_hurt_by_mob(None);
-            }
+                    > LAST_HURT_BY_MOB_EXPIRY_TICKS)
+        {
+            self.set_last_hurt_by_mob(None);
         }
 
         self.y_head_rot_o = self.y_head_rot;
@@ -486,8 +510,8 @@ impl LivingEntity {
             death_time: self.death_time,
         });
         if self.death_time >= DEATH_REMOVAL_TICKS && !self.entity.is_removed() {
-            self.entity
-                .request_remove_taken(ctx, EntityRemovalReason::Killed);
+            let (entity, mut rot) = self.split_rot();
+            entity.request_remove_taken(ctx, &mut rot, EntityRemovalReason::Killed);
         }
     }
 
@@ -504,10 +528,8 @@ impl LivingEntity {
         if self.entity.entity_type.despawn_time >= 0
             && self.entity.total_entity_age >= self.entity.entity_type.despawn_time
         {
-            if self
-                .entity
-                .request_remove_taken(ctx, EntityRemovalReason::Discarded)
-            {
+            let (entity, mut rot) = self.split_rot();
+            if entity.request_remove_taken(ctx, &mut rot, EntityRemovalReason::Discarded) {
                 ctx.record_event(LifecycleEvent::Despawn { id: self.entity.id });
             }
         } else {
@@ -543,7 +565,7 @@ impl LivingEntity {
             ctx.record_event(LifecycleEvent::CombatTrackerRecheck { id: self.entity.id });
         }
 
-        if self.is_sleeping() && !self.bed_exists {
+        if self.is_sleeping() && (!self.can_interact_with_level() || !self.bed_exists) {
             self.stop_sleeping();
         }
 
@@ -672,7 +694,8 @@ impl LivingEntity {
         self.entity.delta_movement = Vec3::new(0.0, 0.0, 0.0);
         self.living_tick(ctx);
         if let Some(vehicle_id) = self.entity.vehicle {
-            ctx.position_taken_rider(vehicle_id, &mut self.entity);
+            let (entity, mut rot) = self.split_rot();
+            ctx.position_taken_rider(vehicle_id, entity, &mut rot);
         }
         self.entity.fall_distance = 0.0;
     }
