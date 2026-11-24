@@ -48,4 +48,4 @@ The `regex` crate and its `regex-automata` engines deliberately omit lookaround 
 
 **JVM adapter:** no `jni` crate — `rivet-ffi` exposes plain `extern "C"`; the Java side binds via FFM (Panama). Java shims live in `adapter/` (Gradle), not in the cargo workspace.
 
-**Explicitly rejected:** ECS frameworks (bevy_ecs — D4), `dashmap` on tick-thread state, serde-based packet codecs, `async-trait`/boxed futures in game logic, pre-release crypto pins. Each rejection is a Pumpkin scar — see `LESSONS-PUMPKIN.md`.
+**Explicitly rejected:** ECS frameworks (bevy_ecs — D4), `dashmap` on tick-thread state, serde-based packet codecs, `async-trait`/boxed futures in game logic, pre-release crypto pins. Each rejection is a Pumpkin scar — see `docs/background.md` (Lessons from Pumpkin).

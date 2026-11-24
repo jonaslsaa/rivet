@@ -71,7 +71,7 @@ public final class RivetReferenceOracle {
     static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
     private static final Gson PRETTY = new GsonBuilder().disableHtmlEscaping().setPrettyPrinting().create();
     /** Repo-relative path of this file: every op's Java source lives here, so its SHA-256 is the op source hash. */
-    private static final String OP_SOURCE = "tools/rivet-reference-oracle/src";
+    private static final String OP_SOURCE = "tools/rivet-reference-oracle/src/RivetReferenceOracle.java";
     private static final TagParser<Tag> SNBT_PARSER = TagParser.create(NbtOps.INSTANCE);
 
     /**
@@ -184,6 +184,9 @@ public final class RivetReferenceOracle {
             (request, dec) -> packetReencode(request),
             error -> error instanceof PacketRejection
         ));
+        for (Op op : EntityOps.ops()) {
+            register(ops, op);
+        }
         GameplayOps.register(ops);
         return Collections.unmodifiableMap(ops);
     }
@@ -408,7 +411,24 @@ public final class RivetReferenceOracle {
         manifest.addProperty("paper", requiredProperty("rivet.paper.pin"));
         manifest.addProperty("paper_commit", requiredProperty("rivet.paper.commit"));
         manifest.addProperty("op_source", OP_SOURCE);
-        manifest.addProperty("op_source_sha256", opSourceSha256(Path.of(requiredProperty("rivet.oracle.source"))));
+        Path source = Path.of(requiredProperty("rivet.oracle.source"));
+        manifest.addProperty("op_source_sha256", sha256(Files.readAllBytes(source)));
+        // Op families that live in their own file beside this one (EntityOps.java, ...) are pinned too.
+        JsonArray siblings = new JsonArray();
+        List<Path> others;
+        try (var listing = Files.list(source.getParent())) {
+            others = listing
+                .filter(path -> path.getFileName().toString().endsWith(".java") && !path.equals(source))
+                .sorted()
+                .toList();
+        }
+        for (Path other : others) {
+            JsonObject sibling = new JsonObject();
+            sibling.addProperty("path", OP_SOURCE.substring(0, OP_SOURCE.lastIndexOf('/') + 1) + other.getFileName());
+            sibling.addProperty("sha256", sha256(Files.readAllBytes(other)));
+            siblings.add(sibling);
+        }
+        manifest.add("extra_op_sources", siblings);
         manifest.add("ops", entries);
         Files.writeString(outDir.resolve("manifest.json"), PRETTY.toJson(manifest) + "\n", StandardCharsets.UTF_8);
 
@@ -442,27 +462,6 @@ public final class RivetReferenceOracle {
             line.add("detail", detail);
         }
         return line;
-    }
-
-    /**
-     * SHA-256 over the bytes of every {@code *.java} file of the op source
-     * directory, concatenated in file-name order: the one hash that pins every
-     * op's Java source (a directory holding only {@code RivetReferenceOracle.java}
-     * hashes like that file alone).
-     */
-    private static String opSourceSha256(final Path sourceDir) throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        List<Path> sources;
-        try (var listing = Files.list(sourceDir)) {
-            sources = listing.filter(path -> path.getFileName().toString().endsWith(".java")).sorted().toList();
-        }
-        if (sources.isEmpty()) {
-            throw new IllegalStateException("no op sources under " + sourceDir);
-        }
-        for (Path source : sources) {
-            digest.update(Files.readAllBytes(source));
-        }
-        return HexFormat.of().formatHex(digest.digest());
     }
 
     private static String sha256(final byte[] bytes) throws Exception {

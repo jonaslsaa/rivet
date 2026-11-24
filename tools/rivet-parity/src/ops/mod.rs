@@ -31,6 +31,8 @@
 pub mod codec;
 pub mod codec_corpus;
 pub mod compare;
+pub mod entity;
+pub mod entity_corpus;
 pub mod gameplay;
 pub mod handlers;
 pub mod packet;
@@ -55,29 +57,10 @@ pub fn ops_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../rivet-reference-oracle/fixtures/ops")
 }
 
-/// The directory holding every op's Java source. Its SHA-256 (the bytes of
-/// every `*.java` file in file-name order, see [`read_op_source`]) is pinned
-/// per recording.
+/// The Java file holding every op's source (its SHA-256 is pinned per recording).
 pub fn op_source() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../rivet-reference-oracle/src")
-}
-
-/// The bytes the op-source hash covers: every `*.java` file of the directory
-/// `source` concatenated in file-name order, or the single file `source`.
-fn read_op_source(source: &Path) -> std::io::Result<Vec<u8>> {
-    if !source.is_dir() {
-        return fs::read(source);
-    }
-    let mut files: Vec<PathBuf> = fs::read_dir(source)?
-        .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|path| path.extension().is_some_and(|ext| ext == "java"))
-        .collect();
-    files.sort();
-    let mut bytes = Vec::new();
-    for file in files {
-        bytes.extend(fs::read(file)?);
-    }
-    Ok(bytes)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../rivet-reference-oracle/src/RivetReferenceOracle.java")
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -189,6 +172,51 @@ fn read_pinned(dir: &Path, relative: &str, sha256: &str) -> Result<Vec<u8>, Load
     Ok(bytes)
 }
 
+/// The op families that live in their own `.java` file beside the main op
+/// source (`EntityOps.java`, ...) are pinned like the main file: the manifest
+/// lists every sibling with its SHA-256, and the siblings on disk must be
+/// exactly that set.
+fn verify_extra_op_sources(manifest: &Value, op_source: &Path) -> Result<(), LoadError> {
+    let Some(listed) = manifest.get("extra_op_sources").and_then(Value::as_array) else {
+        return Err(LoadError::Invalid(
+            "ops manifest has no `extra_op_sources` array".into(),
+        ));
+    };
+    let dir = op_source.parent().unwrap_or_else(|| Path::new("."));
+    let mut on_disk = BTreeSet::new();
+    if let Ok(listing) = fs::read_dir(dir) {
+        for file in listing.flatten() {
+            let name = file.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".java") && file.path() != op_source {
+                on_disk.insert(name);
+            }
+        }
+    }
+    let mut pinned = BTreeSet::new();
+    for entry in listed {
+        let path = manifest_str(entry, "path")?;
+        let name = path.rsplit('/').next().unwrap_or(path).to_owned();
+        let bytes = fs::read(dir.join(&name)).map_err(|e| {
+            LoadError::Invalid(format!(
+                "cannot read op source {name} pinned by the manifest: {e}"
+            ))
+        })?;
+        if sha256_hex(&bytes) != manifest_str(entry, "sha256")? {
+            return Err(LoadError::Invalid(format!(
+                "op source {name} changed since the ops were recorded; re-record with `tools/rivet-reference-oracle/run.sh --record`"
+            )));
+        }
+        pinned.insert(name);
+    }
+    if pinned != on_disk {
+        return Err(LoadError::Invalid(format!(
+            "op sources beside {} are {on_disk:?} but the manifest pins {pinned:?}; re-record with `tools/rivet-reference-oracle/run.sh --record`",
+            op_source.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Load and closure-check every recorded op under `dir`.
 pub fn load_fixtures(dir: &Path, op_source: &Path) -> Result<Vec<OpFixture>, LoadError> {
     let manifest_path = dir.join("manifest.json");
@@ -216,7 +244,7 @@ pub fn load_fixtures(dir: &Path, op_source: &Path) -> Result<Vec<OpFixture>, Loa
             "ops manifest is not format-1 `oracle-ops`".into(),
         ));
     }
-    let source = read_op_source(op_source).map_err(|e| {
+    let source = fs::read(op_source).map_err(|e| {
         LoadError::Invalid(format!(
             "cannot read op source {}: {e}",
             op_source.display()
@@ -229,6 +257,7 @@ pub fn load_fixtures(dir: &Path, op_source: &Path) -> Result<Vec<OpFixture>, Loa
             op_source.display()
         )));
     }
+    verify_extra_op_sources(&manifest, op_source)?;
     let Some(entries) = manifest.get("ops").and_then(Value::as_array) else {
         return Err(LoadError::Invalid("ops manifest has no `ops` array".into()));
     };
@@ -737,6 +766,7 @@ pub fn emit_corpus() -> Result<Vec<(&'static str, String)>, String> {
         ("packet.reencode", packet_corpus::emit()?),
         ("snbt.parse", snbt),
     ];
+    corpora.extend(entity_corpus::emit());
     corpora.extend(gameplay::emit());
     corpora.sort_by_key(|(op, _)| *op);
     Ok(corpora)

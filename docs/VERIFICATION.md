@@ -557,8 +557,11 @@ L = several days / multiple rounds. Ordered by risk x already-ported-unverified 
   | `trade.offers` | 1,088 | 0 | 0 | 1,088 |
 
 - `recipe.match`: all 1,585 recipes (7,928 crafting, 1,749 single-input cooking/stonecutting and 288 smithing
-  cases) against exact, near-miss, shuffled-shapeless and mirrored-shaped grids; result is item, count and the sorted
-  component-patch ids. The 94 unavailable inputs are the special recipes Rust has no matcher for
+  cases) against exact, near-miss, shuffled-shapeless and mirrored-shaped grids; the result is the item, the count and
+  every component-patch entry with its value (Paper encodes it with the component's codec under `JsonOps`; both
+  sides print canonical JSON with sorted keys; Rust's component values are the JSON text of the recipe document or of
+  the assembler, e.g. the mixed `dyed_color` RGB, the `trim` material and pattern, the `suspicious_stew_effects` list).
+  All 30 `dyed_color`, 36 `trim` and 68 `suspicious_stew_effects` results match in value, not only in name. The 94 unavailable inputs are the special recipes Rust has no matcher for
   (banner duplicate 64, firework star 5, decorated pot / book cloning / firework rocket / repair item 4 each,
   firework star fade / map extending / shield decoration 3 each).
 - `enchant.select`: 516 enchantment cost cells (43 enchantments x levels), 864 `slot_cost` cells and 1,872
@@ -567,7 +570,10 @@ L = several days / multiple rounds. Ordered by risk x already-ported-unverified 
 - `effect`: 40 mob effects x 13 amplifiers. The 48 mismatches are one root cause (#817): Paper widens
   `float`-literal modifier amounts (`0.2F`), Rivet stores the `f64` literal.
 - `scoreboard.saved_data`: `ScoreboardSaveData` codec round trip, compared in canonical SNBT with compound
-  keys sorted (D12: Java fastutil hash order vs Rivet insertion order). Five documents are excluded:
+  keys sorted (D12: Java fastutil hash order vs Rivet insertion order) and, in the stored form, one holder's
+  `PlayerScores` entries sorted by objective (Paper keys a holder's scores by `Objective` identity hash, so their order
+  changes with every JVM start and cannot be recorded; the order of the holders, a function of `String.hashCode`,
+  is compared). Five documents are excluded:
   four on packed hash order (#818) and one on a duplicate team name, which Paper merges and Rivet rejects (#819).
 - `loot.roll`: 1,355 tables x 16 seeds. Rust answers the 1,113 `blocks/*` tables (17,808 inputs) with
   `rivet_world::block::drops::BlockLootTable` over `LegacyRandomSource(seed)`; a stack is compared as
@@ -595,7 +601,11 @@ L = several days / multiple rounds. Ordered by risk x already-ported-unverified 
   shears or brush for the fishing, shearing and archaeology tables), the request's block default state,
   a fresh entity only where a table requires one, generic damage source; no killer player, block entity or
   explosion radius. Seeds are 16 fixed non-zero values. Trade offers use the plains villager variant only,
-  with the loops of `AbstractVillager.addOffersFromItemListings` (Bukkit acquire event omitted).
+  with the loops of `AbstractVillager.addOffersFromItemListings` (Bukkit acquire event omitted). The gameplay ops
+  run on the process's bare Bukkit state: the entity ops install a process-wide proxy `Bukkit.server`, which makes
+  `EntityType.create` throw a `ClassCastException` (proxy to `CraftServer`), so each gameplay request hides it for
+  the call and restores it, and a golden does not depend on which op family ran first. Op sources are pinned by
+  the manifest's `extra_op_sources` (`GameplayOps.java`, `GameplayData.java`, beside `EntityOps.java`).
 - Named gaps: 107 `loot.roll` cells and 48 `trade.offers` cells are recorded as `threw` because the level
   shell lacks the surface they need (loot: `chests/shipwreck_map`, `entities/drowned`, `entities/ender_dragon`,
   `entities/pillager`, `entities/player` and `entities/wither` for all 16 seeds, `chests/underwater_ruin_big`
@@ -611,6 +621,12 @@ L = several days / multiple rounds. Ordered by risk x already-ported-unverified 
   `scripts/ledger_check.sh` is green.
 - Run: `cargo run -p rivet-parity -- ops check` (offline) or `-- ops live` (needs the Paper runtime);
   `python3 tools/rivet-reference-oracle/harvest_gameplay.py` regenerates the corpus source.
+
+**Status of item 9 (entity verification, pure-op half).**
+- *Ops* (`tools/rivet-reference-oracle/src/EntityOps.java`, Rust twins in `tools/rivet-parity/src/ops/entity.rs`, corpora from `entity_corpus.rs`): `damage.calc` (`CombatRules.getDamageAfterAbsorb` over a damage x armor x toughness grid with edge floats plus 1,500 seeded fractional inputs, `getDamageAfterMagicAbsorb` over damage x protection, and the data-driven definition and tag membership of all 51 vanilla damage types), `damage_source.scaling` (`DamageSource.scalesWithDifficulty` and the real `Player.hurtServer` difficulty scaling: 51 types x 7 attacker shapes x 4 difficulties, plus damage sweeps), `food.exhaustion` (real `FoodData.tick/eat/addExhaustion` scripts over difficulty x `natural_health_regeneration` x 18 start states, edge steps and 320 seeded scripts), `xp.curves` (real `ServerPlayer` experience methods: `getXpNeededForNextLevel` over the level-overflow edges, level/point arithmetic, the level-up sound cool-down, setters, enchanting). The live-entity surfaces use entities allocated without their constructor; the exact harness contract is the class comment of `EntityOps.java` (the Rust side reproduces it).
+- *Scoreboard (2026-11-24).* `damage.calc` 10,233 declared, 10,023 executed and matched, 210 excluded; `damage_source.scaling` 1,764 of 1,764; `food.exhaustion` 518 of 518; `xp.curves` 955 of 955; 0 mismatched; recorded-vs-live and Rust-vs-live both pass on a live Paper boot. The one divergence is #816: `get_damage_after_absorb` clamps the armor fraction to [0,1] without a weapon item, Paper only clamps on the weapon path, so a negative armor total (the 210 of the 308 armor -3.0 inputs whose damage makes the fraction negative) answers more damage in Paper. Filed, not fixed; `input:` rows in `exclusions.tsv`.
+- *Unavailable (not ops, with the reason).* The Breach path of `getDamageAfterAbsorb` (a weapon item makes Paper run `EnchantmentHelper.modifyArmorEffectiveness` through a loot context built from the live victim and `ServerLevel`); `LivingEntity.getDamageAfterArmorAbsorb` and the `BYPASSES_ARMOR`/`BYPASSES_ENCHANTMENTS` branches around it (victim armor attributes and inventory); the resistance and absorption stages of `handleEntityDamage` (`apply_resistance`: active effects); negative and non-finite damage through `Player.hurtServer` (`LivingEntity.hurtServer` clamps it after the scaling; Rivet's composed `DamagePipelineState::hurt_server` clamps first and rejects zero damage, found by reading and filed as #824, so the composed path belongs to the arena half); the Bukkit event pipeline (events are never cancelled or modified in the harness).
+- *Still open (arena half).* Projectile flight, fall damage, fluid contact, knockback and the seed-injection site table need item 7 arenas and a seed contract; AI waits for movement/physics rows. The exit criterion (a V2 row per `damage`, `projectile`, `survival`, `storage`, `ai` module) is therefore met only for the damage (`combat_rules`, `damage_source`, `damage_type`) and survival (`food`, `experience`) files; `projectile`, `storage` and `ai` remain open. The four ops are in `rivet-parity ops live`.
 
 Deferred, deliberately: GameTest runner parity (L6) rides on item 7 and issues #474/#475; Paper JUnit
 and the plugin corpus (L8) start with the adapter (#494, #504). Their ledger rows should be created now

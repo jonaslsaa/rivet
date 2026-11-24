@@ -47,6 +47,10 @@ pub fn handler(op: &str) -> Option<Handler> {
         "recipe.match" => Some(super::gameplay::recipe::recipe_match),
         "scoreboard.saved_data" => Some(super::gameplay::scoreboard::scoreboard_saved_data),
         "trade.offers" => Some(super::gameplay::trade::trade_offers),
+        "damage.calc" => Some(super::entity::damage_calc),
+        "damage_source.scaling" => Some(super::entity::damage_source_scaling),
+        "food.exhaustion" => Some(super::entity::food_exhaustion),
+        "xp.curves" => Some(super::entity::xp_curves),
         _ => None,
     }
 }

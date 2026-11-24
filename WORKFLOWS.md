@@ -1,200 +1,51 @@
-# Rivet Agent Orchestration Design
+# Rivet Workflows
 
-How we run the port with Claude Code workflows. Companion to `RESEARCH.md`.
+How the port is driven with Claude Code workflows. Background and rationale: `docs/background.md`. Roadmap context: `ROADMAP.md` section 3. The merge gate is `scripts/gate.sh`; there is no hosted CI (D10).
 
-## Design principles
+## Rules that hold for every workflow
 
-1. **Durable state lives in git, not in workflows.** Workflows crash, sessions end, resume caches are session-scoped. The single source of truth is `MANIFEST.tsv` (the work queue) plus committed code. Every workflow invocation is a stateless, idempotent executor over the manifest: it reads unit status, skips anything already `done`, and the orchestrator script (never the agents) writes status updates back.
-2. **Disjoint-file assignment beats worktrees.** Bun used 4 worktrees × 16 agents because their agents shared files. We can do better: the scaffold phase pre-creates every crate, `mod` declaration, and stub file *serially*, so translation agents each own a disjoint set of files in the main tree. No worktrees, no merge stage, no conflicts. Worktree isolation is reserved for the rare agent that must touch shared files (`Cargo.toml`, `lib.rs`) — or better, the orchestrator batches those edits itself between waves.
-3. **Translation does not gate on compilation.** Bun's insight: translate everything first, then burn down compiler errors as a separate crate-by-crate phase. Requiring `cargo check` green per-unit serializes the whole wave on the slowest unit and causes agents to "fix" errors by deleting code.
-4. **Reviewers never see the implementer's context.** Diff + Java original + drift checklist only. Schema-forced verdicts.
-5. **Fix the process, not the output.** When the same bug class appears in ≥2 units, the fix is an edit to `PORTING.md`/the wave prompt, then re-run — not hand-patching. The main session (campaign controller) owns this.
-6. **The oracle gates promotion, agents gate merges.** Unit-level: adversarial review. Wave-level: `cargo check` clean + unit tests. Milestone-level: differential oracle (worldgen hashes, packet conformance, azalea bot scenarios) before a milestone branch promotes to `main`. No agent may weaken a test or the oracle to go green — enforced in every prompt and checked by reviewers.
+- **Durable state lives in git.** `MANIFEST.tsv` and the ledgers (`docs/ledgers.md`) are the work queue. Workflows are stateless executors; the controller (main session) selects rows, passes them in as args, and updates the manifest. Workflows never read `MANIFEST.tsv` themselves.
+- **Launch with `scriptPath`.** Run each workflow by passing the absolute path of its script, `<main checkout>/.claude/workflows/<name>.js`, as `scriptPath`, with the args object below. Do not rely on launching by name.
+- **Pin the worktree.** Workflow agents inherit the session cwd, so every lane workflow takes the absolute `worktree` path and pins it in every prompt. That lets several lanes run at once, one worktree and branch per lane. Paper sources are read from the main checkout's `working/Paper`.
+- **Agents commit, the controller pushes.** No workflow pushes, opens a PR or merges. Agents never run `git stash`, `git reset`, rebase or force-push, and never weaken a test, fixture or the oracle to go green.
+- **Fresh reviewers.** Reviewers are new instances each round, see code and Java originals rather than the implementer's reasoning, and return schema-forced verdicts. The implementer never judges its own convergence.
+- **Fix the process, not the output.** If the same bug class appears in two units, edit `PORTING.md` or the prompt and re-run instead of hand-patching.
+- **Tests (D18).** Only ported Paper JUnit tests, tests backed by a Java-generated fixture, and tickdiff or client scenarios. Do not invent behavioural unit tests.
 
-## The manifest
+## Scripts (`.claude/workflows/`)
 
-`MANIFEST.tsv`, one row per **unit** (a class cluster that translates together — not per Java file; cyclic Java clusters must move as one unit):
+`?` marks an optional arg; defaults follow `=`.
 
-```
-id	java_package	java_paths	source_root	files	loc	crate	wave	cycle	needs_split	deps	status	attempts	notes
-mc.nbt	net.minecraft.nbt	minecraft:net/minecraft/nbt/Tag.java,...	minecraft	27	3109	rivet-nbt	3	nbt		com.mojang.serialization,net.minecraft,net.minecraft.util	done	1	
-mc.nbt.utils	net.minecraft.nbt	minecraft:net/minecraft/nbt/NbtUtils.java	minecraft	1	560	rivet-nbt	5		mc.nbt.snbt,mc.nbt.text,net.minecraft.nbt,...	pending	0	
-```
-
-Statuses: `pending → translated → reviewed → fixed → done`, plus `blocked(reason)` for human triage. Built by `scripts/analyze_graph.py` (run with `--split-nbt` to fold in the net.minecraft.nbt class-cluster split, `--split-network` to split the mc.network package into mc.network.buf / mc.network.framing / residual mc.network, `--split-game` to split mc.network.protocol.game into the join-critical mc.network.protocol.game.join / .chunk / .serverbound units plus a residual — the M1 protocol wave's units — `--split-world` to split the oversized mc.world.level.* packages (issue #176) into right-sized class-cluster units: levelgen into random / noise / noisegen / settings / surface / spawner, biome into core / source / data, the feature and feature.configurations packages fully partitioned into their independent leaf features/configs, blockpredicates into core / combinators / states / simple, placement into core / repeating / filter / simple, chunk fully partitioned into wire / access / support / generator (the palette-container value layer, the #183 in-memory chunk data SCC, its dependency-free leaf types, and the #185 generator stack), templatesystem fully partitioned into core / rules / processors, lighting into core / engine, and storage into a LevelStorageSource residual plus version / leveldata / primaryleveldata / saveddata / value clusters, and `--split-server` to split the oversized net.minecraft.server.level package (issue #227) into the #185 pipeline spine — chunkmap / holder / distance / task / level / tracker / view / servercache / light / ticket / region clusters plus a mc.server.level residual that keeps the pre-split id so the 200+ external dependents on net.minecraft.server.level resolve to one hub — all staying wave=3 / cycle=27 inside the giant SCC); rerunning it is idempotent and preserves each unit's `status`/`attempts`/`notes` by id. Each `java_paths` entry is `root:relpath`, prefixed with the source root the file was found under (`minecraft:`, `paper-server:` or `paper-api:`), so a physical file is identified unambiguously even when the same relative path exists under two roots (the four io.papermc.paper.registry `package-info.java` pairs are distinct entries). `source_root` is the comma-joined list of the distinct roots the unit's files span; the analyzer validates that every on-disk Java source is owned exactly once and fails fast on any duplicate. `cycle` (SCC id) and `files`/`loc` are structural graph facts that persist even for done units; `needs_split` is the actionable pre-translation split state — `yes` only for units that are not `done` and own more than 15 files, so a completed unit never advertises itself as a splitting candidate while its `cycle` membership stays visible. `deps` are comma-joined java packages, or unit ids (`mc.nbt.snbt`) where a unit must name a sibling unit that shares its `java_package`. The wave-picker selects only units whose `deps` are `done`, preferring low-wave cycle-free units.
-
-## Parallelization: tracks, waves, and the big cycle
-
-**Measured fact (analyze_graph.py): 535 of 697 package units form one giant dependency cycle** —
-entity↔level↔server back-references make most of Minecraft a single SCC at package level. Implications:
-- Topological ordering alone can schedule only ~160 units. The rest rely on the **stub-first strategy**: scaffold + `// STUB(unit-id)` declarations let any unit translate against not-yet-ported neighbors; semantic convergence is enforced by burndown, review, and the oracle — not by ordering.
-- Epic #9 (class-cluster SCC refinement) is load-bearing, not cleanup: it right-sizes units inside the blob.
-- `MANIFEST.tsv` columns `wave` (topo depth), `cycle` (SCC id), `needs_split` encode this; the wave-picker prefers low-wave cycle-free units and otherwise schedules cluster-sized bites of the big SCC.
-
-**Concurrent tracks** (independent agent sessions/workflows, from day one):
-- **A — oracle/infra**: epics #1–3 (harness, azalea driver, gate/fuzz tooling).
-- **B — foundation crates**: epics #4–8 — util, nbt, serialization, brigadier, registry-codegen are mutually independent; up to five parallel sessions.
-- **C — manifest refinement**: epic #9.
-- **D — adapter de-risk**: epic #14 (FFM spike) as soon as the M1 skeleton exists.
-The serial spine is protocol → join → world → entity → gameplay; tracks A/C/D and `rivet-api` ride alongside. Within any epic, `translate-wave` pipelines units with disjoint file ownership; across crates, waves run concurrently without conflict.
-
-### Parallelism mechanics: when worktrees, when not
-
-Three tiers, isolation matched to conflict risk:
-1. **Within a wave (same session)**: no worktrees. The scaffold pre-creates crates/mod trees/stubs so workflow agents own disjoint files in one checkout — nothing to merge, and one shared cargo `target/` keeps incremental builds warm. This is deliberate (Bun needed 4 worktrees because their agents shared files; we design the sharing away).
-2. **Across epics/tracks (multiple Claude sessions)**: one session per epic, each in **its own git worktree + branch** (`claude --worktree`, background agents with worktree isolation, or `git worktree add`). Sessions never share a checkout — cross-track conflicts are resolved at PR merge, gated by `scripts/gate.sh` run on the merged result (D10 — no hosted CI). This is the intended way to scale beyond one session: 3–5 concurrent epic sessions, each producing PRs against `main`.
-3. **Shared-file hotspots** (`Cargo.toml`, `lib.rs` mod lists, MANIFEST.tsv): only the wave controller edits these, serially, between waves. If two tracks both need a workspace change, it goes in a tiny standalone PR first.
-Caveats: each worktree gets its own cargo `target/` (disk + cold builds — do not share one via symlink; concurrent cargo runs fight over the lock; consider sccache if this hurts). Keep MANIFEST.tsv updates append/status-only so PR merges of it stay trivial.
-
-## GitHub process wiring
-
-Milestones M0–M4, epics (label `epic`) per track live on github.com/jonaslsaa/rivet. Agents decompose epics into sub-issues using the **port-unit issue template**, work them via small PRs (PR template carries the fidelity checklist), and update `MANIFEST.tsv` in the same PR. **No hosted CI (D10)**: the controller runs `scripts/gate.sh` (fmt → clippy -Dwarnings → tests → oracle verify → rivet-parity → Paper-vs-Paper scenario → machete) on every PR before merging — a red gate blocks the merge. The oracle steps never silently skip: missing prerequisites make the gate exit nonzero with an UNVERIFIED status (distinct exit code 3) and a per-item fix list; `--require-oracle` turns any missing oracle prerequisite into a hard failure (exit 1). `blocked` label = controller triage; `regression`/`parity` labels come from `verify-oracle` runs.
-
-## Workflow catalog (`.claude/workflows/`)
-
-`scaffold`, `translate-wave`, `check-burndown`, `review-pr`, `worktree-task`, and `release-prep` exist as executable scripts in `.claude/workflows/` — invoke them by name with explicit `args`; manifest workflows receive rows selected by the controller and never read MANIFEST.tsv themselves. Every lane workflow takes the absolute path of its lane worktree (`worktree`) and pins it in every prompt, because workflow agents inherit the session cwd; that is what lets several lanes run at once. The rest below are designs to be scripted when their phase begins.
-
-Args at a glance (`?` = optional, default after `=`):
-
-| Script | Args |
-|---|---|
-| `scaffold` | `{worktree, family, javaPaths, crate, modulePath, implModel?='sonnet', implEffort?='high'}` — `javaPaths` are manifest `root:relpath` entries; one author plus one fresh reviewer per round, at most 2 rounds; commits on the lane branch |
-| `translate-wave` | `{waveId, worktree, units: [{id, java_package, java_paths, crate, notes?}], rigor?='full', implModel?='sonnet', implEffort?='high', reviewModel?=session model, reviewEffort?='high'}` — `rigor` `full` (two-lens first round, at most 3 rounds) or `lean` (one combined reviewer per round, at most 2 rounds); commits per unit on the lane branch |
-| `check-burndown` | `{worktree, maxRounds?=8, fixModel?='sonnet', fixEffort?='high'}` |
-| `worktree-task` | `{worktree, task, maxRounds?=3, commit?=true, implModel?, implEffort?}` — the model/effort overrides apply to the implementer and fixers only |
-| `release-prep` | `{worktree, task, maxRounds?=6, checks?}` |
-| `review-pr` | `{pr}` or `{range}`, plus `effort?='high'` (`max` for spine PRs and train reviews) |
-
-No workflow pushes; agents commit on the lane branch where the script says so, and the controller pushes.
-
-| Workflow | Shape | Purpose |
+| Script | Args | Behaviour |
 |---|---|---|
-| `analyze-graph` | fan-out readers → merge | Build/refresh MANIFEST.tsv from Java sources |
-| `scaffold` | author → review→fix loop (≤2 rounds) | One family's mirrored files, `mod` lines and type/fn signatures with `STUB(<unit-id>)` bodies, checked against the Java and `cargo check -p`; merges alone, before the family's leaf waves |
-| `translate-wave` | pipeline per unit | The core loop (below) |
-| `check-burndown` | loop until clean | Compiler-error work queue, partitioned by module |
-| `worktree-task` | impl → gate→fix loop | Non-translation tasks (tooling, harnesses, codegen, infra) in an isolated worktree |
-| `release-prep` | refresh → check → review→fix loop | Bring an already-implemented worktree to a clean, current-main, exact-reviewed head for the controller's serialized strict gate |
-| `review-pr` | single agent (effort arg, default high) | Pre-merge "nuke": whole-PR cross-unit review, then `gate.sh` |
-| `verify-oracle` | parallel scenarios | Differential tests vs vanilla/Paper; failures → new manifest rows |
-| `shim-gen` | pipeline per API class | JVM adapter codegen (below) |
-| `doc-drift` | small panel | After each wave: mine review findings for systemic patterns → proposed PORTING.md edits |
+| `scaffold` | `{worktree, family, javaPaths, crate, modulePath, implModel?='sonnet', implEffort?='high'}` | One agent writes a family's mirrored files, `mod` lines and type/fn signatures with `STUB(<unit-id>)` bodies from the Java; one fresh reviewer per round checks the surface against the Java and `cargo check -p <crate>`. At most 2 rounds. Commits on the lane branch. The scaffold PR merges alone, before the family's leaf waves. `javaPaths` are manifest `root:relpath` entries; `modulePath` is the Rust module inside `crates/<crate>/src`. |
+| `translate-wave` | `{waveId, worktree, units: [{id, java_package, java_paths, crate, notes?}], rigor?='full', implModel?='sonnet', implEffort?='high', reviewModel?=session model, reviewEffort?='high'}` | Per unit: implement, then a review and fix loop. `rigor: full` runs two lenses in round 1 (semantic drift; ownership, API and canonical types), then one reviewer per round, at most 3 rounds. `lean` runs one combined reviewer per round, at most 2. Reviewers run `cargo check -p <crate>`; errors in the unit's files are critical. Converged means zero findings and a clean check. Minor-only findings get one blind fix; critical or major after the last round means `blocked`. Units run as a pipeline, and agents commit per unit by explicit path. |
+| `check-burndown` | `{worktree, maxRounds?=8, fixModel?='sonnet', fixEffort?='high'}` | Runs workspace `cargo check`, partitions errors by module, spawns one fixer per partition, and loops until clean or the round cap. Fixers correct the translation; they never delete functionality, and a `todo!()` needs a `blocked` note. |
+| `worktree-task` | `{worktree, task, maxRounds?=3, commit?=true, implModel?, implEffort?}` | For substantive non-translation work (tooling, harnesses, codegen, infra). One implementer, then fresh scoped reviewers each round, then a fixer. From round 2 reviewers get the prior findings and the fixer's disputes, but only after their own fresh pass. `implModel` and `implEffort` apply to the implementer and fixer only; reviewers run at high effort on the session model. `commit` must agree with the task text. |
+| `release-prep` | `{worktree, task, maxRounds?=6, checks?}` | For an already-implemented branch. Each round fetches and **merges `origin/main` into the branch, never rebases** (the branch may be a pushed PR head), runs focused checks, and hands the exact head to a fresh read-only reviewer; confirmed findings go to a fixer that commits locally. Fail-closed: reviewed and checked hashes must match, at least one check command must have run, every changed file must be inspected, the tree must be clean, the branch ahead of and zero behind `origin/main`, and findings empty. Success reports `strict_gate_ready: true` with head, base, check and review evidence. It never runs `scripts/gate.sh`, pushes, opens a PR or merges. |
+| `review-pr` | `{pr}` or `{range}`, plus `effort?='high'` (`low`, `medium`, `high`, `xhigh`, `max`) | One whole-diff reviewer, run once per PR after `check-burndown`. It looks for what per-unit review cannot: cross-unit stub conflicts, aggregate `OWNERSHIP.md` violations, API-surface incoherence, and process violations (weakened tests, smuggled doc edits). Use `max` for spine PRs and train reviews. The controller then runs `scripts/gate.sh`. |
 
-## The core loop: `translate-wave`
+Every script accepts `args` either as an object or as a JSON string.
 
-Args: `{ waveId, worktree, units: [...manifest rows...], rigor?, implModel?, implEffort?, reviewModel?, reviewEffort? }` (see the args table above). Each unit carries its exact `java_paths`; the script resolves them against `working/Paper` and prints them, and the implementer reads exactly those files.
+## Controller cycle
 
-Per unit (see `.claude/workflows/translate-wave.js` for the real script):
+1. Pick ready units from the ledger and `MANIFEST.tsv`: units whose deps are `done`, with the family scaffold merged. `scripts/wave_picker.py` helps; the controller builds the args.
+2. `scaffold` once per family, then `translate-wave` per wave in a lane worktree, then `check-burndown` if the workspace does not compile.
+3. `release-prep` to bring the branch onto current `origin/main` with an exact-head review, then `review-pr`, then the serialized `scripts/gate.sh` (run with `--require-oracle` when the oracle must not be skippable). A red gate blocks the merge.
+4. Update `MANIFEST.tsv` and the ledgers in the same PR. Keep `MANIFEST.tsv` edits to generated fields; regenerate with `scripts/analyze_graph.py` (flags in `CLAUDE.md`).
+5. Unit status flows `pending`, `translated`, `reviewed`, `fixed`, `done`, plus `blocked(reason)` for controller triage. Blocked units and units that failed three times stop retrying and surface for a decision.
 
-1. **Implement** — full context: Java source, PORTING.md, OWNERSHIP.md section, stub conventions.
-2. **Review→fix convergence loop** ("golden loop"), at most 3 rounds (`rigor: full`) or 2 (`rigor: lean`):
-   - Full rigor, round 1: **two** fresh diff-only reviewers with different lenses (semantic drift / ownership+API+canonical types) — first contact has the highest yield. Lean rigor uses one combined reviewer every round.
-   - Later rounds: **one** fresh full-lens reviewer per round, blind to prior findings, reviewing the post-fix state.
-   - Every reviewer runs `cargo check -p <crate>` (`CARGO_BUILD_JOBS=4`); errors in the unit's own files are a critical finding. Zero findings and a clean check → converged. After the last unit settles, one check reports `cargo check -p` per wave crate and any uncommitted leftovers. Findings → fixer applies them (or disputes findings that are factually wrong, with reasons), next round re-verifies.
-   - After the final round: minor-only findings get one blind fix and pass as `converged: with-unverified-minor-fixes`; anything critical/major → `blocked` for controller triage. The loop's verdict comes from agents that never met the implementer — the implementer never judges its own convergence.
-3. **Per-PR "thermo-nuclear" review** (`review-pr`; `effort: max` for spine PRs and train reviews, default `high`) runs once per PR after burndown, before `gate.sh` — it hunts what per-unit reviews structurally can't see: cross-unit stub conflicts, aggregate OWNERSHIP.md violations, API-surface incoherence, process violations (weakened tests, smuggled doc edits).
+Parallelism: within a wave there are no worktrees (disjoint files in one checkout); across lanes there is one worktree and branch per lane; shared-file hotspots (`Cargo.toml`, `lib.rs` mod lists, `MANIFEST.tsv`) are edited only by the controller, or in a tiny standalone PR first.
 
-Notes:
-- **pipeline(), not phase barriers** — unit A runs its review loop while unit B is still translating.
-- Reviewers are **fresh instances every round** and see only code + Java originals, never the implementer's reasoning or previous findings (anchoring kills adversarial yield). Exception: `worktree-task` gate rounds ≥2 receive the prior round's findings and the fixer's disputes — but only AFTER doing their own fresh full-lens pass — because a verifier cannot confirm fixes it has never seen, and disputed-but-wrong findings otherwise resurface forever.
-- Review catches drift early; the oracle is the truth. "Zero findings" never substitutes for parity fixtures — the merge gate stays `review-pr` + `gate.sh` + oracle scoreboard.
-- Agents return structured reports; the **main session** updates MANIFEST.tsv. `translate-wave` and `scaffold` agents commit their own files by explicit path on the lane branch (one unit's commits never include another unit's files); the controller pushes. Agents never `git stash/reset`, rebase, or push (forbidden in every prompt — Bun learned this the hard way).
-- Implementer prompt hard rules: no TODO-and-skip, no inventing APIs, wrapping arithmetic everywhere Java arithmetic exists, `blocked` verdict with reason if the unit can't translate faithfully, one definition per type at its canonical home (a missing hub blocks the unit), and expected test values only from Paper-generated fixtures (hand-written tests earn no verification credit).
+## Comment markers: `STUB` and `RivetTodo`
 
-## `release-prep`
+`scripts/check_markers.py` enforces both forms in the gate.
 
-Use `.claude/workflows/release-prep.js` for a branch whose implementation is already complete. Args are `{worktree, task, maxRounds?, checks?}`. Each round fetches and merges current `origin/main` into a clean branch (never a rebase: the branch may already be a pushed PR head), runs focused mechanical checks, and gives the exact head to a fresh read-only reviewer. Confirmed findings go to a fixer that commits locally; disputed findings must be justified and are rechecked by the next fresh reviewer.
+- `// STUB(<manifest-unit-id>) <reason>`: no implementation here. The id must exist and must not be `done`; a STUB on a done unit is stale.
+- `// RivetTodo(#<issue>) <reason>`: usable partial port with a tracked gap. The argument is a GitHub issue number.
 
-Success is fail-closed: the reviewed head/base must match the refreshed and checked hashes, focused checks must report at least one command, every changed file must be inspected, the branch must be clean, ahead of and zero commits behind current `origin/main`, and the reviewer must return an empty findings list. Empty agent results, contradictory verdicts, dirty leftovers, incomplete inspection, or moving-head evidence cannot produce readiness. The result includes exact head/base/check/review evidence and `strict_gate_ready: true`, but the workflow never runs `scripts/gate.sh`, pushes, opens a PR, or merges — those remain serialized controller actions.
+A line is a marker only when its body begins with the token, the reason is mandatory, both forms on one line is an error, and every `todo!()` or `unimplemented!()` needs a `RivetTodo` on the same line or the line above. On a `done` unit every remaining gap is a `RivetTodo`.
 
-### The Java→Rust semantic-drift checklist (reviewer lens 1)
+## Reviewer drift checklist
 
-The bug classes a Java→Rust port breeds, kept in `PORTING.md` and pasted into every review prompt:
-
-- **Integer overflow**: Java wraps silently; Rust panics in debug. Minecraft's RNG, worldgen, and hashing *depend* on wrapping. Every arithmetic op on Java `int`/`long` ports as `wrapping_*` / `Wrapping<i32>` unless proven otherwise. This is the #1 worldgen-parity killer.
-- `>>` vs `>>>`: Java has both arithmetic and logical shifts; map to the right one on the right signedness.
-- **HashMap/HashSet iteration order** assumptions; Java `HashMap` order ≠ `std::collections::HashMap` order — flag any iteration whose order is observable.
-- **UTF-16 vs UTF-8**: `String.length()`/`charAt` semantics, `char` arithmetic.
-- **Float parity**: MC uses lookup-table `sin`/`cos` (`Mth.sin`) — port the table, don't call `f32::sin`. `Math.floor(double)→int` casts saturate differently than Rust `as`.
-- `null` → `Option` elisions: any Java null-check dropped in translation.
-- `equals`/`hashCode` identity vs value semantics; `==` on boxed types.
-- Dropped `synchronized`/`volatile`; static-init order dependencies.
-- Eager vs lazy: `unwrap_or(expensive())` where Java had short-circuit; side effects inside `debug_assert!`.
-
-## `check-burndown`
-
-After each wave: run `cargo check` (orchestrator or a single agent), partition errors by module, spawn one fixer per partition, loop until clean or dry.
-
-```js
-let rounds = 0
-while (rounds++ < 8) {
-  const check = await agent('Run cargo check --message-format=json for the workspace; return errors grouped by module.', { schema: ERRORS })
-  if (!check.groups.length) break
-  await parallel(check.groups.map(g => () =>
-    agent(burndownPrompt(g), { label: `burn:${g.module}`, effort: 'low' })))
-  log(`round ${rounds}: ${check.groups.length} modules with errors`)
-}
-```
-
-Fixer rule: errors are fixed by *correcting the translation*, never by deleting functionality or `todo!()` — a `todo!()` requires a `blocked` manifest note.
-
-## Comment markers: `STUB` vs `RivetTodo`
-
-`scripts/check_markers.py` (full gate, offline) enforces the canonical forms. The two markers are semantically distinct:
-
-- `// STUB(<manifest-unit-id>) <reason>` — **no implementation here**; a real port replaces the annotated scaffold wholesale when the owning manifest unit lands. The paren argument is the exact MANIFEST.tsv unit id owning the real port; it must exist and must NOT be `done` (a STUB on a done unit is stale — the stub should have been removed when the unit landed).
-- `// RivetTodo(#<issue>) <reason>` — **usable partial semantic port** with a known, tracked gap. The annotated code is real; only the named aspects are deferred. The paren argument is a positive GitHub issue number (format-only validated offline; existence/closure is a review-time check).
-
-Rules per comment line: a line is a marker only when its body *begins* with the token (a mid-sentence mention is prose); both forms on one line is ambiguous (error); the reason is mandatory; every `todo!()` / `unimplemented!()` must carry a `RivetTodo` on the same line or on the immediately-preceding comment line. Prefer a `RivetTodo` for a partial port you are keeping; keep `STUB` only for genuinely absent implementations.
-
-**Enforced distinction.** The `STUB` vs `RivetTodo` line ("no implementation here" vs "partial port with a tracked gap") is only fully enforced on *pending* units: a `STUB` on a `done` unit is stale (error), so on a done unit every remaining gap collapses into `RivetTodo` — a real port with a tracked gap *and* a genuinely-absent Paper-only surface both appear as `RivetTodo`. That is intentional: once a unit has landed, `STUB`'s "the owning unit will replace this" contract is void, so issue-tracked deferral is the only honest form. Reviewers should not expect a done unit to distinguish the two.
-
-## `verify-oracle`
-
-Runs against a milestone branch, scenarios in parallel: worldgen chunk-hash diff over N seeds vs vanilla, packet round-trips vs recorded sessions, azalea bot scripts (join, move, dig, place, combat) executed against both servers with compared outcomes. Output: structured failure list → converted to manifest rows tagged `regression`. Milestones promote only on green.
-
-### Headless client driver
-
-Use Azalea pinned to an exact Minecraft 26.2-compatible release or Git revision as the headless client for behavioral scenarios. Keep it in an isolated tool package/process with its own pinned nightly Rust toolchain: Rivet's production workspace remains on its pinned stable toolchain, and Azalea's Bevy/ECS dependency graph must not enter any server crate. `rivet-oracle` starts the driver and consumes a versioned, machine-readable JSON transcript.
-
-Each scenario is run with identical seed, configuration, world state, and offline bot identity against Paper and Rivet. Compare normalized observable outcomes—login state, position, inventory, health, chunks, server corrections, and relevant packets—rather than treating a successful connection as sufficient. Preserve raw logs or packet captures for diagnosing differences, but exclude nondeterministic values from the parity comparison only when the exclusion is explicit and justified.
-
-Before Rivet implements enough of the protocol to accept a client, validate the harness by running scenarios Paper-versus-Paper and requiring identical normalized transcripts. Also include a controlled negative case to prove that the comparator detects a known difference. Start with a single join scenario, then add movement, digging, placement, inventory, and combat as the corresponding server functionality lands. The harness uses `online-mode=false`; no Microsoft account is required.
-
-## Test reuse: what we can port, what we must record, what we must build
-
-Measured in the tree: 186 JUnit files (~21k LOC) in `paper-server/src/test` + `paper-api/src/test`, and the vanilla **GameTest framework** (47 files under `net/minecraft/gametest`).
-
-1. **The Java server is the executable oracle** — the replacement for Bun's 60k tests. Never hand-write expected values; generate them from the Java side and check them in as golden fixtures: worldgen chunk hashes per seed, packet captures per scenario, region/NBT files, registry dumps, loot-table rolls with fixed seeds.
-2. **Port the GameTest runner early, reuse vanilla's test content.** Modern Minecraft defines test instances as *data* (structures + test-environment definitions in data packs) executed by the framework. Port the runner (small — 47 files) and the vanilla test content runs against Rivet unchanged. This is the closest thing to a language-independent behavioral suite that exists for Minecraft, and it's the highest-leverage single test investment.
-3. **Port Paper's JUnit tests with their units.** They're mostly registry/API-consistency checks (MaterialTest, BlockDataTest, …) — mechanical to translate, and they pin the API surface. Policy: when a unit's Java class has tests, the same wave translates the tests; the implementer's report lists them and reviewers check the tests weren't weakened in translation.
-4. **Tests-with-translation policy for untested code** (most of the 630k): the implementer writes round-trip/property tests for anything with a serialization or math surface (NBT, packets, RNG, Mth) against the golden fixtures from #1. Behavior-heavy code gets its coverage from GameTests and bot scenarios instead — don't ask agents to invent unit tests for AI/gameplay logic; invented tests just enshrine the translation's own bugs.
-
-**The on-track signal is a parity scoreboard, not vibes**: a checked-in `PARITY.md` updated by `verify-oracle` after each milestone run — % chunks hash-identical over N seeds, % recorded packets round-tripping, GameTests passing/total, Paper JUnit ports green, corpus plugins booting. Wave-level health is cheaper and continuous: `cargo check` clean, per-wave test pass rate, and reviewer-findings-per-unit trending *down* (if it isn't, stop scaling and fix PORTING.md). Any scoreboard number that goes down blocks the next wave — regressions are cheapest the wave they appear.
-
-## The JVM plugin adapter track (`shim-gen`)
-
-Goal: real Paper plugins (jars) run against the Rust server. Architecture:
-
-- **Keep `paper-api` as-is** (plugins compile against it unchanged). Reimplement the *implementation* layer (`CraftServer`, `CraftWorld`, `CraftPlayer`, event dispatch, scheduler) as Java shims that call into Rust over **JNI / Java 22+ FFM (Panama)**.
-- JVM runs **in-process**, plugin code runs on the Rust tick thread itself through FFM upcalls, as Bukkit plugins run on the server main thread (D20).
-- Rust side exposes a stable C ABI facade (`rivet-ffi` crate); events flow Rust → JVM dispatch → mutations back through the facade. Batch per-tick to amortize FFI cost; benchmark event-storm latency *early* (M1), because if this is too slow the whole adapter needs a redesign.
-- **Honest limit**: plugins that reflect into NMS/CraftBukkit internals (many do) cannot work; only API-clean plugins are in scope. Track a compatibility corpus (LuckPerms, EssentialsX-core-commands, Vault, PlaceholderAPI, WorldGuard as stretch) and make "corpus plugin boots and passes its smoke script" the oracle for this track.
-
-`shim-gen` is embarrassingly parallel and highly mechanical — ideal agent work:
-
-pipeline over paper-api classes: **generate** (Java shim + Rust FFI stub from the API signatures) → **compile-gate** (javac + cargo check per class, this track *does* gate per-unit since units are tiny) → **review** (one diff reviewer, `effort: low`) — then integration-test waves that boot the corpus plugins.
-
-This track only needs the Rust core's internal API, so it starts at M1 against the minimal server, de-risking the FFI design years before M4.
-
-## Campaign control
-
-- **The main session is the controller, not a workflow.** Per cycle: pick ready units from MANIFEST (topo order) → `translate-wave` → `check-burndown` → read journals → `doc-drift` → update docs/manifest → commit → next wave. Chained single-phase workflows with judgment between them beat one mega-workflow.
-- **Long autonomous runs**: `/loop` (dynamic self-pacing) with the cycle above as the loop body; wakeups land as workflow notifications arrive. Token budget directives (`+Nk`) with the loop-until-budget guard for bounded overnight runs.
-- **Config prerequisites**: raise the workflow size guideline (default is <15 agents) via "Dynamic workflow size" in /config; pre-allow the build commands (cargo, javac, gradle) to avoid permission stalls mid-wave.
-- **Escalation**: `blocked` units and 3×-failed units stop being retried and surface in the wave report for human/controller decision. Systemic findings (same bug class twice) trigger `doc-drift`, and affected `done` units get re-queued for a targeted re-review.
-- **Model/effort tiering**: implementers inherit session model; reviewers `effort: high`; mechanical work (stubs, burndown, shim codegen) `effort: low`.
-
-## Pilot before scale (non-negotiable)
-
-Exactly like Bun's 3-file trial: pick 3 units from `rivet-nbt` (leaf crate, oracle-testable via NBT round-trip against real region files), run the full `translate-wave` → `check-burndown` → review cycle, then spend a session tuning prompts, schemas, and PORTING.md from what went wrong. Only then scale to full waves.
+The Java to Rust semantic-drift list (wrapping arithmetic, `>>` vs `>>>`, HashMap order, UTF-16 vs UTF-8, `Mth` tables and float parity, dropped null checks, equality semantics, `synchronized`, eager vs lazy evaluation) lives in `PORTING.md` and is pasted into every review prompt.

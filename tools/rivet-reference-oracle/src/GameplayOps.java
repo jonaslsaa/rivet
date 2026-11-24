@@ -68,14 +68,26 @@ final class GameplayOps {
     /**
      * The gameplay handlers load and run vanilla code that logs ("Unknown objective ...", loot and
      * trade warnings) to the process's stdout, the stream live mode speaks JSON Lines on. The first
-     * request switches the root logger off for good; the answers never depend on a log line.
+     * request switches the root logger off for good; the answers never depend on a log line. Each
+     * call also hides the Bukkit server proxy {@code EntityOps} installs (see below).
      */
     private static RivetReferenceOracle.Handler quiet(final RivetReferenceOracle.Handler handler) {
         return (request, dec) -> {
             if (org.apache.logging.log4j.LogManager.getRootLogger().getLevel() != org.apache.logging.log4j.Level.OFF) {
                 org.apache.logging.log4j.core.config.Configurator.setRootLevel(org.apache.logging.log4j.Level.OFF);
             }
-            return handler.run(request, dec);
+            // These ops run on the process's bare state: no Bukkit server. EntityOps installs a
+            // process-wide proxy one (CraftEntity creation then casts it to CraftServer and
+            // throws), so an answer would depend on which op family ran first; hide it for the call.
+            java.lang.reflect.Field bukkit = org.bukkit.Bukkit.class.getDeclaredField("server");
+            bukkit.setAccessible(true);
+            Object installed = bukkit.get(null);
+            bukkit.set(null, null);
+            try {
+                return handler.run(request, dec);
+            } finally {
+                bukkit.set(null, installed);
+            }
         };
     }
 

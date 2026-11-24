@@ -3,8 +3,22 @@
   "kind": "oracle-ops",
   "paper": "26.2-DEV-main@0a99345",
   "paper_commit": "0a99345",
-  "op_source": "tools/rivet-reference-oracle/src",
-  "op_source_sha256": "0eef1e60f5d8425e286115c3f446dcd932ab5ad35b8209ac20ea3dcd7030e172",
+  "op_source": "tools/rivet-reference-oracle/src/RivetReferenceOracle.java",
+  "op_source_sha256": "c7632f0ac7b6a2afffa0fe1f370ec0f8258fe9d7a3d138ed29184dcfaca2c7d3",
+  "extra_op_sources": [
+    {
+      "path": "tools/rivet-reference-oracle/src/EntityOps.java",
+      "sha256": "0ae0659c855adc85d393ee5e74f0632c125c670cff874ca02d838efd5af2b852"
+    },
+    {
+      "path": "tools/rivet-reference-oracle/src/GameplayData.java",
+      "sha256": "f26b0a2a61c826d9f5df313f84c1ef73245ba5dc92333fdda323a507ecb112e2"
+    },
+    {
+      "path": "tools/rivet-reference-oracle/src/GameplayOps.java",
+      "sha256": "213f90406c4685069d360d9587854738cde2bf17906bdca70117f24c894b922e"
+    }
+  ],
   "ops": [
     {
       "op": "codec.reencode",
@@ -25,6 +39,24 @@
       "output_n": 62
     },
     {
+      "op": "damage.calc",
+      "corpus": "corpus/damage.calc.jsonl",
+      "corpus_sha256": "d3b3da6c37c9dee219a414509caa6d92d9bf05e9fe879b247c878720c121f0d9",
+      "corpus_n": 10233,
+      "output": "damage.calc.jsonl",
+      "output_sha256": "c715b7b3ea7a9af3e31e7658d62f0e4b6c78e9ea1bbb579c052211f109267931",
+      "output_n": 10233
+    },
+    {
+      "op": "damage_source.scaling",
+      "corpus": "corpus/damage_source.scaling.jsonl",
+      "corpus_sha256": "0d5575e79d070ceba1c60222b371b8089e949b8ba3db45f39278694734b961f7",
+      "corpus_n": 1764,
+      "output": "damage_source.scaling.jsonl",
+      "output_sha256": "782962c2c27361343a585217533c775f741c08e2c33b5d875ad3366b130e0fd0",
+      "output_n": 1764
+    },
+    {
       "op": "effect",
       "corpus": "corpus/effect.jsonl",
       "corpus_sha256": "8c8d5bfbb67c2ad32d0fa0a40993829372fb2aa95bcec472c5be79aa02b9ea68",
@@ -41,6 +73,15 @@
       "output": "enchant.select.jsonl",
       "output_sha256": "96028ef67f7adddfe4303cc6d45a7a75549a55f4eb3bafbd57165a396efa0eb8",
       "output_n": 3252
+    },
+    {
+      "op": "food.exhaustion",
+      "corpus": "corpus/food.exhaustion.jsonl",
+      "corpus_sha256": "0878bcc433ec930e436cedf7a580d5466fcf5adbe3897332349db5b6c28d9cf4",
+      "corpus_n": 518,
+      "output": "food.exhaustion.jsonl",
+      "output_sha256": "5d6c5d5ec04314804027cd472a016818993f6ec9e258bc93dad9acb5e4227c79",
+      "output_n": 518
     },
     {
       "op": "loot.roll",
@@ -75,7 +116,7 @@
       "corpus_sha256": "d72a87d8f99777390e5f4ddfb436be14fe4292f58d77117866333d57ba516a09",
       "corpus_n": 9965,
       "output": "recipe.match.jsonl",
-      "output_sha256": "71c1ac87d6ee797cbb830f46f2d03c63fedd4adbadfe28d85629d061e5a5f709",
+      "output_sha256": "a164203a2cc82125553f9784eac79e7477c0b11a37ba9f0eb4a9f1af574d4690",
       "output_n": 9965
     },
     {
@@ -104,6 +145,15 @@
       "output": "trade.offers.jsonl",
       "output_sha256": "19f0b240f86fbc674c92f9429af94e244883e57478f7cad6a86e6cd6d9592b6f",
       "output_n": 1088
+    },
+    {
+      "op": "xp.curves",
+      "corpus": "corpus/xp.curves.jsonl",
+      "corpus_sha256": "5a7eb8f3ef93f33ba97f31470815933ed713b7c1d122f7c250480f697ee881b4",
+      "corpus_n": 955,
+      "output": "xp.curves.jsonl",
+      "output_sha256": "1252ac0666b73a0204cd3072a01d710dd2e736ca048be3ce19f725cc9c750723",
+      "output_n": 955
     }
   ]
 }

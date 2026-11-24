@@ -84,7 +84,11 @@ fn sort_holder_scores(stored: &Tag) -> Tag {
             to += 1;
         }
         let mut run: Vec<Tag> = entries[from..to].to_vec();
-        run.sort_by_key(|entry| text(entry, "Objective").encode_utf16().collect::<Vec<u16>>());
+        run.sort_by_key(|entry| {
+            text(entry, "Objective")
+                .encode_utf16()
+                .collect::<Vec<u16>>()
+        });
         sorted.extend(run);
         from = to;
     }
@@ -142,7 +146,10 @@ pub fn scoreboard_saved_data(request: &Map<String, Value>) -> Outcome {
         let Ok(stored) = stored.encode_nbt() else {
             return Err("encode");
         };
-        Ok((canonical_snbt(&direct), canonical_snbt(&sort_holder_scores(&stored))))
+        Ok((
+            canonical_snbt(&direct),
+            canonical_snbt(&sort_holder_scores(&stored)),
+        ))
     });
     match answered {
         Ok(Ok((codec, loaded))) => {

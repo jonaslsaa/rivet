@@ -33,13 +33,26 @@ The tool currently supports:
   unregistered id, a decode failure or a `DecoderException` is an input
   rejection. Paper's `GlobalConfiguration` is initialised with defaults first.
 
+- `damage.calc`, `damage_source.scaling`, `food.exhaustion`, `xp.curves` — the pure
+  entity ops (VERIFICATION item 9), implemented in `src/EntityOps.java` (every `src/*.java`
+  is compiled, and the manifest pins each one beside the main file). Floats travel as
+  `0x`+8 hex digits in requests and results. `damage.calc`: `{fn:"after_absorb", damage,
+  armor, toughness}` and `{fn:"after_magic_absorb", damage, protection}` run
+  `CombatRules` (no weapon, so no victim is read), `{fn:"type", damage_type}` answers the
+  vanilla damage type definition and its tags. The other three run the real Paper
+  methods (`Player.hurtServer` scaling, `FoodData.tick/eat/addExhaustion`,
+  `ServerPlayer.giveExperiencePoints/Levels`) on entities allocated without their
+  constructor; the exact harness contract (what the level, health, events and sounds
+  answer) is the class comment of `EntityOps.java`, and the Rust twin in
+  `tools/rivet-parity/src/ops/entity.rs` reproduces it.
+
 - The gameplay-data ops (`GameplayOps.java`, `GameplayData.java`; VERIFICATION
   section 5 item 8), each swept over the whole vanilla registry it names:
   - `recipe.match {recipe, kind, ...}` — `Recipe.matches(input, level)` and the
     assembled stack for one recipe of the data pack and one input (`crafting
     {width,height,grid}`, `single {input}`, `smithing {template,base,addition}`;
     a cell is `""` or `<item id>[#<count>]`). Answers `{match, result?, threw?}`
-    with `result = {item, count, components}` (sorted component-patch ids).
+    with `result = {item, count, components}` (component-patch id to its value, encoded by the component's codec under `JsonOps`, in canonical JSON).
   - `loot.roll {table, seed, luck, entity, block}` — `LootTable.getRandomItems(params, seed)`
     over fixed `LootParams` built from the table's own context-key set (below).
     Answers the ordered stacks as SNBT (`items`), or `threw`.
@@ -54,7 +67,8 @@ The tool currently supports:
     over `VillagerTrade.getOffer(LootContext)`), as `MerchantOffer.CODEC` SNBT.
   - `scoreboard.saved_data {input}` — `ScoreboardSaveData.TYPE.codec()` round trip
     and the encoding after loading into a scoreboard; compound keys sorted in the
-    canonical SNBT (D12).
+    canonical SNBT (D12), and one holder's `PlayerScores` entries sorted by objective
+    (Paper iterates them by `Objective` identity hash, a different order on every JVM start).
 
   **The live-server context.** There is no running `MinecraftServer`. The reloadable
   data (loot tables, recipes) loads the way `ReloadableServerResources` loads it
@@ -86,8 +100,9 @@ request silences log4j until the registries are ready (live mode speaks JSON
 Lines on that stream). `harvest_datapack.py` extracts `codec.reencode` seeds
 from the vanilla data pack in the Paper jar into `fixtures/ops/corpus-src/`.
 
-All thirteen operations live in one op registry (`OPS` in
-`RivetReferenceOracle.java`; the gameplay ops register from `GameplayOps.java`). Each op declares its result-key order (the
+All seventeen operations live in one op registry (`OPS` in
+`RivetReferenceOracle.java`, the entity ones contributed by `EntityOps.java` and the
+gameplay ones by `GameplayOps.java`). Each op declares its result-key order (the
 canonical-JSON contract: results are re-emitted in exactly that order, an
 undeclared key or a raw floating-point number is an `unavailable` fault — floats
 travel as IEEE-754 bit hex via `f32Bits`/`f64Bits`, with human decimals only in
