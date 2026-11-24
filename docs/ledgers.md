@@ -53,7 +53,9 @@ and their blind spots are listed in the script's header.
 
 One row per verification surface, with the VERIFICATION 3.1 columns plus
 `fixtures` and `note`. Rows cover the `rivet-parity` checks, every oracle probe
-script, the oracle fixture kinds, the other committed goldens, the
+script (fixture ownership from `tools/rivet-oracle/probes.tsv`), each recorded
+oracle op (`op.<op>.recorded` offline, `op.<op>.live` against a Paper boot),
+`rivet-oracle regen --check` (`regen.probes`), the oracle fixture kinds, the other committed goldens, the
 `rivet-oracle verify` boots, the join capture, Anvil V1a, the codegen probes,
 the scenario rows, `hash-diff` and `generated-full` (`INACTIVE`), and the Paper
 JUnit census (`INACTIVE`, 0 of 9,653).
