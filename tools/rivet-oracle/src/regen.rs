@@ -796,8 +796,14 @@ pub fn run_cli(args: &[String]) -> i32 {
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--check" => check = true,
-            "--only" => only = iter.next().cloned(),
-            "--changed" => changed = iter.next().cloned(),
+            "--only" => match iter.next() {
+                Some(glob) => only = Some(glob.clone()),
+                None => return usage(),
+            },
+            "--changed" => match iter.next() {
+                Some(range) => changed = Some(range.clone()),
+                None => return usage(),
+            },
             "--jobs" => match iter.next().and_then(|n| n.parse().ok()) {
                 Some(n) if n > 0 => jobs = n,
                 _ => return usage(),
@@ -957,6 +963,19 @@ mod tests {
             .collect();
         assert!(failures.is_empty(), "{failures:#?}");
         assert!(rows.len() >= 92, "{}", rows.len());
+    }
+
+    #[test]
+    fn flags_without_a_value_are_usage_errors() {
+        for args in [
+            &["--check", "--only"][..],
+            &["--check", "--changed"][..],
+            &["--check", "--jobs", "0"][..],
+            &["--only", "x"][..],
+        ] {
+            let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+            assert_eq!(run_cli(&args), 2, "{args:?}");
+        }
     }
 
     #[test]

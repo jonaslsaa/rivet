@@ -340,18 +340,38 @@ pub fn compare(
     let mut comparison = Comparison::default();
     let count = expected.len().max(actual.len());
     for index in 0..count {
-        let (id, expected_line, actual_line) = match (expected.get(index), actual.get(index)) {
-            (Some((eid, e)), Some((aid, a))) => {
-                let e = apply_exclusions(op, e, exclusions);
-                let a = apply_exclusions(op, a, exclusions);
-                (eid.clone(), e.canonical_line(eid), a.canonical_line(aid))
-            }
-            (Some((eid, e)), None) => (eid.clone(), e.canonical_line(eid), "<missing>".into()),
-            (None, Some((aid, a))) => (aid.clone(), "<missing>".into(), a.canonical_line(aid)),
-            (None, None) => unreachable!("index < max(len)"),
-        };
+        let (id, expected_line, actual_line, verdicts) =
+            match (expected.get(index), actual.get(index)) {
+                (Some((eid, e)), Some((aid, a))) => {
+                    // An infrastructure fault is no verdict: it never matches,
+                    // not even an identical fault on the other side.
+                    let verdicts = !matches!(e, Outcome::Unavailable(_))
+                        && !matches!(a, Outcome::Unavailable(_));
+                    let e = apply_exclusions(op, e, exclusions);
+                    let a = apply_exclusions(op, a, exclusions);
+                    (
+                        eid.clone(),
+                        e.canonical_line(eid),
+                        a.canonical_line(aid),
+                        verdicts,
+                    )
+                }
+                (Some((eid, e)), None) => (
+                    eid.clone(),
+                    e.canonical_line(eid),
+                    "<missing>".into(),
+                    false,
+                ),
+                (None, Some((aid, a))) => (
+                    aid.clone(),
+                    "<missing>".into(),
+                    a.canonical_line(aid),
+                    false,
+                ),
+                (None, None) => unreachable!("index < max(len)"),
+            };
         comparison.executed += 1;
-        if expected_line == actual_line {
+        if verdicts && expected_line == actual_line {
             comparison.matched += 1;
             continue;
         }
@@ -499,6 +519,9 @@ mod tests {
     #[test]
     fn unavailable_never_matches_even_itself() {
         let paper = vec![("a".to_owned(), Outcome::Unavailable("crash".into()))];
+        let result = compare("op", &paper, &paper.clone(), &[]);
+        assert_eq!(result.mismatched_ids, vec!["a".to_owned()]);
+        assert_eq!(result.matched, 0);
         let rust = vec![("a".to_owned(), Outcome::Rejected)];
         let result = compare("op", &paper, &rust, &[]);
         assert_eq!(result.mismatched_ids, vec!["a".to_owned()]);

@@ -886,7 +886,9 @@ run_rivet_parity() {
 # fixtures/ops), each comparator with a tamper negative through the client's
 # tamper hook. Same 0/1/3 classification as rivet-parity. (The offline replay
 # and the deliberately-broken-handler negative are cargo tests, so they already
-# ran in the test step.)
+# ran in the test step.) This boot is separate from rivet-parity's (~24s more
+# gate time, measured); folding both onto one boot needs rivet-parity's checks
+# to become registry ops, which is a follow-up.
 run_oracle_ops_live() {
   step "oracle ops live (one JVM boot: Paper vs Rivet + recorded-golden freshness)"
   if [ "$PARITY_RUNNABLE" = 1 ]; then
