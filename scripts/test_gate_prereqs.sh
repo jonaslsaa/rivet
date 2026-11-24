@@ -908,8 +908,8 @@ PATH="$saved_path"
 [ "$ORACLE_UNVERIFIED" = 0 ] || fail "generated-full: PASS set ORACLE_UNVERIFIED"
 grep -q "^    PASS" "$TMP/out_gf0" || fail "generated-full: PASS not printed for exit 0"
 [ "$(wc -l < "$GEN_FULL_LOG" | tr -d ' ')" = 2 ] || fail "generated-full: PASS should run verifier plus tamper control"
-grep -qx -- "run -q -p rivet-oracle -- verify-generated-full" "$GEN_FULL_LOG" || fail "generated-full: verifier argv drifted"
-grep -qx -- "run -q -p rivet-oracle -- verify-generated-full --tamper all" "$GEN_FULL_LOG" || fail "generated-full: tamper-all argv drifted"
+grep -qx -- "run -q -p rivet-oracle --locked -- verify-generated-full" "$GEN_FULL_LOG" || fail "generated-full: verifier argv drifted"
+grep -qx -- "run -q -p rivet-oracle --locked -- verify-generated-full --tamper all" "$GEN_FULL_LOG" || fail "generated-full: tamper-all argv drifted"
 pass "generated-full: exit 0 -> PASS plus exact tamper-all argv"
 
 set_generated_full_exit 1
