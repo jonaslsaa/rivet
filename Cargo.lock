@@ -678,12 +678,16 @@ name = "rivet-parity"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "bytes",
  "chrono",
  "rivet-harness-common",
  "rivet-nbt",
+ "rivet-protocol",
+ "rivet-registry",
  "rivet-serialization",
  "rivet-text",
  "rivet-util",
+ "rivet-world",
  "serde_json",
  "sha2",
  "tempfile",

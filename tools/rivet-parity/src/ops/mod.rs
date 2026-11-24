@@ -22,13 +22,19 @@
 //! - `emit-corpus <dir>` — regenerate the corpora from `rivet-parity`'s own
 //!   corpus (a test pins the committed files to this output).
 //!
-//! Every row asserts closure (declared == executed; zero executed is
+//! Every row asserts closure (declared == executed + excluded, an excluded
+//! input being one the Rust side never runs; zero executed is
 //! UNVERIFIED) and runs its tamper negative; `--break-handler <op>` swaps in a
 //! deliberately broken Rust handler and passes only when the comparator
 //! detects and names it.
 
+pub mod codec;
+pub mod codec_corpus;
 pub mod compare;
 pub mod handlers;
+pub mod packet;
+pub mod packet_corpus;
+pub mod packet_seeds;
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -293,10 +299,28 @@ fn rust_side(op: &str, broken_op: Option<&str>) -> Option<RustSide> {
     })
 }
 
-fn run_rust(side: RustSide, corpus: &[CorpusEntry]) -> Vec<(String, Outcome)> {
+fn run_rust(
+    op: &str,
+    side: RustSide,
+    corpus: &[CorpusEntry],
+    exclusions: &[Exclusion],
+) -> Vec<(String, Outcome)> {
+    let trace = std::env::var_os("RIVET_OPS_TRACE").is_some();
     corpus
         .iter()
         .map(|entry| {
+            // A `skip:` input is never handed to the Rust handler: Rivet
+            // cannot survive it or its answer is not deterministic. Other
+            // excluded inputs run, to prove they still diverge.
+            if compare::input_skipped(op, &entry.id, exclusions) {
+                return (
+                    entry.id.clone(),
+                    Outcome::Unavailable("skipped input not executed".into()),
+                );
+            }
+            if trace {
+                eprintln!("[ops trace] {op} {}", entry.id);
+            }
             let outcome = catch_unwind(AssertUnwindSafe(|| (side.handler)(&entry.request)))
                 .unwrap_or_else(|_| Outcome::Unavailable("Rust handler panicked".into()));
             // The deliberately broken handler: every answer is corrupted, the
@@ -321,7 +345,53 @@ pub struct OpRow {
     pub status: Status,
     pub first: Option<Divergence>,
     pub mismatched_ids: Vec<String>,
+    /// Excluded inputs that now match Paper: their exclusions rows are stale.
+    pub stale_ids: Vec<String>,
     pub note: Option<String>,
+    /// Per ported Rust type (packet struct, codec): how its inputs compared.
+    pub subjects: Vec<SubjectTally>,
+}
+
+/// One scoreboard subject's tally within an op row.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubjectTally {
+    pub subject: String,
+    pub executed: usize,
+    pub matched: usize,
+    pub mismatched: usize,
+    pub excluded: usize,
+}
+
+fn tally_subjects(
+    op: &str,
+    corpus: &[CorpusEntry],
+    comparison: &compare::Comparison,
+) -> Vec<SubjectTally> {
+    let mut tallies: std::collections::BTreeMap<String, SubjectTally> = Default::default();
+    for (entry, (_, verdict)) in corpus.iter().zip(&comparison.per_input) {
+        let Some(subject) = handlers::subject(op, &entry.request) else {
+            continue;
+        };
+        let tally = tallies
+            .entry(subject.clone())
+            .or_insert_with(|| SubjectTally {
+                subject,
+                ..SubjectTally::default()
+            });
+        match verdict {
+            compare::InputVerdict::Matched => {
+                tally.executed += 1;
+                tally.matched += 1;
+            }
+            compare::InputVerdict::Mismatched => {
+                tally.executed += 1;
+                tally.mismatched += 1;
+            }
+            // Never run on the Rust side: declared, not executed.
+            compare::InputVerdict::Excluded => tally.excluded += 1,
+        }
+    }
+    tallies.into_values().collect()
 }
 
 impl OpRow {
@@ -343,7 +413,15 @@ impl OpRow {
                 "fields": d.fields.iter().map(|f| json!({"path": f.path, "expected": f.expected, "actual": f.actual})).collect::<Vec<_>>(),
             })),
             "mismatched_ids": self.mismatched_ids,
+            "stale_ids": self.stale_ids,
             "note": self.note,
+            "subjects": self.subjects.iter().map(|t| json!({
+                "subject": t.subject,
+                "executed": t.executed,
+                "matched": t.matched,
+                "mismatched": t.mismatched,
+                "excluded": t.excluded,
+            })).collect::<Vec<_>>(),
         })
     }
 }
@@ -357,13 +435,32 @@ fn evaluate(
     exclusions: &[Exclusion],
 ) -> OpRow {
     let comparison = compare::compare(&fixture.op, expected, actual, exclusions);
+    let subjects = tally_subjects(&fixture.op, &fixture.corpus, &comparison);
     let closure = Closure {
         declared: fixture.declared,
         executed: comparison.executed,
         matched: comparison.matched,
         mismatched: comparison.mismatched_ids.len(),
+        excluded: comparison.excluded,
     };
-    let status = closure.status(negative.as_ref().is_some_and(Verdict::passed));
+    let mut status = closure.status(negative.as_ref().is_some_and(Verdict::passed));
+    let note = if comparison.stale.is_empty() {
+        None
+    } else {
+        // A recorded divergence that no longer diverges must leave the table.
+        status = Status::Fail;
+        Some(format!(
+            "{} excluded input(s) now match Paper, remove their `input:` rows from exclusions.tsv: {}",
+            comparison.stale.len(),
+            comparison
+                .stale
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    };
     OpRow {
         op: fixture.op.clone(),
         mode,
@@ -372,7 +469,9 @@ fn evaluate(
         status,
         first: comparison.first,
         mismatched_ids: comparison.mismatched_ids,
-        note: None,
+        stale_ids: comparison.stale,
+        note,
+        subjects,
     }
 }
 
@@ -388,7 +487,9 @@ fn no_handler_row(mode: &'static str, fixture: &OpFixture) -> OpRow {
         status: Status::Unverified,
         first: None,
         mismatched_ids: Vec::new(),
+        stale_ids: Vec::new(),
         note: Some("no Rust handler for this op yet (recorded golden only)".into()),
+        subjects: Vec::new(),
     }
 }
 
@@ -404,7 +505,7 @@ pub fn check(
             let Some(side) = rust_side(&fixture.op, broken_op) else {
                 return no_handler_row("check", fixture);
             };
-            let actual = run_rust(side, &fixture.corpus);
+            let actual = run_rust(&fixture.op, side, &fixture.corpus, exclusions);
             let negative =
                 compare::tamper_negative(&fixture.op, &fixture.recorded, &actual, exclusions);
             evaluate(
@@ -442,16 +543,18 @@ pub fn live(
             .map(|(entry, line)| (entry.id.clone(), Outcome::from_live(&fixture.op, line)))
             .collect();
 
-        // Freshness: the committed golden must still be what Paper answers.
+        // Freshness: the committed golden must still be what Paper answers,
+        // on every input (whole-input exclusions describe Rivet, not Paper).
+        let paper_only = compare::paper_exclusions(exclusions);
         let freshness_negative =
-            compare::tamper_negative(&fixture.op, &fixture.recorded, &paper, exclusions);
+            compare::tamper_negative(&fixture.op, &fixture.recorded, &paper, &paper_only);
         let mut fresh = evaluate(
             "recorded-vs-live",
             fixture,
             &fixture.recorded,
             &paper,
             freshness_negative,
-            exclusions,
+            &paper_only,
         );
         if fresh.status == Status::Fail {
             fresh.note = Some("live Paper no longer reproduces the recorded golden".into());
@@ -462,7 +565,7 @@ pub fn live(
             rows.push(no_handler_row("live", fixture));
             continue;
         };
-        let actual = run_rust(side, &fixture.corpus);
+        let actual = run_rust(&fixture.op, side, &fixture.corpus, exclusions);
         // The negative goes through the client's tamper hook: re-ask Paper for
         // the first input that matched, have the hook corrupt that response
         // line, and require the comparator to detect and name the input.
@@ -588,8 +691,10 @@ pub fn emit_corpus() -> Result<Vec<(&'static str, String)>, String> {
     }
 
     Ok(vec![
+        ("codec.reencode", codec_corpus::emit()?),
         ("component.json", component),
         ("nbt.decode", decode),
+        ("packet.reencode", packet_corpus::emit()?),
         ("snbt.parse", snbt),
     ])
 }
@@ -607,6 +712,27 @@ fn print_rows(rows: &[OpRow]) {
                 .as_ref()
                 .map_or_else(|| "not run".to_owned(), ToString::to_string)
         );
+        if !row.subjects.is_empty() {
+            let clean = row
+                .subjects
+                .iter()
+                .filter(|t| t.mismatched == 0 && t.excluded == 0)
+                .count();
+            eprintln!(
+                "      subjects: {} ({} with every input matched)",
+                row.subjects.len(),
+                clean
+            );
+            let all = std::env::var_os("RIVET_OPS_SUBJECTS").is_some();
+            for t in &row.subjects {
+                if all || t.mismatched > 0 || t.excluded > 0 {
+                    eprintln!(
+                        "        {:<48} executed={:<4} matched={:<4} mismatched={:<3} excluded={}",
+                        t.subject, t.executed, t.matched, t.mismatched, t.excluded
+                    );
+                }
+            }
+        }
         if let Some(first) = &row.first {
             eprintln!("      first divergence: {first}");
         }
@@ -640,11 +766,55 @@ fn broken_handler_verdict(rows: &[OpRow], broken: &str) -> i32 {
     }
 }
 
+/// `ops diff <op> [<id-substring>]`: print Paper's recorded answer next to
+/// Rivet's for every input that does not match (the triage view for filing
+/// issues; never part of a gate).
+fn run_diff(op: &str, filter: &str) -> i32 {
+    let dir = ops_dir();
+    let (fixtures, exclusions) = match (
+        load_fixtures(&dir, &op_source()),
+        compare::load_exclusions(&dir.join("exclusions.tsv")),
+    ) {
+        (Ok(f), Ok(e)) => (f, e),
+        (Err(e), _) => {
+            eprintln!("{e}");
+            return 1;
+        }
+        (_, Err(e)) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let Some(fixture) = fixtures.iter().find(|f| f.op == op) else {
+        eprintln!("no recorded op {op}");
+        return 2;
+    };
+    let Some(side) = rust_side(op, None) else {
+        eprintln!("no Rust handler for {op}");
+        return 2;
+    };
+    let actual = run_rust(op, side, &fixture.corpus, &exclusions);
+    let mut shown = 0;
+    for ((id, expected), (_, got)) in fixture.recorded.iter().zip(&actual) {
+        if !id.contains(filter) || compare::input_excluded(op, id, &exclusions) {
+            continue;
+        }
+        let (e, g) = (expected.canonical_line(id), got.canonical_line(id));
+        if e != g || matches!(got, Outcome::Unavailable(_)) {
+            println!("{id}\n  paper: {e}\n  rivet: {g}");
+            shown += 1;
+        }
+    }
+    eprintln!("{shown} differing inputs");
+    0
+}
+
 fn usage() -> i32 {
     eprintln!(
         "usage: rivet-parity ops check [--break-handler <op>]\n\
          \x20      rivet-parity ops live [--break-handler <op>]\n\
          \x20      rivet-parity ops emit-corpus <dir>\n\
+         \x20      rivet-parity ops diff <op> [<id-substring>]\n\
          Exit: 0 PASS, 1 FAIL, 3 UNVERIFIED (with --break-handler: 0 only when the\n\
          broken handler is detected and named)."
     );
@@ -656,6 +826,13 @@ pub fn run_cli(args: &[String]) -> i32 {
     let Some(mode) = args.first().map(String::as_str) else {
         return usage();
     };
+    if mode == "diff" {
+        return match args {
+            [_, op] => run_diff(op, ""),
+            [_, op, filter] => run_diff(op, filter),
+            _ => usage(),
+        };
+    }
     if mode == "emit-corpus" {
         let [_, dir] = args else { return usage() };
         return match emit_corpus() {
@@ -759,7 +936,52 @@ mod tests {
                 row.first.as_ref().map(ToString::to_string),
                 row.note
             );
-            assert!(row.closure.executed > 0 && row.closure.executed == row.closure.declared);
+            assert!(
+                row.closure.executed > 0
+                    && row.closure.executed + row.closure.excluded == row.closure.declared
+            );
+        }
+    }
+
+    /// An `input:` row for an input Rivet already answers like Paper is a stale
+    /// row: the comparison fails and names it instead of hiding the input.
+    #[test]
+    fn stale_input_exclusion_fails_the_row() {
+        let mut exclusions = compare::load_exclusions(&ops_dir().join("exclusions.tsv")).unwrap();
+        let fixtures = fixtures();
+        let fixture = fixtures.iter().find(|f| f.op == "snbt.parse").unwrap();
+        let id = fixture.corpus[0].id.clone();
+        exclusions.push(Exclusion {
+            op: fixture.op.clone(),
+            field: format!("input:{id}"),
+            reason: "no longer diverges".into(),
+            issue: "1".into(),
+        });
+        let rows = check(&fixtures, &exclusions, None);
+        let row = rows.iter().find(|r| r.op == fixture.op).unwrap();
+        assert_eq!(row.status, Status::Fail);
+        assert_eq!(row.stale_ids, vec![id]);
+        assert!(row.mismatched_ids.is_empty());
+    }
+
+    /// Whole-input exclusions describe Rivet: the Paper-only comparison keeps
+    /// only the `result.` field rows, so excluded inputs stay under freshness.
+    #[test]
+    fn paper_comparison_ignores_whole_input_exclusions() {
+        let exclusions = compare::load_exclusions(&ops_dir().join("exclusions.tsv")).unwrap();
+        assert!(exclusions.iter().any(|e| e.field.starts_with("input:")));
+        let paper_only = compare::paper_exclusions(&exclusions);
+        assert!(paper_only.iter().all(|e| e.field.starts_with("result.")));
+        for fixture in fixtures() {
+            let comparison = compare::compare(
+                &fixture.op,
+                &fixture.recorded,
+                &fixture.recorded,
+                &paper_only,
+            );
+            assert_eq!(comparison.excluded, 0, "{}", fixture.op);
+            assert_eq!(comparison.executed, fixture.declared, "{}", fixture.op);
+            assert_eq!(comparison.matched, fixture.declared, "{}", fixture.op);
         }
     }
 
@@ -802,6 +1024,66 @@ mod tests {
                 committed == text,
                 "{} drifted from `rivet-parity ops emit-corpus`",
                 path.display()
+            );
+        }
+    }
+
+    /// Every ported packet struct and every codec in the Rust table is exercised
+    /// by at least one recorded input (the per-subject rows of the exit criterion).
+    #[test]
+    fn every_ported_subject_has_recorded_inputs() {
+        let fixtures = fixtures();
+        let subjects_of = |op: &str| -> std::collections::BTreeSet<String> {
+            fixtures
+                .iter()
+                .find(|f| f.op == op)
+                .unwrap_or_else(|| panic!("{op} is not recorded"))
+                .corpus
+                .iter()
+                .filter_map(|entry| handlers::subject(op, &entry.request))
+                .collect()
+        };
+        let packets = subjects_of("packet.reencode");
+        for entry in packet::entries() {
+            assert!(
+                packets.contains(entry.subject),
+                "packet {} has no recorded input",
+                entry.subject
+            );
+        }
+        let codecs = subjects_of("codec.reencode");
+        for entry in codec::entries() {
+            assert!(
+                codecs.contains(entry.name),
+                "codec {} has no recorded input",
+                entry.name
+            );
+        }
+    }
+
+    /// Every excluded input names a recorded input of its op, so a stale row
+    /// cannot hide in the table.
+    #[test]
+    fn every_excluded_input_is_a_recorded_input() {
+        let exclusions = compare::load_exclusions(&ops_dir().join("exclusions.tsv")).unwrap();
+        let fixtures = fixtures();
+        for exclusion in &exclusions {
+            let Some(id) = exclusion
+                .field
+                .strip_prefix("input:")
+                .or_else(|| exclusion.field.strip_prefix("skip:"))
+            else {
+                continue;
+            };
+            let fixture = fixtures
+                .iter()
+                .find(|f| f.op == exclusion.op)
+                .unwrap_or_else(|| panic!("exclusion for unrecorded op {}", exclusion.op));
+            assert!(
+                fixture.corpus.iter().any(|entry| entry.id == id),
+                "exclusion names {} which is not in the {} corpus",
+                id,
+                exclusion.op
             );
         }
     }
