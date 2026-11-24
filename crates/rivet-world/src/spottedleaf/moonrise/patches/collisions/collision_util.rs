@@ -1,9 +1,11 @@
 //! `ca.spottedleaf.moonrise.patches.collisions.CollisionUtil` — the shape
-//! members (D15 split class: the members that take `Entity`/`Level`/
-//! `BlockState`/`WorldBorder`, `isSpecialCollidingBlock` and
-//! `getCollisionsForBlocksOrWorldBorder` and later, stay with the Moonrise
-//! unit in `rivet-server`; the AABB offset/expand/cut helpers and the
-//! `perform*Collisions` family from `offsetX` on are that unit's too).
+//! members. D15 split class, assigned to `rivet-world` (COVERAGE.tsv; the
+//! shape caches `VoxelShape` holds and calls cannot sit above it): this file
+//! is the live-free half. The members that take `Entity`/`Level`/`BlockState`/
+//! `WorldBorder` (`isSpecialCollidingBlock`, `getCollisionsForBlocksOrWorldBorder`
+//! and later, and the `perform*Collisions` family from `offsetX` on) are
+//! `CollisionUtilLive`-side members at the same mirrored path in `rivet-server`
+//! with the Moonrise unit (the ledger lists that half as `(pending)`).
 //!
 //! Java source:
 //! `working/Paper/paper-server/src/minecraft/java/ca/spottedleaf/moonrise/patches/collisions/CollisionUtil.java`

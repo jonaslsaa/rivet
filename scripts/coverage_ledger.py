@@ -116,7 +116,8 @@ current crate is the package's majority MANIFEST.tsv `crate` (ties by name).
      effects and damage move; chunks, storage, levelgen, lighting, block-state
      tables and item value types (crafting, component) stay in rivet-world.
   4. Every other package keeps its current crate.
-  5. CLASS_CRATES overrides single classes (split classes, dependency floors).
+  5. CLASS_CRATES overrides single classes (split classes, dependency floors);
+     SPLITS adds each split class's other half to `other_paths`.
 Class references are resolved imports (longest matching class prefix, so
 nested and static imports land on the outer class), wildcard imports and
 same-package classes matched by simple-name token, and inline fully
@@ -205,6 +206,8 @@ MOUNTS = {
 #   - rivet-server: classes that hold an `Entity`, so they cannot compile
 #     below the live-game crate (`EntityHitResult`, the entity collision
 #     contexts); the rest of `phys.shapes` stays in `rivet-world`.
+#   - rivet-world: the Moonrise shape classes `VoxelShape` holds or calls
+#     (below the `rivet-server` assignment of the rest of Moonrise).
 CLASS_CRATES = {
     "net.minecraft.world.InteractionHand": "rivet-registry",
     "net.minecraft.world.phys.AABB": "rivet-registry",
@@ -215,6 +218,31 @@ CLASS_CRATES = {
     "net.minecraft.world.phys.EntityHitResult": "rivet-server",
     "net.minecraft.world.phys.shapes.EntityCollisionContext": "rivet-server",
     "net.minecraft.world.phys.shapes.MinecartCollisionContext": "rivet-server",
+    # Moonrise's shape-cache and AABB/shape helpers: `VoxelShape` (rivet-world)
+    # holds `CachedShapeData`, `CachedToAABBs` and `MergedORCache`, and calls
+    # `CollisionUtil`'s live-free members and the two `common.util` helpers, so
+    # these cannot sit above it in rivet-server (the rest of Moonrise does).
+    "ca.spottedleaf.moonrise.patches.collisions.CollisionUtil": "rivet-world",
+    "ca.spottedleaf.moonrise.patches.collisions.shape.CachedShapeData": "rivet-world",
+    "ca.spottedleaf.moonrise.patches.collisions.shape.CachedToAABBs": "rivet-world",
+    "ca.spottedleaf.moonrise.patches.collisions.shape.MergedORCache": "rivet-world",
+    "ca.spottedleaf.moonrise.common.util.FlatBitsetUtil": "rivet-world",
+    "ca.spottedleaf.moonrise.common.util.MixinWorkarounds": "rivet-world",
+}
+
+# D15 split classes: the class straddles two crates, `rust_path` being the
+# assigned crate's half and these the other half (one file per crate at the
+# mirrored path). The ledger lists every split with both homes: the paths below
+# are appended to `other_paths` (suffixed `(pending)` while the file does not
+# exist yet, so a split whose upper half is still to be written stays visible).
+SPLITS = {
+    # Live members take `Entity`/`Level`; ported with the Moonrise unit.
+    "ca.spottedleaf.moonrise.patches.collisions.CollisionUtil": [
+        "crates/rivet-server/src/spottedleaf/moonrise/patches/collisions/collision_util.rs",
+    ],
+    # `rayIntersectsAABB` and `lerp(double, Vec3, Vec3)` sit above rivet-util
+    # because they take the phys value types.
+    "net.minecraft.util.Mth": ["crates/rivet-registry/src/util/mth.rs"],
 }
 
 OBJECT_ALIASES = {
@@ -806,6 +834,11 @@ def build_rows(detail: str | None = None) -> list[dict[str, str]]:
             if best is None or key > best_key or (key == best_key and rf.rel < best.rel):
                 best, best_key = rf, key
         others = sorted(rf.rel for rf in cands if rf is not best and not is_package_module(rf, c.pkg))
+        for half in SPLITS.get(c.fqn, []):
+            if half in others or (best is not None and half == best.rel):
+                continue
+            others.append(half if half in by_path else f"{half}(pending)")
+        others.sort()
         methods = [n for _, n in java_scan.scan_methods(c.code)]
         if best is None:
             total = len(set(methods))
