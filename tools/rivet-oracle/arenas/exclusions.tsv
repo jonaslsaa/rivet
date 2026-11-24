@@ -1,0 +1,4 @@
+scope	key	reason	issue
+entity_nbt	Paper.OriginWorld	the world UUID, random per world creation: differs between Paper twin boots (sand_fall, 2026-11-24)	-
+entity_nbt	WorldUUIDLeast	the world UUID, random per world creation: differs between Paper twin boots (sand_fall, 2026-11-24)	-
+entity_nbt	WorldUUIDMost	the world UUID, random per world creation: differs between Paper twin boots (sand_fall, 2026-11-24)	-

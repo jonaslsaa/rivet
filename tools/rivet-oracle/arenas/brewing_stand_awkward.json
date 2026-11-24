@@ -1,0 +1,49 @@
+{
+  "name": "brewing_stand_awkward",
+  "description": "A brewing stand with three water bottles, a nether wart and blaze powder: fuel is consumed and after 400 ticks the bottles become awkward potions.",
+  "origin": [
+    416,
+    0,
+    64
+  ],
+  "size": [
+    3,
+    2,
+    3
+  ],
+  "ticks": 420,
+  "seed": 1,
+  "fill": [
+    {
+      "from": [
+        0,
+        0,
+        0
+      ],
+      "to": [
+        2,
+        0,
+        2
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        1,
+        1,
+        1
+      ],
+      "state": "minecraft:brewing_stand"
+    }
+  ],
+  "block_entities": [
+    {
+      "pos": [
+        1,
+        1,
+        1
+      ],
+      "snbt": "{Items:[{Slot:0b,id:\"minecraft:potion\",count:1,components:{\"minecraft:potion_contents\":{potion:\"minecraft:water\"}}},{Slot:1b,id:\"minecraft:potion\",count:1,components:{\"minecraft:potion_contents\":{potion:\"minecraft:water\"}}},{Slot:2b,id:\"minecraft:potion\",count:1,components:{\"minecraft:potion_contents\":{potion:\"minecraft:water\"}}},{Slot:3b,id:\"minecraft:nether_wart\",count:1},{Slot:4b,id:\"minecraft:blaze_powder\",count:1}]}"
+    }
+  ]
+}

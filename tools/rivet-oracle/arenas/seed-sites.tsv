@@ -1,0 +1,3 @@
+site	java	rust	reseeded_at	ordinal	status
+1	ServerLevel.random (Level.random, Moonrise ThreadUnsafeRandom), via getRandom().setSeed	ServerLevel::random_mut().set_seed	arena placement, before the first quiet setBlock	0	both sides
+3	Entity.random, via Entity.getRandom().setSeed in EntityAddToWorldEvent (after construction; the UUID drawn at construction is renumbered, not seeded)	-	each entity added within 16 blocks of the box while the arena runs	spawn order within the arena, from 0	Paper only: Rivet has no arena entity runtime, so an arena that spawns entities diverges at its first entity

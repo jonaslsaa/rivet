@@ -1,0 +1,49 @@
+{
+  "name": "spawner_idle_seeded",
+  "description": "A pig spawner with no player in range under the seed-injection contract (level RNG reseeded): BaseSpawner.serverTick must leave it idle and draw nothing from the level RNG. Ordered last per VERIFICATION item 7.",
+  "origin": [
+    448,
+    0,
+    64
+  ],
+  "size": [
+    3,
+    2,
+    3
+  ],
+  "ticks": 40,
+  "seed": 42,
+  "fill": [
+    {
+      "from": [
+        0,
+        0,
+        0
+      ],
+      "to": [
+        2,
+        0,
+        2
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        1,
+        1,
+        1
+      ],
+      "state": "minecraft:spawner"
+    }
+  ],
+  "block_entities": [
+    {
+      "pos": [
+        1,
+        1,
+        1
+      ],
+      "snbt": "{Delay:20s,SpawnData:{entity:{id:\"minecraft:pig\"}}}"
+    }
+  ]
+}

@@ -1,0 +1,96 @@
+{
+  "name": "lava_source_spread",
+  "description": "A lava source placed with flags 3 in a closed 7x7 stone basin: overworld lava (tick delay 30, drop-off 2) spreads to the basin edge.",
+  "origin": [
+    96,
+    0,
+    64
+  ],
+  "size": [
+    9,
+    3,
+    9
+  ],
+  "ticks": 140,
+  "seed": 1,
+  "fill": [
+    {
+      "from": [
+        0,
+        0,
+        0
+      ],
+      "to": [
+        8,
+        0,
+        8
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        0,
+        1,
+        0
+      ],
+      "to": [
+        8,
+        2,
+        0
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        0,
+        1,
+        8
+      ],
+      "to": [
+        8,
+        2,
+        8
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        0,
+        1,
+        1
+      ],
+      "to": [
+        0,
+        2,
+        7
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        8,
+        1,
+        1
+      ],
+      "to": [
+        8,
+        2,
+        7
+      ],
+      "state": "minecraft:stone"
+    }
+  ],
+  "script": [
+    {
+      "tick": 0,
+      "op": "set",
+      "pos": [
+        4,
+        1,
+        4
+      ],
+      "state": "minecraft:lava",
+      "flags": 3
+    }
+  ]
+}

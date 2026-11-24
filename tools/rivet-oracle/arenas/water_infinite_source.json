@@ -1,0 +1,68 @@
+{
+  "name": "water_infinite_source",
+  "description": "Two water sources two blocks apart in a one-wide stone channel: the flowing block between them becomes a new source (waterSourceConversion).",
+  "origin": [
+    192,
+    0,
+    64
+  ],
+  "size": [
+    7,
+    3,
+    3
+  ],
+  "ticks": 20,
+  "seed": 1,
+  "fill": [
+    {
+      "from": [
+        0,
+        0,
+        0
+      ],
+      "to": [
+        6,
+        2,
+        2
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        1,
+        1,
+        1
+      ],
+      "to": [
+        5,
+        1,
+        1
+      ],
+      "state": "minecraft:air"
+    }
+  ],
+  "script": [
+    {
+      "tick": 0,
+      "op": "set",
+      "pos": [
+        1,
+        1,
+        1
+      ],
+      "state": "minecraft:water",
+      "flags": 3
+    },
+    {
+      "tick": 0,
+      "op": "set",
+      "pos": [
+        3,
+        1,
+        1
+      ],
+      "state": "minecraft:water",
+      "flags": 3
+    }
+  ]
+}

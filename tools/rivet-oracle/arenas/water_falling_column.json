@@ -1,0 +1,96 @@
+{
+  "name": "water_falling_column",
+  "description": "A water source at the top of a 3x3 shaft: falling water (level 8 states) descends six blocks, then spreads on the shaft floor.",
+  "origin": [
+    128,
+    0,
+    64
+  ],
+  "size": [
+    5,
+    9,
+    5
+  ],
+  "ticks": 60,
+  "seed": 1,
+  "fill": [
+    {
+      "from": [
+        0,
+        0,
+        0
+      ],
+      "to": [
+        4,
+        0,
+        4
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        0,
+        1,
+        0
+      ],
+      "to": [
+        4,
+        8,
+        0
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        0,
+        1,
+        4
+      ],
+      "to": [
+        4,
+        8,
+        4
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        0,
+        1,
+        1
+      ],
+      "to": [
+        0,
+        8,
+        3
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        4,
+        1,
+        1
+      ],
+      "to": [
+        4,
+        8,
+        3
+      ],
+      "state": "minecraft:stone"
+    }
+  ],
+  "script": [
+    {
+      "tick": 0,
+      "op": "set",
+      "pos": [
+        2,
+        8,
+        2
+      ],
+      "state": "minecraft:water",
+      "flags": 3
+    }
+  ]
+}
