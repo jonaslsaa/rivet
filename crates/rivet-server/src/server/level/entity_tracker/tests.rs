@@ -9,10 +9,10 @@ use rivet_protocol::syncher::{
     SynchedEntityDataBuilder, serializers,
 };
 use rivet_registry::Identifier;
-use rivet_registry::core::Vec3;
+use rivet_registry::core::{BlockPos, Vec3};
 use rivet_registry::holder::Holder;
 use rivet_registry::registries::Attribute;
-use rivet_util::mth::Uuid;
+use rivet_util::mth::{Uuid, pack_degrees};
 use std::collections::HashMap;
 
 use crate::server::level::full_chunk_status::FullChunkStatus;
@@ -53,6 +53,9 @@ struct MockEntity {
     precise_position: bool,
     new_minecart: bool,
     position: Vec3,
+    /// `Entity.trackingPosition()` override; `None` uses `position`.
+    tracking_position: Option<Vec3>,
+    add_entity_kind: AddEntityPacketKind,
     delta_movement: Vec3,
     y_rot: f32,
     x_rot: f32,
@@ -93,6 +96,8 @@ impl MockEntity {
             precise_position: false,
             new_minecart: false,
             position: Vec3::new(10.0, 64.0, 20.0),
+            tracking_position: None,
+            add_entity_kind: AddEntityPacketKind::Tracked { data: 0 },
             delta_movement: Vec3::new(0.0, 0.0, 0.0),
             y_rot: 0.0,
             x_rot: 0.0,
@@ -155,6 +160,12 @@ impl TrackedEntityState for MockEntity {
     }
     fn position(&self) -> Vec3 {
         self.position
+    }
+    fn tracking_position(&self) -> Vec3 {
+        self.tracking_position.unwrap_or(self.position)
+    }
+    fn add_entity_packet_kind(&self) -> AddEntityPacketKind {
+        self.add_entity_kind
     }
     fn delta_movement(&self) -> Vec3 {
         self.delta_movement
@@ -497,7 +508,7 @@ fn pairing_bundle_emits_exact_paper_order_and_sets_force_resync() {
     let v = viewer(10, Vec3::new(12.0, 64.0, 20.0));
 
     let added = tracker
-        .add_entity_simple(&mut entity, &default_reg(), &[v], &mut host)
+        .add_entity(&mut entity, &default_reg(), &[v], |_, _| {}, &mut host)
         .unwrap();
     assert!(added);
     assert!(tracker.get(100).unwrap().server_entity.force_state_resync());
@@ -571,7 +582,7 @@ fn cancelled_track_event_skips_pairing_but_keeps_seen_by_and_force_resync() {
 
     let v = viewer(10, Vec3::new(10.0, 64.0, 20.0));
     tracker
-        .add_entity_simple(&mut entity, &default_reg(), &[v], &mut host)
+        .add_entity(&mut entity, &default_reg(), &[v], |_, _| {}, &mut host)
         .unwrap();
 
     // Only TrackEvent fired; no pairing bundle or debug callbacks.
@@ -810,13 +821,13 @@ fn remove_entity_and_moonrise_tick_transitions() {
     let mut p_reg = default_reg();
     p_reg.kind = TrackingEntityKind::ServerPlayer;
     tracker
-        .add_entity_simple(&mut p1, &p_reg, &[v1, v2], &mut host)
+        .add_entity(&mut p1, &p_reg, &[v1, v2], |_, _| {}, &mut host)
         .unwrap();
     tracker
-        .add_entity_simple(&mut p2, &p_reg, &[v1, v2], &mut host)
+        .add_entity(&mut p2, &p_reg, &[v1, v2], |_, _| {}, &mut host)
         .unwrap();
     tracker
-        .add_entity_simple(&mut mob, &default_reg(), &[v1, v2], &mut host)
+        .add_entity(&mut mob, &default_reg(), &[v1, v2], |_, _| {}, &mut host)
         .unwrap();
     assert_eq!(tracker.entities_tracked_by(1), vec![2, 200]);
     host.clear();
@@ -869,7 +880,7 @@ fn equipment_and_entity_link_dirty_emission() {
     let mut host = RecordingHost::new();
     let v1 = viewer(1, Vec3::new(10.0, 64.0, 20.0));
     tracker
-        .add_entity_simple(&mut mob, &default_reg(), &[v1], &mut host)
+        .add_entity(&mut mob, &default_reg(), &[v1], |_, _| {}, &mut host)
         .unwrap();
     host.clear();
 
@@ -895,7 +906,7 @@ fn equipment_and_entity_link_dirty_emission() {
                 "minecraft:iron_chestplate",
                 1
             )],
-            sanitize: false,
+            sanitize: true,
         }
     );
     assert_eq!(
@@ -924,7 +935,7 @@ fn controlled_negatives_reject_illegal_adds_and_removed_pairing() {
     let mut invalid_reg = default_reg();
     invalid_reg.valid = false;
     assert!(matches!(
-        tracker.add_entity_simple(&mut e, &invalid_reg, &[], &mut host),
+        tracker.add_entity(&mut e, &invalid_reg, &[], |_, _| {}, &mut host),
         Err(EntityTrackerError::IllegalAddEntity { entity_id: 10, .. })
     ));
 
@@ -932,7 +943,7 @@ fn controlled_negatives_reject_illegal_adds_and_removed_pairing() {
     let mut wrong_level = default_reg();
     wrong_level.level_id = 999;
     assert!(matches!(
-        tracker.add_entity_simple(&mut e, &wrong_level, &[], &mut host),
+        tracker.add_entity(&mut e, &wrong_level, &[], |_, _| {}, &mut host),
         Err(EntityTrackerError::IllegalAddEntity { entity_id: 10, .. })
     ));
 
@@ -940,18 +951,18 @@ fn controlled_negatives_reject_illegal_adds_and_removed_pairing() {
     let mut dragon_part = default_reg();
     dragon_part.is_ender_dragon_part = true;
     assert_eq!(
-        tracker.add_entity_simple(&mut e, &dragon_part, &[], &mut host),
+        tracker.add_entity(&mut e, &dragon_part, &[], |_, _| {}, &mut host),
         Ok(false)
     );
     assert!(!tracker.has_entity_with_id(10));
 
     // 4. Duplicate entity ID -> Err
     assert_eq!(
-        tracker.add_entity_simple(&mut e, &default_reg(), &[], &mut host),
+        tracker.add_entity(&mut e, &default_reg(), &[], |_, _| {}, &mut host),
         Ok(true)
     );
     assert!(matches!(
-        tracker.add_entity_simple(&mut e, &default_reg(), &[], &mut host),
+        tracker.add_entity(&mut e, &default_reg(), &[], |_, _| {}, &mut host),
         Err(EntityTrackerError::IllegalAddEntity { entity_id: 10, .. })
     ));
 
@@ -982,7 +993,7 @@ impl ServerEntitySynchronizer for NoopSync {
 }
 
 #[test]
-fn update_player_against_all_respects_per_entity_can_see() {
+fn added_player_is_offered_to_other_entities_respecting_per_entity_can_see() {
     let mut tracker = ChunkMapEntityTracker::new(1, TrackingRangeConfig::default());
     let mut host = RecordingHost::new();
     // Joining player 1 cannot see hidden entity 20, but can see entity 21.
@@ -994,37 +1005,195 @@ fn update_player_against_all_respects_per_entity_can_see() {
     visible.position = Vec3::new(6.0, 64.0, 6.0);
 
     tracker
-        .add_entity_simple(&mut hidden, &default_reg(), &[], &mut host)
+        .add_entity(&mut hidden, &default_reg(), &[], |_, _| {}, &mut host)
         .unwrap();
     tracker
-        .add_entity_simple(&mut visible, &default_reg(), &[], &mut host)
+        .add_entity(&mut visible, &default_reg(), &[], |_, _| {}, &mut host)
         .unwrap();
 
-    let v1 = viewer(1, Vec3::new(0.0, 64.0, 0.0));
-    tracker.update_player_against_all(
-        &v1,
-        |id, apply| {
-            if id == 20 {
-                apply(
-                    &mut hidden,
-                    TrackingEntityKind::Other,
-                    ActivationType::Animal,
-                    &[],
-                );
-            } else if id == 21 {
-                apply(
-                    &mut visible,
-                    TrackingEntityKind::Other,
-                    ActivationType::Animal,
-                    &[],
-                );
-            }
-        },
-        &mut host,
-    );
+    let mut player = MockEntity::new(1);
+    player.server_player = true;
+    player.position = Vec3::new(0.0, 64.0, 0.0);
+    let mut p_reg = default_reg();
+    p_reg.kind = TrackingEntityKind::ServerPlayer;
+    let v1 = viewer(1, player.position);
+    tracker
+        .add_entity(
+            &mut player,
+            &p_reg,
+            &[v1],
+            |id, apply| {
+                if id == 20 {
+                    apply(
+                        &mut hidden,
+                        TrackingEntityKind::Other,
+                        ActivationType::Animal,
+                        &[],
+                    );
+                } else if id == 21 {
+                    apply(
+                        &mut visible,
+                        TrackingEntityKind::Other,
+                        ActivationType::Animal,
+                        &[],
+                    );
+                }
+            },
+            &mut host,
+        )
+        .unwrap();
 
+    assert!(host.events.contains(&HostEvent::PlayerStatus(1, true)));
     assert!(!tracker.get(20).unwrap().seen_by().contains(&1));
     assert!(tracker.get(21).unwrap().seen_by().contains(&1));
+}
+
+#[test]
+fn adding_server_player_absent_from_level_players_is_rejected() {
+    let mut tracker = ChunkMapEntityTracker::new(1, TrackingRangeConfig::default());
+    let mut host = RecordingHost::new();
+    let mut player = MockEntity::new(1);
+    player.server_player = true;
+    let mut p_reg = default_reg();
+    p_reg.kind = TrackingEntityKind::ServerPlayer;
+    assert!(matches!(
+        tracker.add_entity(&mut player, &p_reg, &[], |_, _| {}, &mut host),
+        Err(EntityTrackerError::IllegalAddEntity { entity_id: 1, .. })
+    ));
+    assert!(!tracker.has_entity_with_id(1));
+    assert!(host.events.is_empty());
+}
+
+#[test]
+fn pairing_add_entity_uses_last_sent_rotations_and_tracking_position() {
+    let mut entity = MockEntity::new(100);
+    entity.y_rot = 10.0;
+    entity.x_rot = -20.0;
+    entity.y_head_rot = 30.0;
+    entity.delta_movement = Vec3::new(0.5, 0.0, 0.0);
+    let mut tracked = TrackedEntity::new(&entity, 64, 3, true);
+
+    // The entity turns, moves and speeds up after its last sync; pairing before the next
+    // update-interval tick must still carry the last-sent rotation bytes and movement,
+    // with the position from `entity.trackingPosition()`.
+    entity.y_rot = 100.0;
+    entity.x_rot = 45.0;
+    entity.y_head_rot = 120.0;
+    entity.delta_movement = Vec3::new(1.0, 1.0, 1.0);
+    entity.position = Vec3::new(11.0, 64.0, 20.0);
+    entity.tracking_position = Some(Vec3::new(11.0, 64.5, 20.0));
+    entity.add_entity_kind = AddEntityPacketKind::Tracked { data: 7 };
+
+    let mut host = RecordingHost::new();
+    tracked.update_player(
+        &mut entity,
+        &viewer(10, Vec3::new(10.0, 64.0, 20.0)),
+        &[],
+        100,
+        -1.0,
+        &mut host,
+    );
+    let HostEvent::Packet(10, EntityTrackerPacket::Bundle(bundle)) = &host.events[1] else {
+        panic!("expected pairing bundle, got {:?}", host.events[1]);
+    };
+    assert_eq!(
+        bundle[0],
+        EntityTrackerPacket::AddEntity(ClientboundAddEntityPacket {
+            id: 100,
+            uuid: entity.uuid,
+            entity_type_id: 42,
+            x: 11.0,
+            y: 64.5,
+            z: 20.0,
+            movement: Vec3::new(0.5, 0.0, 0.0),
+            x_rot: pack_degrees(-20.0),
+            y_rot: pack_degrees(10.0),
+            y_head_rot: pack_degrees(30.0),
+            data: 7,
+        })
+    );
+}
+
+#[test]
+fn pairing_add_entity_block_pos_constructor_uses_current_state() {
+    // `ItemFrame`/`Painting`/`LeashFenceKnotEntity`: `new ClientboundAddEntityPacket(entity, data, getPos())`.
+    let mut frame = MockEntity::new(100);
+    frame.living = false;
+    frame.item_frame = true;
+    let mut tracked = TrackedEntity::new(&frame, 64, 3, true);
+
+    frame.y_rot = 180.0;
+    frame.x_rot = 90.0;
+    frame.y_head_rot = 45.0;
+    frame.delta_movement = Vec3::new(0.0, -0.04, 0.0);
+    frame.position = Vec3::new(10.03125, 64.5, 20.5);
+    frame.add_entity_kind = AddEntityPacketKind::BlockPos {
+        data: 2,
+        pos: BlockPos::new(10, 64, 20),
+    };
+
+    let mut host = RecordingHost::new();
+    tracked.update_player(
+        &mut frame,
+        &viewer(10, Vec3::new(10.0, 64.0, 20.0)),
+        &[],
+        100,
+        -1.0,
+        &mut host,
+    );
+    let HostEvent::Packet(10, EntityTrackerPacket::Bundle(bundle)) = &host.events[1] else {
+        panic!("expected pairing bundle, got {:?}", host.events[1]);
+    };
+    assert_eq!(
+        bundle[0],
+        EntityTrackerPacket::AddEntity(ClientboundAddEntityPacket {
+            id: 100,
+            uuid: frame.uuid,
+            entity_type_id: 42,
+            x: 10.0,
+            y: 64.0,
+            z: 20.0,
+            movement: Vec3::new(0.0, -0.04, 0.0),
+            x_rot: pack_degrees(90.0),
+            y_rot: pack_degrees(180.0),
+            y_head_rot: pack_degrees(45.0),
+            data: 2,
+        })
+    );
+}
+
+#[test]
+fn hurt_marked_velocity_event_change_below_bukkit_epsilon_keeps_original() {
+    let mut player = MockEntity::new(1);
+    player.server_player = true;
+    let mut tracked = TrackedEntity::new(&player, 64, 20, true);
+    let mut host = RecordingHost::new();
+    tracked.update_player(
+        &mut player,
+        &viewer(2, Vec3::new(10.0, 64.0, 20.0)),
+        &[],
+        100,
+        -1.0,
+        &mut host,
+    );
+    tracked.send_changes(&mut player, 10, &mut host);
+    host.clear();
+
+    // Bukkit `Vector.equals` treats per-component differences below 1e-6 as equal,
+    // so CraftBukkit keeps (and sends) the original deltaMovement.
+    let original = Vec3::new(0.0, 0.5, 0.0);
+    player.hurt_marked = true;
+    player.delta_movement = original;
+    host.velocity_override = Some(Some(Vec3::new(5.0e-7, 0.5, 0.0)));
+    tracked.send_changes(&mut player, 10, &mut host);
+    assert!(!player.hurt_marked);
+    assert_eq!(player.delta_movement, original);
+    let expected = EntityTrackerPacket::SetEntityMotion {
+        entity_id: 1,
+        movement: original,
+    };
+    assert_eq!(host.packets_for(2), vec![&expected]);
+    assert_eq!(host.packets_for(1), vec![&expected]);
 }
 
 #[test]
@@ -1044,12 +1213,22 @@ fn stationary_minecart_refreshes_position_every_60_ticks() {
     );
     host.clear();
 
+    // `ServerEntity.handleMinecartPosRot` builds the single step as
+    // `new MinecartStep(position, deltaMovement, yRot, xRot, 1.0F)`.
+    let expected = EntityTrackerPacket::MoveMinecart {
+        entity_id: 505,
+        steps: vec![MinecartStep {
+            position: cart.position,
+            movement: cart.delta_movement,
+            y_rot: cart.y_rot,
+            x_rot: cart.x_rot,
+            weight: 1.0,
+        }],
+    };
+
     // Tick 0: tick_count % 60 == 0 -> emits periodic MoveMinecart even when stationary.
     tracked.send_changes(&mut cart, 10, &mut host);
-    assert!(matches!(
-        host.packets_for(10).as_slice(),
-        [EntityTrackerPacket::MoveMinecart { entity_id: 505, steps }] if steps.len() == 1
-    ));
+    assert_eq!(host.packets_for(10), vec![&expected]);
     host.clear();
 
     // Ticks 1..60: stationary, no MoveMinecart.
@@ -1060,8 +1239,5 @@ fn stationary_minecart_refreshes_position_every_60_ticks() {
 
     // Tick 60: tick_count % 60 == 0 -> periodic refresh fires again.
     tracked.send_changes(&mut cart, 10, &mut host);
-    assert!(matches!(
-        host.packets_for(10).as_slice(),
-        [EntityTrackerPacket::MoveMinecart { entity_id: 505, steps }] if steps.len() == 1
-    ));
+    assert_eq!(host.packets_for(10), vec![&expected]);
 }

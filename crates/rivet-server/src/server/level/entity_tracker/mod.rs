@@ -21,9 +21,9 @@ pub use chunk_map_tracker::{
 };
 pub use packets::{EntityTrackerPacket, EquipmentEntry, EquipmentSlot, MinecartStep};
 pub use server_entity::{
-    FORCED_POS_UPDATE_PERIOD, FORCED_TELEPORT_PERIOD, HARD_COLLIDING_TELEPORT_DELAY, ServerEntity,
-    ServerEntitySynchronizer, TOLERANCE_LEVEL_POSITION, TOLERANCE_LEVEL_ROTATION,
-    TrackedEntityState,
+    AddEntityPacketKind, FORCED_POS_UPDATE_PERIOD, FORCED_TELEPORT_PERIOD,
+    HARD_COLLIDING_TELEPORT_DELAY, ServerEntity, ServerEntitySynchronizer,
+    TOLERANCE_LEVEL_POSITION, TOLERANCE_LEVEL_ROTATION, TrackedEntityState,
 };
 pub use tracked_entity::{EntityTrackerHost, NearbyPlayersChunk, TrackedEntity};
 pub use vec_delta_codec::{TRUNCATION_STEPS, VecDeltaCodec, java_math_round};

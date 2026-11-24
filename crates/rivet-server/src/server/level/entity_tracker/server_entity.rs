@@ -14,8 +14,8 @@ use rivet_protocol::game::{
     ClientboundUpdateAttributesPacket,
 };
 use rivet_protocol::syncher::{DataValue, SynchedEntityData};
-use rivet_registry::core::Vec3;
-use rivet_util::mth::{Uuid, pack_degrees};
+use rivet_registry::core::{BlockPos, Vec3};
+use rivet_util::mth::{Uuid, pack_degrees, unpack_degrees};
 
 /// `ServerEntity.TOLERANCE_LEVEL_ROTATION`.
 pub const TOLERANCE_LEVEL_ROTATION: i32 = 1;
@@ -27,6 +27,20 @@ pub const FORCED_POS_UPDATE_PERIOD: i32 = 60;
 pub const FORCED_TELEPORT_PERIOD: i32 = 400;
 /// `ServerEntity.sendChanges` hard-colliding teleport delay override (Paper moonrise).
 pub const HARD_COLLIDING_TELEPORT_DELAY: i32 = 9999;
+
+/// `ClientboundAddEntityPacket` constructor chosen by `Entity.getAddEntityPacket(ServerEntity)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddEntityPacketKind {
+    /// `new ClientboundAddEntityPacket(entity, serverEntity, data)`: position from
+    /// `entity.trackingPosition()`, rotations and movement from the `ServerEntity`'s
+    /// last-sent values. Used by `Entity` (`data` 0) and the overrides in `Warden`,
+    /// `Projectile`, `FishingHook` and `FallingBlockEntity`, which pass their own `data`.
+    Tracked { data: i32 },
+    /// `new ClientboundAddEntityPacket(entity, data, pos)`: integer block position,
+    /// the entity's current rotations and `getDeltaMovement()`. Used by `ItemFrame`,
+    /// `Painting` and `LeashFenceKnotEntity` with `pos = getPos()`.
+    BlockPos { data: i32, pos: BlockPos },
+}
 
 /// Entity view passed to `ServerEntity` without re-owning entity storage.
 pub trait TrackedEntityState {
@@ -58,8 +72,10 @@ pub trait TrackedEntityState {
     fn x_rot(&self) -> f32;
     fn y_head_rot(&self) -> f32;
     fn on_ground(&self) -> bool;
-    fn add_entity_data(&self) -> i32 {
-        0
+    /// `Entity.getAddEntityPacket(ServerEntity)`: which constructor the entity's
+    /// override uses, with its `data` argument.
+    fn add_entity_packet_kind(&self) -> AddEntityPacketKind {
+        AddEntityPacketKind::Tracked { data: 0 }
     }
 
     /// `Entity.needsSync` flag.
@@ -218,6 +234,26 @@ impl ServerEntity {
 
     pub fn position_base(&self) -> Vec3 {
         self.position_codec.get_base()
+    }
+
+    /// `ServerEntity.getLastSentMovement()`.
+    pub fn last_sent_movement(&self) -> Vec3 {
+        self.last_sent_movement
+    }
+
+    /// `ServerEntity.getLastSentXRot()`.
+    pub fn last_sent_x_rot(&self) -> f32 {
+        unpack_degrees(self.last_sent_x_rot)
+    }
+
+    /// `ServerEntity.getLastSentYRot()`.
+    pub fn last_sent_y_rot(&self) -> f32 {
+        unpack_degrees(self.last_sent_y_rot)
+    }
+
+    /// `ServerEntity.getLastSentYHeadRot()`.
+    pub fn last_sent_y_head_rot(&self) -> f32 {
+        unpack_degrees(self.last_sent_y_head_rot)
     }
 
     pub fn last_passengers(&self) -> &[i32] {
@@ -477,7 +513,7 @@ impl ServerEntity {
                         return;
                     }
                     Some(modified_vel) => {
-                        if modified_vel != current_vel {
+                        if !bukkit_vector_equals(current_vel, modified_vel) {
                             entity.set_delta_movement(modified_vel);
                         }
                     }
@@ -504,12 +540,12 @@ impl ServerEntity {
         let entity_id = entity.entity_id();
         let lerp_steps = entity.take_minecart_lerp_steps();
         if lerp_steps.is_empty() {
-            let position_changed = vec3_length_sqr(self.position_codec.delta(entity.position()))
+            let diff = vec3_distance_to_sqr(entity.delta_movement(), self.last_sent_movement);
+            let current_position = entity.tracking_position();
+            let position_changed = vec3_length_sqr(self.position_codec.delta(current_position))
                 >= TOLERANCE_LEVEL_POSITION;
             let should_send_position = position_changed || self.tick_count % 60 == 0;
-            let delta_changed =
-                vec3_distance_to_sqr(entity.delta_movement(), self.last_sent_movement) > 1.0e-7;
-            if should_send_position || should_send_rotation || delta_changed {
+            if should_send_position || should_send_rotation || diff > 1.0e-7 {
                 synchronizer.send_to_tracking_players(EntityTrackerPacket::MoveMinecart {
                     entity_id,
                     steps: vec![MinecartStep {
@@ -517,7 +553,7 @@ impl ServerEntity {
                         movement: entity.delta_movement(),
                         y_rot: entity.y_rot(),
                         x_rot: entity.x_rot(),
-                        weight: 0.0,
+                        weight: 1.0,
                     }],
                 });
             }
@@ -575,22 +611,11 @@ impl ServerEntity {
         }
 
         let entity_id = entity.entity_id();
-        let pos = entity.position();
 
-        // 1. AddEntity
-        packets.push(EntityTrackerPacket::AddEntity(ClientboundAddEntityPacket {
-            id: entity_id,
-            uuid: entity.uuid(),
-            entity_type_id: entity.entity_type_id(),
-            x: pos.x,
-            y: pos.y,
-            z: pos.z,
-            movement: self.last_sent_movement,
-            x_rot: pack_degrees(entity.x_rot()),
-            y_rot: pack_degrees(entity.y_rot()),
-            y_head_rot: pack_degrees(entity.y_head_rot()),
-            data: entity.add_entity_data(),
-        }));
+        // 1. AddEntity (`entity.getAddEntityPacket(this)`)
+        packets.push(EntityTrackerPacket::AddEntity(
+            self.get_add_entity_packet(entity),
+        ));
 
         // 2. Non-default SynchedEntityData values
         if let Some(values) = &self.tracked_data_values {
@@ -629,10 +654,11 @@ impl ServerEntity {
             }
             let dirty_equipment = entity.detect_equipment_updates();
             if !dirty_equipment.is_empty() {
+                // `LivingEntity.handleEquipmentChanges`: Paper - data sanitization.
                 synchronizer.send_to_tracking_players(EntityTrackerPacket::SetEquipment {
                     entity_id,
                     slots: dirty_equipment,
-                    sanitize: false,
+                    sanitize: true,
                 });
             }
         }
@@ -658,6 +684,43 @@ impl ServerEntity {
                 source_id: entity_id,
                 dest_id: holder_id,
             });
+        }
+    }
+
+    /// `Entity.getAddEntityPacket(ServerEntity)` with the constructor the entity's
+    /// override selects.
+    fn get_add_entity_packet(&self, entity: &dyn TrackedEntityState) -> ClientboundAddEntityPacket {
+        match entity.add_entity_packet_kind() {
+            AddEntityPacketKind::Tracked { data } => {
+                // Paper - fix entity tracker desync: `entity.trackingPosition()`.
+                let pos = entity.tracking_position();
+                ClientboundAddEntityPacket {
+                    id: entity.entity_id(),
+                    uuid: entity.uuid(),
+                    entity_type_id: entity.entity_type_id(),
+                    x: pos.x,
+                    y: pos.y,
+                    z: pos.z,
+                    movement: self.last_sent_movement(),
+                    x_rot: pack_degrees(self.last_sent_x_rot()),
+                    y_rot: pack_degrees(self.last_sent_y_rot()),
+                    y_head_rot: pack_degrees(self.last_sent_y_head_rot()),
+                    data,
+                }
+            }
+            AddEntityPacketKind::BlockPos { data, pos } => ClientboundAddEntityPacket {
+                id: entity.entity_id(),
+                uuid: entity.uuid(),
+                entity_type_id: entity.entity_type_id(),
+                x: f64::from(pos.get_x()),
+                y: f64::from(pos.get_y()),
+                z: f64::from(pos.get_z()),
+                movement: entity.delta_movement(),
+                x_rot: pack_degrees(entity.x_rot()),
+                y_rot: pack_degrees(entity.y_rot()),
+                y_head_rot: pack_degrees(entity.y_head_rot()),
+                data,
+            },
         }
     }
 
@@ -705,10 +768,18 @@ impl ServerEntity {
         synchronizer.send_to_tracking_players(EntityTrackerPacket::SetEquipment {
             entity_id: entity.entity_id(),
             slots: dirty_equipment,
-            sanitize: false,
+            // `LivingEntity.handleEquipmentChanges`: Paper - data sanitization.
+            sanitize: true,
         });
         true
     }
+}
+
+/// Bukkit `Vector.equals`: per-component `Math.abs(a - b) < epsilon` with
+/// `Vector.epsilon = 0.000001`.
+fn bukkit_vector_equals(a: Vec3, b: Vec3) -> bool {
+    const EPSILON: f64 = 0.000001;
+    (a.x - b.x).abs() < EPSILON && (a.y - b.y).abs() < EPSILON && (a.z - b.z).abs() < EPSILON
 }
 
 #[inline]

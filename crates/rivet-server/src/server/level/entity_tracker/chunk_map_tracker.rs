@@ -105,202 +105,117 @@ impl ChunkMapEntityTracker {
     /// Returns `Ok(true)` if the entity was added to `entity_map`, `Ok(false)`
     /// if legitimately skipped (`EnderDragonPart`, `suppressTrackerForLogin`, or
     /// `range == 0`), or `Err(EntityTrackerError::IllegalAddEntity)` if the
-    /// entity is invalid, belongs to a different level, or is already tracked.
-    #[allow(clippy::too_many_arguments)]
+    /// entity is invalid, belongs to a different level, or is already tracked,
+    /// or is a `ServerPlayer` missing from `level_players`.
+    ///
+    /// `level_players` is `this.level.players()`. For a `ServerPlayer` it already
+    /// holds the player's own `ViewerInfo` (`ServerLevel.EntityCallbacks.onTrackingStart`
+    /// adds the player to `players` before `addEntity` runs); that viewer is
+    /// then offered to every other tracked entity (`e.updatePlayer(player)`).
+    /// `with_other(id, apply)` resolves another tracked entity by id and calls
+    /// `apply` with it, its tracking kind, activation type and indirect passenger
+    /// ranges; an id it does not resolve is skipped.
     pub fn add_entity<F>(
         &mut self,
         entity: &mut dyn TrackedEntityState,
         reg: &EntityTrackRegistration,
         level_players: &[ViewerInfo],
-        self_viewer: Option<&ViewerInfo>,
-        mut resolve_other: F,
+        mut with_other: F,
         host: &mut dyn EntityTrackerHost,
     ) -> Result<bool, EntityTrackerError>
     where
         F: FnMut(
             i32,
-        ) -> Option<(
-            &'static mut dyn TrackedEntityState,
-            TrackingEntityKind,
-            ActivationType,
-            Vec<i32>,
-        )>,
-    {
-        let entity_id = entity.entity_id();
-        if !reg.valid {
-            return Err(EntityTrackerError::IllegalAddEntity {
-                entity_id,
-                reason: "entity is not valid",
-            });
-        }
-        if reg.level_id != self.level_id {
-            return Err(EntityTrackerError::IllegalAddEntity {
-                entity_id,
-                reason: "entity belongs to a different level",
-            });
-        }
-        if self.entity_map.contains_key(&entity_id) {
-            return Err(EntityTrackerError::IllegalAddEntity {
-                entity_id,
-                reason: "entity is already tracked",
-            });
-        }
-        if entity.is_server_player() && reg.suppress_tracker_for_login {
-            return Ok(false);
-        }
-        if reg.is_ender_dragon_part {
-            return Ok(false);
-        }
-
-        let default_range = reg.client_tracking_range_chunks.wrapping_mul(16);
-        let range =
-            get_entity_tracking_range(reg.kind, reg.activation_type, default_range, &self.config);
-        if range == 0 {
-            return Ok(false);
-        }
-
-        let range_y = self
-            .config
-            .tracking_range_y
-            .range_for(reg.kind, reg.activation_type);
-        let mut tracked = TrackedEntity::new(entity, range, reg.update_interval, reg.track_delta);
-        tracked.update_players(
-            entity,
-            level_players,
-            &reg.indirect_passenger_ranges,
-            self.config.entity_broadcast_range_percentage,
-            range_y,
-            host,
-        );
-        let is_player = entity.is_server_player();
-        self.entity_map.insert(entity_id, tracked);
-
-        if is_player {
-            host.update_player_status(entity_id, true);
-            if let Some(viewer) = self_viewer {
-                for (&other_id, other_tracked) in &mut self.entity_map {
-                    if other_id != entity_id
-                        && let Some((other_entity, other_kind, other_act, other_passengers)) =
-                            resolve_other(other_id)
-                    {
-                        let other_range_y = self
-                            .config
-                            .tracking_range_y
-                            .range_for(other_kind, other_act);
-                        other_tracked.update_player(
-                            other_entity,
-                            viewer,
-                            &other_passengers,
-                            self.config.entity_broadcast_range_percentage,
-                            other_range_y,
-                            host,
-                        );
-                    }
-                }
-            }
-        }
-
-        Ok(true)
-    }
-
-    /// Simplified `add_entity` when adding a non-player entity (or when the caller
-    /// handles cross-entity player updates separately via `update_player_for_all`).
-    pub fn add_entity_simple(
-        &mut self,
-        entity: &mut dyn TrackedEntityState,
-        reg: &EntityTrackRegistration,
-        level_players: &[ViewerInfo],
-        host: &mut dyn EntityTrackerHost,
-    ) -> Result<bool, EntityTrackerError> {
-        let entity_id = entity.entity_id();
-        if !reg.valid {
-            return Err(EntityTrackerError::IllegalAddEntity {
-                entity_id,
-                reason: "entity is not valid",
-            });
-        }
-        if reg.level_id != self.level_id {
-            return Err(EntityTrackerError::IllegalAddEntity {
-                entity_id,
-                reason: "entity belongs to a different level",
-            });
-        }
-        if self.entity_map.contains_key(&entity_id) {
-            return Err(EntityTrackerError::IllegalAddEntity {
-                entity_id,
-                reason: "entity is already tracked",
-            });
-        }
-        if entity.is_server_player() && reg.suppress_tracker_for_login {
-            return Ok(false);
-        }
-        if reg.is_ender_dragon_part {
-            return Ok(false);
-        }
-
-        let default_range = reg.client_tracking_range_chunks.wrapping_mul(16);
-        let range =
-            get_entity_tracking_range(reg.kind, reg.activation_type, default_range, &self.config);
-        if range == 0 {
-            return Ok(false);
-        }
-
-        let range_y = self
-            .config
-            .tracking_range_y
-            .range_for(reg.kind, reg.activation_type);
-        let mut tracked = TrackedEntity::new(entity, range, reg.update_interval, reg.track_delta);
-        tracked.update_players(
-            entity,
-            level_players,
-            &reg.indirect_passenger_ranges,
-            self.config.entity_broadcast_range_percentage,
-            range_y,
-            host,
-        );
-        let is_player = entity.is_server_player();
-        self.entity_map.insert(entity_id, tracked);
-        if is_player {
-            host.update_player_status(entity_id, true);
-        }
-        Ok(true)
-    }
-
-    /// Updates a newly added `ServerPlayer` against every other tracked entity
-    /// in `entity_map` (second half of `ChunkMap::addEntity` for players,
-    /// avoiding `'static` lifetime requirements on borrowed arena storage).
-    pub fn update_player_against_all<F>(
-        &mut self,
-        viewer: &ViewerInfo,
-        mut with_entity: F,
-        host: &mut dyn EntityTrackerHost,
-    ) where
-        F: FnMut(
-            i32,
             &mut dyn FnMut(&mut dyn TrackedEntityState, TrackingEntityKind, ActivationType, &[i32]),
         ),
     {
-        let pct = self.config.entity_broadcast_range_percentage;
-        let range_y_cfg = self.config.tracking_range_y;
-        for (&other_id, other_tracked) in &mut self.entity_map {
-            if other_id == viewer.player_id {
-                continue;
-            }
-            with_entity(
-                other_id,
-                &mut |other_entity, kind, act, passenger_ranges| {
-                    let range_y = range_y_cfg.range_for(kind, act);
-                    other_tracked.update_player(
-                        other_entity,
-                        viewer,
-                        passenger_ranges,
-                        pct,
-                        range_y,
-                        host,
-                    );
-                },
-            );
+        let entity_id = entity.entity_id();
+        if !reg.valid {
+            return Err(EntityTrackerError::IllegalAddEntity {
+                entity_id,
+                reason: "entity is not valid",
+            });
         }
+        if reg.level_id != self.level_id {
+            return Err(EntityTrackerError::IllegalAddEntity {
+                entity_id,
+                reason: "entity belongs to a different level",
+            });
+        }
+        if self.entity_map.contains_key(&entity_id) {
+            return Err(EntityTrackerError::IllegalAddEntity {
+                entity_id,
+                reason: "entity is already tracked",
+            });
+        }
+        let is_player = entity.is_server_player();
+        if is_player && reg.suppress_tracker_for_login {
+            return Ok(false);
+        }
+        if reg.is_ender_dragon_part {
+            return Ok(false);
+        }
+
+        let default_range = reg.client_tracking_range_chunks.wrapping_mul(16);
+        let range =
+            get_entity_tracking_range(reg.kind, reg.activation_type, default_range, &self.config);
+        if range == 0 {
+            return Ok(false);
+        }
+        let self_viewer = if is_player {
+            Some(
+                *level_players
+                    .iter()
+                    .find(|v| v.player_id == entity_id)
+                    .ok_or(EntityTrackerError::IllegalAddEntity {
+                        entity_id,
+                        reason: "server player is not in the level's players",
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        let range_y = self
+            .config
+            .tracking_range_y
+            .range_for(reg.kind, reg.activation_type);
+        let mut tracked = TrackedEntity::new(entity, range, reg.update_interval, reg.track_delta);
+        tracked.update_players(
+            entity,
+            level_players,
+            &reg.indirect_passenger_ranges,
+            self.config.entity_broadcast_range_percentage,
+            range_y,
+            host,
+        );
+        self.entity_map.insert(entity_id, tracked);
+
+        if let Some(viewer) = self_viewer {
+            host.update_player_status(entity_id, true);
+            let pct = self.config.entity_broadcast_range_percentage;
+            let range_y_cfg = self.config.tracking_range_y;
+            for (&other_id, other_tracked) in &mut self.entity_map {
+                if other_id == entity_id {
+                    continue;
+                }
+                with_other(
+                    other_id,
+                    &mut |other_entity, kind, act, passenger_ranges| {
+                        other_tracked.update_player(
+                            other_entity,
+                            &viewer,
+                            passenger_ranges,
+                            pct,
+                            range_y_cfg.range_for(kind, act),
+                            host,
+                        );
+                    },
+                );
+            }
+        }
+
+        Ok(true)
     }
 
     /// `ChunkMap.removeEntity(Entity)`.
