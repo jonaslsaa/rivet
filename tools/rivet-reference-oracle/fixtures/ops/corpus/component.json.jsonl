@@ -1,0 +1,62 @@
+{"id":"component.literal-plain","input":"\"hello\""}
+{"id":"component.literal-unicode","input":"\"héllo wörld\""}
+{"id":"component.literal-emoji","input":"\"🎉\""}
+{"id":"component.literal-empty","input":"\"\""}
+{"id":"component.literal-markup","input":"\"<b>hi & bye</b>\""}
+{"id":"component.literal-escapes","input":"\"line1\\nline2\\t\\\"quoted\\\" \\\\backslash\""}
+{"id":"component.literal-json-tokens","input":"\"{}[],: true false null\""}
+{"id":"component.literal-dashes","input":"\"stat.player.one\""}
+{"id":"component.styled-bold","input":"{\"text\":\"bold\",\"bold\":true}"}
+{"id":"component.styled-italic","input":"{\"text\":\"it\",\"italic\":true}"}
+{"id":"component.styled-named-color","input":"{\"text\":\"red\",\"color\":\"red\"}"}
+{"id":"component.styled-hex-color","input":"{\"text\":\"hex\",\"color\":\"#ff5555\"}"}
+{"id":"component.styled-multi-format","input":"{\"text\":\"x\",\"bold\":true,\"italic\":true,\"underlined\":true,\"strikethrough\":true,\"obfuscated\":true}"}
+{"id":"component.styled-shadow-color","input":"{\"text\":\"s\",\"shadow_color\":-16777216}"}
+{"id":"component.styled-insertion","input":"{\"text\":\"i\",\"insertion\":\"insert me\"}"}
+{"id":"component.styled-font","input":"{\"text\":\"f\",\"font\":\"minecraft:default\"}"}
+{"id":"component.styled-negated-format","input":"{\"text\":\"n\",\"bold\":false}"}
+{"id":"component.translatable-plain","input":"{\"translate\":\"multiplayer.player.joined\"}"}
+{"id":"component.translatable-fallback","input":"{\"translate\":\"key\",\"fallback\":\"Fallback\"}"}
+{"id":"component.translatable-with-string","input":"{\"translate\":\"chat.type.text\",\"with\":[\"<Steve>\"]}"}
+{"id":"component.translatable-with-int","input":"{\"translate\":\"commands.give.success\",\"with\":[42,\"diamond\"]}"}
+{"id":"component.translatable-with-float","input":"{\"translate\":\"custom.f\",\"with\":[3.5]}"}
+{"id":"component.translatable-with-neg-int","input":"{\"translate\":\"custom.n\",\"with\":[-7]}"}
+{"id":"component.translatable-with-bool","input":"{\"translate\":\"custom.b\",\"with\":[true]}"}
+{"id":"component.translatable-with-long","input":"{\"translate\":\"custom.big\",\"with\":[2147483648]}"}
+{"id":"component.translatable-with-styled-component","input":"{\"translate\":\"custom.c\",\"with\":[{\"text\":\"nested\",\"bold\":true}]}"}
+{"id":"component.translatable-with-mixed","input":"{\"translate\":\"custom.m\",\"with\":[1,2.5,false,\"four\"]}"}
+{"id":"component.keybind-forward","input":"{\"keybind\":\"key.forward\"}"}
+{"id":"component.keybind-jump","input":"{\"keybind\":\"key.jump\"}"}
+{"id":"component.score-plain","input":"{\"score\":{\"name\":\"Player\",\"objective\":\"obj\"}}"}
+{"id":"component.score-dashed","input":"{\"score\":{\"name\":\"Team A\",\"objective\":\"scoreboard\"}}"}
+{"id":"component.selector-plain","input":"{\"selector\":\"@p\"}"}
+{"id":"component.selector-styled","input":"{\"selector\":\"@a[team=red]\",\"color\":\"gold\"}"}
+{"id":"component.selector-with-separator","input":"{\"selector\":\"@e\",\"separator\":\",\"}"}
+{"id":"component.selector-with-object-separator","input":"{\"selector\":\"@e\",\"separator\":{\"text\":\" | \"}}"}
+{"id":"component.nested-extra","input":"{\"text\":\"a\",\"extra\":[\"b\",\"c\"]}"}
+{"id":"component.nested-extra-styled","input":"{\"text\":\"a\",\"extra\":[{\"text\":\"b\",\"bold\":true},{\"translate\":\"x\"}]}"}
+{"id":"component.nested-deep","input":"{\"text\":\"a\",\"extra\":[{\"text\":\"b\",\"extra\":[\"c\"]}]}"}
+{"id":"component.nested-extra-with-style","input":"{\"text\":\"a\",\"extra\":[\"b\",\"c\"],\"color\":\"yellow\"}"}
+{"id":"component.nested-list-form","input":"[\"a\",\"b\"]"}
+{"id":"component.typed-text","input":"{\"type\":\"text\",\"text\":\"legacy\"}"}
+{"id":"component.typed-translatable","input":"{\"type\":\"translatable\",\"translate\":\"a\",\"fallback\":\"b\"}"}
+{"id":"component.hover-show-text","input":"{\"text\":\"h\",\"hover_event\":{\"action\":\"show_text\",\"value\":\"hover!\"}}"}
+{"id":"component.click-open-url","input":"{\"text\":\"c\",\"click_event\":{\"action\":\"open_url\",\"url\":\"https://example.com/path?q=1&r=2\"}}"}
+{"id":"component.click-run-command","input":"{\"text\":\"r\",\"click_event\":{\"action\":\"run_command\",\"command\":\"/say hi\"}}"}
+{"id":"component.click-copy-to-clipboard","input":"{\"text\":\"cp\",\"click_event\":{\"action\":\"copy_to_clipboard\",\"value\":\"copied\"}}"}
+{"id":"component.malformed-hover-show-text-wrong-key","input":"{\"text\":\"h\",\"hover_event\":{\"action\":\"show_text\",\"contents\":\"hover!\"}}"}
+{"id":"component.malformed-click-open-url-wrong-key","input":"{\"text\":\"c\",\"click_event\":{\"action\":\"open_url\",\"href\":\"https://example.com\"}}"}
+{"id":"component.malformed-click-run-command-wrong-key","input":"{\"text\":\"r\",\"click_event\":{\"action\":\"run_command\",\"value\":\"/say hi\"}}"}
+{"id":"component.malformed-click-copy-clipboard-wrong-key","input":"{\"text\":\"cp\",\"click_event\":{\"action\":\"copy_to_clipboard\",\"text\":\"copied\"}}"}
+{"id":"component.malformed-not-json","input":"not json"}
+{"id":"component.malformed-unclosed-object","input":"{\"text\":\"a\""}
+{"id":"component.malformed-text-missing-key","input":"{\"type\":\"text\"}"}
+{"id":"component.malformed-translate-not-string","input":"{\"translate\":42}"}
+{"id":"component.malformed-bold-not-bool","input":"{\"text\":\"a\",\"bold\":\"yes\"}"}
+{"id":"component.malformed-extra-empty","input":"{\"text\":\"a\",\"extra\":[]}"}
+{"id":"component.malformed-extra-not-list","input":"{\"text\":\"a\",\"extra\":5}"}
+{"id":"component.malformed-score-missing-objective","input":"{\"score\":{\"name\":\"p\"}}"}
+{"id":"component.malformed-score-not-object","input":"{\"score\":\"p\"}"}
+{"id":"component.malformed-unknown-type","input":"{\"type\":\"bogus\",\"text\":\"x\"}"}
+{"id":"component.malformed-bad-color","input":"{\"text\":\"a\",\"color\":\"notacolor\"}"}
+{"id":"component.malformed-with-bad-component","input":"{\"translate\":\"x\",\"with\":[{\"foo\":42}]}"}

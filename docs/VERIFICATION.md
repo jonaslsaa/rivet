@@ -395,6 +395,41 @@ L = several days / multiple rounds. Ordered by risk x already-ported-unverified 
 | 11 | **Bot rows: dig/place (#55), container click (#56).** Paper-vs-Paper first, then `--server both` as the server paths land. Reuse one Paper boot for several scenarios. | M each | Twin-run identical, negative detected, row on scoreboard. Hard cap of ~12 L5 rows total. |
 | 12 | **Differential fuzz in T3.** Drive `packet.reencode`, `nbt.decode`, `snbt.parse`, `codec.reencode` from the existing 15 fuzz targets with a fixed time budget; minimized divergences are appended to the committed corpus through record mode. | M | Nightly row with executions and divergences; every found divergence becomes a permanent recorded input. |
 
+**Status of items 2 and 3 (landed together).**
+- *Item 3, oracle ops.* `RivetReferenceOracle` has an op registry (declared result-key order, rejection
+  classes, IEEE-754 bit-hex floats) serving both `run.sh --record` and the live JSON-Lines loop; the five
+  existing ops run on it unchanged (`rivet-parity` still reports 1,995 checks, transcript byte-identical).
+  The Rust client is `rivet_harness_common::oracle_client` (boot once, pipelining, tamper hook) with
+  `closure` and `canon`; `rivet-parity ops check|live` runs the comparator (canonical lines, first
+  divergence with op/id/field, `exclusions.tsv`, per-comparator tamper negative, closure counts).
+  Recorded: `snbt.parse` 170, `nbt.decode` 40, `component.json` 62 inputs under
+  `tools/rivet-reference-oracle/fixtures/ops/`; `nbt.encode` stays on the semantic comparator (D12).
+  `ops live` is a full-gate step; the offline replay and the broken-handler negative are cargo tests.
+- *Item 2, probe regeneration.* `tools/rivet-oracle/probes.tsv` covers every `run_*.sh` plus the op
+  recorder; `rivet-oracle regen --check [--only glob] [--changed range]` (see `tools/rivet-oracle/README.md`).
+  T3: `scripts/gate.sh --nightly`. T1 path trigger: `regen --check --changed origin/main...HEAD`, to be
+  called by the merge tier once `gate.sh` grows `--tier merge` (§6.1 item 3). Rows with no committed
+  output and orphan goldens report UNVERIFIED, so the nightly row is not PASS until they are resolved.
+  `VERIFY.tsv` takes probe ownership from `probes.tsv` and has `op.<op>.recorded|live` and
+  `regen.probes` rows.
+- *First full regen run (2026-11-24, `--jobs 2`, 1,626 s wall): 88 PASS, 7 FAIL, 4 UNVERIFIED* (the
+  four `none` rows: `directory_lock`, `lighting_core`, `thread_unsafe_random`, `world_identity`).
+  No probe was nondeterministic and none crashed. All 7 failures are goldens that were edited by hand
+  after the probe ran, so they cannot be reproduced; none of them is Paper behaving differently. They
+  are findings, and the fixtures were left untouched:
+  - `block_pos_set`, `freeze_snow`, `plant_survival`, `tree_core`: the body matches byte for byte, but
+    the committed file carries 1 to 3 provenance `#` header lines that the probe does not print.
+  - `block_mutation_metadata`: `section_flags.tsv` is identical. `block_mutation_callbacks.tsv` is the
+    probe output with the 937 rows that are all `BlockBehaviour` dropped (259 of 1,196 lines kept).
+  - `block_shape_behavior`: the committed file has the same 1,779 records as the probe's
+    non-`structure_` output, in an older case order. The `structure_` cases also print by default now,
+    and `structure-block-shape.jsonl` owns them (that row PASSes).
+  - `update_shape`: `block-update-shape-owners.tsv` and `voxel-edge-faces.tsv` were split by hand from
+    the `UPDATE_OWNER`/`EDGE_FACE` stdout, with the prefixes stripped and a header added.
+
+  The fix for each is to make the probe write the committed form itself (or regenerate the golden from
+  the probe), then re-run the consumer tests. That is follow-up work, not part of this change.
+
 Deferred, deliberately: GameTest runner parity (L6) rides on item 7 and issues #474/#475; Paper JUnit
 and the plugin corpus (L8) start with the adapter (#494, #504). Their ledger rows should be created now
 as `INACTIVE` with the real denominators (`0 / 9,653`) so the scoreboard tells the truth.

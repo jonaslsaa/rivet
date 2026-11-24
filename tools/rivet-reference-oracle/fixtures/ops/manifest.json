@@ -1,0 +1,37 @@
+{
+  "format": 1,
+  "kind": "oracle-ops",
+  "paper": "26.2-DEV-main@0a99345",
+  "paper_commit": "0a99345",
+  "op_source": "tools/rivet-reference-oracle/src/RivetReferenceOracle.java",
+  "op_source_sha256": "01c811dc53fcb6dae62b46ce72d25ed6b601022d59d88f50f4b1690eeba4ab3c",
+  "ops": [
+    {
+      "op": "component.json",
+      "corpus": "corpus/component.json.jsonl",
+      "corpus_sha256": "0b4daba1f5b6f9ebb2026b7214638c8d76cf9328eb39f9b1abb0165c386252a1",
+      "corpus_n": 62,
+      "output": "component.json.jsonl",
+      "output_sha256": "704687d0133e5bfe5d4f387e9e4c3b176054a873ccfb143b6a4ea28779e94740",
+      "output_n": 62
+    },
+    {
+      "op": "nbt.decode",
+      "corpus": "corpus/nbt.decode.jsonl",
+      "corpus_sha256": "8c233c96125fca5a4350fe951d7ca1f3fdbca83984468927efb671fbd6d05cca",
+      "corpus_n": 40,
+      "output": "nbt.decode.jsonl",
+      "output_sha256": "5a33dc8446fdbbd5c4213e81bc2ffa82fe227c1208064c012d687acc8f53d1e3",
+      "output_n": 40
+    },
+    {
+      "op": "snbt.parse",
+      "corpus": "corpus/snbt.parse.jsonl",
+      "corpus_sha256": "185fc66cc0f0068a6710478ece222b3434633aeaf614e63831f5eae547475543",
+      "corpus_n": 170,
+      "output": "snbt.parse.jsonl",
+      "output_sha256": "263c55f8b330f1953d6b9e666bc8b9e620ed48abeb357cf28df80e40dc8958a8",
+      "output_n": 170
+    }
+  ]
+}

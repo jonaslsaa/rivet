@@ -1,0 +1,112 @@
+# probes.tsv — every Java probe script and the committed output(s) it must
+# reproduce byte-for-byte (`rivet-oracle regen --check`, VERIFICATION §5 item 2).
+# Columns (tab-separated; `-` = empty):
+#   script   repo-relative path of the producer
+#   mode     stdout: stdout == the outputs concatenated in order
+#            files:  {outN} in args is replaced by a temp file named like output N
+#            dir:    {dir} in args is a temp dir; each output is read by basename
+#            none:   no committed output exists (always UNVERIFIED; note says why)
+#   args     space-separated arguments
+#   env      space-separated KEY=VALUE pairs
+#   outputs  comma-separated repo-relative committed files
+#   note     free text
+script	mode	args	env	outputs	note
+tools/rivet-oracle/scripts/run_beardifier_noise_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/beardifier-noise.jsonl	-
+tools/rivet-oracle/scripts/run_beardifier_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/beardifier.jsonl	-
+tools/rivet-oracle/scripts/run_biome_temperature_probe.sh	dir	{dir}	-	tools/rivet-oracle/fixtures/biome-temperature/biome-temperature.json,tools/rivet-oracle/fixtures/biome-temperature/manifest.json	-
+tools/rivet-oracle/scripts/run_block_entity_debug_probe.sh	files	{out0}	-	tools/rivet-oracle/fixtures/block-entity-debug.jsonl	-
+tools/rivet-oracle/scripts/run_block_entity_lifecycle_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/block-entity-lifecycle.jsonl	-
+tools/rivet-oracle/scripts/run_block_entity_lifecycle_probe.sh	stdout	-	RIVET_BLOCK_ENTITY_PROBE_MODE=spawner	tools/rivet-oracle/fixtures/spawner-entity-id.jsonl	-
+tools/rivet-oracle/scripts/run_block_entity_map_order_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/block-entity-map-order.jsonl	-
+tools/rivet-oracle/scripts/run_block_entity_ticker_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/block-entity-ticker.jsonl	-
+tools/rivet-oracle/scripts/run_block_mutation_metadata_probe.sh	files	{out0} {out1}	-	crates/rivet-server/src/server/level/block_mutation_callbacks.tsv,crates/rivet-registry/src/block_state/section_flags.tsv	-
+tools/rivet-oracle/scripts/run_block_pos_set_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/block-pos-set.tsv	-
+tools/rivet-oracle/scripts/run_block_shape_behavior_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/block-shape-behavior.jsonl	-
+tools/rivet-oracle/scripts/run_block_shape_behavior_probe.sh	stdout	structure_	-	tools/rivet-oracle/fixtures/structure-block-shape.jsonl	-
+tools/rivet-oracle/scripts/run_bubble_column_probe.sh	files	{out0}	-	tools/rivet-oracle/fixtures/bubble-column.jsonl	-
+tools/rivet-oracle/scripts/run_builtin_pack_repository_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/builtin-pack-repository.jsonl	-
+tools/rivet-oracle/scripts/run_buried_treasure_generation_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/buried-treasure-generation.jsonl	-
+tools/rivet-oracle/scripts/run_chest_minecart_load_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/chest-minecart-load.jsonl	-
+tools/rivet-oracle/scripts/run_chest_minecart_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/chest-minecart.jsonl	-
+tools/rivet-oracle/scripts/run_chunk_block_batch_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/chunk-block-batch.jsonl	-
+tools/rivet-oracle/scripts/run_chunk_level_probe.sh	dir	{dir}	-	tools/rivet-oracle/fixtures/chunk-level/chunk-level-goldens.json,tools/rivet-oracle/fixtures/chunk-level/manifest.json	-
+tools/rivet-oracle/scripts/run_chunk_post_process_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/chunk-post-process.jsonl	-
+tools/rivet-oracle/scripts/run_composed_noise_probe.sh	dir	{dir}	-	tools/rivet-oracle/fixtures/composed-noise/composed-noise.json	-
+tools/rivet-oracle/scripts/run_data_worldgen_probe.sh	dir	{dir}	-	tools/rivet-oracle/fixtures/data-worldgen/terrain-provider-goldens.json,tools/rivet-oracle/fixtures/data-worldgen/noise-data-goldens.json,tools/rivet-oracle/fixtures/data-worldgen/manifest.json	-
+tools/rivet-oracle/scripts/run_dataconverter_probe.sh	dir	{dir}	-	tools/rivet-oracle/fixtures/dataconverter/dataconverter-foundation.json,tools/rivet-oracle/fixtures/dataconverter/manifest.json	-
+tools/rivet-oracle/scripts/run_directory_lock_probe.sh	none	-	-	-	drives `cargo test -p rivet-server directory_lock` against a live JVM lock holder; it asserts in Rust and commits no fixture
+tools/rivet-oracle/scripts/run_entity_lookup_probe.sh	files	{out0}	-	tools/rivet-oracle/fixtures/entity-lookup.jsonl	-
+tools/rivet-oracle/scripts/run_entity_post_load_policy_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/entity-post-load-policy.jsonl	-
+tools/rivet-oracle/scripts/run_entity_region_probe.sh	files	{out0}	-	tools/rivet-oracle/fixtures/entity-region.jsonl	-
+tools/rivet-oracle/scripts/run_entity_tracking_probe.sh	files	{out0}	-	tools/rivet-oracle/fixtures/entity-tracking.jsonl	-
+tools/rivet-oracle/scripts/run_environment_attributes_probe.sh	files	{out0} {out1} {out2}	-	crates/rivet-world/src/biome/gameplay_environment.jsonl,tools/rivet-oracle/fixtures/environment-attributes.jsonl,tools/rivet-oracle/fixtures/environment-boolean-maps.jsonl	-
+tools/rivet-oracle/scripts/run_fallen_tree_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/fallen-trees.jsonl	-
+tools/rivet-oracle/scripts/run_flowing_fluid_probe.sh	files	{out0} {out1} {out2} {out3}	-	crates/rivet-world/src/fluid/block_behaviors.tsv,tools/rivet-oracle/fixtures/fluid-block-states.tsv,tools/rivet-oracle/fixtures/flowing-fluid.jsonl,tools/rivet-oracle/fixtures/fluid-collision-faces.tsv	-
+tools/rivet-oracle/scripts/run_freeze_snow_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/freeze-snow.tsv	-
+tools/rivet-oracle/scripts/run_full_activation_lifecycle_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/full-activation-lifecycle.jsonl	-
+tools/rivet-oracle/scripts/run_generated_block_light_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/generated-block-light.jsonl	-
+tools/rivet-oracle/scripts/run_generated_boot_settings_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/generated-boot-settings.jsonl	-
+tools/rivet-oracle/scripts/run_generation_creature_load_probe.sh	files	{out0}	-	tools/rivet-oracle/fixtures/generation-creature-load.jsonl	-
+tools/rivet-oracle/scripts/run_generation_farm_animal_probe.sh	files	{out0} {out1}	-	tools/rivet-oracle/fixtures/generation-farm-animals.jsonl,crates/rivet-world/src/entity/farm-variant-registries.jsonl	-
+tools/rivet-oracle/scripts/run_generation_population_trace_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/generation-population-trace.jsonl,tools/rivet-oracle/fixtures/generation-population-positive.jsonl	stdout is the trace rows followed by the positive rows; the committed goldens split them across two files
+tools/rivet-oracle/scripts/run_generation_sheep_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/generation-sheep.jsonl	-
+tools/rivet-oracle/scripts/run_heart_tick_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/heart-tick.jsonl	-
+tools/rivet-oracle/scripts/run_hive_storage_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/hive-storage.jsonl	-
+tools/rivet-oracle/scripts/run_holder_readiness_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/holder-readiness.jsonl	-
+tools/rivet-oracle/scripts/run_incremental_light_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/incremental-light.jsonl	-
+tools/rivet-oracle/scripts/run_initial_spawn_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/initial-spawn.jsonl	-
+tools/rivet-oracle/scripts/run_lazy_block_entity_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/lazy-block-entity.jsonl	-
+tools/rivet-oracle/scripts/run_lazy_structure_point_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/lazy-structure-point.jsonl	-
+tools/rivet-oracle/scripts/run_level_ticks_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/level-ticks.jsonl	-
+tools/rivet-oracle/scripts/run_lighting_core_probe.sh	none	-	-	-	writes a key=value trace to --output but no committed fixture consumes it
+tools/rivet-oracle/scripts/run_liquid_block_probe.sh	files	{out0}	-	tools/rivet-oracle/fixtures/liquid-block.jsonl	-
+tools/rivet-oracle/scripts/run_live_block_mutation_probe.sh	files	{out0}	-	tools/rivet-oracle/fixtures/live-block-mutation.jsonl	-
+tools/rivet-oracle/scripts/run_live_block_packets_probe.sh	files	{out0}	-	tools/rivet-oracle/fixtures/live-block-packets.jsonl	-
+tools/rivet-oracle/scripts/run_long_reference_set_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/long-reference-set.tsv	-
+tools/rivet-oracle/scripts/run_mineshaft_authority_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/mineshaft-authority.jsonl	-
+tools/rivet-oracle/scripts/run_mineshaft_chest_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/mineshaft-chest.jsonl	-
+tools/rivet-oracle/scripts/run_mineshaft_generation_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/mineshaft-generation.jsonl	-
+tools/rivet-oracle/scripts/run_mineshaft_generation_probe.sh	files	{out0} moves	-	tools/rivet-oracle/fixtures/mineshaft-move.jsonl	-
+tools/rivet-oracle/scripts/run_mineshaft_placement_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/mineshaft-placement.jsonl	-
+tools/rivet-oracle/scripts/run_mineshaft_placement_probe.sh	files	{out0} falling	-	tools/rivet-oracle/fixtures/structure-falling-blocks.txt	-
+tools/rivet-oracle/scripts/run_moss_carpet_placement_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/moss-carpet-placement.jsonl	-
+tools/rivet-oracle/scripts/run_neighbor_collector_probe.sh	files	{out0}	-	tools/rivet-oracle/fixtures/neighbor-collector.jsonl	-
+tools/rivet-oracle/scripts/run_placement_count_probe.sh	dir	{dir}	-	tools/rivet-oracle/fixtures/placement-count/placement-count.json,tools/rivet-oracle/fixtures/placement-count/manifest.json	-
+tools/rivet-oracle/scripts/run_plant_survival_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/plant-survival.tsv	-
+tools/rivet-oracle/scripts/run_poi_chunk_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/poi-chunk.jsonl	-
+tools/rivet-oracle/scripts/run_poi_distance_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/poi-distance.jsonl	-
+tools/rivet-oracle/scripts/run_poi_manager_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/poi-manager.jsonl	-
+tools/rivet-oracle/scripts/run_poi_record_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/poi-record.jsonl	-
+tools/rivet-oracle/scripts/run_poi_section_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/poi-section.jsonl	-
+tools/rivet-oracle/scripts/run_poi_storage_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/poi-storage.jsonl	-
+tools/rivet-oracle/scripts/run_region_deflate_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/region-deflate.jsonl	-
+tools/rivet-oracle/scripts/run_seq_probe.sh	dir	{dir}	-	tools/rivet-oracle/fixtures/seq/seq-random.json,tools/rivet-oracle/fixtures/seq/manifest.json	-
+tools/rivet-oracle/scripts/run_spawner_tick_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/spawner-tick.jsonl	-
+tools/rivet-oracle/scripts/run_spawner_tick_probe.sh	stdout	reload	-	tools/rivet-oracle/fixtures/spawner-reload.jsonl	-
+tools/rivet-oracle/scripts/run_spline_probe.sh	dir	{dir}	-	tools/rivet-oracle/fixtures/spline/spline-goldens.json,tools/rivet-oracle/fixtures/spline/manifest.json	-
+tools/rivet-oracle/scripts/run_structure_core_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/structure-core.jsonl	-
+tools/rivet-oracle/scripts/run_structure_event_dispatch_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/structure-event-dispatch.jsonl	-
+tools/rivet-oracle/scripts/run_structure_placement_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/structure-placement.jsonl	-
+tools/rivet-oracle/scripts/run_structure_references_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/structure-references.jsonl	-
+tools/rivet-oracle/scripts/run_structure_registry_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/structure-registry.jsonl	-
+tools/rivet-oracle/scripts/run_structure_registry_probe.sh	stdout	entities	-	tools/rivet-oracle/fixtures/entity-types.jsonl	-
+tools/rivet-oracle/scripts/run_structure_ring_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/structure-rings.jsonl	-
+tools/rivet-oracle/scripts/run_structure_selection_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/structure-selection.jsonl	-
+tools/rivet-oracle/scripts/run_structure_snapshot_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/structure-snapshots.jsonl	-
+tools/rivet-oracle/scripts/run_structure_spawn_trace_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/structure-spawn-trace.jsonl	-
+tools/rivet-oracle/scripts/run_surface_column_probe.sh	dir	{dir}	-	tools/rivet-oracle/fixtures/surface-column/surface-columns.json	-
+tools/rivet-oracle/scripts/run_surface_rule_data_probe.sh	dir	{dir}	-	tools/rivet-oracle/fixtures/surface-rule-data/surface-rule-data.json,tools/rivet-oracle/fixtures/surface-rule-data/manifest.json	-
+tools/rivet-oracle/scripts/run_synth_noise_probe.sh	files	{out0}	-	tools/rivet-oracle/fixtures/synth/synth-noise.json	-
+tools/rivet-oracle/scripts/run_thread_unsafe_random_probe.sh	none	-	-	-	prints ThreadUnsafeRandom/seed traces to stdout; no committed fixture consumes them
+tools/rivet-oracle/scripts/run_tick_container_lifecycle_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/tick-container-lifecycle.jsonl	-
+tools/rivet-oracle/scripts/run_timer_queue_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/timer-queue.jsonl,tools/rivet-oracle/fixtures/timer-queue-codec.jsonl	stdout is the TIMER_QUEUE rows followed by the TIMER_CODEC rows; the committed goldens split them across two files
+tools/rivet-oracle/scripts/run_tree_core_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/tree-core.tsv	-
+tools/rivet-oracle/scripts/run_tree_placement_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/tree-placement.jsonl	-
+tools/rivet-oracle/scripts/run_update_shape_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/block-update-shape-owners.tsv,tools/rivet-oracle/fixtures/voxel-edge-faces.tsv	the committed files were post-processed by hand from this stdout (a `# Paper ...` header added, the UPDATE_OWNER/EDGE_FACE prefixes stripped, split by prefix), so they cannot match byte-for-byte until the probe writes them itself
+tools/rivet-oracle/scripts/run_world_clock_bootstrap_probe.sh	files	{out0}	-	tools/rivet-oracle/fixtures/world-clock-bootstrap.jsonl	-
+tools/rivet-oracle/scripts/run_world_clock_probe.sh	files	{out0}	-	tools/rivet-oracle/fixtures/world-clock.jsonl	-
+tools/rivet-oracle/scripts/run_world_event_probe.sh	files	{out0}	-	tools/rivet-oracle/fixtures/world-events.jsonl	-
+tools/rivet-oracle/scripts/run_world_identity_probe.sh	none	-	-	-	prints a world-identity diagnostic to stdout; no committed fixture consumes it
+tools/rivet-oracle/scripts/run_world_runtime_settings_probe.sh	files	{out0}	-	tools/rivet-oracle/fixtures/world-runtime-settings.jsonl	-
+tools/rivet-oracle/scripts/run_worldgen_sampler.sh	dir	{dir}	-	tools/rivet-oracle/fixtures/worldgen/samples.json	-
+tools/rivet-reference-oracle/run.sh	dir	--record tools/rivet-reference-oracle/fixtures/ops/corpus {dir}	-	tools/rivet-reference-oracle/fixtures/ops/component.json.jsonl,tools/rivet-reference-oracle/fixtures/ops/nbt.decode.jsonl,tools/rivet-reference-oracle/fixtures/ops/snbt.parse.jsonl,tools/rivet-reference-oracle/fixtures/ops/manifest.json	oracle-op record mode (every recorded op)

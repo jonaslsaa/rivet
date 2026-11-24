@@ -8,6 +8,7 @@ description = "Byte-for-byte NBT/SNBT parity diff between rivet-nbt and the Pape
 [dependencies]
 base64 = "0.22"
 chrono = "0.4"
+rivet-harness-common = { path = "../rivet-harness-common" }
 rivet-nbt = { path = "../../crates/rivet-nbt" }
 rivet-serialization = { path = "../../crates/rivet-serialization" }
 rivet-text = { path = "../../crates/rivet-text" }
@@ -17,3 +18,6 @@ rivet-util = { path = "../../crates/rivet-util" }
 # against Paper's Gson output (issue #98).
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
