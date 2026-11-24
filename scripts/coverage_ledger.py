@@ -69,7 +69,7 @@ underscores removed and lower-cased, so `AABB` -> `aabb.rs`). A candidate is a
     `net.minecraft.world.level.levelgen.feature`).
 Directory and package segments are compared split on `_` as well as `/` and
 `.`, so `block_entity/` mirrors `...block.entity`. Among mirrored candidates
-the exact mount wins, then the longest suffix, then the assigned crate, then
+the assigned crate wins, then the exact mount, then the longest suffix, then
 the current crate, then the lexicographically smallest path.
 A class over 2,000 LOC may be split into a directory module (PORTING.md): when
 the home is `x.rs` with a sibling `x/` directory, or `x/mod.rs`, every
@@ -208,6 +208,8 @@ MOUNTS = {
 #     contexts); the rest of `phys.shapes` stays in `rivet-world`.
 #   - rivet-world: the Moonrise shape classes `VoxelShape` holds or calls
 #     (below the `rivet-server` assignment of the rest of Moonrise).
+# TODO(#834): D15 says the ledger computes these from the crate graph; they are
+# hand-written until it does.
 CLASS_CRATES = {
     "net.minecraft.world.InteractionHand": "rivet-registry",
     "net.minecraft.world.phys.AABB": "rivet-registry",
@@ -243,6 +245,14 @@ SPLITS = {
     # `rayIntersectsAABB` and `lerp(double, Vec3, Vec3)` sit above rivet-util
     # because they take the phys value types.
     "net.minecraft.util.Mth": ["crates/rivet-registry/src/util/mth.rs"],
+    # Members that need rivet-world's shapes (`AABB.of`) or an `Entity`/live
+    # level (`HitResult.distanceTo`, the `CollisionContext` factories) sit above
+    # the value type.
+    "net.minecraft.world.phys.AABB": ["crates/rivet-world/src/phys/aabb.rs"],
+    "net.minecraft.world.phys.HitResult": ["crates/rivet-server/src/world/phys/hit_result.rs"],
+    "net.minecraft.world.phys.shapes.CollisionContext": [
+        "crates/rivet-server/src/world/phys/shapes/collision_context.rs",
+    ],
 }
 
 OBJECT_ALIASES = {
@@ -830,7 +840,7 @@ def build_rows(detail: str | None = None) -> list[dict[str, str]]:
             score = mirror_score(rf, c.pkg)
             if score is None:
                 continue
-            key = (score[0], score[1], rf.crate == assigned, rf.crate == current[c.path])
+            key = (rf.crate == assigned, score[0], score[1], rf.crate == current[c.path])
             if best is None or key > best_key or (key == best_key and rf.rel < best.rel):
                 best, best_key = rf, key
         others = sorted(rf.rel for rf in cands if rf is not best and not is_package_module(rf, c.pkg))
@@ -850,7 +860,10 @@ def build_rows(detail: str | None = None) -> list[dict[str, str]]:
             missing = sorted(set(methods))
         else:
             files = home_files(best, c.pkg, by_path, java_pkgs)
-            total, covered, missing = method_coverage(methods, files)
+            # Members ported in a split's other half (D15) count as covered.
+            halves = [by_path[h] for h in SPLITS.get(c.fqn, []) if h in by_path and h != best.rel]
+            total, covered, missing = method_coverage(
+                methods, files + [h for rf in halves for h in home_files(rf, c.pkg, by_path, java_pkgs)])
             stubs, todos = marker_counts(files)
             complete = covered == total and stubs == 0 and todos == 0
             row.update({

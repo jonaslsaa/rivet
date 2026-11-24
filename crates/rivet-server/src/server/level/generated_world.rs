@@ -4872,6 +4872,7 @@ fn box_is_full(shape: &AABB) -> bool {
         && shape.max_z == 1.0
 }
 
+// RivetTodo(#834): stand-in for `CollisionContext.empty()` and `VoxelShape` in spawn obstruction checks.
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum SpawnCollisionContext<'a> {

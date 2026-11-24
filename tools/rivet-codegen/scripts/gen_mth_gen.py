@@ -150,6 +150,8 @@ import java.lang.reflect.Field;
 import net.minecraft.util.Mth;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.levelgen.SingleThreadedRandomSource;
+import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.AABB;
 import org.apache.commons.lang3.math.Fraction;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
@@ -417,6 +419,8 @@ def emit_one(idx: int, lhs: str, rhs: str) -> str | None:
         jpred = pred.replace("|x|", "x ->")
         return f"pI(Mth.binarySearch({frm}, {to}, {jpred}));"
 
+    if lhs.startswith("super::ray_intersects_aabb("):
+        return RAY[idx]
     if lhs.startswith("super::rotation_around_axis("):
         return ROT[idx]
 
@@ -458,7 +462,7 @@ ROT_SPECS = [
     ((0, 0, 0), (0.5, 0.5, 0.5, 0.5)),
 ]
 ROT: dict[int, str] = {}
-_i = 1112
+_i = 1124
 for (ax, ay, az), (qx, qy, qz, qw) in ROT_SPECS:
     for comp in ("x", "y", "z", "w"):
         ROT[_i] = (
@@ -466,7 +470,32 @@ for (ax, ay, az), (qx, qy, qz, qw) in ROT_SPECS:
             f"new Quaternionf({qx}F, {qy}F, {qz}F, {qw}F), new Quaternionf()).{comp}());"
         )
         _i += 1
-assert _i == 1132, _i
+assert _i == 1144, _i
+
+RAY_SPECS = [
+    ((1, 1, 1), (0, 0, 1), (0, 0, 0, 2, 2, 2)),
+    ((0, 0, 0), (1, 0, 0), (0, 0, 0, 2, 2, 2)),
+    ((5, 5, 5), (0, 0, 0), (0, 0, 0, 2, 2, 2)),
+    ((1, 1, 1), (0, 0, -1), (0, 0, 0, 2, 2, 2)),
+    ((-1, -1, -1), (1, 1, 1), (0, 0, 0, 2, 2, 2)),
+    ((0, 0, 0), (-1, -1, -1), (0, 0, 0, 2, 2, 2)),
+    ((2, 2, 2), (1, 0, 0), (0, 0, 0, 2, 2, 2)),
+    ((0, 0, 0), (0, 0, 1), (0, 0, 0, 2, 2, 2)),
+    ((1, 1, 1), (1, 1, 1), (1, 1, 1, 3, 3, 3)),
+    ((1, 1, 1), (0, 0, -1), (1, 1, 1, 3, 3, 3)),
+    ((3, 3, 3), (-1, -1, -1), (1, 1, 1, 3, 3, 3)),
+    ((0.5, 0.5, 0.5), (1, 0, 0), (1, 1, 1, 3, 3, 3)),
+]
+RAY: dict[int, str] = {}
+_i = 1112
+for (sx, sy, sz), (dx, dy, dz), (mnx, mny, mnz, mxx, mxy, mxz) in RAY_SPECS:
+    RAY[_i] = (
+        f"pBool(Mth.rayIntersectsAABB(new Vec3({sx}, {sy}, {sz}), new Vec3({dx}, {dy}, {dz}), "
+        f"new AABB({mnx}, {mny}, {mnz}, {mxx}, {mxy}, {mxz})));"
+    )
+    _i += 1
+assert _i == 1124, _i
+
 
 def main() -> None:
     rows = []

@@ -691,7 +691,8 @@ GOLDENS = {
 # Goldens whose vectors are compiled into a generated test file instead of being
 # read by path: golden id -> consumer files.
 GOLDEN_CONSUMERS = {
-    "util-mth-vectors": ["crates/rivet-util/src/mth_golden_tests.rs"],
+    "util-mth-vectors": ["crates/rivet-util/src/mth_golden_tests.rs",
+                         "crates/rivet-registry/src/util/golden_tests.rs"],
 }
 
 CURATED: list[dict] = [
