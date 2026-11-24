@@ -433,6 +433,18 @@ def git_files() -> list[str]:
     return sorted(p for p in out.stdout.split("\0") if p)
 
 
+def tracked_entries(directory: str, tracked: list[str]) -> list[str]:
+    """Names of the tracked files and directories directly under `directory`
+    (untracked local leftovers are not part of the ledger)."""
+    prefix = directory + "/"
+    return sorted({t[len(prefix):].split("/", 1)[0] for t in tracked if t.startswith(prefix)})
+
+
+def is_tracked(path: str, tracked: list[str]) -> bool:
+    """`path` is a tracked file or a directory holding tracked files."""
+    return any(t == path or t.startswith(path + "/") for t in tracked)
+
+
 def fixture_path(name: str) -> str:
     return name if "/" in name and (name.startswith("crates/") or name.startswith("tools/")) \
         else f"{ORACLE_FIXTURES}/{name}"
@@ -471,16 +483,15 @@ def count_corpus(paths: list[str], tracked: list[str]) -> str:
     total = 0
     seen = False
     for p in paths:
-        full = REPO / p
-        if full.is_dir():
+        if p in tracked:
+            seen = True
+            # A manifest describes the corpus files next to it; it is no input.
+            total += 0 if p.endswith("manifest.json") else file_records(REPO / p)
+        else:
             files = [t for t in tracked if t.startswith(p + "/")
                      and not t.endswith("manifest.json") and not t.endswith(".md")]
             total += sum(file_records(REPO / t) for t in files)
             seen = seen or bool(files)
-        elif full.is_file():
-            seen = True
-            # A manifest describes the corpus files next to it; it is no input.
-            total += 0 if p.endswith("manifest.json") else file_records(full)
     return str(total) if seen else "-"
 
 
@@ -686,13 +697,14 @@ def load_java_classes() -> set[str]:
 QUALIFIED_RE = re.compile(r"\b(?:net\.minecraft|ca\.spottedleaf|io\.papermc|com\.mojang)(?:\.[A-Za-z_$][\w$]*)+")
 
 
-def probe_java_classes(script_text: str, known: set[str]) -> list[str]:
+def probe_java_classes(script_text: str, known: set[str], tracked: list[str]) -> list[str]:
     mains = sorted(set(re.findall(r"\b([A-Z]\w*(?:Probe|Sampler))\b(?!\.java)", script_text)))
     out: set[str] = set()
     for main in mains:
-        src = REPO / ORACLE / "src/java" / f"{main}.java"
-        if not src.is_file():
+        rel = f"{ORACLE}/src/java/{main}.java"
+        if rel not in tracked:
             continue
+        src = REPO / rel
         text = src.read_text(encoding="utf-8", errors="replace")
         code = java_scan.blank_comments_and_strings(text)
         tokens = set(re.findall(r"[A-Za-z_$][\w$]*", code))
@@ -722,11 +734,11 @@ def build_rows(tree: "RustTree | None" = None) -> list[dict[str, str]]:
     known = load_java_classes()
 
     scripts_dir = REPO / ORACLE / "scripts"
-    on_disk = sorted(p.name for p in scripts_dir.iterdir()
-                     if re.match(r"run_.*_probe\.sh$", p.name) or p.name == "run_worldgen_sampler.sh")
-    unmapped = sorted(set(on_disk) ^ set(PROBE_OUTPUTS))
+    probe_scripts = [n for n in tracked_entries(f"{ORACLE}/scripts", tracked)
+                     if re.match(r"run_.*_probe\.sh$", n) or n == "run_worldgen_sampler.sh"]
+    unmapped = sorted(set(probe_scripts) ^ set(PROBE_OUTPUTS))
     if unmapped:
-        raise SystemExit(f"PROBE_OUTPUTS out of sync with {scripts_dir}: {unmapped}")
+        raise SystemExit(f"PROBE_OUTPUTS out of sync with tracked {ORACLE}/scripts: {unmapped}")
 
     claimed: set[str] = set()
     rows: list[dict] = []
@@ -735,8 +747,8 @@ def build_rows(tree: "RustTree | None" = None) -> list[dict[str, str]]:
                    extra_consumers: tuple[str, ...] = ()) -> dict:
         paths = [fixture_path(f) for f in fixtures]
         for p in paths + list(extra_consumers):
-            if not (REPO / p).exists():
-                raise SystemExit(f"{rid}: {p} does not exist")
+            if not is_tracked(p, tracked):
+                raise SystemExit(f"{rid}: {p} is not tracked")
         claimed.update(paths)
         consumers = sorted(set(consumers_of(paths, rs_texts)) | set(extra_consumers))
         primary: set[str] = set()
@@ -755,11 +767,11 @@ def build_rows(tree: "RustTree | None" = None) -> list[dict[str, str]]:
             "note": note if consumers else (note + "; " if note else "") + "no Rust consumer found",
         }
 
-    for script in on_disk:
+    for script in probe_scripts:
         text = (scripts_dir / script).read_text(encoding="utf-8", errors="replace")
         name = re.sub(r"^run_|(_probe)?\.sh$", "", script).replace("_", "-")
         outputs = PROBE_OUTPUTS[script]
-        java = probe_java_classes(text, known)
+        java = probe_java_classes(text, known, tracked)
         note = "" if outputs else "output fixture not identified (probe writes stdout or a test-time file)"
         rows.append(golden_row(f"probe.{name}", f"probe:{ORACLE}/scripts/{script}", outputs, java, note))
 
@@ -770,7 +782,7 @@ def build_rows(tree: "RustTree | None" = None) -> list[dict[str, str]]:
         rows.append(golden_row(f"golden.{gid}", f"golden:{producer}", fixtures, [], "",
                                tuple(GOLDEN_CONSUMERS.get(gid, ()))))
 
-    oracle_entries = sorted(p.name for p in (REPO / ORACLE_FIXTURES).iterdir())
+    oracle_entries = tracked_entries(ORACLE_FIXTURES, tracked)
     leftover = [e for e in oracle_entries
                 if f"{ORACLE_FIXTURES}/{e}" not in claimed and e not in ORACLE_NON_GOLDEN]
     if leftover:
@@ -779,8 +791,8 @@ def build_rows(tree: "RustTree | None" = None) -> list[dict[str, str]]:
     for spec in CURATED:
         fixtures = spec["fixtures"]
         for p in fixtures:
-            if not (REPO / p).exists():
-                raise SystemExit(f"{spec['id']}: fixture {p} does not exist")
+            if not is_tracked(p, tracked):
+                raise SystemExit(f"{spec['id']}: fixture {p} is not tracked")
         row = {
             "id": spec["id"], "layer": spec["layer"], "rust_globs": spec["rust_globs"],
             "java_classes": spec["java_classes"], "mechanism": spec["mechanism"], "fixtures": fixtures,

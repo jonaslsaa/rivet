@@ -125,6 +125,20 @@ class CorpusTest(unittest.TestCase):
         self.assertEqual(vl.count_corpus(["tools/rivet-capture/fixtures/join/capture.jsonl"], tracked), "205")
 
 
+class TrackedListingTest(unittest.TestCase):
+    def test_only_tracked_paths_are_listed(self):
+        """Listings come from git ls-files, so an untracked probe script or a
+        fixture a local probe run left behind never reaches the ledger."""
+        tracked = ["o/fixtures/a.json", "o/fixtures/dir/x.tsv", "o/fixtures/dir/y.tsv",
+                   "o/scripts/run_a_probe.sh", "o/scripts-other/z"]
+        self.assertEqual(vl.tracked_entries("o/fixtures", tracked), ["a.json", "dir"])
+        self.assertEqual(vl.tracked_entries("o/scripts", tracked), ["run_a_probe.sh"])
+        self.assertTrue(vl.is_tracked("o/fixtures/dir", tracked))
+        self.assertTrue(vl.is_tracked("o/fixtures/a.json", tracked))
+        self.assertFalse(vl.is_tracked("o/fixtures/di", tracked))
+        self.assertFalse(vl.is_tracked("o/fixtures/stray.json", tracked))
+
+
 class DebtTest(unittest.TestCase):
     def test_glob_regex(self):
         rx = vd.glob_regex("crates/rivet-nbt/src/*_tag.rs")
