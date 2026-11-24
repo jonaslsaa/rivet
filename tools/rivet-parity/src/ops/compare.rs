@@ -103,12 +103,22 @@ impl Outcome {
     }
 }
 
-/// One committed exclusion of `op`. `field` is either a dot path starting at
-/// `result.` (as the field diff names it), dropped from both sides before
-/// comparison, or `input:<id>`, which takes that whole input out of the
-/// comparison: a known divergence (or an input Rivet cannot survive) filed as
-/// `issue` and left unfixed by the verification PR. Excluded inputs are
-/// counted separately from matched and mismatched, never silently.
+/// One committed exclusion of `op`. `field` is one of
+///
+/// - a dot path starting at `result.` (as the field diff names it), dropped
+///   from both sides before comparison: a field Paper itself varies;
+/// - `input:<id>`, which takes that whole input out of the Rivet comparison: a
+///   known Rivet divergence filed as `issue` and left unfixed by the
+///   verification PR. The Rust handler still runs it, and the comparison
+///   fails as stale once Rivet matches Paper (fix the issue, drop the row);
+/// - `skip:<id>`, an input the Rust handler is never given because Rivet
+///   cannot survive it or its answer is not deterministic, so there is no
+///   divergence to keep checking.
+///
+/// Whole-input exclusions never apply to the recorded-vs-live Paper
+/// comparison ([`paper_exclusions`]): they describe Rivet, and Paper must stay
+/// deterministic and fresh on every input. Excluded inputs are counted
+/// separately from matched and mismatched, never silently.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Exclusion {
     pub op: String,
@@ -120,9 +130,10 @@ pub struct Exclusion {
 /// Parse the committed exclusions table (columns `op`, `field`, `reason`, `issue`, tab-separated; header
 /// first). Every row needs a reason and a GitHub issue number. Two kinds of
 /// row exist: `result.<path>` (a field Paper itself varies across twin runs,
-/// VERIFICATION §2.4.3) and `input:<id>` (a known Rivet divergence found by the
+/// VERIFICATION §2.4.3), `input:<id>` (a known Rivet divergence found by the
 /// op, filed as an issue and not fixed in the PR that records it; the input is
-/// reported as excluded, never as matched).
+/// reported as excluded, never as matched) and `skip:<id>` (an input the Rust
+/// handler is not given).
 pub fn parse_exclusions(text: &str) -> Result<Vec<Exclusion>, String> {
     let mut lines = text.lines();
     if lines.next() != Some("op\tfield\treason\tissue") {
@@ -154,9 +165,12 @@ pub fn parse_exclusions(text: &str) -> Result<Vec<Exclusion>, String> {
                 index + 2
             ));
         }
-        if !field.starts_with("result.") && !field.starts_with("input:") {
+        if !field.starts_with("result.")
+            && !field.starts_with("input:")
+            && !field.starts_with("skip:")
+        {
             return Err(format!(
-                "exclusions row {}: field must be a path under `result.` or `input:<id>` (the envelope is never excluded)",
+                "exclusions row {}: field must be a path under `result.`, `input:<id>` or `skip:<id>` (the envelope is never excluded)",
                 index + 2
             ));
         }
@@ -177,14 +191,40 @@ pub fn load_exclusions(path: &Path) -> Result<Vec<Exclusion>, String> {
     parse_exclusions(&text)
 }
 
-/// Whether `id` of `op` is excluded as a whole input.
-pub fn input_excluded(op: &str, id: &str, exclusions: &[Exclusion]) -> bool {
-    exclusions.iter().any(|e| {
-        e.op == op
-            && e.field
-                .strip_prefix("input:")
+fn names_input(exclusion: &Exclusion, op: &str, id: &str, prefixes: &[&str]) -> bool {
+    exclusion.op == op
+        && prefixes.iter().any(|prefix| {
+            exclusion
+                .field
+                .strip_prefix(prefix)
                 .is_some_and(|excluded| excluded == id)
-    })
+        })
+}
+
+/// Whether `id` of `op` is excluded as a whole input (`input:` or `skip:`).
+pub fn input_excluded(op: &str, id: &str, exclusions: &[Exclusion]) -> bool {
+    exclusions
+        .iter()
+        .any(|e| names_input(e, op, id, &["input:", "skip:"]))
+}
+
+/// Whether the Rust handler must not be given `id` of `op` (`skip:` rows).
+pub fn input_skipped(op: &str, id: &str, exclusions: &[Exclusion]) -> bool {
+    exclusions
+        .iter()
+        .any(|e| names_input(e, op, id, &["skip:"]))
+}
+
+/// The exclusions that apply to a comparison with Paper alone: the fields
+/// Paper itself varies. Whole-input rows describe Rivet and are left out, so
+/// Paper's determinism and the recorded goldens' freshness are checked on
+/// every input.
+pub fn paper_exclusions(exclusions: &[Exclusion]) -> Vec<Exclusion> {
+    exclusions
+        .iter()
+        .filter(|e| e.field.starts_with("result."))
+        .cloned()
+        .collect()
 }
 
 fn remove_path(map: &mut Map<String, Value>, path: &str) {
@@ -358,8 +398,11 @@ pub struct Comparison {
     /// The per-input verdict, in corpus order (for per-subject tallies).
     pub per_input: Vec<(String, InputVerdict)>,
     pub matched: usize,
-    /// Inputs taken out of the comparison by an `input:<id>` exclusion.
+    /// Inputs taken out of the comparison by an `input:<id>` or `skip:<id>` exclusion.
     pub excluded: usize,
+    /// Excluded `input:` rows whose input the Rust handler now answers exactly
+    /// as Paper does: the divergence they record is gone, so the row is stale.
+    pub stale: Vec<String>,
     pub mismatched_ids: Vec<String>,
     pub first: Option<Divergence>,
 }
@@ -407,7 +450,11 @@ pub fn compare(
                 (None, None) => unreachable!("index < max(len)"),
             };
         if input_excluded(op, &id, exclusions) {
-            // Never handed to the Rust handler, so not executed.
+            // Not counted executed. A `skip:` input never reached the Rust
+            // handler; an `input:` one did, only to prove it still diverges.
+            if verdicts && !input_skipped(op, &id, exclusions) && expected_line == actual_line {
+                comparison.stale.push(id.clone());
+            }
             comparison.excluded += 1;
             comparison.per_input.push((id, InputVerdict::Excluded));
             continue;

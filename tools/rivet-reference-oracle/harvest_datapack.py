@@ -28,6 +28,46 @@ PROVIDER_TYPES = {
 }
 ANCHORS = {"absolute", "above_bottom", "below_top"}
 
+# configured_feature `type` -> (codec of `config`).
+FEATURE_CONFIG = {
+    "minecraft:ore": "OreConfiguration.CODEC",
+    "minecraft:scattered_ore": "OreConfiguration.CODEC",
+    "minecraft:end_spike": "EndSpikeConfiguration.CODEC",
+    "minecraft:end_gateway": "EndGatewayConfiguration.CODEC",
+    "minecraft:sculk_patch": "SculkPatchConfiguration.CODEC",
+    "minecraft:twisting_vines": "TwistingVinesConfig.CODEC",
+    "minecraft:bamboo": "ProbabilityFeatureConfiguration.CODEC",
+    "minecraft:seagrass": "ProbabilityFeatureConfiguration.CODEC",
+    "minecraft:sea_pickle": "CountConfiguration.CODEC",
+    "minecraft:delta_feature": "DeltaFeatureConfiguration.CODEC",
+    "minecraft:netherrack_replace_blobs": "ReplaceSphereConfiguration.CODEC",
+    "minecraft:underwater_magma": "UnderwaterMagmaConfiguration.CODEC",
+    "minecraft:basalt_columns": "ColumnFeatureConfiguration.CODEC",
+    "minecraft:iceberg": "BlockStateConfiguration.CODEC",
+}
+# placed_feature placement modifier `type` -> the modifier's own (MapCodec) codec.
+PLACEMENT = {
+    "minecraft:rarity_filter": "RarityFilter.CODEC",
+    "minecraft:height_range": "HeightRangePlacement.CODEC",
+    "minecraft:count_on_every_layer": "CountOnEveryLayerPlacement.CODEC",
+    "minecraft:fixed_placement": "FixedPlacement.CODEC",
+    "minecraft:surface_water_depth_filter": "SurfaceWaterDepthFilter.CODEC",
+    "minecraft:in_square": "InSquarePlacement.CODEC",
+    "minecraft:heightmap": "HeightmapPlacement.CODEC",
+    "minecraft:random_offset": "RandomOffsetPlacement.CODEC",
+    "minecraft:surface_relative_threshold_filter": "SurfaceRelativeThresholdFilter.CODEC",
+    "minecraft:count": "CountPlacement.CODEC",
+    "minecraft:noise_based_count": "NoiseBasedCountPlacement.CODEC",
+    "minecraft:noise_threshold_count": "NoiseThresholdCountPlacement.CODEC",
+    "minecraft:biome": "BiomeFilter.CODEC",
+}
+# `components` keys (loot tables, trades) whose value is a table codec.
+COMPONENT = {
+    "minecraft:suspicious_stew_effects": "SuspiciousStewEffects.CODEC",
+    "minecraft:tooltip_display": "TooltipDisplay.CODEC",
+    "minecraft:item_name": "ComponentSerialization.CODEC",
+}
+
 found = {}  # codec -> {canonical json text: source}
 
 
@@ -48,6 +88,9 @@ def walk(source, node, key=None):
             add("BlockState.CODEC", source, node)
         if key == "components" and node:
             add("DataComponentPatch.CODEC", source, node)
+            for component, codec in COMPONENT.items():
+                if component in node:
+                    add(codec, source, node[component])
         for k, v in node.items():
             walk(source, v, k)
     elif isinstance(node, list):
@@ -92,13 +135,60 @@ with zipfile.ZipFile(jar) as z:
             config = doc.get("config", {})
             if isinstance(config, dict) and "minimum_size" in config:
                 add("FeatureSize.CODEC", rel, config["minimum_size"])
+            if isinstance(config, dict) and "foliage_placer" in config:
+                add("FoliagePlacer.CODEC", rel, config["foliage_placer"])
+            codec = FEATURE_CONFIG.get(doc.get("type"))
+            if codec:
+                add(codec, rel, config)
+            if doc.get("type") == "minecraft:end_spike":
+                for spike in config.get("spikes", []):
+                    add("EndSpikeFeature.EndSpike.CODEC", rel, spike)
+            if doc.get("type") == "minecraft:geode":
+                add("GeodeCrackSettings.CODEC", rel, config["crack"])
+                add("GeodeLayerSettings.CODEC", rel, config["layers"])
+        elif rel.startswith("worldgen/placed_feature/"):
+            for modifier in doc.get("placement", []):
+                codec = PLACEMENT.get(modifier.get("type"))
+                if codec:
+                    # The modifier's own codec reads fields only; the dispatch `type` is the registry's.
+                    add(codec, rel, {k: v for k, v in modifier.items() if k != "type"})
+        elif rel.startswith("worldgen/configured_carver/"):
+            config = doc.get("config", {})
+            if "shape" in config:
+                add("CanyonCarverConfiguration.CanyonShapeConfiguration.CODEC", rel, config["shape"])
+            if "debug_settings" in config:
+                add("CarverDebugSettings.CODEC", rel, config["debug_settings"])
+        elif rel.startswith("worldgen/noise_settings/"):
+            if "noise" in doc:
+                add("NoiseSettings.CODEC", rel, doc["noise"])
+        elif rel.startswith("worldgen/biome/"):
+            if "effects" in doc:
+                add("BiomeSpecialEffects.CODEC", rel, doc["effects"])
+                if "grass_color_modifier" in doc["effects"]:
+                    add("BiomeSpecialEffects.GrassColorModifier.CODEC", rel, doc["effects"]["grass_color_modifier"])
+            for cost in doc.get("spawn_costs", {}).values():
+                add("MobSpawnSettings.MobSpawnCost.CODEC", rel, cost)
+            if "temperature_modifier" in doc:
+                add("Biome.TemperatureModifier.CODEC", rel, doc["temperature_modifier"])
         if kind == "recipe":
             walk(rel, doc.get("result"))
         else:
             walk(rel, doc)
 
+# The corpus names harvested inputs by their line number (`pack<N>`), and the
+# recorded goldens and exclusions.tsv are keyed by those ids. The codecs the
+# first harvest covered therefore stay first, in their original order; codecs
+# added later are appended after them (alphabetically), so growing the harvest
+# never renumbers an input that is already recorded.
+FIRST_HARVEST = {
+    "BlockState.CODEC", "DataComponentPatch.CODEC", "FeatureSize.CODEC", "FloatProviders.CODEC",
+    "HeightProvider.CODEC", "IntProviders.CODEC", "ItemStack.CODEC", "ItemStackTemplate.CODEC",
+    "NormalNoise.NoiseParameters.DIRECT_CODEC", "PosRuleTest.CODEC", "ProcessorRule.CODEC",
+    "RuleTest.CODEC", "VerticalAnchor.CODEC", "WorldPreset.DIRECT_CODEC",
+}
+
 lines = []
-for codec in sorted(found):
+for codec in sorted(found, key=lambda c: (c not in FIRST_HARVEST, c)):
     items = sorted(found[codec].items(), key=lambda kv: (kv[1], kv[0]))
     for text, source in items:
         lines.append(json.dumps({"codec": codec, "source": source, "json": json.loads(text)}, separators=(",", ":")))

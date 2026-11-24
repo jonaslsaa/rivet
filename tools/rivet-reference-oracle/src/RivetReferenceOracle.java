@@ -645,6 +645,28 @@ public final class RivetReferenceOracle {
             codecs.put("AttackRange.CODEC", net.minecraft.world.item.component.AttackRange.CODEC);
             codecs.put("SwingAnimation.CODEC", net.minecraft.world.item.component.SwingAnimation.CODEC);
             codecs.put("Weapon.CODEC", net.minecraft.world.item.component.Weapon.CODEC);
+            codecs.put("OreConfiguration.CODEC", net.minecraft.world.level.levelgen.feature.configurations.OreConfiguration.CODEC);
+            codecs.put("ReplaceBlockConfiguration.CODEC", net.minecraft.world.level.levelgen.feature.configurations.ReplaceBlockConfiguration.CODEC);
+            codecs.put("EndSpikeConfiguration.CODEC", net.minecraft.world.level.levelgen.feature.configurations.EndSpikeConfiguration.CODEC);
+            codecs.put("EndSpikeFeature.EndSpike.CODEC", net.minecraft.world.level.levelgen.feature.EndSpikeFeature.EndSpike.CODEC);
+            codecs.put("TwistingVinesConfig.CODEC", net.minecraft.world.level.levelgen.feature.configurations.TwistingVinesConfig.CODEC);
+            codecs.put("SculkPatchConfiguration.CODEC", net.minecraft.world.level.levelgen.feature.configurations.SculkPatchConfiguration.CODEC);
+            codecs.put("ProbabilityFeatureConfiguration.CODEC", net.minecraft.world.level.levelgen.feature.configurations.ProbabilityFeatureConfiguration.CODEC);
+            codecs.put("EndGatewayConfiguration.CODEC", net.minecraft.world.level.levelgen.feature.configurations.EndGatewayConfiguration.CODEC);
+            codecs.put("WorldOptions.CODEC", net.minecraft.world.level.levelgen.WorldOptions.CODEC.codec());
+            codecs.put("BelowZeroRetrogen.CODEC", net.minecraft.world.level.levelgen.BelowZeroRetrogen.CODEC);
+            codecs.put("WrittenBookContent.CODEC", net.minecraft.world.item.component.WrittenBookContent.CODEC);
+            codecs.put("LodestoneTracker.CODEC", net.minecraft.world.item.component.LodestoneTracker.CODEC);
+            codecs.put("SeededContainerLoot.CODEC", net.minecraft.world.item.component.SeededContainerLoot.CODEC);
+            codecs.put("TooltipDisplay.CODEC", net.minecraft.world.item.component.TooltipDisplay.CODEC);
+            codecs.put("Enchantable.CODEC", net.minecraft.world.item.enchantment.Enchantable.CODEC);
+            codecs.put("BlocksAttacks.ItemDamageFunction.CODEC", net.minecraft.world.item.component.BlocksAttacks.ItemDamageFunction.CODEC);
+            codecs.put("KineticWeapon.Condition.CODEC", net.minecraft.world.item.component.KineticWeapon.Condition.CODEC);
+            codecs.put("CountPlacement.CODEC", net.minecraft.world.level.levelgen.placement.CountPlacement.CODEC.codec());
+            codecs.put("NoiseBasedCountPlacement.CODEC", net.minecraft.world.level.levelgen.placement.NoiseBasedCountPlacement.CODEC.codec());
+            codecs.put("NoiseThresholdCountPlacement.CODEC", net.minecraft.world.level.levelgen.placement.NoiseThresholdCountPlacement.CODEC.codec());
+            codecs.put("BiomeFilter.CODEC", net.minecraft.world.level.levelgen.placement.BiomeFilter.CODEC.codec());
+            codecs.put("FontDescription.CODEC", net.minecraft.network.chat.FontDescription.CODEC);
             return Collections.unmodifiableMap(codecs);
         }
     }

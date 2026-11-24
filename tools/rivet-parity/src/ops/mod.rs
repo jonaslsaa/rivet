@@ -309,12 +309,13 @@ fn run_rust(
     corpus
         .iter()
         .map(|entry| {
-            // An excluded input is never handed to the Rust handler: some
-            // exclusions exist because the Rust decoder cannot survive it.
-            if compare::input_excluded(op, &entry.id, exclusions) {
+            // A `skip:` input is never handed to the Rust handler: Rivet
+            // cannot survive it or its answer is not deterministic. Other
+            // excluded inputs run, to prove they still diverge.
+            if compare::input_skipped(op, &entry.id, exclusions) {
                 return (
                     entry.id.clone(),
-                    Outcome::Unavailable("excluded input not executed".into()),
+                    Outcome::Unavailable("skipped input not executed".into()),
                 );
             }
             if trace {
@@ -344,6 +345,8 @@ pub struct OpRow {
     pub status: Status,
     pub first: Option<Divergence>,
     pub mismatched_ids: Vec<String>,
+    /// Excluded inputs that now match Paper: their exclusions rows are stale.
+    pub stale_ids: Vec<String>,
     pub note: Option<String>,
     /// Per ported Rust type (packet struct, codec): how its inputs compared.
     pub subjects: Vec<SubjectTally>,
@@ -410,6 +413,7 @@ impl OpRow {
                 "fields": d.fields.iter().map(|f| json!({"path": f.path, "expected": f.expected, "actual": f.actual})).collect::<Vec<_>>(),
             })),
             "mismatched_ids": self.mismatched_ids,
+            "stale_ids": self.stale_ids,
             "note": self.note,
             "subjects": self.subjects.iter().map(|t| json!({
                 "subject": t.subject,
@@ -439,7 +443,24 @@ fn evaluate(
         mismatched: comparison.mismatched_ids.len(),
         excluded: comparison.excluded,
     };
-    let status = closure.status(negative.as_ref().is_some_and(Verdict::passed));
+    let mut status = closure.status(negative.as_ref().is_some_and(Verdict::passed));
+    let note = if comparison.stale.is_empty() {
+        None
+    } else {
+        // A recorded divergence that no longer diverges must leave the table.
+        status = Status::Fail;
+        Some(format!(
+            "{} excluded input(s) now match Paper, remove their `input:` rows from exclusions.tsv: {}",
+            comparison.stale.len(),
+            comparison
+                .stale
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    };
     OpRow {
         op: fixture.op.clone(),
         mode,
@@ -448,7 +469,8 @@ fn evaluate(
         status,
         first: comparison.first,
         mismatched_ids: comparison.mismatched_ids,
-        note: None,
+        stale_ids: comparison.stale,
+        note,
         subjects,
     }
 }
@@ -465,6 +487,7 @@ fn no_handler_row(mode: &'static str, fixture: &OpFixture) -> OpRow {
         status: Status::Unverified,
         first: None,
         mismatched_ids: Vec::new(),
+        stale_ids: Vec::new(),
         note: Some("no Rust handler for this op yet (recorded golden only)".into()),
         subjects: Vec::new(),
     }
@@ -520,16 +543,18 @@ pub fn live(
             .map(|(entry, line)| (entry.id.clone(), Outcome::from_live(&fixture.op, line)))
             .collect();
 
-        // Freshness: the committed golden must still be what Paper answers.
+        // Freshness: the committed golden must still be what Paper answers,
+        // on every input (whole-input exclusions describe Rivet, not Paper).
+        let paper_only = compare::paper_exclusions(exclusions);
         let freshness_negative =
-            compare::tamper_negative(&fixture.op, &fixture.recorded, &paper, exclusions);
+            compare::tamper_negative(&fixture.op, &fixture.recorded, &paper, &paper_only);
         let mut fresh = evaluate(
             "recorded-vs-live",
             fixture,
             &fixture.recorded,
             &paper,
             freshness_negative,
-            exclusions,
+            &paper_only,
         );
         if fresh.status == Status::Fail {
             fresh.note = Some("live Paper no longer reproduces the recorded golden".into());
@@ -918,6 +943,48 @@ mod tests {
         }
     }
 
+    /// An `input:` row for an input Rivet already answers like Paper is a stale
+    /// row: the comparison fails and names it instead of hiding the input.
+    #[test]
+    fn stale_input_exclusion_fails_the_row() {
+        let mut exclusions = compare::load_exclusions(&ops_dir().join("exclusions.tsv")).unwrap();
+        let fixtures = fixtures();
+        let fixture = fixtures.iter().find(|f| f.op == "snbt.parse").unwrap();
+        let id = fixture.corpus[0].id.clone();
+        exclusions.push(Exclusion {
+            op: fixture.op.clone(),
+            field: format!("input:{id}"),
+            reason: "no longer diverges".into(),
+            issue: "1".into(),
+        });
+        let rows = check(&fixtures, &exclusions, None);
+        let row = rows.iter().find(|r| r.op == fixture.op).unwrap();
+        assert_eq!(row.status, Status::Fail);
+        assert_eq!(row.stale_ids, vec![id]);
+        assert!(row.mismatched_ids.is_empty());
+    }
+
+    /// Whole-input exclusions describe Rivet: the Paper-only comparison keeps
+    /// only the `result.` field rows, so excluded inputs stay under freshness.
+    #[test]
+    fn paper_comparison_ignores_whole_input_exclusions() {
+        let exclusions = compare::load_exclusions(&ops_dir().join("exclusions.tsv")).unwrap();
+        assert!(exclusions.iter().any(|e| e.field.starts_with("input:")));
+        let paper_only = compare::paper_exclusions(&exclusions);
+        assert!(paper_only.iter().all(|e| e.field.starts_with("result.")));
+        for fixture in fixtures() {
+            let comparison = compare::compare(
+                &fixture.op,
+                &fixture.recorded,
+                &fixture.recorded,
+                &paper_only,
+            );
+            assert_eq!(comparison.excluded, 0, "{}", fixture.op);
+            assert_eq!(comparison.executed, fixture.declared, "{}", fixture.op);
+            assert_eq!(comparison.matched, fixture.declared, "{}", fixture.op);
+        }
+    }
+
     /// The automated negative: a deliberately broken Rust handler must be
     /// detected and named (op, input id, field) by the same comparator.
     #[test]
@@ -1001,7 +1068,11 @@ mod tests {
         let exclusions = compare::load_exclusions(&ops_dir().join("exclusions.tsv")).unwrap();
         let fixtures = fixtures();
         for exclusion in &exclusions {
-            let Some(id) = exclusion.field.strip_prefix("input:") else {
+            let Some(id) = exclusion
+                .field
+                .strip_prefix("input:")
+                .or_else(|| exclusion.field.strip_prefix("skip:"))
+            else {
                 continue;
             };
             let fixture = fixtures

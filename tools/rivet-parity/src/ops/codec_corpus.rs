@@ -944,6 +944,194 @@ const HAND: &[(&str, &str)] = &[
         r#"{"item_damage_per_attack":2,"disable_blocking_for_seconds":5.0}"#,
     ),
     ("Weapon.CODEC", r#"{"item_damage_per_attack":-1}"#),
+    (
+        "OreConfiguration.CODEC",
+        r#"{"size":9,"discard_chance_on_air_exposure":0.5,"targets":[{"target":{"predicate_type":"minecraft:tag_match","tag":"minecraft:stone_ore_replaceables"},"state":{"Name":"minecraft:coal_ore"}}]}"#,
+    ),
+    (
+        "OreConfiguration.CODEC",
+        r#"{"size":9,"discard_chance_on_air_exposure":0.0,"targets":[{"target":{"predicate_type":"minecraft:block_match","block":"minecraft:stone"},"state":{"Name":"minecraft:iron_ore"}}]}"#,
+    ),
+    (
+        "OreConfiguration.CODEC",
+        r#"{"size":65,"discard_chance_on_air_exposure":0.0,"targets":[]}"#,
+    ),
+    ("OreConfiguration.CODEC", r#"{"size":3,"targets":[]}"#),
+    (
+        "ReplaceBlockConfiguration.CODEC",
+        r#"{"targets":[{"target":{"predicate_type":"minecraft:always_true"},"state":{"Name":"minecraft:stone"}}]}"#,
+    ),
+    ("ReplaceBlockConfiguration.CODEC", r#"{"targets":[]}"#),
+    ("ReplaceBlockConfiguration.CODEC", r#"{}"#),
+    (
+        "EndSpikeConfiguration.CODEC",
+        r#"{"crystal_invulnerable":true,"spikes":[{"centerX":1,"centerZ":-2,"radius":3,"height":76,"guarded":true}],"crystal_beam_target":[0,100,0]}"#,
+    ),
+    ("EndSpikeConfiguration.CODEC", r#"{"spikes":[]}"#),
+    ("EndSpikeConfiguration.CODEC", r#"{"spikes":[{}]}"#),
+    (
+        "EndSpikeConfiguration.CODEC",
+        r#"{"crystal_invulnerable":false}"#,
+    ),
+    (
+        "EndSpikeFeature.EndSpike.CODEC",
+        r#"{"centerX":5,"centerZ":6,"radius":2,"height":90,"guarded":false}"#,
+    ),
+    ("EndSpikeFeature.EndSpike.CODEC", r#"{}"#),
+    ("EndSpikeFeature.EndSpike.CODEC", r#"{"radius":"big"}"#),
+    (
+        "TwistingVinesConfig.CODEC",
+        r#"{"spread_width":8,"spread_height":4,"max_height":8}"#,
+    ),
+    (
+        "TwistingVinesConfig.CODEC",
+        r#"{"spread_width":0,"spread_height":4,"max_height":8}"#,
+    ),
+    (
+        "SculkPatchConfiguration.CODEC",
+        r#"{"charge_count":10,"amount_per_charge":1,"spread_attempts":64,"growth_rounds":0,"spread_rounds":1,"extra_rare_growths":{"type":"minecraft:uniform","min_inclusive":1,"max_inclusive":3},"catalyst_chance":0.5}"#,
+    ),
+    ("SculkPatchConfiguration.CODEC", r#"{"charge_count":0}"#),
+    (
+        "ProbabilityFeatureConfiguration.CODEC",
+        r#"{"probability":0.5}"#,
+    ),
+    (
+        "ProbabilityFeatureConfiguration.CODEC",
+        r#"{"probability":1.5}"#,
+    ),
+    (
+        "ProbabilityFeatureConfiguration.CODEC",
+        r#"{"probability":-0.1}"#,
+    ),
+    (
+        "EndGatewayConfiguration.CODEC",
+        r#"{"exact":true,"exit":[1,2,3]}"#,
+    ),
+    ("EndGatewayConfiguration.CODEC", r#"{"exact":false}"#),
+    ("EndGatewayConfiguration.CODEC", r#"{}"#),
+    ("WorldOptions.CODEC", r#"{"seed":42}"#),
+    (
+        "WorldOptions.CODEC",
+        r#"{"seed":-9223372036854775808,"generate_structures":false,"bonus_chest":true,"legacy_custom_options":"x"}"#,
+    ),
+    ("WorldOptions.CODEC", r#"{"generate_structures":true}"#),
+    ("WorldOptions.CODEC", r#"{"seed":"abc"}"#),
+    (
+        "BelowZeroRetrogen.CODEC",
+        r#"{"target_status":"minecraft:full"}"#,
+    ),
+    (
+        "BelowZeroRetrogen.CODEC",
+        r#"{"target_status":"minecraft:surface","missing_bedrock":[1,2]}"#,
+    ),
+    (
+        "BelowZeroRetrogen.CODEC",
+        r#"{"target_status":"minecraft:empty"}"#,
+    ),
+    (
+        "BelowZeroRetrogen.CODEC",
+        r#"{"target_status":"minecraft:bogus"}"#,
+    ),
+    (
+        "WrittenBookContent.CODEC",
+        r#"{"title":"T","author":"A","generation":1,"pages":["one",{"text":"two","color":"red"}],"resolved":true}"#,
+    ),
+    (
+        "WrittenBookContent.CODEC",
+        r#"{"title":{"raw":"T","filtered":"F"},"author":"A"}"#,
+    ),
+    (
+        "WrittenBookContent.CODEC",
+        r#"{"title":"T","author":"A","generation":4}"#,
+    ),
+    (
+        "WrittenBookContent.CODEC",
+        r#"{"title":"this title is much too long for a book","author":"A"}"#,
+    ),
+    ("WrittenBookContent.CODEC", r#"{"author":"A"}"#),
+    (
+        "LodestoneTracker.CODEC",
+        r#"{"target":{"dimension":"minecraft:overworld","pos":[1,2,3]},"tracked":false}"#,
+    ),
+    ("LodestoneTracker.CODEC", r#"{}"#),
+    (
+        "LodestoneTracker.CODEC",
+        r#"{"target":{"dimension":"x","pos":[1]}}"#,
+    ),
+    (
+        "SeededContainerLoot.CODEC",
+        r#"{"loot_table":"minecraft:chests/simple_dungeon","seed":123}"#,
+    ),
+    (
+        "SeededContainerLoot.CODEC",
+        r#"{"loot_table":"minecraft:chests/simple_dungeon"}"#,
+    ),
+    ("SeededContainerLoot.CODEC", r#"{"seed":1}"#),
+    ("TooltipDisplay.CODEC", r#"{}"#),
+    (
+        "TooltipDisplay.CODEC",
+        r#"{"hide_tooltip":true,"hidden_components":["minecraft:damage","minecraft:rarity"]}"#,
+    ),
+    (
+        "TooltipDisplay.CODEC",
+        r#"{"hidden_components":["minecraft:nope"]}"#,
+    ),
+    ("Enchantable.CODEC", r#"{"value":5}"#),
+    ("Enchantable.CODEC", r#"{"value":0}"#),
+    ("Enchantable.CODEC", r#"{}"#),
+    (
+        "BlocksAttacks.ItemDamageFunction.CODEC",
+        r#"{"threshold":3.0,"base":1.0,"factor":0.5}"#,
+    ),
+    (
+        "BlocksAttacks.ItemDamageFunction.CODEC",
+        r#"{"threshold":-1.0,"base":1.0,"factor":0.5}"#,
+    ),
+    (
+        "KineticWeapon.Condition.CODEC",
+        r#"{"max_duration_ticks":20,"min_speed":1.5,"min_relative_speed":0.5}"#,
+    ),
+    (
+        "KineticWeapon.Condition.CODEC",
+        r#"{"max_duration_ticks":20}"#,
+    ),
+    (
+        "KineticWeapon.Condition.CODEC",
+        r#"{"max_duration_ticks":-1}"#,
+    ),
+    ("CountPlacement.CODEC", r#"{"count":4}"#),
+    (
+        "CountPlacement.CODEC",
+        r#"{"count":{"type":"minecraft:uniform","min_inclusive":1,"max_inclusive":3}}"#,
+    ),
+    ("CountPlacement.CODEC", r#"{"count":5000}"#),
+    ("CountPlacement.CODEC", r#"{"count":-1}"#),
+    (
+        "NoiseBasedCountPlacement.CODEC",
+        r#"{"noise_to_count_ratio":10,"noise_factor":80.0,"noise_offset":0.3}"#,
+    ),
+    (
+        "NoiseBasedCountPlacement.CODEC",
+        r#"{"noise_to_count_ratio":10,"noise_factor":80.0}"#,
+    ),
+    (
+        "NoiseThresholdCountPlacement.CODEC",
+        r#"{"noise_level":-0.8,"below_noise":15,"above_noise":4}"#,
+    ),
+    (
+        "NoiseThresholdCountPlacement.CODEC",
+        r#"{"noise_level":-0.8}"#,
+    ),
+    ("BiomeFilter.CODEC", r#"{}"#),
+    ("BiomeFilter.CODEC", r#"{"type":"minecraft:biome"}"#),
+    ("FontDescription.CODEC", r#""minecraft:default""#),
+    ("FontDescription.CODEC", r#""minecraft:uniform""#),
+    ("FontDescription.CODEC", r#""Not A Valid Id""#),
+    (
+        "FontDescription.CODEC",
+        r#"{"type":"atlas","atlas":"minecraft:blocks","sprite":"minecraft:block/stone"}"#,
+    ),
 ];
 
 /// Replacement values for mutation: wrong types, boundaries, unknown names.

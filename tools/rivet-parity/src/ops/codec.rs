@@ -19,6 +19,7 @@ use rivet_serialization::decoder::Decoder;
 use rivet_serialization::dynamic_ops::DynamicOps;
 use rivet_serialization::encoder::Encoder;
 use rivet_serialization::json_ops::JsonOps;
+use rivet_serialization::map_codec;
 use serde_json::{Map, Value, json};
 
 use super::compare::Outcome;
@@ -72,7 +73,8 @@ fn render_json(value: &Value) -> String {
 }
 
 /// One table row. `entry!(name, path)` is for `Arc<dyn Codec>` constructors;
-/// `entry!(enum name, path)` for `EnumCodec` ones (a concrete struct).
+/// `entry!(enum name, path)` for `EnumCodec` ones (a concrete struct);
+/// `entry!(map name, path)` for `MapCodec` constructors (Java's `CODEC.codec()`).
 macro_rules! entry {
     (@build $name:literal, $($make:ident)::+) => {
         Entry {
@@ -83,6 +85,19 @@ macro_rules! entry {
             },
             nbt: |input| {
                 let codec = $($make)::+::<NbtOps>();
+                reencode(&*codec, &NbtOps::instance(), input, StringTagVisitor::to_string)
+            },
+        }
+    };
+    (map $name:literal, $($make:ident)::+) => {
+        Entry {
+            name: $name,
+            json: |input| {
+                let codec = map_codec::codec_of($($make)::+::<JsonOps>());
+                reencode(&*codec, &JsonOps::INSTANCE, input, render_json)
+            },
+            nbt: |input| {
+                let codec = map_codec::codec_of($($make)::+::<NbtOps>());
                 reencode(&*codec, &NbtOps::instance(), input, StringTagVisitor::to_string)
             },
         }
@@ -282,6 +297,28 @@ pub fn entries() -> Vec<Entry> {
         entry!("AttackRange.CODEC", rivet_world::item::components::combat::attack_range_codec),
         entry!("SwingAnimation.CODEC", rivet_world::item::components::combat::swing_animation_codec),
         entry!("Weapon.CODEC", rivet_world::item::components::combat::weapon_codec),
+        entry!("OreConfiguration.CODEC", rivet_world::levelgen::feature::configurations::ore_configuration::ore_configuration_codec),
+        entry!("ReplaceBlockConfiguration.CODEC", rivet_world::levelgen::feature::configurations::replace_block_configuration::replace_block_configuration_codec),
+        entry!("EndSpikeConfiguration.CODEC", rivet_world::levelgen::feature::configurations::end_spike_configuration::end_spike_configuration_codec),
+        entry!("EndSpikeFeature.EndSpike.CODEC", rivet_world::levelgen::feature::configurations::end_spike_configuration::end_spike_codec),
+        entry!("TwistingVinesConfig.CODEC", rivet_world::levelgen::feature::configurations::twisting_vines_config::twisting_vines_config_codec),
+        entry!("SculkPatchConfiguration.CODEC", rivet_world::levelgen::feature::configurations::sculk_patch_configuration::sculk_patch_configuration_codec),
+        entry!("ProbabilityFeatureConfiguration.CODEC", rivet_world::levelgen::feature::configurations::probability_feature_configuration::probability_feature_configuration_codec),
+        entry!("EndGatewayConfiguration.CODEC", rivet_world::levelgen::feature::configurations::end_gateway_configuration::end_gateway_configuration_codec),
+        entry!("WorldOptions.CODEC", rivet_world::levelgen::settings::world_options::world_options_codec),
+        entry!("BelowZeroRetrogen.CODEC", rivet_world::levelgen::settings::below_zero_retrogen::below_zero_retrogen_codec),
+        entry!("WrittenBookContent.CODEC", rivet_world::item::components::world_and_books::written_book_content_codec),
+        entry!("LodestoneTracker.CODEC", rivet_world::item::components::world_and_books::lodestone_tracker_codec),
+        entry!("SeededContainerLoot.CODEC", rivet_world::item::components::world_and_books::seeded_container_loot_codec),
+        entry!("TooltipDisplay.CODEC", rivet_world::item::components::display::tooltip_display_codec),
+        entry!("Enchantable.CODEC", rivet_world::item::components::combat::enchantable_codec),
+        entry!("BlocksAttacks.ItemDamageFunction.CODEC", rivet_world::item::components::combat::item_damage_function_codec),
+        entry!("KineticWeapon.Condition.CODEC", rivet_world::item::components::combat::kinetic_weapon_condition_codec),
+        entry!(map "CountPlacement.CODEC", rivet_world::levelgen::placement::count_placement_codec),
+        entry!(map "NoiseBasedCountPlacement.CODEC", rivet_world::levelgen::placement::noise_based_count_placement_codec),
+        entry!(map "NoiseThresholdCountPlacement.CODEC", rivet_world::levelgen::placement::noise_threshold_count_placement_codec),
+        entry!("BiomeFilter.CODEC", rivet_world::levelgen::placement::biome_filter_codec),
+        entry!("FontDescription.CODEC", rivet_text::font_description::font_description_codec),
     ]
 }
 
