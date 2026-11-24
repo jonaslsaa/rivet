@@ -13,6 +13,7 @@ rivet-harness-common = { path = "../rivet-harness-common" }
 rivet-nbt = { path = "../../crates/rivet-nbt" }
 rivet-protocol = { path = "../../crates/rivet-protocol", features = ["packets"] }
 rivet-registry = { path = "../../crates/rivet-registry", features = ["blocks"] }
+rivet-server = { path = "../../crates/rivet-server" }
 rivet-serialization = { path = "../../crates/rivet-serialization" }
 rivet-text = { path = "../../crates/rivet-text" }
 rivet-util = { path = "../../crates/rivet-util" }

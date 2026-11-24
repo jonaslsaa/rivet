@@ -41,6 +41,10 @@ pub fn handler(op: &str) -> Option<Handler> {
         "component.json" => Some(component_json),
         "packet.reencode" => Some(super::packet::packet_reencode),
         "codec.reencode" => Some(super::codec::codec_reencode),
+        "damage.calc" => Some(super::entity::damage_calc),
+        "damage_source.scaling" => Some(super::entity::damage_source_scaling),
+        "food.exhaustion" => Some(super::entity::food_exhaustion),
+        "xp.curves" => Some(super::entity::xp_curves),
         _ => None,
     }
 }

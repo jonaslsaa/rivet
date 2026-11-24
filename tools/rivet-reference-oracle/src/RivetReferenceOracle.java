@@ -108,11 +108,11 @@ public final class RivetReferenceOracle {
 
     /** Runs an op on one request. {@code dec} receives optional human-readable decimals for float fields. */
     @FunctionalInterface
-    private interface Handler {
+    interface Handler {
         JsonObject run(JsonObject request, JsonObject dec) throws Exception;
     }
 
-    private record Op(String name, List<String> resultKeys, Handler handler, Predicate<Exception> rejection) {
+    record Op(String name, List<String> resultKeys, Handler handler, Predicate<Exception> rejection) {
     }
 
     private static final List<String> TAG_KEYS = List.of("tag_id", "tag_type", "snbt", "pretty_snbt");
@@ -174,6 +174,9 @@ public final class RivetReferenceOracle {
             (request, dec) -> packetReencode(request),
             error -> error instanceof PacketRejection
         ));
+        for (Op op : EntityOps.ops()) {
+            register(ops, op);
+        }
         return Collections.unmodifiableMap(ops);
     }
 
@@ -390,7 +393,24 @@ public final class RivetReferenceOracle {
         manifest.addProperty("paper", requiredProperty("rivet.paper.pin"));
         manifest.addProperty("paper_commit", requiredProperty("rivet.paper.commit"));
         manifest.addProperty("op_source", OP_SOURCE);
-        manifest.addProperty("op_source_sha256", sha256(Files.readAllBytes(Path.of(requiredProperty("rivet.oracle.source")))));
+        Path source = Path.of(requiredProperty("rivet.oracle.source"));
+        manifest.addProperty("op_source_sha256", sha256(Files.readAllBytes(source)));
+        // Op families that live in their own file beside this one (EntityOps.java, ...) are pinned too.
+        JsonArray siblings = new JsonArray();
+        List<Path> others;
+        try (var listing = Files.list(source.getParent())) {
+            others = listing
+                .filter(path -> path.getFileName().toString().endsWith(".java") && !path.equals(source))
+                .sorted()
+                .toList();
+        }
+        for (Path other : others) {
+            JsonObject sibling = new JsonObject();
+            sibling.addProperty("path", OP_SOURCE.substring(0, OP_SOURCE.lastIndexOf('/') + 1) + other.getFileName());
+            sibling.addProperty("sha256", sha256(Files.readAllBytes(other)));
+            siblings.add(sibling);
+        }
+        manifest.add("extra_op_sources", siblings);
         manifest.add("ops", entries);
         Files.writeString(outDir.resolve("manifest.json"), PRETTY.toJson(manifest) + "\n", StandardCharsets.UTF_8);
 
@@ -701,7 +721,7 @@ public final class RivetReferenceOracle {
      * from the vanilla data pack: static registries plus the worldgen layer.
      * Initialized on first use so ops that need no registry never pay for it.
      */
-    private static final class ServerRegistries {
+    static final class ServerRegistries {
         /**
          * Loading logs to the process's stdout ("Found new data pack ...");
          * live mode speaks JSON Lines on that stream, so logging is switched
