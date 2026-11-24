@@ -3,23 +3,18 @@
   "kind": "oracle-ops",
   "paper": "26.2-DEV-main@0a99345",
   "paper_commit": "0a99345",
-  "op_source": "tools/rivet-reference-oracle/src/RivetReferenceOracle.java",
-  "op_source_sha256": "c7632f0ac7b6a2afffa0fe1f370ec0f8258fe9d7a3d138ed29184dcfaca2c7d3",
-  "extra_op_sources": [
-    {
-      "path": "tools/rivet-reference-oracle/src/EntityOps.java",
-      "sha256": "0ae0659c855adc85d393ee5e74f0632c125c670cff874ca02d838efd5af2b852"
-    },
-    {
-      "path": "tools/rivet-reference-oracle/src/GameplayData.java",
-      "sha256": "f26b0a2a61c826d9f5df313f84c1ef73245ba5dc92333fdda323a507ecb112e2"
-    },
-    {
-      "path": "tools/rivet-reference-oracle/src/GameplayOps.java",
-      "sha256": "213f90406c4685069d360d9587854738cde2bf17906bdca70117f24c894b922e"
-    }
-  ],
+  "op_source": "tools/rivet-reference-oracle/src",
+  "op_source_sha256": "9c2d02d03d0e2fe3d13ca8ea8098c0086de8b5e573b84d71c5aef5ad688bc1e2",
   "ops": [
+    {
+      "op": "brigadier.dispatch",
+      "corpus": "corpus/brigadier.dispatch.jsonl",
+      "corpus_sha256": "42c777484d078162051d8b01db02688903a7d1561478c4ae6d2635c0139e471e",
+      "corpus_n": 3539,
+      "output": "brigadier.dispatch.jsonl",
+      "output_sha256": "63872b275a52d7ca9ea79b83091d2aa1f4ede3b532e17e12f2069d848c69cfac",
+      "output_n": 3539
+    },
     {
       "op": "codec.reencode",
       "corpus": "corpus/codec.reencode.jsonl",

@@ -6,7 +6,7 @@ repo_dir="$(cd "$tool_dir/../.." && pwd)"
 paper_libraries="${RIVET_PAPER_LIBRARIES:-$repo_dir/tools/rivet-oracle/work/run/libraries}"
 paper_runtime_jar="${RIVET_PAPER_RUNTIME_JAR:-$(dirname "$paper_libraries")/versions/26.2/paper-26.2.jar}"
 classes_dir="$tool_dir/target/classes"
-source_file="$tool_dir/src/RivetReferenceOracle.java"
+source_dir="$tool_dir/src"
 oracle_manifest="${RIVET_ORACLE_MANIFEST:-$repo_dir/tools/rivet-oracle/fixtures/manifest.json}"
 
 java_cmd=""
@@ -109,7 +109,7 @@ done < <(find "$paper_libraries" -type f -name '*.jar' -print0)
 
 mkdir -p "$classes_dir"
 echo "Compiling Rivet reference oracle against $paper_implementation ($paper_commit)" >&2
-"$javac_cmd" --release 25 -cp "$classpath" -d "$classes_dir" "$tool_dir"/src/*.java
+"$javac_cmd" --release 25 -cp "$classpath" -d "$classes_dir" "$source_dir"/*.java
 
 # The JVM runs from target/ (Paper writes logs/ into its cwd), so make the
 # --record corpus/output directories absolute against the caller's cwd first.
@@ -129,6 +129,6 @@ exec "$java_cmd" --enable-native-access=ALL-UNNAMED \
     -Drivet.paper.implementation="$paper_implementation" \
     -Drivet.paper.commit="$paper_commit" \
     -Drivet.paper.pin="$expected_paper" \
-    -Drivet.oracle.source="$source_file" \
+    -Drivet.oracle.source="$source_dir" \
     -cp "$classes_dir:$classpath" \
     dev.rivet.oracle.RivetReferenceOracle "${args[@]}"

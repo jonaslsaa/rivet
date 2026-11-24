@@ -668,6 +668,7 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
+ "rivet-brigadier",
  "rivet-harness-common",
  "rivet-nbt",
  "rivet-protocol",

@@ -28,6 +28,8 @@
 //! deliberately broken Rust handler and passes only when the comparator
 //! detects and names it.
 
+pub mod brigadier;
+pub mod brigadier_corpus;
 pub mod codec;
 pub mod codec_corpus;
 pub mod compare;
@@ -57,10 +59,30 @@ pub fn ops_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../rivet-reference-oracle/fixtures/ops")
 }
 
-/// The Java file holding every op's source (its SHA-256 is pinned per recording).
+/// The directory holding the oracle's Java sources (its digest is pinned per recording).
 pub fn op_source() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../rivet-reference-oracle/src/RivetReferenceOracle.java")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../rivet-reference-oracle/src")
+}
+
+/// The op source digest `RivetReferenceOracle.sourceDigest` pins: the SHA-256
+/// of the `<sha256>  <file name>\n` listing of the directory's `*.java` files in
+/// name order (what `sha256sum src/*.java | sha256sum` prints).
+fn source_digest(dir: &Path) -> Result<String, String> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| format!("cannot list {}: {e}", dir.display()))? {
+        let name = entry.map_err(|e| e.to_string())?.file_name();
+        if name.to_string_lossy().ends_with(".java") {
+            names.push(name);
+        }
+    }
+    names.sort();
+    let mut listing = String::new();
+    for name in names {
+        let path = dir.join(&name);
+        let bytes = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        listing += &format!("{}  {}\n", sha256_hex(&bytes), name.to_string_lossy());
+    }
+    Ok(sha256_hex(listing.as_bytes()))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -172,51 +194,6 @@ fn read_pinned(dir: &Path, relative: &str, sha256: &str) -> Result<Vec<u8>, Load
     Ok(bytes)
 }
 
-/// The op families that live in their own `.java` file beside the main op
-/// source (`EntityOps.java`, ...) are pinned like the main file: the manifest
-/// lists every sibling with its SHA-256, and the siblings on disk must be
-/// exactly that set.
-fn verify_extra_op_sources(manifest: &Value, op_source: &Path) -> Result<(), LoadError> {
-    let Some(listed) = manifest.get("extra_op_sources").and_then(Value::as_array) else {
-        return Err(LoadError::Invalid(
-            "ops manifest has no `extra_op_sources` array".into(),
-        ));
-    };
-    let dir = op_source.parent().unwrap_or_else(|| Path::new("."));
-    let mut on_disk = BTreeSet::new();
-    if let Ok(listing) = fs::read_dir(dir) {
-        for file in listing.flatten() {
-            let name = file.file_name().to_string_lossy().into_owned();
-            if name.ends_with(".java") && file.path() != op_source {
-                on_disk.insert(name);
-            }
-        }
-    }
-    let mut pinned = BTreeSet::new();
-    for entry in listed {
-        let path = manifest_str(entry, "path")?;
-        let name = path.rsplit('/').next().unwrap_or(path).to_owned();
-        let bytes = fs::read(dir.join(&name)).map_err(|e| {
-            LoadError::Invalid(format!(
-                "cannot read op source {name} pinned by the manifest: {e}"
-            ))
-        })?;
-        if sha256_hex(&bytes) != manifest_str(entry, "sha256")? {
-            return Err(LoadError::Invalid(format!(
-                "op source {name} changed since the ops were recorded; re-record with `tools/rivet-reference-oracle/run.sh --record`"
-            )));
-        }
-        pinned.insert(name);
-    }
-    if pinned != on_disk {
-        return Err(LoadError::Invalid(format!(
-            "op sources beside {} are {on_disk:?} but the manifest pins {pinned:?}; re-record with `tools/rivet-reference-oracle/run.sh --record`",
-            op_source.display()
-        )));
-    }
-    Ok(())
-}
-
 /// Load and closure-check every recorded op under `dir`.
 pub fn load_fixtures(dir: &Path, op_source: &Path) -> Result<Vec<OpFixture>, LoadError> {
     let manifest_path = dir.join("manifest.json");
@@ -244,20 +221,19 @@ pub fn load_fixtures(dir: &Path, op_source: &Path) -> Result<Vec<OpFixture>, Loa
             "ops manifest is not format-1 `oracle-ops`".into(),
         ));
     }
-    let source = fs::read(op_source).map_err(|e| {
+    let source = source_digest(op_source).map_err(|e| {
         LoadError::Invalid(format!(
             "cannot read op source {}: {e}",
             op_source.display()
         ))
     })?;
     let pinned_source = manifest_str(&manifest, "op_source_sha256")?;
-    if sha256_hex(&source) != pinned_source {
+    if source != pinned_source {
         return Err(LoadError::Invalid(format!(
             "op source {} changed since the ops were recorded (manifest pins {pinned_source}); re-record with `tools/rivet-reference-oracle/run.sh --record`",
             op_source.display()
         )));
     }
-    verify_extra_op_sources(&manifest, op_source)?;
     let Some(entries) = manifest.get("ops").and_then(Value::as_array) else {
         return Err(LoadError::Invalid("ops manifest has no `ops` array".into()));
     };
@@ -642,6 +618,7 @@ pub fn live(
         let clean = compare::compare(&fixture.op, &paper, &actual, exclusions);
         let negative = match fixture.corpus.iter().enumerate().position(|(i, entry)| {
             !clean.mismatched_ids.contains(&entry.id)
+                && !compare::input_excluded(&fixture.op, &entry.id, exclusions)
                 && !matches!(actual[i].1, Outcome::Unported(_))
         }) {
             Some(index) => {
@@ -760,6 +737,7 @@ pub fn emit_corpus() -> Result<Vec<(&'static str, String)>, String> {
     }
 
     let mut corpora = vec![
+        ("brigadier.dispatch", brigadier_corpus::emit()?),
         ("codec.reencode", codec_corpus::emit()?),
         ("component.json", component),
         ("nbt.decode", decode),
@@ -1229,7 +1207,7 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let source = scratch.path().join("RivetReferenceOracle.java");
         fs::write(&source, "// edited without re-recording\n").unwrap();
-        match load_fixtures(&ops_dir(), &source) {
+        match load_fixtures(&ops_dir(), scratch.path()) {
             Err(LoadError::Invalid(m)) => {
                 assert!(m.contains("changed since the ops were recorded"), "{m}")
             }
