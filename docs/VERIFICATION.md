@@ -410,6 +410,25 @@ L = several days / multiple rounds. Ordered by risk x already-ported-unverified 
   T3: `scripts/gate.sh --nightly`. T1 path trigger: `regen --check --changed origin/main...HEAD`, to be
   called by the merge tier once `gate.sh` grows `--tier merge` (§6.1 item 3). Rows with no committed
   output and orphan goldens report UNVERIFIED, so the nightly row is not PASS until they are resolved.
+  `VERIFY.tsv` takes probe ownership from `probes.tsv` and has `op.<op>.recorded|live` and
+  `regen.probes` rows.
+- *First full regen run (2026-11-24, `--jobs 2`, 1,626 s wall): 88 PASS, 7 FAIL, 4 UNVERIFIED* (the
+  four `none` rows: `directory_lock`, `lighting_core`, `thread_unsafe_random`, `world_identity`).
+  No probe was nondeterministic and none crashed. All 7 failures are goldens that were edited by hand
+  after the probe ran, so they cannot be reproduced; none of them is Paper behaving differently. They
+  are findings, and the fixtures were left untouched:
+  - `block_pos_set`, `freeze_snow`, `plant_survival`, `tree_core`: the body matches byte for byte, but
+    the committed file carries 1 to 3 provenance `#` header lines that the probe does not print.
+  - `block_mutation_metadata`: `section_flags.tsv` is identical. `block_mutation_callbacks.tsv` is the
+    probe output with the 937 rows that are all `BlockBehaviour` dropped (259 of 1,196 lines kept).
+  - `block_shape_behavior`: the committed file has the same 1,779 records as the probe's
+    non-`structure_` output, in an older case order. The `structure_` cases also print by default now,
+    and `structure-block-shape.jsonl` owns them (that row PASSes).
+  - `update_shape`: `block-update-shape-owners.tsv` and `voxel-edge-faces.tsv` were split by hand from
+    the `UPDATE_OWNER`/`EDGE_FACE` stdout, with the prefixes stripped and a header added.
+
+  The fix for each is to make the probe write the committed form itself (or regenerate the golden from
+  the probe), then re-run the consumer tests. That is follow-up work, not part of this change.
 
 Deferred, deliberately: GameTest runner parity (L6) rides on item 7 and issues #474/#475; Paper JUnit
 and the plugin corpus (L8) start with the adapter (#494, #504). Their ledger rows should be created now
