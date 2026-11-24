@@ -29,6 +29,7 @@ pub mod entity_post_load;
 #[cfg(unix)]
 pub mod entity_region_storage;
 pub mod entity_save_limits;
+pub mod entity_tracker;
 pub mod entity_tracking;
 pub mod fluid_runtime;
 pub mod full_chunk_status;
