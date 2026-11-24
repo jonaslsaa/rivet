@@ -1,18 +1,23 @@
 export const meta = {
   name: 'worktree-task',
   description: 'Implement a scoped non-translate-wave task in an isolated worktree, then loop scoped fresh adversarial reviewers until clean',
-  whenToUse: 'Substantive tasks that are NOT manifest-unit translations: tooling, harnesses, codegen, infra scripts. Pass {worktree, task, maxRounds?, commit?}. The implementer works in the named worktree (path pinned in every prompt because workflow agents inherit the session cwd); fresh scoped reviewers verify each round; the loop decides convergence, never the implementer. commit (default true) controls whether agents commit on the worktree branch — it must agree with the task text.',
+  whenToUse: 'Substantive tasks that are NOT manifest-unit translations: tooling, harnesses, codegen, infra scripts. Pass {worktree, task, maxRounds?, commit?, implModel?, implEffort?}. maxRounds defaults to 3; implModel/implEffort (default: session model/effort) apply to the implementer and fixer agents only — reviewers always run fresh at high effort on the session model. The implementer works in the named worktree (path pinned in every prompt because workflow agents inherit the session cwd); fresh scoped reviewers verify each round; the loop decides convergence, never the implementer. commit (default true) controls whether agents commit on the worktree branch — it must agree with the task text.',
   phases: [{ title: 'Implement' }, { title: 'Gate' }, { title: 'Fix' }],
 }
 
 // args sometimes arrives JSON-encoded as a string instead of an object.
 const A = typeof args === 'string' ? JSON.parse(args) : args
-const MAX = (A && A.maxRounds) || 6
+const MAX = (A && A.maxRounds) || 3
 if (!A || !A.worktree || !A.task) throw new Error('worktree-task requires {worktree, task}')
 const WT = A.worktree
 const TASK = A.task
 const SLUG = WT.split('/').pop()
 const COMMIT = A.commit === undefined ? true : !!A.commit
+// Implementer/fixer model overrides; omitted keys inherit the session setting.
+const IMPL_OPTS = {
+  ...(A.implModel ? { model: A.implModel } : {}),
+  ...(A.implEffort ? { effort: A.implEffort } : {}),
+}
 
 const IMPL_REPORT = {
   type: 'object',
@@ -146,7 +151,7 @@ const impl = await resilientAgent(
     `result. Apply its critical and major findings — except a finding that is factually WRONG, which you ` +
     `must not apply; record why instead. Never weaken tests to satisfy a reviewer. Put its verdict ` +
     `VERBATIM in inner_review_verdict.`,
-  { label: `impl:${SLUG}`, phase: 'Implement', schema: IMPL_REPORT },
+  { label: `impl:${SLUG}`, phase: 'Implement', schema: IMPL_REPORT, ...IMPL_OPTS },
 )
 if (!impl) {
   log('implementer failed after retries — stopping for controller triage')
@@ -191,7 +196,7 @@ for (let r = 1; r <= MAX; r++) {
     all = all.concat(mechFindings.map((f) => ({ ...f, round: r })))
     if (r === MAX) break
     phase('Fix')
-    const fixed = await resilientAgent(fixPrompt(mechFindings), { label: `fix:${SLUG}:r${r}`, phase: 'Fix', schema: FIX_REPORT })
+    const fixed = await resilientAgent(fixPrompt(mechFindings), { label: `fix:${SLUG}:r${r}`, phase: 'Fix', schema: FIX_REPORT, ...IMPL_OPTS })
     if (!fixed) {
       log(`fix r${r} failed after retries — stopping for controller triage`)
       return { merge_ready: false, fix_failed: true, findings: all, rounds: r, worktree: WT }
@@ -236,14 +241,14 @@ for (let r = 1; r <= MAX; r++) {
       // Minor-only tail: one blind fix, pass with a caveat instead of burning
       // the whole run on nits.
       phase('Fix')
-      await resilientAgent(fixPrompt(verdict.findings), { label: `fix:${SLUG}:r${r}`, phase: 'Fix', schema: FIX_REPORT })
+      await resilientAgent(fixPrompt(verdict.findings), { label: `fix:${SLUG}:r${r}`, phase: 'Fix', schema: FIX_REPORT, ...IMPL_OPTS })
       log(`converged with unverified minor fixes after ${MAX} rounds`)
       return { merge_ready: true, converged: 'with-unverified-minor-fixes', findings: all, rounds: MAX, worktree: WT, impl_report: impl }
     }
     break
   }
   phase('Fix')
-  const fixed = await resilientAgent(fixPrompt(verdict.findings), { label: `fix:${SLUG}:r${r}`, phase: 'Fix', schema: FIX_REPORT })
+  const fixed = await resilientAgent(fixPrompt(verdict.findings), { label: `fix:${SLUG}:r${r}`, phase: 'Fix', schema: FIX_REPORT, ...IMPL_OPTS })
   if (!fixed) {
     log(`fix r${r} failed after retries — stopping for controller triage`)
     return { merge_ready: false, fix_failed: true, findings: all, rounds: r, worktree: WT }
