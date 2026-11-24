@@ -15,6 +15,11 @@
 //! The crate is std-only by design — see `Cargo.toml`. Modules:
 //!
 //! - [`exit`] — the 0 PASS / 1 FAIL / 3 UNVERIFIED exit contract.
+//! - [`closure`] — declared-vs-executed counts and the row status they imply
+//!   (zero executed is UNVERIFIED; dropped inputs FAIL).
+//! - [`oracle_client`] — boot-once JSON-Lines oracle client: id correlation,
+//!   deadlock-free request pipelining, and the tamper hook for negatives.
+//! - [`canon`] — canonical IEEE-754 bit-hex float encoding (D14 NaN rules).
 //! - [`server`] — child-process boot lifecycle with kill-on-drop cleanup.
 //! - [`port`] — held localhost port reservations (no bind-drop-boot race).
 //! - [`transcript`] — strict JSONL parsing (malformed / duplicate-terminal /
@@ -27,8 +32,11 @@
 //! (which command to spawn, Paper's clean-save marker, the rivet-server
 //! `RIVET_READY` line, fixture corruption) stays in the calling tool.
 
+pub mod canon;
+pub mod closure;
 pub mod exit;
 pub mod negative;
+pub mod oracle_client;
 pub mod port;
 pub mod server;
 pub mod timing;
