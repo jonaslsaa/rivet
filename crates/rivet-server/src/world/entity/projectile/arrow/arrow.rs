@@ -25,6 +25,9 @@ pub struct PotionEffect {
 }
 
 /// Potion contents attached to a tipped `Arrow` (`PotionContents`).
+///
+/// Stand-in seam for `net.minecraft.world.item.alchemy.PotionContents`, kept here rather than at
+/// the canonical `world::item::alchemy` path until that port lands.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PotionContents {
     pub effects: Vec<PotionEffect>,

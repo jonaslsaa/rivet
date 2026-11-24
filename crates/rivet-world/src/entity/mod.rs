@@ -3,7 +3,7 @@
 //!
 //! `MobSpawnSettings` keyed its spawner map on `MobCategory` and its spawn-cost
 //! map on `EntityType<?>` (both `net.minecraft.world.entity`). The `mc.world.
-//! entity` unit is not ported (`Entity` lives in `rivet-server`, which is downstream of this crate), so this
+//! entity` unit is ported in `rivet-server`, which is downstream of this crate, so this
 //! module carries the minimal faithful surface `MobSpawnSettings` needs:
 //!
 //! - `MobCategory` — the **full** `StringRepresentable` enum (eight values, the

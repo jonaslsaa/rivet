@@ -1,3 +1,6 @@
+//! No Java counterpart: the per-player food, exhaustion and experience state machine
+//! (`Player` and `FoodData` ticking), placed next to `Player`.
+
 use super::{
     Difficulty, ExhaustionConfig, ExhaustionReason, ExperienceSaveData, ExperienceState,
     RegainReason, SurvivalEvent, SurvivalGameRules, SurvivalPlayerHost,

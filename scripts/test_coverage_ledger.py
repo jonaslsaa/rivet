@@ -237,6 +237,8 @@ class RealClassTest(unittest.TestCase):
         self.assertEqual(
             (r["rust_path"], r["status"], r["hub"]),
             ("crates/rivet-server/src/world/entity/entity.rs", "partial", "spine"))
+        self.assertEqual(r["method_total"], "505")
+        self.assertGreater(int(r["method_covered"]), 0)
         self.assertIn("crates/rivet-api/src/native/facades/entity.rs", r["other_paths"].split(";"))
         self.assertNotIn("crates/rivet-world/src/entity/mod.rs", r["other_paths"].split(";"))
 

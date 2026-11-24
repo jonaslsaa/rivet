@@ -1,3 +1,6 @@
+//! No Java counterpart: the experience state `Player` ticks (`experienceLevel`,
+//! `experienceProgress`, `totalExperience`), placed next to `Player`.
+
 use rivet_util::mth::{clamp, clamp_f32};
 
 use super::SurvivalEvent;

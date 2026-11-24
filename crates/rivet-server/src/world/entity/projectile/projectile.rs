@@ -16,6 +16,9 @@ use crate::world::entity::projectile::world_view::{
 };
 
 /// Paper `EntityReference<Entity>`: stores persistent UUID and optional cached runtime ID.
+///
+/// Stand-in seam for `net.minecraft.world.entity.EntityReference`, kept here rather than at the
+/// canonical `world::entity::entity_reference` path until that port lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EntityReference {
     pub uuid: EntityUuid,
