@@ -4,7 +4,7 @@
   "paper": "26.2-DEV-main@0a99345",
   "paper_commit": "0a99345",
   "op_source": "tools/rivet-reference-oracle/src",
-  "op_source_sha256": "424e903247f0a60ed58cb2153dd6b1e39fe80856e02b8840287fa2852ac2cfe8",
+  "op_source_sha256": "0eef1e60f5d8425e286115c3f446dcd932ab5ad35b8209ac20ea3dcd7030e172",
   "ops": [
     {
       "op": "codec.reencode",

@@ -62,45 +62,59 @@ final class GameplayOps {
     private GameplayOps() {
     }
 
+    /**
+     * The gameplay handlers load and run vanilla code that logs ("Unknown objective ...", loot and
+     * trade warnings) to the process's stdout, the stream live mode speaks JSON Lines on. The first
+     * request switches the root logger off for good; the answers never depend on a log line.
+     */
+    private static RivetReferenceOracle.Handler quiet(final RivetReferenceOracle.Handler handler) {
+        return (request, dec) -> {
+            if (org.apache.logging.log4j.LogManager.getRootLogger().getLevel() != org.apache.logging.log4j.Level.OFF) {
+                org.apache.logging.log4j.core.config.Configurator.setRootLevel(org.apache.logging.log4j.Level.OFF);
+            }
+            return handler.run(request, dec);
+        };
+    }
+
     static void register(final Map<String, Op> ops) {
         RivetReferenceOracle.register(ops, new Op(
             "effect",
             List.of("category", "color", "modifiers"),
-            (request, dec) -> effect(request, dec),
+            quiet((request, dec) -> effect(request, dec)),
             error -> false,
             GameplayOps::effectCheck
         ));
         RivetReferenceOracle.register(ops, new Op(
             "scoreboard.saved_data",
             List.of("accept", "phase", "codec", "loaded"),
-            (request, dec) -> scoreboardSavedData(request, dec),
+            quiet((request, dec) -> scoreboardSavedData(request, dec)),
             error -> error instanceof com.mojang.brigadier.exceptions.CommandSyntaxException
         ));
         RivetReferenceOracle.register(ops, new Op(
             "enchant.select",
             List.of("costs", "enchantments", "slot_cost"),
-            (request, dec) -> enchantSelect(request, dec),
+            quiet((request, dec) -> enchantSelect(request, dec)),
             error -> false,
             GameplayOps::enchantCheck
         ));
         RivetReferenceOracle.register(ops, new Op(
             "loot.roll",
             List.of("items", "threw"),
-            (request, dec) -> lootRoll(request, dec),
+            quiet((request, dec) -> lootRoll(request, dec)),
             error -> false,
             GameplayOps::lootCheck
         ));
         RivetReferenceOracle.register(ops, new Op(
             "trade.offers",
             List.of("offers", "threw"),
-            (request, dec) -> tradeOffers(request, dec),
+            quiet((request, dec) -> tradeOffers(request, dec)),
             error -> false,
             GameplayOps::tradeCheck
         ));
         RivetReferenceOracle.register(ops, new Op(
             "recipe.match",
             List.of("match", "result", "threw"),
-            (request, dec) -> recipeMatch(request, dec),
+            quiet((request, dec) -> recipeMatch(request, dec)),
             error -> false,
             GameplayOps::recipeCheck
         ));
