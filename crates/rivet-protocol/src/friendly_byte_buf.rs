@@ -13,6 +13,8 @@
 //! `ResourceKey`/registry paths, `BlockPos`/`GlobalPos`,
 //! `Vector3f`/`Quaternionf` (JOML), `PublicKey` (crypto), the JsonOps/codec
 //! paths, and `Instant`.
+//! `readBlockHitResult`/`writeBlockHitResult` (#448) are ported and inline the
+//! packed-long `readBlockPos`/`writeBlockPos` they compose.
 //!
 //! `readEnum`-by-class (`clazz.getEnumConstants()[readVarInt()]`) is ported
 //! at the call site: the value-table `read_var_int` + `by_id` pattern, because
@@ -44,7 +46,9 @@ use rivet_nbt::end_tag::EndTag;
 use rivet_nbt::nbt_accounter::NbtAccounter;
 use rivet_nbt::nbt_io;
 use rivet_nbt::tag::Tag;
-use rivet_registry::core::ChunkPos;
+use rivet_registry::core::{BlockHitResult, BlockPos, ChunkPos, Direction, Vec3};
+
+use crate::codec::CodecError;
 use rivet_util::data_io::{DataInput, DataOutput};
 use rivet_util::mth::Uuid;
 
@@ -405,6 +409,62 @@ impl FriendlyByteBuf {
             self.write_long(*l);
         }
         self
+    }
+
+    // ---- block hit results -------------------------------------------------
+
+    /// `readBlockHitResult()` — `readBlockPos()` (`BlockPos.of(readLong())`),
+    /// `readEnum(Direction.class)`, three `readFloat()` click offsets, then the
+    /// `inside` and `worldBorderHit` booleans. The location is
+    /// `new Vec3((double) pos.getX() + clickX, ...)` — float offsets widened to
+    /// double before the add, exactly as Java's binary numeric promotion.
+    ///
+    /// An out-of-range direction ordinal surfaces as `Err` with the JVM's
+    /// `ArrayIndexOutOfBoundsException` text (`Direction.values()[ordinal]`); a
+    /// truncated buffer panics like every other raw read here.
+    pub fn read_block_hit_result(&mut self) -> Result<BlockHitResult, CodecError> {
+        let pos = BlockPos::of_long(self.read_long());
+        let ordinal = self.read_var_int();
+        let face = usize::try_from(ordinal)
+            .ok()
+            .and_then(|index| Direction::VALUES.get(index).copied())
+            .ok_or_else(|| {
+                CodecError::new(format!(
+                    "Index {ordinal} out of bounds for length {}",
+                    Direction::VALUES.len()
+                ))
+            })?;
+        let click_x = self.read_float();
+        let click_y = self.read_float();
+        let click_z = self.read_float();
+        let inside = self.read_boolean();
+        let world_border = self.read_boolean();
+        Ok(BlockHitResult::new_with_world_border_hit(
+            Vec3::new(
+                pos.get_x() as f64 + click_x as f64,
+                pos.get_y() as f64 + click_y as f64,
+                pos.get_z() as f64 + click_z as f64,
+            ),
+            face,
+            pos,
+            inside,
+            world_border,
+        ))
+    }
+
+    /// `writeBlockHitResult(BlockHitResult)` — `writeBlockPos`, `writeEnum`
+    /// (direction ordinal), the three `(float) (location - blockPos)` offsets,
+    /// then `isInside()` and `isWorldBorderHit()`.
+    pub fn write_block_hit_result(&mut self, block_hit: &BlockHitResult) -> &mut Self {
+        let block_pos = block_hit.get_block_pos();
+        self.write_long(block_pos.as_long());
+        self.write_var_int(block_hit.get_direction().get_3d_data_value());
+        let location = block_hit.get_location();
+        self.write_float((location.x - block_pos.get_x() as f64) as f32);
+        self.write_float((location.y - block_pos.get_y() as f64) as f32);
+        self.write_float((location.z - block_pos.get_z() as f64) as f32);
+        self.write_boolean(block_hit.is_inside());
+        self.write_boolean(block_hit.is_world_border_hit())
     }
 
     // ---- chunk positions and bitsets ---------------------------------------

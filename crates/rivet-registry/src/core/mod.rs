@@ -43,6 +43,7 @@
 
 mod axis_cycle;
 mod block_box;
+mod block_hit_result;
 mod block_pos;
 mod chunk_pos;
 mod cursor3d;
@@ -52,6 +53,7 @@ mod direction8;
 mod game_profile;
 mod game_type;
 mod global_pos;
+mod interaction_hand;
 pub mod java_block_pos_set;
 mod position;
 mod quart_pos;
@@ -65,6 +67,7 @@ mod vec3i;
 
 pub use axis_cycle::AxisCycle;
 pub use block_box::BlockBox;
+pub use block_hit_result::{BlockHitResult, HitResultType};
 pub use block_pos::{BlockPos, MutableBlockPos, TraversalNodeStatus, block_pos_codec};
 pub use chunk_pos::ChunkPos;
 pub use cursor3d::Cursor3D;
@@ -75,6 +78,7 @@ pub use direction8::Direction8;
 pub use game_profile::{GameProfile, Property, PropertyMap};
 pub use game_type::{GameType, game_type_codec, game_type_legacy_id_codec};
 pub use global_pos::{GlobalPos, global_pos_codec, global_pos_map_codec};
+pub use interaction_hand::InteractionHand;
 pub use java_block_pos_set::{JavaBlockPosSet, JavaBlockPosSetError};
 pub use position::Position;
 pub use quart_pos::QuartPos;
