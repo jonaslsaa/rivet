@@ -292,7 +292,11 @@ mod tests {
         for fixture in load_fixtures(&ops_dir(), &op_source()).unwrap() {
             if !matches!(
                 fixture.op.as_str(),
-                "effect" | "enchant.select" | "recipe.match" | "scoreboard.saved_data"
+                "effect"
+                    | "enchant.select"
+                    | "loot.roll"
+                    | "recipe.match"
+                    | "scoreboard.saved_data"
             ) {
                 continue;
             }

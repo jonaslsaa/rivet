@@ -76,7 +76,9 @@ The tool currently supports:
   create) are `threw` answers, listed in `rivet-parity`'s tests.
 
   `harvest_gameplay.py` extracts the recipe documents, resolved item tags, loot table
-  ids and trade set ids from the Paper jar into `fixtures/ops/corpus-src/gameplay-data.json`;
+  ids and trade set ids from the Paper jar into `fixtures/ops/corpus-src/gameplay-data.json`
+  and the `blocks/*` loot table documents into `corpus-src/block-loot-tables.json`
+  (the Rust `loot.roll` handler evaluates those; every other table is `unavailable`);
   the corpus generators are `rivet-parity`'s `ops/gameplay/`.
 
 Registry loading logs to stdout, so the first `codec.reencode`/`packet.reencode`

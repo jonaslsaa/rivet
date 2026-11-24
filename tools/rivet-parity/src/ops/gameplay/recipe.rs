@@ -588,11 +588,8 @@ pub fn recipe_match(request: &Map<String, Value>) -> Outcome {
     let outcome = with_recipe(id, |parsed| {
         let recipe = match parsed {
             Ok(recipe) => recipe,
-            Err(error) => {
-                return Outcome::Unported(format!(
-                    "the Rust recipe loader rejects the document: {error}"
-                ));
-            }
+            // Paper loads every vanilla recipe: a rejection here is a port bug, a mismatch.
+            Err(_) => return Outcome::Rejected,
         };
         if let Recipe::Special { serializer, .. } = recipe {
             return Outcome::Unported(format!(

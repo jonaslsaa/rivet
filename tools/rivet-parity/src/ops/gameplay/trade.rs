@@ -8,9 +8,10 @@
 //! offers as `MerchantOffer.CODEC` SNBT.
 //!
 //! The Rust side has the trade value types and the selection loop
-//! (`rivet_world::trading`) but no decoder for the `villager_trade` and
-//! `trade_set` data-pack documents, so every cell is unported (porting it is
-//! not part of this verification item).
+//! (`rivet_world::trading`) but no loader for the `villager_trade` and
+//! `trade_set` data-pack documents (nor the loot context their providers
+//! read), so every cell is unported (porting it is not part of this
+//! verification item).
 
 use serde_json::{Map, Value, json};
 
@@ -42,6 +43,6 @@ pub fn emit() -> String {
 
 pub fn trade_offers(_request: &Map<String, Value>) -> Outcome {
     Outcome::Unported(
-        "villager_trade / trade_set data-pack documents have no Rust decoder (rivet_world::trading holds the value types only)".into(),
+        "villager_trade / trade_set data-pack documents have no Rust loader (rivet_world::trading has the value types and the selection loop, not the documents or the loot context their providers read)".into(),
     )
 }

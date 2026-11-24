@@ -485,8 +485,9 @@ OP_SURFACES = {
          "net.minecraft.world.level.levelgen.synth.NormalNoise", "net.minecraft.network.chat.ComponentSerialization"]),
     # Gameplay-data ops (VERIFICATION item 8). The globs name the files the handler's answers
     # depend on: the recipe loader/matchers, the enchantment registry and selection helper, the
-    # mob-effect table, the scoreboard codec and load/pack paths. loot.roll and trade.offers have
-    # no Rust handler yet (every input is unavailable, unavailable.tsv), so they claim no file.
+    # mob-effect table, the scoreboard codec and load/pack paths. loot.roll answers the blocks/*
+    # tables through block/drops.rs only; trade.offers has no Rust handler yet (every input is
+    # unavailable, unavailable.tsv), so it claims no file.
     "recipe.match": (
         ["crates/rivet-world/src/crafting/ingredient.rs", "crates/rivet-world/src/crafting/input.rs",
          "crates/rivet-world/src/crafting/item.rs", "crates/rivet-world/src/crafting/json.rs",
@@ -499,7 +500,7 @@ OP_SURFACES = {
          "net.minecraft.world.item.crafting.ImbueRecipe", "net.minecraft.world.item.crafting.CraftingInput",
          "net.minecraft.world.item.crafting.Ingredient", "net.minecraft.world.item.crafting.RecipeManager"]),
     "loot.roll": (
-        [],
+        ["crates/rivet-world/src/block/drops.rs"],
         ["net.minecraft.world.level.storage.loot.LootTable", "net.minecraft.world.level.storage.loot.LootParams",
          "net.minecraft.world.level.storage.loot.LootContext", "net.minecraft.world.level.storage.loot.LootPool"]),
     "enchant.select": (
@@ -542,15 +543,17 @@ def op_rows(tracked: list[str]) -> list[dict]:
             if not is_tracked(path, tracked):
                 raise SystemExit(f"op.{op}: {path} is not tracked")
         n = count_corpus([corpus], tracked)
+        # A row whose every input is unavailable (unavailable.tsv) has nothing to tamper with.
+        negative = "n" if op_unavailable_counts().get(op, 0) >= n else "y"
         rows.append({
-            "id": f"op.{op}.recorded", "layer": "L1", "tier": "T0", "negative": "y",
+            "id": f"op.{op}.recorded", "layer": "L1", "tier": "T0", "negative": negative,
             "mechanism": f"test:rivet-parity ops::tests (recorded Paper {op} vs the Rust handler, "
                          "offline; + tamper and broken-handler negatives)",
             "fixtures": fixtures, "corpus_n": n, "rust_globs": globs, "java_classes": java,
             "consumers": [], "seed_status": "UNVERIFIED",
             "note": "byte-equal canonical lines; exclusions in fixtures/ops/exclusions.tsv"})
         rows.append({
-            "id": f"op.{op}.live", "layer": "L2", "tier": "T1", "negative": "y",
+            "id": f"op.{op}.live", "layer": "L2", "tier": "T1", "negative": negative,
             "mechanism": f"op:rivet-parity ops live {op} (recorded vs live Paper, Rust vs live Paper, "
                          "+ live tamper negative; gate.sh run_oracle_ops_live)",
             "fixtures": fixtures, "corpus_n": n, "rust_globs": globs, "java_classes": java,

@@ -10,6 +10,10 @@ Writes fixtures/ops/corpus-src/gameplay-data.json (deterministic: sorted keys an
 - `loot_tables`: the id of every document of data/minecraft/loot_table/;
 - `trade_sets`: the id of every document of data/minecraft/trade_set/.
 
+and fixtures/ops/corpus-src/block-loot-tables.json: the document of every
+`minecraft:blocks/*` loot table, by id (the Rust `loot.roll` handler evaluates them with
+`rivet_world::block::drops::BlockLootTable`).
+
 The Rust corpus generator (`rivet-parity ops emit-corpus`) and the Rust recipe handler
 read that file, so regenerating a corpus needs no jar; only refreshing the data does.
 The Java ops verify at record time that the corpora close over what the live server
@@ -74,4 +78,8 @@ data = {
     "trade_sets": sorted(documents("trade_set")),
 }
 out.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n")
+block_out = out.with_name("block-loot-tables.json")
+block_tables = {k: v for k, v in documents("loot_table").items() if k.startswith("minecraft:blocks/")}
+block_out.write_text(json.dumps(block_tables, indent=1, sort_keys=True) + "\n")
+print(f"{block_out}: {len(block_tables)} block loot tables")
 print(f"{out}: {len(recipes)} recipes, {len(tags)} item tags, {len(data['loot_tables'])} loot tables, {len(data['trade_sets'])} trade sets")
