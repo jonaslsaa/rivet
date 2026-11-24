@@ -146,6 +146,29 @@ impl ServerLevel {
         );
     }
 
+    /// `blockTicks.tick(gameTime, max, this::tickBlock)` with canonical world
+    /// access during output: the block-tick twin of
+    /// [`Self::run_fluid_ticks_with_world`], with the same collect/run/cleanup
+    /// phases and the same no-cleanup-on-error behavior.
+    pub fn run_block_ticks_with_world<E>(
+        &mut self,
+        max: i32,
+        check: impl FnMut(ChunkPos) -> bool,
+        mut output: impl FnMut(&mut Self, BlockPos, Block) -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.block_ticks.collect_due_ticks(
+            &mut BlockTickContainers(&mut self.chunk_map),
+            self.game_time,
+            max,
+            check,
+        );
+        while let Some((pos, kind)) = self.block_ticks.next_collected_tick() {
+            output(self, pos, kind)?;
+        }
+        self.block_ticks.cleanup_after_tick();
+        Ok(())
+    }
+
     /// The same source collect/run/cleanup phases, with canonical world access
     /// during output. The scheduler never moves, so reentrant schedule and
     /// willTickThisTick reach its actual active queues/index. Errors/panics

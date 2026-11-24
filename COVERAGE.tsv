@@ -1083,7 +1083,7 @@ net.minecraft.network.CompressionEncoder	minecraft:net/minecraft/network/Compres
 net.minecraft.network.Connection	minecraft:net/minecraft/network/Connection.java	972	A		mc.network	rivet-protocol	rivet-protocol	-	crates/rivet-server/src/server/network/connection.rs	62	0	0	0	absent
 net.minecraft.network.ConnectionProtocol	minecraft:net/minecraft/network/ConnectionProtocol.java	19	A		mc.network	rivet-protocol	rivet-protocol	-		1	0	0	0	absent
 net.minecraft.network.DisconnectionDetails	minecraft:net/minecraft/network/DisconnectionDetails.java	18	A		mc.network	rivet-protocol	rivet-protocol	-		0	0	0	0	absent
-net.minecraft.network.FriendlyByteBuf	minecraft:net/minecraft/network/FriendlyByteBuf.java	1700	A	spine	mc.network.buf	rivet-protocol	rivet-protocol	crates/rivet-protocol/src/friendly_byte_buf.rs		203	65	0	0	partial
+net.minecraft.network.FriendlyByteBuf	minecraft:net/minecraft/network/FriendlyByteBuf.java	1700	A	spine	mc.network.buf	rivet-protocol	rivet-protocol	crates/rivet-protocol/src/friendly_byte_buf.rs		203	67	0	0	partial
 net.minecraft.network.HandlerNames	minecraft:net/minecraft/network/HandlerNames.java	20	A		mc.network	rivet-protocol	rivet-protocol	-		0	0	0	0	absent
 net.minecraft.network.HashedPatchMap	minecraft:net/minecraft/network/HashedPatchMap.java	60	A		mc.network	rivet-protocol	rivet-protocol	-		2	0	0	0	absent
 net.minecraft.network.HashedStack	minecraft:net/minecraft/network/HashedStack.java	56	A		mc.network	rivet-protocol	rivet-protocol	-		2	0	0	0	absent
@@ -1237,8 +1237,8 @@ net.minecraft.network.protocol.game.ClientGamePacketListener	minecraft:net/minec
 net.minecraft.network.protocol.game.ClientboundAddEntityPacket	minecraft:net/minecraft/network/protocol/game/ClientboundAddEntityPacket.java	178	A	spine	mc.network.protocol.game	rivet-protocol	rivet-protocol	crates/rivet-protocol/src/game/clientbound_add_entity_packet.rs		14	10	0	0	partial
 net.minecraft.network.protocol.game.ClientboundAnimatePacket	minecraft:net/minecraft/network/protocol/game/ClientboundAnimatePacket.java	53	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	-		5	0	0	0	absent
 net.minecraft.network.protocol.game.ClientboundAwardStatsPacket	minecraft:net/minecraft/network/protocol/game/ClientboundAwardStatsPacket.java	29	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	-		2	0	0	0	absent
-net.minecraft.network.protocol.game.ClientboundBlockChangedAckPacket	minecraft:net/minecraft/network/protocol/game/ClientboundBlockChangedAckPacket.java	30	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	-		3	0	0	0	absent
-net.minecraft.network.protocol.game.ClientboundBlockDestructionPacket	minecraft:net/minecraft/network/protocol/game/ClientboundBlockDestructionPacket.java	56	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	-		6	0	0	0	absent
+net.minecraft.network.protocol.game.ClientboundBlockChangedAckPacket	minecraft:net/minecraft/network/protocol/game/ClientboundBlockChangedAckPacket.java	30	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	crates/rivet-protocol/src/game/clientbound_block_changed_ack_packet.rs		3	0	0	0	partial
+net.minecraft.network.protocol.game.ClientboundBlockDestructionPacket	minecraft:net/minecraft/network/protocol/game/ClientboundBlockDestructionPacket.java	56	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	crates/rivet-protocol/src/game/clientbound_block_destruction_packet.rs		6	3	0	0	partial
 net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket	minecraft:net/minecraft/network/protocol/game/ClientboundBlockEntityDataPacket.java	68	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	-		6	0	0	0	absent
 net.minecraft.network.protocol.game.ClientboundBlockEventPacket	minecraft:net/minecraft/network/protocol/game/ClientboundBlockEventPacket.java	67	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	-		7	0	0	0	absent
 net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket	minecraft:net/minecraft/network/protocol/game/ClientboundBlockUpdatePacket.java	50	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	-		4	0	0	0	absent
@@ -1423,8 +1423,8 @@ net.minecraft.network.protocol.game.ServerboundSpectatorActionPacket	minecraft:n
 net.minecraft.network.protocol.game.ServerboundSwingPacket	minecraft:net/minecraft/network/protocol/game/ServerboundSwingPacket.java	40	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	-		4	0	0	0	absent
 net.minecraft.network.protocol.game.ServerboundTeleportToEntityPacket	minecraft:net/minecraft/network/protocol/game/ServerboundTeleportToEntityPacket.java	43	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	-		4	0	0	0	absent
 net.minecraft.network.protocol.game.ServerboundTestInstanceBlockActionPacket	minecraft:net/minecraft/network/protocol/game/ServerboundTestInstanceBlockActionPacket.java	71	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	-		2	0	0	0	absent
-net.minecraft.network.protocol.game.ServerboundUseItemOnPacket	minecraft:net/minecraft/network/protocol/game/ServerboundUseItemOnPacket.java	59	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	-		6	0	0	0	absent
-net.minecraft.network.protocol.game.ServerboundUseItemPacket	minecraft:net/minecraft/network/protocol/game/ServerboundUseItemPacket.java	66	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	-		7	0	0	0	absent
+net.minecraft.network.protocol.game.ServerboundUseItemOnPacket	minecraft:net/minecraft/network/protocol/game/ServerboundUseItemOnPacket.java	59	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	crates/rivet-protocol/src/game/serverbound_use_item_on_packet.rs		6	3	0	0	partial
+net.minecraft.network.protocol.game.ServerboundUseItemPacket	minecraft:net/minecraft/network/protocol/game/ServerboundUseItemPacket.java	66	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	crates/rivet-protocol/src/game/serverbound_use_item_packet.rs		7	4	0	0	partial
 net.minecraft.network.protocol.game.VecDeltaCodec	minecraft:net/minecraft/network/protocol/game/VecDeltaCodec.java	54	A		mc.network.protocol.game	rivet-protocol	rivet-protocol	-	crates/rivet-server/src/server/level/entity_tracker/vec_delta_codec.rs	8	0	0	0	absent
 net.minecraft.network.protocol.handshake.ClientIntent	minecraft:net/minecraft/network/protocol/handshake/ClientIntent.java	28	A		mc.network.protocol.handshake	rivet-protocol	rivet-protocol	-		2	0	0	0	absent
 net.minecraft.network.protocol.handshake.ClientIntentionPacket	minecraft:net/minecraft/network/protocol/handshake/ClientIntentionPacket.java	43	A		mc.network.protocol.handshake	rivet-protocol	rivet-protocol	-		4	0	0	0	absent
@@ -1743,7 +1743,7 @@ net.minecraft.server.level.ServerEntity	minecraft:net/minecraft/server/level/Ser
 net.minecraft.server.level.ServerEntityGetter	minecraft:net/minecraft/server/level/ServerEntityGetter.java	134	A		mc.server.level	rivet-server	rivet-server	-		5	0	0	0	absent
 net.minecraft.server.level.ServerLevel	minecraft:net/minecraft/server/level/ServerLevel.java	2997	A	spine	mc.server.level	rivet-server	rivet-server	crates/rivet-server/src/server/level/server_level.rs		198	6	0	2	partial
 net.minecraft.server.level.ServerPlayer	minecraft:net/minecraft/server/level/ServerPlayer.java	3141	A	spine	mc.server.level	rivet-server	rivet-server	-		211	0	0	0	absent
-net.minecraft.server.level.ServerPlayerGameMode	minecraft:net/minecraft/server/level/ServerPlayerGameMode.java	600	A		mc.server.level	rivet-server	rivet-server	-		16	0	0	0	absent
+net.minecraft.server.level.ServerPlayerGameMode	minecraft:net/minecraft/server/level/ServerPlayerGameMode.java	600	A		mc.server.level	rivet-server	rivet-server	crates/rivet-server/src/server/level/server_player_game_mode.rs		16	7	3	0	partial
 net.minecraft.server.level.SimulationChunkTracker	minecraft:net/minecraft/server/level/SimulationChunkTracker.java	46	A		mc.server.level.pipeline.tracker	rivet-server	rivet-server	-		4	0	0	0	absent
 net.minecraft.server.level.ThreadedLevelLightEngine	minecraft:net/minecraft/server/level/ThreadedLevelLightEngine.java	261	A		mc.server.level.pipeline.light	rivet-server	rivet-server	-		17	0	0	0	absent
 net.minecraft.server.level.ThrottlingChunkTaskDispatcher	minecraft:net/minecraft/server/level/ThrottlingChunkTaskDispatcher.java	47	A		mc.server.level.pipeline.task	rivet-server	rivet-server	-		3	0	0	0	absent
@@ -2605,8 +2605,8 @@ net.minecraft.world.ContainerHelper	minecraft:net/minecraft/world/ContainerHelpe
 net.minecraft.world.Containers	minecraft:net/minecraft/world/Containers.java	54	A		mc.world	rivet-world	rivet-world	-	crates/rivet-world/src/fluid/containers.rs	3	0	0	0	absent
 net.minecraft.world.Difficulty	minecraft:net/minecraft/world/Difficulty.java	54	A		mc.world	rivet-world	rivet-world	-	crates/rivet-registry/src/core/difficulty.rs	6	0	0	0	absent
 net.minecraft.world.DifficultyInstance	minecraft:net/minecraft/world/DifficultyInstance.java	62	A		mc.world	rivet-world	rivet-world	-		6	0	0	0	absent
-net.minecraft.world.InteractionHand	minecraft:net/minecraft/world/InteractionHand.java	25	A		mc.world	rivet-world	rivet-world	-		1	0	0	0	absent
-net.minecraft.world.InteractionResult	minecraft:net/minecraft/world/InteractionResult.java	84	A		mc.world	rivet-world	rivet-world	-		7	0	0	0	absent
+net.minecraft.world.InteractionHand	minecraft:net/minecraft/world/InteractionHand.java	25	A		mc.world	rivet-world	rivet-world	-	crates/rivet-registry/src/core/interaction_hand.rs	1	0	0	0	absent
+net.minecraft.world.InteractionResult	minecraft:net/minecraft/world/InteractionResult.java	84	A		mc.world	rivet-world	rivet-world	crates/rivet-world/src/interaction_result.rs		7	7	0	0	complete
 net.minecraft.world.ItemStackWithSlot	minecraft:net/minecraft/world/ItemStackWithSlot.java	20	A		mc.world	rivet-world	rivet-world	-		1	0	0	0	absent
 net.minecraft.world.LockCode	minecraft:net/minecraft/world/LockCode.java	38	A		mc.world	rivet-world	rivet-world	-		4	0	0	0	absent
 net.minecraft.world.MenuProvider	minecraft:net/minecraft/world/MenuProvider.java	8	A		mc.world	rivet-world	rivet-world	-	crates/rivet-world/src/inventory/menu_provider.rs	1	0	0	0	absent
@@ -2723,7 +2723,7 @@ net.minecraft.world.entity.HasCustomInventoryScreen	minecraft:net/minecraft/worl
 net.minecraft.world.entity.HumanoidArm	minecraft:net/minecraft/world/entity/HumanoidArm.java	44	A		mc.world.entity	rivet-entity	rivet-server	-	crates/rivet-protocol/src/protocol/common/humanoid_arm.rs	3	0	0	0	absent
 net.minecraft.world.entity.InsideBlockEffectApplier	minecraft:net/minecraft/world/entity/InsideBlockEffectApplier.java	117	A		mc.world.entity	rivet-entity	rivet-server	-		8	0	0	0	absent
 net.minecraft.world.entity.InsideBlockEffectType	minecraft:net/minecraft/world/entity/InsideBlockEffectType.java	40	A		mc.world.entity	rivet-entity	rivet-server	-		2	0	0	0	absent
-net.minecraft.world.entity.Interaction	minecraft:net/minecraft/world/entity/Interaction.java	196	A		mc.world.entity	rivet-entity	rivet-server	-		22	0	0	0	absent
+net.minecraft.world.entity.Interaction	minecraft:net/minecraft/world/entity/Interaction.java	196	A		mc.world.entity	rivet-entity	rivet-server	-	crates/rivet-server/src/server/interaction/mod.rs	22	0	0	0	absent
 net.minecraft.world.entity.InterpolationHandler	minecraft:net/minecraft/world/entity/InterpolationHandler.java	143	A		mc.world.entity	rivet-entity	rivet-server	-		11	0	0	0	absent
 net.minecraft.world.entity.ItemBasedSteering	minecraft:net/minecraft/world/entity/ItemBasedSteering.java	58	A		mc.world.entity	rivet-entity	rivet-server	-		5	0	0	0	absent
 net.minecraft.world.entity.ItemOwner	minecraft:net/minecraft/world/entity/ItemOwner.java	43	A		mc.world.entity	rivet-entity	rivet-server	-		5	0	0	0	absent
@@ -4941,7 +4941,7 @@ net.minecraft.world.level.validation.DirectoryValidator	minecraft:net/minecraft/
 net.minecraft.world.level.validation.ForbiddenSymlinkInfo	minecraft:net/minecraft/world/level/validation/ForbiddenSymlinkInfo.java	6	A		mc.world.level.validation	rivet-world	rivet-world	crates/rivet-world/src/level/validation/forbidden_symlink_info.rs		0	0	0	0	complete
 net.minecraft.world.level.validation.PathAllowList	minecraft:net/minecraft/world/level/validation/PathAllowList.java	111	A		mc.world.level.validation	rivet-world	rivet-world	crates/rivet-world/src/level/validation/path_allow_list.rs		8	4	0	0	partial
 net.minecraft.world.phys.AABB	minecraft:net/minecraft/world/phys/AABB.java	489	A	spine	mc.world.phys	rivet-world	rivet-world	-		41	0	0	0	absent
-net.minecraft.world.phys.BlockHitResult	minecraft:net/minecraft/world/phys/BlockHitResult.java	68	A		mc.world.phys	rivet-world	rivet-world	-		9	0	0	0	absent
+net.minecraft.world.phys.BlockHitResult	minecraft:net/minecraft/world/phys/BlockHitResult.java	68	A		mc.world.phys	rivet-world	rivet-world	-	crates/rivet-registry/src/core/block_hit_result.rs	9	0	0	0	absent
 net.minecraft.world.phys.EntityHitResult	minecraft:net/minecraft/world/phys/EntityHitResult.java	25	A		mc.world.phys	rivet-world	rivet-world	-		2	0	0	0	absent
 net.minecraft.world.phys.HitResult	minecraft:net/minecraft/world/phys/HitResult.java	30	A		mc.world.phys	rivet-world	rivet-world	-		3	0	0	0	absent
 net.minecraft.world.phys.Vec2	minecraft:net/minecraft/world/phys/Vec2.java	83	A		mc.world.phys	rivet-world	rivet-world	-		11	0	0	0	absent

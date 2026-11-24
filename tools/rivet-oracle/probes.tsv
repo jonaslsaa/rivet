@@ -55,6 +55,7 @@ tools/rivet-oracle/scripts/run_hive_storage_probe.sh	stdout	-	-	tools/rivet-orac
 tools/rivet-oracle/scripts/run_holder_readiness_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/holder-readiness.jsonl	-
 tools/rivet-oracle/scripts/run_incremental_light_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/incremental-light.jsonl	-
 tools/rivet-oracle/scripts/run_initial_spawn_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/initial-spawn.jsonl	-
+tools/rivet-oracle/scripts/run_interaction_packets_probe.sh	files	{out0}	-	tools/rivet-oracle/fixtures/interaction-packets.jsonl	-
 tools/rivet-oracle/scripts/run_lazy_block_entity_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/lazy-block-entity.jsonl	-
 tools/rivet-oracle/scripts/run_lazy_structure_point_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/lazy-structure-point.jsonl	-
 tools/rivet-oracle/scripts/run_level_ticks_probe.sh	stdout	-	-	tools/rivet-oracle/fixtures/level-ticks.jsonl	-

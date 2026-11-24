@@ -1,0 +1,60 @@
+{
+  "name": "piston_push",
+  "description": "A redstone block set with flags 3 next to a piston: the piston schedules its extension as a block event (runBlockEvents), moves the cobblestone through a moving_piston block entity and finishes two ticks later.",
+  "origin": [
+    512,
+    0,
+    64
+  ],
+  "size": [
+    6,
+    3,
+    3
+  ],
+  "ticks": 12,
+  "seed": 1,
+  "fill": [
+    {
+      "from": [
+        0,
+        0,
+        0
+      ],
+      "to": [
+        5,
+        0,
+        2
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        1,
+        1,
+        1
+      ],
+      "state": "minecraft:piston[facing=east]"
+    },
+    {
+      "from": [
+        2,
+        1,
+        1
+      ],
+      "state": "minecraft:cobblestone"
+    }
+  ],
+  "script": [
+    {
+      "tick": 0,
+      "op": "set",
+      "pos": [
+        0,
+        1,
+        1
+      ],
+      "state": "minecraft:redstone_block",
+      "flags": 3
+    }
+  ]
+}

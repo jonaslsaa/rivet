@@ -1,0 +1,57 @@
+{
+  "name": "sand_fall",
+  "description": "Sand set with flags 3 above a 6-block drop: FallingBlock.onPlace schedules a block tick (2), FallingBlock.tick spawns a FallingBlockEntity whose fall (entity physics, renumbered entity id, IEEE-bit position/motion) ends by placing the block again.",
+  "origin": [
+    480,
+    0,
+    64
+  ],
+  "size": [
+    3,
+    9,
+    3
+  ],
+  "ticks": 30,
+  "seed": 7,
+  "fill": [
+    {
+      "from": [
+        0,
+        0,
+        0
+      ],
+      "to": [
+        2,
+        8,
+        2
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        1,
+        1,
+        1
+      ],
+      "to": [
+        1,
+        8,
+        1
+      ],
+      "state": "minecraft:air"
+    }
+  ],
+  "script": [
+    {
+      "tick": 0,
+      "op": "set",
+      "pos": [
+        1,
+        8,
+        1
+      ],
+      "state": "minecraft:sand",
+      "flags": 3
+    }
+  ]
+}

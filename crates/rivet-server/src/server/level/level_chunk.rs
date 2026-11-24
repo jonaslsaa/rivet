@@ -175,7 +175,8 @@ impl LevelChunk {
     ) {
         self.holder_full_status = Some(status);
     }
-    pub(super) fn set_loaded(&mut self, loaded: bool) {
+    /// `LevelChunk.setLoaded` (public in the source).
+    pub fn set_loaded(&mut self, loaded: bool) {
         self.loaded = loaded;
     }
     pub(super) fn install_paper_unsaved_listener(&mut self) {

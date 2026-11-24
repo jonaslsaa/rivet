@@ -1,0 +1,136 @@
+{
+  "name": "water_flow_obstacles",
+  "description": "Water spreading around partial blocks (bottom slab, stairs, fence, glass pane, trapdoor): FlowingFluid.canPassThroughWall over real collision faces, no waterlogging by flowing water.",
+  "origin": [
+    256,
+    0,
+    64
+  ],
+  "size": [
+    9,
+    3,
+    9
+  ],
+  "ticks": 40,
+  "seed": 1,
+  "fill": [
+    {
+      "from": [
+        0,
+        0,
+        0
+      ],
+      "to": [
+        8,
+        0,
+        8
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        0,
+        1,
+        0
+      ],
+      "to": [
+        8,
+        2,
+        0
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        0,
+        1,
+        8
+      ],
+      "to": [
+        8,
+        2,
+        8
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        0,
+        1,
+        1
+      ],
+      "to": [
+        0,
+        2,
+        7
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        8,
+        1,
+        1
+      ],
+      "to": [
+        8,
+        2,
+        7
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        2,
+        1,
+        2
+      ],
+      "state": "minecraft:oak_slab"
+    },
+    {
+      "from": [
+        6,
+        1,
+        2
+      ],
+      "state": "minecraft:oak_stairs[facing=east]"
+    },
+    {
+      "from": [
+        2,
+        1,
+        6
+      ],
+      "state": "minecraft:oak_fence"
+    },
+    {
+      "from": [
+        6,
+        1,
+        6
+      ],
+      "state": "minecraft:glass_pane"
+    },
+    {
+      "from": [
+        4,
+        1,
+        6
+      ],
+      "state": "minecraft:oak_trapdoor[half=bottom,open=true,facing=north]"
+    }
+  ],
+  "script": [
+    {
+      "tick": 0,
+      "op": "set",
+      "pos": [
+        4,
+        1,
+        4
+      ],
+      "state": "minecraft:water",
+      "flags": 3
+    }
+  ]
+}

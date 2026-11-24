@@ -662,6 +662,7 @@ dependencies = [
  "rivet-harness-common",
  "rivet-nbt",
  "rivet-registry",
+ "rivet-server",
  "rivet-util",
  "rivet-world",
  "rustix",

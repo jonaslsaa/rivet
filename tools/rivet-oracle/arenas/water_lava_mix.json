@@ -1,0 +1,73 @@
+{
+  "name": "water_lava_mix",
+  "description": "Water placed at one end of a stone channel flows into a quietly placed lava source and flowing lava: lava-water mixing forms obsidian and cobblestone through the BlockFormEvent path and fizz level events.",
+  "origin": [
+    224,
+    0,
+    64
+  ],
+  "size": [
+    9,
+    3,
+    3
+  ],
+  "ticks": 60,
+  "seed": 1,
+  "fill": [
+    {
+      "from": [
+        0,
+        0,
+        0
+      ],
+      "to": [
+        8,
+        2,
+        2
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        1,
+        1,
+        1
+      ],
+      "to": [
+        7,
+        1,
+        1
+      ],
+      "state": "minecraft:air"
+    },
+    {
+      "from": [
+        7,
+        1,
+        1
+      ],
+      "state": "minecraft:lava"
+    },
+    {
+      "from": [
+        6,
+        1,
+        1
+      ],
+      "state": "minecraft:lava[level=2]"
+    }
+  ],
+  "script": [
+    {
+      "tick": 0,
+      "op": "set",
+      "pos": [
+        1,
+        1,
+        1
+      ],
+      "state": "minecraft:water",
+      "flags": 3
+    }
+  ]
+}

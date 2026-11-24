@@ -95,6 +95,9 @@ pub mod enchantment;
 pub mod entity;
 pub mod flag;
 pub mod fluid;
+/// `net.minecraft.world.InteractionResult` (#448): the block/item interaction
+/// result consumed by `ServerPlayerGameMode` and the world-interaction service.
+pub mod interaction_result;
 pub mod inventory;
 pub mod item;
 pub mod level;

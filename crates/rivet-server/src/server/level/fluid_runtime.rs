@@ -20,6 +20,16 @@ use rivet_world::{
     ticks::ScheduledTick,
 };
 
+/// `ServerLevel.tickBlock` outcome: the dispatched body's own refusal, or a
+/// scheduled block whose `BlockState.tick` body has no Rust port yet.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum BlockTickError {
+    #[error(transparent)]
+    Body(#[from] FluidError),
+    #[error("no Rust scheduled-tick body for {block} (BlockState.tick) at {pos:?}")]
+    NoRustBody { block: String, pos: BlockPos },
+}
+
 /// These are the source's observable external effects and contextual geometry.
 /// Implementations must execute their real event channels and drop/game-event
 /// bodies. Having no listeners is a decision of that channel, not this trait.
@@ -355,6 +365,45 @@ impl ServerLevel {
             return Ok(());
         };
         FlowingFluid::new(kind).tick(&mut world, pos, state, fluid)
+    }
+
+    /// `ServerLevel.tickBlock`: the scheduled block must still be there, then
+    /// `BlockState.tick` dispatches to that block's own body. Only bodies
+    /// ported to Rust are dispatched; every other block refuses, never a
+    /// successful no-op. Each newly ported scheduled-tick body joins here.
+    pub fn tick_block_live(
+        &mut self,
+        pos: BlockPos,
+        scheduled: Block,
+        services: &mut impl FluidRuntimeServices,
+    ) -> Result<(), BlockTickError> {
+        let state = LiveFluidWorld::new(self, services)?.block(pos)?;
+        if Block::new(state.block()) != scheduled {
+            return Ok(());
+        }
+        match state.block().name() {
+            "minecraft:water" | "minecraft:lava" => {
+                Ok(self.tick_liquid_block_live(pos, state, services)?)
+            }
+            "minecraft:bubble_column" => Ok(self.tick_bubble_column_live(pos, state, services)?),
+            name => Err(BlockTickError::NoRustBody {
+                block: name.to_owned(),
+                pos,
+            }),
+        }
+    }
+
+    /// `blockTicks.tick(gameTime, max, this::tickBlock)` with actual
+    /// chunk-ticking authority and the live mutation services.
+    pub fn run_block_ticks_live(
+        &mut self,
+        max: i32,
+        check: impl FnMut(ChunkPos) -> bool,
+        services: &mut impl FluidRuntimeServices,
+    ) -> Result<(), BlockTickError> {
+        self.run_block_ticks_with_world(max, check, |level, pos, block| {
+            level.tick_block_live(pos, block, services)
+        })
     }
 
     /// Natural scheduled fluid execution with actual chunk-ticking authority

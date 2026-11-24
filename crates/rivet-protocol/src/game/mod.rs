@@ -29,6 +29,13 @@ pub mod serversbound_client_tick_end_packet;
 pub mod serversbound_move_player_packet;
 pub mod serversbound_player_action_packet;
 
+// #448 world-interaction packets (`ServerGamePacketListenerImpl.handleUseItemOn`
+// / `handleUseItem` ingress and the block-change ack / crack-stage egress).
+pub mod clientbound_block_changed_ack_packet;
+pub mod clientbound_block_destruction_packet;
+pub mod serverbound_use_item_on_packet;
+pub mod serverbound_use_item_packet;
+
 // #90 clientbound entity-pairing packets. The three capture-proven bodies are
 // fully ported; the four absent ones carry blocked-codec STUBs.
 pub mod clientbound_add_entity_packet;
@@ -45,6 +52,11 @@ pub use serversbound_client_command_packet::ServerboundClientCommandPacket;
 pub use serversbound_client_tick_end_packet::ServerboundClientTickEndPacket;
 pub use serversbound_move_player_packet::ServerboundMovePlayerPacket;
 pub use serversbound_player_action_packet::ServerboundPlayerActionPacket;
+
+pub use clientbound_block_changed_ack_packet::ClientboundBlockChangedAckPacket;
+pub use clientbound_block_destruction_packet::ClientboundBlockDestructionPacket;
+pub use serverbound_use_item_on_packet::ServerboundUseItemOnPacket;
+pub use serverbound_use_item_packet::ServerboundUseItemPacket;
 
 pub use clientbound_add_entity_packet::ClientboundAddEntityPacket;
 pub use clientbound_entity_event_packet::ClientboundEntityEventPacket;
