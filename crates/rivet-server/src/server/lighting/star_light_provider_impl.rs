@@ -796,6 +796,14 @@ impl StarLightProvider for SkyLightProvider {
         self.changes.section_change(pos, new_empty_value);
     }
 
+    fn has_updates(&self) -> bool {
+        self.changes.front().is_some() || !self.pending_restores.is_empty()
+    }
+
+    // `propagate_changes` keeps the trait's no-op: Paper's `propagateChanges()`
+    // does not drain the server light queue; queued work runs only through the
+    // owner's `try_run_updates` (the chunk-system scheduler's role).
+
     fn light_chunk(&mut self, pos: ChunkPos, empty_sections: &[Option<bool>]) {
         // Preserve the legacy no-op for a missing center; status generation
         // uses `try_light_chunk` below when absence must be observable.
@@ -2274,6 +2282,94 @@ mod tests {
             provider.get_block_light_value_in(restored, BlockPos::new(9, 64, 8)),
             13
         );
+        assert!(provider.try_run_updates().unwrap().is_empty());
+    }
+
+    #[test]
+    fn level_light_engine_delegates_has_light_work_and_run_light_updates_to_provider() {
+        use super::super::generated_block_light_fixture::write;
+        use rivet_registry::block_state::BlockState;
+        use rivet_registry::generated::blocks::BlockId;
+        use rivet_world::chunk::status::ChunkStatus;
+        use rivet_world::lighting::level_light_engine::LevelLightEngine;
+        use rivet_world::lighting::light_event_listener::LightEventListener;
+
+        let mut chunk = all_air_chunk(ChunkPos::ZERO);
+        SkyLightProvider::new(overworld(), true, true, no_chunks())
+            .light_chunk_with(&mut chunk, &all_air_empty_sections())
+            .unwrap();
+        chunk.set_persisted_status(ChunkStatus::Full);
+        chunk.set_light_correct(true);
+        write(
+            &mut chunk,
+            8,
+            64,
+            8,
+            BlockState::of(BlockId::from_name("minecraft:torch").unwrap()).id(),
+        );
+
+        let provider = SkyLightProvider::with_owned_storage(
+            overworld(),
+            true,
+            true,
+            HashMap::from([((0, 0), chunk)]),
+        );
+        let mut engine =
+            LevelLightEngine::with_provider(Box::new(overworld()), true, true, Box::new(provider));
+        assert!(!engine.has_light_work());
+        assert_eq!(engine.run_light_updates(), 0);
+
+        engine.update_section_status(SectionPos::of(0, 4, 0), false);
+        engine.check_block(BlockPos::new(8, 64, 8));
+        assert!(engine.has_light_work());
+        // Paper returns `hadUpdates ? 1 : 0`, but `propagateChanges()` does not
+        // drain the server queue: the queued work and light stay in place.
+        assert_eq!(engine.run_light_updates(), 1);
+        assert!(engine.has_light_work());
+        assert_eq!(engine.get_block_light_value(BlockPos::new(8, 64, 8)), 0);
+        assert_eq!(engine.get_block_light_value(BlockPos::new(9, 64, 8)), 0);
+        assert_eq!(engine.run_light_updates(), 1);
+        assert!(engine.has_light_work());
+    }
+
+    #[test]
+    fn propagate_changes_leaves_server_queue_for_the_owner_drain() {
+        use super::super::generated_block_light_fixture::write;
+        use rivet_registry::block_state::BlockState;
+        use rivet_registry::generated::blocks::BlockId;
+        use rivet_world::chunk::status::ChunkStatus;
+
+        let mut chunk = all_air_chunk(ChunkPos::ZERO);
+        SkyLightProvider::new(overworld(), true, true, no_chunks())
+            .light_chunk_with(&mut chunk, &all_air_empty_sections())
+            .unwrap();
+        chunk.set_persisted_status(ChunkStatus::Full);
+        chunk.set_light_correct(true);
+        write(
+            &mut chunk,
+            8,
+            64,
+            8,
+            BlockState::of(BlockId::from_name("minecraft:torch").unwrap()).id(),
+        );
+        let mut provider = SkyLightProvider::with_owned_storage(
+            overworld(),
+            true,
+            true,
+            HashMap::from([((0, 0), chunk)]),
+        );
+
+        provider.section_change(SectionPos::of(0, 4, 0), false);
+        provider.block_change(BlockPos::new(8, 64, 8));
+        assert!(provider.has_updates());
+        provider.propagate_changes();
+        assert!(provider.has_updates());
+        assert_eq!(provider.get_block_light_value(BlockPos::new(8, 64, 8)), 0);
+
+        assert_eq!(provider.try_run_updates().unwrap(), [ChunkPos::ZERO]);
+        assert!(!provider.has_updates());
+        assert_eq!(provider.get_block_light_value(BlockPos::new(8, 64, 8)), 14);
+        assert_eq!(provider.get_block_light_value(BlockPos::new(9, 64, 8)), 13);
         assert!(provider.try_run_updates().unwrap().is_empty());
     }
 }

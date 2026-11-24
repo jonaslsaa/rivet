@@ -15,10 +15,10 @@
 //! obtains it from the constructor's `LightChunkGetter.getLevel()`, taken
 //! directly here so the generic getter does not force a block-state type
 //! parameter onto the facade) and an `Option<Box<dyn StarLightProvider + Send>>`
-//! standing in for the two `LightEngine<?,?>` fields. The facade is the
-//! compile-green skeleton the later phases build on: the `LightEventListener`
-//! delegation surface and `getLayerListener` land with the
-//! `mc.world.level.lighting.core` unit.
+//! standing in for the two `LightEngine<?,?>` fields. `LightEventListener`
+//! delegates `check_block`, `update_section_status`, `has_light_work`, and
+//! `run_light_updates` directly to the attached provider (matching Paper's
+//! `LevelLightEngine` / `StarLightInterface`).
 //!
 //! Java's `EMPTY` singleton (a no-engine `new LevelLightEngine()`) shapes
 //! [`Default`]: the same `LevelHeightAccessor.create(0, 0)` and both light
@@ -26,16 +26,15 @@
 //! the Rust `Default` leaves the provider `None` because the concrete provider
 //! lives in `rivet-server` (the seam) and cannot be filled from `rivet-world`.
 //!
-//! RivetTodo(#184): the `LightEngine`/`LayerLightSectionStorage` engine surface
-//! and the `LightEventListener`/`getLayerListener` implementation are not
-//! ported (the `mc.world.level.lighting.core`/`.engine` units); this module is
-//! the facade skeleton — section arithmetic, light flags, and the provider
-//! holder. `has_block_light`/`has_sky_light` are stored but not threaded into
-//! the provider (Java passes them to the `StarLightInterface` ctor); the
-//! provider receives them when the real engine lands.
+//! RivetTodo(#184): `getLayerListener` is not ported yet; the facade exposes
+//! section arithmetic, light flags, channel-gated sky/block readers, and the
+//! `LightEventListener` delegation surface over the attached provider.
 
+use crate::chunk::data_layer::DataLayer;
 use crate::level::height_accessor::LevelHeightAccessor;
+use crate::lighting::light_event_listener::LightEventListener;
 use crate::lighting::star_light_provider::StarLightProvider;
+use rivet_registry::core::{BlockPos, ChunkPos, SectionPos};
 
 /// `LevelLightEngine.LIGHT_SECTION_PADDING` — each light-section extent adds
 /// one padding section beyond the world's build sections.
@@ -145,6 +144,94 @@ impl LevelLightEngine {
             .as_deref_mut()
             .map(|p| p as &mut dyn StarLightProvider)
     }
+
+    /// Paper's `LevelLightEngine` sky-light reader, gated by `has_sky_light`.
+    pub fn get_sky_light_value(&self, pos: BlockPos) -> i32 {
+        if !self.has_sky_light {
+            return 0;
+        }
+        self.provider
+            .as_deref()
+            .map_or(0, |p| p.get_sky_light_value(pos))
+    }
+
+    /// Paper's `LevelLightEngine` block-light reader, gated by `has_block_light`.
+    pub fn get_block_light_value(&self, pos: BlockPos) -> i32 {
+        if !self.has_block_light {
+            return 0;
+        }
+        self.provider
+            .as_deref()
+            .map_or(0, |p| p.get_block_light_value(pos))
+    }
+
+    /// Paper's `LevelLightEngine.getRawBrightness(BlockPos, int skyDampen)`,
+    /// which delegates to `StarLightInterface.getRawBrightness`: the dampen is
+    /// subtracted unconditionally (a disabled sky channel reads `0`, so the
+    /// result can exceed the block value), `15` short-circuits, otherwise
+    /// `max(sky, block)`.
+    pub fn get_raw_brightness(&self, pos: BlockPos, sky_dampen: i32) -> i32 {
+        let sky = self.get_sky_light_value(pos).wrapping_sub(sky_dampen);
+        // Don't fetch the block light level if the skylight level is 15,
+        // since the value will never be higher.
+        if sky == 15 {
+            return 15;
+        }
+        let block = self.get_block_light_value(pos);
+        sky.max(block)
+    }
+
+    /// Paper's `StarLightInterface.skyReader.getDataLayerData(SectionPos)`,
+    /// gated by `has_sky_light`.
+    pub fn get_sky_data_layer(&self, pos: SectionPos) -> Option<DataLayer> {
+        if !self.has_sky_light {
+            return None;
+        }
+        self.provider.as_deref()?.get_data_layer_data(pos)
+    }
+
+    /// Paper's `StarLightInterface.blockReader.getDataLayerData(SectionPos)`,
+    /// gated by `has_block_light`.
+    pub fn get_block_data_layer(&self, pos: SectionPos) -> Option<DataLayer> {
+        if !self.has_block_light {
+            return None;
+        }
+        self.provider.as_deref()?.get_block_data_layer_data(pos)
+    }
+}
+
+impl LightEventListener for LevelLightEngine {
+    fn check_block(&mut self, pos: BlockPos) {
+        if let Some(provider) = self.provider.as_deref_mut() {
+            provider.block_change(pos);
+        }
+    }
+
+    fn has_light_work(&self) -> bool {
+        self.provider
+            .as_deref()
+            .is_some_and(StarLightProvider::has_updates)
+    }
+
+    /// Paper's `runLightUpdates()`: `hadUpdates = hasLightWork()`, then
+    /// `propagateChanges()`, returning `hadUpdates ? 1 : 0` (not a count).
+    fn run_light_updates(&mut self) -> i32 {
+        let had_updates = self.has_light_work();
+        if let Some(provider) = self.provider.as_deref_mut() {
+            provider.propagate_changes();
+        }
+        i32::from(had_updates)
+    }
+
+    fn update_section_status(&mut self, pos: SectionPos, section_empty: bool) {
+        if let Some(provider) = self.provider.as_deref_mut() {
+            provider.section_change(pos, section_empty);
+        }
+    }
+
+    fn set_light_enabled(&mut self, _pos: ChunkPos, _enable: bool) {}
+
+    fn propagate_light_sources(&mut self, _pos: ChunkPos) {}
 }
 
 /// Java's `EMPTY` singleton *shape* — `new LevelLightEngine()` with
@@ -334,5 +421,143 @@ mod tests {
             // Resolves only if `LevelLightEngine` does NOT implement Sync.
             let _ = <LevelLightEngine as AmbiguousIfImpl<_>>::some_item;
         };
+    }
+
+    #[test]
+    fn channel_gated_readers_and_listener_delegation_match_paper() {
+        use rivet_registry::core::{BlockPos, ChunkPos, Vec3iLike};
+        use std::collections::HashSet;
+        use std::sync::{Arc, Mutex};
+
+        type EventLog = Arc<Mutex<Vec<(String, (i32, i32, i32))>>>;
+
+        struct StubProvider {
+            sky: i32,
+            block: i32,
+            pending_updates: i32,
+            log: EventLog,
+        }
+        impl StarLightProvider for StubProvider {
+            fn block_change(&mut self, pos: BlockPos) {
+                self.pending_updates += 1;
+                self.log
+                    .lock()
+                    .unwrap()
+                    .push(("block".into(), pos.coords()));
+            }
+            fn section_change(&mut self, pos: SectionPos, new_empty_value: bool) {
+                self.pending_updates += 1;
+                self.log
+                    .lock()
+                    .unwrap()
+                    .push((format!("section:{new_empty_value}"), pos.coords()));
+            }
+            fn has_updates(&self) -> bool {
+                self.pending_updates > 0
+            }
+            fn propagate_changes(&mut self) {
+                self.pending_updates = 0;
+            }
+            fn light_chunk(&mut self, _pos: ChunkPos, _empty_sections: &[Option<bool>]) {}
+            fn force_load_in_chunk(&mut self, _pos: ChunkPos, _empty_sections: &[Option<bool>]) {}
+            fn relight_chunks(&mut self, _chunks: &HashSet<ChunkPos>) {}
+            fn check_chunk_edges(&mut self, _pos: ChunkPos) {}
+            fn get_sky_light_value(&self, _pos: BlockPos) -> i32 {
+                self.sky
+            }
+            fn get_block_light_value(&self, _pos: BlockPos) -> i32 {
+                self.block
+            }
+            fn get_data_layer_data(&self, _pos: SectionPos) -> Option<DataLayer> {
+                Some(DataLayer::new(self.sky))
+            }
+            fn get_block_data_layer_data(&self, _pos: SectionPos) -> Option<DataLayer> {
+                Some(DataLayer::new(self.block))
+            }
+        }
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut both = LevelLightEngine::with_provider(
+            overworld(),
+            true,
+            true,
+            Box::new(StubProvider {
+                sky: 15,
+                block: 11,
+                pending_updates: 0,
+                log: Arc::clone(&log),
+            }),
+        );
+        let pos = BlockPos::new(1, 64, 2);
+        let sec = SectionPos::of(0, 4, 0);
+        assert_eq!(both.get_sky_light_value(pos), 15);
+        assert_eq!(both.get_block_light_value(pos), 11);
+        assert_eq!(both.get_raw_brightness(pos, 0), 15);
+        assert_eq!(both.get_raw_brightness(pos, 10), 11);
+        assert!(both.get_sky_data_layer(sec).is_some());
+        assert!(both.get_block_data_layer(sec).is_some());
+
+        // LightEventListener routes directly to provider.
+        assert!(!both.has_light_work());
+        assert_eq!(both.run_light_updates(), 0);
+        both.check_block(pos);
+        both.update_section_status(sec, false);
+        assert!(both.has_light_work());
+        // Paper returns `hadUpdates ? 1 : 0`, not the number of queued changes.
+        assert_eq!(both.run_light_updates(), 1);
+        assert!(!both.has_light_work());
+        assert_eq!(both.run_light_updates(), 0);
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                ("block".into(), (1, 64, 2)),
+                ("section:false".into(), (0, 4, 0)),
+            ]
+        );
+
+        // No provider attached returns false / 0.
+        let mut empty = LevelLightEngine::default();
+        assert!(!empty.has_light_work());
+        assert_eq!(empty.run_light_updates(), 0);
+
+        // Disabled block channel returns 0 / None even if provider would return non-zero.
+        let sky_only = LevelLightEngine::with_provider(
+            overworld(),
+            false,
+            true,
+            Box::new(StubProvider {
+                sky: 12,
+                block: 14,
+                pending_updates: 0,
+                log: Arc::new(Mutex::new(Vec::new())),
+            }),
+        );
+        assert_eq!(sky_only.get_sky_light_value(pos), 12);
+        assert_eq!(sky_only.get_block_light_value(pos), 0);
+        assert_eq!(sky_only.get_raw_brightness(pos, 5), 7);
+        assert_eq!(sky_only.get_raw_brightness(pos, 13), 0);
+        assert!(sky_only.get_sky_data_layer(sec).is_some());
+        assert!(sky_only.get_block_data_layer(sec).is_none());
+
+        // Disabled sky channel returns 0 / None even if provider would return non-zero.
+        let block_only = LevelLightEngine::with_provider(
+            overworld(),
+            true,
+            false,
+            Box::new(StubProvider {
+                sky: 15,
+                block: 9,
+                pending_updates: 0,
+                log: Arc::new(Mutex::new(Vec::new())),
+            }),
+        );
+        assert_eq!(block_only.get_sky_light_value(pos), 0);
+        assert_eq!(block_only.get_block_light_value(pos), 9);
+        assert_eq!(block_only.get_raw_brightness(pos, 0), 9);
+        // Paper subtracts the dampen from the (disabled, 0) sky reading too.
+        assert_eq!(block_only.get_raw_brightness(pos, -15), 15);
+        assert_eq!(block_only.get_raw_brightness(pos, -12), 12);
+        assert!(block_only.get_sky_data_layer(sec).is_none());
+        assert!(block_only.get_block_data_layer(sec).is_some());
     }
 }
