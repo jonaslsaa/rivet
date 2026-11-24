@@ -46,9 +46,12 @@ import java.util.TreeMap;
  *
  * <p>Request: {@code spec} (the dispatcher), {@code input} (the command string),
  * {@code cursor} (the suggestion cursor, in UTF-16 units) and {@code want}, a list of
- * facets: {@code run} (parse result, execute result or exception, result-consumer
- * calls), {@code suggestions}, {@code usage} (needs {@code usage_path}, the node names
- * from the root) and {@code ambiguities}.
+ * facets: {@code run} (parse result, execute result or exception without its text,
+ * result-consumer calls), {@code messages} (the message and raw message of every parse
+ * error and of the execute exception: the text a Minecraft-installed
+ * {@code BuiltInExceptionProvider} decides, kept apart so a divergence in wording does
+ * not hide the structure in {@code run}), {@code suggestions}, {@code usage} (needs
+ * {@code usage_path}, the node names from the root) and {@code ambiguities}.
  *
  * <p>Spec: {@code {"commands":[<root literal>...]}}. A node is
  * {@code {"literal":name}} or {@code {"argument":name,"type":{...}}} with optional
@@ -63,7 +66,7 @@ import java.util.TreeMap;
  * literals then merge into those nodes. The command source is the string {@code "src"}.
  */
 final class BrigadierDispatchOp {
-    static final List<String> RESULT_KEYS = List.of("run", "suggestions", "usage", "ambiguities");
+    static final List<String> RESULT_KEYS = List.of("run", "messages", "suggestions", "usage", "ambiguities");
 
     private static final String SOURCE = "src";
 
@@ -265,6 +268,7 @@ final class BrigadierDispatchOp {
         for (JsonElement want : request.getAsJsonArray("want")) {
             switch (want.getAsString()) {
                 case "run" -> result.add("run", runFacet(built, input));
+                case "messages" -> result.add("messages", messagesFacet(built, input));
                 case "suggestions" -> result.add("suggestions", suggestFacet(built, input, request.get("cursor").getAsInt()));
                 case "usage" -> result.add("usage", usageFacet(built, request.getAsJsonArray("usage_path")));
                 case "ambiguities" -> result.add("ambiguities", ambiguityFacet(built));
@@ -295,6 +299,33 @@ final class BrigadierDispatchOp {
         run.add("execute", executed);
         run.add("consumer", consumed);
         return run;
+    }
+
+    /** The text of every exception the input raises: per-node parse errors, then the execute exception. */
+    private static JsonObject messagesFacet(final Built built, final String input) {
+        CommandDispatcher<String> dispatcher = built.dispatcher();
+        ParseResults<String> parse = dispatcher.parse(input, SOURCE);
+        JsonObject json = new JsonObject();
+        JsonArray errors = new JsonArray();
+        for (Map.Entry<CommandNode<String>, CommandSyntaxException> entry : parse.getExceptions().entrySet()) {
+            JsonObject error = messageJson(entry.getValue());
+            error.add("node", path(dispatcher, entry.getKey()));
+            errors.add(error);
+        }
+        json.add("parse_errors", errors);
+        try {
+            dispatcher.execute(parse);
+        } catch (CommandSyntaxException error) {
+            json.add("execute", messageJson(error));
+        }
+        return json;
+    }
+
+    private static JsonObject messageJson(final CommandSyntaxException error) {
+        JsonObject json = new JsonObject();
+        json.addProperty("message", error.getMessage());
+        json.addProperty("raw", error.getRawMessage().getString());
+        return json;
     }
 
     private static JsonObject parseJson(final CommandDispatcher<String> dispatcher, final ParseResults<String> parse) {
@@ -385,8 +416,6 @@ final class BrigadierDispatchOp {
     private static JsonObject exceptionJson(final CommandSyntaxException error) {
         JsonObject json = new JsonObject();
         json.addProperty("type", TYPE_NAMES.getOrDefault(error.getType(), "other"));
-        json.addProperty("message", error.getMessage());
-        json.addProperty("raw", error.getRawMessage().getString());
         json.addProperty("cursor", error.getCursor());
         if (error.getInput() != null) {
             json.addProperty("input", error.getInput());

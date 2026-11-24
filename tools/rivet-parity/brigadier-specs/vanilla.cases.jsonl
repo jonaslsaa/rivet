@@ -239,3 +239,19 @@
 ["time set d", "*"]
 ["execute as S ru", "*"]
 ["xp add S 5 l", "*"]
+"execute unless entity Steve"
+"execute unless entity Steve run say hi"
+"execute unless entity"
+"execute if entity Steve if entity Alex run say both"
+"execute unless score Steve kills matches 1.."
+"execute unless score Steve kills matches 1.. run return 7"
+"execute unless score Steve kills <= Alex deaths"
+"execute if score Steve kills >= Alex deaths run say hi"
+"execute if score Steve kills > Alex"
+"execute if score Steve kills != Alex deaths"
+"execute if score Steve kills <"
+"execute store success score Steve kills run say hi"
+"execute store success score Steve kills"
+"execute store success"
+"execute store result score Steve kills store success score Alex deaths run return 3"
+"execute as Steve unless entity Alex at Alex store result score Steve kills run say hi"

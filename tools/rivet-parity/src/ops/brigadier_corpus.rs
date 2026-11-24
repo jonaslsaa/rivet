@@ -4,15 +4,17 @@
 //! Rivet), one command string, a suggestion cursor and the facets wanted. The
 //! committed sources under `tools/rivet-parity/brigadier-specs/`:
 //!
-//! - `<spec>.json`, six dispatcher specs: `basic` (every built-in argument
+//! - `<spec>.json`, seven dispatcher specs: `basic` (every built-in argument
 //!   type, bounds, string modes, optional trailing arguments, failing commands),
 //!   `ambiguous` (overlapping sibling arguments), `forks` (redirects, forks,
 //!   forwards, modifiers that throw), `usage` (optional branches, restricted
 //!   nodes, redirects in usage strings) and `vanilla` (the structure of real
 //!   vanilla commands: `execute`'s redirect/fork graph, `tell` redirecting to
 //!   `msg`, `time`/`weather`/`xp`/`effect`/`tp`/... with vanilla bounds, op-only
-//!   commands behind a fixed `requires`) and `suggest` (fixed suggestion providers
-//!   with text, integer and tooltip entries);
+//!   commands behind a fixed `requires`), `suggest` (fixed suggestion providers
+//!   with text, integer and tooltip entries) and `dedup` (providers that suggest
+//!   one text in several letter cases, alone and from sibling arguments, which
+//!   `Suggestions.create` dedups through a `HashSet`);
 //! - `<spec>.cases.jsonl`, the hand-written command strings of that spec: a JSON
 //!   string, or `[string, cursor...]` for extra suggestion cursors, where `"*"`
 //!   asks for every cursor from 0 to the end of the string.
@@ -79,6 +81,13 @@ const SPECS: &[SpecSource] = &[
         cases: include_str!("../../brigadier-specs/suggest.cases.jsonl"),
         suggest_every: 1,
         seeded: 40,
+    },
+    SpecSource {
+        name: "dedup",
+        spec: include_str!("../../brigadier-specs/dedup.json"),
+        cases: include_str!("../../brigadier-specs/dedup.cases.jsonl"),
+        suggest_every: 1,
+        seeded: 10,
     },
     SpecSource {
         name: "vanilla",
@@ -475,6 +484,14 @@ pub fn emit() -> Result<String, String> {
                 &["run"],
                 None,
             );
+            out += &input_line(
+                format!("{name}.msg.h{index:03}"),
+                &spec,
+                command,
+                None,
+                &["messages"],
+                None,
+            );
             if index % source.suggest_every == 0 {
                 out += &input_line(
                     format!("{name}.sug.h{index:03}"),
@@ -518,6 +535,14 @@ pub fn emit() -> Result<String, String> {
                 &command,
                 None,
                 &["run"],
+                None,
+            );
+            out += &input_line(
+                format!("{name}.msg.s{made:03}"),
+                &spec,
+                &command,
+                None,
+                &["messages"],
                 None,
             );
             let length = utf16_len(&command);

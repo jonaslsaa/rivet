@@ -8,8 +8,9 @@
 //! the reader cursor, the per-node errors), the execute result or exception,
 //! the result-consumer calls, the completion suggestions, `getAllUsage` and
 //! `getSmartUsage`, and `findAmbiguities`. Brigadier's own exceptions are data
-//! inside the result (type, message, raw message, cursor, input); the op never
-//! answers "rejected".
+//! inside the result (type, cursor, input in `run`; the message and raw message
+//! of every exception in their own `messages` facet, so a divergence in wording
+//! cannot hide the structure); the op never answers "rejected".
 //!
 //! Everything here calls the ported `rivet-brigadier`; the handler only mirrors
 //! the op contract around it (spec decoding, result JSON).
@@ -490,8 +491,6 @@ fn type_name(exception_type: &dyn CommandExceptionType) -> &'static str {
 fn exception(error: &CommandSyntaxException<'_>) -> Value {
     let mut json = Map::new();
     json.insert("type".into(), json!(type_name(error.get_type())));
-    json.insert("message".into(), json!(error.get_message()));
-    json.insert("raw".into(), json!(error.get_raw_message().get_string()));
     json.insert("cursor".into(), json!(error.get_cursor()));
     // An absent value is an absent key: the oracle transport drops JSON nulls.
     if let Some(input) = error.get_input() {
@@ -609,6 +608,34 @@ fn run_facet(built: &mut Built, input: &str) -> Result<Value, Fault> {
     Ok(json!({"parse": parsed, "execute": executed, "consumer": consumer}))
 }
 
+/// The `messages` facet: the text of every exception the input raises, kept
+/// apart from the structure in `run` (see `BrigadierDispatchOp.java`).
+fn messages_facet(built: &Built, input: &str) -> Value {
+    let dispatcher = &built.dispatcher;
+    let parse = dispatcher.parse_string(input, SOURCE.to_owned());
+    let message = |error: &CommandSyntaxException<'_>| {
+        let mut json = Map::new();
+        json.insert("message".into(), json!(error.get_message()));
+        json.insert("raw".into(), json!(error.get_raw_message().get_string()));
+        json
+    };
+    let errors: Vec<Value> = parse
+        .get_exceptions()
+        .iter()
+        .map(|(node, error)| {
+            let mut json = message(error);
+            json.insert("node".into(), path(dispatcher, node));
+            Value::Object(json)
+        })
+        .collect();
+    let mut json = Map::new();
+    json.insert("parse_errors".into(), Value::Array(errors));
+    if let Err(error) = dispatcher.execute_parse(parse) {
+        json.insert("execute".into(), Value::Object(message(&error)));
+    }
+    Value::Object(json)
+}
+
 fn suggest_facet(built: &Built, input: &str, cursor: i32) -> Value {
     let dispatcher = &built.dispatcher;
     let parse = dispatcher.parse_string(input, SOURCE.to_owned());
@@ -689,6 +716,9 @@ fn dispatch(request: &Map<String, Value>) -> Result<Map<String, Value>, Fault> {
             Some("run") => {
                 result.insert("run".into(), run_facet(&mut built, input)?);
             }
+            Some("messages") => {
+                result.insert("messages".into(), messages_facet(&built, input));
+            }
             Some("suggestions") => {
                 let cursor = get(request, "cursor")?
                     .as_i64()
@@ -710,7 +740,7 @@ fn dispatch(request: &Map<String, Value>) -> Result<Map<String, Value>, Fault> {
     }
     // The declared result-key order of the Java op.
     let mut ordered = Map::new();
-    for key in ["run", "suggestions", "usage", "ambiguities"] {
+    for key in ["run", "messages", "suggestions", "usage", "ambiguities"] {
         if let Some(value) = result.shift_remove(key) {
             ordered.insert(key.into(), value);
         }
@@ -772,7 +802,7 @@ mod tests {
             "{} inputs",
             fixture.corpus.len()
         );
-        for facet in ["run", "suggestions", "usage", "ambiguities"] {
+        for facet in ["run", "messages", "suggestions", "usage", "ambiguities"] {
             let n = fixture
                 .corpus
                 .iter()
@@ -787,7 +817,15 @@ mod tests {
             .collect();
         assert_eq!(
             specs.into_iter().collect::<Vec<_>>(),
-            ["ambiguous", "basic", "forks", "suggest", "usage", "vanilla"]
+            [
+                "ambiguous",
+                "basic",
+                "dedup",
+                "forks",
+                "suggest",
+                "usage",
+                "vanilla"
+            ]
         );
         let run_inputs: Vec<&str> = fixture
             .corpus
@@ -859,8 +897,18 @@ mod tests {
     fn nested_tampers_are_detected_and_named_per_facet() {
         let fixture = fixture();
         let exclusions = compare::load_exclusions(&ops_dir().join("exclusions.tsv")).unwrap();
-        let cases: [(&str, &str, &str); 5] = [
+        let cases: [(&str, &str, &str); 7] = [
             ("run", "/run/execute/result", "result.run.execute.result"),
+            (
+                "run",
+                "/run/execute/exception/cursor",
+                "result.run.execute.exception.cursor",
+            ),
+            (
+                "messages",
+                "/messages/execute/message",
+                "result.messages.execute.message",
+            ),
             ("run", "/run/parse/cursor", "result.run.parse.cursor"),
             (
                 "suggestions",

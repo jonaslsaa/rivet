@@ -4,16 +4,16 @@
   "paper": "26.2-DEV-main@0a99345",
   "paper_commit": "0a99345",
   "op_source": "tools/rivet-reference-oracle/src",
-  "op_source_sha256": "0116e8ddce7662961f8942ab20e6ffb51f40ac74559fab6c4829d00a8c362916",
+  "op_source_sha256": "f32b216610f99526a23477769491d29cb5080ec25796e13e7d7aba1ca85a01cb",
   "ops": [
     {
       "op": "brigadier.dispatch",
       "corpus": "corpus/brigadier.dispatch.jsonl",
-      "corpus_sha256": "c9219e4009e537e01d7acbd9f8bfa773fa032139123d5475533e7adba61ea4d4",
-      "corpus_n": 2249,
+      "corpus_sha256": "42c777484d078162051d8b01db02688903a7d1561478c4ae6d2635c0139e471e",
+      "corpus_n": 3539,
       "output": "brigadier.dispatch.jsonl",
-      "output_sha256": "0edd7e45060754ccacab9d7f1f0f4033482995e9db7820407c3cae0928769cb2",
-      "output_n": 2249
+      "output_sha256": "63872b275a52d7ca9ea79b83091d2aa1f4ede3b532e17e12f2069d848c69cfac",
+      "output_n": 3539
     },
     {
       "op": "codec.reencode",
