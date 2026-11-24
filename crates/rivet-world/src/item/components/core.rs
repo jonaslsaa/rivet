@@ -380,15 +380,22 @@ impl HolderSetRef {
     }
 }
 
-/// Codec matching `RegistryCodecs.homogeneousList(...)`:
-/// - `"#namespace:path"` -> `HolderSetRef::Tag`
-/// - `"namespace:path"` -> `HolderSetRef::Direct(vec![id])`
-/// - `["namespace:a", "namespace:b"]` -> `HolderSetRef::Direct(ids)`
+/// Codec matching `RegistryCodecs.homogeneousList(...)` (`HolderSetCodec` with
+/// `alwaysUseList = false`):
+/// - `"#namespace:path"` <-> `HolderSetRef::Tag`
+/// - `"namespace:path"` <-> `HolderSetRef::Direct(vec![id])` (a one-element
+///   direct set encodes compactly as the bare element)
+/// - `["namespace:a", "namespace:b"]` <-> `HolderSetRef::Direct(ids)`
 pub fn holder_set_ref_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<HolderSetRef, Ops>> {
     codec_from_fns(
         "holder_set_ref",
         |v: &HolderSetRef, ops: &Ops| match v {
             HolderSetRef::Tag(id) => DataResult::success(ops.create_string(format!("#{id}"))),
+            // `ExtraCodecs.compactListCodec` (alwaysUseList=false): a one-element
+            // direct set encodes as the bare element.
+            HolderSetRef::Direct(ids) if ids.len() == 1 => {
+                DataResult::success(encode_identifier(&ids[0], ops))
+            }
             HolderSetRef::Direct(ids) => {
                 let items: Vec<Ops::Output> =
                     ids.iter().map(|id| encode_identifier(id, ops)).collect();
@@ -432,4 +439,158 @@ pub fn holder_set_ref_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Holder
             DataResult::success(HolderSetRef::Direct(ids))
         },
     )
+}
+
+// ---------------------------------------------------------------------------
+// HolderRef<T> (registry-file holder seam for RegistryFileCodec)
+// ---------------------------------------------------------------------------
+
+/// Serializable representation of a `Holder<T>` written through
+/// `RegistryFileCodec.create(registry, DIRECT_CODEC)`: either a registry
+/// reference by `Identifier` or an inline (`Holder.Direct`) value.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HolderRef<T> {
+    Reference(Identifier),
+    Direct(T),
+}
+
+impl<T> HolderRef<T> {
+    pub fn reference(id: Identifier) -> Self {
+        Self::Reference(id)
+    }
+
+    pub fn direct(value: T) -> Self {
+        Self::Direct(value)
+    }
+}
+
+/// Codec matching `RegistryFileCodec.create(registry, direct)`: a reference
+/// encodes as its identifier and a direct holder through `direct`. Decoding
+/// tries `Identifier.CODEC` first and falls back to the inline element codec.
+pub fn holder_ref_codec<T, Ops>(direct: Arc<dyn Codec<T, Ops>>) -> Arc<dyn Codec<HolderRef<T>, Ops>>
+where
+    T: Clone + 'static,
+    Ops: DynamicOps + 'static,
+{
+    let enc_direct = Arc::clone(&direct);
+    let dec_direct = direct;
+    codec_from_fns(
+        "holder_ref",
+        move |v: &HolderRef<T>, ops: &Ops| match v {
+            HolderRef::Reference(id) => DataResult::success(encode_identifier(id, ops)),
+            HolderRef::Direct(value) => enc_direct.encode_start(ops, value),
+        },
+        move |ops: &Ops, input: &Ops::Output| {
+            if let Some(id) = decode_identifier(ops, input).result() {
+                return DataResult::success(HolderRef::Reference(id.clone()));
+            }
+            dec_direct.parse(ops, input).map_owned(HolderRef::Direct)
+        },
+    )
+}
+
+// ---------------------------------------------------------------------------
+// SoundEvent
+// ---------------------------------------------------------------------------
+
+/// Port of `net.minecraft.sounds.SoundEvent` (the inline/direct form).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SoundEvent {
+    pub location: Identifier,
+    pub fixed_range: Option<f32>,
+}
+
+impl SoundEvent {
+    /// `SoundEvent.createVariableRangeEvent(Identifier)`.
+    pub fn variable_range(location: Identifier) -> Self {
+        Self {
+            location,
+            fixed_range: None,
+        }
+    }
+
+    /// `SoundEvent.createFixedRangeEvent(Identifier, float)`.
+    pub fn fixed_range(location: Identifier, range: f32) -> Self {
+        Self {
+            location,
+            fixed_range: Some(range),
+        }
+    }
+}
+
+/// `SoundEvent.DIRECT_CODEC`: `{ "sound_id": Identifier, "range"?: float }`
+/// (`range` is a `lenientOptionalFieldOf`, so an undecodable value is dropped).
+pub fn sound_event_direct_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<SoundEvent, Ops>> {
+    codec_from_fns(
+        "sound_event",
+        |v: &SoundEvent, ops: &Ops| DataResult::success(encode_sound_event_direct(v, ops)),
+        decode_sound_event_direct,
+    )
+}
+
+fn encode_sound_event_direct<Ops: DynamicOps>(v: &SoundEvent, ops: &Ops) -> Ops::Output {
+    let mut entries = vec![rivet_serialization::Pair::of(
+        ops.create_string("sound_id".to_string()),
+        encode_identifier(&v.location, ops),
+    )];
+    if let Some(range) = v.fixed_range {
+        entries.push(rivet_serialization::Pair::of(
+            ops.create_string("range".to_string()),
+            ops.create_float(range),
+        ));
+    }
+    ops.create_map(entries)
+}
+
+fn decode_sound_event_direct<Ops: DynamicOps>(
+    ops: &Ops,
+    input: &Ops::Output,
+) -> DataResult<SoundEvent> {
+    let map_res = ops.get_map(input);
+    let Some(map) = map_res.result() else {
+        return DataResult::error("SoundEvent must be a map");
+    };
+    let Some(id_in) = get_map_field(ops, map.as_ref(), "sound_id") else {
+        return DataResult::error("No key sound_id in MapLike");
+    };
+    let location_res = decode_identifier(ops, &id_in);
+    let Some(location) = location_res.result().cloned() else {
+        return DataResult::error(
+            location_res
+                .error_ref()
+                .map(|e| e.message().to_string())
+                .unwrap_or_else(|| "Invalid SoundEvent.sound_id".to_string()),
+        );
+    };
+    let fixed_range = get_map_field(ops, map.as_ref(), "range")
+        .and_then(|val| ops.get_number_value(&val).result().map(|n| n.float_value()));
+    DataResult::success(SoundEvent {
+        location,
+        fixed_range,
+    })
+}
+
+/// `SoundEvent.CODEC` = `RegistryFileCodec.create(SOUND_EVENT, DIRECT_CODEC)`.
+pub fn sound_event_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<HolderRef<SoundEvent>, Ops>>
+{
+    holder_ref_codec(sound_event_direct_codec::<Ops>())
+}
+
+/// Encode side of `SoundEvent.CODEC` for hand-written record codecs.
+pub(crate) fn encode_sound<Ops: DynamicOps>(v: &HolderRef<SoundEvent>, ops: &Ops) -> Ops::Output {
+    match v {
+        HolderRef::Reference(id) => encode_identifier(id, ops),
+        HolderRef::Direct(event) => encode_sound_event_direct(event, ops),
+    }
+}
+
+/// Decode side of `SoundEvent.CODEC` for hand-written record codecs.
+pub(crate) fn decode_sound<Ops: DynamicOps>(
+    ops: &Ops,
+    input: &Ops::Output,
+) -> DataResult<HolderRef<SoundEvent>> {
+    if let Some(id) = decode_identifier(ops, input).result() {
+        return DataResult::success(HolderRef::Reference(id.clone()));
+    }
+    decode_sound_event_direct(ops, input).map_owned(HolderRef::Direct)
 }

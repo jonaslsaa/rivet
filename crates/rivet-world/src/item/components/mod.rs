@@ -36,37 +36,41 @@ pub use consumable::{
     suspicious_stew_effects_codec, use_cooldown_codec, use_effects_codec, use_remainder_codec,
 };
 pub use core::{
-    CustomData, Filterable, HolderSetRef, TypedEntityData, custom_data_codec, filterable_codec,
-    holder_set_ref_codec, typed_entity_data_codec,
+    CustomData, Filterable, HolderRef, HolderSetRef, SoundEvent, TypedEntityData,
+    custom_data_codec, filterable_codec, holder_ref_codec, holder_set_ref_codec, sound_event_codec,
+    sound_event_direct_codec, typed_entity_data_codec,
 };
 pub use display::{
     CustomModelData, DyedItemColor, ItemLore, LEATHER_COLOR, LORE_MAX_LINES,
     MAP_ITEM_COLOR_DEFAULT, MapDecorationEntry, MapDecorations, MapItemColor, MapPostProcessing,
     TooltipDisplay, custom_model_data_codec, dyed_item_color_codec, item_lore_codec,
-    map_decoration_entry_codec, map_decorations_codec, map_item_color_codec,
-    map_post_processing_codec, tooltip_display_codec,
+    map_decoration_entry_codec, map_decorations_codec, map_item_color_codec, tooltip_display_codec,
 };
 pub use world_and_books::{
     AttributeModifierDisplay, AttributeModifierEntry, AttributeModifierSpec, AttributeOperation,
     BOOK_MAX_GENERATION, BOOK_PAGE_EDIT_LENGTH, BOOK_PAGE_LENGTH, BOOK_TITLE_LENGTH,
     BOOK_TITLE_MAX_LENGTH, BlockItemStateProperties, FIREWORKS_MAX_EXPLOSIONS, FireworkExplosion,
-    FireworkShape, Fireworks, InstrumentComponent, ItemAttributeModifiers, LodestoneTracker,
-    ProvidesTrimMaterial, SeededContainerLoot, SulfurCubeContent, WRITABLE_BOOK_MAX_PAGES,
-    WritableBookContent, WrittenBookContent, attribute_modifier_display_codec,
-    attribute_modifier_entry_codec, attribute_operation_codec, block_item_state_properties_codec,
-    firework_explosion_codec, firework_shape_codec, fireworks_codec, instrument_component_codec,
+    FireworkShape, Fireworks, Instrument, InstrumentComponent, ItemAttributeModifiers,
+    LodestoneTracker, MaterialAssetGroup, ProvidesTrimMaterial, SeededContainerLoot,
+    SulfurCubeContent, TrimMaterial, WRITABLE_BOOK_MAX_PAGES, WritableBookContent,
+    WrittenBookContent, attribute_modifier_display_codec, attribute_modifier_entry_codec,
+    attribute_operation_codec, block_item_state_properties_codec, firework_explosion_codec,
+    firework_shape_codec, fireworks_codec, instrument_component_codec, instrument_direct_codec,
     item_attribute_modifiers_codec, lodestone_tracker_codec, provides_trim_material_codec,
-    seeded_container_loot_codec, sulfur_cube_content_codec, writable_book_content_codec,
-    written_book_content_codec,
+    seeded_container_loot_codec, sulfur_cube_content_codec, trim_material_direct_codec,
+    writable_book_content_codec, written_book_content_codec,
 };
 
 use crate::item::codec_from_fns;
 use rivet_nbt::compound_tag::CompoundTag;
 use rivet_nbt::nbt_ops::NbtOps;
 use rivet_nbt::tag::Tag;
+use rivet_nbt::tag_parser::parse_compound_fully;
 use rivet_registry::Identifier;
+use rivet_serialization::float_format::java_float_compare;
 use rivet_serialization::{Codec, DataResult, DynamicOps};
 use rivet_util::mth;
+use std::cmp::Ordering;
 use std::sync::Arc;
 
 /// Helper to read a required map field from `DynamicOps::get_map`.
@@ -181,19 +185,35 @@ pub(crate) fn argb_blue(color: i32) -> i32 {
     color & 0xFF
 }
 
-/// Convert any `DynamicOps::Output` into a `CompoundTag` via `convert_to(&NbtOps::instance())`.
+/// Decode side of `CustomData.COMPOUND_TAG_CODEC` =
+/// `Codec.either(CompoundTag.CODEC, TagParser.FLATTENED_CODEC)`: a structured
+/// compound (converted via `NbtOps`) or, failing that, an SNBT string that
+/// parses to a compound.
 pub(crate) fn decode_compound_tag<Ops: DynamicOps>(
     ops: &Ops,
     input: &Ops::Output,
 ) -> DataResult<CompoundTag> {
     let tag = ops.convert_to(&NbtOps::instance(), input);
-    match tag {
-        Tag::Compound(c) => DataResult::success(c),
-        other => DataResult::error(format!("Not a compound tag: {other:?}")),
+    let left_err = match tag {
+        Tag::Compound(c) => return DataResult::success(c),
+        other => format!("Not a compound tag: {other:?}"),
+    };
+    match ops.get_string_value(input).result() {
+        Some(snbt) => match parse_compound_fully(snbt) {
+            Ok(c) => DataResult::success(c),
+            Err(e) => DataResult::error(format!(
+                "Failed to parse either. First: {left_err}; Second: {}",
+                e.message
+            )),
+        },
+        None => DataResult::error(format!(
+            "Failed to parse either. First: {left_err}; Second: Not a string"
+        )),
     }
 }
 
-/// Convert a `CompoundTag` into `Ops::Output` via `NbtOps::instance().convert_to(ops, ...)`.
+/// Encode side of `CustomData.COMPOUND_TAG_CODEC` (Paper's default, non-SNBT
+/// branch): convert the `CompoundTag` into `Ops::Output` via `NbtOps`.
 pub(crate) fn encode_compound_tag<Ops: DynamicOps>(tag: &CompoundTag, ops: &Ops) -> Ops::Output {
     NbtOps::instance().convert_to(ops, &Tag::Compound(tag.clone()))
 }
@@ -209,9 +229,31 @@ pub(crate) fn validate_int_range(value: i32, min: i32, max: i32, label: &str) ->
     }
 }
 
-/// Validate a float range `[min, max]` inclusive (rejecting NaN).
+/// `ExtraCodecs.NON_NEGATIVE_INT` (`[0, Integer.MAX_VALUE]`).
+pub(crate) fn validate_non_negative_int(value: i32, label: &str) -> DataResult<i32> {
+    if value < 0 {
+        DataResult::error(format!("{label} must be non-negative: {value}"))
+    } else {
+        DataResult::success(value)
+    }
+}
+
+/// `ExtraCodecs.POSITIVE_INT` (`[1, Integer.MAX_VALUE]`).
+pub(crate) fn validate_positive_int(value: i32, label: &str) -> DataResult<i32> {
+    if value < 1 {
+        DataResult::error(format!("{label} must be positive: {value}"))
+    } else {
+        DataResult::success(value)
+    }
+}
+
+/// `ExtraCodecs.floatRange(min, max)` / `Codec.floatRange(min, max)`: inclusive
+/// range check using Java `Float.compareTo` (IEEE total order), so `-0.0 < 0.0`
+/// and `NaN` sorts above every value.
 pub(crate) fn validate_float_range(value: f32, min: f32, max: f32, label: &str) -> DataResult<f32> {
-    if value.is_nan() || value < min || value > max {
+    if java_float_compare(value, min) == Ordering::Less
+        || java_float_compare(value, max) == Ordering::Greater
+    {
         DataResult::error(format!(
             "{label} must be within range [{min}; {max}]: {value}"
         ))
@@ -220,21 +262,36 @@ pub(crate) fn validate_float_range(value: f32, min: f32, max: f32, label: &str) 
     }
 }
 
-/// Validate a strictly positive float `(0.0, f32::MAX]`.
+/// `ExtraCodecs.POSITIVE_FLOAT`: `compareTo(0.0F) > 0 && compareTo(Float.MAX_VALUE) <= 0`.
 pub(crate) fn validate_positive_float(value: f32, label: &str) -> DataResult<f32> {
-    if value.is_nan() || value <= 0.0 {
+    if java_float_compare(value, 0.0) != Ordering::Greater
+        || java_float_compare(value, f32::MAX) == Ordering::Greater
+    {
         DataResult::error(format!("{label} must be positive: {value}"))
     } else {
         DataResult::success(value)
     }
 }
 
-/// Validate a non-negative float `[0.0, f32::MAX]`.
+/// `ExtraCodecs.NON_NEGATIVE_FLOAT`: `compareTo(0.0F) >= 0 && compareTo(Float.MAX_VALUE) <= 0`.
 pub(crate) fn validate_non_negative_float(value: f32, label: &str) -> DataResult<f32> {
-    if value.is_nan() || value < 0.0 {
+    if java_float_compare(value, 0.0) == Ordering::Less
+        || java_float_compare(value, f32::MAX) == Ordering::Greater
+    {
         DataResult::error(format!("{label} must be non-negative: {value}"))
     } else {
         DataResult::success(value)
+    }
+}
+
+/// Turn a validator `DataResult` into a `Result` for `?`-style composition.
+pub(crate) fn result_of<T: Clone>(r: DataResult<T>) -> Result<T, String> {
+    match r.result() {
+        Some(v) => Ok(v.clone()),
+        None => Err(r
+            .error_ref()
+            .map(|e| e.message().to_string())
+            .unwrap_or_default()),
     }
 }
 

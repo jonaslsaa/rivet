@@ -12,17 +12,24 @@
 
 use crate::enchantment::{EquipmentSlot, EquipmentSlotGroup};
 use crate::item::codec_from_fns;
-use crate::item::components::core::{Filterable, filterable_codec};
+use crate::item::components::core::{
+    Filterable, HolderRef, SoundEvent, decode_sound, encode_sound, filterable_codec,
+    holder_ref_codec,
+};
 use crate::item::components::{
-    decode_identifier, encode_identifier, get_map_field, validate_int_range, validate_string_len,
+    decode_identifier, encode_identifier, get_map_field, result_of, validate_int_range,
+    validate_positive_float, validate_string_len,
 };
 use crate::item::recursive_components::{ItemStackTemplate, item_stack_template_codec};
 use indexmap::IndexMap;
 use rivet_registry::Identifier;
 use rivet_registry::core::{GlobalPos, global_pos_codec};
-use rivet_serialization::{Codec, DataResult, DynamicOps};
+use rivet_registry::identifier::identifier_codec;
+use rivet_serialization::codec::unbounded_map;
+use rivet_serialization::{Codec, DataResult, DynamicOps, JsonOps, Pair};
 use rivet_text::component::Component;
 use rivet_text::component_serialization;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -266,6 +273,18 @@ pub struct WritableBookContent {
 }
 
 impl WritableBookContent {
+    /// The codec-level field validators (Paper's `Codec.validate` /
+    /// range codecs), which fail on encode as well as decode.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.pages.len() > WRITABLE_BOOK_MAX_PAGES {
+            return Err(format!(
+                "WritableBookContent has {} pages, max is {WRITABLE_BOOK_MAX_PAGES}",
+                self.pages.len()
+            ));
+        }
+        Ok(())
+    }
+
     pub fn empty() -> Self {
         Self { pages: Vec::new() }
     }
@@ -341,6 +360,9 @@ pub fn writable_book_content_codec<Ops: DynamicOps + 'static>()
     codec_from_fns(
         "writable_book_content",
         move |v: &WritableBookContent, ops: &Ops| {
+            if let Err(e) = v.validate() {
+                return DataResult::error(e);
+            }
             let mut entries = Vec::new();
             if !v.pages.is_empty() {
                 let mut list = Vec::with_capacity(v.pages.len());
@@ -407,6 +429,18 @@ pub struct WrittenBookContent {
 }
 
 impl WrittenBookContent {
+    /// The codec-level field validators (Paper's `Codec.validate` /
+    /// range codecs), which fail on encode as well as decode.
+    pub fn validate(&self) -> Result<(), String> {
+        result_of(validate_int_range(
+            self.generation,
+            0,
+            BOOK_MAX_GENERATION,
+            "generation",
+        ))?;
+        Ok(())
+    }
+
     pub fn empty() -> Self {
         Self {
             title: Filterable::pass_through(String::new()),
@@ -447,20 +481,24 @@ impl WrittenBookContent {
         })
     }
 
-    /// `WrittenBookContent.tryCraftCopy()` — returns `None` if `generation >= 2`,
-    /// otherwise a copy with `generation + 1`.
-    pub fn try_craft_copy(&self) -> Option<Self> {
-        if self.generation >= 2 {
-            None
-        } else {
-            Some(Self {
-                title: self.title.clone(),
-                author: self.author.clone(),
-                generation: self.generation + 1,
-                pages: self.pages.clone(),
-                resolved: self.resolved,
-            })
+    /// `WrittenBookContent.craftCopy()` — a copy with `generation + 1`. Java's
+    /// record constructor throws for a generation outside `0..=3`, so copying a
+    /// generation-3 book is an error here. (The "too tattered to copy" guard
+    /// lives in the book-cloning recipe, not in this component.)
+    pub fn craft_copy(&self) -> Result<Self, String> {
+        let generation = self.generation + 1;
+        if !(0..=BOOK_MAX_GENERATION).contains(&generation) {
+            return Err(format!(
+                "Generation was {generation}, but must be between 0 and {BOOK_MAX_GENERATION}"
+            ));
         }
+        Ok(Self {
+            title: self.title.clone(),
+            author: self.author.clone(),
+            generation,
+            pages: self.pages.clone(),
+            resolved: self.resolved,
+        })
     }
 
     /// `WrittenBookContent.markResolved()`.
@@ -491,6 +529,56 @@ impl WrittenBookContent {
     }
 }
 
+/// `ComponentSerialization.flatRestrictedCodec(maxFlatSize)`: decodes through
+/// `ComponentSerialization.CODEC`, then rejects a component whose compact JSON
+/// encoding (`GsonHelper.encodesLongerThan`) exceeds `max_flat_size` chars.
+/// Encoding is unrestricted.
+fn flat_restricted_component_codec<Ops: DynamicOps + 'static>(
+    max_flat_size: usize,
+) -> Arc<dyn Codec<Component, Ops>> {
+    let inner = component_serialization::codec::<Ops>();
+    let enc_inner = Arc::clone(&inner);
+    let dec_inner = inner;
+    let json_codec = component_serialization::codec::<JsonOps>();
+    codec_from_fns(
+        "flat_restricted_component",
+        move |v: &Component, ops: &Ops| enc_inner.encode_start(ops, v),
+        move |ops: &Ops, input: &Ops::Output| {
+            dec_inner.parse(ops, input).flat_map(|component| {
+                let too_large = json_codec
+                    .encode_start(&JsonOps::INSTANCE, &component)
+                    .result()
+                    .is_some_and(|json| json_encodes_longer_than(json, max_flat_size));
+                if too_large {
+                    DataResult::error(format!(
+                        "Component was too large: greater than max size {max_flat_size}"
+                    ))
+                } else {
+                    DataResult::success(component)
+                }
+            })
+        },
+    )
+}
+
+/// `GsonHelper.encodesLongerThan(JsonElement, int)`: whether Gson's compact
+/// `JsonWriter` output exceeds `limit` UTF-16 chars. `serde_json` compact output
+/// matches Gson's (non-HTML-safe) form except that Gson also escapes U+2028 and
+/// U+2029 as six-char `\uXXXX` sequences.
+fn json_encodes_longer_than(json: &serde_json::Value, limit: usize) -> bool {
+    let Ok(text) = serde_json::to_string(json) else {
+        return false;
+    };
+    let len: usize = text
+        .chars()
+        .map(|c| match c {
+            '\u{2028}' | '\u{2029}' => 6,
+            other => other.len_utf16(),
+        })
+        .sum();
+    len > limit
+}
+
 /// `WrittenBookContent.CODEC`.
 pub fn written_book_content_codec<Ops: DynamicOps + 'static>()
 -> Arc<dyn Codec<WrittenBookContent, Ops>> {
@@ -516,7 +604,7 @@ pub fn written_book_content_codec<Ops: DynamicOps + 'static>()
         },
     );
     let title_codec = filterable_codec(title_str_codec);
-    let page_codec = filterable_codec(component_serialization::codec::<Ops>());
+    let page_codec = filterable_codec(flat_restricted_component_codec::<Ops>(BOOK_PAGE_LENGTH));
     let enc_title = Arc::clone(&title_codec);
     let dec_title = title_codec;
     let enc_page = Arc::clone(&page_codec);
@@ -524,6 +612,9 @@ pub fn written_book_content_codec<Ops: DynamicOps + 'static>()
     codec_from_fns(
         "written_book_content",
         move |v: &WrittenBookContent, ops: &Ops| {
+            if let Err(e) = v.validate() {
+                return DataResult::error(e);
+            }
             let Some(title_val) = enc_title.encode_start(ops, &v.title).result().cloned() else {
                 return DataResult::error("Failed to encode WrittenBookContent.title");
             };
@@ -938,15 +1029,10 @@ pub fn fireworks_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Fireworks, 
                     let Some(n) = n_res.result() else {
                         return DataResult::error("Fireworks.flight_duration must be a number");
                     };
-                    let raw = n.int_value();
-                    // ExtraCodecs.UNSIGNED_BYTE accepts signed byte (-128..=127 -> unsigned 0..=255)
-                    // or unsigned integer 0..=255; reject > 255 or < -128.
-                    if !(-128..=255).contains(&raw) {
-                        return DataResult::error(format!(
-                            "Unsigned byte out of range for flight_duration: {raw}"
-                        ));
-                    }
-                    (raw as i8) as u8
+                    // `ExtraCodecs.UNSIGNED_BYTE` decodes through `Codec.BYTE`
+                    // (`Number.byteValue()`, which wraps and never fails) and then
+                    // `UnsignedBytes.toInt`.
+                    n.byte_value() as u8
                 } else {
                     0
                 };
@@ -1402,54 +1488,283 @@ pub fn sulfur_cube_content_codec<Ops: DynamicOps + 'static>()
     )
 }
 
+/// Port of `net.minecraft.world.item.Instrument` (the inline/direct form).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Instrument {
+    pub sound_event: HolderRef<SoundEvent>,
+    pub use_duration: f32,
+    pub range: f32,
+    pub description: Component,
+}
+
+impl Instrument {
+    /// The codec-level field validators (`ExtraCodecs.POSITIVE_FLOAT`), which
+    /// fail on encode as well as decode.
+    pub fn validate(&self) -> Result<(), String> {
+        result_of(validate_positive_float(self.use_duration, "use_duration"))?;
+        result_of(validate_positive_float(self.range, "range"))?;
+        Ok(())
+    }
+}
+
+/// `Instrument.DIRECT_CODEC`.
+pub fn instrument_direct_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Instrument, Ops>> {
+    let desc = component_serialization::codec::<Ops>();
+    let enc_desc = Arc::clone(&desc);
+    let dec_desc = desc;
+    codec_from_fns(
+        "instrument",
+        move |v: &Instrument, ops: &Ops| {
+            if let Err(e) = v.validate() {
+                return DataResult::error(e);
+            }
+            let desc_res = enc_desc.encode_start(ops, &v.description);
+            let Some(desc_val) = desc_res.result().cloned() else {
+                return DataResult::error("Failed to encode Instrument.description");
+            };
+            DataResult::success(ops.create_map(vec![
+                Pair::of(
+                    ops.create_string("sound_event".to_string()),
+                    encode_sound(&v.sound_event, ops),
+                ),
+                Pair::of(
+                    ops.create_string("use_duration".to_string()),
+                    ops.create_float(v.use_duration),
+                ),
+                Pair::of(
+                    ops.create_string("range".to_string()),
+                    ops.create_float(v.range),
+                ),
+                Pair::of(ops.create_string("description".to_string()), desc_val),
+            ]))
+        },
+        move |ops: &Ops, input: &Ops::Output| {
+            let map_res = ops.get_map(input);
+            let Some(map) = map_res.result() else {
+                return DataResult::error("Instrument must be a map");
+            };
+            let Some(sound_in) = get_map_field(ops, map.as_ref(), "sound_event") else {
+                return DataResult::error("No key sound_event in MapLike");
+            };
+            let Some(sound_event) = decode_sound(ops, &sound_in).result().cloned() else {
+                return DataResult::error("Invalid Instrument.sound_event");
+            };
+            let read_float = |key: &str| -> Result<f32, String> {
+                let val = get_map_field(ops, map.as_ref(), key)
+                    .ok_or_else(|| format!("No key {key} in MapLike"))?;
+                let f = ops
+                    .get_number_value(&val)
+                    .result()
+                    .map(|n| n.float_value())
+                    .ok_or_else(|| format!("Instrument.{key} must be a number"))?;
+                result_of(validate_positive_float(f, key))
+            };
+            let use_duration = match read_float("use_duration") {
+                Ok(f) => f,
+                Err(e) => return DataResult::error(e),
+            };
+            let range = match read_float("range") {
+                Ok(f) => f,
+                Err(e) => return DataResult::error(e),
+            };
+            let Some(desc_in) = get_map_field(ops, map.as_ref(), "description") else {
+                return DataResult::error("No key description in MapLike");
+            };
+            dec_desc
+                .parse(ops, &desc_in)
+                .map_owned(|description| Instrument {
+                    sound_event,
+                    use_duration,
+                    range,
+                    description,
+                })
+        },
+    )
+}
+
 /// Port of `net.minecraft.world.item.component.InstrumentComponent`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct InstrumentComponent {
-    pub instrument: Identifier,
+    pub instrument: HolderRef<Instrument>,
 }
 
 impl InstrumentComponent {
-    pub fn new(instrument: Identifier) -> Self {
+    pub fn new(instrument: HolderRef<Instrument>) -> Self {
         Self { instrument }
     }
 }
 
-/// `InstrumentComponent.CODEC` (registry-reference form).
+/// `InstrumentComponent.CODEC` = `Instrument.CODEC` (`RegistryFileCodec`) xmapped.
 pub fn instrument_component_codec<Ops: DynamicOps + 'static>()
 -> Arc<dyn Codec<InstrumentComponent, Ops>> {
+    let inner = holder_ref_codec(instrument_direct_codec::<Ops>());
+    let enc = Arc::clone(&inner);
+    let dec = inner;
     codec_from_fns(
         "instrument_component",
-        |v: &InstrumentComponent, ops: &Ops| {
-            DataResult::success(encode_identifier(&v.instrument, ops))
+        move |v: &InstrumentComponent, ops: &Ops| enc.encode_start(ops, &v.instrument),
+        move |ops: &Ops, input: &Ops::Output| {
+            dec.parse(ops, input).map_owned(InstrumentComponent::new)
         },
-        |ops: &Ops, input: &Ops::Output| {
-            decode_identifier(ops, input).map_owned(InstrumentComponent::new)
+    )
+}
+
+/// Port of `net.minecraft.world.item.equipment.trim.MaterialAssetGroup`.
+/// `base`/override values are `AssetInfo` suffixes (valid resource paths);
+/// override keys are `ResourceKey<EquipmentAsset>` identifiers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterialAssetGroup {
+    pub base: String,
+    pub overrides: HashMap<Identifier, String>,
+}
+
+/// Port of `net.minecraft.world.item.equipment.trim.TrimMaterial` (the
+/// inline/direct form).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrimMaterial {
+    pub assets: MaterialAssetGroup,
+    pub description: Component,
+}
+
+/// `MaterialAssetGroup.AssetInfo.CODEC` = `ExtraCodecs.RESOURCE_PATH_CODEC`.
+fn asset_info_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<String, Ops>> {
+    fn check(s: &str) -> DataResult<String> {
+        if Identifier::is_valid_path(s) {
+            DataResult::success(s.to_string())
+        } else {
+            DataResult::error(format!(
+                "Invalid string to use as a resource path element: {s}"
+            ))
+        }
+    }
+    codec_from_fns(
+        "asset_info",
+        |v: &String, ops: &Ops| check(v).map_owned(|s| ops.create_string(s)),
+        |ops: &Ops, input: &Ops::Output| ops.get_string_value(input).flat_map(|s| check(&s)),
+    )
+}
+
+/// `TrimMaterial.DIRECT_CODEC`: `MaterialAssetGroup.MAP_CODEC` (`asset_name`,
+/// `override_armor_assets` defaulting to `{}`) plus `description`.
+pub fn trim_material_direct_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<TrimMaterial, Ops>>
+{
+    let asset = asset_info_codec::<Ops>();
+    let overrides = unbounded_map(identifier_codec::<Ops>(), asset_info_codec::<Ops>());
+    let desc = component_serialization::codec::<Ops>();
+    let (enc_asset, dec_asset) = (Arc::clone(&asset), asset);
+    let (enc_over, dec_over) = (Arc::clone(&overrides), overrides);
+    let (enc_desc, dec_desc) = (Arc::clone(&desc), desc);
+    codec_from_fns(
+        "trim_material",
+        move |v: &TrimMaterial, ops: &Ops| {
+            let base_res = enc_asset.encode_start(ops, &v.assets.base);
+            let Some(base_val) = base_res.result().cloned() else {
+                return DataResult::error(
+                    base_res
+                        .error_ref()
+                        .map(|e| e.message().to_string())
+                        .unwrap_or_default(),
+                );
+            };
+            let mut entries = vec![Pair::of(
+                ops.create_string("asset_name".to_string()),
+                base_val,
+            )];
+            if !v.assets.overrides.is_empty() {
+                let over_res = enc_over.encode_start(ops, &v.assets.overrides);
+                let Some(over_val) = over_res.result().cloned() else {
+                    return DataResult::error(
+                        over_res
+                            .error_ref()
+                            .map(|e| e.message().to_string())
+                            .unwrap_or_default(),
+                    );
+                };
+                entries.push(Pair::of(
+                    ops.create_string("override_armor_assets".to_string()),
+                    over_val,
+                ));
+            }
+            let Some(desc_val) = enc_desc.encode_start(ops, &v.description).result().cloned()
+            else {
+                return DataResult::error("Failed to encode TrimMaterial.description");
+            };
+            entries.push(Pair::of(
+                ops.create_string("description".to_string()),
+                desc_val,
+            ));
+            DataResult::success(ops.create_map(entries))
+        },
+        move |ops: &Ops, input: &Ops::Output| {
+            let map_res = ops.get_map(input);
+            let Some(map) = map_res.result() else {
+                return DataResult::error("TrimMaterial must be a map");
+            };
+            let Some(base_in) = get_map_field(ops, map.as_ref(), "asset_name") else {
+                return DataResult::error("No key asset_name in MapLike");
+            };
+            let base_res = dec_asset.parse(ops, &base_in);
+            let Some(base) = base_res.result().cloned() else {
+                return DataResult::error(
+                    base_res
+                        .error_ref()
+                        .map(|e| e.message().to_string())
+                        .unwrap_or_default(),
+                );
+            };
+            let overrides = match get_map_field(ops, map.as_ref(), "override_armor_assets") {
+                Some(over_in) => {
+                    let over_res = dec_over.parse(ops, &over_in);
+                    match over_res.result().cloned() {
+                        Some(o) => o,
+                        None => {
+                            return DataResult::error(
+                                over_res
+                                    .error_ref()
+                                    .map(|e| e.message().to_string())
+                                    .unwrap_or_default(),
+                            );
+                        }
+                    }
+                }
+                None => HashMap::new(),
+            };
+            let Some(desc_in) = get_map_field(ops, map.as_ref(), "description") else {
+                return DataResult::error("No key description in MapLike");
+            };
+            dec_desc
+                .parse(ops, &desc_in)
+                .map_owned(|description| TrimMaterial {
+                    assets: MaterialAssetGroup { base, overrides },
+                    description,
+                })
         },
     )
 }
 
 /// Port of `net.minecraft.world.item.component.ProvidesTrimMaterial`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ProvidesTrimMaterial {
-    pub material: Identifier,
+    pub material: HolderRef<TrimMaterial>,
 }
 
 impl ProvidesTrimMaterial {
-    pub fn new(material: Identifier) -> Self {
+    pub fn new(material: HolderRef<TrimMaterial>) -> Self {
         Self { material }
     }
 }
 
-/// `ProvidesTrimMaterial.CODEC` (registry-reference form).
+/// `ProvidesTrimMaterial.CODEC` = `TrimMaterial.CODEC` (`RegistryFileCodec`) xmapped.
 pub fn provides_trim_material_codec<Ops: DynamicOps + 'static>()
 -> Arc<dyn Codec<ProvidesTrimMaterial, Ops>> {
+    let inner = holder_ref_codec(trim_material_direct_codec::<Ops>());
+    let enc = Arc::clone(&inner);
+    let dec = inner;
     codec_from_fns(
         "provides_trim_material",
-        |v: &ProvidesTrimMaterial, ops: &Ops| {
-            DataResult::success(encode_identifier(&v.material, ops))
-        },
-        |ops: &Ops, input: &Ops::Output| {
-            decode_identifier(ops, input).map_owned(ProvidesTrimMaterial::new)
+        move |v: &ProvidesTrimMaterial, ops: &Ops| enc.encode_start(ops, &v.material),
+        move |ops: &Ops, input: &Ops::Output| {
+            dec.parse(ops, input).map_owned(ProvidesTrimMaterial::new)
         },
     )
 }

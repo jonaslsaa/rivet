@@ -25,6 +25,10 @@ fn id(path: &str) -> Identifier {
     Identifier::with_default_namespace(path)
 }
 
+fn sound(path: &str) -> HolderRef<SoundEvent> {
+    HolderRef::Reference(id(path))
+}
+
 fn round_trip_json<T: Clone + PartialEq + std::fmt::Debug>(
     codec: &Arc<dyn Codec<T, JsonOps>>,
     value: &T,
@@ -171,6 +175,21 @@ fn holder_set_ref_tag_single_and_list_forms() {
         .cloned()
         .expect("single id should decode");
     assert_eq!(single, HolderSetRef::single(id("stone")));
+    // compactListCodec: a one-element direct set encodes as the bare element.
+    assert_eq!(round_trip_json(&jc, &single), json!("minecraft:stone"));
+    assert_eq!(
+        round_trip_nbt(&nc, &single),
+        Tag::String(rivet_nbt::string_tag::StringTag::value_of(
+            "minecraft:stone".to_string()
+        ))
+    );
+    // A one-element list still decodes to the same value.
+    let single_list = jc
+        .parse(&JsonOps::INSTANCE, &json!(["minecraft:stone"]))
+        .result()
+        .cloned()
+        .expect("one-element list should decode");
+    assert_eq!(single_list, single);
 
     let list = HolderSetRef::direct(vec![id("stone"), id("dirt")]);
     round_trip_json(&jc, &list);
@@ -333,8 +352,9 @@ fn map_components_round_trip_and_order() {
 
     assert_eq!(MapPostProcessing::by_id(99), MapPostProcessing::Lock);
     assert_eq!(MapPostProcessing::by_id(1), MapPostProcessing::Scale);
-    round_trip_json(&map_post_processing_codec(), &MapPostProcessing::Scale);
-    round_trip_nbt(&map_post_processing_codec(), &MapPostProcessing::Lock);
+    // MapPostProcessing is network-only in Paper (ID_MAP + STREAM_CODEC, no Codec).
+    assert_eq!(MapPostProcessing::Lock.id(), 0);
+    assert_eq!(MapPostProcessing::Scale.id(), 1);
 
     let decs = MapDecorations::empty()
         .with_decoration(
@@ -439,9 +459,9 @@ fn blocks_attacks_damage_math_and_round_trip() {
             .unwrap(),
         ],
         item_damage: f,
-        bypassed_by: Some(id("bypasses_shield")),
-        block_sound: Some(id("item.shield.block")),
-        disabled_sound: Some(id("item.shield.break")),
+        bypassed_by: Some(HolderSetRef::tag(id("bypasses_shield"))),
+        block_sound: Some(sound("item.shield.block")),
+        disabled_sound: Some(sound("item.shield.break")),
     };
     assert_eq!(custom.block_delay_ticks(), 5);
     round_trip_json(&blocks_attacks_codec(), &custom);
@@ -453,7 +473,7 @@ fn piercing_kinetic_tool_enchantable_and_repairable() {
     let pw = PiercingWeapon {
         deals_knockback: false,
         dismounts: true,
-        sound: Some(id("item.trident.throw")),
+        sound: Some(sound("item.trident.throw")),
         hit_sound: None,
     };
     round_trip_json(&piercing_weapon_codec(), &pw);
@@ -472,7 +492,7 @@ fn piercing_kinetic_tool_enchantable_and_repairable() {
         damage_conditions: Some(cond),
         forward_movement: 0.5,
         damage_multiplier: 1.5,
-        sound: Some(id("item.mace.smash_air")),
+        sound: Some(sound("item.mace.smash_air")),
         hit_sound: None,
     };
     round_trip_json(&kinetic_weapon_codec(), &kw);
@@ -527,7 +547,7 @@ fn consumable_timing_effects_and_round_trips() {
     let cons = Consumable {
         consume_seconds: DEFAULT_CONSUME_SECONDS,
         animation: ItemUseAnimation::Drink,
-        sound: id("entity.generic.drink"),
+        sound: sound("entity.generic.drink"),
         has_consume_particles: false,
         on_consume_effects: vec![
             ConsumeEffect::ApplyEffects(
@@ -539,7 +559,7 @@ fn consumable_timing_effects_and_round_trips() {
             ConsumeEffect::ClearAllEffects(ClearAllStatusEffectsConsumeEffect),
             ConsumeEffect::TeleportRandomly(TeleportRandomlyConsumeEffect::try_new(8.0).unwrap()),
             ConsumeEffect::PlaySound(PlaySoundConsumeEffect {
-                sound: id("entity.enderman.teleport"),
+                sound: sound("entity.enderman.teleport"),
             }),
         ],
     };
@@ -671,14 +691,15 @@ fn books_limits_generation_and_round_trip() {
         true,
     )
     .unwrap();
-    let copy1 = written.try_craft_copy().expect("gen 0 -> 1");
+    let copy1 = written.craft_copy().expect("gen 0 -> 1");
     assert_eq!(copy1.generation, 1);
-    let copy2 = copy1.try_craft_copy().expect("gen 1 -> 2");
+    let copy2 = copy1.craft_copy().expect("gen 1 -> 2");
     assert_eq!(copy2.generation, 2);
-    assert!(
-        copy2.try_craft_copy().is_none(),
-        "gen >= 2 cannot be copied"
-    );
+    // Paper's `craftCopy()` has no generation guard: gen 2 copies to gen 3.
+    let copy3 = copy2.craft_copy().expect("gen 2 -> 3");
+    assert_eq!(copy3.generation, 3);
+    // Generation 4 is rejected by the record constructor (IllegalArgumentException).
+    assert!(copy3.craft_copy().is_err(), "gen 3 -> 4 is out of range");
 
     round_trip_json(&written_book_content_codec(), &written);
     round_trip_nbt(&written_book_content_codec(), &written);
@@ -715,12 +736,16 @@ fn fireworks_unsigned_byte_and_limits() {
     round_trip_json(&fireworks_codec(), &fw);
     round_trip_nbt(&fireworks_codec(), &fw);
 
-    // Controlled negative: flight_duration > 255 rejected.
-    assert!(
-        fireworks_codec::<JsonOps>()
-            .parse(&JsonOps::INSTANCE, &json!({"flight_duration": 256}))
-            .is_error()
-    );
+    // UNSIGNED_BYTE decodes via `Number.byteValue()` (wrapping) then
+    // `UnsignedBytes.toInt`: 256 -> 0, 300 -> 44, -1 -> 255.
+    for (raw, expected) in [(256, 0_u8), (300, 44), (-1, 255)] {
+        let decoded = fireworks_codec::<JsonOps>()
+            .parse(&JsonOps::INSTANCE, &json!({ "flight_duration": raw }))
+            .result()
+            .cloned()
+            .expect("flight_duration decodes through Codec.BYTE");
+        assert_eq!(decoded.flight_duration, expected, "flight_duration {raw}");
+    }
 }
 
 #[test]
@@ -774,11 +799,359 @@ fn sulfur_cube_instrument_and_trim_material() {
     round_trip_json(&sulfur_cube_content_codec(), &sc);
     round_trip_nbt(&sulfur_cube_content_codec(), &sc);
 
-    let inst = InstrumentComponent::new(id("ponder_goat_horn"));
+    let inst = InstrumentComponent::new(HolderRef::Reference(id("ponder_goat_horn")));
     round_trip_json(&instrument_component_codec(), &inst);
     round_trip_nbt(&instrument_component_codec(), &inst);
 
-    let trim = ProvidesTrimMaterial::new(id("gold"));
+    let trim = ProvidesTrimMaterial::new(HolderRef::Reference(id("gold")));
     round_trip_json(&provides_trim_material_codec(), &trim);
     round_trip_nbt(&provides_trim_material_codec(), &trim);
+}
+
+// ---------------------------------------------------------------------------
+// Paper-fidelity regressions (PR #774 review)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn item_use_animation_custom_arm_transform_matches_paper() {
+    // ItemUseAnimation.java: EAT(1, "eat", true), DRINK(2, "drink", true), SPEAR(11, "spear", true).
+    for anim in [
+        ItemUseAnimation::Eat,
+        ItemUseAnimation::Drink,
+        ItemUseAnimation::Spear,
+    ] {
+        assert!(anim.has_custom_arm_transform(), "{anim:?}");
+    }
+    for anim in [
+        ItemUseAnimation::None,
+        ItemUseAnimation::Block,
+        ItemUseAnimation::Bow,
+        ItemUseAnimation::Trident,
+        ItemUseAnimation::Crossbow,
+        ItemUseAnimation::Spyglass,
+        ItemUseAnimation::TootHorn,
+        ItemUseAnimation::Brush,
+        ItemUseAnimation::Bundle,
+    ] {
+        assert!(!anim.has_custom_arm_transform(), "{anim:?}");
+    }
+}
+
+#[test]
+fn blocks_attacks_block_delay_ticks_rounds_like_math_round() {
+    // Math.round(0.24F * 20.0F) = Math.round(4.8F) = 5 (truncation would give 4).
+    let ba = BlocksAttacks {
+        block_delay_seconds: 0.24,
+        ..BlocksAttacks::default()
+    };
+    assert_eq!(ba.block_delay_ticks(), 5);
+    // Math.round(0.21F * 20.0F) = Math.round(4.2F) = 4.
+    let ba = BlocksAttacks {
+        block_delay_seconds: 0.21,
+        ..BlocksAttacks::default()
+    };
+    assert_eq!(ba.block_delay_ticks(), 4);
+}
+
+#[test]
+fn blocks_attacks_bypassed_by_is_a_homogeneous_holder_set() {
+    let jc = blocks_attacks_codec::<JsonOps>();
+    for (input, expected) in [
+        (
+            json!("#minecraft:bypasses_shield"),
+            HolderSetRef::tag(id("bypasses_shield")),
+        ),
+        (json!("minecraft:arrow"), HolderSetRef::single(id("arrow"))),
+        (
+            json!(["minecraft:arrow"]),
+            HolderSetRef::single(id("arrow")),
+        ),
+        (
+            json!(["minecraft:arrow", "minecraft:trident"]),
+            HolderSetRef::direct(vec![id("arrow"), id("trident")]),
+        ),
+    ] {
+        let decoded = jc
+            .parse(&JsonOps::INSTANCE, &json!({ "bypassed_by": input }))
+            .result()
+            .cloned()
+            .expect("bypassed_by decodes as a holder set");
+        assert_eq!(decoded.bypassed_by, Some(expected));
+    }
+    let single = BlocksAttacks {
+        bypassed_by: Some(HolderSetRef::single(id("arrow"))),
+        ..BlocksAttacks::default()
+    };
+    assert_eq!(
+        round_trip_json(&jc, &single),
+        json!({ "bypassed_by": "minecraft:arrow" })
+    );
+}
+
+#[test]
+fn custom_data_and_typed_entity_data_accept_snbt_strings() {
+    let decoded = custom_data_codec::<JsonOps>()
+        .parse(&JsonOps::INSTANCE, &json!("{owner:'steve',level:3}"))
+        .result()
+        .cloned()
+        .expect("CustomData decodes TagParser.FLATTENED_CODEC SNBT");
+    assert_eq!(
+        decoded.tag().get_string("owner").map(String::as_str),
+        Some("steve")
+    );
+    assert_eq!(decoded.tag().get_int("level"), Some(3));
+    // Encoding uses the structured compound branch.
+    assert_eq!(
+        custom_data_codec::<JsonOps>()
+            .encode_start(&JsonOps::INSTANCE, &decoded)
+            .result()
+            .cloned()
+            .unwrap(),
+        json!({"owner": "steve", "level": 3})
+    );
+    // An SNBT string that is not a compound is rejected.
+    assert!(
+        custom_data_codec::<JsonOps>()
+            .parse(&JsonOps::INSTANCE, &json!("[1,2,3]"))
+            .is_error()
+    );
+
+    let id_codec = crate::item::codec_from_fns::<Identifier, NbtOps, _, _>(
+        "id",
+        |v, ops| rivet_serialization::DataResult::success(ops.create_string(v.to_string())),
+        crate::item::components::decode_identifier,
+    );
+    let snbt = Tag::String(rivet_nbt::string_tag::StringTag::value_of(
+        "{id:'minecraft:pig',Fuse:30}".to_string(),
+    ));
+    let ted = typed_entity_data_codec(id_codec)
+        .parse(&NbtOps::instance(), &snbt)
+        .result()
+        .cloned()
+        .expect("TypedEntityData decodes an SNBT string");
+    assert_eq!(ted.id(), &id("pig"));
+    assert!(!ted.contains("id"));
+    assert_eq!(ted.tag_without_id().get_int("Fuse"), Some(30));
+}
+
+#[test]
+fn sound_holders_accept_inline_sound_events() {
+    let decoded = consumable_codec::<JsonOps>()
+        .parse(
+            &JsonOps::INSTANCE,
+            &json!({"sound": {"sound_id": "minecraft:custom.slurp", "range": 8.0}}),
+        )
+        .result()
+        .cloned()
+        .expect("inline SoundEvent decodes");
+    assert_eq!(
+        decoded.sound,
+        HolderRef::Direct(SoundEvent::fixed_range(id("custom.slurp"), 8.0))
+    );
+    round_trip_json(&consumable_codec(), &decoded);
+    round_trip_nbt(&consumable_codec(), &decoded);
+
+    // `range` is a lenientOptionalFieldOf: an undecodable value is dropped.
+    let lenient = sound_event_codec::<JsonOps>()
+        .parse(
+            &JsonOps::INSTANCE,
+            &json!({"sound_id": "minecraft:custom.slurp", "range": "far"}),
+        )
+        .result()
+        .cloned()
+        .expect("lenient range");
+    assert_eq!(
+        lenient,
+        HolderRef::Direct(SoundEvent::variable_range(id("custom.slurp")))
+    );
+
+    let pw = PiercingWeapon {
+        sound: Some(HolderRef::Direct(SoundEvent::variable_range(id("x.y")))),
+        ..PiercingWeapon::default()
+    };
+    assert_eq!(
+        round_trip_json(&piercing_weapon_codec(), &pw),
+        json!({"sound": {"sound_id": "minecraft:x.y"}})
+    );
+}
+
+#[test]
+fn instrument_and_trim_material_accept_inline_definitions() {
+    let inst = InstrumentComponent::new(HolderRef::Direct(Instrument {
+        sound_event: sound("item.goat_horn.sound.0"),
+        use_duration: 7.0,
+        range: 256.0,
+        description: Component::literal("Ponder"),
+    }));
+    let encoded = round_trip_json(&instrument_component_codec(), &inst);
+    assert_eq!(
+        encoded,
+        json!({
+            "sound_event": "minecraft:item.goat_horn.sound.0",
+            "use_duration": 7.0,
+            "range": 256.0,
+            "description": "Ponder"
+        })
+    );
+    round_trip_nbt(&instrument_component_codec(), &inst);
+    assert!(
+        instrument_component_codec::<JsonOps>()
+            .parse(
+                &JsonOps::INSTANCE,
+                &json!({
+                    "sound_event": "minecraft:a",
+                    "use_duration": 0.0,
+                    "range": 1.0,
+                    "description": "x"
+                })
+            )
+            .is_error()
+    );
+
+    let mut overrides = std::collections::HashMap::new();
+    overrides.insert(id("iron"), "iron_darker".to_string());
+    let trim = ProvidesTrimMaterial::new(HolderRef::Direct(TrimMaterial {
+        assets: MaterialAssetGroup {
+            base: "iron".to_string(),
+            overrides,
+        },
+        description: Component::literal("Iron"),
+    }));
+    let encoded = round_trip_json(&provides_trim_material_codec(), &trim);
+    assert_eq!(
+        encoded,
+        json!({
+            "asset_name": "iron",
+            "override_armor_assets": {"minecraft:iron": "iron_darker"},
+            "description": "Iron"
+        })
+    );
+    round_trip_nbt(&provides_trim_material_codec(), &trim);
+    // RESOURCE_PATH_CODEC rejects an invalid path element.
+    assert!(
+        provides_trim_material_codec::<JsonOps>()
+            .parse(
+                &JsonOps::INSTANCE,
+                &json!({"asset_name": "Bad Name", "description": "x"})
+            )
+            .is_error()
+    );
+}
+
+#[test]
+fn apply_effects_uses_mob_effect_instance_codec_wire_shape() {
+    let speed = MobEffectInstance::full(MobEffectId::Speed, 200, 1, true, true, true, None);
+    let effect = ConsumeEffect::ApplyEffects(
+        ApplyStatusEffectsConsumeEffect::try_new(vec![speed], 1.0).unwrap(),
+    );
+    let encoded = round_trip_json(&consume_effect_codec(), &effect);
+    let wire = serde_json::to_string(&encoded).unwrap();
+    assert_eq!(
+        wire,
+        r#"{"type":"minecraft:apply_effects","effects":[{"id":"minecraft:speed","amplifier":1,"duration":200,"ambient":true,"show_icon":true}]}"#
+    );
+
+    // Hidden effects round-trip through the recursive Details map.
+    let hidden = MobEffectInstance::full(MobEffectId::Speed, 40, 0, false, false, false, None);
+    let outer = MobEffectInstance::full(
+        MobEffectId::Speed,
+        100,
+        2,
+        false,
+        true,
+        true,
+        Some(Box::new(hidden)),
+    );
+    let jc = crate::effect::mob_effect_instance_codec::<JsonOps>();
+    let encoded = round_trip_json(&jc, &outer);
+    assert_eq!(
+        encoded["hidden_effect"],
+        json!({"duration": 40, "show_particles": false, "show_icon": false})
+    );
+    let decoded = jc
+        .parse(&JsonOps::INSTANCE, &encoded)
+        .result()
+        .cloned()
+        .unwrap();
+    let decoded_hidden = decoded.hidden_effect().expect("hidden effect decoded");
+    assert_eq!(decoded_hidden.duration(), 40);
+    assert!(!decoded_hidden.is_visible());
+    round_trip_nbt(&crate::effect::mob_effect_instance_codec(), &outer);
+}
+
+#[test]
+fn written_book_pages_are_flat_size_restricted() {
+    let codec = written_book_content_codec::<JsonOps>();
+    // A literal page encodes as a bare JSON string: 32765 chars + 2 quotes = 32767.
+    let at_limit = json!({"title": "t", "author": "a", "pages": ["a".repeat(32765)]});
+    assert!(
+        codec
+            .parse(&JsonOps::INSTANCE, &at_limit)
+            .result()
+            .is_some()
+    );
+    let over_limit = json!({"title": "t", "author": "a", "pages": ["a".repeat(32766)]});
+    assert!(codec.parse(&JsonOps::INSTANCE, &over_limit).is_error());
+    // The filtered variant is restricted too.
+    let filtered_over = json!({
+        "title": "t",
+        "author": "a",
+        "pages": [{"raw": "ok", "filtered": "a".repeat(32766)}]
+    });
+    assert!(codec.parse(&JsonOps::INSTANCE, &filtered_over).is_error());
+}
+
+#[test]
+fn float_validators_follow_java_compare_to() {
+    // compareTo(-0.0F, 0.0F) < 0: -0.0 is below a 0.0 lower bound.
+    assert!(
+        AttackRange::try_new(-0.0, 3.0, 0.0, 5.0, 0.3, 1.0).is_err(),
+        "floatRange rejects -0.0"
+    );
+    assert!(
+        Weapon::try_new(1, -0.0).is_err(),
+        "NON_NEGATIVE_FLOAT rejects -0.0"
+    );
+    // +Infinity is above Float.MAX_VALUE.
+    assert!(Weapon::try_new(1, f32::INFINITY).is_err());
+    assert!(UseCooldown::try_new(f32::INFINITY, None).is_err());
+    assert!(TeleportRandomlyConsumeEffect::try_new(f32::INFINITY).is_err());
+    // NaN sorts above every value.
+    assert!(UseEffects::try_new(true, true, f32::NAN).is_err());
+    assert!(Weapon::try_new(1, f32::MAX).is_ok());
+}
+
+#[test]
+fn bounded_fields_fail_on_encode() {
+    let weapon = Weapon::with_damage(-1);
+    assert!(
+        weapon_codec::<JsonOps>()
+            .encode_start(&JsonOps::INSTANCE, &weapon)
+            .is_error()
+    );
+    let book = WrittenBookContent {
+        generation: 4,
+        ..WrittenBookContent::empty()
+    };
+    assert!(
+        written_book_content_codec::<JsonOps>()
+            .encode_start(&JsonOps::INSTANCE, &book)
+            .is_error()
+    );
+    let tool = Tool::new(vec![], 1.0, -1, true);
+    assert!(
+        tool_codec::<NbtOps>()
+            .encode_start(&NbtOps::instance(), &tool)
+            .is_error()
+    );
+    let food = FoodProperties {
+        nutrition: -1,
+        saturation: 0.0,
+        can_always_eat: false,
+    };
+    assert!(
+        food_properties_codec::<JsonOps>()
+            .encode_start(&JsonOps::INSTANCE, &food)
+            .is_error()
+    );
 }

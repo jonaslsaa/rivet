@@ -608,19 +608,6 @@ impl MapPostProcessing {
     }
 }
 
-/// Codec for `MapPostProcessing` by integer id.
-pub fn map_post_processing_codec<Ops: DynamicOps + 'static>()
--> Arc<dyn Codec<MapPostProcessing, Ops>> {
-    codec_from_fns(
-        "map_post_processing",
-        |v: &MapPostProcessing, ops: &Ops| DataResult::success(ops.create_int(v.id())),
-        |ops: &Ops, input: &Ops::Output| {
-            ops.get_number_value(input)
-                .map_owned(|n| MapPostProcessing::by_id(n.int_value()))
-        },
-    )
-}
-
 // ---------------------------------------------------------------------------
 // MapDecorations
 // ---------------------------------------------------------------------------

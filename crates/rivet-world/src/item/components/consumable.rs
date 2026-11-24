@@ -10,12 +10,15 @@
 //! - `UseRemainder` (`net.minecraft.world.item.component.UseRemainder`)
 //! - `OminousBottleAmplifier` (`net.minecraft.world.item.component.OminousBottleAmplifier`)
 
-use crate::effect::MobEffectInstance;
+use crate::effect::{MobEffectInstance, mob_effect_instance_codec};
 use crate::item::codec_from_fns;
-use crate::item::components::core::{HolderSetRef, holder_set_ref_codec};
+use crate::item::components::core::{
+    HolderRef, HolderSetRef, SoundEvent, decode_sound, encode_sound, holder_set_ref_codec,
+};
 use crate::item::components::{
-    decode_compound_tag, decode_identifier, encode_compound_tag, encode_identifier, get_map_field,
-    validate_float_range, validate_int_range, validate_non_negative_float, validate_positive_float,
+    decode_identifier, encode_identifier, get_map_field, result_of, validate_float_range,
+    validate_int_range, validate_non_negative_float, validate_non_negative_int,
+    validate_positive_float,
 };
 use crate::item::recursive_components::{ItemStackTemplate, item_stack_template_codec};
 use rivet_registry::Identifier;
@@ -35,17 +38,21 @@ pub struct FoodProperties {
 }
 
 impl FoodProperties {
+    /// The codec-level field validators (Paper's `Codec.validate` /
+    /// range codecs), which fail on encode as well as decode.
+    pub fn validate(&self) -> Result<(), String> {
+        result_of(validate_non_negative_int(self.nutrition, "nutrition"))?;
+        Ok(())
+    }
+
     pub fn try_new(nutrition: i32, saturation: f32, can_always_eat: bool) -> Result<Self, String> {
-        if nutrition < 0 {
-            return Err(format!(
-                "FoodProperties.nutrition must be non-negative: {nutrition}"
-            ));
-        }
-        Ok(Self {
+        let value = Self {
             nutrition,
             saturation,
             can_always_eat,
-        })
+        };
+        value.validate()?;
+        Ok(value)
     }
 }
 
@@ -54,6 +61,9 @@ pub fn food_properties_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<FoodP
     codec_from_fns(
         "food_properties",
         |v: &FoodProperties, ops: &Ops| {
+            if let Err(e) = v.validate() {
+                return DataResult::error(e);
+            }
             let mut entries = vec![
                 rivet_serialization::Pair::of(
                     ops.create_string("nutrition".to_string()),
@@ -200,7 +210,7 @@ impl ItemUseAnimation {
 
     /// `ItemUseAnimation.hasCustomArmTransform()`.
     pub const fn has_custom_arm_transform(self) -> bool {
-        matches!(self, Self::Spear)
+        matches!(self, Self::Eat | Self::Drink | Self::Spear)
     }
 }
 
@@ -234,14 +244,25 @@ pub struct ApplyStatusEffectsConsumeEffect {
 }
 
 impl ApplyStatusEffectsConsumeEffect {
+    /// The codec-level field validators (Paper's `Codec.validate` /
+    /// range codecs), which fail on encode as well as decode.
+    pub fn validate(&self) -> Result<(), String> {
+        result_of(validate_float_range(
+            self.probability,
+            0.0,
+            1.0,
+            "probability",
+        ))?;
+        Ok(())
+    }
+
     pub fn try_new(effects: Vec<MobEffectInstance>, probability: f32) -> Result<Self, String> {
-        if let Some(err) = validate_float_range(probability, 0.0, 1.0, "probability").error_ref() {
-            return Err(err.message().to_string());
-        }
-        Ok(Self {
+        let value = Self {
             effects,
             probability,
-        })
+        };
+        value.validate()?;
+        Ok(value)
     }
 
     pub fn always(effects: Vec<MobEffectInstance>) -> Self {
@@ -269,13 +290,19 @@ pub struct TeleportRandomlyConsumeEffect {
 }
 
 impl TeleportRandomlyConsumeEffect {
+    /// The codec-level field validators (Paper's `Codec.validate` /
+    /// range codecs), which fail on encode as well as decode.
+    pub fn validate(&self) -> Result<(), String> {
+        result_of(validate_positive_float(self.diameter, "diameter"))?;
+        Ok(())
+    }
+
     pub const DEFAULT_DIAMETER: f32 = 16.0;
 
     pub fn try_new(diameter: f32) -> Result<Self, String> {
-        if let Some(err) = validate_positive_float(diameter, "diameter").error_ref() {
-            return Err(err.message().to_string());
-        }
-        Ok(Self { diameter })
+        let value = Self { diameter };
+        value.validate()?;
+        Ok(value)
     }
 }
 
@@ -288,9 +315,9 @@ impl Default for TeleportRandomlyConsumeEffect {
 }
 
 /// Port of `net.minecraft.world.item.consume_effects.PlaySoundConsumeEffect`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PlaySoundConsumeEffect {
-    pub sound: Identifier,
+    pub sound: HolderRef<SoundEvent>,
 }
 
 /// Port of `net.minecraft.world.item.consume_effects.ConsumeEffect` dispatched
@@ -306,6 +333,16 @@ pub enum ConsumeEffect {
 }
 
 impl ConsumeEffect {
+    /// The codec-level field validators (Paper's `Codec.validate` /
+    /// range codecs), which fail on encode as well as decode.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::ApplyEffects(e) => e.validate(),
+            Self::TeleportRandomly(e) => e.validate(),
+            Self::RemoveEffects(_) | Self::ClearAllEffects(_) | Self::PlaySound(_) => Ok(()),
+        }
+    }
+
     pub fn type_identifier(&self) -> Identifier {
         let path = match self {
             Self::ApplyEffects(_) => "apply_effects",
@@ -323,20 +360,30 @@ pub fn consume_effect_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Consum
     let hs = holder_set_ref_codec::<Ops>();
     let enc_hs = Arc::clone(&hs);
     let dec_hs = hs;
+    let eff = mob_effect_instance_codec::<Ops>();
+    let enc_eff = Arc::clone(&eff);
+    let dec_eff = eff;
     codec_from_fns(
         "consume_effect",
         move |v: &ConsumeEffect, ops: &Ops| {
+            if let Err(e) = v.validate() {
+                return DataResult::error(e);
+            }
             let mut entries = vec![rivet_serialization::Pair::of(
                 ops.create_string("type".to_string()),
                 encode_identifier(&v.type_identifier(), ops),
             )];
             match v {
                 ConsumeEffect::ApplyEffects(e) => {
-                    let eff_list: Vec<Ops::Output> = e
-                        .effects
-                        .iter()
-                        .map(|inst| encode_compound_tag(&inst.save_nbt(), ops))
-                        .collect();
+                    let mut eff_list = Vec::with_capacity(e.effects.len());
+                    for inst in &e.effects {
+                        match enc_eff.encode_start(ops, inst).result().cloned() {
+                            Some(ev) => eff_list.push(ev),
+                            None => {
+                                return DataResult::error("Failed to encode apply_effects.effects");
+                            }
+                        }
+                    }
                     entries.push(rivet_serialization::Pair::of(
                         ops.create_string("effects".to_string()),
                         ops.create_list(eff_list),
@@ -369,7 +416,7 @@ pub fn consume_effect_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Consum
                 ConsumeEffect::PlaySound(e) => {
                     entries.push(rivet_serialization::Pair::of(
                         ops.create_string("sound".to_string()),
-                        encode_identifier(&e.sound, ops),
+                        encode_sound(&e.sound, ops),
                     ));
                 }
             }
@@ -399,13 +446,16 @@ pub fn consume_effect_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Consum
                     };
                     let mut effects = Vec::with_capacity(items.len());
                     for item in &items {
-                        let Some(tag) = decode_compound_tag(ops, item).result().cloned() else {
+                        let inst_res = dec_eff.parse(ops, item);
+                        let Some(inst) = inst_res.result().cloned() else {
                             return DataResult::error(
-                                "apply_effects.effects elements must be compounds",
+                                inst_res
+                                    .error_ref()
+                                    .map(|e| e.message().to_string())
+                                    .unwrap_or_else(|| {
+                                        "Invalid MobEffectInstance in apply_effects".to_string()
+                                    }),
                             );
-                        };
-                        let Some(inst) = MobEffectInstance::load_nbt(&tag) else {
-                            return DataResult::error("Invalid MobEffectInstance in apply_effects");
                         };
                         effects.push(inst);
                     }
@@ -475,7 +525,7 @@ pub fn consume_effect_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Consum
                     let Some(s_in) = get_map_field(ops, map.as_ref(), "sound") else {
                         return DataResult::error("play_sound missing required field 'sound'");
                     };
-                    decode_identifier(ops, &s_in).map_owned(|sound| {
+                    decode_sound(ops, &s_in).map_owned(|sound| {
                         ConsumeEffect::PlaySound(PlaySoundConsumeEffect { sound })
                     })
                 }
@@ -499,35 +549,43 @@ const CONSUME_EFFECTS_START_FRACTION: f32 = 0.21875;
 pub struct Consumable {
     pub consume_seconds: f32,
     pub animation: ItemUseAnimation,
-    pub sound: Identifier,
+    pub sound: HolderRef<SoundEvent>,
     pub has_consume_particles: bool,
     pub on_consume_effects: Vec<ConsumeEffect>,
 }
 
 impl Consumable {
-    pub fn default_sound() -> Identifier {
-        Identifier::with_default_namespace("entity.generic.eat")
+    /// The codec-level field validators (Paper's `Codec.validate` /
+    /// range codecs), which fail on encode as well as decode.
+    pub fn validate(&self) -> Result<(), String> {
+        result_of(validate_non_negative_float(
+            self.consume_seconds,
+            "consume_seconds",
+        ))?;
+        Ok(())
+    }
+
+    /// `SoundEvents.GENERIC_EAT`.
+    pub fn default_sound() -> HolderRef<SoundEvent> {
+        HolderRef::Reference(Identifier::with_default_namespace("entity.generic.eat"))
     }
 
     pub fn try_new(
         consume_seconds: f32,
         animation: ItemUseAnimation,
-        sound: Identifier,
+        sound: HolderRef<SoundEvent>,
         has_consume_particles: bool,
         on_consume_effects: Vec<ConsumeEffect>,
     ) -> Result<Self, String> {
-        if let Some(err) =
-            validate_non_negative_float(consume_seconds, "consume_seconds").error_ref()
-        {
-            return Err(err.message().to_string());
-        }
-        Ok(Self {
+        let value = Self {
             consume_seconds,
             animation,
             sound,
             has_consume_particles,
             on_consume_effects,
-        })
+        };
+        value.validate()?;
+        Ok(value)
     }
 
     /// `Consumable.consumeTicks() = (int)(this.consumeSeconds * 20.0F)`.
@@ -567,6 +625,9 @@ pub fn consumable_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Consumable
     codec_from_fns(
         "consumable",
         move |v: &Consumable, ops: &Ops| {
+            if let Err(e) = v.validate() {
+                return DataResult::error(e);
+            }
             let mut entries = Vec::new();
             if v.consume_seconds != DEFAULT_CONSUME_SECONDS {
                 entries.push(rivet_serialization::Pair::of(
@@ -586,7 +647,7 @@ pub fn consumable_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Consumable
             if v.sound != Consumable::default_sound() {
                 entries.push(rivet_serialization::Pair::of(
                     ops.create_string("sound".to_string()),
-                    encode_identifier(&v.sound, ops),
+                    encode_sound(&v.sound, ops),
                 ));
             }
             if !v.has_consume_particles {
@@ -641,7 +702,7 @@ pub fn consumable_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Consumable
                 ItemUseAnimation::Eat
             };
             let sound = if let Some(val) = get_map_field(ops, map.as_ref(), "sound") {
-                match decode_identifier(ops, &val).result().cloned() {
+                match decode_sound(ops, &val).result().cloned() {
                     Some(id) => id,
                     None => return DataResult::error("Invalid Consumable.sound"),
                 }
@@ -872,14 +933,20 @@ pub struct UseCooldown {
 }
 
 impl UseCooldown {
+    /// The codec-level field validators (Paper's `Codec.validate` /
+    /// range codecs), which fail on encode as well as decode.
+    pub fn validate(&self) -> Result<(), String> {
+        result_of(validate_positive_float(self.seconds, "seconds"))?;
+        Ok(())
+    }
+
     pub fn try_new(seconds: f32, cooldown_group: Option<Identifier>) -> Result<Self, String> {
-        if let Some(err) = validate_positive_float(seconds, "seconds").error_ref() {
-            return Err(err.message().to_string());
-        }
-        Ok(Self {
+        let value = Self {
             seconds,
             cooldown_group,
-        })
+        };
+        value.validate()?;
+        Ok(value)
     }
 
     /// `UseCooldown.ticks() = (int)(this.seconds * 20.0F)`.
@@ -893,6 +960,9 @@ pub fn use_cooldown_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<UseCoold
     codec_from_fns(
         "use_cooldown",
         |v: &UseCooldown, ops: &Ops| {
+            if let Err(e) = v.validate() {
+                return DataResult::error(e);
+            }
             let mut entries = vec![rivet_serialization::Pair::of(
                 ops.create_string("seconds".to_string()),
                 ops.create_float(v.seconds),
@@ -953,6 +1023,18 @@ pub struct UseEffects {
 }
 
 impl UseEffects {
+    /// The codec-level field validators (Paper's `Codec.validate` /
+    /// range codecs), which fail on encode as well as decode.
+    pub fn validate(&self) -> Result<(), String> {
+        result_of(validate_float_range(
+            self.speed_multiplier,
+            0.0,
+            1.0,
+            "speed_multiplier",
+        ))?;
+        Ok(())
+    }
+
     /// `UseEffects.DEFAULT = new UseEffects(false, true, 0.2F)`.
     pub const DEFAULT: Self = Self {
         can_sprint: false,
@@ -965,16 +1047,13 @@ impl UseEffects {
         interact_vibrations: bool,
         speed_multiplier: f32,
     ) -> Result<Self, String> {
-        if let Some(err) =
-            validate_float_range(speed_multiplier, 0.0, 1.0, "speed_multiplier").error_ref()
-        {
-            return Err(err.message().to_string());
-        }
-        Ok(Self {
+        let value = Self {
             can_sprint,
             interact_vibrations,
             speed_multiplier,
-        })
+        };
+        value.validate()?;
+        Ok(value)
     }
 }
 
@@ -989,6 +1068,9 @@ pub fn use_effects_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<UseEffect
     codec_from_fns(
         "use_effects",
         |v: &UseEffects, ops: &Ops| {
+            if let Err(e) = v.validate() {
+                return DataResult::error(e);
+            }
             let mut entries = Vec::new();
             if v.can_sprint {
                 entries.push(rivet_serialization::Pair::of(

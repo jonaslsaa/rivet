@@ -11,11 +11,15 @@
 //! - `Repairable` (`net.minecraft.world.item.enchantment.Repairable`)
 
 use crate::item::codec_from_fns;
-use crate::item::components::core::{HolderSetRef, holder_set_ref_codec};
-use crate::item::components::{
-    decode_identifier, encode_identifier, get_map_field, validate_float_range, validate_int_range,
-    validate_non_negative_float, validate_positive_float,
+use crate::item::components::core::{
+    HolderRef, HolderSetRef, SoundEvent, decode_sound, encode_sound, holder_set_ref_codec,
 };
+use crate::item::components::{
+    get_map_field, result_of, validate_float_range, validate_int_range,
+    validate_non_negative_float, validate_non_negative_int, validate_positive_float,
+    validate_positive_int,
+};
+use crate::loot::java_round_f32;
 use rivet_registry::Identifier;
 use rivet_serialization::{Codec, DataResult, DynamicOps};
 use rivet_util::mth;
@@ -36,24 +40,30 @@ pub struct Weapon {
 }
 
 impl Weapon {
+    /// The codec-level field validators (Paper's `Codec.validate` /
+    /// range codecs), which fail on encode as well as decode.
+    pub fn validate(&self) -> Result<(), String> {
+        result_of(validate_non_negative_int(
+            self.item_damage_per_attack,
+            "item_damage_per_attack",
+        ))?;
+        result_of(validate_non_negative_float(
+            self.disable_blocking_for_seconds,
+            "disable_blocking_for_seconds",
+        ))?;
+        Ok(())
+    }
+
     pub fn try_new(
         item_damage_per_attack: i32,
         disable_blocking_for_seconds: f32,
     ) -> Result<Self, String> {
-        if item_damage_per_attack < 0 {
-            return Err(format!(
-                "item_damage_per_attack must be non-negative: {item_damage_per_attack}"
-            ));
-        }
-        if disable_blocking_for_seconds.is_nan() || disable_blocking_for_seconds < 0.0 {
-            return Err(format!(
-                "disable_blocking_for_seconds must be non-negative: {disable_blocking_for_seconds}"
-            ));
-        }
-        Ok(Self {
+        let value = Self {
             item_damage_per_attack,
             disable_blocking_for_seconds,
-        })
+        };
+        value.validate()?;
+        Ok(value)
     }
 
     pub const fn with_damage(item_damage_per_attack: i32) -> Self {
@@ -78,6 +88,9 @@ pub fn weapon_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Weapon, Ops>> 
     codec_from_fns(
         "weapon",
         |v: &Weapon, ops: &Ops| {
+            if let Err(e) = v.validate() {
+                return DataResult::error(e);
+            }
             let mut entries = Vec::new();
             if v.item_damage_per_attack != 1 {
                 entries.push(rivet_serialization::Pair::of(
@@ -155,6 +168,22 @@ pub struct AttackRange {
 }
 
 impl AttackRange {
+    /// The codec-level field validators (Paper's `Codec.validate` /
+    /// range codecs), which fail on encode as well as decode.
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, val, max) in [
+            ("min_reach", self.min_reach, 64.0_f32),
+            ("max_reach", self.max_reach, 64.0_f32),
+            ("min_creative_reach", self.min_creative_reach, 64.0_f32),
+            ("max_creative_reach", self.max_creative_reach, 64.0_f32),
+            ("hitbox_margin", self.hitbox_margin, 1.0_f32),
+            ("mob_factor", self.mob_factor, 2.0_f32),
+        ] {
+            result_of(validate_float_range(val, 0.0, max, name))?;
+        }
+        Ok(())
+    }
+
     pub const DEFAULT: Self = Self {
         min_reach: 0.0,
         max_reach: 3.0,
@@ -172,26 +201,16 @@ impl AttackRange {
         hitbox_margin: f32,
         mob_factor: f32,
     ) -> Result<Self, String> {
-        for (name, val, max) in [
-            ("min_reach", min_reach, 64.0_f32),
-            ("max_reach", max_reach, 64.0_f32),
-            ("min_creative_reach", min_creative_reach, 64.0_f32),
-            ("max_creative_reach", max_creative_reach, 64.0_f32),
-            ("hitbox_margin", hitbox_margin, 1.0_f32),
-            ("mob_factor", mob_factor, 2.0_f32),
-        ] {
-            if let Some(err) = validate_float_range(val, 0.0, max, name).error_ref() {
-                return Err(err.message().to_string());
-            }
-        }
-        Ok(Self {
+        let value = Self {
             min_reach,
             max_reach,
             min_creative_reach,
             max_creative_reach,
             hitbox_margin,
             mob_factor,
-        })
+        };
+        value.validate()?;
+        Ok(value)
     }
 
     pub const fn effective_min_range(self, is_creative: bool) -> f32 {
@@ -222,6 +241,9 @@ pub fn attack_range_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<AttackRa
     codec_from_fns(
         "attack_range",
         |v: &AttackRange, ops: &Ops| {
+            if let Err(e) = v.validate() {
+                return DataResult::error(e);
+            }
             let mut entries = Vec::new();
             if v.min_reach != 0.0 {
                 entries.push(rivet_serialization::Pair::of(
@@ -391,6 +413,13 @@ pub struct SwingAnimation {
 }
 
 impl SwingAnimation {
+    /// The codec-level field validators (Paper's `Codec.validate` /
+    /// range codecs), which fail on encode as well as decode.
+    pub fn validate(&self) -> Result<(), String> {
+        result_of(validate_positive_int(self.duration, "duration"))?;
+        Ok(())
+    }
+
     /// `SwingAnimation.DEFAULT = new SwingAnimation(SwingAnimationType.WHACK, 6)`.
     pub const DEFAULT: Self = Self {
         animation_type: SwingAnimationType::Whack,
@@ -398,15 +427,12 @@ impl SwingAnimation {
     };
 
     pub fn try_new(animation_type: SwingAnimationType, duration: i32) -> Result<Self, String> {
-        if duration <= 0 {
-            return Err(format!(
-                "SwingAnimation.duration must be positive: {duration}"
-            ));
-        }
-        Ok(Self {
+        let value = Self {
             animation_type,
             duration,
-        })
+        };
+        value.validate()?;
+        Ok(value)
     }
 }
 
@@ -424,6 +450,9 @@ pub fn swing_animation_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Swing
     codec_from_fns(
         "swing_animation",
         move |v: &SwingAnimation, ops: &Ops| {
+            if let Err(e) = v.validate() {
+                return DataResult::error(e);
+            }
             let mut entries = Vec::new();
             if v.animation_type != SwingAnimationType::Whack {
                 let encoded = enc_ty.encode_start(ops, &v.animation_type);
@@ -541,6 +570,16 @@ pub struct DamageReduction {
 }
 
 impl DamageReduction {
+    /// The codec-level field validators (Paper's `Codec.validate` /
+    /// range codecs), which fail on encode as well as decode.
+    pub fn validate(&self) -> Result<(), String> {
+        result_of(validate_positive_float(
+            self.horizontal_blocking_angle,
+            "horizontal_blocking_angle",
+        ))?;
+        Ok(())
+    }
+
     /// Default reduction used by `BlocksAttacks`: `(90.0F, Optional.empty(), 0.0F, 1.0F)`.
     pub fn default_reduction() -> Self {
         Self {
@@ -557,18 +596,14 @@ impl DamageReduction {
         base: f32,
         factor: f32,
     ) -> Result<Self, String> {
-        if let Some(err) =
-            validate_positive_float(horizontal_blocking_angle, "horizontal_blocking_angle")
-                .error_ref()
-        {
-            return Err(err.message().to_string());
-        }
-        Ok(Self {
+        let value = Self {
             horizontal_blocking_angle,
             damage_type,
             base,
             factor,
-        })
+        };
+        value.validate()?;
+        Ok(value)
     }
 
     /// Port of `DamageReduction.resolve(DamageSource, float dealtDamage, double angle)`
@@ -593,6 +628,9 @@ pub fn damage_reduction_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Dama
     codec_from_fns(
         "damage_reduction",
         move |v: &DamageReduction, ops: &Ops| {
+            if let Err(e) = v.validate() {
+                return DataResult::error(e);
+            }
             let mut entries = Vec::new();
             if v.horizontal_blocking_angle != 90.0 {
                 entries.push(rivet_serialization::Pair::of(
@@ -689,6 +727,13 @@ pub struct ItemDamageFunction {
 }
 
 impl ItemDamageFunction {
+    /// The codec-level field validators (Paper's `Codec.validate` /
+    /// range codecs), which fail on encode as well as decode.
+    pub fn validate(&self) -> Result<(), String> {
+        result_of(validate_non_negative_float(self.threshold, "threshold"))?;
+        Ok(())
+    }
+
     /// `ItemDamageFunction.DEFAULT = new ItemDamageFunction(1.0F, 0.0F, 1.0F)`.
     pub const DEFAULT: Self = Self {
         threshold: 1.0,
@@ -697,14 +742,13 @@ impl ItemDamageFunction {
     };
 
     pub fn try_new(threshold: f32, base: f32, factor: f32) -> Result<Self, String> {
-        if let Some(err) = validate_non_negative_float(threshold, "threshold").error_ref() {
-            return Err(err.message().to_string());
-        }
-        Ok(Self {
+        let value = Self {
             threshold,
             base,
             factor,
-        })
+        };
+        value.validate()?;
+        Ok(value)
     }
 
     /// Exact port of `ItemDamageFunction.apply(float dealtDamage)`.
@@ -729,6 +773,9 @@ pub fn item_damage_function_codec<Ops: DynamicOps + 'static>()
     codec_from_fns(
         "item_damage_function",
         |v: &ItemDamageFunction, ops: &Ops| {
+            if let Err(e) = v.validate() {
+                return DataResult::error(e);
+            }
             let entries = vec![
                 rivet_serialization::Pair::of(
                     ops.create_string("threshold".to_string()),
@@ -799,12 +846,26 @@ pub struct BlocksAttacks {
     pub disable_cooldown_scale: f32,
     pub damage_reductions: Vec<DamageReduction>,
     pub item_damage: ItemDamageFunction,
-    pub bypassed_by: Option<Identifier>,
-    pub block_sound: Option<Identifier>,
-    pub disabled_sound: Option<Identifier>,
+    pub bypassed_by: Option<HolderSetRef>,
+    pub block_sound: Option<HolderRef<SoundEvent>>,
+    pub disabled_sound: Option<HolderRef<SoundEvent>>,
 }
 
 impl BlocksAttacks {
+    /// The codec-level field validators (Paper's `Codec.validate` /
+    /// range codecs), which fail on encode as well as decode.
+    pub fn validate(&self) -> Result<(), String> {
+        result_of(validate_non_negative_float(
+            self.block_delay_seconds,
+            "block_delay_seconds",
+        ))?;
+        result_of(validate_non_negative_float(
+            self.disable_cooldown_scale,
+            "disable_cooldown_scale",
+        ))?;
+        Ok(())
+    }
+
     pub fn default_value() -> Self {
         Self {
             block_delay_seconds: 0.0,
@@ -817,9 +878,9 @@ impl BlocksAttacks {
         }
     }
 
-    /// `BlocksAttacks.blockDelayTicks() = (int)(blockDelaySeconds * 20.0F)`.
+    /// `BlocksAttacks.blockDelayTicks() = Math.round(blockDelaySeconds * 20.0F)`.
     pub fn block_delay_ticks(&self) -> i32 {
-        (self.block_delay_seconds * 20.0_f32) as i32
+        java_round_f32(self.block_delay_seconds * 20.0_f32)
     }
 }
 
@@ -837,9 +898,15 @@ pub fn blocks_attacks_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Blocks
     let dec_red = red_codec;
     let enc_dmg = Arc::clone(&dmg_codec);
     let dec_dmg = dmg_codec;
+    let hs_codec = holder_set_ref_codec::<Ops>();
+    let enc_hs = Arc::clone(&hs_codec);
+    let dec_hs = hs_codec;
     codec_from_fns(
         "blocks_attacks",
         move |v: &BlocksAttacks, ops: &Ops| {
+            if let Err(e) = v.validate() {
+                return DataResult::error(e);
+            }
             let mut entries = Vec::new();
             if v.block_delay_seconds != 0.0 {
                 entries.push(rivet_serialization::Pair::of(
@@ -880,22 +947,25 @@ pub fn blocks_attacks_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Blocks
                     None => return DataResult::error("Failed to encode BlocksAttacks.item_damage"),
                 }
             }
-            if let Some(tag) = &v.bypassed_by {
-                entries.push(rivet_serialization::Pair::of(
-                    ops.create_string("bypassed_by".to_string()),
-                    ops.create_string(format!("#{tag}")),
-                ));
+            if let Some(set) = &v.bypassed_by {
+                match enc_hs.encode_start(ops, set).result().cloned() {
+                    Some(ev) => entries.push(rivet_serialization::Pair::of(
+                        ops.create_string("bypassed_by".to_string()),
+                        ev,
+                    )),
+                    None => return DataResult::error("Failed to encode BlocksAttacks.bypassed_by"),
+                }
             }
             if let Some(s) = &v.block_sound {
                 entries.push(rivet_serialization::Pair::of(
                     ops.create_string("block_sound".to_string()),
-                    encode_identifier(s, ops),
+                    encode_sound(s, ops),
                 ));
             }
             if let Some(s) = &v.disabled_sound {
                 entries.push(rivet_serialization::Pair::of(
                     ops.create_string("disabled_sound".to_string()),
-                    encode_identifier(s, ops),
+                    encode_sound(s, ops),
                 ));
             }
             DataResult::success(ops.create_map(entries))
@@ -968,28 +1038,23 @@ pub fn blocks_attacks_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Blocks
                 ItemDamageFunction::DEFAULT
             };
             let bypassed_by = if let Some(val) = get_map_field(ops, map.as_ref(), "bypassed_by") {
-                let s_res = ops.get_string_value(&val);
-                let Some(s) = s_res.result() else {
-                    return DataResult::error("BlocksAttacks.bypassed_by must be a #tag string");
-                };
-                let Some(rest) = s.strip_prefix('#') else {
-                    return DataResult::error(format!(
-                        "BlocksAttacks.bypassed_by must start with '#': {s}"
-                    ));
-                };
-                match Identifier::try_parse(rest) {
-                    Some(id) => Some(id),
+                let hs_res = dec_hs.parse(ops, &val);
+                match hs_res.result().cloned() {
+                    Some(set) => Some(set),
                     None => {
-                        return DataResult::error(format!(
-                            "Invalid tag in BlocksAttacks.bypassed_by: {s}"
-                        ));
+                        return DataResult::error(
+                            hs_res
+                                .error_ref()
+                                .map(|e| e.message().to_string())
+                                .unwrap_or_else(|| "Invalid BlocksAttacks.bypassed_by".to_string()),
+                        );
                     }
                 }
             } else {
                 None
             };
             let block_sound = if let Some(val) = get_map_field(ops, map.as_ref(), "block_sound") {
-                match decode_identifier(ops, &val).result().cloned() {
+                match decode_sound(ops, &val).result().cloned() {
                     Some(id) => Some(id),
                     None => return DataResult::error("Invalid BlocksAttacks.block_sound"),
                 }
@@ -998,7 +1063,7 @@ pub fn blocks_attacks_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Blocks
             };
             let disabled_sound =
                 if let Some(val) = get_map_field(ops, map.as_ref(), "disabled_sound") {
-                    match decode_identifier(ops, &val).result().cloned() {
+                    match decode_sound(ops, &val).result().cloned() {
                         Some(id) => Some(id),
                         None => return DataResult::error("Invalid BlocksAttacks.disabled_sound"),
                     }
@@ -1023,12 +1088,12 @@ pub fn blocks_attacks_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Blocks
 // ---------------------------------------------------------------------------
 
 /// Port of `net.minecraft.world.item.component.PiercingWeapon`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PiercingWeapon {
     pub deals_knockback: bool,
     pub dismounts: bool,
-    pub sound: Option<Identifier>,
-    pub hit_sound: Option<Identifier>,
+    pub sound: Option<HolderRef<SoundEvent>>,
+    pub hit_sound: Option<HolderRef<SoundEvent>>,
 }
 
 impl Default for PiercingWeapon {
@@ -1063,13 +1128,13 @@ pub fn piercing_weapon_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Pierc
             if let Some(s) = &v.sound {
                 entries.push(rivet_serialization::Pair::of(
                     ops.create_string("sound".to_string()),
-                    encode_identifier(s, ops),
+                    encode_sound(s, ops),
                 ));
             }
             if let Some(s) = &v.hit_sound {
                 entries.push(rivet_serialization::Pair::of(
                     ops.create_string("hit_sound".to_string()),
-                    encode_identifier(s, ops),
+                    encode_sound(s, ops),
                 ));
             }
             DataResult::success(ops.create_map(entries))
@@ -1101,7 +1166,7 @@ pub fn piercing_weapon_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Pierc
                 false
             };
             let sound = if let Some(val) = get_map_field(ops, map.as_ref(), "sound") {
-                match decode_identifier(ops, &val).result().cloned() {
+                match decode_sound(ops, &val).result().cloned() {
                     Some(id) => Some(id),
                     None => return DataResult::error("Invalid PiercingWeapon.sound"),
                 }
@@ -1109,7 +1174,7 @@ pub fn piercing_weapon_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Pierc
                 None
             };
             let hit_sound = if let Some(val) = get_map_field(ops, map.as_ref(), "hit_sound") {
-                match decode_identifier(ops, &val).result().cloned() {
+                match decode_sound(ops, &val).result().cloned() {
                     Some(id) => Some(id),
                     None => return DataResult::error("Invalid PiercingWeapon.hit_sound"),
                 }
@@ -1139,21 +1204,28 @@ pub struct KineticWeaponCondition {
 }
 
 impl KineticWeaponCondition {
+    /// The codec-level field validators (Paper's `Codec.validate` /
+    /// range codecs), which fail on encode as well as decode.
+    pub fn validate(&self) -> Result<(), String> {
+        result_of(validate_non_negative_int(
+            self.max_duration_ticks,
+            "max_duration_ticks",
+        ))?;
+        Ok(())
+    }
+
     pub fn try_new(
         max_duration_ticks: i32,
         min_speed: f32,
         min_relative_speed: f32,
     ) -> Result<Self, String> {
-        if max_duration_ticks < 0 {
-            return Err(format!(
-                "max_duration_ticks must be non-negative: {max_duration_ticks}"
-            ));
-        }
-        Ok(Self {
+        let value = Self {
             max_duration_ticks,
             min_speed,
             min_relative_speed,
-        })
+        };
+        value.validate()?;
+        Ok(value)
     }
 
     /// Exact port of `KineticWeapon.Condition.test(int, double, double, double)`.
@@ -1176,6 +1248,9 @@ pub fn kinetic_weapon_condition_codec<Ops: DynamicOps + 'static>()
     codec_from_fns(
         "kinetic_weapon_condition",
         |v: &KineticWeaponCondition, ops: &Ops| {
+            if let Err(e) = v.validate() {
+                return DataResult::error(e);
+            }
             let mut entries = vec![rivet_serialization::Pair::of(
                 ops.create_string("max_duration_ticks".to_string()),
                 ops.create_int(v.max_duration_ticks),
@@ -1260,8 +1335,21 @@ pub struct KineticWeapon {
     pub damage_conditions: Option<KineticWeaponCondition>,
     pub forward_movement: f32,
     pub damage_multiplier: f32,
-    pub sound: Option<Identifier>,
-    pub hit_sound: Option<Identifier>,
+    pub sound: Option<HolderRef<SoundEvent>>,
+    pub hit_sound: Option<HolderRef<SoundEvent>>,
+}
+
+impl KineticWeapon {
+    /// The codec-level field validators (Paper's `Codec.validate` /
+    /// range codecs), which fail on encode as well as decode.
+    pub fn validate(&self) -> Result<(), String> {
+        result_of(validate_non_negative_int(
+            self.contact_cooldown_ticks,
+            "contact_cooldown_ticks",
+        ))?;
+        result_of(validate_non_negative_int(self.delay_ticks, "delay_ticks"))?;
+        Ok(())
+    }
 }
 
 impl Default for KineticWeapon {
@@ -1288,6 +1376,9 @@ pub fn kinetic_weapon_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Kineti
     codec_from_fns(
         "kinetic_weapon",
         move |v: &KineticWeapon, ops: &Ops| {
+            if let Err(e) = v.validate() {
+                return DataResult::error(e);
+            }
             let mut entries = Vec::new();
             if v.contact_cooldown_ticks != 10 {
                 entries.push(rivet_serialization::Pair::of(
@@ -1335,13 +1426,13 @@ pub fn kinetic_weapon_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Kineti
             if let Some(s) = &v.sound {
                 entries.push(rivet_serialization::Pair::of(
                     ops.create_string("sound".to_string()),
-                    encode_identifier(s, ops),
+                    encode_sound(s, ops),
                 ));
             }
             if let Some(s) = &v.hit_sound {
                 entries.push(rivet_serialization::Pair::of(
                     ops.create_string("hit_sound".to_string()),
-                    encode_identifier(s, ops),
+                    encode_sound(s, ops),
                 ));
             }
             DataResult::success(ops.create_map(entries))
@@ -1430,7 +1521,7 @@ pub fn kinetic_weapon_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Kineti
                     1.0
                 };
             let sound = if let Some(val) = get_map_field(ops, map.as_ref(), "sound") {
-                match decode_identifier(ops, &val).result().cloned() {
+                match decode_sound(ops, &val).result().cloned() {
                     Some(id) => Some(id),
                     None => return DataResult::error("Invalid KineticWeapon.sound"),
                 }
@@ -1438,7 +1529,7 @@ pub fn kinetic_weapon_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Kineti
                 None
             };
             let hit_sound = if let Some(val) = get_map_field(ops, map.as_ref(), "hit_sound") {
-                match decode_identifier(ops, &val).result().cloned() {
+                match decode_sound(ops, &val).result().cloned() {
                     Some(id) => Some(id),
                     None => return DataResult::error("Invalid KineticWeapon.hit_sound"),
                 }
@@ -1473,6 +1564,15 @@ pub struct ToolRule {
 }
 
 impl ToolRule {
+    /// The codec-level field validators (Paper's `Codec.validate` /
+    /// range codecs), which fail on encode as well as decode.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(speed) = self.speed {
+            result_of(validate_positive_float(speed, "speed"))?;
+        }
+        Ok(())
+    }
+
     pub fn mines_and_drops(blocks: HolderSetRef, speed: f32) -> Self {
         Self {
             blocks,
@@ -1506,6 +1606,9 @@ pub fn tool_rule_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<ToolRule, O
     codec_from_fns(
         "tool_rule",
         move |v: &ToolRule, ops: &Ops| {
+            if let Err(e) = v.validate() {
+                return DataResult::error(e);
+            }
             let Some(blocks_val) = enc_hs.encode_start(ops, &v.blocks).result().cloned() else {
                 return DataResult::error("Failed to encode Tool.Rule.blocks");
             };
@@ -1582,6 +1685,16 @@ pub struct Tool {
 }
 
 impl Tool {
+    /// The codec-level field validators (Paper's `Codec.validate` /
+    /// range codecs), which fail on encode as well as decode.
+    pub fn validate(&self) -> Result<(), String> {
+        result_of(validate_non_negative_int(
+            self.damage_per_block,
+            "damage_per_block",
+        ))?;
+        Ok(())
+    }
+
     pub fn new(
         rules: Vec<ToolRule>,
         default_mining_speed: f32,
@@ -1631,6 +1744,9 @@ pub fn tool_codec<Ops: DynamicOps + 'static>() -> Arc<dyn Codec<Tool, Ops>> {
     codec_from_fns(
         "tool",
         move |v: &Tool, ops: &Ops| {
+            if let Err(e) = v.validate() {
+                return DataResult::error(e);
+            }
             let mut rules_out = Vec::with_capacity(v.rules.len());
             for rule in &v.rules {
                 match enc_r.encode_start(ops, rule).result().cloned() {
