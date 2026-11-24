@@ -35,6 +35,7 @@ pub mod codec_corpus;
 pub mod compare;
 pub mod entity;
 pub mod entity_corpus;
+pub mod gameplay;
 pub mod handlers;
 pub mod packet;
 pub mod packet_corpus;
@@ -374,6 +375,8 @@ pub struct OpRow {
     pub note: Option<String>,
     /// Per ported Rust type (packet struct, codec): how its inputs compared.
     pub subjects: Vec<SubjectTally>,
+    /// Why inputs are unavailable (the Rust side has no implementation), by reason.
+    pub unavailable_reasons: std::collections::BTreeMap<String, usize>,
 }
 
 /// One scoreboard subject's tally within an op row.
@@ -384,6 +387,7 @@ pub struct SubjectTally {
     pub matched: usize,
     pub mismatched: usize,
     pub excluded: usize,
+    pub unavailable: usize,
 }
 
 fn tally_subjects(
@@ -413,6 +417,8 @@ fn tally_subjects(
             }
             // Never run on the Rust side: declared, not executed.
             compare::InputVerdict::Excluded => tally.excluded += 1,
+            // The Rust side has no implementation: not executed either.
+            compare::InputVerdict::Unavailable => tally.unavailable += 1,
         }
     }
     tallies.into_values().collect()
@@ -429,6 +435,9 @@ impl OpRow {
             "executed": self.closure.executed,
             "matched": self.closure.matched,
             "mismatched": self.closure.mismatched,
+            "excluded": self.closure.excluded,
+            "unavailable": self.closure.unavailable,
+            "unavailable_reasons": self.unavailable_reasons,
             "negative": self.negative.as_ref().map(|v| v.to_string()),
             "negative_detected": self.negative.as_ref().is_some_and(Verdict::passed),
             "first_divergence": self.first.as_ref().map(|d| json!({
@@ -445,6 +454,7 @@ impl OpRow {
                 "matched": t.matched,
                 "mismatched": t.mismatched,
                 "excluded": t.excluded,
+                "unavailable": t.unavailable,
             })).collect::<Vec<_>>(),
         })
     }
@@ -466,6 +476,7 @@ fn evaluate(
         matched: comparison.matched,
         mismatched: comparison.mismatched_ids.len(),
         excluded: comparison.excluded,
+        unavailable: comparison.unavailable,
     };
     let mut status = closure.status(negative.as_ref().is_some_and(Verdict::passed));
     let note = if comparison.stale.is_empty() {
@@ -496,6 +507,7 @@ fn evaluate(
         stale_ids: comparison.stale,
         note,
         subjects,
+        unavailable_reasons: comparison.unavailable_reasons,
     }
 }
 
@@ -514,7 +526,17 @@ fn no_handler_row(mode: &'static str, fixture: &OpFixture) -> OpRow {
         stale_ids: Vec::new(),
         note: Some("no Rust handler for this op yet (recorded golden only)".into()),
         subjects: Vec::new(),
+        unavailable_reasons: Default::default(),
     }
+}
+
+/// A Rust-vs-Paper row whose every declared input is unavailable: the surface
+/// it sweeps is not ported, so nothing was compared.
+fn fully_unported(row: &OpRow) -> bool {
+    matches!(row.mode, "check" | "live")
+        && row.closure.declared > 0
+        && row.closure.executed == 0
+        && row.closure.unavailable == row.closure.declared
 }
 
 /// Offline mode: recorded Paper answers vs the Rust handlers, no JVM.
@@ -594,9 +616,10 @@ pub fn live(
         // the first input that matched, have the hook corrupt that response
         // line, and require the comparator to detect and name the input.
         let clean = compare::compare(&fixture.op, &paper, &actual, exclusions);
-        let negative = match fixture.corpus.iter().position(|entry| {
+        let negative = match fixture.corpus.iter().enumerate().position(|(i, entry)| {
             !clean.mismatched_ids.contains(&entry.id)
                 && !compare::input_excluded(&fixture.op, &entry.id, exclusions)
+                && !matches!(actual[i].1, Outcome::Unported(_))
         }) {
             Some(index) => {
                 oracle
@@ -722,6 +745,8 @@ pub fn emit_corpus() -> Result<Vec<(&'static str, String)>, String> {
         ("snbt.parse", snbt),
     ];
     corpora.extend(entity_corpus::emit());
+    corpora.extend(gameplay::emit());
+    corpora.sort_by_key(|(op, _)| *op);
     Ok(corpora)
 }
 
@@ -738,6 +763,9 @@ fn print_rows(rows: &[OpRow]) {
                 .as_ref()
                 .map_or_else(|| "not run".to_owned(), ToString::to_string)
         );
+        for (reason, count) in &row.unavailable_reasons {
+            eprintln!("      unavailable ({count}): {reason}");
+        }
         if !row.subjects.is_empty() {
             let clean = row
                 .subjects
@@ -930,7 +958,20 @@ pub fn run_cli(args: &[String]) -> i32 {
     if let Some(op) = broken {
         return broken_handler_verdict(&rows, op);
     }
-    let status = Status::combine(rows.iter().map(|row| row.status));
+    // A row whose every input is unported has nothing for the Rust side to be
+    // compared on: it stays UNVERIFIED in the ledger and in its printed row, but
+    // the missing port is not the oracle failing to run.
+    for row in rows.iter().filter(|row| fully_unported(row)) {
+        eprintln!(
+            "  UNPORTED {} ({}): all {} inputs unavailable, row stays UNVERIFIED",
+            row.op, row.mode, row.closure.declared
+        );
+    }
+    let status = Status::combine(
+        rows.iter()
+            .filter(|row| !fully_unported(row))
+            .map(|row| row.status),
+    );
     eprintln!("  STATUS: {status}");
     status.exit_code().into()
 }
@@ -952,6 +993,12 @@ mod tests {
         let rows = check(&fixtures(), &exclusions, None);
         assert!(!rows.is_empty());
         for row in &rows {
+            if fully_unported(row) {
+                // Nothing ported to compare: UNVERIFIED, with named reasons, never silent.
+                assert_eq!(row.status, Status::Unverified, "{}", row.op);
+                assert!(!row.unavailable_reasons.is_empty(), "{}", row.op);
+                continue;
+            }
             assert_eq!(
                 row.status,
                 Status::Pass,
@@ -964,7 +1011,8 @@ mod tests {
             );
             assert!(
                 row.closure.executed > 0
-                    && row.closure.executed + row.closure.excluded == row.closure.declared
+                    && row.closure.executed + row.closure.excluded + row.closure.unavailable
+                        == row.closure.declared
             );
         }
     }
@@ -1033,7 +1081,10 @@ mod tests {
             assert_eq!(first.id, fixture.corpus[0].id, "names the first input");
             assert!(!first.fields.is_empty(), "names the diverging field");
             // Only the broken op fails.
-            for other in rows.iter().filter(|r| r.op != fixture.op) {
+            for other in rows
+                .iter()
+                .filter(|r| r.op != fixture.op && !fully_unported(r))
+            {
                 assert_eq!(other.status, Status::Pass, "{}", other.op);
             }
         }

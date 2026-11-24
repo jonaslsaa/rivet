@@ -32,6 +32,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.NbtAccounter;
@@ -67,7 +68,7 @@ public final class RivetReferenceOracle {
     private static final int PROTOCOL_VERSION = 1;
     private static final int MAX_NBT_BYTES = 16 * 1024 * 1024;
     private static final int MAX_BASE64_CHARS = ((MAX_NBT_BYTES + 2) / 3) * 4;
-    private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
+    static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
     private static final Gson PRETTY = new GsonBuilder().disableHtmlEscaping().setPrettyPrinting().create();
     /**
      * Repo-relative directory of the oracle's Java sources. The op source hash is the SHA-256 of
@@ -116,7 +117,16 @@ public final class RivetReferenceOracle {
         JsonObject run(JsonObject request, JsonObject dec) throws Exception;
     }
 
-    record Op(String name, List<String> resultKeys, Handler handler, Predicate<Exception> rejection) {
+    /**
+     * {@code corpusCheck}, when present, runs over the parsed requests of an op's
+     * corpus at record time and throws when the corpus does not close over the
+     * registry the op sweeps (declared == registry size x seeds).
+     */
+    record Op(String name, List<String> resultKeys, Handler handler, Predicate<Exception> rejection,
+              Consumer<List<JsonObject>> corpusCheck) {
+        Op(String name, List<String> resultKeys, Handler handler, Predicate<Exception> rejection) {
+            this(name, resultKeys, handler, rejection, null);
+        }
     }
 
     private static final List<String> TAG_KEYS = List.of("tag_id", "tag_type", "snbt", "pretty_snbt");
@@ -190,16 +200,17 @@ public final class RivetReferenceOracle {
         for (Op op : EntityOps.ops()) {
             register(ops, op);
         }
+        GameplayOps.register(ops);
         return Collections.unmodifiableMap(ops);
     }
 
-    private static void register(final Map<String, Op> ops, final Op op) {
+    static void register(final Map<String, Op> ops, final Op op) {
         if (ops.putIfAbsent(op.name(), op) != null) {
             throw new IllegalStateException("duplicate op " + op.name());
         }
     }
 
-    private static List<String> keys(final List<String> head, final String... tail) {
+    static List<String> keys(final List<String> head, final String... tail) {
         List<String> all = new ArrayList<>(head);
         all.addAll(List.of(tail));
         return List.copyOf(all);
@@ -364,6 +375,13 @@ public final class RivetReferenceOracle {
             List<String> lines = new String(corpusBytes, StandardCharsets.UTF_8).lines().toList();
             StringBuilder recorded = new StringBuilder();
             Set<String> ids = new HashSet<>();
+            if (op.corpusCheck() != null) {
+                List<JsonObject> requests = new ArrayList<>();
+                for (String line : lines) {
+                    requests.add(JsonParser.parseString(line).getAsJsonObject());
+                }
+                op.corpusCheck().accept(requests);
+            }
             int count = 0;
             for (int index = 0; index < lines.size(); index++) {
                 String line = lines.get(index);
@@ -741,6 +759,9 @@ public final class RivetReferenceOracle {
             org.apache.logging.log4j.core.config.Configurator.setRootLevel(org.apache.logging.log4j.Level.OFF);
         }
 
+        /** The layered registries behind {@link #ACCESS}, for ops that reload the data-pack layer on top. */
+        static net.minecraft.core.LayeredRegistryAccess<net.minecraft.server.RegistryLayer> LAYERS;
+
         static final RegistryAccess ACCESS = load();
 
         static {
@@ -794,7 +815,8 @@ public final class RivetReferenceOracle {
                     var worldgen = net.minecraft.resources.RegistryDataLoader.load(
                         resources, lookups, net.minecraft.resources.RegistryDataLoader.WORLDGEN_REGISTRIES, Runnable::run
                     ).join();
-                    var access = layers.replaceFrom(net.minecraft.server.RegistryLayer.WORLDGEN, worldgen).compositeAccess().freeze();
+                    LAYERS = layers.replaceFrom(net.minecraft.server.RegistryLayer.WORLDGEN, worldgen);
+                    var access = LAYERS.compositeAccess().freeze();
                     // ReloadableServerResources: bind every item's prototype components.
                     net.minecraft.core.registries.BuiltInRegistries.DATA_COMPONENT_INITIALIZERS.build(access)
                         .forEach(net.minecraft.core.component.DataComponentInitializers.PendingComponents::apply);
@@ -1007,7 +1029,7 @@ public final class RivetReferenceOracle {
         return result;
     }
 
-    private static String requiredString(final JsonObject request, final String property) {
+    static String requiredString(final JsonObject request, final String property) {
         JsonElement value = request.get(property);
         if (value == null || !value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString()) {
             throw new IllegalArgumentException("property '" + property + "' must be a string");

@@ -923,3 +923,362 @@ damage.calc	input:absorb.6952	Rivet clamps the armor fraction to [0,1] without a
 damage.calc	input:absorb.6953	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
 damage.calc	input:absorb.6955	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
 damage.calc	input:absorb.6957	Rivet clamps the armor fraction to [0,1] without a weapon item (negative total armor); Paper uses it unclamped	816
+effect	input:minecraft:speed#0	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#1	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#2	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#3	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#4	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#7	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#15	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#63	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#127	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#254	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#255	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#2147483647	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#0	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#1	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#2	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#3	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#4	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#7	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#15	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#63	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#127	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#254	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#255	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#2147483647	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#0	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#1	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#2	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#3	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#4	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#7	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#15	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#63	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#127	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#254	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#255	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#2147483647	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#0	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#1	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#2	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#3	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#4	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#7	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#15	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#63	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#127	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#254	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#255	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#2147483647	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+scoreboard.saved_data	input:scores	packed objectives/scores/teams in Java fastutil hash order, Rivet in insertion order	818
+scoreboard.saved_data	input:teams_member_in_two	packed objectives/scores/teams in Java fastutil hash order, Rivet in insertion order	818
+scoreboard.saved_data	input:teams_duplicate_name	duplicate team name on load: Paper merges into the existing team, Rivet rejects the load	819
+scoreboard.saved_data	input:team_empty_and_filled	packed objectives/scores/teams in Java fastutil hash order, Rivet in insertion order	818
+scoreboard.saved_data	input:everything	packed objectives/scores/teams in Java fastutil hash order, Rivet in insertion order	818
+loot.roll	input:minecraft:blocks/attached_melon_stem#1	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#2	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#3	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#42	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#100	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#1337	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#4096	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#65537	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#123456789	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#987654321	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#-1	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#-42	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#9223372036854775807	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#-9223372036854775807	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#5489	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_melon_stem#31415926535	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#1	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#2	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#3	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#42	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#100	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#1337	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#4096	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#65537	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#123456789	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#987654321	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#-1	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#-42	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#9223372036854775807	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#-9223372036854775807	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#5489	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/attached_pumpkin_stem#31415926535	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/brown_mushroom_block#1	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#2	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#3	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#1337	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#4096	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#987654321	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#-1	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#-42	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#9223372036854775807	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#-9223372036854775807	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#5489	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/brown_mushroom_block#31415926535	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/chorus_flower#1	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#2	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#3	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#42	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#100	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#1337	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#4096	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#65537	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#123456789	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#987654321	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#-1	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#-42	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#9223372036854775807	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#-9223372036854775807	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#5489	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_flower#31415926535	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/chorus_plant#4096	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/chorus_plant#987654321	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/chorus_plant#-1	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/chorus_plant#-42	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/chorus_plant#9223372036854775807	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/chorus_plant#5489	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/copper_golem_statue#1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#2	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#3	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#100	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#1337	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#4096	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#65537	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#123456789	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#987654321	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#-1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#-42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#-9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#5489	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/copper_golem_statue#31415926535	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/dead_bush#1	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/dead_bush#-42	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/dead_bush#-9223372036854775807	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/dead_bush#5489	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#2	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#3	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#100	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#1337	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#4096	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#65537	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#123456789	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#987654321	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#-1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#-42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#-9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#5489	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/exposed_copper_golem_statue#31415926535	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/large_fern#1	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#2	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#3	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#42	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#100	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#1337	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#4096	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#65537	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#123456789	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#987654321	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#-1	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#-42	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#9223372036854775807	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#-9223372036854775807	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#5489	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/large_fern#31415926535	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/melon_stem#1	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#2	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#3	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#42	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#100	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#1337	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#4096	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#65537	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#123456789	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#987654321	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#-1	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#-42	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#9223372036854775807	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#-9223372036854775807	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#5489	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/melon_stem#31415926535	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#2	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#3	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#100	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#1337	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#4096	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#65537	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#123456789	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#987654321	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#-1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#-42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#-9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#5489	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/oxidized_copper_golem_statue#31415926535	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/pumpkin_stem#1	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#2	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#3	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#42	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#100	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#1337	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#4096	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#65537	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#123456789	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#987654321	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#-1	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#-42	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#9223372036854775807	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#-9223372036854775807	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#5489	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/pumpkin_stem#31415926535	binomial number provider with a float n (stem tables): the Rust loader rejects a document Paper loads	825
+loot.roll	input:minecraft:blocks/red_mushroom_block#1	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#2	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#3	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#1337	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#4096	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#987654321	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#-1	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#-42	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#9223372036854775807	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#-9223372036854775807	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#5489	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/red_mushroom_block#31415926535	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#1	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#2	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#3	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#42	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#100	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#1337	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#4096	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#65537	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#123456789	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#987654321	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#-1	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#-42	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#9223372036854775807	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#-9223372036854775807	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#5489	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/resin_clump#31415926535	Rust BlockLootTable drops zero-count stacks that LootTable.getRandomItems returns	828
+loot.roll	input:minecraft:blocks/snow#1	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#2	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#3	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#42	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#100	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#1337	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#4096	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#65537	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#123456789	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#987654321	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#-1	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#-42	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#9223372036854775807	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#-9223372036854775807	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#5489	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/snow#31415926535	entity_properties loot condition unsupported: the Rust loader rejects a document Paper loads	826
+loot.roll	input:minecraft:blocks/tall_grass#1	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#2	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#3	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#42	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#100	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#1337	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#4096	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#65537	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#123456789	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#987654321	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#-1	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#-42	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#9223372036854775807	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#-9223372036854775807	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#5489	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/tall_grass#31415926535	location_check loot condition unsupported: the Rust loader rejects a document Paper loads	827
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#2	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#3	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#100	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#1337	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#4096	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#65537	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#123456789	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#987654321	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#-1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#-42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#-9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#5489	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_copper_golem_statue#31415926535	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#2	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#3	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#100	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#1337	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#4096	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#65537	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#123456789	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#987654321	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#-1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#-42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#-9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#5489	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_exposed_copper_golem_statue#31415926535	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#2	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#3	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#100	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#1337	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#4096	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#65537	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#123456789	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#987654321	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#-1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#-42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#-9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#5489	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_oxidized_copper_golem_statue#31415926535	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#2	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#3	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#100	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#1337	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#4096	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#65537	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#123456789	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#987654321	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#-1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#-42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#-9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#5489	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/waxed_weathered_copper_golem_statue#31415926535	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#2	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#3	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#100	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#1337	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#4096	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#65537	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#123456789	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#987654321	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#-1	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#-42	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#-9223372036854775807	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#5489	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
+loot.roll	input:minecraft:blocks/weathered_copper_golem_statue#31415926535	copy_state emits a block_state component equal to the item prototype's, which Paper's patch omits	829
