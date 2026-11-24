@@ -289,25 +289,14 @@ impl WritableBookContent {
         Self { pages: Vec::new() }
     }
 
-    /// `new WritableBookContent(List<Filterable<String>>)` — rejects > 100 pages
-    /// or any page exceeding 1024 UTF-16 code units.
+    /// `new WritableBookContent(List<Filterable<String>>)` — rejects > 100 pages only
+    /// (the 1024-unit page limit lives in the codecs, not the constructor).
     pub fn try_new(pages: Vec<Filterable<String>>) -> Result<Self, String> {
         if pages.len() > WRITABLE_BOOK_MAX_PAGES {
             return Err(format!(
                 "Got {} pages, but maximum is {WRITABLE_BOOK_MAX_PAGES}",
                 pages.len()
             ));
-        }
-        for page in &pages {
-            validate_string_len(
-                &page.raw,
-                0,
-                BOOK_PAGE_EDIT_LENGTH,
-                "WritableBookContent.page",
-            )?;
-            if let Some(f) = &page.filtered {
-                validate_string_len(f, 0, BOOK_PAGE_EDIT_LENGTH, "WritableBookContent.page")?;
-            }
         }
         Ok(Self { pages })
     }

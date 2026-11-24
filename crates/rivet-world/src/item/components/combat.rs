@@ -612,8 +612,8 @@ impl DamageReduction {
         if !matches_type {
             return 0.0;
         }
-        if angle_radians > (std::f64::consts::PI / 180.0) * (self.horizontal_blocking_angle as f64)
-        {
+        // Java: `Mth.DEG_TO_RAD * horizontalBlockingAngle` is a float product, widened afterwards.
+        if angle_radians > f64::from(mth::DEG_TO_RAD * self.horizontal_blocking_angle) {
             return 0.0;
         }
         mth::clamp_f32(self.base + self.factor * dealt_damage, 0.0, dealt_damage)

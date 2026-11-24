@@ -445,6 +445,11 @@ fn blocks_attacks_damage_math_and_round_trip() {
     assert_eq!(r.resolve(true, 10.0, 0.0), 10.0);
     assert_eq!(r.resolve(true, 10.0, std::f64::consts::PI), 0.0);
     assert_eq!(r.resolve(false, 10.0, 0.0), 0.0);
+    // Java cutoff = (double)(Mth.DEG_TO_RAD * 90.0f) = (double)1.5707964f
+    // = 1.5707963705062866, above f64 PI/2 = 1.5707963267948966; an angle
+    // between the two is still blocked in Paper.
+    assert_eq!(r.resolve(true, 10.0, 1.57079634), 10.0);
+    assert_eq!(r.resolve(true, 10.0, 1.5707964), 0.0);
 
     let custom = BlocksAttacks {
         block_delay_seconds: 0.25,
@@ -679,9 +684,17 @@ fn books_limits_generation_and_round_trip() {
         vec![Filterable::pass_through("p".to_string()); WRITABLE_BOOK_MAX_PAGES + 1];
     assert!(WritableBookContent::try_new(too_many_pages).is_err());
 
-    // Controlled negative: page > 1024 UTF-16 code units rejected.
+    // Paper's constructor only guards the page count; the 1024-unit limit is
+    // codec-only, so construction and withReplacedPages accept a long page...
     let long_page = "a".repeat(BOOK_PAGE_EDIT_LENGTH + 1);
-    assert!(WritableBookContent::try_new(vec![Filterable::pass_through(long_page)]).is_err());
+    let long = WritableBookContent::try_new(vec![Filterable::pass_through(long_page)]).unwrap();
+    assert!(writable.with_replaced_pages(long.pages().to_vec()).is_ok());
+    // ...while the codec rejects it on encode.
+    assert!(
+        writable_book_content_codec::<JsonOps>()
+            .encode_start(&JsonOps::INSTANCE, &long)
+            .is_error()
+    );
 
     let written = WrittenBookContent::try_new(
         Filterable::pass_through("My Book".to_string()),
