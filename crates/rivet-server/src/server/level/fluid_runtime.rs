@@ -381,18 +381,16 @@ impl ServerLevel {
         if Block::new(state.block()) != scheduled {
             return Ok(());
         }
-        Ok(match state.block().name() {
+        match state.block().name() {
             "minecraft:water" | "minecraft:lava" => {
-                self.tick_liquid_block_live(pos, state, services)?
+                Ok(self.tick_liquid_block_live(pos, state, services)?)
             }
-            "minecraft:bubble_column" => self.tick_bubble_column_live(pos, state, services)?,
-            name => {
-                return Err(BlockTickError::NoRustBody {
-                    block: name.to_owned(),
-                    pos,
-                });
-            }
-        })
+            "minecraft:bubble_column" => Ok(self.tick_bubble_column_live(pos, state, services)?),
+            name => Err(BlockTickError::NoRustBody {
+                block: name.to_owned(),
+                pos,
+            }),
+        }
     }
 
     /// `blockTicks.tick(gameTime, max, this::tickBlock)` with actual
