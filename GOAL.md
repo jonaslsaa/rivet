@@ -12,10 +12,9 @@ You are working on **Rivet**: a faithful Rust port of the Paper Minecraft server
 4. `PORTING.md` — the Java→Rust pattern map. Every translation follows it; every review checks against it.
 5. `OWNERSHIP.md` — how the GC'd object graph maps to arenas/IDs, `LevelCtx`, dispatch, event hooks. Decided per subsystem here, never per-unit.
 6. `CRATES.md` — workspace layout and which external libraries we use (and which are rejected, and why).
-7. `WORKFLOWS.md` — how agent waves and reviews run. Being rewritten; where it conflicts with D15–D19 or `ROADMAP.md`, those win.
-8. `RESEARCH.md` — background: why this plan, Bun's methodology, how Paper differs.
-9. `LESSONS-PUMPKIN.md` — what to adopt/avoid from the Pumpkin project; consultation targets when stuck.
-10. `MANIFEST.tsv` — the work queue: units, dependencies, status (status is derived from the `COVERAGE.tsv` ledger once it exists, D15).
+7. `WORKFLOWS.md` — how agent waves and reviews run. Where it conflicts with D15–D19 or `ROADMAP.md`, those win.
+8. `docs/background.md` — background: why this plan, Bun's methodology, how Paper differs, what to adopt/avoid from Pumpkin.
+9. `MANIFEST.tsv` — the work queue: units, dependencies, status (status is derived from the `COVERAGE.tsv` ledger once it exists, D15).
 
 ## Hard rules (excerpted; details in the docs)
 
