@@ -55,14 +55,16 @@ pub struct Closure {
     pub mismatched: usize,
     /// Inputs a committed, issue-linked exclusion took out of the comparison
     /// (a known divergence left unfixed by the verification change). They are
-    /// executed but neither matched nor mismatched, and always reported.
+    /// declared but never executed on the Rust side (`executed` counts only
+    /// the inputs that ran, so `matched + mismatched == executed` and
+    /// `executed + excluded == declared`), and are always reported.
     pub excluded: usize,
 }
 
 impl Closure {
     /// The row status given whether its tamper negative was detected and named.
     pub fn status(&self, negative_detected: bool) -> Status {
-        if self.matched + self.mismatched + self.excluded != self.executed {
+        if self.matched + self.mismatched != self.executed {
             // The accounting itself is inconsistent: never green.
             return Status::Fail;
         }
@@ -72,7 +74,7 @@ impl Closure {
         if self.executed == 0 {
             return Status::Unverified;
         }
-        if self.executed != self.declared {
+        if self.executed + self.excluded != self.declared {
             return Status::Fail;
         }
         if !negative_detected {
@@ -143,10 +145,10 @@ mod tests {
     }
 
     #[test]
-    fn excluded_inputs_close_the_accounting_but_are_reported() {
+    fn excluded_inputs_close_the_accounting_without_counting_as_executed() {
         let excluded = Closure {
             declared: 5,
-            executed: 5,
+            executed: 3,
             matched: 3,
             mismatched: 0,
             excluded: 2,
@@ -165,7 +167,7 @@ mod tests {
         );
         assert_eq!(
             Closure {
-                executed: 4,
+                executed: 2,
                 matched: 2,
                 ..excluded
             }

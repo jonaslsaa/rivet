@@ -353,6 +353,7 @@ pub enum InputVerdict {
 /// Counts and divergences of one op comparison.
 #[derive(Debug, Clone, Default)]
 pub struct Comparison {
+    /// Inputs the Rust handler actually ran (excluded inputs are not run).
     pub executed: usize,
     /// The per-input verdict, in corpus order (for per-subject tallies).
     pub per_input: Vec<(String, InputVerdict)>,
@@ -405,12 +406,13 @@ pub fn compare(
                 ),
                 (None, None) => unreachable!("index < max(len)"),
             };
-        comparison.executed += 1;
         if input_excluded(op, &id, exclusions) {
+            // Never handed to the Rust handler, so not executed.
             comparison.excluded += 1;
             comparison.per_input.push((id, InputVerdict::Excluded));
             continue;
         }
+        comparison.executed += 1;
         if verdicts && expected_line == actual_line {
             comparison.matched += 1;
             comparison.per_input.push((id, InputVerdict::Matched));

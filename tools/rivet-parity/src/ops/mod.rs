@@ -22,7 +22,8 @@
 //! - `emit-corpus <dir>` — regenerate the corpora from `rivet-parity`'s own
 //!   corpus (a test pins the committed files to this output).
 //!
-//! Every row asserts closure (declared == executed; zero executed is
+//! Every row asserts closure (declared == executed + excluded, an excluded
+//! input being one the Rust side never runs; zero executed is
 //! UNVERIFIED) and runs its tamper negative; `--break-handler <op>` swaps in a
 //! deliberately broken Rust handler and passes only when the comparator
 //! detects and names it.
@@ -374,10 +375,16 @@ fn tally_subjects(
                 subject,
                 ..SubjectTally::default()
             });
-        tally.executed += 1;
         match verdict {
-            compare::InputVerdict::Matched => tally.matched += 1,
-            compare::InputVerdict::Mismatched => tally.mismatched += 1,
+            compare::InputVerdict::Matched => {
+                tally.executed += 1;
+                tally.matched += 1;
+            }
+            compare::InputVerdict::Mismatched => {
+                tally.executed += 1;
+                tally.mismatched += 1;
+            }
+            // Never run on the Rust side: declared, not executed.
             compare::InputVerdict::Excluded => tally.excluded += 1,
         }
     }
@@ -904,7 +911,10 @@ mod tests {
                 row.first.as_ref().map(ToString::to_string),
                 row.note
             );
-            assert!(row.closure.executed > 0 && row.closure.executed == row.closure.declared);
+            assert!(
+                row.closure.executed > 0
+                    && row.closure.executed + row.closure.excluded == row.closure.declared
+            );
         }
     }
 
