@@ -6,7 +6,8 @@
 //! level/ServerPlayerGameMode.java` (Paper 26.2, `0a993450`): `tick`,
 //! `incrementDestroyProgress`, `handleBlockBreakAction`, `destroyAndAck`,
 //! `useItem`, `useItemOn`, and the Paper/CraftBukkit fields they touch
-//! (`captureSentBlockEntities`, `capturedBlockEntity`, `interactResult`).
+//! (`captureSentBlockEntities`, `capturedBlockEntity`, `interactResult`,
+//! `firedInteract`, `interactPosition`, `interactHand`, `interactItemStack`).
 //!
 //! All state is tick-thread owned (no `Arc<RwLock>`). Effects aimed at the
 //! acting player or its connection are appended, in Java call order, to an
@@ -28,6 +29,7 @@ use rivet_protocol::protocol::game::clientbound_block_updates::ClientboundBlockU
 use rivet_registry::block_state::BlockState;
 use rivet_registry::core::{BlockHitResult, BlockPos, Direction, GameType, InteractionHand, Vec3};
 use rivet_world::interaction_result::InteractionResult;
+use rivet_world::item::item_stack::ItemStack;
 
 /// `Attributes.BLOCK_INTERACTION_RANGE` default value (`4.5`).
 pub const DEFAULT_BLOCK_INTERACTION_RANGE: f64 = 4.5;
@@ -75,6 +77,8 @@ pub struct InteractionPlayer {
     pub y_rot: f32,
     /// `player.getXRot()`.
     pub x_rot: f32,
+    /// `LivingEntity.yHeadRot` (`getViewYRot(1.0F)`).
+    pub y_head_rot: f32,
     /// `ServerPlayerGameMode.gameModeForPlayer`.
     pub game_type: GameType,
     /// `player.blockInteractionRange()` (`Attributes.BLOCK_INTERACTION_RANGE`).
@@ -104,6 +108,7 @@ impl InteractionPlayer {
             eye_position,
             y_rot: 0.0,
             x_rot: 0.0,
+            y_head_rot: 0.0,
             game_type,
             block_interaction_range: DEFAULT_BLOCK_INTERACTION_RANGE,
             may_build: !game_type.is_block_placing_restricted(),
@@ -177,6 +182,8 @@ pub enum InteractionEffect {
     ContainerSendAllDataToRemote,
     /// `player.containerMenu.forceHeldSlot(hand)`.
     ContainerForceHeldSlot(InteractionHand),
+    /// `player.containerMenu.forceHeldSlotAndArmor(hand)`.
+    ContainerForceHeldSlotAndArmor(InteractionHand),
     /// `connection.send(new ClientboundContainerClosePacket(player.containerMenu.containerId))`.
     ContainerClose,
     /// `player.getBukkitEntity().sendHealthUpdate()`.
@@ -199,6 +206,10 @@ pub trait InteractionWorld {
 
     /// `level.getBlockState(pos)`.
     fn get_block_state(&self, pos: BlockPos) -> BlockState;
+
+    /// `level.clip(new ClipContext(from, to, ClipContext.Block.OUTLINE,
+    /// ClipContext.Fluid.NONE, player))`.
+    fn clip(&self, player: &InteractionPlayer, from: Vec3, to: Vec3) -> BlockHitResult;
 
     /// `level.getBlockStateIfLoaded(pos)` (Paper).
     fn get_block_state_if_loaded(&self, pos: BlockPos) -> Option<BlockState>;
@@ -261,6 +272,9 @@ pub trait InteractionWorld {
     /// `ServerPlayerGameMode.destroyBlock(pos)`.
     fn destroy_block(&mut self, player: &InteractionPlayer, pos: BlockPos) -> bool;
 
+    /// `player.getItemInHand(hand)`.
+    fn get_item_in_hand(&self, player: &InteractionPlayer, hand: InteractionHand) -> ItemStack;
+
     /// The hand item's `isEmpty()`.
     fn is_hand_empty(&self, player: &InteractionPlayer, hand: InteractionHand) -> bool;
 
@@ -291,11 +305,11 @@ pub trait InteractionWorld {
     /// pos, false, player.getMainHandItem())`.
     fn handle_debug_stick_left_click(&mut self, player: &InteractionPlayer, pos: BlockPos) -> bool;
 
-    /// `MCUtil.clientPredictsInteraction(player, level.getBlockState(pos), <hand item>)`.
+    /// `MCUtil.clientPredictsInteraction(player, state, <hand item>)`.
     fn client_predicts_interaction(
         &self,
         player: &InteractionPlayer,
-        pos: BlockPos,
+        state: BlockState,
         hand: InteractionHand,
     ) -> bool;
 
@@ -315,7 +329,7 @@ pub trait InteractionWorld {
 }
 
 /// `net.minecraft.server.level.ServerPlayerGameMode` digging and interaction state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ServerPlayerGameMode {
     is_destroying_block: bool,
     destroy_progress_start: i32,
@@ -333,6 +347,15 @@ pub struct ServerPlayerGameMode {
     /// CraftBukkit `interactResult` — `PlayerInteractEvent.useItemInHand() == DENY`
     /// of the last `useItemOn`.
     pub interact_result: bool,
+    /// CraftBukkit `firedInteract` — set by `useItemOn`, cleared by
+    /// `handleUseItem` whenever its raytrace hits a block.
+    pub fired_interact: bool,
+    /// CraftBukkit `interactPosition` (`null` until the first `useItemOn`).
+    pub interact_position: Option<BlockPos>,
+    /// CraftBukkit `interactHand` (`null` until the first `useItemOn`).
+    pub interact_hand: Option<InteractionHand>,
+    /// CraftBukkit `interactItemStack` (`null` until the first `useItemOn`).
+    pub interact_item_stack: Option<ItemStack>,
 }
 
 impl Default for ServerPlayerGameMode {
@@ -356,6 +379,10 @@ impl ServerPlayerGameMode {
             capture_sent_block_entities: false,
             captured_block_entity: false,
             interact_result: false,
+            fired_interact: false,
+            interact_position: None,
+            interact_hand: None,
+            interact_item_stack: None,
         }
     }
 
@@ -615,13 +642,16 @@ impl ServerPlayerGameMode {
         }
         let cancelled_item = world.is_hand_on_cooldown(player, hand);
 
-        // RivetTodo(#501) PlayerInteractEvent RIGHT_CLICK_BLOCK producer site (and the
-        // firedInteract/interactPosition/interactHand/interactItemStack record that handleUseItem reads).
-        // With no listener the event keeps its constructor defaults plus the two pre-sets:
-        // useInteractedBlock() is DENY iff cancelledBlock, useItemInHand() is DENY iff cancelledItem.
+        // RivetTodo(#501) PlayerInteractEvent RIGHT_CLICK_BLOCK producer site. With no listener the
+        // event keeps its constructor defaults plus the two pre-sets: useInteractedBlock() is DENY iff
+        // cancelledBlock, useItemInHand() is DENY iff cancelledItem.
         let use_interacted_block_denied = cancelled_block;
         let use_item_in_hand_denied = cancelled_item;
+        self.fired_interact = true;
         self.interact_result = use_item_in_hand_denied;
+        self.interact_position = Some(pos);
+        self.interact_hand = Some(hand);
+        self.interact_item_stack = Some(world.get_item_in_hand(player, hand).copy());
 
         if use_interacted_block_denied {
             if world.is_cake_block(pos) {
@@ -629,7 +659,7 @@ impl ServerPlayerGameMode {
             } else if world.is_jigsaw_structure_or_command_block(pos) {
                 out.push(InteractionEffect::ContainerClose);
             }
-            if world.client_predicts_interaction(player, pos, hand) {
+            if world.client_predicts_interaction(player, world.get_block_state(pos), hand) {
                 out.push(InteractionEffect::ContainerSendAllDataToRemote);
             } else {
                 out.push(InteractionEffect::ContainerForceHeldSlot(hand));

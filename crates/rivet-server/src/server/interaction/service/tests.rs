@@ -5,6 +5,7 @@
 //! (`working/Paper` `0a993450`). The wire layer is proven separately against
 //! actual Paper codecs (`tools/rivet-oracle/fixtures/interaction-packets.jsonl`).
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use rivet_protocol::game::serversbound_player_action_packet::Action as PlayerAction;
@@ -17,6 +18,8 @@ use rivet_registry::block_state::BlockState;
 use rivet_registry::core::{BlockHitResult, BlockPos, Direction, GameType, InteractionHand, Vec3};
 use rivet_registry::generated::blocks::BlockId;
 use rivet_world::interaction_result::InteractionResult;
+use rivet_world::item::item_id::ItemId;
+use rivet_world::item::item_stack::ItemStack;
 
 use super::*;
 use crate::server::level::server_player_game_mode::{InteractionEffect, InteractionPlayer};
@@ -37,6 +40,10 @@ fn dirt() -> BlockState {
     state("minecraft:dirt")
 }
 
+fn item(name: &str) -> ItemStack {
+    ItemStack::of(ItemId::from_name(name).unwrap())
+}
+
 const PLAYER_ID: i32 = 7;
 
 /// Recording in-memory `InteractionWorld`.
@@ -54,12 +61,17 @@ struct MockWorld {
     cake: bool,
     destroy_progress: f32,
     allow_destroy: bool,
+    hand_items: [ItemStack; 2],
     hand_empty: [bool; 2],
     hand_enabled: [bool; 2],
     hand_cooldown: [bool; 2],
     hand_places_blocks: [bool; 2],
     adventure_can_break: bool,
     client_predicts: bool,
+    /// `level.clip` answer; `None` misses at `to`.
+    clip_result: Option<BlockHitResult>,
+    /// The last `level.clip(from, to)` call.
+    last_clip: Cell<Option<(Vec3, Vec3)>>,
     block_use_item_on_result: InteractionResult,
     block_use_without_item_result: InteractionResult,
     item_use_on_result: InteractionResult,
@@ -89,12 +101,15 @@ impl MockWorld {
             cake: false,
             destroy_progress: 0.25,
             allow_destroy: true,
+            hand_items: [item("minecraft:stone"), ItemStack::empty()],
             hand_empty: [false, true],
             hand_enabled: [true, true],
             hand_cooldown: [false, false],
             hand_places_blocks: [false, false],
             adventure_can_break: false,
             client_predicts: false,
+            clip_result: None,
+            last_clip: Cell::new(None),
             block_use_item_on_result: InteractionResult::TRY_WITH_EMPTY_HAND,
             block_use_without_item_result: InteractionResult::PASS,
             item_use_on_result: InteractionResult::PASS,
@@ -133,6 +148,11 @@ impl InteractionWorld for MockWorld {
     }
     fn get_block_state(&self, pos: BlockPos) -> BlockState {
         self.block(pos)
+    }
+    fn clip(&self, _: &InteractionPlayer, from: Vec3, to: Vec3) -> BlockHitResult {
+        self.last_clip.set(Some((from, to)));
+        self.clip_result
+            .unwrap_or_else(|| BlockHitResult::miss(to, Direction::South, BlockPos::ZERO))
     }
     fn get_block_state_if_loaded(&self, pos: BlockPos) -> Option<BlockState> {
         self.is_chunk_loaded(pos.get_x() >> 4, pos.get_z() >> 4)
@@ -195,6 +215,9 @@ impl InteractionWorld for MockWorld {
         self.destroyed.push(pos);
         true
     }
+    fn get_item_in_hand(&self, _: &InteractionPlayer, hand: InteractionHand) -> ItemStack {
+        self.hand_items[hand_index(hand)].copy()
+    }
     fn is_hand_empty(&self, _: &InteractionPlayer, hand: InteractionHand) -> bool {
         self.hand_empty[hand_index(hand)]
     }
@@ -220,7 +243,7 @@ impl InteractionWorld for MockWorld {
     fn client_predicts_interaction(
         &self,
         _: &InteractionPlayer,
-        _: BlockPos,
+        _: BlockState,
         _: InteractionHand,
     ) -> bool {
         self.client_predicts
@@ -988,4 +1011,178 @@ fn use_item_requires_a_non_empty_enabled_item() {
         vec![InteractionEffect::ResetLastActionTime]
     );
     assert_eq!(world.item_use_rotation, None);
+}
+
+/// A survival player right-clicks a block with an ender pearl on cooldown: the
+/// client sends `use_item_on` then `use_item`. `useItemOn` records
+/// `interactResult = cancelledItem`, and `handleUseItem`'s raytrace hits the
+/// same block with the same hand and item, so Paper replays the cancellation
+/// (`resyncUsingItem` + `forceHeldSlotAndArmor`) instead of using the item.
+#[test]
+fn use_item_replays_a_cooldown_cancelled_use_item_on_for_the_raytraced_block() {
+    let mut service = service();
+    let mut world = MockWorld::new();
+    let pos = BlockPos::new(0, 65, 2);
+    world.set_block(pos, stone());
+    world.hand_items[0] = item("minecraft:ender_pearl");
+    world.hand_cooldown = [true, false];
+    world.item_use_result = InteractionResult::SUCCESS_SERVER;
+    let player = survival_player();
+
+    service.handle_use_item_on(&use_item_on(pos, Direction::North, 1), &player, &mut world);
+    let game_mode = service.game_mode();
+    assert!(game_mode.fired_interact);
+    assert!(game_mode.interact_result);
+    assert_eq!(game_mode.interact_position, Some(pos));
+    assert_eq!(game_mode.interact_hand, Some(InteractionHand::MainHand));
+
+    world.clip_result = Some(BlockHitResult::new(
+        Vec3::new(0.5, 65.62, 2.0),
+        Direction::North,
+        pos,
+        false,
+    ));
+    let packet = ServerboundUseItemPacket::new(InteractionHand::MainHand, 2, 0.0, 0.0);
+    let out = service.handle_use_item(&packet, &player, &mut world);
+    assert_eq!(
+        out,
+        vec![
+            InteractionEffect::ResetLastActionTime,
+            InteractionEffect::ResyncUsingItem,
+            InteractionEffect::ContainerForceHeldSlotAndArmor(InteractionHand::MainHand),
+        ]
+    );
+    assert!(!service.game_mode().fired_interact);
+    assert_eq!(world.item_use_rotation, None);
+
+    // With `firedInteract` cleared the next raytrace hit is a fresh
+    // RIGHT_CLICK_BLOCK event, which no listener cancels; the cooldown is over.
+    world.hand_cooldown = [false, false];
+    let packet = ServerboundUseItemPacket::new(InteractionHand::MainHand, 3, 0.0, 0.0);
+    let out = service.handle_use_item(&packet, &player, &mut world);
+    assert_eq!(
+        out,
+        vec![
+            InteractionEffect::ResetLastActionTime,
+            InteractionEffect::Swing(InteractionHand::MainHand),
+        ]
+    );
+}
+
+#[test]
+fn use_item_replay_needs_the_same_block_hand_and_item() {
+    let pos = BlockPos::new(0, 65, 2);
+    let setup = || {
+        let mut service = service();
+        let mut world = MockWorld::new();
+        world.set_block(pos, stone());
+        world.hand_items[0] = item("minecraft:ender_pearl");
+        world.hand_cooldown = [true, false];
+        world.client_predicts = true;
+        service.handle_use_item_on(
+            &use_item_on(pos, Direction::North, 1),
+            &survival_player(),
+            &mut world,
+        );
+        world.clip_result = Some(BlockHitResult::new(
+            Vec3::new(0.5, 65.62, 2.0),
+            Direction::North,
+            pos,
+            false,
+        ));
+        (service, world)
+    };
+    let packet = ServerboundUseItemPacket::new(InteractionHand::MainHand, 2, 0.0, 0.0);
+    let replayed = vec![
+        InteractionEffect::ResetLastActionTime,
+        InteractionEffect::ResyncUsingItem,
+        InteractionEffect::ContainerSendAllDataToRemote,
+    ];
+    let not_cancelled = vec![InteractionEffect::ResetLastActionTime];
+
+    let (mut service, mut world) = setup();
+    assert_eq!(
+        service.handle_use_item(&packet, &survival_player(), &mut world),
+        replayed
+    );
+
+    // A different raytraced block is a fresh event; `firedInteract` still clears.
+    let (mut service, mut world) = setup();
+    world.clip_result = Some(BlockHitResult::new(
+        Vec3::new(0.5, 66.0, 2.0),
+        Direction::North,
+        pos.above(),
+        false,
+    ));
+    assert_eq!(
+        service.handle_use_item(&packet, &survival_player(), &mut world),
+        not_cancelled
+    );
+    assert!(!service.game_mode().fired_interact);
+
+    // A different item (components included) is a fresh event.
+    let (mut service, mut world) = setup();
+    world.hand_items[0] = item("minecraft:snowball");
+    assert_eq!(
+        service.handle_use_item(&packet, &survival_player(), &mut world),
+        not_cancelled
+    );
+
+    // A different hand is a fresh event.
+    let (mut service, mut world) = setup();
+    world.hand_empty = [false, false];
+    world.hand_items[1] = item("minecraft:ender_pearl");
+    let off_hand = ServerboundUseItemPacket::new(InteractionHand::OffHand, 2, 0.0, 0.0);
+    assert_eq!(
+        service.handle_use_item(&off_hand, &survival_player(), &mut world),
+        not_cancelled
+    );
+
+    // A raytrace miss is RIGHT_CLICK_AIR: never cancelled, `firedInteract` kept.
+    let (mut service, mut world) = setup();
+    world.clip_result = None;
+    assert_eq!(
+        service.handle_use_item(&packet, &survival_player(), &mut world),
+        not_cancelled
+    );
+    assert!(service.game_mode().fired_interact);
+}
+
+#[test]
+fn use_item_raytraces_along_the_snapped_head_rotation() {
+    let mut service = service();
+    let mut world = MockWorld::new();
+    let player = survival_player();
+    let eye = player.eye_position;
+
+    // Unrotated: `calculateViewVector(0, 0)` = (0, 0, 1) scaled by the 4.5 range.
+    let packet = ServerboundUseItemPacket::new(InteractionHand::MainHand, 1, 0.0, 0.0);
+    service.handle_use_item(&packet, &player, &mut world);
+    assert_eq!(
+        world.last_clip.get(),
+        Some((eye, Vec3::new(eye.x, eye.y, eye.z + 4.5)))
+    );
+
+    // `absSnapRotationTo` sets `yHeadRot`, which `getViewYRot(1.0F)` reads;
+    // yaw 90 looks down -X and pitch -90 straight up (`Mth` table values).
+    let packet = ServerboundUseItemPacket::new(InteractionHand::MainHand, 2, 90.0, 0.0);
+    service.handle_use_item(&packet, &player, &mut world);
+    let (_, to) = world.last_clip.get().unwrap();
+    assert!((to.x - (eye.x - 4.5)).abs() < 1e-6, "{to:?}");
+    assert!((to.z - eye.z).abs() < 1e-6, "{to:?}");
+
+    // Without a snap the view yaw is still the head yaw, not `yRot`.
+    let mut turned_head = player;
+    turned_head.y_head_rot = 90.0;
+    let packet = ServerboundUseItemPacket::new(InteractionHand::MainHand, 3, 0.0, 0.0);
+    let out = service.handle_use_item(&packet, &turned_head, &mut world);
+    assert_eq!(out, vec![InteractionEffect::ResetLastActionTime]);
+    let (_, to) = world.last_clip.get().unwrap();
+    assert!((to.x - (eye.x - 4.5)).abs() < 1e-6, "{to:?}");
+
+    // Pitch -90 looks straight up.
+    let packet = ServerboundUseItemPacket::new(InteractionHand::MainHand, 4, 0.0, -90.0);
+    service.handle_use_item(&packet, &player, &mut world);
+    let (_, to) = world.last_clip.get().unwrap();
+    assert!((to.y - (eye.y + 4.5)).abs() < 1e-6, "{to:?}");
 }

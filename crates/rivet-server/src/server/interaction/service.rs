@@ -9,9 +9,12 @@ use rivet_protocol::game::{
     ClientboundBlockChangedAckPacket, ServerboundPlayerActionPacket, ServerboundUseItemOnPacket,
     ServerboundUseItemPacket,
 };
-use rivet_registry::core::{Direction, InteractionHand};
-use rivet_util::mth::{clamp_f32, wrap_degrees_f32};
+use rivet_registry::block_state::BlockState;
+use rivet_registry::core::{Direction, HitResultType, InteractionHand, Vec3};
+use rivet_registry::generated::blocks::BlockId;
+use rivet_util::mth::{self, clamp_f32, wrap_degrees_f32};
 use rivet_world::interaction_result::SwingSource;
+use rivet_world::item::item_stack::ItemStack;
 
 use crate::server::level::server_player_game_mode::{
     InteractionEffect, InteractionPlayer, InteractionWorld, ServerPlayerGameMode, send_block_update,
@@ -306,7 +309,7 @@ impl WorldInteractionService {
                 }
             } else if world.is_under_spawn_protection(player, pos) {
                 // Paper: fix inventory desync (MC-99075).
-                if world.client_predicts_interaction(player, pos, hand) {
+                if world.client_predicts_interaction(player, world.get_block_state(pos), hand) {
                     out.push(InteractionEffect::ContainerSendAllDataToRemote);
                 } else {
                     out.push(InteractionEffect::ContainerForceHeldSlot(hand));
@@ -357,9 +360,58 @@ impl WorldInteractionService {
             abs_snap_rotation_to(&mut player, target_y_rot, target_x_rot);
         }
 
-        // RivetTodo(#501) CraftBukkit's raytrace PlayerInteractEvent (RIGHT_CLICK_AIR / RIGHT_CLICK_BLOCK)
-        // producer site, including the no-listener cancellation that replays `interactResult` when the
-        // raytraced block, hand and item match the last useItemOn (resyncUsingItem + inventory resync).
+        // CraftBukkit: raytrace to look for 'rogue armswings'.
+        let from = player.eye_position;
+        let delta = scale(
+            calculate_view_vector(player.x_rot, player.y_head_rot),
+            player.block_interaction_range,
+        );
+        let to = Vec3::new(from.x + delta.x, from.y + delta.y, from.z + delta.z);
+        let hit_result = world.clip(&player, from, to);
+
+        let cancelled = if hit_result.get_type() != HitResultType::Block {
+            // RivetTodo(#501) PlayerInteractEvent RIGHT_CLICK_AIR producer site. With no listener
+            // useItemInHand() keeps its DEFAULT, so the use is not cancelled.
+            false
+        } else {
+            let item_stack = world.get_item_in_hand(&player, hand);
+            let game_mode = &self.game_mode;
+            let cancelled = if game_mode.fired_interact
+                && game_mode.interact_position == Some(hit_result.get_block_pos())
+                && game_mode.interact_hand == Some(hand)
+                && game_mode
+                    .interact_item_stack
+                    .as_ref()
+                    .is_some_and(|interact| {
+                        ItemStack::is_same_item_same_components(interact, &item_stack)
+                    }) {
+                game_mode.interact_result
+            } else {
+                // RivetTodo(#501) PlayerInteractEvent RIGHT_CLICK_BLOCK producer site. With no
+                // listener useItemInHand() keeps its DEFAULT, so the use is not cancelled.
+                false
+            };
+            self.game_mode.fired_interact = false;
+            cancelled
+        };
+
+        if cancelled {
+            // Paper: properly cancel usable items.
+            out.push(InteractionEffect::ResyncUsingItem);
+            // Paper: fix inventory desync (SPIGOT-2524).
+            let air =
+                BlockState::of(BlockId::from_name("minecraft:air").expect("air is registered"));
+            if world.client_predicts_interaction(&player, air, hand) {
+                out.push(InteractionEffect::ContainerSendAllDataToRemote);
+            } else {
+                out.push(InteractionEffect::ContainerForceHeldSlotAndArmor(hand));
+            }
+            return out;
+        }
+        // Re-read in case the event changed the hand item.
+        if world.is_hand_empty(&player, hand) {
+            return out;
+        }
 
         if self
             .game_mode
@@ -381,8 +433,10 @@ impl Default for WorldInteractionService {
 /// The rotation `Entity.absSnapRotationTo(yRot, xRot)` leaves on the player:
 /// `setYRot(yRot % 360)` and `setXRot(Mth.clamp(xRot, -90, 90) % 360)`, each
 /// discarding a non-finite value (`Entity.setYRot`/`setXRot`), `setXRot`
-/// storing `Math.clamp(xRot % 360, -90, 90)`.
+/// storing `Math.clamp(xRot % 360, -90, 90)`, then Paper's
+/// `setYHeadRot(yRot)` (`LivingEntity` stores it unchecked).
 fn abs_snap_rotation_to(player: &mut InteractionPlayer, y_rot: f32, x_rot: f32) {
+    let head_y_rot = y_rot;
     let y_rot = y_rot % 360.0;
     if y_rot.is_finite() {
         player.y_rot = y_rot;
@@ -393,6 +447,28 @@ fn abs_snap_rotation_to(player: &mut InteractionPlayer, y_rot: f32, x_rot: f32) 
         // `f32::clamp` matches `Math.min(max, Math.max(value, min))` (signed zeros included).
         player.x_rot = (x_rot % 360.0).clamp(-90.0, 90.0);
     }
+    player.y_head_rot = head_y_rot;
+}
+
+/// `Entity.calculateViewVector(float xRot, float yRot)` — `Mth` table trig in
+/// `float`, widened to `double` by `new Vec3(double, double, double)`.
+fn calculate_view_vector(x_rot: f32, y_rot: f32) -> Vec3 {
+    let real_x_rot = x_rot * mth::DEG_TO_RAD;
+    let real_y_rot = -y_rot * mth::DEG_TO_RAD;
+    let y_cos = mth::cos(f64::from(real_y_rot));
+    let y_sin = mth::sin(f64::from(real_y_rot));
+    let x_cos = mth::cos(f64::from(real_x_rot));
+    let x_sin = mth::sin(f64::from(real_x_rot));
+    Vec3::new(
+        f64::from(y_sin * x_cos),
+        f64::from(-x_sin),
+        f64::from(y_cos * x_cos),
+    )
+}
+
+/// `Vec3.scale(double scale)`.
+fn scale(vec: Vec3, scale: f64) -> Vec3 {
+    Vec3::new(vec.x * scale, vec.y * scale, vec.z * scale)
 }
 
 #[cfg(test)]
