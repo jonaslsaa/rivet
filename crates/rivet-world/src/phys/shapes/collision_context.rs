@@ -5,7 +5,9 @@
 //! `working/Paper/paper-server/src/minecraft/java/net/minecraft/world/phys/shapes/CollisionContext.java`.
 //!
 //! The members that need live types go up to `rivet-server`'s
-//! `CollisionContextLive: CollisionContext` (the same mirrored path):
+//! `CollisionContextLive: CollisionContext` subtrait (the same mirrored path,
+//! implemented by every Java implementor; its two members are still STUBs
+//! there):
 //! `canStandOnFluid(FluidState, FluidState)`, `getCollisionShape(BlockState,
 //! CollisionGetter, BlockPos)` and the static factories `empty()`,
 //! `emptyWithFluidCollisions()`, `of(Entity)`, `of(Entity, boolean)`,

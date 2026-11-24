@@ -1,5 +1,5 @@
 //! `net.minecraft.world.phys.shapes.EntityCollisionContext` (and its nested
-//! `Empty`). The class holds an `Entity`, so it is whole in `rivet-server`
+//! `Empty`, a struct embedding it). The class holds an `Entity`, so it is whole in `rivet-server`
 //! (D15); it implements `rivet_world`'s `CollisionContext`.
 //!
 //! Java source:
@@ -20,7 +20,7 @@ use rivet_world::phys::shapes::voxel_shape::VoxelShape;
 
 use crate::world::entity::entity_id::EntityId;
 
-/// `EntityCollisionContext`; `Empty` is [`EntityCollisionContext::empty`].
+/// `EntityCollisionContext`; the nested subclass `Empty` is [`Empty`].
 #[derive(Clone, Debug)]
 pub struct EntityCollisionContext {
     descending: bool,
@@ -29,8 +29,6 @@ pub struct EntityCollisionContext {
     held_item: ItemStack,
     always_collide_with_fluid: bool,
     entity: Option<EntityId>,
-    /// `this instanceof EntityCollisionContext.Empty`.
-    is_empty_context: bool,
 }
 
 impl EntityCollisionContext {
@@ -50,22 +48,6 @@ impl EntityCollisionContext {
             held_item,
             always_collide_with_fluid,
             entity,
-            is_empty_context: false,
-        }
-    }
-
-    /// `new EntityCollisionContext.Empty(boolean alwaysCollideWithFluid)`.
-    pub fn empty(always_collide_with_fluid: bool) -> EntityCollisionContext {
-        EntityCollisionContext {
-            is_empty_context: true,
-            ..EntityCollisionContext::new(
-                false,
-                false,
-                -f64::MAX,
-                ItemStack::empty(),
-                always_collide_with_fluid,
-                None,
-            )
         }
     }
 
@@ -88,16 +70,64 @@ impl CollisionContext for EntityCollisionContext {
         self.descending
     }
 
-    /// `Empty.isAbove` is `defaultValue`; otherwise
-    /// `entityBottom > pos.getY() + shape.max(Y) - 1.0E-5F`.
-    fn is_above(&self, shape: &VoxelShape, pos: &BlockPos, default_value: bool) -> bool {
-        if self.is_empty_context {
-            return default_value;
-        }
+    /// `entityBottom > pos.getY() + shape.max(Y) - 1.0E-5F` (the `float`
+    /// literal widens).
+    fn is_above(&self, shape: &VoxelShape, pos: &BlockPos, _default_value: bool) -> bool {
         self.entity_bottom > pos.get_y() as f64 + shape.max(Axis::Y) - 1.0E-5f32 as f64
     }
 
     fn is_placement(&self) -> bool {
         self.placement
+    }
+}
+
+/// `EntityCollisionContext.Empty` — `extends EntityCollisionContext`, so it
+/// embeds its parent (OWNERSHIP.md §Class hierarchies) and overrides `isAbove`.
+#[derive(Clone, Debug)]
+pub struct Empty {
+    entity_collision_context: EntityCollisionContext,
+}
+
+impl Empty {
+    /// `new EntityCollisionContext.Empty(boolean alwaysCollideWithFluid)`.
+    pub fn new(always_collide_with_fluid: bool) -> Empty {
+        Empty {
+            entity_collision_context: EntityCollisionContext::new(
+                false,
+                false,
+                -f64::MAX,
+                ItemStack::empty(),
+                always_collide_with_fluid,
+                None,
+            ),
+        }
+    }
+
+    /// The embedded `EntityCollisionContext`.
+    pub fn entity_collision_context(&self) -> &EntityCollisionContext {
+        &self.entity_collision_context
+    }
+}
+
+impl CollisionContext for Empty {
+    fn is_holding_item(&self, item: ItemId) -> bool {
+        self.entity_collision_context.is_holding_item(item)
+    }
+
+    fn always_collide_with_fluid(&self) -> bool {
+        self.entity_collision_context.always_collide_with_fluid()
+    }
+
+    fn is_descending(&self) -> bool {
+        self.entity_collision_context.is_descending()
+    }
+
+    /// `Empty.isAbove` — `defaultValue`.
+    fn is_above(&self, _shape: &VoxelShape, _pos: &BlockPos, default_value: bool) -> bool {
+        default_value
+    }
+
+    fn is_placement(&self) -> bool {
+        self.entity_collision_context.is_placement()
     }
 }
