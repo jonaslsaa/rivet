@@ -171,7 +171,7 @@ impl JUnitLikeTestReporter {
     }
 
     /// Render deterministic XML matching Paper's `JUnitLikeTestReporter.java`.
-    pub fn to_xml(&self) -> String {
+    pub fn to_xml(&self) -> io::Result<String> {
         let mut out = String::new();
         out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>");
         out.push_str("<testsuite>");
@@ -179,7 +179,7 @@ impl JUnitLikeTestReporter {
             out,
             "<testsuite time=\"{}\" timestamp=\"{}\"",
             format_seconds(self.total_time_ms),
-            escape_xml_attr(&self.timestamp)
+            escape_xml_attr(&self.timestamp)?
         );
         if self.test_cases.is_empty() {
             out.push_str("/>");
@@ -189,8 +189,8 @@ impl JUnitLikeTestReporter {
                 let _ = write!(
                     out,
                     "<testcase classname=\"{}\" name=\"{}\" time=\"{}\"",
-                    escape_xml_attr(&tc.classname),
-                    escape_xml_attr(&tc.name),
+                    escape_xml_attr(&tc.classname)?,
+                    escape_xml_attr(&tc.name)?,
                     format_seconds(tc.time_ms)
                 );
                 match &tc.failure_tag {
@@ -198,7 +198,7 @@ impl JUnitLikeTestReporter {
                         let _ = write!(
                             out,
                             "><{tag} message=\"{}\"/></testcase>",
-                            escape_xml_attr(msg)
+                            escape_xml_attr(msg)?
                         );
                     }
                     None => out.push_str("/>"),
@@ -207,12 +207,12 @@ impl JUnitLikeTestReporter {
             out.push_str("</testsuite>");
         }
         out.push_str("</testsuite>");
-        out
+        Ok(out)
     }
 
     /// Write the XML report to `path`.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        fs::write(path, self.to_xml())
+        fs::write(path, self.to_xml()?)
     }
 }
 
@@ -275,17 +275,16 @@ fn java_double_to_string(v: f64) -> String {
     }
 }
 
-fn is_valid_xml_1_0_char(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x09 | 0x0A | 0x0D | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF
-    )
-}
-
-/// JDK `ToStream.writeAttrString`: `& < > "` become entity refs and TAB/LF/CR
+/// JDK `ToStream.writeAttrString`: `& < > "` become entity refs, TAB/LF/CR
 /// become numeric char refs (`&#9;`/`&#10;`/`&#13;`) so attribute-value
-/// normalization preserves them; `'`, 0x7F-0x9F and U+2028 are written raw.
-fn escape_xml_attr(s: &str) -> String {
+/// normalization preserves them, and supplementary code points (U+10000 and
+/// up) become decimal char refs (`&#128512;`). `'`, 0x7F-0x9F, U+2028 and
+/// U+FFFE/U+FFFF are written raw. Any other C0 control character makes the
+/// JDK Transformer throw ("An invalid XML character ... was found"), which
+/// Paper's `finish()` rethrows as `Error("Couldn't save test report")`; that
+/// is surfaced here as an `InvalidData` error. Verified against JDK 25's
+/// default `Transformer` over a DOM `setAttribute` document.
+fn escape_xml_attr(s: &str) -> io::Result<String> {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
@@ -296,11 +295,22 @@ fn escape_xml_attr(s: &str) -> String {
             '\t' => out.push_str("&#9;"),
             '\n' => out.push_str("&#10;"),
             '\r' => out.push_str("&#13;"),
-            other if is_valid_xml_1_0_char(other) => out.push(other),
-            _ => {}
+            c if (c as u32) < 0x20 => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Couldn't save test report: An invalid XML character (Unicode: 0x{:x}) was found",
+                        c as u32
+                    ),
+                ));
+            }
+            c if (c as u32) >= 0x10000 => {
+                let _ = write!(out, "&#{};", c as u32);
+            }
+            other => out.push(other),
         }
     }
-    out
+    Ok(out)
 }
 
 /// Overall run verdict. Zero selected tests is explicitly non-success.

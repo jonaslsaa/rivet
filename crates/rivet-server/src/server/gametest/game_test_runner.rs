@@ -478,6 +478,11 @@ impl GameTestRunner {
 
         self.all_test_infos.push(new_id);
         self.scheduled_for_rerun.push(new_id);
+        // Paper: `stopped` starts true and is set again by `stop()` and by an
+        // empty `runScheduledRerunTests`; here that is not-started/stopped/finished.
+        if !self.started || self.stopped || self.finished {
+            self.run_scheduled_rerun_tests();
+        }
         new_id
     }
 
@@ -925,6 +930,9 @@ impl GameTestRunner {
                 .join(", ")
         );
         let rerun_ids = std::mem::take(&mut self.scheduled_for_rerun);
+        self.started = true;
+        self.stopped = false;
+        self.finished = false;
         let new_batches = divide_into_batches(
             rerun_ids,
             self.config.max_tests_per_batch,

@@ -311,7 +311,7 @@ fn intentionally_failing_synthetic_test_paper_timing_and_reports() {
 
     let junit = junit_capture.lock().unwrap();
     assert!(junit.is_finished());
-    let xml = junit.to_xml();
+    let xml = junit.to_xml().unwrap();
     assert!(xml.contains("<testsuite"));
     assert!(xml.contains("<failure message=\""));
     assert!(xml.contains("minecraft:synthetic_fail"));
@@ -1562,11 +1562,9 @@ fn deterministic_grid_spawner_skips_preserved_positions_to_avoid_collisions() {
     );
 }
 
-#[test]
-fn junit_xml_strips_illegal_xml_1_0_control_characters() {
+fn failed_entry_with_message(message: &str) -> GameTestReportEntry {
     use rivet_registry::core::Rotation;
-    let mut reporter = JUnitLikeTestReporter::new("2026-01-01T00:00:00Z");
-    reporter.on_test_failed(&GameTestReportEntry {
+    GameTestReportEntry {
         id: Identifier::with_default_namespace("ctrl_test"),
         structure: Identifier::with_default_namespace("empty"),
         required: true,
@@ -1574,16 +1572,84 @@ fn junit_xml_strips_illegal_xml_1_0_control_characters() {
         test_block_pos: None,
         run_time_ms: 10,
         tick_count: 1,
-        error: Some(GameTestException::assert(
-            "bad\u{0000}null\u{001B}esc\tand\nok",
-            1,
-        )),
-    });
+        error: Some(GameTestException::assert(message, 1)),
+    }
+}
+
+#[test]
+fn junit_xml_rejects_illegal_xml_1_0_control_characters() {
+    // Derived from JDK 25: DOM `setAttribute` + default `Transformer` throws
+    // `An invalid XML character (Unicode: 0x0 / 0x1b) was found`; Paper's
+    // `finish()` rethrows it as `Error("Couldn't save test report")`.
+    for bad in ["bad\u{0000}null", "bad\u{001B}esc"] {
+        let mut reporter = JUnitLikeTestReporter::new("2026-01-01T00:00:00Z");
+        reporter.on_test_failed(&failed_entry_with_message(bad));
+        reporter.finish();
+        let err = reporter.to_xml().expect_err("illegal control char");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("invalid XML character"));
+    }
+}
+
+#[test]
+fn junit_xml_escapes_supplementary_code_points_as_decimal_refs() {
+    // Derived from JDK 25 (same path as above): U+1F600 -> `&#128512;`;
+    // TAB/LF/CR -> `&#9;`/`&#10;`/`&#13;`; U+007F, U+0085, U+2028, U+FFFE,
+    // U+FFFF and `'` are written raw.
+    let mut reporter = JUnitLikeTestReporter::new("2026-01-01T00:00:00Z");
+    reporter.on_test_failed(&failed_entry_with_message(
+        "a\u{1F600}b\tc\nd\u{7F}\u{85}\u{2028}\u{FFFE}\u{FFFF}'",
+    ));
     reporter.finish();
-    let xml = reporter.to_xml();
-    assert!(!xml.contains('\u{0000}'), "NUL must be stripped from XML");
-    assert!(!xml.contains('\u{001B}'), "ESC must be stripped from XML");
-    assert!(xml.contains("badnullesc&#9;and&#10;ok"));
+    let xml = reporter.to_xml().unwrap();
+    assert!(
+        xml.contains("a&#128512;b&#9;c&#10;d\u{7F}\u{85}\u{2028}\u{FFFE}\u{FFFF}'"),
+        "{xml}"
+    );
+}
+
+#[test]
+fn rerun_test_on_finished_runner_runs_scheduled_copy() {
+    // Paper `GameTestRunner.rerunTest`: `if (this.stopped) runScheduledRerunTests()`.
+    let registries = build_registries_with(
+        vec![],
+        vec![(
+            Identifier::with_default_namespace("rerun_me"),
+            fn_instance(
+                "rerun_fn",
+                TestEnvironmentRef::Key(default_environment_key()),
+                10,
+                0,
+                true,
+                1,
+                1,
+            ),
+        )],
+    );
+    let counter = Arc::new(AtomicI32::new(0));
+    let c = Arc::clone(&counter);
+    let mut functions = TestFunctionRegistry::with_builtins();
+    functions.register(Identifier::with_default_namespace("rerun_fn"), move |h| {
+        c.fetch_add(1, Ordering::SeqCst);
+        h.succeed();
+        Ok(())
+    });
+    let infos = vec![make_info(
+        &registries,
+        "rerun_me",
+        RetryOptions::no_retries(),
+    )];
+    let mut runner = GameTestRunner::new(infos, registries, GameTestRunnerConfig::default());
+    runner.run_to_completion(&functions, 100);
+    assert!(runner.is_finished());
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+    let original = runner.all_test_infos()[0];
+    runner.rerun_test(original);
+    assert!(!runner.is_finished());
+    runner.run_to_completion(&functions, 100);
+    assert!(runner.is_finished());
+    assert_eq!(counter.load(Ordering::SeqCst), 2);
 }
 
 #[test]
@@ -1675,7 +1741,7 @@ fn junit_xml_matches_jdk_transformer_output() {
     });
     reporter.finish();
     assert_eq!(
-        reporter.to_xml(),
+        reporter.to_xml().unwrap(),
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\
          <testsuite><testsuite time=\"1.05\" timestamp=\"2026-01-01T00:00:00Z\">\
          <testcase classname=\"minecraft:empty\" name=\"minecraft:pass_it\" time=\"1.0\"/>\
@@ -1686,7 +1752,7 @@ fn junit_xml_matches_jdk_transformer_output() {
 
     let empty = JUnitLikeTestReporter::new("t");
     assert_eq!(
-        empty.to_xml(),
+        empty.to_xml().unwrap(),
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\
          <testsuite><testsuite time=\"0.0\" timestamp=\"t\"/></testsuite>"
     );
