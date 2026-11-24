@@ -1347,6 +1347,13 @@ main() {
     python3 scripts/test_check_markers.py
   fi
 
+  # --- ledger freshness (every gate, scoped included) ----------------------------
+  # COVERAGE.tsv / VERIFY.tsv must regenerate byte-identically from the tree
+  # (D19, VERIFICATION T0). A stale ledger is fixed by regenerating and
+  # committing: python3 scripts/coverage_ledger.py && python3 scripts/verify_ledger.py
+  step "ledger freshness (scripts/ledger_check.sh)"
+  bash scripts/ledger_check.sh
+
   # --- rivet-codegen (workspace-excluded tool) fmt/clippy/test ------------------
   # tools/rivet-codegen is excluded from the cargo workspace, so --workspace
   # fmt/clippy/test never touch it. Its golden drift test

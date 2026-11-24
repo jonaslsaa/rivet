@@ -120,6 +120,11 @@ const HARD_RULES =
   `Never abort a merge or discard conflicting/unexplained files; resolve in place or stop blocked. ` +
   `Never modify or commit anything from \`${WT}/working\`.`
 
+const LEDGERS =
+  `COVERAGE.tsv and VERIFY.tsv are generated ledgers: never hand-edit or hand-merge them. After any merge or code change, run ` +
+  `\`python3 scripts/coverage_ledger.py && python3 scripts/verify_ledger.py\` (this also resolves merge conflicts in those two files) ` +
+  `and commit the result if they changed, then confirm \`bash scripts/ledger_check.sh\` passes.`
+
 const RESUME_NOTE =
   `This workflow may resume after interruption. Re-read branch, status, log, and merge state from disk before acting. ` +
   `If a merge is already in progress, resolve it faithfully and conclude it; never abort it or assume a clean starting state.`
@@ -144,7 +149,7 @@ function fixPrompt(findings, disputes) {
     `${HARD_RULES} Work only from the current state. Inspect all uncommitted files before acting: commit them only if they ` +
     `belong to this task and are correct; never delete or overwrite unexplained work. Correct confirmed findings against ` +
     `project docs and pinned Paper where relevant. If a finding is factually wrong, do not apply it; record a precise dispute. ` +
-    `Reconsider comments before committing. Run focused checks, commit all intended deliverable changes conventionally, and ` +
+    `Reconsider comments before committing. ${LEDGERS} Run focused checks, commit all intended deliverable changes conventionally, and ` +
     `finish with a clean tree. Report the resulting full HEAD hash, cleanliness, changed files, disputes, and check evidence. ` +
     `If safe completion is impossible, return status=blocked and preserve the state.\n` +
     `${CHECKS ? `Required focused checks:\n${CHECKS}` : ''}`
@@ -161,7 +166,7 @@ for (let round = 1; round <= MAX; round++) {
     `Refresh the already-implemented branch in \`${WT}\` onto current \`origin/main\` before release review. ` +
       `${HARD_RULES} ${RESUME_NOTE} Run \`git fetch origin\`. If the tree is clean and behind, merge ` +
       `\`origin/main\` into the branch (\`git merge --no-edit origin/main\`); resolve any merge conflicts faithfully using the task and ` +
-      `current main, then commit the merge without weakening or dropping the deliverable. If the tree is dirty, do not merge or discard anything: report ` +
+      `current main, then commit the merge without weakening or dropping the deliverable. ${LEDGERS} If the tree is dirty, do not merge or discard anything: report ` +
       `ready=false so the fix phase can inspect and commit legitimate task work. Finish by reporting full 40-character hashes, ` +
       `ahead/behind counts, cleanliness, and every merge-base-diff deliverable file as a repo-relative path. ready=true requires ` +
       `a named non-main branch, clean tree, ` +
