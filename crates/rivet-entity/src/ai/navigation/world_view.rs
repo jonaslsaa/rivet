@@ -329,39 +329,17 @@ pub trait PathWorldView {
 
     fn block_info(&self, pos: BlockPos) -> BlockPathInfo;
 
-    /// Returns `true` if `aabb` does not intersect any block collision shape.
+    /// `PathNavigationRegion.noCollision(mob, aabb)`, the test inside
+    /// `WalkNodeEvaluator.hasCollisions`.
     ///
-    /// Default implementation checks every integer block cell overlapped by `aabb`
-    /// using `block_info(pos).collision_max_y`. Cells in chunks missing from the
-    /// region read as [`BlockPathInfo::UNLOADED`] and, like Paper's
-    /// `PathNavigationRegion.getChunkForCollisions` (`EmptyLevelChunk`), add no
-    /// collision.
-    fn is_aabb_collision_free(&self, aabb: Aabb) -> bool {
-        let min_x = mth::floor_d(aabb.min_x + 1.0e-7);
-        let max_x = mth::floor_d(aabb.max_x - 1.0e-7);
-        let min_y = mth::floor_d(aabb.min_y + 1.0e-7);
-        let max_y = mth::floor_d(aabb.max_y - 1.0e-7);
-        let min_z = mth::floor_d(aabb.min_z + 1.0e-7);
-        let max_z = mth::floor_d(aabb.max_z - 1.0e-7);
-        // Inspect one block below min_y so protruding shapes (fences/walls with height 1.5)
-        // are included, matching Paper's BlockCollisions.
-        let start_y = min_y.saturating_sub(1);
-
-        for x in min_x..=max_x {
-            for y in start_y..=max_y {
-                for z in min_z..=max_z {
-                    let info = self.block_info(BlockPos::new(x, y, z));
-                    if let Some(max_local_y) = info.collision_max_y {
-                        let block_top = y as f64 + max_local_y;
-                        if aabb.min_y < block_top - 1.0e-7 && aabb.max_y > y as f64 + 1.0e-7 {
-                            return false;
-                        }
-                    }
-                }
-            }
-        }
-        true
-    }
+    /// Returns `true` when `aabb` intersects no block collision `VoxelShape`
+    /// (each block's real shape under the navigating mob's `CollisionContext`,
+    /// read through `getChunkForCollisions`, so cells in chunks missing from the
+    /// region are `EmptyLevelChunk` air and add nothing) and, per
+    /// `noBorderCollision`, the world border's collision shape when
+    /// `WorldBorder.isInsideCloseToBorder(mob, aabb)`. The region contributes no
+    /// entity collisions.
+    fn is_aabb_collision_free(&self, aabb: Aabb) -> bool;
 
     /// Paper's `WorldBorder.isWithinBounds(BlockPos)`:
     /// `x >= minX && x < maxX && z >= minZ && z < maxZ` on the block coordinates.
@@ -580,8 +558,19 @@ pub struct MobPathingState {
     pub jumping: bool,
     pub delta_movement: Vec3,
     pub has_mob_passenger: bool,
+    /// `Mob.onPathfindingStart()`, called by `WalkNodeEvaluator.prepare` and
+    /// `FlyNodeEvaluator.prepare`. The `Mob` default does nothing; `Sniffer`
+    /// overrides it.
+    pub on_pathfinding_start: fn(&mut MobPathingState),
+    /// `Mob.onPathfindingDone()`, called by `WalkNodeEvaluator.done` and
+    /// `FlyNodeEvaluator.done`. The `Mob` default does nothing; `Sniffer`
+    /// overrides it.
+    pub on_pathfinding_done: fn(&mut MobPathingState),
     malus_overrides: [Option<f32>; PathType::COUNT],
 }
+
+/// The `Mob.onPathfindingStart()` / `Mob.onPathfindingDone()` default.
+fn no_pathfinding_hook(_mob: &mut MobPathingState) {}
 
 impl Default for MobPathingState {
     fn default() -> Self {
@@ -626,6 +615,8 @@ impl MobPathingState {
             jumping: false,
             delta_movement: Vec3::ZERO,
             has_mob_passenger: false,
+            on_pathfinding_start: no_pathfinding_hook,
+            on_pathfinding_done: no_pathfinding_hook,
             malus_overrides: [None; PathType::COUNT],
         }
     }
@@ -694,6 +685,16 @@ impl MobPathingState {
     /// Mirrors `Mob.setPathfindingMalus(PathType, float)`.
     pub fn set_pathfinding_malus(&mut self, path_type: PathType, malus: f32) {
         self.malus_overrides[path_type.index()] = Some(malus);
+    }
+
+    /// Mirrors `Mob.onPathfindingStart()`.
+    pub fn on_pathfinding_start(&mut self) {
+        (self.on_pathfinding_start)(self);
+    }
+
+    /// Mirrors `Mob.onPathfindingDone()`.
+    pub fn on_pathfinding_done(&mut self) {
+        (self.on_pathfinding_done)(self);
     }
 
     /// Mirrors `LivingEntity.setSpeed(float)` which sets `speed` and `zza = speed`.

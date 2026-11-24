@@ -80,6 +80,33 @@ impl PathWorldView for TestWorld {
         })
     }
 
+    /// Block shapes are `[0, 1] x [0, collision_max_y] x [0, 1]` boxes. The
+    /// fixture's world border filters targets only and has no collision shape.
+    fn is_aabb_collision_free(&self, aabb: crate::ai::goal::context::Aabb) -> bool {
+        use rivet_util::mth;
+
+        let min_x = mth::floor_d(aabb.min_x + 1.0e-7);
+        let max_x = mth::floor_d(aabb.max_x - 1.0e-7);
+        let min_y = mth::floor_d(aabb.min_y + 1.0e-7);
+        let max_y = mth::floor_d(aabb.max_y - 1.0e-7);
+        let min_z = mth::floor_d(aabb.min_z + 1.0e-7);
+        let max_z = mth::floor_d(aabb.max_z - 1.0e-7);
+        // One cell below `min_y` so shapes taller than a block (fences) count.
+        for x in min_x..=max_x {
+            for y in (min_y - 1)..=max_y {
+                for z in min_z..=max_z {
+                    if let Some(height) = self.block_info(BlockPos::new(x, y, z)).collision_max_y {
+                        let y = f64::from(y);
+                        if aabb.min_y < y + height - 1.0e-7 && aabb.max_y > y + 1.0e-7 {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
     /// Block shapes are `[0, 1] x [0, collision_max_y] x [0, 1]` boxes; a water or
     /// lava cell's fluid shape is a source's `[0, 1] x [0, 8/9] x [0, 1]` box.
     fn clip_hits_block(
@@ -364,6 +391,7 @@ fn walk_path_finder_navigates_around_wall_and_respects_unloaded() {
         .find_path(
             &mut eval,
             &world,
+            &mut PathTypeCache::new(),
             &mut mob,
             &mut TestRandom::new(),
             &[BlockPos::new(6, 1, 0)],
@@ -413,6 +441,7 @@ fn walk_path_finder_controlled_negative_blocked_by_enclosure() {
         .find_path(
             &mut eval,
             &world,
+            &mut PathTypeCache::new(),
             &mut mob,
             &mut TestRandom::new(),
             &[BlockPos::new(4, 1, 0)],
@@ -454,6 +483,7 @@ fn walk_path_finder_step_up_and_door_opening() {
         .find_path(
             &mut eval,
             &world,
+            &mut PathTypeCache::new(),
             &mut mob,
             &mut TestRandom::new(),
             &[BlockPos::new(2, 2, 0)],
@@ -500,6 +530,7 @@ fn fly_evaluator_paths_over_wall_in_3d() {
         .find_path(
             &mut eval,
             &world,
+            &mut PathTypeCache::new(),
             &mut mob,
             &mut TestRandom::new(),
             &[BlockPos::new(4, 1, 0)],
@@ -531,6 +562,7 @@ fn swim_evaluator_navigates_underwater_and_handles_breach() {
         .find_path(
             &mut eval,
             &world,
+            &mut PathTypeCache::new(),
             &mut mob,
             &mut TestRandom::new(),
             &[BlockPos::new(4, 2, 0)],
@@ -550,6 +582,7 @@ fn swim_evaluator_navigates_underwater_and_handles_breach() {
         .find_path(
             &mut eval,
             &world,
+            &mut PathTypeCache::new(),
             &mut mob,
             &mut TestRandom::new(),
             &[BlockPos::new(0, 4, 0)],
@@ -575,6 +608,7 @@ fn amphibious_evaluator_restores_malus_on_done() {
     let _ = finder.find_path(
         &mut eval,
         &world,
+        &mut PathTypeCache::new(),
         &mut mob,
         &mut TestRandom::new(),
         &[BlockPos::new(4, 1, 0)],
@@ -603,13 +637,23 @@ fn ground_navigation_follows_path_and_detects_stuck() {
     let mut nav = PathNavigation::ground(16.0);
     let mut move_control = MoveControl::new();
 
-    assert!(nav.move_to_xyz(&mut mob, &world, &mut TestRandom::new(), 4.5, 1.0, 0.5, 1.0));
+    assert!(nav.move_to_xyz(
+        &mut mob,
+        &world,
+        &mut PathTypeCache::new(),
+        &mut TestRandom::new(),
+        4.5,
+        1.0,
+        0.5,
+        1.0
+    ));
     assert!(nav.is_in_progress());
 
     // One tick sets MoveControl wanted position
     nav.tick(
         &mut mob,
         &world,
+        &mut PathTypeCache::new(),
         &mut TestRandom::new(),
         &mut move_control,
         1,
@@ -621,6 +665,7 @@ fn ground_navigation_follows_path_and_detects_stuck() {
         nav.tick(
             &mut mob,
             &world,
+            &mut PathTypeCache::new(),
             &mut TestRandom::new(),
             &mut move_control,
             t,
@@ -631,6 +676,7 @@ fn ground_navigation_follows_path_and_detects_stuck() {
     nav.tick(
         &mut mob,
         &world,
+        &mut PathTypeCache::new(),
         &mut TestRandom::new(),
         &mut move_control,
         101,
@@ -648,6 +694,7 @@ fn ground_navigation_follows_path_and_detects_stuck() {
     assert!(fast_nav.move_to_xyz(
         &mut fast_mob,
         &world,
+        &mut PathTypeCache::new(),
         &mut TestRandom::new(),
         4.5,
         1.0,
@@ -658,6 +705,7 @@ fn ground_navigation_follows_path_and_detects_stuck() {
         fast_nav.tick(
             &mut fast_mob,
             &world,
+            &mut PathTypeCache::new(),
             &mut TestRandom::new(),
             &mut fast_mc,
             t,
@@ -667,6 +715,7 @@ fn ground_navigation_follows_path_and_detects_stuck() {
     fast_nav.tick(
         &mut fast_mob,
         &world,
+        &mut PathTypeCache::new(),
         &mut TestRandom::new(),
         &mut fast_mc,
         32,
@@ -693,6 +742,7 @@ fn ground_navigation_avoid_sun_trims_sky_exposed_nodes_on_move_to() {
         .create_path(
             &mut mob,
             &world,
+            &mut PathTypeCache::new(),
             &mut TestRandom::new(),
             BlockPos::new(4, 1, 0),
             0,
@@ -709,6 +759,7 @@ fn ground_navigation_avoid_sun_trims_sky_exposed_nodes_on_move_to() {
     let path = nav.create_path(
         &mut mob,
         &open_world,
+        &mut PathTypeCache::new(),
         &mut TestRandom::new(),
         BlockPos::new(4, 1, 0),
         0,
@@ -748,6 +799,7 @@ fn wall_climber_navigation_falls_back_to_direct_move_control() {
     let _ = nav.create_path(
         &mut mob,
         &world,
+        &mut PathTypeCache::new(),
         &mut TestRandom::new(),
         BlockPos::new(5, 1, 0),
         0,
@@ -756,6 +808,7 @@ fn wall_climber_navigation_falls_back_to_direct_move_control() {
     nav.tick(
         &mut mob,
         &world,
+        &mut PathTypeCache::new(),
         &mut TestRandom::new(),
         &mut move_control,
         1,
@@ -996,6 +1049,7 @@ fn wall_climber_fallback_checks_3d_distance_when_below_target() {
     let _ = nav.create_path(
         &mut mob,
         &world,
+        &mut PathTypeCache::new(),
         &mut TestRandom::new(),
         BlockPos::new(0, 6, 0),
         0,
@@ -1006,6 +1060,7 @@ fn wall_climber_fallback_checks_3d_distance_when_below_target() {
     nav.tick(
         &mut mob,
         &world,
+        &mut PathTypeCache::new(),
         &mut TestRandom::new(),
         &mut move_control,
         1,
@@ -1019,6 +1074,7 @@ fn wall_climber_fallback_checks_3d_distance_when_below_target() {
     nav.tick(
         &mut mob,
         &world,
+        &mut PathTypeCache::new(),
         &mut TestRandom::new(),
         &mut move_control,
         2,
@@ -1041,6 +1097,7 @@ fn amphibious_path_finder_swims_upward_underwater() {
         .find_path(
             &mut eval,
             &world,
+            &mut PathTypeCache::new(),
             &mut mob,
             &mut TestRandom::new(),
             &[BlockPos::new(0, 4, 0)],
@@ -1105,7 +1162,14 @@ fn ground_navigation_does_not_prematurely_cut_corner_around_wall() {
     let mut nav = PathNavigation::ground(16.0);
     let mut mc = MoveControl::new();
     assert!(nav.move_to_path(Some(path), 1.0, &mob, &world));
-    nav.tick(&mut mob, &world, &mut TestRandom::new(), &mut mc, 1);
+    nav.tick(
+        &mut mob,
+        &world,
+        &mut PathTypeCache::new(),
+        &mut TestRandom::new(),
+        &mut mc,
+        1,
+    );
 
     // Mob has not passed (1,1,0) and cannot move directly on ground; must not skip node 0
     assert_eq!(nav.path.as_ref().map(Path::get_next_node_index), Some(0));
@@ -1137,10 +1201,26 @@ fn wall_climber_fallback_keeps_climbing_toward_elevated_target() {
 
     // Create path to elevated target (0, 6, 0) which sets WallClimber's path_to_position,
     // then clear the path so WallClimber's direct climbing fallback runs.
-    let _ = nav.move_to_xyz(&mut mob, &world, &mut TestRandom::new(), 0.5, 6.0, 0.5, 1.0);
+    let _ = nav.move_to_xyz(
+        &mut mob,
+        &world,
+        &mut PathTypeCache::new(),
+        &mut TestRandom::new(),
+        0.5,
+        6.0,
+        0.5,
+        1.0,
+    );
     nav.path = None;
     nav.speed_modifier = 1.0;
-    nav.tick(&mut mob, &world, &mut TestRandom::new(), &mut mc, 1);
+    nav.tick(
+        &mut mob,
+        &world,
+        &mut PathTypeCache::new(),
+        &mut TestRandom::new(),
+        &mut mc,
+        1,
+    );
 
     // Must still want to move toward (0, 6, 0) instead of clearing path_to_position
     assert!(mc.has_wanted());
@@ -1392,6 +1472,7 @@ fn path_finder_candidate_selection_uses_paper_comparators() {
         .find_path(
             &mut eval,
             &world,
+            &mut PathTypeCache::new(),
             &mut mob,
             &mut TestRandom::new(),
             &[far, near],
@@ -1412,6 +1493,7 @@ fn path_finder_candidate_selection_uses_paper_comparators() {
         .find_path(
             &mut eval,
             &world,
+            &mut PathTypeCache::new(),
             &mut mob,
             &mut TestRandom::new(),
             &[a, b],
@@ -1433,6 +1515,7 @@ fn ground_create_path_surface_search_scans_up_and_rejects_unloaded_targets() {
     let _ = nav.create_path(
         &mut mob,
         &world,
+        &mut PathTypeCache::new(),
         &mut TestRandom::new(),
         BlockPos::new(3, 1, 0),
         0,
@@ -1449,6 +1532,7 @@ fn ground_create_path_surface_search_scans_up_and_rejects_unloaded_targets() {
         nav.create_path(
             &mut mob,
             &unloaded,
+            &mut PathTypeCache::new(),
             &mut TestRandom::new(),
             BlockPos::new(3, 1, 0),
             0
@@ -1612,6 +1696,7 @@ fn create_path_drops_targets_outside_world_border() {
         nav.create_path_targets(
             &mut mob,
             &world,
+            &mut PathTypeCache::new(),
             &mut TestRandom::new(),
             &[outside],
             0,
@@ -1623,6 +1708,7 @@ fn create_path_drops_targets_outside_world_border() {
         .create_path_targets(
             &mut mob,
             &world,
+            &mut PathTypeCache::new(),
             &mut TestRandom::new(),
             &[outside, inside],
             0,
@@ -1642,6 +1728,7 @@ fn should_recompute_path_uses_remaining_nodes_around_midpoint() {
     let path = nav.create_path(
         &mut mob,
         &world,
+        &mut PathTypeCache::new(),
         &mut TestRandom::new(),
         BlockPos::new(4, 1, 0),
         0,
@@ -1743,4 +1830,150 @@ fn unloaded_region_cells_read_as_empty_chunk_air_outside_path_type() {
         eval.get_path_type_of_mob(&mut ctx, &swimmer, 0, 4, 0),
         PathType::Breach
     );
+}
+
+#[test]
+fn level_path_type_cache_keeps_unloaded_blocked_across_searches() {
+    // A wall of cells missing from the first mob's region.
+    let mut partial = TestWorld::flat(0);
+    for z in -30..=30 {
+        for y in 1..=3 {
+            partial.set(2, y, z, BlockPathInfo::UNLOADED);
+        }
+    }
+    let loaded = TestWorld::flat(0);
+    let target = BlockPos::new(4, 1, 0);
+    let search = |world: &TestWorld, cache: &mut PathTypeCache| {
+        let mut mob = MobPathingState::new(Vec3::new(0.5, 1.0, 0.5), 0.6, 1.8);
+        PathFinder::new(400)
+            .find_path(
+                &mut WalkNodeEvaluator::new(),
+                world,
+                cache,
+                &mut mob,
+                &mut TestRandom::new(),
+                &[target],
+                8.0,
+                0,
+                1.0,
+            )
+            .is_some_and(|path| path.can_reach())
+    };
+
+    let mut level_cache = PathTypeCache::new();
+    assert!(!search(&partial, &mut level_cache));
+    // `ServerLevel.getPathTypeCache()` still holds the BLOCKED entries after the
+    // chunk loads, so a later search sharing it stays blocked.
+    assert!(!search(&loaded, &mut level_cache));
+    assert!(search(&loaded, &mut PathTypeCache::new()));
+
+    // `sendBlockUpdated` invalidates per position.
+    for z in -30..=30 {
+        for y in 0..=3 {
+            level_cache.invalidate(BlockPos::new(2, y, z));
+        }
+    }
+    assert!(search(&loaded, &mut level_cache));
+}
+
+#[test]
+fn swim_get_path_type_scans_the_mob_box() {
+    use crate::ai::navigation::NodeEvaluator;
+
+    let mut pool = TestWorld::flat(0);
+    pool.fill_water(-3, 1, -3, 3, 3, 3);
+    pool.set(1, 2, 0, BlockPathInfo::SOLID);
+    let mut swimmer = MobPathingState::new(Vec3::new(0.5, 2.0, 0.5), 0.6, 0.6);
+    let mut eval = SwimNodeEvaluator::new(true);
+    eval.prepare(&mut swimmer, &pool);
+    let mut ctx = PathfindingContext::new(&pool, None, BlockPos::new(0, 2, 0));
+    // Air above water-pathfindable water is BREACH.
+    assert_eq!(eval.get_path_type(&mut ctx, 0, 4, 0), PathType::Breach);
+    assert_eq!(eval.get_path_type(&mut ctx, 0, 2, 0), PathType::Water);
+
+    // A two-wide swimmer also reads the neighbouring column.
+    let mut wide = MobPathingState::new(Vec3::new(0.5, 2.0, 0.5), 1.2, 0.6);
+    let mut wide_eval = SwimNodeEvaluator::new(true);
+    wide_eval.prepare(&mut wide, &pool);
+    let mut ctx = PathfindingContext::new(&pool, None, BlockPos::new(0, 2, 0));
+    assert_eq!(
+        wide_eval.get_path_type(&mut ctx, 0, 2, 0),
+        PathType::Blocked
+    );
+    assert_eq!(wide_eval.get_path_type(&mut ctx, -2, 2, 0), PathType::Water);
+}
+
+thread_local! {
+    static PATHFINDING_HOOK_LOG: std::cell::RefCell<Vec<&'static str>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// `Sniffer.onPathfindingStart()` with `isInWater()` standing in for the
+/// fire-or-water check.
+fn sniffer_like_start(mob: &mut MobPathingState) {
+    PATHFINDING_HOOK_LOG.with(|log| log.borrow_mut().push("start"));
+    if mob.in_water {
+        mob.set_pathfinding_malus(PathType::Water, 0.0);
+    }
+}
+
+/// `Sniffer.onPathfindingDone()`.
+fn sniffer_like_done(mob: &mut MobPathingState) {
+    PATHFINDING_HOOK_LOG.with(|log| log.borrow_mut().push("done"));
+    mob.set_pathfinding_malus(PathType::Water, -1.0);
+}
+
+#[test]
+fn evaluators_run_mob_pathfinding_hooks_at_paper_points() {
+    let take_log = || PATHFINDING_HOOK_LOG.with(|log| std::mem::take(&mut *log.borrow_mut()));
+    let mut world = TestWorld::flat(0);
+    for z in -30..=30 {
+        world.set(2, 1, z, BlockPathInfo::WATER);
+        world.set(2, 2, z, BlockPathInfo::WATER);
+    }
+    let target = BlockPos::new(4, 1, 0);
+    let search = |mob: &mut MobPathingState| {
+        PathFinder::new(400)
+            .find_path(
+                &mut WalkNodeEvaluator::new(),
+                &world,
+                &mut PathTypeCache::new(),
+                mob,
+                &mut TestRandom::new(),
+                &[target],
+                8.0,
+                0,
+                1.0,
+            )
+            .is_some_and(|path| path.can_reach())
+    };
+
+    let mut sniffer = MobPathingState::new(Vec3::new(0.5, 1.0, 0.5), 1.9, 1.75);
+    sniffer.on_pathfinding_start = sniffer_like_start;
+    sniffer.on_pathfinding_done = sniffer_like_done;
+    sniffer.set_pathfinding_malus(PathType::Water, -1.0);
+    assert!(!search(&mut sniffer));
+    assert_eq!(take_log(), ["start", "done"]);
+
+    sniffer.in_water = true;
+    assert!(search(&mut sniffer));
+    assert_eq!(take_log(), ["start", "done"]);
+    assert_eq!(sniffer.get_pathfinding_malus(PathType::Water), -1.0);
+
+    // FlyNodeEvaluator calls each hook once more around `super`.
+    let mut flyer = MobPathingState::new(Vec3::new(0.5, 1.0, 0.5), 0.6, 0.6);
+    flyer.on_pathfinding_start = sniffer_like_start;
+    flyer.on_pathfinding_done = sniffer_like_done;
+    let _ = PathFinder::new(400).find_path(
+        &mut FlyNodeEvaluator::new(),
+        &world,
+        &mut PathTypeCache::new(),
+        &mut flyer,
+        &mut TestRandom::new(),
+        &[target],
+        8.0,
+        0,
+        1.0,
+    );
+    assert_eq!(take_log(), ["start", "start", "done", "done"]);
 }

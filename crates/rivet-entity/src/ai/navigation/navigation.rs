@@ -15,7 +15,7 @@ use crate::ai::navigation::evaluator::{
 };
 use crate::ai::navigation::path::Path;
 use crate::ai::navigation::path_finder::PathFinder;
-use crate::ai::navigation::path_type::PathType;
+use crate::ai::navigation::path_type::{PathType, PathTypeCache};
 use crate::ai::navigation::world_view::{MobPathingState, PathWorldView};
 
 /// Concrete navigation variant mirroring Paper 26.2's `PathNavigation` subclasses.
@@ -379,6 +379,7 @@ impl PathNavigation {
         &mut self,
         mob: &mut MobPathingState,
         world: &W,
+        cache: &mut PathTypeCache,
         random: &mut dyn GoalRandom,
         mut target: BlockPos,
         reach_range: i32,
@@ -412,6 +413,7 @@ impl PathNavigation {
         self.create_path_targets(
             mob,
             world,
+            cache,
             random,
             &[target],
             reach_range,
@@ -451,11 +453,15 @@ impl PathNavigation {
     /// Mirrors `PathNavigation.createPath(Set<BlockPos>, Entity, int, boolean, int, float)`.
     ///
     /// `max_path_length` is [`PathNavigation::max_path_length`] for every overload
-    /// except `createPath(BlockPos, int, int)`.
+    /// except `createPath(BlockPos, int, int)`. `cache` is the level's
+    /// `ServerLevel.getPathTypeCache()`, shared by every mob's search and
+    /// invalidated per position by `ServerLevel.sendBlockUpdated`.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_path_targets<W: PathWorldView + ?Sized>(
         &mut self,
         mob: &mut MobPathingState,
         world: &W,
+        cache: &mut PathTypeCache,
         random: &mut dyn GoalRandom,
         targets: &[BlockPos],
         reach_range: i32,
@@ -494,6 +500,7 @@ impl PathNavigation {
             | NavigationVariant::WallClimber { evaluator, .. } => self.path_finder.find_path(
                 evaluator,
                 world,
+                cache,
                 mob,
                 random,
                 targets,
@@ -504,6 +511,7 @@ impl PathNavigation {
             NavigationVariant::Flying { evaluator } => self.path_finder.find_path(
                 evaluator,
                 world,
+                cache,
                 mob,
                 random,
                 targets,
@@ -514,6 +522,7 @@ impl PathNavigation {
             NavigationVariant::WaterBound { evaluator, .. } => self.path_finder.find_path(
                 evaluator,
                 world,
+                cache,
                 mob,
                 random,
                 targets,
@@ -524,6 +533,7 @@ impl PathNavigation {
             NavigationVariant::Amphibious { evaluator } => self.path_finder.find_path(
                 evaluator,
                 world,
+                cache,
                 mob,
                 random,
                 targets,
@@ -601,6 +611,7 @@ impl PathNavigation {
         &mut self,
         mob: &mut MobPathingState,
         world: &W,
+        cache: &mut PathTypeCache,
         random: &mut dyn GoalRandom,
         x: f64,
         y: f64,
@@ -608,7 +619,7 @@ impl PathNavigation {
         speed_modifier: f64,
     ) -> bool {
         let target = BlockPos::new(mth::floor_d(x), mth::floor_d(y), mth::floor_d(z));
-        let path = self.create_path(mob, world, random, target, 1);
+        let path = self.create_path(mob, world, cache, random, target, 1);
         self.move_to_path(path, speed_modifier, mob, world)
     }
 
@@ -650,6 +661,7 @@ impl PathNavigation {
         &mut self,
         mob: &mut MobPathingState,
         world: &W,
+        cache: &mut PathTypeCache,
         random: &mut dyn GoalRandom,
         game_time: i64,
     ) {
@@ -659,7 +671,7 @@ impl PathNavigation {
             self.has_delayed_recomputation = true;
         } else if let Some(target_pos) = self.target_pos {
             self.path = None;
-            self.path = self.create_path(mob, world, random, target_pos, self.reach_range);
+            self.path = self.create_path(mob, world, cache, random, target_pos, self.reach_range);
             self.time_last_recompute = game_time;
             self.has_delayed_recomputation = false;
         }
@@ -671,6 +683,7 @@ impl PathNavigation {
         &mut self,
         mob: &mut MobPathingState,
         world: &W,
+        cache: &mut PathTypeCache,
         random: &mut dyn GoalRandom,
         move_control: &mut MoveControl,
         game_time: i64,
@@ -709,7 +722,7 @@ impl PathNavigation {
 
         self.tick = self.tick.wrapping_add(1);
         if self.has_delayed_recomputation {
-            self.recompute_path(mob, world, random, game_time);
+            self.recompute_path(mob, world, cache, random, game_time);
         }
 
         if self.is_done() {

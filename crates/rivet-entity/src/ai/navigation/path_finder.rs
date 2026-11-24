@@ -6,6 +6,7 @@ use crate::ai::goal::context::{BlockPos, GoalRandom};
 use crate::ai::navigation::evaluator::NodeEvaluator;
 use crate::ai::navigation::node::{BinaryHeap, Node, NodeArena, Target};
 use crate::ai::navigation::path::Path;
+use crate::ai::navigation::path_type::PathTypeCache;
 use crate::ai::navigation::world_view::{MobPathingState, PathWorldView, PathfindingContext};
 
 /// Port of `net.minecraft.world.level.pathfinder.PathFinder` in Paper 26.2.
@@ -43,12 +44,15 @@ impl PathFinder {
     ///
     /// Targets are passed as a slice in deterministic order (matching an ordered
     /// target set). Calls `evaluator.prepare`, runs A*, and always calls `evaluator.done`.
-    /// `random` is the mob's `getRandom()`, used by `NodeEvaluator.getStart()`.
+    /// `cache` is the level's `ServerLevel.getPathTypeCache()`, which Paper's
+    /// `PathfindingContext(level, mob)` always uses on the server. `random` is the
+    /// mob's `getRandom()`, used by `NodeEvaluator.getStart()`.
     #[allow(clippy::too_many_arguments)]
     pub fn find_path<E: NodeEvaluator, W: PathWorldView + ?Sized>(
         &mut self,
         evaluator: &mut E,
         world: &W,
+        cache: &mut PathTypeCache,
         mob: &mut MobPathingState,
         random: &mut dyn GoalRandom,
         targets: &[BlockPos],
@@ -62,7 +66,7 @@ impl PathFinder {
 
         evaluator.prepare(mob, world);
         let mut arena = NodeArena::new();
-        let mut ctx = PathfindingContext::new(world, None, mob.block_position());
+        let mut ctx = PathfindingContext::new(world, Some(cache), mob.block_position());
         let start_idx = evaluator.get_start(&mut ctx, mob, &mut arena, random);
 
         // Build ordered map of Target -> BlockPos (deterministic iteration)

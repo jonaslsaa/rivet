@@ -754,9 +754,11 @@ impl NodeEvaluator for WalkNodeEvaluator {
     fn prepare<W: PathWorldView + ?Sized>(&mut self, mob: &mut MobPathingState, _world: &W) {
         self.config.prepare_dimensions(mob);
         self.clear_caches();
+        mob.on_pathfinding_start();
     }
 
-    fn done(&mut self, _mob: &mut MobPathingState) {
+    fn done(&mut self, mob: &mut MobPathingState) {
+        mob.on_pathfinding_done();
         self.clear_caches();
     }
 
@@ -1063,14 +1065,20 @@ impl NodeEvaluator for FlyNodeEvaluator {
         &mut self.walk.config
     }
 
+    /// `FlyNodeEvaluator.prepare`: `super.prepare` already ran the mob's
+    /// `onPathfindingStart()`, and Paper calls it a second time here.
     fn prepare<W: PathWorldView + ?Sized>(&mut self, mob: &mut MobPathingState, world: &W) {
         self.walk.prepare(mob, world);
         self.path_type_by_pos_cache.clear();
+        mob.on_pathfinding_start();
     }
 
+    /// `FlyNodeEvaluator.done`: calls `onPathfindingDone()`, then `super.done`
+    /// calls it a second time.
     fn done(&mut self, mob: &mut MobPathingState) {
-        self.walk.done(mob);
+        mob.on_pathfinding_done();
         self.path_type_by_pos_cache.clear();
+        self.walk.done(mob);
     }
 
     fn get_start<W: PathWorldView + ?Sized>(
@@ -1484,6 +1492,32 @@ impl NodeEvaluator for SwimNodeEvaluator {
         y: i32,
         z: i32,
     ) -> PathType {
+        self.path_type_in_box(ctx, x, y, z)
+    }
+
+    /// `SwimNodeEvaluator.getPathType(context, x, y, z)` is
+    /// `getPathTypeOfMob(context, x, y, z, this.mob)`.
+    fn get_path_type<W: PathWorldView + ?Sized>(
+        &mut self,
+        ctx: &mut PathfindingContext<'_, W>,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> PathType {
+        self.path_type_in_box(ctx, x, y, z)
+    }
+}
+
+impl SwimNodeEvaluator {
+    /// Exact port of `SwimNodeEvaluator.getPathTypeOfMob`, which reads only the
+    /// prepared `entityWidth` x `entityHeight` x `entityDepth` box, never the mob.
+    fn path_type_in_box<W: PathWorldView + ?Sized>(
+        &self,
+        ctx: &mut PathfindingContext<'_, W>,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> PathType {
         let mut last_water_pathfindable = false;
         for dx in x..(x + self.config.entity_width) {
             for dy in y..(y + self.config.entity_height) {
@@ -1506,21 +1540,6 @@ impl NodeEvaluator for SwimNodeEvaluator {
             }
         }
         if last_water_pathfindable {
-            PathType::Water
-        } else {
-            PathType::Blocked
-        }
-    }
-
-    fn get_path_type<W: PathWorldView + ?Sized>(
-        &mut self,
-        ctx: &mut PathfindingContext<'_, W>,
-        x: i32,
-        y: i32,
-        z: i32,
-    ) -> PathType {
-        let info = ctx.get_block_info(BlockPos::new(x, y, z));
-        if info.is_water && info.is_pathfindable_water {
             PathType::Water
         } else {
             PathType::Blocked
