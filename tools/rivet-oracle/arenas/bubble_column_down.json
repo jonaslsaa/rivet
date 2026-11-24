@@ -1,0 +1,65 @@
+{
+  "name": "bubble_column_down",
+  "description": "As bubble_column_up with a magma block: a drag-down bubble column.",
+  "origin": [
+    320,
+    0,
+    64
+  ],
+  "size": [
+    3,
+    8,
+    3
+  ],
+  "ticks": 50,
+  "seed": 1,
+  "fill": [
+    {
+      "from": [
+        0,
+        0,
+        0
+      ],
+      "to": [
+        2,
+        7,
+        2
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        1,
+        1,
+        1
+      ],
+      "to": [
+        1,
+        6,
+        1
+      ],
+      "state": "minecraft:water"
+    },
+    {
+      "from": [
+        1,
+        7,
+        1
+      ],
+      "state": "minecraft:air"
+    }
+  ],
+  "script": [
+    {
+      "tick": 0,
+      "op": "set",
+      "pos": [
+        1,
+        0,
+        1
+      ],
+      "state": "minecraft:magma_block",
+      "flags": 3
+    }
+  ]
+}

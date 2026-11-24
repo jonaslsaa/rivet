@@ -1,0 +1,88 @@
+{
+  "arenas": {
+    "brewing_stand_awkward": {
+      "arena_sha256": "99d65c3a2f4da67d6af4304de9cd448b5c201604f2b8b5bafe5c35a8e6ba86bc",
+      "trace_sha256": "6eec125fdfa094af491eeca6cd3f5b7856ba800b8702e210083a950500e47e43",
+      "trace_lines": 423
+    },
+    "bubble_column_down": {
+      "arena_sha256": "4461af5384cbbecdbb1f27d5026410f3a50544c616ca4c7f5d1631218b923444",
+      "trace_sha256": "6518eb3d438e9b4d9b5c420d9f3907bccb95872df8fb696a8a3410e0a4496805",
+      "trace_lines": 53
+    },
+    "bubble_column_up": {
+      "arena_sha256": "245c9347f126a52bf3c3a5484139812aaab71868ebd814659ba683c3976bc6ab",
+      "trace_sha256": "e9795533438f88a07e3b44a681f64e59e655e656af7ea00bd2548cb47b378deb",
+      "trace_lines": 53
+    },
+    "fire_tick_delay_seeded": {
+      "arena_sha256": "3001d122e82307fde88aa67e63e27bb8cc126e5e64cd66e77637b0d8245f3025",
+      "trace_sha256": "80a9beca95720282e5265d240883b2467a244aa32dc90f5d60fcfd5fb277e53b",
+      "trace_lines": 163
+    },
+    "furnace_smelt": {
+      "arena_sha256": "8b22751ef8ac76fa43eedeb59beb9334a39f5caf9332859526513b9c19f79da7",
+      "trace_sha256": "5cd2f6d2bec17a4b6758a705abd55c13bf84149b35c870e9eec3a16d1ab4b9ef",
+      "trace_lines": 263
+    },
+    "hopper_transfer": {
+      "arena_sha256": "9d662fc7ce31f47903c0868456b95f1b74f3641e0b9eaaa16acbb8daf6aee440",
+      "trace_sha256": "622476ce140707840309643813299d4794ad153a6b57c901a07870646247a2c7",
+      "trace_lines": 63
+    },
+    "lava_source_spread": {
+      "arena_sha256": "3cc5ec9ca0b79735178307339483e266ba0f6f6f03569f3d7f07326e17768914",
+      "trace_sha256": "4ddcc80e831e0d1b52b45e30dd9cbdee434106678d68f2894edf9db4c38f2efe",
+      "trace_lines": 143
+    },
+    "piston_push": {
+      "arena_sha256": "4e0d905d583a12e672f501eeeae84e8685db3b36b8956174495d68ccd60bf604",
+      "trace_sha256": "a49c21c9c2a6303bb5cd036bffd33f2a24222877d89746ee7c5861852c63d421",
+      "trace_lines": 15
+    },
+    "sand_fall": {
+      "arena_sha256": "a5925b6fa816a7342c1e0e1ae1d54a904aeff0833b406ccb2da4e31ff94cf6ef",
+      "trace_sha256": "a244dc846ad3cb357d540c51e3108dbee336c380efef3b5334316f4c5b07b39d",
+      "trace_lines": 33
+    },
+    "spawner_idle_seeded": {
+      "arena_sha256": "ece83d9b11ff0ac19f6009034444a39c1ed54fb78481cfb5fd725be161a41e57",
+      "trace_sha256": "a8de88fdb5280b362cc4d89e75796412444d4623e1f418c68e7422c4b7a5c574",
+      "trace_lines": 43
+    },
+    "water_decay": {
+      "arena_sha256": "183d9bc4e7186f9263dece7c10e6360be36462d61ae17e56b881dedd88aa19ad",
+      "trace_sha256": "7a023f0a8d1d993c428854b79dbabdcd22c2b6fcf9f344ce9120599091854e5a",
+      "trace_lines": 83
+    },
+    "water_falling_column": {
+      "arena_sha256": "d5a4d5f55c3cf423322347cd591a9839e57a4af2de0d873573ab9a08f63d8866",
+      "trace_sha256": "9d1629ff13c62fc6978eb8ab344771aa5a936bc18b00f060ed6e11cc67f6276b",
+      "trace_lines": 63
+    },
+    "water_flow_obstacles": {
+      "arena_sha256": "2c3405418db0194d5c878e43609caec0fd6440e1c2b19c630ff34e7b120d3260",
+      "trace_sha256": "ccce00e52d84851bd8dd22ff26f6ee94a889d1290699b69a7b23027535e00102",
+      "trace_lines": 43
+    },
+    "water_infinite_source": {
+      "arena_sha256": "b069a618e06b7d9ee2eacdba6026b4502001bb40726c0d79704cff3c54de5fec",
+      "trace_sha256": "ee6a8a87d75caa81bb8395bbb5f1e1c59ce77b36725ea8200210735c5441720a",
+      "trace_lines": 23
+    },
+    "water_lava_mix": {
+      "arena_sha256": "48e6b6e5422b322812d9d3d972b19a5219451a3ecf6597670962e2d5bb62f9bf",
+      "trace_sha256": "24756b46bffd92d8a3ac52ce7e9e60e502af93e4af313560c37a8f2564a7e73f",
+      "trace_lines": 63
+    },
+    "water_source_spread": {
+      "arena_sha256": "4cf3cd827c854b2543dcc0519b4e8687e7fcebb31214150f98f3ec71546e9c9b",
+      "trace_sha256": "6760401ab90993d4c966936bc9439481afe136ca6db2a5103cbe05330ddb6d58",
+      "trace_lines": 43
+    }
+  },
+  "schema": "rivet.arena-trace/1",
+  "paper_commit": "0a99345",
+  "probe_sha256": "0e67eabd652de28e490d887095c8a84be4fbc10772e71d0b411b56c72402997c",
+  "twin_identical": true
+}

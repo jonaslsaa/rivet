@@ -1,0 +1,107 @@
+{
+  "name": "water_decay",
+  "description": "A water source spreads in a basin; at tick 30 the source is replaced by air with flags 3 and the flowing water decays back to air.",
+  "origin": [
+    160,
+    0,
+    64
+  ],
+  "size": [
+    9,
+    3,
+    9
+  ],
+  "ticks": 80,
+  "seed": 1,
+  "fill": [
+    {
+      "from": [
+        0,
+        0,
+        0
+      ],
+      "to": [
+        8,
+        0,
+        8
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        0,
+        1,
+        0
+      ],
+      "to": [
+        8,
+        2,
+        0
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        0,
+        1,
+        8
+      ],
+      "to": [
+        8,
+        2,
+        8
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        0,
+        1,
+        1
+      ],
+      "to": [
+        0,
+        2,
+        7
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        8,
+        1,
+        1
+      ],
+      "to": [
+        8,
+        2,
+        7
+      ],
+      "state": "minecraft:stone"
+    }
+  ],
+  "script": [
+    {
+      "tick": 0,
+      "op": "set",
+      "pos": [
+        4,
+        1,
+        4
+      ],
+      "state": "minecraft:water",
+      "flags": 3
+    },
+    {
+      "tick": 30,
+      "op": "set",
+      "pos": [
+        4,
+        1,
+        4
+      ],
+      "state": "minecraft:air",
+      "flags": 3
+    }
+  ]
+}

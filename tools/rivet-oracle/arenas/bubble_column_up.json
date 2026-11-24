@@ -1,0 +1,65 @@
+{
+  "name": "bubble_column_up",
+  "description": "A quietly placed column of water sources over stone; at tick 0 the stone under it becomes soul sand with flags 3: LiquidBlock.updateShape schedules a block tick (20), LiquidBlock.tick builds an upward bubble column.",
+  "origin": [
+    288,
+    0,
+    64
+  ],
+  "size": [
+    3,
+    8,
+    3
+  ],
+  "ticks": 50,
+  "seed": 1,
+  "fill": [
+    {
+      "from": [
+        0,
+        0,
+        0
+      ],
+      "to": [
+        2,
+        7,
+        2
+      ],
+      "state": "minecraft:stone"
+    },
+    {
+      "from": [
+        1,
+        1,
+        1
+      ],
+      "to": [
+        1,
+        6,
+        1
+      ],
+      "state": "minecraft:water"
+    },
+    {
+      "from": [
+        1,
+        7,
+        1
+      ],
+      "state": "minecraft:air"
+    }
+  ],
+  "script": [
+    {
+      "tick": 0,
+      "op": "set",
+      "pos": [
+        1,
+        0,
+        1
+      ],
+      "state": "minecraft:soul_sand",
+      "flags": 3
+    }
+  ]
+}

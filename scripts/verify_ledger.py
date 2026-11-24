@@ -43,6 +43,12 @@ Rows
   scenario.*       the eight run-scenario.sh rows of gate.sh (L5)
   reference.selftest, hash.selftest, hash.paper, hash.diff (INACTIVE), generated-full (INACTIVE),
   junit.census     (INACTIVE 0/9,653: Paper JUnit runs against the adapter, L8)
+  arena.harness    the L4 arena tick-trace harness itself (Paper twin admission, closure,
+                   tamper negative); corpus_n = declared arenas
+  arena.<name>     one L4 arena per tools/rivet-oracle/arenas/arenas.tsv row: Paper vs
+                   Rivet tick trace; corpus_n = tick records (ticks + 1); rust_globs and
+                   java_classes from arenas.tsv; results written by
+                   `rivet-arena-trace check --ledger`
 
 Derived columns
 ---------------
@@ -801,10 +807,53 @@ def build_rows(tree: "RustTree | None" = None) -> list[dict[str, str]]:
             row["seed_counts"] = spec["seed_counts"]
         rows.append(row)
 
+    rows.extend(arena_rows(tracked))
+
     rows.sort(key=lambda r: r["id"])
     ids = [r["id"] for r in rows]
     if len(ids) != len(set(ids)):
         raise SystemExit("duplicate VERIFY row ids")
+    return rows
+
+
+ARENAS = f"{ORACLE}/arenas"
+ARENA_MECHANISM = "arena:rivet-arena-trace (Paper vs Rivet tick trace)"
+
+
+def arena_rows(tracked: list[str]) -> list[dict]:
+    """The L4 arena rows: the harness plus one row per declared arena."""
+    index = REPO / ARENAS / "arenas.tsv"
+    if not index.exists():
+        return []
+    lines = index.read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0].split("\t") != ["name", "rust_globs", "java_classes"]:
+        raise SystemExit(f"{ARENAS}/arenas.tsv: bad header")
+    declared = [line.split("\t") for line in lines[1:] if line.strip()]
+    specs = sorted(p[len(ARENAS) + 1:-len(".json")] for p in tracked
+                   if p.startswith(ARENAS + "/") and p.endswith(".json") and p.count("/") == 3)
+    if sorted(cells[0] for cells in declared) != specs:
+        raise SystemExit(f"{ARENAS}/arenas.tsv does not list exactly the tracked arena files {specs}")
+    rows = [{
+        "id": "arena.harness", "layer": "L4", "rust_globs": [], "java_classes": [],
+        "mechanism": "harness:rivet-arena-trace check (Paper twin admission, closure, tamper negative)",
+        "fixtures": [f"{ARENAS}/arenas.tsv", f"{ARENAS}/paper/manifest.json"],
+        "corpus_n": str(len(declared)), "negative": "y", "tier": "T2", "consumers": [],
+        "seed_status": "UNVERIFIED", "note": "harness health; no Rivet parity claim"}]
+    for name, globs, java in declared:
+        fixtures = [f"{ARENAS}/{name}.json", f"{ARENAS}/paper/{name}.trace.jsonl"]
+        for p in fixtures:
+            if not is_tracked(p, tracked):
+                raise SystemExit(f"arena.{name}: {p} is not tracked")
+        for g in globs.split(";"):
+            if g and not is_tracked(g, tracked):
+                raise SystemExit(f"arena.{name}: rust glob {g} is not a tracked file")
+        ticks = json.loads((REPO / ARENAS / f"{name}.json").read_text(encoding="utf-8"))["ticks"]
+        rows.append({
+            "id": f"arena.{name}", "layer": "L4", "rust_globs": [g for g in globs.split(";") if g],
+            "java_classes": [j for j in java.split(";") if j], "mechanism": ARENA_MECHANISM,
+            "fixtures": fixtures, "corpus_n": str(ticks + 1), "negative": "y", "tier": "T2",
+            "consumers": [], "seed_status": "UNVERIFIED",
+            "note": "not yet compared: run rivet-arena-trace check --ledger"})
     return rows
 
 

@@ -79,6 +79,11 @@
 #                          join packets byte-for-byte against the committed fixture,
 #                          plus a negative control. Guarded by the paperclip jar + the
 #                          rivet-client binary, like oracle verify.
+#   - arena tick-trace     opt-in (RIVET_ARENA_TRACE=1): the offline L4 arena
+#                          differential, Rivet's level runtime vs the committed
+#                          twin-admitted Paper traces + a per-trace tamper
+#                          negative (tools/rivet-oracle/arenas/README.md). Red only
+#                          on a broken harness or a regressed ledger-PASS arena.
 # Oracle verification is never silently skipped. When its prerequisites are missing
 # the pre-check below names each missing item with a fix, the steps report UNVERIFIED,
 # and the gate exits with a distinct nonzero code (3). (One path is red but not
@@ -565,6 +570,27 @@ run_oracle_verify() {
     echo "    UNVERIFIED — oracle verify did not run (see the prereq report above)"
     ORACLE_UNVERIFIED=1
   fi
+}
+
+# L4 arena tick-trace differential (tools/rivet-oracle/arenas/README.md) —
+# opt-in via RIVET_ARENA_TRACE=1. Offline: Rivet's level runtime against the
+# committed twin-admitted Paper traces, plus closure and the per-trace tamper
+# negative. A diverging arena is a FAIL ledger row, not a red gate; the step
+# fails only when the harness breaks or an arena VERIFY.tsv records as PASS
+# regresses.
+run_arena_trace() {
+  step "arena tick-trace (L4: Rivet vs committed Paper arena traces + tamper negative)"
+  if [ -z "${RIVET_ARENA_TRACE:-}" ] || [ "${RIVET_ARENA_TRACE}" = 0 ]; then
+    echo "    NOTICE — inactive (opt-in); set RIVET_ARENA_TRACE=1 to run the arena differential"
+    return 0
+  fi
+  local rc=0
+  cargo run -q -p rivet-oracle --locked --bin rivet-arena-trace -- check 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "    FAILED — arena harness broken or a ledger-PASS arena regressed (exit $rc)"
+    exit 1
+  fi
+  echo "    PASS — harness healthy; per-arena PASS/FAIL above (ledger: arena.* rows)"
 }
 
 # Source-disjoint Stage-B/G4 generated normal-overworld FULL parity. This is a
@@ -1448,6 +1474,7 @@ run_paper_junit_baseline() {
     run_rivet_parity
     run_oracle_ops_live
     run_join_capture
+    run_arena_trace
   fi
 
   # --- scenario runner (full gate only; terminal M1 acceptance harness) ------

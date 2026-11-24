@@ -1,0 +1,5 @@
+name: RivetArenaTraceProbe
+version: 1
+main: rivet.arena.ArenaTraceProbe
+api-version: '1.21'
+load: POSTWORLD

@@ -1,0 +1,44 @@
+{
+  "name": "fire_tick_delay_seeded",
+  "description": "Fire on netherrack (infiniburn), lit by a script setBlock with flags 3 at tick 0. FireBlock.onPlace and every FireBlock.tick reschedule the fire at fireTickDelay + level.random.nextInt(10); with no player near, canSpreadFireAround is false and the tick draws nothing else. The scheduled delays come from the seeded level RNG (seed site 1): Paper twin admission holds only if that seed takes effect.",
+  "origin": [
+    544,
+    0,
+    64
+  ],
+  "size": [
+    3,
+    2,
+    3
+  ],
+  "ticks": 160,
+  "seed": 42,
+  "fill": [
+    {
+      "from": [
+        0,
+        0,
+        0
+      ],
+      "to": [
+        2,
+        0,
+        2
+      ],
+      "state": "minecraft:netherrack"
+    }
+  ],
+  "script": [
+    {
+      "tick": 0,
+      "op": "set",
+      "pos": [
+        1,
+        1,
+        1
+      ],
+      "state": "minecraft:fire",
+      "flags": 3
+    }
+  ]
+}

@@ -35,8 +35,16 @@ tempfile = { workspace = true }
 # Paper jar descriptor to unzip without reopening a mutable pathname.
 rustix = { version = "1.1", features = ["fs"] }
 
+# `rivet-arena-trace` replays L4 arenas on rivet-server's public level
+# runtime; its runner lives in the tool, never in the server library.
+rivet-server = { path = "../../crates/rivet-server" }
+
 [[bin]]
 name = "rivet-generated-full"
 path = "src/bin/rivet_generated_full.rs"
+
+[[bin]]
+name = "rivet-arena-trace"
+path = "src/bin/rivet_arena_trace/main.rs"
 
 [dev-dependencies]
