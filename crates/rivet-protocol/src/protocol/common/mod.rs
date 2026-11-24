@@ -14,7 +14,7 @@
 //! (`chat_visiblity`, `humanoid_arm`, `particle_status`) are
 //! `server.level`/`world.entity` value types that live here (issue #197) rather
 //! than in their package-mirror crates because `rivet-protocol` cannot depend on
-//! the downstream `rivet-server`/`rivet-entity` crates. `ServerLinks` has the
+//! the downstream `rivet-server` crate. `ServerLinks` has the
 //! same constraint (issue #207): its wire codecs live in the `server_links`
 //! module here, consumed by the `clientbound_server_links` packet body, while
 //! the server-side `ServerLinks` value type is deferred to `rivet-server`.

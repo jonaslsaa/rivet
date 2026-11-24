@@ -17,3 +17,4 @@
 //! is #96.
 
 pub mod server;
+pub mod world;
