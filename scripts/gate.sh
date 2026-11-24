@@ -96,8 +96,24 @@
 #
 #   ./scripts/gate.sh                        # full gate: fmt, clippy, tests, manifest, codegen, oracle, scenario, machete
 #   ./scripts/gate.sh --require-oracle       # full gate; missing oracle prereqs hard-fail
+#   ./scripts/gate.sh --fast                 # fast tier (below)
 #   ./scripts/gate.sh crates/rivet-nbt       # fmt+clippy+test for rivet-nbt only
 #   SCOPE="rivet-nbt, rivet-serialization" ./scripts/gate.sh
+#
+# --fast is the workspace-wide offline tier: fmt, clippy -Dwarnings, nextest
+# (plus the feature-gated rivet-registry/rivet-protocol/rivet-fuzz steps, which
+# the workspace steps never compile), the manifest regression suite, the marker
+# audit, rivet-codegen fmt/clippy/test (its golden drift test is offline), and
+# cargo machete. It runs NO oracle, scenario, or JVM step (no Paper boot, no
+# codegen probe, no anvil/hash/parity row), so it never yields UNVERIFIED: it
+# exits 0 (green) or 1 (anything failed, including a usage error). A fast green
+# is not a full-gate green; the full gate stays the default. --fast cannot be
+# combined with a crate scope.
+#
+# Every cargo invocation passes --locked (a stale Cargo.lock fails the gate
+# instead of being silently rewritten). Every run ends with a per-step wall-time
+# summary, also written to work/gate-timing.tsv (columns: mode, step, seconds,
+# outcome) in this checkout.
 set -euo pipefail
 
 # Distinct exit code for "oracle UNVERIFIED" (hard failures are exit 1).
@@ -111,6 +127,106 @@ VERIFY_RUNNABLE=0
 PARITY_RUNNABLE=0
 CAPTURE_RUNNABLE=0
 SCENARIO_RUNNABLE=0
+# Gate tier: full (default), fast (--fast) or scoped (crate arguments). main()
+# sets it; the exit trap reads it.
+GATE_MODE=full
+
+# ---- per-step wall-time ledger -------------------------------------------------
+#
+# step "<label>" prints the `==> <label>` banner and starts timing that step; the
+# previous step ends there. The exit trap closes the last open step (marking it
+# failed when the gate exits nonzero), prints the summary, and writes the TSV.
+# Bash builtins only (EPOCHREALTIME, falling back to whole SECONDS on bash < 5),
+# so sourcing stays side-effect-free and PATH-shimmed tests keep working.
+GATE_STEP_NAMES=()
+GATE_STEP_MS=()
+GATE_STEP_CUR=""
+GATE_STEP_T0=0
+GATE_T0=0
+GATE_NOW_MS=0
+
+gate_now_ms() {
+  if [ -n "${EPOCHREALTIME:-}" ]; then
+    local t="${EPOCHREALTIME/[.,]/}"
+    GATE_NOW_MS=$(( 10#$t / 1000 ))
+  else
+    GATE_NOW_MS=$(( SECONDS * 1000 ))
+  fi
+}
+
+gate_step_close() {
+  [ -n "$GATE_STEP_CUR" ] || return 0
+  gate_now_ms
+  GATE_STEP_NAMES+=("$GATE_STEP_CUR")
+  GATE_STEP_MS+=("$(( GATE_NOW_MS - GATE_STEP_T0 ))")
+  GATE_STEP_CUR=""
+}
+
+step() {
+  gate_step_close
+  gate_now_ms
+  GATE_STEP_CUR="$1"
+  GATE_STEP_T0=$GATE_NOW_MS
+  echo "==> $1"
+}
+
+gate_fmt_secs() {
+  printf '%d.%d' "$(( $1 / 1000 ))" "$(( ($1 % 1000) / 100 ))"
+}
+
+# Prints the TSV rows for the steps recorded so far. $1 = the gate's exit code,
+# $2 = the total wall ms, $3 = the label of the step the gate died in (or "").
+gate_timing_rows() {
+  local rc=$1 total=$2 failed_step=$3 i=0 n=${#GATE_STEP_NAMES[@]} outcome
+  printf 'mode\tstep\tseconds\toutcome\n'
+  while [ "$i" -lt "$n" ]; do
+    outcome=done
+    if [ "$i" -eq $(( n - 1 )) ] && [ -n "$failed_step" ]; then
+      outcome=failed
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$GATE_MODE" "${GATE_STEP_NAMES[$i]}" \
+      "$(gate_fmt_secs "${GATE_STEP_MS[$i]}")" "$outcome"
+    i=$(( i + 1 ))
+  done
+  printf '%s\tTOTAL\t%s\texit %s\n' "$GATE_MODE" "$(gate_fmt_secs "$total")" "$rc"
+}
+
+# EXIT trap (installed by main): the summary prints on every exit, green or red,
+# so a failed run still shows where its time went. In --fast mode it also folds
+# any nonzero exit into 1 (the fast tier's contract is exit 0/1 only).
+gate_on_exit() {
+  local rc=$? failed_step="" total i=0 n mark tsv_dir="$REPO_DIR/work"
+  set +e
+  if [ -n "$GATE_STEP_CUR" ] && [ "$rc" -ne 0 ]; then
+    failed_step="$GATE_STEP_CUR"
+  fi
+  gate_step_close
+  gate_now_ms
+  total=$(( GATE_NOW_MS - GATE_T0 ))
+  n=${#GATE_STEP_NAMES[@]}
+  echo
+  echo "==> gate timing ($GATE_MODE tier; wall seconds per step; also in work/gate-timing.tsv)"
+  while [ "$i" -lt "$n" ]; do
+    mark=""
+    if [ "$i" -eq $(( n - 1 )) ] && [ -n "$failed_step" ]; then
+      mark="  <- FAILED"
+    fi
+    printf '    %8ss  %s%s\n' "$(gate_fmt_secs "${GATE_STEP_MS[$i]}")" "${GATE_STEP_NAMES[$i]}" "$mark"
+    i=$(( i + 1 ))
+  done
+  printf '    %8ss  TOTAL (exit %s)\n' "$(gate_fmt_secs "$total")" "$rc"
+  if mkdir -p "$tsv_dir" \
+    && gate_timing_rows "$rc" "$total" "$failed_step" > "$tsv_dir/gate-timing.tsv.tmp" \
+    && mv -f "$tsv_dir/gate-timing.tsv.tmp" "$tsv_dir/gate-timing.tsv"; then
+    :
+  else
+    echo "    (could not write $tsv_dir/gate-timing.tsv)" >&2
+  fi
+  if [ "$GATE_MODE" = fast ] && [ "$rc" -ne 0 ]; then
+    exit 1
+  fi
+  exit "$rc"
+}
 
 # Directory of this script via bash builtins only (no external tools at load
 # time — sourcing must stay side-effect-free so tests can shim PATH).
@@ -417,24 +533,24 @@ oracle_prereq_check() {
 # gate like any other oracle stage; the tamper never touches the committed
 # fixtures.
 run_oracle_verify() {
-  echo "==> oracle verify (all committed fixture kinds: M0 slice + worldgen samples + M2 regions + text corpus + spline + composed-noise + surface-column)"
-  cargo run -q -p rivet-oracle
+  step "oracle verify (all committed fixture kinds: M0 slice + worldgen samples + M2 regions + text corpus + spline + composed-noise + surface-column)"
+  cargo run -q -p rivet-oracle --locked
   if [ "$VERIFY_RUNNABLE" = 1 ]; then
-    echo "==> oracle verify (M0 sanity gate: green against vanilla itself)"
-    cargo run -q -p rivet-oracle -- verify
+    step "oracle verify (M0 sanity gate: green against vanilla itself)"
+    cargo run -q -p rivet-oracle --locked -- verify
     echo "    VERIFIED — fresh Paper boot is byte-identical to the committed golden baseline"
-    echo "==> oracle negative control (verify --expect-fail: detects tamper)"
-    cargo run -q -p rivet-oracle -- verify --expect-fail
-    echo "==> oracle verify (M2 region gate: normal-overworld none-compression region parity)"
-    cargo run -q -p rivet-oracle -- verify --m2
+    step "oracle negative control (verify --expect-fail: detects tamper)"
+    cargo run -q -p rivet-oracle --locked -- verify --expect-fail
+    step "oracle verify (M2 region gate: normal-overworld none-compression region parity)"
+    cargo run -q -p rivet-oracle --locked -- verify --m2
     echo "    VERIFIED — fresh normal-overworld boot is byte-identical to the committed region baseline"
-    echo "==> oracle negative control (verify --m2 --expect-fail: detects tamper)"
-    cargo run -q -p rivet-oracle -- verify --m2 --expect-fail
-    echo "==> oracle verify (M2 FULL region gate: superflat status-FULL region capture, issue #51)"
-    cargo run -q -p rivet-oracle -- verify --full
+    step "oracle negative control (verify --m2 --expect-fail: detects tamper)"
+    cargo run -q -p rivet-oracle --locked -- verify --m2 --expect-fail
+    step "oracle verify (M2 FULL region gate: superflat status-FULL region capture, issue #51)"
+    cargo run -q -p rivet-oracle --locked -- verify --full
     echo "    VERIFIED — fresh corpus-forced superflat boot is byte-identical to the committed status-FULL region baseline"
-    echo "==> oracle negative control (verify --full --expect-fail: detects tamper)"
-    cargo run -q -p rivet-oracle -- verify --full --expect-fail
+    step "oracle negative control (verify --full --expect-fail: detects tamper)"
+    cargo run -q -p rivet-oracle --locked -- verify --full --expect-fail
   else
     echo "    UNVERIFIED — oracle verify did not run (see the prereq report above)"
     ORACLE_UNVERIFIED=1
@@ -452,18 +568,18 @@ run_oracle_generated_full() {
   # but ordinary pre-G4/full gates must not become unreleasable merely because
   # the generated corpus has not been captured yet.
   if [ -z "${RIVET_GENERATED_FULL:-}" ] || [ "${RIVET_GENERATED_FULL}" = 0 ]; then
-    echo "==> oracle verify-generated-full (Stage-B normal-overworld FULL parity; issue #175)"
+    step "oracle verify-generated-full (Stage-B normal-overworld FULL parity; issue #175)"
     echo "    NOTICE — promotion is inactive for the pre-G4 gate; set RIVET_GENERATED_FULL=1 to activate the strict row"
     return 0
   fi
-  echo "==> oracle verify-generated-full (Stage-B normal-overworld FULL parity; issue #175)"
+  step "oracle verify-generated-full (Stage-B normal-overworld FULL parity; issue #175)"
   local rc=0
-  cargo run -q -p rivet-oracle -- verify-generated-full 2>&1 || rc=$?
+  cargo run -q -p rivet-oracle --locked -- verify-generated-full 2>&1 || rc=$?
   if [ "$rc" -eq 0 ]; then
     echo "    PASS — four-seed normal-overworld FULL corpus matches byte-for-byte"
     local tamper_rc=0
-    echo "==> oracle verify-generated-full --tamper all (named payload tamper controls)"
-    cargo run -q -p rivet-oracle -- verify-generated-full --tamper all 2>&1 || tamper_rc=$?
+    step "oracle verify-generated-full --tamper all (named payload tamper controls)"
+    cargo run -q -p rivet-oracle --locked -- verify-generated-full --tamper all 2>&1 || tamper_rc=$?
     if [ "$tamper_rc" -eq 0 ]; then
       echo "    PASS — block/light/heightmap/NBT-order/key/LastUpdate tampering detected and named exactly"
     elif [ "$tamper_rc" -eq 3 ]; then
@@ -506,9 +622,9 @@ run_oracle_generated_full() {
 # fresh read-only reload, strict region scanner, and named corruption negatives.
 # Missing provenance/artifacts are UNVERIFIED (3); a mismatch is FAIL (1).
 run_anvil_roundtrip_v1a() {
-  echo "==> anvil-roundtrip-v1a (storage-only #231 round-trip; 432 committed M0 fixtures)"
+  step "anvil-roundtrip-v1a (storage-only #231 round-trip; 432 committed M0 fixtures)"
   local rc=0
-  cargo run -q -p rivet-oracle -- anvil-roundtrip-v1a \
+  cargo run -q -p rivet-oracle --locked -- anvil-roundtrip-v1a \
     --out "$REPO_DIR/tools/rivet-oracle/work/anvil-roundtrip-v1a" 2>&1 || rc=$?
   if [ "$rc" -eq 0 ]; then
     echo "    PASS — storage-only V1a round-trip, strict scanner, and corruption negatives verified"
@@ -547,12 +663,12 @@ run_anvil_roundtrip_v1a() {
 # or a Paper-vs-Paper self-diff) or FAILED divergence is gate-fatal, never a
 # silent or vacuous green.
 run_oracle_hash() {
-  echo "==> chunk-hash engine (issue #54: xxh3_64 seed-hash gate)"
-  echo "==> oracle hash self-check (xxh3_64 known-answer vectors)"
-  cargo run -q -p rivet-oracle -- hash-self-check
+  step "chunk-hash engine (issue #54: xxh3_64 seed-hash gate)"
+  step "oracle hash self-check (xxh3_64 known-answer vectors)"
+  cargo run -q -p rivet-oracle --locked -- hash-self-check
   echo "    VERIFIED — xxh3_64 matches the pinned known-answer vectors"
-  echo "==> oracle hash-paper (rebuild committed Paper manifest; must be git-clean)"
-  cargo run -q -p rivet-oracle -- hash-paper
+  step "oracle hash-paper (rebuild committed Paper manifest; must be git-clean)"
+  cargo run -q -p rivet-oracle --locked -- hash-paper
   # The byte-identity check needs a git work tree to compare the rebuild against
   # the committed manifest. The gate shell tests drive gate.sh from a non-git
   # sandbox (cargo stubbed), where the manifest cannot be tracked; there the
@@ -589,7 +705,7 @@ print(f"{len(full)} FULL: " + ", ".join(f"{d}/{cx}.{cz}" for d, cx, cz in full))
   # never imply Paper == Rivet parity); if RIVET_HASH_DIR aliases the paper tree,
   # surface that as a hard failure rather than a silent UNVERIFIED.
   local rc=0
-  cargo run -q -p rivet-oracle -- hash-diff "$paper_dir" "$rivet_dir" 2>&1 || rc=$?
+  cargo run -q -p rivet-oracle --locked -- hash-diff "$paper_dir" "$rivet_dir" 2>&1 || rc=$?
   if [ "$rc" -eq 3 ]; then
     # RIVET_HASH_DIR was set, so the comparison was requested and could not
     # complete (incomplete corpus coverage, or a self-diff if it aliases the
@@ -599,8 +715,8 @@ print(f"{len(full)} FULL: " + ", ".join(f"{d}/{cx}.{cz}" for d, cx, cz in full))
     exit 1
   elif [ "$rc" -eq 0 ]; then
     echo "    VERIFIED — Paper-vs-Rivet FULL digests match across the corpus matrix"
-    echo "==> oracle hash-diff --expect-fail (tamper negatives: every mutation class must be detected)"
-    cargo run -q -p rivet-oracle -- hash-diff --expect-fail "$paper_dir" "$rivet_dir" all
+    step "oracle hash-diff --expect-fail (tamper negatives: every mutation class must be detected)"
+    cargo run -q -p rivet-oracle --locked -- hash-diff --expect-fail "$paper_dir" "$rivet_dir" all
     echo "    VERIFIED — block/light/heightmap/NBT-order tampering all detected and named"
   else
     echo "    FAILED — hash-diff exited $rc (see the output above)"
@@ -670,7 +786,7 @@ if not isinstance(data, dict) or data.get("ok") is not True:
 #     (gate exits 3); with --require-oracle any nonzero exit is a hard failure
 #     (exit 1), exactly like rivet-parity's rc=3 handling.
 run_oracle_self_test() {
-  echo "==> reference oracle self-test (raw JSON Lines on stdout, no log prefix)"
+  step "reference oracle self-test (raw JSON Lines on stdout, no log prefix)"
   if [ "$PARITY_RUNNABLE" = 1 ] && command -v python3 >/dev/null 2>&1; then
     local out="" rc=0 tmp
     # Capture stdout to a file (not $() — command substitution strips trailing
@@ -704,7 +820,7 @@ run_oracle_self_test() {
 }
 
 run_rivet_parity() {
-  echo "==> rivet-parity (byte-for-byte NBT/SNBT vs Paper oracle)"
+  step "rivet-parity (byte-for-byte NBT/SNBT vs Paper oracle)"
   if [ "$PARITY_RUNNABLE" = 1 ]; then
     # run.sh enforces the compile-jar == runtime-jar SHA-256 and Paper commit ==
     # manifest pin itself (exit 1 on mismatch); the prereq pre-check above only
@@ -721,7 +837,7 @@ run_rivet_parity() {
     tmp="$(mktemp)"
     # `|| rc=$?` (not set +e) so errexit stays on for every other statement and
     # the failed command's real exit status is captured in $rc.
-    cargo run -q -p rivet-parity -- --require-oracle 2>"$tmp" || rc=$?
+    cargo run -q -p rivet-parity --locked -- --require-oracle 2>"$tmp" || rc=$?
     cat "$tmp" >&2
     if [ "$rc" -eq 0 ]; then
       echo "    VERIFIED — rivet-nbt byte-for-byte parity with Paper (within documented divergences)"
@@ -764,15 +880,15 @@ run_rivet_parity() {
 # tampered packet to be detected AND named — proving the capture->normalize->
 # byte-compare chain is not vacuously green.
 run_join_capture() {
-  echo "==> join capture (rivet-capture verify: byte-identity against vanilla join)"
+  step "join capture (rivet-capture verify: byte-identity against vanilla join)"
   if [ "$CAPTURE_RUNNABLE" = 1 ]; then
-    cargo run -q -p rivet-capture -- verify
+    cargo run -q -p rivet-capture --locked -- verify
     echo "    VERIFIED — fresh Paper join is byte-identical to the committed join fixture"
-    echo "==> join capture negative control (rivet-capture verify --expect-fail: detects tamper)"
-    cargo run -q -p rivet-capture -- verify --expect-fail
-    echo "==> join capture detector discrimination (rivet-capture verify --mutate <kind>: every injected defect must be detected AND named)"
+    step "join capture negative control (rivet-capture verify --expect-fail: detects tamper)"
+    cargo run -q -p rivet-capture --locked -- verify --expect-fail
+    step "join capture detector discrimination (rivet-capture verify --mutate <kind>: every injected defect must be detected AND named)"
     for kind in reorder delete insert field canon relabel burst entity-id set-time-absent; do
-      cargo run -q -p rivet-capture -- verify --mutate "$kind"
+      cargo run -q -p rivet-capture --locked -- verify --mutate "$kind"
     done
   else
     echo "    UNVERIFIED — join capture did not run (see the prereq report above)"
@@ -792,11 +908,11 @@ run_join_capture() {
 # green-looking outcome.
 run_scenario_paper_rows() {
   if [ "$SCENARIO_RUNNABLE" = 1 ]; then
-    echo "==> scenario runner (join: Paper-vs-Paper + negative case)"
+    step "scenario runner (join: Paper-vs-Paper + negative case)"
     "$REPO_DIR/tools/rivet-client/run-scenario.sh" join
-    echo "==> scenario runner (join: Rivet-vs-Paper differential)"
+    step "scenario runner (join: Rivet-vs-Paper differential)"
     "$REPO_DIR/tools/rivet-client/run-scenario.sh" join --server both
-    echo "==> scenario runner (move: Rivet-vs-Paper authoritative-walk differential)"
+    step "scenario runner (move: Rivet-vs-Paper authoritative-walk differential)"
     "$REPO_DIR/tools/rivet-client/run-scenario.sh" move --server both
   else
     echo "    UNVERIFIED — scenario Paper rows (join/move Paper-vs-Rivet) did not run (paperclip jar or rivet-client binary missing; see the prereq report above)"
@@ -816,7 +932,7 @@ run_scenario_paper_rows() {
 # sets ORACLE_UNVERIFIED so the gate exits 3, and under --require-oracle it is
 # a hard failure (exit 1) — exactly the rivet-parity/self-test boundary.
 run_scenario_loaded_world() {
-  echo "==> scenario runner (loaded-world: official-client acceptance vs the disposable copied world, issue #374)"
+  step "scenario runner (loaded-world: official-client acceptance vs the disposable copied world, issue #374)"
   local rc=0
   "$REPO_DIR/tools/rivet-client/run-scenario.sh" loaded-world || rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -855,7 +971,7 @@ run_scenario_loaded_world() {
 # --require-oracle it is a hard failure (exit 1) — exactly the
 # rivet-parity/self-test boundary.
 run_scenario_recenter() {
-  echo "==> scenario runner (recenter: sustained-walking acceptance vs the disposable copied world, issues #185/#561)"
+  step "scenario runner (recenter: sustained-walking acceptance vs the disposable copied world, issues #185/#561)"
   local rc=0
   "$REPO_DIR/tools/rivet-client/run-scenario.sh" recenter || rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -902,7 +1018,7 @@ run_scenario_recenter() {
 # under --require-oracle it is a hard failure (exit 1) — exactly the
 # rivet-parity/self-test boundary.
 run_scenario_generated_world() {
-  echo "==> scenario runner (generated-world: official-client acceptance vs a fresh seed-42 generated world)"
+  step "scenario runner (generated-world: official-client acceptance vs a fresh seed-42 generated world)"
   # The opt-in uses the same convention as RIVET_REQUIRE_ORACLE: any non-empty
   # value other than "0" enables the strict check, so an operator can disable
   # the row explicitly with RIVET_GENERATED_WORLD=0 (never silently enabling it).
@@ -945,10 +1061,11 @@ main() {
   cd "$REPO_DIR"
 
   # --- flags & scope resolution ----------------------------------------------
-  local SCOPE_ARGS=()
+  local SCOPE_ARGS=() FAST=0
   for a in "$@"; do
     case "$a" in
       --require-oracle) REQUIRE_ORACLE=1 ;;
+      --fast) FAST=1 ;;
       *) SCOPE_ARGS+=("$a") ;;
     esac
   done
@@ -974,48 +1091,68 @@ main() {
     PKG_FLAGS+=(-p "$p")
   done
 
-  local FULL_GATE=false
+  # WORKSPACE: no crate scope (full or fast tier) — the repo-wide offline steps
+  # run. FULL_GATE: the default full tier — additionally the oracle, scenario,
+  # and JVM steps.
+  local WORKSPACE=false FULL_GATE=false
   if [ ${#PKG_FLAGS[@]} -eq 0 ]; then
-    FULL_GATE=true
+    WORKSPACE=true
   fi
-  if [ "$REQUIRE_ORACLE" = 1 ] && [ "$FULL_GATE" != true ]; then
+  if [ "$FAST" = 1 ]; then
+    GATE_MODE=fast
+    if [ "$WORKSPACE" != true ]; then
+      echo "ERROR: --fast is workspace-wide and cannot be combined with a crate scope (${PKGS[*]})" >&2
+      exit 1
+    fi
+  elif [ "$WORKSPACE" = true ]; then
+    FULL_GATE=true
+  else
+    GATE_MODE=scoped
+  fi
+  gate_now_ms
+  GATE_T0=$GATE_NOW_MS
+  trap gate_on_exit EXIT
+  if [ "$REQUIRE_ORACLE" = 1 ] && [ "$GATE_MODE" = scoped ]; then
     echo "NOTE: --require-oracle is ignored for crate-scoped gates (oracle steps are skipped)"
+  fi
+  if [ "$REQUIRE_ORACLE" = 1 ] && [ "$GATE_MODE" = fast ]; then
+    echo "NOTE: --require-oracle is ignored for the --fast gate (oracle steps are skipped)"
   fi
 
   # --- oracle prereq pre-check (full gate only) -------------------------------
   if [ "$FULL_GATE" = true ]; then
-    echo "==> oracle prereq pre-check"
+    step "oracle prereq pre-check"
     oracle_prereq_check
   fi
 
   # --- cargo fmt --------------------------------------------------------------
-  echo "==> cargo fmt --check"
+  step "cargo fmt --check"
   if [ ${#PKG_FLAGS[@]} -gt 0 ]; then
-    cargo fmt --check "${PKG_FLAGS[@]}"
+    cargo --locked fmt --check "${PKG_FLAGS[@]}"
   else
-    cargo fmt --all --check
+    cargo --locked fmt --all --check
   fi
 
   # --- cargo clippy (-Dwarnings) ----------------------------------------------
-  echo "==> cargo clippy (-Dwarnings)"
+  step "cargo clippy (-Dwarnings)"
   if [ ${#PKG_FLAGS[@]} -gt 0 ]; then
-    RUSTFLAGS=-Dwarnings cargo clippy "${PKG_FLAGS[@]}" --all-targets
+    RUSTFLAGS=-Dwarnings cargo clippy "${PKG_FLAGS[@]}" --all-targets --locked
   else
-    RUSTFLAGS=-Dwarnings cargo clippy --workspace --all-targets
+    RUSTFLAGS=-Dwarnings cargo clippy --workspace --all-targets --locked
   fi
 
   # --- cargo test -------------------------------------------------------------
-  echo "==> cargo test"
+  step "cargo test"
   if [ ${#PKG_FLAGS[@]} -gt 0 ]; then
     if command -v cargo-nextest >/dev/null 2>&1; then
-      cargo nextest run "${PKG_FLAGS[@]}"
+      cargo nextest run "${PKG_FLAGS[@]}" --locked
     else
-      cargo test "${PKG_FLAGS[@]}"
+      cargo test "${PKG_FLAGS[@]}" --locked
     fi
   elif command -v cargo-nextest >/dev/null 2>&1; then
-    cargo nextest run --workspace
+    cargo nextest run --workspace --locked
   else
-    cargo test --workspace
+    cargo test --workspace --locked
   fi
 
   # --- feature-gated generated registry tables (rivet-registry `blocks`) ----------
@@ -1034,13 +1171,13 @@ main() {
   for p in ${PKGS[@]+"${PKGS[@]}"}; do
     [ "$p" = "rivet-registry" ] && GATE_BLOCKS=true
   done
-  if [ "$FULL_GATE" = true ] || [ "$GATE_BLOCKS" = true ]; then
-    echo "==> rivet-registry --features blocks (generated registry tables)"
-    RUSTFLAGS=-Dwarnings cargo clippy -p rivet-registry --features blocks --all-targets
+  if [ "$WORKSPACE" = true ] || [ "$GATE_BLOCKS" = true ]; then
+    step "rivet-registry --features blocks (generated registry tables)"
+    RUSTFLAGS=-Dwarnings cargo clippy -p rivet-registry --features blocks --all-targets --locked
     if command -v cargo-nextest >/dev/null 2>&1; then
-      cargo nextest run -p rivet-registry --features blocks
+      cargo nextest run -p rivet-registry --features blocks --locked
     else
-      cargo test -p rivet-registry --features blocks
+      cargo test -p rivet-registry --features blocks --locked
     fi
   fi
 
@@ -1063,13 +1200,13 @@ main() {
   for p in ${PKGS[@]+"${PKGS[@]}"}; do
     [ "$p" = "rivet-protocol" ] && GATE_PACKETS=true
   done
-  if [ "$FULL_GATE" = true ] || [ "$GATE_PACKETS" = true ]; then
-    echo "==> rivet-protocol --features packets (generated packet tables + packet bodies)"
-    RUSTFLAGS=-Dwarnings cargo clippy -p rivet-protocol --features packets --all-targets
+  if [ "$WORKSPACE" = true ] || [ "$GATE_PACKETS" = true ]; then
+    step "rivet-protocol --features packets (generated packet tables + packet bodies)"
+    RUSTFLAGS=-Dwarnings cargo clippy -p rivet-protocol --features packets --all-targets --locked
     if command -v cargo-nextest >/dev/null 2>&1; then
-      cargo nextest run -p rivet-protocol --features packets
+      cargo nextest run -p rivet-protocol --features packets --locked
     else
-      cargo test -p rivet-protocol --features packets
+      cargo test -p rivet-protocol --features packets --locked
     fi
   fi
 
@@ -1089,10 +1226,10 @@ main() {
   for p in ${PKGS[@]+"${PKGS[@]}"}; do
     [ "$p" = "rivet-fuzz" ] && GATE_FUZZ=true
   done
-  if [ "$FULL_GATE" = true ] || [ "$GATE_FUZZ" = true ]; then
-    echo "==> rivet-fuzz --features packets (protocol packet-decode fuzz targets)"
-    cargo check -p rivet-fuzz --features packets --bins
-    RUSTFLAGS=-Dwarnings cargo clippy -p rivet-fuzz --features packets --all-targets
+  if [ "$WORKSPACE" = true ] || [ "$GATE_FUZZ" = true ]; then
+    step "rivet-fuzz --features packets (protocol packet-decode fuzz targets)"
+    cargo check -p rivet-fuzz --features packets --bins --locked
+    RUSTFLAGS=-Dwarnings cargo clippy -p rivet-fuzz --features packets --all-targets --locked
   fi
 
   # --- storage-only #231 V1a oracle ---------------------------------------------
@@ -1117,8 +1254,8 @@ main() {
   # roots are absent) — same prerequisite as the oracle steps. Skipped when
   # gating a crate subset — the manifest is a repo-wide artifact, not a
   # workspace crate — same rule as oracle/scenario.
-  if [ "$FULL_GATE" = true ]; then
-    echo "==> manifest regression suite (scripts/test_analyze_graph.py)"
+  if [ "$WORKSPACE" = true ]; then
+    step "manifest regression suite (scripts/test_analyze_graph.py)"
     python3 scripts/test_analyze_graph.py
   fi
 
@@ -1133,8 +1270,8 @@ main() {
   # generated. scripts/test_check_markers.py is the sandbox suite for the
   # checker itself. Skipped when gating a crate subset — the marker audit is
   # repo-wide and does not target a workspace crate.
-  if [ "$FULL_GATE" = true ]; then
-    echo "==> marker audit (scripts/check_markers.py)"
+  if [ "$WORKSPACE" = true ]; then
+    step "marker audit (scripts/check_markers.py)"
     python3 scripts/check_markers.py
     python3 scripts/test_check_markers.py
   fi
@@ -1150,16 +1287,19 @@ main() {
   # under `set -e` rather than being skipped.
   # Skipped when gating a crate subset (scoped gates check a specific workspace
   # crate, not the excluded tool's generated output) — same rule as oracle/scenario.
-  if [ "$FULL_GATE" = true ]; then
-    echo "==> rivet-codegen (workspace-excluded tool) fmt/clippy/test"
-    cargo fmt --manifest-path tools/rivet-codegen/Cargo.toml -- --check
-    RUSTFLAGS=-Dwarnings cargo clippy --manifest-path tools/rivet-codegen/Cargo.toml --all-targets
+  if [ "$WORKSPACE" = true ]; then
+    step "rivet-codegen (workspace-excluded tool) fmt/clippy/test"
+    cargo --locked fmt --manifest-path tools/rivet-codegen/Cargo.toml -- --check
+    RUSTFLAGS=-Dwarnings cargo clippy --manifest-path tools/rivet-codegen/Cargo.toml --all-targets --locked
     if command -v cargo-nextest >/dev/null 2>&1; then
-      cargo nextest run --manifest-path tools/rivet-codegen/Cargo.toml
+      cargo nextest run --manifest-path tools/rivet-codegen/Cargo.toml --locked
     else
-      cargo test --manifest-path tools/rivet-codegen/Cargo.toml
+      cargo test --manifest-path tools/rivet-codegen/Cargo.toml --locked
     fi
+  fi
 
+  # The probes boot the Paper bundler JVM, so they belong to the full tier only.
+  if [ "$FULL_GATE" = true ]; then
     # --- block-state global-id probe (full gate; needs the Paper bundler) ------
     # GlobalPaletteProbe boots the real Paper block-state registry and
     # cross-checks the emitted global-id table: size 32366,
@@ -1179,20 +1319,20 @@ main() {
       PROBE_BUNDLER="$REPO_DIR/tools/rivet-oracle/work/jars/paper-bundler-26.2.local-SNAPSHOT.jar"
     fi
     if [ -f "$PROBE_BUNDLER" ]; then
-      echo "==> rivet-codegen probe-block-states (live Paper block-state registry)"
-      cargo run --release --quiet --manifest-path tools/rivet-codegen/Cargo.toml -- \
+      step "rivet-codegen probe-block-states (live Paper block-state registry)"
+      cargo run --release --quiet --manifest-path tools/rivet-codegen/Cargo.toml --locked -- \
         probe-block-states --bundler "$PROBE_BUNDLER"
-      echo "==> rivet-codegen probe-biomes-tags (live Paper biome id + tag network content)"
-      cargo run --release --quiet --manifest-path tools/rivet-codegen/Cargo.toml -- \
+      step "rivet-codegen probe-biomes-tags (live Paper biome id + tag network content)"
+      cargo run --release --quiet --manifest-path tools/rivet-codegen/Cargo.toml --locked -- \
         probe-biomes-tags --bundler "$PROBE_BUNDLER"
-      echo "==> rivet-codegen probe-block-behaviors (live Paper per-StateId behavior table)"
-      cargo run --release --quiet --manifest-path tools/rivet-codegen/Cargo.toml -- \
+      step "rivet-codegen probe-block-behaviors (live Paper per-StateId behavior table)"
+      cargo run --release --quiet --manifest-path tools/rivet-codegen/Cargo.toml --locked -- \
         probe-block-behaviors --bundler "$PROBE_BUNDLER"
-      echo "==> rivet-codegen probe-worldgen (live Paper worldgen noise/biome/preset data)"
-      cargo run --release --quiet --manifest-path tools/rivet-codegen/Cargo.toml -- \
+      step "rivet-codegen probe-worldgen (live Paper worldgen noise/biome/preset data)"
+      cargo run --release --quiet --manifest-path tools/rivet-codegen/Cargo.toml --locked -- \
         probe-worldgen --bundler "$PROBE_BUNDLER"
-      echo "==> rivet-codegen probe-feature-data (live Paper seed-42 FEATURES feature data)"
-      cargo run --release --quiet --manifest-path tools/rivet-codegen/Cargo.toml -- \
+      step "rivet-codegen probe-feature-data (live Paper seed-42 FEATURES feature data)"
+      cargo run --release --quiet --manifest-path tools/rivet-codegen/Cargo.toml --locked -- \
         probe-feature-data --bundler "$PROBE_BUNDLER"
     else
       echo "    SKIPPED (no Paper bundler jar: build working/Paper (paper-bundler-*.jar) or place it in tools/rivet-oracle/work/jars/)"
@@ -1200,7 +1340,7 @@ main() {
   fi
 
 run_paper_junit_baseline() {
-  echo "==> paper-junit-baseline (issue #517: unit tests + committed census validation)"
+  step "paper-junit-baseline (issue #517: unit tests + committed census validation)"
   python3 -m unittest discover -s "$REPO_DIR/tools/paper-junit-baseline" -q
   local shared_repo
   shared_repo="$(shared_repo_dir_for)"
@@ -1320,9 +1460,9 @@ run_paper_junit_baseline() {
   # (the scenario drives a whole server).
   if [ "$FULL_GATE" = true ]; then
     run_scenario_paper_rows
-    echo "==> scenario runner (dwell: wall-clock keepalive survival past the 30s kick limit)"
+    step "scenario runner (dwell: wall-clock keepalive survival past the 30s kick limit)"
     "$REPO_DIR/tools/rivet-client/run-scenario.sh" dwell --server rivet
-    echo "==> scenario runner (kick: decoded disconnect reason from the anti-cheat gate)"
+    step "scenario runner (kick: decoded disconnect reason from the anti-cheat gate)"
     "$REPO_DIR/tools/rivet-client/run-scenario.sh" kick --server rivet
     run_scenario_loaded_world
     run_scenario_recenter
@@ -1332,13 +1472,14 @@ run_paper_junit_baseline() {
   # --- unused dependencies (cargo-machete) -------------------------------------
   # machete stays workspace-wide (even on scoped gates); also cover the
   # workspace-excluded codegen tool's own manifest.
-  echo "==> cargo machete (unused deps)"
+  step "cargo machete (unused deps)"
   if ! command -v cargo-machete >/dev/null 2>&1; then
     echo "    cargo-machete not found; installing (cargo install cargo-machete --locked)"
     cargo install cargo-machete --locked
   fi
-  cargo machete
-  cargo machete tools/rivet-codegen
+  cargo --locked machete
+  cargo --locked machete tools/rivet-codegen
+  gate_step_close
 
   # --- final verdict ------------------------------------------------------------
   if [ "$ORACLE_UNVERIFIED" = 1 ]; then
@@ -1349,7 +1490,11 @@ run_paper_junit_baseline() {
     echo "      failure instead."
     exit "$ORACLE_EXIT_UNVERIFIED"
   fi
-  echo "GATE GREEN"
+  if [ "$GATE_MODE" = fast ]; then
+    echo "FAST GATE GREEN — offline tier only: no oracle, scenario, or JVM step ran (not a full-gate green)"
+  else
+    echo "GATE GREEN"
+  fi
 }
 
 # The strict gate owns the shared build lock for its complete process tree. Sourcing
@@ -1358,6 +1503,13 @@ if [[ "${BASH_SOURCE[0]:-}" == "$0" ]]; then
   if [ "${RIVET_BUILD_LOCK_HELD:-0}" = 1 ]; then
     main "$@"
   else
+    for a in "$@"; do
+      if [ "$a" = --fast ]; then
+        # The fast tier exits 0/1 only, including a failure of the lock wrapper.
+        "$REPO_DIR/scripts/with-build-lock.sh" "$REPO_DIR" "$REPO_DIR/scripts/gate.sh" "$@" || exit 1
+        exit 0
+      fi
+    done
     exec "$REPO_DIR/scripts/with-build-lock.sh" "$REPO_DIR" "$REPO_DIR/scripts/gate.sh" "$@"
   fi
 fi
