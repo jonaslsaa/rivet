@@ -200,13 +200,15 @@ class RealClassTest(unittest.TestCase):
     def test_float_goal_assigned_to_server(self):
         """net/minecraft/world/entity/ai/goal/FloatGoal.java declares canUse,
         requiresUpdateEveryTick and tick (plus a constructor, not counted);
-        crates/rivet-entity/src/ai/goal/float_goal.rs implements can_use,
-        requires_update_every_tick and tick. It is rivet-entity content, so
-        D15 step 1 assigns it to rivet-server while the home stays where it is."""
+        crates/rivet-server/src/world/entity/ai/goal/float_goal.rs implements
+        can_use, requires_update_every_tick and tick. rivet-server mounts
+        net.minecraft at its root (D15: the live-game crate), and the manifest
+        maps net.minecraft.world.entity to rivet-server, so the file is the
+        mirrored home in the assigned crate."""
         r = self.rows["net.minecraft.world.entity.ai.goal.FloatGoal"]
-        self.assertEqual(r["current_crate"], "rivet-entity")
+        self.assertEqual(r["current_crate"], "rivet-server")
         self.assertEqual(r["assigned_crate"], "rivet-server")
-        self.assertEqual(r["rust_path"], "crates/rivet-entity/src/ai/goal/float_goal.rs")
+        self.assertEqual(r["rust_path"], "crates/rivet-server/src/world/entity/ai/goal/float_goal.rs")
         self.assertEqual((r["method_total"], r["method_covered"], r["status"]), ("3", "3", "complete"))
 
     def test_data_hook_under_subdirectory_mount(self):
@@ -224,13 +226,17 @@ class RealClassTest(unittest.TestCase):
         self.assertEqual((r["method_total"], r["method_covered"]), ("2", "2"))
         self.assertEqual((r["stub_count"], r["rivettodo_count"], r["status"]), ("0", "0", "complete"))
 
-    def test_entity_absent_spine_hub(self):
-        """Entity.java (5,462 LOC) has no mirrored home: rivet-world/src/entity/mod.rs
-        is the world.entity package module and rivet-api's facades/entity.rs is
-        not at a mirrored path, so status is absent; it is an Appendix A spine hub."""
+    def test_entity_partial_spine_hub(self):
+        """Entity.java (5,462 LOC) has its mirrored home at
+        crates/rivet-server/src/world/entity/entity.rs (a lifecycle foundation,
+        not a complete port), so status is partial; it is an Appendix A spine
+        hub. rivet-api's facades/entity.rs is not at a mirrored path and is
+        listed in other_paths, while rivet-world/src/entity/mod.rs is the
+        world.entity package module and is not."""
         r = self.rows["net.minecraft.world.entity.Entity"]
-        self.assertEqual((r["rust_path"], r["status"], r["hub"]), ("-", "absent", "spine"))
-        self.assertEqual(r["method_covered"], "0")
+        self.assertEqual(
+            (r["rust_path"], r["status"], r["hub"]),
+            ("crates/rivet-server/src/world/entity/entity.rs", "partial", "spine"))
         self.assertIn("crates/rivet-api/src/native/facades/entity.rs", r["other_paths"].split(";"))
         self.assertNotIn("crates/rivet-world/src/entity/mod.rs", r["other_paths"].split(";"))
 
