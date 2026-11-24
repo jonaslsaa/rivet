@@ -289,3 +289,56 @@ codec.reencode	input:IntProviders.POSITIVE_CODEC.poison08.json	JSON number narro
 codec.reencode	input:ProvidesTrimMaterial.CODEC.poison09.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
 codec.reencode	input:ProvidesTrimMaterial.CODEC.poison10.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
 codec.reencode	input:ProvidesTrimMaterial.CODEC.poison11.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+effect	input:minecraft:speed#0	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#1	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#2	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#3	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#4	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#7	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#15	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#63	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#127	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#254	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#255	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:speed#2147483647	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#0	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#1	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#2	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#3	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#4	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#7	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#15	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#63	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#127	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#254	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#255	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:slowness#2147483647	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#0	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#1	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#2	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#3	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#4	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#7	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#15	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#63	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#127	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#254	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#255	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:haste#2147483647	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#0	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#1	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#2	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#3	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#4	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#7	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#15	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#63	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#127	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#254	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#255	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+effect	input:minecraft:mining_fatigue#2147483647	modifier amount of a float-literal template: Paper widens the f32 (0.2F...), Rivet stores the f64 literal	817
+scoreboard.saved_data	input:scores	packed objectives/scores/teams in Java fastutil hash order, Rivet in insertion order	818
+scoreboard.saved_data	input:teams_member_in_two	packed objectives/scores/teams in Java fastutil hash order, Rivet in insertion order	818
+scoreboard.saved_data	input:teams_duplicate_name	duplicate team name on load: Paper merges into the existing team, Rivet rejects the load	819
+scoreboard.saved_data	input:team_empty_and_filled	packed objectives/scores/teams in Java fastutil hash order, Rivet in insertion order	818
+scoreboard.saved_data	input:everything	packed objectives/scores/teams in Java fastutil hash order, Rivet in insertion order	818

@@ -1,0 +1,12 @@
+op	count	reason
+loot.roll	21680	loot-table documents have no Rust decoder, and the level/entity context is not ported (rivet_world::loot holds the runtime only)
+recipe.match	3	special recipe CraftingSpecialFireworkStarFade has no matching logic
+recipe.match	3	special recipe CraftingSpecialMapExtending has no matching logic
+recipe.match	3	special recipe CraftingSpecialShieldDecoration has no matching logic
+recipe.match	4	special recipe CraftingDecoratedPot has no matching logic
+recipe.match	4	special recipe CraftingSpecialBookCloning has no matching logic
+recipe.match	4	special recipe CraftingSpecialFireworkRocket has no matching logic
+recipe.match	4	special recipe CraftingSpecialRepairItem has no matching logic
+recipe.match	5	special recipe CraftingSpecialFireworkStar has no matching logic
+recipe.match	64	special recipe CraftingSpecialBannerDuplicate has no matching logic
+trade.offers	1088	villager_trade / trade_set data-pack documents have no Rust decoder (rivet_world::trading holds the value types only)

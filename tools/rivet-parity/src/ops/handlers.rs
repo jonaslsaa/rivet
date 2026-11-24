@@ -41,6 +41,12 @@ pub fn handler(op: &str) -> Option<Handler> {
         "component.json" => Some(component_json),
         "packet.reencode" => Some(super::packet::packet_reencode),
         "codec.reencode" => Some(super::codec::codec_reencode),
+        "effect" => Some(super::gameplay::effect::effect),
+        "enchant.select" => Some(super::gameplay::enchant::enchant_select),
+        "loot.roll" => Some(super::gameplay::loot::loot_roll),
+        "recipe.match" => Some(super::gameplay::recipe::recipe_match),
+        "scoreboard.saved_data" => Some(super::gameplay::scoreboard::scoreboard_saved_data),
+        "trade.offers" => Some(super::gameplay::trade::trade_offers),
         _ => None,
     }
 }
@@ -51,7 +57,7 @@ pub fn subject(op: &str, request: &Map<String, Value>) -> Option<String> {
     match op {
         "packet.reencode" => super::packet::subject_of(request),
         "codec.reencode" => super::codec::subject_of(request),
-        _ => None,
+        _ => super::gameplay::subject(op, request),
     }
 }
 
