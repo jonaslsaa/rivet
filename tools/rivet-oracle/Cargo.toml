@@ -35,8 +35,16 @@ tempfile = { workspace = true }
 # Paper jar descriptor to unzip without reopening a mutable pathname.
 rustix = { version = "1.1", features = ["fs"] }
 
+# The L4 arena tick-trace runner lives in rivet-server behind `arena-trace`
+# (it needs crate-internal world owners); `rivet-arena-trace` drives it.
+rivet-server = { path = "../../crates/rivet-server", features = ["arena-trace"] }
+
 [[bin]]
 name = "rivet-generated-full"
 path = "src/bin/rivet_generated_full.rs"
+
+[[bin]]
+name = "rivet-arena-trace"
+path = "src/bin/rivet_arena_trace/main.rs"
 
 [dev-dependencies]
