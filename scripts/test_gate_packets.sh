@@ -62,11 +62,23 @@ printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$SANDBOX/scripts/t
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$SANDBOX/scripts/check_markers.py"
 printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$SANDBOX/scripts/test_check_markers.py"
 
-# The oracle pre-check now requires the rivet-client binary (join-capture
-# harness); provide an existing dummy file so the pre-check reports all
-# prerequisites present.
-mkdir -p "$SANDBOX/target/debug"
-: > "$SANDBOX/target/debug/rivet-client"
+# The full gate's paper-junit-baseline step (#517) runs that tool's unittest
+# suite (`unittest discover`, which exits 5 when no test runs) and then
+# validate.py against working/Paper. Stub one passing test and a validator that
+# exits 0 (VERIFIED); the tool's behaviour is covered by its own suite.
+mkdir -p "$SANDBOX/tools/paper-junit-baseline"
+printf 'import unittest\n\n\nclass Stub(unittest.TestCase):\n    def test_stub(self):\n        pass\n' \
+  > "$SANDBOX/tools/paper-junit-baseline/test_stub.py"
+printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > "$SANDBOX/tools/paper-junit-baseline/validate.py"
+
+# The oracle pre-check requires the trusted, contract-named rivet-client
+# artifact (join-capture harness and scenario rows); arbitrary target/debug
+# builds are not accepted. The sandbox is not a git worktree, so the gate
+# resolves the shared oracle work dir to the sandbox itself; provide an existing
+# dummy file at that exact path so the pre-check reports all prerequisites
+# present.
+mkdir -p "$SANDBOX/tools/rivet-oracle/work/bin"
+: > "$SANDBOX/tools/rivet-oracle/work/bin/rivet-client-26.2-f96e8c45"
 
 # gate.sh now also runs the scenario runner's Paper rows (join/move
 # Paper-vs-Rivet differentials) whenever the paperclip jar and the client binary
@@ -171,9 +183,12 @@ chmod +x "$SANDBOX/home/.cargo/bin/cargo" "$SANDBOX/home/.cargo/bin/cargo-machet
         "$SANDBOX/home/.cargo/bin/java" "$SANDBOX/jdk/bin/javac"
 
 # Fully controlled PATH: sandbox bin + minimal system dirs. gate.sh prepends
-# $HOME/.cargo/bin itself. JAVA_HOME points at the sandbox jdk so the
-# reference-oracle javac probe is deterministic on hosts with their own JDK.
-GATE="env HOME=$SANDBOX/home JAVA_HOME=$SANDBOX/jdk CARGO_TARGET_DIR=$SANDBOX/target PATH=$SANDBOX/home/.cargo/bin:/usr/bin:/bin $SANDBOX/scripts/gate.sh"
+# $HOME/.cargo/bin itself. RIVET_JAVA_HOME/JAVA_HOME point at the
+# sandbox jdk (RIVET_JAVA_HOME is probed first) so the reference-oracle javac
+# probe is deterministic on hosts with their own JDK; host RIVET_CLIENT_BIN /
+# RIVET_ORACLE_JAR overrides are unset so the pre-check resolves the sandbox's
+# own artifacts.
+GATE="env -u RIVET_CLIENT_BIN -u RIVET_ORACLE_JAR HOME=$SANDBOX/home RIVET_JAVA_HOME=$SANDBOX/jdk JAVA_HOME=$SANDBOX/jdk CARGO_TARGET_DIR=$SANDBOX/target PATH=$SANDBOX/home/.cargo/bin:/usr/bin:/bin $SANDBOX/scripts/gate.sh"
 
 # Assertions shared by every scenario: the packets step must be scoped to
 # `-p rivet-protocol --features packets` — never widened to `--all-features` or

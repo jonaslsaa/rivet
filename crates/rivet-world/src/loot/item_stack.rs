@@ -110,6 +110,12 @@ impl LootItemStack {
         self.enchantments.get(enchantment).copied().unwrap_or(0)
     }
 
+    /// All enchantment levels on this stack, in insertion order.
+    #[must_use]
+    pub fn enchantments(&self) -> &IndexMap<Identifier, i32> {
+        &self.enchantments
+    }
+
     /// `ItemStack.copyWithCount(int)`.
     #[must_use]
     pub fn copy_with_count(&self, count: i32) -> Self {

@@ -52,45 +52,58 @@ Milestones M0–M4, epics (label `epic`) per track live on github.com/jonaslsaa/
 
 ## Workflow catalog (`.claude/workflows/`)
 
-`translate-wave`, `check-burndown`, `review-pr`, `worktree-task`, and `release-prep` exist as executable scripts in `.claude/workflows/` — invoke them by name with explicit `args`; manifest workflows receive rows selected by the controller and never read MANIFEST.tsv themselves. The rest below are designs to be scripted when their phase begins.
+`scaffold`, `translate-wave`, `check-burndown`, `review-pr`, `worktree-task`, and `release-prep` exist as executable scripts in `.claude/workflows/` — invoke them by name with explicit `args`; manifest workflows receive rows selected by the controller and never read MANIFEST.tsv themselves. Every lane workflow takes the absolute path of its lane worktree (`worktree`) and pins it in every prompt, because workflow agents inherit the session cwd; that is what lets several lanes run at once. The rest below are designs to be scripted when their phase begins.
+
+Args at a glance (`?` = optional, default after `=`):
+
+| Script | Args |
+|---|---|
+| `scaffold` | `{worktree, family, javaPaths, crate, modulePath, implModel?='sonnet', implEffort?='high'}` — `javaPaths` are manifest `root:relpath` entries; one author plus one fresh reviewer per round, at most 2 rounds; commits on the lane branch |
+| `translate-wave` | `{waveId, worktree, units: [{id, java_package, java_paths, crate, notes?}], rigor?='full', implModel?='sonnet', implEffort?='high', reviewModel?=session model, reviewEffort?='high'}` — `rigor` `full` (two-lens first round, at most 3 rounds) or `lean` (one combined reviewer per round, at most 2 rounds); commits per unit on the lane branch |
+| `check-burndown` | `{worktree, maxRounds?=8, fixModel?='sonnet', fixEffort?='high'}` |
+| `worktree-task` | `{worktree, task, maxRounds?=3, commit?=true, implModel?, implEffort?}` — the model/effort overrides apply to the implementer and fixers only |
+| `release-prep` | `{worktree, task, maxRounds?=6, checks?}` |
+| `review-pr` | `{pr}` or `{range}`, plus `effort?='high'` (`max` for spine PRs and train reviews) |
+
+No workflow pushes; agents commit on the lane branch where the script says so, and the controller pushes.
 
 | Workflow | Shape | Purpose |
 |---|---|---|
 | `analyze-graph` | fan-out readers → merge | Build/refresh MANIFEST.tsv from Java sources |
-| `scaffold` | serial | Crate skeletons, mod trees, stub files, Cargo.toml — run once per crate wave, before fan-out |
+| `scaffold` | author → review→fix loop (≤2 rounds) | One family's mirrored files, `mod` lines and type/fn signatures with `STUB(<unit-id>)` bodies, checked against the Java and `cargo check -p`; merges alone, before the family's leaf waves |
 | `translate-wave` | pipeline per unit | The core loop (below) |
 | `check-burndown` | loop until clean | Compiler-error work queue, partitioned by module |
 | `worktree-task` | impl → gate→fix loop | Non-translation tasks (tooling, harnesses, codegen, infra) in an isolated worktree |
 | `release-prep` | refresh → check → review→fix loop | Bring an already-implemented worktree to a clean, current-main, exact-reviewed head for the controller's serialized strict gate |
-| `review-pr` | single max-effort agent | Pre-merge "nuke": whole-PR cross-unit review, then `gate.sh` |
+| `review-pr` | single agent (effort arg, default high) | Pre-merge "nuke": whole-PR cross-unit review, then `gate.sh` |
 | `verify-oracle` | parallel scenarios | Differential tests vs vanilla/Paper; failures → new manifest rows |
 | `shim-gen` | pipeline per API class | JVM adapter codegen (below) |
 | `doc-drift` | small panel | After each wave: mine review findings for systemic patterns → proposed PORTING.md edits |
 
 ## The core loop: `translate-wave`
 
-Args: `{ waveId, units: [...manifest rows...] }` (topo-ready units only, ~10–30 per wave; concurrency caps at 16 anyway).
+Args: `{ waveId, worktree, units: [...manifest rows...], rigor?, implModel?, implEffort?, reviewModel?, reviewEffort? }` (see the args table above). Each unit carries its exact `java_paths`; the script resolves them against `working/Paper` and prints them, and the implementer reads exactly those files.
 
 Per unit (see `.claude/workflows/translate-wave.js` for the real script):
 
 1. **Implement** — full context: Java source, PORTING.md, OWNERSHIP.md section, stub conventions.
-2. **Review→fix convergence loop** ("golden loop"), max 6 rounds:
-   - Round 1: **two** fresh diff-only reviewers with different lenses (semantic drift / ownership+API) — first contact has the highest yield.
-   - Rounds 2–6: **one** fresh full-lens reviewer per round, blind to prior findings, reviewing the post-fix state.
-   - Zero findings → converged. Findings → fixer applies them (or disputes findings that are factually wrong, with reasons), next round re-verifies.
+2. **Review→fix convergence loop** ("golden loop"), at most 3 rounds (`rigor: full`) or 2 (`rigor: lean`):
+   - Full rigor, round 1: **two** fresh diff-only reviewers with different lenses (semantic drift / ownership+API+canonical types) — first contact has the highest yield. Lean rigor uses one combined reviewer every round.
+   - Later rounds: **one** fresh full-lens reviewer per round, blind to prior findings, reviewing the post-fix state.
+   - Every reviewer runs `cargo check -p <crate>` (`CARGO_BUILD_JOBS=4`); errors in the unit's own files are a critical finding. Zero findings and a clean check → converged. After the last unit settles, one check reports `cargo check -p` per wave crate and any uncommitted leftovers. Findings → fixer applies them (or disputes findings that are factually wrong, with reasons), next round re-verifies.
    - After the final round: minor-only findings get one blind fix and pass as `converged: with-unverified-minor-fixes`; anything critical/major → `blocked` for controller triage. The loop's verdict comes from agents that never met the implementer — the implementer never judges its own convergence.
-3. **Per-PR "thermo-nuclear" review** (`review-pr`, `effort: max`) runs once per PR after burndown, before `gate.sh` — it hunts what per-unit reviews structurally can't see: cross-unit stub conflicts, aggregate OWNERSHIP.md violations, API-surface incoherence, process violations (weakened tests, smuggled doc edits).
+3. **Per-PR "thermo-nuclear" review** (`review-pr`; `effort: max` for spine PRs and train reviews, default `high`) runs once per PR after burndown, before `gate.sh` — it hunts what per-unit reviews structurally can't see: cross-unit stub conflicts, aggregate OWNERSHIP.md violations, API-surface incoherence, process violations (weakened tests, smuggled doc edits).
 
 Notes:
 - **pipeline(), not phase barriers** — unit A runs its review loop while unit B is still translating.
 - Reviewers are **fresh instances every round** and see only code + Java originals, never the implementer's reasoning or previous findings (anchoring kills adversarial yield). Exception: `worktree-task` gate rounds ≥2 receive the prior round's findings and the fixer's disputes — but only AFTER doing their own fresh full-lens pass — because a verifier cannot confirm fixes it has never seen, and disputed-but-wrong findings otherwise resurface forever.
 - Review catches drift early; the oracle is the truth. "Zero findings" never substitutes for parity fixtures — the merge gate stays `review-pr` + `gate.sh` + oracle scoreboard.
-- Agents return structured reports; the **main session** updates MANIFEST.tsv and commits per wave. Agents never `git commit`, never `git stash/reset` (forbidden in every prompt — Bun learned this the hard way).
-- Implementer prompt hard rules: no TODO-and-skip, no inventing APIs, wrapping arithmetic everywhere Java arithmetic exists, `blocked` verdict with reason if the unit can't translate faithfully.
+- Agents return structured reports; the **main session** updates MANIFEST.tsv. `translate-wave` and `scaffold` agents commit their own files by explicit path on the lane branch (one unit's commits never include another unit's files); the controller pushes. Agents never `git stash/reset`, rebase, or push (forbidden in every prompt — Bun learned this the hard way).
+- Implementer prompt hard rules: no TODO-and-skip, no inventing APIs, wrapping arithmetic everywhere Java arithmetic exists, `blocked` verdict with reason if the unit can't translate faithfully, one definition per type at its canonical home (a missing hub blocks the unit), and expected test values only from Paper-generated fixtures (hand-written tests earn no verification credit).
 
 ## `release-prep`
 
-Use `.claude/workflows/release-prep.js` for a branch whose implementation is already complete. Args are `{worktree, task, maxRounds?, checks?}`. Each round fetches and rebases a clean branch onto current `origin/main`, runs focused mechanical checks, and gives the exact head to a fresh read-only reviewer. Confirmed findings go to a fixer that commits locally; disputed findings must be justified and are rechecked by the next fresh reviewer.
+Use `.claude/workflows/release-prep.js` for a branch whose implementation is already complete. Args are `{worktree, task, maxRounds?, checks?}`. Each round fetches and merges current `origin/main` into a clean branch (never a rebase: the branch may already be a pushed PR head), runs focused mechanical checks, and gives the exact head to a fresh read-only reviewer. Confirmed findings go to a fixer that commits locally; disputed findings must be justified and are rechecked by the next fresh reviewer.
 
 Success is fail-closed: the reviewed head/base must match the refreshed and checked hashes, focused checks must report at least one command, every changed file must be inspected, the branch must be clean, ahead of and zero commits behind current `origin/main`, and the reviewer must return an empty findings list. Empty agent results, contradictory verdicts, dirty leftovers, incomplete inspection, or moving-head evidence cannot produce readiness. The result includes exact head/base/check/review evidence and `strict_gate_ready: true`, but the workflow never runs `scripts/gate.sh`, pushes, opens a PR, or merges — those remain serialized controller actions.
 
