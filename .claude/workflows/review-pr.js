@@ -1,7 +1,7 @@
 export const meta = {
   name: 'review-pr',
   description: 'Pre-merge heavyweight review of a whole PR diff (cross-unit consistency), then the controller runs gate.sh',
-  whenToUse: 'Run once per PR after check-burndown converges, before merging. Pass args {pr} (number) or {range} (git range like main...HEAD).',
+  whenToUse: 'Run once per PR after check-burndown converges, before merging. Pass args {pr} (number) or {range} (git range like main...HEAD), plus effort? (default high; max for spine PRs and train reviews).',
   phases: [{ title: 'Nuke' }],
 }
 
@@ -27,8 +27,14 @@ const VERDICT = {
   },
 }
 
-if (!args || (!args.pr && !args.range)) throw new Error('review-pr requires args {pr} or {range}')
-const target = args.pr ? `PR #${args.pr} (use \`gh pr diff ${args.pr}\` and \`gh pr view ${args.pr}\`)` : `git range ${args.range} (use \`git diff ${args.range}\`)`
+// args sometimes arrives JSON-encoded as a string instead of an object.
+const A = typeof args === 'string' ? JSON.parse(args) : args
+if (!A || (!A.pr && !A.range)) throw new Error('review-pr requires args {pr} or {range}')
+const EFFORT = A.effort || 'high'
+if (!['low', 'medium', 'high', 'xhigh', 'max'].includes(EFFORT)) {
+  throw new Error(`review-pr: effort must be one of low/medium/high/xhigh/max (got ${EFFORT})`)
+}
+const target = A.pr ? `PR #${A.pr} (use \`gh pr diff ${A.pr}\` and \`gh pr view ${A.pr}\`)` : `git range ${A.range} (use \`git diff ${A.range}\`)`
 
 const verdict = await agent(
   `You are the pre-merge reviewer for the Rivet port. Review the ENTIRE diff of ${target} as one
@@ -44,7 +50,7 @@ Your job is what per-unit reviews structurally cannot see:
 Read GOAL.md, PORTING.md, OWNERSHIP.md first. Set merge_ready=false if any critical or major
 finding exists. Do not manufacture findings — an empty list with merge_ready=true is a valid
 result for a good PR.`,
-  { label: `nuke:${args.pr || args.range}`, phase: 'Nuke', schema: VERDICT, effort: 'max' },
+  { label: `nuke:${A.pr || A.range}`, phase: 'Nuke', schema: VERDICT, effort: EFFORT },
 )
 
 if (!verdict) throw new Error('review agent failed')
