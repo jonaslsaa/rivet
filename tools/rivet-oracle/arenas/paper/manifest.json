@@ -15,9 +15,14 @@
       "trace_sha256": "e9795533438f88a07e3b44a681f64e59e655e656af7ea00bd2548cb47b378deb",
       "trace_lines": 53
     },
+    "fire_tick_delay_seeded": {
+      "arena_sha256": "3001d122e82307fde88aa67e63e27bb8cc126e5e64cd66e77637b0d8245f3025",
+      "trace_sha256": "80a9beca95720282e5265d240883b2467a244aa32dc90f5d60fcfd5fb277e53b",
+      "trace_lines": 163
+    },
     "furnace_smelt": {
       "arena_sha256": "8b22751ef8ac76fa43eedeb59beb9334a39f5caf9332859526513b9c19f79da7",
-      "trace_sha256": "db215ff8cb4376b8de3e605eeec102cfc5e4c511ae1828174fc8827cae86ad4b",
+      "trace_sha256": "5cd2f6d2bec17a4b6758a705abd55c13bf84149b35c870e9eec3a16d1ab4b9ef",
       "trace_lines": 263
     },
     "hopper_transfer": {
@@ -32,17 +37,17 @@
     },
     "piston_push": {
       "arena_sha256": "4e0d905d583a12e672f501eeeae84e8685db3b36b8956174495d68ccd60bf604",
-      "trace_sha256": "cf240f77064d8a5cb676adfe42ebab2ae17e60b058db515edd6aabe7691fc9a7",
+      "trace_sha256": "a49c21c9c2a6303bb5cd036bffd33f2a24222877d89746ee7c5861852c63d421",
       "trace_lines": 15
     },
     "sand_fall": {
       "arena_sha256": "a5925b6fa816a7342c1e0e1ae1d54a904aeff0833b406ccb2da4e31ff94cf6ef",
-      "trace_sha256": "812273cde3d2c29b2bd118598ac948a146d183b98b3b39c0e219e4fbff41da28",
+      "trace_sha256": "a244dc846ad3cb357d540c51e3108dbee336c380efef3b5334316f4c5b07b39d",
       "trace_lines": 33
     },
     "spawner_idle_seeded": {
-      "arena_sha256": "d94665a86f3295d271fd1cbe3b8e3dd7b4251db64eab94818522adeac021bf5e",
-      "trace_sha256": "893cf66e837aa1ada92b250eadc71657229d295bbfb977656b7086179642874d",
+      "arena_sha256": "ece83d9b11ff0ac19f6009034444a39c1ed54fb78481cfb5fd725be161a41e57",
+      "trace_sha256": "a8de88fdb5280b362cc4d89e75796412444d4623e1f418c68e7422c4b7a5c574",
       "trace_lines": 43
     },
     "water_decay": {
@@ -78,6 +83,6 @@
   },
   "schema": "rivet.arena-trace/1",
   "paper_commit": "0a99345",
-  "probe_sha256": "d6f661556c7e364dfe512e6dad5c2830c10f6b8de147e3627eac700ffeae43ec",
+  "probe_sha256": "0e67eabd652de28e490d887095c8a84be4fbc10772e71d0b411b56c72402997c",
   "twin_identical": true
 }

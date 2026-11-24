@@ -1,6 +1,6 @@
 {
   "name": "spawner_idle_seeded",
-  "description": "A pig spawner with no player in range under the seed-injection contract (level RNG reseeded): BaseSpawner.serverTick must leave it idle and draw nothing from the level RNG. Ordered last per VERIFICATION item 7.",
+  "description": "A pig spawner with no player in range: BaseSpawner.serverTick returns at isNearPlayer before any draw, so this arena exercises no RNG (Paper's trace shows the spawner unchanged). A spawner that spawns needs an arena player, which neither side has yet; fire_tick_delay_seeded is the seeded-RNG arena (site 1).",
   "origin": [
     448,
     0,

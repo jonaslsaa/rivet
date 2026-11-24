@@ -7,6 +7,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import ca.spottedleaf.moonrise.common.util.ThreadUnsafeRandom;
 import it.unimi.dsi.fastutil.objects.ObjectLinkedOpenHashSet;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -26,6 +27,11 @@ import net.minecraft.commands.arguments.blocks.BlockStateParser;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.DoubleTag;
+import net.minecraft.nbt.FloatTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.StringTag;
+import net.minecraft.nbt.Tag;
 import net.minecraft.nbt.TagParser;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ServerLevel;
@@ -66,8 +72,9 @@ import org.bukkit.plugin.java.JavaPlugin;
  * LevelTicks.schedule paths, and the trace reads production state.
  *
  * Timeline per arena (the Rust runner uses the same one):
- *   t = 0: reseed the level RNG, quietly place the arena, apply its block
- *          entity NBT, run script ops with tick 0, snapshot 0.
+ *   t = 0: reseed the level RNG, install a fresh seeded entity RNG, quietly
+ *          place the arena, apply its block entity NBT, run script ops with
+ *          tick 0, snapshot 0.
  *   t >= 1: (one ServerLevel.tick has run) run script ops with tick t,
  *          snapshot t.
  * The trace schema is documented in tools/rivet-oracle/arenas/README.md.
@@ -82,7 +89,8 @@ public final class ArenaTraceProbe extends JavaPlugin implements Listener {
     static final long SITE_ENTITY_RANDOM = 3;
     static final int MAX_WAIT_TICKS = 400;
 
-    static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
+    /** serializeNulls: schema members whose value is null (`health`) are written, not dropped. */
+    static final Gson GSON = new GsonBuilder().disableHtmlEscaping().serializeNulls().create();
     static final Comparator<BlockPos> POS_ORDER = Comparator.<BlockPos>comparingInt(BlockPos::getY)
         .thenComparingInt(BlockPos::getZ).thenComparingInt(BlockPos::getX);
 
@@ -113,9 +121,10 @@ public final class ArenaTraceProbe extends JavaPlugin implements Listener {
         final Map<UUID, Integer> entityNumbers = new HashMap<>();
         final List<JsonArray> blockEvents = new ArrayList<>();
         final List<JsonObject> script = new ArrayList<>();
+        ArenaEntityRandom entityRandom;
+        String violation;
         int waited;
         int t = -1;
-        int entitySpawns;
 
         Arena(String name, byte[] bytes) throws Exception {
             this.name = name;
@@ -269,7 +278,33 @@ public final class ArenaTraceProbe extends JavaPlugin implements Listener {
         unsafe.putObject(level, unsafe.objectFieldOffset(field), recording);
     }
 
-    /** Seed-injection site 3: each entity's RNG at spawn, by arena spawn ordinal. */
+    /**
+     * Seed-injection site 3. Paper 26.2 gives every entity the one static
+     * Entity.SHARED_RANDOM (`Entity.random` is a reference to it, captured at
+     * construction), and that source honours only the first setSeed per JVM.
+     * Reseeding it per entity therefore cannot work. Instead each arena installs
+     * a fresh seeded source as Entity.SHARED_RANDOM before placement, so every
+     * entity constructed while the arena runs shares it, in Paper's own draw
+     * order. setSeed on it is not modelled and fails the probe.
+     */
+    static final class ArenaEntityRandom extends ThreadUnsafeRandom {
+        private boolean sealed;
+
+        ArenaEntityRandom(long seed) {
+            super(seed);
+            this.sealed = true;
+        }
+
+        @Override
+        public synchronized void setSeed(long seed) {
+            if (sealed) {
+                throw new IllegalStateException("setSeed on the arena entity RNG (Entity.SHARED_RANDOM)");
+            }
+            super.setSeed(seed);
+        }
+    }
+
+    /** Every entity near the arena must draw from the arena's entity RNG (site 3). */
     @EventHandler
     public void onEntityAdd(com.destroystokyo.paper.event.entity.EntityAddToWorldEvent event) {
         Arena active = arena;
@@ -277,8 +312,10 @@ public final class ArenaTraceProbe extends JavaPlugin implements Listener {
             return;
         }
         Entity entity = ((org.bukkit.craftbukkit.entity.CraftEntity) event.getEntity()).getHandle();
-        if (entity.level() == level && active.aabb().inflate(16).contains(entity.position())) {
-            entity.getRandom().setSeed(mix(active.seed, SITE_ENTITY_RANDOM, active.entitySpawns++));
+        if (entity.level() == level && active.aabb().inflate(16).contains(entity.position())
+            && entity.getRandom() != active.entityRandom && active.violation == null) {
+            active.violation = active.name + ": " + BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType())
+                + " was not constructed with the arena entity RNG (seed site 3)";
         }
     }
 
@@ -317,6 +354,9 @@ public final class ArenaTraceProbe extends JavaPlugin implements Listener {
                 runScript(arena, arena.t);
                 snapshot(arena);
             }
+            if (arena.violation != null) {
+                throw new IllegalStateException(arena.violation);
+            }
             if (arena.t == arena.ticks) {
                 complete(arena);
                 arena = null;
@@ -347,6 +387,9 @@ public final class ArenaTraceProbe extends JavaPlugin implements Listener {
         }
         // Seed-injection site 1, before anything in the arena can draw from it.
         level.getRandom().setSeed(mix(a.seed, SITE_LEVEL_RANDOM, 0));
+        // Seed-injection site 3: entities constructed from here on capture it.
+        a.entityRandom = new ArenaEntityRandom(mix(a.seed, SITE_ENTITY_RANDOM, 0));
+        Entity.SHARED_RANDOM = a.entityRandom;
         a.t = 0;
 
         JsonArray placements = new JsonArray();
@@ -554,7 +597,7 @@ public final class ArenaTraceProbe extends JavaPlugin implements Listener {
             for (String key : exclusions.getOrDefault("block_entity_nbt", Set.of())) {
                 tag.remove(key);
             }
-            now.put(p, tag.toString());
+            now.put(p, normalizeFloats(tag).toString());
         }
         JsonArray rows = new JsonArray();
         List<BlockPos> changed = new ArrayList<>();
@@ -611,7 +654,7 @@ public final class ArenaTraceProbe extends JavaPlugin implements Listener {
             for (String key : exclusions.getOrDefault("entity_nbt", Set.of())) {
                 tag.remove(key);
             }
-            row.addProperty("nbt", tag.toString());
+            row.addProperty("nbt", normalizeFloats(tag).toString());
             rows.add(row);
         }
         rows.sort(Comparator.comparingInt(r -> r.get("n").getAsInt()));
@@ -690,6 +733,35 @@ public final class ArenaTraceProbe extends JavaPlugin implements Listener {
             out.add(String.format("0x%016x", Double.doubleToLongBits(v)));
         }
         return out;
+    }
+
+    /**
+     * NBT floats and doubles as IEEE-754 bits (VERIFICATION 2.4), so parity
+     * never rests on decimal float formatting: a FloatTag becomes the string
+     * `#f:0x<floatToIntBits>`, a DoubleTag `#d:0x<doubleToLongBits>` (NaN
+     * canonicalized, D14). A real string starting with `#` gains one more `#`,
+     * which keeps the mapping injective. Mutates and returns `tag`.
+     */
+    static Tag normalizeFloats(Tag tag) {
+        if (tag instanceof FloatTag f) {
+            return StringTag.valueOf(String.format("#f:0x%08x", Float.floatToIntBits(f.value())));
+        }
+        if (tag instanceof DoubleTag d) {
+            return StringTag.valueOf(String.format("#d:0x%016x", Double.doubleToLongBits(d.value())));
+        }
+        if (tag instanceof StringTag s) {
+            return s.value().startsWith("#") ? StringTag.valueOf("#" + s.value()) : s;
+        }
+        if (tag instanceof CompoundTag c) {
+            for (String key : List.copyOf(c.keySet())) {
+                c.put(key, normalizeFloats(c.get(key)));
+            }
+        } else if (tag instanceof ListTag l) {
+            for (int i = 0; i < l.size(); i++) {
+                l.set(i, normalizeFloats(l.get(i)));
+            }
+        }
+        return tag;
     }
 
     static String hex(byte[] bytes) {

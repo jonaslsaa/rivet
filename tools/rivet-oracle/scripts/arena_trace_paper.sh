@@ -27,6 +27,13 @@ jar="${java_home:+$java_home/bin/}jar"
 
 [[ -f "$runtime" ]] || { echo "UNVERIFIED: Paper runtime jar missing: $runtime" >&2; exit 2; }
 [[ -d "$libraries" ]] || { echo "UNVERIFIED: Paper libraries missing: $libraries" >&2; exit 2; }
+for tool in "$java" "$javac" "$jar"; do
+    command -v "$tool" > /dev/null 2>&1 \
+        || { echo "UNVERIFIED: $tool not found (Temurin 25; set RIVET_JAVA_HOME or JAVA_HOME)" >&2; exit 2; }
+done
+java_spec="$("$java" -XshowSettings:properties -version 2>&1 | sed -n 's/^ *java\.specification\.version = //p')"
+[[ "$java_spec" == "25" ]] \
+    || { echo "UNVERIFIED: Java 25 required (D14), $java reports '${java_spec:-nothing}'" >&2; exit 2; }
 commit="$(unzip -p "$runtime" META-INF/MANIFEST.MF | tr -d '\r' | sed -n 's/^Git-Commit: //p')"
 [[ "$commit" == "0a99345" ]] || { echo "Expected Paper 0a99345, got $commit" >&2; exit 1; }
 

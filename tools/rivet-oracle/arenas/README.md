@@ -17,8 +17,9 @@ bytes.
 
 Code: `src/java/arena/ArenaTraceProbe.java` (Paper plugin),
 `scripts/arena_trace_paper.sh` (one fresh Paper boot),
-`crates/rivet-server/src/server/level/arena_trace.rs` (Rivet runner, feature
-`arena-trace`), `src/bin/rivet_arena_trace/` (CLI and comparator).
+`src/bin/rivet_arena_trace/` (CLI, comparator and the Rivet runner
+`runner.rs`, over rivet-server's public level API; nothing of the harness is
+compiled into the server library).
 
 ## Commands
 
@@ -33,7 +34,8 @@ cargo run -p rivet-oracle --bin rivet-arena-trace -- rivet --arena N  # print Ri
 
 Paper boots need the materialized runtime (`RIVET_PAPER_RUNTIME_JAR`,
 `RIVET_PAPER_LIBRARIES`, default `tools/rivet-oracle/work/run`) and Temurin
-25; a missing prerequisite exits 2 (UNVERIFIED). Boots, Rivet traces and logs
+25 (`RIVET_JAVA_HOME`/`JAVA_HOME`, else `PATH`); a missing jar, library
+directory, `java`/`javac`/`jar`, or a Java other than 25 exits 2 (UNVERIFIED). Boots, Rivet traces and logs
 go to `work/arena-trace/` (`RIVET_ARENA_WORK`), never `/tmp`. A full twin
 record of all arenas takes about four minutes (the arenas run at 20 TPS).
 
@@ -62,27 +64,51 @@ divergence, not a harness failure. `scripts/gate.sh` runs `check` only when
   VERIFICATION 2.5 also names `level.getThreadSafeRandom()`; Paper 26.2's
   `Level`/`ServerLevel` have no such source, so there is no site for it. On
   the Rust side the reseed is a call on the arena's own level
-  (`random_mut().set_seed`) inside the test-support runner, never a global.
-- **Seeded RNG coverage today.** Only site 1 is exercised, and only by arenas
-  whose mechanics draw from the level RNG. `spawner_idle_seeded` runs under
-  the contract but draws nothing: with no player in range `BaseSpawner.serverTick`
-  returns before any draw (Paper's trace shows the spawner unchanged). A
-  spawner that spawns needs an arena player, which neither side has yet.
+  (`random_mut().set_seed`) inside the runner, never a global.
+- **Entity RNG (site 3).** VERIFICATION 2.5 asks for each entity's `random`
+  reseeded at spawn. Paper 26.2 cannot do that: every `Entity.random` is the
+  one static `Entity.SHARED_RANDOM`, whose `setSeed` honours only the first
+  call per JVM. So each arena installs a fresh seeded source as
+  `Entity.SHARED_RANDOM` before placement; every entity constructed while it
+  runs shares it, in Paper's own draw order, independent of which arenas ran
+  before in the batch. The probe fails if an entity near the box holds any
+  other source, or if anything calls `setSeed` on it. A Rivet entity runtime
+  must model the same single shared source per arena.
+- **Seeded RNG coverage today.** Site 1 is exercised by
+  `fire_tick_delay_seeded`: every `FireBlock` reschedule draws
+  `level.random.nextInt(10)`, so its scheduled-tick delays are the seeded
+  stream and twin admission holds only because the seed takes effect (an
+  unseeded level RNG is time-seeded). Site 3 is exercised only by
+  `sand_fall` (the falling block's construction-time UUID draw, which the
+  trace renumbers). `spawner_idle_seeded` draws nothing: with no player in
+  range `BaseSpawner.serverTick` returns before any draw. A spawner that
+  spawns needs an arena player, which neither side has yet, so VERIFICATION
+  item 7's "spawner with seeded RNG" remains open.
 - **Block-entity NBT.** Paper places the block (fresh entity) and then loads
   the arena NBT into it; the Rust runner puts the header's full post-load NBT
   pending before the same quiet placement, which creates the live entity from
   it. Both start tick 0 from the same entity state.
 - **Admission.** Two fresh Paper boots must produce byte-identical traces
   before a recording is committed or a live comparison counts.
+- **Batch order.** One boot runs the requested arenas in `arenas.tsv` order
+  (alphabetical). Each arena reseeds sites 1 and 3 at its own placement, so
+  its trace does not depend on the arenas before it.
 - **Opt-in.** `opt_in` in an arena turns a frozen mechanic back on. None is
   implemented yet; both sides refuse an arena that sets one.
 
 ## Trace schema `rivet.arena-trace/1`
 
-JSON lines. Key order is fixed as listed. Positions are relative to the arena
-origin `[dx,dy,dz]`; block states are global state ids (`Block.getId`);
-doubles and floats are IEEE-754 bit patterns as `0x`-prefixed hex
-(`doubleToLongBits` / `floatToIntBits`, NaN canonicalized, D14).
+JSON lines. Key order is fixed as listed; a member whose value is null is
+written as `null`, never omitted. Positions are relative to the arena origin
+`[dx,dy,dz]`; block states are global state ids (`Block.getId`); doubles and
+floats are IEEE-754 bit patterns as `0x`-prefixed hex (`doubleToLongBits` /
+`floatToIntBits`, NaN canonicalized, D14), including inside NBT: before
+printing SNBT both emitters replace every `FloatTag` with the string
+`"#f:0x<8 hex>"` and every `DoubleTag` with `"#d:0x<16 hex>"`, and prefix one
+more `#` to any real string that starts with `#` (an injective mapping), so
+parity never rests on decimal float formatting. The header's
+`block_entities` SNBT is the exception: it is the raw input the Rivet runner
+loads, not a compared record.
 
 1. `{"kind":"header","schema","arena","arena_sha256","origin","size","ticks","seed","opt_in","placements","block_entities","script"}`
    — the arena resolved by Paper: `placements` `[dx,dy,dz,state]` in placement
@@ -99,14 +125,21 @@ doubles and floats are IEEE-754 bit patterns as `0x`-prefixed hex
      `ServerLevel.blockEvent` queued in the box since the previous record, in
      queue order (Paper side: a recording subclass of the private queue).
    - `block_entities`: `[dx,dy,dz,snbt|null]` for every block entity whose
-     `saveWithFullMetadata` SNBT (sorted keys) changed, appeared or vanished.
+     `saveWithFullMetadata` SNBT (sorted keys, floats normalized) changed,
+     appeared or vanished.
    - `entities`: every entity in the box, `{"n","type","pos","delta","health","nbt"}`;
      `n` is the first-appearance number within the arena, `UUID` is removed
-     from `nbt` in favour of `n`, `health` is null for non-living entities.
+     from `nbt` in favour of `n`, `health` is `null` for non-living entities.
+     The Rivet runner binds no entity owner (admission refuses with
+     `MissingOwner`); if the level ever holds an entity the runner ends with
+     an `error` line, since no Rust row emitter exists yet.
+   - Rivet's `block_events` is empty because `ServerLevel` has no block-event
+     queue at all; the port that adds `blockEvents` makes the runner read it.
 3. `{"kind":"end","ticks"}` — closure: the run reached its declared length.
 
 A Rivet run that hits a missing or refusing authority (an `Unavailable`
-error, a block tick without a Rust body, a panic in an unported branch) ends
+error, a block tick without a Rust body in `ServerLevel::tick_block_live`,
+an entity it cannot render, a panic in an unported branch) ends
 with `{"kind":"error","t","phase","message"}` instead of the record for that
 tick. The comparator canonicalizes both lines through one JSON writer and
 compares bytes; the first divergence is reported as tick, field path and both
@@ -135,5 +168,8 @@ The arena lands in a verification PR, before or with the port it verifies
    `rivet-arena-trace check --arena <name>` and record the honest result with
    `check --ledger` after committing. A `FAIL` with a named divergence is a
    valid row; the port PR flips it to `PASS`.
-5. If the Rust side needs a phase the runner does not drive yet, extend
-   `arena_trace.rs` with the production entry point, never with a substitute.
+5. If the Rust side needs a phase the runner does not drive yet, add the
+   production entry point to `ServerLevel` (as `tick_block_live` /
+   `run_block_ticks_live` are) and call it from `runner.rs`; the runner never
+   dispatches game logic itself. A newly ported scheduled-tick body joins
+   `ServerLevel::tick_block_live`.
