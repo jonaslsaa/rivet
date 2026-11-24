@@ -24,7 +24,9 @@ Classes, from the VERIFY.tsv rows whose `rust_globs` match a file:
 Corpus cap: a row credits at most K * corpus_n LOC (K = 50); a row with no
 countable corpus (`-`) credits nothing. Allocation is greedy and
 deterministic: V2 rows first, then V1 rows, each in id order, each spending
-its budget over its matched files in path order on LOC not yet credited.
+its budget on LOC not yet credited, over its matched files in `rust_globs`
+order (verify_ledger lists the files a row verifies directly before the
+same-crate files its tests import), files of one glob in path order.
 A file can therefore be split across classes.
 
 Outputs per subsystem (SUBSYSTEMS, first matching path prefix) and in total:
@@ -202,7 +204,15 @@ def allocate(rows: list[dict[str, str]], files: dict[str, int]) -> tuple[dict, d
             if row_class(r) != cls:
                 continue
             budget = K * int(r["corpus_n"]) if r["corpus_n"].isdigit() else 0
-            for path in sorted(p for p in files if any(rx.match(p) for rx in regexes)):
+            # Glob order first (verify_ledger lists a row's primary files
+            # before the files its tests merely import), then path order.
+            ordered = []
+            seen = set()
+            for rx in regexes:
+                for path in sorted(p for p in files if p not in seen and rx.match(p)):
+                    seen.add(path)
+                    ordered.append(path)
+            for path in ordered:
                 if budget <= 0:
                     break
                 take = min(budget, remaining[path])

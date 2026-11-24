@@ -86,6 +86,35 @@ class RustScanTest(unittest.TestCase):
         self.assertEqual(len(code), len(text))
         self.assertEqual(rust_scan.production_line_count(text), 4)
 
+    def test_module_map(self):
+        src = {
+            "crates/c/src/lib.rs": "pub mod a;\nmod b;\n// mod commented;\n",
+            "crates/c/src/a.rs": (
+                "#[cfg(test)]\n#[path = \"a_fixture.rs\"]\nmod tests;\n"
+                "pub(crate) mod inner;\n"
+                "mod inline { mod skipped; }\n"
+                "#[cfg(test)]\nmod t { include!(\"spliced.rs\"); }\n"
+            ),
+            "crates/c/src/a_fixture.rs": "use super::*;\n",
+            "crates/c/src/a/inner.rs": "",
+            "crates/c/src/a/inline/skipped.rs": "",
+            "crates/c/src/spliced.rs": "",
+            "crates/c/src/b/mod.rs": "mod leaf;\n",
+            "crates/c/src/b/leaf.rs": "",
+            "crates/c/src/orphan.rs": "",
+        }
+        m = rust_scan.module_map(set(src), src.__getitem__)
+        got = {p: (i.path, i.test_only, i.parent) for p, i in m.items()}
+        self.assertEqual(got, {
+            "crates/c/src/lib.rs": ((), False, None),
+            "crates/c/src/a.rs": (("a",), False, "crates/c/src/lib.rs"),
+            "crates/c/src/a_fixture.rs": (("a", "tests"), True, "crates/c/src/a.rs"),
+            "crates/c/src/a/inner.rs": (("a", "inner"), False, "crates/c/src/a.rs"),
+            "crates/c/src/spliced.rs": (("a",), True, "crates/c/src/a.rs"),
+            "crates/c/src/b/mod.rs": (("b",), False, "crates/c/src/lib.rs"),
+            "crates/c/src/b/leaf.rs": (("b", "leaf"), False, "crates/c/src/b/mod.rs"),
+        })
+
     def test_test_file_rules(self):
         self.assertTrue(rust_scan.is_test_file(Path("a/tests.rs")))
         self.assertTrue(rust_scan.is_test_file(Path("a/foo_tests.rs")))

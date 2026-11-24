@@ -47,15 +47,21 @@ Derived columns
                 of a .json (json_records: an array's length or an object's largest
                 member), one per other file; directories sum their tracked files (manifest.json and
                 *.md excluded); `-` when the row has no countable corpus
-  rust_globs    files the row verifies. Consumers are the tracked `.rs` files that
-                name a fixture path (`fixtures/<name>`). A production consumer
-                verifies itself; a test-only consumer (tests.rs, *_test(s).rs, files
-                under tests/, or a module its parent declares under #[cfg(test)])
-                verifies the same-workspace production files it `use`s
-                (crate::, super::, rivet_*:: paths resolved to the longest existing
-                module file; lib.rs re-exports are not followed) and, for
-                `x_test.rs` / `x_tests.rs` / `x_fixture.rs`, its sibling `x.rs`.
-                Curated rows list globs by hand in this file.
+  rust_globs    files the row verifies, primary files first (verify_debt.py
+                spends a row's capped credit in this order). Consumers are the
+                tracked `.rs` files that name a fixture path (`fixtures/<name>`).
+                Module structure comes from rust_scan.module_map (crate roots
+                through `mod x;`, honouring `#[path]`, `#[cfg(test)]` and
+                `include!`). Primary: a production consumer itself; a test-only
+                consumer (test file name, or a module declared under
+                #[cfg(test)] here or in an ancestor) credits the module that
+                declares it and, for `x_test.rs` / `x_tests.rs` / `x_fixture.rs`,
+                its sibling `x.rs`. Secondary: the production files a test-only
+                consumer `use`s (crate::, super::, rivet_*:: resolved through the
+                module tree to the longest existing module; crate roots never),
+                only within the consumer's own crate; a tools/ consumer's
+                imports of any workspace crate. Curated rows list globs by hand
+                in this file.
   java_classes  Paper classes the probe's main Java source imports, names fully
                 qualified, or uses by simple name under a wildcard import (outer
                 classes, resolved against COVERAGE.tsv)
@@ -63,9 +69,9 @@ Derived columns
 record-tests
 ------------
 For every row whose rust consumers include cargo-test code, the tests whose
-nextest name lies in a consumer file's module (or that integration-test
-binary) decide the result: all passed -> PASS, any failed -> FAIL, none ran ->
-UNVERIFIED. matched/mismatched stay `-`: cargo reports tests, not corpus
+nextest name lies in a consumer file's module (its module-tree path, so
+`#[path]` modules resolve; or that integration-test binary) decide the
+result: all passed -> PASS, any failed -> FAIL, none ran -> UNVERIFIED. matched/mismatched stay `-`: cargo reports tests, not corpus
 inputs (per-input counts arrive with the generic oracle-op framework,
 VERIFICATION item 3). The note records the test counts.
 
@@ -500,7 +506,6 @@ def curated_corpus(spec, tracked: list[str]) -> str:
 # ------------------------------------------------- rust consumers -> globs
 
 USE_RE = re.compile(r"\buse\s+([^;]+);")
-TEST_MOD_RE_T = r"#\[cfg\((?:all\(\s*)?test\b[^\]]*\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+{name}\s*;"
 
 
 def expand_use(tree: str) -> list[str]:
@@ -540,84 +545,107 @@ def expand_use(tree: str) -> list[str]:
 class RustTree:
     def __init__(self, tracked: list[str]):
         self.files = {p for p in tracked if p.endswith(".rs")}
-        self._code_cache: dict[str, str] = {}
-        self.crate_dirs = {}
-        for p in self.files:
+        self._text_cache: dict[str, str] = {}
+        self._test_only: dict[str, bool] = {}
+        self.crate_roots = {}
+        for p in sorted(self.files):
             parts = p.split("/")
-            if len(parts) > 2 and parts[0] in ("crates", "tools") and parts[2] == "src":
-                self.crate_dirs[parts[1].replace("-", "_")] = f"{parts[0]}/{parts[1]}/src"
+            if len(parts) == 4 and parts[0] in ("crates", "tools") and parts[2] == "src" \
+                    and parts[3] in ("lib.rs", "main.rs"):
+                self.crate_roots.setdefault(parts[1].replace("-", "_"), p)
+        self.modules = rust_scan.module_map(self.files, self._text)
+        self.by_module = {(m.root, m.path): f for f, m in sorted(self.modules.items())}
 
-    def module_file(self, dir_: str, segs: list[str]) -> str | None:
-        """Longest existing module file for `dir_/segs...` (never lib.rs)."""
+    def _text(self, path: str) -> str:
+        if path not in self._text_cache:
+            self._text_cache[path] = (REPO / path).read_text(encoding="utf-8", errors="replace")
+        return self._text_cache[path]
+
+    def module_file(self, root: str, segs: list[str]) -> str | None:
+        """File of the longest prefix of module path `segs` under crate root
+        file `root` (never the root itself)."""
         for n in range(len(segs), 0, -1):
-            base = dir_ + "/" + "/".join(segs[:n])
-            for cand in (base + ".rs", base + "/mod.rs"):
-                if cand in self.files:
-                    return cand
+            f = self.by_module.get((root, tuple(segs[:n])))
+            if f:
+                return f
         return None
 
     def resolve_use(self, consumer: str, path: str) -> str | None:
+        """File a `use` path names, via the module tree; None outside it."""
         segs = [s for s in path.split("::") if s and s != "*" and s != "self"]
         if not segs:
             return None
-        parts = consumer.split("/")
+        if segs[0] in self.crate_roots:
+            return self.module_file(self.crate_roots[segs[0]], segs[1:])
+        info = self.modules.get(consumer)
+        if info is None:
+            return None
         if segs[0] == "crate":
-            if len(parts) < 3 or parts[2] != "src":
-                return None
-            return self.module_file("/".join(parts[:3]), segs[1:])
+            return self.module_file(info.root, segs[1:])
         if segs[0] == "super":
-            here = consumer[:-len("/mod.rs")] if consumer.endswith("/mod.rs") else consumer[:-3]
-            base = here.rsplit("/", 1)[0]
-            segs = segs[1:]
+            base = list(info.path)
             while segs and segs[0] == "super":
-                base = base.rsplit("/", 1)[0]
+                base = base[:-1]
                 segs = segs[1:]
-            return self.module_file(base, segs) if segs else None
-        if segs[0] in self.crate_dirs:
-            return self.module_file(self.crate_dirs[segs[0]], segs[1:])
+            return self.module_file(info.root, base + segs)
         return None
 
-    def _code(self, path: str) -> str:
-        if path not in self._code_cache:
-            self._code_cache[path] = rust_scan.blank_comments_and_strings(
-                (REPO / path).read_text(encoding="utf-8", errors="replace"))
-        return self._code_cache[path]
-
     def is_test_only(self, path: str, text: str) -> bool:
-        rel = Path(path)
-        if rust_scan.is_test_file(rel):
-            return True
-        if rust_scan.production_line_count(text) == 0:
-            return True
-        name = rel.stem if rel.name != "mod.rs" else rel.parent.name
-        parent_dir = rel.parent if rel.name != "mod.rs" else rel.parent.parent
-        pattern = re.compile(TEST_MOD_RE_T.format(name=re.escape(name)))
-        for cand in (parent_dir / "mod.rs", parent_dir.with_suffix(".rs"), parent_dir / "lib.rs",
-                     parent_dir / "main.rs"):
-            c = cand.as_posix()
-            if c in self.files:
-                if pattern.search(self._code(c)):
-                    return True
-        return False
+        """Test code: a test file name, no production lines, or a module
+        declared under #[cfg(test)] (itself or an ancestor)."""
+        if path not in self._test_only:
+            info = self.modules.get(path)
+            self._test_only[path] = rust_scan.is_test_file(Path(path)) \
+                or (info is not None and info.test_only) or rust_scan.production_line_count(text) == 0
+        return self._test_only[path]
 
-    def globs_for(self, consumer: str, text: str) -> list[str]:
-        out = set()
+    def globs_for(self, consumer: str, text: str) -> tuple[set[str], set[str]]:
+        """(primary, secondary) files a consumer verifies. Primary: a
+        production consumer itself; for a test-only consumer, the module that
+        declares it and its `x_test(s).rs`/`x_fixture.rs` sibling `x.rs`.
+        Secondary: production files a test-only (or tools/) consumer `use`s,
+        limited to the consumer's own crate for a crates/ consumer (imports
+        from other crates are fixture plumbing: SNBT parsing, registries)."""
+        primary: set[str] = set()
+        secondary: set[str] = set()
         test_only = self.is_test_only(consumer, text)
-        if not test_only and consumer.startswith("crates/"):
-            out.add(consumer)
+        in_crates = consumer.startswith("crates/")
+        if not test_only and in_crates:
+            primary.add(consumer)
         if test_only:
             stem = re.sub(r"_(?:tests?|fixture)\.rs$", ".rs", consumer)
-            if stem != consumer and stem in self.files:
-                out.add(stem)
-        if test_only or not consumer.startswith("crates/"):
+            if stem != consumer and stem in self.files and not self.is_test_only(stem, self._text(stem)):
+                primary.add(stem)
+            info = self.modules.get(consumer)
+            parent = info.parent if info else None
+            if parent and parent.startswith("crates/") and self.modules[parent].parent is not None \
+                    and not self.is_test_only(parent, self._text(parent)):
+                primary.add(parent)
+        if test_only or not in_crates:
+            own_src = "/".join(consumer.split("/")[:3]) + "/"
             code = rust_scan.blank_comments_and_strings(text)
             for m in USE_RE.finditer(code):
                 for path in expand_use(m.group(1)):
                     target = self.resolve_use(consumer, path)
-                    if target and target.startswith("crates/") and not rust_scan.is_test_file(Path(target)) \
-                            and not target.endswith(("/lib.rs", "/main.rs")):
-                        out.add(target)
-        return sorted(out)
+                    if target and target.startswith("crates/") and target in self.modules \
+                            and self.modules[target].parent is not None \
+                            and (not in_crates or target.startswith(own_src)) \
+                            and not self.is_test_only(target, self._text(target)):
+                        secondary.add(target)
+        return primary, secondary - primary
+
+    def test_scope(self, consumer: str) -> tuple[str, str] | None:
+        """(nextest binary id, module prefix) of the tests a consumer file holds."""
+        parts = consumer.split("/")
+        if len(parts) < 4 or parts[0] not in ("crates", "tools"):
+            return None
+        crate = parts[1]
+        if parts[2] == "tests":
+            return (f"{crate}::{Path(parts[3]).stem}", "") if len(parts) == 4 else None
+        info = self.modules.get(consumer)
+        if info is None or not info.path:
+            return None
+        return (crate, "::".join(info.path))
 
 
 def consumers_of(fixtures: list[str], rs_texts: dict[str, str]) -> list[str]:
@@ -672,12 +700,12 @@ def probe_java_classes(script_text: str, known: set[str]) -> list[str]:
 
 # ---------------------------------------------------------------- build
 
-def build_rows() -> list[dict[str, str]]:
+def build_rows(tree: "RustTree | None" = None) -> list[dict[str, str]]:
     tracked = git_files()
     rs_texts = {p: (REPO / p).read_text(encoding="utf-8", errors="replace")
                 for p in tracked if p.endswith(".rs") and (p.startswith("crates/") or p.startswith("tools/"))
                 and not p.startswith("tools/rivet-codegen/")}
-    tree = RustTree(tracked)
+    tree = tree or RustTree(tracked)
     known = load_java_classes()
 
     scripts_dir = REPO / ORACLE / "scripts"
@@ -698,11 +726,16 @@ def build_rows() -> list[dict[str, str]]:
                 raise SystemExit(f"{rid}: {p} does not exist")
         claimed.update(paths)
         consumers = sorted(set(consumers_of(paths, rs_texts)) | set(extra_consumers))
-        globs: set[str] = set()
+        primary: set[str] = set()
+        secondary: set[str] = set()
         for c in consumers:
-            globs.update(tree.globs_for(c, rs_texts[c]))
+            p, q = tree.globs_for(c, rs_texts[c])
+            primary |= p
+            secondary |= q
+        # Primary files first: verify_debt.py spends a row's capped credit in this order.
+        globs = sorted(primary) + sorted(secondary - primary)
         return {
-            "id": rid, "layer": "L1", "rust_globs": sorted(globs), "java_classes": java,
+            "id": rid, "layer": "L1", "rust_globs": globs, "java_classes": java,
             "mechanism": mechanism, "fixtures": paths, "corpus_n": count_corpus(paths, tracked),
             "negative": "n", "tier": "T0", "consumers": consumers,
             "seed_status": "UNVERIFIED",
@@ -837,27 +870,8 @@ def parse_nextest(logs: list[Path]) -> dict[tuple[str, str], bool]:
     return results
 
 
-def test_scope(consumer: str) -> tuple[str, str] | None:
-    """(nextest binary id, module prefix) of the tests a consumer file holds."""
-    parts = consumer.split("/")
-    if len(parts) < 4 or parts[0] not in ("crates", "tools"):
-        return None
-    crate = parts[1]
-    if parts[2] == "tests":
-        return (f"{crate}::{Path(parts[3]).stem}", "") if len(parts) == 4 else None
-    if parts[2] != "src":
-        return None
-    mod = parts[3:]
-    if mod[-1] in ("lib.rs", "main.rs") and len(mod) == 1:
-        return None
-    if mod[-1] == "mod.rs":
-        mod = mod[:-1]
-    else:
-        mod[-1] = mod[-1][:-3]
-    return (crate, "::".join(mod))
-
-
-def record_tests(rows: list[dict], previous: dict[str, dict[str, str]], logs: list[Path], commit: str) -> int:
+def record_tests(rows: list[dict], previous: dict[str, dict[str, str]], logs: list[Path], commit: str,
+                 tree: RustTree) -> int:
     results = parse_nextest(logs)
     if not results:
         raise SystemExit("no nextest PASS/FAIL lines found in the given logs")
@@ -867,7 +881,7 @@ def record_tests(rows: list[dict], previous: dict[str, dict[str, str]], logs: li
             continue
         passed = failed = 0
         for c in r["consumers"]:
-            scope = test_scope(c)
+            scope = tree.test_scope(c)
             if scope is None:
                 continue
             binary, prefix = scope
@@ -912,7 +926,8 @@ def main() -> int:
     rt.add_argument("logs", nargs="+", type=Path)
     args = ap.parse_args()
 
-    rows = build_rows()
+    tree = RustTree(git_files())
+    rows = build_rows(tree)
     previous = load_results(args.output)
 
     if args.cmd == "record":
@@ -922,7 +937,7 @@ def main() -> int:
                                  "mismatched": args.mismatched, "last_verified_commit": args.commit,
                                  "note": args.note}
     elif args.cmd == "record-tests":
-        n = record_tests(rows, previous, args.logs, args.commit)
+        n = record_tests(rows, previous, args.logs, args.commit, tree)
         print(f"recorded {n} L1 rows from {len(args.logs)} log(s)")
 
     text = render(rows, previous)

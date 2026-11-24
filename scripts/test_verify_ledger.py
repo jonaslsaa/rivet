@@ -40,12 +40,30 @@ class UseParsingTest(unittest.TestCase):
         self.assertEqual(vl.expand_use("super::Foo as Bar"), ["super::Foo"])
 
     def test_test_scope(self):
-        self.assertEqual(vl.test_scope("crates/rivet-world/src/fluid/paper_fixture.rs"),
+        """fluid/paper_fixture.rs is `mod paper_fixture;` (under #[cfg(test)])
+        in fluid.rs; levelgen/noisegen/mod.rs is that module; levelgen/structure/
+        placement_fixture.rs is `#[path = "placement_fixture.rs"] mod tests;`
+        in placement.rs, so its tests are named placement::tests::*;
+        mth_golden_tests.rs is `#[path] mod mth_golden_tests;` in mth.rs."""
+        tree = vl.RustTree(vl.git_files())
+        self.assertEqual(tree.test_scope("crates/rivet-world/src/fluid/paper_fixture.rs"),
                          ("rivet-world", "fluid::paper_fixture"))
-        self.assertEqual(vl.test_scope("crates/rivet-world/src/poi/mod.rs"), ("rivet-world", "poi"))
-        self.assertEqual(vl.test_scope("crates/rivet-world/tests/biome_temperature_golden.rs"),
+        self.assertEqual(tree.test_scope("crates/rivet-world/src/levelgen/noisegen/mod.rs"),
+                         ("rivet-world", "levelgen::noisegen"))
+        self.assertEqual(tree.test_scope("crates/rivet-world/src/levelgen/structure/placement_fixture.rs"),
+                         ("rivet-world", "levelgen::structure::placement::tests"))
+        self.assertEqual(tree.test_scope("crates/rivet-util/src/mth_golden_tests.rs"),
+                         ("rivet-util", "mth::mth_golden_tests"))
+        self.assertEqual(tree.test_scope("crates/rivet-world/tests/biome_temperature_golden.rs"),
                          ("rivet-world::biome_temperature_golden", ""))
-        self.assertIsNone(vl.test_scope("crates/rivet-world/src/lib.rs"))
+        self.assertIsNone(tree.test_scope("crates/rivet-world/src/lib.rs"))
+        # A #[path] test module is test-only and credits the module declaring it.
+        fixture = "crates/rivet-world/src/levelgen/structure/placement_fixture.rs"
+        text = (vl.REPO / fixture).read_text()
+        self.assertTrue(tree.is_test_only(fixture, text))
+        primary, secondary = tree.globs_for(fixture, text)
+        self.assertEqual(primary, {"crates/rivet-world/src/levelgen/structure/placement.rs"})
+        self.assertTrue(all(p.startswith("crates/rivet-world/") for p in secondary))
 
 
 class NextestTest(unittest.TestCase):

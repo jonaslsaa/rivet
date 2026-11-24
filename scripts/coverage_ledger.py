@@ -53,7 +53,9 @@ One row per `.java` file (= its top-level class) under the three roots,
 Rust home
 ---------
 Rust files are the tracked `crates/*/src/**/*.rs`, minus test files (`tests.rs`,
-`*_tests.rs`, `*_test.rs`, anything under `tests/`) and `generated/` trees. A
+`*_tests.rs`, `*_test.rs`, anything under `tests/`, and any module the crate's
+module tree declares under `#[cfg(test)]`, rust_scan.module_map) and
+`generated/` trees. A
 file `<dirs>/<stem>.rs` (or `<dirs>/<stem>/mod.rs`) is a candidate for a Java
 class when `stem` equals the class name in snake case (compared with
 underscores removed and lower-cased, so `AABB` -> `aabb.rs`). A candidate is a
@@ -587,9 +589,16 @@ class RustFile:
 
 def load_rust() -> list[RustFile]:
     files = []
-    for rel in rust_scan.tracked_crate_sources():
+    sources = rust_scan.tracked_crate_sources()
+    modules = rust_scan.module_map(
+        {rel.as_posix() for rel in sources},
+        lambda p: (REPO / p).read_text(encoding="utf-8", errors="replace"))
+    for rel in sources:
         inner = rel.parts[3:]
         if not inner or rust_scan.is_test_file(Path(*inner)) or rust_scan.is_generated_path(rel):
+            continue
+        info = modules.get(rel.as_posix())
+        if info is not None and info.test_only:
             continue
         if inner == ("lib.rs",) or inner == ("main.rs",) or inner[-1] in ("lib.rs", "main.rs"):
             continue
