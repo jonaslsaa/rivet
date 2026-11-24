@@ -2,6 +2,8 @@
 
 ## Workspace (bottom-up dependency order)
 
+> D15 and OWNERSHIP.md supersede this table where they differ: `rivet-entity` folds into the live-game crate `rivet-server`, the `COVERAGE.tsv` ledger assigns every class its crate, and entities use OWNERSHIP's dispatch pattern, not an `AnyEntity` enum.
+
 | Crate | Ports | Notes |
 |---|---|---|
 | `rivet-core` | `net.minecraft` root package | `CrashReport`, `ChatFormatting`, `SharedConstants`, `Util`, root exceptions. Bottom of the stack — keeps module-path mirroring clean instead of scattering root classes ad hoc. |

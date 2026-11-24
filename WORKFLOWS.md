@@ -177,7 +177,7 @@ Measured in the tree: 186 JUnit files (~21k LOC) in `paper-server/src/test` + `p
 Goal: real Paper plugins (jars) run against the Rust server. Architecture:
 
 - **Keep `paper-api` as-is** (plugins compile against it unchanged). Reimplement the *implementation* layer (`CraftServer`, `CraftWorld`, `CraftPlayer`, event dispatch, scheduler) as Java shims that call into Rust over **JNI / Java 22+ FFM (Panama)**.
-- JVM runs **in-process**, plugin code confined to a dedicated "main thread" that is tick-synchronized with the Rust tick loop (Bukkit's API is main-thread-confined anyway — this maps cleanly).
+- JVM runs **in-process**, plugin code runs on the Rust tick thread itself through FFM upcalls, as Bukkit plugins run on the server main thread (D20).
 - Rust side exposes a stable C ABI facade (`rivet-ffi` crate); events flow Rust → JVM dispatch → mutations back through the facade. Batch per-tick to amortize FFI cost; benchmark event-storm latency *early* (M1), because if this is too slow the whole adapter needs a redesign.
 - **Honest limit**: plugins that reflect into NMS/CraftBukkit internals (many do) cannot work; only API-clean plugins are in scope. Track a compatibility corpus (LuckPerms, EssentialsX-core-commands, Vault, PlaceholderAPI, WorldGuard as stretch) and make "corpus plugin boots and passes its smoke script" the oracle for this track.
 
