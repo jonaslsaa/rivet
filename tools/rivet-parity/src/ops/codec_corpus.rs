@@ -1132,6 +1132,246 @@ const HAND: &[(&str, &str)] = &[
         "FontDescription.CODEC",
         r#"{"type":"atlas","atlas":"minecraft:blocks","sprite":"minecraft:block/stone"}"#,
     ),
+    (
+        "Tool.CODEC",
+        r#"{"rules":[{"blocks":"minecraft:stone","speed":4.0,"correct_for_drops":true}]}"#,
+    ),
+    (
+        "Tool.CODEC",
+        r#"{"rules":[{"blocks":["minecraft:stone","minecraft:dirt"],"speed":2.0}],"default_mining_speed":2.0,"damage_per_block":2,"can_destroy_blocks_in_creative":false}"#,
+    ),
+    (
+        "Tool.CODEC",
+        r##"{"rules":[{"blocks":"#minecraft:mineable/pickaxe","speed":6.0,"correct_for_drops":true}]}"##,
+    ),
+    ("Tool.CODEC", r#"{"rules":[]}"#),
+    ("Tool.CODEC", r#"{}"#),
+    ("Tool.CODEC", r#"{"rules":[],"damage_per_block":-1}"#),
+    ("Tool.Rule.CODEC", r#"{"blocks":"minecraft:stone"}"#),
+    (
+        "Tool.Rule.CODEC",
+        r#"{"blocks":["minecraft:stone"],"speed":0.0}"#,
+    ),
+    (
+        "Tool.Rule.CODEC",
+        r#"{"blocks":"minecraft:not_a_block","speed":1.0}"#,
+    ),
+    ("Repairable.CODEC", r#"{"items":"minecraft:iron_ingot"}"#),
+    (
+        "Repairable.CODEC",
+        r#"{"items":["minecraft:iron_ingot","minecraft:gold_ingot"]}"#,
+    ),
+    ("Repairable.CODEC", r##"{"items":"#minecraft:planks"}"##),
+    ("Repairable.CODEC", r#"{"items":[]}"#),
+    ("Repairable.CODEC", r#"{}"#),
+    ("BlocksAttacks.CODEC", r#"{}"#),
+    (
+        "BlocksAttacks.CODEC",
+        r#"{"block_delay_seconds":0.25,"disable_cooldown_scale":2.0,"damage_reductions":[{"horizontal_blocking_angle":90.0,"base":0.0,"factor":1.0}],"item_damage":{"threshold":3.0,"base":1.0,"factor":1.0}}"#,
+    ),
+    (
+        "BlocksAttacks.CODEC",
+        r#"{"block_sound":"minecraft:item.shield.block","disabled_sound":"minecraft:item.shield.break"}"#,
+    ),
+    ("BlocksAttacks.CODEC", r#"{"block_delay_seconds":-1.0}"#),
+    ("BlocksAttacks.CODEC", r#"{"damage_reductions":[]}"#),
+    (
+        "BlocksAttacks.DamageReduction.CODEC",
+        r#"{"base":1.0,"factor":0.5}"#,
+    ),
+    (
+        "BlocksAttacks.DamageReduction.CODEC",
+        r#"{"horizontal_blocking_angle":0.0,"base":1.0,"factor":0.5}"#,
+    ),
+    (
+        "BlocksAttacks.DamageReduction.CODEC",
+        r#"{"type":"minecraft:fall","base":1.0,"factor":0.5}"#,
+    ),
+    ("BlocksAttacks.DamageReduction.CODEC", r#"{"base":1.0}"#),
+    ("DamageResistant.CODEC", r#"{"types":"minecraft:fall"}"#),
+    (
+        "DamageResistant.CODEC",
+        r#"{"types":["minecraft:fall","minecraft:cactus"]}"#,
+    ),
+    (
+        "DamageResistant.CODEC",
+        r##"{"types":"#minecraft:is_fire"}"##,
+    ),
+    ("DamageResistant.CODEC", r#"{"types":[]}"#),
+    ("DamageResistant.CODEC", r#"{}"#),
+    ("KineticWeapon.CODEC", r#"{}"#),
+    (
+        "KineticWeapon.CODEC",
+        r#"{"contact_cooldown_ticks":5,"delay_ticks":2,"dismount_conditions":{"max_duration_ticks":10,"min_speed":1.0},"knockback_conditions":{"max_duration_ticks":20},"damage_conditions":{"max_duration_ticks":30,"min_relative_speed":0.5},"forward_movement":1.0,"damage_multiplier":2.0,"sound":"minecraft:item.spear.use","hit_sound":"minecraft:item.spear.hit"}"#,
+    ),
+    ("KineticWeapon.CODEC", r#"{"contact_cooldown_ticks":-1}"#),
+    ("KineticWeapon.CODEC", r#"{"damage_conditions":{}}"#),
+    ("PiercingWeapon.CODEC", r#"{}"#),
+    (
+        "PiercingWeapon.CODEC",
+        r#"{"deals_knockback":false,"dismounts":true,"sound":"minecraft:item.spear.use","hit_sound":{"sound_id":"minecraft:item.spear.hit","range":16.0}}"#,
+    ),
+    ("PiercingWeapon.CODEC", r#"{"deals_knockback":"yes"}"#),
+    ("SwingAnimationType.CODEC", r#""whack""#),
+    ("SwingAnimationType.CODEC", r#""stab""#),
+    ("SwingAnimationType.CODEC", r#""none""#),
+    ("SwingAnimationType.CODEC", r#""slash""#),
+    ("SwingAnimationType.CODEC", r#"1"#),
+    ("MapDecorations.CODEC", r#"{}"#),
+    (
+        "MapDecorations.CODEC",
+        r#"{"a":{"type":"minecraft:player","x":1.5,"z":-2.5,"rotation":90.0}}"#,
+    ),
+    (
+        "MapDecorations.CODEC",
+        r#"{"a":{"type":"minecraft:not_a_type","x":1.0,"z":2.0,"rotation":0.0}}"#,
+    ),
+    (
+        "MapDecorations.CODEC",
+        r#"{"a":{"type":"minecraft:player","x":1.0}}"#,
+    ),
+    (
+        "MapDecorations.Entry.CODEC",
+        r#"{"type":"minecraft:frame","x":0.0,"z":0.0,"rotation":0.0}"#,
+    ),
+    (
+        "MapDecorations.Entry.CODEC",
+        r#"{"type":"minecraft:target_x","x":1,"z":2,"rotation":3}"#,
+    ),
+    (
+        "MapDecorations.Entry.CODEC",
+        r#"{"type":"minecraft:player","x":"1","z":2,"rotation":3}"#,
+    ),
+    ("ItemAttributeModifiers.CODEC", r#"[]"#),
+    (
+        "ItemAttributeModifiers.CODEC",
+        r#"[{"type":"minecraft:attack_damage","id":"minecraft:base_attack_damage","amount":7.0,"operation":"add_value","slot":"mainhand"}]"#,
+    ),
+    (
+        "ItemAttributeModifiers.CODEC",
+        r#"[{"type":"minecraft:armor","id":"minecraft:armor.chestplate","amount":8.0,"operation":"add_value","slot":"chest","display":{"type":"hidden"}}]"#,
+    ),
+    (
+        "ItemAttributeModifiers.CODEC",
+        r#"[{"type":"minecraft:armor","id":"minecraft:x","amount":1.0,"operation":"add_value","display":{"type":"override","value":"hi"}}]"#,
+    ),
+    (
+        "ItemAttributeModifiers.CODEC",
+        r#"[{"type":"minecraft:not_an_attribute","id":"minecraft:x","amount":1.0,"operation":"add_value"}]"#,
+    ),
+    (
+        "ItemAttributeModifiers.Entry.CODEC",
+        r#"{"type":"minecraft:movement_speed","id":"minecraft:x","amount":0.1,"operation":"add_multiplied_base"}"#,
+    ),
+    (
+        "ItemAttributeModifiers.Entry.CODEC",
+        r#"{"type":"minecraft:movement_speed","id":"minecraft:x","amount":0.1,"operation":"bogus"}"#,
+    ),
+    (
+        "ItemAttributeModifiers.Entry.CODEC",
+        r#"{"type":"minecraft:movement_speed","id":"minecraft:x","amount":0.1,"operation":"add_value","slot":"nowhere"}"#,
+    ),
+    ("FireworkExplosion.Shape.CODEC", r#""small_ball""#),
+    ("FireworkExplosion.Shape.CODEC", r#""large_ball""#),
+    ("FireworkExplosion.Shape.CODEC", r#""star""#),
+    ("FireworkExplosion.Shape.CODEC", r#""creeper""#),
+    ("FireworkExplosion.Shape.CODEC", r#""burst""#),
+    ("FireworkExplosion.Shape.CODEC", r#""cube""#),
+    (
+        "InstrumentComponent.CODEC",
+        r#""minecraft:ponder_goat_horn""#,
+    ),
+    (
+        "InstrumentComponent.CODEC",
+        r#""minecraft:not_an_instrument""#,
+    ),
+    (
+        "InstrumentComponent.CODEC",
+        r#"{"sound_event":"minecraft:item.goat_horn.sound.0","use_duration":7.0,"range":256.0,"description":"x"}"#,
+    ),
+    (
+        "InstrumentComponent.CODEC",
+        r#"{"sound_event":"minecraft:item.goat_horn.sound.0","use_duration":0.0,"range":256.0,"description":"x"}"#,
+    ),
+    (
+        "Instrument.DIRECT_CODEC",
+        r#"{"sound_event":"minecraft:item.goat_horn.sound.0","use_duration":7.0,"range":256.0,"description":{"translate":"instrument.minecraft.ponder_goat_horn"}}"#,
+    ),
+    (
+        "Instrument.DIRECT_CODEC",
+        r#"{"sound_event":"minecraft:item.goat_horn.sound.0","use_duration":-1.0,"range":256.0,"description":"x"}"#,
+    ),
+    (
+        "Instrument.DIRECT_CODEC",
+        r#"{"sound_event":"minecraft:item.goat_horn.sound.0","use_duration":7.0,"range":256.0}"#,
+    ),
+    (
+        "TrimMaterial.DIRECT_CODEC",
+        r##"{"asset_name":"quartz","description":{"color":"#E3D4C4","translate":"trim_material.minecraft.quartz"}}"##,
+    ),
+    (
+        "TrimMaterial.DIRECT_CODEC",
+        r#"{"asset_name":"quartz","override_armor_assets":{"minecraft:iron":"quartz_darker"},"description":"x"}"#,
+    ),
+    (
+        "TrimMaterial.DIRECT_CODEC",
+        r#"{"asset_name":"Bad Name","description":"x"}"#,
+    ),
+    ("TrimMaterial.DIRECT_CODEC", r#"{"description":"x"}"#),
+    ("ProvidesTrimMaterial.CODEC", r#""minecraft:quartz""#),
+    (
+        "ProvidesTrimMaterial.CODEC",
+        r#""minecraft:not_a_material""#,
+    ),
+    (
+        "ProvidesTrimMaterial.CODEC",
+        r#"{"asset_name":"quartz","description":"x"}"#,
+    ),
+    ("SulfurCubeContent.CODEC", r#"{"id":"minecraft:stone"}"#),
+    ("SulfurCubeContent.CODEC", r#""minecraft:stone""#),
+    (
+        "SulfurCubeContent.CODEC",
+        r#"{"id":"minecraft:stone","count":2}"#,
+    ),
+    ("SulfurCubeContent.CODEC", r#"{}"#),
+    ("IntProviders.NON_NEGATIVE_CODEC", r#"0"#),
+    ("IntProviders.NON_NEGATIVE_CODEC", r#"-1"#),
+    (
+        "IntProviders.NON_NEGATIVE_CODEC",
+        r#"{"type":"minecraft:uniform","min_inclusive":0,"max_inclusive":5}"#,
+    ),
+    (
+        "IntProviders.NON_NEGATIVE_CODEC",
+        r#"{"type":"minecraft:uniform","min_inclusive":-1,"max_inclusive":5}"#,
+    ),
+    ("IntProviders.POSITIVE_CODEC", r#"0"#),
+    ("IntProviders.POSITIVE_CODEC", r#"1"#),
+    (
+        "IntProviders.POSITIVE_CODEC",
+        r#"{"type":"minecraft:biased_to_bottom","min_inclusive":1,"max_inclusive":5}"#,
+    ),
+    (
+        "IntProviders.POSITIVE_CODEC",
+        r#"{"type":"minecraft:constant","value":0}"#,
+    ),
+    ("Direction.Axis.CODEC", r#""x""#),
+    ("Direction.Axis.CODEC", r#""y""#),
+    ("Direction.Axis.CODEC", r#""z""#),
+    ("Direction.Axis.CODEC", r#""w""#),
+    ("Direction.Axis.CODEC", r#"1"#),
+    (
+        "Biome.NETWORK_CODEC",
+        r#"{"has_precipitation":true,"temperature":0.8,"downfall":0.4,"effects":{"water_color":4159204}}"#,
+    ),
+    (
+        "Biome.NETWORK_CODEC",
+        r#"{"has_precipitation":false,"temperature":2.0,"temperature_modifier":"frozen","downfall":0.0,"effects":{"water_color":4159204,"fog_color":12638463,"sky_color":7907327}}"#,
+    ),
+    (
+        "Biome.NETWORK_CODEC",
+        r#"{"temperature":0.8,"downfall":0.4}"#,
+    ),
+    ("Biome.NETWORK_CODEC", r#"{}"#),
 ];
 
 /// Replacement values for mutation: wrong types, boundaries, unknown names.

@@ -667,6 +667,29 @@ public final class RivetReferenceOracle {
             codecs.put("NoiseThresholdCountPlacement.CODEC", net.minecraft.world.level.levelgen.placement.NoiseThresholdCountPlacement.CODEC.codec());
             codecs.put("BiomeFilter.CODEC", net.minecraft.world.level.levelgen.placement.BiomeFilter.CODEC.codec());
             codecs.put("FontDescription.CODEC", net.minecraft.network.chat.FontDescription.CODEC);
+            codecs.put("Tool.CODEC", net.minecraft.world.item.component.Tool.CODEC);
+            codecs.put("Tool.Rule.CODEC", net.minecraft.world.item.component.Tool.Rule.CODEC);
+            codecs.put("Repairable.CODEC", net.minecraft.world.item.enchantment.Repairable.CODEC);
+            codecs.put("BlocksAttacks.CODEC", net.minecraft.world.item.component.BlocksAttacks.CODEC);
+            codecs.put("BlocksAttacks.DamageReduction.CODEC", net.minecraft.world.item.component.BlocksAttacks.DamageReduction.CODEC);
+            codecs.put("DamageResistant.CODEC", net.minecraft.world.item.component.DamageResistant.CODEC);
+            codecs.put("KineticWeapon.CODEC", net.minecraft.world.item.component.KineticWeapon.CODEC);
+            codecs.put("PiercingWeapon.CODEC", net.minecraft.world.item.component.PiercingWeapon.CODEC);
+            codecs.put("SwingAnimationType.CODEC", net.minecraft.world.item.SwingAnimationType.CODEC);
+            codecs.put("MapDecorations.CODEC", net.minecraft.world.item.component.MapDecorations.CODEC);
+            codecs.put("MapDecorations.Entry.CODEC", net.minecraft.world.item.component.MapDecorations.Entry.CODEC);
+            codecs.put("ItemAttributeModifiers.CODEC", net.minecraft.world.item.component.ItemAttributeModifiers.CODEC);
+            codecs.put("ItemAttributeModifiers.Entry.CODEC", net.minecraft.world.item.component.ItemAttributeModifiers.Entry.CODEC);
+            codecs.put("FireworkExplosion.Shape.CODEC", net.minecraft.world.item.component.FireworkExplosion.Shape.CODEC);
+            codecs.put("InstrumentComponent.CODEC", net.minecraft.world.item.component.InstrumentComponent.CODEC);
+            codecs.put("Instrument.DIRECT_CODEC", net.minecraft.world.item.Instrument.DIRECT_CODEC);
+            codecs.put("TrimMaterial.DIRECT_CODEC", net.minecraft.world.item.equipment.trim.TrimMaterial.DIRECT_CODEC);
+            codecs.put("ProvidesTrimMaterial.CODEC", net.minecraft.world.item.component.ProvidesTrimMaterial.CODEC);
+            codecs.put("SulfurCubeContent.CODEC", net.minecraft.world.item.component.SulfurCubeContent.CODEC);
+            codecs.put("IntProviders.NON_NEGATIVE_CODEC", net.minecraft.util.valueproviders.IntProviders.NON_NEGATIVE_CODEC);
+            codecs.put("IntProviders.POSITIVE_CODEC", net.minecraft.util.valueproviders.IntProviders.POSITIVE_CODEC);
+            codecs.put("Direction.Axis.CODEC", net.minecraft.core.Direction.Axis.CODEC);
+            codecs.put("Biome.NETWORK_CODEC", net.minecraft.world.level.biome.Biome.NETWORK_CODEC);
             return Collections.unmodifiableMap(codecs);
         }
     }

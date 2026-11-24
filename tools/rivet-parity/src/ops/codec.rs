@@ -122,18 +122,18 @@ macro_rules! entry {
 
 /// Every ported registry-free codec exposed to the op.
 ///
-/// STUB (deliberately omitted): (1) the ported codecs that need a `RegistryOpsLookup` (holders,
-/// tags, `RegistryFileCodec`: configured features, placers, predicates, processors, biomes,
-/// density functions, the registry-bound `WorldPreset`/`LevelStem` forms, and the item components
-/// that carry holder sets or sound events such as `Tool`, `Repairable`, `BlocksAttacks`,
-/// `DamageResistant`, `MapDecorations`): running them needs a Rust `RegistryAccess` that mirrors
-/// Paper's frozen registries (tracked by #803), which is a port, not a fixture; (2) the
-/// MapCodec-only constructors that no Java `Codec` constant wraps; (3) registry-free codecs not
-/// triaged into this table yet (`ClickEvent`, the `ServerStatus` forms, `NameAndId`,
-/// `WorldClocks`, `GeodeBlockSettings`, flat-world settings, ...). Polymorphic roots
-/// (`IntProviders.CODEC`, `RuleTest.CODEC`, `ItemStack.CODEC`, ...) reach every variant codec
-/// registered under them, so those variants are verified through their root rather than listed
-/// one by one.
+/// STUB (deliberately omitted; the full list is #812): (1) the ported codecs that need a
+/// `RegistryOpsLookup` (holders, tags, `RegistryFileCodec`: configured and placed features,
+/// trunk and root placers, block predicates, state providers, processors, density functions,
+/// `GeodeBlockSettings`, the flat-world settings), tracked by #803; (2) the MapCodec-only
+/// constructors that no Java `Codec` constant wraps; (3) registry-free codecs not in this
+/// table yet: `template_feature_configuration`, `level_stem`, `world_dimensions`,
+/// `world_gen_settings`, `attribute_modifier_display`, `attribute_operation`, `ClickEvent`,
+/// the `ServerStatus` forms, `NameAndId`, `WorldClocks`, and every function not yet triaged.
+/// Polymorphic roots (`IntProviders.CODEC`, `RuleTest.CODEC`, `ItemStack.CODEC`, ...) reach the
+/// variant codecs registered under them, so those variants are verified through their root
+/// rather than listed one by one. The item components that carry registry ids (`Tool`,
+/// `Repairable`, `MapDecorations`, ...) are here, but Rivet does not validate those ids (#811).
 pub fn entries() -> Vec<Entry> {
     use rivet_registry::block_state_codec::block_state_codec;
     use rivet_registry::core::block_pos_codec;
@@ -320,6 +320,29 @@ pub fn entries() -> Vec<Entry> {
         entry!(map "NoiseThresholdCountPlacement.CODEC", rivet_world::levelgen::placement::noise_threshold_count_placement_codec),
         entry!("BiomeFilter.CODEC", rivet_world::levelgen::placement::biome_filter_codec),
         entry!("FontDescription.CODEC", rivet_text::font_description::font_description_codec),
+        entry!("Tool.CODEC", rivet_world::item::components::combat::tool_codec),
+        entry!("Tool.Rule.CODEC", rivet_world::item::components::combat::tool_rule_codec),
+        entry!("Repairable.CODEC", rivet_world::item::components::combat::repairable_codec),
+        entry!("BlocksAttacks.CODEC", rivet_world::item::components::combat::blocks_attacks_codec),
+        entry!("BlocksAttacks.DamageReduction.CODEC", rivet_world::item::components::combat::damage_reduction_codec),
+        entry!("DamageResistant.CODEC", rivet_world::item::components::combat::damage_resistant_codec),
+        entry!("KineticWeapon.CODEC", rivet_world::item::components::combat::kinetic_weapon_codec),
+        entry!("PiercingWeapon.CODEC", rivet_world::item::components::combat::piercing_weapon_codec),
+        entry!("SwingAnimationType.CODEC", rivet_world::item::components::combat::swing_animation_type_codec),
+        entry!("MapDecorations.CODEC", rivet_world::item::components::display::map_decorations_codec),
+        entry!("MapDecorations.Entry.CODEC", rivet_world::item::components::display::map_decoration_entry_codec),
+        entry!("ItemAttributeModifiers.CODEC", rivet_world::item::components::world_and_books::item_attribute_modifiers_codec),
+        entry!("ItemAttributeModifiers.Entry.CODEC", rivet_world::item::components::world_and_books::attribute_modifier_entry_codec),
+        entry!("FireworkExplosion.Shape.CODEC", rivet_world::item::components::world_and_books::firework_shape_codec),
+        entry!("InstrumentComponent.CODEC", rivet_world::item::components::world_and_books::instrument_component_codec),
+        entry!("Instrument.DIRECT_CODEC", rivet_world::item::components::world_and_books::instrument_direct_codec),
+        entry!("TrimMaterial.DIRECT_CODEC", rivet_world::item::components::world_and_books::trim_material_direct_codec),
+        entry!("ProvidesTrimMaterial.CODEC", rivet_world::item::components::world_and_books::provides_trim_material_codec),
+        entry!("SulfurCubeContent.CODEC", rivet_world::item::components::world_and_books::sulfur_cube_content_codec),
+        entry!("IntProviders.NON_NEGATIVE_CODEC", rivet_util::valueproviders::int_provider::non_negative_int_provider_codec),
+        entry!("IntProviders.POSITIVE_CODEC", rivet_util::valueproviders::int_provider::positive_int_provider_codec),
+        entry!("Direction.Axis.CODEC", rivet_world::levelgen::structure::templatesystem::axis_codec::axis_codec),
+        entry!("Biome.NETWORK_CODEC", rivet_world::biome::biome::Biome::network_codec),
     ]
 }
 

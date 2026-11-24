@@ -3,7 +3,8 @@
 
 Writes fixtures/ops/corpus-src/codec-datapack.jsonl: {"codec", "source", "json"}
 lines, deterministic (sorted by source file). Every distinct document this script
-routes to a table codec is kept: nothing is sampled or size-capped. Routing is by
+routes to a table codec is kept: nothing is sampled or size-capped, but only the
+folders and fields named below are routed (not every vanilla document). Routing is by
 data-pack folder and, for configured features and placement modifiers, by `type`
 (see the tables below); codecs without a router here, or without vanilla JSON,
 are covered by hand-typed corpus inputs only. The Rust corpus generator
@@ -69,14 +70,86 @@ COMPONENT = {
     "minecraft:suspicious_stew_effects": "SuspiciousStewEffects.CODEC",
     "minecraft:tooltip_display": "TooltipDisplay.CODEC",
     "minecraft:item_name": "ComponentSerialization.CODEC",
+    "minecraft:custom_name": "ComponentSerialization.CODEC",
+    "minecraft:tool": "Tool.CODEC",
+    "minecraft:repairable": "Repairable.CODEC",
+    "minecraft:damage_resistant": "DamageResistant.CODEC",
+    "minecraft:map_decorations": "MapDecorations.CODEC",
+    "minecraft:attribute_modifiers": "ItemAttributeModifiers.CODEC",
+    "minecraft:instrument": "InstrumentComponent.CODEC",
+    "minecraft:provides_trim_material": "ProvidesTrimMaterial.CODEC",
+    "minecraft:blocks_attacks": "BlocksAttacks.CODEC",
+    "minecraft:kinetic_weapon": "KineticWeapon.CODEC",
+    "minecraft:piercing_weapon": "PiercingWeapon.CODEC",
+    "minecraft:swing_animation": "SwingAnimation.CODEC",
+    "minecraft:lore": "ItemLore.CODEC",
+    "minecraft:enchantable": "Enchantable.CODEC",
+    "minecraft:custom_model_data": "CustomModelData.CODEC",
+    "minecraft:dyed_color": "DyedItemColor.CODEC",
+    "minecraft:map_color": "MapItemColor.CODEC",
+    "minecraft:fireworks": "Fireworks.CODEC",
+    "minecraft:firework_explosion": "FireworkExplosion.CODEC",
+    "minecraft:lodestone_tracker": "LodestoneTracker.CODEC",
+    "minecraft:written_book_content": "WrittenBookContent.CODEC",
+    "minecraft:writable_book_content": "WritableBookContent.CODEC",
+    "minecraft:container_loot": "SeededContainerLoot.CODEC",
+    "minecraft:block_state": "BlockItemStateProperties.CODEC",
+    "minecraft:custom_data": "CustomData.CODEC",
+    "minecraft:weapon": "Weapon.CODEC",
+    "minecraft:attack_range": "AttackRange.CODEC",
+    "minecraft:consumable": "Consumable.CODEC",
+    "minecraft:death_protection": "DeathProtection.CODEC",
+    "minecraft:use_cooldown": "UseCooldown.CODEC",
+    "minecraft:use_remainder": "UseRemainder.CODEC",
+    "minecraft:use_effects": "UseEffects.CODEC",
+    "minecraft:food": "FoodProperties.DIRECT_CODEC",
+}
+# Vanilla pack folders whose documents hold text components, and the top-level
+# fields (dotted path into the document) that carry them: routed to
+# ComponentSerialization.CODEC. A field that is absent in a document is skipped.
+TEXT_FIELDS = {
+    "advancement": ("display.title", "display.description"),
+    "painting_variant": ("title", "author"),
+    "enchantment": ("description",),
+    "jukebox_song": ("description",),
+    "trim_pattern": ("description",),
+    "trim_material": ("description",),
+    "instrument": ("description",),
+    "dialog": ("title", "external_title", "description", "body.contents", "body"),
 }
 
 found = {}  # codec -> {canonical json text: source}
+late = {}  # the same, for documents routed after the first recorded corpus (see the output order below)
 
 
-def add(codec, source, value):
+def add(codec, source, value, later=False):
     text = json.dumps(value, sort_keys=False, separators=(",", ":"))
-    found.setdefault(codec, {}).setdefault(text, source)
+    (late if later else found).setdefault(codec, {}).setdefault(text, source)
+
+
+def text_fields(rel, kind, doc):
+    for path in TEXT_FIELDS.get(kind, ()):
+        node = doc
+        for part in path.split("."):
+            node = node.get(part) if isinstance(node, dict) else None
+        yield from _components(node)
+
+
+def _components(node):
+    """A dialog `body` is an object or a list of objects whose `contents`/`description` are text."""
+    if node is None:
+        return
+    if isinstance(node, list):
+        for v in node:
+            yield from _components(v)
+    elif isinstance(node, dict) and "type" in node and node["type"] in ("minecraft:plain_message", "minecraft:item"):
+        for f in ("contents", "description"):
+            if f in node:
+                yield from _components(node[f])
+    elif isinstance(node, dict) and "contents" in node and "type" not in node:
+        yield node["contents"]
+    else:
+        yield node
 
 
 def walk(source, node, key=None):
@@ -173,6 +246,10 @@ with zipfile.ZipFile(jar) as z:
                 add("MobSpawnSettings.MobSpawnCost.CODEC", rel, cost)
             if "temperature_modifier" in doc:
                 add("Biome.TemperatureModifier.CODEC", rel, doc["temperature_modifier"])
+        if rel.startswith("worldgen/multi_noise_biome_source_parameter_list/") and "preset" in doc:
+            add("MultiNoiseBiomeSourceParameterList.Preset.CODEC", rel, doc["preset"], later=True)
+        for text in text_fields(rel, kind, doc):
+            add("ComponentSerialization.CODEC", rel, text, later=True)
         if kind == "recipe":
             walk(rel, doc.get("result"))
         else:
@@ -191,9 +268,21 @@ FIRST_HARVEST = {
 }
 
 lines = []
-for codec in sorted(found, key=lambda c: (c not in FIRST_HARVEST, c)):
-    items = sorted(found[codec].items(), key=lambda kv: (kv[1], kv[0]))
-    for text, source in items:
-        lines.append(json.dumps({"codec": codec, "source": source, "json": json.loads(text)}, separators=(",", ":")))
+
+
+def emit(table, codecs):
+    for codec in codecs:
+        for text, source in sorted(table[codec].items(), key=lambda kv: (kv[1], kv[0])):
+            lines.append(json.dumps({"codec": codec, "source": source, "json": json.loads(text)}, separators=(",", ":")))
+
+
+emit(found, sorted(found, key=lambda c: (c not in FIRST_HARVEST, c)))
+# Documents routed after the second harvest (text components of the pack's
+# description/title/author fields, the multi-noise preset) go last, so no
+# earlier input is renumbered or reseeded. A text already harvested elsewhere
+# is not repeated.
+for codec in late:
+    late[codec] = {t: src for t, src in late[codec].items() if t not in found.get(codec, {})}
+emit(late, sorted(c for c in late if late[c]))
 out.write_text("\n".join(lines) + "\n")
-print(f"wrote {len(lines)} seeds for {len(found)} codecs to {out}")
+print(f"wrote {len(lines)} seeds for {len(found.keys() | late.keys())} codecs to {out}")

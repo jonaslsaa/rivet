@@ -248,3 +248,44 @@ codec.reencode	input:RarityFilter.CODEC.pack4214.mut3.json	JSON number narrowing
 codec.reencode	input:RarityFilter.CODEC.pack4216.mut4.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
 codec.reencode	input:TwistingVinesConfig.CODEC.pack4253.mut2.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
 codec.reencode	input:TwistingVinesConfig.CODEC.pack4253.mut3.json	JSON number narrowing: Paper wraps out-of-range numbers (BigDecimal/long), Rivet saturates or rejects	796
+codec.reencode	input:Tool.Rule.CODEC.hand452.mut2.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:Tool.Rule.CODEC.hand454.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:Tool.Rule.CODEC.hand454.nbt	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:Tool.Rule.CODEC.hand454.mut0.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:Tool.Rule.CODEC.hand454.mut0.nbt	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:Tool.Rule.CODEC.hand454.mut1.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:Tool.Rule.CODEC.hand454.mut1.nbt	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:Repairable.CODEC.hand457.mut3.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:Repairable.CODEC.hand457.mut4.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:Repairable.CODEC.hand458.mut2.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:BlocksAttacks.CODEC.hand462.mut3.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:BlocksAttacks.DamageReduction.CODEC.hand467.mut1.json	Float 1e300 re-encodes as null in Rivet, Infinity in Paper	797
+codec.reencode	input:MapDecorations.CODEC.hand488.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:MapDecorations.CODEC.hand488.nbt	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:MapDecorations.CODEC.hand488.mut4.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:MapDecorations.Entry.CODEC.hand491.mut4.json	JSON double formatting: 1e+300 in Rivet, 1.0E300 in Paper	806
+codec.reencode	input:MapDecorations.Entry.CODEC.hand492.mut4.json	JSON double formatting: 1e+300 in Rivet, 1.0E300 in Paper	806
+codec.reencode	input:ItemAttributeModifiers.CODEC.hand496.json	Dispatch type key order: Rivet type first, Paper value first (D12 class)	799
+codec.reencode	input:ItemAttributeModifiers.CODEC.hand497.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:ItemAttributeModifiers.CODEC.hand497.nbt	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:InstrumentComponent.CODEC.hand507.mut0.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:InstrumentComponent.CODEC.hand507.mut0.nbt	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:InstrumentComponent.CODEC.hand508.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:InstrumentComponent.CODEC.hand508.nbt	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:InstrumentComponent.CODEC.hand508.mut3.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:ProvidesTrimMaterial.CODEC.hand518.mut1.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:ProvidesTrimMaterial.CODEC.hand518.mut1.nbt	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:ProvidesTrimMaterial.CODEC.hand518.mut4.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:ProvidesTrimMaterial.CODEC.hand519.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:ProvidesTrimMaterial.CODEC.hand519.nbt	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:ProvidesTrimMaterial.CODEC.hand519.mut1.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:ProvidesTrimMaterial.CODEC.hand519.mut1.nbt	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:IntProviders.POSITIVE_CODEC.hand530.mut0.json	JSON number narrowing: Rivet saturates 1e300, Paper rejects	796
+codec.reencode	input:InstrumentComponent.CODEC.poison09.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:InstrumentComponent.CODEC.poison10.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:InstrumentComponent.CODEC.poison11.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:IntProviders.NON_NEGATIVE_CODEC.poison08.json	JSON number narrowing: Rivet saturates 1e300, Paper wraps	796
+codec.reencode	input:IntProviders.POSITIVE_CODEC.poison08.json	JSON number narrowing: Rivet saturates 1e300, Paper rejects	796
+codec.reencode	input:ProvidesTrimMaterial.CODEC.poison09.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:ProvidesTrimMaterial.CODEC.poison10.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811
+codec.reencode	input:ProvidesTrimMaterial.CODEC.poison11.json	Registry id not validated: Rivet keeps an unregistered holder/registry id, Paper declines at decode	811

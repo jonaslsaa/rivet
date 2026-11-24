@@ -4,16 +4,16 @@
   "paper": "26.2-DEV-main@0a99345",
   "paper_commit": "0a99345",
   "op_source": "tools/rivet-reference-oracle/src/RivetReferenceOracle.java",
-  "op_source_sha256": "5a8b7b230a10e6cecae20c8d40dfaee474577d8766aa889d4775a636d41e0bba",
+  "op_source_sha256": "d5a5f81c8a30726cc20fdfc073a285743902e83da81f0368ba5afc1fca60abdf",
   "ops": [
     {
       "op": "codec.reencode",
       "corpus": "corpus/codec.reencode.jsonl",
-      "corpus_sha256": "1f65785fafa918b6e0e52f700a7afc8f61fefa5ffd32de1939e0c43a5a4ce6a1",
-      "corpus_n": 12309,
+      "corpus_sha256": "fa266512548d0bd8154247de9b8c003039b1a27482ad83f2cb691bec25f7c58c",
+      "corpus_n": 14051,
       "output": "codec.reencode.jsonl",
-      "output_sha256": "09c5fd86f8aa5c6e7b91c9067e23382e89e46d8b1f17c82a94e1b01ba387bdb0",
-      "output_n": 12309
+      "output_sha256": "c7dd751ea62eb008b033eea6eeadf350fe9a51a048082d71d8afd7d3c3d87e10",
+      "output_n": 14051
     },
     {
       "op": "component.json",
