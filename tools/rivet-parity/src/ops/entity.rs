@@ -30,9 +30,10 @@
 //!   members whose inputs are the victim's armor attributes and inventory;
 //! - the resistance and absorption stages of `LivingEntity.handleEntityDamage`
 //!   (`apply_resistance`): they read the victim's active effects;
-//! - negative `Player.hurtServer` damage: `LivingEntity.hurtServer` clamps it
-//!   to zero before the scaled value is observable, and that clamp is not a
-//!   ported function.
+//! - negative or non-finite damage through `Player.hurtServer`: `LivingEntity.hurtServer`
+//!   clamps it after the scaling, while Rivet's composed `DamagePipelineState::hurt_server`
+//!   clamps before scaling and rejects zero damage (#824). The op calls the leaf
+//!   `scale_damage_for_difficulty`; the composed path belongs to the arena half.
 //!
 //! The damage-type-tag membership that is reachable without an entity is
 //! `damage.calc` `fn:"type"`.

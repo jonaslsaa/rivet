@@ -209,19 +209,20 @@ fn damage_calc() -> String {
 const DIFFICULTIES: [&str; 4] = ["peaceful", "easy", "normal", "hard"];
 
 /// (direct, causing) entity kinds: no entity, a mob hitting directly, a player
-/// hitting directly, and projectiles shot by nobody, a mob or a player.
-const ATTACKERS: [(&str, &str); 6] = [
+/// hitting directly, and projectiles shot by nobody, a non-living entity, a mob or a player.
+const ATTACKERS: [(&str, &str); 7] = [
     ("none", "none"),
     ("living", "living"),
     ("player", "player"),
     ("non_living", "none"),
+    ("non_living", "non_living"),
     ("non_living", "living"),
     ("non_living", "player"),
 ];
 
 /// Damage values for the scaling arithmetic (negatives are clamped to zero by
 /// `LivingEntity.hurtServer` before the scaled value is observable, so they are
-/// not inputs; see the module comment of `entity.rs`).
+/// not inputs; see the module comment of `entity.rs` and #824).
 const SCALED_DAMAGES: [f32; 28] = [
     0.0,
     -0.0,

@@ -8,7 +8,7 @@
   "extra_op_sources": [
     {
       "path": "tools/rivet-reference-oracle/src/EntityOps.java",
-      "sha256": "1679123b57b88650fc6e0cd9d40e79cbfdddcf79cb621f642d49ffe75a3a00e7"
+      "sha256": "0ae0659c855adc85d393ee5e74f0632c125c670cff874ca02d838efd5af2b852"
     }
   ],
   "ops": [
@@ -42,11 +42,11 @@
     {
       "op": "damage_source.scaling",
       "corpus": "corpus/damage_source.scaling.jsonl",
-      "corpus_sha256": "ed2a9d8e53f152e99fba48d6ea1fd86fb0ec6fb8916f0ddf16e03f3081ac5fe6",
-      "corpus_n": 1560,
+      "corpus_sha256": "0d5575e79d070ceba1c60222b371b8089e949b8ba3db45f39278694734b961f7",
+      "corpus_n": 1764,
       "output": "damage_source.scaling.jsonl",
-      "output_sha256": "05c4eee522f1349b3d97c28efe6915ae895a34bc15512376e7c4abb060db5a7d",
-      "output_n": 1560
+      "output_sha256": "782962c2c27361343a585217533c775f741c08e2c33b5d875ad3366b130e0fd0",
+      "output_n": 1764
     },
     {
       "op": "food.exhaustion",

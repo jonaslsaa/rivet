@@ -69,8 +69,9 @@ import org.bukkit.craftbukkit.entity.CraftPlayer;
  *   {@code hurtServer(level, starve, amount)} sets {@code health =
  *   max(health - amount, 0)}: the armor, absorption and event pipeline of
  *   {@code LivingEntity.hurtServer} is not part of this op.</li>
- * <li><b>Events</b>: the Bukkit server is a proxy whose plugin manager drops
- *   every event, so {@code FoodLevelChangeEvent} and
+ * <li><b>Events</b>: the Bukkit server is a proxy (installed once, process-wide, into
+ *   {@code Bukkit.server} on the first food or xp request; it is never removed) whose
+ *   plugin manager drops every event, so {@code FoodLevelChangeEvent} and
  *   {@code EntityExhaustionEvent} are never cancelled or modified.</li>
  * <li><b>damage_source.scaling</b> runs the real {@code Player.hurtServer}: the
  *   harness answers not-invulnerable, not-dead, health 20, no fire resistance,
